@@ -52,4 +52,4 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 ## Built-in apps
 `SPEC-APPS.md` specifies Activity Monitor, Text Editor, Calendar, Clock/Timer and Preview, built only on what the system can do today. `apps.html` has the 17 mockups. Source: `apps.mjs`.
 
-`SPEC-DISK-REMINDERS.md` specifies Disk Utility (a GUI over milkfs: snapshots and diff, clones, scrub, encryption, backups, a shared confirm sheet) and Reminders (lists, due dates, repeat, rung by the alarm daemon). `disk-reminders.html` has the 11 mockups. Source: `disk-reminders.mjs`.
+`SPEC-DISK-REMINDERS.md` specifies Disk Utility (a GUI over milkfs: snapshots and diff, clones, scrub, encryption, erasing and formatting a spare disk, encrypting in place, backups and restore with passphrases, a shared confirm sheet) and Reminders (lists, due dates, repeat, rung by the alarm daemon). `disk-reminders.html` has the 18 mockups. Source: `disk-reminders.mjs`.

@@ -16,6 +16,8 @@
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 - Never push (there is no remote), never force anything, never `--no-verify`, never bare `git stash`.
 - Keep `cargo build` and `cargo clippy` warning-free, run `cargo fmt`.
+- `kernel/build.rs` fails every build if a `user/<crate>` program isn't listed in `initramfs.list`, so register a new
+  crate in the same commit that adds it (or other people's test rebuilds break).
 - Keep `kernel/src/main.rs` edits minimal (mod lines, init calls). Put real code in your own files.
 
 ## Kernel facts (as of main after the proc merge)

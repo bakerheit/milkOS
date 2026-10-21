@@ -35,7 +35,12 @@ KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 
 # Repo + server (127.0.0.1 only, free port).
-scripts/milk-repo.sh build "$WORK/repo" >"$WORK/repo.log"
+scripts/milk-repo.sh build "$WORK/repo-all" >"$WORK/repo.log"
+# Served at first: the three original packages. fortune 1.1.0 and games join later (the
+# upgrade / dependency phase), from this pristine signed copy.
+mkdir -p "$WORK/repo"
+for f in fortune-1.0.0 snake-1.0.0 moo2048-1.0.0; do cp "$WORK/repo-all/$f.milkpkg" "$WORK/repo-all/$f.milkpkg.sig" "$WORK/repo/"; done
+python3 -I scripts/mkpkg.py index "$WORK/repo" --key scripts/milk-test-key.secret >>"$WORK/repo.log"
 PORT=$(python3 -I -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])")
 (cd "$WORK" && exec python3 -I -m http.server --bind 127.0.0.1 --directory "$WORK/repo" "$PORT" >"$WORK/http.log" 2>&1) &
 HPID=$!
@@ -93,6 +98,22 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   "done:$WORK/phase2" "waitfile:$WORK/tampered2" \
   'send:milk update' 'wait:milk: [^\n]*(refused|updated)' "$P" \
   'send:audit --event user.pkg.verify_fail' "$P" \
+  "done:$WORK/phase3" "waitfile:$WORK/restored" \
+  'send:milk update' 'wait:milk: [^\n]*(updated|refused)' "$P" \
+  'send:milk install fortune=1.0.0' 'wait:milk: (installed|[^\n]*refused|[^\n]*error)' "$P" \
+  'send:milk search fortune' "$P" \
+  'send:milk upgrade fortune' 'wait:milk: (then|[^\n]*failed|[^\n]*error)' "$P" \
+  'send:/Volumes/Milk-try-upgrade/Applications/fortune/bin/fortune -n 15' "$P" \
+  'send:milk discard upgrade' 'wait:discarded' "$P" \
+  'send:milk info fortune' "$P" \
+  'send:milk upgrade -y' 'wait:milk: (kept|[^\n]*failed|[^\n]*error)' "$P" \
+  'send:fortune -n 15' "$P" \
+  'send:milk install games' 'wait:milk: (installed games|[^\n]*error|[^\n]*refused)' "$P" \
+  'send:milk remove snake' "$P" \
+  'send:milk info games' "$P" \
+  'send:milk remove games' "$P" \
+  'send:milk autoremove' 'wait:autoremove: ' "$P" \
+  'send:milk list' "$P" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
@@ -114,6 +135,11 @@ for _ in $(seq 1200); do
     rm -f "$WORK/repo/snake-1.0.0.milkpkg.sig" # unsigned
     touch "$WORK/tampered1"
   fi
+  if [ -e "$WORK/phase3" ] && [ ! -e "$WORK/restored" ]; then
+    rm -f "$WORK/repo"/*
+    cp "$WORK/repo-all"/* "$WORK/repo/" # pristine and complete: 5 packages, all signed
+    touch "$WORK/restored"
+  fi
   if [ -e "$WORK/phase2" ] && [ ! -e "$WORK/tampered2" ]; then
     flip "$WORK/repo/index.txt" # the index signature no longer matches
     touch "$WORK/tampered2"
@@ -131,7 +157,8 @@ QPID=""
 DPID=""
 
 S="$WORK/session.txt"
-sed -n '/msh:[^ ]*\$ echo http/,$p' "$LOG" | tr -d '\r' >"$S"
+# From the first command on (a kernel line can land between the prompt and the echo).
+sed -n '/echo http:\/\/10.0.2.2:/,$p' "$LOG" | tr -d '\r' >"$S"
 echo "---- msh ----"
 cat "$S"
 echo "---- checks ----"
@@ -164,6 +191,33 @@ check "audit: verify failure (tampered package)" "user.pkg.verify_fail +what=for
 check "audit: verify failure (unsigned, refused)" "user.pkg.verify_fail +what=snake-1.0.0.milkpkg [^ ]* reason=unsigned .* insecure=false"
 check "audit: verify failure (unsigned, --insecure)" "user.pkg.verify_fail +what=snake-1.0.0.milkpkg [^ ]* reason=unsigned .* insecure=true"
 check "audit: verify failure (tampered index)" "user.pkg.verify_fail +what=http://10.0.2.2:[0-9]+/index.txt [^ ]* reason=BAD signature"
+check "milk selftest: version compare" "milk: version compare 10/10 checks"
+check "restored repo: 5 packages" "milk: index updated, 5 packages"
+check "pinned install of an older version" "milk: installed fortune 1.0.0 in /Applications/fortune"
+check "search offers the upgrade" "^fortune +1.1.0 .*\\[installed 1.0.0, upgrade available\\]"
+check "upgrade plan" "milk: upgrade fortune 1.0.0 -> 1.1.0"
+check "upgrade went into a clone" "milk: upgraded 1 package\\(s\\) in clone try-upgrade; the live system is untouched"
+check "the clone runs the new version" "If an upgrade sours, discard the clone"
+check "discarded upgrade" "discarded clone try-upgrade; the live system never saw the upgrade"
+check "live still 1.0.0 after discard" "installed: +1.0.0 in /Applications/fortune"
+check "upgrade -y kept" "milk: kept the upgrade: clone try-upgrade is now the live system"
+check "dependency announced" "milk: games needs snake"
+check "dependency installed as such" "milk: installed snake 1.0.0 in /Applications/snake \\(as a dependency\\)"
+check "remove refused while needed" "milk: snake is needed by games"
+check "info lists depends" "depends: +snake moo2048>=1.0"
+check "autoremove took the orphan" "milk: autoremove: 1 package\\(s\\) removed"
+check "audit: upgrade" "user.pkg.upgrade +packages=fortune:1.0.0->1.1.0 clone=try-upgrade"
+check "audit: upgrade kept" "user.pkg.keep +name=upgrade clone=try-upgrade now=.*fortune:1.1.0"
+check "audit: dependency install" "user.pkg.install +name=snake version=1.0.0 .* auto=true"
+check "audit: autoremove" "user.pkg.remove +name=snake version=1.0.0 reason=autoremove"
+# Dependencies first: snake is installed before games.
+sl=$(grep -n "milk: installed snake 1.0.0 in /Applications/snake (as a dependency)" "$S" | head -1 | cut -d: -f1)
+gl=$(grep -n "milk: installed games 1.0.0" "$S" | head -1 | cut -d: -f1)
+[ -n "$sl" ] && [ -n "$gl" ] && [ "$sl" -lt "$gl" ] || fail "dependency order (snake line $sl, games line $gl)"
+echo "  ok  install order: snake (dependency) before games"
+# The live fortune is 1.1.0 at the end: its 15th quote is new in 1.1.
+[ "$(grep -c "If an upgrade sours" "$S")" -ge 2 ] || fail "live fortune is not 1.1.0 after upgrade -y"
+echo "  ok  live fortune runs 1.1.0 after upgrade -y"
 check "audit: install" "user.pkg.install +name=fortune version=1.0.0 sha256="
 check "audit: remove" "user.pkg.remove +name=fortune"
 check "audit: try" "user.pkg.try +name=snake"
@@ -185,11 +239,13 @@ echo "---- on disk (mkmilkfs.py, after shutdown) ----"
 python3 -I scripts/mkmilkfs.py check "$WORK/fs.img" | tail -3
 python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" /Applications | tee "$WORK/apps.txt"
 grep -q " moo2048$" "$WORK/apps.txt" || fail "moo2048 not on disk after keep"
-grep -q " fortune$" "$WORK/apps.txt" && fail "fortune still on disk after remove"
-grep -q " snake$" "$WORK/apps.txt" && fail "snake on the live volume after discard"
+grep -q " fortune$" "$WORK/apps.txt" || fail "fortune (1.1.0) not on disk"
+python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" /Applications/fortune/manifest | grep -q "^version 1.1.0$" || fail "fortune on disk is not 1.1.0"
+grep -q " snake$" "$WORK/apps.txt" && fail "snake on disk after autoremove"
+grep -q " games$" "$WORK/apps.txt" && fail "games on disk after remove"
 python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" / | grep -q "try-snake" && fail "clone left behind"
 python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" /var/log/audit.log | grep -c "user.pkg" | sed 's/^/audit.log on disk: user.pkg records: /'
-echo "  ok  disk: moo2048 kept, fortune removed, snake never reached the live volume"
+echo "  ok  disk: moo2048 kept, fortune upgraded to 1.1.0, games removed, snake autoremoved"
 echo "---- second boot of the same image ----"
 rm -f "$SERIAL" "$WORK/drive.done"
 LOG2="$WORK/serial2.log"
@@ -200,7 +256,7 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
 QPID=$!
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG2" \
   "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
-  'send:milk list' "$P" 'send:audit verify' 'wait:audit.log: [A-Z]+' "$P" \
+  'send:milk list' "$P" 'send:fortune -n 15' "$P" 'send:audit verify' 'wait:audit.log: [A-Z]+' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive2.log" 2>&1 &
 DPID=$!
 for _ in $(seq 600); do
@@ -219,6 +275,7 @@ sed -n '/msh:[^ ]*\$ moo2048/,$p' "$LOG2" | tr -d '\r' >"$S"
 cat "$S"
 check "after reboot: init relinked /bin/moo2048 and it runs" "moo2048: selftest ok"
 check "after reboot: still installed" "^moo2048 +1.0.0"
+check "after reboot: fortune is 1.1.0" "^fortune +1.1.0"
 check "after reboot: audit chain OK across boots" "audit verify: /Volumes/Milk/var/log/audit.log: OK"
 
 echo "---- repo server log ----"

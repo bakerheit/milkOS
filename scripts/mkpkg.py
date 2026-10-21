@@ -26,6 +26,7 @@ manifest (text, `key value` per line):
     description Milk-themed quotes, one at a time
     exec bin/fortune                       (optional: what /bin/<name> links to)
     dock Fortune #EBB650                   (optional: dock label and icon colour)
+    depends snake moo2048>=1.0             (optional: installed first, by milk)
     files bin/fortune share/fortune/quotes.txt
     payload-sha256 <hex>
 
@@ -52,7 +53,7 @@ import struct
 import sys
 import tarfile
 
-KEYS_ONE = ("name", "version", "description", "exec", "dock")
+KEYS_ONE = ("name", "version", "description", "exec", "dock", "depends")
 
 
 # ---- Ed25519 (RFC 8032), pure python: written here, hashlib only for SHA-512 -------------

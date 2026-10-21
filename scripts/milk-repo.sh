@@ -17,7 +17,8 @@ build() {
   (cd packages && cargo build --release -q --target-dir "$REPO_ROOT/target/packages")
   mkdir -p "$dir"
   rm -f "$dir"/*.milkpkg "$dir"/index.txt
-  for spec in packages/*/package.txt; do
+  # Every spec: packages/<name>/package.txt, plus extra versions as package-<ver>.txt.
+  for spec in packages/*/package*.txt; do
     local name
     name=$(awk '$1 == "name" { print $2 }' "$spec")
     local ver

@@ -16,6 +16,7 @@ extern crate alloc;
 pub mod alloc_brk;
 pub mod epoll;
 pub mod io;
+pub mod mdns;
 pub mod net;
 pub mod sys;
 pub mod table;

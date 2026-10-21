@@ -8,7 +8,7 @@
 
 extern crate alloc;
 
-use rt::net::{self, SockAddr};
+use rt::net;
 use rt::{eprintln, println, sys};
 
 rt::main!(main);
@@ -49,9 +49,12 @@ fn main(args: &rt::Args) -> i32 {
         }
     }
     let Some(host) = host else { return usage() };
-    let Some(dst) = SockAddr::parse(host, 0) else {
-        eprintln!("ping: {host}: not an address (no resolver in user space)");
-        return 2;
+    let dst = match net::lookup(host, 0) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("ping: {e}");
+            return 2;
+        }
     };
     let fd = match net::socket_proto(net::SOCK_DGRAM, net::IPPROTO_ICMP) {
         Ok(fd) => fd,

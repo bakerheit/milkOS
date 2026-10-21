@@ -224,7 +224,25 @@ netmask=.. broadcast=.. gateway=.. dns=.. dhcp=Bound`).
 | `fetch [-i] URL` | HTTP GET | |
 | `drop id / name / list / send / recv / peers / forget / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
 
-Addresses are numeric (or `localhost`): there is no resolver for user programs yet.
+**Names in user programs** (`rt::net::lookup(host_port, default_port)` /
+`rt::net::resolve(host)`, getaddrinfo-style, IPv4). `ping`, `fetch`, `nc` and
+`drop send` use it, and so does `mssh`:
+
+* a dotted quad, or `localhost` (127.0.0.1): no lookup;
+* **`NAME.local`**: mDNS (RFC 6762) on eth1, `rt::mdns`. It uses the real DNS wire format
+  on UDP 5353 and the group 224.0.0.251, sent as a "legacy unicast" query (an ephemeral
+  source port, one retry, 1.5 s), and the A record comes straight back. The responder is
+  the Milk Drop daemon (`drop daemon`, already on eth1 for discovery). It answers A/ANY
+  queries for `<its drop name>.local` with eth1's address: straight back to a legacy
+  unicast asker, else to the group with the cache-flush bit. The `.local` name is the
+  Milk Drop name (`drop name bob` -> `bob.local`), since every machine's hostname is `milk`.
+  There is no probing for name conflicts: two machines with one name both answer, and
+  the first answer wins.
+* **anything else is refused** (`ping: example.com: not resolved: milkOS resolves only
+  numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are
+  refused`). The kernel's DNS policy for its own callers (`.test` only, see DNS above) is
+  unchanged. Multicast never leaves through eth0, so `.local` lookups can't reach slirp or
+  the Mac.
 
 ## Milk Drop (`user/drop`)
 
@@ -429,7 +447,7 @@ It kills only its own qemus and serial drivers, by PID.
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
-* A resolver for user programs (an `/etc/hosts` + the same `.test` policy, or a syscall).
+* `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8); AAAA.
 * Per-socket buffer sizes instead of the fixed 16 KiB pool; window scaling then.
 * Delayed ACKs and Nagle (fewer packets), SACK, IP fragment reassembly, keepalive.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the

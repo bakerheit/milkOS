@@ -416,7 +416,9 @@ pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         if let Some((r, _)) = l.v6.router {
             write!(w, " router6={r}")?;
         }
-        if k == 0 {
+        if st.iface.v4_off {
+            writeln!(w, " ipv4=off")?;
+        } else if k == 0 {
             writeln!(w, " dhcp={:?}", st.dhcp.state)?;
         } else if l.ll.on {
             let state = if c.configured() { "bound" } else { "probing" };

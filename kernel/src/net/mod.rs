@@ -262,8 +262,15 @@ fn net_thread() {
 /// and the net thread. Call after `sched::init`.
 pub fn init() {
     hostname::load();
+    let v6only = boot_v6only();
     let have_dev = with(|st| {
         let now = st.now;
+        if v6only {
+            st.iface.v4_off = true;
+            for l in st.iface.links.iter_mut() {
+                l.ll.on = false;
+            }
+        }
         st.iface.ll_start(now);
         for (k, l) in st.iface.links.iter().enumerate().filter(|(_, l)| l.up()) {
             kprintln!(
@@ -271,17 +278,28 @@ pub fn init() {
                 iface::LINK_NAMES[k],
                 l.slot,
                 l.mac,
-                if l.ll.on { ", link-local" } else { ", DHCP" }
+                if v6only {
+                    ", IPv6 only"
+                } else if l.ll.on {
+                    ", link-local"
+                } else {
+                    ", DHCP"
+                }
             );
         }
         ipv6::start(st);
         if st.iface.eth0().up() {
-            dhcp::start(st);
+            if !v6only {
+                dhcp::start(st);
+            }
             true
         } else {
             false
         }
     });
+    if v6only {
+        kprintln!("[net] v6-only boot: no IPv4 on eth0 or eth1 (loopback keeps 127.0.0.1)");
+    }
     let eth1 = with(|st| st.iface.links[1].up());
     procnet::init();
     if !THREAD_UP.swap(true, Ordering::AcqRel) {
@@ -289,9 +307,11 @@ pub fn init() {
     }
     kprintln!(
         "[net] stack up: lo{}, {} sockets, buffers {} KiB auto-sized up to {} MiB, net thread started",
-        match (have_dev, eth1) {
-            (true, true) => " + eth0 (DHCP started) + eth1 (link-local)",
-            (true, false) => " + eth0 (DHCP started)",
+        match (have_dev, eth1, v6only) {
+            (true, true, false) => " + eth0 (DHCP started) + eth1 (link-local)",
+            (true, false, false) => " + eth0 (DHCP started)",
+            (true, true, true) => " + eth0 + eth1 (IPv6 only)",
+            (true, false, true) => " + eth0 (IPv6 only)",
             _ => " only (no NIC)",
         },
         socket::MAX_SOCKETS,
@@ -424,6 +444,9 @@ impl Stack {
     }
 
     fn arp_input(&mut self, k: usize, p: &[u8]) {
+        if self.iface.v4_off {
+            return;
+        }
         if p.len() < 28 || be16(p, 0) != 1 || be16(p, 2) != 0x0800 || p[4] != 6 || p[5] != 4 {
             return;
         }
@@ -450,6 +473,10 @@ impl Stack {
     /// An IPv4 packet from link `k` (None: loopback).
     fn ip_input(&mut self, link: Option<usize>, pkt: &[u8], from_lo: bool) {
         self.stats.ip_in_receives += 1;
+        if self.iface.v4_off && link.is_some() {
+            self.stats.ip_in_addr_errors += 1;
+            return; // a v6-only boot takes no IPv4 from the wire
+        }
         if pkt.len() < IP_HDR || pkt[0] >> 4 != 4 {
             self.stats.ip_in_hdr_errors += 1;
             return;
@@ -556,6 +583,26 @@ impl Stack {
         }
         r
     }
+}
+
+/// Is this a v6-only boot? (fw_cfg file `opt/milkos/net` containing `v6only=1`; see
+/// `scripts/run.sh` MILK_V6ONLY=1.)
+fn boot_v6only() -> bool {
+    let Some(f) = crate::fwcfg::find_file("opt/milkos/net") else {
+        return false;
+    };
+    let mut buf = alloc::vec![0u8; (f.size as usize).min(256)];
+    if !crate::fwcfg::read_file(f, &mut buf) {
+        return false;
+    }
+    alloc::string::String::from_utf8_lossy(&buf)
+        .split_whitespace()
+        .any(|w| w == "v6only=1")
+}
+
+/// Is IPv4 off on the links (a v6-only boot)?
+pub fn v4_off() -> bool {
+    with(|st| st.iface.v4_off)
 }
 
 /// Current IPv4 configuration of eth0.

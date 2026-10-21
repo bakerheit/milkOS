@@ -246,6 +246,18 @@ One socket layer for both families (`wire::IpAddr`, `SockAddr { ip: IpAddr, port
   (peers `::1` and 127.0.0.1, MSS 1440), the V6ONLY sharing and clash rules, the two
   "wrong family" errors, and a UDP datagram over `::1`.
 
+### v6-only boot
+
+`MILK_V6ONLY=1 scripts/run.sh` (or fw_cfg `opt/milkos/net` = `v6only=1`) boots with IPv4
+off the wire: no DHCP on eth0, no 169.254 link-local on eth1, ARP and IPv4 neither sent
+nor taken on any link (sends get `ENETUNREACH`). Loopback keeps 127.0.0.1, as on Linux.
+slirp itself runs with `ipv4=off`. Everything else works over IPv6 alone: SLAAC, the
+tools (`ping -6`, `fetch`, `nc`, `netstat`, `ifconfig`/`netctl` show IPv4 as off),
+`localhost` (`::1` first), httpd on `[::]:80`, Milk Drop (discovery over `ff02::fb`,
+`.local` by AAAA, transfers between the VM-link addresses). `scripts/net6-test.sh` proves
+it. One limit is slirp's: this qemu's `hostfwd` only forwards IPv4, so nothing on the Mac
+can connect *into* a v6-only guest. The guest reaches the Mac's `::1` as `fec0::2`.
+
 ## eth1: a second network for VM-to-VM links
 
 A second `virtio-net-device` becomes `eth1`. Interfaces are named in qemu command-line
@@ -711,6 +723,16 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
   the file intact, and both audit records carry the IPv6 addresses.
 
 It kills only its own qemus and serial drivers, by PID.
+
+**`scripts/net6-test.sh`**: the v6-only boot, two VMs. alice's self-test must show IPv4
+really off (no address on eth0/eth1, 10.0.2.2 refused, loopback IPv4 fine) and pass
+everything else, including a TCP echo over IPv6 to the Mac's `::1`. Her tools work over
+IPv6 alone: ping -6 to slirp, fetch from the Mac's `::1` (an HTTP helper bound there) and
+from her own httpd (`[::1]` and `localhost`), `nc -6` to the Mac's echo server, IPv4
+shown as off. Then Milk Drop between alice and bob with no IPv4 anywhere: `drop list`
+finds bob at his VM-link IPv6 address, `ping -6 bob.local`, and `drop send bob` delivers a
+file. The host helpers bind `::1`/127.0.0.1 only, bob's slirp is restricted, and eth1 is
+two UDP ports on 127.0.0.1.
 
 ## Next
 

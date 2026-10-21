@@ -455,6 +455,35 @@ fn test_fragments6() -> core::result::Result<(), String> {
     Ok(())
 }
 
+/// A v6-only boot: no IPv4 address on eth0 or eth1 after DHCP would have finished, IPv4
+/// to the slirp gateway is refused at once (ENETUNREACH), loopback IPv4 still works.
+fn test_v4_off() -> core::result::Result<(), String> {
+    sched::sleep_ms(1500); // DHCP would have answered by now (~10 ms on slirp)
+    let (a0, a1) = super::with(|st| (st.iface.links[0].cfg.addr, st.iface.links[1].cfg.addr));
+    let gw = connect(SockAddr::new(Ipv4::new(10, 0, 2, 2), 80), 500);
+    let lo = {
+        let a = socket::socket(SockType::Dgram).map_err(es)?;
+        let r = socket::sendto(a, b"x", SockAddr::new(Ipv4::LOCALHOST, 9));
+        let _ = socket::close(a);
+        r
+    };
+    kprintln!(
+        "[net] v6-only: eth0 {a0}, eth1 {a1} (no IPv4), connect 10.0.2.2: {}, IPv4 loopback ok",
+        match gw {
+            Err(x) => e(x),
+            Ok(_) => "connected?!",
+        }
+    );
+    if !a0.is_unspecified()
+        || !a1.is_unspecified()
+        || gw.map(|_| ()) != Err(ENETUNREACH)
+        || lo.is_err()
+    {
+        return Err(String::from("IPv4 is not off"));
+    }
+    Ok(())
+}
+
 /// MLD and multicast membership on eth0: a UDP datagram to the group ff02::1:3 (as if
 /// from a neighbour) is dropped until a socket joins the group, delivered while it is
 /// joined, dropped again after it leaves; the joins and leaves go out as MLDv2 reports.
@@ -1049,9 +1078,12 @@ pub fn run() {
         }
     };
 
-    // 1. DHCP.
+    // 1. DHCP (not in a v6-only boot: there IPv4 must stay off the wire).
     let mut have_ip = false;
-    if super::has_device() {
+    let v6only = super::v4_off();
+    if v6only && super::has_device() {
+        check("v6-only", test_v4_off());
+    } else if super::has_device() {
         let t0 = timer::now_ns();
         have_ip = wait_for(3000, || super::config().configured());
         let c = super::config();
@@ -1166,6 +1198,13 @@ pub fn run() {
         );
     }
 
+    // IPv6 to the host: no IPv4 needed (a v6-only boot runs this too).
+    if super::has_device()
+        && let Some(addr) = cfg.echo6
+    {
+        check("tcp echo over IPv6", test_echo(addr));
+    }
+
     // 4. DNS policy (no packets for any of these).
     check(
         "dns policy",
@@ -1217,9 +1256,7 @@ pub fn run() {
         if let Some(addr) = cfg.echo {
             check("tcp echo", test_echo(addr));
         }
-        if let Some(addr) = cfg.echo6 {
-            check("tcp echo over IPv6", test_echo(addr));
-        }
+
         if let Some(addr) = cfg.refused {
             check(
                 "host refused",

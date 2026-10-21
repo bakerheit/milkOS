@@ -81,6 +81,8 @@ fn main(args: &rt::Args) -> i32 {
                 l.push_str(&alloc::format!("  broadcast {b}"));
             }
             println!("{l}");
+        } else if get("ipv4") == Some("off") {
+            println!("        inet off (IPv6 only)");
         }
         // Linux style: `inet6 ADDR  prefixlen N  scopeid 0x20<link>`.
         for v in kv.iter().filter(|(k, _)| *k == "inet6").map(|(_, v)| *v) {

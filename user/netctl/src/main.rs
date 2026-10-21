@@ -133,6 +133,8 @@ fn show(keys: bool) -> i32 {
             }
             if let Some(a) = i.ipv4() {
                 println!("{p}.ipv4={a}");
+            } else if i.get("ipv4") == Some("off") {
+                println!("{p}.ipv4=off");
             }
             let v6 = i.all("inet6");
             if !v6.is_empty() {
@@ -170,6 +172,7 @@ fn show(keys: bool) -> i32 {
         );
         let mut v4 = match i.ipv4() {
             Some(a) => alloc::format!("  ipv4       {a}"),
+            None if i.get("ipv4") == Some("off") => String::from("  ipv4       off (IPv6 only)"),
             None => String::from("  ipv4       -"),
         };
         if let Some(d) = i.get("dhcp") {

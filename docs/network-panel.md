@@ -26,7 +26,7 @@ Show `lo` collapsed or not at all.
 | Kind | (name) | | `eth0` = "Ethernet (host network)", `eth1` = "VM link (Milk Drop)". |
 | MAC | `mac` | `52:54:00:12:34:56` | |
 | MTU | `mtu` | `1500` | |
-| IPv4 | `ipv4` | `10.0.2.15/24` | Absent: "No IPv4 address". |
+| IPv4 | `ipv4` | `10.0.2.15/24` | `off`: IPv4 is off on this link (a v6-only boot), so show "Off". Absent: "No IPv4 address". |
 | Configured by | `dhcp` / `linklocal` | `Bound` / `bound` | eth0: DHCP state `Off`, `Selecting`, `Requesting`, `Bound`, `Renewing` ("Bound" = "DHCP"; the others = "Getting an address..."). eth1: `probing` / `bound` ("Self-assigned"). Neither key: IPv4 is off on that link (a v6-only boot). |
 | Router | `gateway` | `10.0.2.2` | |
 | DNS | `dns` | `10.0.2.3` | Informational: user programs resolve only numbers, `localhost` and `.local` names. |
@@ -107,7 +107,7 @@ value.
   service isn't running`. Show that once, under the group, not per field.
 - **Hidden** (`drop_visible=off`). Say what it means in one line: "Other Macs won't see
   this one or find bob.local. Transfers from Macs that already know it still work."
-- **IPv6 only** (a v6-only boot: no `ipv4` and no `dhcp`/`linklocal` keys). Show IPv4 as
+- **IPv6 only** (a v6-only boot: `ipv4=off`, no `dhcp`/`linklocal` keys). Show IPv4 as
   "Off" rather than "No address", to tell it apart from a DHCP failure.
 - **Getting an address** (`dhcp` not `Bound`, or `linklocal=probing`, or `tentative` IPv6).
   Show a spinner next to the field, not an error.

@@ -188,6 +188,10 @@ pub fn multicast_mac(ip: Ipv4) -> Mac {
 
 pub struct Iface {
     pub links: [Link; MAX_LINKS],
+    /// A v6-only boot (fw_cfg `opt/milkos/net`: `v6only=1`): no IPv4 on any link (no
+    /// DHCP, no link-local, no ARP, IPv4 neither sent nor taken). Loopback keeps
+    /// 127.0.0.1, as on Linux.
+    pub v4_off: bool,
     pub lo_stats: DevStats,
     ip_id: u16,
     pending: [Pending; PENDING],
@@ -241,6 +245,7 @@ impl Iface {
             lo_count: 0,
             lo_seen: 0,
             lo_too_big: alloc::vec::Vec::new(),
+            v4_off: false,
         }
     }
 
@@ -412,6 +417,9 @@ impl Iface {
             Some(f) => f.id,
             None => self.next_ip_id(),
         };
+        if self.v4_off && !dst.is_loopback() {
+            return Err(ENETUNREACH); // a v6-only boot: IPv4 only on loopback
+        }
         match self.route(src, dst)? {
             Route::Loopback => {
                 self.lo_enqueue(|buf| build_ip(buf, src, dst, proto, id, frag, fill))

@@ -1,5 +1,6 @@
 //! Kernel feature tests from user space, one per subcommand. Prints PASS/FAIL lines.
 //!   utest pipe    pipe + fork + dup2 + exec: read another program's stdout
+//!   utest cow     fork shares memory copy-on-write; writes stay private
 //!   utest proc    /proc/<pid> appears, describes the process, and goes away when reaped
 //!   utest signal  handlers, sigreturn, masks, EINTR, SIGCHLD, process groups, defaults
 //!   utest all     everything
@@ -279,6 +280,75 @@ fn t_signal() -> bool {
     ok
 }
 
+fn mem_free_kb() -> u64 {
+    let m = sys::read_file("/proc/meminfo").unwrap_or_default();
+    String::from_utf8_lossy(&m)
+        .lines()
+        .find_map(|l| l.strip_prefix("MemFree:"))
+        .and_then(|v| v.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+fn t_cow() -> bool {
+    const N: usize = 1 << 20;
+    let mut buf: Vec<u8> = (0..N).map(|i| (i % 253) as u8).collect();
+    let before = mem_free_kb();
+    let (r, w) = sys::pipe().unwrap();
+    let (r2, w2) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = (sys::close(r), sys::close(w2));
+        let after_fork = mem_free_kb();
+        let shared_ok = buf.iter().enumerate().all(|(i, &b)| b == (i % 253) as u8);
+        for b in buf.iter_mut() {
+            *b = 0xee;
+        }
+        let after_write = mem_free_kb();
+        // Tell the parent, then wait until it has scribbled on its own copy.
+        let _ = sys::write(w, &[shared_ok as u8]);
+        let msg = alloc::format!("{after_fork} {after_write}");
+        let _ = sys::write(w, msg.as_bytes());
+        let _ = sys::close(w);
+        let mut b = [0u8; 1];
+        let _ = sys::read(r2, &mut b);
+        let mine = buf.iter().all(|&b| b == 0xee);
+        sys::exit(if mine { 0 } else { 3 });
+    }
+    let _ = (sys::close(w), sys::close(r2));
+    let mut got = Vec::new();
+    let mut b = [0u8; 64];
+    loop {
+        match sys::read(r, &mut b) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => got.extend_from_slice(&b[..n]),
+        }
+    }
+    let _ = sys::close(r);
+    let parent_ok = buf.iter().enumerate().all(|(i, &b)| b == (i % 253) as u8);
+    buf[0] = 1;
+    buf[N - 1] = 2;
+    let _ = sys::write(w2, b"x");
+    let _ = sys::close(w2);
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    let nums: Vec<u64> = String::from_utf8_lossy(&got[1..])
+        .split(' ')
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    let (af, aw) = (
+        nums.first().copied().unwrap_or(0),
+        nums.get(1).copied().unwrap_or(0),
+    );
+    let fork_cost = before.saturating_sub(af);
+    let write_cost = af.saturating_sub(aw);
+    check(
+        "copy-on-write fork",
+        got.first() == Some(&1) && parent_ok && st == 0 && fork_cost < 512 && write_cost >= 1000,
+        &alloc::format!(
+            "fork took {fork_cost} KiB with 1 MiB of heap, child's writes then copied {write_cost} KiB; parent kept its data, child kept its own (status {st})"
+        ),
+    )
+}
+
 fn t_proc() -> bool {
     let (r, w) = sys::pipe().unwrap();
     let pid = sys::fork().unwrap();
@@ -322,6 +392,9 @@ fn main(args: &rt::Args) -> i32 {
     let mut ok = true;
     if what == "pipe" || what == "all" {
         ok &= t_pipe();
+    }
+    if what == "cow" || what == "all" {
+        ok &= t_cow();
     }
     if what == "proc" || what == "all" {
         ok &= t_proc();

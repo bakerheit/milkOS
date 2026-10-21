@@ -546,6 +546,19 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
     let ec = (frame.esr >> 26) & 0x3f;
     let iss = frame.esr & 0x01ff_ffff;
     let fsc = iss & 0x3f;
+    // Write to a copy-on-write page (permission fault, WnR set): copy it and retry.
+    if ec == EC_DABT_LOWER && (0x0d..=0x0f).contains(&fsc) && iss & (1 << 6) != 0 {
+        let me = current();
+        let fixed = me
+            .inner
+            .lock()
+            .space
+            .as_mut()
+            .is_some_and(|s| s.cow_fault(frame.far as usize));
+        if fixed {
+            return true;
+        }
+    }
     if ec == EC_DABT_LOWER && (0x04..=0x07).contains(&fsc) {
         let me = current();
         let grown = me

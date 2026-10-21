@@ -10,9 +10,11 @@
                                          one-block extents, for upgrade tests)
   mkmilkfs.py mkfs  ... --v0             make a format-v0 image (upgrade tests)
   mkmilkfs.py mkdir IMAGE PATH [MODE]     make a directory (and its parents), mode octal (755)
-  mkmilkfs.py populate IMAGE DIR N        add N files under DIR (100 per subdirectory; small
-                                         ones inline, every 50th 8 KiB in extents): for
-                                         mount-time and big-tree tests
+  mkmilkfs.py populate IMAGE DIR N        add N files under DIR (100 per subdirectory dNNN;
+                                         fNNNNN with .md / .txt / no extension in turn; small
+                                         ones inline, every 50th 8 KiB in extents; each text
+                                         holds "uniqNNNNN" and one of 7 fruit words, FRUITS[i
+                                         % 7]): for mount-time, tree and search tests
   mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
                                          sb smap bref data node
   mkmilkfs.py corrupt IMAGE flip PATH [--snapshot NAME]
@@ -810,6 +812,9 @@ def cmd_mkdir(path, dest, mode=0o755):
     return 0
 
 
+FRUITS = ["apple", "banana", "cherry", "grape", "lemon", "mango", "peach"]
+
+
 def cmd_populate(path, dest, n):
     """N files under DEST/dNNN/fNNNNN, in one commit (mount-time and big-tree tests)."""
     img = Image(path)
@@ -839,16 +844,16 @@ def cmd_populate(path, dest, n):
             sub = mkdir(d, f"d{i // 100:03}")
         ino = sb["next_ino"]
         sb["next_ino"] += 1
-        name = f"f{i:05}"
+        name = f"f{i:05}" + [".md", ".txt", ""][i % 3]
+        line = f"file {i} of {n} uniq{i:05} {FRUITS[i % 7]}\n".encode()
         if i % 50 == 49:
-            data = (f"big file {i}\n".encode() * 700)[:8192]
+            data = (line + f"big file {i}\n".encode() * 700)[:8192]
             blocks = [data[j:j + BLOCK].ljust(BLOCK, b"\0") for j in range(0, len(data), BLOCK)]
             ptrs = [w.put(b, gen) for b in blocks]
             for j, ptr in enumerate(ptrs):
                 live[(ino, K_EXT, j)] = struct.pack("<QQIQ", ptr[0], gen, 1, ptr[2])
         else:
-            data = f"file {i} of {n}\n".encode() * (1 + i % 40)
-            data = data[:1024]
+            data = (line + f"more text {i}\n".encode() * (i % 40))[:1024]
             live[(ino, K_INLINE, 0)] = data
         live[(ino, K_INODE, 0)] = inode_encode(S_IFREG | 0o644, 1, len(data), sub, now)
         bucket_edit(live, sub, name, lambda l: l + [(name, ino, 8)])

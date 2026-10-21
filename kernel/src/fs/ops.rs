@@ -12,6 +12,7 @@ use super::abi::{
 use super::errno::{Errno, Result};
 use super::file::OpenFile;
 use super::node::{DirEntry, InodeRef, InodeType, SetAttr, Stat, check_name};
+use super::notify::{self, Event};
 use super::path::{self, Walker};
 
 /// `open(2)`. `mode` is used with O_CREAT (permission bits; apply the umask before).
@@ -57,7 +58,16 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
                     return Err(Errno::EISDIR);
                 }
                 check_name(&name)?;
-                break dir.create(&name, mode & 0o7777)?;
+                let n = dir.create(&name, mode & 0o7777)?;
+                if notify::active() {
+                    notify::emit(Event::Created {
+                        dir: notify::id(&dir),
+                        name: name.clone(),
+                        obj: notify::id(&n),
+                        kind: InodeType::File,
+                    });
+                }
+                break n;
             }
             Err(e) => return Err(e),
         }
@@ -74,6 +84,9 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
     }
     if flags & O_TRUNC != 0 && writable && node.kind() == InodeType::File {
         node.truncate(0)?;
+        notify::emit(Event::Modified {
+            obj: notify::id(&node),
+        });
     }
     Ok(OpenFile::new(
         node,
@@ -126,7 +139,14 @@ pub fn mkdir_at(base: Option<&InodeRef>, path: &str, mode: u32) -> Result<()> {
         return Err(Errno::EEXIST);
     }
     check_name(&p.name)?;
-    p.dir.mkdir(&p.name, mode & 0o7777).map(|_| ())
+    let n = p.dir.mkdir(&p.name, mode & 0o7777)?;
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&n),
+        kind: InodeType::Dir,
+    });
+    Ok(())
 }
 
 /// `mkdir -p`: create `path` and any missing parents. Existing directories are fine.
@@ -166,10 +186,22 @@ pub fn unlink_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
             Errno::ENOTDIR
         });
     }
-    if path::step_raw(&p.dir, &p.name).is_ok_and(|n| sealed(&n)) {
-        return Err(Errno::EPERM);
+    // Only its id: holding the inode across the unlink would keep it "open" (deferred
+    // delete).
+    let obj = match path::step_raw(&p.dir, &p.name) {
+        Ok(n) if sealed(&n) => return Err(Errno::EPERM),
+        Ok(n) => Some(notify::id(&n)),
+        Err(_) => None,
+    };
+    p.dir.unlink(&p.name)?;
+    if let Some(obj) = obj {
+        notify::emit(Event::Removed {
+            dir: notify::id(&p.dir),
+            name: p.name,
+            obj,
+        });
     }
-    p.dir.unlink(&p.name)
+    Ok(())
 }
 
 /// `rmdir(2)`: remove an empty directory.
@@ -189,7 +221,15 @@ pub fn rmdir_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
     if path::is_mount_boundary(&raw) {
         return Err(Errno::EBUSY);
     }
-    p.dir.rmdir(&p.name)
+    let obj = notify::id(&raw);
+    drop(raw);
+    p.dir.rmdir(&p.name)?;
+    notify::emit(Event::Removed {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj,
+    });
+    Ok(())
 }
 
 /// `rename(2)`.
@@ -228,7 +268,15 @@ pub fn rename_at(
     if sealed(&src) || path::step_raw(&pn.dir, &pn.name).is_ok_and(|n| sealed(&n)) {
         return Err(Errno::EPERM);
     }
-    po.dir.rename(&po.name, &pn.dir, &pn.name)
+    po.dir.rename(&po.name, &pn.dir, &pn.name)?;
+    notify::emit(Event::Renamed {
+        from_dir: notify::id(&po.dir),
+        from: po.name,
+        to_dir: notify::id(&pn.dir),
+        to: pn.name,
+        obj: notify::id(&src),
+    });
+    Ok(())
 }
 
 /// `symlink(2)`: create `linkpath` pointing at `target` (not resolved now).
@@ -245,7 +293,14 @@ pub fn symlink_at(target: &str, base: Option<&InodeRef>, linkpath: &str) -> Resu
         return Err(Errno::EEXIST);
     }
     check_name(&p.name)?;
-    p.dir.symlink(&p.name, target).map(|_| ())
+    let n = p.dir.symlink(&p.name, target)?;
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&n),
+        kind: InodeType::Symlink,
+    });
+    Ok(())
 }
 
 /// `readlink(2)`.
@@ -282,7 +337,14 @@ pub fn link_at(
     if p.dir.dev() != src.dev() {
         return Err(Errno::EXDEV);
     }
-    p.dir.link(&p.name, &src)
+    p.dir.link(&p.name, &src)?;
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&src),
+        kind: src.kind(),
+    });
+    Ok(())
 }
 
 /// The audit log file is append-only for the kernel: user processes may not open it for
@@ -299,14 +361,25 @@ pub fn truncate(path: &str, len: u64) -> Result<()> {
     }
     match n.kind() {
         InodeType::Dir => Err(Errno::EISDIR),
-        InodeType::File => n.truncate(len),
+        InodeType::File => {
+            n.truncate(len)?;
+            notify::emit(Event::Modified {
+                obj: notify::id(&n),
+            });
+            Ok(())
+        }
         _ => Err(Errno::EINVAL),
     }
 }
 
 /// chmod / chown / utimensat.
 pub fn setattr_at(base: Option<&InodeRef>, path: &str, follow: bool, attr: &SetAttr) -> Result<()> {
-    lookup_at(base, path, follow)?.setattr(attr)
+    let n = lookup_at(base, path, follow)?;
+    n.setattr(attr)?;
+    notify::emit(Event::Attr {
+        obj: notify::id(&n),
+    });
+    Ok(())
 }
 
 pub fn chmod(path: &str, perm: u32) -> Result<()> {
@@ -354,7 +427,11 @@ pub fn ficlone(src: &OpenFile, dst: &OpenFile) -> Result<()> {
     if !src.readable() || !dst.writable() {
         return Err(Errno::EBADF);
     }
-    super::milkfs::inode::reflink(src.inode(), dst.inode())
+    super::milkfs::inode::reflink(src.inode(), dst.inode())?;
+    notify::emit(Event::Modified {
+        obj: notify::id(dst.inode()),
+    });
+    Ok(())
 }
 
 pub fn read_file(path: &str) -> Result<Vec<u8>> {

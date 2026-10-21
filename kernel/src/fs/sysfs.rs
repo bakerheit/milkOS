@@ -247,7 +247,9 @@ pub fn init() -> Result<()> {
         };
         d.add_text("driver", format!("{driver}\n"));
     }
-    milkfs::sysfs(&root.add_dir("fs").add_dir("milkfs"));
+    let fsdir = root.add_dir("fs");
+    milkfs::sysfs(&fsdir.add_dir("milkfs"));
+    super::search::sysfs(&fsdir.add_dir("search"));
     super::pagecache::sysfs(&root.add_dir("fs").add_dir("pagecache"));
     root.add_dir("kernel")
         .add_file("version", || String::from(procfs::VERSION));

@@ -1,0 +1,12 @@
+[package]
+name = "spot"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "spot"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

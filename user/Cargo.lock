@@ -156,6 +156,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "spot"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "store"
 version = "0.0.1"
 dependencies = [

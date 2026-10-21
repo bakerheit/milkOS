@@ -2,11 +2,12 @@
 //!
 //! [`init`] walks the 32 virtio-mmio slots of qemu `virt` and hands each device it finds to
 //! its driver. Drivers so far: [`input`] (keyboard, tablet),
-//! [`blk`] (disks, registered with `fs::blockdev`).
+//! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`).
 
 pub mod blk;
 pub mod input;
 pub mod mmio;
+pub mod net;
 pub mod queue;
 
 use crate::kprintln;
@@ -51,6 +52,7 @@ pub fn init() {
         let r = match t.device_id() {
             device_id::INPUT => input::attach(t),
             device_id::BLOCK => blk::attach(t),
+            device_id::NET => net::attach(t),
             _ => Ok(()),
         };
         if let Err(e) = r {

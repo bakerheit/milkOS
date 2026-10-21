@@ -31,6 +31,17 @@ impl Errno {
             36 => "ENAMETOOLONG",
             38 => "ENOSYS",
             39 => "ENOTEMPTY",
+            32 => "EPIPE",
+            88 => "ENOTSOCK",
+            97 => "EAFNOSUPPORT",
+            98 => "EADDRINUSE",
+            99 => "EADDRNOTAVAIL",
+            101 => "ENETUNREACH",
+            104 => "ECONNRESET",
+            107 => "ENOTCONN",
+            110 => "ETIMEDOUT",
+            111 => "ECONNREFUSED",
+            113 => "EHOSTUNREACH",
             _ => "E?",
         }
     }
@@ -42,6 +53,10 @@ impl Errno {
             20 => "not a directory",
             21 => "is a directory",
             38 => "function not implemented",
+            101 => "network is unreachable",
+            104 => "connection reset by peer",
+            110 => "connection timed out",
+            111 => "connection refused",
             _ => self.name(),
         }
     }

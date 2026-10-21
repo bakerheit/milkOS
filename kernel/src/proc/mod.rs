@@ -14,6 +14,7 @@ pub mod elf;
 pub mod errno;
 pub mod fd;
 mod selftest;
+pub mod sock;
 pub mod syscall;
 pub mod uspace;
 

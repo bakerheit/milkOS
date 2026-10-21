@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod alloc_brk;
+pub mod net;
 pub mod sys;
 
 use alloc::string::String;

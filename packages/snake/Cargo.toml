@@ -1,0 +1,12 @@
+[package]
+name = "snake"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "snake"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../../user/rt" }

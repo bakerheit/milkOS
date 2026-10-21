@@ -1,0 +1,13 @@
+[package]
+name = "moo2048"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "moo2048"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../../user/rt" }
+gui = { path = "../../user/gui" }

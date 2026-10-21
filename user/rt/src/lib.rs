@@ -21,6 +21,7 @@ pub mod sha256;
 pub mod sha512;
 pub mod sys;
 pub mod table;
+pub mod version;
 
 use alloc::string::String;
 use alloc::vec::Vec;

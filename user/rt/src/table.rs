@@ -17,6 +17,8 @@ pub enum Ty {
     /// Bytes; rendered as 1.5K, literals may carry a unit.
     Size,
     Str,
+    /// A version number: compared semver-ish (rt::version), shown as text.
+    Ver,
 }
 
 impl Ty {
@@ -25,17 +27,19 @@ impl Ty {
             Ty::Int => "int",
             Ty::Size => "size",
             Ty::Str => "str",
+            Ty::Ver => "ver",
         }
     }
     fn parse(s: &str) -> Ty {
         match s {
             "int" => Ty::Int,
             "size" => Ty::Size,
+            "ver" => Ty::Ver,
             _ => Ty::Str,
         }
     }
     pub fn numeric(self) -> bool {
-        self != Ty::Str
+        matches!(self, Ty::Int | Ty::Size)
     }
 }
 
@@ -69,6 +73,9 @@ impl Val {
 
 /// Compare two values of a column of type `ty`.
 pub fn compare(a: &Val, b: &Val, ty: Ty) -> Ordering {
+    if ty == Ty::Ver {
+        return crate::version::cmp(&a.text(), &b.text());
+    }
     if ty.numeric() {
         match (a.as_int(), b.as_int()) {
             (Some(x), Some(y)) => x.cmp(&y),

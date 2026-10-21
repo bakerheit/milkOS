@@ -114,6 +114,9 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:milk remove games' "$P" \
   'send:milk autoremove' 'wait:autoremove: ' "$P" \
   'send:milk list' "$P" \
+  'send:milk list | where version > 1.0' "$P" \
+  'send:milk search | where status == available | select name version' "$P" \
+  'send:milk list | to-json' "$P" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
@@ -218,6 +221,15 @@ echo "  ok  install order: snake (dependency) before games"
 # The live fortune is 1.1.0 at the end: its 15th quote is new in 1.1.
 [ "$(grep -c "If an upgrade sours" "$S")" -ge 2 ] || fail "live fortune is not 1.1.0 after upgrade -y"
 echo "  ok  live fortune runs 1.1.0 after upgrade -y"
+# Structured output: `where version > 1.0` compares versions (1.0.0 is not > 1.0).
+awk '/milk list \| where version > 1.0$/{f=1; next} f && /^msh:/{exit} f' "$S" >"$WORK/where.txt"
+grep -Eq '^fortune +1\.1\.0 +no ' "$WORK/where.txt" || { cat "$WORK/where.txt"; fail "milk list | where: fortune 1.1.0 missing"; }
+grep -q '^moo2048' "$WORK/where.txt" && { cat "$WORK/where.txt"; fail "milk list | where version > 1.0 kept moo2048 1.0.0"; }
+echo "  ok  milk list | where version > 1.0 (fortune 1.1.0 in, moo2048 1.0.0 out)"
+awk '/where status == available \| select name version$/{f=1; next} f && /^msh:/{exit} f' "$S" >"$WORK/avail.txt"
+grep -Eq '^games +1\.0\.0$' "$WORK/avail.txt" && grep -Eq '^snake +1\.0\.0$' "$WORK/avail.txt" || { cat "$WORK/avail.txt"; fail "milk search | where status == available"; }
+echo "  ok  milk search | where status == available | select name version (games, snake)"
+check "milk list | to-json" '"name": ?"moo2048", ?"version": ?"1.0.0"'
 check "audit: install" "user.pkg.install +name=fortune version=1.0.0 sha256="
 check "audit: remove" "user.pkg.remove +name=fortune"
 check "audit: try" "user.pkg.try +name=snake"

@@ -58,6 +58,13 @@ const KEYS: &str = "/etc/milk/keys";
 /// --insecure: accept unsigned / badly signed indexes and packages (loudly, and audited).
 static INSECURE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// MILK_TABLE=1 (msh's structured pipes): `list` and `search` write a table.
+static TABLE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn table_out() -> bool {
+    TABLE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 fn insecure() -> bool {
     INSECURE.load(core::sync::atomic::Ordering::Relaxed)
 }
@@ -744,6 +751,25 @@ fn cmd_autoremove() -> Res<()> {
 
 fn cmd_list() {
     let v = installed(APPS);
+    if table_out() {
+        use rt::table::{Table, Ty, Val};
+        let mut t = Table::new(&[
+            ("name", Ty::Str),
+            ("version", Ty::Ver),
+            ("auto", Ty::Str),
+            ("description", Ty::Str),
+        ]);
+        for (name, m) in &v {
+            t.push(alloc::vec![
+                Val::str(&m.name),
+                Val::str(&m.version),
+                Val::str(if is_auto(APPS, name) { "yes" } else { "no" }),
+                Val::str(&m.description),
+            ]);
+        }
+        t.write(&mut rt::io::Out::stdout());
+        return;
+    }
     if v.is_empty() {
         println!("milk: no packages installed");
     }
@@ -761,6 +787,40 @@ fn cmd_search(word: Option<&str>) -> Res<()> {
     let mut names: Vec<&str> = idx.iter().map(|p| p.name.as_str()).collect();
     names.sort();
     names.dedup();
+    if table_out() {
+        use rt::table::{Table, Ty, Val};
+        let mut t = Table::new(&[
+            ("name", Ty::Str),
+            ("version", Ty::Ver),
+            ("installed", Ty::Ver),
+            ("status", Ty::Str),
+            ("description", Ty::Str),
+        ]);
+        for name in names {
+            let p = find_in(&idx, name, None)?;
+            if let Some(w) = word
+                && !p.name.contains(w)
+                && !p.desc.to_lowercase().contains(&w.to_lowercase())
+            {
+                continue;
+            }
+            let have = installed_version(APPS, name);
+            let status = match &have {
+                Some(v) if *v == p.version => "installed",
+                Some(_) => "upgrade",
+                None => "available",
+            };
+            t.push(alloc::vec![
+                Val::str(&p.name),
+                Val::str(&p.version),
+                have.map_or(Val::Nil, |v| Val::str(&v)),
+                Val::str(status),
+                Val::str(&p.desc),
+            ]);
+        }
+        t.write(&mut rt::io::Out::stdout());
+        return Ok(());
+    }
     for name in names {
         let p = find_in(&idx, name, None)?;
         if let Some(w) = word
@@ -1084,6 +1144,9 @@ fn usage() -> i32 {
 
 fn main(args: &rt::Args) -> i32 {
     let mut a: Vec<&str> = args.argv.iter().skip(1).copied().collect();
+    if rt::table::requested(args) {
+        TABLE.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     if let Some(i) = a.iter().position(|x| *x == "--insecure") {
         a.remove(i);
         INSECURE.store(true, core::sync::atomic::Ordering::Relaxed);

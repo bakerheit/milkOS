@@ -73,6 +73,7 @@ pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
     let mut p = PRIMARY.lock();
     if p.is_none() {
         *p = Some(vol.clone());
+        *PRIMARY_PATH.lock() = String::from(path);
     }
     Ok((vol, report))
 }
@@ -113,6 +114,37 @@ pub fn automount() {
             Err(e) => kprintln!("milkfs: mounting {} failed: {e}", dev.name()),
         }
         return;
+    }
+}
+
+/// Where the primary volume is mounted (`/Volumes/<label>`).
+static PRIMARY_PATH: SpinLock<String> = SpinLock::new(String::new());
+
+pub fn mount_path() -> Option<String> {
+    let p = PRIMARY_PATH.lock().clone();
+    (!p.is_empty()).then_some(p)
+}
+
+/// The user's home directory on the primary volume.
+pub const HOME: &str = "/home/milk";
+
+/// Persistent home: bind `<volume>/home/milk` onto `/home/milk` (seeding it from the
+/// initramfs copy the first time). Without a volume, `/home/milk` stays on tmpfs. Runs
+/// in `fs::init`, before the desktop creates its folders in the home directory.
+pub fn setup_home() {
+    let Some(vol) = mount_path() else { return };
+    let on_disk = format!("{vol}{HOME}");
+    let fresh = crate::fs::ops::stat(&on_disk).is_err();
+    if fresh && let Err(e) = crate::fs::ops::copy_tree(HOME, &on_disk) {
+        kprintln!("milkfs: can't create {on_disk}: {e}; home stays in RAM");
+        return;
+    }
+    match crate::fs::path::bind(&on_disk, HOME) {
+        Ok(()) => kprintln!(
+            "milkfs: {HOME} is {on_disk}{} (persistent)",
+            if fresh { ", new" } else { "" }
+        ),
+        Err(e) => kprintln!("milkfs: bind {on_disk} -> {HOME} failed: {e}; home stays in RAM"),
     }
 }
 

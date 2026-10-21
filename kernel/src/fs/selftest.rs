@@ -880,6 +880,40 @@ fn milkfs(t: &mut T) {
         "milkfs in /proc/mounts",
     );
     t.ok(ops::mkdir(D, 0o755).is_ok(), "milkfs mkdir");
+
+    // Persistent home: /home/milk is a bind mount of <volume>/home/milk.
+    if let Some(vp) = super::milkfs::mount_path() {
+        let vol_dev = ops::stat(&vp).map(|s| s.dev).ok();
+        t.ok(
+            ops::stat("/home/milk").map(|s| s.dev).ok() == vol_dev,
+            "/home/milk is on milkfs",
+        );
+        let f = "/home/milk/.selftest-home";
+        t.ok(ops::write_file(f, b"persistent").is_ok(), "write in home");
+        t.ok(
+            read_str(&alloc::format!("{vp}/home/milk/.selftest-home")) == "persistent",
+            "home file visible on the volume",
+        );
+        let pathof = |p: &str| {
+            ops::lookup(p)
+                .and_then(|i| path::path_of(&i))
+                .unwrap_or_default()
+        };
+        t.ok(
+            pathof("/home/milk") == "/home/milk",
+            "path_of home is /home/milk",
+        );
+        t.ok(
+            pathof("/Users/milk") == "/home/milk",
+            "/Users/milk is the same home",
+        );
+        t.err(
+            ops::rmdir(&alloc::format!("{vp}/home/milk")),
+            Errno::EBUSY,
+            "the bound home can't be removed",
+        );
+        t.ok(ops::unlink(f).is_ok(), "unlink in home");
+    }
     let p = |n: &str| alloc::format!("{D}/{n}");
 
     // files

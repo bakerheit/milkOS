@@ -89,6 +89,41 @@ pub fn mount(path: &str, fs: FsRef) -> Result<()> {
     Ok(())
 }
 
+/// Another view of a directory that is already in the tree (a bind mount's "file
+/// system"): same inodes, same device number.
+struct BindFs {
+    name: &'static str,
+    root: InodeRef,
+}
+
+impl super::node::FileSystem for BindFs {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn dev(&self) -> u64 {
+        self.root.dev()
+    }
+    fn root(&self) -> InodeRef {
+        self.root.clone()
+    }
+}
+
+/// Bind mount: make directory `src` also appear at `dst` (like `mount --bind`). Paths
+/// through `dst` and `path_of` report `dst`.
+pub fn bind(src: &str, dst: &str) -> Result<()> {
+    let root = Walker::new().resolve(None, src, true)?;
+    if root.kind() != InodeType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    let name = MOUNTS
+        .lock()
+        .iter()
+        .rev()
+        .find(|m| m.fs.dev() == root.dev())
+        .map_or("bind", |m| m.fs.name());
+    mount(dst, alloc::sync::Arc::new(BindFs { name, root }))
+}
+
 /// One line of `/proc/mounts`: (mount point, fs type, device number).
 pub struct MountInfo {
     pub path: String,

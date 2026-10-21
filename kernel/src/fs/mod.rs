@@ -38,7 +38,7 @@ pub use file::OpenFile;
 pub use node::{DirEntry, FileSystem, FsRef, Inode, InodeRef, InodeType, SetAttr, Stat, Timespec};
 pub use ops::*;
 #[allow(unused_imports)]
-pub use path::{mount, path_of, root};
+pub use path::{bind, mount, path_of, root};
 
 use crate::kprintln;
 
@@ -75,4 +75,5 @@ pub fn init() {
     sysfs::init().expect("fs: mount /sys");
     milkfs::crashtest::configure();
     milkfs::automount();
+    milkfs::setup_home();
 }

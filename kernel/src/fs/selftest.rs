@@ -2922,6 +2922,21 @@ fn milkfs_control_errors(t: &mut T) {
         ops::write_file(&alloc::format!("/sys/fs/milkfs/{name}"), arg.as_bytes())
     };
     let error = || read_str("/sys/fs/milkfs/error");
+    use super::milkfs::label_ok;
+    t.ok(
+        label_ok("Milk")
+            && label_ok("My Backups (2026)")
+            && label_ok("Böhm")
+            && label_ok(&"x".repeat(31))
+            && !label_ok("")
+            && !label_ok(&"x".repeat(32))
+            && !label_ok(&"é".repeat(16))
+            && !label_ok("a/b")
+            && !label_ok(".hidden")
+            && !label_ok("..")
+            && !label_ok("tab\there"),
+        "volume labels: 1-31 bytes of UTF-8, no '/', no control characters, no leading '.'",
+    );
     let cases: [(&str, &str, Errno, &str); 9] = [
         (
             "snapshot",

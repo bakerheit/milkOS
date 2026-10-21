@@ -1037,6 +1037,15 @@ format v3, `sb_mac`). The new volume is left locked (listed by `/sys/fs/milkfs/u
 `snap unlock DEV` mounts it. `mkfs` refuses a mounted device (EBUSY, any mounted volume,
 not just the primary one).
 
+**Labels** (`fs::milkfs::label_ok`, the same rule in `mkmilkfs.py mkfs`): 1 to 31 bytes of
+UTF-8 (a multi-byte character counts as several), no `/`, no control characters, not
+starting with `.`; spaces and other punctuation are fine. The label names the mount
+point, `/Volumes/<label>` (`/Volumes/<label>-<device>` if that is taken; a disk whose
+label breaks the rule, made by an older tool, mounts as `Milk`). **Erasing**: `mkfs` of a
+disk that holds milkfs needs `force` (EEXIST otherwise), and works on any disk that isn't
+mounted, a locked encrypted one included; a mounted one (the home volume always is) is
+refused with EBUSY.
+
 `/sys/fs/milkfs/disks` lists every block device, for choosing what to format:
 
 ```text
@@ -1413,7 +1422,7 @@ full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the
 | `encrypt` **D** | progress / last result | `[dev=NAME] [recovery=FILE] [rate=MB]` + `\nPASSPHRASE`, or `rate=MB` alone | EBUSY converting already, a send/receive/scrub running, EINVAL encrypted already, passphrase under 8, usage, ENOSPC |
 | `decrypt` **D** | = `encrypt` | `[dev=NAME]` + `\nSECRET` | EACCES wrong passphrase or recovery key, EINVAL not encrypted, EBUSY as `encrypt` |
 | `passwd` **D** | - | `OLD\nNEW` | EACCES OLD is wrong, EINVAL NEW under 8 characters or the volume isn't encrypted, EIO |
-| `mkfs` **D** | usage | `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: `\nPASSPHRASE`) | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY mounted, EINVAL label (1-31, no `/`), passphrase missing or under 8, EEXIST/EACCES the recovery file can't be created (nothing formatted) |
+| `mkfs` **D** | usage | `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: `\nPASSPHRASE`) | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY mounted, EINVAL label (1-31 bytes of UTF-8, no `/` or control characters, not starting with `.`), passphrase missing or under 8, EEXIST/EACCES the recovery file can't be created (nothing formatted) |
 | `disks` | every block device: `NAME BYTES rw\|ro milkfs plain\|encrypted mounted=PATH\|locked\|unmounted LABEL` or `NAME BYTES rw\|ro other` | - | - |
 | `bench` **D** | last result | `DIR N SIZE` | EINVAL usage |
 | `treetest` **D** | last result | `DIR N` | EINVAL usage |

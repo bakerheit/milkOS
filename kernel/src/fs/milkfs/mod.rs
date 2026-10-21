@@ -70,10 +70,13 @@ pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
 /// What `mkfs` refuses: a bad label (EINVAL), a mounted volume's device (EBUSY), a disk
 /// holding milkfs without `force` (EEXIST).
 fn mkfs_check(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
-    if label.is_empty() || label.len() > format::LABEL_MAX || label.contains('/') {
+    if !label_ok(label) {
         return fail(
             Errno::EINVAL,
-            format!("labels are 1-{} characters without '/'", format::LABEL_MAX),
+            format!(
+                "labels are 1-{} bytes of UTF-8, without '/' or control characters, not starting with '.'",
+                format::LABEL_MAX
+            ),
         );
     }
     let mounted = |v: &Volume| v.device_name == dev.name();
@@ -90,6 +93,17 @@ fn mkfs_check(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
         return Err(Errno::EEXIST);
     }
     Ok(())
+}
+
+/// A volume label (it becomes `/Volumes/<label>`): 1 to `LABEL_MAX` bytes of UTF-8 (so a
+/// multi-byte character counts for more than one), no `/`, no control characters, not
+/// starting with `.` (that would be a hidden folder, and rules out `.` and `..`). Spaces
+/// and other punctuation are fine.
+pub fn label_ok(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= format::LABEL_MAX
+        && !label.starts_with('.')
+        && !label.chars().any(|c| c == '/' || c.is_control())
 }
 
 /// `mkfs` an encrypted volume on `dev`, under `passphrase` (8 characters or more). With
@@ -261,7 +275,7 @@ fn mount_found(
     key: Option<Arc<crypt::VolumeKey>>,
     primary: bool,
 ) -> Option<String> {
-    let label = if sb.label.is_empty() || sb.label.contains('/') {
+    let label = if !label_ok(&sb.label) {
         String::from("Milk")
     } else {
         sb.label.clone()
@@ -2145,7 +2159,7 @@ fn explain(name: &str, e: Errno) -> &'static str {
         ("mkfs", E::EEXIST) => "the device already holds milkfs: add `force` to erase it",
         ("mkfs", E::EBUSY) => "that device is mounted",
         ("mkfs", E::EINVAL) => {
-            "write `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: the passphrase on a second line); labels are 1-31 characters without '/'"
+            "write `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: the passphrase on a second line); labels are 1-31 bytes of UTF-8, no '/', no control characters, not starting with '.'"
         }
         (_, E::EACCES | E::EPERM) => "not allowed (needs an administrator)",
         (_, E::ENOSPC) => "the volume is full",

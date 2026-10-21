@@ -689,7 +689,17 @@ def parse_size(s):
     return int(s[:-1]) * mult[s[-1].upper()] if s[-1].upper() in mult else int(s)
 
 
+def label_ok(label):
+    """The kernel's rule (fs::milkfs::label_ok): 1-31 bytes of UTF-8, no '/', no control
+    characters, not starting with '.'."""
+    b = label.encode()
+    return 1 <= len(b) <= 31 and not label.startswith(".") and not any(
+        c == "/" or ord(c) < 0x20 or 0x7f <= ord(c) < 0xa0 for c in label)
+
+
 def cmd_mkfs(path, size, label, force, version=None, encrypt=False, recovery_out=None):
+    if not label_ok(label):
+        sys.exit(f"bad label {label!r}: 1-31 bytes of UTF-8, no '/', no control characters, not starting with '.'")
     if os.path.exists(path):
         img = Image(path, unlock=False)  # only "is there a milkfs?" (no key needed)
         if img.superblock() and not force:

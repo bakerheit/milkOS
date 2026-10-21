@@ -1516,6 +1516,41 @@ pub fn info() -> String {
         "bcache:      {bufs}/{cap} buffers, {dirty} dirty, {} hits, {} misses, {} writebacks",
         c.hits, c.misses, c.writebacks
     );
+    if st.store.encrypted() {
+        // Mounted means unlocked (a locked volume isn't mounted: /sys/fs/milkfs/unlock).
+        let _ = writeln!(s, "encryption:  on");
+        let _ = writeln!(s, "locked:      no");
+        let _ = writeln!(
+            s,
+            "cipher:      xchacha20-siv (per block; tag HMAC-SHA256/64)"
+        );
+        let _ = writeln!(s, "key wrap:    xchacha20-poly1305");
+        match st.read_keyring() {
+            Ok(ring) => {
+                let pass: alloc::vec::Vec<_> = ring
+                    .slots
+                    .iter()
+                    .filter(|k| k.kind == format::SLOT_PASSPHRASE)
+                    .collect();
+                let rec = ring
+                    .slots
+                    .iter()
+                    .filter(|k| k.kind == format::SLOT_RECOVERY)
+                    .count();
+                let kdf = pass.first().map_or_else(
+                    || String::from("-"),
+                    |k| format!("scrypt N=2^{} r={} p={}", k.log_n, k.r, k.p),
+                );
+                let _ = writeln!(s, "kdf:         {kdf}");
+                let _ = writeln!(s, "key slots:   {} passphrase, {rec} recovery", pass.len());
+            }
+            Err(e) => {
+                let _ = writeln!(s, "kdf:         ? (keyring unreadable: {e})");
+            }
+        }
+    } else {
+        let _ = writeln!(s, "encryption:  off");
+    }
     s
 }
 

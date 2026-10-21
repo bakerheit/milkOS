@@ -107,7 +107,7 @@ VAULT="$T/vault.img" PLAIN="$T/plain.img"
 $M mkfs "$VAULT" --size 32M --label Vault --encrypt --passphrase-file "$T/p2" --recovery-out "$T/vault-recovery" >/dev/null
 $M mkfs "$PLAIN" --size 16M --label Plain >/dev/null
 EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
-  "cat /sys/fs/milkfs/lock" \
+  "cat /sys/fs/milkfs/info" "cat /sys/fs/milkfs/lock" \
   "snap lock Milk" "snap lock Plain" \
   "echo kept across the lock > /Volumes/Vault/notes.txt" \
   "cd /Volumes/Vault" "snap lock Vault" "cd /" \
@@ -116,6 +116,10 @@ EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
   "raw:snap unlock" "wait:Passphrase" "raw:$P2" "wait:unlocked" "wait:msh:" \
   "cat /Volumes/Vault/notes.txt" "echo second > /Volumes/Vault/two.txt" "snap lock"
 L="$(tr -d '\r' < "$T/b3.log")"
+I="$(echo "$L" | awk '/\$ cat \/sys\/fs\/milkfs\/info$/{on=1;next} on && /^msh:/{exit} on')"
+echo "$I" | grep -q "^encryption:  on$" && echo "$I" | grep -q "^locked:      no$" && echo "$I" | grep -q "^cipher:      xchacha20-siv" \
+  && echo "$I" | grep -q "^kdf:         scrypt N=2^16 r=8 p=4$" && echo "$I" | grep -q "^key slots:   1 passphrase, 1 recovery$" \
+  && ok "info: encryption on, unlocked, cipher, KDF, key slots" || bad "info encryption lines: $(echo "$I" | tail -6)"
 echo "$L" | grep -a -A4 "cat /sys/fs/milkfs/lock" | grep -aq "Milk unlocked at=/Volumes/Milk (home: can't be locked)" && ok "lock file: home volume marked" || bad "lock file listing"
 echo "$L" | grep -aq "snap: lock Milk: .*holds /home/milk.*you can't lock the volume you're logged into.*(EBUSY" && ok "locking the home volume: EBUSY, says why" || bad "home lock refusal"
 echo "$L" | grep -aq "snap: lock Plain: .*isn't encrypted.*(EINVAL" && ok "locking a plain volume: EINVAL, says why" || bad "plain lock refusal"

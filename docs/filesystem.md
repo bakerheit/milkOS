@@ -1017,6 +1017,22 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
 - Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
   can start qemu sees it; for unattended test boots).
 
+**State in `/sys/fs/milkfs/info`** (the primary volume; Disk Utility's diskkit parses it):
+
+```text
+encryption:  on
+locked:      no
+cipher:      xchacha20-siv (per block; tag HMAC-SHA256/64)
+key wrap:    xchacha20-poly1305
+kdf:         scrypt N=2^16 r=8 p=4
+key slots:   1 passphrase, 1 recovery
+```
+
+`kdf` is the first passphrase slot's parameters (each slot has its own). A plain volume
+has just `encryption:  off`. `info` only describes a mounted volume, so `locked:` is
+always `no` there; locked volumes (not mounted, no `info`) are listed by
+`/sys/fs/milkfs/unlock` (`vda Milk locked`) and `/sys/fs/milkfs/lock`.
+
 **Locking again.** `snap lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
 can be locked), `/sys/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
 kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices locked):
@@ -1222,7 +1238,7 @@ full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the
 
 | file | read | write | errors (besides the common ones) |
 |---|---|---|---|
-| `info` | volume status | - | - |
+| `info` | volume status, `key: value` lines (`label`, `device`, `generation`, `blocks`, `snapshots`, `state`, ..., `encryption: on\|off`; when on also `locked`, `cipher`, `key wrap`, `kdf`, `key slots`, see "Encryption at rest"); `no milkfs volume mounted` without one | - | - |
 | `snapshots` | `NAME gen=G created=T` per line | - | - |
 | `clones` | `NAME of=SNAP at=PATH` | - | - |
 | `error` | last failure, `CONTROL: ERRNO: reason` | - | - |

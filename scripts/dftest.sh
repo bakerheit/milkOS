@@ -93,6 +93,7 @@ big=$(( $(out "wc -c /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
   && ok "$big K written: used $u0 -> $u1 K" || bad "used: $u0 -> $u1 K after writing $big K"
 out "df /Volumes/Milk/.snapshots/dfsnap" | grep -q "^milkfs .* /Volumes/Milk/.snapshots/dfsnap (ro)$" && ok "a snapshot: milkfs, read-only" || bad "snapshot statfs"
 out "df /no/such/path" | grep -q "^df: /no/such/path: " && ok "a missing path: an error" || bad "missing path"
+echo "$L" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
 echo "$L" | grep -q "fs selftest: PASS" && ok "self-test: $(echo "$L" | grep -o 'fs selftest: PASS ([0-9]* checks)')" || bad "self-test: $(echo "$L" | grep -a 'selftest: FAIL' | head -3)"
 echo
 [ $FAIL = 0 ] && echo "dftest: PASS ($T)" || echo "dftest: FAIL ($T)"

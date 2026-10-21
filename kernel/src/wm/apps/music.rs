@@ -773,7 +773,7 @@ impl WindowContents for Music {
             y += ROW_H;
         }
         if self.lib.is_empty() {
-            p.text_p(20, y, "No WAV files in ~/Music yet.", LATTE, false);
+            p.text_p(20, y, "No WAV files in ~/Music yet.", COCOA, false);
         }
         if let Some(i) = hover_index(&self.hits, self.hover) {
             let (r, h) = self.hits[i];

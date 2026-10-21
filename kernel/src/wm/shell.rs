@@ -1037,7 +1037,7 @@ impl Desktop {
         };
         icons::draw(p, 14, 8, 40, Icon::Globe, CREAM, 255, COCOA, false);
         let end = if l.query.is_empty() {
-            p.text_x(66, 12, "Search", LATTE, 2, false);
+            p.text_x(66, 12, "Search", COCOA, 2, false);
             66
         } else {
             p.text_x(66, 12, &l.query, ESPRESSO, 2, false)
@@ -1204,7 +1204,7 @@ impl Desktop {
                 label(p, "RECENT");
                 let now = crate::timer::now_ns();
                 if self.history.is_empty() {
-                    p.text_p(pad, 44, "No notifications yet.", LATTE, false);
+                    p.text_p(pad, 44, "No notifications yet.", COCOA, false);
                 }
                 let max = ((w - 2 * pad) / 7) as usize;
                 for (k, n) in self.history.iter().rev().take(4).enumerate() {
@@ -1220,7 +1220,7 @@ impl Desktop {
                     let sub: String = sub.chars().take(max).collect();
                     p.text_p(pad, y + 18, &sub, COCOA, false);
                 }
-                p.text(pad, 196, "Click the clock for all", LATTE);
+                p.text(pad, 196, "Click the clock for all", COCOA);
             }
             4 => {
                 label(p, "NOTES");
@@ -1236,7 +1236,7 @@ impl Desktop {
                     }
                 }
                 let ago = apps::notes::edited_ago(now);
-                p.text(pad, 150, &ago, LATTE);
+                p.text(pad, 150, &ago, COCOA);
             }
             _ => {
                 label(p, "APPS");

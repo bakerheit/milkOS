@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use crate::fs;
 use crate::gfx::{Color, Rect, rgb};
 
+use super::super::button::{self, Kind, State};
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
@@ -211,7 +212,7 @@ impl Welcome {
                 ],
                 icon: Icon::Gear,
                 bg: rgb(0x6B, 0x55, 0x4A),
-                fg: CREAM,
+                fg: TERM_FG, // fixed light: cream turns dark in Chocolate milk
                 buttons: alloc::vec![(
                     String::from(if dark {
                         "Back to Whole milk"
@@ -333,6 +334,8 @@ impl WindowContents for Welcome {
         p.text_p(78, 76, "every button below really does it.", COCOA, false);
         // Cards, two columns.
         let x0 = (w - 2 * CARD_W - GAP) / 2;
+        // The pills paint their own hover (SPEC Buttons).
+        let mut pills: Vec<Rect> = Vec::new();
         for (i, c) in self.cards().iter().enumerate() {
             let cx = x0 + (i as i32 % 2) * (CARD_W + GAP);
             let cy = TOP + (i as i32 / 2) * (CARD_H + GAP);
@@ -356,14 +359,18 @@ impl WindowContents for Welcome {
             }
             let mut bx = cx + 62;
             for (label, act) in &c.buttons {
-                let bw = super::super::fontx::prop_width(label, true) + 24;
-                let br = Rect::new(bx, cy + CARD_H - 32, bw, 24);
-                let (bg, fg) = match act {
-                    Some(_) => (STRAW, MILK),
-                    None => (OAT, LATTE),
+                let bw = button::pill_w(label);
+                let br = Rect::new(bx, cy + CARD_H - 32, bw, button::PILL_H);
+                let kind = if act.is_some() {
+                    Kind::Primary
+                } else {
+                    Kind::Disabled
                 };
-                p.rrect_r(br, R_BUTTON, bg, 255);
-                p.text_p_center(br.x, br.w, br.y + 4, label, fg, act.is_some());
+                let hov = self.hover.is_some_and(|(x, y)| hit(&br, x, y));
+                button::paint(p, br, label, kind, State::hover(hov && act.is_some()));
+                if act.is_some() {
+                    pills.push(br);
+                }
                 if let Some(a) = act {
                     self.hits.push((br, *a));
                 }
@@ -387,9 +394,10 @@ impl WindowContents for Welcome {
             255,
         );
         if off {
-            p.fill(cb.x + 4, cb.y + 9, 3, 3, MILK);
-            p.fill(cb.x + 7, cb.y + 11, 3, 3, MILK);
-            p.fill(cb.x + 10, cb.y + 5, 3, 7, MILK);
+            // The tick is ink: a glyph on straw (milk on straw is 2.4:1).
+            p.fill(cb.x + 4, cb.y + 9, 3, 3, INK);
+            p.fill(cb.x + 7, cb.y + 11, 3, 3, INK);
+            p.fill(cb.x + 10, cb.y + 5, 3, 7, INK);
         }
         let end = p.text_p(cb.x + 26, fy + 5, "Don't show again", ESPRESSO, false);
         self.hits
@@ -403,7 +411,9 @@ impl WindowContents for Welcome {
         p.rrect_r(go, R_BUTTON, ESPRESSO, 255);
         p.text_p_center(go.x, go.w, go.y + 6, "Get started", MILK, true);
         self.hits.push((go, Do::Close));
-        if let Some(i) = hover_index(&self.hits, self.hover) {
+        if let Some(i) = hover_index(&self.hits, self.hover)
+            && !pills.contains(&self.hits[i].0)
+        {
             paint_hover(p, self.hits[i].0, false);
         }
     }

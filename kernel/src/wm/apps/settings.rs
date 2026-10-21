@@ -11,6 +11,7 @@ use crate::gfx::{Color, Rect, rgb};
 use crate::{fs, heap, pmm, timer};
 
 use super::super::buffer::Buffer;
+use super::super::button::{self, Kind as BKind, State};
 use super::super::paint::{self, Painter, hit};
 use super::super::prefs::{self, Prefs};
 use super::super::theme::*;
@@ -122,10 +123,11 @@ impl Settings {
         }
     }
 
+    /// An option button: the chosen one is a primary (straw, ink), the rest secondary.
     fn button(&mut self, p: &mut Painter, r: Rect, label: &str, on: bool, h: Hit) {
-        let (bg, fg) = if on { (STRAW, MILK) } else { (OAT, ESPRESSO) };
-        p.rrect_r(r, R_BUTTON, bg, 255);
-        p.text_p_center(r.x, r.w, r.y + (r.h - 16) / 2, label, fg, on);
+        let kind = if on { BKind::Primary } else { BKind::Secondary };
+        let hov = self.hover.is_some_and(|(x, y)| hit(&r, x, y));
+        button::paint(p, r, label, kind, State::hover(hov));
         self.hits.push((r, h));
     }
 
@@ -537,6 +539,15 @@ impl WindowContents for Settings {
                 Hit::Section(s) if s == self.section => {}
                 Hit::Section(_) => paint_hover(p, r, true),
                 Hit::Brightness => {}
+                // Buttons paint their own hover (SPEC Buttons).
+                Hit::Resolution(..)
+                | Hit::LockAfter(_)
+                | Hit::LockNow
+                | Hit::Sound(_)
+                | Hit::TestSound
+                | Hit::TmToggle
+                | Hit::TmNow
+                | Hit::TmInterval(_) => {}
                 _ => paint_hover(p, r, false),
             }
         }

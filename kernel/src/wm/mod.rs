@@ -20,6 +20,7 @@ pub mod actions;
 mod anim;
 mod apps;
 mod buffer;
+mod button;
 pub mod client;
 pub mod clipboard;
 mod ctl;

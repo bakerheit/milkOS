@@ -277,7 +277,7 @@ impl Files {
                 x,
                 84,
                 "No snapshots yet (Settings > Time Machine > Back up now).",
-                LATTE,
+                COCOA,
                 false,
             );
         }
@@ -347,7 +347,7 @@ impl WindowContents for Files {
         if let Some(e) = &self.error {
             gp.text(SIDEBAR_W + 24, GRID_TOP, &format!("Can't open: {e}"), STRAW);
         } else if self.items.is_empty() {
-            gp.text(SIDEBAR_W + 24, GRID_TOP, "This folder is empty", LATTE);
+            gp.text(SIDEBAR_W + 24, GRID_TOP, "This folder is empty", COCOA);
         }
         for (i, e) in self.items.iter().enumerate() {
             let (cx, cy) = self.cell(i);
@@ -407,7 +407,7 @@ impl WindowContents for Files {
                     w - 64,
                     sy + 4,
                     &format!("{snap}, read-only"),
-                    LATTE,
+                    COCOA,
                     1,
                     false,
                 );
@@ -419,7 +419,7 @@ impl WindowContents for Files {
             p.text_center(up.x, up.w, sy + 4, "up", COCOA, false);
         }
         if in_snapshot(&self.path).is_none() {
-            p.text_right(w - 64, sy + 4, &fsx::pretty(&self.path), LATTE, 1, false);
+            p.text_right(w - 64, sy + 4, &fsx::pretty(&self.path), COCOA, 1, false);
         }
         // The right-click menu, over everything.
         if let Some((x, y, i)) = self.ctx {

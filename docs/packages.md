@@ -128,6 +128,34 @@ the snapshot / clone / promote / discard itself (`milkfs.*`, attributed to `/bin
 62 ... /bin/milk  user.pkg.keep    name=moo2048 ... undo=rollback:before-try-moo2048
 ```
 
+## Milk Store (`/bin/store`)
+
+A desktop window (user/gui, MILK_WIN syscalls) over `/bin/milk`. Type `store` in the
+Terminal, or use its dock entry (below).
+
+* The list comes from `MILK_TABLE=1 milk search` (the structured output, parsed with
+  `rt::table`), plus the index cache (versions, size), installed manifests (`depends`, and
+  the `dock` colour as the tile colour; packages that aren't installed get an accent picked
+  by a hash of the name) and `/sys/fs/milkfs/clones` (`try-<name>` means "trying").
+* Rows: tile, name, description, and one badge: `installed` (matcha), `<ver> new` (honey,
+  an upgrade), `trying` (blue), or the version. The card shows the details and the
+  buttons Install, Try, Keep, Discard, Remove, Upgrade, each enabled only when it makes
+  sense (Keep/Discard only while trying, Upgrade only with a newer version). The top bar
+  has Update (`milk update`) and Upgrade all (`milk upgrade -y`).
+* Every action runs `/bin/milk` (fork, a pipe on stdout+stderr, the read end
+  non-blocking); the log box shows its output live, word-wrapped, with a moving progress
+  strip, then a `done` / `failed` chip from the exit status, and the list is reloaded. So
+  signatures, clones, `-y` and audit records are exactly the command line's. Upgrade from
+  the Store keeps automatically (`-y`); Try leaves the clone for Keep or Discard.
+* First run with no index cache runs `milk update` on its own.
+* Keys: Up/Down (or the wheel) select, `i` install, `t` try, `k` keep, `d` discard,
+  `r` remove, `u` upgrade, `g` update, `a` upgrade all, `q` quit.
+* Theme: SPEC tokens. The wm doesn't publish its theme in `/dev/wm`'s status; the Store
+  looks for a `theme dark` line there first, then `dark = true` in
+  `/home/milk/.config/milk/settings`, and then uses the wm's "Chocolate milk" values.
+* Dock entry: `rootfs/System/Applications/store/manifest` is a milk-format manifest with
+  `exec /bin/store` and `dock Store #E58C97`, for the desktop's manifest dock reading.
+
 ## The toy packages (`packages/`)
 
 A sibling cargo workspace (same target and linker script as `user/`, uses `user/rt` and
@@ -165,4 +193,4 @@ same image runs moo2048 from the relinked `/bin`, and `audit verify` is OK acros
 ## Not done
 
 Version ranges beyond `>=`, conflicts/provides, key rotation or revocation lists, running a tried app *as if* the clone were `/` (needs
-per-process roots), the desktop reading `dock` entries.
+per-process roots).

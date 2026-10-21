@@ -134,6 +134,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "store"
+version = "0.0.1"
+dependencies = [
+ "gui",
+ "rt",
+]
+
+[[package]]
 name = "stty"
 version = "0.0.1"
 dependencies = [

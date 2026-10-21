@@ -32,6 +32,11 @@ pub struct DevNode {
 /// games, not for keys.
 static RNG: SpinLock<u64> = SpinLock::new(0);
 
+/// One word from /dev/urandom's generator (NOT cryptographic; see `crypto::rand`).
+pub fn random_u64() -> u64 {
+    next_random()
+}
+
 fn next_random() -> u64 {
     let mut s = RNG.lock();
     if *s == 0 {

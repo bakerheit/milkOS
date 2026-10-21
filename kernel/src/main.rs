@@ -9,6 +9,7 @@ use core::ptr::write_volatile;
 
 mod audio;
 mod audit;
+mod crypto;
 mod cursor;
 mod display;
 mod dtb;

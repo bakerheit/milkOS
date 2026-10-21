@@ -2618,6 +2618,27 @@ fn show(path: &str) {
     kprintln!("{}", read_str(path).trim_end());
 }
 
+/// The crypto known-answer tests (published vectors), timed.
+fn crypto(t: &mut T) {
+    let t0 = crate::timer::now_ns();
+    let (bad, n) = crate::crypto::selftest();
+    for b in &bad {
+        t.ok(false, &alloc::format!("crypto: {b}"));
+    }
+    t.ok(
+        bad.is_empty(),
+        &alloc::format!(
+            "crypto: {n} known-answer tests ({} ms)",
+            (crate::timer::now_ns() - t0) / 1_000_000
+        ),
+    );
+    kprintln!(
+        "crypto: {}/{n} known-answer tests pass (RFC 8439, XChaCha draft, RFC 4231, RFC 7914) in {} ms",
+        n - bad.len(),
+        (crate::timer::now_ns() - t0) / 1_000_000
+    );
+}
+
 /// fs::notify events, and the search index over a small tmpfs tree (built and updated
 /// synchronously here; the real indexer thread starts later, on /home/milk).
 fn notify_and_search(t: &mut T) {
@@ -2803,6 +2824,7 @@ pub fn run() {
     procfs_sysfs(&mut t);
     blockdev(&mut t);
     mac_share(&mut t);
+    crypto(&mut t);
     milkfs(&mut t);
     notify_and_search(&mut t);
     if t.failed != 0 {

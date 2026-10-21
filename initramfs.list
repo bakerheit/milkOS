@@ -61,3 +61,5 @@
 /bin/audit    target/user/aarch64-unknown-none-softfloat/release/audit   755
 /bin/milk     target/user/aarch64-unknown-none-softfloat/release/milk   755
 /bin/top      target/user/aarch64-unknown-none-softfloat/release/top   755
+/bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
+/bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755

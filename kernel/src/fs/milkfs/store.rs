@@ -36,7 +36,20 @@ pub struct Store {
     /// History is branched: no dead lists; a block a snapshot may still have is left
     /// for the next reachability sweep instead.
     pub branched: bool,
+    /// Decoded tree nodes by (block, checksum): blocks are copy-on-write and only reused
+    /// with new contents (a new checksum), so an entry can never be stale.
+    nodes: crate::sync::SpinLock<NodeCache>,
 }
+
+#[derive(Default)]
+struct NodeCache {
+    map: alloc::collections::BTreeMap<(u64, u64), (alloc::sync::Arc<super::format::DiskNode>, u64)>,
+    lru: alloc::collections::BTreeMap<u64, (u64, u64)>,
+    tick: u64,
+}
+
+/// Decoded nodes kept.
+const NODE_CACHE: usize = 512;
 
 impl Store {
     /// A store with every block free except the two superblocks. Mount marks the rest.
@@ -53,6 +66,7 @@ impl Store {
             dead_new: Vec::new(),
             clone_origin: None,
             branched: false,
+            nodes: crate::sync::SpinLock::new(NodeCache::default()),
         };
         s.mark(0);
         s.mark(1);
@@ -104,6 +118,67 @@ impl Store {
             }
         }
         Err(Errno::ENOSPC)
+    }
+
+    /// The decoded tree node at `p` (checksum verified), shared from the node cache.
+    pub fn node(&self, p: BlockPtr) -> Result<alloc::sync::Arc<super::format::DiskNode>> {
+        let key = (p.block, p.csum);
+        {
+            let mut c = self.nodes.lock();
+            c.tick += 1;
+            let now = c.tick;
+            if let Some((n, t)) = c.map.get(&key).cloned() {
+                c.lru.remove(&t);
+                c.lru.insert(now, key);
+                c.map.insert(key, (n.clone(), now));
+                return Ok(n);
+            }
+        }
+        let n = alloc::sync::Arc::new(super::btree::decode_at(self, p)?);
+        let mut c = self.nodes.lock();
+        if c.map.len() >= NODE_CACHE
+            && let Some((&t, &old)) = c.lru.iter().next()
+        {
+            c.lru.remove(&t);
+            c.map.remove(&old);
+        }
+        c.tick += 1;
+        let now = c.tick;
+        c.lru.insert(now, key);
+        c.map.insert(key, (n.clone(), now));
+        Ok(n)
+    }
+
+    /// Allocate up to `want` consecutive blocks (at least one): `(first, count)`.
+    pub fn alloc_run(&mut self, want: usize) -> Result<(u64, usize)> {
+        let first = self.alloc()?;
+        let mut got = 1;
+        while got < want {
+            let b = first + got as u64;
+            if b >= self.nblocks || !self.mark(b) {
+                break; // used (mark refuses) or past the end
+            }
+            got += 1;
+        }
+        self.hint = first + got as u64;
+        if self.hint >= self.nblocks {
+            self.hint = 2;
+        }
+        Ok((first, got))
+    }
+
+    /// Read `csums.len()` consecutive blocks starting at `block` into `out` (one device
+    /// request for whatever isn't cached), verifying every block's checksum.
+    pub fn read_run(&self, block: u64, csums: &[u64], out: &mut [u8]) -> Result<()> {
+        self.cache
+            .read_run(block, &mut out[..csums.len() * BLOCK])?;
+        for (i, c) in csums.iter().enumerate() {
+            if xxh64(&out[i * BLOCK..(i + 1) * BLOCK]) != *c {
+                crate::kprintln!("milkfs: checksum mismatch in block {}", block + i as u64);
+                return Err(Errno::EIO);
+            }
+        }
+        Ok(())
     }
 
     /// Drop a block the live tree referenced (see the module docs for the rules).

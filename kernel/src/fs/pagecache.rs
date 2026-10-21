@@ -100,39 +100,58 @@ fn insert(key: Key, page: &[u8; PAGE], epoch: u64) {
     }
 }
 
+/// Pages read ahead on a miss (64 KiB): one call into the file system fills them all.
+pub const READAHEAD: u64 = 16;
+
 /// Read `buf.len()` bytes at `off` of the file `(dev, ino)` whose size is `size`, through
-/// the cache. `fill(page_index, page)` reads one whole page from the file system (bytes
-/// past EOF zero).
+/// the cache. `fill(first_page, out)` reads whole pages `first_page..` from the file system
+/// into `out` (a multiple of PAGE bytes; bytes past EOF zero). On a miss up to
+/// [`READAHEAD`] pages are filled and cached at once; with the cache off the whole request
+/// goes to the file system in one call.
 pub fn read(
     dev: u64,
     ino: u64,
     size: u64,
     off: u64,
     buf: &mut [u8],
-    mut fill: impl FnMut(u64, &mut [u8; PAGE]) -> Result<()>,
+    mut fill: impl FnMut(u64, &mut [u8]) -> Result<()>,
 ) -> Result<usize> {
     if off >= size {
         return Ok(0);
     }
     let n = (buf.len() as u64).min(size - off) as usize;
-    let on = ENABLED.load(Ordering::Relaxed);
-    let mut page = [0u8; PAGE];
+    let p = PAGE as u64;
+    let last_page = (size - 1) / p;
+    if !ENABLED.load(Ordering::Relaxed) {
+        let (first, end) = (off / p, (off + n as u64 - 1) / p + 1);
+        let mut tmp = alloc::vec![0u8; ((end - first) * p) as usize];
+        fill(first, &mut tmp)?;
+        let at = (off - first * p) as usize;
+        buf[..n].copy_from_slice(&tmp[at..at + n]);
+        return Ok(n);
+    }
+    let mut tmp = alloc::vec::Vec::new();
     let mut done = 0;
     while done < n {
         let pos = off + done as u64;
-        let (pg, at) = (pos / PAGE as u64, (pos % PAGE as u64) as usize);
+        let (pg, at) = (pos / p, (pos % p) as usize);
         let chunk = (PAGE - at).min(n - done);
-        let out = &mut buf[done..done + chunk];
-        if !(on && lookup((dev, ino, pg), at, out)) {
-            let epoch = EPOCH.load(Ordering::Acquire);
-            page.fill(0);
-            fill(pg, &mut page)?;
-            out.copy_from_slice(&page[at..at + chunk]);
-            if on {
-                insert((dev, ino, pg), &page, epoch);
-            }
+        if lookup((dev, ino, pg), at, &mut buf[done..done + chunk]) {
+            done += chunk;
+            continue;
         }
-        done += chunk;
+        let epoch = EPOCH.load(Ordering::Acquire);
+        let ra = READAHEAD.min(last_page - pg + 1) as usize;
+        tmp.clear();
+        tmp.resize(ra * PAGE, 0);
+        fill(pg, &mut tmp)?;
+        for (i, page) in tmp.as_chunks::<PAGE>().0.iter().enumerate() {
+            insert((dev, ino, pg + i as u64), page, epoch);
+        }
+        // Serve as much of the request as the filled pages cover.
+        let have = (ra * PAGE - at).min(n - done);
+        buf[done..done + have].copy_from_slice(&tmp[at..at + have]);
+        done += have;
     }
     Ok(n)
 }

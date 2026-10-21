@@ -986,10 +986,13 @@ fn milkfs_test_volume(t: &mut T) {
         report.problems == 0 && report.inodes == 1,
         "fresh volume mounts clean",
     );
-    super::milkfs::set_test_override(Some(vol.clone()));
+    super::milkfs::set_test_override(Some((vol.clone(), VP)));
     milkfs_destructive(t, &vol, VP, D, &dev);
     milkfs_clones(t, &vol, VP, &dev);
     page_cache(t, VP);
+    milkfs_diff(t, VP);
+    milkfs_versions(t, VP);
+    milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1625,6 +1628,291 @@ fn page_cache(t: &mut T, vp: &str) {
         let _ = ops::unlink(&big);
     }
     let _ = ops::unlink(&f);
+}
+
+/// `snap diff` on the test volume.
+fn milkfs_diff(t: &mut T, vp: &str) {
+    use super::milkfs::{self as m, diff::Change};
+    let p = |n: &str| alloc::format!("{vp}/dd/{n}");
+    let _ = ops::mkdir_all(&p("sub"), 0o755);
+    for (n, c) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        let _ = ops::write_file(&p(n), c.as_bytes());
+    }
+    for i in 0..300 {
+        let _ = ops::write_file(&p(&alloc::format!("sub/f{i:03}")), b"same");
+    }
+    t.ok(m::snapshot("d1").is_ok(), "diff: snapshot d1");
+    let _ = ops::write_file(&p("b"), b"B changed");
+    let _ = ops::unlink(&p("c"));
+    let _ = ops::write_file(&p("e"), b"new");
+    let _ = ops::rename(&p("a"), &p("sub/a2"));
+    let _ = ops::mkdir(&p("newdir"), 0o755);
+    t.ok(m::snapshot("d2").is_ok(), "diff: snapshot d2");
+    let _ = ops::write_file(&p("f"), b"after d2");
+    let want = alloc::vec![
+        Change::Modified(String::from("/dd/b")),
+        Change::Removed(String::from("/dd/c")),
+        Change::Added(String::from("/dd/e")),
+        Change::Added(String::from("/dd/newdir")),
+        Change::Renamed(String::from("/dd/a"), String::from("/dd/sub/a2")),
+    ];
+    let got = m::diff("d1", Some("d2"))
+        .map(|r| r.changes)
+        .unwrap_or_default();
+    t.ok(
+        got == want,
+        &alloc::format!("diff d1..d2 is exact ({got:?})"),
+    );
+    t.ok(
+        m::diff("d2", Some("d1")).map(|r| r.changes).ok() == Some(want),
+        "diff order doesn't matter",
+    );
+    t.ok(
+        m::diff("d2", None).map(|r| r.changes).ok()
+            == Some(alloc::vec![Change::Added(String::from("/dd/f"))]),
+        "diff snapshot..live",
+    );
+    t.ok(
+        m::diff("d2", Some("d2")).is_ok_and(|r| r.changes.is_empty()),
+        "diff of a snapshot with itself",
+    );
+    // One change among 300 files: only the path to it is read.
+    t.ok(m::snapshot("d3").is_ok(), "diff: snapshot d3");
+    let _ = ops::write_file(&p("sub/f123"), b"different");
+    match m::diff("d3", None) {
+        Ok(r) => t.ok(
+            r.changes == alloc::vec![Change::Modified(String::from("/dd/sub/f123"))]
+                && r.nodes_read <= 8,
+            &alloc::format!(
+                "diff reads only changed nodes ({} read, {} skipped)",
+                r.nodes_read,
+                r.subtrees_skipped
+            ),
+        ),
+        Err(e) => t.ok(false, &alloc::format!("diff d3..live: {e}")),
+    }
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/diff", b"d1 d2").is_ok()
+            && read_str("/sys/fs/milkfs/diff").contains("R /dd/a -> /dd/sub/a2"),
+        "/sys/fs/milkfs/diff",
+    );
+    t.err(
+        m::diff("nope", None),
+        Errno::ENOENT,
+        "diff of a missing snapshot",
+    );
+    for n in ["d1", "d2", "d3"] {
+        let _ = m::delete_snapshot(n);
+    }
+    rm_rf(&alloc::format!("{vp}/dd"));
+}
+
+/// Version history on the test volume.
+fn milkfs_versions(t: &mut T, vp: &str) {
+    use super::milkfs as m;
+    let f = alloc::format!("{vp}/doc.txt");
+    let snaps = || -> Vec<String> {
+        m::snapshots()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    };
+    let _ = ops::write_file(&f, b"version one");
+    let _ = m::snapshot("v1");
+    let _ = ops::write_file(&f, b"version two, longer");
+    let _ = m::snapshot("v2");
+    let _ = m::snapshot("v2b"); // same content: must collapse
+    let _ = ops::rename(&f, &alloc::format!("{vp}/renamed doc.txt"));
+    let f = alloc::format!("{vp}/renamed doc.txt");
+    let _ = ops::write_file(&f, b"three");
+    let v = m::versions(&f).unwrap_or_default();
+    let names: Vec<Option<String>> = v.iter().map(|x| x.snapshot.clone()).collect();
+    t.ok(
+        names == alloc::vec![Some(String::from("v1")), Some(String::from("v2")), None],
+        &alloc::format!("versions: distinct versions, renamed file followed ({names:?})"),
+    );
+    t.ok(
+        v.iter().map(|x| x.size).collect::<Vec<_>>() == alloc::vec![11, 19, 5]
+            && v[0].hash != v[1].hash,
+        "versions: sizes and hashes",
+    );
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/versions", f.as_bytes()).is_ok()
+            && read_str("/sys/fs/milkfs/versions").contains("v2\t"),
+        "/sys/fs/milkfs/versions",
+    );
+    let before = snaps().len();
+    t.ok(m::restore_version(&f, "v1").is_ok(), "restore a version");
+    t.ok(read_str(&f) == "version one", "restored content");
+    t.ok(
+        snaps().len() == before + 1 && snaps().iter().any(|s| s.starts_with("pre-restore-")),
+        "restore kept the unsaved current version in a snapshot",
+    );
+    let before = snaps().len();
+    t.ok(
+        ops::write_file(
+            "/sys/fs/milkfs/restore",
+            alloc::format!("v2 {f}").as_bytes(),
+        )
+        .is_ok()
+            && read_str(&f) == "version two, longer",
+        "restore via /sys (path with a space)",
+    );
+    t.ok(
+        snaps().len() == before,
+        "no safety snapshot when the current version is kept",
+    );
+    t.err(
+        m::versions(&alloc::format!("{vp}/nope")),
+        Errno::ENOENT,
+        "versions of a missing file",
+    );
+    t.err(
+        m::versions("/etc/motd"),
+        Errno::EXDEV,
+        "versions outside the volume",
+    );
+    for s in snaps() {
+        let _ = m::delete_snapshot(&s);
+    }
+    let _ = ops::unlink(&f);
+}
+
+/// check / check --repair on the test volume, with damage made on purpose.
+fn milkfs_fsck(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    use super::milkfs::{self as m, format::*, items::LIVE};
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check: clean volume is clean",
+    );
+    let _ = ops::write_file(
+        &alloc::format!("{vp}/victim.txt"),
+        b"precious data, 4 KiB+".repeat(250).as_slice(),
+    );
+    let _ = ops::write_file(&alloc::format!("{vp}/keep.txt"), b"keep");
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        // An inode with a link but no entry, an entry to a missing inode, a wrong count.
+        let lost = st.alloc_ino();
+        let t0 = (1, 0);
+        let _ = st.put_inode(
+            lost,
+            &InodeItem {
+                mode: 0o100644,
+                nlink: 1,
+                parent: ROOT_INO,
+                atime: t0,
+                mtime: t0,
+                ctime: t0,
+                ..InodeItem::default()
+            },
+        );
+        let _ = st.add_dirent(
+            ROOT_INO,
+            Dirent {
+                ino: 999_999,
+                dtype: 8,
+                name: String::from("ghost"),
+            },
+        );
+        if let Ok(Some(d)) = st.lookup(LIVE, ROOT_INO, "keep.txt") {
+            let mut i = st.inode(LIVE, d.ino).unwrap();
+            i.nlink = 7;
+            let _ = st.put_inode(d.ino, &i);
+        }
+        let _ = st.commit();
+    }
+    let gen_slot = vol.state.lock().sb.generation % 2;
+    let other = 1 - gen_slot;
+    let _ = dev.write_blocks(other * 8, &[0xAB; 4096]);
+    let r = m::check(false).unwrap_or_default();
+    t.ok(
+        r.problems.len() >= 3
+            && r.notes.iter().any(|n| n.contains("torn"))
+            && r.repaired.is_empty(),
+        &alloc::format!(
+            "check finds the damage and the torn slot, changes nothing ({} problems)",
+            r.problems.len()
+        ),
+    );
+    t.ok(
+        read_str(&alloc::format!("{vp}/keep.txt")) == "keep",
+        "check alone leaves files alone",
+    );
+    let r = m::check(true).unwrap_or_default();
+    t.ok(
+        r.repaired.len() >= 4,
+        &alloc::format!("repair fixes it ({} repairs)", r.repaired.len()),
+    );
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check is clean after repair",
+    );
+    t.ok(
+        ops::readdir(&alloc::format!("{vp}/lost+found"))
+            .is_ok_and(|e| e.len() == 1 && e[0].name.starts_with('#')),
+        "unreferenced inode is in lost+found",
+    );
+    t.err(
+        ops::stat(&alloc::format!("{vp}/ghost")),
+        Errno::ENOENT,
+        "dangling entry removed",
+    );
+    t.ok(
+        ops::stat(&alloc::format!("{vp}/keep.txt")).is_ok_and(|s| s.nlink == 1),
+        "link count fixed",
+    );
+    let mut b = [0u8; 4096];
+    t.ok(
+        dev.read_blocks(other * 8, &mut b).is_ok() && Superblock::decode(&b).is_some(),
+        "damaged superblock slot rewritten",
+    );
+    // Data damage: overwrite a data block behind the cache, then check.
+    let blk = {
+        let st = vol.state.lock();
+        let ino = st
+            .lookup(LIVE, ROOT_INO, "victim.txt")
+            .ok()
+            .flatten()
+            .map(|d| d.ino);
+        ino.and_then(|i| st.extents(LIVE, i, 0).ok())
+            .and_then(|e| e.first().map(|x| x.1.block))
+    };
+    if let Some(blk) = blk {
+        let mut saved = [0u8; 4096];
+        let _ = dev.read_blocks(blk * 8, &mut saved);
+        let _ = dev.write_blocks(blk * 8, &[0u8; 4096]);
+        vol.state.lock().cache().discard();
+        let r = m::check(true).unwrap_or_default();
+        t.ok(
+            r.unrepairable
+                .iter()
+                .any(|u| u.contains("victim.txt") && u.contains("checksum")),
+            "bad data block reported with its path, not 'repaired'",
+        );
+        t.err(
+            ops::read_file(&alloc::format!("{vp}/victim.txt")),
+            Errno::EIO,
+            "reading it gives EIO",
+        );
+        let _ = dev.write_blocks(blk * 8, &saved);
+        vol.state.lock().cache().discard();
+        super::pagecache::drop_all();
+        t.ok(
+            m::check(false).is_ok_and(|r| r.clean()),
+            "clean again once the block is back",
+        );
+    }
+    rm_rf(&alloc::format!("{vp}/lost+found"));
+    let _ = ops::unlink(&alloc::format!("{vp}/victim.txt"));
+    let _ = ops::unlink(&alloc::format!("{vp}/keep.txt"));
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

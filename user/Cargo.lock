@@ -38,6 +38,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsstress"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "gui"
 version = "0.0.1"
 dependencies = [
@@ -149,6 +156,13 @@ dependencies = [
 
 [[package]]
 name = "utest"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "versions"
 version = "0.0.1"
 dependencies = [
  "rt",

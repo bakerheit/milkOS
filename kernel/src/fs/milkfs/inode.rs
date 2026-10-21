@@ -298,7 +298,9 @@ impl MilkInode {
                     uid: d.uid,
                     gid: d.gid,
                     size,
-                    parent: if is_dir { dir } else { 0 },
+                    // Files record their (first) directory too: diff and versions use it
+                    // to find a path without scanning.
+                    parent: dir,
                     atime: t,
                     mtime: t,
                     ctime: t,
@@ -370,10 +372,10 @@ impl Inode for MilkInode {
         }
         let size = self.vol.state.lock().inode(self.view, self.ino)?.size;
         let (view, ino) = (self.view, self.ino);
-        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, page| {
+        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, pages| {
             let st = self.vol.state.lock();
             let at = pg * crate::fs::pagecache::PAGE as u64;
-            st.read_data(view, ino, size, at, page).map(|_| ())
+            st.read_data(view, ino, size, at, pages).map(|_| ())
         })
     }
 
@@ -644,8 +646,8 @@ impl Inode for MilkInode {
             )?;
             let mut s = st.inode(st.cur, src.ino)?;
             s.ctime = t;
+            s.parent = ndi;
             if moving_dir && od != ndi {
-                s.parent = ndi;
                 let mut o = st.inode(st.cur, od)?;
                 o.nlink -= 1;
                 st.put_inode(od, &o)?;

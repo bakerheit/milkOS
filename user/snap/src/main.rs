@@ -5,6 +5,8 @@
 //!   snap delete NAME
 //!   snap rollback NAME    make the volume what NAME captured (newer snapshots go away)
 //!   snap info             volume status
+//!   snap diff A [B|live]  what changed between two snapshots (or a snapshot and now)
+//!   snap check [--repair] check the volume (and fix what is safe to fix)
 //!   snap clones           list clones
 //!   snap clone SNAP NAME  writable clone of SNAP, mounted at /Volumes/Milk-NAME
 //!   snap promote NAME     the clone becomes the volume (old state kept as before-NAME)
@@ -67,6 +69,23 @@ fn why(e: rt::Errno) -> alloc::string::String {
     alloc::format!("{text} (errno {})", e.0)
 }
 
+/// Like `control` but silent on success (for commands whose result is read back).
+fn control_quiet(op: &str, arg: &str) -> i32 {
+    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let r = sys::open(&path, O_WRONLY).and_then(|fd| {
+        let r = sys::write(fd, arg.as_bytes());
+        let _ = sys::close(fd);
+        r
+    });
+    match r {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("snap: {op} {arg}: {}", why(e));
+            1
+        }
+    }
+}
+
 fn control(op: &str, name: &str) -> i32 {
     let path = alloc::format!("/sys/fs/milkfs/{op}");
     let r = sys::open(&path, O_WRONLY).and_then(|fd| {
@@ -90,6 +109,27 @@ fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
         (None, _) | (Some("list"), _) => cat("/sys/fs/milkfs/snapshots"),
         (Some("info"), _) => cat("/sys/fs/milkfs/info"),
+        (Some("diff"), Some(a)) => {
+            let b = args.get(3).unwrap_or("live");
+            match control_quiet("diff", &alloc::format!("{a} {b}")) {
+                0 => cat("/sys/fs/milkfs/diff"),
+                e => e,
+            }
+        }
+        (Some("check"), opt) => {
+            let mode = if opt == Some("--repair") {
+                "repair"
+            } else {
+                "check"
+            };
+            match control_quiet("check", mode) {
+                0 => {
+                    cat("/sys/fs/milkfs/check");
+                    0
+                }
+                e => e,
+            }
+        }
         (Some("clones"), _) => cat("/sys/fs/milkfs/clones"),
         (Some("clone"), Some(snap)) => match args.get(3) {
             Some(name) => control("clone", &alloc::format!("{snap} {name}")),
@@ -106,7 +146,7 @@ fn main(args: &rt::Args) -> i32 {
         }
         _ => {
             eprintln!(
-                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | clones | clone SNAP NAME | promote NAME | discard NAME | auto [on|off|interval=15m|keep=K|daily=D|now]]"
+                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | auto [on|off|interval=15m|keep=K|daily=D|now]]"
             );
             2
         }

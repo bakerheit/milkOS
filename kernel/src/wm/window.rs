@@ -121,6 +121,8 @@ pub struct Window {
     pub dirty: bool,
     /// Focus state the surface was last drawn with.
     drawn_focused: bool,
+    /// The pointer is over the traffic lights: show their symbols.
+    pub hover: bool,
 }
 
 /// Light `i`'s box in window coordinates.
@@ -158,6 +160,7 @@ impl Window {
             contents,
             dirty: true,
             drawn_focused: false,
+            hover: false,
         })
     }
 
@@ -236,6 +239,24 @@ impl Window {
         for (i, c) in lights.into_iter().enumerate() {
             let r = light_rect(i);
             p.circle(r.x, r.y, r.w, c, 255);
+            if self.hover {
+                // x, -, + (hover state; the mockup does not show one, this is macOS's).
+                let (x, y, m) = (r.x, r.y, ESPRESSO);
+                match i {
+                    0 => {
+                        for k in 0..6 {
+                            p.fill_a(x + 3 + k, y + 3 + k, 1, 1, m, 0xB0);
+                            p.fill_a(x + 8 - k, y + 3 + k, 1, 1, m, 0xB0);
+                        }
+                    }
+                    1 => p.fill_a(x + 3, y + 5, 6, 2, m, 0xB0),
+                    _ => {
+                        p.fill_a(x + 3, y + 5, 6, 2, m, 0xB0);
+                        p.fill_a(x + 5, y + 3, 2, 2, m, 0xB0);
+                        p.fill_a(x + 5, y + 7, 2, 2, m, 0xB0);
+                    }
+                }
+            }
         }
         // Title: bold, centred, top at y8 inside the border.
         let tc = match (dark, focused) {

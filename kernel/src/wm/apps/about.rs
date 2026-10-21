@@ -6,7 +6,6 @@ use crate::{heap, pmm, timer};
 
 use super::super::icons;
 use super::super::paint::Painter;
-use super::super::shell::fmt_uptime;
 use super::super::theme::*;
 use super::super::window::WindowContents;
 
@@ -76,7 +75,15 @@ impl WindowContents for About {
         );
         bar(p, lx, 274, bw, hs.used * 100 / hs.total.max(1), BLUE);
         p.text(lx, 296, "Uptime", ESPRESSO);
-        p.text_right(w - lx, 296, &fmt_uptime(timer::now_ns()), COCOA, 1, false);
+        let up = timer::now_ns() / 1_000_000_000;
+        p.text_right(
+            w - lx,
+            296,
+            &format!("{}:{:02}:{:02}", up / 3600, up / 60 % 60, up % 60),
+            COCOA,
+            1,
+            false,
+        );
         p.text(lx, 316, "Frame", ESPRESSO);
         let drag = if st.drag_frames > 0 {
             format!("   drag {} us", st.drag_avg_us)

@@ -31,6 +31,8 @@ pub enum PanelKey {
     Card(u8),
     Thumb(u8),
     Cell(u32),
+    /// The dock's hover name.
+    Tip,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -105,6 +107,7 @@ enum DockAction {
 }
 
 struct DockItem {
+    name: &'static str,
     icon: Icon,
     bg: Color,
     fg: Color,
@@ -113,48 +116,56 @@ struct DockItem {
 
 const DOCK: [DockItem; 8] = [
     DockItem {
+        name: "Files",
         icon: Icon::Folder,
         bg: HONEY,
         fg: ESPRESSO,
         action: DockAction::App(App::Files),
     },
     DockItem {
+        name: "Terminal",
         icon: Icon::Term,
         bg: ESPRESSO,
         fg: CREAM,
         action: DockAction::App(App::Terminal),
     },
     DockItem {
+        name: "Web",
         icon: Icon::Globe,
         bg: BLUE,
         fg: ESPRESSO,
         action: DockAction::Soon("Web"),
     },
     DockItem {
+        name: "Notes",
         icon: Icon::Note,
         bg: MILK,
         fg: ESPRESSO,
         action: DockAction::App(App::Notes),
     },
     DockItem {
+        name: "Music",
         icon: Icon::Music,
         bg: STRAW,
         fg: ESPRESSO,
         action: DockAction::Soon("Music"),
     },
     DockItem {
+        name: "Spaces",
         icon: Icon::Spaces,
         bg: MILK,
         fg: ESPRESSO,
         action: DockAction::Spaces,
     },
     DockItem {
+        name: "Today",
         icon: Icon::Cal,
         bg: MILK,
         fg: ESPRESSO,
         action: DockAction::Home,
     },
     DockItem {
+        name: "About milkOS",
         icon: Icon::Gear,
         bg: LATTE,
         fg: ESPRESSO,
@@ -171,6 +182,13 @@ pub fn dock_rect() -> Rect {
         w,
         DOCK_H,
     )
+}
+
+/// Which dock icon is at `lx` pixels from the dock's left edge.
+pub fn dock_index(lx: i32) -> Option<usize> {
+    let i = (lx - DOCK_PAD) / (DOCK_ICON + DOCK_GAP);
+    let within = (lx - DOCK_PAD) % (DOCK_ICON + DOCK_GAP) < DOCK_ICON;
+    (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
 }
 
 /// Centre x of dock icon `i` on screen (for scripts).
@@ -492,6 +510,14 @@ impl Desktop {
                 });
             }
         }
+        if let Some(i) = self.tip
+            && self.launcher.is_none()
+        {
+            let (cx, _) = dock_icon_center(i);
+            let w = font::str_width(DOCK[i].name, 1) + 24;
+            let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
+            v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
+        }
         for (i, t) in self.toasts.iter().enumerate() {
             let r = Rect::new(
                 SCREEN_W - TOAST_RIGHT - TOAST_W,
@@ -561,7 +587,7 @@ impl Desktop {
 
     // ---- painting -------------------------------------------------------------------------
 
-    pub(super) fn paint_panel(&self, key: PanelKey, p: &mut Painter, w: i32, h: i32) {
+    pub(super) fn paint_panel(&self, key: PanelKey, p: &mut Painter, w: i32, h: i32, solid: bool) {
         match key {
             PanelKey::MenuBar => self.paint_menubar(p, w),
             PanelKey::Dock => self.paint_dock(p),
@@ -572,7 +598,12 @@ impl Desktop {
                     p.text(64, 32, &t.sub, COCOA);
                 }
             }
-            PanelKey::Control => self.paint_control(p),
+            PanelKey::Control => self.paint_control(p, solid),
+            PanelKey::Tip => {
+                if let Some(i) = self.tip {
+                    p.text_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
+                }
+            }
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
             PanelKey::LaunchResults => self.paint_launch_results(p, w),
             PanelKey::Card(i) => self.paint_card(i, p, w, h),
@@ -643,13 +674,15 @@ impl Desktop {
         }
     }
 
-    fn paint_control(&self, p: &mut Painter) {
+    fn paint_control(&self, p: &mut Painter, solid: bool) {
         let s = &self.settings;
+        // Tiles are milk at 0.7 over glass; over plain milk (solid mode) use oat so they show.
+        let (tbg, ta) = if solid { (OAT, 255) } else { (MILK, a(700)) };
         let tile = |p: &mut Painter, tx: i32, label: &str, sub: &str, on: bool| {
             if on {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, STRAW, 255);
             } else {
-                p.rrect(tx, 16, 124, CC_TILE_H, 16, MILK, a(700));
+                p.rrect(tx, 16, 124, CC_TILE_H, 16, tbg, ta);
             }
             let (c1, c2) = if on { (MILK, MILK) } else { (ESPRESSO, COCOA) };
             p.bold(tx + 14, 26, label, c1);
@@ -668,7 +701,7 @@ impl Desktop {
             .enumerate()
         {
             let sy = SLIDER_Y[i];
-            p.rrect(16, sy, CC_W - 32, CC_TILE_H, 16, MILK, a(700));
+            p.rrect(16, sy, CC_W - 32, CC_TILE_H, 16, tbg, ta);
             p.bold(30, sy + 8, label, ESPRESSO);
             p.rrect(TRACK_X, sy + 36, TRACK_W, CC_SLIDER_H, 4, COCOA, 0x40);
             p.rrect(
@@ -934,13 +967,11 @@ impl Desktop {
                 }
             }
             PanelKey::Dock => {
-                let i = (x - DOCK_PAD) / (DOCK_ICON + DOCK_GAP);
-                let within = (x - DOCK_PAD) % (DOCK_ICON + DOCK_GAP) < DOCK_ICON;
-                if x < DOCK_PAD || !within || i as usize >= DOCK.len() {
+                let Some(i) = dock_index(x) else {
                     return;
-                }
+                };
                 self.control = false;
-                match DOCK[i as usize].action {
+                match DOCK[i].action {
                     DockAction::App(a) => self.open(a),
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
@@ -1000,6 +1031,7 @@ impl Desktop {
             PanelKey::Cell(id) => {
                 self.drag = Some(Drag::Cell { id });
             }
+            PanelKey::Tip => {}
         }
     }
 

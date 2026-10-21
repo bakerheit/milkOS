@@ -216,6 +216,10 @@ pub struct Desktop {
     thumbs: BTreeMap<u32, Buffer>,
     pointer: (i32, i32),
     drag: Option<Drag>,
+    /// Window whose traffic lights the pointer is over.
+    hover_lights: Option<u32>,
+    /// Dock item under the pointer (its name shows above it).
+    tip: Option<usize>,
     damage: DirtyList<32>,
     pub stats: Stats,
     status: String,
@@ -267,6 +271,8 @@ impl Desktop {
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
             drag: None,
+            hover_lights: None,
+            tip: None,
             damage: DirtyList::new(),
             stats: Stats::default(),
             status: String::new(),
@@ -602,7 +608,7 @@ impl Desktop {
                 Style::Bar => p.fill_a(0, r.h - 1, r.w, 1, WHITE, GLASS_BORDER_A),
                 Style::Opaque => {}
             }
-            self.paint_panel(spec.key, &mut p, r.w, r.h);
+            self.paint_panel(spec.key, &mut p, r.w, r.h, solid);
         }
         Some(buf)
     }
@@ -1025,7 +1031,34 @@ impl Desktop {
             }
             Some(Drag::Content { id }) => self.send_pointer(id, x, y, PointerKind::Drag),
             Some(Drag::Slider(i)) => self.slider_to(i, x),
-            _ => {}
+            Some(_) => {}
+            None => self.hover(x, y),
+        }
+    }
+
+    /// Hover feedback: traffic-light symbols and the dock's name tips.
+    fn hover(&mut self, x: i32, y: i32) {
+        let hl = self.window_at(x, y).filter(|&id| {
+            self.win(id)
+                .is_some_and(|w| matches!(w.hit(x, y), Some(Part::Light(_))))
+        });
+        if hl != self.hover_lights {
+            for id in [self.hover_lights, hl].into_iter().flatten() {
+                if let Some(w) = self.win_mut(id) {
+                    w.hover = Some(id) == hl;
+                    w.dirty = true;
+                }
+            }
+            self.hover_lights = hl;
+        }
+        let tip = if self.mode != Mode::Spaces && hit(&shell::dock_rect(), x, y) {
+            shell::dock_index(x - shell::dock_rect().x)
+        } else {
+            None
+        };
+        if tip != self.tip {
+            self.tip = tip;
+            self.invalidate(PanelKey::Tip);
         }
     }
 

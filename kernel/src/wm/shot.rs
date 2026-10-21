@@ -102,7 +102,7 @@ impl Desktop {
 
     /// Take the picture of `region` (None: the whole screen) and save it in the background.
     pub(super) fn capture(&mut self, region: Option<Rect>) {
-        let full = Rect::new(0, 0, SCREEN_W, SCREEN_H);
+        let full = Rect::new(0, 0, screen_w(), screen_h());
         let r = region.map_or(full, |r| super::paint::intersect(&r, &full));
         if r.w <= 0 || r.h <= 0 {
             return;
@@ -153,10 +153,10 @@ pub(super) fn draw(s: &Select, p: &mut Painter, d: Rect) {
     };
     // Dim around the selection (four bands).
     let bands = [
-        Rect::new(0, 0, SCREEN_W, r.y),
-        Rect::new(0, r.y + r.h, SCREEN_W, SCREEN_H - r.y - r.h),
+        Rect::new(0, 0, screen_w(), r.y),
+        Rect::new(0, r.y + r.h, screen_w(), screen_h() - r.y - r.h),
         Rect::new(0, r.y, r.x, r.h),
-        Rect::new(r.x + r.w, r.y, SCREEN_W - r.x - r.w, r.h),
+        Rect::new(r.x + r.w, r.y, screen_w() - r.x - r.w, r.h),
     ];
     for b in bands {
         let c = super::paint::intersect(&b, &d);
@@ -173,7 +173,7 @@ pub(super) fn draw(s: &Select, p: &mut Painter, d: Rect) {
     let lw = crate::font::str_width(&label, 1) + 12;
     let (lx, ly) = (
         (r.x + r.w - lw).max(0),
-        if r.y + r.h + 26 < SCREEN_H {
+        if r.y + r.h + 26 < screen_h() {
             r.y + r.h + 6
         } else {
             r.y - 24

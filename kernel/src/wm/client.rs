@@ -381,7 +381,7 @@ fn button(b: Button) -> i32 {
 
 /// Where a new client window goes: cascaded from the top left of the work area.
 pub fn place(n: i32, w: i32, h: i32) -> Rect {
-    let x = (160 + n * 32).min(SCREEN_W - w).max(0);
-    let y = (80 + n * 32).min(SCREEN_H - h).max(MENU_H);
+    let x = (160 + n * 32).min(screen_w() - w).max(0);
+    let y = (80 + n * 32).min(screen_h() - h).max(MENU_H);
     Rect::new(x, y, w, h)
 }

@@ -225,8 +225,8 @@ pub fn dock_rect() -> Rect {
     let n = dock_len() as i32;
     let w = 2 * DOCK_PAD + n * dock_icon() + (n - 1) * DOCK_GAP;
     Rect::new(
-        (SCREEN_W - w) / 2,
-        SCREEN_H - DOCK_BOTTOM - dock_h(),
+        (screen_w() - w) / 2,
+        screen_h() - DOCK_BOTTOM - dock_h(),
         w,
         dock_h(),
     )
@@ -263,7 +263,7 @@ impl Desktop {
                     dock_icon(),
                 )
             }
-            None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
+            None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
         }
     }
 }
@@ -493,7 +493,7 @@ impl Launcher {
 }
 
 fn launcher_x() -> i32 {
-    (SCREEN_W - LAUNCH_W) / 2
+    (screen_w() - LAUNCH_W) / 2
 }
 
 fn results_height(l: &Launcher) -> i32 {
@@ -504,7 +504,7 @@ fn results_height(l: &Launcher) -> i32 {
 // ---- control centre -----------------------------------------------------------------------
 
 pub fn control_rect() -> Rect {
-    Rect::new(SCREEN_W - CC_RIGHT - CC_W, CC_TOP, CC_W, CC_H)
+    Rect::new(screen_w() - CC_RIGHT - CC_W, CC_TOP, CC_W, CC_H)
 }
 
 const SLIDER_Y: [i32; 2] = [88, 160];
@@ -517,7 +517,7 @@ fn card_rect(i: u8) -> Rect {
     let y1 = 56 + 96 + CARD_GAP;
     let y2 = y1 + 228 + CARD_GAP;
     match i {
-        0 => Rect::new(CARD_MARGIN, 56, SCREEN_W - 2 * CARD_MARGIN, 96),
+        0 => Rect::new(CARD_MARGIN, 56, screen_w() - 2 * CARD_MARGIN, 96),
         1..=3 => Rect::new(
             CARD_MARGIN + (i as i32 - 1) * (296 + CARD_GAP),
             y1,
@@ -550,7 +550,7 @@ pub fn cell_size(w: i32, h: i32) -> (i32, i32) {
 
 fn thumb_rect(i: usize, n: usize) -> Rect {
     let total = n as i32 * THUMB_W + (n as i32 - 1) * THUMB_GAP;
-    let sx = (SCREEN_W - total) / 2;
+    let sx = (screen_w() - total) / 2;
     Rect::new(
         sx + i as i32 * (THUMB_W + THUMB_GAP),
         SPACES_STRIP_Y,
@@ -599,7 +599,7 @@ impl Desktop {
         let mut v = Vec::new();
         let bar = spec(
             PanelKey::MenuBar,
-            Rect::new(0, 0, SCREEN_W, MENU_H),
+            Rect::new(0, 0, screen_w(), MENU_H),
             0,
             Style::Bar,
             false,
@@ -659,7 +659,7 @@ impl Desktop {
                 v.push(Layer::Label {
                     x: 0,
                     y: 722,
-                    w: SCREEN_W,
+                    w: screen_w(),
                     text: String::from(
                         "Click a window to focus   Drag it to another space   Esc to leave",
                     ),
@@ -678,7 +678,7 @@ impl Desktop {
         }
         for (i, t) in self.toasts.iter().enumerate() {
             let r = Rect::new(
-                SCREEN_W - TOAST_RIGHT - TOAST_W,
+                screen_w() - TOAST_RIGHT - TOAST_W,
                 TOAST_TOP + i as i32 * (TOAST_H + 8),
                 TOAST_W,
                 TOAST_H,
@@ -1151,10 +1151,10 @@ impl Desktop {
         for win in self.windows.iter().filter(|x| x.space == i && !x.minimized) {
             let r = win.rect;
             let rr = Rect::new(
-                4 + r.x * aw / SCREEN_W,
-                4 + (r.y - MENU_H).max(0) * ah / (SCREEN_H - MENU_H),
-                (r.w * aw / SCREEN_W).max(4),
-                (r.h * ah / (SCREEN_H - MENU_H)).max(4),
+                4 + r.x * aw / screen_w(),
+                4 + (r.y - MENU_H).max(0) * ah / (screen_h() - MENU_H),
+                (r.w * aw / screen_w()).max(4),
+                (r.h * ah / (screen_h() - MENU_H)).max(4),
             );
             match self.thumbs.get(&win.id) {
                 Some(t) => p.blit_scaled(rr, t),
@@ -1178,7 +1178,7 @@ impl Desktop {
                     let m = if self.menu == Some(0) { None } else { Some(0) };
                     self.control = false;
                     self.set_menu(m);
-                } else if x >= SCREEN_W - MENU_PAD_X - sw - 8 {
+                } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
                     self.set_menu(None);
                     self.control = !self.control;
                 } else if let Some(t) = self.menu_title_at(x) {

@@ -35,6 +35,7 @@ mod power;
 pub mod powerbox;
 pub mod prefs;
 mod rtc;
+mod screen;
 mod script;
 mod shell;
 mod shot;
@@ -172,6 +173,11 @@ pub fn run() {
         "wm: desktop up in {} ms (wallpaper + blur + first frame + fade)",
         (timer::now_ns() - t0) / 1_000_000
     );
+    // A display mode saved in Settings.
+    let res = prefs::get().resolution;
+    if res != (theme::screen_w(), theme::screen_h()) {
+        d.set_resolution(res.0, res.1);
+    }
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
@@ -321,7 +327,7 @@ pub struct Desktop {
 impl Desktop {
     fn new(fb: Surface<'static>) -> Result<Desktop, Surface<'static>> {
         rtc::init();
-        let Some(back) = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0) else {
+        let Some(back) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
             return Err(fb);
         };
         let t = timer::now_ns();
@@ -419,8 +425,8 @@ impl Desktop {
 
     /// Cross-fade from whatever is on screen (the boot splash) to the composed desktop.
     fn fade_in(&mut self) {
-        let n = (SCREEN_W * SCREEN_H) as usize;
-        let splash: Option<Buffer> = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0);
+        let n = (screen_w() * screen_h()) as usize;
+        let splash: Option<Buffer> = Buffer::new(screen_w() as usize, screen_h() as usize, 0);
         if let Some(mut sp) = splash {
             sp.pixels_mut()[..n].copy_from_slice(&self.fb.pixels()[..n]);
             const STEPS: u32 = 12;
@@ -440,14 +446,14 @@ impl Desktop {
     // ---- damage -------------------------------------------------------------------------------
 
     fn damage(&mut self, r: Rect) {
-        let r = r.clipped(SCREEN_W as usize, SCREEN_H as usize);
+        let r = r.clipped(screen_w() as usize, screen_h() as usize);
         if !r.is_empty() {
             self.damage.add(r);
         }
     }
 
     fn damage_all(&mut self) {
-        self.damage(Rect::new(0, 0, SCREEN_W, SCREEN_H));
+        self.damage(Rect::new(0, 0, screen_w(), screen_h()));
     }
 
     fn cursor_rect(&self) -> Rect {
@@ -662,6 +668,14 @@ impl Desktop {
         if p.dock != old.dock {
             theme::set_dock_icon(p.dock);
         }
+        if p.resolution != (theme::screen_w(), theme::screen_h())
+            && !self.set_resolution(p.resolution.0, p.resolution.1)
+        {
+            self.post_toast(
+                "Can't switch the display",
+                "not enough memory for that size",
+            );
+        }
         self.settings.brightness = p.brightness;
         // Everything may look different: redraw every window and panel.
         for w in &mut self.windows {
@@ -817,8 +831,8 @@ impl Desktop {
 
     /// The area between the menu bar and the dock.
     fn work_area() -> Rect {
-        let dock_top = SCREEN_H - DOCK_BOTTOM - dock_h();
-        Rect::new(0, MENU_H, SCREEN_W, dock_top - MENU_H)
+        let dock_top = screen_h() - DOCK_BOTTOM - dock_h();
+        Rect::new(0, MENU_H, screen_w(), dock_top - MENU_H)
     }
 
     fn zoom(&mut self, id: u32) {
@@ -843,8 +857,8 @@ impl Desktop {
         let old = w.bounds();
         let (ww, _) = (w.rect.w, w.rect.h);
         // Keep the title bar reachable.
-        let x = x.clamp(80 - ww, SCREEN_W - 80);
-        let y = y.clamp(MENU_H, SCREEN_H - TITLE_H - 8);
+        let x = x.clamp(80 - ww, screen_w() - 80);
+        let y = y.clamp(MENU_H, screen_h() - TITLE_H - 8);
         let w = self.win_mut(id).unwrap();
         if (w.rect.x, w.rect.y) == (x, y) {
             return;
@@ -861,8 +875,8 @@ impl Desktop {
             return;
         };
         let r = w.rect;
-        let nw = nw.clamp(WIN_MIN_W, SCREEN_W - r.x.max(0));
-        let nh = nh.clamp(WIN_MIN_H, SCREEN_H - r.y);
+        let nw = nw.clamp(WIN_MIN_W, screen_w() - r.x.max(0));
+        let nh = nh.clamp(WIN_MIN_H, screen_h() - r.y);
         if (nw, nh) == (r.w, r.h) {
             return;
         }
@@ -1448,7 +1462,7 @@ impl Desktop {
         if self.shot.is_some() {
             match ev {
                 Event::PointerMove { x, y } => {
-                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
                     self.damage(self.cursor_rect());
                     self.pointer = (x, y);
                     self.damage(self.cursor_rect());
@@ -1477,7 +1491,7 @@ impl Desktop {
         if self.locked() {
             match ev {
                 Event::PointerMove { x, y } => {
-                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
                     self.damage(self.cursor_rect());
                     self.pointer = (x, y);
                     self.damage(self.cursor_rect());
@@ -1540,7 +1554,7 @@ impl Desktop {
     }
 
     fn pointer_move(&mut self, x: i32, y: i32) {
-        let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+        let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
         if (x, y) == self.pointer {
             return;
         }

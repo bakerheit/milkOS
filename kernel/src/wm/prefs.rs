@@ -27,6 +27,8 @@ pub struct Prefs {
     pub sound: bool,
     /// Lock the screen after this many minutes without input; 0 = never.
     pub lock_mins: u32,
+    /// Display mode (one of `screen::MODES`).
+    pub resolution: (i32, i32),
 }
 
 impl Prefs {
@@ -37,6 +39,7 @@ impl Prefs {
         dock: 48,
         sound: true,
         lock_mins: 0,
+        resolution: (1024, 768),
     };
 
     /// The idle times Settings offers (minutes; 0 = never).
@@ -50,7 +53,7 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
@@ -59,7 +62,9 @@ impl Prefs {
             match self.lock_mins {
                 0 => String::from("never"),
                 m => format!("{m}"),
-            }
+            },
+            self.resolution.0,
+            self.resolution.1
         )
     }
 
@@ -75,6 +80,14 @@ impl Prefs {
                 "wallpaper" => p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v),
                 "sound" => p.sound = v != "off",
                 "lock" => p.lock_mins = v.parse().unwrap_or(0).min(24 * 60),
+                "resolution" => {
+                    if let Some((w, h)) = v.split_once('x')
+                        && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
+                        && super::screen::MODES.contains(&(w, h))
+                    {
+                        p.resolution = (w, h);
+                    }
+                }
                 "brightness" => p.brightness = v.parse().unwrap_or(100).clamp(20, 100),
                 "dock" => {
                     p.dock = match v.parse().unwrap_or(48) {

@@ -3,7 +3,7 @@
 //! the pre-blurred copies glass panels sample (SPEC: Glass), tinted with the theme's milk.
 //! Integer maths only (the target is soft-float).
 
-use crate::gfx::{Color, DrawTarget, blend, rgb};
+use crate::gfx::{Color, DrawTarget, Rect, blend, rgb};
 
 use super::buffer::Buffer;
 use super::paint::Painter;
@@ -57,7 +57,7 @@ pub fn paint(b: &mut Buffer, kind: Kind) {
 impl Wallpaper {
     /// Wallpaper `kind`, with glass tinted for the current theme (`theme::tc(MILK)`).
     pub fn new(kind: Kind) -> Option<Wallpaper> {
-        let (w, h) = (SCREEN_W as usize, SCREEN_H as usize);
+        let (w, h) = (screen_w() as usize, screen_h() as usize);
         let mut sharp = Buffer::new(w, h, 0)?;
         paint(&mut sharp, kind);
         let mut glass = Buffer::new(w, h, 0)?;
@@ -143,6 +143,47 @@ fn css_circle(b: &mut Buffer, x: i64, y: i64, d: i64, c: Color, alpha: u8) {
     disc(b, 16 * x + 8 * d, 16 * y + 8 * d, 8 * d, c, alpha);
 }
 
+/// The scenes are designed at 1024x768 (SPEC). Other display modes scale them uniformly by
+/// the width; the sky keeps its distance from the top, the hills (and the cow) from the
+/// bottom. At 1024x768 every mapping is the identity.
+#[derive(Clone, Copy)]
+struct Fit {
+    w: i64,
+    h: i64,
+}
+
+impl Fit {
+    fn of(b: &Buffer) -> Fit {
+        Fit {
+            w: b.w() as i64,
+            h: b.h() as i64,
+        }
+    }
+    /// A length (or x).
+    fn d(self, v: i64) -> i64 {
+        v * self.w / 1024
+    }
+    /// A y measured from the top.
+    fn top(self, y: i64) -> i64 {
+        self.d(y)
+    }
+    /// A y measured from the bottom.
+    fn bot(self, y: i64) -> i64 {
+        self.h - self.d(768 - y)
+    }
+    /// A circle anchored to the top / the bottom.
+    fn sky(self, b: &mut Buffer, x: i64, y: i64, d: i64, c: Color, alpha: u8) {
+        css_circle(b, self.d(x), self.top(y), self.d(d), c, alpha);
+    }
+    fn hill(self, b: &mut Buffer, x: i64, y: i64, d: i64, c: Color, alpha: u8) {
+        css_circle(b, self.d(x), self.bot(y), self.d(d), c, alpha);
+    }
+    /// How far the cow (drawn at its 1024x768 spot, (842, 636)) moves.
+    fn cow(self) -> (i32, i32) {
+        ((self.d(842) - 842) as i32, (self.bot(636) - 636) as i32)
+    }
+}
+
 fn draw(b: &mut Buffer) {
     // Vertical gradient #FBE3C8 0% -> #F3C3B8 52% -> #C9B3D9 100%.
     let (top, mid, bot) = (
@@ -161,13 +202,17 @@ fn draw(b: &mut Buffer) {
         b.fill_rect(0, y as i32, b.w(), 1, c);
     }
     // Sun halo, sun, three hills.
-    css_circle(b, 700, 40, 240, MILK, a(280));
-    css_circle(b, 740, 80, 160, HONEY, 255);
-    css_circle(b, -120, 500, 1040, rgb(0xCF, 0xE0, 0xC4), 255);
-    css_circle(b, 380, 590, 1100, rgb(0xB9, 0xD3, 0xB0), 255);
-    css_circle(b, 760, 650, 700, rgb(0xA5, 0xC7, 0x9F), 255);
+    let f = Fit::of(b);
+    f.sky(b, 700, 40, 240, MILK, a(280));
+    f.sky(b, 740, 80, 160, HONEY, 255);
+    f.hill(b, -120, 500, 1040, rgb(0xCF, 0xE0, 0xC4), 255);
+    f.hill(b, 380, 590, 1100, rgb(0xB9, 0xD3, 0xB0), 255);
+    f.hill(b, 760, 650, 700, rgb(0xA5, 0xC7, 0x9F), 255);
     // The tiny cow.
+    let (cx, cy) = f.cow();
+    let (bw, bh) = (b.w(), b.h());
     let mut p = Painter::raw(b);
+    let mut p = p.sub(Rect::new(cx, cy, bw, bh));
     p.rrect(842, 636, 56, 30, 8, MILK, 255);
     p.rrect(852, 642, 14, 10, 4, ESPRESSO, 255);
     p.rrect(874, 650, 12, 8, 4, ESPRESSO, 255);
@@ -204,26 +249,30 @@ fn draw_night(b: &mut Buffer) {
         seed ^= seed << 5;
         seed
     };
+    let f = Fit::of(b);
     for i in 0..140 {
-        let x = (next() % SCREEN_W as u32) as i64;
-        let y = (next() % 470) as i64;
+        let x = (next() % screen_w() as u32) as i64;
+        let y = f.top((next() % 470) as i64);
         let a = (60 + next() % 180) as u8;
         let big = i % 11 == 0;
         let r16 = if big { 20 } else { 9 };
         disc(b, 16 * x + 8, 16 * y + 8, r16, rgb(0xFF, 0xF6, 0xE4), a);
     }
     // Moon and halo where the sun is in the day.
-    css_circle(b, 720, 60, 200, rgb(0xFF, 0xF3, 0xDA), a(90));
-    css_circle(b, 760, 100, 120, rgb(0xF5, 0xEC, 0xD6), 255);
-    css_circle(b, 790, 110, 30, rgb(0xE4, 0xD9, 0xC0), 255); // craters
-    css_circle(b, 812, 160, 22, rgb(0xE4, 0xD9, 0xC0), 255);
-    css_circle(b, 770, 150, 14, rgb(0xE8, 0xDE, 0xC6), 255);
+    f.sky(b, 720, 60, 200, rgb(0xFF, 0xF3, 0xDA), a(90));
+    f.sky(b, 760, 100, 120, rgb(0xF5, 0xEC, 0xD6), 255);
+    f.sky(b, 790, 110, 30, rgb(0xE4, 0xD9, 0xC0), 255); // craters
+    f.sky(b, 812, 160, 22, rgb(0xE4, 0xD9, 0xC0), 255);
+    f.sky(b, 770, 150, 14, rgb(0xE8, 0xDE, 0xC6), 255);
     // Hills, night greens.
-    css_circle(b, -120, 500, 1040, rgb(0x3F, 0x55, 0x45), 255);
-    css_circle(b, 380, 590, 1100, rgb(0x35, 0x4B, 0x3C), 255);
-    css_circle(b, 760, 650, 700, rgb(0x2C, 0x41, 0x34), 255);
+    f.hill(b, -120, 500, 1040, rgb(0x3F, 0x55, 0x45), 255);
+    f.hill(b, 380, 590, 1100, rgb(0x35, 0x4B, 0x3C), 255);
+    f.hill(b, 760, 650, 700, rgb(0x2C, 0x41, 0x34), 255);
     // The cow, lying down asleep: body on the grass, legs tucked, head resting, eyes shut.
+    let (cx, cy) = f.cow();
+    let (bw, bh) = (b.w(), b.h());
     let mut p = Painter::raw(b);
+    let mut p = p.sub(Rect::new(cx, cy, bw, bh));
     let cow = rgb(0xE9, 0xE2, 0xD6);
     let spot = rgb(0x2A, 0x22, 0x1E);
     p.rrect(842, 650, 56, 26, 10, cow, 255);
@@ -248,7 +297,8 @@ fn draw_oat(b: &mut Buffer) {
     for y in 0..h {
         b.fill_rect(0, y as i32, b.w(), 1, lerp(top, bot, y, h));
     }
-    css_circle(b, 620, -220, 760, MILK, a(350));
+    let f = Fit::of(b);
+    f.sky(b, 620, -220, 760, MILK, a(350));
 }
 
 /// One box-blur pass of radius `r` along a line of `n` pixels (`get`/`set` by index), edges

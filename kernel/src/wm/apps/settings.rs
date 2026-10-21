@@ -53,6 +53,7 @@ enum Hit {
     TestSound,
     LockAfter(u32),
     LockNow,
+    Resolution(i32, i32),
 }
 
 pub struct Settings {
@@ -105,7 +106,7 @@ impl Settings {
         if !self.thumbs.is_empty() {
             return;
         }
-        let Some(mut full) = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0) else {
+        let Some(mut full) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
             return;
         };
         for k in Kind::ALL {
@@ -206,8 +207,16 @@ impl Settings {
         p.circle(t.x + t.w * v / 100 - 8, t.y - 4, 16, MILK, 255);
         p.ring(t.x + t.w * v / 100 - 8, t.y - 4, 16, 1, SAND, 255);
         self.hits.push((grow_h(r, 0), Hit::Brightness));
+        // Resolution: switched live, kept in settings.
+        let ry = r.y + r.h + 24;
+        p.text_p(x, ry, "Resolution", ESPRESSO, true);
+        for (i, &(rw, rh)) in super::super::screen::MODES.iter().enumerate() {
+            let b = Rect::new(x + i as i32 * 112, ry + 24, 104, 30);
+            let on = self.pending.resolution == (rw, rh);
+            self.button(p, b, &format!("{rw} x {rh}"), on, Hit::Resolution(rw, rh));
+        }
         // Lock screen: after how long without input, and a button to lock now.
-        let y = r.y + r.h + 28;
+        let y = ry + 24 + 30 + 26;
         p.text_p(x, y, "Lock the screen after", ESPRESSO, true);
         p.text_p(
             x,
@@ -590,6 +599,10 @@ impl WindowContents for Settings {
                 self.send(pr);
             }
             Hit::LockNow => request(Request::Lock),
+            Hit::Resolution(w, h) => {
+                pr.resolution = (w, h);
+                self.send(pr);
+            }
             Hit::TmInterval(iv) => {
                 let _ = fsx::ctl_write(AUTO, &format!("interval={iv}"));
                 self.read_tm();

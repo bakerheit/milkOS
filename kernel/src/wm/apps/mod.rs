@@ -40,7 +40,7 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
             Box::new(super::powerbox::Panel::new()),
         ),
         App::Settings => (
-            Rect::new(180, 80, 660, 420),
+            Rect::new(180, 80, 660, 468),
             Box::new(settings::Settings::new()),
         ),
         App::Client(id) => {

@@ -21,6 +21,8 @@ pub enum Step {
     Panic,
     /// Pretend nobody touched anything for this many seconds (the idle lock).
     Idle(u64),
+    /// Switch the display mode.
+    Resolution(i32, i32),
 }
 
 pub struct Script {
@@ -756,6 +758,47 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 }
             }
         }
+        // Display modes: Settings > Display & Lock > Resolution (buttons at body y 219).
+        "res1280" | "res1440" | "resback" | "res1440click" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            let i = if name == "res1280" { 1 } else { 2 };
+            b.click(181 + 188 + i * 112 + 52, 113 + 219).wait(1500);
+            if name == "res1440click" {
+                // The dock moved with the screen: Terminal's tile is now at (540, 856).
+                b.click(540, 856)
+                    .wait(600)
+                    .typ("echo clicked at 1440x900")
+                    .enter()
+                    .wait(500);
+            }
+            if name == "resback" {
+                // Settings stays where it was: 1024 x 768 is the first button.
+                b.click(181 + 188 + 52, 113 + 219).wait(1500);
+            }
+        }
+        // Overlays at 1440x900: Spaces, Today, Skim, the lock screen.
+        "big-spaces" | "big-today" | "big-skim" | "big-lock" => {
+            b.0.push(Step::Resolution(1440, 900));
+            b.wait(600);
+            match name {
+                "big-spaces" => b.key(Key::F(3), Mods::NONE),
+                "big-today" => b.key(Key::F(4), Mods::NONE),
+                "big-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("mo"),
+                _ => b.key(Key::Char('q'), Mods::META_CTRL),
+            };
+            b.wait(900);
+        }
+        "bench1280" | "bench1440" => {
+            let (w, h) = if name == "bench1280" {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
+            b.wait(800);
+            b.0.push(Step::Bench);
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }
@@ -767,13 +810,13 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // Settings > Display & Lock > 5 min.
             let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
-            b.click(181 + 188 + 2 * 82 + 38, 113 + 249).wait(400);
+            b.click(181 + 188 + 2 * 82 + 38, 113 + 325).wait(400);
         }
         "idlelock" => {
             // Settings > Display & Lock > 1 min, then a minute of (pretend) idleness.
             let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
-            b.click(181 + 188 + 82 + 38, 113 + 249).wait(300);
+            b.click(181 + 188 + 82 + 38, 113 + 325).wait(300);
             b.0.push(Step::Idle(61));
             b.wait(800);
         }
@@ -889,6 +932,9 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Idle(s) => d.pretend_idle(*s),
+                Step::Resolution(w, h) => {
+                    d.set_resolution(*w, *h);
+                }
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

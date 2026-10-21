@@ -189,7 +189,7 @@ impl Desktop {
         let x = titles.get(idx)?.0;
         let items = self.menu_items(idx);
         let r = Rect::new(
-            (x - 12).min(SCREEN_W - MENU_W - 8),
+            (x - 12).min(screen_w() - MENU_W - 8),
             MENU_H + 2,
             MENU_W,
             Self::menu_height(&items),

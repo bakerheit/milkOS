@@ -107,6 +107,11 @@ static INIT_NEXT: AtomicBool = AtomicBool::new(false);
 /// Kernel threads waiting for processes they started (ppid 0).
 static KERNEL_CHILD_WQ: WaitQueue = WaitQueue::new();
 
+/// Processes created since boot (fork + spawn), for /proc/stat.
+pub fn forks() -> u32 {
+    NEXT_PID.load(Ordering::Relaxed) - 1
+}
+
 /// Forget a reaped process: process table and /proc/<pid>.
 fn release(pid: Pid) {
     PROCS.lock().remove(&pid);

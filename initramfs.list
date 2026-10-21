@@ -16,6 +16,7 @@
 # Coreutils (user/coreutils/src/bin/*.rs), one small binary each.
 /bin/cat     target/user/aarch64-unknown-none-softfloat/release/cat     755
 /bin/chroot  target/user/aarch64-unknown-none-softfloat/release/chroot  755
+/bin/sandbox target/user/aarch64-unknown-none-softfloat/release/sandbox 755
 /bin/clear   target/user/aarch64-unknown-none-softfloat/release/clear   755
 /bin/cp      target/user/aarch64-unknown-none-softfloat/release/cp      755
 /bin/echo    target/user/aarch64-unknown-none-softfloat/release/echo    755

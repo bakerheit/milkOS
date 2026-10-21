@@ -8,6 +8,7 @@
 //!   utest par [N] [ms]  N processes computing in parallel vs 1: prints the speedup
 //!   utest threads 8 threads on a futex mutex, a condvar ping-pong, munmap under a thread
 //!   utest chroot  a child chroots into a subdir; "/" is remapped and ".." can't escape
+//!   utest sandbox a child drops caps; fs/net/spawn denials hit, grants still work
 //!   utest all     everything except par
 
 #![no_std]
@@ -714,6 +715,78 @@ fn t_chroot() -> bool {
     )
 }
 
+fn t_sandbox() -> bool {
+    let _ = sys::mkdir("/tmp/sb", 0o755);
+    {
+        let fd = sys::open_mode("/tmp/sb/ok", sys::O_WRONLY | sys::O_CREAT, 0o644).unwrap_or(-1);
+        if fd >= 0 {
+            let _ = sys::write_all(
+                fd, b"ok
+",
+            );
+            let _ = sys::close(fd);
+        }
+    }
+    let (r, w) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::close(r);
+        // Restrict: read-only under /tmp/sb, no network, no spawn.
+        sys::sandbox("fs=/tmp/sb:r net=none spawn=0").expect("sandbox");
+        let mut bits = 0u8;
+        // Granted read works.
+        if sys::read_file("/tmp/sb/ok")
+            .map(|d| {
+                d == b"ok
+"
+            })
+            .unwrap_or(false)
+        {
+            bits |= 1;
+        }
+        // Write under the read-only grant is denied.
+        if sys::open_mode("/tmp/sb/no", sys::O_WRONLY | sys::O_CREAT, 0o644).is_err() {
+            bits |= 2;
+        }
+        // Reading outside the grant is denied.
+        if sys::read_file("/etc/motd").is_err() {
+            bits |= 4;
+        }
+        // Opening a socket is denied (net=none).
+        if rt::net::socket(1).is_err() {
+            bits |= 8;
+        }
+        // fork is denied (spawn dropped).
+        match sys::fork() {
+            Ok(0) => sys::exit(0),
+            Ok(_) => {}
+            Err(_) => bits |= 16,
+        }
+        // Can't widen back: asking for full fs again stays denied.
+        let _ = sys::sandbox("net=all");
+        if sys::read_file("/etc/motd").is_err() {
+            bits |= 32;
+        }
+        let _ = sys::write(w, &[bits]);
+        sys::exit(bits as i32)
+    }
+    let _ = sys::close(w);
+    let mut b = [0u8; 1];
+    let _ = sys::read(r, &mut b);
+    let _ = sys::close(r);
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    // Our own caps are untouched: we can still read /etc/motd and open a socket.
+    let parent_ok = sys::read_file("/etc/motd").is_ok();
+    check(
+        "capability sandbox",
+        b[0] == 0b111111 && st == (0b111111 << 8) && parent_ok,
+        &alloc::format!(
+            "child checks {:#08b} (want 0b111111), parent unrestricted: {parent_ok}",
+            b[0]
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -733,6 +806,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "chroot" || what == "all" {
         ok &= t_chroot();
+    }
+    if what == "sandbox" || what == "all" {
+        ok &= t_sandbox();
     }
     if what == "threads" || what == "all" {
         ok &= t_threads();

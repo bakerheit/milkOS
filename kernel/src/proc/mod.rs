@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod asid;
+pub mod caps;
 pub mod elf;
 pub mod errno;
 pub mod fd;
@@ -109,6 +110,8 @@ pub struct Inner {
     pub group_exit: Option<i32>,
     /// Ever had more than one thread (so address-space teardown needs a TLB shootdown).
     pub ever_threaded: bool,
+    /// Capability set (sandbox); shared by the thread group, inherited, only shrinks.
+    pub caps: alloc::sync::Arc<caps::Caps>,
 }
 
 static PROCS: SpinLock<BTreeMap<Pid, Arc<Process>>> = SpinLock::new(BTreeMap::new());
@@ -141,6 +144,37 @@ fn current_root_dir() -> Option<InodeRef> {
         return None;
     }
     get(pid).and_then(|p| p.inner.lock().root_dir.clone())
+}
+
+/// Capability check for opening a device by path (audio / clipboard / windows). EACCES if
+/// the matching capability was dropped. No-op for non-device paths.
+pub fn dev_caps_check(path: &str) -> KResult<()> {
+    let caps = current().inner.lock().caps.clone();
+    let (cap, name) = match path {
+        "/dev/audio" | "/dev/dsp" => (caps.audio, "audio"),
+        "/dev/clipboard" => (caps.clipboard, "clipboard"),
+        "/dev/fb0" | "/dev/input" | "/dev/wm" => (caps.windows, "windows"),
+        _ => return Ok(()),
+    };
+    if cap {
+        Ok(())
+    } else {
+        Err(caps::deny(
+            "open",
+            &alloc::format!("dev={name} path={path}"),
+        ))
+    }
+}
+
+/// The calling thread's capability set.
+pub fn current_caps() -> alloc::sync::Arc<caps::Caps> {
+    current().inner.lock().caps.clone()
+}
+
+/// Replace the current process's capability set (sandbox: only ever shrinks, enforced by
+/// the caller computing the intersection).
+pub fn set_caps(c: caps::Caps) {
+    current().inner.lock().caps = alloc::sync::Arc::new(c);
 }
 
 /// chroot: make `dir` the calling process's root. The cwd is left as is (as on Linux).
@@ -204,6 +238,7 @@ struct Launch<'a> {
     argv: Vec<String>,
     exe: String,
     clear_child_tid: usize,
+    caps: alloc::sync::Arc<caps::Caps>,
 }
 
 /// Create a process and start its thread with `l.frame`.
@@ -237,6 +272,7 @@ fn start(l: Launch) -> KResult<Pid> {
             exe: l.exe,
             group_exit: None,
             ever_threaded: false,
+            caps: l.caps,
         }),
         child_wq: WaitQueue::new(),
     });
@@ -319,6 +355,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         argv,
         exe: String::from(path),
         clear_child_tid: 0,
+        caps: caps::Caps::all(),
     })
 }
 
@@ -346,6 +383,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         argv,
         exe: String::from(path),
         clear_child_tid: 0,
+        caps: caps::Caps::all(),
     })
 }
 
@@ -386,7 +424,7 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
 /// fork(), recording `clear_child_tid` for the child (CLONE_CHILD_CLEARTID).
 pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
     let parent = current();
-    let (space, fds, name, cwd, pgid, sid, sig, argv, exe, root_dir) = {
+    let (space, fds, name, cwd, pgid, sid, sig, argv, exe, root_dir, caps) = {
         let mut i = parent.inner.lock();
         let space = i.space.as_mut().ok_or(ESRCH)?.fork()?;
         (
@@ -400,6 +438,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
             i.argv.clone(),
             i.exe.clone(),
             i.root_dir.clone(),
+            i.caps.clone(),
         )
     };
     let mut cf = *frame;
@@ -415,6 +454,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
         fds,
         cwd,
         root_dir,
+        caps,
         frame: &cf,
         tpidr_el0: sched::current_tpidr_el0(),
         fp,

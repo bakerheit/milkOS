@@ -121,6 +121,7 @@ pub mod nr {
     pub const MUNMAP: usize = 215;
     pub const CLONE: usize = 220;
     pub const FUTEX: usize = 98;
+    pub const MILK_SANDBOX: usize = 0x1000;
     pub const EXECVE: usize = 221;
     pub const MMAP: usize = 222;
     pub const WAIT4: usize = 260;
@@ -530,6 +531,13 @@ pub fn getcwd() -> Result<String> {
     let mut b = [0u8; 512];
     let n = sc(nr::GETCWD, [b.as_mut_ptr() as usize, b.len(), 0, 0, 0, 0])?;
     Ok(String::from_utf8_lossy(&b[..n.saturating_sub(1)]).into_owned())
+}
+
+/// Shrink this process's capabilities from a spec string (see /bin/sandbox). Only ever
+/// drops capabilities; takes effect for this process and everything it execs/forks.
+pub fn sandbox(spec: &str) -> Result<()> {
+    let s = cs(spec);
+    sc(nr::MILK_SANDBOX, [s.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
 }
 
 pub fn chroot(path: &str) -> Result<()> {

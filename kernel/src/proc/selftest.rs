@@ -89,6 +89,7 @@ fn launch(name: &str, entry_off: usize, x0: u64, x1: u64) -> u32 {
         fds: FdTable::with_console().unwrap(),
         cwd: fs::root(),
         root_dir: None,
+        caps: super::caps::Caps::all(),
         frame: &f,
         tpidr_el0: 0,
         fp: Box::new(FpState::zeroed()),

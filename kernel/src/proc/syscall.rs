@@ -60,6 +60,8 @@ pub mod nr {
     pub const SET_TID_ADDRESS: u64 = 96;
     pub const FUTEX: u64 = 98;
     pub const SET_ROBUST_LIST: u64 = 99;
+    /// milkOS: shrink the caller's capability set from a text spec (sandbox launcher).
+    pub const MILK_SANDBOX: u64 = 0x1000;
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -443,6 +445,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         nr::CLONE => sys_clone(frame, a[0], a1),
         nr::EXECVE => {
             let path = user_path(a0)?;
+            check_fs(abi::AT_FDCWD as i64, &path, false, "execve")?;
             let (argv, envp) = {
                 let p = current();
                 let i = p.inner.lock();
@@ -468,6 +471,19 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             let n = f.read(&mut buf)?;
             copy_out(a0, &buf[..n])?;
             Ok(n)
+        }
+        nr::MILK_SANDBOX => {
+            let spec = with_space(|s| s.read_cstr(a0, 4096))?;
+            let cur = super::current_caps();
+            let shrunk = super::caps::shrink(&cur, &spec)?;
+            if shrunk.restricted() {
+                crate::audit::record(
+                    "sandbox.enter",
+                    &alloc::format!("spec={}", spec.replace(' ', ",")),
+                );
+            }
+            super::set_caps(shrunk);
+            Ok(0)
         }
         nr::MILK_WIN_CREATE => sys_win_create(a0, a1, a2, a3, a[4] as usize),
         nr::MILK_WIN_COMMIT => {
@@ -599,6 +615,37 @@ fn base(dirfd: i64) -> KResult<Option<InodeRef>> {
     } else {
         Ok(Some(file(dirfd)?.inode().clone()))
     }
+}
+
+/// Capability check for a filesystem path. Cheap no-op when the process's fs cap is
+/// unrestricted (the default); otherwise resolves `path` to an absolute path (relative to
+/// `dirfd`) and checks it against the grants, auditing a denial.
+fn check_fs(dirfd: i64, path: &str, write: bool, op: &str) -> KResult<()> {
+    let caps = super::current_caps();
+    if caps.fs.is_none() {
+        return Ok(());
+    }
+    let base_path = if path.starts_with('/') {
+        String::new()
+    } else if dirfd == abi::AT_FDCWD as i64 {
+        fs::path_of(&cwd()).unwrap_or_else(|_| String::from("/"))
+    } else {
+        fs::path_of(file(dirfd)?.inode()).unwrap_or_else(|_| String::from("/"))
+    };
+    let abs = super::caps::normalize(&base_path, path);
+    if caps.fs_ok(&abs, write) {
+        Ok(())
+    } else {
+        Err(super::caps::deny(
+            op,
+            &alloc::format!("path={abs} need={}", if write { "rw" } else { "r" }),
+        ))
+    }
+}
+
+fn open_needs_write(flags: u32) -> bool {
+    use abi::*;
+    flags & O_ACCMODE != O_RDONLY || flags & (O_CREAT | O_TRUNC) != 0
 }
 
 fn read_timespec(va: usize) -> KResult<u64> {
@@ -762,6 +809,8 @@ fn sys_readv(fd: i64, iov: usize, cnt: usize) -> KResult<usize> {
 
 fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> {
     let path = user_path(path)?;
+    check_fs(dirfd, &path, open_needs_write(flags), "openat")?;
+    super::dev_caps_check(&path)?;
     let base = base(dirfd)?;
     let f = Arc::new(fs::open_at(
         base.as_ref(),
@@ -968,6 +1017,10 @@ fn sys_clone(frame: &TrapFrame, flags: u64, newsp: usize) -> KResult<usize> {
             with_space(|s| s.copy_out(ctid, &(tid as i32).to_le_bytes()))?;
         }
         return Ok(tid as usize);
+    }
+    // fork(): needs the spawn capability.
+    if !super::current_caps().spawn {
+        return Err(super::caps::deny("fork", "spawn capability dropped"));
     }
     // Otherwise a fork(): only a plain child (optionally with an exit signal) is supported.
     if flags & !CSIGNAL != 0

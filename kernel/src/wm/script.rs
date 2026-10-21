@@ -345,6 +345,59 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // proc's userland test suite (fork / CoW, pipes, signals) from the desktop shell.
             b.wait(300).typ("utest").enter().wait(6000);
         }
+        "tm1" => {
+            // Settings > Time Machine > Back up now, close Settings, delete a file, then
+            // Files > Time Machine > newest snapshot.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+        }
+        "tm2" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+            b.click(297, 193).wait(300);
+        }
+        "timemachine" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+            b.click(297, 193).wait(300); // newest snapshot: its home folder
+            b.click(421, 145).wait(40).click(421, 145).wait(300); // Documents
+            b.click(421, 145).wait(200); // select todo.txt
+            b.click(593, 451).wait(300); // Restore
+            b.click(137, 181).wait(400); // live Documents: it's back
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

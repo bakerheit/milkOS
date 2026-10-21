@@ -8,7 +8,11 @@ use diskkit::snaps::{self, ChangeKind, SnapKind, interval_words};
 use gui::Color;
 
 const X0: i32 = SIDE + 24;
-const CW: i32 = W - SIDE - 48;
+
+/// The width of the main area.
+fn main_w(win: &Window) -> i32 {
+    win.w - SIDE - 48
+}
 const DIFF_ROW: u32 = 5000;
 
 fn card(win: &mut Window, th: &Theme, r: Rect, tint: Option<Color>) {
@@ -48,7 +52,7 @@ impl App {
             th.cocoa,
         );
         // The usage bar.
-        let bar = Rect::new(X0, BAR + 80, CW, 24);
+        let bar = Rect::new(X0, BAR + 80, main_w(win), 24);
         win.rrect(bar.x, bar.y, bar.w, bar.h, 12, th.oat);
         let used_w = (bar.w as i64 * info.used_pct10() as i64 / 1000) as i32;
         if used_w > 0 {
@@ -81,22 +85,22 @@ impl App {
                 String::from(last.split('T').next().unwrap_or(last)),
             ),
         ];
-        let cw = (CW - 3 * 12) / 4;
+        let card_w = (main_w(win) - 3 * 12) / 4;
         for (i, (k, v)) in facts.iter().enumerate() {
-            let r = Rect::new(X0 + i as i32 * (cw + 12), BAR + 142, cw, 64);
+            let r = Rect::new(X0 + i as i32 * (card_w + 12), BAR + 142, card_w, 64);
             card(win, &th, r, None);
             win.text(r.x + 14, r.y + 10, k, th.cocoa);
             bold_x(
                 win,
                 r.x + 14,
                 r.y + 34,
-                &widgets::fit(v, cw - 28),
+                &widgets::fit(v, card_w - 28),
                 th.espresso,
                 1,
             );
         }
         // The Time Machine card.
-        let tm = Rect::new(X0, BAR + 222, CW, 112);
+        let tm = Rect::new(X0, BAR + 222, main_w(win), 112);
         card(win, &th, tm, None);
         bold_x(win, tm.x + 16, tm.y + 12, "Time Machine", th.espresso, 1);
         match self.disk.auto.clone() {
@@ -162,7 +166,7 @@ impl App {
             .scrub
             .as_ref()
             .is_some_and(|s| !s.errors.is_empty());
-        let hc = Rect::new(X0, BAR + 350, CW, 56);
+        let hc = Rect::new(X0, BAR + 350, main_w(win), 56);
         widgets::bordered(
             win,
             hc,
@@ -220,7 +224,7 @@ impl App {
             );
             charts_bar(
                 win,
-                Rect::new(X0, y + 22, CW, 12),
+                Rect::new(X0, y + 22, main_w(win), 12),
                 (used * 1000 / diskkit::names::MAX_SNAPSHOTS) as u32,
                 th.honey,
                 th.oat,
@@ -243,8 +247,8 @@ impl App {
         let snaps = self.disk.snaps.clone();
         // Header and rows.
         let top = BAR + 12;
-        win.fill(X0, top, CW, 28, th.cream);
-        widgets::hline(win, X0, top + 27, CW, th.sand);
+        win.fill(X0, top, main_w(win), 28, th.cream);
+        widgets::hline(win, X0, top + 27, main_w(win), th.sand);
         for (x, l) in [
             (X0 + 12, "Name"),
             (X0 + 300, "Created"),
@@ -257,7 +261,7 @@ impl App {
         if snaps.is_empty() {
             text_c(
                 win,
-                X0 + CW / 2,
+                X0 + main_w(win) / 2,
                 top + 80,
                 "No snapshots yet. Take one to keep this moment.",
                 th.cocoa,
@@ -275,7 +279,7 @@ impl App {
             let y = top + 28 + (i - (self.scroll / 30) as usize) as i32 * 30;
             let sel = self.sel_snap.as_deref() == Some(s.name.as_str());
             if sel {
-                win.fill(X0, y, CW, 30, Theme::tint(th.milk, th.straw, 0x33));
+                win.fill(X0, y, main_w(win), 30, Theme::tint(th.milk, th.straw, 0x33));
             }
             win.text(X0 + 12, y + 7, &widgets::fit(&s.name, 306), th.espresso);
             win.text(X0 + 300, y + 7, &s.when(), th.espresso);
@@ -287,8 +291,9 @@ impl App {
             win.text(X0 + 460, y + 7, kind, th.espresso);
             let n = snaps::clones_of(&self.disk.clones, &s.name).len();
             win.text(X0 + 590, y + 7, &format!("{n}"), th.espresso);
-            widgets::hline(win, X0, y + 29, CW, th.sand);
-            self.hits.add(Rect::new(X0, y, CW, 30), SNAP_ROW + i as u32);
+            widgets::hline(win, X0, y + 29, main_w(win), th.sand);
+            self.hits
+                .add(Rect::new(X0, y, main_w(win), 30), SNAP_ROW + i as u32);
         }
         // The action bar.
         let by = top + 28 + rows_h + 10;
@@ -325,7 +330,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(X0 + CW - dw, by, dw, 24),
+            Rect::new(X0 + main_w(win) - dw, by, dw, 24),
             "Delete...",
             Kind::Secondary,
             B_DELETE,
@@ -355,7 +360,14 @@ impl App {
         // The diff.
         if let Some((head, d)) = self.diff.clone() {
             let dy = by + 70;
-            bold_x(win, X0, dy, &widgets::fit(&head, CW), th.espresso, 1);
+            bold_x(
+                win,
+                X0,
+                dy,
+                &widgets::fit(&head, main_w(win)),
+                th.espresso,
+                1,
+            );
             if d.changes.is_empty() {
                 win.text(X0, dy + 30, "No changes.", th.cocoa);
             }
@@ -363,7 +375,7 @@ impl App {
                 .changes
                 .iter()
                 .enumerate()
-                .take(((H - 24 - dy - 30) / 28).max(0) as usize)
+                .take(((win.h - 24 - dy - 30) / 28).max(0) as usize)
             {
                 let y = dy + 28 + i as i32 * 28;
                 let (letter, col) = match c.kind {
@@ -378,8 +390,14 @@ impl App {
                     Some(t) => format!("{} -> {}", c.path, t),
                     None => c.path.clone(),
                 };
-                win.text(X0 + 36, y + 3, &widgets::fit(&path, CW - 40), th.espresso);
-                self.hits.add(Rect::new(X0, y, CW, 24), DIFF_ROW + i as u32);
+                win.text(
+                    X0 + 36,
+                    y + 3,
+                    &widgets::fit(&path, main_w(win) - 40),
+                    th.espresso,
+                );
+                self.hits
+                    .add(Rect::new(X0, y, main_w(win), 24), DIFF_ROW + i as u32);
             }
         }
     }
@@ -389,10 +407,17 @@ impl App {
         let clones = self.disk.clones.clone();
         let label = self.volume_label();
         if clones.is_empty() {
-            text_c(win, X0 + CW / 2, BAR + 120, "No clones.", th.cocoa, 1);
             text_c(
                 win,
-                X0 + CW / 2,
+                X0 + main_w(win) / 2,
+                BAR + 120,
+                "No clones.",
+                th.cocoa,
+                1,
+            );
+            text_c(
+                win,
+                X0 + main_w(win) / 2,
                 BAR + 146,
                 "A clone is a writable copy of a snapshot. Try something in it, then keep or discard it.",
                 th.cocoa,
@@ -401,10 +426,10 @@ impl App {
         }
         for (i, c) in clones.iter().enumerate() {
             let y = BAR + 14 + i as i32 * 116;
-            if y + 100 > H - 30 {
+            if y + 100 > win.h - 30 {
                 break;
             }
-            let r = Rect::new(X0, y, CW, 104);
+            let r = Rect::new(X0, y, main_w(win), 104);
             card(win, &th, r, None);
             win.rrect(r.x + 14, r.y + 14, 40, 40, 10, th.lav);
             bold_x(win, r.x + 68, r.y + 12, &c.name, th.espresso, 1);
@@ -472,13 +497,13 @@ impl App {
         }
         win.text(
             X0,
-            H - 24 - 40,
+            win.h - 24 - 40,
             "Keep makes the clone live; the current state is kept as before-<name>.",
             th.cocoa,
         );
         win.text(
             X0,
-            H - 24 - 22,
+            win.h - 24 - 22,
             "Discard frees what the clone wrote. Neither can be undone.",
             th.cocoa,
         );
@@ -488,7 +513,7 @@ impl App {
         let th = self.th;
         let st = self.disk.scrub.clone().unwrap_or_else(|| scrub::parse(""));
         // The scrub card.
-        let sc = Rect::new(X0, BAR + 14, CW, 132);
+        let sc = Rect::new(X0, BAR + 14, main_w(win), 132);
         card(win, &th, sc, None);
         bold_x(win, sc.x + 16, sc.y + 12, "Scrub", th.espresso, 1);
         match &st.phase {
@@ -592,7 +617,7 @@ impl App {
             ) + 6;
         }
         // The schedule card.
-        let hc = Rect::new(X0, BAR + 158, CW, 86);
+        let hc = Rect::new(X0, BAR + 158, main_w(win), 86);
         card(win, &th, hc, None);
         bold_x(
             win,
@@ -640,7 +665,7 @@ impl App {
                 win.text(
                     X0,
                     y,
-                    &widgets::fit(&format!("block {}: {}", e.block, e.what), CW),
+                    &widgets::fit(&format!("block {}: {}", e.block, e.what), main_w(win)),
                     th.danger,
                 );
                 y += 20;
@@ -654,7 +679,7 @@ impl App {
             y += 30;
         }
         // The structure check card.
-        let cc = Rect::new(X0, y, CW, H - 24 - y - 10);
+        let cc = Rect::new(X0, y, main_w(win), win.h - 24 - y - 10);
         if cc.h > 60 {
             card(win, &th, cc, None);
             bold_x(win, cc.x + 16, cc.y + 12, "Structure check", th.espresso, 1);
@@ -710,7 +735,7 @@ impl App {
         let th = self.th;
         let info = self.disk.info.clone();
         let enc = info.as_ref().and_then(|i| i.encrypted);
-        let ec = Rect::new(X0, BAR + 14, CW, 126);
+        let ec = Rect::new(X0, BAR + 14, main_w(win), 126);
         let (head, tint) = match enc {
             Some(true) => ("Encrypted and unlocked", Some(th.matcha)),
             Some(false) => ("Not encrypted", None),
@@ -782,7 +807,7 @@ impl App {
             th.cocoa,
         );
         // The recovery key card.
-        let rc = Rect::new(X0, BAR + 152, CW, 64);
+        let rc = Rect::new(X0, BAR + 152, main_w(win), 64);
         card(win, &th, rc, None);
         bold_x(win, rc.x + 16, rc.y + 10, "Recovery key", th.espresso, 1);
         win.text(
@@ -792,7 +817,7 @@ impl App {
             th.cocoa,
         );
         // The backups warning.
-        let bc = Rect::new(X0, BAR + 228, CW, 112);
+        let bc = Rect::new(X0, BAR + 228, main_w(win), 112);
         widgets::bordered(win, bc, 14, Theme::tint(th.milk, th.honey, 0x22), th.honey);
         bold_x(
             win,
@@ -844,7 +869,7 @@ impl App {
         bold_x(win, X0, BAR + 14, &row.name, th.espresso, 2);
         win.text(X0, BAR + 52, &row.kind, th.cocoa);
         if row.locked {
-            let c = Rect::new(X0, BAR + 90, CW, 100);
+            let c = Rect::new(X0, BAR + 90, main_w(win), 100);
             card(win, &th, c, None);
             widgets::padlock(win, c.x + 18, c.y + 16, th.espresso);
             bold_x(
@@ -897,7 +922,7 @@ impl App {
             .and_then(|p| self.disk.usage_of(p))
             .copied();
         if let Some(u) = usage {
-            let bar = Rect::new(X0, BAR + 80, CW, 20);
+            let bar = Rect::new(X0, BAR + 80, main_w(win), 20);
             charts_bar(win, bar, u.used_pct10(), th.honey, th.oat);
             win.text(
                 X0,

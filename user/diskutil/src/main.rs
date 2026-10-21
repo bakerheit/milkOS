@@ -112,11 +112,16 @@ fn main(_args: &rt::Args) -> i32 {
         scroll: 0,
         last_refresh: 0,
     };
+    // Resizable down to what its sheets need (the spec says 680x480).
+    win.set_resizable(760, 560);
     app.disk.refresh();
     app.disk.share_rw = Some(data::probe_share());
     loop {
         match win.event(100) {
             Some(Event::Close) => break,
+            Some(Event::Resize { w, h }) => {
+                let _ = win.resize(w, h);
+            }
             Some(Event::Down { x, y, button: 1 }) => {
                 if let Some(id) = app.hits.at(x, y) {
                     app.click(id);
@@ -312,10 +317,10 @@ impl App {
     fn draw(&mut self, win: &mut Window) {
         let th = self.th;
         self.hits.clear();
-        win.fill(0, 0, W, H, th.milk);
+        win.fill(0, 0, win.w, win.h, th.milk);
         self.draw_sidebar(win);
-        win.fill(SIDE, 0, W - SIDE, BAR, th.cream);
-        widgets::hline(win, SIDE, BAR, W - SIDE, th.sand);
+        win.fill(SIDE, 0, win.w - SIDE, BAR, th.cream);
+        widgets::hline(win, SIDE, BAR, win.w - SIDE, th.sand);
         let sel = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
         segmented(
             win,
@@ -341,11 +346,11 @@ impl App {
         }
         if let Some(j) = &self.job {
             let secs = timeio::mono_ms().saturating_sub(j.started_ms) / 1000;
-            win.fill(SIDE, H - 24, W - SIDE, 24, th.cream);
-            widgets::hline(win, SIDE, H - 24, W - SIDE, th.sand);
+            win.fill(SIDE, win.h - 24, win.w - SIDE, 24, th.cream);
+            widgets::hline(win, SIDE, win.h - 24, win.w - SIDE, th.sand);
             win.text(
                 SIDE + 12,
-                H - 20,
+                win.h - 20,
                 &format!("{} ... {} s", j.what, secs),
                 th.espresso,
             );
@@ -362,13 +367,13 @@ impl App {
 
     fn draw_sidebar(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(0, 0, SIDE, H, th.oat);
-        widgets::vline(win, SIDE - 1, 0, H, th.sand);
+        win.fill(0, 0, SIDE, win.h, th.oat);
+        widgets::vline(win, SIDE - 1, 0, win.h, th.sand);
         win.text(16, 14, "VOLUMES", th.cocoa);
         let rows = self.rows();
         for (i, r) in rows.iter().enumerate() {
             let y = 40 + i as i32 * 50;
-            if y + 50 > H {
+            if y + 50 > win.h {
                 break;
             }
             let rect = Rect::new(8, y, SIDE - 16, 46);
@@ -414,7 +419,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(W - 12 - bw, 10, bw, 24),
+            Rect::new(win.w - 12 - bw, 10, bw, 24),
             label,
             Kind::Primary,
             id,

@@ -657,7 +657,7 @@ impl App {
 
     fn frame(&self, win: &mut Window, w: i32, h: i32, title: &str, danger: bool) -> Rect {
         let th = self.th;
-        let r = Rect::new((W - w) / 2, (H - h) / 2, w, h);
+        let r = Rect::new((win.w - w) / 2, (win.h - h) / 2, w, h);
         win.rrect(
             r.x - 1,
             r.y + 6,

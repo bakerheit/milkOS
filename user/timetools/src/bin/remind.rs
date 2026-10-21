@@ -8,6 +8,7 @@
 //!             "Water plants every 2 weeks" (the same words as the Reminders window's quick add)
 //!   remind add in 5m TITLE...       (due at the first whole minute 5 minutes from now)
 //!   remind done ID | undone ID | rm ID
+//!   remind snooze ID [MINUTES]      (ring again later, default 10; the due day does not change)
 //!
 //! WHEN is today, tomorrow, +3d, a weekday name or YYYY-MM-DD; without a time a reminder rings at
 //! 09:00. Completing a repeating reminder moves it to its next day. Files: ~/Library/Reminders.
@@ -36,7 +37,7 @@ fn usage() -> i32 {
     println!("                  [--until DATE] [--no-alert] [--notes TEXT...]");
     println!("       remind add TITLE [tomorrow] [at 5pm] [every 2 weeks]    (sentence form)");
     println!("       remind add in 5m TITLE...");
-    println!("       remind done ID | undone ID | rm ID");
+    println!("       remind done ID | undone ID | rm ID | snooze ID [MINUTES]");
     println!("WHEN: today, tomorrow, +3d, a weekday name or YYYY-MM-DD");
     2
 }
@@ -99,6 +100,27 @@ fn main(args: &rt::Args) -> i32 {
             return 0;
         }
         "add" => return add(args, &paths, &mut set, today),
+        "snooze" => {
+            let Some(id) = id_arg() else {
+                return usage();
+            };
+            let mins = args
+                .get(3)
+                .and_then(|m| m.parse::<u64>().ok())
+                .unwrap_or(10)
+                .clamp(1, 1440);
+            let (d, at) = minute_after(timeio::now_secs(), mins * 60_000);
+            match set.get_mut(id) {
+                Some(r) => {
+                    r.snooze = Some((d, at));
+                    println!("rings again at {} {}", d.fmt(), fmt_hm(at));
+                }
+                None => {
+                    println!("remind: no reminder {id}");
+                    return 1;
+                }
+            }
+        }
         sub @ ("done" | "undone" | "rm") => {
             let Some(id) = id_arg() else {
                 return usage();

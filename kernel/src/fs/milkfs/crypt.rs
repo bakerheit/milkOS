@@ -233,6 +233,7 @@ impl super::volume::State {
     /// Rewrap the volume key under passphrase `new`, `old` (a passphrase or the recovery
     /// key) proving we may: a new keyring block, one commit, no data rewritten.
     pub fn rewrap(&mut self, old: &str, new: &str) -> Result<()> {
+        self.not_converting()?;
         let key = self.store.crypt.clone().ok_or(Errno::EINVAL)?;
         let ring = self.read_keyring()?;
         let (k2, idx) = unlock(&ring, old)?;

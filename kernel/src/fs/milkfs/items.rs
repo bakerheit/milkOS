@@ -622,6 +622,7 @@ impl State {
     /// Returns the size `dst` must get. The caller updates the inode.
     pub fn reflink(&mut self, src: u64, dst: u64) -> Result<u64> {
         use crate::fs::node::{S_IFDIR, S_IFMT, S_IFREG};
+        self.not_converting()?;
         let si = self.inode(self.cur, src)?;
         let di = self.inode(self.cur, dst)?;
         if si.mode & S_IFMT == S_IFDIR || di.mode & S_IFMT == S_IFDIR {

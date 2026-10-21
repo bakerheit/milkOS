@@ -23,6 +23,13 @@
 #           and locked, `snap unlock` mounts it, files are written; mkfs of the mounted
 #           disk is refused. Mac: the passphrase and the shown recovery key open it, check
 #           clean, no plaintext on the disk.
+#   boot 5: encrypt the home volume in place while it is in use: `snap encrypt` (slowed
+#           down) asks for the passphrase; meanwhile info shows the progress, a reflink
+#           copy, a rollback and a second encrypt are refused (EBUSY), files written go
+#           in; at full speed it finishes. Mac: it is encrypted, the files are there, no
+#           plaintext on the disk.
+#   boot 6: it is locked at boot; `snap unlock`, then `snap decrypt --wait`. Mac: plain
+#           again (no passphrase needed), the files are there.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -167,6 +174,50 @@ printf '%s\n' "$P3" > "$T/p3"
 [ -n "$REC4" ] && [ "$($M cat "$BLANK" /fresh.txt --recovery "$REC4")" = "made in milkOS: $CANARY-3" ] && ok "Mac: the shown recovery key opens it" || bad "Mac open with the recovery key"
 $M check "$BLANK" --passphrase-file "$T/p3" > "$T/check4.txt" 2>&1 && ok "Mac: check clean" || { bad "check of the kernel-made volume"; cat "$T/check4.txt"; }
 grep -aq "$CANARY-3" "$BLANK" && bad "plaintext on the kernel-made encrypted disk" || ok "no plaintext on the kernel-made disk"
+
+PL="$T/inplace.img"; P5="fourth-fake-test-passphrase"
+$M mkfs "$PL" --size 32M >/dev/null
+echo "$CANARY-5 written on the Mac" > "$T/c5.txt"
+head -c 6000000 /dev/urandom > "$T/r5.bin"
+$M put "$PL" /docs/c5.txt "$T/c5.txt" >/dev/null && $M put "$PL" /docs/r5.bin "$T/r5.bin" >/dev/null
+IMG="$PL" EXTRA_DISKS="" boot b5 - \
+  "snap create s5" \
+  "raw:snap encrypt --no-recovery --rate 1" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:started" "wait:msh:" \
+  "cat /sys/fs/milkfs/info" "cp --reflink /Volumes/Milk/docs/r5.bin /Volumes/Milk/docs/copy.bin" \
+  "snap rollback s5" \
+  "raw:snap encrypt --no-recovery" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:msh:" \
+  "echo made while encrypting: $CANARY-6 > /Volumes/Milk/docs/during.txt" \
+  "echo rate=0 > /sys/fs/milkfs/encrypt" "sleep 6" "cat /sys/fs/milkfs/encrypt" "cat /sys/fs/milkfs/info"
+L="$(tr -d '\r' < "$T/b5.log")"
+echo "$L" | grep -q "^encryption:  converting$" && echo "$L" | grep -Eq "^conversion:  encrypt [0-9]+% \([0-9]+/[0-9]+ blocks\), " \
+  && ok "info while encrypting: converting, with progress ($(echo "$L" | sed -n 's/^conversion:  //p' | head -1))" || bad "info while converting"
+echo "$L" | grep -aq "cp: .*being converted\|cp: .*EBUSY\|cp: .*busy" && ok "a reflink copy is refused while converting" || bad "reflink during conversion: $(echo "$L" | grep -a '^cp:' | head -1)"
+echo "$L" | grep -aq "snap: rollback s5: the volume is being converted" && ok "rollback is refused while converting" || bad "rollback during conversion"
+echo "$L" | grep -aq "snap: encrypt: it is being converted already (EBUSY" && ok "a second encrypt is refused (EBUSY)" || bad "second encrypt: $(echo "$L" | grep -a 'snap: encrypt' | tail -1)"
+echo "$L" | grep -aq "milkfs: vda (Milk) at /Volumes/Milk: encrypted in place, done\|milkfs: encryption done" && ok "it finished (in the background, the volume in use)" || bad "didn't finish: $(echo "$L" | grep -a 'convert\|in place' | tail -2)"
+echo "$L" | grep "^encryption:  " | tail -1 | grep -q "^encryption:  on$" && ok "info afterwards: encryption on" || bad "info after"
+printf '%s\n' "$P5" > "$T/p5"
+[ "$($M cat "$PL" /docs/during.txt --passphrase-file "$T/p5")" = "made while encrypting: $CANARY-6" ] \
+  && [ "$($M cat "$PL" /docs/c5.txt --passphrase-file "$T/p5")" = "$CANARY-5 written on the Mac" ] \
+  && $M cat "$PL" /docs/r5.bin --passphrase-file "$T/p5" | cmp -s - "$T/r5.bin" \
+  && ok "Mac: encrypted now, every file there (also the one written meanwhile)" || bad "Mac after in-place encryption"
+$M check "$PL" --passphrase-file "$T/p5" > "$T/check5.txt" 2>&1 && grep -q "encryption: on" "$T/check5.txt" && ok "Mac: check clean, encryption on" || { bad "check after in-place encryption"; cat "$T/check5.txt"; }
+grep -aq "$CANARY" "$PL" && bad "plaintext left on the disk after encrypting in place" || ok "no plaintext left on the disk (free space cleared too)"
+MILKFS_PASSPHRASE= $M check "$PL" > /dev/null 2>&1 < /dev/null && bad "Mac opened it without a passphrase" || ok "Mac: no passphrase, no entry"
+
+IMG="$PL" EXTRA_DISKS="" boot b6 - \
+  "raw:snap unlock" "wait:Passphrase" "raw:$P5" "wait:unlocked" "wait:msh:" \
+  "cat /Volumes/Milk/docs/during.txt" \
+  "raw:snap decrypt --wait" "wait:Passphrase" "raw:$P5" "wait:decrypted in place" "wait:msh:" \
+  "cat /sys/fs/milkfs/info"
+L="$(tr -d '\r' < "$T/b6.log")"
+echo "$L" | grep -aq "vda (Milk) is encrypted and locked" && ok "boot 6: locked at boot" || bad "boot 6 not locked"
+echo "$L" | grep -aq "^made while encrypting: $CANARY-6" && ok "unlocked: the file is there" || bad "boot 6 file"
+echo "$L" | grep -aq "snap: vda (Milk) at /Volumes/Milk: decrypted in place, done" && ok "snap decrypt --wait: done" || bad "decrypt: $(echo "$L" | grep -a 'snap:' | tail -2)"
+echo "$L" | awk '/\$ cat \/sys\/fs\/milkfs\/info$/{on=1; next} on && /^msh:/{on=0} on' | grep -q "^encryption:  off$" && ok "info: encryption off" || bad "info after decrypt"
+MILKFS_PASSPHRASE= $M check "$PL" > "$T/check6.txt" 2>&1 < /dev/null && grep -q "encryption: off" "$T/check6.txt" \
+  && [ "$(MILKFS_PASSPHRASE= $M cat "$PL" /docs/during.txt < /dev/null)" = "made while encrypting: $CANARY-6" ] \
+  && ok "Mac: plain again, readable with no passphrase, check clean" || { bad "Mac after decrypt"; cat "$T/check6.txt"; }
 
 echo
 [ $FAIL = 0 ] && echo "enctest: PASS ($T)" || echo "enctest: FAIL ($T)"

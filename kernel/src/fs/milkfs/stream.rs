@@ -639,6 +639,7 @@ impl State {
         if self.receiving {
             return Err(Errno::EBUSY);
         }
+        self.not_converting()?;
         self.set_cur(LIVE)?;
         self.commit()?;
         check_snap_name(&h.snap)?;

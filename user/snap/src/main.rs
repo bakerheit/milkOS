@@ -24,6 +24,11 @@
 //!   snap lock [DEV|PATH]  lock unlocked encrypted volumes again (sync, unmount, wipe the
 //!                         key); not the one /home/milk is on. No argument: every one
 //!   snap passwd           change the primary volume's passphrase (rewraps the key)
+//!   snap encrypt [DEV] [--recovery-out FILE | --no-recovery] [--rate MB] [--wait]
+//!                         encrypt a plain volume in place, in the background (asks for
+//!                         the new passphrase, shows the recovery key once)
+//!   snap decrypt [DEV] [--wait]  decrypt an encrypted volume in place (asks for its
+//!                         passphrase or the recovery key)
 //!   snap disks            every disk: size, milkfs or not, encrypted, mounted or locked
 //!   snap mkfs DEV [LABEL] [--force] [--encrypt [--recovery-out FILE | --no-recovery]]
 //!                         format DEV as milkfs; --encrypt asks for a passphrase and
@@ -631,6 +636,124 @@ fn mkfs(args: &[&str], home: Option<&str>) -> i32 {
     0
 }
 
+/// Follow `/sys/fs/milkfs/encrypt` until no volume is being converted.
+fn convert_wait() -> i32 {
+    let mut shown = u64::MAX;
+    loop {
+        let t = sys::read_file("/sys/fs/milkfs/encrypt").unwrap_or_default();
+        let t = alloc::string::String::from_utf8_lossy(&t).into_owned();
+        let Some(l) = t.lines().find(|l| l.contains(": converting: ")) else {
+            print!(
+                "{}",
+                t.lines()
+                    .filter(|l| !l.starts_with("rate"))
+                    .map(|l| alloc::format!("snap: {l}\n"))
+                    .collect::<alloc::string::String>()
+            );
+            return if t.contains("stopped") { 1 } else { 0 };
+        };
+        let pct = l
+            .split(": converting: ")
+            .nth(1)
+            .and_then(|x| x.split('%').next())
+            .and_then(|x| x.split(' ').nth(1))
+            .and_then(|x| x.parse::<u64>().ok())
+            .unwrap_or(0);
+        if shown == u64::MAX || pct / 25 != shown / 25 {
+            eprintln!("snap: {l}");
+            shown = pct;
+        }
+        sys::sleep_ms(500);
+    }
+}
+
+/// `snap encrypt [DEV] [--recovery-out FILE | --no-recovery] [--passphrase-file F]
+/// [--rate MB] [--wait]` and `snap decrypt [DEV] [--passphrase-file F] [--wait]`.
+fn convert(args: &[&str], encrypt: bool, home: Option<&str>) -> i32 {
+    let (mut dev, mut rec_out, mut no_rec, mut pfile, mut rate, mut wait) =
+        (None, None, false, None, None, false);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--recovery-out" if encrypt => rec_out = it.next().copied(),
+            "--no-recovery" if encrypt => no_rec = true,
+            "--passphrase-file" => pfile = it.next().copied(),
+            "--rate" => rate = it.next().copied(),
+            "--wait" => wait = true,
+            _ if !a.starts_with('-') && dev.is_none() => dev = Some(a),
+            _ => {
+                eprintln!(
+                    "usage: snap encrypt [DEV] [--recovery-out FILE | --no-recovery] [--passphrase-file F] [--rate MB] [--wait]\n       snap decrypt [DEV] [--passphrase-file F] [--wait]"
+                );
+                return 2;
+            }
+        }
+    }
+    let mut req = alloc::string::String::new();
+    if let Some(d) = dev {
+        req.push_str(&alloc::format!("dev={d} "));
+    }
+    let tmp = alloc::format!(
+        "{}/.milkfs-recovery-{}",
+        home.unwrap_or("/tmp"),
+        sys::getpid()
+    );
+    let rec = (encrypt && !no_rec).then(|| rec_out.map(abs).unwrap_or_else(|| tmp.clone()));
+    if let Some(r) = &rec {
+        req.push_str(&alloc::format!("recovery={r} "));
+    }
+    if let Some(r) = rate
+        && write_ctl("encrypt", &alloc::format!("rate={r}")).is_err()
+    {
+        return 1;
+    }
+    let secret = match pfile {
+        Some(_) => stream_passphrase(pfile, false),
+        None if encrypt => {
+            let a = ask("New passphrase for the volume (8 characters or more): ");
+            let b = a.as_ref().and_then(|_| ask("Again: "));
+            match (a, b) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                (Some(_), Some(_)) => {
+                    eprintln!("snap: the passphrases differ");
+                    None
+                }
+                _ => None,
+            }
+        }
+        None => ask("Passphrase (or recovery key): "),
+    };
+    let Some(p) = secret else {
+        return 1;
+    };
+    let op = if encrypt { "encrypt" } else { "decrypt" };
+    let mut t = alloc::format!("{}\n{p}", req.trim_end());
+    let r = write_ctl(op, &t);
+    // SAFETY: zero bytes are valid UTF-8.
+    unsafe { t.as_bytes_mut().fill(0) };
+    if r.is_err() {
+        return 1;
+    }
+    println!(
+        "snap: {} in place started (the volume stays usable; progress: snap info)",
+        if encrypt { "encrypting" } else { "decrypting" }
+    );
+    match (&rec, rec_out) {
+        (Some(path), None) => {
+            let k = sys::read_file(path).unwrap_or_default();
+            let _ = sys::unlink(path);
+            println!(
+                "snap: recovery key: {}",
+                core::str::from_utf8(&k).unwrap_or("?").trim_end()
+            );
+            println!("snap: write it down and keep it apart from the disk: it is shown only now");
+        }
+        (Some(path), Some(_)) => println!("snap: recovery key written to {path}"),
+        _ => {}
+    }
+    if wait { convert_wait() } else { 0 }
+}
+
 fn passwd() -> i32 {
     let Some(old) = ask("Current passphrase (or recovery key): ") else {
         return 1;
@@ -659,6 +782,8 @@ fn main(args: &rt::Args) -> i32 {
         (Some("unlock"), d) => unlock(d),
         (Some("lock"), t) => lock(t),
         (Some("mkfs"), _) => mkfs(&args.argv[2..], args.env("HOME")),
+        (Some("encrypt"), _) => convert(&args.argv[2..], true, args.env("HOME")),
+        (Some("decrypt"), _) => convert(&args.argv[2..], false, args.env("HOME")),
         (Some("disks"), _) => cat("/sys/fs/milkfs/disks"),
         (Some("passwd"), _) => passwd(),
         (Some("scrub"), None) => scrub_wait(),

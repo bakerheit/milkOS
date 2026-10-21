@@ -102,6 +102,11 @@ pub fn status() -> Status {
     STATUS.lock().clone()
 }
 
+/// Is a scrub run (over all volumes) under way?
+pub fn running() -> bool {
+    ACTIVE.load(Ordering::Acquire)
+}
+
 /// Is a scrub reading the volume mounted at `path` right now?
 pub fn running_on(path: &str) -> bool {
     let s = STATUS.lock();
@@ -175,6 +180,15 @@ pub fn control(cmd: &str) -> Result<()> {
             None if w == "start" => {
                 if ACTIVE.load(Ordering::Acquire) {
                     return Err(Errno::EBUSY);
+                }
+                if super::all_volumes()
+                    .iter()
+                    .any(|(v, _)| v.state.lock().converting())
+                {
+                    return super::fail(
+                        Errno::EBUSY,
+                        "a volume is being converted in place: scrub after it is done",
+                    );
                 }
                 REQUEST.store(true, Ordering::Release);
             }
@@ -443,6 +457,10 @@ pub fn scrub_volume(
     user: bool,
 ) -> Result<Vec<ScrubError>> {
     let (audit, sleep) = (user, user);
+    if v.state.lock().converting() {
+        kprintln!("milkfs scrub: {path}: skipped (being converted in place)");
+        return Ok(Vec::new());
+    }
     let t0 = crate::timer::now_ns();
     let key = v.state.lock().store.crypt.clone();
     let (dev, trees, heads, map, total) = {

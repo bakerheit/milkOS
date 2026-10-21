@@ -60,6 +60,7 @@ TESTS=(
   "wm-demo-tour|q|300|scripts/wm-demo.sh tour @WORK@/tour.png"
   "serial-soak-full|f|3600|scripts/serial-soak.sh 5 14"
   "crashtest|f|3600|scripts/crashtest.sh"
+  "converttest|f|2400|scripts/converttest.sh"
   "stressloop|f|3600|scripts/stressloop.sh"
   "releasetest|f|1800|scripts/releasetest.sh"
   "treetest|f|1800|scripts/treetest.sh"

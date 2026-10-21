@@ -224,7 +224,7 @@ pub fn automount() {
     let test_pass = test_passphrase();
     let mut primary_done = false;
     for (dev, sb) in found {
-        let key = if sb.flags & format::SB_ENCRYPTED != 0 {
+        let key = if format::needs_key(sb.flags) {
             match test_pass.as_deref().map(|p| unlock_key(&dev, &sb, p)) {
                 Some(Ok(k)) => Some(k),
                 other => {
@@ -351,7 +351,7 @@ static LOCKED: SpinLock<alloc::vec::Vec<BlockRef>> = SpinLock::new(alloc::vec::V
 /// TEST ONLY: a passphrase handed in by qemu (`-fw_cfg name=opt/milkos/passphrase,...`),
 /// so test scripts (crashtest.sh on an encrypted volume) can boot unattended. Anyone
 /// who can start qemu can read it; real use goes through `snap unlock`.
-fn test_passphrase() -> Option<String> {
+pub(crate) fn test_passphrase() -> Option<String> {
     let f = crate::fwcfg::find_file("opt/milkos/passphrase")?;
     let mut buf = alloc::vec![0u8; f.size as usize];
     if !crate::fwcfg::read_file(f, &mut buf) {
@@ -448,6 +448,7 @@ pub fn unlock(secret: &str, dev: Option<&str>) -> Result<alloc::vec::Vec<String>
             mounted.push(p);
         }
     }
+    convert_kick();
     let ok = !mounted.is_empty();
     audit_op(
         "milkfs.unlock",
@@ -596,6 +597,7 @@ fn lock_one(v: &Arc<Volume>, path: &str, home: Option<&Arc<Volume>>) -> Result<(
     }
     {
         let mut st = v.state.lock();
+        st.not_converting()?;
         if !st.store.encrypted() {
             return fail(
                 Errno::EINVAL,
@@ -691,6 +693,256 @@ pub fn change_passphrase(old: &str, new: &str) -> Result<()> {
     let r = v.state.lock().rewrap(old, new);
     audit_op("milkfs.passwd", "", &r);
     r
+}
+
+// ---- encrypting / decrypting in place (convert.rs) --------------------------------
+
+/// The mounted volume named by `dev` (a device name, mount path or label), or the
+/// primary one.
+fn volume_named(dev: Option<&str>) -> Result<Arc<Volume>> {
+    match dev {
+        None => primary(),
+        Some(t) => all_volumes()
+            .into_iter()
+            .find(|(v, p)| names_volume(v, p, t))
+            .map(|(v, _)| v)
+            .map_or_else(
+                || fail(Errno::ENODEV, format!("no mounted milkfs volume {t}")),
+                Ok,
+            ),
+    }
+}
+
+/// Conversion speed limit in MB/s (0: as fast as it goes).
+static CONVERT_RATE_MB: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static CONVERT_THREAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static THREADS_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The last conversion that finished or failed (for `/sys/fs/milkfs/encrypt`).
+static LAST_CONVERT: SpinLock<String> = SpinLock::new(String::new());
+
+/// Make sure the conversion thread runs if any mounted volume is being converted (after
+/// a start, an unlock, or at boot: a conversion cut short by a crash resumes).
+pub fn convert_kick() {
+    use core::sync::atomic::Ordering;
+    if !THREADS_STARTED.load(Ordering::Acquire)
+        || crashtest::mode() == Some(crashtest::Mode::Check)
+        || !all_volumes()
+            .iter()
+            .any(|(v, _)| v.state.lock().converting())
+        || CONVERT_THREAD.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    drop(crate::sched::spawn_prio(
+        "milkfs-convert",
+        crate::sched::Priority::Low,
+        convert_thread,
+    ));
+}
+
+fn convert_thread() {
+    use core::sync::atomic::Ordering;
+    const BATCH: u64 = 64;
+    loop {
+        let vols: alloc::vec::Vec<_> = all_volumes()
+            .into_iter()
+            .filter(|(v, _)| v.state.lock().converting())
+            .collect();
+        if vols.is_empty() {
+            CONVERT_THREAD.store(false, Ordering::Release);
+            // A start that raced with this exit kicks again; if it didn't, we're done.
+            if all_volumes()
+                .iter()
+                .any(|(v, _)| v.state.lock().converting())
+                && !CONVERT_THREAD.swap(true, Ordering::AcqRel)
+            {
+                continue;
+            }
+            return;
+        }
+        for (v, path) in vols {
+            let t0 = crate::timer::now_ns();
+            let r = v.state.lock().convert_step(BATCH);
+            match r {
+                Ok(convert::Step::More) => {
+                    let rate = CONVERT_RATE_MB.load(Ordering::Relaxed) as u64;
+                    // BATCH blocks of 4 KiB at `rate` MB/s.
+                    if let Some(want_ns) = (BATCH * 4096 * 1000).checked_div(rate) {
+                        let spent = crate::timer::now_ns() - t0;
+                        if want_ns > spent {
+                            crate::sched::sleep_ms((want_ns - spent) / 1_000_000);
+                        }
+                    } else {
+                        crate::sched::yield_now();
+                    }
+                }
+                Ok(convert::Step::Done) => {
+                    let enc = v.state.lock().store.encrypted();
+                    let text = format!(
+                        "{} ({}) at {path}: {} in place, done\n",
+                        v.device_name,
+                        v.label,
+                        if enc { "encrypted" } else { "decrypted" }
+                    );
+                    kprintln!("milkfs: {}", text.trim_end());
+                    *LAST_CONVERT.lock() = text;
+                    crate::fs::pagecache::invalidate_dev(v.dev);
+                    audit_op(
+                        "milkfs.convert.done",
+                        &format!("dev={} encrypted={enc}", v.device_name),
+                        &Ok(()),
+                    );
+                }
+                Ok(convert::Step::NeedSpace(_)) => crate::sched::sleep_ms(2000),
+                Err(e) => {
+                    *LAST_CONVERT.lock() = format!(
+                        "{} ({}): conversion stopped: {e} (it resumes at the next mount)\n",
+                        v.device_name, v.label
+                    );
+                    kprintln!("milkfs: {}: conversion stopped: {e}", v.device_name);
+                    crate::sched::sleep_ms(5000);
+                    if v.state.lock().broken {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encrypt the volume `dev` names (default the primary one) in place under `passphrase`
+/// (8 characters or more), in the background; with `recovery_out` also a recovery key,
+/// written there (O_EXCL, 0600). The volume stays usable; from the first commit on it
+/// needs the passphrase to mount. Progress: `info`, `/sys/fs/milkfs/encrypt`.
+pub fn encrypt_in_place(
+    dev: Option<&str>,
+    passphrase: &str,
+    recovery_out: Option<&str>,
+) -> Result<()> {
+    use crate::fs::abi::{O_CREAT, O_EXCL, O_WRONLY};
+    if passphrase.len() < 8 {
+        return fail(Errno::EINVAL, "the passphrase needs 8 characters or more");
+    }
+    let v = volume_named(dev)?;
+    if scrub::running() {
+        return fail(
+            Errno::EBUSY,
+            "a scrub is reading the volume: wait or `snap scrub stop`",
+        );
+    }
+    let uuid = {
+        let st = v.state.lock();
+        if st.converting() {
+            return fail(Errno::EBUSY, "it is being converted already");
+        }
+        if st.store.crypt.is_some() {
+            return fail(Errno::EINVAL, format!("{} is encrypted already", v.label));
+        }
+        st.sb.uuid
+    };
+    let out = match recovery_out {
+        Some(p) => match crate::fs::ops::open(p, O_WRONLY | O_CREAT | O_EXCL, 0o600) {
+            Ok(f) => Some(f),
+            Err(e) => return fail(e, format!("can't create the recovery key file {p}: {e}")),
+        },
+        None => None,
+    };
+    let r = (|| {
+        // The key and its slots first (scrypt, slow), without the volume lock.
+        let mut vk = [0u8; 32];
+        crate::crypto::rng::fill(&mut vk);
+        let key = crypt::VolumeKey::from_master(&vk);
+        crate::crypto::wipe(&mut vk);
+        let mut ring = format::Keyring {
+            uuid,
+            slots: alloc::vec![crypt::wrap(
+                &uuid,
+                &key,
+                format::SLOT_PASSPHRASE,
+                passphrase.as_bytes()
+            )?],
+        };
+        let mut shown = None;
+        if out.is_some() {
+            let mut rk = [0u8; 16];
+            crate::crypto::rng::fill(&mut rk);
+            ring.slots
+                .push(crypt::wrap(&uuid, &key, format::SLOT_RECOVERY, &rk)?);
+            shown = Some(crypt::format_recovery(&rk));
+            crate::crypto::wipe(&mut rk);
+        }
+        v.state.lock().convert_encrypt_begin(key, &ring)?;
+        if let (Some(f), Some(k)) = (&out, shown) {
+            let mut text = format!("{k}\n").into_bytes();
+            let w = f.write(&text).and_then(|_| f.fsync());
+            crate::crypto::wipe(&mut text);
+            w?;
+        }
+        Ok(())
+    })();
+    if r.is_err()
+        && let Some(p) = recovery_out
+    {
+        let _ = crate::fs::ops::unlink(p);
+    }
+    audit_op(
+        "milkfs.encrypt",
+        &format!("dev={} recovery={}", v.device_name, recovery_out.is_some()),
+        &r,
+    );
+    if r.is_ok() {
+        LAST_CONVERT.lock().clear();
+        kprintln!(
+            "milkfs: {} ({}): encrypting in place",
+            v.device_name,
+            v.label
+        );
+        convert_kick();
+    }
+    r
+}
+
+/// Decrypt the encrypted volume `dev` names (default the primary one) in place, in the
+/// background; `secret` (a passphrase or the recovery key) must open it (EACCES).
+pub fn decrypt_in_place(dev: Option<&str>, secret: &str) -> Result<()> {
+    let v = volume_named(dev)?;
+    if scrub::running() {
+        return fail(
+            Errno::EBUSY,
+            "a scrub is reading the volume: wait or `snap scrub stop`",
+        );
+    }
+    let r = v.state.lock().convert_decrypt_begin(secret);
+    audit_op("milkfs.decrypt", &format!("dev={}", v.device_name), &r);
+    if r.is_ok() {
+        LAST_CONVERT.lock().clear();
+        kprintln!(
+            "milkfs: {} ({}): decrypting in place",
+            v.device_name,
+            v.label
+        );
+        convert_kick();
+    }
+    r
+}
+
+/// `/sys/fs/milkfs/encrypt` (and `decrypt`) read: each converting volume's progress, or
+/// the last result.
+fn convert_status() -> String {
+    let mut s = String::new();
+    for (v, p) in all_volumes() {
+        if let Some(t) = v.state.lock().convert_text() {
+            let _ = writeln!(s, "{} ({}) at {p}: converting: {t}", v.device_name, v.label);
+        }
+    }
+    if s.is_empty() {
+        s = LAST_CONVERT.lock().clone();
+    }
+    let r = CONVERT_RATE_MB.load(core::sync::atomic::Ordering::Relaxed);
+    if r > 0 {
+        let _ = writeln!(s, "rate limit: {r} MB/s");
+    }
+    s
 }
 
 /// Where the primary volume is mounted (`/Volumes/<label>`).
@@ -1390,6 +1642,7 @@ fn unmount_clone(name: &str) {
 /// [`discard_clone`].
 pub fn clone(snap: &str, name: &str) -> Result<String> {
     let v = primary()?;
+    v.state.lock().not_converting()?;
     records_room(&v)?;
     let id = v.state.lock().clone_create(snap, name)?;
     let r = mount_clone(&v, name, id);
@@ -1429,6 +1682,7 @@ pub fn discard_clone(name: &str) -> Result<()> {
 /// `before-<name>`, so `rollback before-<name>` undoes it. Returns that snapshot's name.
 pub fn promote_clone(name: &str) -> Result<String> {
     let v = primary()?;
+    v.state.lock().not_converting()?;
     v.state.lock().clone_index_check(name)?;
     let mut keep = format!("before-{name}");
     keep.truncate(format::SNAP_NAME_MAX);
@@ -1465,6 +1719,8 @@ pub fn start_threads() {
     }));
     timemachine::start();
     scrub::start_thread();
+    THREADS_STARTED.store(true, core::sync::atomic::Ordering::Release);
+    convert_kick(); // a conversion a crash cut short resumes
 }
 
 /// Self-test only (before the scheduler runs, so nothing else can notice): point the
@@ -1555,6 +1811,7 @@ pub fn delete_snapshot(name: &str) -> Result<()> {
 /// Roll the primary volume back to snapshot `name` (newer snapshots are deleted).
 pub fn rollback(name: &str) -> Result<()> {
     let v = primary()?;
+    v.state.lock().not_converting()?;
     if user_op() {
         crate::audit::before_rewind();
     }
@@ -1646,7 +1903,14 @@ pub fn info() -> String {
     );
     if st.store.encrypted() {
         // Mounted means unlocked (a locked volume isn't mounted: /sys/fs/milkfs/unlock).
-        let _ = writeln!(s, "encryption:  on");
+        let _ = writeln!(
+            s,
+            "encryption:  {}",
+            if st.converting() { "converting" } else { "on" }
+        );
+        if let Some(t) = st.convert_text() {
+            let _ = writeln!(s, "conversion:  {t}");
+        }
         let _ = writeln!(s, "locked:      no");
         let _ = writeln!(
             s,
@@ -1696,7 +1960,9 @@ fn disks_text() -> String {
         let _ = write!(s, "{} {bytes} {ro}", d.name());
         match probe(&d) {
             Some(sb) => {
-                let enc = if sb.flags & format::SB_ENCRYPTED != 0 {
+                let enc = if sb.flags & format::SB_CONVERTING != 0 {
+                    "converting"
+                } else if sb.flags & format::SB_ENCRYPTED != 0 {
                     "encrypted"
                 } else {
                     "plain"
@@ -1817,6 +2083,13 @@ fn explain(name: &str, e: Errno) -> &'static str {
         ("unlock" | "passwd", E::EIO) => "the keyring can't be read (damaged?)",
         ("lock", E::EINVAL) => "write a device, mount path, label or `all`",
         ("passwd", E::EACCES) => "the current passphrase (or recovery key) is wrong",
+        ("decrypt", E::EACCES) => "wrong passphrase or recovery key",
+        ("encrypt" | "decrypt", E::EBUSY) => {
+            "busy: already converting, or a send, receive or scrub is using the volume"
+        }
+        ("encrypt" | "decrypt", E::EINVAL) => {
+            "encrypt: `[dev=NAME] [recovery=FILE] [rate=MB]` and the passphrase (8 or more) on a second line; decrypt: `[dev=NAME]` and the passphrase or recovery key"
+        }
         ("passwd", E::EINVAL) => "write `OLD\nNEW`; the new passphrase needs 8 characters or more",
         ("send", E::ENOENT) => "no such snapshot (or the output's folder doesn't exist)",
         ("send", E::EINVAL) => {
@@ -1882,8 +2155,8 @@ fn explain(name: &str, e: Errno) -> &'static str {
 /// key (`passwd`), or write and delete files anywhere as the kernel (`send`, `bench`,
 /// `treetest`, `dedupe`).
 pub const DESTRUCTIVE: &[&str] = &[
-    "delete", "rollback", "restore", "discard", "promote", "receive", "mkfs", "check", "auto",
-    "lock", "passwd", "send", "bench", "treetest", "dedupe",
+    "encrypt", "decrypt", "delete", "rollback", "restore", "discard", "promote", "receive", "mkfs",
+    "check", "auto", "lock", "passwd", "send", "bench", "treetest", "dedupe",
 ];
 
 /// The rule for [`authorize`]: `op` is the control (`check repair` for a repair); Err
@@ -2063,6 +2336,55 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         },
     );
     dir.add_file("error", || LAST_ERROR.lock().clone());
+    guarded(dir, "encrypt", convert_status, |b| {
+        // `[dev=NAME] [recovery=FILE] [rate=MB]` then `\nPASSPHRASE`; or just `rate=MB`
+        let mut raw = alloc::vec::Vec::from(b);
+        let r = (|| {
+            let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+            let (line, pass) = split_secret(t);
+            let (mut dev, mut rec) = (None, None);
+            for w in line.split_whitespace() {
+                if let Some(d) = w.strip_prefix("dev=") {
+                    dev = Some(d);
+                } else if let Some(f) = w.strip_prefix("recovery=") {
+                    rec = Some(f);
+                } else if let Some(r) = w.strip_prefix("rate=") {
+                    let r = r.parse().map_err(|_| Errno::EINVAL)?;
+                    CONVERT_RATE_MB.store(r, core::sync::atomic::Ordering::Relaxed);
+                } else {
+                    return Err(Errno::EINVAL);
+                }
+            }
+            match pass {
+                Some(p) => encrypt_in_place(dev, p, rec),
+                None if dev.is_none() && rec.is_none() => Ok(()), // only a rate change
+                None => fail(Errno::EINVAL, "write the new passphrase on the second line"),
+            }
+        })();
+        crate::crypto::wipe(&mut raw);
+        r
+    });
+    guarded(dir, "decrypt", convert_status, |b| {
+        // `[dev=NAME]` then `\nSECRET` (a passphrase or the recovery key)
+        let mut raw = alloc::vec::Vec::from(b);
+        let r = (|| {
+            let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+            let (line, secret) = split_secret(t);
+            let mut dev = None;
+            for w in line.split_whitespace() {
+                dev = Some(w.strip_prefix("dev=").ok_or(Errno::EINVAL)?);
+            }
+            let Some(sec) = secret else {
+                return fail(
+                    Errno::EINVAL,
+                    "write the passphrase (or recovery key) on the second line",
+                );
+            };
+            decrypt_in_place(dev, sec)
+        })();
+        crate::crypto::wipe(&mut raw);
+        r
+    });
     guarded(dir, "passwd", String::new, |b| {
         // `OLD\nNEW` (each a whole line, so they may contain spaces)
         let mut raw = alloc::vec::Vec::from(b);

@@ -1060,6 +1060,77 @@ has just `encryption:  off`. `info` only describes a mounted volume, so `locked:
 always `no` there; locked volumes (not mounted, no `info`) are listed by
 `/sys/fs/milkfs/unlock` (`vda Milk locked`) and `/sys/fs/milkfs/lock`.
 
+**Encrypting in place** (and back). `snap encrypt [DEV] [--recovery-out FILE |
+--no-recovery] [--rate MB] [--wait]` encrypts a plain volume (default the primary one) in
+the background, while it is in use; `snap decrypt [DEV] [--wait]` (asks for the
+passphrase or the recovery key) makes an encrypted one plain again. Underneath:
+`/sys/fs/milkfs/encrypt` (`[dev=NAME] [recovery=FILE] [rate=MB]`, the new passphrase on
+a second line; `rate=MB` alone changes the speed, 0 = unlimited) and
+`/sys/fs/milkfs/decrypt` (`[dev=NAME]`, the secret on a second line); kernel
+`fs::milkfs::encrypt_in_place(dev, passphrase, recovery_out)`,
+`decrypt_in_place(dev, secret)`; `kernel/src/fs/milkfs/convert.rs`.
+
+How (crash-safe because it is copy-on-write all the way):
+
+- From the start the superblock has `SB_CONVERTING` (flag 4; `SB_TO_PLAIN`, 8, when
+  decrypting) and the keyring: the volume needs its key to mount. A block may be in
+  either form; its pointer's checksum says which (the plaintext xxh64, or the SIV tag),
+  and reads try the xxh64 first (a sealed block matching its tag as an xxh64: 2^-64).
+  Every new block is written in the target form.
+- Each tree (live, then snapshots oldest first, then clones) is walked a leaf at a time
+  from a cursor. A leaf in the old form is rewritten (copy-on-write: it and its path to
+  the root are written anew at the next commit); every data block it points to in the
+  old form is copied to a new block in the new form, keeping its birth (so the
+  birth-based release rules keep meaning the same). Each batch (64 blocks) ends in an
+  ordinary commit that also records the cursor (item `K_CONVERT`): a crash or power cut
+  leaves a committed generation, consistent, partly converted, and the work resumes from
+  the cursor. Nothing is ever overwritten in place.
+- Data shared between trees (snapshots, clones, reflink copies) stays shared: a copied
+  block goes into the remap table (items `K_REMAP`: old block and checksum -> new block
+  and checksum, committed with the batch), and every other tree pointing at the old block
+  is pointed at the same copy. Tree nodes are not shared afterwards (each snapshot gets
+  its own copies of its nodes: a few percent of its size). Shared-block counts move with
+  the blocks; a snapshot's are recounted when it is done. The volume is in branched mode
+  for the duration (no dead lists); a reachability sweep after each tree, and whenever
+  free space runs low, reclaims old blocks no tree needs. Needs some free space (about
+  two batches plus a tenth of the volume when a sweep can't help); without it the
+  conversion pauses ("paused: needs N more free KiB") and goes on by itself once there
+  is room.
+- Then a pass checks that every block of every tree is in the new form (another pass if
+  not), then (encrypting) every free block is overwritten with zeros, so no plaintext of
+  old data is left in free space; then the superblock flips (`SB_ENCRYPTED` set or
+  cleared, the keyring freed when decrypting) and the remap table and `K_CONVERT` go.
+
+**Resuming is automatic**: a volume found converting at mount (boot, or `unlock` for an
+encrypted one) carries on in the background (thread `milkfs-convert`, low priority) from
+its cursor; there is nothing to press. **While converting**: reads and writes work,
+snapshots can be taken and deleted, `send` works (from an encrypted-or-converting volume
+the stream is encrypted by default), Time Machine keeps going. Refused with EBUSY (they
+could add a reference to an old-form block, or would race with it): reflink copies
+(`cp --reflink`, FICLONE), `dedupe`, `rollback`, `clone`, `promote`, `receive`, `lock`,
+`passwd`, `scrub` (and a scrub running refuses the start), a second `encrypt`/`decrypt`.
+
+`info` while converting:
+
+```text
+encryption:  converting
+conversion:  encrypt 24% (385/1486 blocks), live tree
+```
+
+(`encrypt|decrypt PCT% (DONE/TOTAL blocks), PHASE[, paused: REASON]`, PHASE `live tree`,
+`snapshot NAME`, `clone NAME`, `verifying` or `clearing free space`; TOTAL is the blocks
+in use at the start, DONE can pass it, PCT stays below 100 until it is done.)
+`/sys/fs/milkfs/encrypt` reads `vda (Milk) at /Volumes/Milk: converting: encrypt 24% ...`
+per converting volume, then the last result (`... encrypted in place, done`).
+
+Tests: `scripts/converttest.sh` (a volume filled by the crash writer: files, reflink and
+deduped copies, snapshots, a promoted clone; SIGKILL and power-cut rounds at random
+points of encrypting and of decrypting; after each crash the Mac's check is clean, every
+tree is exactly as before, the crash-check boot passes, and a resumed copy finishes:
+encrypted with no plaintext left on the disk, or plain and readable without a
+passphrase) and enctest boots 5-6 (the home volume encrypted while in use, what is
+refused meanwhile, locked at the next boot, decrypted back).
+
 **Locking again.** `snap lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
 can be locked), `/sys/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
 kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices locked):
@@ -1108,7 +1179,10 @@ twice, prints the recovery key; or `--passphrase-file`), `mkmilkfs.py change-pas
 IMAGE`, and every other command opens an encrypted image with `--passphrase-file FILE`,
 `--recovery KEY`, `$MILKFS_PASSPHRASE` or a prompt. `mkmilkfs.py selftest-crypto` runs
 the published vectors on the tool's own crypto (stdlib only; ChaCha20 and scrypt use the
-`cryptography` package or OpenSSL's scrypt for speed when available).
+`cryptography` package or OpenSSL's scrypt for speed when available). A volume being
+converted in place is read in either form (`check` says how many blocks it read sealed
+and plain); writing to one (`put`, `mkdir`, `receive`, `check --repair`) is refused until
+milkOS has finished.
 
 ### Scrub
 
@@ -1327,6 +1401,8 @@ full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the
 | `dedupe` **D** | last result | `DIR` or `DIR dry` | ENOENT, ENOTDIR, EOPNOTSUPP not on milkfs, EINVAL |
 | `unlock` | locked volumes, `vdb Vault locked` | `[dev=NAME ]SECRET` | ENODEV nothing (of that name) locked, EACCES wrong passphrase or recovery key, EINVAL usage, EIO keyring unreadable |
 | `lock` **D** | encrypted volumes and state | `DEV`, `PATH`, `LABEL` or `all` | EBUSY in use (names the processes) / home volume / send, receive or scrub running (the reason says which), EINVAL not encrypted or already locked, ENODEV no such mounted volume |
+| `encrypt` **D** | progress / last result | `[dev=NAME] [recovery=FILE] [rate=MB]` + `\nPASSPHRASE`, or `rate=MB` alone | EBUSY converting already, a send/receive/scrub running, EINVAL encrypted already, passphrase under 8, usage, ENOSPC |
+| `decrypt` **D** | = `encrypt` | `[dev=NAME]` + `\nSECRET` | EACCES wrong passphrase or recovery key, EINVAL not encrypted, EBUSY as `encrypt` |
 | `passwd` **D** | - | `OLD\nNEW` | EACCES OLD is wrong, EINVAL NEW under 8 characters or the volume isn't encrypted, EIO |
 | `mkfs` **D** | usage | `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: `\nPASSPHRASE`) | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY mounted, EINVAL label (1-31, no `/`), passphrase missing or under 8, EEXIST/EACCES the recovery file can't be created (nothing formatted) |
 | `disks` | every block device: `NAME BYTES rw\|ro milkfs plain\|encrypted mounted=PATH\|locked\|unmounted LABEL` or `NAME BYTES rw\|ro other` | - | - |

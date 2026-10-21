@@ -14,6 +14,8 @@
                                          the recovery key, or writes it to FILE)
   mkmilkfs.py change-passphrase IMAGE    rewrap the volume key under a new passphrase
   mkmilkfs.py selftest-crypto            this tool's crypto against the published vectors
+  An image milkOS is encrypting or decrypting in place is read in either form (check
+  counts both); commands that write refuse it until milkOS has finished.
   Encrypted images: every command takes --passphrase-file FILE, --recovery KEY or
   $MILKFS_PASSPHRASE (else it asks); new passphrases --new-passphrase-file FILE or
   $MILKFS_NEW_PASSPHRASE.
@@ -54,6 +56,9 @@ VERSION = 1      # written by mkfs; 0, 1, 2 (reflinks) and 3 (encrypted) are rea
 MAX_VERSION = 3
 CRYPT_VERSION = 3
 SB_ENCRYPTED = 2
+SB_CONVERTING = 4       # being encrypted (or, with SB_TO_PLAIN, decrypted) in place:
+SB_TO_PLAIN = 8         # a block is in either form, its pointer's checksum says which
+K_CONVERT, K_REMAP = 9, 10  # (VOL_OBJ, ...) items of a conversion in progress
 MIN_VERSION = 0
 MAX_SNAPS = 30
 K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE = 1, 2, 3, 4, 5, 6
@@ -568,7 +573,9 @@ class Image:
         self.size = os.fstat(self.f.fileno()).st_size
         self.key = None
         sb = self.superblock()
-        if unlock and sb and sb["flags"] & SB_ENCRYPTED:
+        self.converting = bool(sb and sb["flags"] & SB_CONVERTING)
+        self.forms = {"plain": set(), "sealed": set()}  # blocks read, by form
+        if unlock and sb and sb["flags"] & (SB_ENCRYPTED | SB_CONVERTING):
             self.key = volume_key(self, sb)
 
     def raw(self, blk):
@@ -579,10 +586,14 @@ class Image:
     def read(self, p):
         blk, birth, csum = p
         b = self.raw(blk)
+        if self.converting and xxh64(b) == csum:
+            self.forms["plain"].add(blk)
+            return b  # not converted yet: plain
         if self.key:
             pt = self.key.open(blk, birth, csum, b)
             if pt is None:
                 raise IOError(f"checksum (tag) mismatch in block {blk} (birth {birth})")
+            self.forms["sealed"].add(blk)
             return pt
         if xxh64(b) != csum:
             raise IOError(f"checksum mismatch in block {blk} (birth {birth})")
@@ -932,6 +943,9 @@ class Writer:
     """Writes new blocks into blocks the current superblock doesn't reach."""
 
     def __init__(self, path, img, sb):
+        if sb["flags"] & SB_CONVERTING:
+            sys.exit(f"{path}: being converted (encrypted or decrypted) in place: "
+                     "let milkOS finish that first")
         self.f = open(path, "r+b")
         self.key = img.key
         used = all_used(img, sb)
@@ -1848,6 +1862,13 @@ def cmd_check(path, quiet):
               "none (the next mount rebuilds it)" if not sb["spacemap"][0] else "BAD")
         if sb["flags"] & 1:
             print("  history branched (a clone was promoted): no dead lists, sweeps reclaim space")
+        if sb["flags"] & SB_CONVERTING:
+            print(f"  encryption: being {'decrypted' if sb['flags'] & SB_TO_PLAIN else 'encrypted'} in place: "
+                  f"{len(img.forms['sealed'])} block(s) read sealed, {len(img.forms['plain'])} plain")
+        elif sb["flags"] & SB_ENCRYPTED:
+            print("  encryption: on")
+        else:
+            print("  encryption: off")
         for s in sb["snaps"]:
             if s["clone"]:
                 print(f"  clone {s['name']} (id {s['id']}) of the snapshot at gen {s['gen']}")

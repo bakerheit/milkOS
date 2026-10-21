@@ -218,7 +218,12 @@ impl State {
     /// Start converting (the open transaction is committed). Encrypting: `key` is the new
     /// volume key and `keyring` its keyring block (written, plaintext, not yet
     /// referenced); decrypting: the volume's own key and keyring.
-    fn convert_begin(&mut self, to_sealed: bool, key: Arc<VolumeKey>, keyring: BlockPtr) -> Result<()> {
+    fn convert_begin(
+        &mut self,
+        to_sealed: bool,
+        key: Arc<VolumeKey>,
+        keyring: BlockPtr,
+    ) -> Result<()> {
         let used = self.store.total() - self.store.free_blocks();
         self.store.crypt = Some(key);
         self.store.convert = Some(to_sealed);
@@ -269,7 +274,11 @@ impl State {
 
     fn tree_root_ptr(&self, t: Tree) -> Option<BlockPtr> {
         match t {
-            Tree::Snap(g) => self.snaps.iter().find(|s| s.generation == g).map(|s| s.root),
+            Tree::Snap(g) => self
+                .snaps
+                .iter()
+                .find(|s| s.generation == g)
+                .map(|s| s.root),
             _ => None,
         }
     }
@@ -467,7 +476,9 @@ impl State {
         let mut pieces: Vec<Ext> = Vec::new();
         for (idx, (b, c)) in out.into_iter().enumerate() {
             match pieces.last_mut() {
-                Some(p) if p.block + p.csums.len() as u64 == b && p.csums.len() < MAX_RUN as usize => {
+                Some(p)
+                    if p.block + p.csums.len() as u64 == b && p.csums.len() < MAX_RUN as usize =>
+                {
                     p.csums.push(c)
                 }
                 _ => pieces.push(Ext {
@@ -490,7 +501,9 @@ impl State {
             Some(p) => !self.store.in_target_form(p)?,
             None => false, // dirty: written in the new form at the next commit
         };
-        let mut changes: Vec<(Key, Vec<(Key, Vec<u8>)>)> = Vec::new();
+        // Item key -> what replaces it (nothing: deleted).
+        type Items = Vec<(Key, Vec<u8>)>;
+        let mut changes: Vec<(Key, Items)> = Vec::new();
         let mut written = 0;
         for (k, v) in &leaf.items {
             if *k < cursor {
@@ -505,7 +518,10 @@ impl State {
                 && let (Some(pieces), n) = self.convert_ext(t, &e)?
             {
                 written += n;
-                changes.push((*k, pieces.iter().map(|p| (p.key(k.obj), p.encode())).collect()));
+                changes.push((
+                    *k,
+                    pieces.iter().map(|p| (p.key(k.obj), p.encode())).collect(),
+                ));
             }
         }
         let first = leaf.items.first().cloned();
@@ -640,7 +656,8 @@ impl State {
             }
         }
         self.conv.as_mut().unwrap().paused = None;
-        let mut written = 0u64;
+        let mut written = 0u64; // blocks rewritten (progress)
+        let mut work = 0u64; // verify reads, free blocks cleared (batch size only)
         let mut sweep_after = false;
         let r = (|| -> Result<Step> {
             loop {
@@ -694,7 +711,7 @@ impl State {
                         }
                         let t = self.tree_for(p, id).ok_or(Errno::EIO)?;
                         let next = self.verify_leaf(t, st.cursor)?;
-                        written += 1;
+                        work += 1;
                         match next {
                             Some(k) => {
                                 st.tree = (p as u64) << 56 | id;
@@ -721,7 +738,7 @@ impl State {
                             }
                             b += 1;
                         }
-                        written += n / 4;
+                        work += n / 4;
                         st.cursor = Key::new(0, 0, b);
                         if b >= end {
                             self.store.cache.flush()?;
@@ -731,7 +748,7 @@ impl State {
                     }
                     _ => return Err(Errno::EIO),
                 }
-                if written >= budget {
+                if written + work >= budget {
                     return Ok(Step::More);
                 }
             }
@@ -765,7 +782,9 @@ impl State {
     fn verify_done(&mut self, st: &mut ConvertState) -> Result<Step> {
         let left = self.conv.as_ref().unwrap().left;
         if left > 0 {
-            crate::kprintln!("milkfs: convert: {left} block(s) still in the old form: another pass");
+            crate::kprintln!(
+                "milkfs: convert: {left} block(s) still in the old form: another pass"
+            );
             st.passes += 1;
             st.phase = PH_LIVE;
             st.tree = 0;
@@ -823,7 +842,11 @@ impl State {
         if let Some(s) = done {
             crate::kprintln!(
                 "milkfs: {} done: {} block(s) rewritten{}",
-                if to_sealed { "encryption" } else { "decryption" },
+                if to_sealed {
+                    "encryption"
+                } else {
+                    "decryption"
+                },
                 s.done,
                 if s.passes > 0 {
                     alloc::format!(", {} extra pass(es)", s.passes)
@@ -835,14 +858,18 @@ impl State {
         Ok(Step::Done)
     }
 
-    /// One line about the conversion for `info` (None: not converting).
+    /// The conversion's progress for `info` (None: not converting), machine-readable:
+    /// `encrypt|decrypt PCT% (DONE/TOTAL blocks), PHASE[, paused: REASON]`, PHASE one of
+    /// `live tree`, `snapshot NAME`, `clone NAME`, `verifying`, `clearing free space`.
+    /// TOTAL is the blocks in use when it started; DONE may pass it (snapshots get their
+    /// own tree nodes), PCT never says 100 before it is done.
     pub fn convert_text(&self) -> Option<String> {
         let c = self.conv.as_ref()?;
         let s = &c.state;
         let what = if self.store.writes_sealed() {
-            "encrypting"
+            "encrypt"
         } else {
-            "decrypting"
+            "decrypt"
         };
         let phase = match s.phase {
             PH_LIVE => String::from("live tree"),
@@ -863,9 +890,15 @@ impl State {
             PH_VERIFY => String::from("verifying"),
             _ => String::from("clearing free space"),
         };
-        let pct = (s.done * 100).checked_div(s.total.max(1)).unwrap_or(0).min(99);
+        // Rewriting is most of it (snapshots add their own tree nodes, so "about");
+        // verifying and clearing free space are the last few percent.
+        let pct = match s.phase {
+            PH_VERIFY => 95,
+            PH_WIPE => 96 + 3 * s.cursor.off / self.store.total().max(1),
+            _ => (s.done * 95 / s.total.max(1)).min(94),
+        };
         Some(alloc::format!(
-            "{what} in place: {pct}% ({} of about {} blocks), {phase}{}",
+            "{what} {pct}% ({}/{} blocks), {phase}{}",
             s.done,
             s.total,
             c.paused

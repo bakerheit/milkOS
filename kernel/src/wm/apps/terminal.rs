@@ -163,13 +163,13 @@ impl Tab {
             concat!(
                 "milkOS ",
                 env!("MILKOS_VERSION"),
-                " terminal: msh on /dev/tty1. Kernel log above, live."
+                ": msh on /dev/tty1, the kernel log above (live)."
             )
         } else {
             concat!(
                 "milkOS ",
                 env!("MILKOS_VERSION"),
-                " terminal. Kernel log above, live. Type 'help'."
+                ": the kernel log above (live). Type 'help'."
             )
         };
         t.lines.push((String::from(banner), MATCHA));

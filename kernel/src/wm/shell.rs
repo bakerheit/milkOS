@@ -470,10 +470,6 @@ impl Launcher {
         self.sel = 0;
     }
 
-    pub fn result_count(&self) -> usize {
-        self.items.len()
-    }
-
     /// Row y offsets in the results panel: (y, height, header kind or item index).
     fn layout(&self) -> Vec<(i32, i32, Option<super::skim::Kind>, Option<usize>)> {
         let mut y = 8;
@@ -517,6 +513,19 @@ pub fn control_rect() -> Rect {
 const SLIDER_Y: [i32; 2] = [88, 160];
 const TRACK_X: i32 = 30;
 const TRACK_W: i32 = CC_W - 60;
+
+/// The tiles inside glass panels (control centre, notification centre): milk at 0.7 over
+/// the glass in Whole milk; in Chocolate milk a shade lighter than the glass (oat), so they
+/// read as raised the same way.
+pub(super) fn tile_colour(solid: bool) -> (Color, u8) {
+    if solid {
+        (OAT, 255)
+    } else if super::theme::dark() {
+        (OAT, a(700))
+    } else {
+        (MILK, a(700))
+    }
+}
 
 // ---- home cards ---------------------------------------------------------------------------
 
@@ -925,8 +934,7 @@ impl Desktop {
 
     fn paint_control(&self, p: &mut Painter, solid: bool) {
         let s = &self.settings;
-        // Tiles are milk at 0.7 over glass; over plain milk (solid mode) use oat so they show.
-        let (tbg, ta) = if solid { (OAT, 255) } else { (MILK, a(700)) };
+        let (tbg, ta) = tile_colour(solid);
         let tile = |p: &mut Painter, tx: i32, label: &str, sub: &str, on: bool| {
             if on {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, STRAW, 255);
@@ -937,7 +945,15 @@ impl Desktop {
             p.text_p(tx + 14, 26, label, c1, true);
             p.text_p(tx + 14, 46, sub, c2, false);
         };
-        tile(p, 16, "Network", "not yet", false);
+        let net = crate::net::config();
+        let addr = if !crate::net::has_device() {
+            String::from("no network")
+        } else if net.configured() {
+            format!("{}", net.addr)
+        } else {
+            String::from("waiting for DHCP")
+        };
+        tile(p, 16, "Network", &addr, false);
         tile(
             p,
             148,

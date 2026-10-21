@@ -71,6 +71,11 @@ pub trait WindowContents {
     fn document_path(&self) -> Option<alloc::string::String> {
         None
     }
+    /// The pointer moved over the body with no button down (or left it: (-1, -1)). True if
+    /// the body needs redrawing (a hover state changed).
+    fn hover(&mut self, _x: i32, _y: i32) -> bool {
+        false
+    }
     /// A drag began at body (x, y): the path of the file being dragged there, if any
     /// (Files). The desktop takes the drag over from then on.
     fn drag_start(&mut self, _x: i32, _y: i32) -> Option<alloc::string::String> {
@@ -95,6 +100,29 @@ pub trait WindowContents {
     /// Menu titles for the menu bar while this window is focused.
     fn menus(&self) -> &'static [&'static str] {
         &["File", "Edit", "View", "Window", "Help"]
+    }
+}
+
+/// The hit under `at` (hover states): its index in `hits`.
+pub fn hover_index<T>(hits: &[(Rect, T)], at: Option<(i32, i32)>) -> Option<usize> {
+    let (x, y) = at?;
+    hits.iter().position(|(r, _)| super::paint::hit(r, x, y))
+}
+
+/// Move the hover point; true if it now lands on a different hit (redraw).
+pub fn hover_move<T>(hits: &[(Rect, T)], at: &mut Option<(i32, i32)>, x: i32, y: i32) -> bool {
+    let new = (x >= 0).then_some((x, y));
+    let changed = hover_index(hits, *at) != hover_index(hits, new);
+    *at = new;
+    changed
+}
+
+/// SPEC hover: a button lightens (white, 6%); a list row gets a faint strawberry tint.
+pub fn paint_hover(p: &mut Painter, r: Rect, row: bool) {
+    if row {
+        p.rrect_r(r, R_ROW, STRAW, 0x22);
+    } else {
+        p.rrect_r(r, R_BUTTON, WHITE, a(70));
     }
 }
 

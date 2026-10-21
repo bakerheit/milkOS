@@ -336,6 +336,8 @@ pub struct Desktop {
     drag: Option<Drag>,
     /// Window whose traffic lights the pointer is over.
     hover_lights: Option<u32>,
+    /// Window whose body the pointer is over (hover states).
+    hover_body: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
     /// Dock item being pressed (drawn 4% darker until release).
@@ -424,6 +426,7 @@ impl Desktop {
             pointer: input::pointer(),
             drag: None,
             hover_lights: None,
+            hover_body: None,
             tip: None,
             dock_pressed: None,
             menu: None,
@@ -1100,21 +1103,18 @@ impl Desktop {
             self.dims = dims;
             self.damage_all();
         }
-        let vis: Vec<Rect> = self
-            .windows
-            .iter()
-            .filter(|w| self.visible(w))
-            .map(|w| w.rect)
-            .collect();
         let mut live: Vec<PanelKey> = Vec::new();
         for l in layers {
             let Layer::Panel(spec) = l else {
                 continue;
             };
             live.push(spec.key);
-            let solid = spec.style != Style::Opaque
-                && spec.style != Style::Bar
-                && vis.iter().any(|w| w.intersects(&spec.rect));
+            // SPEC Glass: live blur over windows isn't supported, so a glass panel is always
+            // composited over Wb (the blurred wallpaper) and drawn opaque: a window under the
+            // notification centre, control centre, a menu, a toast or Skim never shows
+            // through. (`solid`, plain milk blended over the windows, let their text read
+            // through at 8%.)
+            let solid = false;
             let ok = self
                 .cache
                 .get(&spec.key)
@@ -1265,9 +1265,8 @@ impl Desktop {
                     if spec.shadow {
                         p.shadow(spec.rect, spec.radius, &SHADOW_FLOAT);
                     }
-                    let a = if c.solid { GLASS_SOLID_A } else { 255 };
                     let r = spec.rect;
-                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, a);
+                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, 255);
                 }
             }
         }
@@ -1721,19 +1720,15 @@ impl Desktop {
                 Layer::Panel(s) if s.key == PanelKey::LaunchResults => Some(s.rect),
                 _ => None,
             });
+            // The rows as laid out (kind headers in between), like a click.
             if let Some(r) = rows
                 && hit(&r, x, y)
-                && y - r.y >= 40
+                && let Some(row) = self.launcher.as_ref().and_then(|l| l.item_at(y - r.y))
+                && let Some(l) = &mut self.launcher
+                && row != l.sel
             {
-                let row = ((y - r.y - 40) / LAUNCH_ROW_H) as usize;
-                let n = self.launcher.as_ref().map_or(0, |l| l.result_count());
-                if let Some(l) = &mut self.launcher
-                    && row < n
-                    && row != l.sel
-                {
-                    l.sel = row;
-                    self.invalidate(PanelKey::LaunchResults);
-                }
+                l.sel = row;
+                self.invalidate(PanelKey::LaunchResults);
             }
         }
         if self.menu.is_some() {
@@ -1751,6 +1746,29 @@ impl Desktop {
                     self.menu_hover = row;
                     self.invalidate(PanelKey::Menu);
                 }
+            }
+        }
+        // Hover states inside window bodies.
+        let body = self.window_at(x, y).filter(|&id| {
+            self.mode == Mode::Desktop
+                && self
+                    .win(id)
+                    .is_some_and(|w| w.hit(x, y) == Some(Part::Body))
+        });
+        if body != self.hover_body
+            && let Some(old) = self.hover_body
+            && let Some(w) = self.win_mut(old)
+            && w.contents.hover(-1, -1)
+        {
+            w.dirty = true;
+        }
+        self.hover_body = body;
+        if let Some(id) = body
+            && let Some(w) = self.win_mut(id)
+        {
+            let b = window::body_rect(w.rect.w, w.rect.h);
+            if w.contents.hover(x - w.rect.x - b.x, y - w.rect.y - b.y) {
+                w.dirty = true;
             }
         }
         let hl = self.window_at(x, y).filter(|&id| {

@@ -211,7 +211,8 @@ impl Files {
             .enumerate()
             .map(|(i, (n, p))| (44 + i as i32 * 28, *n, *p))
             .collect();
-        let mut devs: Vec<(&'static str, &'static str)> = alloc::vec![("milk", "/")];
+        // The root file system and the Milk disk (two "milk"s read like a typo).
+        let mut devs: Vec<(&'static str, &'static str)> = alloc::vec![("milkOS", "/")];
         if crate::fs::stat(VOLUME).is_ok() {
             devs.push(("Milk", VOLUME));
             devs.push(("Time Machine", TM));

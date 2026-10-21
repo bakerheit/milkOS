@@ -114,8 +114,6 @@ pub const BLUR_PASSES: usize = 3;
 pub const GLASS_A: u8 = a(550);
 pub const GLASS_STRONG_A: u8 = a(700);
 pub const GLASS_BORDER_A: u8 = a(750);
-/// A glass panel over a window is plain milk at this alpha.
-pub const GLASS_SOLID_A: u8 = a(920);
 
 // ---- shadows (grow, dy, alpha) -------------------------------------------------------------
 pub const SHADOW_WINDOW: [(i32, i32, u8); 3] = [(10, 12, a(50)), (5, 8, a(70)), (0, 4, a(120))];

@@ -1540,7 +1540,7 @@ impl Desktop {
                 self.invalidate(PanelKey::MenuBar);
             }
             if self.mode == Mode::Home {
-                for i in 0..6 {
+                for i in 0..shell::card_count() {
                     self.invalidate(PanelKey::Card(i));
                 }
             }

@@ -778,13 +778,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
         }
         // Overlays at 1440x900: Spaces, Today, Skim, the lock screen.
-        "big-spaces" | "big-today" | "big-skim" | "big-lock" => {
-            b.0.push(Step::Resolution(1440, 900));
+        "big-spaces" | "big-today" | "big-skim" | "big-lock" | "mid-today" | "mid-skim" => {
+            let (w, h) = if name.starts_with("mid") {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
             b.wait(600);
             match name {
                 "big-spaces" => b.key(Key::F(3), Mods::NONE),
-                "big-today" => b.key(Key::F(4), Mods::NONE),
-                "big-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("mo"),
+                "big-today" | "mid-today" => b.key(Key::F(4), Mods::NONE),
+                "big-skim" | "mid-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("o"),
                 _ => b.key(Key::Char('q'), Mods::META_CTRL),
             };
             b.wait(900);

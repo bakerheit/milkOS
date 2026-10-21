@@ -44,6 +44,8 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 
 `dock-alternatives.html`: six alternatives to the dock (left rail, taskbar, apps in the menu bar, auto-hide with previews, dots pill, corner fan), with the screen space each costs. Source `dock-alternatives.mjs`.
 
+`dock-alternatives-2.html`: six more dock ideas that are not an icon strip at an edge (Rooms, Recents strip, Edge slots, Keypad, Trays, Selection-aware dock). Source `dock-alternatives-2.mjs`.
+
 ## Art direction
 `ART.md` is the art direction for icons, wallpapers, the boot splash and sounds. `art-direction.html` is the visual reference, `art/check-wallpaper.py` checks a wallpaper against the glass-contrast rule. Source: `art-direction.mjs`.
 

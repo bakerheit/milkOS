@@ -937,8 +937,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(super::theme::screen_w() - 30, 14).wait(600);
             if name == "notifclear" {
                 let r = super::notif::rect();
-                b.click(r.x + super::notif::W - 16 - 38, r.y + 160 + 9)
-                    .wait(500);
+                b.click(r.x + super::notif::W - 18 - 30, r.y + 20).wait(500);
             }
         }
         // Hover states: over a Welcome button, over a Settings section.
@@ -964,6 +963,115 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             let (x, y) = dock_icon_center(9);
             b.wait(300).click(x, y).wait(4000);
+        }
+        // The notification drawer (SPEC "Notification drawer"): Mary's four states.
+        "drawer-arrive" | "drawer-open" | "drawer-keys" | "drawer-empty" | "drawer-mentions" => {
+            if name != "drawer-empty" {
+                b.wait(300)
+                    .typ("notify Mum Photos from the weekend")
+                    .enter()
+                    .wait(300);
+                if name != "drawer-arrive" {
+                    b.typ("notify Gus @milk the allocator merged, build is green")
+                        .enter()
+                        .wait(300);
+                    b.key(Key::Char(' '), Mods::META)
+                        .wait(150)
+                        .typ("back up now")
+                        .wait(200);
+                    b.enter().wait(500);
+                    b.key(
+                        Key::Char('3'),
+                        Mods {
+                            meta: true,
+                            shift: true,
+                            ..Mods::NONE
+                        },
+                    )
+                    .wait(1200);
+                    b.typ("notify Gus PR is up for review").enter().wait(400);
+                }
+            }
+            if name == "drawer-arrive" {
+                b.wait(600);
+            } else {
+                b.key(Key::Char('n'), Mods::CTRL).wait(500);
+            }
+            match name {
+                "drawer-keys" => {
+                    // Down twice, collapse the selected group, then hover a card (its x).
+                    b.key(Key::Down, Mods::NONE).wait(150);
+                    b.key(Key::Down, Mods::NONE).wait(150);
+                    b.key(Key::Left, Mods::NONE).wait(300);
+                    let r = super::notif::rect();
+                    b.glide(600, 400, r.x + 150, r.y + 88 + 22 + 30, 8)
+                        .wait(400);
+                }
+                "drawer-mentions" => {
+                    b.key(Key::Tab, Mods::NONE).wait(400);
+                }
+                "drawer-empty" => {
+                    // Do Not Disturb on: the switch at the bottom.
+                    let r = super::notif::rect();
+                    b.click(r.x + r.w - 12 - 36, r.y + r.h - 12 - 22).wait(500);
+                }
+                _ => {}
+            }
+        }
+        // Tabs everywhere (SPEC Tabs). Files is at (96, 64) 600 wide, the Terminal at
+        // (440, 270): drag the Terminal by its title bar onto Files' title bar.
+        "tabs-drop" | "tabs-merge" | "tabs-split" | "tabs-mixed" | "tabs-plus" | "tabs-keys"
+        | "tabs-close" => {
+            b.wait(300).to(700, 286).wait(30).down().wait(30);
+            for i in 1..=14 {
+                b.to(700 + (330 - 700) * i / 14, 286 + (80 - 286) * i / 14)
+                    .wait(16);
+            }
+            b.wait(200);
+            if name == "tabs-drop" {
+                b.wait(300);
+            } else {
+                b.up().wait(500);
+                // Two tabs now; Files' strip is 38 high, tabs 160 wide from x84.
+                match name {
+                    "tabs-split" => {
+                        // Pull the Terminal tab (the second) down out of the strip.
+                        b.drag(96 + 84 + 166 + 60, 64 + 22, 560, 420, 12).wait(500);
+                    }
+                    "tabs-mixed" | "tabs-keys" | "tabs-close" => {
+                        // Paint too (Notes already lives in space 2; Paint opens at
+                        // (255, 177)): drag it by its title bar onto the strip.
+                        let (x, y) = dock_icon_center(4);
+                        b.click(x, y).wait(600);
+                        b.drag(420, 193, 330, 80, 12).wait(500);
+                        if name == "tabs-keys" {
+                            b.key(
+                                Key::Char('['),
+                                Mods {
+                                    meta: true,
+                                    shift: true,
+                                    ..Mods::NONE
+                                },
+                            )
+                            .wait(400);
+                        }
+                        if name == "tabs-close" {
+                            b.key(Key::Char('w'), Mods::META).wait(500);
+                        }
+                    }
+                    "tabs-plus" => {
+                        // The + after the tabs: Skim, then Paint joins as a tab.
+                        b.click(96 + 84 + 2 * 166 + 4 + 14, 64 + 22).wait(400);
+                        b.typ("paint").wait(200).enter().wait(800);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "tabs-terminal" => {
+            // The Terminal alone with two shells: its tabs are the window's strip.
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(600);
+            b.typ("echo second shell").enter().wait(300);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);
@@ -997,7 +1105,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .drag(300, 80, 360, 120, 30)
                 .wait(500);
             b.glide(360, 120, 700, 420, 20).click(700, 420);
-            b.typ("cowsay hello Andrew").enter().wait(1500);
+            b.typ("cowsay hello milk").enter().wait(1500);
             b.key(Key::Char(' '), Mods::META)
                 .wait(300)
                 .typ("not")

@@ -28,6 +28,8 @@ pub enum Kind {
     Calc,
     Command,
     App,
+    /// Tabs of tabbed windows (tabs everywhere).
+    Tab,
     Action,
     Setting,
     File,
@@ -41,6 +43,7 @@ impl Kind {
             Kind::App => "APPLICATIONS",
             Kind::Action => "ACTIONS",
             Kind::Setting => "SETTINGS",
+            Kind::Tab => "TABS",
             Kind::File => "FILES",
         }
     }
@@ -54,6 +57,7 @@ impl Kind {
             Kind::App => 2 + more,
             Kind::Action => 2 + more,
             Kind::Setting => 1,
+            Kind::Tab => 2 + more,
             Kind::File => 2 + more,
         }
     }
@@ -69,6 +73,16 @@ pub enum Act {
     Command(String),
     /// An installed package (`packages::get`).
     Package(usize),
+    /// Tab `1` of window `0`.
+    Tab(u32, usize),
+}
+
+/// Every tab of every tabbed window (window, tab, title, app), set by the desktop before a
+/// search.
+static TABS: SpinLock<Vec<(u32, usize, String, String)>> = SpinLock::new(Vec::new());
+
+pub fn set_tabs(v: Vec<(u32, usize, String, String)>) {
+    *TABS.lock() = v;
 }
 
 #[derive(Clone)]
@@ -354,6 +368,24 @@ pub fn search(q: &str) -> Vec<Item> {
         }
     }
     if !empty {
+        // Tabs of tabbed windows, by their title or their app.
+        for (wid, i, title, app) in TABS.lock().iter() {
+            let s = fuzzy(q, title).or_else(|| fuzzy(q, app).map(|s| s - 10));
+            if let Some(s) = s {
+                out.push((
+                    s,
+                    Item {
+                        kind: Kind::Tab,
+                        title: title.clone(),
+                        sub: format!("{app}, a tab"),
+                        icon: Icon::Spaces,
+                        bg: MILK,
+                        fg: ESPRESSO,
+                        act: Act::Tab(*wid, *i),
+                    },
+                ));
+            }
+        }
         // Actions: match the name, or "app name".
         for a in actions::all() {
             let s = fuzzy(q, a.name)

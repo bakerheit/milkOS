@@ -18,9 +18,13 @@ use crate::{heap, klog, pmm, timer};
 use super::super::clipboard;
 use super::super::event::Key;
 use super::super::paint::{Painter, hit};
+use super::super::session::user_name;
 use super::super::theme::*;
 use super::super::tty;
-use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
+use super::super::window::{
+    App, KeyInput, Part, PointerInput, PointerKind, Strip, WindowContents, paint_strip, plus_rect,
+    tab_close_rect, tab_rect,
+};
 use super::super::{Mode, Request, request, rtc, shell::fmt_uptime};
 use super::fsx;
 
@@ -42,10 +46,8 @@ pub fn queue_tab(cmd: Option<String>) {
     NEW_TABS.lock().push(cmd);
 }
 
-/// The tab strip (shown once there are two tabs or more).
-const STRIP_H: i32 = 30;
-const PLUS_W: i32 = 36;
-const TAB_MAX_W: i32 = 220;
+/// The body's tab strip (SPEC Tabs: 38 high), when the Terminal shares its window.
+const STRIP_H: i32 = super::super::window::STRIP_H;
 const PAD: i32 = 14;
 const LINE_H: i32 = 18;
 
@@ -828,9 +830,14 @@ pub struct Terminal {
     tabs: Vec<Tab>,
     active: usize,
     title: String,
-    /// Tab strip hit boxes, as drawn: (tab, its close box) per tab, and the + button.
-    strip: Vec<(Rect, Rect)>,
-    plus: Rect,
+    /// The window draws the shell tabs in its title strip (the Terminal is alone in its
+    /// window); otherwise, with 2+ shells, they are drawn at the top of the body.
+    external: bool,
+    /// Strip hover states (only for the strip drawn in the body).
+    tab_hover: Option<usize>,
+    close_hover: Option<usize>,
+    /// Body width at the last draw (for hit-testing the strip).
+    width: i32,
 }
 
 impl Terminal {
@@ -839,8 +846,10 @@ impl Terminal {
             tabs: alloc::vec![Tab::first()],
             active: 0,
             title: String::new(),
-            strip: Vec::new(),
-            plus: Rect::new(0, 0, 0, 0),
+            external: false,
+            tab_hover: None,
+            close_hover: None,
+            width: 520,
         };
         t.retitle();
         t
@@ -849,14 +858,45 @@ impl Terminal {
     fn retitle(&mut self) {
         let tab = &self.tabs[self.active];
         self.title = match (tab.tty, self.tabs.len()) {
-            (0, _) => String::from("andrew: sh"),
-            (_, 1) => String::from("andrew: msh"),
-            (n, _) => format!("andrew: {}  (tty{n})", tab.label),
+            (0, _) => format!("{}: sh", user_name()),
+            (_, 1) => format!("{}: msh", user_name()),
+            (n, _) => format!("{}: {}  (tty{n})", user_name(), tab.label),
         };
     }
 
     fn top(&self) -> i32 {
-        if self.tabs.len() > 1 { STRIP_H } else { 0 }
+        if self.tabs.len() > 1 && !self.external {
+            STRIP_H
+        } else {
+            0
+        }
+    }
+
+    /// SPEC: Terminal tabs read "1 msh", "2 msh".
+    fn tab_titles(&self) -> Vec<String> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, t)| format!("{} {}", i + 1, t.label))
+            .collect()
+    }
+
+    /// The body strip's tab / close / + under (x, y).
+    fn strip_hit(&self, x: i32, y: i32) -> Option<Part> {
+        if y >= STRIP_H {
+            return None;
+        }
+        let n = self.tabs.len();
+        for i in 0..n {
+            let r = tab_rect(i, n, self.width, 8);
+            if hit(&tab_close_rect(r), x, y) {
+                return Some(Part::TabClose(i));
+            }
+            if hit(&r, x, y) {
+                return Some(Part::Tab(i));
+            }
+        }
+        hit(&plus_rect(n, self.width, 8), x, y).then_some(Part::TabNew)
     }
 
     /// Open a tab (msh on a free tty, or the built-in shell if there is no msh), running
@@ -917,43 +957,27 @@ impl Terminal {
         true
     }
 
+    /// The shell tabs at the top of the body (SPEC Tabs, Terminal colours; first tab at x8,
+    /// there are no traffic lights here).
     fn draw_strip(&mut self, p: &mut Painter, w: i32) {
-        self.strip.clear();
         p.fill(0, 0, w, STRIP_H, TERM_BAR);
-        let n = self.tabs.len() as i32;
-        let avail = w - 8 - PLUS_W;
-        let tw = (avail / n).min(TAB_MAX_W);
-        for (i, t) in self.tabs.iter().enumerate() {
-            let x = 8 + i as i32 * tw;
-            let r = Rect::new(x, 4, tw - 4, STRIP_H - 4);
-            let active = i == self.active;
-            if active {
-                p.rrect(r.x, r.y, r.w, r.h + 8, 8, TERM_BG, 255);
-            } else if i + 1 != self.active && i + 1 < self.tabs.len() {
-                p.fill(r.x + r.w + 1, 10, 1, STRIP_H - 18, rgb(0x5C, 0x4C, 0x42));
-            }
-            let fg = if active { TERM_FG } else { LATTE };
-            // Close box on the left, the label (number + name) in the rest.
-            let cb = Rect::new(r.x + 8, r.y + 5, 14, 14);
-            let (cx, cy) = (cb.x + 3, cb.y + 3);
-            for k in 0..8 {
-                p.fill(cx + k, cy + k, 2, 1, fg);
-                p.fill(cx + 7 - k, cy + k, 2, 1, fg);
-            }
-            let room = ((r.w - 40) / 8).max(1) as usize;
-            let mut label = format!("{}  {}", i + 1, t.label);
-            if label.chars().count() > room {
-                label = label.chars().take(room.saturating_sub(1)).collect();
-                label.push('~');
-            }
-            p.text(r.x + 30, r.y + 6, &label, fg);
-            self.strip.push((r, cb));
-        }
-        // +: a new tab.
-        let px = 8 + n * tw + 6;
-        self.plus = Rect::new(px, 6, 22, 20);
-        p.fill(px + 6, 15, 11, 2, LATTE);
-        p.fill(px + 10, 11, 2, 10, LATTE);
+        let s = Strip {
+            titles: self.tab_titles(),
+            active: self.active,
+            terminal: true,
+            inner: true,
+        };
+        paint_strip(
+            p,
+            &s,
+            w,
+            8,
+            self.tab_hover,
+            self.close_hover,
+            TERM_BG,
+            TERM_FG,
+            true,
+        );
     }
 }
 
@@ -979,7 +1003,43 @@ impl WindowContents for Terminal {
         &["Shell", "Edit", "View", "Window", "Help"]
     }
 
+    fn inner_tabs(&self) -> Option<(Vec<String>, usize)> {
+        (self.tabs.len() > 1).then(|| (self.tab_titles(), self.active))
+    }
+
+    fn inner_select(&mut self, i: usize) {
+        self.select(i);
+    }
+
+    fn inner_close(&mut self, i: usize) {
+        self.close_tab(i);
+    }
+
+    fn inner_new(&mut self) {
+        self.new_tab(None);
+    }
+
+    fn set_strip_external(&mut self, on: bool) {
+        self.external = on;
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        if self.top() == 0 {
+            return false;
+        }
+        let (t, c) = match self.strip_hit(x, y) {
+            Some(Part::Tab(i)) => (Some(i), None),
+            Some(Part::TabClose(i)) => (Some(i), Some(i)),
+            _ => (None, None),
+        };
+        let changed = t != self.tab_hover || c != self.close_hover;
+        self.tab_hover = t;
+        self.close_hover = c;
+        changed
+    }
+
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, focused: bool) {
+        self.width = w;
         let top = self.top();
         if top > 0 {
             self.draw_strip(p, w);
@@ -1022,17 +1082,13 @@ impl WindowContents for Terminal {
         let top = self.top();
         if top > 0 && e.y < top {
             if let PointerKind::Down(_) = e.kind {
-                if hit(&self.plus, e.x, e.y) {
-                    self.new_tab(None);
-                    return true;
+                match self.strip_hit(e.x, e.y) {
+                    Some(Part::TabNew) => self.new_tab(None),
+                    Some(Part::TabClose(i)) => self.close_tab(i),
+                    Some(Part::Tab(i)) => return self.select(i),
+                    _ => return false,
                 }
-                if let Some(i) = self.strip.iter().position(|(r, _)| hit(r, e.x, e.y)) {
-                    if hit(&self.strip[i].1, e.x, e.y) {
-                        self.close_tab(i);
-                        return true;
-                    }
-                    return self.select(i);
-                }
+                return true;
             }
             return false;
         }
@@ -1112,7 +1168,7 @@ impl BuiltinShell {
         } else {
             String::from(fsx::basename(&self.cwd))
         };
-        self.prompt = format!("andrew@milk {short} % ");
+        self.prompt = format!("{}@milk {short} % ", user_name());
     }
 
     fn path(&self, arg: &str) -> String {
@@ -1216,7 +1272,7 @@ impl Shell for BuiltinShell {
                 }
                 None => out.out(&arg),
             },
-            "whoami" => out.out("andrew"),
+            "whoami" => out.out(user_name()),
             "hostname" => out.out("milk"),
             "ls" => {
                 let long = rest.first() == Some(&"-l");

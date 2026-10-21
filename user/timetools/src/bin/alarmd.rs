@@ -3,7 +3,8 @@
 //! -q: say nothing at start.
 //!
 //! Started by init. Once a second it looks at the files Clock and Calendar write:
-//! `~/Library/Clock/alarms`, `~/Library/Clock/timers` and `~/Library/Calendar/*.cal`. Nothing is
+//! `~/Library/Clock/alarms`, `~/Library/Clock/timers`, `~/Library/Calendar/*.cal` and
+//! `~/Library/Reminders/*.rem`. Nothing is
 //! cached, so an edit made by an app counts on the next tick. Time that passed while the VM was
 //! paused is caught up (at most ten minutes of it); a clock set backwards rings nothing.
 
@@ -73,6 +74,7 @@ fn main(args: &rt::Args) -> i32 {
         alarms(&paths, from, now);
         timers(&paths, timeio::mono_ms());
         calendar(&paths, from, now);
+        reminders(&paths, from, now);
         last = now;
     }
 }
@@ -151,5 +153,12 @@ fn calendar(paths: &timeio::Paths, from: i64, now: i64) {
             format!("{} {at}", day.fmt())
         };
         ring(paths, "event", &title, when.trim());
+    }
+}
+
+fn reminders(paths: &timeio::Paths, from: i64, now: i64) {
+    let (set, _) = timeio::load_reminders(paths);
+    for (_, title, list, at) in set.rings_due(from, now) {
+        ring(paths, "reminder", &title, &format!("{list} {}", fmt_hm(at)));
     }
 }

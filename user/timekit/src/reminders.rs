@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! list  <name>  <colour>
-//! reminder  <id>  <due|->  <HH:MM|->  <repeat[:every]>  <until|->  <done: - or the day>  <flag 0|1>  <title>  <notes>
+//! reminder  <id>  <due|->  <HH:MM|->  <repeat[:every]>  <until|->  <done: - or the day>  <alert 0|1>  <title>  <notes>
 //! ```
 //!
 //! Completing a repeating reminder moves its due date to the next one instead of closing it. A
@@ -34,7 +34,8 @@ pub struct Reminder {
     pub until: Option<Date>,
     /// The day it was completed, if it is done.
     pub done: Option<Date>,
-    pub flagged: bool,
+    /// Ring when it falls due (on by default).
+    pub alert: bool,
 }
 
 impl Reminder {
@@ -49,7 +50,7 @@ impl Reminder {
             every: 1,
             until: None,
             done: None,
-            flagged: false,
+            alert: true,
         }
     }
 
@@ -116,7 +117,7 @@ impl Reminder {
             rep,
             self.until.map_or("-".to_string(), |d| d.fmt()),
             self.done.map_or("-".to_string(), |d| d.fmt()),
-            u8::from(self.flagged),
+            u8::from(self.alert),
             esc(&self.title),
             esc(&self.notes),
         )
@@ -155,7 +156,7 @@ impl Reminder {
             every,
             until: opt_date(f[5])?,
             done: opt_date(f[6])?,
-            flagged: match f[7] {
+            alert: match f[7] {
                 "0" => false,
                 "1" => true,
                 _ => return None,
@@ -242,6 +243,15 @@ impl ReminderList {
     }
 }
 
+fn default_rank(name: &str) -> u8 {
+    match name {
+        "Personal" => 0,
+        "Home" => 1,
+        "Work" => 2,
+        _ => 3,
+    }
+}
+
 /// Every list, with reminder ids unique across all of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReminderSet {
@@ -255,10 +265,14 @@ impl Default for ReminderSet {
 }
 
 impl ReminderSet {
-    /// One list, "Reminders": what a fresh machine shows.
+    /// Personal, Home and Work: what a fresh machine shows.
     pub fn defaults() -> ReminderSet {
         ReminderSet {
-            lists: alloc::vec![ReminderList::new("Reminders", "straw")],
+            lists: alloc::vec![
+                ReminderList::new("Personal", "straw"),
+                ReminderList::new("Home", "matcha"),
+                ReminderList::new("Work", "blue"),
+            ],
         }
     }
 
@@ -290,6 +304,9 @@ impl ReminderSet {
             }
             set.lists.push(l);
         }
+        // The three default lists first, in their usual order, then the rest by name.
+        set.lists
+            .sort_by_key(|l| (default_rank(&l.name), l.name.clone()));
         (set, skipped)
     }
 
@@ -366,7 +383,7 @@ impl ReminderSet {
         true
     }
 
-    /// Open reminders of one list, soonest first (undated last), flagged first among equals.
+    /// Open reminders of one list, soonest first (undated last).
     pub fn open_in(&self, list: usize) -> Vec<&Reminder> {
         let mut v: Vec<&Reminder> = self.lists[list]
             .items
@@ -417,7 +434,7 @@ impl ReminderSet {
             return out;
         }
         for l in &self.lists {
-            for r in l.items.iter().filter(|r| !r.is_done()) {
+            for r in l.items.iter().filter(|r| !r.is_done() && r.alert) {
                 if let Some(t) = r.ring_secs()
                     && t > last
                     && t <= now
@@ -435,10 +452,10 @@ impl ReminderSet {
     }
 }
 
-fn due_key(r: &Reminder) -> (u8, Option<(Date, u16)>, u8) {
+fn due_key(r: &Reminder) -> (u8, Option<(Date, u16)>) {
     match r.due {
-        Some(d) => (0, Some((d, r.time.unwrap_or(0))), u8::from(!r.flagged)),
-        None => (1, None, u8::from(!r.flagged)),
+        Some(d) => (0, Some((d, r.time.unwrap_or(0)))),
+        None => (1, None),
     }
 }
 
@@ -520,14 +537,14 @@ mod tests {
         r.repeat = Repeat::Weekly;
         r.every = 2;
         r.until = Some(d(2025, 12, 1));
-        r.flagged = true;
+        r.alert = false;
         l.items.push(r);
         let mut done = Reminder::new(4, "Done thing");
         done.done = Some(d(2025, 5, 30));
         l.items.push(done);
         let (back, skipped) = ReminderList::parse(&l.to_text());
         assert_eq!((back, skipped), (l, 0));
-        let junk = "# c\nlist\tX\tpurple\nreminder\t1\t-\t09:00\tnone\t-\t-\t0\ttime without day\t\nreminder\t2\t2025-02-30\t-\tnone\t-\t-\t0\tbad date\t\nreminder\t3\t-\t-\tsoon\t-\t-\t0\tbad repeat\t\nreminder\t4\t-\t-\tnone\t-\t-\t2\tbad flag\t\nreminder\t5\t-\t-\tnone\t-\t-\t0\tfine\nnope\n";
+        let junk = "# c\nlist\tX\tpurple\nreminder\t1\t-\t09:00\tnone\t-\t-\t0\ttime without day\t\nreminder\t2\t2025-02-30\t-\tnone\t-\t-\t0\tbad date\t\nreminder\t3\t-\t-\tsoon\t-\t-\t0\tbad repeat\t\nreminder\t4\t-\t-\tnone\t-\t-\t2\tbad alert\t\nreminder\t5\t-\t-\tnone\t-\t-\t0\tfine\nnope\n";
         let (j, skipped) = ReminderList::parse(junk);
         assert_eq!(j.items.len(), 1);
         assert_eq!(skipped, 6);
@@ -535,16 +552,19 @@ mod tests {
     }
 
     fn set() -> ReminderSet {
-        let mut s = ReminderSet::defaults();
-        s.lists.push(ReminderList::new("Work", "blue"));
+        let mut s = ReminderSet {
+            lists: alloc::vec![
+                ReminderList::new("Reminders", "straw"),
+                ReminderList::new("Work", "blue")
+            ],
+        };
         let mut a = Reminder::new(0, "later");
         a.due = Some(d(2025, 3, 9));
         let mut b = Reminder::new(0, "sooner");
         b.due = Some(d(2025, 3, 3));
         b.time = Some(10 * 60);
         let c = Reminder::new(0, "someday");
-        let mut e = Reminder::new(0, "flagged someday");
-        e.flagged = true;
+        let e = Reminder::new(0, "also someday");
         s.add(0, a);
         s.add(0, b);
         s.add(0, c);
@@ -559,7 +579,7 @@ mod tests {
     fn ordering_and_smart_lists() {
         let s = set();
         let titles: Vec<&str> = s.open_in(0).iter().map(|r| r.title.as_str()).collect();
-        assert_eq!(titles, ["sooner", "later", "flagged someday", "someday"]);
+        assert_eq!(titles, ["sooner", "later", "someday", "also someday"]);
         let today = d(2025, 3, 5);
         let due: Vec<&str> = s
             .smart(|r| r.due.is_some_and(|x| x <= today))
@@ -611,6 +631,20 @@ mod tests {
     }
 
     #[test]
+    fn alerts_can_be_off() {
+        let mut s = set();
+        let id = s.lists[0]
+            .items
+            .iter()
+            .find(|r| r.title == "sooner")
+            .unwrap()
+            .id;
+        s.get_mut(id).unwrap().alert = false;
+        let sooner = join_secs(d(2025, 3, 3), 10 * 3600);
+        assert!(s.rings_due(sooner - 1, sooner).is_empty());
+    }
+
+    #[test]
     fn done_ones_never_ring() {
         let mut s = set();
         let id = s.lists[0]
@@ -627,12 +661,21 @@ mod tests {
     #[test]
     fn from_files_and_names() {
         let (s, sk) = ReminderSet::from_files(&[]);
-        assert_eq!((s.lists.len(), sk), (1, 0));
+        assert_eq!((s.lists.len(), sk), (3, 0));
         let a = "list\tShopping\tmatcha\nreminder\t1\t-\t-\tnone\t-\t-\t0\tmilk\t\n".to_string();
         let b = "reminder\t1\t-\t-\tnone\t-\t-\t0\tclash\t\n".to_string();
         let (s, _) = ReminderSet::from_files(&[("Shopping".into(), a), ("Garden".into(), b)]);
-        assert_eq!(s.lists[1].name, "Garden");
-        assert_eq!(s.lists[1].items[0].id, 2);
+        assert_eq!(s.lists[0].name, "Garden"); // sorted by name after the defaults
+        assert_eq!(s.lists[0].items[0].id, 2);
+        let home = "list\tHome\tmatcha\n".to_string();
+        let personal = "list\tPersonal\tstraw\n".to_string();
+        let (s, _) = ReminderSet::from_files(&[
+            ("Home".into(), home),
+            ("Personal".into(), personal),
+            ("Zed".into(), "list\tZed\tblue\n".to_string()),
+        ]);
+        let names: Vec<&str> = s.lists.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["Personal", "Home", "Zed"]);
         let n = |x: &str| ReminderSet::file_name(&ReminderList::new(x, "straw"));
         assert_eq!(
             (n("Work").as_str(), n("a/b").as_str(), n("").as_str()),

@@ -139,7 +139,12 @@ impl Game {
     }
     fn render(&self, out: &mut String, title: &str) {
         out.push_str("\x1b[H");
-        let _ = writeln!(out, " {title}  score {:<5} length {:<4}\r", self.score, self.body.len());
+        let _ = writeln!(
+            out,
+            " {title}  score {:<5} length {:<4}\r",
+            self.score,
+            self.body.len()
+        );
         out.push_str(" +");
         for _ in 0..W {
             out.push('-');
@@ -271,6 +276,10 @@ fn main(args: &rt::Args) -> i32 {
     let mut t = old;
     ioctl(TCSETS, &mut t);
     print!("\x1b[?25h");
-    println!("snake: game over, length {}, score {}", g.body.len(), g.score);
+    println!(
+        "snake: game over, length {}, score {}",
+        g.body.len(),
+        g.score
+    );
     0
 }

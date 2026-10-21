@@ -18,8 +18,7 @@ const N: usize = 4;
 type Board = [[u32; N]; N];
 
 const NAMES: [&str; 12] = [
-    "", "drop", "sip", "glass", "jug", "churn", "pail", "cream", "butter", "cheese", "herd",
-    "COW",
+    "", "drop", "sip", "glass", "jug", "churn", "pail", "cream", "butter", "cheese", "herd", "COW",
 ];
 
 struct Rng(u64);
@@ -167,9 +166,23 @@ const HEIGHT: i32 = TOP + WIDTH;
 fn draw(w: &mut Window, b: &Board, score: u32, over: bool) {
     w.fill(0, 0, WIDTH, HEIGHT, gui::MILK);
     w.bold(GAP, 16, "moo2048", gui::ESPRESSO);
-    let s = alloc::format!("score {score}{}", if over { "  - no moves left (n: new game)" } else { "" });
+    let s = alloc::format!(
+        "score {score}{}",
+        if over {
+            "  - no moves left (n: new game)"
+        } else {
+            ""
+        }
+    );
     w.text(GAP + 96, 18, &s, gui::COCOA);
-    w.rrect(GAP / 2, TOP - GAP / 2, WIDTH - GAP, WIDTH - GAP, 12, gui::SAND);
+    w.rrect(
+        GAP / 2,
+        TOP - GAP / 2,
+        WIDTH - GAP,
+        WIDTH - GAP,
+        12,
+        gui::SAND,
+    );
     for (r, row) in b.iter().enumerate() {
         for (c, &v) in row.iter().enumerate() {
             let x = GAP + c as i32 * (CELL + GAP);

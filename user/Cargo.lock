@@ -73,6 +73,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "milk"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "msh"
 version = "0.0.1"
 dependencies = [

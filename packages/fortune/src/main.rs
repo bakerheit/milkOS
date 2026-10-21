@@ -35,7 +35,9 @@ fn quotes_text(argv0: &str) -> String {
     if let Some((dir, _)) = argv0.rsplit_once("/bin/") {
         tries.push(alloc::format!("{dir}/share/fortune/quotes.txt"));
     }
-    tries.push(String::from("/Applications/fortune/share/fortune/quotes.txt"));
+    tries.push(String::from(
+        "/Applications/fortune/share/fortune/quotes.txt",
+    ));
     for p in tries {
         if let Ok(b) = sys::read_file(&p) {
             return String::from_utf8_lossy(&b).into_owned();

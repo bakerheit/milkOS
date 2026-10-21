@@ -2,8 +2,8 @@
 //! (5 minutes, this process only, kept across the exec), after an administrator's
 //! password: the terminal fallback for the desktop's trusted panel. The command keeps your
 //! own user id; the ticket only unlocks what asks for one (the destructive
-//! /sys/fs/milkfs controls: rollback, delete, discard, promote, check repair, passwd,
-//! receive, mkfs). -S reads the password from stdin (scripts). `auth -s`: this process's
+//! /sys/fs/milkfs controls, `fs::milkfs::DESTRUCTIVE`: delete, rollback, discard, promote,
+//! receive, send, lock, passwd, check repair, ...). -S reads the password from stdin (scripts). `auth -s`: this process's
 //! ticket (`auth /bin/auth -s` shows a fresh one). Unlike sudo, COMMAND runs as you.
 #![no_std]
 #![no_main]

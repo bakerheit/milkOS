@@ -12,6 +12,7 @@
 //! * Rate limit per requesting real uid: 3 wrong passwords in a row lock that uid out of
 //!   authorising for 15 s, doubling with every further miss (max 10 min); a success
 //!   resets it. Each try also costs the 500 ms of `authenticate`.
+//! * Hooked into milkfs with `fs::milkfs::set_authorizer` ([`init`]).
 //! * Audited: `auth.grant`, `auth.deny` (with the reason), `auth.revoke`, `auth.required`
 //!   (a privileged write refused for want of a ticket).
 //! * The desktop's trusted panel registers with [`set_prompt`]; the request then never
@@ -98,6 +99,23 @@ pub fn require(op: &str) -> KResult<()> {
     }
     crate::audit!("auth.required", "op={op}");
     Err(EPERM)
+}
+
+/// The rule for milkfs's destructive controls (`fs::milkfs::DESTRUCTIVE`, through
+/// `fs::milkfs::authorize`): root or a ticket, with the reason in /sys/fs/milkfs/error.
+fn milkfs_rule(op: &str) -> crate::fs::Result<()> {
+    if require(&alloc::format!("milkfs.{op}")).is_ok() {
+        return Ok(());
+    }
+    crate::fs::milkfs::set_reason(
+        "needs an administrator's authorisation: run the command under `auth` (e.g. `auth snap delete NAME`) or approve it in the desktop's password panel",
+    );
+    Err(crate::fs::Errno::EPERM)
+}
+
+/// Hook the ticket rule into the filesystem. Called from `proc::init`.
+pub fn init() {
+    crate::fs::milkfs::set_authorizer(Some(milkfs_rule));
 }
 
 /// Drop `pid`'s ticket (exit, revoke).

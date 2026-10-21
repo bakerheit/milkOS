@@ -281,6 +281,7 @@ pub fn init() {
     exceptions::set_user_fault_handler(on_user_fault);
     fs::set_root_resolver(current_root_dir);
     fs::perm::set_cred_resolver(current_who);
+    auth::init();
     cred::selftest();
     login::init();
     login::selftest();

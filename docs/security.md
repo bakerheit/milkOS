@@ -242,14 +242,19 @@ nothing. A ticket
 
 **What it unlocks.** `proc::auth::require(op)` passes for euid 0, the kernel itself, or a
 valid ticket, and otherwise fails with EPERM and an `auth.required` audit record. The
-filesystem keeps that check in one helper (`privileged()` in `fs/milkfs/mod.rs`), called
-by the destructive `/sys/fs/milkfs` controls: `delete`, `rollback`, `discard`, `promote`,
-`check` with repair, `passwd`, `receive` and `mkfs` (and `lock` once it lands). Opening the
-control files still needs the usual admin-group write access; the ticket is an extra
-requirement on top (a non-admin's process with a ticket still can't open them).
-Read-only and harmless controls (`snapshot`, `clone`, `scrub`, `send`, listings) are
-unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as euid 0 after
-their own password check.
+filesystem decides in one place, `fs::milkfs::authorize(op, arg)`, run with the writer's
+credentials before every control in `fs::milkfs::DESTRUCTIVE` (docs/filesystem.md):
+`delete`, `rollback`, `restore`, `discard`, `promote`, `receive`, `mkfs`, `check` (repair
+only), `auto` (its `keep=` prunes snapshots), `lock`, `passwd`, and `send`, `bench`,
+`treetest`, `dedupe` (they write and delete files anywhere as the kernel). `proc::auth::init`
+installs the ticket rule with `fs::milkfs::set_authorizer`; a refusal is EPERM, and
+`set_reason` puts "needs an administrator's authorisation ..." in `/sys/fs/milkfs/error`,
+which `snap` prints. Opening the control files still needs the usual admin-group write
+access; the ticket is an extra requirement on top (a non-admin's process with a ticket
+still can't open them). Harmless controls (`snapshot`, `clone`, `scrub`, `sync`, listings)
+are unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as euid 0 after
+their own password check. Kernel threads (the desktop, Time Machine) are the kernel and
+pass.
 
 **Asking: the syscall.** `MILK_AUTH = 0x1003` (0x1002 is `MILK_OPENPTY`), `(op, a, b, c, d)`:
 
@@ -302,8 +307,8 @@ not-an-administrator|rate-limited (N s left)|cancelled`, `auth.revoke pid=`,
 `login.ok` / `login.fail` from `authenticate` appear alongside.
 
 **Effect on existing flows.** Anything that wrote those controls as a non-root admin now
-needs a ticket: `snap rollback/delete/...` and `milk try`'s keep/discard (and its
-auto-discard after a failed try) when run as `milk` rather than root. Boot-time and kernel
+needs a ticket: `snap rollback/delete/send/...`, `dedupe`, and `milk try`'s keep/discard
+(and its auto-discard after a failed try) when run as `milk` rather than root. Boot-time and kernel
 callers (the fs self-test, `milk` under the root console in the tests) are unaffected.
 
 **Tests**: `utest auth` (as milk): admin group alone is refused, a wrong password is

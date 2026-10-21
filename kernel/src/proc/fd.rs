@@ -118,6 +118,15 @@ impl FdTable {
             .ok_or(EBADF)
     }
 
+    /// Every open fd with its file.
+    pub fn list(&self) -> Vec<(i64, Arc<OpenFile>)> {
+        self.fds
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| e.as_ref().map(|e| (i as i64, e.file.clone())))
+            .collect()
+    }
+
     pub fn count(&self) -> usize {
         self.fds.iter().filter(|e| e.is_some()).count()
     }

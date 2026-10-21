@@ -258,6 +258,10 @@ impl WindowContents for Terminal {
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, focused: bool) {
         let cols = ((w - 2 * PAD) / 8).max(4) as usize;
         let rows = ((h - 2 * PAD + 2) / LINE_H).max(1) as usize;
+        if self.tty {
+            // Tell programs on /dev/tty1 (TIOCGWINSZ); SIGWINCH only on a real change.
+            super::super::tty::set_winsize(rows as u16, cols as u16);
+        }
         // The prompt line (with the cursor) is the last visual row.
         let prompt = if self.tty {
             self.cur.clone()

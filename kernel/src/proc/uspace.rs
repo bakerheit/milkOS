@@ -25,6 +25,7 @@ use crate::mmu::{
     phys_to_virt,
 };
 use crate::pmm;
+use crate::sync::SpinLock;
 
 pub const IMAGE_BASE: VirtAddr = USER_BASE + 0x40_0000;
 pub const MMAP_BASE: VirtAddr = USER_BASE + (1 << 40);
@@ -75,10 +76,82 @@ impl Perm {
     }
 }
 
+/// What a region of the address space is (for /proc/<pid>/maps).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RegionKind {
+    Image,
+    Heap,
+    Stack,
+    Anon,
+}
+
+pub struct Region {
+    pub start: VirtAddr,
+    pub end: VirtAddr,
+    pub perm: Perm,
+    pub kind: RegionKind,
+}
+
 #[derive(Clone, Copy)]
 struct Page {
     pa: PhysAddr,
+    /// What the program asked for.
     perm: Perm,
+    /// Copy-on-write: logically writable but mapped read-only until the first write.
+    cow: bool,
+}
+
+impl Page {
+    fn new(pa: PhysAddr, perm: Perm) -> Page {
+        Page {
+            pa,
+            perm,
+            cow: false,
+        }
+    }
+
+    /// The hardware mapping: like `perm`, but read-only while copy-on-write.
+    fn attrs(&self) -> MapAttrs {
+        Perm {
+            write: self.perm.write && !self.cow,
+            exec: self.perm.exec,
+        }
+        .attrs()
+    }
+}
+
+// ---- shared frames (copy-on-write) -------------------------------------------------------
+
+/// Frames with more than one owner: frame -> number of owners beyond the first. A frame
+/// that is not in here has exactly one owner.
+static SHARED: SpinLock<BTreeMap<PhysAddr, u32>> = SpinLock::new(BTreeMap::new());
+
+fn share_frame(pa: PhysAddr) {
+    *SHARED.lock().entry(pa).or_insert(0) += 1;
+}
+
+/// Drop one owner. True if it was the last one (the caller frees the frame).
+fn release_frame(pa: PhysAddr) -> bool {
+    let mut m = SHARED.lock();
+    match m.get_mut(&pa) {
+        Some(c) => {
+            *c -= 1;
+            if *c == 0 {
+                m.remove(&pa);
+            }
+            false
+        }
+        None => true,
+    }
+}
+
+fn frame_shared(pa: PhysAddr) -> bool {
+    SHARED.lock().contains_key(&pa)
+}
+
+/// Number of frames currently shared between address spaces.
+pub fn shared_frames() -> usize {
+    SHARED.lock().len()
 }
 
 pub struct UserSpace {
@@ -138,6 +211,41 @@ impl UserSpace {
         self.pages.len() * PAGE_SIZE
     }
 
+    fn kind_of(&self, va: VirtAddr) -> RegionKind {
+        if va >= STACK_TOP - STACK_MAX {
+            RegionKind::Stack
+        } else if va >= MMAP_BASE {
+            RegionKind::Anon
+        } else if va >= self.brk_start && self.brk_start != 0 {
+            RegionKind::Heap
+        } else {
+            RegionKind::Image
+        }
+    }
+
+    /// Mapped pages merged into runs of the same permissions and kind.
+    pub fn regions(&self) -> Vec<Region> {
+        let mut out: Vec<Region> = Vec::new();
+        for (&va, p) in &self.pages {
+            let kind = self.kind_of(va);
+            if let Some(last) = out.last_mut()
+                && last.end == va
+                && last.perm == p.perm
+                && last.kind == kind
+            {
+                last.end += PAGE_SIZE;
+                continue;
+            }
+            out.push(Region {
+                start: va,
+                end: va + PAGE_SIZE,
+                perm: p.perm,
+                kind,
+            });
+        }
+        out
+    }
+
     /// Map a fresh zeroed page at `va` (page aligned). If one is already there, widen its
     /// permissions to include `perm` and keep its contents (overlapping ELF segments).
     pub fn map_page(&mut self, va: VirtAddr, perm: Perm) -> KResult<PhysAddr> {
@@ -145,20 +253,11 @@ impl UserSpace {
         if !user_range_ok(va, PAGE_SIZE) {
             return Err(EINVAL);
         }
-        if let Some(p) = self.pages.get(&va).copied() {
+        if let Some(mut p) = self.pages.get(&va).copied() {
             let want = p.perm.union(perm);
             if want != p.perm {
-                self.space().unmap_page(va);
-                self.space()
-                    .map(va, p.pa, PAGE_SIZE, want.attrs(), &mut PmmTables)
-                    .map_err(|_| ENOMEM)?;
-                self.pages.insert(
-                    va,
-                    Page {
-                        pa: p.pa,
-                        perm: want,
-                    },
-                );
+                p.perm = want;
+                self.remap(va, p)?;
             }
             return Ok(p.pa);
         }
@@ -171,8 +270,67 @@ impl UserSpace {
             pmm::free_frame(pa);
             return Err(ENOMEM);
         }
-        self.pages.insert(va, Page { pa, perm });
+        self.pages.insert(va, Page::new(pa, perm));
         Ok(pa)
+    }
+
+    /// Replace the mapping of page `va` with `p` (frame and/or permissions).
+    fn remap(&mut self, va: VirtAddr, p: Page) -> KResult<()> {
+        self.space().unmap_page(va);
+        self.space()
+            .map(va, p.pa, PAGE_SIZE, p.attrs(), &mut PmmTables)
+            .map_err(|_| ENOMEM)?;
+        self.pages.insert(va, p);
+        Ok(())
+    }
+
+    /// A write fault at `va`: if it hit a copy-on-write page, give this space its own
+    /// writable copy (or just make it writable if nobody else shares the frame any more)
+    /// and return true.
+    pub fn cow_fault(&mut self, va: VirtAddr) -> bool {
+        let pg = page_down(va);
+        let Some(mut p) = self.pages.get(&pg).copied() else {
+            return false;
+        };
+        if !p.cow || !p.perm.write {
+            return false;
+        }
+        if frame_shared(p.pa) {
+            let Some(new) = pmm::alloc_frame() else {
+                return false;
+            };
+            // SAFETY: two distinct whole frames.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    phys_to_virt(p.pa) as *const u8,
+                    phys_to_virt(new) as *mut u8,
+                    PAGE_SIZE,
+                )
+            };
+            release_frame(p.pa); // still owned by the other side(s)
+            p.pa = new;
+        }
+        p.cow = false;
+        if self.remap(pg, p).is_err() {
+            return false;
+        }
+        if p.perm.exec {
+            self.sync_icache();
+        }
+        true
+    }
+
+    /// Break copy-on-write on every page of `[va, va+len)` (before the kernel writes there
+    /// through its own mapping, which ignores the read-only bit).
+    fn unshare_range(&mut self, va: VirtAddr, len: usize) {
+        if len == 0 || !user_range_ok(va, len) {
+            return;
+        }
+        for pg in (page_down(va)..va + len).step_by(PAGE_SIZE) {
+            if self.pages.get(&pg).is_some_and(|p| p.cow) {
+                self.cow_fault(pg);
+            }
+        }
     }
 
     /// Map `[va, va+len)` (rounded out to pages) with zeroed pages.
@@ -191,7 +349,9 @@ impl UserSpace {
         for v in doomed {
             let p = self.pages.remove(&v).unwrap();
             self.space().unmap_page(v);
-            pmm::free_frame(p.pa);
+            if release_frame(p.pa) {
+                pmm::free_frame(p.pa);
+            }
         }
     }
 
@@ -229,7 +389,8 @@ impl UserSpace {
     }
 
     /// Copy kernel data out to user memory (needs write permission).
-    pub fn copy_out(&self, va: VirtAddr, data: &[u8]) -> KResult<()> {
+    pub fn copy_out(&mut self, va: VirtAddr, data: &[u8]) -> KResult<()> {
+        self.unshare_range(va, data.len());
         self.chunks(va, data.len(), true, |k, off, n| unsafe {
             // SAFETY: k..k+n is inside a frame this space owns.
             core::ptr::copy_nonoverlapping(data.as_ptr().add(off), k, n)
@@ -319,26 +480,29 @@ impl UserSpace {
         unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
     }
 
-    /// A copy of this space: same layout, same contents, new frames and ASID (eager copy,
-    /// no copy-on-write yet).
-    pub fn fork(&self) -> KResult<UserSpace> {
+    /// A copy of this space, copy-on-write: both spaces share every frame; writable pages
+    /// become read-only in both until one of them writes (then `cow_fault` copies).
+    pub fn fork(&mut self) -> KResult<UserSpace> {
         let mut n = UserSpace::new()?;
         n.brk_start = self.brk_start;
         n.brk = self.brk;
         n.mmap_next = self.mmap_next;
         n.stack_low = self.stack_low;
-        for (&va, p) in &self.pages {
-            let pa = n.map_page(va, p.perm)?;
-            // SAFETY: two distinct whole frames.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    phys_to_virt(p.pa) as *const u8,
-                    phys_to_virt(pa) as *mut u8,
-                    PAGE_SIZE,
-                )
-            };
+        let pages: Vec<(VirtAddr, Page)> = self.pages.iter().map(|(&v, &p)| (v, p)).collect();
+        for (va, mut p) in pages {
+            if p.perm.write && !p.cow {
+                p.cow = true;
+                self.remap(va, p)?; // parent goes read-only too
+            }
+            if n.space()
+                .map(va, p.pa, PAGE_SIZE, p.attrs(), &mut PmmTables)
+                .is_err()
+            {
+                return Err(ENOMEM); // `n` drops: releases what it already shares
+            }
+            share_frame(p.pa);
+            n.pages.insert(va, p);
         }
-        n.sync_icache();
         Ok(n)
     }
 
@@ -444,15 +608,12 @@ impl UserSpace {
             .range(addr..page_up(addr + len))
             .map(|(&v, &p)| (v, p))
             .collect();
-        for (va, p) in pages {
+        for (va, mut p) in pages {
             if p.perm == perm {
                 continue;
             }
-            self.space().unmap_page(va);
-            self.space()
-                .map(va, p.pa, PAGE_SIZE, perm.attrs(), &mut PmmTables)
-                .map_err(|_| ENOMEM)?;
-            self.pages.insert(va, Page { pa: p.pa, perm });
+            p.perm = perm;
+            self.remap(va, p)?;
             if perm.exec {
                 self.sync_icache();
             }
@@ -484,7 +645,9 @@ impl Drop for UserSpace {
             );
         }
         for p in self.pages.values() {
-            pmm::free_frame(p.pa);
+            if release_frame(p.pa) {
+                pmm::free_frame(p.pa);
+            }
         }
         if let Some(space) = self.space.take() {
             // SAFETY: not live (caller's contract); tables came from the PMM.

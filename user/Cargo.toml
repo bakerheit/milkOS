@@ -3,7 +3,7 @@
 # `cargo build` at the repo root builds these too. See docs/processes.md.
 [workspace]
 resolver = "2"
-members = ["rt", "init", "hello", "msh", "fault", "snap", "fetch"]
+members = ["rt", "init", "hello", "msh", "fault", "utest", "coreutils", "snap", "fetch"]
 
 [workspace.package]
 version = "0.0.1"

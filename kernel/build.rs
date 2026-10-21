@@ -53,11 +53,23 @@ fn build_user(repo: &Path) {
         );
     }
     let list = fs::read_to_string(repo.join("initramfs.list")).unwrap_or_default();
+    // Programs: user/<crate>/src/main.rs is binary <crate>; user/<crate>/src/bin/<x>.rs is <x>.
+    let mut programs = Vec::new();
     for e in fs::read_dir(&user).unwrap().filter_map(|e| e.ok()) {
-        if !e.path().join("src/main.rs").exists() {
-            continue;
+        if e.path().join("src/main.rs").exists() {
+            programs.push(e.file_name().to_string_lossy().into_owned());
         }
-        let name = e.file_name().to_string_lossy().into_owned();
+        if let Ok(bins) = fs::read_dir(e.path().join("src/bin")) {
+            for b in bins.filter_map(|b| b.ok()) {
+                let p = b.path();
+                if p.extension().is_some_and(|x| x == "rs") {
+                    programs.push(p.file_stem().unwrap().to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    programs.sort();
+    for name in programs {
         let host = format!("{USER_BIN_DIR}/{name}");
         assert!(
             repo.join(&host).exists(),

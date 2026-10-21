@@ -87,9 +87,9 @@ struct Context {
 #[repr(C, align(16))]
 #[derive(Clone)]
 pub struct FpState {
-    q: [u128; 32],
-    fpcr: u64,
-    fpsr: u64,
+    pub q: [u128; 32],
+    pub fpcr: u64,
+    pub fpsr: u64,
 }
 
 impl FpState {
@@ -755,6 +755,12 @@ pub fn set_current_name(name: &str) {
 pub fn save_current_fp(fp: &mut FpState) {
     // SAFETY: FP is enabled (init); writes 528 bytes into `fp`.
     unsafe { fp_save(fp) };
+}
+
+/// Load `fp` into the live FP/SIMD registers (sigreturn).
+pub fn load_current_fp(fp: &FpState) {
+    // SAFETY: FP is enabled; reads 528 bytes from `fp`.
+    unsafe { fp_restore(fp) };
 }
 
 /// Zero the live FP/SIMD registers (execve).

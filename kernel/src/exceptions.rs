@@ -150,6 +150,16 @@ pub fn set_irq_exit_hook(h: IrqExitHook) {
     IRQ_EXIT.set(h);
 }
 
+/// Hook run last, IRQs masked, whenever an exception (syscall, fault, IRQ) is about to
+/// return to EL0. The process layer reschedules and delivers signals here; it may rewrite
+/// the frame or never return (process killed).
+pub type UserReturnHook = fn(frame: &mut TrapFrame);
+static USER_RETURN: FnSlot = FnSlot::new();
+
+pub fn set_user_return_hook(h: UserReturnHook) {
+    USER_RETURN.set(h);
+}
+
 pub fn set_syscall_handler(h: SyscallHandler) {
     SYSCALL.set(h);
 }
@@ -193,6 +203,12 @@ extern "C" fn exception_entry(frame: &mut TrapFrame, vector: usize) {
         }
         2 => crash(frame, vector, "FIQ (unexpected: we only use IRQ)"),
         _ => crash(frame, vector, "SError"),
+    }
+    if frame.is_user()
+        && let Some(h) = USER_RETURN.get::<UserReturnHook>()
+    {
+        crate::sync::irq_disable();
+        h(frame);
     }
 }
 

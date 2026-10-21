@@ -553,6 +553,17 @@ pub fn take_error(id: SocketId) -> Result<Option<Errno>> {
     })
 }
 
+/// "tcp", "udp" or "icmp" (ping socket).
+pub fn proto_name(id: SocketId) -> Result<&'static str> {
+    with(|st| {
+        st.socks.lookup(id).map(|(_, s)| match s.ty {
+            SockType::Stream => "tcp",
+            SockType::Dgram if s.icmp => "icmp",
+            SockType::Dgram => "udp",
+        })
+    })
+}
+
 /// SO_TYPE.
 pub fn sock_type(id: SocketId) -> Result<SockType> {
     with(|st| st.socks.lookup(id).map(|(_, s)| s.ty))

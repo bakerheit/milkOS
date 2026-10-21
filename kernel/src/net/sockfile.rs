@@ -29,6 +29,9 @@ pub struct SocketFile {
     nonblock: AtomicBool,
     /// SO_RCVTIMEO in ns (0 = wait forever).
     rcvtimeo: AtomicU64,
+    /// Last sendto destination that was audited (ip << 16 | port, +1; 0 = none), so a UDP
+    /// or ping stream is logged once per destination, not per packet.
+    pub audited_dst: AtomicU64,
 }
 
 impl SocketFile {
@@ -73,6 +76,7 @@ pub fn open(id: SocketId, nonblock: bool) -> OpenFile {
         ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
         nonblock: AtomicBool::new(nonblock),
         rcvtimeo: AtomicU64::new(0),
+        audited_dst: AtomicU64::new(0),
     });
     let flags = abi::O_RDWR | if nonblock { abi::O_NONBLOCK } else { 0 };
     OpenFile::new(inode, flags)

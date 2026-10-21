@@ -228,7 +228,16 @@ fn write(pid: u32, data: &[u8]) -> Result<usize> {
     let mut off = 0;
     while off < data.len() {
         let now = timer::now_ns();
-        let n = push(&mut MIXER.lock(), pid, &data[off..], now);
+        let (n, new_client) = {
+            let mut m = MIXER.lock();
+            let had = m.clients.iter().any(|c| c.key == Key::Pid(pid));
+            (push(&mut m, pid, &data[off..], now), !had)
+        };
+        if new_client {
+            // The first write of a stream (there is no open hook; idle writers are
+            // forgotten after 2 s, so this is "started playing").
+            crate::audit::record("audio.open", "dev=/dev/audio");
+        }
         off += n;
         kick();
         if off < data.len() {

@@ -62,10 +62,23 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         SOCKET => sys_socket(a[0] as u32, a[1] as u32, a[2] as u32),
         PPOLL => sys_ppoll(a[0] as usize, a1, a2),
         BIND => with_sock(fd, |s, _| socket::bind(s, read_addr(a1, a2)?).map(|_| 0)),
-        LISTEN => with_sock(fd, |s, _| socket::listen(s, a1).map(|_| 0)),
+        LISTEN => with_sock(fd, |s, _| {
+            let local = socket::local_addr(s).unwrap_or(SockAddr::ANY);
+            let r = socket::listen(s, a1).map(|_| 0);
+            let local = socket::local_addr(s).unwrap_or(local);
+            net_event("net.listen", s, "local", local, &r);
+            r
+        }),
         ACCEPT => sys_accept(fd, a1, a2, 0),
         ACCEPT4 => sys_accept(fd, a1, a2, a3 as u32),
-        CONNECT => with_sock(fd, |s, nb| connect(s, read_addr(a1, a2)?, nb)),
+        CONNECT => with_sock(fd, |s, nb| {
+            let addr = read_addr(a1, a2)?;
+            let r = connect(s, addr, nb);
+            if !matches!(r, Err(e) if e == nerr::EALREADY || e == nerr::EISCONN) {
+                net_event("net.connect", s, "dst", addr, &r);
+            }
+            r
+        }),
         GETSOCKNAME => with_sock(fd, |s, _| write_addr(socket::local_addr(s)?, a1, a2)),
         GETPEERNAME => with_sock(fd, |s, _| write_addr(socket::peer_addr(s)?, a1, a2)),
         SENDTO => with_sock(fd, |s, nb| {
@@ -75,6 +88,18 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
             } else {
                 None
             };
+            if let Some(to) = to {
+                let key = ((to.ip.to_u32() as u64) << 16 | to.port as u64) + 1;
+                let f = file(fd)?;
+                let sf = sockfile::of(&f)?;
+                if sf
+                    .audited_dst
+                    .swap(key, core::sync::atomic::Ordering::Relaxed)
+                    != key
+                {
+                    net_event("net.sendto", s, "dst", to, &Ok(0));
+                }
+            }
             sockfile::send(s, &data, to, nb || a3 as u32 & MSG_DONTWAIT != 0)
         }),
         RECVFROM => with_sock(fd, |s, nb| {
@@ -158,12 +183,27 @@ fn sys_accept(fd: i64, addr: usize, addrlen: usize, flags: u32) -> KResult<usize
             r => break r?,
         }
     };
+    let local = socket::local_addr(child).unwrap_or(SockAddr::ANY);
     let of = sockfile::open(child, flags & SOCK_NONBLOCK != 0);
     let newfd = install(of, flags & SOCK_CLOEXEC != 0)?;
+    crate::audit!(
+        "net.accept",
+        "proto=tcp local={local} peer={peer} fd={newfd}"
+    );
     if addr != 0 {
         write_addr(peer, addr, addrlen)?;
     }
     Ok(newfd)
+}
+
+/// Audit a network operation: `<event> proto=.. <what>=ADDR result=ok|ERRNO`.
+fn net_event(event: &str, s: SocketId, what: &str, addr: SockAddr, r: &KResult<usize>) {
+    let proto = socket::proto_name(s).unwrap_or("?");
+    let res = match r {
+        Ok(_) => "ok",
+        Err(e) => nerr::name(*e),
+    };
+    crate::audit!(event, "proto={proto} {what}={addr} result={res}");
 }
 
 fn connect(s: SocketId, addr: SockAddr, nb: bool) -> KResult<usize> {

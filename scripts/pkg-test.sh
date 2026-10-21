@@ -166,8 +166,10 @@ QPID=""
 DPID=""
 
 S="$WORK/session.txt"
-# From the first command on (a kernel line can land between the prompt and the echo).
-sed -n '/echo http:\/\/10.0.2.2:/,$p' "$LOG" | tr -d '\r' >"$S"
+# From the first command on. Asynchronous kernel lines (timemachine's boot snapshot, the
+# audit log re-attaching after a promote) can land inside a command's echo:
+# console_clean.py puts them back on their own lines first.
+python3 -I scripts/console_clean.py "$LOG" | sed -n '/echo http:\/\/10.0.2.2:/,$p' >"$S"
 echo "---- msh ----"
 cat "$S"
 echo "---- checks ----"
@@ -300,7 +302,7 @@ wait "$QPID" 2>/dev/null || true
 QPID=""
 DPID=""
 S="$WORK/session2.txt"
-sed -n '/msh:[^ ]*\$ moo2048/,$p' "$LOG2" | tr -d '\r' >"$S"
+python3 -I scripts/console_clean.py "$LOG2" | sed -n '/msh:[^ ]*\$ moo2048/,$p' >"$S"
 cat "$S"
 check "after reboot: init relinked /bin/moo2048 and it runs" "moo2048: selftest ok"
 check "after reboot: still installed" "^moo2048 +1.0.0"

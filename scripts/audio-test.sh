@@ -60,7 +60,7 @@ done
 [ -e "$WORK/drive.done" ] || fail "console session timed out"
 echo "---- guest ----"
 grep -a '^\[virtio-snd\]\|^\[audio\]' "$LOG" | tr -d '\r'
-sed -n '/msh:\/\$ play tone 440 0.5/,$p' "$LOG" | tr -d '\r'
+python3 -I scripts/console_clean.py "$LOG" | sed -n '/msh:\/\$ play tone 440 0.5/,$p'
 # Graceful stop: qemu writes the WAV header sizes on exit.
 kill "$DPID" 2>/dev/null || true
 kill "$QPID"

@@ -578,6 +578,100 @@ fn devfs(t: &mut T) {
     }
 }
 
+fn procfs_sysfs(t: &mut T) {
+    let mi = read_str("/proc/meminfo");
+    t.ok(
+        mi.starts_with("MemTotal:") && mi.contains("MemFree:") && mi.contains("KernelHeap:"),
+        "/proc/meminfo",
+    );
+    let total_kb: usize = mi
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    t.ok(
+        total_kb == pmm::stats().total_frames * 4,
+        "MemTotal matches the PMM",
+    );
+    let up = read_str("/proc/uptime");
+    let secs: f32 = up
+        .split_whitespace()
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(-1.0);
+    t.ok(secs > 0.5 && secs < 600.0, "/proc/uptime is plausible");
+    t.ok(
+        read_str("/proc/version").starts_with("milkOS 0.0.1"),
+        "/proc/version",
+    );
+    let irqs = read_str("/proc/interrupts");
+    let timer_count: u64 = irqs
+        .lines()
+        .find(|l| l.trim_start().starts_with("27:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    t.ok(timer_count > 50, "/proc/interrupts counts timer ticks");
+    t.ok(
+        irqs.contains("uart-pl011"),
+        "/proc/interrupts lists the UART",
+    );
+    let mounts = read_str("/proc/mounts");
+    t.ok(
+        mounts.contains("tmpfs / tmpfs")
+            && mounts.contains("devfs /dev devfs")
+            && mounts.contains("proc /proc proc")
+            && mounts.contains("sysfs /sys sysfs"),
+        "/proc/mounts",
+    );
+    t.err(
+        ops::open("/proc/version", O_WRONLY, 0).and_then(|f| f.write(b"x")),
+        Errno::EACCES,
+        "procfs is read-only",
+    );
+    t.err(
+        ops::mkdir("/proc/x", 0o755),
+        Errno::EROFS,
+        "mkdir in procfs",
+    );
+    t.ok(
+        ops::stat("/proc/meminfo").map(|s| s.size).ok() == Some(0),
+        "procfs st_size 0",
+    );
+    let devs = ops::readdir("/sys/devices/platform").unwrap_or_default();
+    t.ok(
+        devs.iter().any(|e| e.name == "9000000.pl011"),
+        "/sys/devices/platform lists the UART",
+    );
+    t.ok(
+        read_str("/sys/devices/platform/9000000.pl011/compatible").contains("arm,pl011"),
+        "sysfs compatible",
+    );
+    t.ok(
+        read_str("/sys/devices/platform/9000000.pl011/reg").starts_with("0x9000000 0x1000"),
+        "sysfs reg",
+    );
+    t.ok(
+        read_str("/sys/kernel/version") == read_str("/proc/version"),
+        "/sys/kernel/version",
+    );
+    t.ok(
+        ops::lookup("/sys/devices/platform/..")
+            .and_then(|i| path::path_of(&i))
+            .ok()
+            .as_deref()
+            == Some("/sys/devices"),
+        "sysfs .. and path_of",
+    );
+}
+
+/// Print a few inspectable files so they show up in the boot log.
+fn show(path: &str) {
+    kprintln!("$ cat {path}");
+    kprintln!("{}", read_str(path).trim_end());
+}
+
 pub fn run() {
     let mut t = T {
         checks: 0,
@@ -590,10 +684,26 @@ pub fn run() {
     paths_and_mounts(&mut t);
     initramfs(&mut t);
     devfs(&mut t);
+    procfs_sysfs(&mut t);
     if t.failed != 0 {
         panic!("fs selftest: {} of {} checks failed", t.failed, t.checks);
     }
     kprintln!("fs selftest: PASS ({} checks)", t.checks);
-    kprintln!("$ cat /etc/motd");
-    kprintln!("{}", read_str("/etc/motd").trim_end());
+    for p in [
+        "/proc/version",
+        "/proc/uptime",
+        "/proc/meminfo",
+        "/proc/interrupts",
+        "/proc/mounts",
+    ] {
+        show(p);
+    }
+    kprintln!("$ ls /sys/devices/platform");
+    let names: Vec<String> = ops::readdir("/sys/devices/platform")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    kprintln!("{}", names.join("  "));
+    show("/etc/motd");
 }

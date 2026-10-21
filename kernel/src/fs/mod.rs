@@ -5,11 +5,11 @@
 //! - `file`: `OpenFile` (inode + offset + flags), what fd tables hold.
 //! - `ops`: the path-based kernel API (`open`, `stat`, `mkdir`, ...), re-exported here.
 //! - `abi`: Linux userspace layouts (`struct stat`, `linux_dirent64`, `O_*` flags).
-//! - file systems: `tmpfs`.
+//! - file systems: `tmpfs` (root), `devfs` (/dev), `procfs` (/proc), `sysfs` (/sys), all but
+//!   tmpfs built on `synth`; `initramfs` unpacks the built-in archive into the root.
 
 // Public API surface for the syscall layer; not all of it is used inside the kernel yet.
 #![allow(dead_code)]
-#![allow(unused_imports)]
 
 pub mod abi;
 pub mod clock;
@@ -20,14 +20,21 @@ pub mod initramfs;
 pub mod node;
 pub mod ops;
 pub mod path;
+pub mod procfs;
 pub mod selftest;
 pub mod synth;
+pub mod sysfs;
 pub mod tmpfs;
 
+// Re-exports: the API the syscall layer uses (unused inside the kernel so far).
+#[allow(unused_imports)]
 pub use errno::{Errno, Result};
+#[allow(unused_imports)]
 pub use file::OpenFile;
+#[allow(unused_imports)]
 pub use node::{DirEntry, FileSystem, FsRef, Inode, InodeRef, InodeType, SetAttr, Stat, Timespec};
 pub use ops::*;
+#[allow(unused_imports)]
 pub use path::{mount, path_of, root};
 
 use crate::kprintln;
@@ -52,7 +59,7 @@ const SKELETON: &[(&str, u32)] = &[
 pub fn init() {
     clock::init();
     let root = tmpfs::TmpFs::new(0);
-    mount("/", root).expect("fs: mount root tmpfs");
+    mount("/", root.clone()).expect("fs: mount root tmpfs");
     for &(dir, perm) in SKELETON {
         mkdir(dir, perm).expect("fs: create skeleton");
     }
@@ -61,4 +68,6 @@ pub fn init() {
     kprintln!("fs: tmpfs mounted at /");
     initramfs::load();
     devfs::init().expect("fs: mount /dev");
+    procfs::init(root).expect("fs: mount /proc");
+    sysfs::init().expect("fs: mount /sys");
 }

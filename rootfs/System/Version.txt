@@ -1,0 +1,4 @@
+ProductName:    milkOS
+ProductVersion: 0.0.1
+BuildArch:      aarch64
+Kernel:         milkOS kernel 0.0.1 (Rust, no_std)

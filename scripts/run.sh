@@ -18,5 +18,8 @@ DISPLAY_ARGS=(-device ramfb -display cocoa)
 # virtio-input keyboard + tablet (absolute pointer); modern virtio-mmio (qemu defaults to legacy).
 INPUT_ARGS=(-global virtio-mmio.force-legacy=false
   -device virtio-keyboard-device -device virtio-tablet-device)
+# Scratch disk /tmp/milk-disk.img as virtio-blk (/dev/vda), see scripts/disk.sh.
+source scripts/disk.sh
+milk_disk_args
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
-  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}"
+  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}"

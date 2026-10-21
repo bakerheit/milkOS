@@ -29,7 +29,7 @@ const tabsWindow = (dimNotes = false, bellInBar = false) => {
   const x = 60, y = 70, w = 640, hh = 440;
   let h = shadow(x, y, w, hh, 12) + B(x, y, w, hh, `background:${C.milk};border-radius:12px;border:1px solid ${C.sand};overflow:hidden`,
     B(0, 0, w, 38, `background:${C.cream};border-bottom:1px solid ${C.sand}`) + lightsX(13, 12) +
-    [["Documents", 1, 0], ["andrew: sh", 0, 1], ["notes.md", 0, 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + (t[2] && bellInBar ? circle(tx + 116, 15, 10, C.straw) : ""); }).join("") +
+    [["Documents", 1, 0], ["milk: sh", 0, 1], ["notes.md", 0, 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + (t[2] && bellInBar ? circle(tx + 116, 15, 10, C.straw) : ""); }).join("") +
     B(0, 38, 150, hh - 40, `background:${C.oat};border-right:1px solid ${C.sand}`) + T(16, 52, "FAVOURITES", `color:${C.cocoa}`) + B(8, 76, 134, 24, `background:${C.straw}55;border-radius:8px`) + T(18, 80, "Documents") + T(18, 108, "Downloads") + T(18, 136, "Desktop") + T(18, 164, "Pictures") +
     [["folder", "projects"], ["folder", "school"], ["doc", "todo.txt"], ["photo", "bike.png"], ["note", "ideas.md"], ["folder", "kernel"]].map((f, i) => {
       const cx = 170 + (i % 4) * 116, cy = 62 + Math.floor(i / 4) * 116, isF = f[0] === "folder";
@@ -125,7 +125,7 @@ function attached() {
   h += B(bx, by, 36, 26, `background:${C.straw}33;border:1px solid ${C.straw};border-radius:13px`) + TC(bx, by + 5, 36, "&#9835;", `color:${C.esp}`) + badge(bx + 22, by - 6, 2);
   // popover scoped to this window
   const px = 420, py = 114, pw = 300, ph = 250;
-  let inner = T(16, 12, "<b>From this window</b>") + T(16, 30, "andrew: sh, Documents", `color:${C.cocoa}`) +
+  let inner = T(16, 12, "<b>From this window</b>") + T(16, 30, "milk: sh, Documents", `color:${C.cocoa}`) +
     card(10, 54, pw - 20, NOTE.bld, { compact: true, sel: true }) +
     card(10, 118, pw - 20, { ic: "folder", tone: C.honey, app: "Files", title: "Copy finished", body: "12 files to milk-ssd", t: "10:34" }, { compact: true }) +
     T(16, 190, "Other windows: 3 more", `color:${C.cocoa}`) + TRi(pw, pw - 16, 190, "Open inbox", `color:${C.straw}`) + B(0, 214, pw, 1, `background:${C.sand}`) + T(16, 226, "Mute this window", `color:${C.cocoa}`);

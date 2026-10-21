@@ -38,7 +38,7 @@ function taskbar() {
   let inner = milkDrop(6, 4, 28) + B(40, 6, 1, 24, `background:${C.sand}`);
   [0, 1, 2, 5].forEach((ai, i) => { inner += iconOf(APPS[ai], 48 + i * 34, 4, 28); });
   inner += B(188, 6, 1, 24, `background:${C.sand}`);
-  const wins = [["Documents", "folder", C.honey, true, 0], ["andrew: sh", "term", C.esp, false, 0], ["Notes + 2 tabs", "note", C.milk, false, 1]];
+  const wins = [["Documents", "folder", C.honey, true, 0], ["milk: sh", "term", C.esp, false, 0], ["Notes + 2 tabs", "note", C.milk, false, 1]];
   wins.forEach((wn, i) => {
     const wx = 198 + i * 178;
     inner += B(wx, 3, 170, 30, `background:${wn[3] ? C.straw + "44" : "rgba(255,253,248,.6)"};border:${wn[3] ? 2 : 1}px solid ${wn[3] ? C.straw : C.sand};border-radius:9px`, iconOf([wn[1], wn[2], ""], 4, 3, 22) + T(32, 6, wn[0].length > 14 ? wn[0].slice(0, 13) + "~" : wn[0]) + (wn[4] ? B(150, 9, 12, 12, `background:${C.straw};border-radius:6px`) : ""));

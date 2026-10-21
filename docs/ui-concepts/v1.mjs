@@ -141,10 +141,10 @@ function filesWin(x = 96, y = 64, focus = false) {
   return win(x, y, w, h, "Documents", body, { focus });
 }
 function shellWin(x = 440, y = 270, focus = true) {
-  const body = T(14, 46, "andrew@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
-    T(14, 90, "andrew@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
-    T(14, 134, "andrew@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
-  return win(x, y, 520, 290, "andrew: sh", body, { focus, dark: true });
+  const body = T(14, 46, "milk@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
+    T(14, 90, "milk@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
+    T(14, 134, "milk@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
+  return win(x, y, 520, 290, "milk: sh", body, { focus, dark: true });
 }
 
 /* ------------------------------ scenes ------------------------------ */
@@ -154,7 +154,7 @@ function sceneHome() {
   let h = WP + menubar("Home");
   const c = TOK.cards, p = c.pad;
   const card = (x, y, w, hh, label, inner) => glass(x, y, w, hh, c.r, T(p, p, label, `color:${col("cocoa")}`) + inner);
-  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning, Andrew", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
+  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
   const y1 = 56 + 96 + c.gap;
   h += card(48, y1, 296, 228, "CALENDAR", ["M", "T", "W", "T", "F", "S", "S"].map((d, i) => TC(12 + i * 38, 40, 38, d, `color:${col("cocoa")}`)).join("") +
     Array.from({ length: 21 }, (_, i) => { const n = i + 12, cx = 12 + (i % 7) * 38, cy = 66 + Math.floor(i / 7) * 34, today = n === 20; return (today ? B(cx + 3, cy - 4, 32, 24, `background:${col("straw")};border-radius:12px`) : "") + TC(cx, cy, 38, String(n > 31 ? n - 31 : n), today ? `color:${col("milk")};${BD}` : ""); }).join(""));
@@ -387,7 +387,7 @@ Width ${TOK.launcher.w}, centred, top at y${TOK.launcher.y}. Input row height ${
 ${TOK.toast.w}x${TOK.toast.h}, radius ${TOK.radius.toast}, glass, ${TOK.toast.right}px from the right edge, ${TOK.toast.top}px from the top. Icon 40x40 at (12,12), title bold at (64,12), subtitle cocoa at (64,32).
 
 ## Notification drawer (side drawer)
-Chosen look (Andrew, 2026-10-21). Panel ${TOK.drawer.w} wide, ${TOK.drawer.right}px from the right edge, from y${TOK.drawer.top} down to ${TOK.drawer.bottom}px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius ${TOK.radius.launcher}, glass at alpha ${TOK.drawer.alpha}, floating shadow. Inner padding ${TOK.drawer.pad}.
+Chosen look (owner decision, 2026-10-21). Panel ${TOK.drawer.w} wide, ${TOK.drawer.right}px from the right edge, from y${TOK.drawer.top} down to ${TOK.drawer.bottom}px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius ${TOK.radius.launcher}, glass at alpha ${TOK.drawer.alpha}, floating shadow. Inner padding ${TOK.drawer.pad}.
 - Header (${TOK.drawer.headerH}px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), ${TOK.drawer.chipH}px high, fully rounded, selected chip espresso with cream text.
 - Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
 - Card: width drawer minus ${TOK.drawer.pad * 2}, height ${TOK.drawer.cardH} (compact ${TOK.drawer.cardCompactH}), radius ${TOK.drawer.cardR}, milk at 82% with a 1px white edge. App icon ${TOK.drawer.iconIn}x${TOK.drawer.iconIn} at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long (use a real ellipsis, U+2026, if the font draws it). Selected card: straw at 13% fill and a 1px straw border.

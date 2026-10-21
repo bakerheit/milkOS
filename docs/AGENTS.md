@@ -4,7 +4,7 @@
 - `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"` (rustup is keg-only). Nightly + `aarch64-unknown-none-softfloat`, pinned in `rust-toolchain.toml`.
 - `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only,
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
-- qemu: `-M virt -accel hvf -cpu host`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
+- qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 
 ## Git
@@ -19,7 +19,7 @@
 ## Kernel facts (as of main after the proc merge)
 - Boot order in `kmain`: `exceptions::init` → `mem::init` (MMU + caches on) → `display::init` → `gic::init` →
   `timer::init` → `uart::init` → virtio → `sync::irq_enable` → self-tests → `fs::init` → `sched::init` →
-  sched self-test → `proc::init` → `proc::start_init` (PID 1 = `/bin/init`, which runs `msh` on the console).
+  `smp::init` (CPUs 1-3 via PSCI) → sched self-test → `proc::init` → `proc::start_init` (PID 1 = `/bin/init`, which runs `msh` on the console).
 - Threads: `sched::spawn`/`spawn_prio`, `sleep_ms`, `sleep_until`, `yield_now`, `WaitQueue` (incl.
   `wait_until_timeout`), `sched::Mutex`. Never block in an IRQ handler or while holding a `SpinLock`.
 - Ownership: `sched` owns `timer::set_tick_hook` and `timer::set_deadline` (don't call them elsewhere; use threads and
@@ -28,8 +28,10 @@
 - Memory: identity map (VA == PA). Use `mmu::virt_to_phys` / `phys_to_virt` anyway, it is the one place that
   will change for higher-half. Heap via `alloc` (Vec/Box/BTreeMap fine). DMA / big buffers:
   `pmm::alloc_contiguous_zeroed(npages, align_frames)`, free with `pmm::free_contiguous`. No allocation in IRQ handlers.
-- Locks: `sync::SpinLock<T>` (masks IRQs), `sync::IrqGuard`, `sync::without_irqs`. RMW atomics are fine now that
-  the MMU is on (they hang only with the MMU off).
+- SMP: milkOS runs on 4 CPUs by default (`MILK_SMP=1` for one). `percpu::id()` is the current CPU. Any shared
+  state needs a real lock or atomics; "single core, plain load/store is fine" is no longer true. See `docs/smp.md`.
+- Locks: `sync::SpinLock<T>` (masks IRQs, really spins across CPUs, panics on same-CPU re-entry), `sync::IrqGuard`,
+  `sync::without_irqs`, `sched::Mutex` for anything that may sleep.
 - Interrupts: `gic::register(intid, handler)`; `gic::spi(n)`, `gic::ppi(n)`. Handlers get `&mut TrapFrame`, run
   with IRQs masked: no blocking.
 - Time: `timer::now_ns()`, `timer::ticks()` (100 Hz), `timer::set_tick_hook`, `timer::set_deadline`. Use the virtual

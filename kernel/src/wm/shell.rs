@@ -707,7 +707,7 @@ impl Desktop {
                             x: r.x - 20,
                             y: r.y + r.h + 10,
                             w: r.w + 40,
-                            text: String::from(w.contents.title()),
+                            text: Self::window_label(w),
                             color: MILK,
                         });
                     }
@@ -942,7 +942,7 @@ impl Desktop {
                 super::notif::badge(p, ix + dock_icon() - 13, (DOCK_PAD - 6).max(0), n);
             }
             let running = match it.action {
-                DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
+                DockAction::App(a) => self.has_app(a),
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
                 DockAction::Program(p) => self.running_program(p),
@@ -1095,13 +1095,14 @@ impl Desktop {
         };
         match i {
             0 => {
+                let user = super::session::user_name();
                 let greet = match t.hour {
-                    0..=4 => "Still up, Andrew?",
-                    5..=11 => "Good morning, Andrew",
-                    12..=17 => "Good afternoon, Andrew",
-                    _ => "Good evening, Andrew",
+                    0..=4 => format!("Still up, {user}?"),
+                    5..=11 => format!("Good morning, {user}"),
+                    12..=17 => format!("Good afternoon, {user}"),
+                    _ => format!("Good evening, {user}"),
                 };
-                p.text_x(pad + 8, 16, greet, ESPRESSO, 2, true);
+                p.text_x(pad + 8, 16, &greet, ESPRESSO, 2, true);
                 let n = self.windows.len();
                 let line = format!(
                     "{}, {} {}   {} window{} open",
@@ -1451,6 +1452,7 @@ impl Desktop {
             self.close_launcher();
         } else {
             self.control = false;
+            super::skim::set_tabs(self.tab_list());
             self.launcher = Some(Launcher::new());
         }
     }
@@ -1465,6 +1467,7 @@ impl Desktop {
     }
 
     pub(super) fn launcher_key(&mut self, k: &super::window::KeyInput) {
+        super::skim::set_tabs(self.tab_list());
         let Some(l) = &mut self.launcher else {
             return;
         };
@@ -1513,6 +1516,7 @@ impl Desktop {
                 super::apps::settings::show_section(i);
                 self.open(App::Settings);
             }
+            Act::Tab(wid, i) => self.show_tab(wid, i),
             Act::Package(k) => {
                 if let Some(p) = super::packages::get(k) {
                     self.launch_package(&p);

@@ -39,10 +39,12 @@ pub mod prefs;
 mod rtc;
 mod screen;
 mod script;
+pub mod session;
 mod shell;
 mod shot;
 mod skim;
 mod snap;
+mod tabs;
 mod theme;
 pub mod tty;
 mod wallpaper;
@@ -270,6 +272,9 @@ enum Drag {
     },
     /// Dragging a file (dnd.rs).
     File,
+    /// Pressed on window tab `i` of `id` at (x0, y0): dragging it out of the strip makes it a
+    /// window (tabs.rs).
+    Tab { id: u32, i: usize, x0: i32, y0: i32 },
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
@@ -366,6 +371,8 @@ pub struct Desktop {
     shot_hide: bool,
     /// A file being dragged (dnd.rs).
     dnd: Option<dnd::Dnd>,
+    /// The "+" of this window's strip was pressed: the next app opened becomes its tab.
+    add_tab_to: Option<u32>,
     /// The notification drawer is open, its state, and what it lists (notif.rs).
     notif: bool,
     drawer: notif::Drawer,
@@ -420,6 +427,7 @@ impl Desktop {
             shot: None,
             shot_hide: false,
             dnd: None,
+            add_tab_to: None,
             notif: false,
             drawer: notif::Drawer::default(),
             history: Vec::new(),
@@ -544,11 +552,26 @@ impl Desktop {
 
     /// Open `app`, or bring its window forward if it is already running (single instance).
     fn open(&mut self, app: App) {
-        if let Some(id) = self.windows.iter().find(|w| w.app == app).map(|w| w.id) {
+        // Already open, maybe as a tab of some window: show that tab.
+        if let Some((id, t)) = self.find_app(app) {
+            if let Some(w) = self.win_mut(id) {
+                w.switch_to(t);
+            }
             self.show_window(id);
+            self.damage_window(id);
             return;
         }
         let (rect, contents): (Rect, Box<dyn WindowContents>) = apps::create(app);
+        // The "+" of a strip: it opens as a tab there.
+        if let Some(into) = self.add_tab_to.take()
+            && let Some(w) = self.win_mut(into)
+        {
+            w.add_tab(app, contents);
+            self.show_window(into);
+            self.damage_window(into);
+            self.invalidate(PanelKey::Dock);
+            return;
+        }
         let id = self.next_id;
         self.next_id += 1;
         let Some(w) = Window::new(id, app, rect, self.space, contents) else {
@@ -624,7 +647,7 @@ impl Desktop {
 
     /// A tab in the open Terminal running `cmd`, or the Terminal itself (its first tab).
     fn open_tab(&mut self, cmd: Option<String>) {
-        if self.windows.iter().any(|w| w.app == App::Terminal) {
+        if self.has_app(App::Terminal) {
             apps::terminal::queue_tab(cmd);
         } else if let Some(c) = cmd {
             apps::terminal::queue_command(&c);
@@ -743,7 +766,9 @@ impl Desktop {
         } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
             apps::notes::open_file(&path);
             let sp = self.space;
-            if let Some(w) = self.windows.iter_mut().find(|w| w.app == App::Notes) {
+            if let Some((id, _)) = self.find_app(App::Notes)
+                && let Some(w) = self.win_mut(id)
+            {
                 w.space = sp;
             }
             self.open(App::Notes);
@@ -825,7 +850,10 @@ impl Desktop {
         self.windows
             .iter()
             .find(|w| {
-                matches!(w.app, App::Client(c) if client::process_name(c).as_deref() == Some(name))
+                (0..w.tab_count()).any(|i| {
+                    matches!(w.tab_app(i), Some(App::Client(c))
+                        if client::process_name(c).as_deref() == Some(name))
+                })
             })
             .map(|w| w.id)
     }
@@ -894,8 +922,13 @@ impl Desktop {
     /// Close from the UI (traffic light, Cmd+W, menu). A client's window goes away at once and
     /// the process gets a Close event.
     fn close(&mut self, id: u32) {
-        if let Some(App::Client(cid)) = self.win(id).map(|w| w.app) {
-            client::closed(cid);
+        // Every tab's client is told (closing a window closes all its tabs).
+        if let Some(w) = self.win(id) {
+            for i in 0..w.tab_count() {
+                if let Some(App::Client(cid)) = w.tab_app(i) {
+                    client::closed(cid);
+                }
+            }
         }
         self.close_window(id);
     }
@@ -1243,9 +1276,15 @@ impl Desktop {
             if start != Some(k) {
                 p.shadow_window(w.rect);
             }
+            // A window dragged onto another's strip: 92% with a 2px straw edge (SPEC Tabs).
+            let alpha = if w.ghost { 235 } else { 255 };
             p.blit_rrect(
-                w.rect.x, w.rect.y, &w.surf, 0, 0, w.rect.w, w.rect.h, R_WINDOW, 255,
+                w.rect.x, w.rect.y, &w.surf, 0, 0, w.rect.w, w.rect.h, R_WINDOW, alpha,
             );
+            if w.ghost {
+                let r = w.rect;
+                p.rrect_stroke(r.x, r.y, r.w, r.h, R_WINDOW, 2, STRAW, 255);
+            }
         }
         if !self.anims.is_empty() {
             anim::draw(&self.anims, &self.windows, &mut p, d);
@@ -1348,7 +1387,9 @@ impl Desktop {
                 Request::Open(a) => self.open(a),
                 Request::OpenHere(a) => {
                     let sp = self.space;
-                    if let Some(w) = self.windows.iter_mut().find(|w| w.app == a) {
+                    if let Some((id, _)) = self.find_app(a)
+                        && let Some(w) = self.win_mut(id)
+                    {
                         w.space = sp;
                     }
                     self.open(a);
@@ -1367,7 +1408,7 @@ impl Desktop {
                     }
                 }
                 Request::Powerbox => {
-                    if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
+                    if !self.has_app(App::Powerbox) && powerbox::pending() {
                         self.open(App::Powerbox);
                     }
                 }
@@ -1378,9 +1419,8 @@ impl Desktop {
                     }
                 }
                 Request::ClientGone(id) => {
-                    if let Some(w) = self.windows.iter().find(|w| w.app == App::Client(id)) {
-                        let wid = w.id;
-                        self.close_window(wid);
+                    if let Some((wid, t)) = self.find_app(App::Client(id)) {
+                        self.close_tab(wid, t);
                     }
                 }
             }
@@ -1388,6 +1428,7 @@ impl Desktop {
         self.tick(now);
         let animating = self.step_anims(now);
         let fading = self.lock_tick(now);
+        self.sync_bars();
         self.lock_a = self.lock_alpha(timer::now_ns());
         self.render_and_compose();
         *STATS.lock() = self.stats;
@@ -1529,13 +1570,8 @@ impl Desktop {
             }
             // Windows of userland clients that exited without destroying them.
             for cid in client::reap() {
-                if let Some(wid) = self
-                    .windows
-                    .iter()
-                    .find(|w| w.app == App::Client(cid))
-                    .map(|w| w.id)
-                {
-                    self.close_window(wid);
+                if let Some((wid, t)) = self.find_app(App::Client(cid)) {
+                    self.close_tab(wid, t);
                 }
             }
             // Per-CPU load (percpu, sampled on each CPU's tick) for the menu bar meter.
@@ -1698,7 +1734,21 @@ impl Desktop {
                     });
                 }
                 self.move_window(id, x - dx, y - dy);
-                self.set_snap_preview(snap::zone_at(x, y));
+                match self.update_drop_target(id, x, y) {
+                    // Over another window's strip: the ghost hangs just below that strip so
+                    // the drop slot stays in sight (familiar-plus.html), no snap preview.
+                    Some(below) => {
+                        self.move_window(id, x - dx, below);
+                        self.set_snap_preview(None);
+                    }
+                    None => self.set_snap_preview(snap::zone_at(x, y)),
+                }
+            }
+            Some(Drag::Tab { id, i, x0, y0 }) => {
+                // Out of the strip (down, up, or far sideways): its own window again.
+                if (y - y0).abs() > 24 || (x - x0).abs() > 200 {
+                    self.tear_tab(id, i, x, y);
+                }
             }
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
@@ -1712,7 +1762,7 @@ impl Desktop {
                         tried: true,
                     });
                     let path = self.win_mut(id).and_then(|w| {
-                        let b = window::body_rect(w.rect.w, w.rect.h);
+                        let b = w.body();
                         w.contents
                             .drag_start(x0 - w.rect.x - b.x, y0 - w.rect.y - b.y)
                     });
@@ -1733,6 +1783,7 @@ impl Desktop {
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
     fn hover(&mut self, x: i32, y: i32) {
+        self.hover_tabs(x, y);
         // The drawer: the dismiss x follows the pointer.
         if self.notif {
             let r = notif::rect();
@@ -1803,7 +1854,7 @@ impl Desktop {
         if let Some(id) = body
             && let Some(w) = self.win_mut(id)
         {
-            let b = window::body_rect(w.rect.w, w.rect.h);
+            let b = w.body();
             if w.contents.hover(x - w.rect.x - b.x, y - w.rect.y - b.y) {
                 w.dirty = true;
             }
@@ -1837,7 +1888,7 @@ impl Desktop {
         let Some(w) = self.win_mut(id) else {
             return;
         };
-        let b = window::body_rect(w.rect.w, w.rect.h);
+        let b = w.body();
         let e = PointerInput {
             x: x - w.rect.x - b.x,
             y: y - w.rect.y - b.y,
@@ -1950,6 +2001,9 @@ impl Desktop {
                     h0: r.h,
                 })
             }
+            Some(p @ (Part::Tab(_) | Part::TabClose(_) | Part::TabNew)) => {
+                self.tab_press(id, p, x, y);
+            }
             Some(Part::Body) => {
                 self.drag = Some(Drag::Content {
                     id,
@@ -1998,6 +2052,10 @@ impl Desktop {
                     prefs::save(&p);
                 }
             }
+            Some(Drag::Move { id, .. }) if self.drop_window(id) => {
+                // Merged into the window it was dropped on (tabs.rs).
+                self.set_snap_preview(None);
+            }
             Some(Drag::Move { id, .. }) => {
                 if self.snap_preview.is_some() {
                     if let Some(z) = snap::zone_at(x, y) {
@@ -2030,7 +2088,10 @@ impl Desktop {
             Key::Char('3' | '#') if m.meta && m.shift => return self.capture(None),
             Key::Char('4' | '$') if m.meta && m.shift => return self.shot_region_start(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
-            Key::Escape if self.launcher.is_some() => return self.close_launcher(),
+            Key::Escape if self.launcher.is_some() => {
+                self.add_tab_to = None;
+                return self.close_launcher();
+            }
             Key::Escape if self.control => {
                 self.control = false;
                 return;
@@ -2073,6 +2134,12 @@ impl Desktop {
                             && w.contents.close_part()
                         {
                             w.dirty = true;
+                        } else if let Some(w) = self.win(id)
+                            && w.tab_count() > 1
+                        {
+                            // The window tab, then (when it is the last) the window.
+                            let a = w.active;
+                            self.close_tab(id, a);
                         } else {
                             self.close(id);
                         }
@@ -2084,6 +2151,9 @@ impl Desktop {
                     }
                 }
                 Key::Tab | Key::Char('`') => self.cycle_windows(),
+                // Cmd+Shift+[ / ]: the window's previous / next tab.
+                Key::Char('[' | '{') if m.shift => self.cycle_tab(-1),
+                Key::Char(']' | '}') if m.shift => self.cycle_tab(1),
                 // Everything else (Cmd+C / V / X / A ...) is the focused window's.
                 _ => handled = false,
             }

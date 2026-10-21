@@ -972,7 +972,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .enter()
                     .wait(300);
                 if name != "drawer-arrive" {
-                    b.typ("notify Gus @andrew the allocator merged, build is green")
+                    b.typ("notify Gus @milk the allocator merged, build is green")
                         .enter()
                         .wait(300);
                     b.key(Key::Char(' '), Mods::META)
@@ -1018,6 +1018,60 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 _ => {}
             }
         }
+        // Tabs everywhere (SPEC Tabs). Files is at (96, 64) 600 wide, the Terminal at
+        // (440, 270): drag the Terminal by its title bar onto Files' title bar.
+        "tabs-drop" | "tabs-merge" | "tabs-split" | "tabs-mixed" | "tabs-plus" | "tabs-keys"
+        | "tabs-close" => {
+            b.wait(300).to(700, 286).wait(30).down().wait(30);
+            for i in 1..=14 {
+                b.to(700 + (330 - 700) * i / 14, 286 + (80 - 286) * i / 14)
+                    .wait(16);
+            }
+            b.wait(200);
+            if name == "tabs-drop" {
+                b.wait(300);
+            } else {
+                b.up().wait(500);
+                // Two tabs now; Files' strip is 38 high, tabs 160 wide from x84.
+                match name {
+                    "tabs-split" => {
+                        // Pull the Terminal tab (the second) down out of the strip.
+                        b.drag(96 + 84 + 166 + 60, 64 + 22, 560, 420, 12).wait(500);
+                    }
+                    "tabs-mixed" | "tabs-keys" | "tabs-close" => {
+                        // Notes too (it opens at (120, 96)): drag it onto the strip.
+                        let (x, y) = dock_icon_center(3);
+                        b.click(x, y).wait(600);
+                        b.drag(340, 112, 330, 80, 12).wait(500);
+                        if name == "tabs-keys" {
+                            b.key(
+                                Key::Char('['),
+                                Mods {
+                                    meta: true,
+                                    shift: true,
+                                    ..Mods::NONE
+                                },
+                            )
+                            .wait(400);
+                        }
+                        if name == "tabs-close" {
+                            b.key(Key::Char('w'), Mods::META).wait(500);
+                        }
+                    }
+                    "tabs-plus" => {
+                        // The + after the tabs: Skim, then Music joins as a tab.
+                        b.click(96 + 84 + 2 * 166 + 4 + 14, 64 + 22).wait(400);
+                        b.typ("music").wait(200).enter().wait(800);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "tabs-terminal" => {
+            // The Terminal alone with two shells: its tabs are the window's strip.
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(600);
+            b.typ("echo second shell").enter().wait(300);
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }
@@ -1050,7 +1104,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .drag(300, 80, 360, 120, 30)
                 .wait(500);
             b.glide(360, 120, 700, 420, 20).click(700, 420);
-            b.typ("cowsay hello Andrew").enter().wait(1500);
+            b.typ("cowsay hello milk").enter().wait(1500);
             b.key(Key::Char(' '), Mods::META)
                 .wait(300)
                 .typ("not")

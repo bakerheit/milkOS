@@ -161,12 +161,11 @@ impl Desktop {
                 let Some(w) = self.win(id) else {
                     return;
                 };
-                let (app, rect) = (w.app, w.rect);
+                let (app, rect, body) = (w.app, w.rect, w.body());
                 self.set_focus(Some(id));
                 match app {
                     App::Client(cid) => {
-                        let b = super::window::body_rect(rect.w, rect.h);
-                        let (bx, by) = (pos.0 - rect.x - b.x, pos.1 - rect.y - b.y);
+                        let (bx, by) = (pos.0 - rect.x - body.x, pos.1 - rect.y - body.y);
                         if let Err(e) = super::client::drop_file(cid, bx, by, &path) {
                             self.post_toast(&format!("Can't give {name}"), &e);
                         }

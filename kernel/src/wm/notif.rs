@@ -93,7 +93,11 @@ fn today() -> u64 {
 /// A notice addressed to you (the Mentions chip): it names you or has an @.
 fn mentions_you(n: &Notice) -> bool {
     let t = format!("{} {}", n.title, n.sub).to_ascii_lowercase();
-    t.contains('@') || t.contains("andrew")
+    // The name as a whole word, so "milkOS" is not a mention of the user "milk".
+    let me = super::session::user_name().to_ascii_lowercase();
+    t.contains('@')
+        || t.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == me)
 }
 
 /// The app's look for its card icon.

@@ -163,7 +163,7 @@ impl Desktop {
                 ];
                 for w in &self.windows {
                     v.push(Item {
-                        label: String::from(w.contents.title()),
+                        label: Self::window_label(w),
                         key: if w.minimized {
                             "minimised"
                         } else if Some(w.id) == self.focus {

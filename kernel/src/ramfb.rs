@@ -1,6 +1,8 @@
 //! ramfb: a simple framebuffer that qemu scans out of guest RAM. We tell it where the buffer is
 //! (and its size and pixel format) by writing a `RAMFBCfg` to the fw_cfg file "etc/ramfb".
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::fwcfg;
 use crate::gfx::Surface;
 
@@ -19,6 +21,17 @@ const FOURCC_XRGB8888: u32 = u32::from_le_bytes(*b"XR24");
 struct FbMem([u32; WIDTH * HEIGHT]);
 
 static mut FB_MEM: FbMem = FbMem([0; WIDTH * HEIGHT]);
+
+/// Set once qemu has accepted the configuration.
+static LIVE: AtomicBool = AtomicBool::new(false);
+
+/// Raw pointer to the live framebuffer (WIDTH x HEIGHT, stride WIDTH), or `None` before
+/// [`init`] succeeded. For overlays that draw next to the console (the mouse cursor); the
+/// caller must serialise its writes with the console's (see `cursor.rs`).
+pub fn framebuffer() -> Option<*mut u32> {
+    LIVE.load(Ordering::Acquire)
+        .then(|| (&raw mut FB_MEM).cast::<u32>())
+}
 
 /// Configure ramfb at 1024x768 XRGB8888 and return a surface over the buffer.
 /// `None` if there is no fw_cfg or no ramfb device (e.g. qemu was run without `-device ramfb`).
@@ -42,6 +55,7 @@ pub fn init() -> Option<Surface<'static>> {
     if (file.size as usize) < cfg.len() || !fwcfg::write_file(file, &mut cfg) {
         return None;
     }
+    LIVE.store(true, Ordering::Release);
     // SAFETY: mem is 4096-aligned static storage of WIDTH*HEIGHT pixels.
     Some(unsafe { Surface::from_raw(mem, WIDTH, HEIGHT, WIDTH) })
 }

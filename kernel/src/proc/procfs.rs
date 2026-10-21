@@ -99,7 +99,14 @@ impl Inode for FdDir {
         InodeType::Dir
     }
     fn stat(&self) -> Stat {
-        Stat::new(self.dev, self.ino, InodeType::Dir, 0o500)
+        // Like Linux: owned by the process's effective user (so it can list its own fds).
+        let mut st = Stat::new(self.dev, self.ino, InodeType::Dir, 0o500);
+        if let Some(p) = get(self.pid) {
+            let c = *p.cred.lock();
+            st.uid = c.euid;
+            st.gid = c.egid;
+        }
+        st
     }
     fn lookup(&self, name: &str) -> fs::Result<InodeRef> {
         if name == ".." {

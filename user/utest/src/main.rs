@@ -968,6 +968,9 @@ fn t_linux() -> bool {
 /// Credentials: an unprivileged process can't raise its ids; sudo (set-user-ID root, asks
 /// for the caller's password) and su can.
 fn t_creds() -> bool {
+    if sys::geteuid() == 0 {
+        return as_milk("creds", "credentials");
+    }
     let (r, e, sv) = sys::getresuid();
     let me = sys::geteuid();
     let mut ok = true;
@@ -1010,6 +1013,119 @@ fn t_creds() -> bool {
     check("credentials", ok, &detail)
 }
 
+/// Run `utest <what>` as the milk user (`su milk -c`: root needs no password), for the
+/// tests that are about being unprivileged, when utest itself runs as root (the console).
+fn as_milk(what: &str, name: &str) -> bool {
+    let cmd = alloc::format!("/bin/utest {what}");
+    let (out, st) = capture(&["/bin/su", "milk", "-c", &cmd]);
+    let text = String::from_utf8_lossy(&out);
+    for l in text.lines() {
+        println!("  (as milk) {l}");
+    }
+    check(
+        name,
+        st == 0 && text.contains("ALL PASS"),
+        &alloc::format!("as milk via su: {}", sys::describe_status(st)),
+    )
+}
+
+/// Run `argv` through `sudo -S` with the default test password ("milk", see
+/// docs/security.md). Returns the wait status.
+fn sudo(argv: &[&str]) -> i32 {
+    let (r, w) = sys::pipe().unwrap();
+    let pid = match sys::fork().unwrap() {
+        0 => {
+            sys::dup2(r, 0).unwrap();
+            let mut v = alloc::vec!["sudo", "-S"];
+            v.extend_from_slice(argv);
+            let _ = sys::execve("/bin/sudo", &v, &[]);
+            sys::exit(127)
+        }
+        p => p,
+    };
+    let _ = sys::close(r);
+    let _ = sys::write_all(w, b"milk\n");
+    let _ = sys::close(w);
+    sys::wait4(pid as i32, 0).map_or(-1, |x| x.1)
+}
+
+/// Unix permissions as a non-root user: rwx on files and directories, ownership of new
+/// files, sticky /tmp, chmod/chown rules, exec bits; and the sandbox still on top.
+fn t_perms() -> bool {
+    if sys::geteuid() == 0 {
+        return as_milk("perms", "permissions");
+    }
+    let me = sys::geteuid();
+    let eacces = |r: sys::Result<i32>| matches!(r, Err(sys::Errno(13)));
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    // 0: /etc/shadow unreadable; 1: /etc/passwd not writable; 2: can't create in /etc.
+    t(eacces(sys::open("/etc/shadow", sys::O_RDONLY)));
+    t(eacces(sys::open("/etc/passwd", sys::O_WRONLY)));
+    t(eacces(sys::open_mode(
+        "/etc/utest",
+        sys::O_WRONLY | sys::O_CREAT,
+        0o644,
+    )));
+    // 3: a new file is mine.
+    let f = "/tmp/utest-perm";
+    let _ = sys::unlink(f);
+    if let Ok(fd) = sys::open_mode(f, sys::O_WRONLY | sys::O_CREAT, 0o644) {
+        let _ = sys::write_all(fd, b"#!x\n");
+        let _ = sys::close(fd);
+    }
+    t(sys::stat_path(f, true).is_ok_and(|s| s.uid == me));
+    // 4: mode 000 locks even the owner out; 5: the owner can chmod it back.
+    let _ = sys::chmod(f, 0);
+    t(eacces(sys::open(f, sys::O_RDONLY)));
+    t(sys::chmod(f, 0o644).is_ok() && sys::open(f, sys::O_RDONLY).map(sys::close).is_ok());
+    // 6: no exec without x; 7: chown to root refused.
+    t(matches!(sys::execve(f, &[f], &[]), sys::Errno(13)));
+    t(sys::chown(f, 0, u32::MAX).is_err());
+    // 8: a directory without x can't be searched.
+    let d = "/tmp/utest-dir";
+    let _ = sys::mkdir(d, 0o755);
+    let _ = sys::open_mode("/tmp/utest-dir/x", sys::O_WRONLY | sys::O_CREAT, 0o644).map(sys::close);
+    let _ = sys::chmod(d, 0o600);
+    t(matches!(
+        sys::stat_path("/tmp/utest-dir/x", true),
+        Err(sys::Errno(13))
+    ));
+    let _ = sys::chmod(d, 0o755);
+    let _ = sys::unlink("/tmp/utest-dir/x");
+    let _ = sys::rmdir(d);
+    // 9: sticky /tmp: root's file there can't be removed by us; 10: but by root.
+    let rf = "/tmp/utest-rootfile";
+    let made = sudo(&["/bin/touch", rf]) == 0;
+    t(made && matches!(sys::unlink(rf), Err(sys::Errno(1))));
+    t(sudo(&["/bin/rm", rf]) == 0 && sys::stat_path(rf, true).is_err());
+    // 11: both must allow: a sandbox grant of /etc doesn't open /etc/shadow, and a file
+    // the permissions allow is still out of reach outside the grant.
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        sys::sandbox("fs=/etc:r net=none").expect("sandbox");
+        let shadow = matches!(sys::open("/etc/shadow", sys::O_RDONLY), Err(sys::Errno(13)));
+        let passwd = sys::read_file("/etc/passwd").is_ok();
+        let outside = sys::read_file(f).is_err();
+        sys::exit(if shadow && passwd && outside { 0 } else { 1 });
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    t(st == 0);
+    let _ = sys::unlink(f);
+    let want = (1u32 << n) - 1;
+    check(
+        "permissions",
+        bits == want,
+        &alloc::format!("checks {bits:#b} (want {want:#b}) as uid {me}"),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1048,6 +1164,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "linux" || what == "all" {
         ok &= t_linux();
+    }
+    if what == "perms" || what == "all" {
+        ok &= t_perms();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

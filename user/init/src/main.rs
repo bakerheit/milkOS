@@ -4,13 +4,11 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-
 use rt::{println, sys};
 
 rt::main!(main);
 
-const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
+const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "USER=root", "TERM=dumb"];
 
 fn main(_args: &rt::Args) -> i32 {
     let u = sys::uname().unwrap_or_default();
@@ -51,7 +49,9 @@ fn main(_args: &rt::Args) -> i32 {
         wait_for(pid);
     }
     loop {
-        let sh = match spawn_session_shell() {
+        // The serial console is the maintenance console: a root shell (the desktop
+        // session runs as milk; see docs/security.md). HOME stays /home/milk.
+        let sh = match sys::spawn("/bin/msh", &["msh"], ENV) {
             Ok(p) => p,
             Err(e) => {
                 println!("init: cannot start /bin/msh: {e}");
@@ -64,30 +64,6 @@ fn main(_args: &rt::Args) -> i32 {
             "init: msh exited ({}), starting a new one",
             sys::describe_status(st)
         );
-    }
-}
-
-/// The console shell runs as the session user, `milk` (init itself stays root). Falls
-/// back to a root shell if the account is missing.
-fn spawn_session_shell() -> sys::Result<u32> {
-    let Some(p) = rt::users::by_name("milk") else {
-        println!("init: no user milk in /etc/passwd: console shell runs as root");
-        return sys::spawn("/bin/msh", &["msh"], ENV);
-    };
-    match sys::fork()? {
-        0 => {
-            if let Err(e) = rt::users::become_user(&p) {
-                rt::eprintln!("init: cannot become {}: {e}", p.name);
-                sys::exit(126);
-            }
-            let _ = sys::chdir(&p.home);
-            let env = rt::users::login_env(&p);
-            let env: alloc::vec::Vec<&str> = env.iter().map(|s| s.as_str()).collect();
-            let e = sys::execve("/bin/msh", &["msh"], &env);
-            rt::eprintln!("init: /bin/msh: {e}");
-            sys::exit(127)
-        }
-        pid => Ok(pid),
     }
 }
 

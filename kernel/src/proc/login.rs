@@ -280,7 +280,8 @@ pub fn init() {
     let a = session();
     // The layout the permission model expects (docs/security.md):
     //  /root 0700 root; /tmp 1777; /bin and /Applications root:admin 0775 (admins install
-    //  packages without sudo, like macOS); a milkfs volume root root:admin 0775; the
+    //  packages without sudo, like macOS), /etc/milk/repos root:admin 0664; a milkfs
+    //  volume root root:admin 0775; the
     //  session user's home owned by them (a one-time migration for disks made before
     //  users existed, where everything belongs to root).
     let _ = fs::mkdir("/root", 0o700);
@@ -288,11 +289,19 @@ pub fn init() {
     chmod_own("/tmp", 0o1777, 0, 0);
     chmod_own("/bin", 0o775, 0, cred::ADMIN_GID);
     chmod_own("/Applications", 0o775, 0, cred::ADMIN_GID);
+    // Package sources are an admin setting (the Store and `milk repo` edit it); the
+    // trusted signing keys in /etc/milk/keys stay root's.
+    chmod_own("/etc/milk/repos", 0o664, 0, cred::ADMIN_GID);
     if let Ok(st) = fs::stat("/Volumes/Milk")
         && st.uid == 0
         && st.gid == 0
     {
-        chmod_own("/Volumes/Milk", (st.perm | 0o775) & 0o7777, 0, cred::ADMIN_GID);
+        chmod_own(
+            "/Volumes/Milk",
+            (st.perm | 0o775) & 0o7777,
+            0,
+            cred::ADMIN_GID,
+        );
     }
     if let Ok(st) = fs::stat(&a.home)
         && st.uid != a.uid

@@ -40,10 +40,12 @@ fn long_line(out: &mut Out, o: &Opts, path: &str, name: &str, st: &Stat) {
         format!("{}", st.size)
     };
     let mut l = format!(
-        "{}{} {:>3} root root {:>8} {} {}",
+        "{}{} {:>3} {:<5} {:<5} {:>8} {} {}",
         st.type_char(),
         fmt_perm(st.mode),
         st.nlink,
+        rt::users::user_name(st.uid),
+        rt::users::group_name(st.gid),
         size,
         fmt_time(st.mtime),
         name

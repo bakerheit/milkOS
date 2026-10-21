@@ -58,7 +58,34 @@ pub fn set_cred_resolver(f: CredResolver) {
 }
 
 pub fn who() -> Who {
+    let tid = crate::sched::current_tid();
+    if ELEVATED.lock().contains(&tid) {
+        return Who::KERNEL;
+    }
     RESOLVER.get::<CredResolver>().map_or(Who::KERNEL, |f| f())
+}
+
+/// Threads currently running kernel work on a user's behalf (see [`as_kernel`]).
+static ELEVATED: SpinLock<Vec<u32>> = SpinLock::new(Vec::new());
+
+/// Run `f` with the calling thread treated as the kernel (root) by the VFS. For control
+/// files: the permission check happens when the user opens one (`/sys/fs/milkfs/clone`,
+/// admin group), the action it triggers (mounting a clone under /Volumes) is the kernel's.
+pub fn as_kernel<R>(f: impl FnOnce() -> R) -> R {
+    let tid = crate::sched::current_tid();
+    let fresh = {
+        let mut e = ELEVATED.lock();
+        let fresh = !e.contains(&tid);
+        if fresh {
+            e.push(tid);
+        }
+        fresh
+    };
+    let r = f();
+    if fresh {
+        ELEVATED.lock().retain(|&t| t != tid);
+    }
+    r
 }
 
 // ---- file systems without Unix owners ---------------------------------------------------
@@ -113,19 +140,23 @@ use super::node::{InodeType, SetAttr, Stat};
 
 const ADMIN_GID: u32 = 80;
 
-/// The ownership and mode the checks use: [`stat`] plus two mappings for synthetic file
-/// systems: terminals (`/dev/console`, `/dev/ttyN`, mode 0620) belong to the session
-/// user, and /proc and /sys control files (owner-writable) are writable by the `admin`
-/// group, so administrators can use them without sudo.
+/// The ownership and mode the checks use: [`stat`] plus two mappings: terminals
+/// (`/dev/console`, `/dev/ttyN`, mode 0620) belong to the session user, and /proc and /sys
+/// control files (owner-writable) are writable by the `admin` group, so administrators can
+/// use them without sudo.
 pub fn view(node: &InodeRef) -> Stat {
     let mut st = stat(node);
+    // Terminals (major 4 ttyN, 5 console; mode 0620) are the session user's, whichever
+    // driver publishes them.
+    let major = (st.rdev >> 8) & 0xfff;
+    if st.kind == InodeType::CharDev && st.perm == 0o620 && matches!(major, 4 | 5) {
+        let o = MOUNT_OWNER.load(Ordering::Relaxed);
+        st.uid = (o >> 32) as u32;
+        st.gid = o as u32;
+        return st;
+    }
     if let Some(kind) = synthetic(st.dev) {
         match kind {
-            Synth::Dev if st.kind == InodeType::CharDev && st.perm == 0o620 => {
-                let o = MOUNT_OWNER.load(Ordering::Relaxed);
-                st.uid = (o >> 32) as u32;
-                st.gid = o as u32;
-            }
             Synth::ProcSys if st.kind == InodeType::File && st.perm & 0o200 != 0 => {
                 st.gid = ADMIN_GID;
                 st.perm |= 0o020;
@@ -138,7 +169,6 @@ pub fn view(node: &InodeRef) -> Stat {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Synth {
-    Dev,
     ProcSys,
 }
 
@@ -150,7 +180,6 @@ fn synthetic(dev: u64) -> Option<Synth> {
     }
     let m = super::path::mounts().into_iter().find(|m| m.dev == dev)?;
     let s = match m.fs_name {
-        "devfs" => Some(Synth::Dev),
         "proc" | "sysfs" => Some(Synth::ProcSys),
         _ => None,
     };

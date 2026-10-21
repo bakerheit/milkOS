@@ -535,16 +535,15 @@ impl WindowContents for Settings {
                 self.read_tm();
             }
             Hit::TmNow => {
+                let before = self.tm_count;
                 let ok = fsx::ctl_write(AUTO, "now").is_ok();
                 self.read_tm();
-                super::super::notify(
-                    "Time Machine",
-                    if ok {
-                        "Snapshot taken"
-                    } else {
-                        "Couldn't snapshot"
-                    },
-                );
+                let msg = match (ok, self.tm_count > before) {
+                    (false, _) => "Couldn't take a snapshot",
+                    (true, true) => "Snapshot taken",
+                    (true, false) => "Nothing changed since the last one",
+                };
+                super::super::notify("Time Machine", msg);
             }
             Hit::Sound(on) => {
                 pr.sound = on;

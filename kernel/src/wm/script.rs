@@ -290,7 +290,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "termselect" => {
             // Terminal: select a few words of output with the mouse, copy, paste at the prompt.
             b.wait(300).typ("echo milk and honey").enter().wait(300);
-            b.drag(455 + 0, 507 - 18 + 8, 455 + 8 * 14, 507 - 18 + 8, 8);
+            b.drag(455, 507 - 18 + 8, 455 + 8 * 14, 507 - 18 + 8, 8);
             b.key(Key::Char('c'), Mods::META)
                 .key(Key::Char('v'), Mods::META)
                 .wait(200);

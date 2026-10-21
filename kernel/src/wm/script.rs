@@ -398,6 +398,54 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(593, 451).wait(300); // Restore
             b.click(137, 181).wait(400); // live Documents: it's back
         }
+        "browser" => {
+            // Dock globe: the Browser opens milkOS's own home page (kernel httpd).
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+        }
+        "browse2" => {
+            // Follow a link (the kernel page's /net), then go back.
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ(&host_test_url()).enter().wait(1500);
+        }
+        "browselink" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500).click(220, 290).wait(2000);
+        }
+        "browseback" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y)
+                .wait(2500)
+                .click(220, 290)
+                .wait(2000)
+                .click(175, 111)
+                .wait(2000);
+        }
+        "browse3" => {
+            // On the python test site: follow the relative link, then the absolute one back.
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ(&host_test_url()).enter().wait(1500);
+            b.click(230, 312).wait(1500);
+        }
+        "browserdeny" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(1500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ("http://example.com/").enter().wait(800);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }
@@ -451,6 +499,26 @@ fn build(name: &str) -> Option<Vec<Step>> {
     }
     b.0.push(Step::Log("done"));
     Some(b.0)
+}
+
+/// The test web server for the browse2 / browse3 demos: the Mac's 127.0.0.1 as seen from
+/// the guest (10.0.2.2, WM_HOSTNET=1), on the port in fw_cfg `opt/milkos/testport`.
+fn host_test_url() -> String {
+    let port = fwcfg::find_file("opt/milkos/testport")
+        .and_then(|f| {
+            let mut buf = alloc::vec![0u8; 8];
+            let n = (f.size as usize).min(8);
+            fwcfg::read_file(f, &mut buf[..n]).then(|| {
+                core::str::from_utf8(&buf[..n])
+                    .unwrap_or("8000")
+                    .trim_matches(char::from(0))
+                    .trim()
+                    .parse::<u16>()
+                    .unwrap_or(8000)
+            })
+        })
+        .unwrap_or(8000);
+    alloc::format!("http://10.0.2.2:{port}/")
 }
 
 pub fn from_fw_cfg() -> Option<Script> {

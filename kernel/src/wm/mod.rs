@@ -96,6 +96,8 @@ pub enum Request {
     /// New preferences from Settings: apply and save.
     Prefs(prefs::Prefs),
     Skim,
+    /// Nothing to do: just run a frame (a background job has a result for an app).
+    Wake,
 }
 
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
@@ -507,6 +509,11 @@ impl Desktop {
             "today" | "home" => return self.toggle_mode(Mode::Home),
             "spaces" => return self.toggle_mode(Mode::Spaces),
             "paint" => return self.launch("/bin/paint"),
+            "browser" | "web" => return self.open(App::Browser),
+            _ if what.starts_with("http://") || what.starts_with("localhost") => {
+                apps::browser::open_url(what);
+                return self.open(App::Browser);
+            }
             _ => {}
         }
         let path = apps::fsx::resolve("/", what);
@@ -1083,6 +1090,7 @@ impl Desktop {
                 Request::ClientCreate(id) => self.open(App::Client(id)),
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
+                Request::Wake => {}
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();

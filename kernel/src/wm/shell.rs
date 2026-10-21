@@ -133,11 +133,11 @@ const DOCK: [DockItem; 9] = [
         action: DockAction::App(App::Terminal),
     },
     DockItem {
-        name: "Web",
+        name: "Browser",
         icon: Icon::Globe,
         bg: BLUE,
         fg: INK,
-        action: DockAction::Soon("Web"),
+        action: DockAction::App(App::Browser),
     },
     DockItem {
         name: "Notes",
@@ -258,7 +258,7 @@ struct Entry {
     action: Action,
 }
 
-const ENTRIES: [Entry; 10] = [
+const ENTRIES: [Entry; 11] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -298,6 +298,14 @@ const ENTRIES: [Entry; 10] = [
         bg: HONEY,
         fg: INK,
         action: Action::Program("/bin/paint"),
+    },
+    Entry {
+        name: "Browser",
+        sub: "Web pages from IP addresses and localhost",
+        icon: Icon::Globe,
+        bg: BLUE,
+        fg: INK,
+        action: Action::App(App::Browser),
     },
     Entry {
         name: "Settings",

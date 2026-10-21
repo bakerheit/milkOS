@@ -37,6 +37,12 @@ fi
 # eth0, restricted, no port forwards (safe with other qemus running; scripts/netdev.sh).
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args
+# WM_HOSTNET=1: an unrestricted netdev (like scripts/net-test.sh), so the guest can reach the
+# Mac's 127.0.0.1 as 10.0.2.2, for testing the Browser against a local test server. Only
+# use it with demos that go to 10.0.2.2 (the Browser itself only fetches IP literals).
+if [ -n "${WM_HOSTNET:-}" ]; then
+  NET_ARGS=(-netdev "user,id=n0" -device virtio-net-device,netdev=n0)
+fi
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \

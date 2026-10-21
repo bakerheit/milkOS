@@ -2,6 +2,7 @@
 //! window rect and a fresh instance.
 
 pub mod about;
+pub mod browser;
 pub mod files;
 pub mod fsx;
 pub mod notes;
@@ -23,6 +24,10 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
         ),
         App::Notes => (Rect::new(120, 96, 440, 330), Box::new(notes::Notes::new())),
         App::About => (Rect::new(332, 140, 360, 380), Box::new(about::About::new())),
+        App::Browser => (
+            Rect::new(150, 56, 700, 520),
+            Box::new(browser::Browser::new()),
+        ),
         App::Settings => (
             Rect::new(180, 80, 660, 420),
             Box::new(settings::Settings::new()),

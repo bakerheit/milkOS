@@ -999,6 +999,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_sendrecv(t, VP);
     milkfs_scrub(t, &vol, VP, &dev);
     milkfs_spacemap(t);
+    milkfs_statfs(t, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
@@ -2812,6 +2813,124 @@ fn notify_and_search(t: &mut T) {
     rm_rf(R);
 }
 
+/// statfs on the RAM file systems, and the Linux `struct statfs` layout.
+fn statfs_basics(t: &mut T) {
+    use super::node::{self as n, StatFs};
+    let tmp = ops::statfs("/tmp");
+    t.ok(
+        tmp.as_ref().is_ok_and(|s| {
+            s.fs_type == n::TMPFS_MAGIC && s.bsize == 4096 && s.blocks > 0 && s.bfree <= s.blocks
+        }),
+        &alloc::format!("statfs /tmp: tmpfs with a size ({tmp:?})"),
+    );
+    for (p, magic) in [
+        ("/proc", n::PROC_MAGIC),
+        ("/sys/fs", n::SYSFS_MAGIC),
+        ("/dev/null", n::DEVFS_MAGIC),
+    ] {
+        let s = ops::statfs(p);
+        t.ok(
+            s.as_ref()
+                .is_ok_and(|s| s.fs_type == magic && s.blocks == 0 && s.bfree == 0),
+            &alloc::format!("statfs {p}: its type, no sizes ({s:?})"),
+        );
+    }
+    t.err(
+        ops::statfs("/tmp/no/such/thing"),
+        Errno::ENOENT,
+        "statfs of a missing path",
+    );
+    let s = StatFs {
+        fs_type: 1,
+        bsize: 2,
+        blocks: 3,
+        bfree: 4,
+        bavail: 5,
+        files: 6,
+        ffree: 7,
+        fsid: 0x0000_0009_0000_0008,
+        namelen: 10,
+        flags: 11,
+    };
+    let l = s.to_linux();
+    let b = l.as_bytes();
+    let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+    let fsid = (
+        i32::from_le_bytes(b[56..60].try_into().unwrap()),
+        i32::from_le_bytes(b[60..64].try_into().unwrap()),
+    );
+    t.ok(
+        (0..7).all(|i| w(i) == i as u64 + 1)
+            && fsid == (8, 9)
+            && w(8) == 10
+            && w(9) == 2
+            && w(10) == 11
+            && (11..15).all(|i| w(i) == 0),
+        "struct statfs layout (120 bytes, f_frsize = f_bsize)",
+    );
+}
+
+/// statfs on the milkfs test volume: sizes, space going and coming back, snapshots
+/// read-only.
+fn milkfs_statfs(t: &mut T, vp: &str) {
+    use super::node as n;
+    let Some(s0) = t.must(ops::statfs(vp), "statfs the test volume") else {
+        return;
+    };
+    t.ok(
+        s0.fs_type == n::MILKFS_MAGIC
+            && s0.bsize == 4096
+            && s0.blocks == 4096
+            && s0.bfree > 0
+            && s0.bfree < s0.blocks
+            && s0.bavail == s0.bfree
+            && s0.flags & n::ST_RDONLY == 0,
+        &alloc::format!("milkfs statfs: 16 MiB in 4 KiB blocks, some used ({s0:?})"),
+    );
+    let f = alloc::format!("{vp}/statfs-test.bin");
+    let data = alloc::vec![0x5au8; 256 << 10];
+    let wrote = ops::write_file(&f, &data).is_ok() && super::milkfs::sync().is_ok();
+    let s1 = ops::statfs(vp).unwrap_or_default();
+    t.ok(
+        wrote && s0.bfree - s1.bfree.min(s0.bfree) >= 64,
+        &alloc::format!(
+            "256 KiB written: free blocks {} -> {} (64 or more fewer)",
+            s0.bfree,
+            s1.bfree
+        ),
+    );
+    t.ok(
+        ops::statfs(&f).is_ok_and(|s| s == s1),
+        "statfs of a file = statfs of its volume",
+    );
+    if t.must(
+        super::milkfs::snapshot("statfs-snap"),
+        "snapshot for statfs",
+    )
+    .is_some()
+    {
+        let sp = ops::statfs(&alloc::format!("{vp}/.snapshots/statfs-snap"));
+        t.ok(
+            sp.as_ref().is_ok_and(|s| {
+                s.fs_type == n::MILKFS_MAGIC && s.flags & n::ST_RDONLY != 0 && s.blocks == 4096
+            }),
+            &alloc::format!("statfs of a snapshot: the volume's numbers, read-only ({sp:?})"),
+        );
+        let _ = super::milkfs::delete_snapshot("statfs-snap");
+    }
+    let _ = ops::unlink(&f);
+    let _ = super::milkfs::sync();
+    let s2 = ops::statfs(vp).unwrap_or_default();
+    t.ok(
+        s2.bfree >= s0.bfree.saturating_sub(4),
+        &alloc::format!(
+            "deleted again: free blocks back ({} -> {})",
+            s1.bfree,
+            s2.bfree
+        ),
+    );
+}
+
 pub fn run() {
     // Crash-test boots (scripts/crashtest.sh) do only that.
     if super::milkfs::crashtest::run() {
@@ -2829,6 +2948,7 @@ pub fn run() {
     initramfs(&mut t);
     devfs(&mut t);
     procfs_sysfs(&mut t);
+    statfs_basics(&mut t);
     blockdev(&mut t);
     mac_share(&mut t);
     crypto(&mut t);

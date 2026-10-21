@@ -221,9 +221,67 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   wait queues): so VFS calls are thread context only, never from IRQ context and never
   while holding a `SpinLock` (that's also true because the VFS allocates).
 
+## statfs (`df`, Disk Utility)
+
+`statfs(2)` (syscall 43, a path, symlinks followed) and `fstatfs(2)` (44, an fd) answer
+for every file system; kernel side `fs::statfs(path)` / `fs::statfs_of(&inode)` ->
+`node::StatFs`, each file system's `FileSystem::statfs`. The file system is found by the
+inode's device number among the mounts (a bind mount like `/home/milk` answers for what
+it binds); a milkfs snapshot browsed under `.snapshots` (its own device number) answers
+through its volume; pipes and sockets get type 0 and zero sizes.
+
+Copied out as Linux's aarch64 `struct statfs` (asm-generic, 64-bit), 120 bytes, all
+little-endian:
+
+| offset | field | type | milkOS |
+|---|---|---|---|
+| 0 | `f_type` | i64 | magic number, below |
+| 8 | `f_bsize` | i64 | block size (bytes) |
+| 16 | `f_blocks` | u64 | size in blocks |
+| 24 | `f_bfree` | u64 | free blocks |
+| 32 | `f_bavail` | u64 | free blocks for unprivileged users (= `f_bfree`, nothing is reserved) |
+| 40 | `f_files` | u64 | inodes (0: no fixed inode table) |
+| 48 | `f_ffree` | u64 | free inodes |
+| 56 | `f_fsid` | i32[2] | file system id (low word first) |
+| 64 | `f_namelen` | i64 | longest name (255) |
+| 72 | `f_frsize` | i64 | = `f_bsize` |
+| 80 | `f_flags` | i64 | `ST_RDONLY` 1, `ST_NOSUID` 2, `ST_NODEV` 4, `ST_NOEXEC` 8, `ST_VALID` 0x20 (always) |
+| 88 | `f_spare` | i64[4] | 0 |
+
+| file system | `f_type` | block | size / free | flags, fsid |
+|---|---|---|---|---|
+| milkfs | `0x4d494c4b` ("MILK") | 4096 | the device's blocks / free in the space map (copy-on-write: a write needs free blocks even when it overwrites) | snapshots and a broken volume `ST_RDONLY`; fsid from the UUID (same for the live tree, snapshots and clones) |
+| tmpfs | `0x01021994` | 4096 | the cap, or without one used + free RAM / what's left of that | |
+| FAT32 | `0x4d44` (msdos) | cluster size | data clusters / free clusters (FSInfo, kept exact) | `ST_NOSUID ST_NODEV`, `ST_RDONLY` if mounted read-only |
+| 9p (`/Volumes/Mac`) | `0x01021997` | the Mac's | the Mac's numbers for the shared folder's disk (Tstatfs), so "free" is the Mac's free space | `ST_NOSUID ST_NODEV`, `ST_RDONLY` unless the share is writable |
+| proc, sysfs, devfs | `0x9fa0`, `0x62656572`, `0x1373` | 4096 | 0 / 0 | |
+
+User side: `rt::sys::statfs(path)`, `rt::sys::fstatfs(fd)` -> `rt::sys::StatFs` (with
+`type_name()`, `read_only()`). Tool: `df [-h] [-a] [PATH...]` (coreutils): without paths
+every mount in `/proc/mounts`, minus the ones with no storage (proc, sysfs, devfs) and
+repeats of one file system (binds), `-a` for all; 1K blocks, `-h` human; `(ro)` after a
+read-only mount. With `MILK_TABLE=1` a table: `mount type size used avail use_pct bsize
+blocks bfree bavail files ffree ro` (sizes in bytes; `use_pct` like GNU df: used /
+(used + avail), rounded up; empty for no storage).
+
+```text
+Type      1K-blocks       Used      Avail  Use%  Mounted on
+tmpfs        492356      10168     482188    3%  /
+milkfs        65536         40      65496    1%  /Volumes/Milk
+9p        482746440  381604980  101141460   80%  /Volumes/Mac (ro)
+vfat          64511          0      64510    1%  /Volumes/DFFAT
+```
+
+Tests: the self-test (`statfs_basics`: RAM file systems, the struct layout; on the
+milkfs test volume: sizes, a write and a delete moving the free count, a snapshot
+read-only) and `scripts/dftest.sh` (`df` against the Mac's numbers: the milkfs image's
+size, the FAT image's BPB and FSInfo, `os.statvfs` of the share, growth by a written
+file).
+
 ## Writing a file system
 
-Implement `FileSystem` (`name`, `dev` from `node::alloc_dev()`, `root`) and `Inode` for
+Implement `FileSystem` (`name`, `dev` from `node::alloc_dev()`, `root`, and `statfs` if it
+has storage; the default reports zero sizes) and `Inode` for
 your objects. Every `Inode` method has a default error, so only implement what you support.
 Names passed in are single components, never `.`/`..` (except `lookup("..")`, which every
 directory must answer; the root of a fs returns itself). Don't hold your own lock while

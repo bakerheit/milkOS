@@ -89,6 +89,55 @@ impl LinuxStat {
     }
 }
 
+/// `struct statfs` for aarch64 Linux (asm-generic/statfs.h, 64-bit: every field a
+/// 64-bit word except the two-word fsid), 120 bytes. What `statfs`/`fstatfs` (syscalls
+/// 43/44) copy out.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LinuxStatFs {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: u64,
+    pub f_bfree: u64,
+    pub f_bavail: u64,
+    pub f_files: u64,
+    pub f_ffree: u64,
+    pub f_fsid: [i32; 2],
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    pub f_spare: [i64; 4],
+}
+
+const _: () = assert!(core::mem::size_of::<LinuxStatFs>() == 120);
+
+impl LinuxStatFs {
+    pub fn as_bytes(&self) -> &[u8; 120] {
+        // SAFETY: repr(C), 120 bytes (asserted), no padding (8-byte fields, the fsid is
+        // two 4-byte words at an 8-byte offset), plain integers.
+        unsafe { &*(self as *const LinuxStatFs as *const [u8; 120]) }
+    }
+}
+
+impl super::node::StatFs {
+    pub fn to_linux(self) -> LinuxStatFs {
+        LinuxStatFs {
+            f_type: self.fs_type as i64,
+            f_bsize: self.bsize as i64,
+            f_blocks: self.blocks,
+            f_bfree: self.bfree,
+            f_bavail: self.bavail,
+            f_files: self.files,
+            f_ffree: self.ffree,
+            f_fsid: [self.fsid as u32 as i32, (self.fsid >> 32) as u32 as i32],
+            f_namelen: self.namelen as i64,
+            f_frsize: self.bsize as i64,
+            f_flags: self.flags as i64,
+            f_spare: [0; 4],
+        }
+    }
+}
+
 impl Stat {
     pub fn to_linux(&self) -> LinuxStat {
         let t = |t: Timespec| (t.sec, t.nsec as u64);

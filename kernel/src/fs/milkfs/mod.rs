@@ -427,6 +427,14 @@ fn holders(devs: &[u64]) -> alloc::vec::Vec<String> {
     out
 }
 
+/// `statfs` for a device number of a milkfs view that isn't mounted itself (a snapshot
+/// under `.snapshots`).
+pub fn statfs_dev(dev: u64) -> Option<crate::fs::node::StatFs> {
+    all_volumes()
+        .into_iter()
+        .find_map(|(v, _)| v.view_of_dev(dev).map(|view| v.statfs_view(view)))
+}
+
 /// Is `t` (a device name, mount path or label) this volume?
 fn names_volume(v: &Volume, path: &str, t: &str) -> bool {
     v.device_name == t || path == t || v.label == t

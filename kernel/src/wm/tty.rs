@@ -63,7 +63,7 @@ impl Termios {
         ],
     };
 
-    pub fn to_bytes(&self) -> [u8; TERMIOS_LEN] {
+    pub fn to_bytes(self) -> [u8; TERMIOS_LEN] {
         let mut b = [0u8; TERMIOS_LEN];
         for (k, v) in [self.iflag, self.oflag, self.cflag, self.lflag]
             .iter()

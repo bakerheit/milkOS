@@ -267,16 +267,20 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
     let envp: Vec<String> = envp.iter().map(|s| String::from(*s)).collect();
     let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
     let cwd = fs::lookup(cwd).unwrap_or_else(|_| fs::root());
-    start(
-        basename(path),
-        0,
+    start(Launch {
+        name: basename(path),
+        ppid: 0,
+        pgid: None,
+        sid: None,
         space,
-        FdTable::with_tty(tty)?,
+        fds: FdTable::with_tty(tty)?,
         cwd,
-        &user_frame(entry, sp),
-        0,
-        Box::new(FpState::zeroed()),
-    )
+        frame: &user_frame(entry, sp),
+        tpidr_el0: 0,
+        fp: Box::new(FpState::zeroed()),
+        sig: signal::SigState::new(),
+        argv,
+    })
 }
 
 /// Start `/bin/init` as PID 1. Call at the end of boot.

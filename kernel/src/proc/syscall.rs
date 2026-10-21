@@ -700,12 +700,11 @@ fn tty_of(f: &OpenFile) -> Option<&'static super::tty::Tty> {
 fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     let f = file(fd)?;
     if let Some(tty) = tty_of(&f) {
-        let input = if super::tty::ioctl_reads_arg(cmd) {
-            Some(u32::from_le_bytes(copy_in(arg, 4)?.try_into().unwrap()))
-        } else {
-            None
+        let input = match super::tty::ioctl_in_size(cmd) {
+            0 => Vec::new(),
+            n => copy_in(arg, n)?,
         };
-        if let Some(out) = tty.ioctl(cmd, input)?
+        if let Some(out) = tty.ioctl(cmd, &input)?
             && arg != 0
         {
             copy_out(arg, &out)?;

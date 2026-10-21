@@ -15,7 +15,11 @@
 //! and send SIGINT / SIGQUIT to the foreground process group (set with TIOCSPGRP).
 //! `read` gives at most one line per call and blocks until one is there (interruptible:
 //! EINTR on a signal). Before the scheduler runs, `read` is non-blocking (EAGAIN).
-//! Always cooked mode: termios settings are not implemented (TCGETS returns zeros).
+//!
+//! termios: TCGETS/TCSETS* round-trip a Linux `struct termios`; the flags honoured are
+//! ICANON (off: raw bytes, read returns whatever is there), ECHO, ISIG (^C/^\ signals)
+//! and ICRNL. Window size: `TERM.set_winsize(rows, cols)` (the Terminal calls it when the
+//! window is resized) or TIOCSWINSZ; a change sends SIGWINCH to the foreground group.
 //!
 //! The UART is fed by a kernel thread, "tty-uart", that sleeps until the RX interrupt
 //! fires, so ^C works while nobody is reading.
@@ -36,8 +40,58 @@ struct State {
     line: Vec<u8>,
     ready: VecDeque<u8>,
     eof: bool,
-    /// Inside an ESC [ ... sequence (arrow keys etc.), which we swallow.
+    /// Inside an ESC [ ... sequence (arrow keys etc.), which we swallow in cooked mode.
     esc: u8,
+    /// Linux `struct termios` (asm-generic, 60 bytes), as last set.
+    termios: [u8; 60],
+}
+
+// termios flag bits (asm-generic)
+const ICRNL: u32 = 0o400;
+const ISIG: u32 = 0o1;
+const ICANON: u32 = 0o2;
+const ECHO: u32 = 0o10;
+const ECHOE: u32 = 0o20;
+const ECHOK: u32 = 0o40;
+const IEXTEN: u32 = 0o100000;
+
+/// Sane defaults, like a fresh Linux tty: cooked, echo, signals, CR -> NL, OPOST|ONLCR,
+/// CS8|CREAD|B38400, ^C ^\ DEL ^U ^D.
+const fn default_termios() -> [u8; 60] {
+    let mut t = [0u8; 60];
+    let iflag = ICRNL.to_le_bytes();
+    let oflag = (0o1u32 | 0o4).to_le_bytes();
+    let cflag = (0o60u32 | 0o200 | 0o17).to_le_bytes();
+    let lflag = (ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN).to_le_bytes();
+    let mut i = 0;
+    while i < 4 {
+        t[i] = iflag[i];
+        t[4 + i] = oflag[i];
+        t[8 + i] = cflag[i];
+        t[12 + i] = lflag[i];
+        i += 1;
+    }
+    // c_cc starts at 17: VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN
+    t[17] = 0x03;
+    t[18] = 0x1c;
+    t[19] = 0x7f;
+    t[20] = 0x15;
+    t[21] = 0x04;
+    t[22] = 0;
+    t[23] = 1;
+    t
+}
+
+impl State {
+    fn flag(&self, off: usize) -> u32 {
+        u32::from_le_bytes(self.termios[off..off + 4].try_into().unwrap())
+    }
+    fn lflag(&self) -> u32 {
+        self.flag(12)
+    }
+    fn iflag(&self) -> u32 {
+        self.flag(0)
+    }
 }
 
 pub struct Tty {
@@ -46,8 +100,8 @@ pub struct Tty {
     readers: WaitQueue,
     fg_pgrp: AtomicU32,
     output: fn(&[u8]),
-    rows: u16,
-    cols: u16,
+    /// rows << 16 | cols
+    winsize: AtomicU32,
 }
 
 impl Tty {
@@ -59,12 +113,37 @@ impl Tty {
                 ready: VecDeque::new(),
                 eof: false,
                 esc: 0,
+                termios: default_termios(),
             }),
             readers: WaitQueue::new(),
             fg_pgrp: AtomicU32::new(0),
             output,
-            rows,
-            cols,
+            winsize: AtomicU32::new((rows as u32) << 16 | cols as u32),
+        }
+    }
+
+    /// (rows, cols).
+    pub fn winsize(&self) -> (u16, u16) {
+        let w = self.winsize.load(Ordering::Relaxed);
+        ((w >> 16) as u16, w as u16)
+    }
+
+    /// Set the window size; SIGWINCH to the foreground group if it changed. Thread context.
+    pub fn set_winsize(&self, rows: u16, cols: u16) {
+        let new = (rows as u32) << 16 | cols as u32;
+        if self.winsize.swap(new, Ordering::Relaxed) != new {
+            self.signal_foreground(signal::SIGWINCH);
+        }
+    }
+
+    fn signal_foreground(&self, sig: u32) {
+        let pg = self.fg_pgrp.load(Ordering::Relaxed);
+        if pg != 0 {
+            let info = SigInfo {
+                code: signal::SI_KERNEL,
+                ..SigInfo::default()
+            };
+            signal::send_pgrp(pg, sig, info);
         }
     }
 
@@ -85,14 +164,7 @@ impl Tty {
             (self.output)(&echo);
         }
         if let Some(s) = sig {
-            let pg = self.fg_pgrp.load(Ordering::Relaxed);
-            if pg != 0 {
-                let info = SigInfo {
-                    code: signal::SI_KERNEL,
-                    ..SigInfo::default()
-                };
-                signal::send_pgrp(pg, s, info);
-            }
+            self.signal_foreground(s);
         }
         self.readers.wake_all();
     }
@@ -116,11 +188,15 @@ impl Tty {
             {
                 let mut st = self.st.lock();
                 if !st.ready.is_empty() {
-                    let line_end = st
-                        .ready
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map_or(usize::MAX, |i| i + 1);
+                    let canon = st.lflag() & ICANON != 0;
+                    let line_end = if canon {
+                        st.ready
+                            .iter()
+                            .position(|&b| b == b'\n')
+                            .map_or(usize::MAX, |i| i + 1)
+                    } else {
+                        usize::MAX
+                    };
                     let n = buf.len().min(st.ready.len()).min(line_end);
                     for (i, b) in st.ready.drain(..n).enumerate() {
                         buf[i] = b;
@@ -158,22 +234,50 @@ impl Tty {
         self.fg_pgrp.store(pgid, Ordering::Relaxed);
     }
 
-    /// Terminal ioctls. `arg` is the value read from the user pointer for the "set" calls;
-    /// returned bytes (if any) are copied out to the user pointer by the syscall layer.
-    pub fn ioctl(&self, cmd: u32, arg: Option<u32>) -> KResult<Option<Vec<u8>>> {
+    /// Terminal ioctls. `arg` holds the bytes read from the user pointer for the "set"
+    /// calls (see [`ioctl_in_size`]); returned bytes (if any) are copied out to the user
+    /// pointer by the syscall layer.
+    pub fn ioctl(&self, cmd: u32, arg: &[u8]) -> KResult<Option<Vec<u8>>> {
+        let u32_arg = || -> KResult<u32> {
+            Ok(u32::from_le_bytes(
+                arg.get(..4).ok_or(EINVAL)?.try_into().unwrap(),
+            ))
+        };
         match cmd {
-            // struct termios (asm-generic, 60 bytes): zeroed is good enough for isatty().
-            TCGETS => Ok(Some(alloc::vec![0u8; 60])),
-            TCSETS | TCSETSW | TCSETSF => Ok(None), // accepted, ignored (always cooked)
-            TIOCGWINSZ => Ok(Some(
-                [self.rows, self.cols, 0, 0]
-                    .iter()
-                    .flat_map(|v| v.to_le_bytes())
-                    .collect(),
-            )),
+            TCGETS => Ok(Some(self.st.lock().termios.to_vec())),
+            TCSETS | TCSETSW | TCSETSF => {
+                let mut st = self.st.lock();
+                st.termios.copy_from_slice(arg.get(..60).ok_or(EINVAL)?);
+                if cmd == TCSETSF {
+                    st.ready.clear();
+                    st.line.clear();
+                }
+                // Leaving cooked mode: a half-typed line becomes readable.
+                if st.lflag() & ICANON == 0 && !st.line.is_empty() {
+                    let l = core::mem::take(&mut st.line);
+                    st.ready.extend(l);
+                }
+                drop(st);
+                self.readers.wake_all();
+                Ok(None)
+            }
+            TIOCGWINSZ => {
+                let (r, c) = self.winsize();
+                Ok(Some(
+                    [r, c, 0, 0].iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ))
+            }
+            TIOCSWINSZ => {
+                let w = arg.get(..4).ok_or(EINVAL)?;
+                self.set_winsize(
+                    u16::from_le_bytes([w[0], w[1]]),
+                    u16::from_le_bytes([w[2], w[3]]),
+                );
+                Ok(None)
+            }
             TIOCGPGRP => Ok(Some(self.foreground().to_le_bytes().to_vec())),
             TIOCSPGRP => {
-                let pg = arg.ok_or(EINVAL)?;
+                let pg = u32_arg()?;
                 if pg == 0 {
                     return Err(EINVAL);
                 }
@@ -192,15 +296,47 @@ pub const TCSETSF: u32 = 0x5404;
 pub const TIOCGPGRP: u32 = 0x540f;
 pub const TIOCSPGRP: u32 = 0x5410;
 pub const TIOCGWINSZ: u32 = 0x5413;
+pub const TIOCSWINSZ: u32 = 0x5414;
 
-/// Which ioctls read a u32 argument from user memory first.
-pub fn ioctl_reads_arg(cmd: u32) -> bool {
-    cmd == TIOCSPGRP
+/// How many bytes of user memory an ioctl reads as its argument (0: none).
+pub fn ioctl_in_size(cmd: u32) -> usize {
+    match cmd {
+        TIOCSPGRP => 4,
+        TIOCSWINSZ => 8,
+        TCSETS | TCSETSW | TCSETSF => 60,
+        _ => 0,
+    }
 }
 
 impl State {
     /// One input byte. Returns a signal to send to the foreground group, if any.
-    fn input(&mut self, b: u8, echo: &mut Vec<u8>) -> Option<u32> {
+    fn input(&mut self, mut b: u8, echo: &mut Vec<u8>) -> Option<u32> {
+        let (lflag, iflag) = (self.lflag(), self.iflag());
+        if b == b'\r' && iflag & ICRNL != 0 {
+            b = b'\n';
+        }
+        if lflag & ISIG != 0 && (b == 0x03 || b == 0x1c) {
+            if lflag & ECHO != 0 {
+                echo.extend_from_slice(if b == 0x03 { b"^C\n" } else { b"^\\\n" });
+            }
+            self.line.clear();
+            self.ready.clear();
+            return Some(if b == 0x03 {
+                signal::SIGINT
+            } else {
+                signal::SIGQUIT
+            });
+        }
+        if lflag & ICANON == 0 {
+            // Raw: every byte is readable at once.
+            self.ready.push_back(b);
+            if lflag & ECHO != 0 {
+                echo.push(b);
+            }
+            return None;
+        }
+        let mut sink = Vec::new();
+        let echo = if lflag & ECHO != 0 { echo } else { &mut sink };
         if self.esc == 1 {
             self.esc = if b == b'[' { 2 } else { 0 };
             return None;
@@ -233,17 +369,6 @@ impl State {
                         echo.extend_from_slice(b"\x08 \x08");
                     }
                 }
-            }
-            0x03 | 0x1c => {
-                // ^C, ^\: flush, signal the foreground group.
-                echo.extend_from_slice(if b == 0x03 { b"^C\n" } else { b"^\\\n" });
-                self.line.clear();
-                self.ready.clear();
-                return Some(if b == 0x03 {
-                    signal::SIGINT
-                } else {
-                    signal::SIGQUIT
-                });
             }
             0x04 => {
                 // ^D

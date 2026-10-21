@@ -935,7 +935,8 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "hover-settings" => {
             let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(500);
-            b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8).wait(300);
+            b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8)
+                .wait(300);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

@@ -97,7 +97,7 @@ boot b1 "$T/boot1.log" \
 L="$(tr -d '\r' < "$T/boot1.log")"
 echo "$L" | grep -a "^snap: sent\|^snap: received\|^snap: receive" | sed 's/^/    /'
 [ "$(echo "$L" | grep -ac '^snap: received')" = 2 ] && ok "kernel: received s1 (full) and s2 (incremental) on /Volumes/Backup" || bad "kernel receives"
-echo "$L" | grep -aq "receive.*that name is taken" && ok "receiving s2 again is refused (EEXIST)" || bad "second receive of s2"
+echo "$L" | grep -aq "receive.*already has a snapshot of that name (EEXIST" && ok "receiving s2 again is refused (EEXIST)" || bad "second receive of s2"
 
 for s in s1 s2 s2-full; do
   if $M verify-stream "$SHAREDIR/$SUB/$s.stream" > "$T/$s.verify"; then
@@ -149,7 +149,7 @@ boot b2 "$T/boot2.log" \
 L="$(tr -d '\r' < "$T/boot2.log")"
 echo "$L" | grep -a "^snap: receive" | sed 's/^/    /'
 echo "$L" | grep -aq "receive.*base snapshot isn't on the target" && ok "kernel refuses an incremental whose base is missing" || bad "kernel: missing base"
-[ "$(echo "$L" | grep -ac 'receive.*damaged stream')" = 2 ] && ok "kernel refuses the damaged and the truncated stream" || bad "kernel: bad streams"
+[ "$(echo "$L" | grep -ac 'receive.*damaged or cut short (nothing was changed) (EIO')" = 2 ] && ok "kernel refuses the damaged and the truncated stream" || bad "kernel: bad streams"
 $M check "$F" > "$T/fresh.txt" 2>&1 && grep -q " 0 snapshot" "$T/fresh.txt" && [ "$($M tree "$F" | wc -l | tr -d ' ')" = 0 ] \
   && ok "the target is still empty and clean" || { bad "target after refused receives"; cat "$T/fresh.txt"; }
 

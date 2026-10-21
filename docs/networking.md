@@ -364,14 +364,18 @@ AirDrop-style sharing between two milkOS machines on the eth1 link. Everything i
 userland except the eth1 link itself and one tiny fs hook (`/etc/milk/drop` is persistent).
 
 **Identity.** Each machine has an Ed25519 key pair (`rt::ed25519`) in `/etc/milk/drop/`
-(`identity.secret`, the seed; `identity.pub`; `name`; `known_peers`), made the first time
-`drop` runs. That first run is normally the daemon init starts at boot. On a machine with a
+(`identity.secret`, the seed, 0600 root; `identity.pub`; `name`; `known_peers`, root's
+trust list), made the first time root's `drop` runs. That is normally the `drop` service
+(milkd, as root) at boot. The identity is the machine's: other users' `drop` reads only the
+public half and has the daemon sign over `/run/drop.sock`, and each user keeps their own
+trust list in `~/.config/milk/drop/known_peers`. The model is in docs/security.md, "Milk
+Drop: one machine identity, per-user clients". On a machine with a
 Milk volume, `fs::init` binds `/Volumes/Milk/etc/milk/drop` onto it
 (`milkfs::setup_persistent_etc`), so the identity and the trusted peers survive reboots.
 The fingerprint people compare is the first 8 bytes of SHA-256(public key) in four groups
 (`3fa2 91bc 07de 44a1`). The default name is `<hostname>-<first 4 fingerprint digits>`;
-`drop name alice` changes it. The secret is only as safe as the system: everything runs as
-uid 0, so any program could read it. `milk run-try` sandboxes keep tried apps away from
+`drop name alice` changes it. The secret is only as safe as root: it is 0600 root, so
+ordinary users' programs can't read it (root's can). `milk run-try` sandboxes keep tried apps away from
 their clone's `/etc`. Keys come from the kernel CSPRNG (`/dev/urandom`: ChaCha20 seeded
 from virtio-rng, docs/crypto.md), and `identity.secret` records that (`rng=kernel-csprng`).
 
@@ -594,6 +598,11 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
   must not be;
 * Ctrl-C stops a `drop recv -k` waiting in accept;
 * the `user.drop.*` records on both machines;
+* as milk, the desktop's account: alice-as-milk sends bob-as-milk a file, signed by each
+  machine's daemon; it lands in `~/Downloads` owned by milk (root's earlier receive into
+  that folder is milk's too); milk can't read `identity.secret`; milk (an administrator)
+  renames the machine through the daemon (`user.drop.rename ... by uid=501`), and nobody
+  is refused (`user.drop.refused`);
 * after shutdown, the host reads both received files out of the images (`mkmilkfs.py
   cat`) and compares their SHA-256 with the originals, and finds alice's `known_peers` on
   her disk;

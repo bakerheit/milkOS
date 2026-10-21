@@ -142,6 +142,11 @@ impl Store {
         Err(Errno::ENOSPC)
     }
 
+    /// Empty the node cache (an encrypted volume being locked: no plaintext left behind).
+    pub fn forget_nodes(&self) {
+        *self.nodes.lock() = NodeCache::default();
+    }
+
     /// The decoded tree node at `p` (checksum verified), shared from the node cache.
     pub fn node(&self, p: BlockPtr) -> Result<alloc::sync::Arc<super::format::DiskNode>> {
         let key = (p.block, p.csum);

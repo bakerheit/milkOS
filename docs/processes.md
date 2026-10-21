@@ -261,7 +261,7 @@ Implemented (number: name):
 * **Capability sandbox**: each process carries a capability set, inherited and shrink-only,
   enforced on openat/execve/fork/socket/device opens; denials are audited. Full model and
   the powerbox design in docs/security.md.
-| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY, 4105 MILK_WIN_RESIZE (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -347,6 +347,7 @@ child a private copy).
 | 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
 | 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
 | 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+| 4105 | `MILK_WIN_RESIZE` | `(id, w, h, info, flags)` → 0. With `flags` bit 0 (RESIZABLE): the window handles resize events, down to `w` x `h` (nothing else changes; `info` unused). Without: a new `w` x `h` body (up to 1000 x 700), the old picture copied into its top-left and the rest milk; the old mapping is gone and `info` describes the new one exactly as for `MILK_WIN_CREATE`. A size the window did not ask for makes the window fit it. |
 
 Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
 
@@ -357,7 +358,16 @@ alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4
 down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
 the end), 7 close (the user closed the window: clean up and exit), 8 drop (a file was dragged
 from Files onto the window at x, y: `key` is a new fd for it, opened read-only and granted
-to the process; read it and close it). 2 (key up) is reserved.
+to the process; read it and close it), 9 notice action (a button on one of the process's
+notices was pressed: `key` = the notice's `id=`, `mods` = which button, see "/dev/wm"
+below), 10 resize (only after RESIZABLE: the window's body on screen is now x by y; answer
+with `MILK_WIN_RESIZE` to that size and redraw; until then the old picture is shown in the
+top-left). 2 (key up) is reserved.
+
+Resizing: a window that did not declare itself RESIZABLE is never made smaller than its
+buffer (and never joins a smaller tab group); a resizable one follows its window, a resize
+drag or a tab group, down to its minimum. `user/gui`: `Window::set_resizable(min_w, min_h)`,
+`Event::Resize { w, h }`, `Window::resize(w, h)`. Paint is resizable (a bigger canvas).
 
 Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
 stays mapped until the process destroys the window or exits. Windows of processes that exit
@@ -369,14 +379,123 @@ without destroying them are closed and freed by the wm within a second.
 
 `kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
 first space): `open <app|absolute path>` (apps: files terminal notes about paint today
-spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
-<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
-write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+spaces milkdrop; a folder opens in Files, a text file in Notes, a `/bin` program runs),
+`notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`. An
+unknown command (or an unknown `notify` option) fails the write with `EINVAL`.
+
+**Notifications with buttons.** `notify` takes options after the subtitle, one per field:
+
+```text
+notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snooze\taction=Open:open /home/milk
+```
+
+* `app=<name>`: the group in the drawer and the icon (default: the writing program's name).
+* `id=<number>`: the poster's own number for this notice, sent back with an action.
+* `action=<label>[:<command>]`, up to two: buttons on the toast and on the drawer card (the
+  first is the primary). Pressing one marks the notice read, removes its toast and:
+  * with a command: runs it, no shell: the first word is an absolute path or a `/bin`
+    program, the rest its arguments; `open <what>` is done by the desktop itself (as the
+    `open` command above);
+  * without: sends the posting process's window an action event (kind 9 in the 32-byte
+    window event: `key` = the `id`, `mods` = the button's index). `user/gui` has
+    `gui::notify(app, title, sub, tag, &[labels])` and `Event::Action { tag, index }`. A
+    poster with no window gets nothing (the press is logged).
+
+**A timer in the menu bar.** `timer <text>[\t<option>...]` shows a countdown left of the
+bell ("04:32", a stopwatch on a straw tint), one per app, so a Clock timer stays visible
+after its window closes. Options: `app=<name>` (default: the writing program) and
+`open=<what>` (what a click opens, as for `open`; default the app, e.g. `/bin/clock`).
+Empty text clears it; an item not refreshed for 5 s goes by itself, so a publisher
+refreshes it every second and one that dies leaves nothing behind. `user/gui`:
+`gui::menu_timer(app, text, open)`.
+
+The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
+LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
+`Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,
 `space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
 
 `user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
 paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and
 `cowsay [text]` (which just prints).
+
+## Services: `milkd` and service files
+
+`milkd` (`user/milkd`) is the service manager. init (PID 1) starts it first thing and
+restarts it if it ever exits; init itself keeps only reaping orphans and the console
+shell. milkd reads every `/etc/milk/services/<name>.service`, starts the enabled ones in
+dependency order, supervises them (restart with backoff), captures their stdout and
+stderr into the journal, and answers `svc` over `/run/milkd.sock`. Kernel threads are not
+services.
+
+### The service file format
+
+Plain text, one `key = value` per line, `#` starts a comment, blank lines ignored, keys
+case-sensitive, unknown keys are reported (`svc status` shows a warning) and ignored. The
+file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 characters.
+
+| key | value | default |
+|---|---|---|
+| `exec` | the program and its arguments, split on spaces; `"..."` quotes one argument. The program is an absolute path. **Required.** | |
+| `description` | one line for `svc list` | |
+| `user` | account to run as (name from /etc/passwd). The service gets that user's uid, gid, groups, HOME, USER; never set-ID tricks needed. | `root` |
+| `restart` | `always` (whenever it exits), `on-failure` (exit status != 0 or killed by a signal), `never` | `on-failure` |
+| `after` | units (space separated) to start before this one: ordering only | |
+| `needs` | units that must be up (running, listening, or exited with status 0) for this one to start; if one of them fails, is skipped, stopped or isn't there, this unit is not started (or is stopped if it was running) and its status says `dependency failed: <unit>` | |
+| `sandbox` | a capability spec, exactly as for the `sandbox` syscall (docs/security.md): one `fs=PATH:r` or `fs=PATH:rw` token per grant (`fs=/srv/www:r fs=/proc:r`), `fs-none`, `net=none|local|all`, `audio=0`, `clipboard=0`, `windows=0`, `spawn=0` (no fork). The service's own binary is granted read automatically; the sandbox is applied just before the exec, after the user switch. | none (unrestricted) |
+| `socket` | socket activation: milkd creates this AF_UNIX listening socket (a path, mode 0660, owned by `user`, group admin), and starts the service on the first connection, handing it the listener as **fd 3** with `LISTEN_FDS=1` / `LISTEN_PID` in the environment, like systemd. | |
+| `cwd` | working directory | `/` |
+| `env` | extra environment, space-separated `KEY=VALUE` | |
+| `if-exists` | start only if this path exists (else status `skipped`) | |
+| `if-contains` | `PATH TEXT...`: start only if the file contains TEXT | |
+| `enabled` | `yes` / `no`: started at boot | `yes` |
+| `console` | `yes`: also echo the unit's output on the system console (milkd's stdout) | `no` |
+
+Example (`/etc/milk/services/clockd.service`):
+
+```text
+# Alarms and timers for the desktop.
+description = clock daemon: alarms
+exec = /bin/clockd --quiet
+user = milk
+restart = always
+after = drop
+sandbox = fs=/home/milk/Library/Clock:rw net=none spawn=0
+socket = /run/clockd.sock
+```
+
+**Restart and backoff.** After an unexpected exit milkd waits 100 ms, then doubles the
+wait on every quick failure (one that ran less than 10 s) up to 30 s; a run of 10 s or
+more resets it. After 8 quick failures in a row the unit is `failed` and left alone
+until `svc start` / `svc restart`. `svc stop` sends SIGTERM, then SIGKILL after 3 s.
+
+**Logs.** A service's stdout and stderr go (line by line) to the journal with its unit
+name and level `info` (stdout) / `err` (stderr); `log -u <unit>` shows them.
+
+### The journal (`kernel/src/journal.rs`, `log`)
+
+One structured log for the kernel and the services: every entry has a sequence number,
+a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`,
+`debug`) and a message (up to 216 bytes). The kernel keeps the last 4096 in a fixed ring
+(adding one never allocates, so every `kprintln!` line goes in as unit `kernel`).
+
+* `/dev/journal` (mode 0662 root:admin): **write** one entry per line. Root writes
+  `UNIT\tLEVEL\tPID\tMESSAGE` (milkd uses this for each service's output, with the
+  service's pid); anyone else writes `MESSAGE` or `LEVEL\tMESSAGE` and gets unit
+  `user/<program>` and their own pid. **Read** (root, admin): the entries as lines
+  `seq\tboot\tmono_ms\twall_s\tpid\tuid\tunit\tlevel\tmessage`; the file offset is a cursor,
+  so a reader at EOF reads on later and gets only what's new.
+* The `journald` kernel thread appends new entries to
+  `/Volumes/Milk/var/log/journal/current.log` (root:admin 0640) every 2 s and rotates it
+  at 512 KiB to `journal.1` .. `journal.3`: about 2 MiB of history across reboots.
+* `log [-u UNIT]... [--since 30s|10m|2h|1d|UNIXTIME] [-n N] [-p LEVEL] [-b] [-f]`: old boots
+  from the files, then the live ring; `-b` this boot only, `-f` follow, `-p warn` only
+  warnings and errors, `-u user` every `user/...` unit. `MILK_TABLE=1`: a table (time,
+  boot, seq, unit, pid, uid, level, message).
+
+**`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
+`svc logs <unit>` = `log -u <unit>`): talks to milkd over `/run/milkd.sock` (AF_UNIX
+stream, one text request per line, `SO_PEERCRED` decides): anyone may `list` / `status`;
+`start`, `stop`, `restart` need root or the `admin` group. `MILK_TABLE=1` gives tables.
 
 ## Userland (`user/`)
 

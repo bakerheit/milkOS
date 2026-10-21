@@ -102,16 +102,52 @@ pub struct Toast {
     pub until_ns: u64,
     /// Hovered: the time it had left when the pointer arrived (SPEC: toasts pause).
     pub paused: Option<u64>,
+    /// Its notice's buttons (pills under the text).
+    pub actions: Vec<super::notif::NoticeAction>,
 }
 
-/// Toast `i`'s place (SPEC: 264x64, 12 from the right, 40 from the top, stacked).
-pub fn toast_rect(i: usize) -> Rect {
-    Rect::new(
-        screen_w() - TOAST_RIGHT - TOAST_W,
-        TOAST_TOP + i as i32 * (TOAST_H + 8),
-        TOAST_W,
-        TOAST_H,
-    )
+impl Toast {
+    pub fn height(&self) -> i32 {
+        TOAST_H
+            + if self.actions.is_empty() {
+                0
+            } else {
+                super::notif::ACTIONS_H
+            }
+    }
+}
+
+/// The toasts' places (SPEC: 264 wide, 12 from the right, 40 from the top, stacked 8 apart;
+/// 64 high, more with buttons).
+pub fn toast_rects(toasts: &[Toast]) -> Vec<Rect> {
+    let mut y = TOAST_TOP;
+    toasts
+        .iter()
+        .map(|t| {
+            let r = Rect::new(screen_w() - TOAST_RIGHT - TOAST_W, y, TOAST_W, t.height());
+            y += t.height() + 8;
+            r
+        })
+        .collect()
+}
+
+/// The places toasts would have, given which have buttons (for demo scripts).
+pub fn toast_rects_for(with_actions: &[bool]) -> Vec<Rect> {
+    let mut y = TOAST_TOP;
+    with_actions
+        .iter()
+        .map(|&a| {
+            let h = TOAST_H + if a { super::notif::ACTIONS_H } else { 0 };
+            let r = Rect::new(screen_w() - TOAST_RIGHT - TOAST_W, y, TOAST_W, h);
+            y += h + 8;
+            r
+        })
+        .collect()
+}
+
+/// Where a toast's buttons are, in toast coordinates.
+fn toast_actions(t: &Toast) -> Vec<Rect> {
+    super::notif::action_rects(&t.actions, 64, TOAST_H - 6)
 }
 
 /// SPEC "Menu bar status area": 16px glyphs, 12px apart, right to left from the clock.
@@ -132,6 +168,80 @@ pub(super) enum Status {
     Focus,
     /// The unread count; opens the notification drawer.
     Bell,
+    /// A timer an app publishes ("04:32", /dev/wm `timer`), by its place in [`timers`].
+    Timer(usize),
+}
+
+// ---- menu bar timer items (/dev/wm `timer`) -------------------------------------------------
+
+/// A countdown an app shows in the menu bar while it runs (SPEC-APPS Timer).
+#[derive(Clone)]
+pub struct TimerItem {
+    /// Who publishes it (one item per app).
+    pub app: String,
+    pub text: String,
+    /// What a click opens (an app name or path for `open`); default the app.
+    pub open: String,
+    /// Gone unless refreshed by then (a publisher that dies leaves no stale item).
+    pub until_ns: u64,
+}
+
+static TIMERS: crate::sync::SpinLock<Vec<TimerItem>> = crate::sync::SpinLock::new(Vec::new());
+static TIMERS_GEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// How long an item lives without a refresh.
+const TIMER_TTL_NS: u64 = 5_000_000_000;
+
+/// Set (or with empty `text`, clear) `app`'s menu bar timer. Any thread.
+pub fn set_timer(app: &str, text: &str, open: Option<&str>) {
+    {
+        let mut t = TIMERS.lock();
+        t.retain(|i| i.app != app);
+        if !text.trim().is_empty() {
+            let text: String = text.trim().chars().take(12).collect();
+            t.push(TimerItem {
+                app: String::from(app),
+                text,
+                open: String::from(open.unwrap_or(app)),
+                until_ns: crate::timer::now_ns() + TIMER_TTL_NS,
+            });
+        }
+    }
+    TIMERS_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::WAKE.wake_all();
+}
+
+/// The current items (expired ones dropped).
+pub fn timers() -> Vec<TimerItem> {
+    let now = crate::timer::now_ns();
+    let mut t = TIMERS.lock();
+    let n = t.len();
+    t.retain(|i| i.until_ns > now);
+    if t.len() != n {
+        TIMERS_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    t.clone()
+}
+
+/// Bumped on every change (the menu bar redraws).
+pub fn timers_gen() -> u32 {
+    TIMERS_GEN.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A timer item's width: the stopwatch glyph, the text, the straw tint's padding.
+fn timer_w(text: &str) -> i32 {
+    8 + 12 + 4 + super::fontx::prop_width(text, false) + 8
+}
+
+/// The menu bar timer: a straw-tinted pill with a small stopwatch and the text.
+fn paint_timer(p: &mut Painter, x: i32, text: &str) {
+    let w = timer_w(text);
+    p.rrect(x, 4, w, 20, 10, STRAW, a(270));
+    let (gx, gy) = (x + 8, 8);
+    p.ring(gx, gy + 1, 12, 2, ESPRESSO, 255);
+    p.fill(gx + 5, gy - 2, 2, 3, ESPRESSO);
+    p.fill(gx + 5, gy + 4, 2, 4, ESPRESSO);
+    p.text_p(gx + 16, MENU_TEXT_Y, text, ESPRESSO, false);
 }
 
 // ---- dock ---------------------------------------------------------------------------------
@@ -224,6 +334,8 @@ const DOCK: [DockItem; 9] = [
 /// A dock tile as drawn: the built-in ones, then installed packages (packages.rs).
 struct Tile {
     name: String,
+    /// The artist's icon for it (crate::art), if there is one.
+    art: Option<&'static str>,
     /// None: a package, drawn as its colour with its initial.
     icon: Option<Icon>,
     bg: Color,
@@ -245,6 +357,7 @@ fn tiles() -> Vec<Tile> {
         .iter()
         .map(|d| Tile {
             name: String::from(d.name),
+            art: icons::art_name(d.name),
             icon: Some(d.icon),
             bg: d.bg,
             fg: d.fg,
@@ -255,6 +368,8 @@ fn tiles() -> Vec<Tile> {
         // The Store is the one package with its own glyph (a box), not an initial.
         let store = p.exec.rsplit('/').next() == Some("store");
         v.push(Tile {
+            // By manifest name or label, so new apps pick up their art automatically.
+            art: icons::package_art(&p.name, &p.label),
             name: p.label,
             icon: store.then_some(Icon::Package),
             bg: p.color,
@@ -333,6 +448,14 @@ impl Desktop {
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
     dock_icon_center_of(i, super::packages::count())
+}
+
+/// The centre of the dock tile called `name` (demo scripts).
+pub fn dock_tile_center(name: &str) -> Option<(i32, i32)> {
+    tiles()
+        .iter()
+        .position(|t| t.name == name)
+        .map(dock_icon_center)
 }
 
 /// The same once there are `extra` package tiles in the dock (it grows from the centre):
@@ -657,6 +780,12 @@ fn home_app_at(x: i32, y: i32) -> Option<usize> {
 
 /// A dock tile's icon, `s` across at (x, y): its glyph, or a package's colour and initial.
 fn paint_tile(p: &mut Painter, x: i32, y: i32, s: i32, t: &Tile) {
+    // The artist's icon when there is one (crate::art), else the drawn glyph.
+    if let Some(n) = t.art
+        && icons::art(p, x, y, s, n)
+    {
+        return;
+    }
     match t.icon {
         Some(icon) => icons::draw(p, x, y, s, icon, t.bg, 255, t.fg, t.bg == MILK),
         None => {
@@ -827,14 +956,8 @@ impl Desktop {
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
-        for (i, t) in self.toasts.iter().enumerate() {
-            v.push(spec(
-                PanelKey::Toast(t.id),
-                toast_rect(i),
-                R_TOAST,
-                Style::Glass,
-                true,
-            ));
+        for (t, r) in self.toasts.iter().zip(toast_rects(&self.toasts)) {
+            v.push(spec(PanelKey::Toast(t.id), r, R_TOAST, Style::Glass, true));
         }
         if let Some(m) = self.menu_layer() {
             v.push(m);
@@ -887,7 +1010,15 @@ impl Desktop {
     /// clock (SPEC "Menu bar status area"). Each hit target is the item plus half the gap
     /// on each side, the bar's full height.
     pub(super) fn status_items(&self) -> Vec<(Status, i32, i32)> {
-        status_layout(&self.status, self.cpu_loads.len(), self.settings.focus_mode)
+        let mut v = status_layout(&self.status, self.cpu_loads.len(), self.settings.focus_mode);
+        // App timers, left of the bell.
+        let mut x = v.last().map_or(screen_w() - MENU_PAD_X, |&(_, x, _)| x);
+        for (i, t) in timers().iter().enumerate() {
+            let w = timer_w(&t.text);
+            x -= STATUS_GAP + w;
+            v.push((Status::Timer(i), x, w));
+        }
+        v
     }
 
     pub(super) fn status_text(&self) -> String {
@@ -927,10 +1058,20 @@ impl Desktop {
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
                     let (icon, bg, fg) = super::notif::app_icon(&t.app);
-                    icons::draw(p, 12, 12, 40, icon, bg, 255, fg, bg == CREAM);
+                    icons::app_tile(p, 12, 12, 40, &t.app, icon, bg, fg);
                     p.text_p(64, 12, &t.title, ESPRESSO, true);
                     p.text_right(w - 12, 12, "now", COCOA, 1, false);
                     p.text_p(64, 32, &t.sub, COCOA, false);
+                    // Its buttons: the first primary (SPEC Received toast: Show, Open).
+                    for (k, r) in toast_actions(t).into_iter().enumerate() {
+                        let kind = if k == 0 {
+                            super::button::Kind::Primary
+                        } else {
+                            super::button::Kind::Secondary
+                        };
+                        let st = super::button::State::hover(self.toast_hover == Some((t.id, k)));
+                        super::button::paint(p, r, &t.actions[k].label, kind, st);
+                    }
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
@@ -990,6 +1131,11 @@ impl Desktop {
                 Status::Network => paint_network(p, x, 6, network_up()),
                 Status::Focus => paint_moon(p, x, 6),
                 Status::Bell => super::notif::paint_bell(p, x + 1, 6, self.unread(), false),
+                Status::Timer(i) => {
+                    if let Some(t) = timers().get(i) {
+                        paint_timer(p, x, &t.text);
+                    }
+                }
             }
         }
     }
@@ -1142,7 +1288,11 @@ impl Desktop {
                 p.rrect(8, y, w - 16, rh, R_ROW, STRAW, SEL_ROW_A);
             }
             let border = e.bg == MILK || e.bg == CREAM;
-            icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
+            let art = e.kind == super::skim::Kind::App
+                && icons::art_name(&e.title).is_some_and(|n| icons::art(p, 16, y + 6, 36, n));
+            if !art {
+                icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
+            }
             p.text_p(64, y + 6, &e.title, ESPRESSO, true);
             // SPEC: no secondary text on a selected row.
             let sub = if i == sel { ESPRESSO } else { COCOA };
@@ -1399,6 +1549,14 @@ impl Desktop {
                             self.control = false;
                             self.toggle_notif();
                         }
+                        Status::Timer(i) => {
+                            // The app that runs it (or what it asked to open).
+                            if let Some(t) = timers().get(i) {
+                                self.close_notif();
+                                self.control = false;
+                                self.open_any(&t.open);
+                            }
+                        }
                     }
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
@@ -1418,9 +1576,16 @@ impl Desktop {
                 self.invalidate(PanelKey::Dock);
             }
             PanelKey::Toast(id) => {
-                // SPEC: clicking a toast opens the drawer on that item.
-                let notice = self.toasts.iter().find(|t| t.id == id).map(|t| t.notice);
-                self.open_notif(notice);
+                // A button runs its action; anywhere else opens the drawer on the item (SPEC).
+                let Some(t) = self.toasts.iter().find(|t| t.id == id) else {
+                    return;
+                };
+                let notice = t.notice;
+                if let Some(k) = toast_actions(t).iter().position(|r| hit(r, x, y)) {
+                    self.run_action(notice, k);
+                    return;
+                }
+                self.open_notif(Some(notice));
             }
             PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {

@@ -136,6 +136,25 @@ pub fn stat_at(base: Option<&InodeRef>, path: &str, follow: bool) -> Result<Stat
     Ok(lookup_at(base, path, follow)?.stat())
 }
 
+/// `fstatfs(2)`: the file system `node` is in. Found by device number among the mounts;
+/// a milkfs snapshot (its own device number, browsed under `.snapshots`) through its
+/// volume; anything else (pipes, sockets) gets an empty answer.
+pub fn statfs_of(node: &InodeRef) -> Result<super::node::StatFs> {
+    let dev = node.dev();
+    if let Some(fs) = super::path::fs_of_dev(dev) {
+        return fs.statfs();
+    }
+    if let Some(s) = super::milkfs::statfs_dev(dev) {
+        return Ok(s);
+    }
+    Ok(super::node::StatFs::empty(0, dev))
+}
+
+/// `statfs(2)` (follows symlinks).
+pub fn statfs(path: &str) -> Result<super::node::StatFs> {
+    statfs_of(&lookup(path)?)
+}
+
 /// Entries of a directory, without `.` and `..`, in the file system's order (sorted by
 /// name for tmpfs).
 pub fn readdir(path: &str) -> Result<Vec<DirEntry>> {

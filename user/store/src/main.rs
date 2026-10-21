@@ -257,6 +257,8 @@ struct App {
     outcome: Outcome,
     last_label: String,
     repo: String,
+    /// Where the left button is held (a button under it draws pressed).
+    held: Option<(i32, i32)>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -467,7 +469,11 @@ impl App {
             text: th.espresso,
             latte: th.latte,
         };
-        self.win.button((x, y, w, BTN_H), label, kind, false, bt);
+        let held = self
+            .held
+            .is_some_and(|(hx, hy)| (x..x + w).contains(&hx) && (y..y + BTN_H).contains(&hy));
+        self.win
+            .button((x, y, w, BTN_H), label, kind, held, held, bt);
     }
 
     fn chip(&mut self, x: i32, y: i32, label: &str, c: Color) -> i32 {
@@ -752,6 +758,7 @@ fn main(_args: &rt::Args) -> i32 {
         outcome: Outcome::None,
         last_label: String::new(),
         repo,
+        held: None,
     };
     if app.pkgs.is_empty() {
         app.start(&["update"]); // first run: fetch the index
@@ -765,7 +772,11 @@ fn main(_args: &rt::Args) -> i32 {
             dirty = true;
             match ev {
                 Event::Close => return 0,
-                Event::Down { x, y, button: 1 } => app.click(x, y),
+                Event::Down { x, y, button: 1 } => {
+                    app.held = Some((x, y));
+                    app.click(x, y);
+                }
+                Event::Up { button: 1, .. } => app.held = None,
                 Event::Scroll(n) => {
                     app.sel = (app.sel as i32 + n.signum())
                         .clamp(0, app.pkgs.len() as i32 - 1)

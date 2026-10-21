@@ -115,6 +115,36 @@ impl Volume {
             .is_some_and(|w| w.strong_count() > 0)
     }
 
+    /// Inode objects someone still holds (open files, working directories, mappings),
+    /// any view: (view, ino).
+    pub(crate) fn held_objects(&self) -> alloc::vec::Vec<(u64, u64)> {
+        self.inodes
+            .lock()
+            .iter()
+            .filter(|(_, w)| w.strong_count() > 0)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// The view whose device number is `dev`, if it is one of this volume's.
+    pub(crate) fn view_of_dev(&self, dev: u64) -> Option<u64> {
+        if dev == self.dev {
+            return Some(LIVE);
+        }
+        self.snap_devs
+            .lock()
+            .iter()
+            .find(|(_, d)| **d == dev)
+            .map(|(v, _)| *v)
+    }
+
+    /// Device numbers of every view handed out so far (live, snapshots, clones).
+    pub(crate) fn all_devs(&self) -> alloc::vec::Vec<u64> {
+        let mut d = alloc::vec![self.dev];
+        d.extend(self.snap_devs.lock().values().copied());
+        d
+    }
+
     pub fn root_obj(&self, view: u64) -> Arc<MilkInode> {
         self.inode_obj(view, ROOT_INO, InodeType::Dir)
     }
@@ -196,6 +226,30 @@ impl FileSystem for Volume {
     }
     fn sync(&self) -> Result<()> {
         self.state.lock().commit()
+    }
+    fn statfs(&self) -> Result<crate::fs::node::StatFs> {
+        Ok(self.statfs_view(LIVE))
+    }
+}
+
+impl Volume {
+    /// `statfs` as seen through `view` (snapshots are read-only): 4 KiB blocks, all of the
+    /// device and the free ones; no inode table (files/ffree 0); fsid from the UUID.
+    pub fn statfs_view(&self, view: u64) -> crate::fs::node::StatFs {
+        use crate::fs::node as n;
+        let st = self.state.lock();
+        let mut s = n::StatFs::empty(n::MILKFS_MAGIC, 0);
+        let u = &st.sb.uuid;
+        s.fsid = u64::from_le_bytes(u[..8].try_into().unwrap())
+            ^ u64::from_le_bytes(u[8..].try_into().unwrap());
+        s.bsize = BLOCK as u64;
+        s.blocks = st.store.total();
+        s.bfree = st.store.free_blocks();
+        s.bavail = s.bfree;
+        if !is_writable_view(view) || st.broken {
+            s.flags |= n::ST_RDONLY;
+        }
+        s
     }
 }
 
@@ -360,6 +414,9 @@ impl FileSystem for ViewFs {
     }
     fn sync(&self) -> Result<()> {
         self.vol.state.lock().commit()
+    }
+    fn statfs(&self) -> Result<crate::fs::node::StatFs> {
+        Ok(self.vol.statfs_view(self.view))
     }
 }
 

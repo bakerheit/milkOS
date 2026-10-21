@@ -116,6 +116,34 @@ pub fn is_text(name: &str) -> bool {
         || !n.contains('.')
 }
 
+/// The artist's file-type tile for an entry (crate::art: file-<kind>).
+pub fn art_kind(e: &Entry) -> &'static str {
+    art_kind_of(
+        &e.name,
+        e.kind == InodeType::Dir || e.kind == InodeType::Symlink,
+    )
+}
+
+/// [`art_kind`] by name (and whether it is a folder).
+pub fn art_kind_of(name: &str, dir: bool) -> &'static str {
+    if dir {
+        return "folder";
+    }
+    let n = name.to_ascii_lowercase();
+    let ext = |xs: &[&str]| xs.iter().any(|x| n.ends_with(x));
+    if ext(&[".png", ".jpg", ".jpeg", ".gif", ".bmp"]) {
+        "image"
+    } else if ext(&[".wav", ".mp3", ".ogg", ".flac"]) {
+        "audio"
+    } else if ext(&[".zip", ".tar", ".gz", ".tgz", ".xz"]) {
+        "archive"
+    } else if ext(&[".milk", ".pkg"]) {
+        "package"
+    } else {
+        "document"
+    }
+}
+
 pub fn icon_for(e: &Entry) -> Icon {
     match e.kind {
         InodeType::Dir => Icon::Folder,

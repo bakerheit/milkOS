@@ -23,8 +23,6 @@ pub enum Step {
     Idle(u64),
     /// Switch the display mode.
     Resolution(i32, i32),
-    /// Chocolate milk (true) or Whole milk.
-    Theme(bool),
 }
 
 pub struct Script {
@@ -32,6 +30,9 @@ pub struct Script {
     steps: Vec<Step>,
     i: usize,
     wait_until: u64,
+    /// A dark- demo: the desktop switches to Chocolate milk before its first frame (so the
+    /// timed first composite is a dark one, not a theme switch).
+    pub dark: bool,
 }
 
 struct B(Vec<Step>);
@@ -684,22 +685,25 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install fortune").enter().wait(3000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            // After the Store (tile 9), by name: fortune is tile 10, moo2048 tile 11.
+            // Installed apps come after the system ones (Store, Clock, ... from tile 9):
+            // fortune, then moo2048.
+            let sys = super::packages::count();
+            let (fortune, moo, n) = (9 + sys, 10 + sys, sys + 2);
             if name == "pkgrun" || name == "pkgsandbox" {
-                let (x, y) = dock_icon_center_of(11, 3);
+                let (x, y) = dock_icon_center_of(moo, n);
                 b.click(x, y).wait(2000);
             }
             if name == "pkgsandbox" {
                 // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
                 b.key(Key::Left, Mods::NONE).wait(300);
-                let (x, y) = dock_icon_center_of(1, 3);
+                let (x, y) = dock_icon_center_of(1, n);
                 b.click(x, y).wait(400);
                 b.typ("audit --event sandbox").enter().wait(800);
             } else if name == "pkgfortune" {
-                let (x, y) = dock_icon_center_of(10, 3);
+                let (x, y) = dock_icon_center_of(fortune, n);
                 b.click(x, y).wait(2000);
             } else {
-                let (x, y) = dock_icon_center_of(11, 3);
+                let (x, y) = dock_icon_center_of(moo, n);
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
         }
@@ -882,7 +886,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.up().wait(1500);
         }
         "dragpkg" => {
-            // moo2048 installed (tile 10, after the Store): drop todo.txt on its tile.
+            // moo2048 installed (after the system apps): drop todo.txt on its tile.
             let url = host_test_url();
             b.wait(300)
                 .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
@@ -891,14 +895,15 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk update").enter().wait(2000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            let (tx, ty) = dock_icon_center_of(10, 2);
+            let sys = super::packages::count();
+            let (tx, ty) = dock_icon_center_of(9 + sys, sys + 1);
             b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
                 b.to(425 + (tx - 425) * i / 16, 186 + (ty - 186) * i / 16)
                     .wait(16);
             }
             b.up().wait(2000);
-            let (x, y) = dock_icon_center_of(1, 2);
+            let (x, y) = dock_icon_center_of(1, sys + 1);
             b.click(x, y).wait(400);
             b.typ("audit --event powerbox").enter().wait(600);
             b.typ("audit --event sandbox").enter().wait(800);
@@ -971,7 +976,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .enter()
                     .wait(300);
             }
-            let (x, y) = dock_icon_center(9);
+            let (x, y) = super::shell::dock_tile_center("Store").unwrap_or(dock_icon_center(9));
             b.wait(300).click(x, y).wait(4000);
         }
         // The notification drawer (SPEC "Notification drawer"): the four mockup states.
@@ -1031,7 +1036,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // Tabs everywhere (SPEC Tabs). Files is at (96, 64) 600 wide, the Terminal at
         // (440, 270): drag the Terminal by its title bar onto Files' title bar.
         "tabs-drop" | "tabs-merge" | "tabs-split" | "tabs-mixed" | "tabs-plus" | "tabs-keys"
-        | "tabs-close" | "tabs-client" => {
+        | "tabs-close" | "tabs-client" | "tabs-client-hold" => {
             b.wait(300).to(700, 286).wait(30).down().wait(30);
             for i in 1..=14 {
                 b.to(700 + (330 - 700) * i / 14, 286 + (80 - 286) * i / 14)
@@ -1048,17 +1053,20 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         // Pull the Terminal tab (the second) down out of the strip.
                         b.drag(96 + 84 + 166 + 60, 64 + 22, 560, 420, 12).wait(500);
                     }
-                    "tabs-client" => {
-                        // Paint (a client app, 562x382 buffer, opens at (255, 177)) over
-                        // the strip: no drop target, it would not fit (no client resize).
+                    "tabs-client" | "tabs-client-hold" => {
+                        // Paint (a resizable client, opens at (255, 177)) dragged onto the
+                        // strip joins the group and resizes its canvas to the group's body.
                         let (x, y) = dock_icon_center(4);
-                        b.click(x, y).wait(600);
+                        b.click(x, y).wait(800);
                         b.to(420, 193).wait(30).down().wait(30);
                         for i in 1..=12 {
                             b.to(420 + (330 - 420) * i / 12, 193 + (80 - 193) * i / 12)
                                 .wait(16);
                         }
                         b.wait(400);
+                        if name == "tabs-client" {
+                            b.up().wait(1000);
+                        }
                     }
                     "tabs-mixed" | "tabs-keys" | "tabs-close" => {
                         // Music too (Notes already lives in space 2; Music opens at
@@ -1131,7 +1139,71 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 _ => {}
             }
         }
-        "drop-bob-wait" | "drop-bob-accept" => {
+        // Button states (SPEC Buttons: a primary keeps its ink label when hovered and
+        // pressed). The pointer rests on the button's padding, clear of its label.
+        "button-hover" => {
+            // todo.txt selected: Share is a primary pill; hover its left padding.
+            b.click(425, 186).wait(300);
+            let sw = super::button::pill_w("Share");
+            b.glide(425, 186, 97 + 530 - 8 - sw + 4, 97 + 20, 8)
+                .wait(400);
+        }
+        "button-press" => {
+            // Settings (window (180, 80), body (181, 113)) > Sound, then hold the chosen
+            // "On" button (body (188, 100), 90 x 30) down at its left padding.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(241, 113 + 164).wait(300);
+            b.glide(241, 277, 181 + 188 + 8, 113 + 115, 8)
+                .wait(100)
+                .down()
+                .wait(400);
+        }
+        // Notification actions (/dev/wm notify action=...): a toast with two buttons; the
+        // first runs a command (a second notice), the drawer shows the same buttons.
+        "notif-actions" | "notif-action-run" | "notif-actions-drawer" => {
+            b.wait(300)
+                .typ("notify --app Clock --action \"Snooze:notify --app Clock Snoozed 5 minutes\" --action \"Open:open files\" \"Tea is ready\" Your 4 minute timer finished")
+                .enter()
+                .wait(600);
+            let first = super::shell::toast_rects_for(&[true])[0];
+            let sw = super::button::pill_w("Snooze");
+            let (bx, by) = (
+                first.x + 64 + sw / 2,
+                first.y + super::theme::TOAST_H - 6 + 12,
+            );
+            match name {
+                "notif-actions" => {
+                    b.glide(600, 400, bx - sw / 2 + 4, by, 8).wait(300);
+                }
+                "notif-action-run" => {
+                    b.click(bx, by).wait(800);
+                }
+                _ => {
+                    let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
+                    b.click(x, y).wait(600);
+                }
+            }
+        }
+        // Client window resize: Paint (window (255, 177) 562 x 414) draws a stroke, then its
+        // corner is dragged out; the canvas grows and the stroke stays.
+        "client-resize" => {
+            let (x, y) = dock_icon_center(4);
+            b.click(x, y).wait(800);
+            b.drag(330, 300, 520, 420, 12).wait(300);
+            b.drag(255 + 562 - 6, 177 + 414 - 6, 980, 660, 16)
+                .wait(1200);
+        }
+        // A menu bar timer (/dev/wm timer): a shell loop refreshes "04:32" the way a Clock
+        // timer does; dark too.
+        "menu-timer" => {
+            b.wait(300)
+                .typ("echo -e 'timer\\t04:32\\tapp=Clock' > /dev/wm")
+                .enter()
+                .wait(600);
+            let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
+            b.glide(600, 400, x - 60, y + 40, 8).wait(200);
+        }
+        "drop-bob-wait" | "drop-bob-accept" | "drop-bob-received" => {
             b.wait(300).typ("drop name bob").enter().wait(1500);
             b.typ("open milkdrop").enter().wait(1000);
             if name == "drop-bob-wait" {
@@ -1142,7 +1214,11 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.wait(20000);
                 let aw = super::button::dialog_w("Trust alice and accept");
                 b.click(191 + 642 - 16 - aw / 2, 183 + 296 - 56 + 14 + 14)
-                    .wait(6000);
+                    .wait(if name == "drop-bob-received" {
+                        1500
+                    } else {
+                        6000
+                    });
             }
         }
         "tabs-terminal" => {
@@ -1279,8 +1355,7 @@ pub fn from_fw_cfg() -> Option<Script> {
         return None;
     };
     if dark {
-        steps.insert(0, Step::Theme(true));
-        steps.insert(1, Step::Wait(400));
+        steps.insert(0, Step::Wait(400));
     }
     kprintln!("[demo] {name}: {} steps", steps.len());
     Some(Script {
@@ -1288,6 +1363,7 @@ pub fn from_fw_cfg() -> Option<Script> {
         steps,
         i: 0,
         wait_until: 0,
+        dark,
     })
 }
 
@@ -1312,11 +1388,6 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Idle(s) => d.pretend_idle(*s),
-                Step::Theme(dark) => {
-                    let mut p = super::prefs::get();
-                    p.dark = *dark;
-                    super::request(super::Request::Prefs(p));
-                }
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);
                 }

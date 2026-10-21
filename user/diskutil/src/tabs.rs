@@ -2,7 +2,7 @@
 
 use crate::sheets::Sheet;
 use crate::*;
-use appkit::widgets::{chip, text_c, text_r};
+use appkit::widgets::{chip, text_c};
 use diskkit::scrub::{self, AUTO_CHOICES, Phase, RATES};
 use diskkit::snaps::{self, ChangeKind, SnapKind, interval_words};
 use gui::Color;
@@ -710,7 +710,7 @@ impl App {
         let th = self.th;
         let info = self.disk.info.clone();
         let enc = info.as_ref().and_then(|i| i.encrypted);
-        let ec = Rect::new(X0, BAR + 14, CW, 112);
+        let ec = Rect::new(X0, BAR + 14, CW, 126);
         let (head, tint) = match enc {
             Some(true) => ("Encrypted and unlocked", Some(th.matcha)),
             Some(false) => ("Not encrypted", None),
@@ -723,46 +723,66 @@ impl App {
                 "Every block is encrypted with a key that only your passphrase or the recovery key can open."
             }
             Some(false) => "Encryption is set up when the disk is made on the Mac.",
-            None => "The system does not say whether this volume is encrypted once it is unlocked.",
+            None => "The system did not say whether this volume is encrypted.",
         };
         win.text(
             ec.x + 16,
-            ec.y + 36,
+            ec.y + 34,
             &widgets::fit(sentence, ec.w - 32),
             th.cocoa,
         );
+        // The details the kernel reports: cipher, key derivation, key slots.
+        if let Some(i) = info.as_ref().filter(|i| i.encrypted == Some(true)) {
+            let d = format!("{}   {}   {}", i.kdf, i.key_wrap, i.key_slots);
+            win.text(ec.x + 16, ec.y + 54, &widgets::fit(&d, ec.w - 32), th.cocoa);
+        }
         let cw = button_w("Change passphrase...", true);
         button(
             win,
             &th,
             &mut self.hits,
-            Rect::new(ec.x + 16, ec.y + 62, cw, 24),
+            Rect::new(ec.x + 16, ec.y + 76, cw, 24),
             "Change passphrase...",
             Kind::Secondary,
             CHG_PASS,
             enc != Some(false),
             true,
         );
+        let primary_path = format!("/Volumes/{}", self.volume_label());
+        let entry = self.disk.lock_entry(&primary_path).cloned();
+        let (can_lock, lock_note) = match (&entry, enc) {
+            (Some(e), _) if e.home => (
+                false,
+                "You can't lock the volume you're logged into; it locks at shutdown.",
+            ),
+            (Some(_), _) if self.job.is_some() => (false, "Wait for the running job to finish."),
+            (Some(_), _) => (
+                true,
+                "Locking closes the volume and wipes the key from memory.",
+            ),
+            (None, Some(false)) => (false, "Only an encrypted volume can be locked."),
+            (None, _) => (false, "The system lists no encrypted volume to lock."),
+        };
         let lw = button_w("Lock now", true);
         button(
             win,
             &th,
             &mut self.hits,
-            Rect::new(ec.x + 16 + cw + 8, ec.y + 62, lw, 24),
+            Rect::new(ec.x + 16 + cw + 8, ec.y + 76, lw, 24),
             "Lock now",
             Kind::Secondary,
-            0,
-            false,
+            LOCK,
+            can_lock,
             true,
         );
         win.text(
-            ec.x + 16,
-            ec.y + 90,
-            "Lock now needs a lock call (not available yet).",
+            ec.x + 16 + cw + lw + 24,
+            ec.y + 80,
+            &widgets::fit(lock_note, ec.w - cw - lw - 56),
             th.cocoa,
         );
         // The recovery key card.
-        let rc = Rect::new(X0, BAR + 138, CW, 64);
+        let rc = Rect::new(X0, BAR + 152, CW, 64);
         card(win, &th, rc, None);
         bold_x(win, rc.x + 16, rc.y + 10, "Recovery key", th.espresso, 1);
         win.text(
@@ -772,7 +792,7 @@ impl App {
             th.cocoa,
         );
         // The backups warning.
-        let bc = Rect::new(X0, BAR + 214, CW, 112);
+        let bc = Rect::new(X0, BAR + 228, CW, 112);
         widgets::bordered(win, bc, 14, Theme::tint(th.milk, th.honey, 0x22), th.honey);
         bold_x(
             win,
@@ -808,7 +828,7 @@ impl App {
         );
         win.text(
             X0,
-            BAR + 342,
+            BAR + 356,
             "Creating or erasing a volume is not offered here: the disk is made on the Mac.",
             th.cocoa,
         );
@@ -856,10 +876,7 @@ impl App {
             return;
         }
         let lines: &[&str] = match row.icon {
-            Icon::Share => &[
-                "The folder shared with the Mac.",
-                "It is read-only unless milkOS was started with MILK_SHARE_RW=1.",
-            ],
+            Icon::Share => &["The folder shared with the Mac."],
             Icon::Ram => &[
                 "The root of the file system lives in memory and is not kept across a restart.",
                 "Your home folder and apps are on the Milk disk.",
@@ -868,32 +885,82 @@ impl App {
                 "A clone of a snapshot: a writable copy that shares the disk's blocks.",
                 "Manage it on the Clones tab of the Milk disk.",
             ],
-            Icon::Disk => &["The system reports usage only for milkfs volumes."],
+            Icon::Disk => &[],
         };
         for (i, l) in lines.iter().enumerate() {
-            win.text(X0, BAR + 92 + i as i32 * 22, l, th.espresso);
+            win.text(X0, BAR + 130 + i as i32 * 22, l, th.espresso);
         }
-        if row.icon == Icon::Share {
-            let rw = match self.disk.share_rw {
-                Some(true) => "The Mac folder can be written to (backups are possible).",
-                Some(false) => "The Mac folder is read-only right now.",
-                None => "",
-            };
-            win.text(X0, BAR + 146, rw, th.cocoa);
-        }
-        if row.icon == Icon::Ram {
-            let used = diskkit::fmt::kb(self.disk.root_used_kb);
+        // Size and free space from statfs.
+        let usage = row
+            .path
+            .as_deref()
+            .and_then(|p| self.disk.usage_of(p))
+            .copied();
+        if let Some(u) = usage {
+            let bar = Rect::new(X0, BAR + 80, CW, 20);
+            charts_bar(win, bar, u.used_pct10(), th.honey, th.oat);
             win.text(
                 X0,
-                BAR + 146,
+                BAR + 106,
                 &format!(
-                    "{used} used of {} of memory",
-                    diskkit::fmt::kb(self.disk.total_kb)
+                    "{} used   {} free   {} in all{}",
+                    diskkit::fmt::kb(u.total_kb.saturating_sub(u.free_kb)),
+                    diskkit::fmt::kb(u.free_kb),
+                    diskkit::fmt::kb(u.total_kb),
+                    if u.read_only { "   read-only" } else { "" }
                 ),
+                th.espresso,
+            );
+        } else {
+            win.text(
+                X0,
+                BAR + 84,
+                "The system reports no size for this volume.",
                 th.cocoa,
             );
         }
-        let _ = text_r;
+        if row.icon == Icon::Share {
+            let rw = match (self.disk.share_rw, usage.map(|u| u.read_only)) {
+                (Some(true), _) => "The Mac folder can be written to (backups are possible).",
+                (_, Some(true)) | (Some(false), _) => {
+                    "It is read-only unless milkOS was started with MILK_SHARE_RW=1."
+                }
+                _ => "",
+            };
+            win.text(X0, BAR + 130 + lines.len() as i32 * 22, rw, th.cocoa);
+        }
+        // An encrypted volume that is mounted can be locked again.
+        if let Some(e) = row
+            .path
+            .as_deref()
+            .and_then(|p| self.disk.lock_entry(p))
+            .cloned()
+        {
+            let (ok, note) = if e.home {
+                (
+                    false,
+                    "You can't lock the volume you're logged into; it locks at shutdown.",
+                )
+            } else {
+                (
+                    self.job.is_none(),
+                    "Locking closes the volume and wipes the key from memory.",
+                )
+            };
+            let w = button_w("Lock now", true);
+            button(
+                win,
+                &th,
+                &mut self.hits,
+                Rect::new(X0, BAR + 170, w, 24),
+                "Lock now",
+                Kind::Secondary,
+                LOCK_OTHER,
+                ok,
+                true,
+            );
+            win.text(X0 + w + 12, BAR + 174, note, th.cocoa);
+        }
     }
 
     pub fn tab_click(&mut self, id: u32) {
@@ -928,6 +995,18 @@ impl App {
             }
             REPAIR => self.ask_repair(),
             CHG_PASS => self.open_passwd(),
+            LOCK => {
+                let path = format!("/Volumes/{}", self.volume_label());
+                self.lock_volume(&path);
+            }
+            LOCK_OTHER => {
+                let path = self
+                    .rows()
+                    .get(self.vol)
+                    .and_then(|r| r.path.clone())
+                    .unwrap_or_default();
+                self.lock_volume(&path);
+            }
             UNLOCK => self.open_unlock(),
             c if (C_OPEN..C_OPEN + 100).contains(&c) => {
                 if let Some(m) = self
@@ -994,20 +1073,62 @@ impl App {
         }
     }
 
-    pub fn fail(&mut self, title: &str, errno: i32) {
-        let mut body = alloc::vec![String::from(diskkit::names::why(errno))];
-        if errno == 13 {
-            body = alloc::vec![String::from(
-                "This needs authorisation, and the system cannot ask for it yet."
-            )];
+    /// Lock an encrypted volume by its mount path. A refusal names who is using it.
+    fn lock_volume(&mut self, path: &str) {
+        let Some(device) = self.disk.lock_entry(path).map(|e| e.device.clone()) else {
+            return;
+        };
+        match data::ctl("lock", &diskkit::fsinfo::lock_request(&device)) {
+            Ok(()) => {
+                self.vol = 0;
+                self.disk.refresh();
+            }
+            Err(e) => self.fail("The volume can not be locked", e),
         }
-        body.push(format!("Details: error {errno}"));
+    }
+
+    /// Show why a control write failed: the kernel's own reason from `/sys/fs/milkfs/error` when
+    /// it has one (with the processes holding a volume when a lock is refused), else our words.
+    pub fn fail(&mut self, title: &str, errno: i32) {
+        let mut body: Vec<String> = Vec::new();
+        let mut details = format!("Details: error {errno}");
+        match data::last_error() {
+            Some(e) => {
+                let holders = diskkit::fsinfo::holders(&e.reason);
+                if holders.is_empty() {
+                    body.push(sentence(&e.reason));
+                } else {
+                    body.push(String::from("It is in use. Close these first:"));
+                    body.extend(holders.into_iter().take(4).map(|h| format!("  {h}")));
+                }
+                details = format!("Details: {} {} (error {errno})", e.control, e.errno_name);
+            }
+            None if errno == 13 => body.push(String::from(
+                "This needs authorisation, and the system cannot ask for it yet.",
+            )),
+            None => body.push(String::from(diskkit::names::why(errno))),
+        }
+        body.push(details);
         self.sheet = Some(Sheet::Message {
             title: String::from(title),
             body,
             danger: true,
         });
     }
+}
+
+/// "the volume is busy" as a sentence: first letter up, a full stop.
+fn sentence(s: &str) -> String {
+    let mut c = s.chars();
+    let mut out: String = c
+        .next()
+        .map(|f| f.to_uppercase().collect())
+        .unwrap_or_default();
+    out.push_str(c.as_str());
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
 }
 
 fn charts_bar(win: &mut Window, r: Rect, tenths: u32, fill: Color, track: Color) {
@@ -1029,6 +1150,7 @@ impl ClonedRow for Option<&Row> {
             kind: r.kind.clone(),
             icon: r.icon,
             locked: r.locked,
+            path: r.path.clone(),
         })
     }
 }

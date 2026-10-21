@@ -198,14 +198,46 @@ DIGITS = {"2": [(0.8, 4.4), (1.8, 1.8), (4.2, 0.8), (6.6, 1.8), (7.4, 4.4), (6.6
 
 
 def calendar(t):
+    """A milk tile with a straw band. The shell paints today's date over the middle, so the middle is nearly empty: only a faint 4 by 3 grid of dots."""
     g = Glyph()
-    x0 = 24 - (8 + 3 + 8) / 2 + 0.2
-    for k, ch in enumerate("21"):
-        pts = [(x0 + k * 11 + x, 20.2 + y) for x, y in DIGITS[ch]]
-        g.line(pts, 2.8, t["esp"])
+    if BOLD < 1.5:
+        for r in range(3):
+            for c in range(4):
+                g.ell(14.0 + c * 6.7, 24.5 + r * 6.4, 1.15, 1.15, fill=t["cocoa"] + (96,))
     for x in (15.5, 32.5):
         g.rr(x - 1.4, 3.6, 2.8, 7.4, 1.4, t["milk"])                  # the rings on the band
     return compose(t["milk"], [g], border=t["sand"], band=band_top(STRAW, 15.5))
+
+
+def today(t):
+    """A honey half-sun rising on a cocoa horizon, three short agenda lines under it. No numeral and no page: it must not read as Calendar."""
+    g = Glyph()
+    g.d.pieslice([14 * U, 5.5 * U, 34 * U, 25.5 * U], 180, 360, fill=HONEY)
+    g.line([(8.5, 15.5), (39.5, 15.5)], 2.4, t["cocoa"], False)
+    for y, w in (((24, 22), (30, 22), (36, 13)) if BOLD < 1.5 else ((26, 22), (35, 22))):
+        g.line([(13, y), (13 + w, y)], 2.4, t["esp"], False)
+    return compose(t["milk"], [g], border=t["sand"])
+
+
+def disk_utility(t):
+    """A sand tile with an ink drive: a rounded slab, a platter circle and spindle, and one small matcha dot for the health light."""
+    g = Glyph()
+    g.rr(9, 13, 30, 22, 5.5, None, outline=t["esp"], width=2.6)
+    if BOLD < 1.5:
+        g.ell(20.5, 24, 6.4, 6.4, outline=t["esp"], width=2.2)
+    g.ell(20.5, 24, 2.0 if BOLD < 1.5 else 3.2, 2.0 if BOLD < 1.5 else 3.2, fill=t["esp"])
+    g.ell(33.2, 29.6, 2.5, 2.5, fill=MATCHA)                              # the accent: the health light
+    return compose(t["sand"], [g])
+
+
+def reminders(t):
+    """A milk tile: a straw ring with an ink check in it, two ink lines to its right."""
+    g = Glyph()
+    g.ell(17.2, 24, 8.0, 8.0, outline=STRAW, width=2.9)
+    g.line([(13.4, 24.4), (16.2, 27.4), (21.2, 21.2)], 2.5, t["esp"])
+    for y, w in ((20.5, 10), (27.5, 10)):
+        g.line([(29, y), (29 + w, y)], 2.4, t["esp"], False)
+    return compose(t["milk"], [g], border=t["sand"])
 
 
 def clock(t):
@@ -304,7 +336,7 @@ def file_package(t):
 
 
 ICONS = [("files", files), ("terminal", terminal), ("browser", browser), ("notes", notes), ("paint", paint), ("music", music), ("settings", settings),
-         ("text-editor", text_editor), ("calendar", calendar), ("clock", clock), ("preview", preview), ("activity", activity), ("store", store), ("spaces", spaces)]
+         ("text-editor", text_editor), ("calendar", calendar), ("clock", clock), ("preview", preview), ("activity", activity), ("store", store), ("spaces", spaces), ("today", today), ("disk-utility", disk_utility), ("reminders", reminders)]
 FILE_ICONS = [("file-folder", files), ("file-document", file_document), ("file-image", file_image), ("file-audio", file_audio), ("file-archive", file_archive),
               ("file-package", file_package)]
 FILE_SIZES = [56, 36]

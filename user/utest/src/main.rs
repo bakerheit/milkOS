@@ -1523,6 +1523,163 @@ fn t_auxv(args: &rt::Args) -> bool {
     check("auxv ids", ok, &detail)
 }
 
+/// One request to milkd over /run/milkd.sock; the reply up to and including ok / error.
+fn milkd(req: &str) -> String {
+    use rt::unix::{self, Name};
+    let Ok(fd) = unix::socket(unix::SOCK_STREAM) else {
+        return String::from("error\tsocket");
+    };
+    if unix::connect(fd, &Name::Path("/run/milkd.sock")).is_err() {
+        let _ = sys::close(fd);
+        return String::from("error\tconnect");
+    }
+    let _ = sys::write_all(fd, alloc::format!("{req}\n").as_bytes());
+    let mut out = Vec::new();
+    let mut b = [0u8; 1024];
+    loop {
+        match sys::read(fd, &mut b) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&b[..n]),
+        }
+        let t = String::from_utf8_lossy(&out);
+        if t.ends_with("ok\n") || t.lines().last().is_some_and(|l| l.starts_with("error")) {
+            break;
+        }
+    }
+    let _ = sys::close(fd);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// milkd: a crashing service is restarted with doubling backoff, a missing / failed
+/// dependency is reported, start / stop over the socket work for root and admins and are
+/// refused for everyone else. Needs root (it writes /etc/milk/services).
+fn t_svc() -> bool {
+    if sys::geteuid() != 0 {
+        return check("services", true, "skipped: needs root");
+    }
+    let write = |name: &str, body: &str| {
+        let p = alloc::format!("/etc/milk/services/{name}.service");
+        if let Ok(fd) = sys::open_mode(&p, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o644) {
+            let _ = sys::write_all(fd, body.as_bytes());
+            let _ = sys::close(fd);
+        }
+    };
+    write(
+        "ut-crashy",
+        "description = crashes at once\nexec = /bin/false\nrestart = always\n",
+    );
+    write("ut-oneshot", "exec = /bin/false\nrestart = never\n");
+    write(
+        "ut-needs-missing",
+        "exec = /bin/sleep 60\nneeds = ut-no-such-unit\n",
+    );
+    write(
+        "ut-needs-dead",
+        "exec = /bin/sleep 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
+    );
+    write(
+        "ut-sleeper",
+        "description = sleeps\nexec = /bin/sleep 600\nuser = milk\nrestart = on-failure\n",
+    );
+    let reload = milkd("reload");
+    let status = |u: &str| milkd(&alloc::format!("status {u}"));
+    // Let the crasher go round a few times (100 + 200 + 400 + 800 ms ...).
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let mut st = String::new();
+    while sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 6_000_000_000 {
+        st = status("ut-crashy");
+        let restarts = st
+            .split('\t')
+            .nth(3)
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(0);
+        if restarts >= 4 {
+            break;
+        }
+        sys::sleep_ms(100);
+    }
+    // The journal has the delays: they double.
+    let delays: Vec<u64> = sys::read_file("/dev/journal")
+        .map(|j| {
+            String::from_utf8_lossy(&j)
+                .lines()
+                .filter(|l| l.split('\t').nth(6) == Some("ut-crashy"))
+                .filter_map(|l| {
+                    let m = l.split('\t').nth(8)?;
+                    let i = m.find(" in ")?;
+                    m[i + 4..].strip_suffix(" ms")?.parse().ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let backoff = delays.len() >= 4
+        && delays.windows(2).take(3).all(|w| w[1] == 2 * w[0])
+        && delays[0] == 100;
+    // Dependencies.
+    let missing = status("ut-needs-missing");
+    let dead = status("ut-needs-dead");
+    let deps = missing.contains("dependency failed: ut-no-such-unit")
+        && dead.contains("dependency failed: ut-oneshot");
+    if !deps {
+        println!("  needs-missing: {missing:?}\n  needs-dead: {dead:?}");
+    }
+    // Start / stop: root yes; milk (admin) yes; nobody refused.
+    sys::sleep_ms(300);
+    let up =
+        status("ut-sleeper").contains("\trunning\t") && status("ut-sleeper").contains("\tmilk\t");
+    let as_user = |uid: u32, gid: u32, req: &str| -> bool {
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            let _ = sys::setgroups(&rt::users::groups_of(&rt::users::user_name(uid), gid));
+            let _ = sys::setgid(gid);
+            let _ = sys::setuid(uid);
+            let r = milkd(req);
+            sys::exit(if r.ends_with("ok\n") { 0 } else { 1 });
+        }
+        sys::wait4(pid as i32, 0).is_ok_and(|(_, st)| st == 0)
+    };
+    let nobody_stop = as_user(65534, 65534, "stop ut-sleeper");
+    let nobody_status = as_user(65534, 65534, "status ut-sleeper");
+    let still_up = status("ut-sleeper").contains("\trunning\t");
+    let milk_stop = as_user(501, 20, "stop ut-sleeper");
+    sys::sleep_ms(500);
+    let stopped = status("ut-sleeper").contains("\tinactive\t");
+    let root_start = milkd("start ut-sleeper").ends_with("ok\n");
+    sys::sleep_ms(300);
+    let restarted = status("ut-sleeper").contains("\trunning\t");
+    let control = !nobody_stop
+        && nobody_status
+        && still_up
+        && milk_stop
+        && stopped
+        && root_start
+        && restarted;
+    // Clean up: stop the test units, drop their files.
+    for u in [
+        "ut-crashy",
+        "ut-sleeper",
+        "ut-needs-missing",
+        "ut-needs-dead",
+        "ut-oneshot",
+    ] {
+        let _ = milkd(&alloc::format!("stop {u}"));
+        let _ = sys::unlink(&alloc::format!("/etc/milk/services/{u}.service"));
+    }
+    let ok = reload.ends_with("ok\n") && backoff && deps && up && control;
+    check(
+        "services",
+        ok,
+        &alloc::format!(
+            "crasher delays {delays:?} ({}); deps {deps}; sleeper up as milk {up}; nobody stop \
+             refused {}, nobody status {nobody_status}, milk (admin) stop {milk_stop}, root \
+             start {root_start}; last crasher status {:?}",
+            if backoff { "doubling" } else { "NOT doubling" },
+            !nobody_stop,
+            st.lines().next().unwrap_or("")
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1579,6 +1736,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "auxv" || what == "all" {
         ok &= t_auxv(args);
+    }
+    if what == "svc" || what == "all" {
+        ok &= t_svc();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

@@ -102,6 +102,8 @@ struct Unit {
     listen_fd: i32,
     /// Start again once it's down (svc restart).
     restart_after_stop: bool,
+    /// Being stopped because a unit it needs went down: it ends up Failed with this.
+    dep_failed: Option<String>,
 }
 
 fn now_ms() -> u64 {
@@ -274,6 +276,7 @@ impl Milkd {
                             err_buf: Vec::new(),
                             listen_fd: -1,
                             restart_after_stop: false,
+                            dep_failed: None,
                         },
                     );
                 }
@@ -304,7 +307,7 @@ impl Milkd {
                             verdict =
                                 Some(Err(alloc::format!("dependency failed: {d} (no such unit)")))
                         }
-                        Some(State::Running | State::Listening) => {}
+                        Some(State::Running | State::Listening | State::Exited(0)) => {}
                         Some(
                             State::Failed(_)
                             | State::Skipped(_)
@@ -490,7 +493,11 @@ impl Milkd {
         );
         // The console line init used to print for its daemons.
         let d = &self.units[n].def.description;
-        rt::println!("  {n} (pid {pid}): {d}");
+        if d.is_empty() {
+            rt::println!("  {n} (pid {pid})");
+        } else {
+            rt::println!("  {n} (pid {pid}): {d}");
+        }
     }
 
     /// A child exited: restart, give up, or settle.
@@ -513,7 +520,10 @@ impl Milkd {
         let desc = sys::describe_status(status);
         if u.state == State::Stopping {
             let again = core::mem::take(&mut u.restart_after_stop);
-            u.state = State::Inactive;
+            u.state = match u.dep_failed.take() {
+                Some(why) => State::Failed(why),
+                None => State::Inactive,
+            };
             self.log(&n, "info", pid, &alloc::format!("stopped ({desc})"));
             if again {
                 self.units.get_mut(&n).unwrap().state = State::Pending;
@@ -720,7 +730,50 @@ impl Milkd {
             }
             self.exited(pid, st);
         }
+        self.propagate_failures();
         self.schedule();
+    }
+
+    /// A unit that `needs` one that went down (failed, skipped, stopped, exited with an
+    /// error) goes down too, as "dependency failed: X".
+    fn propagate_failures(&mut self) {
+        let down: Vec<String> = self
+            .units
+            .values()
+            .filter(|u| {
+                matches!(
+                    u.state,
+                    State::Failed(_) | State::Skipped(_) | State::Inactive
+                ) || matches!(u.state, State::Exited(s) if s != 0)
+            })
+            .map(|u| u.name.clone())
+            .collect();
+        let names: Vec<String> = self.units.keys().cloned().collect();
+        for n in names {
+            let Some(dep) = self.units[&n]
+                .def
+                .needs
+                .iter()
+                .find(|d| down.contains(d))
+                .cloned()
+            else {
+                continue;
+            };
+            let why = alloc::format!("dependency failed: {dep}");
+            match self.units[&n].state {
+                State::Running => {
+                    self.units.get_mut(&n).unwrap().dep_failed = Some(why.clone());
+                    let _ = self.stop(&n);
+                    self.log(&n, "err", 0, &why);
+                }
+                State::Waiting | State::Listening => {
+                    let _ = self.stop(&n);
+                    self.units.get_mut(&n).unwrap().state = State::Failed(why.clone());
+                    self.log(&n, "err", 0, &why);
+                }
+                _ => {}
+            }
+        }
     }
 
     fn next_timeout(&self) -> i32 {

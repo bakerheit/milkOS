@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::percpu::{self, MAX_CPUS};
 use crate::sched::kstack::KStack;
-use crate::{gic, kprintln, mem, mmu, sched, sync, timer};
+use crate::{gic, kprintln, mem, mmu, sched, timer};
 
 /// What a secondary needs before it can run Rust. Layout shared with smp.S.
 #[repr(C, align(64))]
@@ -178,6 +178,18 @@ pub fn init() -> usize {
         }
         if !percpu::get(cpu).online.load(Ordering::Acquire) {
             kprintln!("[smp] cpu {cpu} (mpidr {mpidr:#x}) did not come up");
+            continue;
+        }
+        // And for it to join the scheduler (its idle thread exists), so whatever runs next
+        // (the scheduler self-test, drivers) starts with every CPU fully in.
+        let t0 = timer::now_ns();
+        while percpu::get(cpu).idle.load(Ordering::Acquire) == 0
+            && timer::now_ns() - t0 < 1_000_000_000
+        {
+            core::hint::spin_loop();
+        }
+        if percpu::get(cpu).idle.load(Ordering::Acquire) == 0 {
+            kprintln!("[smp] cpu {cpu} came online but did not join the scheduler");
         }
     }
     let n = percpu::count();
@@ -211,7 +223,10 @@ extern "C" fn secondary_main(cpu: usize) -> ! {
         "[smp] cpu {cpu} up (mpidr {:#x})",
         percpu::get(cpu).mpidr.load(Ordering::Relaxed)
     );
-    sync::irq_enable();
+    // IRQs stay masked until the scheduler knows this CPU (run_secondary unmasks them):
+    // other CPUs may already route IRQs, IPIs and work here.
+    #[cfg(feature = "smp-join-delay")]
+    timer::delay_ms(200); // regression knob: the old IRQs-on window, made wide
     sched::run_secondary(cpu, stack)
 }
 

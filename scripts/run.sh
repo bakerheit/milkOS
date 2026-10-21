@@ -2,10 +2,11 @@
 # Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one).
 #   scripts/run.sh            window (cocoa) + serial on this terminal
 #   scripts/run.sh headless   no window, serial only (used for tests)
+# RELEASE=1: release kernel. MILK_FEATURES="a b": kernel cargo features (kernel/Cargo.toml).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-cargo build ${RELEASE:+--release} -q
+cargo build ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} -q
 PROFILE=debug
 [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"

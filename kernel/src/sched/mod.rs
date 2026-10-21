@@ -183,6 +183,11 @@ pub struct Thread {
 struct CpuSched {
     current: Tid,
     idle: Tid,
+    /// This CPU has joined the scheduler (its idle thread exists and `current`/`idle` are
+    /// real). A CPU is `percpu` online a little earlier; until it joins, nothing may be
+    /// queued on it, kicked to it or scheduled on it: its `current`/`idle` read as tid 0
+    /// (kmain), which made an early IPI or tick "switch away from kmain" on the wrong CPU.
+    joined: bool,
 }
 
 /// How ready threads are queued (see the module docs).
@@ -233,7 +238,16 @@ impl Sched {
     }
 
     fn is_current_somewhere(&self, tid: Tid) -> bool {
-        percpu::online().any(|c| self.cpus[c].current == tid)
+        self.joined_cpus().any(|c| self.cpus[c].current == tid)
+    }
+
+    /// CPUs that have joined the scheduler (see [`CpuSched::joined`]).
+    fn joined_cpus(&self) -> impl Iterator<Item = usize> + '_ {
+        percpu::online().filter(|&c| self.cpus[c].joined)
+    }
+
+    fn joined_mask(&self) -> u32 {
+        self.joined_cpus().fold(0, |m, c| m | 1 << c)
     }
 
     /// A dead thread whose stack nobody is using any more.
@@ -276,7 +290,7 @@ impl Sched {
     /// all when it has nothing. Among equals, the busiest queue. (prio, source cpu, index)
     fn steal_candidate(&self, cpu: usize, own: Option<usize>) -> Option<(usize, usize, usize)> {
         let mut best: Option<(usize, usize, usize)> = None;
-        for c in percpu::online().filter(|&c| c != cpu) {
+        for c in self.joined_cpus().filter(|&c| c != cpu) {
             let Some((p, i)) = self.best_in(&self.rq[c], cpu) else {
                 continue;
             };
@@ -355,7 +369,8 @@ impl Sched {
             return;
         }
         let mine = self.queued(cpu);
-        let Some(src) = percpu::online()
+        let Some(src) = self
+            .joined_cpus()
             .filter(|&c| c != cpu && self.queued(c) >= mine + 2)
             .max_by_key(|&c| self.queued(c))
         else {
@@ -388,14 +403,18 @@ impl Sched {
     /// running something less important. Never allocates (capacity is reserved in `add`),
     /// so it is fine from IRQ context.
     fn make_ready(&mut self, tid: Tid) {
+        let joined = self.joined_mask();
         let Some(t) = self.threads.get_mut(&tid) else {
             return;
         };
         t.state = State::Ready;
         t.wake_at = 0;
         let (prio, pinned, last) = (t.prio, t.pinned, t.cpu);
+        let ran = t.ran;
         let me = percpu::id();
-        let candidates = || percpu::online().filter(move |&c| pinned.is_none_or(|p| p == c));
+        let candidates = || {
+            percpu::online().filter(move |&c| joined & 1 << c != 0 && pinned.is_none_or(|p| p == c))
+        };
         if self.policy == Policy::Global {
             self.global[prio as usize].push_back(tid);
             // An idle CPU first (ourselves included).
@@ -421,7 +440,6 @@ impl Sched {
         // 3. Any free CPU, this one first.
         // 4. One running something less important (its last CPU on a tie).
         // 5. Else the shortest queue (its last CPU on a tie): the tick round-robins it.
-        let ran = t.ran;
         let free = |c: usize| {
             self.is_idle(c)
                 && self.queued(c) == 0
@@ -434,7 +452,7 @@ impl Sched {
             return;
         }
         if ran && last == me && last_ok {
-            let backup = percpu::online().find(|&c| c != me && free(c));
+            let backup = percpu::online().find(|&c| c != me && joined & 1 << c != 0 && free(c));
             let preempt = self.running_prio(me) < prio;
             // Strict priorities: if we won't preempt here and there is no free CPU to fall
             // back on, but another CPU runs a less important (non-idle) thread, go there.
@@ -624,6 +642,7 @@ pub fn init() {
     idle.pinned = Some(0);
     with(|s| {
         s.cpus[0].idle = idle.tid;
+        s.cpus[0].joined = true;
         s.add(idle);
     });
     percpu::get(0)
@@ -662,7 +681,7 @@ pub fn enable_fp() {
 }
 
 /// A secondary CPU joins the scheduler: the code running now (on `stack`) becomes that
-/// CPU's idle thread. IRQs on.
+/// CPU's idle thread. Call with IRQs masked; they are unmasked once the CPU has joined.
 pub fn run_secondary(cpu: usize, stack: KStack) -> ! {
     let idle = {
         let _g = IrqGuard::new();
@@ -686,12 +705,16 @@ pub fn run_secondary(cpu: usize, stack: KStack) -> ! {
             s.cpus[cpu] = CpuSched {
                 current: tid,
                 idle: tid,
+                joined: true,
             };
             tid
         })
     };
-    percpu::get(cpu).idle.store(idle, Ordering::Relaxed);
     percpu::get(cpu).current.store(idle, Ordering::Relaxed);
+    percpu::get(cpu).idle.store(idle, Ordering::Release); // smp::init waits for this
+    // Only now: an IPI or tick before the CPU had joined would schedule with garbage
+    // per-CPU state (smp.rs keeps IRQs masked until here).
+    sync::irq_enable();
     idle_main(cpu);
     unreachable!()
 }
@@ -924,6 +947,9 @@ fn schedule(how: Leave) {
         .need_resched
         .store(false, Ordering::Relaxed);
     let sw = with(|s| {
+        if !s.cpus[cpu].joined {
+            return None; // not part of the scheduler yet (run_secondary): nothing to switch
+        }
         let now = timer::now_ns();
         let cur = s.cpus[cpu].current;
         let idle = s.cpus[cpu].idle;
@@ -1170,6 +1196,9 @@ fn on_tick(_frame: &mut TrapFrame) {
     }
     with(|s| {
         s.wake_expired(timer::now_ns());
+        if !s.cpus[cpu].joined {
+            return;
+        }
         s.balance(cpu);
         if s.should_preempt(cpu) {
             percpu::get(cpu).need_resched.store(true, Ordering::Relaxed);
@@ -1366,7 +1395,8 @@ pub fn set_policy(p: Policy) {
                 Policy::PerCpu => s.rq[cpu][prio].push_back(tid),
             }
         }
-        for c in percpu::online() {
+        let joined: Vec<usize> = s.joined_cpus().collect();
+        for c in joined {
             kick(c);
         }
     });

@@ -184,11 +184,13 @@ pub fn from_input(ev: crate::input::Event) -> Option<Event> {
 pub struct UartKeys {
     state: u8,
     num: u32,
+    /// When the pending ESC arrived (ns), to tell a lone Escape from a sequence.
+    esc_at: u64,
 }
 
 impl UartKeys {
     /// Feed one byte; returns a key event when one is complete.
-    pub fn feed(&mut self, b: u8) -> Option<Event> {
+    pub fn feed(&mut self, b: u8, now: u64) -> Option<Event> {
         match self.state {
             1 => {
                 self.state = match b {
@@ -246,6 +248,7 @@ impl UartKeys {
             _ => match b {
                 0x1b => {
                     self.state = 1;
+                    self.esc_at = now;
                     None
                 }
                 b'\r' | b'\n' => Some(Event::key(Key::Enter, Mods::NONE)),
@@ -259,9 +262,9 @@ impl UartKeys {
         }
     }
 
-    /// A lone ESC with nothing after it (by the end of a poll) is the Escape key.
-    pub fn flush(&mut self) -> Option<Event> {
-        if self.state == 1 {
+    /// A lone ESC with nothing after it for 30 ms is the Escape key.
+    pub fn flush(&mut self, now: u64) -> Option<Event> {
+        if self.state == 1 && now.saturating_sub(self.esc_at) > 30_000_000 {
             self.state = 0;
             return Some(Event::key(Key::Escape, Mods::NONE));
         }

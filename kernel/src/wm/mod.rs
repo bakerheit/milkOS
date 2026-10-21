@@ -231,6 +231,8 @@ pub struct Desktop {
     status: String,
     uart: event::UartKeys,
     script: Option<script::Script>,
+    /// Compose into the back buffer only (the boot fade-in does the first flush itself).
+    hold_flush: bool,
     // CPU accounting.
     idle_ns: u64,
     acct_start: u64,
@@ -286,6 +288,7 @@ impl Desktop {
             status: String::new(),
             uart: event::UartKeys::default(),
             script: None,
+            hold_flush: true,
             idle_ns: 0,
             acct_start: timer::now_ns(),
             last_second: timer::now_ns() / 1_000_000_000,
@@ -310,11 +313,32 @@ impl Desktop {
         d.frame();
         d.stats.full_us = (timer::now_ns() - t) / 1000;
         kprintln!(
-            "wm: first full-screen frame {} us ({} px)",
+            "wm: first full-screen composite {} us ({} px)",
             d.stats.full_us,
             d.stats.last_px
         );
+        d.fade_in();
         Ok(d)
+    }
+
+    /// Cross-fade from whatever is on screen (the boot splash) to the composed desktop.
+    fn fade_in(&mut self) {
+        let n = (SCREEN_W * SCREEN_H) as usize;
+        let splash: Option<Buffer> = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0);
+        if let Some(mut sp) = splash {
+            sp.pixels_mut()[..n].copy_from_slice(&self.fb.pixels()[..n]);
+            const STEPS: u32 = 12;
+            for step in 1..STEPS {
+                let a = (step * 255 / STEPS) as u8;
+                let (src, back) = (sp.pixels(), self.back.pixels());
+                for (i, p) in self.fb.pixels_mut()[..n].iter_mut().enumerate() {
+                    *p = crate::gfx::blend(src[i], back[i], a);
+                }
+                timer::delay_ms(14);
+            }
+        }
+        self.hold_flush = false;
+        self.fb.pixels_mut()[..n].copy_from_slice(&self.back.pixels()[..n]);
     }
 
     // ---- damage -------------------------------------------------------------------------------
@@ -375,6 +399,7 @@ impl Desktop {
             return;
         };
         self.windows.push(w);
+        self.invalidate(PanelKey::Dock);
         if self.mode != Mode::Desktop {
             self.set_mode(Mode::Desktop);
         }
@@ -541,6 +566,7 @@ impl Desktop {
             self.thumbs.clear();
         }
         self.invalidate(PanelKey::MenuBar);
+        self.invalidate(PanelKey::Dock);
         self.damage_all();
     }
 
@@ -702,15 +728,17 @@ impl Desktop {
             self.compose_rect(*d, layers, &vis, cur);
         }
         // Flush to ramfb.
-        let fstride = self.fb.stride();
-        let bstride = self.back.stride();
-        let src = self.back.pixels();
-        let dst = self.fb.pixels_mut();
-        for d in &rects {
-            for y in d.y..d.y + d.h {
-                let (s, f) = (y as usize * bstride, y as usize * fstride);
-                let (x0, x1) = (d.x as usize, (d.x + d.w) as usize);
-                dst[f + x0..f + x1].copy_from_slice(&src[s + x0..s + x1]);
+        if !self.hold_flush {
+            let fstride = self.fb.stride();
+            let bstride = self.back.stride();
+            let src = self.back.pixels();
+            let dst = self.fb.pixels_mut();
+            for d in &rects {
+                for y in d.y..d.y + d.h {
+                    let (s, f) = (y as usize * bstride, y as usize * fstride);
+                    let (x0, x1) = (d.x as usize, (d.x + d.w) as usize);
+                    dst[f + x0..f + x1].copy_from_slice(&src[s + x0..s + x1]);
+                }
             }
         }
         let us = (timer::now_ns() - t0) / 1000;
@@ -807,11 +835,11 @@ impl Desktop {
         let now = timer::now_ns();
         // Input: serial console keys, virtio input, then the demo script.
         while let Some(b) = uart::read_byte() {
-            if let Some(ev) = self.uart.feed(b) {
+            if let Some(ev) = self.uart.feed(b, now) {
                 self.handle(ev);
             }
         }
-        if let Some(ev) = self.uart.flush() {
+        if let Some(ev) = self.uart.flush(now) {
             self.handle(ev);
         }
         while let Some(ev) = input::poll() {

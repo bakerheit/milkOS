@@ -230,6 +230,9 @@ pub fn from_fw_cfg() -> Option<Script> {
         .ok()?
         .trim_matches(char::from(0))
         .trim();
+    if name == "none" || name.is_empty() {
+        return None;
+    }
     let Some(steps) = build(name) else {
         kprintln!("[demo] unknown demo '{name}'");
         return None;

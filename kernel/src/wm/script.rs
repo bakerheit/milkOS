@@ -964,7 +964,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(9);
             b.wait(300).click(x, y).wait(4000);
         }
-        // The notification drawer (SPEC "Notification drawer"): Mary's four states.
+        // The notification drawer (SPEC "Notification drawer"): the four mockup states.
         "drawer-arrive" | "drawer-open" | "drawer-keys" | "drawer-empty" | "drawer-mentions" => {
             if name != "drawer-empty" {
                 b.wait(300)
@@ -972,7 +972,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .enter()
                     .wait(300);
                 if name != "drawer-arrive" {
-                    b.typ("notify Gus @milk the allocator merged, build is green")
+                    b.typ("notify Sam @milk the allocator merged, build is green")
                         .enter()
                         .wait(300);
                     b.key(Key::Char(' '), Mods::META)
@@ -989,7 +989,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         },
                     )
                     .wait(1200);
-                    b.typ("notify Gus PR is up for review").enter().wait(400);
+                    b.typ("notify Sam PR is up for review").enter().wait(400);
                 }
             }
             if name == "drawer-arrive" {

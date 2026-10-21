@@ -34,7 +34,9 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
                 if flags & O_CREAT != 0 && flags & O_EXCL != 0 {
                     return Err(Errno::EEXIST);
                 }
-                if node.kind() == InodeType::Symlink && flags & O_PATH == 0 {
+                // O_PATH | O_NOFOLLOW opens the link itself.
+                let link_itself = flags & O_PATH != 0 && flags & O_NOFOLLOW != 0;
+                if node.kind() == InodeType::Symlink && !link_itself {
                     if flags & O_NOFOLLOW != 0 {
                         return Err(Errno::ELOOP);
                     }

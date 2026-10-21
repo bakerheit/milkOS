@@ -321,6 +321,20 @@ fn tmpfs_namespace(t: &mut T) {
         Errno::ELOOP,
         "O_NOFOLLOW on a symlink",
     );
+    t.ok(
+        ops::open("/tmp/t/link", O_PATH | O_NOFOLLOW, 0)
+            .map(|f| f.stat().kind)
+            .ok()
+            == Some(InodeType::Symlink),
+        "O_PATH|O_NOFOLLOW opens the link itself",
+    );
+    t.ok(
+        ops::open("/tmp/t/link", O_PATH, 0)
+            .map(|f| f.stat().kind)
+            .ok()
+            == Some(InodeType::File),
+        "O_PATH follows",
+    );
 
     // hard links, and unlink while open
     t.ok(ops::link("/tmp/t/b.txt", "/tmp/t/hard").is_ok(), "link");

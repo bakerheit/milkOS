@@ -11,3 +11,8 @@
 /bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755
 /bin/stty   target/user/aarch64-unknown-none-softfloat/release/stty    755
 /bin/paint  target/user/aarch64-unknown-none-softfloat/release/paint   755
+/bin/open   target/user/aarch64-unknown-none-softfloat/release/open    755
+/bin/notify target/user/aarch64-unknown-none-softfloat/release/notify  755
+/bin/today  target/user/aarch64-unknown-none-softfloat/release/today   755
+/bin/spaces target/user/aarch64-unknown-none-softfloat/release/spaces  755
+/bin/cowsay target/user/aarch64-unknown-none-softfloat/release/cowsay  755

@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "desk"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "fault"
 version = "0.0.1"
 dependencies = [

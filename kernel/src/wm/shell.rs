@@ -824,6 +824,7 @@ impl Desktop {
         match i {
             0 => {
                 let greet = match t.hour {
+                    0..=4 => "Still up, Andrew?",
                     5..=11 => "Good morning, Andrew",
                     12..=17 => "Good afternoon, Andrew",
                     _ => "Good evening, Andrew",

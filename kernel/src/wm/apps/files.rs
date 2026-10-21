@@ -31,6 +31,13 @@ const GRID_TOP: i32 = 20;
 const CELL_W: i32 = 100;
 const CELL_H: i32 = 108;
 
+/// A folder someone asked Files to show (`open <dir>`); the Files window picks it up.
+static PENDING: crate::sync::SpinLock<Option<String>> = crate::sync::SpinLock::new(None);
+
+pub fn show_path(path: &str) {
+    *PENDING.lock() = Some(String::from(path));
+}
+
 pub struct Files {
     path: String,
     title: String,
@@ -62,7 +69,8 @@ impl Files {
             size: (0, 0),
             last_sec: 0,
         };
-        f.go("/home/milk/Documents");
+        let start = PENDING.lock().take();
+        f.go(start.as_deref().unwrap_or("/home/milk/Documents"));
         f
     }
 
@@ -306,6 +314,11 @@ impl WindowContents for Files {
     }
 
     fn tick(&mut self, now: u64) -> bool {
+        let pending = PENDING.lock().take();
+        if let Some(p) = pending {
+            self.go(&p);
+            return true;
+        }
         // Pick up changes made elsewhere (Terminal, Notes autosave) about once a second.
         let sec = now / 1_000_000_000;
         if sec == self.last_sec {

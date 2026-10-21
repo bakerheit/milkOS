@@ -19,6 +19,7 @@
 mod apps;
 mod buffer;
 pub mod client;
+mod ctl;
 mod event;
 mod icons;
 mod menus;
@@ -86,6 +87,9 @@ pub enum Request {
     ClientCreate(u32),
     /// A process destroyed its window (or exited).
     ClientGone(u32),
+    /// `open` from /dev/wm: an app name or an absolute path.
+    OpenAny(String),
+    Skim,
 }
 
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
@@ -331,6 +335,7 @@ impl Desktop {
             last_second: timer::now_ns() / 1_000_000_000,
         };
         apps::fsx::ensure_home();
+        ctl::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
         d.open(App::Terminal);
@@ -447,7 +452,7 @@ impl Desktop {
 
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
-    fn launch(&mut self, path: &'static str) {
+    fn launch(&mut self, path: &str) {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
@@ -462,6 +467,66 @@ impl Desktop {
             }
             Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
         }
+    }
+
+    /// `open` from /dev/wm: an app by name, a folder (Files), a text file (Notes) or a program.
+    fn open_any(&mut self, what: &str) {
+        match what.to_ascii_lowercase().as_str() {
+            "files" | "finder" => return self.open(App::Files),
+            "terminal" | "term" | "sh" | "msh" => return self.open(App::Terminal),
+            "notes" => return self.open(App::Notes),
+            "about" | "about milkos" => return self.open(App::About),
+            "today" | "home" => return self.toggle_mode(Mode::Home),
+            "spaces" => return self.toggle_mode(Mode::Spaces),
+            "paint" => return self.launch("/bin/paint"),
+            _ => {}
+        }
+        let path = apps::fsx::resolve("/", what);
+        if apps::fsx::is_dir(&path) {
+            apps::files::show_path(&path);
+            self.open(App::Files);
+        } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
+            self.launch(&path);
+        } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
+            apps::notes::open_file(&path);
+            let sp = self.space;
+            if let Some(w) = self.windows.iter_mut().find(|w| w.app == App::Notes) {
+                w.space = sp;
+            }
+            self.open(App::Notes);
+        } else {
+            self.post_toast("Can't open", what);
+        }
+    }
+
+    /// The /dev/wm status text.
+    fn status_report(&self) -> String {
+        let mode = match self.mode {
+            Mode::Desktop => "desktop",
+            Mode::Home => "today",
+            Mode::Spaces => "spaces",
+        };
+        let mut s = alloc::format!(
+            "mode {mode}\nspace {} of {}\nfocus {}\n",
+            self.space + 1,
+            self.nspaces,
+            self.focused_window().map_or("none", |w| w.contents.title())
+        );
+        for w in &self.windows {
+            let r = w.rect;
+            s.push_str(&alloc::format!(
+                "window {} {}x{}+{}+{} space {}{} {}\n",
+                w.id,
+                r.w,
+                r.h,
+                r.x,
+                r.y,
+                w.space + 1,
+                if w.minimized { " minimised" } else { "" },
+                w.contents.title()
+            ));
+        }
+        s
     }
 
     /// A client window whose process is called `name`.
@@ -945,6 +1010,12 @@ impl Desktop {
                 }
                 Request::Mode(m) => self.toggle_mode(m),
                 Request::ClientCreate(id) => self.open(App::Client(id)),
+                Request::OpenAny(what) => self.open_any(&what),
+                Request::Skim => {
+                    if self.launcher.is_none() {
+                        self.toggle_launcher();
+                    }
+                }
                 Request::ClientGone(id) => {
                     if let Some(w) = self.windows.iter().find(|w| w.app == App::Client(id)) {
                         let wid = w.id;
@@ -1074,6 +1145,7 @@ impl Desktop {
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
             self.last_second = sec;
+            ctl::set_status(self.status_report());
             // Windows of userland clients that exited without destroying them.
             for cid in client::reap() {
                 if let Some(wid) = self

@@ -212,6 +212,19 @@ without destroying them are closed and freed by the wm within a second.
 
 `/bin/paint` is the example client (dock, Skim, or `paint` in a shell).
 
+### `/dev/wm` and the desktop tools
+
+`kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
+first space): `open <app|absolute path>` (apps: files terminal notes about paint today
+spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
+<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
+write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+`space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
+
+`user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
+paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and
+`cowsay [text]` (which just prints).
+
 ## Userland (`user/`)
 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs

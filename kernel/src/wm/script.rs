@@ -225,6 +225,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(800);
             b.typ("ps").enter().wait(400);
         }
+        "desk" => {
+            b.wait(300)
+                .typ("cowsay hello from userland")
+                .enter()
+                .wait(300);
+            b.typ("notify Tea is ready in 3 minutes").enter().wait(300);
+            b.typ("cat /dev/wm").enter().wait(300);
+            b.typ("open ~/Documents/todo.txt").enter().wait(600);
+        }
+        "desktoday" => {
+            b.wait(300).typ("today").enter().wait(600);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

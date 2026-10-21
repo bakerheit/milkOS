@@ -530,6 +530,14 @@ impl Desktop {
         if demo.is_none() && !prefs::get().welcome {
             d.post_toast("Welcome to milkOS", "Ctrl+Space: search");
         }
+        // A dark- demo boots as a dark desktop would (prefs saved dark): switch before the
+        // timed first frame, not inside it (that was the 27 ms "first composite" in dark:
+        // the night wallpaper's decode and blurs, not compositing).
+        if demo.as_ref().is_some_and(|s| s.dark) && !prefs::get().dark {
+            let mut p = prefs::get();
+            p.dark = true;
+            d.apply_prefs(p);
+        }
         d.script = demo;
 
         // First frame: full screen, timed.

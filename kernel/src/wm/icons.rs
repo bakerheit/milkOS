@@ -222,14 +222,35 @@ pub fn art_name(app: &str) -> Option<&'static str> {
         "Music" => "music",
         "Settings" => "settings",
         "Store" | "Milk Store" => "store",
-        "Today" | "Calendar" => "calendar",
+        "Today" => "today",
+        "Calendar" => "calendar",
         "Spaces" => "spaces",
         "Clock" => "clock",
         "Preview" => "preview",
         "Activity" | "Activity Monitor" => "activity",
         "Text Editor" => "text-editor",
+        "Disk" | "Disk Utility" => "disk-utility",
+        "Reminders" => "reminders",
         _ => return None,
     })
+}
+
+/// The art for an installed app (a manifest): by its package name, its dock label
+/// ("Disk Utility" -> disk-utility), or a known alias; None: the drawn letter tile.
+pub fn package_art(pkg_name: &str, label: &str) -> Option<&'static str> {
+    let kebab: alloc::string::String = label
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let alias = match pkg_name {
+        "diskutil" => "disk-utility",
+        "texteditor" | "edit" => "text-editor",
+        _ => pkg_name,
+    };
+    let by_label = art_name(label).unwrap_or("");
+    crate::art::icon_named(&[pkg_name, alias, &kebab, by_label])
 }
 
 /// Tiles that are milk (no edge in the art): the shell draws their 1px sand edge.
@@ -241,6 +262,8 @@ fn milk_tile(name: &str) -> bool {
             | "text-editor"
             | "calendar"
             | "spaces"
+            | "today"
+            | "reminders"
             | "file-document"
             | "file-image"
             | "file-audio"

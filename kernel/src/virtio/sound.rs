@@ -297,6 +297,86 @@ pub fn detach() {
     );
 }
 
+/// Before the kernel resets a device a user-space driver died holding (udrv `quiesce`):
+/// qemu's reset doesn't flush a PCM stream's buffers. It completes them later, as it
+/// plays them or at the next PREPARE, onto whatever tx queue is live by then, which
+/// breaks the next driver's queue (qemu then marks the device broken). So, on the dead
+/// driver's own control queue: STOP and RELEASE every stream. RELEASE completes all of a
+/// stream's pending buffers (virtio 1.2, 5.14.6.6.5.1), onto the dead driver's tx queue,
+/// while it still exists. The requests live in a scratch page of ours; descriptors 0 and
+/// 1 of the dead queue are reused (nothing else can be using them by then).
+pub fn quiesce(t: &Transport, queues: &[crate::udrv::QueueRegs]) {
+    let Some(q) = queues.get(CTLQ as usize).copied().filter(|q| q.num >= 2) else {
+        return;
+    };
+    let rd16 = |pa: u64| {
+        // SAFETY: inside the dead driver's DMA buffers (udrv checked), ordinary RAM.
+        unsafe { read_volatile(phys_to_virt(pa as PhysAddr) as *const u16) }
+    };
+    let wr = |pa: u64, v: u64, width: usize| {
+        let p = phys_to_virt(pa as PhysAddr);
+        // SAFETY: as above.
+        unsafe {
+            match width {
+                2 => write_volatile(p as *mut u16, v as u16),
+                4 => write_volatile(p as *mut u32, v as u32),
+                _ => write_volatile(p as *mut u64, v),
+            }
+        }
+    };
+    // A control request the driver was waiting for completes first.
+    let end = timer::now_ns() + 100_000_000;
+    let mut avail = rd16(q.avail + 2);
+    while rd16(q.used + 2) != avail {
+        if timer::now_ns() > end {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    let Some(scratch) = pmm::alloc_contiguous_zeroed(1, 1) else {
+        return;
+    };
+    let sp = scratch as u64;
+    let streams = t.config_read32(4).min(MAX_STREAMS as u32);
+    let mut released = 0;
+    'outer: for stream in 0..streams {
+        for code in [R_PCM_STOP, R_PCM_RELEASE] {
+            w32(va(scratch), 0, code);
+            w32(va(scratch), 4, stream);
+            w32(va(scratch), 512, 0);
+            // desc 0: the request (device reads), chained to desc 1: the status.
+            wr(q.desc, sp, 8);
+            wr(q.desc + 8, 8, 4);
+            wr(q.desc + 12, 1, 2); // NEXT
+            wr(q.desc + 14, 1, 2);
+            wr(q.desc + 16, sp + 512, 8);
+            wr(q.desc + 24, 4, 4);
+            wr(q.desc + 28, 2, 2); // WRITE
+            wr(q.desc + 30, 0, 2);
+            wr(q.avail + 4 + 2 * (avail % q.num as u16) as u64, 0, 2);
+            super::mmio::mb();
+            avail = avail.wrapping_add(1);
+            wr(q.avail + 2, avail as u64, 2);
+            t.notify(CTLQ);
+            let end = timer::now_ns() + 100_000_000;
+            while rd16(q.used + 2) != avail {
+                if timer::now_ns() > end {
+                    break 'outer;
+                }
+                core::hint::spin_loop();
+            }
+            if code == R_PCM_RELEASE && r32(va(scratch), 512) == S_OK {
+                released += 1;
+            }
+        }
+    }
+    pmm::free_contiguous(scratch, 1);
+    kprintln!(
+        "[virtio-snd] slot {}: released {released} stream(s) a dead user-space driver left behind",
+        t.slot()
+    );
+}
+
 fn on_irq(irq: u32, _frame: &mut TrapFrame) {
     let slot = (irq - gic::spi(MMIO_SPI_BASE)) as usize;
     if let Ok(t) = Transport::probe(slot) {

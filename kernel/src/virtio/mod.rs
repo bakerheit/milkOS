@@ -74,6 +74,7 @@ pub fn init() {
                 crate::udrv::Hooks {
                     detach: rng::detach,
                     attach: rng::attach,
+                    quiesce: None,
                 },
             ),
             Ok(()) if id == device_id::SOUND && sound::present() => crate::udrv::register(
@@ -84,6 +85,7 @@ pub fn init() {
                 crate::udrv::Hooks {
                     detach: sound::detach,
                     attach: sound::attach,
+                    quiesce: Some(sound::quiesce),
                 },
             ),
             Ok(()) => {}

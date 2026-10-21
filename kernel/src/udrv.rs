@@ -63,6 +63,20 @@ pub struct Hooks {
     pub detach: fn(),
     /// Take the device (again) from a fresh transport.
     pub attach: fn(Transport) -> core::result::Result<(), mmio::Error>,
+    /// Before a dead driver's device is reset: make the device give back what it holds,
+    /// through the driver's own queues (which the kernel tracked). For devices whose
+    /// reset doesn't (qemu's virtio-sound keeps a stream's buffers and completes them
+    /// later, onto whatever queue is live; see `virtio::sound::quiesce`).
+    pub quiesce: Option<fn(&Transport, &[QueueRegs])>,
+}
+
+/// Where a user driver put a virtqueue (as it wrote the registers), for [`Hooks::quiesce`].
+#[derive(Clone, Copy, Default)]
+pub struct QueueRegs {
+    pub num: u32,
+    pub desc: u64,
+    pub avail: u64,
+    pub used: u64,
 }
 
 const WINDOW: usize = 0x200;
@@ -347,7 +361,7 @@ fn claim(id: u32) -> KResult<usize> {
 /// End the claim on `slot` (if it is still claim `generation`, or any claim when None).
 /// `space_alive`: the owner still maps the DMA buffers, so they wait in LEFTOVER.
 fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool) {
-    let (claim, irq, class, attach) = {
+    let (claim, irq, class, attach, quiesce) = {
         let mut devs = DEVS.lock();
         let Some(d) = devs.iter_mut().find(|d| d.slot == slot) else {
             return;
@@ -361,9 +375,34 @@ fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool
         d.releases += 1;
         d.last_release = alloc::format!("pid {} ({}): {reason}", c.pid, c.exe);
         // The kernel driver is the fallback whenever no user driver holds the device.
-        (c, d.irq, d.class, Some(d.hooks.attach))
+        (c, d.irq, d.class, Some(d.hooks.attach), d.hooks.quiesce)
     };
-    // 1. Stop the device (and its DMA).
+    // 1. Stop the device (and its DMA): first make it give back what it holds, while the
+    // driver's queues still exist (only for queues inside its own DMA buffers).
+    if let (Some(q), Some(t)) = (quiesce, transport(slot)) {
+        let regs: Vec<QueueRegs> = claim
+            .q
+            .iter()
+            .map(|q| {
+                let n = q.num as u64;
+                let ok = n > 0
+                    && claim.in_dma(q.desc, 16 * n)
+                    && claim.in_dma(q.drv, 6 + 2 * n)
+                    && claim.in_dma(q.dev, 6 + 8 * n);
+                if ok {
+                    QueueRegs {
+                        num: q.num,
+                        desc: q.desc,
+                        avail: q.drv,
+                        used: q.dev,
+                    }
+                } else {
+                    QueueRegs::default()
+                }
+            })
+            .collect();
+        q(&t, &regs);
+    }
     reset(slot);
     // 2. Its interrupt is no longer the driver's.
     let _ = gic::disable(irq);
@@ -383,11 +422,6 @@ fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool
         for &(pa, n) in &claim.dma {
             quarantine(pa, n);
         }
-    }
-    if class == Class::Sound {
-        // Let qemu finish the buffers it was playing when we reset it (at most the
-        // device's 4 periods, 40 ms) before a new queue exists to push them onto.
-        crate::sched::sleep_ms(50);
     }
     crate::audit!(
         "driver.release",

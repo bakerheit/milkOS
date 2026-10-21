@@ -92,11 +92,12 @@ DMA-coherent, so a cacheable mapping is correct.
 
 Steps:
 
-1. Reset the device.
-2. Unregister the user interrupt handler.
-3. Put the DMA frames in **quarantine** for 2 s before they are freed (see "Devices that
+1. For a device with a `quiesce` hook (sound), make it give back what it holds, through
+   the dead driver's own queues (see below).
+2. Reset the device.
+3. Unregister the user interrupt handler.
+4. Put the DMA frames in **quarantine** for 2 s before they are freed (see "Devices that
    finish requests after a reset").
-4. For sound, wait 50 ms.
 5. Re-attach the in-kernel driver: the fallback while no user driver runs.
 
 Audited `driver.release` with the reason.
@@ -116,9 +117,20 @@ So:
 * **Kernel detach** (soundd claims the device): the kernel driver sends PCM STOP and
   RELEASE first. RELEASE must complete every pending buffer (virtio 1.2, 5.14.6.6.5.1)
   while the pages are still the kernel's.
-* **Releasing a dead driver**: it can't release anything, so the kernel waits 50 ms after
-  the reset (qemu finishes what it was playing, at most 4 periods) and keeps the DMA
-  frames quarantined for 2 s, past the kernel driver's PREPARE.
+* **Releasing a dead driver**: it can't release anything, so the kernel does it for it,
+  before the reset (`virtio::sound::quiesce`). The kernel tracked where the driver put its
+  queues (and checked they are inside its DMA buffers). On the dead driver's control
+  queue, it sends PCM STOP and RELEASE for every stream, using descriptors 0 and 1 and a
+  scratch page of its own, after letting any control request the driver had pending
+  complete. RELEASE returns every buffer onto the dead driver's own tx queue, which still
+  exists, so nothing is left for qemu to push onto the next driver's queue. The DMA frames
+  are also quarantined for 2 s.
+
+  A first attempt only waited 50 ms after the reset, for qemu to finish playing. It
+  failed under host load: qemu's audio timer fell behind, the stale buffers landed on the
+  kernel driver's new queue, and qemu marked the device broken. Every control request then
+  went unanswered until the next reset. The quiesce has passed every run since, including
+  three crash tests in parallel.
 * **Both drivers** drain the tx used ring after PREPARE. They also ignore completions
   for heads they didn't queue (`strays` in `/proc/audio`), instead of trusting them.
 

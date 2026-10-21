@@ -61,7 +61,7 @@ echo "eth1 link: alice 127.0.0.1:$PA <-> bob 127.0.0.1:$PB (qemu -netdev dgram)"
 
 # boot NAME MAC LOCAL_PORT REMOTE_PORT: eth0 = restricted slirp, eth1 = the dgram link.
 boot() {
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-2}" -m 512M \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-2}" -m 512M \
     -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=off" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -drive "file=$WORK/$1-disk.img,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \

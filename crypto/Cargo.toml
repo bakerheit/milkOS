@@ -1,0 +1,10 @@
+[package]
+name = "milkcrypto"
+version = "0.0.1"
+edition = "2024"
+
+# Shared by the kernel (kernel/src/crypto) and userland (rt::crypto): no_std, alloc only,
+# no dependencies. See docs/crypto.md.
+[lib]
+test = false
+bench = false

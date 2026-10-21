@@ -9,6 +9,7 @@ use core::ptr::write_volatile;
 
 mod audio;
 mod audit;
+mod crypto;
 mod cursor;
 mod display;
 mod dtb;
@@ -98,6 +99,7 @@ pub extern "C" fn kmain() -> ! {
     timer::init();
     uart::init();
     virtio::init();
+    crypto::init();
     sync::irq_enable();
     selftest::run();
     memtest::run();

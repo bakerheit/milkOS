@@ -23,7 +23,7 @@ boot() { # image mode log [sock]
   local fw=() ser=(-serial "file:$3")
   [ "$2" != normal ] && fw=(-fw_cfg "name=opt/milkos/test,string=$2")
   [ -n "${4:-}" ] && ser=(-serial "unix:$4,server,nowait")
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
     -kernel "$ELF.bin" -display none -monitor none "${ser[@]}" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$1,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \

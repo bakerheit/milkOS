@@ -38,6 +38,7 @@ _real_start:
     b       1b
 3:  ldr     x0, =__boot_dtb
     str     x19, [x0]
+    msr     tpidr_el1, xzr          // per-CPU index 0 (percpu.rs)
     bl      kmain
 2:  wfe
     b       2b

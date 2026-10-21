@@ -85,6 +85,55 @@ impl Dtb {
         unsafe { core::slice::from_raw_parts(addr as *const u8, n) }
     }
 
+    /// Visit every property: `f(parent node name, node name, depth, property name, data)`.
+    /// Depth 1 is the root. Names are as in the blob (`cpu@1`, `psci`).
+    pub fn for_each_prop(&self, mut f: impl FnMut(&[u8], &[u8], usize, &[u8], &[u8])) {
+        let start = self.base + self.struct_off;
+        let end = start + self.struct_size;
+        let strings = self.base + self.strings_off;
+        let limit = self.base + self.total_size;
+        // Node names by depth (bounded; deeper nodes keep the last slot).
+        let mut stack: [&[u8]; 16] = [b""; 16];
+        let mut depth = 0usize;
+        let mut p = start;
+        while p + 4 <= end {
+            let token = be32(p);
+            p += 4;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let name = self.cstr(p, end);
+                    p = (p + name.len() + 1 + 3) & !3;
+                    depth += 1;
+                    stack[depth.min(15)] = name;
+                }
+                FDT_END_NODE => depth = depth.saturating_sub(1),
+                FDT_PROP => {
+                    if p + 8 > end {
+                        return;
+                    }
+                    let len = be32(p) as usize;
+                    let name_off = be32(p + 4) as usize;
+                    let data = p + 8;
+                    if data + len > end {
+                        return;
+                    }
+                    p = (data + len + 3) & !3;
+                    let name = self.cstr(strings + name_off, limit);
+                    // SAFETY: inside the blob (checked above).
+                    let bytes = unsafe { core::slice::from_raw_parts(data as *const u8, len) };
+                    let parent = if depth >= 2 {
+                        stack[(depth - 1).min(15)]
+                    } else {
+                        b""
+                    };
+                    f(parent, stack[depth.min(15)], depth, name, bytes);
+                }
+                FDT_NOP => {}
+                _ => return,
+            }
+        }
+    }
+
     /// Read the `reg` ranges of every top-level `memory` node. Returns how many
     /// ranges were stored in `out`.
     pub fn memory(&self, out: &mut [MemRange; MAX_BANKS]) -> usize {

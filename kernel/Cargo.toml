@@ -11,9 +11,6 @@ bench = false
 [features]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
 crash-test = []
-# Real compare-exchange SpinLock for SMP. Only once the MMU maps RAM as Normal memory:
-# atomic read-modify-write hangs on Device memory (MMU off).
-atomic-locks = []
 # Scheduler self-test ends with a thread recursing forever, to prove the stack guard.
 kstack-overflow-test = []
 # Log every syscall (pid, number, result) to the console.

@@ -3,8 +3,9 @@
 //! (Transmit is still the polled console writer in main.rs.) UART0 is at 0x0900_0000 and
 //! raises SPI 1 = INTID 33 on qemu virt (DTB: `pl011@9000000`, `interrupts = <0 1 4>`).
 //!
-//! The ring is single-producer (the IRQ handler) / single-consumer ([`read_byte`]), so it
-//! needs no lock and only plain atomic loads/stores. If the consumer falls behind and the
+//! The ring is single-producer (the IRQ handler; device SPIs are routed to the boot CPU
+//! only, see gic::init) / single-consumer ([`read_byte`], called only by the tty-uart
+//! thread), so it needs no lock: acquire/release on head and tail is enough on SMP too. If the consumer falls behind and the
 //! ring fills, new bytes are dropped (counted in [`overruns`]).
 
 // Public API surface for later subsystems (scheduler, drivers); not all of it is used yet.
@@ -60,7 +61,7 @@ fn push(b: u8) {
     let head = HEAD.load(Ordering::Relaxed);
     let tail = TAIL.load(Ordering::Acquire);
     if head.wrapping_sub(tail) >= RING_SIZE {
-        OVERRUNS.store(OVERRUNS.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        OVERRUNS.fetch_add(1, Ordering::Relaxed);
         return;
     }
     RING[head % RING_SIZE].store(b, Ordering::Relaxed);

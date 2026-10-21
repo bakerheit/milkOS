@@ -78,6 +78,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskutil"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "diskkit",
+ "gui",
+ "rt",
+ "timeio",
+ "timekit",
+]
+
+[[package]]
 name = "drop"
 version = "0.0.1"
 dependencies = [

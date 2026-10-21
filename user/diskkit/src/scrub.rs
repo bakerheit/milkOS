@@ -151,26 +151,27 @@ pub fn parse(text: &str) -> Status {
 }
 
 /// How often the automatic scrub can run: (label, the control word).
-pub const AUTO_CHOICES: [(&str, &str); 4] = [
+pub const AUTO_CHOICES: [(&str, &str); 3] = [
+    ("12 hours", "auto=12h"),
+    ("7 days", "auto=7d"),
     ("Off", "auto=off"),
-    ("Daily", "auto=1d"),
-    ("Weekly", "auto=7d"),
-    ("Monthly", "auto=30d"),
 ];
+
+/// The speed limits offered, in MB/s.
+pub const RATES: [u32; 3] = [16, 32, 64];
 
 /// The control word that sets the speed limit in MB/s (0 = unlimited).
 pub fn rate_word(mb: u32) -> String {
     alloc::format!("rate={mb}")
 }
 
-/// Which of [`AUTO_CHOICES`] a status line says is on.
-pub fn auto_choice(auto: &str) -> usize {
+/// Which of [`AUTO_CHOICES`] a status line says is on (`None` for a schedule not on the list).
+pub fn auto_choice(auto: &str) -> Option<usize> {
     match auto {
-        a if a.contains("off") => 0,
-        "every 1d" | "every 24h" => 1,
-        "every 7d" => 2,
-        "every 30d" => 3,
-        _ => 2,
+        a if a.contains("off") => Some(2),
+        "every 12h" => Some(0),
+        "every 7d" => Some(1),
+        _ => None,
     }
 }
 
@@ -247,9 +248,11 @@ mod tests {
     #[test]
     fn words() {
         assert_eq!(rate_word(8), "rate=8");
-        assert_eq!(auto_choice("off"), 0);
-        assert_eq!(auto_choice("every 7d"), 2);
-        assert_eq!(auto_choice("every 30d"), 3);
-        assert_eq!(AUTO_CHOICES[2].1, "auto=7d");
+        assert_eq!(auto_choice("off"), Some(2));
+        assert_eq!(auto_choice("every 7d"), Some(1));
+        assert_eq!(auto_choice("every 12h"), Some(0));
+        assert_eq!(auto_choice("every 30d"), None);
+        assert_eq!(AUTO_CHOICES[1].1, "auto=7d");
+        assert_eq!(RATES[1], 32);
     }
 }

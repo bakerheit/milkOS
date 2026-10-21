@@ -14,6 +14,9 @@ pub struct VolumeInfo {
     pub commits: u64,
     /// "ok", or "BROKEN (read-only)".
     pub state: String,
+    /// Whether the volume is encrypted, if the system says (an `encryption:` or `encrypted:` line
+    /// in `info`); `None` when it does not.
+    pub encrypted: Option<bool>,
 }
 
 pub const BLOCK_KB: u64 = 4;
@@ -74,6 +77,13 @@ pub fn parse_info(text: &str) -> Option<VolumeInfo> {
                     .unwrap_or(0)
             }
             "state" => v.state = val.to_string(),
+            "encryption" | "encrypted" => {
+                v.encrypted = match val.split_whitespace().next() {
+                    Some("on" | "yes" | "true" | "encrypted") => Some(true),
+                    Some("off" | "no" | "false" | "none") => Some(false),
+                    _ => None,
+                }
+            }
             _ => {}
         }
     }
@@ -151,6 +161,9 @@ mod tests {
         );
         assert_eq!(v.used_pct10(), 32);
         assert!(v.healthy());
+        assert_eq!(v.encrypted, None);
+        let enc = parse_info(&alloc::format!("{INFO}encryption:  on\n")).unwrap();
+        assert_eq!(enc.encrypted, Some(true));
         assert!(parse_info("no milkfs volume mounted\n").is_none());
         let mut b = v.clone();
         b.state = "BROKEN (read-only)".into();

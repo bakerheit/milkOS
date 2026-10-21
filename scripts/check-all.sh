@@ -54,6 +54,7 @@ TESTS=(
   "diskkit-unit|q|300|scripts/diskkit-test.sh"
   "alarm-test|q|600|scripts/alarm-test.sh"
   "apps-test|q|600|scripts/apps-test.sh"
+  "disk-test|q|600|scripts/disk-test.sh"
   "wm-demo-tour|q|300|scripts/wm-demo.sh tour @WORK@/tour.png"
   "serial-soak-full|f|3600|scripts/serial-soak.sh 5 14"
   "crashtest|f|3600|scripts/crashtest.sh"

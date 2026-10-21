@@ -169,6 +169,62 @@ pub fn parse_auto(text: &str) -> Option<AutoSettings> {
     Some(a)
 }
 
+/// "15m" as "15 minutes", "1h" as "1 hour", "30s" as "30 seconds".
+pub fn interval_words(v: &str) -> String {
+    let Some(unit) = v.chars().last() else {
+        return String::new();
+    };
+    let n = &v[..v.len() - unit.len_utf8()];
+    let (one, many) = match unit {
+        's' => ("second", "seconds"),
+        'm' => ("minute", "minutes"),
+        'h' => ("hour", "hours"),
+        'd' => ("day", "days"),
+        _ => return v.to_string(),
+    };
+    if n == "1" {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// "878s" as "about 15 minutes": a countdown for people (rounded up to whole minutes or hours).
+pub fn eta_words(v: &str) -> String {
+    let Some(unit) = v.chars().last() else {
+        return String::new();
+    };
+    let Ok(n) = v[..v.len() - unit.len_utf8()].parse::<u64>() else {
+        return v.to_string();
+    };
+    let secs = match unit {
+        's' => n,
+        'm' => n * 60,
+        'h' => n * 3600,
+        'd' => n * 86_400,
+        _ => return v.to_string(),
+    };
+    match secs {
+        0..=59 => format!("{secs} seconds"),
+        60..=3599 => {
+            let m = secs.div_ceil(60);
+            if m == 1 {
+                String::from("about 1 minute")
+            } else {
+                format!("about {m} minutes")
+            }
+        }
+        _ => {
+            let h = secs.div_ceil(3600);
+            if h == 1 {
+                String::from("about 1 hour")
+            } else {
+                format!("about {h} hours")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChangeKind {
     Added,
@@ -297,6 +353,28 @@ mod tests {
         let off = parse_auto("off interval=1h keep=4 daily=7\n0 automatic snapshot(s)\n").unwrap();
         assert!(!off.enabled && off.next_in.is_none());
         assert!(parse_auto("no milkfs volume\n").is_none());
+    }
+
+    #[test]
+    fn interval_text() {
+        assert_eq!(interval_words("15m"), "15 minutes");
+        assert_eq!(interval_words("1h"), "1 hour");
+        assert_eq!(interval_words("2h"), "2 hours");
+        assert_eq!(interval_words("30s"), "30 seconds");
+        assert_eq!(interval_words("1d"), "1 day");
+        assert_eq!(interval_words(""), "");
+        assert_eq!(interval_words("7x"), "7x");
+    }
+
+    #[test]
+    fn countdown_text() {
+        assert_eq!(eta_words("878s"), "about 15 minutes");
+        assert_eq!(eta_words("12m"), "about 12 minutes");
+        assert_eq!(eta_words("45s"), "45 seconds");
+        assert_eq!(eta_words("60s"), "about 1 minute");
+        assert_eq!(eta_words("1h"), "about 1 hour");
+        assert_eq!(eta_words("2h"), "about 2 hours");
+        assert_eq!(eta_words("x"), "x");
     }
 
     #[test]

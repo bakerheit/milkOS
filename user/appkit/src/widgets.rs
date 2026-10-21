@@ -138,6 +138,37 @@ pub fn switch(win: &mut Window, th: &Theme, hits: &mut Hits, x: i32, y: i32, on:
     hits.add(r, id);
 }
 
+/// A checkbox 18px square (radius 5): a straw fill with an ink check when on, a sand ring when off,
+/// then the label. Registers the box and its label as one click target. Returns the width used.
+pub fn checkbox(
+    win: &mut Window,
+    th: &Theme,
+    hits: &mut Hits,
+    x: i32,
+    y: i32,
+    on: bool,
+    label: &str,
+    id: u32,
+) -> i32 {
+    if on {
+        win.rrect(x, y, 18, 18, 5, th.straw);
+        win.stroke(x + 4, y + 9, x + 7, y + 13, 1, th.ink);
+        win.stroke(x + 7, y + 13, x + 14, y + 4, 1, th.ink);
+    } else {
+        bordered(win, Rect::new(x, y, 18, 18), 5, th.milk, th.cocoa);
+    }
+    win.text(x + 26, y + 1, label, th.espresso);
+    let w = 26 + str_width(label, 1);
+    hits.add(Rect::new(x, y, w, 18), id);
+    w
+}
+
+/// A padlock glyph about 14x16, for locked volumes.
+pub fn padlock(win: &mut Window, x: i32, y: i32, c: Color) {
+    crate::shapes::ring(win, x + 7, y + 5, 3, 5, None, c);
+    win.rrect(x, y + 7, 14, 9, 3, c);
+}
+
 /// A chip (preset button, tag): height 24, radius 8, oat fill with a sand border, or straw tint
 /// when `on`.
 pub fn chip(

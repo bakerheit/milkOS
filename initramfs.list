@@ -21,6 +21,7 @@
 /bin/id      target/user/aarch64-unknown-none-softfloat/release/id      755
 /bin/chmod   target/user/aarch64-unknown-none-softfloat/release/chmod   755
 /bin/chown   target/user/aarch64-unknown-none-softfloat/release/chown   755
+/bin/log     target/user/aarch64-unknown-none-softfloat/release/log     755
 # Set-user-ID root (4755): they check a password themselves, then switch ids.
 /bin/su      target/user/aarch64-unknown-none-softfloat/release/su      4755
 /bin/sudo    target/user/aarch64-unknown-none-softfloat/release/sudo    4755

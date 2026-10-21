@@ -430,6 +430,27 @@ until `svc start` / `svc restart`. `svc stop` sends SIGTERM, then SIGKILL after 
 **Logs.** A service's stdout and stderr go (line by line) to the journal with its unit
 name and level `info` (stdout) / `err` (stderr); `log -u <unit>` shows them.
 
+### The journal (`kernel/src/journal.rs`, `log`)
+
+One structured log for the kernel and the services: every entry has a sequence number,
+a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`,
+`debug`) and a message (up to 216 bytes). The kernel keeps the last 4096 in a fixed ring
+(adding one never allocates, so every `kprintln!` line goes in as unit `kernel`).
+
+* `/dev/journal` (mode 0662 root:admin): **write** one entry per line. Root writes
+  `UNIT\tLEVEL\tPID\tMESSAGE` (milkd uses this for each service's output, with the
+  service's pid); anyone else writes `MESSAGE` or `LEVEL\tMESSAGE` and gets unit
+  `user/<program>` and their own pid. **Read** (root, admin): the entries as lines
+  `seq\tboot\tmono_ms\twall_s\tpid\tuid\tunit\tlevel\tmessage`; the file offset is a cursor,
+  so a reader at EOF reads on later and gets only what's new.
+* The `journald` kernel thread appends new entries to
+  `/Volumes/Milk/var/log/journal/current.log` (root:admin 0640) every 2 s and rotates it
+  at 512 KiB to `journal.1` .. `journal.3`: about 2 MiB of history across reboots.
+* `log [-u UNIT]... [--since 30s|10m|2h|1d|UNIXTIME] [-n N] [-p LEVEL] [-b] [-f]`: old boots
+  from the files, then the live ring; `-b` this boot only, `-f` follow, `-p warn` only
+  warnings and errors, `-u user` every `user/...` unit. `MILK_TABLE=1`: a table (time,
+  boot, seq, unit, pid, uid, level, message).
+
 **`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
 `svc logs <unit>` = `log -u <unit>`): talks to milkd over `/run/milkd.sock` (AF_UNIX
 stream, one text request per line, `SO_PEERCRED` decides): anyone may `list` / `status`;

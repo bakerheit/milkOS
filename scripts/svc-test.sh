@@ -3,7 +3,9 @@
 #   boot 1: `utest svc` (a crashing unit restarted with doubling backoff, failed
 #           dependencies reported, start/stop over /run/milkd.sock allowed for root and
 #           admins and refused for others), httpd running as a milkd service, `svc`
-#           tables; a marker written to the journal, flushed to disk;
+#           tables; `utest auth` (admin tickets: refused without one, granted with the
+#           documented test password `milk`, not inherited, revocable, kept across exec,
+#           rate limited, audited); a marker written to the journal, flushed to disk;
 #   boot 2: the marker is still in `log` (from the previous boot's file), not in `log -b`.
 # Fresh /tmp directory; only the qemus started here are killed.
 set -euo pipefail
@@ -42,6 +44,7 @@ trap 'kill -9 "${QPID:-}" 2>/dev/null || true' EXIT
 
 L1="$(boot b1 \
   "send:utest svc" "wait:$P" \
+  "send:utest auth" "wait:$P" \
   "send:svc" "wait:$P" \
   "send:MILK_TABLE=1 svc list" "wait:$P" \
   "send:echo $MARK > /dev/journal" "wait:$P" \
@@ -49,6 +52,7 @@ L1="$(boot b1 \
   "send:echo now > /sys/fs/milkfs/sync" "wait:$P")"
 echo "$L1" > "$T/b1.txt"
 echo "$L1" | grep -q "utest: PASS services" && ok "$(echo "$L1" | grep -m1 'utest: PASS services' | cut -c1-200)" || bad "utest svc"
+echo "$L1" | grep -q "utest: PASS authorisation" && ok "$(echo "$L1" | grep -m1 '(as milk) utest: PASS authorisation' | cut -c1-200)" || bad "utest auth"
 echo "$L1" | grep -Eq "^httpd +running" && ok "httpd runs as a milkd service" || bad "httpd not running under milkd"
 echo "$L1" | grep -q "^unit:str	state:str" && ok "svc list as a table" || bad "svc table"
 

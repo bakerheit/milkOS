@@ -87,6 +87,13 @@ pub mod nr {
     pub const MPROTECT: u64 = 226;
     pub const WAIT4: u64 = 260;
     pub const GETRANDOM: u64 = 278;
+    /// milkOS desktop windows (wm/client.rs, docs/processes.md): create, commit, event,
+    /// title, destroy.
+    pub const MILK_WIN_CREATE: u64 = 4100;
+    pub const MILK_WIN_COMMIT: u64 = 4101;
+    pub const MILK_WIN_EVENT: u64 = 4102;
+    pub const MILK_WIN_TITLE: u64 = 4103;
+    pub const MILK_WIN_DESTROY: u64 = 4104;
 }
 
 pub fn init() {
@@ -433,6 +440,45 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             copy_out(a0, &buf[..n])?;
             Ok(n)
         }
+        nr::MILK_WIN_CREATE => sys_win_create(a0, a1, a2, a3, a[4] as usize),
+        nr::MILK_WIN_COMMIT => {
+            let r = crate::gfx::Rect::new(a1 as i32, a2 as i32, a3 as i32, a[4] as i32);
+            if crate::wm::client::commit(current().pid, a0 as u32, r) {
+                Ok(0)
+            } else {
+                Err(EBADF)
+            }
+        }
+        nr::MILK_WIN_EVENT => {
+            let ms = a2 as u64;
+            match crate::wm::client::next_event(current().pid, a0 as u32, ms * 1_000_000) {
+                Ok(Some(ev)) => {
+                    copy_out(a1, &ev)?;
+                    Ok(1)
+                }
+                Ok(None) => Ok(0),
+                Err(()) => Err(EBADF),
+            }
+        }
+        nr::MILK_WIN_TITLE => {
+            let t = copy_in(a1, a2.min(128))?;
+            let t = String::from_utf8_lossy(&t);
+            if crate::wm::client::set_title(current().pid, a0 as u32, &t) {
+                Ok(0)
+            } else {
+                Err(EBADF)
+            }
+        }
+        nr::MILK_WIN_DESTROY => {
+            let (pa, pages) = crate::wm::client::destroy(current().pid, a0 as u32).ok_or(EBADF)?;
+            // Unmap from this process first, then the frames can go back to the PMM.
+            with_space(|s| {
+                s.unmap_shared(pa, pages * crate::mmu::PAGE_SIZE);
+                Ok(())
+            })?;
+            crate::wm::client::free(pa, pages);
+            Ok(0)
+        }
         _ => {
             let (w, b) = ((nr as usize / 64) % 8, nr % 64);
             if nr < 512 && REPORTED[w].fetch_or(1 << b, Ordering::Relaxed) & (1 << b) == 0 {
@@ -448,6 +494,35 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             Err(ENOSYS)
         }
     }
+}
+
+// ---- desktop windows ------------------------------------------------------------------
+
+/// MILK_WIN_CREATE(w, h, title, title_len, info): a window with a `w` x `h` body whose pixels
+/// (XRGB, stride w) are mapped into this process. Writes `struct { u64 addr; u32 w, h,
+/// stride, id; }` (24 bytes) to `info` and returns the window id.
+fn sys_win_create(w: usize, h: usize, title: usize, tlen: usize, info: usize) -> KResult<usize> {
+    let t = copy_in(title, tlen.min(128))?;
+    let t = String::from_utf8_lossy(&t);
+    let pid = current().pid;
+    let c = crate::wm::client::create(pid, w as u32, h as u32, &t).ok_or(EINVAL)?;
+    let va = match with_space(|s| s.map_shared(c.pa, c.bytes)) {
+        Ok(va) => va,
+        Err(e) => {
+            if let Some((pa, pages)) = crate::wm::client::destroy(pid, c.id) {
+                crate::wm::client::free(pa, pages);
+            }
+            return Err(e);
+        }
+    };
+    let mut out = [0u8; 24];
+    out[..8].copy_from_slice(&(va as u64).to_le_bytes());
+    out[8..12].copy_from_slice(&(w as u32).to_le_bytes());
+    out[12..16].copy_from_slice(&(h as u32).to_le_bytes());
+    out[16..20].copy_from_slice(&(w as u32).to_le_bytes());
+    out[20..24].copy_from_slice(&c.id.to_le_bytes());
+    copy_out(info, &out)?;
+    Ok(c.id as usize)
 }
 
 // ---- helpers --------------------------------------------------------------------------

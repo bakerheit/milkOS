@@ -179,6 +179,7 @@ Implemented (number: name):
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown (`proc/sock.rs`, see docs/networking.md) |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -223,6 +224,66 @@ proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that 
   works while nobody reads. `uart::read_byte` belongs to it.
 * Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
   job stop/continue.
+
+### The desktop Terminal's tty: `/dev/tty1`
+
+`kernel/src/wm/tty.rs`: `TTY1`, a `proc::tty::Tty` (above) registered as rdev 4:1, so
+termios, window size, process groups and ^C -> SIGINT all come from the shared line
+discipline and the syscall layer's tty registry. What the Terminal window adds:
+
+* It feeds `TTY1.input` with the keys typed into it. Arrow keys, Home/End, Delete and Esc go
+  in as xterm sequences (`ESC [ A`, `ESC [ H`, `ESC [ 3 ~`, ...): cooked mode swallows them,
+  raw-mode programs read them. Ctrl+letters become control bytes; Cmd+C / Cmd+V copy and
+  paste instead.
+* It calls `TTY1.set_winsize(rows, cols)` with its real text area on every layout, so
+  `TIOCGWINSZ` follows window resizes and the foreground job gets SIGWINCH on a change.
+* A `term-sh` kernel thread keeps `msh` running on it (`proc::spawn_on`).
+
+`/bin/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
+
+### Desktop windows (`MILK_WIN_*`)
+
+A process can own a desktop window. Kernel side: `kernel/src/wm/client.rs` (+ the arms in
+`proc/syscall.rs`); user side: the `user/gui` crate. The window's body is a pixel buffer of
+contiguous PMM frames owned by the window system and mapped into the process with
+`UserSpace::map_shared` (pages marked `shared`: the space never frees them; `fork` gives the
+child a private copy).
+
+| nr | call | args → result |
+|---|---|---|
+| 4100 | `MILK_WIN_CREATE` | `(w, h, title, title_len, info)` → window id. Body up to 1000 x 700. Writes `struct { u64 addr; u32 w, h, stride, id; }` (24 bytes) to `info`: the XRGB pixels (`0x00RRGGBB`, `stride` = w) at `addr`, initially milk white. |
+| 4101 | `MILK_WIN_COMMIT` | `(id, x, y, w, h)` → 0. Shows what changed in that rect (w = 0: everything). The wm redraws the window on its next frame. |
+| 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
+| 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
+| 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+
+Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
+
+Event (little endian): `u32 kind, i32 x, i32 y, u32 key, u32 mods, i32 extra, 8 bytes reserved`.
+Kinds: 1 key down (`key` = Unicode code point, or 0x10001 Enter, 0x10002 Backspace, 0x10003
+Tab, 0x10004 Esc, 0x10005..8 Up/Down/Left/Right, 0x10009 Delete; `mods` bits shift 1, ctrl 2,
+alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4 / 5 button
+down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
+the end), 7 close (the user closed the window: clean up and exit). 2 (key up) is reserved.
+
+Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
+stays mapped until the process destroys the window or exits. Windows of processes that exit
+without destroying them are closed and freed by the wm within a second.
+
+`/bin/paint` is the example client (dock, Skim, or `paint` in a shell).
+
+### `/dev/wm` and the desktop tools
+
+`kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
+first space): `open <app|absolute path>` (apps: files terminal notes about paint today
+spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
+<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
+write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+`space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
+
+`user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
+paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and
+`cowsay [text]` (which just prints).
 
 ## Userland (`user/`)
 

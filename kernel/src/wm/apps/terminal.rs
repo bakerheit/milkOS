@@ -15,10 +15,11 @@ use crate::fs::{self, InodeType};
 use crate::gfx::Color;
 use crate::{heap, klog, pmm, timer};
 
+use super::super::clipboard;
 use super::super::event::Key;
 use super::super::paint::Painter;
 use super::super::theme::*;
-use super::super::window::{App, KeyInput, WindowContents};
+use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
 use super::super::{Mode, Request, request, rtc, shell::fmt_uptime};
 use super::fsx;
 
@@ -79,6 +80,10 @@ pub struct Terminal {
     cur: String,
     /// Inside an escape sequence in the tty output (swallowed; msh runs with TERM=dumb).
     esc: u8,
+    /// The rows on screen at the last draw (for copying a selection).
+    screen: Vec<String>,
+    /// Mouse selection in screen cells: anchor and end (row, col). Cleared by new output.
+    sel: Option<((usize, usize), (usize, usize))>,
 }
 
 impl Terminal {
@@ -97,6 +102,8 @@ impl Terminal {
             tty_gen: 0,
             cur: String::new(),
             esc: 0,
+            screen: Vec::new(),
+            sel: None,
         };
         t.follow_log();
         t.lines.push((String::new(), LATTE));
@@ -140,12 +147,57 @@ impl Terminal {
         true
     }
 
+    fn sel_range(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (a, b) = self.sel?;
+        if a == b {
+            return None;
+        }
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    fn selected_text(&self) -> String {
+        let Some((a, b)) = self.sel_range() else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for (r, row) in self.screen.iter().enumerate().take(b.0 + 1).skip(a.0) {
+            let l: Vec<char> = row.chars().collect();
+            let c0 = if r == a.0 { a.1.min(l.len()) } else { 0 };
+            let c1 = if r == b.0 { b.1.min(l.len()) } else { l.len() };
+            out.extend(&l[c0..c1.max(c0)]);
+            if r != b.0 {
+                out.push('\n');
+            }
+        }
+        String::from(out.trim_end())
+    }
+
+    /// Type `text` into the shell (as if typed; newlines are Enter).
+    fn paste(&mut self, text: &str) {
+        if self.tty {
+            for b in text.bytes() {
+                super::super::tty::input(if b == b'\n' { b'\r' } else { b });
+            }
+        } else {
+            for c in text.chars() {
+                if c == '\n' {
+                    self.submit();
+                } else if !c.is_control() {
+                    let b = self.byte(self.cursor);
+                    self.input.insert(b, c);
+                    self.cursor += 1;
+                }
+            }
+        }
+    }
+
     /// A key typed into the window, as tty bytes.
     fn key_to_tty(&mut self, k: &KeyInput) -> bool {
         use super::super::tty;
         if k.mods.ctrl {
             match k.key {
-                Key::Char('l') => {
+                // Ctrl+L clears the window, unless a raw-mode program wants the key.
+                Key::Char('l') if tty::canonical() => {
                     self.lines.clear();
                     return true;
                 }
@@ -160,6 +212,27 @@ impl Terminal {
             Key::Enter => tty::input(b'\r'),
             Key::Backspace => tty::input(0x7f),
             Key::Tab => tty::input(b'\t'),
+            Key::Escape => tty::input(0x1b),
+            Key::Up | Key::Down | Key::Right | Key::Left | Key::Home | Key::End => {
+                // xterm sequences: swallowed by the line discipline in cooked mode, read by
+                // programs in raw mode.
+                let f = match k.key {
+                    Key::Up => b'A',
+                    Key::Down => b'B',
+                    Key::Right => b'C',
+                    Key::Left => b'D',
+                    Key::Home => b'H',
+                    _ => b'F',
+                };
+                for b in [0x1b, b'[', f] {
+                    tty::input(b);
+                }
+            }
+            Key::Delete => {
+                for b in *b"\x1b[3~" {
+                    tty::input(b);
+                }
+            }
             Key::PageUp => {
                 self.back += 8;
                 return true;
@@ -287,6 +360,23 @@ impl WindowContents for Terminal {
         self.back = self.back.min(max_back);
         let end = vis.len() - self.back;
         let start = end.saturating_sub(rows);
+        self.screen = vis[start..end].iter().map(|(s, _)| s.clone()).collect();
+        if let Some((a, b)) = self.sel_range() {
+            for r in a.0..=b.0.min(self.screen.len().saturating_sub(1)) {
+                let c0 = if r == a.0 { a.1 } else { 0 };
+                let c1 = if r == b.0 { b.1 } else { cols };
+                if c1 > c0 {
+                    p.fill_a(
+                        PAD + c0 as i32 * 8,
+                        PAD + r as i32 * LINE_H - 1,
+                        (c1 - c0) as i32 * 8,
+                        LINE_H,
+                        STRAW,
+                        SEL_ROW_A,
+                    );
+                }
+            }
+        }
         for (k, (s, c)) in vis[start..end].iter().enumerate() {
             p.text(PAD, PAD + k as i32 * LINE_H, s, *c);
         }
@@ -312,6 +402,23 @@ impl WindowContents for Terminal {
     }
 
     fn key(&mut self, k: &KeyInput) -> bool {
+        // Copy / paste: Cmd+C / Cmd+V, or Ctrl+Shift+C / V (plain Ctrl+C is the interrupt).
+        if let Key::Char(c @ ('c' | 'v')) = k.key
+            && (k.mods.meta || (k.mods.ctrl && k.mods.shift))
+        {
+            if c == 'c' {
+                let t = self.selected_text();
+                if !t.is_empty() {
+                    clipboard::set(&t);
+                }
+                self.sel = None;
+                return true;
+            }
+            let text = clipboard::get();
+            self.paste(&text);
+            return true;
+        }
+        self.sel = None;
         self.back = 0;
         if self.tty {
             return self.key_to_tty(k);
@@ -385,7 +492,34 @@ impl WindowContents for Terminal {
         true
     }
 
+    fn pointer(&mut self, e: &PointerInput) -> bool {
+        let rows = self.screen.len().max(1);
+        let r = ((e.y - PAD).max(0) / LINE_H) as usize;
+        let c = ((e.x - PAD + 4).max(0) / 8) as usize;
+        let cell = (r.min(rows - 1), c);
+        match e.kind {
+            PointerKind::Down(_) => {
+                self.sel = Some((cell, cell));
+                true
+            }
+            PointerKind::Drag => {
+                if let Some((a, _)) = self.sel {
+                    self.sel = Some((a, cell));
+                }
+                true
+            }
+            PointerKind::Up(_) => {
+                if self.sel.is_some_and(|(a, b)| a == b) {
+                    self.sel = None;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+
     fn scroll(&mut self, dy: i32) -> bool {
+        self.sel = None;
         let old = self.back;
         self.back = (self.back as i32 - dy * 3).max(0) as usize;
         old != self.back
@@ -394,6 +528,9 @@ impl WindowContents for Terminal {
     fn tick(&mut self, _now: u64) -> bool {
         let log = self.follow_log();
         let tty = self.tty && self.follow_tty();
+        if log || tty {
+            self.sel = None; // rows moved under it
+        }
         log || tty
     }
 }

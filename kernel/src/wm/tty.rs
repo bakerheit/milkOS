@@ -134,3 +134,14 @@ pub fn start_shell() -> bool {
     }));
     true
 }
+
+/// Is tty1 in canonical (line) mode? (The Terminal keeps Ctrl+L for itself only then.)
+pub fn canonical() -> bool {
+    const ICANON: u32 = 0o2;
+    match TTY1.ioctl(proc::tty::TCGETS, &[]) {
+        Ok(Some(t)) if t.len() >= 16 => {
+            u32::from_le_bytes([t[12], t[13], t[14], t[15]]) & ICANON != 0
+        }
+        _ => true,
+    }
+}

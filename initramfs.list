@@ -39,3 +39,12 @@
 /bin/uniq    target/user/aarch64-unknown-none-softfloat/release/uniq    755
 /bin/uptime  target/user/aarch64-unknown-none-softfloat/release/uptime  755
 /bin/wc      target/user/aarch64-unknown-none-softfloat/release/wc      755
+
+# Desktop (wm): stty, the Paint window client, and the /dev/wm tools (user/desk).
+/bin/stty   target/user/aarch64-unknown-none-softfloat/release/stty    755
+/bin/paint  target/user/aarch64-unknown-none-softfloat/release/paint   755
+/bin/open   target/user/aarch64-unknown-none-softfloat/release/open    755
+/bin/notify target/user/aarch64-unknown-none-softfloat/release/notify  755
+/bin/today  target/user/aarch64-unknown-none-softfloat/release/today   755
+/bin/spaces target/user/aarch64-unknown-none-softfloat/release/spaces  755
+/bin/cowsay target/user/aarch64-unknown-none-softfloat/release/cowsay  755

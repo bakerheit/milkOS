@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "desk"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "fault"
 version = "0.0.1"
 dependencies = [
@@ -18,6 +25,13 @@ dependencies = [
 
 [[package]]
 name = "fetch"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "gui"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -45,11 +59,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "paint"
+version = "0.0.1"
+dependencies = [
+ "gui",
+ "rt",
+]
+
+[[package]]
 name = "rt"
 version = "0.0.1"
 
 [[package]]
 name = "snap"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "stty"
 version = "0.0.1"
 dependencies = [
  "rt",

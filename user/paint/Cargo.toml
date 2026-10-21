@@ -1,0 +1,13 @@
+[package]
+name = "paint"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "paint"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }

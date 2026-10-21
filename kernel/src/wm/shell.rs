@@ -6,7 +6,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::font;
 use crate::gfx::{Color, Rect};
 use crate::{heap, pmm};
 
@@ -103,6 +102,8 @@ pub struct Toast {
 #[derive(Clone, Copy)]
 enum DockAction {
     App(App),
+    /// A userland program, started with `proc::spawn`.
+    Program(&'static str),
     Home,
     Spaces,
     Soon(&'static str),
@@ -116,7 +117,7 @@ struct DockItem {
     action: DockAction,
 }
 
-const DOCK: [DockItem; 8] = [
+const DOCK: [DockItem; 9] = [
     DockItem {
         name: "Files",
         icon: Icon::Folder,
@@ -144,6 +145,13 @@ const DOCK: [DockItem; 8] = [
         bg: MILK,
         fg: ESPRESSO,
         action: DockAction::App(App::Notes),
+    },
+    DockItem {
+        name: "Paint",
+        icon: Icon::Paint,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: DockAction::Program("/bin/paint"),
     },
     DockItem {
         name: "Music",
@@ -193,6 +201,28 @@ pub fn dock_index(lx: i32) -> Option<usize> {
     (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
 }
 
+impl Desktop {
+    /// The dock tile an app lives in (where minimise flies to); bottom centre if none.
+    pub(super) fn dock_slot(&self, app: App) -> Rect {
+        let prog = match app {
+            App::Client(c) => super::client::process_name(c),
+            _ => None,
+        };
+        let i = DOCK.iter().position(|d| match d.action {
+            DockAction::App(a) => a == app,
+            DockAction::Program(p) => prog.as_deref() == p.rsplit('/').next(),
+            _ => false,
+        });
+        match i {
+            Some(i) => {
+                let (cx, cy) = dock_icon_center(i);
+                Rect::new(cx - DOCK_ICON / 2, cy - DOCK_ICON / 2, DOCK_ICON, DOCK_ICON)
+            }
+            None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
+        }
+    }
+}
+
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
     let d = dock_rect();
@@ -207,6 +237,7 @@ pub fn dock_icon_center(i: usize) -> (i32, i32) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     App(App),
+    Program(&'static str),
     Home,
     Spaces,
     Control,
@@ -222,7 +253,7 @@ struct Entry {
     action: Action,
 }
 
-const ENTRIES: [Entry; 8] = [
+const ENTRIES: [Entry; 9] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -254,6 +285,14 @@ const ENTRIES: [Entry; 8] = [
         bg: LATTE,
         fg: ESPRESSO,
         action: Action::App(App::About),
+    },
+    Entry {
+        name: "Paint",
+        sub: "Draw something (a userland app)",
+        icon: Icon::Paint,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: Action::Program("/bin/paint"),
     },
     Entry {
         name: "Today",
@@ -322,6 +361,10 @@ pub fn fuzzy(q: &str, name: &str) -> Option<i32> {
 }
 
 impl Launcher {
+    pub fn result_count(&self) -> usize {
+        self.results().len()
+    }
+
     fn results(&self) -> Vec<&'static Entry> {
         if self.query.trim().is_empty() {
             return ENTRIES.iter().take(4).collect();
@@ -516,7 +559,7 @@ impl Desktop {
             && self.launcher.is_none()
         {
             let (cx, _) = dock_icon_center(i);
-            let w = font::str_width(DOCK[i].name, 1) + 24;
+            let w = super::fontx::prop_width(DOCK[i].name, false) + 24;
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
@@ -579,15 +622,20 @@ impl Desktop {
         )
     }
 
-    pub(super) fn app_title(&self) -> &'static str {
-        match self.mode {
+    pub(super) fn app_title(&self) -> String {
+        String::from(match self.mode {
             Mode::Home => "Today",
             Mode::Spaces => "Overview",
-            Mode::Desktop => self.focused_window().map_or("milkOS", |w| match w.app {
-                App::About => "milkOS",
-                a => a.name(),
-            }),
-        }
+            Mode::Desktop => match self.focused_window() {
+                None => "milkOS",
+                Some(w) => match w.app {
+                    App::About => "milkOS",
+                    // A userland app: its window title names it.
+                    App::Client(_) => w.contents.title(),
+                    a => a.name(),
+                },
+            },
+        })
     }
 
     // ---- painting -------------------------------------------------------------------------
@@ -599,15 +647,15 @@ impl Desktop {
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
                     icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, ESPRESSO, false);
-                    p.bold(64, 12, &t.title, ESPRESSO);
-                    p.text(64, 32, &t.sub, COCOA);
+                    p.text_p(64, 12, &t.title, ESPRESSO, true);
+                    p.text_p(64, 32, &t.sub, COCOA, false);
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
                 if let Some(i) = self.tip {
-                    p.text_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
+                    p.text_p_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
                 }
             }
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
@@ -635,18 +683,14 @@ impl Desktop {
             if self.menu == Some(k) {
                 p.rrect(x - 8, 3, tw + 16, MENU_H - 6, 6, STRAW, SEL_ROW_A);
             }
-            if k == 0 {
-                p.bold(x, MENU_TEXT_Y, name, ESPRESSO);
-            } else {
-                p.text(x, MENU_TEXT_Y, name, ESPRESSO);
-            }
+            p.text_p(x, MENU_TEXT_Y, &name, ESPRESSO, k == 0);
         }
-        p.text_right(
-            w - MENU_PAD_X,
+        let sw = super::fontx::prop_width(&self.status, false);
+        p.text_p(
+            w - MENU_PAD_X - sw,
             MENU_TEXT_Y,
             &self.status,
             ESPRESSO,
-            1,
             false,
         );
     }
@@ -657,11 +701,19 @@ impl Desktop {
             icons::draw(
                 p, ix, DOCK_PAD, DOCK_ICON, it.icon, it.bg, 255, it.fg, false,
             );
+            // SPEC hover / pressed: lighten 4% / darken 4%.
+            let r = (DOCK_ICON * 24 + 50) / 100;
+            if self.dock_pressed == Some(i) {
+                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, 0, a(40));
+            } else if self.tip == Some(i) {
+                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, WHITE, a(40));
+            }
             let running = match it.action {
                 DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
                 DockAction::Soon(_) => false,
+                DockAction::Program(p) => self.running_program(p),
             };
             if running {
                 p.rrect(
@@ -688,8 +740,8 @@ impl Desktop {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, tbg, ta);
             }
             let (c1, c2) = if on { (MILK, MILK) } else { (ESPRESSO, COCOA) };
-            p.bold(tx + 14, 26, label, c1);
-            p.text(tx + 14, 46, sub, c2);
+            p.text_p(tx + 14, 26, label, c1, true);
+            p.text_p(tx + 14, 46, sub, c2, false);
         };
         tile(p, 16, "Network", "not yet", false);
         tile(
@@ -705,7 +757,7 @@ impl Desktop {
         {
             let sy = SLIDER_Y[i];
             p.rrect(16, sy, CC_W - 32, CC_TILE_H, 16, tbg, ta);
-            p.bold(30, sy + 8, label, ESPRESSO);
+            p.text_p(30, sy + 8, label, ESPRESSO, true);
             p.rrect(TRACK_X, sy + 36, TRACK_W, CC_SLIDER_H, 4, COCOA, 0x40);
             p.rrect(
                 TRACK_X,
@@ -775,18 +827,19 @@ impl Desktop {
             }
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
-            p.bold(64, y + 6, e.name, ESPRESSO);
-            p.text(64, y + 22, e.sub, COCOA);
+            p.text_p(64, y + 6, e.name, ESPRESSO, true);
+            p.text_p(64, y + 22, e.sub, COCOA, false);
             if sel {
                 p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
             }
         }
         let fy = 40 + res.len().max(1) as i32 * LAUNCH_ROW_H + 8;
-        p.text(
+        p.text_p(
             16,
             fy,
-            "Up/Down to choose   Enter to open   Esc to close",
+            "Up/Down to choose    Enter to open    Esc to close",
             COCOA,
+            false,
         );
     }
 
@@ -800,6 +853,7 @@ impl Desktop {
         match i {
             0 => {
                 let greet = match t.hour {
+                    0..=4 => "Still up, Andrew?",
                     5..=11 => "Good morning, Andrew",
                     12..=17 => "Good afternoon, Andrew",
                     _ => "Good evening, Andrew",
@@ -951,7 +1005,7 @@ impl Desktop {
                 None => p.rrect_r(rr, 3, CREAM, 255),
             }
         }
-        p.text_center(0, w, 66, &space_label(i), COCOA, i == self.space);
+        p.text_p_center(0, w, 66, &space_label(i), COCOA, i == self.space);
         if i == self.space {
             p.rrect_stroke(0, 0, w, h, THUMB_R, SEL_BORDER, HONEY, 255);
         }
@@ -962,7 +1016,7 @@ impl Desktop {
     pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
         match key {
             PanelKey::MenuBar => {
-                let sw = font::str_width(&self.status, 1);
+                let sw = super::fontx::prop_width(&self.status, false);
                 if x < 30 {
                     self.set_menu(None);
                     self.toggle_launcher();
@@ -981,11 +1035,13 @@ impl Desktop {
                 let Some(i) = dock_index(x) else {
                     return;
                 };
+                self.dock_pressed = Some(i);
                 self.control = false;
                 match DOCK[i].action {
                     DockAction::App(a) => self.open(a),
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
+                    DockAction::Program(path) => self.launch(path),
                     DockAction::Soon(name) => self.post_toast(name, "Not in milkOS yet. Soon!"),
                 }
                 self.invalidate(PanelKey::Dock);
@@ -1165,6 +1221,7 @@ impl Desktop {
         self.close_launcher();
         match action {
             Action::App(a) => self.open(a),
+            Action::Program(p) => self.launch(p),
             Action::Home => self.toggle_mode(Mode::Home),
             Action::Spaces => self.toggle_mode(Mode::Spaces),
             Action::Control => self.control = true,

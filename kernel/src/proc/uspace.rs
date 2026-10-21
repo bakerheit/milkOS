@@ -97,6 +97,9 @@ struct Page {
     pa: PhysAddr,
     /// What the program asked for.
     perm: Perm,
+    /// Someone else's frame mapped in (a desktop window buffer, see `map_shared`): never
+    /// freed or copy-on-write shared by this space.
+    foreign: bool,
     /// Copy-on-write: logically writable but mapped read-only until the first write.
     cow: bool,
 }
@@ -107,6 +110,7 @@ impl Page {
             pa,
             perm,
             cow: false,
+            foreign: false,
         }
     }
 
@@ -349,7 +353,7 @@ impl UserSpace {
         for v in doomed {
             let p = self.pages.remove(&v).unwrap();
             self.space().unmap_page(v);
-            if release_frame(p.pa) {
+            if !p.foreign && release_frame(p.pa) {
                 pmm::free_frame(p.pa);
             }
         }
@@ -490,6 +494,20 @@ impl UserSpace {
         n.stack_low = self.stack_low;
         let pages: Vec<(VirtAddr, Page)> = self.pages.iter().map(|(&v, &p)| (v, p)).collect();
         for (va, mut p) in pages {
+            if p.foreign {
+                // A desktop window buffer: the child gets its own private snapshot (the
+                // window stays the parent's), and the parent's mapping is left alone.
+                let pa = n.map_page(va, p.perm)?;
+                // SAFETY: two distinct whole frames.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        phys_to_virt(p.pa) as *const u8,
+                        phys_to_virt(pa) as *mut u8,
+                        PAGE_SIZE,
+                    )
+                };
+                continue;
+            }
             if p.perm.write && !p.cow {
                 p.cow = true;
                 self.remap(va, p)?; // parent goes read-only too
@@ -621,6 +639,58 @@ impl UserSpace {
         Ok(())
     }
 
+    /// Map `len` bytes of physically contiguous memory at `pa` that this space does not own
+    /// (a desktop window's pixel buffer), read/write, at a fresh address in the mmap area.
+    /// The owner keeps the frames alive until the process has unmapped them or exited.
+    pub fn map_shared(&mut self, pa: PhysAddr, len: usize) -> KResult<VirtAddr> {
+        let len = page_up(len);
+        let va = self.mmap_next;
+        if len == 0 || va + len > STACK_TOP - STACK_MAX {
+            return Err(ENOMEM);
+        }
+        self.mmap_next = va + len + PAGE_SIZE;
+        for off in (0..len).step_by(PAGE_SIZE) {
+            if self
+                .space()
+                .map(
+                    va + off,
+                    pa + off,
+                    PAGE_SIZE,
+                    Perm::RW.attrs(),
+                    &mut PmmTables,
+                )
+                .is_err()
+            {
+                self.unmap_range(va, off);
+                return Err(ENOMEM);
+            }
+            self.pages.insert(
+                va + off,
+                Page {
+                    pa: pa + off,
+                    perm: Perm::RW,
+                    cow: false,
+                    foreign: true,
+                },
+            );
+        }
+        Ok(va)
+    }
+
+    /// Unmap every shared page that maps physical `[pa, pa+len)` (whatever its address).
+    pub fn unmap_shared(&mut self, pa: PhysAddr, len: usize) {
+        let doomed: Vec<VirtAddr> = self
+            .pages
+            .iter()
+            .filter(|(_, p)| p.foreign && p.pa >= pa && p.pa < pa + len)
+            .map(|(&v, _)| v)
+            .collect();
+        for v in doomed {
+            self.pages.remove(&v);
+            self.space().unmap_page(v);
+        }
+    }
+
     pub fn munmap(&mut self, addr: VirtAddr, len: usize) -> KResult<()> {
         if !addr.is_multiple_of(PAGE_SIZE) || len == 0 || !user_range_ok(addr, len) {
             return Err(EINVAL);
@@ -645,7 +715,7 @@ impl Drop for UserSpace {
             );
         }
         for p in self.pages.values() {
-            if release_frame(p.pa) {
+            if !p.foreign && release_frame(p.pa) {
                 pmm::free_frame(p.pa);
             }
         }

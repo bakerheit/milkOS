@@ -378,6 +378,63 @@ write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): 
 paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and
 `cowsay [text]` (which just prints).
 
+## Services: `milkd` and service files
+
+`milkd` (`user/milkd`) is the service manager. init (PID 1) starts it first thing and
+restarts it if it ever exits; init itself keeps only reaping orphans and the console
+shell. milkd reads every `/etc/milk/services/<name>.service`, starts the enabled ones in
+dependency order, supervises them (restart with backoff), captures their stdout and
+stderr into the journal, and answers `svc` over `/run/milkd.sock`. Kernel threads are not
+services.
+
+### The service file format
+
+Plain text, one `key = value` per line, `#` starts a comment, blank lines ignored, keys
+case-sensitive, unknown keys are reported (`svc status` shows a warning) and ignored. The
+file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 characters.
+
+| key | value | default |
+|---|---|---|
+| `exec` | the program and its arguments, split on spaces; `"..."` quotes one argument. The program is an absolute path. **Required.** | |
+| `description` | one line for `svc list` | |
+| `user` | account to run as (name from /etc/passwd). The service gets that user's uid, gid, groups, HOME, USER; never set-ID tricks needed. | `root` |
+| `restart` | `always` (whenever it exits), `on-failure` (exit status != 0 or killed by a signal), `never` | `on-failure` |
+| `after` | units (space separated) to start before this one: ordering only | |
+| `needs` | units that must be running for this one to start; if one of them fails or isn't there, this unit is not started and its status says `dependency failed: <unit>` | |
+| `sandbox` | a capability spec, exactly as for the `sandbox` tool (docs/security.md): `fs=/srv/www:r net=local spawn=0` ... The service's own binary is granted read automatically. | none (unrestricted) |
+| `socket` | socket activation: milkd creates this AF_UNIX listening socket (a path, mode 0660, owned by `user`, group admin), and starts the service on the first connection, handing it the listener as **fd 3** with `LISTEN_FDS=1` / `LISTEN_PID` in the environment, like systemd. | |
+| `cwd` | working directory | `/` |
+| `env` | extra environment, space-separated `KEY=VALUE` | |
+| `if-exists` | start only if this path exists (else status `skipped`) | |
+| `if-contains` | `PATH TEXT...`: start only if the file contains TEXT | |
+| `enabled` | `yes` / `no`: started at boot | `yes` |
+
+Example (`/etc/milk/services/clockd.service`):
+
+```text
+# Alarms and timers for the desktop.
+description = clock daemon: alarms
+exec = /bin/clockd --quiet
+user = milk
+restart = always
+after = drop
+sandbox = fs=/home/milk/Library/Clock:rw net=none spawn=0
+socket = /run/clockd.sock
+```
+
+**Restart and backoff.** After an unexpected exit milkd waits 100 ms, then doubles the
+wait on every quick failure (one that ran less than 10 s) up to 30 s; a run of 10 s or
+more resets it. After 8 quick failures in a row the unit is `failed` and left alone
+until `svc start` / `svc restart`. `svc stop` sends SIGTERM, then SIGKILL after 3 s.
+
+**Logs.** A service's stdout and stderr go (line by line) to the journal with its unit
+name and level `info` (stdout) / `err` (stderr); `log -u <unit>` shows them.
+
+**`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
+`svc logs <unit>` = `log -u <unit>`): talks to milkd over `/run/milkd.sock` (AF_UNIX
+stream, one text request per line, `SO_PEERCRED` decides): anyone may `list` / `status`;
+`start`, `stop`, `restart` need root or the `admin` group. `MILK_TABLE=1` gives tables.
+
 ## Userland (`user/`)
 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs

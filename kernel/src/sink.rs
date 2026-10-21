@@ -1,4 +1,6 @@
-//! Where `kprintln!` output goes: the UART, and the on-screen console once one is installed.
+//! Where `kprintln!` output goes: the UART, the kernel log ring ([`crate::klog`], shown by the
+//! desktop's Terminal), and the on-screen console if one is installed (only when the desktop
+//! could not start, see `display::console_fallback`).
 //!
 //! The screen console sits behind a try-lock. If something (an interrupt handler, a panic) prints
 //! while the console is already mid-write, the text still goes to the UART but is dropped from the
@@ -66,6 +68,7 @@ pub struct Sink;
 impl Write for Sink {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         let _ = crate::Uart.write_str(s);
+        crate::klog::write(s);
         with_screen(|c| c.write_str(s));
         Ok(())
     }

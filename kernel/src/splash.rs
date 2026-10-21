@@ -125,14 +125,17 @@ pub fn bar(t: &mut dyn DrawTarget, percent: i32) {
     t.fill_rect(x, y, w * percent.clamp(0, 100) / 100, h, BLUE);
 }
 
-/// Show the splash for about `ms` milliseconds, then fade to `to`.
-pub fn show(t: &mut dyn DrawTarget, ms: u64, to: Color) {
+/// Show the splash for about `ms` milliseconds, then fade to `to` (or leave it up if `None`).
+pub fn show(t: &mut dyn DrawTarget, ms: u64, to: Option<Color>) {
     draw(t);
     const STEPS: i32 = 40;
     for i in 1..=STEPS {
         delay_ms(ms / STEPS as u64);
         bar(t, i * 100 / STEPS);
     }
+    let Some(to) = to else {
+        return;
+    };
     for _ in 0..6 {
         let (w, h) = (t.width() as i32, t.height() as i32);
         t.fill_rect_alpha(0, 0, w, h, to, 70);

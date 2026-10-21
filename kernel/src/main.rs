@@ -21,6 +21,7 @@ mod gfx;
 mod gic;
 mod heap;
 mod input;
+mod klog;
 mod mem;
 mod memtest;
 mod mmu;
@@ -35,6 +36,7 @@ mod sync;
 mod timer;
 mod uart;
 mod virtio;
+mod wm;
 
 global_asm!(include_str!("boot.S"));
 
@@ -85,7 +87,6 @@ pub extern "C" fn kmain() -> ! {
     timer::init();
     uart::init();
     virtio::init();
-    cursor::init();
     sync::irq_enable();
     selftest::run();
     memtest::run();
@@ -96,44 +97,19 @@ pub extern "C" fn kmain() -> ! {
     proc::init();
     proc::start_init();
 
-    // kmain is now just thread 0. The console belongs to msh (no more uart::echo_pending
-    // here). Sleep between polls rather than wfi: a wfi loop would sit on its whole time
-    // slice whenever it is scheduled. The window server's loop goes here (or in its own
-    // thread, see docs/processes.md).
+    // The desktop: compositor, window manager and shell, in its own thread. It owns the
+    // screen and draws the mouse cursor from here on.
+    sched::spawn_prio("wm", sched::Priority::High, wm::run);
+    // kmain is now just thread 0.
     loop {
-        input_demo();
-        sched::sleep_ms(10);
+        sched::sleep_ms(1000);
     }
-}
-
-/// Demo until the window server exists: typed text echoes on the console, the mouse moves
-/// the cursor, buttons and scrolling are logged to the serial port only.
-fn input_demo() {
-    while let Some(ev) = input::poll() {
-        match ev {
-            input::Event::PointerMove { x, y } => cursor::move_to(x, y),
-            input::Event::KeyDown(k) => match k.text() {
-                Some('\x08') => kprint_str("\x08 \x08"),
-                Some(c) if c == '\n' || !c.is_control() => {
-                    let _ = console_writer().write_char(c);
-                }
-                _ => {}
-            },
-            input::Event::Button { .. } | input::Event::Scroll { .. } => {
-                let _ = writeln!(Uart, "[input] {ev:?}");
-            }
-            input::Event::KeyUp(_) => {}
-        }
-    }
-}
-
-fn kprint_str(s: &str) {
-    let _ = console_writer().write_str(s);
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     kprintln!("\n*** KERNEL PANIC ***\n{info}");
+    wm::panic_screen(info);
     loop {
         unsafe { core::arch::asm!("wfe") };
     }

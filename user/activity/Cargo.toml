@@ -1,0 +1,15 @@
+[package]
+name = "activity"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "activity"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+sysview = { path = "../sysview" }

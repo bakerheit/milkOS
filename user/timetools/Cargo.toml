@@ -1,0 +1,38 @@
+[package]
+name = "timetools"
+version.workspace = true
+edition.workspace = true
+
+# Command-line side of Calendar and Clock, and the background ringer:
+#   alarmd  rings alarms, timers and calendar alerts with every window closed (started by init)
+#   alarm   add, list and switch alarms
+#   timer   start, pause and list countdown timers
+#   cal     a month view, an agenda and event editing
+[[bin]]
+name = "alarmd"
+path = "src/bin/alarmd.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "alarm"
+path = "src/bin/alarm.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "timer"
+path = "src/bin/timer.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "cal"
+path = "src/bin/cal.rs"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+timekit = { path = "../timekit" }
+timeio = { path = "../timeio" }

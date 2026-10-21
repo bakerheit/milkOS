@@ -1,0 +1,9 @@
+[package]
+name = "timekit"
+version.workspace = true
+edition.workspace = true
+
+# Pure logic for Calendar, Clock and the alarm daemon: no syscalls, so the unit tests run on the
+# host (`cargo test --target aarch64-apple-darwin`, see docs/apps.md).
+[lib]
+bench = false

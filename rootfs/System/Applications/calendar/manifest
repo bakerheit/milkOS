@@ -1,0 +1,8 @@
+format 1
+name calendar
+version 1.0.0
+description Calendar: days, weeks, months and reminders
+exec /bin/calendar
+dock Calendar #7F93C9
+files
+payload-sha256 -

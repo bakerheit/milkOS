@@ -68,7 +68,7 @@ Height 64, radius 20, glass. Padding 8, icons 48x48, gap 12. Width = 16 + n*48 +
 - Minimum size 240x160. Body padding 16. Files sidebar width 160 (oat, 1px sand right edge). Status bar height 24 (cream, 1px sand top edge).
 
 ## Tabs (Terminal tabs and Tabs-everywhere window tabs share this)
-One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at Gus's request.
+One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at the engineer's request.
 - Strip: a window with two or more tabs uses a 38px bar in place of the 32px title bar. Same fill, 1px sand line under it. The traffic lights keep their x (14) and sit at y12, centred in the taller bar.
 - Tab: height 32, top y6 inside the strip (so it touches the line under the strip), width between 96 and 160 (tabs share the strip equally, never narrower than 96), 6px between tabs. The first tab starts at x84. Corner radius 10px on the top corners only, square at the bottom. Padding 12px left, 8px right.
 - Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
@@ -111,7 +111,7 @@ Dim the wallpaper with espresso at 0.35. Space strip at y40: thumbnails 128x88, 
 Dawn pasture: vertical gradient #FBE3C8 → #F3C3B8 → #C9B3D9, honey sun disc with halo, three overlapping matcha hill circles, tiny cow. Stored sharp (W) and pre-blurred (Wb = box blur r24 x3 passes, recomputed on change).
 
 ## Dark theme ("Chocolate milk")
-Values from kernel/src/wm/theme.rs tc() as given by Gus, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
+Values from kernel/src/wm/theme.rs tc() as given by the engineer, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
 | Token | Light | Dark | Use |
 |---|---|---|---|
 | milk | #FFFDF8 | #2E2520 | window body, cards, launcher |
@@ -177,4 +177,4 @@ Rules that come out of the numbers:
 - **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
 ## What the mockup does not show
-Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.
+Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Raise it with the design owner if one of these blocks you.

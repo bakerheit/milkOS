@@ -212,7 +212,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${id(i)}"><div class="stagebox">
 <h3>Key idea</h3><p>${s.idea}</p><h3>What is new about it</h3><p>${s.new_}</p><h3>Cost in a kernel-drawn UI</h3><p>${s.why}</p>
 <h3>Main elements</h3><ul class="chips">${s.els.map((e) => `<li>${e}</li>`).join("")}</ul><h3>Font note</h3><p>${s.font}</p></aside></article>`).join("")}
 <div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${id(i)}" for="r-${id(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.n}. ${s.name}</b><span>${s.cost}</span></div></label>`).join("")}</div>
-<section class="plan"><h2>Mary's take</h2>
+<section class="plan"><h2>Design notes</h2>
 <p><b>Cheapest to try first: C Scroll.</b> It needs no window manager, it is very Linux, and the rich cards are small renderers you can add one at a time. It could even live as the terminal app inside the 1.0 desktop.</p>
 <p style="margin-top:8px"><b>Most distinctive: A Rewind.</b> Nothing else has "the whole computer has a timeline" as its front door. Start with file versions and window lists only, and treat screenshots of the past as a later upgrade.</p>
 <p style="margin-top:8px"><b>B Canvas</b> suits a bitmap font surprisingly well (labels at 2x and 4x, never shrunk). <b>D Dial</b> is the lightest to build but works best layered on top of another look (the modes and radial menus can sit on the 1.0 desktop).</p></section>

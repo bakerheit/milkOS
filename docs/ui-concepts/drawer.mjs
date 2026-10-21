@@ -25,7 +25,7 @@ function expanded() {
   const x = 1024 - D.right - D.w, y = D.top, w = D.w, hh = 768 - D.top - D.bottom;
   let inner = T(18, 14, "<b>Notifications</b>") + TRi(w, w - 18, 14, "Clear all", `color:${C.cocoa}`) + pill(14, 46, 64, "All", true, D.chipH) + pill(84, 46, 96, "Mentions", false, D.chipH) + pill(186, 46, 80, "Today", false, D.chipH);
   inner += T(18, 88, "&#9662; MESSAGES", `color:${C.cocoa}`) + TRi(w, w - 18, 88, "4", `color:${C.cocoa}`);
-  const more = [NOTE.mum, NOTE.gus, { ic: "photo", tone: C.straw, title: "Mum", body: "Are you coming Sunday?", t: "9:40" }, { ic: "note", tone: C.blue, title: "Gus", body: "PR is up for review", t: "9:12" }];
+  const more = [NOTE.mum, NOTE.sam, { ic: "photo", tone: C.straw, title: "Mum", body: "Are you coming Sunday?", t: "9:40" }, { ic: "note", tone: C.blue, title: "Sam", body: "PR is up for review", t: "9:12" }];
   more.forEach((n, i) => { inner += card(12, 110 + i * 72, w - 24, n, { sel: i === 1 }); });
   inner += B(w - 38, 190, 24, 24, `background:${C.milk};border:1px solid ${C.sand};border-radius:12px`) + TC(w - 38, 195, 24, "x", `color:${C.cocoa}`);
   inner += T(18, 410, "&#9656; CALENDAR", `color:${C.cocoa}`) + TRi(w, w - 18, 410, "1", `color:${C.cocoa}`) + T(18, 440, "&#9656; SYSTEM", `color:${C.cocoa}`) + TRi(w, w - 18, 440, "2", `color:${C.cocoa}`);

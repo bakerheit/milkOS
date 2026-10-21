@@ -101,7 +101,7 @@ function verbs() {
       return (f[2] ? B(x - 6, y - 6, 124, 118, `background:${C.blue}33;border:2px solid ${C.blue};border-radius:14px`) : "") + icon(x + 24, y, 64, f[0], C.cream, C.esp, `border:1px solid ${C.sand}`) + TC(x - 6, y + 74, 124, f[1]);
     }).join("") + T(18, 300, "Type to search, or drop a file here.", `color:${C.cocoa}`));
   // who
-  h += B(548, 270, 180, 330, `background:${C.milk};border:1px solid ${C.sand};border-radius:16px`, T(16, 14, "TO WHOM", `color:${C.cocoa}`) + ["Mum", "Gus", "Dad", "Hank", "Me"].map((p, i) => (i === 0 ? B(8, 42 + i * 52, 164, 44, `background:${C.straw}44;border-radius:10px`) : "") + circle(18, 50 + i * 52, 28, [C.straw, C.blue, C.matcha, C.honey, C.lav][i]) + T(58, 58 + i * 52, p)).join(""));
+  h += B(548, 270, 180, 330, `background:${C.milk};border:1px solid ${C.sand};border-radius:16px`, T(16, 14, "TO WHOM", `color:${C.cocoa}`) + ["Mum", "Sam", "Dad", "Alex", "Me"].map((p, i) => (i === 0 ? B(8, 42 + i * 52, 164, 44, `background:${C.straw}44;border-radius:10px`) : "") + circle(18, 50 + i * 52, 28, [C.straw, C.blue, C.matcha, C.honey, C.lav][i]) + T(58, 58 + i * 52, p)).join(""));
   // preview + do it
   h += B(744, 270, 248, 330, `background:${C.milk};border:2px solid ${C.esp};border-radius:16px`, T(16, 14, "THIS WILL", `color:${C.cocoa}`) + T(16, 44, "Email bike.png") + T(16, 62, "(2.1 MB) to Mum") + T(16, 80, "from andrew@milk.", `color:${C.cocoa}`) + icon(16, 110, 64, "photo", C.cream, C.esp, `border:1px solid ${C.sand}`) + T(90, 124, "bike.png", `color:${C.cocoa}`) + T(90, 142, "800x600", `color:${C.cocoa}`) +
     B(16, 230, 216, 48, `background:${C.esp};border-radius:24px`) + TC(16, 246, 216, "<b>Do it   &#9166;</b>", `color:${C.cream}`) + T(16, 290, "Undo for 30 seconds", `color:${C.cocoa}`));
@@ -153,10 +153,10 @@ function onething() {
     ["# milkOS 1.0 spec", "", "## Menu bar", "Height 28. Glass, alpha 0.55.", "", "## Dock", "Height 64, icons 48, gap 12.", "Centred, 12 px above the bottom.", "", "## Window chrome", "Radius 12, title bar 32.", "Lights d12, gap 8."].map((l, i) => T(24, 50 + i * 22, l, l.startsWith("#") ? BD : "")).join("") + B(24 + 8 * 18, 50 + 11 * 22, 8, 16, `background:${C.esp}`));
   // right column: queue
   h += B(764, 52, 230, 300, `background:${C.oat};border:1px solid ${C.sand};border-radius:14px`, T(16, 14, "NEXT", `color:${C.cocoa}`) +
-    [["Reply to Gus", "5 min"], ["Fix the allocator", "1 hour"], ["Lunch", "12:30"], ["Bike ride", "5:00"]].map((t, i) => B(10, 40 + i * 62, 210, 54, `background:${C.milk};border:1px solid ${C.sand};border-radius:10px`, T(12, 8, `<b>${i + 1}. ${t[0]}</b>`) + T(12, 28, t[1], `color:${C.cocoa}`))).join(""));
+    [["Reply to Sam", "5 min"], ["Fix the allocator", "1 hour"], ["Lunch", "12:30"], ["Bike ride", "5:00"]].map((t, i) => B(10, 40 + i * 62, 210, 54, `background:${C.milk};border:1px solid ${C.sand};border-radius:10px`, T(12, 8, `<b>${i + 1}. ${t[0]}</b>`) + T(12, 28, t[1], `color:${C.cocoa}`))).join(""));
   // parked
   h += B(764, 368, 230, 270, `background:${C.honey}22;border:1px dashed ${C.honey};border-radius:14px`, T(16, 14, "PARKED", `color:${C.cocoa}`) + T(16, 34, "held until your 10:50 break", `color:${C.cocoa}`) +
-    [["Mail from Mum", C.straw], ["Update available", C.blue], ["Ping from Hank", C.matcha]].map((p, i) => B(12, 62 + i * 62, 206, 50, `background:${C.milk};border:1px solid ${C.sand};border-left:6px solid ${p[1]};border-radius:10px`, T(14, 8, `<b>${p[0]}</b>`) + T(14, 26, "tap to let through", `color:${C.cocoa}`))).join(""));
+    [["Mail from Mum", C.straw], ["Update available", C.blue], ["Ping from Alex", C.matcha]].map((p, i) => B(12, 62 + i * 62, 206, 50, `background:${C.milk};border:1px solid ${C.sand};border-left:6px solid ${p[1]};border-radius:10px`, T(14, 8, `<b>${p[0]}</b>`) + T(14, 26, "tap to let through", `color:${C.cocoa}`))).join(""));
   // actions
   h += B(40, 660, 160, 48, `background:${C.matcha};border-radius:24px`) + TC(40, 676, 160, "<b>Done &#10003;</b>") + pill(214, 668, 150, "Swap task", false, 32) + pill(376, 668, 150, "Park this", false, 32) + T(560, 676, "Esc = park everything and breathe", `color:${C.cocoa}`);
   h += T(40, 728, "Apps open only as tools for the task and close with it. There is no desktop to wander off to.", `color:${C.cocoa}`);
@@ -250,7 +250,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${id(i)}"><div class="stagebox">
 <h3>Key idea</h3><p>${s.idea}</p><h3>What is new about it</h3><p>${s.new_}</p><h3>Cost in a kernel-drawn UI</h3><p>${s.why}</p>
 <h3>Main elements</h3><ul class="chips">${s.els.map((e) => `<li>${e}</li>`).join("")}</ul><h3>Font note</h3><p>${s.font}</p></aside></article>`).join("")}
 <div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${id(i)}" for="r-${id(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.n}. ${s.name}</b><span>${s.cost}</span></div></label>`).join("")}</div>
-<section class="plan"><h2>Mary's take</h2>
+<section class="plan"><h2>Design notes</h2>
 <p><b>Most milkOS-ish: 1 Patchbay.</b> It turns the Linux idea everyone loves (small programs joined by pipes) into something you can see and touch, and the plumbing it needs is plumbing the OS needs anyway.</p>
 <p style="margin-top:8px"><b>Most radical: 3 Verbs.</b> It deletes the idea of an app from the user's view. It is also the cheapest way to try something truly different: a form, a verb table and a preview.</p>
 <p style="margin-top:8px"><b>Best for the brand: 4 Fridge Door.</b> Nobody else will ship a milk carton as a battery meter. <b>2 Meadow</b> and <b>5 One Thing</b> work well as modes layered on a normal desktop (an ambient screensaver, a focus mode) rather than as the whole OS.</p></section>

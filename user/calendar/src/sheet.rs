@@ -1,6 +1,6 @@
 //! The event sheet and the "add calendar" sheet: state, keys, clicks and drawing.
 
-use crate::{App, H, SHEET, W};
+use crate::{App, SHEET};
 use alloc::format;
 use alloc::string::String;
 use appkit::widgets::{self, Kind, bold_x, button, button_w, chip, field, switch};
@@ -323,7 +323,7 @@ impl App {
 
     fn frame(&self, win: &mut Window, w: i32, h: i32, title: &str) -> Rect {
         let th = self.th;
-        let r = Rect::new((W - w) / 2, (H - h) / 2, w, h);
+        let r = Rect::new((win.w - w) / 2, (win.h - h) / 2, w, h);
         win.rrect(
             r.x - 1,
             r.y + 6,

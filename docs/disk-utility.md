@@ -31,6 +31,17 @@ Long writes (send, receive, check, repair) run in a forked child so the window s
 sheet's result is the kernel's own one-line report. A wrong passphrase says "That was not the
 passphrase", never an errno; other errors give a sentence and "Details: error N".
 
+## Encrypted backups, and spare disks
+
+When the system lists its disks (`/sys/fs/milkfs/disks`), a backup of an encrypted volume is encrypted
+by default: the Back up sheet asks for a passphrase twice (`send` gets it on a second line) and offers
+"Not encrypted" as a choice (`plaintext`), which brings back the warning and the "I understand" box.
+Restore has an optional passphrase field (`receive` gets it on a second line); a wrong or missing one
+reads "The passphrase is wrong or missing for this backup". On a system without that file the sheet is
+the old one (unencrypted, with the warning). The sidebar also lists unmounted milkfs volumes and
+disks that are not milkfs. Formatting and encrypting a spare disk (the `mkfs` control) is not in the
+window yet; it needs a spec addendum from the UI lead first.
+
 ## Where it differs from the spec, and why
 - **No "snapshot first" box for Roll back or Replace.** Both delete every snapshot newer than the
   target (like `zfs rollback -r`), which includes the safety snapshot, so the box would promise

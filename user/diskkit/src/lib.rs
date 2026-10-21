@@ -5,6 +5,7 @@
 extern crate alloc;
 
 pub mod backup;
+pub mod disks;
 pub mod fmt;
 pub mod fsinfo;
 pub mod mounts;

@@ -1,6 +1,6 @@
 //! Editing a reminder in place, and the add-list sheet.
 
-use crate::{App, EDIT, H, SHEET, W};
+use crate::{App, EDIT, SHEET};
 use alloc::format;
 use alloc::string::String;
 use appkit::widgets::{self, Kind, bold_x, button, button_w, chip, field, switch};
@@ -290,7 +290,7 @@ impl App {
             return;
         };
         let caret = timeio::mono_ms() / 500 % 2 == 0;
-        let r = Rect::new((W - 400) / 2, (H - 240) / 2, 400, 240);
+        let r = Rect::new((win.w - 400) / 2, (win.h - 240) / 2, 400, 240);
         win.rrect(
             r.x - 1,
             r.y + 6,

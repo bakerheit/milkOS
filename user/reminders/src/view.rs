@@ -1,9 +1,7 @@
 //! Drawing: the sidebar, the header with quick add, the rows, the completed group, the toast.
 
 use crate::edit::editing;
-use crate::{
-    App, CHECK, COMPLETED, H, LIST, NEW_LIST, QUICK, ROW, SEARCH, SIDE, SMART, UNDO, View, W,
-};
+use crate::{App, CHECK, COMPLETED, LIST, NEW_LIST, QUICK, ROW, SEARCH, SIDE, SMART, UNDO, View};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -109,8 +107,8 @@ impl App {
 
     pub fn draw_sidebar(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(0, 0, SIDE, H, th.oat);
-        widgets::vline(win, SIDE - 1, 0, H, th.sand);
+        win.fill(0, 0, SIDE, win.h, th.oat);
+        widgets::vline(win, SIDE - 1, 0, win.h, th.sand);
         let caret = timeio::mono_ms() / 500 % 2 == 0;
         field(
             win,
@@ -165,7 +163,7 @@ impl App {
                 self.set.open_in(i).len(),
             );
             let y = 172 + i as i32 * 30;
-            if y > H - 80 {
+            if y > win.h - 80 {
                 break;
             }
             let r = Rect::new(8, y, SIDE - 16, 26);
@@ -187,7 +185,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(12, H - 40, bw, 24),
+            Rect::new(12, win.h - 40, bw, 24),
             "Add list",
             Kind::Secondary,
             NEW_LIST,
@@ -199,7 +197,7 @@ impl App {
     pub fn draw_main(&mut self, win: &mut Window) {
         let th = self.th;
         let x0 = SIDE + 24;
-        let w = W - SIDE - 48;
+        let w = win.w - SIDE - 48;
         let items = self.items();
         // Total height, with the editor open on one row.
         let editor_h = 270 + 6;
@@ -209,12 +207,12 @@ impl App {
             Item::Row(_, r) => ROW_H + if editing(app, r) { editor_h } else { 0 },
         };
         let total: i32 = items.iter().map(|i| height(i, self)).sum();
-        let view_h = H - TOP;
+        let view_h = win.h - TOP;
         self.scroll = self.scroll.clamp(0, (total - view_h).max(0));
         let mut y = TOP - self.scroll;
         for (n, it) in items.iter().enumerate() {
             let h = height(it, self);
-            if y + h < TOP || y > H {
+            if y + h < TOP || y > win.h {
                 y += h;
                 continue;
             }
@@ -256,7 +254,7 @@ impl App {
             );
         }
         // The header repaints over whatever scrolled under it.
-        win.fill(SIDE, 0, W - SIDE, TOP, th.milk);
+        win.fill(SIDE, 0, win.w - SIDE, TOP, th.milk);
         bold_x(win, x0, 14, &self.title(), th.espresso, 2);
         let open = self.open_rows();
         let overdue = open.iter().filter(|(_, r)| r.overdue(self.today)).count();
@@ -272,7 +270,7 @@ impl App {
         self.draw_quick(win, x0, w);
         // The Undo toast after a delete.
         if self.undo.is_some() {
-            let r = Rect::new(SIDE + (W - SIDE - 300) / 2, H - 52, 300, 36);
+            let r = Rect::new(SIDE + (win.w - SIDE - 300) / 2, win.h - 52, 300, 36);
             win.rrect(r.x, r.y, r.w, r.h, 18, th.espresso);
             win.text(r.x + 18, r.y + 10, "Reminder deleted", th.milk);
             let bw = button_w("Undo", true);

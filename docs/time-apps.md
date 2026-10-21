@@ -52,6 +52,30 @@ is given to the owner of the parent folder (`timeio::write_atomic`, `mkdir_p`), 
 can still change it. The boot id file (`/run/boot-id`) is made by alarmd at start and read by
 everyone; if it cannot be made, processes fall back to the wall clock minus the monotonic clock.
 
+## Toasts, the menu bar and resizing
+
+alarmd posts every ring as a toast with up to two buttons that run a command (docs/processes.md,
+`notify ... action=<label>:<command>`), so they work with every window closed:
+
+| Ring | Buttons |
+| --- | --- |
+| Alarm | Snooze 9 min (`/bin/alarm snooze ID 9`), Open (the Clock) |
+| Timer done | Again (`/bin/timer <seconds>s <label>`), Open |
+| Calendar alert | Open (the Calendar) |
+| Reminder | Done (`/bin/remind done ID`), Snooze 10m (`/bin/remind snooze ID 10`) |
+
+A reminder's snooze is the last column of its line (`YYYY-MM-DD@HH:MM`); it rings again then and
+leaves the due day alone; completing the reminder clears it. A ringing alarm still opens the small
+Snooze / Stop panel that plays the alarm sound.
+
+alarmd also keeps the soonest running timer in the menu bar ("04:32", refreshed every second; the
+desktop drops it 5 seconds after the last refresh, and alarmd clears it when no timer runs), so a
+timer stays visible after the Clock window is closed. Clicking it opens the Clock.
+
+Calendar, Activity Monitor, Disk Utility and Reminders are resizable (their layouts follow the
+window; the Clock is not). The smallest sizes are larger than the spec's, because the sheets are
+fixed size: Calendar 760x580, Activity Monitor 720x480, Disk Utility 760x560, Reminders 640x520.
+
 ## alarmd
 
 Started by init. Once a second it reads the three files (no cache: an app's edit counts on the

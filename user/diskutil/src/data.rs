@@ -3,6 +3,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use diskkit::disks::{self, DiskEntry};
 use diskkit::fsinfo::{self, ControlError, LockEntry, Locked, VolumeInfo};
 use diskkit::mounts::{self, Volume};
 use diskkit::scrub::{self, Status};
@@ -44,6 +45,9 @@ pub struct Disk {
     pub locked: Vec<Locked>,
     /// Encrypted volumes and whether they can be locked (`/sys/fs/milkfs/lock`).
     pub lock: Vec<LockEntry>,
+    /// Every block device (`/sys/fs/milkfs/disks`), on a system that lists them. Its presence also
+    /// means backups of an encrypted volume can be encrypted.
+    pub disks: Option<Vec<DiskEntry>>,
     pub volumes: Vec<Volume>,
     /// Size and free space by mount path, from statfs.
     pub usage: Vec<(String, Usage)>,
@@ -61,6 +65,9 @@ impl Disk {
         self.auto = snaps::parse_auto(&text(&format!("{DIR}/auto")));
         self.scrub = Some(scrub::parse(&text(&format!("{DIR}/scrub"))));
         self.locked = fsinfo::parse_locked(&text(&format!("{DIR}/unlock")));
+        self.disks = sys::stat_path(&format!("{DIR}/disks"), true)
+            .ok()
+            .map(|_| disks::parse(&text(&format!("{DIR}/disks"))));
         self.lock = fsinfo::parse_lock(&text(&format!("{DIR}/lock")));
         self.volumes = mounts::volumes(&text("/proc/mounts"));
         self.usage = self

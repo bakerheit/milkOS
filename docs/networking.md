@@ -4,8 +4,9 @@ Files: `kernel/src/virtio/net.rs` (driver), `kernel/src/net/` (stack, socket API
 demo server, self-test), `kernel/src/proc/sock.rs` (socket syscalls), `user/rt/src/net.rs` +
 `user/fetch` (user side), `scripts/net-test.sh` + helpers (end-to-end test).
 
-Everything is written from scratch (no crates). IPv4 only, one Ethernet interface (`eth0`,
-virtio-net) plus loopback (`lo`).
+Everything is written from scratch (no crates). IPv4 only: up to two Ethernet interfaces
+(`eth0`, the slirp NIC with DHCP; `eth1`, an optional VM-to-VM link with a link-local
+address, see "eth1" below) plus loopback (`lo`).
 
 ## Running it
 
@@ -55,12 +56,13 @@ DNS (see the resolver policy below).
 * **virtio-net**: features MAC + STATUS only (no offloads, no mergeable buffers, no control
   queue). 12-byte `virtio_net_hdr` (VERSION_1), sent zeroed. Up to 64 rx and 64 tx
   descriptors, 2 KiB buffer each.
-* **Ethernet / ARP**: 32-entry cache, requests rate-limited to 1/s, 3 tries; up to 8 packets
+* **Ethernet / ARP**: per-interface 32-entry cache, requests rate-limited to 1/s, 3 tries; up to 8 packets
   wait (3 s) for an answer, then are dropped. Entries live 10 minutes. The gateway is
   resolved right after DHCP.
 * **IPv4**: header checksum checked, DF set on everything we send, TTL 64. Fragments (MF or
   offset) are dropped and counted (`ReasmFails`), we never fragment (UDP > 1472 bytes:
-  `EMSGSIZE`). Routing: loopback, on-link, else the default gateway.
+  `EMSGSIZE`). Routing: loopback, on-link (per interface), link-local and multicast to
+eth1, else the default gateway (eth0's).
 * **ICMP**: echo replies; our pings (`socket::ping`); destination unreachable (port /
   protocol) for closed UDP ports and unknown protocols.
 * **UDP**: checksums both ways, datagrams queued as records in the socket's rx ring,
@@ -85,6 +87,34 @@ DNS (see the resolver policy below).
   times, then `ETIMEDOUT` (+RST). TIME_WAIT is 2 s (2 x MSL of 1 s; Linux: 60 s), orphaned
   FIN_WAIT_2 30 s. No SACK, no timestamps, no delayed ACK, no Nagle, no keepalive, no
   urgent data.
+
+## eth1: a second network for VM-to-VM links
+
+A second `virtio-net-device` becomes `eth1`. Interfaces are named in qemu command-line
+order (qemu gives the first `-device` the highest virtio-mmio slot; `Iface::attach` sorts
+by slot, highest first), so with one NIC nothing changes and in a two-NIC boot the first
+one (slirp) stays eth0 with DHCP exactly as before. eth1:
+
+* **Addressing**: IPv4 link-local (RFC 3927, simplified): the candidate is 169.254.X.Y
+  from the last two MAC bytes (`02:6d:6b:64:0a:0a` -> 169.254.10.10, bytes kept in
+  1..=254), probed with two ARP probes (sender 0.0.0.0) 200 ms apart, then taken (/16, no
+  gateway) and announced with a gratuitous ARP. A probe or claim for our candidate/address
+  from another MAC is a conflict: logged (`[net] eth1: link-local A is taken by MAC;
+  trying B`), a new candidate is mixed from the MAC and the conflict count, and probing
+  starts over. Two boots whose MACs derive the same address end up on different ones.
+* **Routing**: 169.254/16 and multicast go out of eth1, everything else as before (eth0
+  never sends or takes multicast, as before). Each link has its own ARP cache; the parked
+  packet pool is shared and remembers the link.
+* **Multicast**: link-scope only (224.0.0.0/24, never routed). eth1 accepts frames to
+  `01:00:5e:*` and delivers 224.0.0.x datagrams to the UDP socket bound to the port (one
+  socket, as for unicast); no IGMP (the link has no router to tell). Sending to a group
+  uses the RFC 1112 MAC. No ICMP errors for multicast.
+* **The wire**: qemu `-netdev dgram` between two qemus over 127.0.0.1 UDP (each side's
+  `local` is the other's `remote`), so it needs no start order and no root; frames,
+  including broadcasts and multicast, go to the one peer. `scripts/drop-test.sh` boots such
+  a pair.
+* `/proc/net/dev`, `arp`, `route` (169.254/16 and 224/4 on eth1) and `ifaddr`
+  (`linklocal=bound|probing conflicts=N`) list eth1; `ifconfig` shows it.
 
 ## The kernel socket API (`kernel/src/net/socket.rs`)
 

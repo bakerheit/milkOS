@@ -16,7 +16,7 @@
 //! wakes the net thread ([`crate::net::on_device_irq`]), which drains the rings.
 
 use core::ptr::write_bytes;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::mmio::{Error, MMIO_SPI_BASE, Transport};
 use super::queue::{MAX_QUEUE_SIZE, QueueMem, Virtqueue};
@@ -100,6 +100,8 @@ unsafe impl Send for VirtioNet {}
 
 /// Set once a virtio-net device is attached (cheap check for "is there a NIC").
 static PRESENT: AtomicBool = AtomicBool::new(false);
+/// Devices attached so far (the stack takes up to `net::iface::MAX_LINKS`).
+static COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub fn present() -> bool {
     PRESENT.load(Ordering::Acquire)
@@ -235,17 +237,19 @@ fn pow2_queue(t: &Transport, idx: u16) -> Result<u16, Error> {
     Ok(1u16 << (usize::BITS - 1 - max.leading_zeros()))
 }
 
-/// Bring up a virtio-net device and hand it to the network stack. Only the first device is
-/// used; more are reset and left alone.
+/// Bring up a virtio-net device and hand it to the network stack. Up to two are used
+/// (eth0, eth1, named in qemu command-line order by the stack); more are reset and left
+/// alone.
 pub fn attach(t: Transport) -> Result<(), Error> {
-    if present() {
+    if COUNT.load(Ordering::Acquire) >= crate::net::iface::MAX_LINKS {
         kprintln!(
-            "[virtio-net] slot {}: second NIC ignored (one interface only)",
+            "[virtio-net] slot {}: NIC ignored (eth0 and eth1 are taken)",
             t.slot()
         );
         t.reset();
         return Ok(());
     }
+    COUNT.fetch_add(1, Ordering::AcqRel);
     let features = t.begin_init(0, F_MAC | F_STATUS)?;
     let mac = if features & F_MAC != 0 {
         loop {
@@ -314,8 +318,9 @@ pub fn attach(t: Transport) -> Result<(), Error> {
     }
     t.driver_ok();
     t.notify(RXQ);
+    let slot = t.slot();
     kprintln!(
-        "[virtio-net] eth0 mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, rx {} / tx {} buffers, link {}",
+        "[virtio-net] slot {slot}: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, rx {} / tx {} buffers, link {}",
         mac[0],
         mac[1],
         mac[2],
@@ -327,6 +332,6 @@ pub fn attach(t: Transport) -> Result<(), Error> {
         if dev.link_up() { "up" } else { "down" }
     );
     PRESENT.store(true, Ordering::Release);
-    crate::net::attach_device(dev);
+    crate::net::attach_device(dev, slot);
     Ok(())
 }

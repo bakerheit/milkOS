@@ -243,7 +243,7 @@ fn respond(c: &mut Conn) {
 }
 
 fn index() -> Vec<u8> {
-    let (cfg, mac) = with(|st| (st.iface.cfg, st.iface.mac));
+    let (cfg, mac) = with(|st| (st.iface.eth0().cfg, st.iface.eth0().mac));
     let up = timer::now_ns() / 1_000_000_000;
     let mut s = String::new();
     let _ = write!(

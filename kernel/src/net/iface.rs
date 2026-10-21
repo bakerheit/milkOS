@@ -1,9 +1,13 @@
 //! The interface layer: Ethernet framing, ARP resolution, IPv4 output and routing, and the
 //! loopback queue.
 //!
-//! There is one Ethernet interface (`eth0`, the virtio-net device, if any) and `lo`.
-//! Routing is three rules: 127/8 and our own address go to `lo`; addresses on our subnet
-//! (and broadcasts) go out directly; everything else goes to the default gateway.
+//! Up to two Ethernet interfaces and `lo`: `eth0` (the first virtio-net device: slirp,
+//! DHCP) and `eth1` (a second one, for VM-to-VM links: a link-local 169.254/16 address
+//! from its MAC, and link-scope multicast). Routing: 127/8 and our own addresses go to
+//! `lo`; broadcasts and multicast out of the link they belong to (multicast only on a
+//! link-local link); addresses on a link's subnet (169.254/16 on eth1) go out directly;
+//! everything else goes to the default gateway (eth0's, from DHCP). With one NIC this is
+//! exactly the old single-interface behaviour.
 //!
 //! Nothing here allocates after [`Iface::new`]: frames are built straight into device tx
 //! buffers, packets waiting for ARP sit in a small fixed pool, and loopback packets in a
@@ -39,7 +43,8 @@ const LO_SLOTS: usize = 32;
 /// TCP recovers from loss; slirp never loses anything.
 pub static LO_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
 
-/// IPv4 configuration of eth0 (from DHCP). `addr` unspecified = not configured.
+/// IPv4 configuration of a link (eth0: DHCP; eth1: link-local). `addr` unspecified = not
+/// configured.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct IpConfig {
     pub addr: Ipv4,
@@ -63,19 +68,114 @@ impl IpConfig {
 #[derive(Clone, Copy)]
 struct Pending {
     used: bool,
+    link: u8,
     nexthop: Ipv4,
     len: usize,
     since: u64,
 }
 
-pub struct Iface {
+/// Most Ethernet interfaces: eth0 (slirp, DHCP) and eth1 (VM-to-VM, link-local).
+pub const MAX_LINKS: usize = 2;
+pub const LINK_NAMES: [&str; MAX_LINKS] = ["eth0", "eth1"];
+
+/// Gap between link-local ARP probes, and how many go out before the address is taken.
+const LL_PROBE_NS: u64 = 200_000_000;
+const LL_PROBES: u8 = 2;
+
+/// IPv4 link-local autoconfiguration (RFC 3927, simplified): a candidate in 169.254/16
+/// derived from the MAC, probed with ARP, taken if nobody answers, re-picked on conflict.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct LinkLocal {
+    pub on: bool,
+    pub cand: Ipv4,
+    probes: u8,
+    next: u64,
+    pub conflicts: u32,
+}
+
+/// One Ethernet interface: a virtio-net device, its MAC, IPv4 config and ARP cache.
+pub struct Link {
     pub dev: Option<VirtioNet>,
+    /// virtio-mmio slot (interfaces are named by slot, highest first, which is the qemu
+    /// command-line order: the first `-device virtio-net-device` is eth0).
+    pub slot: usize,
     pub mac: Mac,
     pub cfg: IpConfig,
     pub arp: ArpCache,
+    /// eth frames we dropped before they reached the device (ARP failures, full pool).
+    pub extra_drops: u64,
+    pub ll: LinkLocal,
+}
+
+impl Link {
+    const fn empty() -> Link {
+        Link {
+            dev: None,
+            slot: 0,
+            mac: Mac::ZERO,
+            cfg: IpConfig {
+                addr: Ipv4::UNSPECIFIED,
+                mask: Ipv4::UNSPECIFIED,
+                gateway: None,
+                dns: None,
+            },
+            arp: ArpCache::new(),
+            extra_drops: 0,
+            ll: LinkLocal {
+                on: false,
+                cand: Ipv4::UNSPECIFIED,
+                probes: 0,
+                next: 0,
+                conflicts: 0,
+            },
+        }
+    }
+
+    pub fn up(&self) -> bool {
+        self.dev.is_some()
+    }
+
+    /// Does this link take IPv4 multicast (224.0.0.0/24, link scope)? Only link-local
+    /// links: eth0 keeps its old behaviour (no multicast).
+    pub fn multicast(&self) -> bool {
+        self.ll.on && self.cfg.configured()
+    }
+}
+
+/// The link-local candidate for `mac` after `conflicts` collisions: 169.254.X.Y with X, Y
+/// from the last two MAC bytes (kept in 1..=254), then mixed on each conflict.
+pub fn ll_candidate(mac: Mac, conflicts: u32) -> Ipv4 {
+    let m = mac.0;
+    let fix = |b: u32| if (1..=254).contains(&b) { b } else { 1 + b % 254 };
+    let mut x = fix(m[4] as u32);
+    let mut y = fix(m[5] as u32);
+    if conflicts > 0 {
+        let h = (m[3] as u32 ^ (m[4] as u32) << 8 ^ (m[5] as u32) << 16)
+            .wrapping_mul(2_654_435_761)
+            .wrapping_add(conflicts.wrapping_mul(40_503));
+        x = 1 + (h >> 8) % 254;
+        y = 1 + (h >> 20) % 254;
+    }
+    Ipv4::new(169, 254, x as u8, y as u8)
+}
+
+pub fn is_link_local(ip: Ipv4) -> bool {
+    ip.0[0] == 169 && ip.0[1] == 254
+}
+
+/// Link-scope multicast (224.0.0.0/24): never routed, what discovery uses.
+pub fn is_link_multicast(ip: Ipv4) -> bool {
+    ip.0[0] == 224 && ip.0[1] == 0 && ip.0[2] == 0
+}
+
+/// Ethernet address for an IPv4 multicast group (RFC 1112: 01:00:5e + low 23 bits).
+pub fn multicast_mac(ip: Ipv4) -> Mac {
+    Mac([0x01, 0x00, 0x5e, ip.0[1] & 0x7f, ip.0[2], ip.0[3]])
+}
+
+pub struct Iface {
+    pub links: [Link; MAX_LINKS],
     pub lo_stats: DevStats,
-    /// Stats of eth0 frames we dropped before they reached the device (ARP failures).
-    pub eth_extra_drops: u64,
     ip_id: u16,
     pending: [Pending; PENDING],
     /// PENDING * MTU bytes.
@@ -100,22 +200,21 @@ fn leak(bytes: usize) -> *mut u8 {
 /// Where an outgoing packet goes.
 enum Route {
     Loopback,
-    Ether(Ipv4),
-    Broadcast,
+    /// Link, next hop.
+    Ether(usize, Ipv4),
+    /// Link, destination MAC (broadcast or multicast).
+    Flood(usize, Mac),
 }
 
 impl Iface {
     pub fn new() -> Iface {
         Iface {
-            dev: None,
-            mac: Mac::ZERO,
-            cfg: IpConfig::default(),
-            arp: ArpCache::new(),
+            links: [Link::empty(), Link::empty()],
             lo_stats: DevStats::default(),
-            eth_extra_drops: 0,
             ip_id: 1,
             pending: [Pending {
                 used: false,
+                link: 0,
                 nexthop: Ipv4::UNSPECIFIED,
                 len: 0,
                 since: 0,
@@ -129,35 +228,137 @@ impl Iface {
         }
     }
 
+    /// eth0 (the first NIC; DHCP runs here).
+    pub fn eth0(&self) -> &Link {
+        &self.links[0]
+    }
+    pub fn eth0_mut(&mut self) -> &mut Link {
+        &mut self.links[0]
+    }
+
+    /// Attach a device. Interfaces are kept ordered by virtio slot, highest first, so the
+    /// names follow the qemu command line whatever order the slots were probed in. Returns
+    /// the name it got, or None if every link is taken.
+    pub fn attach(&mut self, dev: VirtioNet, slot: usize, mac: Mac) -> Option<&'static str> {
+        let n = self.links.iter().filter(|l| l.up()).count();
+        if n == MAX_LINKS {
+            return None;
+        }
+        // Insert at its sorted position (links[..n] are up and sorted by slot, descending).
+        let pos = self.links[..n]
+            .iter()
+            .position(|l| slot > l.slot)
+            .unwrap_or(n);
+        for k in (pos..n).rev() {
+            self.links.swap(k, k + 1);
+        }
+        let l = &mut self.links[pos];
+        *l = Link::empty();
+        l.dev = Some(dev);
+        l.slot = slot;
+        l.mac = mac;
+        // Every link but eth0 configures itself link-local (eth0 gets DHCP).
+        for (k, l) in self.links.iter_mut().enumerate() {
+            if l.up() {
+                l.ll.on = k > 0;
+            }
+        }
+        Some(LINK_NAMES[pos])
+    }
+
+    /// Start link-local autoconfiguration on every link that wants it.
+    pub fn ll_start(&mut self, now: u64) {
+        for l in self.links.iter_mut().filter(|l| l.up() && l.ll.on) {
+            l.ll.cand = ll_candidate(l.mac, l.ll.conflicts);
+            l.ll.probes = 0;
+            l.ll.next = now;
+            l.cfg = IpConfig::default();
+        }
+    }
+
+    /// Which link owns `ip` as its address?
+    pub fn link_of_addr(&self, ip: Ipv4) -> Option<usize> {
+        self.links
+            .iter()
+            .position(|l| l.up() && l.cfg.is_local(ip))
+    }
+
+    /// The link-local link (eth1), if configured.
+    fn ll_link(&self) -> Option<usize> {
+        self.links.iter().position(|l| l.up() && l.multicast())
+    }
+
     /// Source address we use to reach `dst`.
     pub fn src_for(&self, dst: Ipv4) -> Ipv4 {
         if dst.is_loopback() {
-            dst
-        } else {
-            self.cfg.addr
+            return dst;
         }
+        if (is_link_local(dst) || dst.is_multicast())
+            && let Some(k) = self.ll_link()
+        {
+            return self.links[k].cfg.addr;
+        }
+        for l in self.links.iter().filter(|l| l.up() && l.cfg.configured()) {
+            if dst.same_net(l.cfg.addr, l.cfg.mask) {
+                return l.cfg.addr;
+            }
+        }
+        self.links[0].cfg.addr
     }
 
-    /// Is `ip` one of ours (any 127/8 address, or eth0's)?
+    /// Is `ip` one of ours (any 127/8 address, or a link's)?
     pub fn is_our_addr(&self, ip: Ipv4) -> bool {
-        ip.is_loopback() || self.cfg.is_local(ip)
+        ip.is_loopback() || self.link_of_addr(ip).is_some()
     }
 
-    fn route(&self, dst: Ipv4) -> Result<Route> {
+    fn route(&self, src: Ipv4, dst: Ipv4) -> Result<Route> {
         if self.is_our_addr(dst) {
             return Ok(Route::Loopback);
         }
-        if dst.is_broadcast() || (self.cfg.configured() && dst == self.cfg.subnet_broadcast()) {
-            return Ok(Route::Broadcast);
+        let by_src = self.link_of_addr(src);
+        if dst.is_broadcast() {
+            // Limited broadcast: out of the source's link, else eth0 (DHCP before an address).
+            let k = by_src.unwrap_or(0);
+            return if self.links[k].up() {
+                Ok(Route::Flood(k, Mac::BROADCAST))
+            } else {
+                Err(ENETDOWN)
+            };
         }
-        if dst.is_multicast() || !self.cfg.configured() {
-            return Err(ENETUNREACH);
+        for (k, l) in self.links.iter().enumerate() {
+            if l.up() && l.cfg.configured() && dst == l.cfg.subnet_broadcast() {
+                return Ok(Route::Flood(k, Mac::BROADCAST));
+            }
         }
-        if dst.same_net(self.cfg.addr, self.cfg.mask) {
-            Ok(Route::Ether(dst))
-        } else {
-            self.cfg.gateway.map(Route::Ether).ok_or(ENETUNREACH)
+        if dst.is_multicast() {
+            // Only link-local links carry multicast (eth0 never did).
+            let k = by_src
+                .filter(|&k| self.links[k].multicast())
+                .or_else(|| self.ll_link())
+                .ok_or(ENETUNREACH)?;
+            return Ok(Route::Flood(k, multicast_mac(dst)));
         }
+        for (k, l) in self.links.iter().enumerate() {
+            if l.up() && l.cfg.configured() && dst.same_net(l.cfg.addr, l.cfg.mask) {
+                return Ok(Route::Ether(k, dst));
+            }
+        }
+        if is_link_local(dst)
+            && let Some(k) = self.ll_link()
+        {
+            return Ok(Route::Ether(k, dst));
+        }
+        // Default route: the first link with a gateway (eth0 from DHCP).
+        self.links
+            .iter()
+            .enumerate()
+            .find_map(|(k, l)| {
+                (l.up() && l.cfg.configured())
+                    .then_some(l.cfg.gateway)
+                    .flatten()
+                    .map(|g| Route::Ether(k, g))
+            })
+            .ok_or(ENETUNREACH)
     }
 
     /// Send an IPv4 packet. `fill` writes the payload into the buffer it gets (up to
@@ -174,7 +375,7 @@ impl Iface {
     ) -> Result<()> {
         let id = self.ip_id;
         self.ip_id = self.ip_id.wrapping_add(1);
-        match self.route(dst)? {
+        match self.route(src, dst)? {
             Route::Loopback => {
                 let every = LO_DROP_EVERY.load(Ordering::Relaxed);
                 if every != 0 {
@@ -201,36 +402,40 @@ impl Iface {
                 self.lo_stats.rx_bytes += n as u64;
                 Ok(())
             }
-            Route::Broadcast => self.send_frame(Mac::BROADCAST, src, dst, proto, id, fill),
-            Route::Ether(hop) => {
-                if let Some(mac) = self.arp.lookup(hop) {
-                    return self.send_frame(mac, src, dst, proto, id, fill);
+            Route::Flood(k, mac) => self.send_frame(k, mac, src, dst, proto, id, fill),
+            Route::Ether(k, hop) => {
+                if let Some(mac) = self.links[k].arp.lookup(hop) {
+                    return self.send_frame(k, mac, src, dst, proto, id, fill);
                 }
                 // Park the packet until ARP answers.
-                let Some(k) = self.pending.iter().position(|p| !p.used) else {
-                    self.eth_extra_drops += 1;
+                let Some(slot) = self.pending.iter().position(|p| !p.used) else {
+                    self.links[k].extra_drops += 1;
                     return Err(ENOBUFS);
                 };
-                // SAFETY: pending slot k is free; MTU bytes each.
-                let buf =
-                    unsafe { core::slice::from_raw_parts_mut(self.pending_buf.add(k * MTU), MTU) };
+                // SAFETY: pending slot is free; MTU bytes each.
+                let buf = unsafe {
+                    core::slice::from_raw_parts_mut(self.pending_buf.add(slot * MTU), MTU)
+                };
                 let n = build_ip(buf, src, dst, proto, id, fill);
-                self.pending[k] = Pending {
+                self.pending[slot] = Pending {
                     used: true,
+                    link: k as u8,
                     nexthop: hop,
                     len: n,
                     since: now,
                 };
-                if self.arp.want(hop, now) {
-                    self.send_arp(arp::OP_REQUEST, Mac::ZERO, hop);
+                if self.links[k].arp.want(hop, now) {
+                    self.send_arp(k, arp::OP_REQUEST, Mac::ZERO, hop);
                 }
                 Ok(())
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_frame(
         &mut self,
+        k: usize,
         dst_mac: Mac,
         src: Ipv4,
         dst: Ipv4,
@@ -238,8 +443,9 @@ impl Iface {
         id: u16,
         fill: impl FnOnce(&mut [u8]) -> usize,
     ) -> Result<()> {
-        let mac = self.mac;
-        let dev = self.dev.as_mut().ok_or(ENETDOWN)?;
+        let l = &mut self.links[k];
+        let mac = l.mac;
+        let dev = l.dev.as_mut().ok_or(ENETDOWN)?;
         let ok = dev.send_with(|f| {
             eth_header(f, dst_mac, mac, ETHERTYPE_IPV4);
             ETH_HDR + build_ip(&mut f[ETH_HDR..ETH_HDR + MTU], src, dst, proto, id, fill)
@@ -247,11 +453,19 @@ impl Iface {
         if ok { Ok(()) } else { Err(ENOBUFS) }
     }
 
-    /// Send an ARP packet (request: `tha` zero, broadcast; reply: unicast to `tha`).
-    pub fn send_arp(&mut self, op: u16, tha: Mac, tpa: Ipv4) {
-        let mac = self.mac;
-        let spa = self.cfg.addr;
-        let Some(dev) = self.dev.as_mut() else { return };
+    /// Send an ARP packet on link `k` (request: `tha` zero, broadcast; reply: unicast to
+    /// `tha`).
+    pub fn send_arp(&mut self, k: usize, op: u16, tha: Mac, tpa: Ipv4) {
+        let spa = self.links[k].cfg.addr;
+        self.send_arp_from(k, op, spa, tha, tpa);
+    }
+
+    /// ARP with an explicit sender address (link-local probes use 0.0.0.0, announcements
+    /// the new address).
+    fn send_arp_from(&mut self, k: usize, op: u16, spa: Ipv4, tha: Mac, tpa: Ipv4) {
+        let l = &mut self.links[k];
+        let mac = l.mac;
+        let Some(dev) = l.dev.as_mut() else { return };
         let dst = if op == arp::OP_REQUEST {
             Mac::BROADCAST
         } else {
@@ -263,20 +477,21 @@ impl Iface {
         });
     }
 
-    /// `ip` resolved to `mac`: send everything that was waiting for it.
-    pub fn flush_pending(&mut self, ip: Ipv4, mac: Mac) {
-        let me = self.mac;
-        for k in 0..PENDING {
-            let p = self.pending[k];
-            if !p.used || p.nexthop != ip {
+    /// `ip` resolved to `mac` on link `k`: send everything that was waiting for it.
+    pub fn flush_pending(&mut self, k: usize, ip: Ipv4, mac: Mac) {
+        let me = self.links[k].mac;
+        for slot in 0..PENDING {
+            let p = self.pending[slot];
+            if !p.used || p.link as usize != k || p.nexthop != ip {
                 continue;
             }
-            self.pending[k].used = false;
-            let Some(dev) = self.dev.as_mut() else {
+            self.pending[slot].used = false;
+            let Some(dev) = self.links[k].dev.as_mut() else {
                 continue;
             };
-            // SAFETY: slot k holds p.len bytes of a built packet.
-            let pkt = unsafe { core::slice::from_raw_parts(self.pending_buf.add(k * MTU), p.len) };
+            // SAFETY: the slot holds p.len bytes of a built packet.
+            let pkt =
+                unsafe { core::slice::from_raw_parts(self.pending_buf.add(slot * MTU), p.len) };
             dev.send_with(|f| {
                 eth_header(f, mac, me, ETHERTYPE_IPV4);
                 f[ETH_HDR..ETH_HDR + pkt.len()].copy_from_slice(pkt);
@@ -285,43 +500,113 @@ impl Iface {
         }
     }
 
-    /// Timers: ARP retries and expiry, stale parked packets.
+    /// An ARP packet on link `k` mentions `spa` (from `sha`) / asks for `tpa`: link-local
+    /// conflict detection. True if it was a conflict (the caller then ignores it).
+    pub fn ll_arp_seen(&mut self, k: usize, sha: Mac, spa: Ipv4, tpa: Ipv4, now: u64) -> bool {
+        let l = &mut self.links[k];
+        if !l.ll.on || sha == l.mac {
+            return false;
+        }
+        let probing = !l.cfg.configured() && !l.ll.cand.is_unspecified();
+        let clash = if probing {
+            spa == l.ll.cand || (spa.is_unspecified() && tpa == l.ll.cand)
+        } else {
+            l.cfg.configured() && spa == l.cfg.addr
+        };
+        if !clash {
+            return false;
+        }
+        let old = if probing { l.ll.cand } else { l.cfg.addr };
+        l.ll.conflicts += 1;
+        l.ll.cand = ll_candidate(l.mac, l.ll.conflicts);
+        l.ll.probes = 0;
+        l.ll.next = now + LL_PROBE_NS;
+        l.cfg = IpConfig::default();
+        crate::kprintln!(
+            "[net] {}: link-local {old} is taken by {sha}; trying {}",
+            LINK_NAMES[k],
+            l.ll.cand
+        );
+        true
+    }
+
+    /// Timers: link-local probing, ARP retries and expiry, stale parked packets.
     pub fn tick(&mut self, now: u64) {
-        let mut due = [Ipv4::UNSPECIFIED; arp::ARP_SLOTS];
-        let n = self.arp.due(now, &mut due);
-        for &ip in &due[..n] {
-            if self.arp.want(ip, now) {
-                self.send_arp(arp::OP_REQUEST, Mac::ZERO, ip);
+        for k in 0..MAX_LINKS {
+            let l = &self.links[k];
+            if !l.up() || !l.ll.on || l.cfg.configured() || l.ll.cand.is_unspecified() {
+                continue;
+            }
+            if now < l.ll.next {
+                continue;
+            }
+            let cand = l.ll.cand;
+            if l.ll.probes < LL_PROBES {
+                self.send_arp_from(k, arp::OP_REQUEST, Ipv4::UNSPECIFIED, Mac::ZERO, cand);
+                let l = &mut self.links[k];
+                l.ll.probes += 1;
+                l.ll.next = now + LL_PROBE_NS;
+            } else {
+                let l = &mut self.links[k];
+                l.cfg = IpConfig {
+                    addr: cand,
+                    mask: Ipv4::new(255, 255, 0, 0),
+                    gateway: None,
+                    dns: None,
+                };
+                crate::kprintln!(
+                    "[net] {}: link-local address {cand}/16 (from mac {})",
+                    LINK_NAMES[k],
+                    l.mac
+                );
+                // Announce it, so peers' ARP caches are fresh.
+                self.send_arp_from(k, arp::OP_REQUEST, cand, Mac::ZERO, cand);
             }
         }
-        let pending = &mut self.pending;
-        let mut drops = 0;
-        self.arp.expire(now, |ip| {
-            for p in pending.iter_mut() {
-                if p.used && p.nexthop == ip {
-                    p.used = false;
-                    drops += 1;
+        let mut drops = [0u64; MAX_LINKS];
+        for k in 0..MAX_LINKS {
+            if !self.links[k].up() {
+                continue;
+            }
+            let mut due = [Ipv4::UNSPECIFIED; arp::ARP_SLOTS];
+            let n = self.links[k].arp.due(now, &mut due);
+            for &ip in &due[..n] {
+                if self.links[k].arp.want(ip, now) {
+                    self.send_arp(k, arp::OP_REQUEST, Mac::ZERO, ip);
                 }
             }
-        });
+            let pending = &mut self.pending;
+            self.links[k].arp.expire(now, |ip| {
+                for p in pending.iter_mut() {
+                    if p.used && p.link as usize == k && p.nexthop == ip {
+                        p.used = false;
+                        drops[k] += 1;
+                    }
+                }
+            });
+        }
         for p in self.pending.iter_mut() {
             if p.used && now.saturating_sub(p.since) > PENDING_NS {
                 p.used = false;
-                drops += 1;
+                drops[p.link as usize] += 1;
             }
         }
-        self.eth_extra_drops += drops;
+        for (l, d) in self.links.iter_mut().zip(drops) {
+            l.extra_drops += d;
+        }
     }
 
-    /// ARP work outstanding (parked packets or unresolved entries)?
+    /// Timer work outstanding (parked packets, unresolved entries, link-local probing)?
     pub fn busy(&self) -> bool {
         self.pending.iter().any(|p| p.used)
-            || self
-                .arp
-                .entries
-                .iter()
-                .flatten()
-                .any(|e| e.state == arp::ArpState::Incomplete)
+            || self.links.iter().any(|l| {
+                (l.ll.on && l.up() && !l.cfg.configured())
+                    || l.arp
+                        .entries
+                        .iter()
+                        .flatten()
+                        .any(|e| e.state == arp::ArpState::Incomplete)
+            })
     }
 
     /// Oldest loopback packet, if any. The slice stays valid until [`lo_pop`](Self::lo_pop)

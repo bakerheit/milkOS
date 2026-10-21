@@ -52,7 +52,7 @@ pub trait WindowContents {
     }
     /// Body background (what the body is cleared to before `draw`).
     fn background(&self) -> Color {
-        if self.dark() { ESPRESSO } else { MILK }
+        if self.dark() { TERM_BG } else { MILK }
     }
     /// Draw the body. `p`'s logical (0, 0) is the body's top-left; it is `w` x `h`.
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, focused: bool);
@@ -83,6 +83,8 @@ pub enum App {
     Terminal,
     Notes,
     About,
+    Settings,
+    Browser,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -94,6 +96,8 @@ impl App {
             App::Terminal => "Terminal",
             App::Notes => "Notes",
             App::About => "About milkOS",
+            App::Settings => "Settings",
+            App::Browser => "Browser",
             App::Client(_) => "App",
         }
     }
@@ -250,7 +254,7 @@ impl Window {
             }
             if self.hover {
                 // x, -, + (hover state; the mockup does not show one, this is macOS's).
-                let (x, y, m) = (r.x, r.y, ESPRESSO);
+                let (x, y, m) = (r.x, r.y, INK);
                 match i {
                     0 => {
                         for k in 0..6 {
@@ -269,7 +273,7 @@ impl Window {
         }
         // Title: bold, centred, top at y8 inside the border.
         let tc = match (dark, focused) {
-            (true, true) => CREAM,
+            (true, true) => TERM_FG,
             (true, false) => LATTE,
             (false, true) => ESPRESSO,
             (false, false) => COCOA,

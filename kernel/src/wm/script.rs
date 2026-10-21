@@ -131,8 +131,31 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("write the window manager");
         }
         "about" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(100)
+                .typ("about")
+                .wait(150)
+                .enter()
+                .wait(1200);
+        }
+        "settings" => {
             let (x, y) = dock_icon_center(8);
-            b.click(x, y).wait(1200);
+            b.click(x, y).wait(500);
+        }
+        "dark" => {
+            // Settings > Appearance > Chocolate milk.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(181 + 188 + 212 + 98, 113 + 92 + 68)
+                .wait(800);
+        }
+        "wallpapers" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(181 + 60, 113 + 44 + 28 + 12)
+                .wait(800);
         }
         "launcher" => {
             b.key(Key::Char(' '), Mods::META).wait(100).typ("te");
@@ -322,6 +345,126 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // proc's userland test suite (fork / CoW, pipes, signals) from the desktop shell.
             b.wait(300).typ("utest").enter().wait(6000);
         }
+        "tm1" => {
+            // Settings > Time Machine > Back up now, close Settings, delete a file, then
+            // Files > Time Machine > newest snapshot.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+        }
+        "tm2" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+            b.click(297, 193).wait(300);
+        }
+        "timemachine" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(241, 309)
+                .wait(200)
+                .click(556, 304)
+                .wait(800);
+            b.click(200, 96).wait(300);
+            b.click(700, 450)
+                .typ("rm Documents/todo.txt")
+                .enter()
+                .wait(400);
+            b.click(200, 300).wait(200).click(137, 415).wait(300);
+            b.click(297, 193).wait(300); // newest snapshot: its home folder
+            b.click(421, 145).wait(40).click(421, 145).wait(300); // Documents
+            b.click(421, 145).wait(200); // select todo.txt
+            b.click(593, 451).wait(300); // Restore
+            b.click(137, 181).wait(400); // live Documents: it's back
+        }
+        "browser" => {
+            // Dock globe: the Browser opens milkOS's own home page (kernel httpd).
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+        }
+        "browse2" => {
+            // Follow a link (the kernel page's /net), then go back.
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ(&host_test_url()).enter().wait(1500);
+        }
+        "browselink" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500).click(220, 290).wait(2000);
+        }
+        "browseback" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y)
+                .wait(2500)
+                .click(220, 290)
+                .wait(2000)
+                .click(175, 111)
+                .wait(2000);
+        }
+        "browse3" => {
+            // On the python test site: follow the relative link, then the absolute one back.
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(2500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ(&host_test_url()).enter().wait(1500);
+            b.click(230, 312).wait(1500);
+        }
+        "browserdeny" => {
+            let (x, y) = dock_icon_center(2);
+            b.click(x, y).wait(1500);
+            b.key(Key::Char('l'), Mods::META).wait(100);
+            for _ in 0..40 {
+                b.key(Key::Backspace, Mods::NONE);
+            }
+            b.typ("http://example.com/").enter().wait(800);
+        }
+        "ansi" => {
+            b.wait(300);
+            b.typ(r"/bin/echo -e '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
+            b.typ(
+                r"/bin/echo -e '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
+            )
+            .enter()
+            .wait(300);
+        }
+        "clear" => {
+            b.wait(300)
+                .typ("ls /bin")
+                .enter()
+                .wait(400)
+                .typ("clear")
+                .enter()
+                .wait(400);
+            b.typ("echo the screen was cleared").enter().wait(300);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }
@@ -375,6 +518,26 @@ fn build(name: &str) -> Option<Vec<Step>> {
     }
     b.0.push(Step::Log("done"));
     Some(b.0)
+}
+
+/// The test web server for the browse2 / browse3 demos: the Mac's 127.0.0.1 as seen from
+/// the guest (10.0.2.2, WM_HOSTNET=1), on the port in fw_cfg `opt/milkos/testport`.
+fn host_test_url() -> String {
+    let port = fwcfg::find_file("opt/milkos/testport")
+        .and_then(|f| {
+            let mut buf = alloc::vec![0u8; 8];
+            let n = (f.size as usize).min(8);
+            fwcfg::read_file(f, &mut buf[..n]).then(|| {
+                core::str::from_utf8(&buf[..n])
+                    .unwrap_or("8000")
+                    .trim_matches(char::from(0))
+                    .trim()
+                    .parse::<u16>()
+                    .unwrap_or(8000)
+            })
+        })
+        .unwrap_or(8000);
+    alloc::format!("http://10.0.2.2:{port}/")
 }
 
 pub fn from_fw_cfg() -> Option<Script> {

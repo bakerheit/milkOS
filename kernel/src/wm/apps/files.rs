@@ -12,6 +12,7 @@ use crate::timer;
 use super::super::event::Key;
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
+use super::super::rtc;
 use super::super::theme::*;
 use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
 use super::super::{Request, request};
@@ -26,7 +27,67 @@ const FAVS: [(&str, &str); 6] = [
     ("Pictures", "/home/milk/Pictures"),
     ("Music", "/home/milk/Music"),
 ];
-const DEVICES: [(&str, &str); 2] = [("milk", "/"), ("proc", "/proc")];
+const VOLUME: &str = "/Volumes/Milk";
+const SNAPDIR: &str = "/Volumes/Milk/.snapshots";
+/// The Time Machine view (a list of milkfs snapshots), not a real path.
+const TM: &str = "timemachine:";
+
+/// One milkfs snapshot, from /sys/fs/milkfs/snapshots ("name gen=G created=T").
+struct Snap {
+    name: String,
+    generation: u64,
+    created: u64,
+}
+
+fn snapshots() -> Vec<Snap> {
+    let text = crate::fs::read_to_string("/sys/fs/milkfs/snapshots").unwrap_or_default();
+    let mut v: Vec<Snap> = text
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let name = it.next()?;
+            let mut s = Snap {
+                name: String::from(name),
+                generation: 0,
+                created: 0,
+            };
+            for kv in it {
+                match kv.split_once('=') {
+                    Some(("gen", g)) => s.generation = g.parse().unwrap_or(0),
+                    Some(("created", c)) => s.created = c.parse().unwrap_or(0),
+                    _ => {}
+                }
+            }
+            (s.generation > 0 || s.created > 0).then_some(s)
+        })
+        .collect();
+    v.sort_by_key(|s| core::cmp::Reverse(s.created));
+    v
+}
+
+fn when(secs: u64) -> String {
+    let t = rtc::from_epoch(secs);
+    format!(
+        "{} {} {}, {:02}:{:02}",
+        &rtc::DAYS[t.weekday as usize][..3],
+        t.day,
+        &rtc::MONTHS[t.month as usize - 1][..3],
+        t.hour,
+        t.minute
+    )
+}
+
+/// If `path` is inside a snapshot: (snapshot name, the matching live path).
+fn in_snapshot(path: &str) -> Option<(String, String)> {
+    let rest = path.strip_prefix(SNAPDIR)?.strip_prefix('/')?;
+    let (name, inner) = rest.split_once('/').unwrap_or((rest, ""));
+    let live = if inner.is_empty() {
+        String::from(VOLUME)
+    } else {
+        format!("{VOLUME}/{inner}")
+    };
+    Some((String::from(name), live))
+}
 const GRID_TOP: i32 = 20;
 const CELL_W: i32 = 100;
 const CELL_H: i32 = 108;
@@ -52,6 +113,8 @@ pub struct Files {
     /// Body size at the last draw (for hit-testing the status bar chip).
     size: (i32, i32),
     last_sec: u64,
+    /// The Time Machine view's rows.
+    snaps: Vec<Snap>,
 }
 
 impl Files {
@@ -68,6 +131,7 @@ impl Files {
             rows_visible: 3,
             size: (0, 0),
             last_sec: 0,
+            snaps: Vec::new(),
         };
         let start = PENDING.lock().take();
         f.go(start.as_deref().unwrap_or("/home/milk/Documents"));
@@ -76,10 +140,12 @@ impl Files {
 
     fn go(&mut self, path: &str) {
         self.path = String::from(path);
-        self.title = String::from(match path {
-            "/" => "milk",
-            p => fsx::basename(p),
-        });
+        self.title = match (path, in_snapshot(path)) {
+            (TM, _) => String::from("Time Machine"),
+            ("/", _) => String::from("milk"),
+            (p, Some((snap, _))) => format!("{} ({snap})", fsx::basename(p)),
+            (p, None) => String::from(fsx::basename(p)),
+        };
         self.selected = None;
         self.scroll = 0;
         self.last_click = None;
@@ -87,6 +153,12 @@ impl Files {
     }
 
     fn reload(&mut self) {
+        if self.path == TM {
+            self.snaps = snapshots();
+            self.items.clear();
+            self.error = None;
+            return;
+        }
         match fsx::list(&self.path) {
             Ok(v) => {
                 self.items = v;
@@ -122,16 +194,86 @@ impl Files {
         }
     }
 
-    fn side_rows() -> impl Iterator<Item = (i32, &'static str, &'static str)> {
-        let favs = FAVS
+    fn side_rows() -> Vec<(i32, &'static str, &'static str)> {
+        let mut v: Vec<(i32, &'static str, &'static str)> = FAVS
             .iter()
             .enumerate()
-            .map(|(i, (n, p))| (44 + i as i32 * 28, *n, *p));
-        let devs = DEVICES
-            .iter()
-            .enumerate()
-            .map(|(i, (n, p))| (250 + i as i32 * 28, *n, *p));
-        favs.chain(devs)
+            .map(|(i, (n, p))| (44 + i as i32 * 28, *n, *p))
+            .collect();
+        let mut devs: Vec<(&'static str, &'static str)> = alloc::vec![("milk", "/")];
+        if crate::fs::stat(VOLUME).is_ok() {
+            devs.push(("Milk", VOLUME));
+            devs.push(("Time Machine", TM));
+        }
+        devs.push(("proc", "/proc"));
+        for (i, (n, p)) in devs.into_iter().enumerate() {
+            v.push((250 + i as i32 * 28, n, p));
+        }
+        v
+    }
+
+    /// Copy the selected item of a snapshot back into the live tree.
+    fn restore(&mut self) {
+        let Some(e) = self.selected.and_then(|i| self.items.get(i)) else {
+            return;
+        };
+        let Some((snap, live_dir)) = in_snapshot(&self.path) else {
+            return;
+        };
+        let src = fsx::resolve(&self.path, &e.name);
+        let dst = fsx::resolve(&live_dir, &e.name);
+        let r = if fsx::is_dir(&src) {
+            crate::fs::copy_tree(&src, &dst)
+        } else {
+            let _ = crate::fs::mkdir_all(&live_dir, 0o755);
+            crate::fs::read_file(&src).and_then(|d| crate::fs::write_file(&dst, &d))
+        };
+        let _ = crate::fs::sync_all();
+        match r {
+            Ok(()) => {
+                super::super::notify(&format!("Restored {}", e.name), &format!("from {snap}"))
+            }
+            Err(err) => super::super::notify("Restore failed", &format!("{}: {err}", e.name)),
+        }
+    }
+
+    fn restore_chip(w: i32, h: i32) -> Rect {
+        Rect::new(w - 56 - 84, h - STATUS_H + 3, 76, 18)
+    }
+
+    fn draw_snapshots(&self, p: &mut Painter, w: i32) {
+        let x = SIDEBAR_W + 20;
+        p.text_x(x, 14, "Time Machine", ESPRESSO, 2, true);
+        p.text_p(
+            x,
+            50,
+            "Snapshots of /Volumes/Milk. Open one to browse it, select a file, Restore.",
+            COCOA,
+            false,
+        );
+        if self.snaps.is_empty() {
+            p.text_p(
+                x,
+                84,
+                "No snapshots yet (Settings > Time Machine > Back up now).",
+                LATTE,
+                false,
+            );
+        }
+        for (i, sn) in self.snaps.iter().enumerate() {
+            let y = 76 + i as i32 * 44 - self.scroll * 44;
+            if y < 70 {
+                continue;
+            }
+            let r = Rect::new(x - 8, y, w - x - 12, 40);
+            if self.selected == Some(i) {
+                p.rrect_r(r, R_ROW, STRAW, SEL_ROW_A);
+            }
+            icons::draw(p, x, y + 4, 32, Icon::Clock, CREAM, 255, ESPRESSO, true);
+            p.text_p(x + 44, y + 3, &sn.name, ESPRESSO, true);
+            let sub = format!("{}   generation {}", when(sn.created), sn.generation);
+            p.text_p(x + 44, y + 21, &sub, COCOA, false);
+        }
     }
 }
 
@@ -158,6 +300,21 @@ impl WindowContents for Files {
                 p.rrect(8, y, SIDEBAR_W - 16, 24, R_BUTTON, STRAW, SEL_SIDEBAR_A);
             }
             p.text(18, y + 4, name, ESPRESSO);
+        }
+        if self.path == TM {
+            let mut gp = p.sub(Rect::new(0, 0, w, h - STATUS_H));
+            self.draw_snapshots(&mut gp, w);
+            let sy = h - STATUS_H;
+            p.fill(0, sy, w, STATUS_H, CREAM);
+            p.fill(0, sy, w, 1, SAND);
+            let n = self.snaps.len();
+            p.text(
+                SIDEBAR_W + 12,
+                sy + 4,
+                &format!("{n} snapshot{}", if n == 1 { "" } else { "s" }),
+                COCOA,
+            );
+            return;
         }
         // Grid.
         let mut gp = p.sub(Rect::new(0, 0, w, h - STATUS_H));
@@ -214,12 +371,30 @@ impl WindowContents for Files {
             ),
         };
         p.text(SIDEBAR_W + 12, sy + 4, &info, COCOA);
+        if let Some((snap, _)) = in_snapshot(&self.path) {
+            if self.selected.is_some() {
+                let r = Self::restore_chip(w, h);
+                p.rrect_r(r, R_BUTTON, STRAW, 255);
+                p.text_p_center(r.x, r.w, sy + 4, "Restore", MILK, true);
+            } else {
+                p.text_right(
+                    w - 64,
+                    sy + 4,
+                    &format!("{snap}, read-only"),
+                    LATTE,
+                    1,
+                    false,
+                );
+            }
+        }
         if self.path != "/" {
             let up = Self::up_chip(w, h);
             p.rrect(up.x, up.y, up.w, up.h, R_BUTTON, OAT, 255);
             p.text_center(up.x, up.w, sy + 4, "up", COCOA, false);
         }
-        p.text_right(w - 64, sy + 4, &fsx::pretty(&self.path), LATTE, 1, false);
+        if in_snapshot(&self.path).is_none() {
+            p.text_right(w - 64, sy + 4, &fsx::pretty(&self.path), LATTE, 1, false);
+        }
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {
@@ -234,6 +409,25 @@ impl WindowContents for Files {
                 }
             }
             return false;
+        }
+        if self.path == TM {
+            let x = SIDEBAR_W + 20;
+            let row = (e.y - 76) / 44 + self.scroll;
+            if e.y >= 76 && (row as usize) < self.snaps.len() && e.x >= x - 8 {
+                let name = self.snaps[row as usize].name.clone();
+                let root = format!("{SNAPDIR}/{name}");
+                let home = format!("{root}/home/milk");
+                self.go(if fsx::is_dir(&home) { &home } else { &root });
+                return true;
+            }
+            return false;
+        }
+        if in_snapshot(&self.path).is_some()
+            && self.selected.is_some()
+            && hit(&Self::restore_chip(self.size.0, self.size.1), e.x, e.y)
+        {
+            self.restore();
+            return true;
         }
         if self.path != "/" && hit(&Self::up_chip(self.size.0, self.size.1), e.x, e.y) {
             let up = fsx::parent(&self.path);
@@ -325,6 +519,14 @@ impl WindowContents for Files {
             return false;
         }
         self.last_sec = sec;
+        if self.path == TM {
+            let n = snapshots();
+            if n.len() != self.snaps.len() {
+                self.snaps = n;
+                return true;
+            }
+            return false;
+        }
         let Ok(new) = fsx::list(&self.path) else {
             return false;
         };

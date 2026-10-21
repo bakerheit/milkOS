@@ -30,19 +30,24 @@ struct Pipe {
     rd_wq: WaitQueue,
     /// Writers wait here for space / reader gone.
     wr_wq: WaitQueue,
-    /// Bumped on every read, write and close: the pipe's readiness event counter
-    /// (`Inode::poll_seq`, for edge-triggered epoll).
-    seq: AtomicU64,
+    /// Readiness event counters (`Inode::poll_seq`, edge-triggered epoll): `wseq` for the
+    /// read end (data written, writers gone), `rseq` for the write end (room made by a
+    /// read, readers gone).
+    wseq: AtomicU64,
+    rseq: AtomicU64,
 }
 
 impl Pipe {
     /// Readiness changed: wake blocked peers and poll/select/epoll waiters.
+    /// `readers`: something for the read end happened (data, writer gone); `writers`:
+    /// something for the write end (room, reader gone).
     fn changed(&self, readers: bool, writers: bool) {
-        self.seq.fetch_add(1, Ordering::Release);
         if readers {
+            self.wseq.fetch_add(1, Ordering::Release);
             self.rd_wq.wake_all();
         }
         if writers {
+            self.rseq.fetch_add(1, Ordering::Release);
             self.wr_wq.wake_all();
         }
         crate::poll::notify();
@@ -79,7 +84,8 @@ pub fn new(nonblock: bool) -> (InodeRef, InodeRef) {
         writers: AtomicUsize::new(1),
         rd_wq: WaitQueue::new(),
         wr_wq: WaitQueue::new(),
-        seq: AtomicU64::new(0),
+        wseq: AtomicU64::new(0),
+        rseq: AtomicU64::new(0),
     });
     let ino = NEXT_INO.fetch_add(1, Ordering::Relaxed);
     let end = |write| -> InodeRef {
@@ -232,6 +238,10 @@ impl Inode for PipeEnd {
     }
 
     fn poll_seq(&self) -> u64 {
-        self.pipe.seq.load(Ordering::Acquire)
+        if self.write {
+            self.pipe.rseq.load(Ordering::Acquire)
+        } else {
+            self.pipe.wseq.load(Ordering::Acquire)
+        }
     }
 }

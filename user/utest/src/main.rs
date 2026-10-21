@@ -1313,6 +1313,143 @@ fn t_unix() -> bool {
     )
 }
 
+/// epoll: level vs edge-triggered vs one-shot on a pipe, EPOLLHUP, select, and an epoll
+/// server (one thread, non-blocking) answering 100 AF_UNIX clients at once.
+fn t_epoll() -> bool {
+    use rt::epoll::{self as ep, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT};
+    use rt::unix::{self, Name};
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    let mut buf = [0u8; 256];
+    let e = ep::create().unwrap();
+    // Level-triggered: reported while data is there.
+    let (r, w) = sys::pipe().unwrap();
+    ep::add(e, r, EPOLLIN, 7).unwrap();
+    t(ep::wait(e, 8, 0).unwrap().is_empty());
+    let _ = sys::write_all(w, b"0123456789");
+    let a = ep::wait(e, 8, 100).unwrap();
+    let b = ep::wait(e, 8, 0).unwrap();
+    t(a.len() == 1 && a[0].data == 7 && a[0].events & EPOLLIN != 0 && b.len() == 1); // 1
+    // Edge-triggered: once per edge. No new data -> nothing, even after a partial read.
+    ep::modify(e, r, EPOLLIN | EPOLLET, 8).unwrap();
+    let first = ep::wait(e, 8, 0).unwrap();
+    let again = ep::wait(e, 8, 0).unwrap();
+    let _ = sys::read(r, &mut buf[..5]);
+    let after_partial = ep::wait(e, 8, 0).unwrap();
+    let _ = sys::write_all(w, b"more");
+    let new_data = ep::wait(e, 8, 100).unwrap();
+    t(first.len() == 1 && again.is_empty() && after_partial.is_empty() && new_data.len() == 1); // 2
+    let _ = sys::read(r, &mut buf);
+    t(ep::wait(e, 8, 0).unwrap().is_empty()); // 3: drained
+    // One-shot: one report until re-armed.
+    ep::modify(e, r, EPOLLIN | EPOLLONESHOT, 9).unwrap();
+    let _ = sys::write_all(w, b"x");
+    let one = ep::wait(e, 8, 100).unwrap();
+    let none = ep::wait(e, 8, 0).unwrap();
+    ep::modify(e, r, EPOLLIN | EPOLLONESHOT, 9).unwrap();
+    let rearmed = ep::wait(e, 8, 0).unwrap();
+    t(one.len() == 1 && none.is_empty() && rearmed.len() == 1); // 4
+    // select: readable and writable bits; then EPOLLHUP once the writer is gone.
+    let mut rs = [1u64 << r];
+    let mut ws = [1u64 << w];
+    let k = ep::select(64, Some(&mut rs), Some(&mut ws), None, Some(0)).unwrap_or(0);
+    t(k == 2 && rs[0] == 1 << r && ws[0] == 1 << w); // 5
+    let _ = sys::read(r, &mut buf);
+    let _ = sys::close(w);
+    ep::modify(e, r, EPOLLIN, 10).unwrap();
+    let h = ep::wait(e, 8, 100).unwrap();
+    t(h.len() == 1 && h[0].events & EPOLLHUP != 0); // 6
+    let _ = sys::close(r);
+    // A closed fd's entry disappears by itself.
+    t(ep::wait(e, 8, 0).unwrap().is_empty()); // 7
+    let _ = sys::close(e);
+
+    // The server: listener + 100 clients in another process.
+    const CLIENTS: usize = 100;
+    let name = alloc::format!("utest-epoll-{}", sys::getpid());
+    let l = unix::socket(unix::SOCK_STREAM | unix::SOCK_NONBLOCK).unwrap();
+    let _ = unix::bind(l, &Name::Abstract(name.as_bytes()));
+    let _ = unix::listen(l, 128);
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let mut socks = Vec::new();
+        for i in 0..CLIENTS {
+            let c = unix::socket(unix::SOCK_STREAM).unwrap();
+            if unix::connect(c, &Name::Abstract(name.as_bytes())).is_err() {
+                sys::exit(2);
+            }
+            let _ = sys::write_all(c, alloc::format!("hello {i}").as_bytes());
+            socks.push(c);
+        }
+        let mut good = 0;
+        for (i, &c) in socks.iter().enumerate() {
+            let mut b = [0u8; 64];
+            let k = sys::read(c, &mut b).unwrap_or(0);
+            if &b[..k] == alloc::format!("ok {i}").as_bytes() {
+                good += 1;
+            }
+        }
+        sys::exit(if good == CLIENTS { 0 } else { 1 });
+    }
+    let e = ep::create().unwrap();
+    ep::add(e, l, EPOLLIN, u64::MAX).unwrap();
+    let (mut replied, mut accepted, mut wakeups) = (0, 0, 0);
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    while replied < CLIENTS && sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 20_000_000_000 {
+        let evs = ep::wait(e, 64, 1000).unwrap_or_default();
+        wakeups += 1;
+        for ev in evs {
+            if ev.data == u64::MAX {
+                // Edge or not, drain the backlog.
+                while let Ok(c) = unix::accept(l, unix::SOCK_NONBLOCK) {
+                    accepted += 1;
+                    let _ = ep::add(e, c, EPOLLIN | EPOLLET, c as u64);
+                }
+                continue;
+            }
+            let c = ev.data as i32;
+            // Edge-triggered: read until EAGAIN.
+            let mut msg = Vec::new();
+            loop {
+                match sys::read(c, &mut buf) {
+                    Ok(0) => break,
+                    Ok(k) => msg.extend_from_slice(&buf[..k]),
+                    Err(_) => break,
+                }
+            }
+            if let Some(i) = core::str::from_utf8(&msg)
+                .ok()
+                .and_then(|m| m.strip_prefix("hello "))
+                .and_then(|x| x.parse::<usize>().ok())
+            {
+                let _ = sys::write_all(c, alloc::format!("ok {i}").as_bytes());
+                replied += 1;
+            }
+        }
+    }
+    let (_, st) = sys::wait4(child as i32, 0).unwrap();
+    let us = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1000;
+    t(replied == CLIENTS && accepted == CLIENTS && st == 0); // 8
+    let _ = sys::close(e);
+    let _ = sys::close(l);
+    let want = (1u32 << n) - 1;
+    check(
+        "epoll",
+        bits == want,
+        &alloc::format!(
+            "checks {bits:#b} (want {want:#b}); server: {accepted} accepted, {replied} \
+             answered in {us} us, {wakeups} epoll_wait calls, client {}",
+            sys::describe_status(st)
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1360,6 +1497,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "unix" || what == "all" {
         ok &= t_unix();
+    }
+    if what == "epoll" || what == "all" {
+        ok &= t_epoll();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

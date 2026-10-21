@@ -12,6 +12,7 @@ pub mod asid;
 pub mod caps;
 pub mod cred;
 pub mod elf;
+pub mod epoll;
 pub mod errno;
 pub mod fd;
 pub mod futex;

@@ -179,6 +179,26 @@ clean hangup when the client dies. Migrating means: a socket per service in `/ru
 request/response protocol, and the clients (rt, the wm) switching from `open("/dev/..")`
 to `connect`.
 
+### poll, select, epoll (`kernel/src/poll.rs`, `proc/epoll.rs`)
+
+One readiness core: each object that can block answers `Inode::poll()` (Linux `POLL*`
+bits) and calls `poll::notify()` when that may have changed (pipes, ttys, AF_UNIX sockets,
+the TCP/UDP stack); waiters scan their fds, sleep until a notify or 20 ms (for objects that
+never notify), and scan again. `ppoll` (73), `pselect6` (72) and epoll all sit on it.
+
+* `epoll_create1` (20), `epoll_ctl` (21: ADD / MOD / DEL), `epoll_pwait` (22). Any fd with a
+  poll method; regular files, directories and other epoll fds are EPERM / EINVAL. An entry
+  disappears when its file is closed everywhere. Level-triggered by default;
+  **EPOLLET** reports a ready fd once, then again only after new input / room
+  (`Inode::poll_seq`, per object and per direction for pipes and AF_UNIX sockets; other
+  objects use the global generation, so they may report extra edges but never miss one)
+  or after it was seen not ready; **EPOLLONESHOT** disables an entry after one report
+  until EPOLL_CTL_MOD. EPOLLERR / EPOLLHUP always. The sigmask argument is ignored; a
+  pending signal is EINTR. `rt::epoll` on the user side.
+* Pipes now report real readiness (they used to look always ready): POLLIN with data,
+  POLLHUP when writers are gone, POLLOUT with room for an atomic write, POLLERR when
+  readers are gone.
+
 ### Signals (`proc/signal.rs`)
 
 * Per process: pending and blocked masks, 64 sigactions, the latest siginfo per signal
@@ -219,6 +239,7 @@ Implemented (number: name):
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | sockets | 198 socket (AF_INET, AF_UNIX), 199 socketpair, 211 sendmsg, 212 recvmsg (AF_UNIX), 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
+| readiness | 73 ppoll, 72 pselect6, 20 epoll_create1, 21 epoll_ctl, 22 epoll_pwait |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
 | milkOS | 0x1000 sandbox (shrink capabilities; see docs/security.md), 0x1001 powerbox (ask the user for one file through the wm's Open/Save panel; docs/security.md) |
 

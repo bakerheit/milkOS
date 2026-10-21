@@ -227,15 +227,32 @@ impl UnixSock {
         self.me.upgrade().expect("live socket")
     }
 
-    /// Readiness changed: bump the event counter, wake waiters here and in poll/epoll.
+    /// Something arrived for this socket (data, a connection, hangup): bump its event
+    /// counter, wake waiters here and in poll/epoll.
     fn changed(&self) {
         self.seq.fetch_add(1, Ordering::Release);
         self.wq.wake_all();
         poll::notify();
     }
 
+    /// We consumed from our receive buffer (or backlog): writers / connecters blocked on
+    /// us may go on, and our stream peer becomes writable again (its edge, not ours).
+    fn consumed(&self) {
+        self.wq.wake_all();
+        if let Some(p) = self.peer() {
+            p.seq.fetch_add(1, Ordering::Release);
+        }
+        poll::notify();
+    }
+
     fn nonblocking(&self) -> bool {
         self.nonblock.load(Ordering::Relaxed)
+    }
+
+    /// read(2) / write(2) on the socket honour this (the open file's O_NONBLOCK, synced
+    /// at creation, accept4, fcntl(F_SETFL) and every socket call).
+    pub fn set_nonblocking(&self, on: bool) {
+        self.nonblock.store(on, Ordering::Relaxed);
     }
 
     fn peer(&self) -> Option<Arc<UnixSock>> {
@@ -416,7 +433,7 @@ impl UnixSock {
                 };
                 if let Some(s) = pending.pop_front() {
                     drop(i);
-                    self.changed(); // room in the backlog: wake connecters
+                    self.consumed(); // room in the backlog: wake connecters
                     return Ok(s);
                 }
             }
@@ -615,7 +632,7 @@ impl UnixSock {
                     };
                     drop(i);
                     if !peek {
-                        self.changed(); // room for writers
+                        self.consumed(); // room for writers
                     }
                     return Ok(r);
                 }

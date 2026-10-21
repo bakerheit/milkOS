@@ -45,6 +45,7 @@ fn kind_of(ty: u32) -> KResult<Kind> {
 }
 
 fn open_file(s: Arc<UnixSock>, nonblock: bool) -> OpenFile {
+    s.set_nonblocking(nonblock);
     let flags = crate::fs::abi::O_RDWR
         | if nonblock {
             crate::fs::abi::O_NONBLOCK

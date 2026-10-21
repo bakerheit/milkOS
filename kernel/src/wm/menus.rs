@@ -35,6 +35,8 @@ pub enum MenuAction {
     Restart,
     ShutDown,
     Lock,
+    /// File > Browse Versions... for the focused window's document.
+    Versions,
     /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
     Key(char),
     /// Shown greyed out (no clipboard yet).
@@ -116,13 +118,24 @@ impl Desktop {
             ];
         }
         match name {
-            "File" | "Shell" => alloc::vec![
-                item("Open Terminal", "", MenuAction::Open(App::Terminal)),
-                item("Open Files", "", MenuAction::Open(App::Files)),
-                item("Open Notes", "", MenuAction::Open(App::Notes)),
-                sep(),
-                item("Close Window", "Cmd+W", win(MenuAction::Close)),
-            ],
+            "File" | "Shell" => {
+                let mut v = alloc::vec![
+                    item("Open Terminal", "", MenuAction::Open(App::Terminal)),
+                    item("Open Files", "", MenuAction::Open(App::Files)),
+                    item("Open Notes", "", MenuAction::Open(App::Notes)),
+                    sep(),
+                ];
+                let doc = has_win
+                    && self
+                        .focused_window()
+                        .is_some_and(|w| w.contents.document_path().is_some());
+                if doc {
+                    v.push(item("Browse Versions...", "", MenuAction::Versions));
+                    v.push(sep());
+                }
+                v.push(item("Close Window", "Cmd+W", win(MenuAction::Close)));
+                v
+            }
             "Edit" | "Format" => alloc::vec![
                 item("Undo", "Cmd+Z", MenuAction::Disabled),
                 sep(),
@@ -277,6 +290,14 @@ impl Desktop {
             }
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
             MenuAction::Lock => self.lock_screen(),
+            MenuAction::Versions => {
+                if let Some(p) = self
+                    .focused_window()
+                    .and_then(|w| w.contents.document_path())
+                {
+                    super::apps::versions::show(&p);
+                }
+            }
             MenuAction::Restart => super::power::restart(),
             MenuAction::ShutDown => super::power::shut_down(),
             MenuAction::Key(c) => {

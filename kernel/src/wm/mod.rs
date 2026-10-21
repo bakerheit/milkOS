@@ -1388,6 +1388,10 @@ impl Desktop {
                 button: Button::Left,
                 down: false,
             } => self.release(),
+            Event::Button {
+                button: Button::Right,
+                down: true,
+            } => self.right_click(),
             Event::Button { .. } => {}
             Event::Scroll { dy } => {
                 let (x, y) = self.pointer;
@@ -1528,6 +1532,31 @@ impl Desktop {
         };
         if w.contents.pointer(&e) {
             w.dirty = true;
+        }
+    }
+
+    /// Right button: closes menus and overlays; on a window body it focuses the window and
+    /// hands it the click (context menus, e.g. Files' Browse All Versions).
+    fn right_click(&mut self) {
+        let (x, y) = self.pointer;
+        if self.menu.is_some() || self.launcher.is_some() || self.control {
+            self.set_menu(None);
+            self.close_launcher();
+            self.control = false;
+            return;
+        }
+        if self.mode != Mode::Desktop {
+            return;
+        }
+        let Some(id) = self.window_at(x, y) else {
+            return;
+        };
+        self.set_focus(Some(id));
+        if self
+            .win(id)
+            .is_some_and(|w| w.hit(x, y) == Some(Part::Body))
+        {
+            self.send_pointer(id, x, y, PointerKind::Down(Button::Right));
         }
     }
 

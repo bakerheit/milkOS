@@ -82,6 +82,11 @@ pub fn open_file(path: &str) {
     });
 }
 
+/// The file Notes is editing.
+pub fn current_path() -> String {
+    with(|s| s.path.clone())
+}
+
 /// The note's lines (for the Today card).
 pub fn snapshot() -> Vec<String> {
     with(|s| s.lines.clone())
@@ -229,6 +234,10 @@ impl WindowContents for Notes {
 
     fn tick(&mut self, _now: u64) -> bool {
         self.sync()
+    }
+
+    fn document_path(&self) -> Option<String> {
+        Some(current_path())
     }
 
     fn menus(&self) -> &'static [&'static str] {

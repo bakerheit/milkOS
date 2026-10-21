@@ -59,6 +59,39 @@ impl B {
     fn click(&mut self, x: i32, y: i32) -> &mut Self {
         self.to(x, y).wait(30).down().wait(30).up().wait(60)
     }
+    fn rclick(&mut self, x: i32, y: i32) -> &mut Self {
+        self.to(x, y).wait(30);
+        self.ev(Event::Button {
+            button: Button::Right,
+            down: true,
+        })
+        .wait(30)
+        .ev(Event::Button {
+            button: Button::Right,
+            down: false,
+        })
+        .wait(60)
+    }
+    /// In the Terminal: a file with three snapshotted versions and a newer current one.
+    fn herd(&mut self) -> &mut Self {
+        const F: &str = "/home/milk/Documents/herd.txt";
+        self.wait(300);
+        for (i, line) in ["- one cow", "- two cows", "- three cows", "- a calf!"]
+            .iter()
+            .enumerate()
+        {
+            let op = if i == 0 { ">" } else { ">>" };
+            self.typ(&alloc::format!("echo '{line}' {op} {F}"))
+                .enter()
+                .wait(250);
+            if i < 3 {
+                self.typ(&alloc::format!("snap create herd{}", i + 1))
+                    .enter()
+                    .wait(500);
+            }
+        }
+        self
+    }
     /// Press at (x0, y0), glide to (x1, y1) in `n` steps of ~16 ms, release.
     fn drag(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, n: i32) -> &mut Self {
         self.to(x0, y0).wait(30).down().wait(30);
@@ -639,6 +672,32 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 let (x, y) = dock_icon_center_of(10, 2);
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
+        }
+        // Versions: Files (window (96, 64), body (97, 97)), herd.txt is the first icon.
+        "versions" | "versionsrestore" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(300);
+            b.click(321 + 40, 150 + 6 + 26 + 10).wait(1200);
+            if name == "versionsrestore" {
+                // One version further back (herd2), then Restore (window (110, 64) 800 x 500).
+                b.key(Key::Down, Mods::NONE).wait(300);
+                b.click(111 + 798 - 16 - 90, 97 + 466 - 44 + 22).wait(1200);
+            }
+        }
+        "filesctx" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(400);
+        }
+        "notesversions" => {
+            b.herd();
+            b.typ("open /home/milk/Documents/herd.txt")
+                .enter()
+                .wait(1000);
+            b.click(115, 14).wait(400).click(160, 130).wait(1200);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

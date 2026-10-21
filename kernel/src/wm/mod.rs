@@ -366,8 +366,9 @@ pub struct Desktop {
     shot_hide: bool,
     /// A file being dragged (dnd.rs).
     dnd: Option<dnd::Dnd>,
-    /// The notification centre is open, and what it lists (notif.rs).
+    /// The notification drawer is open, its state, and what it lists (notif.rs).
     notif: bool,
+    drawer: notif::Drawer,
     history: Vec<notif::Notice>,
 }
 
@@ -420,6 +421,7 @@ impl Desktop {
             shot_hide: false,
             dnd: None,
             notif: false,
+            drawer: notif::Drawer::default(),
             history: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
@@ -1042,7 +1044,11 @@ impl Desktop {
     }
 
     fn post_toast_with(&mut self, app: &str, title: &str, sub: &str, sound: bool) {
-        self.record_notice(app, title, sub);
+        let notice = self.record_notice(app, title, sub);
+        // Open drawer: the card appears at the top of its group instead of a toast.
+        if self.notif {
+            return;
+        }
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
@@ -1054,9 +1060,12 @@ impl Desktop {
         self.next_toast += 1;
         self.toasts.push(shell::Toast {
             id,
+            notice,
+            app: String::from(app),
             title: String::from(title),
             sub: String::from(sub),
-            until_ns: timer::now_ns() + 5_000_000_000,
+            until_ns: timer::now_ns() + notif::TOAST_NS,
+            paused: None,
         });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
@@ -1485,7 +1494,8 @@ impl Desktop {
     fn tick(&mut self, now: u64) {
         // Expire toasts.
         let before = self.toasts.len();
-        self.toasts.retain(|t| t.until_ns > now);
+        self.toasts
+            .retain(|t| t.paused.is_some() || t.until_ns > now);
         if self.toasts.len() != before {
             let ids: Vec<u32> = self.toasts.iter().map(|t| t.id).collect();
             for i in ids {
@@ -1638,7 +1648,9 @@ impl Desktop {
             Event::Button { .. } => {}
             Event::Scroll { dy } => {
                 let (x, y) = self.pointer;
-                if let Some(id) = self.window_at(x, y)
+                if self.notif && hit(&notif::rect(), x, y) {
+                    self.scroll_notif(dy);
+                } else if let Some(id) = self.window_at(x, y)
                     && let Some(w) = self.win_mut(id)
                     && w.contents.scroll(dy)
                 {
@@ -1721,6 +1733,24 @@ impl Desktop {
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
     fn hover(&mut self, x: i32, y: i32) {
+        // The drawer: the dismiss x follows the pointer.
+        if self.notif {
+            let r = notif::rect();
+            self.hover_notif(hit(&r, x, y).then_some((x - r.x, y - r.y)));
+        }
+        // Toasts pause while the pointer is on them (SPEC: 5 s, paused on hover).
+        let now = timer::now_ns();
+        let over = (0..self.toasts.len()).find(|&i| hit(&shell::toast_rect(i), x, y));
+        for (i, t) in self.toasts.iter_mut().enumerate() {
+            match (Some(i) == over, t.paused) {
+                (true, None) => t.paused = Some(t.until_ns.saturating_sub(now)),
+                (false, Some(left)) => {
+                    t.until_ns = now + left;
+                    t.paused = None;
+                }
+                _ => {}
+            }
+        }
         // Skim: the selection follows the pointer over the results.
         if self.launcher.is_some() {
             let rows = self.layers().iter().find_map(|l| match l {
@@ -2005,7 +2035,9 @@ impl Desktop {
                 self.control = false;
                 return;
             }
-            Key::Escape if self.notif => return self.toggle_notif(),
+            Key::Escape if self.notif => return self.close_notif(),
+            // Ctrl+N: the notification drawer.
+            Key::Char('n') if m.ctrl && !m.meta && !m.alt => return self.toggle_notif(),
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
             Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),
@@ -2025,6 +2057,9 @@ impl Desktop {
             Key::Left if m.ctrl => return self.switch_space(self.space.saturating_sub(1)),
             Key::Right if m.ctrl => return self.switch_space(self.space + 1),
             _ => {}
+        }
+        if self.notif && self.notif_key(&k) {
+            return;
         }
         if self.launcher.is_some() {
             return self.launcher_key(&k);

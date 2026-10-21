@@ -937,8 +937,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(super::theme::screen_w() - 30, 14).wait(600);
             if name == "notifclear" {
                 let r = super::notif::rect();
-                b.click(r.x + super::notif::W - 16 - 38, r.y + 160 + 9)
-                    .wait(500);
+                b.click(r.x + super::notif::W - 18 - 30, r.y + 20).wait(500);
             }
         }
         // Hover states: over a Welcome button, over a Settings section.
@@ -964,6 +963,60 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             let (x, y) = dock_icon_center(9);
             b.wait(300).click(x, y).wait(4000);
+        }
+        // The notification drawer (SPEC "Notification drawer"): Mary's four states.
+        "drawer-arrive" | "drawer-open" | "drawer-keys" | "drawer-empty" | "drawer-mentions" => {
+            if name != "drawer-empty" {
+                b.wait(300)
+                    .typ("notify Mum Photos from the weekend")
+                    .enter()
+                    .wait(300);
+                if name != "drawer-arrive" {
+                    b.typ("notify Gus @andrew the allocator merged, build is green")
+                        .enter()
+                        .wait(300);
+                    b.key(Key::Char(' '), Mods::META)
+                        .wait(150)
+                        .typ("back up now")
+                        .wait(200);
+                    b.enter().wait(500);
+                    b.key(
+                        Key::Char('3'),
+                        Mods {
+                            meta: true,
+                            shift: true,
+                            ..Mods::NONE
+                        },
+                    )
+                    .wait(1200);
+                    b.typ("notify Gus PR is up for review").enter().wait(400);
+                }
+            }
+            if name == "drawer-arrive" {
+                b.wait(600);
+            } else {
+                b.key(Key::Char('n'), Mods::CTRL).wait(500);
+            }
+            match name {
+                "drawer-keys" => {
+                    // Down twice, collapse the selected group, then hover a card (its x).
+                    b.key(Key::Down, Mods::NONE).wait(150);
+                    b.key(Key::Down, Mods::NONE).wait(150);
+                    b.key(Key::Left, Mods::NONE).wait(300);
+                    let r = super::notif::rect();
+                    b.glide(600, 400, r.x + 150, r.y + 88 + 22 + 30, 8)
+                        .wait(400);
+                }
+                "drawer-mentions" => {
+                    b.key(Key::Tab, Mods::NONE).wait(400);
+                }
+                "drawer-empty" => {
+                    // Do Not Disturb on: the switch at the bottom.
+                    let r = super::notif::rect();
+                    b.click(r.x + r.w - 12 - 36, r.y + r.h - 12 - 22).wait(500);
+                }
+                _ => {}
+            }
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

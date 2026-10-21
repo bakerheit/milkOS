@@ -21,6 +21,12 @@ ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 IMG="$T/a.img"
 rm -f "$IMG"
 $M mkfs "$IMG" --size 64M >/dev/null
+# A second, encrypted disk ("Vault"), unlocked at boot with a throwaway test passphrase (the
+# kernel's test-only fw_cfg hook), so the window can lock it and unlock it again.
+VAULT="$T/vault.img"; PW="vault-test-passphrase-not-real"
+printf '%s\n' "$PW" > "$T/pw"
+rm -f "$VAULT"
+$M mkfs "$VAULT" --size 32M --label Vault --encrypt --passphrase-file "$T/pw" --recovery-out "$T/vault-recovery" >/dev/null
 $M mkdir "$IMG" /home/milk >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
@@ -28,6 +34,8 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device ramfb -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
+  -drive "file=$VAULT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 \
+  -fw_cfg "name=opt/milkos/passphrase,string=$PW" \
   -qmp "unix:$QMP,server,nowait" >/dev/null 2>&1 &
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
@@ -78,6 +86,30 @@ click 506 23                       # Health tab
 click 837 23 2                     # Scrub now
 q screendump "$T/health.png"
 ser "send:cat /sys/fs/milkfs/scrub" "wait:$P"
-out "cat /sys/fs/milkfs/scrub" | grep -q "run 1" && ok "Scrub now started a scrub" || bad "no scrub: $(out "cat /sys/fs/milkfs/scrub")"
+out "cat /sys/fs/milkfs/scrub" | grep -q "scrub: \[run [0-9]" && ok "Scrub now started a scrub" || bad "no scrub: $(out "cat /sys/fs/milkfs/scrub")"
+# The Vault: lock it from the window (it is not the volume the session lives on), see it listed as
+# locked, unlock it again with the passphrase.
+ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
+out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "the Vault was unlocked at boot" || bad "no unlocked Vault: $(out "cat /sys/fs/milkfs/lock")"
+click 100 163                      # the Vault row in the sidebar
+q screendump "$T/vault.png"
+# While a program holds a file on it, Lock now is refused and the sheet names the program.
+ser "send:echo x > /Volumes/Vault/x.txt" "wait:$P" "send:sleep 12 < /Volumes/Vault/x.txt &" "wait:$P"
+click 258 226 2                    # Lock now (refused)
+q screendump "$T/busy.png"
+q key ret sleep 0.5
+ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
+out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "a busy Vault was not locked" || bad "the Vault was locked while in use"
+ser "send:sleep 13" "wait:$P"
+click 258 226 3                    # Lock now
+ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
+out "cat /sys/fs/milkfs/lock" | grep -q "Vault locked" && ok "Lock now locked the Vault" || bad "Vault not locked: $(out "cat /sys/fs/milkfs/lock")"
+click 100 163                      # the locked Vault row
+click 278 212                      # Unlock...
+q type "wrong-passphrase" key ret sleep 3 screendump "$T/wrong.png"
+q key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace
+q type "$PW" key ret sleep 4
+ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
+out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "Unlock with the passphrase mounted the Vault again" || bad "Vault still locked: $(out "cat /sys/fs/milkfs/lock")"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "disk-test: PASS (screenshots in $T)"; else echo "disk-test: FAIL (logs and screenshots in $T)"; exit 1; fi

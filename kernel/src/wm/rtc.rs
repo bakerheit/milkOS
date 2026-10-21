@@ -6,7 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::timer;
 
-const PL031_DR: usize = 0x0901_0000;
+const PL031_DR: usize = crate::mmu::phys_to_virt(0x0901_0000);
 
 /// Epoch seconds at uptime 0 (0 = no RTC; then we count from 2026-01-01 00:00).
 static BASE: AtomicU64 = AtomicU64::new(0);

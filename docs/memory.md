@@ -3,10 +3,15 @@
 Files: `kernel/src/{dtb,mmu,pmm,heap,mem,memtest,spin}.rs`, header + DTB hand-off in `boot.S`.
 
 ## Boot sequence (`mem::init`, called first thing in `kmain`)
-1. `boot.S` saves `x0` (device tree pointer) in `__boot_dtb`.
+1. `boot.S` (at the physical load address, MMU off, position independent) zeroes
+   .bss, fills two static boot tables (`boot_l0`/`boot_l1`: 1 GiB of MMIO + the first
+   1 GiB of RAM, used as both TTBR0 = identity and TTBR1 = `KERNEL_BASE + pa`), turns on
+   MMU + D-cache + I-cache, branches to the higher half, sets sp and saves `x0` (device
+   tree pointer) in `__boot_dtb`.
 2. `dtb.rs` finds `/memory` in the blob. No DTB -> assume 512 MiB at 0x4000_0000.
-3. `mmu::init` builds the boot page tables in a static pool (no allocator, no
-   locks, MMU still off) and turns on MMU + D-cache + I-cache.
+3. `mmu::init` builds the kernel's real tables (linear map of MMIO and *all* of RAM) in
+   a static pool (no allocator yet), switches TTBR1 to them (through a 6-instruction
+   trampoline called at its physical address) and points TTBR0 at an empty table.
 4. `pmm::init` puts a bitmap right after the kernel image (`__kernel_end`), marks
    everything up to there used, and `pmm::reserve`s the DTB.
 5. `heap::init` takes 4 MiB of contiguous frames. The heap grows on demand.
@@ -17,23 +22,36 @@ qemu passes a DTB in `x0` only when it boots an arm64 *Image* (a flat binary
 with the 64-byte Linux header). A plain ELF gets `x0 = 0` and no DTB anywhere
 in RAM (checked with `info roms`). So `boot.S` starts with an Image header and
 `scripts/run.sh` runs `llvm-objcopy -O binary` and boots the `.bin`. The ELF
-still boots (entry is the same first instruction, a branch over the header); it
-just lands on the 512 MiB default. The DTB sits at RAM + 128 MiB (1 MiB window).
+is linked at the higher-half VMA (its LMA is the physical load address), so only
+the flat Image boots. The DTB sits at RAM + 128 MiB (1 MiB window).
 
-## Address map today
-| range | type | notes |
-|---|---|---|
-| `0x0000_0000..0x4000_0000` | Device-nGnRE, RW, XN | UART, GIC, fw_cfg, virtio-mmio, PCIe low MMIO |
-| `0x4000_0000..RAM end` | Normal WB cacheable, inner shareable, RW+X | 2 MiB blocks (1 GiB blocks if RAM >= 1 GiB and aligned) |
-| everything else | unmapped | |
+## Address map: higher-half kernel
+`KERNEL_BASE = 0xffff_0000_0000_0000`; physical `pa` is at kernel VA `KERNEL_BASE + pa`.
 
-Identity mapped: VA == PA. Always go through `mmu::phys_to_virt` /
-`mmu::virt_to_phys` (and the `PhysAddr` / `VirtAddr` aliases) so the identity
-assumption lives in one place. Anything handed to qemu devices (fw_cfg, ramfb,
-virtqueues) needs a *physical* address: use `virt_to_phys`.
+| VA range | TTBR | type | notes |
+|---|---|---|---|
+| `0x1000..0x1_0000_0000_0000` | 0 | user (EL0, nG, ASID) | `mmu::USER_BASE..USER_END`; page 0 unmapped |
+| `0xffff_0000_0000_0000..+0x4000_0000` | 1 | Device-nGnRE, RW, XN | UART, GIC, fw_cfg, virtio-mmio, PCIe low MMIO |
+| `0xffff_0000_4000_0000..+RAM size` | 1 | Normal WB, inner shareable, RW+X | all RAM; the kernel image at `0xffff_0000_4008_0000` |
+| `0xffff_8000_0000_0000..+2 GiB` | 1 | Normal WB, RW, XN | `VMAP_BASE`: kernel stacks with guard pages |
+| everything else | | unmapped | |
 
-TCR: 4 KiB granule, 48-bit VA (4 levels), WB/WA walks, inner shareable, IPS from
-the CPU. TTBR1 walks are disabled (`EPD1`) for now. MAIR slots: 0 Device-nGnRE,
+TTBR0 is only ever user space: a user thread's table, or an empty table for
+kernel-only threads (`mmu::kernel_ttbr0()`). Kernel mappings are global and live only
+in TTBR1 (`mmu::kernel_ttbr1()`), so user tables have nothing of the kernel in them.
+
+Always go through `mmu::phys_to_virt` / `mmu::virt_to_phys` (and the `PhysAddr` /
+`VirtAddr` aliases). MMIO bases are `phys_to_virt(0x0900_0000)` etc. (`const fn`).
+Anything handed to qemu devices (fw_cfg DMA descriptors, ramfb, virtqueues, buffers)
+needs a *physical* address: use `virt_to_phys`, which also handles kernel-stack
+addresses (a stack is physically contiguous). It panics on a non-kernel address, so a
+stray identity-era pointer shows up loudly instead of DMA-ing to the wrong place.
+
+`AddressSpace` knows its half (`Half::Lower` for TTBR0 trees, `Half::Upper` for the
+kernel's): `map`/`translate`/`unmap_page` refuse VAs of the other half.
+
+TCR: 4 KiB granule, 48-bit VA in both halves (4 levels), WB/WA walks, inner shareable,
+IPS from the CPU (capped at 48 bits). MAIR slots: 0 Device-nGnRE,
 1 Normal WB, 2 Normal non-cacheable, 3 Device-nGnRnE. SCTLR: M, C, I, SA on;
 WXN and alignment checking off (RAM is currently RWX; see "Not done").
 
@@ -46,8 +64,9 @@ WXN and alignment checking off (RAM is currently RWX; see "Not done").
 - `alloc::{Box, Vec, String, ...}` just work (`heap.rs` is the `#[global_allocator]`).
   Address-ordered free list, 16-byte granularity, coalescing, grows in >= 1 MiB
   contiguous chunks from the PMM, never shrinks. Don't allocate in IRQ context.
-- `mmu::AddressSpace`: `new`, `map` (blocks + pages), `translate`, `unmap_page`,
-  `destroy`. `mmu::with_kernel_space`, `mmu::map_device(pa, len)`.
+- `mmu::AddressSpace`: `new(half, alloc)`, `new_user`, `map` (blocks + pages),
+  `translate`, `unmap_page`, `destroy`. `mmu::with_kernel_space`,
+  `mmu::map_device(pa, len)` (for MMIO above 1 GiB; returns the kernel VA).
 
 ### DMA buffers (virtio, ramfb, ...)
 ```rust
@@ -60,34 +79,17 @@ cache-coherent with the guest, so no cache maintenance is needed in qemu. On rea
 hardware you would map the buffer `MemType::NormalNc` or clean/invalidate.
 The 3 MiB ramfb static in `.bss` can move to `alloc_contiguous_zeroed(768, 1)`.
 
-## Going to per-process address spaces and a higher-half kernel
-The page-table code is already independent of the kernel's own tables:
-`AddressSpace` owns a root table, `map`/`translate`/`unmap_page` work on any
-space, and table pages come from a `TableAlloc` (boot pool or PMM). Steps:
+## Secondary CPUs
+`smp.S` gets the boot identity tables (`mmu::boot_ttbr0()`) for TTBR0 and the kernel's
+tables for TTBR1 in its `BootBlock`, turns the MMU on, branches high, then swaps TTBR0
+for the empty table before running Rust.
 
-1. **Processes**: `AddressSpace::new(&mut PmmTables)` per process; map user pages
-   with `MapAttrs { user: true, .. }` (sets AP[1], nG, PXN) in the low half; on a
-   context switch write the space's root plus an ASID (TCR.A1 = 0 -> ASID in
-   TTBR0[63:48]) to `TTBR0_EL1`, no TLB flush needed when ASIDs are distinct.
-   Free with `destroy()` then free the leaf frames. Add `unmap_range`, and
-   copy-on-write via the AP bits + a data-abort handler.
-2. **Higher half**: add `KERNEL_BASE = 0xffff_0000_0000_0000` and make
-   `PHYS_OFFSET` in `mmu.rs` equal to it. Build the kernel map in a second
-   `AddressSpace` whose root goes in `TTBR1_EL1`, clear `TCR.EPD1`, link the
-   kernel at `KERNEL_BASE + 0x4008_0000` (VMA) with LMA unchanged, and keep the
-   current identity map in TTBR0 only during early boot (boot.S runs position
-   independent until the switch). After the jump, TTBR0 holds just the current
-   user process. Drop the TTBR0 identity map; MMIO goes through
-   `map_device`, which already returns a VA.
-3. **Everything that passes addresses to devices** uses `virt_to_phys` (already
-   the rule), so step 2 doesn't touch drivers.
-4. Per-section permissions (W^X) need 4 KiB pages for the image and
-   page-aligned section boundaries in `linker.ld`; `map` already picks pages
-   when alignment demands.
+## W^X (not done)
+Per-section permissions need 4 KiB pages for the image and page-aligned section
+boundaries in `linker.ld`; `map` already picks pages when alignment demands.
 
 ## Not done / hazards
 - Kernel RAM is mapped RWX (no W^X, no stack guard pages).
 - Single bank of RAM (the one containing the kernel); other DTB banks are ignored.
-- Atomics and the spinlock (`spin.rs`) must not be used before `mmu::init`:
-  exclusives to Device memory (MMU off) hang.
-- TLB maintenance is inner-shareable but there is only one core running.
+- The boot tables cover only the first 1 GiB of RAM; everything up to `mmu::init`
+  (DTB parsing) must stay inside it. qemu puts the image and DTB there.

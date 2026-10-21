@@ -4,6 +4,8 @@
 - `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"` (rustup is keg-only). Nightly + `aarch64-unknown-none-softfloat`, pinned in `rust-toolchain.toml`.
 - `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only,
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
+  `MILK_MONITOR=/tmp/x.sock scripts/run.sh headless` adds a qemu monitor socket (`info registers -a` on a hang).
+  `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).
 - qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 
@@ -25,8 +27,9 @@
 - Ownership: `sched` owns `timer::set_tick_hook` and `timer::set_deadline` (don't call them elsewhere; use threads and
   sleeps). The console tty (`proc/console.rs`) owns `uart::read_byte`. Processes and syscalls: `docs/processes.md`.
   Files: `docs/filesystem.md`. User programs live in `user/` and are listed in `initramfs.list`.
-- Memory: identity map (VA == PA). Use `mmu::virt_to_phys` / `phys_to_virt` anyway, it is the one place that
-  will change for higher-half. Heap via `alloc` (Vec/Box/BTreeMap fine). DMA / big buffers:
+- Memory: higher-half kernel. Kernel VA = `mmu::phys_to_virt(pa)` = `0xffff_0000_0000_0000 + pa`; TTBR0 is user
+  space only. MMIO bases are `phys_to_virt(<pa>)`; anything a device reads (DMA, rings, fw_cfg) gets
+  `mmu::virt_to_phys(ptr)`. Never hand a device a raw pointer cast. See `docs/memory.md`. Heap via `alloc` (Vec/Box/BTreeMap fine). DMA / big buffers:
   `pmm::alloc_contiguous_zeroed(npages, align_frames)`, free with `pmm::free_contiguous`. No allocation in IRQ handlers.
 - SMP: milkOS runs on 4 CPUs by default (`MILK_SMP=1` for one). `percpu::id()` is the current CPU. Any shared
   state needs a real lock or atomics; "single core, plain load/store is fine" is no longer true. See `docs/smp.md`.

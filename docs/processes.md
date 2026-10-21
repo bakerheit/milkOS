@@ -67,45 +67,38 @@ from a stack buffer still works (as long as it doesn't cross the stack's top).
 
 ## Address spaces: the decision
 
-**The kernel stays identity mapped in the low part of TTBR0, in every address space;
-user space is `0x100_0000_0000` (1 TiB) .. `0x1_0000_0000_0000` (256 TiB).**
+**The kernel is in the higher half (TTBR1, `0xffff_...`); TTBR0 is purely user space:
+`mmu::USER_BASE` (`0x1000`) .. `mmu::USER_END` (`0x1_0000_0000_0000`, 256 TiB).**
 
 ```text
-TTBR0 (48-bit), shared by kernel and the current process:
-  L0 slot 0   0 .. 512 GiB      kernel: devices 0..1 GiB, RAM, kernel-stack window   EL1 only, global
-  L0 slot 1   512 GiB .. 1 TiB  kernel: reserved (high PCIe MMIO)                     EL1 only, global
-  L0 slot 2+  1 TiB ..          user:   image at 1 TiB + 4 MiB, brk after it,         EL0, nG (ASID)
-                                        mmap from 2 TiB up, stack below 256 TiB
-TTBR1: unused (EPD1)
+TTBR0 (48-bit), the current process only (an empty table for kernel threads):
+  0 .. 0x1000                   unmapped (null pointers fault)
+  0x40_0000                     where static Linux binaries link (ET_EXEC loads as linked)
+  0x100_0040_0000               IMAGE_BASE: milkOS programs (user/rt/user.ld), static-pie
+                                brk right after the image
+  0x200_0000_0000 (2 TiB) ..    MMAP_BASE: anonymous mmap, bump allocated upwards
+  .. 0xffff_ffff_0000           stack (STACK_TOP), grows down on fault
+TTBR1: the kernel (docs/memory.md): linear map of MMIO + RAM, kernel stacks. Global.
 ```
 
-* A user root table copies L0 slots 0 and 1 from the kernel's root (pointers to the same
-  L1 tables), so every current and future kernel mapping is visible in every process.
-  `mmu::prepare_kernel_slots()` makes sure both slots have an L1 table before the first
-  process. User mappings are `nG` + EL0, tagged with the process's ASID.
-* **Why not the higher half now:** with VA == PA kept, every driver written in parallel
-  (virtio-input, virtio-blk, ramfb/fw_cfg DMA descriptors, MMIO bases like
-  `0x0a00_0000`) keeps working with no change. Moving the kernel to TTBR1 changes all of
-  them at once and is better done as its own step after the merges.
-* **Cost:** static Linux binaries linked at the usual `0x400000` can't load (the loader
-  says so). Static-pie binaries can (loaded at 1 TiB + 4 MiB). Our own programs link at
-  `0x10000400000` (`user/rt/user.ld`), which stays valid after the higher-half move.
-* **Higher-half later** (docs/memory.md has the recipe): set `PHYS_OFFSET`, build the
-  kernel map for TTBR1, clear `TCR.EPD1`, make every MMIO base go through
-  `phys_to_virt`/`map_device`, then drop `KERNEL_L0_SLOTS` to 0 so user space starts at
-  4 KiB. Nothing in `proc/` depends on where the kernel is, except `USER_BASE`.
+* A user root table starts empty and holds only user mappings (`nG` + EL0, tagged with
+  the process's ASID). Nothing is copied from the kernel.
+* `IMAGE_BASE`/`MMAP_BASE` are absolute constants in `proc/uspace.rs`, and `USER_BASE`
+  is one constant in `mmu.rs`: move them there, nothing else in `proc/` cares.
+* A user pointer into the kernel half fails `user_range_ok` (`EFAULT` from a syscall) and
+  faults at EL0 (`SIGSEGV`); `utest kaddr` checks both.
 
 ### ASIDs and switching
 
 8-bit ASIDs (`proc/asid.rs`), 255 live user spaces, ASID 0 = kernel-only threads (whose
-TTBR0 is the kernel root). TTBR0 = root | ASID << 48 is written on every switch between
+TTBR0 is an empty table). TTBR0 = root | ASID << 48 is written on every switch between
 threads with different spaces; no TLB flush, because an ASID's entries are flushed
 (`tlbi aside1is`) when it is freed. Kernel entries are global and identical everywhere.
 
 ### User memory from the kernel
 
 The kernel never dereferences user pointers. `UserSpace::copy_in/copy_out/read_cstr`
-walk the process's page map and copy through the identity map of the frame, after
+walk the process's page map and copy through the kernel's linear map of the frame, after
 checking the whole range (and write permission) first. A bad pointer is `EFAULT`, never
 a kernel abort, and PAN doesn't matter.
 
@@ -119,7 +112,7 @@ a kernel abort, and PAN doesn't matter.
   first write faults and copies (or just re-enables write for the last owner). fds are
   shared `Arc<OpenFile>`s (shared offsets); FP regs, TPIDR_EL0, pgid/sid, signal actions
   and mask are inherited; pending signals are not. The kernel's `copy_out` breaks COW
-  first, because it writes through the identity map, which ignores the read-only bit.
+  first, because it writes through the linear map, which ignores the read-only bit.
 * **execve**: reads the file through the VFS (relative to cwd), loads it into a new
   space, only then swaps it in (a failed exec leaves the caller intact); drops
   close-on-exec fds; handlers go back to SIG_DFL (SIG_IGN stays).
@@ -209,8 +202,13 @@ is the to-do list for running a static musl binary. `--features strace` logs eve
 
 ### ELF loading and the initial stack
 
+Linux compatibility check: `tests/linux/linux-hello.c` is a freestanding C program
+(raw `svc #0` syscalls, no libc, no milkOS headers) built by `tests/linux/build.sh` with
+the host's bare-metal `aarch64-elf-gcc` as a static ET_EXEC at `0x400000`. The binary is
+committed and packed as `/bin/linux-hello`; `utest linux` runs it.
+
 `proc/elf.rs`: ELF64 aarch64, `ET_EXEC` in the user range, or `ET_DYN` without
-`PT_INTERP` (static-pie, loaded at 1 TiB + 4 MiB). Each `PT_LOAD` gets exact R/W/X page
+`PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
 permissions; overlapping pages take the union. The I-cache is synced after loading.
 The stack is the Linux layout: `argc, argv[], NULL, envp[], NULL, auxv` (AT_PHDR,
 AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_ENTRY, AT_HWCAP = FP|ASIMD, AT_CLKTCK, AT_RANDOM,
@@ -243,8 +241,12 @@ proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that 
   `ioctl` is not used for a registered tty.
 * `read` blocks (interruptible: EINTR), except before `sched::init` where it is EAGAIN
   when empty (the fs self-test relies on that).
-* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt), so ^C
-  works while nobody reads. `uart::read_byte` belongs to it.
+* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt, with a
+  1 s timeout that runs `uart::poll` as a fallback: it rescues bytes if an RX interrupt
+  was ever lost and logs "recovered by poll" once), so ^C works while nobody reads.
+  `uart::read_byte` belongs to it. Regression test: `scripts/serial-soak.sh [boots]
+  [commands]` types `echo tickK` once a second over serial; every tick must come back
+  and the fallback must never fire.
 * Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
   job stop/continue.
 

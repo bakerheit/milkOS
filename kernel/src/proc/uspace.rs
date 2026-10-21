@@ -2,15 +2,17 @@
 //! anonymous mmap and a stack that grows on demand.
 //!
 //! The kernel never dereferences user pointers directly: every access goes through the
-//! page map here and the kernel's identity map of the frame (`phys_to_virt`), so a bad
+//! page map here and the kernel's linear map of the frame (`phys_to_virt`), so a bad
 //! user pointer is an `EFAULT`, never a kernel data abort, and PAN/TTBR0 state don't matter.
 //!
 //! Layout (see docs/processes.md):
 //! ```text
-//! 0x0000_0000_0000 .. USER_BASE         kernel (identity map etc., EL1 only, shared)
-//! USER_BASE + 0x40_0000 (IMAGE_BASE)    program image (user/rt/user.ld links here)
+//! 0 .. USER_BASE (0x1000)               unmapped (null pointers fault)
+//! 0x40_0000                             where Linux static binaries are linked (ET_EXEC)
+//! IMAGE_BASE = 0x100_0040_0000          milkOS programs (user/rt/user.ld links here) and
+//!                                       static-pie binaries
 //!   ... brk heap right after the image's last segment
-//! MMAP_BASE = USER_BASE + 1 TiB          anonymous mmap, bump allocated upwards
+//! MMAP_BASE = 0x200_0000_0000 (2 TiB)   anonymous mmap, bump allocated upwards
 //! STACK_TOP - STACK_MAX .. STACK_TOP     stack (STACK_INIT mapped at exec, grows on fault)
 //! ```
 
@@ -27,8 +29,10 @@ use crate::mmu::{
 use crate::pmm;
 use crate::sync::SpinLock;
 
-pub const IMAGE_BASE: VirtAddr = USER_BASE + 0x40_0000;
-pub const MMAP_BASE: VirtAddr = USER_BASE + (1 << 40);
+// The kernel is in TTBR1 (the higher half), so all of TTBR0 from USER_BASE up is user space.
+// These stay where they were before that move, so existing binaries keep working.
+pub const IMAGE_BASE: VirtAddr = 0x100_0040_0000;
+pub const MMAP_BASE: VirtAddr = 0x200_0000_0000;
 pub const STACK_TOP: VirtAddr = USER_END - 0x1_0000;
 pub const STACK_MAX: usize = 8 << 20;
 pub const STACK_INIT: usize = 64 << 10;

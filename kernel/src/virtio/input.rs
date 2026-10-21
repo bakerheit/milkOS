@@ -57,7 +57,7 @@ struct RawEvent {
 
 /// Device-visible memory for one device: its event queue plus the event buffers.
 /// TODO(mem): allocate from `pmm` (two contiguous frames: queue + buffers) instead of a static
-/// pool, keeping VA == PA or translating in `Virtqueue::addresses` / the buffer address below.
+/// pool. Device addresses go through `mmu::virt_to_phys` (`Virtqueue::addresses`, below).
 #[repr(C, align(4096))]
 struct DevMem {
     queue: QueueMem,
@@ -171,7 +171,7 @@ pub fn attach(t: Transport) -> Result<(), Error> {
     let mut vq = unsafe { Virtqueue::new(qmem, size) };
     t.setup_queue(EVENTQ, &vq).inspect_err(|_| t.fail())?;
     for i in 0..size as usize {
-        let buf = unsafe { events.add(i) } as u64; // VA == PA
+        let buf = crate::mmu::virt_to_phys(unsafe { events.add(i) } as usize) as u64;
         vq.add(&[], &[(buf, size_of::<RawEvent>() as u32)])
             .expect("fresh queue has room");
     }

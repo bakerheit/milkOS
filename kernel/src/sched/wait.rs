@@ -6,6 +6,13 @@
 //! and calls `sched::wake`. If that wake lands before the waiter has actually blocked, the
 //! scheduler records it (`wake_pending`) and the block returns at once. Wakeups can be
 //! spurious; `cond` decides.
+//!
+//! A waiter is on the queue only while it is inside `wait_until*`: however it leaves
+//! (condition true after a wakeup from this queue, from someone else, or from a leftover
+//! `wake_pending`; or a timeout) it takes itself off. A stale entry would make a later
+//! `wake_one` "wake" a thread that isn't waiting and swallow the wakeup meant for the
+//! real waiter behind it: a lost wakeup (boots hung in the mutex self-test with every
+//! CPU idle). `sched::selftest` "stale waiter" checks it.
 
 use alloc::collections::VecDeque;
 use core::cell::UnsafeCell;
@@ -31,6 +38,7 @@ impl WaitQueue {
     /// it must not block. Must be called from thread context (not an IRQ handler).
     pub fn wait_until(&self, mut cond: impl FnMut() -> bool) {
         let flags = sync::irq_save();
+        let mut queued = false;
         while !cond() {
             if !super::started() {
                 // Before the scheduler there is nobody to wait for but IRQs.
@@ -40,12 +48,16 @@ impl WaitQueue {
                 sync::irq_disable();
                 continue;
             }
-            let me = self.enqueue();
+            self.enqueue();
+            queued = true;
             if cond() {
-                self.remove(me);
                 break;
             }
             super::block_current();
+        }
+        if queued {
+            // Whoever woke us may not have been this queue: never leave an entry behind.
+            self.remove(super::current_tid());
         }
         sync::irq_restore(flags);
     }
@@ -55,14 +67,12 @@ impl WaitQueue {
     pub fn wait_until_timeout(&self, mut cond: impl FnMut() -> bool, timeout_ns: u64) -> bool {
         let deadline = crate::timer::now_ns().saturating_add(timeout_ns);
         let flags = sync::irq_save();
+        let mut queued = false;
         let ok = loop {
             if cond() {
                 break true;
             }
             if crate::timer::now_ns() >= deadline {
-                if super::started() {
-                    self.remove(super::current_tid()); // no stale entry left behind
-                }
                 break false;
             }
             if !super::started() {
@@ -72,13 +82,16 @@ impl WaitQueue {
                 sync::irq_disable();
                 continue;
             }
-            let me = self.enqueue();
+            self.enqueue();
+            queued = true;
             if cond() {
-                self.remove(me);
                 break true;
             }
             super::block_current_until(deadline);
         };
+        if queued {
+            self.remove(super::current_tid()); // no stale entry left behind, either way
+        }
         sync::irq_restore(flags);
         ok
     }

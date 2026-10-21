@@ -3,10 +3,10 @@
 //! Memory: each queue lives in one [`QueueMem`] (4 KiB aligned, one page for
 //! [`MAX_QUEUE_SIZE`] = 64). Drivers own that memory as a static for now.
 //! TODO(mem): allocate `QueueMem` from `pmm` (one contiguous, zeroed frame per queue) instead
-//! of statics. The device is handed physical addresses; today VA == PA (identity), so
-//! [`Virtqueue::addresses`] just casts pointers. Under the MMU, keep this memory identity
-//! mapped (or translate here) and Normal cacheable: virtio-mmio on qemu virt is
-//! `dma-coherent`, so no cache maintenance is needed.
+//! of statics. The device is handed physical addresses: [`Virtqueue::addresses`] translates
+//! with `mmu::virt_to_phys`. Keep this memory in the kernel's linear map (or the image) and
+//! Normal cacheable: virtio-mmio on qemu virt is `dma-coherent`, so no cache maintenance is
+//! needed.
 //!
 //! Every ring access is a volatile, naturally aligned load/store: with the MMU off RAM is
 //! Device memory, where unaligned or exclusive accesses fault or hang. No atomics RMW here.
@@ -130,7 +130,7 @@ impl Virtqueue {
     /// `mem`, which it zeroes.
     ///
     /// # Safety
-    /// `mem` must be valid, identity mapped, and used by nothing else for as long as the
+    /// `mem` must be valid, a kernel (linear-map) address, and used by nothing else for as long as the
     /// device may touch it (i.e. until the device is reset).
     pub unsafe fn new(mem: *mut QueueMem, size: u16) -> Self {
         assert!(size.is_power_of_two() && size as usize <= MAX_QUEUE_SIZE);
@@ -163,12 +163,13 @@ impl Virtqueue {
 
     /// Physical addresses of (descriptor table, available ring, used ring).
     pub fn addresses(&self) -> (u64, u64, u64) {
-        // SAFETY: only computes field addresses; VA == PA (identity mapping).
+        let pa = |va: usize| crate::mmu::virt_to_phys(va) as u64;
+        // SAFETY: only computes field addresses.
         unsafe {
             (
-                addr_of!((*self.mem).desc) as u64,
-                addr_of!((*self.mem).avail) as u64,
-                addr_of!((*self.mem).used) as u64,
+                pa(addr_of!((*self.mem).desc) as usize),
+                pa(addr_of!((*self.mem).avail) as usize),
+                pa(addr_of!((*self.mem).used) as usize),
             )
         }
     }

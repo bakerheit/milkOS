@@ -8,7 +8,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-const BASE: usize = 0x0902_0000;
+const BASE: usize = crate::mmu::phys_to_virt(0x0902_0000);
 const DATA: *mut u8 = BASE as *mut u8;
 const SELECTOR: *mut u16 = (BASE + 8) as *mut u16;
 const DMA_HI: *mut u32 = (BASE + 16) as *mut u32;
@@ -115,11 +115,12 @@ fn dma(control: u32, buf: *mut u8, len: usize) -> bool {
         let desc = &raw mut DMA_DESC;
         write_volatile(&raw mut (*desc).control, control.to_be());
         write_volatile(&raw mut (*desc).length, (len as u32).to_be());
-        // Physical address of the buffer. Identity mapped while the MMU is off; once there is a
-        // proper MMU this must translate virtual to physical.
-        write_volatile(&raw mut (*desc).address, (buf as u64).to_be());
+        // The device wants physical addresses (works for buffers on kernel stacks too:
+        // virt_to_phys knows the stack window; a stack is physically contiguous).
+        let pa = crate::mmu::virt_to_phys(buf as usize) as u64;
+        write_volatile(&raw mut (*desc).address, pa.to_be());
         core::arch::asm!("dsb sy", options(nostack, preserves_flags));
-        let d = desc as u64;
+        let d = crate::mmu::virt_to_phys(desc as usize) as u64;
         write_volatile(DMA_HI, ((d >> 32) as u32).to_be());
         write_volatile(DMA_LO, (d as u32).to_be());
         loop {

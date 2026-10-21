@@ -965,6 +965,51 @@ fn t_linux() -> bool {
     )
 }
 
+/// Credentials: an unprivileged process can't raise its ids; sudo (set-user-ID root, asks
+/// for the caller's password) and su can.
+fn t_creds() -> bool {
+    let (r, e, sv) = sys::getresuid();
+    let me = sys::geteuid();
+    let mut ok = true;
+    let mut detail = alloc::format!("ids {r}/{e}/{sv}");
+    if me != 0 {
+        ok &= sys::setuid(0).is_err() && sys::setgroups(&[0]).is_err();
+        ok &= sys::setresuid(u32::MAX, 0, u32::MAX).is_err();
+        detail += ", setuid(0)/setgroups/setresuid refused";
+    }
+    // sudo with the right and the wrong password (-S: from stdin).
+    let run = |pw: &str| {
+        let (r, w) = sys::pipe().unwrap();
+        let (r2, w2) = sys::pipe().unwrap();
+        let pid = match sys::fork().unwrap() {
+            0 => {
+                sys::dup2(r, 0).unwrap();
+                sys::dup2(w2, 1).unwrap();
+                let _ = sys::execve("/bin/sudo", &["sudo", "-S", "/bin/id", "-u"], &[]);
+                sys::exit(127)
+            }
+            p => p,
+        };
+        let _ = sys::close(r);
+        let _ = sys::close(w2);
+        let _ = sys::write_all(w, alloc::format!("{pw}\n").as_bytes());
+        let _ = sys::close(w);
+        let mut out = alloc::vec::Vec::new();
+        let mut b = [0u8; 64];
+        while let Ok(n @ 1..) = sys::read(r2, &mut b) {
+            out.extend_from_slice(&b[..n]);
+        }
+        let _ = sys::close(r2);
+        let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+        (String::from(String::from_utf8_lossy(&out).trim()), st)
+    };
+    let (good, gst) = run("milk");
+    let (bad, bst) = run("wrong");
+    ok &= good == "0" && gst == 0 && bad.is_empty() && bst != 0;
+    detail += &alloc::format!("; sudo good -> {good:?} ({gst}), bad -> {bad:?} ({bst})");
+    check("credentials", ok, &detail)
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1003,6 +1048,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "linux" || what == "all" {
         ok &= t_linux();
+    }
+    if what == "creds" || what == "all" {
+        ok &= t_creds();
     }
     if what == "kaddr" || what == "all" {
         ok &= t_kaddr();

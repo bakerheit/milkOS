@@ -10,10 +10,12 @@
 
 pub mod asid;
 pub mod caps;
+pub mod cred;
 pub mod elf;
 pub mod errno;
 pub mod fd;
 pub mod futex;
+pub mod login;
 pub mod pipe;
 pub mod procfs;
 mod selftest;
@@ -78,6 +80,10 @@ pub struct Process {
     pub inner: SpinLock<Inner>,
     /// The parent sleeps here in wait4; children kick it when they exit.
     pub child_wq: WaitQueue,
+    /// User / group ids (shared by the thread group, inherited; see cred.rs). Its own lock,
+    /// never held across anything else: the VFS reads it on every permission check, also
+    /// from code that holds `inner`.
+    pub cred: SpinLock<cred::Cred>,
 }
 
 pub struct Inner {
@@ -166,6 +172,35 @@ pub fn dev_caps_check(path: &str) -> KResult<()> {
     }
 }
 
+/// Who the VFS should check permissions for: the calling process's effective ids, or the
+/// kernel (root) for kernel threads.
+fn current_who() -> fs::perm::Who {
+    let pid = sched::current_pid();
+    let Some(p) = (pid != 0).then(|| get(pid)).flatten() else {
+        return fs::perm::Who::KERNEL;
+    };
+    let c = *p.cred.lock();
+    let mut groups = [0u32; 16];
+    let g = c.groups();
+    groups[..g.len()].copy_from_slice(g);
+    fs::perm::Who {
+        uid: c.euid,
+        gid: c.egid,
+        groups,
+        ngroups: g.len() as u8,
+        kernel: false,
+    }
+}
+
+/// Credentials of the calling process (root for kernel threads).
+pub fn current_cred() -> cred::Cred {
+    let pid = sched::current_pid();
+    (pid != 0)
+        .then(|| get(pid))
+        .flatten()
+        .map_or(cred::Cred::root(), |p| *p.cred.lock())
+}
+
 /// The calling thread's capability set.
 pub fn current_caps() -> alloc::sync::Arc<caps::Caps> {
     current().inner.lock().caps.clone()
@@ -235,6 +270,12 @@ pub fn init() {
     syscall::init();
     exceptions::set_user_fault_handler(on_user_fault);
     fs::set_root_resolver(current_root_dir);
+    fs::perm::set_cred_resolver(current_who);
+    cred::selftest();
+    login::init();
+    login::selftest();
+    let sess = login::session();
+    fs::perm::set_mount_owner(sess.uid, sess.gid);
     exceptions::set_user_return_hook(on_user_return);
     let bin: Vec<String> = fs::readdir("/bin")
         .unwrap_or_default()
@@ -269,6 +310,7 @@ struct Launch<'a> {
     exe: String,
     clear_child_tid: usize,
     caps: alloc::sync::Arc<caps::Caps>,
+    cred: cred::Cred,
 }
 
 /// Create a process and start its thread with `l.frame`.
@@ -305,6 +347,7 @@ fn start(l: Launch) -> KResult<Pid> {
             caps: l.caps,
         }),
         child_wq: WaitQueue::new(),
+        cred: SpinLock::new(l.cred),
     });
     // Visible before the thread can run (it may call getpid right away).
     PROCS.lock().insert(pid, p.clone());
@@ -363,7 +406,8 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Start the program at `path` as a new process with the kernel as parent, on the console.
+/// Start the program at `path` as a new process with the kernel as parent, on the console,
+/// as the session user ([`login::session`]: the desktop starts apps this way).
 pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
     spawn_with_caps(path, argv, caps::Caps::all())
 }
@@ -371,15 +415,26 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
 /// [`spawn`] with a capability set from the first instruction (the desktop runs packaged
 /// apps sandboxed this way; no window in which the program runs unrestricted). `cwd` is
 /// `/`, HOME is the user's home. The binary is loaded by the kernel, so it needs no grant.
+/// Runs as the session user.
 pub fn spawn_with_caps(
     path: &str,
     argv: &[&str],
     caps: alloc::sync::Arc<caps::Caps>,
 ) -> KResult<Pid> {
+    let acct = login::session();
+    spawn_as(path, argv, caps, acct.cred(), &acct.env())
+}
+
+fn spawn_as(
+    path: &str,
+    argv: &[&str],
+    caps: alloc::sync::Arc<caps::Caps>,
+    cred: cred::Cred,
+    envp: &[String],
+) -> KResult<Pid> {
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
-    let envp = [String::from("PATH=/bin"), String::from("HOME=/")];
-    let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
+    let (space, entry, sp) = load_image(&data, &argv, envp, path)?;
     start(Launch {
         name: basename(path),
         ppid: 0,
@@ -397,11 +452,13 @@ pub fn spawn_with_caps(
         exe: String::from(path),
         clear_child_tid: 0,
         caps,
+        cred,
     })
 }
 
 /// Like [`spawn`], but with fds 0/1/2 on the terminal device `tty`, the given environment and
 /// working directory. The desktop's Terminal window uses it to run `msh` on `/dev/tty1`.
+/// Runs as the session user.
 pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) -> KResult<Pid> {
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
@@ -425,6 +482,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         exe: String::from(path),
         clear_child_tid: 0,
         caps: caps::Caps::all(),
+        cred: login::session_cred(),
     })
 }
 
@@ -432,7 +490,14 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
 pub fn start_init() {
     assert!(get(1).is_none(), "init already running");
     INIT_NEXT.store(true, Ordering::Relaxed);
-    match spawn("/bin/init", &["init"]) {
+    let env = [String::from("PATH=/bin"), String::from("HOME=/")];
+    match spawn_as(
+        "/bin/init",
+        &["init"],
+        caps::Caps::all(),
+        cred::Cred::root(),
+        &env,
+    ) {
         Ok(pid) => kprintln!("[proc] started /bin/init as pid {pid}"),
         Err(e) => panic!("could not start /bin/init: errno {}", e.0),
     }
@@ -465,7 +530,7 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
 /// fork(), recording `clear_child_tid` for the child (CLONE_CHILD_CLEARTID).
 pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
     let parent = current();
-    let (space, fds, name, cwd, pgid, sid, sig, argv, exe, root_dir, caps) = {
+    let (space, fds, name, cwd, pgid, sid, sig, argv, exe, root_dir, caps, cred) = {
         let mut i = parent.inner.lock();
         let space = i.space.as_mut().ok_or(ESRCH)?.fork()?;
         (
@@ -480,6 +545,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
             i.exe.clone(),
             i.root_dir.clone(),
             i.caps.clone(),
+            *parent.cred.lock(),
         )
     };
     let mut cf = *frame;
@@ -496,6 +562,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
         cwd,
         root_dir,
         caps,
+        cred,
         frame: &cf,
         tpidr_el0: sched::current_tpidr_el0(),
         fp,
@@ -555,6 +622,24 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
     let (space, entry, sp) = load_image(&data, argv, envp, path)?;
     let me = current();
     let ttbr0 = space.ttbr0();
+    let nosuid = fs::perm::nosuid(f.inode());
+    {
+        let mut c = me.cred.lock();
+        let before = *c;
+        let changed = c.on_exec(st.perm, st.uid, st.gid, nosuid);
+        let after = *c;
+        drop(c);
+        if changed {
+            crate::audit!(
+                "setid.exec",
+                "path={path} uid={}->{} gid={}->{}",
+                before.euid,
+                after.euid,
+                before.egid,
+                after.egid
+            );
+        }
+    }
     let (old, cloexec) = {
         let mut i = me.inner.lock();
         i.name = Comm::new(basename(path));

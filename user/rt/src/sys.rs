@@ -1021,3 +1021,100 @@ pub fn isatty(fd: i32) -> bool {
 pub fn ioctl(fd: i32, cmd: u32, arg: usize) -> Result<usize> {
     sc(29, [fd as usize, cmd as usize, arg, 0, 0, 0])
 }
+
+// ---- users and groups (kernel/src/proc/cred.rs) ----------------------------------------
+
+pub fn getuid() -> u32 {
+    sc(174, [0; 6]).unwrap_or(0) as u32
+}
+pub fn geteuid() -> u32 {
+    sc(175, [0; 6]).unwrap_or(0) as u32
+}
+pub fn getgid() -> u32 {
+    sc(176, [0; 6]).unwrap_or(0) as u32
+}
+pub fn getegid() -> u32 {
+    sc(177, [0; 6]).unwrap_or(0) as u32
+}
+pub fn setuid(uid: u32) -> Result<()> {
+    sc(146, [uid as usize, 0, 0, 0, 0, 0]).map(|_| ())
+}
+pub fn setgid(gid: u32) -> Result<()> {
+    sc(144, [gid as usize, 0, 0, 0, 0, 0]).map(|_| ())
+}
+/// `u32::MAX` leaves a field unchanged.
+pub fn setresuid(r: u32, e: u32, s: u32) -> Result<()> {
+    sc(147, [r as usize, e as usize, s as usize, 0, 0, 0]).map(|_| ())
+}
+pub fn setresgid(r: u32, e: u32, s: u32) -> Result<()> {
+    sc(149, [r as usize, e as usize, s as usize, 0, 0, 0]).map(|_| ())
+}
+/// (real, effective, saved) user ids.
+pub fn getresuid() -> (u32, u32, u32) {
+    let mut v = [0u32; 3];
+    let p = v.as_mut_ptr() as usize;
+    let _ = sc(148, [p, p + 4, p + 8, 0, 0, 0]);
+    (v[0], v[1], v[2])
+}
+pub fn getgroups() -> Vec<u32> {
+    let mut g = [0u32; 64];
+    let n = sc(158, [g.len(), g.as_mut_ptr() as usize, 0, 0, 0, 0]).unwrap_or(0);
+    g[..n.min(64)].to_vec()
+}
+pub fn setgroups(groups: &[u32]) -> Result<()> {
+    sc(159, [groups.len(), groups.as_ptr() as usize, 0, 0, 0, 0]).map(|_| ())
+}
+
+/// chmod(2) (fchmodat, AT_FDCWD).
+pub fn chmod(path: &str, mode: u32) -> Result<()> {
+    let p = cs(path);
+    sc(
+        53,
+        [
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            mode as usize,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// chown(2) (fchownat, AT_FDCWD); `u32::MAX` leaves uid or gid unchanged.
+pub fn chown(path: &str, uid: u32, gid: u32) -> Result<()> {
+    let p = cs(path);
+    sc(
+        54,
+        [
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            uid as usize,
+            gid as usize,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// Fill `buf` from the kernel's random source (getrandom(2)).
+pub fn getrandom(buf: &mut [u8]) -> Result<usize> {
+    sc(278, [buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0, 0])
+}
+
+/// Turn terminal echo on `fd` on or off. Returns the previous state (None: not a tty).
+pub fn set_echo(fd: i32, on: bool) -> Option<bool> {
+    const TCGETS: u32 = 0x5401;
+    const TCSETS: u32 = 0x5402;
+    const ECHO: u32 = 0o10;
+    let mut t = [0u8; 36];
+    ioctl(fd, TCGETS, t.as_mut_ptr() as usize).ok()?;
+    let lflag = u32::from_le_bytes([t[12], t[13], t[14], t[15]]);
+    let was = lflag & ECHO != 0;
+    let new = if on { lflag | ECHO } else { lflag & !ECHO };
+    t[12..16].copy_from_slice(&new.to_le_bytes());
+    ioctl(fd, TCSETS, t.as_mut_ptr() as usize).ok()?;
+    Some(was)
+}

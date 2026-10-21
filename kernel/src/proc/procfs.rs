@@ -167,6 +167,7 @@ fn status(pid: Pid) -> String {
     let (st, st_name) = state_of(&p);
     let cpu = cpu_ns(&p);
     let psr = thread_of(&p).map_or(0, |t| t.cpu);
+    let c = *p.cred.lock();
     let i = p.inner.lock();
     let rss = i.space.as_ref().map_or(0, |s| s.resident()) / 1024;
     let (mut ign, mut cgt) = (0u64, 0u64);
@@ -185,8 +186,11 @@ fn status(pid: Pid) -> String {
     let _ = writeln!(s, "PPid:\t{}", i.ppid);
     let _ = writeln!(s, "Pgid:\t{}", i.pgid);
     let _ = writeln!(s, "Sid:\t{}", i.sid);
-    let _ = writeln!(s, "Uid:\t0\t0\t0\t0");
-    let _ = writeln!(s, "Gid:\t0\t0\t0\t0");
+    // real, effective, saved, file-system (= effective here)
+    let _ = writeln!(s, "Uid:\t{}\t{}\t{}\t{}", c.ruid, c.euid, c.suid, c.euid);
+    let _ = writeln!(s, "Gid:\t{}\t{}\t{}\t{}", c.rgid, c.egid, c.sgid, c.egid);
+    let groups: Vec<String> = c.groups().iter().map(|g| format!("{g}")).collect();
+    let _ = writeln!(s, "Groups:\t{}", groups.join(" "));
     let _ = writeln!(s, "FDSize:\t{}", i.fds.count());
     let _ = writeln!(s, "VmRSS:\t{rss} kB");
     let _ = writeln!(s, "Threads:\t{}", i.threads.len().max(1));

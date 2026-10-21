@@ -3,6 +3,56 @@
 Two parts: a **capability sandbox** (what a process is allowed to do) and the **audit log**
 (a tamper-evident record of what it did). The sandbox is below; the log follows.
 
+## Users and credentials
+
+Two accounts by default (`rootfs/etc/passwd`, `group`, `shadow`):
+
+| user | uid | primary group | groups | home |
+|---|---|---|---|---|
+| `root` | 0 | `wheel` (0) | wheel, admin | `/root` |
+| `milk` | 501 | `staff` (20) | staff, **admin** (80) | `/home/milk` |
+
+The default password of both is `milk`; change it with `passwd`.
+
+* **Processes** carry real / effective / saved uid and gid plus supplementary groups
+  (`proc/cred.rs`), Linux rules: setuid, setgid, setreuid, setregid, setresuid,
+  setresgid, getresuid, getresgid, getgroups, setgroups (Linux numbers 143-150, 158,
+  159; get*id 174-177). Root (euid 0) may set anything; others only shuffle between
+  their real and saved ids. Ids are inherited across fork and kept across exec, except
+  set-user-ID / set-group-ID binaries (mode 4xxx / 2xxx) set the effective id to the
+  file's owner. Set-ID bits are ignored under `no_new_privs` (any chrooted or sandboxed
+  process) and on FAT and the 9p share. Every change is audited (`cred`, `setid.exec`).
+  `/proc/<pid>/status` shows `Uid:` / `Gid:` / `Groups:`.
+* **Who runs as whom.** The kernel and init are root. init runs the console shell as
+  `milk`; the desktop starts everything (Terminal, apps, the Store) as the *session
+  user*, `milk` at boot.
+* **Passwords** are never stored in plain text: `/etc/shadow` (0600, root) holds
+  `$5m$<rounds>$<salt hex>$<digest hex>`, h = SHA-256(salt ‖ password) then rounds-1 times
+  h = SHA-256(h ‖ salt ‖ password), 5000 rounds, 16-byte random salt. Same code in the
+  kernel (`proc/login.rs`) and user space (`rt::users`); `scripts/mkpasswd.py` makes one
+  on the host. `passwd` also writes `/Volumes/Milk/.milkos/shadow`, which the kernel
+  restores into `/etc/shadow` at boot, so changes survive a reboot.
+* **Tools:** `whoami`, `id`, `su [user] [-c cmd]` (asks the *target's* password),
+  `sudo [-S] [-u user] cmd` (admins only, asks *your* password; `-S` reads it from stdin
+  for scripts; no credential caching), `passwd [user]`. `su`, `sudo` and `passwd` are
+  set-user-ID root (initramfs.list mode 4755). Failures cost a second.
+
+### Login API for the desktop (`kernel/src/proc/login.rs`)
+
+```rust
+proc::login::authenticate(name, password) -> Result<Account, LoginError>
+proc::login::login(name, password) -> Result<Account, LoginError> // + becomes the session user
+proc::login::session() -> Account          // who is logged in (boot: milk)
+proc::login::set_session(account)          // no password check (e.g. after authenticate)
+proc::login::lookup(name) / lookup_uid(uid) -> Option<Account>
+Account { name, uid, gid, groups, gecos, home, shell } .cred() .env() .is_admin()
+```
+
+After `login`, everything the desktop starts (`proc::spawn`, `spawn_with_caps`,
+`spawn_on`) runs as that account; processes already running keep their ids. A failed
+try costs 500 ms and is audited (`login.fail`). The lock screen can become a login
+screen by calling `authenticate` (unlock) or `login` (switch user).
+
 ## The capability sandbox
 
 Files: `kernel/src/proc/caps.rs` (the model), enforcement in `proc/syscall.rs` (openat,

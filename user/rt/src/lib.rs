@@ -22,6 +22,7 @@ pub mod sha512;
 pub mod sys;
 pub mod table;
 pub mod thread;
+pub mod users;
 pub mod version;
 
 use alloc::string::String;

@@ -85,6 +85,16 @@ pub mod nr {
     pub const GETTIMEOFDAY: u64 = 169;
     pub const GETPID: u64 = 172;
     pub const GETPPID: u64 = 173;
+    pub const SETREGID: u64 = 143;
+    pub const SETGID: u64 = 144;
+    pub const SETREUID: u64 = 145;
+    pub const SETUID: u64 = 146;
+    pub const SETRESUID: u64 = 147;
+    pub const GETRESUID: u64 = 148;
+    pub const SETRESGID: u64 = 149;
+    pub const GETRESGID: u64 = 150;
+    pub const GETGROUPS: u64 = 158;
+    pub const SETGROUPS: u64 = 159;
     pub const GETUID: u64 = 174;
     pub const GETEUID: u64 = 175;
     pub const GETGID: u64 = 176;
@@ -109,6 +119,40 @@ pub mod nr {
 
 pub fn init() {
     exceptions::set_syscall_handler(handle);
+}
+
+fn cred() -> super::cred::Cred {
+    *current().cred.lock()
+}
+
+/// Apply an id change to the calling process (all its threads); audited when it changes.
+fn set_cred(what: &str, f: impl FnOnce(&mut super::cred::Cred) -> KResult<()>) -> KResult<usize> {
+    let p = current();
+    let (before, after) = {
+        let mut c = p.cred.lock();
+        let before = *c;
+        f(&mut c)?;
+        (before, *c)
+    };
+    if before != after {
+        crate::audit!(
+            "cred",
+            "{what} uid {}/{}/{} -> {}/{}/{} gid {}/{}/{} -> {}/{}/{}",
+            before.ruid,
+            before.euid,
+            before.suid,
+            after.ruid,
+            after.euid,
+            after.suid,
+            before.rgid,
+            before.egid,
+            before.sgid,
+            after.rgid,
+            after.egid,
+            after.sgid
+        );
+    }
+    Ok(0)
 }
 
 /// Bitmap of syscall numbers already reported as unimplemented (0..512).
@@ -434,7 +478,57 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         nr::UNAME => sys_uname(a0),
         nr::GETPID => Ok(sched::current_pid() as usize),
         nr::GETPPID => Ok(current().inner.lock().ppid as usize),
-        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Ok(0),
+        nr::GETUID => Ok(cred().ruid as usize),
+        nr::GETEUID => Ok(cred().euid as usize),
+        nr::GETGID => Ok(cred().rgid as usize),
+        nr::GETEGID => Ok(cred().egid as usize),
+        nr::SETUID => set_cred("setuid", |c| c.setuid(a[0] as u32)),
+        nr::SETGID => set_cred("setgid", |c| c.setgid(a[0] as u32)),
+        nr::SETREUID => set_cred("setreuid", |c| c.setreuid(a[0] as u32, a[1] as u32)),
+        nr::SETREGID => set_cred("setregid", |c| c.setregid(a[0] as u32, a[1] as u32)),
+        nr::SETRESUID => set_cred("setresuid", |c| {
+            c.setresuid(a[0] as u32, a[1] as u32, a[2] as u32)
+        }),
+        nr::SETRESGID => set_cred("setresgid", |c| {
+            c.setresgid(a[0] as u32, a[1] as u32, a[2] as u32)
+        }),
+        nr::GETRESUID | nr::GETRESGID => {
+            let c = cred();
+            let v = if nr == nr::GETRESUID {
+                [c.ruid, c.euid, c.suid]
+            } else {
+                [c.rgid, c.egid, c.sgid]
+            };
+            for (i, addr) in [a0, a1, a2].into_iter().enumerate() {
+                with_space(|s| s.copy_out(addr, &v[i].to_le_bytes()))?;
+            }
+            Ok(0)
+        }
+        nr::GETGROUPS => {
+            let c = cred();
+            let g = c.groups();
+            if a0 == 0 {
+                return Ok(g.len());
+            }
+            if a0 < g.len() {
+                return Err(EINVAL);
+            }
+            let bytes: Vec<u8> = g.iter().flat_map(|x| x.to_le_bytes()).collect();
+            with_space(|s| s.copy_out(a1, &bytes))?;
+            Ok(g.len())
+        }
+        nr::SETGROUPS => {
+            if a0 > super::cred::NGROUPS_MAX {
+                return Err(EINVAL);
+            }
+            let mut raw = alloc::vec![0u8; a0 * 4];
+            with_space(|s| s.copy_in(a1, &mut raw))?;
+            let g: Vec<u32> = raw
+                .chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            set_cred("setgroups", |c| c.setgroups(&g))
+        }
         nr::GETTID => Ok(sched::current_tid() as usize),
 
         nr::BRK => with_space(|s| Ok(s.set_brk(a0))),

@@ -17,6 +17,12 @@
 /bin/cat     target/user/aarch64-unknown-none-softfloat/release/cat     755
 /bin/chroot  target/user/aarch64-unknown-none-softfloat/release/chroot  755
 /bin/sandbox target/user/aarch64-unknown-none-softfloat/release/sandbox 755
+/bin/whoami  target/user/aarch64-unknown-none-softfloat/release/whoami  755
+/bin/id      target/user/aarch64-unknown-none-softfloat/release/id      755
+# Set-user-ID root (4755): they check a password themselves, then switch ids.
+/bin/su      target/user/aarch64-unknown-none-softfloat/release/su      4755
+/bin/sudo    target/user/aarch64-unknown-none-softfloat/release/sudo    4755
+/bin/passwd  target/user/aarch64-unknown-none-softfloat/release/passwd  4755
 /bin/clear   target/user/aarch64-unknown-none-softfloat/release/clear   755
 /bin/cp      target/user/aarch64-unknown-none-softfloat/release/cp      755
 /bin/echo    target/user/aarch64-unknown-none-softfloat/release/echo    755

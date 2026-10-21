@@ -15,7 +15,9 @@ pub struct Proc {
     /// CPU time used so far (all threads).
     pub cpu_ns: u64,
     pub start_ns: u64,
-    /// The capability line, once the kernel provides one.
+    /// The effective user id.
+    pub uid: u32,
+    /// The capability line: `all`, or `fs=<paths|all|none> net=<none|local|all> audio=0|1 ...`.
     pub caps: Option<String>,
     /// CPU use over the last interval in tenths of a percent (1000 = one whole core).
     pub cpu10: u32,
@@ -49,6 +51,13 @@ pub fn parse_status(text: &str) -> Option<Proc> {
             "CpuNs" => p.cpu_ns = v.parse().unwrap_or(0),
             "StartNs" => p.start_ns = v.parse().unwrap_or(0),
             "Caps" => p.caps = Some(v.to_string()),
+            "Uid" => {
+                p.uid = v
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0)
+            }
             _ => {}
         }
     }
@@ -112,21 +121,74 @@ pub fn is_system(p: &Proc) -> bool {
     p.pid <= 1 || matches!(p.name.as_str(), "init" | "wm" | "kernel")
 }
 
-/// Plain-English sandbox column: `Some("Sandboxed")` when the capability line restricts files,
-/// `None` when it does not (or the kernel gives no line). `fs=all` / `fs=unrestricted` mean open.
+/// "Sandboxed" when the capability line is anything but `all` (a restricted set of files, network,
+/// devices or spawning), `None` when the process is unrestricted or the kernel gives no line.
 pub fn sandbox_label(p: &Proc) -> Option<&'static str> {
-    let caps = p.caps.as_deref()?;
-    let fs = caps
-        .split_whitespace()
-        .find_map(|w| w.strip_prefix("fs="))?;
-    (fs != "all" && fs != "unrestricted" && fs != "*").then_some("Sandboxed")
+    let caps = p.caps.as_deref()?.trim();
+    (!caps.is_empty() && caps != "all").then_some("Sandboxed")
+}
+
+/// What a capability line means for a person.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapsView {
+    /// "Everything", "Nothing", "Its own folder", "Its own folder and 2 files you chose" ...
+    pub can_read: String,
+    /// "Yes", "Local only", "None".
+    pub network: &'static str,
+}
+
+/// Explain a capability line in plain English. `None` for an empty or unreadable line.
+pub fn explain_caps(caps: &str) -> Option<CapsView> {
+    let caps = caps.trim();
+    if caps.is_empty() {
+        return None;
+    }
+    if caps == "all" {
+        return Some(CapsView {
+            can_read: "Everything".to_string(),
+            network: "Yes",
+        });
+    }
+    let get = |k: &str| caps.split_whitespace().find_map(|w| w.strip_prefix(k));
+    let fs = get("fs=")?;
+    let can_read = match fs {
+        "all" => "Everything".to_string(),
+        "none" => "Nothing".to_string(),
+        list => {
+            let grants: Vec<&str> = list.split(',').filter(|g| !g.is_empty()).collect();
+            // Its own folder: /Applications/<app> or ~/Library/<app> (the two the system gives a packaged app).
+            let own = |g: &str| {
+                let path = g.rsplit_once(':').map_or(g, |(p, _)| p);
+                path.starts_with("/Applications/") || path.contains("/Library/")
+            };
+            let own_n = grants.iter().filter(|g| own(g)).count();
+            let files = grants.len() - own_n;
+            match (own_n > 0, files) {
+                (true, 0) => "Its own folder".to_string(),
+                (true, n) => alloc::format!(
+                    "Its own folder and {n} file{} you chose",
+                    if n == 1 { "" } else { "s" }
+                ),
+                (false, 0) => "Nothing".to_string(),
+                (false, n) => {
+                    alloc::format!("{n} place{} you chose", if n == 1 { "" } else { "s" })
+                }
+            }
+        }
+    };
+    let network = match get("net=") {
+        Some("none") => "None",
+        Some("local") => "Local only",
+        _ => "Yes",
+    };
+    Some(CapsView { can_read, network })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const STATUS: &str = "Name:\tmoo2048\nState:\tS (sleeping)\nTgid:\t12\nPid:\t12\nPPid:\t4\nVmRSS:\t2048 kB\nThreads:\t3\nCpuNs:\t5000000\nStartNs:\t1000\nCaps:\tfs=/Applications/moo2048:r net=none\n";
+    const STATUS: &str = "Name:\tmoo2048\nState:\tS (sleeping)\nTgid:\t12\nPid:\t12\nPPid:\t4\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t2048 kB\nThreads:\t3\nCpuNs:\t5000000\nStartNs:\t1000\nCaps:\tfs=/Applications/moo2048:r,/home/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0\n";
 
     #[test]
     fn parses_a_status() {
@@ -139,13 +201,16 @@ mod tests {
             (p.rss_kb, p.threads, p.cpu_ns, p.start_ns),
             (2048, 3, 5_000_000, 1000)
         );
+        assert_eq!(p.uid, 1000);
         assert_eq!(sandbox_label(&p), Some("Sandboxed"));
         assert!(parse_status("Name:\tx\n").is_none());
         let mut q = p.clone();
         q.caps = None;
         assert_eq!(sandbox_label(&q), None);
-        q.caps = Some("fs=all net=all".into());
+        q.caps = Some("all".into());
         assert_eq!(sandbox_label(&q), None);
+        q.caps = Some("fs=all net=none audio=1 clipboard=1 windows=1 spawn=1".into());
+        assert_eq!(sandbox_label(&q), Some("Sandboxed")); // only the network is restricted
     }
 
     fn proc(pid: u32, name: &str, cpu_ns: u64, rss: u64) -> Proc {
@@ -158,6 +223,26 @@ mod tests {
             threads: 1,
             ..Proc::default()
         }
+    }
+
+    #[test]
+    fn caps_in_plain_english() {
+        let v = explain_caps("all").unwrap();
+        assert_eq!((v.can_read.as_str(), v.network), ("Everything", "Yes"));
+        let v = explain_caps("fs=/Applications/moo2048:r,/home/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0").unwrap();
+        assert_eq!((v.can_read.as_str(), v.network), ("Its own folder", "None"));
+        let v = explain_caps("fs=/Applications/x:r,/home/milk/Documents/a.txt:r,/home/milk/Documents/b.txt:rw net=local audio=0 clipboard=0 windows=1 spawn=0").unwrap();
+        assert_eq!(
+            (v.can_read.as_str(), v.network),
+            ("Its own folder and 2 files you chose", "Local only")
+        );
+        let v = explain_caps("fs=none net=none audio=0 clipboard=0 windows=0 spawn=0").unwrap();
+        assert_eq!(v.can_read, "Nothing");
+        let v = explain_caps("fs=/home/milk/a.txt:r net=all audio=1 clipboard=1 windows=1 spawn=1")
+            .unwrap();
+        assert_eq!(v.can_read, "1 place you chose");
+        assert_eq!(explain_caps(""), None);
+        assert_eq!(explain_caps("garbage"), None);
     }
 
     #[test]

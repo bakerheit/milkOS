@@ -56,6 +56,8 @@ fn main(args: &rt::Args) -> i32 {
             paths.alarms, paths.timers, paths.calendars
         );
     }
+    // Create the boot id now, as the user who starts the daemon (init), so apps only ever read it.
+    let _ = timeio::boot_id();
     let mut last = timeio::now_secs();
     loop {
         // Wake just after the second changes.

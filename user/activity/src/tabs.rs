@@ -206,13 +206,33 @@ impl App {
                 &widgets::fit(&format!("Program   {exe}"), panel.w - 32),
                 th.cocoa,
             );
-            let fds = rt::sys::read_dir(&format!("/proc/{}/fd", p.pid)).map_or(0, |v| v.len());
+            // /proc/<pid>/fd is private to the process's user (and root).
+            let fds = match rt::sys::read_dir(&format!("/proc/{}/fd", p.pid)) {
+                Ok(v) => format!("{} open files   ", v.len()),
+                Err(_) => String::new(),
+            };
             win.text(
                 panel.x + 16,
                 panel.y + 74,
-                &format!("{fds} open files   {} threads", p.threads),
+                &format!(
+                    "{fds}{} threads   user {}",
+                    p.threads,
+                    self.s.user_name(p.uid)
+                ),
                 th.cocoa,
             );
+            let explained = p.caps.as_deref().and_then(sysview::proc::explain_caps);
+            if let Some(v) = explained {
+                win.text(
+                    panel.x + 16,
+                    panel.y + 94,
+                    &widgets::fit(
+                        &format!("Can read {}   Network {}", v.can_read, v.network),
+                        panel.w - 32,
+                    ),
+                    th.cocoa,
+                );
+            }
             let (n, last) = self.s.refusals(p.pid);
             if n > 0 {
                 let t = format!(
@@ -222,17 +242,17 @@ impl App {
                 );
                 win.text(
                     panel.x + 16,
-                    panel.y + 94,
+                    panel.y + 114,
                     &widgets::fit(&t, panel.w - 32),
                     th.danger,
                 );
             } else {
-                win.text(panel.x + 16, panel.y + 94, "Nothing refused", th.cocoa);
+                win.text(panel.x + 16, panel.y + 114, "Nothing refused", th.cocoa);
             }
             if is_system(&p) {
                 win.text(
                     panel.x + 16,
-                    panel.y + 114,
+                    panel.y + 130,
                     "System processes can not be quit",
                     th.cocoa,
                 );

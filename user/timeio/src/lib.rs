@@ -76,14 +76,30 @@ pub fn read_text(path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// `mkdir -p`.
+/// When root (alarmd, a root shell) creates something in a user's folder, give it to that
+/// folder's owner, so the user's own apps can still change it.
+fn inherit_owner(path: &str) {
+    if sys::geteuid() != 0 {
+        return;
+    }
+    let parent = path
+        .rfind('/')
+        .map_or("/", |i| if i == 0 { "/" } else { &path[..i] });
+    if let Ok(st) = sys::stat_path(parent, true)
+        && st.uid != 0
+    {
+        let _ = sys::chown(path, st.uid, st.gid);
+    }
+}
+
+/// `mkdir -p`; each folder it makes belongs to its parent's owner.
 pub fn mkdir_p(dir: &str) {
     for (i, _) in dir
         .match_indices('/')
         .chain(core::iter::once((dir.len(), "/")))
     {
-        if i > 0 {
-            let _ = sys::mkdir(&dir[..i], 0o755);
+        if i > 0 && sys::mkdir(&dir[..i], 0o755).is_ok() {
+            inherit_owner(&dir[..i]);
         }
     }
 }
@@ -98,6 +114,7 @@ pub fn write_atomic(path: &str, text: &str) -> sys::Result<()> {
     let r = sys::write_all(fd, text.as_bytes());
     let _ = sys::close(fd);
     r?;
+    inherit_owner(&tmp);
     sys::rename(&tmp, path)
 }
 
@@ -157,8 +174,18 @@ pub fn boot_id() -> u64 {
             let _ = sys::close(fd);
             id
         }
-        Err(_) => read().unwrap_or(id), // another process created it first
+        // Another process created it first, or this user may not create it (alarmd, started at
+        // boot, normally has): fall back to a number every process in this boot agrees on.
+        Err(_) => read().unwrap_or_else(stable_boot_id),
     }
+}
+
+/// The wall clock minus the monotonic clock is the same for every process until the clock is set,
+/// and different after a reboot; four-second buckets absorb the jitter between two reads.
+fn stable_boot_id() -> u64 {
+    let since_boot =
+        sys::clock_ns(sys::CLOCK_REALTIME).saturating_sub(sys::clock_ns(sys::CLOCK_MONOTONIC));
+    (since_boot / 4_000_000_000) | 1
 }
 
 pub fn load_alarms(p: &Paths) -> (Alarms, usize) {

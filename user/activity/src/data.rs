@@ -44,6 +44,8 @@ pub struct Sampler {
     pub ram_disk_kb: u64,
     pub audit: Vec<Record>,
     pub total_records: u64,
+    /// uid -> account name, from /etc/passwd.
+    pub users: Vec<(u32, String)>,
     prev_ns: u64,
     prev_disk: Option<(u64, u64)>,
     prev_irq: Option<[u64; 4]>,
@@ -138,7 +140,23 @@ impl Sampler {
             self.total_records = n;
             self.audit = audit::parse_log(&text("/proc/audit"));
         }
+        if self.users.is_empty() {
+            self.users = text("/etc/passwd")
+                .lines()
+                .filter_map(|l| {
+                    let f: Vec<&str> = l.split(':').collect();
+                    Some((f.get(2)?.parse().ok()?, String::from(*f.first()?)))
+                })
+                .collect();
+        }
         self.prev_ns = now;
+    }
+
+    pub fn user_name(&self, uid: u32) -> String {
+        self.users
+            .iter()
+            .find(|(u, _)| *u == uid)
+            .map_or_else(|| format!("uid {uid}"), |(_, n)| n.clone())
     }
 
     pub fn total_cpu_pct(&self) -> u32 {

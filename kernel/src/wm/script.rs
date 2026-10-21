@@ -17,6 +17,8 @@ pub enum Step {
     Ev(Event),
     Toast(&'static str, &'static str),
     Bench,
+    /// Sweep the pointer across the magnified dock, timing every frame.
+    DockBench,
     Log(&'static str),
     Panic,
     /// Pretend nobody touched anything for this many seconds (the idle lock).
@@ -1203,6 +1205,37 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
             b.glide(600, 400, x - 60, y + 40, 8).wait(200);
         }
+        // Dock magnification (dock.rs): the pointer over the middle, the left end and the right
+        // end of the dock; dock-bench sweeps it across the whole dock timing every frame
+        // (dock-bench-1440 at 1440x900).
+        "dock-magnify" | "dock-magnify-left" | "dock-magnify-right" | "dock-magnify-enter" => {
+            let n = super::shell::dock_len();
+            let i = match name {
+                "dock-magnify-left" => 1,
+                "dock-magnify-right" => n - 2,
+                _ => n / 2,
+            };
+            let (x, y) = dock_icon_center(i);
+            if name == "dock-magnify-enter" {
+                // Caught mid-ease (with slow- it lasts 20x as long).
+                b.glide(x, 420, x, y, 4).wait(60);
+            } else {
+                b.glide(512, 420, x, y, 12).wait(400);
+            }
+        }
+        "settings-dock" => {
+            // Settings > Dock: icon size, Magnification on / off and its size.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(241, 113 + 136).wait(400);
+        }
+        "dock-bench" | "dock-bench-1440" => {
+            if name == "dock-bench-1440" {
+                b.0.push(Step::Resolution(1440, 900));
+                b.wait(800);
+            }
+            b.0.push(Step::DockBench);
+            b.wait(200);
+        }
         "drop-bob-wait" | "drop-bob-accept" | "drop-bob-received" => {
             b.wait(300).typ("drop name bob").enter().wait(1500);
             b.typ("open milkdrop").enter().wait(1000);
@@ -1387,6 +1420,7 @@ impl Script {
                 }
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
+                Step::DockBench => d.bench_dock(),
                 Step::Idle(s) => d.pretend_idle(*s),
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);

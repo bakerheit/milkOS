@@ -31,6 +31,10 @@ pub struct Prefs {
     pub resolution: (i32, i32),
     /// Show the Welcome window at startup (until "Don't show again").
     pub welcome: bool,
+    /// Dock magnification (macOS-style) and how big the icon under the pointer gets, in
+    /// percent of the dock size (125..=200).
+    pub magnify: bool,
+    pub magnify_pct: i32,
 }
 
 impl Prefs {
@@ -43,6 +47,8 @@ impl Prefs {
         lock_mins: 0,
         resolution: (1024, 768),
         welcome: true,
+        magnify: true,
+        magnify_pct: 175,
     };
 
     /// The idle times Settings offers (minutes; 0 = never).
@@ -56,7 +62,7 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\nmagnify = {}\nmagnify_size = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
@@ -68,7 +74,9 @@ impl Prefs {
             },
             self.resolution.0,
             self.resolution.1,
-            if self.welcome { "on" } else { "off" }
+            if self.welcome { "on" } else { "off" },
+            if self.magnify { "on" } else { "off" },
+            self.magnify_pct
         )
     }
 
@@ -84,6 +92,8 @@ impl Prefs {
                 "wallpaper" => p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v),
                 "sound" => p.sound = v != "off",
                 "welcome" => p.welcome = v != "off",
+                "magnify" => p.magnify = v != "off",
+                "magnify_size" => p.magnify_pct = v.parse().unwrap_or(175).clamp(125, 200),
                 "lock" => p.lock_mins = v.parse().unwrap_or(0).min(24 * 60),
                 "resolution" => {
                     if let Some((w, h)) = v.split_once('x')

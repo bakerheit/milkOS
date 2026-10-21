@@ -48,6 +48,9 @@ enum Hit {
     Theme(bool),
     Wallpaper(Option<Kind>),
     Brightness,
+    /// Dock magnification on / off, and its size slider.
+    Magnify(bool),
+    MagnifySize,
     Dock(i32),
     TmToggle,
     TmNow,
@@ -69,6 +72,9 @@ pub struct Settings {
     /// Brightness slider being dragged.
     dragging: bool,
     track: Rect,
+    /// The magnification size slider being dragged, and its track.
+    dragging_mag: bool,
+    mag_track: Rect,
     tm_status: String,
     tm_count: usize,
     last_sec: u64,
@@ -84,6 +90,8 @@ impl Settings {
             pending: prefs::get(),
             dragging: false,
             track: Rect::new(0, 0, 0, 0),
+            dragging_mag: false,
+            mag_track: Rect::new(0, 0, 0, 0),
             tm_status: String::new(),
             tm_count: 0,
             last_sec: 0,
@@ -282,6 +290,64 @@ impl Settings {
             }
             p.text_p_center(r.x, r.w, r.y + r.h - 26, name, ESPRESSO, on);
             self.hits.push((r, Hit::Dock(px)));
+        }
+        // Magnification: icons grow under the pointer (macOS-style), and how much.
+        let my = 220;
+        p.text_p(x, my, "Magnification", ESPRESSO, true);
+        p.text_p(
+            x,
+            my + 20,
+            "Icons grow as the pointer moves along the dock.",
+            COCOA,
+            false,
+        );
+        let on = self.pending.magnify;
+        self.button(
+            p,
+            Rect::new(x, my + 44, 90, 30),
+            "On",
+            on,
+            Hit::Magnify(true),
+        );
+        self.button(
+            p,
+            Rect::new(x + 98, my + 44, 90, 30),
+            "Off",
+            !on,
+            Hit::Magnify(false),
+        );
+        let r = Rect::new(x, my + 88, 340, CC_TILE_H);
+        p.rrect_r(r, 16, OAT, 255);
+        let c = if on { ESPRESSO } else { LATTE };
+        p.text_p(x + 14, r.y + 8, "Size", c, true);
+        let v = self.pending.magnify_pct;
+        p.text_right(
+            r.x + r.w - 14,
+            r.y + 8,
+            &format!("{}.{:02}x", v / 100, v % 100),
+            if on { COCOA } else { LATTE },
+            1,
+            false,
+        );
+        self.mag_track = Rect::new(x + 14, r.y + 36, r.w - 28, CC_SLIDER_H);
+        let t = self.mag_track;
+        let f = (v - 125) * t.w / 75;
+        p.rrect(t.x, t.y, t.w, t.h, 4, COCOA, 0x40);
+        p.rrect(t.x, t.y, f.max(8), t.h, 4, c, 255);
+        p.circle(t.x + f - 8, t.y - 4, 16, MILK, 255);
+        p.ring(t.x + f - 8, t.y - 4, 16, 1, SAND, 255);
+        if on {
+            self.hits.push((r, Hit::MagnifySize));
+        }
+    }
+
+    fn set_magnify_at(&mut self, x: i32) {
+        let t = self.mag_track;
+        let v = (125 + (x - t.x) * 75 / t.w.max(1)).clamp(125, 200);
+        if v != self.pending.magnify_pct {
+            let mut p = self.pending;
+            p.magnify_pct = v;
+            self.send(p);
         }
     }
 
@@ -540,12 +606,13 @@ impl WindowContents for Settings {
             match h {
                 Hit::Section(s) if s == self.section => {}
                 Hit::Section(_) => paint_hover(p, r, true),
-                Hit::Brightness => {}
+                Hit::Brightness | Hit::MagnifySize => {}
                 // Buttons paint their own hover (SPEC Buttons).
                 Hit::Resolution(..)
                 | Hit::LockAfter(_)
                 | Hit::LockNow
                 | Hit::Sound(_)
+                | Hit::Magnify(_)
                 | Hit::TestSound
                 | Hit::TmToggle
                 | Hit::TmNow
@@ -560,6 +627,19 @@ impl WindowContents for Settings {
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {
+        if self.dragging_mag {
+            match e.kind {
+                PointerKind::Drag => {
+                    self.set_magnify_at(e.x);
+                    return true;
+                }
+                PointerKind::Up(_) => {
+                    self.dragging_mag = false;
+                    return false;
+                }
+                _ => {}
+            }
+        }
         if self.dragging {
             match e.kind {
                 PointerKind::Drag => {
@@ -594,6 +674,14 @@ impl WindowContents for Settings {
             Hit::Wallpaper(k) => {
                 pr.wallpaper = k;
                 self.send(pr);
+            }
+            Hit::Magnify(on) => {
+                pr.magnify = on;
+                self.send(pr);
+            }
+            Hit::MagnifySize => {
+                self.dragging_mag = true;
+                self.set_magnify_at(e.x);
             }
             Hit::Brightness => {
                 self.dragging = true;
@@ -661,7 +749,7 @@ impl WindowContents for Settings {
         }
         // Follow changes made elsewhere (Control centre brightness).
         let cur = prefs::get();
-        if cur != self.pending && !self.dragging {
+        if cur != self.pending && !self.dragging && !self.dragging_mag {
             self.pending = cur;
             return true;
         }

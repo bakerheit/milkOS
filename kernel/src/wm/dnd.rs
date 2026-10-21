@@ -20,7 +20,7 @@ use crate::gfx::Rect;
 
 use super::apps::{fsx, music, notes};
 use super::icons::{self, Icon};
-use super::paint::{Painter, grow, hit};
+use super::paint::{Painter, grow};
 use super::shell::{self, DockAction};
 use super::theme::*;
 use super::window::App;
@@ -90,8 +90,7 @@ impl Desktop {
     /// What a drop at (x, y) would go to, if anything takes this file.
     fn dnd_target(&self, x: i32, y: i32, path: &str) -> Option<(Target, Rect)> {
         let dir = fsx::is_dir(path);
-        if hit(&shell::dock_rect(), x, y) {
-            let i = shell::dock_index(x - shell::dock_rect().x)?;
+        if let Some(i) = self.dock_layout.hit(x, y) {
             let ok = match shell::dock_action(i)? {
                 DockAction::App(App::Notes) => is_text(path),
                 DockAction::App(App::Music) => is_wav(path),
@@ -99,9 +98,9 @@ impl Desktop {
                 DockAction::Pkg(k) => !dir && super::packages::get(k).is_some_and(|p| p.window),
                 _ => false,
             };
-            let (cx, cy) = shell::dock_icon_center(i);
-            let s = dock_icon();
-            return ok.then_some((Target::Dock(i), Rect::new(cx - s / 2, cy - s / 2, s, s)));
+            let sl = self.dock_layout.slots[i];
+            let r = Rect::new(sl.x, self.dock_layout.bottom - sl.size, sl.size, sl.size);
+            return ok.then_some((Target::Dock(i), r));
         }
         let id = self.window_at(x, y)?;
         let w = self.win(id)?;

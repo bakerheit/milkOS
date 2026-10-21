@@ -66,6 +66,10 @@ pub trait WindowContents {
     fn scroll(&mut self, _dy: i32) -> bool {
         false
     }
+    /// Cmd+W: close a part of the window (a tab) rather than the window. True if it did.
+    fn close_part(&mut self) -> bool {
+        false
+    }
     /// Called every frame with the uptime; for clocks, live stats, log followers.
     fn tick(&mut self, _now_ns: u64) -> bool {
         false

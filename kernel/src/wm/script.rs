@@ -327,6 +327,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "lsbin" => {
             b.wait(300).typ("ls /bin").enter().wait(600);
         }
+        // Terminal tabs (the boot Terminal has the focus).
+        "tabs" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo second tab on $(tty)").enter().wait(300);
+            b.typ("echo second tab").enter().wait(300);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("ls /bin").enter().wait(600);
+        }
+        "tabswitch" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo this is tab 2").enter().wait(300);
+            b.key(Key::Char('1'), Mods::META).wait(300);
+            b.typ("echo back in tab 1").enter().wait(400);
+        }
+        "tabclose" => {
+            // Three tabs, close the third (Cmd+W), then ps in the first: msh on tty1 and
+            // tty2 only.
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('w'), Mods::META).wait(500);
+            b.key(Key::Char('1'), Mods::META).wait(200);
+            b.typ("ps").enter().wait(600);
+        }
+        "tabcmd" => {
+            // Skim's "> cmd" with the Terminal open: a new tab running it.
+            b.wait(300).key(Key::Char(' '), Mods::META).wait(150);
+            b.typ("> uname -a").wait(200).enter().wait(1200);
+        }
         "sigint" => {
             b.wait(300).typ("sleep 9").enter().wait(1000);
             b.key(Key::Char('c'), Mods::CTRL)

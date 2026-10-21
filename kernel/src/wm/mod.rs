@@ -1102,7 +1102,10 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::NewTab(cmd) => {
-                    if let Some(c) = cmd {
+                    // A tab in the open Terminal, or the Terminal itself (its first tab).
+                    if self.windows.iter().any(|w| w.app == App::Terminal) {
+                        apps::terminal::queue_tab(cmd);
+                    } else if let Some(c) = cmd {
                         apps::terminal::queue_command(&c);
                     }
                     self.open(App::Terminal);
@@ -1620,7 +1623,13 @@ impl Desktop {
             match k.key {
                 Key::Char('w') => {
                     if let Some(id) = self.focus {
-                        self.close(id);
+                        if let Some(w) = self.win_mut(id)
+                            && w.contents.close_part()
+                        {
+                            w.dirty = true;
+                        } else {
+                            self.close(id);
+                        }
                     }
                 }
                 Key::Char('m') => {

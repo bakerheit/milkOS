@@ -240,9 +240,24 @@ The fingerprint people compare is the first 8 bytes of SHA-256(public key) in fo
 (`3fa2 91bc 07de 44a1`). The default name is `<hostname>-<first 4 fingerprint digits>`;
 `drop name alice` changes it. The secret is only as safe as the system: everything runs as
 uid 0, so any program could read it. `milk run-try` sandboxes keep tried apps away from
-their clone's `/etc`. The key comes from SHA-512 over `/dev/urandom` (a xorshift seeded at
-boot, weak on its own), clock jitter, the wall clock, uname and the MACs: good enough for a
-demo, not a real CSPRNG. There is no hardware RNG device yet.
+their clone's `/etc`. Keys come from the kernel CSPRNG (`/dev/urandom`: ChaCha20 seeded
+from virtio-rng, docs/crypto.md), and `identity.secret` records that (`rng=kernel-csprng`).
+
+**Old keys must be rotated.** Identities made before the kernel CSPRNG came from a weak
+generator: a xorshift seeded from the boot counter, stirred with clock jitter. Such a
+secret may be guessable. Their `identity.secret` has no `rng=` tag, and `drop id` and the
+daemon print a warning for them. `drop id --rotate` replaces the key:
+
+* a new seed from the CSPRNG;
+* the old key signs `milkdrop-rotate-v1 <old> <new>`, kept in `/etc/milk/drop/rotation`
+  and sent as `rot=<old>:<sig>` in announcements and hellos;
+* the old secret is overwritten.
+
+A peer that trusted the old key checks that signature and moves to the new key without
+the "KEY CHANGED" refusal (`drop: alice rotated its key (signed by its old key ...)`, a
+`user.drop.key_rotated` record); `drop list` shows `rotated`. Only one step is kept: a peer
+that missed a rotation must `drop forget` the name. A key change *without* a valid
+rotation statement is still refused.
 
 **Discovery** ("mDNS-lite"): UDP to the mDNS group 224.0.0.251, but on port 5359 and
 with a one-line text format instead of DNS records. Only milkOS machines are on the link.
@@ -263,21 +278,42 @@ trust (`new` / `known` / `KEY CHANGED`). With `MILK_TABLE=1` it writes a structu
 (`drop list | where receiving == yes`). The daemon also keeps what it hears in
 `/tmp/drop/peers` (`name ip fp recv seen`).
 
-**Transfer** (TCP 5360, on eth1's address only, while `drop recv` runs). Lines end in `\n`:
+**Transfer** (TCP 5360, on eth1's address only, while `drop recv` runs): protocol 2,
+**encrypted**. The hello lines end in `\n`. Everything after them is ChaCha20-Poly1305
+records (`[*]`):
 
 ```text
-R: MILKDROP/1 HELLO recv name=bob key=<Kr> nonce=<Nr>
-S: MILKDROP/1 HELLO send name=alice key=<Ks> nonce=<Ns> sig=Sign_s("milkdrop-hello-v1 send Nr Ns Kr Ks")
-R: AUTH sig=Sign_r("milkdrop-hello-v1 recv Nr Ns Kr Ks")          (or DECLINE key-changed)
-S: OFFER name=<%-escaped> size=<n> sha256=<hex> sig=Sign_s("milkdrop-offer-v1 Nr Ns name size sha")
-R: ACCEPT                                                          (or DECLINE <why>)
-S: <size bytes, 16 KiB writes, progress every 10%>
-R: DONE sha256=<hex>                                               (or BAD sha256=<hex>)
+R: MILKDROP/2 HELLO recv name=bob key=<Kr> nonce=<Nr> dh=<Er> [rot=<old>:<sig>]
+S: MILKDROP/2 HELLO send name=alice key=<Ks> nonce=<Ns> dh=<Es> sig=Sign_s(T("send")) [rot=...]
+R: AUTH sig=Sign_r(T("recv"))                                      (or DECLINE key-changed)
+      T(role) = "milkdrop-hello-v2 role Nr Ns Kr Ks Er Es"
+S: [*] OFFER name=<%-escaped> size=<n> sha256=<hex> sig=Sign_s("milkdrop-offer-v1 Nr Ns name size sha")
+R: [*] ACCEPT                                                      (or DECLINE <why>)
+S: [*] <the file, one record per 16 KiB, progress every 10%>
+R: [*] DONE sha256=<hex>                                           (or BAD sha256=<hex>)
 ```
 
-* Both sides sign the same transcript (both 128-bit nonces and both keys) with their role,
-  so a hello can't be replayed into another session or toward another peer. The sender
-  also checks that the receiver's key is the one it announced.
+* **Key agreement.** Each side makes a fresh X25519 key pair per connection
+  (`rt::crypto::x25519`, from the CSPRNG): `Er` and `Es`. Both sides sign the same
+  transcript with their role. It covers both 128-bit nonces, both Ed25519 identity keys
+  *and both X25519 keys*. So the existing identities authenticate the key agreement:
+  someone in the middle can't substitute their own X25519 key without breaking a
+  signature, and a hello can't be replayed into another session or toward another peer.
+  The sender also checks that the receiver's key is the one it announced. An all-zero
+  shared secret (a low-order point) is refused.
+* **Records**: `[length: u32 BE][ciphertext][Poly1305 tag: 16]`, with the length as
+  additional data.
+  * Keys: one ChaCha20-Poly1305 key per direction,
+    `SHA-256("milkdrop-v2 key s->r" | "... r->s" || shared || Nr || Ns || Er || Es)`.
+  * Nonces: 4 zero bytes and a 64-bit counter per direction, so a record that is
+    altered, dropped, replayed or reordered fails its tag and ends the connection.
+  * Records hold at most 32 KiB.
+  * The ephemeral secrets and the derived keys are wiped once used.
+* Forward secrecy: the session keys come from ephemeral X25519 keys, so a stolen identity
+  secret doesn't decrypt recorded transfers. It would let the thief impersonate the
+  machine from then on, though (rotate!).
+* Protocol 1 (plaintext) is gone: a `MILKDROP/1 HELLO` peer gets "doesn't speak Milk Drop
+  2". Discovery datagrams stay `MILKDROP/1` (public, signed).
 * **Trust on first use**, keyed by name and key (`known_peers`). A new key is shown with
   its fingerprint: the receiver's prompt says `NEW peer, fingerprint ...; accepting trusts
   this key`, and the sender prints `bob is new: fingerprint ... (trusted on first use)`.
@@ -292,12 +328,12 @@ R: DONE sha256=<hex>                                               (or BAD sha25
 * `drop recv` takes one transfer (received, declined or failed) and exits; `-k` keeps
   going, `-y` accepts without asking. Ctrl-C stops it (blocking socket calls now return
   `EINTR` on a pending signal).
-* Not confidential: the data is not encrypted (no key exchange or cipher yet). It is
-  authenticated (both keys proved, offer signed) and integrity-checked (SHA-256), and the
-  link is two VMs on the Mac's loopback.
-* **Audit** (through `/dev/audit`, so recorded as `user.drop.*`): `identity`, `rename`,
-  `trust` (first use), `send` / `recv` (peer, fingerprint, address, file, size, sha256,
-  `result=ok|bad|declined|refused|failed`), `decline`, `key_changed`, `forget`.
+* **Audit** (through `/dev/audit`, so recorded as `user.drop.*`):
+  * `identity`, `rename`;
+  * `trust` (first use);
+  * `send` / `recv`: peer, fingerprint, address, file, size, sha256,
+    `enc=x25519-chacha20poly1305`, `result=ok|bad|declined|refused|failed`;
+  * `decline`, `key_changed`, `rotate`, `key_rotated`, `forget`.
 
 **Hook for the desktop** (a share sheet, or Files "Send to..."): the wm doesn't need to
 speak the protocol. It can run the CLI:
@@ -358,6 +394,15 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
 * bob sends his file to alice (now known both ways);
 * bob loses his key and makes a new one under the same name. alice refuses to send to him,
   loudly, with a `user.drop.key_changed` record;
+* alice `drop id --rotate`s: bob's `drop list` shows her as `rotated`, and he sends her a
+  file over her new key, accepted because her old key signed it (`user.drop.key_rotated`).
+  Before that, alice `drop forget`s bob's unsigned new key;
+* `drop selftest` (the crypto vectors in userland), `rng: kernel CSPRNG` on new keys, and
+  the kernel's `[crypto]` / `[rng]` boot lines;
+* **the wire**: qemu `-object filter-dump` writes each VM's eth1 traffic to a pcap. The
+  plaintext hellos and discovery datagrams must be in it (so the capture works). The canary
+  text (half of `to-bob.bin` is a known sentence repeated), the file name and the offer
+  must not be;
 * Ctrl-C stops a `drop recv -k` waiting in accept;
 * the `user.drop.*` records on both machines;
 * after shutdown, the host reads both received files out of the images (`mkmilkfs.py
@@ -376,5 +421,5 @@ It kills only its own qemus and serial drivers, by PID.
 * Delayed ACKs and Nagle (fewer packets), SACK, IP fragment reassembly, keepalive.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
   default gateway on eth0); IGMP if a multicast router ever appears.
-* Milk Drop: encryption (X25519 + a cipher), resumable transfers, several files or a
-  folder per offer, a hardware RNG (virtio-rng) for keys.
+* Milk Drop: resumable transfers, several files or a folder per offer, a rotation chain
+  longer than one step.

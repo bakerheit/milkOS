@@ -4,7 +4,6 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use rt::sha512::Sha512;
 use rt::{ed25519, sys};
 
 pub const DIR: &str = "/etc/milk/drop";
@@ -76,38 +75,96 @@ pub fn write_atomic(path: &str, data: &[u8], mode: u32) -> Result<(), String> {
     sys::rename(&tmp, path).map_err(|e| alloc::format!("{path}: {e}"))
 }
 
-/// Random bytes for keys and nonces: /dev/urandom (a xorshift seeded from the boot
-/// counter: weak on its own) stirred with clock jitter, the wall clock, uname and the
-/// machine's MAC addresses through SHA-512. Fine for a hobby OS demo; not a CSPRNG.
+/// Random bytes for keys and nonces: the kernel CSPRNG (ChaCha20, seeded from virtio-rng;
+/// docs/crypto.md) through /dev/urandom.
 pub fn random<const N: usize>() -> [u8; N] {
-    let mut h = Sha512::new();
-    let mut u = [0u8; 64];
-    if let Ok(fd) = sys::open("/dev/urandom", sys::O_RDONLY | sys::O_CLOEXEC) {
-        let _ = sys::read(fd, &mut u);
-        let _ = sys::close(fd);
-    }
-    h.update(&u);
-    h.update(&sys::clock_ns(sys::CLOCK_REALTIME).to_le_bytes());
-    for _ in 0..64 {
-        let a = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        let _ = sys::getpid();
-        let b = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        h.update(&(b.wrapping_sub(a) ^ b).to_le_bytes());
-    }
-    if let Some(t) = text("/proc/net/ifaddr") {
-        h.update(t.as_bytes());
-    }
-    if let Ok(u) = sys::uname() {
-        for f in &u {
-            h.update(f.as_bytes());
+    let mut out = [0u8; N];
+    let fd = sys::open("/dev/urandom", sys::O_RDONLY | sys::O_CLOEXEC).expect("drop: /dev/urandom");
+    let mut got = 0;
+    while got < N {
+        match sys::read(fd, &mut out[got..]) {
+            Ok(n) if n > 0 => got += n,
+            _ => panic!("drop: reading /dev/urandom failed"),
         }
     }
-    h.update(&sys::getpid().to_le_bytes());
-    let d = h.finish();
-    let mut out = [0u8; N];
-    let n = N.min(d.len());
-    out[..n].copy_from_slice(&d[..n]);
+    let _ = sys::close(fd);
     out
+}
+
+/// Which RNG made the key in identity.secret: `rng=kernel-csprng` from this release on;
+/// no tag = the old weak generator (rotate it: `drop id --rotate`).
+pub const RNG_TAG: &str = "rng=kernel-csprng";
+
+/// Was the current key made by the old, weak RNG (no `rng=` tag in identity.secret)?
+pub fn legacy_key() -> bool {
+    text(SECRET).is_some_and(|t| !t.contains(RNG_TAG))
+}
+
+fn write_secret(seed: &[u8; 32]) -> Result<(), String> {
+    write_atomic(
+        SECRET,
+        alloc::format!(
+            "ed25519-seed {} {RNG_TAG} made={}\n# Milk Drop identity of this machine: never copy it anywhere.\n",
+            hex(seed),
+            sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000
+        )
+        .as_bytes(),
+        0o600,
+    )
+}
+
+const ROTATION: &str = "/etc/milk/drop/rotation";
+
+/// A rotation statement: the previous key and its signature over "old -> new".
+#[derive(Clone)]
+pub struct Rotation {
+    pub old: [u8; 32],
+    pub sig: [u8; 64],
+}
+
+/// The statement for the current key, if it replaced an older one.
+pub fn rotation(current: &[u8; 32]) -> Option<Rotation> {
+    let t = text(ROTATION)?;
+    let mut w = t.split_whitespace();
+    if w.next()? != "ed25519-rotate" {
+        return None;
+    }
+    let old = ed25519::unhex::<32>(w.next()?)?;
+    let new = ed25519::unhex::<32>(w.next()?)?;
+    let sig = ed25519::unhex::<64>(w.next()?)?;
+    (&new == current).then_some(Rotation { old, sig })
+}
+
+/// Replace this machine's key with a fresh one from the kernel CSPRNG. The old key signs
+/// the new one (so peers that trusted it move over without a "key changed" refusal) and
+/// is then wiped. Returns (old public key, new identity).
+pub fn rotate(id: &Identity) -> Result<([u8; 32], Identity), String> {
+    let mut seed = random::<32>();
+    let public = ed25519::public_key(&seed);
+    let sig = ed25519::sign(
+        &id.seed,
+        crate::proto::rotation_msg(&id.public, &public).as_bytes(),
+    );
+    write_atomic(
+        ROTATION,
+        alloc::format!(
+            "ed25519-rotate {} {} {}\n# The old key above signed the new one (drop id --rotate).\n",
+            hex(&id.public),
+            hex(&public),
+            hex(&sig)
+        )
+        .as_bytes(),
+        0o644,
+    )?;
+    write_secret(&seed)?;
+    let new = Identity {
+        seed,
+        public,
+        name: id.name.clone(),
+    };
+    save_public(&new)?;
+    rt::crypto::wipe(&mut seed);
+    Ok((id.public, new))
 }
 
 fn hostname() -> String {
@@ -153,15 +210,7 @@ pub fn load_or_create() -> Result<(Identity, bool), String> {
         .map(|n| String::from(n.trim()))
         .filter(|n| name_ok(n))
         .unwrap_or_else(|| default_name(&public));
-    write_atomic(
-        SECRET,
-        alloc::format!(
-            "ed25519-seed {}\n# Milk Drop identity of this machine: never copy it anywhere.\n",
-            hex(&seed)
-        )
-        .as_bytes(),
-        0o600,
-    )?;
+    write_secret(&seed)?;
     let id = Identity { seed, public, name };
     save_public(&id)?;
     Ok((id, true))
@@ -224,12 +273,34 @@ fn save_known(k: &[Known]) -> Result<(), String> {
 }
 
 pub enum Trust {
+    /// The name's trusted key signed this new key (`drop id --rotate` on the peer).
+    Rotated { old: [u8; 32] },
     /// This key was trusted before (under `as_name`, maybe a different name).
     Known { as_name: String },
     /// Never seen: trust on first use.
     New,
     /// The name is known with a different key: refuse.
     Changed { old: [u8; 32] },
+}
+
+/// Trust, taking a rotation statement into account: a changed key is accepted when the
+/// key we trusted signed it.
+pub fn trust_rotated(name: &str, key: &[u8; 32], rot: Option<&Rotation>) -> Trust {
+    match trust(name, key) {
+        Trust::Changed { old }
+            if rot.is_some_and(|r| {
+                r.old == old
+                    && ed25519::verify(
+                        &old,
+                        crate::proto::rotation_msg(&old, key).as_bytes(),
+                        &r.sig,
+                    )
+            }) =>
+        {
+            Trust::Rotated { old }
+        }
+        t => t,
+    }
 }
 
 pub fn trust(name: &str, key: &[u8; 32]) -> Trust {
@@ -245,9 +316,11 @@ pub fn trust(name: &str, key: &[u8; 32]) -> Trust {
     Trust::New
 }
 
-/// Trust `key` as `name` from now on (a known key that changed its name is renamed).
+/// Trust `key` as `name` from now on (a known key that changed its name is renamed; a
+/// rotated key replaces the name's old one).
 pub fn remember(name: &str, key: &[u8; 32]) -> Result<(), String> {
     let mut k = known();
+    k.retain(|e| e.name != name || &e.key == key);
     if let Some(e) = k.iter_mut().find(|e| &e.key == key) {
         if e.name == name {
             return Ok(());

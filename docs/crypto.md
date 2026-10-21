@@ -75,6 +75,11 @@ The kernel's audit log keeps its own SHA-256 (`kernel/src/audit/sha256.rs`) on p
   * getrandom(278), which reads `/dev/urandom`;
   * TCP initial sequence numbers: RFC 6528, SHA-256 of the 4-tuple keyed by a boot-time
     secret from the RNG, plus a 4 µs clock.
+* **Userland users of the primitives**:
+  * `milk`: Ed25519 package signatures, SHA-256;
+  * `audit verify`: SHA-256;
+  * Milk Drop (`user/drop`): Ed25519 identities, X25519 per connection,
+    ChaCha20-Poly1305 records, SHA-256; `drop selftest` runs every vector in userland.
 * **`/proc/rng`**: `seeded= source= reseeds= device_bytes= output_bytes=`.
 
 Not constant-time: `ed25519` (scalar multiplication branches on bits; it signs with Milk

@@ -72,8 +72,21 @@ pub fn draw(
             p.fill(tx + 8 * sc + u(2), ty + 13 * sc, u(11), th(3), fg);
         }
         Icon::Gear => {
-            ring(p, 11, 11, 26, 26, u(13), th(5), fg);
-            rect(p, 20, 20, 8, 8, u(4), fg);
+            // A cog: eight teeth round a ring, so it does not read as a clock.
+            for (a, b, w, h) in [
+                (21, 7, 6, 6),
+                (21, 35, 6, 6),
+                (7, 21, 6, 6),
+                (35, 21, 6, 6),
+                (11, 11, 6, 6),
+                (31, 11, 6, 6),
+                (11, 31, 6, 6),
+                (31, 31, 6, 6),
+            ] {
+                rect(p, a, b, w, h, u(2), fg);
+            }
+            ring(p, 12, 12, 24, 24, u(12), th(5), fg);
+            rect(p, 21, 21, 6, 6, u(3), fg);
         }
         Icon::Note => {
             ring(p, 12, 11, 24, 26, u(3), th(2), fg);
@@ -82,9 +95,12 @@ pub fn draw(
             rect(p, 17, 30, 9, 2, 0, fg);
         }
         Icon::Globe => {
+            // A globe: a wide meridian and three parallels (one thin line read as crosshairs).
             ring(p, 10, 10, 28, 28, u(14), th(3), fg);
-            ring(p, 21, 10, 6, 28, u(3), th(2), fg);
+            ring(p, 17, 10, 14, 28, u(7), th(2), fg);
             rect(p, 10, 23, 28, 2, 0, fg);
+            rect(p, 13, 16, 22, 2, 0, fg);
+            rect(p, 13, 30, 22, 2, 0, fg);
         }
         Icon::Music => {
             rect(p, 14, 28, 11, 9, u(5), fg);
@@ -131,9 +147,15 @@ pub fn draw(
             rect(p, 14, 29, 22, 5, 0, MATCHA);
         }
         Icon::Cal => {
+            // A desk calendar: binder rings on top and a grid of days, today in straw.
             ring(p, 10, 12, 28, 26, u(4), th(3), fg);
             rect(p, 10, 18, 28, 3, 0, fg);
-            rect(p, 17, 26, 5, 5, 0, STRAW);
+            rect(p, 16, 8, 3, 7, u(1), fg);
+            rect(p, 29, 8, 3, 7, u(1), fg);
+            for (a, b) in [(15, 25), (22, 25), (29, 25), (15, 31), (29, 31)] {
+                rect(p, a, b, 4, 3, 0, fg);
+            }
+            rect(p, 21, 30, 6, 5, u(1), STRAW);
         }
         Icon::Doc => {
             ring(p, 14, 9, 20, 30, u(3), th(3), fg);

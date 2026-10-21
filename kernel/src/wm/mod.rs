@@ -20,6 +20,7 @@ pub mod actions;
 mod anim;
 mod apps;
 mod buffer;
+mod button;
 pub mod client;
 pub mod clipboard;
 mod ctl;
@@ -467,7 +468,8 @@ impl Desktop {
         // Apps from manifests before anything lays the dock out (demo scripts aim at it).
         packages::refresh();
         let demo = script::from_fw_cfg();
-        if demo.is_none() {
+        // Not while the Welcome tour is about to open: it announces itself (REVIEW P1 5).
+        if demo.is_none() && !prefs::get().welcome {
             d.post_toast("Welcome to milkOS", "Ctrl+Space: search");
         }
         d.script = demo;
@@ -562,8 +564,15 @@ impl Desktop {
             return;
         }
         let (rect, contents): (Rect, Box<dyn WindowContents>) = apps::create(app);
-        // The "+" of a strip: it opens as a tab there.
+        // The "+" of a strip: it opens as a tab there, if it fits (a client app's buffer
+        // cannot shrink yet; one that does not fit gets its own window).
+        let fits = |w: &Window| {
+            let (mw, mh) = contents.min_body().unwrap_or((0, 0));
+            let b = w.body();
+            mw <= b.w && mh <= b.h - if w.tab_count() < 2 { 6 } else { 0 }
+        };
         if let Some(into) = self.add_tab_to.take()
+            && self.win(into).is_some_and(fits)
             && let Some(w) = self.win_mut(into)
         {
             w.add_tab(app, contents);
@@ -750,6 +759,7 @@ impl Desktop {
             "paint" => return self.launch("/bin/paint"),
             "browser" | "web" => return self.open(App::Browser),
             "music" => return self.open(App::Music),
+            "milkdrop" | "milk drop" => return self.open(App::Drop),
             _ if what.starts_with("http://") || what.starts_with("localhost") => {
                 apps::browser::open_url(what);
                 return self.open(App::Browser);
@@ -1011,8 +1021,11 @@ impl Desktop {
             return;
         };
         let r = w.rect;
-        let nw = nw.clamp(WIN_MIN_W, screen_w() - r.x.max(0));
-        let nh = nh.clamp(WIN_MIN_H, screen_h() - r.y);
+        // Never smaller than a client tab's buffer (clients cannot resize yet).
+        let (mw, mh) = w.min_body();
+        let (mw, mh) = (WIN_MIN_W.max(mw + 2), WIN_MIN_H.max(mh + w.bar_h + 2));
+        let nw = nw.clamp(mw.min(screen_w()), (screen_w() - r.x.max(0)).max(mw));
+        let nh = nh.clamp(mh.min(screen_h()), (screen_h() - r.y).max(mh));
         if (nw, nh) == (r.w, r.h) {
             return;
         }

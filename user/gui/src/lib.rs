@@ -49,6 +49,37 @@ pub const HONEY: Color = rgb(0xEB, 0xB6, 0x50);
 pub const MATCHA: Color = rgb(0x9C, 0xBF, 0x9B);
 pub const BLUE: Color = rgb(0x7F, 0x93, 0xC9);
 pub const LAV: Color = rgb(0xB9, 0xA9, 0xD6);
+/// Fixed in both themes: text and glyphs on straw / honey / blue fills.
+pub const INK: Color = rgb(0x3A, 0x2E, 0x27);
+
+// Buttons (SPEC "Buttons"): straw with ink text, never cream on straw (2.42:1).
+pub const STRAW_HOVER: Color = rgb(0xEA, 0x9A, 0xA4);
+pub const STRAW_PRESSED: Color = rgb(0xDE, 0x7D, 0x89);
+pub const DANGER: Color = rgb(0xB5, 0x47, 0x3B);
+/// Text on danger, #FFFDF8 in both themes.
+pub const DANGER_FG: Color = rgb(0xFF, 0xFD, 0xF8);
+
+/// What kind of button (SPEC "Buttons").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ButtonKind {
+    /// Straw, ink bold text.
+    Primary,
+    /// Oat with a 1px sand border, primary text.
+    Secondary,
+    /// #B5473B with near-white text.
+    Danger,
+    /// Oat with a 1px sand border, latte text (never the only signal).
+    Disabled,
+}
+
+/// The theme's neutrals a button needs (the app knows its theme; gui does not).
+#[derive(Clone, Copy, Debug)]
+pub struct ButtonTheme {
+    pub oat: Color,
+    pub sand: Color,
+    pub text: Color,
+    pub latte: Color,
+}
 
 /// Special keys (printable keys arrive as their character).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -399,6 +430,35 @@ impl Window {
     pub fn bold(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
         self.text(x, y, s, c);
         self.text(x + 1, y, s, c)
+    }
+
+    /// A button (SPEC "Buttons"): 24 high is a fully rounded pill, taller is a dialog button
+    /// (radius 8). The label is bold and centred.
+    /// `r` is (x, y, w, h).
+    pub fn button(
+        &mut self,
+        r: (i32, i32, i32, i32),
+        label: &str,
+        kind: ButtonKind,
+        hover: bool,
+        th: ButtonTheme,
+    ) {
+        let (x, y, w, h) = r;
+        let r = if h <= 24 { h / 2 } else { 8 };
+        let (fill, text, border) = match kind {
+            ButtonKind::Primary => (if hover { STRAW_HOVER } else { STRAW }, INK, None),
+            ButtonKind::Secondary => (th.oat, th.text, Some(th.sand)),
+            ButtonKind::Danger => (DANGER, DANGER_FG, None),
+            ButtonKind::Disabled => (th.oat, th.latte, Some(th.sand)),
+        };
+        if let Some(b) = border {
+            self.rrect(x, y, w, h, r, b);
+            self.rrect(x + 1, y + 1, w - 2, h - 2, (r - 1).max(0), fill);
+        } else {
+            self.rrect(x, y, w, h, r, fill);
+        }
+        let tw = str_width(label, 1) + 1;
+        self.bold(x + (w - tw) / 2, y + (h - 16) / 2, label, text);
     }
 }
 

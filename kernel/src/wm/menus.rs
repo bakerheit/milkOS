@@ -36,6 +36,8 @@ pub enum MenuAction {
     Lock,
     /// File > Browse Versions... for the focused window's document.
     Versions,
+    /// A named command for the focused window's contents (`WindowContents::command`).
+    Command(&'static str),
     /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
     Key(char),
     /// Shown greyed out (no clipboard yet).
@@ -131,8 +133,23 @@ impl Desktop {
                         .is_some_and(|w| w.contents.document_path().is_some());
                 if doc {
                     v.push(item("Browse Versions...", "", MenuAction::Versions));
-                    v.push(sep());
                 }
+                let cmds = if has_win {
+                    self.focused_window()
+                        .map(|w| w.contents.commands())
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                for (label, name) in cmds {
+                    v.push(item(label, "", MenuAction::Command(name)));
+                }
+                v.push(item(
+                    "Receive with Milk Drop",
+                    "",
+                    MenuAction::Open(App::Drop),
+                ));
+                v.push(sep());
                 v.push(item("Close Window", "Cmd+W", win(MenuAction::Close)));
                 v
             }
@@ -308,6 +325,15 @@ impl Desktop {
                     .and_then(|w| w.contents.document_path())
                 {
                     super::apps::versions::show(&p);
+                }
+            }
+            MenuAction::Command(name) => {
+                if let Some(id) = self.focus
+                    && let Some(w) = self.win_mut(id)
+                    && w.contents.command(name)
+                {
+                    w.dirty = true;
+                    self.damage_window(id);
                 }
             }
             MenuAction::Restart => super::power::restart(),

@@ -163,6 +163,7 @@ impl Desktop {
                 x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
             })
             .filter(|w| y < w.rect.y + w.bar_h + 1)
+            .filter(|w| self.fits_into(moving, w))
             .map(|w| (w.id, w.rect.y + w.bar_h + 6));
         let below = target.map(|t| t.1);
         let target = target.map(|t| t.0);
@@ -185,6 +186,18 @@ impl Desktop {
             }
         }
         below
+    }
+
+    /// Would every tab of window `moving` fit in `into`'s body (with the 38px strip)? Client
+    /// apps draw a fixed size buffer, so they never join a smaller tab group.
+    fn fits_into(&self, moving: u32, into: &Window) -> bool {
+        let Some(m) = self.win(moving) else {
+            return false;
+        };
+        let (mw, mh) = m.min_body();
+        let b = into.body();
+        let strip = super::window::STRIP_H - into.bar_h; // 6 more once it has tabs
+        mw <= b.w && mh <= b.h - strip
     }
 
     /// The window being dragged was let go: merge it into the window it was over, if any.

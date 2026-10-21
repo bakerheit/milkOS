@@ -68,8 +68,8 @@ pub fn panic_screen(info: &core::panic::PanicInfo) {
     fb.fill_rounded_rect(x, y, w, h, R_CARD, MILK, 255);
     fb.rounded_rect(x, y, w, h, R_CARD, 1, SAND, 255);
     fb.fill_rounded_rect(x + 24, y + 24, 40, 40, 10, STRAW, 255);
-    font::draw_str_alpha(&mut fb, x + 36, y + 28, "!", MILK, 255, 2);
-    font::draw_str_alpha(&mut fb, x + 37, y + 28, "!", MILK, 255, 2);
+    font::draw_str_alpha(&mut fb, x + 36, y + 28, "!", INK, 255, 2);
+    font::draw_str_alpha(&mut fb, x + 37, y + 28, "!", INK, 255, 2);
     font::draw_str_alpha(&mut fb, x + 80, y + 24, "milkOS stopped", ESPRESSO, 255, 2);
     font::draw_str_alpha(&mut fb, x + 81, y + 24, "milkOS stopped", ESPRESSO, 255, 2);
     font::draw_str_alpha(&mut fb, x + 80, y + 60, "kernel panic", COCOA, 255, 1);

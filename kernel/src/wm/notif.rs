@@ -8,8 +8,8 @@
 //!   82% with a white edge; icon 36 at (10, 10), title bold at (56, 8), time right, one line
 //!   of body at (56, 28) cut with "~". Selected: straw 13% and a straw edge, all text
 //!   primary (SPEC: no secondary text on a selected row). An x on the hovered card dismisses.
-//! * A Today card (date, what's running) and the Do Not Disturb row (44px, a 44x24 switch).
-//!   Do Not Disturb is Focus mode (one setting: the control centre's Focus tile is the same).
+//! * A Today card (date, what's running) and the Focus row (44px, a 44x24 switch): the same
+//!   single setting as the control centre's Focus tile.
 //! * Empty: a check, "All caught up".
 //!
 //! Opening: the menu bar bell (or the clock), Ctrl+N. Closing: Esc, a click outside. Keys:
@@ -384,12 +384,17 @@ impl Desktop {
         p.text_p(
             PAD + 14,
             ty + 52,
-            &format!(
-                "Up {}:{:02}, {n} window{} open",
-                up / 3600,
-                up / 60 % 60,
-                if n == 1 { "" } else { "s" }
-            ),
+            &if up < 60 {
+                // Nothing to say about uptime in the first minute.
+                format!("{n} window{} open", if n == 1 { "" } else { "s" })
+            } else {
+                format!(
+                    "Up {}:{:02}, {n} window{} open",
+                    up / 3600,
+                    up / 60 % 60,
+                    if n == 1 { "" } else { "s" }
+                )
+            },
             COCOA,
             false,
         );
@@ -400,7 +405,7 @@ impl Desktop {
             COCOA,
             false,
         );
-        // Do Not Disturb (= Focus mode).
+        // Focus (holds toasts and sounds).
         let dy = h - PAD - DND_H;
         let on = self.settings.focus_mode;
         if on {
@@ -410,7 +415,14 @@ impl Desktop {
             p.rrect(PAD, dy, cw, DND_H, 14, MILK, a(820));
             p.rrect_stroke(PAD, dy, cw, DND_H, 14, 1, WHITE, a(900));
         }
-        p.text_p(PAD + 14, dy + 14, "Do Not Disturb", ESPRESSO, false);
+        // "Focus", the same single setting as the Control centre tile (SPEC). Focus has no
+        // end time yet, so the sub-line says what is true instead of "On until 12:00".
+        if on {
+            p.text_p(PAD + 14, dy + 4, "Focus", ESPRESSO, true);
+            p.text_p(PAD + 14, dy + 22, "On until you turn it off", COCOA, false);
+        } else {
+            p.text_p(PAD + 14, dy + 14, "Focus", ESPRESSO, false);
+        }
         let sx = PAD + cw - 58;
         p.rrect(sx, dy + 10, 44, 24, 12, if on { STRAW } else { SAND }, 255);
         p.circle(sx + if on { 22 } else { 2 }, dy + 12, 20, MILK, 255);
@@ -733,5 +745,5 @@ pub fn badge(p: &mut Painter, x: i32, y: i32, n: usize) {
     } else {
         format!("{n}")
     };
-    p.text_p_center(x, 18, y + 1, &s, MILK, true);
+    p.text_p_center(x, 18, y + 1, &s, INK, true); // ink on straw: 5.33:1
 }

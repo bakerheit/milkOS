@@ -206,6 +206,26 @@ fn diff_control(arg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where packages live (`milk install`).
+pub const APPLICATIONS: &str = "/Applications";
+
+/// Persistent applications: bind `<volume>/Applications` onto `/Applications` (created
+/// empty the first time), so installed packages survive reboots and are part of the
+/// volume's snapshots and clones (`milk try`). Without a volume it stays on tmpfs.
+pub fn setup_applications() {
+    let Some(vol) = mount_path() else { return };
+    let on_disk = format!("{vol}{APPLICATIONS}");
+    if crate::fs::ops::stat(&on_disk).is_err()
+        && let Err(e) = crate::fs::ops::mkdir_all(&on_disk, 0o755)
+    {
+        kprintln!("milkfs: can't create {on_disk}: {e}; {APPLICATIONS} stays in RAM");
+        return;
+    }
+    if let Err(e) = crate::fs::path::bind(&on_disk, APPLICATIONS) {
+        kprintln!("milkfs: bind {on_disk} -> {APPLICATIONS} failed: {e}");
+    }
+}
+
 // ---- clones -------------------------------------------------------------------------
 
 /// Where each clone of the primary volume is mounted: (name, path).
@@ -290,17 +310,20 @@ pub fn promote_clone(name: &str) -> Result<String> {
     let mut keep = format!("before-{name}");
     keep.truncate(format::SNAP_NAME_MAX);
     unmount_clone(name);
+    if user_op() {
+        crate::audit::before_rewind();
+    }
     let r = v.state.lock().clone_promote(name, &keep);
     crate::fs::pagecache::invalidate_dev(v.dev);
+    if user_op() {
+        crate::audit::volume_rewound();
+    }
     audit_op(
         "milkfs.clone.promote",
         &alloc::format!("name={name} kept_as={keep}"),
         &r,
     );
     r?;
-    if user_op() {
-        crate::audit::volume_rewound();
-    }
     Ok(keep)
 }
 
@@ -364,18 +387,23 @@ pub fn delete_snapshot(name: &str) -> Result<()> {
 /// Roll the primary volume back to snapshot `name` (newer snapshots are deleted).
 pub fn rollback(name: &str) -> Result<()> {
     let v = primary()?;
-    let zombies = {
-        let mut st = v.state.lock();
-        let r = st.snap_rollback(name);
-        crate::fs::pagecache::invalidate_dev(v.dev); // live contents changed underneath
-        r?;
-        st.unlinked_inodes()?
-    };
-    let r = v.reclaim(&zombies);
-    audit_op("milkfs.rollback", &alloc::format!("to={name}"), &r);
+    if user_op() {
+        crate::audit::before_rewind();
+    }
+    let r = (|| {
+        let zombies = {
+            let mut st = v.state.lock();
+            let r = st.snap_rollback(name);
+            crate::fs::pagecache::invalidate_dev(v.dev); // live contents changed underneath
+            r?;
+            st.unlinked_inodes()?
+        };
+        v.reclaim(&zombies)
+    })();
     if user_op() {
         crate::audit::volume_rewound();
     }
+    audit_op("milkfs.rollback", &alloc::format!("to={name}"), &r);
     r
 }
 

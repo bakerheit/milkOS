@@ -152,11 +152,12 @@ fn state_of(p: &Process) -> (char, &'static str) {
 }
 
 fn cpu_ns(p: &Process) -> u64 {
+    thread_of(p).map_or(0, |t| t.cpu_ns)
+}
+
+fn thread_of(p: &Process) -> Option<sched::ThreadInfo> {
     let tid = p.inner.lock().tid;
-    sched::threads()
-        .iter()
-        .find(|t| t.tid == tid)
-        .map_or(0, |t| t.cpu_ns)
+    sched::threads().into_iter().find(|t| t.tid == tid)
 }
 
 fn status(pid: Pid) -> String {
@@ -165,6 +166,7 @@ fn status(pid: Pid) -> String {
     };
     let (st, st_name) = state_of(&p);
     let cpu = cpu_ns(&p);
+    let psr = thread_of(&p).map_or(0, |t| t.cpu);
     let i = p.inner.lock();
     let rss = i.space.as_ref().map_or(0, |s| s.resident()) / 1024;
     let (mut ign, mut cgt) = (0u64, 0u64);
@@ -194,6 +196,7 @@ fn status(pid: Pid) -> String {
     let _ = writeln!(s, "SigCgt:\t{cgt:016x}");
     let _ = writeln!(s, "Tid:\t{}", i.tid);
     let _ = writeln!(s, "CpuNs:\t{cpu}");
+    let _ = writeln!(s, "Cpu:\t{psr}");
     let _ = writeln!(s, "StartNs:\t{}", i.start_ns);
     s
 }
@@ -264,15 +267,16 @@ fn maps(pid: Pid) -> String {
 
 /// `/proc/threads`.
 fn threads() -> String {
-    let mut s = String::from("  TID   PID S PRIO        CPU_NS NAME\n");
+    let mut s = String::from("  TID   PID S PRIO PSR        CPU_NS NAME\n");
     for t in sched::threads() {
         let _ = writeln!(
             s,
-            "{:>5} {:>5} {} {:>4} {:>13} {}",
+            "{:>5} {:>5} {} {:>4} {:>3} {:>13} {}",
             t.tid,
             t.pid,
             t.state.letter(),
             t.prio as u8,
+            t.cpu,
             t.cpu_ns,
             t.name
         );
@@ -280,12 +284,102 @@ fn threads() -> String {
     s
 }
 
-/// Install /proc/self and /proc/threads. After fs::init.
+/// `/proc/cpuinfo`, Linux arm64 style, one block per online CPU.
+fn cpuinfo() -> String {
+    let mut s = String::new();
+    let isar0: u64;
+    // SAFETY: register read (same on every CPU of this machine).
+    unsafe {
+        core::arch::asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack))
+    };
+    let mut feat = String::from("fp asimd evtstrm");
+    let field = |shift: u32| (isar0 >> shift) & 0xf;
+    if field(4) >= 1 {
+        feat.push_str(" aes");
+    }
+    if field(4) >= 2 {
+        feat.push_str(" pmull");
+    }
+    if field(8) >= 1 {
+        feat.push_str(" sha1");
+    }
+    if field(12) >= 1 {
+        feat.push_str(" sha2");
+    }
+    if field(16) >= 1 {
+        feat.push_str(" crc32");
+    }
+    if field(20) >= 2 {
+        feat.push_str(" atomics");
+    }
+    let bogo = timer::frequency() * 2 / 10_000;
+    for c in crate::percpu::online() {
+        let midr = crate::percpu::get(c)
+            .midr
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let _ = writeln!(s, "processor\t: {c}");
+        let _ = writeln!(s, "BogoMIPS\t: {}.{:02}", bogo / 100, bogo % 100);
+        let _ = writeln!(s, "Features\t: {feat}");
+        let _ = writeln!(s, "CPU implementer\t: {:#04x}", (midr >> 24) & 0xff);
+        let _ = writeln!(s, "CPU architecture: 8");
+        let _ = writeln!(s, "CPU variant\t: {:#x}", (midr >> 20) & 0xf);
+        let _ = writeln!(s, "CPU part\t: {:#05x}", (midr >> 4) & 0xfff);
+        let _ = writeln!(s, "CPU revision\t: {}", midr & 0xf);
+        s.push('\n');
+    }
+    s
+}
+
+/// `/proc/stat`: cumulative CPU time per CPU in USER_HZ (100) ticks, Linux layout. milkOS
+/// doesn't split user from system time: all non-idle time is in the "user" column.
+fn stat() -> String {
+    use core::sync::atomic::Ordering::Relaxed;
+    let hz = 1_000_000_000 / timer::TICK_HZ;
+    let mut lines = String::new();
+    let (mut tb, mut ti) = (0u64, 0u64);
+    let mut ctxt = 0;
+    for c in crate::percpu::online() {
+        let (b, i) = sched::cpu_times(c);
+        tb += b;
+        ti += i;
+        ctxt += crate::percpu::get(c).switches.load(Relaxed);
+        let _ = writeln!(lines, "cpu{c} {} 0 0 {} 0 0 0 0 0 0", b / hz, i / hz);
+    }
+    let mut s = format!("cpu  {} 0 0 {} 0 0 0 0 0 0\n", tb / hz, ti / hz);
+    s.push_str(&lines);
+    let intr: u64 = (0..crate::gic::num_irqs()).map(crate::gic::irq_count).sum();
+    let running = sched::threads()
+        .iter()
+        .filter(|t| t.state == sched::State::Running && t.prio != sched::Priority::Idle)
+        .count();
+    let _ = writeln!(s, "intr {intr}");
+    let _ = writeln!(s, "ctxt {ctxt}");
+    let _ = writeln!(s, "btime {}", fs::clock::boot_epoch());
+    let _ = writeln!(s, "processes {}", super::forks());
+    let _ = writeln!(s, "procs_running {running}");
+    let _ = writeln!(s, "procs_blocked 0");
+    s
+}
+
+/// `/proc/cpuload` (milkOS): "cpuN PERCENT" per online CPU, busy share of the last 0.5 s.
+fn cpuload() -> String {
+    let mut s = String::new();
+    for c in crate::percpu::online() {
+        let _ = writeln!(s, "cpu{c} {}", crate::percpu::load(c));
+    }
+    s
+}
+
+/// Install /proc/self, /proc/threads, /proc/cpuinfo, /proc/stat, /proc/cpuload.
+/// After fs::init.
 pub fn init() {
     let Some(root) = procfs::root() else { return };
     let selfl = link(&root, || Ok(format!("{}", sched::current_pid())));
     root.add("self", selfl);
     root.add_file("threads", threads);
+    root.add_file("cpuinfo", cpuinfo);
+    root.add_file("stat", stat);
+    root.add_file("cpuload", cpuload);
 }
 
 /// Create /proc/<pid>.

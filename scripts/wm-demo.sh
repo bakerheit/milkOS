@@ -46,7 +46,7 @@ if [ -n "${WM_HOSTNET:-}" ]; then
   NET_ARGS=(-netdev "user,id=n0" -device virtio-net-device,netdev=n0)
 fi
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \

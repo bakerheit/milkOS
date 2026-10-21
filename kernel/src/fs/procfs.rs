@@ -61,6 +61,7 @@ fn irq_name(intid: u32) -> String {
     use crate::virtio::mmio::{MMIO_SLOTS, MMIO_SPI_BASE, Transport, device_id};
     let virtio0 = gic::spi(MMIO_SPI_BASE);
     match intid {
+        0 => String::from("IPI rescheduling"),
         27 => String::from("arch_timer (virtual)"),
         33 => String::from("uart-pl011"),
         i if (virtio0..virtio0 + MMIO_SLOTS as u32).contains(&i) => {
@@ -78,7 +79,12 @@ fn irq_name(intid: u32) -> String {
 }
 
 fn interrupts() -> String {
-    let mut s = String::from("          CPU0\n");
+    let cpus: alloc::vec::Vec<usize> = crate::percpu::online().collect();
+    let mut s = String::from("     ");
+    for c in &cpus {
+        let _ = write!(s, "{:>11}", format!("CPU{c}"));
+    }
+    s.push('\n');
     for irq in 0..gic::num_irqs() {
         let n = gic::irq_count(irq);
         if n == 0 && !gic::is_registered(irq) {
@@ -89,7 +95,11 @@ fn interrupts() -> String {
             16..32 => "PPI",
             _ => "SPI",
         };
-        let _ = writeln!(s, "{irq:>4}: {n:>10}  GICv2 {kind} {}", irq_name(irq));
+        let _ = write!(s, "{irq:>4}:");
+        for &c in &cpus {
+            let _ = write!(s, " {:>10}", gic::irq_count_cpu(irq, c));
+        }
+        let _ = writeln!(s, "  GICv2 {kind} {}", irq_name(irq));
     }
     let _ = writeln!(s, " ERR: {:>10}  spurious", gic::spurious_count());
     s

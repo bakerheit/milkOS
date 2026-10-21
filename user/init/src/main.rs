@@ -23,6 +23,10 @@ fn main(_args: &rt::Args) -> i32 {
     println!("  user space is running. Starting /bin/hello, then the shell.");
     println!();
 
+    // Installed packages: recreate their /bin links (/bin is in RAM, /Applications is not).
+    if let Ok(pid) = sys::spawn("/bin/milk", &["milk", "relink", "-q"], ENV) {
+        wait_for(pid);
+    }
     // The boot chime, if there is a sound device (it plays while we go on).
     if let Ok(fd) = sys::open("/dev/audio", sys::O_WRONLY | sys::O_CLOEXEC) {
         let _ = sys::close(fd);

@@ -1,0 +1,22 @@
+# Toy packages for the `milk` package manager. NOT part of the initramfs: built on the
+# host by scripts/milk-repo.sh into target/packages, wrapped into .milkpkg files with
+# scripts/mkpkg.py, and installed into /Applications/<name>/ by `milk install`.
+# Same target and linker script as user/ (see .cargo/config.toml), same runtime crate.
+[workspace]
+resolver = "2"
+members = ["fortune", "snake", "moo2048"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+strip = true

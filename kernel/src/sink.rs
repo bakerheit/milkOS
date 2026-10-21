@@ -8,7 +8,7 @@
 
 use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::fbcon::Console;
 
@@ -25,17 +25,66 @@ static SCREEN: ScreenConsole = ScreenConsole {
     inner: UnsafeCell::new(None),
 };
 
-/// Take the flag. Deliberately a plain load + store, not an atomic swap: with the MMU off RAM is
-/// Device memory, where exclusive load/store (what `swap` compiles to) never completes. On a single
-/// core this is still safe, even against interrupts: a handler that sneaks in between the load and
-/// the store runs to completion and releases the flag before we resume.
-/// TODO(smp): switch to `swap` once the MMU maps RAM as Normal memory, and secondary cores run.
+/// Atomic RMW hangs with the MMU off (RAM is Device memory then), and a crash dump can come
+/// that early: use plain load/store until the MMU is on.
+fn mmu_on() -> bool {
+    let sctlr: u64;
+    // SAFETY: register read.
+    unsafe { core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack)) };
+    sctlr & 1 != 0
+}
+
+/// Take the screen-console flag.
 fn try_lock() -> bool {
-    if SCREEN.busy.load(Ordering::Relaxed) {
-        return false;
+    if !mmu_on() {
+        if SCREEN.busy.load(Ordering::Relaxed) {
+            return false;
+        }
+        SCREEN.busy.store(true, Ordering::Relaxed);
+        return true;
     }
-    SCREEN.busy.store(true, Ordering::Relaxed);
-    true
+    SCREEN
+        .busy
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+}
+
+/// Owner (CPU index + 1) of the line lock that keeps `kprintln!` lines from different CPUs
+/// apart; 0 = free.
+static PRINT_OWNER: AtomicU32 = AtomicU32::new(0);
+
+/// Run `f` (one `kprintln!` line) with IRQs masked and the print lock held. Nested prints on
+/// the same CPU (a fault while printing) go straight through; if another CPU holds the lock
+/// for more than ~20 ms (it died mid-line), print anyway rather than hang.
+pub fn with_print_lock<R>(f: impl FnOnce() -> R) -> R {
+    let _irq = crate::sync::IrqGuard::new();
+    if !mmu_on() {
+        return f();
+    }
+    let me = crate::percpu::id() as u32 + 1;
+    let mut took = false;
+    if PRINT_OWNER.load(Ordering::Relaxed) != me {
+        let start = crate::timer::counter();
+        let limit = crate::timer::frequency() / 50;
+        loop {
+            if PRINT_OWNER
+                .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                took = true;
+                break;
+            }
+            if limit != 0 && crate::timer::counter().wrapping_sub(start) > limit {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    let r = f();
+    if took {
+        PRINT_OWNER.store(0, Ordering::Release);
+    }
+    r
 }
 
 /// Run `f` on the screen console if one is installed and not already in use.
@@ -49,7 +98,7 @@ fn with_screen(f: impl FnOnce(&mut Console)) {
         let _cursor = crate::cursor::suspend();
         f(c);
     }
-    SCREEN.busy.store(false, Ordering::Relaxed);
+    SCREEN.busy.store(false, Ordering::Release);
 }
 
 /// From now on `kprintln!` output is mirrored on screen.
@@ -59,7 +108,7 @@ pub fn install_screen(console: Console) {
     }
     // SAFETY: we hold the `busy` flag.
     unsafe { *SCREEN.inner.get() = Some(console) };
-    SCREEN.busy.store(false, Ordering::Relaxed);
+    SCREEN.busy.store(false, Ordering::Release);
 }
 
 /// The writer behind `kprintln!`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and run milkOS in qemu.
+# Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one).
 #   scripts/run.sh            window (cocoa) + serial on this terminal
 #   scripts/run.sh headless   no window, serial only (used for tests)
 set -euo pipefail
@@ -37,6 +37,6 @@ if [ -n "${MILK_SOUND_WAV:-}" ]; then
 elif [ "${MILK_SOUND:-}" = 1 ]; then
   SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
 fi
-exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
+exec qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

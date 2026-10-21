@@ -22,6 +22,7 @@ fn main(args: &rt::Args) -> i32 {
             ("tid", Ty::Int),
             ("state", Ty::Str),
             ("cpu", Ty::Int),
+            ("psr", Ty::Int),
             ("rss", Ty::Int),
             ("name", Ty::Str),
         ]);
@@ -40,6 +41,7 @@ fn main(args: &rt::Args) -> i32 {
                 Val::Int(p.tid as i64),
                 Val::Str(alloc::string::String::from(p.state)),
                 Val::Int((p.cpu_ns / 1_000_000) as i64),
+                Val::Int(p.psr as i64),
                 if p.kernel {
                     Val::Nil
                 } else {
@@ -56,7 +58,7 @@ fn main(args: &rt::Args) -> i32 {
         out.flush();
         return 0;
     }
-    out.line("  PID  PPID  PGID   TID S     TIME     RSS  NAME");
+    out.line("  PID  PPID  PGID   TID S PSR     TIME     RSS  NAME");
     for p in list {
         let (pid, ppid, pgid, rss, name) = if p.kernel {
             (
@@ -77,9 +79,10 @@ fn main(args: &rt::Args) -> i32 {
         };
         let _ = writeln!(
             out,
-            "{pid:>5} {ppid:>5} {pgid:>5} {:>5} {} {:>6}.{:02}s {rss:>7}  {name}",
+            "{pid:>5} {ppid:>5} {pgid:>5} {:>5} {} {:>3} {:>6}.{:02}s {rss:>7}  {name}",
             p.tid,
             p.state,
+            p.psr,
             p.cpu_ns / 1_000_000_000,
             p.cpu_ns / 10_000_000 % 100
         );

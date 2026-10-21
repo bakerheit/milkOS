@@ -120,12 +120,8 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(FILES_CLOSE.0, FILES_CLOSE.1);
         }
         "type" => {
-            b.typ("help")
-                .enter()
-                .wait(100)
-                .typ("cowsay milkOS 1.0")
-                .enter()
-                .typ("uname -a");
+            b.wait(300).typ("help").enter().wait(300);
+            b.typ("ps").enter().wait(300).typ("uname -a");
         }
         "notes" => {
             let (x, y) = dock_icon_center(3);
@@ -165,16 +161,14 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.drag(824, 160, 760, 160, 10);
         }
         "shell" => {
-            b.typ("ls -l ~").enter().wait(50);
-            b.typ("echo hello from the shell > ~/Documents/hello.txt")
+            b.wait(300)
+                .typ("pwd")
                 .enter()
-                .wait(50);
-            b.typ("cd Documents")
-                .enter()
+                .wait(200)
                 .typ("ls")
                 .enter()
-                .typ("cat hello.txt")
-                .enter();
+                .wait(200);
+            b.typ("cat /etc/motd").enter().wait(300);
         }
         "files" => {
             // Files: sidebar Home, double-click Documents, double-click ideas.md (opens Notes).

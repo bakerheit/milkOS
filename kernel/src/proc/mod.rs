@@ -234,6 +234,26 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
     )
 }
 
+/// Like [`spawn`], but with fds 0/1/2 on the terminal device `tty`, the given environment and
+/// working directory. The desktop's Terminal window uses it to run `msh` on `/dev/tty1`.
+pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) -> KResult<Pid> {
+    let data = fs::read_file(path)?;
+    let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
+    let envp: Vec<String> = envp.iter().map(|s| String::from(*s)).collect();
+    let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
+    let cwd = fs::lookup(cwd).unwrap_or_else(|_| fs::root());
+    start(
+        basename(path),
+        0,
+        space,
+        FdTable::with_tty(tty)?,
+        cwd,
+        &user_frame(entry, sp),
+        0,
+        Box::new(FpState::zeroed()),
+    )
+}
+
 /// Start `/bin/init` as PID 1. Call at the end of boot.
 pub fn start_init() {
     assert!(get(1).is_none(), "init already running");

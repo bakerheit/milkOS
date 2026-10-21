@@ -72,6 +72,13 @@ pub struct Terminal {
     /// Rows scrolled back from the bottom.
     back: usize,
     shell: Box<dyn Shell>,
+    /// Attached to `msh` on /dev/tty1: keys go to the tty, its output is drawn here.
+    tty: bool,
+    tty_gen: u64,
+    /// The tty's current (unterminated) output line: the prompt and what is being typed.
+    cur: String,
+    /// Inside an escape sequence in the tty output (swallowed; msh runs with TERM=dumb).
+    esc: u8,
 }
 
 impl Terminal {
@@ -86,14 +93,87 @@ impl Terminal {
             hist_pos: 0,
             back: 0,
             shell: Box::new(BuiltinShell::new()),
+            tty: false,
+            tty_gen: 0,
+            cur: String::new(),
+            esc: 0,
         };
         t.follow_log();
         t.lines.push((String::new(), LATTE));
-        t.lines.push((
-            String::from("milkOS 1.0 terminal. Kernel log above, live. Type 'help'."),
-            MATCHA,
-        ));
+        t.tty = super::super::tty::start_shell();
+        let banner = if t.tty {
+            "milkOS 1.0 terminal: msh on /dev/tty1. Kernel log above, live."
+        } else {
+            "milkOS 1.0 terminal. Kernel log above, live. Type 'help'."
+        };
+        t.lines.push((String::from(banner), MATCHA));
         t
+    }
+
+    /// Draw what msh wrote: lines into the scrollback, the unfinished one stays in `cur`.
+    fn follow_tty(&mut self) -> bool {
+        let Some(bytes) = super::super::tty::take_output(&mut self.tty_gen) else {
+            return false;
+        };
+        for c in String::from_utf8_lossy(&bytes).chars() {
+            match (self.esc, c) {
+                (1, '[') => self.esc = 2,
+                (1, _) => self.esc = 0,
+                (2, '\x40'..='\x7e') => self.esc = 0,
+                (2, _) => {}
+                (_, '\x1b') => self.esc = 1,
+                (_, '\n') => {
+                    let l = core::mem::take(&mut self.cur);
+                    self.lines.push((l, CREAM));
+                }
+                (_, '\x08') => {
+                    self.cur.pop();
+                }
+                (_, '\r') => {}
+                (_, '\t') => self.cur.push_str("    "),
+                (_, c) if !c.is_control() => self.cur.push(c),
+                _ => {}
+            }
+        }
+        self.trim();
+        self.back = 0;
+        true
+    }
+
+    /// A key typed into the window, as tty bytes.
+    fn key_to_tty(&mut self, k: &KeyInput) -> bool {
+        use super::super::tty;
+        if k.mods.ctrl {
+            match k.key {
+                Key::Char('l') => {
+                    self.lines.clear();
+                    return true;
+                }
+                Key::Char(c) if c.is_ascii_alphabetic() => {
+                    tty::input(c.to_ascii_lowercase() as u8 - b'a' + 1);
+                }
+                _ => return false,
+            }
+            return false;
+        }
+        match k.key {
+            Key::Enter => tty::input(b'\r'),
+            Key::Backspace => tty::input(0x7f),
+            Key::Tab => tty::input(b'\t'),
+            Key::PageUp => {
+                self.back += 8;
+                return true;
+            }
+            _ => {
+                if let Some(c) = k.ch {
+                    let mut b = [0u8; 4];
+                    for &x in c.encode_utf8(&mut b).as_bytes() {
+                        tty::input(x);
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Pull new kernel log text into the scrollback. True if anything arrived.
@@ -160,7 +240,11 @@ fn wrap(s: &str, cols: usize) -> Vec<String> {
 
 impl WindowContents for Terminal {
     fn title(&self) -> &str {
-        "andrew: sh"
+        if self.tty {
+            "andrew: msh"
+        } else {
+            "andrew: sh"
+        }
     }
 
     fn dark(&self) -> bool {
@@ -175,7 +259,11 @@ impl WindowContents for Terminal {
         let cols = ((w - 2 * PAD) / 8).max(4) as usize;
         let rows = ((h - 2 * PAD + 2) / LINE_H).max(1) as usize;
         // The prompt line (with the cursor) is the last visual row.
-        let prompt = format!("{}{}", self.shell.prompt(), self.input);
+        let prompt = if self.tty {
+            self.cur.clone()
+        } else {
+            format!("{}{}", self.shell.prompt(), self.input)
+        };
         let prompt_rows = wrap(&prompt, cols);
         let mut vis: Vec<(String, Color)> = Vec::new();
         let need = rows + self.back;
@@ -200,7 +288,11 @@ impl WindowContents for Terminal {
         }
         // Cursor block.
         if self.back == 0 {
-            let pos = self.shell.prompt().chars().count() + self.cursor;
+            let pos = if self.tty {
+                self.cur.chars().count()
+            } else {
+                self.shell.prompt().chars().count() + self.cursor
+            };
             let (r, ccol) = (pos / cols, pos % cols);
             let row_on_screen = (vis.len() - prompt_rows.len() + r) as i32 - start as i32;
             let (x, y) = (PAD + ccol as i32 * 8, PAD + row_on_screen * LINE_H);
@@ -217,6 +309,9 @@ impl WindowContents for Terminal {
 
     fn key(&mut self, k: &KeyInput) -> bool {
         self.back = 0;
+        if self.tty {
+            return self.key_to_tty(k);
+        }
         if k.mods.ctrl {
             match k.key {
                 Key::Char('c') => {
@@ -293,7 +388,9 @@ impl WindowContents for Terminal {
     }
 
     fn tick(&mut self, _now: u64) -> bool {
-        self.follow_log()
+        let log = self.follow_log();
+        let tty = self.tty && self.follow_tty();
+        log || tty
     }
 }
 

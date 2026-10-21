@@ -214,10 +214,10 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.key(Key::Right, Mods::CTRL);
         }
         "control" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
         }
         "dim" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
         "shell" => {
@@ -891,6 +891,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(1);
             b.click(x, y).wait(400);
             b.typ("audit --event powerbox").enter().wait(800);
+        }
+        // Notification centre: a few toasts from different apps, then click the clock.
+        "notif" | "notifempty" | "notifclear" => {
+            if name != "notifempty" {
+                b.wait(300).typ("notify 'Milk is ready'").enter().wait(300);
+                b.key(
+                    Key::Char('3'),
+                    Mods {
+                        meta: true,
+                        shift: true,
+                        ..Mods::NONE
+                    },
+                )
+                .wait(1200);
+                b.typ("notify 'Tea is brewing'").enter().wait(300);
+                b.key(Key::Char(' '), Mods::META)
+                    .wait(150)
+                    .typ("back up now")
+                    .wait(200);
+                b.enter().wait(800);
+            }
+            // The clock is the right end of the menu bar.
+            b.click(super::theme::screen_w() - 30, 14).wait(600);
+            if name == "notifclear" {
+                let r = super::notif::rect();
+                b.click(r.x + super::notif::W - 16 - 38, r.y + 160 + 9)
+                    .wait(500);
+            }
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

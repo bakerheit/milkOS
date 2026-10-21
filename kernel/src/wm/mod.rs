@@ -29,6 +29,7 @@ mod fontx;
 mod icons;
 mod lock;
 mod menus;
+mod notif;
 mod packages;
 mod paint;
 mod png;
@@ -69,22 +70,42 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 // ---- public API ------------------------------------------------------------------------------
 
 /// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-/// Toasts posted from any thread: (title, subtitle, play the notify sound).
-static NOTIFY: SpinLock<Vec<(String, String, bool)>> = SpinLock::new(Vec::new());
+/// Toasts posted from any thread: (app, title, subtitle, play the notify sound).
+static NOTIFY: SpinLock<Vec<(String, String, String, bool)>> = SpinLock::new(Vec::new());
 
-/// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
-pub fn notify(title: &str, subtitle: &str) {
-    NOTIFY
-        .lock()
-        .push((String::from(title), String::from(subtitle), true));
+/// Who is posting: the calling process (e.g. /bin/notify), else the desktop itself.
+fn poster() -> String {
+    crate::proc::get(sched::current_pid())
+        .filter(|_| sched::current_pid() != 0)
+        .map_or(String::from("milkOS"), |p| {
+            String::from(p.inner.lock().name.as_str())
+        })
+}
+
+/// A toast on behalf of `app` (grouped under it in the notification centre).
+pub fn notify_as(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        true,
+    ));
     WAKE.wake_all();
 }
 
+/// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
+pub fn notify(title: &str, subtitle: &str) {
+    notify_as(&poster(), title, subtitle);
+}
+
 /// A toast without the notify sound (when the action had its own, e.g. the shutter).
-pub fn notify_quiet(title: &str, subtitle: &str) {
-    NOTIFY
-        .lock()
-        .push((String::from(title), String::from(subtitle), false));
+pub fn notify_quiet(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        false,
+    ));
     WAKE.wake_all();
 }
 
@@ -343,6 +364,9 @@ pub struct Desktop {
     shot_hide: bool,
     /// A file being dragged (dnd.rs).
     dnd: Option<dnd::Dnd>,
+    /// The notification centre is open, and what it lists (notif.rs).
+    notif: bool,
+    history: Vec<notif::Notice>,
 }
 
 impl Desktop {
@@ -393,6 +417,8 @@ impl Desktop {
             shot: None,
             shot_hide: false,
             dnd: None,
+            notif: false,
+            history: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -577,7 +603,7 @@ impl Desktop {
                         if prefs::get().sound {
                             crate::audio::play_system(crate::audio::Sound::Error);
                         }
-                        notify(&name, "quit unexpectedly");
+                        notify_as(&name, &name, "quit unexpectedly");
                     }
                 }));
                 Some(pid)
@@ -1002,10 +1028,11 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
-        self.post_toast_with(title, sub, true);
+        self.post_toast_with("milkOS", title, sub, true);
     }
 
-    fn post_toast_with(&mut self, title: &str, sub: &str, sound: bool) {
+    fn post_toast_with(&mut self, app: &str, title: &str, sub: &str, sound: bool) {
+        self.record_notice(app, title, sub);
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
@@ -1296,9 +1323,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
-        for (t, s, sound) in posted {
-            self.post_toast_with(&t, &s, sound);
+        let posted: Vec<(String, String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
+        for (app, t, s, sound) in posted {
+            self.post_toast_with(&app, &t, &s, sound);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1504,6 +1531,10 @@ impl Desktop {
             self.cpu_loads = loads;
             self.cpu_steps = steps;
             let st = self.status_text();
+            if st != self.status {
+                // A new minute: the centre's clock and "n min ago".
+                self.notif_tick();
+            }
             if st != self.status || changed {
                 self.status = st;
                 self.invalidate(PanelKey::MenuBar);
@@ -1823,6 +1854,10 @@ impl Desktop {
             self.control = false;
             return;
         }
+        if self.notif {
+            self.toggle_notif();
+            return;
+        }
         if self.mode != Mode::Desktop {
             if self.mode == Mode::Spaces {
                 self.set_mode(Mode::Desktop);
@@ -1945,6 +1980,7 @@ impl Desktop {
                 self.control = false;
                 return;
             }
+            Key::Escape if self.notif => return self.toggle_notif(),
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
             Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),

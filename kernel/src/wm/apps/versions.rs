@@ -21,7 +21,7 @@ use super::super::event::Key;
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
 use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
-use super::super::{Request, notify, request, rtc};
+use super::super::{Request, notify_as, request, rtc};
 use super::{fsx, notes};
 
 /// The file someone asked to see the versions of; the window picks it up.
@@ -185,7 +185,8 @@ impl Versions {
                     notes::open_file(&self.path);
                 }
                 let taken = self.list[self.sel].taken;
-                notify(
+                notify_as(
+                    "Versions",
                     &format!("Restored {name}"),
                     &format!("to the version of {}", when(taken)),
                 );
@@ -194,7 +195,7 @@ impl Versions {
                 self.sel = self.list.len().saturating_sub(1);
                 self.load_chosen();
             }
-            Err(e) => notify("Restore failed", &format!("{name}: {e}")),
+            Err(e) => notify_as("Versions", "Restore failed", &format!("{name}: {e}")),
         }
     }
 

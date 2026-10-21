@@ -201,7 +201,7 @@ impl Files {
             super::music::play_path(&full);
             request(Request::OpenHere(App::Music));
         } else {
-            super::super::notify(&e.name, "No app opens this kind of file yet");
+            super::super::notify_as("Files", &e.name, "No app opens this kind of file yet");
         }
     }
 
@@ -241,10 +241,14 @@ impl Files {
         };
         let _ = crate::fs::sync_all();
         match r {
-            Ok(()) => {
-                super::super::notify(&format!("Restored {}", e.name), &format!("from {snap}"))
+            Ok(()) => super::super::notify_as(
+                "Files",
+                &format!("Restored {}", e.name),
+                &format!("from {snap}"),
+            ),
+            Err(err) => {
+                super::super::notify_as("Files", "Restore failed", &format!("{}: {err}", e.name))
             }
-            Err(err) => super::super::notify("Restore failed", &format!("{}: {err}", e.name)),
         }
     }
 

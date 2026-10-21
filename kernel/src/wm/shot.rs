@@ -13,7 +13,7 @@ use crate::sched;
 
 use super::paint::Painter;
 use super::theme::*;
-use super::{Desktop, notify, notify_quiet, prefs, rtc};
+use super::{Desktop, notify_as, notify_quiet, prefs, rtc};
 
 pub const DIR: &str = "/home/milk/Pictures";
 
@@ -136,9 +136,13 @@ impl Desktop {
                         "wm: screenshot {w}x{h} -> {path} ({} bytes, encoded in {ms} ms)",
                         png.len()
                     );
-                    notify_quiet("Screenshot saved", &format!("~/Pictures/{name}"));
+                    notify_quiet(
+                        "Screenshot",
+                        "Screenshot saved",
+                        &format!("~/Pictures/{name}"),
+                    );
                 }
-                Err(e) => notify("Screenshot not saved", &format!("{e}")),
+                Err(e) => notify_as("Screenshot", "Screenshot not saved", &format!("{e}")),
             }
         }));
     }

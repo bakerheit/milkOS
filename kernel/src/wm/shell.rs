@@ -34,6 +34,8 @@ pub enum PanelKey {
     Tip,
     /// An open menu bar menu.
     Menu,
+    /// The notification centre (notif.rs).
+    Notif,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -702,6 +704,15 @@ impl Desktop {
                 true,
             ));
         }
+        if self.notif {
+            v.push(spec(
+                PanelKey::Notif,
+                super::notif::rect(),
+                R_CARD,
+                Style::GlassStrong,
+                true,
+            ));
+        }
         if let Some(l) = &self.launcher {
             v.push(Layer::Dim(LAUNCH_DIM_A));
             let x = launcher_x();
@@ -778,6 +789,7 @@ impl Desktop {
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
+            PanelKey::Notif => self.paint_notif(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
                 if let Some(t) = self.tip.and_then(|i| tiles().into_iter().nth(i)) {
@@ -1183,8 +1195,14 @@ impl Desktop {
                     let m = if self.menu == Some(0) { None } else { Some(0) };
                     self.control = false;
                     self.set_menu(m);
+                } else if x
+                    >= screen_w() - MENU_PAD_X - super::fontx::prop_width(&self.status, false) - 6
+                {
+                    // The clock: the notification centre.
+                    self.toggle_notif();
                 } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
                     self.set_menu(None);
+                    self.notif = false;
                     self.control = !self.control;
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
@@ -1223,6 +1241,7 @@ impl Desktop {
                     self.invalidate(PanelKey::Toast(i));
                 }
             }
+            PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {
                 if hit(&Rect::new(148, 16, 124, CC_TILE_H), x, y) {
                     self.settings.focus_mode = !self.settings.focus_mode;

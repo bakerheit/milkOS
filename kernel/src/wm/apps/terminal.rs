@@ -851,14 +851,18 @@ impl Terminal {
     /// `cmd` once its shell is up.
     fn new_tab(&mut self, cmd: Option<&str>) {
         if self.tabs.len() >= tty::MAX {
-            super::super::notify("Terminal", "Nine tabs is all there are");
+            super::super::notify_as("Terminal", "Terminal", "Nine tabs is all there are");
             return;
         }
         let n = if self.tabs[0].tty != 0 {
             match tty::open_tab() {
                 Some(n) => n,
                 None => {
-                    super::super::notify("Terminal", "No free terminal for a new tab");
+                    super::super::notify_as(
+                        "Terminal",
+                        "Terminal",
+                        "No free terminal for a new tab",
+                    );
                     return;
                 }
             }

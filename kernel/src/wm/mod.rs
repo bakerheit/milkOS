@@ -1808,6 +1808,39 @@ impl Desktop {
             over,
             px_total / n as u64
         );
+        // The genie: minimise the top window and restore it, every animation frame timed.
+        self.pointer = (screen_w() / 2, screen_h() / 2);
+        let Some(id) = self.focus.or(self.windows.last().map(|w| w.id)) else {
+            return;
+        };
+        let mut g: Vec<u64> = Vec::new();
+        for restore in [false, true] {
+            if restore {
+                self.show_window(id);
+            } else {
+                self.minimise(id);
+            }
+            loop {
+                let t = timer::now_ns();
+                let more = self.step_anims(t);
+                self.update_dock(t);
+                self.render_and_compose();
+                g.push((timer::now_ns() - t) / 1000);
+                if !more {
+                    break;
+                }
+                sched::sleep_ms(8);
+            }
+        }
+        g.sort_unstable();
+        let m = g.len().max(1);
+        kprintln!(
+            "wm: bench genie (minimise + restore): {} frames, median {} us, max {} us, {} over 16.7 ms",
+            g.len(),
+            g[m / 2],
+            g[m - 1],
+            g.iter().filter(|&&t| t > 16_667).count()
+        );
     }
 
     /// Measure frame costs: full-screen redraws, then a scripted window drag. Logs the results.

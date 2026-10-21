@@ -135,6 +135,70 @@ a kernel abort, and PAN doesn't matter.
 while full, are atomic up to 4 KiB (PIPE_BUF), and give SIGPIPE + EPIPE with no reader.
 Waits are interruptible (EINTR). O_NONBLOCK, O_CLOEXEC.
 
+### AF_UNIX sockets (`proc/unix.rs`, `proc/unixsys.rs`)
+
+Local IPC, Linux API: `socket(AF_UNIX, SOCK_STREAM | SOCK_DGRAM)`, `socketpair` (199),
+bind / listen / accept4 / connect / sendto / recvfrom / shutdown / getsockname /
+getpeername, and `sendmsg` (211) / `recvmsg` (212) with control messages. User side:
+`rt::unix`.
+
+* **Names.** A path: `bind` makes a socket node (`S_IFSOCK`, `ls -l` shows `s`, mode
+  0755 like Linux with umask 022) on tmpfs (`/tmp`, `/run`); connecting needs write
+  permission on it (fs/perm.rs) and, under the capability sandbox, an fs grant for it.
+  Unlinking the node only hides the socket. An abstract name (`sun_path[0] == 0`) lives
+  in a kernel table until the socket closes; the sandbox treats it like the network
+  (denied under `net=none`). Binding with just the family autobinds an abstract
+  5-hex-digit name.
+* **Stream:** connect is immediate (the server's end waits in the listener's backlog;
+  a full backlog blocks the connecter, or EAGAIN). 256 KiB receive buffer per socket;
+  writers block on a full peer. Closing gives the peer EOF, writing to a closed peer
+  SIGPIPE + EPIPE. **Dgram:** messages, `sendto` a name or `connect` for a default.
+* **SCM_RIGHTS:** files sent with `sendmsg` arrive as new fds (same open file
+  description: shared offset, flags), close-on-exec with MSG_CMSG_CLOEXEC; too little
+  control room gives MSG_CTRUNC and closes the extra files. On a stream they travel with
+  the first byte of their write and a read stops before the next write that carries
+  files. Up to 253 per message; each send is audited (`unix.scm_rights`). Files in
+  flight on a socket that closes are closed; a socket sent through itself leaks (no
+  garbage collector).
+* **Credentials:** `SO_PEERCRED` = the peer's pid / euid / egid at connect (client side:
+  the listener's, as of `listen`) or socketpair. With `SO_PASSCRED`, every message comes
+  with `SCM_CREDENTIALS` (pid, real uid, real gid of the sender); a sender may claim them
+  explicitly, but only its own pid and its own real/effective/saved ids (root: anything);
+  anything else is EPERM.
+* `read` / `write` work on connected sockets; poll / select / epoll see readiness.
+* Not done: `SOCK_SEQPACKET`, `MSG_WAITALL`, sendmsg/recvmsg on AF_INET.
+
+**Design note (not done yet): system services over AF_UNIX.** The Powerbox and other
+services that today are `/dev` files (`/dev/wm`, `/dev/clipboard`, `/dev/audit`) could be
+sockets under `/run` (e.g. `/run/powerbox.sock`, root:admin 0660 or per-service groups)
+served by a kernel thread or a user daemon. The server checks `SO_PEERCRED` (and the
+caller's `/proc/<pid>/status` `Caps:` line) instead of trusting whoever opened a device,
+answers requests with SCM_RIGHTS (the Powerbox hands back the chosen file as an fd, so
+the sandboxed caller never needs an fs grant), and gets one connection per client with a
+clean hangup when the client dies. Migrating means: a socket per service in `/run`, a small
+request/response protocol, and the clients (rt, the wm) switching from `open("/dev/..")`
+to `connect`.
+
+### poll, select, epoll (`kernel/src/poll.rs`, `proc/epoll.rs`)
+
+One readiness core: each object that can block answers `Inode::poll()` (Linux `POLL*`
+bits) and calls `poll::notify()` when that may have changed (pipes, ttys, AF_UNIX sockets,
+the TCP/UDP stack); waiters scan their fds, sleep until a notify or 20 ms (for objects that
+never notify), and scan again. `ppoll` (73), `pselect6` (72) and epoll all sit on it.
+
+* `epoll_create1` (20), `epoll_ctl` (21: ADD / MOD / DEL), `epoll_pwait` (22). Any fd with a
+  poll method; regular files, directories and other epoll fds are EPERM / EINVAL. An entry
+  disappears when its file is closed everywhere. Level-triggered by default;
+  **EPOLLET** reports a ready fd once, then again only after new input / room
+  (`Inode::poll_seq`, per object and per direction for pipes and AF_UNIX sockets; other
+  objects use the global generation, so they may report extra edges but never miss one)
+  or after it was seen not ready; **EPOLLONESHOT** disables an entry after one report
+  until EPOLL_CTL_MOD. EPOLLERR / EPOLLHUP always. The sigmask argument is ignored; a
+  pending signal is EINTR. `rt::epoll` on the user side.
+* Pipes now report real readiness (they used to look always ready): POLLIN with data,
+  POLLHUP when writers are gone, POLLOUT with room for an atomic write, POLLERR when
+  readers are gone.
+
 ### Signals (`proc/signal.rs`)
 
 * Per process: pending and blocked masks, 64 sigactions, the latest siginfo per signal
@@ -168,13 +232,14 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 51 chroot, 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
+| files | 51 chroot, 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 52 fchmod, 54 fchownat, 55 fchown, 48 faccessat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
 | processes | 220 clone (fork **and** CLONE_THREAD), 221 execve, 260 wait4, 93 exit (one thread), 94 exit_group, 98 futex (WAIT/WAKE + _PRIVATE), 172 getpid, 173 getppid, 178 gettid, 96 set_tid_address, 99 set_robust_list (ignored), 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
 | credentials | 174 getuid, 175 geteuid, 176 getgid, 177 getegid, 146 setuid, 144 setgid, 145 setreuid, 143 setregid, 147 setresuid, 148 getresuid, 149 setresgid, 150 getresgid, 158 getgroups, 159 setgroups (docs/security.md "Users and credentials") |
 | signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
-| sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
+| sockets | 198 socket (AF_INET, AF_UNIX), 199 socketpair, 211 sendmsg, 212 recvmsg (AF_UNIX), 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
+| readiness | 73 ppoll, 72 pselect6, 20 epoll_create1, 21 epoll_ctl, 22 epoll_pwait |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
 | milkOS | 0x1000 sandbox (shrink capabilities; see docs/security.md), 0x1001 powerbox (ask the user for one file through the wm's Open/Save panel; docs/security.md) |
 
@@ -212,7 +277,7 @@ committed and packed as `/bin/linux-hello`; `utest linux` runs it.
 `PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
 permissions; overlapping pages take the union. The I-cache is synced after loading.
 The stack is the Linux layout: `argc, argv[], NULL, envp[], NULL, auxv` (AT_PHDR,
-AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_ENTRY, AT_HWCAP = FP|ASIMD, AT_CLKTCK, AT_RANDOM,
+AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_ENTRY, AT_HWCAP = FP|ASIMD, AT_CLKTCK, AT_RANDOM, AT_UID / AT_EUID / AT_GID / AT_EGID (the new image's real and effective ids), AT_SECURE (1 for a set-ID exec or when real and effective ids differ),
 AT_EXECFN, ...), strings and 16 random bytes above it, sp 16-byte aligned.
 FP/SIMD is enabled at EL0 and saved per user thread on every switch (the kernel itself is
 soft-float and never touches it).

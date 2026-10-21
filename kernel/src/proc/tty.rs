@@ -167,6 +167,7 @@ impl Tty {
             self.signal_foreground(s);
         }
         self.readers.wake_all();
+        crate::poll::notify();
     }
 
     /// Blocking read of at most one line.

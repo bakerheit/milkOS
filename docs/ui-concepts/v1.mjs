@@ -14,7 +14,7 @@ export const TOK = {
     oat: ["#EFE6D4", "sidebars, inactive fills"],
     sand: ["#E2D5BD", "hairlines, borders, tracks"],
     latte: ["#C4AE8F", "disabled text, inactive lights"],
-    cocoa: ["#7A6652", "secondary text"],
+    cocoa: ["#6B5846", "secondary text (was #7A6652: 4.40:1 on the sidebar, now 5.45:1)"],
     espresso: ["#3A2E28", "primary text, terminal background"],
     straw: ["#E58C97", "accent (selection, close light, progress)"],
     honey: ["#EBB650", "focus ring, minimise light, warnings"],
@@ -42,6 +42,7 @@ export const TOK = {
   },
   launcher: { w: 640, y: 140, inputH: 56, rowH: 48, gap: 12, maxRows: 6, dim: 0.25, iconIn: 40, iconRow: 36 },
   toast: { w: 264, h: 64, right: 12, top: 40 },
+  tabs: { stripH: 38, tabH: 32, tabY: 6, firstX: 84, minW: 96, maxW: 160, gap: 6, padL: 12, padR: 8, radiusTop: 10, closeHit: 20, plusW: 28, plusH: 24, plusR: 8, dropBorder: "2px dashed straw", dropFill: "straw at 20%" },
   drawer: { w: 316, right: 12, top: 36, bottom: 12, pad: 12, cardH: 64, cardCompactH: 56, cardR: 14, iconIn: 36, headerH: 78, chipH: 26, dndH: 44, alpha: 0.78, toastSecs: 5 },
   control: { w: 288, h: 292, right: 12, top: 36, tileH: 56, sliderH: 8 },
   cards: { pad: 16, gap: 16, r: 20, cols: 3 },
@@ -238,6 +239,32 @@ export const SLIDES = [
   { id: "redlines", name: "Redlines", draw: sceneRedlines, from: "spec", note: "The same desktop with the key measurements marked. Full numbers are in SPEC.md." },
 ];
 
+
+/* ------------------------------ dark theme + contrast (used by SPEC.md) ------------------------------ */
+export const DARK = { milk: "#2E2520", cream: "#382D27", oat: "#42352D", sand: "#55463C", latte: "#8C7764", cocoa: "#BEA890", espresso: "#F4EBE0", white: "#7A6658" };
+export const FIXED = { "Terminal body": "#3A2E29", "Terminal text": "#FBF6ED", "Ink (shadows, dims, glyphs on honey/straw/blue tiles)": "#3A2E27", "Terminal bar and border": "#4A3C34" };
+const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+const lumOf = (h) => { const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b); };
+const ratio = (a, b) => { const [x, y] = [lumOf(a), lumOf(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+const mixHex = (a, b, t) => "#" + [1, 3, 5].map((i) => Math.round(parseInt(a.slice(i, i + 2), 16) * (1 - t) + parseInt(b.slice(i, i + 2), 16) * t).toString(16).padStart(2, "0")).join("");
+const LIGHT = Object.fromEntries(Object.entries(TOK.color).map(([k, v]) => [k, v[0]]));
+const SEL = 0.27; // selected row = straw at 27% over the surface
+const pairRows = (T, theme) => {
+  const t = { milk: T.milk, cream: T.cream, oat: T.oat, sand: T.sand, text: theme === "dark" ? DARK.espresso : LIGHT.espresso, sub: theme === "dark" ? DARK.cocoa : LIGHT.cocoa, off: T.latte };
+  const sel = mixHex(t.oat, LIGHT.straw, SEL);
+  const rows = [
+    ["Primary text on window body", t.text, t.milk, 4.5], ["Primary text on title bar", t.text, t.cream, 4.5], ["Primary text on sidebar", t.text, t.oat, 4.5],
+    ["Secondary text on window body", t.sub, t.milk, 4.5], ["Secondary text on title bar", t.sub, t.cream, 4.5], ["Secondary text on sidebar", t.sub, t.oat, 4.5],
+    ["Primary text on a selected sidebar row", t.text, sel, 4.5], ["Secondary text on a selected sidebar row (not allowed)", t.sub, sel, 4.5],
+    ["Tab close x, resting (secondary colour) on the title bar", t.sub, t.cream, 3],
+    ["Tab close x on hover (primary) on its hover circle (sand)", t.text, t.sand, 3],
+    ["Disabled text on window body (exempt from AA)", t.off, t.milk, 0],
+  ];
+  return rows.map(([name, fg, bg, min]) => { const r = ratio(fg, bg); return `| ${name} | ${fg} on ${bg} | ${r.toFixed(2)}:1 | ${min ? (r >= min ? "pass" : "FAILS " + min + ":1") : "n/a"} |`; }).join("\n");
+};
+const termRows = [["Terminal text on Terminal body", FIXED["Terminal text"], FIXED["Terminal body"]], ["Terminal tab, inactive (dark cocoa) on Terminal bar", DARK.cocoa, FIXED["Terminal bar and border"]], ["Terminal tab, active text on Terminal body", FIXED["Terminal text"], FIXED["Terminal body"]]]
+  .map(([n, f, b]) => `| ${n} | ${f} on ${b} | ${ratio(f, b).toFixed(2)}:1 | ${ratio(f, b) >= 4.5 ? "pass" : "FAILS"} |`).join("\n");
+
 /* ------------------------------ page ------------------------------ */
 const N = SLIDES.length;
 const idn = (i) => `s${((i % N) + N) % N}`;
@@ -336,6 +363,20 @@ Height ${TOK.dock.h}, radius ${TOK.radius.dock}, glass. Padding ${TOK.dock.pad},
 - Traffic lights: ${TOK.window.lightD}px circles, ${TOK.window.lightGap}px gap, first light's top-left at (${TOK.window.lightX},${TOK.window.lightY}) inside the window (border included). Order: close straw, minimise honey, zoom matcha. Unfocused window: all three latte, title text cocoa.
 - Minimum size ${TOK.window.min[0]}x${TOK.window.min[1]}. Body padding ${TOK.window.bodyPad}. Files sidebar width ${TOK.window.sidebarW} (oat, 1px sand right edge). Status bar height ${TOK.window.statusH} (cream, 1px sand top edge).
 
+## Tabs (Terminal tabs and Tabs-everywhere window tabs share this)
+One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at Gus's request.
+- Strip: a window with two or more tabs uses a ${TOK.tabs.stripH}px bar in place of the ${TOK.window.titleH}px title bar. Same fill, 1px sand line under it. The traffic lights keep their x (${TOK.window.lightX}) and sit at y${TOK.window.lightY + 2}, centred in the taller bar.
+- Tab: height ${TOK.tabs.tabH}, top y${TOK.tabs.tabY} inside the strip (so it touches the line under the strip), width between ${TOK.tabs.minW} and ${TOK.tabs.maxW} (tabs share the strip equally, never narrower than ${TOK.tabs.minW}), ${TOK.tabs.gap}px between tabs. The first tab starts at x${TOK.tabs.firstX}. Corner radius ${TOK.tabs.radiusTop}px on the top corners only, square at the bottom. Padding ${TOK.tabs.padL}px left, ${TOK.tabs.padR}px right.
+- Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
+- Inactive tab: no fill, no border, title in secondary text. Hover: oat at 60% fill.
+- Title: one line, cut with "~" to fit (about 13 characters in the default ${TOK.tabs.minW + 48}px tab). Terminal tabs read "1 msh", "2 msh".
+- Close x: the letter x in secondary text, right-aligned with ${TOK.tabs.padR}px right padding, hit target ${TOK.tabs.closeHit}x${TOK.tabs.closeHit}. Shown on every tab at rest (not only on hover). Hover: a ${TOK.tabs.closeHit}px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
+- New tab (+): ${TOK.tabs.plusW}x${TOK.tabs.plusH}, radius ${TOK.tabs.plusR}, oat fill, 4px after the last tab, the "+" centred.
+- Terminal tabs: same geometry with Terminal colours. Bar and border #4A3C34, active tab fill is the Terminal body #3A2E29 with Terminal text #FBF6ED, inactive title and close x in the dark cocoa #BEA890 (4.63:1 on the bar; the lighter latte would be only 2.48:1), hover circle #55463C. These colours are the same in the light and dark themes.
+- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, ${TOK.tabs.dropBorder.replace("straw", "straw")} border, radius ${TOK.tabs.radiusTop}, with "Drop to add as a tab" in straw, bold. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
+- Keys: Ctrl-T new tab, Ctrl-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Ctrl-1 to Ctrl-9 jump.
+- Notifications attached to tabs (a dot on the strip) are parked for later and not part of this spec.
+
 ## Launcher (Skim)
 Width ${TOK.launcher.w}, centred, top at y${TOK.launcher.y}. Input row height ${TOK.launcher.inputH}, radius ${TOK.radius.launcher}, glass alpha 0.7, query at 2x text, leading icon ${TOK.launcher.iconIn}. Results panel ${TOK.launcher.gap}px below, same radius. Result row height ${TOK.launcher.rowH}, radius ${TOK.radius.row}, selected row straw at 27%, icon ${TOK.launcher.iconRow}. Max ${TOK.launcher.maxRows} rows. Dims the screen behind with espresso at alpha ${TOK.launcher.dim}.
 
@@ -364,6 +405,41 @@ Dim the wallpaper with espresso at ${TOK.spaces.dim}. Space strip at y${TOK.spac
 
 ## Wallpaper
 ${TOK.wallpaper}
+
+## Dark theme ("Chocolate milk")
+Values from kernel/src/wm/theme.rs tc() as given by Gus, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
+| Token | Light | Dark | Use |
+|---|---|---|---|
+${["milk","cream","oat","sand","latte","cocoa","espresso"].map((k) => `| ${k} | ${LIGHT[k]} | ${DARK[k]} | ${TOK.color[k][1]} |`).join("\n")}
+| white | #FFFFFF | ${DARK.white} | glass edges, hover lightening |
+
+Fixed in both themes (deliberately one step off the tokens above so the dark map skips them):
+${Object.entries(FIXED).map(([k, v]) => `- ${k}: ${v}`).join("\n")}
+
+- Glass in dark: re-tinted from the dark milk, alphas unchanged (panels ${TOK.glass.fillAlpha}, launcher and control surfaces 0.7, border ${TOK.glass.borderAlpha}).
+- Wallpaper: "Night pasture" (moon, stars, sleeping cow). Settings offers Auto, Dawn, Night and Oat.
+
+### Contrast, measured from these exact values (WCAG AA: 4.5:1 for text, 3:1 for icons)
+Light theme:
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+${pairRows(LIGHT, "light")}
+
+Dark theme:
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+${pairRows(DARK, "dark")}
+
+Terminal (same in both themes):
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+${termRows}
+
+Rules that come out of the numbers:
+- **Secondary text never goes on a selected row.** A selected row is straw at ${SEL * 100}% over the surface. Primary text on it is fine in both themes; secondary text on it is only about 3.3:1 in dark, so use primary there.
+- **cocoa changed (light):** #7A6652 was 4.40:1 on the sidebar, just under 4.5. It is now #6B5846 (5.45:1 on the sidebar). The dark cocoa #BEA890 is unchanged. Anything hard-coded to #7A6652 should move to the token.
+- **Disabled text (latte) is exempt** from the 4.5:1 rule but should not carry meaning on its own. The tab close x uses cocoa, not latte, for that reason.
+- **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
 ## What the mockup does not show
 Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.

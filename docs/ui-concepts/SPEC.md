@@ -10,7 +10,7 @@ For the engineer building the compositor and shell. Generated from `v1.mjs` (the
 | oat | #EFE6D4 | sidebars, inactive fills |
 | sand | #E2D5BD | hairlines, borders, tracks |
 | latte | #C4AE8F | disabled text, inactive lights |
-| cocoa | #7A6652 | secondary text |
+| cocoa | #6B5846 | secondary text (was #7A6652: 4.40:1 on the sidebar, now 5.45:1) |
 | espresso | #3A2E28 | primary text, terminal background |
 | straw | #E58C97 | accent (selection, close light, progress) |
 | honey | #EBB650 | focus ring, minimise light, warnings |
@@ -67,6 +67,20 @@ Height 64, radius 20, glass. Padding 8, icons 48x48, gap 12. Width = 16 + n*48 +
 - Traffic lights: 12px circles, 8px gap, first light's top-left at (14,10) inside the window (border included). Order: close straw, minimise honey, zoom matcha. Unfocused window: all three latte, title text cocoa.
 - Minimum size 240x160. Body padding 16. Files sidebar width 160 (oat, 1px sand right edge). Status bar height 24 (cream, 1px sand top edge).
 
+## Tabs (Terminal tabs and Tabs-everywhere window tabs share this)
+One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at Gus's request.
+- Strip: a window with two or more tabs uses a 38px bar in place of the 32px title bar. Same fill, 1px sand line under it. The traffic lights keep their x (14) and sit at y12, centred in the taller bar.
+- Tab: height 32, top y6 inside the strip (so it touches the line under the strip), width between 96 and 160 (tabs share the strip equally, never narrower than 96), 6px between tabs. The first tab starts at x84. Corner radius 10px on the top corners only, square at the bottom. Padding 12px left, 8px right.
+- Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
+- Inactive tab: no fill, no border, title in secondary text. Hover: oat at 60% fill.
+- Title: one line, cut with "~" to fit (about 13 characters in the default 144px tab). Terminal tabs read "1 msh", "2 msh".
+- Close x: the letter x in secondary text, right-aligned with 8px right padding, hit target 20x20. Shown on every tab at rest (not only on hover). Hover: a 20px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
+- New tab (+): 28x24, radius 8, oat fill, 4px after the last tab, the "+" centred.
+- Terminal tabs: same geometry with Terminal colours. Bar and border #4A3C34, active tab fill is the Terminal body #3A2E29 with Terminal text #FBF6ED, inactive title and close x in the dark cocoa #BEA890 (4.63:1 on the bar; the lighter latte would be only 2.48:1), hover circle #55463C. These colours are the same in the light and dark themes.
+- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, 2px dashed straw border, radius 10, with "Drop to add as a tab" in straw, bold. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
+- Keys: Ctrl-T new tab, Ctrl-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Ctrl-1 to Ctrl-9 jump.
+- Notifications attached to tabs (a dot on the strip) are parked for later and not part of this spec.
+
 ## Launcher (Skim)
 Width 640, centred, top at y140. Input row height 56, radius 18, glass alpha 0.7, query at 2x text, leading icon 40. Results panel 12px below, same radius. Result row height 48, radius 12, selected row straw at 27%, icon 36. Max 6 rows. Dims the screen behind with espresso at alpha 0.25.
 
@@ -95,6 +109,72 @@ Dim the wallpaper with espresso at 0.35. Space strip at y40: thumbnails 128x88, 
 
 ## Wallpaper
 Dawn pasture: vertical gradient #FBE3C8 → #F3C3B8 → #C9B3D9, honey sun disc with halo, three overlapping matcha hill circles, tiny cow. Stored sharp (W) and pre-blurred (Wb = box blur r24 x3 passes, recomputed on change).
+
+## Dark theme ("Chocolate milk")
+Values from kernel/src/wm/theme.rs tc() as given by Gus, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
+| Token | Light | Dark | Use |
+|---|---|---|---|
+| milk | #FFFDF8 | #2E2520 | window body, cards, launcher |
+| cream | #FBF6EC | #382D27 | title bars, page background |
+| oat | #EFE6D4 | #42352D | sidebars, inactive fills |
+| sand | #E2D5BD | #55463C | hairlines, borders, tracks |
+| latte | #C4AE8F | #8C7764 | disabled text, inactive lights |
+| cocoa | #6B5846 | #BEA890 | secondary text (was #7A6652: 4.40:1 on the sidebar, now 5.45:1) |
+| espresso | #3A2E28 | #F4EBE0 | primary text, terminal background |
+| white | #FFFFFF | #7A6658 | glass edges, hover lightening |
+
+Fixed in both themes (deliberately one step off the tokens above so the dark map skips them):
+- Terminal body: #3A2E29
+- Terminal text: #FBF6ED
+- Ink (shadows, dims, glyphs on honey/straw/blue tiles): #3A2E27
+- Terminal bar and border: #4A3C34
+
+- Glass in dark: re-tinted from the dark milk, alphas unchanged (panels 0.55, launcher and control surfaces 0.7, border 0.75).
+- Wallpaper: "Night pasture" (moon, stars, sleeping cow). Settings offers Auto, Dawn, Night and Oat.
+
+### Contrast, measured from these exact values (WCAG AA: 4.5:1 for text, 3:1 for icons)
+Light theme:
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+| Primary text on window body | #3A2E28 on #FFFDF8 | 12.90:1 | pass |
+| Primary text on title bar | #3A2E28 on #FBF6EC | 12.17:1 | pass |
+| Primary text on sidebar | #3A2E28 on #EFE6D4 | 10.58:1 | pass |
+| Secondary text on window body | #6B5846 on #FFFDF8 | 6.64:1 | pass |
+| Secondary text on title bar | #6B5846 on #FBF6EC | 6.27:1 | pass |
+| Secondary text on sidebar | #6B5846 on #EFE6D4 | 5.45:1 | pass |
+| Primary text on a selected sidebar row | #3A2E28 on #eccec4 | 8.86:1 | pass |
+| Secondary text on a selected sidebar row (not allowed) | #6B5846 on #eccec4 | 4.56:1 | pass |
+| Tab close x, resting (secondary colour) on the title bar | #6B5846 on #FBF6EC | 6.27:1 | pass |
+| Tab close x on hover (primary) on its hover circle (sand) | #3A2E28 on #E2D5BD | 9.05:1 | pass |
+| Disabled text on window body (exempt from AA) | #C4AE8F on #FFFDF8 | 2.11:1 | n/a |
+
+Dark theme:
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+| Primary text on window body | #F4EBE0 on #2E2520 | 12.70:1 | pass |
+| Primary text on title bar | #F4EBE0 on #382D27 | 11.32:1 | pass |
+| Primary text on sidebar | #F4EBE0 on #42352D | 10.01:1 | pass |
+| Secondary text on window body | #BEA890 on #2E2520 | 6.56:1 | pass |
+| Secondary text on title bar | #BEA890 on #382D27 | 5.85:1 | pass |
+| Secondary text on sidebar | #BEA890 on #42352D | 5.17:1 | pass |
+| Primary text on a selected sidebar row | #F4EBE0 on #6e4c4a | 6.37:1 | pass |
+| Secondary text on a selected sidebar row (not allowed) | #BEA890 on #6e4c4a | 3.29:1 | FAILS 4.5:1 |
+| Tab close x, resting (secondary colour) on the title bar | #BEA890 on #382D27 | 5.85:1 | pass |
+| Tab close x on hover (primary) on its hover circle (sand) | #F4EBE0 on #55463C | 7.65:1 | pass |
+| Disabled text on window body (exempt from AA) | #8C7764 on #2E2520 | 3.52:1 | n/a |
+
+Terminal (same in both themes):
+| Pair | Colours | Ratio | AA |
+|---|---|---|---|
+| Terminal text on Terminal body | #FBF6ED on #3A2E29 | 12.17:1 | pass |
+| Terminal tab, inactive (dark cocoa) on Terminal bar | #BEA890 on #4A3C34 | 4.63:1 | pass |
+| Terminal tab, active text on Terminal body | #FBF6ED on #3A2E29 | 12.17:1 | pass |
+
+Rules that come out of the numbers:
+- **Secondary text never goes on a selected row.** A selected row is straw at 27% over the surface. Primary text on it is fine in both themes; secondary text on it is only about 3.3:1 in dark, so use primary there.
+- **cocoa changed (light):** #7A6652 was 4.40:1 on the sidebar, just under 4.5. It is now #6B5846 (5.45:1 on the sidebar). The dark cocoa #BEA890 is unchanged. Anything hard-coded to #7A6652 should move to the token.
+- **Disabled text (latte) is exempt** from the 4.5:1 rule but should not carry meaning on its own. The tab close x uses cocoa, not latte, for that reason.
+- **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
 ## What the mockup does not show
 Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.

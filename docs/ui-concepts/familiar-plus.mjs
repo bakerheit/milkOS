@@ -20,7 +20,7 @@ function tabs() {
   // one window whose title bar is a tab strip
   h += shadow(x, y, w, hh, 12) + B(x, y, w, hh, `background:${C.milk};border-radius:12px;border:1px solid ${C.sand};overflow:hidden`,
     B(0, 0, w, 38, `background:${C.cream};border-bottom:1px solid ${C.sand}`) + lightsX(13, 12) +
-    [["Documents", 1], ["andrew: sh", 0], ["notes.md", 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + TRi(w, tx + 134, 11, "x", `color:${C.latte}`); }).join("") +
+    [["Documents", 1], ["andrew: sh", 0], ["notes.md", 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + TRi(w, tx + 134, 11, "x", `color:${C.cocoa}`); }).join("") +
     B(84 + 3 * 150 + 4, 10, 28, 24, `background:${C.oat};border-radius:8px`) + TC(84 + 3 * 150 + 4, 14, 28, "+") +
     B(0, 38, 160, hh - 40, `background:${C.oat};border-right:1px solid ${C.sand}`) + T(16, 52, "FAVOURITES", `color:${C.cocoa}`) + B(8, 76, 144, 24, `background:${C.straw}55;border-radius:8px`) + T(18, 80, "Documents") + T(18, 108, "Downloads") + T(18, 136, "Desktop") + T(18, 164, "Pictures") +
     [["folder", "projects"], ["folder", "school"], ["doc", "todo.txt"], ["photo", "bike.png"], ["note", "ideas.md"], ["folder", "kernel"]].map((f, i) => {

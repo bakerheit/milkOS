@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 W, H = 2048, 1536
+WORDMARK = False          # the splash carries the drop and the bar's track; the kernel draws the wordmark in the OS font (pass --wordmark to draw ours)
 
 
 def hexc(h):
@@ -195,17 +196,12 @@ def night():
 
 
 def oat():
+    """Plain oat: a very slow gradient, a faint highlight at the top left (3%), and a hair of grain so the 8-bit gradient does not band."""
     rng = np.random.default_rng(7)
-    a = vgrad(W, H, [(0.0, mix(OAT, MILK, 0.35)), (1.0, mix(OAT, SAND, 0.25))])
-    n = rng.normal(0, 2.2, (H, W, 1)).astype(np.float32)
+    a = vgrad(W, H, [(0.0, mix(OAT, MILK, 0.30)), (1.0, mix(OAT, SAND, 0.22))])
+    n = rng.normal(0, 0.9, (H, W, 1)).astype(np.float32)
     im = to_img(a + n)
-    # a very faint drop, large, low on the right: the milkOS mark, ten percent
-    drop = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(drop)
-    cx, cy, r = 1560, 1010, 250
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=MILK + (110,))
-    d.polygon([(cx - r * 0.96, cy - r * 0.28), (cx, cy - r * 2.0), (cx + r * 0.96, cy - r * 0.28)], fill=MILK + (110,))
-    im.alpha_composite(drop.filter(ImageFilter.GaussianBlur(3)))
+    im.alpha_composite(radial(W, H, 0.25 * W, 0.12 * H, 0.9 * W, MILK, 0.03, 1.5))
     return im.convert("RGB")
 
 
@@ -300,7 +296,8 @@ def splash(night_mode):
         im.alpha_composite(radial(W, H, cx, cy, 190 * k, hexc("7F93C9"), 0.16, 2.0))
     blue = hexc("7F93C9")
     draw_drop(im, cx, cy, r, blue, hexc("FFFDF8") if not night_mode else hexc("F4EBE0"), hexc("C9D6EE") if not night_mode else hexc("B9C6E4"))
-    wordmark(im, cx, 522 * k, 54 * k, hexc("F4EBE0") if night_mode else hexc("3A2E28"), blue)
+    if WORDMARK:
+        wordmark(im, cx, 522 * k, 54 * k, hexc("F4EBE0") if night_mode else hexc("3A2E28"), blue)
     d = ImageDraw.Draw(im)
     track = hexc("55463C") if night_mode else hexc("E2D5BD")
     d.rounded_rectangle([cx - 110 * k, 557 * k, cx + 110 * k, 561 * k], radius=2 * k, fill=track + (255,))
@@ -328,6 +325,9 @@ def glass_report(img, dark):
 
 
 if __name__ == "__main__":
+    if "--wordmark" in sys.argv:
+        WORDMARK = True
+        sys.argv.remove("--wordmark")
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     for name, fn, dark in (("wallpaper-dawn", dawn, False), ("wallpaper-night", night, True), ("wallpaper-oat", oat, False)):

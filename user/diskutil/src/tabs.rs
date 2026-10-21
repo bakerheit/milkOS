@@ -237,7 +237,7 @@ impl App {
             );
             y += 66;
         }
-        if info.encrypted == Some(true) {
+        if info.encrypted == Some(true) && self.disk.disks.is_none() {
             win.text(X0, y, "Backups made with Send are not encrypted.", th.cocoa);
         }
     }
@@ -818,27 +818,53 @@ impl App {
         );
         // The backups warning.
         let bc = Rect::new(X0, BAR + 228, main_w(win), 112);
-        widgets::bordered(win, bc, 14, Theme::tint(th.milk, th.honey, 0x22), th.honey);
-        bold_x(
-            win,
-            bc.x + 16,
-            bc.y + 10,
-            "Backups are not encrypted",
-            th.espresso,
-            1,
-        );
-        win.text(
-            bc.x + 16,
-            bc.y + 34,
-            "A backup made with Send is a plain copy of your files.",
-            th.espresso,
-        );
-        win.text(
-            bc.x + 16,
-            bc.y + 52,
-            "Keep it on an encrypted disk, or receive it into another encrypted volume.",
-            th.espresso,
-        );
+        // On a system that encrypts backups of an encrypted volume, Send asks for a passphrase.
+        let encrypted_backups = self.disk.disks.is_some() && enc == Some(true);
+        if encrypted_backups {
+            card(win, &th, bc, None);
+            bold_x(
+                win,
+                bc.x + 16,
+                bc.y + 10,
+                "Backups are encrypted",
+                th.espresso,
+                1,
+            );
+            win.text(
+                bc.x + 16,
+                bc.y + 34,
+                "A backup made with Send asks for a passphrase and encrypts the file.",
+                th.espresso,
+            );
+            win.text(
+                bc.x + 16,
+                bc.y + 52,
+                "You can choose a plain copy instead; keep that on an encrypted disk.",
+                th.espresso,
+            );
+        } else {
+            widgets::bordered(win, bc, 14, Theme::tint(th.milk, th.honey, 0x22), th.honey);
+            bold_x(
+                win,
+                bc.x + 16,
+                bc.y + 10,
+                "Backups are not encrypted",
+                th.espresso,
+                1,
+            );
+            win.text(
+                bc.x + 16,
+                bc.y + 34,
+                "A backup made with Send is a plain copy of your files.",
+                th.espresso,
+            );
+            win.text(
+                bc.x + 16,
+                bc.y + 52,
+                "Keep it on an encrypted disk, or receive it into another encrypted volume.",
+                th.espresso,
+            );
+        }
         let bw = button_w("Back up...", true);
         button(
             win,

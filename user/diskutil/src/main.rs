@@ -255,6 +255,33 @@ impl App {
                 });
             }
         }
+        // Disks the system lists that have no row yet: a milkfs volume that is not mounted, or a disk
+        // that is not milkfs at all.
+        if let Some(list) = &d.disks {
+            for e in list {
+                match &e.content {
+                    diskkit::disks::Content::Milkfs {
+                        state: diskkit::disks::State::Unmounted,
+                        label,
+                        ..
+                    } => v.push(Row {
+                        name: label.clone(),
+                        kind: format!("not mounted, {}", diskkit::fmt::kb(e.kb())),
+                        icon: Icon::Disk,
+                        locked: false,
+                        path: None,
+                    }),
+                    diskkit::disks::Content::Other => v.push(Row {
+                        name: e.name.clone(),
+                        kind: format!("other disk, {}", diskkit::fmt::kb(e.kb())),
+                        icon: Icon::Disk,
+                        locked: false,
+                        path: None,
+                    }),
+                    _ => {}
+                }
+            }
+        }
         v.push(Row {
             name: String::from("In-memory root"),
             kind: d.usage_of("/").map_or(String::from("RAM, not kept"), |u| {
@@ -454,7 +481,16 @@ impl App {
             _ => self.report = report.clone(),
         }
         self.disk.refresh();
-        if code != 0 {
+        if code == 13 && (what == "Restoring" || what == "Backing up") {
+            self.sheet = Some(Sheet::Message {
+                title: format!("{what} did not finish"),
+                body: alloc::vec![
+                    String::from("The passphrase is wrong or missing for this backup."),
+                    String::from("Details: error 13"),
+                ],
+                danger: true,
+            });
+        } else if code != 0 {
             self.fail(&format!("{what} did not finish"), code);
         } else if from != "check" {
             let line =

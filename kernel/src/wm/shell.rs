@@ -6,7 +6,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::font;
 use crate::gfx::{Color, Rect};
 use crate::{heap, pmm};
 
@@ -560,7 +559,7 @@ impl Desktop {
             && self.launcher.is_none()
         {
             let (cx, _) = dock_icon_center(i);
-            let w = font::str_width(DOCK[i].name, 1) + 24;
+            let w = super::fontx::prop_width(DOCK[i].name, false) + 24;
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
@@ -648,15 +647,15 @@ impl Desktop {
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
                     icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, ESPRESSO, false);
-                    p.bold(64, 12, &t.title, ESPRESSO);
-                    p.text(64, 32, &t.sub, COCOA);
+                    p.text_p(64, 12, &t.title, ESPRESSO, true);
+                    p.text_p(64, 32, &t.sub, COCOA, false);
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
                 if let Some(i) = self.tip {
-                    p.text_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
+                    p.text_p_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
                 }
             }
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
@@ -684,18 +683,14 @@ impl Desktop {
             if self.menu == Some(k) {
                 p.rrect(x - 8, 3, tw + 16, MENU_H - 6, 6, STRAW, SEL_ROW_A);
             }
-            if k == 0 {
-                p.bold(x, MENU_TEXT_Y, &name, ESPRESSO);
-            } else {
-                p.text(x, MENU_TEXT_Y, &name, ESPRESSO);
-            }
+            p.text_p(x, MENU_TEXT_Y, &name, ESPRESSO, k == 0);
         }
-        p.text_right(
-            w - MENU_PAD_X,
+        let sw = super::fontx::prop_width(&self.status, false);
+        p.text_p(
+            w - MENU_PAD_X - sw,
             MENU_TEXT_Y,
             &self.status,
             ESPRESSO,
-            1,
             false,
         );
     }
@@ -745,8 +740,8 @@ impl Desktop {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, tbg, ta);
             }
             let (c1, c2) = if on { (MILK, MILK) } else { (ESPRESSO, COCOA) };
-            p.bold(tx + 14, 26, label, c1);
-            p.text(tx + 14, 46, sub, c2);
+            p.text_p(tx + 14, 26, label, c1, true);
+            p.text_p(tx + 14, 46, sub, c2, false);
         };
         tile(p, 16, "Network", "not yet", false);
         tile(
@@ -762,7 +757,7 @@ impl Desktop {
         {
             let sy = SLIDER_Y[i];
             p.rrect(16, sy, CC_W - 32, CC_TILE_H, 16, tbg, ta);
-            p.bold(30, sy + 8, label, ESPRESSO);
+            p.text_p(30, sy + 8, label, ESPRESSO, true);
             p.rrect(TRACK_X, sy + 36, TRACK_W, CC_SLIDER_H, 4, COCOA, 0x40);
             p.rrect(
                 TRACK_X,
@@ -832,18 +827,19 @@ impl Desktop {
             }
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
-            p.bold(64, y + 6, e.name, ESPRESSO);
-            p.text(64, y + 22, e.sub, COCOA);
+            p.text_p(64, y + 6, e.name, ESPRESSO, true);
+            p.text_p(64, y + 22, e.sub, COCOA, false);
             if sel {
                 p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
             }
         }
         let fy = 40 + res.len().max(1) as i32 * LAUNCH_ROW_H + 8;
-        p.text(
+        p.text_p(
             16,
             fy,
-            "Up/Down to choose   Enter to open   Esc to close",
+            "Up/Down to choose    Enter to open    Esc to close",
             COCOA,
+            false,
         );
     }
 
@@ -1009,7 +1005,7 @@ impl Desktop {
                 None => p.rrect_r(rr, 3, CREAM, 255),
             }
         }
-        p.text_center(0, w, 66, &space_label(i), COCOA, i == self.space);
+        p.text_p_center(0, w, 66, &space_label(i), COCOA, i == self.space);
         if i == self.space {
             p.rrect_stroke(0, 0, w, h, THUMB_R, SEL_BORDER, HONEY, 255);
         }
@@ -1020,7 +1016,7 @@ impl Desktop {
     pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
         match key {
             PanelKey::MenuBar => {
-                let sw = font::str_width(&self.status, 1);
+                let sw = super::fontx::prop_width(&self.status, false);
                 if x < 30 {
                     self.set_menu(None);
                     self.toggle_launcher();

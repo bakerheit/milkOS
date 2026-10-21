@@ -343,6 +343,7 @@ impl Desktop {
             acct_start: timer::now_ns(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
+        d.status = d.status_text();
         apps::fsx::ensure_home();
         ctl::init();
         clipboard::init();

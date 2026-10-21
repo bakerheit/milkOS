@@ -666,6 +666,30 @@ impl<'a> Painter<'a> {
         x + font::str_width(s, scale)
     }
 
+    /// Proportional 1x text (fontx::prop_metrics), optionally faux bold. Returns the end x.
+    pub fn text_p(&mut self, x: i32, y: i32, s: &str, c: Color, bold: bool) -> i32 {
+        let mut cx = x;
+        for ch in s.chars() {
+            let (first, adv) = super::fontx::prop_metrics(ch);
+            if ch != ' ' {
+                let mut b = [0u8; 4];
+                let g = ch.encode_utf8(&mut b);
+                self.text_a(cx - first, y, g, c, 255, 1);
+                if bold {
+                    self.text_a(cx - first + 1, y, g, c, 255, 1);
+                }
+            }
+            cx += adv + (bold && super::fontx::PROPORTIONAL_UI) as i32;
+        }
+        cx - super::fontx::PROPORTIONAL_UI as i32
+    }
+
+    /// Proportional text centred in `[x, x+w)`.
+    pub fn text_p_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
+        let tx = x + (w - super::fontx::prop_width(s, bold)) / 2;
+        self.text_p(tx, y, s, c, bold);
+    }
+
     /// Text centred in `[x, x+w)`.
     pub fn text_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
         let tx = x + (w - font::str_width(s, 1)) / 2;

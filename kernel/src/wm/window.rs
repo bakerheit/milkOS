@@ -286,7 +286,7 @@ impl Window {
         } else {
             title
         };
-        p.text_center(0, w, 9, t, tc, true);
+        p.text_p_center(0, w, 9, t, tc, true);
         // Body.
         let br = body_rect(w, h);
         {

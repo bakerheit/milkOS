@@ -6,7 +6,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::font;
 use crate::gfx::Rect;
 
 use super::paint::Painter;
@@ -69,12 +68,12 @@ impl Desktop {
         let mut v = Vec::new();
         let name = self.app_title();
         let mut x = 38;
-        let w = font::str_width(&name, 1) + 1;
+        let w = super::fontx::prop_width(&name, true);
         v.push((x, w, name));
         x += w;
         for m in self.menu_names() {
             x += 24;
-            let w = font::str_width(m, 1);
+            let w = super::fontx::prop_width(m, false);
             v.push((x, w, String::from(*m)));
             x += w;
         }
@@ -220,7 +219,7 @@ impl Desktop {
                 p.rrect(6, y, w - 12, ROW_H, 6, STRAW, SEL_ROW_A);
             }
             let c = if disabled { LATTE } else { ESPRESSO };
-            p.text(16, y + 4, &it.label, c);
+            p.text_p(16, y + 4, &it.label, c, false);
             if !it.key.is_empty() {
                 p.text_right(
                     w - 14,

@@ -115,3 +115,39 @@ pub const fn width(scale: i32) -> i32 {
 pub fn smooth_scale(scale: i32) -> bool {
     scale == 2 || scale == 4
 }
+
+// ---- proportional 1x ------------------------------------------------------------------------
+
+/// The shell's chrome text (menu bar, menus, titles, toasts, tips, Skim, control centre) uses
+/// the proportional face below. `false` puts it back to plain monospace Unifont everywhere.
+pub const PROPORTIONAL_UI: bool = true;
+
+/// Proportional metrics for a Unifont glyph: (first used column, advance in pixels).
+/// Unifont is monospace; trimming each glyph to its ink plus one pixel of spacing gives a
+/// friendlier UI face from the same bitmaps.
+pub fn prop_metrics(c: char) -> (i32, i32) {
+    if !PROPORTIONAL_UI {
+        return (0, 8);
+    }
+    if c == ' ' {
+        return (0, 5);
+    }
+    let g = font::glyph(c);
+    let ink = g.iter().fold(0u8, |a, &b| a | b);
+    if ink == 0 {
+        return (0, 4);
+    }
+    let first = ink.leading_zeros() as i32;
+    let last = 7 - ink.trailing_zeros() as i32;
+    (first, last - first + 2)
+}
+
+/// Width of `s` in the proportional face (+1 per glyph when bold).
+pub fn prop_width(s: &str, bold: bool) -> i32 {
+    let w: i32 = s.chars().map(|c| prop_metrics(c).1).sum();
+    let n = s.chars().count() as i32;
+    if !PROPORTIONAL_UI {
+        return w + bold as i32;
+    }
+    w + if bold { n } else { 0 } - if n > 0 { 1 } else { 0 }
+}

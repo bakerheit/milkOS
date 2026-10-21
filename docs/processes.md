@@ -154,13 +154,35 @@ AT_EXECFN, ...), strings and 16 random bytes above it, sp 16-byte aligned.
 FP/SIMD is enabled at EL0 and saved per user thread on every switch (the kernel itself is
 soft-float and never touches it).
 
-### Console
+### Terminals (`proc/tty.rs`): the API for anyone adding one
 
-fd 0/1/2 of processes the kernel starts are one `open("/dev/console")`. Writes go to the
-`kprintln!` sink (devfs). Reads go to the tty in `proc/console.rs`: cooked mode (echo,
-backspace, ^U, ^C drops the line, ^D at line start = EOF), one line per read, blocking on
-a wait queue the UART RX interrupt wakes. Before `sched::init` it returns EAGAIN (the fs
-self-test checks that). Nothing else may consume `uart::read_byte` now.
+One line discipline, instantiated per terminal. Today: `proc::tty::CONSOLE` (UART,
+`/dev/console`, rdev 5:1) and `wm::tty::TTY1` (desktop Terminal, `/dev/tty1`, rdev 4:1).
+
+```rust
+pub static TERM: Tty = Tty::new("tty1", output_sink, rows, cols); // fn(&[u8]) sink
+proc::tty::register(makedev(4, 1), &TERM);   // ioctls on that device node route here
+TERM.input(bytes);                 // typed bytes; thread context (allocates, signals)
+TERM.read(buf) / TERM.write(buf)   // call from the device inode's read_at / write_at
+TERM.set_winsize(rows, cols);      // window resized: TIOCGWINSZ + SIGWINCH on change
+TERM.foreground() / set_foreground(pgid)   // what TIOCGPGRP / TIOCSPGRP do
+proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that tty
+```
+
+* Cooked mode by default: echo, backspace, ^U, Enter delivers a line, ^D at line start is
+  EOF, one line per read. ^C / ^\ flush input and send SIGINT / SIGQUIT to the
+  foreground process group (ISIG). Escape sequences are swallowed in cooked mode.
+* termios: TCGETS/TCSETS/TCSETSW/TCSETSF round-trip a Linux `struct termios` (60 bytes);
+  ICANON (off = raw bytes, read returns what's there), ECHO, ISIG, ICRNL are honoured.
+* ioctls are handled in the syscall layer via the registry (it needs user-memory copies):
+  TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP. The device inode's own
+  `ioctl` is not used for a registered tty.
+* `read` blocks (interruptible: EINTR), except before `sched::init` where it is EAGAIN
+  when empty (the fs self-test relies on that).
+* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt), so ^C
+  works while nobody reads. `uart::read_byte` belongs to it.
+* Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
+  job stop/continue.
 
 ## Userland (`user/`)
 

@@ -322,7 +322,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${idn(i)}"><div class="stagebox"
 const sh = (arr) => arr.map((l, i) => `  ${i + 1}. grow ${l.grow}px, move down ${l.dy}px, alpha ${l.a}`).join("\n");
 const spec = `# milkOS 1.0 UI spec
 
-For the engineer building the compositor and shell. Generated from \`v1.mjs\` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: \`milkos-1.0.html\`. Screen: ${TOK.screen.w}x${TOK.screen.h}, 32-bit. Layout snaps to a ${TOK.screen.grid}px grid.
+For the engineer building the compositor and shell. Generated from \`v1.mjs\` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: \`milkos-1.0.html\`. App specs (Activity Monitor, Text Editor, Calendar, Clock/Timer, Preview): \`SPEC-APPS.md\`. Art direction: \`ART.md\`. Screen: ${TOK.screen.w}x${TOK.screen.h}, 32-bit. Layout snaps to a ${TOK.screen.grid}px grid.
 
 ## Colour tokens (sRGB)
 | Token | Hex | Use |

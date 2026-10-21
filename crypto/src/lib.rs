@@ -14,6 +14,9 @@
 //! | [`poly1305`] | Poly1305 one-time MAC (RFC 8439 2.5) | RFC 8439 2.5.2, A.3 |
 //! | [`aead`] | ChaCha20-Poly1305 AEAD (RFC 8439 2.8) | RFC 8439 2.8.2 + tamper checks |
 //! | [`x25519`] | X25519 key agreement (RFC 7748) | RFC 7748 5.2, 6.1, iterated x1000 |
+//! | [`xchacha20`] | XChaCha20 stream and XChaCha20-Poly1305 (24-byte nonce) | xchacha draft A.3.1 + a wrong tag |
+//! | [`hmac`] | HMAC-SHA256 (RFC 2104), PBKDF2-HMAC-SHA256 (RFC 8018) | RFC 4231 1, 2, 6; RFC 7914 11 |
+//! | [`scrypt`] | scrypt (RFC 7914), the array from a caller-chosen [`scrypt::Scratch`] | RFC 7914 12 (both) |
 //!
 //! (The kernel's audit log keeps its own SHA-256, `kernel/src/audit/sha256.rs`, on
 //! purpose: `audit verify` checks the kernel's hashes with this independent copy.)
@@ -26,10 +29,13 @@ pub mod aead;
 pub mod chacha20;
 pub mod ed25519;
 mod field25519;
+pub mod hmac;
 pub mod poly1305;
+pub mod scrypt;
 pub mod sha256;
 pub mod sha512;
 pub mod x25519;
+pub mod xchacha20;
 
 /// Hex to a fixed-size array (None if malformed or the wrong length).
 pub fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -100,5 +106,11 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, usize, usize)> {
     v.push(("chacha20poly1305", p, t));
     let (p, t) = x25519::selftest();
     v.push(("x25519", p, t));
+    let (p, t) = xchacha20::selftest();
+    v.push(("xchacha20poly1305", p, t));
+    let (p, t) = hmac::selftest();
+    v.push(("hmac-sha256+pbkdf2", p, t));
+    let (p, t) = scrypt::selftest();
+    v.push(("scrypt", p, t));
     v
 }

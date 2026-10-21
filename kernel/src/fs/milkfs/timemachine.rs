@@ -221,9 +221,6 @@ pub fn interval_text(s: u64) -> String {
 }
 
 pub fn start() {
-    if super::volume().is_none() {
-        return;
-    }
     let enabled = super::volume().is_some_and(|v| v.state.lock().auto_config().enabled);
     drop(crate::sched::spawn("timemachine", thread));
     kprintln!(

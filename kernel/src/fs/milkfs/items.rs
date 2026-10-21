@@ -345,6 +345,7 @@ impl State {
             tmp.resize(count * BLOCK, 0);
             self.store.read_run(
                 e.block + first as u64,
+                e.birth,
                 &e.csums[first..first + count],
                 &mut tmp,
             )?;
@@ -410,11 +411,10 @@ impl State {
             let (start, got) = self.store.alloc_run((n - i).min(MAX_RUN as usize))?;
             let mut csums = Vec::with_capacity(got);
             for j in 0..got {
-                let chunk: &[u8; BLOCK] = data[(i + j) * BLOCK..(i + j + 1) * BLOCK]
-                    .try_into()
-                    .unwrap();
-                self.store.cache.write(start + j as u64, chunk)?;
-                csums.push(xxh64(chunk));
+                let chunk = &mut data[(i + j) * BLOCK..(i + j + 1) * BLOCK];
+                let b = start + j as u64;
+                csums.push(self.store.seal(b, self.store.txn, chunk));
+                self.store.cache.write(b, (&*chunk).try_into().unwrap())?;
             }
             let e = Ext {
                 start: b0 + i as u64,

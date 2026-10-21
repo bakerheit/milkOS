@@ -41,3 +41,11 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 `REVIEW.md` is a prioritised review of the shipped screens against the spec. `share.html` is the Milk Drop sheet (Files > Share, send, incoming, key changed). `shield.html` is a read-only app-permissions design, parked and not scheduled. Source: `share.mjs`. New SPEC sections: Buttons, Files window, Menu bar status area, Milk Drop sheet, Shield.
 
 `REVIEW-DRAWER-TABS.md` reviews the notification drawer and window tabs builds against the spec.
+
+`dock-alternatives.html`: six alternatives to the dock (left rail, taskbar, apps in the menu bar, auto-hide with previews, dots pill, corner fan), with the screen space each costs. Source `dock-alternatives.mjs`.
+
+## Art direction
+`ART.md` is the art direction for icons, wallpapers, the boot splash and sounds. `art-direction.html` is the visual reference, `art/check-wallpaper.py` checks a wallpaper against the glass-contrast rule. Source: `art-direction.mjs`.
+
+## Built-in apps
+`SPEC-APPS.md` specifies Activity Monitor, Text Editor, Calendar, Clock/Timer and Preview, built only on what the system can do today. `apps.html` has the 17 mockups. Source: `apps.mjs`.

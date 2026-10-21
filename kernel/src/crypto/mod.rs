@@ -2,6 +2,7 @@
 //! userland's `rt::crypto`) plus what only the kernel has, the CSPRNG ([`rng`]) behind
 //! /dev/random, /dev/urandom and getrandom. See docs/crypto.md.
 
+pub mod frames;
 pub mod rng;
 
 pub use milkcrypto::*;

@@ -23,11 +23,25 @@ root cover it. `kernel/build.rs` watches it too, so userland rebuilds when it ch
 | `poly1305` | Poly1305 one-time MAC (RFC 8439 2.5), 26-bit limbs, streaming | RFC 8439 2.5.2 (one-shot + streamed), A.3 #6 and #7 (the 2^130-5 carries) |
 | `aead` | ChaCha20-Poly1305 (RFC 8439 2.8): `seal` / `open` (tag checked in constant time before decrypting) | RFC 8439 2.8.2, plus a flipped bit and a wrong AAD |
 | `x25519` | X25519 (RFC 7748): Montgomery ladder, constant-time swap, `public_key`, `shared` (None for an all-zero result) | RFC 7748 5.2 (both), 6.1, the iterated test after 1 and 1000 rounds |
+| `xchacha20` | XChaCha20 stream (`xor`) and XChaCha20-Poly1305 (`seal` / `open`, 24-byte nonce, safe to pick at random), on `hchacha20` + ChaCha20 / `aead` | draft-irtf-cfrg-xchacha-03 A.3.1, plus a wrong tag |
+| `hmac` | HMAC-SHA256 (`HmacSha256`, `hmac_sha256`), PBKDF2-HMAC-SHA256 | RFC 4231 cases 1, 2, 6; RFC 7914 11 |
+| `scrypt` | scrypt (RFC 7914), the memory-hard password KDF; its big array comes from a `Scratch` the caller provides (`VecScratch` on the heap, or the kernel's page frames) | RFC 7914 12, both vectors |
 | `field25519` (private) | GF(2^255-19), shared by Ed25519 and X25519; constant-time `cswap` | via the curves |
 | crate root | `hex`, `unhex`, `unhex_vec`, `ct_eq` (constant-time compare), `wipe` (volatile zeroing) | |
 
 `milkcrypto::selftest()` runs every module's vectors. The kernel prints them at boot
 (`[crypto] test vectors: chacha20 4/4 sha256 5/5 ...: ok`).
+
+**Why scrypt (not Argon2id)** for passwords: memory-hard, standardised with test vectors,
+and it needs only Salsa20/8 + PBKDF2-HMAC-SHA256 on top of what is here (Argon2 needs
+BLAKE2b). milkfs uses N = 2^16, r = 8, p = 4 (64 MiB, ~0.35 s). In the kernel,
+`crypto::frames::scrypt` puts the array in page frames taken for the call and handed back
+wiped (the kernel heap never shrinks); the fs self-test runs RFC 7914's vector through it.
+**HMAC-SHA256** is the PRF (key derivation, milkfs's per-block synthetic IV, where a PRF is
+required and Poly1305, a one-time MAC, wouldn't do). Users: milkfs encryption at rest
+(`kernel/src/fs/milkfs/crypt.rs`, docs/filesystem.md); its salts and nonces come from
+`crypto::rng::fill`. `scripts/mkmilkfs.py` has its own stdlib-only copy for the Mac side
+(`mkmilkfs.py selftest-crypto` runs the same vectors).
 
 **Adding a primitive** (e.g. XChaCha20-Poly1305, a password KDF): put it in
 `crypto/src/<name>.rs`, give it a `selftest()` with the standard's vectors, list it in

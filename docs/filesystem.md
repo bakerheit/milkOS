@@ -535,6 +535,30 @@ The intended UI flow: snapshot (or take the newest auto snapshot) → clone → 
 writes into `/Volumes/Milk-<name>` → user tries the app (run with that root once proc has
 per-process roots; today, from that path) → Keep = promote, Cancel = discard.
 
+### Diff (`snap diff`)
+
+`fs::milkfs::diff(a, b: Option<&str>) -> DiffResult { changes: Vec<Change>, nodes_read,
+subtrees_skipped }`, `Change::{Added, Removed, Modified, Renamed(old, new)}` with paths from
+the volume root. `b = None` or `"live"` = the live volume; the order of `a` and `b` doesn't
+matter. Shell: write `A [B]` to `/sys/fs/milkfs/diff`, read the result back;
+`snap diff A [B|live]` prints e.g.
+
+```
+diff before..live: 5 change(s) (2 tree nodes read, 0 unchanged subtrees skipped)
+A /home/milk/Documents/Plans 2026
+D /home/milk/Documents/todo.txt
+M /home/milk/README.txt
+R /dd/a -> /dd/sub/a2
+```
+
+Only changed nodes are read: walking the newer tree, a subtree whose pointer was born at or
+before the older snapshot is skipped (CoW: it's the same subtree in both), and those
+pointers are skipped in the older tree too; the items of the remaining leaves are compared.
+After a promote (branched history) shared subtrees are found by block-pointer equality
+against the older tree instead. One change among 300 files reads at most a handful of
+nodes (self-test checks <= 8). Files now record their parent directory (as directories
+always did), so paths are found without scanning; older files fall back to a scan.
+
 ### Persistent home
 
 With a milkfs volume, `/home/milk` is a **bind mount** of `<volume>/home/milk`

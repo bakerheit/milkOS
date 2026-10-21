@@ -15,6 +15,7 @@
 pub mod btree;
 pub mod clone;
 pub mod crashtest;
+pub mod diff;
 pub mod format;
 pub mod inode;
 pub mod items;
@@ -170,6 +171,39 @@ pub fn setup_home() {
         ),
         Err(e) => kprintln!("milkfs: bind {on_disk} -> {HOME} failed: {e}; home stays in RAM"),
     }
+}
+
+// ---- diff ---------------------------------------------------------------------------
+
+/// What changed from snapshot `a` to snapshot `b` (or the live volume when `b` is `None`
+/// or `"live"`). The order of `a` and `b` doesn't matter: older -> newer.
+pub fn diff(a: &str, b: Option<&str>) -> Result<diff::DiffResult> {
+    primary()?.state.lock().diff(a, b)
+}
+
+static LAST_DIFF: SpinLock<String> = SpinLock::new(String::new());
+
+fn diff_control(arg: &str) -> Result<()> {
+    let mut w = arg.split_whitespace();
+    let a = w.next().ok_or(Errno::EINVAL)?;
+    let b = w.next();
+    if w.next().is_some() {
+        return Err(Errno::EINVAL);
+    }
+    let r = diff(a, b)?;
+    let mut s = format!(
+        "diff {a}..{}: {} change(s) ({} tree nodes read, {} unchanged subtrees skipped)\n",
+        b.unwrap_or("live"),
+        r.changes.len(),
+        r.nodes_read,
+        r.subtrees_skipped
+    );
+    for c in &r.changes {
+        s.push_str(&c.line());
+        s.push('\n');
+    }
+    *LAST_DIFF.lock() = s;
+    Ok(())
 }
 
 // ---- clones -------------------------------------------------------------------------
@@ -465,6 +499,11 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         timemachine::control(arg(b)?)
     });
     dir.add_file("clones", clones_text);
+    dir.add_control(
+        "diff",
+        || LAST_DIFF.lock().clone(),
+        |b| diff_control(arg(b)?),
+    );
     dir.add_control("clone", clones_text, |b| {
         let mut w = arg(b)?.split_whitespace();
         let (Some(snap), Some(name), None) = (w.next(), w.next(), w.next()) else {

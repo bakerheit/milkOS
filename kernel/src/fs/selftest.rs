@@ -990,6 +990,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_destructive(t, &vol, VP, D, &dev);
     milkfs_clones(t, &vol, VP, &dev);
     page_cache(t, VP);
+    milkfs_diff(t, VP);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1625,6 +1626,83 @@ fn page_cache(t: &mut T, vp: &str) {
         let _ = ops::unlink(&big);
     }
     let _ = ops::unlink(&f);
+}
+
+/// `snap diff` on the test volume.
+fn milkfs_diff(t: &mut T, vp: &str) {
+    use super::milkfs::{self as m, diff::Change};
+    let p = |n: &str| alloc::format!("{vp}/dd/{n}");
+    let _ = ops::mkdir_all(&p("sub"), 0o755);
+    for (n, c) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        let _ = ops::write_file(&p(n), c.as_bytes());
+    }
+    for i in 0..300 {
+        let _ = ops::write_file(&p(&alloc::format!("sub/f{i:03}")), b"same");
+    }
+    t.ok(m::snapshot("d1").is_ok(), "diff: snapshot d1");
+    let _ = ops::write_file(&p("b"), b"B changed");
+    let _ = ops::unlink(&p("c"));
+    let _ = ops::write_file(&p("e"), b"new");
+    let _ = ops::rename(&p("a"), &p("sub/a2"));
+    let _ = ops::mkdir(&p("newdir"), 0o755);
+    t.ok(m::snapshot("d2").is_ok(), "diff: snapshot d2");
+    let _ = ops::write_file(&p("f"), b"after d2");
+    let want = alloc::vec![
+        Change::Modified(String::from("/dd/b")),
+        Change::Removed(String::from("/dd/c")),
+        Change::Added(String::from("/dd/e")),
+        Change::Added(String::from("/dd/newdir")),
+        Change::Renamed(String::from("/dd/a"), String::from("/dd/sub/a2")),
+    ];
+    let got = m::diff("d1", Some("d2"))
+        .map(|r| r.changes)
+        .unwrap_or_default();
+    t.ok(
+        got == want,
+        &alloc::format!("diff d1..d2 is exact ({got:?})"),
+    );
+    t.ok(
+        m::diff("d2", Some("d1")).map(|r| r.changes).ok() == Some(want),
+        "diff order doesn't matter",
+    );
+    t.ok(
+        m::diff("d2", None).map(|r| r.changes).ok()
+            == Some(alloc::vec![Change::Added(String::from("/dd/f"))]),
+        "diff snapshot..live",
+    );
+    t.ok(
+        m::diff("d2", Some("d2")).is_ok_and(|r| r.changes.is_empty()),
+        "diff of a snapshot with itself",
+    );
+    // One change among 300 files: only the path to it is read.
+    t.ok(m::snapshot("d3").is_ok(), "diff: snapshot d3");
+    let _ = ops::write_file(&p("sub/f123"), b"different");
+    match m::diff("d3", None) {
+        Ok(r) => t.ok(
+            r.changes == alloc::vec![Change::Modified(String::from("/dd/sub/f123"))]
+                && r.nodes_read <= 8,
+            &alloc::format!(
+                "diff reads only changed nodes ({} read, {} skipped)",
+                r.nodes_read,
+                r.subtrees_skipped
+            ),
+        ),
+        Err(e) => t.ok(false, &alloc::format!("diff d3..live: {e}")),
+    }
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/diff", b"d1 d2").is_ok()
+            && read_str("/sys/fs/milkfs/diff").contains("R /dd/a -> /dd/sub/a2"),
+        "/sys/fs/milkfs/diff",
+    );
+    t.err(
+        m::diff("nope", None),
+        Errno::ENOENT,
+        "diff of a missing snapshot",
+    );
+    for n in ["d1", "d2", "d3"] {
+        let _ = m::delete_snapshot(n);
+    }
+    rm_rf(&alloc::format!("{vp}/dd"));
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

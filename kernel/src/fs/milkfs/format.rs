@@ -504,7 +504,8 @@ pub fn decode_dead(b: &[u8; BLOCK]) -> Result<(Vec<DeadEntry>, BlockPtr)> {
 // ---- items --------------------------------------------------------------------------
 
 /// `K_INODE` value, 68 bytes: mode u32 (S_IF* | perm), nlink u32, uid u32, gid u32,
-/// size u64, parent u64 (directories: the containing directory; others 0), then
+/// size u64, parent u64 (the containing directory; for files the one they were created
+/// or last renamed into, 0 on files made before that was recorded), then
 /// atime, mtime, ctime as (i64 seconds, u32 nanoseconds).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InodeItem {

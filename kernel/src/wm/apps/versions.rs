@@ -396,6 +396,11 @@ impl WindowContents for Versions {
         true
     }
 
+    fn drop_path(&mut self, path: &str) -> bool {
+        self.load(path);
+        true
+    }
+
     fn tick(&mut self, _now: u64) -> bool {
         let asked = PENDING.lock().take();
         if let Some(p) = asked {

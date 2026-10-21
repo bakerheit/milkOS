@@ -287,7 +287,9 @@ Kinds: 1 key down (`key` = Unicode code point, or 0x10001 Enter, 0x10002 Backspa
 Tab, 0x10004 Esc, 0x10005..8 Up/Down/Left/Right, 0x10009 Delete; `mods` bits shift 1, ctrl 2,
 alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4 / 5 button
 down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
-the end), 7 close (the user closed the window: clean up and exit). 2 (key up) is reserved.
+the end), 7 close (the user closed the window: clean up and exit), 8 drop (a file was dragged
+from Files onto the window at x, y: `key` is a new fd for it, opened read-only and granted
+to the process; read it and close it). 2 (key up) is reserved.
 
 Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
 stays mapped until the process destroys the window or exits. Windows of processes that exit

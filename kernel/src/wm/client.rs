@@ -234,6 +234,20 @@ pub fn info(id: u32) -> Option<(u32, u32, String)> {
         .map(|cl| (cl.w, cl.h, cl.title.clone()))
 }
 
+/// A file dropped onto client window `id` at body (x, y): the user's grant of that one
+/// file (`proc::grant_file`, read-only, audited as powerbox.grant via=drop), delivered as an
+/// open fd in a Drop event (kind 8: x, y, key = fd). The app reads it like any fd.
+pub fn drop_file(id: u32, x: i32, y: i32, path: &str) -> Result<(), String> {
+    let pid = CLIENTS
+        .lock()
+        .get(&id)
+        .map(|cl| cl.pid)
+        .ok_or_else(|| String::from("the window is gone"))?;
+    let fd = proc::grant_file(pid, path, false, "drop").map_err(|e| alloc::format!("{e}"))?;
+    push(id, encode(8, x, y, fd as u32, 0, 0));
+    Ok(())
+}
+
 fn push(id: u32, ev: [u8; EVENT_LEN]) {
     if let Some(cl) = CLIENTS.lock().get_mut(&id) {
         if cl.events.len() >= MAX_QUEUED {

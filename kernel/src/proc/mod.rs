@@ -177,6 +177,37 @@ pub fn set_caps(c: caps::Caps) {
     current().inner.lock().caps = alloc::sync::Arc::new(c);
 }
 
+/// A user's grant of one file to process `pid` (a drag and drop onto its window, the
+/// desktop's counterpart of the powerbox): the same `caps.with_fs_grant` as MILK_POWERBOX,
+/// and the file opened into the process (returns the fd). Audited as
+/// `powerbox.grant pid= path= mode= via=`.
+pub fn grant_file(pid: Pid, path: &str, write: bool, via: &str) -> KResult<usize> {
+    let p = get(pid).ok_or(ESRCH)?;
+    let flags = if write {
+        fs::abi::O_RDWR
+    } else {
+        fs::abi::O_RDONLY
+    };
+    let f = alloc::sync::Arc::new(fs::open(path, flags, 0)?);
+    let fd = {
+        let mut i = p.inner.lock();
+        let grant = caps::FsGrant {
+            prefix: String::from(path),
+            write,
+        };
+        i.caps = alloc::sync::Arc::new(i.caps.with_fs_grant(grant));
+        i.fds.alloc(f, false)? as usize
+    };
+    crate::audit::record(
+        "powerbox.grant",
+        &alloc::format!(
+            "pid={pid} path={path} mode={} via={via}",
+            if write { "rw" } else { "r" }
+        ),
+    );
+    Ok(fd)
+}
+
 /// chroot: make `dir` the calling process's root. The cwd is left as is (as on Linux).
 pub fn chroot(dir: InodeRef) -> KResult<()> {
     if dir.kind() != fs::InodeType::Dir {

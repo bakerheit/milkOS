@@ -434,6 +434,19 @@ impl WindowContents for Files {
         }
     }
 
+    fn drag_start(&mut self, x: i32, y: i32) -> Option<String> {
+        if x < SIDEBAR_W || self.path == TM {
+            return None;
+        }
+        let i = (0..self.items.len()).find(|&i| {
+            let (cx, cy) = self.cell(i);
+            hit(&Rect::new(cx - 4, cy - 4, 100, 96), x, y)
+        })?;
+        self.selected = Some(i);
+        self.last_click = None;
+        Some(fsx::resolve(&self.path, &self.items[i].name))
+    }
+
     fn document_path(&self) -> Option<String> {
         let e = self.items.get(self.selected?)?;
         (e.kind != crate::fs::InodeType::Dir && in_snapshot(&self.path).is_none())

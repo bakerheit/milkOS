@@ -23,6 +23,7 @@ mod buffer;
 pub mod client;
 pub mod clipboard;
 mod ctl;
+mod dnd;
 mod event;
 mod fontx;
 mod icons;
@@ -238,8 +239,16 @@ enum Drag {
     },
     /// Pressed a traffic light; acts on release if still over it.
     Light { id: u32, which: usize },
-    /// Button went down in a window body: moves go to the client as drags.
-    Content { id: u32 },
+    /// Button went down in a window body at (x0, y0): moves go to the client as drags,
+    /// unless the first real move turns it into a file drag (`tried`: asked already).
+    Content {
+        id: u32,
+        x0: i32,
+        y0: i32,
+        tried: bool,
+    },
+    /// Dragging a file (dnd.rs).
+    File,
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
@@ -332,6 +341,8 @@ pub struct Desktop {
     /// Cmd+Shift+4 region selection (shot.rs); compose without cursor / overlay (capture).
     shot: Option<shot::Select>,
     shot_hide: bool,
+    /// A file being dragged (dnd.rs).
+    dnd: Option<dnd::Dnd>,
 }
 
 impl Desktop {
@@ -381,6 +392,7 @@ impl Desktop {
             idle_skew: 0,
             shot: None,
             shot_hide: false,
+            dnd: None,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -525,25 +537,28 @@ impl Desktop {
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
     fn launch(&mut self, path: &str) {
-        self.launch_with(path, None);
+        self.launch_with(path, None, None);
     }
 
     /// Start a program (or show its window if it runs), optionally sandboxed from its first
     /// instruction.
+    /// Returns the new process's pid (None if it was already running, or didn't start).
     fn launch_with(
         &mut self,
         path: &str,
         caps: Option<(alloc::sync::Arc<crate::proc::caps::Caps>, String)>,
-    ) {
+        arg: Option<&str>,
+    ) -> Option<u32> {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
-            return;
+            return None;
         }
         let spec = caps.as_ref().map(|c| c.1.clone());
+        let argv: Vec<&str> = core::iter::once(name).chain(arg).collect();
         let started = match caps {
-            Some((c, _)) => crate::proc::spawn_with_caps(path, &[name], c),
-            None => crate::proc::spawn(path, &[name]),
+            Some((c, _)) => crate::proc::spawn_with_caps(path, &argv, c),
+            None => crate::proc::spawn(path, &argv),
         };
         match started {
             Ok(pid) => {
@@ -565,8 +580,12 @@ impl Desktop {
                         notify(&name, "quit unexpectedly");
                     }
                 }));
+                Some(pid)
             }
-            Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+            Err(e) => {
+                self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0));
+                None
+            }
         }
     }
 
@@ -582,6 +601,24 @@ impl Desktop {
 
     /// An installed package: its window app, or its program in a Terminal tab.
     fn launch_package(&mut self, p: &packages::Pkg) {
+        self.launch_package_with(p, None);
+    }
+
+    /// The same, with a file dropped on its dock tile: a running window app gets it as a
+    /// drop on its window; a new one starts with the file granted and as its argument.
+    fn launch_package_with(&mut self, p: &packages::Pkg, file: Option<&str>) {
+        if p.window
+            && let Some(f) = file
+            && let Some(id) = self.program_window(p.exec.rsplit('/').next().unwrap_or(""))
+        {
+            self.show_window(id);
+            if let Some(App::Client(cid)) = self.win(id).map(|w| w.app)
+                && let Err(e) = client::drop_file(cid, 0, 0, f)
+            {
+                self.post_toast(&p.label, &e);
+            }
+            return;
+        }
         if p.window {
             // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
             // system is their own /Applications/<name> read-only and ~/Library/<name>
@@ -590,17 +627,25 @@ impl Desktop {
             let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
             let lib = alloc::format!("/home/milk/Library/{}", p.dir);
             let _ = crate::fs::mkdir_all(&lib, 0o755);
+            let mut grants = alloc::vec![
+                crate::proc::caps::FsGrant {
+                    prefix: app_dir.clone(),
+                    write: false,
+                },
+                crate::proc::caps::FsGrant {
+                    prefix: lib.clone(),
+                    write: true,
+                },
+            ];
+            // A file dropped on the tile: the user's grant, read-only, just that file.
+            if let Some(f) = file {
+                grants.push(crate::proc::caps::FsGrant {
+                    prefix: String::from(f),
+                    write: false,
+                });
+            }
             let caps = crate::proc::caps::Caps {
-                fs: Some(alloc::vec![
-                    crate::proc::caps::FsGrant {
-                        prefix: app_dir.clone(),
-                        write: false,
-                    },
-                    crate::proc::caps::FsGrant {
-                        prefix: lib.clone(),
-                        write: true,
-                    },
-                ]),
+                fs: Some(grants),
                 net: crate::proc::caps::Net::None,
                 audio: true,
                 clipboard: false,
@@ -608,7 +653,15 @@ impl Desktop {
                 spawn: false,
             };
             let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
-            self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)));
+            if let Some(pid) =
+                self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)), file)
+                && let Some(f) = file
+            {
+                crate::audit::record(
+                    "powerbox.grant",
+                    &alloc::format!("pid={pid} path={f} mode=r via=drop"),
+                );
+            }
         } else {
             // By its /bin name when milk linked it there (a shorter tab label).
             let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
@@ -1191,6 +1244,9 @@ impl Desktop {
                 }
             }
         }
+        if let Some(g) = &self.dnd {
+            dnd::draw(g, &mut p, d);
+        }
         if let Some(s) = &self.shot
             && !self.shot_hide
         {
@@ -1598,7 +1654,28 @@ impl Desktop {
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
             }
-            Some(Drag::Content { id }) => self.send_pointer(id, x, y, PointerKind::Drag),
+            Some(Drag::Content { id, x0, y0, tried }) => {
+                if !tried && (x - x0).pow(2) + (y - y0).pow(2) > 36 {
+                    self.drag = Some(Drag::Content {
+                        id,
+                        x0,
+                        y0,
+                        tried: true,
+                    });
+                    let path = self.win_mut(id).and_then(|w| {
+                        let b = window::body_rect(w.rect.w, w.rect.h);
+                        w.contents
+                            .drag_start(x0 - w.rect.x - b.x, y0 - w.rect.y - b.y)
+                    });
+                    if let Some(path) = path {
+                        self.drag = Some(Drag::File);
+                        self.dnd_start(id, path);
+                        return;
+                    }
+                }
+                self.send_pointer(id, x, y, PointerKind::Drag)
+            }
+            Some(Drag::File) => self.dnd_move(x, y),
             Some(Drag::Slider(i)) => self.slider_to(i, x),
             Some(_) => {}
             None => self.hover(x, y),
@@ -1784,7 +1861,12 @@ impl Desktop {
                 })
             }
             Some(Part::Body) => {
-                self.drag = Some(Drag::Content { id });
+                self.drag = Some(Drag::Content {
+                    id,
+                    x0: x,
+                    y0: y,
+                    tried: false,
+                });
                 self.send_pointer(id, x, y, PointerKind::Down(Button::Left));
             }
             None => {}
@@ -1812,9 +1894,10 @@ impl Desktop {
                     }
                 }
             }
-            Some(Drag::Content { id }) => {
+            Some(Drag::Content { id, .. }) => {
                 self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
             }
+            Some(Drag::File) => self.dnd_drop(),
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),
             Some(Drag::Slider(0)) => {
                 // Display brightness is a saved preference (Settings shows it too).

@@ -69,15 +69,17 @@ impl App {
         w.commit();
     }
 
+    fn show(&mut self, fd: i32, how: &str) {
+        self.text = read_fd(fd);
+        let _ = sys::close(fd);
+        let s = String::from_utf8_lossy(&self.text).into_owned();
+        self.lines = s.lines().map(String::from).collect();
+        self.status = format!("{how}: got a file, {} bytes", self.text.len());
+    }
+
     fn open(&mut self) {
         match sys::powerbox_open() {
-            Ok(fd) => {
-                self.text = read_fd(fd);
-                let _ = sys::close(fd);
-                let s = String::from_utf8_lossy(&self.text).into_owned();
-                self.lines = s.lines().map(String::from).collect();
-                self.status = format!("powerbox: got a file, {} bytes", self.text.len());
-            }
+            Ok(fd) => self.show(fd, "powerbox"),
             Err(e) => self.status = format!("powerbox open: {}", e.name()),
         }
         println!("peek: {}", self.status);
@@ -131,7 +133,8 @@ fn main(_args: &rt::Args) -> i32 {
             String::from("Peek can't see your files."),
             String::from(""),
             String::from("Press o (or Open a file...) and pick one in the"),
-            String::from("desktop's panel: only that file is shared with Peek."),
+            String::from("desktop's panel, or drop a file here from Files:"),
+            String::from("only that file is shared with Peek."),
         ],
         text: Vec::new(),
     };
@@ -149,6 +152,11 @@ fn main(_args: &rt::Args) -> i32 {
             Event::Down { x, y, .. } if inside(x, y, SAVE) => app.save(),
             Event::Key(Key::Char('o'), _) => app.open(),
             Event::Key(Key::Char('s'), _) => app.save(),
+            Event::Drop { fd, .. } => {
+                app.show(fd, "dropped");
+                println!("peek: {}", app.status);
+                app.draw();
+            }
             _ => {}
         }
     }

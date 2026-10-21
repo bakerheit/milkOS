@@ -100,7 +100,7 @@ pub struct Toast {
 // ---- dock ---------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum DockAction {
+pub(super) enum DockAction {
     App(App),
     /// A userland program, started with `proc::spawn`.
     Program(&'static str),
@@ -192,6 +192,11 @@ struct Tile {
     bg: Color,
     fg: Color,
     action: DockAction,
+}
+
+/// What dock tile `i` does (drag and drop asks).
+pub(super) fn dock_action(i: usize) -> Option<DockAction> {
+    tiles().into_iter().nth(i).map(|t| t.action)
 }
 
 fn dock_len() -> usize {

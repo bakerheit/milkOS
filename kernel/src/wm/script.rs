@@ -830,6 +830,68 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 _ => &mut b,
             };
         }
+        // Drag and drop from Files (window (96, 64); todo.txt is the second icon, at
+        // (421, 150)). The Terminal is at (440, 270) 520 x 290.
+        "dragterm" | "dragghost" => {
+            b.wait(300).typ("cat ").wait(200);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + 18 * i, 150 + 19 * i).wait(16);
+            }
+            if name == "dragterm" {
+                b.up().wait(300).enter().wait(800);
+            } else {
+                b.wait(400);
+            }
+        }
+        "dragnotes" | "dragdockterm" => {
+            // Onto the dock: Notes opens it; Terminal opens a tab in its folder.
+            let (tx, ty) = dock_icon_center(if name == "dragnotes" { 3 } else { 1 });
+            b.wait(300).to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1500);
+        }
+        "dragpkg" => {
+            // moo2048 installed (tile 9): drop todo.txt on its tile.
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            let (tx, ty) = dock_icon_center_of(9, 1);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(2000);
+            let (x, y) = dock_icon_center_of(1, 1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(600);
+            b.typ("audit --event sandbox").enter().wait(800);
+        }
+        "dragpeek" => {
+            // Peek (sandboxed, no fs) opens at (192, 112); move it aside, then drop todo.txt
+            // on it: the drop is the grant.
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.drag(450, 128, 650, 380, 10).wait(300);
+            b.click(300, 80).wait(300);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (800 - 421) * i / 16, 150 + (560 - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1200);
+            let (x, y) = dock_icon_center(1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(800);
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }

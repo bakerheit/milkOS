@@ -1029,6 +1029,21 @@ impl WindowContents for Terminal {
         self.tabs[self.active].scroll(dy)
     }
 
+    /// A file dropped here: its quoted path typed at the prompt (no Enter), like macOS.
+    fn drop_path(&mut self, path: &str) -> bool {
+        let q = alloc::format!("{} ", super::super::dnd::quote(path));
+        let tab = &mut self.tabs[self.active];
+        if tab.tty != 0 {
+            for b in q.bytes() {
+                tty::input(tab.tty, b);
+            }
+        } else {
+            tab.input.push_str(&q);
+            tab.cursor = tab.input.chars().count();
+        }
+        true
+    }
+
     fn close_part(&mut self) -> bool {
         if self.tabs.len() > 1 {
             self.close_tab(self.active);

@@ -80,6 +80,14 @@ then the kernel opens it and returns the fd. Audited as `powerbox.grant pid= pat
 cancels as `powerbox.cancel pid= mode=`. The process never widens its own authority; the user
 does, per file, through trusted UI.
 
+**Drag and drop is a grant too.** Dropping a file from Files onto a userland window (or a
+packaged window app's dock tile) is the user choosing that one file for that app, so it
+goes through the same path: `proc::grant_file(pid, path, write=false, via="drop")` adds
+`caps.with_fs_grant(path, read)`, opens the file into the process and audits
+`powerbox.grant pid= path= mode=r via=drop`; the window gets a Drop event carrying the fd
+(docs/processes.md). A dock tile drop on an app that isn't running starts it sandboxed with
+the file in its grants and as its argument. Peek shows dropped files (wm demo `dragpeek`).
+
 **Packaged window apps run sandboxed** (desktop dock / Skim launches of `milk` packages
 whose program links `user/gui`): `proc::spawn_with_caps` starts them with `fs` =
 `/Applications/<name>:r` + `~/Library/<name>:rw` (created first), `net none`, no clipboard,

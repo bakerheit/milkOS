@@ -24,6 +24,10 @@
 //!   snap lock [DEV|PATH]  lock unlocked encrypted volumes again (sync, unmount, wipe the
 //!                         key); not the one /home/milk is on. No argument: every one
 //!   snap passwd           change the primary volume's passphrase (rewraps the key)
+//!   snap disks            every disk: size, milkfs or not, encrypted, mounted or locked
+//!   snap mkfs DEV [LABEL] [--force] [--encrypt [--recovery-out FILE | --no-recovery]]
+//!                         format DEV as milkfs; --encrypt asks for a passphrase and
+//!                         shows the recovery key once (or writes it to FILE)
 //!   snap receive [FILE] [--to PATH] [--force] [--passphrase-file F]
 //!                         recreate the snapshot in a stream (FILE or stdin) on the milkfs
 //!                         volume PATH is on (default /Volumes/Milk); --force rolls the
@@ -531,6 +535,102 @@ fn lock(target: Option<&str>) -> i32 {
     }
 }
 
+/// `snap mkfs DEV [LABEL] [--force] [--encrypt [--recovery-out FILE | --no-recovery]
+/// [--passphrase-file F]]`.
+fn mkfs(args: &[&str], home: Option<&str>) -> i32 {
+    let (mut dev, mut label, mut force) = (None, None, false);
+    let (mut encrypt, mut rec_out, mut no_rec, mut pfile) = (false, None, false, None);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--force" => force = true,
+            "--encrypt" => encrypt = true,
+            "--recovery-out" => rec_out = it.next().copied(),
+            "--no-recovery" => no_rec = true,
+            "--passphrase-file" => pfile = it.next().copied(),
+            _ if dev.is_none() => dev = Some(a),
+            _ => label = Some(a),
+        }
+    }
+    let Some(dev) = dev.filter(|_| encrypt || (rec_out.is_none() && !no_rec && pfile.is_none()))
+    else {
+        eprintln!(
+            "usage: snap mkfs DEVICE [LABEL] [--force] [--encrypt [--recovery-out FILE | --no-recovery] [--passphrase-file FILE]]"
+        );
+        return 2;
+    };
+    let mut req = alloc::format!("{dev} {}", label.unwrap_or("Milk"));
+    if force {
+        req.push_str(" force");
+    }
+    if !encrypt {
+        return match write_ctl("mkfs", &req) {
+            Ok(()) => {
+                println!("snap: {dev} formatted (milkfs, mounted at the next boot)");
+                0
+            }
+            Err(_) => 1,
+        };
+    }
+    // The recovery key goes to a file the kernel creates (0600, owned like its folder);
+    // without --recovery-out, a temporary one in the home folder, shown and removed.
+    let tmp = alloc::format!(
+        "{}/.milkfs-recovery-{}",
+        home.unwrap_or("/tmp"),
+        sys::getpid()
+    );
+    let rec = if no_rec {
+        None
+    } else {
+        Some(rec_out.map(abs).unwrap_or_else(|| tmp.clone()))
+    };
+    req.push_str(" encrypt");
+    if let Some(r) = &rec {
+        req.push_str(&alloc::format!(" recovery={r}"));
+    }
+    let Some(p) = (match pfile {
+        Some(_) => stream_passphrase(pfile, false),
+        None => {
+            let a = ask("Passphrase for the new volume (8 characters or more): ");
+            let b = a.as_ref().and_then(|_| ask("Again: "));
+            match (a, b) {
+                (Some(a), Some(b)) if a == b => Some(a),
+                (Some(_), Some(_)) => {
+                    eprintln!("snap: the passphrases differ");
+                    None
+                }
+                _ => None,
+            }
+        }
+    }) else {
+        return 1;
+    };
+    let mut t = alloc::format!("{req}\n{p}");
+    let r = write_ctl("mkfs", &t);
+    // SAFETY: zero bytes are valid UTF-8.
+    unsafe { t.as_bytes_mut().fill(0) };
+    if r.is_err() {
+        return 1;
+    }
+    println!(
+        "snap: {dev} formatted as an encrypted milkfs volume (locked: `snap unlock {dev}` mounts it)"
+    );
+    match (&rec, rec_out) {
+        (Some(path), None) => {
+            let k = sys::read_file(path).unwrap_or_default();
+            let _ = sys::unlink(path);
+            println!(
+                "snap: recovery key: {}",
+                core::str::from_utf8(&k).unwrap_or("?").trim_end()
+            );
+            println!("snap: write it down and keep it apart from the disk: it is shown only now");
+        }
+        (Some(path), Some(_)) => println!("snap: recovery key written to {path}"),
+        _ => println!("snap: no recovery key (only the passphrase opens it)"),
+    }
+    0
+}
+
 fn passwd() -> i32 {
     let Some(old) = ask("Current passphrase (or recovery key): ") else {
         return 1;
@@ -558,6 +658,8 @@ fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
         (Some("unlock"), d) => unlock(d),
         (Some("lock"), t) => lock(t),
+        (Some("mkfs"), _) => mkfs(&args.argv[2..], args.env("HOME")),
+        (Some("disks"), _) => cat("/sys/fs/milkfs/disks"),
         (Some("passwd"), _) => passwd(),
         (Some("scrub"), None) => scrub_wait(),
         (Some("scrub"), Some("status")) => cat("/sys/fs/milkfs/scrub"),

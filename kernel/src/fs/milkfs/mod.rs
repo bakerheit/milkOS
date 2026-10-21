@@ -56,27 +56,94 @@ pub fn probe(dev: &BlockRef) -> Option<Superblock> {
 /// Format `dev` as an empty milkfs. Refuses (EEXIST) if it already holds milkfs unless
 /// `force`, and always (EBUSY) if it is the mounted volume's device.
 pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
+    mkfs_check(dev, label, force)?;
+    let r = volume::mkfs(dev, label);
+    audit_op(
+        "milkfs.mkfs",
+        &format!("dev={} label={label} encrypted=no", dev.name()),
+        &r,
+    );
+    r
+}
+
+/// What `mkfs` refuses: a bad label (EINVAL), a mounted volume's device (EBUSY), a disk
+/// holding milkfs without `force` (EEXIST).
+fn mkfs_check(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
     if label.is_empty() || label.len() > format::LABEL_MAX || label.contains('/') {
         return fail(
             Errno::EINVAL,
             format!("labels are 1-{} characters without '/'", format::LABEL_MAX),
         );
     }
-    if PRIMARY
-        .lock()
-        .as_ref()
-        .is_some_and(|v| v.device_name == dev.name())
-        || TEST_OVERRIDE
-            .lock()
-            .as_ref()
-            .is_some_and(|v| v.device_name == dev.name())
+    let mounted = |v: &Volume| v.device_name == dev.name();
+    if PRIMARY.lock().as_deref().is_some_and(mounted)
+        || TEST_OVERRIDE.lock().as_deref().is_some_and(mounted)
+        || all_volumes().iter().any(|(v, _)| mounted(v))
     {
-        return Err(Errno::EBUSY);
+        return fail(
+            Errno::EBUSY,
+            format!("{} is mounted: lock or unmount it first", dev.name()),
+        );
     }
     if probe(dev).is_some() && !force {
         return Err(Errno::EEXIST);
     }
-    volume::mkfs(dev, label)
+    Ok(())
+}
+
+/// `mkfs` an encrypted volume on `dev`, under `passphrase` (8 characters or more). With
+/// `recovery_out`, also a recovery slot, whose key is written (once, mode 0600) to that
+/// file; without, there is no recovery key. The new volume is left locked: `unlock`
+/// mounts it. The passphrase is never logged.
+pub fn mkfs_encrypted(
+    dev: &BlockRef,
+    label: &str,
+    force: bool,
+    passphrase: &str,
+    recovery_out: Option<&str>,
+) -> Result<()> {
+    use crate::fs::abi::{O_CREAT, O_EXCL, O_WRONLY};
+    if passphrase.len() < 8 {
+        return fail(Errno::EINVAL, "the passphrase needs 8 characters or more");
+    }
+    mkfs_check(dev, label, force)?;
+    // The recovery file first: if it can't be made, nothing is formatted.
+    let out = match recovery_out {
+        Some(p) => match crate::fs::ops::open(p, O_WRONLY | O_CREAT | O_EXCL, 0o600) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                return fail(e, format!("can't create the recovery key file {p}: {e}"));
+            }
+        },
+        None => None,
+    };
+    let r = (|| {
+        let key = volume::mkfs_encrypted(dev, label, passphrase, out.is_some())?;
+        if let (Some(f), Some(k)) = (&out, key) {
+            let mut text = format!("{k}\n").into_bytes();
+            let w = f.write(&text).and_then(|_| f.fsync());
+            crate::crypto::wipe(&mut text);
+            w?;
+        }
+        LOCKED.lock().retain(|d| d.name() != dev.name());
+        LOCKED.lock().push(dev.clone());
+        Ok(())
+    })();
+    if r.is_err()
+        && let Some(p) = recovery_out
+    {
+        let _ = crate::fs::ops::unlink(p);
+    }
+    audit_op(
+        "milkfs.mkfs",
+        &format!(
+            "dev={} label={label} encrypted=yes recovery={}",
+            dev.name(),
+            recovery_out.is_some()
+        ),
+        &r,
+    );
+    r
 }
 
 /// Open the milkfs on `dev` and mount it at `path` (created if missing). The first
@@ -1614,6 +1681,39 @@ pub fn info() -> String {
     s
 }
 
+/// `/sys/fs/milkfs/disks`: every block device, one line each:
+/// `NAME BYTES rw|ro milkfs plain|encrypted mounted=PATH|locked|unmounted LABEL` (the
+/// label last: it may hold spaces), or `NAME BYTES rw|ro other` (no milkfs: FAT, blank,
+/// a scratch disk). What `mkfs` can be pointed at.
+fn disks_text() -> String {
+    let mut s = String::new();
+    let vols = all_volumes();
+    let locked = LOCKED.lock().clone();
+    for d in blockdev::devices() {
+        let bytes = d.num_blocks() * d.block_size() as u64;
+        let ro = if d.read_only() { "ro" } else { "rw" };
+        let _ = write!(s, "{} {bytes} {ro}", d.name());
+        match probe(&d) {
+            Some(sb) => {
+                let enc = if sb.flags & format::SB_ENCRYPTED != 0 {
+                    "encrypted"
+                } else {
+                    "plain"
+                };
+                let state = match vols.iter().find(|(v, _)| v.device_name == d.name()) {
+                    Some((_, p)) => format!("mounted={p}"),
+                    None if locked.iter().any(|l| l.name() == d.name()) => String::from("locked"),
+                    None => String::from("unmounted"),
+                };
+                let _ = write!(s, " milkfs {enc} {state} {}", sb.label);
+            }
+            None => s.push_str(" other"),
+        }
+        s.push('\n');
+    }
+    s
+}
+
 fn snapshots_text() -> String {
     let mut s = String::new();
     if let Ok(list) = snapshots() {
@@ -1756,9 +1856,9 @@ fn explain(name: &str, e: Errno) -> &'static str {
         }
         ("mkfs", E::ENODEV) => "no such device",
         ("mkfs", E::EEXIST) => "the device already holds milkfs: add `force` to erase it",
-        ("mkfs", E::EBUSY) => "that device is the mounted volume",
+        ("mkfs", E::EBUSY) => "that device is mounted",
         ("mkfs", E::EINVAL) => {
-            "write `DEVICE [LABEL] [force]`; labels are 1-31 characters without '/'"
+            "write `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: the passphrase on a second line); labels are 1-31 characters without '/'"
         }
         (_, E::EACCES | E::EPERM) => "not allowed (needs an administrator)",
         (_, E::ENOSPC) => "the volume is full",
@@ -1866,6 +1966,7 @@ fn arg(buf: &[u8]) -> Result<&str> {
 pub fn sysfs(dir: &Arc<SynthDir>) {
     dir.add_file("info", info);
     dir.add_file("snapshots", snapshots_text);
+    dir.add_file("disks", disks_text);
     control(dir, "snapshot", snapshots_text, |b| {
         snapshot(arg(b)?).map(|_| ())
     });
@@ -2099,20 +2200,44 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
     guarded(
         dir,
         "mkfs",
-        || String::from("write: <device> [label] [force]\n"),
+        || {
+            String::from(
+                "write: <device> [label] [force] [encrypt [recovery=FILE]] (encrypt: then a newline and the passphrase)\n",
+            )
+        },
         |b| {
-            let mut words = arg(b)?.split_whitespace();
-            let dev = words.next().ok_or(Errno::EINVAL)?;
-            let (mut label, mut force) = ("Milk", false);
-            for w in words {
-                if w == "force" {
-                    force = true;
-                } else {
-                    label = w;
+            let mut raw = alloc::vec::Vec::from(b);
+            let r = (|| {
+                let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+                let (line, pass) = split_secret(t);
+                let mut words = line.split_whitespace();
+                let dev = words.next().ok_or(Errno::EINVAL)?;
+                let (mut label, mut force, mut encrypt, mut recovery) =
+                    ("Milk", false, false, None);
+                for w in words {
+                    match w {
+                        "force" => force = true,
+                        "encrypt" => encrypt = true,
+                        _ if w.starts_with("recovery=") => recovery = Some(&w[9..]),
+                        _ => label = w,
+                    }
                 }
-            }
-            let d = blockdev::get(dev).ok_or(Errno::ENODEV)?;
-            mkfs(&d, label, force)
+                let d = blockdev::get(dev).ok_or(Errno::ENODEV)?;
+                match (encrypt, pass) {
+                    (false, None) if recovery.is_none() => mkfs(&d, label, force),
+                    (true, Some(p)) => mkfs_encrypted(&d, label, force, p, recovery),
+                    (true, None) => fail(
+                        Errno::EINVAL,
+                        "encrypt: write the passphrase on the second line",
+                    ),
+                    _ => fail(
+                        Errno::EINVAL,
+                        "a passphrase or recovery= only goes with `encrypt`",
+                    ),
+                }
+            })();
+            crate::crypto::wipe(&mut raw);
+            r
         },
     );
 }

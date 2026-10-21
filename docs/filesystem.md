@@ -1017,6 +1017,33 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
 - Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
   can start qemu sees it; for unattended test boots).
 
+**Making one in milkOS** (no Mac needed): `snap mkfs DEV [LABEL] [--force] --encrypt
+[--recovery-out FILE | --no-recovery] [--passphrase-file F]` asks for the passphrase twice
+(not echoed) and shows the recovery key once (`snap: recovery key: XXXX-...`), or writes
+it to FILE. Underneath: `/sys/fs/milkfs/mkfs` takes `DEV [LABEL] [force] encrypt
+[recovery=FILE]` and then, on a second line of the same write, the passphrase (8
+characters or more; wiped after use, never logged or audited); kernel
+`fs::milkfs::mkfs_encrypted(dev, label, force, passphrase, recovery_out)`. A random
+volume key (CSPRNG) goes into a passphrase slot (scrypt 2^16/8/4) and, with `recovery=`,
+a recovery slot whose 128-bit key is written to FILE (created with O_EXCL, mode 0600,
+owned like its folder; snap's temporary one in the home folder is read and removed). The
+layout is what `mkmilkfs.py mkfs --encrypt` makes (root leaf sealed, keyring in block 3,
+format v3, `sb_mac`). The new volume is left locked (listed by `/sys/fs/milkfs/unlock`):
+`snap unlock DEV` mounts it. `mkfs` refuses a mounted device (EBUSY, any mounted volume,
+not just the primary one).
+
+`/sys/fs/milkfs/disks` lists every block device, for choosing what to format:
+
+```text
+vda 25165824 rw milkfs encrypted mounted=/Volumes/Fresh Fresh
+vdb 67108864 rw milkfs plain mounted=/Volumes/Milk Milk
+vdc 67108864 rw other
+```
+
+(`NAME BYTES rw|ro milkfs plain|encrypted mounted=PATH|locked|unmounted LABEL`, the label
+last since it may contain spaces, or `NAME BYTES rw|ro other` for anything that isn't
+milkfs: FAT, blank, a scratch disk.) `snap disks` prints it.
+
 **State in `/sys/fs/milkfs/info`** (the primary volume; Disk Utility's diskkit parses it):
 
 ```text
@@ -1301,7 +1328,8 @@ full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the
 | `unlock` | locked volumes, `vdb Vault locked` | `[dev=NAME ]SECRET` | ENODEV nothing (of that name) locked, EACCES wrong passphrase or recovery key, EINVAL usage, EIO keyring unreadable |
 | `lock` **D** | encrypted volumes and state | `DEV`, `PATH`, `LABEL` or `all` | EBUSY in use (names the processes) / home volume / send, receive or scrub running (the reason says which), EINVAL not encrypted or already locked, ENODEV no such mounted volume |
 | `passwd` **D** | - | `OLD\nNEW` | EACCES OLD is wrong, EINVAL NEW under 8 characters or the volume isn't encrypted, EIO |
-| `mkfs` **D** | usage | `DEVICE [LABEL] [force]` | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY the mounted volume, EINVAL label (1-31, no `/`) |
+| `mkfs` **D** | usage | `DEVICE [LABEL] [force] [encrypt [recovery=FILE]]` (encrypt: `\nPASSPHRASE`) | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY mounted, EINVAL label (1-31, no `/`), passphrase missing or under 8, EEXIST/EACCES the recovery file can't be created (nothing formatted) |
+| `disks` | every block device: `NAME BYTES rw\|ro milkfs plain\|encrypted mounted=PATH\|locked\|unmounted LABEL` or `NAME BYTES rw\|ro other` | - | - |
 | `bench` **D** | last result | `DIR N SIZE` | EINVAL usage |
 | `treetest` **D** | last result | `DIR N` | EINVAL usage |
 

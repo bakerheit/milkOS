@@ -17,6 +17,12 @@
 #           open there (the error names them), then locks: unmounted, listed locked, key
 #           wiped; what was written just before is on the disk (Mac check); `snap unlock`
 #           mounts it again.
+#   boot 4: kernel mkfs --encrypt: a blank disk is listed in /sys/fs/milkfs/disks,
+#           `snap mkfs vda Fresh --encrypt` asks for the passphrase (not echoed, not
+#           logged) and shows the recovery key once; the disk is then listed encrypted
+#           and locked, `snap unlock` mounts it, files are written; mkfs of the mounted
+#           disk is refused. Mac: the passphrase and the shown recovery key open it, check
+#           clean, no plaintext on the disk.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -135,6 +141,32 @@ echo "$L" | grep -aq "^vd. Vault locked" && ok "listed as locked" || bad "not li
 $M check "$VAULT" --passphrase-file "$T/p2" > "$T/vcheck.txt" 2>&1 && ok "Mac: Vault checks clean after the locks" || { bad "Vault check"; cat "$T/vcheck.txt"; }
 [ "$($M cat "$VAULT" /two.txt --passphrase-file "$T/p2")" = "second" ] && ok "Mac: written just before \`snap lock\`: on the disk" || bad "lock didn't sync"
 grep -aq "kept across the lock" "$VAULT" && bad "Vault plaintext on the disk" || ok "Vault raw image: no plaintext"
+
+BLANK="$T/blank.img"; P3="third-fake-test-passphrase"
+dd if=/dev/zero of="$BLANK" bs=1m count=24 2>/dev/null
+IMG="$BLANK" EXTRA_DISKS="" boot b4 - \
+  "cat /sys/fs/milkfs/disks" \
+  "raw:snap mkfs vda Fresh --encrypt" "wait:Passphrase for the new" "raw:$P3" "wait:Again" "raw:$P3" "wait:recovery key: " \
+  "wait:msh:" "cat /sys/fs/milkfs/disks" \
+  "raw:snap unlock vda" "wait:Passphrase" "raw:$P3" "wait:unlocked" "wait:msh:" \
+  "echo made in milkOS: $CANARY-3 > /Volumes/Fresh/fresh.txt" "snap mkfs vda Again --force" \
+  "cat /sys/fs/milkfs/disks" "echo now > /sys/fs/milkfs/sync"
+L="$(tr -d '\r' < "$T/b4.log")"
+D4() { echo "$L" | awk -v n="$1" '/\$ cat \/sys\/fs\/milkfs\/disks$/{c++; on=(c==n); next} on && /^msh:/{on=0} on'; }
+D4 1 | grep -q "^vda 25165824 rw other$" && ok "disks: the blank disk (24 MiB, no milkfs)" || bad "disks before mkfs: $(D4 1)"
+echo "$L" | grep -aq "^snap: vda formatted as an encrypted milkfs volume" && ok "snap mkfs --encrypt formats it" || bad "snap mkfs --encrypt"
+REC4="$(echo "$L" | sed -n 's/^snap: recovery key: //p' | head -1)"
+echo "$REC4" | grep -Eq '^([0-9A-F]{4}-){7}[0-9A-F]{4}$' && ok "the recovery key is shown once ($(echo "$L" | grep -ac 'recovery key: ') time)" || bad "recovery key shown: $REC4"
+D4 2 | grep -q "^vda 25165824 rw milkfs encrypted locked Fresh$" && ok "disks: now milkfs, encrypted, locked" || bad "disks after mkfs: $(D4 2)"
+echo "$L" | grep -aq "snap: Fresh unlocked" && ok "snap unlock mounts the new volume" || bad "unlock the new volume"
+echo "$L" | grep -aq "snap: mkfs: vda is mounted: lock or unmount it first (EBUSY" && ok "mkfs of the mounted disk: EBUSY" || bad "mkfs of a mounted disk"
+D4 3 | grep -q "^vda 25165824 rw milkfs encrypted mounted=/Volumes/Fresh Fresh$" && ok "disks: mounted" || bad "disks mounted: $(D4 3)"
+echo "$L" | grep -aq "$P3" && bad "the new passphrase was echoed or logged" || ok "the new passphrase isn't echoed or logged"
+printf '%s\n' "$P3" > "$T/p3"
+[ "$($M cat "$BLANK" /fresh.txt --passphrase-file "$T/p3")" = "made in milkOS: $CANARY-3" ] && ok "Mac: the passphrase opens it, the file is there" || bad "Mac open with the passphrase"
+[ -n "$REC4" ] && [ "$($M cat "$BLANK" /fresh.txt --recovery "$REC4")" = "made in milkOS: $CANARY-3" ] && ok "Mac: the shown recovery key opens it" || bad "Mac open with the recovery key"
+$M check "$BLANK" --passphrase-file "$T/p3" > "$T/check4.txt" 2>&1 && ok "Mac: check clean" || { bad "check of the kernel-made volume"; cat "$T/check4.txt"; }
+grep -aq "$CANARY-3" "$BLANK" && bad "plaintext on the kernel-made encrypted disk" || ok "no plaintext on the kernel-made disk"
 
 echo
 [ $FAIL = 0 ] && echo "enctest: PASS ($T)" || echo "enctest: FAIL ($T)"

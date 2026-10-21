@@ -114,6 +114,23 @@ pub fn new_uuid() -> [u8; 16] {
 
 /// Format `dev`: an empty root directory at generation 1.
 pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
+    mkfs_with(dev, label, None).map(|_| ())
+}
+
+/// A new volume encrypted under `passphrase` (a random volume key in a passphrase
+/// slot), plus a recovery slot if `recovery`: returns the recovery key, formatted for
+/// people (shown once; it isn't stored anywhere).
+pub fn mkfs_encrypted(
+    dev: &BlockRef,
+    label: &str,
+    passphrase: &str,
+    recovery: bool,
+) -> Result<Option<String>> {
+    mkfs_with(dev, label, Some((passphrase, recovery)))
+}
+
+fn mkfs_with(dev: &BlockRef, label: &str, enc: Option<(&str, bool)>) -> Result<Option<String>> {
+    use super::crypt;
     let cache = BCache::new(dev.clone(), 8)?;
     let total = cache.num_blocks();
     if total < 16 {
@@ -135,35 +152,80 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         1,
         &mut leaf,
     );
+    let uuid = new_uuid();
+    // Encrypted: a random volume key, wrapped in the keyring (block 3, plaintext).
+    let mut keyring = BlockPtr::NONE;
+    let mut shown = None;
+    let key = match enc {
+        None => None,
+        Some((pass, recovery)) => {
+            let mut vk = [0u8; 32];
+            crate::crypto::rng::fill(&mut vk);
+            let key = crypt::VolumeKey::from_master(&vk);
+            crate::crypto::wipe(&mut vk);
+            let mut ring = Keyring {
+                uuid,
+                slots: alloc::vec![crypt::wrap(&uuid, &key, SLOT_PASSPHRASE, pass.as_bytes())?],
+            };
+            if recovery {
+                let mut rk = [0u8; 16];
+                crate::crypto::rng::fill(&mut rk);
+                ring.slots
+                    .push(crypt::wrap(&uuid, &key, SLOT_RECOVERY, &rk)?);
+                shown = Some(crypt::format_recovery(&rk));
+                crate::crypto::wipe(&mut rk);
+            }
+            let b = ring.encode();
+            cache.write(3, &b)?;
+            keyring = BlockPtr {
+                block: 3,
+                birth: 1,
+                csum: xxh64(&b),
+            };
+            Some(key)
+        }
+    };
+    let csum = match &key {
+        Some(k) => k.seal(2, 1, &mut leaf),
+        None => xxh64(&leaf),
+    };
     cache.write(2, &leaf)?;
-    let sb = Superblock {
+    let mut sb = Superblock {
         total_blocks: total,
         generation: 1,
         root: BlockPtr {
             block: 2,
             birth: 1,
-            csum: xxh64(&leaf),
+            csum,
         },
         deadlist: BlockPtr::NONE,
         next_ino: ROOT_INO + 1,
         created: t.0 as u64,
-        uuid: new_uuid(),
+        uuid,
         label: String::from(label),
         snaps: Vec::new(),
         clones: Vec::new(),
         auto: [0; 4],
-        flags: 0,
-        version: BASE_VERSION,
+        flags: if key.is_some() { SB_ENCRYPTED } else { 0 },
+        version: if key.is_some() {
+            CRYPT_VERSION
+        } else {
+            BASE_VERSION
+        },
         spacemap: BlockPtr::NONE,
         last_scrub: 0,
         scrub_every: 0,
-        keyring: BlockPtr::NONE,
+        keyring,
         sb_mac: 0,
     };
+    if let Some(k) = &key {
+        sb.sb_mac = k.sb_mac(&sb.encode());
+    }
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
     cache.write_through(1, &sb.encode())?;
-    cache.flush()
+    cache.flush()?;
+    Ok(shown)
 }
 
 impl State {

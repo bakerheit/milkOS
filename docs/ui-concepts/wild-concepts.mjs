@@ -101,7 +101,7 @@ function verbs() {
       return (f[2] ? B(x - 6, y - 6, 124, 118, `background:${C.blue}33;border:2px solid ${C.blue};border-radius:14px`) : "") + icon(x + 24, y, 64, f[0], C.cream, C.esp, `border:1px solid ${C.sand}`) + TC(x - 6, y + 74, 124, f[1]);
     }).join("") + T(18, 300, "Type to search, or drop a file here.", `color:${C.cocoa}`));
   // who
-  h += B(548, 270, 180, 330, `background:${C.milk};border:1px solid ${C.sand};border-radius:16px`, T(16, 14, "TO WHOM", `color:${C.cocoa}`) + ["Mum", "Sam", "Dad", "Alex", "Me"].map((p, i) => (i === 0 ? B(8, 42 + i * 52, 164, 44, `background:${C.straw}44;border-radius:10px`) : "") + circle(18, 50 + i * 52, 28, [C.straw, C.blue, C.matcha, C.honey, C.lav][i]) + T(58, 58 + i * 52, p)).join(""));
+  h += B(548, 270, 180, 330, `background:${C.milk};border:1px solid ${C.sand};border-radius:16px`, T(16, 14, "TO WHOM", `color:${C.cocoa}`) + ["Mum", "Sam", "Dad", "Robin", "Me"].map((p, i) => (i === 0 ? B(8, 42 + i * 52, 164, 44, `background:${C.straw}44;border-radius:10px`) : "") + circle(18, 50 + i * 52, 28, [C.straw, C.blue, C.matcha, C.honey, C.lav][i]) + T(58, 58 + i * 52, p)).join(""));
   // preview + do it
   h += B(744, 270, 248, 330, `background:${C.milk};border:2px solid ${C.esp};border-radius:16px`, T(16, 14, "THIS WILL", `color:${C.cocoa}`) + T(16, 44, "Email bike.png") + T(16, 62, "(2.1 MB) to Mum") + T(16, 80, "from milk@milk.", `color:${C.cocoa}`) + icon(16, 110, 64, "photo", C.cream, C.esp, `border:1px solid ${C.sand}`) + T(90, 124, "bike.png", `color:${C.cocoa}`) + T(90, 142, "800x600", `color:${C.cocoa}`) +
     B(16, 230, 216, 48, `background:${C.esp};border-radius:24px`) + TC(16, 246, 216, "<b>Do it   &#9166;</b>", `color:${C.cream}`) + T(16, 290, "Undo for 30 seconds", `color:${C.cocoa}`));
@@ -156,7 +156,7 @@ function onething() {
     [["Reply to Sam", "5 min"], ["Fix the allocator", "1 hour"], ["Lunch", "12:30"], ["Bike ride", "5:00"]].map((t, i) => B(10, 40 + i * 62, 210, 54, `background:${C.milk};border:1px solid ${C.sand};border-radius:10px`, T(12, 8, `<b>${i + 1}. ${t[0]}</b>`) + T(12, 28, t[1], `color:${C.cocoa}`))).join(""));
   // parked
   h += B(764, 368, 230, 270, `background:${C.honey}22;border:1px dashed ${C.honey};border-radius:14px`, T(16, 14, "PARKED", `color:${C.cocoa}`) + T(16, 34, "held until your 10:50 break", `color:${C.cocoa}`) +
-    [["Mail from Mum", C.straw], ["Update available", C.blue], ["Ping from Alex", C.matcha]].map((p, i) => B(12, 62 + i * 62, 206, 50, `background:${C.milk};border:1px solid ${C.sand};border-left:6px solid ${p[1]};border-radius:10px`, T(14, 8, `<b>${p[0]}</b>`) + T(14, 26, "tap to let through", `color:${C.cocoa}`))).join(""));
+    [["Mail from Mum", C.straw], ["Update available", C.blue], ["Ping from Robin", C.matcha]].map((p, i) => B(12, 62 + i * 62, 206, 50, `background:${C.milk};border:1px solid ${C.sand};border-left:6px solid ${p[1]};border-radius:10px`, T(14, 8, `<b>${p[0]}</b>`) + T(14, 26, "tap to let through", `color:${C.cocoa}`))).join(""));
   // actions
   h += B(40, 660, 160, 48, `background:${C.matcha};border-radius:24px`) + TC(40, 676, 160, "<b>Done &#10003;</b>") + pill(214, 668, 150, "Swap task", false, 32) + pill(376, 668, 150, "Park this", false, 32) + T(560, 676, "Esc = park everything and breathe", `color:${C.cocoa}`);
   h += T(40, 728, "Apps open only as tools for the task and close with it. There is no desktop to wander off to.", `color:${C.cocoa}`);

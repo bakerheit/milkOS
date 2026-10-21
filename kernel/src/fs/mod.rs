@@ -24,6 +24,7 @@ pub mod node;
 pub mod ops;
 pub mod path;
 pub mod procfs;
+pub mod ramdisk;
 pub mod selftest;
 pub mod synth;
 pub mod sysfs;
@@ -38,7 +39,7 @@ pub use file::OpenFile;
 pub use node::{DirEntry, FileSystem, FsRef, Inode, InodeRef, InodeType, SetAttr, Stat, Timespec};
 pub use ops::*;
 #[allow(unused_imports)]
-pub use path::{bind, mount, path_of, root};
+pub use path::{bind, mount, path_of, root, sync_all, unmount};
 
 use crate::kprintln;
 
@@ -57,6 +58,11 @@ const SKELETON: &[(&str, u32)] = &[
     ("/tmp", 0o1777),
     ("/Volumes", 0o755),
 ];
+
+/// Start the file systems' kernel threads (call after `sched::init`).
+pub fn start_threads() {
+    milkfs::start_threads();
+}
 
 /// Mount the root tmpfs and build the standard layout. Call once, after the heap is up.
 pub fn init() {

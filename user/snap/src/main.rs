@@ -5,6 +5,7 @@
 //!   snap delete NAME
 //!   snap rollback NAME    make the volume what NAME captured (newer snapshots go away)
 //!   snap info             volume status
+//!   snap auto [SETTINGS]  automatic snapshots: show, or set e.g. `on interval=15m keep=8 daily=14`
 
 #![no_std]
 #![no_main]
@@ -67,11 +68,15 @@ fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
         (None, _) | (Some("list"), _) => cat("/sys/fs/milkfs/snapshots"),
         (Some("info"), _) => cat("/sys/fs/milkfs/info"),
+        (Some("auto"), None) => cat("/sys/fs/milkfs/auto"),
+        (Some("auto"), Some(_)) => control("auto", &args.argv[2..].join(" ")),
         (Some(op @ ("create" | "delete" | "rollback")), Some(name)) => {
             control(if op == "create" { "snapshot" } else { op }, name)
         }
         _ => {
-            eprintln!("usage: snap [list | info | create NAME | delete NAME | rollback NAME]");
+            eprintln!(
+                "usage: snap [list | info | auto [on|off|interval=15m|keep=K|daily=D|now] | create NAME | delete NAME | rollback NAME]"
+            );
             2
         }
     }

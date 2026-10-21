@@ -25,12 +25,23 @@ pub struct State {
     /// Live head's dead list (committed part; `store.dead_new` is prepended at commit).
     pub deadlist: BlockPtr,
     pub next_ino: u64,
+    /// Automatic snapshot settings (superblock `auto`), see `timemachine`.
+    pub auto: [u32; 4],
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
     pub broken: bool,
     pub commits: u64,
+    /// Batching: when the open transaction got its first change, and how many
+    /// operations it holds.
+    pub dirty_since: Option<u64>,
+    pub batched_ops: u32,
 }
+
+/// A transaction is committed once it is this old ...
+pub const COMMIT_DELAY_NS: u64 = 1_000_000_000;
+/// ... or holds this many operations (bounds the dirty tree kept in memory).
+pub const MAX_BATCH_OPS: u32 = 512;
 
 /// What mount found.
 #[derive(Clone, Debug, Default)]
@@ -115,6 +126,7 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         uuid: new_uuid(),
         label: String::from(label),
         snaps: Vec::new(),
+        auto: [0; 4],
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -211,10 +223,13 @@ impl State {
             snaps: sb.snaps.clone(),
             deadlist: sb.deadlist,
             next_ino: sb.next_ino,
+            auto: sb.auto,
             sb,
             meta_dirty: false,
             broken: false,
             commits: 0,
+            dirty_since: None,
+            batched_ops: 0,
         };
         if !orphans.is_empty() {
             for ino in orphans {
@@ -252,6 +267,8 @@ impl State {
                 self.store.committed();
                 self.meta_dirty = false;
                 self.commits += 1;
+                self.dirty_since = None;
+                self.batched_ops = 0;
                 Ok(())
             }
             Err(e) => {
@@ -283,12 +300,40 @@ impl State {
             uuid: self.sb.uuid,
             label: self.sb.label.clone(),
             snaps: self.snaps.clone(),
+            auto: self.auto,
         };
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
         cache.write_through(generation % 2, &sb.encode())?; // 2. the commit point
         cache.device().flush()?; // 3. and it is durable
         Ok(sb)
+    }
+
+    /// An operation finished: commit if the batch is old or big enough, or the block cache
+    /// is filling up with dirty buffers. Otherwise the transaction stays open.
+    pub fn op_done(&mut self) -> Result<()> {
+        let now = crate::timer::now_ns();
+        if !self.dirty() {
+            return Ok(());
+        }
+        let since = *self.dirty_since.get_or_insert(now);
+        self.batched_ops += 1;
+        let (_, cap, dirty) = self.store.cache.usage();
+        if self.batched_ops >= MAX_BATCH_OPS
+            || now - since >= COMMIT_DELAY_NS
+            || dirty * 4 >= cap * 3
+        {
+            return self.commit();
+        }
+        Ok(())
+    }
+
+    /// For the flusher thread: commit if the open transaction is older than the delay.
+    pub fn flush_if_due(&mut self) -> Result<()> {
+        match self.dirty_since {
+            Some(t) if crate::timer::now_ns() - t >= COMMIT_DELAY_NS => self.commit(),
+            _ => Ok(()),
+        }
     }
 
     pub fn label(&self) -> &str {

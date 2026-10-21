@@ -6,8 +6,8 @@
 //! tree. So a rollback needs no cache invalidation, and inode numbers are never reused
 //! (`next_ino` only grows) so a stale object can only ever see ENOENT.
 //!
-//! Every mutating call is its own transaction and commits before returning (v0 is
-//! synchronous: an `Ok` means it is on disk).
+//! Mutating calls join the volume's open transaction, committed about a second later (or
+//! on `fsync`/`sync`): see `Volume::txn`.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -119,7 +119,9 @@ impl Volume {
         self.inode_obj(view, ROOT_INO, InodeType::Dir)
     }
 
-    /// Run a mutating operation on the live tree as one transaction.
+    /// Run a mutating operation on the live tree. It joins the open transaction, which is
+    /// committed when it is about a second old (or big, or on sync), so a crash loses at
+    /// most the last second of work but never leaves part of an operation behind.
     pub fn txn<R>(&self, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
         let reap = core::mem::take(&mut *self.reap.lock());
         let mut st = self.state.lock();
@@ -133,9 +135,9 @@ impl Volume {
             }
         }
         let r = f(&mut st);
-        // Commit whatever happened, even on error (a failed op may have changed nothing,
-        // or a consistent prefix of the change: each tree update is a complete step).
-        let c = st.commit();
+        // Keep whatever happened, even on error (a failed op changed nothing, or a complete
+        // prefix of its steps: each tree update is a whole step).
+        let c = st.op_done();
         let r = r?;
         c?;
         Ok(r)
@@ -182,6 +184,9 @@ impl FileSystem for Volume {
     }
     fn root(&self) -> InodeRef {
         self.root_obj(LIVE)
+    }
+    fn sync(&self) -> Result<()> {
+        self.state.lock().commit()
     }
 }
 
@@ -614,6 +619,11 @@ impl Inode for MilkInode {
             }
             Ok(())
         })
+    }
+
+    fn sync(&self) -> Result<()> {
+        // One transaction covers the whole volume: committing it syncs this file.
+        self.vol.state.lock().commit()
     }
 
     fn readlink(&self) -> Result<String> {

@@ -19,6 +19,7 @@ pub mod inode;
 pub mod items;
 pub mod snap;
 pub mod store;
+pub mod timemachine;
 pub mod volume;
 
 use alloc::format;
@@ -54,6 +55,10 @@ pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
         .lock()
         .as_ref()
         .is_some_and(|v| v.device_name == dev.name())
+        || TEST_OVERRIDE
+            .lock()
+            .as_ref()
+            .is_some_and(|v| v.device_name == dev.name())
     {
         return Err(Errno::EBUSY);
     }
@@ -63,18 +68,25 @@ pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
     volume::mkfs(dev, label)
 }
 
-/// Open the milkfs on `dev` and mount it at `path` (created if missing).
+/// Open the milkfs on `dev` and mount it at `path` (created if missing). The first
+/// volume mounted with this becomes the primary one (snapshot API, `/sys/fs/milkfs`).
 pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
+    let r = mount_secondary(dev, path)?;
+    let mut p = PRIMARY.lock();
+    if p.is_none() {
+        *p = Some(r.0.clone());
+        *PRIMARY_PATH.lock() = String::from(path);
+    }
+    Ok(r)
+}
+
+/// Mount without ever becoming the primary volume (self-test volumes).
+pub fn mount_secondary(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
     let name = String::from(dev.name());
     let (state, report) = volume::State::open(dev)?;
     let vol = Volume::new(state, &name);
     crate::fs::ops::mkdir_all(path, 0o755)?;
     crate::fs::path::mount(path, vol.clone())?;
-    let mut p = PRIMARY.lock();
-    if p.is_none() {
-        *p = Some(vol.clone());
-        *PRIMARY_PATH.lock() = String::from(path);
-    }
     Ok((vol, report))
 }
 
@@ -148,7 +160,41 @@ pub fn setup_home() {
     }
 }
 
+/// Background work, once the scheduler runs: the flusher (commits the open transaction
+/// once it is a second old) and the Time Machine thread.
+pub fn start_threads() {
+    if volume().is_none() {
+        return;
+    }
+    drop(crate::sched::spawn("milkfs-flush", || {
+        loop {
+            crate::sched::sleep_ms(250);
+            if let Some(v) = volume() {
+                let _ = v.state.lock().flush_if_due();
+            }
+        }
+    }));
+    timemachine::start();
+}
+
+/// Self-test only (before the scheduler runs, so nothing else can notice): point the
+/// primary-volume API and `/sys/fs/milkfs` at a throwaway test volume, so destructive
+/// checks never reach the user's disk. `None` restores the real primary volume.
+static TEST_OVERRIDE: SpinLock<Option<Arc<Volume>>> = SpinLock::new(None);
+
+pub fn set_test_override(v: Option<Arc<Volume>>) {
+    *TEST_OVERRIDE.lock() = v;
+}
+
 pub fn volume() -> Option<Arc<Volume>> {
+    if let Some(v) = TEST_OVERRIDE.lock().clone() {
+        return Some(v);
+    }
+    PRIMARY.lock().clone()
+}
+
+/// The user's volume, ignoring any self-test override.
+pub fn user_volume() -> Option<Arc<Volume>> {
     PRIMARY.lock().clone()
 }
 
@@ -208,6 +254,18 @@ pub fn info() -> String {
     let _ = writeln!(s, "commits:     {} this boot", st.commits);
     let _ = writeln!(
         s,
+        "open txn:    {} op(s){}",
+        st.batched_ops,
+        match st.dirty_since {
+            Some(t) => format!(
+                ", dirty for {} ms",
+                (crate::timer::now_ns() - t) / 1_000_000
+            ),
+            None => String::new(),
+        }
+    );
+    let _ = writeln!(
+        s,
         "state:       {}",
         if st.broken {
             "BROKEN (read-only)"
@@ -252,6 +310,9 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
     dir.add_control("delete", snapshots_text, |b| delete_snapshot(arg(b)?));
     dir.add_control("rollback", snapshots_text, |b| rollback(arg(b)?));
     dir.add_control("sync", String::new, |_| sync());
+    dir.add_control("auto", timemachine::status, |b| {
+        timemachine::control(arg(b)?)
+    });
     dir.add_control(
         "mkfs",
         || String::from("write: <device> [label] [force]\n"),

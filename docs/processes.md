@@ -133,7 +133,7 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 56 openat, 57 close, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 61 getdents64, 17 getcwd, 49 chdir, 34 mkdirat, 35 unlinkat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (console: TCGETS, TIOCGWINSZ) |
+| files | 56 openat, 57 close, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 61 getdents64, 17 getcwd, 49 chdir, 34 mkdirat, 35 unlinkat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (console: TCGETS, TIOCGWINSZ) |
 | processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |

@@ -224,6 +224,9 @@ pub struct Superblock {
     pub label: String,
     /// Oldest first (ascending generation).
     pub snaps: Vec<SnapRecord>,
+    /// Automatic snapshot settings: [state (0 default, 1 on, 2 off), interval seconds,
+    /// keep last, keep daily]; 0 = default. Zeros on images made before they existed.
+    pub auto: [u32; 4],
 }
 
 // Superblock byte offsets.
@@ -240,9 +243,11 @@ const SB_LABEL: usize = 112;
 const SB_NSNAPS: usize = 144;
 const SB_SNAPS: usize = 152;
 const SNAP_REC: usize = 128;
+const SB_AUTO: usize = 3992;
 const SB_CSUM: usize = BLOCK - 8;
 
-const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_CSUM);
+const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
+const _: () = assert!(SB_AUTO + 16 <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -278,6 +283,9 @@ impl Superblock {
             s.root.put(&mut r[64..]);
             s.deadlist.put(&mut r[88..]);
             r[112..120].copy_from_slice(&s.next_ino.to_le_bytes());
+        }
+        for (i, v) in self.auto.iter().enumerate() {
+            b[SB_AUTO + i * 4..SB_AUTO + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
@@ -321,6 +329,7 @@ impl Superblock {
             uuid,
             label: get_str(&b[SB_LABEL..SB_LABEL + LABEL_MAX + 1]),
             snaps,
+            auto: core::array::from_fn(|i| le32(&b[SB_AUTO + i * 4..])),
         })
     }
 }

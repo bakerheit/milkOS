@@ -89,6 +89,29 @@ pub fn mount(path: &str, fs: FsRef) -> Result<()> {
     Ok(())
 }
 
+/// Remove the most recent mount at `path` (exact mount path). EBUSY if something is
+/// mounted inside it, EINVAL if nothing is mounted there or it is `/`. Open files keep
+/// their file system alive until they close.
+pub fn unmount(path: &str) -> Result<()> {
+    let mut m = MOUNTS.lock();
+    let i = m
+        .iter()
+        .rposition(|x| x.path == path && x.covered.is_some())
+        .ok_or(Errno::EINVAL)?;
+    let root = m[i].root.clone();
+    if m.iter().any(|x| {
+        x.covered
+            .as_ref()
+            .is_some_and(|c| c.dev() == root.dev() && c.ino() == root.ino())
+    }) {
+        return Err(Errno::EBUSY);
+    }
+    let gone = m.remove(i);
+    drop(m);
+    drop(gone);
+    Ok(())
+}
+
 /// Another view of a directory that is already in the tree (a bind mount's "file
 /// system"): same inodes, same device number.
 struct BindFs {
@@ -105,6 +128,9 @@ impl super::node::FileSystem for BindFs {
     }
     fn root(&self) -> InodeRef {
         self.root.clone()
+    }
+    fn sync(&self) -> Result<()> {
+        self.root.sync()
     }
 }
 
@@ -129,6 +155,18 @@ pub struct MountInfo {
     pub path: String,
     pub fs_name: &'static str,
     pub dev: u64,
+}
+
+/// `sync(2)`: ask every mounted file system to make its changes durable.
+pub fn sync_all() -> Result<()> {
+    let all: Vec<FsRef> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    let mut r = Ok(());
+    for fs in all {
+        if let Err(e) = fs.sync() {
+            r = Err(e);
+        }
+    }
+    r
 }
 
 pub fn mounts() -> Vec<MountInfo> {

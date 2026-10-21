@@ -830,10 +830,7 @@ pub fn rm_rf(path: &str) {
 }
 
 /// Space accounting on the mounted milkfs must be exact after every phase.
-fn milk_space(t: &mut T, what: &str) {
-    let Some(v) = super::milkfs::volume() else {
-        return;
-    };
+fn milk_space(t: &mut T, v: &super::milkfs::Volume, what: &str) {
     let r = v.state.lock().verify_space();
     match r {
         Ok(c) => t.ok(
@@ -858,63 +855,143 @@ fn milkfs(t: &mut T) {
         "xxh64 matches mkmilkfs.py",
     );
 
-    if super::milkfs::volume().is_none() {
-        kprintln!("fs selftest: no milkfs volume, skipping milkfs checks");
-        return;
-    }
-    const D: &str = "/Volumes/Milk/.selftest";
-    // Leftovers from a boot that died mid-test (crash tests do that on purpose).
-    rm_rf(D);
-    for s in super::milkfs::snapshots().unwrap_or_default() {
-        if s.name.starts_with("selftest-") {
-            let _ = super::milkfs::delete_snapshot(&s.name);
-        }
-    }
-    milk_space(t, "milkfs space exact at start");
-    t.ok(
-        ops::stat("/Volumes/Milk").map(|s| s.kind).ok() == Some(InodeType::Dir),
-        "/Volumes/Milk is a directory",
-    );
-    t.ok(
-        read_str("/proc/mounts").contains("milkfs /Volumes/Milk milkfs"),
-        "milkfs in /proc/mounts",
-    );
-    t.ok(ops::mkdir(D, 0o755).is_ok(), "milkfs mkdir");
+    milkfs_user_volume(t);
+    milkfs_test_volume(t);
+}
 
+/// The user's volume: read-only checks only. Never writes, never snapshots.
+fn milkfs_user_volume(t: &mut T) {
+    let (Some(v), Some(vp)) = (super::milkfs::user_volume(), super::milkfs::mount_path()) else {
+        kprintln!("fs selftest: no milkfs volume, skipping the user-volume checks");
+        return;
+    };
+    t.ok(
+        ops::stat(&vp).map(|s| s.kind).ok() == Some(InodeType::Dir),
+        "user volume mounted",
+    );
+    t.ok(
+        read_str("/proc/mounts").contains(&alloc::format!("milkfs {vp} milkfs")),
+        "user volume in /proc/mounts",
+    );
+    let generation = v.state.lock().sb.generation;
+    let info = read_str("/sys/fs/milkfs/info");
+    t.ok(
+        info.contains("state:       ok")
+            && info.contains(&alloc::format!("generation:  {generation}")),
+        "user volume info consistent",
+    );
+    milk_space(t, &v, "user volume space accounting exact");
     // Persistent home: /home/milk is a bind mount of <volume>/home/milk.
-    if let Some(vp) = super::milkfs::mount_path() {
-        let vol_dev = ops::stat(&vp).map(|s| s.dev).ok();
+    let vol_dev = ops::stat(&vp).map(|s| s.dev).ok();
+    t.ok(
+        ops::stat("/home/milk").map(|s| s.dev).ok() == vol_dev,
+        "/home/milk is on milkfs",
+    );
+    let pathof = |p: &str| {
+        ops::lookup(p)
+            .and_then(|i| path::path_of(&i))
+            .unwrap_or_default()
+    };
+    t.ok(
+        pathof("/home/milk") == "/home/milk",
+        "path_of home is /home/milk",
+    );
+    t.ok(
+        pathof("/Users/milk") == "/home/milk",
+        "/Users/milk is the same home",
+    );
+    t.err(
+        ops::rmdir(&alloc::format!("{vp}/home/milk")),
+        Errno::EBUSY,
+        "the bound home can't be removed",
+    );
+}
+
+/// Everything destructive, on a throwaway milkfs in RAM (mkfs'd here, unmounted after).
+fn milkfs_test_volume(t: &mut T) {
+    use super::blockdev::BlockRef;
+    const VP: &str = "/Volumes/.milk-selftest";
+    const D: &str = "/Volumes/.milk-selftest/t";
+    let free0 = pmm::stats().free_frames;
+    let Some(disk) = t.must(super::ramdisk::RamDisk::new("ram0", 16 << 20), "RAM disk") else {
+        return;
+    };
+    let dev: BlockRef = alloc::sync::Arc::new(disk);
+    t.ok(
+        super::milkfs::mkfs(&dev, "MilkTest", false).is_ok(),
+        "mkfs the test volume",
+    );
+    t.err(
+        super::milkfs::mkfs(&dev, "MilkTest", false),
+        Errno::EEXIST,
+        "mkfs refuses an existing milkfs",
+    );
+    let Some((vol, report)) = t.must(
+        super::milkfs::mount_secondary(dev.clone(), VP),
+        "mount the test volume",
+    ) else {
+        return;
+    };
+    t.ok(
+        report.problems == 0 && report.inodes == 1,
+        "fresh volume mounts clean",
+    );
+    super::milkfs::set_test_override(Some(vol.clone()));
+    milkfs_destructive(t, &vol, VP, D, &dev);
+    milkfs_bench(&vol, VP);
+    super::milkfs::set_test_override(None);
+    t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
+    let _ = ops::rmdir(VP);
+    drop(vol);
+    drop(dev);
+    t.ok(
+        pmm::stats().free_frames == free0,
+        "test volume's RAM disk freed",
+    );
+}
+
+fn milkfs_destructive(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    d: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    milk_space(t, vol, "milkfs space exact at start");
+    t.ok(ops::mkdir(d, 0o755).is_ok(), "milkfs mkdir");
+    // Bind mounts (what the persistent home uses), on the test volume.
+    {
+        let src = alloc::format!("{vp}/bindsrc");
+        let _ = ops::mkdir(&src, 0o755);
+        let _ = ops::write_file(&alloc::format!("{src}/f"), b"bound");
+        let _ = ops::mkdir("/tmp/bindtest", 0o755);
+        t.ok(super::bind(&src, "/tmp/bindtest").is_ok(), "bind mount");
         t.ok(
-            ops::stat("/home/milk").map(|s| s.dev).ok() == vol_dev,
-            "/home/milk is on milkfs",
+            read_str("/tmp/bindtest/f") == "bound",
+            "read through a bind mount",
         );
-        let f = "/home/milk/.selftest-home";
-        t.ok(ops::write_file(f, b"persistent").is_ok(), "write in home");
         t.ok(
-            read_str(&alloc::format!("{vp}/home/milk/.selftest-home")) == "persistent",
-            "home file visible on the volume",
-        );
-        let pathof = |p: &str| {
-            ops::lookup(p)
+            ops::lookup("/tmp/bindtest")
                 .and_then(|i| path::path_of(&i))
-                .unwrap_or_default()
-        };
-        t.ok(
-            pathof("/home/milk") == "/home/milk",
-            "path_of home is /home/milk",
-        );
-        t.ok(
-            pathof("/Users/milk") == "/home/milk",
-            "/Users/milk is the same home",
+                .ok()
+                .as_deref()
+                == Some("/tmp/bindtest"),
+            "path_of a bind mount",
         );
         t.err(
-            ops::rmdir(&alloc::format!("{vp}/home/milk")),
+            ops::rmdir(&src),
             Errno::EBUSY,
-            "the bound home can't be removed",
+            "a bound directory can't be removed",
         );
-        t.ok(ops::unlink(f).is_ok(), "unlink in home");
+        t.ok(super::unmount("/tmp/bindtest").is_ok(), "unmount the bind");
+        let _ = ops::rmdir("/tmp/bindtest");
+        let _ = ops::unlink(&alloc::format!("{src}/f"));
+        t.ok(
+            ops::rmdir(&src).is_ok(),
+            "bind source removable after unmount",
+        );
     }
-    let p = |n: &str| alloc::format!("{D}/{n}");
+    let p = |n: &str| alloc::format!("{d}/{n}");
 
     // files
     if let Some(f) = t.must(
@@ -988,7 +1065,7 @@ fn milkfs(t: &mut T) {
         (0..60).all(|i| read_str(&p(&alloc::format!("many-{i:02}"))) == alloc::format!("file {i}")),
         "milkfs 60 small files",
     );
-    milk_space(t, "milkfs space exact after writes");
+    milk_space(t, vol, "milkfs space exact after writes");
 
     // namespace
     t.ok(
@@ -1026,7 +1103,7 @@ fn milkfs(t: &mut T) {
     );
     t.err(ops::unlink(&p("d2")), Errno::EISDIR, "milkfs unlink dir");
     t.ok(
-        ops::stat(D).map(|s| s.nlink).ok() == Some(3),
+        ops::stat(d).map(|s| s.nlink).ok() == Some(3),
         "milkfs dir nlink",
     );
     t.ok(
@@ -1050,7 +1127,7 @@ fn milkfs(t: &mut T) {
             "milkfs open file survives unlink",
         );
     }
-    if let Some(d) = t.must(ops::open(D, O_RDONLY | O_DIRECTORY, 0), "milkfs open dir") {
+    if let Some(d) = t.must(ops::open(d, O_RDONLY | O_DIRECTORY, 0), "milkfs open dir") {
         let mut buf = vec![0u8; 8192];
         let n = d.getdents64(&mut buf).unwrap_or(0);
         let names: Vec<String> = parse_dirents(&buf[..n])
@@ -1065,14 +1142,14 @@ fn milkfs(t: &mut T) {
         );
     }
     t.ok(
-        ops::readdir("/Volumes/Milk")
+        ops::readdir(vp)
             .unwrap_or_default()
             .iter()
             .any(|e| e.name == ".snapshots"),
         ".snapshots listed in the volume root",
     );
     t.err(
-        ops::mkdir("/Volumes/Milk/.snapshots", 0o755),
+        ops::mkdir(&alloc::format!("{vp}/.snapshots"), 0o755),
         Errno::EEXIST,
         "can't create .snapshots",
     );
@@ -1081,7 +1158,7 @@ fn milkfs(t: &mut T) {
         Errno::EXDEV,
         "milkfs rename to tmpfs",
     );
-    milk_space(t, "milkfs space exact after namespace ops");
+    milk_space(t, vol, "milkfs space exact after namespace ops");
 
     // snapshots
     let before = read_str(&p("b.txt"));
@@ -1102,7 +1179,7 @@ fn milkfs(t: &mut T) {
     let _ = ops::write_file(&p("b.txt"), b"changed after the snapshot");
     let _ = ops::write_file(&p("new.txt"), b"born after the snapshot");
     let _ = ops::unlink(&p("many-00"));
-    let snap = "/Volumes/Milk/.snapshots/selftest-a/.selftest";
+    let snap = &alloc::format!("{vp}/.snapshots/selftest-a/t");
     t.ok(
         read_str(&alloc::format!("{snap}/b.txt")) == before,
         "snapshot keeps the old content",
@@ -1135,10 +1212,10 @@ fn milkfs(t: &mut T) {
             .and_then(|i| path::path_of(&i))
             .ok()
             .as_deref()
-            == Some("/Volumes/Milk/.snapshots"),
+            == Some(alloc::format!("{vp}/.snapshots").as_str()),
         "snapshot .. leads to .snapshots",
     );
-    milk_space(t, "milkfs space exact with a snapshot");
+    milk_space(t, vol, "milkfs space exact with a snapshot");
 
     // the shell interface
     t.ok(
@@ -1151,20 +1228,17 @@ fn milkfs(t: &mut T) {
         "/sys/fs/milkfs/snapshots",
     );
     t.ok(
-        read_str("/sys/fs/milkfs/info").contains("label:       Milk"),
+        read_str("/sys/fs/milkfs/info").contains("label:       MilkTest"),
         "/sys/fs/milkfs/info",
     );
     let _ = ops::write_file(&p("b.txt"), b"third version");
     t.ok(
-        read_str("/Volumes/Milk/.snapshots/selftest-b/.selftest/b.txt")
+        read_str(&alloc::format!("{vp}/.snapshots/selftest-b/t/b.txt"))
             == "changed after the snapshot",
         "second snapshot",
     );
     t.err(
-        ops::write_file(
-            "/sys/fs/milkfs/mkfs",
-            super::milkfs::volume().unwrap().device_name.as_bytes(),
-        ),
+        super::milkfs::mkfs(dev, "x", true),
         Errno::EBUSY,
         "mkfs refuses the mounted volume",
     );
@@ -1189,25 +1263,84 @@ fn milkfs(t: &mut T) {
     );
     t.ok(
         super::milkfs::snapshots()
-            .map(|l| l.iter().map(|s| s.name.clone()).collect::<Vec<_>>())
+            .map(|l| {
+                l.iter()
+                    .filter(|s| s.name.starts_with("selftest-"))
+                    .map(|s| s.name.clone())
+                    .collect::<Vec<_>>()
+            })
             .ok()
             == Some(alloc::vec![String::from("selftest-a")]),
         "rollback dropped the newer snapshot",
     );
-    milk_space(t, "milkfs space exact after rollback");
+    milk_space(t, vol, "milkfs space exact after rollback");
     t.ok(
         super::milkfs::delete_snapshot("selftest-a").is_ok(),
         "delete snapshot",
     );
     t.err(
-        ops::stat("/Volumes/Milk/.snapshots/selftest-a"),
+        ops::stat(&alloc::format!("{vp}/.snapshots/selftest-a")),
         Errno::ENOENT,
         "deleted snapshot is gone",
     );
-    milk_space(t, "milkfs space exact after deleting the snapshot");
+    milk_space(t, vol, "milkfs space exact after deleting the snapshot");
+
+    // Time Machine pieces (the thread itself only runs once the scheduler is up).
+    {
+        use super::milkfs::timemachine::{Config, prune_plan, stamp};
+        t.ok(
+            stamp(0) == "1970-01-01T00:00:00"
+                && stamp(1_792_554_055) == "2026-10-21T03:40:55"
+                && stamp(951_782_400) == "2000-02-29T00:00:00"
+                && stamp(4_102_444_799) == "2099-12-31T23:59:59",
+            "RTC timestamps to dates",
+        );
+        let day = 86_400 * 20_000;
+        let mk = |g: u64, t: u64| super::milkfs::SnapInfo {
+            name: alloc::format!("auto-{g}"),
+            generation: g,
+            created: t,
+        };
+        // 12 hourly today (gens 10..21), one each on the 3 previous days (gens 1..3).
+        let mut list: Vec<_> = (0..12).map(|h| mk(10 + h, day + h * 3600)).collect();
+        list.extend((1..=3).map(|d| mk(d, day - (4 - d) * 86_400)));
+        let mut del = prune_plan(&list, 4, 3);
+        del.sort();
+        let mut want: Vec<String> = (10..18).map(|g| alloc::format!("auto-{g}")).collect();
+        want.push(String::from("auto-1"));
+        want.sort();
+        t.ok(
+            del == want,
+            "retention: newest 4 + newest of each of 3 days",
+        );
+        let v = vol.clone();
+        let saved = v.state.lock().auto_config();
+        t.ok(
+            super::ops::write_file("/sys/fs/milkfs/auto", b"interval=30s keep=3 daily=2").is_ok()
+                && v.state.lock().sb.auto == [1, 30, 3, 2]
+                && read_str("/sys/fs/milkfs/auto").starts_with("on interval=30s keep=3 daily=2"),
+            "/sys/fs/milkfs/auto sets and persists the settings",
+        );
+        t.err(
+            super::ops::write_file("/sys/fs/milkfs/auto", b"interval=x"),
+            Errno::EINVAL,
+            "bad auto setting",
+        );
+        let _ = ops::write_file(&p("tm"), b"changed");
+        let first = v.state.lock().auto_snapshot(1_792_554_055);
+        let again = v.state.lock().auto_snapshot(1_792_554_056);
+        t.ok(
+            matches!(&first, Ok(Some(s)) if s.name == "auto-2026-10-21T03:40:55")
+                && matches!(again, Ok(None)),
+            "auto snapshot named by time, skipped when nothing changed",
+        );
+        let _ = super::milkfs::delete_snapshot("auto-2026-10-21T03:40:55");
+        let _ = v.state.lock().set_auto_config(Config { ..saved });
+        milk_space(t, vol, "milkfs space exact after auto snapshots");
+    }
 
     // clean up
-    let entries = ops::readdir(D).unwrap_or_default();
+    let entries = ops::readdir(d).unwrap_or_default();
     for e in &entries {
         if e.kind != InodeType::Dir {
             let _ = ops::unlink(&p(&e.name));
@@ -1216,27 +1349,42 @@ fn milkfs(t: &mut T) {
     let _ = ops::unlink(&p("d2/inner/f"));
     let _ = ops::rmdir(&p("d2/inner"));
     let _ = ops::rmdir(&p("d2"));
-    t.ok(ops::rmdir(D).is_ok(), "milkfs cleanup");
-    milk_space(t, "milkfs space exact after cleanup");
+    t.ok(ops::rmdir(d).is_ok(), "milkfs cleanup");
+    milk_space(t, vol, "milkfs space exact after cleanup");
 }
 
-/// Persistence demo: every boot appends a line to /Volumes/Milk/boot.log and shows it.
-fn boot_log() {
-    const LOG: &str = "/Volumes/Milk/boot.log";
-    let Some(v) = super::milkfs::volume() else {
-        return;
-    };
-    let old = read_str(LOG);
-    let n = old.lines().count() + 1;
-    let line = alloc::format!(
-        "boot {n}: unix time {}, generation {}\n",
-        super::clock::now().sec,
-        v.state.lock().sb.generation
-    );
-    if let Ok(f) = ops::open(LOG, O_WRONLY | O_CREAT | O_APPEND, 0o644) {
-        let _ = f.write(line.as_bytes());
+/// Small-file benchmark on the test volume: printed, not checked.
+fn milkfs_bench(v: &super::milkfs::Volume, vp: &str) {
+    let dir = alloc::format!("{vp}/.bench");
+    rm_rf(&dir);
+    let _ = super::sync_all();
+    let commits = || v.state.lock().commits;
+    let (c0, t0) = (commits(), crate::timer::now_ns());
+    let _ = ops::mkdir(&dir, 0o755);
+    let data = [0x6du8; 1024];
+    for i in 0..200 {
+        let _ = ops::write_file(&alloc::format!("{dir}/f{i}"), &data);
     }
-    show(LOG);
+    let _ = super::sync_all();
+    let (c1, t1) = (commits(), crate::timer::now_ns());
+    let mut ok = 0;
+    for i in 0..200 {
+        if ops::read_file(&alloc::format!("{dir}/f{i}")).is_ok_and(|d| d == data) {
+            ok += 1;
+        }
+    }
+    let t2 = crate::timer::now_ns();
+    rm_rf(&dir);
+    let _ = super::sync_all();
+    let (c3, t3) = (commits(), crate::timer::now_ns());
+    kprintln!(
+        "milkfs bench: 200 x 1 KiB files: create {} ms ({} commits), read {} ms ({ok} ok), delete {} ms ({} commits)",
+        (t1 - t0) / 1_000_000,
+        c1 - c0,
+        (t2 - t1) / 1_000_000,
+        (t3 - t2) / 1_000_000,
+        c3 - c1
+    );
 }
 
 /// Print a few inspectable files so they show up in the boot log.
@@ -1265,9 +1413,15 @@ pub fn run() {
     blockdev(&mut t);
     milkfs(&mut t);
     if t.failed != 0 {
-        panic!("fs selftest: {} of {} checks failed", t.failed, t.checks);
+        // Loud, but never a panic: a self-test must not take the machine down.
+        kprintln!(
+            "*** fs selftest: FAIL: {} of {} checks failed (see FAIL lines above) ***",
+            t.failed,
+            t.checks
+        );
+    } else {
+        kprintln!("fs selftest: PASS ({} checks)", t.checks);
     }
-    kprintln!("fs selftest: PASS ({} checks)", t.checks);
     for p in [
         "/proc/version",
         "/proc/uptime",
@@ -1285,6 +1439,5 @@ pub fn run() {
         .collect();
     kprintln!("{}", names.join("  "));
     show("/sys/fs/milkfs/info");
-    boot_log();
     show("/etc/motd");
 }

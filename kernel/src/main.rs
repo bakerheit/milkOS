@@ -96,6 +96,7 @@ pub extern "C" fn kmain() -> ! {
     sched::selftest::run();
     proc::init();
     proc::start_init();
+    fs::start_threads();
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the
     // screen and draws the mouse cursor from here on.

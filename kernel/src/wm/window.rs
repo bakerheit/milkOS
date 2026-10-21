@@ -72,6 +72,11 @@ pub trait WindowContents {
     fn document_path(&self) -> Option<alloc::string::String> {
         None
     }
+    /// The smallest body this can live in without being clipped (client apps draw a fixed
+    /// size buffer and cannot be resized yet). None: anything goes.
+    fn min_body(&self) -> Option<(i32, i32)> {
+        None
+    }
     /// The contents' own tabs (the Terminal's shells), when there are two or more: titles and
     /// the active one. Alone in its window, they are drawn as the window's tab strip.
     fn inner_tabs(&self) -> Option<(Vec<alloc::string::String>, usize)> {
@@ -293,6 +298,14 @@ pub fn paint_strip(
         } else if hover == Some(i) {
             p.rrect(r.x, r.y, r.w, r.h + TAB_R, TAB_R, hov, a(600));
         }
+        // The x takes its colours from the tab it sits on: a Terminal-coloured active tab
+        // in a light window still gets the Terminal's x (light cocoa there is 1.94:1).
+        let dark_tab = s.terminal || (active && active_fill == TERM_BG);
+        let (x_rest, x_circle, x_hover) = if dark_tab {
+            (T_SECOND, T_HOVER, TERM_FG)
+        } else {
+            (second, SAND, ESPRESSO)
+        };
         let fg = if active { active_text } else { second };
         let room = r.w - 12 - 8 - 20 - 4;
         let label = fit(t, room, active);
@@ -300,10 +313,10 @@ pub fn paint_strip(
         // The close x, at rest too; hover: a circle behind it, the x in primary.
         let c = tab_close_rect(r);
         let xc = if close_hover == Some(i) {
-            p.circle(c.x, c.y, 20, if s.terminal { T_HOVER } else { SAND }, 255);
-            if s.terminal { TERM_FG } else { ESPRESSO }
+            p.circle(c.x, c.y, 20, x_circle, 255);
+            x_hover
         } else {
-            second
+            x_rest
         };
         p.text_p_center(c.x, c.w, c.y + 2, "x", xc, false);
     }
@@ -321,6 +334,9 @@ pub fn paint_strip(
 }
 
 /// SPEC drop target: where a dragged window would land as a tab.
+/// The drop target is at least this wide, so "Drop to add as a tab" fits.
+pub const DROP_MIN_W: i32 = 176;
+
 pub fn paint_drop_target(p: &mut Painter, r: Rect) {
     p.rrect_r(r, TAB_R, STRAW, a(200));
     // A 2px dashed border: dashes of 6, gaps of 4, along each side.
@@ -337,8 +353,9 @@ pub fn paint_drop_target(p: &mut Painter, r: Rect) {
         y += 10;
     }
     p.rrect_stroke(r.x, r.y, r.w, r.h, TAB_R, 1, STRAW, a(500));
+    // Primary text: straw on the straw tint is 1.96:1; the dashed border carries the colour.
     let label = fit("Drop to add as a tab", r.w - 16, true);
-    p.text_p(r.x + 8, r.y + (r.h - 16) / 2, &label, STRAW, true);
+    p.text_p(r.x + 8, r.y + (r.h - 16) / 2, &label, ESPRESSO, true);
 }
 
 /// A tab parked behind the active one.
@@ -435,6 +452,14 @@ impl Window {
     }
 
     /// Body rect in window coordinates: inside the border, under the title bar and its line.
+    /// The smallest body any of this window's tabs needs: (w, h).
+    pub fn min_body(&self) -> (i32, i32) {
+        core::iter::once(&self.contents)
+            .chain(self.parked.iter().map(|t| &t.contents))
+            .filter_map(|c| c.min_body())
+            .fold((0, 0), |(w, h), (cw, ch)| (w.max(cw), h.max(ch)))
+    }
+
     pub fn body(&self) -> Rect {
         Rect::new(
             1,
@@ -730,6 +755,8 @@ impl Window {
                     true,
                 );
             }
+            // The drop target takes the title's place while a window hovers here.
+            None if self.drop_hint => {}
             None => p.text_p_center(0, w, 9, t, tc, true),
         }
         if self.drop_hint {
@@ -737,8 +764,10 @@ impl Window {
             let r = if strip.is_some() {
                 tab_rect(n, n + 1, w, TAB_X)
             } else {
-                Rect::new(TAB_X, 3, (w - TAB_X - 12).min(TAB_MAX + 40), bh - 6)
+                Rect::new(TAB_X, 3, TAB_MAX + 40, bh - 6)
             };
+            // At least 176 wide so the label fits (SPEC Tabs), inside the window.
+            let r = Rect::new(r.x, r.y, r.w.max(DROP_MIN_W).min(w - r.x - 8), r.h);
             paint_drop_target(&mut p, r);
         }
         self.contents

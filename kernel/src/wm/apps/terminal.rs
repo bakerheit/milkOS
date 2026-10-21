@@ -63,7 +63,7 @@ impl Output<'_> {
         }
     }
     pub fn out(&mut self, s: &str) {
-        self.line(s, LATTE);
+        self.line(s, TERM_DIM);
     }
     pub fn good(&mut self, s: &str) {
         self.line(s, MATCHA);
@@ -157,7 +157,7 @@ impl Tab {
     fn first() -> Tab {
         let mut t = Tab::blank(0, true);
         t.follow_log();
-        t.lines.push((String::new(), LATTE));
+        t.lines.push((String::new(), TERM_DIM));
         if tty::start_shell(1) {
             t.tty = 1;
         }
@@ -455,7 +455,7 @@ impl Tab {
         while let Some(i) = self.partial.find('\n') {
             let line: String = self.partial[..i].chars().filter(|c| *c != '\r').collect();
             self.partial.drain(..=i);
-            self.lines.push((line, LATTE));
+            self.lines.push((line, TERM_DIM));
         }
         self.trim();
         true
@@ -680,7 +680,7 @@ impl Tab {
                 let mut b = [0u8; 4];
                 p.text(x, y, ch.encode_utf8(&mut b), TERM_BG);
             } else {
-                p.rrect_stroke(x, y, 8, 16, 0, 1, LATTE, 255);
+                p.rrect_stroke(x, y, 8, 16, 0, 1, TERM_DIM, 255);
             }
         }
     }

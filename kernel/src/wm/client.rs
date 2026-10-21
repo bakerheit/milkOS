@@ -305,6 +305,13 @@ impl WindowContents for ClientView {
         &["File", "Edit", "Window", "Help"]
     }
 
+    fn min_body(&self) -> Option<(i32, i32)> {
+        CLIENTS
+            .lock()
+            .get(&self.id)
+            .map(|cl| (cl.w as i32, cl.h as i32))
+    }
+
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
         // Copy the geometry out and blit without holding the lock (IRQs stay on). If the
         // process destroys the window meanwhile, the worst case is one frame of stale pixels.

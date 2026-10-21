@@ -1021,7 +1021,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // Tabs everywhere (SPEC Tabs). Files is at (96, 64) 600 wide, the Terminal at
         // (440, 270): drag the Terminal by its title bar onto Files' title bar.
         "tabs-drop" | "tabs-merge" | "tabs-split" | "tabs-mixed" | "tabs-plus" | "tabs-keys"
-        | "tabs-close" => {
+        | "tabs-close" | "tabs-client" => {
             b.wait(300).to(700, 286).wait(30).down().wait(30);
             for i in 1..=14 {
                 b.to(700 + (330 - 700) * i / 14, 286 + (80 - 286) * i / 14)
@@ -1038,12 +1038,24 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         // Pull the Terminal tab (the second) down out of the strip.
                         b.drag(96 + 84 + 166 + 60, 64 + 22, 560, 420, 12).wait(500);
                     }
-                    "tabs-mixed" | "tabs-keys" | "tabs-close" => {
-                        // Paint too (Notes already lives in space 2; Paint opens at
-                        // (255, 177)): drag it by its title bar onto the strip.
+                    "tabs-client" => {
+                        // Paint (a client app, 562x382 buffer, opens at (255, 177)) over
+                        // the strip: no drop target, it would not fit (no client resize).
                         let (x, y) = dock_icon_center(4);
                         b.click(x, y).wait(600);
-                        b.drag(420, 193, 330, 80, 12).wait(500);
+                        b.to(420, 193).wait(30).down().wait(30);
+                        for i in 1..=12 {
+                            b.to(420 + (330 - 420) * i / 12, 193 + (80 - 193) * i / 12)
+                                .wait(16);
+                        }
+                        b.wait(400);
+                    }
+                    "tabs-mixed" | "tabs-keys" | "tabs-close" => {
+                        // Music too (Notes already lives in space 2; Music opens at
+                        // (300, 92)): drag it by its title bar onto the strip.
+                        let (x, y) = dock_icon_center(5);
+                        b.click(x, y).wait(600);
+                        b.drag(500, 108, 330, 80, 12).wait(500);
                         if name == "tabs-keys" {
                             b.key(
                                 Key::Char('['),
@@ -1060,9 +1072,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         }
                     }
                     "tabs-plus" => {
-                        // The + after the tabs: Skim, then Paint joins as a tab.
+                        // The + after the tabs: Skim, then Settings joins as a tab.
                         b.click(96 + 84 + 2 * 166 + 4 + 14, 64 + 22).wait(400);
-                        b.typ("paint").wait(200).enter().wait(800);
+                        b.typ("settings").wait(200).enter().wait(800);
                     }
                     _ => {}
                 }

@@ -237,6 +237,49 @@ check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"
 
+echo "---- a machine with a pre-CSPRNG (legacy) identity: carol ----"
+# A fresh image whose /etc/milk/drop holds an old-format secret (no rng= tag, as made by
+# the weak generator): the daemon must rotate it at boot, signed by the old key.
+LEGACY_SEED=$(python3 -I -c "print('42' * 32)")
+python3 -I scripts/mkmilkfs.py mkfs "$WORK/carol-fs.img" --size 64M --label Milk >/dev/null
+python3 -I scripts/mkmilkfs.py mkdir "$WORK/carol-fs.img" /etc/milk/drop 700 >/dev/null
+printf 'ed25519-seed %s\n# Milk Drop identity of this machine: never copy it anywhere.\n' "$LEGACY_SEED" >"$WORK/legacy.secret"
+printf 'carol\n' >"$WORK/legacy.name"
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/identity.secret "$WORK/legacy.secret" >/dev/null
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/name "$WORK/legacy.name" >/dev/null
+dd if=/dev/zero of="$WORK/carol-disk.img" bs=1m count=0 seek=64 2>/dev/null
+read -r PC PD < <(python3 -I -c "
+import socket
+ss = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(2)]
+for s in ss: s.bind(('127.0.0.1', 0))
+print(*[s.getsockname()[1] for s in ss])")
+boot carol 02:6d:6b:64:0c:0c "$PC" "$PD"
+QC=$!
+PIDS+=("$QC")
+python3 -I scripts/serial_drive.py "$WORK/carol.sock" "$WORK/carol.log" \
+  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:audit --event user.drop' "$P" \
+  'send:echo now > /sys/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
+DC=$!
+PIDS+=("$DC")
+for _ in $(seq 600); do [ -e "$WORK/carol.done" ] && break; sleep 0.1; done
+[ -e "$WORK/carol.done" ] || fail "carol's boot timed out"
+sleep 1.5
+kill "$DC" 2>/dev/null || true
+kill "$QC"
+wait "$QC" 2>/dev/null || true
+C="$WORK/carol.txt"
+tr -d '\r' <"$WORK/carol.log" >"$C"
+grep -E "^drop: carol|^name:|^fingerprint:|^rotated:|^rng:|user\.drop\.rotate" "$C"
+check "$C" "the daemon rotated the legacy identity at boot" "drop: carol's identity came from the old weak RNG: rotated it \\([0-9a-f ]{19} -> [0-9a-f ]{19}, signed by the old key\\)"
+check "$C" "drop id: rotated, now from the kernel CSPRNG" "^rotated: +from [0-9a-f ]{19} \\(signed by it\\)"
+check "$C" "drop id: the new key's RNG" "^rng: +kernel CSPRNG"
+check "$C" "audit: rotation because of the legacy RNG" "user\\.drop\\.rotate +name=carol old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} key=[0-9a-f]{64} reason=legacy-rng"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/identity.secret >"$WORK/carol.secret"
+grep -q "rng=kernel-csprng" "$WORK/carol.secret" || fail "carol's secret on disk isn't tagged rng=kernel-csprng"
+grep -q "$LEGACY_SEED" "$WORK/carol.secret" && fail "carol's legacy seed is still on disk"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/rotation | grep -q "^ed25519-rotate " || fail "no rotation statement on carol's disk"
+echo "  ok  on disk: the legacy seed is gone, the new one is tagged, the rotation statement is kept"
+
 cleanup
 trap - EXIT
 rm -rf "$WORK"

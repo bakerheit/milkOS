@@ -222,7 +222,29 @@ fn cmd_name(new: &str) -> Res<()> {
 
 /// Announce every 10 s and answer queries at once. Keeps /tmp/drop/peers (what it heard).
 fn cmd_daemon(quiet: bool) -> Res<()> {
-    let id = identity()?;
+    let mut id = identity()?;
+    // An identity from the old, weak RNG is replaced at boot: the old key signs the new
+    // one, so peers that trusted it follow (docs/networking.md, "Old keys must be rotated").
+    if ident::legacy_key() {
+        let (old, new) = ident::rotate(&id)?;
+        println!(
+            "drop: {}'s identity came from the old weak RNG: rotated it ({} -> {}, signed by the old key)",
+            new.name,
+            fingerprint(&old),
+            fingerprint(&new.public)
+        );
+        audit(
+            "drop.rotate",
+            &alloc::format!(
+                "name={} old_fp={} new_fp={} key={} reason=legacy-rng",
+                new.name,
+                ident::fp_compact(&old),
+                ident::fp_compact(&new.public),
+                hex(&new.public)
+            ),
+        );
+        id = new;
+    }
     let mut addr = None;
     for _ in 0..100 {
         addr = eth1_addr();
@@ -242,9 +264,6 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     )
     .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
     let _ = sys::mkdir("/tmp/drop", 0o755);
-    if ident::legacy_key() {
-        warn_legacy();
-    }
     if !quiet {
         println!(
             "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}",

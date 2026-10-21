@@ -245,8 +245,10 @@ from virtio-rng, docs/crypto.md), and `identity.secret` records that (`rng=kerne
 
 **Old keys must be rotated.** Identities made before the kernel CSPRNG came from a weak
 generator: a xorshift seeded from the boot counter, stirred with clock jitter. Such a
-secret may be guessable. Their `identity.secret` has no `rng=` tag, and `drop id` and the
-daemon print a warning for them. `drop id --rotate` replaces the key:
+secret may be guessable. Their `identity.secret` has no `rng=` tag. The daemon rotates
+such a key at boot by itself (`drop: carol's identity came from the old weak RNG:
+rotated it ...`, a `user.drop.rotate ... reason=legacy-rng` record), and `drop id` warns
+if one is still there. `drop id --rotate` does the same by hand, any time:
 
 * a new seed from the CSPRNG;
 * the old key signs `milkdrop-rotate-v1 <old> <new>`, kept in `/etc/milk/drop/rotation`
@@ -399,6 +401,9 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
   Before that, alice `drop forget`s bob's unsigned new key;
 * `drop selftest` (the crypto vectors in userland), `rng: kernel CSPRNG` on new keys, and
   the kernel's `[crypto]` / `[rng]` boot lines;
+* a third boot, carol, on an image whose `/etc/milk/drop` holds an old-format secret
+  (a fixed seed with no `rng=` tag): her daemon rotates it at boot. On disk afterwards
+  the old seed is gone, the new one is tagged, and the rotation statement is kept;
 * **the wire**: qemu `-object filter-dump` writes each VM's eth1 traffic to a pcap. The
   plaintext hellos and discovery datagrams must be in it (so the capture works). The canary
   text (half of `to-bob.bin` is a known sentence repeated), the file name and the offer

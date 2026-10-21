@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Page-cache benchmark on real virtio disks: a 4 MiB file on milkfs (/home/milk, private
+# Benchmarks on real virtio disks (private images). Page cache: a 4 MiB file on milkfs (/home/milk, private
 # image) and on FAT32 (scripts/mkfat.sh image), each read twice with the page cache off,
-# then on (/sys/fs/pagecache/bench). Everything in a fresh /tmp directory; the file comes
+# then on (/sys/fs/pagecache/bench). milkfs create/read/delete of 300 x 1000 B,
+# 100 x 20 KB and 4 x 1 MiB files (/sys/fs/milkfs/bench). Everything in a fresh /tmp directory; the file comes
 # in through the Mac shared folder (read-only). Only the qemu started here is killed.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -36,6 +37,9 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:echo /home/milk/big.bin > $B/bench" "wait:$P" \
   "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
   "send:cat $B/stats" "wait:$P" \
+  "send:echo /home/milk/b1 300 1000 > /sys/fs/milkfs/bench" "wait:$P" \
+  "send:echo /home/milk/b2 100 20000 > /sys/fs/milkfs/bench" "wait:$P" \
+  "send:echo /home/milk/b3 4 1048576 > /sys/fs/milkfs/bench" "wait:$P" \
   "send:echo CACHEBENCH""-DONE" "wait:CACHEBENCH-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
@@ -43,4 +47,5 @@ kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 tr -d '\r' < "$LOG" | grep -a "pagecache bench:" | sed 's/^pagecache bench: /  /'
 tr -d '\r' < "$LOG" | grep -a "pages (" | sed 's/^/  stats: /'
+tr -d '\r' < "$LOG" | grep -a "^milkfs bench:" | sed 's/^milkfs bench: /  milkfs create: /'
 [ -e "$T/done" ] || { echo "cachebench: session did not finish"; exit 1; }

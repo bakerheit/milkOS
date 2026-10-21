@@ -329,6 +329,57 @@ pub fn check(repair: bool) -> Result<fsck::CheckReport> {
 
 static LAST_CHECK: SpinLock<String> = SpinLock::new(String::new());
 
+// ---- benchmark ----------------------------------------------------------------------
+
+static LAST_BENCH: SpinLock<String> = SpinLock::new(String::new());
+
+/// Create `n` files of `size` bytes in `dir` (on the primary volume), sync, read them
+/// back, delete them, sync; report the times, commits and blocks the files took.
+pub fn bench_create(dir: &str, n: usize, size: usize) -> Result<String> {
+    use crate::fs::ops;
+    let v = primary()?;
+    let _ = ops::mkdir_all(dir, 0o755);
+    crate::fs::sync_all()?;
+    let data: alloc::vec::Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let stat = |v: &Volume| {
+        let st = v.state.lock();
+        (st.commits, st.store.free_blocks())
+    };
+    let ((c0, f0), t0) = (stat(&v), crate::timer::now_ns());
+    for i in 0..n {
+        ops::write_file(&format!("{dir}/f{i}"), &data)?;
+    }
+    crate::fs::sync_all()?;
+    let ((c1, f1), t1) = (stat(&v), crate::timer::now_ns());
+    crate::fs::pagecache::drop_all();
+    let mut ok = 0;
+    for i in 0..n {
+        if ops::read_file(&format!("{dir}/f{i}")).is_ok_and(|d| d == data) {
+            ok += 1;
+        }
+    }
+    let t2 = crate::timer::now_ns();
+    for i in 0..n {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    let _ = ops::rmdir(dir);
+    crate::fs::sync_all()?;
+    let ((c3, _), t3) = (stat(&v), crate::timer::now_ns());
+    let ms = |a: u64, b: u64| format!("{}.{:01} ms", (b - a) / 1_000_000, (b - a) / 100_000 % 10);
+    let r = format!(
+        "{n} x {size} B: create {} ({} commits, {} blocks), read {} ({ok} ok), delete {} ({} commits)\n",
+        ms(t0, t1),
+        c1 - c0,
+        f0.saturating_sub(f1),
+        ms(t1, t2),
+        ms(t2, t3),
+        c3 - c1
+    );
+    kprintln!("milkfs bench: {}", r.trim_end());
+    *LAST_BENCH.lock() = r.clone();
+    Ok(r)
+}
+
 // ---- clones -------------------------------------------------------------------------
 
 /// Where each clone of the primary volume is mounted: (name, path).
@@ -655,6 +706,20 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         "diff",
         || LAST_DIFF.lock().clone(),
         |b| diff_control(arg(b)?),
+    );
+    dir.add_control(
+        "bench",
+        || LAST_BENCH.lock().clone(),
+        |b| {
+            // `DIR N SIZE`
+            let mut w = arg(b)?.split_whitespace();
+            let (Some(d), Some(n), Some(sz)) = (w.next(), w.next(), w.next()) else {
+                return Err(Errno::EINVAL);
+            };
+            let n = n.parse().map_err(|_| Errno::EINVAL)?;
+            let sz = sz.parse().map_err(|_| Errno::EINVAL)?;
+            bench_create(d, n, sz).map(|_| ())
+        },
     );
     dir.add_control(
         "check",

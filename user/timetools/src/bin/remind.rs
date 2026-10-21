@@ -3,9 +3,11 @@
 //!   remind [list [NAME]]             open reminders, by list (all lists, or one)
 //!   remind lists                     the lists and how many are open
 //!   remind add [--list NAME] [WHEN [HH:MM]] TITLE... [--repeat daily|weekly|monthly|yearly[:N]]
-//!             [--until DATE] [--flag] [--notes TEXT...]
+//!             [--until DATE] [--no-alert] [--notes TEXT...]
+//!   remind add TITLE with the day, time and repeat at the end, e.g. "Call mum tomorrow at 5pm",
+//!             "Water plants every 2 weeks" (the same words as the Reminders window's quick add)
 //!   remind add in 5m TITLE...       (due at the first whole minute 5 minutes from now)
-//!   remind done ID | undone ID | flag ID | rm ID
+//!   remind done ID | undone ID | rm ID
 //!
 //! WHEN is today, tomorrow, +3d, a weekday name or YYYY-MM-DD; without a time a reminder rings at
 //! 09:00. Completing a repeating reminder moves it to its next day. Files: ~/Library/Reminders.
@@ -31,9 +33,10 @@ fn usage() -> i32 {
     println!(
         "       remind add [--list NAME] [WHEN [HH:MM]] TITLE... [--repeat daily|weekly|monthly|yearly[:N]]"
     );
-    println!("                  [--until DATE] [--flag] [--notes TEXT...]");
+    println!("                  [--until DATE] [--no-alert] [--notes TEXT...]");
+    println!("       remind add TITLE [tomorrow] [at 5pm] [every 2 weeks]    (sentence form)");
     println!("       remind add in 5m TITLE...");
-    println!("       remind done ID | undone ID | flag ID | rm ID");
+    println!("       remind done ID | undone ID | rm ID");
     println!("WHEN: today, tomorrow, +3d, a weekday name or YYYY-MM-DD");
     2
 }
@@ -45,9 +48,8 @@ fn show(r: &Reminder, today: timekit::Date) -> String {
         _ => String::from("no date"),
     };
     alloc::format!(
-        "{:>3}  {}{}  {:<16} {}",
+        "{:>3}  {}  {:<16} {}",
         r.id,
-        if r.flagged { '!' } else { ' ' },
         if r.overdue(today) { '*' } else { ' ' },
         when,
         r.title
@@ -81,7 +83,7 @@ fn main(args: &rt::Args) -> i32 {
                 }
             }
             if shown == 0 {
-                println!("nothing to do (* = overdue, ! = flagged)");
+                println!("nothing to do (* = overdue)");
             }
             return 0;
         }
@@ -97,7 +99,7 @@ fn main(args: &rt::Args) -> i32 {
             return 0;
         }
         "add" => return add(args, &paths, &mut set, today),
-        sub @ ("done" | "undone" | "flag" | "rm") => {
+        sub @ ("done" | "undone" | "rm") => {
             let Some(id) = id_arg() else {
                 return usage();
             };
@@ -111,8 +113,7 @@ fn main(args: &rt::Args) -> i32 {
                                 println!("next due {}", r.due.map_or(String::new(), |d| d.fmt()));
                             }
                         }
-                        "undone" => r.reopen(),
-                        _ => r.flagged = !r.flagged,
+                        _ => r.reopen(),
                     }
                     true
                 }),
@@ -174,11 +175,20 @@ fn add(args: &rt::Args, paths: &timeio::Paths, set: &mut ReminderSet, today: tim
         println!("remind: the reminder needs a title");
         return usage();
     }
+    if r.due.is_none() {
+        // The sentence form: the day, time and repeat at the end of the title.
+        let q = timekit::quickadd::parse(&r.title, today);
+        r.title = q.title;
+        r.due = q.due;
+        r.time = q.time;
+        r.repeat = q.repeat;
+        r.every = q.every;
+    }
     while let Some(flag) = args.get(i) {
         i += 1;
         match (flag, args.get(i)) {
-            ("--flag", _) => {
-                r.flagged = true;
+            ("--no-alert", _) => {
+                r.alert = false;
                 continue;
             }
             ("--repeat", Some(v)) => {

@@ -46,7 +46,7 @@ LOGF=/home/milk/.cache/milk/alarmd.log
 boot b1 "ps | grep alarmd" \
   "alarm add 03:15 weekdays pills" "alarm add in 5s ring-test" "timer 6s tea-test" \
   "cal add in 5s standup-test --alert 0" "cal add tomorrow 12:00 lunch-test --repeat weekly" \
-  "remind add in 5s call-the-plumber" "remind add tomorrow stretch --repeat weekly" "remind add undated-thing" \
+  "remind add in 5s call-the-plumber" "remind add tomorrow stretch --repeat weekly" "remind add undated-thing" "remind add Pick up parcel friday at 5pm" \
   "alarm list" "timer list" "cal list 3" "cal" "remind list" \
   "sleep 30" "sleep 30" "sleep 20" \
   "cat $LOGF" "alarm list" "timer list" "cal list 3" "remind done 2" "remind done 3" "remind list" \
@@ -58,7 +58,7 @@ out "$L" "cat $LOGF" | sed 's/^/    log: /'
 out "$L" "cat $LOGF" | grep -q "timer: Timer done / tea-test" && ok "the timer rang" || bad "no timer ring in the log"
 out "$L" "cat $LOGF" | grep -q "alarm: Alarm / ring-test" && ok "the alarm rang" || bad "no alarm ring in the log"
 out "$L" "cat $LOGF" | grep -q "event: standup-test / Today " && ok "the calendar alert rang" || bad "no event alert in the log"
-out "$L" "cat $LOGF" | grep -q "reminder: call-the-plumber / Reminders" && ok "the reminder rang" || bad "no reminder ring in the log"
+out "$L" "cat $LOGF" | grep -q "reminder: call-the-plumber / Personal" && ok "the reminder rang" || bad "no reminder ring in the log"
 out "$L" "remind done 2" | grep -q "next due" && ok "completing a repeating reminder moves it on" || bad "repeating reminder did not move on: $(out "$L" "remind done 2")"
 [ "$(out "$L" "cat $LOGF" | grep -c "pills\|lunch-test\|stretch\|undated")" = 0 ] && ok "the weekday alarm and tomorrow's event did not ring" || bad "something rang that should not have"
 # The second "alarm list" / "timer list" is the one typed after the sleeps.

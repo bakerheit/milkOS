@@ -397,6 +397,16 @@ impl CalendarSet {
             }
             set.cals.push(c);
         }
+        // The three default calendars first, in their usual order, then the rest by name.
+        set.cals.sort_by_key(|c| {
+            let rank = match c.name.as_str() {
+                "Personal" => 0,
+                "Home" => 1,
+                "Work" => 2,
+                _ => 3,
+            };
+            (rank, c.name.clone())
+        });
         (set, skipped)
     }
 

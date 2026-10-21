@@ -1100,21 +1100,18 @@ impl Desktop {
             self.dims = dims;
             self.damage_all();
         }
-        let vis: Vec<Rect> = self
-            .windows
-            .iter()
-            .filter(|w| self.visible(w))
-            .map(|w| w.rect)
-            .collect();
         let mut live: Vec<PanelKey> = Vec::new();
         for l in layers {
             let Layer::Panel(spec) = l else {
                 continue;
             };
             live.push(spec.key);
-            let solid = spec.style != Style::Opaque
-                && spec.style != Style::Bar
-                && vis.iter().any(|w| w.intersects(&spec.rect));
+            // SPEC Glass: live blur over windows isn't supported, so a glass panel is always
+            // composited over Wb (the blurred wallpaper) and drawn opaque: a window under the
+            // notification centre, control centre, a menu, a toast or Skim never shows
+            // through. (`solid`, plain milk blended over the windows, let their text read
+            // through at 8%.)
+            let solid = false;
             let ok = self
                 .cache
                 .get(&spec.key)
@@ -1265,9 +1262,8 @@ impl Desktop {
                     if spec.shadow {
                         p.shadow(spec.rect, spec.radius, &SHADOW_FLOAT);
                     }
-                    let a = if c.solid { GLASS_SOLID_A } else { 255 };
                     let r = spec.rect;
-                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, a);
+                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, 255);
                 }
             }
         }

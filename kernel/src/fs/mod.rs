@@ -15,6 +15,7 @@ pub mod abi;
 pub mod clock;
 pub mod errno;
 pub mod file;
+pub mod initramfs;
 pub mod node;
 pub mod ops;
 pub mod path;
@@ -55,4 +56,5 @@ pub fn init() {
     // macOS spelling of the home directory parent.
     symlink("home", "/Users").expect("fs: /Users symlink");
     kprintln!("fs: tmpfs mounted at /");
+    initramfs::load();
 }

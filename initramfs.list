@@ -1,0 +1,5 @@
+# Extra files packed into the initramfs, on top of everything in rootfs/.
+# One per line:   <path in the image>   <host path, relative to the repo root>   [octal mode]
+# Example:        /bin/init             target/user/init                         755
+# A missing host file is skipped with a cargo warning, so the kernel still builds
+# before the user programs do. See docs/filesystem.md.

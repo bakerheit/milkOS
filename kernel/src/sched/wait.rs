@@ -51,6 +51,38 @@ impl WaitQueue {
         sync::irq_restore(flags);
     }
 
+    /// [`wait_until`](Self::wait_until) with a timeout: returns true if `cond()` became
+    /// true, false if `timeout_ns` passed first. Wakeups can be spurious; `cond` decides.
+    pub fn wait_until_timeout(&self, mut cond: impl FnMut() -> bool, timeout_ns: u64) -> bool {
+        let deadline = crate::timer::now_ns().saturating_add(timeout_ns);
+        let flags = sync::irq_save();
+        let ok = loop {
+            if cond() {
+                break true;
+            }
+            if crate::timer::now_ns() >= deadline {
+                break false;
+            }
+            if !super::started() {
+                sync::irq_restore(flags);
+                // SAFETY: wait for an interrupt.
+                unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+                sync::irq_disable();
+                continue;
+            }
+            let me = super::current_tid();
+            {
+                let mut q = self.q.lock();
+                if !q.contains(&me) {
+                    q.push_back(me);
+                }
+            }
+            super::block_current_until(deadline);
+        };
+        sync::irq_restore(flags);
+        ok
+    }
+
     /// Wake the longest waiter. Returns false if nobody was waiting. IRQ-safe.
     pub fn wake_one(&self) -> bool {
         loop {

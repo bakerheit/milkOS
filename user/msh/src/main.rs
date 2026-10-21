@@ -225,7 +225,7 @@ fn ls(dir: &str) {
                 };
                 let item = format!("{name}{suffix}");
                 if line.len() + item.len() + 2 > 78 {
-                    println!("{line}");
+                    println!("{}", line.trim_end());
                     line.clear();
                 }
                 line += &format!("{item:<16}");

@@ -199,6 +199,7 @@ impl Sched {
             return;
         };
         t.state = State::Ready;
+        t.wake_at = 0;
         let prio = t.prio;
         self.ready[prio as usize].push_back(tid);
         if cur_is_idle || prio > cur_prio {
@@ -229,7 +230,12 @@ impl Sched {
         while i < self.sleeping.len() {
             let tid = self.sleeping[i];
             let due = match self.threads.get(&tid) {
-                Some(t) if t.state == State::Sleeping => t.wake_at <= now,
+                Some(t)
+                    if t.state == State::Sleeping
+                        || (t.state == State::Blocked && t.wake_at != 0) =>
+                {
+                    t.wake_at <= now
+                }
                 _ => {
                     self.sleeping.swap_remove(i);
                     continue;
@@ -248,7 +254,7 @@ impl Sched {
         self.sleeping
             .iter()
             .filter_map(|t| self.threads.get(t))
-            .filter(|t| t.state == State::Sleeping)
+            .filter(|t| t.state == State::Sleeping || (t.state == State::Blocked && t.wake_at != 0))
             .map(|t| t.wake_at)
             .min()
     }
@@ -606,6 +612,23 @@ pub fn need_resched() -> bool {
 pub(crate) fn block_current() {
     debug_assert!(!sync::irqs_enabled());
     with(|s| s.cur().state = State::Blocked);
+    schedule();
+}
+
+/// Like [`block_current`], but also wake up at `deadline_ns` (now_ns time) if nobody
+/// calls [`wake`] first. The caller re-checks its condition either way.
+pub(crate) fn block_current_until(deadline_ns: u64) {
+    debug_assert!(!sync::irqs_enabled());
+    with(|s| {
+        let me = s.current;
+        let t = s.cur();
+        t.state = State::Blocked;
+        t.wake_at = deadline_ns.max(1);
+        if !s.sleeping.contains(&me) {
+            s.sleeping.push(me);
+        }
+        arm_deadline(s);
+    });
     schedule();
 }
 

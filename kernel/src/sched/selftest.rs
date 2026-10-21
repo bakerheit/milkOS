@@ -16,6 +16,7 @@ pub fn run() {
     semaphore();
     preemption();
     churn();
+    timeout();
     #[cfg(feature = "kstack-overflow-test")]
     overflow();
     kprintln!("[sched-test] PASS");
@@ -193,6 +194,35 @@ fn preemption() {
         s2
     );
     assert!(s1 > 0 && s2 > 0, "busy threads were not preempted");
+}
+
+/// wait_until_timeout: times out when nobody wakes us, returns early when someone does.
+fn timeout() {
+    let wq = Arc::new(super::WaitQueue::new());
+    let t0 = timer::now_ns();
+    let r = wq.wait_until_timeout(|| false, 20_000_000);
+    let waited = (timer::now_ns() - t0) / 1000;
+    assert!(
+        !r && waited >= 20_000,
+        "timed wait returned after {waited} us"
+    );
+    let flag = Arc::new(AtomicBool::new(false));
+    let h = {
+        let (wq, flag) = (wq.clone(), flag.clone());
+        spawn("waker", move || {
+            super::sleep_ms(5);
+            flag.store(true, Ordering::Relaxed);
+            wq.wake_all();
+        })
+    };
+    let t1 = timer::now_ns();
+    let r2 = wq.wait_until_timeout(|| flag.load(Ordering::Relaxed), 1_000_000_000);
+    let early = (timer::now_ns() - t1) / 1000;
+    h.join();
+    kprintln!(
+        "[sched-test] timed wait: timed out after {waited} us (20 ms), woken after {early} us (of 1 s)"
+    );
+    assert!(r2 && early < 500_000, "timed wait missed its wakeup");
 }
 
 /// Spawn and join many threads; stacks and page tables must come back.

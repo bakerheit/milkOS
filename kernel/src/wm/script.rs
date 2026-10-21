@@ -1236,6 +1236,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         // Minimise into the dock with the genie (slow-dock-genie catches it mid-flight;
         // dock-genie-restore brings it back out from its dock icon).
+        // slow-dock-genie-<pct>: the minimise caught at about <pct>% of the way (slow- only:
+        // the genie then lasts 7.6 s), for looking at the squeezed window frame by frame.
+        n if n
+            .strip_prefix("dock-genie-")
+            .and_then(|p| p.parse::<u32>().ok())
+            .is_some() =>
+        {
+            let pct: u64 = n["dock-genie-".len()..].parse().unwrap_or(50);
+            b.wait(300);
+            b.click(TERM_MIN.0, TERM_MIN.1);
+            b.wait(7600 * pct / 100);
+        }
         "dock-genie" | "dock-genie-restore" => {
             b.wait(300);
             b.click(TERM_MIN.0, TERM_MIN.1);

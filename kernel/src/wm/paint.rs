@@ -13,6 +13,7 @@
 
 use alloc::boxed::Box;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::font::{self, GLYPH_H, GLYPH_W};
 use crate::gfx::{Color, DrawTarget, Rect, blend};
@@ -516,6 +517,181 @@ impl<'a> Painter<'a> {
             let q = srow[sx as usize];
             let p = &mut self.px[base + bx as usize];
             *p = if alpha == 255 { q } else { blend(*p, q, alpha) };
+        }
+    }
+
+    /// One row of a squeezed window (the genie), filtered so nothing is dropped: source rows
+    /// `sy0..sy1` (16.16, fractional) are averaged (a box over the rows they cover; under one
+    /// row, the two nearest rows blended), then the averaged row is resampled across logical
+    /// `x0..x1` (1/256 px, fractional, at the row's centre) with a box filter. The ends are
+    /// anti-aliased: `slope` is how far (1/256 px) the left and right edges move across this
+    /// one row, and each end ramps over that width (at least a pixel), so a shallow edge fades
+    /// over the pixels it crosses instead of stepping. The window's rounded corners (`radius`)
+    /// count as empty. `acc` is scratch (one entry per source column).
+    pub fn blit_span_filtered(
+        &mut self,
+        y: i32,
+        x0: i64,
+        x1: i64,
+        src: &Buffer,
+        sy0: i64,
+        sy1: i64,
+        slope: (i64, i64),
+        radius: i32,
+        alpha: u8,
+        acc: &mut Vec<[u32; 4]>,
+    ) {
+        if x1 <= x0 {
+            return;
+        }
+        let (wl, wr) = (slope.0.abs().max(256), slope.1.abs().max(256));
+        let (px0, px1) = (
+            ((x0 - wl / 2) >> 8) as i32,
+            ((x1 + wr / 2 + 255) >> 8) as i32,
+        );
+        let Some(b) = self.buf_rect(px0, y, px1 - px0, 1) else {
+            return;
+        };
+        let (sw, sh) = (src.w() as usize, src.h());
+        // Close to 1:1 both ways: the plain nearest span is exact enough (and cheaper).
+        let wide = x1 - x0;
+        let rows = sy1 - sy0;
+        if (wide - sw as i64 * 256).abs() * 100 < sw as i64 * 256
+            && (rows - 65536).abs() * 100 < 65536
+            && wl == 256
+            && wr == 256
+        {
+            let (a, z) = (((x0 + 128) >> 8) as i32, ((x1 + 128) >> 8) as i32);
+            return self.blit_span(y, a, z, src, (sy0 >> 16) as i32, radius, alpha);
+        }
+        // How far in from each side the rounded corner cuts at source row `r`.
+        let cut = |r: i32| -> usize {
+            let inset = |d: i32| -> i32 {
+                if d >= radius {
+                    return 0;
+                }
+                let dy = radius - d;
+                let mut i = 0;
+                while i < radius && (radius - i) * (radius - i) + dy * dy > radius * radius {
+                    i += 1;
+                }
+                i
+            };
+            inset(r).max(inset(sh - 1 - r)) as usize
+        };
+        // 1. Vertical: weights (1/256) of the source rows this output row covers.
+        acc.clear();
+        acc.resize(sw, [0; 4]);
+        let add_row = |r: i32, wr: u32, acc: &mut Vec<[u32; 4]>| {
+            if wr == 0 || r < 0 || r >= sh {
+                return;
+            }
+            let row = src.row(r as usize);
+            let c = cut(r);
+            for (x, q) in row.iter().enumerate().take(sw - c).skip(c) {
+                let e = &mut acc[x];
+                e[0] += (q >> 16 & 0xff) * wr;
+                e[1] += (q >> 8 & 0xff) * wr;
+                e[2] += (q & 0xff) * wr;
+                e[3] += wr;
+            }
+        };
+        let total_w: u32 = if rows < 65536 {
+            // Under a row: the two nearest rows, blended by where the centre falls.
+            let c = (sy0 + sy1) / 2 - 32768;
+            let (r0, f) = ((c >> 16) as i32, ((c & 0xffff) >> 8) as u32);
+            add_row(r0.max(0), 256 - f, acc);
+            add_row((r0 + 1).min(sh - 1), f, acc);
+            256
+        } else {
+            let mut t = 0;
+            let mut r = (sy0 >> 16) as i32;
+            while ((r as i64) << 16) < sy1 && r < sh {
+                let a = sy0.max((r as i64) << 16);
+                let z = sy1.min(((r + 1) as i64) << 16);
+                let wr = ((z - a) >> 8) as u32;
+                add_row(r, wr, acc);
+                t += wr;
+                r += 1;
+            }
+            t.max(1)
+        };
+        // 2. Horizontal: each output pixel averages the source columns under it. All the
+        // per-pixel maths is multiplies (one reciprocal per pixel); the ramps only run at the
+        // two ends.
+        let dx0 = x0 + ((self.ox as i64) << 8);
+        let dx1 = dx0 + wide;
+        let base = b.y as usize * self.stride;
+        let swf = sw as i64 * 256; // source width, 1/256 px
+        // Source 1/256 px per output 1/256 px, 16.16.
+        let scale = (swf << 16) / wide;
+        // Within 2% of 1:1 across: one source column per pixel (nearest) is exact enough.
+        let near = (scale - 65536).abs() < 65536 / 50;
+        let (lin, rin) = (dx0 + wl / 2, dx1 - wr / 2);
+        for bx in b.x..b.x + b.w {
+            let (p0, p1) = ((bx as i64) << 8, ((bx + 1) as i64) << 8);
+            // Edge ramps (0..256) at the pixel's centre.
+            let c = p0 + 128;
+            let lf = if c >= lin {
+                256
+            } else {
+                ((c - (dx0 - wl / 2)) * 256 / wl).clamp(0, 256)
+            };
+            let rf = if c <= rin {
+                256
+            } else {
+                ((dx1 + wr / 2 - c) * 256 / wr).clamp(0, 256)
+            };
+            let cov = (lf * rf) as u64 >> 8;
+            if cov == 0 {
+                continue;
+            }
+            // What the pixel shows: the span under it (clamped to the span at the ends).
+            let a = p0.clamp(dx0, dx1 - 1);
+            let z = p1.clamp(a + 1, dx1);
+            // The source range under [a, z), 1/256 source px.
+            let s0 = ((a - dx0) * scale) >> 16;
+            let s1 = (((z - dx0) * scale) >> 16).max(s0 + 1);
+            let (r, g, bl, w, cw) = if near {
+                let e = acc[(((s0 + s1) >> 9) as usize).min(sw - 1)];
+                (e[0] as u64, e[1] as u64, e[2] as u64, e[3] as u64, 1u64)
+            } else {
+                let (mut r, mut g, mut bl, mut w, mut cw) = (0u64, 0u64, 0u64, 0u64, 0u64);
+                let mut c = (s0 >> 8) as usize;
+                while ((c as i64) << 8) < s1 && c < sw {
+                    let ca = s0.max((c as i64) << 8);
+                    let cz = s1.min(((c + 1) as i64) << 8);
+                    let wc = (cz - ca) as u64;
+                    let e = acc[c];
+                    r += e[0] as u64 * wc;
+                    g += e[1] as u64 * wc;
+                    bl += e[2] as u64 * wc;
+                    w += e[3] as u64 * wc;
+                    cw += wc;
+                    c += 1;
+                }
+                (r, g, bl, w, cw)
+            };
+            if w == 0 {
+                continue;
+            }
+            let inv = (1u64 << 40).div_ceil(w);
+            let ch = |v: u64| ((v * inv) >> 40).min(255) as u32;
+            let q = ch(r) << 16 | ch(g) << 8 | ch(bl);
+            // Coverage: the span's share of the pixel x how much of it was window (not a
+            // rounded corner), x the fade.
+            let full = cw * total_w as u64;
+            let k = if w >= full {
+                (cov * alpha as u64) >> 8
+            } else {
+                cov * w * alpha as u64 / (256 * full)
+            }
+            .min(255) as u8;
+            if k == 0 {
+                continue;
+            }
+            let p = &mut self.px[base + bx as usize];
+            *p = if k == 255 { q } else { blend(*p, q, k) };
         }
     }
 

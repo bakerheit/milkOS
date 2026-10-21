@@ -177,7 +177,7 @@ Implemented (number: name):
 | signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
-| sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown (`proc/sock.rs`, see docs/networking.md) |
+| sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
 | milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
 

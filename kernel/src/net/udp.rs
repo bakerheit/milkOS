@@ -119,7 +119,7 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8], ip_pkt: &[u8]) {
     let from = SockAddr::new(src, sport);
     let mut target = None;
     for (i, s) in st.socks.iter() {
-        if s.ty != SockType::Dgram || !s.owns_port || s.local.port != dport {
+        if s.ty != SockType::Dgram || s.icmp || !s.owns_port || s.local.port != dport {
             continue;
         }
         if !s.local.ip.is_unspecified() && s.local.ip != dst && !dst.is_broadcast() {
@@ -141,17 +141,25 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8], ip_pkt: &[u8]) {
         return;
     };
     st.stats.udp_in_datagrams += 1;
+    if !queue(st, i, from, data) {
+        st.stats.udp_rcvbuf_errors += 1;
+    }
+}
+
+/// Queue one datagram record for socket slot `i` (UDP, or ICMP ping sockets). False if it
+/// did not fit (dropped).
+pub fn queue(st: &mut Stack, i: usize, from: SockAddr, data: &[u8]) -> bool {
     let s = st.socks.get(i).unwrap();
     if s.shut_rd || s.rx.free() < REC_HDR + data.len() {
         s.rx_drops += 1;
-        st.stats.udp_rcvbuf_errors += 1;
-        return;
+        return false;
     }
     let mut h = [0u8; REC_HDR];
     put16(&mut h, 0, data.len() as u16);
-    h[2..6].copy_from_slice(&src.0);
-    put16(&mut h, 6, sport);
+    h[2..6].copy_from_slice(&from.ip.0);
+    put16(&mut h, 6, from.port);
     s.rx.push(&h);
     s.rx.push(data);
     st.wake(i);
+    true
 }

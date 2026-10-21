@@ -14,7 +14,7 @@ virtio-net) plus loopback (`lo`).
 | `scripts/run.sh` / `screenshot.sh` | `-netdev user,id=n0,restrict=on` + `virtio-net-device` (`scripts/netdev.sh`). The guest gets 10.0.2.15 by DHCP and can ping 10.0.2.2; slirp lets it reach nothing else (no host, no internet; it also hands out no router/DNS in this mode). |
 | `MILK_HTTP_PORT=8088 scripts/run.sh` | also forwards `127.0.0.1:8088` on the Mac to the guest's port 80: `curl http://127.0.0.1:8088/`. Opt-in so parallel qemus don't fight over the port. |
 | `scripts/net-test.sh` | the full end-to-end test (below). Unrestricted slirp, but every host-side helper binds to 127.0.0.1 and the guest is only told about 10.0.2.2 (= the Mac's loopback). |
-| in msh | `fetch http://127.0.0.1/` (the guest's own server), `fetch 10.0.2.2:PORT/path` (a server on the Mac's 127.0.0.1, only reachable without `restrict=on`), `cat /proc/net/tcp` |
+| in msh | `ifconfig`, `netstat [-t] [-u] [-l] [-s]`, `ping [-c N] [-i MS] 10.0.2.2`, `fetch http://127.0.0.1/`, `nc HOST PORT` / `nc -l PORT`, `cat /proc/net/tcp`. Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
 
 Network safety rule for tests: only qemu's own gateway/DHCP (10.0.2.2) and servers we start
 on the Mac at 127.0.0.1 (seen from the guest as 10.0.2.2:PORT). No internet hosts, no real
@@ -98,6 +98,7 @@ use crate::net::socket::{self, SockType, SocketId, Shutdown, POLLIN, POLLOUT};
 use crate::net::wire::{Ipv4, SockAddr};
 
 pub fn socket(ty: SockType) -> Result<SocketId>                 // Stream (TCP) | Dgram (UDP); ENOBUFS when 32 are in use
+pub fn socket_icmp() -> Result<SocketId>                        // ping socket (Dgram, ICMP echo; see the ping row below)
 pub fn bind(s: SocketId, addr: SockAddr) -> Result<()>          // port 0 = ephemeral (49152..); EADDRINUSE, EADDRNOTAVAIL, EINVAL (bound)
 pub fn listen(s: SocketId, backlog: usize) -> Result<()>        // TCP; backlog clamped to 1..=16; autobinds
 pub fn accept(s: SocketId) -> Result<(SocketId, SockAddr)>      // EAGAIN if none ready; EINVAL if not listening
@@ -158,31 +159,48 @@ work on them (the last close closes the socket).
 
 | nr | call | notes |
 |---|---|---|
-| 198 | socket | `AF_INET` only (`EAFNOSUPPORT`); `SOCK_STREAM`/`SOCK_DGRAM` + `SOCK_NONBLOCK`/`SOCK_CLOEXEC`; protocol 0/6/17 |
+| 198 | socket | `AF_INET` only (`EAFNOSUPPORT`); `SOCK_STREAM`/`SOCK_DGRAM` + `SOCK_NONBLOCK`/`SOCK_CLOEXEC`; protocol 0/6/17, or `SOCK_DGRAM` + 1 (`IPPROTO_ICMP`) for a ping socket |
 | 200 | bind | `struct sockaddr_in` (16 bytes) |
 | 201 | listen | |
 | 202 / 242 | accept / accept4 | blocks unless non-blocking; accept4 flags `SOCK_NONBLOCK`/`SOCK_CLOEXEC` |
 | 203 | connect | blocks until connected or failed unless non-blocking (`EINPROGRESS`) |
 | 204 / 205 | getsockname / getpeername | |
 | 206 / 207 | sendto / recvfrom | `MSG_DONTWAIT`; blocking send queues everything before returning |
-| 208 / 209 | setsockopt / getsockopt | set: SO_REUSEADDR, SO_KEEPALIVE, SO_SNDBUF, SO_RCVBUF, SO_REUSEPORT, TCP_NODELAY accepted and ignored; get: SO_ERROR, SO_TYPE; else `ENOPROTOOPT` |
+| 208 / 209 | setsockopt / getsockopt | set: SO_RCVTIMEO (recv/recvfrom/read/accept give EAGAIN after it); SO_REUSEADDR, SO_KEEPALIVE, SO_SNDBUF, SO_RCVBUF, SO_REUSEPORT, SO_SNDTIMEO, TCP_NODELAY accepted and ignored; get: SO_ERROR, SO_TYPE; else `ENOPROTOOPT` |
 | 210 | shutdown | |
+| 73 | ppoll | any fd: sockets report real readiness, the console is readable once a line (or ^D) is typed, other files are always ready (`Inode::poll`, default POLLIN\|POLLOUT). Sleeps on the stack's readiness queue, re-checking non-socket fds every 20 ms. The sigmask is ignored. |
 
-Not yet: `poll`/`ppoll`/`select`/`epoll`, `sendmsg`/`recvmsg`, `socketpair`, `MSG_PEEK`,
-`SO_RCVTIMEO`, `AF_UNIX`, signals interrupting a blocking call (there are no signals yet).
+Not yet: `select`/`epoll`, `sendmsg`/`recvmsg`, `socketpair`, `MSG_PEEK`, `AF_UNIX`, signals interrupting a blocking call (there are no signals yet).
 `read`/`write` on a socket honour `O_NONBLOCK` as of the last socket syscall on that fd
 (`OpenFile` does not pass its flags to the inode; the socket syscalls re-sync them).
 
 ## /proc/net
 
 `dev` (lo, eth0 counters), `arp`, `route` (Linux hex format), `tcp` (Linux columns, plus a
-`# STATE rexmit N rto Nms` comment per line), `udp`, `snmp` (Ip/Icmp/Tcp/Udp counters).
+`# STATE rexmit N rto Nms` comment per line), `udp`, `snmp` (Ip/Icmp/Tcp/Udp counters),
+and milkOS's `ifaddr` (`eth0 flags=UP,BROADCAST,RUNNING mtu=1500 ether=.. inet=..
+netmask=.. broadcast=.. gateway=.. dns=.. dhcp=Bound`).
 
-## In-kernel HTTP server (demo)
+## Userland tools (`user/`)
 
-`net/services.rs`, on the net thread, port 80, using only the socket API: `/` (HTML with
-the interface config), `/net` (all of /proc/net), `/big` (1 MiB of numbered 32-byte lines),
-404 otherwise. HTTP/1.0, `Connection: close`, 8 connections at a time.
+| program | what | how |
+|---|---|---|
+| `ifconfig [IFACE]` | addresses, MAC, gateway/DNS/DHCP state, counters | `/proc/net/ifaddr` (milkOS, `key=value` per interface) + `/proc/net/dev` |
+| `netstat [-t] [-u] [-l] [-s]` | sockets, or protocol counters | `/proc/net/{tcp,udp,snmp}` |
+| `ping [-c N] [-i MS] [-s SIZE] [-W MS] ADDR` | ICMP echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged). `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
+| `nc [-u] HOST PORT`, `nc -l [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP) |
+| `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www) |
+| `fetch [-i] URL` | HTTP GET | |
+
+Addresses are numeric (or `localhost`): there is no resolver for user programs yet.
+
+## In-kernel HTTP server (demo, off by default)
+
+`net/services.rs`, on the net thread, using only the socket API: `/` (HTML with the
+interface config), `/net` (all of /proc/net), `/big` (1 MiB of numbered 32-byte lines), 404
+otherwise. HTTP/1.0, `Connection: close`, 8 connections at a time. Off unless
+`net::services::enable(port)` is called; the self-test does that with `khttpd=PORT` in its
+fw_cfg config (net-test.sh uses 8080, for the `/big` window/retransmission checks).
 
 ## Tests
 
@@ -197,15 +215,18 @@ the Mac's test DNS server, a refused host port. It then prints /proc/net.
 
 **`scripts/net-test.sh`**: starts `scripts/net_test_servers.py` (TCP echo, test DNS, HTTP,
 all on 127.0.0.1, from a mktemp dir), boots with
-`hostfwd=tcp:127.0.0.1:8088-:80`, checks the self-test, types three `fetch` commands into
-msh over the serial console (`scripts/serial_drive.py`), then from the Mac: `curl /`,
-`curl /big` (content verified), 4 parallel `/big`, `/net`, a 404. Kills only the qemu and
+hostfwds for guest :80 (userland httpd), :8080 (kernel httpd) and :7777 (nc -l), checks
+the self-test, types `ifconfig`, `ping`, three `fetch`es, `nc` to the host echo server (then
+^D), `nc -l 7777` (the Mac connects and sends a line) and `netstat` into msh over the serial
+console (`scripts/serial_drive.py`), then from the Mac: the userland httpd (`/`, a file, a
+listing, 404, 403 for `..`, 301) and the kernel httpd (`/big` content verified, 4 parallel
+`/big`, `/net`, 404). Kills only the qemu and
 python processes it started, by PID.
 
 ## Next
 
-* `ppoll`/`epoll` on sockets (`net::set_wake_hook` / `READY_WQ` are the hooks), `MSG_PEEK`,
-  timeouts (`SO_RCVTIMEO`), `sendmsg`/`recvmsg`.
+* `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
+  `MSG_PEEK`, `sendmsg`/`recvmsg`.
 * A resolver for user programs (an `/etc/hosts` + the same `.test` policy, or a syscall).
 * Per-socket buffer sizes instead of the fixed 16 KiB pool; window scaling then.
 * Delayed ACKs and Nagle (fewer packets), SACK, IP fragment reassembly, keepalive.

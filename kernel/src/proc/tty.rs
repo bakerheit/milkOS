@@ -221,6 +221,12 @@ impl Tty {
         }
     }
 
+    /// For poll(2): would `read` return now (a line, any input in raw mode, or ^D)?
+    pub fn readable(&self) -> bool {
+        let st = self.st.lock();
+        !st.ready.is_empty() || st.eof
+    }
+
     pub fn write(&self, buf: &[u8]) -> KResult<usize> {
         (self.output)(buf);
         Ok(buf.len())

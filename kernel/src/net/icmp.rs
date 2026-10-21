@@ -3,7 +3,7 @@
 
 use super::Stack;
 use super::iface::PROTO_ICMP;
-use super::wire::{Ipv4, be16, checksum, put16};
+use super::wire::{Ipv4, SockAddr, be16, checksum, put16};
 use crate::fs::errno::Result;
 use crate::timer;
 
@@ -81,7 +81,18 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, msg: &[u8], ip_pkt: &[u8]) {
         }
         ECHO_REPLY => {
             st.stats.icmp_in_echo_reps += 1;
-            if be16(msg, 4) != PING_ID {
+            let id = be16(msg, 4);
+            if id != PING_ID {
+                // A ping socket's reply?
+                let target = st.socks.iter().find(|(_, s)| {
+                    s.icmp
+                        && s.owns_port
+                        && s.local.port == id
+                        && (!s.udp_connected || s.remote.ip == src)
+                });
+                if let Some((i, _)) = target {
+                    super::udp::queue(st, i, SockAddr::new(src, 0), msg);
+                }
                 return;
             }
             let seq = be16(msg, 6);
@@ -124,6 +135,38 @@ pub fn send_ping(st: &mut Stack, dst: Ipv4, seq: u16) -> Result<()> {
         put16(b, 2, c);
         n
     })
+}
+
+/// sendto on a ping socket (slot `i`): `msg` is an ICMP echo request; we set the
+/// identifier (the socket's local "port", bound on first use) and the checksum.
+pub fn sendto(st: &mut Stack, i: usize, msg: &[u8], to: SockAddr) -> Result<usize> {
+    use super::errno::*;
+    if msg.len() < 8 || msg[0] != ECHO_REQUEST || msg[1] != 0 {
+        return Err(EINVAL);
+    }
+    if msg.len() > super::udp::MAX_PAYLOAD + 8 {
+        return Err(EMSGSIZE);
+    }
+    let s = st.socks.get(i).ok_or(EBADF)?;
+    if !s.owns_port {
+        let p = st.socks.ephemeral(super::socket::SockType::Dgram)?;
+        let s = st.socks.get(i).unwrap();
+        s.local.port = p;
+        s.owns_port = true;
+    }
+    let s = st.socks.get(i).unwrap();
+    let (src, id) = (s.local.ip, s.local.port);
+    st.stats.icmp_out_msgs += 1;
+    st.stats.icmp_out_echos += 1;
+    st.send_ip(src, to.ip, PROTO_ICMP, |b| {
+        b[..msg.len()].copy_from_slice(msg);
+        put16(b, 4, id);
+        put16(b, 2, 0);
+        let c = checksum(&b[..msg.len()]);
+        put16(b, 2, c);
+        msg.len()
+    })?;
+    Ok(msg.len())
 }
 
 /// Destination unreachable (`code` 2 = protocol, 3 = port) about `orig` (an IP packet we

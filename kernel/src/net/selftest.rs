@@ -5,7 +5,7 @@
 //! connection refused, an HTTP GET to our own server on :80, the DNS policy checks.
 //!
 //! With a test config passed by `scripts/net-test.sh` as fw_cfg file `opt/milkos/nettest`
-//! (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT`): a TCP echo round trip
+//! (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT khttpd=PORT`): a TCP echo round trip
 //! against the host's echo server, a DNS lookup against the host's test DNS server, and a
 //! refused connection to a host port nobody listens on. Only addresses from that config are
 //! contacted (in practice the Mac's loopback, seen as 10.0.2.2).
@@ -30,6 +30,7 @@ struct Config {
     name: Option<String>,
     expect: Option<Ipv4>,
     refused: Option<SockAddr>,
+    khttpd: Option<u16>,
 }
 
 fn parse_addr(s: &str) -> Option<SockAddr> {
@@ -57,6 +58,7 @@ fn read_config() -> Config {
             Some(("name", v)) => c.name = Some(String::from(v)),
             Some(("expect", v)) => c.expect = Ipv4::parse(v),
             Some(("refused", v)) => c.refused = parse_addr(v),
+            Some(("khttpd", v)) => c.khttpd = v.parse().ok(),
             _ => {}
         }
     }
@@ -453,18 +455,27 @@ pub fn run() {
             Err(x) => Err(alloc::format!("got {}", e(x))),
         },
     );
-    check(
-        "http self",
-        http_get(SockAddr::new(Ipv4::LOCALHOST, 80), "/").and_then(|b| {
-            let t = String::from_utf8_lossy(&b);
-            if t.starts_with("HTTP/1.0 200 OK") && t.contains("Hello from milkOS") {
-                kprintln!("[net] http GET 127.0.0.1:80/: 200 OK, {} bytes", b.len());
-                Ok(())
-            } else {
-                Err(alloc::format!("bad reply: {:?}", t.lines().next()))
-            }
-        }),
-    );
+    // The kernel HTTP server only when asked (net-test.sh), else userland httpd owns :80.
+    if let Some(port) = cfg.khttpd {
+        check(
+            "kernel httpd",
+            services::enable(port)
+                .map_err(|x| alloc::format!("enable :{port}: {}", e(x)))
+                .and_then(|_| http_get(SockAddr::new(Ipv4::LOCALHOST, port), "/"))
+                .and_then(|b| {
+                    let t = String::from_utf8_lossy(&b);
+                    if t.starts_with("HTTP/1.0 200 OK") && t.contains("Hello from milkOS") {
+                        kprintln!(
+                            "[net] http GET 127.0.0.1:{port}/: 200 OK, {} bytes",
+                            b.len()
+                        );
+                        Ok(())
+                    } else {
+                        Err(alloc::format!("bad reply: {:?}", t.lines().next()))
+                    }
+                }),
+        );
+    }
 
     // 4. DNS policy (no packets for any of these).
     check(

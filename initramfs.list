@@ -48,3 +48,11 @@
 /bin/today  target/user/aarch64-unknown-none-softfloat/release/today   755
 /bin/spaces target/user/aarch64-unknown-none-softfloat/release/spaces  755
 /bin/cowsay target/user/aarch64-unknown-none-softfloat/release/cowsay  755
+
+# Network and sound tools (net agent).
+/bin/ifconfig target/user/aarch64-unknown-none-softfloat/release/ifconfig   755
+/bin/netstat  target/user/aarch64-unknown-none-softfloat/release/netstat   755
+/bin/ping     target/user/aarch64-unknown-none-softfloat/release/ping   755
+/bin/nc       target/user/aarch64-unknown-none-softfloat/release/nc   755
+/bin/httpd    target/user/aarch64-unknown-none-softfloat/release/httpd   755
+/bin/play     target/user/aarch64-unknown-none-softfloat/release/play   755

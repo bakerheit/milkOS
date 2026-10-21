@@ -1,7 +1,8 @@
 //! Socket syscalls (Linux aarch64 numbers) on top of the kernel socket API in `net::socket`.
 //! Written by the net side; kept here because it needs the fd table and user copies.
 //!
-//! AF_INET only, SOCK_STREAM / SOCK_DGRAM, `struct sockaddr_in` (16 bytes). Blocking
+//! AF_INET only: SOCK_STREAM (TCP), SOCK_DGRAM (UDP, or ICMP echo with IPPROTO_ICMP, the
+//! Linux "ping socket"), `struct sockaddr_in` (16 bytes). Also ppoll(2), for any fd. Blocking
 //! unless the fd is O_NONBLOCK (SOCK_NONBLOCK / fcntl) or the call passes MSG_DONTWAIT.
 //! No signals exist yet, so a blocking call waits until the socket is ready.
 
@@ -29,6 +30,7 @@ pub const SETSOCKOPT: u64 = 208;
 pub const GETSOCKOPT: u64 = 209;
 pub const SHUTDOWN: u64 = 210;
 pub const ACCEPT4: u64 = 242;
+pub const PPOLL: u64 = 73;
 
 const SOCK_NONBLOCK: u32 = 0o4000;
 const SOCK_CLOEXEC: u32 = 0o2000000;
@@ -37,12 +39,14 @@ const SOL_SOCKET: u32 = 1;
 const IPPROTO_TCP: u32 = 6;
 const SO_TYPE: u32 = 3;
 const SO_ERROR: u32 = 4;
+const SO_RCVTIMEO: u32 = 20;
+const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
 
 /// Is `nr` one of ours?
 pub fn handles(nr: u64) -> bool {
-    matches!(nr, SOCKET | BIND..=SHUTDOWN | ACCEPT4)
+    matches!(nr, SOCKET | BIND..=SHUTDOWN | ACCEPT4 | PPOLL)
 }
 
 pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
@@ -56,6 +60,7 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
     );
     match nr {
         SOCKET => sys_socket(a[0] as u32, a[1] as u32, a[2] as u32),
+        PPOLL => sys_ppoll(a[0] as usize, a1, a2),
         BIND => with_sock(fd, |s, _| socket::bind(s, read_addr(a1, a2)?).map(|_| 0)),
         LISTEN => with_sock(fd, |s, _| socket::listen(s, a1).map(|_| 0)),
         ACCEPT => sys_accept(fd, a1, a2, 0),
@@ -74,14 +79,15 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         }),
         RECVFROM => with_sock(fd, |s, nb| {
             let mut buf = alloc::vec![0u8; a2.min(MAX_IO)];
-            let (n, from) = sockfile::recv(s, &mut buf, nb || a3 as u32 & MSG_DONTWAIT != 0)?;
+            let nb = nb || a3 as u32 & MSG_DONTWAIT != 0;
+            let (n, from) = sockfile::recv(s, &mut buf, nb, timeout_of(fd))?;
             copy_out(a1, &buf[..n])?;
             if a4 != 0 {
                 write_addr(from, a4, a5)?;
             }
             Ok(n)
         }),
-        SETSOCKOPT => with_sock(fd, |_, _| setsockopt(a1 as u32, a2 as u32)),
+        SETSOCKOPT => setsockopt(fd, a1 as u32, a2 as u32, a3, a4),
         GETSOCKOPT => with_sock(fd, |s, _| getsockopt(s, a1 as u32, a2 as u32, a3, a4)),
         SHUTDOWN => with_sock(fd, |s, _| {
             let how = match a1 {
@@ -104,6 +110,14 @@ fn with_sock(fd: i64, f: impl FnOnce(SocketId, bool) -> KResult<usize>) -> KResu
     f(id, nb)
 }
 
+/// SO_RCVTIMEO of `fd` (FOREVER if unset).
+fn timeout_of(fd: i64) -> u64 {
+    file(fd)
+        .ok()
+        .and_then(|f| sockfile::of(&f).ok().map(|s| s.rcv_timeout()))
+        .unwrap_or(FOREVER)
+}
+
 fn install(of: OpenFile, cloexec: bool) -> KResult<usize> {
     let fd = current().inner.lock().fds.alloc(Arc::new(of), cloexec)?;
     Ok(fd as usize)
@@ -114,14 +128,12 @@ fn sys_socket(domain: u32, ty: u32, proto: u32) -> KResult<usize> {
         return Err(nerr::EAFNOSUPPORT);
     }
     let kind = SockType::from_linux(ty).ok_or(nerr::EPROTONOSUPPORT)?;
-    let proto_ok = match kind {
-        SockType::Stream => proto == 0 || proto == 6,
-        SockType::Dgram => proto == 0 || proto == 17,
+    let id = match (kind, proto) {
+        (SockType::Stream, 0 | 6) | (SockType::Dgram, 0 | 17) => socket::socket(kind)?,
+        // Linux "ping socket": unprivileged ICMP echo (see net::socket::socket_icmp).
+        (SockType::Dgram, 1) => socket::socket_icmp()?,
+        _ => return Err(nerr::EPROTONOSUPPORT),
     };
-    if !proto_ok {
-        return Err(nerr::EPROTONOSUPPORT);
-    }
-    let id = socket::socket(kind)?;
     // From here the OpenFile owns the socket (closing it on drop).
     install(
         sockfile::open(id, ty & SOCK_NONBLOCK != 0),
@@ -133,10 +145,15 @@ fn sys_accept(fd: i64, addr: usize, addrlen: usize, flags: u32) -> KResult<usize
     let file = file(fd)?;
     let s = sockfile::of(&file)?;
     let (id, nb) = (s.id, s.nonblocking());
+    let end = crate::timer::now_ns().saturating_add(s.rcv_timeout());
     let (child, peer) = loop {
         match socket::accept(id) {
             Err(e) if e == EAGAIN && !nb => {
-                socket::wait(id, socket::POLLIN, FOREVER);
+                let left = end.saturating_sub(crate::timer::now_ns());
+                if left == 0 {
+                    return Err(EAGAIN);
+                }
+                socket::wait(id, socket::POLLIN, left);
             }
             r => break r?,
         }
@@ -159,12 +176,87 @@ fn connect(s: SocketId, addr: SockAddr, nb: bool) -> KResult<usize> {
     }
 }
 
-fn setsockopt(level: u32, opt: u32) -> KResult<usize> {
-    // Accepted and ignored: SO_REUSEADDR (we always allow it), SO_KEEPALIVE, SO_SNDBUF,
-    // SO_RCVBUF, SO_REUSEPORT, TCP_NODELAY (we never delay).
+fn setsockopt(fd: i64, level: u32, opt: u32, val: usize, len: usize) -> KResult<usize> {
+    let f = file(fd)?;
+    let sf = sockfile::of(&f)?;
     match (level, opt) {
-        (SOL_SOCKET, 2 | 7 | 8 | 9 | 15) | (IPPROTO_TCP, 1) => Ok(0),
+        (SOL_SOCKET, SO_RCVTIMEO) => {
+            // struct timeval { tv_sec: i64, tv_usec: i64 }; all zero = no timeout.
+            if len < 16 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(val, 16)?;
+            let sec = i64::from_le_bytes(b[0..8].try_into().unwrap());
+            let usec = i64::from_le_bytes(b[8..16].try_into().unwrap());
+            if sec < 0 || !(0..1_000_000).contains(&usec) {
+                return Err(EINVAL);
+            }
+            sf.set_rcv_timeout((sec as u64).saturating_mul(1_000_000_000) + usec as u64 * 1000);
+            Ok(0)
+        }
+        // Accepted and ignored: SO_REUSEADDR (we always allow it), SO_SNDBUF, SO_RCVBUF,
+        // SO_KEEPALIVE, SO_REUSEPORT, SO_SNDTIMEO (sends only wait for buffer space),
+        // TCP_NODELAY (we never delay).
+        (SOL_SOCKET, 2 | 7 | 8 | 9 | 15 | SO_SNDTIMEO) | (IPPROTO_TCP, 1) => Ok(0),
         _ => Err(ENOPROTOOPT),
+    }
+}
+
+/// ppoll(fds, nfds, timeout, sigmask): any fd kind (sockets and the console really wait;
+/// other files are always ready). The sigmask is ignored (no signals yet).
+fn sys_ppoll(fds: usize, nfds: usize, tmo: usize) -> KResult<usize> {
+    if nfds > 256 {
+        return Err(EINVAL);
+    }
+    let raw = copy_in(fds, nfds * 8)?;
+    let mut entries: alloc::vec::Vec<(i32, u32, Option<Arc<OpenFile>>)> = raw
+        .chunks(8)
+        .map(|c| {
+            let fd = i32::from_le_bytes(c[0..4].try_into().unwrap());
+            let ev = u16::from_le_bytes([c[4], c[5]]) as u32;
+            let f = if fd >= 0 { file(fd as i64).ok() } else { None };
+            (fd, ev, f)
+        })
+        .collect();
+    let timeout = if tmo == 0 {
+        FOREVER
+    } else {
+        let t = copy_in(tmo, 16)?;
+        let sec = i64::from_le_bytes(t[0..8].try_into().unwrap());
+        let nsec = i64::from_le_bytes(t[8..16].try_into().unwrap());
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            return Err(EINVAL);
+        }
+        (sec as u64).saturating_mul(1_000_000_000) + nsec as u64
+    };
+    let end = crate::timer::now_ns().saturating_add(timeout);
+    let always = socket::POLLERR | socket::POLLHUP | socket::POLLNVAL;
+    let mut out = alloc::vec![0u8; raw.len()];
+    loop {
+        let mut ready = 0;
+        for (k, (fd, ev, f)) in entries.iter_mut().enumerate() {
+            let rev = match (*fd, f.as_ref()) {
+                (fd, _) if fd < 0 => 0,
+                (_, None) => socket::POLLNVAL,
+                (_, Some(f)) => f.inode().poll() & (*ev | always),
+            };
+            out[k * 8..k * 8 + 8].copy_from_slice(&raw[k * 8..k * 8 + 8]);
+            out[k * 8 + 6..k * 8 + 8].copy_from_slice(&(rev as u16).to_le_bytes());
+            if rev != 0 {
+                ready += 1;
+            }
+        }
+        let now = crate::timer::now_ns();
+        if ready > 0 || now >= end {
+            copy_out(fds, &out)?;
+            return Ok(ready);
+        }
+        // Sleep until a socket changes, re-checking other fds (the console) every 20 ms.
+        let g = crate::net::ready_generation();
+        crate::net::READY_WQ.wait_until_timeout(
+            || crate::net::ready_generation() != g,
+            (end - now).min(20_000_000),
+        );
     }
 }
 

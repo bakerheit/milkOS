@@ -277,7 +277,7 @@ committed and packed as `/bin/linux-hello`; `utest linux` runs it.
 `PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
 permissions; overlapping pages take the union. The I-cache is synced after loading.
 The stack is the Linux layout: `argc, argv[], NULL, envp[], NULL, auxv` (AT_PHDR,
-AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_ENTRY, AT_HWCAP = FP|ASIMD, AT_CLKTCK, AT_RANDOM,
+AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_ENTRY, AT_HWCAP = FP|ASIMD, AT_CLKTCK, AT_RANDOM, AT_UID / AT_EUID / AT_GID / AT_EGID (the new image's real and effective ids), AT_SECURE (1 for a set-ID exec or when real and effective ids differ),
 AT_EXECFN, ...), strings and 16 random bytes above it, sp 16-byte aligned.
 FP/SIMD is enabled at EL0 and saved per user thread on every switch (the kernel itself is
 soft-float and never touches it).

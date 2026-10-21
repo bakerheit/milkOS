@@ -1450,6 +1450,79 @@ fn t_epoll() -> bool {
     )
 }
 
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_SECURE: u64 = 23;
+
+/// `utest auxv-print`: our auxv ids, for t_auxv's set-user-ID copy.
+fn auxv_print(args: &rt::Args) -> i32 {
+    let g = |t| args.aux(t).map_or(-1, |v| v as i64);
+    println!(
+        "AUXV {} {} {} {} {}",
+        g(AT_UID),
+        g(AT_EUID),
+        g(AT_GID),
+        g(AT_EGID),
+        g(AT_SECURE)
+    );
+    0
+}
+
+/// The auxv carries the real ids; AT_SECURE is set for a set-user-ID exec.
+fn t_auxv(args: &rt::Args) -> bool {
+    let g = |t| args.aux(t).unwrap_or(u64::MAX);
+    let mut ok = g(AT_UID) == sys::getuid() as u64
+        && g(AT_EUID) == sys::geteuid() as u64
+        && g(AT_GID) == sys::getgid() as u64
+        && g(AT_EGID) == sys::getegid() as u64
+        && g(AT_SECURE) == (sys::getuid() != sys::geteuid()) as u64;
+    let mut detail = alloc::format!(
+        "self: uid {} euid {} gid {} egid {} secure {}",
+        g(AT_UID),
+        g(AT_EUID),
+        g(AT_GID),
+        g(AT_EGID),
+        g(AT_SECURE)
+    );
+    if sys::geteuid() == 0 {
+        // A set-user-ID root copy of utest, run by milk: euid 0, uid 501, AT_SECURE 1.
+        let copy = "/tmp/utest-suid";
+        let made = sys::read_file("/bin/utest").ok().and_then(|data| {
+            let fd =
+                sys::open_mode(copy, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o755).ok()?;
+            let r = sys::write_all(fd, &data);
+            let _ = sys::close(fd);
+            r.ok()?;
+            sys::chmod(copy, 0o4755).ok()
+        });
+        let (r, w) = sys::pipe().unwrap();
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            let _ = sys::dup2(w, 1);
+            let _ = sys::setgroups(&[20]);
+            let _ = sys::setgid(20);
+            let _ = sys::setuid(501);
+            let _ = sys::execve(copy, &[copy, "auxv-print"], &[]);
+            sys::exit(127);
+        }
+        let _ = sys::close(w);
+        let mut out = Vec::new();
+        let mut b = [0u8; 128];
+        while let Ok(n @ 1..) = sys::read(r, &mut b) {
+            out.extend_from_slice(&b[..n]);
+        }
+        let _ = sys::close(r);
+        let _ = sys::wait4(pid as i32, 0);
+        let _ = sys::unlink(copy);
+        let line = String::from(String::from_utf8_lossy(&out).trim());
+        ok &= made.is_some() && line == "AUXV 501 0 20 20 1";
+        detail += &alloc::format!("; set-user-ID copy run by milk: {line:?}");
+    }
+    check("auxv ids", ok, &detail)
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1500,6 +1573,12 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "epoll" || what == "all" {
         ok &= t_epoll();
+    }
+    if what == "auxv-print" {
+        return auxv_print(args);
+    }
+    if what == "auxv" || what == "all" {
+        ok &= t_auxv(args);
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

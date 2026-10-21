@@ -394,12 +394,13 @@ fn load_image(
     argv: &[String],
     envp: &[String],
     path: &str,
+    ids: &elf::AuxIds,
 ) -> KResult<(UserSpace, usize, usize)> {
     let mut space = UserSpace::new()?;
     let img = elf::load(&mut space, data)?;
     space.set_brk_start(img.end);
     let top = space.map_stack()?;
-    let sp = elf::build_stack(&space, top, argv, envp, &img, path)?;
+    let sp = elf::build_stack(&space, top, argv, envp, &img, path, ids)?;
     Ok((space, img.entry, sp))
 }
 
@@ -443,7 +444,7 @@ fn spawn_as(
 ) -> KResult<Pid> {
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
-    let (space, entry, sp) = load_image(&data, &argv, envp, path)?;
+    let (space, entry, sp) = load_image(&data, &argv, envp, path, &elf::AuxIds::of(&cred, false))?;
     start(Launch {
         name: basename(path),
         ppid: 0,
@@ -472,7 +473,8 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
     let envp: Vec<String> = envp.iter().map(|s| String::from(*s)).collect();
-    let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
+    let cred = login::session_cred();
+    let (space, entry, sp) = load_image(&data, &argv, &envp, path, &elf::AuxIds::of(&cred, false))?;
     let cwd = fs::lookup(cwd).unwrap_or_else(|_| fs::root());
     start(Launch {
         name: basename(path),
@@ -491,7 +493,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         exe: String::from(path),
         clear_child_tid: 0,
         caps: caps::Caps::all(),
-        cred: login::session_cred(),
+        cred,
     })
 }
 
@@ -631,16 +633,18 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
         }
     }
     data.truncate(done);
-    let (space, entry, sp) = load_image(&data, argv, envp, path)?;
     let me = current();
-    let ttbr0 = space.ttbr0();
+    // The ids the new image will have (set-ID bits), known before building its stack.
     let nosuid = fs::perm::nosuid(f.inode());
+    let before = *me.cred.lock();
+    let mut after = before;
+    let changed = after.on_exec(st.perm, st.uid, st.gid, nosuid);
+    let (space, entry, sp) =
+        load_image(&data, argv, envp, path, &elf::AuxIds::of(&after, changed))?;
+    let ttbr0 = space.ttbr0();
     {
-        let mut c = me.cred.lock();
-        let before = *c;
-        let changed = c.on_exec(st.perm, st.uid, st.gid, nosuid);
-        let after = *c;
-        drop(c);
+        // Only now, with the new image built: a failed exec leaves the ids alone.
+        *me.cred.lock() = after;
         if changed {
             crate::audit!(
                 "setid.exec",

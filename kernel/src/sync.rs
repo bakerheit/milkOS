@@ -1,14 +1,21 @@
 //! Interrupt masking and locking for the (currently) single-core kernel.
 //!
 //! Everything here is written so SMP is a drop-in later: [`SpinLock`] already has the
-//! final API (`lock()` returns a guard that derefs to the data and unlocks on drop). Today
-//! the "spin" part is a single-core deadlock check; the one place to change for SMP is
-//! [`SpinLock::acquire`] / [`SpinLock::release`].
+//! final API (`lock()` returns a guard that derefs to the data and unlocks on drop). The
+//! only thing that changes is how the lock word is taken, in `SpinLock::acquire` /
+//! `try_acquire`, selected by the `atomic-locks` cargo feature:
 //!
-//! Note on atomics: until the MMU is on, RAM is Device memory, where exclusive
-//! (ldxr/stxr, LSE) accesses are not guaranteed to work. So code in this kernel that has to
-//! run before the MMU uses only plain atomic loads/stores (never `fetch_*`/`swap`/`cas`).
-//! That is fine for single-writer state; real multi-writer atomics come with SMP + MMU.
+//! - default (no feature): IRQs masked + plain loads/stores. Correct on one core, where the
+//!   only possible contender is ourselves further up the stack, so a held lock is reported
+//!   as a deadlock panic instead of spinning forever.
+//! - `atomic-locks`: real compare-exchange spinlock, correct for SMP.
+//!
+//! Why the default avoids atomic read-modify-write: until the MMU is on, RAM is Device
+//! memory, and exclusive accesses (ldxr/stxr, which is what `swap`/`fetch_*`/
+//! `compare_exchange` compile to here) never succeed there, so they loop forever. Turn on
+//! `atomic-locks` only once the MMU maps RAM as Normal cacheable memory and that happens
+//! before the first lock is taken. Nothing else in the irq code uses atomic RMW either
+//! (checked: the default build contains no ldxr/stxr/LSE instructions).
 
 // Public API surface for later subsystems (scheduler, drivers); not all of it is used yet.
 #![allow(dead_code)]
@@ -132,30 +139,60 @@ impl<T> SpinLock<T> {
     /// Try to take the lock without blocking.
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let irq = IrqGuard::new();
-        if self.locked.load(Ordering::Acquire) {
+        if !self.try_acquire() {
             return None; // `irq` drops and restores the mask.
         }
-        self.locked.store(true, Ordering::Relaxed);
         Some(SpinLockGuard {
             lock: self,
             _irq: irq,
         })
     }
 
-    // --- the SMP seam -----------------------------------------------------------------
-    // Single core, IRQs masked: if the lock is already held, the holder is us further up the
-    // stack, so spinning would hang forever. Fail loudly instead.
-    // For SMP, replace with:
-    //   while self.locked.compare_exchange_weak(false, true, Acquire, Relaxed).is_err() {
-    //       core::hint::spin_loop();
-    //   }
-    // (needs the MMU on with cacheable memory so exclusives work).
+    // --- the SMP seam: the only code that changes with `atomic-locks` ------------------
+
+    /// Single core, MMU off: no atomic RMW (it would hang on Device memory).
+    #[cfg(not(feature = "atomic-locks"))]
     #[inline]
-    fn acquire(&self) {
+    fn try_acquire(&self) -> bool {
+        // IRQs are masked by the caller, and nothing else runs on this core.
         if self.locked.load(Ordering::Acquire) {
-            panic!("SpinLock deadlock: lock already held on this core");
+            return false;
         }
         self.locked.store(true, Ordering::Relaxed);
+        true
+    }
+
+    #[cfg(not(feature = "atomic-locks"))]
+    #[inline]
+    fn acquire(&self) {
+        // With IRQs masked on one core, the holder can only be us: spinning would hang.
+        if !self.try_acquire() {
+            panic!("SpinLock deadlock: lock already held on this core");
+        }
+    }
+
+    /// SMP: needs the MMU on with RAM as Normal cacheable memory.
+    #[cfg(feature = "atomic-locks")]
+    #[inline]
+    fn try_acquire(&self) -> bool {
+        self.locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    #[cfg(feature = "atomic-locks")]
+    #[inline]
+    fn acquire(&self) {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            // Spin on a plain load so we don't hammer the line with exclusives.
+            while self.locked.load(Ordering::Relaxed) {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     #[inline]

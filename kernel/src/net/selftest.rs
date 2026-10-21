@@ -208,6 +208,57 @@ fn test_loopback_tcp() -> core::result::Result<(), String> {
     Ok(())
 }
 
+/// Drop rate of the lossy-loopback test (every Nth packet). 3 passes too, just slower.
+const LOSSY_EVERY: u32 = 7;
+
+/// TCP over a lossy loopback (every Nth packet dropped: data, ACKs, SYN and FIN alike).
+fn test_lossy_tcp() -> core::result::Result<(), String> {
+    use super::iface::LO_DROP_EVERY;
+    let before = super::with(|st| st.stats.tcp_retrans_segs);
+    LO_DROP_EVERY.store(LOSSY_EVERY, core::sync::atomic::Ordering::Relaxed);
+    let r = (|| {
+        let l = socket::socket(SockType::Stream).map_err(es)?;
+        socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, 5002)).map_err(es)?;
+        socket::listen(l, 4).map_err(es)?;
+        let c = connect(SockAddr::new(Ipv4::LOCALHOST, 5002), 10_000)
+            .map_err(|x| alloc::format!("connect: {}", e(x)))?;
+        if socket::wait(l, POLLIN, 10_000 * MS) == 0 {
+            return Err(String::from("accept: nothing queued"));
+        }
+        let (a, _) = socket::accept(l).map_err(es)?;
+        let total = 64 * 1024;
+        let r = pump(c, a, total, 60_000);
+        socket::shutdown(c, socket::Shutdown::Write).map_err(es)?;
+        socket::wait(a, POLLIN, 10_000 * MS);
+        let mut b = [0u8; 8];
+        let eof = socket::recv(a, &mut b);
+        let _ = socket::close(a);
+        let _ = socket::close(c);
+        let _ = socket::close(l);
+        let ns = r?;
+        if eof != Ok(0) {
+            return Err(alloc::format!("no EOF after FIN: {eof:?}"));
+        }
+        Ok((total, ns))
+    })();
+    LO_DROP_EVERY.store(0, core::sync::atomic::Ordering::Relaxed);
+    let (total, ns) = r?;
+    let (after, dropped) =
+        super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
+    kprintln!(
+        "[net] tcp lossy loopback: {} KiB intact in {} ms with every {}th packet dropped ({} dropped, {} retransmissions)",
+        total / 1024,
+        ns / MS,
+        LOSSY_EVERY,
+        dropped,
+        after - before
+    );
+    if after == before {
+        return Err(String::from("no retransmissions?"));
+    }
+    Ok(())
+}
+
 fn test_loopback_udp() -> core::result::Result<(), String> {
     let a = socket::socket(SockType::Dgram).map_err(es)?;
     let b = socket::socket(SockType::Dgram).map_err(es)?;
@@ -387,6 +438,7 @@ pub fn run() {
     // 3. Loopback.
     check("udp loopback", test_loopback_udp());
     check("tcp loopback", test_loopback_tcp());
+    check("tcp lossy", test_lossy_tcp());
     check(
         "refused",
         match connect(SockAddr::new(Ipv4::LOCALHOST, 9), 1000) {

@@ -61,7 +61,7 @@ for _ in $(seq 600); do
   sleep 0.1
 done
 echo "---- guest ----"
-grep '^\[net\]\|^\[virtio-net\]\|^    ' "$LOG" | sed -n '/\[virtio-net\]/,/selftest/p'
+awk '/^\[(net|virtio-net)\]/ { print; inproc = /\/proc\/net/; next } inproc && /^    / { print; next } { inproc = 0 }' "$LOG"
 grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
 
 echo "---- host curl -> guest :80 (via 127.0.0.1:$HTTP_PORT) ----"

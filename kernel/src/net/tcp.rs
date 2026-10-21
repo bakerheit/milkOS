@@ -132,7 +132,10 @@ pub struct Tcb {
     fin_seq: Option<u32>,
     fin_acked: bool,
     pub peer_fin: bool,
+    /// Current retransmission timeout (backed off on timeouts).
     pub rto: u64,
+    /// RTO from the RTT estimate, before backoff; restored on every ACK of new data.
+    rto_base: u64,
     pub srtt: u64,
     rttvar: u64,
     /// (sequence number that acks the timed segment, send time). Karn: never a resend.
@@ -155,7 +158,13 @@ pub struct Tcb {
     pub backlog: u8,
     pub connect_pending: bool,
     pub retransmits: u32,
+    /// Out-of-order data already written into the receive ring past its end, as absolute
+    /// sequence ranges [start, end).
+    ooo: [(u32, u32); MAX_OOO],
+    nooo: u8,
 }
+
+const MAX_OOO: usize = 8;
 
 impl Tcb {
     pub const fn new() -> Tcb {
@@ -178,6 +187,7 @@ impl Tcb {
             fin_acked: false,
             peer_fin: false,
             rto: RTO_INIT,
+            rto_base: RTO_INIT,
             srtt: 0,
             rttvar: 0,
             rtt_probe: None,
@@ -196,6 +206,8 @@ impl Tcb {
             backlog: 0,
             connect_pending: false,
             retransmits: 0,
+            ooo: [(0, 0); MAX_OOO],
+            nooo: 0,
         }
     }
 
@@ -214,6 +226,7 @@ impl Tcb {
         self.cwnd = 10 * mss as u32; // RFC 6928 initial window
         self.ssthresh = u32::MAX;
         self.rto = RTO_INIT;
+        self.rto_base = RTO_INIT;
     }
 
     fn sample_rtt(&mut self, r: u64) {
@@ -225,7 +238,8 @@ impl Tcb {
             self.rttvar = (3 * self.rttvar + d) / 4;
             self.srtt = (7 * self.srtt + r) / 8;
         }
-        self.rto = (self.srtt + (4 * self.rttvar).max(10 * MS)).clamp(RTO_MIN, RTO_MAX);
+        self.rto_base = (self.srtt + (4 * self.rttvar).max(10 * MS)).clamp(RTO_MIN, RTO_MAX);
+        self.rto = self.rto_base;
     }
 }
 
@@ -914,6 +928,9 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
             t.sample_rtt(now.saturating_sub(at));
         }
         t.retries = 0;
+        // New data got through: drop the timeout backoff (as BSD does). Without it, Karn's
+        // rule (no samples from resent data) can leave the RTO doubled for good under loss.
+        t.rto = t.rto_base;
         let mss = t.mss as u32;
         if t.dupacks >= 3 {
             t.cwnd = t.ssthresh; // leave fast recovery
@@ -1016,9 +1033,21 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
                     if n < data.len() {
                         fin = false;
                     }
+                    if ooo_advance(t, &mut s.rx) {
+                        fin = false; // the FIN sat before data we already had: wait for it
+                    }
                     st.wake(i);
                 } else {
-                    fin = false; // out of order: dropped, our ACK asks for the gap
+                    // Out of order: keep it in the ring past the readable end (if there is
+                    // room in the gap list), and ACK rcv_nxt so the peer fills the hole.
+                    fin = false;
+                    if !s.shut_rd {
+                        let off = seq.wrapping_sub(t.rcv_nxt) as usize;
+                        let n = s.rx.write_at(off, data);
+                        if n > 0 {
+                            ooo_insert(t, seq, seq.wrapping_add(n as u32));
+                        }
+                    }
                 }
                 let s = st.socks.get(i).unwrap();
                 s.tcb.ack_now = true;
@@ -1050,6 +1079,55 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
         st.wake(i);
     }
     output(st, i);
+}
+
+/// Remember out-of-order range [a, b) (merging with overlapping or touching ones). If the
+/// list is full the range is forgotten (the data is resent later anyway).
+fn ooo_insert(t: &mut Tcb, mut a: u32, mut b: u32) {
+    let base = t.rcv_nxt;
+    let rel = |x: u32| x.wrapping_sub(base);
+    let mut k = 0;
+    while k < t.nooo as usize {
+        let (s, e) = t.ooo[k];
+        if rel(s) <= rel(b) && rel(a) <= rel(e) {
+            if rel(s) < rel(a) {
+                a = s;
+            }
+            if rel(e) > rel(b) {
+                b = e;
+            }
+            t.ooo[k] = t.ooo[t.nooo as usize - 1];
+            t.nooo -= 1;
+        } else {
+            k += 1;
+        }
+    }
+    if (t.nooo as usize) < MAX_OOO {
+        t.ooo[t.nooo as usize] = (a, b);
+        t.nooo += 1;
+    }
+}
+
+/// rcv_nxt moved: make any stored out-of-order data it now reaches readable. Returns true
+/// if anything was merged.
+fn ooo_advance(t: &mut Tcb, rx: &mut Ring) -> bool {
+    let mut merged = false;
+    loop {
+        let base = t.rcv_nxt;
+        let hit = t.ooo[..t.nooo as usize]
+            .iter()
+            .position(|&(s, _)| le(s, base));
+        let Some(k) = hit else { return merged };
+        let e = t.ooo[k].1;
+        if gt(e, base) {
+            let extra = e.wrapping_sub(base);
+            rx.commit(extra as usize);
+            t.rcv_nxt = e;
+            merged = true;
+        }
+        t.ooo[k] = t.ooo[t.nooo as usize - 1];
+        t.nooo -= 1;
+    }
 }
 
 fn enter_time_wait(t: &mut Tcb, now: u64) {

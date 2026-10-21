@@ -65,6 +65,26 @@ impl Ring {
         n
     }
 
+    /// Write `data` into free space `off` bytes past the end, without making it readable
+    /// (TCP out-of-order data). Returns how much fit. [`commit`](Self::commit) later.
+    pub fn write_at(&mut self, off: usize, data: &[u8]) -> usize {
+        if off >= self.free() {
+            return 0;
+        }
+        let n = data.len().min(self.free() - off);
+        let start = (self.head + self.len + off) % self.cap;
+        let first = n.min(self.cap - start);
+        let m = self.mem_mut();
+        m[start..start + first].copy_from_slice(&data[..first]);
+        m[..n - first].copy_from_slice(&data[first..n]);
+        n
+    }
+
+    /// Make `n` bytes already written past the end (by `write_at`) readable.
+    pub fn commit(&mut self, n: usize) {
+        self.len += n.min(self.free());
+    }
+
     /// Copy bytes `[off, off + out.len())` (relative to the head) without consuming them.
     /// Returns how many were available.
     pub fn peek_at(&self, off: usize, out: &mut [u8]) -> usize {
@@ -85,9 +105,8 @@ impl Ring {
         let n = n.min(self.len);
         self.head = (self.head + n) % self.cap;
         self.len -= n;
-        if self.len == 0 {
-            self.head = 0;
-        }
+        // Don't re-home `head` to 0 when empty: out-of-order bytes may already sit past
+        // the end (`write_at`), at positions relative to the current head.
     }
 
     /// Copy out and consume up to `out.len()` bytes.

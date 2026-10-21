@@ -10,6 +10,7 @@
 //! fixed ring.
 
 use alloc::vec;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::arp::{self, ArpCache};
 use super::errno::*;
@@ -33,6 +34,10 @@ const PENDING: usize = 8;
 const PENDING_NS: u64 = 3_000_000_000;
 /// Loopback ring size (packets).
 const LO_SLOTS: usize = 32;
+
+/// Test knob: drop every Nth loopback packet (0 = off). The self-test uses it to prove
+/// TCP recovers from loss; slirp never loses anything.
+pub static LO_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
 
 /// IPv4 configuration of eth0 (from DHCP). `addr` unspecified = not configured.
 #[derive(Clone, Copy, Default, Debug)]
@@ -80,6 +85,7 @@ pub struct Iface {
     lo_len: [u16; LO_SLOTS],
     lo_head: usize,
     lo_count: usize,
+    lo_seen: u32,
 }
 
 // SAFETY: the raw buffers are leaked heap memory owned by this Iface, accessed under the
@@ -119,6 +125,7 @@ impl Iface {
             lo_len: [0; LO_SLOTS],
             lo_head: 0,
             lo_count: 0,
+            lo_seen: 0,
         }
     }
 
@@ -169,6 +176,14 @@ impl Iface {
         self.ip_id = self.ip_id.wrapping_add(1);
         match self.route(dst)? {
             Route::Loopback => {
+                let every = LO_DROP_EVERY.load(Ordering::Relaxed);
+                if every != 0 {
+                    self.lo_seen = self.lo_seen.wrapping_add(1);
+                    if self.lo_seen.is_multiple_of(every) {
+                        self.lo_stats.tx_dropped += 1;
+                        return Ok(()); // "lost on the wire"
+                    }
+                }
                 if self.lo_count == LO_SLOTS {
                     self.lo_stats.tx_dropped += 1;
                     return Err(ENOBUFS);

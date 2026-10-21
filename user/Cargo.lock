@@ -255,6 +255,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soundd"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "udrv",
+]
+
+[[package]]
 name = "spot"
 version = "0.0.1"
 dependencies = [

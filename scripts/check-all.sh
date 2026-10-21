@@ -39,6 +39,7 @@ TESTS=(
   "net-test|q|600|scripts/net-test.sh"
   "pkg-test|q|600|scripts/pkg-test.sh"
   "svc-test|q|600|scripts/svc-test.sh"
+  "driver-crash-test|q|600|scripts/driver-crash-test.sh @WORK@"
   "drop-test|q|600|scripts/drop-test.sh"
   "fscktest|q|600|scripts/fscktest.sh"
   "reflinktest|q|600|scripts/reflinktest.sh"

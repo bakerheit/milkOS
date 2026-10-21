@@ -34,7 +34,6 @@ use crate::{gic, kprintln, pmm};
 
 /// Which kind of device (and which `opt/milkos/drivers` key).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // Sound: registered once soundd's hand-off lands
 pub enum Class {
     Rng,
     Sound,
@@ -146,6 +145,32 @@ static IRQ_WQ: WaitQueue = WaitQueue::new();
 /// DMA buffers of claims whose fd was closed while the owner was still running: still
 /// mapped in its address space, freed when that space is gone ([`space_gone`]).
 static LEFTOVER: SpinLock<Vec<(u32, PhysAddr, usize)>> = SpinLock::new(Vec::new());
+/// Released DMA buffers waiting out [`QUARANTINE_NS`] before they are freed: a device may
+/// still complete requests it had taken before the reset (qemu's virtio-sound reset
+/// doesn't flush a stream's queued buffers; it finishes them later and writes their
+/// status into these pages). (free after, pa, pages)
+static QUARANTINE: SpinLock<Vec<(u64, PhysAddr, usize)>> = SpinLock::new(Vec::new());
+const QUARANTINE_NS: u64 = 2_000_000_000;
+
+fn quarantine(pa: PhysAddr, pages: usize) {
+    let at = crate::timer::now_ns() + QUARANTINE_NS;
+    QUARANTINE.lock().push((at, pa, pages));
+}
+
+/// Free quarantined buffers whose time is up. Called from every entry point (the rngd and
+/// soundd syscalls come often enough).
+fn sweep() {
+    let now = crate::timer::now_ns();
+    let due: Vec<(PhysAddr, usize)> = {
+        let mut q = QUARANTINE.lock();
+        let (due, keep): (Vec<_>, Vec<_>) = q.drain(..).partition(|e| e.0 <= now);
+        *q = keep;
+        due.into_iter().map(|e| (e.1, e.2)).collect()
+    };
+    for (pa, n) in due {
+        pmm::free_contiguous(pa, n);
+    }
+}
 
 pub fn policy(c: Class) -> Policy {
     let user = match c {
@@ -313,6 +338,9 @@ fn claim(id: u32) -> KResult<usize> {
         "[udrv] {} (slot {slot}, IRQ {irq}) claimed by pid {pid} ({exe})",
         class.name()
     );
+    if class == Class::Sound {
+        crate::audio::sink_changed();
+    }
     Ok(fd as usize)
 }
 
@@ -344,7 +372,8 @@ fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool
     PENDING[slot].store(0, Ordering::Release);
     IRQ_WQ.wake_all();
     crate::poll::notify();
-    // 3. Its memory (once nothing maps it).
+    // 3. Its memory: once nothing maps it (the owner's space is gone) and the device can't
+    // be finishing old requests into it any more (quarantine).
     let pages: usize = claim.dma_pages();
     if space_alive {
         LEFTOVER
@@ -352,8 +381,13 @@ fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool
             .extend(claim.dma.iter().map(|&(pa, n)| (claim.pid, pa, n)));
     } else {
         for &(pa, n) in &claim.dma {
-            pmm::free_contiguous(pa, n);
+            quarantine(pa, n);
         }
+    }
+    if class == Class::Sound {
+        // Let qemu finish the buffers it was playing when we reset it (at most the
+        // device's 4 periods, 40 ms) before a new queue exists to push them onto.
+        crate::sched::sleep_ms(50);
     }
     crate::audit!(
         "driver.release",
@@ -389,6 +423,9 @@ fn release(slot: usize, generation: Option<u64>, reason: &str, space_alive: bool
             ),
         }
     }
+    if class == Class::Sound {
+        crate::audio::sink_changed();
+    }
 }
 
 /// `pid`'s address space is gone (exit, or exec replaced it): end its claims and free the
@@ -410,8 +447,9 @@ pub fn space_gone(pid: u32) {
         theirs.into_iter().map(|e| (e.1, e.2)).collect()
     };
     for (pa, n) in freed {
-        pmm::free_contiguous(pa, n);
+        quarantine(pa, n);
     }
+    sweep();
 }
 
 // ---- the device fd -------------------------------------------------------------------------
@@ -621,6 +659,7 @@ fn devfd(fd: usize) -> KResult<Arc<crate::fs::OpenFile>> {
 
 /// `MILK_DRIVER(op, a, b, c, d)` (docs/drivers.md).
 pub fn sys(op: usize, a: usize, b: usize, c: usize, d: usize) -> KResult<usize> {
+    sweep();
     if op == 0 {
         return claim(a as u32);
     }

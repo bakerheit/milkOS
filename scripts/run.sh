@@ -42,6 +42,9 @@ fi
 # `echo "info registers -a" | nc -U /tmp/x.sock`).
 MON_ARGS=()
 [ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
+# MILK_DRIVERS="rng=kernel sound=user": which driver runs each device, the kernel's or the
+# user-space one (default: user for both, the kernel's as the fallback; docs/drivers.md).
+[ -n "${MILK_DRIVERS:-}" ] && MON_ARGS+=(-fw_cfg "name=opt/milkos/drivers,string=$MILK_DRIVERS")
 exec qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio ${MON_ARGS[@]+"${MON_ARGS[@]}"} "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

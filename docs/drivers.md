@@ -82,16 +82,47 @@ window buffer, but never copied or shared by fork. The process sees exactly the
 physical addresses of its own buffers and nothing else. virtio-mmio on qemu `virt` is
 DMA-coherent, so a cacheable mapping is correct.
 
-**Release** happens when the owner exits (in `finish_process`, after its address space is
-gone, so nothing maps the buffers any more), when it execs, or when the last copy of the
-device fd is closed (its mappings are removed from the owner first). Steps:
+**Release** happens in three cases:
+
+* the owner exits (in `finish_process`, after its address space is gone, so nothing maps
+  the buffers any more);
+* it execs (the same, for the old image);
+* the last copy of the device fd is closed. The owner still maps the buffers then, so
+  they are kept until its address space goes.
+
+Steps:
 
 1. Reset the device.
-2. Free the DMA frames.
-3. Unregister the user interrupt handler.
-4. Re-attach the in-kernel driver when the policy is `user` with fallback (always, today).
+2. Unregister the user interrupt handler.
+3. Put the DMA frames in **quarantine** for 2 s before they are freed (see "Devices that
+   finish requests after a reset").
+4. For sound, wait 50 ms.
+5. Re-attach the in-kernel driver: the fallback while no user driver runs.
 
 Audited `driver.release` with the reason.
+
+**Devices that finish requests after a reset.** The crash test found that qemu's
+virtio-sound reset does not flush the buffers a PCM stream holds. qemu completes them
+later: as it plays them, or at the next PREPARE. It writes their status into the old
+driver's memory and pushes their ids onto whatever queue is live by then. Without care
+that does two things:
+
+* It corrupted the next driver's queue. The in-kernel driver panicked on an integer
+  underflow, and a restarted soundd ran out of descriptors.
+* It scribbled on freed memory.
+
+So:
+
+* **Kernel detach** (soundd claims the device): the kernel driver sends PCM STOP and
+  RELEASE first. RELEASE must complete every pending buffer (virtio 1.2, 5.14.6.6.5.1)
+  while the pages are still the kernel's.
+* **Releasing a dead driver**: it can't release anything, so the kernel waits 50 ms after
+  the reset (qemu finishes what it was playing, at most 4 periods) and keeps the DMA
+  frames quarantined for 2 s, past the kernel driver's PREPARE.
+* **Both drivers** drain the tx used ring after PREPARE. They also ignore completions
+  for heads they didn't queue (`strays` in `/proc/audio`), instead of trusting them.
+
+This is the "the device is trusted" caveat from the threat model, met in practice.
 
 ## Policy: which driver runs
 
@@ -104,7 +135,8 @@ sound=user" scripts/run.sh`) sets each class to `user` or `kernel`:
   chime) and whenever no user driver holds the device. The user driver takes over when it
   claims and gives the device back when it dies.
 
-Defaults: **rng = user** and **sound = user** (see "soundd").
+Defaults: **rng = user** and **sound = user**. soundd passes audio-test and music-test as
+the default driver and survives the crash test, so it is solid enough to be the default.
 `/proc/drivers` shows the policy and current owner of each device. The units test it with
 `if-contains = /proc/drivers rng policy=user`.
 
@@ -138,22 +170,49 @@ soundd starts the PCM stream once 4 periods are queued (or nothing more is comin
 stops it 200 ms after the mixer runs dry, like the kernel driver. When soundd dies:
 
 1. Periods it had taken are lost (at most 80 ms of sound).
-2. The kernel re-attaches its own driver and carries on with the next period.
+2. The kernel re-attaches its own driver and carries on with the next period, plus any
+   periods soundd hadn't taken yet.
 3. When milkd has restarted soundd, it claims the device back, so playback moves to it.
 
-Writers never see an error. The gap is the restart time plus 80 ms.
+Writers never see an error. In the crash test the 440 Hz tone shows no measurable gap
+(20 ms windows). Periods lost in a hand-off are counted as played, so `SNDCTL_DSP_SYNC`
+doesn't wait for them.
 
 ## Supervision
 
-Both are milkd services (`/etc/milk/services/rngd.service`, `soundd.service`): `user =
-root`, `restart = always`, `sandbox = fs-none fs=/dev/entropy:rw ... net=none spawn=0`
-(the `driver` capability stays), and output into the journal as `rngd` / `soundd`. milkd's
-backoff starts at 100 ms, so a killed driver is back well within a second.
+Both are milkd services (`/etc/milk/services/rngd.service`, `soundd.service`):
 
-`scripts/driver-crash-test.sh` kills both mid-use and checks:
+* `user = root` and `restart = always`;
+* a sandbox with only the one device node they need (`fs=/dev/entropy:rw` /
+  `fs=/dev/pcm:rw`), `net=none spawn=0 clipboard=0 windows=0`, and the `driver`
+  capability kept;
+* output into the journal as `rngd` / `soundd`;
+* conditional on the policy (`if-contains = /proc/drivers rng policy=user`).
 
-* the kernel never panics;
-* milkd restarts each within a second (journal);
-* playback continues through the recording (the kernel driver bridges the gap, then
-  soundd takes over again);
-* the CSPRNG keeps its `rngd` source.
+milkd's backoff starts at 100 ms. `svc kill UNIT [SIG]` signals a unit without stopping
+it, so the restart policy applies.
+
+`scripts/driver-crash-test.sh` (in check-all):
+
+* **Boot 1, default policy.** A 5 s 440 Hz tone plays, and 1.5 s in both drivers get
+  SIGKILL. Checks:
+  * the kernel never panics;
+  * milkd restarts each, and it is driving its device again about 100 ms after the kill
+    (journal, monotonic ms; the limit is 1 s);
+  * `/proc/drivers` shows claims=2 releases=1;
+  * the tone plays to its end with the longest gap < 300 ms (qemu's wav recording);
+  * soundd is the sink at the end, and the CSPRNG's source is `rngd+jitter` again.
+* **Boot 2, `rng=kernel sound=kernel`.** Both policies are kernel, nobody claims, the
+  units are skipped, and the kernel drivers play and seed.
+
+`utest driver` covers the interface itself:
+
+* root and the capability are required (a `driver=0` sandbox or uid nobody gets EPERM);
+* a second claim gets EBUSY;
+* the window bounds hold;
+* a queue pointed at kernel memory is refused at QueueReady;
+* a planted bad descriptor is refused at QueueNotify (never on the available ring, so
+  the device can't see it);
+* a real request completes through the interrupt fd;
+* a forked child gets SIGSEGV on the DMA address;
+* close gives the device back, and the refusals are audited.

@@ -1,6 +1,9 @@
-//! svc list | status [UNIT] | start UNIT | stop UNIT | restart UNIT | reload | logs UNIT
-//! Talks to milkd over /run/milkd.sock. Anyone may list / status; start, stop, restart and
-//! reload need root or group admin (milkd checks the caller with SO_PEERCRED).
+//! svc list | status [UNIT] | start UNIT | stop UNIT | restart UNIT | kill UNIT [SIG] |
+//! reload | logs UNIT
+//! Talks to milkd over /run/milkd.sock. Anyone may list / status; start, stop, restart,
+//! kill and reload need root or group admin (milkd checks the caller with SO_PEERCRED).
+//! `kill` signals the unit's process (default 9) without stopping the unit, so milkd
+//! restarts it per its policy (crash tests).
 //! MILK_TABLE=1: list / status as a table.
 #![no_std]
 #![no_main]
@@ -138,6 +141,7 @@ fn main(args: &rt::Args) -> i32 {
         ("status", None) => String::from("status"),
         ("status" | "start" | "stop" | "restart", Some(u)) => alloc::format!("{cmd} {u}"),
         ("reload", _) => String::from("reload"),
+        ("kill", Some(u)) => alloc::format!("kill {u} {}", args.get(3).unwrap_or("9")),
         ("logs", Some(u)) => {
             let e = sys::execve("/bin/log", &["log", "-u", u], &[]);
             rt::eprintln!("svc: /bin/log: {e}");
@@ -145,12 +149,24 @@ fn main(args: &rt::Args) -> i32 {
         }
         _ => {
             rt::eprintln!(
-                "usage: svc list | status [UNIT] | start|stop|restart UNIT | reload | logs UNIT"
+                "usage: svc list | status [UNIT] | start|stop|restart UNIT | kill UNIT [SIG] | reload | logs UNIT"
             );
             return 2;
         }
     };
     match ask(&req) {
+        Ok(lines) if cmd == "kill" => {
+            let pid = lines
+                .first()
+                .and_then(|l| l.split('\t').nth(1))
+                .unwrap_or("?");
+            rt::println!(
+                "svc: signal {} sent to {} (pid {pid}); its restart policy applies",
+                args.get(3).unwrap_or("9"),
+                unit.unwrap_or("")
+            );
+            0
+        }
         Ok(lines) => {
             if !lines.is_empty() {
                 show(args, &lines, cmd == "status" && unit.is_some());

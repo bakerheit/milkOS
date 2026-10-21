@@ -493,9 +493,12 @@ a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`
   boot, seq, unit, pid, uid, level, message).
 
 **`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
-`svc logs <unit>` = `log -u <unit>`): talks to milkd over `/run/milkd.sock` (AF_UNIX
-stream, one text request per line, `SO_PEERCRED` decides): anyone may `list` / `status`;
-`start`, `stop`, `restart` need root or the `admin` group. `MILK_TABLE=1` gives tables.
+`svc kill <unit> [sig]`, `svc logs <unit>` = `log -u <unit>`): talks to milkd over
+`/run/milkd.sock` (AF_UNIX stream, one text request per line, `SO_PEERCRED` decides):
+anyone may `list` / `status`; `start`, `stop`, `restart`, `kill` need root or the `admin`
+group. `kill` signals the unit's process (default SIGKILL) without stopping the unit, so
+its restart policy brings it back (how `scripts/driver-crash-test.sh` crashes a driver).
+`MILK_TABLE=1` gives tables.
 
 ## Userland (`user/`)
 

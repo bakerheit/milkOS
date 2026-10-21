@@ -76,6 +76,16 @@ pub fn init() {
                     attach: rng::attach,
                 },
             ),
+            Ok(()) if id == device_id::SOUND && sound::present() => crate::udrv::register(
+                slot,
+                irq,
+                id,
+                crate::udrv::Class::Sound,
+                crate::udrv::Hooks {
+                    detach: sound::detach,
+                    attach: sound::attach,
+                },
+            ),
             Ok(()) => {}
             Err(e) => kprintln!("[virtio] slot {slot}: driver failed: {e:?}"),
         }

@@ -167,8 +167,8 @@ impl Notes {
             return String::new();
         };
         let mut out = String::new();
-        for r in r0..=r1 {
-            let l: Vec<char> = s.lines[r].chars().collect();
+        for (r, line) in s.lines.iter().enumerate().take(r1 + 1).skip(r0) {
+            let l: Vec<char> = line.chars().collect();
             let a = if r == r0 { c0.min(l.len()) } else { 0 };
             let b = if r == r1 { c1.min(l.len()) } else { l.len() };
             out.extend(&l[a..b]);

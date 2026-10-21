@@ -160,8 +160,8 @@ impl Terminal {
             return String::new();
         };
         let mut out = String::new();
-        for r in a.0..=b.0.min(self.screen.len().saturating_sub(1)) {
-            let l: Vec<char> = self.screen[r].chars().collect();
+        for (r, row) in self.screen.iter().enumerate().take(b.0 + 1).skip(a.0) {
+            let l: Vec<char> = row.chars().collect();
             let c0 = if r == a.0 { a.1.min(l.len()) } else { 0 };
             let c1 = if r == b.0 { b.1.min(l.len()) } else { l.len() };
             out.extend(&l[c0..c1.max(c0)]);

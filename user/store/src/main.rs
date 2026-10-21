@@ -10,11 +10,12 @@
 //! index cache for versions and sizes, installed manifests (`/Applications/<name>/manifest`,
 //! whose `dock` colour becomes the tile colour), `/sys/fs/milkfs/clones` for "trying".
 //!
-//! Keys (also what scripted tests use): Up/Down select, i install, t try, k keep,
+//! Keys (also what scripted tests use): Up/Down select, i install, t try, o/Enter run the
+//! tried app (`milk run-try`: its clone as /, sandboxed), k keep,
 //! d discard, r remove, u upgrade, g update (get the index), a upgrade all, q quit.
 //!
 //! Theme: the SPEC tokens ("Whole milk"). The wm does not publish its theme in /dev/wm's
-//! status yet, so the Store reads `dark = true` from the desktop's settings file
+//! status yet, so the Store reads `theme = chocolate` from the desktop's settings file
 //! (`/home/milk/.config/milk/settings`) and then uses the "Chocolate milk" values (the same
 //! mapping as the wm's theme table).
 
@@ -62,11 +63,12 @@ fn theme() -> Theme {
     let dark = status
         .lines()
         .find_map(|l| l.strip_prefix("theme "))
-        .map(|t| t.trim() == "dark")
+        .map(|t| matches!(t.trim(), "dark" | "chocolate"))
         .unwrap_or_else(|| {
+            // The wm's own settings file (kernel/src/wm/prefs.rs): `theme = chocolate|whole`.
             text("/home/milk/.config/milk/settings").lines().any(|l| {
                 let (k, v) = l.split_once('=').unwrap_or((l, ""));
-                k.trim() == "dark" && v.trim() == "true"
+                k.trim() == "theme" && matches!(v.trim(), "chocolate" | "dark")
             })
         });
     if dark {
@@ -260,15 +262,17 @@ struct App {
 enum Act {
     Install,
     Try,
+    Run,
     Keep,
     Discard,
     Remove,
     Upgrade,
 }
 
-const ACTS: [(Act, &str); 6] = [
+const ACTS: [(Act, &str); 7] = [
     (Act::Install, "Install"),
     (Act::Try, "Try"),
+    (Act::Run, "Run"),
     (Act::Keep, "Keep"),
     (Act::Discard, "Discard"),
     (Act::Remove, "Remove"),
@@ -307,7 +311,7 @@ fn act_buttons() -> Vec<(Act, &'static str, i32, i32)> {
     let mut x = CARD_X + 20;
     ACTS.iter()
         .map(|&(a, label)| {
-            let w = gui::str_width(label, 1) + 28;
+            let w = gui::str_width(label, 1) + 18;
             let r = (a, label, x, w);
             x += w + 6;
             r
@@ -328,7 +332,7 @@ impl App {
         match a {
             Act::Install => p.installed.is_none() && !p.trying,
             Act::Try => p.installed.is_none() && !p.trying,
-            Act::Keep | Act::Discard => p.trying,
+            Act::Run | Act::Keep | Act::Discard => p.trying,
             Act::Remove => p.installed.is_some() && !p.trying,
             Act::Upgrade => p.upgradable() && !p.trying,
         }
@@ -377,6 +381,7 @@ impl App {
         let verb = match a {
             Act::Install => "install",
             Act::Try => "try",
+            Act::Run => "run-try",
             Act::Keep => "keep",
             Act::Discard => "discard",
             Act::Remove => "remove",
@@ -670,7 +675,7 @@ impl App {
                 } else {
                     "Whole milk"
                 };
-                let s = alloc::format!("keys: i t k d r u, g update, a upgrade all \u{b7} {hint}");
+                let s = alloc::format!("keys: i t o k d r u, g update, a all \u{b7} {hint}");
                 self.win.text(lx, sy + 1, &s, self.th.latte);
             }
         }
@@ -760,6 +765,7 @@ fn main(_args: &rt::Args) -> i32 {
                     Key::Down => app.sel = (app.sel + 1).min(app.pkgs.len().saturating_sub(1)),
                     Key::Char('i') => app.act(Act::Install),
                     Key::Char('t') => app.act(Act::Try),
+                    Key::Enter | Key::Char('o') => app.act(Act::Run),
                     Key::Char('k') => app.act(Act::Keep),
                     Key::Char('d') => app.act(Act::Discard),
                     Key::Char('r') => app.act(Act::Remove),
@@ -778,6 +784,14 @@ fn main(_args: &rt::Args) -> i32 {
         }
         if app.pump() {
             dirty = true;
+        }
+        if ev.is_none() && !busy {
+            // Idle tick: follow a theme switch made in Settings.
+            let th = theme();
+            if th.dark != app.th.dark {
+                app.th = th;
+                dirty = true;
+            }
         }
         if dirty {
             app.draw();

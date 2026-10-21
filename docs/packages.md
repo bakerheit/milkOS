@@ -103,8 +103,11 @@ milk upgrade [NAME] [-y]  newer versions of installed packages (and any new depe
                        `milk discard upgrade`; -y keeps it at once
 milk list              installed packages
 milk try NAME          snapshot milk-try-NAME, clone it as try-NAME (/Volumes/Milk-try-NAME),
-                       install into the clone only; prints the path to run it from
-milk keep NAME         promote the clone (it becomes the live volume), link /bin; the state
+                       install into the clone only
+milk run-try [--no-sandbox] NAME [ARGS]  run the tried app with its clone as / (chroot)
+                       in a sandbox (below); also finds NAME inside the try-upgrade clone
+milk keep NAME         drop run-try's scratch dirs, promote the clone (it becomes the live
+                       volume), link /bin; the state
                        before is snapshot before-try-NAME (rollback to undo)
 milk discard NAME      discard the clone and its snapshot; the live system never changed
 milk relink [-q]       recreate /bin links
@@ -148,10 +151,13 @@ Terminal, or use its dock entry (below).
   signatures, clones, `-y` and audit records are exactly the command line's. Upgrade from
   the Store keeps automatically (`-y`); Try leaves the clone for Keep or Discard.
 * First run with no index cache runs `milk update` on its own.
-* Keys: Up/Down (or the wheel) select, `i` install, `t` try, `k` keep, `d` discard,
+* Run (enabled while trying) is `milk run-try NAME`: the tried app with its clone as `/`,
+  sandboxed; a window app like moo2048 opens its window, a terminal app's output lands in
+  the log box. The Store waits for it (other buttons are off until it exits).
+* Keys: Up/Down (or the wheel) select, `i` install, `t` try, `o`/Enter run, `k` keep, `d` discard,
   `r` remove, `u` upgrade, `g` update, `a` upgrade all, `q` quit.
 * Theme: SPEC tokens. The wm doesn't publish its theme in `/dev/wm`'s status; the Store
-  looks for a `theme dark` line there first, then `dark = true` in
+  looks for a `theme dark` line there first, then `theme = chocolate` (the wm's own prefs line) in
   `/home/milk/.config/milk/settings`, and then uses the wm's "Chocolate milk" values.
 * Dock entry: `rootfs/System/Applications/store/manifest` is a milk-format manifest with
   `exec /bin/store` and `dock Store #E58C97`, for the desktop's manifest dock reading.
@@ -208,12 +214,31 @@ per-process view, not a global mount change, so several tried apps can run at on
 different roots. The cwd is left as-is across `chroot` (as on Linux), which is why the
 helper does the `chdir("/")`.
 
-Proposed `milk run-try NAME`: look up the clone path (`/Volumes/Milk-try-NAME`), then
-`chroot <clone> /bin/<app>` (the app's exec name is in its installed manifest). milk owns
-this; the kernel side it needs is just `chroot`, already here. For GUI apps the clone must
-contain the app and its data under the usual paths; `/dev`, `/proc`, `/sys` inside the
-clone are only present if the clone has them (milkfs clones carry the tmpfs tree, so bind
-or re-mount those inside the jail if the app needs them — not wired yet).
+`milk run-try [--no-sandbox] NAME [ARGS...]` does this (user/milk, `cmd_run_try`):
+
+1. Finds the clone: `try-NAME`, or `try-upgrade` if NAME is in it; reads the app's `exec`
+   from the clone's manifest; makes a scratch dir `/tmp/run-NAME` inside the clone.
+2. Writes `user.pkg.run_try name= version= clone= root= exec= sandbox=` to the audit log.
+3. `chroot(<clone>)`, `chdir("/")`: `/Applications` is now the clone's, nothing else
+   resolves.
+4. Unless `--no-sandbox`, `sandbox("fs=/:r fs=/tmp/run-NAME:rw fs=<clone>/tmp/run-NAME:rw
+   net=local clipboard=0")` (the kernel logs `sandbox.enter`): the clone read-only, the
+   scratch dir writable (named both ways, because grants match the jailed absolute path or
+   the real path for a cwd-relative one), loopback/link-local network only, no clipboard;
+   audio, windows and spawn stay on, so window apps and sounds work.
+5. execve `/Applications/NAME/<exec>` with `PATH=/Applications/NAME/bin`,
+   `HOME=TMPDIR=/tmp/run-NAME`, and TERM / MILK_* passed through. milk *becomes* the app:
+   same pid, same terminal, its exit status.
+
+`milk keep` removes `tmp/run-*` from the clone before promoting it, so scratch never lands
+on the live volume. Inside the jail there is no `/dev`, `/proc`, `/sys` or `/bin` (the clone
+is the user volume, which has none): static apps that use stdio, tty ioctls and the window
+syscalls work (fortune, snake, moo2048); an app that needs device nodes would need bind
+mounts inside the jail, which aren't wired. pkg-test checks it: snake's demo through
+`run-try`, `run-try moo2048 --selftest` plus its scratch dir, `keep` leaving no `tmp`, and
+`run-try fortune -n 15` in the upgrade clone printing the 1.1.0-only quote while live is
+still 1.0.0 (so the jail really is the clone), plus the `user.pkg.run_try` and
+`sandbox.enter` records.
 
 Caveat: `getdents64` on the chroot root still reports the real parent's inode number for
 `..` (path resolution is clamped, directory listing isn't); nothing leaks a usable path.
@@ -221,5 +246,5 @@ Caveat: `getdents64` on the chroot root still reports the real parent's inode nu
 ## Not done
 
 Version ranges beyond `>=`, conflicts/provides, key rotation or revocation lists,
-wiring `milk run-try` to `chroot` (the syscall exists, see above), and a full mount namespace (chroot is a
+device nodes inside the `run-try` jail, and a full mount namespace (chroot is a
 per-process root, not per-process mounts).

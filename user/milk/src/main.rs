@@ -17,6 +17,9 @@
 //!   milk list                 installed packages
 //!   milk try NAME             install into a milkfs clone of a fresh snapshot only; the
 //!                             live system is untouched (run it from the clone's path)
+//!   milk run-try [--no-sandbox] NAME [ARGS...]
+//!                             run the tried app with its clone as / (chroot), sandboxed:
+//!                             clone read-only, /tmp/run-NAME read-write, net local only
 //!   milk keep NAME            promote that clone: the install becomes real
 //!   milk discard NAME         throw the clone away
 //!   milk relink [-q]          recreate the /bin links (/bin is in RAM; init runs this)
@@ -985,8 +988,8 @@ fn cmd_try(name: &str) -> Res<()> {
     if !others.is_empty() {
         println!("milk: (with its dependencies: {})", others.join(", "));
     }
-    if let Some(e) = &man.exec {
-        println!("milk: try it:   {apps}/{}/{e}", man.name);
+    if man.exec.is_some() {
+        println!("milk: try it:   milk run-try {name}");
     }
     println!("milk: then:     milk keep {name}  (make it real)  or  milk discard {name}");
     Ok(())
@@ -1070,7 +1073,8 @@ fn cmd_upgrade(only: Option<&str>, yes: bool) -> Res<()> {
 
 fn cmd_keep(name: &str) -> Res<()> {
     let c = clone_name(name);
-    clone_path(&c).ok_or_else(|| alloc::format!("not trying {name} (no clone {c})"))?;
+    let root = clone_path(&c).ok_or_else(|| alloc::format!("not trying {name} (no clone {c})"))?;
+    drop_run_scratch(&root);
     milkfs("promote", &c)?;
     // The origin snapshot is not needed any more (before-<clone> holds the undo).
     let _ = milkfs("delete", &snap_name(name));
@@ -1113,6 +1117,93 @@ fn cmd_keep(name: &str) -> Res<()> {
     Ok(())
 }
 
+/// Scratch dir (inside the clone) that `run-try` gives a tried app; removed before `keep`.
+fn run_scratch(name: &str) -> String {
+    alloc::format!("/tmp/run-{name}")
+}
+
+/// `milk run-try [--no-sandbox] NAME [ARGS...]`: run a tried app *as if its clone were the
+/// system*. milk chroots into the clone (so `/Applications` is the clone's, and nothing
+/// outside it resolves), then, unless `--no-sandbox`, enters a capability sandbox: the
+/// clone read-only, a scratch dir read-write (`/tmp/run-NAME` in the clone, also HOME and
+/// TMPDIR), network loopback/link-local only, no clipboard. Then milk *becomes* the app
+/// (execve), so it keeps the terminal, the pid and the exit status. Works for `try NAME`
+/// clones and for a package inside the `try-upgrade` clone.
+fn cmd_run_try(name: &str, sandboxed: bool, extra: &[&str], envp: &[&str]) -> Res<()> {
+    let label = if clone_path(&clone_name(name)).is_some() {
+        name
+    } else if clone_path(&clone_name("upgrade"))
+        .is_some_and(|r| exists(&alloc::format!("{r}{APPS}/{name}/manifest")))
+    {
+        "upgrade"
+    } else {
+        return Err(alloc::format!("not trying {name}: `milk try {name}` first"));
+    };
+    let c = clone_name(label);
+    let root = clone_path(&c).ok_or("clone vanished")?;
+    let man = text(&alloc::format!("{root}{APPS}/{name}/manifest"))
+        .and_then(|t| Manifest::parse(&t))
+        .ok_or_else(|| alloc::format!("{name} has no manifest in clone {c}"))?;
+    let exec = man
+        .exec
+        .as_ref()
+        .ok_or_else(|| alloc::format!("{name} has nothing to run (no exec in its manifest)"))?;
+    let jailed = alloc::format!("{APPS}/{name}/{exec}");
+    let scratch = run_scratch(name);
+    mkdir_all(&alloc::format!("{root}{scratch}"))?;
+    // Grants are matched on the path a request names: the jailed absolute path, or the
+    // real path for a cwd-relative one, so the scratch dir is granted in both spellings.
+    let spec = if sandboxed {
+        alloc::format!("fs=/:r fs={scratch}:rw fs={root}{scratch}:rw net=local clipboard=0")
+    } else {
+        String::from("none")
+    };
+    audit(
+        "pkg.run_try",
+        &alloc::format!(
+            "name={name} version={} clone={c} root={root} exec={jailed} sandbox={}",
+            man.version,
+            spec.replace(' ', ",")
+        ),
+    );
+    sys::chroot(&root).map_err(|e| alloc::format!("chroot {root}: {e}"))?;
+    sys::chdir("/").map_err(|e| alloc::format!("chdir /: {e}"))?;
+    if sandboxed {
+        sys::sandbox(&spec).map_err(|e| alloc::format!("sandbox: {e}"))?;
+    }
+    let mut env = alloc::vec![
+        alloc::format!("PATH={APPS}/{name}/bin"),
+        alloc::format!("HOME={scratch}"),
+        alloc::format!("TMPDIR={scratch}"),
+    ];
+    env.extend(
+        envp.iter()
+            .filter(|e| e.starts_with("TERM=") || e.starts_with("MILK_"))
+            .map(|e| String::from(*e)),
+    );
+    let env: Vec<&str> = env.iter().map(|e| e.as_str()).collect();
+    let mut argv = alloc::vec![jailed.as_str()];
+    argv.extend_from_slice(extra);
+    let e = sys::execve(&jailed, &argv, &env);
+    Err(alloc::format!("exec {jailed} inside {root}: {e}"))
+}
+
+/// Before a clone becomes the live volume, drop the scratch dirs `run-try` made in it.
+fn drop_run_scratch(root: &str) {
+    let tmp = alloc::format!("{root}/tmp");
+    let Ok(entries) = sys::read_dir(&tmp) else {
+        return;
+    };
+    for (n, _) in &entries {
+        if n.starts_with("run-") {
+            let _ = rm_rf(&alloc::format!("{tmp}/{n}"));
+        }
+    }
+    if sys::read_dir(&tmp).is_ok_and(|e| e.iter().all(|(n, _)| n == "." || n == "..")) {
+        let _ = sys::rmdir(&tmp);
+    }
+}
+
 fn cmd_discard(name: &str) -> Res<()> {
     let c = clone_name(name);
     clone_path(&c).ok_or_else(|| alloc::format!("not trying {name} (no clone {c})"))?;
@@ -1137,7 +1228,7 @@ fn cmd_relink(quiet: bool) {
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: milk [--insecure] update | search [WORD] | info NAME | install NAME[=VER] | list\n       milk remove [--force] NAME | autoremove | upgrade [NAME] [-y]\n       milk [--insecure] try NAME | keep NAME|upgrade | discard NAME|upgrade | relink [-q] | keys | selftest"
+        "usage: milk [--insecure] update | search [WORD] | info NAME | install NAME[=VER] | list\n       milk remove [--force] NAME | autoremove | upgrade [NAME] [-y]\n       milk [--insecure] try NAME | run-try [--no-sandbox] NAME [ARGS]\n       milk keep NAME|upgrade | discard NAME|upgrade | relink [-q] | keys | selftest"
     );
     2
 }
@@ -1175,6 +1266,8 @@ fn main(args: &rt::Args) -> i32 {
             Ok(())
         }
         ["try", n] => cmd_try(n),
+        ["run-try", "--no-sandbox", n, rest @ ..] => cmd_run_try(n, false, rest, &args.envp),
+        ["run-try", n, rest @ ..] if !n.starts_with('-') => cmd_run_try(n, true, rest, &args.envp),
         ["keep", n] => cmd_keep(n),
         ["discard", n] => cmd_discard(n),
         ["relink"] => {

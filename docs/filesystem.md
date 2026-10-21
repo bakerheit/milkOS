@@ -211,8 +211,9 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   U+FFFD. Reads take whatever `uart::read_byte` has, mapping CR to LF, and return `EAGAIN`
   when nothing is waiting (there are no wait queues yet). Note `kmain`'s idle loop
   (`uart::echo_pending`) consumes the same bytes.
-- `/dev/random` and `/dev/urandom`: xorshift64* seeded from the counter. **Not
-  cryptographic.** Writes stir the state.
+- `/dev/random` and `/dev/urandom`: the kernel CSPRNG (ChaCha20 with fast key erasure,
+  seeded from virtio-rng + timer jitter, docs/crypto.md). Reads block only until the boot
+  seed; writes are mixed into its pool.
 - Timestamps: Unix time from the PL031 RTC read once at `fs::init`, plus uptime. No atime
   updates.
 - Locking: tmpfs, devfs, procfs and sysfs use `SpinLock`s and never block (tmpfs copies

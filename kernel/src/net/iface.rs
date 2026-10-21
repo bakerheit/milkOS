@@ -146,7 +146,13 @@ impl Link {
 /// from the last two MAC bytes (kept in 1..=254), then mixed on each conflict.
 pub fn ll_candidate(mac: Mac, conflicts: u32) -> Ipv4 {
     let m = mac.0;
-    let fix = |b: u32| if (1..=254).contains(&b) { b } else { 1 + b % 254 };
+    let fix = |b: u32| {
+        if (1..=254).contains(&b) {
+            b
+        } else {
+            1 + b % 254
+        }
+    };
     let mut x = fix(m[4] as u32);
     let mut y = fix(m[5] as u32);
     if conflicts > 0 {
@@ -278,9 +284,7 @@ impl Iface {
 
     /// Which link owns `ip` as its address?
     pub fn link_of_addr(&self, ip: Ipv4) -> Option<usize> {
-        self.links
-            .iter()
-            .position(|l| l.up() && l.cfg.is_local(ip))
+        self.links.iter().position(|l| l.up() && l.cfg.is_local(ip))
     }
 
     /// The link-local link (eth1), if configured.

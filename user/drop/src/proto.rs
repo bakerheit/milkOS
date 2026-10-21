@@ -7,13 +7,18 @@ use rt::ed25519;
 use rt::net::{self, SockAddr};
 
 use crate::ident::{self, Identity, hex};
+use rt::crypto::{self, aead};
+use rt::sha256::Sha256;
 
 /// Discovery: queries and announcements, on the mDNS group but our own port.
 pub const DISC_PORT: u16 = 5359;
 pub const GROUP: [u8; 4] = [224, 0, 0, 251];
 /// Transfers (TCP), while `drop recv` runs.
 pub const XFER_PORT: u16 = 5360;
+/// Discovery datagrams.
 pub const MAGIC: &str = "MILKDROP/1";
+/// The transfer protocol: v2 = X25519 + ChaCha20-Poly1305 (v1 was signed but plaintext).
+pub const XMAGIC: &str = "MILKDROP/2";
 /// Longest protocol line we accept.
 const MAX_LINE: usize = 1024;
 
@@ -73,6 +78,8 @@ pub struct Peer {
     pub addr: [u8; 4],
     pub port: u16,
     pub receiving: bool,
+    /// Its rotation statement (`rot=old:sig`), if its key replaced an older one.
+    pub rot: Option<ident::Rotation>,
 }
 
 const ANNOUNCE_CTX: &str = "milkdrop-announce-v1";
@@ -80,11 +87,14 @@ const ANNOUNCE_CTX: &str = "milkdrop-announce-v1";
 /// Our signed announcement: who we are, where transfers go, whether `drop recv` is on.
 pub fn announce(id: &Identity, host: &str, receiving: bool) -> String {
     let body = alloc::format!(
-        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT} key={} fp={} recv={}",
+        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT} key={} fp={} recv={}{}",
         id.name,
         hex(&id.public),
         ident::fp_compact(&id.public),
-        receiving as u8
+        receiving as u8,
+        ident::rotation(&id.public)
+            .map(|r| alloc::format!(" rot={}:{}", hex(&r.old), hex(&r.sig)))
+            .unwrap_or_default()
     );
     let sig = ed25519::sign(&id.seed, alloc::format!("{ANNOUNCE_CTX} {body}").as_bytes());
     alloc::format!("{body} sig={}", hex(&sig))
@@ -120,6 +130,13 @@ pub fn parse_announce(line: &str, from: SockAddr) -> Option<Peer> {
         addr: from.ip,
         port: field(body, "port")?.parse().ok()?,
         receiving: field(body, "recv") == Some("1"),
+        rot: field(body, "rot").and_then(|r| {
+            let (o, s) = r.split_once(':')?;
+            Some(ident::Rotation {
+                old: ed25519::unhex::<32>(o)?,
+                sig: ed25519::unhex::<64>(s)?,
+            })
+        }),
     })
 }
 
@@ -166,14 +183,85 @@ pub fn query(ms: u64) -> Result<Vec<Peer>, String> {
 
 // ---- the transfer connection -------------------------------------------------------------
 
-/// Hello transcript both sides sign (with their role): binds both nonces and both keys, so
-/// a signature can't be replayed into another session or for another peer.
-pub fn transcript(role: &str, nonce_r: &str, nonce_s: &str, key_r: &[u8], key_s: &[u8]) -> String {
+/// Hello transcript both sides sign (with their role): binds both nonces, both identity
+/// keys and both ephemeral X25519 keys, so a signature can't be replayed into another
+/// session or for another peer, and nobody in the middle can swap the X25519 keys.
+pub fn transcript(
+    role: &str,
+    nonce_r: &str,
+    nonce_s: &str,
+    key_r: &[u8],
+    key_s: &[u8],
+    dh_r: &[u8],
+    dh_s: &[u8],
+) -> String {
     alloc::format!(
-        "milkdrop-hello-v1 {role} {nonce_r} {nonce_s} {} {}",
+        "milkdrop-hello-v2 {role} {nonce_r} {nonce_s} {} {} {} {}",
         hex(key_r),
-        hex(key_s)
+        hex(key_s),
+        hex(dh_r),
+        hex(dh_s)
     )
+}
+
+/// What a rotated identity signs with its OLD key: "this new key replaces me".
+pub fn rotation_msg(old: &[u8; 32], new: &[u8; 32]) -> String {
+    alloc::format!("milkdrop-rotate-v1 {} {}", hex(old), hex(new))
+}
+
+/// The session after the hello: one ChaCha20-Poly1305 key per direction, derived from
+/// the X25519 shared secret and the transcript; nonces are a per-direction counter.
+pub struct Channel {
+    tx: [u8; 32],
+    rx: [u8; 32],
+    tx_n: u64,
+    rx_n: u64,
+}
+
+/// Longest plaintext in one record.
+pub const MAX_RECORD: usize = 32 * 1024;
+
+impl Channel {
+    pub fn derive(
+        shared: &[u8; 32],
+        nonce_r: &str,
+        nonce_s: &str,
+        dh_r: &[u8; 32],
+        dh_s: &[u8; 32],
+        sender: bool,
+    ) -> Channel {
+        let k = |label: &[u8]| {
+            let mut h = Sha256::new();
+            h.update(label)
+                .update(shared)
+                .update(nonce_r.as_bytes())
+                .update(nonce_s.as_bytes())
+                .update(dh_r)
+                .update(dh_s);
+            h.finish()
+        };
+        let (s2r, r2s) = (k(b"milkdrop-v2 key s->r"), k(b"milkdrop-v2 key r->s"));
+        let (tx, rx) = if sender { (s2r, r2s) } else { (r2s, s2r) };
+        Channel {
+            tx,
+            rx,
+            tx_n: 0,
+            rx_n: 0,
+        }
+    }
+
+    fn nonce(n: u64) -> [u8; 12] {
+        let mut b = [0u8; 12];
+        b[4..].copy_from_slice(&n.to_be_bytes());
+        b
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        crypto::wipe(&mut self.tx);
+        crypto::wipe(&mut self.rx);
+    }
 }
 
 pub fn offer_msg(nonce_r: &str, nonce_s: &str, name: &str, size: u64, sha: &str) -> String {
@@ -228,15 +316,6 @@ impl Conn {
         }
     }
 
-    /// Up to `max` bytes of data (what is buffered first).
-    pub fn data(&mut self, max: usize) -> Result<Vec<u8>, String> {
-        if self.buf.is_empty() {
-            self.fill()?;
-        }
-        let n = max.min(self.buf.len());
-        Ok(self.buf.drain(..n).collect())
-    }
-
     pub fn send(&mut self, b: &[u8]) -> Result<(), String> {
         let mut off = 0;
         while off < b.len() {
@@ -252,6 +331,59 @@ impl Conn {
 
     pub fn send_line(&mut self, l: &str) -> Result<(), String> {
         self.send(alloc::format!("{l}\n").as_bytes())
+    }
+
+    /// Exactly `n` bytes.
+    fn exact(&mut self, n: usize) -> Result<Vec<u8>, String> {
+        while self.buf.len() < n {
+            self.fill()?;
+        }
+        Ok(self.buf.drain(..n).collect())
+    }
+
+    /// One encrypted record: `[length: u32 BE][ciphertext][tag: 16]`, the length as AAD,
+    /// nonce = the direction's counter.
+    pub fn send_rec(&mut self, ch: &mut Channel, pt: &[u8]) -> Result<(), String> {
+        if pt.len() > MAX_RECORD {
+            return Err(String::from("record too large"));
+        }
+        let len = (pt.len() as u32).to_be_bytes();
+        let mut rec = Vec::with_capacity(4 + pt.len() + aead::TAG);
+        rec.extend_from_slice(&len);
+        rec.extend_from_slice(pt);
+        let tag = aead::seal(&ch.tx, &Channel::nonce(ch.tx_n), &len, &mut rec[4..]);
+        ch.tx_n += 1;
+        rec.extend_from_slice(&tag);
+        self.send(&rec)
+    }
+
+    /// The next record, decrypted and authenticated (anything altered, replayed, dropped
+    /// or reordered fails the tag: the counter is in the nonce).
+    pub fn recv_rec(&mut self, ch: &mut Channel) -> Result<Vec<u8>, String> {
+        let h = self.exact(4)?;
+        let len = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as usize;
+        if len > MAX_RECORD {
+            return Err(String::from("record too large"));
+        }
+        let mut body = self.exact(len + aead::TAG)?;
+        let tag: [u8; 16] = body[len..].try_into().unwrap();
+        body.truncate(len);
+        if !aead::open(&ch.rx, &Channel::nonce(ch.rx_n), &h, &mut body, &tag) {
+            return Err(String::from(
+                "a record failed authentication (altered on the wire?); connection dropped",
+            ));
+        }
+        ch.rx_n += 1;
+        Ok(body)
+    }
+
+    pub fn send_eline(&mut self, ch: &mut Channel, l: &str) -> Result<(), String> {
+        self.send_rec(ch, l.as_bytes())
+    }
+
+    pub fn eline(&mut self, ch: &mut Channel) -> Result<String, String> {
+        let b = self.recv_rec(ch)?;
+        Ok(String::from_utf8_lossy(&b).into_owned())
     }
 }
 

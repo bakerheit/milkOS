@@ -267,15 +267,26 @@ fn in_window(x: u32, lo: u32, len: u32) -> bool {
     x.wrapping_sub(lo) < len
 }
 
+/// The secret in [`initial_seq`]: 64 random bits, drawn once (from the CSPRNG).
+static ISN_SECRET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 fn initial_seq(local: SockAddr, remote: SockAddr, now: u64) -> u32 {
-    // RFC 6528 shape: per-connection offset + a 4 µs clock.
-    let mut h: u32 = 0x811c_9dc5;
-    let (lp, rp) = (local.port.to_be_bytes(), remote.port.to_be_bytes());
-    let bytes = local.ip.0.iter().chain(&remote.ip.0).chain(&lp).chain(&rp);
-    for &b in bytes {
-        h = (h ^ b as u32).wrapping_mul(16_777_619);
+    // RFC 6528: ISN = M + F(4-tuple, secret), M a 4 µs clock, F = SHA-256 keyed by a
+    // boot-time secret, so sequence numbers can't be predicted from outside.
+    use core::sync::atomic::Ordering;
+    let mut key = ISN_SECRET.load(Ordering::Relaxed);
+    if key == 0 {
+        key = crate::crypto::rng::next_u64() | 1;
+        ISN_SECRET.store(key, Ordering::Relaxed);
     }
-    h.wrapping_add((now / 4000) as u32)
+    let mut h = crate::crypto::sha256::Sha256::new();
+    h.update(&key.to_le_bytes());
+    h.update(&local.ip.0);
+    h.update(&local.port.to_be_bytes());
+    h.update(&remote.ip.0);
+    h.update(&remote.port.to_be_bytes());
+    let d = h.finish();
+    u32::from_le_bytes([d[0], d[1], d[2], d[3]]).wrapping_add((now / 4000) as u32)
 }
 
 // ---- segment output -------------------------------------------------------------------------

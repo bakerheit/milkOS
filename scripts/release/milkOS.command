@@ -69,7 +69,7 @@ SOUND_ARGS=()
 [ "$SOUND" = 1 ] && SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
 
 [ "$HEADLESS" = 0 ] && say "Starting milkOS @VERSION@ (a window opens; this one is its console)..."
-exec "$QEMU" -name "milkOS @VERSION@" -M virt "${ACCEL[@]}" -smp 4 -m 512M -rtc base=localtime \
+exec "$QEMU" -name "milkOS @VERSION@" -M virt "${ACCEL[@]}" -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -smp 4 -m 512M -rtc base=localtime \
   -kernel kernel.bin -serial "$SERIAL" "${MONITOR[@]+"${MONITOR[@]}"}" "${DISPLAY_ARGS[@]}" \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \

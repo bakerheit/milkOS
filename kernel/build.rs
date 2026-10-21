@@ -42,8 +42,10 @@ fn build_user(repo: &Path) {
     if !user.join("Cargo.toml").exists() {
         return;
     }
-    // A directory: cargo rescans everything under it for changes.
+    // A directory: cargo rescans everything under it for changes. user/rt also uses the
+    // shared crypto crate.
     println!("cargo:rerun-if-changed={}", user.display());
+    println!("cargo:rerun-if-changed={}", repo.join("crypto").display());
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(&user)

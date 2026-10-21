@@ -2,7 +2,7 @@
 //!
 //! [`init`] walks the 32 virtio-mmio slots of qemu `virt` and hands each device it finds to
 //! its driver. Drivers so far: [`input`] (keyboard, tablet),
-//! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`), [`sound`] (PCM output for `crate::audio`).
+//! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`), [`sound`] (PCM output for `crate::audio`), [`rng`] (entropy for `crate::crypto::rng`).
 
 pub mod blk;
 pub mod input;
@@ -10,6 +10,7 @@ pub mod mmio;
 pub mod net;
 pub mod p9;
 pub mod queue;
+pub mod rng;
 pub mod sound;
 
 use crate::kprintln;
@@ -59,6 +60,7 @@ pub fn init() {
             device_id::NET => net::attach(t),
             device_id::SOUND => sound::attach(t),
             device_id::P9 => p9::attach(t),
+            device_id::RNG => rng::attach(t),
             _ => Ok(()),
         };
         if let Err(e) = r {

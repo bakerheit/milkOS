@@ -357,6 +357,8 @@ pub fn render(f: Gen) -> String {
 /// Add `/proc/net/*`.
 pub fn init() {
     let Some(root) = procfs::root() else { return };
+    // Not network, but procfs is up by now and the CSPRNG has no init of its own after it.
+    root.add_file("rng", crate::crypto::rng::status);
     let dir = root.add_dir("net");
     for &(name, f) in FILES {
         dir.add_file(name, move || render(f));

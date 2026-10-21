@@ -34,11 +34,15 @@ ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 
-# Two different 1 MiB files to send, and each VM's private images.
+# Two different 1 MiB files to send, and each VM's private images. to-bob.bin is half
+# random, half a known text (the canary) that must never show up on the wire.
+CANARY="MILKDROP-PLAINTEXT-CANARY-$$"
 python3 -I -c "
 import os, sys
-for p in sys.argv[1:]:
-    open(p, 'wb').write(os.urandom(1 << 20))" "$WORK/to-bob.bin" "$WORK/to-alice.bin"
+canary = (sys.argv[3] + ' the quick brown cow jumps over the lazy moon\\n').encode()
+half = 1 << 19
+open(sys.argv[1], 'wb').write(os.urandom(half) + (canary * (half // len(canary) + 1))[:half])
+open(sys.argv[2], 'wb').write(os.urandom(1 << 20))" "$WORK/to-bob.bin" "$WORK/to-alice.bin" "$CANARY"
 for vm in alice bob; do
   python3 -I scripts/mkmilkfs.py mkfs "$WORK/$vm-fs.img" --size 64M --label Milk >/dev/null
   python3 -I scripts/mkmilkfs.py mkdir "$WORK/$vm-fs.img" /share >/dev/null
@@ -61,14 +65,15 @@ echo "eth1 link: alice 127.0.0.1:$PA <-> bob 127.0.0.1:$PB (qemu -netdev dgram)"
 
 # boot NAME MAC LOCAL_PORT REMOTE_PORT: eth0 = restricted slirp, eth1 = the dgram link.
 boot() {
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-2}" -m 512M \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-2}" -m 512M \
     -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=off" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -drive "file=$WORK/$1-disk.img,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -drive "file=$WORK/$1-fs.img,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 \
     -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$3,remote.type=inet,remote.host=127.0.0.1,remote.port=$4" \
-    -device "virtio-net-device,netdev=d0,mac=$2" 2>>"$WORK/$1.qemu.err" &
+    -device "virtio-net-device,netdev=d0,mac=$2" \
+    -object "filter-dump,id=cap0,netdev=d0,file=$WORK/$1-eth1.pcap" 2>>"$WORK/$1.qemu.err" &
 }
 boot alice 02:6d:6b:64:0a:0a "$PA" "$PB"
 QA=$!
@@ -81,13 +86,17 @@ echo "qemu: alice pid $QA, bob pid $QB"
 P='wait:msh:[^\n]*\$ '
 DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed|mismatch|timed out|closed))'
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
-  "$P" 'send:drop name alice' "$P" 'send:drop id' "$P" "done:$WORK/a1" "waitfile:$WORK/b1" \
+  "$P" 'send:drop name alice' "$P" 'send:drop id' "$P" 'send:drop selftest' "$P" \
+  "done:$WORK/a1" "waitfile:$WORK/b1" \
   'send:drop list' "$P" \
   'send:drop send bob /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
   'send:drop recv' 'wait:receiving as' "done:$WORK/a2" \
   'wait:accept\? \[y/N\]' 'send:y' "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/b3" \
   'send:drop send bob /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
+  'send:drop id --rotate' "$P" \
+  'send:drop forget bob' "$P" \
+  'send:drop recv -y' 'wait:receiving as' "done:$WORK/a4" "wait:$DONE_RE" "$P" \
   'send:drop peers' "$P" \
   'send:ls /home/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -105,7 +114,10 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:mv /etc/milk/drop/identity.secret /etc/milk/drop/old.secret' "$P" \
   'send:drop id' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b3" \
-  "wait:$DONE_RE" "$P" "waitfile:$WORK/alice.done" \
+  "wait:$DONE_RE" "$P" "waitfile:$WORK/a4" \
+  'send:drop list' "$P" \
+  'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
+  "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
   'send:echo now > /sys/fs/milkfs/sync' "$P" \
@@ -144,7 +156,7 @@ check "$A" "alice: identity made at first boot" "drop: new identity milk-[0-9a-f
 check "$A" "init started the Milk Drop daemon" "drop \\(pid [0-9]+\\): Milk Drop on eth1"
 check "$A" "alice discovers bob (new, receiving)" "^bob +169\\.254\\.11\\.11 +[0-9a-f ]{19} +yes +new "
 check "$A" "first contact: bob's fingerprint shown, TOFU" "drop: bob is new: fingerprint [0-9a-f ]{19} \\(trusted on first use\\)"
-check "$B" "bob's prompt names alice, NEW, with her fingerprint" "drop: alice \\(NEW peer, fingerprint [0-9a-f ]{19}; accepting trusts this key from now on\\) wants to send you to-bob\\.bin \\(1024 KiB\\)\\."
+check "$B" "bob's prompt names alice, NEW, with her fingerprint" "drop: alice \\(NEW peer, fingerprint [0-9a-f ]{19}; accepting trusts this key from now on\\) wants to send you to-bob\\.bin \\(1024 KiB\\), encrypted\\."
 check "$A" "alice's progress reaches 100%" "drop: \\[##########\\] 100%  1024 KiB / 1024 KiB"
 check "$B" "bob verified the SHA-256 (the host's hash)" "drop: received /home/milk/Downloads/to-bob\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
 check "$A" "alice: bob confirmed the hash" "drop: sent to-bob\\.bin to bob: 1024 KiB in [0-9]+ ms"
@@ -155,8 +167,8 @@ check "$A" "alice's prompt: bob is known (no NEW)" "drop: bob \\(fingerprint [0-
 check "$B" "bob: a new identity (same name) after losing the old key" "drop: new identity bob \\(fingerprint"
 check "$A" "changed key refused, loudly" "drop: WARNING: bob's KEY HAS CHANGED\\. Refusing to talk to it\\."
 check "$A" "the send failed because of it" "drop: bob's key changed; refused"
-check "$A" "audit: alice's send" "user\\.drop\\.send +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-bob\\.bin size=1048576 sha256=$SHA_TO_BOB result=ok"
-check "$A" "audit: alice's receive" "user\\.drop\\.recv +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-alice\\.bin size=1048576 sha256=$SHA_TO_ALICE saved=/home/milk/Downloads/to-alice\\.bin result=ok"
+check "$A" "audit: alice's send" "user\\.drop\\.send +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-bob\\.bin size=1048576 sha256=$SHA_TO_BOB enc=x25519-chacha20poly1305 result=ok"
+check "$A" "audit: alice's receive" "user\\.drop\\.recv +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-alice\\.bin size=1048576 sha256=$SHA_TO_ALICE saved=/home/milk/Downloads/to-alice\\.bin enc=x25519-chacha20poly1305 result=ok"
 check "$A" "audit: the refused key change" "user\\.drop\\.key_changed +role=send name=bob addr=169\\.254\\.11\\.11 trusted_fp=[0-9a-f]{16} offered_fp=[0-9a-f]{16} action=refused"
 check "$A" "audit: first-use trust" "user\\.drop\\.trust +name=bob fp=[0-9a-f]{16} role=send"
 check "$B" "audit: bob's receive" "user\\.drop\\.recv +peer=alice .* result=ok"
@@ -166,7 +178,30 @@ check "$B" "bob's receiver saw alice hang up on the changed key" "drop: the peer
 # Ctrl-C ends a drop recv blocked in accept (blocking socket calls take signals).
 grep -A2 'drop recv -k' "$B" | grep -q '^msh:' || fail "Ctrl-C did not stop drop recv -k"
 echo "  ok  Ctrl-C stops a drop recv blocked in accept"
-FP_A=$(sed -n 's/^fingerprint: *//p' "$A" | head -1)
+check "$A" "userland crypto vectors (rt::crypto)" "drop: selftest ok"
+check "$A" "X25519 vectors in userland" "drop: x25519 +8/8 vectors"
+check "$A" "a fresh key is from the kernel CSPRNG" "^rng: +kernel CSPRNG"
+check "$A" "the kernel CSPRNG was seeded from virtio-rng" "\\[rng\\] ChaCha20 CSPRNG seeded from virtio-rng \\(64 bytes\\).*: ok$"
+check "$A" "the kernel ran every crypto vector" "\\[crypto\\] test vectors: .*x25519 8/8: ok"
+check "$A" "alice rotated her key" "drop: the old key signed the new one"
+check "$B" "bob sees alice's rotation in drop list" "^alice +169\\.254\\.10\\.10 +[0-9a-f ]{19} +yes +rotated "
+check "$B" "bob accepts the rotated key (signed by the old one)" "drop: alice rotated its key \\(signed by its old key [0-9a-f ]{19}\\): now [0-9a-f ]{19}"
+check "$A" "drop forget: bob's new key is first contact again" "drop: forgot bob; its next key will be trusted on first use"
+check "$A" "alice receives over the rotated key" "drop: received /home/milk/Downloads/to-alice \\(1\\)\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
+check "$B" "audit: the accepted rotation" "user\\.drop\\.key_rotated +role=send name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} action=accepted"
+check "$A" "audit: the rotation" "user\\.drop\\.rotate +name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16}"
+# The wire (qemu filter-dump on eth1, both VMs): the hello and discovery are visible, the
+# file and its name are not.
+for vm in alice bob; do
+  [ -s "$WORK/$vm-eth1.pcap" ] || fail "no capture from $vm's eth1"
+  grep -aq "MILKDROP/2 HELLO recv" "$WORK/$vm-eth1.pcap" || fail "$vm capture: no plaintext hello (the capture isn't working)"
+  grep -aq "ANNOUNCE name=" "$WORK/$vm-eth1.pcap" || fail "$vm capture: no discovery datagrams"
+  grep -aq "$CANARY" "$WORK/$vm-eth1.pcap" && fail "$vm capture: the canary text went over the wire in plaintext"
+  grep -aq "to-bob.bin" "$WORK/$vm-eth1.pcap" && fail "$vm capture: the file name went over the wire in plaintext"
+  grep -aq "sha256=" "$WORK/$vm-eth1.pcap" && fail "$vm capture: the offer went over the wire in plaintext"
+done
+echo "  ok  eth1 captures (filter-dump): hello + discovery visible; canary text, file name and offer never in plaintext ($(wc -c <"$WORK/alice-eth1.pcap" | tr -d ' ') bytes captured on alice)"
+FP_A=$(sed -n 's/^drop:   new fingerprint: *//p' "$A" | head -1)
 [ -n "$FP_A" ] || fail "no fingerprint in alice's drop id"
 
 echo "---- on disk (mkmilkfs.py, after shutdown) ----"
@@ -201,6 +236,49 @@ cat "$A2"; echo
 check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"
+
+echo "---- a machine with a pre-CSPRNG (legacy) identity: carol ----"
+# A fresh image whose /etc/milk/drop holds an old-format secret (no rng= tag, as made by
+# the weak generator): the daemon must rotate it at boot, signed by the old key.
+LEGACY_SEED=$(python3 -I -c "print('42' * 32)")
+python3 -I scripts/mkmilkfs.py mkfs "$WORK/carol-fs.img" --size 64M --label Milk >/dev/null
+python3 -I scripts/mkmilkfs.py mkdir "$WORK/carol-fs.img" /etc/milk/drop 700 >/dev/null
+printf 'ed25519-seed %s\n# Milk Drop identity of this machine: never copy it anywhere.\n' "$LEGACY_SEED" >"$WORK/legacy.secret"
+printf 'carol\n' >"$WORK/legacy.name"
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/identity.secret "$WORK/legacy.secret" >/dev/null
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/name "$WORK/legacy.name" >/dev/null
+dd if=/dev/zero of="$WORK/carol-disk.img" bs=1m count=0 seek=64 2>/dev/null
+read -r PC PD < <(python3 -I -c "
+import socket
+ss = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(2)]
+for s in ss: s.bind(('127.0.0.1', 0))
+print(*[s.getsockname()[1] for s in ss])")
+boot carol 02:6d:6b:64:0c:0c "$PC" "$PD"
+QC=$!
+PIDS+=("$QC")
+python3 -I scripts/serial_drive.py "$WORK/carol.sock" "$WORK/carol.log" \
+  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:audit --event user.drop' "$P" \
+  'send:echo now > /sys/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
+DC=$!
+PIDS+=("$DC")
+for _ in $(seq 600); do [ -e "$WORK/carol.done" ] && break; sleep 0.1; done
+[ -e "$WORK/carol.done" ] || fail "carol's boot timed out"
+sleep 1.5
+kill "$DC" 2>/dev/null || true
+kill "$QC"
+wait "$QC" 2>/dev/null || true
+C="$WORK/carol.txt"
+tr -d '\r' <"$WORK/carol.log" >"$C"
+grep -E "^drop: carol|^name:|^fingerprint:|^rotated:|^rng:|user\.drop\.rotate" "$C"
+check "$C" "the daemon rotated the legacy identity at boot" "drop: carol's identity came from the old weak RNG: rotated it \\([0-9a-f ]{19} -> [0-9a-f ]{19}, signed by the old key\\)"
+check "$C" "drop id: rotated, now from the kernel CSPRNG" "^rotated: +from [0-9a-f ]{19} \\(signed by it\\)"
+check "$C" "drop id: the new key's RNG" "^rng: +kernel CSPRNG"
+check "$C" "audit: rotation because of the legacy RNG" "user\\.drop\\.rotate +name=carol old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} key=[0-9a-f]{64} reason=legacy-rng"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/identity.secret >"$WORK/carol.secret"
+grep -q "rng=kernel-csprng" "$WORK/carol.secret" || fail "carol's secret on disk isn't tagged rng=kernel-csprng"
+grep -q "$LEGACY_SEED" "$WORK/carol.secret" && fail "carol's legacy seed is still on disk"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/rotation | grep -q "^ed25519-rotate " || fail "no rotation statement on carol's disk"
+echo "  ok  on disk: the legacy seed is gone, the new one is tagged, the rotation statement is kept"
 
 cleanup
 trap - EXIT

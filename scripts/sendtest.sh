@@ -41,7 +41,7 @@ boot() { # name log commands...
   for img in $DISKS; do
     drives+=(-drive "file=$img,if=none,format=raw,id=d${#drives[@]}" -device "virtio-blk-device,drive=d${#drives[@]}")
   done
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
     -display none -monitor none -serial "unix:$SOCK,server,nowait" \
     -global virtio-mmio.force-legacy=false "${drives[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
   QPID=$!

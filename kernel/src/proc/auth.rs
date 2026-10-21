@@ -101,9 +101,40 @@ pub fn require(op: &str) -> KResult<()> {
     Err(EPERM)
 }
 
+/// Apps the desktop started (`proc::spawn_with_caps`), as (pid, start time). Not
+/// inherited by their children.
+static DESKTOP_APPS: SpinLock<Vec<(u32, u64)>> = SpinLock::new(Vec::new());
+
+/// The desktop started `pid` (Disk Utility, the Store, ...).
+pub fn mark_desktop_app(pid: u32) {
+    if let Some(start) = start_of(pid) {
+        DESKTOP_APPS.lock().push((pid, start));
+    }
+}
+
+fn is_desktop_app(pid: u32) -> bool {
+    let Some(start) = start_of(pid) else {
+        return false;
+    };
+    DESKTOP_APPS.lock().contains(&(pid, start))
+}
+
 /// The rule for milkfs's destructive controls (`fs::milkfs::DESTRUCTIVE`, through
 /// `fs::milkfs::authorize`): root or a ticket, with the reason in /sys/fs/milkfs/error.
+///
+/// Transitional: until the window manager registers its trusted panel ([`set_prompt`]),
+/// a desktop app has no way to ask for a ticket, so apps the desktop started keep the
+/// old rule (the open-time admin-group check), audited as `auth.legacy`. Anything run
+/// from a terminal needs a ticket now; once the panel exists, everything does.
 fn milkfs_rule(op: &str) -> crate::fs::Result<()> {
+    if privileged() {
+        return Ok(());
+    }
+    let pid = crate::sched::current_pid();
+    if PROMPT.get::<Prompt>().is_none() && is_desktop_app(pid) {
+        crate::audit!("auth.legacy", "pid={pid} op=milkfs.{op} (no trusted panel yet)");
+        return Ok(());
+    }
     if require(&alloc::format!("milkfs.{op}")).is_ok() {
         return Ok(());
     }
@@ -121,6 +152,7 @@ pub fn init() {
 /// Drop `pid`'s ticket (exit, revoke).
 pub fn forget(pid: u32) {
     TICKETS.lock().retain(|t| t.pid != pid);
+    DESKTOP_APPS.lock().retain(|&(p, _)| p != pid);
 }
 
 pub fn revoke() {

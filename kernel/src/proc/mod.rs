@@ -434,7 +434,9 @@ pub fn spawn_with_caps(
     caps: alloc::sync::Arc<caps::Caps>,
 ) -> KResult<Pid> {
     let acct = login::session();
-    spawn_as(path, argv, caps, acct.cred(), &acct.env())
+    let pid = spawn_as(path, argv, caps, acct.cred(), &acct.env())?;
+    auth::mark_desktop_app(pid);
+    Ok(pid)
 }
 
 fn spawn_as(

@@ -256,6 +256,16 @@ are unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as eu
 their own password check. Kernel threads (the desktop, Time Machine) are the kernel and
 pass.
 
+**Until the panel exists (transitional).** The wm's trusted panel isn't built yet, and
+without it a desktop app has no way to ask for a ticket. So while no prompt is
+registered, apps the desktop started (`proc::spawn_with_caps`, e.g. Disk Utility) keep
+the old rule, the open-time admin-group check, and each such write is audited as
+`auth.legacy pid= op=milkfs.<control> (no trusted panel yet)`. Their children are not
+covered. Everything run from a terminal (console, the Terminal window, ssh-style
+sessions) needs a ticket already. The moment the wm calls `set_prompt` the allowance
+ends, and Disk Utility's control writes (`user/diskutil/src/data.rs`, `ctl`) ask the
+panel on EPERM and retry. disk-test then has to type the test password into the panel.
+
 **Asking: the syscall.** `MILK_AUTH = 0x1003` (0x1002 is `MILK_OPENPTY`), `(op, a, b, c, d)`:
 
 | op | args | does | returns |
@@ -303,7 +313,8 @@ acceptable for a single-user machine with console access.
 **Audit records** (`proc/auth.rs`): `auth.grant pid= exe= user= uid= via=panel|password
 for=300 s reason=`, `auth.deny pid= exe= user= via= reason=BadPassword|NoSuchUser|
 not-an-administrator|rate-limited (N s left)|cancelled`, `auth.revoke pid=`,
-`auth.required op=milkfs.<control>` (a privileged write refused for want of a ticket).
+`auth.required op=milkfs.<control>` (a privileged write refused for want of a ticket),
+`auth.legacy` (the transitional desktop-app allowance above).
 `login.ok` / `login.fail` from `authenticate` appear alongside.
 
 **Effect on existing flows.** Anything that wrote those controls as a non-root admin now

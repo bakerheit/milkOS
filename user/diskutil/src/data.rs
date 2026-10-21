@@ -17,12 +17,20 @@ pub fn text(p: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Write `text` to a control file. `Err` carries the errno.
+/// Write `text` to a control file. `Err` carries the errno. A destructive control
+/// refused with EPERM needs an admin ticket (docs/security.md, "Authorisation tickets"):
+/// ask the window system's trusted password panel once, then retry.
 pub fn ctl(op: &str, text: &str) -> Result<(), i32> {
-    let fd = sys::open(&format!("{DIR}/{op}"), sys::O_WRONLY).map_err(|e| e.0)?;
-    let r = sys::write(fd, text.as_bytes());
-    let _ = sys::close(fd);
-    r.map(|_| ()).map_err(|e| e.0)
+    let write = || -> Result<(), i32> {
+        let fd = sys::open(&format!("{DIR}/{op}"), sys::O_WRONLY).map_err(|e| e.0)?;
+        let r = sys::write(fd, text.as_bytes());
+        let _ = sys::close(fd);
+        r.map(|_| ()).map_err(|e| e.0)
+    };
+    match write() {
+        Err(1) if sys::authorize(&format!("Disk Utility wants to {op}")).is_ok() => write(),
+        r => r,
+    }
 }
 
 /// What the volume looks like right now.

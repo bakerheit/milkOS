@@ -890,6 +890,84 @@ that snapshot is deleted (the report says how many were freed now):
 978 block(s) (3912 KiB) shared, 980 block(s) freed now
 ```
 
+### Encryption at rest
+
+A milkfs volume can be encrypted ("FileVault"): every block except the two superblocks
+and the keyring is encrypted and authenticated; without the passphrase (or the recovery
+key) the volume doesn't mount. Crypto: `kernel/src/crypto/` (from scratch, published test
+vectors at boot; see docs/crypto.md); milkfs part: `kernel/src/fs/milkfs/crypt.rs`.
+
+**Keys.** A random 256-bit volume key VK (made on the Mac with `os.urandom` at `mkfs
+--encrypt`). Never stored in the clear: the keyring block (plaintext, pointed at by the
+superblock) holds key slots, each VK wrapped with XChaCha20-Poly1305 (random nonce,
+aad = "milkfs slot" | uuid | kind):
+
+- passphrase slots: KEK = scrypt(passphrase, salt, N = 2^16, r = 8, p = 4): 64 MiB, about
+  0.35 s per try here (parameters are per slot, so they can grow later);
+- the recovery slot: KEK = HMAC-SHA256(salt, recovery key); the recovery key is 128 random
+  bits shown once at creation as 8 groups of 4 hex digits.
+
+Changing a passphrase rewraps VK into a new slot (a new keyring block, one commit): no
+data block is rewritten. VK gives `enc = HMAC(VK, "milkfs v1 enc")` and
+`mac = HMAC(VK, "milkfs v1 mac")`.
+
+**Blocks: XChaCha20 with a synthetic IV, checksums over the plaintext.**
+`tag = HMAC-SHA256(mac, "MKB1" | block | birth | plaintext)[..8]` is stored where the
+checksum always was (in the pointer to the block, or per block in an extent), and the
+block is `plaintext XOR XChaCha20(enc, nonce = tag | block | birth)`. Reading rebuilds
+the nonce from the pointer, decrypts, and checks the tag in constant time. Why this and
+not XChaCha20-Poly1305 per block: a block is exactly 4 KiB and a pointer has 8 spare
+bytes, so there is nowhere to keep a 24-byte nonce and a 16-byte tag; and copy-on-write
+can rewrite the same (block, birth) within one transaction, so a counter or random nonce
+couldn't be reconstructed. With SIV the nonce depends on the content: a repeated nonce
+means the identical plaintext and ciphertext again (it leaks only "this block was
+written twice with the same bytes"), never a reused keystream, under CoW, snapshots and
+clones alike. Block number and birth are inside the tag, so blocks can't be swapped or
+replayed; a forgery succeeds with probability 2^-64 per try. The price: verifying any
+block (check, scrub) needs the key; dedupe and versions hash file contents instead of
+checksums on encrypted volumes (the tags differ for equal data in different places).
+
+**Superblock** (plaintext, readable before unlocking: label, generation, sizes, snapshot
+names and times are visible) carries `SB_ENCRYPTED` (flag 2), the keyring pointer (offset
+4052), and `sb_mac` (offset 4076) = HMAC-SHA256(mac, "MKSB" | bytes 0..4076) over the
+bytes on disk, checked after unlocking: an altered superblock (an old root, a different
+keyring) refuses to mount. Encrypted volumes are format v3: older kernels refuse them.
+
+**Unlocking.** At boot an encrypted volume is found but stays unmounted, "locked":
+
+```text
+milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphrase to /sys/fs/milkfs/unlock)
+```
+
+- `snap unlock [DEV]` asks for the passphrase (or the recovery key) without echoing it,
+  three tries; `snap passwd` changes the passphrase (asks for the current one or the
+  recovery key, then the new one twice).
+- `/sys/fs/milkfs/unlock`: read: the locked volumes (`vda Milk locked`); write
+  `[dev=NAME ]SECRET`. `/sys/fs/milkfs/passwd`: write `OLD\nNEW`. Wrong: EACCES.
+- Kernel: `fs::milkfs::unlock(secret, dev) -> Result<Vec<String>>` (mount paths),
+  `fs::milkfs::change_passphrase(old, new)`, `fs::milkfs::locked()`. If the volume is the
+  primary one (labelled Milk), unlocking it binds `/home/milk` and `/Applications` onto
+  it, mounts its clones and tells the search indexer to rescan, as boot would have; until
+  then home is the RAM copy, and no other disk takes the primary role.
+- For proc's login: after a successful login, `fs::milkfs::unlock(password, None)` opens
+  a volume whose passphrase is the login password (ENODEV if nothing is locked, EACCES if
+  it isn't that password); a password change can call `change_passphrase`.
+- Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
+  can start qemu sees it; for unattended test boots).
+
+**Send/receive**: streams are **plaintext** (`snap send` decrypts; the stream carries
+xxh64 of plaintext blocks), so they can be checked and received anywhere, including on
+the Mac, and an encrypted target re-encrypts under its own key. Keep streams of an
+encrypted volume somewhere encrypted (an encrypted Mac disk, or receive them into another
+encrypted volume).
+
+**Mac**: `mkmilkfs.py mkfs IMAGE --encrypt [--recovery-out FILE]` (asks for a passphrase
+twice, prints the recovery key; or `--passphrase-file`), `mkmilkfs.py change-passphrase
+IMAGE`, and every other command opens an encrypted image with `--passphrase-file FILE`,
+`--recovery KEY`, `$MILKFS_PASSPHRASE` or a prompt. `mkmilkfs.py selftest-crypto` runs
+the published vectors on the tool's own crypto (stdlib only; ChaCha20 and scrypt use the
+`cryptography` package or OpenSSL's scrypt for speed when available).
+
 ### Scrub
 
 `snap scrub` (start and wait), `snap scrub start|stop|status|rate=MB/s|auto=off|on|7d|12h`,

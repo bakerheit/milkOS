@@ -15,6 +15,7 @@
 pub mod btree;
 pub mod clone;
 pub mod crashtest;
+pub mod crypt;
 pub mod diff;
 pub mod format;
 pub mod fsck;
@@ -78,7 +79,21 @@ pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
 /// Open the milkfs on `dev` and mount it at `path` (created if missing). The first
 /// volume mounted with this becomes the primary one (snapshot API, `/sys/fs/milkfs`).
 pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
-    let r = mount_secondary(dev, path)?;
+    mount_keyed(dev, path, None, true)
+}
+
+/// Mount, with the volume key for an encrypted volume; `primary`: become the primary
+/// volume if there is none yet.
+fn mount_keyed(
+    dev: BlockRef,
+    path: &str,
+    key: Option<Arc<crypt::VolumeKey>>,
+    primary: bool,
+) -> Result<(Arc<Volume>, MountReport)> {
+    let r = mount_secondary_with(dev, path, key)?;
+    if !primary {
+        return Ok(r);
+    }
     let mut p = PRIMARY.lock();
     if p.is_none() {
         *p = Some(r.0.clone());
@@ -89,8 +104,16 @@ pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
 
 /// Mount without ever becoming the primary volume (self-test volumes, backup disks).
 pub fn mount_secondary(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
+    mount_secondary_with(dev, path, None)
+}
+
+fn mount_secondary_with(
+    dev: BlockRef,
+    path: &str,
+    key: Option<Arc<crypt::VolumeKey>>,
+) -> Result<(Arc<Volume>, MountReport)> {
     let name = String::from(dev.name());
-    let (state, report) = volume::State::open(dev)?;
+    let (state, report) = volume::State::open_with(dev, key)?;
     let vol = Volume::new(state, &name);
     crate::fs::ops::mkdir_all(path, 0o755)?;
     crate::fs::path::mount(path, vol.clone())?;
@@ -116,7 +139,8 @@ pub(crate) fn all_volumes() -> alloc::vec::Vec<(Arc<Volume>, String)> {
 /// Mount every disk that holds milkfs at `/Volumes/<label>` (`/Volumes/<label>-<dev>`
 /// if that is taken). The primary volume (home, Time Machine, the snapshot API) is the
 /// one labelled `Milk`, or the first found if none is (qemu's disk order isn't the
-/// command line's). Never formats anything.
+/// command line's). Encrypted volumes stay unmounted ("locked") until `unlock`; if the
+/// primary one is locked, no other disk takes its place. Never formats anything.
 pub fn automount() {
     let mut found: alloc::vec::Vec<(BlockRef, format::Superblock)> = blockdev::devices()
         .into_iter()
@@ -126,76 +150,254 @@ pub fn automount() {
         let p = found.remove(i);
         found.insert(0, p);
     }
+    let test_pass = test_passphrase();
     let mut primary_done = false;
     for (dev, sb) in found {
-        let label = if sb.label.is_empty() || sb.label.contains('/') {
-            String::from("Milk")
-        } else {
-            sb.label.clone()
-        };
-        let mut path = format!("/Volumes/{label}");
-        if primary_done {
-            if crate::fs::ops::stat(&path).is_ok() {
-                path = format!("/Volumes/{label}-{}", dev.name());
+        let key = if sb.flags & format::SB_ENCRYPTED != 0 {
+            match test_pass.as_deref().map(|p| unlock_key(&dev, &sb, p)) {
+                Some(Ok(k)) => Some(k),
+                other => {
+                    if let Some(Err(e)) = other {
+                        kprintln!(
+                            "milkfs: {}: the test passphrase didn't unlock it: {e}",
+                            dev.name()
+                        );
+                    }
+                    kprintln!(
+                        "milkfs: {} ({}) is encrypted and locked: `snap unlock` (or write the passphrase to /sys/fs/milkfs/unlock)",
+                        dev.name(),
+                        sb.label
+                    );
+                    LOCKED.lock().push(dev);
+                    primary_done = true; // keep the primary role for it
+                    continue;
+                }
             }
-            match mount_secondary(dev.clone(), &path) {
-                Ok((_, r)) => kprintln!(
+        } else {
+            None
+        };
+        let primary = !primary_done;
+        primary_done = true;
+        mount_found(dev, &sb, key, primary);
+    }
+}
+
+/// Mount a volume found on `dev` (boot or unlock), logging the result; for the primary
+/// volume also its earlier clones. Returns the mount path.
+fn mount_found(
+    dev: BlockRef,
+    sb: &format::Superblock,
+    key: Option<Arc<crypt::VolumeKey>>,
+    primary: bool,
+) -> Option<String> {
+    let label = if sb.label.is_empty() || sb.label.contains('/') {
+        String::from("Milk")
+    } else {
+        sb.label.clone()
+    };
+    let mut path = format!("/Volumes/{label}");
+    if !primary {
+        if crate::fs::ops::stat(&path).is_ok() {
+            path = format!("/Volumes/{label}-{}", dev.name());
+        }
+        return match mount_keyed(dev.clone(), &path, key, false) {
+            Ok((_, r)) => {
+                kprintln!(
                     "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {} blocks used",
                     dev.name(),
                     r.mount_ns / 1_000_000,
                     r.mount_ns / 10_000 % 100,
                     r.generation,
                     r.used_blocks
-                ),
-                Err(e) => kprintln!("milkfs: mounting {} failed: {e}", dev.name()),
-            }
-            continue;
-        }
-        primary_done = true;
-        match mount(crashtest::wrap(dev.clone()), &path) {
-            Ok((vol, r)) => {
-                let st = vol.state.lock();
-                kprintln!(
-                    "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {}, {}/{} blocks used, {} snapshot(s), check {}{}",
-                    dev.name(),
-                    r.mount_ns / 1_000_000,
-                    r.mount_ns / 10_000 % 100,
-                    r.generation,
-                    if r.fast {
-                        String::from("space map current")
-                    } else {
-                        format!("{} inodes", r.inodes)
-                    },
-                    r.used_blocks,
-                    st.store.total(),
-                    st.snaps.len(),
-                    if r.fast {
-                        "skipped (snap check)"
-                    } else if r.problems == 0 {
-                        "clean"
-                    } else {
-                        "FOUND PROBLEMS"
-                    },
-                    if r.orphans > 0 {
-                        format!(", {} orphan(s) reclaimed", r.orphans)
-                    } else {
-                        String::new()
-                    }
                 );
+                Some(path)
             }
-            Err(e) => kprintln!("milkfs: mounting {} failed: {e}", dev.name()),
-        }
-        // Clones made on an earlier boot (not the hidden ones of a receive).
-        if let Some(v) = user_volume() {
-            let list = v.state.lock().clone_list();
-            for c in list.into_iter().filter(|c| !c.name.starts_with('.')) {
-                match mount_clone(&v, &c.name, c.id) {
-                    Ok(p) => kprintln!("milkfs: clone {} (of {}) mounted at {p}", c.name, c.origin),
-                    Err(e) => kprintln!("milkfs: clone {}: {e}", c.name),
+            Err(e) => {
+                kprintln!("milkfs: mounting {} failed: {e}", dev.name());
+                None
+            }
+        };
+    }
+    match mount_keyed(crashtest::wrap(dev.clone()), &path, key, true) {
+        Ok((vol, r)) => {
+            let st = vol.state.lock();
+            kprintln!(
+                "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {}, {}/{} blocks used, {} snapshot(s), check {}{}{}",
+                dev.name(),
+                r.mount_ns / 1_000_000,
+                r.mount_ns / 10_000 % 100,
+                r.generation,
+                if r.fast {
+                    String::from("space map current")
+                } else {
+                    format!("{} inodes", r.inodes)
+                },
+                r.used_blocks,
+                st.store.total(),
+                st.snaps.len(),
+                if r.fast {
+                    "skipped (snap check)"
+                } else if r.problems == 0 {
+                    "clean"
+                } else {
+                    "FOUND PROBLEMS"
+                },
+                if r.orphans > 0 {
+                    format!(", {} orphan(s) reclaimed", r.orphans)
+                } else {
+                    String::new()
+                },
+                if st.store.encrypted() {
+                    ", encrypted"
+                } else {
+                    ""
                 }
+            );
+        }
+        Err(e) => {
+            kprintln!("milkfs: mounting {} failed: {e}", dev.name());
+            return None;
+        }
+    }
+    // Clones made on an earlier boot (not the hidden ones of a receive).
+    if let Some(v) = user_volume() {
+        let list = v.state.lock().clone_list();
+        for c in list.into_iter().filter(|c| !c.name.starts_with('.')) {
+            match mount_clone(&v, &c.name, c.id) {
+                Ok(p) => kprintln!("milkfs: clone {} (of {}) mounted at {p}", c.name, c.origin),
+                Err(e) => kprintln!("milkfs: clone {}: {e}", c.name),
             }
         }
     }
+    Some(path)
+}
+
+// ---- encrypted volumes: unlock, change passphrase ---------------------------------
+
+/// Encrypted volumes found at boot and not unlocked yet.
+static LOCKED: SpinLock<alloc::vec::Vec<BlockRef>> = SpinLock::new(alloc::vec::Vec::new());
+
+/// TEST ONLY: a passphrase handed in by qemu (`-fw_cfg name=opt/milkos/passphrase,...`),
+/// so test scripts (crashtest.sh on an encrypted volume) can boot unattended. Anyone
+/// who can start qemu can read it; real use goes through `snap unlock`.
+fn test_passphrase() -> Option<String> {
+    let f = crate::fwcfg::find_file("opt/milkos/passphrase")?;
+    let mut buf = alloc::vec![0u8; f.size as usize];
+    if !crate::fwcfg::read_file(f, &mut buf) {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&buf)
+        .trim_end_matches('\0')
+        .trim()
+        .into();
+    crate::crypto::ct::zeroize(&mut buf);
+    Some(s)
+}
+
+/// The keyring block of `sb` on `dev`, read straight from the disk (before any State).
+fn read_keyring(dev: &BlockRef, sb: &format::Superblock) -> Result<format::Keyring> {
+    let per = (format::BLOCK / dev.block_size()) as u64;
+    let mut b = [0u8; format::BLOCK];
+    dev.read_blocks(sb.keyring.block * per, &mut b)?;
+    if sb.keyring.is_none() || format::xxh64(&b) != sb.keyring.csum {
+        return Err(Errno::EIO);
+    }
+    format::Keyring::decode(&b).ok_or(Errno::EIO)
+}
+
+/// The volume key of the encrypted volume on `dev`, from a passphrase or the recovery
+/// key. EACCES if `secret` opens no slot.
+fn unlock_key(
+    dev: &BlockRef,
+    sb: &format::Superblock,
+    secret: &str,
+) -> Result<Arc<crypt::VolumeKey>> {
+    let ring = read_keyring(dev, sb)?;
+    if ring.uuid != sb.uuid {
+        return Err(Errno::EIO);
+    }
+    let t0 = crate::timer::now_ns();
+    let r = crypt::unlock(&ring, secret);
+    kprintln!(
+        "milkfs: {}: unlock {} ({} ms)",
+        dev.name(),
+        if r.is_ok() { "ok" } else { "refused" },
+        (crate::timer::now_ns() - t0) / 1_000_000
+    );
+    r.map(|(k, _)| Arc::new(k))
+}
+
+/// Encrypted volumes still locked: (device, label).
+pub fn locked() -> alloc::vec::Vec<(String, String)> {
+    LOCKED
+        .lock()
+        .iter()
+        .map(|d| {
+            (
+                String::from(d.name()),
+                probe(d).map(|sb| sb.label).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+/// Unlock and mount locked encrypted volumes with `secret` (a passphrase or the
+/// recovery key): the one on `dev` or every one it opens. Returns where they were
+/// mounted. EACCES if it opens none, ENODEV if nothing is locked. If it was the
+/// primary volume, home, /Applications and its clones are set up as at boot.
+pub fn unlock(secret: &str, dev: Option<&str>) -> Result<alloc::vec::Vec<String>> {
+    let cands: alloc::vec::Vec<BlockRef> = LOCKED
+        .lock()
+        .iter()
+        .filter(|d| dev.is_none_or(|n| d.name() == n))
+        .cloned()
+        .collect();
+    if cands.is_empty() {
+        return Err(Errno::ENODEV);
+    }
+    let mut mounted = alloc::vec::Vec::new();
+    let mut last = Errno::EACCES;
+    for d in cands {
+        let Some(sb) = probe(&d) else { continue };
+        let key = match unlock_key(&d, &sb, secret) {
+            Ok(k) => k,
+            Err(e) => {
+                last = e;
+                continue;
+            }
+        };
+        LOCKED.lock().retain(|x| x.name() != d.name());
+        let primary = user_volume().is_none();
+        if let Some(p) = mount_found(d.clone(), &sb, Some(key), primary) {
+            if primary && user_volume().is_some() {
+                setup_home();
+                setup_applications();
+                crate::fs::notify::rescan(0); // home moved under the indexer's feet
+            }
+            mounted.push(p);
+        }
+    }
+    let ok = !mounted.is_empty();
+    audit_op(
+        "milkfs.unlock",
+        &format!("dev={} mounted={}", dev.unwrap_or("-"), mounted.join(",")),
+        &if ok { Ok(()) } else { Err(last) },
+    );
+    if ok { Ok(mounted) } else { Err(last) }
+}
+
+/// Change a passphrase of the primary (encrypted) volume: `old` (a passphrase or the
+/// recovery key) must open a slot; the volume key is rewrapped under `new` (no block is
+/// rewritten). Replaces the slot `old` opened, or the first passphrase slot if `old`
+/// was the recovery key.
+pub fn change_passphrase(old: &str, new: &str) -> Result<()> {
+    if new.len() < 8 {
+        return Err(Errno::EINVAL);
+    }
+    let v = primary()?;
+    let r = v.state.lock().rewrap(old, new);
+    audit_op("milkfs.passwd", "", &r);
+    r
 }
 
 /// Where the primary volume is mounted (`/Volumes/<label>`).
@@ -489,7 +691,7 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
                     v.state
                         .lock()
                         .store
-                        .read_run(ext.block, &ext.csums, &mut data)?;
+                        .read_run(ext.block, ext.birth, &ext.csums, &mut data)?;
                     for (i, chunk) in data.chunks(format::BLOCK).enumerate() {
                         let src = ext.block + i as u64;
                         if sent.insert(src) {
@@ -499,12 +701,15 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
                             });
                         }
                     }
+                    // The stream carries plaintext and its xxh64 (on an encrypted
+                    // volume the pointers hold keyed tags, meaningless elsewhere).
+                    let csums = data.chunks(format::BLOCK).map(format::xxh64).collect();
                     enc.record(&Record::Extent {
                         ino,
                         start: ext.start,
                         old_end,
                         src: ext.block,
-                        csums: ext.csums,
+                        csums,
                     });
                 }
             }
@@ -869,9 +1074,7 @@ pub fn promote_clone(name: &str) -> Result<String> {
 /// Background work, once the scheduler runs: the flusher (commits the open transaction
 /// once it is a second old) and the Time Machine thread.
 pub fn start_threads() {
-    if volume().is_none() {
-        return;
-    }
+    // Always: an encrypted primary volume may only be unlocked later.
     drop(crate::sched::spawn("milkfs-flush", || {
         loop {
             crate::sched::sleep_ms(250);
@@ -1109,6 +1312,48 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         },
     );
     dir.add_control("scrub", scrub::status_text, |b| scrub::control(arg(b)?));
+    dir.add_control(
+        "unlock",
+        || {
+            let mut s = String::new();
+            for (d, l) in locked() {
+                let _ = writeln!(s, "{d} {l} locked");
+            }
+            s
+        },
+        |b| {
+            // `[dev=NAME ]SECRET` (a passphrase or the recovery key; may contain spaces)
+            let mut raw = alloc::vec::Vec::from(b);
+            let r = (|| {
+                let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+                let t = t.trim_end_matches(['\n', '\r']);
+                let (dev, secret) = match t.strip_prefix("dev=") {
+                    Some(rest) => {
+                        let (d, s) = rest.split_once(' ').ok_or(Errno::EINVAL)?;
+                        (Some(d), s)
+                    }
+                    None => (None, t),
+                };
+                if secret.is_empty() {
+                    return Err(Errno::EINVAL);
+                }
+                unlock(secret, dev).map(|_| ())
+            })();
+            crate::crypto::ct::zeroize(&mut raw);
+            r
+        },
+    );
+    dir.add_control("passwd", String::new, |b| {
+        // `OLD\nNEW` (each a whole line, so they may contain spaces)
+        let mut raw = alloc::vec::Vec::from(b);
+        let r = (|| {
+            let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+            let (old, new) = t.split_once('\n').ok_or(Errno::EINVAL)?;
+            change_passphrase(old, new.trim_end_matches(['\n', '\r']))
+        })();
+        crate::crypto::ct::zeroize(&mut raw);
+        r
+    });
     dir.add_control(
         "send",
         || LAST_SEND.lock().clone(),

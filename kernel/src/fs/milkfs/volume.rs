@@ -40,6 +40,8 @@ pub struct State {
     pub version: u32,
     /// (last full scrub, scrub interval): superblock `last_scrub`, `scrub_every`.
     pub scrub: (u64, u32),
+    /// Encrypted volumes: the keyring block (wrapped keys).
+    pub keyring: BlockPtr,
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
@@ -155,6 +157,8 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         spacemap: BlockPtr::NONE,
         last_scrub: 0,
         scrub_every: 0,
+        keyring: BlockPtr::NONE,
+        sb_mac: 0,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -167,9 +171,32 @@ impl State {
     /// is current (and orphans from their list), otherwise rebuilt from the trees with a
     /// namespace check and orphan reclaim (inodes no directory entry points at).
     pub fn open(dev: BlockRef) -> Result<(State, MountReport)> {
+        Self::open_with(dev, None)
+    }
+
+    /// Open with the volume key (encrypted volumes: EACCES without it; EIO if the
+    /// superblock's MAC doesn't check out, i.e. it was altered).
+    pub fn open_with(
+        dev: BlockRef,
+        key: Option<Arc<super::crypt::VolumeKey>>,
+    ) -> Result<(State, MountReport)> {
         let t0 = crate::timer::now_ns();
         let name = String::from(dev.name());
         let sb = probe(&dev).ok_or(Errno::EINVAL)?;
+        let key = if sb.flags & SB_ENCRYPTED != 0 {
+            let k = key.ok_or(Errno::EACCES)?;
+            // The MAC is over the bytes on disk (another writer may encode differently).
+            let mut raw = [0u8; BLOCK];
+            let per = (BLOCK / dev.block_size()) as u64;
+            dev.read_blocks((sb.generation % 2) * per, &mut raw)?;
+            if !crate::crypto::ct::eq(&k.sb_mac(&raw).to_le_bytes(), &sb.sb_mac.to_le_bytes()) {
+                kprintln!("milkfs: {name}: superblock MAC mismatch (altered?): not mounting");
+                return Err(Errno::EIO);
+            }
+            Some(k)
+        } else {
+            None
+        };
         let cache = BCache::new(dev, 512)?; // 2 MiB
         if sb.total_blocks > cache.num_blocks() || sb.total_blocks < 3 {
             return Err(Errno::EINVAL);
@@ -185,6 +212,7 @@ impl State {
         super::crashtest::LAST_COMMIT.store(sb.generation, core::sync::atomic::Ordering::Relaxed);
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
+        store.crypt = key;
 
         let loaded = if sb.spacemap.is_none() {
             Err("absent (last written by the Mac tool or an older kernel)")
@@ -371,6 +399,7 @@ impl State {
             flags: sb.flags,
             version: sb.version.max(BASE_VERSION),
             scrub: (sb.last_scrub, sb.scrub_every),
+            keyring: sb.keyring,
             sb,
             meta_dirty: false,
             broken: false,
@@ -462,7 +491,14 @@ impl State {
             spacemap,
             last_scrub: self.scrub.0,
             scrub_every: self.scrub.1,
+            keyring: self.keyring,
+            sb_mac: 0,
         };
+        let mut sb = sb;
+        if let Some(k) = &self.store.crypt {
+            sb.version = sb.version.max(CRYPT_VERSION);
+            sb.sb_mac = k.sb_mac(&sb.encode());
+        }
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
         cache.write_through(generation % 2, &sb.encode())?; // 2. the commit point
@@ -539,6 +575,9 @@ pub fn reachable(
     seen.extend(data);
     // The space map of the last commit (none right after a rebuilding mount).
     seen.extend(store.map_blocks().iter().map(|p| p.block));
+    if !sb.keyring.is_none() {
+        seen.insert(sb.keyring.block);
+    }
     seen.insert(0);
     seen.insert(1);
     Ok(seen)

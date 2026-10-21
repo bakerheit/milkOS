@@ -10,7 +10,8 @@
 //!
 //! What is sent is tree items, not blocks: inodes, directory entries, symlinks, inline
 //! data as they are; file data as `EXTENT` records (file range + the sender's block
-//! numbers and checksums), each data block once as a `DATA` record before its first use,
+//! numbers and the xxh64 of each block's plaintext, so an encrypted sender's keyed tags
+//! never leave it), each data block once as a `DATA` record before its first use,
 //! so reflink copies stay shared on the receiver. Data removal is by file range (`DROP`),
 //! so the receiver may lay its blocks out differently. An incremental stream holds only
 //! the items that differ (found like `snap diff`, reading only changed nodes): removals
@@ -510,7 +511,8 @@ pub struct RecvCtx {
     pub temp_base: bool,
     pub base: String,
     /// Sender's block -> (our block, checksum, birth).
-    map: BTreeMap<u64, (u64, u64, u64)>,
+    /// Sender's block -> (our block, xxh64 of the plaintext, birth, our checksum).
+    map: BTreeMap<u64, (u64, u64, u64, u64)>,
     /// Our blocks written by DATA records and not yet used by an EXTENT (freed if the
     /// receive fails; commits only happen when this is empty).
     pub unused: BTreeSet<u64>,
@@ -629,9 +631,12 @@ impl State {
                     return Err(Errno::EIO);
                 }
                 let b = self.store.alloc()?;
-                let blk: &[u8; BLOCK] = data.as_slice().try_into().map_err(|_| Errno::EIO)?;
-                self.store.cache.write(b, blk)?;
-                ctx.map.insert(src, (b, xxh64(blk), self.store.txn));
+                let mut blk: [u8; BLOCK] = data.as_slice().try_into().map_err(|_| Errno::EIO)?;
+                let plain = xxh64(&blk);
+                // Ours: sealed with this volume's key if it is encrypted.
+                let csum = self.store.seal(b, self.store.txn, &mut blk);
+                self.store.cache.write(b, &blk)?;
+                ctx.map.insert(src, (b, plain, self.store.txn, csum));
                 ctx.unused.insert(b);
                 ctx.blocks += 1;
             }
@@ -646,17 +651,17 @@ impl State {
                 self.drop_range(ino, start, (start + n).max(old_end))?;
                 let mut i = 0u64;
                 while i < n {
-                    let get = |j: u64| -> Result<(u64, u64, u64)> {
+                    let get = |j: u64| -> Result<(u64, u64, u64, u64)> {
                         let m = *ctx.map.get(&(src + j)).ok_or(Errno::EIO)?;
                         if m.1 != csums[j as usize] {
                             return Err(Errno::EIO); // data doesn't match the extent
                         }
                         Ok(m)
                     };
-                    let (b0, _, birth) = get(i)?;
+                    let (b0, _, birth, _) = get(i)?;
                     let mut j = i + 1;
                     while j < n {
-                        let (b, _, br) = get(j)?;
+                        let (b, _, br, _) = get(j)?;
                         if b != b0 + (j - i) || br != birth {
                             break;
                         }
@@ -669,7 +674,9 @@ impl State {
                         start: start + i,
                         block: b0,
                         birth,
-                        csums: csums[i as usize..j as usize].to_vec(),
+                        csums: (i..j)
+                            .map(|k| ctx.map.get(&(src + k)).map_or(0, |m| m.3))
+                            .collect(),
                         legacy: false,
                     };
                     self.put(e.key(ino), e.encode())?;

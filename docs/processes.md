@@ -401,13 +401,14 @@ file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 charact
 | `restart` | `always` (whenever it exits), `on-failure` (exit status != 0 or killed by a signal), `never` | `on-failure` |
 | `after` | units (space separated) to start before this one: ordering only | |
 | `needs` | units that must be running for this one to start; if one of them fails or isn't there, this unit is not started and its status says `dependency failed: <unit>` | |
-| `sandbox` | a capability spec, exactly as for the `sandbox` tool (docs/security.md): `fs=/srv/www:r net=local spawn=0` ... The service's own binary is granted read automatically. | none (unrestricted) |
+| `sandbox` | a capability spec, exactly as for the `sandbox` syscall (docs/security.md): one `fs=PATH:r` or `fs=PATH:rw` token per grant (`fs=/srv/www:r fs=/proc:r`), `fs-none`, `net=none|local|all`, `audio=0`, `clipboard=0`, `windows=0`, `spawn=0` (no fork). The service's own binary is granted read automatically; the sandbox is applied just before the exec, after the user switch. | none (unrestricted) |
 | `socket` | socket activation: milkd creates this AF_UNIX listening socket (a path, mode 0660, owned by `user`, group admin), and starts the service on the first connection, handing it the listener as **fd 3** with `LISTEN_FDS=1` / `LISTEN_PID` in the environment, like systemd. | |
 | `cwd` | working directory | `/` |
 | `env` | extra environment, space-separated `KEY=VALUE` | |
 | `if-exists` | start only if this path exists (else status `skipped`) | |
 | `if-contains` | `PATH TEXT...`: start only if the file contains TEXT | |
 | `enabled` | `yes` / `no`: started at boot | `yes` |
+| `console` | `yes`: also echo the unit's output on the system console (milkd's stdout) | `no` |
 
 Example (`/etc/milk/services/clockd.service`):
 

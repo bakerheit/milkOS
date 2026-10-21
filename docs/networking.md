@@ -384,11 +384,17 @@ port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
 * a numeric address (dotted quad or IPv6): no lookup;
 * `localhost`: `::1` and 127.0.0.1 (`ping localhost` stays IPv4, `ping -6 localhost` is `::1`);
 * **`NAME.local`**: mDNS (RFC 6762) on eth1, `rt::mdns`. It uses the real DNS wire format
-  on UDP 5353 and the group 224.0.0.251, sent as a "legacy unicast" query (an ephemeral
-  source port, one retry, 1.5 s), and the A record comes straight back. The responder is
-  the Milk Drop daemon (`drop daemon`, already on eth1 for discovery). It answers A/ANY
-  queries for `<its drop name>.local` with eth1's address: straight back to a legacy
-  unicast asker, else to the group with the cache-flush bit. The `.local` name is the
+  on UDP 5353, over IPv6 to `ff02::fb` (asking AAAA and A) and over IPv4 to 224.0.0.251
+  (asking A and AAAA), each a "legacy unicast" query (an ephemeral source port, one
+  retry, 1.5 s); the records come straight back, and once one answer is in the other
+  family gets 100 ms more. `-4`/`-6` (`Want::V4`/`V6`) ask over that family only, for
+  that record type only. The responder is the Milk Drop daemon (`drop daemon`, already on
+  eth1 for discovery), on `169.254.x.y:5353` and `[fd6d:696c:6b00:1::…]:5353` (which also
+  takes the group `ff02::fb`). It answers A, AAAA and ANY queries for `<its drop
+  name>.local` with eth1's IPv4 address and its VM-link IPv6 address (the ULA, so no scope
+  id is needed; the link-local isn't announced): straight back to a legacy unicast asker
+  (a link-local IPv6 asker on its own link, via the datagram's scope), else to the group
+  of the family it asked on, with the cache-flush bit. The `.local` name is the
   Milk Drop name (`drop name bob` -> `bob.local`), since every machine's hostname is `milk`.
   There is no probing for name conflicts: two machines with one name both answer, and
   the first answer wins.
@@ -443,8 +449,12 @@ with a one-line text format instead of DNS records. Only milkOS machines are on 
 10 s, and answers every `QUERY` at once (unicast), with:
 
 ```text
-MILKDROP/1 ANNOUNCE name=alice host=milk port=5360 key=<64 hex> fp=<16 hex> recv=0|1 sig=<128 hex>
+MILKDROP/1 ANNOUNCE name=alice host=milk port=5360 [addr6=<eth1 IPv6>] key=<64 hex> fp=<16 hex> recv=0|1 sig=<128 hex>
 ```
+
+`addr6` is eth1's address on the VM link's IPv6 prefix, signed with the rest; a peer
+takes it only if it is on `fd6d:696c:6b00:1::/64`, so an announcement can't point
+transfers anywhere else.
 
 `sig` is Ed25519 over `milkdrop-announce-v1 <the line before " sig=">` with the key it
 carries, and `fp` must match that key, so an announcement can't be altered in flight or
@@ -519,7 +529,11 @@ speak the protocol. It can run the CLI:
 * peers: `MILK_TABLE=1 drop list` (a `\x1emilk-table 1` table: name, address,
   fingerprint, receiving, trust, host; see docs/shell.md), or read `/tmp/drop/peers`
   without waiting;
-* send: `drop send <name> <path>`. It prints `drop: [####......]  40%  416 KiB / 1024 KiB`
+* send: `drop send [-4|-6] <name> <path>`. A drop name or fingerprint goes over IPv4
+  (the address the announcement came from) unless `-6` (its `addr6`); `NAME.local` tries
+  its addresses IPv6 first, as getaddrinfo orders them, falling back to the next one if
+  refused; a numeric address (`[fd6d:…]:5360` too) is used as it is. `drop recv` listens
+  on both eth1 addresses (the IPv4 one and the IPv6 one, v6-only), never on eth0. It prints `drop: [####......]  40%  416 KiB / 1024 KiB`
   progress lines, then `drop: sent ...` (exit 0) or `drop: <reason>` (exit 1). A `KEY
   CHANGED` refusal is the boxed warning on stderr;
 * receive: `drop recv` prints `drop: <who> wants to send you <file> (<size>).` then

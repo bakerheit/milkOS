@@ -13,6 +13,9 @@
 #     /run/drop.sock); it lands in bob's ~/Downloads owned by milk; milk can't read the
 #     machine's secret key; milk (an administrator) renames through the daemon, nobody
 #     is refused,
+#   - IPv6 between the VMs over eth1: alice resolves bob.local over mDNS on ff02::fb
+#     (AAAA), pings him with ICMPv6, and sends him a file over IPv6 (TCP between the two
+#     eth1 fd6d:696c:6b00:1::/64 addresses),
 #   - after shutdown, the host reads both received files out of the images and compares
 #     their SHA-256 with the originals, and a second boot of alice's image keeps her
 #     identity (same fingerprint: /etc/milk/drop is persistent).
@@ -104,6 +107,9 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/a4" "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/bm1" \
   'send:su milk -c "drop send bob /Volumes/Milk/share/to-bob.bin"' "wait:$DONE_RE" "$P" \
+  'send:ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|unknown|not resolved|no answer|Request timeout' "$P" \
+  "waitfile:$WORK/bv6" \
+  'send:drop send bob.local /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
   'send:su milk -c "cat /etc/milk/drop/identity.secret"' "$P" \
   'send:su milk -c "drop name alice"' "$P" \
   'send:echo milk | sudo -S -u nobody /bin/drop name evil' "$P" \
@@ -128,6 +134,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:drop list' "$P" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
   'send:su milk -c "drop recv -y"' 'wait:receiving as' "done:$WORK/bm1" "wait:$DONE_RE" "$P" \
+  'send:drop recv -y' 'wait:receiving as' "done:$WORK/bv6" "wait:$DONE_RE" "$P" \
   'send:ls -l /home/milk/Downloads' "$P" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
@@ -214,6 +221,15 @@ check "$A" "drop forget: bob's new key is first contact again" "drop: forgot bob
 check "$A" "alice receives over the rotated key" "drop: received /home/milk/Downloads/to-alice \\(1\\)\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
 check "$B" "audit: the accepted rotation" "user\\.drop\\.key_rotated +role=send name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} action=accepted"
 check "$A" "audit: the rotation" "user\\.drop\\.rotate +name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16}"
+# IPv6 between the two VMs over eth1 (EUI-64 of 02:6d:6b:64:0b:0b = 6d:6bff:fe64:b0b).
+A6='fd6d:696c:6b00:1:6d:6bff:fe64:a0a'
+B6='fd6d:696c:6b00:1:6d:6bff:fe64:b0b'
+check "$A" "ping -6 bob.local: AAAA over ff02::fb, echo over eth1" "bytes from $B6: icmp_seq=1"
+check "$A" "ping -6 bob.local: both replies" "2 packets transmitted, 2 received, 0% packet loss"
+check "$B" "bob's receiver listens on eth1's IPv6 address too" "drop: receiving as bob .* and \[$B6\]:[0-9]+"
+check "$B" "bob got alice's file over IPv6" "drop: received /home/milk/Downloads/to-bob \(2\)\.bin \(1024 KiB\) from alice, sha256 $SHA_TO_BOB ok"
+check "$A" "audit: alice's send over IPv6" "user\.drop\.send +peer=bob fp=[0-9a-f]{16} addr=$B6 file=to-bob\.bin size=1048576 sha256=$SHA_TO_BOB .*result=ok"
+check "$B" "audit: bob's receive over IPv6" "user\.drop\.recv +peer=alice fp=[0-9a-f]{16} addr=$A6 .*result=ok"
 # The wire (qemu filter-dump on eth1, both VMs): the hello and discovery are visible, the
 # file and its name are not.
 for vm in alice bob; do

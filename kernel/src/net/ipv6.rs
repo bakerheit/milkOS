@@ -577,11 +577,12 @@ fn send_ns(st: &mut Stack, k: usize, target: Ipv6, src: Ipv6, with_slla: bool) {
         |b| {
             put32(b, 0, 0);
             b[4..20].copy_from_slice(&target.0);
+            // Reserved (4) + target (16), then the 8-byte source link-layer option.
             if with_slla {
                 b[20] = 1;
                 b[21] = 1;
                 b[22..28].copy_from_slice(&mac.0);
-                24
+                28
             } else {
                 20
             }
@@ -596,10 +597,10 @@ fn send_na(st: &mut Stack, k: usize, target: Ipv6, to: Ipv6, solicited: bool) {
     let _ = send_icmp(st, target, to, Some(k), 255, 136, 0, |b| {
         put32(b, 0, flags);
         b[4..20].copy_from_slice(&target.0);
-        b[20] = 2; // target link-layer address
+        b[20] = 2; // target link-layer address (8 bytes)
         b[21] = 1;
         b[22..28].copy_from_slice(&mac.0);
-        24
+        28
     });
 }
 

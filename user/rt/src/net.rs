@@ -578,7 +578,8 @@ impl Want {
 ///
 /// * a numeric IPv4 or IPv6 address (`fe80::1%eth1` with its interface): no lookup;
 /// * `localhost`: ::1 and 127.0.0.1;
-/// * `NAME.local`: mDNS on the VM-to-VM link (eth1), [`crate::mdns`];
+/// * `NAME.local`: mDNS on the VM-to-VM link (eth1), [`crate::mdns`]: AAAA over
+///   ff02::fb and A over 224.0.0.251;
 /// * anything else: refused. User space doesn't resolve internet names (the kernel's DNS
 ///   policy, `net::dns`, is the only path to a real resolver and it refuses them too).
 pub fn resolve_all(host: &str, want: Want) -> core::result::Result<Vec<SockAddr>, String> {
@@ -589,7 +590,9 @@ pub fn resolve_all(host: &str, want: Want) -> core::result::Result<Vec<SockAddr>
     } else if let Some(a) = parse_host(host, 0) {
         out.push(a);
     } else if crate::mdns::is_local(host) {
-        out.push(SockAddr::v4(crate::mdns::resolve(host, 1500)?, 0));
+        for ip in crate::mdns::resolve(host, 1500, want)? {
+            out.push(SockAddr::new(ip, 0));
+        }
     } else {
         return Err(alloc::format!(
             "{host}: not resolved: milkOS resolves only numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are refused"

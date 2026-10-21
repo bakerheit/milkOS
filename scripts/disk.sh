@@ -6,7 +6,7 @@
 #   milk_disk_args          -> DISK_ARGS writable, persistent (qemu locks the images)
 #   milk_disk_args shared   -> DISK_ARGS with snapshot=on + no locking: writes are thrown
 #                              away, and any number of qemus can use the images at once
-# Override the paths with MILK_DISK=... / MILK_FS=...
+# Override the paths with MILK_DISK=... / MILK_FS=...; MILK_FAT=image adds a FAT32 disk.
 milk_disk_args() {
   local disk="${MILK_DISK:-/tmp/milk-disk.img}"
   local fsimg="${MILK_FS:-/tmp/milk-fs.img}"
@@ -24,4 +24,8 @@ milk_disk_args() {
   [ "${1:-}" = shared ] && extra=",snapshot=on,file.locking=off"
   DISK_ARGS=(-drive "file=$disk,if=none,format=raw,id=hd0$extra" -device virtio-blk-device,drive=hd0
     -drive "file=$fsimg,if=none,format=raw,id=hd1$extra" -device virtio-blk-device,drive=hd1)
+  # Optional third disk: a FAT32 image (scripts/mkfat.sh), mounted at /Volumes/<LABEL>.
+  if [ -n "${MILK_FAT:-}" ]; then
+    DISK_ARGS+=(-drive "file=$MILK_FAT,if=none,format=raw,id=hd2$extra" -device virtio-blk-device,drive=hd2)
+  fi
 }

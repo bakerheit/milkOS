@@ -21,13 +21,16 @@ rm -f "$SOCK" "$OUT" "$LOG"
 # Shared disks: writes discarded, safe with other qemus running (scripts/disk.sh).
 source scripts/disk.sh
 milk_disk_args shared
+# Mac shared folder at /Volumes/Mac (read-only unless MILK_SHARE_RW=1), scripts/share.sh.
+source scripts/share.sh
+milk_share_args
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
-  "${DISK_ARGS[@]}" \
+  "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   -qmp "unix:$SOCK,server,nowait" &
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT

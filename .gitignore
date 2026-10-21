@@ -2,3 +2,7 @@ target/
 .DS_Store
 *.img
 *.iso
+
+# Mac <-> milkOS shared folder (virtio-9p): contents are local, only the README is tracked.
+share/*
+!share/README.txt

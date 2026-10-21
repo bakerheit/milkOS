@@ -17,11 +17,14 @@ pub mod blockdev;
 pub mod clock;
 pub mod devfs;
 pub mod errno;
+pub mod fat;
 pub mod file;
 pub mod initramfs;
 pub mod milkfs;
+pub mod ninep;
 pub mod node;
 pub mod ops;
+pub mod pagecache;
 pub mod path;
 pub mod procfs;
 pub mod ramdisk;
@@ -82,4 +85,6 @@ pub fn init() {
     milkfs::crashtest::configure();
     milkfs::automount();
     milkfs::setup_home();
+    ninep::automount();
+    fat::automount();
 }

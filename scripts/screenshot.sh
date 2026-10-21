@@ -22,6 +22,9 @@ rm -f "$SOCK" "$OUT"
 # Shared scratch disk: writes discarded, safe with other qemus running (scripts/disk.sh).
 source scripts/disk.sh
 milk_disk_args shared
+# Mac shared folder at /Volumes/Mac (read-only unless MILK_SHARE_RW=1), scripts/share.sh.
+source scripts/share.sh
+milk_share_args
 # eth0, restricted, no port forwards (safe with other qemus running; scripts/netdev.sh).
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args
@@ -31,7 +34,7 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
-  "${DISK_ARGS[@]}" "${NET_ARGS[@]}" \
+  "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" "${NET_ARGS[@]}" \
   -monitor "unix:$SOCK,server,nowait" "$@" &
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT

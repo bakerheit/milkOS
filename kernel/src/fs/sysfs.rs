@@ -14,8 +14,8 @@ use core::fmt::Write;
 use core::ptr::read_volatile;
 
 use super::errno::Result;
-use super::procfs;
 use super::synth::SynthFs;
+use super::{milkfs, procfs};
 use crate::mem;
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -246,6 +246,7 @@ pub fn init() -> Result<()> {
         };
         d.add_text("driver", format!("{driver}\n"));
     }
+    milkfs::sysfs(&root.add_dir("fs").add_dir("milkfs"));
     root.add_dir("kernel")
         .add_file("version", || String::from(procfs::VERSION));
     super::mount("/sys", Arc::clone(&fs) as _)?;

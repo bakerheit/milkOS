@@ -683,7 +683,11 @@ fn procfs_sysfs(t: &mut T) {
 /// Disk I/O through the first block device, if there is one. Non-destructive: the region
 /// written (the last 80 KiB, bigger than the driver's 64 KiB bounce buffer) is restored.
 fn blockdev(t: &mut T) {
-    let Some(d) = super::blockdev::devices().into_iter().next() else {
+    // The scratch disk: the first one that does not hold milkfs.
+    let Some(d) = super::blockdev::devices()
+        .into_iter()
+        .find(|d| super::milkfs::probe(d).is_none())
+    else {
         kprintln!("fs selftest: no block device, skipping disk checks");
         return;
     };
@@ -809,6 +813,376 @@ fn blockdev(t: &mut T) {
     );
 }
 
+/// Space accounting on the mounted milkfs must be exact after every phase.
+fn milk_space(t: &mut T, what: &str) {
+    let Some(v) = super::milkfs::volume() else {
+        return;
+    };
+    let r = v.state.lock().verify_space();
+    match r {
+        Ok(c) => t.ok(
+            c.free_but_used == 0 && c.leaked == 0 && c.reachable == c.allocated,
+            what,
+        ),
+        Err(e) => t.ok(false, &alloc::format!("{what}: {e}")),
+    }
+}
+
+fn milkfs(t: &mut T) {
+    use super::milkfs::format::xxh64;
+    t.ok(xxh64(b"") == 0xef46_db37_51d8_e999, "xxh64 empty");
+    t.ok(xxh64(b"abc") == 0x44bc_2cf5_ad77_0999, "xxh64 abc");
+    t.ok(
+        xxh64(b"Nobody inspects the spammish repetition") == 0xfbce_a83c_8a37_8bf1,
+        "xxh64 long",
+    );
+    let hundred: Vec<u8> = (0..100).collect();
+    t.ok(
+        xxh64(&hundred) == 0x6ac1_e580_3216_6597,
+        "xxh64 matches mkmilkfs.py",
+    );
+
+    if super::milkfs::volume().is_none() {
+        kprintln!("fs selftest: no milkfs volume, skipping milkfs checks");
+        return;
+    }
+    const D: &str = "/Volumes/Milk/.selftest";
+    let _ = super::ops::rmdir(D); // leftovers from an interrupted boot are not our problem
+    milk_space(t, "milkfs space exact at start");
+    t.ok(
+        ops::stat("/Volumes/Milk").map(|s| s.kind).ok() == Some(InodeType::Dir),
+        "/Volumes/Milk is a directory",
+    );
+    t.ok(
+        read_str("/proc/mounts").contains("milkfs /Volumes/Milk milkfs"),
+        "milkfs in /proc/mounts",
+    );
+    t.ok(ops::mkdir(D, 0o755).is_ok(), "milkfs mkdir");
+    let p = |n: &str| alloc::format!("{D}/{n}");
+
+    // files
+    if let Some(f) = t.must(
+        ops::open(&p("a.txt"), O_RDWR | O_CREAT | O_EXCL, 0o644),
+        "milkfs create",
+    ) {
+        t.ok(f.write(b"hello world").ok() == Some(11), "milkfs write");
+        let mut b = [0u8; 16];
+        t.ok(
+            f.pread(&mut b, 0).ok() == Some(11) && &b[..11] == b"hello world",
+            "milkfs read back",
+        );
+        t.ok(f.pwrite(b"W", 6).ok() == Some(1), "milkfs pwrite");
+        t.ok(f.stat().size == 11 && f.stat().perm == 0o644, "milkfs stat");
+    }
+    t.ok(
+        read_str(&p("a.txt")) == "hello World",
+        "milkfs pwrite in place",
+    );
+    if let Some(a) = t.must(
+        ops::open(&p("a.txt"), O_WRONLY | O_APPEND, 0),
+        "milkfs O_APPEND",
+    ) {
+        let _ = a.write(b"!");
+    }
+    t.ok(read_str(&p("a.txt")) == "hello World!", "milkfs append");
+
+    // big file across many blocks and tree splits
+    let len = 300 * 1024 + 77;
+    let data: Vec<u8> = (0..len).map(|i| (i * 13 + i / 4096) as u8).collect();
+    t.ok(
+        ops::write_file(&p("big"), &data).is_ok(),
+        "milkfs write 300 KiB",
+    );
+    t.ok(
+        ops::read_file(&p("big")).ok().as_deref() == Some(&data[..]),
+        "milkfs 300 KiB reads back",
+    );
+    t.ok(
+        ops::truncate(&p("big"), 5000).is_ok() && ops::truncate(&p("big"), 9000).is_ok(),
+        "milkfs truncate",
+    );
+    let back = ops::read_file(&p("big")).unwrap_or_default();
+    t.ok(
+        back.len() == 9000 && back[..5000] == data[..5000] && back[5000..].iter().all(|&b| b == 0),
+        "milkfs truncated tail reads as zeros",
+    );
+    if let Some(s) = t.must(
+        ops::open(&p("sparse"), O_RDWR | O_CREAT, 0o600),
+        "milkfs sparse",
+    ) {
+        let _ = s.pwrite(b"x", 1 << 20);
+        let st = s.stat();
+        t.ok(
+            st.size == (1 << 20) + 1 && st.blocks == 8,
+            "milkfs sparse file has one block",
+        );
+        let mut hole = [1u8; 32];
+        t.ok(
+            s.pread(&mut hole, 8192).ok() == Some(32) && hole == [0; 32],
+            "milkfs hole reads zeros",
+        );
+    }
+    for i in 0..60 {
+        let _ = ops::write_file(
+            &p(&alloc::format!("many-{i:02}")),
+            alloc::format!("file {i}").as_bytes(),
+        );
+    }
+    t.ok(
+        (0..60).all(|i| read_str(&p(&alloc::format!("many-{i:02}"))) == alloc::format!("file {i}")),
+        "milkfs 60 small files",
+    );
+    milk_space(t, "milkfs space exact after writes");
+
+    // namespace
+    t.ok(
+        ops::rename(&p("a.txt"), &p("b.txt")).is_ok(),
+        "milkfs rename",
+    );
+    t.err(
+        ops::stat(&p("a.txt")),
+        Errno::ENOENT,
+        "milkfs old name gone",
+    );
+    t.ok(
+        ops::mkdir(&p("d1"), 0o755).is_ok()
+            && ops::mkdir(&p("d2"), 0o755).is_ok()
+            && ops::write_file(&p("d1/f"), b"in d1").is_ok(),
+        "milkfs dirs",
+    );
+    t.ok(
+        ops::rename(&p("d1"), &p("d2/inner")).is_ok(),
+        "milkfs rename dir",
+    );
+    t.ok(
+        read_str(&p("d2/inner/../../b.txt")) == "hello World!",
+        "milkfs .. after rename",
+    );
+    t.err(
+        ops::rename(&p("d2"), &p("d2/inner/x")),
+        Errno::EINVAL,
+        "milkfs dir into itself",
+    );
+    t.err(
+        ops::rmdir(&p("d2")),
+        Errno::ENOTEMPTY,
+        "milkfs rmdir non-empty",
+    );
+    t.err(ops::unlink(&p("d2")), Errno::EISDIR, "milkfs unlink dir");
+    t.ok(
+        ops::stat(D).map(|s| s.nlink).ok() == Some(3),
+        "milkfs dir nlink",
+    );
+    t.ok(
+        ops::symlink("b.txt", &p("link")).is_ok() && read_str(&p("link")) == "hello World!",
+        "milkfs symlink",
+    );
+    t.ok(
+        ops::link(&p("b.txt"), &p("hard")).is_ok(),
+        "milkfs hard link",
+    );
+    t.ok(
+        ops::stat(&p("b.txt")).map(|s| s.nlink).ok() == Some(2),
+        "milkfs nlink 2",
+    );
+    let open_big = ops::open(&p("big"), O_RDONLY, 0).ok();
+    t.ok(ops::unlink(&p("big")).is_ok(), "milkfs unlink open file");
+    if let Some(f) = open_big {
+        let mut b = [0u8; 4];
+        t.ok(
+            f.pread(&mut b, 0).ok() == Some(4) && b[..] == data[..4],
+            "milkfs open file survives unlink",
+        );
+    }
+    if let Some(d) = t.must(ops::open(D, O_RDONLY | O_DIRECTORY, 0), "milkfs open dir") {
+        let mut buf = vec![0u8; 8192];
+        let n = d.getdents64(&mut buf).unwrap_or(0);
+        let names: Vec<String> = parse_dirents(&buf[..n])
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        t.ok(
+            names.len() == 2 + 60 + 5
+                && names.iter().any(|n| n == "d2")
+                && names.iter().any(|n| n == "sparse"),
+            "milkfs getdents64",
+        );
+    }
+    t.ok(
+        ops::readdir("/Volumes/Milk")
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.name == ".snapshots"),
+        ".snapshots listed in the volume root",
+    );
+    t.err(
+        ops::mkdir("/Volumes/Milk/.snapshots", 0o755),
+        Errno::EEXIST,
+        "can't create .snapshots",
+    );
+    t.err(
+        ops::rename(&p("b.txt"), "/tmp/b.txt"),
+        Errno::EXDEV,
+        "milkfs rename to tmpfs",
+    );
+    milk_space(t, "milkfs space exact after namespace ops");
+
+    // snapshots
+    let before = read_str(&p("b.txt"));
+    t.ok(
+        super::milkfs::snapshot("selftest-a").is_ok(),
+        "snapshot selftest-a",
+    );
+    t.err(
+        super::milkfs::snapshot("selftest-a"),
+        Errno::EEXIST,
+        "duplicate snapshot name",
+    );
+    t.err(
+        super::milkfs::snapshot("bad/name"),
+        Errno::EINVAL,
+        "bad snapshot name",
+    );
+    let _ = ops::write_file(&p("b.txt"), b"changed after the snapshot");
+    let _ = ops::write_file(&p("new.txt"), b"born after the snapshot");
+    let _ = ops::unlink(&p("many-00"));
+    let snap = "/Volumes/Milk/.snapshots/selftest-a/.selftest";
+    t.ok(
+        read_str(&alloc::format!("{snap}/b.txt")) == before,
+        "snapshot keeps the old content",
+    );
+    t.ok(
+        read_str(&p("b.txt")) == "changed after the snapshot",
+        "live has the new content",
+    );
+    t.err(
+        ops::stat(&alloc::format!("{snap}/new.txt")),
+        Errno::ENOENT,
+        "snapshot doesn't see new files",
+    );
+    t.ok(
+        read_str(&alloc::format!("{snap}/many-00")) == "file 0",
+        "snapshot keeps deleted files",
+    );
+    t.err(
+        ops::open(&alloc::format!("{snap}/b.txt"), O_WRONLY, 0).and_then(|f| f.write(b"x")),
+        Errno::EROFS,
+        "snapshots are read-only",
+    );
+    t.err(
+        ops::mkdir(&alloc::format!("{snap}/x"), 0o755),
+        Errno::EROFS,
+        "no mkdir in a snapshot",
+    );
+    t.ok(
+        ops::lookup(&alloc::format!("{snap}/../.."))
+            .and_then(|i| path::path_of(&i))
+            .ok()
+            .as_deref()
+            == Some("/Volumes/Milk/.snapshots"),
+        "snapshot .. leads to .snapshots",
+    );
+    milk_space(t, "milkfs space exact with a snapshot");
+
+    // the shell interface
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/snapshot", b"selftest-b\n").is_ok(),
+        "snapshot via /sys",
+    );
+    let list = read_str("/sys/fs/milkfs/snapshots");
+    t.ok(
+        list.contains("selftest-a gen=") && list.contains("selftest-b gen="),
+        "/sys/fs/milkfs/snapshots",
+    );
+    t.ok(
+        read_str("/sys/fs/milkfs/info").contains("label:       Milk"),
+        "/sys/fs/milkfs/info",
+    );
+    let _ = ops::write_file(&p("b.txt"), b"third version");
+    t.ok(
+        read_str("/Volumes/Milk/.snapshots/selftest-b/.selftest/b.txt")
+            == "changed after the snapshot",
+        "second snapshot",
+    );
+    t.err(
+        ops::write_file(
+            "/sys/fs/milkfs/mkfs",
+            super::milkfs::volume().unwrap().device_name.as_bytes(),
+        ),
+        Errno::EBUSY,
+        "mkfs refuses the mounted volume",
+    );
+
+    // rollback to the first snapshot (deletes selftest-b)
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/rollback", b"selftest-a").is_ok(),
+        "rollback via /sys",
+    );
+    t.ok(
+        read_str(&p("b.txt")) == before,
+        "rollback restored the content",
+    );
+    t.err(
+        ops::stat(&p("new.txt")),
+        Errno::ENOENT,
+        "rollback removed the new file",
+    );
+    t.ok(
+        read_str(&p("many-00")) == "file 0",
+        "rollback restored the deleted file",
+    );
+    t.ok(
+        super::milkfs::snapshots()
+            .map(|l| l.iter().map(|s| s.name.clone()).collect::<Vec<_>>())
+            .ok()
+            == Some(alloc::vec![String::from("selftest-a")]),
+        "rollback dropped the newer snapshot",
+    );
+    milk_space(t, "milkfs space exact after rollback");
+    t.ok(
+        super::milkfs::delete_snapshot("selftest-a").is_ok(),
+        "delete snapshot",
+    );
+    t.err(
+        ops::stat("/Volumes/Milk/.snapshots/selftest-a"),
+        Errno::ENOENT,
+        "deleted snapshot is gone",
+    );
+    milk_space(t, "milkfs space exact after deleting the snapshot");
+
+    // clean up
+    let entries = ops::readdir(D).unwrap_or_default();
+    for e in &entries {
+        if e.kind != InodeType::Dir {
+            let _ = ops::unlink(&p(&e.name));
+        }
+    }
+    let _ = ops::unlink(&p("d2/inner/f"));
+    let _ = ops::rmdir(&p("d2/inner"));
+    let _ = ops::rmdir(&p("d2"));
+    t.ok(ops::rmdir(D).is_ok(), "milkfs cleanup");
+    milk_space(t, "milkfs space exact after cleanup");
+}
+
+/// Persistence demo: every boot appends a line to /Volumes/Milk/boot.log and shows it.
+fn boot_log() {
+    const LOG: &str = "/Volumes/Milk/boot.log";
+    let Some(v) = super::milkfs::volume() else {
+        return;
+    };
+    let old = read_str(LOG);
+    let n = old.lines().count() + 1;
+    let line = alloc::format!(
+        "boot {n}: unix time {}, generation {}\n",
+        super::clock::now().sec,
+        v.state.lock().sb.generation
+    );
+    if let Ok(f) = ops::open(LOG, O_WRONLY | O_CREAT | O_APPEND, 0o644) {
+        let _ = f.write(line.as_bytes());
+    }
+    show(LOG);
+}
+
 /// Print a few inspectable files so they show up in the boot log.
 fn show(path: &str) {
     kprintln!("$ cat {path}");
@@ -829,6 +1203,7 @@ pub fn run() {
     devfs(&mut t);
     procfs_sysfs(&mut t);
     blockdev(&mut t);
+    milkfs(&mut t);
     if t.failed != 0 {
         panic!("fs selftest: {} of {} checks failed", t.failed, t.checks);
     }
@@ -849,5 +1224,7 @@ pub fn run() {
         .map(|e| e.name)
         .collect();
     kprintln!("{}", names.join("  "));
+    show("/sys/fs/milkfs/info");
+    boot_log();
     show("/etc/motd");
 }

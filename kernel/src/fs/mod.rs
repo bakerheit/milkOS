@@ -19,6 +19,7 @@ pub mod devfs;
 pub mod errno;
 pub mod file;
 pub mod initramfs;
+pub mod milkfs;
 pub mod node;
 pub mod ops;
 pub mod path;
@@ -72,4 +73,5 @@ pub fn init() {
     devfs::init().expect("fs: mount /dev");
     procfs::init(root).expect("fs: mount /proc");
     sysfs::init().expect("fs: mount /sys");
+    milkfs::automount();
 }

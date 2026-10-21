@@ -46,7 +46,7 @@ SHARE_DIR="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/share"
 X="$SHARE_DIR/$SHARE_SUB"; mkdir -p "$X"
 head -c 200000 /dev/urandom > "$X/payload.bin"
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -kernel "$ELF.bin" \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
   -display none -monitor none -serial "unix:$SOCK,server,nowait" \
   -global virtio-mmio.force-legacy=false "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
 QPID=$!
@@ -94,7 +94,7 @@ cmp -s "$X/readback.bin" "$X/payload.bin" && ok "milkOS reads back what it wrote
 cmp -s "$X/renamed.txt" "$REF/readme.txt" && ok "milkOS reads a renamed file" || bad "milkOS read after rename"
 
 echo "== 3. Mac: attach read-only and check what milkOS wrote"
-fsck_msdos -n "$IMG" >/dev/null 2>&1 && ok "fsck_msdos clean after milkOS wrote" || { bad "fsck_msdos after milkOS wrote"; fsck_msdos -n "$IMG" || true; }
+if fsck_msdos -n "$IMG" 2>&1 | tee "$T/fsck.txt" | grep -q "Fix?"; then bad "fsck_msdos after milkOS wrote wants fixes"; cat "$T/fsck.txt"; elif fsck_msdos -n "$IMG" >/dev/null 2>&1; then ok "fsck_msdos clean after milkOS wrote (nothing to fix, FSInfo exact)"; else bad "fsck_msdos after milkOS wrote"; fi
 DEV="$(hdiutil attach -readonly -imagekey diskimage-class=CRawDiskImage -mountpoint "$MNT" "$IMG" | awk 'NR==1{print $1}')"
 [ "$(cat "$MNT/Made In milkOS/a pretty long file name from milkOS.txt")" = "hello from milkOS" ] \
   && ok "long-name file written by milkOS" || bad "long-name file written by milkOS"

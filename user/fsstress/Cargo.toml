@@ -1,0 +1,12 @@
+[package]
+name = "fsstress"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fsstress"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

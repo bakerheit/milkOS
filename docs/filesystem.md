@@ -373,6 +373,22 @@ cache on is slightly slower. FAT reads also walk the cluster chain from a per-fi
 and read runs of contiguous clusters in one request (before that change, a cold 4 MiB FAT
 read took 289 ms).
 
+## SMP
+
+With 4 CPUs, file-system calls really run in parallel: user processes on different CPUs,
+the `milkfs-flush` and `timemachine` threads, virtio completions (IRQs on CPU 0, waiters
+anywhere). Locking that makes it safe: one `sched::Mutex` per milkfs volume and per FAT
+volume (and per bcache and virtio device), spinlocks only for short map updates and never
+held across I/O, always taken in one order (inode map -> node / fid / snapshot-dev locks,
+never back); page-cache fills run unlocked and are guarded by the invalidation epoch.
+
+`user/fsstress DIR [WORKERS] [ROUNDS] [READFILE]` forks workers (one per CPU and more)
+that write / read-verify / rename / delete files of varying size in parallel, optionally
+re-reading a shared file every round. Run on `-smp 4` for 8 boots, each with Time Machine
+snapshotting every second meanwhile: 8 workers x 20 rounds on milkfs and 4 x 8 on FAT32
+per boot, 0 errors, `mkmilkfs.py check` clean, `fsck_msdos` with nothing to fix. The test
+scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4}`.
+
 ## Next steps
 
 - Pipes (`InodeType::Fifo`) and `poll` on the wait queues; `O_NONBLOCK`.

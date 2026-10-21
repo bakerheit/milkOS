@@ -139,6 +139,7 @@ Implemented (number: name):
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom, 134/135 rt_sigaction/rt_sigprocmask (accepted, ignored) |
 | milkOS | 4096 MILK_PS: array of 48-byte records (pid, ppid, tid, state, kernel?, cpu ns, rss, name) for `ps`, until /proc has per-process dirs |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -179,6 +180,37 @@ It has real termios state (`sys_ioctl` routes it to `wm::tty::ioctl`):
   swallows them, raw-mode programs see them.
 
 `/bin/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
+
+### Desktop windows (`MILK_WIN_*`)
+
+A process can own a desktop window. Kernel side: `kernel/src/wm/client.rs` (+ the arms in
+`proc/syscall.rs`); user side: the `user/gui` crate. The window's body is a pixel buffer of
+contiguous PMM frames owned by the window system and mapped into the process with
+`UserSpace::map_shared` (pages marked `shared`: the space never frees them; `fork` gives the
+child a private copy).
+
+| nr | call | args → result |
+|---|---|---|
+| 4100 | `MILK_WIN_CREATE` | `(w, h, title, title_len, info)` → window id. Body up to 1000 x 700. Writes `struct { u64 addr; u32 w, h, stride, id; }` (24 bytes) to `info`: the XRGB pixels (`0x00RRGGBB`, `stride` = w) at `addr`, initially milk white. |
+| 4101 | `MILK_WIN_COMMIT` | `(id, x, y, w, h)` → 0. Shows what changed in that rect (w = 0: everything). The wm redraws the window on its next frame. |
+| 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
+| 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
+| 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+
+Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
+
+Event (little endian): `u32 kind, i32 x, i32 y, u32 key, u32 mods, i32 extra, 8 bytes reserved`.
+Kinds: 1 key down (`key` = Unicode code point, or 0x10001 Enter, 0x10002 Backspace, 0x10003
+Tab, 0x10004 Esc, 0x10005..8 Up/Down/Left/Right, 0x10009 Delete; `mods` bits shift 1, ctrl 2,
+alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4 / 5 button
+down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
+the end), 7 close (the user closed the window: clean up and exit). 2 (key up) is reserved.
+
+Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
+stays mapped until the process destroys the window or exits. Windows of processes that exit
+without destroying them are closed and freed by the wm within a second.
+
+`/bin/paint` is the example client (dock, Skim, or `paint` in a shell).
 
 ## Userland (`user/`)
 

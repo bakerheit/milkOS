@@ -1,0 +1,382 @@
+//! Userland window clients: a process gets a desktop window whose body is a pixel buffer
+//! shared with it (mapped into its address space), draws into it, says which part changed
+//! (commit), and reads input events. The syscalls (`MILK_WIN_*`, 4100..) live in
+//! `proc/syscall.rs` and call into this module; docs/processes.md documents them.
+//!
+//! Ownership: the buffer is contiguous PMM frames owned here (in [`CLIENTS`]). The process maps
+//! them with `UserSpace::map_shared` (which never frees them). They are freed when the process
+//! destroys the window (after it unmapped them) or once the process is gone. Closing the
+//! window on screen only hides it and sends a Close event; the frames stay until then.
+//!
+//! The wm thread sees a client window as a normal [`WindowContents`] ([`ClientView`]) that
+//! blits the shared buffer into the window body.
+
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use crate::gfx::Rect;
+use crate::mmu::{PAGE_SIZE, phys_to_virt};
+use crate::sched::WaitQueue;
+use crate::sync::SpinLock;
+use crate::{pmm, proc};
+
+use super::event::{Button, Key};
+use super::paint::Painter;
+use super::theme::*;
+use super::window::{KeyInput, PointerInput, PointerKind, WindowContents};
+use super::{Request, request};
+
+pub const MAX_W: u32 = 1000;
+pub const MAX_H: u32 = 700;
+/// Event record size (see [`encode`]).
+pub const EVENT_LEN: usize = 32;
+const MAX_QUEUED: usize = 256;
+
+// Event kinds (2 is reserved for key-up, not sent yet).
+pub const EV_KEY_DOWN: u32 = 1;
+pub const EV_POINTER_MOVE: u32 = 3;
+pub const EV_BUTTON_DOWN: u32 = 4;
+pub const EV_BUTTON_UP: u32 = 5;
+pub const EV_SCROLL: u32 = 6;
+pub const EV_CLOSE: u32 = 7;
+
+// Key codes for non-character keys (printable keys send their Unicode code point).
+pub const K_ENTER: u32 = 0x1_0001;
+pub const K_BACKSPACE: u32 = 0x1_0002;
+pub const K_TAB: u32 = 0x1_0003;
+pub const K_ESCAPE: u32 = 0x1_0004;
+pub const K_UP: u32 = 0x1_0005;
+pub const K_DOWN: u32 = 0x1_0006;
+pub const K_LEFT: u32 = 0x1_0007;
+pub const K_RIGHT: u32 = 0x1_0008;
+pub const K_DELETE: u32 = 0x1_0009;
+
+struct Client {
+    pid: u32,
+    w: u32,
+    h: u32,
+    pa: usize,
+    pages: usize,
+    title: String,
+    title_gen: u32,
+    /// Bounding box of committed changes not yet shown.
+    dirty: Option<Rect>,
+    events: VecDeque<[u8; EVENT_LEN]>,
+    /// Closed on screen (the process has been told).
+    closed: bool,
+}
+
+static CLIENTS: SpinLock<BTreeMap<u32, Client>> = SpinLock::new(BTreeMap::new());
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+/// Clients blocked in MILK_WIN_EVENT wait here.
+static EVENT_WQ: WaitQueue = WaitQueue::new();
+
+pub struct Created {
+    pub id: u32,
+    pub pa: usize,
+    pub bytes: usize,
+}
+
+/// MILK_WIN_CREATE: a `w` x `h` buffer (stride = w) for process `pid`. The caller maps it.
+pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
+    if w == 0 || h == 0 || w > MAX_W || h > MAX_H {
+        return None;
+    }
+    let bytes = (w * h * 4) as usize;
+    let pages = bytes.div_ceil(PAGE_SIZE);
+    let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+    // Start milk-white rather than black.
+    // SAFETY: fresh frames we own.
+    unsafe {
+        core::slice::from_raw_parts_mut(phys_to_virt(pa) as *mut u32, (w * h) as usize).fill(MILK)
+    };
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    CLIENTS.lock().insert(
+        id,
+        Client {
+            pid,
+            w,
+            h,
+            pa,
+            pages,
+            title: String::from(title),
+            title_gen: 0,
+            dirty: None,
+            events: VecDeque::new(),
+            closed: false,
+        },
+    );
+    request(Request::ClientCreate(id));
+    Some(Created { id, pa, bytes })
+}
+
+/// MILK_WIN_COMMIT: `r` of the buffer changed (whole buffer if empty).
+pub fn commit(pid: u32, id: u32, r: Rect) -> bool {
+    let mut c = CLIENTS.lock();
+    let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
+        return false;
+    };
+    let full = Rect::new(0, 0, cl.w as i32, cl.h as i32);
+    let r = if r.is_empty() {
+        full
+    } else {
+        super::paint::intersect(&r, &full)
+    };
+    cl.dirty = Some(cl.dirty.map_or(r, |d| d.union(&r)));
+    drop(c);
+    super::WAKE.wake_all();
+    true
+}
+
+pub fn set_title(pid: u32, id: u32, title: &str) -> bool {
+    let mut c = CLIENTS.lock();
+    let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
+        return false;
+    };
+    cl.title = String::from(title);
+    cl.title_gen += 1;
+    drop(c);
+    super::WAKE.wake_all();
+    true
+}
+
+/// MILK_WIN_EVENT: the next event for window `id`, waiting up to `timeout_ns` (0 = don't
+/// wait). `Err(())` if the window doesn't exist or isn't the caller's.
+pub fn next_event(pid: u32, id: u32, timeout_ns: u64) -> Result<Option<[u8; EVENT_LEN]>, ()> {
+    let pop = || -> Result<Option<[u8; EVENT_LEN]>, ()> {
+        let mut c = CLIENTS.lock();
+        let cl = c.get_mut(&id).filter(|cl| cl.pid == pid).ok_or(())?;
+        Ok(cl.events.pop_front())
+    };
+    if let Some(e) = pop()? {
+        return Ok(Some(e));
+    }
+    if timeout_ns > 0 {
+        EVENT_WQ.wait_until_timeout(
+            || {
+                CLIENTS
+                    .lock()
+                    .get(&id)
+                    .is_none_or(|cl| !cl.events.is_empty())
+            },
+            timeout_ns,
+        );
+    }
+    pop()
+}
+
+/// MILK_WIN_DESTROY, step 1: forget the window; returns the buffer (pa, bytes) so the caller
+/// can unmap it from the process, then hand it to [`free`].
+pub fn destroy(pid: u32, id: u32) -> Option<(usize, usize)> {
+    let mut c = CLIENTS.lock();
+    if c.get(&id).is_none_or(|cl| cl.pid != pid) {
+        return None;
+    }
+    let cl = c.remove(&id).unwrap();
+    drop(c);
+    request(Request::ClientGone(id));
+    Some((cl.pa, cl.pages))
+}
+
+/// Step 2: give the frames back (the process no longer maps them).
+pub fn free(pa: usize, pages: usize) {
+    pmm::free_contiguous(pa, pages);
+}
+
+/// Called by the wm about once a second: windows of processes that have exited are closed
+/// and their buffers freed (an exited process's address space is already gone).
+pub fn reap() -> Vec<u32> {
+    let alive =
+        |pid: u32| proc::get(pid).is_some_and(|p| p.inner.lock().state == proc::PState::Alive);
+    let dead: Vec<u32> = CLIENTS
+        .lock()
+        .iter()
+        .filter(|(_, cl)| !alive(cl.pid))
+        .map(|(&id, _)| id)
+        .collect();
+    for &id in &dead {
+        if let Some(cl) = CLIENTS.lock().remove(&id) {
+            free(cl.pa, cl.pages);
+        }
+    }
+    dead
+}
+
+/// The window was closed on screen: tell the client.
+pub fn closed(id: u32) {
+    if let Some(cl) = CLIENTS.lock().get_mut(&id) {
+        cl.closed = true;
+    }
+    push(id, encode(EV_CLOSE, 0, 0, 0, 0, 0));
+}
+
+/// The name of the process that owns client window `id` (for the dock's running dots).
+pub fn process_name(id: u32) -> Option<String> {
+    let pid = CLIENTS.lock().get(&id)?.pid;
+    let p = proc::get(pid)?;
+    let n = p.inner.lock().name;
+    Some(String::from(n.as_str()))
+}
+
+/// Body size the wm should give a new client window, and its title.
+pub fn info(id: u32) -> Option<(u32, u32, String)> {
+    CLIENTS
+        .lock()
+        .get(&id)
+        .map(|cl| (cl.w, cl.h, cl.title.clone()))
+}
+
+fn push(id: u32, ev: [u8; EVENT_LEN]) {
+    if let Some(cl) = CLIENTS.lock().get_mut(&id) {
+        if cl.events.len() >= MAX_QUEUED {
+            cl.events.pop_front();
+        }
+        cl.events.push_back(ev);
+    }
+    EVENT_WQ.wake_all();
+}
+
+/// 32-byte event: kind u32, x i32, y i32, key u32, mods u32, extra i32 (button / scroll dy),
+/// 8 bytes reserved. All little endian.
+fn encode(kind: u32, x: i32, y: i32, key: u32, mods: u32, extra: i32) -> [u8; EVENT_LEN] {
+    let mut b = [0u8; EVENT_LEN];
+    for (k, v) in [kind, x as u32, y as u32, key, mods, extra as u32]
+        .iter()
+        .enumerate()
+    {
+        b[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    b
+}
+
+/// What the wm holds for a client window.
+pub struct ClientView {
+    id: u32,
+    title: String,
+    title_gen: u32,
+    /// The pointer is pressed inside (so moves are sent as drags too).
+    last: (i32, i32),
+}
+
+impl ClientView {
+    pub fn new(id: u32) -> Box<ClientView> {
+        let title = info(id).map_or(String::from("App"), |i| i.2);
+        Box::new(ClientView {
+            id,
+            title,
+            title_gen: 0,
+            last: (-1, -1),
+        })
+    }
+}
+
+fn mods_bits(m: super::event::Mods) -> u32 {
+    (m.shift as u32) | (m.ctrl as u32) << 1 | (m.alt as u32) << 2 | (m.meta as u32) << 3
+}
+
+impl WindowContents for ClientView {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn menus(&self) -> &'static [&'static str] {
+        &["File", "Edit", "Window", "Help"]
+    }
+
+    fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
+        // Copy the geometry out and blit without holding the lock (IRQs stay on). If the
+        // process destroys the window meanwhile, the worst case is one frame of stale pixels.
+        let Some((pa, cw, ch)) = CLIENTS
+            .lock()
+            .get(&self.id)
+            .map(|cl| (cl.pa, cl.w as i32, cl.h as i32))
+        else {
+            p.fill(0, 0, w, h, MILK);
+            return;
+        };
+        // SAFETY: the frames belong to the client table until the process is gone and the
+        // window closed; the process may be writing them concurrently (tearing at worst).
+        let px = unsafe {
+            core::slice::from_raw_parts(phys_to_virt(pa) as *const u32, (cw * ch) as usize)
+        };
+        p.blit_raw(0, 0, px, cw as usize, cw, ch);
+        if w > cw {
+            p.fill(cw, 0, w - cw, h, MILK);
+        }
+        if h > ch {
+            p.fill(0, ch, cw.min(w), h - ch, MILK);
+        }
+    }
+
+    fn key(&mut self, k: &KeyInput) -> bool {
+        let code = match k.key {
+            Key::Enter => K_ENTER,
+            Key::Backspace => K_BACKSPACE,
+            Key::Tab => K_TAB,
+            Key::Escape => K_ESCAPE,
+            Key::Up => K_UP,
+            Key::Down => K_DOWN,
+            Key::Left => K_LEFT,
+            Key::Right => K_RIGHT,
+            Key::Delete => K_DELETE,
+            Key::Char(c) => k.ch.unwrap_or(c) as u32,
+            _ => return false,
+        };
+        push(
+            self.id,
+            encode(EV_KEY_DOWN, 0, 0, code, mods_bits(k.mods), 0),
+        );
+        false
+    }
+
+    fn pointer(&mut self, e: &PointerInput) -> bool {
+        let (kind, extra) = match e.kind {
+            PointerKind::Down(b) => (EV_BUTTON_DOWN, button(b)),
+            PointerKind::Up(b) => (EV_BUTTON_UP, button(b)),
+            PointerKind::Drag => (EV_POINTER_MOVE, 1),
+        };
+        if kind == EV_POINTER_MOVE && (e.x, e.y) == self.last {
+            return false;
+        }
+        self.last = (e.x, e.y);
+        push(self.id, encode(kind, e.x, e.y, 0, 0, extra));
+        false
+    }
+
+    fn scroll(&mut self, dy: i32) -> bool {
+        push(self.id, encode(EV_SCROLL, 0, 0, 0, 0, dy));
+        false
+    }
+
+    fn tick(&mut self, _now: u64) -> bool {
+        let mut c = CLIENTS.lock();
+        let Some(cl) = c.get_mut(&self.id) else {
+            return false;
+        };
+        let mut redraw = cl.dirty.take().is_some();
+        if cl.title_gen != self.title_gen {
+            self.title_gen = cl.title_gen;
+            self.title = cl.title.clone();
+            redraw = true;
+        }
+        redraw
+    }
+}
+
+fn button(b: Button) -> i32 {
+    match b {
+        Button::Left => 1,
+        Button::Right => 2,
+        Button::Middle => 3,
+    }
+}
+
+/// Where a new client window goes: cascaded from the top left of the work area.
+pub fn place(n: i32, w: i32, h: i32) -> Rect {
+    let x = (160 + n * 32).min(SCREEN_W - w).max(0);
+    let y = (80 + n * 32).min(SCREEN_H - h).max(MENU_H);
+    Rect::new(x, y, w, h)
+}

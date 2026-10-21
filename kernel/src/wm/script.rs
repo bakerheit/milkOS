@@ -131,7 +131,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("write the window manager");
         }
         "about" => {
-            let (x, y) = dock_icon_center(7);
+            let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(1200);
         }
         "launcher" => {
@@ -199,6 +199,31 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("stty")
                 .enter()
                 .wait(300);
+        }
+        "paint" => {
+            // Dock icon 4 is Paint. Its window lands at (192, 112); the canvas starts 48px
+            // into the body, so draw a smiling cow-ish face in screen coordinates.
+            let (x, y) = dock_icon_center(4);
+            b.click(x, y).wait(1200);
+            b.click(193 + 12 + 34 + 14, 145 + 24).wait(100); // straw swatch
+            b.drag(320, 280, 520, 280, 24).wait(50);
+            b.drag(520, 280, 520, 420, 16).wait(50);
+            b.drag(520, 420, 320, 420, 24).wait(50);
+            b.drag(320, 420, 320, 280, 16).wait(50);
+            b.click(193 + 12 + 4 * 34 + 14, 145 + 24).wait(100); // blue
+            b.drag(380, 340, 381, 341, 2).drag(460, 340, 461, 341, 2);
+            b.click(193 + 12 + 2 * 34 + 14, 145 + 24).wait(100); // honey
+            b.drag(370, 385, 420, 400, 10)
+                .drag(420, 400, 470, 385, 10)
+                .wait(300);
+        }
+        "paintclose" => {
+            let (x, y) = dock_icon_center(4);
+            b.click(x, y)
+                .wait(1200)
+                .click(192 + 14 + 6, 112 + 16)
+                .wait(800);
+            b.typ("ps").enter().wait(400);
         }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);

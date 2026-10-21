@@ -22,5 +22,11 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
         ),
         App::Notes => (Rect::new(120, 96, 440, 330), Box::new(notes::Notes::new())),
         App::About => (Rect::new(332, 140, 360, 380), Box::new(about::About::new())),
+        App::Client(id) => {
+            let (w, h) = super::client::info(id).map_or((320, 240), |i| (i.0 as i32, i.1 as i32));
+            // Body + frame (1px border each side, 32px title bar + its line).
+            let r = super::client::place(id as i32 % 8, w + 2, h + 34);
+            (r, super::client::ClientView::new(id))
+        }
     }
 }

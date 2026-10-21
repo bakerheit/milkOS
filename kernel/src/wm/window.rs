@@ -83,6 +83,8 @@ pub enum App {
     Terminal,
     Notes,
     About,
+    /// A userland window client (`wm::client`), by its client id.
+    Client(u32),
 }
 
 impl App {
@@ -92,6 +94,7 @@ impl App {
             App::Terminal => "Terminal",
             App::Notes => "Notes",
             App::About => "About milkOS",
+            App::Client(_) => "App",
         }
     }
 }

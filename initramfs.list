@@ -10,3 +10,4 @@
 /bin/msh    target/user/aarch64-unknown-none-softfloat/release/msh     755
 /bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755
 /bin/stty   target/user/aarch64-unknown-none-softfloat/release/stty    755
+/bin/paint  target/user/aarch64-unknown-none-softfloat/release/paint   755

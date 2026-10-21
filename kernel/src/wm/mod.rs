@@ -18,6 +18,7 @@
 
 mod apps;
 mod buffer;
+pub mod client;
 mod event;
 mod icons;
 mod menus;
@@ -81,6 +82,10 @@ pub enum Request {
     /// Open, and if the app's window is on another space, bring it to this one.
     OpenHere(App),
     Mode(Mode),
+    /// A process created a window (`client::create`).
+    ClientCreate(u32),
+    /// A process destroyed its window (or exited).
+    ClientGone(u32),
 }
 
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
@@ -440,6 +445,40 @@ impl Desktop {
         self.damage_window(id);
     }
 
+    /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
+    /// a window, focus that instead.
+    fn launch(&mut self, path: &'static str) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if let Some(id) = self.program_window(name) {
+            self.show_window(id);
+            return;
+        }
+        match crate::proc::spawn(path, &[name]) {
+            Ok(pid) => {
+                kprintln!("wm: started {path} as pid {pid}");
+                drop(sched::spawn("reap-app", move || {
+                    crate::proc::wait_kernel_child(pid);
+                }));
+            }
+            Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+        }
+    }
+
+    /// A client window whose process is called `name`.
+    fn program_window(&self, name: &str) -> Option<u32> {
+        self.windows
+            .iter()
+            .find(|w| {
+                matches!(w.app, App::Client(c) if client::process_name(c).as_deref() == Some(name))
+            })
+            .map(|w| w.id)
+    }
+
+    fn running_program(&self, path: &str) -> bool {
+        self.program_window(path.rsplit('/').next().unwrap_or(path))
+            .is_some()
+    }
+
     /// Make a window visible and focused: unminimise, switch to its space, leave overlays.
     fn show_window(&mut self, id: u32) {
         let Some(w) = self.win_mut(id) else {
@@ -492,7 +531,16 @@ impl Desktop {
         self.set_focus(top);
     }
 
+    /// Close from the UI (traffic light, Cmd+W, menu). A client's window goes away at once and
+    /// the process gets a Close event.
     fn close(&mut self, id: u32) {
+        if let Some(App::Client(cid)) = self.win(id).map(|w| w.app) {
+            client::closed(cid);
+        }
+        self.close_window(id);
+    }
+
+    fn close_window(&mut self, id: u32) {
         self.damage_window(id);
         if let Some(i) = self.idx(id) {
             self.windows.remove(i);
@@ -896,6 +944,13 @@ impl Desktop {
                     self.open(a);
                 }
                 Request::Mode(m) => self.toggle_mode(m),
+                Request::ClientCreate(id) => self.open(App::Client(id)),
+                Request::ClientGone(id) => {
+                    if let Some(w) = self.windows.iter().find(|w| w.app == App::Client(id)) {
+                        let wid = w.id;
+                        self.close_window(wid);
+                    }
+                }
             }
         }
         self.tick(now);
@@ -1019,6 +1074,17 @@ impl Desktop {
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
             self.last_second = sec;
+            // Windows of userland clients that exited without destroying them.
+            for cid in client::reap() {
+                if let Some(wid) = self
+                    .windows
+                    .iter()
+                    .find(|w| w.app == App::Client(cid))
+                    .map(|w| w.id)
+                {
+                    self.close_window(wid);
+                }
+            }
             let span = now - self.acct_start;
             let idle = idle_thread_ns();
             if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {

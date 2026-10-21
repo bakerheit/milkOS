@@ -79,6 +79,9 @@ impl Perm {
 struct Page {
     pa: PhysAddr,
     perm: Perm,
+    /// Someone else's frame mapped in (a desktop window buffer, see `map_shared`): never
+    /// freed by this space.
+    shared: bool,
 }
 
 pub struct UserSpace {
@@ -157,6 +160,7 @@ impl UserSpace {
                     Page {
                         pa: p.pa,
                         perm: want,
+                        shared: p.shared,
                     },
                 );
             }
@@ -171,7 +175,14 @@ impl UserSpace {
             pmm::free_frame(pa);
             return Err(ENOMEM);
         }
-        self.pages.insert(va, Page { pa, perm });
+        self.pages.insert(
+            va,
+            Page {
+                pa,
+                perm,
+                shared: false,
+            },
+        );
         Ok(pa)
     }
 
@@ -191,7 +202,9 @@ impl UserSpace {
         for v in doomed {
             let p = self.pages.remove(&v).unwrap();
             self.space().unmap_page(v);
-            pmm::free_frame(p.pa);
+            if !p.shared {
+                pmm::free_frame(p.pa);
+            }
         }
     }
 
@@ -452,12 +465,70 @@ impl UserSpace {
             self.space()
                 .map(va, p.pa, PAGE_SIZE, perm.attrs(), &mut PmmTables)
                 .map_err(|_| ENOMEM)?;
-            self.pages.insert(va, Page { pa: p.pa, perm });
+            self.pages.insert(
+                va,
+                Page {
+                    pa: p.pa,
+                    perm,
+                    shared: p.shared,
+                },
+            );
             if perm.exec {
                 self.sync_icache();
             }
         }
         Ok(())
+    }
+
+    /// Map `len` bytes of physically contiguous memory at `pa` that this space does not own
+    /// (a desktop window's pixel buffer), read/write, at a fresh address in the mmap area.
+    /// The owner keeps the frames alive until the process has unmapped them or exited.
+    pub fn map_shared(&mut self, pa: PhysAddr, len: usize) -> KResult<VirtAddr> {
+        let len = page_up(len);
+        let va = self.mmap_next;
+        if len == 0 || va + len > STACK_TOP - STACK_MAX {
+            return Err(ENOMEM);
+        }
+        self.mmap_next = va + len + PAGE_SIZE;
+        for off in (0..len).step_by(PAGE_SIZE) {
+            if self
+                .space()
+                .map(
+                    va + off,
+                    pa + off,
+                    PAGE_SIZE,
+                    Perm::RW.attrs(),
+                    &mut PmmTables,
+                )
+                .is_err()
+            {
+                self.unmap_range(va, off);
+                return Err(ENOMEM);
+            }
+            self.pages.insert(
+                va + off,
+                Page {
+                    pa: pa + off,
+                    perm: Perm::RW,
+                    shared: true,
+                },
+            );
+        }
+        Ok(va)
+    }
+
+    /// Unmap every shared page that maps physical `[pa, pa+len)` (whatever its address).
+    pub fn unmap_shared(&mut self, pa: PhysAddr, len: usize) {
+        let doomed: Vec<VirtAddr> = self
+            .pages
+            .iter()
+            .filter(|(_, p)| p.shared && p.pa >= pa && p.pa < pa + len)
+            .map(|(&v, _)| v)
+            .collect();
+        for v in doomed {
+            self.pages.remove(&v);
+            self.space().unmap_page(v);
+        }
     }
 
     pub fn munmap(&mut self, addr: VirtAddr, len: usize) -> KResult<()> {
@@ -484,7 +555,9 @@ impl Drop for UserSpace {
             );
         }
         for p in self.pages.values() {
-            pmm::free_frame(p.pa);
+            if !p.shared {
+                pmm::free_frame(p.pa);
+            }
         }
         if let Some(space) = self.space.take() {
             // SAFETY: not live (caller's contract); tables came from the PMM.

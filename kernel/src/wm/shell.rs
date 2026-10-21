@@ -103,6 +103,8 @@ pub struct Toast {
 #[derive(Clone, Copy)]
 enum DockAction {
     App(App),
+    /// A userland program, started with `proc::spawn`.
+    Program(&'static str),
     Home,
     Spaces,
     Soon(&'static str),
@@ -116,7 +118,7 @@ struct DockItem {
     action: DockAction,
 }
 
-const DOCK: [DockItem; 8] = [
+const DOCK: [DockItem; 9] = [
     DockItem {
         name: "Files",
         icon: Icon::Folder,
@@ -144,6 +146,13 @@ const DOCK: [DockItem; 8] = [
         bg: MILK,
         fg: ESPRESSO,
         action: DockAction::App(App::Notes),
+    },
+    DockItem {
+        name: "Paint",
+        icon: Icon::Paint,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: DockAction::Program("/bin/paint"),
     },
     DockItem {
         name: "Music",
@@ -207,6 +216,7 @@ pub fn dock_icon_center(i: usize) -> (i32, i32) {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     App(App),
+    Program(&'static str),
     Home,
     Spaces,
     Control,
@@ -222,7 +232,7 @@ struct Entry {
     action: Action,
 }
 
-const ENTRIES: [Entry; 8] = [
+const ENTRIES: [Entry; 9] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -254,6 +264,14 @@ const ENTRIES: [Entry; 8] = [
         bg: LATTE,
         fg: ESPRESSO,
         action: Action::App(App::About),
+    },
+    Entry {
+        name: "Paint",
+        sub: "Draw something (a userland app)",
+        icon: Icon::Paint,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: Action::Program("/bin/paint"),
     },
     Entry {
         name: "Today",
@@ -579,15 +597,20 @@ impl Desktop {
         )
     }
 
-    pub(super) fn app_title(&self) -> &'static str {
-        match self.mode {
+    pub(super) fn app_title(&self) -> String {
+        String::from(match self.mode {
             Mode::Home => "Today",
             Mode::Spaces => "Overview",
-            Mode::Desktop => self.focused_window().map_or("milkOS", |w| match w.app {
-                App::About => "milkOS",
-                a => a.name(),
-            }),
-        }
+            Mode::Desktop => match self.focused_window() {
+                None => "milkOS",
+                Some(w) => match w.app {
+                    App::About => "milkOS",
+                    // A userland app: its window title names it.
+                    App::Client(_) => w.contents.title(),
+                    a => a.name(),
+                },
+            },
+        })
     }
 
     // ---- painting -------------------------------------------------------------------------
@@ -636,9 +659,9 @@ impl Desktop {
                 p.rrect(x - 8, 3, tw + 16, MENU_H - 6, 6, STRAW, SEL_ROW_A);
             }
             if k == 0 {
-                p.bold(x, MENU_TEXT_Y, name, ESPRESSO);
+                p.bold(x, MENU_TEXT_Y, &name, ESPRESSO);
             } else {
-                p.text(x, MENU_TEXT_Y, name, ESPRESSO);
+                p.text(x, MENU_TEXT_Y, &name, ESPRESSO);
             }
         }
         p.text_right(
@@ -662,6 +685,7 @@ impl Desktop {
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
                 DockAction::Soon(_) => false,
+                DockAction::Program(p) => self.running_program(p),
             };
             if running {
                 p.rrect(
@@ -986,6 +1010,7 @@ impl Desktop {
                     DockAction::App(a) => self.open(a),
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
+                    DockAction::Program(path) => self.launch(path),
                     DockAction::Soon(name) => self.post_toast(name, "Not in milkOS yet. Soon!"),
                 }
                 self.invalidate(PanelKey::Dock);
@@ -1165,6 +1190,7 @@ impl Desktop {
         self.close_launcher();
         match action {
             Action::App(a) => self.open(a),
+            Action::Program(p) => self.launch(p),
             Action::Home => self.toggle_mode(Mode::Home),
             Action::Spaces => self.toggle_mode(Mode::Spaces),
             Action::Control => self.control = true,

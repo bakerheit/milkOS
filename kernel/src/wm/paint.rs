@@ -442,6 +442,19 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Copy a `w` x `h` block of raw pixels (`stride` per row) to logical (x, y).
+    pub fn blit_raw(&mut self, x: i32, y: i32, src: &[u32], stride: usize, w: i32, h: i32) {
+        let Some(b) = self.buf_rect(x, y, w, h) else {
+            return;
+        };
+        let (dx0, dy0) = (x + self.ox, y + self.oy);
+        for by in b.y..b.y + b.h {
+            let s0 = (by - dy0) as usize * stride + (b.x - dx0) as usize;
+            let s = &src[s0..s0 + b.w as usize];
+            self.span(by, b.x, b.x + b.w).copy_from_slice(s);
+        }
+    }
+
     /// Copy the same rectangle from a buffer laid out like the one we paint on (a screen-sized
     /// wallpaper under the back buffer): source pixel = destination buffer pixel.
     pub fn blit_same(&mut self, r: Rect, src: &Buffer) {

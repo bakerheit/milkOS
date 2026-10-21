@@ -63,17 +63,17 @@ fn sep() -> Item {
 
 impl Desktop {
     /// Menu bar titles: (x, width, name), index 0 is the app name.
-    pub(super) fn menu_titles(&self) -> Vec<(i32, i32, &'static str)> {
+    pub(super) fn menu_titles(&self) -> Vec<(i32, i32, String)> {
         let mut v = Vec::new();
         let name = self.app_title();
         let mut x = 38;
-        let w = font::str_width(name, 1) + 1;
+        let w = font::str_width(&name, 1) + 1;
         v.push((x, w, name));
         x += w;
         for m in self.menu_names() {
             x += 24;
             let w = font::str_width(m, 1);
-            v.push((x, w, *m));
+            v.push((x, w, String::from(*m)));
             x += w;
         }
         v
@@ -92,9 +92,10 @@ impl Desktop {
 
     pub(super) fn menu_items(&self, idx: usize) -> Vec<Item> {
         let titles = self.menu_titles();
-        let Some(&(_, _, name)) = titles.get(idx) else {
+        let Some((_, _, name)) = titles.get(idx) else {
             return Vec::new();
         };
+        let name = name.as_str();
         let has_win = self.focus.is_some() && self.mode == Mode::Desktop;
         let win = |a| if has_win { a } else { MenuAction::Disabled };
         if idx == 0 {
@@ -168,7 +169,7 @@ impl Desktop {
     pub(super) fn menu_layer(&self) -> Option<Layer> {
         let idx = self.menu?;
         let titles = self.menu_titles();
-        let &(x, _, _) = titles.get(idx)?;
+        let x = titles.get(idx)?.0;
         let items = self.menu_items(idx);
         let r = Rect::new(
             (x - 12).min(SCREEN_W - MENU_W - 8),
@@ -281,6 +282,6 @@ impl Desktop {
     pub(super) fn menu_title_at(&self, x: i32) -> Option<usize> {
         self.menu_titles()
             .iter()
-            .position(|&(tx, tw, _)| x >= tx - 8 && x < tx + tw + 8)
+            .position(|(tx, tw, _)| x >= tx - 8 && x < tx + tw + 8)
     }
 }

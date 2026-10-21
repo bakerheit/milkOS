@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "hello"
 version = "0.0.1"
 dependencies = [
@@ -27,6 +34,14 @@ dependencies = [
 name = "msh"
 version = "0.0.1"
 dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "paint"
+version = "0.0.1"
+dependencies = [
+ "gui",
  "rt",
 ]
 

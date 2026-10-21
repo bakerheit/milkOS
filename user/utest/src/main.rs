@@ -7,6 +7,7 @@
 //!   utest cowsmp  4 children + parent write their copies of one buffer at once
 //!   utest par [N] [ms]  N processes computing in parallel vs 1: prints the speedup
 //!   utest threads 8 threads on a futex mutex, a condvar ping-pong, munmap under a thread
+//!   utest chroot  a child chroots into a subdir; "/" is remapped and ".." can't escape
 //!   utest all     everything except par
 
 #![no_std]
@@ -653,6 +654,66 @@ fn t_threads() -> bool {
     ok
 }
 
+fn t_chroot() -> bool {
+    // Build a jail with one file, in a fresh process so our own root is untouched.
+    let _ = sys::mkdir("/tmp/jail", 0o755);
+    let _ = sys::mkdir("/tmp/jail/sub", 0o755);
+    {
+        let fd =
+            sys::open_mode("/tmp/jail/hello", sys::O_WRONLY | sys::O_CREAT, 0o644).unwrap_or(-1);
+        if fd >= 0 {
+            let _ = sys::write_all(
+                fd,
+                b"in jail
+",
+            );
+            let _ = sys::close(fd);
+        }
+    }
+    let (r, w) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::close(r);
+        let mut rc = 0u8;
+        if sys::chroot("/tmp/jail").is_err() {
+            rc = 1;
+        }
+        // "/hello" is now the jailed file; "/tmp" (the outer world) is gone.
+        let inside = sys::read_file("/hello")
+            .map(|d| {
+                d == b"in jail
+"
+            })
+            .unwrap_or(false);
+        let outer_gone = sys::stat_path("/tmp/jail", true).is_err();
+        // ".." from root can't escape: "/sub/../hello" stays inside.
+        let dotdot = sys::read_file("/sub/../hello")
+            .map(|d| {
+                d == b"in jail
+"
+            })
+            .unwrap_or(false);
+        let escape = sys::read_file("/../../etc/motd").is_ok();
+        if !(inside && outer_gone && dotdot && !escape) {
+            rc |= 2;
+        }
+        let _ = sys::write(w, &[rc]);
+        sys::exit(rc as i32)
+    }
+    let _ = sys::close(w);
+    let mut b = [0u8; 1];
+    let _ = sys::read(r, &mut b);
+    let _ = sys::close(r);
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    // Our own root is unchanged: the outer path still resolves here.
+    let parent_unaffected = sys::stat_path("/tmp/jail/hello", true).is_ok();
+    check(
+        "chroot jail",
+        st == 0 && parent_unaffected,
+        &alloc::format!("child rc {}, parent root intact: {parent_unaffected}", b[0]),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -669,6 +730,9 @@ fn main(args: &rt::Args) -> i32 {
         let n = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
         let ms = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(500);
         ok &= t_par(n, ms);
+    }
+    if what == "chroot" || what == "all" {
+        ok &= t_chroot();
     }
     if what == "threads" || what == "all" {
         ok &= t_threads();

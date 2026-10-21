@@ -93,6 +93,8 @@ pub struct Inner {
     /// Every live thread of this process (the leader included).
     pub threads: Vec<Tid>,
     pub cwd: InodeRef,
+    /// This process's root directory (chroot); None = the real root.
+    pub root_dir: Option<InodeRef>,
     pub start_ns: u64,
     /// Process group and session (job control).
     pub pgid: Pid,
@@ -131,6 +133,25 @@ pub fn get(pid: Pid) -> Option<Arc<Process>> {
     PROCS.lock().get(&pid).cloned()
 }
 
+/// The calling thread's process root (chroot), for the VFS resolver. None for kernel
+/// threads and un-chrooted processes.
+fn current_root_dir() -> Option<InodeRef> {
+    let pid = sched::current_pid();
+    if pid == 0 {
+        return None;
+    }
+    get(pid).and_then(|p| p.inner.lock().root_dir.clone())
+}
+
+/// chroot: make `dir` the calling process's root. The cwd is left as is (as on Linux).
+pub fn chroot(dir: InodeRef) -> KResult<()> {
+    if dir.kind() != fs::InodeType::Dir {
+        return Err(ENOTDIR);
+    }
+    current().inner.lock().root_dir = Some(dir);
+    Ok(())
+}
+
 /// The process of the calling thread. Panics on a kernel thread.
 pub fn current() -> Arc<Process> {
     let pid = sched::current_pid();
@@ -149,6 +170,7 @@ pub fn init() {
     procfs::init();
     syscall::init();
     exceptions::set_user_fault_handler(on_user_fault);
+    fs::set_root_resolver(current_root_dir);
     exceptions::set_user_return_hook(on_user_return);
     let bin: Vec<String> = fs::readdir("/bin")
         .unwrap_or_default()
@@ -174,6 +196,7 @@ struct Launch<'a> {
     space: UserSpace,
     fds: FdTable,
     cwd: InodeRef,
+    root_dir: Option<InodeRef>,
     frame: &'a TrapFrame,
     tpidr_el0: u64,
     fp: Box<FpState>,
@@ -205,6 +228,7 @@ fn start(l: Launch) -> KResult<Pid> {
             tid: 0,
             threads: Vec::new(),
             cwd: l.cwd,
+            root_dir: l.root_dir,
             start_ns: timer::now_ns(),
             pgid: l.pgid.unwrap_or(pid),
             sid: l.sid.unwrap_or(pid),
@@ -287,6 +311,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         space,
         fds: FdTable::with_console()?,
         cwd: fs::root(),
+        root_dir: None,
         frame: &user_frame(entry, sp),
         tpidr_el0: 0,
         fp: Box::new(FpState::zeroed()),
@@ -313,6 +338,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         space,
         fds: FdTable::with_tty(tty)?,
         cwd,
+        root_dir: None,
         frame: &user_frame(entry, sp),
         tpidr_el0: 0,
         fp: Box::new(FpState::zeroed()),
@@ -360,7 +386,7 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
 /// fork(), recording `clear_child_tid` for the child (CLONE_CHILD_CLEARTID).
 pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
     let parent = current();
-    let (space, fds, name, cwd, pgid, sid, sig, argv, exe) = {
+    let (space, fds, name, cwd, pgid, sid, sig, argv, exe, root_dir) = {
         let mut i = parent.inner.lock();
         let space = i.space.as_mut().ok_or(ESRCH)?.fork()?;
         (
@@ -373,6 +399,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
             i.sig.for_child(),
             i.argv.clone(),
             i.exe.clone(),
+            i.root_dir.clone(),
         )
     };
     let mut cf = *frame;
@@ -387,6 +414,7 @@ pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
         space,
         fds,
         cwd,
+        root_dir,
         frame: &cf,
         tpidr_el0: sched::current_tpidr_el0(),
         fp,

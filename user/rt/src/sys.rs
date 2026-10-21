@@ -97,6 +97,7 @@ pub mod nr {
     pub const UTIMENSAT: usize = 88;
     pub const RENAMEAT2: usize = 276;
     pub const CHDIR: usize = 49;
+    pub const CHROOT: usize = 51;
     pub const DUP: usize = 23;
     pub const DUP3: usize = 24;
     pub const FCNTL: usize = 25;
@@ -529,6 +530,11 @@ pub fn getcwd() -> Result<String> {
     let mut b = [0u8; 512];
     let n = sc(nr::GETCWD, [b.as_mut_ptr() as usize, b.len(), 0, 0, 0, 0])?;
     Ok(String::from_utf8_lossy(&b[..n.saturating_sub(1)]).into_owned())
+}
+
+pub fn chroot(path: &str) -> Result<()> {
+    let p = cs(path);
+    sc(nr::CHROOT, [p.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
 }
 
 pub fn chdir(path: &str) -> Result<()> {

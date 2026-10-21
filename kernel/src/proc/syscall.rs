@@ -36,6 +36,7 @@ pub mod nr {
     pub const FCHDIR: u64 = 50;
     pub const UTIMENSAT: u64 = 88;
     pub const RENAMEAT2: u64 = 276;
+    pub const CHROOT: u64 = 51;
     pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
     pub const PIPE2: u64 = 59;
@@ -207,6 +208,12 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
                 return Err(ENOTDIR);
             }
             current().inner.lock().cwd = ino;
+            Ok(0)
+        }
+        nr::CHROOT => {
+            let path = user_path(a0)?;
+            let ino = fs::lookup_at(Some(&cwd()), &path, true)?;
+            super::chroot(ino)?;
             Ok(0)
         }
         nr::MKDIRAT => {

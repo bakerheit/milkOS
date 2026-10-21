@@ -158,6 +158,7 @@ pub fn with<R>(f: impl FnOnce(&mut Stack) -> R) -> R {
         let st = g.get_or_insert_with(new_stack);
         st.now = timer::now_ns();
         let r = f(st);
+        ipv6::flush_ns(st);
         st.poll_loopback();
         let woken = st.take_woken();
         (r, woken, st.next_deadline())

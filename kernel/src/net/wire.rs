@@ -246,26 +246,143 @@ pub fn pseudo_sum6(src: Ipv6, dst: Ipv6, next: u8, len: usize) -> u32 {
     acc + (len as u32 >> 16) + (len as u32 & 0xffff) + next as u32
 }
 
-/// An IPv4 address + port (`struct sockaddr_in` minus the family).
+/// An IPv4 or IPv6 address (sockets of both families share one layer).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IpAddr {
+    V4(Ipv4),
+    V6(Ipv6),
+}
+
+impl Default for IpAddr {
+    fn default() -> IpAddr {
+        IpAddr::V4(Ipv4::UNSPECIFIED)
+    }
+}
+
+impl From<Ipv4> for IpAddr {
+    fn from(a: Ipv4) -> IpAddr {
+        IpAddr::V4(a)
+    }
+}
+
+impl From<Ipv6> for IpAddr {
+    /// An IPv4-mapped IPv6 address becomes the IPv4 address.
+    fn from(a: Ipv6) -> IpAddr {
+        match a.to_v4() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(a),
+        }
+    }
+}
+
+impl IpAddr {
+    pub const ANY4: IpAddr = IpAddr::V4(Ipv4::UNSPECIFIED);
+    pub const ANY6: IpAddr = IpAddr::V6(Ipv6::UNSPECIFIED);
+
+    pub fn is_unspecified(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_unspecified(),
+            IpAddr::V6(a) => a.is_unspecified(),
+        }
+    }
+    pub fn is_loopback(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_loopback(),
+            IpAddr::V6(a) => a.is_loopback(),
+        }
+    }
+    pub fn is_multicast(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_multicast(),
+            IpAddr::V6(a) => a.is_multicast(),
+        }
+    }
+    /// IPv4 limited broadcast (IPv6 has none).
+    pub fn is_broadcast(self) -> bool {
+        matches!(self, IpAddr::V4(a) if a.is_broadcast())
+    }
+    pub fn v4(self) -> Option<Ipv4> {
+        match self {
+            IpAddr::V4(a) => Some(a),
+            IpAddr::V6(_) => None,
+        }
+    }
+    pub fn v6(self) -> Option<Ipv6> {
+        match self {
+            IpAddr::V6(a) => Some(a),
+            IpAddr::V4(_) => None,
+        }
+    }
+    pub fn is_v6(self) -> bool {
+        matches!(self, IpAddr::V6(_))
+    }
+    /// As IPv6 (IPv4 addresses mapped: ::ffff:a.b.c.d), for AF_INET6 sockets.
+    pub fn to_v6_mapped(self) -> Ipv6 {
+        match self {
+            IpAddr::V4(a) if a.is_unspecified() => Ipv6::UNSPECIFIED,
+            IpAddr::V4(a) => Ipv6::mapped(a),
+            IpAddr::V6(a) => a,
+        }
+    }
+    /// The address bytes (4 or 16).
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            IpAddr::V4(a) => &a.0,
+            IpAddr::V6(a) => &a.0,
+        }
+    }
+}
+
+impl fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IpAddr::V4(a) => fmt::Display::fmt(a, f),
+            IpAddr::V6(a) => fmt::Display::fmt(a, f),
+        }
+    }
+}
+
+impl fmt::Debug for IpAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// An address + port (`struct sockaddr_in` / `sockaddr_in6` minus the family).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SockAddr {
-    pub ip: Ipv4,
+    pub ip: IpAddr,
     pub port: u16,
 }
 
 impl SockAddr {
-    pub const fn new(ip: Ipv4, port: u16) -> SockAddr {
-        SockAddr { ip, port }
+    pub fn new(ip: impl Into<IpAddr>, port: u16) -> SockAddr {
+        SockAddr {
+            ip: ip.into(),
+            port,
+        }
     }
     pub const ANY: SockAddr = SockAddr {
-        ip: Ipv4::UNSPECIFIED,
+        ip: IpAddr::ANY4,
         port: 0,
     };
 }
 
 impl fmt::Display for SockAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.ip, self.port)
+        match self.ip {
+            IpAddr::V4(a) => write!(f, "{a}:{}", self.port),
+            IpAddr::V6(a) => write!(f, "[{a}]:{}", self.port),
+        }
+    }
+}
+
+/// The TCP/UDP pseudo-header sum for either family.
+pub fn l4_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
+    match (src, dst) {
+        (IpAddr::V6(s), IpAddr::V6(d)) => pseudo_sum6(s, d, proto, len),
+        (IpAddr::V4(s), IpAddr::V4(d)) => pseudo_sum(s, d, proto, len),
+        (s, d) => pseudo_sum6(s.to_v6_mapped(), d.to_v6_mapped(), proto, len),
     }
 }
 

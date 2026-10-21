@@ -38,6 +38,8 @@ use crate::fs::errno::{Errno, Result};
 pub const MAX_BACKLOG: usize = 16;
 /// MSS we announce and use at most (1500 MTU - 40).
 pub const OUR_MSS: u16 = 1460;
+/// The same over IPv6 (1500 - 40 - 20).
+pub const OUR_MSS6: u16 = 1440;
 /// MSS assumed when the peer sends no option (RFC 9293).
 const DEFAULT_MSS: u16 = 536;
 /// Our window scale shift: 65535 << 7 = 8 MiB, above `socket::MAX_BUF`.
@@ -534,9 +536,9 @@ fn initial_seq(local: SockAddr, remote: SockAddr, now: u64) -> u32 {
     }
     let mut h = crate::crypto::sha256::Sha256::new();
     h.update(&key.to_le_bytes());
-    h.update(&local.ip.0);
+    h.update(local.ip.bytes());
     h.update(&local.port.to_be_bytes());
-    h.update(&remote.ip.0);
+    h.update(remote.ip.bytes());
     h.update(&remote.port.to_be_bytes());
     let d = h.finish();
     u32::from_le_bytes([d[0], d[1], d[2], d[3]]).wrapping_add((now / 4000) as u32)
@@ -602,24 +604,30 @@ impl Opts {
 
 /// Build and send one segment. `data`: (ring, offset from its head, length). False if it
 /// could not be queued (device or loopback queue full).
-#[allow(clippy::too_many_arguments)]
-fn emit(
-    iface: &mut Iface,
-    stats: &mut Stats,
+/// The parts of the stack that sending a segment touches (so `output` can hold the
+/// socket table at the same time).
+struct Out<'a> {
+    iface: &'a mut Iface,
+    ip6: &'a mut State6,
+    stats: &'a mut Stats,
     now: u64,
+}
+
+fn emit(
+    out: &mut Out,
     local: SockAddr,
     remote: SockAddr,
+    scope: Option<usize>,
     h: Hdr,
     o: &Opts,
     data: Option<(&Ring, usize, usize)>,
 ) -> bool {
-    stats.tcp_out_segs += 1;
-    stats.ip_out_requests += 1;
+    out.stats.tcp_out_segs += 1;
+    out.stats.ip_out_requests += 1;
     if h.flags & RST != 0 {
-        stats.tcp_out_rsts += 1;
+        out.stats.tcp_out_rsts += 1;
     }
-    iface
-        .send_ip(now, local.ip, remote.ip, PROTO_TCP, |b| {
+    let seg = |b: &mut [u8], src: IpAddr, dst: IpAddr| {
             put16(b, 0, local.port);
             put16(b, 2, remote.port);
             put32(b, 4, h.seq);
@@ -636,11 +644,49 @@ fn emit(
                 let len = len.min(b.len() - hl);
                 n += ring.peek_at(off, &mut b[hl..hl + len]);
             }
-            let c = finish(sum(&b[..n], pseudo_sum(local.ip, remote.ip, PROTO_TCP, n)));
+            let c = finish(sum(&b[..n], l4_sum(src, dst, PROTO_TCP, n)));
             put16(b, 16, c);
             n
-        })
-        .is_ok()
+    };
+    match (local.ip, remote.ip) {
+        (IpAddr::V6(l6), IpAddr::V6(r6)) => ipv6::send_on(
+            out.iface,
+            out.ip6,
+            out.now,
+            l6,
+            r6,
+            scope,
+            ipv6::NH_TCP,
+            64,
+            |b, s, d| seg(b, s.into(), d.into()),
+        )
+        .is_ok(),
+        (l, r) => {
+            let (l4, r4) = (l.v4().unwrap_or_default(), r.v4().unwrap_or_default());
+            out.iface
+                .send_ip(out.now, l4, r4, PROTO_TCP, |b| seg(b, l, r))
+                .is_ok()
+        }
+    }
+}
+
+/// [`emit`] with the whole stack at hand.
+fn emit_st(
+    st: &mut Stack,
+    local: SockAddr,
+    remote: SockAddr,
+    scope: Option<usize>,
+    h: Hdr,
+    o: &Opts,
+) -> bool {
+    let now = st.now;
+    let mut out = Out {
+        iface: &mut st.iface,
+        ip6: &mut st.ip6,
+        stats: &mut st.stats,
+        now,
+    };
+    emit(&mut out, local, remote, scope, h, o, None)
 }
 
 fn plain_hdr(seq: u32, ack: u32, flags: u8) -> Hdr {
@@ -662,17 +708,9 @@ fn reset_for(st: &mut Stack, local: SockAddr, remote: SockAddr, seg: &Seg) {
     } else {
         plain_hdr(0, seg.seq.wrapping_add(seg.len()), RST | ACK)
     };
-    let now = st.now;
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        local,
-        remote,
-        h,
-        &Opts::default(),
-        None,
-    );
+    // A link-local peer: answer on the link it came from.
+    let scope = st.rx_link;
+    emit_st(st, local, remote, scope, h, &Opts::default());
 }
 
 /// Our receive window in bytes (free buffer space, as much as the scale can express).
@@ -729,13 +767,20 @@ pub fn output(st: &mut Stack, i: usize) {
         iface,
         socks,
         stats,
+        ip6,
         ..
     } = st;
+    let mut out = Out {
+        iface,
+        ip6,
+        stats,
+        now,
+    };
     let Some(s) = socks.get(i) else { return };
     if s.ty != SockType::Stream {
         return;
     }
-    let (local, remote) = (s.local, s.remote);
+    let (local, remote, scope) = (s.local, s.remote, s.scope);
     let nodelay = s.nodelay;
     let t = &mut s.tcb;
     let tx = &s.tx;
@@ -759,7 +804,7 @@ pub fn output(st: &mut Stack, i: usize) {
                     ts: (!synack || t.ts_ok).then(|| (tsval(now), t.ts_recent)),
                     ..Opts::default()
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, None) {
+                if !emit(&mut out, local, remote, scope, h, &o, None) {
                     t.kick = Some(now + KICK);
                     return;
                 }
@@ -808,11 +853,11 @@ pub fn output(st: &mut Stack, i: usize) {
                 flags: ACK | if fin { FIN } else { 0 },
                 wnd,
             };
-            if !emit(iface, stats, now, local, remote, h, &o, Some((tx, off, n))) {
+            if !emit(&mut out, local, remote, scope, h, &o, Some((tx, off, n))) {
                 t.kick = Some(now + KICK);
                 return;
             }
-            stats.tcp_retrans_segs += 1;
+            out.stats.tcp_retrans_segs += 1;
             t.retransmits += 1;
             t.sack_retrans += 1;
             t.rec_first = false;
@@ -904,13 +949,13 @@ pub fn output(st: &mut Stack, i: usize) {
                     flags,
                     wnd,
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, Some((tx, off, n))) {
+                if !emit(&mut out, local, remote, scope, h, &o, Some((tx, off, n))) {
                     t.kick = Some(now + KICK);
                     return;
                 }
                 let fresh = !lt(t.snd_nxt, t.snd_max);
                 if !fresh {
-                    stats.tcp_retrans_segs += 1;
+                    out.stats.tcp_retrans_segs += 1;
                     t.retransmits += 1;
                 }
                 t.snd_nxt = t.snd_nxt.wrapping_add(n as u32);
@@ -944,7 +989,7 @@ pub fn output(st: &mut Stack, i: usize) {
                     flags: FIN | ACK,
                     wnd,
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, None) {
+                if !emit(&mut out, local, remote, scope, h, &o, None) {
                     t.kick = Some(now + KICK);
                     return;
                 }
@@ -974,7 +1019,7 @@ pub fn output(st: &mut Stack, i: usize) {
             flags: ACK,
             wnd,
         };
-        if emit(iface, stats, now, local, remote, h, &o, None) {
+        if emit(&mut out, local, remote, scope, h, &o, None) {
             let e = t.rcv_nxt.wrapping_add(edge);
             acked_now(t, e);
         } else {
@@ -1091,26 +1136,45 @@ fn find_listener(st: &Stack, local: SockAddr) -> Option<usize> {
         if s.ty != SockType::Stream || s.tcb.state != TcpState::Listen {
             continue;
         }
-        if s.local.port != local.port {
+        if s.local.port != local.port || !super::socket::takes(s, local.ip) {
             continue;
         }
         if s.local.ip == local.ip {
             return Some(i);
         }
-        if s.local.ip.is_unspecified() {
+        // An IPv4 wildcard beats a dual-stack IPv6 one for IPv4 (as Linux picks).
+        if wild.is_none() || !s.local.ip.is_v6() {
             wild = Some(i);
         }
     }
     wild
 }
 
-/// A TCP segment arrived (IP payload, addresses from the IP header).
+/// The MSS we announce and accept at most on this family (MTU - IP - TCP headers).
+fn our_mss(a: IpAddr) -> u16 {
+    if a.is_v6() { OUR_MSS6 } else { OUR_MSS }
+}
+
+/// A TCP segment arrived over IPv4 (IP payload, addresses from the IP header).
 pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8]) {
+    st.rx_link = None;
+    segment(st, src.into(), dst.into(), p);
+}
+
+/// A TCP segment arrived over IPv6 on link `link` (None: loopback).
+pub fn input6(st: &mut Stack, src: Ipv6, dst: Ipv6, p: &[u8], link: Option<usize>) {
+    // Link-local pairs are only meaningful with their link: remember it for replies.
+    st.rx_link = link.filter(|_| dst.is_link_local() || src.is_link_local());
+    segment(st, IpAddr::V6(src), IpAddr::V6(dst), p);
+    st.rx_link = None;
+}
+
+fn segment(st: &mut Stack, src: IpAddr, dst: IpAddr, p: &[u8]) {
     st.stats.tcp_in_segs += 1;
-    if dst.is_broadcast() || dst.is_multicast() || src.is_broadcast() {
+    if dst.is_broadcast() || dst.is_multicast() || src.is_broadcast() || src.is_multicast() {
         return;
     }
-    if finish(sum(p, pseudo_sum(src, dst, PROTO_TCP, p.len()))) != 0 {
+    if finish(sum(p, l4_sum(src, dst, PROTO_TCP, p.len()))) != 0 {
         st.stats.tcp_in_errs += 1;
         return;
     }
@@ -1163,16 +1227,23 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
         return;
     };
     let now = st.now;
-    let nodelay = st.socks.get(l).unwrap().nodelay;
+    let (nodelay, family, v6only) = {
+        let ls = st.socks.get(l).unwrap();
+        (ls.nodelay, ls.family, ls.v6only)
+    };
+    let scope = st.rx_link;
     let s = st.socks.get(c).unwrap();
     s.user_open = false;
     s.nodelay = nodelay;
+    s.family = family;
+    s.v6only = v6only;
+    s.scope = scope;
     s.local = local;
     s.remote = remote;
     let t = &mut s.tcb;
     t.start(
         initial_seq(local, remote, now),
-        seg.mss.unwrap_or(DEFAULT_MSS).min(OUR_MSS),
+        seg.mss.unwrap_or(DEFAULT_MSS).min(our_mss(local.ip)),
     );
     t.state = TcpState::SynReceived;
     t.irs = seg.seq;
@@ -1221,7 +1292,7 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     }
     t.irs = seg.seq;
     t.rcv_nxt = seg.seq.wrapping_add(1);
-    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(OUR_MSS);
+    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(our_mss(s.local.ip));
 
     // Options: on only if both sides offered them (we always offer).
     if let Some(ws) = seg.wscale {
@@ -1580,17 +1651,8 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
                 if orphan {
                     // Data for a socket nobody will read: abort (as Linux does).
                     let h = plain_hdr(t.snd_nxt, 0, RST);
-                    let (l, r) = (s.local, s.remote);
-                    emit(
-                        &mut st.iface,
-                        &mut st.stats,
-                        now,
-                        l,
-                        r,
-                        h,
-                        &Opts::default(),
-                        None,
-                    );
+                    let (l, r, sc) = (s.local, s.remote, s.scope);
+                    emit_st(st, l, r, sc, h, &Opts::default());
                     finished(st, i);
                     return;
                 }
@@ -1844,16 +1906,8 @@ fn tw_input(st: &mut Stack, k: usize, seg: &Seg) -> bool {
         flags: ACK,
         wnd: 0,
     };
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        e.local,
-        e.remote,
-        h,
-        &o,
-        None,
-    );
+    let scope = st.rx_link;
+    emit_st(st, e.local, e.remote, scope, h, &o);
     false
 }
 
@@ -1916,17 +1970,9 @@ fn send_rst_now(st: &mut Stack, i: usize) {
     let now = st.now;
     let Some(s) = st.socks.get(i) else { return };
     let h = plain_hdr(s.tcb.snd_nxt, s.tcb.rcv_nxt, RST | ACK);
-    let (l, r) = (s.local, s.remote);
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        l,
-        r,
-        h,
-        &Opts::default(),
-        None,
-    );
+    let (l, r, sc) = (s.local, s.remote, s.scope);
+    let _ = now;
+    emit_st(st, l, r, sc, h, &Opts::default());
 }
 
 // ---- timers -------------------------------------------------------------------------------------
@@ -2085,7 +2131,7 @@ pub fn connect(st: &mut Stack, i: usize, remote: SockAddr) {
     let s = st.socks.get(i).unwrap();
     let iss = initial_seq(local, remote, now);
     let t = &mut s.tcb;
-    t.start(iss, OUR_MSS);
+    t.start(iss, our_mss(local.ip));
     t.state = TcpState::SynSent;
     t.connect_pending = true;
     st.stats.tcp_active_opens += 1;

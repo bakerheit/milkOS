@@ -30,7 +30,7 @@
 use alloc::vec::Vec;
 
 use super::Stack;
-use super::iface::{ETH_HDR, MTU};
+use super::iface::{ETH_HDR, Iface, MTU};
 use super::wire::{Ipv6, Mac, be16, be32, finish, pseudo_sum6, put16, put32, sum};
 use crate::fs::errno::Result;
 use crate::net::errno::*;
@@ -245,6 +245,8 @@ struct Parked {
 pub struct State6 {
     pub stats: Stats6,
     parked: Vec<Parked>,
+    /// Neighbours to solicit (queued by `send_on`).
+    want_ns: Vec<(usize, Ipv6)>,
     /// Echo replies to our pings: (from, identifier, sequence, payload bytes, when).
     pub ping_replies: Vec<(Ipv6, u16, u16, usize, u64)>,
 }
@@ -254,6 +256,7 @@ impl State6 {
         State6 {
             stats: Stats6::default(),
             parked: Vec::new(),
+            want_ns: Vec::new(),
             ping_replies: Vec::new(),
         }
     }
@@ -298,22 +301,19 @@ pub fn start(st: &mut Stack) {
 }
 
 /// Every address of ours, on any link (and `::1`).
-pub fn is_ours(st: &Stack, ip: Ipv6) -> bool {
-    ip.is_loopback() || st.iface.links.iter().any(|l| l.up() && l.v6.has(ip, false))
+pub fn is_ours(iface: &Iface, ip: Ipv6) -> bool {
+    ip.is_loopback() || iface.links.iter().any(|l| l.up() && l.v6.has(ip, false))
 }
 
 /// The link that owns `ip`.
-fn link_of(st: &Stack, ip: Ipv6) -> Option<usize> {
-    st.iface
-        .links
-        .iter()
-        .position(|l| l.up() && l.v6.has(ip, false))
+pub fn link_of(iface: &Iface, ip: Ipv6) -> Option<usize> {
+    iface.links.iter().position(|l| l.up() && l.v6.has(ip, false))
 }
 
 /// Which link a destination goes out of, and the next hop. `scope`: the link a scoped
 /// (link-local / multicast) destination was given with (sin6_scope_id), if any.
-fn route(st: &Stack, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)> {
-    let up = |k: usize| st.iface.links.get(k).is_some_and(|l| l.up());
+fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)> {
+    let up = |k: usize| iface.links.get(k).is_some_and(|l| l.up());
     if dst.is_multicast() || dst.is_link_local() {
         if let Some(k) = scope.filter(|&k| up(k)) {
             return Some((k, dst));
@@ -322,14 +322,14 @@ fn route(st: &Stack, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)> {
             return Some((1, dst)); // .local lives on the VM link
         }
         // A link-local neighbour we already know, else eth1 (the VM link), else eth0.
-        if let Some(k) = (0..st.iface.links.len())
-            .find(|&k| up(k) && st.iface.links[k].v6.lookup(dst).is_some())
+        if let Some(k) = (0..iface.links.len())
+            .find(|&k| up(k) && iface.links[k].v6.lookup(dst).is_some())
         {
             return Some((k, dst));
         }
         return [1, 0].into_iter().find(|&k| up(k)).map(|k| (k, dst));
     }
-    for (k, l) in st.iface.links.iter().enumerate() {
+    for (k, l) in iface.links.iter().enumerate() {
         if !l.up() {
             continue;
         }
@@ -343,7 +343,7 @@ fn route(st: &Stack, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)> {
             return Some((k, dst));
         }
     }
-    st.iface
+    iface
         .links
         .iter()
         .enumerate()
@@ -353,12 +353,12 @@ fn route(st: &Stack, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)> {
 /// Our source address for `dst` (RFC 6724, the simple cases): ::1 for loopback, the
 /// link-local for link-local or link-scope multicast, else an address on the same prefix,
 /// else eth0's SLAAC address.
-pub fn src_for(st: &Stack, dst: Ipv6, scope: Option<usize>) -> Option<Ipv6> {
-    if dst.is_loopback() || is_ours(st, dst) {
+pub fn src_for(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<Ipv6> {
+    if dst.is_loopback() || is_ours(iface, dst) {
         return Some(if dst.is_loopback() { Ipv6::LOOPBACK } else { dst });
     }
-    let (k, _) = route(st, dst, scope)?;
-    let l6 = &st.iface.links[k].v6;
+    let (k, _) = route(iface, dst, scope)?;
+    let l6 = &iface.links[k].v6;
     if dst.is_link_local() || dst.is_link_multicast() {
         return l6.link_local();
     }
@@ -413,36 +413,54 @@ fn send_hop(
     hop: u8,
     fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
 ) -> Result<()> {
-    st.ip6.stats.out_requests += 1;
+    let now = st.now;
+    send_on(&mut st.iface, &mut st.ip6, now, src, dst, scope, next, hop, fill)
+}
+
+/// The sending core, on the parts of the stack it needs (so TCP can call it while it
+/// holds the socket table).
+#[allow(clippy::too_many_arguments)]
+pub fn send_on(
+    iface: &mut Iface,
+    ip6: &mut State6,
+    now: u64,
+    src: Ipv6,
+    dst: Ipv6,
+    scope: Option<usize>,
+    next: u8,
+    hop: u8,
+    fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
+) -> Result<()> {
+    ip6.stats.out_requests += 1;
     let src = if src.is_unspecified() {
-        match src_for(st, dst, scope) {
+        match src_for(iface, dst, scope) {
             Some(s) => s,
             None if next == NH_ICMP6 => Ipv6::UNSPECIFIED, // DAD probes, early RS
             None => {
-                st.ip6.stats.out_no_routes += 1;
+                ip6.stats.out_no_routes += 1;
                 return Err(EADDRNOTAVAIL);
             }
         }
     } else {
         src
     };
-    if dst.is_loopback() || is_ours(st, dst) {
-        return st.iface.lo_enqueue(|b| {
+    if dst.is_loopback() || is_ours(iface, dst) {
+        return iface.lo_enqueue(|b| {
             let n = fill(&mut b[HDR..MTU], src, dst).min(MTU - HDR);
             build(b, src, dst, next, hop, n)
         });
     }
-    let Some((k, nexthop)) = route(st, dst, scope) else {
-        st.ip6.stats.out_no_routes += 1;
+    let Some((k, nexthop)) = route(iface, dst, scope) else {
+        ip6.stats.out_no_routes += 1;
         return Err(ENETUNREACH);
     };
     let mac = if dst.is_multicast() {
         Some(dst.multicast_mac())
     } else {
-        st.iface.links[k].v6.lookup(nexthop)
+        iface.links[k].v6.lookup(nexthop)
     };
     if let Some(mac) = mac {
-        return st.iface.send_eth(k, mac, ETHERTYPE_IPV6, |b| {
+        return iface.send_eth(k, mac, ETHERTYPE_IPV6, |b| {
             let n = fill(&mut b[HDR..MTU], src, dst).min(MTU - HDR);
             build(b, src, dst, next, hop, n)
         });
@@ -452,20 +470,28 @@ fn send_hop(
     let n = fill(&mut pkt[HDR..MTU], src, dst).min(MTU - HDR);
     let len = build(&mut pkt, src, dst, next, hop, n);
     pkt.truncate(len);
-    let now = st.now;
-    if st.ip6.parked.len() >= PENDING_MAX {
-        st.ip6.parked.remove(0);
+    if ip6.parked.len() >= PENDING_MAX {
+        ip6.parked.remove(0);
     }
-    st.ip6.parked.push(Parked {
+    ip6.parked.push(Parked {
         link: k,
         hop: nexthop,
         pkt,
         since: now,
     });
-    if st.iface.links[k].v6.want(nexthop, now) {
-        send_ns(st, k, nexthop, Ipv6::UNSPECIFIED, true);
+    if iface.links[k].v6.want(nexthop, now) {
+        ip6.want_ns.push((k, nexthop));
     }
     Ok(())
+}
+
+/// NS for neighbours `send_on` found unresolved (sent from the net thread's tick or right
+/// after, where the whole stack is at hand).
+pub fn flush_ns(st: &mut Stack) {
+    let want = core::mem::take(&mut st.ip6.want_ns);
+    for (k, ip) in want {
+        send_ns(st, k, ip, Ipv6::UNSPECIFIED, true);
+    }
 }
 
 fn flush_parked(st: &mut Stack, k: usize, ip: Ipv6, mac: Mac) {
@@ -573,6 +599,7 @@ pub fn send_error(st: &mut Stack, link: Option<usize>, ty: u8, code: u8, pointer
     if dst.is_multicast() || src.is_unspecified() || src.is_multicast() {
         return;
     }
+    let _ = &st.iface;
     if pkt[6] == NH_ICMP6 && pkt.len() > HDR && pkt[HDR] < 128 {
         return; // an error about an error
     }
@@ -609,7 +636,7 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
     }
     // Ours: a unicast address (tentative ones only for NDP), a link-scope group, loopback.
     let ours = link.is_none()
-        || is_ours(st, dst)
+        || is_ours(&st.iface, dst)
         || dst.is_link_multicast()
         || st.iface.links.iter().any(|l| l.v6.has(dst, true));
     if !ours {
@@ -712,9 +739,8 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
     st.ip6.stats.in_delivers += 1;
     match next {
         NH_ICMP6 => icmp_input(st, link, src, dst, hop, payload, pkt, src_mac),
-        // TCP and UDP over IPv6 come with the socket layer's IPv6 support.
-        NH_UDP => send_error(st, link, 1, 4, 0, pkt),
-        NH_TCP => {}
+        NH_UDP => super::udp::input6(st, src, dst, payload, pkt, link),
+        NH_TCP => super::tcp::input6(st, src, dst, payload, link),
         NH_NONE => {}
         _ => {
             st.ip6.stats.in_unknown_protos += 1;

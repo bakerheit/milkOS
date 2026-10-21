@@ -80,6 +80,7 @@ pub extern "C" fn kmain() -> ! {
     selftest::run();
     memtest::run();
     fs::init();
+    fs::selftest::run();
 
     loop {
         uart::echo_pending();

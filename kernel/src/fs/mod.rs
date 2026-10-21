@@ -13,12 +13,15 @@
 
 pub mod abi;
 pub mod clock;
+pub mod devfs;
 pub mod errno;
 pub mod file;
 pub mod initramfs;
 pub mod node;
 pub mod ops;
 pub mod path;
+pub mod selftest;
+pub mod synth;
 pub mod tmpfs;
 
 pub use errno::{Errno, Result};
@@ -57,4 +60,5 @@ pub fn init() {
     symlink("home", "/Users").expect("fs: /Users symlink");
     kprintln!("fs: tmpfs mounted at /");
     initramfs::load();
+    devfs::init().expect("fs: mount /dev");
 }

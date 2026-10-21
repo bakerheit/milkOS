@@ -341,6 +341,32 @@ pub fn symlink_at(target: &str, base: Option<&InodeRef>, linkpath: &str) -> Resu
     Ok(())
 }
 
+/// `mknod(2)` for a socket or FIFO name (AF_UNIX `bind`): needs write on the directory;
+/// the new node is the caller's. EEXIST if the name exists (Linux's EADDRINUSE is the
+/// caller's to report).
+pub fn mknod_at(
+    base: Option<&InodeRef>,
+    path: &str,
+    kind: InodeType,
+    mode: u32,
+) -> Result<InodeRef> {
+    let p = Walker::new().parent(base, path)?;
+    if p.is_special() {
+        return Err(Errno::EEXIST);
+    }
+    check_name(&p.name)?;
+    perm::may(&p.dir, W)?;
+    let n = p.dir.mknod(&p.name, kind, mode & 0o7777)?;
+    perm::own_new(&n, &p.dir);
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&n),
+        kind,
+    });
+    Ok(n)
+}
+
 /// `readlink(2)`.
 pub fn readlink(path: &str) -> Result<String> {
     readlink_at(None, path)

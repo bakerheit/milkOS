@@ -254,6 +254,13 @@ pub trait Inode: AsAny + Send + Sync {
     fn poll(&self) -> u32 {
         0x1 | 0x4 // POLLIN | POLLOUT
     }
+    /// A counter that changes whenever this object's readiness may have changed (new
+    /// data, space, hangup), for edge-triggered epoll (`crate::poll`). Default: the global
+    /// readiness generation, which changes on any event: never misses an edge, may report
+    /// extra ones. Objects that can do better (pipes, AF_UNIX sockets) count their own.
+    fn poll_seq(&self) -> u64 {
+        crate::poll::generation()
+    }
 
     // ---- directories -----------------------------------------------------------------
 
@@ -274,6 +281,11 @@ pub trait Inode: AsAny + Send + Sync {
     }
     fn symlink(&self, _name: &str, _target: &str) -> Result<InodeRef> {
         Err(not_dir(self.kind()))
+    }
+    /// Create a special node (`Socket` or `Fifo`) that carries no data: a name for an
+    /// AF_UNIX socket (proc/unix.rs) or a FIFO. Default: not supported.
+    fn mknod(&self, _name: &str, _kind: InodeType, _perm: u32) -> Result<InodeRef> {
+        Err(Errno::EPERM)
     }
     /// Make `name` another hard link to `target` (never a directory; same fs, the VFS checks).
     fn link(&self, _name: &str, _target: &InodeRef) -> Result<()> {

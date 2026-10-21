@@ -1184,6 +1184,345 @@ fn t_wx() -> bool {
     )
 }
 
+/// AF_UNIX: socketpair, a path-named listener with peer credentials, fd passing across
+/// processes both ways, SCM_CREDENTIALS rules, abstract datagrams, socket file permission.
+fn t_unix() -> bool {
+    use rt::unix::{self, Name};
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    let me = sys::getpid();
+    let uid = sys::geteuid();
+    // 0: socketpair round trip.
+    let (a, b) = unix::socketpair(unix::SOCK_STREAM).unwrap();
+    let _ = sys::write_all(a, b"ping");
+    let mut buf = [0u8; 64];
+    t(sys::read(b, &mut buf).ok() == Some(4) && &buf[..4] == b"ping");
+    // 1: fd passing, parent -> child -> parent: the child gets our pipe's read end, reads
+    // what we wrote into it, and sends us back the read end of a pipe of its own.
+    let (pr, pw) = sys::pipe().unwrap();
+    let _ = sys::write_all(pw, b"through the pipe");
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let _ = sys::close(a);
+        let r = unix::recv_with(b, &mut buf, 4).unwrap();
+        let mut got = [0u8; 64];
+        let k = r
+            .fds
+            .first()
+            .map_or(0, |&fd| sys::read(fd, &mut got).unwrap_or(0));
+        let ok = r.n == 4 && &buf[..4] == b"fd!!" && &got[..k] == b"through the pipe";
+        let (cr, cw) = sys::pipe().unwrap();
+        let _ = sys::write_all(cw, b"from the child");
+        let _ = unix::send_with(b, if ok { b"ok" } else { b"no" }, &[cr], None);
+        sys::exit(0);
+    }
+    let _ = unix::send_with(a, b"fd!!", &[pr], None);
+    let _ = sys::close(pr); // the child has its own reference to it now
+    let r = unix::recv_with(a, &mut buf, 4).unwrap_or_default();
+    let mut got = [0u8; 64];
+    let k = r
+        .fds
+        .first()
+        .map_or(0, |&fd| sys::read(fd, &mut got).unwrap_or(0));
+    let _ = sys::wait4(child as i32, 0);
+    t(r.n == 2 && &buf[..2] == b"ok" && &got[..k] == b"from the child");
+    for fd in r.fds.iter().copied().chain([a, b, pw]) {
+        let _ = sys::close(fd);
+    }
+    // 2-3: a listener on a path; the client's and the server's view of each other.
+    let path = "/tmp/utest-unix.sock";
+    let _ = sys::unlink(path);
+    let l = unix::socket(unix::SOCK_STREAM).unwrap();
+    t(unix::bind(l, &Name::Path(path)).is_ok()
+        && unix::listen(l, 8).is_ok()
+        && sys::stat_path(path, false).is_ok_and(|s| s.type_char() == 's'));
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let c = unix::socket(unix::SOCK_STREAM).unwrap();
+        let ok = unix::connect(c, &Name::Path(path)).is_ok()
+            && unix::peer_cred(c).is_ok_and(|p| p.pid == me && p.uid == uid);
+        let _ = sys::write_all(c, if ok { b"y" } else { b"n" });
+        sys::exit(0);
+    }
+    let s = unix::accept(l, 0).unwrap();
+    let pc = unix::peer_cred(s).unwrap_or_default();
+    let k = sys::read(s, &mut buf).unwrap_or(0);
+    let _ = sys::wait4(child as i32, 0);
+    t(pc.pid == child && pc.uid == uid && k == 1 && buf[0] == b'y');
+    let _ = sys::close(s);
+    // 4: SO_PASSCRED: an honest record arrives; 5: a fake one is refused (unless root).
+    let (a, b) = unix::socketpair(unix::SOCK_DGRAM).unwrap();
+    let _ = unix::set_passcred(b, true);
+    let _ = sys::write_all(a, b"hi");
+    let r = unix::recv_with(b, &mut buf, 0).unwrap_or_default();
+    t(r.cred
+        .is_some_and(|c| c.pid == me && c.uid == sys::getuid()));
+    let fake = unix::Cred {
+        pid: 1,
+        uid: 0,
+        gid: 0,
+    };
+    let refused = matches!(
+        unix::send_with(a, b"x", &[], Some(fake)),
+        Err(sys::Errno(1))
+    );
+    t(refused || uid == 0);
+    let _ = sys::close(a);
+    let _ = sys::close(b);
+    // 6: abstract datagram names.
+    let srv = unix::socket(unix::SOCK_DGRAM).unwrap();
+    let cli = unix::socket(unix::SOCK_DGRAM).unwrap();
+    let name = alloc::format!("utest-{me}");
+    let _ = unix::bind(srv, &Name::Abstract(name.as_bytes()));
+    let _ = unix::sendto(cli, b"dgram", &Name::Abstract(name.as_bytes()));
+    let k = sys::read(srv, &mut buf).unwrap_or(0);
+    t(k == 5 && &buf[..5] == b"dgram");
+    let _ = sys::close(srv);
+    let _ = sys::close(cli);
+    // 7: the socket file's permissions apply: owner-only (0700) keeps others out.
+    let ok7 = if uid == 0 {
+        let _ = sys::chmod(path, 0o700);
+        let child = sys::fork().unwrap();
+        if child == 0 {
+            let _ = sys::setgroups(&[20]);
+            let _ = sys::setgid(20);
+            let _ = sys::setuid(501);
+            let c = unix::socket(unix::SOCK_STREAM).unwrap();
+            let denied = matches!(unix::connect(c, &Name::Path(path)), Err(sys::Errno(13)));
+            sys::exit(if denied { 0 } else { 1 });
+        }
+        let (_, st) = sys::wait4(child as i32, 0).unwrap();
+        st == 0
+    } else {
+        true // covered when utest runs as root
+    };
+    t(ok7);
+    let _ = sys::close(l);
+    let _ = sys::unlink(path);
+    let want = (1u32 << n) - 1;
+    check(
+        "AF_UNIX",
+        bits == want,
+        &alloc::format!("checks {bits:#b} (want {want:#b}); peer cred {pc:?}"),
+    )
+}
+
+/// epoll: level vs edge-triggered vs one-shot on a pipe, EPOLLHUP, select, and an epoll
+/// server (one thread, non-blocking) answering 100 AF_UNIX clients at once.
+fn t_epoll() -> bool {
+    use rt::epoll::{self as ep, EPOLLET, EPOLLHUP, EPOLLIN, EPOLLONESHOT};
+    use rt::unix::{self, Name};
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    let mut buf = [0u8; 256];
+    let e = ep::create().unwrap();
+    // Level-triggered: reported while data is there.
+    let (r, w) = sys::pipe().unwrap();
+    ep::add(e, r, EPOLLIN, 7).unwrap();
+    t(ep::wait(e, 8, 0).unwrap().is_empty());
+    let _ = sys::write_all(w, b"0123456789");
+    let a = ep::wait(e, 8, 100).unwrap();
+    let b = ep::wait(e, 8, 0).unwrap();
+    t(a.len() == 1 && a[0].data == 7 && a[0].events & EPOLLIN != 0 && b.len() == 1); // 1
+    // Edge-triggered: once per edge. No new data -> nothing, even after a partial read.
+    ep::modify(e, r, EPOLLIN | EPOLLET, 8).unwrap();
+    let first = ep::wait(e, 8, 0).unwrap();
+    let again = ep::wait(e, 8, 0).unwrap();
+    let _ = sys::read(r, &mut buf[..5]);
+    let after_partial = ep::wait(e, 8, 0).unwrap();
+    let _ = sys::write_all(w, b"more");
+    let new_data = ep::wait(e, 8, 100).unwrap();
+    t(first.len() == 1 && again.is_empty() && after_partial.is_empty() && new_data.len() == 1); // 2
+    let _ = sys::read(r, &mut buf);
+    t(ep::wait(e, 8, 0).unwrap().is_empty()); // 3: drained
+    // One-shot: one report until re-armed.
+    ep::modify(e, r, EPOLLIN | EPOLLONESHOT, 9).unwrap();
+    let _ = sys::write_all(w, b"x");
+    let one = ep::wait(e, 8, 100).unwrap();
+    let none = ep::wait(e, 8, 0).unwrap();
+    ep::modify(e, r, EPOLLIN | EPOLLONESHOT, 9).unwrap();
+    let rearmed = ep::wait(e, 8, 0).unwrap();
+    t(one.len() == 1 && none.is_empty() && rearmed.len() == 1); // 4
+    // select: readable and writable bits; then EPOLLHUP once the writer is gone.
+    let mut rs = [1u64 << r];
+    let mut ws = [1u64 << w];
+    let k = ep::select(64, Some(&mut rs), Some(&mut ws), None, Some(0)).unwrap_or(0);
+    t(k == 2 && rs[0] == 1 << r && ws[0] == 1 << w); // 5
+    let _ = sys::read(r, &mut buf);
+    let _ = sys::close(w);
+    ep::modify(e, r, EPOLLIN, 10).unwrap();
+    let h = ep::wait(e, 8, 100).unwrap();
+    t(h.len() == 1 && h[0].events & EPOLLHUP != 0); // 6
+    let _ = sys::close(r);
+    // A closed fd's entry disappears by itself.
+    t(ep::wait(e, 8, 0).unwrap().is_empty()); // 7
+    let _ = sys::close(e);
+
+    // The server: listener + 100 clients in another process.
+    const CLIENTS: usize = 100;
+    let name = alloc::format!("utest-epoll-{}", sys::getpid());
+    let l = unix::socket(unix::SOCK_STREAM | unix::SOCK_NONBLOCK).unwrap();
+    let _ = unix::bind(l, &Name::Abstract(name.as_bytes()));
+    let _ = unix::listen(l, 128);
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let mut socks = Vec::new();
+        for i in 0..CLIENTS {
+            let c = unix::socket(unix::SOCK_STREAM).unwrap();
+            if unix::connect(c, &Name::Abstract(name.as_bytes())).is_err() {
+                sys::exit(2);
+            }
+            let _ = sys::write_all(c, alloc::format!("hello {i}").as_bytes());
+            socks.push(c);
+        }
+        let mut good = 0;
+        for (i, &c) in socks.iter().enumerate() {
+            let mut b = [0u8; 64];
+            let k = sys::read(c, &mut b).unwrap_or(0);
+            if &b[..k] == alloc::format!("ok {i}").as_bytes() {
+                good += 1;
+            }
+        }
+        sys::exit(if good == CLIENTS { 0 } else { 1 });
+    }
+    let e = ep::create().unwrap();
+    ep::add(e, l, EPOLLIN, u64::MAX).unwrap();
+    let (mut replied, mut accepted, mut wakeups) = (0, 0, 0);
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    while replied < CLIENTS && sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 20_000_000_000 {
+        let evs = ep::wait(e, 64, 1000).unwrap_or_default();
+        wakeups += 1;
+        for ev in evs {
+            if ev.data == u64::MAX {
+                // Edge or not, drain the backlog.
+                while let Ok(c) = unix::accept(l, unix::SOCK_NONBLOCK) {
+                    accepted += 1;
+                    let _ = ep::add(e, c, EPOLLIN | EPOLLET, c as u64);
+                }
+                continue;
+            }
+            let c = ev.data as i32;
+            // Edge-triggered: read until EAGAIN.
+            let mut msg = Vec::new();
+            loop {
+                match sys::read(c, &mut buf) {
+                    Ok(0) => break,
+                    Ok(k) => msg.extend_from_slice(&buf[..k]),
+                    Err(_) => break,
+                }
+            }
+            if let Some(i) = core::str::from_utf8(&msg)
+                .ok()
+                .and_then(|m| m.strip_prefix("hello "))
+                .and_then(|x| x.parse::<usize>().ok())
+            {
+                let _ = sys::write_all(c, alloc::format!("ok {i}").as_bytes());
+                replied += 1;
+            }
+        }
+    }
+    let (_, st) = sys::wait4(child as i32, 0).unwrap();
+    let us = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1000;
+    t(replied == CLIENTS && accepted == CLIENTS && st == 0); // 8
+    let _ = sys::close(e);
+    let _ = sys::close(l);
+    let want = (1u32 << n) - 1;
+    check(
+        "epoll",
+        bits == want,
+        &alloc::format!(
+            "checks {bits:#b} (want {want:#b}); server: {accepted} accepted, {replied} \
+             answered in {us} us, {wakeups} epoll_wait calls, client {}",
+            sys::describe_status(st)
+        ),
+    )
+}
+
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_SECURE: u64 = 23;
+
+/// `utest auxv-print`: our auxv ids, for t_auxv's set-user-ID copy.
+fn auxv_print(args: &rt::Args) -> i32 {
+    let g = |t| args.aux(t).map_or(-1, |v| v as i64);
+    println!(
+        "AUXV {} {} {} {} {}",
+        g(AT_UID),
+        g(AT_EUID),
+        g(AT_GID),
+        g(AT_EGID),
+        g(AT_SECURE)
+    );
+    0
+}
+
+/// The auxv carries the real ids; AT_SECURE is set for a set-user-ID exec.
+fn t_auxv(args: &rt::Args) -> bool {
+    let g = |t| args.aux(t).unwrap_or(u64::MAX);
+    let mut ok = g(AT_UID) == sys::getuid() as u64
+        && g(AT_EUID) == sys::geteuid() as u64
+        && g(AT_GID) == sys::getgid() as u64
+        && g(AT_EGID) == sys::getegid() as u64
+        && g(AT_SECURE) == (sys::getuid() != sys::geteuid()) as u64;
+    let mut detail = alloc::format!(
+        "self: uid {} euid {} gid {} egid {} secure {}",
+        g(AT_UID),
+        g(AT_EUID),
+        g(AT_GID),
+        g(AT_EGID),
+        g(AT_SECURE)
+    );
+    if sys::geteuid() == 0 {
+        // A set-user-ID root copy of utest, run by milk: euid 0, uid 501, AT_SECURE 1.
+        let copy = "/tmp/utest-suid";
+        let made = sys::read_file("/bin/utest").ok().and_then(|data| {
+            let fd =
+                sys::open_mode(copy, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o755).ok()?;
+            let r = sys::write_all(fd, &data);
+            let _ = sys::close(fd);
+            r.ok()?;
+            sys::chmod(copy, 0o4755).ok()
+        });
+        let (r, w) = sys::pipe().unwrap();
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            let _ = sys::dup2(w, 1);
+            let _ = sys::setgroups(&[20]);
+            let _ = sys::setgid(20);
+            let _ = sys::setuid(501);
+            let _ = sys::execve(copy, &[copy, "auxv-print"], &[]);
+            sys::exit(127);
+        }
+        let _ = sys::close(w);
+        let mut out = Vec::new();
+        let mut b = [0u8; 128];
+        while let Ok(n @ 1..) = sys::read(r, &mut b) {
+            out.extend_from_slice(&b[..n]);
+        }
+        let _ = sys::close(r);
+        let _ = sys::wait4(pid as i32, 0);
+        let _ = sys::unlink(copy);
+        let line = String::from(String::from_utf8_lossy(&out).trim());
+        ok &= made.is_some() && line == "AUXV 501 0 20 20 1";
+        detail += &alloc::format!("; set-user-ID copy run by milk: {line:?}");
+    }
+    check("auxv ids", ok, &detail)
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1228,6 +1567,18 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "wx" || what == "all" {
         ok &= t_wx();
+    }
+    if what == "unix" || what == "all" {
+        ok &= t_unix();
+    }
+    if what == "epoll" || what == "all" {
+        ok &= t_epoll();
+    }
+    if what == "auxv-print" {
+        return auxv_print(args);
+    }
+    if what == "auxv" || what == "all" {
+        ok &= t_auxv(args);
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

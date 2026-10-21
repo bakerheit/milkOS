@@ -171,6 +171,7 @@ fn deliver_wakeups(w: Woken) {
     }
     READY_GEN.fetch_add(1, Ordering::AcqRel);
     READY_WQ.wake_all();
+    crate::poll::notify(); // poll / select / epoll waiters (kernel/src/poll.rs)
     // The in-kernel services live on the net thread: let it look too (loopback traffic
     // never raises an IRQ). It stops once a pass changes nothing.
     KICK.store(true, Ordering::Release);

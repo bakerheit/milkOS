@@ -1120,7 +1120,11 @@ impl Shell for BuiltinShell {
             "clear" => return ShellResult::Clear,
             "uname" => {
                 if arg.contains('a') {
-                    out.out("milkOS 1.0 milk 0.0.1 aarch64 qemu-virt");
+                    out.out(concat!(
+                        "milkOS milk ",
+                        env!("MILKOS_VERSION"),
+                        " aarch64 qemu-virt"
+                    ));
                 } else {
                     out.out("milkOS");
                 }

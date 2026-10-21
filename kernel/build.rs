@@ -10,9 +10,24 @@ fn main() {
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
     let repo = Path::new(&dir).parent().unwrap();
+    // The one version number (<repo>/VERSION): env!("MILKOS_VERSION") in the kernel, and
+    // @VERSION@ in rootfs text files (motd, System/Version.txt) is replaced with it.
+    let version = read_version(repo);
+    println!("cargo:rustc-env=MILKOS_VERSION={version}");
+    println!("cargo:rerun-if-changed={}", repo.join("VERSION").display());
     // User programs first: the initramfs packs them (initramfs.list).
     build_user(repo);
-    build_initramfs(repo);
+    build_initramfs(repo, &version);
+}
+
+fn read_version(repo: &Path) -> String {
+    let v = fs::read_to_string(repo.join("VERSION")).expect("read <repo>/VERSION");
+    let v = v.trim();
+    assert!(
+        !v.is_empty() && v.split('.').all(|p| p.parse::<u32>().is_ok()),
+        "VERSION must be like 0.1.0, got {v:?}"
+    );
+    v.to_string()
 }
 
 // ---- user programs ------------------------------------------------------------------
@@ -168,7 +183,7 @@ fn ensure_parents(cpio: &mut Cpio, seen: &mut Vec<String>, name: &str) {
     }
 }
 
-fn build_initramfs(repo: &Path) {
+fn build_initramfs(repo: &Path, version: &str) {
     let rootfs = repo.join("rootfs");
     let list = repo.join("initramfs.list");
     println!("cargo:rerun-if-changed={}", rootfs.display());
@@ -198,7 +213,13 @@ fn build_initramfs(repo: &Path) {
             } else if meta.is_dir() {
                 cpio.entry(&name, S_IFDIR | perm, &[]);
             } else {
-                cpio.entry(&name, S_IFREG | perm, &fs::read(&full).unwrap());
+                let mut data = fs::read(&full).unwrap();
+                if let Ok(text) = std::str::from_utf8(&data)
+                    && text.contains("@VERSION@")
+                {
+                    data = text.replace("@VERSION@", version).into_bytes();
+                }
+                cpio.entry(&name, S_IFREG | perm, &data);
             }
         }
     }

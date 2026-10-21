@@ -2,6 +2,9 @@
 //!   httpd [-p PORT] [-q] [DIR]       defaults: port 80, /srv/www
 //! Directories serve their index.html, or a listing. Paths with ".." are refused. -q: no
 //! request log. init starts `httpd -q /srv/www` at boot.
+//!
+//! `/status` is generated: a system dashboard (CPU per core, memory, uptime, load,
+//! network totals, recent audit events) in the HTML subset the desktop Browser renders.
 
 #![no_std]
 #![no_main]
@@ -12,6 +15,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use rt::net::{self, SockAddr};
 use rt::{eprintln, println, sys};
+
+mod status;
 
 rt::main!(main);
 
@@ -169,6 +174,17 @@ fn serve(c: i32, root: &str) -> (String, String, usize) {
     if !path.starts_with('/') || path.split('/').any(|p| p == "..") {
         let (s, n) = error(c, "403 Forbidden", head);
         return (s, line, n);
+    }
+    if path == "/status" {
+        let body = status::page();
+        let n = respond(
+            c,
+            "200 OK",
+            "text/html; charset=utf-8",
+            body.as_bytes(),
+            head,
+        );
+        return (String::from("200 OK"), line, n);
     }
     let full = alloc::format!("{root}{path}");
     let fd = match sys::open(&full, sys::O_RDONLY | sys::O_CLOEXEC) {

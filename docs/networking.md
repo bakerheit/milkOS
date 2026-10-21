@@ -190,6 +190,7 @@ netmask=.. broadcast=.. gateway=.. dns=.. dhcp=Bound`).
 | `ping [-c N] [-i MS] [-s SIZE] [-W MS] ADDR` | ICMP echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged). `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
 | `nc [-u] HOST PORT`, `nc -l [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP) |
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www) |
+| `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
 
 Addresses are numeric (or `localhost`): there is no resolver for user programs yet.

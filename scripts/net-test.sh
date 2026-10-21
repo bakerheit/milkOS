@@ -138,6 +138,11 @@ for t in "/missing 404" "/../etc/motd 403" "/notes 301"; do
   [ "$code" = "$2" ] || fail "GET $1: expected $2, got $code"
 done
 echo "userland httpd: /, /about.txt, /notes/ listing, 404, 403 (..), 301 ok"
+curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/status" >"$WORK/status.html" || fail "curl /status"
+for want in '<title>milkOS status</title>' '<h2>CPU</h2>' 'cpu0  \[' '<h2>Memory</h2>' '<h2>Recent audit events</h2>' '<b>exec</b> /bin/'; do
+  grep -q "$want" "$WORK/status.html" || { cat "$WORK/status.html"; fail "/status: no $want"; }
+done
+echo "userland httpd /status: CPU, memory, network, recent audit events ok ($(wc -c <"$WORK/status.html") bytes)"
 
 echo "---- host curl -> kernel httpd on guest :8080 (via 127.0.0.1:$KH_PORT) ----"
 HTTP_PORT=$KH_PORT

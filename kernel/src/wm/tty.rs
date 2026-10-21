@@ -62,7 +62,7 @@ pub fn input(b: u8) {
             b'\r' | b'\n' => {
                 push_out(&mut t, b"\n");
                 t.line.push(b'\n');
-                let l: Vec<u8> = t.line.drain(..).collect();
+                let l = core::mem::take(&mut t.line);
                 t.ready.extend(l);
                 wake = true;
             }
@@ -91,7 +91,7 @@ pub fn input(b: u8) {
                 if t.line.is_empty() {
                     t.eof = true;
                 } else {
-                    let l: Vec<u8> = t.line.drain(..).collect();
+                    let l = core::mem::take(&mut t.line);
                     t.ready.extend(l);
                 }
                 wake = true;

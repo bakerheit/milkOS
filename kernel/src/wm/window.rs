@@ -126,6 +126,8 @@ pub struct Window {
     drawn_focused: bool,
     /// The pointer is over the traffic lights: show their symbols.
     pub hover: bool,
+    /// Traffic light being pressed (drawn 4% darker).
+    pub pressed_light: Option<usize>,
 }
 
 /// Light `i`'s box in window coordinates.
@@ -164,6 +166,7 @@ impl Window {
             dirty: true,
             drawn_focused: false,
             hover: false,
+            pressed_light: None,
         })
     }
 
@@ -242,6 +245,9 @@ impl Window {
         for (i, c) in lights.into_iter().enumerate() {
             let r = light_rect(i);
             p.circle(r.x, r.y, r.w, c, 255);
+            if self.pressed_light == Some(i) {
+                p.circle(r.x, r.y, r.w, 0, a(40) * 2); // pressed: darker (8%, 4% reads as nothing on a 12px light)
+            }
             if self.hover {
                 // x, -, + (hover state; the mockup does not show one, this is macOS's).
                 let (x, y, m) = (r.x, r.y, ESPRESSO);

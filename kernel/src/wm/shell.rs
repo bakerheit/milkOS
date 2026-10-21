@@ -362,6 +362,10 @@ pub fn fuzzy(q: &str, name: &str) -> Option<i32> {
 }
 
 impl Launcher {
+    pub fn result_count(&self) -> usize {
+        self.results().len()
+    }
+
     fn results(&self) -> Vec<&'static Entry> {
         if self.query.trim().is_empty() {
             return ENTRIES.iter().take(4).collect();
@@ -702,6 +706,13 @@ impl Desktop {
             icons::draw(
                 p, ix, DOCK_PAD, DOCK_ICON, it.icon, it.bg, 255, it.fg, false,
             );
+            // SPEC hover / pressed: lighten 4% / darken 4%.
+            let r = (DOCK_ICON * 24 + 50) / 100;
+            if self.dock_pressed == Some(i) {
+                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, 0, a(40));
+            } else if self.tip == Some(i) {
+                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, WHITE, a(40));
+            }
             let running = match it.action {
                 DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
                 DockAction::Home => self.mode == Mode::Home,
@@ -1028,6 +1039,7 @@ impl Desktop {
                 let Some(i) = dock_index(x) else {
                     return;
                 };
+                self.dock_pressed = Some(i);
                 self.control = false;
                 match DOCK[i].action {
                     DockAction::App(a) => self.open(a),

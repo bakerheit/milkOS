@@ -269,6 +269,8 @@ pub struct Desktop {
     hover_lights: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
+    /// Dock item being pressed (drawn 4% darker until release).
+    dock_pressed: Option<usize>,
     /// Open menu bar menu (index into `menu_titles`) and the row under the pointer.
     menu: Option<usize>,
     menu_hover: Option<usize>,
@@ -327,6 +329,7 @@ impl Desktop {
             drag: None,
             hover_lights: None,
             tip: None,
+            dock_pressed: None,
             menu: None,
             menu_hover: None,
             damage: DirtyList::new(),
@@ -1272,6 +1275,27 @@ impl Desktop {
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
     fn hover(&mut self, x: i32, y: i32) {
+        // Skim: the selection follows the pointer over the results.
+        if self.launcher.is_some() {
+            let rows = self.layers().iter().find_map(|l| match l {
+                Layer::Panel(s) if s.key == PanelKey::LaunchResults => Some(s.rect),
+                _ => None,
+            });
+            if let Some(r) = rows
+                && hit(&r, x, y)
+                && y - r.y >= 40
+            {
+                let row = ((y - r.y - 40) / LAUNCH_ROW_H) as usize;
+                let n = self.launcher.as_ref().map_or(0, |l| l.result_count());
+                if let Some(l) = &mut self.launcher
+                    && row < n
+                    && row != l.sel
+                {
+                    l.sel = row;
+                    self.invalidate(PanelKey::LaunchResults);
+                }
+            }
+        }
         if self.menu.is_some() {
             if y < MENU_H {
                 if let Some(t) = self.menu_title_at(x) {
@@ -1310,6 +1334,7 @@ impl Desktop {
         if tip != self.tip {
             self.tip = tip;
             self.invalidate(PanelKey::Tip);
+            self.invalidate(PanelKey::Dock);
         }
     }
 
@@ -1377,7 +1402,13 @@ impl Desktop {
         let w = self.win(id).unwrap();
         let r = w.rect;
         match w.hit(x, y) {
-            Some(Part::Light(which)) => self.drag = Some(Drag::Light { id, which }),
+            Some(Part::Light(which)) => {
+                self.drag = Some(Drag::Light { id, which });
+                if let Some(w) = self.win_mut(id) {
+                    w.pressed_light = Some(which);
+                    w.dirty = true;
+                }
+            }
             Some(Part::Title) => {
                 self.drag = Some(Drag::Move {
                     id,
@@ -1404,8 +1435,15 @@ impl Desktop {
 
     fn release(&mut self) {
         let (x, y) = self.pointer;
+        if self.dock_pressed.take().is_some() {
+            self.invalidate(PanelKey::Dock);
+        }
         match self.drag.take() {
             Some(Drag::Light { id, which }) => {
+                if let Some(w) = self.win_mut(id) {
+                    w.pressed_light = None;
+                    w.dirty = true;
+                }
                 if let Some(w) = self.win(id)
                     && w.hit(x, y) == Some(Part::Light(which))
                 {

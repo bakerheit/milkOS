@@ -253,6 +253,13 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .key(Key::F(4), Mods::NONE)
                 .wait(300);
         }
+        "dockpress" => {
+            // Hover the Terminal tile, then press (and hold) the Notes tile and a light.
+            let (x, y) = dock_icon_center(1);
+            b.glide(600, 500, x, y, 8).wait(200);
+            let (x, y) = dock_icon_center(3);
+            b.glide(x - 60, y, x, y, 4).down().wait(300);
+        }
         "openanim" => {
             let (x, y) = dock_icon_center(8);
             b.to(x, y).wait(30).down().wait(30).up();

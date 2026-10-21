@@ -20,6 +20,7 @@ hand-edited file cannot lock an app. Writes go to a sibling file and are renamed
 | File | Written by | Lines |
 | --- | --- | --- |
 | `~/Library/Calendar/<Name>.cal` (one per calendar) | Calendar, `cal` | `calendar name colour [hidden]`, then `event id date start end repeat[:every] until alert title notes` |
+| `~/Library/Reminders/<Name>.rem` (one per list) | `remind` (Reminders app later) | `list name colour`, then `reminder id due time repeat[:every] until done flag title notes` |
 | `~/Library/Clock/alarms` | Clock, `alarm`, alarmd (switches off "once" alarms) | `alarm id HH:MM days on\|off label` |
 | `~/Library/Clock/timers` | Clock, `timer`, alarmd (removes finished ones) | `boot id`, then `timer id running\|paused deadline_ms\|remaining_ms total_ms label` |
 | `~/Library/Clock/recent` | Clock | custom timer minutes, newest first |
@@ -31,6 +32,12 @@ Calendars: `colour` is straw, matcha, blue, honey or lav. With no files the thre
 `alert` is minutes before the start (0 = at the time; an all-day event alerts at 09:00). A monthly
 event on the 31st happens on the last day of shorter months, a yearly 29 February on the 28th in
 other years. A hidden calendar is not drawn but still alerts.
+
+Reminders: `due` is a day or `-`, `time` is `HH:MM` or `-` (a due day without a time rings at 09:00),
+`done` is `-` or the day it was completed, `flag` is 0 or 1. Completing a repeating reminder moves its
+due day to the next one after today (skipping what was missed) instead of closing it; the last
+occurrence (past `until`) closes it. alarmd rings a reminder once, when its time passes; done ones
+never ring.
 
 Alarms: `days` is a weekday mask (bit 0 Monday ... bit 6 Sunday); 0 means once, and the alarm
 switches itself off after it rings. "Snooze 9 min" adds a once alarm.
@@ -57,6 +64,7 @@ paused is caught up, at most ten minutes of it; a clock stepped backwards rings 
 ```
 alarm [list] | add HH:MM [once|daily|weekdays|weekends|mon,wed,fri] [label] | add in 5m [label] | rm|on|off ID
 timer [list] | DURATION [label] (5m, 1h30m, 90s) | pause|resume|reset|rm ID
+remind [list [NAME]] | lists | add [--list NAME] [WHEN [HH:MM] | in 5m] TITLE [--repeat daily|weekly|monthly|yearly[:N]] [--until DATE] [--flag] | done|undone|flag|rm ID
 cal | cal MONTH YEAR | cal list [DAYS] | cal add WHEN [HH:MM[-HH:MM]] TITLE [--repeat daily|weekly|monthly|yearly[:N]] [--until DATE] [--alert MIN] | cal add in 5m TITLE | cal rm ID
 ```
 

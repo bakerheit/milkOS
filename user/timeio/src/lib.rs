@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use rt::sys;
 use timekit::cal::CalendarSet;
 use timekit::clock::{Alarms, Timers};
+use timekit::reminders::ReminderSet;
 
 pub const DEFAULT_HOME: &str = "/home/milk";
 
@@ -20,6 +21,8 @@ pub const DEFAULT_HOME: &str = "/home/milk";
 pub struct Paths {
     /// `~/Library/Calendar`: one `<Name>.cal` file per calendar.
     pub calendars: String,
+    /// `~/Library/Reminders`: one `<Name>.rem` file per list.
+    pub reminders: String,
     pub alarms: String,
     pub timers: String,
     /// The custom timer durations Clock remembers.
@@ -31,6 +34,7 @@ impl Paths {
     pub fn for_home(home: &str) -> Paths {
         Paths {
             calendars: format!("{home}/Library/Calendar"),
+            reminders: format!("{home}/Library/Reminders"),
             alarms: format!("{home}/Library/Clock/alarms"),
             timers: format!("{home}/Library/Clock/timers"),
             recent: format!("{home}/Library/Clock/recent"),
@@ -144,6 +148,35 @@ pub fn save_calendars(p: &Paths, set: &CalendarSet) -> sys::Result<()> {
     for (name, _) in sys::read_dir(&p.calendars).unwrap_or_default() {
         if name.ends_with(".cal") && !keep.contains(&name) {
             let _ = sys::unlink(&format!("{}/{name}", p.calendars));
+        }
+    }
+    Ok(())
+}
+
+/// Read every `*.rem` file in the reminders folder; none gives the default "Reminders" list.
+pub fn load_reminders(p: &Paths) -> (ReminderSet, usize) {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for (name, _) in sys::read_dir(&p.reminders).unwrap_or_default() {
+        if let Some(stem) = name.strip_suffix(".rem") {
+            files.push((
+                String::from(stem),
+                read_text(&format!("{}/{name}", p.reminders)),
+            ));
+        }
+    }
+    files.sort();
+    ReminderSet::from_files(&files)
+}
+
+/// Write each list to its file and remove the files of lists that are gone.
+pub fn save_reminders(p: &Paths, set: &ReminderSet) -> sys::Result<()> {
+    let keep: Vec<String> = set.lists.iter().map(ReminderSet::file_name).collect();
+    for (l, f) in set.lists.iter().zip(&keep) {
+        write_atomic(&format!("{}/{f}", p.reminders), &l.to_text())?;
+    }
+    for (name, _) in sys::read_dir(&p.reminders).unwrap_or_default() {
+        if name.ends_with(".rem") && !keep.contains(&name) {
+            let _ = sys::unlink(&format!("{}/{name}", p.reminders));
         }
     }
     Ok(())

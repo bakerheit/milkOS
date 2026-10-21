@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 D = Path(sys.argv[1])
-NAMES = ["files", "terminal", "browser", "notes", "paint", "music", "settings", "text-editor", "calendar", "clock", "preview", "activity", "store", "spaces"]
+NAMES = ["files", "terminal", "browser", "notes", "paint", "music", "settings", "text-editor", "calendar", "clock", "preview", "activity", "store", "spaces", "today", "disk-utility", "reminders"]
 try:
     FONT = ImageFont.load_default(size=13)
 except TypeError:
@@ -39,7 +39,7 @@ d.text((16, 10), "icons: 48 and 16 px, light theme (left) and dark theme (right)
 for half, dark in enumerate((False, True)):
     x0 = 12 + half * (W // 2)
     bg = DARKBG if dark else CREAM
-    d.rectangle([x0 - 8, 30, x0 + W // 2 - 20, 30 + 7 * 80 + 10], fill=bg)
+    d.rectangle([x0 - 8, 30, x0 + W // 2 - 20, 30 + 9 * 80 + 10], fill=bg)
     for i, n in enumerate(NAMES):
         col, row = i % 2, i // 2
         x, y = x0 + col * 320, 40 + row * 80
@@ -49,7 +49,7 @@ for half, dark in enumerate((False, True)):
         td = ImageDraw.Draw(t)
         td.text((92, 26), n, fill=LIGHT_TXT if dark else COCOA, font=FONT)
         sheet.paste(t.convert("RGB"), (x, y))
-y = 30 + 7 * 80 + 24
+y = 30 + 9 * 80 + 24
 # a dock at the real size, over each wallpaper's bottom strip
 for k, (wp, dark) in enumerate((("wallpaper-dawn", False), ("wallpaper-night", True))):
     bg = Image.open(D / "wallpapers" / f"{wp}-1024x768.png").convert("RGB")
@@ -80,8 +80,8 @@ for wp, dark in (("wallpaper-dawn", False), ("wallpaper-night", True)):
         bg.alpha_composite(icon(n, 48, dark), (dx + 8 + i * 60, 50))
     strips.append(bg.convert("RGB").resize((W // 2 - 20, int(118 * (W // 2 - 20) / 1024))))
 final = Image.new("RGB", (W, 1500), CREAM)
-final.paste(sheet.crop((0, 0, W, 30 + 7 * 80 + 14)), (0, 0))
-yy = 30 + 7 * 80 + 22
+final.paste(sheet.crop((0, 0, W, 30 + 9 * 80 + 14)), (0, 0))
+yy = 30 + 9 * 80 + 22
 ImageDraw.Draw(final).text((16, yy), "the dock at 48 px over the two wallpapers", fill=COCOA, font=FONT)
 yy += 20
 for k, s in enumerate(strips):

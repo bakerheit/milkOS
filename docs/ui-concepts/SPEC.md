@@ -1,6 +1,6 @@
 # milkOS 1.0 UI spec
 
-For the engineer building the compositor and shell. Generated from `v1.mjs` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: `milkos-1.0.html`. Screen: 1024x768, 32-bit. Layout snaps to a 4px grid.
+For the engineer building the compositor and shell. Generated from `v1.mjs` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: `milkos-1.0.html`. App specs (Activity Monitor, Text Editor, Calendar, Clock/Timer, Preview): `SPEC-APPS.md`. Art direction: `ART.md`. Screen: 1024x768, 32-bit. Layout snaps to a 4px grid.
 
 ## Colour tokens (sRGB)
 | Token | Hex | Use |

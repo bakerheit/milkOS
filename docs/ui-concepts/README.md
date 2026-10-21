@@ -46,3 +46,6 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 
 ## Art direction
 `ART.md` is the art direction for icons, wallpapers, the boot splash and sounds. `art-direction.html` is the visual reference, `art/check-wallpaper.py` checks a wallpaper against the glass-contrast rule. Source: `art-direction.mjs`.
+
+## Built-in apps
+`SPEC-APPS.md` specifies Activity Monitor, Text Editor, Calendar, Clock/Timer and Preview, built only on what the system can do today. `apps.html` has the 17 mockups. Source: `apps.mjs`.

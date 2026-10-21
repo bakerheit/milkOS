@@ -115,6 +115,24 @@ impl Volume {
             .is_some_and(|w| w.strong_count() > 0)
     }
 
+    /// Inode objects someone still holds (open files, working directories, mappings),
+    /// any view: (view, ino).
+    pub(crate) fn held_objects(&self) -> alloc::vec::Vec<(u64, u64)> {
+        self.inodes
+            .lock()
+            .iter()
+            .filter(|(_, w)| w.strong_count() > 0)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    /// Device numbers of every view handed out so far (live, snapshots, clones).
+    pub(crate) fn all_devs(&self) -> alloc::vec::Vec<u64> {
+        let mut d = alloc::vec![self.dev];
+        d.extend(self.snap_devs.lock().values().copied());
+        d
+    }
+
     pub fn root_obj(&self, view: u64) -> Arc<MilkInode> {
         self.inode_obj(view, ROOT_INO, InodeType::Dir)
     }

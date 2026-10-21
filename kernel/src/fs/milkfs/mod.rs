@@ -386,6 +386,211 @@ pub fn unlock(secret: &str, dev: Option<&str>) -> Result<alloc::vec::Vec<String>
     if ok { Ok(mounted) } else { Err(last) }
 }
 
+/// Processes holding something on one of `devs` (open files, working or root
+/// directory), e.g. `pid 12 (cat): 1 open file`.
+fn holders(devs: &[u64]) -> alloc::vec::Vec<String> {
+    let mut out = alloc::vec::Vec::new();
+    for p in crate::proc::all() {
+        let inner = p.inner.lock();
+        let files = inner
+            .fds
+            .list()
+            .iter()
+            .filter(|(_, f)| devs.contains(&f.inode().dev()))
+            .count();
+        let mut what = alloc::vec::Vec::new();
+        if files > 0 {
+            what.push(format!(
+                "{files} open file{}",
+                if files == 1 { "" } else { "s" }
+            ));
+        }
+        if devs.contains(&inner.cwd.dev()) {
+            what.push(String::from("working directory"));
+        }
+        if inner
+            .root_dir
+            .as_ref()
+            .is_some_and(|r| devs.contains(&r.dev()))
+        {
+            what.push(String::from("root directory"));
+        }
+        if !what.is_empty() {
+            out.push(format!(
+                "pid {} ({}): {}",
+                p.pid,
+                inner.name,
+                what.join(", ")
+            ));
+        }
+    }
+    out
+}
+
+/// Is `t` (a device name, mount path or label) this volume?
+fn names_volume(v: &Volume, path: &str, t: &str) -> bool {
+    v.device_name == t || path == t || v.label == t
+}
+
+/// Lock unlocked encrypted volumes again: the one `target` names (device, mount path or
+/// label) or, with `None`, every one that can be. Commits, unmounts the live tree,
+/// drops its cached plaintext and wipes the key; the device goes back on the locked
+/// list for `unlock`. Refused:
+/// * EBUSY if a process has a file open on it or works in it (the reason names them),
+///   something is mounted inside it, or a scrub, send or receive is using it;
+/// * EBUSY for the primary volume: `/home/milk`, `/Applications` and `/etc/milk/drop`
+///   are bound from it (you can't lock the disk you're logged into; it locks at
+///   shutdown);
+/// * EINVAL if it isn't encrypted; ENODEV if no such (unlocked) volume.
+///
+/// Returns the devices locked.
+pub fn lock(target: Option<&str>) -> Result<alloc::vec::Vec<String>> {
+    let home = user_volume();
+    let vols = all_volumes();
+    let picked: alloc::vec::Vec<(Arc<Volume>, String)> = match target {
+        Some(t) => {
+            let v: alloc::vec::Vec<_> = vols
+                .into_iter()
+                .filter(|(v, p)| names_volume(v, p, t))
+                .collect();
+            if v.is_empty() {
+                if LOCKED.lock().iter().any(|d| d.name() == t) {
+                    return fail(Errno::EINVAL, format!("{t} is already locked"));
+                }
+                return fail(Errno::ENODEV, format!("no mounted milkfs volume {t}"));
+            }
+            v
+        }
+        None => {
+            let v: alloc::vec::Vec<_> = vols
+                .into_iter()
+                .filter(|(v, _)| {
+                    v.state.lock().store.encrypted()
+                        && !home.as_ref().is_some_and(|h| Arc::ptr_eq(h, v))
+                })
+                .collect();
+            if v.is_empty() {
+                if home
+                    .as_ref()
+                    .is_some_and(|h| h.state.lock().store.encrypted())
+                {
+                    return fail(Errno::EBUSY, home_reason(home.as_ref().unwrap()));
+                }
+                return fail(Errno::ENODEV, "no unlocked encrypted volume");
+            }
+            v
+        }
+    };
+    let mut done = alloc::vec::Vec::new();
+    let mut first_err = None;
+    for (v, path) in picked {
+        let r = lock_one(&v, &path, home.as_ref());
+        audit_op(
+            "milkfs.lock",
+            &format!("dev={} path={path}", v.device_name),
+            &r,
+        );
+        match r {
+            Ok(()) => done.push(v.device_name.clone()),
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) if done.is_empty() => Err(e),
+        _ => Ok(done),
+    }
+}
+
+fn home_reason(v: &Volume) -> String {
+    format!(
+        "{} ({}) holds {HOME}, {APPLICATIONS} and the system's settings: you can't lock the volume you're logged into (it locks at shutdown)",
+        v.device_name, v.label
+    )
+}
+
+fn lock_one(v: &Arc<Volume>, path: &str, home: Option<&Arc<Volume>>) -> Result<()> {
+    let dev = v.device_name.clone();
+    if home.is_some_and(|h| Arc::ptr_eq(h, v)) {
+        return fail(Errno::EBUSY, home_reason(v));
+    }
+    {
+        let mut st = v.state.lock();
+        if !st.store.encrypted() {
+            return fail(
+                Errno::EINVAL,
+                format!("{dev} ({}) isn't encrypted: nothing to lock", v.label),
+            );
+        }
+        if st.receiving || !st.busy_snaps.is_empty() {
+            return fail(
+                Errno::EBUSY,
+                format!("{dev}: a send or receive is using it; try again when it finishes"),
+            );
+        }
+        if scrub::running_on(path) {
+            return fail(
+                Errno::EBUSY,
+                format!("{dev}: a scrub is reading it (`snap scrub stop`, or wait)"),
+            );
+        }
+        if let Err(e) = st.commit() {
+            return fail(e, format!("{dev}: can't write its last changes: {e}"));
+        }
+    }
+    // Unmount first, so nothing new can be opened by path; put it back if it's busy.
+    if crate::fs::path::unmount(path).is_err() {
+        return fail(
+            Errno::EBUSY,
+            format!("{dev}: something is mounted inside {path}; unmount it first"),
+        );
+    }
+    let devs = v.all_devs();
+    let who = holders(&devs);
+    let held = v.held_objects().len();
+    if !who.is_empty() || held > 0 {
+        if let Err(e) = crate::fs::path::mount(path, v.clone()) {
+            kprintln!("milkfs: {dev}: lock refused, but remounting {path} failed: {e}");
+        }
+        let why = if who.is_empty() {
+            format!("{held} file(s) on it are held by the system")
+        } else {
+            who.join("; ")
+        };
+        return fail(
+            Errno::EBUSY,
+            format!("{dev} ({}) is in use: {why}", v.label),
+        );
+    }
+    let bdev = blockdev::get(&dev);
+    let wiped = {
+        let mut st = v.state.lock();
+        let _ = st.commit(); // nothing can have changed, but be sure
+        st.forget_key()
+    };
+    for d in &devs {
+        crate::fs::pagecache::invalidate_dev(*d);
+    }
+    VOLUMES
+        .lock()
+        .retain(|(w, _)| !core::ptr::eq(w.as_ptr(), Arc::as_ptr(v)));
+    let _ = crate::fs::ops::rmdir(path);
+    if let Some(b) = bdev {
+        LOCKED.lock().push(b);
+    }
+    kprintln!(
+        "milkfs: {dev} ({}) locked, {path} unmounted, key {}",
+        v.label,
+        if wiped {
+            "wiped"
+        } else {
+            "wiped once its last reader finishes"
+        }
+    );
+    Ok(())
+}
+
 /// Change a passphrase of the primary (encrypted) volume: `old` (a passphrase or the
 /// recovery key) must open a slot; the volume key is rewrapped under `new` (no block is
 /// rewritten). Replaces the slot `old` opened, or the first passphrase slot if `old`
@@ -1295,6 +1500,66 @@ fn clones_text() -> String {
     s
 }
 
+// ---- control errors: a readable reason next to the errno --------------------------
+
+/// Why the calling thread's current control write is failing (set by [`fail`]).
+static REASON: SpinLock<alloc::vec::Vec<(u32, String)>> = SpinLock::new(alloc::vec::Vec::new());
+/// `/sys/fs/milkfs/error`: the last failed control write, `CONTROL: ERRNO: reason`.
+static LAST_ERROR: SpinLock<String> = SpinLock::new(String::new());
+
+fn tid() -> u32 {
+    crate::sched::current_tid()
+}
+
+/// Fail with `e` and say why (in `/sys/fs/milkfs/error` when it came from a control).
+fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
+    let (t, why) = (tid(), why.into());
+    let mut r = REASON.lock();
+    r.retain(|(x, _)| *x != t);
+    r.push((t, why));
+    Err(e)
+}
+
+/// The reason [`fail`] recorded on this thread, if any (taken).
+fn take_reason() -> Option<String> {
+    let t = tid();
+    let mut r = REASON.lock();
+    let i = r.iter().position(|(x, _)| *x == t)?;
+    Some(r.swap_remove(i).1)
+}
+
+/// Run control `name`'s write, keeping `/sys/fs/milkfs/error` current: cleared when a
+/// write succeeds, `name: ERRNO: reason` when it fails.
+fn run_control(name: &str, f: impl FnOnce() -> Result<()>) -> Result<()> {
+    let _ = take_reason();
+    let r = f();
+    let why = take_reason();
+    match r {
+        Ok(()) => LAST_ERROR.lock().clear(),
+        Err(e) => {
+            let why = why.unwrap_or_else(|| String::from(default_reason(name, e)));
+            *LAST_ERROR.lock() = format!("{name}: {}: {why}\n", e.name());
+        }
+    }
+    r
+}
+
+/// Fallback text for an error no code path explained.
+fn default_reason(_name: &str, e: Errno) -> &'static str {
+    match e {
+        Errno::EBUSY => "the volume is busy",
+        Errno::EACCES => "not allowed",
+        Errno::EPERM => "not allowed",
+        Errno::ENOSPC => "the volume is full",
+        Errno::EINVAL => "bad request",
+        Errno::ENODEV => "no milkfs volume",
+        Errno::ENOENT => "no such snapshot, clone or file",
+        Errno::EEXIST => "that name is taken",
+        Errno::EIO => "disk error (or the volume needs a check)",
+        _ => "failed",
+    }
+}
+
 fn arg(buf: &[u8]) -> Result<&str> {
     let s = core::str::from_utf8(buf).map_err(|_| Errno::EINVAL)?.trim();
     if s.is_empty() {
@@ -1369,6 +1634,36 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             r
         },
     );
+    dir.add_control(
+        "lock",
+        || {
+            let mut s = String::new();
+            let home = user_volume();
+            for (v, p) in all_volumes() {
+                if !v.state.lock().store.encrypted() {
+                    continue;
+                }
+                let note = if home.as_ref().is_some_and(|h| Arc::ptr_eq(h, &v)) {
+                    " (home: can't be locked)"
+                } else {
+                    ""
+                };
+                let _ = writeln!(s, "{} {} unlocked at={p}{note}", v.device_name, v.label);
+            }
+            for (d, l) in locked() {
+                let _ = writeln!(s, "{d} {l} locked");
+            }
+            s
+        },
+        |b| {
+            // `all` (every lockable volume) or `DEV|PATH|LABEL`
+            run_control("lock", || {
+                let t = arg(b)?;
+                lock((t != "all").then_some(t)).map(|_| ())
+            })
+        },
+    );
+    dir.add_file("error", || LAST_ERROR.lock().clone());
     dir.add_control("passwd", String::new, |b| {
         // `OLD\nNEW` (each a whole line, so they may contain spaces)
         let mut raw = alloc::vec::Vec::from(b);

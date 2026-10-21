@@ -19,6 +19,8 @@
 //!                         start and wait for it, printing progress)
 //!   snap unlock [DEV]     unlock an encrypted volume (asks for the passphrase, or the
 //!                         recovery key) and mount it
+//!   snap lock [DEV|PATH]  lock unlocked encrypted volumes again (sync, unmount, wipe the
+//!                         key); not the one /home/milk is on. No argument: every one
 //!   snap passwd           change the primary volume's passphrase (rewraps the key)
 //!   snap receive [FILE] [--to PATH] [--force]
 //!                         recreate the snapshot in a stream (FILE or stdin) on the milkfs
@@ -89,6 +91,19 @@ fn why(e: rt::Errno) -> alloc::string::String {
     alloc::format!("{text} (errno {})", e.0)
 }
 
+/// Why control `op` just failed: the kernel's reason from /sys/fs/milkfs/error when it
+/// is about `op` (`op: ERRNO: reason`), else the errno in words.
+fn why_op(op: &str, e: rt::Errno) -> alloc::string::String {
+    let text = sys::read_file("/sys/fs/milkfs/error").unwrap_or_default();
+    let text = core::str::from_utf8(&text).unwrap_or("").trim_end();
+    if let Some(rest) = text.strip_prefix(op).and_then(|r| r.strip_prefix(": "))
+        && let Some((_, reason)) = rest.split_once(": ")
+    {
+        return alloc::format!("{reason} ({}, errno {})", e.name(), e.0);
+    }
+    why(e)
+}
+
 /// Like `control` but silent on success (for commands whose result is read back).
 fn control_quiet(op: &str, arg: &str) -> i32 {
     let path = alloc::format!("/sys/fs/milkfs/{op}");
@@ -100,7 +115,7 @@ fn control_quiet(op: &str, arg: &str) -> i32 {
     match r {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("snap: {op} {arg}: {}", why(e));
+            eprintln!("snap: {op} {arg}: {}", why_op(op, e));
             1
         }
     }
@@ -119,7 +134,7 @@ fn control(op: &str, name: &str) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("snap: {op} {name}: {}", why(e));
+            eprintln!("snap: {op} {name}: {}", why_op(op, e));
             1
         }
     }
@@ -337,7 +352,7 @@ fn send_secret(op: &str, text: &str) -> i32 {
     match r {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("snap: {op}: {}", why(e));
+            eprintln!("snap: {op}: {}", why_op(op, e));
             1
         }
     }
@@ -375,6 +390,33 @@ fn unlock(dev: Option<&str>) -> i32 {
     1
 }
 
+fn lock(target: Option<&str>) -> i32 {
+    let r = sys::open("/sys/fs/milkfs/lock", O_WRONLY).and_then(|fd| {
+        let r = sys::write(fd, target.unwrap_or("all").as_bytes());
+        let _ = sys::close(fd);
+        r
+    });
+    match r {
+        Ok(_) => {
+            let st = sys::read_file("/sys/fs/milkfs/lock").unwrap_or_default();
+            let st = core::str::from_utf8(&st).unwrap_or("");
+            // Every locked volume, the one just locked among them.
+            for l in st.lines().filter(|l| l.ends_with(" locked")) {
+                println!("snap: {l}");
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!(
+                "snap: lock{}: {}",
+                target.map(|t| alloc::format!(" {t}")).unwrap_or_default(),
+                why_op("lock", e)
+            );
+            1
+        }
+    }
+}
+
 fn passwd() -> i32 {
     let Some(old) = ask("Current passphrase (or recovery key): ") else {
         return 1;
@@ -401,6 +443,7 @@ fn passwd() -> i32 {
 fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
         (Some("unlock"), d) => unlock(d),
+        (Some("lock"), t) => lock(t),
         (Some("passwd"), _) => passwd(),
         (Some("scrub"), None) => scrub_wait(),
         (Some("scrub"), Some("status")) => cat("/sys/fs/milkfs/scrub"),
@@ -449,7 +492,7 @@ fn main(args: &rt::Args) -> i32 {
         }
         _ => {
             eprintln!(
-                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | auto [on|off|interval=15m|keep=K|daily=D|now] | send SNAP [--from OLDER] [-o FILE] | receive [FILE] [--to PATH] [--force]]"
+                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | unlock [DEV] | lock [DEV|PATH] | passwd | scrub [...] | auto [on|off|interval=15m|keep=K|daily=D|now] | send SNAP [--from OLDER] [-o FILE] | receive [FILE] [--to PATH] [--force]]"
             );
             2
         }

@@ -102,6 +102,12 @@ pub fn status() -> Status {
     STATUS.lock().clone()
 }
 
+/// Is a scrub reading the volume mounted at `path` right now?
+pub fn running_on(path: &str) -> bool {
+    let s = STATUS.lock();
+    s.phase == Phase::Running && s.volume == path
+}
+
 /// Start the thread (after the scheduler runs).
 pub fn start_thread() {
     drop(crate::sched::spawn_prio(

@@ -258,4 +258,16 @@ impl super::volume::State {
         self.meta_dirty = true;
         self.commit()
     }
+
+    /// Lock: drop the volume key (wiped once its last holder lets go, see `VolumeKey`'s
+    /// `Drop`) and the decoded tree nodes, and refuse every write from now on (a block
+    /// written without the key would land in plaintext). Reads fail too: every pointer's
+    /// checksum is a SIV tag that no longer verifies. Commit first. True if the key was
+    /// wiped right here (nothing else held it).
+    pub fn forget_key(&mut self) -> bool {
+        self.broken = true;
+        let k = self.store.crypt.take();
+        self.store.forget_nodes();
+        k.is_some_and(|k| alloc::sync::Arc::strong_count(&k) == 1)
+    }
 }

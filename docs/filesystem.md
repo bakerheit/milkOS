@@ -959,6 +959,42 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
 - Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
   can start qemu sees it; for unattended test boots).
 
+**Locking again.** `snap lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
+can be locked), `/sys/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
+kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices locked):
+
+1. refuse if a send, receive or scrub is using the volume (EBUSY);
+2. commit the open transaction (an I/O error: that errno, nothing unmounted);
+3. unmount the live tree, so nothing new can be opened by path;
+4. look for anything still holding a file on it (any view: live, snapshots): every
+   process's open files, working directory and root directory are scanned, and the
+   volume's inode table tells about the rest (mappings, kernel threads). If anything is
+   found the volume is mounted back where it was and the lock is refused with EBUSY; the
+   reason names the processes:
+   `vdb (Vault) is in use: pid 16 (sleep): 1 open file; pid 10 (msh): working directory`;
+5. drop the key and the decoded tree nodes and mark the in-memory state unwritable (a
+   block written without the key would land in plaintext), invalidate the page cache for
+   every view's device number (no plaintext pages left), forget the volume and put the
+   device back on the locked list, where `unlock` finds it.
+
+`VolumeKey` wipes itself when its last holder drops it; the log line says whether that
+happened at the lock (`... locked, /Volumes/Vault unmounted, key wiped`) or will when a
+last reader lets go (`key wiped once its last reader finishes`). Freed heap memory is
+not zeroed beyond the key itself.
+
+**The home volume can't be locked.** `/home/milk`, `/Applications` and `/etc/milk/drop`
+are bound from the primary volume, and the logged-in session, the desktop and the
+indexer live on it, so locking it is refused (EBUSY: "you can't lock the volume you're
+logged into"); it locks at shutdown (the key is only ever in RAM). A secondary encrypted
+volume (a backup disk, a vault) locks and unlocks any number of times.
+`/sys/fs/milkfs/lock` reads as the encrypted volumes and their state:
+
+```text
+vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)
+vdb Vault unlocked at=/Volumes/Vault
+vdd Old locked
+```
+
 **Send/receive**: streams are **plaintext** (`snap send` decrypts; the stream carries
 xxh64 of plaintext blocks), so they can be checked and received anywhere, including on
 the Mac, and an encrypted target re-encrypts under its own key. Keep streams of an

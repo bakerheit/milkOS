@@ -13,6 +13,7 @@
 //! [`delete_snapshot`], [`rollback`], [`sync`], [`info`]. Shell API: `/sys/fs/milkfs/*`.
 
 pub mod btree;
+pub mod crashtest;
 pub mod format;
 pub mod inode;
 pub mod items;
@@ -86,7 +87,7 @@ pub fn automount() {
             sb.label.clone()
         };
         let path = format!("/Volumes/{label}");
-        match mount(dev.clone(), &path) {
+        match mount(crashtest::wrap(dev.clone()), &path) {
             Ok((vol, r)) => {
                 let st = vol.state.lock();
                 kprintln!(

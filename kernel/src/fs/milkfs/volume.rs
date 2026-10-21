@@ -246,6 +246,8 @@ impl State {
         let r = self.commit_inner();
         match r {
             Ok(sb) => {
+                super::crashtest::LAST_COMMIT
+                    .store(sb.generation, core::sync::atomic::Ordering::Relaxed);
                 self.sb = sb;
                 self.store.committed();
                 self.meta_dirty = false;

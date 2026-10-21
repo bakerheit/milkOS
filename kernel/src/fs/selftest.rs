@@ -813,6 +813,22 @@ fn blockdev(t: &mut T) {
     );
 }
 
+/// `rm -r`, best effort.
+pub fn rm_rf(path: &str) {
+    match ops::lstat(path) {
+        Ok(st) if st.kind == InodeType::Dir => {
+            for e in ops::readdir(path).unwrap_or_default() {
+                rm_rf(&alloc::format!("{path}/{}", e.name));
+            }
+            let _ = ops::rmdir(path);
+        }
+        Ok(_) => {
+            let _ = ops::unlink(path);
+        }
+        Err(_) => {}
+    }
+}
+
 /// Space accounting on the mounted milkfs must be exact after every phase.
 fn milk_space(t: &mut T, what: &str) {
     let Some(v) = super::milkfs::volume() else {
@@ -847,7 +863,13 @@ fn milkfs(t: &mut T) {
         return;
     }
     const D: &str = "/Volumes/Milk/.selftest";
-    let _ = super::ops::rmdir(D); // leftovers from an interrupted boot are not our problem
+    // Leftovers from a boot that died mid-test (crash tests do that on purpose).
+    rm_rf(D);
+    for s in super::milkfs::snapshots().unwrap_or_default() {
+        if s.name.starts_with("selftest-") {
+            let _ = super::milkfs::delete_snapshot(&s.name);
+        }
+    }
     milk_space(t, "milkfs space exact at start");
     t.ok(
         ops::stat("/Volumes/Milk").map(|s| s.kind).ok() == Some(InodeType::Dir),
@@ -1190,6 +1212,10 @@ fn show(path: &str) {
 }
 
 pub fn run() {
+    // Crash-test boots (scripts/crashtest.sh) do only that.
+    if super::milkfs::crashtest::run() {
+        return;
+    }
     let mut t = T {
         checks: 0,
         failed: 0,

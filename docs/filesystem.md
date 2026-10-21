@@ -1,7 +1,8 @@
 # File systems
 
-Files: `kernel/src/fs/`, `kernel/src/virtio/blk.rs`, `kernel/build.rs` (initramfs packer),
-`rootfs/`, `initramfs.list`, `scripts/disk.sh`.
+Files: `kernel/src/fs/` (milkfs in `fs/milkfs/`), `kernel/src/virtio/blk.rs`,
+`kernel/build.rs` (initramfs packer), `rootfs/`, `initramfs.list`, `scripts/disk.sh`,
+`scripts/mkmilkfs.py`, `scripts/crashtest.sh`, `user/snap`.
 One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interrupts`.
 
 | module | what |
@@ -18,12 +19,15 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `initramfs.rs` | cpio newc reader, unpacks the built-in archive into `/` |
 | `blockdev.rs` | `BlockDevice` trait, disk registry, `/dev/vdX` byte-offset inode |
 | `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
+| `bcache.rs` | block cache: fixed-size LRU of 4 KiB buffers, write-back, `flush` = durable |
+| `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
-| `selftest.rs` | boot self-test (169 checks with a disk attached), then prints `/proc/*` and `cat /etc/motd` |
+| `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
 
 Boot: `kmain` calls `fs::init()` after `memtest::run()`, then `fs::selftest::run()`.
 `fs::init` mounts tmpfs on `/`, creates the skeleton, unpacks the initramfs, mounts devfs,
-procfs and sysfs.
+procfs and sysfs, then mounts the first disk that holds milkfs at `/Volumes/<label>`
+(never formats anything).
 
 ## The tree
 
@@ -36,13 +40,13 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | tmpfs | the user's home (`$HOME`) |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
-| `/Volumes` | tmpfs | where disks will mount (milkfs volumes, below) |
+| `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots |
 | `/bin` | tmpfs | user programs from the initramfs |
 | `/etc` | tmpfs | `motd`, `hostname` (= `milk`) |
 | `/tmp` | tmpfs | mode `1777` |
 | `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) |
 | `/proc` | proc | `meminfo uptime version interrupts mounts` |
-| `/sys` | sysfs | `devices/platform/*`, `kernel/version` |
+| `/sys` | sysfs | `devices/platform/*`, `kernel/version`, `fs/milkfs/*` (snapshot control) |
 
 ## Kernel API (for the syscall layer)
 
@@ -205,9 +209,10 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   cryptographic.** Writes stir the state.
 - Timestamps: Unix time from the PL031 RTC read once at `fs::init`, plus uptime. No atime
   updates.
-- Locking: every inode has its own `SpinLock`; tmpfs namespace changes also take a per-fs
-  `ns` lock. File data is copied with IRQs masked (that's what `SpinLock` does). Nothing
-  blocks. Don't call into the VFS from IRQ context (it allocates).
+- Locking: tmpfs, devfs, procfs and sysfs use `SpinLock`s and never block (tmpfs copies
+  file data with IRQs masked). milkfs, the bcache and virtio-blk **sleep** (`sched::Mutex`,
+  wait queues): so VFS calls are thread context only, never from IRQ context and never
+  while holding a `SpinLock` (that's also true because the VFS allocates).
 
 ## Writing a file system
 
@@ -268,27 +273,191 @@ writable at any byte offset (read-modify-write at unaligned edges, 64 KiB per ca
 virtio-blk (`kernel/src/virtio/blk.rs`, probed by `virtio::init`): one queue, one request
 in flight, header/status page + 64 KiB bounce buffer from `pmm::alloc_contiguous_zeroed`
 (so callers pass any kernel buffer; bigger transfers are split). Negotiates `RO` and
-`FLUSH`. Completion is **polled** under the device lock with a 5 s timeout, because there
-are no wait queues yet; the IRQ is registered only to acknowledge (it reads 0 in
-`/proc/interrupts` because polling acks before it is ever taken).
+`FLUSH`. The device lock is a `sched::Mutex`; a request sleeps on a `WaitQueue` until its
+used-ring entry appears (5 s timeout) and the IRQ handler acks and wakes it. Before
+`sched::init` that wait is a `wfi` loop, so the boot self-test uses the same path.
 
-Scripts: `scripts/disk.sh` creates `/tmp/milk-disk.img` (64 MiB, sparse, a text label in
-sector 0) on first use. `run.sh` attaches it writable (persistent; qemu takes a write lock,
-so one `run.sh` at a time). `screenshot.sh` attaches it with `snapshot=on,file.locking=off`:
-writes are discarded and any number of qemus can share it. The fs self-test reads sector 0,
-then writes/reads/flushes the last 80 KiB directly and through `/dev/vda` and restores what
-was there.
+Block cache (`fs/bcache.rs`): `BCache::new(dev, nbufs)` over 4 KiB blocks, `read`, `write`
+(write-back), `write_through`, `flush` (all dirty buffers in block order, then the device
+flush: after it returns, everything written before is durable), `stats`. LRU eviction
+writes dirty buffers back early. Lock: `sched::Mutex` (held across I/O).
+
+Scripts: `scripts/disk.sh` attaches two disks: `/tmp/milk-disk.img` (scratch: 64 MiB,
+sparse, a text label in sector 0) and `/tmp/milk-fs.img` (milkfs, made once with
+`mkmilkfs.py`). Which one becomes `vda` depends on qemu's slot order, so the kernel goes by
+content: milkfs mounts whichever disk has a milkfs superblock, the scratch test uses the
+first that doesn't. `run.sh` attaches them writable (persistent; qemu takes a write lock,
+so one `run.sh` at a time). `screenshot.sh` attaches them with
+`snapshot=on,file.locking=off`: writes are discarded and any number of qemus can share them.
+The scratch test reads sector 0, then writes/reads/flushes the last 80 KiB directly, through
+`/dev/vdX` and through a 4-buffer bcache, and restores what was there.
 
 ## Next steps
 
-- Wait queues from `proc` → blocking `/dev/console` reads, pipes (`InodeType::Fifo`),
-  `poll`. `OpenFile` reads will then need `O_NONBLOCK` honoured.
+- Pipes (`InodeType::Fifo`) and `poll` on the wait queues; `O_NONBLOCK`.
 - Permission checks once processes have credentials (`Inode::stat` already has
   uid/gid/perm), `umask` in the syscall layer.
 - `mmap` of tmpfs files (expose the frame for a page index), `statfs`, `sync`.
-- A page cache for disk file systems, then milkfs (below).
+- A page cache for milkfs file data (today every read goes through the bcache and the tree).
 
-## milkfs: design sketch (not implemented)
+## milkfs v0 (implemented)
+
+`kernel/src/fs/milkfs/`, host tool `scripts/mkmilkfs.py`, crash test `scripts/crashtest.sh`.
+Mounted at `/Volumes/<label>` (`/Volumes/Milk`). The design it follows is the sketch below;
+the differences are listed at the end of this section.
+
+| file | what |
+|---|---|
+| `format.rs` | on-disk structures, xxh64, FNV-1a name hash (mirrored in `mkmilkfs.py`) |
+| `store.rs` | allocator (free map rebuilt at mount), birth-time release rules, checksummed block I/O, dead-list chains |
+| `btree.rs` | copy-on-write B+tree: dirty nodes in memory, written bottom-up at commit |
+| `volume.rs` | `State`, commit, mount (mark + namespace check + orphan reclaim), mkfs, space check |
+| `items.rs` | inodes, directory entries, extents, symlinks, file data |
+| `snap.rs` | snapshot create / delete / rollback |
+| `inode.rs` | VFS objects: `Volume` (the `FileSystem`), `MilkInode`, `.snapshots` |
+| `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
+| `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
+
+### On-disk format v0
+
+All integers little endian, 4 KiB blocks.
+
+```text
+block 0, 1   superblock slots: generation g is written to slot g % 2; mount takes the valid
+             (magic + checksum + version) slot with the higher generation
+block 2..    tree nodes, data blocks, dead-list blocks, anywhere; never overwritten while the
+             last committed superblock can reach them
+```
+
+**Block pointer** (24 B): `block u64 | birth u64 (generation it was written in) | xxh64 u64`
+of the 4 KiB block. `block == 0` = none. Checksums live in pointers (Merkle style), so every
+tree node, data block and dead-list block is verified when read; the superblock checksums
+itself.
+
+**Superblock** (one block):
+
+| off | field |
+|---|---|
+| 0 | magic `MILKFS01` |
+| 8 | version u32 = 0, 12: block size u32 = 4096 |
+| 16 | total blocks u64, 24: generation u64 |
+| 32 | live tree root: block pointer |
+| 56 | live dead list head: block pointer |
+| 80 | next inode number u64, 88: created (unix s) u64 |
+| 96 | uuid [16], 112: label [32] (NUL padded) |
+| 144 | snapshot count u32 (max 30) |
+| 152 | 30 snapshot records x 128 B: name [48], generation u64, created u64, root pointer, dead list pointer, next_ino u64, 8 reserved |
+| 4088 | xxh64 of bytes 0..4088 |
+
+**Tree node**: header `"MKND" | level u8 (0 = leaf) | pad u8 | count u16 | birth u64`, then
+leaf items `key (17 B) | value length u16 | value` or internal entries
+`key (17 B) | child pointer (24 B)` (up to 99 per node). A key is
+`(object id u64, kind u8, offset u64)`, sorted in that order; child `i` of an internal node
+covers keys from its separator to the next one. Values are at most 1500 bytes.
+
+| kind | key | value |
+|---|---|---|
+| 1 inode | `(ino, 1, 0)` | 68 B: mode u32 (`S_IF*` + perm), nlink u32, uid u32, gid u32, size u64, parent u64 (directories), atime/mtime/ctime as (i64 s, u32 ns) |
+| 2 dirent | `(dir ino, 2, fnv1a64(name))` | every name in that dir with that hash: `ino u64 | d_type u8 | len u8 | name` repeated |
+| 3 extent | `(ino, 3, block index)` | block pointer of that 4 KiB of the file (absent = hole) |
+| 4 symlink | `(ino, 4, 0)` | target bytes (max 1024) |
+
+The root directory is inode 1 (its parent is itself). Inode numbers only grow.
+
+**Dead-list block**: `"MKDL" | count u32 | next pointer (24 B) | count x (block u64, birth u64)`
+(254 per block). A chain is only ever prepended to or rewritten whole.
+
+### Transactions and crash consistency
+
+Every mutating VFS call (write, create, mkdir, unlink, rmdir, rename, link, truncate,
+setattr) is one transaction, committed before the call returns (v0 is synchronous):
+
+1. The B+tree path to every changed item was copied into memory (old blocks released by the
+   rules below); new data blocks went to freshly allocated blocks through the bcache.
+2. Commit writes the dirty nodes bottom-up into new blocks, prepends this transaction's
+   dead-list entries as a new chain block, `bcache.flush()` (everything durable),
+3. writes the new superblock to slot `generation % 2` (**the commit point**), flushes again.
+
+A crash at any moment leaves the previous superblock valid and everything it references
+untouched; a torn superblock fails its checksum and the other slot wins. Blocks the commit
+freed only become reusable after it is durable.
+
+**Free space is not stored.** Mount marks every block reachable from the chosen superblock
+(live tree, every snapshot tree, shared subtrees once, extents, dead-list chains); the rest is
+free. So the allocator can't be wrong after a crash. While a transaction is open a dropped
+block is: born in this transaction → reused at once; born after the newest snapshot → freed
+when the commit is durable; otherwise a snapshot still has it → live dead list.
+
+Mount also checks the live namespace (every entry points at an inode, directory parents
+and link counts match) and reclaims orphans (inodes with no entry: unlinked while open
+before a crash). It prints e.g. `milkfs: vda mounted at /Volumes/Milk: generation 1430,
+2 inodes, 4/16384 blocks used, 0 snapshot(s), check clean`.
+
+### Snapshots
+
+- **Create** (`fs::milkfs::snapshot(name)`): commit, then record `{name, generation, root,
+  dead list}` in the superblock and start the live head with an empty dead list; one more
+  commit. O(1), no data copied. Names: `[A-Za-z0-9._:-]`, max 47, max 30 snapshots.
+- **Browse**: `/Volumes/Milk/.snapshots/<name>/` is the snapshot's tree, read-only (EROFS),
+  with its own device number. `.snapshots` is a virtual directory in the volume root.
+- **Delete**: the dead-list algorithm (ZFS): entries of the next dead list (next snapshot's,
+  or the head's) born after the previous snapshot were only visible to the deleted one and
+  are freed; the rest, plus the deleted snapshot's own list, become the next one's list.
+- **Rollback** (`rollback(name)`): deletes newer snapshots (like `zfs rollback -r`), frees
+  every live block born after the snapshot (subtrees born before it are skipped, CoW makes
+  them entirely old), drops the head's dead list (those blocks are live again), sets the
+  live root to the snapshot's. The snapshot is kept. Inode objects hold only `(view, ino)`
+  and inode numbers are never reused, so open files see ENOENT instead of stale data.
+
+Kernel API (`crate::fs::milkfs`): `probe(dev)`, `mkfs(dev, label, force)`, `mount(dev,
+path)`, `automount()`, `snapshot(name) -> SnapInfo`, `snapshots()`, `delete_snapshot(name)`,
+`rollback(name)`, `sync()`, `info()`, `volume()`.
+
+Shell: `/sys/fs/milkfs/info` and `snapshots` (read); write a name to `snapshot`, `delete`,
+`rollback`; anything to `sync`; `vdX [label] [force]` to `mkfs`. msh has no redirection yet,
+so `user/snap` wraps them: `snap`, `snap info`, `snap create NAME`, `snap delete NAME`,
+`snap rollback NAME`.
+
+**mkfs** never runs on its own. In the kernel it is the explicit `mkfs()` call (or the
+`/sys/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless
+`force`, and always refuses the mounted volume (EBUSY). On the Mac:
+`scripts/mkmilkfs.py mkfs IMAGE [--size 64M] [--label Milk] [--force]`, same refusal.
+`mkmilkfs.py check IMAGE` is a host fsck (every checksum, key order, namespace),
+`ls IMAGE [PATH] [--snapshot NAME]` and `cat IMAGE PATH [--snapshot NAME]` read images.
+
+### Tests
+
+- Boot self-test (milkfs part, on `/Volumes/Milk/.selftest`, cleaned up afterwards): file
+  I/O, 300 KiB file, truncate, sparse, 60 files, rename/link/symlink/unlink-while-open,
+  getdents64, snapshots via the API and `/sys`, browsing, EROFS, rollback, delete, and
+  **exact space accounting** (allocated blocks == reachable blocks, no leak, nothing live
+  marked free) after every phase. xxh64 is checked against the reference vectors.
+- Persistence: every boot appends to `/Volumes/Milk/boot.log` and prints it.
+- `scripts/crashtest.sh [kills] [powercuts] [superblock-cuts]` (default 4 4 4) on a fresh
+  `/tmp/milk-crash.img`. A writer workload (self-describing files via tmp + rename,
+  snapshots taken, deleted and rolled back) is interrupted by SIGKILL of qemu at a random
+  time, by an in-kernel power cut after N random sectors (the request in flight is torn,
+  the machine halts), or by a cut during the K-th superblock write after T of its 8
+  sectors. After each: host `mkmilkfs.py check`, then a check boot that mounts, verifies
+  every file in the live tree and all snapshots against its own header, checks the mounted
+  generation is the last committed one (or exactly the in-flight one when its superblock
+  fully landed), deletes the snapshots and checks space accounting is exact.
+
+### Not in v0 (vs the design below)
+
+- Snapshot records live in the superblock (max 30) instead of a volume tree; one volume per
+  disk, no per-app volumes or clones yet (so no try-before-install yet).
+- No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
+- One extent per 4 KiB block (no multi-block extents, no inline data, no reflink copies).
+- B+tree deletion doesn't merge underfull nodes.
+- Synchronous: one commit per operation (two device flushes each). No batching, no
+  background flusher thread, no page cache.
+- One global lock per volume (`sched::Mutex<State>`), so operations on a volume serialise.
+- No permission checks (like the rest of the VFS), no xattrs, no fsck repair (check only).
+- Rollback brings back files that were unlinked-but-open when the snapshot was taken; they
+  are reclaimed right after.
+
+## milkfs: design sketch (the plan v0 follows)
 
 Goal: a disk file system where snapshots are free, so the OS can offer per-app undo and
 try-before-install as ordinary features. Copy-on-write everywhere, like ZFS/btrfs/APFS, but

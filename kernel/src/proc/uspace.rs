@@ -63,19 +63,23 @@ impl Perm {
         exec: true,
     };
 
+    /// W^X: a writable page is never executable (SCTLR.WXN enforces it in hardware too).
     fn attrs(self) -> MapAttrs {
         MapAttrs {
             mem: MemType::Normal,
             write: self.write,
-            exec: self.exec,
+            exec: self.exec && !self.write,
             user: true,
         }
     }
 
+    /// Two segments sharing a page: writable wins over executable (W^X), like Linux,
+    /// where the later (data) mapping replaces the text one for that page.
     fn union(self, o: Perm) -> Perm {
+        let write = self.write || o.write;
         Perm {
-            write: self.write || o.write,
-            exec: self.exec || o.exec,
+            write,
+            exec: (self.exec || o.exec) && !write,
         }
     }
 }

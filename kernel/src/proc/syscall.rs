@@ -33,6 +33,10 @@ pub mod nr {
     pub const LINKAT: u64 = 37;
     pub const FTRUNCATE: u64 = 46;
     pub const FCHMODAT: u64 = 53;
+    pub const FACCESSAT: u64 = 48;
+    pub const FCHMOD: u64 = 52;
+    pub const FCHOWNAT: u64 = 54;
+    pub const FCHOWN: u64 = 55;
     pub const FCHDIR: u64 = 50;
     pub const UTIMENSAT: u64 = 88;
     pub const RENAMEAT2: u64 = 276;
@@ -85,6 +89,16 @@ pub mod nr {
     pub const GETTIMEOFDAY: u64 = 169;
     pub const GETPID: u64 = 172;
     pub const GETPPID: u64 = 173;
+    pub const SETREGID: u64 = 143;
+    pub const SETGID: u64 = 144;
+    pub const SETREUID: u64 = 145;
+    pub const SETUID: u64 = 146;
+    pub const SETRESUID: u64 = 147;
+    pub const GETRESUID: u64 = 148;
+    pub const SETRESGID: u64 = 149;
+    pub const GETRESGID: u64 = 150;
+    pub const GETGROUPS: u64 = 158;
+    pub const SETGROUPS: u64 = 159;
     pub const GETUID: u64 = 174;
     pub const GETEUID: u64 = 175;
     pub const GETGID: u64 = 176;
@@ -109,6 +123,49 @@ pub mod nr {
 
 pub fn init() {
     exceptions::set_syscall_handler(handle);
+}
+
+/// chown's (uid, gid) with -1 meaning "leave alone".
+fn chown_attr(uid: u32, gid: u32) -> fs::SetAttr {
+    fs::SetAttr {
+        uid: (uid != u32::MAX).then_some(uid),
+        gid: (gid != u32::MAX).then_some(gid),
+        ..Default::default()
+    }
+}
+
+fn cred() -> super::cred::Cred {
+    *current().cred.lock()
+}
+
+/// Apply an id change to the calling process (all its threads); audited when it changes.
+fn set_cred(what: &str, f: impl FnOnce(&mut super::cred::Cred) -> KResult<()>) -> KResult<usize> {
+    let p = current();
+    let (before, after) = {
+        let mut c = p.cred.lock();
+        let before = *c;
+        f(&mut c)?;
+        (before, *c)
+    };
+    if before != after {
+        crate::audit!(
+            "cred",
+            "{what} uid {}/{}/{} -> {}/{}/{} gid {}/{}/{} -> {}/{}/{}",
+            before.ruid,
+            before.euid,
+            before.suid,
+            after.ruid,
+            after.euid,
+            after.suid,
+            before.rgid,
+            before.egid,
+            before.sgid,
+            after.rgid,
+            after.egid,
+            after.sgid
+        );
+    }
+    Ok(0)
 }
 
 /// Bitmap of syscall numbers already reported as unimplemented (0..512).
@@ -176,7 +233,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         }
         nr::PIPE2 => sys_pipe2(a0, a[1] as u32),
         nr::FSTAT => {
-            let st = file(a[0] as i64)?.stat().to_linux();
+            let st = fs::perm::view(file(a[0] as i64)?.inode()).to_linux();
             copy_out(a1, st.as_bytes())?;
             Ok(0)
         }
@@ -212,7 +269,42 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             if ino.kind() != InodeType::Dir {
                 return Err(ENOTDIR);
             }
+            fs::perm::may(&ino, fs::perm::X)?;
             current().inner.lock().cwd = ino;
+            Ok(0)
+        }
+        nr::FACCESSAT => {
+            // mode: F_OK 0, X_OK 1, W_OK 2, R_OK 4. Checked against the effective ids.
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let n = fs::lookup_at(base.as_ref(), &path, true)?;
+            fs::perm::may(&n, a[2] as u32 & 7)?;
+            Ok(0)
+        }
+        nr::FCHMOD | nr::FCHOWN => {
+            let f = file(a[0] as i64)?;
+            let attr = if nr == nr::FCHMOD {
+                fs::SetAttr {
+                    perm: Some(a[1] as u32 & 0o7777),
+                    ..Default::default()
+                }
+            } else {
+                chown_attr(a[1] as u32, a[2] as u32)
+            };
+            let attr = fs::perm::check_setattr(f.inode(), &attr)?;
+            f.inode().setattr(&attr)?;
+            Ok(0)
+        }
+        nr::FCHOWNAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let follow = a[4] as u32 & abi::AT_SYMLINK_NOFOLLOW == 0;
+            fs::setattr_at(
+                base.as_ref(),
+                &path,
+                follow,
+                &chown_attr(a[2] as u32, a[3] as u32),
+            )?;
             Ok(0)
         }
         nr::CHROOT => {
@@ -434,13 +526,66 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         nr::UNAME => sys_uname(a0),
         nr::GETPID => Ok(sched::current_pid() as usize),
         nr::GETPPID => Ok(current().inner.lock().ppid as usize),
-        nr::GETUID | nr::GETEUID | nr::GETGID | nr::GETEGID => Ok(0),
+        nr::GETUID => Ok(cred().ruid as usize),
+        nr::GETEUID => Ok(cred().euid as usize),
+        nr::GETGID => Ok(cred().rgid as usize),
+        nr::GETEGID => Ok(cred().egid as usize),
+        nr::SETUID => set_cred("setuid", |c| c.setuid(a[0] as u32)),
+        nr::SETGID => set_cred("setgid", |c| c.setgid(a[0] as u32)),
+        nr::SETREUID => set_cred("setreuid", |c| c.setreuid(a[0] as u32, a[1] as u32)),
+        nr::SETREGID => set_cred("setregid", |c| c.setregid(a[0] as u32, a[1] as u32)),
+        nr::SETRESUID => set_cred("setresuid", |c| {
+            c.setresuid(a[0] as u32, a[1] as u32, a[2] as u32)
+        }),
+        nr::SETRESGID => set_cred("setresgid", |c| {
+            c.setresgid(a[0] as u32, a[1] as u32, a[2] as u32)
+        }),
+        nr::GETRESUID | nr::GETRESGID => {
+            let c = cred();
+            let v = if nr == nr::GETRESUID {
+                [c.ruid, c.euid, c.suid]
+            } else {
+                [c.rgid, c.egid, c.sgid]
+            };
+            for (i, addr) in [a0, a1, a2].into_iter().enumerate() {
+                with_space(|s| s.copy_out(addr, &v[i].to_le_bytes()))?;
+            }
+            Ok(0)
+        }
+        nr::GETGROUPS => {
+            let c = cred();
+            let g = c.groups();
+            if a0 == 0 {
+                return Ok(g.len());
+            }
+            if a0 < g.len() {
+                return Err(EINVAL);
+            }
+            let bytes: Vec<u8> = g.iter().flat_map(|x| x.to_le_bytes()).collect();
+            with_space(|s| s.copy_out(a1, &bytes))?;
+            Ok(g.len())
+        }
+        nr::SETGROUPS => {
+            if a0 > super::cred::NGROUPS_MAX {
+                return Err(EINVAL);
+            }
+            let mut raw = alloc::vec![0u8; a0 * 4];
+            with_space(|s| s.copy_in(a1, &mut raw))?;
+            let g: Vec<u32> = raw
+                .chunks(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            set_cred("setgroups", |c| c.setgroups(&g))
+        }
         nr::GETTID => Ok(sched::current_tid() as usize),
 
         nr::BRK => with_space(|s| Ok(s.set_brk(a0))),
         nr::MMAP => sys_mmap(a0, a1, a[2] as u32, a[3] as u32, a[4] as i64),
         nr::MUNMAP => with_space(|s| s.munmap(a0, a1).map(|_| 0)),
         nr::MPROTECT => {
+            if wx(a[2] as u32) {
+                return Err(EACCES);
+            }
             let perm = prot_to_perm(a[2] as u32);
             with_space(|s| s.protect(a0, a1, perm).map(|_| 0))
         }
@@ -735,6 +880,11 @@ fn sys_setpgid(pid: u32, pgid: u32) -> KResult<usize> {
     Ok(0)
 }
 
+/// PROT_WRITE | PROT_EXEC together: refused (W^X; nothing on milkOS JITs).
+fn wx(prot: u32) -> bool {
+    prot & 6 == 6
+}
+
 fn prot_to_perm(prot: u32) -> Option<Perm> {
     const PROT_WRITE: u32 = 2;
     const PROT_EXEC: u32 = 4;
@@ -921,10 +1071,11 @@ fn sys_pipe2(fds: usize, flags: u32) -> KResult<usize> {
 fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResult<usize> {
     let path = user_path(path)?;
     let st = if path.is_empty() && flags & abi::AT_EMPTY_PATH != 0 {
-        file(dirfd)?.stat()
+        fs::perm::view(file(dirfd)?.inode())
     } else {
         let base = base(dirfd)?;
-        fs::stat_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?
+        let n = fs::lookup_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?;
+        fs::perm::view(&n)
     };
     copy_out(statbuf, st.to_linux().as_bytes())?;
     Ok(0)
@@ -1026,6 +1177,9 @@ fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
 // ---- memory ---------------------------------------------------------------------------
 
 fn sys_mmap(addr: usize, len: usize, prot: u32, flags: u32, fd: i64) -> KResult<usize> {
+    if wx(prot) {
+        return Err(EACCES);
+    }
     const MAP_PRIVATE: u32 = 0x02;
     const MAP_FIXED: u32 = 0x10;
     const MAP_ANONYMOUS: u32 = 0x20;

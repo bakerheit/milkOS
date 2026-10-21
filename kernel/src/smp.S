@@ -39,6 +39,13 @@ secondary_entry:
     tlbi    vmalle1
     dsb     nsh
     isb
+    mrs     x2, sctlr_el1          // W^X in hardware (SCTLR.WXN), now that we are off the
+    orr     x2, x2, #(1 << 19)     // writable+executable boot block
+    msr     sctlr_el1, x2
+    isb
+    tlbi    vmalle1
+    dsb     nsh
+    isb
     mov     x0, x20
     msr     tpidr_el1, x0          // per-CPU index (percpu.rs)
     mov     x29, xzr

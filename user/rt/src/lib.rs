@@ -19,6 +19,7 @@ pub mod net;
 pub mod sys;
 pub mod table;
 pub mod thread;
+pub mod users;
 pub mod version;
 
 /// The shared crypto primitives (<repo>/crypto: ChaCha20, SHA-256/512, Ed25519, ...).

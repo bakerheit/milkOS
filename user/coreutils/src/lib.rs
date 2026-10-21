@@ -33,13 +33,20 @@ pub fn fmt_time(t: i64) -> String {
 }
 
 /// "rwxr-xr-x" from permission bits.
+/// `rwxr-xr-x`, with set-user-ID / set-group-ID shown as `s` (`S` without x) in the
+/// owner / group execute column and the sticky bit as `t` (`T`) in the other one.
 pub fn fmt_perm(mode: u32) -> String {
     let mut s = String::new();
-    for shift in [6, 3, 0] {
+    for (shift, special, ch) in [(6, 0o4000, 's'), (3, 0o2000, 's'), (0, 0o1000, 't')] {
         let b = (mode >> shift) & 7;
         s.push(if b & 4 != 0 { 'r' } else { '-' });
         s.push(if b & 2 != 0 { 'w' } else { '-' });
-        s.push(if b & 1 != 0 { 'x' } else { '-' });
+        s.push(match (b & 1 != 0, mode & special != 0) {
+            (true, true) => ch,
+            (false, true) => ch.to_ascii_uppercase(),
+            (true, false) => 'x',
+            (false, false) => '-',
+        });
     }
     s
 }

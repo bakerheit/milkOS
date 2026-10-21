@@ -8,7 +8,7 @@ use rt::{println, sys};
 
 rt::main!(main);
 
-const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
+const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "USER=root", "TERM=dumb"];
 
 fn main(_args: &rt::Args) -> i32 {
     let u = sys::uname().unwrap_or_default();
@@ -59,6 +59,8 @@ fn main(_args: &rt::Args) -> i32 {
         wait_for(pid);
     }
     loop {
+        // The serial console is the maintenance console: a root shell (the desktop
+        // session runs as milk; see docs/security.md). HOME stays /home/milk.
         let sh = match sys::spawn("/bin/msh", &["msh"], ENV) {
             Ok(p) => p,
             Err(e) => {

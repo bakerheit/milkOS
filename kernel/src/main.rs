@@ -7,14 +7,20 @@ use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
 mod display;
+mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
 mod fwcfg;
 mod gfx;
+mod gic;
 mod ramfb;
+mod selftest;
 mod sink;
 mod splash;
+mod sync;
+mod timer;
+mod uart;
 
 global_asm!(include_str!("boot.S"));
 
@@ -50,11 +56,21 @@ pub fn console_writer() -> impl Write {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
+    // Vectors first, so a fault anywhere after this gets a crash dump.
+    exceptions::init();
     display::init();
     kprintln!("milkOS 0.0.1 booting...");
     kprintln!("hello from the kernel");
+
+    gic::init();
+    timer::init();
+    uart::init();
+    sync::irq_enable();
+    selftest::run();
+
     loop {
-        unsafe { core::arch::asm!("wfe") };
+        uart::echo_pending();
+        unsafe { core::arch::asm!("wfi") };
     }
 }
 

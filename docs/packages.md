@@ -221,10 +221,12 @@ helper does the `chdir("/")`.
 2. Writes `user.pkg.run_try name= version= clone= root= exec= sandbox=` to the audit log.
 3. `chroot(<clone>)`, `chdir("/")`: `/Applications` is now the clone's, nothing else
    resolves.
-4. Unless `--no-sandbox`, `sandbox("fs=/:r fs=/tmp/run-NAME:rw fs=<clone>/tmp/run-NAME:rw
-   net=local clipboard=0")` (the kernel logs `sandbox.enter`): the clone read-only, the
-   scratch dir writable (named both ways, because grants match the jailed absolute path or
-   the real path for a cwd-relative one), loopback/link-local network only, no clipboard;
+4. Unless `--no-sandbox`, `sandbox("fs=/Applications:r fs=<clone>/Applications:r
+   fs=/tmp/run-NAME:rw fs=<clone>/tmp/run-NAME:rw net=local clipboard=0")` (the kernel logs
+   `sandbox.enter`): the clone's `/Applications` read-only and nothing else of it (its
+   `/home/milk` and `/etc`, including the copy of `/etc/milk/drop`'s secret key, stay
+   unreadable), the scratch dir writable (each named both ways, because grants match the
+   jailed absolute path or the real path for a cwd-relative one), loopback/link-local network only, no clipboard;
    audio, windows and spawn stay on, so window apps and sounds work.
 5. execve `/Applications/NAME/<exec>` with `PATH=/Applications/NAME/bin`,
    `HOME=TMPDIR=/tmp/run-NAME`, and TERM / MILK_* passed through. milk *becomes* the app:

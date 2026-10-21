@@ -78,7 +78,14 @@ fn paint(buf: &mut Buffer, glass: &Buffer) {
     p.ring(cx - 36, ay, 72, 2, SAND, 255);
     icons::drop_shape(&mut p, cx, ay + 42, 17, 37, BLUE);
     icons::drop_shape(&mut p, cx, ay + 42, 13, 30, MILK);
-    p.text_p_center(0, screen_w(), ay + 84, "andrew", ESPRESSO, true);
+    p.text_p_center(
+        0,
+        screen_w(),
+        ay + 84,
+        super::session::user_name(),
+        ESPRESSO,
+        true,
+    );
     p.text_p_center(
         0,
         screen_w(),

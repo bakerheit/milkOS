@@ -48,9 +48,12 @@
   `kprintln!` goes to UART + the screen console.
 
 ## UI
-- Spec: `docs/ui-concepts/SPEC.md`, mockup `docs/ui-concepts/milkos-1.0.html` (by Mary, UI lead). Andrew picked
+- Spec: `docs/ui-concepts/SPEC.md`, mockup `docs/ui-concepts/milkos-1.0.html` (the UI design). The project owner picked
   01 Whole Milk, 03 Skim, 06 Today, 07 Spaces, 10 Glass. Follow the spec numbers; ask the lead if one blocks you.
 - Every window has its own offscreen surface. Nothing but the compositor writes to the framebuffer.
 
 ## Verifying
+- `scripts/check-all.sh` runs every test script one after another (private images, time limits, one pass/fail
+  table, non-zero exit on any fail; about 8 minutes). `--full` adds the long soak/crash/stress runs, `--only REGEX`
+  picks some, `--list` shows them. Run it before asking the lead to merge.
 - Prove it in qemu. For UI work, screenshot and actually look at the PNG. Paste boot logs in reports.

@@ -17,6 +17,9 @@
 //!   snap scrub [start|stop|status|rate=MB/s|auto=off|on|7d]
 //!                         verify every block's checksum in the background (no argument:
 //!                         start and wait for it, printing progress)
+//!   snap unlock [DEV]     unlock an encrypted volume (asks for the passphrase, or the
+//!                         recovery key) and mount it
+//!   snap passwd           change the primary volume's passphrase (rewraps the key)
 //!   snap receive [FILE] [--to PATH] [--force]
 //!                         recreate the snapshot in a stream (FILE or stdin) on the milkfs
 //!                         volume PATH is on (default /Volumes/Milk); --force rolls the
@@ -69,6 +72,7 @@ fn why(e: rt::Errno) -> alloc::string::String {
             "no such snapshot or clone (for a receive: the stream's base snapshot isn't on the target)"
         }
         5 => "I/O error or damaged stream",
+        13 => "wrong passphrase or recovery key",
         16 => {
             "busy: a clone is built on that snapshot, a send is reading it, or (receive) the target changed since the base snapshot: --force rolls it back"
         }
@@ -285,8 +289,119 @@ fn scrub_wait() -> i32 {
     1
 }
 
+const TCGETS: usize = 0x5401;
+const TCSETS: usize = 0x5402;
+const ECHO: u32 = 0o10;
+
+fn tty(cmd: usize, t: &mut [u8; 60]) -> bool {
+    // SAFETY: `t` is valid for the 36-byte termios TCGETS/TCSETS read and write.
+    unsafe { sys::syscall(sys::nr::IOCTL, [0, cmd, t.as_mut_ptr() as usize, 0, 0, 0]) >= 0 }
+}
+
+/// Ask for a secret on the terminal without echoing it (or read a line from a pipe).
+fn ask(prompt: &str) -> Option<alloc::string::String> {
+    let mut t = [0u8; 60];
+    let is_tty = tty(TCGETS, &mut t);
+    let saved = t;
+    if is_tty {
+        let l = u32::from_le_bytes(t[12..16].try_into().unwrap()) & !ECHO;
+        t[12..16].copy_from_slice(&l.to_le_bytes());
+        tty(TCSETS, &mut t);
+        let _ = sys::write_all(2, prompt.as_bytes());
+    }
+    let mut line = Vec::new();
+    let mut b = [0u8; 1];
+    while let Ok(1) = sys::read(0, &mut b) {
+        if b[0] == b'\n' || b[0] == b'\r' {
+            break;
+        }
+        line.push(b[0]);
+    }
+    if is_tty {
+        let mut t = saved;
+        tty(TCSETS, &mut t);
+        let _ = sys::write_all(2, b"\n");
+    }
+    let s = alloc::string::String::from_utf8(line).ok()?;
+    (!s.is_empty()).then_some(s)
+}
+
+/// Write a secret to a control file; errors are reported without it.
+fn send_secret(op: &str, text: &str) -> i32 {
+    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let r = sys::open(&path, O_WRONLY).and_then(|fd| {
+        let r = sys::write(fd, text.as_bytes());
+        let _ = sys::close(fd);
+        r
+    });
+    match r {
+        Ok(_) => 0,
+        Err(e) => {
+            eprintln!("snap: {op}: {}", why(e));
+            1
+        }
+    }
+}
+
+fn unlock(dev: Option<&str>) -> i32 {
+    let locked = sys::read_file("/sys/fs/milkfs/unlock").unwrap_or_default();
+    let locked = core::str::from_utf8(&locked).unwrap_or("");
+    let target = locked
+        .lines()
+        .find(|l| dev.is_none_or(|d| l.split(' ').next() == Some(d)));
+    let Some(target) = target else {
+        eprintln!(
+            "snap: nothing to unlock{}",
+            dev.map(|d| alloc::format!(" on {d}")).unwrap_or_default()
+        );
+        return 1;
+    };
+    let mut f = target.split(' ');
+    let (d, label) = (f.next().unwrap_or(""), f.next().unwrap_or(""));
+    for attempt in 0..3 {
+        let Some(secret) = ask(&alloc::format!(
+            "Passphrase (or recovery key) for {label} on {d}: "
+        )) else {
+            return 1;
+        };
+        if send_secret("unlock", &alloc::format!("dev={d} {secret}")) == 0 {
+            println!("snap: {label} unlocked");
+            return 0;
+        }
+        if attempt < 2 {
+            eprintln!("snap: try again");
+        }
+    }
+    1
+}
+
+fn passwd() -> i32 {
+    let Some(old) = ask("Current passphrase (or recovery key): ") else {
+        return 1;
+    };
+    let Some(new) = ask("New passphrase (8 characters or more): ") else {
+        return 1;
+    };
+    let Some(again) = ask("New passphrase again: ") else {
+        return 1;
+    };
+    if new != again {
+        eprintln!("snap: the new passphrases differ");
+        return 1;
+    }
+    match send_secret("passwd", &alloc::format!("{old}\n{new}")) {
+        0 => {
+            println!("snap: passphrase changed (the volume key was rewrapped)");
+            0
+        }
+        e => e,
+    }
+}
+
 fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
+        (Some("unlock"), d) => unlock(d),
+        (Some("passwd"), _) => passwd(),
         (Some("scrub"), None) => scrub_wait(),
         (Some("scrub"), Some("status")) => cat("/sys/fs/milkfs/scrub"),
         (Some("scrub"), Some(_)) => match control_quiet("scrub", &args.argv[2..].join(" ")) {

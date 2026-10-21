@@ -42,6 +42,6 @@ fi
 # `echo "info registers -a" | nc -U /tmp/x.sock`).
 MON_ARGS=()
 [ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
-exec qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
+exec qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio ${MON_ARGS[@]+"${MON_ARGS[@]}"} "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

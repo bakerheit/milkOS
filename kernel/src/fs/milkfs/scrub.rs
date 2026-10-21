@@ -312,6 +312,8 @@ enum Owner {
 
 struct Scan {
     dev: BlockRef,
+    /// Encrypted volume: blocks are opened (decrypted + tag checked) with this.
+    key: Option<Arc<super::crypt::VolumeKey>>,
     per: u64,
     nodes: BTreeSet<u64>,
     data: BTreeSet<u64>,
@@ -341,9 +343,14 @@ impl Scan {
         r
     }
 
-    fn check(&mut self, i: u64, csum: u64) -> bool {
-        let b = &self.buf[(i as usize) * BLOCK..(i as usize + 1) * BLOCK];
-        xxh64(b) == csum
+    /// Is the `i`-th block of the last read (disk block `block`, born `birth`) intact?
+    /// (Encrypted: decrypts it in place, so a node can be decoded afterwards.)
+    fn check(&mut self, i: u64, block: u64, birth: u64, csum: u64) -> bool {
+        let b = &mut self.buf[(i as usize) * BLOCK..(i as usize + 1) * BLOCK];
+        match &self.key {
+            Some(k) => k.open(block, birth, csum, b),
+            None => xxh64(b) == csum,
+        }
     }
 
     fn tree(&mut self, label: &str, view: u64, root: BlockPtr) -> Result<()> {
@@ -353,7 +360,7 @@ impl Scan {
                 continue;
             }
             let ok = match self.read(p.block, 1) {
-                Ok(()) => self.check(0, p.csum),
+                Ok(()) => self.check(0, p.block, p.birth, p.csum),
                 Err(Errno::EINTR) => return Err(Errno::EINTR),
                 Err(_) => false,
             };
@@ -394,7 +401,7 @@ impl Scan {
                 if !self.data.insert(b) {
                     continue;
                 }
-                if read.is_err() || !self.check(j, e.csums[(i + j) as usize]) {
+                if read.is_err() || !self.check(j, b, e.birth, e.csums[(i + j) as usize]) {
                     let off = (e.start + i + j) * BLOCK as u64;
                     self.bad.push((b, Owner::Data(view, ino, off)));
                 }
@@ -409,7 +416,7 @@ impl Scan {
             return Ok(false);
         }
         let ok = match self.read(p.block, 1) {
-            Ok(()) => self.check(0, p.csum),
+            Ok(()) => self.check(0, p.block, p.birth, p.csum),
             Err(Errno::EINTR) => return Err(Errno::EINTR),
             Err(_) => false,
         };
@@ -431,6 +438,7 @@ pub fn scrub_volume(
 ) -> Result<Vec<ScrubError>> {
     let (audit, sleep) = (user, user);
     let t0 = crate::timer::now_ns();
+    let key = v.state.lock().store.crypt.clone();
     let (dev, trees, heads, map, total) = {
         let mut st = v.state.lock();
         st.commit()?;
@@ -472,6 +480,7 @@ pub fn scrub_volume(
     let per = (BLOCK / dev.block_size()) as u64;
     let mut sc = Scan {
         dev,
+        key,
         per,
         nodes: BTreeSet::new(),
         data: BTreeSet::new(),

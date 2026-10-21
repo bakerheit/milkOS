@@ -43,6 +43,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/Applications` | milkfs (bind of `/Volumes/Milk/Applications`), tmpfs without a disk | packages (`milk install`, docs/packages.md), persistent |
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
+| `/etc/milk/drop` | milkfs (bind of `/Volumes/Milk/etc/milk/drop`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
 | `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
 | `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |
@@ -210,8 +211,9 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   U+FFFD. Reads take whatever `uart::read_byte` has, mapping CR to LF, and return `EAGAIN`
   when nothing is waiting (there are no wait queues yet). Note `kmain`'s idle loop
   (`uart::echo_pending`) consumes the same bytes.
-- `/dev/random` and `/dev/urandom`: xorshift64* seeded from the counter. **Not
-  cryptographic.** Writes stir the state.
+- `/dev/random` and `/dev/urandom`: the kernel CSPRNG (ChaCha20 with fast key erasure,
+  seeded from virtio-rng + timer jitter, docs/crypto.md). Reads block only until the boot
+  seed; writes are mixed into its pool.
 - Timestamps: Unix time from the PL031 RTC read once at `fs::init`, plus uptime. No atime
   updates.
 - Locking: tmpfs, devfs, procfs and sysfs use `SpinLock`s and never block (tmpfs copies
@@ -391,6 +393,127 @@ on fresh private milkfs + FAT32 images with Time Machine snapshotting every seco
 snapshotting every second meanwhile: 8 workers x 20 rounds on milkfs and 4 x 8 on FAT32
 per boot, 0 errors, `mkmilkfs.py check` clean, `fsck_msdos` with nothing to fix. The test
 scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4}`.
+
+## Change notifications (`fs::notify`)
+
+`kernel/src/fs/notify.rs`, an inotify-lite for kernel code: every namespace change and
+every close of a written file, in order, to whoever watches.
+
+```rust
+let w: Arc<notify::Watcher> = notify::watch(4096); // queue capacity; unwatch = drop it
+while let Some(ev) = w.next(200_000_000) {          // wait up to 200 ms
+    match ev {
+        Event::Created { dir, name, obj, kind } => {} // name appeared in dir (create,
+                                                      // mkdir, symlink, link)
+        Event::Removed { dir, name, obj } => {}      // unlink, rmdir
+        Event::Renamed { from_dir, from, to_dir, to, obj } => {} // whatever `to` was is gone
+        Event::Modified { obj } => {}                 // last close after a write, truncate,
+                                                      // O_TRUNC, FICLONE into it
+        Event::Attr { obj } => {}                     // chmod, chown, utimensat
+        Event::Rescan { dev } => {}                   // rollback, receive, promote on dev
+        Event::Overflow => {}                         // this watcher fell behind: rescan
+    }
+}
+```
+
+- Objects are `(dev, ino)` ids (`notify::id(&inode)`), not paths: a path costs a walk up
+  `..`, depends on the caller's root (chroot) and has several spellings with bind mounts.
+  A watcher that wants paths maps directory ids to paths itself (the search indexer does;
+  `/home/milk` and `/Volumes/Milk/home/milk` are then the same directory).
+- Emitted by `fs::ops` (`open_at` with O_CREAT/O_TRUNC, `mkdir_at`, `symlink_at`,
+  `link_at`, `unlink_at`, `rmdir_at`, `rename_at`, `truncate`, `setattr_at`, `ficlone`)
+  and by `OpenFile` (`Modified` when the last reference to an open file that was written
+  goes, like inotify's IN_CLOSE_WRITE). So every syscall and every kernel caller of
+  `fs::ops` is covered; a file system that changes contents behind the VFS calls
+  `notify::rescan(dev)` (milkfs: rollback, receive, promote).
+- Cost with no watcher: one atomic load per operation. With watchers: a small allocation
+  and a spinlock per event and watcher. A full queue drops events and the watcher's next
+  `next()` returns `Overflow` (once).
+- Events are reported after the change succeeded; by the time a watcher handles one the
+  tree may have moved on (a file created and renamed): check that the path still names
+  `obj` before trusting it.
+
+## Search (`fs::search`)
+
+`kernel/src/fs/search/` (`mod.rs`: the index and its thread; `query.rs`: queries and
+`/sys/fs/search`). A Spotlight-style index of everything under its roots (default
+`/home/milk` and `/Applications`; `/sys/fs/search/roots`): path, name, kind, size, mtime,
+and the words of text files.
+
+- **Kinds**: the extension for known ones (`md`, `txt`, `rs`, `toml`, `html`, `json`, `py`,
+  `sh`, `csv`, ... are text; `png`, `wav`, `pdf`, `zip`, `img`, ...), otherwise sniffed from
+  the first 512 bytes (`png`, `wav`, `app` (ELF), `pdf`, `stream` (a `snap send` stream),
+  `text`, `data`); `folder`, `link`.
+- **Words**: text files up to 512 KiB are read; words are lowercase alphanumeric runs of
+  2+ characters, at most 4000 distinct per file. Names are split the same way (plus the
+  whole name), single characters included.
+- **Skipped**: anything with a component starting with `.` (so `~/.cache`, where the
+  index lives, never shows up).
+- **Kept up to date** by the `search-index` thread (priority `Low`, content reading
+  limited to 16 MB/s) from `fs::notify` events: a create, rename or delete is in the index
+  within ~0.2 s, a written file once it is closed. If an event can't be applied as is (the
+  tree moved on), the thread re-verifies once the queue is empty.
+- **Stored** at `~/.cache/milk/index` (on milkfs: survives reboots), written 2 s after
+  things go quiet (at most every 30 s while busy), via a temp file + rename. Format:
+  `"MKSX" | version u32 | roots | entries (path, kind, size, mtime, folder, words) | xxh64`.
+  At boot it is loaded and **verified**: the roots are walked comparing size and mtime,
+  and only changed or new files are read again; without a usable file (missing, damaged,
+  other roots or version) the index is built from scratch.
+
+Numbers (`scripts/searchtest.sh`, 5051 entries, `-smp 4`): built from scratch in 170 ms;
+after a reboot loaded in 9 ms and verified in ~590 ms (cold caches: the walk reads every
+tree node once); a query for a unique word 0.3 ms, one with 714 hits 3.2 ms.
+
+### Queries
+
+Words and filters, separated by spaces:
+
+- Every word must match the file's **name** or **content**, as a whole word or the start
+  of one (`proj` finds `Project Plan.md`, `milk` finds "milkshake").
+- `kind:K`: `md`, `txt`, `png`, ... or a group: `text` (any text kind), `image`, `audio`,
+  `folder`. Several `kind:` = any of them.
+- `in:NAME`: under a folder called NAME (any level, case-insensitive); `in:/path`: under
+  that path.
+- `modified:today|yesterday|week|month|Nd|Nh|Nm` (N days, hours, minutes).
+- Filters alone list everything that passes them, newest first.
+
+Ranking, per word: name word 100, name prefix 60, content word 20, content prefix 10
+(name and content add up), +50 if the whole name is the query, + recency (8 if modified
+today, 4 this week, 2 this month); ties newest first, then by path.
+
+### Kernel API (for the wm's Skim)
+
+```rust
+use crate::fs::search;
+let hits: Vec<search::Hit> = search::query("plan kind:md", 20)?;  // limit 0 = 50
+for h in hits {
+    // h.path: "/home/milk/Documents/Project Plan.md"
+    // h.kind: "md" | "txt" | "folder" | "png" | "text" | "data" | ...
+    // h.size (bytes), h.mtime (unix seconds), h.score (higher is better),
+    // h.matched: "name" | "content" | "name+content" | "" (filters only)
+}
+let s: search::Status = search::status(); // s.state: "starting" | "building" |
+                                           // "verifying" | "ready"; files, folders, ...
+```
+
+- Errors: `EAGAIN` while the index isn't built yet (shortly after boot), `EINVAL` for a
+  malformed filter (`modified:soon`).
+- Cheap enough to call per keystroke from a kernel thread: it takes the index lock
+  (a `sched::Mutex`) for the length of the query, no I/O. The results are sorted.
+- `search::parse(q, now)` splits a query without running it (e.g. to show filter chips).
+
+### `/sys/fs/search` and `spot`
+
+- `query`: write `[limit=N] QUERY`, read back `# N result(s) for "QUERY" in T us`, then one
+  line per hit: `score<TAB>kind<TAB>size<TAB>mtime<TAB>matched<TAB>path` (the last query
+  written, whoever wrote it).
+- `status` (read): state, counts, roots, how this boot's index came about, events
+  handled, saves. `roots` (read/write: space-separated paths; writing rebuilds),
+  `rebuild` (write anything).
+- `spot WORDS...` (like macOS `mdfind`): paths, best first; `-l` adds kind, size, date and
+  where it matched; `-n N`; `--status`, `--rebuild`. Under msh structured pipes
+  (`MILK_TABLE=1`) it emits a table (`path name kind size modified score matched`):
+  `spot -n 100 kind:md cow | where size > 1K | sort-by modified -r`.
 
 ## Next steps
 
@@ -768,6 +891,86 @@ that snapshot is deleted (the report says how many were freed now):
 /Volumes/Milk/d: 4 file(s) with data, 1 group(s) of identical files, 2 now share, 1 already shared, 0 same hash but different
 978 block(s) (3912 KiB) shared, 980 block(s) freed now
 ```
+
+### Encryption at rest
+
+A milkfs volume can be encrypted ("FileVault"): every block except the two superblocks
+and the keyring is encrypted and authenticated; without the passphrase (or the recovery
+key) the volume doesn't mount. Crypto: the shared `milkcrypto` crate (`crypto/`: XChaCha20-Poly1305,
+HMAC-SHA256, scrypt; from scratch, published test
+vectors at boot; see docs/crypto.md); milkfs part: `kernel/src/fs/milkfs/crypt.rs`.
+
+**Keys.** A random 256-bit volume key VK (made on the Mac with `os.urandom` at `mkfs
+--encrypt`). Never stored in the clear: the keyring block (plaintext, pointed at by the
+superblock) holds key slots, each VK wrapped with XChaCha20-Poly1305 (random nonce,
+aad = "milkfs slot" | uuid | kind):
+
+- passphrase slots: KEK = scrypt(passphrase, salt, N = 2^16, r = 8, p = 4): 64 MiB, about
+  0.35 s per try here (parameters are per slot, so they can grow later);
+- the recovery slot: KEK = HMAC-SHA256(salt, recovery key); the recovery key is 128 random
+  bits shown once at creation as 8 groups of 4 hex digits.
+
+Changing a passphrase rewraps VK into a new slot (a new keyring block, one commit): no
+data block is rewritten. Salts and nonces made in the kernel come from the CSPRNG
+(`crypto::rng::fill`). VK gives `enc = HMAC(VK, "milkfs v1 enc")` and
+`mac = HMAC(VK, "milkfs v1 mac")`.
+
+**Blocks: XChaCha20 with a synthetic IV, checksums over the plaintext.**
+`tag = HMAC-SHA256(mac, "MKB1" | block | birth | plaintext)[..8]` is stored where the
+checksum always was (in the pointer to the block, or per block in an extent), and the
+block is `plaintext XOR XChaCha20(enc, nonce = tag | block | birth)`. Reading rebuilds
+the nonce from the pointer, decrypts, and checks the tag in constant time. Why this and
+not XChaCha20-Poly1305 per block: a block is exactly 4 KiB and a pointer has 8 spare
+bytes, so there is nowhere to keep a 24-byte nonce and a 16-byte tag; and copy-on-write
+can rewrite the same (block, birth) within one transaction, so a counter or random nonce
+couldn't be reconstructed. With SIV the nonce depends on the content: a repeated nonce
+means the identical plaintext and ciphertext again (it leaks only "this block was
+written twice with the same bytes"), never a reused keystream, under CoW, snapshots and
+clones alike. Block number and birth are inside the tag, so blocks can't be swapped or
+replayed; a forgery succeeds with probability 2^-64 per try. The price: verifying any
+block (check, scrub) needs the key; dedupe and versions hash file contents instead of
+checksums on encrypted volumes (the tags differ for equal data in different places).
+
+**Superblock** (plaintext, readable before unlocking: label, generation, sizes, snapshot
+names and times are visible) carries `SB_ENCRYPTED` (flag 2), the keyring pointer (offset
+4052), and `sb_mac` (offset 4076) = HMAC-SHA256(mac, "MKSB" | bytes 0..4076) over the
+bytes on disk, checked after unlocking: an altered superblock (an old root, a different
+keyring) refuses to mount. Encrypted volumes are format v3: older kernels refuse them.
+
+**Unlocking.** At boot an encrypted volume is found but stays unmounted, "locked":
+
+```text
+milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphrase to /sys/fs/milkfs/unlock)
+```
+
+- `snap unlock [DEV]` asks for the passphrase (or the recovery key) without echoing it,
+  three tries; `snap passwd` changes the passphrase (asks for the current one or the
+  recovery key, then the new one twice).
+- `/sys/fs/milkfs/unlock`: read: the locked volumes (`vda Milk locked`); write
+  `[dev=NAME ]SECRET`. `/sys/fs/milkfs/passwd`: write `OLD\nNEW`. Wrong: EACCES.
+- Kernel: `fs::milkfs::unlock(secret, dev) -> Result<Vec<String>>` (mount paths),
+  `fs::milkfs::change_passphrase(old, new)`, `fs::milkfs::locked()`. If the volume is the
+  primary one (labelled Milk), unlocking it binds `/home/milk` and `/Applications` onto
+  it, mounts its clones and tells the search indexer to rescan, as boot would have; until
+  then home is the RAM copy, and no other disk takes the primary role.
+- For proc's login: after a successful login, `fs::milkfs::unlock(password, None)` opens
+  a volume whose passphrase is the login password (ENODEV if nothing is locked, EACCES if
+  it isn't that password); a password change can call `change_passphrase`.
+- Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
+  can start qemu sees it; for unattended test boots).
+
+**Send/receive**: streams are **plaintext** (`snap send` decrypts; the stream carries
+xxh64 of plaintext blocks), so they can be checked and received anywhere, including on
+the Mac, and an encrypted target re-encrypts under its own key. Keep streams of an
+encrypted volume somewhere encrypted (an encrypted Mac disk, or receive them into another
+encrypted volume).
+
+**Mac**: `mkmilkfs.py mkfs IMAGE --encrypt [--recovery-out FILE]` (asks for a passphrase
+twice, prints the recovery key; or `--passphrase-file`), `mkmilkfs.py change-passphrase
+IMAGE`, and every other command opens an encrypted image with `--passphrase-file FILE`,
+`--recovery KEY`, `$MILKFS_PASSPHRASE` or a prompt. `mkmilkfs.py selftest-crypto` runs
+the published vectors on the tool's own crypto (stdlib only; ChaCha20 and scrypt use the
+`cryptography` package or OpenSSL's scrypt for speed when available).
 
 ### Scrub
 

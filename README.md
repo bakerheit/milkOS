@@ -71,9 +71,13 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - `rootfs/`: files copied into the initramfs (`/etc`, system sounds, the web root).
 - `scripts/`: run and test scripts. The main tests: `net-test.sh`, `pkg-test.sh`, `audio-test.sh`,
   `crashtest.sh`, `fattest.sh`, `wm-demo.sh <demo>`, `input-test.sh`, `screenshot.sh`.
+  `check-all.sh` runs all of them in turn and prints one table (`--full` for the long ones).
 - `docs/`: design notes, one per area: `memory`, `processes`, `smp`, `filesystem`, `networking`, `audio`,
   `packages`, `security`, `shell`, plus `AGENTS.md` (how to work on milkOS) and `ui-concepts/` (the UI spec
   and mockups). Screenshots are in `docs/screenshots/`.
+
+## Licence
+milkOS is MIT licensed, see `LICENSE`. Third-party pieces keep their own licences (below).
 
 ## Credits
 The console font is [GNU Unifont](https://unifoundry.com/unifont/) 13.0.06 (8x16 glyphs, U+0020..U+00FF),

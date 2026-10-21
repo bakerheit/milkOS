@@ -2618,6 +2618,200 @@ fn show(path: &str) {
     kprintln!("{}", read_str(path).trim_end());
 }
 
+/// The crypto this file system uses: the shared crate's vectors for XChaCha20-Poly1305,
+/// HMAC/PBKDF2 and scrypt (also printed by `crypto::init`), and scrypt's RFC 7914 vector
+/// once more through the kernel's page-frame scratch, timed.
+fn crypto(t: &mut T) {
+    for (name, p, n) in milkcrypto::selftest() {
+        if matches!(
+            name,
+            "xchacha20poly1305" | "hmac-sha256+pbkdf2" | "scrypt" | "chacha20" | "poly1305"
+        ) {
+            t.ok(p == n, &alloc::format!("crypto: {name} {p}/{n} vectors"));
+        }
+    }
+    let t0 = crate::timer::now_ns();
+    let mut out = [0u8; 64];
+    let ok = crate::crypto::frames::scrypt(b"password", b"NaCl", 10, 8, 16, &mut out).is_some()
+        && out[..]
+            == milkcrypto::unhex_vec(
+                "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640",
+            )[..];
+    t.ok(
+        ok,
+        &alloc::format!(
+            "crypto: scrypt RFC 7914 vector with the array in page frames ({} ms)",
+            (crate::timer::now_ns() - t0) / 1_000_000
+        ),
+    );
+}
+
+/// fs::notify events, and the search index over a small tmpfs tree (built and updated
+/// synchronously here; the real indexer thread starts later, on /home/milk).
+fn notify_and_search(t: &mut T) {
+    use super::notify::{self, Event};
+    use super::search;
+    const R: &str = "/tmp/st";
+    let p = |n: &str| alloc::format!("{R}/{n}");
+    rm_rf(R);
+    let _ = ops::mkdir(R, 0o755);
+    // Events, in order, for a little sequence of changes.
+    let w = notify::watch(64);
+    let _ = ops::mkdir(&p("d"), 0o755);
+    let _ = ops::write_file(&p("d/a.txt"), b"x");
+    let _ = ops::rename(&p("d/a.txt"), &p("d/b.txt"));
+    let _ = ops::unlink(&p("d/b.txt"));
+    let mut kinds = Vec::new();
+    while let Some(e) = w.next(0) {
+        kinds.push(match e {
+            Event::Created { name, .. } => alloc::format!("+{name}"),
+            Event::Removed { name, .. } => alloc::format!("-{name}"),
+            Event::Renamed { from, to, .. } => alloc::format!("{from}>{to}"),
+            Event::Modified { .. } => String::from("M"),
+            Event::Attr { .. } => String::from("A"),
+            _ => String::from("?"),
+        });
+    }
+    t.ok(
+        kinds == ["+d", "+a.txt", "M", "M", "a.txt>b.txt", "-b.txt"],
+        &alloc::format!("notify: events in order ({kinds:?})"),
+    );
+    let small = notify::watch(16);
+    for i in 0..40 {
+        let _ = ops::write_file(&p(&alloc::format!("d/f{i}")), b"");
+    }
+    t.ok(
+        small.next(0) == Some(Event::Overflow),
+        "notify: a full queue reports Overflow",
+    );
+    drop(small);
+    rm_rf(&p("d"));
+    // A little tree.
+    let _ = ops::mkdir(&p("Documents"), 0o755);
+    let _ = ops::mkdir(&p("code"), 0o755);
+    let _ = ops::mkdir(&p(".hidden"), 0o755);
+    let _ = ops::write_file(
+        &p("Documents/Project Plan.md"),
+        b"# Roadmap\nThe milkshake launch, then pasture time.",
+    );
+    let _ = ops::write_file(&p("Documents/notes.txt"), b"buy oat milk; call the vet");
+    let _ = ops::write_file(
+        &p("code/main.rs"),
+        b"fn main() { println!(\"hello pasture\"); }",
+    );
+    let _ = ops::write_file(&p("code/readme"), b"pasture notes, no extension");
+    let _ = ops::write_file(&p("pic.png"), b"\x89PNG\r\n\x1a\n....");
+    let _ = ops::write_file(&p("blob"), &[0u8, 1, 2, 3, 255, 254]);
+    let _ = ops::write_file(&p(".hidden/secret.txt"), b"pasture");
+    search::build_now(&[R]);
+    let w = notify::watch(256);
+    let q = |s: &str| -> Vec<String> {
+        search::query(s, 0)
+            .map(|h| {
+                h.into_iter()
+                    .map(|h| String::from(&h.path[R.len()..]))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    t.ok(
+        search::status().files == 6 && search::status().folders == 2,
+        &alloc::format!(
+            "search: 6 files, 2 folders (hidden ones skipped): {:?}",
+            search::status()
+        ),
+    );
+    t.ok(
+        q("pasture")
+            == [
+                "/Documents/Project Plan.md",
+                "/code/main.rs",
+                "/code/readme",
+            ]
+            || {
+                let mut v = q("pasture");
+                v.sort();
+                v == [
+                    "/Documents/Project Plan.md",
+                    "/code/main.rs",
+                    "/code/readme",
+                ]
+            },
+        &alloc::format!(
+            "search: content word, hidden file not found ({:?})",
+            q("pasture")
+        ),
+    );
+    t.ok(
+        q("proj") == ["/Documents/Project Plan.md"],
+        "search: name prefix",
+    );
+    t.ok(
+        q("notes").first().map(String::as_str) == Some("/Documents/notes.txt")
+            && q("notes").contains(&String::from("/code/readme")),
+        &alloc::format!(
+            "search: a name match ranks above a content match ({:?})",
+            q("notes")
+        ),
+    );
+    t.ok(
+        q("milk").len() == 2,
+        &alloc::format!(
+            "search: word and word prefix (milk, milkshake): {:?}",
+            q("milk")
+        ),
+    );
+    t.ok(
+        q("pasture kind:md") == ["/Documents/Project Plan.md"]
+            && q("kind:png") == ["/pic.png"]
+            && q("kind:data") == ["/blob"]
+            && q("kind:text pasture").len() == 3,
+        "search: kind filters (extension, magic, sniffed text)",
+    );
+    let mut docs = q("in:Documents");
+    docs.sort();
+    t.ok(
+        docs == ["/Documents/Project Plan.md", "/Documents/notes.txt"],
+        &alloc::format!("search: in:Documents ({docs:?})"),
+    );
+    t.ok(
+        q("vet modified:today") == ["/Documents/notes.txt"] && q("vet modified:1h").len() == 1,
+        "search: modified: filters",
+    );
+    t.ok(
+        q("oat milk") == ["/Documents/notes.txt"],
+        "search: all words must match",
+    );
+    // Incremental: create, rename, delete, a new folder, a renamed folder.
+    let _ = ops::write_file(&p("Documents/zebra.txt"), b"a zebra crossing");
+    let _ = ops::rename(&p("Documents/notes.txt"), &p("Documents/old-notes.txt"));
+    let _ = ops::unlink(&p("pic.png"));
+    let _ = ops::mkdir(&p("code/sub"), 0o755);
+    let _ = ops::write_file(&p("code/sub/deep.md"), b"deep pasture");
+    let _ = ops::rename(&p("code"), &p("src"));
+    if let Ok(f) = ops::open(&p("Documents/old-notes.txt"), O_WRONLY, 0) {
+        let _ = f.pwrite(b"sell", 0); // "buy" -> "sell"
+    }
+    search::apply_now(&w);
+    let mut past = q("pasture");
+    past.sort();
+    t.ok(
+        q("zebra") == ["/Documents/zebra.txt"]
+            && q("old") == ["/Documents/old-notes.txt"]
+            && q("kind:png").is_empty()
+            && past == ["/Documents/Project Plan.md", "/src/main.rs", "/src/readme", "/src/sub/deep.md"]
+            && q("sell") == ["/Documents/old-notes.txt"]
+            && q("buy").is_empty(),
+        &alloc::format!(
+            "search: create, rename, delete, folder rename and a rewrite are all reflected ({past:?})"
+        ),
+    );
+    t.ok(search::roundtrip_ok(), "search: the saved form round-trips");
+    drop(w);
+    search::reset();
+    rm_rf(R);
+}
+
 pub fn run() {
     // Crash-test boots (scripts/crashtest.sh) do only that.
     if super::milkfs::crashtest::run() {
@@ -2637,7 +2831,9 @@ pub fn run() {
     procfs_sysfs(&mut t);
     blockdev(&mut t);
     mac_share(&mut t);
+    crypto(&mut t);
     milkfs(&mut t);
+    notify_and_search(&mut t);
     if t.failed != 0 {
         // Loud, but never a panic: a self-test must not take the machine down.
         kprintln!(

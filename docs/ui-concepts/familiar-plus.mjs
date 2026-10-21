@@ -20,7 +20,7 @@ function tabs() {
   // one window whose title bar is a tab strip
   h += shadow(x, y, w, hh, 12) + B(x, y, w, hh, `background:${C.milk};border-radius:12px;border:1px solid ${C.sand};overflow:hidden`,
     B(0, 0, w, 38, `background:${C.cream};border-bottom:1px solid ${C.sand}`) + lightsX(13, 12) +
-    [["Documents", 1], ["andrew: sh", 0], ["notes.md", 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + TRi(w, tx + 134, 11, "x", `color:${C.cocoa}`); }).join("") +
+    [["Documents", 1], ["milk: sh", 0], ["notes.md", 0]].map((t, i) => { const tx = 84 + i * 150; return B(tx, 6, 144, 32, `background:${t[1] ? C.milk : "transparent"};border:${t[1] ? 1 : 0}px solid ${C.sand};border-bottom:0;border-radius:10px 10px 0 0`) + T(tx + 12, 11, t[1] ? `<b>${t[0]}</b>` : t[0], t[1] ? "" : `color:${C.cocoa}`) + TRi(w, tx + 134, 11, "x", `color:${C.cocoa}`); }).join("") +
     B(84 + 3 * 150 + 4, 10, 28, 24, `background:${C.oat};border-radius:8px`) + TC(84 + 3 * 150 + 4, 14, 28, "+") +
     B(0, 38, 160, hh - 40, `background:${C.oat};border-right:1px solid ${C.sand}`) + T(16, 52, "FAVOURITES", `color:${C.cocoa}`) + B(8, 76, 144, 24, `background:${C.straw}55;border-radius:8px`) + T(18, 80, "Documents") + T(18, 108, "Downloads") + T(18, 136, "Desktop") + T(18, 164, "Pictures") +
     [["folder", "projects"], ["folder", "school"], ["doc", "todo.txt"], ["photo", "bike.png"], ["note", "ideas.md"], ["folder", "kernel"]].map((f, i) => {
@@ -28,7 +28,7 @@ function tabs() {
       return icon(cx + 20, cy, 56, f[0], isF ? C.honey + "55" : C.cream, isF ? C.cocoa : C.esp, isF ? "" : `border:1px solid ${C.sand}`) + TC(cx - 6, cy + 64, 108, f[1]);
     }).join(""));
   // drop highlight on the tab strip
-  h += B(x + 84 + 3 * 150 - 4, y + 4, 150, 36, `background:${C.straw}33;border:2px dashed ${C.straw};border-radius:10px`) + T(x + 84 + 3 * 150 + 6, y + 12, "Drop to add as a tab", `color:${C.straw};${BD}`);
+  h += B(x + 84 + 3 * 150 - 4, y + 4, 184, 36, `background:${C.straw}33;border:2px dashed ${C.straw};border-radius:10px`) + T(x + 84 + 3 * 150 + 6, y + 12, "Drop to add as a tab", `color:${C.esp};${BD}`);
   // another window being dragged (ghost)
   h += shadow(560, 330, 330, 250, 12) + B(560, 330, 330, 250, `background:${C.milk};border-radius:12px;border:2px solid ${C.straw};opacity:.92;overflow:hidden`,
     B(0, 0, 330, 32, `background:${C.cream};border-bottom:1px solid ${C.sand}`) + lightsX(13, 10) + TC(0, 8, 330, "<b>todo.txt</b>") + T(18, 52, "[x] draft the UI spec") + T(18, 72, "[x] pick a look") + T(18, 92, "[ ] fix the allocator") + T(18, 112, "[ ] boot logo", `color:${C.cocoa}`));
@@ -101,7 +101,7 @@ function shelf() {
   // clipboard strip
   const cx = 150, cy = 600, cw = 700, ch = 80;
   let ci = T(16, 8, "CLIPBOARD   hold Ctrl-V, pick with the arrows", `color:${C.cocoa}`) + newBadge(cw - 60, 8);
-  [["fn kmain() {", 1], ["https://milk.example", 0], ["Dear Gus,", 0], ["10:41", 0], ["image 800x600", 0], ["#FBF6EC", 0]].forEach((c, i) => {
+  [["fn kmain() {", 1], ["https://milk.example", 0], ["Dear Sam,", 0], ["10:41", 0], ["image 800x600", 0], ["#FBF6EC", 0]].forEach((c, i) => {
     ci += B(14 + i * 112, 34, 106, 36, `background:${c[1] ? C.straw + "44" : "rgba(255,253,248,.9)"};border:${c[1] ? 2 : 1}px solid ${c[1] ? C.straw : C.sand};border-radius:10px;overflow:hidden`, T(8, 10, c[0].slice(0, 12)));
   });
   h += glass(cx, cy, cw, ch, 16, ci, { alpha: 0.78 });
@@ -208,7 +208,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${id(i)}"><div class="stagebox">
 <h3>What feels familiar</h3><p>${s.fam}</p><h3>What is new</h3><p>${s.nw}</p><h3>Who it helps</h3><p>${s.helps}</p><h3>Cost in a kernel-drawn UI</h3><p>${s.why}</p>
 <h3>Main elements</h3><ul class="chips">${s.els.map((e) => `<li>${e}</li>`).join("")}</ul><h3>Font note</h3><p>${s.font}</p></aside></article>`).join("")}
 <div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${id(i)}" for="r-${id(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.n}. ${s.name}</b><span>${s.cost}</span></div></label>`).join("")}</div>
-<section class="plan"><h2>Mary's take</h2>
+<section class="plan"><h2>Design notes</h2>
 <p>These all sit on top of the 1.0 desktop, so you do not have to pick one. A good order to build them: <b>E Live capsule</b> (easiest, instantly useful), <b>D Shelf and clipboard</b>, <b>A Tabs everywhere</b>, <b>B Projects</b>, and <b>C Time slider</b> last because it needs the filesystem to keep old versions.</p>
 <p style="margin-top:8px">If I had to pick the pair that would make someone say "oh, nice" the first day: <b>Projects</b> (your whole setup follows you) and <b>Tabs everywhere</b> (the window clutter problem, solved the way browsers already taught people).</p></section>
 </div>

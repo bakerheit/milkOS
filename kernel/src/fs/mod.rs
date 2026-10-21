@@ -23,12 +23,14 @@ pub mod initramfs;
 pub mod milkfs;
 pub mod ninep;
 pub mod node;
+pub mod notify;
 pub mod ops;
 pub mod pagecache;
 pub mod path;
 pub mod perm;
 pub mod procfs;
 pub mod ramdisk;
+pub mod search;
 pub mod selftest;
 pub mod synth;
 pub mod sysfs;
@@ -66,6 +68,7 @@ const SKELETON: &[(&str, u32)] = &[
 /// Start the file systems' kernel threads (call after `sched::init`).
 pub fn start_threads() {
     milkfs::start_threads();
+    search::start_thread();
 }
 
 /// Mount the root tmpfs and build the standard layout. Call once, after the heap is up.
@@ -87,6 +90,7 @@ pub fn init() {
     milkfs::automount();
     milkfs::setup_home();
     milkfs::setup_applications();
+    milkfs::setup_persistent_etc("/etc/milk/drop");
     ninep::automount();
     fat::automount();
 }

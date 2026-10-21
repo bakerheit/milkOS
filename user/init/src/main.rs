@@ -45,6 +45,16 @@ fn main(_args: &rt::Args) -> i32 {
         }
     }
 
+    // Milk Drop, if there is a VM-to-VM link (eth1): announce this machine there.
+    if sys::read_file("/proc/net/ifaddr").is_ok_and(|t| t.windows(5).any(|w| w == b"eth1 ")) {
+        match sys::spawn("/bin/drop", &["drop", "daemon", "-q"], ENV) {
+            Ok(pid) => {
+                quiet(pid);
+                println!("  drop (pid {pid}): Milk Drop on eth1");
+            }
+            Err(e) => println!("init: cannot start /bin/drop: {e}"),
+        }
+    }
     if let Ok(pid) = sys::spawn("/bin/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }

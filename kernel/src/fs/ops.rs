@@ -13,6 +13,7 @@ use super::abi::{
 use super::errno::{Errno, Result};
 use super::file::OpenFile;
 use super::node::{DirEntry, InodeRef, InodeType, SetAttr, Stat, check_name};
+use super::notify::{self, Event};
 use super::path::{self, Walker};
 use super::perm::{self, R, W};
 
@@ -61,10 +62,18 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
                 }
                 check_name(&name)?;
                 perm::may(&dir, W)?;
-                let node = dir.create(&name, mode & 0o7777)?;
-                perm::own_new(&node, &dir);
+                let n = dir.create(&name, mode & 0o7777)?;
+                perm::own_new(&n, &dir);
                 created = true;
-                break node;
+                if notify::active() {
+                    notify::emit(Event::Created {
+                        dir: notify::id(&dir),
+                        name: name.clone(),
+                        obj: notify::id(&n),
+                        kind: InodeType::File,
+                    });
+                }
+                break n;
             }
             Err(e) => return Err(e),
         }
@@ -93,6 +102,9 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
     }
     if flags & O_TRUNC != 0 && writable && node.kind() == InodeType::File {
         node.truncate(0)?;
+        notify::emit(Event::Modified {
+            obj: notify::id(&node),
+        });
     }
     Ok(OpenFile::new(
         node,
@@ -146,8 +158,14 @@ pub fn mkdir_at(base: Option<&InodeRef>, path: &str, mode: u32) -> Result<()> {
     }
     check_name(&p.name)?;
     perm::may(&p.dir, W)?;
-    let node = p.dir.mkdir(&p.name, mode & 0o7777)?;
-    perm::own_new(&node, &p.dir);
+    let n = p.dir.mkdir(&p.name, mode & 0o7777)?;
+    perm::own_new(&n, &p.dir);
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&n),
+        kind: InodeType::Dir,
+    });
     Ok(())
 }
 
@@ -188,12 +206,28 @@ pub fn unlink_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
             Errno::ENOTDIR
         });
     }
-    match path::step_raw(&p.dir, &p.name) {
+    // Only its id: holding the inode across the unlink would keep it "open" (deferred
+    // delete).
+    let obj = match path::step_raw(&p.dir, &p.name) {
         Ok(n) if sealed(&n) => return Err(Errno::EPERM),
-        Ok(n) => perm::may_delete(&p.dir, &n)?,
-        Err(_) => perm::may(&p.dir, W)?,
+        Ok(n) => {
+            perm::may_delete(&p.dir, &n)?;
+            Some(notify::id(&n))
+        }
+        Err(_) => {
+            perm::may(&p.dir, W)?;
+            None
+        }
+    };
+    p.dir.unlink(&p.name)?;
+    if let Some(obj) = obj {
+        notify::emit(Event::Removed {
+            dir: notify::id(&p.dir),
+            name: p.name,
+            obj,
+        });
     }
-    p.dir.unlink(&p.name)
+    Ok(())
 }
 
 /// `rmdir(2)`: remove an empty directory.
@@ -214,7 +248,15 @@ pub fn rmdir_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
         return Err(Errno::EBUSY);
     }
     perm::may_delete(&p.dir, &raw)?;
-    p.dir.rmdir(&p.name)
+    let obj = notify::id(&raw);
+    drop(raw);
+    p.dir.rmdir(&p.name)?;
+    notify::emit(Event::Removed {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj,
+    });
+    Ok(())
 }
 
 /// `rename(2)`.
@@ -262,7 +304,15 @@ pub fn rename_at(
     if src.kind() == InodeType::Dir && !alloc::sync::Arc::ptr_eq(&po.dir, &pn.dir) {
         perm::may(&src, W)?;
     }
-    po.dir.rename(&po.name, &pn.dir, &pn.name)
+    po.dir.rename(&po.name, &pn.dir, &pn.name)?;
+    notify::emit(Event::Renamed {
+        from_dir: notify::id(&po.dir),
+        from: po.name,
+        to_dir: notify::id(&pn.dir),
+        to: pn.name,
+        obj: notify::id(&src),
+    });
+    Ok(())
 }
 
 /// `symlink(2)`: create `linkpath` pointing at `target` (not resolved now).
@@ -280,8 +330,14 @@ pub fn symlink_at(target: &str, base: Option<&InodeRef>, linkpath: &str) -> Resu
     }
     check_name(&p.name)?;
     perm::may(&p.dir, W)?;
-    let node = p.dir.symlink(&p.name, target)?;
-    perm::own_new(&node, &p.dir);
+    let n = p.dir.symlink(&p.name, target)?;
+    perm::own_new(&n, &p.dir);
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&n),
+        kind: InodeType::Symlink,
+    });
     Ok(())
 }
 
@@ -320,7 +376,14 @@ pub fn link_at(
         return Err(Errno::EXDEV);
     }
     perm::may(&p.dir, W)?;
-    p.dir.link(&p.name, &src)
+    p.dir.link(&p.name, &src)?;
+    notify::emit(Event::Created {
+        dir: notify::id(&p.dir),
+        name: p.name,
+        obj: notify::id(&src),
+        kind: src.kind(),
+    });
+    Ok(())
 }
 
 /// The audit log file is append-only for the kernel: user processes may not open it for
@@ -338,7 +401,13 @@ pub fn truncate(path: &str, len: u64) -> Result<()> {
     perm::may(&n, W)?;
     match n.kind() {
         InodeType::Dir => Err(Errno::EISDIR),
-        InodeType::File => n.truncate(len),
+        InodeType::File => {
+            n.truncate(len)?;
+            notify::emit(Event::Modified {
+                obj: notify::id(&n),
+            });
+            Ok(())
+        }
         _ => Err(Errno::EINVAL),
     }
 }
@@ -347,7 +416,11 @@ pub fn truncate(path: &str, len: u64) -> Result<()> {
 pub fn setattr_at(base: Option<&InodeRef>, path: &str, follow: bool, attr: &SetAttr) -> Result<()> {
     let n = lookup_at(base, path, follow)?;
     let a = perm::check_setattr(&n, attr)?;
-    n.setattr(&a)
+    n.setattr(&a)?;
+    notify::emit(Event::Attr {
+        obj: notify::id(&n),
+    });
+    Ok(())
 }
 
 pub fn chmod(path: &str, perm: u32) -> Result<()> {
@@ -395,7 +468,11 @@ pub fn ficlone(src: &OpenFile, dst: &OpenFile) -> Result<()> {
     if !src.readable() || !dst.writable() {
         return Err(Errno::EBADF);
     }
-    super::milkfs::inode::reflink(src.inode(), dst.inode())
+    super::milkfs::inode::reflink(src.inode(), dst.inode())?;
+    notify::emit(Event::Modified {
+        obj: notify::id(dst.inode()),
+    });
+    Ok(())
 }
 
 pub fn read_file(path: &str) -> Result<Vec<u8>> {

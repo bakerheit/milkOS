@@ -14,16 +14,17 @@
 extern crate alloc;
 
 pub mod alloc_brk;
-pub mod ed25519;
 pub mod io;
 pub mod net;
-pub mod sha256;
-pub mod sha512;
 pub mod sys;
 pub mod table;
 pub mod thread;
 pub mod users;
 pub mod version;
+
+/// The shared crypto primitives (<repo>/crypto: ChaCha20, SHA-256/512, Ed25519, ...).
+pub use milkcrypto as crypto;
+pub use milkcrypto::{ed25519, sha256, sha512};
 
 use alloc::string::String;
 use alloc::vec::Vec;

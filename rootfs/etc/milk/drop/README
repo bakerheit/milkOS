@@ -1,0 +1,7 @@
+Milk Drop (docs/networking.md, "Milk Drop"): this machine's identity and the peers it trusts.
+On a machine with a Milk volume this directory is /Volumes/Milk/etc/milk/drop (persistent).
+
+  identity.secret   Ed25519 seed (hex). Never leaves this machine.
+  identity.pub      ed25519 <name> <public key hex>
+  name              the name peers see (drop name NEW to change it)
+  known_peers       trusted on first use: <name> <public key hex> <first seen, unix time>

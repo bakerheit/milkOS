@@ -19,6 +19,7 @@ const H0: [u32; 8] = [
 
 pub type Digest = [u8; 32];
 
+#[derive(Clone)]
 pub struct Sha256 {
     h: [u32; 8],
     buf: [u8; 64],

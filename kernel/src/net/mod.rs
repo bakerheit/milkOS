@@ -182,12 +182,14 @@ fn deliver_wakeups(w: Woken) {
     }
 }
 
-/// Called by the virtio-net driver at attach time (thread context, boot).
-pub fn attach_device(dev: VirtioNet) {
+/// Called by the virtio-net driver at attach time (thread context, boot). `slot` orders
+/// the interfaces (see [`Iface::attach`]).
+pub fn attach_device(dev: VirtioNet, slot: usize) {
     let mac = Mac(dev.mac());
     with(|st| {
-        st.iface.mac = mac;
-        st.iface.dev = Some(dev);
+        if st.iface.attach(dev, slot, mac).is_none() {
+            kprintln!("[net] slot {slot}: no free interface");
+        }
     });
 }
 
@@ -233,23 +235,35 @@ fn net_thread() {
 /// and the net thread. Call after `sched::init`.
 pub fn init() {
     let have_dev = with(|st| {
-        if st.iface.dev.is_some() {
+        let now = st.now;
+        st.iface.ll_start(now);
+        for (k, l) in st.iface.links.iter().enumerate().filter(|(_, l)| l.up()) {
+            kprintln!(
+                "[net] {}: virtio slot {}, mac {}{}",
+                iface::LINK_NAMES[k],
+                l.slot,
+                l.mac,
+                if l.ll.on { ", link-local" } else { ", DHCP" }
+            );
+        }
+        if st.iface.eth0().up() {
             dhcp::start(st);
             true
         } else {
             false
         }
     });
+    let eth1 = with(|st| st.iface.links[1].up());
     procnet::init();
     if !THREAD_UP.swap(true, Ordering::AcqRel) {
         drop(sched::spawn_prio("net", sched::Priority::High, net_thread));
     }
     kprintln!(
         "[net] stack up: lo{}, {} sockets x 2 x {} KiB buffers, net thread started",
-        if have_dev {
-            " + eth0 (DHCP started)"
-        } else {
-            " only (no NIC)"
+        match (have_dev, eth1) {
+            (true, true) => " + eth0 (DHCP started) + eth1 (link-local)",
+            (true, false) => " + eth0 (DHCP started)",
+            _ => " only (no NIC)",
         },
         socket::MAX_SOCKETS,
         socket::BUF_SIZE / 1024
@@ -306,20 +320,22 @@ impl Stack {
     }
 
     fn poll_rx(&mut self) {
-        for _ in 0..256 {
-            let Some(dev) = self.iface.dev.as_mut() else {
-                return;
-            };
-            let Some(b) = dev.rx_pop() else { break };
-            let f = b.frame();
-            self.eth_input(f);
-            if let Some(dev) = self.iface.dev.as_mut() {
-                dev.rx_done(b);
+        for k in 0..iface::MAX_LINKS {
+            for _ in 0..256 {
+                let Some(dev) = self.iface.links[k].dev.as_mut() else {
+                    break;
+                };
+                let Some(b) = dev.rx_pop() else { break };
+                let f = b.frame();
+                self.eth_input(k, f);
+                if let Some(dev) = self.iface.links[k].dev.as_mut() {
+                    dev.rx_done(b);
+                }
             }
-        }
-        if let Some(dev) = self.iface.dev.as_mut() {
-            dev.rx_kick();
-            dev.tx_reclaim();
+            if let Some(dev) = self.iface.links[k].dev.as_mut() {
+                dev.rx_kick();
+                dev.tx_reclaim();
+            }
         }
     }
 
@@ -329,27 +345,29 @@ impl Stack {
             let Some(pkt) = self.iface.lo_front() else {
                 return;
             };
-            self.ip_input(pkt, true);
+            self.ip_input(None, pkt, true);
             self.iface.lo_pop();
         }
     }
 
-    fn eth_input(&mut self, f: &[u8]) {
+    fn eth_input(&mut self, k: usize, f: &[u8]) {
         if f.len() < ETH_HDR {
             return;
         }
         let dst = Mac([f[0], f[1], f[2], f[3], f[4], f[5]]);
-        if dst != self.iface.mac && dst != Mac::BROADCAST {
-            return; // multicast or someone else's
+        let l = &self.iface.links[k];
+        let group = dst.0[0..3] == [0x01, 0x00, 0x5e] && l.multicast();
+        if dst != l.mac && dst != Mac::BROADCAST && !group {
+            return; // someone else's, or multicast on a link that takes none
         }
         match be16(f, 12) {
-            ETHERTYPE_ARP => self.arp_input(&f[ETH_HDR..]),
-            ETHERTYPE_IPV4 => self.ip_input(&f[ETH_HDR..], false),
+            ETHERTYPE_ARP => self.arp_input(k, &f[ETH_HDR..]),
+            ETHERTYPE_IPV4 => self.ip_input(Some(k), &f[ETH_HDR..], false),
             _ => {}
         }
     }
 
-    fn arp_input(&mut self, p: &[u8]) {
+    fn arp_input(&mut self, k: usize, p: &[u8]) {
         if p.len() < 28 || be16(p, 0) != 1 || be16(p, 2) != 0x0800 || p[4] != 6 || p[5] != 4 {
             return;
         }
@@ -357,18 +375,24 @@ impl Stack {
         let sha = Mac([p[8], p[9], p[10], p[11], p[12], p[13]]);
         let spa = ip_at(p, 14);
         let tpa = ip_at(p, 24);
-        let for_us = self.iface.cfg.is_local(tpa);
+        let now = self.now;
+        if self.iface.ll_arp_seen(k, sha, spa, tpa, now) {
+            return; // a link-local conflict: we moved away from that address
+        }
+        let l = &mut self.iface.links[k];
+        let for_us = l.cfg.is_local(tpa);
         // RFC 826 merge: refresh if known; learn if the packet is for us.
-        if !spa.is_unspecified() && (for_us || self.iface.arp.has(spa)) {
-            self.iface.arp.insert(spa, sha, self.now);
-            self.iface.flush_pending(spa, sha);
+        if !spa.is_unspecified() && (for_us || l.arp.has(spa)) {
+            l.arp.insert(spa, sha, now);
+            self.iface.flush_pending(k, spa, sha);
         }
         if op == arp::OP_REQUEST && for_us {
-            self.iface.send_arp(arp::OP_REPLY, sha, spa);
+            self.iface.send_arp(k, arp::OP_REPLY, sha, spa);
         }
     }
 
-    fn ip_input(&mut self, pkt: &[u8], from_lo: bool) {
+    /// An IPv4 packet from link `k` (None: loopback).
+    fn ip_input(&mut self, link: Option<usize>, pkt: &[u8], from_lo: bool) {
         self.stats.ip_in_receives += 1;
         if pkt.len() < IP_HDR || pkt[0] >> 4 != 4 {
             self.stats.ip_in_hdr_errors += 1;
@@ -388,13 +412,15 @@ impl Stack {
         let proto = pkt[9];
         let src = ip_at(pkt, 12);
         let dst = ip_at(pkt, 16);
-        let cfg = self.iface.cfg;
+        let l = &self.iface.links[link.unwrap_or(0)];
+        let cfg = l.cfg;
         let accept = from_lo
-            || cfg.is_local(dst)
+            || self.iface.is_our_addr(dst)
             || dst.is_broadcast()
             || (cfg.configured() && dst == cfg.subnet_broadcast())
-            // Before DHCP finishes, take any unicast UDP (the DHCP reply may be unicast).
-            || (!cfg.configured() && proto == iface::PROTO_UDP);
+            || (l.multicast() && iface::is_link_multicast(dst))
+            // Before DHCP finishes, take any unicast UDP on eth0 (the reply may be unicast).
+            || (link == Some(0) && !cfg.configured() && proto == iface::PROTO_UDP);
         if !accept {
             self.stats.ip_in_addr_errors += 1;
             return;
@@ -407,7 +433,7 @@ impl Stack {
             iface::PROTO_UDP => udp::input(self, src, dst, payload, &pkt[..total]),
             _ => {
                 self.stats.ip_in_unknown_protos += 1;
-                if !dst.is_broadcast() {
+                if !dst.is_broadcast() && !dst.is_multicast() {
                     icmp::send_unreachable(self, 2, &pkt[..total]);
                 }
             }
@@ -438,10 +464,18 @@ impl Stack {
 
 /// Current IPv4 configuration of eth0.
 pub fn config() -> iface::IpConfig {
-    with(|st| st.iface.cfg)
+    with(|st| st.iface.eth0().cfg)
 }
 
 /// eth0's MAC, if there is a NIC.
 pub fn mac() -> Option<Mac> {
-    with(|st| st.iface.dev.as_ref().map(|_| st.iface.mac))
+    with(|st| st.iface.eth0().up().then_some(st.iface.eth0().mac))
+}
+
+/// A link's (name, MAC, IPv4 config), if that interface exists (0 = eth0, 1 = eth1).
+pub fn link(k: usize) -> Option<(&'static str, Mac, iface::IpConfig)> {
+    with(|st| {
+        let l = st.iface.links.get(k)?;
+        l.up().then_some((iface::LINK_NAMES[k], l.mac, l.cfg))
+    })
 }

@@ -43,6 +43,9 @@ export const TOK = {
   launcher: { w: 640, y: 140, inputH: 56, rowH: 48, gap: 12, maxRows: 6, dim: 0.25, iconIn: 40, iconRow: 36 },
   toast: { w: 264, h: 64, right: 12, top: 40 },
   tabs: { stripH: 38, tabH: 32, tabY: 6, firstX: 84, minW: 96, maxW: 160, gap: 6, padL: 12, padR: 8, radiusTop: 10, closeHit: 20, plusW: 28, plusH: 24, plusR: 8, dropBorder: "2px dashed straw", dropFill: "straw at 20%" },
+  button: { pillH: 24, pillR: 12, dialogH: 28, dialogR: 8, padX: 14, minW: 88, ink: "#3A2E27", hover: "#EA9AA4", pressed: "#DE7D89", danger: "#B5473B" },
+  files: { toolbarH: 40, navD: 24, pathH: 24, searchW: 150, sidebarW: 168, statusH: 24 },
+  menuStatus: { glyph: 16, gap: 12, hitH: 28 },
   drawer: { w: 316, right: 12, top: 36, bottom: 12, pad: 12, cardH: 64, cardCompactH: 56, cardR: 14, iconIn: 36, headerH: 78, chipH: 26, dndH: 44, alpha: 0.78, toastSecs: 5 },
   control: { w: 288, h: 292, right: 12, top: 36, tileH: 56, sliderH: 8 },
   cards: { pad: 16, gap: 16, r: 20, cols: 3 },
@@ -138,10 +141,10 @@ function filesWin(x = 96, y = 64, focus = false) {
   return win(x, y, w, h, "Documents", body, { focus });
 }
 function shellWin(x = 440, y = 270, focus = true) {
-  const body = T(14, 46, "andrew@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
-    T(14, 90, "andrew@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
-    T(14, 134, "andrew@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
-  return win(x, y, 520, 290, "andrew: sh", body, { focus, dark: true });
+  const body = T(14, 46, "milk@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
+    T(14, 90, "milk@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
+    T(14, 134, "milk@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
+  return win(x, y, 520, 290, "milk: sh", body, { focus, dark: true });
 }
 
 /* ------------------------------ scenes ------------------------------ */
@@ -151,7 +154,7 @@ function sceneHome() {
   let h = WP + menubar("Home");
   const c = TOK.cards, p = c.pad;
   const card = (x, y, w, hh, label, inner) => glass(x, y, w, hh, c.r, T(p, p, label, `color:${col("cocoa")}`) + inner);
-  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning, Andrew", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
+  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
   const y1 = 56 + 96 + c.gap;
   h += card(48, y1, 296, 228, "CALENDAR", ["M", "T", "W", "T", "F", "S", "S"].map((d, i) => TC(12 + i * 38, 40, 38, d, `color:${col("cocoa")}`)).join("") +
     Array.from({ length: 21 }, (_, i) => { const n = i + 12, cx = 12 + (i % 7) * 38, cy = 66 + Math.floor(i / 7) * 34, today = n === 20; return (today ? B(cx + 3, cy - 4, 32, 24, `background:${col("straw")};border-radius:12px`) : "") + TC(cx, cy, 38, String(n > 31 ? n - 31 : n), today ? `color:${col("milk")};${BD}` : ""); }).join(""));
@@ -319,7 +322,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${idn(i)}"><div class="stagebox"
 const sh = (arr) => arr.map((l, i) => `  ${i + 1}. grow ${l.grow}px, move down ${l.dy}px, alpha ${l.a}`).join("\n");
 const spec = `# milkOS 1.0 UI spec
 
-For the engineer building the compositor and shell. Generated from \`v1.mjs\` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: \`milkos-1.0.html\`. Screen: ${TOK.screen.w}x${TOK.screen.h}, 32-bit. Layout snaps to a ${TOK.screen.grid}px grid.
+For the engineer building the compositor and shell. Generated from \`v1.mjs\` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: \`milkos-1.0.html\`. App specs (Activity Monitor, Text Editor, Calendar, Clock/Timer, Preview): \`SPEC-APPS.md\`. Art direction: \`ART.md\`. Screen: ${TOK.screen.w}x${TOK.screen.h}, 32-bit. Layout snaps to a ${TOK.screen.grid}px grid.
 
 ## Colour tokens (sRGB)
 | Token | Hex | Use |
@@ -364,17 +367,17 @@ Height ${TOK.dock.h}, radius ${TOK.radius.dock}, glass. Padding ${TOK.dock.pad},
 - Minimum size ${TOK.window.min[0]}x${TOK.window.min[1]}. Body padding ${TOK.window.bodyPad}. Files sidebar width ${TOK.window.sidebarW} (oat, 1px sand right edge). Status bar height ${TOK.window.statusH} (cream, 1px sand top edge).
 
 ## Tabs (Terminal tabs and Tabs-everywhere window tabs share this)
-One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at Gus's request.
+One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at the engineer's request.
 - Strip: a window with two or more tabs uses a ${TOK.tabs.stripH}px bar in place of the ${TOK.window.titleH}px title bar. Same fill, 1px sand line under it. The traffic lights keep their x (${TOK.window.lightX}) and sit at y${TOK.window.lightY + 2}, centred in the taller bar.
 - Tab: height ${TOK.tabs.tabH}, top y${TOK.tabs.tabY} inside the strip (so it touches the line under the strip), width between ${TOK.tabs.minW} and ${TOK.tabs.maxW} (tabs share the strip equally, never narrower than ${TOK.tabs.minW}), ${TOK.tabs.gap}px between tabs. The first tab starts at x${TOK.tabs.firstX}. Corner radius ${TOK.tabs.radiusTop}px on the top corners only, square at the bottom. Padding ${TOK.tabs.padL}px left, ${TOK.tabs.padR}px right.
 - Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
 - Inactive tab: no fill, no border, title in secondary text. Hover: oat at 60% fill.
 - Title: one line, cut with "~" to fit (about 13 characters in the default ${TOK.tabs.minW + 48}px tab). Terminal tabs read "1 msh", "2 msh".
-- Close x: the letter x in secondary text, right-aligned with ${TOK.tabs.padR}px right padding, hit target ${TOK.tabs.closeHit}x${TOK.tabs.closeHit}. Shown on every tab at rest (not only on hover). Hover: a ${TOK.tabs.closeHit}px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
+- Close x: the letter x in the secondary colour of the tab it sits on (a light tab: secondary text; a Terminal-coloured tab: #BEA890 in any window, so a Terminal tab merged into a light window must not use the light cocoa, which is only 1.94:1 on the Terminal fill), right-aligned with ${TOK.tabs.padR}px right padding, hit target ${TOK.tabs.closeHit}x${TOK.tabs.closeHit}. Shown on every tab at rest (not only on hover). Hover: a ${TOK.tabs.closeHit}px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
 - New tab (+): ${TOK.tabs.plusW}x${TOK.tabs.plusH}, radius ${TOK.tabs.plusR}, oat fill, 4px after the last tab, the "+" centred.
 - Terminal tabs: same geometry with Terminal colours. Bar and border #4A3C34, active tab fill is the Terminal body #3A2E29 with Terminal text #FBF6ED, inactive title and close x in the dark cocoa #BEA890 (4.63:1 on the bar; the lighter latte would be only 2.48:1), hover circle #55463C. These colours are the same in the light and dark themes.
-- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, ${TOK.tabs.dropBorder.replace("straw", "straw")} border, radius ${TOK.tabs.radiusTop}, with "Drop to add as a tab" in straw, bold. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
-- Keys: Ctrl-T new tab, Ctrl-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Ctrl-1 to Ctrl-9 jump.
+- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, ${TOK.tabs.dropBorder.replace("straw", "straw")} border, radius ${TOK.tabs.radiusTop}, with "Drop to add as a tab" in primary text, bold (straw text on the straw tint is only 1.96:1; the dashed straw border carries the colour), and at least 176px wide so the label fits. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
+- Keys: Cmd-T new tab, Cmd-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Cmd-1 to Cmd-9 jump. The first build kept the existing Terminal keys Cmd-T and Cmd-W, so the spec now matches it. Ctrl may be accepted as an alias where it is free.
 - Notifications attached to tabs (a dot on the strip) are parked for later and not part of this spec.
 
 ## Launcher (Skim)
@@ -387,12 +390,12 @@ ${TOK.toast.w}x${TOK.toast.h}, radius ${TOK.radius.toast}, glass, ${TOK.toast.ri
 Chosen look (Andrew, 2026-10-21). Panel ${TOK.drawer.w} wide, ${TOK.drawer.right}px from the right edge, from y${TOK.drawer.top} down to ${TOK.drawer.bottom}px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius ${TOK.radius.launcher}, glass at alpha ${TOK.drawer.alpha}, floating shadow. Inner padding ${TOK.drawer.pad}.
 - Header (${TOK.drawer.headerH}px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), ${TOK.drawer.chipH}px high, fully rounded, selected chip espresso with cream text.
 - Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
-- Card: width drawer minus ${TOK.drawer.pad * 2}, height ${TOK.drawer.cardH} (compact ${TOK.drawer.cardCompactH}), radius ${TOK.drawer.cardR}, milk at 82% with a 1px white edge. App icon ${TOK.drawer.iconIn}x${TOK.drawer.iconIn} at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long. Selected card: straw at 13% fill and a 1px straw border.
-- Today card: label, then up to three events (time bold, title). Do Not Disturb row: ${TOK.drawer.dndH}px high at the bottom with a switch (44x24, straw when on).
+- Card: width drawer minus ${TOK.drawer.pad * 2}, height ${TOK.drawer.cardH} (compact ${TOK.drawer.cardCompactH}), radius ${TOK.drawer.cardR}, milk at 82% with a 1px white edge. App icon ${TOK.drawer.iconIn}x${TOK.drawer.iconIn} at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long (use a real ellipsis, U+2026, if the font draws it). Selected card: straw at 13% fill and a 1px straw border.
+- Today card: label, then up to three events (time bold, title). Focus row (the label is "Focus", not "Do Not Disturb": it is the same single setting as the Control centre Focus tile, with the sub-line "On until 12:00" while on): ${TOK.drawer.dndH}px high at the bottom with a switch (44x24, straw when on).
 - Opening: click the menu bar bell, or Ctrl-N. Closing: Esc, or click outside. Snap open (no animation required).
 - Keys: Up/Down select, Return opens the source app or window, Backspace dismisses the selected card, Left/Right collapse or expand a group, Tab cycles the filter chips.
 - Arrival: a toast (above) shows for ${TOK.drawer.toastSecs} seconds, pauses while hovered, and clicking it opens the drawer on that item. If the drawer is open, the new card appears at the top of its group instead.
-- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Do Not Disturb holds toasts and sounds but still collects cards, and shows a moon on the bell.
+- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Focus holds toasts and sounds but still collects cards, and shows a moon on the bell.
 
 ## Control centre
 ${TOK.control.w}x${TOK.control.h}, radius ${TOK.radius.card}, glass, ${TOK.control.right}px from right, ${TOK.control.top}px from top. Tiles/sliders ${TOK.control.tileH} high, radius 16, white at 70%. Slider track ${TOK.control.sliderH} high, fill espresso.
@@ -407,7 +410,7 @@ Dim the wallpaper with espresso at ${TOK.spaces.dim}. Space strip at y${TOK.spac
 ${TOK.wallpaper}
 
 ## Dark theme ("Chocolate milk")
-Values from kernel/src/wm/theme.rs tc() as given by Gus, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
+Values from kernel/src/wm/theme.rs tc() as given by the engineer, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
 | Token | Light | Dark | Use |
 |---|---|---|---|
 ${["milk","cream","oat","sand","latte","cocoa","espresso"].map((k) => `| ${k} | ${LIGHT[k]} | ${DARK[k]} | ${TOK.color[k][1]} |`).join("\n")}
@@ -439,10 +442,58 @@ Rules that come out of the numbers:
 - **Secondary text never goes on a selected row.** A selected row is straw at ${SEL * 100}% over the surface. Primary text on it is fine in both themes; secondary text on it is only about 3.3:1 in dark, so use primary there.
 - **cocoa changed (light):** #7A6652 was 4.40:1 on the sidebar, just under 4.5. It is now #6B5846 (5.45:1 on the sidebar). The dark cocoa #BEA890 is unchanged. Anything hard-coded to #7A6652 should move to the token.
 - **Disabled text (latte) is exempt** from the 4.5:1 rule but should not carry meaning on its own. The tab close x uses cocoa, not latte, for that reason.
+- **Dimming an inactive window must not drop its text below 4.5:1.** In the dark theme the shipped inactive Terminal text is #8C7764 on #3A2E29, 3.08:1 (the light theme uses #C4AE8F on the same body, 6.11:1). Use #BEA890 (5.74:1) for dimmed Terminal text, or dim the window with a veil instead of recolouring the text.
 - **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
+## Buttons
+Added 2026-10-21 after a contrast check of the shipped screens: filled buttons were cream text on straw, 2.42:1. The fix keeps the pink and darkens the text. The text colour is the fixed ink (${TOK.button.ink}), not espresso, because espresso turns light in the dark theme.
+| Kind | Fill | Text | Contrast |
+|---|---|---|---|
+| Primary (filled) | straw ${LIGHT.straw} | ink ${TOK.button.ink}, bold | ${ratio(TOK.button.ink, LIGHT.straw).toFixed(2)}:1 |
+| Primary, hover | ${TOK.button.hover} | ink | ${ratio(TOK.button.ink, TOK.button.hover).toFixed(2)}:1 |
+| Primary, pressed | ${TOK.button.pressed} | ink | ${ratio(TOK.button.ink, TOK.button.pressed).toFixed(2)}:1 |
+| Secondary | oat, 1px sand border | primary text (espresso; #F4EBE0 in dark) | ${ratio(LIGHT.espresso, LIGHT.oat).toFixed(2)}:1 light, ${ratio(DARK.espresso, DARK.oat).toFixed(2)}:1 dark |
+| Danger | ${TOK.button.danger} | #FFFDF8 (fixed, not the milk token) | ${ratio("#FFFDF8", TOK.button.danger).toFixed(2)}:1 |
+| Disabled | oat, 1px sand border | latte (exempt from 4.5:1, never the only signal) | ${ratio(LIGHT.latte, LIGHT.oat).toFixed(2)}:1 |
+- Sizes: pill (inside cards, toasts, banners) height ${TOK.button.pillH}, fully rounded (radius ${TOK.button.pillR}), padding ${TOK.button.padX} each side. Dialog button (sheets, panels, Open/Save) height ${TOK.button.dialogH}, radius ${TOK.button.dialogR}, minimum width ${TOK.button.minW}. Text is bold (the faux bold).
+- Button row in a sheet: right-aligned, 8px apart, the primary on the far right, the cancel or secondary action to its left. A destructive primary uses the Danger kind.
+- Focus ring: 2px honey, 2px outside the button. Pressed buttons move nothing.
+- Where it applies: every filled straw pill (Welcome tour buttons, Restore this version, Share, Send), dialog buttons (Open, Cancel), and sheets. Straw is still used freely for fills without text on them (selection, progress, the traffic light).
+
+## Files window: toolbar, sidebar and status bar
+Proposal from the 2026-10 screen review. Today the window has only a sidebar, a grid and a status bar with an "up" pill squeezed into the corner.
+- Toolbar: ${TOK.files.toolbarH}px high, directly under the title bar, cream, 1px sand line below. Left to right at 12px padding: back and forward (${TOK.files.navD}px circles, oat; forward is latte when disabled), the path bar (${TOK.files.pathH}px high, radius ${TOK.files.pathH / 2}, milk with 1px sand, "Home > Documents", each part clickable, replaces the old "up" pill), search (${TOK.files.searchW}px wide, same style), the Share button (a secondary pill; primary while a file is selected), and a view menu button (list or grid).
+- Sidebar (${TOK.files.sidebarW} wide): FAVOURITES (Home, Documents, Downloads, Desktop, Pictures, Music), NEARBY (Milk Drop devices found on the link: a dot, green when the device is receiving and latte when not; dropping a file on a name sends it), SHARED (the Mac folder). "milk" and "Milk" are not good labels (they differ by a capital): name them "This machine" and "Milk disk". Time Machine is not a device: give it a clock button in the toolbar (it opens the versions view) and keep the "Browse All Versions" menu item.
+- Status bar: ${TOK.files.statusH} high. Left to right: "1 of 4 selected, 1.0 MB", then "212 GB available" on the right. Path text uses secondary text, never latte (latte on cream is 1.99:1).
+- Empty folder: a centred line in secondary text, "This folder is empty", and a faint dashed outline where dropped files would go.
+
+## Menu bar status area
+The right side of the menu bar today shows only the CPU meter and the clock, so there is nowhere to open the notification drawer from and no sign of Focus, network or sound. Right to left from the clock, ${TOK.menuStatus.gap}px apart, each a ${TOK.menuStatus.glyph}px glyph with a ${TOK.menuStatus.hitH}px high hit target:
+1. Clock (opens Today).
+2. CPU meter (opens Activity).
+3. Volume (opens the Control centre).
+4. Network (opens the Control centre).
+5. Focus moon, shown only while Focus is on.
+6. Bell with the unread count (opens the notification drawer). This is the one that must exist before the drawer ships.
+Icons are primary text colour, 1px lines on the 8x16 grid look; counts use the 18px straw badge from the Notification drawer section.
+
+## Milk Drop sheet (Files > Share)
+Mockups: share.html. Built on the existing \`drop\` commands only (docs/networking.md), so no new kernel work.
+- Sending: the Share button (or dropping a file on a NEARBY name) opens a sheet, ${520}px wide, radius 14, window shadow, header 44 (title "Milk Drop", Esc hint on the right), below the Files toolbar's title bar.
+- Device rows: 64 high, radius 12, 12px side margin, 12px between. Name bold, fingerprint in four groups of four (e.g. 3fa2 91bc 07de 44a1) in secondary text, a trust chip on the right (Known: matcha at 27%, New device: honey at 27%, KEY CHANGED: ${TOK.button.danger} with light text, Not receiving: latte and the row at 55% opacity with "open Milk Drop there"). Selected row: straw 20% fill and a 2px straw border.
+- Data: \`MILK_TABLE=1 drop list\` (name, address, fingerprint, receiving, trust). Rescan while the sheet is open (about every 3 seconds; one scan is about 1.5 s) and show a small spinner while scanning.
+- Footer: "Checked (SHA-256), not yet encrypted." in secondary text (honest, and it becomes "Encrypted" when encryption lands), Cancel (secondary) and Send (primary) dialog buttons.
+- Progress: a file chip, a 12px straw progress bar, and the numbers from \`drop: [####......]  40%  416 KiB / 1024 KiB\`. Cancel stops the transfer. \`drop: sent ...\` (exit 0) closes the sheet and shows the Received toast on the other machine; \`drop: <reason>\` (exit 1) shows the reason in an error row.
+- Incoming (a milkOS-owned panel in the Powerbox style, 644 wide): "alice wants to send you bike.png" with the size, and for a new device a honey panel with the fingerprint at 4x text, "Check this matches what alice sees", and "Accepting trusts this device from now on." Buttons: Decline (secondary) and Trust alice and accept (primary). A known device shows no panel and the buttons Decline and Accept. Driven by \`drop recv\`, which prints "wants to send you" then waits at "accept? [y/N]"; the panel writes y or n.
+- Key changed: a danger-coloured header ("bob's key has changed", "Sending is blocked until you decide"), the old and new fingerprints side by side, advice to compare them in person or by phone, and one danger button, Forget bob and re-verify (\`drop forget bob\`). Sending stays blocked until then.
+- Received toast: the Notification drawer's toast with two pill buttons, Show (in Files) and Open. Files land in ~/Downloads.
+- Nothing nearby: "No other milkOS machines found" with Look again and Close.
+
+## Shield (design only, parked, not scheduled)
+Mockups: shield.html. A read-only view of what each app can do and what it was refused. Nothing here needs new enforcement: it reads the capability sets and the audit log (docs/security.md). Any control that would change network access is drawn disabled and marked "parked, not scheduled". Do not queue engineering for this until the project owner says so. The first buildable version could be read-only: a title-bar button opening a panel (files, files you gave it, network, sound, clipboard, windows, recent activity), and Settings > Privacy with the audit log as sentences and an "intact" line from \`audit verify\`.
+
 ## What the mockup does not show
-Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.
+Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Raise it with the design owner if one of these blocks you.
 `;
 
 const here = dirname(fileURLToPath(import.meta.url));

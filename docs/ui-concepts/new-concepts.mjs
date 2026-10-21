@@ -31,7 +31,7 @@ function rewind() {
   h += B(272, 64, 728, 440, `background:linear-gradient(160deg,#F9EBD3,#EBD7BB);border-radius:14px;border:2px solid ${C.straw};overflow:hidden`,
     B(0, 0, 728, 28, `background:rgba(255,253,248,.7)`) + T(12, 6, "<b>Files</b>   File   Edit   View") + TR(716, 6, "9:12 AM", `color:${C.cocoa}`) +
     win(28, 48, 360, 250, "kernel notes.md", T(16, 46, "# milkOS kernel") + T(16, 66, "- boot on qemu virt") + T(16, 84, "- UART first, then display") + T(16, 102, "- heap next", `color:${C.cocoa}`) + T(16, 140, "TODO: interrupts", `background:${C.honey}55`), { shade: true }) +
-    win(240, 150, 440, 250, "andrew: sh", T(14, 46, "$ cargo build", `color:${C.cream}`) + T(14, 64, "   Compiling milkos-kernel", `color:${C.latte}`) + T(14, 82, "error: no global allocator", `color:${C.straw}`) + T(14, 100, "$ _", `color:${C.cream}`), { dark: true }));
+    win(240, 150, 440, 250, "milk: sh", T(14, 46, "$ cargo build", `color:${C.cream}`) + T(14, 64, "   Compiling milkos-kernel", `color:${C.latte}`) + T(14, 82, "error: no global allocator", `color:${C.straw}`) + T(14, 100, "$ _", `color:${C.cream}`), { dark: true }));
   // action bar under the viewer
   h += pill(272, 516, 190, "3 files changed since", false, 32) + T(474, 524, "Drag a window or file out", `color:${C.cocoa}`) +
     B(790, 516, 210, 32, `background:${C.esp};border-radius:16px`) + TC(790, 524, 210, "<b>Restore this moment</b>", `color:${C.cream}`);
@@ -212,7 +212,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${id(i)}"><div class="stagebox">
 <h3>Key idea</h3><p>${s.idea}</p><h3>What is new about it</h3><p>${s.new_}</p><h3>Cost in a kernel-drawn UI</h3><p>${s.why}</p>
 <h3>Main elements</h3><ul class="chips">${s.els.map((e) => `<li>${e}</li>`).join("")}</ul><h3>Font note</h3><p>${s.font}</p></aside></article>`).join("")}
 <div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${id(i)}" for="r-${id(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.n}. ${s.name}</b><span>${s.cost}</span></div></label>`).join("")}</div>
-<section class="plan"><h2>Mary's take</h2>
+<section class="plan"><h2>Design notes</h2>
 <p><b>Cheapest to try first: C Scroll.</b> It needs no window manager, it is very Linux, and the rich cards are small renderers you can add one at a time. It could even live as the terminal app inside the 1.0 desktop.</p>
 <p style="margin-top:8px"><b>Most distinctive: A Rewind.</b> Nothing else has "the whole computer has a timeline" as its front door. Start with file versions and window lists only, and treat screenshots of the past as a later upgrade.</p>
 <p style="margin-top:8px"><b>B Canvas</b> suits a bitmap font surprisingly well (labels at 2x and 4x, never shrunk). <b>D Dial</b> is the lightest to build but works best layered on top of another look (the modes and radial menus can sit on the 1.0 desktop).</p></section>

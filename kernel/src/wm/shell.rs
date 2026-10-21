@@ -94,10 +94,28 @@ fn spec(key: PanelKey, rect: Rect, radius: i32, style: Style, shadow: bool) -> L
 
 pub struct Toast {
     pub id: u32,
+    /// The drawer card it is (clicking the toast opens the drawer on it).
+    pub notice: u64,
+    pub app: String,
     pub title: String,
     pub sub: String,
     pub until_ns: u64,
+    /// Hovered: the time it had left when the pointer arrived (SPEC: toasts pause).
+    pub paused: Option<u64>,
 }
+
+/// Toast `i`'s place (SPEC: 264x64, 12 from the right, 40 from the top, stacked).
+pub fn toast_rect(i: usize) -> Rect {
+    Rect::new(
+        screen_w() - TOAST_RIGHT - TOAST_W,
+        TOAST_TOP + i as i32 * (TOAST_H + 8),
+        TOAST_W,
+        TOAST_H,
+    )
+}
+
+/// The bell's room in the menu bar (left of the cpu meter).
+const BELL_SLOT: i32 = 30;
 
 // ---- dock ---------------------------------------------------------------------------------
 
@@ -689,7 +707,7 @@ impl Desktop {
                             x: r.x - 20,
                             y: r.y + r.h + 10,
                             w: r.w + 40,
-                            text: String::from(w.contents.title()),
+                            text: Self::window_label(w),
                             color: MILK,
                         });
                     }
@@ -715,13 +733,13 @@ impl Desktop {
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
         for (i, t) in self.toasts.iter().enumerate() {
-            let r = Rect::new(
-                screen_w() - TOAST_RIGHT - TOAST_W,
-                TOAST_TOP + i as i32 * (TOAST_H + 8),
-                TOAST_W,
-                TOAST_H,
-            );
-            v.push(spec(PanelKey::Toast(t.id), r, R_TOAST, Style::Glass, true));
+            v.push(spec(
+                PanelKey::Toast(t.id),
+                toast_rect(i),
+                R_TOAST,
+                Style::Glass,
+                true,
+            ));
         }
         if let Some(m) = self.menu_layer() {
             v.push(m);
@@ -780,10 +798,12 @@ impl Desktop {
         )
     }
 
-    /// Width of the menu bar's right side: "cpu" + one bar per CPU + gap + the clock.
+    /// Width of the menu bar's right side: the bell + "cpu" + one bar per CPU + gap + the
+    /// clock.
     pub(super) fn status_width(&self) -> i32 {
         let n = self.cpu_loads.len().max(1) as i32;
-        super::fontx::prop_width("cpu", false)
+        BELL_SLOT
+            + super::fontx::prop_width("cpu", false)
             + 4
             + n * 6
             + 14
@@ -814,8 +834,10 @@ impl Desktop {
             PanelKey::Dock => self.paint_dock(p),
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
-                    icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, INK, false);
+                    let (icon, bg, fg) = super::notif::app_icon(&t.app);
+                    icons::draw(p, 12, 12, 40, icon, bg, 255, fg, bg == CREAM);
                     p.text_p(64, 12, &t.title, ESPRESSO, true);
+                    p.text_right(w - 12, 12, "now", COCOA, 1, false);
                     p.text_p(64, 32, &t.sub, COCOA, false);
                 }
             }
@@ -867,12 +889,15 @@ impl Desktop {
             let c = if l > 75 { HONEY } else { MATCHA };
             p.rrect(x, 21 - h, 4, h, 2, c, 255);
         }
-        p.text_p(
-            mx - 4 - super::fontx::prop_width("cpu", false),
-            MENU_TEXT_Y,
-            "cpu",
-            COCOA,
-            false,
+        let cx = mx - 4 - super::fontx::prop_width("cpu", false);
+        p.text_p(cx, MENU_TEXT_Y, "cpu", COCOA, false);
+        // The bell: unread total, or a moon in Do Not Disturb.
+        super::notif::paint_bell(
+            p,
+            cx - BELL_SLOT + 4,
+            6,
+            self.unread(),
+            self.settings.focus_mode,
         );
     }
 
@@ -911,8 +936,13 @@ impl Desktop {
             } else if self.tip == Some(i) {
                 p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, WHITE, a(40));
             }
+            // Unread notifications from this app (SPEC badge, top right of the tile).
+            let n = self.unread_for_tile(&it.name);
+            if n > 0 {
+                super::notif::badge(p, ix + dock_icon() - 13, (DOCK_PAD - 6).max(0), n);
+            }
             let running = match it.action {
-                DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
+                DockAction::App(a) => self.has_app(a),
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
                 DockAction::Program(p) => self.running_program(p),
@@ -1039,9 +1069,11 @@ impl Desktop {
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
             p.text_p(64, y + 6, &e.title, ESPRESSO, true);
-            p.text_p(64, y + 24, &e.sub, COCOA, false);
+            // SPEC: no secondary text on a selected row.
+            let sub = if i == sel { ESPRESSO } else { COCOA };
+            p.text_p(64, y + 24, &e.sub, sub, false);
             if i == sel {
-                p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
+                p.text_right(w - 20, y + 16, "Enter", ESPRESSO, 1, false);
             }
         }
         let fy = results_height(l) - 30;
@@ -1063,13 +1095,14 @@ impl Desktop {
         };
         match i {
             0 => {
+                let user = super::session::user_name();
                 let greet = match t.hour {
-                    0..=4 => "Still up, Andrew?",
-                    5..=11 => "Good morning, Andrew",
-                    12..=17 => "Good afternoon, Andrew",
-                    _ => "Good evening, Andrew",
+                    0..=4 => format!("Still up, {user}?"),
+                    5..=11 => format!("Good morning, {user}"),
+                    12..=17 => format!("Good afternoon, {user}"),
+                    _ => format!("Good evening, {user}"),
                 };
-                p.text_x(pad + 8, 16, greet, ESPRESSO, 2, true);
+                p.text_x(pad + 8, 16, &greet, ESPRESSO, 2, true);
                 let n = self.windows.len();
                 let line = format!(
                     "{}, {} {}   {} window{} open",
@@ -1261,12 +1294,15 @@ impl Desktop {
                 } else if x
                     >= screen_w() - MENU_PAD_X - super::fontx::prop_width(&self.status, false) - 6
                 {
-                    // The clock: the notification centre.
+                    // The clock (like the bell): the notification drawer.
                     self.toggle_notif();
-                } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
+                } else if x >= screen_w() - MENU_PAD_X - (sw - BELL_SLOT) - 8 {
                     self.set_menu(None);
-                    self.notif = false;
+                    self.close_notif();
                     self.control = !self.control;
+                } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
+                    // The bell.
+                    self.toggle_notif();
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
                     self.control = false;
@@ -1298,17 +1334,15 @@ impl Desktop {
                 self.invalidate(PanelKey::Dock);
             }
             PanelKey::Toast(id) => {
-                self.toasts.retain(|t| t.id != id);
-                let ids: Vec<u32> = self.toasts.iter().map(|t| t.id).collect();
-                for i in ids {
-                    self.invalidate(PanelKey::Toast(i));
-                }
+                // SPEC: clicking a toast opens the drawer on that item.
+                let notice = self.toasts.iter().find(|t| t.id == id).map(|t| t.notice);
+                self.open_notif(notice);
             }
             PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {
                 if hit(&Rect::new(148, 16, 124, CC_TILE_H), x, y) {
-                    self.settings.focus_mode = !self.settings.focus_mode;
-                    self.invalidate(PanelKey::Control);
+                    // Focus is Do Not Disturb (one setting, also in the drawer).
+                    self.set_dnd(!self.settings.focus_mode);
                 }
                 for (i, sy) in SLIDER_Y.iter().enumerate() {
                     if hit(&Rect::new(16, *sy, CC_W - 32, CC_TILE_H), x, y) {
@@ -1418,6 +1452,7 @@ impl Desktop {
             self.close_launcher();
         } else {
             self.control = false;
+            super::skim::set_tabs(self.tab_list());
             self.launcher = Some(Launcher::new());
         }
     }
@@ -1432,6 +1467,7 @@ impl Desktop {
     }
 
     pub(super) fn launcher_key(&mut self, k: &super::window::KeyInput) {
+        super::skim::set_tabs(self.tab_list());
         let Some(l) = &mut self.launcher else {
             return;
         };
@@ -1480,6 +1516,7 @@ impl Desktop {
                 super::apps::settings::show_section(i);
                 self.open(App::Settings);
             }
+            Act::Tab(wid, i) => self.show_tab(wid, i),
             Act::Package(k) => {
                 if let Some(p) = super::packages::get(k) {
                     self.launch_package(&p);

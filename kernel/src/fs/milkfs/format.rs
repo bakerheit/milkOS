@@ -17,12 +17,14 @@ pub const BLOCK: usize = 4096;
 pub const MAGIC: &[u8; 8] = b"MILKFS01";
 /// Newest format this kernel reads. 1 = v0 + multi-block extents (`K_EXT`) and inline
 /// data (`K_INLINE`); 2 = v1 + shared blocks (reflink copies, `K_BREF`).
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// What a commit writes unless the volume has shared blocks: v0 volumes are upgraded to
 /// this by their first commit; a volume becomes v2 with its first reflink (older kernels
 /// would free a shared block while another file still uses it, so they must refuse it).
 pub const BASE_VERSION: u32 = 1;
 pub const REFLINK_VERSION: u32 = 2;
+/// v3: encrypted volumes (`SB_ENCRYPTED`); older kernels must refuse them.
+pub const CRYPT_VERSION: u32 = 3;
 /// Oldest format this kernel reads.
 pub const MIN_VERSION: u32 = 0;
 pub const NODE_MAGIC: &[u8; 4] = b"MKND";
@@ -273,11 +275,18 @@ pub struct Superblock {
     /// often to scrub (s; 0 = default, u32::MAX = never). Zeros from older kernels.
     pub last_scrub: u64,
     pub scrub_every: u32,
+    /// Encrypted volumes: the keyring block (plaintext, wrapped keys) and a MAC of the
+    /// superblock (bytes 0..SB_MAC, keyed by the volume key) so it can't be altered.
+    pub keyring: BlockPtr,
+    pub sb_mac: u64,
 }
 
 /// Superblock flag: history is no longer linear (a clone was promoted), so dead lists
 /// are not kept and snapshot delete / rollback free space by an exact reachability sweep.
 pub const SB_BRANCHED: u32 = 1;
+/// Superblock flag: every block but the superblocks and the keyring is encrypted
+/// (see `crypt.rs`); `keyring` points at the wrapped volume keys.
+pub const SB_ENCRYPTED: u32 = 2;
 
 // Superblock byte offsets.
 const SB_VERSION: usize = 8;
@@ -297,11 +306,15 @@ const SB_AUTO: usize = 3992;
 const SB_FLAGS: usize = 4008;
 const SB_SPACEMAP: usize = 4016;
 const SB_SCRUB: usize = 4040;
+const SB_KEYRING: usize = 4052;
+/// The superblock MAC covers bytes 0..SB_MAC.
+pub const SB_MAC: usize = 4076;
 const SB_CSUM: usize = BLOCK - 8;
 
 const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
 const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_SPACEMAP);
-const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_SCRUB && SB_SCRUB + 12 <= SB_CSUM);
+const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_SCRUB && SB_SCRUB + 12 <= SB_KEYRING);
+const _: () = assert!(SB_KEYRING + PTR_SIZE <= SB_MAC && SB_MAC + 8 <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -354,6 +367,8 @@ impl Superblock {
         self.spacemap.put(&mut b[SB_SPACEMAP..]);
         b[SB_SCRUB..SB_SCRUB + 8].copy_from_slice(&self.last_scrub.to_le_bytes());
         b[SB_SCRUB + 8..SB_SCRUB + 12].copy_from_slice(&self.scrub_every.to_le_bytes());
+        self.keyring.put(&mut b[SB_KEYRING..]);
+        b[SB_MAC..SB_MAC + 8].copy_from_slice(&self.sb_mac.to_le_bytes());
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
         b
@@ -416,6 +431,8 @@ impl Superblock {
             spacemap: BlockPtr::get(&b[SB_SPACEMAP..]),
             last_scrub: le64(&b[SB_SCRUB..]),
             scrub_every: le32(&b[SB_SCRUB + 8..]),
+            keyring: BlockPtr::get(&b[SB_KEYRING..]),
+            sb_mac: le64(&b[SB_MAC..]),
         })
     }
 }
@@ -781,6 +798,88 @@ pub fn data_ptrs(k: &Key, v: &[u8]) -> Vec<BlockPtr> {
     match Ext::decode(k, v) {
         Some(e) => (0..e.csums.len()).map(|i| e.ptr(i)).collect(),
         None => Vec::new(),
+    }
+}
+
+// ---- keyring (encrypted volumes) ------------------------------------------------------
+//
+// One plaintext block: "MKKR" | version u32 = 1 | uuid [16] | slot count u32 | pad u32 |
+// slots of 128 bytes: kind u8 | log2 N u8 | r u8 | p u8 | pad [4] | salt [16] |
+// nonce [24] | wrapped volume key [32] | tag [16] | pad [32].
+
+pub const KEYRING_MAGIC: &[u8; 4] = b"MKKR";
+pub const SLOT_SIZE: usize = 128;
+pub const MAX_SLOTS: usize = 16;
+/// A slot unlocked by a passphrase (scrypt) ...
+pub const SLOT_PASSPHRASE: u8 = 1;
+/// ... or by the recovery key (128 random bits, HMAC-SHA256).
+pub const SLOT_RECOVERY: u8 = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct KeySlot {
+    pub kind: u8,
+    pub log_n: u8,
+    pub r: u8,
+    pub p: u8,
+    pub salt: [u8; 16],
+    pub nonce: [u8; 24],
+    pub wrapped: [u8; 32],
+    pub tag: [u8; 16],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Keyring {
+    pub uuid: [u8; 16],
+    pub slots: Vec<KeySlot>,
+}
+
+impl Keyring {
+    pub fn encode(&self) -> [u8; BLOCK] {
+        let mut b = [0u8; BLOCK];
+        b[..4].copy_from_slice(KEYRING_MAGIC);
+        b[4..8].copy_from_slice(&1u32.to_le_bytes());
+        b[8..24].copy_from_slice(&self.uuid);
+        b[24..28].copy_from_slice(&(self.slots.len().min(MAX_SLOTS) as u32).to_le_bytes());
+        for (i, s) in self.slots.iter().take(MAX_SLOTS).enumerate() {
+            let o = 32 + i * SLOT_SIZE;
+            b[o] = s.kind;
+            b[o + 1] = s.log_n;
+            b[o + 2] = s.r;
+            b[o + 3] = s.p;
+            b[o + 8..o + 24].copy_from_slice(&s.salt);
+            b[o + 24..o + 48].copy_from_slice(&s.nonce);
+            b[o + 48..o + 80].copy_from_slice(&s.wrapped);
+            b[o + 80..o + 96].copy_from_slice(&s.tag);
+        }
+        b
+    }
+
+    pub fn decode(b: &[u8; BLOCK]) -> Option<Keyring> {
+        if &b[..4] != KEYRING_MAGIC || le32(&b[4..]) != 1 {
+            return None;
+        }
+        let n = le32(&b[24..]) as usize;
+        if n > MAX_SLOTS {
+            return None;
+        }
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&b[8..24]);
+        let slots = (0..n)
+            .map(|i| {
+                let o = 32 + i * SLOT_SIZE;
+                KeySlot {
+                    kind: b[o],
+                    log_n: b[o + 1],
+                    r: b[o + 2],
+                    p: b[o + 3],
+                    salt: b[o + 8..o + 24].try_into().unwrap(),
+                    nonce: b[o + 24..o + 48].try_into().unwrap(),
+                    wrapped: b[o + 48..o + 80].try_into().unwrap(),
+                    tag: b[o + 80..o + 96].try_into().unwrap(),
+                }
+            })
+            .collect();
+        Some(Keyring { uuid, slots })
     }
 }
 

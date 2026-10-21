@@ -1,0 +1,12 @@
+[package]
+name = "drop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "drop"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

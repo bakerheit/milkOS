@@ -9,6 +9,10 @@ name = "milkos-kernel"
 test = false
 bench = false
 
+[dependencies]
+# Shared crypto primitives (also used by userland through rt): <repo>/crypto.
+milkcrypto = { path = "../crypto" }
+
 [features]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
 crash-test = []

@@ -293,7 +293,12 @@ impl Files {
             icons::draw(p, x, y + 4, 32, Icon::Clock, CREAM, 255, ESPRESSO, true);
             p.text_p(x + 44, y + 3, &sn.name, ESPRESSO, true);
             let sub = format!("{}   generation {}", when(sn.created), sn.generation);
-            p.text_p(x + 44, y + 21, &sub, COCOA, false);
+            let c = if self.selected == Some(i) {
+                ESPRESSO
+            } else {
+                COCOA
+            };
+            p.text_p(x + 44, y + 21, &sub, c, false);
         }
     }
 }

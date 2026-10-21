@@ -29,18 +29,20 @@ LOGS="$(mktemp -d /tmp/milk-crash.XXXXXX)"
 cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
-python3 scripts/mkmilkfs.py mkfs "$IMG" --size 64M --label Milk --force >/dev/null
+source scripts/enc.sh
+milk_enc_setup "$LOGS"
+python3 scripts/mkmilkfs.py mkfs "$IMG" --size 64M --label Milk --force ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 
 QPID=""
 cleanup() { [ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true; }
 trap cleanup EXIT
 
 boot() { # mode log
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
     -display none -monitor none -serial "file:$2" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
-    -fw_cfg "name=opt/milkos/test,string=$1" 2>/dev/null &
+    -fw_cfg "name=opt/milkos/test,string=$1" ${ENC_QEMU[@]+"${ENC_QEMU[@]}"} 2>/dev/null &
   QPID=$!
 }
 stop() { kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""; }

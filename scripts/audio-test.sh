@@ -33,7 +33,7 @@ KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 
 SERIAL="$WORK/serial.sock"
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
+qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
   -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
   -display none -global virtio-mmio.force-legacy=false \
   -audiodev "wav,id=snd0,path=$WAV,out.frequency=48000" -device virtio-sound-device,audiodev=snd0 \

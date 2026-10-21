@@ -58,10 +58,10 @@ function s01(){
   );
   // Terminal
   h+=B(440,270,520,290,`background:${C.esp};border-radius:12px;box-shadow:0 18px 40px rgba(60,40,30,.35);overflow:hidden`,
-    B(0,0,520,30,`background:#4A3C34`)+lights(14,9)+TC(110,7,300,'andrew &mdash; sh',`color:${C.sand}`)+
-    T(14,46,'andrew@milk ~ % uname -a',`color:${C.cream}`)+T(14,64,'milkOS 0.1 aarch64 milk',`color:${C.latte}`)+
-    T(14,90,'andrew@milk ~ % ls',`color:${C.cream}`)+T(14,108,'projects  school  todo.txt  ideas.md',`color:${C.matcha}`)+
-    T(14,134,'andrew@milk ~ % ',`color:${C.cream}`)+B(142,134,8,16,`background:${C.cream}`)
+    B(0,0,520,30,`background:#4A3C34`)+lights(14,9)+TC(110,7,300,'milk &mdash; sh',`color:${C.sand}`)+
+    T(14,46,'milk@milk ~ % uname -a',`color:${C.cream}`)+T(14,64,'milkOS 0.1 aarch64 milk',`color:${C.latte}`)+
+    T(14,90,'milk@milk ~ % ls',`color:${C.cream}`)+T(14,108,'projects  school  todo.txt  ideas.md',`color:${C.matcha}`)+
+    T(14,134,'milk@milk ~ % ',`color:${C.cream}`)+B(142,134,8,16,`background:${C.cream}`)
   );
   // dock
   const items=[['folder',C.honey],['term',C.esp],['globe',C.blue],['note',C.milk],['music',C.straw],['photo',C.milk],['cal',C.milk],['gear',C.latte]];
@@ -147,11 +147,11 @@ function s05(){
   h+=TR(1012,4,'Tue 10:41   87%',`color:${C.sand}`);
   const pane=(x,y,w,hh,title,body,f)=>B(x,y,w,hh,`border:${f?2:1}px solid ${f?C.honey:C.latte};background:${C.milk}`,T(8,-9,`&nbsp;${title}&nbsp;`,`background:${C.cream};color:${f?C.esp:C.cocoa}`)+body);
   h+=pane(8,40,640,690,'shell',
-    T(12,14,`<span style="color:${C.straw}">andrew@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ milk status`)+
+    T(12,14,`<span style="color:${C.straw}">milk@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ milk status`)+
     T(12,38,'kernel   milkOS 0.1.0  (aarch64)')+T(12,56,'uptime   2h 14m')+T(12,74,'disk     212 GB free')+
-    T(12,104,`<span style="color:${C.straw}">andrew@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ ls`)+
+    T(12,104,`<span style="color:${C.straw}">milk@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ ls`)+
     T(12,128,`<span style="color:${C.blue}">docs/</span>  <span style="color:${C.blue}">kernel/</span>  <span style="color:${C.blue}">scripts/</span>  Cargo.toml  README.md`)+
-    T(12,158,`<span style="color:${C.straw}">andrew@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ `)+B(212,158,8,16,`background:${C.esp}`),true);
+    T(12,158,`<span style="color:${C.straw}">milk@milk</span> <span style="color:${C.blue}">~/milkOS</span> $ `)+B(212,158,8,16,`background:${C.esp}`),true);
   h+=pane(660,40,356,270,'clock + disks',
     T(12,16,'10:41:07',X3+BD)+T(12,72,'Tuesday 20 October',`color:${C.cocoa}`)+
     T(12,108,'/       ')+B(80,110,240,12,`background:${C.sand}`,B(0,0,70,12,`background:${C.matcha}`))+
@@ -171,7 +171,7 @@ function s05(){
 function s06(){
   let h=B(0,0,1024,768,`background:${C.cream}`);
   h+=B(0,0,1024,28,`background:${C.cream}`)+drop(16,8,13)+T(40,6,'<b>milk</b>')+TR(1008,6,'Wi-Fi   87%   10:41');
-  h+=T(48,56,'Good morning, Andrew',X3+BD)+T(48,112,'Tuesday, 20 October   2 events today',`color:${C.cocoa}`);
+  h+=T(48,56,'Good morning',X3+BD)+T(48,112,'Tuesday, 20 October   2 events today',`color:${C.cocoa}`);
   const card=(x,y,w,hh,c,t,body)=>B(x,y,w,hh,`background:${c};border-radius:22px;border:1px solid ${C.sand};overflow:hidden`,T(20,16,t,`color:${C.cocoa};font-size:11px;letter-spacing:1px`)+body);
   h+=card(48,156,300,220,C.milk,'CALENDAR',
     ['M','T','W','T','F','S','S'].map((d,i)=>TC(14+i*38,42,38,d,`color:${C.latte}`)).join('')+

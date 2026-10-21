@@ -115,7 +115,14 @@ pub struct Files {
     last_sec: u64,
     /// The Time Machine view's rows.
     snaps: Vec<Snap>,
+    /// Right-click menu: where, and for which item.
+    ctx: Option<(i32, i32, usize)>,
 }
+
+/// The right-click menu's rows.
+const CTX: [&str; 2] = ["Open", "Browse All Versions..."];
+const CTX_W: i32 = 210;
+const CTX_ROW: i32 = 26;
 
 impl Files {
     pub fn new() -> Files {
@@ -132,6 +139,7 @@ impl Files {
             size: (0, 0),
             last_sec: 0,
             snaps: Vec::new(),
+            ctx: None,
         };
         let start = PENDING.lock().take();
         f.go(start.as_deref().unwrap_or("/home/milk/Documents"));
@@ -238,6 +246,11 @@ impl Files {
             }
             Err(err) => super::super::notify("Restore failed", &format!("{}: {err}", e.name)),
         }
+    }
+
+    fn ctx_rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        let rh = CTX.len() as i32 * CTX_ROW + 12;
+        Rect::new(x.min(w - CTX_W - 4), y.min(h - rh - 4), CTX_W, rh)
     }
 
     fn restore_chip(w: i32, h: i32) -> Rect {
@@ -398,12 +411,69 @@ impl WindowContents for Files {
         if in_snapshot(&self.path).is_none() {
             p.text_right(w - 64, sy + 4, &fsx::pretty(&self.path), LATTE, 1, false);
         }
+        // The right-click menu, over everything.
+        if let Some((x, y, i)) = self.ctx {
+            let r = Self::ctx_rect(x, y, w, h);
+            p.shadow(r, 10, &SHADOW_FLOAT);
+            p.rrect_r(r, 10, MILK, 255);
+            p.rrect_stroke(r.x, r.y, r.w, r.h, 10, 1, SAND, 255);
+            let file = self
+                .items
+                .get(i)
+                .is_some_and(|e| e.kind != crate::fs::InodeType::Dir);
+            for (k, label) in CTX.iter().enumerate() {
+                let enabled = k == 0 || file;
+                p.text_p(
+                    r.x + 14,
+                    r.y + 6 + k as i32 * CTX_ROW + 4,
+                    label,
+                    if enabled { ESPRESSO } else { LATTE },
+                    false,
+                );
+            }
+        }
+    }
+
+    fn document_path(&self) -> Option<String> {
+        let e = self.items.get(self.selected?)?;
+        (e.kind != crate::fs::InodeType::Dir && in_snapshot(&self.path).is_none())
+            .then(|| fsx::resolve(&self.path, &e.name))
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {
-        let PointerKind::Down(_) = e.kind else {
+        let PointerKind::Down(button) = e.kind else {
             return false;
         };
+        // An open right-click menu takes the next click.
+        if let Some((x, y, i)) = self.ctx.take() {
+            let r = Self::ctx_rect(x, y, self.size.0, self.size.1);
+            if hit(&r, e.x, e.y) {
+                let k = ((e.y - r.y - 6) / CTX_ROW).clamp(0, CTX.len() as i32 - 1);
+                match k {
+                    0 => self.open(i),
+                    _ => {
+                        if let Some(p) = self.document_path() {
+                            super::versions::show(&p);
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        if button == super::super::event::Button::Right {
+            let item = (0..self.items.len()).find(|&i| {
+                let (cx, cy) = self.cell(i);
+                hit(&Rect::new(cx - 4, cy - 4, 100, 96), e.x, e.y)
+            });
+            if let Some(i) = item
+                && e.x >= SIDEBAR_W
+                && self.path != TM
+            {
+                self.selected = Some(i);
+                self.ctx = Some((e.x, e.y, i));
+            }
+            return true;
+        }
         if e.x < SIDEBAR_W {
             for (y, _, path) in Self::side_rows() {
                 if hit(&Rect::new(8, y, SIDEBAR_W - 16, 24), e.x, e.y) {

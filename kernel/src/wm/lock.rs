@@ -42,14 +42,14 @@ const CLOCK_Y: i32 = 176;
 
 fn paint(buf: &mut Buffer, glass: &Buffer) {
     let mut p = Painter::new(buf);
-    p.blit_same(Rect::new(0, 0, SCREEN_W, SCREEN_H), glass);
+    p.blit_same(Rect::new(0, 0, screen_w(), screen_h()), glass);
     // A soft veil so the clock reads on any wallpaper.
-    p.fill_a(0, 0, SCREEN_W, SCREEN_H, MILK, a(250));
+    p.fill_a(0, 0, screen_w(), screen_h(), MILK, a(250));
     let t = rtc::now();
     let clock = format!("{:02}:{:02}", t.hour, t.minute);
     let cw = crate::font::str_width(&clock, CLOCK_SCALE);
     p.text_x(
-        (SCREEN_W - cw) / 2,
+        (screen_w() - cw) / 2,
         CLOCK_Y,
         &clock,
         ESPRESSO,
@@ -64,7 +64,7 @@ fn paint(buf: &mut Buffer, glass: &Buffer) {
     );
     let dw = crate::font::str_width(&date, 2);
     p.text_x(
-        (SCREEN_W - dw) / 2,
+        (screen_w() - dw) / 2,
         CLOCK_Y + 16 * CLOCK_SCALE + 18,
         &date,
         COCOA,
@@ -72,16 +72,16 @@ fn paint(buf: &mut Buffer, glass: &Buffer) {
         true,
     );
     // Who is here, and how to get back in.
-    let cx = SCREEN_W / 2;
-    let ay = SCREEN_H - 230;
+    let cx = screen_w() / 2;
+    let ay = screen_h() - 230;
     p.circle(cx - 36, ay, 72, CREAM, 255);
     p.ring(cx - 36, ay, 72, 2, SAND, 255);
     icons::drop_shape(&mut p, cx, ay + 42, 17, 37, BLUE);
     icons::drop_shape(&mut p, cx, ay + 42, 13, 30, MILK);
-    p.text_p_center(0, SCREEN_W, ay + 84, "andrew", ESPRESSO, true);
+    p.text_p_center(0, screen_w(), ay + 84, "andrew", ESPRESSO, true);
     p.text_p_center(
         0,
-        SCREEN_W,
+        screen_w(),
         ay + 106,
         "Click or press any key to unlock",
         COCOA,
@@ -111,7 +111,7 @@ impl Desktop {
         if self.locked() {
             return;
         }
-        let Some(mut buf) = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0) else {
+        let Some(mut buf) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
             return;
         };
         paint(&mut buf, &self.wp.glass);
@@ -143,6 +143,17 @@ impl Desktop {
             self.idle_skew = 0;
             self.damage_all();
             crate::kprintln!("wm: screen unlocked");
+        }
+    }
+
+    /// The display mode changed: a lock screen that is up gets a buffer of the new size.
+    pub(super) fn relayout_lock(&mut self) {
+        let glass = &self.wp.glass;
+        if let Some(l) = self.lock.as_mut()
+            && let Some(mut buf) = Buffer::new(screen_w() as usize, screen_h() as usize, 0)
+        {
+            paint(&mut buf, glass);
+            l.buf = buf;
         }
     }
 
@@ -187,7 +198,7 @@ impl Desktop {
         if fading || settle {
             self.damage_all();
         } else if new_minute {
-            self.damage(Rect::new(0, CLOCK_Y - 8, SCREEN_W, 16 * CLOCK_SCALE + 80));
+            self.damage(Rect::new(0, CLOCK_Y - 8, screen_w(), 16 * CLOCK_SCALE + 80));
         }
         fading
     }

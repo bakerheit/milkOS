@@ -45,6 +45,7 @@
 # Desktop (wm): stty, the Paint window client, and the /dev/wm tools (user/desk).
 /bin/stty   target/user/aarch64-unknown-none-softfloat/release/stty    755
 /bin/paint  target/user/aarch64-unknown-none-softfloat/release/paint   755
+/bin/peek   target/user/aarch64-unknown-none-softfloat/release/peek    755
 /bin/open   target/user/aarch64-unknown-none-softfloat/release/open    755
 /bin/notify target/user/aarch64-unknown-none-softfloat/release/notify  755
 /bin/today  target/user/aarch64-unknown-none-softfloat/release/today   755

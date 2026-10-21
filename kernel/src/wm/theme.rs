@@ -3,8 +3,25 @@
 
 use crate::gfx::{Color, rgb};
 
-pub const SCREEN_W: i32 = 1024;
-pub const SCREEN_H: i32 = 768;
+/// The screen size (the display mode, Settings > Display & Lock): 1024x768 at boot.
+static SCREEN: [core::sync::atomic::AtomicI32; 2] = [
+    core::sync::atomic::AtomicI32::new(1024),
+    core::sync::atomic::AtomicI32::new(768),
+];
+
+pub fn screen_w() -> i32 {
+    SCREEN[0].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn screen_h() -> i32 {
+    SCREEN[1].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The desktop changed the display mode (wm thread).
+pub fn set_screen(w: i32, h: i32) {
+    SCREEN[0].store(w, core::sync::atomic::Ordering::Relaxed);
+    SCREEN[1].store(h, core::sync::atomic::Ordering::Relaxed);
+}
 
 // ---- colours ------------------------------------------------------------------------------
 pub const MILK: Color = rgb(0xFF, 0xFD, 0xF8);

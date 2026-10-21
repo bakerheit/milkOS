@@ -54,7 +54,8 @@ pub fn panic_screen(info: &core::panic::PanicInfo) {
         return;
     };
     // SAFETY: the static framebuffer; we are panicking, nothing else will draw again.
-    let mut fb = unsafe { Surface::from_raw(ptr, ramfb::WIDTH, ramfb::HEIGHT, ramfb::WIDTH) };
+    let (fw, fh) = ramfb::size();
+    let mut fb = unsafe { Surface::from_raw(ptr, fw, fh, fw) };
     let mut msg = Fixed {
         buf: [0; 1024],
         len: 0,
@@ -62,8 +63,8 @@ pub fn panic_screen(info: &core::panic::PanicInfo) {
     let _ = write!(msg, "{info}");
     let text = core::str::from_utf8(&msg.buf[..msg.len]).unwrap_or("(unprintable)");
     let (w, h) = (640, 300);
-    let (x, y) = ((SCREEN_W - w) / 2, (SCREEN_H - h) / 2);
-    fb.fill_rect_alpha(0, 0, SCREEN_W, SCREEN_H, ESPRESSO, a(450));
+    let (x, y) = ((screen_w() - w) / 2, (screen_h() - h) / 2);
+    fb.fill_rect_alpha(0, 0, screen_w(), screen_h(), ESPRESSO, a(450));
     fb.fill_rounded_rect(x, y, w, h, R_CARD, MILK, 255);
     fb.rounded_rect(x, y, w, h, R_CARD, 1, SAND, 255);
     fb.fill_rounded_rect(x + 24, y + 24, 40, 40, 10, STRAW, 255);

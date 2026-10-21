@@ -1,0 +1,13 @@
+[package]
+name = "peek"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "peek"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }

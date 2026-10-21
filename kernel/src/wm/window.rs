@@ -66,6 +66,15 @@ pub trait WindowContents {
     fn scroll(&mut self, _dy: i32) -> bool {
         false
     }
+    /// The file this window is about (Notes' note, Files' selected file), for File >
+    /// Browse Versions...
+    fn document_path(&self) -> Option<alloc::string::String> {
+        None
+    }
+    /// The window is finished (a dialog that has its answer): the desktop closes it.
+    fn wants_close(&self) -> bool {
+        false
+    }
     /// Cmd+W: close a part of the window (a tab) rather than the window. True if it did.
     fn close_part(&mut self) -> bool {
         false
@@ -90,6 +99,9 @@ pub enum App {
     Settings,
     Browser,
     Music,
+    Versions,
+    /// The trusted Open / Save panel (powerbox.rs).
+    Powerbox,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -104,6 +116,8 @@ impl App {
             App::Settings => "Settings",
             App::Browser => "Browser",
             App::Music => "Music",
+            App::Versions => "Versions",
+            App::Powerbox => "Open",
             App::Client(_) => "App",
         }
     }

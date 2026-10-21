@@ -58,7 +58,7 @@ pub fn zone_at(x: i32, y: i32) -> Option<Zone> {
             Zone::Left
         });
     }
-    if x >= SCREEN_W - 1 - EDGE {
+    if x >= screen_w() - 1 - EDGE {
         return Some(if top {
             Zone::TopRight
         } else if bottom {

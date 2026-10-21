@@ -9,6 +9,7 @@ pub mod music;
 pub mod notes;
 pub mod settings;
 pub mod terminal;
+pub mod versions;
 
 use alloc::boxed::Box;
 
@@ -30,8 +31,16 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
             Box::new(browser::Browser::new()),
         ),
         App::Music => (Rect::new(300, 92, 460, 476), Box::new(music::Music::new())),
+        App::Versions => (
+            Rect::new(110, 64, 800, 500),
+            Box::new(versions::Versions::new()),
+        ),
+        App::Powerbox => (
+            Rect::new(192, 120, 640, 460),
+            Box::new(super::powerbox::Panel::new()),
+        ),
         App::Settings => (
-            Rect::new(180, 80, 660, 420),
+            Rect::new(180, 80, 660, 468),
             Box::new(settings::Settings::new()),
         ),
         App::Client(id) => {

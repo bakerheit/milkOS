@@ -62,6 +62,9 @@ pub mod nr {
     pub const SET_ROBUST_LIST: u64 = 99;
     /// milkOS: shrink the caller's capability set from a text spec (sandbox launcher).
     pub const MILK_SANDBOX: u64 = 0x1000;
+    /// milkOS: ask the user for a file through the wm's trusted Open/Save panel (powerbox);
+    /// the chosen path is granted to the caller and returned opened. docs/security.md.
+    pub const MILK_POWERBOX: u64 = 0x1001;
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -485,6 +488,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             super::set_caps(shrunk);
             Ok(0)
         }
+        nr::MILK_POWERBOX => sys_powerbox(a0, a1, a2),
         nr::MILK_WIN_CREATE => sys_win_create(a0, a1, a2, a3, a[4] as usize),
         nr::MILK_WIN_COMMIT => {
             let r = crate::gfx::Rect::new(a1 as i32, a2 as i32, a3 as i32, a[4] as i32);
@@ -823,6 +827,60 @@ fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> 
         .lock()
         .fds
         .alloc(f, flags & abi::O_CLOEXEC != 0)?;
+    Ok(fd as usize)
+}
+
+/// MILK_POWERBOX(mode, name, name_len): mode 0 = open (read), 1 = save (read+write,
+/// created / truncated). `name` is a suggested file name for save (may be empty). Blocks
+/// while the wm shows its Open/Save panel; the path the user picks is added to the
+/// caller's fs grants (just that file) and returned as an open fd. Cancel: ECANCELED, no
+/// grant. A signal: EINTR (the panel goes away). Needs the windows capability. Audited as
+/// `powerbox.grant` / `powerbox.cancel`.
+fn sys_powerbox(mode: usize, name: usize, name_len: usize) -> KResult<usize> {
+    let caps = super::current_caps();
+    if !caps.windows {
+        return Err(super::caps::deny("powerbox", "need=windows"));
+    }
+    let save = mode & 1 != 0;
+    let suggested = if name_len > 0 {
+        let b = copy_in(name, name_len.min(255))?;
+        String::from_utf8_lossy(&b).replace(['/', '\0'], "")
+    } else {
+        String::new()
+    };
+    let pid = current().pid;
+    let path = match crate::wm::powerbox::ask(pid, save, &suggested) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            crate::audit::record(
+                "powerbox.cancel",
+                &alloc::format!("pid={pid} mode={}", if save { "save" } else { "open" }),
+            );
+            return Err(ECANCELED);
+        }
+        Err(()) => return Err(EINTR),
+    };
+    // Exactly that path, read for open, read+write for save. Re-read the caps: they may
+    // have shrunk while we waited (a sandbox call from another thread).
+    let grant = super::caps::FsGrant {
+        prefix: path.clone(),
+        write: save,
+    };
+    super::set_caps(super::current_caps().with_fs_grant(grant));
+    crate::audit::record(
+        "powerbox.grant",
+        &alloc::format!(
+            "pid={pid} path={path} mode={}",
+            if save { "rw" } else { "r" }
+        ),
+    );
+    let flags = if save {
+        abi::O_RDWR | abi::O_CREAT | abi::O_TRUNC
+    } else {
+        abi::O_RDONLY
+    };
+    let f = Arc::new(fs::open(&path, flags, 0o644 & !UMASK)?);
+    let fd = current().inner.lock().fds.alloc(f, false)?;
     Ok(fd as usize)
 }
 

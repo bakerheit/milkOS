@@ -64,7 +64,7 @@ fn size(n: u64) -> String {
     match n {
         0..1024 => alloc::format!("{n} B"),
         1024..1_048_576 => alloc::format!("{}.{} KB", n / 1024, n % 1024 * 10 / 1024),
-        _ => alloc::format!("{}.{} MB", n >> 20, (n & 0xfffff) * 10 >> 20),
+        _ => alloc::format!("{}.{} MB", n >> 20, ((n & 0xfffff) * 10) >> 20),
     }
 }
 

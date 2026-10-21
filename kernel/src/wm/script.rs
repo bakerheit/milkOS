@@ -21,6 +21,8 @@ pub enum Step {
     Panic,
     /// Pretend nobody touched anything for this many seconds (the idle lock).
     Idle(u64),
+    /// Switch the display mode.
+    Resolution(i32, i32),
 }
 
 pub struct Script {
@@ -58,6 +60,39 @@ impl B {
     }
     fn click(&mut self, x: i32, y: i32) -> &mut Self {
         self.to(x, y).wait(30).down().wait(30).up().wait(60)
+    }
+    fn rclick(&mut self, x: i32, y: i32) -> &mut Self {
+        self.to(x, y).wait(30);
+        self.ev(Event::Button {
+            button: Button::Right,
+            down: true,
+        })
+        .wait(30)
+        .ev(Event::Button {
+            button: Button::Right,
+            down: false,
+        })
+        .wait(60)
+    }
+    /// In the Terminal: a file with three snapshotted versions and a newer current one.
+    fn herd(&mut self) -> &mut Self {
+        const F: &str = "/home/milk/Documents/herd.txt";
+        self.wait(300);
+        for (i, line) in ["- one cow", "- two cows", "- three cows", "- a calf!"]
+            .iter()
+            .enumerate()
+        {
+            let op = if i == 0 { ">" } else { ">>" };
+            self.typ(&alloc::format!("echo '{line}' {op} {F}"))
+                .enter()
+                .wait(250);
+            if i < 3 {
+                self.typ(&alloc::format!("snap create herd{}", i + 1))
+                    .enter()
+                    .wait(500);
+            }
+        }
+        self
     }
     /// Press at (x0, y0), glide to (x1, y1) in `n` steps of ~16 ms, release.
     fn drag(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, n: i32) -> &mut Self {
@@ -618,7 +653,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         // Packages (docs/packages.md), against a repo served by scripts/wm-pkg-demo.sh: install
         // fortune and moo2048 from the Terminal; their dock tiles appear within 3 s.
-        "pkgdock" | "pkgrun" | "pkgfortune" => {
+        "pkgdock" | "pkgrun" | "pkgfortune" | "pkgsandbox" => {
             let url = host_test_url();
             b.wait(300)
                 .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
@@ -629,9 +664,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
             // Sorted by name: fortune is tile 9, moo2048 tile 10.
-            if name == "pkgrun" {
+            if name == "pkgrun" || name == "pkgsandbox" {
                 let (x, y) = dock_icon_center_of(10, 2);
                 b.click(x, y).wait(2000);
+            }
+            if name == "pkgsandbox" {
+                // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
+                b.key(Key::Left, Mods::NONE).wait(300);
+                let (x, y) = dock_icon_center_of(1, 2);
+                b.click(x, y).wait(400);
+                b.typ("audit --event sandbox").enter().wait(800);
             } else if name == "pkgfortune" {
                 let (x, y) = dock_icon_center_of(9, 2);
                 b.click(x, y).wait(2000);
@@ -639,6 +681,123 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 let (x, y) = dock_icon_center_of(10, 2);
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
+        }
+        // Versions: Files (window (96, 64), body (97, 97)), herd.txt is the first icon.
+        "versions" | "versionsrestore" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(300);
+            b.click(321 + 40, 150 + 6 + 26 + 10).wait(1200);
+            if name == "versionsrestore" {
+                // One version further back (herd2), then Restore (window (110, 64) 800 x 500).
+                b.key(Key::Down, Mods::NONE).wait(300);
+                b.click(111 + 798 - 16 - 90, 97 + 466 - 44 + 22).wait(1200);
+            }
+        }
+        "filesctx" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(400);
+        }
+        "notesversions" => {
+            b.herd();
+            b.typ("open /home/milk/Documents/herd.txt")
+                .enter()
+                .wait(1000);
+            b.click(115, 14).wait(400).click(160, 130).wait(1200);
+        }
+        // Powerbox: peek sandboxes itself (no fs), asks for a file through the wm's panel.
+        "powerbox" | "powerboxpick" | "powerboxsave" | "powerboxaudit" => {
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.key(Key::Char('o'), Mods::NONE).wait(900);
+            if name != "powerbox" {
+                // Documents: ideas.md, todo.txt. Pick todo.txt.
+                b.key(Key::Down, Mods::NONE)
+                    .key(Key::Down, Mods::NONE)
+                    .wait(200)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxsave" || name == "powerboxaudit" {
+                // Save a copy: the suggested name, Enter.
+                b.key(Key::Char('s'), Mods::NONE)
+                    .wait(900)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxaudit" {
+                let (x, y) = dock_icon_center(1);
+                b.click(x, y).wait(400);
+                b.typ("clear").enter().wait(200);
+                b.typ("ls ~/Documents").enter().wait(300);
+                b.typ("audit --event powerbox").enter().wait(500);
+                b.typ("audit --event sandbox").enter().wait(800);
+            }
+        }
+        // Screenshots (Cmd+Shift+3 / 4), saved to ~/Pictures.
+        "shot" | "shotregion" | "shotselect" => {
+            let cs = Mods {
+                meta: true,
+                shift: true,
+                ..Mods::NONE
+            };
+            if name == "shot" {
+                b.wait(300).key(Key::Char('3'), cs).wait(2500);
+            } else {
+                b.wait(300).key(Key::Char('4'), cs).wait(300);
+                b.to(300, 90).wait(30).down().wait(30);
+                for i in 1..=12 {
+                    b.to(300 + 32 * i, 90 + 25 * i).wait(16);
+                }
+                if name == "shotregion" {
+                    b.up().wait(2500);
+                } else {
+                    b.wait(300);
+                }
+            }
+        }
+        // Display modes: Settings > Display & Lock > Resolution (buttons at body y 219).
+        "res1280" | "res1440" | "resback" | "res1440click" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            let i = if name == "res1280" { 1 } else { 2 };
+            b.click(181 + 188 + i * 112 + 52, 113 + 219).wait(1500);
+            if name == "res1440click" {
+                // The dock moved with the screen: Terminal's tile is now at (540, 856).
+                b.click(540, 856)
+                    .wait(600)
+                    .typ("echo clicked at 1440x900")
+                    .enter()
+                    .wait(500);
+            }
+            if name == "resback" {
+                // Settings stays where it was: 1024 x 768 is the first button.
+                b.click(181 + 188 + 52, 113 + 219).wait(1500);
+            }
+        }
+        // Overlays at 1440x900: Spaces, Today, Skim, the lock screen.
+        "big-spaces" | "big-today" | "big-skim" | "big-lock" => {
+            b.0.push(Step::Resolution(1440, 900));
+            b.wait(600);
+            match name {
+                "big-spaces" => b.key(Key::F(3), Mods::NONE),
+                "big-today" => b.key(Key::F(4), Mods::NONE),
+                "big-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("mo"),
+                _ => b.key(Key::Char('q'), Mods::META_CTRL),
+            };
+            b.wait(900);
+        }
+        "bench1280" | "bench1440" => {
+            let (w, h) = if name == "bench1280" {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
+            b.wait(800);
+            b.0.push(Step::Bench);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);
@@ -651,13 +810,13 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // Settings > Display & Lock > 5 min.
             let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
-            b.click(181 + 188 + 2 * 82 + 38, 113 + 249).wait(400);
+            b.click(181 + 188 + 2 * 82 + 38, 113 + 325).wait(400);
         }
         "idlelock" => {
             // Settings > Display & Lock > 1 min, then a minute of (pretend) idleness.
             let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
-            b.click(181 + 188 + 82 + 38, 113 + 249).wait(300);
+            b.click(181 + 188 + 82 + 38, 113 + 325).wait(300);
             b.0.push(Step::Idle(61));
             b.wait(800);
         }
@@ -773,6 +932,9 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Idle(s) => d.pretend_idle(*s),
+                Step::Resolution(w, h) => {
+                    d.set_resolution(*w, *h);
+                }
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

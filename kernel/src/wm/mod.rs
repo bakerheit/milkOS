@@ -30,11 +30,15 @@ mod lock;
 mod menus;
 mod packages;
 mod paint;
+mod png;
 mod power;
+pub mod powerbox;
 pub mod prefs;
 mod rtc;
+mod screen;
 mod script;
 mod shell;
+mod shot;
 mod skim;
 mod snap;
 mod theme;
@@ -64,13 +68,22 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 // ---- public API ------------------------------------------------------------------------------
 
 /// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-static NOTIFY: SpinLock<Vec<(String, String)>> = SpinLock::new(Vec::new());
+/// Toasts posted from any thread: (title, subtitle, play the notify sound).
+static NOTIFY: SpinLock<Vec<(String, String, bool)>> = SpinLock::new(Vec::new());
 
 /// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
 pub fn notify(title: &str, subtitle: &str) {
     NOTIFY
         .lock()
-        .push((String::from(title), String::from(subtitle)));
+        .push((String::from(title), String::from(subtitle), true));
+    WAKE.wake_all();
+}
+
+/// A toast without the notify sound (when the action had its own, e.g. the shutter).
+pub fn notify_quiet(title: &str, subtitle: &str) {
+    NOTIFY
+        .lock()
+        .push((String::from(title), String::from(subtitle), false));
     WAKE.wake_all();
 }
 
@@ -109,6 +122,8 @@ pub enum Request {
     NewTab(Option<String>),
     /// Show the lock screen.
     Lock,
+    /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
+    Powerbox,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -158,9 +173,15 @@ pub fn run() {
         "wm: desktop up in {} ms (wallpaper + blur + first frame + fade)",
         (timer::now_ns() - t0) / 1_000_000
     );
+    // A display mode saved in Settings.
+    let res = prefs::get().resolution;
+    if res != (theme::screen_w(), theme::screen_h()) {
+        d.set_resolution(res.0, res.1);
+    }
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
+    powerbox::set_up();
     let mut next = timer::now_ns();
     loop {
         let busy = d.frame();
@@ -298,12 +319,15 @@ pub struct Desktop {
     /// Last key press or click (the idle lock timer); demos add pretend idle time.
     last_input: u64,
     idle_skew: u64,
+    /// Cmd+Shift+4 region selection (shot.rs); compose without cursor / overlay (capture).
+    shot: Option<shot::Select>,
+    shot_hide: bool,
 }
 
 impl Desktop {
     fn new(fb: Surface<'static>) -> Result<Desktop, Surface<'static>> {
         rtc::init();
-        let Some(back) = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0) else {
+        let Some(back) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
             return Err(fb);
         };
         let t = timer::now_ns();
@@ -345,6 +369,8 @@ impl Desktop {
             lock_a: 0,
             last_input: t,
             idle_skew: 0,
+            shot: None,
+            shot_hide: false,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -399,8 +425,8 @@ impl Desktop {
 
     /// Cross-fade from whatever is on screen (the boot splash) to the composed desktop.
     fn fade_in(&mut self) {
-        let n = (SCREEN_W * SCREEN_H) as usize;
-        let splash: Option<Buffer> = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0);
+        let n = (screen_w() * screen_h()) as usize;
+        let splash: Option<Buffer> = Buffer::new(screen_w() as usize, screen_h() as usize, 0);
         if let Some(mut sp) = splash {
             sp.pixels_mut()[..n].copy_from_slice(&self.fb.pixels()[..n]);
             const STEPS: u32 = 12;
@@ -420,14 +446,14 @@ impl Desktop {
     // ---- damage -------------------------------------------------------------------------------
 
     fn damage(&mut self, r: Rect) {
-        let r = r.clipped(SCREEN_W as usize, SCREEN_H as usize);
+        let r = r.clipped(screen_w() as usize, screen_h() as usize);
         if !r.is_empty() {
             self.damage.add(r);
         }
     }
 
     fn damage_all(&mut self) {
-        self.damage(Rect::new(0, 0, SCREEN_W, SCREEN_H));
+        self.damage(Rect::new(0, 0, screen_w(), screen_h()));
     }
 
     fn cursor_rect(&self) -> Rect {
@@ -489,13 +515,34 @@ impl Desktop {
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
     fn launch(&mut self, path: &str) {
+        self.launch_with(path, None);
+    }
+
+    /// Start a program (or show its window if it runs), optionally sandboxed from its first
+    /// instruction.
+    fn launch_with(
+        &mut self,
+        path: &str,
+        caps: Option<(alloc::sync::Arc<crate::proc::caps::Caps>, String)>,
+    ) {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
             return;
         }
-        match crate::proc::spawn(path, &[name]) {
+        let spec = caps.as_ref().map(|c| c.1.clone());
+        let started = match caps {
+            Some((c, _)) => crate::proc::spawn_with_caps(path, &[name], c),
+            None => crate::proc::spawn(path, &[name]),
+        };
+        match started {
             Ok(pid) => {
+                if let Some(spec) = spec {
+                    crate::audit::record(
+                        "sandbox.enter",
+                        &alloc::format!("pid={pid} exe={path} spec={spec}"),
+                    );
+                }
                 kprintln!("wm: started {path} as pid {pid}");
                 let name = alloc::string::String::from(name);
                 drop(sched::spawn("reap-app", move || {
@@ -526,7 +573,32 @@ impl Desktop {
     /// An installed package: its window app, or its program in a Terminal tab.
     fn launch_package(&mut self, p: &packages::Pkg) {
         if p.window {
-            self.launch(&p.exec);
+            // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
+            // system is their own /Applications/<name> read-only and ~/Library/<name>
+            // read-write; no network, no spawning, no clipboard; more only through the
+            // powerbox, one user-chosen file at a time.
+            let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
+            let lib = alloc::format!("/home/milk/Library/{}", p.dir);
+            let _ = crate::fs::mkdir_all(&lib, 0o755);
+            let caps = crate::proc::caps::Caps {
+                fs: Some(alloc::vec![
+                    crate::proc::caps::FsGrant {
+                        prefix: app_dir.clone(),
+                        write: false,
+                    },
+                    crate::proc::caps::FsGrant {
+                        prefix: lib.clone(),
+                        write: true,
+                    },
+                ]),
+                net: crate::proc::caps::Net::None,
+                audio: true,
+                clipboard: false,
+                windows: true,
+                spawn: false,
+            };
+            let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
+            self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)));
         } else {
             // By its /bin name when milk linked it there (a shorter tab label).
             let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
@@ -595,6 +667,14 @@ impl Desktop {
         }
         if p.dock != old.dock {
             theme::set_dock_icon(p.dock);
+        }
+        if p.resolution != (theme::screen_w(), theme::screen_h())
+            && !self.set_resolution(p.resolution.0, p.resolution.1)
+        {
+            self.post_toast(
+                "Can't switch the display",
+                "not enough memory for that size",
+            );
         }
         self.settings.brightness = p.brightness;
         // Everything may look different: redraw every window and panel.
@@ -751,8 +831,8 @@ impl Desktop {
 
     /// The area between the menu bar and the dock.
     fn work_area() -> Rect {
-        let dock_top = SCREEN_H - DOCK_BOTTOM - dock_h();
-        Rect::new(0, MENU_H, SCREEN_W, dock_top - MENU_H)
+        let dock_top = screen_h() - DOCK_BOTTOM - dock_h();
+        Rect::new(0, MENU_H, screen_w(), dock_top - MENU_H)
     }
 
     fn zoom(&mut self, id: u32) {
@@ -777,8 +857,8 @@ impl Desktop {
         let old = w.bounds();
         let (ww, _) = (w.rect.w, w.rect.h);
         // Keep the title bar reachable.
-        let x = x.clamp(80 - ww, SCREEN_W - 80);
-        let y = y.clamp(MENU_H, SCREEN_H - TITLE_H - 8);
+        let x = x.clamp(80 - ww, screen_w() - 80);
+        let y = y.clamp(MENU_H, screen_h() - TITLE_H - 8);
         let w = self.win_mut(id).unwrap();
         if (w.rect.x, w.rect.y) == (x, y) {
             return;
@@ -795,8 +875,8 @@ impl Desktop {
             return;
         };
         let r = w.rect;
-        let nw = nw.clamp(WIN_MIN_W, SCREEN_W - r.x.max(0));
-        let nh = nh.clamp(WIN_MIN_H, SCREEN_H - r.y);
+        let nw = nw.clamp(WIN_MIN_W, screen_w() - r.x.max(0));
+        let nh = nh.clamp(WIN_MIN_H, screen_h() - r.y);
         if (nw, nh) == (r.w, r.h) {
             return;
         }
@@ -859,11 +939,15 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
+        self.post_toast_with(title, sub, true);
+    }
+
+    fn post_toast_with(&mut self, title: &str, sub: &str, sound: bool) {
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
         }
-        if prefs::get().sound {
+        if sound && prefs::get().sound {
             crate::audio::play_system(crate::audio::Sound::Notify);
         }
         let id = self.next_toast;
@@ -1097,6 +1181,11 @@ impl Desktop {
                 }
             }
         }
+        if let Some(s) = &self.shot
+            && !self.shot_hide
+        {
+            shot::draw(s, &mut p, d);
+        }
         if self.lock_a > 0 {
             lock::draw(&self.lock, &mut p, d, self.lock_a);
         }
@@ -1111,7 +1200,7 @@ impl Desktop {
             let a = ((100 - self.settings.brightness) * 255 / 100 * 7 / 10) as u8;
             p.fill_a(d.x, d.y, d.w, d.h, 0, a);
         }
-        if cur.intersects(&d) {
+        if cur.intersects(&d) && !self.shot_hide {
             p.sprite(
                 cur.x,
                 cur.y,
@@ -1141,9 +1230,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String)> = core::mem::take(&mut *NOTIFY.lock());
-        for (t, s) in posted {
-            self.post_toast(&t, &s);
+        let posted: Vec<(String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
+        for (t, s, sound) in posted {
+            self.post_toast_with(&t, &s, sound);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1162,6 +1251,11 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::Lock => self.lock_screen(),
+                Request::Powerbox => {
+                    if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
+                        self.open(App::Powerbox);
+                    }
+                }
                 Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
@@ -1298,6 +1392,16 @@ impl Desktop {
                 w.dirty = true;
             }
         }
+        // Dialogs that are done (the powerbox panel once answered or withdrawn).
+        let done: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.contents.wants_close())
+            .map(|w| w.id)
+            .collect();
+        for id in done {
+            self.close(id);
+        }
         // Once a second: CPU, clock, live panels.
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
@@ -1354,11 +1458,40 @@ impl Desktop {
             self.last_input = timer::now_ns();
             self.idle_skew = 0;
         }
+        // Choosing a screenshot region: drag it out, Esc cancels; nothing else gets through.
+        if self.shot.is_some() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                    self.shot_move(x, y);
+                }
+                Event::Button {
+                    button: Button::Left,
+                    down,
+                } => {
+                    if down {
+                        self.shot_press();
+                    } else {
+                        self.shot_release();
+                    }
+                }
+                Event::Key {
+                    key: Key::Escape,
+                    down: true,
+                    ..
+                } => self.shot_cancel(),
+                _ => {}
+            }
+            return;
+        }
         // Locked: the pointer moves, a click or a key unlocks, nothing else gets through.
         if self.locked() {
             match ev {
                 Event::PointerMove { x, y } => {
-                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
                     self.damage(self.cursor_rect());
                     self.pointer = (x, y);
                     self.damage(self.cursor_rect());
@@ -1388,6 +1521,10 @@ impl Desktop {
                 button: Button::Left,
                 down: false,
             } => self.release(),
+            Event::Button {
+                button: Button::Right,
+                down: true,
+            } => self.right_click(),
             Event::Button { .. } => {}
             Event::Scroll { dy } => {
                 let (x, y) = self.pointer;
@@ -1417,7 +1554,7 @@ impl Desktop {
     }
 
     fn pointer_move(&mut self, x: i32, y: i32) {
-        let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+        let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
         if (x, y) == self.pointer {
             return;
         }
@@ -1528,6 +1665,31 @@ impl Desktop {
         };
         if w.contents.pointer(&e) {
             w.dirty = true;
+        }
+    }
+
+    /// Right button: closes menus and overlays; on a window body it focuses the window and
+    /// hands it the click (context menus, e.g. Files' Browse All Versions).
+    fn right_click(&mut self) {
+        let (x, y) = self.pointer;
+        if self.menu.is_some() || self.launcher.is_some() || self.control {
+            self.set_menu(None);
+            self.close_launcher();
+            self.control = false;
+            return;
+        }
+        if self.mode != Mode::Desktop {
+            return;
+        }
+        let Some(id) = self.window_at(x, y) else {
+            return;
+        };
+        self.set_focus(Some(id));
+        if self
+            .win(id)
+            .is_some_and(|w| w.hit(x, y) == Some(Part::Body))
+        {
+            self.send_pointer(id, x, y, PointerKind::Down(Button::Right));
         }
     }
 
@@ -1674,6 +1836,9 @@ impl Desktop {
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
             Key::Char('q') if m.meta && m.ctrl => return self.lock_screen(),
+            // Screenshots: Cmd+Shift+3 the screen, Cmd+Shift+4 a region.
+            Key::Char('3' | '#') if m.meta && m.shift => return self.capture(None),
+            Key::Char('4' | '$') if m.meta && m.shift => return self.shot_region_start(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {

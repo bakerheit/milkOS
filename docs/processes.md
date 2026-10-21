@@ -182,7 +182,7 @@ Implemented (number: name):
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
-| milkOS | 0x1000 sandbox (shrink capabilities; see docs/security.md) |
+| milkOS | 0x1000 sandbox (shrink capabilities; see docs/security.md), 0x1001 powerbox (ask the user for one file through the wm's Open/Save panel; docs/security.md) |
 
 ### Threads, chroot, sandbox
 

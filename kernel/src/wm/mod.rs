@@ -31,6 +31,7 @@ mod menus;
 mod packages;
 mod paint;
 mod power;
+pub mod powerbox;
 pub mod prefs;
 mod rtc;
 mod script;
@@ -109,6 +110,8 @@ pub enum Request {
     NewTab(Option<String>),
     /// Show the lock screen.
     Lock,
+    /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
+    Powerbox,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -161,6 +164,7 @@ pub fn run() {
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
+    powerbox::set_up();
     let mut next = timer::now_ns();
     loop {
         let busy = d.frame();
@@ -489,13 +493,34 @@ impl Desktop {
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
     fn launch(&mut self, path: &str) {
+        self.launch_with(path, None);
+    }
+
+    /// Start a program (or show its window if it runs), optionally sandboxed from its first
+    /// instruction.
+    fn launch_with(
+        &mut self,
+        path: &str,
+        caps: Option<(alloc::sync::Arc<crate::proc::caps::Caps>, String)>,
+    ) {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
             return;
         }
-        match crate::proc::spawn(path, &[name]) {
+        let spec = caps.as_ref().map(|c| c.1.clone());
+        let started = match caps {
+            Some((c, _)) => crate::proc::spawn_with_caps(path, &[name], c),
+            None => crate::proc::spawn(path, &[name]),
+        };
+        match started {
             Ok(pid) => {
+                if let Some(spec) = spec {
+                    crate::audit::record(
+                        "sandbox.enter",
+                        &alloc::format!("pid={pid} exe={path} spec={spec}"),
+                    );
+                }
                 kprintln!("wm: started {path} as pid {pid}");
                 let name = alloc::string::String::from(name);
                 drop(sched::spawn("reap-app", move || {
@@ -526,7 +551,32 @@ impl Desktop {
     /// An installed package: its window app, or its program in a Terminal tab.
     fn launch_package(&mut self, p: &packages::Pkg) {
         if p.window {
-            self.launch(&p.exec);
+            // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
+            // system is their own /Applications/<name> read-only and ~/Library/<name>
+            // read-write; no network, no spawning, no clipboard; more only through the
+            // powerbox, one user-chosen file at a time.
+            let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
+            let lib = alloc::format!("/home/milk/Library/{}", p.dir);
+            let _ = crate::fs::mkdir_all(&lib, 0o755);
+            let caps = crate::proc::caps::Caps {
+                fs: Some(alloc::vec![
+                    crate::proc::caps::FsGrant {
+                        prefix: app_dir.clone(),
+                        write: false,
+                    },
+                    crate::proc::caps::FsGrant {
+                        prefix: lib.clone(),
+                        write: true,
+                    },
+                ]),
+                net: crate::proc::caps::Net::None,
+                audio: true,
+                clipboard: false,
+                windows: true,
+                spawn: false,
+            };
+            let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
+            self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)));
         } else {
             // By its /bin name when milk linked it there (a shorter tab label).
             let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
@@ -1162,6 +1212,11 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::Lock => self.lock_screen(),
+                Request::Powerbox => {
+                    if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
+                        self.open(App::Powerbox);
+                    }
+                }
                 Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
@@ -1297,6 +1352,16 @@ impl Desktop {
             if w.contents.tick(now) {
                 w.dirty = true;
             }
+        }
+        // Dialogs that are done (the powerbox panel once answered or withdrawn).
+        let done: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.contents.wants_close())
+            .map(|w| w.id)
+            .collect();
+        for id in done {
+            self.close(id);
         }
         // Once a second: CPU, clock, live panels.
         let sec = now / 1_000_000_000;

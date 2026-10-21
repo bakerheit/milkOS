@@ -335,6 +335,17 @@ fn basename(path: &str) -> &str {
 
 /// Start the program at `path` as a new process with the kernel as parent, on the console.
 pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
+    spawn_with_caps(path, argv, caps::Caps::all())
+}
+
+/// [`spawn`] with a capability set from the first instruction (the desktop runs packaged
+/// apps sandboxed this way; no window in which the program runs unrestricted). `cwd` is
+/// `/`, HOME is the user's home. The binary is loaded by the kernel, so it needs no grant.
+pub fn spawn_with_caps(
+    path: &str,
+    argv: &[&str],
+    caps: alloc::sync::Arc<caps::Caps>,
+) -> KResult<Pid> {
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
     let envp = [String::from("PATH=/bin"), String::from("HOME=/")];
@@ -355,7 +366,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         argv,
         exe: String::from(path),
         clear_child_tid: 0,
-        caps: caps::Caps::all(),
+        caps,
     })
 }
 

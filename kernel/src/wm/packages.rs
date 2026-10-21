@@ -24,6 +24,8 @@ pub const DIR: &str = "/Applications";
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pkg {
     pub name: String,
+    /// Its directory under /Applications.
+    pub dir: String,
     /// Dock label.
     pub label: String,
     pub color: Color,
@@ -114,6 +116,7 @@ fn parse(name: &str, text: &str) -> Option<Pkg> {
         exec,
         window,
         name: pname,
+        dir: String::from(name),
     })
 }
 

@@ -651,7 +651,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         // Packages (docs/packages.md), against a repo served by scripts/wm-pkg-demo.sh: install
         // fortune and moo2048 from the Terminal; their dock tiles appear within 3 s.
-        "pkgdock" | "pkgrun" | "pkgfortune" => {
+        "pkgdock" | "pkgrun" | "pkgfortune" | "pkgsandbox" => {
             let url = host_test_url();
             b.wait(300)
                 .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
@@ -662,9 +662,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
             // Sorted by name: fortune is tile 9, moo2048 tile 10.
-            if name == "pkgrun" {
+            if name == "pkgrun" || name == "pkgsandbox" {
                 let (x, y) = dock_icon_center_of(10, 2);
                 b.click(x, y).wait(2000);
+            }
+            if name == "pkgsandbox" {
+                // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
+                b.key(Key::Left, Mods::NONE).wait(300);
+                let (x, y) = dock_icon_center_of(1, 2);
+                b.click(x, y).wait(400);
+                b.typ("audit --event sandbox").enter().wait(800);
             } else if name == "pkgfortune" {
                 let (x, y) = dock_icon_center_of(9, 2);
                 b.click(x, y).wait(2000);
@@ -698,6 +705,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .enter()
                 .wait(1000);
             b.click(115, 14).wait(400).click(160, 130).wait(1200);
+        }
+        // Powerbox: peek sandboxes itself (no fs), asks for a file through the wm's panel.
+        "powerbox" | "powerboxpick" | "powerboxsave" | "powerboxaudit" => {
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.key(Key::Char('o'), Mods::NONE).wait(900);
+            if name != "powerbox" {
+                // Documents: ideas.md, todo.txt. Pick todo.txt.
+                b.key(Key::Down, Mods::NONE)
+                    .key(Key::Down, Mods::NONE)
+                    .wait(200)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxsave" || name == "powerboxaudit" {
+                // Save a copy: the suggested name, Enter.
+                b.key(Key::Char('s'), Mods::NONE)
+                    .wait(900)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxaudit" {
+                let (x, y) = dock_icon_center(1);
+                b.click(x, y).wait(400);
+                b.typ("clear").enter().wait(200);
+                b.typ("ls ~/Documents").enter().wait(300);
+                b.typ("audit --event powerbox").enter().wait(500);
+                b.typ("audit --event sandbox").enter().wait(800);
+            }
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

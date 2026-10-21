@@ -49,26 +49,47 @@ grant — a known gap (an early-LSM-style limitation); grants should name real d
 and a future version resolves to the inode. `..` is collapsed before matching, so it can't
 walk out. chroot and the sandbox compose: a jailed, sandboxed process is bounded by both.
 
-### Powerbox: granting one file by asking the user (design, no UI yet)
+### Powerbox: granting one file by asking the user
 
 A sandboxed process with no broad fs grant asks the window server to let the user pick a
-file; on confirmation the kernel adds *just that path* to the process's grants. The flow:
+file; on confirmation the kernel adds *just that path* to the process's grants.
 
-1. The process calls a `powerbox_open(mode)` request (a new `MILK_POWERBOX` syscall, or a
-   message on the wm device). It blocks.
-2. The kernel asks the wm (which owns the screen and input) to show a file picker **in the
-   wm's own, trusted UI** — never drawn by the requesting process, so the process can't spoof
-   or pre-fill it. The request carries only the mode (open/save) and a suggested name.
-3. The user picks a file (or cancels). The wm returns the chosen absolute path to the
-   kernel.
-4. The kernel adds a single grant for exactly that path (`caps.with_fs_grant`, read for
-   open, read+write for save) to the process, opens it, and returns the fd. Cancel →
-   `ECANCELED`, no grant added.
+**Syscall** `MILK_POWERBOX = 0x1001` (`proc/syscall.rs`, `sys_powerbox`), args
+`(mode, name, name_len)`: mode 0 = open (read), 1 = save (read+write, created/truncated);
+`name` is a suggested file name for save (`/` stripped, 255 bytes max). Userland:
+`rt::sys::powerbox_open()`, `rt::sys::powerbox_save(name)`, both returning an open fd.
+Needs the `windows` capability (else EACCES, audited). Errors: `ECANCELED` (125) when the
+user cancels, `EINTR` when a signal arrives while the panel is up (the panel then closes).
 
-The grant is one file, added by the user's own action, so the sandbox stays shrink-only in
-spirit: the process never widens its own authority; the user does, per file, through trusted
-UI. `with_fs_grant` already exists in `caps.rs`; the kernel↔wm message and the picker are
-the wm agent's to wire. Audited as `powerbox.grant path=… mode=…`.
+**Kernel ↔ wm message** (`kernel/src/wm/powerbox.rs`): the syscall calls
+`wm::powerbox::ask(pid, save, suggested)` on the requesting thread. That queues a request
+(pid, the process name as the kernel knows it, open/save, the suggested name — nothing else
+from the process), posts `Request::Powerbox` to the desktop and sleeps on a wait queue
+(100 ms ticks, checking `signal::interrupted()`). The desktop shows one panel at a time
+(`App::Powerbox`), which answers with an absolute path or `None`; closing it is a cancel.
+Without a running desktop `ask` answers `None` at once.
+
+**The panel** is the wm's own window: header "*app* (pid N) wants to open/save a file" and
+"Only the file you choose is shared with it", places (Home, Documents, ...), the folder's
+contents, a name field for save, Cancel / Open (Save). The app can't draw on it, pre-fill a
+path, or send it input.
+
+**The grant**: `caps.with_fs_grant(FsGrant { prefix: <exact path>, write: save })` on the
+process (one file: grants match the path itself or below it, and a file has nothing below),
+then the kernel opens it and returns the fd. Audited as `powerbox.grant pid= path= mode=r|rw`,
+cancels as `powerbox.cancel pid= mode=`. The process never widens its own authority; the user
+does, per file, through trusted UI.
+
+**Packaged window apps run sandboxed** (desktop dock / Skim launches of `milk` packages
+whose program links `user/gui`): `proc::spawn_with_caps` starts them with `fs` =
+`/Applications/<name>:r` + `~/Library/<name>:rw` (created first), `net none`, no clipboard,
+no spawning, windows and audio on — from the first instruction (no window in which they run
+unrestricted). Audited as `sandbox.enter pid= exe= spec=`. Anything else they need comes
+through the powerbox. Terminal programs from packages run in the Terminal as before.
+
+**Demo**: `/bin/peek` sandboxes itself (`fs-none net=none spawn=0 clipboard=0`), shows that a
+direct open of `~/Documents/todo.txt` fails (EACCES, `sandbox.deny`), then opens and saves
+files only through the panel (wm demos `powerbox`, `powerboxpick`, `powerboxaudit`).
 
 # The audit log
 

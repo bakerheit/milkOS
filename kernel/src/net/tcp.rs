@@ -28,11 +28,12 @@ use super::Stack;
 use super::Stats;
 use super::errno::*;
 use super::iface::{Iface, PROTO_TCP};
+use super::ipv6::{self, State6};
 use super::ring::Ring;
 use super::socket::{
     MAX_BUF, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDHUP, POLLRDNORM, POLLWRNORM, SockType,
 };
-use super::wire::{Ipv4, SockAddr, be16, be32, finish, pseudo_sum, put16, put32, sum};
+use super::wire::{IpAddr, Ipv4, Ipv6, SockAddr, be16, be32, finish, l4_sum, put16, put32, sum};
 use crate::fs::errno::{Errno, Result};
 
 pub const MAX_BACKLOG: usize = 16;
@@ -353,7 +354,9 @@ impl Tcb {
     /// Sender MSS for congestion control: payload of a full segment with the options every
     /// segment carries (timestamps), so cwnd holds whole segments (RFC 5681 SMSS).
     fn smss(&self) -> u32 {
-        (self.mss as u32).saturating_sub(if self.ts_ok { 12 } else { 0 }).max(64)
+        (self.mss as u32)
+            .saturating_sub(if self.ts_ok { 12 } else { 0 })
+            .max(64)
     }
 
     fn max_sack_blocks(&self) -> usize {
@@ -567,12 +570,12 @@ struct Opts {
 }
 
 impl Opts {
-    fn write(&self, b: &mut [u8]) -> usize {
+    fn write(&self, b: &mut [u8], mss: u16) -> usize {
         let mut k = 0;
         if self.syn {
             b[0] = 2;
             b[1] = 4;
-            put16(b, 2, OUR_MSS);
+            put16(b, 2, mss);
             k = 4;
             if self.sack_ok {
                 b[k..k + 4].copy_from_slice(&[1, 1, 4, 2]);
@@ -628,25 +631,25 @@ fn emit(
         out.stats.tcp_out_rsts += 1;
     }
     let seg = |b: &mut [u8], src: IpAddr, dst: IpAddr| {
-            put16(b, 0, local.port);
-            put16(b, 2, remote.port);
-            put32(b, 4, h.seq);
-            put32(b, 8, h.ack);
-            let ol = o.write(&mut b[20..60]);
-            let hl = 20 + ol;
-            b[12] = ((hl / 4) << 4) as u8;
-            b[13] = h.flags;
-            put16(b, 14, h.wnd);
-            put16(b, 16, 0);
-            put16(b, 18, 0);
-            let mut n = hl;
-            if let Some((ring, off, len)) = data {
-                let len = len.min(b.len() - hl);
-                n += ring.peek_at(off, &mut b[hl..hl + len]);
-            }
-            let c = finish(sum(&b[..n], l4_sum(src, dst, PROTO_TCP, n)));
-            put16(b, 16, c);
-            n
+        put16(b, 0, local.port);
+        put16(b, 2, remote.port);
+        put32(b, 4, h.seq);
+        put32(b, 8, h.ack);
+        let ol = o.write(&mut b[20..60], our_mss(local.ip));
+        let hl = 20 + ol;
+        b[12] = ((hl / 4) << 4) as u8;
+        b[13] = h.flags;
+        put16(b, 14, h.wnd);
+        put16(b, 16, 0);
+        put16(b, 18, 0);
+        let mut n = hl;
+        if let Some((ring, off, len)) = data {
+            let len = len.min(b.len() - hl);
+            n += ring.peek_at(off, &mut b[hl..hl + len]);
+        }
+        let c = finish(sum(&b[..n], l4_sum(src, dst, PROTO_TCP, n)));
+        put16(b, 16, c);
+        n
     };
     match (local.ip, remote.ip) {
         (IpAddr::V6(l6), IpAddr::V6(r6)) => ipv6::send_on(
@@ -1591,7 +1594,11 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
     // 3 duplicate ACKs, so the threshold is the flight minus one.
     let mss = t.smss();
     let segs = t.snd_max.wrapping_sub(t.snd_una).div_ceil(mss);
-    let thresh = if segs < 4 { segs.saturating_sub(1).max(1) } else { 3 };
+    let thresh = if segs < 4 {
+        segs.saturating_sub(1).max(1)
+    } else {
+        3
+    };
     if !t.in_recovery
         && t.snd_una != t.snd_max
         && (t.dupacks as u32 >= thresh || (t.sack_ok && t.sacked_bytes() >= thresh * mss))

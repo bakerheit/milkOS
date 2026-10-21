@@ -635,7 +635,11 @@ impl Iface {
             // rate is 1 in `every` but the losses don't line up with the traffic's own
             // period (dropping exactly every Nth packet can hit the same packet of a
             // repeating exchange for ever).
-            let mut x = if self.lo_seen == 0 { 0x6d69_6c6b } else { self.lo_seen };
+            let mut x = if self.lo_seen == 0 {
+                0x6d69_6c6b
+            } else {
+                self.lo_seen
+            };
             x ^= x << 13;
             x ^= x >> 17;
             x ^= x << 5;

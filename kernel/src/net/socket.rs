@@ -292,7 +292,9 @@ fn check_local_ip(st: &Stack, ip: IpAddr) -> Result<()> {
 /// Our source address for `dst` (None: no route / no usable address).
 pub fn source_for(st: &Stack, dst: IpAddr, scope: Option<usize>) -> Option<IpAddr> {
     match dst {
-        IpAddr::V4(d) => Some(st.iface.src_for(d)).filter(|a| !a.is_unspecified()).map(IpAddr::V4),
+        IpAddr::V4(d) => Some(st.iface.src_for(d))
+            .filter(|a| !a.is_unspecified())
+            .map(IpAddr::V4),
         IpAddr::V6(d) => super::ipv6::src_for(&st.iface, d, scope).map(IpAddr::V6),
     }
 }
@@ -312,7 +314,8 @@ pub fn takes(s: &Sock, dst: IpAddr) -> bool {
     if s.local.ip.is_unspecified() {
         return true;
     }
-    s.local.ip == dst || ((dst.is_broadcast() || dst.is_multicast()) && s.local.ip.is_v6() == dst.is_v6())
+    s.local.ip == dst
+        || ((dst.is_broadcast() || dst.is_multicast()) && s.local.ip.is_v6() == dst.is_v6())
 }
 
 /// Can socket `s` talk to `to`? (An AF_INET socket can't reach IPv6; a v6-only socket
@@ -383,6 +386,11 @@ pub fn family(id: SocketId) -> Result<Family> {
     with(|st| st.socks.lookup(id).map(|(_, s)| s.family))
 }
 
+/// The link a scoped (link-local) IPv6 socket is bound to, if any.
+pub fn scope(id: SocketId) -> Result<Option<usize>> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.scope))
+}
+
 /// Set the link for a scoped IPv6 address (sin6_scope_id; 0 = none).
 pub fn set_scope(id: SocketId, scope: Option<usize>) -> Result<()> {
     with(|st| {
@@ -402,6 +410,20 @@ pub fn socket_icmp() -> Result<SocketId> {
     with(|st| {
         let i = st.socks.alloc(SockType::Dgram).ok_or(ENOBUFS)?;
         st.socks.get(i).unwrap().icmp = true;
+        Ok(st.socks.id_of(i).unwrap())
+    })
+}
+
+/// socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6): the same for ICMPv6 echo (type 128 in,
+/// 129 back). IPv6 only.
+pub fn socket_icmp6() -> Result<SocketId> {
+    with(|st| {
+        let i = st.socks.alloc(SockType::Dgram).ok_or(ENOBUFS)?;
+        let s = st.socks.get(i).unwrap();
+        s.icmp = true;
+        s.family = Family::V6;
+        s.v6only = true;
+        s.local.ip = IpAddr::ANY6;
         Ok(st.socks.id_of(i).unwrap())
     })
 }
@@ -583,13 +605,18 @@ pub fn recv(id: SocketId, buf: &mut [u8]) -> Result<usize> {
 
 /// recvfrom(2): like [`recv`], plus the sender (TCP: the peer).
 pub fn recvfrom(id: SocketId, buf: &mut [u8]) -> Result<(usize, SockAddr)> {
+    recvfrom_scoped(id, buf).map(|(n, a, _)| (n, a))
+}
+
+/// [`recvfrom`], plus the link a link-local IPv6 sender is on (its sin6_scope_id).
+pub fn recvfrom_scoped(id: SocketId, buf: &mut [u8]) -> Result<(usize, SockAddr, Option<usize>)> {
     with(|st| {
         let (i, s) = st.socks.lookup(id)?;
         match s.ty {
             SockType::Dgram => udp::recvfrom(s, buf),
             SockType::Stream => {
-                let peer = s.remote;
-                tcp::recv(st, i, buf).map(|n| (n, peer))
+                let (peer, scope) = (s.remote, s.scope);
+                tcp::recv(st, i, buf).map(|n| (n, peer, scope))
             }
         }
     })

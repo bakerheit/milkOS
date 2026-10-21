@@ -101,6 +101,9 @@ pub struct Stack {
     pub wake_any: bool,
     /// Time of the current processing pass (set on entry).
     pub now: u64,
+    /// The link the IPv6 segment being processed came in on, when its addresses are
+    /// link-scoped (TCP answers and new connections need it). None otherwise.
+    pub rx_link: Option<usize>,
 }
 
 static NET: SpinLock<Option<Box<Stack>>> = SpinLock::new(None);
@@ -146,6 +149,7 @@ fn new_stack() -> Box<Stack> {
         wake_mask: 0,
         wake_any: false,
         now: timer::now_ns(),
+        rx_link: None,
     })
 }
 

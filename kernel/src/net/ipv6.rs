@@ -31,10 +31,13 @@ use alloc::vec::Vec;
 
 use super::Stack;
 use super::iface::{ETH_HDR, Iface, MTU};
-use super::wire::{Ipv6, Mac, be16, be32, finish, pseudo_sum6, put16, put32, sum};
+use super::socket::Family;
+use super::wire::{
+    IpAddr, Ipv6, Mac, SockAddr, be16, be32, finish, pseudo_sum6, put16, put32, sum,
+};
 use crate::fs::errno::Result;
-use crate::net::errno::*;
 use crate::kprintln;
+use crate::net::errno::*;
 
 pub const ETHERTYPE_IPV6: u16 = 0x86dd;
 pub const HDR: usize = 40;
@@ -307,7 +310,10 @@ pub fn is_ours(iface: &Iface, ip: Ipv6) -> bool {
 
 /// The link that owns `ip`.
 pub fn link_of(iface: &Iface, ip: Ipv6) -> Option<usize> {
-    iface.links.iter().position(|l| l.up() && l.v6.has(ip, false))
+    iface
+        .links
+        .iter()
+        .position(|l| l.up() && l.v6.has(ip, false))
 }
 
 /// Which link a destination goes out of, and the next hop. `scope`: the link a scoped
@@ -322,8 +328,8 @@ fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)
             return Some((1, dst)); // .local lives on the VM link
         }
         // A link-local neighbour we already know, else eth1 (the VM link), else eth0.
-        if let Some(k) = (0..iface.links.len())
-            .find(|&k| up(k) && iface.links[k].v6.lookup(dst).is_some())
+        if let Some(k) =
+            (0..iface.links.len()).find(|&k| up(k) && iface.links[k].v6.lookup(dst).is_some())
         {
             return Some((k, dst));
         }
@@ -333,12 +339,11 @@ fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)
         if !l.up() {
             continue;
         }
-        let on_link = l
-            .v6
-            .addrs
-            .iter()
-            .any(|a| a.origin != Origin::LinkLocal && dst.same_prefix(a.addr, a.plen))
-            || l.v6.prefixes.iter().any(|&(p, n, _)| dst.same_prefix(p, n));
+        let on_link =
+            l.v6.addrs
+                .iter()
+                .any(|a| a.origin != Origin::LinkLocal && dst.same_prefix(a.addr, a.plen))
+                || l.v6.prefixes.iter().any(|&(p, n, _)| dst.same_prefix(p, n));
         if on_link {
             return Some((k, dst));
         }
@@ -355,7 +360,11 @@ fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)
 /// else eth0's SLAAC address.
 pub fn src_for(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<Ipv6> {
     if dst.is_loopback() || is_ours(iface, dst) {
-        return Some(if dst.is_loopback() { Ipv6::LOOPBACK } else { dst });
+        return Some(if dst.is_loopback() {
+            Ipv6::LOOPBACK
+        } else {
+            dst
+        });
     }
     let (k, _) = route(iface, dst, scope)?;
     let l6 = &iface.links[k].v6;
@@ -414,7 +423,17 @@ fn send_hop(
     fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
 ) -> Result<()> {
     let now = st.now;
-    send_on(&mut st.iface, &mut st.ip6, now, src, dst, scope, next, hop, fill)
+    send_on(
+        &mut st.iface,
+        &mut st.ip6,
+        now,
+        src,
+        dst,
+        scope,
+        next,
+        hop,
+        fill,
+    )
 }
 
 /// The sending core, on the parts of the stack it needs (so TCP can call it while it
@@ -510,7 +529,8 @@ fn flush_parked(st: &mut Stack, k: usize, ip: Ipv6, mac: Mac) {
 }
 
 /// An ICMPv6 message: `fill` writes the body after the 4-byte type/code/checksum header.
-fn send_icmp(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn send_icmp(
     st: &mut Stack,
     src: Ipv6,
     dst: Ipv6,
@@ -537,24 +557,36 @@ fn send_icmp(
 fn send_ns(st: &mut Stack, k: usize, target: Ipv6, src: Ipv6, with_slla: bool) {
     let mac = st.iface.links[k].mac;
     let src = if src.is_unspecified() && with_slla {
-        st.iface.links[k].v6.link_local().unwrap_or(Ipv6::UNSPECIFIED)
+        st.iface.links[k]
+            .v6
+            .link_local()
+            .unwrap_or(Ipv6::UNSPECIFIED)
     } else {
         src
     };
     let with_slla = with_slla && !src.is_unspecified();
     st.ip6.stats.nd_out += 1;
-    let _ = send_icmp(st, src, target.solicited_node(), Some(k), 255, 135, 0, |b| {
-        put32(b, 0, 0);
-        b[4..20].copy_from_slice(&target.0);
-        if with_slla {
-            b[20] = 1;
-            b[21] = 1;
-            b[22..28].copy_from_slice(&mac.0);
-            24
-        } else {
-            20
-        }
-    });
+    let _ = send_icmp(
+        st,
+        src,
+        target.solicited_node(),
+        Some(k),
+        255,
+        135,
+        0,
+        |b| {
+            put32(b, 0, 0);
+            b[4..20].copy_from_slice(&target.0);
+            if with_slla {
+                b[20] = 1;
+                b[21] = 1;
+                b[22..28].copy_from_slice(&mac.0);
+                24
+            } else {
+                20
+            }
+        },
+    );
 }
 
 fn send_na(st: &mut Stack, k: usize, target: Ipv6, to: Ipv6, solicited: bool) {
@@ -573,7 +605,10 @@ fn send_na(st: &mut Stack, k: usize, target: Ipv6, to: Ipv6, solicited: bool) {
 
 fn send_rs(st: &mut Stack, k: usize) {
     let mac = st.iface.links[k].mac;
-    let src = st.iface.links[k].v6.link_local().unwrap_or(Ipv6::UNSPECIFIED);
+    let src = st.iface.links[k]
+        .v6
+        .link_local()
+        .unwrap_or(Ipv6::UNSPECIFIED);
     st.ip6.stats.nd_out += 1;
     let _ = send_icmp(st, src, Ipv6::ALL_ROUTERS, Some(k), 255, 133, 0, |b| {
         put32(b, 0, 0);
@@ -784,6 +819,20 @@ fn icmp_input(
         }
         129 if p.len() >= 8 => {
             st.ip6.stats.icmp_in_echo_reps += 1;
+            // A ping socket's reply (AF_INET6, IPPROTO_ICMPV6)?
+            let id = be16(p, 4);
+            let target = st.socks.iter().find(|(_, s)| {
+                s.icmp
+                    && s.family == Family::V6
+                    && s.owns_port
+                    && s.local.port == id
+                    && (!s.udp_connected || s.remote.ip == IpAddr::V6(src))
+            });
+            if let Some((i, _)) = target {
+                let scope = link.filter(|_| src.is_link_local());
+                super::udp::queue(st, i, SockAddr::new(src, 0), scope, p);
+                return;
+            }
             let r = &mut st.ip6.ping_replies;
             if r.len() >= 32 {
                 r.remove(0);
@@ -803,9 +852,12 @@ fn icmp_input(
     let _ = pkt;
 }
 
+/// A prefix information option: (prefix, length, flags, valid lifetime).
+type PrefixInfo = (Ipv6, u8, u8, u32);
+
 /// The options of an ND message from offset `o`: (source link-layer address, target
 /// link-layer address, MTU, prefix infos).
-fn nd_opts(p: &[u8], mut o: usize) -> (Option<Mac>, Option<Mac>, Option<u32>, Vec<(Ipv6, u8, u8, u32)>) {
+fn nd_opts(p: &[u8], mut o: usize) -> (Option<Mac>, Option<Mac>, Option<u32>, Vec<PrefixInfo>) {
     let (mut slla, mut tlla, mut mtu, mut pfx) = (None, None, None, Vec::new());
     while o + 2 <= p.len() {
         let (t, len) = (p[o], p[o + 1] as usize * 8);
@@ -870,7 +922,7 @@ fn nd_input(st: &mut Stack, k: usize, src: Ipv6, dst: Ipv6, p: &[u8], src_mac: M
                 dad_failed(st, k, target, "a neighbour advertises it");
                 return;
             }
-            if let Some(m) = tlla.or(Some(src_mac).filter(|_| !dst.is_multicast())) {
+            if let Some(m) = tlla.or((!dst.is_multicast()).then_some(src_mac)) {
                 st.iface.links[k].v6.learn(target, m, now, router);
                 flush_parked(st, k, target, m);
             }
@@ -973,7 +1025,12 @@ pub fn tick(st: &mut Stack) {
             l6.router = None;
         }
         // Router solicitation (eth0 only: the VM link has no routers).
-        if k == 0 && l6.rs_sent < RS_TRIES && l6.rs_next != 0 && now >= l6.rs_next && l6.router.is_none() {
+        if k == 0
+            && l6.rs_sent < RS_TRIES
+            && l6.rs_next != 0
+            && now >= l6.rs_next
+            && l6.router.is_none()
+        {
             l6.rs_sent += 1;
             l6.rs_next = now + RS_INTERVAL;
             send_rs(st, k);
@@ -996,7 +1053,9 @@ pub fn tick(st: &mut Stack) {
             send_ns(st, k, ip, Ipv6::UNSPECIFIED, true);
         }
     }
-    st.ip6.parked.retain(|p| now.saturating_sub(p.since) < PENDING_NS);
+    st.ip6
+        .parked
+        .retain(|p| now.saturating_sub(p.since) < PENDING_NS);
 }
 
 /// The next IPv6 timer (DAD, RS, ND retries), for the net thread.

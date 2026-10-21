@@ -1,5 +1,6 @@
 //! UDP (RFC 768) over IPv4 and IPv6. Datagrams wait in the socket's receive ring as
-//! records: `[len: u16][family: u8 (4/6)][0][src port: u16][src address: 16][payload]`.
+//! records: `[len: u16][family: u8 (4/6)][link: u8 (0 none, else index + 1)][src port: u16]
+//! [src address: 16][payload]`. The link is the scope of a link-local IPv6 sender.
 
 use super::errno::*;
 use super::iface::{MTU, PROTO_UDP};
@@ -54,11 +55,25 @@ pub fn send_scoped(
                 n
             })
         }
-        IpAddr::V4(d4) => send_v4(st, src.ip.v4().unwrap_or(Ipv4::UNSPECIFIED), src.port, d4, dst.port, data),
+        IpAddr::V4(d4) => send_v4(
+            st,
+            src.ip.v4().unwrap_or(Ipv4::UNSPECIFIED),
+            src.port,
+            d4,
+            dst.port,
+            data,
+        ),
     }
 }
 
-fn send_v4(st: &mut Stack, src: Ipv4, sport: u16, dst: Ipv4, dport: u16, data: &[u8]) -> Result<()> {
+fn send_v4(
+    st: &mut Stack,
+    src: Ipv4,
+    sport: u16,
+    dst: Ipv4,
+    dport: u16,
+    data: &[u8],
+) -> Result<()> {
     if data.len() > MAX_DATAGRAM {
         return Err(EMSGSIZE);
     }
@@ -103,7 +118,13 @@ pub fn sendto(st: &mut Stack, i: usize, data: &[u8], to: SockAddr) -> Result<usi
         return Err(EPIPE);
     }
     socket::family_ok(s, to.ip)?;
-    if data.len() > if to.ip.is_v6() { MAX_PAYLOAD6 } else { MAX_DATAGRAM } {
+    if data.len()
+        > if to.ip.is_v6() {
+            MAX_PAYLOAD6
+        } else {
+            MAX_DATAGRAM
+        }
+    {
         return Err(EMSGSIZE);
     }
     if !s.owns_port {
@@ -117,7 +138,11 @@ pub fn sendto(st: &mut Stack, i: usize, data: &[u8], to: SockAddr) -> Result<usi
     // A dual-stack socket's wildcard local address fits either family.
     let src = if local.ip.is_unspecified() || local.ip.is_v6() != to.ip.is_v6() {
         SockAddr {
-            ip: if to.ip.is_v6() { IpAddr::ANY6 } else { IpAddr::ANY4 },
+            ip: if to.ip.is_v6() {
+                IpAddr::ANY6
+            } else {
+                IpAddr::ANY4
+            },
             port: local.port,
         }
     } else {
@@ -137,14 +162,14 @@ pub fn next_len(s: &Sock) -> usize {
     }
 }
 
-pub fn recvfrom(s: &mut Sock, buf: &mut [u8]) -> Result<(usize, SockAddr)> {
+pub fn recvfrom(s: &mut Sock, buf: &mut [u8]) -> Result<(usize, SockAddr, Option<usize>)> {
     let mut h = [0u8; REC_HDR];
     if s.rx.peek_at(0, &mut h) < REC_HDR {
         if let Some(e) = s.error.take() {
             return Err(e);
         }
         if s.shut_rd {
-            return Ok((0, SockAddr::ANY));
+            return Ok((0, SockAddr::ANY, None));
         }
         return Err(EAGAIN);
     }
@@ -155,11 +180,12 @@ pub fn recvfrom(s: &mut Sock, buf: &mut [u8]) -> Result<(usize, SockAddr)> {
         IpAddr::V4(Ipv4([h[6], h[7], h[8], h[9]]))
     };
     let from = SockAddr::new(ip, be16(&h, 4));
+    let scope = h[3].checked_sub(1).map(usize::from);
     s.rx.consume(REC_HDR);
     let m = len.min(buf.len());
     let n = s.rx.pop(&mut buf[..m]);
     s.rx.consume(len - n); // truncated datagram: the rest is gone
-    Ok((n, from))
+    Ok((n, from, scope))
 }
 
 pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8], ip_pkt: &[u8]) {
@@ -224,14 +250,15 @@ fn deliver(st: &mut Stack, src: IpAddr, dst: IpAddr, p: &[u8], ip_pkt: &[u8], li
         return;
     };
     st.stats.udp_in_datagrams += 1;
-    if !queue(st, i, from, data) {
+    let scope = link.filter(|_| src.v6().is_some_and(|a| a.is_link_local()) || dst.is_multicast());
+    if !queue(st, i, from, scope, data) {
         st.stats.udp_rcvbuf_errors += 1;
     }
 }
 
 /// Queue one datagram record for socket slot `i` (UDP, or ICMP ping sockets). False if it
 /// did not fit (dropped).
-pub fn queue(st: &mut Stack, i: usize, from: SockAddr, data: &[u8]) -> bool {
+pub fn queue(st: &mut Stack, i: usize, from: SockAddr, link: Option<usize>, data: &[u8]) -> bool {
     let s = st.socks.get(i).unwrap();
     if s.shut_rd || s.rx.free() < REC_HDR + data.len() {
         s.rx_drops += 1;
@@ -240,6 +267,7 @@ pub fn queue(st: &mut Stack, i: usize, from: SockAddr, data: &[u8]) -> bool {
     let mut h = [0u8; REC_HDR];
     put16(&mut h, 0, data.len() as u16);
     put16(&mut h, 4, from.port);
+    h[3] = link.map_or(0, |k| k as u8 + 1);
     match from.ip {
         IpAddr::V4(a) => {
             h[2] = 4;

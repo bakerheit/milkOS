@@ -15,7 +15,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::errno::{self, *};
-use super::socket::{self, POLLIN, POLLOUT, SockType, SocketId};
+use super::socket::{self, Family, POLLIN, POLLOUT, SockType, SocketId};
 use super::wire::{Ipv4, Ipv6, SockAddr, checksum, put16};
 use super::{dns, services};
 use crate::fs::errno::{Errno, Result};
@@ -91,7 +91,12 @@ fn es(x: Errno) -> String {
 
 /// Blocking connect with a timeout.
 fn connect(addr: SockAddr, timeout_ms: u64) -> Result<SocketId> {
-    let s = socket::socket(SockType::Stream)?;
+    connect_fam(Family::V4, addr, timeout_ms)
+}
+
+/// [`connect`] from a socket of family `fam`.
+fn connect_fam(fam: Family, addr: SockAddr, timeout_ms: u64) -> Result<SocketId> {
+    let s = socket::socket_family(fam, SockType::Stream)?;
     match socket::connect(s, addr) {
         Ok(()) => return Ok(s),
         Err(x) if x == EINPROGRESS => {}
@@ -220,10 +225,9 @@ fn ping6(dst: Ipv6, seq: u16, timeout_ms: u64) -> core::result::Result<u64, Stri
         .map_err(|x| alloc::format!("send: {}", e(x)))?;
     let got = wait_for(timeout_ms, || {
         super::with(|st| {
-            st.ip6
-                .ping_replies
-                .iter()
-                .any(|&(from, id, sq, _, _)| id == 0x6d6b && sq == seq && (from == dst || dst.is_multicast()))
+            st.ip6.ping_replies.iter().any(|&(from, id, sq, _, _)| {
+                id == 0x6d6b && sq == seq && (from == dst || dst.is_multicast())
+            })
         })
     });
     if got {
@@ -235,9 +239,17 @@ fn ping6(dst: Ipv6, seq: u16, timeout_ms: u64) -> core::result::Result<u64, Stri
 
 fn test_ipv6() -> core::result::Result<(), String> {
     // Link-local after DAD (0.5 s), then SLAAC from slirp's RA (it answers our RS).
-    let ll = wait_for(2000, || super::with(|st| st.iface.eth0().v6.link_local().is_some()));
+    let ll = wait_for(2000, || {
+        super::with(|st| st.iface.eth0().v6.link_local().is_some())
+    });
     let slaac = wait_for(4000, || {
-        super::with(|st| st.iface.eth0().v6.addr(super::ipv6::Origin::Slaac).is_some())
+        super::with(|st| {
+            st.iface
+                .eth0()
+                .v6
+                .addr(super::ipv6::Origin::Slaac)
+                .is_some()
+        })
     });
     let (lla, ga, router) = super::with(|st| {
         let v = &st.iface.eth0().v6;
@@ -259,7 +271,9 @@ fn test_ipv6() -> core::result::Result<(), String> {
         rtt_ll / 1000
     );
     if !slaac {
-        return Err(String::from("no SLAAC address (no router advertisement from slirp?)"));
+        return Err(String::from(
+            "no SLAAC address (no router advertisement from slirp?)",
+        ));
     }
     // slirp's host: <prefix>::2 (as 10.0.2.2 for IPv4).
     let ga = ga.unwrap();
@@ -284,7 +298,10 @@ fn test_ipv6_ext() -> core::result::Result<(), String> {
     // ext: (next header value of each header, its bytes without the next-header byte).
     let packet = |seq: u16, ext: &[(u8, &[u8])]| -> Vec<u8> {
         let mut icmp = alloc::vec![128u8, 0, 0, 0, 0x6d, 0x6c, (seq >> 8) as u8, seq as u8];
-        let c = finish(sum(&icmp, pseudo_sum6(Ipv6::LOOPBACK, Ipv6::LOOPBACK, 58, icmp.len())));
+        let c = finish(sum(
+            &icmp,
+            pseudo_sum6(Ipv6::LOOPBACK, Ipv6::LOOPBACK, 58, icmp.len()),
+        ));
         put16(&mut icmp, 2, c);
         let mut body = Vec::new();
         for (k, (_, bytes)) in ext.iter().enumerate() {
@@ -320,7 +337,8 @@ fn test_ipv6_ext() -> core::result::Result<(), String> {
         })
     };
     let before = super::with(|st| st.ip6.stats);
-    let inject = |p: Vec<u8>| super::with(|st| super::ipv6::input(st, None, &p, super::wire::Mac::ZERO));
+    let inject =
+        |p: Vec<u8>| super::with(|st| super::ipv6::input(st, None, &p, super::wire::Mac::ZERO));
     inject(packet(1, &[(0, padn), (60, padn)]));
     let ok1 = replies(1);
     inject(packet(2, &[(44, atomic)]));
@@ -593,6 +611,97 @@ fn test_fragments() -> core::result::Result<(), String> {
     Ok(())
 }
 
+/// The dual-stack socket layer over loopback: an AF_INET6 wildcard listener takes both a
+/// ::1 client and a 127.0.0.1 one (peer seen as IPv4); IPV6_V6ONLY lets an AF_INET listener
+/// share the port, a dual-stack one may not; UDP over ::1; an AF_INET socket refuses ::1.
+fn test_dual_stack() -> core::result::Result<(), String> {
+    let lo6 = Ipv6::LOOPBACK;
+    let l = socket::socket_family(Family::V6, SockType::Stream).map_err(es)?;
+    socket::bind(l, SockAddr::new(Ipv6::UNSPECIFIED, 5010)).map_err(es)?;
+    socket::listen(l, 4).map_err(es)?;
+    let accept = |what: &str| {
+        if socket::wait(l, POLLIN, 1000 * MS) == 0 {
+            return Err(alloc::format!("{what}: nothing to accept"));
+        }
+        socket::accept(l).map_err(|x| alloc::format!("{what} accept: {}", e(x)))
+    };
+    // v6 client to [::1]:5010.
+    let c6 = connect_fam(Family::V6, SockAddr::new(lo6, 5010), 1000)
+        .map_err(|x| alloc::format!("connect [::1]:5010: {}", e(x)))?;
+    let (a6, p6) = accept("v6")?;
+    let total = 128 * 1024;
+    let ns = pump(c6, a6, total, 5000)?;
+    pump(a6, c6, 16 * 1024, 5000)?;
+    let mss6 = tcb_mss(a6);
+    let _ = socket::close(c6);
+    let _ = socket::close(a6);
+    // v4 client to the same dual-stack listener.
+    let c4 = connect(SockAddr::new(Ipv4::LOCALHOST, 5010), 1000)
+        .map_err(|x| alloc::format!("connect 127.0.0.1:5010: {}", e(x)))?;
+    let (a4, p4) = accept("v4")?;
+    pump(c4, a4, 8 * 1024, 5000)?;
+    let _ = socket::close(c4);
+    let _ = socket::close(a4);
+    let _ = socket::close(l);
+    if p6.ip != lo6.into() || p4.ip != Ipv4::LOCALHOST.into() {
+        return Err(alloc::format!("peers {p6} / {p4}"));
+    }
+    if mss6 != super::tcp::OUR_MSS6 {
+        return Err(alloc::format!("v6 mss {mss6}"));
+    }
+    // IPV6_V6ONLY: a v6-only [::]:5011 and 0.0.0.0:5011 coexist; dual-stack [::]:5012 can't
+    // join a 0.0.0.0:5012.
+    let v6o = socket::socket_family(Family::V6, SockType::Stream).map_err(es)?;
+    socket::set_v6only(v6o, true).map_err(es)?;
+    socket::bind(v6o, SockAddr::new(Ipv6::UNSPECIFIED, 5011)).map_err(es)?;
+    let v4l = socket::socket(SockType::Stream).map_err(es)?;
+    let shared = socket::bind(v4l, SockAddr::new(Ipv4::UNSPECIFIED, 5011));
+    let v4b = socket::socket(SockType::Stream).map_err(es)?;
+    socket::bind(v4b, SockAddr::new(Ipv4::UNSPECIFIED, 5012)).map_err(es)?;
+    let ds = socket::socket_family(Family::V6, SockType::Stream).map_err(es)?;
+    let clash = socket::bind(ds, SockAddr::new(Ipv6::UNSPECIFIED, 5012));
+    // A v6-only socket can't reach IPv4; an AF_INET one can't reach IPv6.
+    let v6o_c = socket::socket_family(Family::V6, SockType::Stream).map_err(es)?;
+    socket::set_v6only(v6o_c, true).map_err(es)?;
+    let to4 = socket::connect(v6o_c, SockAddr::new(Ipv4::LOCALHOST, 5011));
+    let v4c = socket::socket(SockType::Stream).map_err(es)?;
+    let to6 = socket::connect(v4c, SockAddr::new(lo6, 5011));
+    for s in [v6o, v4l, v4b, ds, v6o_c, v4c] {
+        let _ = socket::close(s);
+    }
+    if shared.is_err() || clash != Err(EADDRINUSE) || to4.is_ok() || to6 != Err(EAFNOSUPPORT) {
+        return Err(alloc::format!(
+            "v6only: share {shared:?}, clash {clash:?}, v6only->v4 {to4:?}, v4->v6 {to6:?}"
+        ));
+    }
+    // UDP over ::1.
+    let ua = socket::socket_family(Family::V6, SockType::Dgram).map_err(es)?;
+    let ub = socket::socket_family(Family::V6, SockType::Dgram).map_err(es)?;
+    socket::bind(ub, SockAddr::new(lo6, 5013)).map_err(es)?;
+    socket::sendto(ua, b"milkOS udp6", SockAddr::new(lo6, 5013)).map_err(es)?;
+    socket::wait(ub, POLLIN, 500 * MS);
+    let mut buf = [0u8; 32];
+    let got = socket::recvfrom(ub, &mut buf);
+    let _ = socket::close(ua);
+    let _ = socket::close(ub);
+    let (n, from) = got.map_err(|x| alloc::format!("udp6: {}", e(x)))?;
+    if &buf[..n] != b"milkOS udp6" || from.ip != lo6.into() {
+        return Err(alloc::format!("udp6 got {n} bytes from {from}"));
+    }
+    kprintln!(
+        "[net] dual-stack: {} KiB [::1]:{} -> [::]:5010 in {} us (mss {mss6}), 127.0.0.1:{} accepted too, V6ONLY ok, udp6 ok",
+        total / 1024,
+        p6.port,
+        ns / 1000,
+        p4.port
+    );
+    Ok(())
+}
+
+fn tcb_mss(id: SocketId) -> u16 {
+    super::with(|st| st.socks.get(id.slot()).map_or(0, |s| s.tcb.mss))
+}
+
 fn test_loopback_udp() -> core::result::Result<(), String> {
     let a = socket::socket(SockType::Dgram).map_err(es)?;
     let b = socket::socket(SockType::Dgram).map_err(es)?;
@@ -778,6 +887,7 @@ pub fn run() {
     // 3. Loopback.
     check("udp loopback", test_loopback_udp());
     check("tcp loopback", test_loopback_tcp());
+    check("dual-stack", test_dual_stack());
     check("tcp lossy 1/7", test_lossy_tcp(7, 256 * 1024, 5002));
     if cfg.heavy_loss {
         check("tcp lossy 1/3", test_lossy_tcp(3, 32 * 1024, 5003));

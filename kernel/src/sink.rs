@@ -45,6 +45,8 @@ fn with_screen(f: impl FnOnce(&mut Console)) {
     }
     // SAFETY: we hold the `busy` flag.
     if let Some(c) = unsafe { &mut *SCREEN.inner.get() } {
+        // The mouse cursor sits on the same framebuffer: take it off while the console draws.
+        let _cursor = crate::cursor::suspend();
         f(c);
     }
     SCREEN.busy.store(false, Ordering::Relaxed);

@@ -90,6 +90,13 @@ pub mod nr {
     pub const EXECVE: usize = 221;
     pub const MMAP: usize = 222;
     pub const WAIT4: usize = 260;
+    pub const IOCTL: usize = 29;
+    pub const KILL: usize = 129;
+    pub const RT_SIGACTION: usize = 134;
+    pub const RT_SIGPROCMASK: usize = 135;
+    pub const RT_SIGRETURN: usize = 139;
+    pub const SETPGID: usize = 154;
+    pub const GETPGID: usize = 155;
     pub const MILK_PS: usize = 4096;
 }
 
@@ -413,7 +420,8 @@ pub fn describe_status(st: i32) -> String {
             11 => "SIGSEGV",
             _ => "signal",
         };
-        format!("killed by {name} ({sig})")
+        let core = if st & 0x80 != 0 { ", core dumped" } else { "" };
+        format!("killed by {name} ({sig}{core})")
     }
 }
 
@@ -466,4 +474,165 @@ pub fn ps() -> Result<Vec<PsEntry>> {
             }
         })
         .collect())
+}
+
+// ---- signals -------------------------------------------------------------------------
+
+pub const SIGHUP: i32 = 1;
+pub const SIGINT: i32 = 2;
+pub const SIGQUIT: i32 = 3;
+pub const SIGKILL: i32 = 9;
+pub const SIGUSR1: i32 = 10;
+pub const SIGSEGV: i32 = 11;
+pub const SIGUSR2: i32 = 12;
+pub const SIGPIPE: i32 = 13;
+pub const SIGTERM: i32 = 15;
+pub const SIGCHLD: i32 = 17;
+pub const SIG_DFL: usize = 0;
+pub const SIG_IGN: usize = 1;
+const SA_RESTORER: usize = 0x0400_0000;
+const SA_SIGINFO: usize = 4;
+
+/// Signal names for kill -l and friends.
+pub fn signal_name(sig: i32) -> &'static str {
+    match sig {
+        1 => "HUP",
+        2 => "INT",
+        3 => "QUIT",
+        4 => "ILL",
+        5 => "TRAP",
+        6 => "ABRT",
+        7 => "BUS",
+        8 => "FPE",
+        9 => "KILL",
+        10 => "USR1",
+        11 => "SEGV",
+        12 => "USR2",
+        13 => "PIPE",
+        14 => "ALRM",
+        15 => "TERM",
+        17 => "CHLD",
+        18 => "CONT",
+        19 => "STOP",
+        20 => "TSTP",
+        28 => "WINCH",
+        _ => "?",
+    }
+}
+
+pub fn signal_number(name: &str) -> Option<i32> {
+    let n = name.trim_start_matches("SIG");
+    if let Ok(v) = n.parse() {
+        return Some(v);
+    }
+    (1..32).find(|&s| signal_name(s) == n)
+}
+
+/// Every handler returns here; the kernel's rt_sigreturn restores the interrupted state.
+#[unsafe(naked)]
+extern "C" fn __rt_sigreturn() {
+    core::arch::naked_asm!("mov x8, #139", "svc #0", "brk #1");
+}
+
+/// sigaction with a plain handler address (or SIG_DFL / SIG_IGN). Returns the old one.
+pub fn sigaction(sig: i32, handler: usize) -> Result<usize> {
+    let act = [
+        handler,
+        SA_SIGINFO | SA_RESTORER,
+        __rt_sigreturn as *const () as usize,
+        0usize,
+    ];
+    let mut old = [0usize; 4];
+    sc(
+        nr::RT_SIGACTION,
+        [
+            sig as usize,
+            act.as_ptr() as usize,
+            old.as_mut_ptr() as usize,
+            8,
+            0,
+            0,
+        ],
+    )?;
+    Ok(old[0])
+}
+
+/// Install `h` as the handler for `sig`.
+pub fn signal(sig: i32, h: extern "C" fn(i32)) -> Result<usize> {
+    sigaction(sig, h as *const () as usize)
+}
+
+pub const SIG_BLOCK: usize = 0;
+pub const SIG_UNBLOCK: usize = 1;
+pub const SIG_SETMASK: usize = 2;
+
+pub fn sigprocmask(how: usize, set: u64) -> Result<u64> {
+    let mut old = 0u64;
+    sc(
+        nr::RT_SIGPROCMASK,
+        [
+            how,
+            &set as *const u64 as usize,
+            &mut old as *mut u64 as usize,
+            8,
+            0,
+            0,
+        ],
+    )?;
+    Ok(old)
+}
+
+pub fn sigmask(sig: i32) -> u64 {
+    1 << (sig - 1)
+}
+
+pub fn kill(pid: i32, sig: i32) -> Result<()> {
+    sc(nr::KILL, [pid as isize as usize, sig as usize, 0, 0, 0, 0]).map(|_| ())
+}
+
+pub fn setpgid(pid: u32, pgid: u32) -> Result<()> {
+    sc(nr::SETPGID, [pid as usize, pgid as usize, 0, 0, 0, 0]).map(|_| ())
+}
+
+pub fn getpgid(pid: u32) -> Result<u32> {
+    sc(nr::GETPGID, [pid as usize, 0, 0, 0, 0, 0]).map(|p| p as u32)
+}
+
+const TIOCGPGRP: usize = 0x540f;
+const TIOCSPGRP: usize = 0x5410;
+const TIOCGWINSZ: usize = 0x5413;
+
+/// Make process group `pg` the foreground group of the terminal on `fd`.
+pub fn tcsetpgrp(fd: i32, pg: u32) -> Result<()> {
+    sc(
+        nr::IOCTL,
+        [fd as usize, TIOCSPGRP, &pg as *const u32 as usize, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+pub fn tcgetpgrp(fd: i32) -> Result<u32> {
+    let mut pg = 0u32;
+    sc(
+        nr::IOCTL,
+        [
+            fd as usize,
+            TIOCGPGRP,
+            &mut pg as *mut u32 as usize,
+            0,
+            0,
+            0,
+        ],
+    )?;
+    Ok(pg)
+}
+
+/// Is `fd` a terminal?
+pub fn isatty(fd: i32) -> bool {
+    let mut ws = [0u16; 4];
+    sc(
+        nr::IOCTL,
+        [fd as usize, TIOCGWINSZ, ws.as_mut_ptr() as usize, 0, 0, 0],
+    )
+    .is_ok()
 }

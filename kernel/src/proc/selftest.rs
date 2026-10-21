@@ -80,16 +80,20 @@ fn launch(name: &str, entry_off: usize, x0: u64, x1: u64) -> u32 {
     let mut f = user_frame(IMAGE_BASE + entry_off, sp);
     f.x[0] = x0;
     f.x[1] = x1;
-    start(
+    start(super::Launch {
         name,
-        0,
-        s,
-        FdTable::with_console().unwrap(),
-        fs::root(),
-        &f,
-        0,
-        Box::new(FpState::zeroed()),
-    )
+        ppid: 0,
+        pgid: None,
+        sid: None,
+        space: s,
+        fds: FdTable::with_console().unwrap(),
+        cwd: fs::root(),
+        frame: &f,
+        tpidr_el0: 0,
+        fp: Box::new(FpState::zeroed()),
+        sig: super::signal::SigState::new(),
+        argv: alloc::vec::Vec::new(),
+    })
     .expect("start")
 }
 
@@ -164,7 +168,7 @@ pub fn run() {
     let after = pmm::stats().free_frames;
     kprintln!(
         "[proc-test] el0: pid {a} status {sa:#x}, pid {b} status {sb:#x} (FP kept across 40 switches), \
-         pid {c} status {sc:#x} (SIGSEGV), pmm {before} -> {after}, {} ASIDs in use",
+         pid {c} status {sc:#x} (SIGSEGV, core), pmm {before} -> {after}, {} ASIDs in use",
         super::asid::in_use()
     );
     assert!(
@@ -172,7 +176,7 @@ pub fn run() {
         "EL0 FP/syscall test failed"
     );
     assert!(
-        sc == wstatus_signaled(SIGSEGV),
+        sc == wstatus_signaled(SIGSEGV) | 0x80,
         "fault did not kill with SIGSEGV"
     );
     assert!(after == before, "process memory leaked");

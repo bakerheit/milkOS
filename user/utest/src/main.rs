@@ -1,5 +1,6 @@
 //! Kernel feature tests from user space, one per subcommand. Prints PASS/FAIL lines.
 //!   utest pipe    pipe + fork + dup2 + exec: read another program's stdout
+//!   utest signal  handlers, sigreturn, masks, EINTR, SIGCHLD, process groups, defaults
 //!   utest all     everything
 
 #![no_std]
@@ -99,12 +100,181 @@ fn t_pipe() -> bool {
         total == N && good,
         &alloc::format!("{total} bytes, data {}", if good { "ok" } else { "BAD" }),
     );
-    // Reader gone: write fails with EPIPE (32).
+    // Reader gone: SIGPIPE (ignored here, else it would kill us) and EPIPE (32).
+    let old = sys::sigaction(sys::SIGPIPE, sys::SIG_IGN).unwrap();
     let (r, w) = sys::pipe().unwrap();
     let _ = sys::close(r);
     let e = sys::write(w, b"x");
     let _ = sys::close(w);
+    sys::sigaction(sys::SIGPIPE, old).unwrap();
     ok &= check("EPIPE", e == Err(sys::Errno(32)), &alloc::format!("{e:?}"));
+    ok
+}
+
+// ---- signals ----
+
+static mut HITS: u32 = 0;
+static mut LAST_SIG: i32 = 0;
+static mut CHLD: u32 = 0;
+
+extern "C" fn on_sig(sig: i32) {
+    // SAFETY: single-threaded process; handlers don't nest here.
+    unsafe {
+        HITS += 1;
+        LAST_SIG = sig;
+        // Clobber FP/SIMD and callee-saved registers: sigreturn must put them back.
+        core::arch::asm!(".arch_extension fp", "fmov d0, xzr", "fmov d8, xzr",
+            out("x20") _, out("x21") _, out("x22") _);
+    }
+}
+
+extern "C" fn on_chld(_sig: i32) {
+    // SAFETY: as above.
+    unsafe { CHLD += 1 };
+}
+
+extern "C" fn on_segv(_sig: i32) {
+    rt::println!("utest:   (SIGSEGV handler ran, exiting 42)");
+    sys::exit(42)
+}
+
+fn hits() -> u32 {
+    // SAFETY: read of a plain static, single-threaded.
+    unsafe { core::ptr::read_volatile(&raw const HITS) }
+}
+
+fn t_signal() -> bool {
+    let me = sys::getpid() as i32;
+    let mut ok = true;
+
+    // 1. A handler runs and sigreturn brings back x19..x21 and d0/d8.
+    sys::signal(sys::SIGUSR1, on_sig).unwrap();
+    let (mut x19, mut d0, mut d8): (u64, u64, u64);
+    // SAFETY: kill(getpid(), SIGUSR1) via raw syscall with live callee-saved/FP values.
+    unsafe {
+        core::arch::asm!(
+            ".arch_extension fp",
+            "mov x20, #0x1234",
+            "movk x20, #0x5678, lsl #16",
+            "mov x9, #0x4321",
+            "fmov d0, x9",
+            "fmov d8, x20",
+            "mov x8, #129",
+            "svc #0",
+            "mov {x19}, x20",
+            "fmov {d0}, d0",
+            "fmov {d8}, d8",
+            x19 = out(reg) x19, d0 = out(reg) d0, d8 = out(reg) d8,
+            in("x0") me, in("x1") sys::SIGUSR1,
+            out("x8") _, out("x9") _, out("x20") _,
+        );
+    }
+    ok &= check(
+        "handler + sigreturn (x20, d0, d8 restored)",
+        hits() == 1 && x19 == 0x5678_1234 && d0 == 0x4321 && d8 == 0x5678_1234,
+        &alloc::format!("hits {}, x20 {x19:#x}, d0 {d0:#x}, d8 {d8:#x}", hits()),
+    );
+
+    // 2. Blocked signals wait until unblocked.
+    sys::sigprocmask(sys::SIG_BLOCK, sys::sigmask(sys::SIGUSR1)).unwrap();
+    sys::kill(me, sys::SIGUSR1).unwrap();
+    let held = hits();
+    sys::sigprocmask(sys::SIG_UNBLOCK, sys::sigmask(sys::SIGUSR1)).unwrap();
+    ok &= check(
+        "sigprocmask",
+        held == 1 && hits() == 2,
+        &alloc::format!("while blocked {held}, after unblock {}", hits()),
+    );
+
+    // 3. A fault handler.
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        sys::signal(sys::SIGSEGV, on_segv).unwrap();
+        // SAFETY: deliberately not.
+        unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
+        sys::exit(1);
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    ok &= check("SIGSEGV handler", st == 42 << 8, &sys::describe_status(st));
+
+    // 4. kill interrupts a blocking read: EINTR with a handler, termination without.
+    for with_handler in [true, false] {
+        let (r, w) = sys::pipe().unwrap();
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            if with_handler {
+                sys::signal(sys::SIGTERM, on_sig).unwrap();
+            }
+            let mut b = [0u8; 1];
+            let e = sys::read(r, &mut b);
+            sys::exit(if e == Err(sys::Errno(4)) { 7 } else { 1 });
+        }
+        sys::sleep_ms(30);
+        sys::kill(pid as i32, sys::SIGTERM).unwrap();
+        let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+        let _ = (sys::close(r), sys::close(w));
+        if with_handler {
+            ok &= check("EINTR on read", st == 7 << 8, &sys::describe_status(st));
+        } else {
+            ok &= check("default SIGTERM", st == 15, &sys::describe_status(st));
+        }
+    }
+
+    // 5. SIGCHLD reaches the parent; nanosleep gets cut short by it.
+    sys::signal(sys::SIGCHLD, on_chld).unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        sys::exit(0);
+    }
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let slept = sys::nanosleep(2_000_000_000);
+    let dt = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000;
+    let _ = sys::wait4(pid as i32, 0);
+    let chld = unsafe { core::ptr::read_volatile(&raw const CHLD) };
+    ok &= check(
+        "SIGCHLD",
+        chld == 1 && slept == Err(sys::Errno(4)) && dt < 1000,
+        &alloc::format!("handler ran {chld}x, nanosleep {slept:?} after {dt} ms"),
+    );
+    sys::sigaction(sys::SIGCHLD, sys::SIG_DFL).unwrap();
+
+    // 6. Process groups: kill(-pgid) reaches every member.
+    let mut kids = Vec::new();
+    let mut pgid = 0;
+    for _ in 0..3 {
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            loop {
+                sys::sleep_ms(1000);
+            }
+        }
+        if pgid == 0 {
+            pgid = pid;
+        }
+        sys::setpgid(pid, pgid).unwrap();
+        kids.push(pid);
+    }
+    let groups: Vec<u32> = kids.iter().map(|&k| sys::getpgid(k).unwrap_or(0)).collect();
+    sys::kill(-(pgid as i32), sys::SIGKILL).unwrap();
+    let statuses: Vec<i32> = kids
+        .iter()
+        .map(|&k| sys::wait4(k as i32, 0).unwrap().1)
+        .collect();
+    ok &= check(
+        "process group kill",
+        groups.iter().all(|&g| g == pgid) && statuses.iter().all(|&s| s == 9),
+        &alloc::format!("pgids {groups:?}, statuses {statuses:?}"),
+    );
+
+    // 7. Ignored signals do nothing; SIGKILL can't be caught.
+    sys::sigaction(sys::SIGUSR2, sys::SIG_IGN).unwrap();
+    sys::kill(me, sys::SIGUSR2).unwrap();
+    let e = sys::sigaction(sys::SIGKILL, sys::SIG_IGN);
+    ok &= check(
+        "SIG_IGN / SIGKILL",
+        e == Err(sys::Errno(22)),
+        "SIGUSR2 ignored, sigaction(SIGKILL) -> EINVAL",
+    );
     ok
 }
 
@@ -113,6 +283,9 @@ fn main(args: &rt::Args) -> i32 {
     let mut ok = true;
     if what == "pipe" || what == "all" {
         ok &= t_pipe();
+    }
+    if what == "signal" || what == "all" {
+        ok &= t_signal();
     }
     println!("utest: {}", if ok { "ALL PASS" } else { "SOME FAILED" });
     if ok { 0 } else { 1 }

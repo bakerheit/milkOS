@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::errno::*;
+use super::signal;
 use super::uspace::{Perm, UserSpace};
 use super::{PState, current};
 use crate::exceptions::{self, TrapFrame};
@@ -52,8 +53,17 @@ pub mod nr {
     pub const CLOCK_GETRES: u64 = 114;
     pub const CLOCK_NANOSLEEP: u64 = 115;
     pub const SCHED_YIELD: u64 = 124;
+    pub const KILL: u64 = 129;
+    pub const TKILL: u64 = 130;
+    pub const TGKILL: u64 = 131;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
+    pub const RT_SIGPENDING: u64 = 136;
+    pub const RT_SIGRETURN: u64 = 139;
+    pub const SETPGID: u64 = 154;
+    pub const GETPGID: u64 = 155;
+    pub const GETSID: u64 = 156;
+    pub const SETSID: u64 = 157;
     pub const UNAME: u64 = 160;
     pub const GETTIMEOFDAY: u64 = 169;
     pub const GETPID: u64 = 172;
@@ -103,9 +113,7 @@ fn handle(frame: &mut TrapFrame, imm: u16) {
         Err(e) => e.neg() as u64,
     };
     sync::irq_disable();
-    if sched::need_resched() {
-        sched::yield_now();
-    }
+    // Rescheduling and signal delivery happen in proc::on_user_return.
 }
 
 fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
@@ -217,24 +225,16 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
 
         nr::EXIT | nr::EXIT_GROUP => super::exit_current(super::wstatus_exited(a[0] as i32)),
         nr::SET_TID_ADDRESS => Ok(sched::current_tid() as usize),
-        nr::NANOSLEEP => {
-            let ns = read_timespec(a0)?;
-            sched::sleep_ns(ns);
-            if a1 != 0 {
-                copy_out(a1, &[0u8; 16])?;
-            }
-            Ok(0)
-        }
+        nr::NANOSLEEP => sleep_interruptible(read_timespec(a0)?, a1),
         nr::CLOCK_NANOSLEEP => {
             const TIMER_ABSTIME: u64 = 1;
             let ns = read_timespec(a2)?;
             if a[1] & TIMER_ABSTIME != 0 {
                 let now = clock_ns(a[0] as u32)?;
-                sched::sleep_ns(ns.saturating_sub(now));
+                sleep_interruptible(ns.saturating_sub(now), 0)
             } else {
-                sched::sleep_ns(ns);
+                sleep_interruptible(ns, a3)
             }
-            Ok(0)
         }
         nr::CLOCK_GETTIME => {
             let ns = clock_ns(a[0] as u32)?;
@@ -261,15 +261,75 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             sched::yield_now();
             Ok(0)
         }
-        // No signals yet: accept and ignore, so libc start-up code is happy.
-        nr::RT_SIGACTION | nr::RT_SIGPROCMASK => {
-            if nr == nr::RT_SIGPROCMASK && a2 != 0 {
-                copy_out(a2, &[0u8; 8])?;
-            }
-            if nr == nr::RT_SIGACTION && a2 != 0 {
-                copy_out(a2, &[0u8; 32])?;
+        nr::RT_SIGACTION => {
+            let new = if a1 != 0 {
+                let b = copy_in(a1, 32)?;
+                let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                Some(signal::SigAction {
+                    handler: w(0),
+                    flags: w(1),
+                    restorer: w(2),
+                    mask: w(3),
+                })
+            } else {
+                None
+            };
+            let old = signal::sigaction(a[0] as u32, new)?;
+            if a2 != 0 {
+                copy_out(
+                    a2,
+                    &words(&[old.handler, old.flags, old.restorer, old.mask]),
+                )?;
             }
             Ok(0)
+        }
+        nr::RT_SIGPROCMASK => {
+            let set = if a1 != 0 {
+                Some(u64::from_le_bytes(copy_in(a1, 8)?.try_into().unwrap()))
+            } else {
+                None
+            };
+            let old = signal::sigprocmask(a[0] as u32, set)?;
+            if a2 != 0 {
+                copy_out(a2, &old.to_le_bytes())?;
+            }
+            Ok(0)
+        }
+        nr::RT_SIGPENDING => {
+            copy_out(a0, &signal::pending().to_le_bytes())?;
+            Ok(0)
+        }
+        nr::RT_SIGRETURN => signal::sigreturn(frame),
+        nr::KILL => signal::kill(a[0] as i32 as i64, a[1] as u32).map(|_| 0),
+        // One thread per process: a tid names its process.
+        nr::TKILL => signal::kill(tid_to_pid(a[0] as u32)? as i64, a[1] as u32).map(|_| 0),
+        nr::TGKILL => signal::kill(a[0] as i32 as i64, a[2] as u32).map(|_| 0),
+        nr::SETPGID => sys_setpgid(a[0] as u32, a[1] as u32),
+        nr::GETPGID => {
+            let p = if a[0] == 0 {
+                current()
+            } else {
+                super::get(a[0] as u32).ok_or(ESRCH)?
+            };
+            Ok(p.inner.lock().pgid as usize)
+        }
+        nr::GETSID => {
+            let p = if a[0] == 0 {
+                current()
+            } else {
+                super::get(a[0] as u32).ok_or(ESRCH)?
+            };
+            Ok(p.inner.lock().sid as usize)
+        }
+        nr::SETSID => {
+            let p = current();
+            if super::all().iter().any(|q| q.inner.lock().pgid == p.pid) {
+                return Err(EPERM); // already a group leader
+            }
+            let mut i = p.inner.lock();
+            i.pgid = p.pid;
+            i.sid = p.pid;
+            Ok(p.pid as usize)
         }
         nr::UNAME => sys_uname(a0),
         nr::GETPID => Ok(sched::current_pid() as usize),
@@ -407,6 +467,59 @@ fn clock_ns(id: u32) -> KResult<u64> {
         2 | 3 => Ok(sched::current_cpu_ns()),
         _ => Err(EINVAL),
     }
+}
+
+/// nanosleep that a signal can cut short (EINTR, remaining time in `rem`).
+fn sleep_interruptible(ns: u64, rem: usize) -> KResult<usize> {
+    static NOBODY: sched::WaitQueue = sched::WaitQueue::new();
+    let start = timer::now_ns();
+    if NOBODY.wait_until_timeout(signal::interrupted, ns) {
+        if rem != 0 {
+            let left = ns.saturating_sub(timer::now_ns() - start);
+            write_timespec(rem, left)?;
+        }
+        return Err(EINTR);
+    }
+    Ok(0)
+}
+
+fn tid_to_pid(tid: u32) -> KResult<u32> {
+    sched::threads()
+        .into_iter()
+        .find(|t| t.tid == tid && t.pid != 0)
+        .map(|t| t.pid)
+        .ok_or(ESRCH)
+}
+
+/// setpgid(pid, pgid): only on yourself or your children, within your session.
+fn sys_setpgid(pid: u32, pgid: u32) -> KResult<usize> {
+    let me = current();
+    let target = if pid == 0 || pid == me.pid {
+        me.clone()
+    } else {
+        let t = super::get(pid).ok_or(ESRCH)?;
+        if t.inner.lock().ppid != me.pid {
+            return Err(ESRCH);
+        }
+        t
+    };
+    let pgid = if pgid == 0 { target.pid } else { pgid };
+    let my_sid = me.inner.lock().sid;
+    // Joining an existing group: it must be in our session.
+    if pgid != target.pid
+        && !super::all().iter().any(|q| {
+            let i = q.inner.lock();
+            i.pgid == pgid && i.sid == my_sid
+        })
+    {
+        return Err(EPERM);
+    }
+    let mut i = target.inner.lock();
+    if i.sid != my_sid || i.sid == target.pid {
+        return Err(EPERM); // other session, or a session leader
+    }
+    i.pgid = pgid;
+    Ok(0)
 }
 
 fn prot_to_perm(prot: u32) -> Option<Perm> {
@@ -577,16 +690,24 @@ fn sys_fcntl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     }
 }
 
-fn is_console(f: &OpenFile) -> bool {
+fn tty_of(f: &OpenFile) -> Option<&'static super::tty::Tty> {
     let st = f.stat();
-    st.kind == InodeType::CharDev && st.rdev == fs::node::makedev(5, 1)
+    (st.kind == InodeType::CharDev)
+        .then(|| super::tty::by_rdev(st.rdev))
+        .flatten()
 }
 
 fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     let f = file(fd)?;
-    if is_console(&f) {
-        let out = super::console::ioctl(cmd)?;
-        if arg != 0 {
+    if let Some(tty) = tty_of(&f) {
+        let input = if super::tty::ioctl_reads_arg(cmd) {
+            Some(u32::from_le_bytes(copy_in(arg, 4)?.try_into().unwrap()))
+        } else {
+            None
+        };
+        if let Some(out) = tty.ioctl(cmd, input)?
+            && arg != 0
+        {
             copy_out(arg, &out)?;
         }
         return Ok(0);

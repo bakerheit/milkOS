@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 pub mod asid;
-pub mod console;
 pub mod elf;
 pub mod errno;
 pub mod fd;
@@ -17,6 +16,7 @@ pub mod pipe;
 mod selftest;
 pub mod signal;
 pub mod syscall;
+pub mod tty;
 pub mod uspace;
 
 use alloc::boxed::Box;
@@ -88,6 +88,12 @@ pub struct Inner {
     pub tid: Tid,
     pub cwd: InodeRef,
     pub start_ns: u64,
+    /// Process group and session (job control).
+    pub pgid: Pid,
+    pub sid: Pid,
+    pub sig: signal::SigState,
+    /// Command line of the current image (for /proc/<pid>/cmdline).
+    pub argv: Vec<String>,
 }
 
 static PROCS: SpinLock<BTreeMap<Pid, Arc<Process>>> = SpinLock::new(BTreeMap::new());
@@ -115,9 +121,10 @@ pub fn all() -> Vec<Arc<Process>> {
 /// smoke test. Call after `sched::init`.
 pub fn init() {
     mmu::prepare_kernel_slots();
-    console::init();
+    tty::init();
     syscall::init();
     exceptions::set_user_fault_handler(on_user_fault);
+    exceptions::set_user_return_hook(on_user_return);
     let bin: Vec<String> = fs::readdir("/bin")
         .unwrap_or_default()
         .into_iter()
@@ -132,36 +139,48 @@ pub fn init() {
     selftest::run();
 }
 
-/// Create a process around `space` and start its thread at `entry` with stack `sp`.
-#[allow(clippy::too_many_arguments)]
-fn start(
-    name: &str,
+/// Everything a new process starts with.
+struct Launch<'a> {
+    name: &'a str,
     ppid: Pid,
+    /// None: a new process group / session led by the new process.
+    pgid: Option<Pid>,
+    sid: Option<Pid>,
     space: UserSpace,
     fds: FdTable,
     cwd: InodeRef,
-    frame: &TrapFrame,
+    frame: &'a TrapFrame,
     tpidr_el0: u64,
     fp: Box<FpState>,
-) -> KResult<Pid> {
+    sig: signal::SigState,
+    argv: Vec<String>,
+}
+
+/// Create a process and start its thread with `l.frame`.
+fn start(l: Launch) -> KResult<Pid> {
     let pid = if INIT_NEXT.swap(false, Ordering::Relaxed) {
         1
     } else {
         NEXT_PID.fetch_add(1, Ordering::Relaxed)
     };
-    let ttbr0 = space.ttbr0();
+    let (name, ppid, frame, tpidr_el0, fp) = (l.name, l.ppid, l.frame, l.tpidr_el0, l.fp);
+    let ttbr0 = l.space.ttbr0();
     let p = Arc::new(Process {
         pid,
         inner: SpinLock::new(Inner {
             ppid,
             name: Comm::new(name),
             state: PState::Alive,
-            space: Some(space),
-            fds,
+            space: Some(l.space),
+            fds: l.fds,
             children: Vec::new(),
             tid: 0,
-            cwd,
+            cwd: l.cwd,
             start_ns: timer::now_ns(),
+            pgid: l.pgid.unwrap_or(pid),
+            sid: l.sid.unwrap_or(pid),
+            sig: l.sig,
+            argv: l.argv,
         }),
         child_wq: WaitQueue::new(),
     });
@@ -224,16 +243,20 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
     let envp = [String::from("PATH=/bin"), String::from("HOME=/")];
     let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
-    start(
-        basename(path),
-        0,
+    start(Launch {
+        name: basename(path),
+        ppid: 0,
+        pgid: None,
+        sid: None,
         space,
-        FdTable::with_console()?,
-        fs::root(),
-        &user_frame(entry, sp),
-        0,
-        Box::new(FpState::zeroed()),
-    )
+        fds: FdTable::with_console()?,
+        cwd: fs::root(),
+        frame: &user_frame(entry, sp),
+        tpidr_el0: 0,
+        fp: Box::new(FpState::zeroed()),
+        sig: signal::SigState::new(),
+        argv,
+    })
 }
 
 /// Start `/bin/init` as PID 1. Call at the end of boot.
@@ -268,25 +291,38 @@ pub fn wait_kernel_child(pid: Pid) -> i32 {
 /// fork(): copy the caller. The child resumes from the same syscall with x0 = 0.
 pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
     let parent = current();
-    let (space, fds, name, cwd) = {
-        let i = parent.inner.lock();
-        let space = i.space.as_ref().ok_or(ESRCH)?.fork()?;
-        (space, i.fds.clone(), i.name, i.cwd.clone())
+    let (space, fds, name, cwd, pgid, sid, sig, argv) = {
+        let mut i = parent.inner.lock();
+        let space = i.space.as_mut().ok_or(ESRCH)?.fork()?;
+        (
+            space,
+            i.fds.clone(),
+            i.name,
+            i.cwd.clone(),
+            i.pgid,
+            i.sid,
+            i.sig.for_child(),
+            i.argv.clone(),
+        )
     };
     let mut cf = *frame;
     cf.x[0] = 0;
     let mut fp = Box::new(FpState::zeroed());
     sched::save_current_fp(&mut fp);
-    start(
-        name.as_str(),
-        parent.pid,
+    start(Launch {
+        name: name.as_str(),
+        ppid: parent.pid,
+        pgid: Some(pgid),
+        sid: Some(sid),
         space,
         fds,
         cwd,
-        &cf,
-        sched::current_tpidr_el0(),
+        frame: &cf,
+        tpidr_el0: sched::current_tpidr_el0(),
         fp,
-    )
+        sig,
+        argv,
+    })
 }
 
 /// execve(): replace the caller's image. On success `frame` is rewritten to enter the new
@@ -313,6 +349,8 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
     let (old, cloexec) = {
         let mut i = me.inner.lock();
         i.name = Comm::new(basename(path));
+        i.argv = argv.to_vec();
+        i.sig.on_exec();
         (i.space.replace(space), i.fds.take_cloexec())
     };
     sched::with_current_user(|u| {
@@ -376,6 +414,7 @@ pub fn exit_current(wstatus: i32) -> ! {
         0 => KERNEL_CHILD_WQ.wake_all(),
         p => {
             if let Some(parent) = get(p) {
+                signal::notify_parent(&parent, pid, wstatus);
                 parent.child_wq.wake_all();
             }
         }
@@ -392,19 +431,30 @@ pub fn wait(want: i64, options: u64) -> KResult<(Pid, i32)> {
     let mut result = None;
     me.child_wq.wait_until(|| {
         result = try_reap(&me, want, options & WNOHANG != 0);
-        result.is_some()
+        result.is_some() || signal::interrupted()
     });
-    result.unwrap()
+    result.unwrap_or(Err(EINTR))
 }
 
 fn try_reap(me: &Process, want: i64, nohang: bool) -> Option<KResult<(Pid, i32)>> {
+    // want > 0: that pid; -1: any; 0: my process group; < -1: process group -want.
+    let my_pgid = me.inner.lock().pgid;
+    let want_pgid = match want {
+        0 => Some(my_pgid),
+        w if w < -1 => Some((-w) as Pid),
+        _ => None,
+    };
     let children: Vec<Pid> = me
         .inner
         .lock()
         .children
-        .iter()
-        .copied()
-        .filter(|&c| want <= 0 || c as i64 == want)
+        .clone()
+        .into_iter()
+        .filter(|&c| match (want, want_pgid) {
+            (_, Some(g)) => get(c).is_some_and(|p| p.inner.lock().pgid == g),
+            (-1, None) => true,
+            (w, None) => c as i64 == w,
+        })
         .collect();
     if children.is_empty() {
         return Some(Err(ECHILD));
@@ -419,6 +469,14 @@ fn try_reap(me: &Process, want: i64, nohang: bool) -> Option<KResult<(Pid, i32)>
         }
     }
     nohang.then_some(Ok((0, 0)))
+}
+
+/// Last thing before every return to EL0: reschedule if asked, deliver signals.
+fn on_user_return(frame: &mut TrapFrame) {
+    if sched::need_resched() {
+        sched::yield_now();
+    }
+    signal::deliver(frame);
 }
 
 // ---- faults ---------------------------------------------------------------------------
@@ -485,6 +543,18 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
     } else {
         String::new()
     };
+    // A handler for it? Then it runs on the way out (the faulting instruction is retried
+    // when it returns, as on Linux).
+    let usig = sig as u32;
+    if signal::has_handler(usig) {
+        let code = if ec == EC_DABT_LOWER && (0x0d..=0x0f).contains(&fsc) {
+            2
+        } else {
+            1
+        };
+        signal::post_fault(usig, code, frame.far);
+        return true;
+    }
     let me = current();
     let name = me.inner.lock().name;
     kprintln!(
@@ -498,5 +568,5 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
         frame.elr
     );
     drop(me);
-    exit_current(wstatus_signaled(sig))
+    exit_current(wstatus_signaled(sig) | 0x80) // "core dumped", like Linux's default
 }

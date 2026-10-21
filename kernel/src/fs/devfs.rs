@@ -86,9 +86,9 @@ impl Inode for DevNode {
                 }
                 Ok(buf.len())
             }
-            // The tty line discipline (proc/console.rs): blocks until a line is typed once
+            // The tty line discipline (proc/tty.rs): blocks until a line is typed once
             // the scheduler runs; EAGAIN when empty before that.
-            Kind::Console => crate::proc::console::read(buf),
+            Kind::Console => crate::proc::tty::CONSOLE.read(buf),
         }
     }
 

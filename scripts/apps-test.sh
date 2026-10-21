@@ -67,5 +67,11 @@ q screendump "$T/clock.png"
 ser "send:cat /dev/wm" "wait:$P"
 tr -d '\r' < "$LOG" | grep -a "window .* Clock" >/dev/null && ok "the Clock window is on the desktop" || bad "no Clock window"
 [ "$(stat -f %z "$T/clock.png")" -gt 10000 ] && ok "Clock drew (screenshot $(stat -f %z "$T/clock.png") bytes)" || bad "Clock screenshot is empty"
+ser "send:open /bin/activity" "wait:$P"
+sleep 3
+q move 483 140 click sleep 2 screendump "$T/activity-security.png"
+ser "send:cat /dev/wm" "wait:$P"
+tr -d '\r' < "$LOG" | grep -a "window .* Activity Monitor" >/dev/null && ok "the Activity Monitor window is on the desktop" || bad "no Activity Monitor window"
+differ "$T/clock.png" "$T/activity-security.png" && ok "Activity Monitor drew its own screen" || bad "Activity Monitor screenshot matches Clock"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "apps-test: PASS (screenshots in $T)"; else echo "apps-test: FAIL (logs and screenshots in $T)"; exit 1; fi

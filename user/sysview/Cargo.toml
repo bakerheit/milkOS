@@ -1,0 +1,10 @@
+[package]
+name = "sysview"
+version.workspace = true
+edition.workspace = true
+
+# The logic behind Activity Monitor: parsing /proc, CPU percentages and rates, sorting, history
+# buffers, and turning audit records into plain-English sentences. Pure (no syscalls), so the
+# unit tests run on the host: `scripts/sysview-test.sh`.
+[lib]
+bench = false

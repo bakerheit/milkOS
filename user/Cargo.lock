@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "activity"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "sysview",
+]
+
+[[package]]
 name = "appkit"
 version = "0.0.1"
 dependencies = [
@@ -220,6 +230,10 @@ version = "0.0.1"
 dependencies = [
  "rt",
 ]
+
+[[package]]
+name = "sysview"
+version = "0.0.1"
 
 [[package]]
 name = "timeio"

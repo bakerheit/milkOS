@@ -22,6 +22,7 @@ pub mod items;
 pub mod snap;
 pub mod store;
 pub mod timemachine;
+pub mod versions;
 pub mod volume;
 
 use alloc::format;
@@ -226,6 +227,93 @@ pub fn setup_applications() {
     }
 }
 
+// ---- versions -----------------------------------------------------------------------
+
+pub use versions::Version;
+
+/// The live file at `path` (any VFS path, e.g. `/home/milk/Documents/ideas.md`), as
+/// (volume, inode number).
+fn live_file(path: &str) -> Result<(Arc<Volume>, u64)> {
+    let v = primary()?;
+    let i = crate::fs::ops::lookup(path)?;
+    if i.dev() != v.dev {
+        return Err(Errno::EXDEV); // not on the (live) milkfs volume
+    }
+    if i.kind() != crate::fs::node::InodeType::File {
+        return Err(Errno::EISDIR);
+    }
+    Ok((v, i.ino()))
+}
+
+/// The distinct versions of the file at `path` across the volume's snapshots, oldest
+/// first; the last entry is the current file (`snapshot: None`).
+pub fn versions(path: &str) -> Result<alloc::vec::Vec<Version>> {
+    let (v, ino) = live_file(path)?;
+    let st = v.state.lock();
+    st.versions_of(ino)
+}
+
+/// Put the content `path` had in `snapshot` back into the live file. If the current
+/// content isn't already kept in a snapshot, a `pre-restore-<time>` snapshot is taken
+/// first, so restoring never loses anything.
+pub fn restore_version(path: &str, snapshot: &str) -> Result<()> {
+    let (v, ino) = live_file(path)?;
+    let mount = api_volume_path().ok_or(Errno::ENODEV)?;
+    let (src, need_safety) = {
+        let st = v.state.lock();
+        let s = st
+            .snaps
+            .iter()
+            .find(|s| s.name == snapshot)
+            .ok_or(Errno::ENOENT)?;
+        let in_snap = match st.inode(s.generation, ino) {
+            Ok(_) => Some(ino),
+            Err(_) => st
+                .path_in(items::LIVE, ino)
+                .and_then(|p| st.resolve_in(s.generation, &p)),
+        }
+        .ok_or(Errno::ENOENT)?;
+        let rel = st.path_in(s.generation, in_snap).ok_or(Errno::ENOENT)?;
+        let (cur, _) = st.content_hash(items::LIVE, ino)?;
+        let kept = st.snaps.iter().any(|s| {
+            st.inode(s.generation, ino).is_ok()
+                && st
+                    .content_hash(s.generation, ino)
+                    .is_ok_and(|(h, _)| h == cur)
+        });
+        (format!("{mount}/.snapshots/{snapshot}{rel}"), !kept)
+    };
+    if need_safety {
+        let name = format!(
+            "pre-restore-{}",
+            timemachine::stamp(crate::fs::clock::now().sec as u64)
+        );
+        v.state.lock().snap_create(&name)?;
+    }
+    let data = crate::fs::ops::read_file(&src)?;
+    crate::fs::ops::write_file(path, &data)
+}
+
+static LAST_VERSIONS: SpinLock<String> = SpinLock::new(String::new());
+
+fn versions_control(path: &str) -> Result<()> {
+    let list = versions(path)?;
+    let mut s = format!("# {path}\n");
+    for x in list {
+        let _ = writeln!(
+            s,
+            "{}\t{}\t{}\t{}\t{:016x}",
+            x.snapshot.as_deref().unwrap_or("current"),
+            x.taken,
+            x.mtime,
+            x.size,
+            x.hash
+        );
+    }
+    *LAST_VERSIONS.lock() = s;
+    Ok(())
+}
+
 // ---- clones -------------------------------------------------------------------------
 
 /// Where each clone of the primary volume is mounted: (name, path).
@@ -349,8 +437,29 @@ pub fn start_threads() {
 /// checks never reach the user's disk. `None` restores the real primary volume.
 static TEST_OVERRIDE: SpinLock<Option<Arc<Volume>>> = SpinLock::new(None);
 
-pub fn set_test_override(v: Option<Arc<Volume>>) {
-    *TEST_OVERRIDE.lock() = v;
+static TEST_OVERRIDE_PATH: SpinLock<String> = SpinLock::new(String::new());
+
+/// `path`: where the test volume is mounted.
+pub fn set_test_override(v: Option<(Arc<Volume>, &str)>) {
+    match v {
+        Some((v, path)) => {
+            *TEST_OVERRIDE.lock() = Some(v);
+            *TEST_OVERRIDE_PATH.lock() = String::from(path);
+        }
+        None => {
+            *TEST_OVERRIDE.lock() = None;
+            TEST_OVERRIDE_PATH.lock().clear();
+        }
+    }
+}
+
+/// Where the volume the API acts on is mounted (the test volume during the self-test).
+fn api_volume_path() -> Option<String> {
+    let t = TEST_OVERRIDE_PATH.lock().clone();
+    if !t.is_empty() {
+        return Some(t);
+    }
+    mount_path()
 }
 
 pub fn volume() -> Option<Arc<Volume>> {
@@ -532,6 +641,16 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         || LAST_DIFF.lock().clone(),
         |b| diff_control(arg(b)?),
     );
+    dir.add_control(
+        "versions",
+        || LAST_VERSIONS.lock().clone(),
+        |b| versions_control(arg(b)?),
+    );
+    dir.add_control("restore", String::new, |b| {
+        // `SNAPSHOT PATH` (the path may contain spaces).
+        let (snap, path) = arg(b)?.split_once(' ').ok_or(Errno::EINVAL)?;
+        restore_version(path.trim(), snap)
+    });
     dir.add_control("clone", clones_text, |b| {
         let mut w = arg(b)?.split_whitespace();
         let (Some(snap), Some(name), None) = (w.next(), w.next(), w.next()) else {

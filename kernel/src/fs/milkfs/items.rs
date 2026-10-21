@@ -355,6 +355,11 @@ impl State {
         Ok(())
     }
 
+    /// A small file's data stored inline in its inode's leaf (None: data is in extents).
+    pub fn inline_bytes(&self, _view: u64, _ino: u64) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
     /// Number of data blocks `ino` has (for `st_blocks`).
     pub fn block_count(&self, view: u64, ino: u64) -> Result<u64> {
         Ok(self.extents(view, ino, 0)?.len() as u64)

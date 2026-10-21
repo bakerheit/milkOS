@@ -986,11 +986,12 @@ fn milkfs_test_volume(t: &mut T) {
         report.problems == 0 && report.inodes == 1,
         "fresh volume mounts clean",
     );
-    super::milkfs::set_test_override(Some(vol.clone()));
+    super::milkfs::set_test_override(Some((vol.clone(), VP)));
     milkfs_destructive(t, &vol, VP, D, &dev);
     milkfs_clones(t, &vol, VP, &dev);
     page_cache(t, VP);
     milkfs_diff(t, VP);
+    milkfs_versions(t, VP);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1703,6 +1704,78 @@ fn milkfs_diff(t: &mut T, vp: &str) {
         let _ = m::delete_snapshot(n);
     }
     rm_rf(&alloc::format!("{vp}/dd"));
+}
+
+/// Version history on the test volume.
+fn milkfs_versions(t: &mut T, vp: &str) {
+    use super::milkfs as m;
+    let f = alloc::format!("{vp}/doc.txt");
+    let snaps = || -> Vec<String> {
+        m::snapshots()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    };
+    let _ = ops::write_file(&f, b"version one");
+    let _ = m::snapshot("v1");
+    let _ = ops::write_file(&f, b"version two, longer");
+    let _ = m::snapshot("v2");
+    let _ = m::snapshot("v2b"); // same content: must collapse
+    let _ = ops::rename(&f, &alloc::format!("{vp}/renamed doc.txt"));
+    let f = alloc::format!("{vp}/renamed doc.txt");
+    let _ = ops::write_file(&f, b"three");
+    let v = m::versions(&f).unwrap_or_default();
+    let names: Vec<Option<String>> = v.iter().map(|x| x.snapshot.clone()).collect();
+    t.ok(
+        names == alloc::vec![Some(String::from("v1")), Some(String::from("v2")), None],
+        &alloc::format!("versions: distinct versions, renamed file followed ({names:?})"),
+    );
+    t.ok(
+        v.iter().map(|x| x.size).collect::<Vec<_>>() == alloc::vec![11, 19, 5]
+            && v[0].hash != v[1].hash,
+        "versions: sizes and hashes",
+    );
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/versions", f.as_bytes()).is_ok()
+            && read_str("/sys/fs/milkfs/versions").contains("v2\t"),
+        "/sys/fs/milkfs/versions",
+    );
+    let before = snaps().len();
+    t.ok(m::restore_version(&f, "v1").is_ok(), "restore a version");
+    t.ok(read_str(&f) == "version one", "restored content");
+    t.ok(
+        snaps().len() == before + 1 && snaps().iter().any(|s| s.starts_with("pre-restore-")),
+        "restore kept the unsaved current version in a snapshot",
+    );
+    let before = snaps().len();
+    t.ok(
+        ops::write_file(
+            "/sys/fs/milkfs/restore",
+            alloc::format!("v2 {f}").as_bytes(),
+        )
+        .is_ok()
+            && read_str(&f) == "version two, longer",
+        "restore via /sys (path with a space)",
+    );
+    t.ok(
+        snaps().len() == before,
+        "no safety snapshot when the current version is kept",
+    );
+    t.err(
+        m::versions(&alloc::format!("{vp}/nope")),
+        Errno::ENOENT,
+        "versions of a missing file",
+    );
+    t.err(
+        m::versions("/etc/motd"),
+        Errno::EXDEV,
+        "versions outside the volume",
+    );
+    for s in snaps() {
+        let _ = m::delete_snapshot(&s);
+    }
+    let _ = ops::unlink(&f);
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

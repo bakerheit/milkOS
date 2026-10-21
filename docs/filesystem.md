@@ -559,6 +559,51 @@ against the older tree instead. One change among 300 files reads at most a handf
 nodes (self-test checks <= 8). Files now record their parent directory (as directories
 always did), so paths are found without scanning; older files fall back to a scan.
 
+### Versions ("Browse All Versions")
+
+For a Versions panel (Notes, Files): the history of one file across the volume's snapshots.
+
+```rust
+// crate::fs::milkfs
+pub struct Version {
+    pub snapshot: Option<String>, // the (oldest) snapshot holding this content; None = current file
+    pub taken: u64,                // when that snapshot was taken (unix s); current: now
+    pub mtime: i64,                // the file's own mtime in that version
+    pub size: u64,
+    pub hash: u64,                 // content hash: equal = identical contents
+}
+pub fn versions(path: &str) -> Result<Vec<Version>>;            // oldest first, current last
+pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
+```
+
+- `path` is any VFS path to a regular file on the milkfs volume (`/home/milk/...`,
+  `/Volumes/Milk/...`, `/Applications/...`); elsewhere EXDEV, a directory EISDIR.
+- Distinct versions only: consecutive snapshots with the same content collapse into the
+  oldest one; if the current content equals the newest snapshot's, that entry is shown as
+  the current one. Hashes come from the extent checksums (no file data is read), so listing
+  is cheap even for big files.
+- The file is followed by inode number, so its history survives renames; where that inode
+  doesn't exist in a snapshot, the current path is tried (for editors that save via
+  write-temp + rename).
+- `restore_version` writes the snapshot's content into the live file (same inode, so open
+  editors see it on their next read). If the current content isn't in any snapshot, it first
+  takes snapshot `pre-restore-<time>`, so a restore never loses anything (and that version
+  shows up in the list). Fails with ENOSPC if the 30-record snapshot table is full.
+- To show a version's content, read `<volume>/.snapshots/<snapshot><path in volume>`, e.g.
+  `/Volumes/Milk/.snapshots/monday/home/milk/Documents/ideas.md` (read-only).
+- Shell: write a path to `/sys/fs/milkfs/versions` and read back tab-separated lines
+  `snapshot|current, taken, mtime, size, hash` (after a `# path` header); write
+  `SNAPSHOT PATH` to `/sys/fs/milkfs/restore`. Tool: `versions FILE`,
+  `versions restore FILE SNAPSHOT`:
+
+```
+/home/milk/Documents/ideas.md: 4 version(s)
+   1  2026-10-21 05:04      12 B  109ff1d8  in snapshot monday
+   2  2026-10-21 05:04      21 B  cf46a6a6  in snapshot tuesday
+   3  2026-10-21 05:04       6 B  a3f8b57b  in snapshot pre-restore-2026-10-21T05:04:10
+   *  2026-10-21 05:04      12 B  109ff1d8  (current)
+```
+
 ### Persistent home
 
 With a milkfs volume, `/home/milk` is a **bind mount** of `<volume>/home/milk`

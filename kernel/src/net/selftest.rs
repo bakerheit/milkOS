@@ -5,8 +5,9 @@
 //! connection refused, an HTTP GET to our own server on :80, the DNS policy checks.
 //!
 //! With a test config passed by `scripts/net-test.sh` as fw_cfg file `opt/milkos/nettest`
-//! (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT khttpd=PORT`): a TCP echo round trip
-//! against the host's echo server, a DNS lookup against the host's test DNS server, and a
+//! (`echo=IP:PORT echo6=[IPV6]:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT khttpd=PORT`): TCP
+//! echo round trips against the host's echo servers (IPv4, and IPv6 to fec0::2, which slirp
+//! maps to the Mac's ::1), a DNS lookup against the host's test DNS server, and a
 //! refused connection to a host port nobody listens on. Only addresses from that config are
 //! contacted (in practice the Mac's loopback, seen as 10.0.2.2).
 
@@ -26,6 +27,7 @@ const MS: u64 = 1_000_000;
 #[derive(Default)]
 struct Config {
     echo: Option<SockAddr>,
+    echo6: Option<SockAddr>,
     dns: Option<SockAddr>,
     name: Option<String>,
     expect: Option<Ipv4>,
@@ -38,6 +40,12 @@ struct Config {
 fn parse_addr(s: &str) -> Option<SockAddr> {
     let (ip, port) = s.split_once(':')?;
     Some(SockAddr::new(Ipv4::parse(ip)?, port.parse().ok()?))
+}
+
+/// `[IPV6]:PORT`.
+fn parse_addr6(s: &str) -> Option<SockAddr> {
+    let (ip, port) = s.strip_prefix('[')?.split_once("]:")?;
+    Some(SockAddr::new(Ipv6::parse(ip)?, port.parse().ok()?))
 }
 
 fn read_config() -> Config {
@@ -56,6 +64,7 @@ fn read_config() -> Config {
     for kv in text.split_whitespace() {
         match kv.split_once('=') {
             Some(("echo", v)) => c.echo = parse_addr(v),
+            Some(("echo6", v)) => c.echo6 = parse_addr6(v),
             Some(("dns", v)) => c.dns = parse_addr(v),
             Some(("name", v)) => c.name = Some(String::from(v)),
             Some(("expect", v)) => c.expect = Ipv4::parse(v),
@@ -767,7 +776,12 @@ fn http_get(addr: SockAddr, path: &str) -> core::result::Result<Vec<u8>, String>
 }
 
 fn test_echo(addr: SockAddr) -> core::result::Result<(), String> {
-    let s = connect(addr, 3000).map_err(|x| alloc::format!("connect {addr}: {}", e(x)))?;
+    let fam = if addr.ip.is_v6() {
+        Family::V6
+    } else {
+        Family::V4
+    };
+    let s = connect_fam(fam, addr, 3000).map_err(|x| alloc::format!("connect {addr}: {}", e(x)))?;
     let total = 512 * 1024;
     let r = pump(s, s, total, 20_000);
     let rexmit = super::with(|st| {
@@ -980,6 +994,9 @@ pub fn run() {
         }
         if let Some(addr) = cfg.echo {
             check("tcp echo", test_echo(addr));
+        }
+        if let Some(addr) = cfg.echo6 {
+            check("tcp echo over IPv6", test_echo(addr));
         }
         if let Some(addr) = cfg.refused {
             check(

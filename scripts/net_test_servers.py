@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Host-side helpers for scripts/net-test.sh (python3 stdlib only).
 
-Binds ONLY to 127.0.0.1 (the guest reaches the Mac's loopback as 10.0.2.2 through qemu's
-user-mode networking):
-  * a TCP echo server,
+Binds ONLY to the loopback: 127.0.0.1 (the guest reaches it as 10.0.2.2 through qemu's
+user-mode networking) and ::1 (the guest reaches it as fec0::2, slirp's IPv6 host):
+  * a TCP echo server on each,
   * a tiny DNS server: A records for the names in NAMES, NXDOMAIN for everything else
     (it never forwards anything anywhere),
   * an HTTP server with one page, /hello.txt (for the guest's `fetch` program),
 and reserves a "refused" port (bound, then closed: nothing listens there).
-Writes "echo=PORT dns=PORT http=PORT refused=PORT" to the file given as argv[1], then serves until
+Writes "echo=PORT echo6=PORT dns=PORT http=PORT refused=PORT" to the file given as argv[1], then serves until
 killed. Run it with `python3 -I` from a scratch directory.
 """
 import http.server
@@ -54,6 +54,15 @@ class TCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
 
+class TCPServer6(TCPServer):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        # ::1 only, IPv6 only: nothing but this host's loopback can reach it.
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
+
+
 def qname(msg, off):
     labels = []
     while True:
@@ -90,6 +99,8 @@ def dns_loop(sock):
 def main():
     out = sys.argv[1]
     echo = TCPServer((HOST, 0), Echo)
+    echo6 = TCPServer6(("::1", 0), Echo)
+    threading.Thread(target=echo6.serve_forever, daemon=True).start()
     web = http.server.ThreadingHTTPServer((HOST, 0), Http)
     threading.Thread(target=web.serve_forever, daemon=True).start()
     dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -100,7 +111,7 @@ def main():
     r.close()
     with open(out + ".tmp", "w") as f:
         f.write(
-            f"echo={echo.server_address[1]} dns={dns.getsockname()[1]} "
+            f"echo={echo.server_address[1]} echo6={echo6.server_address[1]} dns={dns.getsockname()[1]} "
             f"http={web.server_address[1]} refused={refused}\n"
         )
     import os

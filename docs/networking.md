@@ -610,16 +610,24 @@ It covers:
   * a 20000-byte UDP datagram over loopback, as 14 fragments, back whole;
   * crafted fragments: last-first (reassembled), an overlapping pair (dropped), a TCP
     fragment at offset 8 (refused), and a lone first fragment (times out);
+* **IPv6**: link-local and SLAAC on eth0, echo to `::1`, our link-local and `fec0::2`
+  (slirp), the extension-header rules on crafted packets;
+* **dual stack** over loopback: v6 and v4 clients on one `[::]` listener, the V6ONLY rules,
+  UDP over `::1`;
 * connection refused (RST), an HTTP GET to our own server, and the DNS policy. With the fw_cfg file
-`opt/milkos/nettest` (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT`, passed
-by net-test.sh) also: 512 KiB TCP echo against the Mac, a `.test` lookup + NXDOMAIN against
-the Mac's test DNS server, a refused host port. It then prints /proc/net.
+`opt/milkos/nettest` (`echo=IP:PORT echo6=[IPV6]:PORT dns=IP:PORT name=NAME expect=IP
+refused=IP:PORT`, passed by net-test.sh) also: 512 KiB TCP echo against the Mac over IPv4
+(10.0.2.2) and over IPv6 (`[fec0::2]`, which slirp maps to the Mac's `::1`), a `.test`
+lookup + NXDOMAIN against the Mac's test DNS server, a refused host port. It then prints
+/proc/net.
 
-**`scripts/net-test.sh`**: starts `scripts/net_test_servers.py` (TCP echo, test DNS, HTTP,
-all on 127.0.0.1, from a mktemp dir), boots with
+**`scripts/net-test.sh`**: starts `scripts/net_test_servers.py` (TCP echo on 127.0.0.1
+and on `::1` (v6-only), test DNS and HTTP on 127.0.0.1, from a mktemp dir), boots with
 hostfwds for guest :80 (userland httpd), :8080 (kernel httpd) and :7777 (nc -l), checks
-the self-test, types `ifconfig`, `ping`, three `fetch`es, `nc` to the host echo server (then
-^D), `nc -l 7777` (the Mac connects and sends a line) and `netstat` into msh over the serial
+the self-test, types `ifconfig` (inet6 lines checked), `ping`, `ping -6 fec0::2`, four
+`fetch`es (one to `http://[::1]/`, the userland httpd over IPv6), `nc` to the host echo
+server and `nc -6 fec0::2` to the `::1` one (then ^D), `nc -l 7777` (the Mac connects and
+sends a line), `netstat` (httpd's `[::]:80` in tcp6) and `netstat -6 -l` into msh over the serial
 console (`scripts/serial_drive.py`), then from the Mac: the userland httpd (`/`, a file, a
 listing, 404, 403 for `..`, 301) and the kernel httpd (`/big` content verified, 4 parallel
 `/big`, `/net`, 404). Kills only the qemu and
@@ -660,7 +668,11 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
 * after shutdown, the host reads both received files out of the images (`mkmilkfs.py
   cat`) and compares their SHA-256 with the originals, and finds alice's `known_peers` on
   her disk;
-* a second boot of alice's image: same name, same fingerprint, bob still trusted.
+* a second boot of alice's image: same name, same fingerprint, bob still trusted;
+* **IPv6 between the VMs over eth1**: alice `ping -6 bob.local` (AAAA over `ff02::fb`,
+  then ICMPv6 to bob's `fd6d:696c:6b00:1:6d:6bff:fe64:b0b`) and `drop send bob.local`,
+  which goes over IPv6 (IPv6 first): bob's receiver listens on both eth1 addresses, gets
+  the file intact, and both audit records carry the IPv6 addresses.
 
 It kills only its own qemus and serial drivers, by PID.
 
@@ -668,7 +680,10 @@ It kills only its own qemus and serial drivers, by PID.
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
-* `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8); AAAA.
+* `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8).
+* IPv6: reassembly and path MTU discovery (we never fragment and assume 1500); privacy
+  addresses (RFC 8981); MLD (no multicast router on these links, so no need yet); Milk
+  Drop discovery over `ff02::fb` (announcements are IPv4 multicast and carry `addr6`).
 * Keepalive; ECN; a smarter congestion controller (CUBIC); D-SACK; RACK-TLP.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
   default gateway on eth0); IGMP if a multicast router ever appears.

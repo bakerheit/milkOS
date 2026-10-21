@@ -383,8 +383,11 @@ held across I/O, always taken in one order (inode map -> node / fid / snapshot-d
 never back); page-cache fills run unlocked and are guarded by the invalidation epoch.
 
 `user/fsstress DIR [WORKERS] [ROUNDS] [READFILE]` forks workers (one per CPU and more)
-that write / read-verify / rename / delete files of varying size in parallel, optionally
-re-reading a shared file every round. Run on `-smp 4` for 8 boots, each with Time Machine
+that write / read-verify / rename / delete files of varying size in parallel, make
+reflink copies on milkfs (verify, write into the copy, check the original is unchanged),
+optionally re-reading a shared file every round. `scripts/stressloop.sh [BOOTS]` runs it
+on fresh private milkfs + FAT32 images with Time Machine snapshotting every second, then
+`dedupe`, `snap check`, and on the Mac `mkmilkfs.py check` and `fsck_msdos -n`. Run on `-smp 4` for 8 boots, each with Time Machine
 snapshotting every second meanwhile: 8 workers x 20 rounds on milkfs and 4 x 8 on FAT32
 per boot, 0 errors, `mkmilkfs.py check` clean, `fsck_msdos` with nothing to fix. The test
 scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4}`.
@@ -818,6 +821,10 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
   exact. The host check also compares each crashed image's space map with the blocks
   actually reachable (24/24 rounds exact).
 - `scripts/mounttime.sh [N]`: mount time with N files, with and without a space map.
+- `scripts/treetest.sh [N]`: B+tree shape after creating and deleting N files.
+- `scripts/reflinktest.sh`: `cp --reflink`, `--reflink=auto` / refusal on tmpfs, writing a
+  copy, `dedupe -n` / `dedupe` from the shell; byte-exact and clean on the Mac.
+- `scripts/stressloop.sh [BOOTS]`: parallel stress (see SMP).
 - Self-test, space map (own RAM disk, `State` re-opens as reboots): a fresh volume scans;
   after commits a re-open loads the map; an unlinked-while-open file left at a "crash" is
   deleted from the orphan list; a damaged chunk is noticed and rebuilt; a block in use

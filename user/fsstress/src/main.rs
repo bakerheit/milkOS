@@ -4,8 +4,10 @@
 //!
 //! Each worker, in DIR/wN: writes 8 files of varying size with a pattern derived from
 //! (worker, round, file), reads each back and compares, renames it, reads it again,
-//! deletes some; and, if READFILE is given (e.g. something on /Volumes/Mac), reads it every
-//! round and checks it never changes. Prints a summary; exit status = number of errors.
+//! deletes some; on milkfs also makes reflink copies (FICLONE), checks them, writes into
+//! them and checks the original didn't change (skipped where the file system can't); and,
+//! if READFILE is given (e.g. something on /Volumes/Mac), reads it every round and checks
+//! it never changes. Prints a summary; exit status = number of errors.
 
 #![no_std]
 #![no_main]
@@ -50,11 +52,39 @@ fn read_file(path: &str) -> Result<Vec<u8>, rt::Errno> {
     Ok(out)
 }
 
+/// Reflink `src` to `dst`. Ok(false): the file system can't (not milkfs).
+fn reflink(src: &str, dst: &str) -> Result<bool, rt::Errno> {
+    let s = sys::open(src, sys::O_RDONLY)?;
+    let d = match sys::open_mode(dst, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o644) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = sys::close(s);
+            return Err(e);
+        }
+    };
+    let r = sys::ficlone(s, d);
+    let _ = (sys::close(s), sys::close(d));
+    match r {
+        Ok(()) => Ok(true),
+        Err(e) if e.0 == 95 || e.0 == 18 => Ok(false), // EOPNOTSUPP, EXDEV
+        Err(e) => Err(e),
+    }
+}
+
+/// Overwrite the first bytes of `path` in place.
+fn poke(path: &str, bytes: &[u8]) -> Result<(), rt::Errno> {
+    let fd = sys::open(path, sys::O_WRONLY)?;
+    let r = sys::write_all(fd, bytes);
+    let _ = sys::close(fd);
+    r
+}
+
 fn worker(dir: &str, w: u32, rounds: u32, readfile: Option<&str>) -> i32 {
     let d = format!("{dir}/w{w}");
     let _ = sys::mkdir(&d, 0o755);
     let reference = readfile.and_then(|f| read_file(f).ok());
     let mut errors = 0;
+    let mut reflinks = true;
     let mut bad = |what: &str| {
         errors += 1;
         if errors <= 5 {
@@ -77,6 +107,34 @@ fn worker(dir: &str, w: u32, rounds: u32, readfile: Option<&str>) -> i32 {
             }
             if read_file(&g).ok().as_deref() != Some(&data[..]) {
                 bad("read after rename differs");
+            }
+            if reflinks && (r + j) % 2 == 1 {
+                let c = format!("{d}/c{j}");
+                match reflink(&g, &c) {
+                    Ok(false) => reflinks = false,
+                    Err(_) => bad("reflink"),
+                    Ok(true) => {
+                        if read_file(&c).ok().as_deref() != Some(&data[..]) {
+                            bad("reflink copy differs");
+                        }
+                        let mark = [b'c', w as u8, r as u8, j as u8];
+                        let n = mark.len().min(data.len());
+                        if poke(&c, &mark[..n]).is_err() {
+                            bad("write into reflink copy");
+                        }
+                        let mut want = data.clone();
+                        want[..n].copy_from_slice(&mark[..n]);
+                        if read_file(&c).ok().as_deref() != Some(&want[..]) {
+                            bad("written reflink copy differs");
+                        }
+                        if read_file(&g).ok().as_deref() != Some(&data[..]) {
+                            bad("original changed by writing its reflink copy");
+                        }
+                        if r % 2 == 0 && sys::unlink(&c).is_err() {
+                            bad("unlink reflink copy");
+                        }
+                    }
+                }
             }
             if (r + j) % 3 == 0 && sys::unlink(&g).is_err() {
                 bad("unlink");

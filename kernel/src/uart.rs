@@ -3,10 +3,21 @@
 //! (Transmit is still the polled console writer in main.rs.) UART0 is at 0x0900_0000 and
 //! raises SPI 1 = INTID 33 on qemu virt (DTB: `pl011@9000000`, `interrupts = <0 1 4>`).
 //!
-//! The ring is single-producer (the IRQ handler; device SPIs are routed to the boot CPU
-//! only, see gic::init) / single-consumer ([`read_byte`], called only by the tty-uart
-//! thread), so it needs no lock: acquire/release on head and tail is enough on SMP too. If the consumer falls behind and the
-//! ring fills, new bytes are dropped (counted in [`overruns`]).
+//! The ring has one producer at a time ([`drain`], under `DRAIN`: the IRQ handler, or the
+//! slow fallback poll) and one consumer ([`read_byte`], called only by the tty-uart
+//! thread), so acquire/release on head and tail is enough on SMP. If the consumer falls
+//! behind and the ring fills, new bytes are dropped (counted in [`overruns`]).
+//!
+//! **Clear, then drain.** qemu's PL011 raises the RX interrupt only when the FIFO goes
+//! from empty to non-empty (its trigger level is 1) and drops it when a read empties the
+//! FIFO or ICR is written. The handler used to drain first and write ICR after: a byte
+//! landing in between (easy when a line arrives as a burst while the handler runs, and
+//! qemu's device thread runs in parallel with the vCPU) had its interrupt cleared with
+//! the FIFO non-empty, so no further byte ever raised one again: the console wedged with
+//! FR = RXFF, RIS.RX = 0. Writing ICR first and then reading until RXFE is set can't lose
+//! an edge: anything that arrives after the last read starts a fresh one. (Same order is
+//! right for a real PL011's level-triggered FIFO interrupt.) [`poll`] is a slow
+//! defence-in-depth re-check that also counts and reports a lost interrupt.
 
 // Public API surface for later subsystems (scheduler, drivers); not all of it is used yet.
 #![allow(dead_code)]
@@ -16,7 +27,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::TrapFrame;
 use crate::gic;
-use crate::sync::FnSlot;
+use crate::sync::{FnSlot, SpinLock};
 
 const UART_BASE: usize = crate::mmu::phys_to_virt(0x0900_0000);
 const UARTDR: usize = 0x00;
@@ -40,6 +51,10 @@ static HEAD: AtomicUsize = AtomicUsize::new(0);
 /// Written only by the reader.
 static TAIL: AtomicUsize = AtomicUsize::new(0);
 static OVERRUNS: AtomicU64 = AtomicU64::new(0);
+/// Times [`poll`] found bytes in the FIFO with no RX interrupt pending.
+static RESCUES: AtomicU64 = AtomicU64::new(0);
+/// Serialises the producers of the ring (IRQ handler and [`poll`]), across CPUs.
+static DRAIN: SpinLock<()> = SpinLock::new(());
 /// Called (IRQ context) after new bytes land in the ring; the console tty wakes readers.
 static RX_HOOK: FnSlot = FnSlot::new();
 
@@ -90,15 +105,49 @@ pub fn overruns() -> u64 {
     OVERRUNS.load(Ordering::Relaxed)
 }
 
-fn on_irq(_irq: u32, _frame: &mut TrapFrame) {
-    // Drain the FIFO, then clear the (level) RX / timeout / error sources.
+/// Clear the RX / timeout / error interrupts, *then* move every byte in the FIFO into
+/// the ring (see the module docs for why that order). Returns how many bytes moved.
+fn drain() -> usize {
+    let _g = DRAIN.lock();
+    reg_write(UARTICR, INT_RX | INT_RT | INT_ERRORS);
+    let mut n = 0;
     while reg_read(UARTFR) & FR_RXFE == 0 {
         push((reg_read(UARTDR) & 0xff) as u8);
+        n += 1;
     }
-    reg_write(UARTICR, INT_RX | INT_RT | INT_ERRORS);
+    n
+}
+
+fn on_irq(_irq: u32, _frame: &mut TrapFrame) {
+    drain();
     if let Some(h) = RX_HOOK.get::<fn()>() {
         h();
     }
+}
+
+/// Slow fallback (the tty-uart thread calls it about once a second when idle): if the
+/// FIFO holds bytes but no RX interrupt is pending, an interrupt was lost; take the
+/// bytes anyway, count it and say so once. Returns true if it moved any bytes.
+pub fn poll() -> bool {
+    const UARTMIS: usize = 0x40;
+    if reg_read(UARTFR) & FR_RXFE != 0 || reg_read(UARTMIS) & (INT_RX | INT_RT) != 0 {
+        return false; // nothing waiting, or the IRQ is on its way
+    }
+    if drain() == 0 {
+        return false;
+    }
+    if RESCUES.fetch_add(1, Ordering::Relaxed) == 0 {
+        crate::kprintln!("[uart] RX bytes waiting with no RX interrupt: recovered by poll");
+    }
+    if let Some(h) = RX_HOOK.get::<fn()>() {
+        h();
+    }
+    true
+}
+
+/// Times [`poll`] had to rescue bytes (0 unless an RX interrupt was lost).
+pub fn rescues() -> u64 {
+    RESCUES.load(Ordering::Relaxed)
 }
 
 /// Hook up the RX interrupt. GIC must be initialised; IRQs still need unmasking.

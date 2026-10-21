@@ -42,9 +42,11 @@ secondaries: smp.S). `kprintln!` takes a line lock (`sink::with_print_lock`) so 
 from different CPUs don't interleave; a nested print on the same CPU, or a holder that
 died mid-line (~20 ms), doesn't hang it. Console writes from processes use it too.
 
-Audited for SMP: gic/uart/input counters are atomic adds now; the uart RX ring stays
-single-producer (the UART IRQ, on whichever CPU it is routed to) / single-consumer
-(tty-uart thread); the screen-console
+Audited for SMP: gic/uart/input counters are atomic adds now; the uart RX ring has one
+producer at a time (`uart::drain` under a lock: the UART IRQ on whichever CPU it is
+routed to, or the 1 s fallback poll) and one consumer (tty-uart thread). The RX handler
+clears ICR *before* draining the FIFO: draining first lost the RX edge when a byte
+landed in between and wedged the console (see uart.rs, `scripts/serial-soak.sh`); the screen-console
 flag uses compare-exchange once the MMU is on; klog, input queue, tty, pipes, net are
 all behind SpinLocks or proper atomics; net's "set flag, wake queue" pattern is safe with
 the new wait-queue protocol below.

@@ -4,6 +4,8 @@
 - `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"` (rustup is keg-only). Nightly + `aarch64-unknown-none-softfloat`, pinned in `rust-toolchain.toml`.
 - `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only,
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
+  `MILK_MONITOR=/tmp/x.sock scripts/run.sh headless` adds a qemu monitor socket (`info registers -a` on a hang).
+  `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).
 - qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 

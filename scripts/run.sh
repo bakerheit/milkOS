@@ -37,6 +37,10 @@ if [ -n "${MILK_SOUND_WAV:-}" ]; then
 elif [ "${MILK_SOUND:-}" = 1 ]; then
   SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
 fi
+# MILK_MONITOR=/tmp/x.sock adds a qemu monitor on that unix socket (debugging hangs:
+# `echo "info registers -a" | nc -U /tmp/x.sock`).
+MON_ARGS=()
+[ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
-  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
+  -kernel "$KERNEL" -serial mon:stdio ${MON_ARGS[@]+"${MON_ARGS[@]}"} "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

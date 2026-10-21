@@ -241,8 +241,12 @@ proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that 
   `ioctl` is not used for a registered tty.
 * `read` blocks (interruptible: EINTR), except before `sched::init` where it is EAGAIN
   when empty (the fs self-test relies on that).
-* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt), so ^C
-  works while nobody reads. `uart::read_byte` belongs to it.
+* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt, with a
+  1 s timeout that runs `uart::poll` as a fallback: it rescues bytes if an RX interrupt
+  was ever lost and logs "recovered by poll" once), so ^C works while nobody reads.
+  `uart::read_byte` belongs to it. Regression test: `scripts/serial-soak.sh [boots]
+  [commands]` types `echo tickK` once a second over serial; every tick must come back
+  and the fallback must never fire.
 * Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
   job stop/continue.
 

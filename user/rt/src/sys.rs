@@ -672,6 +672,21 @@ pub fn mmap_anon(len: usize) -> Result<*mut u8> {
     sc(nr::MMAP, [0, len, PROT_RW, MAP_PRIVATE_ANON, usize::MAX, 0]).map(|a| a as *mut u8)
 }
 
+/// Anonymous private mapping with protection `prot` (PROT_READ 1 | WRITE 2 | EXEC 4).
+pub fn mmap_prot(len: usize, prot: u32) -> Result<*mut u8> {
+    const MAP_PRIVATE_ANON: usize = 0x22;
+    sc(
+        nr::MMAP,
+        [0, len, prot as usize, MAP_PRIVATE_ANON, usize::MAX, 0],
+    )
+    .map(|a| a as *mut u8)
+}
+
+/// mprotect(2) on `[addr, addr+len)`.
+pub fn mprotect(addr: usize, len: usize, prot: u32) -> Result<()> {
+    sc(226, [addr, len, prot as usize, 0, 0, 0]).map(|_| ())
+}
+
 pub fn munmap(p: *mut u8, len: usize) -> Result<()> {
     sc(nr::MUNMAP, [p as usize, len, 0, 0, 0, 0]).map(|_| ())
 }

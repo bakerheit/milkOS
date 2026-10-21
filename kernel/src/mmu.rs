@@ -134,6 +134,20 @@ impl MapAttrs {
         exec: false,
         user: false,
     };
+    /// Kernel code: read + execute, never writable (W^X).
+    pub const KERNEL_TEXT: MapAttrs = MapAttrs {
+        mem: MemType::Normal,
+        write: false,
+        exec: true,
+        user: false,
+    };
+    /// Kernel constants: read only, execute never.
+    pub const KERNEL_RODATA: MapAttrs = MapAttrs {
+        mem: MemType::Normal,
+        write: false,
+        exec: false,
+        user: false,
+    };
 
     fn bits(self) -> u64 {
         let attr_idx = match self.mem {
@@ -450,9 +464,10 @@ impl AddressSpace {
 
 static KERNEL_SPACE: SpinLock<Option<AddressSpace>> = SpinLock::new(None);
 
-/// Number of page-table pages available before the frame allocator exists:
-/// L0 + L1 + a couple of L2/L3 for RAM edges.
-const BOOT_TABLES: usize = 8;
+/// Number of page-table pages available before the frame allocator exists: L0, L1, the
+/// L2s for RAM, and L3s for the kernel image, which is mapped in 4 KiB pages by section
+/// (W^X; ~10 MiB = 5 L3 tables) plus the RAM below it.
+const BOOT_TABLES: usize = 32;
 
 struct BootPool {
     tables: UnsafeCell<[Table; BOOT_TABLES]>,
@@ -498,6 +513,23 @@ unsafe extern "C" {
     /// which turn their MMU on through them.
     static boot_l0: Table;
     fn mmu_switch_ttbr1(root: u64);
+    // linker.ld: the image's sections, page aligned.
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_end: u8;
+    static __kernel_end: u8;
+}
+
+/// Physical [start, end) of the kernel's text, rodata, and data+bss+boot stack.
+fn image_sections() -> [(PhysAddr, PhysAddr, MapAttrs); 3] {
+    let pa = |s: *const u8| virt_to_phys(s as usize);
+    let (t0, t1) = (pa(&raw const __text_start), pa(&raw const __text_end));
+    let (r1, k1) = (pa(&raw const __rodata_end), pa(&raw const __kernel_end));
+    [
+        (t0, t1, MapAttrs::KERNEL_TEXT),
+        (t1, r1, MapAttrs::KERNEL_RODATA),
+        (r1, k1.next_multiple_of(PAGE_SIZE), MapAttrs::KERNEL_DATA),
+    ]
 }
 
 global_asm!(
@@ -543,16 +575,24 @@ pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
             &mut pool,
         )
         .expect("map device region");
+    // RAM, W^X: everything read/write + execute-never, except the kernel image's text
+    // (read + execute) and rodata (read only). The image is mapped in 4 KiB pages; the rest
+    // in 2 MiB / 1 GiB blocks where alignment allows.
     let ram_end = (ram_base + ram_size).next_multiple_of(BLOCK_2M);
-    space
-        .map(
-            phys_to_virt(ram_base),
-            ram_base,
-            ram_end - ram_base,
-            MapAttrs::KERNEL_RAM,
-            &mut pool,
-        )
-        .expect("map RAM");
+    let secs = image_sections();
+    let (img_start, img_end) = (secs[0].0, secs[2].1);
+    let mut map = |start: PhysAddr, end: PhysAddr, attrs: MapAttrs| {
+        if end > start {
+            space
+                .map(phys_to_virt(start), start, end - start, attrs, &mut pool)
+                .expect("map RAM");
+        }
+    };
+    map(ram_base, img_start, MapAttrs::KERNEL_DATA);
+    for (a, b, attrs) in secs {
+        map(a, b, attrs);
+    }
+    map(img_end, ram_end, MapAttrs::KERNEL_DATA);
     let root = space.root() as u64;
     KERNEL_TTBR1.store(root, core::sync::atomic::Ordering::Relaxed);
     // SAFETY: called at its physical address through the boot identity map in TTBR0; it
@@ -572,9 +612,35 @@ pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
             t = in(reg) kernel_ttbr0(),
             options(nostack)
         );
+        // Hardware W^X on top: any writable page is execute-never (SCTLR.WXN), for EL1 and
+        // EL0. Only now: the boot tables were one writable+executable block.
+        set_wxn();
     }
     *KERNEL_SPACE.lock() = Some(space);
 }
+
+/// Turn on SCTLR_EL1.WXN on this CPU (and flush its TLB: WXN may be cached there).
+/// smp.S does the same on secondaries once they run on the final tables.
+pub fn set_wxn() {
+    // SAFETY: system register write; every mapping in use honours W^X already.
+    unsafe {
+        core::arch::asm!(
+            "mrs {t}, sctlr_el1",
+            "orr {t}, {t}, {wxn}",
+            "msr sctlr_el1, {t}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            t = out(reg) _,
+            wxn = in(reg) SCTLR_WXN,
+            options(nostack)
+        );
+    }
+}
+
+/// SCTLR.WXN bit, for smp.rs (secondaries enable the MMU without it, then set it).
+pub const SCTLR_WXN_BIT: u64 = SCTLR_WXN;
 
 /// Run `f` on the kernel's address space.
 pub fn with_kernel_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> R {
@@ -623,7 +689,7 @@ const SCTLR_A: u64 = 1 << 1; // alignment check (off: Normal memory allows unali
 const SCTLR_C: u64 = 1 << 2; // data cache
 const SCTLR_SA: u64 = 1 << 3; // SP alignment check at EL1
 const SCTLR_I: u64 = 1 << 12; // instruction cache
-const SCTLR_WXN: u64 = 1 << 19; // writable => execute-never (off: no W^X yet)
+const SCTLR_WXN: u64 = 1 << 19; // writable => execute-never (set after the boot tables)
 
 const TCR_T0SZ: u64 = 64 - VA_BITS as u64;
 const TCR_IRGN0_WBWA: u64 = 0b01 << 8;

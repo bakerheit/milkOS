@@ -12,11 +12,19 @@ SECTIONS
     . = KERNEL_BASE + KERNEL_PHYS;
     __kernel_start = .;
 
+    /* W^X (mmu.rs): text RX, rodata R, data/bss/stack RW + XN, so each starts on a page. */
     .text : AT(KERNEL_PHYS) {
+        __text_start = .;
         KEEP(*(.text.boot))
         *(.text .text.*)
     }
-    .rodata : ALIGN(16) { *(.rodata .rodata.*) }
+    . = ALIGN(4K);
+    __text_end = .;
+    __rodata_start = .;
+    .rodata : { *(.rodata .rodata.*) }
+    . = ALIGN(4K);
+    __rodata_end = .;
+    __data_start = .;
     .data   : ALIGN(16) { *(.data .data.*) }
     .bss    : ALIGN(16) {
         __bss_start = .;

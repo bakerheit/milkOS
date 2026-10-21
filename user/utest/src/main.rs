@@ -1126,6 +1126,52 @@ fn t_perms() -> bool {
     )
 }
 
+/// User-space W^X: the heap and the stack don't execute, text isn't writable, and
+/// mmap / mprotect refuse PROT_WRITE | PROT_EXEC. Each probe runs in a child, which must
+/// die of SIGSEGV.
+fn t_wx() -> bool {
+    const RET: u32 = 0xd65f_03c0;
+    fn segv(f: fn()) -> bool {
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            f();
+            sys::exit(0); // it ran: W^X is broken
+        }
+        let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+        st & 0x7f == sys::SIGSEGV
+    }
+    fn jump(addr: usize) {
+        // SAFETY: deliberately not; a `ret` if it runs at all.
+        let f: extern "C" fn() = unsafe { core::mem::transmute(addr) };
+        f();
+    }
+    let heap = segv(|| {
+        let code = alloc::boxed::Box::new([RET; 4]);
+        jump(code.as_ptr() as usize);
+    });
+    let stack = segv(|| {
+        let code = [RET; 4];
+        jump(core::hint::black_box(&code).as_ptr() as usize);
+    });
+    let text = segv(|| {
+        let p = t_wx as *const () as *mut u8;
+        // SAFETY: deliberately not: must fault.
+        unsafe { core::ptr::write_volatile(p, 0) };
+    });
+    let mut page = alloc::vec![0u8; 8192];
+    let addr = (page.as_mut_ptr() as usize + 4095) & !4095;
+    let mprot = sys::mprotect(addr, 4096, 7).is_err();
+    let mmap_rwx = sys::mmap_prot(4096, 7).is_err();
+    check(
+        "W^X",
+        heap && stack && text && mprot && mmap_rwx,
+        &alloc::format!(
+            "SIGSEGV: jump into heap {heap}, into stack {stack}, write to text {text}; \
+             RWX refused: mprotect {mprot}, mmap {mmap_rwx}"
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1167,6 +1213,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "perms" || what == "all" {
         ok &= t_perms();
+    }
+    if what == "wx" || what == "all" {
+        ok &= t_wx();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

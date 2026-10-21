@@ -155,7 +155,9 @@ pub fn init() -> usize {
             b.mair = mair;
             b.tcr = tcr;
             b.ttbr0 = ttbr0;
-            b.sctlr = sctlr;
+            // Without WXN: the MMU comes on through the boot identity block (writable +
+            // executable); smp.S sets WXN once it runs on the kernel's W^X tables.
+            b.sctlr = sctlr & !mmu::SCTLR_WXN_BIT;
             b.cpu = cpu as u64;
             b.ttbr1 = mmu::kernel_ttbr1();
             b.ttbr0_final = mmu::kernel_ttbr0();

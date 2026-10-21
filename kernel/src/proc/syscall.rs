@@ -583,6 +583,9 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         nr::MMAP => sys_mmap(a0, a1, a[2] as u32, a[3] as u32, a[4] as i64),
         nr::MUNMAP => with_space(|s| s.munmap(a0, a1).map(|_| 0)),
         nr::MPROTECT => {
+            if wx(a[2] as u32) {
+                return Err(EACCES);
+            }
             let perm = prot_to_perm(a[2] as u32);
             with_space(|s| s.protect(a0, a1, perm).map(|_| 0))
         }
@@ -877,6 +880,11 @@ fn sys_setpgid(pid: u32, pgid: u32) -> KResult<usize> {
     Ok(0)
 }
 
+/// PROT_WRITE | PROT_EXEC together: refused (W^X; nothing on milkOS JITs).
+fn wx(prot: u32) -> bool {
+    prot & 6 == 6
+}
+
 fn prot_to_perm(prot: u32) -> Option<Perm> {
     const PROT_WRITE: u32 = 2;
     const PROT_EXEC: u32 = 4;
@@ -1169,6 +1177,9 @@ fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
 // ---- memory ---------------------------------------------------------------------------
 
 fn sys_mmap(addr: usize, len: usize, prot: u32, flags: u32, fd: i64) -> KResult<usize> {
+    if wx(prot) {
+        return Err(EACCES);
+    }
     const MAP_PRIVATE: u32 = 0x02;
     const MAP_FIXED: u32 = 0x10;
     const MAP_ANONYMOUS: u32 = 0x20;

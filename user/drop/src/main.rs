@@ -6,7 +6,8 @@
 //!   drop daemon [-q]           announce + answer queries (init starts it when eth1 exists)
 //!   drop list [-w MS]          peers on the link (MILK_TABLE=1: a table)
 //!   drop send PEER FILE        PEER: a name, a fingerprint prefix or an IPv4 address
-//!   drop recv [-y] [-k]        accept files into ~/Downloads (-y: no prompt, -k: keep going)
+//!   drop recv [-y] [-k]        accept one transfer into ~/Downloads (-y: no prompt,
+//!                              -k: keep receiving until Ctrl-C)
 //!   drop peers                 peers trusted on first use
 //!   drop forget NAME           stop trusting NAME (after a legitimate key change)
 //!
@@ -801,9 +802,11 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
             Err(e) => break Err(alloc::format!("accept: {e}")),
         };
         let mut c = Conn::new(fd, 10_000);
+        // One transfer (received, declined or failed), unless -k.
         match serve(&id, &mut c, from, yes, dir) {
-            Ok(true) if !keep => break Ok(()),
+            Ok(_) if !keep => break Ok(()),
             Ok(_) => {}
+            Err(e) if !keep => break Err(e),
             Err(e) => eprintln!("drop: {e}"),
         }
     };

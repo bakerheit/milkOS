@@ -105,7 +105,8 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:mv /etc/milk/drop/identity.secret /etc/milk/drop/old.secret' "$P" \
   'send:drop id' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b3" \
-  "waitfile:$WORK/alice.done" 'raw:\x03' "$P" \
+  "wait:$DONE_RE" "$P" "waitfile:$WORK/alice.done" \
+  'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
   'send:echo now > /sys/fs/milkfs/sync' "$P" \
   "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
@@ -161,6 +162,10 @@ check "$A" "audit: first-use trust" "user\\.drop\\.trust +name=bob fp=[0-9a-f]{1
 check "$B" "audit: bob's receive" "user\\.drop\\.recv +peer=alice .* result=ok"
 check "$B" "audit: bob's send" "user\\.drop\\.send +peer=alice .* result=ok"
 check "$B" "audit: identity creation" "user\\.drop\\.identity +name=milk-[0-9a-f]{4} fp="
+check "$B" "bob's receiver saw alice hang up on the changed key" "drop: the peer closed the connection"
+# Ctrl-C ends a drop recv blocked in accept (blocking socket calls take signals).
+grep -A2 'drop recv -k' "$B" | grep -q '^msh:' || fail "Ctrl-C did not stop drop recv -k"
+echo "  ok  Ctrl-C stops a drop recv blocked in accept"
 FP_A=$(sed -n 's/^fingerprint: *//p' "$A" | head -1)
 [ -n "$FP_A" ] || fail "no fingerprint in alice's drop id"
 
@@ -192,7 +197,7 @@ kill "$QA"
 wait "$QA" 2>/dev/null || true
 A2="$WORK/alice2.txt"
 tr -d '\r' <"$WORK/alice2.log" | sed -n '/msh:[^ ]*\$ drop id/,$p' >"$A2"
-cat "$A2"
+cat "$A2"; echo
 check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"

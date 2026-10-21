@@ -43,6 +43,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/Applications` | milkfs (bind of `/Volumes/Milk/Applications`), tmpfs without a disk | packages (`milk install`, docs/packages.md), persistent |
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
+| `/etc/milk/drop` | milkfs (bind of `/Volumes/Milk/etc/milk/drop`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
 | `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
 | `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |

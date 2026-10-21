@@ -222,8 +222,99 @@ netmask=.. broadcast=.. gateway=.. dns=.. dhcp=Bound`).
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
+| `drop id / name / list / send / recv / peers / forget / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
 
 Addresses are numeric (or `localhost`): there is no resolver for user programs yet.
+
+## Milk Drop (`user/drop`)
+
+AirDrop-style sharing between two milkOS machines on the eth1 link. Everything is
+userland except the eth1 link itself and one tiny fs hook (`/etc/milk/drop` is persistent).
+
+**Identity.** Each machine has an Ed25519 key pair (`rt::ed25519`) in `/etc/milk/drop/`
+(`identity.secret`, the seed; `identity.pub`; `name`; `known_peers`), made the first time
+`drop` runs. That first run is normally the daemon init starts at boot. On a machine with a
+Milk volume, `fs::init` binds `/Volumes/Milk/etc/milk/drop` onto it
+(`milkfs::setup_persistent_etc`), so the identity and the trusted peers survive reboots.
+The fingerprint people compare is the first 8 bytes of SHA-256(public key) in four groups
+(`3fa2 91bc 07de 44a1`). The default name is `<hostname>-<first 4 fingerprint digits>`;
+`drop name alice` changes it. The secret is only as safe as the system: everything runs as
+uid 0, so any program could read it. `milk run-try` sandboxes keep tried apps away from
+their clone's `/etc`. The key comes from SHA-512 over `/dev/urandom` (a xorshift seeded at
+boot, weak on its own), clock jitter, the wall clock, uname and the MACs: good enough for a
+demo, not a real CSPRNG. There is no hardware RNG device yet.
+
+**Discovery** ("mDNS-lite"): UDP to the mDNS group 224.0.0.251, but on port 5359 and
+with a one-line text format instead of DNS records. Only milkOS machines are on the link.
+`drop daemon` (started by init when eth1 exists, bound to eth1's address) multicasts every
+10 s, and answers every `QUERY` at once (unicast), with:
+
+```text
+MILKDROP/1 ANNOUNCE name=alice host=milk port=5360 key=<64 hex> fp=<16 hex> recv=0|1 sig=<128 hex>
+```
+
+`sig` is Ed25519 over `milkdrop-announce-v1 <the line before " sig=">` with the key it
+carries, and `fp` must match that key, so an announcement can't be altered in flight or
+claim someone else's key. It can be replayed, though, and trust is not decided here.
+`recv=1` while `drop recv` runs. The daemon re-reads the name and the receiving flag for
+every message and never makes a key. `drop list` multicasts a QUERY (and once more halfway
+through), collects answers for 1.5 s, and prints name, address, fingerprint, receiving and
+trust (`new` / `known` / `KEY CHANGED`). With `MILK_TABLE=1` it writes a structured table
+(`drop list | where receiving == yes`). The daemon also keeps what it hears in
+`/tmp/drop/peers` (`name ip fp recv seen`).
+
+**Transfer** (TCP 5360, on eth1's address only, while `drop recv` runs). Lines end in `\n`:
+
+```text
+R: MILKDROP/1 HELLO recv name=bob key=<Kr> nonce=<Nr>
+S: MILKDROP/1 HELLO send name=alice key=<Ks> nonce=<Ns> sig=Sign_s("milkdrop-hello-v1 send Nr Ns Kr Ks")
+R: AUTH sig=Sign_r("milkdrop-hello-v1 recv Nr Ns Kr Ks")          (or DECLINE key-changed)
+S: OFFER name=<%-escaped> size=<n> sha256=<hex> sig=Sign_s("milkdrop-offer-v1 Nr Ns name size sha")
+R: ACCEPT                                                          (or DECLINE <why>)
+S: <size bytes, 16 KiB writes, progress every 10%>
+R: DONE sha256=<hex>                                               (or BAD sha256=<hex>)
+```
+
+* Both sides sign the same transcript (both 128-bit nonces and both keys) with their role,
+  so a hello can't be replayed into another session or toward another peer. The sender
+  also checks that the receiver's key is the one it announced.
+* **Trust on first use**, keyed by name and key (`known_peers`). A new key is shown with
+  its fingerprint: the receiver's prompt says `NEW peer, fingerprint ...; accepting trusts
+  this key`, and the sender prints `bob is new: fingerprint ... (trusted on first use)`.
+  A known key under a new name is the same peer, renamed. A known name with a different key
+  is refused, loudly, on either side: a boxed `WARNING: bob's KEY HAS CHANGED` with both
+  fingerprints, plus an audit record. `drop forget bob` is the way out after a real
+  reinstall.
+* The offer is signed, so the name, size and SHA-256 are the sender's. The receiver
+  streams into `~/Downloads/.<name>.part`, hashes as it goes, and renames to the final
+  name only if the SHA-256 matches. The name is reduced to a safe basename, with
+  ` (1)`, ` (2)`... added if it exists. A mismatch deletes the file and tells the sender.
+* `drop recv` takes one transfer (received, declined or failed) and exits; `-k` keeps
+  going, `-y` accepts without asking. Ctrl-C stops it (blocking socket calls now return
+  `EINTR` on a pending signal).
+* Not confidential: the data is not encrypted (no key exchange or cipher yet). It is
+  authenticated (both keys proved, offer signed) and integrity-checked (SHA-256), and the
+  link is two VMs on the Mac's loopback.
+* **Audit** (through `/dev/audit`, so recorded as `user.drop.*`): `identity`, `rename`,
+  `trust` (first use), `send` / `recv` (peer, fingerprint, address, file, size, sha256,
+  `result=ok|bad|declined|refused|failed`), `decline`, `key_changed`, `forget`.
+
+**Hook for the desktop** (a share sheet, or Files "Send to..."): the wm doesn't need to
+speak the protocol. It can run the CLI:
+
+* peers: `MILK_TABLE=1 drop list` (a `\x1emilk-table 1` table: name, address,
+  fingerprint, receiving, trust, host; see docs/shell.md), or read `/tmp/drop/peers`
+  without waiting;
+* send: `drop send <name> <path>`. It prints `drop: [####......]  40%  416 KiB / 1024 KiB`
+  progress lines, then `drop: sent ...` (exit 0) or `drop: <reason>` (exit 1). A `KEY
+  CHANGED` refusal is the boxed warning on stderr;
+* receive: `drop recv` prints `drop: <who> wants to send you <file> (<size>).` then
+  `drop: accept? [y/N]` and reads a line from stdin, so a GUI can show its own sheet with
+  the name and fingerprint and answer `y` or `n`. Finished files are in `~/Downloads`.
+
+Kept stable for that: the line prefixes above, the table columns, the exit status.
+
+**Test**: `scripts/drop-test.sh` (below).
 
 ## In-kernel HTTP server (demo, off by default)
 
@@ -254,6 +345,28 @@ listing, 404, 403 for `..`, 301) and the kernel httpd (`/big` content verified, 
 `/big`, `/net`, 404). Kills only the qemu and
 python processes it started, by PID.
 
+**`scripts/drop-test.sh`**: Milk Drop between two VMs, alice and bob. Each has its own
+private milkfs and scratch images in a mktemp dir, with a different random 1 MiB file put
+in by `mkmilkfs.py`. eth0 is a restricted slirp; eth1 is `-netdev dgram` between two free
+UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
+169.254.11.11). Over the serial consoles, kept in step with marker files, it checks:
+
+* both link-local addresses and eth0's DHCP; identities made at first boot; init's daemon;
+* alice `drop list`s bob (new, receiving) and sends him her file. bob's prompt shows alice
+  as NEW with her fingerprint, he types `y`, progress reaches 100%, and he verifies the
+  SHA-256, which must equal the host's;
+* bob sends his file to alice (now known both ways);
+* bob loses his key and makes a new one under the same name. alice refuses to send to him,
+  loudly, with a `user.drop.key_changed` record;
+* Ctrl-C stops a `drop recv -k` waiting in accept;
+* the `user.drop.*` records on both machines;
+* after shutdown, the host reads both received files out of the images (`mkmilkfs.py
+  cat`) and compares their SHA-256 with the originals, and finds alice's `known_peers` on
+  her disk;
+* a second boot of alice's image: same name, same fingerprint, bob still trusted.
+
+It kills only its own qemus and serial drivers, by PID.
+
 ## Next
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
@@ -261,4 +374,7 @@ python processes it started, by PID.
 * A resolver for user programs (an `/etc/hosts` + the same `.test` policy, or a syscall).
 * Per-socket buffer sizes instead of the fixed 16 KiB pool; window scaling then.
 * Delayed ACKs and Nagle (fewer packets), SACK, IP fragment reassembly, keepalive.
-* Multiple interfaces (the routing table is three rules today).
+* A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
+  default gateway on eth0); IGMP if a multicast router ever appears.
+* Milk Drop: encryption (X25519 + a cipher), resumable transfers, several files or a
+  folder per offer, a hardware RNG (virtio-rng) for keys.

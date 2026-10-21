@@ -57,6 +57,10 @@ pub struct Store {
     /// Encrypted volume: the unlocked key. Every block written gets sealed, every block
     /// read opened (see `crypt.rs`); the checksum in a pointer is then the SIV tag.
     pub crypt: Option<alloc::sync::Arc<super::crypt::VolumeKey>>,
+    /// Converting in place (`SB_CONVERTING`, with `crypt` set): blocks are read in either
+    /// form (a plaintext xxh64 match first, then the SIV tag); written sealed if `true`
+    /// (encrypting), plain if `false` (decrypting).
+    pub convert: Option<bool>,
 }
 
 #[derive(Default)]
@@ -89,6 +93,7 @@ impl Store {
             recv_drops: None,
             held: None,
             crypt: None,
+            convert: None,
         };
         s.mark(0);
         s.mark(1);
@@ -213,19 +218,59 @@ impl Store {
     /// xxh64 of it, or on an encrypted volume `data` is encrypted in place and the
     /// checksum is its SIV tag.
     pub fn seal(&self, block: u64, birth: u64, data: &mut [u8]) -> u64 {
-        match &self.crypt {
-            Some(k) => k.seal(block, birth, data),
-            None => xxh64(data),
+        match (&self.crypt, self.convert) {
+            (Some(_), Some(false)) | (None, _) => xxh64(data),
+            (Some(k), _) => k.seal(block, birth, data),
         }
     }
 
     /// `data` as read from block `block`: does it match `csum`? (Encrypted: decrypts it
     /// in place and checks the tag.)
     pub fn verify(&self, block: u64, birth: u64, csum: u64, data: &mut [u8]) -> bool {
-        match &self.crypt {
-            Some(k) => k.open(block, birth, csum, data),
-            None => xxh64(data) == csum,
+        self.verify_mode(block, birth, csum, data).is_some()
+    }
+
+    /// Like [`Store::verify`], also saying which form the block was in: `Some(true)`
+    /// sealed, `Some(false)` plain, `None` neither (damaged, or the wrong key).
+    pub fn verify_mode(&self, block: u64, birth: u64, csum: u64, data: &mut [u8]) -> Option<bool> {
+        match (&self.crypt, self.convert) {
+            (None, _) => (xxh64(data) == csum).then_some(false),
+            (Some(k), None) => k.open(block, birth, csum, data).then_some(true),
+            (Some(k), Some(_)) => {
+                // A sealed block's raw bytes matching its tag as an xxh64: 2^-64.
+                if xxh64(data) == csum {
+                    Some(false)
+                } else {
+                    k.open(block, birth, csum, data).then_some(true)
+                }
+            }
         }
+    }
+
+    /// Is the block at `p` in the form new writes take (sealed when encrypting, plain
+    /// when decrypting)? Reads it (EIO if it matches neither).
+    pub fn in_target_form(&self, p: BlockPtr) -> Result<bool> {
+        let mut b = [0u8; BLOCK];
+        self.cache.read(p.block, &mut b)?;
+        let sealed = self
+            .verify_mode(p.block, p.birth, p.csum, &mut b)
+            .ok_or(Errno::EIO)?;
+        Ok(sealed == self.writes_sealed())
+    }
+
+    /// Do new blocks get sealed?
+    pub fn writes_sealed(&self) -> bool {
+        self.crypt.is_some() && self.convert != Some(false)
+    }
+
+    /// Write `data` to a newly allocated `block` keeping an older `birth` (an in-place
+    /// conversion's copy of a data block): returns its checksum.
+    pub fn write_copy(&mut self, block: u64, birth: u64, data: &[u8]) -> Result<u64> {
+        let mut buf = [0u8; BLOCK];
+        buf.copy_from_slice(data);
+        let csum = self.seal(block, birth, &mut buf);
+        self.cache.write(block, &buf)?;
+        Ok(csum)
     }
 
     pub fn encrypted(&self) -> bool {

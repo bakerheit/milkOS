@@ -8,7 +8,11 @@
 #           gone within 1 s; the index is saved to ~/.cache/milk/index.
 #   Mac:    add a file while milkOS is off.
 #   boot 2: the index is loaded from disk and verified (nothing re-read but the new
-#           file), queries work at once, the offline file is found.
+#           file), queries work at once (the saved index answers while it is verified),
+#           the offline file is found.
+# The test waits for the index (`spot --wait`) instead of sleeping, and the last thing
+# boot 1 does is a sync, which saves the index first (`search::flush`): so a busy machine
+# (check-all running tests side by side) gives the same result.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -49,7 +53,7 @@ boot() { # name commands...
 # Output of the command typed as $2 in log $1, up to the next prompt.
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
 G=/home/milk/gen
-boot b1 "sleep 4" "spot --status" "sleep 2" "spot --status" \
+boot b1 "spot --wait" "spot --status" "spot --status" \
   "spot uniq01234" "head -1 /sys/fs/search/query" "spot -n 10000 mango" "head -1 /sys/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
   "spot f0499" "spot -n 3 kind:txt cherry | where kind == txt | count" \
   "echo quokka sighting near the dam > /home/milk/new-note.txt" "sleep 1" "spot quokka" \
@@ -78,12 +82,14 @@ out "$L1" "spot --status" | tail -6 | grep -q "saves" && ok "saved: $(out "$L1" 
 
 echo "a narwhal surfaced while milkOS was off" > "$T/offline.txt"
 $M put "$IMG" "$G/d000/offline.txt" "$T/offline.txt" >/dev/null
-boot b2 "sleep 3" "spot --status" "spot uniq04321" "spot narwhal"
+boot b2 "spot --wait-index" "spot uniq04321" "spot --status" "spot --wait" "spot --status" "spot narwhal"
 L2="$T/b2.log"
-st="$(out "$L2" "spot --status" | grep origin | sed 's/^origin: *//')"
-echo "    second boot: $st"
+st0="$(out "$L2" "spot --status" | grep state | sed 's/^state: *//')"
+st="$(tr -d '\r' < "$L2" | grep -a "^origin:" | tail -1 | sed 's/^origin: *//')"
+echo "    second boot: $st (the first query answered while $st0)"
 echo "$st" | grep -q "^loaded .* verified" || bad "index not loaded: $st"
-[ "$(out "$L2" "spot uniq04321")" = "$G/d043/f04321.txt" ] && ok "queries work right away" || bad "uniq04321: $(out "$L2" "spot uniq04321")"
+# The first query, typed at once after boot: the saved index answers while it is verified.
+[ "$(out "$L2" "spot uniq04321")" = "$G/d043/f04321.txt" ] && ok "queries work right away (the saved index, before it is verified)" || bad "uniq04321: $(out "$L2" "spot uniq04321")"
 [ "$(out "$L2" "spot narwhal")" = "$G/d000/offline.txt" ] && ok "a file added while off is found (verify scan)" || bad "offline file: $(out "$L2" "spot narwhal")"
 $M check "$IMG" > "$T/check.txt" 2>&1 && ok "host check clean" || { bad "host check"; tail -3 "$T/check.txt"; }
 echo

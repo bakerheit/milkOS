@@ -10,6 +10,14 @@
 //!                                                     after T of its 8 sectors (T = 8: it
 //!                                                     landed, but the commit never returned)
 //! -fw_cfg name=opt/milkos/test,string=crash-check     verify, print CRASHCHECK PASS/FAIL
+//! -fw_cfg name=opt/milkos/test,string=convert=encrypt:R  start (or resume) encrypting the
+//!                                                     volume in place, rewriting R KiB/s
+//!                                                     (0: full speed) under the test
+//!                                                     passphrase;
+//!                                                     the script SIGKILLs qemu, or waits
+//!                                                     for CONVERT DONE. `decrypt` too.
+//! -fw_cfg name=opt/milkos/test,string=convert-cut=encrypt:N  same, full speed, with a power
+//!                                                     cut after N more sectors
 //! ```
 //!
 //! The workload writes self-describing files (`crash/f-K`, via `crash/.tmp-K` + rename),
@@ -41,6 +49,10 @@ pub enum Mode {
     /// (superblock write number, sectors of it that land)
     PowerCutSb(u64, u64),
     Check,
+    /// In-place conversion (true: encrypt) rewriting this many KiB/s.
+    Convert(bool, u32),
+    /// In-place conversion with a power cut after this many sectors.
+    ConvertCut(bool, u64),
 }
 
 static MODE: SpinLock<Option<Mode>> = SpinLock::new(None);
@@ -62,7 +74,20 @@ pub fn configure() {
         "crash-writer" => Some(Mode::Writer),
         "crash-check" => Some(Mode::Check),
         _ => {
-            if let Some(n) = s.strip_prefix("powercut=") {
+            let conv = |r: &str| -> Option<(bool, u64)> {
+                let (d, n) = r.split_once(':')?;
+                let enc = match d {
+                    "encrypt" => true,
+                    "decrypt" => false,
+                    _ => return None,
+                };
+                Some((enc, n.parse().ok()?))
+            };
+            if let Some(r) = s.strip_prefix("convert=") {
+                conv(r).map(|(e, n)| Mode::Convert(e, n as u32))
+            } else if let Some(r) = s.strip_prefix("convert-cut=") {
+                conv(r).map(|(e, n)| Mode::ConvertCut(e, n))
+            } else if let Some(n) = s.strip_prefix("powercut=") {
                 n.parse().ok().map(Mode::PowerCut)
             } else if let Some(kt) = s.strip_prefix("powercut-sb=") {
                 kt.split_once(':')
@@ -163,7 +188,7 @@ impl BlockDevice for FaultyDev {
 /// The device milkfs should mount: wrapped for a power-cut run.
 pub fn wrap(dev: BlockRef) -> BlockRef {
     let (budget, sb_left, sb_keep) = match mode() {
-        Some(Mode::PowerCut(n)) => (n, 0, 0),
+        Some(Mode::PowerCut(n) | Mode::ConvertCut(_, n)) => (n, 0, 0),
         Some(Mode::PowerCutSb(k, t)) => (u64::MAX, k.max(1), t),
         _ => return dev,
     };
@@ -411,5 +436,85 @@ pub fn run() -> bool {
             true
         }
         Some(Mode::Writer | Mode::PowerCut(_) | Mode::PowerCutSb(..)) => writer(),
+        Some(Mode::Convert(enc, rate)) => converter(enc, rate),
+        Some(Mode::ConvertCut(enc, _)) => converter(enc, 0),
+    }
+}
+
+/// Encrypt (or decrypt) the volume in place, driving the conversion directly (this runs
+/// before the scheduler), then idle: `CONVERT DONE` when it finished.
+fn converter(encrypt: bool, rate_kb: u32) -> ! {
+    let idle = || -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    };
+    let Some(v) = super::volume() else {
+        kprintln!("CONVERT FAIL: no milkfs volume");
+        idle()
+    };
+    let Some(pass) = super::test_passphrase() else {
+        kprintln!("CONVERT FAIL: no test passphrase (fw_cfg opt/milkos/passphrase)");
+        idle()
+    };
+    if let Some(f) = FAULTY.lock().as_ref() {
+        f.armed.store(true, Ordering::Relaxed);
+    }
+    let (converting, encrypted) = {
+        let st = v.state.lock();
+        (st.converting(), st.store.crypt.is_some())
+    };
+    if converting {
+        kprintln!("convert: resuming");
+    } else {
+        let r = match (encrypt, encrypted) {
+            (true, false) => super::encrypt_in_place(None, &pass, None),
+            (false, true) => super::decrypt_in_place(None, &pass),
+            _ => {
+                kprintln!("CONVERT DONE (nothing to do)");
+                idle()
+            }
+        };
+        if let Err(e) = r {
+            kprintln!("CONVERT FAIL: start: {e}");
+            idle();
+        }
+        kprintln!("convert: started");
+    }
+    let mut steps = 0u64;
+    let done = |v: &super::Volume| v.state.lock().conv.as_ref().map_or(0, |c| c.state.done);
+    loop {
+        let t0 = crate::timer::now_ns();
+        let d0 = done(&v);
+        let r = v.state.lock().convert_step(64);
+        steps += 1;
+        match r {
+            Ok(super::convert::Step::More) => {
+                if steps % 16 == 0
+                    && let Some(t) = v.state.lock().convert_text()
+                {
+                    kprintln!("convert: {t}");
+                }
+                if rate_kb > 0 {
+                    // Blocks rewritten this step, at `rate_kb` KiB/s.
+                    let want = done(&v).saturating_sub(d0) * 4 * 1_000_000_000 / rate_kb as u64;
+                    while crate::timer::now_ns() - t0 < want {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+            Ok(super::convert::Step::Done) => {
+                kprintln!("CONVERT DONE after {steps} steps");
+                idle()
+            }
+            Ok(super::convert::Step::NeedSpace(n)) => {
+                kprintln!("CONVERT FAIL: needs {n} more free blocks");
+                idle()
+            }
+            Err(e) => {
+                kprintln!("CONVERT FAIL: {e}");
+                idle()
+            }
+        }
     }
 }

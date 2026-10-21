@@ -314,6 +314,7 @@ pub fn dedupe(dir: &InodeRef, dry_run: bool) -> Result<DedupeReport> {
     }
     if !dry_run {
         d.ro()?;
+        d.vol.state.lock().not_converting()?;
     }
     let (view, top) = (d.view, d.ino);
     let mut rep = DedupeReport::default();

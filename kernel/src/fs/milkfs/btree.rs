@@ -489,3 +489,60 @@ pub fn stats(st: &Store, root: BlockPtr) -> Result<TreeStats> {
     }
     Ok(s)
 }
+
+/// The leaf whose key range holds `key`, for walking a tree a leaf at a time while it
+/// changes (an in-place conversion): its items, its block (None if it is dirty in
+/// memory), the blocks of the committed internal nodes on the way down, and the first key
+/// of the next leaf (None: it is the last).
+pub struct LeafAt {
+    pub items: Vec<(Key, Vec<u8>)>,
+    pub ptr: Option<BlockPtr>,
+    pub path: Vec<BlockPtr>,
+    pub next: Option<Key>,
+}
+
+pub fn leaf_at(c: &Child, st: &Store, key: &Key) -> Result<LeafAt> {
+    let mut out = LeafAt {
+        items: Vec::new(),
+        ptr: None,
+        path: Vec::new(),
+        next: None,
+    };
+    leaf_at_rec(c, st, key, &mut out)?;
+    Ok(out)
+}
+
+fn leaf_at_rec(c: &Child, st: &Store, key: &Key, out: &mut LeafAt) -> Result<()> {
+    match c {
+        Child::Mem(n) => match &**n {
+            Node::Leaf(items) => out.items = items.clone(),
+            Node::Internal(_, kids) if kids.is_empty() => {}
+            Node::Internal(_, kids) => {
+                let i = child_index(kids, key);
+                if let Some((k, _)) = kids.get(i + 1) {
+                    out.next = Some(*k);
+                }
+                leaf_at_rec(&kids[i].1, st, key, out)?;
+            }
+        },
+        Child::Disk(p) => {
+            let node = st.node(*p)?;
+            match &*node {
+                DiskNode::Leaf(items) => {
+                    out.items = items.clone();
+                    out.ptr = Some(*p);
+                }
+                DiskNode::Internal(_, kids) if kids.is_empty() => out.path.push(*p),
+                DiskNode::Internal(_, kids) => {
+                    out.path.push(*p);
+                    let i = child_index(kids, key);
+                    if let Some((k, _)) = kids.get(i + 1) {
+                        out.next = Some(*k);
+                    }
+                    leaf_at_rec(&Child::Disk(kids[i].1), st, key, out)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}

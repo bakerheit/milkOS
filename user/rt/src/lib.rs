@@ -16,6 +16,7 @@ extern crate alloc;
 pub mod alloc_brk;
 pub mod io;
 pub mod sys;
+pub mod table;
 
 use alloc::string::String;
 use alloc::vec::Vec;

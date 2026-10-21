@@ -19,6 +19,18 @@ fn main(args: &rt::Args) -> i32 {
         env.push(String::from(*kv));
         a = &a[1..];
     }
+    if a.is_empty() && rt::table::requested(args) {
+        use rt::table::{Table, Ty, Val};
+        let mut t = Table::new(&[("name", Ty::Str), ("value", Ty::Str)]);
+        for e in env.iter().filter(|e| !e.starts_with("MILK_TABLE=")) {
+            let (k, v) = e.split_once('=').unwrap_or((e, ""));
+            t.push(alloc::vec![Val::str(k), Val::str(v)]);
+        }
+        let mut out = rt::io::Out::stdout();
+        t.write(&mut out);
+        out.flush();
+        return 0;
+    }
     if a.is_empty() {
         let mut out = rt::io::Out::stdout();
         for e in &env {

@@ -77,7 +77,45 @@ fn columns(out: &mut Out, names: &[String]) {
     }
 }
 
-fn list(out: &mut Out, o: &Opts, path: &str, entries: Vec<(String, Stat)>, tty: bool) {
+fn type_name(st: &Stat) -> &'static str {
+    match st.type_char() {
+        'd' => "dir",
+        'l' => "link",
+        'c' => "char",
+        'b' => "block",
+        'p' => "fifo",
+        's' => "socket",
+        _ => "file",
+    }
+}
+
+/// Where entries go: printed, or (msh asked for a table) collected into one.
+struct Sink<'a> {
+    out: &'a mut Out,
+    table: Option<rt::table::Table>,
+    many: bool,
+}
+
+fn list(sink: &mut Sink, o: &Opts, path: &str, entries: Vec<(String, Stat)>, tty: bool) {
+    let many = sink.many;
+    if let Some(t) = sink.table.as_mut() {
+        use rt::table::Val;
+        for (n, st) in entries {
+            t.push(alloc::vec![
+                Val::Str(if path.is_empty() || !many {
+                    n
+                } else {
+                    join(path, &n)
+                }),
+                Val::str(type_name(&st)),
+                Val::Int(st.size as i64),
+                Val::Str(format!("{}{}", st.type_char(), fmt_perm(st.mode))),
+                Val::Str(fmt_time(st.mtime)),
+            ]);
+        }
+        return;
+    }
+    let out = &mut *sink.out;
     if o.long {
         if !path.is_empty() {
             // A directory listing (not the plain-file operands).
@@ -123,6 +161,15 @@ fn main(args: &rt::Args) -> i32 {
     }
     let tty = sys::isatty(1);
     let mut out = Out::stdout();
+    let table = rt::table::requested(args).then(|| {
+        rt::table::Table::new(&[
+            ("name", rt::table::Ty::Str),
+            ("type", rt::table::Ty::Str),
+            ("size", rt::table::Ty::Size),
+            ("mode", rt::table::Ty::Str),
+            ("modified", rt::table::Ty::Str),
+        ])
+    });
     let mut rc = 0;
     let (mut files, mut dirs) = (Vec::new(), Vec::new());
     for p in &paths {
@@ -136,13 +183,18 @@ fn main(args: &rt::Args) -> i32 {
         }
     }
     let many = files.len() + dirs.len() > 1;
-    list(&mut out, &o, "", files, tty);
+    let mut sink = Sink {
+        out: &mut out,
+        table,
+        many,
+    };
+    list(&mut sink, &o, "", files, tty);
     for (i, d) in dirs.iter().enumerate() {
-        if many {
+        if many && sink.table.is_none() {
             if i > 0 || !out_empty(&paths, &dirs) {
-                out.line("");
+                sink.out.line("");
             }
-            let _ = writeln!(out, "{d}:");
+            let _ = writeln!(sink.out, "{d}:");
         }
         let mut ents: Vec<(String, Stat)> = Vec::new();
         match sys::read_dir(d) {
@@ -165,7 +217,10 @@ fn main(args: &rt::Args) -> i32 {
             }
         }
         ents.sort_by(|a, b| a.0.cmp(&b.0));
-        list(&mut out, &o, d, ents, tty);
+        list(&mut sink, &o, d, ents, tty);
+    }
+    if let Some(t) = sink.table.take() {
+        t.write(sink.out);
     }
     out.flush();
     rc

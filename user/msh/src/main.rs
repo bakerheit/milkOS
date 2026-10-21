@@ -16,6 +16,7 @@ extern crate alloc;
 
 mod lex;
 mod parse;
+mod tablecmd;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -42,6 +43,14 @@ struct Job {
     last_pid: u32,
     status: Option<i32>,
     text: String,
+}
+
+/// One pipeline stage, expanded.
+#[derive(Default)]
+struct Stage {
+    argv: Vec<String>,
+    assigns: Vec<(String, String)>,
+    redirs: Vec<parse::Redir>,
 }
 
 struct Shell {
@@ -368,11 +377,12 @@ impl Shell {
             }
         }
 
-        let n = p.len();
+        let stages = self.plan(p);
+        let n = stages.len();
         let mut pids = Vec::new();
         let mut pgid = 0u32;
         let mut prev_read: Option<i32> = None;
-        for (i, c) in p.iter().enumerate() {
+        for (i, st) in stages.iter().enumerate() {
             let pipe = if i + 1 < n {
                 match sys::pipe() {
                     Ok(fds) => Some(fds),
@@ -384,12 +394,7 @@ impl Shell {
             } else {
                 None
             };
-            let argv = self.expand_words(&c.words);
-            let assigns: Vec<(String, String)> = c
-                .assigns
-                .iter()
-                .map(|(k, v)| (k.clone(), self.expand_one(v)))
-                .collect();
+            let (argv, assigns) = (&st.argv, &st.assigns);
             match sys::fork() {
                 Ok(0) => {
                     // Child: own process group (the pipeline's), default signals, plumbing.
@@ -404,10 +409,10 @@ impl Shell {
                         let _ = sys::dup2(w, 1);
                         let _ = (sys::close(r), sys::close(w));
                     }
-                    if self.apply_redirs(&c.redirs, false).is_none() {
+                    if self.apply_redirs(&st.redirs, false).is_none() {
                         sys::exit(1);
                     }
-                    sys::exit(self.exec_child(&argv, &assigns));
+                    sys::exit(self.exec_child(argv, assigns));
                 }
                 Ok(pid) => {
                     if pgid == 0 {
@@ -604,6 +609,59 @@ impl Shell {
             .find(|p| sys::stat_path(p, true).is_ok_and(|s| !s.is_dir()))
     }
 
+    /// Expand a pipeline into stages and work out structured pipes (docs/shell.md):
+    /// a stage feeding a table command gets MILK_TABLE=1; wherever a table would reach
+    /// something that isn't a table command (or the end), a `table` renderer goes in,
+    /// taking over the stage's stdout redirections.
+    fn plan(&self, p: &Pipeline) -> Vec<Stage> {
+        let mut stages: Vec<Stage> = p
+            .iter()
+            .map(|c| Stage {
+                argv: self.expand_words(&c.words),
+                assigns: c
+                    .assigns
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.expand_one(v)))
+                    .collect(),
+                redirs: c.redirs.clone(),
+            })
+            .collect();
+        let name = |s: &Stage| s.argv.first().cloned().unwrap_or_default();
+        let mut out: Vec<Stage> = Vec::new();
+        let n = stages.len();
+        for i in 0..n {
+            let mut st = core::mem::take(&mut stages[i]);
+            let me = name(&st);
+            let next_is_table = stages
+                .get(i + 1)
+                .is_some_and(|s| tablecmd::is_table_cmd(&name(s)));
+            if next_is_table && !tablecmd::is_table_cmd(&me) {
+                st.assigns
+                    .push((String::from("MILK_TABLE"), String::from("1")));
+            }
+            let render = tablecmd::emits_table(&me) && !next_is_table;
+            let mut moved = Vec::new();
+            if render {
+                st.redirs.retain(|r| {
+                    let stdout = r.fd == 1;
+                    if stdout {
+                        moved.push(r.clone());
+                    }
+                    !stdout
+                });
+            }
+            out.push(st);
+            if render {
+                out.push(Stage {
+                    argv: alloc::vec![String::from("table")],
+                    assigns: Vec::new(),
+                    redirs: moved,
+                });
+            }
+        }
+        out
+    }
+
     /// In a forked child: run a built-in or exec a program. Returns the exit code if
     /// it didn't exec.
     fn exec_child(&mut self, argv: &[String], assigns: &[(String, String)]) -> i32 {
@@ -615,6 +673,9 @@ impl Shell {
                 Some(c) => c,
                 None => self.last,
             };
+        }
+        if tablecmd::is_table_cmd(&argv[0]) {
+            return tablecmd::run(argv);
         }
         let Some(path) = self.find(&argv[0]) else {
             eprintln!("msh: {}: command not found", argv[0]);
@@ -766,7 +827,10 @@ fn help() {
     println!("programs (/bin): ls cat echo wc head tail grep sort uniq ps kill sleep");
     println!("  mkdir rm mv cp ln touch env uptime free uname true false clear");
     println!("  hello fault utest");
+    println!("structured pipes (docs/shell.md): where COL OP V, sort-by COL [-r], select COL..,");
+    println!("  first N, last N, get COL, count, table, to-json; producers: ps ls env");
     println!("try: ps | grep msh,  ls -l /bin | sort -n -k5 | tail -3,  cat /etc/motd | wc -l");
+    println!("     ps | where rss > 100 | sort-by name,  ls /bin | sort-by size -r | first 3");
 }
 
 // ---- globbing --------------------------------------------------------------------------

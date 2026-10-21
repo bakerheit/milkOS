@@ -69,6 +69,14 @@ fn assignment(w: &Word) -> Option<(String, Word)> {
     Some((String::from(name), value))
 }
 
+/// `where COL` so far, with no operator yet: the next `<` / `>` is the comparison.
+/// (Later ones, as in `where size > 1M > out`, are ordinary redirections.)
+fn is_where(c: &Command) -> bool {
+    matches!(c.words.first().and_then(|w| w.first()), Some(Part::Lit(s, false)) if s == "where")
+        && c.words.first().is_some_and(|w| w.len() == 1)
+        && c.words.len() == 2
+}
+
 pub fn parse(toks: Vec<Tok>) -> Result<Vec<Item>, String> {
     let mut items = Vec::new();
     let mut it = toks.into_iter().peekable();
@@ -112,6 +120,22 @@ pub fn parse(toks: Vec<Tok>) -> Result<Vec<Item>, String> {
                 } else {
                     cur_cmd.words.push(w);
                 }
+            }
+            // In `where COL > 100` the comparison operators are words, not redirections.
+            Some(Tok::Redir(fd, kind)) if is_where(&cur_cmd) => {
+                let op = match kind {
+                    RedirKind::In => "<",
+                    RedirKind::Out => ">",
+                    RedirKind::Append => ">>",
+                    RedirKind::Dup => ">&",
+                };
+                let default_fd = if kind == RedirKind::In { 0 } else { 1 };
+                let text = if fd == default_fd {
+                    String::from(op)
+                } else {
+                    alloc::format!("{fd}{op}")
+                };
+                cur_cmd.words.push(alloc::vec![Part::Lit(text, true)]);
             }
             Some(Tok::Redir(fd, kind)) => match it.next() {
                 Some(Tok::Word(target)) => cur_cmd.redirs.push(Redir { fd, kind, target }),

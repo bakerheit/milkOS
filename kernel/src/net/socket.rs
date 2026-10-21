@@ -389,8 +389,12 @@ pub fn connect(id: SocketId, addr: SockAddr) -> Result<()> {
             return Err(ECONNREFUSED);
         }
         if s.tcb.used {
-            return Err(EINVAL); // a socket is connected once
+            return Err(EISCONN); // it was connected and has closed: not reusable (Linux)
         }
+        // Fresh TCB (a failed attempt may have left state behind).
+        s.tcb = Tcb::new();
+        s.rx.clear();
+        s.tx.clear();
         let src = st.iface.src_for(addr.ip);
         if src.is_unspecified() {
             return Err(ENETUNREACH);

@@ -1181,6 +1181,9 @@ fn finished(st: &mut Stack, i: usize) {
 /// The connection failed with `e` (refused, reset, timed out).
 fn fail(st: &mut Stack, i: usize, e: Errno) {
     let Some(s) = st.socks.get(i) else { return };
+    if s.tcb.state == TcpState::SynSent {
+        s.tcb.used = false; // a failed connect may be retried on the same socket (Linux)
+    }
     s.error = Some(e);
     s.tx.clear();
     finished(st, i);

@@ -620,6 +620,13 @@ sockets' buffers, which overflow under large-window bursts. Those are real packe
 which SACK recovery has to repair. Treat the guest -> guest column as a range, not a
 number; it doesn't show the TCP change on its own.
 
+It was noisier still in the second IPv6 round: guest -> guest ranged from 0.5 to
+100 MiB/s, and one build measured 96 and then 14 MiB/s
+in two runs a few minutes apart, so a bisect on that column chases noise. What it showed
+instead: the sender's eth1 transmit queue fills (thousands of `tx dropped` in
+`/proc/net/dev`, i.e. frames TCP waits to send again, not lost data) and the dgram link
+loses frames (the retransmits). The slirp paths stayed at 135-175 and 370-440 MiB/s.
+
 Lossy loopback (boot self-test, every Nth packet dropped, data and ACKs alike):
 
 | | before | after |

@@ -28,7 +28,13 @@ impl FdTable {
 
     /// stdin, stdout, stderr: one shared open of /dev/console.
     pub fn with_console() -> KResult<Self> {
-        let c = Arc::new(fs::open("/dev/console", abi::O_RDWR, 0)?);
+        Self::with_tty("/dev/console")
+    }
+
+    /// stdin, stdout, stderr: one shared open of the terminal device at `path` (e.g. the
+    /// desktop Terminal's `/dev/tty1`).
+    pub fn with_tty(path: &str) -> KResult<Self> {
+        let c = Arc::new(fs::open(path, abi::O_RDWR, 0)?);
         let mut t = Self::new();
         for _ in 0..3 {
             t.alloc(c.clone(), false)?;

@@ -57,11 +57,23 @@ fn uptime() -> String {
     )
 }
 
-fn irq_name(intid: u32) -> &'static str {
+fn irq_name(intid: u32) -> String {
+    use crate::virtio::mmio::{MMIO_SLOTS, MMIO_SPI_BASE, Transport, device_id};
+    let virtio0 = gic::spi(MMIO_SPI_BASE);
     match intid {
-        27 => "arch_timer (virtual)",
-        33 => "uart-pl011",
-        _ => "-",
+        27 => String::from("arch_timer (virtual)"),
+        33 => String::from("uart-pl011"),
+        i if (virtio0..virtio0 + MMIO_SLOTS as u32).contains(&i) => {
+            let slot = (i - virtio0) as usize;
+            let what = match Transport::probe(slot).map(|t| t.device_id()) {
+                Ok(device_id::BLOCK) => "virtio-blk",
+                Ok(device_id::INPUT) => "virtio-input",
+                Ok(_) => "virtio",
+                Err(_) => "virtio (empty)",
+            };
+            format!("{what} (mmio slot {slot})")
+        }
+        _ => String::from("-"),
     }
 }
 

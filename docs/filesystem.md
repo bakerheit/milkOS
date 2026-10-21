@@ -1,6 +1,7 @@
 # File systems
 
-Files: `kernel/src/fs/`, `kernel/build.rs` (initramfs packer), `rootfs/`, `initramfs.list`.
+Files: `kernel/src/fs/`, `kernel/src/virtio/blk.rs`, `kernel/build.rs` (initramfs packer),
+`rootfs/`, `initramfs.list`, `scripts/disk.sh`.
 One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interrupts`.
 
 | module | what |
@@ -15,8 +16,10 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `synth.rs` | building blocks for kernel-generated fs (dirs, generated files, symlinks) |
 | `devfs.rs`, `procfs.rs`, `sysfs.rs` | `/dev`, `/proc`, `/sys` |
 | `initramfs.rs` | cpio newc reader, unpacks the built-in archive into `/` |
+| `blockdev.rs` | `BlockDevice` trait, disk registry, `/dev/vdX` byte-offset inode |
+| `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
-| `selftest.rs` | boot self-test (156 checks), then prints `/proc/*` and `cat /etc/motd` |
+| `selftest.rs` | boot self-test (169 checks with a disk attached), then prints `/proc/*` and `cat /etc/motd` |
 
 Boot: `kmain` calls `fs::init()` after `memtest::run()`, then `fs::selftest::run()`.
 `fs::init` mounts tmpfs on `/`, creates the skeleton, unpacks the initramfs, mounts devfs,
@@ -37,7 +40,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/bin` | tmpfs | user programs from the initramfs |
 | `/etc` | tmpfs | `motd`, `hostname` (= `milk`) |
 | `/tmp` | tmpfs | mode `1777` |
-| `/dev` | devfs | `null zero random urandom console` |
+| `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) |
 | `/proc` | proc | `meminfo uptime version interrupts mounts` |
 | `/sys` | sysfs | `devices/platform/*`, `kernel/version` |
 
@@ -243,10 +246,41 @@ the archive is reproducible. Two ways in:
    re-runs the packer when any listed file changes. Build the user programs first, then
    `cargo build` the kernel. `fs::read_file("/bin/init")` then hands you the ELF.
 
+## Block devices
+
+```rust
+pub trait BlockDevice: Send + Sync {
+    fn name(&self) -> &str;                 // "vda"
+    fn block_size(&self) -> usize;          // 512 for virtio-blk
+    fn num_blocks(&self) -> u64;
+    fn read_only(&self) -> bool;
+    fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<()>;   // whole blocks
+    fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<()>;
+    fn flush(&self) -> Result<()>;
+}
+fs::blockdev::register(dev: Arc<dyn BlockDevice>);   // drivers; any time
+fs::blockdev::devices() -> Vec<Arc<dyn BlockDevice>>; fs::blockdev::get("vda")
+```
+
+Each registered disk appears as `/dev/<name>` (block special, `rdev` 254:16n), readable and
+writable at any byte offset (read-modify-write at unaligned edges, 64 KiB per call).
+
+virtio-blk (`kernel/src/virtio/blk.rs`, probed by `virtio::init`): one queue, one request
+in flight, header/status page + 64 KiB bounce buffer from `pmm::alloc_contiguous_zeroed`
+(so callers pass any kernel buffer; bigger transfers are split). Negotiates `RO` and
+`FLUSH`. Completion is **polled** under the device lock with a 5 s timeout, because there
+are no wait queues yet; the IRQ is registered only to acknowledge (it reads 0 in
+`/proc/interrupts` because polling acks before it is ever taken).
+
+Scripts: `scripts/disk.sh` creates `/tmp/milk-disk.img` (64 MiB, sparse, a text label in
+sector 0) on first use. `run.sh` attaches it writable (persistent; qemu takes a write lock,
+so one `run.sh` at a time). `screenshot.sh` attaches it with `snapshot=on,file.locking=off`:
+writes are discarded and any number of qemus can share it. The fs self-test reads sector 0,
+then writes/reads/flushes the last 80 KiB directly and through `/dev/vda` and restores what
+was there.
+
 ## Next steps
 
-- `BlockDevice` trait (`read_blocks`, `write_blocks`, `flush`, `block_size`, `num_blocks`)
-  in `fs/blockdev.rs`, virtio-blk implementing it, `/dev/vda` via `devfs::add_device`.
 - Wait queues from `proc` → blocking `/dev/console` reads, pipes (`InodeType::Fifo`),
   `poll`. `OpenFile` reads will then need `O_NONBLOCK` honoured.
 - Permission checks once processes have credentials (`Inode::stat` already has
@@ -331,10 +365,9 @@ Old tree nodes go to the dead list / free list as above.
 
 ### How it plugs into this VFS
 
-- `fs/blockdev.rs`: `trait BlockDevice { fn block_size(&self) -> usize; fn num_blocks(&self)
-  -> u64; fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<()>; fn
-  write_blocks(&self, lba: u64, buf: &[u8]) -> Result<()>; fn flush(&self) -> Result<()>; }`,
-  implemented by the virtio-blk driver (DMA buffers from `pmm::alloc_contiguous_zeroed`).
+- `fs/blockdev.rs` already has the `BlockDevice` trait and virtio-blk implements it
+  (`fs::blockdev::get("vda")`). milkfs needs 4 KiB blocks on top: a block cache that reads
+  and writes 8 sectors at a time.
 - `fs/milkfs/`: `MilkFs::mount(dev: Arc<dyn BlockDevice>, volume: &str) ->
   Result<Arc<MilkFs>>` implements `FileSystem`; `MilkInode` implements `Inode`
   (`lookup`/`readdir` from DIRENT items, `read_at`/`write_at` through EXTENT items and a
@@ -346,6 +379,6 @@ Old tree nodes go to the dead list / free list as above.
   `fs::rollback(path, name)`, `fs::clone_volume`) exposed to userspace via `ioctl` on the
   volume root (`Inode::ioctl` exists for this) or a milkOS-specific syscall.
 - Needs from other subsystems first: blocking I/O (virtio-blk completion IRQ waking a
-  waiter: proc's wait queues; can't hold `SpinLock`s across that), and for try-before-install
+  waiter instead of today's polling: proc's wait queues; can't hold `SpinLock`s across that), and for try-before-install
   a per-process root (mount namespace or `chroot`) in proc.
 - The VFS will grow `FileSystem::sync()` and `statfs()` for this.

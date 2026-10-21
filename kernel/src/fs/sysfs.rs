@@ -236,7 +236,11 @@ pub fn init() -> Result<()> {
                 "virtio_device",
                 format!("{virtio_id} ({})\n", virtio_name(virtio_id)),
             );
-            "virtio-mmio"
+            match virtio_id {
+                2 => "virtio-blk (kernel/src/virtio/blk.rs)",
+                18 => "virtio-input (kernel/src/virtio/input.rs)",
+                _ => "none",
+            }
         } else {
             driver_for(&n.compatible)
         };

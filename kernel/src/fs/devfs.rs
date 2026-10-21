@@ -152,6 +152,7 @@ pub fn init() -> Result<()> {
     root.add("console", node(ids, Kind::Console, makedev(5, 1), 0o620));
     super::mount("/dev", fs.clone())?;
     *DEVFS.lock() = Some(fs);
+    super::blockdev::publish_all();
     Ok(())
 }
 

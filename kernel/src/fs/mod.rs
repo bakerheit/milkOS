@@ -12,6 +12,7 @@
 #![allow(dead_code)]
 
 pub mod abi;
+pub mod blockdev;
 pub mod clock;
 pub mod devfs;
 pub mod errno;

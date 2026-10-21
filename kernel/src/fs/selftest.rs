@@ -680,6 +680,99 @@ fn procfs_sysfs(t: &mut T) {
     );
 }
 
+/// Disk I/O through the first block device, if there is one. Non-destructive: the region
+/// written (the last 80 KiB, bigger than the driver's 64 KiB bounce buffer) is restored.
+fn blockdev(t: &mut T) {
+    let Some(d) = super::blockdev::devices().into_iter().next() else {
+        kprintln!("fs selftest: no block device, skipping disk checks");
+        return;
+    };
+    kprintln!("fs selftest: disk {}", super::blockdev::describe(&d));
+    let bs = d.block_size();
+    let mut s0 = vec![0u8; bs];
+    if t.must(d.read_blocks(0, &mut s0), "read sector 0").is_some() {
+        let line: String = s0
+            .iter()
+            .take_while(|&&b| b != b'\n' && b != 0)
+            .map(|&b| {
+                if (0x20..0x7f).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        kprintln!("fs selftest: sector 0 says: {line:?}");
+    }
+    let sectors = 160u64;
+    if d.num_blocks() < sectors + 1 || d.read_only() {
+        return;
+    }
+    let lba = d.num_blocks() - sectors;
+    let len = sectors as usize * bs;
+    let mut saved = vec![0u8; len];
+    if t.must(d.read_blocks(lba, &mut saved), "read test region")
+        .is_none()
+    {
+        return;
+    }
+    let pattern: Vec<u8> = (0..len)
+        .map(|i| (i as u32).wrapping_mul(2_654_435_761) as u8 ^ (i >> 9) as u8)
+        .collect();
+    t.ok(d.write_blocks(lba, &pattern).is_ok(), "write 80 KiB");
+    t.ok(d.flush().is_ok(), "flush");
+    let mut back = vec![0u8; len];
+    t.ok(
+        d.read_blocks(lba, &mut back).is_ok() && back == pattern,
+        "80 KiB reads back from the disk",
+    );
+    t.err(
+        d.read_blocks(d.num_blocks(), &mut back[..bs]),
+        Errno::ENXIO,
+        "read past the end",
+    );
+    t.err(
+        d.read_blocks(0, &mut back[..100]),
+        Errno::EINVAL,
+        "partial-sector read",
+    );
+
+    // The same disk through /dev, at byte offsets.
+    let path = alloc::format!("/dev/{}", d.name());
+    let st = ops::stat(&path);
+    t.ok(
+        st.as_ref().map(|s| (s.kind, s.size)).ok()
+            == Some((InodeType::BlockDev, d.num_blocks() * bs as u64)),
+        "/dev/vdX is a block device of the right size",
+    );
+    if let Some(f) = t.must(ops::open(&path, O_RDWR, 0), "open /dev/vdX") {
+        let off = lba * bs as u64 + 500; // straddles a sector boundary
+        let mut b = [0u8; 30];
+        t.ok(
+            f.pread(&mut b, off).ok() == Some(30) && b[..] == pattern[500..530],
+            "unaligned pread through /dev",
+        );
+        t.ok(
+            f.pwrite(b"milkOS was here", off).ok() == Some(15),
+            "unaligned pwrite",
+        );
+        let mut sec = vec![0u8; 2 * bs];
+        let _ = d.read_blocks(lba, &mut sec);
+        t.ok(
+            &sec[500..515] == b"milkOS was here"
+                && sec[515..] == pattern[515..2 * bs]
+                && sec[..500] == pattern[..500],
+            "read-modify-write kept the neighbours",
+        );
+    }
+    t.ok(
+        d.write_blocks(lba, &saved).is_ok()
+            && d.read_blocks(lba, &mut back).is_ok()
+            && back == saved,
+        "test region restored",
+    );
+}
+
 /// Print a few inspectable files so they show up in the boot log.
 fn show(path: &str) {
     kprintln!("$ cat {path}");
@@ -699,6 +792,7 @@ pub fn run() {
     initramfs(&mut t);
     devfs(&mut t);
     procfs_sysfs(&mut t);
+    blockdev(&mut t);
     if t.failed != 0 {
         panic!("fs selftest: {} of {} checks failed", t.failed, t.checks);
     }

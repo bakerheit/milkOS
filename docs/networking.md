@@ -456,6 +456,14 @@ The host helper is `scripts/net_bench_host.py`, bound to 127.0.0.1.
 | | guest -> host | host -> guest | guest -> guest | notes |
 |---|---|---|---|---|
 | baseline (16 KiB windows, no scaling/SACK/timestamps, 2 s TIME_WAIT) | 98-105 MiB/s | 91-94 MiB/s | 34-37 MiB/s | 64 MiB per run, debug kernel, smp 4, three runs |
+| window scaling + timestamps + SACK, delayed ACKs, Nagle, auto-sized buffers (64 KiB -> 4 MiB) | 190-210 MiB/s | 366-395 MiB/s | 59-103 MiB/s | same; guest -> guest varies with drops on the dgram link (host UDP buffers), which SACK recovery repairs |
+
+Lossy loopback (boot self-test, every Nth packet dropped, data and ACKs alike):
+
+| | before | after |
+|---|---|---|
+| 1/7 | 64 KiB in 200-400 ms, go-back-N only | 256 KiB in ~2.2 s, 85 of 234 resends by SACK recovery |
+| 1/3 | (not tested) | 64 KiB in ~4.2 s, intact |
 
 ## In-kernel HTTP server (demo, off by default)
 

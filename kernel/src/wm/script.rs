@@ -799,12 +799,43 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.wait(800);
             b.0.push(Step::Bench);
         }
+        // Welcome, from the logo menu (it doesn't open by itself under demo scripts).
+        // Welcome buttons (window at (142, 40), body at (143, 73)).
+        "welcome" | "welcome-snap" | "welcome-versions" | "welcome-peek" | "welcome-dark"
+        | "welcome-spaces" | "welcome-dontshow" | "welcome-try" | "welcome-moo" => {
+            if name == "welcome-try" || name == "welcome-moo" {
+                // A package repo (scripts/wm-pkg-demo.sh serves one); moo2048 installed.
+                let url = host_test_url();
+                b.wait(300)
+                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .enter()
+                    .wait(300)
+                    .typ("milk update")
+                    .enter()
+                    .wait(2000);
+                if name == "welcome-moo" {
+                    b.typ("milk install moo2048").enter().wait(3000);
+                }
+            }
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            match name {
+                "welcome-snap" => b.click(304, 281).wait(1500),
+                "welcome-versions" => b.click(657, 281).wait(2500),
+                "welcome-peek" => b.click(696, 419).wait(1500).click(777, 419).wait(1500),
+                "welcome-dark" => b.click(300, 557).wait(1500),
+                "welcome-spaces" => b.click(635, 557).wait(1200),
+                "welcome-dontshow" => b.click(182, 614).wait(800),
+                "welcome-try" => b.click(306, 419).wait(8000),
+                "welcome-moo" => b.click(612, 419).wait(2000).click(777, 419).wait(1500),
+                _ => &mut b,
+            };
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }
         "lockmenu" => {
             // The logo's system menu > Lock Screen.
-            b.click(18, 14).wait(300).click(80, 196).wait(700);
+            b.click(18, 14).wait(300).click(80, 220).wait(700);
         }
         "lockprefs" => {
             // Settings > Display & Lock > 5 min.
@@ -874,6 +905,13 @@ fn host_test_url() -> String {
     alloc::format!("http://10.0.2.2:{port}/")
 }
 
+/// Booted for a demo (any `opt/milkos/demo`, even "none"): the desktop then skips first-boot
+/// things like the Welcome window, whose clicks the demos don't expect. `firstboot` is the
+/// demo that wants them.
+pub static DEMO_BOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The `firstboot` demo: boot like a user would (it ends once the desktop is up).
+pub static FIRSTBOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn from_fw_cfg() -> Option<Script> {
     let f = fwcfg::find_file("opt/milkos/demo")?;
     // Heap, not stack: fw_cfg reads by DMA to this address, and thread stacks live in a
@@ -887,7 +925,9 @@ pub fn from_fw_cfg() -> Option<Script> {
         .ok()?
         .trim_matches(char::from(0))
         .trim();
-    if name == "none" || name.is_empty() {
+    DEMO_BOOT.store(name != "firstboot", core::sync::atomic::Ordering::Relaxed);
+    FIRSTBOOT.store(name == "firstboot", core::sync::atomic::Ordering::Relaxed);
+    if name == "none" || name == "firstboot" || name.is_empty() {
         return None;
     }
     // slow-<demo>: the same demo with animations 20x slower (for catching them on camera).

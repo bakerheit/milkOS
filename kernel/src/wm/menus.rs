@@ -105,6 +105,7 @@ impl Desktop {
         if idx == 0 {
             return alloc::vec![
                 item("About milkOS", "", MenuAction::Open(App::About)),
+                item("Welcome to milkOS", "", MenuAction::Open(App::Welcome)),
                 sep(),
                 item("Skim", "Ctrl+Space", MenuAction::Skim),
                 item("Control centre", "", MenuAction::Control),

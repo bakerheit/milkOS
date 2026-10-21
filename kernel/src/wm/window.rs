@@ -102,6 +102,7 @@ pub enum App {
     Versions,
     /// The trusted Open / Save panel (powerbox.rs).
     Powerbox,
+    Welcome,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -118,6 +119,7 @@ impl App {
             App::Music => "Music",
             App::Versions => "Versions",
             App::Powerbox => "Open",
+            App::Welcome => "Welcome",
             App::Client(_) => "App",
         }
     }

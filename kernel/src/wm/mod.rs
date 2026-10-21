@@ -122,6 +122,8 @@ pub enum Request {
     NewTab(Option<String>),
     /// Show the lock screen.
     Lock,
+    /// Launch an installed package by name (sandboxed if it is a window app).
+    OpenPackage(String),
     /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
     Powerbox,
     /// Nothing to do: just run a frame (a background job has a result for an app).
@@ -177,6 +179,14 @@ pub fn run() {
     let res = prefs::get().resolution;
     if res != (theme::screen_w(), theme::screen_h()) {
         d.set_resolution(res.0, res.1);
+    }
+    // First boot (until "Don't show again"): the Welcome tour. Not under demo scripts,
+    // whose clicks assume the plain desktop.
+    if prefs::get().welcome && !script::DEMO_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        d.open(App::Welcome);
+    }
+    if script::FIRSTBOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        kprintln!("[demo] firstboot done");
     }
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
@@ -1251,6 +1261,13 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::Lock => self.lock_screen(),
+                Request::OpenPackage(name) => {
+                    packages::refresh();
+                    match packages::all().into_iter().find(|p| p.name == name) {
+                        Some(p) => self.launch_package(&p),
+                        None => self.post_toast(&name, "isn't installed (milk install it first)"),
+                    }
+                }
                 Request::Powerbox => {
                     if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
                         self.open(App::Powerbox);

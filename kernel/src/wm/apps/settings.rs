@@ -378,7 +378,7 @@ impl Settings {
         p.text_p(
             x + 90,
             70,
-            "Version 1.0, kernel 0.0.1, aarch64 on qemu virt",
+            concat!("Version ", env!("MILKOS_VERSION"), ", aarch64 on qemu virt"),
             COCOA,
             false,
         );

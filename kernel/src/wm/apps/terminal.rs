@@ -160,9 +160,17 @@ impl Tab {
             t.tty = 1;
         }
         let banner = if t.tty != 0 {
-            "milkOS 1.0 terminal: msh on /dev/tty1. Kernel log above, live."
+            concat!(
+                "milkOS ",
+                env!("MILKOS_VERSION"),
+                " terminal: msh on /dev/tty1. Kernel log above, live."
+            )
         } else {
-            "milkOS 1.0 terminal. Kernel log above, live. Type 'help'."
+            concat!(
+                "milkOS ",
+                env!("MILKOS_VERSION"),
+                " terminal. Kernel log above, live. Type 'help'."
+            )
         };
         t.lines.push((String::from(banner), MATCHA));
         t
@@ -174,7 +182,11 @@ impl Tab {
         let banner = if n != 0 {
             format!("msh on {}", tty::path(n))
         } else {
-            String::from("milkOS 1.0 terminal. Type 'help'.")
+            String::from(concat!(
+                "milkOS ",
+                env!("MILKOS_VERSION"),
+                " terminal. Type 'help'."
+            ))
         };
         t.lines.push((banner, MATCHA));
         t
@@ -1120,7 +1132,11 @@ impl Shell for BuiltinShell {
             "clear" => return ShellResult::Clear,
             "uname" => {
                 if arg.contains('a') {
-                    out.out("milkOS 1.0 milk 0.0.1 aarch64 qemu-virt");
+                    out.out(concat!(
+                        "milkOS milk ",
+                        env!("MILKOS_VERSION"),
+                        " aarch64 qemu-virt"
+                    ));
                 } else {
                     out.out("milkOS");
                 }

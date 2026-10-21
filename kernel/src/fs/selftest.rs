@@ -616,7 +616,7 @@ fn procfs_sysfs(t: &mut T) {
         .unwrap_or(-1.0);
     t.ok(secs > 0.5 && secs < 600.0, "/proc/uptime is plausible");
     t.ok(
-        read_str("/proc/version").starts_with("milkOS 0.0.1"),
+        read_str("/proc/version").starts_with(concat!("milkOS ", env!("MILKOS_VERSION"))),
         "/proc/version",
     );
     let irqs = read_str("/proc/interrupts");
@@ -2394,7 +2394,9 @@ fn milkfs_scrub(
     let has = |s: &str| errs.iter().any(|e| e.what.contains(s));
     t.ok(
         errs.len() == n0 + 2
-            && has(&alloc::format!("data of {d}/a at offset 0 (live, snapshot sc1)"))
+            && has(&alloc::format!(
+                "data of {d}/a at offset 0 (live, snapshot sc1)"
+            ))
             && has(&alloc::format!("data of {d}/b at offset 0 (snapshot sc1)")),
         &alloc::format!("scrub finds both flipped bits, with paths ({errs:?})"),
     );

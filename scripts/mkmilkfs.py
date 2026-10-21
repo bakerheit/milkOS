@@ -9,6 +9,7 @@
   mkmilkfs.py put   IMAGE PATH FILE [--v0]  copy a Mac file into the image (--v0: old-style
                                          one-block extents, for upgrade tests)
   mkmilkfs.py mkfs  ... --v0             make a format-v0 image (upgrade tests)
+  mkmilkfs.py mkdir IMAGE PATH [MODE]     make a directory (and its parents), mode octal (755)
   mkmilkfs.py populate IMAGE DIR N        add N files under DIR (100 per subdirectory; small
                                          ones inline, every 50th 8 KiB in extents): for
                                          mount-time and big-tree tests
@@ -783,6 +784,32 @@ def cmd_put(path, dest, src, v0=False):
     return 0
 
 
+def cmd_mkdir(path, dest, mode=0o755):
+    img = Image(path)
+    sb = dict(img.superblock())
+    sb["version"] = max(sb.get("version", 0), 1)
+    live = dict(img.items(sb["root"]))
+    w = Writer(path, img, sb)
+    now = time.time()
+    d, made = ROOT_INO, False
+    for part in [x for x in dest.split("/") if x]:
+        hit = [ino for (o, k, _), v in live.items() if o == d and k == K_DIRENT
+               for nm, ino, _ in dirents_decode(v) if nm == part]
+        if hit:
+            d = hit[0]
+            continue
+        ino = sb["next_ino"]
+        sb["next_ino"] += 1
+        live[(ino, K_INODE, 0)] = inode_encode(S_IFDIR | mode, 2, 0, d, now)
+        bucket_edit(live, d, part, lambda l, n=part, i=ino: l + [(n, i, 4)])
+        set_inode_field(live, d, 4, "<I", inode_decode(live[(d, K_INODE, 0)])["nlink"] + 1)
+        d, made = ino, True
+    if made:
+        w.commit(sb, w.tree(live, sb["gen"] + 1))
+    print(f"{path}: {dest}{'' if made else ' (exists)'}")
+    return 0
+
+
 def cmd_populate(path, dest, n):
     """N files under DEST/dNNN/fNNNNN, in one commit (mount-time and big-tree tests)."""
     img = Image(path)
@@ -1307,6 +1334,8 @@ def main(argv):
         return cmd_receive(pos[0], pos[1], "--force" in opts)
     elif cmd == "tree":
         cmd_tree(pos[0], opts.get("--snapshot"))
+    elif cmd == "mkdir":
+        return cmd_mkdir(pos[0], pos[1], int(pos[2], 8) if len(pos) > 2 else 0o755)
     elif cmd == "populate":
         return cmd_populate(pos[0], pos[1], int(pos[2]))
     elif cmd == "put":

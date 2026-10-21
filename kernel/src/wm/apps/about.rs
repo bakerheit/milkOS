@@ -43,7 +43,14 @@ impl WindowContents for About {
         let x = cx - name_w / 2;
         let x2 = p.text_x(x, 124, "milk", ESPRESSO, 2, true);
         p.text_x(x2, 124, "OS", BLUE, 2, true);
-        p.text_center(0, w, 162, "Version 1.0  (kernel 0.0.1)", COCOA, false);
+        p.text_center(
+            0,
+            w,
+            162,
+            concat!("Version ", env!("MILKOS_VERSION")),
+            COCOA,
+            false,
+        );
         let cpus = crate::percpu::online().count();
         let cores = format!(
             "aarch64, qemu virt, {cpus} core{}",

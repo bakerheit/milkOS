@@ -1117,8 +1117,8 @@ fn sys_uname(buf: usize) -> KResult<usize> {
     let fields = [
         "milkOS",
         "milk",
-        "0.0.1",
-        "#1 milkOS 0.0.1 (aarch64, Rust)",
+        env!("MILKOS_VERSION"),
+        concat!("#1 milkOS ", env!("MILKOS_VERSION"), " (aarch64, Rust)"),
         "aarch64",
         "(none)",
     ];

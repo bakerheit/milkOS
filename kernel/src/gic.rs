@@ -21,8 +21,8 @@ use crate::kprintln;
 use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{FnSlot, IrqGuard};
 
-const GICD_BASE: usize = 0x0800_0000;
-const GICC_BASE: usize = 0x0801_0000;
+const GICD_BASE: usize = crate::mmu::phys_to_virt(0x0800_0000);
+const GICC_BASE: usize = crate::mmu::phys_to_virt(0x0801_0000);
 
 // Distributor registers.
 const GICD_CTLR: usize = 0x000;

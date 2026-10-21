@@ -19,10 +19,11 @@ const FALLBACK_RAM: MemRange = MemRange {
     size: 512 << 20,
 };
 
+/// Physical range of the kernel image (incl. .bss and the boot stack).
 pub fn kernel_range() -> (PhysAddr, PhysAddr) {
     (
-        addr_of!(__kernel_start) as usize,
-        addr_of!(__kernel_end) as usize,
+        mmu::virt_to_phys(addr_of!(__kernel_start) as usize),
+        mmu::virt_to_phys(addr_of!(__kernel_end) as usize),
     )
 }
 
@@ -30,6 +31,14 @@ pub fn kernel_range() -> (PhysAddr, PhysAddr) {
 pub fn boot_dtb() -> PhysAddr {
     // SAFETY: plain word written once by boot.S.
     unsafe { addr_of!(__boot_dtb).read() as usize }
+}
+
+/// Kernel virtual address of the boot device tree (0 if none), for reading it.
+pub fn boot_dtb_ptr() -> usize {
+    match boot_dtb() {
+        0 => 0,
+        pa => mmu::phys_to_virt(pa),
+    }
 }
 
 /// Bring up the MMU, physical allocator and heap. Call once from `kmain`,
@@ -43,7 +52,7 @@ pub fn init() {
     // 512 MiB default (which is what run.sh passes with -m).
     let dtb_addr = boot_dtb();
     // SAFETY: the bootloader's pointer, or 0.
-    let dtb = unsafe { Dtb::from_addr(dtb_addr) };
+    let dtb = unsafe { Dtb::from_addr(boot_dtb_ptr()) };
     let mut banks = [MemRange { base: 0, size: 0 }; MAX_BANKS];
     let nbanks = dtb.as_ref().map_or(0, |d| d.memory(&mut banks));
     let (ram, source) = match banks[..nbanks]
@@ -65,19 +74,21 @@ pub fn init() {
     let mut low_end = kend;
     if let Some(d) = &dtb {
         let bitmap_len = (ram.size / PAGE_SIZE).div_ceil(64) * 8 + PAGE_SIZE;
-        let dend = d.base() + d.total_size();
-        if d.base() < kend + bitmap_len && dend > kend {
+        let dbase = mmu::virt_to_phys(d.base());
+        let dend = dbase + d.total_size();
+        if dbase < kend + bitmap_len && dend > kend {
             low_end = dend;
         }
     }
 
-    // 3. MMU on (identity map, caches), then PMM, then heap.
-    // SAFETY: first and only call, core 0, MMU still off.
+    // 3. The kernel's own page tables (boot.S turned the MMU on with temporary ones), then
+    // PMM, then heap.
+    // SAFETY: first and only call, core 0, before the PMM.
     unsafe { mmu::init(ram.base, ram.size) };
     // SAFETY: MMU is on, RAM is mapped, nothing else owns RAM above the kernel image.
     unsafe { pmm::init(ram.base, ram.size, low_end) };
     if let Some(d) = &dtb {
-        pmm::reserve(d.base(), d.total_size());
+        pmm::reserve(mmu::virt_to_phys(d.base()), d.total_size());
     }
     heap::init();
 
@@ -91,7 +102,11 @@ pub fn init() {
         source
     );
     match &dtb {
-        Some(d) => kprintln!("mem: dtb at {:#x}, {} bytes", d.base(), d.total_size()),
+        Some(d) => kprintln!(
+            "mem: dtb at {:#x}, {} bytes",
+            mmu::virt_to_phys(d.base()),
+            d.total_size()
+        ),
         None => kprintln!("mem: no device tree (x0 = {dtb_addr:#x})"),
     }
     kprintln!(
@@ -102,7 +117,8 @@ pub fn init() {
         pmm::reserved_end()
     );
     kprintln!(
-        "mem: MMU+caches on (4K granule, 48-bit VA, identity map), device 0..0x40000000, RAM cacheable"
+        "mem: MMU+caches on (4K granule, 48-bit VA, higher half at {:#x}: device 0..0x40000000, RAM cacheable; TTBR0 user only)",
+        mmu::KERNEL_BASE
     );
     kprintln!(
         "mem: pmm {} frames total, {} reserved, {} free ({} MiB)",

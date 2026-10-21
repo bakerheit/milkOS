@@ -46,7 +46,7 @@ pub fn init() -> Option<Surface<'static>> {
 
     // RAMFBCfg: addr u64, fourcc u32, flags u32, width u32, height u32, stride u32; all big endian.
     let mut cfg = [0u8; 28];
-    cfg[0..8].copy_from_slice(&(mem as u64).to_be_bytes()); // physical == virtual with the MMU off
+    cfg[0..8].copy_from_slice(&(crate::mmu::virt_to_phys(mem as usize) as u64).to_be_bytes());
     cfg[8..12].copy_from_slice(&FOURCC_XRGB8888.to_be_bytes());
     cfg[12..16].copy_from_slice(&0u32.to_be_bytes());
     cfg[16..20].copy_from_slice(&(WIDTH as u32).to_be_bytes());

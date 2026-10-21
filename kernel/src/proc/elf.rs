@@ -3,8 +3,8 @@
 //! expects.
 //!
 //! * `ET_EXEC`: segments go where they are linked; they must lie in the user range
-//!   (`mmu::USER_BASE` and up, 1 TiB). Binaries linked for Linux's usual 0x400000 are
-//!   refused until the kernel moves to the higher half (docs/processes.md).
+//!   (`mmu::USER_BASE`..`mmu::USER_END`, all of TTBR0: the kernel is in the higher half).
+//!   That includes Linux's usual 0x400000 and milkOS's 0x100_0040_0000.
 //! * `ET_DYN` without `PT_INTERP` (static-pie): loaded at `IMAGE_BASE`; the program
 //!   relocates itself.
 //! * Anything with `PT_INTERP` (dynamically linked) is refused.

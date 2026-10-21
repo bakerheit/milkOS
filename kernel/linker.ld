@@ -1,12 +1,18 @@
-/* milkOS kernel image. qemu's virt machine has RAM at 0x4000_0000. */
+/* milkOS kernel image. qemu's virt machine has RAM at 0x4000_0000 and loads the image
+   at RAM + 0x80000 (text_offset in boot.S). The kernel runs in the higher half: it is
+   linked at KERNEL_BASE + that load address (mmu.rs KERNEL_BASE), loaded at the
+   physical one. boot.S runs position-independent until the MMU is on. */
 ENTRY(_start)
+
+KERNEL_PHYS = 0x40080000;
+KERNEL_BASE = 0xFFFF000000000000;
 
 SECTIONS
 {
-    . = 0x40080000;
+    . = KERNEL_BASE + KERNEL_PHYS;
     __kernel_start = .;
 
-    .text : {
+    .text : AT(KERNEL_PHYS) {
         KEEP(*(.text.boot))
         *(.text .text.*)
     }

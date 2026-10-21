@@ -2,7 +2,7 @@
 //! (fork/clone, execve, exit, wait4, reparenting to init, zombies).
 //!
 //! Each process runs at EL0 in its own [`uspace::UserSpace`] (TTBR0 + ASID); the kernel
-//! stays identity mapped in the low L0 slots of every space, EL1-only. Syscalls use the
+//! lives in the higher half (TTBR1), so all of TTBR0 is the process's. Syscalls use the
 //! Linux aarch64 ABI and numbers ([`syscall`]). Faults kill the process with a message,
 //! never the kernel. See docs/processes.md.
 
@@ -199,7 +199,6 @@ pub fn all() -> Vec<Arc<Process>> {
 /// Set up the process layer: syscalls, user-fault handling, the console. Runs the EL0
 /// smoke test. Call after `sched::init`.
 pub fn init() {
-    mmu::prepare_kernel_slots();
     tty::init();
     procfs::init();
     syscall::init();
@@ -790,7 +789,7 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
         _ => "",
     };
     let addr = if matches!(ec, EC_DABT_LOWER | EC_IABT_LOWER | EC_PC_ALIGN) {
-        let hint = if (frame.far as usize) < mmu::USER_BASE {
+        let hint = if !(mmu::USER_BASE..mmu::USER_END).contains(&(frame.far as usize)) {
             " (not a user address)"
         } else {
             ""

@@ -60,8 +60,9 @@ fn test_mmu() {
     assert!(mmu::caches_on(), "selftest: MMU/caches are not enabled");
     let (kstart, _) = crate::mem::kernel_range();
     mmu::with_kernel_space(|s| {
-        // Identity map for device space and RAM; nothing beyond.
-        for va in [
+        // Linear map (KERNEL_BASE + pa) of device space and RAM; nothing low, nothing
+        // non-canonical.
+        for pa in [
             0x0900_0000usize,
             0x0a00_0000,
             0x3fff_f000,
@@ -69,16 +70,23 @@ fn test_mmu() {
             kstart + 0x1234,
         ] {
             assert!(
-                s.translate(va) == Some(va),
-                "selftest: {va:#x} not identity mapped"
+                s.translate(mmu::phys_to_virt(pa)) == Some(pa),
+                "selftest: {pa:#x} not in the linear map"
             );
         }
-        assert!(s.translate(1 << 39).is_none());
-        assert!(s.translate(1 << 48).is_none());
+        for va in [
+            0x0900_0000usize,
+            kstart,
+            1 << 39,
+            1 << 48,
+            mmu::KERNEL_BASE - 0x1000,
+        ] {
+            assert!(s.translate(va).is_none(), "selftest: {va:#x} mapped");
+        }
 
-        // Map two scattered frames at a high virtual address and use them
+        // Map two scattered frames at an unused kernel virtual address and use them
         // through both names.
-        let va = 1usize << 39;
+        let va = mmu::KERNEL_BASE + (1usize << 39);
         let a = pmm::alloc_frame().unwrap();
         let b = pmm::alloc_frame().unwrap();
         s.map(va, a, PAGE_SIZE, MapAttrs::KERNEL_DATA, &mut PmmTables)
@@ -97,8 +105,8 @@ fn test_mmu() {
         unsafe {
             (va as *mut u64).write_volatile(0xdead_beef_cafe_f00d);
             ((va + PAGE_SIZE) as *mut u64).write_volatile(0x1234_5678_9abc_def0);
-            assert!((a as *const u64).read_volatile() == 0xdead_beef_cafe_f00d);
-            assert!((b as *const u64).read_volatile() == 0x1234_5678_9abc_def0);
+            assert!((mmu::phys_to_virt(a) as *const u64).read_volatile() == 0xdead_beef_cafe_f00d);
+            assert!((mmu::phys_to_virt(b) as *const u64).read_volatile() == 0x1234_5678_9abc_def0);
         }
         // Overlap checks: same page again, and inside an existing 2 MiB block.
         assert!(
@@ -107,7 +115,7 @@ fn test_mmu() {
         );
         assert!(
             s.map(
-                kstart & !0xfff,
+                mmu::phys_to_virt(kstart) & !0xfff,
                 0,
                 PAGE_SIZE,
                 MapAttrs::KERNEL_DATA,
@@ -127,7 +135,8 @@ fn test_mmu() {
 
     // A throwaway address space: blocks vs pages, then give the tables back.
     let free_before = pmm::stats().free_frames;
-    let mut space = AddressSpace::new(&mut PmmTables).expect("selftest: no table frame");
+    let mut space =
+        AddressSpace::new(mmu::Half::Lower, &mut PmmTables).expect("selftest: no table frame");
     let two_mib = 512 * PAGE_SIZE;
     let pa = pmm::alloc_contiguous(1024, 512).expect("selftest: no 4 MiB contiguous");
     assert!(pa.is_multiple_of(two_mib));
@@ -161,7 +170,9 @@ fn test_mmu() {
         pmm::stats().free_frames == free_before,
         "selftest: table frames leaked"
     );
-    kprintln!("selftest: mmu ok (caches on, identity map, 4K/2M mappings, aliasing, destroy)");
+    kprintln!(
+        "selftest: mmu ok (caches on, higher-half linear map, 4K/2M mappings, aliasing, destroy)"
+    );
 }
 
 fn test_pmm() {

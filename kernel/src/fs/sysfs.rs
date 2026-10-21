@@ -45,11 +45,11 @@ fn cstr(b: &[u8], off: usize) -> Option<&str> {
 
 /// Top-level nodes of the boot device tree (empty if there is none).
 fn dt_nodes() -> Vec<DtNode> {
-    let base = mem::boot_dtb();
+    let base = mem::boot_dtb_ptr();
     if base == 0 {
         return Vec::new();
     }
-    // SAFETY: boot DTB is reserved RAM, identity-mapped; header read first for the size.
+    // SAFETY: boot DTB is reserved RAM, in the kernel's linear map; header read first for the size.
     let hdr = unsafe { core::slice::from_raw_parts(base as *const u8, 40) };
     if be32(hdr, 0) != Some(FDT_MAGIC) {
         return Vec::new();
@@ -195,10 +195,11 @@ pub fn init() -> Result<()> {
         let mut virtio_id = 0;
         if virtio && let Some(&(base, _)) = regs.first() {
             // MagicValue "virt" @0, DeviceID @8; both side-effect-free reads.
-            // SAFETY: virtio-mmio window is below 1 GiB, mapped as device memory.
-            let magic = unsafe { read_volatile(base as *const u32) };
+            // SAFETY: virtio-mmio window is below 1 GiB, in the kernel's linear map as device memory.
+            let va = crate::mmu::phys_to_virt(base as usize);
+            let magic = unsafe { read_volatile(va as *const u32) };
             virtio_id = if magic == 0x7472_6976 {
-                unsafe { read_volatile((base + 8) as *const u32) }
+                unsafe { read_volatile((va + 8) as *const u32) }
             } else {
                 0
             };

@@ -18,7 +18,7 @@ use crate::exceptions::TrapFrame;
 use crate::gic;
 use crate::sync::FnSlot;
 
-const UART_BASE: usize = 0x0900_0000;
+const UART_BASE: usize = crate::mmu::phys_to_virt(0x0900_0000);
 const UARTDR: usize = 0x00;
 const UARTFR: usize = 0x18;
 const UARTIFLS: usize = 0x34;

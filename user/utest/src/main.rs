@@ -787,6 +787,30 @@ fn t_sandbox() -> bool {
     )
 }
 
+/// The kernel lives in the higher half (TTBR1): a user pointer into it must be EFAULT for a
+/// syscall and SIGSEGV for a load, never a kernel read.
+fn t_kaddr() -> bool {
+    const KERNEL_IMAGE: usize = 0xffff_0000_4008_0000;
+    // SAFETY: never dereferenced here; the kernel must refuse it.
+    let kbuf = unsafe { core::slice::from_raw_parts(KERNEL_IMAGE as *const u8, 16) };
+    let w = sys::write(1, kbuf);
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        // SAFETY: deliberately not: must fault.
+        let v = unsafe { core::ptr::read_volatile(KERNEL_IMAGE as *const u8) };
+        sys::exit(v as i32);
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    check(
+        "kernel addresses",
+        w == Err(sys::Errno(14)) && st & 0x7f == sys::SIGSEGV,
+        &alloc::format!(
+            "write(kernel ptr) -> {w:?}, load from {KERNEL_IMAGE:#x}: {}",
+            sys::describe_status(st)
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -818,6 +842,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "proc" || what == "all" {
         ok &= t_proc();
+    }
+    if what == "kaddr" || what == "all" {
+        ok &= t_kaddr();
     }
     if what == "signal" || what == "all" {
         ok &= t_signal();

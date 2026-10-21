@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::node::Timespec;
 use crate::timer;
 
-const PL031_DR: usize = 0x0901_0000;
+const PL031_DR: usize = crate::mmu::phys_to_virt(0x0901_0000);
 /// PrimeCell peripheral ID registers at 0xfe0..0xfec; PL031 reads 0x31, 0x10, x4, 0x00.
 const PL031_PERIPH_ID0: usize = PL031_DR + 0xfe0;
 

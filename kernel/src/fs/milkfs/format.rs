@@ -22,6 +22,7 @@ pub const VERSION: u32 = 1;
 pub const MIN_VERSION: u32 = 0;
 pub const NODE_MAGIC: &[u8; 4] = b"MKND";
 pub const DEAD_MAGIC: &[u8; 4] = b"MKDL";
+pub const MAP_MAGIC: &[u8; 4] = b"MKSM";
 
 pub const MAX_SNAPS: usize = 30;
 pub const SNAP_NAME_MAX: usize = 47;
@@ -40,6 +41,12 @@ pub const K_INLINE: u8 = 6;
 pub const INLINE_MAX: usize = 1024;
 /// Longest run one `K_EXT` item describes (its value: 20 + 8 per block bytes).
 pub const MAX_RUN: u64 = 128;
+
+/// Object id of volume-wide items (not an inode: inode numbers only grow from 1).
+pub const VOL_OBJ: u64 = u64::MAX;
+/// `(VOL_OBJ, K_ORPHAN, ino)` -> empty: `ino` was unlinked while open; mount finishes
+/// deleting it (so a mount with a current space map needn't scan every inode).
+pub const K_ORPHAN: u8 = 7;
 
 /// Root directory inode number.
 pub const ROOT_INO: u64 = 1;
@@ -251,6 +258,9 @@ pub struct Superblock {
     pub flags: u32,
     /// Format version the superblock was written with (`MIN_VERSION..=VERSION`).
     pub version: u32,
+    /// Persistent free-space map of exactly this generation (none: rebuild at mount).
+    /// Kernels that predate it write zeros here, which drops a map they made stale.
+    pub spacemap: BlockPtr,
 }
 
 /// Superblock flag: history is no longer linear (a clone was promoted), so dead lists
@@ -273,10 +283,12 @@ const SB_SNAPS: usize = 152;
 const SNAP_REC: usize = 128;
 const SB_AUTO: usize = 3992;
 const SB_FLAGS: usize = 4008;
+const SB_SPACEMAP: usize = 4016;
 const SB_CSUM: usize = BLOCK - 8;
 
 const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
-const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_CSUM);
+const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_SPACEMAP);
+const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -293,7 +305,7 @@ impl Superblock {
     pub fn encode(&self) -> [u8; BLOCK] {
         let mut b = [0u8; BLOCK];
         b[..8].copy_from_slice(MAGIC);
-        b[SB_VERSION..SB_VERSION + 4].copy_from_slice(&VERSION.to_le_bytes());
+        b[SB_VERSION..SB_VERSION + 4].copy_from_slice(&self.version.to_le_bytes());
         b[SB_BSIZE..SB_BSIZE + 4].copy_from_slice(&(BLOCK as u32).to_le_bytes());
         b[SB_TOTAL..SB_TOTAL + 8].copy_from_slice(&self.total_blocks.to_le_bytes());
         b[SB_GEN..SB_GEN + 8].copy_from_slice(&self.generation.to_le_bytes());
@@ -326,6 +338,7 @@ impl Superblock {
             b[SB_AUTO + i * 4..SB_AUTO + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
         b[SB_FLAGS..SB_FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
+        self.spacemap.put(&mut b[SB_SPACEMAP..]);
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
         b
@@ -385,6 +398,7 @@ impl Superblock {
             auto: core::array::from_fn(|i| le32(&b[SB_AUTO + i * 4..])),
             flags: le32(&b[SB_FLAGS..]),
             version,
+            spacemap: BlockPtr::get(&b[SB_SPACEMAP..]),
         })
     }
 }
@@ -516,6 +530,56 @@ pub fn decode_dead(b: &[u8; BLOCK]) -> Result<(Vec<DeadEntry>, BlockPtr)> {
         })
         .collect();
     Ok((entries, next))
+}
+
+// ---- space map ----------------------------------------------------------------------
+//
+// Index block: magic "MKSM" | pad u32 | generation u64 | total blocks u64 | used u64 |
+// chunk count u32 | pad u32 | chunk count x BlockPtr. Chunk i is a bitmap block for
+// blocks i*32768 .. (bit set = used). Written whole at every commit into fresh blocks.
+
+pub const MAP_HEADER: usize = 40;
+pub const MAP_BITS: u64 = (BLOCK * 8) as u64;
+pub const MAP_MAX_CHUNKS: usize = (BLOCK - MAP_HEADER) / PTR_SIZE;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapIndex {
+    pub generation: u64,
+    pub total: u64,
+    pub used: u64,
+    pub chunks: Vec<BlockPtr>,
+}
+
+impl MapIndex {
+    pub fn encode(&self, out: &mut [u8; BLOCK]) {
+        out.fill(0);
+        out[..4].copy_from_slice(MAP_MAGIC);
+        out[8..16].copy_from_slice(&self.generation.to_le_bytes());
+        out[16..24].copy_from_slice(&self.total.to_le_bytes());
+        out[24..32].copy_from_slice(&self.used.to_le_bytes());
+        out[32..36].copy_from_slice(&(self.chunks.len() as u32).to_le_bytes());
+        for (i, c) in self.chunks.iter().enumerate() {
+            c.put(&mut out[MAP_HEADER + i * PTR_SIZE..]);
+        }
+    }
+
+    pub fn decode(b: &[u8; BLOCK]) -> Option<MapIndex> {
+        if &b[..4] != MAP_MAGIC {
+            return None;
+        }
+        let n = le32(&b[32..]) as usize;
+        if n > MAP_MAX_CHUNKS {
+            return None;
+        }
+        Some(MapIndex {
+            generation: le64(&b[8..]),
+            total: le64(&b[16..]),
+            used: le64(&b[24..]),
+            chunks: (0..n)
+                .map(|i| BlockPtr::get(&b[MAP_HEADER + i * PTR_SIZE..]))
+                .collect(),
+        })
+    }
 }
 
 // ---- items --------------------------------------------------------------------------

@@ -994,6 +994,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_versions(t, VP);
     milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
+    milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
@@ -1916,6 +1917,158 @@ fn milkfs_fsck(
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.
+/// A file made straight in a volume's live tree (no VFS): returns its inode.
+fn raw_file(
+    st: &mut super::milkfs::volume::State,
+    name: &str,
+    data: &[u8],
+    nlink: u32,
+) -> Option<u64> {
+    use super::milkfs::format::*;
+    let _ = st.set_cur(super::milkfs::items::LIVE);
+    let ino = st.alloc_ino();
+    let size = st.write_data(ino, 0, 0, data).ok()?;
+    st.put_inode(
+        ino,
+        &InodeItem {
+            mode: 0o100644,
+            nlink,
+            size,
+            parent: ROOT_INO,
+            ..InodeItem::default()
+        },
+    )
+    .ok()?;
+    if nlink > 0 {
+        st.add_dirent(
+            ROOT_INO,
+            Dirent {
+                ino,
+                dtype: 8,
+                name: String::from(name),
+            },
+        )
+        .ok()?;
+    }
+    Some(ino)
+}
+
+/// The persistent space map, on its own RAM disk driven through `State` (re-opens are
+/// "reboots"; dropping a State without a commit is a crash).
+fn milkfs_spacemap(t: &mut T) {
+    use super::blockdev::BlockRef;
+    use super::milkfs::format::*;
+    use super::milkfs::items::LIVE;
+    use super::milkfs::volume::State;
+    let Some(disk) = t.must(
+        super::ramdisk::RamDisk::new("ram1", 8 << 20),
+        "map RAM disk",
+    ) else {
+        return;
+    };
+    let dev: BlockRef = alloc::sync::Arc::new(disk);
+    if super::milkfs::mkfs(&dev, "MapTest", false).is_err() {
+        t.ok(false, "mkfs the map test volume");
+        return;
+    }
+    let exact = |st: &mut State| {
+        st.verify_space()
+            .is_ok_and(|s| s.leaked == 0 && s.free_but_used == 0 && s.reachable == s.allocated)
+    };
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "open the map test volume");
+        return;
+    };
+    t.ok(!r.fast, "fresh volume: no space map yet, scanned");
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let _ = raw_file(&mut st, "big", &big, 1);
+    let _ = raw_file(&mut st, "small", b"small", 1);
+    let _ = st.commit();
+    // Unlinked while open, then the machine goes down: on the orphan list.
+    let orphan = raw_file(&mut st, "", &big[..50_000], 0).unwrap_or(0);
+    let _ = st.add_orphan(orphan);
+    let _ = st.commit();
+    let committed = st.sb.generation;
+    drop(st); // crash: no further commit
+
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "re-open with a space map");
+        return;
+    };
+    t.ok(
+        r.fast && r.generation == committed,
+        &alloc::format!(
+            "re-open loads the space map, no scan ({} us)",
+            r.mount_ns / 1000
+        ),
+    );
+    t.ok(
+        r.orphans == 1 && st.inode(LIVE, orphan).is_err(),
+        "orphan list: the unlinked-while-open file is deleted at mount",
+    );
+    t.ok(exact(&mut st), "space exact after a mapped mount");
+    let mut b = vec![0u8; 300_000];
+    t.ok(
+        st.lookup(LIVE, ROOT_INO, "big")
+            .ok()
+            .flatten()
+            .and_then(|d| st.read_data(LIVE, d.ino, 300_000, 0, &mut b).ok())
+            == Some(300_000)
+            && b == big,
+        "data intact",
+    );
+
+    // Damage a bitmap chunk: mount notices (checksum) and rebuilds from the trees.
+    let map = st.sb.spacemap;
+    let chunk = st
+        .store
+        .read_map_index(map)
+        .ok()
+        .and_then(|i| i.chunks.first().copied());
+    drop(st);
+    if let Some(c) = chunk {
+        let _ = dev.write_blocks(c.block * 8, &[0x5au8; BLOCK]);
+    }
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "re-open with a damaged space map");
+        return;
+    };
+    t.ok(
+        !r.fast && r.problems == 0,
+        "damaged space map: rebuilt by a scan",
+    );
+    t.ok(exact(&mut st), "space exact after the rebuild");
+    let _ = raw_file(&mut st, "after", b"x", 1);
+    let _ = st.commit();
+    drop(st);
+    let r = State::open(dev.clone()).map(|(_, r)| r.fast);
+    t.ok(r == Ok(true), "the next commit writes a good map again");
+
+    // A free map that lost a block in use: check finds it, repair marks it again.
+    let Ok((mut st, _)) = State::open(dev.clone()) else {
+        return;
+    };
+    let victim = st
+        .lookup(LIVE, ROOT_INO, "big")
+        .ok()
+        .flatten()
+        .and_then(|d| st.extents(LIVE, d.ino, 0).ok())
+        .and_then(|e| e.first().map(|x| x.1.block));
+    if let Some(v) = victim {
+        st.store.sweep_free(v);
+    }
+    let found = st.check(false).is_ok_and(|r| {
+        r.problems
+            .iter()
+            .any(|p| p.contains("1 reachable blocks marked free"))
+    });
+    t.ok(found, "check finds a block in use marked free");
+    let fixed = st
+        .check(true)
+        .is_ok_and(|r| r.repaired.iter().any(|x| x.contains("marked 1")));
+    t.ok(fixed && exact(&mut st), "repair marks it used again");
+}
+
 fn milkfs_bench(v: &super::milkfs::Volume, vp: &str) {
     let dir = alloc::format!("{vp}/.bench");
     rm_rf(&dir);

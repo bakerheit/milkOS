@@ -10,7 +10,9 @@
 //! - an inode with links but no entry -> linked into `/lost+found` as `#<ino>`;
 //! - an inode with no links and no entry -> deleted;
 //! - a wrong link count or directory parent -> fixed;
-//! - blocks allocated but unreachable (in memory) -> swept.
+//! - an orphan-list entry for an inode that is gone or has links -> dropped;
+//! - blocks allocated but unreachable -> swept; reachable blocks marked free -> marked
+//!   (either way the next commit writes a corrected space map).
 //!
 //! Not repairable (reported): a data block or tree node whose checksum fails. Recover
 //! those from a snapshot (`versions restore`, `snap rollback`).
@@ -103,6 +105,7 @@ impl State {
         let mut inodes: BTreeMap<u64, InodeItem> = BTreeMap::new();
         let mut dirents: Vec<(u64, Dirent)> = Vec::new();
         let mut extents: Vec<(u64, u64, BlockPtr)> = Vec::new();
+        let mut orphan_list: Vec<u64> = Vec::new();
         let mut nodes = 0u64;
         let walked = {
             let mut node = |_: &BlockPtr| {
@@ -110,6 +113,12 @@ impl State {
                 true
             };
             let mut item = |k: &Key, v: &[u8]| -> Result<()> {
+                if k.obj == VOL_OBJ {
+                    if k.kind == K_ORPHAN {
+                        orphan_list.push(k.off);
+                    }
+                    return Ok(());
+                }
                 match k.kind {
                     K_INODE => {
                         inodes.insert(k.obj, InodeItem::decode(v)?);
@@ -215,6 +224,18 @@ impl State {
                 }
             }
         }
+        let mut stale_orphans: Vec<u64> = Vec::new();
+        for &ino in &orphan_list {
+            match inodes.get(&ino) {
+                Some(i) if i.nlink == 0 => {}
+                _ => {
+                    rep.problems.push(format!(
+                        "orphan list names inode {ino}, which is gone or has links"
+                    ));
+                    stale_orphans.push(ino);
+                }
+            }
+        }
         if let Some(r) = inodes.get(&ROOT_INO) {
             let want = 2 + subdirs.get(&ROOT_INO).copied().unwrap_or(0);
             if r.nlink != want {
@@ -229,18 +250,29 @@ impl State {
 
         // 4. Space accounting (the in-memory allocator vs what is reachable).
         let space = self.verify_space()?;
-        if space.leaked != 0 || space.free_but_used != 0 {
+        if space.free_but_used != 0 || (space.leaked != 0 && !self.branched()) {
             rep.problems.push(format!(
                 "space: {} blocks leaked, {} reachable blocks marked free",
                 space.leaked, space.free_but_used
             ));
+        } else if space.leaked != 0 {
+            rep.notes.push(format!(
+                "{} blocks wait for the next sweep (branched history)",
+                space.leaked
+            ));
         }
 
-        if !repair || (rep.problems.is_empty() && !bad_slot) {
+        if !repair || (rep.problems.is_empty() && !bad_slot && space.leaked == 0) {
             return Ok(rep);
         }
 
-        // ---- repairs, one transaction ----
+        // ---- repairs ----
+        // First, before anything allocates: blocks in use that the free map lost.
+        if space.free_but_used != 0 {
+            let n = self.mark_reachable()?;
+            rep.repaired
+                .push(format!("marked {n} reachable blocks used again"));
+        }
         self.set_cur(LIVE)?;
         for (dir, name, ino) in dangling {
             self.remove_dirent(dir, &name)?;
@@ -250,6 +282,11 @@ impl State {
         for ino in reclaim {
             self.delete_inode(ino)?;
             rep.repaired.push(format!("deleted orphan inode {ino}"));
+        }
+        for ino in stale_orphans {
+            self.del_orphan(ino)?;
+            rep.repaired
+                .push(format!("dropped orphan-list entry for inode {ino}"));
         }
         for (ino, n) in fix_nlink {
             if let Ok(mut i) = self.inode(LIVE, ino) {
@@ -303,7 +340,7 @@ impl State {
                 self.sb.generation
             ));
         }
-        if space.leaked != 0 || space.free_but_used != 0 {
+        if space.leaked != 0 {
             let n = self.sweep()?;
             rep.repaired.push(format!("swept {n} unreachable blocks"));
         }

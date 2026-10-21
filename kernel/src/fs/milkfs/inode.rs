@@ -174,6 +174,9 @@ impl Volume {
         if i.nlink == 0 && !self.is_open(st.cur, ino) {
             st.delete_inode(ino)
         } else {
+            if i.nlink == 0 {
+                st.add_orphan(ino)?;
+            }
             st.put_inode(ino, &i)
         }
     }

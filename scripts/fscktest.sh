@@ -2,7 +2,7 @@
 # milkfs check/repair test: damage private images on purpose, repair on the host and in
 # the kernel, verify. Everything in a fresh /tmp directory; only qemus started here are
 # killed (by PID).
-#   repairable kinds:   orphan dangling nlink parent sb
+#   repairable kinds:   orphan dangling nlink parent sb smap
 #   unrepairable kinds: data node (must be reported, never "repaired")
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -41,7 +41,7 @@ wait_for "crash-writer: iteration" "$T/base.log" 60 && sleep 2
 stop
 $M check "$BASE" --quiet >/dev/null && ok "base image is clean" || { bad "base image"; exit 1; }
 
-for kind in orphan dangling nlink parent sb; do
+for kind in orphan dangling nlink parent sb smap; do
   echo "== $kind"
   # host repair
   H="$T/$kind-host.img"; cp "$BASE" "$H"
@@ -71,13 +71,17 @@ for kind in orphan dangling nlink parent sb; do
   for _ in $(seq 600); do [ -e "$T/$kind.done" ] && break; sleep 0.2; done
   sleep 0.5; stop; kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
   L="$(tr -d '\r' < "$LOG")"
-  if [ "$kind" != sb ]; then
+  if [ "$kind" = smap ]; then
+    echo "$L" | grep -aq "vda: space map chunk unreadable: rebuilding" && ok "mount notices the damaged space map and rebuilds it" || bad "mount didn't notice the space map"
+  elif [ "$kind" != sb ]; then
     echo "$L" | grep -aq "check FOUND PROBLEMS" && ok "mount reports it (and doesn't repair)" || bad "mount didn't report $kind"
   fi
   if echo "$L" | grep -a -A3 'snap check --repair$' | grep -aq "repaired:"; then
     ok "kernel repair: $(echo "$L" | grep -a -m1 'repaired:' | sed 's/^ *//')"
   elif [ "$kind" = sb ] && echo "$L" | awk '/snap check$/{n++} n==1' | grep -aq "checksummed: clean"; then
     ok "kernel: the damaged slot is where the next commit goes, so the boot's first commit already rewrote it"
+  elif [ "$kind" = smap ] && echo "$L" | awk '/snap check$/{n++} n==1' | grep -aq "checksummed: clean"; then
+    ok "kernel: mount rebuilt the map and the next commit wrote a good one"
   else
     bad "kernel repair of $kind"
   fi

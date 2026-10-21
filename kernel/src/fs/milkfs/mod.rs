@@ -109,14 +109,22 @@ pub fn automount() {
             Ok((vol, r)) => {
                 let st = vol.state.lock();
                 kprintln!(
-                    "milkfs: {} mounted at {path}: generation {}, {} inodes, {}/{} blocks used, {} snapshot(s), check {}{}",
+                    "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {}, {}/{} blocks used, {} snapshot(s), check {}{}",
                     dev.name(),
+                    r.mount_ns / 1_000_000,
+                    r.mount_ns / 10_000 % 100,
                     r.generation,
-                    r.inodes,
+                    if r.fast {
+                        String::from("space map current")
+                    } else {
+                        format!("{} inodes", r.inodes)
+                    },
                     r.used_blocks,
                     st.store.total(),
                     st.snaps.len(),
-                    if r.problems == 0 {
+                    if r.fast {
+                        "skipped (snap check)"
+                    } else if r.problems == 0 {
                         "clean"
                     } else {
                         "FOUND PROBLEMS"

@@ -405,9 +405,9 @@ the differences are listed at the end of this section.
 | file | what |
 |---|---|
 | `format.rs` | on-disk structures, xxh64, FNV-1a name hash (mirrored in `mkmilkfs.py`) |
-| `store.rs` | allocator (free map rebuilt at mount), birth-time release rules, checksummed block I/O, dead-list chains |
+| `store.rs` | allocator and its persistent space map, birth-time release rules, checksummed block I/O, dead-list chains, decoded node cache |
 | `btree.rs` | copy-on-write B+tree: dirty nodes in memory, written bottom-up at commit |
-| `volume.rs` | `State`, commit, mount (mark + namespace check + orphan reclaim), mkfs, space check |
+| `volume.rs` | `State`, commit, mount (space map, or mark + namespace check + orphan reclaim), mkfs, space check |
 | `items.rs` | inodes, directory entries, extents, symlinks, file data |
 | `snap.rs` | snapshot create / delete / rollback |
 | `clone.rs` | clones: create / discard / promote |
@@ -454,6 +454,7 @@ itself.
 | 152 | 30 records x 128 B (snapshots and clones): name [48], generation u64 (clone: its origin's), created u64, root pointer, dead list pointer, next_ino u64, flags u32 (1 = clone), id u32 (clones) |
 | 3992 | automatic snapshots: state u32 (0 default/1 on/2 off), interval s u32, keep u32, daily u32 (0 = default) |
 | 4008 | flags u32: 1 = `SB_BRANCHED` (a clone was promoted; see below) |
+| 4016 | space map index: block pointer (zero = none; kernels before the map write zeros here) |
 | 4088 | xxh64 of bytes 0..4088 |
 
 **Tree node**: header `"MKND" | level u8 (0 = leaf) | pad u8 | count u16 | birth u64`, then
@@ -470,11 +471,19 @@ covers keys from its separator to the next one. Values are at most 1500 bytes.
 | 4 symlink | `(ino, 4, 0)` | target bytes (max 1024) |
 | 5 run (v1) | `(ino, 5, first block index)` | `block u64 | birth u64 | count u32 | count x xxh64 u64`: `count` (1..128) consecutive file blocks stored in consecutive disk blocks from `block`, one checksum per block |
 | 6 inline (v1) | `(ino, 6, 0)` | the whole file content, files up to 1024 bytes (no data block at all) |
+| 7 orphan | `(2^64-1, 7, ino)` | empty: `ino` has no links left but is still open; whoever deletes it removes the entry, mount finishes the delete if the machine went down first |
 
 The root directory is inode 1 (its parent is itself). Inode numbers only grow.
 
 **Dead-list block**: `"MKDL" | count u32 | next pointer (24 B) | count x (block u64, birth u64)`
 (254 per block). A chain is only ever prepended to or rewritten whole.
+
+**Space map**: an index block `"MKSM" | pad u32 | generation u64 | total blocks u64 |
+used u64 | chunk count u32 | pad u32 | chunk count x block pointer`, and the chunks: plain
+bitmaps, bit `b` of chunk `i` = block `i * 32768 + b` is in use. One index holds 169 chunks
+(volumes up to 22 GiB; bigger ones simply have no map and mount by scanning). Neither item
+kind 7 nor the map needs a format bump: kernels that predate them ignore kind 7 and write
+zeros at 4016, which drops a map they would have made stale.
 
 ### Transactions and crash consistency
 
@@ -490,7 +499,8 @@ after. A commit:
 1. The B+tree path to every changed item was copied into memory (old blocks released by the
    rules below); new data blocks went to freshly allocated blocks through the bcache.
 2. Commit writes the dirty nodes bottom-up into new blocks, prepends this transaction's
-   dead-list entries as a new chain block, `bcache.flush()` (everything durable),
+   dead-list entries as a new chain block, writes the space map (last, so it sees every
+   allocation), `bcache.flush()` (everything durable),
 3. writes the new superblock to slot `generation % 2` (**the commit point**), flushes again.
 
 A crash at any moment leaves the previous superblock valid and everything it references
@@ -503,16 +513,46 @@ dead lists are dropped and snapshot delete, rollback and promote reclaim space w
 exact **sweep** (free every allocated block the committed state can't reach, the same walk
 mount does). When no snapshots are left the history is linear again and the flag clears.
 
-**Free space is not stored.** Mount marks every block reachable from the chosen superblock
-(live tree, every snapshot tree, shared subtrees once, extents, dead-list chains); the rest is
-free. So the allocator can't be wrong after a crash. While a transaction is open a dropped
-block is: born in this transaction → reused at once; born after the newest snapshot → freed
-when the commit is durable; otherwise a snapshot still has it → live dead list.
+**Free space.** While a transaction is open a dropped block is: born in this transaction →
+reused at once; born after the newest snapshot → freed when the commit is durable;
+otherwise a snapshot still has it → live dead list.
 
-Mount also checks the live namespace (every entry points at an inode, directory parents
-and link counts match) and reclaims orphans (inodes with no entry: unlinked while open
-before a crash). It prints e.g. `milkfs: vda mounted at /Volumes/Milk: generation 1430,
-2 inodes, 4/16384 blocks used, 0 snapshot(s), check clean`.
+Every commit writes the **space map** of the generation it commits, into fresh blocks, as
+part of the commit: the allocator's bitmap minus what the commit frees (`pending_free`,
+the previous map among it) plus the map's own blocks. Because it is written before the
+superblock and the superblock points at it, it can't be out of date with the generation
+that wins at mount, crash or not. Mount loads it when it is intact: index and chunk
+checksums, generation stamp = the superblock's, size matches, bit count = the stored
+count, and the blocks the superblock points at (roots, dead-list heads, the map itself)
+marked used. Then it finishes the deletes on the orphan list and is done:
+
+```text
+milkfs: vda mounted at /Volumes/Milk in 0.37 ms: generation 29, space map current, ...
+```
+
+Otherwise (no map: made by `mkmilkfs.py`, last written by the Mac tool or an older kernel;
+damaged; stale) it says why and **rebuilds** it the old way: mark every block reachable
+from the superblock (live tree, every snapshot tree, shared subtrees once, extents,
+dead-list chains, the rest is free), check the live namespace (every entry points at an
+inode, directory parents and link counts match) and reclaim orphans (inodes with no entry
+and no links). The next commit writes a fresh map.
+
+```text
+milkfs: vda: space map absent (last written by the Mac tool or an older kernel): rebuilding it from the trees
+milkfs: vda mounted at /Volumes/Milk in 100.70 ms: generation 2, 20202 inodes, 3578/65536 blocks used, 0 snapshot(s), check clean
+```
+
+So a mapped mount does no namespace check: that is what `snap check` is for. On a branched
+volume the map also counts blocks waiting for the next sweep (as the in-memory map does);
+before the map, a reboot reclaimed those, now the next sweep (snapshot delete) does.
+
+Mount time, `scripts/mounttime.sh N` (N files made on the Mac, 100 per directory, every
+50th 8 KiB, the rest inline; virtio, `-smp 4`):
+
+| files | scan (no map: before, or after a Mac-side write) | with the space map |
+|---|---|---|
+| 20 000 (3 578 blocks) | 100-113 ms | 0.3-0.5 ms |
+| 100 000 (18 604 blocks) | 1 065-1 163 ms | 0.3-0.5 ms |
 
 ### Snapshots
 
@@ -647,14 +687,17 @@ files unlinked while open when the machine went down, like Linux's orphan list) 
 | inode with links but no entry | yes | linked into `/lost+found` as `#<ino>` |
 | inode with no links and no entry | yes | deleted |
 | wrong link count / directory parent | yes | fixed |
-| allocated but unreachable blocks (in memory) | yes | swept (on disk there is no free map to leak) |
+| allocated but unreachable blocks | yes (a note on a branched volume: they wait for the next sweep) | swept, and a corrected space map committed |
+| reachable blocks marked free | yes | marked used again (before anything else allocates) |
+| space map unreadable or wrong (host check compares it with the reachable blocks) | yes | kernel: mount already rebuilt it; host: dropped (the next mount rebuilds it) |
+| orphan-list entry for an inode that is gone or has links | yes | entry dropped |
 | data block fails its checksum | yes, with the file's path | **no**: recover with `versions restore` / `snap rollback` |
 | tree node fails its checksum | yes (mount also refuses, EIO) | **no**: the image is left untouched |
 
 The host repair rewrites the live tree from the fixed item set into free blocks and commits a
 new superblock (snapshots untouched; if there are any, the volume switches to exact sweeps
 since the dead lists no longer describe the new tree). `mkmilkfs.py corrupt IMAGE
-{orphan,dangling,nlink,parent,sb,data,node}` damages a test image on purpose, and
+{orphan,dangling,nlink,parent,sb,smap,data,node}` damages a test image on purpose, and
 `scripts/fscktest.sh` runs every kind through both repairs (base image = a few seconds of
 the crash workload; after a repair the kernel's crash-check verifies every file).
 
@@ -712,7 +755,13 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
   every file in the live tree and all snapshots against its own header, checks the mounted
   generation is the last committed one (or exactly the in-flight one when its superblock
   fully landed), discards the clones, deletes the snapshots and checks space accounting is
-  exact.
+  exact. The host check also compares each crashed image's space map with the blocks
+  actually reachable (24/24 rounds exact).
+- `scripts/mounttime.sh [N]`: mount time with N files, with and without a space map.
+- Self-test, space map (own RAM disk, `State` re-opens as reboots): a fresh volume scans;
+  after commits a re-open loads the map; an unlinked-while-open file left at a "crash" is
+  deleted from the orphan list; a damaged chunk is noticed and rebuilt; a block in use
+  marked free is found by `check` and marked again by `check --repair`.
 
 ### Performance (v1)
 
@@ -750,7 +799,6 @@ Where it comes from:
 
 - Snapshot and clone records live in the superblock (30 in total) instead of a volume
   tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
-- No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
 - No reflink copies (v1 added multi-block runs and inline data).
 - B+tree deletion doesn't merge underfull nodes.
 - Batched commits (about 1 s). Reads are page-cached (see Page cache).

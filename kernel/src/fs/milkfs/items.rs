@@ -155,7 +155,18 @@ impl State {
         self.del(&Key::new(ino, K_INLINE, 0))?;
         self.del(&Key::new(ino, K_SYMLINK, 0))?;
         self.del(&inode_key(ino))?;
+        self.del_orphan(ino)?;
         Ok(())
+    }
+
+    /// Put `ino` (no links left, still open) on the orphan list: mount finishes deleting
+    /// it if the machine goes down before the last close does.
+    pub fn add_orphan(&mut self, ino: u64) -> Result<()> {
+        self.put(Key::new(VOL_OBJ, K_ORPHAN, ino), Vec::new())
+    }
+
+    pub fn del_orphan(&mut self, ino: u64) -> Result<()> {
+        self.del(&Key::new(VOL_OBJ, K_ORPHAN, ino)).map(|_| ())
     }
 
     // ---- directories -------------------------------------------------------------

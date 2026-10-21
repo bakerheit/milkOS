@@ -72,6 +72,12 @@ click 313 159                      # the row second-one again (taking a snapshot
 click 824 286                      # Delete...
 q screendump "$T/delete-sheet.png"
 click 698 376                      # the Danger button "Delete snapshot"
+# The first destructive control needs an administrator's ticket: the desktop's trusted
+# password panel asks (the password field has the focus); the demo account's well-known
+# default password, then Return. The ticket lasts 5 minutes, so the rest needs no panel.
+sleep 1
+q screendump "$T/auth-panel.png"
+q type "milk" sleep 0.3 screendump "$T/auth-panel-typed.png" key ret sleep 2
 ser "send:snap" "wait:$P"
 out "snap" | grep -q "second-one" && bad "second-one is still there after Delete" || ok "Delete snapshot removed it (after the confirm sheet)"
 out "snap" | grep -q "first-one" && ok "the other snapshots are untouched" || bad "first-one vanished"

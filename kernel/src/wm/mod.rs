@@ -19,6 +19,7 @@
 pub mod actions;
 mod anim;
 mod apps;
+mod authpanel;
 mod buffer;
 mod button;
 pub mod client;
@@ -207,6 +208,8 @@ pub enum Request {
     OpenPackage(String),
     /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
     Powerbox,
+    /// A process asks for an administrator's authorisation (authpanel.rs).
+    Auth,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -273,6 +276,9 @@ pub fn run() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
     powerbox::set_up();
+    // The trusted password panel answers admin authorisation requests from now on (and
+    // ends the transitional allowance for desktop apps, docs/security.md).
+    crate::proc::auth::set_prompt(authpanel::prompt);
     let mut next = timer::now_ns();
     loop {
         let busy = d.frame();
@@ -1540,6 +1546,14 @@ impl Desktop {
                 Request::Powerbox => {
                     if !self.has_app(App::Powerbox) && powerbox::pending() {
                         self.open(App::Powerbox);
+                    }
+                }
+                Request::Auth => {
+                    if !self.has_app(App::Auth) && authpanel::pending() {
+                        self.open(App::Auth);
+                        if let Some((id, _)) = self.find_app(App::Auth) {
+                            self.show_window(id);
+                        }
                     }
                 }
                 Request::NewTab(cmd) => self.open_tab(cmd),

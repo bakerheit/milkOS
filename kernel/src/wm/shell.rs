@@ -106,7 +106,6 @@ enum DockAction {
     Program(&'static str),
     Home,
     Spaces,
-    Soon(&'static str),
 }
 
 struct DockItem {
@@ -158,7 +157,7 @@ const DOCK: [DockItem; 9] = [
         icon: Icon::Music,
         bg: STRAW,
         fg: INK,
-        action: DockAction::Soon("Music"),
+        action: DockAction::App(App::Music),
     },
     DockItem {
         name: "Spaces",
@@ -258,7 +257,7 @@ pub struct Entry {
     pub action: Action,
 }
 
-pub const ENTRIES: [Entry; 11] = [
+pub const ENTRIES: [Entry; 12] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -306,6 +305,14 @@ pub const ENTRIES: [Entry; 11] = [
         bg: BLUE,
         fg: INK,
         action: Action::App(App::Browser),
+    },
+    Entry {
+        name: "Music",
+        sub: "Play the tunes in ~/Music and the system sounds",
+        icon: Icon::Music,
+        bg: STRAW,
+        fg: INK,
+        action: Action::App(App::Music),
     },
     Entry {
         name: "Settings",
@@ -798,7 +805,6 @@ impl Desktop {
                 DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
-                DockAction::Soon(_) => false,
                 DockAction::Program(p) => self.running_program(p),
             };
             if running {
@@ -1128,7 +1134,6 @@ impl Desktop {
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
                     DockAction::Program(path) => self.launch(path),
-                    DockAction::Soon(name) => self.post_toast(name, "Not in milkOS yet. Soon!"),
                 }
                 self.invalidate(PanelKey::Dock);
             }

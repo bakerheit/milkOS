@@ -351,6 +351,7 @@ impl Desktop {
         };
         d.status = d.status_text();
         apps::fsx::ensure_home();
+        apps::music::seed_library();
         ctl::init();
         actions::register_builtin();
         clipboard::init();
@@ -509,6 +510,7 @@ impl Desktop {
             "spaces" => return self.toggle_mode(Mode::Spaces),
             "paint" => return self.launch("/bin/paint"),
             "browser" | "web" => return self.open(App::Browser),
+            "music" => return self.open(App::Music),
             _ if what.starts_with("http://") || what.starts_with("localhost") => {
                 apps::browser::open_url(what);
                 return self.open(App::Browser);
@@ -519,6 +521,9 @@ impl Desktop {
         if apps::fsx::is_dir(&path) {
             apps::files::show_path(&path);
             self.open(App::Files);
+        } else if path.to_ascii_lowercase().ends_with(".wav") && crate::fs::stat(&path).is_ok() {
+            apps::music::play_path(&path);
+            self.open(App::Music);
         } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
             self.launch(&path);
         } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {

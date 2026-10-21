@@ -85,6 +85,7 @@ pub enum App {
     About,
     Settings,
     Browser,
+    Music,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -98,6 +99,7 @@ impl App {
             App::About => "About milkOS",
             App::Settings => "Settings",
             App::Browser => "Browser",
+            App::Music => "Music",
             App::Client(_) => "App",
         }
     }

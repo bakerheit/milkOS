@@ -398,6 +398,42 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(593, 451).wait(300); // Restore
             b.click(137, 181).wait(400); // live Documents: it's back
         }
+        // Music: window at (300, 92), body at (301, 125), 458 wide. Play at body (229, 182);
+        // rows from body y 238 (MUSIC header at 214), SYSTEM SOUNDS header after them.
+        "music" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .key(Key::Char(' '), Mods::NONE)
+                .wait(3000);
+        }
+        "musicpause" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(1500);
+            b.click(301 + 229, 125 + 182).wait(800);
+        }
+        "musicseek" => {
+            // Play, then click three quarters along the progress bar.
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(600);
+            b.click(301 + 20 + 418 * 3 / 4, 125 + 135).wait(1200);
+        }
+        "musicsys" => {
+            // Second track down, then the chime from System Sounds (click selects, again plays).
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y).wait(800);
+            b.key(Key::Down, Mods::NONE).enter().wait(1000);
+            b.click(301 + 200, 125 + 318 + 12)
+                .wait(150)
+                .click(301 + 200, 125 + 318 + 12)
+                .wait(600);
+        }
         "browser" => {
             // Dock globe: the Browser opens milkOS's own home page (kernel httpd).
             let (x, y) = dock_icon_center(2);

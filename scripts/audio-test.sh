@@ -93,13 +93,19 @@ find("boot chime, second note C6", lambda r: near(r["freq"], 1046.5) and r["dur"
 find("tone 440 Hz 0.5 s", lambda r: near(r["freq"], 440) and 0.44 <= r["dur"] <= 0.56)
 find("tone 1000 Hz 0.25 s", lambda r: near(r["freq"], 1000) and 0.2 <= r["dur"] <= 0.3)
 m = find("two writers: a 660 Hz run with 440 Hz inside it", lambda r: near(r["freq"], 660) and r["probe"]["440.0"] > -30)
-# Inside that run, 100 ms windows: some must hold both tones, and the end 660 alone.
+# The 660 Hz tone may be split into several runs where the mix changes (both tones, then
+# 660 alone): take the run and the 660 Hz runs right after it as one span.
+end = m["start"] + m["dur"]
+while pos < len(runs) and near(runs[pos]["freq"], 660) and abs(runs[pos]["start"] - end) < 0.05:
+    end = runs[pos]["start"] + runs[pos]["dur"]
+    pos += 1
+# Inside that span, 100 ms windows: some must hold both tones, and the end 660 alone.
 sys.path.insert(0, scripts)
 import wav_check
 rate, _, mono = wav_check.load(wav)
 a, n = int(m["start"] * rate), int(0.1 * rate)
 wins = []
-for k in range(a, a + int(m["dur"] * rate) - n + 1, n):
+for k in range(a, int(end * rate) - n + 1, n):
     seg = mono[k:k + n]
     wins.append((round((k - a) / rate, 1), wav_check.goertzel(seg, rate, 440), wav_check.goertzel(seg, rate, 660)))
 both = [w for w in wins if w[1] > -16 and w[2] > -16]

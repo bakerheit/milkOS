@@ -233,7 +233,7 @@ impl Tty {
         Ok(buf.len())
     }
 
-/// A fresh terminal again (a pty being reused): default termios, no pending input or
+    /// A fresh terminal again (a pty being reused): default termios, no pending input or
     /// EOF, no foreground group, the given size. Thread context.
     pub fn reset(&self, rows: u16, cols: u16) {
         {

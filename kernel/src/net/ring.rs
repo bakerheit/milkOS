@@ -1,30 +1,69 @@
-//! Byte ring buffer over fixed memory (socket send/receive buffers).
+//! Byte ring buffer for socket send/receive buffers.
 //!
-//! The memory comes from the socket pool (allocated once at boot) so nothing here
-//! allocates: rings are filled and drained from IRQ context.
+//! Each ring owns physically contiguous frames from the PMM (not the kernel heap, which
+//! is small): [`Ring::alloc`] takes them, dropping the ring gives them back, and
+//! [`Ring::grow`] moves the contents to a bigger block (TCP buffer auto-sizing). All
+//! socket buffers together are capped at [`BUDGET`] bytes; past that, allocation and
+//! growth fail (a socket then keeps its current size). Used under the stack lock only.
+
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::mmu::{PAGE_SIZE, PhysAddr, phys_to_virt};
+use crate::pmm;
+
+/// Upper limit for the memory of all socket buffers together.
+pub const BUDGET: usize = 64 << 20;
+static IN_USE: AtomicUsize = AtomicUsize::new(0);
+
+/// Bytes currently held by socket buffers (for /proc/net/sockstat-style reporting).
+pub fn in_use() -> usize {
+    IN_USE.load(Ordering::Relaxed)
+}
 
 pub struct Ring {
     buf: *mut u8,
     cap: usize,
+    pa: PhysAddr,
     /// Offset of the first byte.
     head: usize,
     len: usize,
 }
 
-// SAFETY: the memory is owned by the socket pool slot this ring belongs to; access is
-// serialised by the stack lock.
+// SAFETY: the memory is owned by this ring; access is serialised by the stack lock.
 unsafe impl Send for Ring {}
 
+fn take(cap: usize) -> Option<(PhysAddr, *mut u8)> {
+    let pages = cap.div_ceil(PAGE_SIZE);
+    let bytes = pages * PAGE_SIZE;
+    if IN_USE.fetch_add(bytes, Ordering::AcqRel) + bytes > BUDGET {
+        IN_USE.fetch_sub(bytes, Ordering::AcqRel);
+        return None;
+    }
+    let Some(pa) = pmm::alloc_contiguous(pages, 1) else {
+        IN_USE.fetch_sub(bytes, Ordering::AcqRel);
+        return None;
+    };
+    Some((pa, phys_to_virt(pa) as *mut u8))
+}
+
+fn give_back(pa: PhysAddr, cap: usize) {
+    let pages = cap.div_ceil(PAGE_SIZE);
+    pmm::free_contiguous(pa, pages);
+    IN_USE.fetch_sub(pages * PAGE_SIZE, Ordering::AcqRel);
+}
+
 impl Ring {
-    /// # Safety
-    /// `buf..buf+cap` must be valid, writable and used by nothing else while the ring lives.
-    pub const unsafe fn new(buf: *mut u8, cap: usize) -> Ring {
-        Ring {
+    /// A ring of `cap` bytes (rounded up to whole pages), or None (out of memory/budget).
+    pub fn alloc(cap: usize) -> Option<Ring> {
+        let cap = cap.div_ceil(PAGE_SIZE).max(1) * PAGE_SIZE;
+        let (pa, buf) = take(cap)?;
+        Some(Ring {
             buf,
             cap,
+            pa,
             head: 0,
             len: 0,
-        }
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -44,12 +83,37 @@ impl Ring {
         self.len = 0;
     }
 
+    /// Move to a block of `new_cap` bytes (bigger), keeping every byte: the readable ones
+    /// and anything written past the end (TCP out-of-order data), at the same offsets
+    /// from the head. False if there is no memory (the ring is unchanged).
+    pub fn grow(&mut self, new_cap: usize) -> bool {
+        let new_cap = new_cap.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        if new_cap <= self.cap {
+            return true;
+        }
+        let Some((pa, buf)) = take(new_cap) else {
+            return false;
+        };
+        // SAFETY: both blocks are ours; the old one is cap bytes, the new one bigger.
+        unsafe {
+            let first = self.cap - self.head;
+            core::ptr::copy_nonoverlapping(self.buf.add(self.head), buf, first);
+            core::ptr::copy_nonoverlapping(self.buf, buf.add(first), self.head);
+        }
+        give_back(self.pa, self.cap);
+        self.buf = buf;
+        self.pa = pa;
+        self.cap = new_cap;
+        self.head = 0;
+        true
+    }
+
     fn mem(&self) -> &[u8] {
-        // SAFETY: see `new`.
+        // SAFETY: `buf..buf+cap` is our block.
         unsafe { core::slice::from_raw_parts(self.buf, self.cap) }
     }
     fn mem_mut(&mut self) -> &mut [u8] {
-        // SAFETY: see `new`.
+        // SAFETY: as above.
         unsafe { core::slice::from_raw_parts_mut(self.buf, self.cap) }
     }
 
@@ -114,5 +178,11 @@ impl Ring {
         let n = self.peek_at(0, out);
         self.consume(n);
         n
+    }
+}
+
+impl Drop for Ring {
+    fn drop(&mut self) {
+        give_back(self.pa, self.cap);
     }
 }

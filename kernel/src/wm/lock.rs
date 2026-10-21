@@ -95,6 +95,13 @@ impl Desktop {
         self.idle_skew += secs * 1_000_000_000;
     }
 
+    /// Locked less than 400 ms ago (presses then don't unlock: key repeat of Ctrl+Cmd+Q).
+    pub(super) fn lock_just_shown(&self) -> bool {
+        self.lock.as_ref().is_some_and(|l| {
+            !l.leaving && timer::now_ns().saturating_sub(l.fade_start) < 400_000_000
+        })
+    }
+
     pub(super) fn locked(&self) -> bool {
         self.lock.as_ref().is_some_and(|l| !l.leaving)
     }

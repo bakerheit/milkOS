@@ -1349,7 +1349,8 @@ impl Desktop {
             ev,
             Event::Button { down: true, .. } | Event::Key { down: true, .. }
         );
-        if press {
+        // Any activity (pointer and wheel too) restarts the idle-lock timer.
+        if press || matches!(ev, Event::PointerMove { .. } | Event::Scroll { .. }) {
             self.last_input = timer::now_ns();
             self.idle_skew = 0;
         }
@@ -1362,7 +1363,8 @@ impl Desktop {
                     self.pointer = (x, y);
                     self.damage(self.cursor_rect());
                 }
-                _ if press => self.unlock_screen(),
+                // Not in the first moments: the locking key's auto-repeat would undo it.
+                _ if press && !self.lock_just_shown() => self.unlock_screen(),
                 _ => {}
             }
             return;

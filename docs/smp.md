@@ -85,8 +85,12 @@ the new wait-queue protocol below.
   "blocked" before the CPU has committed to switching away.
 * **No lost wakeups**: a `WaitQueue` waiter enqueues itself, then checks its condition,
   then blocks; `wake()` on a thread that is still running sets `wake_pending`, and its
-  next block returns immediately. Wakeups can be spurious; conditions decide. A timed
-  wait that times out takes itself off the queue.
+  next block returns immediately. Wakeups can be spurious; conditions decide. However a
+  wait ends (condition true, timeout, a wakeup from elsewhere or a leftover pending
+  wake), the waiter takes itself off the queue: a stale entry used to let `wake_one`
+  "wake" a thread that wasn't waiting and swallow the wakeup of the real waiter behind
+  it (boots hung in the mutex self-test, all CPUs idle). `[sched-test] stale waiter`
+  reproduces that exact sequence.
 * **Wakeups find a CPU** (see Placement): the chosen CPU is kicked with `need_resched`
   + SGI 0 (`IPI_RESCHED`); the reschedule happens on the IRQ-exit path. Each CPU's tick
   handles its own time slice (round robin within its own queue).

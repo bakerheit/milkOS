@@ -23,6 +23,7 @@ pub mod client;
 pub mod clipboard;
 mod ctl;
 mod event;
+mod fontx;
 mod icons;
 mod menus;
 mod paint;

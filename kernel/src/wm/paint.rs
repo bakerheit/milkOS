@@ -618,13 +618,52 @@ impl<'a> Painter<'a> {
         self.text_a(x + 1, y, s, c, 255, 1)
     }
 
-    /// Scaled text, optionally faux bold (second copy `scale` px right so strokes stay even).
+    /// Scaled text, optionally faux bold. 2x and 4x are drawn smooth (fontx: Scale2x +
+    /// anti-aliasing from the Unifont bitmaps); other sizes are pixel-doubled.
     pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        if super::fontx::smooth_scale(scale) {
+            return self.text_smooth(x, y, s, c, scale, bold);
+        }
         let end = self.text_a(x, y, s, c, 255, scale);
         if bold {
             self.text_a(x + scale.max(1), y, s, c, 255, scale);
         }
         end
+    }
+
+    fn text_smooth(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        let (gw, gh) = (super::fontx::width(scale), GLYPH_H as i32 * scale);
+        let clip = self.clip();
+        let mut cx = x;
+        for ch in s.chars() {
+            let adv = GLYPH_W as i32 * scale;
+            if ch != ' '
+                && cx + gw > clip.x
+                && cx < clip.x + clip.w
+                && y + gh > clip.y
+                && y < clip.y + clip.h
+            {
+                let m = super::fontx::glyph(ch, scale, bold);
+                let Some(b) = self.buf_rect(cx, y, gw, gh) else {
+                    cx += adv;
+                    continue;
+                };
+                let (bx0, by0) = (cx + self.ox, y + self.oy);
+                for by in b.y..b.y + b.h {
+                    let mrow = &m[((by - by0) * gw) as usize..][..gw as usize];
+                    let base = by as usize * self.stride;
+                    for bx in b.x..b.x + b.w {
+                        let a = mrow[(bx - bx0) as usize];
+                        if a != 0 {
+                            let p = &mut self.px[base + bx as usize];
+                            *p = if a == 255 { c } else { blend(*p, c, a) };
+                        }
+                    }
+                }
+            }
+            cx += adv;
+        }
+        x + font::str_width(s, scale)
     }
 
     /// Text centred in `[x, x+w)`.

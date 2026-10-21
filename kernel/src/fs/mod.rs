@@ -82,4 +82,5 @@ pub fn init() {
     milkfs::crashtest::configure();
     milkfs::automount();
     milkfs::setup_home();
+    milkfs::setup_applications();
 }

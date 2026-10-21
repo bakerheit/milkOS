@@ -73,6 +73,7 @@ fn why(e: rt::Errno) -> alloc::string::String {
         2 => {
             "no such snapshot or clone (for a receive: the stream's base snapshot isn't on the target)"
         }
+        1 => "needs an administrator's authorisation: run it as `auth snap ...` (or as root)",
         5 => "I/O error or damaged stream",
         13 => "wrong passphrase or recovery key",
         16 => {

@@ -1,0 +1,12 @@
+[package]
+name = "milkd"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "milkd"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

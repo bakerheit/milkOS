@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod asid;
+pub mod auth;
 pub mod caps;
 pub mod cred;
 pub mod elf;
@@ -280,6 +281,7 @@ pub fn init() {
     exceptions::set_user_fault_handler(on_user_fault);
     fs::set_root_resolver(current_root_dir);
     fs::perm::set_cred_resolver(current_who);
+    auth::init();
     cred::selftest();
     login::init();
     login::selftest();
@@ -432,7 +434,9 @@ pub fn spawn_with_caps(
     caps: alloc::sync::Arc<caps::Caps>,
 ) -> KResult<Pid> {
     let acct = login::session();
-    spawn_as(path, argv, caps, acct.cred(), &acct.env())
+    let pid = spawn_as(path, argv, caps, acct.cred(), &acct.env())?;
+    auth::mark_desktop_app(pid);
+    Ok(pid)
 }
 
 fn spawn_as(
@@ -746,6 +750,7 @@ pub fn exit_current(wstatus: i32) -> ! {
 /// Zombify the current process (its last thread is exiting) with `wstatus`.
 fn finish_process(wstatus: i32) -> ! {
     let me = current();
+    auth::forget(me.pid);
     let kttbr = mmu::kernel_ttbr0();
     sched::with_current_user(|u| {
         if let Some(u) = u {

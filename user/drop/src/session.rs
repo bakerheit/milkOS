@@ -231,7 +231,7 @@ pub fn connect(
             &cdh,
         )
     };
-    let sig = ed25519::sign(&id.seed, t(p.client_role).as_bytes());
+    let sig = id.sign(t(p.client_role).as_bytes())?;
     c.send_line(&alloc::format!(
         "{} HELLO {} name={} key={} nonce={nonce_c} dh={} sig={}{}",
         p.magic,
@@ -323,7 +323,7 @@ pub fn accept(c: &mut Conn, id: &Identity, p: &Protocol, from: [u8; 4]) -> Resul
         let _ = c.send_line("DECLINE key-changed");
         return Err(key_changed(p, p.server_role, name, old, &key, from));
     }
-    let asig = ed25519::sign(&id.seed, t(p.server_role).as_bytes());
+    let asig = id.sign(t(p.server_role).as_bytes())?;
     c.send_line(&alloc::format!("AUTH sig={}", hex(&asig)))?;
     let mut shared = eph.shared(&cdh)?;
     let ch = Channel::derive(p.key_ctx, &shared, &nonce_s, nonce_c, &sdh, &cdh, false);

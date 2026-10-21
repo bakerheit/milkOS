@@ -114,6 +114,13 @@ pub fn icon_near(name: &str, size: i32, dark: bool) -> Option<&'static IconArt> 
     }
 }
 
+/// The embedded icon name among `names` (first match), as a static string.
+pub fn icon_named(names: &[&str]) -> Option<&'static str> {
+    names
+        .iter()
+        .find_map(|n| ICONS.iter().find(|i| i.name == *n).map(|i| i.name))
+}
+
 pub fn image(name: &str) -> Option<&'static ImageArt> {
     IMAGES.iter().find(|i| i.name == name)
 }

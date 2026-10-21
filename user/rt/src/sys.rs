@@ -1210,3 +1210,45 @@ pub fn set_echo(fd: i32, on: bool) -> Option<bool> {
     ioctl(fd, TCSETS, t.as_mut_ptr() as usize).ok()?;
     Some(was)
 }
+
+// ---- admin authorisation tickets (kernel/src/proc/auth.rs) ------------------------------
+
+const MILK_AUTH: usize = 0x1003;
+
+/// Ask the desktop's trusted password panel to authorise this process (5 minutes).
+/// Ok(ms the ticket lasts); ECANCELED if the user cancelled, EOPNOTSUPP without a desktop.
+pub fn authorize(reason: &str) -> Result<u64> {
+    sc(
+        MILK_AUTH,
+        [0, reason.as_ptr() as usize, reason.len(), 0, 0, 0],
+    )
+    .map(|ms| ms as u64)
+}
+
+/// Authorise this process with a password it read itself (a terminal tool); `user` empty =
+/// the caller's own account. EACCES wrong password, EPERM not an administrator, EAGAIN
+/// locked out after too many wrong passwords.
+pub fn authorize_password(password: &str, user: &str) -> Result<u64> {
+    sc(
+        MILK_AUTH,
+        [
+            1,
+            password.as_ptr() as usize,
+            password.len(),
+            user.as_ptr() as usize,
+            user.len(),
+            0,
+        ],
+    )
+    .map(|ms| ms as u64)
+}
+
+/// Drop this process's ticket.
+pub fn auth_revoke() {
+    let _ = sc(MILK_AUTH, [2, 0, 0, 0, 0, 0]);
+}
+
+/// Milliseconds left on this process's ticket (0: none).
+pub fn auth_left() -> u64 {
+    sc(MILK_AUTH, [3, 0, 0, 0, 0, 0]).unwrap_or(0) as u64
+}

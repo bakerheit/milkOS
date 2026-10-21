@@ -30,7 +30,9 @@ impl Errno {
             25 => "ENOTTY",
             36 => "ENAMETOOLONG",
             38 => "ENOSYS",
+            32 => "EPIPE",
             39 => "ENOTEMPTY",
+            4 => "EINTR",
             _ => "E?",
         }
     }
@@ -65,7 +67,10 @@ pub mod nr {
     pub const GETCWD: usize = 17;
     pub const MKDIRAT: usize = 34;
     pub const CHDIR: usize = 49;
+    pub const DUP: usize = 23;
+    pub const DUP3: usize = 24;
     pub const OPENAT: usize = 56;
+    pub const PIPE2: usize = 59;
     pub const CLOSE: usize = 57;
     pub const GETDENTS64: usize = 61;
     pub const LSEEK: usize = 62;
@@ -180,6 +185,32 @@ pub fn mkdir(path: &str, mode: u32) -> Result<()> {
         ],
     )
     .map(|_| ())
+}
+
+/// pipe2(2): (read end, write end).
+pub fn pipe2(flags: u32) -> Result<(i32, i32)> {
+    let mut fds = [0i32; 2];
+    sc(
+        nr::PIPE2,
+        [fds.as_mut_ptr() as usize, flags as usize, 0, 0, 0, 0],
+    )?;
+    Ok((fds[0], fds[1]))
+}
+
+pub fn pipe() -> Result<(i32, i32)> {
+    pipe2(O_CLOEXEC)
+}
+
+pub fn dup(fd: i32) -> Result<i32> {
+    sc(nr::DUP, [fd as usize, 0, 0, 0, 0, 0]).map(|f| f as i32)
+}
+
+/// dup2 via dup3 (no flags: the new fd is not close-on-exec). Same fd: no-op.
+pub fn dup2(old: i32, new: i32) -> Result<i32> {
+    if old == new {
+        return Ok(new);
+    }
+    sc(nr::DUP3, [old as usize, new as usize, 0, 0, 0, 0]).map(|f| f as i32)
 }
 
 pub fn close(fd: i32) -> Result<()> {

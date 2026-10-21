@@ -32,6 +32,7 @@ pub mod nr {
     pub const UNLINKAT: u64 = 35;
     pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
+    pub const PIPE2: u64 = 59;
     pub const CLOSE: u64 = 57;
     pub const GETDENTS64: u64 = 61;
     pub const LSEEK: u64 = 62;
@@ -135,7 +136,14 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             drop(e);
             Ok(0)
         }
-        nr::LSEEK => Ok(file(a[0] as i64)?.seek(a[1] as i64, a[2] as u32)? as usize),
+        nr::LSEEK => {
+            let f = file(a[0] as i64)?;
+            if f.inode().kind() == InodeType::Fifo {
+                return Err(ESPIPE);
+            }
+            Ok(f.seek(a[1] as i64, a[2] as u32)? as usize)
+        }
+        nr::PIPE2 => sys_pipe2(a0, a[1] as u32),
         nr::FSTAT => {
             let st = file(a[0] as i64)?.stat().to_linux();
             copy_out(a1, st.as_bytes())?;
@@ -492,6 +500,40 @@ fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> 
         .fds
         .alloc(f, flags & abi::O_CLOEXEC != 0)?;
     Ok(fd as usize)
+}
+
+fn sys_pipe2(fds: usize, flags: u32) -> KResult<usize> {
+    if flags & !(abi::O_CLOEXEC | abi::O_NONBLOCK) != 0 {
+        return Err(EINVAL);
+    }
+    let nb = flags & abi::O_NONBLOCK;
+    let (r, w) = super::pipe::new(nb != 0);
+    let r = Arc::new(OpenFile::new(r, abi::O_RDONLY | nb));
+    let w = Arc::new(OpenFile::new(w, abi::O_WRONLY | nb));
+    let cloexec = flags & abi::O_CLOEXEC != 0;
+    let (rfd, wfd) = {
+        let p = current();
+        let mut i = p.inner.lock();
+        let rfd = i.fds.alloc(r, cloexec)?;
+        match i.fds.alloc(w, cloexec) {
+            Ok(wfd) => (rfd, wfd),
+            Err(e) => {
+                let _ = i.fds.close(rfd);
+                return Err(e);
+            }
+        }
+    };
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&(rfd as i32).to_le_bytes());
+    out[4..].copy_from_slice(&(wfd as i32).to_le_bytes());
+    if let Err(e) = copy_out(fds, &out) {
+        let p = current();
+        let mut i = p.inner.lock();
+        let _ = i.fds.close(rfd);
+        let _ = i.fds.close(wfd);
+        return Err(e);
+    }
+    Ok(0)
 }
 
 fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResult<usize> {

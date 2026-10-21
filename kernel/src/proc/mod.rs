@@ -13,7 +13,9 @@ pub mod console;
 pub mod elf;
 pub mod errno;
 pub mod fd;
+pub mod pipe;
 mod selftest;
+pub mod signal;
 pub mod syscall;
 pub mod uspace;
 

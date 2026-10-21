@@ -94,7 +94,7 @@ impl Desktop {
     }
 
     pub(super) fn paint_notif(&self, p: &mut Painter, solid: bool) {
-        let (tbg, ta) = if solid { (OAT, 255) } else { (MILK, a(700)) };
+        let (tbg, ta) = super::shell::tile_colour(solid);
         let now = timer::now_ns();
         // Today.
         let t = rtc::now();

@@ -23,6 +23,8 @@ pub enum Step {
     Idle(u64),
     /// Switch the display mode.
     Resolution(i32, i32),
+    /// Chocolate milk (true) or Whole milk.
+    Theme(bool),
 }
 
 pub struct Script {
@@ -925,6 +927,17 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .wait(500);
             }
         }
+        // Hover states: over a Welcome button, over a Settings section.
+        "hover-welcome" => {
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            b.glide(600, 500, 696, 419, 8).wait(300);
+        }
+        "hover-settings" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500);
+            b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8)
+                .wait(300);
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }
@@ -1033,10 +1046,24 @@ pub fn from_fw_cfg() -> Option<Script> {
         }
         None => name,
     };
-    let Some(steps) = build(name) else {
+    // dark-<demo>: the same demo in Chocolate milk (the polish pass checks both themes).
+    let (inner, dark) = match name.strip_prefix("dark-") {
+        Some(n) => (n, true),
+        None => (name, false),
+    };
+    let steps = if inner == "none" {
+        Some(alloc::vec![Step::Log("done")])
+    } else {
+        build(inner)
+    };
+    let Some(mut steps) = steps else {
         kprintln!("[demo] unknown demo '{name}'");
         return None;
     };
+    if dark {
+        steps.insert(0, Step::Theme(true));
+        steps.insert(1, Step::Wait(400));
+    }
     kprintln!("[demo] {name}: {} steps", steps.len());
     Some(Script {
         name: String::from(name),
@@ -1067,6 +1094,11 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Idle(s) => d.pretend_idle(*s),
+                Step::Theme(dark) => {
+                    let mut p = super::prefs::get();
+                    p.dark = *dark;
+                    super::request(super::Request::Prefs(p));
+                }
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);
                 }

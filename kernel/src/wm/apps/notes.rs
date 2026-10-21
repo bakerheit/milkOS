@@ -26,7 +26,21 @@ struct Store {
 
 static STORE: SpinLock<Option<Store>> = SpinLock::new(None);
 
-const DEFAULT_TEXT: &str = "# milkOS 1.0
+/// The note a new home folder starts with (~/Documents/ideas.md). The version comes from
+/// <repo>/VERSION at build time. Lines fit the Notes window and the Today card (<= 44).
+const DEFAULT_TEXT: &str = concat!(
+    "# Hello from milkOS ",
+    env!("MILKOS_VERSION"),
+    "
+This note saves itself as you type.
+- New? The Welcome tour is in the logo menu.
+- Ctrl+Space finds apps, files and actions.
+- File > Browse Versions shows its past.
+- moo"
+);
+
+/// What the note used to start as: still untouched, it gets the new text.
+const OLD_DEFAULT: &str = "# milkOS 1.0
 - ship the compositor
 - pick a nicer font
 - boot logo, a milk drop
@@ -45,10 +59,12 @@ fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
     if STORE.lock().is_none() {
         // First use: the note lives in ~/Documents/ideas.md. File I/O outside the lock.
         let path = format!("{}/ideas.md", fsx::DOCS);
-        let lines = load(&path).unwrap_or_else(|| {
-            let _ = fs::write_file(&path, DEFAULT_TEXT.as_bytes());
-            DEFAULT_TEXT.lines().map(String::from).collect()
-        });
+        let lines = load(&path)
+            .filter(|l| l.join("\n").trim() != OLD_DEFAULT)
+            .unwrap_or_else(|| {
+                let _ = fs::write_file(&path, DEFAULT_TEXT.as_bytes());
+                DEFAULT_TEXT.lines().map(String::from).collect()
+            });
         let mut g = STORE.lock();
         if g.is_none() {
             *g = Some(Store {

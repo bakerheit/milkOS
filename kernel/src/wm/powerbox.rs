@@ -31,7 +31,9 @@ use super::event::Key;
 use super::icons::{self, Icon};
 use super::paint::{Painter, hit};
 use super::theme::*;
-use super::window::{KeyInput, PointerInput, PointerKind, WindowContents};
+use super::window::{
+    KeyInput, PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
+};
 use super::{Request, request};
 
 #[derive(Clone)]
@@ -205,6 +207,7 @@ pub struct Panel {
     hits: Vec<(Rect, Hit)>,
     last_click: Option<(usize, u64)>,
     done: bool,
+    hover: Option<(i32, i32)>,
 }
 
 impl Panel {
@@ -227,6 +230,7 @@ impl Panel {
             rows_visible: 8,
             hits: Vec::new(),
             last_click: None,
+            hover: None,
         };
         p.go("/home/milk/Documents");
         p
@@ -421,6 +425,17 @@ impl WindowContents for Panel {
         if ok {
             self.hits.push((choose, Hit::Choose));
         }
+        if let Some(i) = hover_index(&self.hits, self.hover) {
+            let (r, h) = self.hits[i];
+            let row = matches!(h, Hit::Row(_) | Hit::Place(_));
+            if h != Hit::Name && self.sel.is_none_or(|s| h != Hit::Row(s)) {
+                paint_hover(p, r, row);
+            }
+        }
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        hover_move(&self.hits, &mut self.hover, x, y)
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {

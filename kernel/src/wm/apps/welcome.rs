@@ -14,7 +14,9 @@ use crate::gfx::{Color, Rect, rgb};
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
-use super::super::window::{PointerInput, PointerKind, WindowContents};
+use super::super::window::{
+    PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
+};
 use super::super::{Mode, Request, packages, prefs, request};
 use super::{files, fsx, versions};
 
@@ -53,6 +55,7 @@ pub struct Welcome {
     closing: bool,
     /// Last thing a button did (shown in the footer).
     said: String,
+    hover: Option<(i32, i32)>,
 }
 
 fn has_milkfs() -> bool {
@@ -103,6 +106,7 @@ impl Welcome {
             hits: Vec::new(),
             closing: false,
             said: String::new(),
+            hover: None,
         }
     }
 
@@ -399,6 +403,13 @@ impl WindowContents for Welcome {
         p.rrect_r(go, R_BUTTON, ESPRESSO, 255);
         p.text_p_center(go.x, go.w, go.y + 6, "Get started", MILK, true);
         self.hits.push((go, Do::Close));
+        if let Some(i) = hover_index(&self.hits, self.hover) {
+            paint_hover(p, self.hits[i].0, false);
+        }
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        hover_move(&self.hits, &mut self.hover, x, y)
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {

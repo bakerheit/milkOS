@@ -2,7 +2,6 @@
 //! row styling as the launcher.) Clicking a title opens its menu, moving along the bar while one
 //! is open switches menus, clicking an item runs it, clicking anywhere else closes it.
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -163,10 +162,15 @@ impl Desktop {
                     sep(),
                 ];
                 for w in &self.windows {
-                    let mark = if Some(w.id) == self.focus { "*" } else { "" };
                     v.push(Item {
-                        label: format!("{} {}", w.contents.title(), mark),
-                        key: if w.minimized { "minimised" } else { "" },
+                        label: String::from(w.contents.title()),
+                        key: if w.minimized {
+                            "minimised"
+                        } else if Some(w.id) == self.focus {
+                            "front"
+                        } else {
+                            ""
+                        },
                         action: Some(MenuAction::Focus(w.id)),
                     });
                 }

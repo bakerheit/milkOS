@@ -164,6 +164,27 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(1000, 14).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
+        "shell" => {
+            b.typ("ls -l ~").enter().wait(50);
+            b.typ("echo hello from the shell > ~/Documents/hello.txt")
+                .enter()
+                .wait(50);
+            b.typ("cd Documents")
+                .enter()
+                .typ("ls")
+                .enter()
+                .typ("cat hello.txt")
+                .enter();
+        }
+        "files" => {
+            // Files: sidebar Home, double-click Documents, double-click ideas.md (opens Notes).
+            b.click(137, 153).wait(200);
+            b.click(421, 145).wait(40).click(421, 145).wait(300);
+            b.click(321, 145).wait(40).click(321, 145).wait(300);
+        }
+        "browse" => {
+            b.click(137, 153).wait(200);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

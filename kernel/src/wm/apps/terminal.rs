@@ -11,6 +11,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::fs::{self, InodeType};
 use crate::gfx::Color;
 use crate::{heap, klog, pmm, timer};
 
@@ -19,6 +20,7 @@ use super::super::paint::Painter;
 use super::super::theme::*;
 use super::super::window::{App, KeyInput, WindowContents};
 use super::super::{Mode, Request, request, rtc, shell::fmt_uptime};
+use super::fsx;
 
 const MAX_LINES: usize = 2000;
 const PAD: i32 = 14;
@@ -83,7 +85,7 @@ impl Terminal {
             history: Vec::new(),
             hist_pos: 0,
             back: 0,
-            shell: Box::new(BuiltinShell),
+            shell: Box::new(BuiltinShell::new()),
         };
         t.follow_log();
         t.lines.push((String::new(), LATTE));
@@ -295,8 +297,36 @@ impl WindowContents for Terminal {
     }
 }
 
-/// The in-kernel stand-in for a real shell.
-pub struct BuiltinShell;
+/// The in-kernel stand-in for a real shell. Works on the real file system (`crate::fs`).
+pub struct BuiltinShell {
+    cwd: String,
+    prompt: String,
+}
+
+impl BuiltinShell {
+    pub fn new() -> BuiltinShell {
+        let mut s = BuiltinShell {
+            cwd: String::from(fsx::HOME),
+            prompt: String::new(),
+        };
+        s.set_prompt();
+        s
+    }
+
+    fn set_prompt(&mut self) {
+        let here = fsx::pretty(&self.cwd);
+        let short = if here == "~" || here == "/" {
+            here
+        } else {
+            String::from(fsx::basename(&self.cwd))
+        };
+        self.prompt = format!("andrew@milk {short} % ");
+    }
+
+    fn path(&self, arg: &str) -> String {
+        fsx::resolve(&self.cwd, arg)
+    }
+}
 
 const COW: &str = r"        \   ^__^
          \  (oo)\_______
@@ -306,7 +336,7 @@ const COW: &str = r"        \   ^__^
 
 impl Shell for BuiltinShell {
     fn prompt(&self) -> &str {
-        "andrew@milk ~ % "
+        &self.prompt
     }
 
     fn run(&mut self, line: &str, out: &mut Output) -> ShellResult {
@@ -318,9 +348,11 @@ impl Shell for BuiltinShell {
         let arg = rest.join(" ");
         match cmd {
             "help" => {
-                out.out("commands: help clear uname uptime date mem log echo whoami");
-                out.out("          open <files|notes|about|terminal>  notify <text>");
-                out.out("          today  spaces  ls  cowsay [text]");
+                out.out("files:    ls [-l] cd pwd cat mkdir touch rm  echo text > file");
+                out.out("          edit <file> (opens it in Notes)");
+                out.out("system:   uname uptime date mem log whoami clear");
+                out.out("desktop:  open <files|notes|about|terminal>  notify <text>");
+                out.out("          today  spaces  cowsay [text]");
                 out.out("keys: Ctrl+Space Skim, F3 Spaces, F4 Today, Ctrl+Left/Right spaces,");
                 out.out("      Cmd+W close, Cmd+M minimise, Cmd+Tab cycle windows");
             }
@@ -368,14 +400,139 @@ impl Shell for BuiltinShell {
                     out.out(l);
                 }
             }
-            "echo" => out.out(&arg),
+            "echo" => match arg.split_once('>') {
+                Some((text, file)) => {
+                    let (append, file) = match file.strip_prefix('>') {
+                        Some(f) => (true, f.trim()),
+                        None => (false, file.trim()),
+                    };
+                    let p = self.path(file);
+                    let mut data = if append {
+                        fs::read_to_string(&p).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    data.push_str(text.trim());
+                    data.push('\n');
+                    if let Err(e) = fs::write_file(&p, data.as_bytes()) {
+                        out.bad(&format!("echo: {file}: {e}"));
+                    }
+                }
+                None => out.out(&arg),
+            },
             "whoami" => out.out("andrew"),
             "hostname" => out.out("milk"),
             "ls" => {
-                out.out(
-                    "projects  school  todo.txt  bike.png  ideas.md  kernel  notes.txt  run.sh",
-                );
-                out.bad("(sample names: no filesystem until vfs lands)");
+                let long = rest.first() == Some(&"-l");
+                let target = rest
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .copied()
+                    .unwrap_or(".");
+                let p = self.path(target);
+                match fsx::list(&p) {
+                    Ok(items) if long => {
+                        for e in items {
+                            let kind = match e.kind {
+                                InodeType::Dir => 'd',
+                                InodeType::Symlink => 'l',
+                                InodeType::CharDev => 'c',
+                                InodeType::BlockDev => 'b',
+                                _ => '-',
+                            };
+                            out.out(&format!(
+                                "{kind} {:>8}  {}",
+                                fsx::human_size(e.size),
+                                e.name
+                            ));
+                        }
+                    }
+                    Ok(items) => {
+                        let mut line = String::new();
+                        for e in items {
+                            let name = if e.kind == InodeType::Dir {
+                                format!("{}/", e.name)
+                            } else {
+                                e.name
+                            };
+                            if line.len() + name.len() + 2 > 60 {
+                                out.good(&line);
+                                line.clear();
+                            }
+                            line.push_str(&name);
+                            line.push_str("  ");
+                        }
+                        if !line.is_empty() {
+                            out.good(&line);
+                        }
+                    }
+                    Err(e) => out.bad(&format!("ls: {target}: {e}")),
+                }
+            }
+            "cd" => {
+                let p = self.path(if arg.is_empty() { "~" } else { arg.as_str() });
+                if fsx::is_dir(&p) {
+                    self.cwd = p;
+                    self.set_prompt();
+                } else {
+                    out.bad(&format!("cd: {arg}: not a directory"));
+                }
+            }
+            "pwd" => out.out(&self.cwd.clone()),
+            "cat" => {
+                for a in &rest {
+                    match fs::read_to_string(&self.path(a)) {
+                        Ok(t) => {
+                            for l in t.lines() {
+                                out.out(l);
+                            }
+                        }
+                        Err(e) => out.bad(&format!("cat: {a}: {e}")),
+                    }
+                }
+            }
+            "mkdir" => {
+                for a in &rest {
+                    if let Err(e) = fs::mkdir_all(&self.path(a), 0o755) {
+                        out.bad(&format!("mkdir: {a}: {e}"));
+                    }
+                }
+            }
+            "touch" => {
+                for a in &rest {
+                    let p = self.path(a);
+                    if fs::stat(&p).is_err()
+                        && let Err(e) = fs::write_file(&p, b"")
+                    {
+                        out.bad(&format!("touch: {a}: {e}"));
+                    }
+                }
+            }
+            "rm" => {
+                for a in &rest {
+                    let p = self.path(a);
+                    let r = if fsx::is_dir(&p) {
+                        fs::rmdir(&p)
+                    } else {
+                        fs::unlink(&p)
+                    };
+                    if let Err(e) = r {
+                        out.bad(&format!("rm: {a}: {e}"));
+                    }
+                }
+            }
+            "edit" => {
+                if arg.is_empty() {
+                    request(Request::OpenHere(App::Notes));
+                } else {
+                    let p = self.path(&arg);
+                    if fs::stat(&p).is_err() {
+                        let _ = fs::write_file(&p, b"");
+                    }
+                    super::notes::open_file(&p);
+                    request(Request::OpenHere(App::Notes));
+                    out.good(&format!("editing {}", fsx::pretty(&p)));
+                }
             }
             "open" => {
                 let app = match arg.as_str() {

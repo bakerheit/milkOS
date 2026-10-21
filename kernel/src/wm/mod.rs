@@ -63,6 +63,8 @@ pub fn notify(title: &str, subtitle: &str) {
 /// Things kernel code (and the built-in apps) can ask the desktop to do.
 pub enum Request {
     Open(App),
+    /// Open, and if the app's window is on another space, bring it to this one.
+    OpenHere(App),
     Mode(Mode),
 }
 
@@ -293,6 +295,7 @@ impl Desktop {
             acct_start: timer::now_ns(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
+        apps::fsx::ensure_home();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
         d.open(App::Terminal);
@@ -861,6 +864,13 @@ impl Desktop {
         for r in reqs {
             match r {
                 Request::Open(a) => self.open(a),
+                Request::OpenHere(a) => {
+                    let sp = self.space;
+                    if let Some(w) = self.windows.iter_mut().find(|w| w.app == a) {
+                        w.space = sp;
+                    }
+                    self.open(a);
+                }
                 Request::Mode(m) => self.toggle_mode(m),
             }
         }

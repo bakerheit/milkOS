@@ -6,36 +6,79 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::sync::SpinLock;
-use crate::timer;
+use crate::{fs, timer};
 
 use super::super::event::Key;
 use super::super::paint::Painter;
 use super::super::theme::*;
 use super::super::window::{KeyInput, PointerInput, PointerKind, WindowContents};
+use super::fsx;
 
 struct Store {
+    /// The file the note is saved to (autosaved after every edit).
+    path: String,
     lines: Vec<String>,
     edited_ns: Option<u64>,
+    /// Bumped when a different file is opened, so open windows reset their caret.
+    generation: u64,
 }
 
 static STORE: SpinLock<Option<Store>> = SpinLock::new(None);
 
+const DEFAULT_TEXT: &str = "# milkOS 1.0
+- ship the compositor
+- pick a nicer font
+- boot logo, a milk drop
+- moo";
+
+fn load(path: &str) -> Option<Vec<String>> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut v: Vec<String> = text.lines().map(String::from).collect();
+    if v.is_empty() {
+        v.push(String::new());
+    }
+    Some(v)
+}
+
 fn with<R>(f: impl FnOnce(&mut Store) -> R) -> R {
+    if STORE.lock().is_none() {
+        // First use: the note lives in ~/Documents/ideas.md. File I/O outside the lock.
+        let path = format!("{}/ideas.md", fsx::DOCS);
+        let lines = load(&path).unwrap_or_else(|| {
+            let _ = fs::write_file(&path, DEFAULT_TEXT.as_bytes());
+            DEFAULT_TEXT.lines().map(String::from).collect()
+        });
+        let mut g = STORE.lock();
+        if g.is_none() {
+            *g = Some(Store {
+                path,
+                lines,
+                edited_ns: None,
+                generation: 0,
+            });
+        }
+    }
     let mut g = STORE.lock();
-    let s = g.get_or_insert_with(|| Store {
-        lines: [
-            "# milkOS 1.0",
-            "- ship the compositor",
-            "- pick a nicer font",
-            "- boot logo, a milk drop",
-            "- moo",
-        ]
-        .iter()
-        .map(|s| String::from(*s))
-        .collect(),
-        edited_ns: None,
+    f(g.as_mut().unwrap())
+}
+
+fn save() {
+    let (path, mut text) = with(|s| (s.path.clone(), s.lines.join("\n")));
+    text.push('\n');
+    if let Err(e) = fs::write_file(&path, text.as_bytes()) {
+        crate::kprintln!("notes: saving {path} failed: {e}");
+    }
+}
+
+/// Open a text file in Notes (the Notes window follows).
+pub fn open_file(path: &str) {
+    let lines = load(path).unwrap_or_else(|| alloc::vec![String::new()]);
+    with(|s| {
+        s.path = String::from(path);
+        s.lines = lines;
+        s.edited_ns = None;
+        s.generation += 1;
     });
-    f(s)
 }
 
 /// The note's lines (for the Today card).
@@ -65,20 +108,39 @@ pub struct Notes {
     col: usize,
     scroll: usize,
     visible_rows: usize,
+    generation: u64,
+    title: String,
 }
 
 impl Notes {
     pub fn new() -> Notes {
-        let (row, col) = with(|s| {
-            let r = s.lines.len() - 1;
-            (r, s.lines[r].chars().count())
-        });
-        Notes {
-            row,
-            col,
+        let mut n = Notes {
+            row: 0,
+            col: 0,
             scroll: 0,
             visible_rows: 10,
+            generation: u64::MAX,
+            title: String::new(),
+        };
+        n.sync();
+        n
+    }
+
+    /// Follow the store to a newly opened file: caret to the end, new title.
+    fn sync(&mut self) -> bool {
+        let (generation, path, row, col) = with(|s| {
+            let r = s.lines.len() - 1;
+            (s.generation, s.path.clone(), r, s.lines[r].chars().count())
+        });
+        if generation == self.generation {
+            return false;
         }
+        self.generation = generation;
+        self.title = String::from(fsx::basename(&path));
+        self.row = row;
+        self.col = col;
+        self.scroll = 0;
+        true
     }
 
     fn byte_at(line: &str, col: usize) -> usize {
@@ -97,7 +159,11 @@ impl Notes {
 
 impl WindowContents for Notes {
     fn title(&self) -> &str {
-        "ideas.md"
+        &self.title
+    }
+
+    fn tick(&mut self, _now: u64) -> bool {
+        self.sync()
     }
 
     fn menus(&self) -> &'static [&'static str] {
@@ -252,6 +318,7 @@ impl WindowContents for Notes {
         });
         if changed {
             with(|s| s.edited_ns = Some(timer::now_ns()));
+            save();
         }
         changed || (row, col) != (self.row, self.col)
     }

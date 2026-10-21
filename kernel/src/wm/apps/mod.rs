@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod files;
+pub mod fsx;
 pub mod notes;
 pub mod terminal;
 

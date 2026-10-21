@@ -49,13 +49,6 @@ pub type DeadlineCallback = fn(&mut TrapFrame);
 static TICK_HOOK: FnSlot = FnSlot::new();
 static DEADLINE_CB: FnSlot = FnSlot::new();
 
-/// A plain per-tick callback (IRQ context, IRQs masked, must not block or allocate). Unlike
-/// the single [`TickHook`] it cannot touch the frame, and any number of subsystems
-/// (up to [`MAX_TICK_CALLBACKS`]) can have one.
-pub type TickCallback = fn();
-pub const MAX_TICK_CALLBACKS: usize = 8;
-static TICK_CALLBACKS: [FnSlot; MAX_TICK_CALLBACKS] = [const { FnSlot::new() }; MAX_TICK_CALLBACKS];
-
 // ---- raw counter access ------------------------------------------------------------
 
 /// Raw virtual counter (CNTVCT_EL0). `isb` first so the read is not speculated early.
@@ -135,20 +128,6 @@ pub fn set_tick_hook(h: TickHook) {
     TICK_HOOK.set(h);
 }
 
-/// Add a per-tick callback. They run on every tick, in registration order, *before* the
-/// [`TickHook`] (which may switch to another context and not return). Returns false if all
-/// [`MAX_TICK_CALLBACKS`] slots are taken.
-pub fn add_tick_callback(cb: TickCallback) -> bool {
-    let _g = IrqGuard::new();
-    for slot in &TICK_CALLBACKS {
-        if slot.get::<TickCallback>().is_none() {
-            slot.set(cb);
-            return true;
-        }
-    }
-    false
-}
-
 /// Arm the one-shot deadline: call `cb` from IRQ context once `now_ns()` reaches `at_ns`.
 /// Replaces any pending deadline. A time in the past fires as soon as IRQs are unmasked.
 pub fn set_deadline(at_ns: u64, cb: DeadlineCallback) {
@@ -222,14 +201,6 @@ fn on_irq(_irq: u32, frame: &mut TrapFrame) {
 
     if deadline_hit && let Some(cb) = DEADLINE_CB.get::<DeadlineCallback>() {
         cb(frame);
-    }
-    if tick {
-        for slot in &TICK_CALLBACKS {
-            match slot.get::<TickCallback>() {
-                Some(cb) => cb(),
-                None => break,
-            }
-        }
     }
     if tick && let Some(h) = TICK_HOOK.get::<TickHook>() {
         h(frame);

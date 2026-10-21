@@ -60,6 +60,12 @@ impl State {
 
     /// Snapshot the live tree as it is now (after committing anything pending).
     pub fn snap_create(&mut self, name: &str) -> Result<SnapInfo> {
+        self.snap_create_at(name, None)
+    }
+
+    /// Same, with a given creation time (a received snapshot keeps the sender's, which is
+    /// also how an incremental stream finds its base).
+    pub fn snap_create_at(&mut self, name: &str, created: Option<u64>) -> Result<SnapInfo> {
         check_snap_name(name)?;
         if self.name_taken(name) {
             return Err(Errno::EEXIST);
@@ -81,7 +87,7 @@ impl State {
         let rec = SnapRecord {
             name: String::from(name),
             generation: self.sb.generation,
-            created: crate::fs::clock::now().sec as u64,
+            created: created.unwrap_or(crate::fs::clock::now().sec as u64),
             root: self.sb.root,
             deadlist: self.deadlist,
             next_ino: self.next_ino,
@@ -108,8 +114,10 @@ impl State {
             .iter()
             .position(|s| s.name == name)
             .ok_or(Errno::ENOENT)?;
-        if self.is_origin(self.snaps[k].generation) {
-            return Err(Errno::EBUSY); // a clone is built on it
+        if self.is_origin(self.snaps[k].generation)
+            || self.busy_snaps.contains(&self.snaps[k].generation)
+        {
+            return Err(Errno::EBUSY); // a clone is built on it, or a send is reading it
         }
         if self.branched() {
             // No dead lists after a promote: drop the record, then sweep exactly.

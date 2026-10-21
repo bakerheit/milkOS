@@ -223,6 +223,11 @@ pub fn reflink(src: &InodeRef, dst: &InodeRef) -> Result<()> {
     })
 }
 
+/// The volume an inode is on (None: not milkfs).
+pub fn volume_of(i: &InodeRef) -> Option<Arc<Volume>> {
+    downcast::<MilkInode>(i).map(|m| m.vol.clone())
+}
+
 /// What [`dedupe`] did.
 #[derive(Clone, Debug, Default)]
 pub struct DedupeReport {

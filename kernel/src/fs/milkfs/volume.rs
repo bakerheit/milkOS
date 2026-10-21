@@ -38,11 +38,17 @@ pub struct State {
     /// Format version the next commit writes (`BASE_VERSION`, or `REFLINK_VERSION` once
     /// blocks are shared).
     pub version: u32,
+    /// (last full scrub, scrub interval): superblock `last_scrub`, `scrub_every`.
+    pub scrub: (u64, u32),
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
     pub broken: bool,
     pub commits: u64,
+    /// Snapshots (by generation) a send is reading: can't be deleted meanwhile.
+    pub busy_snaps: Vec<u64>,
+    /// A receive is in progress on this volume.
+    pub receiving: bool,
     /// Batching: when the open transaction got its first change, and how many
     /// operations it holds.
     pub dirty_since: Option<u64>,
@@ -147,6 +153,8 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         flags: 0,
         version: BASE_VERSION,
         spacemap: BlockPtr::NONE,
+        last_scrub: 0,
+        scrub_every: 0,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -362,10 +370,13 @@ impl State {
             auto: sb.auto,
             flags: sb.flags,
             version: sb.version.max(BASE_VERSION),
+            scrub: (sb.last_scrub, sb.scrub_every),
             sb,
             meta_dirty: false,
             broken: false,
             commits: 0,
+            busy_snaps: Vec::new(),
+            receiving: false,
             dirty_since: None,
             batched_ops: 0,
         }
@@ -449,6 +460,8 @@ impl State {
             flags: self.flags,
             version: self.version,
             spacemap,
+            last_scrub: self.scrub.0,
+            scrub_every: self.scrub.1,
         };
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
@@ -608,9 +621,10 @@ impl State {
         let r = reachable(&self.store, &self.sb, &mut |_, _| Ok(()))?;
         let total = self.store.total();
         let free_but_used = r.iter().filter(|&&b| !self.store.is_used(b)).count() as u64;
-        let allocated = total - self.store.free_blocks();
+        // Blocks a running scrub holds back are free as far as the volume goes.
+        let allocated = total - self.store.free_blocks() - self.store.held_count();
         let leaked = (0..total)
-            .filter(|b| self.store.is_used(*b) && !r.contains(b))
+            .filter(|b| self.store.is_used(*b) && !r.contains(b) && !self.store.is_held(*b))
             .count() as u64;
         Ok(SpaceCheck {
             reachable: r.len() as u64,

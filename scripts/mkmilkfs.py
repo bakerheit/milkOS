@@ -14,6 +14,15 @@
                                          mount-time and big-tree tests
   mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
                                          sb smap bref data node
+  mkmilkfs.py corrupt IMAGE flip PATH [--snapshot NAME]
+                                         flip one bit in the first data block of PATH
+  mkmilkfs.py verify-stream FILE         check a `snap send` stream (every record checksum,
+                                         counts, chained hash) and describe it
+  mkmilkfs.py receive IMAGE FILE [--force]  recreate the stream's snapshot in IMAGE (full:
+                                         IMAGE must be empty; incremental: its base must be
+                                         there, --force rolls the live tree back to it)
+  mkmilkfs.py tree  IMAGE [--snapshot NAME]  every path with type, mode, size, mtime and a
+                                         content hash (diff two of these to compare trees)
   mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]      (NAME may also be a clone)
   mkmilkfs.py cat   IMAGE PATH [--snapshot NAME]
   mkmilkfs.py xxh64 HEXDATA               (for cross-checking the kernel's checksum)
@@ -525,8 +534,9 @@ class Writer:
             n += 1
         return level[0][1]
 
-    def commit(self, sb, new_root=None):
-        """New generation: the superblock write (after an fsync) is the commit point."""
+    def commit(self, sb, new_root=None, add_snaps=()):
+        """New generation: the superblock write (after an fsync) is the commit point.
+        add_snaps: snapshot records to add (their gen is filled in)."""
         sb2 = dict(sb, snaps=[dict(x) for x in sb["snaps"]], gen=sb["gen"] + 1, spacemap=(0, 0, 0))
         if new_root is not None and new_root != sb["root"]:
             sb2["root"] = new_root
@@ -537,6 +547,8 @@ class Writer:
                 sb2["dead"] = (0, 0, 0)
                 for x in sb2["snaps"]:
                     x["dead"] = (0, 0, 0)
+        for x in add_snaps:
+            sb2["snaps"].append(dict(x, gen=sb2["gen"], root=sb2["root"]))
         self.f.flush()
         os.fsync(self.f.fileno())
         self.f.seek((sb2["gen"] % 2) * BLOCK)
@@ -818,6 +830,246 @@ def cmd_populate(path, dest, n):
     return 0
 
 
+# ---- send streams ---------------------------------------------------------------------
+R_HEADER, R_ITEM, R_DELETE, R_DROP, R_DATA, R_EXTENT, R_END = 1, 2, 3, 4, 5, 6, 7
+R_NAMES = {1: "header", 2: "item", 3: "delete", 4: "drop", 5: "data", 6: "extent", 7: "end"}
+
+
+class StreamError(Exception):
+    pass
+
+
+def chain_step(chain, csum):
+    return xxh64(struct.pack("<QQ", chain, csum))
+
+
+def read_stream(path):
+    """Yield (type, payload) of every record, checking each checksum and, at the end, the
+    counts and the chained hash. The header is decoded into a dict (type R_HEADER)."""
+    f = open(path, "rb")
+    records = data = chain = 0
+    first = True
+    while True:
+        h = f.read(8)
+        if len(h) < 8:
+            raise StreamError("truncated (no END record)")
+        t, ln = h[0], struct.unpack_from("<I", h, 4)[0]
+        if h[1:4] != b"\0\0\0" or ln > 64 << 10:
+            raise StreamError(f"bad record header at byte {f.tell() - 8}")
+        rest = f.read(ln + 8)
+        if len(rest) < ln + 8:
+            raise StreamError("truncated record")
+        p, c = rest[:ln], struct.unpack_from("<Q", rest, ln)[0]
+        if xxh64(h + p) != c:
+            raise StreamError(f"checksum mismatch in record {records} ({R_NAMES.get(t, t)})")
+        if first and t != R_HEADER:
+            raise StreamError("no header")
+        first = False
+        if t == R_END:
+            n, d, ch = struct.unpack("<QQQ", p)
+            if (n, d, ch) != (records, data, chain):
+                raise StreamError("END doesn't match the records (missing, reordered or replaced)")
+            yield t, (n, d)
+            return
+        chain = chain_step(chain, c)
+        records += 1
+        if t == R_DATA:
+            data += 1
+        if t == R_HEADER:
+            if p[0:8] != b"MILKSTRM":
+                raise StreamError("not a milkfs stream")
+            ver, flags = struct.unpack_from("<II", p, 8)
+            if ver != 1:
+                raise StreamError(f"stream version {ver} (this tool reads 1)")
+            hd = dict(incremental=bool(flags & 1), uuid=p[16:32].hex(), label=cstr(p[32:64]),
+                      snap=cstr(p[64:112]), snap_created=struct.unpack_from("<Q", p, 112)[0],
+                      snap_gen=struct.unpack_from("<Q", p, 120)[0], base=cstr(p[128:176]),
+                      base_created=struct.unpack_from("<Q", p, 176)[0],
+                      base_gen=struct.unpack_from("<Q", p, 184)[0],
+                      next_ino=struct.unpack_from("<Q", p, 192)[0])
+            yield t, hd
+        else:
+            yield t, p
+
+
+def key_unpack(p):
+    return struct.unpack_from("<QBQ", p)
+
+
+def cmd_verify_stream(path):
+    counts, hd = {}, None
+    try:
+        for t, p in read_stream(path):
+            counts[t] = counts.get(t, 0) + 1
+            if t == R_HEADER:
+                hd = p
+    except StreamError as e:
+        print(f"{path}: BAD stream: {e}")
+        return 1
+    kind = f"incremental from {hd['base']!r} (created {hd['base_created']})" if hd["incremental"] else "full"
+    print(f"{path}: milkfs stream v1, snapshot {hd['snap']!r} of {hd['label']!r} "
+          f"(created {hd['snap_created']}), {kind}")
+    print("  " + ", ".join(f"{counts[t]} {R_NAMES[t]}" for t in sorted(counts) if t not in (R_HEADER, R_END)))
+    print(f"  {os.path.getsize(path)} bytes, every checksum and the END record check out")
+    return 0
+
+
+class DataIndex:
+    """Data item keys per inode, for file-range drops on an item dict."""
+
+    def __init__(self, items):
+        self.items, self.by = items, {}
+        for k in items:
+            if k[1] in (K_EXT, K_EXTENT):
+                self.by.setdefault(k[0], set()).add(k)
+
+    def put(self, k, v):
+        self.items[k] = v
+        self.by.setdefault(k[0], set()).add(k)
+
+    def drop(self, ino, s, e):
+        for k in list(self.by.get(ino, ())):
+            ptrs = data_ptrs(k, self.items[k])
+            start, end = ptrs[0][0], ptrs[-1][0] + 1
+            if end <= s or start >= e:
+                continue
+            del self.items[k]
+            self.by[ino].discard(k)
+            for part in ([p for p in ptrs if p[0] < s], [p for p in ptrs if p[0] >= e]):
+                if part:
+                    self.put((ino, K_EXT, part[0][0]), ext_pack([p for _, p in part]))
+
+
+def ext_pack(ptrs):
+    """K_EXT value for consecutive blocks with one birth."""
+    return struct.pack("<QQI", ptrs[0][0], ptrs[0][1], len(ptrs)) + b"".join(struct.pack("<Q", p[2]) for p in ptrs)
+
+
+def cmd_receive(path, stream, force):
+    img = Image(path)
+    sb = img.superblock()
+    try:
+        for _ in read_stream(stream):  # check it all before writing anything
+            pass
+    except StreamError as e:
+        print(f"{stream}: BAD stream: {e} (nothing written to {path})")
+        return 1
+    try:
+        recs = read_stream(stream)
+        _, hd = next(recs)
+        if any(s["name"] == hd["snap"] for s in sb["snaps"]):
+            print(f"{path}: already has a snapshot {hd['snap']!r}")
+            return 2
+        if hd["incremental"]:
+            base = next((s for s in sb["snaps"] if s["name"] == hd["base"]
+                         and s["created"] == hd["base_created"] and not s["clone"]), None)
+            if base is None:
+                print(f"{path}: the stream's base snapshot {hd['base']!r} (created {hd['base_created']}) isn't here")
+                return 2
+            if base["root"] != sb["root"] and not force:
+                print(f"{path}: changed since snapshot {hd['base']!r} (--force rolls it back to it)")
+                return 2
+            live = dict(img.items(base["root"]))
+        else:
+            live = dict(img.items(sb["root"]))
+            if any(k[0] == ROOT_INO and k[1] == K_DIRENT for k in live):
+                print(f"{path}: a full stream needs an empty volume")
+                return 2
+        sb = dict(sb)
+        sb["version"] = max(sb.get("version", 0), 1)
+        w = Writer(path, img, sb)
+        gen = sb["gen"] + 1
+        idx = DataIndex(live)
+        blocks, max_obj, n = {}, 0, 0
+        for t, p in recs:
+            n += 1
+            if t == R_ITEM:
+                k = key_unpack(p)
+                live[k] = p[17:]
+                max_obj = max(max_obj, k[0])
+            elif t == R_DELETE:
+                live.pop(key_unpack(p), None)
+            elif t == R_DROP:
+                idx.drop(*struct.unpack("<QQQ", p))
+            elif t == R_DATA:
+                src = struct.unpack_from("<Q", p)[0]
+                blocks[src] = w.put(p[8:], gen)
+            elif t == R_EXTENT:
+                ino, start, old_end, src, cnt = struct.unpack_from("<QQQQI", p)
+                csums = struct.unpack_from(f"<{cnt}Q", p, 36)
+                idx.drop(ino, start, max(start + cnt, old_end))
+                ptrs = []
+                for i in range(cnt):
+                    b = blocks.get(src + i)
+                    if b is None or b[2] != csums[i]:
+                        raise StreamError(f"extent of inode {ino} refers to data the stream didn't carry")
+                    ptrs.append(b)
+                i = 0
+                while i < cnt:
+                    j = i + 1
+                    while j < cnt and ptrs[j][0] == ptrs[i][0] + (j - i):
+                        j += 1
+                    idx.put((ino, K_EXT, start + i), ext_pack(ptrs[i:j]))
+                    i = j
+                max_obj = max(max_obj, ino)
+    except StreamError as e:
+        print(f"{stream}: BAD stream: {e} (nothing written to {path})")
+        return 1
+    _, want = bref_check(live)
+    bref_rebuild(live, want)
+    if want:
+        sb["version"] = max(sb["version"], 2)
+    sb["next_ino"] = max(sb["next_ino"], hd["next_ino"], max_obj + 1)
+    root = w.tree(live, gen)
+    snap = dict(name=hd["snap"], created=hd["snap_created"], dead=(0, 0, 0),
+                next_ino=sb["next_ino"], clone=False, id=0)
+    w.commit(sb, root, add_snaps=[snap])
+    print(f"{path}: received {hd['snap']!r} ({'incremental' if hd['incremental'] else 'full'}, {n} records, "
+          f"{len(blocks)} data blocks{', ' + str(len(want)) + ' shared' if want else ''})")
+    return 0
+
+
+def cmd_tree(path, snapshot):
+    img = Image(path)
+    t = tree_for(img, img.superblock(), snapshot)
+
+    def walk(ino, prefix):
+        for name, cino, _ in sorted(t.listdir(ino)):
+            i = t.inode(cino)
+            p = f"{prefix}/{name}"
+            kind = i["mode"] & S_IFMT
+            if kind == S_IFDIR:
+                print(f"d {i['mode'] & 0o7777:o} {p}")
+                walk(cino, p)
+            elif kind == S_IFLNK:
+                tgt = t.items.get((cino, K_SYMLINK, 0), b"").decode("utf-8", "replace")
+                print(f"l {i['mode'] & 0o7777:o} {p} -> {tgt}")
+            else:
+                data = t.read(cino)
+                print(f"- {i['mode'] & 0o7777:o} {i['size']:9} {i['mtime']} {xxh64(data):016x} {p}")
+    walk(ROOT_INO, "")
+
+
+def cmd_flip(path, fpath, snapshot):
+    img = Image(path)
+    t = tree_for(img, img.superblock(), snapshot)
+    ino = t.resolve(fpath)
+    ptrs = sorted(p for k, v in t.items.items() if k[0] == ino for p in data_ptrs(k, v))
+    if not ptrs:
+        sys.exit(f"{fpath}: no data blocks (inline or empty)")
+    blk = ptrs[0][1][0]
+    with open(path, "r+b") as f:
+        f.seek(blk * BLOCK + 100)
+        b = f.read(1)
+        f.seek(blk * BLOCK + 100)
+        f.write(bytes([b[0] ^ 1]))
+        f.flush()
+        os.fsync(f.fileno())
+    print(f"{path}: flipped a bit in block {blk} (first data block of {fpath}"
+          f"{' in snapshot ' + snapshot if snapshot else ''})")
+    return 0
+
+
 def cmd_corrupt(path, kind):
     """Damage a (private, test) image on purpose: orphan, dangling, nlink, parent, sb,
     data, node."""
@@ -1045,8 +1297,16 @@ def main(argv):
         if "--repair" in opts:
             return cmd_check_repair(pos[0])
         return cmd_check(pos[0], "--quiet" in opts)
+    elif cmd == "corrupt" and pos[1] == "flip":
+        return cmd_flip(pos[0], pos[2], opts.get("--snapshot"))
     elif cmd == "corrupt":
         return cmd_corrupt(pos[0], pos[1])
+    elif cmd == "verify-stream":
+        return cmd_verify_stream(pos[0])
+    elif cmd == "receive":
+        return cmd_receive(pos[0], pos[1], "--force" in opts)
+    elif cmd == "tree":
+        cmd_tree(pos[0], opts.get("--snapshot"))
     elif cmd == "populate":
         return cmd_populate(pos[0], pos[1], int(pos[2]))
     elif cmd == "put":

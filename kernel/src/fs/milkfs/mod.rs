@@ -20,8 +20,10 @@ pub mod format;
 pub mod fsck;
 pub mod inode;
 pub mod items;
+pub mod scrub;
 pub mod snap;
 pub mod store;
+pub mod stream;
 pub mod timemachine;
 pub mod versions;
 pub mod volume;
@@ -85,26 +87,71 @@ pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
     Ok(r)
 }
 
-/// Mount without ever becoming the primary volume (self-test volumes).
+/// Mount without ever becoming the primary volume (self-test volumes, backup disks).
 pub fn mount_secondary(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
     let name = String::from(dev.name());
     let (state, report) = volume::State::open(dev)?;
     let vol = Volume::new(state, &name);
     crate::fs::ops::mkdir_all(path, 0o755)?;
     crate::fs::path::mount(path, vol.clone())?;
+    let mut all = VOLUMES.lock();
+    all.retain(|(w, _)| w.strong_count() > 0);
+    all.push((Arc::downgrade(&vol), String::from(path)));
     Ok((vol, report))
 }
 
-/// Mount the first disk that holds milkfs at `/Volumes/<label>`. Never formats anything.
+/// Every mounted milkfs volume and where (for the flusher and the scrub).
+#[allow(clippy::type_complexity)]
+static VOLUMES: SpinLock<alloc::vec::Vec<(alloc::sync::Weak<Volume>, String)>> =
+    SpinLock::new(alloc::vec::Vec::new());
+
+pub(crate) fn all_volumes() -> alloc::vec::Vec<(Arc<Volume>, String)> {
+    VOLUMES
+        .lock()
+        .iter()
+        .filter_map(|(w, p)| w.upgrade().map(|v| (v, p.clone())))
+        .collect()
+}
+
+/// Mount every disk that holds milkfs at `/Volumes/<label>` (`/Volumes/<label>-<dev>`
+/// if that is taken). The primary volume (home, Time Machine, the snapshot API) is the
+/// one labelled `Milk`, or the first found if none is (qemu's disk order isn't the
+/// command line's). Never formats anything.
 pub fn automount() {
-    for dev in blockdev::devices() {
-        let Some(sb) = probe(&dev) else { continue };
+    let mut found: alloc::vec::Vec<(BlockRef, format::Superblock)> = blockdev::devices()
+        .into_iter()
+        .filter_map(|d| probe(&d).map(|sb| (d, sb)))
+        .collect();
+    if let Some(i) = found.iter().position(|(_, sb)| sb.label == "Milk") {
+        let p = found.remove(i);
+        found.insert(0, p);
+    }
+    let mut primary_done = false;
+    for (dev, sb) in found {
         let label = if sb.label.is_empty() || sb.label.contains('/') {
             String::from("Milk")
         } else {
             sb.label.clone()
         };
-        let path = format!("/Volumes/{label}");
+        let mut path = format!("/Volumes/{label}");
+        if primary_done {
+            if crate::fs::ops::stat(&path).is_ok() {
+                path = format!("/Volumes/{label}-{}", dev.name());
+            }
+            match mount_secondary(dev.clone(), &path) {
+                Ok((_, r)) => kprintln!(
+                    "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {} blocks used",
+                    dev.name(),
+                    r.mount_ns / 1_000_000,
+                    r.mount_ns / 10_000 % 100,
+                    r.generation,
+                    r.used_blocks
+                ),
+                Err(e) => kprintln!("milkfs: mounting {} failed: {e}", dev.name()),
+            }
+            continue;
+        }
+        primary_done = true;
         match mount(crashtest::wrap(dev.clone()), &path) {
             Ok((vol, r)) => {
                 let st = vol.state.lock();
@@ -138,17 +185,16 @@ pub fn automount() {
             }
             Err(e) => kprintln!("milkfs: mounting {} failed: {e}", dev.name()),
         }
-        // Clones made on an earlier boot.
+        // Clones made on an earlier boot (not the hidden ones of a receive).
         if let Some(v) = user_volume() {
             let list = v.state.lock().clone_list();
-            for c in list {
+            for c in list.into_iter().filter(|c| !c.name.starts_with('.')) {
                 match mount_clone(&v, &c.name, c.id) {
                     Ok(p) => kprintln!("milkfs: clone {} (of {}) mounted at {p}", c.name, c.origin),
                     Err(e) => kprintln!("milkfs: clone {}: {e}", c.name),
                 }
             }
         }
-        return;
     }
 }
 
@@ -388,6 +434,227 @@ pub fn bench_create(dir: &str, n: usize, size: usize) -> Result<String> {
     Ok(r)
 }
 
+// ---- send / receive -----------------------------------------------------------------
+
+static LAST_SEND: SpinLock<String> = SpinLock::new(String::new());
+static LAST_RECEIVE: SpinLock<String> = SpinLock::new(String::new());
+
+/// What a send wrote.
+#[derive(Clone, Debug, Default)]
+pub struct SendReport {
+    pub records: u64,
+    pub data_blocks: u64,
+    pub bytes: u64,
+    pub ms: u64,
+}
+
+/// Write snapshot `snap` of the primary volume as a stream to `out` (a file path),
+/// incremental from the older snapshot `from`. The volume isn't locked while the stream
+/// is written (it may go onto the volume itself); the snapshots read can't be deleted
+/// meanwhile (EBUSY).
+pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
+    use crate::fs::abi::{O_CREAT, O_TRUNC, O_WRONLY};
+    use stream::{Encoder, Plan, Record};
+    let v = primary()?;
+    let t0 = crate::timer::now_ns();
+    let plan = {
+        let mut st = v.state.lock();
+        let p = st.send_plan(snap, from)?;
+        st.busy_snaps.extend(p.gens.iter().copied());
+        p
+    };
+    let gens = plan.gens.clone();
+    let r = (|| -> Result<SendReport> {
+        let f = crate::fs::ops::open(out, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
+        let mut enc = Encoder::default();
+        let write = |enc: &mut Encoder, f: &crate::fs::OpenFile| -> Result<()> {
+            let mut b = &enc.buf[..];
+            while !b.is_empty() {
+                let n = f.write(b)?;
+                b = &b[n..];
+            }
+            enc.buf.clear();
+            Ok(())
+        };
+        enc.record(&Record::Header(plan.header.clone()));
+        let mut sent = alloc::collections::BTreeSet::new();
+        let mut data = alloc::vec::Vec::new();
+        for p in plan.recs {
+            match p {
+                Plan::Item(k, val) => enc.record(&Record::Item(k, val)),
+                Plan::Delete(k) => enc.record(&Record::Delete(k)),
+                Plan::Drop(ino, from, to) => enc.record(&Record::Drop { ino, from, to }),
+                Plan::Extent { ino, old_end, ext } => {
+                    data.resize(ext.csums.len() * format::BLOCK, 0);
+                    v.state
+                        .lock()
+                        .store
+                        .read_run(ext.block, &ext.csums, &mut data)?;
+                    for (i, chunk) in data.chunks(format::BLOCK).enumerate() {
+                        let src = ext.block + i as u64;
+                        if sent.insert(src) {
+                            enc.record(&Record::Data {
+                                src,
+                                data: chunk.to_vec(),
+                            });
+                        }
+                    }
+                    enc.record(&Record::Extent {
+                        ino,
+                        start: ext.start,
+                        old_end,
+                        src: ext.block,
+                        csums: ext.csums,
+                    });
+                }
+            }
+            if enc.buf.len() >= 1 << 20 {
+                write(&mut enc, &f)?;
+            }
+        }
+        enc.record(&Record::End {
+            records: 0,
+            data: 0,
+            chain: 0,
+        });
+        write(&mut enc, &f)?;
+        f.fsync()?;
+        Ok(SendReport {
+            records: enc.records + 1,
+            data_blocks: enc.data_blocks,
+            bytes: enc.bytes,
+            ms: (crate::timer::now_ns() - t0) / 1_000_000,
+        })
+    })();
+    {
+        let mut st = v.state.lock();
+        for g in gens {
+            if let Some(i) = st.busy_snaps.iter().position(|&x| x == g) {
+                st.busy_snaps.remove(i);
+            }
+        }
+    }
+    let text = match &r {
+        Ok(s) => format!(
+            "sent {snap}{} to {out}: {} records, {} data blocks, {} bytes in {} ms\n",
+            from.map(|f| format!(" (incremental from {f})"))
+                .unwrap_or_default(),
+            s.records,
+            s.data_blocks,
+            s.bytes,
+            s.ms
+        ),
+        Err(e) => format!("send {snap} failed: {e}\n"),
+    };
+    *LAST_SEND.lock() = text;
+    audit_op(
+        "milkfs.send",
+        &format!("snapshot={snap} from={} out={out}", from.unwrap_or("-")),
+        &r,
+    );
+    r
+}
+
+/// What a receive did.
+#[derive(Clone, Debug, Default)]
+pub struct RecvReport {
+    pub snapshot: String,
+    pub incremental: bool,
+    pub items: u64,
+    pub data_blocks: u64,
+    pub bytes: u64,
+    pub ms: u64,
+}
+
+/// The milkfs volume a VFS path is on.
+pub fn volume_at(path: &str) -> Result<Arc<Volume>> {
+    inode::volume_of(&crate::fs::ops::lookup(path)?).ok_or(Errno::EXDEV)
+}
+
+/// Recreate the snapshot in stream file `path` on the milkfs volume at `target` (any
+/// path on it; default: the primary volume). Full streams need an empty volume;
+/// incremental ones need the base snapshot (ENOENT otherwise) and a live tree unchanged
+/// since it (EBUSY; `force`: roll back to it first). Atomic: nothing changes unless the
+/// whole stream checks out.
+pub fn receive(path: &str, target: Option<&str>, force: bool) -> Result<RecvReport> {
+    use crate::fs::abi::O_RDONLY;
+    use stream::{Decoder, Record};
+    let v = match target {
+        Some(t) => volume_at(t)?,
+        None => primary()?,
+    };
+    let t0 = crate::timer::now_ns();
+    let f = crate::fs::ops::open(path, O_RDONLY, 0)?;
+    let mut rd = Decoder::new(|b: &mut [u8]| f.read(b));
+    let r = (|| -> Result<RecvReport> {
+        let Record::Header(h) = rd.next()? else {
+            return Err(Errno::EINVAL);
+        };
+        let mut ctx = v.state.lock().recv_begin(&h, force)?;
+        let applied = (|| -> Result<()> {
+            let mut batch = alloc::vec::Vec::new();
+            loop {
+                let rec = rd.next()?;
+                let end = matches!(rec, Record::End { .. });
+                let cut = !matches!(rec, Record::Data { .. });
+                if !end {
+                    batch.push(rec);
+                }
+                if end || (cut && batch.len() >= 64) {
+                    let mut st = v.state.lock();
+                    st.recv_apply(&mut ctx, core::mem::take(&mut batch))?;
+                    if ctx.unused.is_empty() {
+                        st.op_done()?;
+                    }
+                }
+                if end {
+                    return Ok(());
+                }
+            }
+        })();
+        let mut st = v.state.lock();
+        let (items, blocks) = (ctx.items, ctx.blocks);
+        match applied {
+            Ok(()) => {
+                st.recv_finish(&mut ctx, &h)?;
+            }
+            Err(e) => {
+                st.recv_abort(&ctx);
+                return Err(e);
+            }
+        }
+        drop(st);
+        crate::fs::pagecache::invalidate_dev(v.dev);
+        Ok(RecvReport {
+            snapshot: h.snap.clone(),
+            incremental: h.incremental,
+            items,
+            data_blocks: blocks,
+            bytes: rd.bytes,
+            ms: (crate::timer::now_ns() - t0) / 1_000_000,
+        })
+    })();
+    let text = match &r {
+        Ok(s) => format!(
+            "received {}{} from {path}: {} items, {} data blocks, {} bytes in {} ms\n",
+            s.snapshot,
+            if s.incremental { " (incremental)" } else { "" },
+            s.items,
+            s.data_blocks,
+            s.bytes,
+            s.ms
+        ),
+        Err(e) => format!("receive from {path} failed: {e}\n"),
+    };
+    *LAST_RECEIVE.lock() = text;
+    audit_op(
+        "milkfs.receive",
+        &format!("stream={path} target={}", target.unwrap_or("-")),
+        &r,
+    );
+    r
+}
+
 // ---- dedupe -------------------------------------------------------------------------
 
 pub use inode::DedupeReport;
@@ -606,12 +873,13 @@ pub fn start_threads() {
     drop(crate::sched::spawn("milkfs-flush", || {
         loop {
             crate::sched::sleep_ms(250);
-            if let Some(v) = volume() {
+            for (v, _) in all_volumes() {
                 let _ = v.state.lock().flush_if_due();
             }
         }
     }));
     timemachine::start();
+    scrub::start_thread();
 }
 
 /// Self-test only (before the scheduler runs, so nothing else can notice): point the
@@ -835,6 +1103,37 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             let n = n.parse().map_err(|_| Errno::EINVAL)?;
             let sz = sz.parse().map_err(|_| Errno::EINVAL)?;
             bench_create(d, n, sz).map(|_| ())
+        },
+    );
+    dir.add_control("scrub", scrub::status_text, |b| scrub::control(arg(b)?));
+    dir.add_control(
+        "send",
+        || LAST_SEND.lock().clone(),
+        |b| {
+            // `SNAP [FROM] PATH`
+            let w: alloc::vec::Vec<&str> = arg(b)?.split_whitespace().collect();
+            match w.as_slice() {
+                [s, p] => send(s, None, p).map(|_| ()),
+                [s, f, p] => send(s, Some(f), p).map(|_| ()),
+                _ => Err(Errno::EINVAL),
+            }
+        },
+    );
+    dir.add_control(
+        "receive",
+        || LAST_RECEIVE.lock().clone(),
+        |b| {
+            // `PATH [TARGET] [force]`
+            let mut w: alloc::vec::Vec<&str> = arg(b)?.split_whitespace().collect();
+            let force = w.last() == Some(&"force");
+            if force {
+                w.pop();
+            }
+            match w.as_slice() {
+                [p] => receive(p, None, force).map(|_| ()),
+                [p, t] => receive(p, Some(t), force).map(|_| ()),
+                _ => Err(Errno::EINVAL),
+            }
         },
     );
     dir.add_control(

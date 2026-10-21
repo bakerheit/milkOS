@@ -269,6 +269,10 @@ pub struct Superblock {
     /// Persistent free-space map of exactly this generation (none: rebuild at mount).
     /// Kernels that predate it write zeros here, which drops a map they made stale.
     pub spacemap: BlockPtr,
+    /// Background scrub: when the last full scrub finished (unix s, 0 never) and how
+    /// often to scrub (s; 0 = default, u32::MAX = never). Zeros from older kernels.
+    pub last_scrub: u64,
+    pub scrub_every: u32,
 }
 
 /// Superblock flag: history is no longer linear (a clone was promoted), so dead lists
@@ -292,11 +296,12 @@ const SNAP_REC: usize = 128;
 const SB_AUTO: usize = 3992;
 const SB_FLAGS: usize = 4008;
 const SB_SPACEMAP: usize = 4016;
+const SB_SCRUB: usize = 4040;
 const SB_CSUM: usize = BLOCK - 8;
 
 const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
 const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_SPACEMAP);
-const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_CSUM);
+const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_SCRUB && SB_SCRUB + 12 <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -347,6 +352,8 @@ impl Superblock {
         }
         b[SB_FLAGS..SB_FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
         self.spacemap.put(&mut b[SB_SPACEMAP..]);
+        b[SB_SCRUB..SB_SCRUB + 8].copy_from_slice(&self.last_scrub.to_le_bytes());
+        b[SB_SCRUB + 8..SB_SCRUB + 12].copy_from_slice(&self.scrub_every.to_le_bytes());
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
         b
@@ -407,6 +414,8 @@ impl Superblock {
             flags: le32(&b[SB_FLAGS..]),
             version,
             spacemap: BlockPtr::get(&b[SB_SPACEMAP..]),
+            last_scrub: le64(&b[SB_SCRUB..]),
+            scrub_every: le32(&b[SB_SCRUB + 8..]),
         })
     }
 }

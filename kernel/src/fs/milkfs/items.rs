@@ -115,12 +115,12 @@ impl State {
         Ok((t, store))
     }
 
-    fn put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
+    pub(super) fn put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
         let (t, st) = self.wtree()?;
         btree::insert(t, st, key, val)
     }
 
-    fn del(&mut self, key: &Key) -> Result<bool> {
+    pub(super) fn del(&mut self, key: &Key) -> Result<bool> {
         let (t, st) = self.wtree()?;
         btree::remove(t, st, key)
     }
@@ -431,7 +431,7 @@ impl State {
 
     /// Remove file blocks `from..to` from `ino`'s extents (releasing those blocks),
     /// keeping the parts of runs outside the range.
-    fn drop_range(&mut self, ino: u64, from: u64, to: u64) -> Result<()> {
+    pub fn drop_range(&mut self, ino: u64, from: u64, to: u64) -> Result<()> {
         for e in self.exts(self.cur, ino, from, to)? {
             self.del(&e.key(ino))?;
             let i0 = from.saturating_sub(e.start) as usize;
@@ -620,6 +620,60 @@ impl State {
             self.bref_add(e.block, e.len())?;
         }
         Ok(si.size)
+    }
+
+    /// Recount the current view's shared blocks from its references and rewrite the
+    /// table to match (after a receive built the tree from a stream). Commits first.
+    /// Returns the number of shared blocks.
+    pub fn rebuild_brefs(&mut self) -> Result<usize> {
+        self.commit()?;
+        let root = if self.cur == LIVE {
+            self.sb.root
+        } else {
+            self.clones
+                .iter()
+                .find(|c| c.id == self.cur as u32)
+                .ok_or(Errno::ENOENT)?
+                .root
+        };
+        let mut refs: alloc::collections::BTreeMap<u64, u32> = Default::default();
+        let mut old: Vec<u64> = Vec::new();
+        btree::walk(&self.store, root, &mut |_| true, &mut |k, v| {
+            if k.obj == VOL_OBJ && k.kind == K_BREF {
+                old.push(k.off);
+            }
+            for p in data_ptrs(k, v) {
+                *refs.entry(p.block).or_default() += 1;
+            }
+            Ok(())
+        })?;
+        for s in old {
+            self.del_bref(s)?;
+        }
+        let mut run: Option<(u64, u64, u32)> = None;
+        let mut shared = 0;
+        for (&b, &n) in refs.iter().filter(|(_, n)| **n > 1) {
+            shared += 1;
+            let x = n - 1;
+            match run {
+                Some((s, l, rx)) if s + l == b && rx == x && l < MAX_RUN => {
+                    run = Some((s, l + 1, rx))
+                }
+                _ => {
+                    if let Some((s, l, rx)) = run {
+                        self.put_bref(s, l, rx)?;
+                    }
+                    run = Some((b, 1, x));
+                }
+            }
+        }
+        if let Some((s, l, rx)) = run {
+            self.put_bref(s, l, rx)?;
+        }
+        if shared > 0 {
+            self.version = self.version.max(REFLINK_VERSION);
+        }
+        Ok(shared)
     }
 
     /// Do `a` and `b` (current view) use exactly the same blocks already?

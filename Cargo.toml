@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["kernel"]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+lto = true

@@ -330,6 +330,77 @@ pub trait FileSystem: Send + Sync {
     fn sync(&self) -> Result<()> {
         Ok(())
     }
+    /// `statfs(2)`: size and free space. Default: no storage of its own (all sizes 0),
+    /// the type from [`magic_of`] (devfs, proc, sysfs).
+    fn statfs(&self) -> Result<StatFs> {
+        Ok(StatFs::empty(magic_of(self.name()), self.dev()))
+    }
+}
+
+/// What `statfs(2)` reports about a file system (sizes in `bsize` units). See
+/// docs/filesystem.md "statfs" for the Linux `struct statfs` it becomes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StatFs {
+    /// `f_type`: the file system's magic number (`*_MAGIC` below).
+    pub fs_type: u64,
+    pub bsize: u64,
+    pub blocks: u64,
+    pub bfree: u64,
+    /// Free blocks an unprivileged user may use.
+    pub bavail: u64,
+    /// Inodes (0 when the file system has no fixed inode table).
+    pub files: u64,
+    pub ffree: u64,
+    /// `f_fsid` (two 32-bit words, low first).
+    pub fsid: u64,
+    pub namelen: u64,
+    /// `ST_*` mount flags.
+    pub flags: u64,
+}
+
+pub const ST_RDONLY: u64 = 1;
+pub const ST_NOSUID: u64 = 2;
+pub const ST_NODEV: u64 = 4;
+pub const ST_NOEXEC: u64 = 8;
+/// Linux sets this on every statfs answer (the flags are valid).
+pub const ST_VALID: u64 = 0x20;
+
+/// "MILK": milkOS's own (no Linux file system uses it).
+pub const MILKFS_MAGIC: u64 = 0x4d49_4c4b;
+pub const TMPFS_MAGIC: u64 = 0x0102_1994;
+pub const MSDOS_MAGIC: u64 = 0x4d44;
+pub const V9FS_MAGIC: u64 = 0x0102_1997;
+pub const PROC_MAGIC: u64 = 0x9fa0;
+pub const SYSFS_MAGIC: u64 = 0x6265_6572;
+/// The old Linux devfs's number (devtmpfs reuses tmpfs's; ours has no storage).
+pub const DEVFS_MAGIC: u64 = 0x1373;
+
+/// `f_type` for a file system type name (`FileSystem::name`); 0 if unknown.
+pub fn magic_of(name: &str) -> u64 {
+    match name {
+        "milkfs" => MILKFS_MAGIC,
+        "tmpfs" => TMPFS_MAGIC,
+        "vfat" => MSDOS_MAGIC,
+        "9p" => V9FS_MAGIC,
+        "proc" => PROC_MAGIC,
+        "sysfs" => SYSFS_MAGIC,
+        "devfs" => DEVFS_MAGIC,
+        _ => 0,
+    }
+}
+
+impl StatFs {
+    /// No storage: every size 0, 4 KiB blocks, 255-byte names.
+    pub fn empty(fs_type: u64, fsid: u64) -> StatFs {
+        StatFs {
+            fs_type,
+            bsize: 4096,
+            fsid,
+            namelen: 255,
+            flags: ST_VALID,
+            ..StatFs::default()
+        }
+    }
 }
 
 /// Linux `makedev`.

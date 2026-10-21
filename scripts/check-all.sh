@@ -45,6 +45,8 @@ TESTS=(
   "scrubtest|q|900|scripts/scrubtest.sh"
   "sendtest|q|600|scripts/sendtest.sh"
   "fattest|q|600|scripts/fattest.sh"
+  "dftest|q|600|scripts/dftest.sh"
+  "enctest|q|900|scripts/enctest.sh"
   "searchtest|q|900|scripts/searchtest.sh"
   "audio-test|q|600|scripts/audio-test.sh"
   "music-test|q|600|scripts/music-test.sh"

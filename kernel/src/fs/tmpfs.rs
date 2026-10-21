@@ -74,6 +74,22 @@ impl FileSystem for TmpFs {
     fn root(&self) -> InodeRef {
         self.root.clone()
     }
+    /// Pages: the cap (or, without one, what is used plus the free RAM), free = what is
+    /// left of that.
+    fn statfs(&self) -> Result<super::node::StatFs> {
+        let used = self.shared.pages.load(Ordering::Relaxed);
+        let ram_free = pmm::stats().free_frames as u64;
+        let (blocks, free) = match self.shared.max_pages {
+            0 => (used + ram_free, ram_free),
+            cap => (cap, cap.saturating_sub(used).min(ram_free)),
+        };
+        let mut s = super::node::StatFs::empty(super::node::TMPFS_MAGIC, self.shared.dev);
+        s.bsize = PAGE_SIZE as u64;
+        s.blocks = blocks;
+        s.bfree = free;
+        s.bavail = free;
+        Ok(s)
+    }
 }
 
 enum Data {

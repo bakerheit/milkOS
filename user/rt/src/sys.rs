@@ -96,6 +96,8 @@ pub mod nr {
     pub const SYMLINKAT: usize = 36;
     pub const LINKAT: usize = 37;
     pub const NEWFSTATAT: usize = 79;
+    pub const STATFS: usize = 43;
+    pub const FSTATFS: usize = 44;
     pub const UTIMENSAT: usize = 88;
     pub const RENAMEAT2: usize = 276;
     pub const CHDIR: usize = 49;
@@ -314,6 +316,81 @@ pub fn stat_fd(fd: i32) -> Result<Stat> {
         [fd as usize, st.as_mut_ptr() as usize, 0, 0, 0, 0],
     )?;
     Ok(parse_stat(&st))
+}
+
+/// What `statfs`/`fstatfs` say about a file system (Linux `struct statfs`, 120 bytes;
+/// sizes in `bsize` units). See docs/filesystem.md "statfs".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StatFs {
+    /// Magic number: 0x4d494c4b milkfs, 0x01021994 tmpfs, 0x4d44 FAT, 0x01021997 9p,
+    /// 0x9fa0 proc, 0x62656572 sysfs, 0x1373 devfs.
+    pub fs_type: u64,
+    pub bsize: u64,
+    pub blocks: u64,
+    pub bfree: u64,
+    pub bavail: u64,
+    pub files: u64,
+    pub ffree: u64,
+    pub fsid: u64,
+    pub namelen: u64,
+    /// ST_RDONLY 1, ST_NOSUID 2, ST_NODEV 4, ST_NOEXEC 8, ST_VALID 0x20.
+    pub flags: u64,
+}
+
+impl StatFs {
+    pub fn read_only(&self) -> bool {
+        self.flags & 1 != 0
+    }
+    /// The type's name, from the magic number.
+    pub fn type_name(&self) -> &'static str {
+        match self.fs_type {
+            0x4d49_4c4b => "milkfs",
+            0x0102_1994 => "tmpfs",
+            0x4d44 => "vfat",
+            0x0102_1997 => "9p",
+            0x9fa0 => "proc",
+            0x6265_6572 => "sysfs",
+            0x1373 => "devfs",
+            _ => "?",
+        }
+    }
+}
+
+fn parse_statfs(b: &[u8; 120]) -> StatFs {
+    let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+    StatFs {
+        fs_type: w(0),
+        bsize: w(1),
+        blocks: w(2),
+        bfree: w(3),
+        bavail: w(4),
+        files: w(5),
+        ffree: w(6),
+        fsid: w(7),
+        namelen: w(8),
+        flags: w(10),
+    }
+}
+
+/// `statfs(2)`: the file system `path` is on.
+pub fn statfs(path: &str) -> Result<StatFs> {
+    let p = cs(path);
+    let mut b = [0u8; 120];
+    sc(
+        nr::STATFS,
+        [p.as_ptr() as usize, b.as_mut_ptr() as usize, 0, 0, 0, 0],
+    )?;
+    Ok(parse_statfs(&b))
+}
+
+/// `fstatfs(2)`.
+pub fn fstatfs(fd: i32) -> Result<StatFs> {
+    let mut b = [0u8; 120];
+    sc(
+        nr::FSTATFS,
+        [fd as usize, b.as_mut_ptr() as usize, 0, 0, 0, 0],
+    )?;
+    Ok(parse_statfs(&b))
 }
 
 pub fn unlink(path: &str) -> Result<()> {

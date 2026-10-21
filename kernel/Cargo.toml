@@ -7,3 +7,7 @@ edition = "2024"
 name = "milkos-kernel"
 test = false
 bench = false
+
+[features]
+# Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
+crash-test = []

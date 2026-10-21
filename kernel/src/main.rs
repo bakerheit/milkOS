@@ -6,6 +6,13 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod exceptions;
+mod gic;
+mod selftest;
+mod sync;
+mod timer;
+mod uart;
+
 global_asm!(include_str!("boot.S"));
 
 /// PL011 UART on qemu's virt machine.
@@ -41,8 +48,17 @@ pub fn console_writer() -> impl Write {
 pub extern "C" fn kmain() -> ! {
     kprintln!("milkOS 0.0.1 booting...");
     kprintln!("hello from the kernel");
+
+    exceptions::init();
+    gic::init();
+    timer::init();
+    uart::init();
+    sync::irq_enable();
+    selftest::run();
+
     loop {
-        unsafe { core::arch::asm!("wfe") };
+        uart::echo_pending();
+        unsafe { core::arch::asm!("wfi") };
     }
 }
 

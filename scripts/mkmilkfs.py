@@ -531,13 +531,13 @@ def dirents_decode(v):
 
 # ---- image access --------------------------------------------------------------------
 class Image:
-    def __init__(self, path):
+    def __init__(self, path, unlock=True):
         self.path = path
         self.f = open(path, "rb")
         self.size = os.fstat(self.f.fileno()).st_size
         self.key = None
         sb = self.superblock()
-        if sb and sb["flags"] & SB_ENCRYPTED:
+        if unlock and sb and sb["flags"] & SB_ENCRYPTED:
             self.key = volume_key(self, sb)
 
     def raw(self, blk):
@@ -649,7 +649,7 @@ def parse_size(s):
 
 def cmd_mkfs(path, size, label, force, version=None, encrypt=False, recovery_out=None):
     if os.path.exists(path):
-        img = Image(path)
+        img = Image(path, unlock=False)  # only "is there a milkfs?" (no key needed)
         if img.superblock() and not force:
             sys.exit(f"{path} already holds milkfs (use --force to wipe it)")
         if size is None:

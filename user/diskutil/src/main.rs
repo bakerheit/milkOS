@@ -160,6 +160,25 @@ pub enum Icon {
     Ram,
 }
 
+/// The size of a volume's icon slot in the sidebar (SPEC: a 32px icon).
+pub const ICON: i32 = 32;
+
+/// A volume's icon in its slot at (x, y). Today a plain tile (radius 24% of the size, as the SPEC
+/// says for tiles); the art pass replaces the body of this function with Chen's icons, drawn at
+/// `ICON` x `ICON` here, and nothing else in the window changes.
+fn volume_icon(win: &mut Window, th: &Theme, x: i32, y: i32, icon: Icon, locked: bool) {
+    let tile = match icon {
+        Icon::Disk => th.honey,
+        Icon::Clone => th.lav,
+        Icon::Share => th.blue,
+        Icon::Ram => th.sand,
+    };
+    win.rrect(x, y, ICON, ICON, ICON * 24 / 100, tile);
+    if locked {
+        widgets::padlock(win, x + 9, y + 8, th.ink);
+    }
+}
+
 impl App {
     pub fn rows(&self) -> Vec<Row> {
         let mut v = Vec::new();
@@ -339,17 +358,7 @@ impl App {
                     Theme::tint(th.oat, th.straw, 0x33),
                 );
             }
-            // A 32px icon tile.
-            let tile = match r.icon {
-                Icon::Disk => th.honey,
-                Icon::Clone => th.lav,
-                Icon::Share => th.blue,
-                Icon::Ram => th.sand,
-            };
-            win.rrect(16, y + 7, 32, 32, 8, tile);
-            if r.locked {
-                widgets::padlock(win, 25, y + 15, th.ink);
-            }
+            volume_icon(win, &th, 16, y + 7, r.icon, r.locked);
             bold_x(
                 win,
                 56,
@@ -358,7 +367,9 @@ impl App {
                 th.espresso,
                 1,
             );
-            win.text(56, y + 25, &widgets::fit(&r.kind, SIDE - 56 - 12), th.cocoa);
+            // No secondary text on a selected row: it would sit on the straw tint.
+            let kind_col = if self.vol == i { th.espresso } else { th.cocoa };
+            win.text(56, y + 25, &widgets::fit(&r.kind, SIDE - 56 - 12), kind_col);
             self.hits.add(rect, VOL + i as u32);
         }
     }

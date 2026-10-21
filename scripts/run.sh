@@ -6,7 +6,9 @@ set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 cargo build ${RELEASE:+--release} -q
-KERNEL="target/aarch64-unknown-none-softfloat/${RELEASE:+release}${RELEASE:-debug}/milkos-kernel"
+PROFILE=debug
+[ -n "${RELEASE:-}" ] && PROFILE=release
+KERNEL="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 DISPLAY_ARGS=(-device ramfb -display cocoa)
 [ "${1:-}" = headless ] && DISPLAY_ARGS=(-display none)
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \

@@ -1,0 +1,14 @@
+[package]
+name = "timeio"
+version.workspace = true
+edition.workspace = true
+
+# The system side of Calendar, Clock and alarmd: where the data files live, reading and
+# writing them safely, the local clock, desktop notifications.
+[lib]
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+timekit = { path = "../timekit" }

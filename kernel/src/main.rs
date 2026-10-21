@@ -33,6 +33,7 @@ mod percpu;
 mod pmm;
 mod poll;
 mod proc;
+mod pty;
 mod ramfb;
 mod sched;
 mod selftest;

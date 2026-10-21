@@ -239,3 +239,40 @@ pub fn recv(fd: i32, buf: &mut [u8]) -> Result<usize> {
 pub fn shutdown(fd: i32, how: usize) -> Result<()> {
     sc(nr::SHUTDOWN, [fd as usize, how, 0, 0, 0, 0]).map(|_| ())
 }
+
+/// Resolve a host name for a user program (getaddrinfo-style, IPv4 only):
+///
+/// * a dotted quad, or `localhost` (127.0.0.1): no lookup;
+/// * `NAME.local`: mDNS on the VM-to-VM link (eth1), [`crate::mdns`];
+/// * anything else: refused. User space doesn't resolve internet names (the kernel's DNS
+///   policy, `net::dns`, is the only path to a real resolver and it refuses them too).
+pub fn resolve(host: &str) -> core::result::Result<[u8; 4], alloc::string::String> {
+    if let Some(a) = SockAddr::parse(host, 0) {
+        return Ok(a.ip);
+    }
+    if crate::mdns::is_local(host) {
+        return crate::mdns::resolve(host, 1500);
+    }
+    Err(alloc::format!(
+        "{host}: not resolved: milkOS resolves only numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are refused"
+    ))
+}
+
+/// `HOST[:PORT]` (HOST as in [`resolve`]) to an address, `default_port` if there is none.
+pub fn lookup(
+    spec: &str,
+    default_port: u16,
+) -> core::result::Result<SockAddr, alloc::string::String> {
+    let (host, port) = match spec.rsplit_once(':') {
+        Some((h, p)) => (
+            h,
+            p.parse()
+                .map_err(|_| alloc::format!("{spec}: bad port '{p}'"))?,
+        ),
+        None => (spec, default_port),
+    };
+    Ok(SockAddr {
+        ip: resolve(host)?,
+        port,
+    })
+}

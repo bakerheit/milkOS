@@ -3,10 +3,50 @@
 version = 4
 
 [[package]]
+name = "activity"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "sysview",
+]
+
+[[package]]
+name = "appkit"
+version = "0.0.1"
+dependencies = [
+ "gui",
+ "rt",
+]
+
+[[package]]
 name = "audit"
 version = "0.0.1"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "calendar"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "timeio",
+ "timekit",
+]
+
+[[package]]
+name = "clock"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "timeio",
+ "timekit",
 ]
 
 [[package]]
@@ -196,6 +236,31 @@ name = "stty"
 version = "0.0.1"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "sysview"
+version = "0.0.1"
+
+[[package]]
+name = "timeio"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "timekit",
+]
+
+[[package]]
+name = "timekit"
+version = "0.0.1"
+
+[[package]]
+name = "timetools"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "timeio",
+ "timekit",
 ]
 
 [[package]]

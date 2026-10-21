@@ -110,7 +110,7 @@ s.close()" "$NC_PORT" || fail "connect to nc -l"
 for _ in $(seq 300); do [ -e "$WORK/drive.done" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
 [ -e "$WORK/drive.done" ] || { cat "$WORK/drive.log" >&2; fail "msh session did not finish"; }
 sleep 0.2
-sed -n '/msh:\/\$ ifconfig/,$p' "$LOG" | tr -d '\r'
+python3 -I scripts/console_clean.py "$LOG" | sed -n '/msh:\/\$ ifconfig/,$p'
 grep -q "inet 10.0.2.15  netmask 255.255.255.0" "$LOG" || fail "ifconfig"
 grep -q "3 packets transmitted, 3 received, 0% packet loss" "$LOG" || fail "ping"
 grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
@@ -118,7 +118,7 @@ grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
 grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
 grep -q "nc: connection from 10.0.2.2:" "$LOG" || fail "nc -l: no connection"
 grep -q "tcp .* \*:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no :80 listener"
-T="$WORK/console.txt"; tr -d '\r' <"$LOG" >"$T"
+T="$WORK/console.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T"
 grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"
 [ "$(grep -c '^top - .*load ' "$T")" -ge 2 ] || fail "top -b -n 2: expected two frames"
 grep -Eq '^ +1 +0 S .* init$' "$T" || fail "top: init not in the process list"

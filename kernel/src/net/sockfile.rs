@@ -27,6 +27,8 @@ pub struct SocketFile {
     pub id: SocketId,
     ino: u64,
     nonblock: AtomicBool,
+    /// SO_RCVTIMEO in ns (0 = wait forever).
+    rcvtimeo: AtomicU64,
 }
 
 impl SocketFile {
@@ -35,6 +37,16 @@ impl SocketFile {
     }
     pub fn set_nonblocking(&self, on: bool) {
         self.nonblock.store(on, Ordering::Relaxed);
+    }
+    /// Blocking receive/accept timeout (`SO_RCVTIMEO`), or FOREVER.
+    pub fn rcv_timeout(&self) -> u64 {
+        match self.rcvtimeo.load(Ordering::Relaxed) {
+            0 => FOREVER,
+            t => t,
+        }
+    }
+    pub fn set_rcv_timeout(&self, ns: u64) {
+        self.rcvtimeo.store(ns, Ordering::Relaxed);
     }
 }
 
@@ -60,6 +72,7 @@ pub fn open(id: SocketId, nonblock: bool) -> OpenFile {
         id,
         ino: NEXT_INO.fetch_add(1, Ordering::Relaxed),
         nonblock: AtomicBool::new(nonblock),
+        rcvtimeo: AtomicU64::new(0),
     });
     let flags = abi::O_RDWR | if nonblock { abi::O_NONBLOCK } else { 0 };
     OpenFile::new(inode, flags)
@@ -73,16 +86,23 @@ pub fn of(f: &OpenFile) -> Result<&SocketFile> {
     Ok(s)
 }
 
-/// recv, blocking unless `nonblock`.
+/// recv, blocking unless `nonblock` (for at most `timeout_ns`, then `EAGAIN`, like
+/// SO_RCVTIMEO on Linux).
 pub fn recv(
     id: SocketId,
     buf: &mut [u8],
     nonblock: bool,
+    timeout_ns: u64,
 ) -> Result<(usize, super::wire::SockAddr)> {
+    let end = crate::timer::now_ns().saturating_add(timeout_ns);
     loop {
         match socket::recvfrom(id, buf) {
             Err(e) if e == EAGAIN && !nonblock => {
-                socket::wait(id, POLLIN, FOREVER);
+                let left = end.saturating_sub(crate::timer::now_ns());
+                if left == 0 {
+                    return Err(EAGAIN);
+                }
+                socket::wait(id, POLLIN, left);
             }
             r => return r,
         }
@@ -137,12 +157,15 @@ impl Inode for SocketFile {
         st
     }
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> Result<usize> {
-        recv(self.id, buf, self.nonblocking()).map(|(n, _)| n)
+        recv(self.id, buf, self.nonblocking(), self.rcv_timeout()).map(|(n, _)| n)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
         send(self.id, buf, None, self.nonblocking())
     }
     fn truncate(&self, _len: u64) -> Result<()> {
         Err(EINVAL)
+    }
+    fn poll(&self) -> u32 {
+        socket::poll(self.id)
     }
 }

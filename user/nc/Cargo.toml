@@ -1,0 +1,12 @@
+[package]
+name = "nc"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "nc"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

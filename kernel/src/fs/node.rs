@@ -249,6 +249,11 @@ pub trait Inode: AsAny + Send + Sync {
     fn ioctl(&self, _cmd: u32, _arg: usize) -> Result<usize> {
         Err(Errno::ENOTTY)
     }
+    /// poll(2) readiness as Linux `POLL*` bits. Default: always readable and writable
+    /// (right for regular files); devices and sockets that can block override it.
+    fn poll(&self) -> u32 {
+        0x1 | 0x4 // POLLIN | POLLOUT
+    }
 
     // ---- directories -----------------------------------------------------------------
 

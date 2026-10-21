@@ -137,7 +137,7 @@ Implemented (number: name):
 | processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
-| sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown (`proc/sock.rs`, see docs/networking.md) |
+| sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom, 134/135 rt_sigaction/rt_sigprocmask (accepted, ignored) |
 | milkOS | 4096 MILK_PS: array of 48-byte records (pid, ppid, tid, state, kernel?, cpu ns, rss, name) for `ps`, until /proc has per-process dirs |
 

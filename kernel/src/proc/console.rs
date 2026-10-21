@@ -151,6 +151,23 @@ pub fn read(buf: &mut [u8]) -> KResult<usize> {
     }
 }
 
+/// For poll(2): would a read return without blocking (a line or ^D is waiting)? Feeds
+/// pending UART bytes through the line discipline first (echoing them, as a read would).
+/// If another thread is in `read` right now, that reader gets the line: not readable.
+pub fn readable() -> bool {
+    let Some(mut tty) = TTY.try_lock() else {
+        return false;
+    };
+    let mut echo = Vec::new();
+    while let Some(b) = uart::read_byte() {
+        tty.input(b, &mut echo);
+    }
+    if !echo.is_empty() {
+        write_bytes(&echo);
+    }
+    !tty.ready.is_empty() || tty.eof
+}
+
 const TCGETS: u32 = 0x5401;
 const TIOCGWINSZ: u32 = 0x5413;
 const TIOCGPGRP: u32 = 0x540f;

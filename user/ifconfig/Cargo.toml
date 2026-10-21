@@ -1,0 +1,12 @@
+[package]
+name = "ifconfig"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ifconfig"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

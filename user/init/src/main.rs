@@ -23,6 +23,14 @@ fn main(_args: &rt::Args) -> i32 {
     println!("  user space is running. Starting /bin/hello, then the shell.");
     println!();
 
+    // The web server for :80 (the kernel's own httpd is off by default).
+    if sys::read_file("/srv/www/index.html").is_ok() {
+        match sys::spawn("/bin/httpd", &["httpd", "-q", "/srv/www"], ENV) {
+            Ok(pid) => println!("  httpd (pid {pid}) serving /srv/www on :80"),
+            Err(e) => println!("init: cannot start /bin/httpd: {e}"),
+        }
+    }
+
     if let Ok(pid) = sys::spawn("/bin/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }

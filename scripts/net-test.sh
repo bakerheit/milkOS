@@ -2,9 +2,11 @@
 # End-to-end network test: boot milkOS headless with qemu user-mode networking and check
 #   - the kernel's boot self-test (DHCP, ping 10.0.2.2, loopback UDP/TCP, DNS policy, plus
 #     TCP echo / DNS / refused against the helpers below, all on the Mac's 127.0.0.1),
-#   - the guest's HTTP server on :80, from the Mac via hostfwd 127.0.0.1:$HTTP_PORT (curl),
-#   - the socket syscalls: /bin/fetch typed into msh over the serial console, against a
-#     host HTTP helper (10.0.2.2:PORT), the guest's own server, and a refused port.
+#   - the network tools typed into msh over the serial console: ifconfig, ping, netstat,
+#     fetch (host helper, the guest's own servers, a refused port), nc (to the host echo
+#     server, and nc -l reached from the Mac),
+#   - from the Mac (curl): the userland /bin/httpd on guest :80 via 127.0.0.1:$HTTP_PORT,
+#     and the kernel's httpd (enabled for the test on guest :8080) via a free port.
 #
 #   scripts/net-test.sh            HTTP_PORT=8088 by default (override: HTTP_PORT=9099 ...)
 #
@@ -49,7 +51,13 @@ for _ in $(seq 50); do [ -s "$WORK/ports" ] && break; sleep 0.1; done
 [ -s "$WORK/ports" ] || fail "helper servers did not start"
 # shellcheck disable=SC1090
 eval "$(tr ' ' '\n' <"$WORK/ports" | sed 's/^/P_/')"
-CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused"
+CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused khttpd=8080"
+# Two more free host ports: the kernel httpd (guest :8080) and nc -l (guest :7777).
+read -r KH_PORT NC_PORT < <(python3 -I -c "
+import socket
+ss = [socket.socket() for _ in range(2)]
+for s in ss: s.bind(('127.0.0.1', 0))
+print(*[s.getsockname()[1] for s in ss])")
 echo "helpers: echo 127.0.0.1:$P_echo, dns 127.0.0.1:$P_dns, http 127.0.0.1:$P_http, refused port $P_refused (pid $SPID)"
 SERIAL="$WORK/serial.sock"
 
@@ -58,16 +66,24 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
   -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
-  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:80" -device virtio-net-device,netdev=n0 \
+  -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:80,hostfwd=tcp:127.0.0.1:$KH_PORT-:8080,hostfwd=tcp:127.0.0.1:$NC_PORT-:7777" \
+  -device virtio-net-device,netdev=n0 \
   -fw_cfg "name=opt/milkos/nettest,string=$CFG" &
 QPID=$!
 echo "qemu pid $QPID, serial log $LOG"
-# Console: log everything; once msh is up, run fetch three times.
+# Console: log everything; once msh is up, run the network tools.
+P='wait:msh:/\$ '
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  'wait:\[net\] selftest' 'wait:msh:/\$ ' \
-  "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' 'wait:msh:/\$ ' \
-  'send:fetch -i http://127.0.0.1/' 'wait:fetch: [^\n]* ms' 'wait:msh:/\$ ' \
-  "send:fetch 10.0.2.2:$P_refused" 'wait:fetch: connect' \
+  'wait:\[net\] selftest' "$P" \
+  'send:ifconfig' 'wait:RX packets' "$P" \
+  'send:ping -c 3 -i 200 10.0.2.2' 'wait:rtt min' "$P" \
+  "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' "$P" \
+  'send:fetch -i http://127.0.0.1/' 'wait:fetch: [^\n]* ms' "$P" \
+  "send:fetch 10.0.2.2:$P_refused" 'wait:fetch: connect' "$P" \
+  "send:nc 10.0.2.2 $P_echo" 'send:hello through nc' 'wait:hello through nc\r?\n\r?hello through nc' \
+  'raw:\x04' "$P" \
+  'send:nc -l 7777' 'wait:listening on tcp' "done:$WORK/nc.listening" 'wait:from the mac' "$P" \
+  'send:netstat' 'wait:LISTEN' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 
@@ -80,20 +96,41 @@ echo "---- guest ----"
 awk '/^\[(net|virtio-net)\]/ { print; inproc = /\/proc\/net/; next } inproc && /^    / { print; next } { inproc = 0 }' "$LOG"
 grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
 
-echo "---- msh: fetch (socket syscalls from user space) ----"
+echo "---- msh: network tools (socket syscalls from user space) ----"
+for _ in $(seq 300); do [ -e "$WORK/nc.listening" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
+[ -e "$WORK/nc.listening" ] || { cat "$WORK/drive.log" >&2; fail "msh session stalled before nc -l"; }
+python3 -I -c "
+import socket, sys
+s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5)
+s.sendall(b'from the mac, to nc -l\n')
+s.close()" "$NC_PORT" || fail "connect to nc -l"
 for _ in $(seq 300); do [ -e "$WORK/drive.done" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
-[ -e "$WORK/drive.done" ] || { cat "$WORK/drive.log" >&2; fail "msh/fetch session did not finish"; }
+[ -e "$WORK/drive.done" ] || { cat "$WORK/drive.log" >&2; fail "msh session did not finish"; }
 sleep 0.2
-sed -n '/msh:\/\$ fetch/,$p' "$LOG" | tr -d '\r'
+sed -n '/msh:\/\$ ifconfig/,$p' "$LOG" | tr -d '\r'
+grep -q "inet 10.0.2.15  netmask 255.255.255.0" "$LOG" || fail "ifconfig"
+grep -q "3 packets transmitted, 3 received, 0% packet loss" "$LOG" || fail "ping"
 grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
 [ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 2 ] || fail "fetch: expected two 200 OK"
 grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
+grep -q "nc: connection from 10.0.2.2:" "$LOG" || fail "nc -l: no connection"
+grep -q "tcp .* \*:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no :80 listener"
 
-echo "---- host curl -> guest :80 (via 127.0.0.1:$HTTP_PORT) ----"
+echo "---- host curl -> userland httpd on guest :80 (via 127.0.0.1:$HTTP_PORT) ----"
 curl -sS -i --max-time 5 "http://127.0.0.1:$HTTP_PORT/" >"$WORK/index.txt" || fail "curl /"
-cat "$WORK/index.txt"
-grep -q "Hello from milkOS" "$WORK/index.txt" || fail "index page content"
+tr -d '\r' <"$WORK/index.txt"
+grep -q "Hello from milkOS userland" "$WORK/index.txt" || fail "index page content"
+curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/about.txt" | grep -q "served by /bin/httpd" || fail "about.txt"
+curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/notes/" | grep -q 'href="hello.txt"' || fail "directory listing"
+for t in "/missing 404" "/../etc/motd 403" "/notes 301"; do
+  set -- $t
+  code=$(curl -sS --path-as-is -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$HTTP_PORT$1")
+  [ "$code" = "$2" ] || fail "GET $1: expected $2, got $code"
+done
+echo "userland httpd: /, /about.txt, /notes/ listing, 404, 403 (..), 301 ok"
 
+echo "---- host curl -> kernel httpd on guest :8080 (via 127.0.0.1:$KH_PORT) ----"
+HTTP_PORT=$KH_PORT
 curl -sS --max-time 20 -o "$WORK/big.bin" -w 'GET /big: %{http_code}, %{size_download} bytes in %{time_total} s (%{speed_download} B/s)\n' \
   "http://127.0.0.1:$HTTP_PORT/big" || fail "curl /big"
 python3 -I - "$WORK/big.bin" <<'PY' || fail "/big content mismatch"
@@ -123,7 +160,7 @@ echo "---- GET /net (guest /proc/net) ----"
 cat "$WORK/net.txt"
 code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$HTTP_PORT/nope")
 [ "$code" = 404 ] || fail "expected 404, got $code"
-echo "GET /nope: 404 ok"
+echo "GET /nope (kernel httpd): 404 ok"
 echo "---- host helper log ----"
 cat "$WORK/servers.log"
 cleanup

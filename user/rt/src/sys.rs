@@ -451,3 +451,19 @@ pub fn ps() -> Result<Vec<PsEntry>> {
         })
         .collect())
 }
+
+/// Read a whole file (small files: /proc, configs, web pages).
+pub fn read_file(path: &str) -> Result<Vec<u8>> {
+    let fd = open(path, O_RDONLY | O_CLOEXEC)?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    let r = loop {
+        match read(fd, &mut buf) {
+            Ok(0) => break Ok(out),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) => break Err(e),
+        }
+    };
+    let _ = close(fd);
+    r
+}

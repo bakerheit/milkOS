@@ -205,8 +205,10 @@ pub fn on_device_irq() {
 
 /// The net thread: receive, run timers, run the services, sleep until the next timer or
 /// interrupt.
-fn net_thread(mut http: services::Http) {
+fn net_thread() {
+    let mut http: Option<services::Http> = None;
     loop {
+        services::adopt(&mut http);
         with(|st| {
             st.poll_rx();
             let now = st.now;
@@ -214,7 +216,9 @@ fn net_thread(mut http: services::Http) {
             dhcp::tick(st);
             tcp::tick(st);
         });
-        services::run(&mut http);
+        if let Some(h) = http.as_mut() {
+            services::run(h);
+        }
         let (next, now) = with(|st| (st.next_deadline(), st.now));
         PLANNED.store(next, Ordering::Release);
         NET_WQ.wait_until_timeout(
@@ -226,7 +230,7 @@ fn net_thread(mut http: services::Http) {
 }
 
 /// Bring the stack up: create it, add `/proc/net`, start DHCP on eth0 (if there is one)
-/// and the net thread (which also runs the HTTP demo on :80). Call after `sched::init`.
+/// and the net thread. Call after `sched::init`.
 pub fn init() {
     let have_dev = with(|st| {
         if st.iface.dev.is_some() {
@@ -238,11 +242,7 @@ pub fn init() {
     });
     procnet::init();
     if !THREAD_UP.swap(true, Ordering::AcqRel) {
-        // Listen on :80 before the thread runs, so the port is open when init returns.
-        let http = services::start();
-        drop(sched::spawn_prio("net", sched::Priority::High, move || {
-            net_thread(http)
-        }));
+        drop(sched::spawn_prio("net", sched::Priority::High, net_thread));
     }
     kprintln!(
         "[net] stack up: lo{}, {} sockets x 2 x {} KiB buffers, net thread started",

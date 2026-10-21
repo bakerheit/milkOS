@@ -92,6 +92,20 @@ impl Inode for DevNode {
         }
     }
 
+    fn poll(&self) -> u32 {
+        match self.kind {
+            // POLLIN only once a whole line (or ^D) is waiting; always writable.
+            Kind::Console => {
+                if crate::proc::console::readable() {
+                    0x1 | 0x4
+                } else {
+                    0x4
+                }
+            }
+            _ => 0x1 | 0x4,
+        }
+    }
+
     fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
         match self.kind {
             Kind::Null | Kind::Zero => Ok(buf.len()),

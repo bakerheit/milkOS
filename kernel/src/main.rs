@@ -6,6 +6,16 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod display;
+mod fbcon;
+mod font;
+mod font_data;
+mod fwcfg;
+mod gfx;
+mod ramfb;
+mod sink;
+mod splash;
+
 global_asm!(include_str!("boot.S"));
 
 /// PL011 UART on qemu's virt machine.
@@ -33,12 +43,14 @@ macro_rules! kprintln {
     }};
 }
 
+/// Writer behind `kprintln!`: UART always, plus the screen once `display::init` has run.
 pub fn console_writer() -> impl Write {
-    Uart
+    sink::Sink
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kmain() -> ! {
+    display::init();
     kprintln!("milkOS 0.0.1 booting...");
     kprintln!("hello from the kernel");
     loop {

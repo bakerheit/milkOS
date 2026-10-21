@@ -177,6 +177,22 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
             t.rto / 1_000_000
         )?;
     }
+    // Connections in TIME_WAIT (kept without a socket, tcp::TwTable).
+    let base = st.socks.iter().filter(|(_, s)| s.ty == SockType::Stream).count();
+    for (n, e) in st.tw.entries.iter().enumerate() {
+        writeln!(
+            w,
+            "{:>4}: {:08X}:{:04X} {:08X}:{:04X} 06 00000000:00000000 03:{:08X} 00000000 {:>5} {:>8} 0 # TIME_WAIT",
+            base + n,
+            e.local.ip.proc_hex(),
+            e.local.port,
+            e.remote.ip.proc_hex(),
+            e.remote.port,
+            e.deadline.saturating_sub(now) / 10_000_000,
+            0,
+            0
+        )?;
+    }
     Ok(())
 }
 

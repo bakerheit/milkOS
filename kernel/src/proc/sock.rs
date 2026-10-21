@@ -41,6 +41,9 @@ const IPPROTO_TCP: u32 = 6;
 const SO_TYPE: u32 = 3;
 const SO_ERROR: u32 = 4;
 const SO_RCVTIMEO: u32 = 20;
+const SO_SNDBUF: u32 = 7;
+const SO_RCVBUF: u32 = 8;
+const TCP_NODELAY: u32 = 1;
 const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
@@ -310,10 +313,22 @@ fn setsockopt(fd: i64, level: u32, opt: u32, val: usize, len: usize) -> KResult<
             sf.set_rcv_timeout((sec as u64).saturating_mul(1_000_000_000) + usec as u64 * 1000);
             Ok(0)
         }
-        // Accepted and ignored: SO_REUSEADDR (we always allow it), SO_SNDBUF, SO_RCVBUF,
-        // SO_KEEPALIVE, SO_REUSEPORT, SO_SNDTIMEO (sends only wait for buffer space),
-        // TCP_NODELAY (we never delay).
-        (SOL_SOCKET, 2 | 7 | 8 | 9 | 15 | SO_SNDTIMEO) | (IPPROTO_TCP, 1) => Ok(0),
+        (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) | (IPPROTO_TCP, TCP_NODELAY) => {
+            if len < 4 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(val, 4)?;
+            let v = i32::from_le_bytes(b[0..4].try_into().unwrap());
+            match opt {
+                TCP_NODELAY if level == IPPROTO_TCP => socket::set_nodelay(sf.id, v != 0)?,
+                SO_RCVBUF => socket::set_buf(sf.id, true, v.max(0) as usize)?,
+                _ => socket::set_buf(sf.id, false, v.max(0) as usize)?,
+            }
+            Ok(0)
+        }
+        // Accepted and ignored: SO_REUSEADDR (we always allow it), SO_KEEPALIVE,
+        // SO_REUSEPORT, SO_SNDTIMEO (sends only wait for buffer space).
+        (SOL_SOCKET, 2 | 9 | 15 | SO_SNDTIMEO) => Ok(0),
         _ => Err(ENOPROTOOPT),
     }
 }
@@ -380,6 +395,9 @@ fn sys_ppoll(fds: usize, nfds: usize, tmo: usize) -> KResult<usize> {
 fn getsockopt(s: SocketId, level: u32, opt: u32, val: usize, len: usize) -> KResult<usize> {
     let v: i32 = match (level, opt) {
         (SOL_SOCKET, SO_ERROR) => socket::take_error(s)?.map_or(0, |e| e.0),
+        (SOL_SOCKET, SO_RCVBUF) => socket::get_buf(s, true)? as i32,
+        (SOL_SOCKET, SO_SNDBUF) => socket::get_buf(s, false)? as i32,
+        (IPPROTO_TCP, TCP_NODELAY) => socket::nodelay(s)? as i32,
         (SOL_SOCKET, SO_TYPE) => match socket::sock_type(s)? {
             SockType::Stream => socket::SOCK_STREAM as i32,
             SockType::Dgram => socket::SOCK_DGRAM as i32,

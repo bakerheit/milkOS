@@ -84,6 +84,8 @@ pub struct Stats {
 pub struct Stack {
     pub iface: Iface,
     pub socks: socket::Table,
+    /// TCP connections in TIME_WAIT (no socket slot of their own).
+    pub tw: tcp::TwTable,
     pub dhcp: dhcp::Dhcp,
     pub ping: icmp::PingTable,
     pub stats: Stats,
@@ -129,6 +131,7 @@ fn new_stack() -> Box<Stack> {
     Box::new(Stack {
         iface: Iface::new(),
         socks: socket::Table::new(),
+        tw: tcp::TwTable::new(),
         dhcp: dhcp::Dhcp::new(),
         ping: icmp::PingTable::new(),
         stats: Stats::default(),
@@ -260,14 +263,15 @@ pub fn init() {
         drop(sched::spawn_prio("net", sched::Priority::High, net_thread));
     }
     kprintln!(
-        "[net] stack up: lo{}, {} sockets x 2 x {} KiB buffers, net thread started",
+        "[net] stack up: lo{}, {} sockets, buffers {} KiB auto-sized up to {} MiB, net thread started",
         match (have_dev, eth1) {
             (true, true) => " + eth0 (DHCP started) + eth1 (link-local)",
             (true, false) => " + eth0 (DHCP started)",
             _ => " only (no NIC)",
         },
         socket::MAX_SOCKETS,
-        socket::BUF_SIZE / 1024
+        socket::BUF_SIZE / 1024,
+        socket::MAX_BUF >> 20
     );
 }
 
@@ -288,10 +292,13 @@ impl Stack {
         let mut d = now + 1_000_000_000;
         for (_, s) in self.socks.iter() {
             if s.ty == socket::SockType::Stream {
-                for t in [s.tcb.timer, s.tcb.deadline].into_iter().flatten() {
+                if let Some(t) = tcp::next_timer(&s.tcb) {
                     d = d.min(t);
                 }
             }
+        }
+        if let Some(t) = self.tw.next_deadline() {
+            d = d.min(t);
         }
         if let Some(t) = self.dhcp.next_deadline() {
             d = d.min(t);

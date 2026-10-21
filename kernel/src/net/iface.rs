@@ -37,7 +37,7 @@ const PENDING: usize = 8;
 /// How long a packet may wait for ARP.
 const PENDING_NS: u64 = 3_000_000_000;
 /// Loopback ring size (packets).
-const LO_SLOTS: usize = 32;
+const LO_SLOTS: usize = 256;
 
 /// Test knob: drop every Nth loopback packet (0 = off). The self-test uses it to prove
 /// TCP recovers from loss; slirp never loses anything.

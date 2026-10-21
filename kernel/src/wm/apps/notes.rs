@@ -8,6 +8,7 @@ use alloc::vec::Vec;
 use crate::sync::SpinLock;
 use crate::{fs, timer};
 
+use super::super::clipboard;
 use super::super::event::Key;
 use super::super::paint::Painter;
 use super::super::theme::*;
@@ -110,6 +111,8 @@ pub struct Notes {
     visible_rows: usize,
     generation: u64,
     title: String,
+    /// Selection anchor; the selection runs from here to the caret.
+    anchor: Option<(usize, usize)>,
 }
 
 impl Notes {
@@ -121,6 +124,7 @@ impl Notes {
             visible_rows: 10,
             generation: u64::MAX,
             title: String::new(),
+            anchor: None,
         };
         n.sync();
         n
@@ -145,6 +149,67 @@ impl Notes {
 
     fn byte_at(line: &str, col: usize) -> usize {
         line.char_indices().nth(col).map_or(line.len(), |(i, _)| i)
+    }
+
+    /// The selection as (start, end), ordered; None if empty.
+    fn selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let a = self.anchor?;
+        let c = (self.row, self.col);
+        match a.cmp(&c) {
+            core::cmp::Ordering::Less => Some((a, c)),
+            core::cmp::Ordering::Greater => Some((c, a)),
+            core::cmp::Ordering::Equal => None,
+        }
+    }
+
+    fn selected_text(&self, s: &Store) -> String {
+        let Some(((r0, c0), (r1, c1))) = self.selection() else {
+            return String::new();
+        };
+        let mut out = String::new();
+        for r in r0..=r1 {
+            let l: Vec<char> = s.lines[r].chars().collect();
+            let a = if r == r0 { c0.min(l.len()) } else { 0 };
+            let b = if r == r1 { c1.min(l.len()) } else { l.len() };
+            out.extend(&l[a..b]);
+            if r != r1 {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Delete the selection (if any); the caret goes to its start. True if something went.
+    fn delete_selection(&mut self, s: &mut Store) -> bool {
+        let Some(((r0, c0), (r1, c1))) = self.selection() else {
+            self.anchor = None;
+            return false;
+        };
+        let head: String = s.lines[r0].chars().take(c0).collect();
+        let tail: String = s.lines[r1].chars().skip(c1).collect();
+        s.lines.drain(r0 + 1..=r1);
+        s.lines[r0] = head + &tail;
+        self.row = r0;
+        self.col = c0;
+        self.anchor = None;
+        true
+    }
+
+    /// Insert `text` (may contain newlines) at the caret.
+    fn insert_text(&mut self, s: &mut Store, text: &str) {
+        let line = &mut s.lines[self.row];
+        let at = Self::byte_at(line, self.col);
+        let rest = line.split_off(at);
+        let mut parts = text.split('\n');
+        let first = parts.next().unwrap_or("");
+        s.lines[self.row].push_str(first);
+        self.col += first.chars().count();
+        for p in parts {
+            self.row += 1;
+            s.lines.insert(self.row, String::from(p));
+            self.col = p.chars().count();
+        }
+        s.lines[self.row].push_str(&rest);
     }
 
     fn keep_visible(&mut self) {
@@ -182,6 +247,25 @@ impl WindowContents for Notes {
             .take(self.visible_rows)
         {
             let y = PAD + (i - self.scroll) as i32 * LINE_H;
+            if let Some(((r0, c0), (r1, c1))) = self.selection()
+                && (r0..=r1).contains(&i)
+            {
+                let n = l.chars().count();
+                let a = if i == r0 { c0 } else { 0 };
+                // The line break counts as one selected cell.
+                let b = if i == r1 { c1 } else { n + 1 };
+                let (a, b) = (a.min(cols), b.min(cols + 1));
+                if b > a {
+                    p.fill_a(
+                        PAD + a as i32 * 8,
+                        y - 1,
+                        (b - a) as i32 * 8,
+                        18,
+                        STRAW,
+                        SEL_ROW_A,
+                    );
+                }
+            }
             let shown: String = l.chars().take(cols).collect();
             if l.starts_with('#') {
                 p.bold(PAD, y, &shown, ESPRESSO);
@@ -210,7 +294,71 @@ impl WindowContents for Notes {
 
     fn key(&mut self, k: &KeyInput) -> bool {
         let (row, col) = (self.row, self.col);
+        // Clipboard and select-all: Cmd or Ctrl + A / C / X / V.
+        if (k.mods.meta || k.mods.ctrl)
+            && let Key::Char(c) = k.key
+        {
+            let changed = with(|s| match c {
+                'a' => {
+                    self.anchor = Some((0, 0));
+                    self.row = s.lines.len() - 1;
+                    self.col = s.lines[self.row].chars().count();
+                    false
+                }
+                'c' => {
+                    let t = self.selected_text(s);
+                    if !t.is_empty() {
+                        clipboard::set(&t);
+                    }
+                    false
+                }
+                'x' => {
+                    let t = self.selected_text(s);
+                    if !t.is_empty() {
+                        clipboard::set(&t);
+                    }
+                    self.delete_selection(s)
+                }
+                'v' => {
+                    let t = clipboard::get();
+                    self.delete_selection(s);
+                    self.insert_text(s, &t);
+                    !t.is_empty()
+                }
+                _ => false,
+            });
+            if changed {
+                with(|s| s.edited_ns = Some(timer::now_ns()));
+                save();
+            }
+            return true;
+        }
+        let moving = matches!(
+            k.key,
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::Home | Key::End
+        );
+        if moving {
+            if k.mods.shift {
+                if self.anchor.is_none() {
+                    self.anchor = Some((self.row, self.col));
+                }
+            } else {
+                self.anchor = None;
+            }
+        }
+        let had_selection = self.selection().is_some();
         let changed = with(|s| {
+            // Typing, Enter or erasing replaces the selection.
+            if !moving && had_selection {
+                let erase = matches!(k.key, Key::Backspace | Key::Delete);
+                let types = k.ch.is_some_and(|c| !c.is_control()) || k.key == Key::Enter;
+                if erase || types {
+                    self.delete_selection(s);
+                    if erase {
+                        return true;
+                    }
+                }
+            }
             let line_len = |s: &Store, r: usize| s.lines[r].chars().count();
             match k.key {
                 Key::Left => {
@@ -320,11 +468,14 @@ impl WindowContents for Notes {
             with(|s| s.edited_ns = Some(timer::now_ns()));
             save();
         }
-        changed || (row, col) != (self.row, self.col)
+        changed || (row, col) != (self.row, self.col) || had_selection
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {
-        if !matches!(e.kind, PointerKind::Down(_) | PointerKind::Drag) {
+        if let PointerKind::Up(_) = e.kind {
+            if self.selection().is_none() {
+                self.anchor = None;
+            }
             return false;
         }
         let r = ((e.y - PAD).max(0) / LINE_H) as usize + self.scroll;
@@ -333,6 +484,9 @@ impl WindowContents for Notes {
             let c = ((e.x - PAD + 4).max(0) / 8) as usize;
             self.col = c.min(s.lines[self.row].chars().count());
         });
+        if let PointerKind::Down(_) = e.kind {
+            self.anchor = Some((self.row, self.col));
+        }
         true
     }
 

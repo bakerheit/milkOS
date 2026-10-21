@@ -260,6 +260,43 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(3);
             b.glide(x - 60, y, x, y, 4).down().wait(300);
         }
+        "select" => {
+            // Notes: open it, drag-select two lines, copy, paste at the end.
+            let (x, y) = dock_icon_center(3);
+            b.click(x, y).wait(300);
+            // Notes body: window (120, 96), body at (121, 129), text at +16 / 20px lines.
+            b.drag(
+                121 + 16 + 16,
+                129 + 16 + 20 + 8,
+                121 + 16 + 8 * 18,
+                129 + 16 + 40 + 8,
+                10,
+            );
+            b.key(Key::Char('c'), Mods::META).key(Key::End, Mods::CTRL);
+            b.key(Key::Down, Mods::NONE)
+                .key(Key::Down, Mods::NONE)
+                .key(Key::Down, Mods::NONE);
+            b.key(Key::End, Mods::NONE).key(Key::Enter, Mods::NONE);
+            b.key(Key::Char('v'), Mods::META).wait(100);
+            b.drag(
+                121 + 16 + 16,
+                129 + 16 + 8,
+                121 + 16 + 8 * 11,
+                129 + 16 + 8,
+                6,
+            )
+            .wait(200);
+        }
+        "termselect" => {
+            // Terminal: select a few words of output with the mouse, copy, paste at the prompt.
+            b.wait(300).typ("echo milk and honey").enter().wait(300);
+            b.drag(455 + 0, 507 - 18 + 8, 455 + 8 * 14, 507 - 18 + 8, 8);
+            b.key(Key::Char('c'), Mods::META)
+                .key(Key::Char('v'), Mods::META)
+                .wait(200);
+            b.drag(455, 507 - 36 + 8, 455 + 8 * 10, 507 - 36 + 8, 6)
+                .wait(200);
+        }
         "openanim" => {
             let (x, y) = dock_icon_center(8);
             b.to(x, y).wait(30).down().wait(30).up();

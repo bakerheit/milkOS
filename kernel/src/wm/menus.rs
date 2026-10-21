@@ -35,6 +35,8 @@ pub enum MenuAction {
     Help,
     Restart,
     ShutDown,
+    /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
+    Key(char),
     /// Shown greyed out (no clipboard yet).
     Disabled,
 }
@@ -123,9 +125,10 @@ impl Desktop {
             "Edit" | "Format" => alloc::vec![
                 item("Undo", "Cmd+Z", MenuAction::Disabled),
                 sep(),
-                item("Cut", "Cmd+X", MenuAction::Disabled),
-                item("Copy", "Cmd+C", MenuAction::Disabled),
-                item("Paste", "Cmd+V", MenuAction::Disabled),
+                item("Cut", "Cmd+X", win(MenuAction::Key('x'))),
+                item("Copy", "Cmd+C", win(MenuAction::Key('c'))),
+                item("Paste", "Cmd+V", win(MenuAction::Key('v'))),
+                item("Select All", "Cmd+A", win(MenuAction::Key('a'))),
             ],
             "View" => alloc::vec![
                 item("Today", "F4", MenuAction::Today),
@@ -274,6 +277,14 @@ impl Desktop {
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
             MenuAction::Restart => super::power::restart(),
             MenuAction::ShutDown => super::power::shut_down(),
+            MenuAction::Key(c) => {
+                self.handle(super::Event::Key {
+                    key: super::Key::Char(c),
+                    ch: None,
+                    mods: super::event::Mods::META,
+                    down: true,
+                });
+            }
             MenuAction::Disabled => {}
         }
     }

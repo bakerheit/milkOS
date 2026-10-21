@@ -20,6 +20,7 @@ mod anim;
 mod apps;
 mod buffer;
 pub mod client;
+pub mod clipboard;
 mod ctl;
 mod event;
 mod icons;
@@ -343,6 +344,7 @@ impl Desktop {
         };
         apps::fsx::ensure_home();
         ctl::init();
+        clipboard::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
         d.open(App::Terminal);
@@ -1497,6 +1499,7 @@ impl Desktop {
             return self.launcher_key(&k);
         }
         if m.meta {
+            let mut handled = true;
             match k.key {
                 Key::Char('w') => {
                     if let Some(id) = self.focus {
@@ -1509,9 +1512,12 @@ impl Desktop {
                     }
                 }
                 Key::Tab | Key::Char('`') => self.cycle_windows(),
-                _ => {}
+                // Everything else (Cmd+C / V / X / A ...) is the focused window's.
+                _ => handled = false,
             }
-            return;
+            if handled {
+                return;
+            }
         }
         if self.mode != Mode::Desktop {
             return;

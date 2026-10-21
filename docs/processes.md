@@ -110,21 +110,60 @@ a kernel abort, and PAN doesn't matter.
 
 * One thread per process (no CLONE_THREAD yet). `Process { pid, inner: SpinLock<Inner>,
   child_wq }`; `Inner` has the `UserSpace`, the fd table, cwd (an `InodeRef`), children,
-  state (`Alive` / `Zombie(wait status)`).
-* **fork** (`clone` with flags = SIGCHLD): eager copy of every page (no copy-on-write
-  yet), same fds (shared `Arc<OpenFile>`, so shared offsets), FP regs and TPIDR_EL0
-  copied, child returns 0.
+  state (`Alive` / `Zombie(wait status)`), pgid / sid, signal state, argv, exe path.
+* **fork** (`clone` with flags = SIGCHLD): **copy-on-write**. Both spaces share every
+  frame (a global share count per frame); writable pages turn read-only in both, and the
+  first write faults and copies (or just re-enables write for the last owner). fds are
+  shared `Arc<OpenFile>`s (shared offsets); FP regs, TPIDR_EL0, pgid/sid, signal actions
+  and mask are inherited; pending signals are not. The kernel's `copy_out` breaks COW
+  first, because it writes through the identity map, which ignores the read-only bit.
 * **execve**: reads the file through the VFS (relative to cwd), loads it into a new
   space, only then swaps it in (a failed exec leaves the caller intact); drops
-  close-on-exec fds.
+  close-on-exec fds; handlers go back to SIG_DFL (SIG_IGN stays).
 * **exit**: switch TTBR0 away, free the address space and fds immediately, become a
-  zombie, hand children to init (pid 1), wake the parent. init exiting panics.
-* **wait4**: any child or a given pid, `WNOHANG`, Linux wait-status encoding.
-* **Faults** from EL0 kill only the process, e.g.
+  zombie, hand children to init (pid 1), SIGCHLD + wake the parent. init exiting panics.
+* **wait4**: a pid, any child (-1), own group (0) or group -N; `WNOHANG`; Linux wait
+  status encoding (signal | 0x80 for "core dumped"); EINTR on a signal.
+* **Faults** from EL0 go to the process's handler if it has one (SIGSEGV / SIGBUS /
+  SIGILL / SIGTRAP / SIGFPE), otherwise kill only the process with a message, e.g.
   `[proc] pid 8 (fault) killed by SIGSEGV: permission fault, level 1 reading 0x0 (not a
-  user address) at pc 0x100004000e8`. A translation fault just below the stack grows
-  it (up to 8 MiB). There are no signal handlers: the "signal" is just the wait status.
+  user address) at pc 0x100004000e8`. A translation fault just below the stack grows it
+  (up to 8 MiB); a write fault on a COW page copies it.
 * PID 1 is reserved for `/bin/init`; the EL0 boot test's processes get 2.. .
+
+### Pipes (`proc/pipe.rs`)
+
+`pipe2` gives two fds whose `OpenFile`s wrap a read-end and a write-end inode (Fifo) of a
+64 KiB ring, so dup/fork/close need nothing special: an end closes when its last
+`OpenFile` drops. Reads block while empty (EOF once no writer is left); writes block
+while full, are atomic up to 4 KiB (PIPE_BUF), and give SIGPIPE + EPIPE with no reader.
+Waits are interruptible (EINTR). O_NONBLOCK, O_CLOEXEC.
+
+### Signals (`proc/signal.rs`)
+
+* Per process: pending and blocked masks, 64 sigactions, the latest siginfo per signal
+  (classic signals don't queue). `kill(pid | 0 | -1 | -pgid, sig)`, `tkill`, `tgkill`.
+* Delivery on every return to EL0 (`exceptions::set_user_return_hook`, which also does
+  the deferred reschedule): default action terminate / terminate+core / ignore, or a
+  handler. The handler frame is the Linux aarch64 `rt_sigframe` (siginfo, ucontext with
+  sigcontext, an `fpsimd_context` record, a frame record); the handler gets x0 = signo,
+  x1 = &siginfo, x2 = &ucontext, lr = `sa_restorer` (required: there is no vDSO
+  trampoline yet; rt and libc set it). `rt_sigreturn` restores registers, FP/SIMD and the
+  mask, and only NZCV from the saved pstate.
+* SA_RESETHAND, SA_NODEFER, sa_mask; SIGKILL/SIGSTOP can't be caught, blocked or ignored.
+  Stopping (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU) is not implemented: treated as ignored.
+  No SA_RESTART: interrupted calls return EINTR. No sigaltstack.
+* Blocking syscalls that return EINTR: read/write on pipes and ttys, wait4, nanosleep,
+  clock_nanosleep. `signal::interrupted()` is the check to use in any new wait.
+* Process groups and sessions: `setpgid`, `getpgid`, `setsid`, `getsid`; the terminal's
+  foreground group is set with TIOCSPGRP, and ^C / ^\ on a tty signal that group.
+
+### /proc (`proc/procfs.rs`)
+
+`/proc/<pid>/{status, stat, cmdline, maps, fd/N, cwd, exe}`, `/proc/self` and
+`/proc/threads` (every thread, kernel ones too), hung on the vfs's procfs root. Each
+pid directory appears when the process starts and goes when it is reaped. `ps` reads
+these (there are no milkOS-specific syscalls any more).
 
 ### Syscalls
 
@@ -133,12 +172,12 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 56 openat, 57 close, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 61 getdents64, 17 getcwd, 49 chdir, 34 mkdirat, 35 unlinkat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (console: TCGETS, TIOCGWINSZ) |
-| processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address |
+| files | 56 openat, 57 close, 59 pipe2, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
+| processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address, 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
+| signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
-| misc | 160 uname (sysname "milkOS"), 278 getrandom, 134/135 rt_sigaction/rt_sigprocmask (accepted, ignored) |
-| milkOS | 4096 MILK_PS: array of 48-byte records (pid, ppid, tid, state, kernel?, cpu ns, rss, name) for `ps`, until /proc has per-process dirs |
+| misc | 160 uname (sysname "milkOS"), 278 getrandom |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -188,18 +227,23 @@ proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that 
 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs
 `cargo build --release` in `user/` into `target/user/` **before** it packs the
-initramfs, and fails the build if a program (`user/<name>/src/main.rs`) isn't listed in
-`initramfs.list`. So `cargo build` at the root builds everything and the programs land in
-`/bin`. Adding a program: `user/<name>/` + workspace member + one line in
+initramfs, and fails the build if a program isn't listed in `initramfs.list`. Programs
+are `user/<crate>/src/main.rs` (binary `<crate>`) and `user/<crate>/src/bin/<x>.rs`
+(binary `<x>`). So `cargo build` at the root builds everything and the programs land in
+`/bin`. Adding one: the source file (+ workspace member for a new crate) + one line in
 `initramfs.list`.
 
-* `rt`: `_start`, syscall wrappers (`rt::sys`), `print!`/`println!`/`eprintln!` (one
-  write per call), brk bump allocator, panic handler, `rt::main!(main)`.
-* `init`: banner, runs `hello`, keeps `msh` running (restarts it), reaps orphans.
-* `hello`: argv/env, uname, clocks, brk heap, mmap.
-* `msh`: built-ins `echo ps uname sleep exit help cd pwd ls cat mkdir`; runs `/bin/<name>`
-  (or a path) via fork + execve + wait4; `cmd &` runs in the background.
-* `fault`: `fault` (null read), `fault write`, `fault ill`, `fault stack N` (KiB).
+* `rt`: `_start`, syscall wrappers (`rt::sys`: files, processes, signals with an
+  `sa_restorer` trampoline, job control, /proc-based `ps`), `print!`/`println!`,
+  `rt::io` (buffered `Out`, `Lines`, `each_input`, flag parsing), `rt::table`
+  (structured pipes), brk bump allocator, panic handler, `rt::main!(main)`.
+* `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
+* `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
+  globs, job control with Ctrl-C, structured pipes).
+* `coreutils`: ls cat echo wc head tail grep sort uniq ps kill sleep mkdir rm mv cp ln
+  touch env uptime free uname true false clear, one binary each.
+* `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
+  `utest pipe | cow | proc | signal | all`).
 
 ## Moving the window server into a kernel thread
 
@@ -244,11 +288,11 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
 
 ## Not done yet / next
 
-* Copy-on-write fork, file-backed and shared mmap (tmpfs frames are page aligned already),
-  demand paging for brk/mmap, `PROT_NONE` (accepted, ignored).
-* Threads in a process (`CLONE_VM|CLONE_THREAD`, futex), signals (kill, handlers,
-  ^C → SIGINT), process groups / job control, pipes.
-* /proc/<pid>/ (then retire MILK_PS), per-process CPU accounting in /proc.
+* File-backed and shared mmap (tmpfs frames are page aligned already), demand paging for
+  brk/mmap, `PROT_NONE` (accepted, ignored).
+* Threads in a process (`CLONE_VM|CLONE_THREAD`, futex), job stop/continue (SIGTSTP,
+  `bg`), SA_RESTART, sigaltstack, a vDSO with a sigreturn trampoline.
+* Controlling-terminal rules (any process may TIOCSPGRP today), SIGTTIN/SIGTTOU.
 * 16-bit ASIDs (Apple silicon has them), SMP (scheduler lock across check+block,
-  per-CPU current thread via TPIDR_EL1).
+  per-CPU current thread via TPIDR_EL1, an atomic COW share-and-copy).
 * The higher-half kernel move (above), then static Linux binaries at 0x400000.

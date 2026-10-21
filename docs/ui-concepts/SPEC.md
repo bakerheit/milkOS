@@ -73,6 +73,17 @@ Width 640, centred, top at y140. Input row height 56, radius 18, glass alpha 0.7
 ## Toast / notification
 264x64, radius 16, glass, 12px from the right edge, 40px from the top. Icon 40x40 at (12,12), title bold at (64,12), subtitle cocoa at (64,32).
 
+## Notification drawer (side drawer)
+Chosen look (Andrew, 2026-10-21). Panel 316 wide, 12px from the right edge, from y36 down to 12px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius 18, glass at alpha 0.78, floating shadow. Inner padding 12.
+- Header (78px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), 26px high, fully rounded, selected chip espresso with cream text.
+- Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
+- Card: width drawer minus 24, height 64 (compact 56), radius 14, milk at 82% with a 1px white edge. App icon 36x36 at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long. Selected card: straw at 13% fill and a 1px straw border.
+- Today card: label, then up to three events (time bold, title). Do Not Disturb row: 44px high at the bottom with a switch (44x24, straw when on).
+- Opening: click the menu bar bell, or Ctrl-N. Closing: Esc, or click outside. Snap open (no animation required).
+- Keys: Up/Down select, Return opens the source app or window, Backspace dismisses the selected card, Left/Right collapse or expand a group, Tab cycles the filter chips.
+- Arrival: a toast (above) shows for 5 seconds, pauses while hovered, and clicking it opens the drawer on that item. If the drawer is open, the new card appears at the top of its group instead.
+- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Do Not Disturb holds toasts and sounds but still collects cards, and shows a moon on the bell.
+
 ## Control centre
 288x292, radius 20, glass, 12px from right, 36px from top. Tiles/sliders 56 high, radius 16, white at 70%. Slider track 8 high, fill espresso.
 

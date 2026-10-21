@@ -42,6 +42,7 @@ export const TOK = {
   },
   launcher: { w: 640, y: 140, inputH: 56, rowH: 48, gap: 12, maxRows: 6, dim: 0.25, iconIn: 40, iconRow: 36 },
   toast: { w: 264, h: 64, right: 12, top: 40 },
+  drawer: { w: 316, right: 12, top: 36, bottom: 12, pad: 12, cardH: 64, cardCompactH: 56, cardR: 14, iconIn: 36, headerH: 78, chipH: 26, dndH: 44, alpha: 0.78, toastSecs: 5 },
   control: { w: 288, h: 292, right: 12, top: 36, tileH: 56, sliderH: 8 },
   cards: { pad: 16, gap: 16, r: 20, cols: 3 },
   spaces: { stripY: 40, thumbW: 128, thumbH: 88, thumbGap: 12, thumbR: 10, dim: 0.35, selBorder: 4, windowScale: "≈0.29 (scaled blit)" },
@@ -341,6 +342,17 @@ Width ${TOK.launcher.w}, centred, top at y${TOK.launcher.y}. Input row height ${
 ## Toast / notification
 ${TOK.toast.w}x${TOK.toast.h}, radius ${TOK.radius.toast}, glass, ${TOK.toast.right}px from the right edge, ${TOK.toast.top}px from the top. Icon 40x40 at (12,12), title bold at (64,12), subtitle cocoa at (64,32).
 
+## Notification drawer (side drawer)
+Chosen look (Andrew, 2026-10-21). Panel ${TOK.drawer.w} wide, ${TOK.drawer.right}px from the right edge, from y${TOK.drawer.top} down to ${TOK.drawer.bottom}px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius ${TOK.radius.launcher}, glass at alpha ${TOK.drawer.alpha}, floating shadow. Inner padding ${TOK.drawer.pad}.
+- Header (${TOK.drawer.headerH}px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), ${TOK.drawer.chipH}px high, fully rounded, selected chip espresso with cream text.
+- Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
+- Card: width drawer minus ${TOK.drawer.pad * 2}, height ${TOK.drawer.cardH} (compact ${TOK.drawer.cardCompactH}), radius ${TOK.drawer.cardR}, milk at 82% with a 1px white edge. App icon ${TOK.drawer.iconIn}x${TOK.drawer.iconIn} at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long. Selected card: straw at 13% fill and a 1px straw border.
+- Today card: label, then up to three events (time bold, title). Do Not Disturb row: ${TOK.drawer.dndH}px high at the bottom with a switch (44x24, straw when on).
+- Opening: click the menu bar bell, or Ctrl-N. Closing: Esc, or click outside. Snap open (no animation required).
+- Keys: Up/Down select, Return opens the source app or window, Backspace dismisses the selected card, Left/Right collapse or expand a group, Tab cycles the filter chips.
+- Arrival: a toast (above) shows for ${TOK.drawer.toastSecs} seconds, pauses while hovered, and clicking it opens the drawer on that item. If the drawer is open, the new card appears at the top of its group instead.
+- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Do Not Disturb holds toasts and sounds but still collects cards, and shows a moon on the bell.
+
 ## Control centre
 ${TOK.control.w}x${TOK.control.h}, radius ${TOK.radius.card}, glass, ${TOK.control.right}px from right, ${TOK.control.top}px from top. Tiles/sliders ${TOK.control.tileH} high, radius 16, white at 70%. Slider track ${TOK.control.sliderH} high, fill espresso.
 
@@ -361,3 +373,5 @@ const here = dirname(fileURLToPath(import.meta.url));
 writeFileSync(join(here, "milkos-1.0.html"), page);
 writeFileSync(join(here, "SPEC.md"), spec);
 console.log("wrote milkos-1.0.html", page.length, "bytes; SPEC.md", spec.length, "bytes");
+
+export { WP, glass, shadow, menubar, dock, win, lightsX, filesWin, shellWin, dim, toast, col };

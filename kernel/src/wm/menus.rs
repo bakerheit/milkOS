@@ -163,7 +163,7 @@ impl Desktop {
                 ];
                 for w in &self.windows {
                     v.push(Item {
-                        label: String::from(w.contents.title()),
+                        label: Self::window_label(w),
                         key: if w.minimized {
                             "minimised"
                         } else if Some(w.id) == self.focus {
@@ -245,7 +245,14 @@ impl Desktop {
                     w - 14,
                     y + 4,
                     it.key,
-                    if disabled { LATTE } else { COCOA },
+                    // SPEC: no secondary text on a selected (highlighted) row.
+                    if disabled {
+                        LATTE
+                    } else if self.menu_hover == Some(i) {
+                        ESPRESSO
+                    } else {
+                        COCOA
+                    },
                     1,
                     false,
                 );

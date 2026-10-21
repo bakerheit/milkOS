@@ -99,6 +99,7 @@ pub extern "C" fn kmain() -> ! {
     timer::init();
     uart::init();
     virtio::init();
+    crypto::init();
     sync::irq_enable();
     selftest::run();
     memtest::run();

@@ -29,7 +29,7 @@ milk_share_args
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
+qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \

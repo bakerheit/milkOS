@@ -189,7 +189,7 @@ impl State {
             let mut raw = [0u8; BLOCK];
             let per = (BLOCK / dev.block_size()) as u64;
             dev.read_blocks((sb.generation % 2) * per, &mut raw)?;
-            if !crate::crypto::ct::eq(&k.sb_mac(&raw).to_le_bytes(), &sb.sb_mac.to_le_bytes()) {
+            if !crate::crypto::ct_eq(&k.sb_mac(&raw).to_le_bytes(), &sb.sb_mac.to_le_bytes()) {
                 kprintln!("milkfs: {name}: superblock MAC mismatch (altered?): not mounting");
                 return Err(Errno::EIO);
             }

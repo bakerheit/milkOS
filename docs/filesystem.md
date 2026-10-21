@@ -43,6 +43,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/Applications` | milkfs (bind of `/Volumes/Milk/Applications`), tmpfs without a disk | packages (`milk install`, docs/packages.md), persistent |
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
+| `/etc/milk/drop` | milkfs (bind of `/Volumes/Milk/etc/milk/drop`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
 | `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
 | `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |
@@ -210,8 +211,9 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   U+FFFD. Reads take whatever `uart::read_byte` has, mapping CR to LF, and return `EAGAIN`
   when nothing is waiting (there are no wait queues yet). Note `kmain`'s idle loop
   (`uart::echo_pending`) consumes the same bytes.
-- `/dev/random` and `/dev/urandom`: xorshift64* seeded from the counter. **Not
-  cryptographic.** Writes stir the state.
+- `/dev/random` and `/dev/urandom`: the kernel CSPRNG (ChaCha20 with fast key erasure,
+  seeded from virtio-rng + timer jitter, docs/crypto.md). Reads block only until the boot
+  seed; writes are mixed into its pool.
 - Timestamps: Unix time from the PL031 RTC read once at `fs::init`, plus uptime. No atime
   updates.
 - Locking: tmpfs, devfs, procfs and sysfs use `SpinLock`s and never block (tmpfs copies
@@ -894,7 +896,8 @@ that snapshot is deleted (the report says how many were freed now):
 
 A milkfs volume can be encrypted ("FileVault"): every block except the two superblocks
 and the keyring is encrypted and authenticated; without the passphrase (or the recovery
-key) the volume doesn't mount. Crypto: `kernel/src/crypto/` (from scratch, published test
+key) the volume doesn't mount. Crypto: the shared `milkcrypto` crate (`crypto/`: XChaCha20-Poly1305,
+HMAC-SHA256, scrypt; from scratch, published test
 vectors at boot; see docs/crypto.md); milkfs part: `kernel/src/fs/milkfs/crypt.rs`.
 
 **Keys.** A random 256-bit volume key VK (made on the Mac with `os.urandom` at `mkfs
@@ -908,7 +911,8 @@ aad = "milkfs slot" | uuid | kind):
   bits shown once at creation as 8 groups of 4 hex digits.
 
 Changing a passphrase rewraps VK into a new slot (a new keyring block, one commit): no
-data block is rewritten. VK gives `enc = HMAC(VK, "milkfs v1 enc")` and
+data block is rewritten. Salts and nonces made in the kernel come from the CSPRNG
+(`crypto::rng::fill`). VK gives `enc = HMAC(VK, "milkfs v1 enc")` and
 `mac = HMAC(VK, "milkfs v1 mac")`.
 
 **Blocks: XChaCha20 with a synthetic IV, checksums over the plaintext.**

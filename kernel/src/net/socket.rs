@@ -624,17 +624,26 @@ pub fn count() -> usize {
 /// `timeout_ns` passes. Returns the bits that were set (0 = timed out). This is the
 /// building block for blocking read/accept/connect: the stack wakes `READY_WQ` on every
 /// readiness change.
+///
+/// A user thread also stops waiting when a signal is pending (0 is returned; the caller
+/// checks [`interrupted`] and fails with `EINTR`), so Ctrl-C reaches a process blocked in
+/// accept / recv / send / connect. Kernel threads are never interrupted.
 pub fn wait(id: SocketId, mask: u32, timeout_ns: u64) -> u32 {
     let want = mask | POLLERR | POLLHUP | POLLNVAL;
     let mut r = 0;
     super::READY_WQ.wait_until_timeout(
         || {
             r = poll(id) & want;
-            r != 0
+            r != 0 || interrupted()
         },
         timeout_ns,
     );
     r
+}
+
+/// Does the calling (user) thread have a signal that should end a blocking socket call?
+pub fn interrupted() -> bool {
+    crate::proc::signal::interrupted()
 }
 
 /// Send one ICMP echo request to `dst` and wait for the reply (thread context).

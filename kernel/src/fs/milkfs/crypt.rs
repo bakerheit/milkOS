@@ -38,7 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::format::*;
-use crate::crypto::{aead, chacha, ct, hmac};
+use crate::crypto::{ct_eq, hmac, wipe, xchacha20};
 use crate::fs::errno::{Errno, Result};
 
 /// scrypt parameters for new passphrase slots: N = 2^16, r = 8, p = 4: 64 MiB, ~0.35 s.
@@ -55,9 +55,9 @@ pub struct VolumeKey {
 
 impl Drop for VolumeKey {
     fn drop(&mut self) {
-        ct::zeroize(&mut self.vk);
-        ct::zeroize(&mut self.enc);
-        ct::zeroize(&mut self.mac);
+        wipe(&mut self.vk);
+        wipe(&mut self.enc);
+        wipe(&mut self.mac);
     }
 }
 
@@ -96,14 +96,14 @@ impl VolumeKey {
     /// Encrypt block `block` (born `birth`) in place; returns its checksum (the tag).
     pub fn seal(&self, block: u64, birth: u64, data: &mut [u8]) -> u64 {
         let tag = self.tag(block, birth, data);
-        chacha::xxor(&self.enc, &Self::nonce(tag, block, birth), 0, data);
+        xchacha20::xor(&self.enc, &Self::nonce(tag, block, birth), 0, data);
         tag
     }
 
     /// Decrypt in place and check the tag. False: wrong key, damaged or tampered.
     pub fn open(&self, block: u64, birth: u64, csum: u64, data: &mut [u8]) -> bool {
-        chacha::xxor(&self.enc, &Self::nonce(csum, block, birth), 0, data);
-        ct::eq(
+        xchacha20::xor(&self.enc, &Self::nonce(csum, block, birth), 0, data);
+        ct_eq(
             &self.tag(block, birth, data).to_le_bytes(),
             &csum.to_le_bytes(),
         )
@@ -152,7 +152,7 @@ pub fn format_recovery(k: &[u8; 16]) -> String {
 fn kek(slot: &KeySlot, secret: &[u8]) -> Option<[u8; 32]> {
     let mut k = [0u8; 32];
     match slot.kind {
-        SLOT_PASSPHRASE => crate::crypto::scrypt::scrypt(
+        SLOT_PASSPHRASE => crate::crypto::frames::scrypt(
             secret,
             &slot.salt,
             slot.log_n,
@@ -180,11 +180,11 @@ pub fn unlock(ring: &Keyring, secret: &str) -> Result<(VolumeKey, usize)> {
             return Err(Errno::ENOMEM); // scrypt couldn't get its memory
         };
         let mut vk = s.wrapped;
-        let ok = aead::xopen(&k, &s.nonce, &aad(&ring.uuid, s.kind), &mut vk, &s.tag);
-        ct::zeroize(&mut k);
+        let ok = xchacha20::open(&k, &s.nonce, &aad(&ring.uuid, s.kind), &mut vk, &s.tag);
+        wipe(&mut k);
         if ok {
             let key = VolumeKey::from_master(&vk);
-            ct::zeroize(&mut vk);
+            wipe(&mut vk);
             return Ok((key, i));
         }
     }
@@ -200,19 +200,19 @@ pub fn wrap(ring_uuid: &[u8; 16], key: &VolumeKey, kind: u8, secret: &[u8]) -> R
         p: KDF_P,
         ..KeySlot::default()
     };
-    crate::crypto::rand::fill(&mut s.salt);
-    crate::crypto::rand::fill(&mut s.nonce);
+    crate::crypto::rng::fill(&mut s.salt);
+    crate::crypto::rng::fill(&mut s.nonce);
     let mut k = kek(&s, secret).ok_or(Errno::ENOMEM)?;
     s.wrapped = key.vk;
-    s.tag = aead::xseal(&k, &s.nonce, &aad(ring_uuid, kind), &mut s.wrapped);
-    ct::zeroize(&mut k);
+    s.tag = xchacha20::seal(&k, &s.nonce, &aad(ring_uuid, kind), &mut s.wrapped);
+    wipe(&mut k);
     Ok(s)
 }
 
 impl VolumeKey {
     /// The same volume key?
     pub fn same_as(&self, o: &VolumeKey) -> bool {
-        ct::eq(&self.vk, &o.vk)
+        ct_eq(&self.vk, &o.vk)
     }
 }
 

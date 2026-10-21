@@ -43,7 +43,7 @@ boot() { # name [fw_cfg passphrase or -] commands...
   local name="$1" fw="$2"; shift 2
   local SOCK="$T/$name.sock" LOG="$T/$name.log" extra=()
   [ "$fw" != - ] && extra=(-fw_cfg "name=opt/milkos/passphrase,string=$fw")
-  qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
+  qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
     -display none -monitor none -serial "unix:$SOCK,server,nowait" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \

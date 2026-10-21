@@ -107,6 +107,9 @@ pub fn recv(
                     return Err(EAGAIN);
                 }
                 socket::wait(id, POLLIN, left);
+                if socket::interrupted() {
+                    return Err(crate::fs::errno::Errno::EINTR);
+                }
             }
             r => return r,
         }
@@ -135,6 +138,13 @@ pub fn send(
             }
             Err(e) if e == EAGAIN && !nonblock => {
                 socket::wait(id, POLLOUT, FOREVER);
+                if socket::interrupted() {
+                    return if off > 0 {
+                        Ok(off)
+                    } else {
+                        Err(crate::fs::errno::Errno::EINTR)
+                    };
+                }
             }
             Err(e) if off > 0 => {
                 let _ = e;

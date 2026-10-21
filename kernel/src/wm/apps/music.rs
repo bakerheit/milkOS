@@ -767,7 +767,8 @@ impl WindowContents for Music {
                 triangle(p, 22, y + 7, 12, c);
             }
             p.text_p(40, y + 5, &t.title, ESPRESSO, cur == Some(i));
-            p.text_right(w - 22, y + 5, &length(t.frames), COCOA, 1, false);
+            let c = if self.sel == i { ESPRESSO } else { COCOA };
+            p.text_right(w - 22, y + 5, &length(t.frames), c, 1, false);
             self.hits.push((r, Hit::Row(i)));
             y += ROW_H;
         }

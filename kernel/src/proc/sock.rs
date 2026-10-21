@@ -207,6 +207,9 @@ fn sys_accept(fd: i64, addr: usize, addrlen: usize, flags: u32) -> KResult<usize
                     return Err(EAGAIN);
                 }
                 socket::wait(id, socket::POLLIN, left);
+                if socket::interrupted() {
+                    return Err(crate::fs::errno::Errno::EINTR);
+                }
             }
             r => break r?,
         }
@@ -238,6 +241,9 @@ fn connect(s: SocketId, addr: SockAddr, nb: bool) -> KResult<usize> {
     match socket::connect(s, addr) {
         Err(e) if e == nerr::EINPROGRESS && !nb => {
             socket::wait(s, POLLOUT, FOREVER);
+            if socket::interrupted() {
+                return Err(crate::fs::errno::Errno::EINTR);
+            }
             socket::connect(s, addr).map(|_| 0)
         }
         r => r.map(|_| 0),

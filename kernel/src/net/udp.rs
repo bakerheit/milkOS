@@ -122,7 +122,11 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8], ip_pkt: &[u8]) {
         if s.ty != SockType::Dgram || s.icmp || !s.owns_port || s.local.port != dport {
             continue;
         }
-        if !s.local.ip.is_unspecified() && s.local.ip != dst && !dst.is_broadcast() {
+        if !s.local.ip.is_unspecified()
+            && s.local.ip != dst
+            && !dst.is_broadcast()
+            && !dst.is_multicast()
+        {
             continue;
         }
         if s.udp_connected && s.remote != from {
@@ -135,7 +139,7 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8], ip_pkt: &[u8]) {
     }
     let Some(i) = target else {
         st.stats.udp_no_ports += 1;
-        if !dst.is_broadcast() {
+        if !dst.is_broadcast() && !dst.is_multicast() {
             icmp::send_unreachable(st, 3, ip_pkt);
         }
         return;

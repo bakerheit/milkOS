@@ -97,6 +97,7 @@ const H0: [u64; 8] = [
 
 pub type Digest = [u8; 64];
 
+#[derive(Clone)]
 pub struct Sha512 {
     h: [u64; 8],
     buf: [u8; 128],

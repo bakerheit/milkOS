@@ -116,7 +116,7 @@ pub fn tick(st: &mut Stack) {
         DhcpState::Renewing => {
             if now >= st.dhcp.expires {
                 // Lease gone: drop the address and start over.
-                st.iface.cfg = Default::default();
+                st.iface.eth0_mut().cfg = Default::default();
                 start(st);
             } else if now >= st.dhcp.next_tx {
                 send(st, REQUEST);
@@ -130,9 +130,9 @@ pub fn tick(st: &mut Stack) {
 fn send(st: &mut Stack, kind: u8) {
     let d = &st.dhcp;
     let renewing = d.state == DhcpState::Renewing;
-    let mac = st.iface.mac;
+    let mac = st.iface.eth0().mac;
     let ciaddr = if renewing {
-        st.iface.cfg.addr
+        st.iface.eth0_mut().cfg.addr
     } else {
         Ipv4::UNSPECIFIED
     };
@@ -225,7 +225,7 @@ fn parse(m: &[u8], xid: u32, mac: &[u8; 6]) -> Option<Reply> {
 
 /// A datagram for UDP port 68.
 pub fn input(st: &mut Stack, m: &[u8]) {
-    let mac = st.iface.mac.0;
+    let mac = st.iface.eth0().mac.0;
     let Some(r) = parse(m, st.dhcp.xid, &mac) else {
         return;
     };
@@ -243,7 +243,7 @@ pub fn input(st: &mut Stack, m: &[u8]) {
         }
         (DhcpState::Requesting | DhcpState::Renewing, ACK) => {
             let lease = r.lease.unwrap_or(3600).max(60);
-            let cfg = &mut st.iface.cfg;
+            let cfg = &mut st.iface.eth0_mut().cfg;
             cfg.addr = r.yiaddr;
             cfg.mask = r.mask.unwrap_or(Ipv4::new(255, 255, 255, 0));
             cfg.gateway = r.router;
@@ -260,14 +260,14 @@ pub fn input(st: &mut Stack, m: &[u8]) {
             d.binds += 1;
             // Announce ourselves so the gateway (and we) have each other in ARP caches.
             if let Some(gw) = r.router
-                && st.iface.arp.want(gw, now)
+                && st.iface.eth0_mut().arp.want(gw, now)
             {
                 st.iface
-                    .send_arp(super::arp::OP_REQUEST, super::wire::Mac::ZERO, gw);
+                    .send_arp(0, super::arp::OP_REQUEST, super::wire::Mac::ZERO, gw);
             }
         }
         (DhcpState::Requesting | DhcpState::Renewing, NAK) => {
-            st.iface.cfg = Default::default();
+            st.iface.eth0_mut().cfg = Default::default();
             start(st);
         }
         _ => {}

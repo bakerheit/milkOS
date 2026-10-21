@@ -10,7 +10,6 @@ use super::errno::{Errno, Result};
 use super::node::{Inode, InodeRef, InodeType, Stat, makedev};
 use super::synth::{Ids, SynthDir, SynthFs};
 use crate::sync::SpinLock;
-use crate::timer;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -26,38 +25,6 @@ pub struct DevNode {
     rdev: u64,
     perm: u32,
     kind: Kind,
-}
-
-/// xorshift64* seeded from the counter. NOT cryptographic: fine for hash seeds and
-/// games, not for keys.
-static RNG: SpinLock<u64> = SpinLock::new(0);
-
-/// One word from /dev/urandom's generator (NOT cryptographic; see `crypto::rand`).
-pub fn random_u64() -> u64 {
-    next_random()
-}
-
-fn next_random() -> u64 {
-    let mut s = RNG.lock();
-    if *s == 0 {
-        // Mix the boot-relative counter so every boot differs a little.
-        *s = timer::counter().wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-    }
-    let mut x = *s;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    *s = x;
-    x.wrapping_mul(0x2545_f491_4f6c_dd1d)
-}
-
-fn stir_random(data: &[u8]) {
-    let mut s = RNG.lock();
-    for chunk in data.chunks(8) {
-        let mut w = [0u8; 8];
-        w[..chunk.len()].copy_from_slice(chunk);
-        *s = (*s ^ u64::from_ne_bytes(w)).rotate_left(17) | 1;
-    }
 }
 
 impl Inode for DevNode {
@@ -84,11 +51,9 @@ impl Inode for DevNode {
                 buf.fill(0);
                 Ok(buf.len())
             }
+            // The kernel CSPRNG (crypto::rng): blocks only until its first seed (boot).
             Kind::Random => {
-                for chunk in buf.chunks_mut(8) {
-                    let r = next_random().to_ne_bytes();
-                    chunk.copy_from_slice(&r[..chunk.len()]);
-                }
+                crate::crypto::rng::fill(buf);
                 Ok(buf.len())
             }
             // The tty line discipline (proc/tty.rs): blocks until a line is typed once
@@ -115,7 +80,7 @@ impl Inode for DevNode {
         match self.kind {
             Kind::Null | Kind::Zero => Ok(buf.len()),
             Kind::Random => {
-                stir_random(buf);
+                crate::crypto::rng::add_entropy(buf);
                 Ok(buf.len())
             }
             Kind::Console => {

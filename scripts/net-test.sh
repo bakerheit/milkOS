@@ -61,7 +61,7 @@ print(*[s.getsockname()[1] for s in ss])")
 echo "helpers: echo 127.0.0.1:$P_echo, dns 127.0.0.1:$P_dns, http 127.0.0.1:$P_http, refused port $P_refused (pid $SPID)"
 SERIAL="$WORK/serial.sock"
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
+qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
   -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
   -display none \
   -global virtio-mmio.force-legacy=false \

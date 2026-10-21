@@ -2618,24 +2618,31 @@ fn show(path: &str) {
     kprintln!("{}", read_str(path).trim_end());
 }
 
-/// The crypto known-answer tests (published vectors), timed.
+/// The crypto this file system uses: the shared crate's vectors for XChaCha20-Poly1305,
+/// HMAC/PBKDF2 and scrypt (also printed by `crypto::init`), and scrypt's RFC 7914 vector
+/// once more through the kernel's page-frame scratch, timed.
 fn crypto(t: &mut T) {
-    let t0 = crate::timer::now_ns();
-    let (bad, n) = crate::crypto::selftest();
-    for b in &bad {
-        t.ok(false, &alloc::format!("crypto: {b}"));
+    for (name, p, n) in milkcrypto::selftest() {
+        if matches!(
+            name,
+            "xchacha20poly1305" | "hmac-sha256+pbkdf2" | "scrypt" | "chacha20" | "poly1305"
+        ) {
+            t.ok(p == n, &alloc::format!("crypto: {name} {p}/{n} vectors"));
+        }
     }
+    let t0 = crate::timer::now_ns();
+    let mut out = [0u8; 64];
+    let ok = crate::crypto::frames::scrypt(b"password", b"NaCl", 10, 8, 16, &mut out).is_some()
+        && out[..]
+            == milkcrypto::unhex_vec(
+                "fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640",
+            )[..];
     t.ok(
-        bad.is_empty(),
+        ok,
         &alloc::format!(
-            "crypto: {n} known-answer tests ({} ms)",
+            "crypto: scrypt RFC 7914 vector with the array in page frames ({} ms)",
             (crate::timer::now_ns() - t0) / 1_000_000
         ),
-    );
-    kprintln!(
-        "crypto: {}/{n} known-answer tests pass (RFC 8439, XChaCha draft, RFC 4231, RFC 7914) in {} ms",
-        n - bad.len(),
-        (crate::timer::now_ns() - t0) / 1_000_000
     );
 }
 

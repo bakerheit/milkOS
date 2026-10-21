@@ -19,7 +19,8 @@
 //!                             live system is untouched (run it from the clone's path)
 //!   milk run-try [--no-sandbox] NAME [ARGS...]
 //!                             run the tried app with its clone as / (chroot), sandboxed:
-//!                             clone read-only, /tmp/run-NAME read-write, net local only
+//!                             the clone's /Applications read-only, /tmp/run-NAME
+//!                             read-write, net local only
 //!   milk keep NAME            promote that clone: the install becomes real
 //!   milk discard NAME         throw the clone away
 //!   milk relink [-q]          recreate the /bin links (/bin is in RAM; init runs this)
@@ -1125,7 +1126,7 @@ fn run_scratch(name: &str) -> String {
 /// `milk run-try [--no-sandbox] NAME [ARGS...]`: run a tried app *as if its clone were the
 /// system*. milk chroots into the clone (so `/Applications` is the clone's, and nothing
 /// outside it resolves), then, unless `--no-sandbox`, enters a capability sandbox: the
-/// clone read-only, a scratch dir read-write (`/tmp/run-NAME` in the clone, also HOME and
+/// clone's /Applications read-only (nothing else of it), a scratch dir read-write (`/tmp/run-NAME` in the clone, also HOME and
 /// TMPDIR), network loopback/link-local only, no clipboard. Then milk *becomes* the app
 /// (execve), so it keeps the terminal, the pid and the exit status. Works for `try NAME`
 /// clones and for a package inside the `try-upgrade` clone.
@@ -1152,9 +1153,13 @@ fn cmd_run_try(name: &str, sandboxed: bool, extra: &[&str], envp: &[&str]) -> Re
     let scratch = run_scratch(name);
     mkdir_all(&alloc::format!("{root}{scratch}"))?;
     // Grants are matched on the path a request names: the jailed absolute path, or the
-    // real path for a cwd-relative one, so the scratch dir is granted in both spellings.
+    // real path for a cwd-relative one, so each is granted in both spellings. Only the
+    // clone's /Applications is readable: not its /home or /etc (e.g. /etc/milk/drop holds
+    // this machine's Milk Drop secret key, and the clone has a copy of it).
     let spec = if sandboxed {
-        alloc::format!("fs=/:r fs={scratch}:rw fs={root}{scratch}:rw net=local clipboard=0")
+        alloc::format!(
+            "fs={APPS}:r fs={root}{APPS}:r fs={scratch}:rw fs={root}{scratch}:rw net=local clipboard=0"
+        )
     } else {
         String::from("none")
     };

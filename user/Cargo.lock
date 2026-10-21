@@ -31,6 +31,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "drop"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "fault"
 version = "0.0.1"
 dependencies = [
@@ -94,6 +101,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "milkcrypto"
+version = "0.0.1"
+
+[[package]]
 name = "msh"
 version = "0.0.1"
 dependencies = [
@@ -147,6 +158,9 @@ dependencies = [
 [[package]]
 name = "rt"
 version = "0.0.1"
+dependencies = [
+ "milkcrypto",
+]
 
 [[package]]
 name = "snap"

@@ -406,6 +406,35 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Scale all of `src` (nearest neighbour) into the logical rect `dst`, through a
+    /// rounded mask of radius `r`, blended at `alpha`. For window animations.
+    pub fn blit_scaled_rrect(&mut self, dst: Rect, src: &Buffer, r: i32, alpha: u8) {
+        let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {
+            return;
+        };
+        let r = r.clamp(0, dst.w.min(dst.h) / 2);
+        let t = corner(r);
+        let (dx0, dy0) = (dst.x + self.ox, dst.y + self.oy);
+        let (sw, sh) = (src.w(), src.h());
+        for by in b.y..b.y + b.h {
+            let j = by - dy0;
+            let sy = (j * sh / dst.h).min(sh - 1);
+            let srow = src.row(sy as usize);
+            let base = by as usize * self.stride;
+            for bx in b.x..b.x + b.w {
+                let i = bx - dx0;
+                let cov = rr_cov(t, r, dst.w, dst.h, i, j);
+                let a = mul_a(cov, alpha);
+                if a == 0 {
+                    continue;
+                }
+                let q = srow[((i * sw / dst.w).min(sw - 1)) as usize];
+                let p = &mut self.px[base + bx as usize];
+                *p = if a == 255 { q } else { blend(*p, q, a) };
+            }
+        }
+    }
+
     /// Nearest-neighbour scale all of `src` into the logical rect `dst` (tiny previews).
     pub fn blit_scaled(&mut self, dst: Rect, src: &Buffer) {
         let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {

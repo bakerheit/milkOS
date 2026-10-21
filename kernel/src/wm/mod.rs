@@ -16,6 +16,7 @@
 //! assumes it runs on the boot stack, so it can become a kernel thread once `proc` lands: put
 //! `Desktop::frame` in that thread's loop and replace the `wfi` with a sleep-until-event.
 
+mod anim;
 mod apps;
 mod buffer;
 pub mod client;
@@ -256,6 +257,8 @@ pub struct Desktop {
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
+    /// Running window animations (anim.rs).
+    anims: Vec<anim::Anim>,
     /// Signature of the full-screen layers (dims) last composited.
     dims: Vec<u8>,
     /// Spaces overview thumbnails, keyed by window id.
@@ -317,6 +320,7 @@ impl Desktop {
                 volume: 40,
             },
             cache: BTreeMap::new(),
+            anims: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -448,6 +452,9 @@ impl Desktop {
         }
         self.set_focus(Some(id));
         self.damage_window(id);
+        if self.stats.frames > 0 {
+            self.anim_open(id); // not for the windows the desktop starts with
+        }
     }
 
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
@@ -549,6 +556,7 @@ impl Desktop {
         let Some(w) = self.win_mut(id) else {
             return;
         };
+        let was_minimised = w.minimized;
         w.minimized = false;
         let sp = w.space;
         if self.mode != Mode::Desktop {
@@ -559,6 +567,9 @@ impl Desktop {
         }
         self.set_focus(Some(id));
         self.damage_window(id);
+        if was_minimised {
+            self.anim_restore(id);
+        }
     }
 
     fn damage_window(&mut self, id: u32) {
@@ -608,7 +619,10 @@ impl Desktop {
     fn close_window(&mut self, id: u32) {
         self.damage_window(id);
         if let Some(i) = self.idx(id) {
-            self.windows.remove(i);
+            let w = self.windows.remove(i);
+            if self.visible(&w) {
+                self.anim_close(w);
+            }
         }
         self.thumbs.remove(&id);
         self.invalidate(PanelKey::Dock);
@@ -621,6 +635,7 @@ impl Desktop {
 
     fn minimise(&mut self, id: u32) {
         self.damage_window(id);
+        self.anim_minimise(id);
         if let Some(w) = self.win_mut(id) {
             w.minimized = true;
         }
@@ -866,7 +881,7 @@ impl Desktop {
         self.damage.clear();
         let mut px = 0u64;
         let vis: Vec<usize> = (0..self.windows.len())
-            .filter(|&i| self.visible(&self.windows[i]))
+            .filter(|&i| self.visible(&self.windows[i]) && !self.animating(self.windows[i].id))
             .collect();
         let cur = self.cursor_rect();
         for d in &rects {
@@ -928,6 +943,9 @@ impl Desktop {
             p.blit_rrect(
                 w.rect.x, w.rect.y, &w.surf, 0, 0, w.rect.w, w.rect.h, R_WINDOW, 255,
             );
+        }
+        if !self.anims.is_empty() {
+            anim::draw(&self.anims, &self.windows, &mut p, d);
         }
         for l in layers {
             match l {
@@ -1025,9 +1043,11 @@ impl Desktop {
             }
         }
         self.tick(now);
+        let animating = self.step_anims(now);
         self.render_and_compose();
         *STATS.lock() = self.stats;
         self.stats.frames != frames
+            || animating
             || self.script.is_some()
             || matches!(
                 self.drag,
@@ -1183,6 +1203,15 @@ impl Desktop {
     // ---- input ----------------------------------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) {
+        // A click or key press finishes running animations.
+        if !self.anims.is_empty()
+            && matches!(
+                ev,
+                Event::Button { down: true, .. } | Event::Key { down: true, .. }
+            )
+        {
+            self.skip_anims();
+        }
         match ev {
             Event::PointerMove { x, y } => self.pointer_move(x, y),
             Event::Button {

@@ -202,6 +202,28 @@ pub fn dock_index(lx: i32) -> Option<usize> {
     (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
 }
 
+impl Desktop {
+    /// The dock tile an app lives in (where minimise flies to); bottom centre if none.
+    pub(super) fn dock_slot(&self, app: App) -> Rect {
+        let prog = match app {
+            App::Client(c) => super::client::process_name(c),
+            _ => None,
+        };
+        let i = DOCK.iter().position(|d| match d.action {
+            DockAction::App(a) => a == app,
+            DockAction::Program(p) => prog.as_deref() == p.rsplit('/').next(),
+            _ => false,
+        });
+        match i {
+            Some(i) => {
+                let (cx, cy) = dock_icon_center(i);
+                Rect::new(cx - DOCK_ICON / 2, cy - DOCK_ICON / 2, DOCK_ICON, DOCK_ICON)
+            }
+            None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
+        }
+    }
+}
+
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
     let d = dock_rect();

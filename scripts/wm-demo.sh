@@ -35,7 +35,7 @@ QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT
 
 DONE="wm: desktop up"
-[ "$DEMO" != none ] && DONE="\[demo\] $DEMO done"
+[ "$DEMO" != none ] && DONE="\[demo\] ${DEMO#slow-} done"
 for _ in $(seq 300); do
   grep -q "$DONE" "$LOG" 2>/dev/null && break
   sleep 0.1

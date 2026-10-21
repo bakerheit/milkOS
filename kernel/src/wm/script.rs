@@ -237,6 +237,26 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "desktoday" => {
             b.wait(300).typ("today").enter().wait(600);
         }
+        "minianim" => {
+            // Ends right after the release, so a quick screenshot catches the animation.
+            b.to(TERM_MIN.0, TERM_MIN.1).wait(30).down().wait(30).up();
+        }
+        "minianim2" => {
+            b.to(TERM_MIN.0, TERM_MIN.1)
+                .wait(30)
+                .down()
+                .wait(30)
+                .up()
+                .wait(4000);
+            b.key(Key::F(4), Mods::NONE)
+                .wait(300)
+                .key(Key::F(4), Mods::NONE)
+                .wait(300);
+        }
+        "openanim" => {
+            let (x, y) = dock_icon_center(8);
+            b.to(x, y).wait(30).down().wait(30).up();
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }
@@ -308,6 +328,14 @@ pub fn from_fw_cfg() -> Option<Script> {
     if name == "none" || name.is_empty() {
         return None;
     }
+    // slow-<demo>: the same demo with animations 20x slower (for catching them on camera).
+    let name = match name.strip_prefix("slow-") {
+        Some(n) => {
+            super::anim::SLOWMO.store(20, core::sync::atomic::Ordering::Relaxed);
+            n
+        }
+        None => name,
+    };
     let Some(steps) = build(name) else {
         kprintln!("[demo] unknown demo '{name}'");
         return None;

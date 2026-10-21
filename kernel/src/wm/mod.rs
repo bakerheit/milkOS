@@ -34,6 +34,7 @@ mod rtc;
 mod script;
 mod shell;
 mod skim;
+mod snap;
 mod theme;
 pub mod tty;
 mod wallpaper;
@@ -195,6 +196,8 @@ enum Drag {
         id: u32,
         dx: i32,
         dy: i32,
+        /// Not moved yet (a snapped / zoomed window unsnaps on its first move).
+        fresh: bool,
     },
     Resize {
         id: u32,
@@ -204,20 +207,13 @@ enum Drag {
         h0: i32,
     },
     /// Pressed a traffic light; acts on release if still over it.
-    Light {
-        id: u32,
-        which: usize,
-    },
+    Light { id: u32, which: usize },
     /// Button went down in a window body: moves go to the client as drags.
-    Content {
-        id: u32,
-    },
+    Content { id: u32 },
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
-    Cell {
-        id: u32,
-    },
+    Cell { id: u32 },
     /// Pressed on something that acts on press only.
     Inert,
 }
@@ -268,6 +264,8 @@ pub struct Desktop {
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
+    /// Snap preview while dragging a window to an edge (snap.rs).
+    snap_preview: Option<Rect>,
     /// Running window animations (anim.rs).
     anims: Vec<anim::Anim>,
     /// Signature of the full-screen layers (dims) last composited.
@@ -337,6 +335,7 @@ impl Desktop {
             },
             cache: BTreeMap::new(),
             anims: Vec::new(),
+            snap_preview: None,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -744,7 +743,6 @@ impl Desktop {
         }
         w.rect.x = x;
         w.rect.y = y;
-        w.restore = None;
         let new = w.bounds();
         self.damage(old);
         self.damage(new);
@@ -1011,6 +1009,13 @@ impl Desktop {
         }
         if !self.anims.is_empty() {
             anim::draw(&self.anims, &self.windows, &mut p, d);
+        }
+        // Where a dragged window will snap.
+        if let Some(r) = self.snap_preview
+            && r.intersects(&d)
+        {
+            p.rrect_r(r, R_WINDOW, MILK, a(350));
+            p.rrect_stroke(r.x, r.y, r.w, r.h, R_WINDOW, 3, HONEY, a(850));
         }
         for l in layers {
             match l {
@@ -1332,7 +1337,22 @@ impl Desktop {
         self.pointer = (x, y);
         self.damage(self.cursor_rect());
         match self.drag {
-            Some(Drag::Move { id, dx, dy }) => self.move_window(id, x - dx, y - dy),
+            Some(Drag::Move { id, dx, dy, fresh }) => {
+                let (mut dx, mut dy) = (dx, dy);
+                if fresh {
+                    if let Some((ndx, ndy)) = self.unsnap_for_drag(id, x, dx) {
+                        (dx, dy) = (ndx, ndy);
+                    }
+                    self.drag = Some(Drag::Move {
+                        id,
+                        dx,
+                        dy,
+                        fresh: false,
+                    });
+                }
+                self.move_window(id, x - dx, y - dy);
+                self.set_snap_preview(snap::zone_at(x, y));
+            }
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
             }
@@ -1484,6 +1504,7 @@ impl Desktop {
                     id,
                     dx: x - r.x,
                     dy: y - r.y,
+                    fresh: true,
                 })
             }
             Some(Part::Resize) => {
@@ -1537,7 +1558,13 @@ impl Desktop {
                     prefs::save(&p);
                 }
             }
-            Some(Drag::Move { .. }) => {
+            Some(Drag::Move { id, .. }) => {
+                if self.snap_preview.is_some() {
+                    if let Some(z) = snap::zone_at(x, y) {
+                        self.snap_to(id, z);
+                    }
+                    self.set_snap_preview(None);
+                }
                 let s = self.stats;
                 if s.drag_frames > 0 {
                     kprintln!(
@@ -1566,8 +1593,20 @@ impl Desktop {
             }
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
-            Key::Up if m.ctrl => return self.toggle_mode(Mode::Spaces),
+            Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),
             Key::F(4) => return self.toggle_mode(Mode::Home),
+            // Ctrl+Alt+arrows: snap the focused window.
+            Key::Left | Key::Right | Key::Up | Key::Down if m.ctrl && m.alt => {
+                if let Some(id) = self.focus {
+                    match k.key {
+                        Key::Left => self.snap_to(id, snap::Zone::Left),
+                        Key::Right => self.snap_to(id, snap::Zone::Right),
+                        Key::Up => self.snap_to(id, snap::Zone::Fill),
+                        _ => self.unsnap(id),
+                    }
+                }
+                return;
+            }
             Key::Left if m.ctrl => return self.switch_space(self.space.saturating_sub(1)),
             Key::Right if m.ctrl => return self.switch_space(self.space + 1),
             _ => {}

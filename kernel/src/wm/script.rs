@@ -492,6 +492,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .enter()
                 .wait(800);
         }
+        "snapleft" => {
+            // Drag Files to the left edge: preview, then let go (snaps to the left half).
+            b.drag(300, 80, 2, 300, 24);
+        }
+        "snappreview" => {
+            // Hold Files at the top-right corner: the quarter preview shows.
+            b.to(300, 80)
+                .wait(30)
+                .down()
+                .wait(30)
+                .glide(300, 80, 1021, 60, 24)
+                .wait(200);
+        }
+        "snapkeys" => {
+            // Terminal focused: Ctrl+Alt+Right, then Files to the left by dragging.
+            let ca = Mods {
+                ctrl: true,
+                alt: true,
+                ..Mods::NONE
+            };
+            b.key(Key::Right, ca).wait(200);
+            b.drag(300, 80, 2, 300, 20).wait(200);
+        }
+        "unsnap" => {
+            // Snap Files left, then drag it away from the edge: it gets its old size back.
+            b.drag(300, 80, 2, 300, 20).wait(200);
+            b.drag(200, 50, 500, 200, 20).wait(200);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

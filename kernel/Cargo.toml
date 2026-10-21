@@ -11,3 +11,6 @@ bench = false
 [features]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
 crash-test = []
+# Real compare-exchange SpinLock for SMP. Only once the MMU maps RAM as Normal memory:
+# atomic read-modify-write hangs on Device memory (MMU off).
+atomic-locks = []

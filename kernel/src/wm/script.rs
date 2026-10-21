@@ -23,8 +23,6 @@ pub enum Step {
     Idle(u64),
     /// Switch the display mode.
     Resolution(i32, i32),
-    /// Chocolate milk (true) or Whole milk.
-    Theme(bool),
 }
 
 pub struct Script {
@@ -32,6 +30,9 @@ pub struct Script {
     steps: Vec<Step>,
     i: usize,
     wait_until: u64,
+    /// A dark- demo: the desktop switches to Chocolate milk before its first frame (so the
+    /// timed first composite is a dark one, not a theme switch).
+    pub dark: bool,
 }
 
 struct B(Vec<Step>);
@@ -1354,8 +1355,7 @@ pub fn from_fw_cfg() -> Option<Script> {
         return None;
     };
     if dark {
-        steps.insert(0, Step::Theme(true));
-        steps.insert(1, Step::Wait(400));
+        steps.insert(0, Step::Wait(400));
     }
     kprintln!("[demo] {name}: {} steps", steps.len());
     Some(Script {
@@ -1363,6 +1363,7 @@ pub fn from_fw_cfg() -> Option<Script> {
         steps,
         i: 0,
         wait_until: 0,
+        dark,
     })
 }
 
@@ -1387,11 +1388,6 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Idle(s) => d.pretend_idle(*s),
-                Step::Theme(dark) => {
-                    let mut p = super::prefs::get();
-                    p.dark = *dark;
-                    super::request(super::Request::Prefs(p));
-                }
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);
                 }

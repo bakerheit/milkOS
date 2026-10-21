@@ -2,7 +2,7 @@
 # Boot milkOS headless, run one scripted desktop demo (kernel/src/wm/script.rs), wait for it to
 # finish and save the screen as a PNG.
 #   scripts/wm-demo.sh DEMO [out.png] [extra qemu args...]
-# DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today
+# DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today hover menu movespace
 #        spaces space2 control dim toast bench tour, or "none" for the plain desktop.
 # Default out: /tmp/milk-DEMO.png; the serial log goes next to it. Only the qemu started here is
 # killed (by PID).

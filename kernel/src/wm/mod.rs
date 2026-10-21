@@ -20,6 +20,7 @@ mod apps;
 mod buffer;
 mod event;
 mod icons;
+mod menus;
 mod paint;
 mod rtc;
 mod script;
@@ -220,6 +221,9 @@ pub struct Desktop {
     hover_lights: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
+    /// Open menu bar menu (index into `menu_titles`) and the row under the pointer.
+    menu: Option<usize>,
+    menu_hover: Option<usize>,
     damage: DirtyList<32>,
     pub stats: Stats,
     status: String,
@@ -273,6 +277,8 @@ impl Desktop {
             drag: None,
             hover_lights: None,
             tip: None,
+            menu: None,
+            menu_hover: None,
             damage: DirtyList::new(),
             stats: Stats::default(),
             status: String::new(),
@@ -1038,6 +1044,23 @@ impl Desktop {
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
     fn hover(&mut self, x: i32, y: i32) {
+        if self.menu.is_some() {
+            if y < MENU_H {
+                if let Some(t) = self.menu_title_at(x) {
+                    self.set_menu(Some(t));
+                }
+            } else if let Some(Layer::Panel(spec)) = self.menu_layer() {
+                let row = if hit(&spec.rect, x, y) {
+                    self.menu_row_at(y - spec.rect.y)
+                } else {
+                    None
+                };
+                if row != self.menu_hover {
+                    self.menu_hover = row;
+                    self.invalidate(PanelKey::Menu);
+                }
+            }
+        }
         let hl = self.window_at(x, y).filter(|&id| {
             self.win(id)
                 .is_some_and(|w| matches!(w.hit(x, y), Some(Part::Light(_))))
@@ -1093,11 +1116,21 @@ impl Desktop {
                 }
                 Layer::Panel(spec) if hit(&spec.rect, x, y) => {
                     let (lx, ly) = (x - spec.rect.x, y - spec.rect.y);
+                    if self.menu.is_some()
+                        && !matches!(spec.key, PanelKey::Menu | PanelKey::MenuBar)
+                    {
+                        self.set_menu(None);
+                        return;
+                    }
                     self.click_panel(spec.key, lx, ly);
                     return;
                 }
                 _ => {}
             }
+        }
+        if self.menu.is_some() {
+            self.set_menu(None);
+            return;
         }
         if self.control {
             self.control = false;
@@ -1180,6 +1213,7 @@ impl Desktop {
         // Global shortcuts.
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
+            Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {
                 self.control = false;
@@ -1208,24 +1242,7 @@ impl Desktop {
                         self.minimise(id);
                     }
                 }
-                Key::Tab | Key::Char('`') => {
-                    // Cycle: send the focused window to the bottom.
-                    let vis: Vec<u32> = self
-                        .windows
-                        .iter()
-                        .filter(|w| !w.minimized && w.space == self.space)
-                        .map(|w| w.id)
-                        .collect();
-                    if vis.len() > 1
-                        && let Some(i) = self.idx(vis[vis.len() - 1])
-                    {
-                        let w = self.windows.remove(i);
-                        let b = w.bounds();
-                        self.windows.insert(0, w);
-                        self.damage(b);
-                        self.focus_top();
-                    }
-                }
+                Key::Tab | Key::Char('`') => self.cycle_windows(),
                 _ => {}
             }
             return;
@@ -1238,6 +1255,34 @@ impl Desktop {
             && w.contents.key(&k)
         {
             w.dirty = true;
+        }
+    }
+
+    /// Send the front window to the back of this space and focus the next one.
+    fn cycle_windows(&mut self) {
+        let vis: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| !w.minimized && w.space == self.space)
+            .map(|w| w.id)
+            .collect();
+        if vis.len() > 1
+            && let Some(i) = self.idx(vis[vis.len() - 1])
+        {
+            let w = self.windows.remove(i);
+            let b = w.bounds();
+            self.windows.insert(0, w);
+            self.damage(b);
+            self.focus_top();
+        }
+    }
+
+    fn set_menu(&mut self, m: Option<usize>) {
+        if m != self.menu {
+            self.menu = m;
+            self.menu_hover = None;
+            self.invalidate(PanelKey::Menu);
+            self.invalidate(PanelKey::MenuBar);
         }
     }
 

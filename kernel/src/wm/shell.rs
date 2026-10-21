@@ -33,6 +33,8 @@ pub enum PanelKey {
     Cell(u32),
     /// The dock's hover name.
     Tip,
+    /// An open menu bar menu.
+    Menu,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -527,6 +529,9 @@ impl Desktop {
             );
             v.push(spec(PanelKey::Toast(t.id), r, R_TOAST, Style::Glass, true));
         }
+        if let Some(m) = self.menu_layer() {
+            v.push(m);
+        }
         if self.control {
             v.push(spec(
                 PanelKey::Control,
@@ -574,7 +579,7 @@ impl Desktop {
         )
     }
 
-    fn app_title(&self) -> &'static str {
+    pub(super) fn app_title(&self) -> &'static str {
         match self.mode {
             Mode::Home => "Today",
             Mode::Spaces => "Overview",
@@ -599,6 +604,7 @@ impl Desktop {
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
+            PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
                 if let Some(i) = self.tip {
                     p.text_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
@@ -625,18 +631,15 @@ impl Desktop {
 
     fn paint_menubar(&self, p: &mut Painter, w: i32) {
         icons::logo(p, 12, 8, 13, ESPRESSO);
-        let mut x = p.bold(38, MENU_TEXT_Y, self.app_title(), ESPRESSO);
-        let menus: &[&str] = match self.mode {
-            Mode::Desktop => self
-                .focused_window()
-                .map_or(&["File", "Edit", "View", "Go", "Window", "Help"], |w| {
-                    w.contents.menus()
-                }),
-            _ => &["View", "Window", "Help"],
-        };
-        for m in menus {
-            x += 24;
-            x = p.text(x, MENU_TEXT_Y, m, ESPRESSO);
+        for (k, (x, tw, name)) in self.menu_titles().into_iter().enumerate() {
+            if self.menu == Some(k) {
+                p.rrect(x - 8, 3, tw + 16, MENU_H - 6, 6, STRAW, SEL_ROW_A);
+            }
+            if k == 0 {
+                p.bold(x, MENU_TEXT_Y, name, ESPRESSO);
+            } else {
+                p.text(x, MENU_TEXT_Y, name, ESPRESSO);
+            }
         }
         p.text_right(
             w - MENU_PAD_X,
@@ -961,9 +964,17 @@ impl Desktop {
             PanelKey::MenuBar => {
                 let sw = font::str_width(&self.status, 1);
                 if x < 30 {
+                    self.set_menu(None);
                     self.toggle_launcher();
                 } else if x >= SCREEN_W - MENU_PAD_X - sw - 8 {
+                    self.set_menu(None);
                     self.control = !self.control;
+                } else if let Some(t) = self.menu_title_at(x) {
+                    let m = if self.menu == Some(t) { None } else { Some(t) };
+                    self.control = false;
+                    self.set_menu(m);
+                } else {
+                    self.set_menu(None);
                 }
             }
             PanelKey::Dock => {
@@ -1032,6 +1043,11 @@ impl Desktop {
                 self.drag = Some(Drag::Cell { id });
             }
             PanelKey::Tip => {}
+            PanelKey::Menu => {
+                if let Some(row) = self.menu_row_at(y) {
+                    self.menu_activate(row);
+                }
+            }
         }
     }
 

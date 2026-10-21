@@ -163,6 +163,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(1000, 14).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
+        "hover" => {
+            b.glide(600, 400, 480, 286, 10);
+        }
+        "menu" => {
+            b.click(320, 14).glide(320, 14, 330, 70, 8);
+        }
+        "movespace" => {
+            b.key(Key::F(3), Mods::NONE).wait(300);
+            b.drag(540, 275, 582, 84, 20).wait(300).click(582, 84);
+        }
         "toast" => {
             b.0.push(Step::Toast("Dentist", "in 15 minutes"));
             b.wait(300);

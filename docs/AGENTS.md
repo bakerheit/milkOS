@@ -30,6 +30,10 @@
   `pmm::alloc_contiguous_zeroed(npages, align_frames)`, free with `pmm::free_contiguous`. No allocation in IRQ handlers.
 - SMP: milkOS runs on 4 CPUs by default (`MILK_SMP=1` for one). `percpu::id()` is the current CPU. Any shared
   state needs a real lock or atomics; "single core, plain load/store is fine" is no longer true. See `docs/smp.md`.
+- Processes can be multi-threaded (clone CLONE_THREAD, futex, `user/rt` thread/Mutex/Condvar); freeing a
+  multi-threaded process's page tables goes through `tlb::shootdown`. `chroot` and the capability sandbox
+  (`proc/caps.rs`, `/bin/sandbox`, model in `docs/security.md`) exist; caps default to "everything", so existing
+  code is unaffected, but new device opens or syscalls that touch files/net/audio/clipboard/windows should check them.
 - Locks: `sync::SpinLock<T>` (masks IRQs, really spins across CPUs, panics on same-CPU re-entry), `sync::IrqGuard`,
   `sync::without_irqs`, `sched::Mutex` for anything that may sleep.
 - Interrupts: `gic::register(intid, handler)`; `gic::spi(n)`, `gic::ppi(n)`. Handlers get `&mut TrapFrame`, run

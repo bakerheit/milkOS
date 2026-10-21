@@ -272,6 +272,7 @@ fn save_known(k: &[Known]) -> Result<(), String> {
     write_atomic(KNOWN, s.as_bytes(), 0o644)
 }
 
+#[derive(Clone)]
 pub enum Trust {
     /// The name's trusted key signed this new key (`drop id --rotate` on the peer).
     Rotated { old: [u8; 32] },

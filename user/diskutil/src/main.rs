@@ -168,7 +168,7 @@ pub enum Icon {
 pub const ICON: i32 = 32;
 
 /// A volume's icon in its slot at (x, y). Today a plain tile (radius 24% of the size, as the SPEC
-/// says for tiles); the art pass replaces the body of this function with Chen's icons, drawn at
+/// says for tiles); the art pass replaces the body of this function with the art icons, drawn at
 /// `ICON` x `ICON` here, and nothing else in the window changes.
 fn volume_icon(win: &mut Window, th: &Theme, x: i32, y: i32, icon: Icon, locked: bool) {
     let tile = match icon {

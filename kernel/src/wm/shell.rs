@@ -657,6 +657,12 @@ fn home_app_at(x: i32, y: i32) -> Option<usize> {
 
 /// A dock tile's icon, `s` across at (x, y): its glyph, or a package's colour and initial.
 fn paint_tile(p: &mut Painter, x: i32, y: i32, s: i32, t: &Tile) {
+    // The artist's icon when there is one (crate::art), else the drawn glyph.
+    if let Some(n) = icons::art_name(&t.name)
+        && icons::art(p, x, y, s, n)
+    {
+        return;
+    }
     match t.icon {
         Some(icon) => icons::draw(p, x, y, s, icon, t.bg, 255, t.fg, t.bg == MILK),
         None => {
@@ -927,7 +933,7 @@ impl Desktop {
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
                     let (icon, bg, fg) = super::notif::app_icon(&t.app);
-                    icons::draw(p, 12, 12, 40, icon, bg, 255, fg, bg == CREAM);
+                    icons::app_tile(p, 12, 12, 40, &t.app, icon, bg, fg);
                     p.text_p(64, 12, &t.title, ESPRESSO, true);
                     p.text_right(w - 12, 12, "now", COCOA, 1, false);
                     p.text_p(64, 32, &t.sub, COCOA, false);
@@ -1142,7 +1148,11 @@ impl Desktop {
                 p.rrect(8, y, w - 16, rh, R_ROW, STRAW, SEL_ROW_A);
             }
             let border = e.bg == MILK || e.bg == CREAM;
-            icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
+            let art = e.kind == super::skim::Kind::App
+                && icons::art_name(&e.title).is_some_and(|n| icons::art(p, 16, y + 6, 36, n));
+            if !art {
+                icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
+            }
             p.text_p(64, y + 6, &e.title, ESPRESSO, true);
             // SPEC: no secondary text on a selected row.
             let sub = if i == sel { ESPRESSO } else { COCOA };

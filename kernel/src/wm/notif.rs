@@ -438,8 +438,7 @@ impl Desktop {
             p.rrect_stroke(x, y, w, h, 14, 1, WHITE, a(900));
         }
         let (icon, bg, fg) = app_icon(&n.app);
-        let border = bg == CREAM;
-        icons::draw(p, x + 10, y + 10, 36, icon, bg, 255, fg, border);
+        icons::app_tile(p, x + 10, y + 10, 36, &n.app, icon, bg, fg);
         // SPEC: everything primary on the selected card.
         let second = if sel { ESPRESSO } else { COCOA };
         let time = clock_hm(n.at_ns);

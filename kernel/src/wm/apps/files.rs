@@ -796,17 +796,19 @@ impl Files {
                 if sel {
                     p.rrect_r(r, R_ROW, STRAW, SEL_ROW_A);
                 }
-                icons::draw(
-                    p,
-                    r.x + 8,
-                    r.y + 2,
-                    22,
-                    icon,
-                    bg,
-                    ba,
-                    fg,
-                    icon != Icon::Folder,
-                );
+                if !icons::file_tile(p, r.x + 8, r.y + 2, 22, fsx::art_kind(e)) {
+                    icons::draw(
+                        p,
+                        r.x + 8,
+                        r.y + 2,
+                        22,
+                        icon,
+                        bg,
+                        ba,
+                        fg,
+                        icon != Icon::Folder,
+                    );
+                }
                 p.text_p(r.x + 40, r.y + 5, &e.name, ESPRESSO, false);
                 let what = if e.kind == crate::fs::InodeType::Dir {
                     String::from("folder")
@@ -827,7 +829,9 @@ impl Files {
             if sel {
                 p.rrect(cx - 4, cy - 4, 100, 96, R_ROW, STRAW, SEL_ROW_A);
             }
-            icons::draw(p, cx + 12, cy, 56, icon, bg, ba, fg, icon != Icon::Folder);
+            if !icons::file_tile(p, cx + 12, cy, 56, fsx::art_kind(e)) {
+                icons::draw(p, cx + 12, cy, 56, icon, bg, ba, fg, icon != Icon::Folder);
+            }
             // Names longer than the cell get cut.
             let name: String = if e.name.chars().count() > 11 {
                 let mut s: String = e.name.chars().take(10).collect();

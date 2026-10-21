@@ -18,6 +18,52 @@ fn main() {
     // User programs first: the initramfs packs them (initramfs.list).
     build_user(repo);
     build_initramfs(repo, &version);
+    build_art(repo);
+}
+
+// ---- art ------------------------------------------------------------------------------
+// docs/ui-concepts/art (icons, wallpapers, the splash) decoded from PNG into raw tables by
+// scripts/art_embed.py (python3 stdlib only), included by src/art.rs. If that fails (no
+// python3), the kernel builds with no art and draws its own icons and wallpapers.
+
+fn build_art(repo: &Path) {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("art");
+    let art = repo.join("docs/ui-concepts/art");
+    let script = repo.join("scripts/art_embed.py");
+    println!("cargo:rerun-if-changed={}", art.join("icons").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        art.join("wallpapers").display()
+    );
+    println!("cargo:rerun-if-changed={}", art.join("splash").display());
+    println!("cargo:rerun-if-changed={}", script.display());
+    let ok = Command::new("python3")
+        .arg("-I")
+        .arg(&script)
+        .arg(&art)
+        .arg(&out)
+        .output()
+        .map(|o| {
+            if !o.status.success() {
+                println!(
+                    "cargo:warning=art_embed.py failed, building without art: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                        .lines()
+                        .last()
+                        .unwrap_or("")
+                );
+            }
+            o.status.success()
+        })
+        .unwrap_or(false);
+    if !ok {
+        fs::create_dir_all(&out).unwrap();
+        fs::write(
+            out.join("art.rs"),
+            "pub static ICONS: &[IconArt] = &[];\npub static IMAGES: &[ImageArt] = &[];\n",
+        )
+        .unwrap();
+    }
 }
 
 fn read_version(repo: &Path) -> String {

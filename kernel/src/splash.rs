@@ -51,8 +51,44 @@ fn in_ellipse(x: i32, y: i32, cx: i32, cy: i32, rx: i32, ry: i32) -> bool {
     dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry
 }
 
+// The artist's splash (crate::art: background, drop and the bar's track; the wordmark,
+// caption and bar fill are drawn here). Used when the screen is its size.
+const ART_INK: Color = rgb(0x3A, 0x2E, 0x28);
+const ART_BLUE: Color = rgb(0x7F, 0x93, 0xC9);
+const ART_COCOA: Color = rgb(0x6B, 0x58, 0x46);
+const ART_STRAW: Color = rgb(0xE5, 0x8C, 0x97);
+/// The art's track: (402, 557) 220 x 4; the wordmark sits between the drop and the bar.
+const ART_BAR: (i32, i32, i32, i32) = (402, 557, 220, 4);
+const ART_WORD_Y: i32 = 458;
+
+fn art_splash(t: &dyn DrawTarget) -> Option<&'static crate::art::ImageArt> {
+    crate::art::image("splash").filter(|a| a.w as usize == t.width() && a.h as usize == t.height())
+}
+
 /// Draw the splash (with an empty progress bar) on a target of any size. See [`bar`] to advance it.
 pub fn draw(t: &mut dyn DrawTarget) {
+    if let Some(a) = art_splash(t) {
+        let stride = t.stride();
+        a.decode_rows(t.pixels_mut(), stride);
+        let w = t.width() as i32;
+        let scale = 4;
+        let tx = (w - font::str_width("milkOS", scale)) / 2;
+        let x = font::draw_str(t, tx, ART_WORD_Y, "milk", ART_INK, None, scale);
+        font::draw_str(t, x, ART_WORD_Y, "OS", ART_BLUE, None, scale);
+        let cap = "booting";
+        let cy = ART_BAR.1 + 24;
+        font::draw_str(
+            t,
+            (w - font::str_width(cap, 1)) / 2,
+            cy,
+            cap,
+            ART_COCOA,
+            None,
+            1,
+        );
+        bar(t, 0);
+        return;
+    }
     let (w, h) = (t.width() as i32, t.height() as i32);
     t.clear(CREAM);
 
@@ -120,6 +156,12 @@ fn bar_rect(t: &dyn DrawTarget) -> (i32, i32, i32, i32) {
 
 /// Redraw the progress bar at `percent` (0..=100).
 pub fn bar(t: &mut dyn DrawTarget, percent: i32) {
+    if art_splash(t).is_some() {
+        // Over the art's track: straw fill only (the track is in the picture).
+        let (x, y, w, h) = ART_BAR;
+        t.fill_rect(x, y, w * percent.clamp(0, 100) / 100, h, ART_STRAW);
+        return;
+    }
     let (x, y, w, h) = bar_rect(t);
     t.fill_rect(x, y, w, h, TRACK);
     t.fill_rect(x, y, w * percent.clamp(0, 100) / 100, h, BLUE);

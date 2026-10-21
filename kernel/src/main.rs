@@ -7,6 +7,7 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod art;
 mod audio;
 mod audit;
 mod crypto;

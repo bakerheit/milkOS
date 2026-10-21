@@ -115,7 +115,8 @@ fn walk(dir: &str, depth: usize, out: &mut Vec<(String, InodeType)>) {
 /// Rebuild the home folder index if it is more than 30 s old (called when Skim opens).
 pub fn refresh_index() {
     let now = timer::now_ns();
-    if INDEX.lock().built_ns != 0 && now - INDEX.lock().built_ns < 30_000_000_000 {
+    let built = INDEX.lock().built_ns;
+    if built != 0 && now - built < 30_000_000_000 {
         return;
     }
     let mut paths = Vec::new();

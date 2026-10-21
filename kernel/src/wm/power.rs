@@ -48,6 +48,8 @@ impl Write for Fixed {
 /// Draw a panic card straight onto the framebuffer. No allocation, no locks: called from the
 /// panic handler, possibly in the middle of a frame.
 pub fn panic_screen(info: &core::panic::PanicInfo) {
+    // Other CPUs keep running: stop the compositor from painting over the card.
+    super::FROZEN.store(true, core::sync::atomic::Ordering::SeqCst);
     let Some(ptr) = ramfb::framebuffer() else {
         return;
     };

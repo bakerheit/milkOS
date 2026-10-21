@@ -84,6 +84,10 @@ const FRAME_NS: u64 = 16_666_667;
 /// How long to sleep when nothing is moving (clocks, log followers and toasts still update).
 const IDLE_NS: u64 = 50_000_000;
 
+/// Set by the panic screen: the compositor stops flushing to the framebuffer (on SMP the wm
+/// thread may still be running on another CPU).
+pub static FROZEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Things kernel code (and the built-in apps) can ask the desktop to do.
 pub enum Request {
     Open(App),
@@ -168,15 +172,6 @@ pub fn run() {
             next.saturating_sub(now),
         );
     }
-}
-
-/// CPU time of the scheduler's idle thread, for the busy percentage.
-fn idle_thread_ns() -> u64 {
-    sched::threads()
-        .iter()
-        .filter(|t| t.name.as_str() == "idle")
-        .map(|t| t.cpu_ns)
-        .sum()
 }
 
 // ---- the desktop -----------------------------------------------------------------------------
@@ -289,9 +284,9 @@ pub struct Desktop {
     script: Option<script::Script>,
     /// Compose into the back buffer only (the boot fade-in does the first flush itself).
     hold_flush: bool,
-    // CPU accounting: the idle thread's CPU time at the start of the last second.
-    idle_cpu_ns: u64,
-    acct_start: u64,
+    /// Busy % per online CPU (menu bar meter), and the same quantised.
+    cpu_loads: Vec<u32>,
+    cpu_steps: Vec<u32>,
     last_second: u64,
 }
 
@@ -350,8 +345,8 @@ impl Desktop {
             status: String::new(),
             script: None,
             hold_flush: true,
-            idle_cpu_ns: idle_thread_ns(),
-            acct_start: timer::now_ns(),
+            cpu_loads: Vec::new(),
+            cpu_steps: Vec::new(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
         d.status = d.status_text();
@@ -952,7 +947,7 @@ impl Desktop {
             self.compose_rect(*d, layers, &vis, cur);
         }
         // Flush to ramfb.
-        if !self.hold_flush {
+        if !self.hold_flush && !FROZEN.load(core::sync::atomic::Ordering::Relaxed) {
             let fstride = self.fb.stride();
             let bstride = self.back.stride();
             let src = self.back.pixels();
@@ -1255,15 +1250,16 @@ impl Desktop {
                     self.close_window(wid);
                 }
             }
-            let span = now - self.acct_start;
-            let idle = idle_thread_ns();
-            if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {
-                self.stats.cpu_pct = (100 - pct.min(100)) as u32;
-            }
-            self.idle_cpu_ns = idle;
-            self.acct_start = now;
+            // Per-CPU load (percpu, sampled on each CPU's tick) for the menu bar meter.
+            let loads: Vec<u32> = crate::percpu::online().map(crate::percpu::load).collect();
+            self.stats.cpu_pct = loads.iter().sum::<u32>() / loads.len().max(1) as u32;
+            // Redraw the meter only when a bar visibly changes (8 steps).
+            let steps: Vec<u32> = loads.iter().map(|l| l * 8 / 100).collect();
+            let changed = steps != self.cpu_steps;
+            self.cpu_loads = loads;
+            self.cpu_steps = steps;
             let st = self.status_text();
-            if st != self.status {
+            if st != self.status || changed {
                 self.status = st;
                 self.invalidate(PanelKey::MenuBar);
             }

@@ -671,12 +671,21 @@ impl Desktop {
     pub(super) fn status_text(&self) -> String {
         let t = rtc::now();
         format!(
-            "cpu {}%   {} {:02}:{:02}",
-            self.stats.cpu_pct,
+            "{} {:02}:{:02}",
             &rtc::DAYS[t.weekday as usize][..3],
             t.hour,
             t.minute
         )
+    }
+
+    /// Width of the menu bar's right side: "cpu" + one bar per CPU + gap + the clock.
+    pub(super) fn status_width(&self) -> i32 {
+        let n = self.cpu_loads.len().max(1) as i32;
+        super::fontx::prop_width("cpu", false)
+            + 4
+            + n * 6
+            + 14
+            + super::fontx::prop_width(&self.status, false)
     }
 
     pub(super) fn app_title(&self) -> String {
@@ -743,11 +752,23 @@ impl Desktop {
             p.text_p(x, MENU_TEXT_Y, &name, ESPRESSO, k == 0);
         }
         let sw = super::fontx::prop_width(&self.status, false);
+        let tx = w - MENU_PAD_X - sw;
+        p.text_p(tx, MENU_TEXT_Y, &self.status, ESPRESSO, false);
+        // A tiny per-CPU load meter: one bar per online CPU.
+        let n = self.cpu_loads.len().max(1) as i32;
+        let mx = tx - 14 - n * 6;
+        for (i, &l) in self.cpu_loads.iter().enumerate() {
+            let x = mx + i as i32 * 6;
+            p.rrect(x, 7, 4, 14, 2, SAND, 255);
+            let h = (14 * l.min(100) as i32 / 100).max(2);
+            let c = if l > 75 { HONEY } else { MATCHA };
+            p.rrect(x, 21 - h, 4, h, 2, c, 255);
+        }
         p.text_p(
-            w - MENU_PAD_X - sw,
+            mx - 4 - super::fontx::prop_width("cpu", false),
             MENU_TEXT_Y,
-            &self.status,
-            ESPRESSO,
+            "cpu",
+            COCOA,
             false,
         );
     }
@@ -1081,7 +1102,7 @@ impl Desktop {
     pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
         match key {
             PanelKey::MenuBar => {
-                let sw = super::fontx::prop_width(&self.status, false);
+                let sw = self.status_width();
                 if x < 30 {
                     self.set_menu(None);
                     self.toggle_launcher();

@@ -7,7 +7,7 @@
 //!   drop name NEW              change the name peers see
 //!   drop daemon [-q]           announce + answer queries (init starts it when eth1 exists)
 //!   drop list [-w MS]          peers on the link (MILK_TABLE=1: a table)
-//!   drop send PEER FILE        PEER: a name, a fingerprint prefix or an IPv4 address
+//!   drop send PEER FILE        PEER: a name, NAME.local, a fingerprint prefix or an IPv4 address
 //!   drop recv [-y] [-k]        accept one transfer into ~/Downloads (-y: no prompt,
 //!                              -k: keep receiving until Ctrl-C)
 //!   drop peers                 peers trusted on first use
@@ -39,7 +39,7 @@ use proto::{Conn, MAGIC, Peer, XFER_PORT, XMAGIC, field};
 use rt::crypto::x25519;
 use rt::net::{self, SockAddr};
 use rt::sha256::Sha256;
-use rt::{ed25519, eprintln, print, println, sys};
+use rt::{ed25519, eprintln, mdns, print, println, sys};
 
 rt::main!(main);
 
@@ -199,7 +199,10 @@ fn cmd_rotate() -> Res<()> {
 /// `drop selftest`: the shared crypto crate's test vectors, run in userland.
 fn cmd_selftest() -> Res<()> {
     let mut all = true;
-    for (name, p, t) in rt::crypto::selftest() {
+    let mut v = rt::crypto::selftest();
+    let (p, t) = mdns::selftest();
+    v.push(("mdns", p, t));
+    for (name, p, t) in v {
         println!("drop: {name:<17} {p}/{t} vectors");
         all &= p == t;
     }
@@ -263,14 +266,25 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         },
     )
     .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
+    // The mDNS responder for `<name>.local` (rt::mdns), on the same link.
+    let mfd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
+    net::bind(
+        mfd,
+        &SockAddr {
+            ip: addr,
+            port: mdns::PORT,
+        },
+    )
+    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
     let _ = sys::mkdir("/tmp/drop", 0o755);
     if !quiet {
         println!(
-            "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}",
+            "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}, answering mDNS for {}.local",
             id.name,
             fingerprint(&id.public),
             ip_str(addr),
-            proto::DISC_PORT
+            proto::DISC_PORT,
+            id.name
         );
     }
     let host = hostname();
@@ -286,15 +300,44 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         }
         proto::announce(me, &host, sys::stat_path(RECEIVING, false).is_ok())
     };
-    let _ = net::set_recv_timeout(fd, 1000);
+    // Both sockets are only read once poll says so; the short timeout is a backstop.
+    let _ = net::set_recv_timeout(fd, 5);
+    let _ = net::set_recv_timeout(mfd, 5);
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
         if now >= next {
             let _ = net::sendto(fd, current(&mut me).as_bytes(), &proto::group());
             next = now + 10_000_000_000;
         }
+        let mut p = [
+            net::PollFd {
+                fd,
+                events: net::POLLIN,
+                revents: 0,
+            },
+            net::PollFd {
+                fd: mfd,
+                events: net::POLLIN,
+                revents: 0,
+            },
+        ];
+        if net::poll(&mut p, Some(1000)).is_err() {
+            sys::sleep_ms(100);
+            continue;
+        }
+        if p[1].revents & net::POLLIN != 0
+            && let Ok((n, from)) = net::recvfrom(mfd, &mut buf)
+        {
+            if let Some(now) = ident::load() {
+                me = now;
+            }
+            answer_mdns(mfd, &buf[..n], from, &me.name, addr);
+        }
+        if p[0].revents & net::POLLIN == 0 {
+            continue;
+        }
         let Ok((n, from)) = net::recvfrom(fd, &mut buf) else {
-            continue; // the 1 s timeout (or an error): go round
+            continue;
         };
         let line = String::from_utf8_lossy(&buf[..n]);
         let line = line.trim_end();
@@ -317,6 +360,25 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
                 ));
             }
             let _ = ident::write_atomic(PEERS_CACHE, s.as_bytes(), 0o644);
+        }
+    }
+}
+
+/// Answer an mDNS query if it asks for `<name>.local` (A or ANY): straight back to the
+/// asker for a legacy unicast query (source port not 5353, as rt::mdns::resolve sends),
+/// else to the group.
+fn answer_mdns(fd: i32, pkt: &[u8], from: SockAddr, name: &str, addr: [u8; 4]) {
+    let Some((id, qs)) = mdns::parse_query(pkt) else {
+        return;
+    };
+    let mine = alloc::format!("{name}.local");
+    for (q, ty) in qs {
+        if (ty == mdns::TYPE_A || ty == mdns::TYPE_ANY) && q.eq_ignore_ascii_case(&mine) {
+            let legacy = from.port != mdns::PORT;
+            let reply = mdns::answer_packet(if legacy { id } else { 0 }, &mine, addr, 10, legacy);
+            let to = if legacy { from } else { mdns::group() };
+            let _ = net::sendto(fd, &reply, &to);
+            return;
         }
     }
 }
@@ -411,6 +473,16 @@ fn key_changed(role: &str, name: &str, old: &[u8; 32], new: &[u8; 32], addr: [u8
 fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
     if let Some(a) = SockAddr::parse(spec, XFER_PORT) {
         return Ok((a, None));
+    }
+    if mdns::is_local(spec) {
+        let ip = mdns::resolve(spec, 1500)?;
+        return Ok((
+            SockAddr {
+                ip,
+                port: XFER_PORT,
+            },
+            None,
+        ));
     }
     let peers = proto::query(1500)?;
     let flat = spec.replace(' ', "").to_ascii_lowercase();

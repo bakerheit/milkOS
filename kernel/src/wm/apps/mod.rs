@@ -5,6 +5,7 @@ pub mod about;
 pub mod browser;
 pub mod files;
 pub mod fsx;
+pub mod milkdrop;
 pub mod music;
 pub mod notes;
 pub mod settings;
@@ -43,6 +44,11 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
         App::Powerbox => (
             Rect::new(192, 120, 640, 460),
             Box::new(super::powerbox::Panel::new()),
+        ),
+        // The Milk Drop incoming panel (Powerbox style, SPEC 644 wide).
+        App::Drop => (
+            Rect::new((super::theme::screen_w() - 644) / 2, 150, 644, 330),
+            Box::new(milkdrop::Receiver::new()),
         ),
         App::Settings => (
             Rect::new(180, 80, 660, 468),

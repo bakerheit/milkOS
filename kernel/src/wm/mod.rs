@@ -759,6 +759,7 @@ impl Desktop {
             "paint" => return self.launch("/bin/paint"),
             "browser" | "web" => return self.open(App::Browser),
             "music" => return self.open(App::Music),
+            "milkdrop" | "milk drop" => return self.open(App::Drop),
             _ if what.starts_with("http://") || what.starts_with("localhost") => {
                 apps::browser::open_url(what);
                 return self.open(App::Browser);

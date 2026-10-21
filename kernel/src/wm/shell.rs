@@ -367,7 +367,7 @@ pub struct Entry {
     pub action: Action,
 }
 
-pub const ENTRIES: [Entry; 12] = [
+pub const ENTRIES: [Entry; 13] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -407,6 +407,14 @@ pub const ENTRIES: [Entry; 12] = [
         bg: HONEY,
         fg: INK,
         action: Action::Program("/bin/paint"),
+    },
+    Entry {
+        name: "Milk Drop",
+        sub: "Receive files from another milkOS on the link",
+        icon: Icon::Globe,
+        bg: LAV,
+        fg: INK,
+        action: Action::App(App::Drop),
     },
     Entry {
         name: "Browser",

@@ -4,6 +4,10 @@
 //! says what is selected and how much room is left. Click selects, double-click opens
 //! (folders here, text files in Notes, WAVs in Music), Backspace goes to the parent folder,
 //! the wheel scrolls.
+//!
+//! Share (the toolbar pill, File > Share..., or dropping a file on a NEARBY device) opens
+//! the Milk Drop sheet over the body (apps/milkdrop.rs). NEARBY lists the machines the
+//! `drop daemon` has heard (/tmp/drop/peers, no waiting).
 
 use alloc::format;
 use alloc::string::String;
@@ -22,6 +26,7 @@ use super::super::theme::*;
 use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
 use super::super::{Request, request};
 use super::fsx::{self, Entry};
+use super::milkdrop;
 use super::notes;
 
 const FAVS: [(&str, &str); 6] = [
@@ -166,6 +171,7 @@ enum Tool {
     /// A part of the path bar: go there.
     Crumb(String),
     Search,
+    Share,
     Clock,
     View,
 }
@@ -203,7 +209,25 @@ pub struct Files {
     hover: Option<(i32, i32)>,
     /// Free bytes where we are (Milk disk only).
     avail: Option<u64>,
+    /// Milk Drop devices the daemon has heard: (name, receiving).
+    nearby: Vec<(String, bool)>,
+    /// The Milk Drop sheet, while sharing.
+    share: Option<milkdrop::Sheet>,
+    now: u64,
 }
+
+/// What the `drop daemon` heard on the link ("name ip fp recv seen" lines).
+fn nearby() -> Vec<(String, bool)> {
+    let text = crate::fs::read_to_string("/tmp/drop/peers").unwrap_or_default();
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() >= 4).then(|| (String::from(f[0]), f[3] == "1"))
+        })
+        .collect()
+}
+
+const DROP_PREFIX: &str = "drop:";
 
 /// The right-click menu's rows.
 const CTX: [&str; 2] = ["Open", "Browse All Versions..."];
@@ -242,6 +266,9 @@ impl Files {
             tools: Vec::new(),
             hover: None,
             avail: None,
+            nearby: nearby(),
+            share: None,
+            now: 0,
         };
         let start = PENDING.lock().take();
         f.show(start.as_deref().unwrap_or("/home/milk/Documents"));
@@ -376,9 +403,10 @@ impl Files {
         }
     }
 
-    /// The sidebar: FAVOURITES, DEVICES (this machine, the Milk disk, FAT volumes) and
-    /// SHARED (the Mac folder). Returns the group labels too: (y, label).
-    fn side_rows() -> (Vec<SideRow>, Vec<(i32, &'static str)>) {
+    /// The sidebar: FAVOURITES, NEARBY (Milk Drop devices; a row's path is "drop:<name>"),
+    /// DEVICES (this machine, the Milk disk, FAT volumes) and SHARED (the Mac folder).
+    /// Returns the group labels too: (y, label).
+    fn side_rows(&self) -> (Vec<SideRow>, Vec<(i32, &'static str)>) {
         let mut rows = Vec::new();
         let mut labels = Vec::new();
         let mut y = TOOL_H + 12;
@@ -403,6 +431,12 @@ impl Files {
             .map(|(n, p)| (String::from(*n), String::from(*p)))
             .collect();
         group(&mut rows, &mut labels, &mut y, "FAVOURITES", favs);
+        let near = self
+            .nearby
+            .iter()
+            .map(|(n, _)| (n.clone(), format!("{DROP_PREFIX}{n}")))
+            .collect();
+        group(&mut rows, &mut labels, &mut y, "NEARBY", near);
         // "milk" and "Milk" read like a typo: say what each one is.
         let mut devs = alloc::vec![(String::from("This machine"), String::from("/"))];
         if crate::fs::stat(VOLUME).is_ok() {
@@ -523,10 +557,12 @@ impl Files {
                 self.tools.push((r, tool));
             }
         }
-        // From the right: view switch, Time Machine clock, search.
+        // From the right: view switch, Time Machine clock, Share, search.
         let view = Rect::new(w - 12 - 24, 8, 24, 24);
         let clock = Rect::new(view.x - 8 - 24, 8, 24, 24);
-        let search = Rect::new(clock.x - 12 - SEARCH_W, 8, SEARCH_W, 24);
+        let share_w = button::pill_w("Share");
+        let share = Rect::new(clock.x - 8 - share_w, 8, share_w, button::PILL_H);
+        let search = Rect::new(share.x - 8 - SEARCH_W, 8, SEARCH_W, 24);
         let bar = Rect::new(72, 8, (search.x - 12 - 72).max(80), 24);
         // Path bar: milk, 1px sand, radius 12; each part clickable.
         p.rrect_r(bar, 12, MILK, 255);
@@ -588,6 +624,15 @@ impl Files {
             }
         }
         self.tools.push((search, Tool::Search));
+        // Share: a secondary pill, primary while a file is selected (SPEC).
+        let kind = if self.document_path().is_some() {
+            Kind::Primary
+        } else {
+            Kind::Secondary
+        };
+        let st = State::hover(self.hovering(&share));
+        button::paint(p, share, "Share", kind, st);
+        self.tools.push((share, Tool::Share));
         // Time Machine: a clock (it is not a device).
         let tm = self.path == TM || in_snapshot(&self.path).is_some();
         let hov = self.hovering(&clock);
@@ -635,7 +680,7 @@ impl Files {
     fn draw_sidebar(&self, p: &mut Painter, h: i32) {
         p.fill(0, TOOL_H, SIDE_W, h - TOOL_H, OAT);
         p.fill(SIDE_W - 1, TOOL_H, 1, h - TOOL_H, SAND);
-        let (rows, labels) = Self::side_rows();
+        let (rows, labels) = self.side_rows();
         for (y, l) in labels {
             p.text(16, y, l, COCOA);
         }
@@ -646,7 +691,14 @@ impl Files {
             if r.path == self.path {
                 p.rrect(8, r.y, SIDE_W - 16, 24, R_BUTTON, STRAW, SEL_SIDEBAR_A);
             }
-            p.text(18, r.y + 4, &r.label, ESPRESSO);
+            if let Some(name) = r.path.strip_prefix(DROP_PREFIX) {
+                // A dot: matcha while that machine is receiving, latte when not.
+                let on = self.nearby.iter().any(|(n, rv)| n == name && *rv);
+                p.circle(18, r.y + 8, 9, if on { MATCHA } else { LATTE }, 255);
+                p.text(34, r.y + 4, &r.label, ESPRESSO);
+            } else {
+                p.text(18, r.y + 4, &r.label, ESPRESSO);
+            }
         }
     }
 
@@ -837,16 +889,17 @@ impl Files {
     }
 }
 
-impl WindowContents for Files {
-    fn title(&self) -> &str {
-        &self.title
+impl Files {
+    /// Open the Milk Drop sheet for the selected file. False if no file is selected.
+    fn open_share(&mut self, device: Option<&str>) -> bool {
+        let Some(path) = self.document_path() else {
+            return false;
+        };
+        self.share = Some(milkdrop::Sheet::new(&path, device));
+        true
     }
 
-    fn menus(&self) -> &'static [&'static str] {
-        &["File", "Edit", "View", "Go", "Window", "Help"]
-    }
-
-    fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
+    fn draw_files(&mut self, p: &mut Painter, w: i32, h: i32) {
         self.size = (w, h);
         let area_h = h - TOOL_H - STATUS_H;
         if self.list {
@@ -890,6 +943,67 @@ impl WindowContents for Files {
             }
         }
     }
+}
+
+impl WindowContents for Files {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn menus(&self) -> &'static [&'static str] {
+        &["File", "Edit", "View", "Go", "Window", "Help"]
+    }
+
+    fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
+        self.draw_files(p, w, h);
+        // The Milk Drop sheet, over the body under the toolbar.
+        let now = self.now;
+        if let Some(sh) = &mut self.share {
+            let r = sh.rect(w, h, TOOL_H);
+            sh.draw(p, r, now);
+        }
+    }
+
+    fn commands(&self) -> Vec<(&'static str, &'static str)> {
+        if self.document_path().is_some() {
+            alloc::vec![("Share...", "share")]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn command(&mut self, name: &str) -> bool {
+        match name {
+            "share" => self.open_share(None),
+            _ => false,
+        }
+    }
+
+    fn drop_zone(&self, x: i32, y: i32, _path: &str) -> Option<Rect> {
+        if x >= SIDE_W || self.share.is_some() {
+            return None;
+        }
+        let (rows, _) = self.side_rows();
+        rows.into_iter()
+            .filter(|r| r.path.starts_with(DROP_PREFIX))
+            .map(|r| Rect::new(8, r.y, SIDE_W - 16, 24))
+            .find(|r| hit(r, x, y))
+    }
+
+    fn drop_at(&mut self, x: i32, y: i32, path: &str) -> bool {
+        let (rows, _) = self.side_rows();
+        let device = rows.into_iter().find_map(|r| {
+            let name = r.path.strip_prefix(DROP_PREFIX)?;
+            hit(&Rect::new(8, r.y, SIDE_W - 16, 24), x, y).then(|| String::from(name))
+        });
+        match device {
+            Some(d) if !fsx::is_dir(path) => {
+                self.share = Some(milkdrop::Sheet::new(path, Some(&d)));
+                true
+            }
+            _ => false,
+        }
+    }
 
     fn drag_start(&mut self, x: i32, y: i32) -> Option<String> {
         if self.path == TM {
@@ -908,6 +1022,9 @@ impl WindowContents for Files {
     }
 
     fn hover(&mut self, x: i32, y: i32) -> bool {
+        if let Some(sh) = &mut self.share {
+            return sh.hover(x, y);
+        }
         let new = (x >= 0).then_some((x, y));
         let before = self.hover;
         self.hover = new;
@@ -924,6 +1041,14 @@ impl WindowContents for Files {
         let PointerKind::Down(button) = e.kind else {
             return false;
         };
+        // The Milk Drop sheet is modal over the body.
+        if let Some(sh) = &mut self.share {
+            match sh.click(e.x, e.y) {
+                milkdrop::Out::Close => self.share = None,
+                milkdrop::Out::Redraw | milkdrop::Out::Nothing => {}
+            }
+            return true;
+        }
         // An open right-click menu takes the next click.
         if let Some((x, y, i)) = self.ctx.take() {
             let r = Self::ctx_rect(x, y, self.size.0, self.size.1);
@@ -962,6 +1087,15 @@ impl WindowContents for Files {
                 Some(Tool::Forward) => self.go_forward(),
                 Some(Tool::Crumb(p)) => self.go(&p),
                 Some(Tool::Clock) => self.go(TM),
+                Some(Tool::Share) => {
+                    if !self.open_share(None) {
+                        super::super::notify_as(
+                            "Files",
+                            "Pick a file to share",
+                            "Select a file, then Share sends it with Milk Drop",
+                        );
+                    }
+                }
                 Some(Tool::View) => {
                     self.list = !self.list;
                     self.scroll = 0;
@@ -972,7 +1106,7 @@ impl WindowContents for Files {
         }
         self.searching = false;
         if e.x < SIDE_W {
-            let (rows, _) = Self::side_rows();
+            let (rows, _) = self.side_rows();
             for r in rows {
                 if hit(&Rect::new(8, r.y, SIDE_W - 16, 24), e.x, e.y) {
                     self.go(&r.path);
@@ -1020,6 +1154,14 @@ impl WindowContents for Files {
     }
 
     fn key(&mut self, k: &KeyInput) -> bool {
+        if let Some(sh) = &mut self.share {
+            match sh.key(k) {
+                milkdrop::Out::Close => self.share = None,
+                milkdrop::Out::Redraw => {}
+                milkdrop::Out::Nothing => return false,
+            }
+            return true;
+        }
         // Typing into the search box.
         if self.searching && !k.mods.meta && !k.mods.ctrl {
             match k.key {
@@ -1116,6 +1258,15 @@ impl WindowContents for Files {
     }
 
     fn tick(&mut self, now: u64) -> bool {
+        self.now = now;
+        let mut sheet = false;
+        if let Some(sh) = &mut self.share {
+            sheet = sh.tick(now);
+            if sh.finished() {
+                self.share = None;
+                sheet = true;
+            }
+        }
         let pending = PENDING.lock().take();
         if let Some(p) = pending {
             self.go(&p);
@@ -1124,20 +1275,25 @@ impl WindowContents for Files {
         // Pick up changes made elsewhere (Terminal, Notes autosave) about once a second.
         let sec = now / 1_000_000_000;
         if sec == self.last_sec {
-            return false;
+            return sheet;
         }
         self.last_sec = sec;
+        let near = nearby();
+        if near != self.nearby {
+            self.nearby = near;
+            sheet = true;
+        }
         if self.path == TM {
             let n = snapshots();
             if n.len() != self.snaps.len() {
                 self.snaps = n;
                 return true;
             }
-            return false;
+            return sheet;
         }
         let avail = available(&self.path);
         let Ok(new) = listing(&self.path) else {
-            return false;
+            return sheet;
         };
         let same = new.len() == self.all.len()
             && new
@@ -1145,7 +1301,7 @@ impl WindowContents for Files {
                 .zip(&self.all)
                 .all(|(a, b)| a.name == b.name && a.size == b.size);
         if same && avail == self.avail {
-            return false;
+            return sheet;
         }
         self.avail = avail;
         self.all = new;

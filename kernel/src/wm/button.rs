@@ -32,7 +32,6 @@ pub const DIALOG_MIN_W: i32 = 88;
 pub enum Kind {
     Primary,
     Secondary,
-    #[allow(dead_code)] // first user: the Milk Drop sheet's key-changed button
     Danger,
     Disabled,
 }

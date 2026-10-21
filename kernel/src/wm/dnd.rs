@@ -104,10 +104,17 @@ impl Desktop {
             return ok.then_some((Target::Dock(i), Rect::new(cx - s / 2, cy - s / 2, s, s)));
         }
         let id = self.window_at(x, y)?;
+        let w = self.win(id)?;
+        // A part of the window that takes it, even from itself (Files' NEARBY devices).
+        let b = w.body();
+        let (bx, by) = (x - w.rect.x - b.x, y - w.rect.y - b.y);
+        if let Some(z) = w.contents.drop_zone(bx, by, path) {
+            let r = Rect::new(z.x + w.rect.x + b.x, z.y + w.rect.y + b.y, z.w, z.h);
+            return Some((Target::Window(id), r));
+        }
         if self.dnd.as_ref().is_some_and(|d| d.from == id) {
             return None; // back onto where it came from: nothing
         }
-        let w = self.win(id)?;
         let ok = match w.app {
             App::Notes => is_text(path),
             App::Music => is_wav(path),
@@ -171,8 +178,9 @@ impl Desktop {
                         }
                     }
                     _ => {
+                        let (bx, by) = (pos.0 - rect.x - body.x, pos.1 - rect.y - body.y);
                         if let Some(w) = self.win_mut(id)
-                            && w.contents.drop_path(&path)
+                            && w.contents.drop_at(bx, by, &path)
                         {
                             w.dirty = true;
                         }

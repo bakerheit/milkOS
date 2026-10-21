@@ -474,7 +474,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
             b.click(297, 233).wait(300); // newest snapshot: its home folder
             // Documents, found with the toolbar search (Return opens the one match).
-            b.click(540, 117)
+            b.click(470, 117)
                 .wait(100)
                 .typ("Documents")
                 .wait(100)
@@ -1088,6 +1088,61 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     }
                     _ => {}
                 }
+            }
+        }
+        // Milk Drop (SPEC "Milk Drop sheet"). share-none runs on one machine (no eth1: nobody
+        // nearby). The drop-alice-* / drop-bob-* pairs boot together with their eth1s linked
+        // (scripts/wm-drop-demo.sh): bob opens the Milk Drop window, alice shares todo.txt.
+        // Files' body is at (97, 97); todo.txt is the second icon (425, 186).
+        "share-none" | "drop-alice-pick" | "drop-alice-send" | "drop-alice-done"
+        | "drop-alice-key" => {
+            b.wait(300);
+            if name != "share-none" {
+                b.typ("drop name alice").enter().wait(1500);
+            }
+            if name == "drop-alice-key" {
+                // alice trusted another key for bob before: his key "has changed".
+                let old = "11".repeat(32);
+                b.typ(&alloc::format!(
+                    "echo bob {old} 1792500000 >> /etc/milk/drop/known_peers"
+                ))
+                .enter()
+                .wait(500);
+            }
+            // Give bob time to boot and start receiving.
+            b.wait(if name == "share-none" { 300 } else { 5000 });
+            b.click(425, 186).wait(300);
+            // The toolbar's Share pill (left of the clock button at body x 530).
+            let sw = super::button::pill_w("Share");
+            b.click(97 + 530 - 8 - sw / 2, 97 + 20).wait(5000);
+            // Send: the sheet (520 wide, one device) hangs at body (39, 38); Send is at
+            // (416, 178) in it, 88 x 28.
+            let send = (97 + 39 + 416 + 44, 97 + 38 + 178 + 14);
+            match name {
+                "drop-alice-send" => {
+                    b.click(send.0, send.1).wait(3000);
+                }
+                "drop-alice-done" => {
+                    b.click(send.0, send.1).wait(16000);
+                }
+                "drop-alice-key" => {
+                    b.click(send.0, send.1).wait(4000);
+                }
+                _ => {}
+            }
+        }
+        "drop-bob-wait" | "drop-bob-accept" => {
+            b.wait(300).typ("drop name bob").enter().wait(1500);
+            b.typ("open milkdrop").enter().wait(1000);
+            if name == "drop-bob-wait" {
+                b.wait(30000);
+            } else {
+                // The incoming panel (644 x 330 at (190, 150), body at (191, 183), 642 x 296):
+                // "Trust alice and accept" at the right of its footer.
+                b.wait(20000);
+                let aw = super::button::dialog_w("Trust alice and accept");
+                b.click(191 + 642 - 16 - aw / 2, 183 + 296 - 56 + 14 + 14)
+                    .wait(6000);
             }
         }
         "tabs-terminal" => {

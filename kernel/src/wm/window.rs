@@ -101,6 +101,23 @@ pub trait WindowContents {
     fn drop_path(&mut self, _path: &str) -> bool {
         false
     }
+    /// A part of the body that takes a dragged file even when the drag started in this
+    /// window (Files' NEARBY devices): its rect in body coordinates.
+    fn drop_zone(&self, _x: i32, _y: i32, _path: &str) -> Option<Rect> {
+        None
+    }
+    /// A file dropped at body (x, y): the drop zone's turn first, then [`drop_path`].
+    fn drop_at(&mut self, _x: i32, _y: i32, path: &str) -> bool {
+        self.drop_path(path)
+    }
+    /// A named command from the menu bar (File > Share..., ...). True if it did something.
+    fn command(&mut self, _name: &str) -> bool {
+        false
+    }
+    /// Commands this window takes now, as (label, name) for its File menu.
+    fn commands(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
     /// The window is finished (a dialog that has its answer): the desktop closes it.
     fn wants_close(&self) -> bool {
         false
@@ -156,6 +173,8 @@ pub enum App {
     /// The trusted Open / Save panel (powerbox.rs).
     Powerbox,
     Welcome,
+    /// Milk Drop: receiving files from another milkOS (apps/milkdrop.rs).
+    Drop,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -173,6 +192,7 @@ impl App {
             App::Versions => "Versions",
             App::Powerbox => "Open",
             App::Welcome => "Welcome",
+            App::Drop => "Milk Drop",
             App::Client(_) => "App",
         }
     }

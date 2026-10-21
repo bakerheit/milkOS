@@ -261,7 +261,7 @@ Implemented (number: name):
 * **Capability sandbox**: each process carries a capability set, inherited and shrink-only,
   enforced on openat/execve/fork/socket/device opens; denials are audited. Full model and
   the powerbox design in docs/security.md.
-| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY, 4105 MILK_WIN_RESIZE (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -347,6 +347,7 @@ child a private copy).
 | 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
 | 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
 | 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+| 4105 | `MILK_WIN_RESIZE` | `(id, w, h, info, flags)` → 0. With `flags` bit 0 (RESIZABLE): the window handles resize events, down to `w` x `h` (nothing else changes; `info` unused). Without: a new `w` x `h` body (up to 1000 x 700), the old picture copied into its top-left and the rest milk; the old mapping is gone and `info` describes the new one exactly as for `MILK_WIN_CREATE`. A size the window did not ask for makes the window fit it. |
 
 Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
 
@@ -357,7 +358,16 @@ alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4
 down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
 the end), 7 close (the user closed the window: clean up and exit), 8 drop (a file was dragged
 from Files onto the window at x, y: `key` is a new fd for it, opened read-only and granted
-to the process; read it and close it). 2 (key up) is reserved.
+to the process; read it and close it), 9 notice action (a button on one of the process's
+notices was pressed: `key` = the notice's `id=`, `mods` = which button, see "/dev/wm"
+below), 10 resize (only after RESIZABLE: the window's body on screen is now x by y; answer
+with `MILK_WIN_RESIZE` to that size and redraw; until then the old picture is shown in the
+top-left). 2 (key up) is reserved.
+
+Resizing: a window that did not declare itself RESIZABLE is never made smaller than its
+buffer (and never joins a smaller tab group); a resizable one follows its window, a resize
+drag or a tab group, down to its minimum. `user/gui`: `Window::set_resizable(min_w, min_h)`,
+`Event::Resize { w, h }`, `Window::resize(w, h)`. Paint is resizable (a bigger canvas).
 
 Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
 stays mapped until the process destroys the window or exits. Windows of processes that exit
@@ -369,9 +379,39 @@ without destroying them are closed and freed by the wm within a second.
 
 `kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
 first space): `open <app|absolute path>` (apps: files terminal notes about paint today
-spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
-<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
-write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+spaces milkdrop; a folder opens in Files, a text file in Notes, a `/bin` program runs),
+`notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`. An
+unknown command (or an unknown `notify` option) fails the write with `EINVAL`.
+
+**Notifications with buttons.** `notify` takes options after the subtitle, one per field:
+
+```text
+notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snooze\taction=Open:open /home/milk
+```
+
+* `app=<name>`: the group in the drawer and the icon (default: the writing program's name).
+* `id=<number>`: the poster's own number for this notice, sent back with an action.
+* `action=<label>[:<command>]`, up to two: buttons on the toast and on the drawer card (the
+  first is the primary). Pressing one marks the notice read, removes its toast and:
+  * with a command: runs it, no shell: the first word is an absolute path or a `/bin`
+    program, the rest its arguments; `open <what>` is done by the desktop itself (as the
+    `open` command above);
+  * without: sends the posting process's window an action event (kind 9 in the 32-byte
+    window event: `key` = the `id`, `mods` = the button's index). `user/gui` has
+    `gui::notify(app, title, sub, tag, &[labels])` and `Event::Action { tag, index }`. A
+    poster with no window gets nothing (the press is logged).
+
+**A timer in the menu bar.** `timer <text>[\t<option>...]` shows a countdown left of the
+bell ("04:32", a stopwatch on a straw tint), one per app, so a Clock timer stays visible
+after its window closes. Options: `app=<name>` (default: the writing program) and
+`open=<what>` (what a click opens, as for `open`; default the app, e.g. `/bin/clock`).
+Empty text clears it; an item not refreshed for 5 s goes by itself, so a publisher
+refreshes it every second and one that dies leaves nothing behind. `user/gui`:
+`gui::menu_timer(app, text, open)`.
+
+The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
+LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
+`Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,
 `space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
 
 `user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative

@@ -121,6 +121,7 @@ pub mod nr {
     pub const MILK_WIN_EVENT: u64 = 4102;
     pub const MILK_WIN_TITLE: u64 = 4103;
     pub const MILK_WIN_DESTROY: u64 = 4104;
+    pub const MILK_WIN_RESIZE: u64 = 4105;
 }
 
 pub fn init() {
@@ -678,6 +679,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
                 Err(EBADF)
             }
         }
+        nr::MILK_WIN_RESIZE => sys_win_resize(a0 as u32, a1, a2, a3, a[4] as u32),
         nr::MILK_WIN_DESTROY => {
             let (pa, pages) = crate::wm::client::destroy(current().pid, a0 as u32).ok_or(EBADF)?;
             // Unmap from this process first, then the frames can go back to the PMM.
@@ -732,6 +734,38 @@ fn sys_win_create(w: usize, h: usize, title: usize, tlen: usize, info: usize) ->
     out[20..24].copy_from_slice(&c.id.to_le_bytes());
     copy_out(info, &out)?;
     Ok(c.id as usize)
+}
+
+/// MILK_WIN_RESIZE(id, w, h, info, flags): with flags bit 0 (RESIZABLE), declare that this
+/// window handles resize events, down to `w` x `h` (nothing is reallocated, `info` unused).
+/// Without it, give the window a new `w` x `h` body (the old picture kept in its top-left):
+/// the old mapping goes away, the new one is described in `info` exactly as
+/// MILK_WIN_CREATE does (24 bytes: addr, w, h, stride, id). Returns 0.
+fn sys_win_resize(id: u32, w: usize, h: usize, info: usize, flags: u32) -> KResult<usize> {
+    let pid = current().pid;
+    if flags & 1 != 0 {
+        return if crate::wm::client::set_resizable(pid, id, w as u32, h as u32) {
+            Ok(0)
+        } else {
+            Err(EBADF)
+        };
+    }
+    let (c, (old_pa, old_pages)) =
+        crate::wm::client::resize(pid, id, w as u32, h as u32).ok_or(EINVAL)?;
+    let va = with_space(|s| {
+        let va = s.map_shared(c.pa, c.bytes)?;
+        s.unmap_shared(old_pa, old_pages * crate::mmu::PAGE_SIZE);
+        Ok(va)
+    })?;
+    crate::wm::client::free(old_pa, old_pages);
+    let mut out = [0u8; 24];
+    out[..8].copy_from_slice(&(va as u64).to_le_bytes());
+    out[8..12].copy_from_slice(&(w as u32).to_le_bytes());
+    out[12..16].copy_from_slice(&(h as u32).to_le_bytes());
+    out[16..20].copy_from_slice(&(w as u32).to_le_bytes());
+    out[20..24].copy_from_slice(&c.id.to_le_bytes());
+    copy_out(info, &out)?;
+    Ok(0)
 }
 
 // ---- helpers --------------------------------------------------------------------------

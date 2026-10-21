@@ -5,6 +5,11 @@
 //! (each row OR-ed with itself shifted one pixel right) before smoothing, so bold stays clean.
 //!
 //! Maps are built on first use and cached forever (a few KiB per glyph and size).
+//!
+//! Shared by the boot splash (which runs before the desktop, drawing straight onto the
+//! framebuffer with [`draw_smooth`] / [`draw_prop`]) and the desktop's painter, so the
+//! "milkOS" wordmark looks the same on the splash, the lock screen and the desktop. It
+//! needs the heap (built in `mem::init`, before the splash).
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -12,6 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::font;
+use crate::gfx::{Color, DrawTarget};
 use crate::sync::SpinLock;
 
 /// Source bitmap width: 8 plus one column for faux bold.
@@ -150,4 +156,62 @@ pub fn prop_width(s: &str, bold: bool) -> i32 {
         return w + bold as i32;
     }
     w + if bold { n } else { 0 } - if n > 0 { 1 } else { 0 }
+}
+
+// ---- drawing on any target (the boot splash) -----------------------------------------------
+
+/// Smooth scaled text (2x, 4x, 8x; other sizes pixel-doubled) straight onto `t`, optionally
+/// faux bold. Returns the end x. The same glyphs the desktop's painter draws.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_smooth(
+    t: &mut dyn DrawTarget,
+    x: i32,
+    y: i32,
+    s: &str,
+    c: Color,
+    scale: i32,
+    bold: bool,
+) -> i32 {
+    if !smooth_scale(scale) {
+        let end = font::draw_str(t, x, y, s, c, None, scale);
+        if bold {
+            font::draw_str(t, x + scale, y, s, c, None, scale);
+        }
+        return end;
+    }
+    let (gw, gh) = (width(scale), font::GLYPH_H as i32 * scale);
+    let mut cx = x;
+    for ch in s.chars() {
+        if ch != ' ' {
+            let m = glyph(ch, scale, bold);
+            for gy in 0..gh {
+                for gx in 0..gw {
+                    let a = m[(gy * gw + gx) as usize];
+                    if a != 0 {
+                        t.blend_pixel(cx + gx, y + gy, c, a);
+                    }
+                }
+            }
+        }
+        cx += font::GLYPH_W as i32 * scale;
+    }
+    cx
+}
+
+/// Proportional 1x text ([`prop_metrics`]) onto `t`. Returns the end x.
+pub fn draw_prop(t: &mut dyn DrawTarget, x: i32, y: i32, s: &str, c: Color, bold: bool) -> i32 {
+    let mut cx = x;
+    for ch in s.chars() {
+        let (first, adv) = prop_metrics(ch);
+        if ch != ' ' {
+            let mut b = [0u8; 4];
+            let g = ch.encode_utf8(&mut b);
+            font::draw_str(t, cx - first, y, g, c, None, 1);
+            if bold {
+                font::draw_str(t, cx - first + 1, y, g, c, None, 1);
+            }
+        }
+        cx += adv + (bold && PROPORTIONAL_UI) as i32;
+    }
+    cx - PROPORTIONAL_UI as i32
 }

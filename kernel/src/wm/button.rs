@@ -12,6 +12,7 @@
 //! dialog button (sheets, panels, Open / Save) is 28 high, radius 8, at least 88 wide.
 
 use crate::gfx::{Color, Rect, rgb};
+use crate::sync::SpinLock;
 
 use super::fontx;
 use super::paint::Painter;
@@ -53,6 +54,14 @@ impl State {
     }
 }
 
+/// Where the left button is held down in the surface being drawn (window coordinates),
+/// set by the desktop around each window's render: a primary button under it is pressed.
+static HELD: SpinLock<Option<(i32, i32)>> = SpinLock::new(None);
+
+pub fn set_held(at: Option<(i32, i32)>) {
+    *HELD.lock() = at;
+}
+
 /// The width of a pill for `label`.
 pub fn pill_w(label: &str) -> i32 {
     fontx::prop_width(label, true) + 2 * PILL_PAD
@@ -67,6 +76,16 @@ pub fn dialog_w(label: &str) -> i32 {
 /// anything taller is a dialog button (radius 8).
 pub fn paint(p: &mut Painter, r: Rect, label: &str, kind: Kind, st: State) {
     let radius = if r.h <= PILL_H { r.h / 2 } else { R_BUTTON };
+    // Pressed: the button is held down (in buffer coordinates, through the painter).
+    let (ox, oy) = p.origin();
+    let held = HELD
+        .lock()
+        .is_some_and(|(x, y)| super::paint::hit(&Rect::new(r.x + ox, r.y + oy, r.w, r.h), x, y));
+    let st = State {
+        pressed: st.pressed || held,
+        hover: st.hover || held,
+        ..st
+    };
     let (fill, text, border) = match kind {
         Kind::Primary => {
             let f = if st.pressed {

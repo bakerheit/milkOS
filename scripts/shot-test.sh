@@ -4,12 +4,13 @@
 #   2. `shotregion`: Cmd+Shift+4 + a drag saves a 385x301 region.
 # After each boot the PNG is pulled out of the image with mkmilkfs.py, checked with
 # png_check.py (CRCs, zlib, filters; a decoder independent of ours) and by macOS's own
-# `sips`, and compared with qemu's screendump of the same screen. Skipped: the toast
-# (top right; the screendump has it, the screenshot doesn't), the menu bar's live cpu meter and
-# clock, and the Terminal's text (the
-# kernel log scrolls on, e.g. with the screenshot's own log line); only the cursor (12x19,
-# in the screendump, not in the screenshot) may differ elsewhere. Sound goes to a WAV
-# (never the speakers).
+# `sips`, and compared with qemu's screendump of the same screen. Skipped, because the
+# screenshot's own "Screenshot saved" notice changes them between the capture and the dump:
+# the toast (top right), the menu bar's whole status area (bell and its unread badge, Focus,
+# network, volume, the live cpu meter and the clock), the dock's badge band (unread badges
+# sit on the tiles' top edge) and the Terminal's text (the kernel log scrolls on, e.g. with
+# the screenshot's own log line). Only the cursor (12x19, in the screendump, not in the
+# screenshot) may differ elsewhere. Sound goes to a WAV (never the speakers).
 #   scripts/shot-test.sh [workdir]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -26,7 +27,7 @@ for demo in shot shotregion; do
   sips -g pixelWidth -g pixelHeight "$WORK/$demo.png" | tail -2 | tr '\n' ' '; echo
   at=0,0; [ "$demo" = shotregion ] && at=300,90
   out=$(python3 -I scripts/png_check.py "$WORK/$demo.png" "$WORK/$demo-qemu.png" --at "$at" \
-    --skip 690,30,334,110 --skip 441,304,518,255 --skip 860,0,164,30)
+    --skip 690,30,334,110 --skip 441,304,518,255 --skip 724,0,300,30 --skip 0,682,1024,34)
   echo "$out" | grep -v '^DIFF'
   read -r _ diff total < <(echo "$out" | grep '^DIFF')
   # Allowed: the cursor (12x19) and, full screen, the toast (~280x70 top right).

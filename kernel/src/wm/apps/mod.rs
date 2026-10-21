@@ -20,7 +20,7 @@ use super::window::{App, WindowContents};
 
 pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
     match app {
-        App::Files => (Rect::new(96, 64, 600, 400), Box::new(files::Files::new())),
+        App::Files => (Rect::new(96, 64, 600, 440), Box::new(files::Files::new())),
         App::Terminal => (
             Rect::new(440, 270, 520, 290),
             Box::new(terminal::Terminal::new()),

@@ -384,12 +384,17 @@ impl Desktop {
         p.text_p(
             PAD + 14,
             ty + 52,
-            &format!(
-                "Up {}:{:02}, {n} window{} open",
-                up / 3600,
-                up / 60 % 60,
-                if n == 1 { "" } else { "s" }
-            ),
+            &if up < 60 {
+                // Nothing to say about uptime in the first minute.
+                format!("{n} window{} open", if n == 1 { "" } else { "s" })
+            } else {
+                format!(
+                    "Up {}:{:02}, {n} window{} open",
+                    up / 3600,
+                    up / 60 % 60,
+                    if n == 1 { "" } else { "s" }
+                )
+            },
             COCOA,
             false,
         );
@@ -740,5 +745,5 @@ pub fn badge(p: &mut Painter, x: i32, y: i32, n: usize) {
     } else {
         format!("{n}")
     };
-    p.text_p_center(x, 18, y + 1, &s, MILK, true);
+    p.text_p_center(x, 18, y + 1, &s, INK, true); // ink on straw: 5.33:1
 }

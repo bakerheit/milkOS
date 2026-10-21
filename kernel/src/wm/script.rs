@@ -10,7 +10,7 @@ use crate::{fwcfg, kprintln};
 
 use super::Desktop;
 use super::event::{Button, Event, Key, Mods};
-use super::shell::{dock_icon_center, dock_icon_center_of};
+use super::shell::{Status, dock_icon_center, dock_icon_center_of, status_center};
 
 pub enum Step {
     Wait(u64),
@@ -126,7 +126,7 @@ impl B {
     }
 }
 
-// The starting desktop (see apps::create): Files (96,64) 600x400, Terminal (440,270) 520x290.
+// The starting desktop (see apps::create): Files (96,64) 600x440, Terminal (440,270) 520x290.
 const TERM_MIN: (i32, i32) = (440 + 14 + 20 + 6, 270 + 16);
 const TERM_ZOOM: (i32, i32) = (440 + 14 + 40 + 6, 270 + 16);
 const FILES_CLOSE: (i32, i32) = (96 + 14 + 6, 64 + 16);
@@ -216,10 +216,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.key(Key::Right, Mods::CTRL);
         }
         "control" => {
-            b.click(915, 14).wait(100);
+            let (x, y) = status_center(Status::Volume, crate::percpu::online().count());
+            b.click(x, y).wait(100);
         }
         "dim" => {
-            b.click(915, 14).wait(100);
+            let (x, y) = status_center(Status::Volume, crate::percpu::online().count());
+            b.click(x, y).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
         "shell" => {
@@ -234,12 +236,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "files" => {
             // Files: sidebar Home, double-click Documents, double-click ideas.md (opens Notes).
-            b.click(137, 153).wait(200);
-            b.click(421, 145).wait(40).click(421, 145).wait(300);
-            b.click(321, 145).wait(40).click(321, 145).wait(300);
+            b.click(137, 183).wait(200);
+            b.click(425, 181).wait(40).click(425, 181).wait(300);
+            b.click(325, 181).wait(40).click(325, 181).wait(300);
         }
         "browse" => {
-            b.click(137, 153).wait(200);
+            b.click(137, 183).wait(200);
         }
         "stty" => {
             b.wait(300)
@@ -438,7 +440,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("rm Documents/todo.txt")
                 .enter()
                 .wait(400);
-            b.click(200, 300).wait(200).click(137, 415).wait(300);
+            b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
         }
         "tm2" => {
             let (x, y) = dock_icon_center(8);
@@ -453,8 +455,8 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("rm Documents/todo.txt")
                 .enter()
                 .wait(400);
-            b.click(200, 300).wait(200).click(137, 415).wait(300);
-            b.click(297, 193).wait(300);
+            b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
+            b.click(297, 233).wait(300);
         }
         "timemachine" => {
             let (x, y) = dock_icon_center(8);
@@ -469,12 +471,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("rm Documents/todo.txt")
                 .enter()
                 .wait(400);
-            b.click(200, 300).wait(200).click(137, 415).wait(300);
-            b.click(297, 193).wait(300); // newest snapshot: its home folder
-            b.click(421, 145).wait(40).click(421, 145).wait(300); // Documents
-            b.click(421, 145).wait(200); // select todo.txt
-            b.click(593, 451).wait(300); // Restore
-            b.click(137, 181).wait(400); // live Documents: it's back
+            b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
+            b.click(297, 233).wait(300); // newest snapshot: its home folder
+            // Documents, found with the toolbar search (Return opens the one match).
+            b.click(540, 117)
+                .wait(100)
+                .typ("Documents")
+                .wait(100)
+                .enter()
+                .wait(300);
+            b.click(425, 181).wait(200); // select todo.txt
+            b.click(641, 491).wait(300); // Restore (status bar)
+            b.click(137, 209).wait(400); // live Documents: it is back
         }
         // Music: window at (300, 92), body at (301, 125), 458 wide. Play at body (229, 182);
         // rows from body y 238 (MUSIC header at 214), SYSTEM SOUNDS header after them.
@@ -695,13 +703,14 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
         }
-        // Versions: Files (window (96, 64), body (97, 97)), herd.txt is the first icon.
+        // Versions: Files (window (96, 64), body (97, 97); the grid starts under the 40px
+        // toolbar), herd.txt is the first icon.
         "versions" | "versionsrestore" => {
             b.herd();
             let (x, y) = dock_icon_center(0);
             b.click(x, y).wait(1500);
-            b.rclick(321, 150).wait(300);
-            b.click(321 + 40, 150 + 6 + 26 + 10).wait(1200);
+            b.rclick(325, 186).wait(300);
+            b.click(325 + 40, 186 + 6 + 26 + 10).wait(1200);
             if name == "versionsrestore" {
                 // One version further back (herd2), then Restore (window (110, 64) 800 x 500).
                 b.key(Key::Down, Mods::NONE).wait(300);
@@ -712,7 +721,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.herd();
             let (x, y) = dock_icon_center(0);
             b.click(x, y).wait(1500);
-            b.rclick(321, 150).wait(400);
+            b.rclick(325, 186).wait(400);
         }
         "notesversions" => {
             b.herd();
@@ -849,12 +858,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
             };
         }
         // Drag and drop from Files (window (96, 64); todo.txt is the second icon, at
-        // (421, 150)). The Terminal is at (440, 270) 520 x 290.
+        // (425, 186)). The Terminal is at (440, 270) 520 x 290.
         "dragterm" | "dragghost" => {
             b.wait(300).typ("cat ").wait(200);
-            b.to(421, 150).wait(30).down().wait(30);
+            b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
-                b.to(421 + 18 * i, 150 + 19 * i).wait(16);
+                b.to(425 + 18 * i, 186 + 17 * i).wait(16);
             }
             if name == "dragterm" {
                 b.up().wait(300).enter().wait(800);
@@ -865,9 +874,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "dragnotes" | "dragdockterm" => {
             // Onto the dock: Notes opens it; Terminal opens a tab in its folder.
             let (tx, ty) = dock_icon_center(if name == "dragnotes" { 3 } else { 1 });
-            b.wait(300).to(421, 150).wait(30).down().wait(30);
+            b.wait(300).to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
-                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                b.to(425 + (tx - 425) * i / 16, 186 + (ty - 186) * i / 16)
                     .wait(16);
             }
             b.up().wait(1500);
@@ -883,9 +892,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
             let (tx, ty) = dock_icon_center_of(10, 2);
-            b.to(421, 150).wait(30).down().wait(30);
+            b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
-                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                b.to(425 + (tx - 425) * i / 16, 186 + (ty - 186) * i / 16)
                     .wait(16);
             }
             b.up().wait(2000);
@@ -903,9 +912,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.drag(tx, ty, tx + (392 - r.x), ty + (364 - r.y), 10)
                 .wait(300);
             b.click(300, 80).wait(300);
-            b.to(421, 150).wait(30).down().wait(30);
+            b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
-                b.to(421 + (800 - 421) * i / 16, 150 + (560 - 150) * i / 16)
+                b.to(425 + (800 - 425) * i / 16, 186 + (560 - 186) * i / 16)
                     .wait(16);
             }
             b.up().wait(1200);
@@ -933,8 +942,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .wait(200);
                 b.enter().wait(800);
             }
-            // The clock is the right end of the menu bar.
-            b.click(super::theme::screen_w() - 30, 14).wait(600);
+            // The bell in the menu bar's status area.
+            let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
+            b.click(x, y).wait(600);
             if name == "notifclear" {
                 let r = super::notif::rect();
                 b.click(r.x + super::notif::W - 18 - 30, r.y + 20).wait(500);

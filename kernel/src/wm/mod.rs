@@ -468,7 +468,8 @@ impl Desktop {
         // Apps from manifests before anything lays the dock out (demo scripts aim at it).
         packages::refresh();
         let demo = script::from_fw_cfg();
-        if demo.is_none() {
+        // Not while the Welcome tour is about to open: it announces itself (REVIEW P1 5).
+        if demo.is_none() && !prefs::get().welcome {
             d.post_toast("Welcome to milkOS", "Ctrl+Space: search");
         }
         d.script = demo;

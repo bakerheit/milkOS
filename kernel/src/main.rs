@@ -15,6 +15,7 @@ mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
+mod fs;
 mod fwcfg;
 mod gfx;
 mod gic;
@@ -83,6 +84,8 @@ pub extern "C" fn kmain() -> ! {
     sync::irq_enable();
     selftest::run();
     memtest::run();
+    fs::init();
+    fs::selftest::run();
 
     loop {
         uart::echo_pending();

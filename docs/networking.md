@@ -457,6 +457,15 @@ The host helper is `scripts/net_bench_host.py`, bound to 127.0.0.1.
 |---|---|---|---|---|
 | baseline (16 KiB windows, no scaling/SACK/timestamps, 2 s TIME_WAIT) | 98-105 MiB/s | 91-94 MiB/s | 34-37 MiB/s | 64 MiB per run, debug kernel, smp 4, three runs |
 | window scaling + timestamps + SACK, delayed ACKs, Nagle, auto-sized buffers (64 KiB -> 4 MiB) | 190-210 MiB/s | 366-395 MiB/s | 59-103 MiB/s | same; guest -> guest varies with drops on the dgram link (host UDP buffers), which SACK recovery repairs |
+| the same code, another machine/load (the lead's run on main) | 201 MiB/s | 293 MiB/s | 33.7 MiB/s | |
+
+**Variance, honestly:** the slirp paths repeat within about 10%. **guest -> guest is
+noisy**: 34-103 MiB/s across runs of the same build, and one run on main matched the
+old baseline. The eth1 link is `-netdev dgram`: two qemu processes passing every frame
+through UDP sockets on the Mac. Its throughput depends on host scheduling and on those
+sockets' buffers, which overflow under large-window bursts. Those are real packet drops,
+which SACK recovery has to repair. Treat the guest -> guest column as a range, not a
+number; it doesn't show the TCP change on its own.
 
 Lossy loopback (boot self-test, every Nth packet dropped, data and ACKs alike):
 

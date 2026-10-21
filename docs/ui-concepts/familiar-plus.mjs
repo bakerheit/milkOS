@@ -101,7 +101,7 @@ function shelf() {
   // clipboard strip
   const cx = 150, cy = 600, cw = 700, ch = 80;
   let ci = T(16, 8, "CLIPBOARD   hold Ctrl-V, pick with the arrows", `color:${C.cocoa}`) + newBadge(cw - 60, 8);
-  [["fn kmain() {", 1], ["https://milk.example", 0], ["Dear Gus,", 0], ["10:41", 0], ["image 800x600", 0], ["#FBF6EC", 0]].forEach((c, i) => {
+  [["fn kmain() {", 1], ["https://milk.example", 0], ["Dear Sam,", 0], ["10:41", 0], ["image 800x600", 0], ["#FBF6EC", 0]].forEach((c, i) => {
     ci += B(14 + i * 112, 34, 106, 36, `background:${c[1] ? C.straw + "44" : "rgba(255,253,248,.9)"};border:${c[1] ? 2 : 1}px solid ${c[1] ? C.straw : C.sand};border-radius:10px;overflow:hidden`, T(8, 10, c[0].slice(0, 12)));
   });
   h += glass(cx, cy, cw, ch, 16, ci, { alpha: 0.78 });
@@ -208,7 +208,7 @@ ${SLIDES.map((s, i) => `<article class="panel p-${id(i)}"><div class="stagebox">
 <h3>What feels familiar</h3><p>${s.fam}</p><h3>What is new</h3><p>${s.nw}</p><h3>Who it helps</h3><p>${s.helps}</p><h3>Cost in a kernel-drawn UI</h3><p>${s.why}</p>
 <h3>Main elements</h3><ul class="chips">${s.els.map((e) => `<li>${e}</li>`).join("")}</ul><h3>Font note</h3><p>${s.font}</p></aside></article>`).join("")}
 <div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${id(i)}" for="r-${id(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.n}. ${s.name}</b><span>${s.cost}</span></div></label>`).join("")}</div>
-<section class="plan"><h2>Mary's take</h2>
+<section class="plan"><h2>Design notes</h2>
 <p>These all sit on top of the 1.0 desktop, so you do not have to pick one. A good order to build them: <b>E Live capsule</b> (easiest, instantly useful), <b>D Shelf and clipboard</b>, <b>A Tabs everywhere</b>, <b>B Projects</b>, and <b>C Time slider</b> last because it needs the filesystem to keep old versions.</p>
 <p style="margin-top:8px">If I had to pick the pair that would make someone say "oh, nice" the first day: <b>Projects</b> (your whole setup follows you) and <b>Tabs everywhere</b> (the window clutter problem, solved the way browsers already taught people).</p></section>
 </div>

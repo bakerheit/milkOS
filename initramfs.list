@@ -67,6 +67,7 @@
 /bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
 /bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755
 /bin/dedupe  target/user/aarch64-unknown-none-softfloat/release/dedupe  755
+/bin/spot    target/user/aarch64-unknown-none-softfloat/release/spot    755
 
 # Linux binary compatibility: a static Linux/aarch64 program with no milkOS knowledge,
 # linked at 0x400000 (tests/linux/build.sh; the binary is committed).

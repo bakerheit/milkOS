@@ -2,7 +2,7 @@
 //! table points at (share it with `Arc<OpenFile>` for `dup`/`fork`, which share the offset
 //! like Linux's `struct file`).
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use super::abi::{
     self, O_ACCMODE, O_APPEND, O_PATH, O_RDONLY, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET, SETFL_MASK,
@@ -16,6 +16,19 @@ pub struct OpenFile {
     flags: AtomicU32,
     /// File offset. For directories: index of the next entry for `getdents64`.
     pos: AtomicU64,
+    /// Written or truncated through this open file: `notify::Event::Modified` when the
+    /// last reference goes (like inotify's IN_CLOSE_WRITE).
+    written: AtomicBool,
+}
+
+impl Drop for OpenFile {
+    fn drop(&mut self) {
+        if self.written.load(Ordering::Relaxed) {
+            super::notify::emit(super::notify::Event::Modified {
+                obj: super::notify::id(&self.inode),
+            });
+        }
+    }
 }
 
 impl OpenFile {
@@ -24,6 +37,7 @@ impl OpenFile {
             inode,
             flags: AtomicU32::new(flags),
             pos: AtomicU64::new(0),
+            written: AtomicBool::new(false),
         }
     }
 
@@ -109,7 +123,9 @@ impl OpenFile {
         if buf.is_empty() {
             return Ok(0);
         }
-        self.inode.write_at(off, buf)
+        let n = self.inode.write_at(off, buf)?;
+        self.written.store(true, Ordering::Relaxed);
+        Ok(n)
     }
 
     /// `lseek(2)`. Returns the new offset.
@@ -139,7 +155,9 @@ impl OpenFile {
         if self.inode.kind() == InodeType::Dir {
             return Err(Errno::EISDIR);
         }
-        self.inode.truncate(len)
+        self.inode.truncate(len)?;
+        self.written.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// `fsync(2)` / `fdatasync(2)`.

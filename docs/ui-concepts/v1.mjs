@@ -364,7 +364,7 @@ Height ${TOK.dock.h}, radius ${TOK.radius.dock}, glass. Padding ${TOK.dock.pad},
 - Minimum size ${TOK.window.min[0]}x${TOK.window.min[1]}. Body padding ${TOK.window.bodyPad}. Files sidebar width ${TOK.window.sidebarW} (oat, 1px sand right edge). Status bar height ${TOK.window.statusH} (cream, 1px sand top edge).
 
 ## Tabs (Terminal tabs and Tabs-everywhere window tabs share this)
-One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at Gus's request.
+One look for every tab strip, so a Terminal's tabs and a Files window that has absorbed a Terminal look the same. Added 2026-10-21 at the engineer's request.
 - Strip: a window with two or more tabs uses a ${TOK.tabs.stripH}px bar in place of the ${TOK.window.titleH}px title bar. Same fill, 1px sand line under it. The traffic lights keep their x (${TOK.window.lightX}) and sit at y${TOK.window.lightY + 2}, centred in the taller bar.
 - Tab: height ${TOK.tabs.tabH}, top y${TOK.tabs.tabY} inside the strip (so it touches the line under the strip), width between ${TOK.tabs.minW} and ${TOK.tabs.maxW} (tabs share the strip equally, never narrower than ${TOK.tabs.minW}), ${TOK.tabs.gap}px between tabs. The first tab starts at x${TOK.tabs.firstX}. Corner radius ${TOK.tabs.radiusTop}px on the top corners only, square at the bottom. Padding ${TOK.tabs.padL}px left, ${TOK.tabs.padR}px right.
 - Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
@@ -407,7 +407,7 @@ Dim the wallpaper with espresso at ${TOK.spaces.dim}. Space strip at y${TOK.spac
 ${TOK.wallpaper}
 
 ## Dark theme ("Chocolate milk")
-Values from kernel/src/wm/theme.rs tc() as given by Gus, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
+Values from kernel/src/wm/theme.rs tc() as given by the engineer, 2026-10-21. Every light neutral token maps to a dark one. The accents (straw, honey, matcha, blue, lav) are unchanged in both themes.
 | Token | Light | Dark | Use |
 |---|---|---|---|
 ${["milk","cream","oat","sand","latte","cocoa","espresso"].map((k) => `| ${k} | ${LIGHT[k]} | ${DARK[k]} | ${TOK.color[k][1]} |`).join("\n")}
@@ -442,7 +442,7 @@ Rules that come out of the numbers:
 - **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
 ## What the mockup does not show
-Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.
+Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Raise it with the design owner if one of these blocks you.
 `;
 
 const here = dirname(fileURLToPath(import.meta.url));

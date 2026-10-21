@@ -393,6 +393,127 @@ snapshotting every second meanwhile: 8 workers x 20 rounds on milkfs and 4 x 8 o
 per boot, 0 errors, `mkmilkfs.py check` clean, `fsck_msdos` with nothing to fix. The test
 scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4}`.
 
+## Change notifications (`fs::notify`)
+
+`kernel/src/fs/notify.rs`, an inotify-lite for kernel code: every namespace change and
+every close of a written file, in order, to whoever watches.
+
+```rust
+let w: Arc<notify::Watcher> = notify::watch(4096); // queue capacity; unwatch = drop it
+while let Some(ev) = w.next(200_000_000) {          // wait up to 200 ms
+    match ev {
+        Event::Created { dir, name, obj, kind } => {} // name appeared in dir (create,
+                                                      // mkdir, symlink, link)
+        Event::Removed { dir, name, obj } => {}      // unlink, rmdir
+        Event::Renamed { from_dir, from, to_dir, to, obj } => {} // whatever `to` was is gone
+        Event::Modified { obj } => {}                 // last close after a write, truncate,
+                                                      // O_TRUNC, FICLONE into it
+        Event::Attr { obj } => {}                     // chmod, chown, utimensat
+        Event::Rescan { dev } => {}                   // rollback, receive, promote on dev
+        Event::Overflow => {}                         // this watcher fell behind: rescan
+    }
+}
+```
+
+- Objects are `(dev, ino)` ids (`notify::id(&inode)`), not paths: a path costs a walk up
+  `..`, depends on the caller's root (chroot) and has several spellings with bind mounts.
+  A watcher that wants paths maps directory ids to paths itself (the search indexer does;
+  `/home/milk` and `/Volumes/Milk/home/milk` are then the same directory).
+- Emitted by `fs::ops` (`open_at` with O_CREAT/O_TRUNC, `mkdir_at`, `symlink_at`,
+  `link_at`, `unlink_at`, `rmdir_at`, `rename_at`, `truncate`, `setattr_at`, `ficlone`)
+  and by `OpenFile` (`Modified` when the last reference to an open file that was written
+  goes, like inotify's IN_CLOSE_WRITE). So every syscall and every kernel caller of
+  `fs::ops` is covered; a file system that changes contents behind the VFS calls
+  `notify::rescan(dev)` (milkfs: rollback, receive, promote).
+- Cost with no watcher: one atomic load per operation. With watchers: a small allocation
+  and a spinlock per event and watcher. A full queue drops events and the watcher's next
+  `next()` returns `Overflow` (once).
+- Events are reported after the change succeeded; by the time a watcher handles one the
+  tree may have moved on (a file created and renamed): check that the path still names
+  `obj` before trusting it.
+
+## Search (`fs::search`)
+
+`kernel/src/fs/search/` (`mod.rs`: the index and its thread; `query.rs`: queries and
+`/sys/fs/search`). A Spotlight-style index of everything under its roots (default
+`/home/milk` and `/Applications`; `/sys/fs/search/roots`): path, name, kind, size, mtime,
+and the words of text files.
+
+- **Kinds**: the extension for known ones (`md`, `txt`, `rs`, `toml`, `html`, `json`, `py`,
+  `sh`, `csv`, ... are text; `png`, `wav`, `pdf`, `zip`, `img`, ...), otherwise sniffed from
+  the first 512 bytes (`png`, `wav`, `app` (ELF), `pdf`, `stream` (a `snap send` stream),
+  `text`, `data`); `folder`, `link`.
+- **Words**: text files up to 512 KiB are read; words are lowercase alphanumeric runs of
+  2+ characters, at most 4000 distinct per file. Names are split the same way (plus the
+  whole name), single characters included.
+- **Skipped**: anything with a component starting with `.` (so `~/.cache`, where the
+  index lives, never shows up).
+- **Kept up to date** by the `search-index` thread (priority `Low`, content reading
+  limited to 16 MB/s) from `fs::notify` events: a create, rename or delete is in the index
+  within ~0.2 s, a written file once it is closed. If an event can't be applied as is (the
+  tree moved on), the thread re-verifies once the queue is empty.
+- **Stored** at `~/.cache/milk/index` (on milkfs: survives reboots), written 2 s after
+  things go quiet (at most every 30 s while busy), via a temp file + rename. Format:
+  `"MKSX" | version u32 | roots | entries (path, kind, size, mtime, folder, words) | xxh64`.
+  At boot it is loaded and **verified**: the roots are walked comparing size and mtime,
+  and only changed or new files are read again; without a usable file (missing, damaged,
+  other roots or version) the index is built from scratch.
+
+Numbers (`scripts/searchtest.sh`, 5051 entries, `-smp 4`): built from scratch in 170 ms;
+after a reboot loaded in 9 ms and verified in ~590 ms (cold caches: the walk reads every
+tree node once); a query for a unique word 0.3 ms, one with 714 hits 3.2 ms.
+
+### Queries
+
+Words and filters, separated by spaces:
+
+- Every word must match the file's **name** or **content**, as a whole word or the start
+  of one (`proj` finds `Project Plan.md`, `milk` finds "milkshake").
+- `kind:K`: `md`, `txt`, `png`, ... or a group: `text` (any text kind), `image`, `audio`,
+  `folder`. Several `kind:` = any of them.
+- `in:NAME`: under a folder called NAME (any level, case-insensitive); `in:/path`: under
+  that path.
+- `modified:today|yesterday|week|month|Nd|Nh|Nm` (N days, hours, minutes).
+- Filters alone list everything that passes them, newest first.
+
+Ranking, per word: name word 100, name prefix 60, content word 20, content prefix 10
+(name and content add up), +50 if the whole name is the query, + recency (8 if modified
+today, 4 this week, 2 this month); ties newest first, then by path.
+
+### Kernel API (for the wm's Skim)
+
+```rust
+use crate::fs::search;
+let hits: Vec<search::Hit> = search::query("plan kind:md", 20)?;  // limit 0 = 50
+for h in hits {
+    // h.path: "/home/milk/Documents/Project Plan.md"
+    // h.kind: "md" | "txt" | "folder" | "png" | "text" | "data" | ...
+    // h.size (bytes), h.mtime (unix seconds), h.score (higher is better),
+    // h.matched: "name" | "content" | "name+content" | "" (filters only)
+}
+let s: search::Status = search::status(); // s.state: "starting" | "building" |
+                                           // "verifying" | "ready"; files, folders, ...
+```
+
+- Errors: `EAGAIN` while the index isn't built yet (shortly after boot), `EINVAL` for a
+  malformed filter (`modified:soon`).
+- Cheap enough to call per keystroke from a kernel thread: it takes the index lock
+  (a `sched::Mutex`) for the length of the query, no I/O. The results are sorted.
+- `search::parse(q, now)` splits a query without running it (e.g. to show filter chips).
+
+### `/sys/fs/search` and `spot`
+
+- `query`: write `[limit=N] QUERY`, read back `# N result(s) for "QUERY" in T us`, then one
+  line per hit: `score<TAB>kind<TAB>size<TAB>mtime<TAB>matched<TAB>path` (the last query
+  written, whoever wrote it).
+- `status` (read): state, counts, roots, how this boot's index came about, events
+  handled, saves. `roots` (read/write: space-separated paths; writing rebuilds),
+  `rebuild` (write anything).
+- `spot WORDS...` (like macOS `mdfind`): paths, best first; `-l` adds kind, size, date and
+  where it matched; `-n N`; `--status`, `--rebuild`. Under msh structured pipes
+  (`MILK_TABLE=1`) it emits a table (`path name kind size modified score matched`):
+  `spot -n 100 kind:md cow | where size > 1K | sort-by modified -r`.
+
 ## Next steps
 
 - Pipes (`InodeType::Fifo`) and `poll` on the wait queues; `O_NONBLOCK`.

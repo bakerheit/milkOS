@@ -651,6 +651,7 @@ pub fn receive(path: &str, target: Option<&str>, force: bool) -> Result<RecvRepo
         }
         drop(st);
         crate::fs::pagecache::invalidate_dev(v.dev);
+        crate::fs::notify::rescan(v.dev);
         Ok(RecvReport {
             snapshot: h.snap.clone(),
             incremental: h.incremental,
@@ -878,6 +879,7 @@ pub fn promote_clone(name: &str) -> Result<String> {
     }
     let r = v.state.lock().clone_promote(name, &keep);
     crate::fs::pagecache::invalidate_dev(v.dev);
+    crate::fs::notify::rescan(v.dev);
     if user_op() {
         crate::audit::volume_rewound();
     }
@@ -980,6 +982,7 @@ pub fn rollback(name: &str) -> Result<()> {
             let mut st = v.state.lock();
             let r = st.snap_rollback(name);
             crate::fs::pagecache::invalidate_dev(v.dev); // live contents changed underneath
+            crate::fs::notify::rescan(v.dev);
             r?;
             st.unlinked_inodes()?
         };

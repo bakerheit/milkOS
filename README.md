@@ -75,6 +75,9 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
   `packages`, `security`, `shell`, plus `AGENTS.md` (how to work on milkOS) and `ui-concepts/` (the UI spec
   and mockups). Screenshots are in `docs/screenshots/`.
 
+## Licence
+milkOS is MIT licensed, see `LICENSE`. Third-party pieces keep their own licences (below).
+
 ## Credits
 The console font is [GNU Unifont](https://unifoundry.com/unifont/) 13.0.06 (8x16 glyphs, U+0020..U+00FF),
 used under the SIL Open Font License 1.1. Licence text: `assets/fonts/UNIFONT-LICENSE.txt`. The larger and

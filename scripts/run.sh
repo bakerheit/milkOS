@@ -36,4 +36,4 @@ elif [ "${MILK_SOUND:-}" = 1 ]; then
 fi
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" \
-  "${NET_ARGS[@]}" "${SOUND_ARGS[@]}"
+  "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

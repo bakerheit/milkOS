@@ -73,26 +73,316 @@ impl fmt::Debug for Ipv4 {
     }
 }
 
-/// An IPv4 address + port (`struct sockaddr_in` minus the family).
+/// An IPv6 address, network byte order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Ipv6(pub [u8; 16]);
+
+impl Ipv6 {
+    pub const UNSPECIFIED: Ipv6 = Ipv6([0; 16]);
+    pub const LOOPBACK: Ipv6 = Ipv6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    /// ff02::1 (all nodes on the link), ff02::2 (all routers), ff02::fb (mDNS).
+    pub const ALL_NODES: Ipv6 = Ipv6([0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+    pub const ALL_ROUTERS: Ipv6 = Ipv6([0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+    pub const MDNS: Ipv6 = Ipv6([0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xfb]);
+
+    pub fn is_unspecified(self) -> bool {
+        self.0 == [0; 16]
+    }
+    pub fn is_loopback(self) -> bool {
+        self == Ipv6::LOOPBACK
+    }
+    pub fn is_multicast(self) -> bool {
+        self.0[0] == 0xff
+    }
+    /// fe80::/10.
+    pub fn is_link_local(self) -> bool {
+        self.0[0] == 0xfe && self.0[1] & 0xc0 == 0x80
+    }
+    /// ff02::/16: link-scope multicast.
+    pub fn is_link_multicast(self) -> bool {
+        self.0[0] == 0xff && self.0[1] & 0x0f == 2
+    }
+    /// An IPv4-mapped address (::ffff:a.b.c.d): the IPv4 address.
+    pub fn to_v4(self) -> Option<Ipv4> {
+        (self.0[..10] == [0; 10] && self.0[10] == 0xff && self.0[11] == 0xff)
+            .then(|| Ipv4([self.0[12], self.0[13], self.0[14], self.0[15]]))
+    }
+    pub fn mapped(v4: Ipv4) -> Ipv6 {
+        let mut a = [0u8; 16];
+        a[10] = 0xff;
+        a[11] = 0xff;
+        a[12..].copy_from_slice(&v4.0);
+        Ipv6(a)
+    }
+    /// The solicited-node multicast address of this one (ff02::1:ffXX:XXXX).
+    pub fn solicited_node(self) -> Ipv6 {
+        let mut a = [0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 0];
+        a[13..].copy_from_slice(&self.0[13..]);
+        Ipv6(a)
+    }
+    /// Ethernet address for a multicast group (RFC 2464: 33:33 + the last 32 bits).
+    pub fn multicast_mac(self) -> Mac {
+        Mac([0x33, 0x33, self.0[12], self.0[13], self.0[14], self.0[15]])
+    }
+    /// `prefix` (its first 8 bytes) + the modified EUI-64 interface id of `mac`.
+    pub fn from_eui64(prefix: &[u8; 8], mac: Mac) -> Ipv6 {
+        let m = mac.0;
+        let mut a = [0u8; 16];
+        a[..8].copy_from_slice(prefix);
+        a[8..].copy_from_slice(&[m[0] ^ 2, m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5]]);
+        Ipv6(a)
+    }
+    /// The first `plen` bits are the same.
+    pub fn same_prefix(self, other: Ipv6, plen: u8) -> bool {
+        let full = (plen / 8) as usize;
+        if self.0[..full] != other.0[..full] {
+            return false;
+        }
+        let rest = plen % 8;
+        rest == 0 || (self.0[full] ^ other.0[full]) >> (8 - rest) == 0
+    }
+    fn segs(self) -> [u16; 8] {
+        core::array::from_fn(|i| u16::from_be_bytes([self.0[2 * i], self.0[2 * i + 1]]))
+    }
+    /// Parse RFC 4291 text (`fe80::1`, `fec0::2`, `::1`, `::ffff:10.0.2.2`).
+    pub fn parse(s: &str) -> Option<Ipv6> {
+        let (head, tail) = match s.split_once("::") {
+            Some((h, t)) => (h, Some(t)),
+            None => (s, None),
+        };
+        let mut words: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
+        let parse_part = |p: &str, out: &mut alloc::vec::Vec<u16>| -> Option<()> {
+            if p.is_empty() {
+                return Some(());
+            }
+            let parts: alloc::vec::Vec<&str> = p.split(':').collect();
+            for (k, w) in parts.iter().enumerate() {
+                if k == parts.len() - 1 && w.contains('.') {
+                    let v4 = Ipv4::parse(w)?;
+                    out.push(u16::from_be_bytes([v4.0[0], v4.0[1]]));
+                    out.push(u16::from_be_bytes([v4.0[2], v4.0[3]]));
+                } else {
+                    if w.is_empty() || w.len() > 4 {
+                        return None;
+                    }
+                    out.push(u16::from_str_radix(w, 16).ok()?);
+                }
+            }
+            Some(())
+        };
+        parse_part(head, &mut words)?;
+        let mut tail_words = alloc::vec::Vec::new();
+        if let Some(t) = tail {
+            parse_part(t, &mut tail_words)?;
+            if words.len() + tail_words.len() > 7 {
+                return None;
+            }
+            words.resize(8 - tail_words.len(), 0);
+            words.extend(tail_words);
+        }
+        if words.len() != 8 {
+            return None;
+        }
+        let mut a = [0u8; 16];
+        for (i, w) in words.iter().enumerate() {
+            a[2 * i..2 * i + 2].copy_from_slice(&w.to_be_bytes());
+        }
+        Some(Ipv6(a))
+    }
+}
+
+impl fmt::Display for Ipv6 {
+    /// RFC 5952: lowercase, leading zeros dropped, the longest run of 2+ zero words as `::`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(v4) = self.to_v4() {
+            return write!(f, "::ffff:{v4}");
+        }
+        let w = self.segs();
+        let (mut best, mut best_len, mut cur, mut cur_len) = (8, 0, 0, 0);
+        for (i, &x) in w.iter().enumerate() {
+            if x == 0 {
+                if cur_len == 0 {
+                    cur = i;
+                }
+                cur_len += 1;
+                if cur_len > best_len {
+                    best = cur;
+                    best_len = cur_len;
+                }
+            } else {
+                cur_len = 0;
+            }
+        }
+        if best_len < 2 {
+            best = 8;
+        }
+        let mut i = 0;
+        while i < 8 {
+            if i == best {
+                f.write_str("::")?;
+                i += best_len;
+                continue;
+            }
+            if i > 0 && i != best + best_len {
+                f.write_str(":")?;
+            }
+            write!(f, "{:x}", w[i])?;
+            i += 1;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Ipv6 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// Running sum of the IPv6 pseudo-header (RFC 8200 8.1).
+pub fn pseudo_sum6(src: Ipv6, dst: Ipv6, next: u8, len: usize) -> u32 {
+    let mut acc = sum(&src.0, 0);
+    acc = sum(&dst.0, acc);
+    acc + (len as u32 >> 16) + (len as u32 & 0xffff) + next as u32
+}
+
+/// An IPv4 or IPv6 address (sockets of both families share one layer).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IpAddr {
+    V4(Ipv4),
+    V6(Ipv6),
+}
+
+impl Default for IpAddr {
+    fn default() -> IpAddr {
+        IpAddr::V4(Ipv4::UNSPECIFIED)
+    }
+}
+
+impl From<Ipv4> for IpAddr {
+    fn from(a: Ipv4) -> IpAddr {
+        IpAddr::V4(a)
+    }
+}
+
+impl From<Ipv6> for IpAddr {
+    /// An IPv4-mapped IPv6 address becomes the IPv4 address.
+    fn from(a: Ipv6) -> IpAddr {
+        match a.to_v4() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(a),
+        }
+    }
+}
+
+impl IpAddr {
+    pub const ANY4: IpAddr = IpAddr::V4(Ipv4::UNSPECIFIED);
+    pub const ANY6: IpAddr = IpAddr::V6(Ipv6::UNSPECIFIED);
+
+    pub fn is_unspecified(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_unspecified(),
+            IpAddr::V6(a) => a.is_unspecified(),
+        }
+    }
+    pub fn is_loopback(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_loopback(),
+            IpAddr::V6(a) => a.is_loopback(),
+        }
+    }
+    pub fn is_multicast(self) -> bool {
+        match self {
+            IpAddr::V4(a) => a.is_multicast(),
+            IpAddr::V6(a) => a.is_multicast(),
+        }
+    }
+    /// IPv4 limited broadcast (IPv6 has none).
+    pub fn is_broadcast(self) -> bool {
+        matches!(self, IpAddr::V4(a) if a.is_broadcast())
+    }
+    pub fn v4(self) -> Option<Ipv4> {
+        match self {
+            IpAddr::V4(a) => Some(a),
+            IpAddr::V6(_) => None,
+        }
+    }
+    pub fn v6(self) -> Option<Ipv6> {
+        match self {
+            IpAddr::V6(a) => Some(a),
+            IpAddr::V4(_) => None,
+        }
+    }
+    pub fn is_v6(self) -> bool {
+        matches!(self, IpAddr::V6(_))
+    }
+    /// As IPv6 (IPv4 addresses mapped: ::ffff:a.b.c.d), for AF_INET6 sockets.
+    pub fn to_v6_mapped(self) -> Ipv6 {
+        match self {
+            IpAddr::V4(a) if a.is_unspecified() => Ipv6::UNSPECIFIED,
+            IpAddr::V4(a) => Ipv6::mapped(a),
+            IpAddr::V6(a) => a,
+        }
+    }
+    /// The address bytes (4 or 16).
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            IpAddr::V4(a) => &a.0,
+            IpAddr::V6(a) => &a.0,
+        }
+    }
+}
+
+impl fmt::Display for IpAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IpAddr::V4(a) => fmt::Display::fmt(a, f),
+            IpAddr::V6(a) => fmt::Display::fmt(a, f),
+        }
+    }
+}
+
+impl fmt::Debug for IpAddr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// An address + port (`struct sockaddr_in` / `sockaddr_in6` minus the family).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub struct SockAddr {
-    pub ip: Ipv4,
+    pub ip: IpAddr,
     pub port: u16,
 }
 
 impl SockAddr {
-    pub const fn new(ip: Ipv4, port: u16) -> SockAddr {
-        SockAddr { ip, port }
+    pub fn new(ip: impl Into<IpAddr>, port: u16) -> SockAddr {
+        SockAddr {
+            ip: ip.into(),
+            port,
+        }
     }
     pub const ANY: SockAddr = SockAddr {
-        ip: Ipv4::UNSPECIFIED,
+        ip: IpAddr::ANY4,
         port: 0,
     };
 }
 
 impl fmt::Display for SockAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.ip, self.port)
+        match self.ip {
+            IpAddr::V4(a) => write!(f, "{a}:{}", self.port),
+            IpAddr::V6(a) => write!(f, "[{a}]:{}", self.port),
+        }
+    }
+}
+
+/// The TCP/UDP pseudo-header sum for either family.
+pub fn l4_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
+    match (src, dst) {
+        (IpAddr::V6(s), IpAddr::V6(d)) => pseudo_sum6(s, d, proto, len),
+        (IpAddr::V4(s), IpAddr::V4(d)) => pseudo_sum(s, d, proto, len),
+        (s, d) => pseudo_sum6(s.to_v6_mapped(), d.to_v6_mapped(), proto, len),
     }
 }
 

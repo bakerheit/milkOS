@@ -23,10 +23,7 @@ pub const XMAGIC: &str = "MILKDROP/2";
 const MAX_LINE: usize = 1024;
 
 pub fn group() -> SockAddr {
-    SockAddr {
-        ip: GROUP,
-        port: DISC_PORT,
-    }
+    SockAddr::v4(GROUP, DISC_PORT)
 }
 
 /// `key=value` field of a protocol line.
@@ -75,7 +72,9 @@ pub struct Peer {
     pub name: String,
     pub host: String,
     pub key: [u8; 32],
-    pub addr: [u8; 4],
+    pub addr: rt::net::Ip,
+    /// Its eth1 IPv6 address (the VM link's fd6d:696c:6b00:1::/64), if it announced one.
+    pub addr6: Option<rt::net::Ip>,
     pub port: u16,
     pub receiving: bool,
     /// Its rotation statement (`rot=old:sig`), if its key replaced an older one.
@@ -84,11 +83,24 @@ pub struct Peer {
 
 const ANNOUNCE_CTX: &str = "milkdrop-announce-v1";
 
-/// Our signed announcement: who we are, where transfers go, whether `drop recv` is on.
-pub fn announce(id: &Identity, host: &str, receiving: bool) -> String {
+/// The VM link's IPv6 prefix (kernel `ipv6::VM_LINK_PREFIX`): the only place an
+/// announced `addr6` may point.
+pub const VM_LINK6: [u8; 8] = [0xfd, 0x6d, 0x69, 0x6c, 0x6b, 0x00, 0x00, 0x01];
+
+/// Is `ip` on the VM link's IPv6 prefix?
+pub fn on_vm_link6(ip: &rt::net::Ip) -> bool {
+    matches!(ip, rt::net::Ip::V6(b) if b[..8] == VM_LINK6)
+}
+
+/// Our signed announcement: who we are, where transfers go (eth1's IPv6 address too, if it
+/// has one), whether `drop recv` is on.
+pub fn announce(id: &Identity, host: &str, receiving: bool, addr6: Option<rt::net::Ip>) -> String {
     let body = alloc::format!(
-        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT} key={} fp={} recv={}{}",
+        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT}{} key={} fp={} recv={}{}",
         id.name,
+        addr6
+            .map(|a| alloc::format!(" addr6={a}"))
+            .unwrap_or_default(),
         hex(&id.public),
         ident::fp_compact(&id.public),
         receiving as u8,
@@ -133,6 +145,10 @@ pub fn parse_announce(line: &str, from: SockAddr) -> Option<Peer> {
         host: String::from(field(body, "host").unwrap_or("?")),
         key,
         addr: from.ip,
+        // Signed with the rest, and only ever an address on the VM link.
+        addr6: field(body, "addr6")
+            .and_then(rt::net::Ip::parse)
+            .filter(on_vm_link6),
         port: field(body, "port")?.parse().ok()?,
         receiving: field(body, "recv") == Some("1"),
         rot: field(body, "rot").and_then(|r| {

@@ -39,7 +39,7 @@ const PENDING_NS: u64 = 3_000_000_000;
 /// Loopback ring size (packets).
 const LO_SLOTS: usize = 256;
 
-/// Test knob: drop every Nth loopback packet (0 = off). The self-test uses it to prove
+/// Test knob: drop 1 in N loopback packets, pseudo-randomly (0 = off). The self-test uses it to prove
 /// TCP recovers from loss; slirp never loses anything.
 pub static LO_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
 
@@ -105,6 +105,8 @@ pub struct Link {
     /// eth frames we dropped before they reached the device (ARP failures, full pool).
     pub extra_drops: u64,
     pub ll: LinkLocal,
+    /// IPv6: addresses, neighbour cache, router.
+    pub v6: super::ipv6::Link6,
 }
 
 impl Link {
@@ -128,6 +130,7 @@ impl Link {
                 next: 0,
                 conflicts: 0,
             },
+            v6: super::ipv6::Link6::new(),
         }
     }
 
@@ -404,30 +407,7 @@ impl Iface {
         };
         match self.route(src, dst)? {
             Route::Loopback => {
-                let every = LO_DROP_EVERY.load(Ordering::Relaxed);
-                if every != 0 {
-                    self.lo_seen = self.lo_seen.wrapping_add(1);
-                    if self.lo_seen.is_multiple_of(every) {
-                        self.lo_stats.tx_dropped += 1;
-                        return Ok(()); // "lost on the wire"
-                    }
-                }
-                if self.lo_count == LO_SLOTS {
-                    self.lo_stats.tx_dropped += 1;
-                    return Err(ENOBUFS);
-                }
-                let slot = (self.lo_head + self.lo_count) % LO_SLOTS;
-                // SAFETY: slot is free (not between head and head+count); MTU bytes each.
-                let buf =
-                    unsafe { core::slice::from_raw_parts_mut(self.lo_buf.add(slot * MTU), MTU) };
-                let n = build_ip(buf, src, dst, proto, id, frag, fill);
-                self.lo_len[slot] = n as u16;
-                self.lo_count += 1;
-                self.lo_stats.tx_packets += 1;
-                self.lo_stats.tx_bytes += n as u64;
-                self.lo_stats.rx_packets += 1;
-                self.lo_stats.rx_bytes += n as u64;
-                Ok(())
+                self.lo_enqueue(|buf| build_ip(buf, src, dst, proto, id, frag, fill))
             }
             Route::Flood(k, mac) => self.send_frame(k, mac, src, dst, proto, id, frag, fill),
             Route::Ether(k, hop) => {
@@ -644,6 +624,65 @@ impl Iface {
                         .flatten()
                         .any(|e| e.state == arp::ArpState::Incomplete)
             })
+    }
+
+    /// Queue one packet (IPv4 or IPv6, built by `build` into an MTU-sized buffer) on the
+    /// loopback ring. The lossy-loopback test knob applies.
+    pub fn lo_enqueue(&mut self, build: impl FnOnce(&mut [u8]) -> usize) -> Result<()> {
+        let every = LO_DROP_EVERY.load(Ordering::Relaxed);
+        if every != 0 {
+            // A fixed pseudo-random sequence (xorshift32, same seed every run), so the
+            // rate is 1 in `every` but the losses don't line up with the traffic's own
+            // period (dropping exactly every Nth packet can hit the same packet of a
+            // repeating exchange for ever).
+            let mut x = if self.lo_seen == 0 {
+                0x6d69_6c6b
+            } else {
+                self.lo_seen
+            };
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.lo_seen = x;
+            if x.is_multiple_of(every) {
+                self.lo_stats.tx_dropped += 1;
+                return Ok(()); // "lost on the wire"
+            }
+        }
+        if self.lo_count == LO_SLOTS {
+            self.lo_stats.tx_dropped += 1;
+            return Err(ENOBUFS);
+        }
+        let slot = (self.lo_head + self.lo_count) % LO_SLOTS;
+        // SAFETY: slot is free (not between head and head+count); MTU bytes each.
+        let buf = unsafe { core::slice::from_raw_parts_mut(self.lo_buf.add(slot * MTU), MTU) };
+        let n = build(buf);
+        self.lo_len[slot] = n as u16;
+        self.lo_count += 1;
+        self.lo_stats.tx_packets += 1;
+        self.lo_stats.tx_bytes += n as u64;
+        self.lo_stats.rx_packets += 1;
+        self.lo_stats.rx_bytes += n as u64;
+        Ok(())
+    }
+
+    /// Send one Ethernet frame on link `k`: `build` writes the payload (up to MTU bytes)
+    /// after the header and returns its length. False if the device queue is full.
+    pub fn send_eth(
+        &mut self,
+        k: usize,
+        dst: Mac,
+        ethertype: u16,
+        build: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Result<()> {
+        let l = &mut self.links[k];
+        let mac = l.mac;
+        let dev = l.dev.as_mut().ok_or(ENETDOWN)?;
+        let ok = dev.send_with(|f| {
+            eth_header(f, dst, mac, ethertype);
+            ETH_HDR + build(&mut f[ETH_HDR..ETH_HDR + MTU])
+        });
+        if ok { Ok(()) } else { Err(ENOBUFS) }
     }
 
     /// Oldest loopback packet, if any. The slice stays valid until [`lo_pop`](Self::lo_pop)

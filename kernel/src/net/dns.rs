@@ -20,7 +20,11 @@ static SERVER: SpinLock<Option<SockAddr>> = SpinLock::new(None);
 pub fn set_server(addr: SockAddr) -> Result<()> {
     let cfg = super::config();
     let ok = addr.ip.is_loopback()
-        || (cfg.configured() && addr.ip.same_net(cfg.addr, cfg.mask) && addr.ip != cfg.addr);
+        || (cfg.configured()
+            && addr
+                .ip
+                .v4()
+                .is_some_and(|a| a.same_net(cfg.addr, cfg.mask) && a != cfg.addr));
     if !ok || addr.port == 0 {
         return Err(EPERM);
     }

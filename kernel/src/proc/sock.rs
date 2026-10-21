@@ -3,7 +3,10 @@
 //!
 //! AF_UNIX sockets (and socketpair, sendmsg, recvmsg) are routed to proc/unixsys.rs.
 //! AF_INET: SOCK_STREAM (TCP), SOCK_DGRAM (UDP, or ICMP echo with IPPROTO_ICMP, the
-//! Linux "ping socket"), `struct sockaddr_in` (16 bytes). Also ppoll(2), for any fd. Blocking
+//! Linux "ping socket"), `struct sockaddr_in` (16 bytes). AF_INET6: the same over IPv6
+//! (IPPROTO_ICMPV6 for ping), `struct sockaddr_in6` (28 bytes, sin6_scope_id = ifindex),
+//! dual-stack unless IPV6_V6ONLY: IPv4 peers show as ::ffff:a.b.c.d. Also ppoll(2), for any
+//! fd. Blocking
 //! unless the fd is O_NONBLOCK (SOCK_NONBLOCK / fcntl) or the call passes MSG_DONTWAIT.
 //! No signals exist yet, so a blocking call waits until the socket is ready.
 
@@ -14,9 +17,10 @@ use super::errno::*;
 use super::syscall::{copy_in, copy_out, file};
 use crate::fs::OpenFile;
 use crate::net::errno as nerr;
-use crate::net::socket::{self, POLLOUT, Shutdown, SockType, SocketId};
+use crate::net::ipv6;
+use crate::net::socket::{self, Family, POLLOUT, Shutdown, SockType, SocketId};
 use crate::net::sockfile::{self, FOREVER};
-use crate::net::wire::{Ipv4, SockAddr};
+use crate::net::wire::{IpAddr, Ipv4, Ipv6, SockAddr};
 
 pub const SOCKET: u64 = 198;
 pub const BIND: u64 = 200;
@@ -44,6 +48,8 @@ const SO_RCVTIMEO: u32 = 20;
 const SO_SNDBUF: u32 = 7;
 const SO_RCVBUF: u32 = 8;
 const TCP_NODELAY: u32 = 1;
+const IPPROTO_IPV6: u32 = 41;
+const IPV6_V6ONLY: u32 = 26;
 const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
@@ -59,9 +65,18 @@ pub fn handles(nr: u64) -> bool {
     )
 }
 
-/// Is `addr` reachable with only the Local network capability (loopback / link-local)?
+/// Is `addr` reachable with only the Local network capability (loopback / link-local, and
+/// over IPv6 also the VM link's own prefix, which is eth1's equivalent of 169.254/16)?
 fn is_local_addr(addr: &SockAddr) -> bool {
-    addr.ip.is_loopback() || addr.ip.0[0] == 169 && addr.ip.0[1] == 254 || addr.ip.is_unspecified()
+    match addr.ip {
+        IpAddr::V4(a) => a.is_loopback() || a.0[0] == 169 && a.0[1] == 254 || a.is_unspecified(),
+        IpAddr::V6(a) => {
+            a.is_loopback()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.0[..8] == ipv6::VM_LINK_PREFIX
+        }
+    }
 }
 
 /// Deny if the calling process may not reach `addr` with its net capability.
@@ -115,7 +130,7 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
             sys_socket(a[0] as u32, a[1] as u32, a[2] as u32)
         }
         PPOLL => sys_ppoll(a[0] as usize, a1, a2),
-        BIND => with_sock(fd, |s, _| socket::bind(s, read_addr(a1, a2)?).map(|_| 0)),
+        BIND => with_sock(fd, |s, _| socket::bind(s, read_addr(s, a1, a2)?).map(|_| 0)),
         LISTEN => with_sock(fd, |s, _| {
             let local = socket::local_addr(s).unwrap_or(SockAddr::ANY);
             let r = socket::listen(s, a1).map(|_| 0);
@@ -126,7 +141,7 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         ACCEPT => sys_accept(fd, a1, a2, 0),
         ACCEPT4 => sys_accept(fd, a1, a2, a3 as u32),
         CONNECT => with_sock(fd, |s, nb| {
-            let addr = read_addr(a1, a2)?;
+            let addr = read_addr(s, a1, a2)?;
             net_allows(&addr, "connect")?;
             let r = connect(s, addr, nb);
             if !matches!(r, Err(e) if e == nerr::EALREADY || e == nerr::EISCONN) {
@@ -134,12 +149,16 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
             }
             r
         }),
-        GETSOCKNAME => with_sock(fd, |s, _| write_addr(socket::local_addr(s)?, a1, a2)),
-        GETPEERNAME => with_sock(fd, |s, _| write_addr(socket::peer_addr(s)?, a1, a2)),
+        GETSOCKNAME => with_sock(fd, |s, _| {
+            write_addr(s, socket::local_addr(s)?, socket::scope(s)?, a1, a2)
+        }),
+        GETPEERNAME => with_sock(fd, |s, _| {
+            write_addr(s, socket::peer_addr(s)?, socket::scope(s)?, a1, a2)
+        }),
         SENDTO => with_sock(fd, |s, nb| {
             let data = copy_in(a1, a2.min(MAX_IO))?;
             let to = if a4 != 0 {
-                Some(read_addr(a4, a5)?)
+                Some(read_addr(s, a4, a5)?)
             } else {
                 None
             };
@@ -147,7 +166,16 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
                 net_allows(to, "sendto")?;
             }
             if let Some(to) = to {
-                let key = ((to.ip.to_u32() as u64) << 16 | to.port as u64) + 1;
+                // FNV-1a of the destination: audit each new one once.
+                let key = to
+                    .ip
+                    .bytes()
+                    .iter()
+                    .chain(&to.port.to_be_bytes())
+                    .fold(0xcbf2_9ce4_8422_2325u64, |h, &b| {
+                        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+                    })
+                    | 1;
                 let f = file(fd)?;
                 let sf = sockfile::of(&f)?;
                 if sf
@@ -163,10 +191,10 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         RECVFROM => with_sock(fd, |s, nb| {
             let mut buf = alloc::vec![0u8; a2.min(MAX_IO)];
             let nb = nb || a3 as u32 & MSG_DONTWAIT != 0;
-            let (n, from) = sockfile::recv(s, &mut buf, nb, timeout_of(fd))?;
+            let (n, from, scope) = sockfile::recv(s, &mut buf, nb, timeout_of(fd))?;
             copy_out(a1, &buf[..n])?;
             if a4 != 0 {
-                write_addr(from, a4, a5)?;
+                write_addr(s, from, scope, a4, a5)?;
             }
             Ok(n)
         }),
@@ -222,14 +250,19 @@ fn install(of: OpenFile, cloexec: bool) -> KResult<usize> {
 }
 
 fn sys_socket(domain: u32, ty: u32, proto: u32) -> KResult<usize> {
-    if domain != socket::AF_INET {
-        return Err(nerr::EAFNOSUPPORT);
-    }
+    let fam = match domain {
+        socket::AF_INET => Family::V4,
+        socket::AF_INET6 => Family::V6,
+        _ => return Err(nerr::EAFNOSUPPORT),
+    };
     let kind = SockType::from_linux(ty).ok_or(nerr::EPROTONOSUPPORT)?;
-    let id = match (kind, proto) {
-        (SockType::Stream, 0 | 6) | (SockType::Dgram, 0 | 17) => socket::socket(kind)?,
+    let id = match (fam, kind, proto) {
+        (_, SockType::Stream, 0 | 6) | (_, SockType::Dgram, 0 | 17) => {
+            socket::socket_family(fam, kind)?
+        }
         // Linux "ping socket": unprivileged ICMP echo (see net::socket::socket_icmp).
-        (SockType::Dgram, 1) => socket::socket_icmp()?,
+        (Family::V4, SockType::Dgram, 1) => socket::socket_icmp()?,
+        (Family::V6, SockType::Dgram, 58) => socket::socket_icmp6()?,
         _ => return Err(nerr::EPROTONOSUPPORT),
     };
     // From here the OpenFile owns the socket (closing it on drop).
@@ -267,7 +300,13 @@ fn sys_accept(fd: i64, addr: usize, addrlen: usize, flags: u32) -> KResult<usize
         "proto=tcp local={local} peer={peer} fd={newfd}"
     );
     if addr != 0 {
-        write_addr(peer, addr, addrlen)?;
+        write_addr(
+            child,
+            peer,
+            socket::scope(child).unwrap_or(None),
+            addr,
+            addrlen,
+        )?;
     }
     Ok(newfd)
 }
@@ -311,6 +350,14 @@ fn setsockopt(fd: i64, level: u32, opt: u32, val: usize, len: usize) -> KResult<
                 return Err(EINVAL);
             }
             sf.set_rcv_timeout((sec as u64).saturating_mul(1_000_000_000) + usec as u64 * 1000);
+            Ok(0)
+        }
+        (IPPROTO_IPV6, IPV6_V6ONLY) => {
+            if len < 4 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(val, 4)?;
+            socket::set_v6only(sf.id, i32::from_le_bytes(b[0..4].try_into().unwrap()) != 0)?;
             Ok(0)
         }
         (SOL_SOCKET, SO_SNDBUF | SO_RCVBUF) | (IPPROTO_TCP, TCP_NODELAY) => {
@@ -398,6 +445,9 @@ fn getsockopt(s: SocketId, level: u32, opt: u32, val: usize, len: usize) -> KRes
         (SOL_SOCKET, SO_RCVBUF) => socket::get_buf(s, true)? as i32,
         (SOL_SOCKET, SO_SNDBUF) => socket::get_buf(s, false)? as i32,
         (IPPROTO_TCP, TCP_NODELAY) => socket::nodelay(s)? as i32,
+        (IPPROTO_IPV6, IPV6_V6ONLY) if socket::family(s)? == Family::V6 => {
+            socket::v6only(s)? as i32
+        }
         (SOL_SOCKET, SO_TYPE) => match socket::sock_type(s)? {
             SockType::Stream => socket::SOCK_STREAM as i32,
             SockType::Dgram => socket::SOCK_DGRAM as i32,
@@ -411,36 +461,93 @@ fn getsockopt(s: SocketId, level: u32, opt: u32, val: usize, len: usize) -> KRes
     Ok(0)
 }
 
-/// `struct sockaddr_in` from user memory.
-fn read_addr(va: usize, len: usize) -> KResult<SockAddr> {
-    if len < 16 {
-        return Err(EINVAL);
+/// The link behind an interface index (sin6_scope_id): lo 1, eth0 2, eth1 3; 0 = none.
+fn link_of_ifindex(i: u32) -> KResult<Option<usize>> {
+    match i {
+        0 | 1 => Ok(None),
+        2 | 3 => Ok(Some(i as usize - 2)),
+        _ => Err(nerr::ENETUNREACH),
     }
-    let b = copy_in(va, 16)?;
-    if u16::from_le_bytes([b[0], b[1]]) as u32 != socket::AF_INET {
-        return Err(nerr::EAFNOSUPPORT);
-    }
-    Ok(SockAddr::new(
-        Ipv4([b[4], b[5], b[6], b[7]]),
-        u16::from_be_bytes([b[2], b[3]]),
-    ))
 }
 
-/// Write a `struct sockaddr_in` to `va`; `lenp` points at the caller's socklen_t (in/out).
-fn write_addr(a: SockAddr, va: usize, lenp: usize) -> KResult<usize> {
-    let mut b = [0u8; 16];
-    b[0..2].copy_from_slice(&(socket::AF_INET as u16).to_le_bytes());
-    b[2..4].copy_from_slice(&a.port.to_be_bytes());
-    b[4..8].copy_from_slice(&a.ip.0);
+/// A `struct sockaddr_in` (AF_INET socket) or `struct sockaddr_in6` (AF_INET6 socket) from
+/// user memory. An IPv4-mapped IPv6 address comes back as IPv4. A scope id sets the
+/// socket's link (for link-local addresses).
+fn read_addr(s: SocketId, va: usize, len: usize) -> KResult<SockAddr> {
+    if len < 2 {
+        return Err(EINVAL);
+    }
+    let fam = u16::from_le_bytes(copy_in(va, 2)?[..2].try_into().unwrap()) as u32;
+    match (socket::family(s)?, fam) {
+        (Family::V4, socket::AF_INET) | (Family::V6, socket::AF_INET) => {
+            // Lenient: a sockaddr_in on a dual-stack AF_INET6 socket is taken as the
+            // v4-mapped address (Linux wants sockaddr_in6 there), unless IPV6_V6ONLY.
+            if len < 16 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(va, 16)?;
+            if socket::family(s)? == Family::V6 && socket::v6only(s)? {
+                return Err(nerr::EAFNOSUPPORT);
+            }
+            Ok(SockAddr::new(
+                Ipv4([b[4], b[5], b[6], b[7]]),
+                u16::from_be_bytes([b[2], b[3]]),
+            ))
+        }
+        (Family::V6, socket::AF_INET6) => {
+            if len < 24 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(va, len.min(28))?;
+            let ip = Ipv6(b[8..24].try_into().unwrap());
+            if b.len() >= 28 {
+                let id = u32::from_le_bytes(b[24..28].try_into().unwrap());
+                let link = link_of_ifindex(id)?;
+                if link.is_some() && (ip.is_link_local() || ip.is_link_multicast()) {
+                    socket::set_scope(s, link)?;
+                }
+            }
+            Ok(SockAddr::new(ip, u16::from_be_bytes([b[2], b[3]])))
+        }
+        _ => Err(nerr::EAFNOSUPPORT),
+    }
+}
+
+/// Write the socket's family of sockaddr to `va`; `lenp` points at the caller's socklen_t
+/// (in/out). AF_INET6 sockets see IPv4 peers as ::ffff:a.b.c.d.
+fn write_addr(
+    s: SocketId,
+    a: SockAddr,
+    scope: Option<usize>,
+    va: usize,
+    lenp: usize,
+) -> KResult<usize> {
+    let mut b = [0u8; 28];
+    let n = if socket::family(s)? == Family::V6 {
+        b[0..2].copy_from_slice(&(socket::AF_INET6 as u16).to_le_bytes());
+        b[2..4].copy_from_slice(&a.port.to_be_bytes());
+        let ip = a.ip.to_v6_mapped();
+        b[8..24].copy_from_slice(&ip.0);
+        if ip.is_link_local() || ip.is_link_multicast() {
+            let id = scope.map_or(0, |k| ipv6::ifindex(Some(k)));
+            b[24..28].copy_from_slice(&id.to_le_bytes());
+        }
+        28
+    } else {
+        b[0..2].copy_from_slice(&(socket::AF_INET as u16).to_le_bytes());
+        b[2..4].copy_from_slice(&a.port.to_be_bytes());
+        b[4..8].copy_from_slice(&a.ip.v4().unwrap_or_default().0);
+        16
+    };
     let room = if lenp != 0 {
         let l = copy_in(lenp, 4)?;
         u32::from_le_bytes([l[0], l[1], l[2], l[3]]) as usize
     } else {
-        16
+        n
     };
-    copy_out(va, &b[..room.min(16)])?;
+    copy_out(va, &b[..room.min(n)])?;
     if lenp != 0 {
-        copy_out(lenp, &16u32.to_le_bytes())?;
+        copy_out(lenp, &(n as u32).to_le_bytes())?;
     }
     Ok(0)
 }

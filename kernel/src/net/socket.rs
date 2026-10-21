@@ -21,7 +21,7 @@ use super::errno::*;
 use super::ring::Ring;
 use super::tcp::{self, Tcb, TcpState};
 use super::udp;
-use super::wire::{Ipv4, SockAddr};
+use super::wire::{IpAddr, Ipv4, Ipv6, SockAddr};
 use super::{Stack, with};
 use crate::fs::errno::{Errno, Result};
 
@@ -68,6 +68,15 @@ impl SockType {
     }
 }
 
+/// Address family of a socket.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Family {
+    V4,
+    V6,
+}
+
+pub const AF_INET6: u32 = 10;
+
 /// `shutdown(2)` `how`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shutdown {
@@ -101,6 +110,14 @@ impl SocketId {
 
 pub struct Sock {
     pub ty: SockType,
+    /// AF_INET or AF_INET6. An AF_INET6 socket is dual-stack unless `v6only`: its IPv4
+    /// peers show as ::ffff:a.b.c.d (the syscall layer maps them), internally they are
+    /// plain IPv4.
+    pub family: Family,
+    pub v6only: bool,
+    /// The link of a scoped (link-local) IPv6 address: sin6_scope_id, or the link a
+    /// connection to one came in on.
+    pub scope: Option<usize>,
     pub local: SockAddr,
     pub remote: SockAddr,
     /// This socket owns its local port (bind / autobind / listen). Accepted children share
@@ -163,6 +180,9 @@ impl Table {
         s.gen_ = s.gen_.wrapping_add(1);
         s.sock = Some(Sock {
             ty,
+            family: Family::V4,
+            v6only: false,
+            scope: None,
             local: SockAddr::ANY,
             remote: SockAddr::ANY,
             owns_port: false,
@@ -218,12 +238,21 @@ impl Table {
     }
 
     /// Is `port` taken for `ty` on an address overlapping `ip`?
-    pub fn port_in_use(&self, ty: SockType, ip: Ipv4, port: u16) -> bool {
+    /// Is `port` taken for `ty` on an address overlapping `ip`? A dual-stack IPv6 wildcard
+    /// (`[::]` without IPV6_V6ONLY) overlaps every IPv4 address too (as on Linux).
+    pub fn port_in_use(&self, ty: SockType, ip: IpAddr, v6only: bool, port: u16) -> bool {
+        let dual = |a: IpAddr, only: bool| a == IpAddr::ANY6 && !only;
         self.iter().any(|(_, s)| {
-            s.ty == ty
-                && s.owns_port
-                && s.local.port == port
-                && (s.local.ip.is_unspecified() || ip.is_unspecified() || s.local.ip == ip)
+            if s.ty != ty || !s.owns_port || s.local.port != port {
+                return false;
+            }
+            let (a, b) = (s.local.ip, ip);
+            if a.is_v6() == b.is_v6() {
+                a.is_unspecified() || b.is_unspecified() || a == b
+            } else {
+                // One IPv4, one IPv6: only a dual-stack wildcard covers both.
+                dual(a, s.v6only) || dual(b, v6only)
+            }
         })
     }
 
@@ -252,11 +281,50 @@ impl Table {
 
 // ---- helpers ------------------------------------------------------------------------------
 
-fn check_local_ip(st: &Stack, ip: Ipv4) -> Result<()> {
-    if ip.is_unspecified() || st.iface.is_our_addr(ip) {
-        Ok(())
-    } else {
-        Err(EADDRNOTAVAIL)
+fn check_local_ip(st: &Stack, ip: IpAddr) -> Result<()> {
+    let ours = match ip {
+        IpAddr::V4(a) => a.is_unspecified() || st.iface.is_our_addr(a),
+        IpAddr::V6(a) => a.is_unspecified() || super::ipv6::is_ours(&st.iface, a),
+    };
+    if ours { Ok(()) } else { Err(EADDRNOTAVAIL) }
+}
+
+/// Our source address for `dst` (None: no route / no usable address).
+pub fn source_for(st: &Stack, dst: IpAddr, scope: Option<usize>) -> Option<IpAddr> {
+    match dst {
+        IpAddr::V4(d) => Some(st.iface.src_for(d))
+            .filter(|a| !a.is_unspecified())
+            .map(IpAddr::V4),
+        IpAddr::V6(d) => super::ipv6::src_for(&st.iface, d, scope).map(IpAddr::V6),
+    }
+}
+
+/// Does socket `s` take traffic addressed to `dst` (its own address, its wildcard for
+/// that family, a dual-stack wildcard for IPv4, broadcast/multicast of its family)?
+pub fn takes(s: &Sock, dst: IpAddr) -> bool {
+    let fam_ok = match (s.family, dst) {
+        (Family::V4, IpAddr::V4(_)) => true,
+        (Family::V4, IpAddr::V6(_)) => false,
+        (Family::V6, IpAddr::V6(_)) => true,
+        (Family::V6, IpAddr::V4(_)) => !s.v6only,
+    };
+    if !fam_ok {
+        return false;
+    }
+    if s.local.ip.is_unspecified() {
+        return true;
+    }
+    s.local.ip == dst
+        || ((dst.is_broadcast() || dst.is_multicast()) && s.local.ip.is_v6() == dst.is_v6())
+}
+
+/// Can socket `s` talk to `to`? (An AF_INET socket can't reach IPv6; a v6-only socket
+/// can't reach IPv4.)
+pub fn family_ok(s: &Sock, to: IpAddr) -> Result<()> {
+    match (s.family, to) {
+        (Family::V4, IpAddr::V6(_)) => Err(EAFNOSUPPORT),
+        (Family::V6, IpAddr::V4(_)) if s.v6only => Err(ENETUNREACH),
+        _ => Ok(()),
     }
 }
 
@@ -277,9 +345,60 @@ fn autobind(st: &mut Stack, i: usize) -> Result<()> {
 
 /// socket(AF_INET, ty, 0).
 pub fn socket(ty: SockType) -> Result<SocketId> {
+    socket_family(Family::V4, ty)
+}
+
+/// socket(AF_INET or AF_INET6, ty, 0). AF_INET6 sockets start dual-stack (IPV6_V6ONLY
+/// off, as Linux's default) with the wildcard `[::]`.
+pub fn socket_family(family: Family, ty: SockType) -> Result<SocketId> {
     with(|st| {
         let i = st.socks.alloc(ty).ok_or(ENOBUFS)?;
+        let s = st.socks.get(i).unwrap();
+        s.family = family;
+        if family == Family::V6 {
+            s.local.ip = IpAddr::ANY6;
+        }
         Ok(st.socks.id_of(i).unwrap())
+    })
+}
+
+/// IPV6_V6ONLY (AF_INET6 sockets only, before bind).
+pub fn set_v6only(id: SocketId, on: bool) -> Result<()> {
+    with(|st| {
+        let (_, s) = st.socks.lookup(id)?;
+        if s.family != Family::V6 {
+            return Err(ENOPROTOOPT);
+        }
+        if s.owns_port {
+            return Err(EINVAL);
+        }
+        s.v6only = on;
+        Ok(())
+    })
+}
+
+pub fn v6only(id: SocketId) -> Result<bool> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.v6only))
+}
+
+/// The socket's family (for the syscall layer's address conversions).
+pub fn family(id: SocketId) -> Result<Family> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.family))
+}
+
+/// The link a scoped (link-local) IPv6 socket is bound to, if any.
+pub fn scope(id: SocketId) -> Result<Option<usize>> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.scope))
+}
+
+/// Set the link for a scoped IPv6 address (sin6_scope_id; 0 = none).
+pub fn set_scope(id: SocketId, scope: Option<usize>) -> Result<()> {
+    with(|st| {
+        let (_, s) = st.socks.lookup(id)?;
+        if scope.is_some() {
+            s.scope = scope;
+        }
+        Ok(())
     })
 }
 
@@ -295,6 +414,20 @@ pub fn socket_icmp() -> Result<SocketId> {
     })
 }
 
+/// socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6): the same for ICMPv6 echo (type 128 in,
+/// 129 back). IPv6 only.
+pub fn socket_icmp6() -> Result<SocketId> {
+    with(|st| {
+        let i = st.socks.alloc(SockType::Dgram).ok_or(ENOBUFS)?;
+        let s = st.socks.get(i).unwrap();
+        s.icmp = true;
+        s.family = Family::V6;
+        s.v6only = true;
+        s.local.ip = IpAddr::ANY6;
+        Ok(st.socks.id_of(i).unwrap())
+    })
+}
+
 /// bind(2). Port 0 picks an ephemeral port. The address must be unspecified, loopback or
 /// eth0's (`EADDRNOTAVAIL`). Bound already: `EINVAL`. Taken: `EADDRINUSE` (connections in
 /// TIME_WAIT or closing in the background never block a bind, as with SO_REUSEADDR).
@@ -305,10 +438,11 @@ pub fn bind(id: SocketId, addr: SockAddr) -> Result<()> {
         if s.owns_port || s.tcb.state != TcpState::Closed {
             return Err(EINVAL);
         }
-        let ty = s.ty;
+        family_ok(s, addr.ip).map_err(|_| EAFNOSUPPORT)?;
+        let (ty, v6only) = (s.ty, s.v6only);
         let port = if addr.port == 0 {
             st.socks.ephemeral(ty)?
-        } else if st.socks.port_in_use(ty, addr.ip, addr.port) {
+        } else if st.socks.port_in_use(ty, addr.ip, v6only, addr.port) {
             return Err(EADDRINUSE);
         } else {
             addr.port
@@ -368,21 +502,24 @@ pub fn accept(id: SocketId) -> Result<(SocketId, SockAddr)> {
 /// UDP: sets the default peer, Ok at once. An unspecified address means 127.0.0.1.
 pub fn connect(id: SocketId, addr: SockAddr) -> Result<()> {
     with(|st| {
-        let addr = if addr.ip.is_unspecified() {
-            SockAddr::new(Ipv4::LOCALHOST, addr.port)
-        } else {
-            addr
+        let addr = match addr.ip {
+            IpAddr::V4(a) if a.is_unspecified() => SockAddr::new(Ipv4::LOCALHOST, addr.port),
+            IpAddr::V6(a) if a.is_unspecified() => SockAddr::new(Ipv6::LOOPBACK, addr.port),
+            _ => addr,
         };
         let (i, s) = st.socks.lookup(id)?;
+        family_ok(s, addr.ip)?;
+        let scope = s.scope;
         if s.ty == SockType::Dgram {
             if addr.port == 0 {
                 return Err(EINVAL);
             }
             s.remote = addr;
             s.udp_connected = true;
-            if s.local.ip.is_unspecified() {
+            if s.local.ip.is_unspecified() || s.local.ip.is_v6() != addr.ip.is_v6() {
                 // Linux fixes the local address at connect.
-                s.local.ip = st.iface.src_for(addr.ip);
+                let src = source_for(st, addr.ip, scope).ok_or(ENETUNREACH)?;
+                st.socks.get(i).unwrap().local.ip = src;
             }
             return autobind(st, i);
         }
@@ -412,12 +549,9 @@ pub fn connect(id: SocketId, addr: SockAddr) -> Result<()> {
         s.tcb = Tcb::new();
         s.rx.clear();
         s.tx.clear();
-        let src = st.iface.src_for(addr.ip);
-        if src.is_unspecified() {
-            return Err(ENETUNREACH);
-        }
+        let src = source_for(st, addr.ip, scope).ok_or(ENETUNREACH)?;
         let s = st.socks.get(i).unwrap();
-        if s.local.ip.is_unspecified() {
+        if s.local.ip.is_unspecified() || s.local.ip.is_v6() != addr.ip.is_v6() {
             s.local.ip = src;
         }
         autobind(st, i)?;
@@ -471,13 +605,18 @@ pub fn recv(id: SocketId, buf: &mut [u8]) -> Result<usize> {
 
 /// recvfrom(2): like [`recv`], plus the sender (TCP: the peer).
 pub fn recvfrom(id: SocketId, buf: &mut [u8]) -> Result<(usize, SockAddr)> {
+    recvfrom_scoped(id, buf).map(|(n, a, _)| (n, a))
+}
+
+/// [`recvfrom`], plus the link a link-local IPv6 sender is on (its sin6_scope_id).
+pub fn recvfrom_scoped(id: SocketId, buf: &mut [u8]) -> Result<(usize, SockAddr, Option<usize>)> {
     with(|st| {
         let (i, s) = st.socks.lookup(id)?;
         match s.ty {
             SockType::Dgram => udp::recvfrom(s, buf),
             SockType::Stream => {
-                let peer = s.remote;
-                tcp::recv(st, i, buf).map(|n| (n, peer))
+                let (peer, scope) = (s.remote, s.scope);
+                tcp::recv(st, i, buf).map(|n| (n, peer, scope))
             }
         }
     })

@@ -26,6 +26,7 @@ pub mod errno;
 pub mod frag;
 pub mod icmp;
 pub mod iface;
+pub mod ipv6;
 pub mod procnet;
 pub mod ring;
 pub mod selftest;
@@ -89,6 +90,8 @@ pub struct Stack {
     pub tw: tcp::TwTable,
     /// IP datagrams being reassembled.
     pub frags: frag::Reasm,
+    /// IPv6 (per-link state is in the links).
+    pub ip6: ipv6::State6,
     pub dhcp: dhcp::Dhcp,
     pub ping: icmp::PingTable,
     pub stats: Stats,
@@ -98,6 +101,9 @@ pub struct Stack {
     pub wake_any: bool,
     /// Time of the current processing pass (set on entry).
     pub now: u64,
+    /// The link the IPv6 segment being processed came in on, when its addresses are
+    /// link-scoped (TCP answers and new connections need it). None otherwise.
+    pub rx_link: Option<usize>,
 }
 
 static NET: SpinLock<Option<Box<Stack>>> = SpinLock::new(None);
@@ -136,12 +142,14 @@ fn new_stack() -> Box<Stack> {
         socks: socket::Table::new(),
         tw: tcp::TwTable::new(),
         frags: frag::Reasm::new(),
+        ip6: ipv6::State6::new(),
         dhcp: dhcp::Dhcp::new(),
         ping: icmp::PingTable::new(),
         stats: Stats::default(),
         wake_mask: 0,
         wake_any: false,
         now: timer::now_ns(),
+        rx_link: None,
     })
 }
 
@@ -154,6 +162,7 @@ pub fn with<R>(f: impl FnOnce(&mut Stack) -> R) -> R {
         let st = g.get_or_insert_with(new_stack);
         st.now = timer::now_ns();
         let r = f(st);
+        ipv6::flush_ns(st);
         st.poll_loopback();
         let woken = st.take_woken();
         (r, woken, st.next_deadline())
@@ -225,6 +234,7 @@ fn net_thread() {
             st.iface.tick(now);
             dhcp::tick(st);
             tcp::tick(st);
+            ipv6::tick(st);
             st.frags.expire(now);
             st.stats.ip_reasm_fails = st.frags.stats.fails;
         });
@@ -256,6 +266,7 @@ pub fn init() {
                 if l.ll.on { ", link-local" } else { ", DHCP" }
             );
         }
+        ipv6::start(st);
         if st.iface.eth0().up() {
             dhcp::start(st);
             true
@@ -307,6 +318,9 @@ impl Stack {
             d = d.min(t);
         }
         if let Some(t) = self.frags.next_deadline() {
+            d = d.min(t);
+        }
+        if let Some(t) = ipv6::next_deadline(self) {
             d = d.min(t);
         }
         if let Some(t) = self.dhcp.next_deadline() {
@@ -362,7 +376,11 @@ impl Stack {
             let Some(pkt) = self.iface.lo_front() else {
                 return;
             };
-            self.ip_input(None, pkt, true);
+            if pkt.first().is_some_and(|b| b >> 4 == 6) {
+                ipv6::input(self, None, pkt, Mac::ZERO);
+            } else {
+                self.ip_input(None, pkt, true);
+            }
             self.iface.lo_pop();
         }
     }
@@ -374,12 +392,16 @@ impl Stack {
         let dst = Mac([f[0], f[1], f[2], f[3], f[4], f[5]]);
         let l = &self.iface.links[k];
         let group = dst.0[0..3] == [0x01, 0x00, 0x5e] && l.multicast();
-        if dst != l.mac && dst != Mac::BROADCAST && !group {
-            return; // someone else's, or multicast on a link that takes none
+        // IPv6 multicast (33:33:*): NDP needs it on every link.
+        let group6 = dst.0[0..2] == [0x33, 0x33];
+        if dst != l.mac && dst != Mac::BROADCAST && !group && !group6 {
+            return; // someone else's, or IPv4 multicast on a link that takes none
         }
+        let src = Mac([f[6], f[7], f[8], f[9], f[10], f[11]]);
         match be16(f, 12) {
-            ETHERTYPE_ARP => self.arp_input(k, &f[ETH_HDR..]),
-            ETHERTYPE_IPV4 => self.ip_input(Some(k), &f[ETH_HDR..], false),
+            ETHERTYPE_ARP if !group6 => self.arp_input(k, &f[ETH_HDR..]),
+            ETHERTYPE_IPV4 if !group6 => self.ip_input(Some(k), &f[ETH_HDR..], false),
+            ipv6::ETHERTYPE_IPV6 => ipv6::input(self, Some(k), &f[ETH_HDR..], src),
             _ => {}
         }
     }

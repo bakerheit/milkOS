@@ -1,6 +1,9 @@
 //! nc: copy stdin to a socket and the socket to stdout.
-//!   nc [-u] HOST PORT        connect (TCP), or send to (UDP)
-//!   nc -l [-u] PORT          listen: accept one TCP connection, or answer the first UDP sender
+//!   nc [-4|-6] [-u] HOST PORT    connect (TCP), or send to (UDP); every address of HOST
+//!                                is tried in turn (IPv6 first, as getaddrinfo orders them)
+//!   nc -l [-4|-6] [-u] PORT      listen (both families on [::], -4 IPv4 only, -6 IPv6
+//!                                only): accept one TCP connection, or answer the first UDP
+//!                                sender
 //! ^D on an empty line ends the input (TCP: half-close, then wait for the peer to finish).
 //! Waits on stdin and the socket together with ppoll.
 
@@ -15,17 +18,29 @@ use rt::{eprintln, sys};
 rt::main!(main);
 
 fn usage() -> i32 {
-    eprintln!("usage: nc [-u] HOST PORT | nc -l [-u] PORT");
+    eprintln!("usage: nc [-4|-6] [-u] HOST PORT | nc -l [-4|-6] [-u] PORT");
     2
+}
+
+/// `*:PORT` (IPv4), `[::]:PORT (IPv6 only)` or `[::]:PORT (IPv6 and IPv4)`.
+fn listen_name(want: net::Want, port: u16) -> alloc::string::String {
+    match want {
+        net::Want::V4 => alloc::format!("*:{port}"),
+        net::Want::V6 => alloc::format!("[::]:{port} (IPv6 only)"),
+        net::Want::Any => alloc::format!("[::]:{port} (IPv6 and IPv4)"),
+    }
 }
 
 fn main(args: &rt::Args) -> i32 {
     let (mut listen, mut udp) = (false, false);
+    let mut want = net::Want::Any;
     let mut pos = alloc::vec::Vec::new();
     for a in args.argv.iter().skip(1) {
         match *a {
             "-l" => listen = true,
             "-u" => udp = true,
+            "-4" => want = net::Want::V4,
+            "-6" => want = net::Want::V6,
             "-lu" | "-ul" => {
                 listen = true;
                 udp = true;
@@ -43,28 +58,38 @@ fn main(args: &rt::Args) -> i32 {
         eprintln!("nc: {what}: {e}");
         1
     };
-    let s = match net::socket(ty) {
-        Ok(s) => s,
-        Err(e) => return fail("socket", e),
-    };
     let mut peer: Option<SockAddr> = None;
     let conn = if listen {
         let [port] = pos[..] else { return usage() };
         let Ok(port) = port.parse::<u16>() else {
             return usage();
         };
+        let (s, me) = if want == net::Want::V4 {
+            (net::socket(ty), SockAddr::v4([0; 4], port))
+        } else {
+            (net::socket6(ty), SockAddr::any6(port))
+        };
+        let s = match s {
+            Ok(s) => s,
+            Err(e) => return fail("socket", e),
+        };
+        if want == net::Want::V6
+            && let Err(e) = net::set_v6only(s, true)
+        {
+            return fail("IPV6_V6ONLY", e);
+        }
         let _ = net::set_reuseaddr(s);
-        if let Err(e) = net::bind(s, &SockAddr { ip: [0; 4], port }) {
+        if let Err(e) = net::bind(s, &me) {
             return fail("bind", e);
         }
         if udp {
-            eprintln!("nc: listening on udp *:{port}");
+            eprintln!("nc: listening on udp {}", listen_name(want, port));
             s
         } else {
             if let Err(e) = net::listen(s, 1) {
                 return fail("listen", e);
             }
-            eprintln!("nc: listening on tcp *:{port}");
+            eprintln!("nc: listening on tcp {}", listen_name(want, port));
             match net::accept(s) {
                 Ok((c, from)) => {
                     eprintln!("nc: connection from {from}");
@@ -78,7 +103,10 @@ fn main(args: &rt::Args) -> i32 {
         let [host, port] = pos[..] else {
             return usage();
         };
-        let addr = match net::lookup(&alloc::format!("{host}:{port}"), 0) {
+        let Ok(port) = port.parse::<u16>() else {
+            return usage();
+        };
+        let addrs = match net::lookup_all(host, port, want) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("nc: {e}");
@@ -86,11 +114,20 @@ fn main(args: &rt::Args) -> i32 {
             }
         };
         if udp {
-            peer = Some(addr);
-        } else if let Err(e) = net::connect(s, &addr) {
-            return fail(&alloc::format!("connect {addr}"), e);
+            peer = Some(addrs[0]);
+            match net::socket_for(&addrs[0], ty) {
+                Ok(s) => s,
+                Err(e) => return fail("socket", e),
+            }
+        } else {
+            match net::connect_any(&addrs, ty) {
+                Ok((s, _)) => s,
+                Err(e) => {
+                    eprintln!("nc: {e}");
+                    return 1;
+                }
+            }
         }
-        s
     };
 
     let mut stdin_open = true;

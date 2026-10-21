@@ -1190,9 +1190,13 @@ milkOS has finished.
 `/sys/fs/milkfs/scrub` (read: status; write: the same words), kernel
 `fs::milkfs::scrub::scrub_volume`. A low-priority kernel thread (`milkfs-scrub`) reads
 every block reachable from each mounted volume's committed state (live tree, snapshots,
-clones, each shared subtree and shared data block once, dead-list chains, the space map)
-**straight from the disk** (no bcache, no node cache, no page cache) and checks its
-checksum. It runs on request and on a schedule (default every 7 days, never earlier than
+clones, each shared subtree and shared data block once, dead-list chains, the space map,
+and on an encrypted volume the keyring) **straight from the disk** (no bcache, no node
+cache, no page cache) and checks its checksum. The keyring block is plaintext: it is
+checked by its xxh64 and by decoding it (magic, the volume's uuid, at least one slot), and
+reported as `keyring (the wrapped keys)` (keep the recovery key: a damaged keyring means
+the next unlock fails). A volume being encrypted or decrypted in place is skipped (and a
+scrub can't start meanwhile). It runs on request and on a schedule (default every 7 days, never earlier than
 5 minutes after boot; the last full scrub's time and the interval live in the superblock).
 
 - Smooth: priority `Low` (every normal thread runs first), rate limited (default 32 MB/s,

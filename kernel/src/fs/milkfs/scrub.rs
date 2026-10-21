@@ -463,7 +463,7 @@ pub fn scrub_volume(
     }
     let t0 = crate::timer::now_ns();
     let key = v.state.lock().store.crypt.clone();
-    let (dev, trees, heads, map, total) = {
+    let (dev, trees, heads, map, total, keyring, uuid) = {
         let mut st = v.state.lock();
         st.commit()?;
         st.store.hold_frees();
@@ -487,6 +487,8 @@ pub fn scrub_volume(
             heads,
             st.sb.spacemap,
             total,
+            st.keyring,
+            st.sb.uuid,
         )
     };
     if user {
@@ -529,6 +531,23 @@ pub fn scrub_volume(
                 p = decode_dead(b)
                     .map(|(_, next)| next)
                     .unwrap_or(BlockPtr::NONE);
+            }
+        }
+        // The keyring (encrypted volumes): plaintext, so its checksum is a plain xxh64
+        // even with the key; and it must still decode, for this volume.
+        if !keyring.is_none() && sc.nodes.insert(keyring.block) {
+            let ok = match sc.read(keyring.block, 1) {
+                Ok(()) => {
+                    let b: &[u8; BLOCK] = sc.buf[..BLOCK].try_into().unwrap();
+                    xxh64(b) == keyring.csum
+                        && Keyring::decode(b).is_some_and(|r| r.uuid == uuid && !r.slots.is_empty())
+                }
+                Err(Errno::EINTR) => return Err(Errno::EINTR),
+                Err(_) => false,
+            };
+            if !ok {
+                sc.bad
+                    .push((keyring.block, Owner::Meta("keyring (the wrapped keys)")));
             }
         }
         if sc.meta(map, "space-map index")? {

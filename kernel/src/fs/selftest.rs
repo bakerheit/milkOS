@@ -1001,6 +1001,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_spacemap(t);
     milkfs_statfs(t, VP);
     milkfs_control_errors(t);
+    milkfs_scrub_keyring(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
@@ -3050,6 +3051,61 @@ fn milkfs_control_errors(t: &mut T) {
         Errno::ENOENT,
         "hook removed: delete runs again",
     );
+}
+
+/// Scrub covers an encrypted volume's keyring: a damaged keyring block is reported (it
+/// is plaintext, checked by xxh64 and by decoding it), a good one isn't.
+fn milkfs_scrub_keyring(t: &mut T) {
+    use super::blockdev::BlockRef;
+    use super::milkfs as m;
+    const VP: &str = "/Volumes/.milk-keyring";
+    let Some(disk) = t.must(
+        super::ramdisk::RamDisk::new("ram3", 8 << 20),
+        "keyring RAM disk",
+    ) else {
+        return;
+    };
+    let dev: BlockRef = alloc::sync::Arc::new(disk);
+    let Some(Some(rec)) = t.must(
+        m::volume::mkfs_encrypted(&dev, "KeyTest", "fake-selftest-passphrase", true),
+        "mkfs an encrypted test volume",
+    ) else {
+        return;
+    };
+    let Some((v, _)) = t.must(
+        m::mount_encrypted_secondary(dev.clone(), VP, &rec),
+        "mount it with the recovery key",
+    ) else {
+        return;
+    };
+    let _ = ops::write_file(&alloc::format!("{VP}/f"), b"some data");
+    let _ = v.state.lock().commit();
+    let clean = m::scrub::scrub_volume(&v, VP, "test", false);
+    t.ok(
+        clean.as_ref().is_ok_and(|e| e.is_empty()),
+        &alloc::format!("scrub of an encrypted volume: clean ({clean:?})"),
+    );
+    let kr = v.state.lock().keyring;
+    let per = (crate::fs::milkfs::format::BLOCK / dev.block_size()) as u64;
+    let mut b = alloc::vec![0u8; crate::fs::milkfs::format::BLOCK];
+    let _ = dev.read_blocks(kr.block * per, &mut b);
+    let good = b.clone();
+    b[100] ^= 0x01; // inside a slot's salt
+    let _ = dev.write_blocks(kr.block * per, &b);
+    let bad = m::scrub::scrub_volume(&v, VP, "test", false);
+    t.ok(
+        bad.as_ref()
+            .is_ok_and(|e| e.len() == 1 && e[0].block == kr.block && e[0].what.contains("keyring")),
+        &alloc::format!("scrub reports a damaged keyring block ({bad:?})"),
+    );
+    let _ = dev.write_blocks(kr.block * per, &good);
+    let again = m::scrub::scrub_volume(&v, VP, "test", false);
+    t.ok(
+        again.is_ok_and(|e| e.is_empty()),
+        "and is clean again once it is put back",
+    );
+    let _ = super::unmount(VP);
+    let _ = ops::rmdir(VP);
 }
 
 /// statfs on the RAM file systems, and the Linux `struct statfs` layout.

@@ -398,6 +398,18 @@ fn unlock_key(
     r.map(|(k, _)| Arc::new(k))
 }
 
+/// Self-test: mount the encrypted volume on `dev` at `path`, unlocked with `secret`
+/// (the recovery key is fast: no scrypt), never as the primary volume.
+pub(crate) fn mount_encrypted_secondary(
+    dev: BlockRef,
+    path: &str,
+    secret: &str,
+) -> Result<(Arc<Volume>, MountReport)> {
+    let sb = probe(&dev).ok_or(Errno::EINVAL)?;
+    let key = unlock_key(&dev, &sb, secret)?;
+    mount_secondary_with(dev, path, Some(key))
+}
+
 /// Encrypted volumes still locked: (device, label).
 pub fn locked() -> alloc::vec::Vec<(String, String)> {
     LOCKED

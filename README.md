@@ -18,7 +18,8 @@ Needs Rust nightly via rustup (`brew install rustup`; the toolchain is pinned in
 and `qemu-system-aarch64`. Boots with HVF acceleration on Apple Silicon.
 
 Handy keys on the desktop: Ctrl/Cmd+Space opens Skim (the launcher), F3 opens Spaces, F4 opens Today.
-The dock has Files, Terminal, Browser, Notes, Paint and Settings.
+The dock has Files, Terminal, Browser, Notes, Paint, Music and Settings; installed packages add their own
+tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves and quarters.
 
 ## What's in it
 **Kernel**
@@ -47,7 +48,9 @@ The dock has Files, Terminal, Browser, Notes, Paint and Settings.
 - A compositor where every window has its own buffer, glass panels, shadows, animations, dirty-rect redraws.
 - Menu bar, dock, Skim launcher, Today widgets, Spaces, notifications, control centre, a light and a dark
   ("Chocolate milk") theme.
-- Apps: Terminal (real shell, colours), Files (with Time Machine), Notes, Browser, Paint, Settings,
+- Skim is a system-wide command bar: apps, app actions, files, settings, a calculator (`= 2+2`) and
+  shell commands (`> ls`). Windows snap to edges and corners. Lock screen.
+- Apps: Terminal (real shell, tabs, colours), Music, Files (with Time Machine), Notes, Browser, Paint, Settings,
   About. User programs can open their own windows (`user/gui`).
 
 **Userland**

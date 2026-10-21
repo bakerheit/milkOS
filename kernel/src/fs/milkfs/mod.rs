@@ -109,14 +109,22 @@ pub fn automount() {
             Ok((vol, r)) => {
                 let st = vol.state.lock();
                 kprintln!(
-                    "milkfs: {} mounted at {path}: generation {}, {} inodes, {}/{} blocks used, {} snapshot(s), check {}{}",
+                    "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {}, {}/{} blocks used, {} snapshot(s), check {}{}",
                     dev.name(),
+                    r.mount_ns / 1_000_000,
+                    r.mount_ns / 10_000 % 100,
                     r.generation,
-                    r.inodes,
+                    if r.fast {
+                        String::from("space map current")
+                    } else {
+                        format!("{} inodes", r.inodes)
+                    },
                     r.used_blocks,
                     st.store.total(),
                     st.snaps.len(),
-                    if r.problems == 0 {
+                    if r.fast {
+                        "skipped (snap check)"
+                    } else if r.problems == 0 {
                         "clean"
                     } else {
                         "FOUND PROBLEMS"
@@ -378,6 +386,114 @@ pub fn bench_create(dir: &str, n: usize, size: usize) -> Result<String> {
     kprintln!("milkfs bench: {}", r.trim_end());
     *LAST_BENCH.lock() = r.clone();
     Ok(r)
+}
+
+// ---- dedupe -------------------------------------------------------------------------
+
+pub use inode::DedupeReport;
+
+static LAST_DEDUPE: SpinLock<String> = SpinLock::new(String::new());
+
+/// Make identical files under `dir` (any VFS path on a milkfs volume) share their blocks;
+/// see [`inode::dedupe`]. `dry_run`: only report.
+pub fn dedupe(dir: &str, dry_run: bool) -> Result<DedupeReport> {
+    let d = crate::fs::ops::lookup(dir)?;
+    let r = inode::dedupe(&d, dry_run)?;
+    let mut s = format!(
+        "{dir}: {} file(s) with data, {} group(s) of identical files, {} {}, {} already shared, {} same hash but different\n",
+        r.files,
+        r.groups,
+        r.deduped,
+        if dry_run { "could share" } else { "now share" },
+        r.already,
+        r.differ
+    );
+    let _ = writeln!(
+        s,
+        "{} block(s) ({} KiB) {}{}",
+        r.blocks,
+        r.blocks * 4,
+        if dry_run { "would be shared" } else { "shared" },
+        if dry_run {
+            String::new()
+        } else {
+            format!(
+                ", {} block(s) freed now{}",
+                r.freed,
+                if (r.freed as u64) < r.blocks {
+                    " (snapshots keep the rest until they are deleted)"
+                } else {
+                    ""
+                }
+            )
+        }
+    );
+    audit_op(
+        "fs.dedupe",
+        &format!("dir={dir} dry_run={dry_run} deduped={}", r.deduped),
+        &Ok::<(), Errno>(()),
+    );
+    *LAST_DEDUPE.lock() = s;
+    Ok(r)
+}
+
+// ---- tree shape test --------------------------------------------------------------
+
+static LAST_TREETEST: SpinLock<String> = SpinLock::new(String::new());
+
+/// Shape of the primary volume's live tree (committed first).
+pub fn tree_stats() -> Result<btree::TreeStats> {
+    let v = primary()?;
+    let mut st = v.state.lock();
+    st.commit()?;
+    btree::stats(&st.store, st.sb.root)
+}
+
+fn stats_line(what: &str, s: &btree::TreeStats) -> String {
+    format!(
+        "{what:<22} height {}, {} nodes ({} leaves), {} items, fill {}%, {} underfull\n",
+        s.height,
+        s.nodes,
+        s.leaves,
+        s.items,
+        s.fill_pct(),
+        s.underfull
+    )
+}
+
+/// Create `n` empty files in `dir`, delete 99 of every 100, then the rest; the live
+/// tree's shape after each step.
+pub fn tree_test(dir: &str, n: usize) -> Result<(String, [btree::TreeStats; 4])> {
+    use crate::fs::ops;
+    let s0 = tree_stats()?;
+    ops::mkdir_all(dir, 0o755)?;
+    let t0 = crate::timer::now_ns();
+    for i in 0..n {
+        ops::write_file(&format!("{dir}/f{i}"), b"")?;
+    }
+    let s1 = tree_stats()?;
+    let t1 = crate::timer::now_ns();
+    for i in (0..n).filter(|i| i % 100 != 0) {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    let s2 = tree_stats()?;
+    for i in (0..n).step_by(100) {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    ops::rmdir(dir)?;
+    let s3 = tree_stats()?;
+    let t3 = crate::timer::now_ns();
+    let mut r = stats_line("before:", &s0);
+    r += &stats_line(&format!("{n} files:"), &s1);
+    r += &stats_line(&format!("{} left (99% deleted):", n.div_ceil(100)), &s2);
+    r += &stats_line("all deleted:", &s3);
+    r += &format!(
+        "create {} ms, delete {} ms\n",
+        (t1 - t0) / 1_000_000,
+        (t3 - t1) / 1_000_000
+    );
+    *LAST_TREETEST.lock() = r.clone();
+    Ok((r, [s0, s1, s2, s3]))
 }
 
 // ---- clones -------------------------------------------------------------------------
@@ -719,6 +835,35 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             let n = n.parse().map_err(|_| Errno::EINVAL)?;
             let sz = sz.parse().map_err(|_| Errno::EINVAL)?;
             bench_create(d, n, sz).map(|_| ())
+        },
+    );
+    dir.add_control(
+        "dedupe",
+        || LAST_DEDUPE.lock().clone(),
+        |b| {
+            // `DIR` or `DIR dry`
+            let a = arg(b)?;
+            let (d, dry) = match a.strip_suffix(" dry") {
+                Some(d) => (d.trim(), true),
+                None => (a, false),
+            };
+            dedupe(d, dry).map(|_| ())
+        },
+    );
+    dir.add_control(
+        "treetest",
+        || LAST_TREETEST.lock().clone(),
+        |b| {
+            // `DIR N`
+            let mut w = arg(b)?.split_whitespace();
+            let (Some(d), Some(n)) = (w.next(), w.next()) else {
+                return Err(Errno::EINVAL);
+            };
+            let (r, _) = tree_test(d, n.parse().map_err(|_| Errno::EINVAL)?)?;
+            for l in r.lines() {
+                kprintln!("milkfs treetest: {l}");
+            }
+            Ok(())
         },
     );
     dir.add_control(

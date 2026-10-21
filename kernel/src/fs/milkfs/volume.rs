@@ -35,6 +35,9 @@ pub struct State {
     pub auto: [u32; 4],
     /// Superblock flags (`SB_BRANCHED`).
     pub flags: u32,
+    /// Format version the next commit writes (`BASE_VERSION`, or `REFLINK_VERSION` once
+    /// blocks are shared).
+    pub version: u32,
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
@@ -59,6 +62,11 @@ pub struct MountReport {
     pub used_blocks: u64,
     pub problems: usize,
     pub orphans: usize,
+    /// How long `open` took.
+    pub mount_ns: u64,
+    /// The space map was current and loaded: no tree scan, no namespace check (`inodes`
+    /// is unknown then; `check` does the full check on request).
+    pub fast: bool,
 }
 
 /// Read both superblock slots straight from the device; the newest valid one wins.
@@ -137,7 +145,8 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         clones: Vec::new(),
         auto: [0; 4],
         flags: 0,
-        version: VERSION,
+        version: BASE_VERSION,
+        spacemap: BlockPtr::NONE,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -146,18 +155,21 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
 }
 
 impl State {
-    /// Load the newest committed state from `dev`, rebuild the free map, check the live
-    /// tree and reclaim orphans (inodes no directory entry points at).
+    /// Load the newest committed state from `dev`: the free map from the space map when it
+    /// is current (and orphans from their list), otherwise rebuilt from the trees with a
+    /// namespace check and orphan reclaim (inodes no directory entry points at).
     pub fn open(dev: BlockRef) -> Result<(State, MountReport)> {
+        let t0 = crate::timer::now_ns();
+        let name = String::from(dev.name());
         let sb = probe(&dev).ok_or(Errno::EINVAL)?;
         let cache = BCache::new(dev, 512)?; // 2 MiB
         if sb.total_blocks > cache.num_blocks() || sb.total_blocks < 3 {
             return Err(Errno::EINVAL);
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
-        if sb.version < VERSION {
+        if sb.version < BASE_VERSION {
             kprintln!(
-                "milkfs: format v{} volume: it is upgraded to v{VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
+                "milkfs: format v{} volume: it is upgraded to v{BASE_VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
                 sb.version
             );
         }
@@ -166,13 +178,44 @@ impl State {
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
 
+        let loaded = if sb.spacemap.is_none() {
+            Err("absent (last written by the Mac tool or an older kernel)")
+        } else {
+            let mut known = alloc::vec![sb.root.block];
+            for s in sb.snaps.iter().chain(sb.clones.iter()) {
+                known.push(s.root.block);
+                if !s.deadlist.is_none() {
+                    known.push(s.deadlist.block);
+                }
+            }
+            if !sb.deadlist.is_none() {
+                known.push(sb.deadlist.block);
+            }
+            store.load_spacemap(sb.spacemap, sb.generation, &known)
+        };
+        match loaded {
+            Ok(()) => return Self::open_fast(store, sb, t0),
+            // (Generation 1 = just made by mkfs: nothing to say.)
+            Err(why) if sb.generation > 1 => {
+                kprintln!("milkfs: {name}: space map {why}: rebuilding it from the trees")
+            }
+            Err(_) => {}
+        }
+
         // Mark everything reachable. Shared subtrees are visited once.
         let mut inodes: BTreeMap<u64, InodeItem> = BTreeMap::new();
         let mut refs: BTreeMap<u64, u32> = BTreeMap::new();
         let mut subdirs: BTreeMap<u64, u32> = BTreeMap::new();
         let mut problems = 0usize;
         let mut dirents: Vec<(u64, Dirent)> = Vec::new();
+        let mut orphan_items: Vec<u64> = Vec::new();
         let used = reachable(&store, &sb, &mut |k: &Key, v: &[u8]| -> Result<()> {
+            if k.obj == VOL_OBJ {
+                if k.kind == K_ORPHAN {
+                    orphan_items.push(k.off);
+                }
+                return Ok(());
+            }
             match k.kind {
                 K_INODE => {
                     inodes.insert(k.obj, InodeItem::decode(v)?);
@@ -241,14 +284,73 @@ impl State {
             return Err(Errno::EIO);
         }
 
-        let report = MountReport {
+        let mut report = MountReport {
             generation: sb.generation,
             inodes: inodes.len() - orphans.len(),
             used_blocks: store.total() - store.free_blocks(),
             problems,
             orphans: orphans.len(),
+            mount_ns: 0,
+            fast: false,
         };
-        let mut st = State {
+        let mut st = Self::from_sb(store, sb);
+        // Orphan-list entries of inodes that are gone or linked again (an older kernel
+        // finished the delete) are dropped.
+        let stale: Vec<u64> = orphan_items
+            .into_iter()
+            .filter(|i| !orphans.contains(i))
+            .collect();
+        if !orphans.is_empty() || !stale.is_empty() {
+            for ino in orphans {
+                st.delete_inode(ino)?;
+            }
+            for ino in stale {
+                st.del_orphan(ino)?;
+            }
+            st.commit()?;
+        }
+        report.mount_ns = crate::timer::now_ns() - t0;
+        Ok((st, report))
+    }
+
+    /// Mount with a current space map: nothing to scan. Finish the deferred deletes on
+    /// the orphan list.
+    fn open_fast(store: Store, sb: Superblock, t0: u64) -> Result<(State, MountReport)> {
+        let mut items = Vec::new();
+        btree::range(
+            &Child::Disk(sb.root),
+            &store,
+            &Key::new(VOL_OBJ, K_ORPHAN, 0),
+            &Key::new(VOL_OBJ, K_ORPHAN + 1, 0),
+            &mut items,
+        )?;
+        let mut report = MountReport {
+            generation: sb.generation,
+            used_blocks: store.total() - store.free_blocks(),
+            fast: true,
+            ..MountReport::default()
+        };
+        let mut st = Self::from_sb(store, sb);
+        if !items.is_empty() {
+            for (k, _) in items {
+                if st
+                    .inode(super::items::LIVE, k.off)
+                    .is_ok_and(|i| i.nlink == 0)
+                {
+                    st.delete_inode(k.off)?;
+                    report.orphans += 1;
+                } else {
+                    st.del_orphan(k.off)?;
+                }
+            }
+            st.commit()?;
+        }
+        report.mount_ns = crate::timer::now_ns() - t0;
+        Ok((st, report))
+    }
+
+    fn from_sb(store: Store, sb: Superblock) -> State {
+        State {
             store,
             tree: Child::Disk(sb.root),
             snaps: sb.snaps.clone(),
@@ -259,20 +361,14 @@ impl State {
             next_ino: sb.next_ino,
             auto: sb.auto,
             flags: sb.flags,
+            version: sb.version.max(BASE_VERSION),
             sb,
             meta_dirty: false,
             broken: false,
             commits: 0,
             dirty_since: None,
             batched_ops: 0,
-        };
-        if !orphans.is_empty() {
-            for ino in orphans {
-                st.delete_inode(ino)?;
-            }
-            st.commit()?;
         }
-        Ok((st, report))
     }
 
     pub fn dirty(&self) -> bool {
@@ -334,6 +430,10 @@ impl State {
             self.deadlist = self.store.write_deadlist(&entries, self.deadlist)?;
         }
         let generation = self.store.txn;
+        // Last: the space map (every other allocation of this commit is done). On a
+        // branched volume it also counts blocks waiting for the next sweep, like the
+        // in-memory map does.
+        let spacemap = self.store.write_spacemap(generation)?;
         let sb = Superblock {
             total_blocks: self.sb.total_blocks,
             generation,
@@ -347,7 +447,8 @@ impl State {
             clones: self.clones.clone(),
             auto: self.auto,
             flags: self.flags,
-            version: VERSION,
+            version: self.version,
+            spacemap,
         };
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
@@ -423,6 +524,8 @@ pub fn reachable(
         seen.extend(chain.iter().map(|p| p.block));
     }
     seen.extend(data);
+    // The space map of the last commit (none right after a rebuilding mount).
+    seen.extend(store.map_blocks().iter().map(|p| p.block));
     seen.insert(0);
     seen.insert(1);
     Ok(seen)
@@ -452,6 +555,25 @@ impl State {
                 self.store.sweep_free(b);
                 n += 1;
             }
+        }
+        if n > 0 {
+            // The map just committed still counts them: write one without.
+            self.meta_dirty = true;
+            self.commit()?;
+        }
+        Ok(n)
+    }
+
+    /// Mark every reachable block used (repair of a free map that lost some). Returns
+    /// how many were marked free.
+    pub fn mark_reachable(&mut self) -> Result<u64> {
+        // No commit first: it could allocate one of those blocks. What the open
+        // transaction dropped is still marked (pending) or on a dead list.
+        let r = reachable(&self.store, &self.sb, &mut |_, _| Ok(()))?;
+        let n = r.into_iter().filter(|&b| self.store.mark(b)).count() as u64;
+        if n > 0 {
+            self.meta_dirty = true;
+            self.commit()?;
         }
         Ok(n)
     }

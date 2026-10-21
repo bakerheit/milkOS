@@ -125,6 +125,21 @@ impl State {
         btree::remove(t, st, key)
     }
 
+    /// Raw item access for the self-test's B+tree model test (live tree).
+    pub fn test_put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
+        self.put(key, val)
+    }
+
+    pub fn test_del(&mut self, key: &Key) -> Result<bool> {
+        self.del(key)
+    }
+
+    pub fn test_items(&self, lo: Key, hi: Key) -> Result<Vec<(Key, Vec<u8>)>> {
+        let mut out = Vec::new();
+        self.view(LIVE, |r, s| btree::range(r, s, &lo, &hi, &mut out))?;
+        Ok(out)
+    }
+
     pub fn alloc_ino(&mut self) -> u64 {
         let i = self.next_ino;
         self.next_ino += 1;
@@ -148,14 +163,23 @@ impl State {
     pub fn delete_inode(&mut self, ino: u64) -> Result<()> {
         for e in self.exts(self.cur, ino, 0, u64::MAX)? {
             self.del(&e.key(ino))?;
-            for i in 0..e.csums.len() {
-                self.store.release(e.ptr(i));
-            }
+            self.release_ext(&e, 0, e.csums.len())?;
         }
         self.del(&Key::new(ino, K_INLINE, 0))?;
         self.del(&Key::new(ino, K_SYMLINK, 0))?;
         self.del(&inode_key(ino))?;
+        self.del_orphan(ino)?;
         Ok(())
+    }
+
+    /// Put `ino` (no links left, still open) on the orphan list: mount finishes deleting
+    /// it if the machine goes down before the last close does.
+    pub fn add_orphan(&mut self, ino: u64) -> Result<()> {
+        self.put(Key::new(VOL_OBJ, K_ORPHAN, ino), Vec::new())
+    }
+
+    pub fn del_orphan(&mut self, ino: u64) -> Result<()> {
+        self.del(&Key::new(VOL_OBJ, K_ORPHAN, ino)).map(|_| ())
     }
 
     // ---- directories -------------------------------------------------------------
@@ -410,12 +434,9 @@ impl State {
     fn drop_range(&mut self, ino: u64, from: u64, to: u64) -> Result<()> {
         for e in self.exts(self.cur, ino, from, to)? {
             self.del(&e.key(ino))?;
-            for i in 0..e.csums.len() {
-                let idx = e.start + i as u64;
-                if idx >= from && idx < to {
-                    self.store.release(e.ptr(i));
-                }
-            }
+            let i0 = from.saturating_sub(e.start) as usize;
+            let i1 = (to.min(e.end()) - e.start) as usize;
+            self.release_ext(&e, i0, i1)?;
             if e.start < from {
                 let k = (from - e.start) as usize;
                 let left = Ext {
@@ -468,6 +489,147 @@ impl State {
             self.write_extents(ino, size, (keep - 1) * b, &block)?;
         }
         Ok(())
+    }
+
+    // ---- shared blocks (reflink copies) ---------------------------------------------
+    //
+    // A tree may reference a data block from more than one file. `K_BREF` entries count
+    // the extra references per range of disk blocks (in the same tree, so snapshots and
+    // clones carry their own counts). Dropping a reference to a shared block lowers its
+    // count; only the last reference goes through the usual release rules (birth times,
+    // dead lists), which are about which *trees* still have a block.
+
+    /// Shared-block entries of `view` overlapping disk blocks `a..b`: (start, len, extra).
+    pub fn bref_entries(&self, view: u64, a: u64, b: u64) -> Result<Vec<(u64, u64, u32)>> {
+        let mut items = Vec::new();
+        self.view(view, |r, s| {
+            btree::range(
+                r,
+                s,
+                &Key::new(VOL_OBJ, K_BREF, a.saturating_sub(MAX_RUN - 1)),
+                &Key::new(VOL_OBJ, K_BREF, b),
+                &mut items,
+            )
+        })?;
+        Ok(items
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let (len, extra) = decode_bref(&v)?;
+                (k.off + len > a && k.off < b).then_some((k.off, len, extra))
+            })
+            .collect())
+    }
+
+    pub fn put_bref(&mut self, start: u64, len: u64, extra: u32) -> Result<()> {
+        self.put(Key::new(VOL_OBJ, K_BREF, start), encode_bref(len, extra))
+    }
+
+    pub fn del_bref(&mut self, start: u64) -> Result<()> {
+        self.del(&Key::new(VOL_OBJ, K_BREF, start)).map(|_| ())
+    }
+
+    /// One more reference to disk blocks `a..a + len` (at most one run).
+    fn bref_add(&mut self, a: u64, len: u64) -> Result<()> {
+        let b = a + len;
+        let mut pos = a;
+        for (s, l, x) in self.bref_entries(self.cur, a, b)? {
+            let (lo, hi) = (s.max(a), (s + l).min(b));
+            self.del_bref(s)?;
+            if s < a {
+                self.put_bref(s, a - s, x)?;
+            }
+            if pos < lo {
+                self.put_bref(pos, lo - pos, 1)?;
+            }
+            self.put_bref(lo, hi - lo, x + 1)?;
+            if s + l > b {
+                self.put_bref(b, s + l - b, x)?;
+            }
+            pos = hi;
+        }
+        if pos < b {
+            self.put_bref(pos, b - pos, 1)?;
+        }
+        Ok(())
+    }
+
+    /// Drop one reference to blocks `i0..i1` of run `e`: shared ones lose a count, the
+    /// others are released (birth rules).
+    fn release_ext(&mut self, e: &Ext, i0: usize, i1: usize) -> Result<()> {
+        if i0 >= i1 {
+            return Ok(());
+        }
+        if self.version < REFLINK_VERSION {
+            // Never had a reflink: nothing is shared.
+            for i in i0..i1 {
+                self.store.release(e.ptr(i));
+            }
+            return Ok(());
+        }
+        let (a, b) = (e.block + i0 as u64, e.block + i1 as u64);
+        let mut pos = a;
+        for (s, l, x) in self.bref_entries(self.cur, a, b)? {
+            let (lo, hi) = (s.max(a), (s + l).min(b));
+            for blk in pos..lo {
+                self.store.release(e.ptr((blk - e.block) as usize));
+            }
+            self.del_bref(s)?;
+            if s < a {
+                self.put_bref(s, a - s, x)?;
+            }
+            if x > 1 {
+                self.put_bref(lo, hi - lo, x - 1)?;
+            }
+            if s + l > b {
+                self.put_bref(b, s + l - b, x)?;
+            }
+            pos = hi;
+        }
+        for blk in pos..b {
+            self.store.release(e.ptr((blk - e.block) as usize));
+        }
+        Ok(())
+    }
+
+    /// Make `dst`'s data a copy-on-write copy of `src`'s, in the current view: `dst`'s old
+    /// data goes, then it shares every block of `src` (small inline data is just copied).
+    /// Returns the size `dst` must get. The caller updates the inode.
+    pub fn reflink(&mut self, src: u64, dst: u64) -> Result<u64> {
+        use crate::fs::node::{S_IFDIR, S_IFMT, S_IFREG};
+        let si = self.inode(self.cur, src)?;
+        let di = self.inode(self.cur, dst)?;
+        if si.mode & S_IFMT == S_IFDIR || di.mode & S_IFMT == S_IFDIR {
+            return Err(Errno::EISDIR);
+        }
+        if si.mode & S_IFMT != S_IFREG || di.mode & S_IFMT != S_IFREG || src == dst {
+            return Err(Errno::EINVAL);
+        }
+        self.drop_range(dst, 0, u64::MAX)?;
+        self.del(&Key::new(dst, K_INLINE, 0))?;
+        if let Some(d) = self.inline_bytes(self.cur, src)? {
+            self.put(Key::new(dst, K_INLINE, 0), d)?;
+            return Ok(si.size);
+        }
+        for e in self.exts(self.cur, src, 0, u64::MAX)? {
+            self.version = self.version.max(REFLINK_VERSION);
+            let copy = Ext {
+                legacy: false,
+                ..e.clone()
+            };
+            self.put(copy.key(dst), copy.encode())?;
+            self.bref_add(e.block, e.len())?;
+        }
+        Ok(si.size)
+    }
+
+    /// Do `a` and `b` (current view) use exactly the same blocks already?
+    pub fn same_blocks(&self, a: u64, b: u64) -> Result<bool> {
+        let (x, y) = (self.extents(self.cur, a, 0)?, self.extents(self.cur, b, 0)?);
+        Ok(!x.is_empty()
+            && x.len() == y.len()
+            && x.iter()
+                .zip(&y)
+                .all(|(p, q)| p.0 == q.0 && p.1.block == q.1.block))
     }
 
     /// Number of data blocks `ino` has (for `st_blocks`).

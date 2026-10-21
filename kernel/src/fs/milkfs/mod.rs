@@ -17,6 +17,7 @@ pub mod clone;
 pub mod crashtest;
 pub mod diff;
 pub mod format;
+pub mod fsck;
 pub mod inode;
 pub mod items;
 pub mod snap;
@@ -313,6 +314,20 @@ fn versions_control(path: &str) -> Result<()> {
     *LAST_VERSIONS.lock() = s;
     Ok(())
 }
+
+// ---- check / repair -----------------------------------------------------------------
+
+/// Check the primary volume; with `repair`, fix what is safe to fix (see `fsck`).
+pub fn check(repair: bool) -> Result<fsck::CheckReport> {
+    let v = primary()?;
+    let r = v.state.lock().check(repair);
+    if repair {
+        crate::fs::pagecache::invalidate_dev(v.dev);
+    }
+    r
+}
+
+static LAST_CHECK: SpinLock<String> = SpinLock::new(String::new());
 
 // ---- clones -------------------------------------------------------------------------
 
@@ -640,6 +655,20 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         "diff",
         || LAST_DIFF.lock().clone(),
         |b| diff_control(arg(b)?),
+    );
+    dir.add_control(
+        "check",
+        || LAST_CHECK.lock().clone(),
+        |b| {
+            let repair = match arg(b)? {
+                "check" => false,
+                "repair" => true,
+                _ => return Err(Errno::EINVAL),
+            };
+            let r = check(repair)?;
+            *LAST_CHECK.lock() = r.text();
+            Ok(())
+        },
     );
     dir.add_control(
         "versions",

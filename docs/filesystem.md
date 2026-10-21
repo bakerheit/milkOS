@@ -620,6 +620,35 @@ pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
    *  2026-10-21 05:04      12 B  109ff1d8  (current)
 ```
 
+### Check and repair (fsck)
+
+Never automatic: mount only finishes deferred deletes (inodes with no links left, i.e.
+files unlinked while open when the machine went down, like Linux's orphan list) and
+*reports* anything else (`check FOUND PROBLEMS`). Repairs happen only on request:
+
+- kernel: `fs::milkfs::check(repair) -> CheckReport`, `/sys/fs/milkfs/check` (write `check`
+  or `repair`, read the report), `snap check [--repair]`;
+- host: `scripts/mkmilkfs.py check IMAGE [--repair]` (exit 0 clean/repaired, 1 problems,
+  2 damage that can't be repaired).
+
+| damage | check finds | repair |
+|---|---|---|
+| a superblock slot is garbage | yes | rewritten from the good one (the next commit lands there; in the kernel any commit heals it) |
+| entry pointing at a missing inode | yes | entry removed |
+| inode with links but no entry | yes | linked into `/lost+found` as `#<ino>` |
+| inode with no links and no entry | yes | deleted |
+| wrong link count / directory parent | yes | fixed |
+| allocated but unreachable blocks (in memory) | yes | swept (on disk there is no free map to leak) |
+| data block fails its checksum | yes, with the file's path | **no**: recover with `versions restore` / `snap rollback` |
+| tree node fails its checksum | yes (mount also refuses, EIO) | **no**: the image is left untouched |
+
+The host repair rewrites the live tree from the fixed item set into free blocks and commits a
+new superblock (snapshots untouched; if there are any, the volume switches to exact sweeps
+since the dead lists no longer describe the new tree). `mkmilkfs.py corrupt IMAGE
+{orphan,dangling,nlink,parent,sb,data,node}` damages a test image on purpose, and
+`scripts/fscktest.sh` runs every kind through both repairs (base image = a few seconds of
+the crash workload; after a repair the kernel's crash-check verifies every file).
+
 ### Persistent home
 
 With a milkfs volume, `/home/milk` is a **bind mount** of `<volume>/home/milk`

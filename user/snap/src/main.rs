@@ -6,6 +6,7 @@
 //!   snap rollback NAME    make the volume what NAME captured (newer snapshots go away)
 //!   snap info             volume status
 //!   snap diff A [B|live]  what changed between two snapshots (or a snapshot and now)
+//!   snap check [--repair] check the volume (and fix what is safe to fix)
 //!   snap clones           list clones
 //!   snap clone SNAP NAME  writable clone of SNAP, mounted at /Volumes/Milk-NAME
 //!   snap promote NAME     the clone becomes the volume (old state kept as before-NAME)
@@ -115,6 +116,20 @@ fn main(args: &rt::Args) -> i32 {
                 e => e,
             }
         }
+        (Some("check"), opt) => {
+            let mode = if opt == Some("--repair") {
+                "repair"
+            } else {
+                "check"
+            };
+            match control_quiet("check", mode) {
+                0 => {
+                    cat("/sys/fs/milkfs/check");
+                    0
+                }
+                e => e,
+            }
+        }
         (Some("clones"), _) => cat("/sys/fs/milkfs/clones"),
         (Some("clone"), Some(snap)) => match args.get(3) {
             Some(name) => control("clone", &alloc::format!("{snap} {name}")),
@@ -131,7 +146,7 @@ fn main(args: &rt::Args) -> i32 {
         }
         _ => {
             eprintln!(
-                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | clones | clone SNAP NAME | promote NAME | discard NAME | auto [on|off|interval=15m|keep=K|daily=D|now]]"
+                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | auto [on|off|interval=15m|keep=K|daily=D|now]]"
             );
             2
         }

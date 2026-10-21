@@ -205,7 +205,18 @@ impl State {
         for (&ino, i) in &inodes {
             let r = refs.get(&ino).copied().unwrap_or(0);
             if ino != ROOT_INO && r == 0 {
-                orphans.push(ino);
+                if i.nlink == 0 {
+                    // Unlinked while open when the machine went down: a deferred delete,
+                    // finished here (like Linux's orphan list). Not a repair.
+                    orphans.push(ino);
+                } else {
+                    // Links but no entry: damage. Mount never repairs; `check --repair` does.
+                    problems += 1;
+                    kprintln!(
+                        "milkfs: check: inode {ino} has {} link(s) but no entry",
+                        i.nlink
+                    );
+                }
                 continue;
             }
             let want = if i.mode & S_IFMT == S_IFDIR {

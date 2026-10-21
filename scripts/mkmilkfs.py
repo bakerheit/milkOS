@@ -3,6 +3,11 @@
 
   mkmilkfs.py mkfs  IMAGE [--size 64M] [--label Milk] [--force]
   mkmilkfs.py check IMAGE [--quiet]      verify superblock, every checksum, namespace
+  mkmilkfs.py check IMAGE --repair       fix what is safe: damaged superblock slot, dangling
+                                         entries, orphans, lost inodes (-> /lost+found),
+                                         link counts, dir parents. Exit 2 = data damage left
+  mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
+                                         sb data node
   mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]      (NAME may also be a clone)
   mkmilkfs.py cat   IMAGE PATH [--snapshot NAME]
   mkmilkfs.py xxh64 HEXDATA               (for cross-checking the kernel's checksum)
@@ -117,6 +122,9 @@ def sb_encode(sb):
         b[o + 64:o + 88] = ptr_pack(s["root"])
         b[o + 88:o + 112] = ptr_pack(s["dead"])
         struct.pack_into("<Q", b, o + 112, s["next_ino"])
+        struct.pack_into("<II", b, o + 120, 1 if s.get("clone") else 0, s.get("id", 0))
+    struct.pack_into("<4I", b, 3992, *sb.get("auto", (0, 0, 0, 0)))
+    struct.pack_into("<I", b, 4008, sb.get("flags", 0))
     struct.pack_into("<Q", b, BLOCK - 8, xxh64(bytes(b[:BLOCK - 8])))
     return bytes(b)
 
@@ -142,6 +150,7 @@ def sb_decode(b):
     nino, created = struct.unpack_from("<QQ", b, 80)
     return dict(total=total, gen=gen, root=ptr_unpack(b, 32), dead=ptr_unpack(b, 56),
                 flags=struct.unpack_from("<I", b, 4008)[0],
+                auto=struct.unpack_from("<4I", b, 3992),
                 next_ino=nino, created=created, uuid=bytes(b[96:112]),
                 label=cstr(b[112:144]), snaps=snaps)
 
@@ -325,6 +334,281 @@ def cmd_mkfs(path, size, label, force):
     print(f"{path}: milkfs v0, {total} blocks of 4 KiB, label {label!r}")
 
 
+def dirents_encode(lst):
+    return b"".join(struct.pack("<QBB", ino, dt, len(n.encode())) + n.encode() for n, ino, dt in lst)
+
+
+def internal_encode(level, entries, birth):
+    b = bytearray(BLOCK)
+    b[0:4] = b"MKND"
+    struct.pack_into("<BBHQ", b, 4, level, 0, len(entries), birth)
+    p = 16
+    for (obj, kind, off), ptr in entries:
+        struct.pack_into("<QBQ", b, p, obj, kind, off)
+        b[p + 17:p + 41] = ptr_pack(ptr)
+        p += 41
+    return bytes(b)
+
+
+def all_used(img, sb):
+    """Every block the superblock reaches (trees, data, dead-list chains, slots)."""
+    used = {0, 1}
+    for root in [sb["root"]] + [s["root"] for s in sb["snaps"]]:
+        nodes = []
+        for k, v in img.items(root, nodes):
+            if k[1] == K_EXTENT:
+                used.add(ptr_unpack(v)[0])
+        used.update(p[0] for p in nodes)
+    for head in [sb["dead"]] + [s["dead"] for s in sb["snaps"]]:
+        used.update(p[0] for p in img.deadlist(head)[1])
+    return used
+
+
+class Writer:
+    """Writes new blocks into blocks the current superblock doesn't reach."""
+
+    def __init__(self, path, img, sb):
+        self.f = open(path, "r+b")
+        used = all_used(img, sb)
+        self.free = (b for b in range(2, sb["total"]) if b not in used)
+
+    def put(self, data, birth):
+        blk = next(self.free)
+        self.f.seek(blk * BLOCK)
+        self.f.write(data)
+        return (blk, birth, xxh64(data))
+
+    def tree(self, items, birth):
+        """Bulk-load a B+tree from {key: value}; returns the root pointer."""
+        leaves, cur, size = [], [], 16
+        for k, v in sorted(items.items()):
+            need = 19 + len(v)
+            if cur and size + need > BLOCK:
+                leaves.append(cur)
+                cur, size = [], 16
+            cur.append((k, v))
+            size += need
+        leaves.append(cur)
+        level = [(lv[0][0] if lv else (0, 0, 0), self.put(leaf_encode(lv, birth), birth)) for lv in leaves]
+        n = 1
+        while len(level) > 1:
+            level = [(level[i][0], self.put(internal_encode(n, level[i:i + 99], birth), birth))
+                     for i in range(0, len(level), 99)]
+            n += 1
+        return level[0][1]
+
+    def commit(self, sb, new_root=None):
+        """New generation: the superblock write (after an fsync) is the commit point."""
+        sb2 = dict(sb, snaps=[dict(x) for x in sb["snaps"]], gen=sb["gen"] + 1)
+        if new_root is not None and new_root != sb["root"]:
+            sb2["root"] = new_root
+            if sb2["snaps"]:
+                # The live tree was rewritten outside the dead-list bookkeeping: switch
+                # the volume to exact sweeps (like a promote does).
+                sb2["flags"] = sb2.get("flags", 0) | 1
+                sb2["dead"] = (0, 0, 0)
+                for x in sb2["snaps"]:
+                    x["dead"] = (0, 0, 0)
+        self.f.flush()
+        os.fsync(self.f.fileno())
+        self.f.seek((sb2["gen"] % 2) * BLOCK)
+        self.f.write(sb_encode(sb2))
+        self.f.flush()
+        os.fsync(self.f.fileno())
+        self.f.close()
+        return sb2
+
+
+def analyse(img, sb, live):
+    """Kernel-equivalent namespace check of the live items. Returns (problems, plan)."""
+    problems, plan = [], dict(dangling=[], reclaim=[], lost=[], nlink=[], parent=[])
+    inodes = {k[0]: inode_decode(v) for k, v in live.items() if k[1] == K_INODE}
+    refs, subdirs = {}, {}
+    for (obj, kind, _), v in live.items():
+        if kind != K_DIRENT:
+            continue
+        for name, ino, dt in dirents_decode(v):
+            i = inodes.get(ino)
+            if i is None:
+                problems.append(f"entry {obj}/{name} -> missing inode {ino}")
+                plan["dangling"].append((obj, name))
+                continue
+            refs.setdefault(ino, []).append(obj)
+            if i["mode"] & S_IFMT == S_IFDIR:
+                subdirs[obj] = subdirs.get(obj, 0) + 1
+    for ino, i in inodes.items():
+        is_dir = i["mode"] & S_IFMT == S_IFDIR
+        dirs = refs.get(ino)
+        if ino != ROOT_INO and not dirs:
+            if i["nlink"] == 0:
+                problems.append(f"inode {ino} has no links and no entry (orphan)")
+                plan["reclaim"].append(ino)
+            else:
+                problems.append(f"inode {ino} ({i['nlink']} links) is in no directory")
+                plan["lost"].append(ino)
+            continue
+        want = 2 + subdirs.get(ino, 0) if is_dir else len(dirs)
+        if i["nlink"] != want:
+            problems.append(f"inode {ino} nlink {i['nlink']} != {want}")
+            plan["nlink"].append((ino, want))
+        if is_dir and ino != ROOT_INO and i["parent"] != dirs[0]:
+            problems.append(f"dir {ino} parent {i['parent']} != {dirs[0]}")
+            plan["parent"].append((ino, dirs[0]))
+    if ROOT_INO not in inodes:
+        problems.append("no root directory")
+    return problems, plan
+
+
+def set_inode_field(items, ino, off, fmt, value):
+    k = (ino, K_INODE, 0)
+    v = bytearray(items[k])
+    struct.pack_into(fmt, v, off, value)
+    items[k] = bytes(v)
+
+
+def bucket_edit(items, dir_ino, name, fn):
+    k = (dir_ino, K_DIRENT, name_hash(name.encode()))
+    lst = fn(dirents_decode(items[k]) if k in items else [])
+    if lst:
+        items[k] = dirents_encode(lst)
+    else:
+        items.pop(k, None)
+
+
+def apply_repairs(items, sb, plan, log):
+    for d, name in plan["dangling"]:
+        bucket_edit(items, d, name, lambda l: [e for e in l if e[0] != name])
+        log.append(f"removed entry {name} (missing inode)")
+    for ino in plan["reclaim"]:
+        for k in [k for k in items if k[0] == ino and k[1] in (K_INODE, K_EXTENT, K_SYMLINK)]:
+            del items[k]
+        log.append(f"deleted orphan inode {ino}")
+    for ino, n in plan["nlink"]:
+        set_inode_field(items, ino, 4, "<I", n)
+        log.append(f"inode {ino}: link count set to {n}")
+    for ino, p in plan["parent"]:
+        set_inode_field(items, ino, 24, "<Q", p)
+        log.append(f"directory {ino}: parent set to {p}")
+    if plan["lost"]:
+        root_entries = [e for (o, k, _), v in items.items() if o == ROOT_INO and k == K_DIRENT
+                        for e in dirents_decode(v)]
+        lf = next((ino for n, ino, _ in root_entries if n == "lost+found"), None)
+        if lf is None:
+            lf = sb["next_ino"]
+            sb["next_ino"] += 1
+            items[(lf, K_INODE, 0)] = inode_encode(S_IFDIR | 0o700, 2, 0, ROOT_INO, time.time())
+            bucket_edit(items, ROOT_INO, "lost+found", lambda l: l + [("lost+found", lf, 4)])
+            r = inode_decode(items[(ROOT_INO, K_INODE, 0)])
+            set_inode_field(items, ROOT_INO, 4, "<I", r["nlink"] + 1)
+        for ino in plan["lost"]:
+            i = inode_decode(items[(ino, K_INODE, 0)])
+            is_dir = i["mode"] & S_IFMT == S_IFDIR
+            name = f"#{ino}"
+            bucket_edit(items, lf, name, lambda l: l + [(name, ino, 4 if is_dir else 8)])
+            if is_dir:
+                set_inode_field(items, ino, 24, "<Q", lf)
+                n = inode_decode(items[(lf, K_INODE, 0)])["nlink"]
+                set_inode_field(items, lf, 4, "<I", n + 1)
+            else:
+                set_inode_field(items, ino, 4, "<I", 1)
+            log.append(f"moved inode {ino} to /lost+found/{name}")
+
+
+def cmd_check_repair(path):
+    """check --repair: fix what is safe to fix, by rewriting the live tree."""
+    img = Image(path)
+    sb = img.superblock()
+    if not sb:
+        print(f"{path}: no valid milkfs superblock in either slot: cannot repair")
+        return 2
+    other = (sb["gen"] + 1) % 2
+    o = sb_decode(img.raw(other))
+    bad_slot = sb["gen"] > 1 and (o is None or o["gen"] >= sb["gen"])
+    try:
+        live = dict(img.items(sb["root"]))
+    except (IOError, ValueError) as e:
+        print(f"cannot repair: live tree unreadable ({e}); recover from a snapshot")
+        return 2
+    bad_data = []
+    for k, v in live.items():
+        if k[1] == K_EXTENT:
+            try:
+                img.read(ptr_unpack(v))
+            except IOError:
+                bad_data.append(f"inode {k[0]} data at offset {k[2] * BLOCK} fails its checksum")
+    problems, plan = analyse(img, sb, live)
+    if bad_slot:
+        problems.append(f"superblock slot {other} is damaged")
+    log = []
+    if problems:
+        w = Writer(path, img, sb)
+        sb = dict(sb)
+        if any(plan.values()):
+            apply_repairs(live, sb, plan, log)
+            new_root = w.tree(live, sb["gen"] + 1)
+        else:
+            new_root = None
+        sb2 = w.commit(sb, new_root)
+        if bad_slot:
+            log.append(f"superblock slot {other} rewritten (generation {sb2['gen']})")
+    for p in problems:
+        print("  problem:", p)
+    for r in log:
+        print("  repaired:", r)
+    for b in bad_data:
+        print("  cannot repair:", b)
+    print("repair:", "nothing to do" if not problems else f"{len(log)} repair(s)",
+          "(data damage remains)" if bad_data else "")
+    return 2 if bad_data else 0
+
+
+def cmd_corrupt(path, kind):
+    """Damage a (private, test) image on purpose: orphan, dangling, nlink, parent, sb,
+    data, node."""
+    img = Image(path)
+    sb = img.superblock()
+    live = dict(img.items(sb["root"]))
+    files = [k[0] for k, v in live.items() if k[1] == K_INODE and inode_decode(v)["mode"] & S_IFMT == S_IFREG]
+    dirs = [k[0] for k, v in live.items() if k[1] == K_INODE and k[0] != ROOT_INO
+            and inode_decode(v)["mode"] & S_IFMT == S_IFDIR]
+    f = open(path, "r+b")
+    if kind == "sb":
+        f.seek(((sb["gen"] + 1) % 2) * BLOCK)
+        f.write(b"\xab" * BLOCK)
+    elif kind == "data":
+        ext = next(v for k, v in live.items() if k[1] == K_EXTENT)
+        f.seek(ptr_unpack(ext)[0] * BLOCK)
+        f.write(bytes(BLOCK))
+    elif kind == "node":
+        nodes = []
+        list(img.items(sb["root"], nodes))
+        f.seek(nodes[-1][0] * BLOCK)  # a leaf
+        f.write(bytes(BLOCK))
+    else:
+        f.close()
+        if kind == "orphan":
+            ino = sb["next_ino"]
+            sb = dict(sb, next_ino=ino + 1)
+            live[(ino, K_INODE, 0)] = inode_encode(S_IFREG | 0o644, 1, 0, ROOT_INO, time.time())
+        elif kind == "dangling":
+            bucket_edit(live, ROOT_INO, "ghost", lambda l: l + [("ghost", 999999, 8)])
+        elif kind == "nlink":
+            set_inode_field(live, files[0], 4, "<I", 9)
+        elif kind == "parent":
+            set_inode_field(live, dirs[0], 24, "<Q", 999999)
+        else:
+            sys.exit(f"unknown damage {kind!r}")
+        w = Writer(path, img, sb)
+        w.commit(sb, w.tree(live, sb["gen"] + 1))
+        print(f"{path}: corrupted ({kind})")
+        return 0
+    f.flush()
+    os.fsync(f.fileno())
+    f.close()
+    print(f"{path}: corrupted ({kind})")
+    return 0
+
+
 def cmd_check(path, quiet):
     img = Image(path)
     problems = []
@@ -386,13 +670,20 @@ def cmd_check(path, quiet):
     for ino, i in inodes.items():
         r = refs.get(ino, 0)
         if ino != ROOT_INO and r == 0:
-            orphans += 1  # reclaimed at the next mount (unlinked while open)
+            if i["nlink"] == 0:
+                orphans += 1  # unlinked while open: the next mount reclaims it
+            else:
+                problems.append(f"inode {ino} ({i['nlink']} links) is in no directory")
             continue
         want = 2 + subdirs.get(ino, 0) if i["mode"] & S_IFMT == S_IFDIR else r
         if i["nlink"] != want:
             problems.append(f"inode {ino} nlink {i['nlink']} != {want}")
     if ROOT_INO not in inodes:
         problems.append("no root directory")
+    other = (sb["gen"] + 1) % 2
+    o = sb_decode(img.raw(other))
+    if sb["gen"] > 1 and (o is None or o["gen"] >= sb["gen"]):
+        problems.append(f"superblock slot {other} is damaged (slot {sb['gen'] % 2} is good)")
 
     if not quiet or problems:
         print(f"{path}: milkfs v0 label {sb['label']!r} generation {sb['gen']}, "
@@ -448,7 +739,11 @@ def main(argv):
         cmd_mkfs(pos[0], parse_size(opts["--size"]) if "--size" in opts else None,
                  opts.get("--label", "Milk"), "--force" in opts)
     elif cmd == "check":
+        if "--repair" in opts:
+            return cmd_check_repair(pos[0])
         return cmd_check(pos[0], "--quiet" in opts)
+    elif cmd == "corrupt":
+        return cmd_corrupt(pos[0], pos[1])
     elif cmd == "ls":
         cmd_ls(pos[0], pos[1] if len(pos) > 1 else "/", opts.get("--snapshot"))
     elif cmd == "cat":

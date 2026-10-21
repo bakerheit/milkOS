@@ -992,6 +992,7 @@ fn milkfs_test_volume(t: &mut T) {
     page_cache(t, VP);
     milkfs_diff(t, VP);
     milkfs_versions(t, VP);
+    milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1776,6 +1777,140 @@ fn milkfs_versions(t: &mut T, vp: &str) {
         let _ = m::delete_snapshot(&s);
     }
     let _ = ops::unlink(&f);
+}
+
+/// check / check --repair on the test volume, with damage made on purpose.
+fn milkfs_fsck(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    use super::milkfs::{self as m, format::*, items::LIVE};
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check: clean volume is clean",
+    );
+    let _ = ops::write_file(
+        &alloc::format!("{vp}/victim.txt"),
+        b"precious data, 4 KiB+".repeat(250).as_slice(),
+    );
+    let _ = ops::write_file(&alloc::format!("{vp}/keep.txt"), b"keep");
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        // An inode with a link but no entry, an entry to a missing inode, a wrong count.
+        let lost = st.alloc_ino();
+        let t0 = (1, 0);
+        let _ = st.put_inode(
+            lost,
+            &InodeItem {
+                mode: 0o100644,
+                nlink: 1,
+                parent: ROOT_INO,
+                atime: t0,
+                mtime: t0,
+                ctime: t0,
+                ..InodeItem::default()
+            },
+        );
+        let _ = st.add_dirent(
+            ROOT_INO,
+            Dirent {
+                ino: 999_999,
+                dtype: 8,
+                name: String::from("ghost"),
+            },
+        );
+        if let Ok(Some(d)) = st.lookup(LIVE, ROOT_INO, "keep.txt") {
+            let mut i = st.inode(LIVE, d.ino).unwrap();
+            i.nlink = 7;
+            let _ = st.put_inode(d.ino, &i);
+        }
+        let _ = st.commit();
+    }
+    let gen_slot = vol.state.lock().sb.generation % 2;
+    let other = 1 - gen_slot;
+    let _ = dev.write_blocks(other * 8, &[0xAB; 4096]);
+    let r = m::check(false).unwrap_or_default();
+    t.ok(
+        r.problems.len() >= 4 && r.repaired.is_empty(),
+        &alloc::format!(
+            "check finds the damage and changes nothing ({} problems)",
+            r.problems.len()
+        ),
+    );
+    t.ok(
+        read_str(&alloc::format!("{vp}/keep.txt")) == "keep",
+        "check alone leaves files alone",
+    );
+    let r = m::check(true).unwrap_or_default();
+    t.ok(
+        r.repaired.len() >= 4,
+        &alloc::format!("repair fixes it ({} repairs)", r.repaired.len()),
+    );
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check is clean after repair",
+    );
+    t.ok(
+        ops::readdir(&alloc::format!("{vp}/lost+found"))
+            .is_ok_and(|e| e.len() == 1 && e[0].name.starts_with('#')),
+        "unreferenced inode is in lost+found",
+    );
+    t.err(
+        ops::stat(&alloc::format!("{vp}/ghost")),
+        Errno::ENOENT,
+        "dangling entry removed",
+    );
+    t.ok(
+        ops::stat(&alloc::format!("{vp}/keep.txt")).is_ok_and(|s| s.nlink == 1),
+        "link count fixed",
+    );
+    let mut b = [0u8; 4096];
+    t.ok(
+        dev.read_blocks(other * 8, &mut b).is_ok() && Superblock::decode(&b).is_some(),
+        "damaged superblock slot rewritten",
+    );
+    // Data damage: overwrite a data block behind the cache, then check.
+    let blk = {
+        let st = vol.state.lock();
+        let ino = st
+            .lookup(LIVE, ROOT_INO, "victim.txt")
+            .ok()
+            .flatten()
+            .map(|d| d.ino);
+        ino.and_then(|i| st.extents(LIVE, i, 0).ok())
+            .and_then(|e| e.first().map(|x| x.1.block))
+    };
+    if let Some(blk) = blk {
+        let mut saved = [0u8; 4096];
+        let _ = dev.read_blocks(blk * 8, &mut saved);
+        let _ = dev.write_blocks(blk * 8, &[0u8; 4096]);
+        vol.state.lock().cache().discard();
+        let r = m::check(true).unwrap_or_default();
+        t.ok(
+            r.unrepairable
+                .iter()
+                .any(|u| u.contains("victim.txt") && u.contains("checksum")),
+            "bad data block reported with its path, not 'repaired'",
+        );
+        t.err(
+            ops::read_file(&alloc::format!("{vp}/victim.txt")),
+            Errno::EIO,
+            "reading it gives EIO",
+        );
+        let _ = dev.write_blocks(blk * 8, &saved);
+        vol.state.lock().cache().discard();
+        super::pagecache::drop_all();
+        t.ok(
+            m::check(false).is_ok_and(|r| r.clean()),
+            "clean again once the block is back",
+        );
+    }
+    rm_rf(&alloc::format!("{vp}/lost+found"));
+    let _ = ops::unlink(&alloc::format!("{vp}/victim.txt"));
+    let _ = ops::unlink(&alloc::format!("{vp}/keep.txt"));
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

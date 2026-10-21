@@ -402,7 +402,11 @@ scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4
 ## milkfs v0 (implemented)
 
 `kernel/src/fs/milkfs/`, host tool `scripts/mkmilkfs.py`, crash test `scripts/crashtest.sh`.
-Mounted at `/Volumes/<label>` (`/Volumes/Milk`). The design it follows is the sketch below;
+Mounted at `/Volumes/<label>` (`/Volumes/Milk`). Every disk with milkfs is mounted, at
+`/Volumes/<label>` (or `/Volumes/<label>-<dev>` if taken); the **primary** volume (home,
+Time Machine, the snapshot API, `/sys/fs/milkfs`) is the one labelled `Milk`, else the first
+found (qemu's disk order isn't the command line's). Others are plain volumes, e.g. backup
+targets for `snap receive`. The design it follows is the sketch below;
 the differences are listed at the end of this section.
 
 | file | what |
@@ -763,6 +767,76 @@ that snapshot is deleted (the report says how many were freed now):
 /Volumes/Milk/d: 4 file(s) with data, 1 group(s) of identical files, 2 now share, 1 already shared, 0 same hash but different
 978 block(s) (3912 KiB) shared, 980 block(s) freed now
 ```
+
+### Send and receive (backups)
+
+`snap send SNAP [--from OLDER] [-o FILE]` writes snapshot SNAP of the primary volume as a
+stream (full, or incremental from the older snapshot OLDER) to FILE or stdout;
+`snap receive [FILE] [--to PATH] [--force]` recreates it on the milkfs volume PATH is on
+(stdin if no FILE; default the primary volume). Kernel: `fs::milkfs::send(snap, from,
+out_path)`, `fs::milkfs::receive(path, target, force)`; `/sys/fs/milkfs/send`
+(`SNAP [FROM] PATH`) and `/sys/fs/milkfs/receive` (`PATH [TARGET] [force]`), each readable
+for the last report. Mac: `mkmilkfs.py verify-stream FILE`, `mkmilkfs.py receive IMAGE FILE
+[--force]`, `mkmilkfs.py tree IMAGE [--snapshot S]` (paths, modes, sizes, mtimes, content
+hashes: diff two to compare). So a backup can live on the Mac:
+
+```text
+snap send monday -o /Volumes/Mac/backups/monday.stream          # (rw share)
+snap send tuesday --from monday -o /Volumes/Mac/backups/tuesday.stream
+mkmilkfs.py verify-stream share/backups/tuesday.stream
+mkmilkfs.py receive /tmp/restore.img share/backups/monday.stream  # then tuesday's
+```
+
+**Stream format** (version 1, little endian). A sequence of records, each
+`type u8 | 0 0 0 | length u32 | payload | xxh64 u64` (the checksum covers type, length and
+payload; payloads at most 64 KiB):
+
+| type | payload |
+|---|---|
+| 1 header | `"MILKSTRM"`, version u32 = 1, flags u32 (1 = incremental), source uuid [16], label [32], snapshot name [48], its creation time u64, its generation u64, base name [48], base creation time u64, base generation u64, next inode u64 |
+| 2 item | key (17) + value: an inode, directory-entry bucket, symlink target or inline data |
+| 3 delete | key (17): remove that item |
+| 4 drop | ino, from, to (u64): remove file blocks `from..to` |
+| 5 data | the sender's block number u64 + its 4096 bytes (each block once, before its first use) |
+| 6 extent | ino, start, old_end, sender's first block (u64), count u32, count x xxh64: file blocks `start..start+count` are those blocks; whatever the receiver had in `start..max(start+count, old_end)` goes first |
+| 7 end | records u64, data records u64, chained hash u64 (`h = xxh64(h ‖ record checksum)` over every record before it) |
+
+A full stream is every item of the snapshot; an incremental one only what differs from
+the base (found like `snap diff`, reading only changed tree nodes), removals first, then
+additions and changes in key order. Data travels per run: a changed run is sent whole;
+blocks shared by reflink copies are sent once and stay shared on the receiver (it
+recounts its shared-block table). Not sent: files with no links left (unlinked while
+open: if the receiver has them from the base, they are removed), the orphan list, the
+shared-block table. Data removal is by file range, so the receiver may lay blocks out
+differently from the sender.
+
+**Receive** is atomic. It applies the records to a hidden clone (`.recv`) of the base
+snapshot (for a full stream: of a `.recv-base` snapshot of the empty target, deleted
+afterwards); only when the `END` record checks out (counts and chained hash: a missing,
+reordered or replaced record is caught) does the clone become the live tree, without
+branching history (`clone_fast_forward`: the origin blocks the clone dropped become the
+live dead list, as if the live tree had made those changes), and the snapshot is recorded
+with the sender's name and creation time. The base of an incremental stream is found by
+name + creation time. Refused: a full stream into a non-empty volume (ENOTEMPTY), an
+incremental stream whose base isn't there (ENOENT), a target whose live tree changed since
+the base (EBUSY; `--force` rolls it back to the base first, deleting newer snapshots, like
+`zfs receive -F`), a snapshot name the target has (EEXIST), any damaged or truncated
+stream (EIO). A crash mid-receive leaves the target as it was plus the hidden clone (and
+`.recv-base`), which the next receive discards. A send keeps the snapshots it reads from
+being deleted (EBUSY) and doesn't hold the volume lock while it writes, so the stream can
+go onto the volume itself.
+
+`scripts/sendtest.sh`: full + incremental + full-to-stdout sends into the rw Mac share;
+`verify-stream` on the Mac; receives in milkOS (onto a second disk) and on the Mac; the
+s1 / s2 trees identical on source, received volume and Mac-received images; damaged and
+truncated streams refused with the target byte-for-byte untouched; a missing base
+refused; qemu killed in the middle of a 20 MB receive: target untouched, and receiving
+again works. 21.7 MB full stream: sent in 53 ms, received in 434 ms (from the 9p share).
+
+Limits: one receive at a time per volume; the target should be idle (a write to its live
+tree during a receive makes the receive fail with EBUSY at the end); changed runs are
+resent whole, so on the receiver they no longer share blocks with unchanged reflink
+copies of the old data; sends come from the primary volume.
 
 ### Persistent home
 

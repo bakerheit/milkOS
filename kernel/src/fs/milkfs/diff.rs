@@ -26,6 +26,9 @@ use super::volume::State;
 use crate::fs::errno::{Errno, Result};
 use crate::fs::node::{S_IFDIR, S_IFMT};
 
+/// Items by key.
+pub type ItemMap = BTreeMap<Key, Vec<u8>>;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Change {
     Added(String),
@@ -187,6 +190,63 @@ impl State {
         Ok(out)
     }
 
+    /// The items of the leaves that differ between an older tree (`old_root`, committed at
+    /// `old_gen`) and a newer one: `(old side, new side)`. Every key whose value differs, or
+    /// that exists on one side only, is in one of them (with its value); keys in neither
+    /// are unchanged. Only changed nodes are read.
+    pub fn tree_delta(
+        &self,
+        old_root: BlockPtr,
+        old_gen: u64,
+        new_root: BlockPtr,
+        nodes_read: &mut u64,
+        skipped: &mut u64,
+    ) -> Result<(ItemMap, ItemMap)> {
+        if old_root == new_root {
+            return Ok((BTreeMap::new(), BTreeMap::new()));
+        }
+        // Pointers of the newer tree that are shared with the older one.
+        let mut shared_set: BTreeSet<u64> = BTreeSet::new();
+        let new_items = if self.branched() {
+            let mut all = BTreeSet::new();
+            let mut node = |p: &BlockPtr| all.insert(p.block);
+            btree::walk(&self.store, old_root, &mut node, &mut |_, _| Ok(()))?;
+            self.unshared_items(
+                new_root,
+                &mut |p| {
+                    let s = all.contains(&p.block);
+                    if s {
+                        shared_set.insert(p.block);
+                    }
+                    s
+                },
+                nodes_read,
+                skipped,
+            )?
+        } else {
+            self.unshared_items(
+                new_root,
+                &mut |p| {
+                    let s = p.birth <= old_gen;
+                    if s {
+                        shared_set.insert(p.block);
+                    }
+                    s
+                },
+                nodes_read,
+                skipped,
+            )?
+        };
+        let mut dummy = 0;
+        let old_items = self.unshared_items(
+            old_root,
+            &mut |p| shared_set.contains(&p.block),
+            nodes_read,
+            &mut dummy,
+        )?;
+        Ok((old_items, new_items))
+    }
+
     /// What changed from `a` to `b` (snapshot names; `None`/`"live"` = the live volume).
     pub fn diff(&mut self, a: &str, b: Option<&str>) -> Result<DiffResult> {
         self.commit()?; // diff committed state
@@ -198,45 +258,12 @@ impl State {
         if old.root == new.root {
             return Ok(res);
         }
-        // Pointers of the newer tree that are shared with the older one.
-        let mut shared_set: BTreeSet<u64> = BTreeSet::new();
-        let new_items = if self.branched() {
-            let mut all = BTreeSet::new();
-            let mut node = |p: &BlockPtr| all.insert(p.block);
-            btree::walk(&self.store, old.root, &mut node, &mut |_, _| Ok(()))?;
-            self.unshared_items(
-                new.root,
-                &mut |p| {
-                    let s = all.contains(&p.block);
-                    if s {
-                        shared_set.insert(p.block);
-                    }
-                    s
-                },
-                &mut res.nodes_read,
-                &mut res.subtrees_skipped,
-            )?
-        } else {
-            let g = old.generation;
-            self.unshared_items(
-                new.root,
-                &mut |p| {
-                    let s = p.birth <= g;
-                    if s {
-                        shared_set.insert(p.block);
-                    }
-                    s
-                },
-                &mut res.nodes_read,
-                &mut res.subtrees_skipped,
-            )?
-        };
-        let mut dummy = 0;
-        let old_items = self.unshared_items(
+        let (old_items, new_items) = self.tree_delta(
             old.root,
-            &mut |p| shared_set.contains(&p.block),
+            old.generation,
+            new.root,
             &mut res.nodes_read,
-            &mut dummy,
+            &mut res.subtrees_skipped,
         )?;
 
         // Directory entries, by (dir, name).

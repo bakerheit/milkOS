@@ -43,6 +43,10 @@ pub struct State {
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
     pub broken: bool,
     pub commits: u64,
+    /// Snapshots (by generation) a send is reading: can't be deleted meanwhile.
+    pub busy_snaps: Vec<u64>,
+    /// A receive is in progress on this volume.
+    pub receiving: bool,
     /// Batching: when the open transaction got its first change, and how many
     /// operations it holds.
     pub dirty_since: Option<u64>,
@@ -366,6 +370,8 @@ impl State {
             meta_dirty: false,
             broken: false,
             commits: 0,
+            busy_snaps: Vec::new(),
+            receiving: false,
             dirty_since: None,
             batched_ops: 0,
         }

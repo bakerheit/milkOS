@@ -996,6 +996,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_bench(&vol, VP);
     milkfs_tree(t, &vol, VP);
     milkfs_reflink(t, &vol, VP);
+    milkfs_sendrecv(t, VP);
     milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -2188,6 +2189,160 @@ fn milkfs_reflink(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: 
     rm_rf(&dir);
     let _ = super::sync_all();
     milk_space(t, vol, "space exact after deleting every copy");
+}
+
+/// snap send / receive between the test volume and a second RAM-disk volume.
+fn milkfs_sendrecv(t: &mut T, vp: &str) {
+    use super::blockdev::BlockRef;
+    use super::milkfs as m;
+    const RP: &str = "/Volumes/.milk-recv";
+    let src = |n: &str| alloc::format!("{vp}/sr/{n}");
+    let _ = ops::mkdir(&alloc::format!("{vp}/sr"), 0o755);
+    let big: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 241) as u8).collect();
+    let _ = ops::write_file(&src("big"), &big);
+    if let (Ok(s), Ok(d)) = (
+        ops::open(&src("big"), O_RDONLY, 0),
+        ops::open(&src("copy"), O_WRONLY | O_CREAT, 0o644),
+    ) {
+        let _ = ops::ficlone(&s, &d);
+    }
+    let _ = ops::write_file(&src("small"), b"small one");
+    let _ = ops::symlink("small", &src("link"));
+    let _ = m::snapshot("sr1");
+    let _ = ops::write_file(&src("small2"), b"another");
+    let _ = ops::unlink(&src("small"));
+    if let Ok(f) = ops::open(&src("big"), O_WRONLY, 0) {
+        let _ = f.pwrite(b"changed!", 100_000);
+    }
+    let _ = m::snapshot("sr2");
+    let _ = ops::write_file(&src("third"), b"third snapshot");
+    let _ = m::snapshot("sr3");
+    t.ok(
+        m::send("sr1", None, "/tmp/sr1.stream").is_ok()
+            && m::send("sr2", Some("sr1"), "/tmp/sr2.stream").is_ok()
+            && m::send("sr3", Some("sr2"), "/tmp/sr3.stream").is_ok(),
+        "send sr1 (full), sr2 and sr3 (incremental)",
+    );
+    t.err(
+        m::send("sr1", Some("sr2"), "/tmp/x.stream"),
+        Errno::EINVAL,
+        "send: the base must be older",
+    );
+    // The target: a fresh volume on its own RAM disk.
+    let Some(disk) = t.must(
+        super::ramdisk::RamDisk::new("ram2", 16 << 20),
+        "receive RAM disk",
+    ) else {
+        return;
+    };
+    let dev: BlockRef = alloc::sync::Arc::new(disk);
+    let _ = m::mkfs(&dev, "RecvTest", false);
+    let Some((tv, _)) = t.must(m::mount_secondary(dev.clone(), RP), "mount the target") else {
+        return;
+    };
+    let snaps = |v: &m::Volume| {
+        v.state
+            .lock()
+            .snap_list()
+            .into_iter()
+            .map(|s| s.name)
+            .collect::<Vec<_>>()
+    };
+    t.err(
+        m::receive("/tmp/sr2.stream", Some(RP), false),
+        Errno::ENOENT,
+        "receive: an incremental whose base is missing is refused",
+    );
+    t.ok(
+        m::receive("/tmp/sr1.stream", Some(RP), false).is_ok()
+            && m::receive("/tmp/sr2.stream", Some(RP), false).is_ok(),
+        "receive sr1, then sr2 on top",
+    );
+    let same = |snap: &str, n: &str| {
+        let a = ops::read_file(&alloc::format!("{vp}/.snapshots/{snap}/sr/{n}"));
+        let b = ops::read_file(&alloc::format!("{RP}/.snapshots/{snap}/sr/{n}"));
+        a.is_ok() && a == b
+    };
+    t.ok(
+        same("sr1", "big")
+            && same("sr1", "copy")
+            && same("sr1", "small")
+            && same("sr2", "big")
+            && same("sr2", "small2")
+            && ops::readlink(&alloc::format!("{RP}/.snapshots/sr1/sr/link")).as_deref()
+                == Ok("small")
+            && ops::stat(&alloc::format!("{RP}/.snapshots/sr2/sr/small")).is_err()
+            && ops::read_file(&alloc::format!("{RP}/sr/big"))
+                == ops::read_file(&alloc::format!("{vp}/.snapshots/sr2/sr/big")),
+        "received snapshots and the live tree match the source",
+    );
+    t.ok(
+        snaps(&tv) == ["sr1", "sr2"],
+        "the target has exactly sr1 and sr2",
+    );
+    t.err(
+        m::receive("/tmp/sr2.stream", Some(RP), false),
+        Errno::EEXIST,
+        "receiving sr2 again is refused",
+    );
+    // A damaged stream: refused, nothing changes.
+    let mut bad = ops::read_file("/tmp/sr3.stream").unwrap_or_default();
+    let mid = bad.len() / 2;
+    if let Some(b) = bad.get_mut(mid) {
+        *b ^= 0x10;
+    }
+    let _ = ops::write_file("/tmp/bad.stream", &bad);
+    let before = tv.state.lock().verify_space().map(|s| s.allocated);
+    t.err(
+        m::receive("/tmp/bad.stream", Some(RP), false),
+        Errno::EIO,
+        "a damaged stream is refused",
+    );
+    let after = tv.state.lock().verify_space();
+    t.ok(
+        snaps(&tv) == ["sr1", "sr2"]
+            && tv.state.lock().clone_list().is_empty()
+            && after
+                .is_ok_and(|s| s.leaked == 0 && s.free_but_used == 0 && Ok(s.allocated) == before),
+        "and the target is exactly as before (no clone left, space exact)",
+    );
+    // Written since the base: refused, unless forced (rolled back to sr2 first).
+    let _ = ops::write_file(&alloc::format!("{RP}/sr/local"), b"local change");
+    t.err(
+        m::receive("/tmp/sr3.stream", Some(RP), false),
+        Errno::EBUSY,
+        "target changed since the base: refused",
+    );
+    t.ok(
+        m::receive("/tmp/sr3.stream", Some(RP), true).is_ok()
+            && ops::stat(&alloc::format!("{RP}/sr/local")).is_err()
+            && read_str(&alloc::format!("{RP}/sr/third")) == "third snapshot",
+        "--force: rolled back to sr2, then sr3 received",
+    );
+    let r = tv.state.lock().check(false);
+    t.ok(
+        r.is_ok_and(|r| r.clean()),
+        "target check clean (shared-block counts too)",
+    );
+    for s in ["sr1", "sr2", "sr3"] {
+        let _ = tv.state.lock().snap_delete(s);
+    }
+    let sp = tv.state.lock().verify_space();
+    t.ok(
+        sp.is_ok_and(|s| s.leaked == 0 && s.free_but_used == 0),
+        "target space exact after deleting the received snapshots",
+    );
+    let _ = super::unmount(RP);
+    let _ = ops::rmdir(RP);
+    drop(tv);
+    drop(dev);
+    for s in ["sr1", "sr2", "sr3"] {
+        let _ = m::delete_snapshot(s);
+    }
+    rm_rf(&alloc::format!("{vp}/sr"));
+    for f in ["sr1", "sr2", "sr3", "bad", "x"] {
+        let _ = ops::unlink(&alloc::format!("/tmp/{f}.stream"));
+    }
 }
 
 /// A file made straight in a volume's live tree (no VFS): returns its inode.

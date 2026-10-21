@@ -147,6 +147,34 @@ impl State {
         self.commit()
     }
 
+    /// A receive is done: clone `name` (built on snapshot `origin`, which the live tree
+    /// still equals) becomes the live tree, without branching history. The origin blocks
+    /// the clone dropped (recorded in `store.recv_drops`) become the live dead list, as if
+    /// the live tree had made those changes itself. EBUSY if the live tree moved on.
+    pub fn clone_fast_forward(&mut self, name: &str) -> Result<()> {
+        self.set_cur(super::items::LIVE)?;
+        self.commit()?;
+        let k = self.clone_index(name)?;
+        let c = self.clones[k].clone();
+        let origin = self
+            .snaps
+            .iter()
+            .find(|s| s.generation == c.generation)
+            .ok_or(Errno::ENOENT)?;
+        if self.sb.root != origin.root || !self.deadlist.is_none() {
+            return Err(Errno::EBUSY);
+        }
+        let drops = self.store.recv_drops.take().unwrap_or_default();
+        self.tree = Child::Disk(c.root);
+        if !self.branched() && !drops.is_empty() {
+            self.deadlist = self.store.write_deadlist(&drops, BlockPtr::NONE)?;
+        }
+        self.clones.remove(k);
+        self.clone_trees.remove(&c.id);
+        self.meta_dirty = true;
+        self.commit()
+    }
+
     /// Make clone `name` the live volume; the current live state is kept as snapshot
     /// `keep_as`.
     pub fn clone_promote(&mut self, name: &str, keep_as: &str) -> Result<()> {

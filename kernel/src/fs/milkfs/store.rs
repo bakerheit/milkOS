@@ -47,6 +47,9 @@ pub struct Store {
     nodes: crate::sync::SpinLock<NodeCache>,
     /// Blocks of the space map the last commit wrote (index first): freed by the next.
     map_blocks: Vec<BlockPtr>,
+    /// While a receive builds its clone: the origin's blocks the clone drops (the live
+    /// tree's dead list once the clone becomes live, see `clone_fast_forward`).
+    pub recv_drops: Option<Vec<DeadEntry>>,
 }
 
 #[derive(Default)]
@@ -76,6 +79,7 @@ impl Store {
             branched: false,
             nodes: crate::sync::SpinLock::new(NodeCache::default()),
             map_blocks: Vec::new(),
+            recv_drops: None,
         };
         s.mark(0);
         s.mark(1);
@@ -201,6 +205,13 @@ impl Store {
                 self.unmark(p.block);
             } else if p.birth > origin {
                 self.pending_free.push(p.block);
+            } else if let Some(d) = self.recv_drops.as_mut()
+                && !self.branched
+            {
+                d.push(DeadEntry {
+                    block: p.block,
+                    birth: p.birth,
+                });
             }
             return;
         }

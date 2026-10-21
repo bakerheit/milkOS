@@ -334,6 +334,8 @@ const DOCK: [DockItem; 9] = [
 /// A dock tile as drawn: the built-in ones, then installed packages (packages.rs).
 struct Tile {
     name: String,
+    /// The artist's icon for it (crate::art), if there is one.
+    art: Option<&'static str>,
     /// None: a package, drawn as its colour with its initial.
     icon: Option<Icon>,
     bg: Color,
@@ -355,6 +357,7 @@ fn tiles() -> Vec<Tile> {
         .iter()
         .map(|d| Tile {
             name: String::from(d.name),
+            art: icons::art_name(d.name),
             icon: Some(d.icon),
             bg: d.bg,
             fg: d.fg,
@@ -365,6 +368,8 @@ fn tiles() -> Vec<Tile> {
         // The Store is the one package with its own glyph (a box), not an initial.
         let store = p.exec.rsplit('/').next() == Some("store");
         v.push(Tile {
+            // By manifest name or label, so new apps pick up their art automatically.
+            art: icons::package_art(&p.name, &p.label),
             name: p.label,
             icon: store.then_some(Icon::Package),
             bg: p.color,
@@ -776,7 +781,7 @@ fn home_app_at(x: i32, y: i32) -> Option<usize> {
 /// A dock tile's icon, `s` across at (x, y): its glyph, or a package's colour and initial.
 fn paint_tile(p: &mut Painter, x: i32, y: i32, s: i32, t: &Tile) {
     // The artist's icon when there is one (crate::art), else the drawn glyph.
-    if let Some(n) = icons::art_name(&t.name)
+    if let Some(n) = t.art
         && icons::art(p, x, y, s, n)
     {
         return;

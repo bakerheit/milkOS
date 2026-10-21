@@ -38,6 +38,7 @@ mod sink;
 mod smp;
 mod splash;
 mod sync;
+mod sysstat;
 mod timer;
 mod uart;
 mod virtio;
@@ -103,6 +104,7 @@ pub extern "C" fn kmain() -> ! {
     smp::init();
     sched::selftest::run();
     audit::init();
+    sysstat::init();
     net::init();
     net::selftest::run();
     audio::init();

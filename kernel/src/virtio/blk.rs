@@ -17,7 +17,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use super::mmio::{self, Error, Transport};
 use super::queue::{MAX_QUEUE_SIZE, QueueMem, Virtqueue};
@@ -64,6 +64,8 @@ pub struct VirtioBlk {
     ro: bool,
     can_flush: bool,
     inner: Mutex<Inner>,
+    /// reads, sectors read, writes, sectors written (/proc/diskstats).
+    io: [AtomicU64; 4],
 }
 
 fn virt(pa: PhysAddr) -> *mut u8 {
@@ -160,6 +162,8 @@ impl BlockDevice for VirtioBlk {
 
     fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<()> {
         self.check(lba, buf.len())?;
+        self.io[0].fetch_add(1, Ordering::Relaxed);
+        self.io[1].fetch_add((buf.len() / SECTOR) as u64, Ordering::Relaxed);
         let mut d = self.inner.lock();
         for (i, chunk) in buf.chunks_mut(BOUNCE_BYTES).enumerate() {
             let sector = lba + (i * BOUNCE_BYTES / SECTOR) as u64;
@@ -177,6 +181,8 @@ impl BlockDevice for VirtioBlk {
             return Err(Errno::EROFS);
         }
         self.check(lba, buf.len())?;
+        self.io[2].fetch_add(1, Ordering::Relaxed);
+        self.io[3].fetch_add((buf.len() / SECTOR) as u64, Ordering::Relaxed);
         let mut d = self.inner.lock();
         for (i, chunk) in buf.chunks(BOUNCE_BYTES).enumerate() {
             let sector = lba + (i * BOUNCE_BYTES / SECTOR) as u64;
@@ -187,6 +193,16 @@ impl BlockDevice for VirtioBlk {
             d.submit(T_OUT, sector, chunk.len(), false)?;
         }
         Ok(())
+    }
+
+    fn io_stats(&self) -> Option<blockdev::IoStats> {
+        let g = |i: usize| self.io[i].load(Ordering::Relaxed);
+        Some(blockdev::IoStats {
+            reads: g(0),
+            sectors_read: g(1),
+            writes: g(2),
+            sectors_written: g(3),
+        })
     }
 
     fn flush(&self) -> Result<()> {
@@ -248,6 +264,7 @@ pub fn attach(t: Transport) -> core::result::Result<(), Error> {
             hdr_pa,
             bounce_pa,
         }),
+        io: [const { AtomicU64::new(0) }; 4],
     };
     let dev: blockdev::BlockRef = Arc::new(dev);
     kprintln!(

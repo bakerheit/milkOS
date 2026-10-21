@@ -17,13 +17,23 @@ fn main(_: &rt::Args) -> i32 {
     });
     let now = rt::sys::clock_ns(rt::sys::CLOCK_REALTIME) / 1_000_000_000;
     let t = coreutils::fmt_time(now as i64);
+    // Load averages, if the kernel provides /proc/loadavg (kernel/src/sysstat.rs).
+    let load = rt::sys::read_file("/proc/loadavg")
+        .ok()
+        .map(|b| {
+            let t = alloc::string::String::from_utf8_lossy(&b).into_owned();
+            let la: alloc::vec::Vec<&str> = t.split_whitespace().take(3).collect();
+            alloc::format!(", load average: {}", la.join(", "))
+        })
+        .unwrap_or_default();
     rt::println!(
-        " {} up {}:{:02}:{:02}, {} processes",
+        " {} up {}:{:02}:{:02}, {} processes{}",
         &t[7..],
         s / 3600,
         s / 60 % 60,
         s % 60,
-        procs
+        procs,
+        load
     );
     0
 }

@@ -26,6 +26,19 @@ pub trait BlockDevice: Send + Sync {
     fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<()>;
     /// Make completed writes durable (a cache flush on the device).
     fn flush(&self) -> Result<()>;
+    /// I/O counters for /proc/diskstats, if the driver keeps them.
+    fn io_stats(&self) -> Option<IoStats> {
+        None
+    }
+}
+
+/// Cumulative I/O counters of a disk (`/proc/diskstats`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct IoStats {
+    pub reads: u64,
+    pub sectors_read: u64,
+    pub writes: u64,
+    pub sectors_written: u64,
 }
 
 pub type BlockRef = Arc<dyn BlockDevice>;

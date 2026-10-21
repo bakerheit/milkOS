@@ -23,6 +23,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `ramdisk.rs` | RAM block device (the self-test's throwaway milkfs) |
 | `ninep.rs` | 9P2000.L client: the Mac shared folder at `/Volumes/Mac` |
 | `fat.rs` | FAT32 with VFAT long names, at `/Volumes/<LABEL>` |
+| `pagecache.rs` | page cache for milkfs and FAT reads, `/sys/fs/pagecache` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
 | `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
@@ -344,13 +345,40 @@ input-test.sh).
   delete, dir move), then the Mac attaches the image read-only and checks it all;
   `fsck_msdos -n` before and after.
 
+## Page cache
+
+`kernel/src/fs/pagecache.rs`. File reads on milkfs and FAT go through one global, bounded
+LRU of 4 KiB pages (2048 pages = 8 MiB, PMM frames), keyed per inode by `(dev, ino, page)`.
+The file system's read path fills a missing page outside the cache lock.
+
+- Invalidation: milkfs drops an inode's pages on write and truncate, and a whole view's on
+  rollback, promote and discard (contents change without a write). FAT also on create,
+  unlink and rename, because its inode numbers are directory-entry slots that get reused.
+  Every invalidation bumps an epoch; a page read while an invalidation happened is not
+  inserted, so a racing write can't leave stale data behind.
+- Not cached: 9p (the Mac can change files underneath), tmpfs (already RAM), devices.
+- No `mmap` of files yet (that's proc/uspace's side).
+- `/sys/fs/pagecache/`: `stats`, `enabled` (write 0/1), `drop`, `bench` (write a path: it
+  is read twice, cold then warm, and the timings are printed and readable from `bench`).
+
+Measured with `scripts/cachebench.sh` (4 MiB random file, real virtio disks, HVF):
+
+| | cache off, 2nd read | cache on, 1st read | cache on, 2nd read |
+|---|---|---|---|
+| milkfs (`/home/milk`) | 38 ms (104 MiB/s) | 48 ms (83 MiB/s) | 0.66 ms (6.0 GiB/s) |
+| FAT32 (512 B clusters) | 34 ms (118 MiB/s) | 39 ms (103 MiB/s) | 0.39 ms (10 GiB/s) |
+
+Filling the cache costs a frame allocation and a copy per page, so a first read with the
+cache on is slightly slower. FAT reads also walk the cluster chain from a per-file cursor
+and read runs of contiguous clusters in one request (before that change, a cold 4 MiB FAT
+read took 289 ms).
+
 ## Next steps
 
 - Pipes (`InodeType::Fifo`) and `poll` on the wait queues; `O_NONBLOCK`.
 - Permission checks once processes have credentials (`Inode::stat` already has
   uid/gid/perm), `umask` in the syscall layer.
 - `mmap` of tmpfs files (expose the frame for a page index), `statfs`, `sync`.
-- A page cache for milkfs file data (today every read goes through the bcache and the tree).
 
 ## milkfs v0 (implemented)
 
@@ -570,7 +598,7 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
 - No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
 - One extent per 4 KiB block (no multi-block extents, no inline data, no reflink copies).
 - B+tree deletion doesn't merge underfull nodes.
-- Batched commits (about 1 s), but no page cache: reads go through the bcache and the tree.
+- Batched commits (about 1 s). Reads are page-cached (see Page cache).
 - After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
   (fine at these sizes; proportional to metadata).
 - One global lock per volume (`sched::Mutex<State>`), so operations on a volume serialise.

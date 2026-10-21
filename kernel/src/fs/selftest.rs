@@ -962,6 +962,7 @@ fn milkfs_test_volume(t: &mut T) {
     const VP: &str = "/Volumes/.milk-selftest";
     const D: &str = "/Volumes/.milk-selftest/t";
     let free0 = pmm::stats().free_frames;
+    let heap0 = crate::heap::stats().total;
     let Some(disk) = t.must(super::ramdisk::RamDisk::new("ram0", 16 << 20), "RAM disk") else {
         return;
     };
@@ -988,15 +989,20 @@ fn milkfs_test_volume(t: &mut T) {
     super::milkfs::set_test_override(Some(vol.clone()));
     milkfs_destructive(t, &vol, VP, D, &dev);
     milkfs_clones(t, &vol, VP, &dev);
+    page_cache(t, VP);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
     drop(vol);
     drop(dev);
+    super::pagecache::drop_all(); // cached pages hold frames too
+    // Every frame comes back, except what the kernel heap grew by (it never shrinks).
+    let lost = free0.saturating_sub(pmm::stats().free_frames);
+    let grown = (crate::heap::stats().total - heap0) / crate::mmu::PAGE_SIZE;
     t.ok(
-        pmm::stats().free_frames == free0,
-        "test volume's RAM disk freed",
+        lost == grown,
+        &alloc::format!("test volume's RAM disk freed ({lost} frames gone, heap grew {grown})"),
     );
 }
 
@@ -1559,6 +1565,66 @@ fn milkfs_clones(
     milk_space(t, vol, "milkfs space exact after clone round trip");
     rm_rf(&alloc::format!("{vp}/c"));
     milk_space(t, vol, "milkfs space exact after clone cleanup");
+}
+
+/// The page cache, on the test volume: hits, and no stale data after writes or rollbacks.
+fn page_cache(t: &mut T, vp: &str) {
+    use super::pagecache as pc;
+    let f = alloc::format!("{vp}/pc.bin");
+    let hits = || -> u64 {
+        pc::stats()
+            .split(", ")
+            .find_map(|w| w.strip_suffix(" hits").and_then(|n| n.parse().ok()))
+            .unwrap_or(0)
+    };
+    let data: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
+    let _ = ops::write_file(&f, &data);
+    let first = ops::read_file(&f).unwrap_or_default();
+    let h0 = hits();
+    let second = ops::read_file(&f).unwrap_or_default();
+    t.ok(
+        first == data && second == data,
+        "page cache: reads are right",
+    );
+    t.ok(hits() >= h0 + 5, "page cache: second read hits the cache");
+    let _ = ops::open(&f, O_WRONLY, 0).and_then(|w| w.pwrite(b"CHANGED", 4096));
+    let after = ops::read_file(&f).unwrap_or_default();
+    t.ok(
+        &after[4096..4103] == b"CHANGED" && after[..4096] == data[..4096],
+        "page cache: a write invalidates",
+    );
+    let _ = ops::truncate(&f, 100);
+    t.ok(
+        ops::read_file(&f).ok().as_deref() == Some(&after[..100]),
+        "page cache: truncate invalidates",
+    );
+    let _ = ops::open(&f, O_WRONLY | O_APPEND, 0).and_then(|w| w.write(b"tail"));
+    t.ok(
+        read_str(&f).ends_with("tail") && read_str(&f).len() == 104,
+        "page cache: append seen",
+    );
+    t.ok(
+        super::milkfs::snapshot("pc").is_ok(),
+        "page cache: snapshot",
+    );
+    let _ = ops::write_file(&f, b"after the snapshot");
+    let _ = read_str(&f); // cache the new content
+    t.ok(
+        super::milkfs::rollback("pc").is_ok() && read_str(&f).len() == 104,
+        "page cache: rollback invalidates",
+    );
+    let _ = super::milkfs::delete_snapshot("pc");
+    // 4 MiB read twice on the RAM test volume (the disk numbers come from cachebench.sh).
+    let big = alloc::format!("{vp}/big.bin");
+    let chunk = vec![0x5au8; 64 << 10]; // in chunks: a 4 MiB Vec would grow the heap
+    let wrote = ops::open(&big, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
+        .and_then(|w| (0..64).try_for_each(|_| w.write(&chunk).map(|_| ())));
+    if wrote.is_ok() {
+        let r = pc::bench(&big);
+        t.ok(r.is_ok(), "page cache bench");
+        let _ = ops::unlink(&big);
+    }
+    let _ = ops::unlink(&f);
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

@@ -226,7 +226,17 @@ pub fn clones() -> Result<alloc::vec::Vec<CloneInfo>> {
 pub fn discard_clone(name: &str) -> Result<()> {
     let v = primary()?;
     v.state.lock().clone_index_check(name)?;
+    let view = v
+        .state
+        .lock()
+        .clone_list()
+        .iter()
+        .find(|c| c.name == name)
+        .map(|c| c.id);
     unmount_clone(name);
+    if let Some(id) = view {
+        crate::fs::pagecache::invalidate_dev(v.view_dev(items::clone_view(id)));
+    }
     v.state.lock().clone_discard(name)
 }
 
@@ -238,7 +248,9 @@ pub fn promote_clone(name: &str) -> Result<String> {
     let mut keep = format!("before-{name}");
     keep.truncate(format::SNAP_NAME_MAX);
     unmount_clone(name);
-    v.state.lock().clone_promote(name, &keep)?;
+    let r = v.state.lock().clone_promote(name, &keep);
+    crate::fs::pagecache::invalidate_dev(v.dev);
+    r?;
     Ok(keep)
 }
 
@@ -302,7 +314,9 @@ pub fn rollback(name: &str) -> Result<()> {
     let v = primary()?;
     let zombies = {
         let mut st = v.state.lock();
-        st.snap_rollback(name)?;
+        let r = st.snap_rollback(name);
+        crate::fs::pagecache::invalidate_dev(v.dev); // live contents changed underneath
+        r?;
         st.unlinked_inodes()?
     };
     v.reclaim(&zombies)

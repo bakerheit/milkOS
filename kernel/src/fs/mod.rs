@@ -24,6 +24,7 @@ pub mod milkfs;
 pub mod ninep;
 pub mod node;
 pub mod ops;
+pub mod pagecache;
 pub mod path;
 pub mod procfs;
 pub mod ramdisk;

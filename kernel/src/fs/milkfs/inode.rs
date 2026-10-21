@@ -196,6 +196,16 @@ impl FileSystem for Volume {
     }
 }
 
+/// Drops a file's cached pages when it goes out of scope (after the change it guards,
+/// error or not).
+struct Invalidate(u64, u64);
+
+impl Drop for Invalidate {
+    fn drop(&mut self) {
+        crate::fs::pagecache::invalidate(self.0, self.1);
+    }
+}
+
 /// One view of a volume (a clone) mounted as its own file system.
 pub struct ViewFs {
     pub vol: Arc<Volume>,
@@ -358,9 +368,13 @@ impl Inode for MilkInode {
                 Errno::EINVAL
             });
         }
-        let st = self.vol.state.lock();
-        let i = st.inode(self.view, self.ino)?;
-        st.read_data(self.view, self.ino, i.size, off, buf)
+        let size = self.vol.state.lock().inode(self.view, self.ino)?.size;
+        let (view, ino) = (self.view, self.ino);
+        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, page| {
+            let st = self.vol.state.lock();
+            let at = pg * crate::fs::pagecache::PAGE as u64;
+            st.read_data(view, ino, size, at, page).map(|_| ())
+        })
     }
 
     fn write_at(&self, off: u64, buf: &[u8]) -> Result<usize> {
@@ -373,6 +387,7 @@ impl Inode for MilkInode {
         }
         self.ro()?;
         let ino = self.ino;
+        let _inv = Invalidate(self.dev, ino);
         self.vol.txn(self.view, |st| {
             let mut i = st.inode(st.cur, ino)?;
             i.size = st.write_data(ino, i.size, off, buf)?;
@@ -397,6 +412,7 @@ impl Inode for MilkInode {
             return Err(Errno::EFBIG);
         }
         let ino = self.ino;
+        let _inv = Invalidate(self.dev, ino);
         self.vol.txn(self.view, |st| {
             let mut i = st.inode(st.cur, ino)?;
             st.truncate_data(ino, i.size, len)?;

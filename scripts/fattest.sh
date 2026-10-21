@@ -68,6 +68,8 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:mv $F/readme.txt \"$F/Renamed To A Long Name.txt\"" "wait:$P" \
   "send:rm $F/CAPS.TXT" "wait:$P" \
   "send:mv \"$F/Projects/milkOS notes\" \"$F/Projects/Notes Moved\"" "wait:$P" \
+  "send:cp \"$F/Made In milkOS/Copied Binary Payload.bin\" $O/readback.bin" "wait:$P" \
+  "send:cp \"$F/Renamed To A Long Name.txt\" $O/renamed.txt" "wait:$P" \
   "send:ls -l \"$F\" \"$F/Made In milkOS\" \"$F/Projects\"" "wait:$P" \
   "send:echo FATTEST""-DONE" "wait:FATTEST-DONE" "done:$T/done" &
 DPID=$!
@@ -87,6 +89,9 @@ for pair in "long.txt:A Long File Name With Spaces.txt" "unicode.txt:Résumé (d
   got="${pair%%:*}"; want="${pair#*:}"
   cmp -s "$X/$got" "$REF/$want" && ok "milkOS read \"$want\"" || bad "milkOS read \"$want\""
 done
+
+cmp -s "$X/readback.bin" "$X/payload.bin" && ok "milkOS reads back what it wrote (page cache)" || bad "milkOS read-back after write"
+cmp -s "$X/renamed.txt" "$REF/readme.txt" && ok "milkOS reads a renamed file" || bad "milkOS read after rename"
 
 echo "== 3. Mac: attach read-only and check what milkOS wrote"
 fsck_msdos -n "$IMG" >/dev/null 2>&1 && ok "fsck_msdos clean after milkOS wrote" || { bad "fsck_msdos after milkOS wrote"; fsck_msdos -n "$IMG" || true; }

@@ -650,6 +650,7 @@ impl FatVol {
                 size,
                 dirent,
             }),
+            cursor: SpinLock::new((0, 0)),
         });
         m.insert(ino, Arc::downgrade(&n));
         n
@@ -692,6 +693,9 @@ pub struct FatNode {
     ino: SpinLock<u64>,
     kind: InodeType,
     loc: SpinLock<Loc>,
+    /// Last (cluster index, cluster) a read reached, so sequential reads don't walk the
+    /// chain from the start every time. Reset by anything that changes the chain.
+    cursor: SpinLock<(usize, u32)>,
 }
 
 impl FatNode {
@@ -721,6 +725,149 @@ impl FatNode {
         }
         self.loc.lock().first = loc.first;
         Ok(chain)
+    }
+
+    fn read_raw(&self, off: u64, buf: &mut [u8]) -> Result<usize> {
+        let v = &self.vol;
+        let st = v.st.lock();
+        let loc = *self.loc.lock();
+        if off >= loc.size as u64 {
+            return Ok(0);
+        }
+        let n = (buf.len() as u64).min(loc.size as u64 - off) as usize;
+        let cb = v.cluster_bytes;
+        let (first_ci, last_ci) = (off as usize / cb, (off as usize + n - 1) / cb);
+        // Find cluster `first_ci`, starting from the sequential-read cursor when it helps.
+        let (mut ci, mut c) = match *self.cursor.lock() {
+            (i, cl) if i <= first_ci && cl != 0 && loc.first != 0 => (i, cl),
+            _ => (0, loc.first),
+        };
+        while ci < first_ci {
+            c = st.fat[c as usize] & 0x0FFF_FFFF;
+            if !v.valid(c) {
+                return Err(Errno::EIO);
+            }
+            ci += 1;
+        }
+        // The clusters we need, then read each run of consecutive ones in one request.
+        let mut clusters = alloc::vec![c];
+        while ci < last_ci {
+            c = st.fat[c as usize] & 0x0FFF_FFFF;
+            if !v.valid(c) {
+                return Err(Errno::EIO);
+            }
+            clusters.push(c);
+            ci += 1;
+        }
+        *self.cursor.lock() = (last_ci, c);
+        let mut tmp = Vec::new();
+        let mut done = 0;
+        let mut i = 0;
+        while i < clusters.len() {
+            let mut j = i + 1;
+            while j < clusters.len() && clusters[j] == clusters[j - 1] + 1 {
+                j += 1;
+            }
+            tmp.resize((j - i) * cb, 0);
+            v.dev.read_blocks(v.sector_of(clusters[i]), &mut tmp)?;
+            let run_start = (first_ci + i) * cb; // file offset of the run
+            let from = (off as usize + done) - run_start;
+            let take = (tmp.len() - from).min(n - done);
+            buf[done..done + take].copy_from_slice(&tmp[from..from + take]);
+            done += take;
+            i = j;
+        }
+        Ok(n)
+    }
+
+    fn write_raw(&self, off: u64, data: &[u8]) -> Result<usize> {
+        if self.kind == InodeType::Dir {
+            return Err(Errno::EISDIR);
+        }
+        let v = &self.vol;
+        v.ro()?;
+        let end = off.checked_add(data.len() as u64).ok_or(Errno::EFBIG)?;
+        if end > u32::MAX as u64 {
+            return Err(Errno::EFBIG);
+        }
+        let mut st = v.st.lock();
+        let cb = v.cluster_bytes;
+        let old = self.loc.lock().size as u64;
+        let chain = self.grow(&mut st, (end as usize).div_ceil(cb))?;
+        // FAT has no holes: anything between the old end and `off` must read as zeros.
+        // New clusters are zeroed by alloc_cluster; zero the tail of the old last one.
+        let mut cbuf = vec![0u8; cb];
+        if off > old && !old.is_multiple_of(cb as u64) {
+            let c = chain[(old / cb as u64) as usize];
+            v.read_cluster(c, &mut cbuf)?;
+            let from = (old % cb as u64) as usize;
+            let to = if off / cb as u64 == old / cb as u64 {
+                (off % cb as u64) as usize
+            } else {
+                cb
+            };
+            cbuf[from..to].fill(0);
+            v.write_cluster(c, &cbuf)?;
+        }
+        let mut done = 0;
+        while done < data.len() {
+            let pos = off as usize + done;
+            let (ci, inc) = (pos / cb, pos % cb);
+            let chunk = (cb - inc).min(data.len() - done);
+            let c = chain[ci];
+            if chunk < cb {
+                v.read_cluster(c, &mut cbuf)?;
+            }
+            cbuf[inc..inc + chunk].copy_from_slice(&data[done..done + chunk]);
+            v.write_cluster(c, &cbuf)?;
+            done += chunk;
+        }
+        {
+            let mut l = self.loc.lock();
+            l.size = l.size.max(end as u32);
+        }
+        self.save()?;
+        v.flush_fat(&mut st)?;
+        Ok(data.len())
+    }
+
+    fn truncate_raw(&self, len: u64) -> Result<()> {
+        if self.kind == InodeType::Dir {
+            return Err(Errno::EISDIR);
+        }
+        let v = &self.vol;
+        v.ro()?;
+        if len > u32::MAX as u64 {
+            return Err(Errno::EFBIG);
+        }
+        let mut st = v.st.lock();
+        let cb = v.cluster_bytes;
+        let loc = *self.loc.lock();
+        if len < loc.size as u64 {
+            let keep = (len as usize).div_ceil(cb);
+            let chain = if loc.first == 0 {
+                Vec::new()
+            } else {
+                v.chain(&st, loc.first)?
+            };
+            if keep == 0 {
+                if loc.first != 0 {
+                    v.free_chain(&mut st, loc.first)?;
+                }
+                self.loc.lock().first = 0;
+            } else if keep < chain.len() {
+                v.free_chain(&mut st, chain[keep])?;
+                v.set_fat(&mut st, chain[keep - 1], EOC);
+            }
+            self.loc.lock().size = len as u32;
+        } else if len > loc.size as u64 {
+            drop(st);
+            // Growing: write zeros (FAT has no sparse files).
+            let zeros = vec![0u8; (len - loc.size as u64) as usize];
+            return self.write_raw(loc.size as u64, &zeros).map(|_| ());
+        }
+        self.save()?;
+        v.flush_fat(&mut st)
     }
 
     fn save(&self) -> Result<()> {
@@ -779,117 +926,26 @@ impl Inode for FatNode {
         if self.kind == InodeType::Dir {
             return Err(Errno::EISDIR);
         }
-        let v = &self.vol;
-        let st = v.st.lock();
-        let loc = *self.loc.lock();
-        if off >= loc.size as u64 {
-            return Ok(0);
-        }
-        let n = (buf.len() as u64).min(loc.size as u64 - off) as usize;
-        let cb = v.cluster_bytes;
-        let chain = v.chain(&st, loc.first)?;
-        let mut cbuf = vec![0u8; cb];
-        let mut done = 0;
-        while done < n {
-            let pos = off as usize + done;
-            let (ci, inc) = (pos / cb, pos % cb);
-            let c = *chain.get(ci).ok_or(Errno::EIO)?;
-            let chunk = (cb - inc).min(n - done);
-            v.read_cluster(c, &mut cbuf)?;
-            buf[done..done + chunk].copy_from_slice(&cbuf[inc..inc + chunk]);
-            done += chunk;
-        }
-        Ok(n)
+        let size = self.loc.lock().size as u64;
+        let (dev, ino) = (self.vol.devno, self.ino());
+        super::pagecache::read(dev, ino, size, off, buf, |pg, page| {
+            self.read_raw(pg * super::pagecache::PAGE as u64, page)
+                .map(|_| ())
+        })
     }
 
     fn write_at(&self, off: u64, data: &[u8]) -> Result<usize> {
-        if self.kind == InodeType::Dir {
-            return Err(Errno::EISDIR);
-        }
-        let v = &self.vol;
-        v.ro()?;
-        let end = off.checked_add(data.len() as u64).ok_or(Errno::EFBIG)?;
-        if end > u32::MAX as u64 {
-            return Err(Errno::EFBIG);
-        }
-        let mut st = v.st.lock();
-        let cb = v.cluster_bytes;
-        let old = self.loc.lock().size as u64;
-        let chain = self.grow(&mut st, (end as usize).div_ceil(cb))?;
-        // FAT has no holes: anything between the old end and `off` must read as zeros.
-        // New clusters are zeroed by alloc_cluster; zero the tail of the old last one.
-        let mut cbuf = vec![0u8; cb];
-        if off > old && !old.is_multiple_of(cb as u64) {
-            let c = chain[(old / cb as u64) as usize];
-            v.read_cluster(c, &mut cbuf)?;
-            let from = (old % cb as u64) as usize;
-            let to = if off / cb as u64 == old / cb as u64 {
-                (off % cb as u64) as usize
-            } else {
-                cb
-            };
-            cbuf[from..to].fill(0);
-            v.write_cluster(c, &cbuf)?;
-        }
-        let mut done = 0;
-        while done < data.len() {
-            let pos = off as usize + done;
-            let (ci, inc) = (pos / cb, pos % cb);
-            let chunk = (cb - inc).min(data.len() - done);
-            let c = chain[ci];
-            if chunk < cb {
-                v.read_cluster(c, &mut cbuf)?;
-            }
-            cbuf[inc..inc + chunk].copy_from_slice(&data[done..done + chunk]);
-            v.write_cluster(c, &cbuf)?;
-            done += chunk;
-        }
-        {
-            let mut l = self.loc.lock();
-            l.size = l.size.max(end as u32);
-        }
-        self.save()?;
-        v.flush_fat(&mut st)?;
-        Ok(data.len())
+        *self.cursor.lock() = (0, 0);
+        let r = self.write_raw(off, data);
+        super::pagecache::invalidate(self.vol.devno, self.ino());
+        r
     }
 
     fn truncate(&self, len: u64) -> Result<()> {
-        if self.kind == InodeType::Dir {
-            return Err(Errno::EISDIR);
-        }
-        let v = &self.vol;
-        v.ro()?;
-        if len > u32::MAX as u64 {
-            return Err(Errno::EFBIG);
-        }
-        let mut st = v.st.lock();
-        let cb = v.cluster_bytes;
-        let loc = *self.loc.lock();
-        if len < loc.size as u64 {
-            let keep = (len as usize).div_ceil(cb);
-            let chain = if loc.first == 0 {
-                Vec::new()
-            } else {
-                v.chain(&st, loc.first)?
-            };
-            if keep == 0 {
-                if loc.first != 0 {
-                    v.free_chain(&mut st, loc.first)?;
-                }
-                self.loc.lock().first = 0;
-            } else if keep < chain.len() {
-                v.free_chain(&mut st, chain[keep])?;
-                v.set_fat(&mut st, chain[keep - 1], EOC);
-            }
-            self.loc.lock().size = len as u32;
-        } else if len > loc.size as u64 {
-            drop(st);
-            // Growing: write zeros (FAT has no sparse files).
-            let zeros = vec![0u8; (len - loc.size as u64) as usize];
-            return self.write_at(loc.size as u64, &zeros).map(|_| ());
-        }
-        self.save()?;
-        v.flush_fat(&mut st)
+        *self.cursor.lock() = (0, 0);
+        let r = self.truncate_raw(len);
+        super::pagecache::invalidate(self.vol.devno, self.ino());
+        r
     }
 
     fn lookup(&self, name: &str) -> Result<InodeRef> {
@@ -933,6 +989,8 @@ impl Inode for FatNode {
         let off = v.add_entry(&mut st, dir, name, ATTR_ARCHIVE, 0, 0)?;
         v.flush_fat(&mut st)?;
         drop(st);
+        // Entry slots are reused: drop whatever an older file in this slot left cached.
+        super::pagecache::invalidate(v.devno, FILE_INO_BASE + off / 32);
         Ok(v.obj(FILE_INO_BASE + off / 32, InodeType::File, 0, 0, Some(off)))
     }
 
@@ -990,6 +1048,7 @@ impl Inode for FatNode {
         }
         v.flush_fat(&mut st)?;
         drop(st);
+        super::pagecache::invalidate(v.devno, FILE_INO_BASE + e.off / 32);
         // An open file loses its data with the entry (FAT has no link counts).
         if let Some(n) = v
             .inodes
@@ -1082,6 +1141,8 @@ impl Inode for FatNode {
         }
         v.flush_fat(&mut st)?;
         drop(st);
+        super::pagecache::invalidate(v.devno, FILE_INO_BASE + src.off / 32);
+        super::pagecache::invalidate(v.devno, FILE_INO_BASE + off / 32);
         // Keep an open file's object pointing at its entry.
         if src.kind() == InodeType::File {
             let (old_ino, new_ino) = (FILE_INO_BASE + src.off / 32, FILE_INO_BASE + off / 32);

@@ -3,7 +3,7 @@
 //! text files, kept up to date from VFS change notifications (`fs::notify`) by a
 //! low-priority thread, stored at `~/.cache/milk/index` so it survives reboots.
 //!
-//! - `query(q, limit)` (`query.rs`): words and prefixes, ranked (name > content, newer first),
+//! - [`query()`]`(q, limit)` (`query.rs`): words and prefixes, ranked (name > content, newer first),
 //!   with filters `kind:md`, `in:Documents`, `modified:today`. See docs/filesystem.md.
 //! - `/sys/fs/search`: `query` (write a query, read the results), `status`, `roots`,
 //!   `rebuild`. Tool: `spot`.
@@ -25,10 +25,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::fs::errno::Result;
 
+pub mod query;
 use crate::fs::node::InodeType;
 use crate::fs::notify::{self, Event, Id};
 use crate::sched::Mutex;
 use crate::sync::SpinLock;
+#[allow(unused_imports)]
+pub use query::{Hit, Query, parse, query, results_text, sysfs};
 
 /// Where the index is kept.
 pub const INDEX_PATH: &str = "/home/milk/.cache/milk/index";

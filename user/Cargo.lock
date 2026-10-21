@@ -45,6 +45,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "httpd"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "ifconfig"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "init"
 version = "0.0.1"
 dependencies = [
@@ -59,10 +73,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "nc"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "netstat"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "paint"
 version = "0.0.1"
 dependencies = [
  "gui",
+ "rt",
+]
+
+[[package]]
+name = "ping"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "play"
+version = "0.0.1"
+dependencies = [
  "rt",
 ]
 

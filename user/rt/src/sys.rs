@@ -926,3 +926,8 @@ pub fn isatty(fd: i32) -> bool {
     )
     .is_ok()
 }
+
+/// ioctl(2) with an integer (or pointer) argument.
+pub fn ioctl(fd: i32, cmd: u32, arg: usize) -> Result<usize> {
+    sc(29, [fd as usize, cmd as usize, arg, 0, 0, 0])
+}

@@ -1,0 +1,12 @@
+[package]
+name = "ping"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ping"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

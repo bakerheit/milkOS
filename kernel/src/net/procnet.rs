@@ -267,6 +267,43 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     )
 }
 
+/// milkOS-specific: one line per interface, `key=value` fields (what `ifconfig` reads;
+/// Linux gets these from ioctls instead).
+pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    writeln!(
+        w,
+        "lo flags=UP,LOOPBACK,RUNNING mtu={} inet=127.0.0.1 netmask=255.0.0.0",
+        super::iface::MTU
+    )?;
+    let Some(d) = st.iface.dev.as_ref() else {
+        return Ok(());
+    };
+    let c = st.iface.cfg;
+    write!(
+        w,
+        "eth0 flags=UP,BROADCAST{} mtu={} ether={}",
+        if d.link_up() { ",RUNNING" } else { "" },
+        super::iface::MTU,
+        st.iface.mac
+    )?;
+    if c.configured() {
+        write!(
+            w,
+            " inet={} netmask={} broadcast={}",
+            c.addr,
+            c.mask,
+            c.subnet_broadcast()
+        )?;
+    }
+    if let Some(g) = c.gateway {
+        write!(w, " gateway={g}")?;
+    }
+    if let Some(n) = c.dns {
+        write!(w, " dns={n}")?;
+    }
+    writeln!(w, " dhcp={:?}", st.dhcp.state)
+}
+
 type Gen = fn(&Stack, &mut dyn Write) -> fmt::Result;
 
 pub const FILES: &[(&str, Gen)] = &[
@@ -276,6 +313,7 @@ pub const FILES: &[(&str, Gen)] = &[
     ("tcp", tcp),
     ("udp", udp),
     ("snmp", snmp),
+    ("ifaddr", ifaddr),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

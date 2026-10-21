@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Drive the guest's serial console over a qemu unix-socket chardev (stdlib only).
 
-  serial_drive.py SOCK LOG [wait:REGEX | send:TEXT | done:FILE] ...
+  serial_drive.py SOCK LOG [wait:REGEX | send:TEXT | raw:TEXT | done:FILE | waitfile:FILE] ...
 
 Connects to SOCK (retrying), appends everything the guest prints to LOG, and runs the
 steps in order: wait for REGEX to appear in output that arrived after the previous step,
-type TEXT followed by Enter, or touch FILE (to tell the caller the steps are done). Then
+type TEXT followed by Enter, type TEXT with \\xNN escapes and no Enter (raw: e.g. ^D is
+raw:\\x04), touch FILE (done:), or wait for the caller to create FILE (waitfile:). Then
 keeps logging until killed. Each wait gives up after 60 s (exit status 1).
 """
 import os
@@ -61,6 +62,16 @@ for step in steps:
         for ch in arg.encode() + b"\r":
             s.sendall(bytes([ch]))
             time.sleep(0.002)
+    elif kind == "raw":
+        for ch in arg.encode().decode("unicode_escape").encode("latin-1"):
+            s.sendall(bytes([ch]))
+            time.sleep(0.002)
+    elif kind == "waitfile":
+        end = time.time() + 60
+        while not os.path.exists(arg):
+            if time.time() > end:
+                sys.exit(f"serial_drive: timed out waiting for file {arg}")
+            time.sleep(0.05)
     elif kind == "done":
         open(arg, "w").close()
 while True:

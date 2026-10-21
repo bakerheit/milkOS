@@ -111,6 +111,9 @@ pub struct Sock {
     pub shut_wr: bool,
     /// UDP: `connect` set a default peer (and filters what we receive).
     pub udp_connected: bool,
+    /// An ICMP "ping socket" (SOCK_DGRAM + IPPROTO_ICMP, as on Linux): datagrams are ICMP
+    /// echo messages; the local "port" is the echo identifier.
+    pub icmp: bool,
     pub rx_drops: u64,
     pub tcb: Tcb,
 }
@@ -172,6 +175,7 @@ impl Table {
             shut_rd: false,
             shut_wr: false,
             udp_connected: false,
+            icmp: false,
             rx_drops: 0,
             tcb: Tcb::new(),
         });
@@ -274,6 +278,18 @@ fn autobind(st: &mut Stack, i: usize) -> Result<()> {
 pub fn socket(ty: SockType) -> Result<SocketId> {
     with(|st| {
         let i = st.socks.alloc(ty).ok_or(ENOBUFS)?;
+        Ok(st.socks.id_of(i).unwrap())
+    })
+}
+
+/// socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP): a Linux-style ping socket. `sendto` takes
+/// an ICMP echo request (8-byte header + payload; we fill in the identifier and checksum),
+/// `recvfrom` returns the echo replies addressed to this socket (ICMP header + payload,
+/// no IP header). Unprivileged, like Linux with `net.ipv4.ping_group_range` open.
+pub fn socket_icmp() -> Result<SocketId> {
+    with(|st| {
+        let i = st.socks.alloc(SockType::Dgram).ok_or(ENOBUFS)?;
+        st.socks.get(i).unwrap().icmp = true;
         Ok(st.socks.id_of(i).unwrap())
     })
 }
@@ -438,6 +454,7 @@ pub fn sendto(id: SocketId, buf: &[u8], to: SockAddr) -> Result<usize> {
     with(|st| {
         let (i, s) = st.socks.lookup(id)?;
         match s.ty {
+            SockType::Dgram if s.icmp => super::icmp::sendto(st, i, buf, to),
             SockType::Dgram => udp::sendto(st, i, buf, to),
             SockType::Stream => tcp::send(st, i, buf),
         }

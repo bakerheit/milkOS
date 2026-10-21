@@ -1,5 +1,6 @@
-//! In-kernel demo services, run by the net thread after every pass: a tiny HTTP/1.0 server
-//! on TCP port 80. It only uses the public socket API (non-blocking), so it doubles as a
+//! In-kernel demo services, run by the net thread after every pass: a tiny HTTP/1.0 server,
+//! off by default ([`enable`] starts it on a port; the boot self-test does when
+//! `scripts/net-test.sh` asks with `khttpd=PORT`). Userland `/bin/httpd` serves :80. It only uses the public socket API (non-blocking), so it doubles as a
 //! test of it. Pages:
 //!
 //! - `/`         a small HTML page with the interface configuration;
@@ -20,7 +21,8 @@ use super::{procnet, with};
 use crate::{kprintln, timer};
 use core::sync::atomic::{AtomicU64, Ordering};
 
-pub const HTTP_PORT: u16 = 80;
+use crate::sync::SpinLock;
+
 const MAX_CONNS: usize = 8;
 const REQ_MAX: usize = 2048;
 const IDLE_NS: u64 = 10_000_000_000;
@@ -62,24 +64,43 @@ pub fn big_bytes(off: usize, out: &mut [u8]) {
     }
 }
 
-/// Listen on port 80 (thread context, at net init).
-pub fn start() -> Http {
-    let r = (|| {
-        let s = socket::socket(SockType::Stream)?;
-        socket::bind(s, SockAddr::new(Ipv4::UNSPECIFIED, HTTP_PORT))?;
-        socket::listen(s, 8)?;
-        Ok::<_, crate::fs::errno::Errno>(s)
-    })();
-    let listener = match r {
-        Ok(s) => Some(s),
-        Err(e) => {
-            kprintln!("[net] httpd: cannot listen on :80: {:?}", e);
-            None
-        }
-    };
-    Http {
-        listener,
+/// Handed from [`enable`] to the net thread.
+static PENDING: SpinLock<Option<Http>> = SpinLock::new(None);
+static PORT: AtomicU64 = AtomicU64::new(0);
+
+/// Start the kernel HTTP server on `port` (it is off by default; userland `/bin/httpd`
+/// normally owns :80). The port is listening when this returns. Thread context.
+pub fn enable(port: u16) -> crate::fs::errno::Result<()> {
+    let s = socket::socket(SockType::Stream)?;
+    let r =
+        socket::bind(s, SockAddr::new(Ipv4::UNSPECIFIED, port)).and_then(|_| socket::listen(s, 8));
+    if let Err(e) = r {
+        let _ = socket::close(s);
+        return Err(e);
+    }
+    *PENDING.lock() = Some(Http {
+        listener: Some(s),
         conns: Vec::new(),
+    });
+    PORT.store(port as u64, Ordering::Relaxed);
+    kprintln!("[net] kernel httpd listening on :{port}");
+    Ok(())
+}
+
+/// Port of the kernel HTTP server, if enabled.
+pub fn port() -> Option<u16> {
+    match PORT.load(Ordering::Relaxed) {
+        0 => None,
+        p => Some(p as u16),
+    }
+}
+
+/// Net thread: pick up a server [`enable`] created.
+pub fn adopt(slot: &mut Option<Http>) {
+    if let Some(mut g) = PENDING.try_lock()
+        && let Some(h) = g.take()
+    {
+        *slot = Some(h);
     }
 }
 

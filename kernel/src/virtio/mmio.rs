@@ -75,6 +75,7 @@ pub mod device_id {
     pub const RNG: u32 = 4;
     pub const GPU: u32 = 16;
     pub const INPUT: u32 = 18;
+    pub const SOUND: u32 = 25;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

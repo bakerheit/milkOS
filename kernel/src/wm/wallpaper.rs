@@ -47,6 +47,15 @@ impl Kind {
 
 /// Draw wallpaper `kind` full screen into `b` (also used for the Settings previews).
 pub fn paint(b: &mut Buffer, kind: Kind) {
+    // The artist's wallpaper (crate::art), scaled to cover this size; the drawn one if
+    // there is none.
+    if let Some(a) = crate::art::image(&alloc::format!("wallpaper-{}", kind.key())) {
+        let (w, h) = (b.w() as usize, b.h() as usize);
+        let px = a.scaled(w, h);
+        let mut p = Painter::raw(b);
+        p.blit_raw(0, 0, &px, w, w as i32, h as i32);
+        return;
+    }
     match kind {
         Kind::Dawn => draw(b),
         Kind::Night => draw_night(b),

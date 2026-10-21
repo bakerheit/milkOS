@@ -7,6 +7,7 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod art;
 mod audio;
 mod audit;
 mod crypto;
@@ -17,6 +18,7 @@ mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
+mod fontx;
 mod fs;
 mod fwcfg;
 mod gfx;

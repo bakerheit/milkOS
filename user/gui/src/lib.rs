@@ -28,6 +28,7 @@ const WIN_COMMIT: usize = 4101;
 const WIN_EVENT: usize = 4102;
 const WIN_TITLE: usize = 4103;
 const WIN_DESTROY: usize = 4104;
+const WIN_RESIZE: usize = 4105;
 
 /// A pixel: 0x00RRGGBB.
 pub type Color = u32;
@@ -128,6 +129,18 @@ pub enum Event {
     Scroll(i32),
     /// The user closed the window: clean up and exit.
     Close,
+    /// The window was resized to a `w` x `h` body (only for a window that called
+    /// [`Window::set_resizable`]): call [`Window::resize`] with it, then redraw.
+    Resize {
+        w: i32,
+        h: i32,
+    },
+    /// A button on one of this app's notices was pressed ([`notify`]): the `tag` the app
+    /// gave it and which button (0 or 1).
+    Action {
+        tag: u32,
+        index: u32,
+    },
     /// A file was dropped on the window at (x, y): `fd` is it, opened read-only for us
     /// (the user's drop is the grant; read it, then close it).
     Drop {
@@ -180,6 +193,11 @@ fn decode(b: &[u8; 32]) -> Option<Event> {
         },
         6 => Event::Scroll(extra),
         7 => Event::Close,
+        10 => Event::Resize { w: x, h: y },
+        9 => Event::Action {
+            tag: word(b, 3),
+            index: word(b, 4),
+        },
         8 => Event::Drop {
             x,
             y,
@@ -224,6 +242,54 @@ impl Window {
             w,
             h,
         })
+    }
+
+    /// This window can be resized (the user's resize drag, joining a tab group), down to
+    /// `min_w` x `min_h`: it gets [`Event::Resize`] and answers with [`Window::resize`].
+    pub fn set_resizable(&self, min_w: i32, min_h: i32) -> bool {
+        let mut info = [0u8; 24];
+        // SAFETY: plain integers; info is 24 writable bytes (unused with the flag).
+        let r = unsafe {
+            sys::syscall(
+                WIN_RESIZE,
+                [
+                    self.id as usize,
+                    min_w as usize,
+                    min_h as usize,
+                    info.as_mut_ptr() as usize,
+                    1,
+                    0,
+                ],
+            )
+        };
+        r >= 0
+    }
+
+    /// A new `w` x `h` body (at most 1000 x 700): the old picture is kept in its top-left,
+    /// the rest is milk. The old pixels are gone afterwards (use [`Window::pixels`] again).
+    pub fn resize(&mut self, w: i32, h: i32) -> sys::Result<()> {
+        let mut info = [0u8; 24];
+        // SAFETY: plain integers; info is 24 writable bytes for the kernel's answer.
+        let r = unsafe {
+            sys::syscall(
+                WIN_RESIZE,
+                [
+                    self.id as usize,
+                    w as usize,
+                    h as usize,
+                    info.as_mut_ptr() as usize,
+                    0,
+                    0,
+                ],
+            )
+        };
+        if r < 0 {
+            return Err(sys::Errno(-r as i32));
+        }
+        self.px = u64::from_le_bytes(info[..8].try_into().unwrap()) as *mut u32;
+        self.w = w;
+        self.h = h;
+        Ok(())
     }
 
     /// The body's pixels, row-major, `w` per row.
@@ -433,7 +499,8 @@ impl Window {
     }
 
     /// A button (SPEC "Buttons"): 24 high is a fully rounded pill, taller is a dialog button
-    /// (radius 8). The label is bold and centred.
+    /// (radius 8). The label is bold and centred. A primary keeps its ink label in every
+    /// state: rest straw, `hover` #EA9AA4, `pressed` #DE7D89.
     /// `r` is (x, y, w, h).
     pub fn button(
         &mut self,
@@ -441,12 +508,22 @@ impl Window {
         label: &str,
         kind: ButtonKind,
         hover: bool,
+        pressed: bool,
         th: ButtonTheme,
     ) {
         let (x, y, w, h) = r;
         let r = if h <= 24 { h / 2 } else { 8 };
         let (fill, text, border) = match kind {
-            ButtonKind::Primary => (if hover { STRAW_HOVER } else { STRAW }, INK, None),
+            ButtonKind::Primary => {
+                let fill = if pressed {
+                    STRAW_PRESSED
+                } else if hover {
+                    STRAW_HOVER
+                } else {
+                    STRAW
+                };
+                (fill, INK, None)
+            }
             ButtonKind::Secondary => (th.oat, th.text, Some(th.sand)),
             ButtonKind::Danger => (DANGER, DANGER_FG, None),
             ButtonKind::Disabled => (th.oat, th.latte, Some(th.sand)),
@@ -467,6 +544,47 @@ impl Drop for Window {
         // SAFETY: plain integer; the kernel unmaps the buffer.
         unsafe { sys::syscall(WIN_DESTROY, [self.id as usize, 0, 0, 0, 0, 0]) };
     }
+}
+
+/// Post a notification from this app (/dev/wm `notify`, see docs/processes.md): `app` is the
+/// group and icon name, `tag` comes back in [`Event::Action`] when one of `actions` (up to
+/// two labels) is pressed. Returns false if there is no desktop.
+pub fn notify(app: &str, title: &str, sub: &str, tag: u32, actions: &[&str]) -> bool {
+    let clean = |s: &str| s.replace(['\t', '\n'], " ");
+    let mut line = alloc::format!(
+        "notify\t{}\t{}\tapp={}\tid={tag}",
+        clean(title),
+        clean(sub),
+        clean(app)
+    );
+    for a in actions.iter().take(2) {
+        line.push_str(&alloc::format!("\taction={}", clean(a).replace(':', " ")));
+    }
+    line.push('\n');
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY) else {
+        return false;
+    };
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
+}
+
+/// Show (or with empty `text`, clear) this app's countdown in the menu bar ("04:32"): one
+/// item per `app`, gone 5 s after the last call, so call it every second while it runs.
+/// A click on it opens `open` (an app or program name; empty: `app`).
+pub fn menu_timer(app: &str, text: &str, open: &str) -> bool {
+    let clean = |s: &str| s.replace(['\t', '\n'], " ");
+    let mut line = alloc::format!("timer\t{}\tapp={}", clean(text), clean(app));
+    if !open.is_empty() {
+        line.push_str(&alloc::format!("\topen={}", clean(open)));
+    }
+    line.push('\n');
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY) else {
+        return false;
+    };
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
 }
 
 /// Blend `src` over `dst` at `a` (0..=255).

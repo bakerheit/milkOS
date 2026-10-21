@@ -1,6 +1,7 @@
 //! Paint: the first userland desktop app. A canvas, a milk palette, three brush sizes,
 //! Clear and Save (writes ~/Pictures/painting.ppm). Keys: 1-8 colours, [ ] brush size,
 //! c clear, s save. Proof that a process can own a window (gui crate, MILK_WIN_* syscalls).
+//! Resizable: a bigger window is a bigger canvas (what was drawn stays put).
 
 #![no_std]
 #![no_main]
@@ -16,6 +17,9 @@ rt::main!(main);
 
 const W: i32 = 560;
 const H: i32 = 380;
+/// The toolbar needs this much width; a little canvas below it.
+const MIN_W: i32 = 560;
+const MIN_H: i32 = 200;
 const BAR: i32 = 48;
 const PALETTE: [u32; 8] = [
     gui::ESPRESSO,
@@ -51,8 +55,9 @@ const SAVE: (i32, i32, i32) = (486, 10, 60);
 impl App {
     fn toolbar(&mut self) {
         let w = &mut self.win;
-        w.fill(0, 0, W, BAR, gui::CREAM);
-        w.fill(0, BAR - 1, W, 1, gui::SAND);
+        let ww = w.w;
+        w.fill(0, 0, ww, BAR, gui::CREAM);
+        w.fill(0, BAR - 1, ww, 1, gui::SAND);
         for (i, &c) in PALETTE.iter().enumerate() {
             let (x, y) = swatch(i);
             if i == self.color {
@@ -75,13 +80,14 @@ impl App {
             let tx = x + (bw - gui::str_width(label, 1)) / 2;
             w.text(tx, y + 6, label, gui::ESPRESSO);
         }
-        w.commit_rect(0, 0, W, BAR);
+        w.commit_rect(0, 0, ww, BAR);
     }
 
     fn clear(&mut self) {
-        self.win.fill(0, BAR, W, H - BAR, gui::MILK);
+        let (w, h) = (self.win.w, self.win.h);
+        self.win.fill(0, BAR, w, h - BAR, gui::MILK);
         let hint = "Draw with the mouse.  1-8 colours, [ ] size, c clear, s save";
-        self.win.text(16, H - 24, hint, gui::LATTE);
+        self.win.text(16, h - 24, hint, gui::COCOA);
         self.win.commit();
     }
 
@@ -103,7 +109,7 @@ impl App {
     }
 
     fn save(&mut self) {
-        let (w, h) = (W as usize, (H - BAR) as usize);
+        let (w, h) = (self.win.w as usize, (self.win.h - BAR) as usize);
         let mut data: Vec<u8> = format!("P6\n{w} {h}\n255\n").into_bytes();
         let px = self.win.pixels();
         for y in 0..h {
@@ -173,6 +179,7 @@ fn main(_args: &rt::Args) -> i32 {
         last: None,
         saved: false,
     };
+    app.win.set_resizable(MIN_W, MIN_H);
     app.toolbar();
     app.clear();
     loop {
@@ -193,6 +200,13 @@ fn main(_args: &rt::Args) -> i32 {
                 }
             }
             Event::Up { .. } => app.last = None,
+            Event::Resize { w, h } => {
+                // The kernel keeps the picture in the top-left; the new edges are milk.
+                if app.win.resize(w.max(MIN_W), h.max(MIN_H)).is_ok() {
+                    app.toolbar();
+                    app.win.commit();
+                }
+            }
             Event::Key(Key::Char(c), _) => match c {
                 '1'..='8' => {
                     app.color = c as usize - '1' as usize;

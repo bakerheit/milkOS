@@ -26,7 +26,8 @@ pub mod clipboard;
 mod ctl;
 mod dnd;
 mod event;
-mod fontx;
+/// The smooth and proportional faces live in the shared font code (the splash uses them).
+use crate::fontx;
 mod icons;
 mod lock;
 mod menus;
@@ -72,9 +73,53 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 
 // ---- public API ------------------------------------------------------------------------------
 
-/// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-/// Toasts posted from any thread: (app, title, subtitle, play the notify sound).
-static NOTIFY: SpinLock<Vec<(String, String, String, bool)>> = SpinLock::new(Vec::new());
+/// A notification on its way to the desktop (any context but IRQ handlers: it allocates).
+pub struct Post {
+    pub app: String,
+    pub title: String,
+    pub sub: String,
+    /// Play the notify sound.
+    pub sound: bool,
+    /// Up to two buttons (toast and drawer card).
+    pub actions: Vec<notif::NoticeAction>,
+    /// The posting process (actions without a command go back to its window), 0: the desktop.
+    pub owner: u32,
+    /// The poster's own number for this notice, sent back with an action.
+    pub tag: u32,
+}
+
+impl Post {
+    fn plain(app: &str, title: &str, sub: &str, sound: bool) -> Post {
+        Post {
+            app: String::from(app),
+            title: String::from(title),
+            sub: String::from(sub),
+            sound,
+            actions: Vec::new(),
+            owner: 0,
+            tag: 0,
+        }
+    }
+}
+
+static NOTIFY: SpinLock<Vec<Post>> = SpinLock::new(Vec::new());
+
+/// Post a notification with everything (ctl.rs `notify` with options, the desktop's own
+/// notices with buttons).
+pub fn post(p: Post) {
+    NOTIFY.lock().push(p);
+    WAKE.wake_all();
+}
+
+/// The calling process, 0 for the desktop's own threads.
+fn poster_pid() -> u32 {
+    let pid = sched::current_pid();
+    if crate::proc::get(pid).is_some() {
+        pid
+    } else {
+        0
+    }
+}
 
 /// Who is posting: the calling process (e.g. /bin/notify), else the desktop itself.
 fn poster() -> String {
@@ -87,13 +132,24 @@ fn poster() -> String {
 
 /// A toast on behalf of `app` (grouped under it in the notification centre).
 pub fn notify_as(app: &str, title: &str, subtitle: &str) {
-    NOTIFY.lock().push((
-        String::from(app),
-        String::from(title),
-        String::from(subtitle),
-        true,
-    ));
-    WAKE.wake_all();
+    post(Post::plain(app, title, subtitle, true));
+}
+
+/// `notify` from /dev/wm with options (ctl.rs): app name, tag, actions.
+pub fn notify_with(
+    app: Option<&str>,
+    title: &str,
+    subtitle: &str,
+    tag: u32,
+    actions: Vec<notif::NoticeAction>,
+) {
+    let app = app.map_or_else(poster, String::from);
+    post(Post {
+        actions,
+        owner: poster_pid(),
+        tag,
+        ..Post::plain(&app, title, subtitle, true)
+    });
 }
 
 /// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
@@ -103,13 +159,7 @@ pub fn notify(title: &str, subtitle: &str) {
 
 /// A toast without the notify sound (when the action had its own, e.g. the shutter).
 pub fn notify_quiet(app: &str, title: &str, subtitle: &str) {
-    NOTIFY.lock().push((
-        String::from(app),
-        String::from(title),
-        String::from(subtitle),
-        false,
-    ));
-    WAKE.wake_all();
+    post(Post::plain(app, title, subtitle, false));
 }
 
 /// The wm thread sleeps here between frames; input, toasts and requests wake it early.
@@ -138,6 +188,8 @@ pub enum Request {
     ClientCreate(u32),
     /// A process destroyed its window (or exited).
     ClientGone(u32),
+    /// A client gave its window a new size itself (MILK_WIN_RESIZE): fit the window to it.
+    ClientResized(u32),
     /// `open` from /dev/wm: an app name or an absolute path.
     OpenAny(String),
     /// New preferences from Settings: apply and save.
@@ -327,6 +379,10 @@ pub struct Desktop {
     launcher: Option<shell::Launcher>,
     control: bool,
     toasts: Vec<shell::Toast>,
+    /// The toast button under the pointer: (toast, index).
+    toast_hover: Option<(u32, usize)>,
+    /// The menu bar timers as last drawn (shell::timers_gen).
+    timers_seen: u32,
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
@@ -412,6 +468,8 @@ impl Desktop {
             launcher: None,
             control: false,
             toasts: Vec::new(),
+            toast_hover: None,
+            timers_seen: 0,
             next_toast: 1,
             settings: Settings {
                 focus_mode: false,
@@ -766,6 +824,13 @@ impl Desktop {
             }
             _ => {}
         }
+        // A program by name (`open clock`): /bin/<name>.
+        if !what.contains('/') && !what.is_empty() {
+            let bin = alloc::format!("/bin/{}", what.to_ascii_lowercase());
+            if crate::fs::stat(&bin).is_ok() {
+                return self.launch(&bin);
+            }
+        }
         let path = apps::fsx::resolve("/", what);
         if apps::fsx::is_dir(&path) {
             apps::files::show_path(&path);
@@ -1088,11 +1153,12 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
-        self.post_toast_with("milkOS", title, sub, true);
+        self.post_toast_with(Post::plain("milkOS", title, sub, true));
     }
 
-    fn post_toast_with(&mut self, app: &str, title: &str, sub: &str, sound: bool) {
-        let notice = self.record_notice(app, title, sub);
+    fn post_toast_with(&mut self, p: Post) {
+        let (app, title, sub, sound) = (p.app.as_str(), p.title.as_str(), p.sub.as_str(), p.sound);
+        let notice = self.record_notice_with(&p);
         // Open drawer: the card appears at the top of its group instead of a toast.
         if self.notif {
             return;
@@ -1114,6 +1180,7 @@ impl Desktop {
             sub: String::from(sub),
             until_ns: timer::now_ns() + notif::TOAST_NS,
             paused: None,
+            actions: p.actions.clone(),
         });
         if self.toasts.len() > 3 {
             self.toasts.remove(0);
@@ -1392,9 +1459,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
-        for (app, t, s, sound) in posted {
-            self.post_toast_with(&app, &t, &s, sound);
+        let posted: Vec<Post> = core::mem::take(&mut *NOTIFY.lock());
+        for p in posted {
+            self.post_toast_with(p);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1433,6 +1500,17 @@ impl Desktop {
                         self.toggle_launcher();
                     }
                 }
+                Request::ClientResized(cid) => {
+                    // A window holding only this client: body = the new buffer.
+                    if let Some((wid, _)) = self.find_app(App::Client(cid))
+                        && let Some(w) = self.win(wid)
+                        && w.tab_count() == 1
+                        && let Some((cw, ch, _)) = client::info(cid)
+                    {
+                        let bar = w.bar_h;
+                        self.resize_window(wid, cw as i32 + 2, ch as i32 + bar + 2);
+                    }
+                }
                 Request::ClientGone(id) => {
                     if let Some((wid, t)) = self.find_app(App::Client(id)) {
                         self.close_tab(wid, t);
@@ -1463,11 +1541,20 @@ impl Desktop {
         let focus = self.focus;
         let (desk, space) = (self.mode == Mode::Desktop, self.space);
         let mut redrawn: Vec<Rect> = Vec::new();
+        // The window the left button is held in: its buttons draw pressed (button.rs).
+        let held = match self.drag {
+            Some(Drag::Content { id, .. }) => Some(id),
+            _ => None,
+        };
+        let (px, py) = self.pointer;
         for w in &mut self.windows {
+            let at = (held == Some(w.id)).then(|| (px - w.rect.x, py - w.rect.y));
+            button::set_held(at);
             if desk && !w.minimized && w.space == space && w.render(focus == Some(w.id)) {
                 redrawn.push(w.rect);
             }
         }
+        button::set_held(None);
         for r in redrawn {
             self.damage(r);
         }
@@ -1602,8 +1689,12 @@ impl Desktop {
                 // A new minute: the centre's clock and "n min ago".
                 self.notif_tick();
             }
-            if st != self.status || changed {
+            // App timers in the menu bar: new text, or one that expired.
+            let _ = shell::timers();
+            let tg = shell::timers_gen();
+            if st != self.status || changed || tg != self.timers_seen {
                 self.status = st;
+                self.timers_seen = tg;
                 self.invalidate(PanelKey::MenuBar);
             }
             if self.mode == Mode::Home {
@@ -1806,7 +1897,26 @@ impl Desktop {
         }
         // Toasts pause while the pointer is on them (SPEC: 5 s, paused on hover).
         let now = timer::now_ns();
-        let over = (0..self.toasts.len()).find(|&i| hit(&shell::toast_rect(i), x, y));
+        let rects = shell::toast_rects(&self.toasts);
+        let over = (0..self.toasts.len()).find(|&i| hit(&rects[i], x, y));
+        // Which toast button is under the pointer (its hover state).
+        let button = over.and_then(|i| {
+            let (t, r) = (&self.toasts[i], rects[i]);
+            notif::action_rects(&t.actions, r.x + 64, r.y + TOAST_H - 6)
+                .iter()
+                .position(|b| hit(b, x, y))
+                .map(|k| (t.id, k))
+        });
+        if button != self.toast_hover {
+            for id in [self.toast_hover, button]
+                .into_iter()
+                .flatten()
+                .map(|b| b.0)
+            {
+                self.invalidate(PanelKey::Toast(id));
+            }
+            self.toast_hover = button;
+        }
         for (i, t) in self.toasts.iter_mut().enumerate() {
             match (Some(i) == over, t.paused) {
                 (true, None) => t.paused = Some(t.until_ns.saturating_sub(now)),
@@ -2054,7 +2164,11 @@ impl Desktop {
                 }
             }
             Some(Drag::Content { id, .. }) => {
-                self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
+                self.send_pointer(id, x, y, PointerKind::Up(Button::Left));
+                // Its pressed button lets go.
+                if let Some(w) = self.win_mut(id) {
+                    w.dirty = true;
+                }
             }
             Some(Drag::File) => self.dnd_drop(),
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),

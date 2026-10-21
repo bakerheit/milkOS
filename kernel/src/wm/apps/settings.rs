@@ -267,17 +267,19 @@ impl Settings {
                 p.rrect_stroke(r.x, r.y, r.w, r.h, 14, 2, HONEY, 255);
             }
             let s = px * 3 / 4;
-            icons::draw(
-                p,
-                r.x + (r.w - s) / 2,
-                r.y + 14,
-                s,
-                icons::Icon::Folder,
-                HONEY,
-                255,
-                INK,
-                false,
-            );
+            if !icons::art(p, r.x + (r.w - s) / 2, r.y + 14, s, "files") {
+                icons::draw(
+                    p,
+                    r.x + (r.w - s) / 2,
+                    r.y + 14,
+                    s,
+                    icons::Icon::Folder,
+                    HONEY,
+                    255,
+                    INK,
+                    false,
+                );
+            }
             p.text_p_center(r.x, r.w, r.y + r.h - 26, name, ESPRESSO, on);
             self.hits.push((r, Hit::Dock(px)));
         }

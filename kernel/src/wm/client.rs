@@ -42,6 +42,10 @@ pub const EV_BUTTON_DOWN: u32 = 4;
 pub const EV_BUTTON_UP: u32 = 5;
 pub const EV_SCROLL: u32 = 6;
 pub const EV_CLOSE: u32 = 7;
+/// A button on one of the app's notices was pressed: key = the app's tag, mods = index.
+pub const EV_ACTION: u32 = 9;
+/// The window's body is now x by y (a resizable client: answer with MILK_WIN_RESIZE).
+pub const EV_RESIZE: u32 = 10;
 
 // Key codes for non-character keys (printable keys send their Unicode code point).
 pub const K_ENTER: u32 = 0x1_0001;
@@ -67,6 +71,12 @@ struct Client {
     events: VecDeque<[u8; EVENT_LEN]>,
     /// Closed on screen (the process has been told).
     closed: bool,
+    /// The client handles EV_RESIZE (MILK_WIN_RESIZE with the RESIZABLE flag): its window
+    /// can be any size from `min` up, else it stays the size of its buffer.
+    resizable: bool,
+    min: (u32, u32),
+    /// The size last asked for with EV_RESIZE (so it is asked once per size).
+    asked: (u32, u32),
 }
 
 static CLIENTS: SpinLock<BTreeMap<u32, Client>> = SpinLock::new(BTreeMap::new());
@@ -107,10 +117,93 @@ pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
             dirty: None,
             events: VecDeque::new(),
             closed: false,
+            resizable: false,
+            min: (w, h),
+            asked: (w, h),
         },
     );
     request(Request::ClientCreate(id));
     Some(Created { id, pa, bytes })
+}
+
+/// MILK_WIN_RESIZE with the RESIZABLE flag: the client handles EV_RESIZE, down to
+/// `min_w` x `min_h`.
+pub fn set_resizable(pid: u32, id: u32, min_w: u32, min_h: u32) -> bool {
+    let mut c = CLIENTS.lock();
+    let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
+        return false;
+    };
+    cl.resizable = true;
+    cl.min = (min_w.clamp(1, cl.w), min_h.clamp(1, cl.h));
+    drop(c);
+    super::WAKE.wake_all();
+    true
+}
+
+/// MILK_WIN_RESIZE: a new `w` x `h` buffer for window `id` (the old picture copied into its
+/// top-left). Returns the new buffer (for the caller to map) and the old one (to unmap and
+/// free).
+pub fn resize(pid: u32, id: u32, w: u32, h: u32) -> Option<(Created, (usize, usize))> {
+    if w == 0 || h == 0 || w > MAX_W || h > MAX_H {
+        return None;
+    }
+    let bytes = (w * h * 4) as usize;
+    let pages = bytes.div_ceil(PAGE_SIZE);
+    let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+    let mut c = CLIENTS.lock();
+    let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
+        drop(c);
+        pmm::free_contiguous(pa, pages);
+        return None;
+    };
+    // SAFETY: the new frames are ours; the old buffer is the client's (it may be drawing
+    // into it: tearing at worst, as with the compositor).
+    unsafe {
+        let new = core::slice::from_raw_parts_mut(phys_to_virt(pa) as *mut u32, (w * h) as usize);
+        new.fill(MILK);
+        let old =
+            core::slice::from_raw_parts(phys_to_virt(cl.pa) as *const u32, (cl.w * cl.h) as usize);
+        let (cw, ch) = (cl.w.min(w) as usize, cl.h.min(h) as usize);
+        for y in 0..ch {
+            new[y * w as usize..][..cw].copy_from_slice(&old[y * cl.w as usize..][..cw]);
+        }
+    }
+    let old = (cl.pa, cl.pages);
+    // The client chose a new size itself (not an answer to EV_RESIZE): the window follows.
+    let own = cl.asked != (w, h);
+    cl.asked = (w, h);
+    cl.pa = pa;
+    cl.pages = pages;
+    cl.w = w;
+    cl.h = h;
+    cl.dirty = Some(Rect::new(0, 0, w as i32, h as i32));
+    drop(c);
+    if own {
+        request(Request::ClientResized(id));
+    }
+    super::WAKE.wake_all();
+    Some((Created { id, pa, bytes }, old))
+}
+
+/// The window's body is `w` x `h` on screen: a resizable client is told (once per size).
+pub fn body_size(id: u32, w: i32, h: i32) {
+    let (w, h) = (
+        w.clamp(1, MAX_W as i32) as u32,
+        h.clamp(1, MAX_H as i32) as u32,
+    );
+    let ask = {
+        let mut c = CLIENTS.lock();
+        match c.get_mut(&id) {
+            Some(cl) if cl.resizable && (cl.w, cl.h) != (w, h) && cl.asked != (w, h) => {
+                cl.asked = (w, h);
+                true
+            }
+            _ => false,
+        }
+    };
+    if ask {
+        push(id, encode(EV_RESIZE, w as i32, h as i32, 0, 0, 0));
+    }
 }
 
 /// MILK_WIN_COMMIT: `r` of the buffer changed (whole buffer if empty).
@@ -248,6 +341,22 @@ pub fn drop_file(id: u32, x: i32, y: i32, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A notice button for the process `pid`: an action event to its first window. False if it
+/// has none.
+pub fn action(pid: u32, tag: u32, index: u32) -> bool {
+    let id = CLIENTS
+        .lock()
+        .iter()
+        .filter(|(_, cl)| cl.pid == pid && !cl.closed)
+        .map(|(id, _)| *id)
+        .min();
+    let Some(id) = id else {
+        return false;
+    };
+    push(id, encode(EV_ACTION, 0, 0, tag, index, 0));
+    true
+}
+
 fn push(id: u32, ev: [u8; EVENT_LEN]) {
     if let Some(cl) = CLIENTS.lock().get_mut(&id) {
         if cl.events.len() >= MAX_QUEUED {
@@ -306,13 +415,16 @@ impl WindowContents for ClientView {
     }
 
     fn min_body(&self) -> Option<(i32, i32)> {
-        CLIENTS
-            .lock()
-            .get(&self.id)
-            .map(|cl| (cl.w as i32, cl.h as i32))
+        // A resizable client goes down to its minimum; the others keep their buffer size.
+        CLIENTS.lock().get(&self.id).map(|cl| {
+            let (w, h) = if cl.resizable { cl.min } else { (cl.w, cl.h) };
+            (w as i32, h as i32)
+        })
     }
 
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
+        // A resizable client follows its window (a resize drag, a tab group).
+        body_size(self.id, w, h);
         // Copy the geometry out and blit without holding the lock (IRQs stay on). If the
         // process destroys the window meanwhile, the worst case is one frame of stale pixels.
         let Some((pa, cw, ch)) = CLIENTS

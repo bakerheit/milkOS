@@ -3,7 +3,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use diskkit::fsinfo::{self, Locked, VolumeInfo};
+use diskkit::fsinfo::{self, ControlError, LockEntry, Locked, VolumeInfo};
 use diskkit::mounts::{self, Volume};
 use diskkit::scrub::{self, Status};
 use diskkit::snaps::{self, AutoSettings, Clone_, Snap};
@@ -34,7 +34,11 @@ pub struct Disk {
     pub auto: Option<AutoSettings>,
     pub scrub: Option<Status>,
     pub locked: Vec<Locked>,
+    /// Encrypted volumes and whether they can be locked (`/sys/fs/milkfs/lock`).
+    pub lock: Vec<LockEntry>,
     pub volumes: Vec<Volume>,
+    /// Size and free space by mount path, from statfs.
+    pub usage: Vec<(String, Usage)>,
     /// Can the Mac folder be written? `None` until checked.
     pub share_rw: Option<bool>,
     pub root_used_kb: u64,
@@ -49,7 +53,15 @@ impl Disk {
         self.auto = snaps::parse_auto(&text(&format!("{DIR}/auto")));
         self.scrub = Some(scrub::parse(&text(&format!("{DIR}/scrub"))));
         self.locked = fsinfo::parse_locked(&text(&format!("{DIR}/unlock")));
+        self.lock = fsinfo::parse_lock(&text(&format!("{DIR}/lock")));
         self.volumes = mounts::volumes(&text("/proc/mounts"));
+        self.usage = self
+            .volumes
+            .iter()
+            .map(|v| v.path.clone())
+            .chain(core::iter::once(String::from("/")))
+            .filter_map(|p| usage_of(&p).map(|u| (p, u)))
+            .collect();
         let mi = text("/proc/meminfo");
         let kb = |key: &str| {
             mi.lines()
@@ -67,13 +79,23 @@ impl Disk {
         self.total_kb = kb("MemTotal");
     }
 
-    /// Volumes that are not clones, for the sidebar.
+    /// Volumes for the sidebar that are neither the primary one nor a clone of it.
     pub fn other_volumes(&self) -> Vec<&Volume> {
         let mounts: Vec<Option<String>> = self.clones.iter().map(|c| c.mount.clone()).collect();
+        let primary = self.info.as_ref().map(|i| format!("/Volumes/{}", i.label));
         self.volumes
             .iter()
-            .filter(|v| v.kind != mounts::Kind::Milk && !mounts::is_clone_mount(v, &mounts))
+            .filter(|v| !mounts::is_clone_mount(v, &mounts) && Some(&v.path) != primary.as_ref())
             .collect()
+    }
+
+    pub fn usage_of(&self, path: &str) -> Option<&Usage> {
+        self.usage.iter().find(|(p, _)| p == path).map(|(_, u)| u)
+    }
+
+    /// The lock entry for a mount path (an encrypted volume), if there is one.
+    pub fn lock_entry(&self, path: &str) -> Option<&LockEntry> {
+        self.lock.iter().find(|l| l.at.as_deref() == Some(path))
     }
 
     pub fn snap_has_clone(&self, name: &str) -> bool {
@@ -83,6 +105,39 @@ impl Disk {
     pub fn records_used(&self) -> usize {
         self.snaps.len() + self.clones.len()
     }
+}
+
+/// A volume's size and free space, from statfs.
+#[derive(Clone, Copy, Debug)]
+pub struct Usage {
+    pub total_kb: u64,
+    pub free_kb: u64,
+    pub read_only: bool,
+}
+
+impl Usage {
+    pub fn used_pct10(&self) -> u32 {
+        (self.total_kb.saturating_sub(self.free_kb) * 1000)
+            .checked_div(self.total_kb)
+            .unwrap_or(0) as u32
+    }
+}
+
+pub fn usage_of(path: &str) -> Option<Usage> {
+    let st = sys::statfs(path).ok()?;
+    if st.blocks == 0 {
+        return None;
+    }
+    Some(Usage {
+        total_kb: st.blocks * st.bsize / 1024,
+        free_kb: st.bfree * st.bsize / 1024,
+        read_only: st.read_only(),
+    })
+}
+
+/// Why the last control write failed (`/sys/fs/milkfs/error`); read it right after the write.
+pub fn last_error() -> Option<ControlError> {
+    fsinfo::parse_error(&text(&format!("{DIR}/error")))
 }
 
 /// Is the Mac folder writable? Creates and removes a small file to find out.

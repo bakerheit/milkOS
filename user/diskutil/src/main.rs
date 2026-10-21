@@ -51,6 +51,8 @@ pub const REPAIR: u32 = 71;
 pub const CHG_PASS: u32 = 80;
 pub const UNLOCK: u32 = 83;
 pub const BACKUP: u32 = 82;
+pub const LOCK: u32 = 81;
+pub const LOCK_OTHER: u32 = 84;
 pub const TM_NOW: u32 = 90;
 pub const TM_SETTINGS: u32 = 91;
 pub const SHEET: u32 = 10_000; // sheet controls
@@ -150,6 +152,8 @@ pub struct Row {
     pub kind: String,
     pub icon: Icon,
     pub locked: bool,
+    /// Where it is mounted, for usage and locking.
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -189,6 +193,7 @@ impl App {
                 kind: format!("milkfs, {}", diskkit::fmt::kb(i.total_kb())),
                 icon: Icon::Disk,
                 locked: false,
+                path: Some(format!("/Volumes/{}", i.label)),
             }),
             None => {
                 for l in &d.locked {
@@ -197,6 +202,7 @@ impl App {
                         kind: String::from("locked"),
                         icon: Icon::Disk,
                         locked: true,
+                        path: None,
                     });
                 }
             }
@@ -211,29 +217,47 @@ impl App {
                 kind: format!("clone of {}", c.origin),
                 icon: Icon::Clone,
                 locked: false,
+                path: c.mount.clone(),
             });
         }
         for vol in d.other_volumes() {
+            let size = d
+                .usage_of(&vol.path)
+                .map(|u| format!(", {}", diskkit::fmt::kb(u.total_kb)))
+                .unwrap_or_default();
+            let (kind, icon) = match vol.kind {
+                VolKind::MacShare => (format!("shared with the Mac{size}"), Icon::Share),
+                VolKind::Fat => (format!("FAT32{size}"), Icon::Disk),
+                VolKind::Milk => (format!("milkfs{size}"), Icon::Disk),
+            };
             v.push(Row {
                 name: vol.name.clone(),
-                kind: String::from(match vol.kind {
-                    VolKind::MacShare => "shared with the Mac",
-                    VolKind::Fat => "FAT32",
-                    VolKind::Milk => "milkfs",
-                }),
-                icon: if vol.kind == VolKind::MacShare {
-                    Icon::Share
-                } else {
-                    Icon::Disk
-                },
+                kind,
+                icon,
                 locked: false,
+                path: Some(vol.path.clone()),
             });
+        }
+        // Other encrypted volumes that are locked (not mounted): listed so they can be unlocked.
+        if d.info.is_some() {
+            for l in &d.locked {
+                v.push(Row {
+                    name: l.label.clone(),
+                    kind: String::from("locked"),
+                    icon: Icon::Disk,
+                    locked: true,
+                    path: None,
+                });
+            }
         }
         v.push(Row {
             name: String::from("In-memory root"),
-            kind: String::from("RAM, not kept"),
+            kind: d.usage_of("/").map_or(String::from("RAM, not kept"), |u| {
+                format!("RAM, {}", diskkit::fmt::kb(u.total_kb))
+            }),
             icon: Icon::Ram,
             locked: false,
+            path: Some(String::from("/")),
         });
         v
     }

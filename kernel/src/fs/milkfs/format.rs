@@ -15,9 +15,14 @@ use crate::fs::errno::{Errno, Result};
 
 pub const BLOCK: usize = 4096;
 pub const MAGIC: &[u8; 8] = b"MILKFS01";
-/// Format version this kernel writes. 1 = v0 + multi-block extents (`K_EXT`) and inline
-/// data (`K_INLINE`). v0 volumes mount and are upgraded by their first commit.
-pub const VERSION: u32 = 1;
+/// Newest format this kernel reads. 1 = v0 + multi-block extents (`K_EXT`) and inline
+/// data (`K_INLINE`); 2 = v1 + shared blocks (reflink copies, `K_BREF`).
+pub const VERSION: u32 = 2;
+/// What a commit writes unless the volume has shared blocks: v0 volumes are upgraded to
+/// this by their first commit; a volume becomes v2 with its first reflink (older kernels
+/// would free a shared block while another file still uses it, so they must refuse it).
+pub const BASE_VERSION: u32 = 1;
+pub const REFLINK_VERSION: u32 = 2;
 /// Oldest format this kernel reads.
 pub const MIN_VERSION: u32 = 0;
 pub const NODE_MAGIC: &[u8; 4] = b"MKND";
@@ -47,7 +52,10 @@ pub const VOL_OBJ: u64 = u64::MAX;
 /// `(VOL_OBJ, K_ORPHAN, ino)` -> empty: `ino` was unlinked while open; mount finishes
 /// deleting it (so a mount with a current space map needn't scan every inode).
 pub const K_ORPHAN: u8 = 7;
-
+/// v2: `(VOL_OBJ, K_BREF, first disk block)` -> `len u32 | extra u32`: the `len` disk
+/// blocks from there are referenced `1 + extra` times by this tree (reflink copies).
+/// Blocks without an entry are referenced once. Entries never overlap.
+pub const K_BREF: u8 = 8;
 /// Root directory inode number.
 pub const ROOT_INO: u64 = 1;
 /// Largest value stored in one leaf item (keeps a split leaf within a block).
@@ -765,4 +773,20 @@ pub fn data_ptrs(k: &Key, v: &[u8]) -> Vec<BlockPtr> {
         Some(e) => (0..e.csums.len()).map(|i| e.ptr(i)).collect(),
         None => Vec::new(),
     }
+}
+
+/// `K_BREF` value: `len u32 | extra u32`.
+pub fn encode_bref(len: u64, extra: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&(len as u32).to_le_bytes());
+    v.extend_from_slice(&extra.to_le_bytes());
+    v
+}
+
+pub fn decode_bref(v: &[u8]) -> Option<(u64, u32)> {
+    if v.len() < 8 {
+        return None;
+    }
+    let (len, extra) = (le32(v) as u64, le32(&v[4..]));
+    (len > 0 && extra > 0).then_some((len, extra))
 }

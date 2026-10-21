@@ -388,6 +388,55 @@ pub fn bench_create(dir: &str, n: usize, size: usize) -> Result<String> {
     Ok(r)
 }
 
+// ---- dedupe -------------------------------------------------------------------------
+
+pub use inode::DedupeReport;
+
+static LAST_DEDUPE: SpinLock<String> = SpinLock::new(String::new());
+
+/// Make identical files under `dir` (any VFS path on a milkfs volume) share their blocks;
+/// see [`inode::dedupe`]. `dry_run`: only report.
+pub fn dedupe(dir: &str, dry_run: bool) -> Result<DedupeReport> {
+    let d = crate::fs::ops::lookup(dir)?;
+    let r = inode::dedupe(&d, dry_run)?;
+    let mut s = format!(
+        "{dir}: {} file(s) with data, {} group(s) of identical files, {} {}, {} already shared, {} same hash but different\n",
+        r.files,
+        r.groups,
+        r.deduped,
+        if dry_run { "could share" } else { "now share" },
+        r.already,
+        r.differ
+    );
+    let _ = writeln!(
+        s,
+        "{} block(s) ({} KiB) {}{}",
+        r.blocks,
+        r.blocks * 4,
+        if dry_run { "would be shared" } else { "shared" },
+        if dry_run {
+            String::new()
+        } else {
+            format!(
+                ", {} block(s) freed now{}",
+                r.freed,
+                if (r.freed as u64) < r.blocks {
+                    " (snapshots keep the rest until they are deleted)"
+                } else {
+                    ""
+                }
+            )
+        }
+    );
+    audit_op(
+        "fs.dedupe",
+        &format!("dir={dir} dry_run={dry_run} deduped={}", r.deduped),
+        &Ok::<(), Errno>(()),
+    );
+    *LAST_DEDUPE.lock() = s;
+    Ok(r)
+}
+
 // ---- tree shape test --------------------------------------------------------------
 
 static LAST_TREETEST: SpinLock<String> = SpinLock::new(String::new());
@@ -786,6 +835,19 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             let n = n.parse().map_err(|_| Errno::EINVAL)?;
             let sz = sz.parse().map_err(|_| Errno::EINVAL)?;
             bench_create(d, n, sz).map(|_| ())
+        },
+    );
+    dir.add_control(
+        "dedupe",
+        || LAST_DEDUPE.lock().clone(),
+        |b| {
+            // `DIR` or `DIR dry`
+            let a = arg(b)?;
+            let (d, dry) = match a.strip_suffix(" dry") {
+                Some(d) => (d.trim(), true),
+                None => (a, false),
+            };
+            dedupe(d, dry).map(|_| ())
         },
     );
     dir.add_control(

@@ -347,6 +347,16 @@ pub fn copy_tree(src: &str, dst: &str) -> Result<()> {
 }
 
 /// Read a whole file (reads until EOF, so synthetic files with size 0 work too).
+/// `FICLONE`: `dst` (open for writing) gets a copy-on-write copy of `src` (open for
+/// reading). EBADF for wrong modes; the file system decides the rest (milkfs: EXDEV across
+/// volumes or views, EINVAL for non-files; anything else: EOPNOTSUPP).
+pub fn ficlone(src: &OpenFile, dst: &OpenFile) -> Result<()> {
+    if !src.readable() || !dst.writable() {
+        return Err(Errno::EBADF);
+    }
+    super::milkfs::inode::reflink(src.inode(), dst.inode())
+}
+
 pub fn read_file(path: &str) -> Result<Vec<u8>> {
     let f = open(path, O_RDONLY, 0)?;
     let mut out = Vec::with_capacity(f.stat().size as usize);

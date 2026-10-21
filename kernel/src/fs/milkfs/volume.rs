@@ -35,6 +35,9 @@ pub struct State {
     pub auto: [u32; 4],
     /// Superblock flags (`SB_BRANCHED`).
     pub flags: u32,
+    /// Format version the next commit writes (`BASE_VERSION`, or `REFLINK_VERSION` once
+    /// blocks are shared).
+    pub version: u32,
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
@@ -142,7 +145,7 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         clones: Vec::new(),
         auto: [0; 4],
         flags: 0,
-        version: VERSION,
+        version: BASE_VERSION,
         spacemap: BlockPtr::NONE,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
@@ -164,9 +167,9 @@ impl State {
             return Err(Errno::EINVAL);
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
-        if sb.version < VERSION {
+        if sb.version < BASE_VERSION {
             kprintln!(
-                "milkfs: format v{} volume: it is upgraded to v{VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
+                "milkfs: format v{} volume: it is upgraded to v{BASE_VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
                 sb.version
             );
         }
@@ -358,6 +361,7 @@ impl State {
             next_ino: sb.next_ino,
             auto: sb.auto,
             flags: sb.flags,
+            version: sb.version.max(BASE_VERSION),
             sb,
             meta_dirty: false,
             broken: false,
@@ -443,7 +447,7 @@ impl State {
             clones: self.clones.clone(),
             auto: self.auto,
             flags: self.flags,
-            version: VERSION,
+            version: self.version,
             spacemap,
         };
         let cache = &self.store.cache;

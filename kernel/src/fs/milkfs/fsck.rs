@@ -11,6 +11,7 @@
 //! - an inode with no links and no entry -> deleted;
 //! - a wrong link count or directory parent -> fixed;
 //! - an orphan-list entry for an inode that is gone or has links -> dropped;
+//! - shared-block counts (reflinks) that don't match the references -> rebuilt from them;
 //! - blocks allocated but unreachable -> swept; reachable blocks marked free -> marked
 //!   (either way the next commit writes a corrected space map).
 //!
@@ -106,6 +107,7 @@ impl State {
         let mut dirents: Vec<(u64, Dirent)> = Vec::new();
         let mut extents: Vec<(u64, u64, BlockPtr)> = Vec::new();
         let mut orphan_list: Vec<u64> = Vec::new();
+        let mut brefs: Vec<(u64, u64, u32)> = Vec::new();
         let mut nodes = 0u64;
         let walked = {
             let mut node = |_: &BlockPtr| {
@@ -116,6 +118,9 @@ impl State {
                 if k.obj == VOL_OBJ {
                     if k.kind == K_ORPHAN {
                         orphan_list.push(k.off);
+                    } else if k.kind == K_BREF {
+                        let (len, extra) = decode_bref(v).ok_or(crate::fs::errno::Errno::EIO)?;
+                        brefs.push((k.off, len, extra));
                     }
                     return Ok(());
                 }
@@ -224,6 +229,51 @@ impl State {
                 }
             }
         }
+        // Shared blocks: the table must count exactly the extra references.
+        let mut refs: BTreeMap<u64, u32> = BTreeMap::new();
+        for (_, _, p) in &extents {
+            *refs.entry(p.block).or_default() += 1;
+        }
+        let want: BTreeMap<u64, u32> = refs
+            .iter()
+            .filter(|(_, n)| **n > 1)
+            .map(|(b, n)| (*b, n - 1))
+            .collect();
+        let mut have: BTreeMap<u64, u32> = BTreeMap::new();
+        let mut overlap = false;
+        for &(start, len, extra) in &brefs {
+            for b in start..start + len {
+                overlap |= have.insert(b, extra).is_some();
+            }
+        }
+        let wrong: Vec<u64> = want
+            .keys()
+            .chain(have.keys())
+            .copied()
+            .collect::<alloc::collections::BTreeSet<u64>>()
+            .into_iter()
+            .filter(|b| want.get(b) != have.get(b))
+            .collect();
+        let fix_brefs = overlap || !wrong.is_empty();
+        if fix_brefs {
+            let under = wrong
+                .iter()
+                .filter(|b| have.get(b).unwrap_or(&0) < want.get(b).unwrap_or(&0))
+                .count();
+            rep.problems.push(format!(
+                "shared-block table: {} block(s) counted wrong ({under} too low: freeing one copy would free a block another file uses){}{}",
+                wrong.len(),
+                if overlap { ", entries overlap" } else { "" },
+                wrong
+                    .first()
+                    .map(|b| format!(
+                        ", e.g. block {b}: {} references, table says {}",
+                        refs.get(b).copied().unwrap_or(0),
+                        1 + have.get(b).copied().unwrap_or(0)
+                    ))
+                    .unwrap_or_default()
+            ));
+        }
         let mut stale_orphans: Vec<u64> = Vec::new();
         for &ino in &orphan_list {
             match inodes.get(&ino) {
@@ -282,6 +332,38 @@ impl State {
         for ino in reclaim {
             self.delete_inode(ino)?;
             rep.repaired.push(format!("deleted orphan inode {ino}"));
+        }
+        if fix_brefs {
+            for &(start, _, _) in &brefs {
+                self.del_bref(start)?;
+            }
+            // Runs of consecutive blocks with the same count, at most MAX_RUN long.
+            let mut run: Option<(u64, u64, u32)> = None;
+            let mut n = 0;
+            for (&b, &x) in &want {
+                match run {
+                    Some((s, l, rx)) if s + l == b && rx == x && l < MAX_RUN => {
+                        run = Some((s, l + 1, rx));
+                    }
+                    _ => {
+                        if let Some((s, l, rx)) = run {
+                            self.put_bref(s, l, rx)?;
+                            n += 1;
+                        }
+                        run = Some((b, 1, x));
+                    }
+                }
+            }
+            if let Some((s, l, rx)) = run {
+                self.put_bref(s, l, rx)?;
+                n += 1;
+            }
+            if !want.is_empty() {
+                self.version = self.version.max(REFLINK_VERSION);
+            }
+            rep.repaired.push(format!(
+                "shared-block table rebuilt from the references ({n} entries)"
+            ));
         }
         for ino in stale_orphans {
             self.del_orphan(ino)?;

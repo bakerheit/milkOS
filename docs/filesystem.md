@@ -416,10 +416,13 @@ the differences are listed at the end of this section.
 | `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
 | `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
 
-### On-disk format (v0, v1)
+### On-disk format (v0, v1, v2)
 
 All integers little endian, 4 KiB blocks. The current kernel writes **v1** = v0 plus two
-item kinds: multi-block runs (kind 5) and inline data (kind 6). It mounts v0 and v1. A v0
+item kinds: multi-block runs (kind 5) and inline data (kind 6), and **v2** = v1 plus shared
+blocks (kind 8, reflink copies) on a volume's first reflink: a kernel without reflinks
+would free a shared block while another file still uses it, so v1 kernels refuse a v2
+volume ("no valid superblock"). It mounts v0, v1 and v2. A v0
 volume mounts with the message `milkfs: format v0 volume: it is upgraded to v1 (...) by its
 first write; kernels older than that won't mount it then`: the first commit writes version 1
 into the superblock (v0 kernels refuse it: the version doesn't match). Old one-block extents
@@ -491,6 +494,7 @@ where it was) and the same create/delete test with 3000 files.
 | 4 symlink | `(ino, 4, 0)` | target bytes (max 1024) |
 | 5 run (v1) | `(ino, 5, first block index)` | `block u64 | birth u64 | count u32 | count x xxh64 u64`: `count` (1..128) consecutive file blocks stored in consecutive disk blocks from `block`, one checksum per block |
 | 6 inline (v1) | `(ino, 6, 0)` | the whole file content, files up to 1024 bytes (no data block at all) |
+| 8 shared blocks (v2) | `(2^64-1, 8, first disk block)` | `len u32 | extra u32`: the `len` (at most 128) disk blocks from there are referenced `1 + extra` times by this tree; blocks without an entry once. Entries never overlap. |
 | 7 orphan | `(2^64-1, 7, ino)` | empty: `ino` has no links left but is still open; whoever deletes it removes the entry, mount finishes the delete if the machine went down first |
 
 The root directory is inode 1 (its parent is itself). Inode numbers only grow.
@@ -711,15 +715,51 @@ files unlinked while open when the machine went down, like Linux's orphan list) 
 | reachable blocks marked free | yes | marked used again (before anything else allocates) |
 | space map unreadable or wrong (host check compares it with the reachable blocks) | yes | kernel: mount already rebuilt it; host: dropped (the next mount rebuilds it) |
 | orphan-list entry for an inode that is gone or has links | yes | entry dropped |
+| shared-block counts that don't match the references (too low = deleting one copy would free a block another uses) | yes (not at mount: `check` counts every reference) | table rebuilt from the references |
+| a snapshot taken while the live table was wrong (it keeps the wrong counts) | host check: a note | none (snapshots are read-only); harmless unless rolled back to: then `check --repair` |
 | data block fails its checksum | yes, with the file's path | **no**: recover with `versions restore` / `snap rollback` |
 | tree node fails its checksum | yes (mount also refuses, EIO) | **no**: the image is left untouched |
 
 The host repair rewrites the live tree from the fixed item set into free blocks and commits a
 new superblock (snapshots untouched; if there are any, the volume switches to exact sweeps
 since the dead lists no longer describe the new tree). `mkmilkfs.py corrupt IMAGE
-{orphan,dangling,nlink,parent,sb,smap,data,node}` damages a test image on purpose, and
+{orphan,dangling,nlink,parent,sb,smap,bref,data,node}` damages a test image on purpose, and
 `scripts/fscktest.sh` runs every kind through both repairs (base image = a few seconds of
 the crash workload; after a repair the kernel's crash-check verifies every file).
+
+### Reflink copies and dedupe
+
+A file can share data blocks with another (copy-on-write): `cp --reflink SRC DST` (or
+`--reflink=auto`: copy if sharing isn't possible), the Linux `FICLONE` ioctl
+(`ioctl(dst_fd, 0x40049409, src_fd)`, `rt::sys::ficlone(src, dst)`, kernel
+`fs::ops::ficlone(&src, &dst)` / `fs::milkfs::inode::reflink`), and `dedupe`.
+
+- The copy gets the source's extent items with the same block pointers, and each shared
+  run gets a **shared-block entry** (kind 8) counting its extra references. Writing either
+  file is ordinary copy-on-write: the touched blocks get new ones, the old run is trimmed,
+  and dropping a reference to a shared block only lowers its count. Only the last
+  reference goes through the normal release rules (birth time, dead lists), which are
+  about which *trees* (live, snapshots) still have a block; the counts are per tree, so
+  snapshots and clones carry their own. Space accounting stays exact through snapshots,
+  deletes, rollbacks, clones and promotes (self-test and crash test).
+- Same view of the same volume only: EXDEV otherwise (other file system, other volume,
+  a snapshot or clone); EISDIR for directories, EINVAL for other non-files or a file onto
+  itself; EBADF unless the source is open for reading and the destination for writing.
+  Inline files (up to 1 KiB) are simply copied. The destination's times are updated.
+- 2 MB with `cp --reflink`: a handful of metadata blocks instead of 489 data blocks
+  (`scripts/reflinktest.sh`).
+
+**dedupe** (`dedupe [-n] DIR`, `/sys/fs/milkfs/dedupe` (`DIR` or `DIR dry`),
+`fs::milkfs::dedupe(dir, dry_run)`): every regular file with data blocks under `DIR` is
+grouped by size and content hash (from the block checksums, no data read); files in a
+group are compared byte by byte with the group's first file and, if equal, made to share
+its blocks. File times stay as they were. Blocks a snapshot still has stay used until
+that snapshot is deleted (the report says how many were freed now):
+
+```text
+/Volumes/Milk/d: 4 file(s) with data, 1 group(s) of identical files, 2 now share, 1 already shared, 0 same hash but different
+978 block(s) (3912 KiB) shared, 980 block(s) freed now
+```
 
 ### Persistent home
 
@@ -819,7 +859,6 @@ Where it comes from:
 
 - Snapshot and clone records live in the superblock (30 in total) instead of a volume
   tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
-- No reflink copies (v1 added multi-block runs and inline data).
 - Batched commits (about 1 s). Reads are page-cached (see Page cache).
 - After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
   (fine at these sizes; proportional to metadata).
@@ -901,7 +940,7 @@ Old tree nodes go to the dead list / free list as above.
   dead list) of the System volume and installs into the clone. The app runs with the clone
   as its root. "Keep" makes the clone the System volume (pointer swap at the next commit);
   "Discard" deletes the clone and frees what only it used.
-- Cheap copies: `cp` of a large file can clone extents (reflink) instead of copying.
+- Cheap copies: `cp --reflink` shares extents instead of copying (done: see Reflink copies).
 
 ### How it plugs into this VFS
 

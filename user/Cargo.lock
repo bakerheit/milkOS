@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dedupe"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "desk"
 version = "0.0.1"
 dependencies = [

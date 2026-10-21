@@ -142,3 +142,7 @@ pub fn put_dirent64(buf: &mut [u8], ino: u64, d_off: i64, d_type: u8, name: &str
     rec[19 + name.len()..].fill(0); // NUL terminator + padding
     Some(reclen)
 }
+
+/// `ioctl(dst_fd, FICLONE, src_fd)`: make `dst`'s contents a copy-on-write copy of
+/// `src`'s (Linux `_IOW(0x94, 9, int)`; milkfs only, see `fs::ops::ficlone`).
+pub const FICLONE: u32 = 0x4004_9409;

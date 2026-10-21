@@ -945,6 +945,11 @@ fn tty_of(f: &OpenFile) -> Option<&'static super::tty::Tty> {
 
 fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     let f = file(fd)?;
+    if cmd == abi::FICLONE {
+        // arg is the source fd (fs agent: reflink copies on milkfs).
+        let src = file(arg as i64)?;
+        return fs::ops::ficlone(&src, &f).map(|_| 0);
+    }
     if let Some(tty) = tty_of(&f) {
         let input = match super::tty::ioctl_in_size(cmd) {
             0 => Vec::new(),

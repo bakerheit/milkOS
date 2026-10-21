@@ -995,6 +995,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
     milkfs_tree(t, &vol, VP);
+    milkfs_reflink(t, &vol, VP);
     milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -2015,6 +2016,178 @@ fn milkfs_tree(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: &st
         }
         Err(e) => t.ok(false, &alloc::format!("tree test: {e}")),
     }
+}
+
+/// Reflink copies (FICLONE) and dedupe: shared blocks, copy-on-write, exact space
+/// through snapshots, rollback and deletes, `check` of the shared-block table.
+fn milkfs_reflink(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: &str) {
+    use super::milkfs::{self as m, format::*, items::LIVE};
+    let dir = alloc::format!("{vp}/rl");
+    let p = |n: &str| alloc::format!("{dir}/{n}");
+    let _ = ops::mkdir(&dir, 0o755);
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 13 % 247) as u8).collect();
+    let _ = ops::write_file(&p("src"), &data);
+    let _ = super::sync_all();
+    let free = || vol.state.lock().store.free_blocks();
+    let blocks = |path: &str| ops::stat(path).map(|s| s.blocks).unwrap_or(0);
+    let clone = |src: &str, dst: &str| -> super::errno::Result<()> {
+        let s = ops::open(src, O_RDONLY, 0)?;
+        let d = ops::open(dst, O_WRONLY | O_CREAT, 0o644)?;
+        ops::ficlone(&s, &d)
+    };
+    let f0 = free();
+    t.ok(
+        clone(&p("src"), &p("copy")).is_ok(),
+        "FICLONE a 300 KB file",
+    );
+    let _ = super::sync_all();
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == data),
+        "the reflink copy reads the same",
+    );
+    let used = f0 - free();
+    t.ok(
+        used < 8 && blocks(&p("copy")) == blocks(&p("src")),
+        &alloc::format!("it shares the 74 data blocks ({used} blocks of metadata used)"),
+    );
+    t.ok(
+        vol.state.lock().version == REFLINK_VERSION,
+        "the volume is format v2 now (older kernels must refuse it)",
+    );
+    milk_space(t, vol, "space exact after a reflink");
+    // Copy-on-write: writing one copy leaves the other alone.
+    if let Ok(f) = ops::open(&p("copy"), O_WRONLY, 0) {
+        let _ = f.pwrite(b"changed in the copy", 100_000);
+    }
+    let mut want = data.clone();
+    want[100_000..100_019].copy_from_slice(b"changed in the copy");
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == want)
+            && ops::read_file(&p("src")).is_ok_and(|d| d == data),
+        "writing the copy doesn't touch the original",
+    );
+    milk_space(t, vol, "space exact after writing into a shared run");
+    // A snapshot holds both; delete the original, then the snapshot.
+    let _ = m::snapshot("rl-a");
+    let _ = ops::unlink(&p("src"));
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == want),
+        "the copy survives deleting the original",
+    );
+    milk_space(
+        t,
+        vol,
+        "space exact after deleting the original under a snapshot",
+    );
+    let _ = m::delete_snapshot("rl-a");
+    milk_space(t, vol, "space exact after deleting the snapshot");
+    // Reflink after a snapshot, then roll back to it.
+    let _ = m::snapshot("rl-b");
+    t.ok(
+        clone(&p("copy"), &p("copy2")).is_ok(),
+        "reflink after a snapshot",
+    );
+    let _ = ops::unlink(&p("copy"));
+    let _ = m::rollback("rl-b");
+    t.ok(
+        ops::stat(&p("copy2")).is_err() && ops::read_file(&p("copy")).is_ok_and(|d| d == want),
+        "rollback: the later reflink is gone, the file is back",
+    );
+    milk_space(t, vol, "space exact after the rollback");
+    let _ = m::delete_snapshot("rl-b");
+    // Small (inline) files are just copied; errors.
+    let _ = ops::write_file(&p("small"), b"tiny");
+    t.ok(
+        clone(&p("small"), &p("small2")).is_ok() && read_str(&p("small2")) == "tiny",
+        "reflink of an inline file copies it",
+    );
+    t.err(
+        clone(&dir, &p("x")),
+        Errno::EISDIR,
+        "reflink from a directory",
+    );
+    t.err(
+        clone(&p("small"), &p("small")),
+        Errno::EINVAL,
+        "reflink onto itself",
+    );
+    let _ = ops::write_file("/tmp/rl-tmpfs", b"on tmpfs");
+    t.err(
+        clone("/tmp/rl-tmpfs", &p("y")),
+        Errno::EXDEV,
+        "reflink from another file system",
+    );
+    let _ = ops::unlink("/tmp/rl-tmpfs");
+    // Dedupe: three identical files written separately, one same-size different one.
+    let other: Vec<u8> = data.iter().map(|b| b ^ 1).collect();
+    for n in ["d1", "d2", "d3"] {
+        let _ = ops::write_file(&p(n), &data);
+    }
+    let _ = ops::write_file(&p("d4"), &other);
+    let _ = super::sync_all();
+    let dry = m::dedupe(&dir, true);
+    t.ok(
+        dry.as_ref()
+            .is_ok_and(|r| r.deduped == 2 && r.blocks == 148),
+        &alloc::format!("dedupe dry run finds 2 files to share ({dry:?})"),
+    );
+    let f1 = free();
+    let r = m::dedupe(&dir, false);
+    t.ok(
+        r.as_ref().is_ok_and(|r| r.deduped == 2 && r.freed > 140) && free() > f1 + 140,
+        &alloc::format!("dedupe shares them and frees ~148 blocks ({r:?})"),
+    );
+    t.ok(
+        ["d1", "d2", "d3"]
+            .iter()
+            .all(|n| ops::read_file(&p(n)).is_ok_and(|d| d == data))
+            && ops::read_file(&p("d4")).is_ok_and(|d| d == other),
+        "deduped files read the same",
+    );
+    t.ok(
+        m::dedupe(&dir, false).is_ok_and(|r| r.already == 2 && r.deduped == 0),
+        "dedupe again: already shared",
+    );
+    milk_space(t, vol, "space exact after dedupe");
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check: shared-block table matches the references",
+    );
+    // Damage the table (one count too low: deleting a copy would free a block in use).
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        let b = st
+            .lookup(LIVE, st.resolve_in(LIVE, "/rl").unwrap_or(0), "d2")
+            .ok()
+            .flatten()
+            .and_then(|d| st.exts(LIVE, d.ino, 0, 1).ok())
+            .and_then(|e| e.first().map(|e| e.block));
+        if let Some(b) = b
+            && let Ok(ents) = st.bref_entries(LIVE, b, b + 1)
+            && let Some(&(s0, l, x)) = ents.first()
+        {
+            let _ = st.put_bref(s0, l, x - 1);
+        }
+        let _ = st.commit();
+    }
+    let found = m::check(false);
+    t.ok(
+        found
+            .as_ref()
+            .is_ok_and(|r| r.problems.iter().any(|p| p.contains("shared-block table"))),
+        "check finds a wrong shared-block count",
+    );
+    let fixed = m::check(true);
+    t.ok(
+        fixed.is_ok_and(|r| r.repaired.iter().any(|x| x.contains("rebuilt")))
+            && m::check(false).is_ok_and(|r| r.clean()),
+        "repair rebuilds the table",
+    );
+    // Everything goes; space comes back exactly.
+    rm_rf(&dir);
+    let _ = super::sync_all();
+    milk_space(t, vol, "space exact after deleting every copy");
 }
 
 /// A file made straight in a volume's live tree (no VFS): returns its inode.

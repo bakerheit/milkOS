@@ -13,7 +13,7 @@
                                          ones inline, every 50th 8 KiB in extents): for
                                          mount-time and big-tree tests
   mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
-                                         sb smap data node
+                                         sb smap bref data node
   mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]      (NAME may also be a clone)
   mkmilkfs.py cat   IMAGE PATH [--snapshot NAME]
   mkmilkfs.py xxh64 HEXDATA               (for cross-checking the kernel's checksum)
@@ -27,11 +27,13 @@ import time
 
 BLOCK = 4096
 MAGIC = b"MILKFS01"
-VERSION = 1      # written by mkfs; 0 and 1 are read
+VERSION = 1      # written by mkfs; 0, 1 and 2 (reflinks) are read
+MAX_VERSION = 2
 MIN_VERSION = 0
 MAX_SNAPS = 30
 K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE = 1, 2, 3, 4, 5, 6
 K_ORPHAN = 7            # (VOL_OBJ, K_ORPHAN, ino): unlinked while open
+K_BREF = 8              # (VOL_OBJ, K_BREF, first block) -> len u32 | extra u32 (v2)
 VOL_OBJ = (1 << 64) - 1
 ROOT_INO = 1
 S_IFMT, S_IFDIR, S_IFREG, S_IFLNK = 0o170000, 0o040000, 0o100000, 0o120000
@@ -154,7 +156,7 @@ def sb_decode(b):
     if b[0:8] != MAGIC or struct.unpack_from("<Q", b, BLOCK - 8)[0] != xxh64(b[:BLOCK - 8]):
         return None
     ver, bs, total, gen = struct.unpack_from("<IIQQ", b, 8)
-    if not MIN_VERSION <= ver <= VERSION or bs != BLOCK:
+    if not MIN_VERSION <= ver <= MAX_VERSION or bs != BLOCK:
         return None
     n = struct.unpack_from("<I", b, 144)[0]
     if n > MAX_SNAPS:
@@ -393,6 +395,48 @@ def all_used(img, sb):
     return used
 
 
+def bref_check(items):
+    """Shared-block table of one tree vs the references its data items make.
+    Returns (problem text or None, {block: extra} the table should hold)."""
+    refs = {}
+    for k, v in items.items():
+        for _, p in data_ptrs(k, v):
+            refs[p[0]] = refs.get(p[0], 0) + 1
+    want = {b: n - 1 for b, n in refs.items() if n > 1}
+    have, overlap = {}, False
+    for (obj, kind, off), v in items.items():
+        if obj == VOL_OBJ and kind == K_BREF:
+            ln, extra = struct.unpack_from("<II", v)
+            for b in range(off, off + ln):
+                overlap |= b in have
+                have[b] = extra
+    wrong = sorted(b for b in set(want) | set(have) if want.get(b) != have.get(b))
+    if not wrong and not overlap:
+        return None, want
+    under = sum(1 for b in wrong if have.get(b, 0) < want.get(b, 0))
+    b = wrong[0] if wrong else None
+    return (f"shared-block table: {len(wrong)} block(s) counted wrong ({under} too low)"
+            + (", entries overlap" if overlap else "")
+            + (f", e.g. block {b}: {refs.get(b, 0)} references, table says {1 + have.get(b, 0)}" if b is not None else "")), want
+
+
+def bref_rebuild(items, want):
+    """Replace the tree's shared-block table with `want` ({block: extra})."""
+    for k in [k for k in items if k[0] == VOL_OBJ and k[1] == K_BREF]:
+        del items[k]
+    run = None
+    for b in sorted(want):
+        x = want[b]
+        if run and run[0] + run[1] == b and run[2] == x and run[1] < 128:
+            run[1] += 1
+            continue
+        if run:
+            items[(VOL_OBJ, K_BREF, run[0])] = struct.pack("<II", run[1], run[2])
+        run = [b, 1, x]
+    if run:
+        items[(VOL_OBJ, K_BREF, run[0])] = struct.pack("<II", run[1], run[2])
+
+
 def read_spacemap(img, sb):
     """(index ptr + chunk ptrs, set of blocks marked used) of the superblock's space map,
     None if it has none. Raises IOError/ValueError if it is damaged or stale."""
@@ -629,14 +673,24 @@ def cmd_check_repair(path):
             except IOError:
                 bad_data.append(f"inode {k[0]} data at offset {idx * BLOCK} fails its checksum")
     problems, plan = analyse(img, sb, live)
+    bad_bref, _ = bref_check(live)
+    if bad_bref:
+        problems.append(bad_bref)
     map_bad, _, _ = spacemap_problems(img, sb, all_used(img, sb))
     problems += map_bad
     log = []
     if problems or bad_slot:
         w = Writer(path, img, sb)
         sb = dict(sb)
-        if any(plan.values()):
+        if any(plan.values()) or bad_bref:
             apply_repairs(live, sb, plan, log)
+            # Deleted orphans may have shared blocks: the table follows the references.
+            bad_after, want = bref_check(live)
+            if bad_after:
+                bref_rebuild(live, want)
+                log.append("shared-block table rebuilt from the references")
+            if want:
+                sb["version"] = max(sb.get("version", 1), 2)
             new_root = w.tree(live, sb["gen"] + 1)
         else:
             new_root = None
@@ -781,6 +835,17 @@ def cmd_corrupt(path, kind):
         p = next(data_ptrs(k, v)[0][1] for k, v in live.items() if k[1] in (K_EXTENT, K_EXT))
         f.seek(p[0] * BLOCK)
         f.write(bytes(BLOCK))
+    elif kind == "bref":
+        f.close()
+        ents = sorted(k for k in live if k[0] == VOL_OBJ and k[1] == K_BREF)
+        if not ents:
+            sys.exit("no shared blocks to damage")
+        ln, extra = struct.unpack_from("<II", live[ents[0]])
+        del live[ents[0]]  # a shared run now counts as referenced once: too low
+        w = Writer(path, img, sb)
+        w.commit(sb, w.tree(live, sb["gen"] + 1))
+        print(f"{path}: corrupted (bref)")
+        return 0
     elif kind == "smap":
         m = read_spacemap(img, sb)
         if m is None:
@@ -848,9 +913,25 @@ def cmd_check(path, quiet):
                     problems.append(f"{what}: inode {k[0]} block {idx}: {e}")
         return dict(items)
 
+    notes = []
     live = walk(sb["root"], "live")
+    trees = [("live", live)]
     for s in sb["snaps"]:
-        walk(s["root"], f"{'clone' if s['clone'] else 'snapshot'} {s['name']}")
+        what = f"{'clone' if s['clone'] else 'snapshot'} {s['name']}"
+        trees.append((what, walk(s["root"], what)))
+    shared = 0
+    for what, items in trees:
+        bad, want = bref_check(items)
+        if bad and what == "live":
+            problems.append(f"{what}: {bad}")
+        elif bad:
+            # Snapshots are read-only: one taken while the live table was wrong keeps it.
+            # Harmless until it is rolled back to (or cloned): then check --repair.
+            notes.append(f"{what}: {bad} (taken before a repair? after a rollback to it, run check --repair)")
+        if what == "live":
+            shared = len(want)
+        if want and sb["version"] < 2:
+            problems.append(f"{what}: shares blocks but the volume is v{sb['version']} (older kernels would free them)")
     for name, head in [("live", sb["dead"])] + [(s["name"], s["dead"]) for s in sb["snaps"]]:
         try:
             _, chain = img.deadlist(head)
@@ -892,7 +973,6 @@ def cmd_check(path, quiet):
         problems.append("no root directory")
     other = (sb["gen"] + 1) % 2
     o = sb_decode(img.raw(other))
-    notes = []
     if sb["gen"] > 1 and (o is None or o["gen"] >= sb["gen"]):
         # Not damage: what a commit interrupted mid-superblock-write leaves; the next
         # commit overwrites that slot. --repair rewrites it now.
@@ -906,6 +986,8 @@ def cmd_check(path, quiet):
         print(f"{path}: milkfs v{sb['version']} label {sb['label']!r} generation {sb['gen']}, "
               f"{len(inodes)} inodes, {len(used)}/{sb['total']} blocks used, "
               f"{len(sb['snaps'])} snapshot(s), {orphans} orphan(s)")
+        if shared:
+            print(f"  {shared} data block(s) shared by reflink copies")
         print("  space map:", "current" if map_own and not map_bad else
               "none (the next mount rebuilds it)" if not sb["spacemap"][0] else "BAD")
         if sb["flags"] & 1:

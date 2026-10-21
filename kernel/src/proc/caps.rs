@@ -88,6 +88,38 @@ impl Caps {
 }
 
 /// True if `path` is `prefix` itself or inside it. Both are normalised absolute paths.
+impl Caps {
+    /// One line in the sandbox's own spec syntax (`fs=/etc:r,/tmp/x:rw net=local audio=0
+    /// ...`), or `all` when unrestricted. For /proc/<pid>/status.
+    pub fn summary(&self) -> String {
+        if !self.restricted() {
+            return String::from("all");
+        }
+        let fs = match &self.fs {
+            None => String::from("all"),
+            Some(g) if g.is_empty() => String::from("none"),
+            Some(g) => g
+                .iter()
+                .map(|x| alloc::format!("{}:{}", x.prefix, if x.write { "rw" } else { "r" }))
+                .collect::<Vec<_>>()
+                .join(","),
+        };
+        let net = match self.net {
+            Net::None => "none",
+            Net::Local => "local",
+            Net::All => "all",
+        };
+        let b = |v: bool| if v { 1 } else { 0 };
+        alloc::format!(
+            "fs={fs} net={net} audio={} clipboard={} windows={} spawn={}",
+            b(self.audio),
+            b(self.clipboard),
+            b(self.windows),
+            b(self.spawn)
+        )
+    }
+}
+
 pub fn path_under(path: &str, prefix: &str) -> bool {
     if prefix == "/" {
         return true;

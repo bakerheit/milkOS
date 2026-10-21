@@ -59,6 +59,44 @@ fn link(dir: &SynthDir, f: impl Fn() -> fs::Result<String> + Send + Sync + 'stat
     })
 }
 
+/// A /proc/<pid> file only the process's (effective) user and root may read (0400).
+struct OwnerFile {
+    pid: Pid,
+    dev: u64,
+    ino: u64,
+    generate: fn(Pid) -> String,
+}
+
+impl Inode for OwnerFile {
+    fn ino(&self) -> u64 {
+        self.ino
+    }
+    fn dev(&self) -> u64 {
+        self.dev
+    }
+    fn kind(&self) -> InodeType {
+        InodeType::File
+    }
+    fn stat(&self) -> Stat {
+        let mut st = Stat::new(self.dev, self.ino, InodeType::File, 0o400);
+        if let Some(p) = get(self.pid) {
+            let c = *p.cred.lock();
+            st.uid = c.euid;
+            st.gid = c.egid;
+        }
+        st
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> fs::Result<usize> {
+        let text = (self.generate)(self.pid);
+        let Some(rest) = text.as_bytes().get(off as usize..) else {
+            return Ok(0);
+        };
+        let n = rest.len().min(buf.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        Ok(n)
+    }
+}
+
 /// `/proc/<pid>/fd`: one symlink per open fd.
 struct FdDir {
     pid: Pid,
@@ -198,6 +236,7 @@ fn status(pid: Pid) -> String {
     let _ = writeln!(s, "Gid:\t{}\t{}\t{}\t{}", c.rgid, c.egid, c.sgid, c.egid);
     let groups: Vec<String> = c.groups().iter().map(|g| format!("{g}")).collect();
     let _ = writeln!(s, "Groups:\t{}", groups.join(" "));
+    let _ = writeln!(s, "Caps:\t{}", i.caps.summary());
     let _ = writeln!(s, "FDSize:\t{}", i.fds.count());
     let _ = writeln!(s, "VmRSS:\t{rss} kB");
     let _ = writeln!(s, "Threads:\t{}", i.threads.len().max(1));
@@ -470,7 +509,18 @@ pub fn add(pid: Pid) {
     d.add_file("status", move || status(pid));
     d.add_file("stat", move || stat_line(pid));
     d.add_file("cmdline", move || cmdline(pid));
-    d.add_file("maps", move || maps(pid));
+    // The memory layout is private to the process's user (and root), like Linux's
+    // ptrace-checked maps; status / stat / cmdline are world readable (ps, top, the
+    // Activity Monitor).
+    d.add(
+        "maps",
+        Arc::new(OwnerFile {
+            pid,
+            dev: d.dev(),
+            ino: d.ids().next(),
+            generate: maps,
+        }),
+    );
     let cwd = link(&d, move || {
         let p = get(pid).ok_or(Errno::ENOENT)?;
         let c = p.inner.lock().cwd.clone();

@@ -275,8 +275,24 @@ pub fn kill(pid: i64, sig: u32) -> KResult<()> {
     if alive.is_empty() {
         return Err(ESRCH);
     }
+    // Linux's rule: root, or the sender's real or effective uid is the target's real or
+    // saved uid. Fails with EPERM only if no target may be signalled.
+    let me = super::current_cred();
+    let allowed: alloc::vec::Vec<_> = alive
+        .into_iter()
+        .filter(|p| {
+            let t = *p.cred.lock();
+            me.is_root()
+                || [me.ruid, me.euid]
+                    .iter()
+                    .any(|&u| u == t.ruid || u == t.suid)
+        })
+        .collect();
+    if allowed.is_empty() {
+        return Err(EPERM);
+    }
     if sig != 0 {
-        for p in &alive {
+        for p in &allowed {
             post(p, sig, info);
         }
     }

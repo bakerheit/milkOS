@@ -1118,6 +1118,18 @@ fn t_perms() -> bool {
     let (_, st) = sys::wait4(pid as i32, 0).unwrap();
     t(st == 0);
     let _ = sys::unlink(f);
+    // 12-16: /proc as a non-root user. Anyone's status (with the Caps line) and the audit
+    // log are readable; another user's memory map isn't, our own is; no signals to root's
+    // processes (init), signal 0 included.
+    let st1 = sys::read_file("/proc/1/status").unwrap_or_default();
+    t(String::from_utf8_lossy(&st1).contains("Caps:\tall"));
+    t(sys::read_file("/proc/audit").is_ok());
+    t(matches!(
+        sys::read_file("/proc/1/maps"),
+        Err(sys::Errno(13))
+    ));
+    t(sys::read_file("/proc/self/maps").is_ok_and(|m| !m.is_empty()));
+    t(matches!(sys::kill(1, 0), Err(sys::Errno(1))));
     let want = (1u32 << n) - 1;
     check(
         "permissions",

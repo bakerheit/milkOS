@@ -73,6 +73,14 @@ stays on top: an operation needs **both** the permission bits and the sandbox.
 * `chroot` is allowed to anyone (it only narrows the view; `milk run-try` needs it) but
   sets `no_new_privs`, as does the capability sandbox: set-ID binaries don't work in there.
 
+**Other users' processes** (Linux's default, `hidepid=0`): everyone can see every
+process in /proc and read its `status` (ids, threads, memory, and a `Caps:` line with its
+capability set in sandbox syntax, `all` if unrestricted), `stat` and `cmdline`, and
+`/proc/audit`, so `ps`, `top` and an Activity Monitor work for any user. Private to the
+process's user and root: `/proc/<pid>/maps` (0400, owned by its euid) and
+`/proc/<pid>/fd/` (0500). Signals follow Linux: root, or a sender whose real or effective
+uid is the target's real or saved uid; otherwise `kill` is EPERM (signal 0 included).
+
 **Admin group decision (milk install, the Store):** like macOS, the administrators group
 `admin` (80) owns the shared, installable places: `/Applications` and `/bin` are
 `root:admin 0775`, `/etc/milk/repos` (package sources) `root:admin 0664`. `milk` is in

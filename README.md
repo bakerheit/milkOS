@@ -14,7 +14,7 @@ Needs Rust nightly via rustup (`brew install rustup`), and `qemu-system-aarch64`
 - `kernel/`: the kernel crate (`no_std`). Entry is `kernel/src/boot.S`, then `kmain` in `main.rs`.
 - `scripts/`: run and test helpers. `scripts/screenshot.sh [out.png] [secs]` boots headless with ramfb
   and saves the screen as a PNG; `scripts/gen_font.py` regenerates `kernel/src/font_data.rs`.
-- `docs/`: design notes.
+- `docs/`: design notes (`docs/memory.md`: MMU, frame allocator, heap).
 
 ## Display
 ramfb (via qemu fw_cfg DMA) at 1024x768 XRGB8888. `gfx.rs` has the drawing primitives (`DrawTarget`,

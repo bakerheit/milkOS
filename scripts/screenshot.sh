@@ -14,7 +14,10 @@ SOCK="/tmp/milk-display.$$.sock"
 LOG="${OUT%.png}.serial.log"
 cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
-KERNEL="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
+ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
+# Flat arm64 Image so qemu passes the device tree (see run.sh).
+KERNEL="$ELF.bin"
+"$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 rm -f "$SOCK" "$OUT"
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \

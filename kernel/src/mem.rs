@@ -1,0 +1,119 @@
+#![allow(dead_code)]
+//! Memory bring-up: device tree -> MMU -> frame allocator -> heap, plus the
+//! boot-time self-test.
+
+use crate::dtb::{Dtb, MAX_BANKS, MemRange};
+use crate::mmu::{self, PAGE_SIZE, PhysAddr};
+use crate::{heap, kprintln, pmm};
+use core::ptr::addr_of;
+
+unsafe extern "C" {
+    static __kernel_start: u8;
+    static __kernel_end: u8;
+    static __boot_dtb: u64;
+}
+
+/// qemu `virt` defaults, used only if the device tree can't be parsed.
+const FALLBACK_RAM: MemRange = MemRange {
+    base: 0x4000_0000,
+    size: 512 << 20,
+};
+
+pub fn kernel_range() -> (PhysAddr, PhysAddr) {
+    (
+        addr_of!(__kernel_start) as usize,
+        addr_of!(__kernel_end) as usize,
+    )
+}
+
+/// Physical address of the device tree blob qemu passed in (0 if none).
+pub fn boot_dtb() -> PhysAddr {
+    // SAFETY: plain word written once by boot.S.
+    unsafe { addr_of!(__boot_dtb).read() as usize }
+}
+
+/// Bring up the MMU, physical allocator and heap. Call once from `kmain`,
+/// before anything allocates or takes a lock.
+pub fn init() {
+    let (kstart, kend) = kernel_range();
+
+    // 1. Where is RAM? Ask the device tree, else assume qemu's default.
+    // qemu only passes a DTB (in x0) when it boots an arm64 Image, i.e. the flat
+    // binary scripts/run.sh makes; a plain ELF boot gets x0 = 0 and lands on the
+    // 512 MiB default (which is what run.sh passes with -m).
+    let dtb_addr = boot_dtb();
+    // SAFETY: the bootloader's pointer, or 0.
+    let dtb = unsafe { Dtb::from_addr(dtb_addr) };
+    let mut banks = [MemRange { base: 0, size: 0 }; MAX_BANKS];
+    let nbanks = dtb.as_ref().map_or(0, |d| d.memory(&mut banks));
+    let (ram, source) = match banks[..nbanks]
+        .iter()
+        .find(|b| (b.base..b.base + b.size).contains(&kstart))
+    {
+        Some(b) => (*b, "device tree"),
+        None => (FALLBACK_RAM, "FALLBACK default, no usable device tree"),
+    };
+    // Whole frames only.
+    let ram = MemRange {
+        base: ram.base.next_multiple_of(PAGE_SIZE),
+        size: ram.size & !(PAGE_SIZE - 1),
+    };
+    let ram_end = ram.base + ram.size;
+
+    // 2. The bitmap goes right after the kernel image. If the device tree sits
+    // there (a loader that puts it next to the kernel), start the bitmap after it.
+    let mut low_end = kend;
+    if let Some(d) = &dtb {
+        let bitmap_len = (ram.size / PAGE_SIZE).div_ceil(64) * 8 + PAGE_SIZE;
+        let dend = d.base() + d.total_size();
+        if d.base() < kend + bitmap_len && dend > kend {
+            low_end = dend;
+        }
+    }
+
+    // 3. MMU on (identity map, caches), then PMM, then heap.
+    // SAFETY: first and only call, core 0, MMU still off.
+    unsafe { mmu::init(ram.base, ram.size) };
+    // SAFETY: MMU is on, RAM is mapped, nothing else owns RAM above the kernel image.
+    unsafe { pmm::init(ram.base, ram.size, low_end) };
+    if let Some(d) = &dtb {
+        pmm::reserve(d.base(), d.total_size());
+    }
+    heap::init();
+
+    let s = pmm::stats();
+    let h = heap::stats();
+    kprintln!(
+        "mem: RAM {:#x}..{:#x} ({} MiB, {})",
+        ram.base,
+        ram_end,
+        ram.size >> 20,
+        source
+    );
+    match &dtb {
+        Some(d) => kprintln!("mem: dtb at {:#x}, {} bytes", d.base(), d.total_size()),
+        None => kprintln!("mem: no device tree (x0 = {dtb_addr:#x})"),
+    }
+    kprintln!(
+        "mem: kernel image {:#x}..{:#x} ({} KiB), reserved below {:#x}",
+        kstart,
+        kend,
+        (kend - kstart) >> 10,
+        pmm::reserved_end()
+    );
+    kprintln!(
+        "mem: MMU+caches on (4K granule, 48-bit VA, identity map), device 0..0x40000000, RAM cacheable"
+    );
+    kprintln!(
+        "mem: pmm {} frames total, {} reserved, {} free ({} MiB)",
+        s.total_frames,
+        s.reserved_frames,
+        s.free_frames,
+        (s.free_frames * PAGE_SIZE) >> 20
+    );
+    kprintln!(
+        "mem: heap {} KiB ({} KiB free)",
+        h.total >> 10,
+        h.free >> 10
+    );
+}

@@ -1,12 +1,15 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::arch::global_asm;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
 mod display;
+mod dtb;
 mod exceptions;
 mod fbcon;
 mod font;
@@ -14,6 +17,11 @@ mod font_data;
 mod fwcfg;
 mod gfx;
 mod gic;
+mod heap;
+mod mem;
+mod memtest;
+mod mmu;
+mod pmm;
 mod ramfb;
 mod selftest;
 mod sink;
@@ -58,6 +66,8 @@ pub fn console_writer() -> impl Write {
 pub extern "C" fn kmain() -> ! {
     // Vectors first, so a fault anywhere after this gets a crash dump.
     exceptions::init();
+    // MMU + caches before anything takes a lock (atomics hang on Device memory).
+    mem::init();
     display::init();
     kprintln!("milkOS 0.0.1 booting...");
     kprintln!("hello from the kernel");
@@ -67,6 +77,7 @@ pub extern "C" fn kmain() -> ! {
     uart::init();
     sync::irq_enable();
     selftest::run();
+    memtest::run();
 
     loop {
         uart::echo_pending();

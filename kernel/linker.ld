@@ -25,6 +25,7 @@ SECTIONS
     . += 64K;
     __stack_top = .;
     __kernel_end = .;
+    __image_size = __kernel_end - __kernel_start;
 
     /DISCARD/ : { *(.comment) *(.eh_frame*) }
 }

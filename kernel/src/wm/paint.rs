@@ -117,6 +117,8 @@ pub struct Painter<'a> {
     clip: Rect,
     ox: i32,
     oy: i32,
+    /// Run colours through the theme's token table (`theme::tc`). Off for the wallpaper.
+    themed: bool,
 }
 
 impl<'a> Painter<'a> {
@@ -129,7 +131,20 @@ impl<'a> Painter<'a> {
             clip: Rect::new(0, 0, w, h),
             ox: 0,
             oy: 0,
+            themed: true,
         }
+    }
+
+    /// Like [`new`](Self::new), but colours are used as given (no theme mapping).
+    pub fn raw(buf: &'a mut Buffer) -> Painter<'a> {
+        let mut p = Painter::new(buf);
+        p.themed = false;
+        p
+    }
+
+    #[inline]
+    fn col(&self, c: Color) -> Color {
+        if self.themed { super::theme::tc(c) } else { c }
     }
 
     /// A painter on the same pixels, clipped further to `r` (logical).
@@ -144,7 +159,16 @@ impl<'a> Painter<'a> {
             clip: b,
             ox: self.ox,
             oy: self.oy,
+            themed: self.themed,
         }
+    }
+
+    /// The same painter with theme mapping switched off (colours used as given): for
+    /// previews of the other theme, wallpaper thumbnails and such.
+    pub fn unthemed(&mut self) -> Painter<'_> {
+        let mut p = self.clipped(self.clip());
+        p.themed = false;
+        p
     }
 
     /// A painter whose logical (0, 0) is this painter's (`r.x`, `r.y`), clipped to `r`.
@@ -181,6 +205,7 @@ impl<'a> Painter<'a> {
     // ---- fills ------------------------------------------------------------------------------
 
     pub fn fill(&mut self, x: i32, y: i32, w: i32, h: i32, c: Color) {
+        let c = self.col(c);
         let Some(b) = self.buf_rect(x, y, w, h) else {
             return;
         };
@@ -190,6 +215,7 @@ impl<'a> Painter<'a> {
     }
 
     pub fn fill_a(&mut self, x: i32, y: i32, w: i32, h: i32, c: Color, alpha: u8) {
+        let c = self.col(c);
         if alpha == 255 {
             return self.fill(x, y, w, h, c);
         }
@@ -208,6 +234,7 @@ impl<'a> Painter<'a> {
 
     /// Filled anti-aliased rounded rect, blended at `alpha`.
     pub fn rrect(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, c: Color, alpha: u8) {
+        let c = self.col(c);
         let r = r.clamp(0, w.min(h) / 2);
         if r == 0 {
             return self.fill_a(x, y, w, h, c, alpha);
@@ -278,6 +305,7 @@ impl<'a> Painter<'a> {
         c: Color,
         alpha: u8,
     ) {
+        let c = self.col(c);
         if w <= 0 || h <= 0 || th <= 0 {
             return;
         }
@@ -354,7 +382,7 @@ impl<'a> Painter<'a> {
                 r.w + 2 * g,
                 r.h + 2 * g,
                 radius + g,
-                super::theme::ESPRESSO,
+                super::theme::INK,
                 a,
             );
         }
@@ -559,6 +587,7 @@ impl<'a> Painter<'a> {
 
     /// Draw `s` at (x, y), `scale`x, blended at `alpha`. Returns the x after the last glyph.
     pub fn text_a(&mut self, x: i32, y: i32, s: &str, c: Color, alpha: u8, scale: i32) -> i32 {
+        let c = self.col(c);
         let gw = GLYPH_W as i32 * scale;
         let gh = GLYPH_H as i32 * scale;
         let clip = self.clip();
@@ -632,6 +661,7 @@ impl<'a> Painter<'a> {
     }
 
     fn text_smooth(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        let c = self.col(c);
         let (gw, gh) = (super::fontx::width(scale), GLYPH_H as i32 * scale);
         let clip = self.clip();
         let mut cx = x;

@@ -5,7 +5,9 @@
 # DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today
 #        spaces space2 control dim toast menu logo movespace files browse shell hover bench tour
 #        stty paint paintclose desk desktoday dockpress select termselect minianim openanim
-#        lsbin sigint winsize utest shutdown panic, or "none" for the plain desktop. Prefix slow- to run animations 20x
+#        lsbin sigint winsize utest settings dark wallpapers timemachine tm1 tm2 browser
+#        browselink browseback browserdeny browse2 browse3 (WM_HOSTNET + test server) ansi clear
+#        shutdown panic, or "none" for the plain desktop. Prefix slow- to run animations 20x
 #        slower (e.g. SETTLE=0.3 scripts/wm-demo.sh slow-minianim) to catch one mid-flight.
 # Default out: /tmp/milk-DEMO.png; the serial log goes next to it. Only the qemu started here is
 # killed (by PID).
@@ -25,17 +27,31 @@ KERNEL="$ELF.bin"
 rm -f "$SOCK" "$OUT" "$LOG"
 # Shared scratch disk: writes discarded, safe with other qemus running (scripts/disk.sh).
 source scripts/disk.sh
-milk_disk_args shared
+# WM_DISK_RW=1: writable disks (use private images: MILK_FS=... MILK_DISK=...), to test that
+# things persist across boots.
+if [ -n "${WM_DISK_RW:-}" ]; then milk_disk_args; else milk_disk_args shared; fi
+# Sound: MILK_SOUND_WAV=/tmp/x.wav records system sounds to a WAV file (never the speakers).
+SOUND_ARGS=()
+if [ -n "${MILK_SOUND_WAV:-}" ]; then
+  SOUND_ARGS=(-audiodev "wav,id=snd0,path=$MILK_SOUND_WAV,out.frequency=48000"
+    -device virtio-sound-device,audiodev=snd0)
+fi
 # eth0, restricted, no port forwards (safe with other qemus running; scripts/netdev.sh).
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args
+# WM_HOSTNET=1: an unrestricted netdev (like scripts/net-test.sh), so the guest can reach the
+# Mac's 127.0.0.1 as 10.0.2.2, for testing the Browser against a local test server. Only
+# use it with demos that go to 10.0.2.2 (the Browser itself only fetches IP literals).
+if [ -n "${WM_HOSTNET:-}" ]; then
+  NET_ARGS=(-netdev "user,id=n0" -device virtio-net-device,netdev=n0)
+fi
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
-  -fw_cfg "name=opt/milkos/demo,string=$DEMO" "${DISK_ARGS[@]}" "${NET_ARGS[@]}" \
+  -fw_cfg "name=opt/milkos/demo,string=$DEMO" "${DISK_ARGS[@]}" "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"} \
   -monitor "unix:$SOCK,server,nowait" "$@" &
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT

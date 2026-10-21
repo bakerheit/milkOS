@@ -252,7 +252,17 @@ pub fn clones() -> Result<alloc::vec::Vec<CloneInfo>> {
 pub fn discard_clone(name: &str) -> Result<()> {
     let v = primary()?;
     v.state.lock().clone_index_check(name)?;
+    let view = v
+        .state
+        .lock()
+        .clone_list()
+        .iter()
+        .find(|c| c.name == name)
+        .map(|c| c.id);
     unmount_clone(name);
+    if let Some(id) = view {
+        crate::fs::pagecache::invalidate_dev(v.view_dev(items::clone_view(id)));
+    }
     let r = v.state.lock().clone_discard(name);
     audit_op("milkfs.clone.discard", &alloc::format!("name={name}"), &r);
     r
@@ -270,6 +280,7 @@ pub fn promote_clone(name: &str) -> Result<String> {
         crate::audit::before_rewind();
     }
     let r = v.state.lock().clone_promote(name, &keep);
+    crate::fs::pagecache::invalidate_dev(v.dev);
     if user_op() {
         crate::audit::volume_rewound();
     }
@@ -348,7 +359,9 @@ pub fn rollback(name: &str) -> Result<()> {
     let r = (|| {
         let zombies = {
             let mut st = v.state.lock();
-            st.snap_rollback(name)?;
+            let r = st.snap_rollback(name);
+            crate::fs::pagecache::invalidate_dev(v.dev); // live contents changed underneath
+            r?;
             st.unlinked_inodes()?
         };
         v.reclaim(&zombies)

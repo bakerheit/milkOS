@@ -145,3 +145,11 @@ pub fn human_size(n: u64) -> String {
         format!("{} MB", n.div_ceil(1024 * 1024))
     }
 }
+
+/// Write `text` to an existing control file (sysfs / devfs): open for writing, no create /
+/// truncate.
+pub fn ctl_write(path: &str, text: &str) -> fs::Result<()> {
+    let f = fs::open(path, fs::abi::O_WRONLY, 0)?;
+    f.write(text.as_bytes())?;
+    Ok(())
+}

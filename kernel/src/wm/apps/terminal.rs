@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fs::{self, InodeType};
-use crate::gfx::Color;
+use crate::gfx::{Color, rgb};
 use crate::{heap, klog, pmm, timer};
 
 use super::super::clipboard;
@@ -78,8 +78,15 @@ pub struct Terminal {
     tty_gen: u64,
     /// The tty's current (unterminated) output line: the prompt and what is being typed.
     cur: String,
-    /// Inside an escape sequence in the tty output (swallowed; msh runs with TERM=dumb).
+    /// ANSI escape parser state: 0 ground, 1 after ESC, 2 in CSI (ESC [), 3 ESC O.
     esc: u8,
+    /// CSI parameter bytes collected so far.
+    csi: String,
+    /// SGR state: colour index (0 = default) and bold.
+    sgr_fg: u8,
+    sgr_bold: bool,
+    /// A bare CR was seen: the next text overwrites the current line.
+    cr: bool,
     /// The rows on screen at the last draw (for copying a selection).
     screen: Vec<String>,
     /// Mouse selection in screen cells: anchor and end (row, col). Cleared by new output.
@@ -102,6 +109,10 @@ impl Terminal {
             tty_gen: 0,
             cur: String::new(),
             esc: 0,
+            csi: String::new(),
+            sgr_fg: 0,
+            sgr_bold: false,
+            cr: false,
             screen: Vec::new(),
             sel: None,
         };
@@ -124,27 +135,129 @@ impl Terminal {
         };
         for c in String::from_utf8_lossy(&bytes).chars() {
             match (self.esc, c) {
-                (1, '[') => self.esc = 2,
-                (1, _) => self.esc = 0,
-                (2, '\x40'..='\x7e') => self.esc = 0,
-                (2, _) => {}
+                (1, '[') => {
+                    self.esc = 2;
+                    self.csi.clear();
+                }
+                (1, 'O') => self.esc = 3,
+                (1, 'c') => {
+                    // RIS: full reset.
+                    self.esc = 0;
+                    self.clear_screen();
+                }
+                (1, _) | (3, _) => self.esc = 0,
+                (2, '\x40'..='\x7e') => {
+                    self.esc = 0;
+                    let params = core::mem::take(&mut self.csi);
+                    self.csi_final(c, &params);
+                }
+                (2, c) => self.csi.push(c),
                 (_, '\x1b') => self.esc = 1,
                 (_, '\n') => {
-                    let l = core::mem::take(&mut self.cur);
-                    self.lines.push((l, CREAM));
+                    self.cr = false;
+                    let mut l = core::mem::take(&mut self.cur);
+                    // The next line starts in the colour this one ended in.
+                    if self.sgr_fg != 0 || self.sgr_bold {
+                        self.cur.push(marker(self.sgr_fg, self.sgr_bold));
+                        l.push(marker(0, false));
+                    }
+                    self.lines.push((l, TERM_FG));
                 }
                 (_, '\x08') => {
                     self.cur.pop();
+                    // Don't leave a dangling colour marker as the "character" to erase next.
+                    while self.cur.chars().last().is_some_and(is_marker) {
+                        self.cur.pop();
+                    }
                 }
-                (_, '\r') => {}
-                (_, '\t') => self.cur.push_str("    "),
-                (_, c) if !c.is_control() => self.cur.push(c),
+                (_, '\r') => self.cr = true,
+                (_, '\x07') => {}
+                (_, '\t') => {
+                    self.take_cr();
+                    let n = visible_len(&self.cur);
+                    for _ in 0..(8 - n % 8) {
+                        self.cur.push(' ');
+                    }
+                }
+                (_, c) if !c.is_control() => {
+                    self.take_cr();
+                    self.cur.push(c);
+                }
                 _ => {}
             }
         }
         self.trim();
         self.back = 0;
         true
+    }
+
+    /// A bare CR followed by text: the text replaces the line (progress bars, `\r\x1b[K`).
+    fn take_cr(&mut self) {
+        if self.cr {
+            self.cr = false;
+            self.cur.clear();
+            if self.sgr_fg != 0 || self.sgr_bold {
+                self.cur.push(marker(self.sgr_fg, self.sgr_bold));
+            }
+        }
+    }
+
+    fn clear_screen(&mut self) {
+        self.lines.clear();
+        self.cur.clear();
+        self.sel = None;
+        self.sgr_fg = 0;
+        self.sgr_bold = false;
+    }
+
+    /// The CSI sequences we act on: SGR colours (m), erase in display (J: 2/3 clear the
+    /// screen), erase in line (K), cursor home (H, f). Cursor movement is ignored: this is a
+    /// scrolling terminal, not a full screen one (yet).
+    fn csi_final(&mut self, f: char, params: &str) {
+        let nums: Vec<u32> = params
+            .split(';')
+            .map(|p| p.trim_start_matches('?').parse().unwrap_or(0))
+            .collect();
+        match f {
+            'm' => {
+                let mut i = 0;
+                while i < nums.len() {
+                    match nums[i] {
+                        0 => {
+                            self.sgr_fg = 0;
+                            self.sgr_bold = false;
+                        }
+                        1 => self.sgr_bold = true,
+                        22 => self.sgr_bold = false,
+                        n @ 30..=37 => self.sgr_fg = (n - 30 + 1) as u8,
+                        n @ 90..=97 => self.sgr_fg = (n - 90 + 9) as u8,
+                        39 => self.sgr_fg = 0,
+                        // 256-colour / truecolour: skip their arguments.
+                        38 | 48 => {
+                            i += if nums.get(i + 1) == Some(&5) { 2 } else { 4 };
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                self.cur.push(marker(self.sgr_fg, self.sgr_bold));
+            }
+            'J' if nums.first().is_some_and(|&n| n >= 2) => self.clear_screen(),
+            'J' => {}
+            'K' => {
+                // Erase to the end of the line: the cursor is at the end, unless a CR moved
+                // it to the start, in which case the whole line goes.
+                if self.cr {
+                    self.cr = false;
+                    self.cur.clear();
+                }
+            }
+            'H' | 'f' => {
+                // Cursor home: on its own it's followed by J (clear) in practice.
+                self.cr = true;
+            }
+            _ => {}
+        }
     }
 
     fn sel_range(&self) -> Option<((usize, usize), (usize, usize))> {
@@ -279,7 +392,7 @@ impl Terminal {
         let line = core::mem::take(&mut self.input);
         self.cursor = 0;
         self.lines
-            .push((format!("{}{}", self.shell.prompt(), line), CREAM));
+            .push((format!("{}{}", self.shell.prompt(), line), TERM_FG));
         if !line.trim().is_empty() {
             self.history.push(line.clone());
         }
@@ -302,13 +415,111 @@ impl Terminal {
     }
 }
 
-/// Split `s` into chunks of at most `cols` characters.
-fn wrap(s: &str, cols: usize) -> Vec<String> {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.is_empty() {
-        return alloc::vec![String::new()];
+// ---- ANSI colour markers ------------------------------------------------------------------
+// Coloured output is kept in the scrollback as plain strings with marker characters from the
+// Private Use Area (U+F700 + colour index, + 0x20 when bold) where the colour changes. They take
+// no space when wrapping or drawing, and copy-paste strips them.
+
+const MARK: u32 = 0xF700;
+
+fn marker(fg: u8, bold: bool) -> char {
+    char::from_u32(MARK + fg as u32 + if bold { 0x20 } else { 0 }).unwrap_or(' ')
+}
+
+fn is_marker(c: char) -> bool {
+    (MARK..MARK + 0x40).contains(&(c as u32))
+}
+
+fn visible_len(s: &str) -> usize {
+    s.chars().filter(|&c| !is_marker(c)).count()
+}
+
+pub fn strip_markers(s: &str) -> String {
+    s.chars().filter(|&c| !is_marker(c)).collect()
+}
+
+/// ANSI colour `i` (1..=16; 0 = the line's own colour) for the espresso Terminal.
+fn ansi(i: u32, bold: bool, base: Color) -> Color {
+    let i = if bold && (1..=8).contains(&i) {
+        i + 8
+    } else {
+        i
+    };
+    match i {
+        1 => rgb(0x6A, 0x58, 0x4C),  // black (lifted, so it shows on espresso)
+        2 => STRAW,                  // red
+        3 => MATCHA,                 // green
+        4 => HONEY,                  // yellow
+        5 => BLUE,                   // blue
+        6 => LAV,                    // magenta
+        7 => rgb(0x8C, 0xC7, 0xC0),  // cyan
+        8 => rgb(0xE6, 0xDA, 0xC8),  // white
+        9 => rgb(0x9A, 0x86, 0x74),  // bright black
+        10 => rgb(0xF2, 0xA7, 0xB0), // bright red
+        11 => rgb(0xB8, 0xD8, 0xB6), // bright green
+        12 => rgb(0xF4, 0xCD, 0x80), // bright yellow
+        13 => rgb(0xA6, 0xB4, 0xDF), // bright blue
+        14 => rgb(0xD2, 0xC6, 0xE8), // bright magenta
+        15 => rgb(0xAE, 0xDE, 0xD8), // bright cyan
+        16 => rgb(0xFF, 0xFF, 0xFF), // bright white
+        _ => base,
     }
-    chars.chunks(cols).map(|c| c.iter().collect()).collect()
+}
+
+/// Draw a scrollback row with its colour markers; `start` is the colour active at its start.
+fn draw_row(
+    p: &mut Painter,
+    x: i32,
+    y: i32,
+    s: &str,
+    base: Color,
+    start: (u32, bool),
+) -> (u32, bool) {
+    let (mut fg, mut bold) = start;
+    let mut run = String::new();
+    let mut cx = x;
+    let flush = |p: &mut Painter, run: &mut String, cx: &mut i32, fg: u32, bold: bool| {
+        if !run.is_empty() {
+            let c = ansi(fg, bold, base);
+            p.text(*cx, y, run, c);
+            if bold {
+                p.text(*cx + 1, y, run, c);
+            }
+            *cx += 8 * run.chars().count() as i32;
+            run.clear();
+        }
+    };
+    for ch in s.chars() {
+        if is_marker(ch) {
+            flush(p, &mut run, &mut cx, fg, bold);
+            let v = ch as u32 - MARK;
+            fg = v & 0x1f;
+            bold = v & 0x20 != 0;
+        } else {
+            run.push(ch);
+        }
+    }
+    flush(p, &mut run, &mut cx, fg, bold);
+    (fg, bold)
+}
+
+/// Split `s` into rows of at most `cols` visible characters (markers don't count).
+fn wrap(s: &str, cols: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut row = String::new();
+    let mut n = 0;
+    for c in s.chars() {
+        if !is_marker(c) {
+            if n == cols {
+                out.push(core::mem::take(&mut row));
+                n = 0;
+            }
+            n += 1;
+        }
+        row.push(c);
+    }
+    out.push(row);
+    out
 }
 
 impl WindowContents for Terminal {
@@ -354,13 +565,16 @@ impl WindowContents for Terminal {
         }
         vis.reverse();
         for seg in &prompt_rows {
-            vis.push((seg.clone(), CREAM));
+            vis.push((seg.clone(), TERM_FG));
         }
         let max_back = vis.len().saturating_sub(rows);
         self.back = self.back.min(max_back);
         let end = vis.len() - self.back;
         let start = end.saturating_sub(rows);
-        self.screen = vis[start..end].iter().map(|(s, _)| s.clone()).collect();
+        self.screen = vis[start..end]
+            .iter()
+            .map(|(s, _)| strip_markers(s))
+            .collect();
         if let Some((a, b)) = self.sel_range() {
             for r in a.0..=b.0.min(self.screen.len().saturating_sub(1)) {
                 let c0 = if r == a.0 { a.1 } else { 0 };
@@ -377,13 +591,19 @@ impl WindowContents for Terminal {
                 }
             }
         }
+        // Colour carries across wrapped rows of the same line, so track it from the top of
+        // the visible window (rows above `start` may set it; good enough to start plain).
+        let mut col = (0u32, false);
         for (k, (s, c)) in vis[start..end].iter().enumerate() {
-            p.text(PAD, PAD + k as i32 * LINE_H, s, *c);
+            col = draw_row(p, PAD, PAD + k as i32 * LINE_H, s, *c, col);
+            if !s.is_empty() && k + 1 < end - start && vis[start + k + 1].1 != *c {
+                col = (0, false);
+            }
         }
         // Cursor block.
         if self.back == 0 {
             let pos = if self.tty {
-                self.cur.chars().count()
+                visible_len(&self.cur)
             } else {
                 self.shell.prompt().chars().count() + self.cursor
             };
@@ -391,10 +611,10 @@ impl WindowContents for Terminal {
             let row_on_screen = (vis.len() - prompt_rows.len() + r) as i32 - start as i32;
             let (x, y) = (PAD + ccol as i32 * 8, PAD + row_on_screen * LINE_H);
             if focused {
-                p.fill(x, y, 8, 16, CREAM);
+                p.fill(x, y, 8, 16, TERM_FG);
                 let ch = self.input.chars().nth(self.cursor).unwrap_or(' ');
                 let mut b = [0u8; 4];
-                p.text(x, y, ch.encode_utf8(&mut b), ESPRESSO);
+                p.text(x, y, ch.encode_utf8(&mut b), TERM_BG);
             } else {
                 p.rrect_stroke(x, y, 8, 16, 0, 1, LATTE, 255);
             }
@@ -427,7 +647,7 @@ impl WindowContents for Terminal {
             match k.key {
                 Key::Char('c') => {
                     let line = format!("{}{}^C", self.shell.prompt(), self.input);
-                    self.lines.push((line, CREAM));
+                    self.lines.push((line, TERM_FG));
                     self.input.clear();
                     self.cursor = 0;
                 }
@@ -802,10 +1022,10 @@ impl Shell for BuiltinShell {
             "cowsay" => {
                 let t = if arg.is_empty() { "moo" } else { arg.as_str() };
                 let n = t.chars().count();
-                out.line(&format!(" {}", "_".repeat(n + 2)), CREAM);
-                out.line(&format!("< {t} >"), CREAM);
-                out.line(&format!(" {}", "-".repeat(n + 2)), CREAM);
-                out.line(COW, CREAM);
+                out.line(&format!(" {}", "_".repeat(n + 2)), TERM_FG);
+                out.line(&format!("< {t} >"), TERM_FG);
+                out.line(&format!(" {}", "-".repeat(n + 2)), TERM_FG);
+                out.line(COW, TERM_FG);
             }
             "exit" => out.out("there is nowhere to go. this is the kernel."),
             _ => out.bad(&format!("{cmd}: command not found (try 'help')")),

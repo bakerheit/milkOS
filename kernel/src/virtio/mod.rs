@@ -8,6 +8,7 @@ pub mod blk;
 pub mod input;
 pub mod mmio;
 pub mod net;
+pub mod p9;
 pub mod queue;
 pub mod sound;
 
@@ -17,6 +18,7 @@ use mmio::{Error, Transport, device_id};
 fn name(id: u32) -> &'static str {
     match id {
         device_id::NET => "net",
+        device_id::P9 => "9p",
         device_id::BLOCK => "block",
         device_id::CONSOLE => "console",
         device_id::RNG => "rng",
@@ -56,6 +58,7 @@ pub fn init() {
             device_id::BLOCK => blk::attach(t),
             device_id::NET => net::attach(t),
             device_id::SOUND => sound::attach(t),
+            device_id::P9 => p9::attach(t),
             _ => Ok(()),
         };
         if let Err(e) = r {

@@ -31,8 +31,8 @@ pub fn wm(line: &str) -> i32 {
 
 /// An argument made absolute against the current directory, if it looks like a path.
 pub fn absolute(arg: &str) -> String {
-    if arg.starts_with('/') {
-        return String::from(arg);
+    if arg.starts_with('/') || arg.contains("://") {
+        return String::from(arg); // absolute, or a URL (open http://127.0.0.1/)
     }
     let is_path = arg.contains('/') || arg.contains('.') || arg == "~";
     if !is_path {

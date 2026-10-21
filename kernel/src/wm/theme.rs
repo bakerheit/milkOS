@@ -24,6 +24,52 @@ pub const WHITE: Color = rgb(0xFF, 0xFF, 0xFF);
 /// Terminal title bar and border.
 pub const TERM_BAR: Color = rgb(0x4A, 0x3C, 0x34);
 
+// ---- fixed colours (the same in both themes) ----------------------------------------------
+// These sit one LSB away from the tokens they resemble, so the theme map below leaves them
+// alone: the Terminal is espresso in both themes, shadows and dims are always dark, glyphs
+// on coloured tiles are always ink.
+/// Terminal body.
+pub const TERM_BG: Color = rgb(0x3A, 0x2E, 0x29);
+/// Terminal text and the light glyph on the Terminal tile.
+pub const TERM_FG: Color = rgb(0xFB, 0xF6, 0xED);
+/// Shadows, dims, glyphs on honey / straw / blue tiles.
+pub const INK: Color = rgb(0x3A, 0x2E, 0x27);
+
+// ---- themes ---------------------------------------------------------------------------------
+
+static DARK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Is "Chocolate milk" (the dark theme) on?
+pub fn dark() -> bool {
+    DARK.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_dark(on: bool) {
+    DARK.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The token table: what each neutral token is in the current theme. The light theme
+/// ("Whole milk") is the SPEC. Accents (straw, honey, matcha, blue, lav) stay as they are.
+/// The painter runs every colour through this, so everything drawn with tokens follows the
+/// theme without knowing about it.
+#[inline]
+pub fn tc(c: Color) -> Color {
+    if !dark() {
+        return c;
+    }
+    match c {
+        MILK => rgb(0x2E, 0x25, 0x20),     // surfaces, window bodies
+        CREAM => rgb(0x38, 0x2D, 0x27),    // title bars
+        OAT => rgb(0x42, 0x35, 0x2D),      // sidebars
+        SAND => rgb(0x55, 0x46, 0x3C),     // hairlines
+        LATTE => rgb(0x8C, 0x77, 0x64),    // disabled text, inactive lights
+        COCOA => rgb(0xBE, 0xA8, 0x90),    // secondary text
+        ESPRESSO => rgb(0xF4, 0xEB, 0xE0), // primary text
+        WHITE => rgb(0x7A, 0x66, 0x58),    // glass edges, hover lightening
+        _ => c,
+    }
+}
+
 /// Alpha as a 0..=255 byte from a percentage-ish fraction written as thousandths.
 pub const fn a(thousandths: u32) -> u8 {
     ((thousandths * 255 + 500) / 1000) as u8
@@ -64,9 +110,22 @@ pub const MENU_PAD_X: i32 = 12;
 pub const MENU_TEXT_Y: i32 = 6;
 
 // ---- dock -----------------------------------------------------------------------------------
-pub const DOCK_H: i32 = 64;
 pub const DOCK_PAD: i32 = 8;
-pub const DOCK_ICON: i32 = 48;
+/// Dock icon size: 48 by SPEC; Settings offers 40 / 48 / 56. The dock is that plus padding.
+static DOCK_ICON_PX: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(48);
+
+pub fn dock_icon() -> i32 {
+    DOCK_ICON_PX.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_dock_icon(px: i32) {
+    DOCK_ICON_PX.store(px.clamp(32, 64), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Dock height (64 at the SPEC's 48px icons).
+pub fn dock_h() -> i32 {
+    dock_icon() + 2 * DOCK_PAD
+}
 pub const DOCK_GAP: i32 = 12;
 pub const DOCK_BOTTOM: i32 = 12;
 pub const DOCK_DOT: i32 = 4;

@@ -188,6 +188,8 @@ pub enum Request {
     ClientCreate(u32),
     /// A process destroyed its window (or exited).
     ClientGone(u32),
+    /// A client gave its window a new size itself (MILK_WIN_RESIZE): fit the window to it.
+    ClientResized(u32),
     /// `open` from /dev/wm: an app name or an absolute path.
     OpenAny(String),
     /// New preferences from Settings: apply and save.
@@ -1486,6 +1488,17 @@ impl Desktop {
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();
+                    }
+                }
+                Request::ClientResized(cid) => {
+                    // A window holding only this client: body = the new buffer.
+                    if let Some((wid, _)) = self.find_app(App::Client(cid))
+                        && let Some(w) = self.win(wid)
+                        && w.tab_count() == 1
+                        && let Some((cw, ch, _)) = client::info(cid)
+                    {
+                        let bar = w.bar_h;
+                        self.resize_window(wid, cw as i32 + 2, ch as i32 + bar + 2);
                     }
                 }
                 Request::ClientGone(id) => {

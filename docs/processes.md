@@ -196,7 +196,7 @@ Implemented (number: name):
 * **Capability sandbox**: each process carries a capability set, inherited and shrink-only,
   enforced on openat/execve/fork/socket/device opens; denials are audited. Full model and
   the powerbox design in docs/security.md.
-| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY, 4105 MILK_WIN_RESIZE (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -282,6 +282,7 @@ child a private copy).
 | 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
 | 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
 | 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+| 4105 | `MILK_WIN_RESIZE` | `(id, w, h, info, flags)` → 0. With `flags` bit 0 (RESIZABLE): the window handles resize events, down to `w` x `h` (nothing else changes; `info` unused). Without: a new `w` x `h` body (up to 1000 x 700), the old picture copied into its top-left and the rest milk; the old mapping is gone and `info` describes the new one exactly as for `MILK_WIN_CREATE`. A size the window did not ask for makes the window fit it. |
 
 Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
 
@@ -292,7 +293,16 @@ alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4
 down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
 the end), 7 close (the user closed the window: clean up and exit), 8 drop (a file was dragged
 from Files onto the window at x, y: `key` is a new fd for it, opened read-only and granted
-to the process; read it and close it). 2 (key up) is reserved.
+to the process; read it and close it), 9 notice action (a button on one of the process's
+notices was pressed: `key` = the notice's `id=`, `mods` = which button, see "/dev/wm"
+below), 10 resize (only after RESIZABLE: the window's body on screen is now x by y; answer
+with `MILK_WIN_RESIZE` to that size and redraw; until then the old picture is shown in the
+top-left). 2 (key up) is reserved.
+
+Resizing: a window that did not declare itself RESIZABLE is never made smaller than its
+buffer (and never joins a smaller tab group); a resizable one follows its window, a resize
+drag or a tab group, down to its minimum. `user/gui`: `Window::set_resizable(min_w, min_h)`,
+`Event::Resize { w, h }`, `Window::resize(w, h)`. Paint is resizable (a bigger canvas).
 
 Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
 stays mapped until the process destroys the window or exits. Windows of processes that exit

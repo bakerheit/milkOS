@@ -185,6 +185,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "netctl"
+version = "0.0.1"
+dependencies = [
+ "drop",
+ "rt",
+]
+
+[[package]]
 name = "netstat"
 version = "0.0.1"
 dependencies = [

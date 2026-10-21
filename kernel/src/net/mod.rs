@@ -24,9 +24,12 @@ pub mod dhcp;
 pub mod dns;
 pub mod errno;
 pub mod frag;
+pub mod hostname;
 pub mod icmp;
 pub mod iface;
 pub mod ipv6;
+pub mod mld;
+pub mod pmtu;
 pub mod procnet;
 pub mod ring;
 pub mod selftest;
@@ -90,6 +93,8 @@ pub struct Stack {
     pub tw: tcp::TwTable,
     /// IP datagrams being reassembled.
     pub frags: frag::Reasm,
+    /// Path MTUs learned from ICMP (both families).
+    pub pmtu: pmtu::Cache,
     /// IPv6 (per-link state is in the links).
     pub ip6: ipv6::State6,
     pub dhcp: dhcp::Dhcp,
@@ -142,6 +147,7 @@ fn new_stack() -> Box<Stack> {
         socks: socket::Table::new(),
         tw: tcp::TwTable::new(),
         frags: frag::Reasm::new(),
+        pmtu: pmtu::Cache::new(),
         ip6: ipv6::State6::new(),
         dhcp: dhcp::Dhcp::new(),
         ping: icmp::PingTable::new(),
@@ -236,6 +242,7 @@ fn net_thread() {
             tcp::tick(st);
             ipv6::tick(st);
             st.frags.expire(now);
+            st.pmtu.expire(now);
             st.stats.ip_reasm_fails = st.frags.stats.fails;
         });
         if let Some(h) = http.as_mut() {
@@ -254,8 +261,16 @@ fn net_thread() {
 /// Bring the stack up: create it, add `/proc/net`, start DHCP on eth0 (if there is one)
 /// and the net thread. Call after `sched::init`.
 pub fn init() {
+    hostname::load();
+    let v6only = boot_v6only();
     let have_dev = with(|st| {
         let now = st.now;
+        if v6only {
+            st.iface.v4_off = true;
+            for l in st.iface.links.iter_mut() {
+                l.ll.on = false;
+            }
+        }
         st.iface.ll_start(now);
         for (k, l) in st.iface.links.iter().enumerate().filter(|(_, l)| l.up()) {
             kprintln!(
@@ -263,17 +278,28 @@ pub fn init() {
                 iface::LINK_NAMES[k],
                 l.slot,
                 l.mac,
-                if l.ll.on { ", link-local" } else { ", DHCP" }
+                if v6only {
+                    ", IPv6 only"
+                } else if l.ll.on {
+                    ", link-local"
+                } else {
+                    ", DHCP"
+                }
             );
         }
         ipv6::start(st);
         if st.iface.eth0().up() {
-            dhcp::start(st);
+            if !v6only {
+                dhcp::start(st);
+            }
             true
         } else {
             false
         }
     });
+    if v6only {
+        kprintln!("[net] v6-only boot: no IPv4 on eth0 or eth1 (loopback keeps 127.0.0.1)");
+    }
     let eth1 = with(|st| st.iface.links[1].up());
     procnet::init();
     if !THREAD_UP.swap(true, Ordering::AcqRel) {
@@ -281,9 +307,11 @@ pub fn init() {
     }
     kprintln!(
         "[net] stack up: lo{}, {} sockets, buffers {} KiB auto-sized up to {} MiB, net thread started",
-        match (have_dev, eth1) {
-            (true, true) => " + eth0 (DHCP started) + eth1 (link-local)",
-            (true, false) => " + eth0 (DHCP started)",
+        match (have_dev, eth1, v6only) {
+            (true, true, false) => " + eth0 (DHCP started) + eth1 (link-local)",
+            (true, false, false) => " + eth0 (DHCP started)",
+            (true, true, true) => " + eth0 + eth1 (IPv6 only)",
+            (true, false, true) => " + eth0 (IPv6 only)",
             _ => " only (no NIC)",
         },
         socket::MAX_SOCKETS,
@@ -372,6 +400,15 @@ impl Stack {
 
     /// Deliver queued loopback packets (bounded, they may generate more).
     fn poll_loopback(&mut self) {
+        // Packets the emulated loopback path MTU refused: answer as a router would.
+        let lo_mtu = iface::LO_MTU.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        for pkt in core::mem::take(&mut self.iface.lo_too_big) {
+            if pkt.first().is_some_and(|b| b >> 4 == 6) {
+                ipv6::send_error(self, None, 2, 0, lo_mtu as u32, &pkt);
+            } else if pkt.len() >= 20 && be16(&pkt, 6) & 0x4000 != 0 {
+                icmp::send_frag_needed(self, &pkt, lo_mtu as u16);
+            }
+        }
         for _ in 0..256 {
             let Some(pkt) = self.iface.lo_front() else {
                 return;
@@ -392,10 +429,10 @@ impl Stack {
         let dst = Mac([f[0], f[1], f[2], f[3], f[4], f[5]]);
         let l = &self.iface.links[k];
         let group = dst.0[0..3] == [0x01, 0x00, 0x5e] && l.multicast();
-        // IPv6 multicast (33:33:*): NDP needs it on every link.
-        let group6 = dst.0[0..2] == [0x33, 0x33];
+        // IPv6 multicast (33:33:*) only for groups the link is in (net::mld).
+        let group6 = dst.0[0..2] == [0x33, 0x33] && mld::member_mac(&l.v6, dst);
         if dst != l.mac && dst != Mac::BROADCAST && !group && !group6 {
-            return; // someone else's, or IPv4 multicast on a link that takes none
+            return; // someone else's, or multicast for a group this link isn't in
         }
         let src = Mac([f[6], f[7], f[8], f[9], f[10], f[11]]);
         match be16(f, 12) {
@@ -407,6 +444,9 @@ impl Stack {
     }
 
     fn arp_input(&mut self, k: usize, p: &[u8]) {
+        if self.iface.v4_off {
+            return;
+        }
         if p.len() < 28 || be16(p, 0) != 1 || be16(p, 2) != 0x0800 || p[4] != 6 || p[5] != 4 {
             return;
         }
@@ -433,6 +473,10 @@ impl Stack {
     /// An IPv4 packet from link `k` (None: loopback).
     fn ip_input(&mut self, link: Option<usize>, pkt: &[u8], from_lo: bool) {
         self.stats.ip_in_receives += 1;
+        if self.iface.v4_off && link.is_some() {
+            self.stats.ip_in_addr_errors += 1;
+            return; // a v6-only boot takes no IPv4 from the wire
+        }
         if pkt.len() < IP_HDR || pkt[0] >> 4 != 4 {
             self.stats.ip_in_hdr_errors += 1;
             return;
@@ -498,14 +542,16 @@ impl Stack {
         proto: u8,
         payload: &[u8],
     ) -> crate::fs::errno::Result<()> {
-        const CHUNK: usize = iface::MTU - IP_HDR; // 1480, a multiple of 8
+        // Fragments sized for the path MTU (1480 bytes of payload on a 1500 path).
+        let mtu = self.pmtu.mtu(dst.into(), self.now);
+        let chunk = (mtu - IP_HDR) & !7;
         let id = self.iface.next_ip_id();
         self.stats.ip_out_requests += 1;
-        for (k, part) in payload.chunks(CHUNK).enumerate() {
+        for (k, part) in payload.chunks(chunk).enumerate() {
             let f = iface::Frag {
                 id,
-                off8: (k * CHUNK / 8) as u16,
-                more: (k + 1) * CHUNK < payload.len(),
+                off8: (k * chunk / 8) as u16,
+                more: (k + 1) * chunk < payload.len(),
             };
             self.frags.stats.creates += 1;
             self.iface
@@ -537,6 +583,26 @@ impl Stack {
         }
         r
     }
+}
+
+/// Is this a v6-only boot? (fw_cfg file `opt/milkos/net` containing `v6only=1`; see
+/// `scripts/run.sh` MILK_V6ONLY=1.)
+fn boot_v6only() -> bool {
+    let Some(f) = crate::fwcfg::find_file("opt/milkos/net") else {
+        return false;
+    };
+    let mut buf = alloc::vec![0u8; (f.size as usize).min(256)];
+    if !crate::fwcfg::read_file(f, &mut buf) {
+        return false;
+    }
+    alloc::string::String::from_utf8_lossy(&buf)
+        .split_whitespace()
+        .any(|w| w == "v6only=1")
+}
+
+/// Is IPv4 off on the links (a v6-only boot)?
+pub fn v4_off() -> bool {
+    with(|st| st.iface.v4_off)
 }
 
 /// Current IPv4 configuration of eth0.

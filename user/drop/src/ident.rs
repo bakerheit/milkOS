@@ -30,6 +30,25 @@ pub struct Identity {
 
 /// The drop daemon's request socket (AF_UNIX, SO_PEERCRED-checked).
 pub const SOCK: &str = "/run/drop.sock";
+/// "off" here hides the machine: the daemon stops announcing and answering discovery and
+/// mDNS queries (it still signs for local users and `drop recv` still takes transfers
+/// from peers that know the address). Absent or "on": visible.
+pub const VISIBLE: &str = "/etc/milk/drop/visible";
+
+/// Is this machine visible on the link (Milk Drop discovery and `<name>.local`)?
+pub fn visible() -> bool {
+    sys::read_file(VISIBLE).map_or(true, |b| String::from_utf8_lossy(&b).trim() != "off")
+}
+
+/// Show or hide the machine: root writes the flag, anyone else asks the daemon
+/// (administrators only).
+pub fn set_visible(on: bool) -> Result<(), String> {
+    let v = if on { "on" } else { "off" };
+    if !is_root() {
+        return daemon(&alloc::format!("visible {v}")).map(|_| ());
+    }
+    write_atomic(VISIBLE, alloc::format!("{v}\n").as_bytes(), 0o644)
+}
 
 /// Contexts the daemon signs for people's accounts (a Milk Drop hello transcript that
 /// names this machine's key, or an offer). Announcements, rotations and renames are the daemon's own.

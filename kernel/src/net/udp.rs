@@ -15,8 +15,9 @@ pub const HDR: usize = 8;
 pub const MAX_PAYLOAD: usize = MTU - 20 - HDR;
 /// Largest datagram payload at all (65535 - 20 - 8): bigger ones go out as IP fragments.
 pub const MAX_DATAGRAM: usize = 65535 - 20 - HDR;
-/// Over IPv6 we don't fragment: one packet (1500 - 40 - 8).
-pub const MAX_PAYLOAD6: usize = MTU - 40 - HDR;
+/// Largest IPv6 datagram payload (65535 - 8); bigger than one packet's worth (1452 on a
+/// 1500 path) goes out as fragments.
+pub const MAX_DATAGRAM6: usize = 65535 - HDR;
 const REC_HDR: usize = 22;
 
 fn finish_udp(c: u16) -> u16 {
@@ -38,11 +39,30 @@ pub fn send_scoped(
 ) -> Result<()> {
     match dst.ip {
         IpAddr::V6(d6) => {
-            if data.len() > MAX_PAYLOAD6 {
+            if data.len() > MAX_DATAGRAM6 {
                 return Err(EMSGSIZE);
             }
             let s6 = src.ip.v6().unwrap_or(Ipv6::UNSPECIFIED);
             st.stats.udp_out_datagrams += 1;
+            let mtu = st.pmtu.mtu(dst.ip, st.now);
+            if HDR + data.len() > mtu - 40 {
+                // Too big for the path: the whole datagram (its checksum needs the real
+                // source), then IPv6 fragments of it.
+                let s6 = if s6.is_unspecified() {
+                    ipv6::src_for(&st.iface, d6, scope).ok_or(EADDRNOTAVAIL)?
+                } else {
+                    s6
+                };
+                let n = HDR + data.len();
+                let mut d = alloc::vec![0u8; n];
+                put16(&mut d, 0, src.port);
+                put16(&mut d, 2, dst.port);
+                put16(&mut d, 4, n as u16);
+                d[HDR..].copy_from_slice(data);
+                let c = finish(sum(&d, l4_sum(s6.into(), d6.into(), PROTO_UDP, n)));
+                put16(&mut d, 6, finish_udp(c));
+                return ipv6::send_fragments(st, s6, d6, scope, ipv6::NH_UDP, &d, mtu);
+            }
             ipv6::send(st, s6, d6, scope, ipv6::NH_UDP, |b, s, d| {
                 let n = HDR + data.len();
                 put16(b, 0, src.port);
@@ -83,7 +103,7 @@ fn send_v4(
         src
     };
     st.stats.udp_out_datagrams += 1;
-    if data.len() > MAX_PAYLOAD {
+    if data.len() > st.pmtu.mtu(dst.into(), st.now) - 20 - HDR {
         // Too big for one packet: the whole datagram, then IP fragments of it.
         let n = HDR + data.len();
         let mut d = alloc::vec![0u8; n];
@@ -120,7 +140,7 @@ pub fn sendto(st: &mut Stack, i: usize, data: &[u8], to: SockAddr) -> Result<usi
     socket::family_ok(s, to.ip)?;
     if data.len()
         > if to.ip.is_v6() {
-            MAX_PAYLOAD6
+            MAX_DATAGRAM6
         } else {
             MAX_DATAGRAM
         }

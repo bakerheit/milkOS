@@ -90,6 +90,12 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:nc -l 7777' 'wait:listening on tcp' "done:$WORK/nc.listening" 'wait:from the mac' "$P" \
   'send:netstat' 'wait:LISTEN' "$P" \
   'send:netstat -6 -l' 'wait:LISTEN' "$P" \
+  'send:netctl' 'wait:milk drop' "$P" \
+  'send:netctl -k' 'wait:drop_visible=' "$P" \
+  'send:netctl hostname milkbox' "$P" \
+  'send:uname -n' "$P" \
+  'send:cat /proc/net/hostname' "$P" \
+  'send:netctl hostname bad_name!' "$P" \
   'send:top -b -n 2 -d 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
   'send:uptime' 'wait:load average' "$P" \
   'send:cat /proc/loadavg' "$P" \
@@ -107,10 +113,13 @@ grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
 for want in 'tcp lossy loopback 1/7: 256 KiB intact' 'tcp lossy loopback 1/3: 32 KiB intact' \
   'tcp TIME_WAIT: parked' 'ip fragments: 20000-byte UDP datagram' \
   'ipv6: eth0 fec0::[0-9a-f:]+/64 \(SLAAC, router fe80::2\), ping fec0::2' 'ipv6 extension headers: .* refused \(1\)' \
-  'dual-stack: .* V6ONLY ok, udp6 ok' 'tcp echo via \[fec0::2\]:[0-9]+: 512 KiB round trip'; do
+  'dual-stack: .* V6ONLY ok, udp6 ok' 'tcp echo via \[fec0::2\]:[0-9]+: 512 KiB round trip' \
+  'ipv6 fragments: .* overlap poisoned \(1\), header chain split refused, 1 reassembled' \
+  'path mtu: IPv6 path 1280 -> tcp mss 1220 .* IPv4 path 1000 -> tcp mss 960' \
+  'mld: ff02::1:3 on eth0 dropped before the join, delivered while joined, dropped after leaving'; do
   grep -Eaq "\[net\] $want" "$LOG" || fail "self-test line missing: $want"
 done
-grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT|dual-stack|tcp echo)' "$LOG" | tr -d '\r' | sed 's/^/  /'
+grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT|dual-stack|tcp echo|path mtu|mld)' "$LOG" | tr -d '\r' | sed 's/^/  /'
 
 echo "---- msh: network tools (socket syscalls from user space) ----"
 for _ in $(seq 300); do [ -e "$WORK/nc.listening" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
@@ -138,6 +147,16 @@ grep -Eq "inet6 fec0::5054:ff:fe12:3456  prefixlen 64  scopeid 0x0<global>" "$LO
 grep -q "2 packets transmitted, 2 received, 0% packet loss" "$LOG" || fail "ping -6 fec0::2"
 grep -q "bytes from fec0::2: icmp_seq=1" "$LOG" || fail "ping -6: no reply line from fec0::2"
 [ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 3 ] || fail "fetch http://[::1]/: expected a third 200 OK"
+T0="$WORK/console0.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T0"
+grep -q "^iface.eth0.ipv4=10.0.2.15/24$" "$T0" || fail "netctl -k: eth0 ipv4"
+grep -q "^iface.eth0.ipv6=fe80::5054:ff:fe12:3456/64,link fec0::5054:ff:fe12:3456/64,global$" "$T0" || fail "netctl -k: eth0 ipv6"
+grep -q "^iface.eth0.dhcp=Bound$" "$T0" || fail "netctl -k: eth0 dhcp"
+grep -q "^hostname=milk$" "$T0" || fail "netctl -k: hostname"
+grep -Eq "^hostname +milk$" "$T0" || fail "netctl show: hostname"
+grep -q "netctl: hostname is now milkbox (was milk)" "$T0" || fail "netctl hostname milkbox"
+[ "$(grep -cx 'milkbox' "$T0")" -ge 2 ] || fail "uname -n / /proc/net/hostname after netctl hostname"
+grep -q "netctl: hostname bad_name!: .*(1-63 letters, digits and '-')" "$T0" || fail "netctl: a bad hostname was not refused"
+echo "netctl show / -k (interfaces, v4 + v6, DHCP, hostname), hostname set (uname, /proc/net/hostname), bad name refused: ok"
 echo "ifconfig inet6, ping -6 fec0::2, fetch http://[::1]/ (httpd over IPv6), netstat tcp6 [::]:80: ok"
 T="$WORK/console.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T"
 grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"

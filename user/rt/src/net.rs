@@ -395,6 +395,21 @@ pub fn socket_family(family: usize, ty: usize, proto: usize) -> Result<i32> {
     sc(nr::SOCKET, [family, ty, proto, 0, 0, 0]).map(|fd| fd as i32)
 }
 
+/// IPV6_JOIN_GROUP / IPV6_LEAVE_GROUP: listen to IPv6 multicast `group` on interface
+/// `ifindex` (0: where it routes). The kernel reports it with MLD and only then takes the
+/// group's traffic.
+pub fn group6(fd: i32, group: [u8; 16], ifindex: u32, join: bool) -> Result<()> {
+    let mut mreq = [0u8; 20];
+    mreq[..16].copy_from_slice(&group);
+    mreq[16..].copy_from_slice(&ifindex.to_le_bytes());
+    let opt = if join { 20 } else { 21 };
+    sc(
+        nr::SETSOCKOPT,
+        [fd as usize, 41, opt, mreq.as_ptr() as usize, 20, 0],
+    )
+    .map(|_| ())
+}
+
 /// IPV6_V6ONLY: an AF_INET6 socket that takes only IPv6 (before bind).
 pub fn set_v6only(fd: i32, on: bool) -> Result<()> {
     let v: i32 = on as i32;

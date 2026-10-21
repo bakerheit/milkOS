@@ -194,13 +194,32 @@ eth1, else the default gateway (eth0's).
   * **routing headers: no source routing, ever.** With segments left > 0 the packet is
     dropped with a parameter problem (RFC 5095 deprecates type 0; we route for no one).
     With 0 left the header is skipped;
-  * fragment headers: an atomic fragment (offset 0, no M, RFC 6946) is fine. Real
-    fragments are dropped and counted: there is no IPv6 reassembly, and we never send
-    fragments (UDP over IPv6 is capped at 1452 bytes);
+  * fragment headers: an atomic fragment (offset 0, no M, RFC 6946) is skipped. Real
+    fragments are reassembled (`net/frag.rs`, the same table and limits as IPv4: 16
+    datagrams, 1 MiB, 30 s; any overlap poisons the datagram, RFC 5722). The first
+    fragment must hold the whole header chain and 8 bytes of the upper-layer header (20
+    for TCP), RFC 7112. The reassembled packet (fragment header removed) goes through
+    IPv6 input again. UDP over IPv6 sends fragments above the path MTU (up to 65527
+    bytes); TCP never needs them;
   * no next header (59) ends the packet.
+* **Multicast and MLD** (`net/mld.rs`, MLDv2 host side, RFC 3810): a link takes IPv6
+  multicast only for groups it is in: all-nodes, the solicited-node group of each of its
+  addresses, and the groups sockets joined (IPV6_JOIN_GROUP, `struct ipv6_mreq`); the
+  Ethernet filter checks `33:33:<group>` the same way. Joins and leaves go to `ff02::16`
+  as state-change reports (twice, 1 s apart; link-local source, hop limit 1, router alert
+  in a hop-by-hop header); queries get a current-state report within their maximum
+  response time (at most 1 s). No source filtering. `/proc/net/igmp6` lists the groups.
+* **Path MTU discovery** (`net/pmtu.rs`, both families; RFC 1191, RFC 8201): ICMP
+  fragmentation needed (IPv4 TCP goes out with DF) and ICMPv6 packet too big lower the
+  path MTU to that destination (floors 552 and 1280, only down, 10 minutes). For TCP only
+  when the quoted segment is in flight on the connection (RFC 5927); the connection then
+  takes the smaller MSS and resends at once, without a congestion response. New
+  connections start under the cached path MTU, UDP fragments at it. `/proc/net/pmtu`.
 * **Boot self-test**: link-local and SLAAC on eth0, the router `fe80::2`, echo to `::1`,
-  to our own link-local and to `fec0::2` (slirp), and crafted packets for each
-  extension-header rule.
+  to our own link-local and to `fec0::2` (slirp), crafted packets for each
+  extension-header rule, reassembly (fragments last-first, an overlap, a split header
+  chain), MLD membership (a group's datagram is dropped before a join and after the
+  leave), and path MTU over loopback (below).
 
 ### Dual stack: TCP and UDP over IPv6
 
@@ -226,6 +245,18 @@ One socket layer for both families (`wire::IpAddr`, `SockAddr { ip: IpAddr, port
 * Self-test (`dual-stack`): a v6 and a v4 client on one `[::]` listener over loopback
   (peers `::1` and 127.0.0.1, MSS 1440), the V6ONLY sharing and clash rules, the two
   "wrong family" errors, and a UDP datagram over `::1`.
+
+### v6-only boot
+
+`MILK_V6ONLY=1 scripts/run.sh` (or fw_cfg `opt/milkos/net` = `v6only=1`) boots with IPv4
+off the wire: no DHCP on eth0, no 169.254 link-local on eth1, ARP and IPv4 neither sent
+nor taken on any link (sends get `ENETUNREACH`). Loopback keeps 127.0.0.1, as on Linux.
+slirp itself runs with `ipv4=off`. Everything else works over IPv6 alone: SLAAC, the
+tools (`ping -6`, `fetch`, `nc`, `netstat`, `ifconfig`/`netctl` show IPv4 as off),
+`localhost` (`::1` first), httpd on `[::]:80`, Milk Drop (discovery over `ff02::fb`,
+`.local` by AAAA, transfers between the VM-link addresses). `scripts/net6-test.sh` proves
+it. One limit is slirp's: this qemu's `hostfwd` only forwards IPv4, so nothing on the Mac
+can connect *into* a v6-only guest. The guest reaches the Mac's `::1` as `fec0::2`.
 
 ## eth1: a second network for VM-to-VM links
 
@@ -355,6 +386,9 @@ and milkOS's `ifaddr` (`eth0 flags=UP,BROADCAST,RUNNING mtu=1500 ether=.. inet=.
 netmask=.. broadcast=.. inet6=ADDR/LEN,SCOPE[,tentative] (one per IPv6 address)
 router6=.. gateway=.. dns=.. dhcp=Bound`).
 
+Also milkOS's `hostname` (the running hostname), `pmtu` (learned path MTUs) and
+`igmp6` (the IPv6 groups each link is in, Linux columns, plus MLD counters).
+
 IPv6: `tcp6` and `udp6` (AF_INET6 sockets, the 32-digit Linux address form; `tcp`/`udp`
 list only AF_INET ones, so a dual-stack listener is in `tcp6`), `if_inet6` (Linux
 format: address, ifindex, prefix length, scope, flags, name), `snmp6` (`Name value`
@@ -371,7 +405,8 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
-| `drop id / name / list / send / recv / peers / forget / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
+| `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
+| `netctl [show] [-k]`, `netctl hostname / name / visible` | the network settings: interfaces, IPv4/IPv6, DHCP, DNS, hostname, the `.local` name, Milk Drop visibility; `-k` is the stable `key=value` contract for the Settings > Network panel | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/etc/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
 
 **Names in user programs** (getaddrinfo-style, both families: `rt::net::lookup_all(spec,
 default_port, Want::{Any,V4,V6})` gives every address in the order to try, IPv6 first as
@@ -455,6 +490,13 @@ MILKDROP/1 ANNOUNCE name=alice host=milk port=5360 [addr6=<eth1 IPv6>] key=<64 h
 `addr6` is eth1's address on the VM link's IPv6 prefix, signed with the rest; a peer
 takes it only if it is on `fd6d:696c:6b00:1::/64`, so an announcement can't point
 transfers anywhere else.
+
+Discovery runs over both families: the same announcements and QUERYs also go to
+`[ff02::fb]:5359` from eth1's IPv6 address (the daemon joins `ff02::fb` on eth1 first;
+MLD reports it). The IPv4 announcement stays for older peers. A peer heard both ways is
+one entry: its IPv4 address stays `addr` (what `drop send NAME` uses) and the IPv6 one is
+`addr6`; a peer heard only over IPv6 (an IPv6-only machine) has an IPv6 `addr`. The
+daemon, `drop recv` and `drop id` work with either family alone.
 
 `sig` is Ed25519 over `milkdrop-announce-v1 <the line before " sig=">` with the key it
 carries, and `fp` must match that key, so an announcement can't be altered in flight or
@@ -578,6 +620,13 @@ sockets' buffers, which overflow under large-window bursts. Those are real packe
 which SACK recovery has to repair. Treat the guest -> guest column as a range, not a
 number; it doesn't show the TCP change on its own.
 
+It was noisier still in the second IPv6 round: guest -> guest ranged from 0.5 to
+100 MiB/s, and one build measured 96 and then 14 MiB/s
+in two runs a few minutes apart, so a bisect on that column chases noise. What it showed
+instead: the sender's eth1 transmit queue fills (thousands of `tx dropped` in
+`/proc/net/dev`, i.e. frames TCP waits to send again, not lost data) and the dgram link
+loses frames (the retransmits). The slirp paths stayed at 135-175 and 370-440 MiB/s.
+
 Lossy loopback (boot self-test, every Nth packet dropped, data and ACKs alike):
 
 | | before | after |
@@ -606,6 +655,12 @@ It covers:
   SACK and timestamps negotiated and SACK recovery doing some of the resending;
 * **TIME_WAIT**: the closing side parks the pair without a socket slot, and a new
   connection on the same 4-tuple reuses it;
+* **Path MTU** over loopback, which plays a smaller-MTU path (`iface::LO_MTU`) and answers
+  too-big packets as a router would: IPv6 at 1280, a TCP connection drops to MSS 1220
+  mid-stream and its 64 KiB arrive intact, then a 4000-byte UDP datagram goes out in
+  1280-byte fragments and comes back whole; IPv4 at 1000 the same (MSS 960);
+* **MLD**: a UDP datagram to `ff02::1:3` on eth0 is dropped until a socket joins it,
+  delivered while joined, dropped after the leave, with MLDv2 reports for both;
 * **IP fragments**:
   * a 20000-byte UDP datagram over loopback, as 14 fragments, back whole;
   * crafted fragments: last-first (reassembled), an overlapping pair (dropped), a TCP
@@ -676,14 +731,24 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
 
 It kills only its own qemus and serial drivers, by PID.
 
+**`scripts/net6-test.sh`**: the v6-only boot, two VMs. alice's self-test must show IPv4
+really off (no address on eth0/eth1, 10.0.2.2 refused, loopback IPv4 fine) and pass
+everything else, including a TCP echo over IPv6 to the Mac's `::1`. Her tools work over
+IPv6 alone: ping -6 to slirp, fetch from the Mac's `::1` (an HTTP helper bound there) and
+from her own httpd (`[::1]` and `localhost`), `nc -6` to the Mac's echo server, IPv4
+shown as off. Then Milk Drop between alice and bob with no IPv4 anywhere: `drop list`
+finds bob at his VM-link IPv6 address, `ping -6 bob.local`, and `drop send bob` delivers a
+file. The host helpers bind `::1`/127.0.0.1 only, bob's slirp is restricted, and eth1 is
+two UDP ports on 127.0.0.1.
+
 ## Next
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
 * `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8).
-* IPv6: reassembly and path MTU discovery (we never fragment and assume 1500); privacy
-  addresses (RFC 8981); MLD (no multicast router on these links, so no need yet); Milk
-  Drop discovery over `ff02::fb` (announcements are IPv4 multicast and carry `addr6`).
+* IPv6: privacy addresses (RFC 8981); MLD source filtering and MLDv1 compatibility;
+  IGMP for IPv4 (still no multicast router on these links); PMTU black-hole detection
+  (RFC 4821) for paths that drop ICMP.
 * Keepalive; ECN; a smarter congestion controller (CUBIC); D-SACK; RACK-TLP.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
   default gateway on eth0); IGMP if a multicast router ever appears.

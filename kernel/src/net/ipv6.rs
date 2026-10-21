@@ -65,6 +65,25 @@ const ND_REACHABLE: u64 = 600 * S;
 const PENDING_MAX: usize = 16;
 const PENDING_NS: u64 = 3 * S;
 
+/// The upper-layer protocol of a first fragment, if its payload (from `o`, starting with
+/// header `next`) holds the rest of the header chain and 8 bytes of that header (20 for
+/// TCP): RFC 7112. None otherwise (the datagram is refused).
+fn upper_after(pkt: &[u8], mut o: usize, mut next: u8) -> Option<u8> {
+    for _ in 0..8 {
+        match next {
+            NH_DSTOPT | NH_ROUTING => {
+                let len = (*pkt.get(o + 1)? as usize + 1) * 8;
+                next = *pkt.get(o)?;
+                o += len;
+            }
+            NH_TCP => return (pkt.len() >= o + 20).then_some(next),
+            NH_HOP | NH_FRAG => return None,
+            _ => return (pkt.len() >= o + 8).then_some(next),
+        }
+    }
+    None
+}
+
 /// Interface index for scope ids and /proc (Linux numbering: lo 1, eth0 2, eth1 3).
 pub fn ifindex(link: Option<usize>) -> u32 {
     link.map_or(1, |k| k as u32 + 2)
@@ -116,6 +135,8 @@ pub struct Link6 {
     nd: Vec<NdEntry>,
     rs_sent: u8,
     rs_next: u64,
+    /// Multicast memberships and MLD reporting (net::mld).
+    pub mld: super::mld::LinkMld,
 }
 
 impl Link6 {
@@ -128,6 +149,7 @@ impl Link6 {
             nd: Vec::new(),
             rs_sent: 0,
             rs_next: 0,
+            mld: super::mld::LinkMld::new(),
         }
     }
 
@@ -252,6 +274,9 @@ pub struct State6 {
     want_ns: Vec<(usize, Ipv6)>,
     /// Echo replies to our pings: (from, identifier, sequence, payload bytes, when).
     pub ping_replies: Vec<(Ipv6, u16, u16, usize, u64)>,
+    /// The last fragment identification used (a scrambled counter, never 0).
+    pub frag_id: u32,
+    pub mld: super::mld::MldStats,
 }
 
 impl State6 {
@@ -261,6 +286,11 @@ impl State6 {
             parked: Vec::new(),
             want_ns: Vec::new(),
             ping_replies: Vec::new(),
+            frag_id: 0,
+            mld: super::mld::MldStats {
+                queries_in: 0,
+                reports_out: 0,
+            },
         }
     }
 }
@@ -355,6 +385,11 @@ fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)
         .find_map(|(k, l)| l.v6.router.map(|(r, _)| (k, r)))
 }
 
+/// The link multicast to `g` goes out of (and is joined on, without an interface).
+pub fn mcast_link(iface: &Iface, g: Ipv6) -> Option<usize> {
+    route(iface, g, None).map(|(k, _)| k)
+}
+
 /// Our source address for `dst` (RFC 6724, the simple cases): ::1 for loopback, the
 /// link-local for link-local or link-scope multicast, else an address on the same prefix,
 /// else eth0's SLAAC address.
@@ -411,6 +446,19 @@ pub fn send(
     fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
 ) -> Result<()> {
     send_hop(st, src, dst, scope, next, 64, fill)
+}
+
+/// [`send`] with the next header and hop limit given (MLD: a hop-by-hop header, hop 1).
+pub fn send_raw(
+    st: &mut Stack,
+    src: Ipv6,
+    dst: Ipv6,
+    scope: Option<usize>,
+    next: u8,
+    hop: u8,
+    fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
+) -> Result<()> {
+    send_hop(st, src, dst, scope, next, hop, fill)
 }
 
 fn send_hop(
@@ -500,6 +548,42 @@ pub fn send_on(
     });
     if iface.links[k].v6.want(nexthop, now) {
         ip6.want_ns.push((k, nexthop));
+    }
+    Ok(())
+}
+
+/// Send `payload` (a whole upper-layer datagram of protocol `next`, checksum done) from
+/// `src` to `dst` as IPv6 fragments sized for the path MTU `mtu` (RFC 8200 4.5): each
+/// fragment's data a multiple of 8 bytes, one 32-bit identification for all of them.
+pub fn send_fragments(
+    st: &mut Stack,
+    src: Ipv6,
+    dst: Ipv6,
+    scope: Option<usize>,
+    next: u8,
+    payload: &[u8],
+    mtu: usize,
+) -> Result<()> {
+    let chunk = (mtu - HDR - 8) & !7;
+    st.ip6.frag_id = st
+        .ip6
+        .frag_id
+        .wrapping_mul(0x9e37_79b9)
+        .wrapping_add(0x6d69_6c6b)
+        | 1;
+    let id = st.ip6.frag_id;
+    for (k, part) in payload.chunks(chunk).enumerate() {
+        let off = k * chunk;
+        let more = off + part.len() < payload.len();
+        st.frags.stats6.creates += 1;
+        send(st, src, dst, scope, NH_FRAG, |b, _, _| {
+            b[0] = next;
+            b[1] = 0;
+            put16(b, 2, (off as u16) | more as u16);
+            put32(b, 4, id);
+            b[8..8 + part.len()].copy_from_slice(part);
+            8 + part.len()
+        })?;
     }
     Ok(())
 }
@@ -670,18 +754,21 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
         st.ip6.stats.in_addr_errors += 1;
         return;
     }
-    // Ours: a unicast address (tentative ones only for NDP), a link-scope group, loopback.
-    let ours = link.is_none()
-        || is_ours(&st.iface, dst)
-        || dst.is_link_multicast()
-        || st.iface.links.iter().any(|l| l.v6.has(dst, true));
+    // Ours: a unicast address (tentative ones only for NDP), a group the link is in
+    // (net::mld), loopback.
+    let ours = match link {
+        None => true,
+        Some(k) if dst.is_multicast() => super::mld::member(&st.iface.links[k].v6, dst),
+        Some(_) => is_ours(&st.iface, dst) || st.iface.links.iter().any(|l| l.v6.has(dst, true)),
+    };
     if !ours {
         st.ip6.stats.in_addr_errors += 1;
         return;
     }
-    // Extension headers.
+    // Extension headers. `nh_at`: where the byte naming the current header is.
     let mut next = pkt[6];
     let mut off = HDR;
+    let mut nh_at = 6;
     let mut first = true;
     loop {
         match next {
@@ -731,6 +818,7 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                     o += 2 + olen;
                 }
                 next = pkt[off];
+                nh_at = off;
                 off += len;
             }
             NH_ROUTING => {
@@ -747,6 +835,7 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                 }
                 let len = (pkt[off + 1] as usize + 1) * 8;
                 next = pkt[off];
+                nh_at = off;
                 off += len;
             }
             NH_FRAG => {
@@ -756,8 +845,19 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                 }
                 let fo = be16(pkt, off + 2);
                 if fo & 0xfff9 != 0 {
-                    // A real fragment (offset or M set): no IPv6 reassembly.
-                    st.ip6.stats.frag_dropped += 1;
+                    // A real fragment (offset or M set): reassemble (net::frag), then the
+                    // whole datagram comes through here again, without a fragment header.
+                    let upper = if fo >> 3 == 0 {
+                        upper_after(pkt, off + 8, pkt[off])
+                    } else {
+                        None
+                    };
+                    let now = st.now;
+                    match st.frags.input6(now, pkt, off, nh_at, upper) {
+                        super::frag::Outcome::Done(whole) => input(st, link, &whole, src_mac),
+                        super::frag::Outcome::Dropped => st.ip6.stats.frag_dropped += 1,
+                        super::frag::Outcome::Pending => {}
+                    }
                     return;
                 }
                 next = pkt[off]; // atomic fragment (RFC 6946): just skip the header
@@ -841,7 +941,28 @@ fn icmp_input(
             r.push((src, be16(p, 4), be16(p, 6), p.len() - 8, now));
             st.wake_any = true;
         }
+        2 if p.len() >= 8 + HDR + 8 => {
+            // Packet too big: the quoted packet (after the 4-byte MTU) is one of ours.
+            let q = &p[8..];
+            let mtu = be32(p, 4) as usize;
+            let qs = Ipv6(q[8..24].try_into().unwrap());
+            let qd = Ipv6(q[24..40].try_into().unwrap());
+            // The upper layer, past any extension headers we put there (we only ever
+            // add a fragment header).
+            let (mut next, mut o) = (q[6], HDR);
+            if next == NH_FRAG && q.len() >= o + 8 {
+                next = q[o];
+                o += 8;
+            }
+            let l4 = q.get(o..).unwrap_or(&[]);
+            super::tcp::too_big(st, IpAddr::V6(qs), IpAddr::V6(qd), next, l4, mtu);
+        }
         1..=4 => {}
+        130 if hop == 1 && src.is_link_local() => {
+            if let Some(k) = link {
+                super::mld::query(st, k, p);
+            }
+        }
         133..=137 if hop == 255 => {
             st.ip6.stats.nd_in += 1;
             if let Some(k) = link {
@@ -1053,6 +1174,7 @@ pub fn tick(st: &mut Stack) {
         for ip in ask {
             send_ns(st, k, ip, Ipv6::UNSPECIFIED, true);
         }
+        super::mld::tick(st, k);
     }
     st.ip6
         .parked
@@ -1072,6 +1194,9 @@ pub fn next_deadline(st: &Stack) -> Option<u64> {
         }
         if l.v6.nd.iter().any(|e| e.state == NdState::Incomplete) {
             min(st.now + ND_RETRY / 4);
+        }
+        if let Some(t) = super::mld::next_deadline(&l.v6, st.now) {
+            min(t);
         }
     }
     if !st.ip6.parked.is_empty() {

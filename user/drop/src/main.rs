@@ -70,6 +70,16 @@ fn eth1_addr6() -> Option<rt::net::Ip> {
         .find(proto::on_vm_link6)
 }
 
+/// Does eth1 run IPv4 at all (its link-local probing, `linklocal=` in ifaddr)? Not in a
+/// v6-only boot.
+fn eth1_has_v4() -> bool {
+    text("/proc/net/ifaddr").is_some_and(|t| {
+        t.lines()
+            .find(|l| l.starts_with("eth1 "))
+            .is_some_and(|l| l.contains(" linklocal="))
+    })
+}
+
 /// eth1's IPv4 address, if the link is up and configured.
 fn eth1_addr() -> Option<[u8; 4]> {
     let t = text("/proc/net/ifaddr")?;
@@ -150,12 +160,19 @@ fn cmd_id() -> Res<()> {
     println!("name:        {}", id.name);
     println!("fingerprint: {}", fingerprint(&id.public));
     println!("public key:  {}", hex(&id.public));
-    match eth1_addr() {
-        Some(a) => println!(
+    let on: Vec<String> = eth1_addr()
+        .map(rt::net::Ip::V4)
+        .into_iter()
+        .chain(eth1_addr6())
+        .map(|a| alloc::format!("{a}"))
+        .collect();
+    if on.is_empty() {
+        println!("link:        no eth1 (Milk Drop needs the VM-to-VM link)");
+    } else {
+        println!(
             "link:        eth1 {} (transfers on port {XFER_PORT})",
-            ip_str(a)
-        ),
-        None => println!("link:        no eth1 (Milk Drop needs the VM-to-VM link)"),
+            on.join(" and ")
+        );
     }
     println!("keys:        {}", ident::DIR);
     if let Some(r) = ident::rotation(&id.public) {
@@ -258,49 +275,57 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         );
         id = new;
     }
-    let mut addr = None;
+    // eth1's addresses: IPv4 link-local (169.254/16, a few seconds of ARP probing) unless
+    // the link runs without IPv4, and the IPv6 VM-link address (DAD: half a second).
+    let (mut addr, mut addr6) = (None, None);
     for _ in 0..100 {
         addr = eth1_addr();
-        if addr.is_some() {
-            break;
-        }
-        sys::sleep_ms(100);
-    }
-    let addr = addr.ok_or("no eth1 address (no VM-to-VM link); not announcing")?;
-    // IPv6 too (DAD takes half a second after the link comes up); without it, IPv4 only.
-    let mut addr6 = None;
-    for _ in 0..30 {
         addr6 = eth1_addr6();
-        if addr6.is_some() {
+        if (addr.is_some() || !eth1_has_v4()) && addr6.is_some() {
             break;
         }
         sys::sleep_ms(100);
     }
-    let fd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(fd, &SockAddr::v4(addr, proto::DISC_PORT))
-        .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
-    // The mDNS responder for `<name>.local` (rt::mdns), on the same link.
-    let mfd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(mfd, &SockAddr::v4(addr, mdns::PORT))
-        .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
-    // And over IPv6: [eth1's address]:5353, which also takes the group ff02::fb.
-    let mfd6 = addr6.and_then(|a6| {
-        let s = net::socket6(net::SOCK_DGRAM).ok()?;
-        let _ = net::set_v6only(s, true);
-        match net::bind(s, &SockAddr::new(a6, mdns::PORT)) {
-            Ok(()) => Some(s),
-            Err(e) => {
-                eprintln!(
-                    "drop: mDNS over IPv6 unavailable (bind [{a6}]:{}: {e})",
-                    mdns::PORT
-                );
-                let _ = sys::close(s);
-                None
-            }
+    if addr.is_none() && addr6.is_none() {
+        return Err(String::from(
+            "no eth1 address (no VM-to-VM link); not announcing",
+        ));
+    }
+    // Per family: the discovery socket (port 5359, with its group) and the mDNS responder
+    // (5353), bound to eth1's address so nothing on eth0 reaches them. Over IPv6 both join
+    // ff02::fb on eth1 (MLD), or the link wouldn't take the group's traffic.
+    let bind_udp = |a: SockAddr| -> Option<i32> {
+        let s = net::socket_for(&a, net::SOCK_DGRAM).ok()?;
+        if a.ip.is_v6() {
+            let _ = net::set_v6only(s, true);
         }
-    });
-    let mut names: Vec<rt::net::Ip> = Vec::from([rt::net::Ip::V4(addr)]);
-    names.extend(addr6);
+        let joined = !a.ip.is_v6() || net::group6(s, mdns::GROUP6, 3, true).is_ok();
+        if joined && net::bind(s, &a).is_ok() {
+            let _ = net::set_recv_timeout(s, 5);
+            Some(s)
+        } else {
+            eprintln!("drop: can't use {a} (bind or group join failed)");
+            let _ = sys::close(s);
+            None
+        }
+    };
+    let mut disc: Vec<(i32, SockAddr)> = Vec::new();
+    let mut mdns_fds: Vec<i32> = Vec::new();
+    let mut names: Vec<rt::net::Ip> = Vec::new();
+    if let Some(a) = addr {
+        let ip = rt::net::Ip::V4(a);
+        disc.extend(bind_udp(SockAddr::new(ip, proto::DISC_PORT)).map(|s| (s, proto::group())));
+        mdns_fds.extend(bind_udp(SockAddr::new(ip, mdns::PORT)));
+        names.push(ip);
+    }
+    if let Some(a6) = addr6 {
+        disc.extend(bind_udp(SockAddr::new(a6, proto::DISC_PORT)).map(|s| (s, proto::group6())));
+        mdns_fds.extend(bind_udp(SockAddr::new(a6, mdns::PORT)));
+        names.push(a6);
+    }
+    if disc.is_empty() {
+        return Err(String::from("no discovery socket on eth1; not announcing"));
+    }
     shared_tmp();
     let ctl = control_socket();
     if let Err(e) = &ctl {
@@ -311,25 +336,20 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     }
     let ctl = ctl.ok();
     if !quiet {
+        let on: Vec<String> = names.iter().map(|a| alloc::format!("{a}")).collect();
+        let groups: Vec<String> = disc.iter().map(|(_, g)| alloc::format!("{g}")).collect();
         println!(
-            "drop: {} (fingerprint {}) on eth1 {}{}, announcing to 224.0.0.251:{}, answering mDNS for {}.local{}",
+            "drop: {} (fingerprint {}) on eth1 {}, announcing to {}, answering mDNS for {}.local",
             id.name,
             fingerprint(&id.public),
-            ip_str(addr),
-            addr6
-                .map(|a| alloc::format!(" and {a}"))
-                .unwrap_or_default(),
-            proto::DISC_PORT,
-            id.name,
-            if mfd6.is_some() {
-                " (IPv4 and IPv6)"
-            } else {
-                ""
-            }
+            on.join(" and "),
+            groups.join(" and "),
+            id.name
         );
     }
     let host = hostname();
-    let mut heard: Vec<(Peer, u64)> = Vec::new();
+    let mut heard: Vec<Peer> = Vec::new();
+    let mut seen: Vec<([u8; 32], u64)> = Vec::new();
     let mut next = 0u64;
     let mut buf = [0u8; 1500];
     let mut me = id;
@@ -341,88 +361,89 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         }
         proto::announce(me, &host, sys::stat_path(RECEIVING, false).is_ok(), addr6)
     };
-    // Both sockets are only read once poll says so; the short timeout is a backstop.
-    let _ = net::set_recv_timeout(fd, 5);
-    let _ = net::set_recv_timeout(mfd, 5);
-    if let Some(s) = mfd6 {
-        let _ = net::set_recv_timeout(s, 5);
-    }
+    let query = alloc::format!("{MAGIC} QUERY");
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        if now >= next {
-            let _ = net::sendto(fd, current(&mut me).as_bytes(), &proto::group());
+        // Hidden (`drop visible off`, netctl): no announcements, no answers.
+        let visible = ident::visible();
+        if now >= next && visible {
+            // Both families: IPv4 for older peers, ff02::fb for IPv6 ones.
+            let ann = current(&mut me);
+            for (s, g) in &disc {
+                let _ = net::sendto(*s, ann.as_bytes(), g);
+            }
             next = now + 10_000_000_000;
         }
-        let mut p = Vec::from([
-            net::PollFd {
+        // Poll set: discovery sockets, then mDNS sockets, then the control socket.
+        let mut p: Vec<net::PollFd> = disc
+            .iter()
+            .map(|(s, _)| *s)
+            .chain(mdns_fds.iter().copied())
+            .chain(ctl)
+            .map(|fd| net::PollFd {
                 fd,
                 events: net::POLLIN,
                 revents: 0,
-            },
-            net::PollFd {
-                fd: mfd,
-                events: net::POLLIN,
-                revents: 0,
-            },
-        ]);
-        // [2]: the mDNS socket over IPv6 (-1 if none), [3]: the control socket.
-        p.push(net::PollFd {
-            fd: mfd6.unwrap_or(-1),
-            events: net::POLLIN,
-            revents: 0,
-        });
-        p.push(net::PollFd {
-            fd: ctl.unwrap_or(-1),
-            events: net::POLLIN,
-            revents: 0,
-        });
+            })
+            .collect();
         if net::poll(&mut p, Some(1000)).is_err() {
             sys::sleep_ms(100);
             continue;
         }
+        let ready = |k: usize| p[k].revents & net::POLLIN != 0;
         if let Some(l) = ctl
-            && p[3].revents & net::POLLIN != 0
+            && ready(p.len() - 1)
         {
             serve_control(l);
         }
-        for (k, s) in [(1, Some(mfd)), (2, mfd6)] {
-            let Some(s) = s else { continue };
-            if p[k].revents & net::POLLIN != 0
+        for (k, &s) in mdns_fds.iter().enumerate() {
+            if ready(disc.len() + k)
                 && let Ok((n, from)) = net::recvfrom(s, &mut buf)
             {
                 if let Some(now) = ident::load() {
                     me = now;
                 }
-                answer_mdns(s, &buf[..n], from, &me.name, &names);
+                // Read now, not at the top of the loop: poll may have waited a second.
+                if ident::visible() {
+                    answer_mdns(s, &buf[..n], from, &me.name, &names);
+                }
             }
         }
-        if p[0].revents & net::POLLIN == 0 {
-            continue;
-        }
-        let Ok((n, from)) = net::recvfrom(fd, &mut buf) else {
-            continue;
-        };
-        let line = String::from_utf8_lossy(&buf[..n]);
-        let line = line.trim_end();
-        if line == alloc::format!("{MAGIC} QUERY") {
-            let _ = net::sendto(fd, current(&mut me).as_bytes(), &from);
-        } else if let Some(peer) = proto::parse_announce(line, from)
-            && peer.key != me.public
-        {
-            heard.retain(|(p, _)| p.key != peer.key);
-            heard.push((peer, sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000));
-            let mut s = String::new();
-            for (p, t) in &heard {
-                s.push_str(&alloc::format!(
-                    "{} {} {} {} {}\n",
-                    p.name,
-                    ip_str(p.addr),
-                    ident::fp_compact(&p.key),
-                    p.receiving as u8,
-                    t
-                ));
+        for (k, &(s, _)) in disc.iter().enumerate() {
+            if !ready(k) {
+                continue;
             }
-            let _ = ident::write_atomic(PEERS_CACHE, s.as_bytes(), 0o644);
+            let Ok((n, from)) = net::recvfrom(s, &mut buf) else {
+                continue;
+            };
+            let line = String::from_utf8_lossy(&buf[..n]);
+            let line = line.trim_end();
+            if line == query {
+                if ident::visible() {
+                    let _ = net::sendto(s, current(&mut me).as_bytes(), &from);
+                }
+            } else if let Some(peer) = proto::parse_announce(line, from)
+                && peer.key != me.public
+            {
+                let key = peer.key;
+                proto::merge(&mut heard, peer);
+                let t = sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000;
+                seen.retain(|(k, _)| *k != key);
+                seen.push((key, t));
+                let mut out = String::new();
+                for p in &heard {
+                    let t = seen.iter().find(|(k, _)| *k == p.key).map_or(0, |x| x.1);
+                    out.push_str(&alloc::format!(
+                        "{} {} {} {} {}\n",
+                        p.name,
+                        ip_str(p.addr),
+                        ident::fp_compact(&p.key),
+                        p.receiving as u8,
+                        t
+                    ));
+                }
+                let _ = ident::write_atomic(PEERS_CACHE, out.as_bytes(), 0o644);
+            }
         }
     }
 }
@@ -533,7 +554,7 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 "not a Milk Drop hello or offer for this machine's key",
             )),
         },
-        "name" | "rotate" if !admin => {
+        "name" | "rotate" | "visible" if !admin => {
             audit(
                 "drop.refused",
                 &alloc::format!("{who} request={cmd} reason=not-an-administrator"),
@@ -552,6 +573,10 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 String::new()
             })
         }
+        "visible" if matches!(arg, "on" | "off") => ident::set_visible(arg == "on").map(|_| {
+            audit("drop.visible", &alloc::format!("visible={arg} by {who}"));
+            String::new()
+        }),
         "rotate" => ident::rotate(&id).map(|(old, new)| {
             audit(
                 "drop.rotate",
@@ -1085,62 +1110,66 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
 
 fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
     let id = identity()?;
-    let addr = eth1_addr().ok_or("no eth1 address (Milk Drop needs the VM-to-VM link)")?;
-    let l = net::socket(net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    let _ = net::set_reuseaddr(l);
-    let me = SockAddr::v4(addr, XFER_PORT);
-    net::bind(l, &me).map_err(|e| alloc::format!("bind {me}: {e} (another drop recv?)"))?;
-    net::listen(l, 2).map_err(|e| alloc::format!("listen: {e}"))?;
-    // eth1's IPv6 address as well (v6-only: the IPv4 side is the socket above). Only eth1
-    // addresses: a transfer never arrives through eth0.
-    let l6 = eth1_addr6().and_then(|a6| {
-        let s = net::socket6(net::SOCK_STREAM).ok()?;
-        let _ = net::set_v6only(s, true);
-        let _ = net::set_reuseaddr(s);
-        let me6 = SockAddr::new(a6, XFER_PORT);
-        if net::bind(s, &me6).is_ok() && net::listen(s, 2).is_ok() {
-            Some((s, me6))
-        } else {
-            let _ = sys::close(s);
-            None
+    // A listener per eth1 address (IPv4 link-local, IPv6 VM-link, v6-only): only eth1, a
+    // transfer never arrives through eth0.
+    let mut ls: Vec<(i32, SockAddr)> = Vec::new();
+    let wants: Vec<SockAddr> = eth1_addr()
+        .map(|a| SockAddr::v4(a, XFER_PORT))
+        .into_iter()
+        .chain(eth1_addr6().map(|a6| SockAddr::new(a6, XFER_PORT)))
+        .collect();
+    if wants.is_empty() {
+        return Err(String::from(
+            "no eth1 address (Milk Drop needs the VM-to-VM link)",
+        ));
+    }
+    for me in wants {
+        let s =
+            net::socket_for(&me, net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
+        if me.ip.is_v6() {
+            let _ = net::set_v6only(s, true);
         }
-    });
+        let _ = net::set_reuseaddr(s);
+        if let Err(e) = net::bind(s, &me).and_then(|_| net::listen(s, 2)) {
+            let _ = sys::close(s);
+            for (o, _) in ls {
+                let _ = sys::close(o);
+            }
+            return Err(alloc::format!("bind {me}: {e} (another drop recv?)"));
+        }
+        ls.push((s, me));
+    }
     shared_tmp();
     let _ = ident::write_atomic(
         RECEIVING,
         alloc::format!("{}\n", sys::getpid()).as_bytes(),
         0o644,
     );
+    let on: Vec<String> = ls.iter().map(|(_, a)| alloc::format!("{a}")).collect();
     println!(
-        "drop: receiving as {} (fingerprint {}) on {me}{}; files go to {}",
+        "drop: receiving as {} (fingerprint {}) on {}; files go to {}",
         id.name,
         fingerprint(&id.public),
-        l6.map(|(_, a)| alloc::format!(" and {a}"))
-            .unwrap_or_default(),
+        on.join(" and "),
         dir
     );
     let r = loop {
-        let mut pf = [
-            net::PollFd {
-                fd: l,
+        let mut pf: Vec<net::PollFd> = ls
+            .iter()
+            .map(|&(fd, _)| net::PollFd {
+                fd,
                 events: net::POLLIN,
                 revents: 0,
-            },
-            net::PollFd {
-                fd: l6.map_or(-1, |(s, _)| s),
-                events: net::POLLIN,
-                revents: 0,
-            },
-        ];
+            })
+            .collect();
         match net::poll(&mut pf, None) {
             Ok(_) => {}
             Err(e) if e.0 == 4 => continue,
             Err(e) => break Err(alloc::format!("poll: {e}")),
         }
-        let which = if pf[0].revents != 0 { l } else { pf[1].fd };
-        if which < 0 {
+        let Some(which) = pf.iter().find(|p| p.revents != 0).map(|p| p.fd) else {
             continue;
-        }
+        };
         let (fd, from) = match net::accept(which) {
             Ok(x) => x,
             Err(e) if e.0 == 4 || e.0 == 11 => continue,
@@ -1156,8 +1185,7 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
         }
     };
     let _ = sys::unlink(RECEIVING);
-    let _ = sys::close(l);
-    if let Some((s, _)) = l6 {
+    for (s, _) in ls {
         let _ = sys::close(s);
     }
     r
@@ -1165,7 +1193,7 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: drop id [--rotate] | name NEW | list [-w MS] | send [-4|-6] PEER FILE | recv [-y] [-k]\n       drop peers | forget NAME | daemon [-q] | selftest"
+        "usage: drop id [--rotate] | name NEW | list [-w MS] | send [-4|-6] PEER FILE | recv [-y] [-k]\n       drop visible [on|off]\n       drop peers | forget NAME | daemon [-q] | selftest"
     );
     2
 }
@@ -1186,6 +1214,23 @@ fn main(args: &rt::Args) -> i32 {
             Err(_) => return usage(),
         },
         ["peers"] => cmd_peers(),
+        ["visible"] => {
+            println!(
+                "drop: this machine is {} on the link",
+                if ident::visible() {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            );
+            Ok(())
+        }
+        ["visible", v @ ("on" | "off")] => ident::set_visible(*v == "on").map(|_| {
+            println!(
+                "drop: this machine is now {} on the link",
+                if *v == "on" { "visible" } else { "hidden" }
+            )
+        }),
         ["forget", n] => cmd_forget(n),
         ["send", peer, file] => cmd_send(peer, file, net::Want::Any),
         ["send", "-4", peer, file] => cmd_send(peer, file, net::Want::V4),

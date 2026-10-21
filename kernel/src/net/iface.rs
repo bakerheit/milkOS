@@ -42,6 +42,10 @@ const LO_SLOTS: usize = 256;
 /// Test knob: drop 1 in N loopback packets, pseudo-randomly (0 = off). The self-test uses it to prove
 /// TCP recovers from loss; slirp never loses anything.
 pub static LO_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
+/// Test knob (the self-test's path MTU test): loopback behaves like a path whose MTU is
+/// this (0 = off). A bigger packet is not delivered; it is kept in `lo_too_big` for the
+/// stack to answer like a router would (ICMP fragmentation needed / ICMPv6 packet too big).
+pub static LO_MTU: AtomicU32 = AtomicU32::new(0);
 
 /// IPv4 configuration of a link (eth0: DHCP; eth1: link-local). `addr` unspecified = not
 /// configured.
@@ -184,6 +188,10 @@ pub fn multicast_mac(ip: Ipv4) -> Mac {
 
 pub struct Iface {
     pub links: [Link; MAX_LINKS],
+    /// A v6-only boot (fw_cfg `opt/milkos/net`: `v6only=1`): no IPv4 on any link (no
+    /// DHCP, no link-local, no ARP, IPv4 neither sent nor taken). Loopback keeps
+    /// 127.0.0.1, as on Linux.
+    pub v4_off: bool,
     pub lo_stats: DevStats,
     ip_id: u16,
     pending: [Pending; PENDING],
@@ -195,6 +203,8 @@ pub struct Iface {
     lo_head: usize,
     lo_count: usize,
     lo_seen: u32,
+    /// Packets too big for [`LO_MTU`] (their first bytes), waiting for an ICMP answer.
+    pub lo_too_big: alloc::vec::Vec<alloc::vec::Vec<u8>>,
 }
 
 // SAFETY: the raw buffers are leaked heap memory owned by this Iface, accessed under the
@@ -234,6 +244,8 @@ impl Iface {
             lo_head: 0,
             lo_count: 0,
             lo_seen: 0,
+            lo_too_big: alloc::vec::Vec::new(),
+            v4_off: false,
         }
     }
 
@@ -405,6 +417,9 @@ impl Iface {
             Some(f) => f.id,
             None => self.next_ip_id(),
         };
+        if self.v4_off && !dst.is_loopback() {
+            return Err(ENETUNREACH); // a v6-only boot: IPv4 only on loopback
+        }
         match self.route(src, dst)? {
             Route::Loopback => {
                 self.lo_enqueue(|buf| build_ip(buf, src, dst, proto, id, frag, fill))
@@ -657,6 +672,15 @@ impl Iface {
         // SAFETY: slot is free (not between head and head+count); MTU bytes each.
         let buf = unsafe { core::slice::from_raw_parts_mut(self.lo_buf.add(slot * MTU), MTU) };
         let n = build(buf);
+        let lo_mtu = LO_MTU.load(Ordering::Relaxed) as usize;
+        if lo_mtu != 0 && n > lo_mtu {
+            // "Too big for the next hop": keep enough of it to quote, deliver nothing.
+            if self.lo_too_big.len() < 16 {
+                self.lo_too_big.push(buf[..n.min(1180)].to_vec());
+            }
+            self.lo_stats.tx_dropped += 1;
+            return Ok(());
+        }
         self.lo_len[slot] = n as u16;
         self.lo_count += 1;
         self.lo_stats.tx_packets += 1;

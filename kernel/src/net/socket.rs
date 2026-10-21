@@ -118,6 +118,8 @@ pub struct Sock {
     /// The link of a scoped (link-local) IPv6 address: sin6_scope_id, or the link a
     /// connection to one came in on.
     pub scope: Option<usize>,
+    /// IPv6 multicast groups joined (IPV6_JOIN_GROUP): (group, link). Left on close.
+    pub groups6: alloc::vec::Vec<(super::wire::Ipv6, usize)>,
     pub local: SockAddr,
     pub remote: SockAddr,
     /// This socket owns its local port (bind / autobind / listen). Accepted children share
@@ -183,6 +185,7 @@ impl Table {
             family: Family::V4,
             v6only: false,
             scope: None,
+            groups6: alloc::vec::Vec::new(),
             local: SockAddr::ANY,
             remote: SockAddr::ANY,
             owns_port: false,
@@ -384,6 +387,47 @@ pub fn v6only(id: SocketId) -> Result<bool> {
 /// The socket's family (for the syscall layer's address conversions).
 pub fn family(id: SocketId) -> Result<Family> {
     with(|st| st.socks.lookup(id).map(|(_, s)| s.family))
+}
+
+/// IPV6_JOIN_GROUP / IPV6_LEAVE_GROUP (UDP, AF_INET6): listen to IPv6 multicast `group`
+/// on `link` (None: the link it routes to; `ff02::fb` is eth1's). The link reports the
+/// membership with MLD (net::mld) and from then on takes that group's traffic.
+pub fn group6(
+    id: SocketId,
+    group: super::wire::Ipv6,
+    link: Option<usize>,
+    join: bool,
+) -> Result<()> {
+    with(|st| {
+        let k = link
+            .or_else(|| super::ipv6::mcast_link(&st.iface, group))
+            .ok_or(ENODEV)?;
+        if k >= st.iface.links.len() || !st.iface.links[k].up() {
+            return Err(ENODEV);
+        }
+        let (_, s) = st.socks.lookup(id)?;
+        if s.ty != SockType::Dgram || s.family != Family::V6 || !group.is_multicast() {
+            return Err(EINVAL);
+        }
+        let have = s.groups6.iter().position(|&m| m == (group, k));
+        match (join, have) {
+            (true, Some(_)) => Err(EADDRINUSE),
+            (true, None) => {
+                if s.groups6.len() >= 20 {
+                    return Err(ENOBUFS);
+                }
+                s.groups6.push((group, k));
+                st.iface.links[k].v6.mld.join(group);
+                Ok(())
+            }
+            (false, Some(p)) => {
+                s.groups6.swap_remove(p);
+                st.iface.links[k].v6.mld.leave(group);
+                Ok(())
+            }
+            (false, None) => Err(EADDRNOTAVAIL),
+        }
+    })
 }
 
 /// The link a scoped (link-local) IPv6 socket is bound to, if any.
@@ -651,6 +695,9 @@ pub fn close(id: SocketId) -> Result<()> {
         let (i, s) = st.socks.lookup(id)?;
         match s.ty {
             SockType::Dgram => {
+                for (g, k) in core::mem::take(&mut s.groups6) {
+                    st.iface.links[k].v6.mld.leave(g);
+                }
                 st.socks.free(i);
                 Ok(())
             }

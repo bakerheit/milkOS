@@ -26,7 +26,8 @@ milk_disk_args
 source scripts/share.sh
 milk_share_args
 # eth0: restricted user-mode networking (see scripts/netdev.sh); MILK_HTTP_PORT=8088 to
-# reach the guest's web server at http://127.0.0.1:8088/.
+# reach the guest's web server at http://127.0.0.1:8088/. MILK_V6ONLY=1: a v6-only boot
+# (no IPv4 in slirp or on the guest's links).
 source scripts/netdev.sh
 milk_net_args
 # Sound (virtio-sound): off by default. MILK_SOUND=1 plays through the Mac's speakers

@@ -119,6 +119,7 @@ pub mod nr {
     pub const CLOCK_GETTIME: usize = 113;
     pub const SCHED_YIELD: usize = 124;
     pub const UNAME: usize = 160;
+    pub const SETHOSTNAME: usize = 161;
     pub const GETPID: usize = 172;
     pub const GETPPID: usize = 173;
     pub const BRK: usize = 214;
@@ -707,6 +708,15 @@ pub fn uname() -> Result<[String; 5]> {
         String::from_utf8_lossy(&s[..n]).into_owned()
     };
     Ok([f(0), f(1), f(2), f(3), f(4)])
+}
+
+/// sethostname(2) (root only; milkOS: one DNS label, 1-63 letters, digits and '-').
+pub fn sethostname(name: &str) -> Result<()> {
+    sc(
+        nr::SETHOSTNAME,
+        [name.as_ptr() as usize, name.len(), 0, 0, 0, 0],
+    )
+    .map(|_| ())
 }
 
 pub fn brk(addr: usize) -> usize {

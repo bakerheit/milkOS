@@ -416,7 +416,9 @@ pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         if let Some((r, _)) = l.v6.router {
             write!(w, " router6={r}")?;
         }
-        if k == 0 {
+        if st.iface.v4_off {
+            writeln!(w, " ipv4=off")?;
+        } else if k == 0 {
             writeln!(w, " dhcp={:?}", st.dhcp.state)?;
         } else if l.ll.on {
             let state = if c.configured() { "bound" } else { "probing" };
@@ -474,7 +476,8 @@ impl fmt::Display for Hex32 {
 /// `/proc/net/snmp6`: one `Name value` per line, as Linux.
 pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     let s = &st.ip6.stats;
-    let rows: [(&str, u64); 19] = [
+    let f = &st.frags.stats6;
+    let rows: [(&str, u64); 25] = [
         ("Ip6InReceives", s.in_receives),
         ("Ip6InHdrErrors", s.in_hdr_errors),
         ("Ip6InAddrErrors", s.in_addr_errors),
@@ -483,7 +486,13 @@ pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         ("Ip6InDelivers", s.in_delivers),
         ("Ip6OutRequests", s.out_requests),
         ("Ip6OutNoRoutes", s.out_no_routes),
-        ("Ip6ReasmFails", s.frag_dropped),
+        ("Ip6ReasmReqds", f.reqds),
+        ("Ip6ReasmOKs", f.oks),
+        ("Ip6ReasmFails", f.fails),
+        ("Ip6ReasmTimeout", f.timeouts),
+        ("Ip6ReasmOverlaps", f.overlaps),
+        ("Ip6FragCreates", f.creates),
+        ("Ip6FragDropped", s.frag_dropped),
         ("Ip6InSourceRouteRefused", s.routing_refused),
         ("Icmp6InMsgs", s.icmp_in_msgs),
         ("Icmp6OutMsgs", s.icmp_out_msgs),
@@ -499,6 +508,67 @@ pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         writeln!(w, "{k:<32}{v}")?;
     }
     Ok(())
+}
+
+/// `/proc/net/igmp6`: the IPv6 groups each link listens to (Linux columns: ifindex,
+/// name, group, users, flags, timer), then the MLD counters as a comment.
+pub fn igmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for (k, l) in st.iface.links.iter().enumerate() {
+        if !l.up() {
+            continue;
+        }
+        for g in super::mld::groups(&l.v6) {
+            let users =
+                l.v6.mld
+                    .joined()
+                    .iter()
+                    .find(|(j, _)| *j == g)
+                    .map_or(1, |&(_, n)| n);
+            writeln!(
+                w,
+                "{:<4} {:<15} {} {:>5} {:08X} {:>5}",
+                ipv6::ifindex(Some(k)),
+                LINK_NAMES[k],
+                Hex32(g),
+                users,
+                if g == super::wire::Ipv6::ALL_NODES {
+                    0x0c
+                } else {
+                    0x04
+                },
+                0
+            )?;
+        }
+    }
+    writeln!(
+        w,
+        "# mld queries_in {} reports_out {}",
+        st.ip6.mld.queries_in, st.ip6.mld.reports_out
+    )
+}
+
+/// `/proc/net/hostname` (milkOS): the hostname (uname's nodename, net::hostname).
+pub fn hostname(_st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    writeln!(w, "{}", super::hostname::get())
+}
+
+/// `/proc/net/pmtu` (milkOS): the path MTUs learned from ICMP, `DST MTU EXPIRES_IN_S`,
+/// then the counters.
+pub fn pmtu(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for e in &st.pmtu.entries {
+        writeln!(
+            w,
+            "{} {} {}",
+            e.dst,
+            e.mtu,
+            e.until.saturating_sub(st.now) / 1_000_000_000
+        )?;
+    }
+    writeln!(
+        w,
+        "# learned {} ignored {}",
+        st.pmtu.stats.learned, st.pmtu.stats.ignored
+    )
 }
 
 /// `/proc/net/ndisc` (milkOS): the IPv6 neighbour cache, `ADDR MAC STATE [router] DEV`.
@@ -532,6 +602,9 @@ pub const FILES: &[(&str, Gen)] = &[
     ("if_inet6", if_inet6),
     ("snmp6", snmp6),
     ("ndisc", ndisc),
+    ("pmtu", pmtu),
+    ("igmp6", igmp6),
+    ("hostname", hostname),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

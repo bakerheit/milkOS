@@ -154,6 +154,8 @@ impl State {
             return Err(Errno::EINVAL);
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
+        // What's on disk now is the last committed generation (until this boot commits).
+        super::crashtest::LAST_COMMIT.store(sb.generation, core::sync::atomic::Ordering::Relaxed);
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
 

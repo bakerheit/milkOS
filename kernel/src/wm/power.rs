@@ -18,11 +18,15 @@ fn psci(fid: u64) {
 }
 
 pub fn shut_down() {
+    // Commit the filesystems first: the last second of writes and the newest search-index
+    // save would otherwise be lost with the power.
+    let _ = crate::fs::sync_all();
     crate::kprintln!("wm: shutting down (PSCI SYSTEM_OFF)");
     psci(PSCI_SYSTEM_OFF);
 }
 
 pub fn restart() {
+    let _ = crate::fs::sync_all();
     crate::kprintln!("wm: restarting (PSCI SYSTEM_RESET)");
     psci(PSCI_SYSTEM_RESET);
 }

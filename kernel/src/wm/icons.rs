@@ -302,6 +302,27 @@ pub fn art(p: &mut Painter, x: i32, y: i32, s: i32, name: &str) -> bool {
         return false;
     };
     p.sprite(x, y, px, s as usize, s as usize);
+    art_finish(p, x, y, s, name);
+    true
+}
+
+/// Art `name`'s pixels at exactly `s` px, from the smallest larger size the art ships (the 96
+/// px icons for a magnified dock): not cached, the caller keeps them.
+pub fn art_scaled(name: &str, s: i32) -> Option<(&'static str, alloc::vec::Vec<u32>)> {
+    let dark = super::theme::dark();
+    if let Some(i) = crate::art::icon(name, s, dark) {
+        return Some((i.name, i.pixels().to_vec()));
+    }
+    let src = crate::art::icon_near(name, s, dark)?;
+    Some((
+        src.name,
+        crate::art::scale_icon(src.pixels(), src.size as usize, s as usize),
+    ))
+}
+
+/// What the shell adds on top of an art tile: today's date on the calendar, the sand edge
+/// of milk tiles.
+pub fn art_finish(p: &mut Painter, x: i32, y: i32, s: i32, name: &str) {
     if name == "calendar" && s >= 28 {
         // The art carries a sample date: today's instead, on the tile's milk.
         let day = alloc::format!("{}", super::rtc::now().day);
@@ -333,7 +354,6 @@ pub fn art(p: &mut Painter, x: i32, y: i32, s: i32, name: &str) -> bool {
         let r = (s * 24 + 50) / 100;
         p.rrect_stroke(x, y, s, s, r, 1, SAND, 255);
     }
-    true
 }
 
 /// An app's tile: the art if there is one, else the drawn glyph.

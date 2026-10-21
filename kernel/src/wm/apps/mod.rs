@@ -50,6 +50,16 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
             Rect::new((super::theme::screen_w() - 644) / 2, 150, 644, 330),
             Box::new(milkdrop::Receiver::new()),
         ),
+        // The trusted password panel, centred.
+        App::Auth => (
+            Rect::new(
+                (super::theme::screen_w() - 520) / 2,
+                (super::theme::screen_h() - 320) / 2 - 40,
+                520,
+                320,
+            ),
+            Box::new(super::authpanel::AuthPanel::new()),
+        ),
         App::Settings => (
             Rect::new(180, 80, 660, 468),
             Box::new(settings::Settings::new()),

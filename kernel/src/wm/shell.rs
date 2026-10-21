@@ -61,6 +61,8 @@ pub struct PanelSpec {
 
 pub enum Layer {
     Panel(PanelSpec),
+    /// The magnified dock's icons, drawn straight over everything below (dock.rs).
+    DockIcons,
     /// Espresso over everything below, at this alpha.
     Dim(u8),
     /// Bold centred text straight on whatever is below.
@@ -348,7 +350,7 @@ pub(super) fn dock_action(i: usize) -> Option<DockAction> {
     tiles().into_iter().nth(i).map(|t| t.action)
 }
 
-fn dock_len() -> usize {
+pub fn dock_len() -> usize {
     DOCK.len() + super::packages::count()
 }
 
@@ -391,14 +393,30 @@ pub fn dock_rect() -> Rect {
     )
 }
 
-/// Which dock icon is at `lx` pixels from the dock's left edge.
-pub fn dock_index(lx: i32) -> Option<usize> {
-    let i = (lx - DOCK_PAD) / (dock_icon() + DOCK_GAP);
-    let within = (lx - DOCK_PAD) % (dock_icon() + DOCK_GAP) < dock_icon();
-    (lx >= DOCK_PAD && within && (i as usize) < dock_len()).then_some(i as usize)
-}
-
 impl Desktop {
+    /// A click on dock icon `i` (the bar or a magnified icon above it).
+    pub(super) fn click_dock(&mut self, i: usize) {
+        self.dock_pressed = Some(i);
+        self.control = false;
+        // An app that is not running yet: its icon hops until its window is up.
+        let starting = !tile_up(self, i)
+            && tiles().get(i).is_some_and(|t| {
+                matches!(
+                    t.action,
+                    DockAction::App(_) | DockAction::Program(_) | DockAction::Pkg(_)
+                )
+            });
+        self.activate_tile(i);
+        if starting && !self.bounces.iter().any(|b| b.tile == i) {
+            self.bounces.push(super::dock::Bounce {
+                tile: i,
+                start_ns: crate::timer::now_ns(),
+                ready_ns: None,
+            });
+        }
+        self.invalidate(PanelKey::Dock);
+    }
+
     /// Do what dock tile `i` does (the dock and Today's Apps card).
     pub(super) fn activate_tile(&mut self, i: usize) {
         let Some(t) = tiles().into_iter().nth(i) else {
@@ -430,17 +448,18 @@ impl Desktop {
                 .is_some_and(|p| prog.as_deref() == p.exec.rsplit('/').next()),
             _ => false,
         });
-        match i {
-            Some(i) => {
-                let (cx, cy) = dock_icon_center(i);
-                Rect::new(
-                    cx - dock_icon() / 2,
-                    cy - dock_icon() / 2,
-                    dock_icon(),
-                    dock_icon(),
-                )
-            }
-            None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
+        let l = &self.dock_layout;
+        match i.and_then(|i| l.slots.get(i)) {
+            // Where the icon is now (magnified or not).
+            Some(s) => Rect::new(s.x, l.bottom - s.size, s.size, s.size),
+            None => match i {
+                Some(i) => {
+                    let (cx, cy) = dock_icon_center(i);
+                    let s = dock_icon();
+                    Rect::new(cx - s / 2, cy - s / 2, s, s)
+                }
+                None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
+            },
         }
     }
 }
@@ -884,11 +903,20 @@ impl Desktop {
             Style::Bar,
             false,
         );
-        let dock = spec(PanelKey::Dock, dock_rect(), R_DOCK, Style::Glass, true);
+        let dock = spec(
+            PanelKey::Dock,
+            self.dock_layout.bar,
+            R_DOCK,
+            Style::Glass,
+            true,
+        );
         match self.mode {
             Mode::Desktop => {
                 v.push(bar);
                 v.push(dock);
+                if self.dock_overlay {
+                    v.push(Layer::DockIcons);
+                }
             }
             Mode::Home => {
                 for i in 0..card_count() {
@@ -950,10 +978,17 @@ impl Desktop {
         if let Some(i) = self.tip
             && self.launcher.is_none()
         {
-            let (cx, _) = dock_icon_center(i);
+            // Above the hovered icon, wherever magnification put it.
+            let l = &self.dock_layout;
+            let (cx, top) = l
+                .slots
+                .get(i)
+                .map_or((dock_icon_center(i).0, dock_rect().y), |s| {
+                    (s.x + s.size / 2, (l.bottom - s.size).min(l.bar.y))
+                });
             let name = tiles().get(i).map_or(String::new(), |t| t.name.clone());
             let w = super::fontx::prop_width(&name, false) + 24;
-            let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
+            let r = Rect::new(cx - w / 2, top - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
         for (t, r) in self.toasts.iter().zip(toast_rects(&self.toasts)) {
@@ -1140,7 +1175,53 @@ impl Desktop {
         }
     }
 
+    /// What each dock icon looks like this frame, laid out as `l` (the magnified dock).
+    pub(super) fn dock_draws(&self, l: &super::dock::Layout) -> Vec<DockDraw> {
+        let bar = l.bar;
+        tiles()
+            .iter()
+            .zip(&l.slots)
+            .enumerate()
+            .map(|(i, (it, s))| DockDraw {
+                x: s.x,
+                y: l.bottom - s.size,
+                s: s.size,
+                art: it.art,
+                icon: it.icon,
+                bg: it.bg,
+                fg: it.fg,
+                letter: it
+                    .name
+                    .chars()
+                    .take(1)
+                    .flat_map(char::to_uppercase)
+                    .collect(),
+                badge: self.unread_for_tile(&it.name),
+                running: self.tile_running(it),
+                pressed: self.dock_pressed == Some(i),
+                hovered: self.tip == Some(i),
+                dot_y: bar.y + dock_h() - DOCK_DOT_GAP - DOCK_DOT + 1,
+            })
+            .collect()
+    }
+
+    fn tile_running(&self, it: &Tile) -> bool {
+        match it.action {
+            DockAction::App(a) => self.has_app(a),
+            DockAction::Home => self.mode == Mode::Home,
+            DockAction::Spaces => self.mode == Mode::Spaces,
+            DockAction::Program(p) => self.running_program(p),
+            DockAction::Pkg(k) => {
+                super::packages::get(k).is_some_and(|p| p.window && self.running_program(&p.exec))
+            }
+        }
+    }
+
     fn paint_dock(&self, p: &mut Painter) {
+        // Magnified: the panel is only the glass bar; the compositor draws the icons.
+        if self.dock_overlay {
+            return;
+        }
         for (i, it) in tiles().iter().enumerate() {
             let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
             // Milk tiles get the 1px sand edge, or they vanish into the glass.
@@ -1567,13 +1648,11 @@ impl Desktop {
                 }
             }
             PanelKey::Dock => {
-                let Some(i) = dock_index(x) else {
-                    return;
-                };
-                self.dock_pressed = Some(i);
-                self.control = false;
-                self.activate_tile(i);
-                self.invalidate(PanelKey::Dock);
+                // Panel coordinates back to the screen: the layout knows where icons are.
+                let b = self.dock_layout.bar;
+                if let Some(i) = self.dock_layout.hit(x + b.x, y + b.y) {
+                    self.click_dock(i);
+                }
             }
             PanelKey::Toast(id) => {
                 // A button runs its action; anywhere else opens the drawer on the item (SPEC).
@@ -1898,4 +1977,100 @@ pub(super) fn status_center(item: Status, cpus: usize) -> (i32, i32) {
         .into_iter()
         .find(|&(it, _, _)| it == item)
         .map_or((screen_w() - 30, 14), |(_, x, w)| (x + w / 2, 14))
+}
+
+// ---- the magnified dock's icons (drawn by the compositor) -----------------------------------
+
+/// One dock icon as the compositor draws it while the dock is magnified.
+#[derive(Clone, PartialEq)]
+pub struct DockDraw {
+    pub x: i32,
+    pub y: i32,
+    pub s: i32,
+    pub art: Option<&'static str>,
+    icon: Option<Icon>,
+    bg: Color,
+    fg: Color,
+    letter: String,
+    badge: usize,
+    running: bool,
+    pressed: bool,
+    hovered: bool,
+    dot_y: i32,
+}
+
+impl DockDraw {
+    /// What it covers (badge included).
+    pub fn bounds(&self) -> Rect {
+        Rect::new(
+            self.x - 4,
+            self.y - 8,
+            self.s + 12,
+            self.dot_y + DOCK_DOT - self.y + 8,
+        )
+    }
+}
+
+/// Draw one magnified dock icon; `sprite` is its art at exactly `d.s` px (if it has art).
+pub fn draw_dock_icon(p: &mut Painter, d: &DockDraw, sprite: Option<(&str, &[u32])>) {
+    let (x, y, s) = (d.x, d.y, d.s);
+    match sprite {
+        Some((name, px)) if px.len() == (s * s) as usize => {
+            p.sprite(x, y, px, s as usize, s as usize);
+            icons::art_finish(p, x, y, s, name);
+        }
+        _ => match d.icon {
+            Some(icon) => icons::draw(p, x, y, s, icon, d.bg, 255, d.fg, d.bg == MILK),
+            None => {
+                let r = (s * 24 + 50) / 100;
+                p.rrect(x, y, s, s, r, d.bg, 255);
+                let scale = if s >= 88 {
+                    4
+                } else if s >= 44 {
+                    2
+                } else {
+                    1
+                };
+                let cw = crate::font::str_width(&d.letter, scale);
+                p.text_x(
+                    x + (s - cw) / 2,
+                    y + (s - 16 * scale) / 2,
+                    &d.letter,
+                    d.fg,
+                    scale,
+                    true,
+                );
+            }
+        },
+    }
+    let r = (s * 24 + 50) / 100;
+    if d.pressed {
+        p.rrect(x, y, s, s, r, 0, a(40));
+    } else if d.hovered {
+        p.rrect(x, y, s, s, r, WHITE, a(40));
+    }
+    if d.badge > 0 {
+        super::notif::badge(p, x + s - 13, y - 6, d.badge);
+    }
+    if d.running {
+        p.rrect(
+            x + s / 2 - DOCK_DOT / 2,
+            d.dot_y,
+            DOCK_DOT,
+            DOCK_DOT,
+            2,
+            COCOA,
+            255,
+        );
+    }
+}
+
+/// The dock tiles' names, in order (to notice tiles coming and going).
+pub fn dock_names() -> Vec<String> {
+    tiles().into_iter().map(|t| t.name).collect()
+}
+
+/// Is dock tile `i`'s app up (a window for it, or the mode it shows)? Ends its bounce.
+pub(super) fn tile_up(d: &super::Desktop, i: usize) -> bool {
+    tiles().get(i).is_some_and(|t| d.tile_running(t))
 }

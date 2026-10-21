@@ -468,6 +468,57 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// One row of a genie: source row `sy` of `src` stretched (nearest) across logical
+    /// `x0..x1` at row `y`, blended at `alpha`; the window's rounded corners (`radius`,
+    /// in source pixels) stay transparent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_span(
+        &mut self,
+        y: i32,
+        x0: i32,
+        x1: i32,
+        src: &Buffer,
+        sy: i32,
+        radius: i32,
+        alpha: u8,
+    ) {
+        let w = x1 - x0;
+        if w <= 0 {
+            return;
+        }
+        let Some(b) = self.buf_rect(x0, y, w, 1) else {
+            return;
+        };
+        let (sw, sh) = (src.w(), src.h());
+        let sy = sy.clamp(0, sh - 1);
+        let srow = src.row(sy as usize);
+        let dx0 = x0 + self.ox;
+        let base = b.y as usize * self.stride;
+        // How far in from each side the corner cuts at this source row.
+        let inset = |r: i32, d: i32| -> i32 {
+            if d >= r {
+                return 0;
+            }
+            let dy = r - d;
+            let mut i = 0;
+            while i < r && (r - i) * (r - i) + dy * dy > r * r {
+                i += 1;
+            }
+            i
+        };
+        let cut = inset(radius, sy).max(inset(radius, sh - 1 - sy));
+        for bx in b.x..b.x + b.w {
+            let i = bx - dx0;
+            let sx = (i * sw / w).min(sw - 1);
+            if sx < cut || sx >= sw - cut {
+                continue;
+            }
+            let q = srow[sx as usize];
+            let p = &mut self.px[base + bx as usize];
+            *p = if alpha == 255 { q } else { blend(*p, q, alpha) };
+        }
+    }
+
     /// Nearest-neighbour scale all of `src` into the logical rect `dst` (tiny previews).
     pub fn blit_scaled(&mut self, dst: Rect, src: &Buffer) {
         let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {

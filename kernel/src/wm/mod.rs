@@ -19,12 +19,14 @@
 pub mod actions;
 mod anim;
 mod apps;
+mod authpanel;
 mod buffer;
 mod button;
 pub mod client;
 pub mod clipboard;
 mod ctl;
 mod dnd;
+mod dock;
 mod event;
 /// The smooth and proportional faces live in the shared font code (the splash uses them).
 use crate::fontx;
@@ -165,6 +167,9 @@ pub fn notify_quiet(app: &str, title: &str, subtitle: &str) {
 /// The wm thread sleeps here between frames; input, toasts and requests wake it early.
 static WAKE: WaitQueue = WaitQueue::new();
 
+/// A magnified dock icon's art at its current size: (size, dark theme, art name, pixels).
+type DockSprite = (i32, bool, &'static str, Vec<u32>);
+
 fn on_input(_ev: &input::Event) {
     WAKE.wake_all();
 }
@@ -203,6 +208,8 @@ pub enum Request {
     OpenPackage(String),
     /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
     Powerbox,
+    /// A process asks for an administrator's authorisation (authpanel.rs).
+    Auth,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -269,6 +276,9 @@ pub fn run() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
     powerbox::set_up();
+    // The trusted password panel answers admin authorisation requests from now on (and
+    // ends the transitional allowance for desktop apps, docs/security.md).
+    crate::proc::auth::set_prompt(authpanel::prompt);
     let mut next = timer::now_ns();
     loop {
         let busy = d.frame();
@@ -402,6 +412,20 @@ pub struct Desktop {
     hover_body: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
+    /// Dock magnification: the ease, this frame's layout, each icon's draw record and its
+    /// art at its current size (made when the size changes).
+    dock_mag: dock::Mag,
+    dock_layout: dock::Layout,
+    dock_draws: Vec<shell::DockDraw>,
+    dock_sprites: Vec<Option<DockSprite>>,
+    /// Icons hopping while their app starts, and whether the compositor draws the icons
+    /// this frame (magnified or hopping) instead of the dock panel.
+    bounces: Vec<dock::Bounce>,
+    /// The dock's tiles last frame (names) and a slide in progress after they changed.
+    dock_names: Vec<String>,
+    dock_slide: Option<dock::Slide>,
+    was_hopping: bool,
+    dock_overlay: bool,
     /// Dock item being pressed (drawn 4% darker until release).
     dock_pressed: Option<usize>,
     /// Open menu bar menu (index into `menu_titles`) and the row under the pointer.
@@ -497,6 +521,15 @@ impl Desktop {
             hover_lights: None,
             hover_body: None,
             tip: None,
+            dock_mag: dock::Mag::new(),
+            dock_layout: dock::layout(0, dock_icon(), 0, 0, 100),
+            dock_draws: Vec::new(),
+            dock_sprites: Vec::new(),
+            bounces: Vec::new(),
+            dock_names: Vec::new(),
+            dock_slide: None,
+            was_hopping: false,
+            dock_overlay: false,
             dock_pressed: None,
             menu: None,
             menu_hover: None,
@@ -1390,6 +1423,19 @@ impl Desktop {
         for l in layers {
             match l {
                 Layer::Dim(a) => p.fill_a(d.x, d.y, d.w, d.h, INK, *a),
+                Layer::DockIcons => {
+                    for (k, dd) in self.dock_draws.iter().enumerate() {
+                        if !dd.bounds().intersects(&d) {
+                            continue;
+                        }
+                        let sprite = self
+                            .dock_sprites
+                            .get(k)
+                            .and_then(|o| o.as_ref())
+                            .map(|(_, _, n, v)| (*n, v.as_slice()));
+                        shell::draw_dock_icon(&mut p, dd, sprite);
+                    }
+                }
                 Layer::Label {
                     x,
                     y,
@@ -1503,6 +1549,14 @@ impl Desktop {
                         self.open(App::Powerbox);
                     }
                 }
+                Request::Auth => {
+                    if !self.has_app(App::Auth) && authpanel::pending() {
+                        self.open(App::Auth);
+                        if let Some((id, _)) = self.find_app(App::Auth) {
+                            self.show_window(id);
+                        }
+                    }
+                }
                 Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
@@ -1528,7 +1582,8 @@ impl Desktop {
             }
         }
         self.tick(now);
-        let animating = self.step_anims(now);
+        let docking = self.update_dock(now);
+        let animating = self.step_anims(now) || docking;
         let fading = self.lock_tick(now);
         self.sync_bars();
         self.lock_a = self.lock_alpha(timer::now_ns());
@@ -1542,6 +1597,147 @@ impl Desktop {
                 self.drag,
                 Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Slider(_))
             )
+    }
+
+    /// Dock magnification for this frame: ease towards the pointer being over the dock,
+    /// lay it out, redo the art of icons whose size changed, damage what moved. True while
+    /// it is still easing.
+    fn update_dock(&mut self, now: u64) -> bool {
+        let p = prefs::get();
+        let base = dock_icon();
+        let max_px = base * p.magnify_pct / 100;
+        let (px, py) = self.pointer;
+        let over = p.magnify
+            && self.mode == Mode::Desktop
+            && self.launcher.is_none()
+            && self.lock_a == 0
+            && !matches!(self.drag, Some(Drag::Move { .. } | Drag::Resize { .. }))
+            && dock::in_zone(&self.dock_layout, max_px, px, py);
+        if over {
+            self.dock_mag.x = px;
+        }
+        self.dock_mag.target = if over { 1024 } else { 0 };
+        let easing = self.dock_mag.step(now);
+        let n = shell::dock_len();
+        let mut l = dock::layout(
+            n,
+            base,
+            self.dock_mag.x,
+            self.dock_mag.eased(),
+            p.magnify_pct,
+        );
+        // Tiles came or went: the others slide aside (or close the gap) from where they were.
+        let names = shell::dock_names();
+        if names != self.dock_names {
+            if !self.dock_names.is_empty() && self.dock_names.len() == self.dock_layout.slots.len()
+            {
+                let from = self
+                    .dock_names
+                    .iter()
+                    .zip(&self.dock_layout.slots)
+                    .map(|(n, s)| (n.clone(), s.x, s.size))
+                    .collect();
+                self.dock_slide = Some(dock::Slide {
+                    start_ns: now,
+                    from,
+                    from_bar: self.dock_layout.bar,
+                });
+            }
+            self.dock_names = names;
+        }
+        let sliding = match &self.dock_slide {
+            Some(sl) => match sl.progress(now) {
+                Some(e) => {
+                    let sl = sl.clone();
+                    sl.apply(&mut l, &self.dock_names, e);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        if !sliding && self.dock_slide.take().is_some() {
+            // Settled: one last full redraw of where it moved.
+            let r = self.dock_layout.icons_rect().union(&l.icons_rect());
+            self.damage(r);
+        }
+        // Launch bounces: a hop until the app's window is up, then a small last one.
+        let mut lifts = alloc::vec![0i32; n];
+        let mut bounces = core::mem::take(&mut self.bounces);
+        bounces.retain_mut(|b| {
+            let up = shell::tile_up(self, b.tile);
+            if up && b.ready_ns.is_none() {
+                b.ready_ns = Some(now);
+            }
+            let size = l.slots.get(b.tile).map_or(base, |s| s.size);
+            match b.lift(now, size) {
+                Some(h) => {
+                    if let Some(v) = lifts.get_mut(b.tile) {
+                        *v = h;
+                    }
+                    true
+                }
+                None => false,
+            }
+        });
+        let hopping = !bounces.is_empty() || !self.bounces.is_empty();
+        self.bounces.extend(bounces);
+        if self.was_hopping && !hopping {
+            // The last hop landed: clear where it was.
+            let r = self.dock_layout.icons_rect();
+            let lift = base * 6 / 10;
+            self.damage(Rect::new(r.x, r.y - lift, r.w, r.h + lift));
+        }
+        let was_hopping = self.was_hopping;
+        self.was_hopping = hopping;
+        let overlay = l.magnified || hopping;
+        if l != self.dock_layout || overlay != self.dock_overlay {
+            let before = self.dock_layout.icons_rect();
+            self.damage(before);
+            self.damage(l.icons_rect());
+            if overlay != self.dock_overlay {
+                // The panel switches between drawing the icons and only the bar.
+                self.invalidate(PanelKey::Dock);
+            }
+            self.dock_layout = l;
+            self.dock_overlay = overlay;
+            self.invalidate(PanelKey::Tip);
+        }
+        if self.dock_overlay {
+            let mut draws = self.dock_draws(&self.dock_layout);
+            for (d, &h) in draws.iter_mut().zip(&lifts) {
+                d.y -= h;
+            }
+            if hopping || was_hopping {
+                // The hop rises above the icons' usual extent (and its last frame must go).
+                let r = self.dock_layout.icons_rect();
+                let lift = base * 6 / 10;
+                self.damage(Rect::new(r.x, r.y - lift, r.w, r.h + lift));
+            } else if draws != self.dock_draws {
+                // Badges, dots or a pressed tint changed under the magnified icons.
+                self.damage(self.dock_layout.icons_rect());
+            }
+            // Badges, dots or pressed state changed: redraw them too.
+            let dark = theme::dark();
+            self.dock_sprites.resize_with(draws.len(), || None);
+            for (k, d) in draws.iter().enumerate() {
+                let fresh = match (&self.dock_sprites[k], d.art) {
+                    (Some((s, dk, n, _)), Some(a)) => *s != d.s || *dk != dark || *n != a,
+                    (None, Some(_)) => true,
+                    (_, None) => false,
+                };
+                if fresh {
+                    self.dock_sprites[k] = d
+                        .art
+                        .and_then(|a| icons::art_scaled(a, d.s))
+                        .map(|(n, v)| (d.s, dark, n, v));
+                }
+            }
+            self.dock_draws = draws;
+        } else {
+            self.dock_draws.clear();
+        }
+        easing || hopping || sliding
     }
 
     /// Re-render stale window surfaces and panels, then composite the damage.
@@ -1570,6 +1766,96 @@ impl Desktop {
         let layers = self.layers();
         self.reconcile(&layers);
         self.compose(&layers);
+    }
+
+    /// Dock magnification frame costs: the pointer sweeps along the dock (left to right and
+    /// back, 4 px a frame) with magnification on, every frame timed (update + render +
+    /// compose). Logs the median and the worst, against the 16.7 ms of a 60 Hz frame.
+    fn bench_dock(&mut self) {
+        let mut p = prefs::get();
+        if !p.magnify {
+            p.magnify = true;
+            prefs::set(p);
+        }
+        let y = shell::dock_rect().y + dock_h() / 2;
+        let (x0, x1) = (
+            shell::dock_rect().x - 30,
+            shell::dock_rect().x + shell::dock_rect().w + 30,
+        );
+        let mut times: Vec<u64> = Vec::new();
+        let mut px_total = 0u64;
+        let mut xs: Vec<i32> = (x0..x1).step_by(4).collect();
+        let back: Vec<i32> = xs.iter().rev().copied().collect();
+        xs.extend(back);
+        // Ease in first (not timed).
+        self.pointer = (xs[0], y);
+        for _ in 0..30 {
+            let t = timer::now_ns();
+            self.update_dock(t);
+            self.render_and_compose();
+            if self.dock_mag.t == 1024 {
+                break;
+            }
+            sched::sleep_ms(5);
+        }
+        for x in xs {
+            self.damage(self.cursor_rect());
+            self.pointer = (x, y);
+            self.damage(self.cursor_rect());
+            let t = timer::now_ns();
+            self.update_dock(t);
+            self.render_and_compose();
+            times.push((timer::now_ns() - t) / 1000);
+            px_total += self.stats.last_px;
+        }
+        times.sort_unstable();
+        let n = times.len().max(1);
+        let over = times.iter().filter(|&&t| t > 16_667).count();
+        kprintln!(
+            "wm: bench dock magnify {}x{}: {} frames, min {} us, median {} us, p95 {} us, max {} us, {} over 16.7 ms, avg {} px/frame",
+            screen_w(),
+            screen_h(),
+            times.len(),
+            times[0],
+            times[n / 2],
+            times[n * 95 / 100],
+            times[n - 1],
+            over,
+            px_total / n as u64
+        );
+        // The genie: minimise the top window and restore it, every animation frame timed.
+        self.pointer = (screen_w() / 2, screen_h() / 2);
+        let Some(id) = self.focus.or(self.windows.last().map(|w| w.id)) else {
+            return;
+        };
+        let mut g: Vec<u64> = Vec::new();
+        for restore in [false, true] {
+            if restore {
+                self.show_window(id);
+            } else {
+                self.minimise(id);
+            }
+            loop {
+                let t = timer::now_ns();
+                let more = self.step_anims(t);
+                self.update_dock(t);
+                self.render_and_compose();
+                g.push((timer::now_ns() - t) / 1000);
+                if !more {
+                    break;
+                }
+                sched::sleep_ms(8);
+            }
+        }
+        g.sort_unstable();
+        let m = g.len().max(1);
+        kprintln!(
+            "wm: bench genie (minimise + restore): {} frames, median {} us, max {} us, {} over 16.7 ms",
+            g.len(),
+            g[m / 2],
+            g[m - 1],
+            g.iter().filter(|&&t| t > 16_667).count()
+        );
     }
 
     /// Measure frame costs: full-screen redraws, then a scripted window drag. Logs the results.
@@ -2006,8 +2292,8 @@ impl Desktop {
             }
             self.hover_lights = hl;
         }
-        let tip = if self.mode != Mode::Spaces && hit(&shell::dock_rect(), x, y) {
-            shell::dock_index(x - shell::dock_rect().x)
+        let tip = if self.mode != Mode::Spaces {
+            self.dock_layout.hit(x, y)
         } else {
             None
         };
@@ -2071,6 +2357,16 @@ impl Desktop {
                         self.close_launcher();
                         return;
                     }
+                }
+                Layer::DockIcons if self.dock_layout.hit(x, y).is_some() => {
+                    if self.menu.is_some() {
+                        self.set_menu(None);
+                        return;
+                    }
+                    if let Some(i) = self.dock_layout.hit(x, y) {
+                        self.click_dock(i);
+                    }
+                    return;
                 }
                 Layer::Panel(spec) if hit(&spec.rect, x, y) => {
                     let (lx, ly) = (x - spec.rect.x, y - spec.rect.y);

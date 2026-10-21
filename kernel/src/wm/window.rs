@@ -175,6 +175,8 @@ pub enum App {
     Welcome,
     /// Milk Drop: receiving files from another milkOS (apps/milkdrop.rs).
     Drop,
+    /// The trusted administrator password panel (authpanel.rs).
+    Auth,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -193,6 +195,7 @@ impl App {
             App::Powerbox => "Open",
             App::Welcome => "Welcome",
             App::Drop => "Milk Drop",
+            App::Auth => "Authorisation",
             App::Client(_) => "App",
         }
     }

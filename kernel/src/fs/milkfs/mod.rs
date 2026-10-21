@@ -57,7 +57,10 @@ pub fn probe(dev: &BlockRef) -> Option<Superblock> {
 /// `force`, and always (EBUSY) if it is the mounted volume's device.
 pub fn mkfs(dev: &BlockRef, label: &str, force: bool) -> Result<()> {
     if label.is_empty() || label.len() > format::LABEL_MAX || label.contains('/') {
-        return Err(Errno::EINVAL);
+        return fail(
+            Errno::EINVAL,
+            format!("labels are 1-{} characters without '/'", format::LABEL_MAX),
+        );
     }
     if PRIMARY
         .lock()
@@ -605,9 +608,18 @@ fn lock_one(v: &Arc<Volume>, path: &str, home: Option<&Arc<Volume>>) -> Result<(
 /// was the recovery key.
 pub fn change_passphrase(old: &str, new: &str) -> Result<()> {
     if new.len() < 8 {
-        return Err(Errno::EINVAL);
+        return fail(
+            Errno::EINVAL,
+            "the new passphrase needs 8 characters or more",
+        );
     }
     let v = primary()?;
+    if !v.state.lock().store.encrypted() {
+        return fail(
+            Errno::EINVAL,
+            format!("{} isn't encrypted: it has no passphrase", v.label),
+        );
+    }
     let r = v.state.lock().rewrap(old, new);
     audit_op("milkfs.passwd", "", &r);
     r
@@ -1250,6 +1262,7 @@ fn unmount_clone(name: &str) {
 /// [`discard_clone`].
 pub fn clone(snap: &str, name: &str) -> Result<String> {
     let v = primary()?;
+    records_room(&v)?;
     let id = v.state.lock().clone_create(snap, name)?;
     let r = mount_clone(&v, name, id);
     audit_op(
@@ -1369,12 +1382,36 @@ pub fn user_volume() -> Option<Arc<Volume>> {
 }
 
 fn primary() -> Result<Arc<Volume>> {
-    volume().ok_or(Errno::ENODEV)
+    match volume() {
+        Some(v) => Ok(v),
+        None if !LOCKED.lock().is_empty() => fail(
+            Errno::ENODEV,
+            "the volume is encrypted and locked: unlock it first (`snap unlock`)",
+        ),
+        None => fail(Errno::ENODEV, "no milkfs volume is mounted"),
+    }
+}
+
+/// ENOSPC with the reason when snapshots + clones are at the limit (before the generic
+/// "volume full" ENOSPC can be confused with it).
+fn records_room(v: &Volume) -> Result<()> {
+    if v.state.lock().records_full() {
+        return fail(
+            Errno::ENOSPC,
+            format!(
+                "{} snapshots and clones at most: delete one first",
+                format::MAX_SNAPS
+            ),
+        );
+    }
+    Ok(())
 }
 
 /// Take a snapshot of the primary volume.
 pub fn snapshot(name: &str) -> Result<SnapInfo> {
-    let r = primary()?.state.lock().snap_create(name);
+    let v = primary()?;
+    records_room(&v)?;
+    let r = v.state.lock().snap_create(name);
     audit_op("milkfs.snapshot", &alloc::format!("name={name}"), &r);
     r
 }
@@ -1524,6 +1561,9 @@ fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
     let (t, why) = (tid(), why.into());
     let mut r = REASON.lock();
     r.retain(|(x, _)| *x != t);
+    if r.len() >= 64 {
+        r.remove(0); // reasons nobody collected (kernel callers, not control writes)
+    }
     r.push((t, why));
     Err(e)
 }
@@ -1545,27 +1585,174 @@ fn run_control(name: &str, f: impl FnOnce() -> Result<()>) -> Result<()> {
     match r {
         Ok(()) => LAST_ERROR.lock().clear(),
         Err(e) => {
-            let why = why.unwrap_or_else(|| String::from(default_reason(name, e)));
+            let why = why.unwrap_or_else(|| String::from(explain(name, e)));
             *LAST_ERROR.lock() = format!("{name}: {}: {why}\n", e.name());
         }
     }
     r
 }
 
-/// Fallback text for an error no code path explained.
-fn default_reason(_name: &str, e: Errno) -> &'static str {
-    match e {
-        Errno::EBUSY => "the volume is busy",
-        Errno::EACCES => "not allowed",
-        Errno::EPERM => "not allowed",
-        Errno::ENOSPC => "the volume is full",
-        Errno::EINVAL => "bad request",
-        Errno::ENODEV => "no milkfs volume",
-        Errno::ENOENT => "no such snapshot, clone or file",
-        Errno::EEXIST => "that name is taken",
-        Errno::EIO => "disk error (or the volume needs a check)",
+/// What an errno from control `name` means, when the code that failed gave no reason of
+/// its own (docs/filesystem.md lists them next to each control).
+fn explain(name: &str, e: Errno) -> &'static str {
+    use Errno as E;
+    match (name, e) {
+        ("snapshot" | "clone", E::EINVAL) => {
+            "names are letters, digits and . _ - : (not . or ..); clone: write `SNAPSHOT NAME`"
+        }
+        ("snapshot" | "clone", E::ENAMETOOLONG) => "names are 47 characters at most",
+        ("snapshot" | "clone", E::EEXIST) => "a snapshot or clone already has that name",
+        ("clone" | "delete" | "rollback" | "diff", E::ENOENT) => "no such snapshot",
+        ("delete", E::EBUSY) => {
+            "a clone is built on that snapshot (discard or promote it first) or a send is reading it"
+        }
+        ("rollback", E::EBUSY) => {
+            "a newer snapshot that would go has a clone: discard or promote it first"
+        }
+        ("diff", E::EINVAL) => "write `A [B|live]`",
+        ("auto", E::EINVAL) => "write on, off, now, interval=15m, keep=N or daily=N",
+        ("bench", E::EINVAL) => "write `DIR N SIZE`",
+        ("treetest", E::EINVAL) => "write `DIR N`",
+        ("scrub", E::EBUSY) => "a scrub is already running",
+        ("scrub", E::EINVAL) => "write start, stop, rate=MB/s or auto=off|on|7d|12h",
+        ("unlock", E::ENODEV) => "nothing is locked (or no locked volume of that name)",
+        ("unlock", E::EACCES) => "wrong passphrase or recovery key",
+        ("unlock", E::EINVAL) => "write `[dev=NAME ]SECRET`",
+        ("unlock" | "passwd", E::EIO) => "the keyring can't be read (damaged?)",
+        ("lock", E::EINVAL) => "write a device, mount path, label or `all`",
+        ("passwd", E::EACCES) => "the current passphrase (or recovery key) is wrong",
+        ("passwd", E::EINVAL) => "write `OLD\nNEW`; the new passphrase needs 8 characters or more",
+        ("send", E::ENOENT) => "no such snapshot (or the output's folder doesn't exist)",
+        ("send", E::EINVAL) => "write `SNAP [FROM] PATH`; FROM must be older than SNAP",
+        ("send", E::ENOSPC) => "no room for the stream where it's going",
+        ("receive", E::ENOENT) => {
+            "the stream's base snapshot isn't on the target (or no such stream file)"
+        }
+        ("receive", E::EBUSY) => {
+            "the target changed since the base snapshot (`force` rolls it back), or a receive is already running"
+        }
+        ("receive", E::ENOTEMPTY) => "a full stream needs an empty volume",
+        ("receive", E::EEXIST) => "the target already has a snapshot of that name",
+        ("receive", E::EINVAL) => {
+            "not a milkfs stream, a newer stream format, or bad arguments (`PATH [TARGET] [force]`)"
+        }
+        ("receive", E::EIO) => "the stream is damaged or cut short (nothing was changed)",
+        ("dedupe", E::ENOENT) => "no such folder",
+        ("dedupe", E::ENOTDIR) => "not a folder",
+        ("dedupe", E::EOPNOTSUPP) => "not on a milkfs volume",
+        ("dedupe", E::EINVAL) => "write `DIR` or `DIR dry`",
+        ("versions" | "restore", E::EXDEV) => {
+            "not on the primary milkfs volume (or a snapshot of it)"
+        }
+        ("versions" | "restore", E::EISDIR) => "versions are kept for files, not folders",
+        ("versions", E::ENOENT) => "no such file",
+        ("restore", E::ENOENT) => "no such snapshot, or the file isn't in it",
+        ("restore", E::EINVAL) => "write `SNAPSHOT PATH`",
+        ("check", E::EINVAL) => "write `check` or `repair`",
+        ("discard" | "promote", E::ENOENT) => "no such clone",
+        ("promote", E::EEXIST) => {
+            "the snapshot `before-NAME` (the live state it keeps) exists already: delete it first"
+        }
+        ("promote", E::ENOSPC) => {
+            "30 snapshots and clones at most (promote keeps one more): delete a snapshot first"
+        }
+        ("mkfs", E::ENODEV) => "no such device",
+        ("mkfs", E::EEXIST) => "the device already holds milkfs: add `force` to erase it",
+        ("mkfs", E::EBUSY) => "that device is the mounted volume",
+        ("mkfs", E::EINVAL) => {
+            "write `DEVICE [LABEL] [force]`; labels are 1-31 characters without '/'"
+        }
+        (_, E::EACCES | E::EPERM) => "not allowed (needs an administrator)",
+        (_, E::ENOSPC) => "the volume is full",
+        (_, E::ENODEV) => "no milkfs volume is mounted",
+        (_, E::EIO) => {
+            "disk or checksum error, or the volume went read-only after a failed write (see the kernel log; `snap check`)"
+        }
+        (_, E::EROFS) => "read-only (a snapshot, or a read-only volume)",
+        (_, E::ENOMEM) => "out of memory",
+        (_, E::EINVAL) => "bad request",
+        (_, E::EBUSY) => "busy",
+        (_, E::ENOENT) => "not found",
         _ => "failed",
     }
+}
+
+/// Controls whose writes [`authorize`] checks first: they destroy or replace data
+/// (`delete`, `rollback`, `restore`, `discard`, `promote`, `receive`, `mkfs`, `check
+/// repair`, `auto` (its `keep=` prunes snapshots)), take a volume away (`lock`), change a
+/// key (`passwd`), or write and delete files anywhere as the kernel (`send`, `bench`,
+/// `treetest`, `dedupe`).
+pub const DESTRUCTIVE: &[&str] = &[
+    "delete", "rollback", "restore", "discard", "promote", "receive", "mkfs", "check", "auto",
+    "lock", "passwd", "send", "bench", "treetest", "dedupe",
+];
+
+/// The rule for [`authorize`]: `op` is the control (`check repair` for a repair); Err
+/// (EACCES or EPERM, with [`set_reason`] for the text) refuses the write.
+pub type Authorizer = fn(op: &str) -> Result<()>;
+static AUTHORIZER: crate::sync::FnSlot = crate::sync::FnSlot::new();
+
+/// Install (or with `None` remove) the authorisation rule for destructive controls
+/// (proc: an admin ticket). Returns the one it replaces.
+pub fn set_authorizer(f: Option<Authorizer>) -> Option<Authorizer> {
+    let old = AUTHORIZER.get::<Authorizer>();
+    match f {
+        Some(f) => AUTHORIZER.set(f),
+        None => AUTHORIZER.clear(),
+    }
+    old
+}
+
+/// May the caller run destructive control `op` (with argument `arg`)? The one place
+/// that decides, called with the writer's credentials (`fs::perm::who()`) before the
+/// control runs as the kernel. Without an installed [`Authorizer`]: yes, the open-time
+/// permission check (root, or group admin, docs/security.md) is the rule. `check` is
+/// only checked for `repair`.
+pub fn authorize(op: &str, arg: &[u8]) -> Result<()> {
+    let op = if op == "check" {
+        if arg.trim_ascii() != b"repair" {
+            return Ok(());
+        }
+        "check repair"
+    } else {
+        op
+    };
+    match AUTHORIZER.get::<Authorizer>() {
+        Some(f) => f(op),
+        None => Ok(()),
+    }
+}
+
+/// For an [`Authorizer`] (or anything under a control write): the reason shown in
+/// `/sys/fs/milkfs/error` for the error about to be returned.
+pub fn set_reason(why: &str) {
+    let _ = fail::<()>(Errno::EINVAL, why);
+}
+
+/// Register a control whose failures are explained in `error`.
+fn control(
+    dir: &Arc<SynthDir>,
+    name: &'static str,
+    read: impl Fn() -> String + Send + Sync + 'static,
+    write: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+) {
+    dir.add_control(name, read, move |b| run_control(name, || write(b)));
+}
+
+/// Same, for a [`DESTRUCTIVE`] control: [`authorize`] runs first, as the writer.
+fn guarded(
+    dir: &Arc<SynthDir>,
+    name: &'static str,
+    read: impl Fn() -> String + Send + Sync + 'static,
+    write: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+) {
+    debug_assert!(DESTRUCTIVE.contains(&name));
+    dir.add_guarded_control(
+        name,
+        read,
+        move |b| run_control(name, || authorize(name, b)),
+        move |b| run_control(name, || write(b)),
+    );
 }
 
 fn arg(buf: &[u8]) -> Result<&str> {
@@ -1581,22 +1768,24 @@ fn arg(buf: &[u8]) -> Result<&str> {
 pub fn sysfs(dir: &Arc<SynthDir>) {
     dir.add_file("info", info);
     dir.add_file("snapshots", snapshots_text);
-    dir.add_control("snapshot", snapshots_text, |b| {
+    control(dir, "snapshot", snapshots_text, |b| {
         snapshot(arg(b)?).map(|_| ())
     });
-    dir.add_control("delete", snapshots_text, |b| delete_snapshot(arg(b)?));
-    dir.add_control("rollback", snapshots_text, |b| rollback(arg(b)?));
-    dir.add_control("sync", String::new, |_| sync());
-    dir.add_control("auto", timemachine::status, |b| {
+    guarded(dir, "delete", snapshots_text, |b| delete_snapshot(arg(b)?));
+    guarded(dir, "rollback", snapshots_text, |b| rollback(arg(b)?));
+    control(dir, "sync", String::new, |_| sync());
+    guarded(dir, "auto", timemachine::status, |b| {
         timemachine::control(arg(b)?)
     });
     dir.add_file("clones", clones_text);
-    dir.add_control(
+    control(
+        dir,
         "diff",
         || LAST_DIFF.lock().clone(),
         |b| diff_control(arg(b)?),
     );
-    dir.add_control(
+    guarded(
+        dir,
         "bench",
         || LAST_BENCH.lock().clone(),
         |b| {
@@ -1610,8 +1799,11 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             bench_create(d, n, sz).map(|_| ())
         },
     );
-    dir.add_control("scrub", scrub::status_text, |b| scrub::control(arg(b)?));
-    dir.add_control(
+    control(dir, "scrub", scrub::status_text, |b| {
+        scrub::control(arg(b)?)
+    });
+    control(
+        dir,
         "unlock",
         || {
             let mut s = String::new();
@@ -1642,7 +1834,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             r
         },
     );
-    dir.add_control(
+    guarded(
+        dir,
         "lock",
         || {
             let mut s = String::new();
@@ -1665,14 +1858,12 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         },
         |b| {
             // `all` (every lockable volume) or `DEV|PATH|LABEL`
-            run_control("lock", || {
-                let t = arg(b)?;
-                lock((t != "all").then_some(t)).map(|_| ())
-            })
+            let t = arg(b)?;
+            lock((t != "all").then_some(t)).map(|_| ())
         },
     );
     dir.add_file("error", || LAST_ERROR.lock().clone());
-    dir.add_control("passwd", String::new, |b| {
+    guarded(dir, "passwd", String::new, |b| {
         // `OLD\nNEW` (each a whole line, so they may contain spaces)
         let mut raw = alloc::vec::Vec::from(b);
         let r = (|| {
@@ -1683,7 +1874,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         crate::crypto::wipe(&mut raw);
         r
     });
-    dir.add_control(
+    guarded(
+        dir,
         "send",
         || LAST_SEND.lock().clone(),
         |b| {
@@ -1696,7 +1888,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             }
         },
     );
-    dir.add_control(
+    guarded(
+        dir,
         "receive",
         || LAST_RECEIVE.lock().clone(),
         |b| {
@@ -1713,7 +1906,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             }
         },
     );
-    dir.add_control(
+    guarded(
+        dir,
         "dedupe",
         || LAST_DEDUPE.lock().clone(),
         |b| {
@@ -1726,7 +1920,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             dedupe(d, dry).map(|_| ())
         },
     );
-    dir.add_control(
+    guarded(
+        dir,
         "treetest",
         || LAST_TREETEST.lock().clone(),
         |b| {
@@ -1742,7 +1937,8 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             Ok(())
         },
     );
-    dir.add_control(
+    guarded(
+        dir,
         "check",
         || LAST_CHECK.lock().clone(),
         |b| {
@@ -1756,28 +1952,30 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             Ok(())
         },
     );
-    dir.add_control(
+    control(
+        dir,
         "versions",
         || LAST_VERSIONS.lock().clone(),
         |b| versions_control(arg(b)?),
     );
-    dir.add_control("restore", String::new, |b| {
+    guarded(dir, "restore", String::new, |b| {
         // `SNAPSHOT PATH` (the path may contain spaces).
         let (snap, path) = arg(b)?.split_once(' ').ok_or(Errno::EINVAL)?;
         restore_version(path.trim(), snap)
     });
-    dir.add_control("clone", clones_text, |b| {
+    control(dir, "clone", clones_text, |b| {
         let mut w = arg(b)?.split_whitespace();
         let (Some(snap), Some(name), None) = (w.next(), w.next(), w.next()) else {
             return Err(Errno::EINVAL);
         };
         clone(snap, name).map(|_| ())
     });
-    dir.add_control("discard", clones_text, |b| discard_clone(arg(b)?));
-    dir.add_control("promote", clones_text, |b| {
+    guarded(dir, "discard", clones_text, |b| discard_clone(arg(b)?));
+    guarded(dir, "promote", clones_text, |b| {
         promote_clone(arg(b)?).map(|_| ())
     });
-    dir.add_control(
+    guarded(
+        dir,
         "mkfs",
         || String::from("write: <device> [label] [force]\n"),
         |b| {

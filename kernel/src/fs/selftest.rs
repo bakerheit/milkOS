@@ -1000,6 +1000,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_scrub(t, &vol, VP, &dev);
     milkfs_spacemap(t);
     milkfs_statfs(t, VP);
+    milkfs_control_errors(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
@@ -2811,6 +2812,144 @@ fn notify_and_search(t: &mut T) {
     drop(w);
     search::reset();
     rm_rf(R);
+}
+
+/// `/sys/fs/milkfs` controls (on the test volume): the errno of a bad write, and
+/// `/sys/fs/milkfs/error` saying why; the authorisation hook for destructive ones.
+fn milkfs_control_errors(t: &mut T) {
+    let ctl = |name: &str, arg: &str| {
+        ops::write_file(&alloc::format!("/sys/fs/milkfs/{name}"), arg.as_bytes())
+    };
+    let error = || read_str("/sys/fs/milkfs/error");
+    let cases: [(&str, &str, Errno, &str); 9] = [
+        (
+            "snapshot",
+            "bad/name",
+            Errno::EINVAL,
+            "snapshot: EINVAL: names are letters",
+        ),
+        ("snapshot", "  \n", Errno::EINVAL, "snapshot: EINVAL: "),
+        (
+            "delete",
+            "no-such-snap",
+            Errno::ENOENT,
+            "delete: ENOENT: no such snapshot",
+        ),
+        (
+            "rollback",
+            "no-such-snap",
+            Errno::ENOENT,
+            "rollback: ENOENT: no such snapshot",
+        ),
+        (
+            "clone",
+            "no-such-snap c1",
+            Errno::ENOENT,
+            "clone: ENOENT: no such snapshot",
+        ),
+        (
+            "discard",
+            "no-such-clone",
+            Errno::ENOENT,
+            "discard: ENOENT: no such clone",
+        ),
+        (
+            "mkfs",
+            "nodev0",
+            Errno::ENODEV,
+            "mkfs: ENODEV: no such device",
+        ),
+        (
+            "lock",
+            "nodev0",
+            Errno::ENODEV,
+            "lock: ENODEV: no mounted milkfs volume nodev0",
+        ),
+        (
+            "passwd",
+            "old-fake-pass\nnew-fake-pass",
+            Errno::EINVAL,
+            "passwd: EINVAL: MilkTest isn't encrypted",
+        ),
+    ];
+    for (name, arg, want, text) in cases {
+        t.err(
+            ctl(name, arg),
+            want,
+            &alloc::format!("control {name} {arg:?}"),
+        );
+        let e = error();
+        t.ok(
+            e.starts_with(text) && e.ends_with('\n'),
+            &alloc::format!("error file after {name} {arg:?}: {e:?}, want {text:?}..."),
+        );
+    }
+    t.ok(
+        ctl("sync", "now").is_ok() && error().is_empty(),
+        "a write that works clears the error file",
+    );
+    // The snapshot + clone limit has its own reason (not "volume full").
+    let mut made = 0;
+    let full = loop {
+        match super::milkfs::snapshot(&alloc::format!("lim-{made}")) {
+            Ok(_) => made += 1,
+            Err(e) => break e,
+        }
+        if made > 40 {
+            break Errno::EINVAL;
+        }
+    };
+    t.ok(full == Errno::ENOSPC, "snapshots stop at the record limit");
+    t.err(
+        ctl("snapshot", "one-too-many"),
+        Errno::ENOSPC,
+        "snapshot at the limit",
+    );
+    t.ok(
+        error().starts_with("snapshot: ENOSPC: 30 snapshots and clones at most"),
+        &alloc::format!("limit reason: {:?}", error()),
+    );
+    for i in 0..made {
+        let _ = super::milkfs::delete_snapshot(&alloc::format!("lim-{i}"));
+    }
+    // The authorisation hook: refuses destructive controls only, with its reason.
+    fn deny(op: &str) -> Result<(), Errno> {
+        super::milkfs::set_reason(&alloc::format!("{op} needs an admin ticket (selftest)"));
+        Err(Errno::EACCES)
+    }
+    let prev = super::milkfs::set_authorizer(Some(deny));
+    t.err(
+        ctl("delete", "whatever"),
+        Errno::EACCES,
+        "hook refuses delete",
+    );
+    t.ok(
+        error() == "delete: EACCES: delete needs an admin ticket (selftest)\n",
+        &alloc::format!("hook's reason: {:?}", error()),
+    );
+    t.err(
+        ctl("check", "repair"),
+        Errno::EACCES,
+        "hook refuses check repair",
+    );
+    t.ok(
+        error().contains("check repair needs"),
+        "hook sees `check repair`",
+    );
+    t.ok(
+        ctl("check", "check").is_ok(),
+        "hook leaves a plain check alone",
+    );
+    t.ok(
+        ctl("snapshot", "hook-ok").is_ok() && super::milkfs::delete_snapshot("hook-ok").is_ok(),
+        "hook leaves snapshot alone",
+    );
+    super::milkfs::set_authorizer(prev);
+    t.err(
+        ctl("delete", "whatever"),
+        Errno::ENOENT,
+        "hook removed: delete runs again",
+    );
 }
 
 /// statfs on the RAM file systems, and the Linux `struct statfs` layout.

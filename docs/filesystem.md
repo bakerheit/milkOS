@@ -1197,6 +1197,62 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
 `user/snap` wraps them: `snap`, `snap info`, `snap create|delete|rollback NAME`,
 `snap clones`, `snap clone SNAP NAME`, `snap promote|discard NAME`, `snap auto [SETTINGS]`.
 
+### `/sys/fs/milkfs` reference: every file and its errors (for Disk Utility)
+
+**How errors come back.** A control is written with one `write(2)`; failure is that
+write's errno. Then `/sys/fs/milkfs/error` says why, one line:
+`CONTROL: ERRNO: reason` (e.g. `lock: EBUSY: vdb (Vault) is in use: pid 16 (sleep): 1
+open file`); a write that works empties it. It is the last failure on the system (not per
+process), so read it right after the failed write and check the control name. `snap`
+prints that reason. Writing nothing (a 0-byte write) does nothing at all.
+
+**Who may write.** At `open`: control files are root's, writable by root and the
+**admin** group (docs/security.md); anyone else gets EACCES from `open` itself (no
+`error` line, the control never ran). Then the destructive ones (marked **D** below,
+`fs::milkfs::DESTRUCTIVE`) pass `fs::milkfs::authorize(op, arg)` with the writer's
+credentials before running as the kernel: the one place that decides, by default "yes"
+(the open check is the rule); `fs::milkfs::set_authorizer(Some(rule))` installs a stricter
+one (proc's admin ticket), whose EACCES/EPERM and `set_reason` text show in `error`.
+`check` is only authorised for `repair`.
+
+Errors every control can give: ENODEV "no milkfs volume is mounted" / "the volume is
+encrypted and locked: unlock it first", EIO "disk or checksum error, or the volume went
+read-only after a failed write" (see the kernel log; `snap check`), ENOSPC "the volume is
+full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the usage.
+
+| file | read | write | errors (besides the common ones) |
+|---|---|---|---|
+| `info` | volume status | - | - |
+| `snapshots` | `NAME gen=G created=T` per line | - | - |
+| `clones` | `NAME of=SNAP at=PATH` | - | - |
+| `error` | last failure, `CONTROL: ERRNO: reason` | - | - |
+| `snapshot` | = `snapshots` | `NAME` | EINVAL bad name (letters, digits, `. _ - :`), ENAMETOOLONG over 47, EEXIST name taken, ENOSPC "30 snapshots and clones at most: delete one first" |
+| `delete` **D** | = `snapshots` | `NAME` | ENOENT no such snapshot, EBUSY a clone is built on it or a send is reading it |
+| `rollback` **D** | = `snapshots` | `NAME` | ENOENT, EBUSY a newer snapshot that would go has a clone |
+| `clone` | = `clones` | `SNAP NAME` | as `snapshot`, plus ENOENT no such snapshot |
+| `discard` **D** | = `clones` | `NAME` | ENOENT no such clone |
+| `promote` **D** | = `clones` | `NAME` | ENOENT no such clone, EEXIST snapshot `before-NAME` exists, ENOSPC no record left for `before-NAME` |
+| `restore` **D** | - | `SNAPSHOT PATH` | ENOENT no such snapshot or the file isn't in it, EINVAL usage, EXDEV not on the primary volume, EISDIR a folder |
+| `versions` | last result | `PATH` | ENOENT no such file, EXDEV, EISDIR |
+| `diff` | last result | `A [B\|live]` | ENOENT no such snapshot, EINVAL usage |
+| `sync` | - | anything | (common) |
+| `auto` **D** | Time Machine settings | `on`, `off`, `now`, `interval=15m`, `keep=N`, `daily=N` | EINVAL anything else |
+| `scrub` | progress, errors, last result | `start`, `stop`, `rate=MB/s`, `auto=off\|on\|7d\|12h` | EBUSY already running, EINVAL |
+| `check` **D** (repair) | last report | `check` or `repair` | EINVAL |
+| `send` **D** | last result | `SNAP [FROM] PATH` | ENOENT no such snapshot (or the output's folder), EINVAL usage or FROM not older, ENOSPC no room for the stream |
+| `receive` **D** | last result | `PATH [TARGET] [force]` | ENOENT base snapshot not on the target (or no stream file), EBUSY target changed since the base (`force` rolls back) or a receive running, ENOTEMPTY full stream needs an empty volume, EEXIST snapshot exists, EINVAL not a stream / newer format / usage, EIO damaged or cut short (nothing changed) |
+| `dedupe` **D** | last result | `DIR` or `DIR dry` | ENOENT, ENOTDIR, EOPNOTSUPP not on milkfs, EINVAL |
+| `unlock` | locked volumes, `vdb Vault locked` | `[dev=NAME ]SECRET` | ENODEV nothing (of that name) locked, EACCES wrong passphrase or recovery key, EINVAL usage, EIO keyring unreadable |
+| `lock` **D** | encrypted volumes and state | `DEV`, `PATH`, `LABEL` or `all` | EBUSY in use (names the processes) / home volume / send, receive or scrub running (the reason says which), EINVAL not encrypted or already locked, ENODEV no such mounted volume |
+| `passwd` **D** | - | `OLD\nNEW` | EACCES OLD is wrong, EINVAL NEW under 8 characters or the volume isn't encrypted, EIO |
+| `mkfs` **D** | usage | `DEVICE [LABEL] [force]` | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY the mounted volume, EINVAL label (1-31, no `/`) |
+| `bench` **D** | last result | `DIR N SIZE` | EINVAL usage |
+| `treetest` **D** | last result | `DIR N` | EINVAL usage |
+
+The reasons are in `explain()` in `kernel/src/fs/milkfs/mod.rs` (a control's own code can
+give a more exact one with `fail(errno, reason)`, as `lock` does); the self-test checks a
+sample of them and the authorisation hook (`milkfs_control_errors`).
+
 **mkfs** never runs on its own. In the kernel it is the explicit `mkfs()` call (or the
 `/sys/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless
 `force`, and always refuses the mounted volume (EBUSY). On the Mac:

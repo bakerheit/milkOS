@@ -1,0 +1,13 @@
+[package]
+name = "diskkit"
+version.workspace = true
+edition.workspace = true
+
+# The logic behind Disk Utility: parsing /sys/fs/milkfs/* and /proc/mounts, volume and snapshot
+# models, names, error words, backup file names. Pure (no syscalls); tests run on the host:
+# `scripts/diskkit-test.sh`.
+[lib]
+bench = false
+
+[dependencies]
+timekit = { path = "../timekit" }

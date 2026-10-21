@@ -108,6 +108,21 @@ impl Theme {
         }
     }
 
+    /// A calendar or list colour for thin shapes (a checkbox ring, a chart line): the darker "ink"
+    /// versions on the light theme (3:1 on milk), the plain accents on the dark one.
+    pub fn accent_ink(&self, name: &str) -> Color {
+        if self.dark {
+            return self.accent(name);
+        }
+        match name {
+            "matcha" => rgb(0x5B, 0x8A, 0x5E),
+            "blue" => rgb(0x4B, 0x63, 0xA8),
+            "honey" => rgb(0xA8, 0x78, 0x12),
+            "lav" => rgb(0x7E, 0x6A, 0xAE),
+            _ => rgb(0xC9, 0x56, 0x6B),
+        }
+    }
+
     /// `c` at `alpha`/255 over `under` (a tint).
     pub fn tint(under: Color, c: Color, alpha: u8) -> Color {
         gui::blend(under, c, alpha)

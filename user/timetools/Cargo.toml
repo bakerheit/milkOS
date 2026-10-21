@@ -8,6 +8,7 @@ edition.workspace = true
 #   alarm   add, list and switch alarms
 #   timer   start, pause and list countdown timers
 #   cal     a month view, an agenda and event editing
+#   remind  reminders: lists, due dates, repeat; alarmd rings them
 [[bin]]
 name = "alarmd"
 path = "src/bin/alarmd.rs"
@@ -29,6 +30,12 @@ bench = false
 [[bin]]
 name = "cal"
 path = "src/bin/cal.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "remind"
+path = "src/bin/remind.rs"
 test = false
 bench = false
 

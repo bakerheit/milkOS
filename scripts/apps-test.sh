@@ -78,5 +78,11 @@ set -- $pos
 q move $(( $1 + 1 + 347 )) $(( $2 + 33 + 20 )) click sleep 2 screendump "$T/activity-security.png"
 tr -d '\r' < "$LOG" | grep -a "window .* Activity Monitor" >/dev/null && ok "the Activity Monitor window is on the desktop" || bad "no Activity Monitor window"
 differ "$T/clock.png" "$T/activity-processes.png" && differ "$T/activity-processes.png" "$T/activity-security.png" && ok "Activity Monitor drew Processes, then a different Security screen" || bad "the Security tab did not open"
+ser "send:remind add Quick thing tomorrow at 5pm" "wait:$P" "send:open /bin/reminders" "wait:$P"
+sleep 3
+q screendump "$T/reminders.png"
+ser "send:cat /dev/wm" "wait:$P" "send:remind list" "wait:$P"
+tr -d '\r' < "$LOG" | grep -a "window .* Reminders" >/dev/null && ok "the Reminders window is on the desktop" || bad "no Reminders window"
+out "remind list" | grep -q "Quick thing" && ok "remind's sentence form reads the day and time" || bad "remind add did not understand the sentence"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "apps-test: PASS (screenshots in $T)"; else echo "apps-test: FAIL (logs and screenshots in $T)"; exit 1; fi

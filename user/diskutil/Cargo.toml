@@ -1,0 +1,17 @@
+[package]
+name = "diskutil"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "diskutil"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+diskkit = { path = "../diskkit" }
+timekit = { path = "../timekit" }
+timeio = { path = "../timeio" }

@@ -493,6 +493,13 @@ pub fn setup_persistent_etc(dir: &str) {
 /// Where packages live (`milk install`).
 pub const APPLICATIONS: &str = "/Applications";
 
+/// The one check for destructive control writes (rollback, delete, discard, promote,
+/// check repair, passwd, receive, mkfs): the writing process must be root or hold an
+/// admin authorisation ticket (proc/auth.rs), not just be in group admin.
+fn privileged(op: &str) -> Result<()> {
+    crate::proc::auth::require(&alloc::format!("milkfs.{op}"))
+}
+
 /// Persistent applications: bind `<volume>/Applications` onto `/Applications` (created
 /// empty the first time), so installed packages survive reboots and are part of the
 /// volume's snapshots and clones (`milk try`). Without a volume it stays on tmpfs.
@@ -1311,8 +1318,14 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
     dir.add_control("snapshot", snapshots_text, |b| {
         snapshot(arg(b)?).map(|_| ())
     });
-    dir.add_control("delete", snapshots_text, |b| delete_snapshot(arg(b)?));
-    dir.add_control("rollback", snapshots_text, |b| rollback(arg(b)?));
+    dir.add_control("delete", snapshots_text, |b| {
+        privileged("delete")?;
+        delete_snapshot(arg(b)?)
+    });
+    dir.add_control("rollback", snapshots_text, |b| {
+        privileged("rollback")?;
+        rollback(arg(b)?)
+    });
     dir.add_control("sync", String::new, |_| sync());
     dir.add_control("auto", timemachine::status, |b| {
         timemachine::control(arg(b)?)
@@ -1370,6 +1383,7 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         },
     );
     dir.add_control("passwd", String::new, |b| {
+        privileged("passwd")?;
         // `OLD\nNEW` (each a whole line, so they may contain spaces)
         let mut raw = alloc::vec::Vec::from(b);
         let r = (|| {
@@ -1397,6 +1411,7 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         "receive",
         || LAST_RECEIVE.lock().clone(),
         |b| {
+            privileged("receive")?;
             // `PATH [TARGET] [force]`
             let mut w: alloc::vec::Vec<&str> = arg(b)?.split_whitespace().collect();
             let force = w.last() == Some(&"force");
@@ -1448,6 +1463,9 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
                 "repair" => true,
                 _ => return Err(Errno::EINVAL),
             };
+            if repair {
+                privileged("check repair")?;
+            }
             let r = check(repair)?;
             *LAST_CHECK.lock() = r.text();
             Ok(())
@@ -1470,14 +1488,19 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         };
         clone(snap, name).map(|_| ())
     });
-    dir.add_control("discard", clones_text, |b| discard_clone(arg(b)?));
+    dir.add_control("discard", clones_text, |b| {
+        privileged("discard")?;
+        discard_clone(arg(b)?)
+    });
     dir.add_control("promote", clones_text, |b| {
+        privileged("promote")?;
         promote_clone(arg(b)?).map(|_| ())
     });
     dir.add_control(
         "mkfs",
         || String::from("write: <device> [label] [force]\n"),
         |b| {
+            privileged("mkfs")?;
             let mut words = arg(b)?.split_whitespace();
             let dev = words.next().ok_or(Errno::EINVAL)?;
             let (mut label, mut force) = ("Milk", false);

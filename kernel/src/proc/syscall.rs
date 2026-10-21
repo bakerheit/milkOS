@@ -69,6 +69,8 @@ pub mod nr {
     /// milkOS: ask the user for a file through the wm's trusted Open/Save panel (powerbox);
     /// the chosen path is granted to the caller and returned opened. docs/security.md.
     pub const MILK_POWERBOX: u64 = 0x1001;
+    /// Admin authorisation tickets (proc/auth.rs): (op, a, b, c, d).
+    pub const MILK_AUTH: u64 = 0x1003; // 0x1002 is MILK_OPENPTY (proc/sock.rs)
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -203,6 +205,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
     match nr {
         n if super::sock::handles(n) => super::sock::dispatch(n, a),
         n if super::epoll::handles(n) => super::epoll::dispatch(n, a),
+        nr::MILK_AUTH => sys_auth(a0, a1, a2, a3, a[4] as usize),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),
@@ -987,6 +990,51 @@ fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> 
 /// caller's fs grants (just that file) and returned as an open fd. Cancel: ECANCELED, no
 /// grant. A signal: EINTR (the panel goes away). Needs the windows capability. Audited as
 /// `powerbox.grant` / `powerbox.cancel`.
+/// MILK_AUTH(op, ...): 0 = ask the desktop's trusted panel (reason, reason_len);
+/// 1 = with a password the caller read itself (password, len, user, user_len; user 0 =
+/// the caller's own account); 2 = revoke; 3 = milliseconds left (0: none).
+/// Returns the ticket's lifetime in ms for 0 / 1.
+fn sys_auth(op: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> KResult<usize> {
+    use super::auth;
+    let text = |va: usize, len: usize| -> KResult<String> {
+        if va == 0 || len == 0 {
+            return Ok(String::new());
+        }
+        let b = copy_in(va, len.min(256))?;
+        Ok(String::from_utf8_lossy(&b).into_owned())
+    };
+    let ms = |ns: u64| (ns / 1_000_000) as usize;
+    match op {
+        0 => {
+            let reason = text(a1, a2)?;
+            if !super::current_caps().windows {
+                return Err(super::caps::deny("auth", "need=windows"));
+            }
+            auth::authorize_with_panel(&reason).map(ms)
+        }
+        1 => {
+            let mut pw = text(a1, a2)?;
+            let user = match text(a3, a4)? {
+                u if u.is_empty() => super::login::lookup_uid(cred().ruid)
+                    .map(|a| a.name)
+                    .ok_or(EPERM)?,
+                u => u,
+            };
+            let r = auth::grant(&user, &pw, "password", "terminal");
+            // Don't leave the password lying in the heap.
+            // SAFETY: overwriting our own String's bytes with zeros keeps it valid UTF-8.
+            unsafe { pw.as_bytes_mut().fill(0) };
+            r.map(ms)
+        }
+        2 => {
+            auth::revoke();
+            Ok(0)
+        }
+        3 => Ok(auth::left(sched::current_pid()).map_or(0, ms)),
+        _ => Err(EINVAL),
+    }
+}
+
 fn sys_powerbox(mode: usize, name: usize, name_len: usize) -> KResult<usize> {
     let caps = super::current_caps();
     if !caps.windows {

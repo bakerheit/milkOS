@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod asid;
+pub mod auth;
 pub mod caps;
 pub mod cred;
 pub mod elf;
@@ -746,6 +747,7 @@ pub fn exit_current(wstatus: i32) -> ! {
 /// Zombify the current process (its last thread is exiting) with `wstatus`.
 fn finish_process(wstatus: i32) -> ! {
     let me = current();
+    auth::forget(me.pid);
     let kttbr = mmu::kernel_ttbr0();
     sched::with_current_user(|u| {
         if let Some(u) = u {

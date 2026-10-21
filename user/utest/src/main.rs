@@ -1680,6 +1680,101 @@ fn t_svc() -> bool {
     )
 }
 
+/// Admin authorisation tickets: destructive milkfs controls need one (not just group
+/// admin); wrong password refused; a ticket works, isn't inherited by fork, survives exec
+/// (`auth`), shows in /proc, can be revoked; 3 wrong passwords lock the user out.
+fn t_auth() -> bool {
+    if sys::geteuid() == 0 {
+        return as_milk("auth", "authorisation");
+    }
+    let ctl = "/sys/fs/milkfs/delete";
+    if sys::stat_path(ctl, true).is_err() {
+        return check("authorisation", true, "skipped: no milkfs volume");
+    }
+    let del = || -> Option<i32> {
+        let fd = sys::open(ctl, sys::O_WRONLY).ok()?;
+        let r = sys::write(fd, b"no-such-snapshot-utest");
+        let _ = sys::close(fd);
+        Some(match r {
+            Ok(_) => 0,
+            Err(e) => e.0,
+        })
+    };
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    t(del() == Some(1)); // 0: admin group alone: EPERM
+    t(matches!(
+        sys::authorize_password("wrong", ""),
+        Err(sys::Errno(13))
+    )); // 1
+    let granted = sys::authorize_password("milk", "");
+    t(granted.is_ok_and(|ms| ms >= 299_000)); // 2: 5 minutes
+    t(del().is_some_and(|e| e != 1)); // 3: past the permission check (no such snapshot)
+    let status = sys::read_file("/proc/self/status").unwrap_or_default();
+    t(String::from_utf8_lossy(&status).contains("Auth:\tadmin ticket from uid 501")); // 4
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        sys::exit(if sys::auth_left() == 0 && del() == Some(1) {
+            0
+        } else {
+            1
+        });
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    t(st == 0); // 5: not inherited
+    sys::auth_revoke();
+    t(sys::auth_left() == 0 && del() == Some(1)); // 6: revoked
+    // 7: `auth` keeps the ticket across exec.
+    let (r, w) = sys::pipe().unwrap();
+    let (r2, w2) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::dup2(r, 0);
+        let _ = sys::dup2(w2, 1);
+        let _ = sys::execve("/bin/auth", &["auth", "-S", "/bin/auth", "-s"], &[]);
+        sys::exit(127);
+    }
+    let _ = sys::close(r);
+    let _ = sys::close(w2);
+    let _ = sys::write_all(w, b"milk\n");
+    let _ = sys::close(w);
+    let mut out = Vec::new();
+    let mut b = [0u8; 256];
+    while let Ok(k @ 1..) = sys::read(r2, &mut b) {
+        out.extend_from_slice(&b[..k]);
+    }
+    let _ = sys::close(r2);
+    let _ = sys::wait4(pid as i32, 0);
+    let out = String::from_utf8_lossy(&out);
+    t(out.contains("ticket: ") && out.contains("s left")); // 7
+    // 8: rate limit: three wrong in a row, then even the right one is refused for a while.
+    for _ in 0..3 {
+        let _ = sys::authorize_password("wrong", "");
+    }
+    let locked = sys::authorize_password("milk", "");
+    t(matches!(locked, Err(sys::Errno(11)))); // 8
+    let audit = sys::read_file("/proc/audit").unwrap_or_default();
+    let audit = String::from_utf8_lossy(&audit);
+    t(audit.contains("auth.grant")
+        && audit.contains("auth.deny")
+        && audit.contains("auth.required")); // 9
+    let want = (1u32 << n) - 1;
+    check(
+        "authorisation",
+        bits == want,
+        &alloc::format!(
+            "checks {bits:#b} (want {want:#b}); auth -s said {:?}",
+            out.trim()
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1739,6 +1834,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "svc" || what == "all" {
         ok &= t_svc();
+    }
+    if what == "auth" || what == "all" {
+        ok &= t_auth();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

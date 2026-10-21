@@ -23,6 +23,7 @@
 /bin/chown   target/user/aarch64-unknown-none-softfloat/release/chown   755
 /bin/log     target/user/aarch64-unknown-none-softfloat/release/log     755
 /bin/svc     target/user/aarch64-unknown-none-softfloat/release/svc     755
+/bin/auth    target/user/aarch64-unknown-none-softfloat/release/auth    755
 /bin/milkd   target/user/aarch64-unknown-none-softfloat/release/milkd   755
 # Set-user-ID root (4755): they check a password themselves, then switch ids.
 /bin/su      target/user/aarch64-unknown-none-softfloat/release/su      4755

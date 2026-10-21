@@ -213,6 +213,8 @@ fn status(pid: Pid) -> String {
     let cpu = cpu_ns(&p);
     let psr = thread_of(&p).map_or(0, |t| t.cpu);
     let c = *p.cred.lock();
+    // Before taking `inner` (the ticket lookup reads the start time from it).
+    let auth = super::auth::left(pid).map(|ns| (ns, super::auth::granted_by(pid).unwrap_or(0)));
     let i = p.inner.lock();
     let rss = i.space.as_ref().map_or(0, |s| s.resident()) / 1024;
     let (mut ign, mut cgt) = (0u64, 0u64);
@@ -237,6 +239,13 @@ fn status(pid: Pid) -> String {
     let groups: Vec<String> = c.groups().iter().map(|g| format!("{g}")).collect();
     let _ = writeln!(s, "Groups:\t{}", groups.join(" "));
     let _ = writeln!(s, "Caps:\t{}", i.caps.summary());
+    if let Some((ns, by)) = auth {
+        let _ = writeln!(
+            s,
+            "Auth:\tadmin ticket from uid {by}, {} s left",
+            ns / 1_000_000_000
+        );
+    }
     let _ = writeln!(s, "FDSize:\t{}", i.fds.count());
     let _ = writeln!(s, "VmRSS:\t{rss} kB");
     let _ = writeln!(s, "Threads:\t{}", i.threads.len().max(1));

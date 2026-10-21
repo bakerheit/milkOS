@@ -132,7 +132,10 @@ fn milkfs_rule(op: &str) -> crate::fs::Result<()> {
     }
     let pid = crate::sched::current_pid();
     if PROMPT.get::<Prompt>().is_none() && is_desktop_app(pid) {
-        crate::audit!("auth.legacy", "pid={pid} op=milkfs.{op} (no trusted panel yet)");
+        crate::audit!(
+            "auth.legacy",
+            "pid={pid} op=milkfs.{op} (no trusted panel yet)"
+        );
         return Ok(());
     }
     if require(&alloc::format!("milkfs.{op}")).is_ok() {

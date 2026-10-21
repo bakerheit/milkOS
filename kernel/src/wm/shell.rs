@@ -168,6 +168,80 @@ pub(super) enum Status {
     Focus,
     /// The unread count; opens the notification drawer.
     Bell,
+    /// A timer an app publishes ("04:32", /dev/wm `timer`), by its place in [`timers`].
+    Timer(usize),
+}
+
+// ---- menu bar timer items (/dev/wm `timer`) -------------------------------------------------
+
+/// A countdown an app shows in the menu bar while it runs (SPEC-APPS Timer).
+#[derive(Clone)]
+pub struct TimerItem {
+    /// Who publishes it (one item per app).
+    pub app: String,
+    pub text: String,
+    /// What a click opens (an app name or path for `open`); default the app.
+    pub open: String,
+    /// Gone unless refreshed by then (a publisher that dies leaves no stale item).
+    pub until_ns: u64,
+}
+
+static TIMERS: crate::sync::SpinLock<Vec<TimerItem>> = crate::sync::SpinLock::new(Vec::new());
+static TIMERS_GEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// How long an item lives without a refresh.
+const TIMER_TTL_NS: u64 = 5_000_000_000;
+
+/// Set (or with empty `text`, clear) `app`'s menu bar timer. Any thread.
+pub fn set_timer(app: &str, text: &str, open: Option<&str>) {
+    {
+        let mut t = TIMERS.lock();
+        t.retain(|i| i.app != app);
+        if !text.trim().is_empty() {
+            let text: String = text.trim().chars().take(12).collect();
+            t.push(TimerItem {
+                app: String::from(app),
+                text,
+                open: String::from(open.unwrap_or(app)),
+                until_ns: crate::timer::now_ns() + TIMER_TTL_NS,
+            });
+        }
+    }
+    TIMERS_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    super::WAKE.wake_all();
+}
+
+/// The current items (expired ones dropped).
+pub fn timers() -> Vec<TimerItem> {
+    let now = crate::timer::now_ns();
+    let mut t = TIMERS.lock();
+    let n = t.len();
+    t.retain(|i| i.until_ns > now);
+    if t.len() != n {
+        TIMERS_GEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    t.clone()
+}
+
+/// Bumped on every change (the menu bar redraws).
+pub fn timers_gen() -> u32 {
+    TIMERS_GEN.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// A timer item's width: the stopwatch glyph, the text, the straw tint's padding.
+fn timer_w(text: &str) -> i32 {
+    8 + 12 + 4 + super::fontx::prop_width(text, false) + 8
+}
+
+/// The menu bar timer: a straw-tinted pill with a small stopwatch and the text.
+fn paint_timer(p: &mut Painter, x: i32, text: &str) {
+    let w = timer_w(text);
+    p.rrect(x, 4, w, 20, 10, STRAW, a(270));
+    let (gx, gy) = (x + 8, 8);
+    p.ring(gx, gy + 1, 12, 2, ESPRESSO, 255);
+    p.fill(gx + 5, gy - 2, 2, 3, ESPRESSO);
+    p.fill(gx + 5, gy + 4, 2, 4, ESPRESSO);
+    p.text_p(gx + 16, MENU_TEXT_Y, text, ESPRESSO, false);
 }
 
 // ---- dock ---------------------------------------------------------------------------------
@@ -923,7 +997,15 @@ impl Desktop {
     /// clock (SPEC "Menu bar status area"). Each hit target is the item plus half the gap
     /// on each side, the bar's full height.
     pub(super) fn status_items(&self) -> Vec<(Status, i32, i32)> {
-        status_layout(&self.status, self.cpu_loads.len(), self.settings.focus_mode)
+        let mut v = status_layout(&self.status, self.cpu_loads.len(), self.settings.focus_mode);
+        // App timers, left of the bell.
+        let mut x = v.last().map_or(screen_w() - MENU_PAD_X, |&(_, x, _)| x);
+        for (i, t) in timers().iter().enumerate() {
+            let w = timer_w(&t.text);
+            x -= STATUS_GAP + w;
+            v.push((Status::Timer(i), x, w));
+        }
+        v
     }
 
     pub(super) fn status_text(&self) -> String {
@@ -1036,6 +1118,11 @@ impl Desktop {
                 Status::Network => paint_network(p, x, 6, network_up()),
                 Status::Focus => paint_moon(p, x, 6),
                 Status::Bell => super::notif::paint_bell(p, x + 1, 6, self.unread(), false),
+                Status::Timer(i) => {
+                    if let Some(t) = timers().get(i) {
+                        paint_timer(p, x, &t.text);
+                    }
+                }
             }
         }
     }
@@ -1448,6 +1535,14 @@ impl Desktop {
                         Status::Bell => {
                             self.control = false;
                             self.toggle_notif();
+                        }
+                        Status::Timer(i) => {
+                            // The app that runs it (or what it asked to open).
+                            if let Some(t) = timers().get(i) {
+                                self.close_notif();
+                                self.control = false;
+                                self.open_any(&t.open);
+                            }
                         }
                     }
                 } else if let Some(t) = self.menu_title_at(x) {

@@ -401,6 +401,14 @@ notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snoo
     `gui::notify(app, title, sub, tag, &[labels])` and `Event::Action { tag, index }`. A
     poster with no window gets nothing (the press is logged).
 
+**A timer in the menu bar.** `timer <text>[\t<option>...]` shows a countdown left of the
+bell ("04:32", a stopwatch on a straw tint), one per app, so a Clock timer stays visible
+after its window closes. Options: `app=<name>` (default: the writing program) and
+`open=<what>` (what a click opens, as for `open`; default the app, e.g. `/bin/clock`).
+Empty text clears it; an item not refreshed for 5 s goes by itself, so a publisher
+refreshes it every second and one that dies leaves nothing behind. `user/gui`:
+`gui::menu_timer(app, text, open)`.
+
 The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
 LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
 `Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,

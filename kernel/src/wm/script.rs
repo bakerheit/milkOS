@@ -1188,6 +1188,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.drag(255 + 562 - 6, 177 + 414 - 6, 980, 660, 16)
                 .wait(1200);
         }
+        // A menu bar timer (/dev/wm timer): a shell loop refreshes "04:32" the way a Clock
+        // timer does; dark too.
+        "menu-timer" => {
+            b.wait(300)
+                .typ("echo -e 'timer\\t04:32\\tapp=Clock' > /dev/wm")
+                .enter()
+                .wait(600);
+            let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
+            b.glide(600, 400, x - 60, y + 40, 8).wait(200);
+        }
         "drop-bob-wait" | "drop-bob-accept" | "drop-bob-received" => {
             b.wait(300).typ("drop name bob").enter().wait(1500);
             b.typ("open milkdrop").enter().wait(1000);

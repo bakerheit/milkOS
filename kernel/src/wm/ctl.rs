@@ -11,6 +11,10 @@
 //!                             command, pressing it runs that program, an absolute path
 //!                             or a /bin name and its words, or `open <what>`; without
 //!                             one, the posting program's window gets an action event)
+//! timer <text>[\t<option>...]  a countdown in the menu bar ("04:32"), one per app, gone
+//!                             5 s after the last refresh or with empty text; options:
+//!                             app=<name> (default: the writing program), open=<what>
+//!                             (what a click opens; default the app)
 //! today | spaces | desktop | skim | lock
 //! ```
 //!
@@ -74,6 +78,21 @@ pub fn command(line: &str) -> bool {
             } else {
                 super::notify_with(app, t, s, tag, actions);
             }
+            true
+        }
+        "timer" => {
+            let mut fields = rest.split('\t');
+            let text = fields.next().unwrap_or("");
+            let (mut app, mut open) = (None, None);
+            for f in fields {
+                match f.split_once('=') {
+                    Some(("app", v)) if !v.is_empty() => app = Some(String::from(v)),
+                    Some(("open", v)) if !v.is_empty() => open = Some(v),
+                    _ => return false,
+                }
+            }
+            let app = app.unwrap_or_else(super::poster);
+            super::shell::set_timer(&app, text, open);
             true
         }
         "today" => {

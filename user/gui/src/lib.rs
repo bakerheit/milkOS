@@ -569,6 +569,24 @@ pub fn notify(app: &str, title: &str, sub: &str, tag: u32, actions: &[&str]) -> 
     ok
 }
 
+/// Show (or with empty `text`, clear) this app's countdown in the menu bar ("04:32"): one
+/// item per `app`, gone 5 s after the last call, so call it every second while it runs.
+/// A click on it opens `open` (an app or program name; empty: `app`).
+pub fn menu_timer(app: &str, text: &str, open: &str) -> bool {
+    let clean = |s: &str| s.replace(['\t', '\n'], " ");
+    let mut line = alloc::format!("timer\t{}\tapp={}", clean(text), clean(app));
+    if !open.is_empty() {
+        line.push_str(&alloc::format!("\topen={}", clean(open)));
+    }
+    line.push('\n');
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY) else {
+        return false;
+    };
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
+}
+
 /// Blend `src` over `dst` at `a` (0..=255).
 pub fn blend(dst: Color, src: Color, a: u8) -> Color {
     let a = a as u32;

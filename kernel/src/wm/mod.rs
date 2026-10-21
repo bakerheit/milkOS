@@ -381,6 +381,8 @@ pub struct Desktop {
     toasts: Vec<shell::Toast>,
     /// The toast button under the pointer: (toast, index).
     toast_hover: Option<(u32, usize)>,
+    /// The menu bar timers as last drawn (shell::timers_gen).
+    timers_seen: u32,
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
@@ -467,6 +469,7 @@ impl Desktop {
             control: false,
             toasts: Vec::new(),
             toast_hover: None,
+            timers_seen: 0,
             next_toast: 1,
             settings: Settings {
                 focus_mode: false,
@@ -820,6 +823,13 @@ impl Desktop {
                 return self.open(App::Browser);
             }
             _ => {}
+        }
+        // A program by name (`open clock`): /bin/<name>.
+        if !what.contains('/') && !what.is_empty() {
+            let bin = alloc::format!("/bin/{}", what.to_ascii_lowercase());
+            if crate::fs::stat(&bin).is_ok() {
+                return self.launch(&bin);
+            }
         }
         let path = apps::fsx::resolve("/", what);
         if apps::fsx::is_dir(&path) {
@@ -1679,8 +1689,12 @@ impl Desktop {
                 // A new minute: the centre's clock and "n min ago".
                 self.notif_tick();
             }
-            if st != self.status || changed {
+            // App timers in the menu bar: new text, or one that expired.
+            let _ = shell::timers();
+            let tg = shell::timers_gen();
+            if st != self.status || changed || tg != self.timers_seen {
                 self.status = st;
+                self.timers_seen = tg;
                 self.invalidate(PanelKey::MenuBar);
             }
             if self.mode == Mode::Home {

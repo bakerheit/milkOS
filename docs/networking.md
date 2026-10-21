@@ -352,6 +352,14 @@ speak the protocol. It can run the CLI:
 
 Kept stable for that: the line prefixes above, the table columns, the exit status.
 
+The desktop does exactly this (`kernel/src/wm/apps/milkdrop.rs`, on a tty of its own,
+`wm::tty::Job`): Files > Share... (or the toolbar's Share, or a file dropped on a NEARBY
+device in the sidebar, which lists `/tmp/drop/peers`) opens the sheet, which rescans with
+`MILK_TABLE=1 drop list` and runs `drop send`; the Milk Drop window (File > Receive with
+Milk Drop, or `open milkdrop`) runs `drop recv -k` and answers its prompt. To see it with
+two machines: `scripts/wm-drop-demo.sh ALICE_DEMO BOB_DEMO OUTDIR` (e.g. `drop-alice-send
+drop-bob-wait`), two desktops with linked eth1s on private images.
+
 **Test**: `scripts/drop-test.sh` (below).
 
 ## In-kernel HTTP server (demo, off by default)

@@ -114,8 +114,25 @@ pub fn toast_rect(i: usize) -> Rect {
     )
 }
 
-/// The bell's room in the menu bar (left of the cpu meter).
-const BELL_SLOT: i32 = 30;
+/// SPEC "Menu bar status area": 16px glyphs, 12px apart, right to left from the clock.
+const STATUS_GAP: i32 = 12;
+
+/// The menu bar's status items, right to left from the clock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Status {
+    /// Opens Today.
+    Clock,
+    /// Opens Activity (`top` in a Terminal tab until there is an Activity app).
+    Cpu,
+    /// Opens the Control centre.
+    Volume,
+    /// Opens the Control centre.
+    Network,
+    /// Shown only while Focus is on; opens the Control centre.
+    Focus,
+    /// The unread count; opens the notification drawer.
+    Bell,
+}
 
 // ---- dock ---------------------------------------------------------------------------------
 
@@ -235,9 +252,11 @@ fn tiles() -> Vec<Tile> {
         })
         .collect();
     for (i, p) in super::packages::all().into_iter().enumerate() {
+        // The Store is the one package with its own glyph (a box), not an initial.
+        let store = p.exec.rsplit('/').next() == Some("store");
         v.push(Tile {
             name: p.label,
-            icon: None,
+            icon: store.then_some(Icon::Package),
             bg: p.color,
             fg: INK,
             action: DockAction::Pkg(i),
@@ -265,6 +284,24 @@ pub fn dock_index(lx: i32) -> Option<usize> {
 }
 
 impl Desktop {
+    /// Do what dock tile `i` does (the dock and Today's Apps card).
+    pub(super) fn activate_tile(&mut self, i: usize) {
+        let Some(t) = tiles().into_iter().nth(i) else {
+            return;
+        };
+        match t.action {
+            DockAction::App(a) => self.open(a),
+            DockAction::Home => self.toggle_mode(Mode::Home),
+            DockAction::Spaces => self.toggle_mode(Mode::Spaces),
+            DockAction::Program(path) => self.launch(path),
+            DockAction::Pkg(k) => {
+                if let Some(p) = super::packages::get(k) {
+                    self.launch_package(&p);
+                }
+            }
+        }
+    }
+
     /// The dock tile an app lives in (where minimise flies to); bottom centre if none.
     pub(super) fn dock_slot(&self, app: App) -> Rect {
         let prog = match app {
@@ -330,7 +367,7 @@ pub struct Entry {
     pub action: Action,
 }
 
-pub const ENTRIES: [Entry; 12] = [
+pub const ENTRIES: [Entry; 13] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -370,6 +407,14 @@ pub const ENTRIES: [Entry; 12] = [
         bg: HONEY,
         fg: INK,
         action: Action::Program("/bin/paint"),
+    },
+    Entry {
+        name: "Milk Drop",
+        sub: "Receive files from another milkOS on the link",
+        icon: Icon::Globe,
+        bg: LAV,
+        fg: INK,
+        action: Action::App(App::Drop),
     },
     Entry {
         name: "Browser",
@@ -584,12 +629,58 @@ fn card_rect(i: u8) -> Rect {
     }
 }
 
-const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
-    (App::Files, Icon::Folder, HONEY, FOLDER_A, COCOA),
-    (App::Terminal, Icon::Term, TERM_BG, 255, TERM_FG),
-    (App::Notes, Icon::Note, CREAM, 255, ESPRESSO),
-    (App::Settings, Icon::Gear, LATTE, 255, ESPRESSO),
-];
+/// The Today Apps card's icons: the dock's tiles at 40px, five to a row.
+const HOME_ICON: i32 = 40;
+const HOME_COLS: i32 = 5;
+
+/// Where Apps-card tile `k` sits in a card `w` wide (None past the second row).
+fn home_app_rect(k: usize, w: i32) -> Option<Rect> {
+    let k = k as i32;
+    let (col, row) = (k % HOME_COLS, k / HOME_COLS);
+    if row > 1 {
+        return None;
+    }
+    let step = (w - 32) / HOME_COLS;
+    Some(Rect::new(
+        16 + col * step + (step - HOME_ICON) / 2,
+        40 + row * 72,
+        HOME_ICON,
+        HOME_ICON,
+    ))
+}
+
+/// Which dock tile the Apps card has at (x, y), in card coordinates.
+fn home_app_at(x: i32, y: i32) -> Option<usize> {
+    let w = card_rect(5).w;
+    (0..tiles().len()).find(|&k| home_app_rect(k, w).is_some_and(|r| hit(&r, x, y)))
+}
+
+/// A dock tile's icon, `s` across at (x, y): its glyph, or a package's colour and initial.
+fn paint_tile(p: &mut Painter, x: i32, y: i32, s: i32, t: &Tile) {
+    match t.icon {
+        Some(icon) => icons::draw(p, x, y, s, icon, t.bg, 255, t.fg, t.bg == MILK),
+        None => {
+            let r = (s * 24 + 50) / 100;
+            p.rrect(x, y, s, s, r, t.bg, 255);
+            let c: String = t
+                .name
+                .chars()
+                .take(1)
+                .flat_map(char::to_uppercase)
+                .collect();
+            let scale = if s >= 44 { 2 } else { 1 };
+            let cw = crate::font::str_width(&c, scale);
+            p.text_x(
+                x + (s - cw) / 2,
+                y + (s - 16 * scale) / 2,
+                &c,
+                t.fg,
+                scale,
+                true,
+            );
+        }
+    }
+}
 
 // ---- spaces -------------------------------------------------------------------------------
 
@@ -620,8 +711,12 @@ fn space_label(i: usize) -> String {
     format!("{} {}", i + 1, SPACE_NAMES[i.min(SPACE_NAMES.len() - 1)])
 }
 
+/// "1h 05m"; empty for the first minute ("0h 00m" on a fresh boot looked broken).
 pub fn fmt_uptime(ns: u64) -> String {
     let s = ns / 1_000_000_000;
+    if s < 60 {
+        return String::new();
+    }
     format!("{}h {:02}m", s / 3600, s / 60 % 60)
 }
 
@@ -788,26 +883,23 @@ impl Desktop {
         v
     }
 
-    pub(super) fn status_text(&self) -> String {
-        let t = rtc::now();
-        format!(
-            "{} {:02}:{:02}",
-            &rtc::DAYS[t.weekday as usize][..3],
-            t.hour,
-            t.minute
-        )
+    /// The status items with their x and width in the menu bar, right to left from the
+    /// clock (SPEC "Menu bar status area"). Each hit target is the item plus half the gap
+    /// on each side, the bar's full height.
+    pub(super) fn status_items(&self) -> Vec<(Status, i32, i32)> {
+        status_layout(&self.status, self.cpu_loads.len(), self.settings.focus_mode)
     }
 
-    /// Width of the menu bar's right side: the bell + "cpu" + one bar per CPU + gap + the
-    /// clock.
-    pub(super) fn status_width(&self) -> i32 {
-        let n = self.cpu_loads.len().max(1) as i32;
-        BELL_SLOT
-            + super::fontx::prop_width("cpu", false)
-            + 4
-            + n * 6
-            + 14
-            + super::fontx::prop_width(&self.status, false)
+    pub(super) fn status_text(&self) -> String {
+        status_clock()
+    }
+
+    /// Which status item is at menu bar x (hit targets reach halfway into the gaps).
+    pub(super) fn status_at(&self, x: i32) -> Option<Status> {
+        self.status_items()
+            .into_iter()
+            .find(|&(_, ix, w)| x >= ix - STATUS_GAP / 2 && x < ix + w + STATUS_GAP / 2)
+            .map(|(it, _, _)| it)
     }
 
     pub(super) fn app_title(&self) -> String {
@@ -876,59 +968,37 @@ impl Desktop {
             }
             p.text_p(x, MENU_TEXT_Y, &name, ESPRESSO, k == 0);
         }
-        let sw = super::fontx::prop_width(&self.status, false);
-        let tx = w - MENU_PAD_X - sw;
-        p.text_p(tx, MENU_TEXT_Y, &self.status, ESPRESSO, false);
-        // A tiny per-CPU load meter: one bar per online CPU.
-        let n = self.cpu_loads.len().max(1) as i32;
-        let mx = tx - 14 - n * 6;
-        for (i, &l) in self.cpu_loads.iter().enumerate() {
-            let x = mx + i as i32 * 6;
-            p.rrect(x, 7, 4, 14, 2, SAND, 255);
-            let h = (14 * l.min(100) as i32 / 100).max(2);
-            let c = if l > 75 { HONEY } else { MATCHA };
-            p.rrect(x, 21 - h, 4, h, 2, c, 255);
+        let _ = w;
+        for (it, x, _) in self.status_items() {
+            match it {
+                Status::Clock => {
+                    p.text_p(x, MENU_TEXT_Y, &self.status, ESPRESSO, false);
+                }
+                Status::Cpu => {
+                    // One bar per online CPU.
+                    for (i, &l) in self.cpu_loads.iter().enumerate() {
+                        let bx = x + i as i32 * 6;
+                        p.rrect(bx, 7, 4, 14, 2, SAND, 255);
+                        let h = (14 * l.min(100) as i32 / 100).max(2);
+                        let c = if l > 75 { HONEY } else { MATCHA };
+                        p.rrect(bx, 21 - h, 4, h, 2, c, 255);
+                    }
+                }
+                Status::Volume => {
+                    paint_speaker(p, x, 6, self.settings.volume, super::prefs::get().sound)
+                }
+                Status::Network => paint_network(p, x, 6, network_up()),
+                Status::Focus => paint_moon(p, x, 6),
+                Status::Bell => super::notif::paint_bell(p, x + 1, 6, self.unread(), false),
+            }
         }
-        let cx = mx - 4 - super::fontx::prop_width("cpu", false);
-        p.text_p(cx, MENU_TEXT_Y, "cpu", COCOA, false);
-        // The bell: unread total, or a moon in Do Not Disturb.
-        super::notif::paint_bell(
-            p,
-            cx - BELL_SLOT + 4,
-            6,
-            self.unread(),
-            self.settings.focus_mode,
-        );
     }
 
     fn paint_dock(&self, p: &mut Painter) {
         for (i, it) in tiles().iter().enumerate() {
             let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
-            match it.icon {
-                Some(icon) => {
-                    icons::draw(p, ix, DOCK_PAD, dock_icon(), icon, it.bg, 255, it.fg, false)
-                }
-                None => {
-                    // A package: its colour and initial.
-                    let r = (dock_icon() * 24 + 50) / 100;
-                    p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, it.bg, 255);
-                    let c: String = it
-                        .name
-                        .chars()
-                        .take(1)
-                        .flat_map(char::to_uppercase)
-                        .collect();
-                    let cw = crate::font::str_width(&c, 2);
-                    p.text_x(
-                        ix + (dock_icon() - cw) / 2,
-                        DOCK_PAD + (dock_icon() - 32) / 2,
-                        &c,
-                        it.fg,
-                        2,
-                        true,
-                    );
-                }
-            }
+            // Milk tiles get the 1px sand edge, or they vanish into the glass.
+            paint_tile(p, ix, DOCK_PAD, dock_icon(), it);
             // SPEC hover / pressed: lighten 4% / darken 4%.
             let r = (dock_icon() * 24 + 50) / 100;
             if self.dock_pressed == Some(i) {
@@ -972,7 +1042,8 @@ impl Desktop {
             } else {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, tbg, ta);
             }
-            let (c1, c2) = if on { (MILK, MILK) } else { (ESPRESSO, COCOA) };
+            // Ink on a straw tile (milk there was 2.42:1).
+            let (c1, c2) = if on { (INK, INK) } else { (ESPRESSO, COCOA) };
             p.text_p(tx + 14, 26, label, c1, true);
             p.text_p(tx + 14, 46, sub, c2, false);
         };
@@ -1014,7 +1085,11 @@ impl Desktop {
         p.text(
             18,
             236,
-            &format!("Up {}   cpu {}%", up, self.stats.cpu_pct),
+            &if up.is_empty() {
+                format!("cpu {}%", self.stats.cpu_pct)
+            } else {
+                format!("Up {}   cpu {}%", up, self.stats.cpu_pct)
+            },
             COCOA,
         );
         let t = rtc::now();
@@ -1037,7 +1112,7 @@ impl Desktop {
         };
         icons::draw(p, 14, 8, 40, Icon::Globe, CREAM, 255, COCOA, false);
         let end = if l.query.is_empty() {
-            p.text_x(66, 12, "Search", LATTE, 2, false);
+            p.text_x(66, 12, "Search", COCOA, 2, false);
             66
         } else {
             p.text_x(66, 12, &l.query, ESPRESSO, 2, false)
@@ -1146,14 +1221,15 @@ impl Desktop {
                         p.rrect(cx + (col - 32) / 2, cy - 4, 32, 24, 12, STRAW, 255);
                     }
                     let s = format!("{n}");
-                    p.text_center(cx, col, cy, &s, if today { MILK } else { ESPRESSO }, today);
+                    // Ink on straw (5.33:1; milk on straw was 2.42:1), SPEC Buttons.
+                    p.text_center(cx, col, cy, &s, if today { INK } else { ESPRESSO }, today);
                 }
                 let m = format!("{} {}", rtc::MONTHS[t.month as usize - 1], t.year);
                 p.text(pad, 180, &m, COCOA);
             }
             2 => {
                 label(p, "SESSION");
-                p.text_x(pad, 44, &fmt_uptime(now), ESPRESSO, 2, true);
+                p.text_x(pad, 44, &fmt_uptime(now), ESPRESSO, 2, true); // empty at first
                 let n = self.windows.len();
                 p.text_x(
                     pad,
@@ -1197,14 +1273,20 @@ impl Desktop {
                         255,
                     );
                 }
-                p.text(pad, 156, &format!("Up {}", fmt_uptime(now)), COCOA);
-                p.bold(pad, 180, "All systems fine", MATCHA);
+                let up = fmt_uptime(now);
+                if !up.is_empty() {
+                    p.text(pad, 156, &format!("Up {up}"), COCOA);
+                }
+                // A matcha dot carries the colour; the words are primary (matcha text on
+                // the card would be about 2:1).
+                p.circle(pad, 183, 10, MATCHA, 255);
+                p.bold(pad + 16, 180, "All systems fine", ESPRESSO);
             }
             6 => {
                 label(p, "RECENT");
                 let now = crate::timer::now_ns();
                 if self.history.is_empty() {
-                    p.text_p(pad, 44, "No notifications yet.", LATTE, false);
+                    p.text_p(pad, 44, "No notifications yet.", COCOA, false);
                 }
                 let max = ((w - 2 * pad) / 7) as usize;
                 for (k, n) in self.history.iter().rev().take(4).enumerate() {
@@ -1220,7 +1302,7 @@ impl Desktop {
                     let sub: String = sub.chars().take(max).collect();
                     p.text_p(pad, y + 18, &sub, COCOA, false);
                 }
-                p.text(pad, 196, "Click the clock for all", LATTE);
+                p.text(pad, 196, "Click the clock for all", COCOA);
             }
             4 => {
                 label(p, "NOTES");
@@ -1236,19 +1318,25 @@ impl Desktop {
                     }
                 }
                 let ago = apps::notes::edited_ago(now);
-                p.text(pad, 150, &ago, LATTE);
+                p.text(pad, 150, &ago, COCOA);
             }
             _ => {
                 label(p, "APPS");
-                for (k, (app, icon, bg, ba, fg)) in HOME_APPS.iter().enumerate() {
-                    let x = 16 + k as i32 * 106;
-                    let border = *bg == CREAM;
-                    icons::draw(p, x + 10, 44, 56, *icon, *bg, *ba, *fg, border);
-                    let name = match app {
-                        App::Settings => "Settings",
-                        a => a.name(),
+                // The same tiles as the dock, in the same order.
+                for (k, t) in tiles().iter().enumerate() {
+                    let Some(r) = home_app_rect(k, w) else {
+                        break;
                     };
-                    p.text_center(x - 6, 92, 108, name, ESPRESSO, false);
+                    paint_tile(p, r.x, r.y, HOME_ICON, t);
+                    let name: String = t.name.chars().take(10).collect();
+                    p.text_p_center(
+                        r.x - 20,
+                        r.w + 40,
+                        r.y + HOME_ICON + 4,
+                        &name,
+                        ESPRESSO,
+                        false,
+                    );
                 }
             }
         }
@@ -1285,24 +1373,33 @@ impl Desktop {
     pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
         match key {
             PanelKey::MenuBar => {
-                let sw = self.status_width();
                 if x < 30 {
                     // The logo: the system menu (About, Skim, Lock Screen, Restart ...).
                     let m = if self.menu == Some(0) { None } else { Some(0) };
                     self.control = false;
                     self.set_menu(m);
-                } else if x
-                    >= screen_w() - MENU_PAD_X - super::fontx::prop_width(&self.status, false) - 6
-                {
-                    // The clock (like the bell): the notification drawer.
-                    self.toggle_notif();
-                } else if x >= screen_w() - MENU_PAD_X - (sw - BELL_SLOT) - 8 {
+                } else if let Some(it) = self.status_at(x) {
                     self.set_menu(None);
-                    self.close_notif();
-                    self.control = !self.control;
-                } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
-                    // The bell.
-                    self.toggle_notif();
+                    match it {
+                        Status::Clock => {
+                            self.close_notif();
+                            self.control = false;
+                            self.toggle_mode(Mode::Home);
+                        }
+                        Status::Cpu => {
+                            self.close_notif();
+                            self.control = false;
+                            self.open_tab(Some(String::from("top")));
+                        }
+                        Status::Volume | Status::Network | Status::Focus => {
+                            self.close_notif();
+                            self.control = !self.control;
+                        }
+                        Status::Bell => {
+                            self.control = false;
+                            self.toggle_notif();
+                        }
+                    }
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
                     self.control = false;
@@ -1317,20 +1414,7 @@ impl Desktop {
                 };
                 self.dock_pressed = Some(i);
                 self.control = false;
-                let Some(t) = tiles().into_iter().nth(i) else {
-                    return;
-                };
-                match t.action {
-                    DockAction::App(a) => self.open(a),
-                    DockAction::Home => self.toggle_mode(Mode::Home),
-                    DockAction::Spaces => self.toggle_mode(Mode::Spaces),
-                    DockAction::Program(path) => self.launch(path),
-                    DockAction::Pkg(k) => {
-                        if let Some(p) = super::packages::get(k) {
-                            self.launch_package(&p);
-                        }
-                    }
-                }
+                self.activate_tile(i);
                 self.invalidate(PanelKey::Dock);
             }
             PanelKey::Toast(id) => {
@@ -1361,12 +1445,15 @@ impl Desktop {
                 }
             }
             PanelKey::Card(5) => {
-                for (k, (app, ..)) in HOME_APPS.iter().enumerate() {
-                    let ix = 16 + k as i32 * 106 + 10;
-                    if hit(&Rect::new(ix, 44, 56, 56), x, y) {
+                // The Apps card: the dock's tiles, so the two always agree.
+                if let Some(i) = home_app_at(x, y) {
+                    if !matches!(
+                        tiles().get(i).map(|t| t.action),
+                        Some(DockAction::Home | DockAction::Spaces)
+                    ) {
                         self.set_mode(Mode::Desktop);
-                        self.open(*app);
                     }
+                    self.activate_tile(i);
                 }
             }
             PanelKey::Card(_) => {}
@@ -1549,4 +1636,101 @@ impl Desktop {
             }
         }
     }
+}
+
+/// Is there a network with an address? (The menu bar's network glyph.)
+fn network_up() -> bool {
+    crate::net::has_device() && crate::net::config().configured()
+}
+
+/// The menu bar's volume glyph (16x16 at (x, y)): a speaker, and waves for the level; a
+/// slash when sound is off.
+fn paint_speaker(p: &mut Painter, x: i32, y: i32, volume: i32, on: bool) {
+    let c = ESPRESSO;
+    p.fill(x + 1, y + 6, 3, 5, c);
+    for k in 0..4 {
+        p.fill(x + 4 + k, y + 5 - k, 1, 7 + 2 * k, c);
+    }
+    if !on || volume == 0 {
+        for k in 0..7 {
+            p.fill(x + 9 + k, y + 4 + k, 2, 1, c);
+            p.fill(x + 9 + k, y + 10 - k, 2, 1, c);
+        }
+        return;
+    }
+    let waves = if volume > 66 {
+        3
+    } else if volume > 33 {
+        2
+    } else {
+        1
+    };
+    for k in 0..waves {
+        let wx = x + 10 + k * 2;
+        let h = 4 + k * 3;
+        p.fill(wx, y + 8 - h / 2, 1, h, c);
+    }
+}
+
+/// The menu bar's network glyph: three nodes joined (wired), latte when offline.
+fn paint_network(p: &mut Painter, x: i32, y: i32, up: bool) {
+    let c = if up { ESPRESSO } else { LATTE };
+    p.rrect(x + 5, y + 1, 6, 5, 1, c, 255);
+    p.fill(x + 7, y + 6, 2, 3, c);
+    p.fill(x + 2, y + 8, 12, 1, c);
+    p.fill(x + 2, y + 8, 1, 3, c);
+    p.fill(x + 13, y + 8, 1, 3, c);
+    p.rrect(x, y + 11, 5, 5, 1, c, 255);
+    p.rrect(x + 11, y + 11, 5, 5, 1, c, 255);
+}
+
+/// The Focus moon (shown only while Focus is on).
+fn paint_moon(p: &mut Painter, x: i32, y: i32) {
+    p.circle(x + 1, y + 1, 14, ESPRESSO, 255);
+    p.circle(x + 6, y - 1, 12, MILK, 255);
+}
+
+/// The menu bar clock's text ("Wed 12:08").
+pub(super) fn status_clock() -> String {
+    let t = rtc::now();
+    format!(
+        "{} {:02}:{:02}",
+        &rtc::DAYS[t.weekday as usize][..3],
+        t.hour,
+        t.minute
+    )
+}
+
+/// The status items, right to left from the clock: (item, x, width). Also used by the demo
+/// scripts to find the bell and the volume glyph.
+pub(super) fn status_layout(clock: &str, cpus: usize, focus: bool) -> Vec<(Status, i32, i32)> {
+    let n = cpus.max(1) as i32;
+    let mut items = alloc::vec![
+        (Status::Clock, super::fontx::prop_width(clock, false)),
+        (Status::Cpu, n * 6 - 2),
+        (Status::Volume, 16),
+        (Status::Network, 16),
+    ];
+    if focus {
+        items.push((Status::Focus, 16));
+    }
+    items.push((Status::Bell, 16));
+    let mut x = screen_w() - MENU_PAD_X;
+    items
+        .into_iter()
+        .map(|(it, w)| {
+            x -= w;
+            let r = (it, x, w);
+            x -= STATUS_GAP;
+            r
+        })
+        .collect()
+}
+
+/// Where a demo clicks a status item (its centre, menu bar y 14), with this many CPUs.
+pub(super) fn status_center(item: Status, cpus: usize) -> (i32, i32) {
+    status_layout(&status_clock(), cpus, false)
+        .into_iter()
+        .find(|&(it, _, _)| it == item)
+        .map_or((screen_w() - 30, 14), |(_, x, w)| (x + w / 2, 14))
 }

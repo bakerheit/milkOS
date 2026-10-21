@@ -51,6 +51,9 @@ pub const TERM_BG: Color = rgb(0x3A, 0x2E, 0x29);
 pub const TERM_FG: Color = rgb(0xFB, 0xF6, 0xED);
 /// Shadows, dims, glyphs on honey / straw / blue tiles.
 pub const INK: Color = rgb(0x3A, 0x2E, 0x27);
+/// Dimmed Terminal text (program output, the unfocused cursor): latte one LSB off, so it
+/// stays 6.1:1 on the Terminal body in both themes (the dark latte would be 3.08:1).
+pub const TERM_DIM: Color = rgb(0xC4, 0xAE, 0x8E);
 
 // ---- themes ---------------------------------------------------------------------------------
 

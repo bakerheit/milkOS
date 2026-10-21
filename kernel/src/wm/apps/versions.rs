@@ -17,6 +17,7 @@ use crate::fs::{self, milkfs};
 use crate::gfx::{Color, Rect};
 use crate::sync::SpinLock;
 
+use super::super::button::{self, Kind, State};
 use super::super::event::Key;
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
@@ -235,7 +236,7 @@ impl Versions {
                     bp.text(0, y, &s, ESPRESSO);
                 }
                 if lines.is_empty() {
-                    bp.text_p(0, 0, "(empty)", LATTE, false);
+                    bp.text_p(0, 0, "(empty)", COCOA, false);
                 }
             }
             Preview::Binary(n) => {
@@ -243,12 +244,12 @@ impl Versions {
                     0,
                     0,
                     &format!("{} (not text)", fsx::human_size(*n)),
-                    LATTE,
+                    COCOA,
                     false,
                 );
             }
             Preview::Missing(why) => {
-                bp.text_p(0, 0, why, LATTE, false);
+                bp.text_p(0, 0, why, COCOA, false);
             }
         }
     }
@@ -360,16 +361,18 @@ impl WindowContents for Versions {
             .list
             .get(self.sel)
             .is_some_and(|v| v.snapshot.is_some());
-        let br = Rect::new(w - 16 - 180, by + 8, 180, 28);
-        let (bg, fg) = if can { (STRAW, MILK) } else { (OAT, LATTE) };
-        p.rrect_r(br, R_BUTTON, bg, 255);
-        p.text_p_center(br.x, br.w, br.y + 6, "Restore this version", fg, can);
+        let label = "Restore this version";
+        let bw = button::dialog_w(label);
+        let br = Rect::new(w - 16 - bw, by + 8, bw, button::DIALOG_H);
+        let kind = if can { Kind::Primary } else { Kind::Disabled };
+        let hov = can && self.hover.is_some_and(|(x, y)| hit(&br, x, y));
+        button::paint(p, br, label, kind, State::hover(hov));
         if can {
             self.hits.push((br, Hit::Restore));
         }
         if let Some(i) = hover_index(&self.hits, self.hover) {
             let (r, h) = self.hits[i];
-            if h != Hit::Row(self.sel) {
+            if h != Hit::Row(self.sel) && h != Hit::Restore {
                 paint_hover(p, r, matches!(h, Hit::Row(_)));
             }
         }

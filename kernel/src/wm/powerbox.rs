@@ -27,6 +27,7 @@ use crate::sync::SpinLock;
 use crate::timer;
 
 use super::apps::fsx;
+use super::button::{self, Kind, State};
 use super::event::Key;
 use super::icons::{self, Icon};
 use super::paint::{Painter, hit};
@@ -365,7 +366,7 @@ impl WindowContents for Panel {
         let list_h = h - ly - FOOT_H - 4;
         self.rows_visible = (list_h / ROW_H).max(1) as usize;
         if self.items.is_empty() {
-            p.text_p(x0, ly + 4, "This folder is empty", LATTE, false);
+            p.text_p(x0, ly + 4, "This folder is empty", COCOA, false);
         }
         for (k, (i, e)) in self
             .items
@@ -408,20 +409,15 @@ impl WindowContents for Panel {
             self.hits.push((nr, Hit::Name));
         }
         let ok = self.choice().is_some();
-        let cancel = Rect::new(w - 16 - 2 * 100 - 8, fy + 12, 100, 30);
-        let choose = Rect::new(w - 16 - 100, fy + 12, 100, 30);
-        p.rrect_r(cancel, R_BUTTON, OAT, 255);
-        p.text_p_center(cancel.x, cancel.w, cancel.y + 7, "Cancel", ESPRESSO, false);
-        let (bg, fg) = if ok { (STRAW, MILK) } else { (OAT, LATTE) };
-        p.rrect_r(choose, R_BUTTON, bg, 255);
-        p.text_p_center(
-            choose.x,
-            choose.w,
-            choose.y + 7,
-            if save { "Save" } else { "Open" },
-            fg,
-            true,
-        );
+        // Dialog buttons (SPEC Buttons): 28 high, the primary on the far right.
+        let cancel = Rect::new(w - 16 - 2 * 100 - 8, fy + 13, 100, button::DIALOG_H);
+        let choose = Rect::new(w - 16 - 100, fy + 13, 100, button::DIALOG_H);
+        let on = |r: &Rect| self.hover.is_some_and(|(x, y)| hit(r, x, y));
+        let (hc, hk) = (on(&cancel), ok && on(&choose));
+        button::paint(p, cancel, "Cancel", Kind::Secondary, State::hover(hc));
+        let kind = if ok { Kind::Primary } else { Kind::Disabled };
+        let label = if save { "Save" } else { "Open" };
+        button::paint(p, choose, label, kind, State::hover(hk));
         self.hits.push((cancel, Hit::Cancel));
         if ok {
             self.hits.push((choose, Hit::Choose));
@@ -429,7 +425,8 @@ impl WindowContents for Panel {
         if let Some(i) = hover_index(&self.hits, self.hover) {
             let (r, h) = self.hits[i];
             let row = matches!(h, Hit::Row(_) | Hit::Place(_));
-            if h != Hit::Name && self.sel.is_none_or(|s| h != Hit::Row(s)) {
+            let btn = matches!(h, Hit::Cancel | Hit::Choose);
+            if !btn && h != Hit::Name && self.sel.is_none_or(|s| h != Hit::Row(s)) {
                 paint_hover(p, r, row);
             }
         }

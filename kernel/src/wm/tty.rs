@@ -9,6 +9,10 @@
 //! (closing the window leaves its shell running, so reopening finds it as you left it);
 //! tty2.. belong to extra tabs: [`open_tab`] takes a free one, [`hangup`] closes it again
 //! (SIGHUP to its foreground job, SIGKILL to its msh; the thread then exits).
+//!
+//! The desktop also runs a few command line tools for itself on a free tty, with no shell
+//! and no tab: [`Job`] (the Milk Drop sheet drives `drop list / send / recv` that way, reading
+//! what they print and answering their prompts).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -262,5 +266,128 @@ pub fn canonical(n: usize) -> bool {
             u32::from_le_bytes([t[12], t[13], t[14], t[15]]) & ICANON != 0
         }
         _ => true,
+    }
+}
+
+// ---- jobs: a program on a free tty, for the desktop itself -----------------------------
+
+/// Exit status of a job's program, once it is done (`u32::MAX` while running).
+static EXIT: [AtomicU32; MAX] = [const { AtomicU32::new(u32::MAX) }; MAX];
+/// The job's pid (0 before it started / after a failed start).
+static JOB_PID: [AtomicU32; MAX] = [const { AtomicU32::new(0) }; MAX];
+
+/// A program the desktop runs on its own tty: its output is read with [`Job::output`], its
+/// input written with [`Job::write`]. Dropping it kills the program (if still running) and
+/// frees the tty.
+pub struct Job {
+    n: usize,
+    seen: u64,
+    /// Output not yet split into lines.
+    partial: alloc::string::String,
+}
+
+impl Job {
+    /// Start `path` with `argv` and `env` (cwd the home folder) on a free tty, from the top
+    /// (tty9 down, so Terminal tabs keep the low numbers). None if all are taken.
+    pub fn start(exe: &str, argv: &[&str], env: &[&str]) -> Option<Job> {
+        let n = (2..=MAX).rev().find(|&n| {
+            !OPEN[idx(n)].load(Ordering::Acquire) && !THREAD[idx(n)].load(Ordering::Acquire)
+        })?;
+        let i = idx(n);
+        if !publish(n) || THREAD[i].swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        OUT[i].lock().clear();
+        EXIT[i].store(u32::MAX, Ordering::Release);
+        JOB_PID[i].store(0, Ordering::Release);
+        // Raw-ish: no echo would be nicer, but the prompts we answer are line based and
+        // the echoed answer is harmless.
+        let tty = path(n);
+        match proc::spawn_on(exe, argv, env, &tty, "/home/milk") {
+            Ok(pid) => {
+                JOB_PID[i].store(pid, Ordering::Release);
+                let name = alloc::format!("job-tty{}", i + 1);
+                drop(sched::spawn(&name, move || {
+                    let st = proc::wait_kernel_child(pid) as u32;
+                    // Only if the tty still belongs to this job (not a newer one).
+                    if JOB_PID[i].load(Ordering::Acquire) == pid {
+                        EXIT[i].store(st & 0xffff, Ordering::Release);
+                    }
+                    super::WAKE.wake_all();
+                }));
+            }
+            Err(e) => {
+                push_out(
+                    n,
+                    alloc::format!("{exe}: cannot start: errno {}\n", e.0).as_bytes(),
+                );
+                EXIT[i].store(0x100, Ordering::Release);
+            }
+        }
+        Some(Job {
+            n,
+            seen: 0,
+            partial: alloc::string::String::new(),
+        })
+    }
+
+    /// New output since the last call, as whole lines (\r and \n both end a line). A
+    /// prompt with no newline yet stays buffered until its line ends.
+    pub fn output(&mut self) -> Vec<alloc::string::String> {
+        if let Some(b) = take_output(self.n, &mut self.seen) {
+            self.partial
+                .push_str(&alloc::string::String::from_utf8_lossy(&b));
+        }
+        let mut lines = Vec::new();
+        while let Some(k) = self.partial.find(['\n', '\r']) {
+            let line: alloc::string::String = self.partial[..k].into();
+            self.partial.drain(..=k);
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
+    /// Type `s` into the program's terminal.
+    pub fn write(&self, s: &str) {
+        for b in s.bytes() {
+            input(self.n, b);
+        }
+    }
+
+    /// The exit status once the program has finished: `Some(code)` (a signal shows as
+    /// 128 + its number), or None while it runs.
+    pub fn exit(&self) -> Option<i32> {
+        let st = EXIT[idx(self.n)].load(Ordering::Acquire);
+        (st != u32::MAX).then(|| {
+            if st & 0x7f != 0 {
+                128 + (st & 0x7f) as i32
+            } else {
+                ((st >> 8) & 0xff) as i32
+            }
+        })
+    }
+
+    /// Stop it (SIGINT, like Ctrl+C: the drop tools clean up their partial files).
+    pub fn interrupt(&self) {
+        let pid = JOB_PID[idx(self.n)].load(Ordering::Acquire);
+        if pid != 0 && self.exit().is_none() {
+            let _ = proc::signal::kill(pid as i64, proc::signal::SIGINT);
+        }
+    }
+}
+
+impl Drop for Job {
+    fn drop(&mut self) {
+        let i = idx(self.n);
+        let pid = JOB_PID[i].load(Ordering::Acquire);
+        if pid != 0 && self.exit().is_none() {
+            let _ = proc::signal::kill(pid as i64, proc::signal::SIGKILL);
+        }
+        OUT[i].lock().clear();
+        // The waiter thread only records the status; the tty is free again now (a new
+        // job resets EXIT before starting).
+        THREAD[i].store(false, Ordering::Release);
     }
 }

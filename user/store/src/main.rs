@@ -41,7 +41,8 @@ const ROW_H: i32 = 64;
 const CARD_X: i32 = LIST_X + LIST_W + 16;
 const CARD_W: i32 = W - CARD_X - 16;
 const BTN_Y: i32 = 290;
-const BTN_H: i32 = 32;
+/// SPEC Buttons: dialog buttons are 28 high.
+const BTN_H: i32 = 28;
 const LOG_Y: i32 = 338;
 const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
 const ENV_TABLE: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb", "MILK_TABLE=1"];
@@ -452,16 +453,21 @@ impl App {
         self.win.text_x(x + 1, y, s, c, 2);
     }
 
+    /// SPEC Buttons: primary straw with ink, secondary oat with a sand edge, disabled latte.
     fn button(&mut self, x: i32, y: i32, w: i32, label: &str, primary: bool, on: bool) {
         let th = &self.th;
-        let (bg, fg) = match (on, primary) {
-            (false, _) => (th.oat, th.latte),
-            (true, true) => (gui::STRAW, gui::MILK),
-            (true, false) => (th.oat, th.espresso),
+        let kind = match (on, primary) {
+            (false, _) => gui::ButtonKind::Disabled,
+            (true, true) => gui::ButtonKind::Primary,
+            (true, false) => gui::ButtonKind::Secondary,
         };
-        self.win.rrect(x, y, w, BTN_H, 8, bg);
-        let tw = gui::str_width(label, 1);
-        self.win.text(x + (w - tw) / 2, y + 8, label, fg);
+        let bt = gui::ButtonTheme {
+            oat: th.oat,
+            sand: th.sand,
+            text: th.espresso,
+            latte: th.latte,
+        };
+        self.win.button((x, y, w, BTN_H), label, kind, false, bt);
     }
 
     fn chip(&mut self, x: i32, y: i32, label: &str, c: Color) -> i32 {
@@ -485,7 +491,7 @@ impl App {
             x + (size - tw) / 2,
             y + (size - 16 * scale) / 2,
             &letter,
-            gui::MILK,
+            gui::INK,
             scale,
         );
     }
@@ -641,7 +647,12 @@ impl App {
             let c = if l.starts_with("$ ") {
                 cocoa
             } else if l.contains("refused") || l.contains("failed") || l.contains("BAD") {
-                gui::STRAW
+                // Straw text on oat is 2.2:1: the danger red in light, straw on dark oat.
+                if self.th.dark {
+                    gui::STRAW
+                } else {
+                    gui::DANGER
+                }
             } else {
                 espresso
             };
@@ -676,7 +687,7 @@ impl App {
                     "Whole milk"
                 };
                 let s = alloc::format!("keys: i t o k d r u, g update, a all \u{b7} {hint}");
-                self.win.text(lx, sy + 1, &s, self.th.latte);
+                self.win.text(lx, sy + 1, &s, self.th.cocoa);
             }
         }
         self.win.commit();

@@ -139,8 +139,8 @@ wait "$QA" "$QB" 2>/dev/null || true
 
 A="$WORK/alice.txt"
 B="$WORK/bob.txt"
-tr -d '\r' <"$WORK/alice.log" >"$A"
-tr -d '\r' <"$WORK/bob.log" >"$B"
+python3 -I scripts/console_clean.py "$WORK/alice.log" >"$A"
+python3 -I scripts/console_clean.py "$WORK/bob.log" >"$B"
 echo "---- alice ----"
 sed -n '/msh:[^ ]*\$ drop name alice/,$p' "$A"
 echo "---- bob ----"
@@ -231,7 +231,7 @@ kill "$DA" 2>/dev/null || true
 kill "$QA"
 wait "$QA" 2>/dev/null || true
 A2="$WORK/alice2.txt"
-tr -d '\r' <"$WORK/alice2.log" | sed -n '/msh:[^ ]*\$ drop id/,$p' >"$A2"
+python3 -I scripts/console_clean.py "$WORK/alice2.log" | sed -n '/msh:[^ ]*\$ drop id/,$p' >"$A2"
 cat "$A2"; echo
 check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
@@ -268,7 +268,7 @@ kill "$DC" 2>/dev/null || true
 kill "$QC"
 wait "$QC" 2>/dev/null || true
 C="$WORK/carol.txt"
-tr -d '\r' <"$WORK/carol.log" >"$C"
+python3 -I scripts/console_clean.py "$WORK/carol.log" >"$C"
 grep -E "^drop: carol|^name:|^fingerprint:|^rotated:|^rng:|user\.drop\.rotate" "$C"
 check "$C" "the daemon rotated the legacy identity at boot" "drop: carol's identity came from the old weak RNG: rotated it \\([0-9a-f ]{19} -> [0-9a-f ]{19}, signed by the old key\\)"
 check "$C" "drop id: rotated, now from the kernel CSPRNG" "^rotated: +from [0-9a-f ]{19} \\(signed by it\\)"

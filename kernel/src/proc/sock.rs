@@ -1,7 +1,8 @@
 //! Socket syscalls (Linux aarch64 numbers) on top of the kernel socket API in `net::socket`.
 //! Written by the net side; kept here because it needs the fd table and user copies.
 //!
-//! AF_INET only: SOCK_STREAM (TCP), SOCK_DGRAM (UDP, or ICMP echo with IPPROTO_ICMP, the
+//! AF_UNIX sockets (and socketpair, sendmsg, recvmsg) are routed to proc/unixsys.rs.
+//! AF_INET: SOCK_STREAM (TCP), SOCK_DGRAM (UDP, or ICMP echo with IPPROTO_ICMP, the
 //! Linux "ping socket"), `struct sockaddr_in` (16 bytes). Also ppoll(2), for any fd. Blocking
 //! unless the fd is O_NONBLOCK (SOCK_NONBLOCK / fcntl) or the call passes MSG_DONTWAIT.
 //! No signals exist yet, so a blocking call waits until the socket is ready.
@@ -43,10 +44,16 @@ const SO_RCVTIMEO: u32 = 20;
 const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
+/// milkOS: allocate a pseudo-terminal (crate::pty); the master fd is returned.
+pub const MILK_OPENPTY: u64 = 0x1002;
 
 /// Is `nr` one of ours?
 pub fn handles(nr: u64) -> bool {
-    matches!(nr, SOCKET | BIND..=SHUTDOWN | ACCEPT4 | PPOLL)
+    use super::unixsys::{RECVMSG, SENDMSG, SOCKETPAIR};
+    matches!(
+        nr,
+        SOCKET | SOCKETPAIR | BIND..=SHUTDOWN | SENDMSG | RECVMSG | ACCEPT4 | PPOLL | MILK_OPENPTY
+    )
 }
 
 /// Is `addr` reachable with only the Local network capability (loopback / link-local)?
@@ -77,6 +84,26 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         a[4] as usize,
         a[5] as usize,
     );
+    // AF_UNIX: its own module (proc/unix.rs); not gated by the net capability (paths by
+    // the fs grants, abstract names by net, when connecting).
+    if nr == MILK_OPENPTY {
+        return sys_openpty(a[0] as usize, a[1] as u32);
+    }
+    if nr == SOCKET && a[0] as u32 == super::unix::AF_UNIX {
+        return super::unixsys::socket(a[1] as u32, a[2] as u32);
+    }
+    if nr == super::unixsys::SOCKETPAIR {
+        return super::unixsys::socketpair(a[0] as u32, a[1] as u32, a[2] as u32, a3);
+    }
+    if !matches!(nr, SOCKET | PPOLL)
+        && let Ok(f) = file(fd)
+        && let Some(s) = super::unix::of(&f)
+    {
+        return super::unixsys::call(nr, a, &f, s);
+    }
+    if matches!(nr, super::unixsys::SENDMSG | super::unixsys::RECVMSG) {
+        return Err(Errno(95)); // EOPNOTSUPP: sendmsg/recvmsg are AF_UNIX only for now
+    }
     match nr {
         SOCKET => {
             if super::current_caps().net == super::caps::Net::None {
@@ -169,6 +196,21 @@ fn timeout_of(fd: i64) -> u64 {
         .ok()
         .and_then(|f| sockfile::of(&f).ok().map(|s| s.rcv_timeout()))
         .unwrap_or(FOREVER)
+}
+
+/// MILK_OPENPTY(&mut slave_number: u32, flags): a free pty's master, as a new fd
+/// (O_CLOEXEC in `flags` = 0o2000000 sets close-on-exec).
+fn sys_openpty(slave_out: usize, flags: u32) -> KResult<usize> {
+    let (n, master) = crate::pty::open()?;
+    let fd = install(
+        OpenFile::new(master, crate::fs::abi::O_RDWR),
+        flags & crate::fs::abi::O_CLOEXEC != 0,
+    )?;
+    if slave_out != 0 {
+        copy_out(slave_out, &(n as u32).to_le_bytes())?;
+    }
+    crate::audit!("pty.open", "pty=ttyp{n} fd={fd}");
+    Ok(fd)
 }
 
 fn install(of: OpenFile, cloexec: bool) -> KResult<usize> {
@@ -307,6 +349,7 @@ fn sys_ppoll(fds: usize, nfds: usize, tmo: usize) -> KResult<usize> {
     let always = socket::POLLERR | socket::POLLHUP | socket::POLLNVAL;
     let mut out = alloc::vec![0u8; raw.len()];
     loop {
+        let g = crate::poll::generation();
         let mut ready = 0;
         for (k, (fd, ev, f)) in entries.iter_mut().enumerate() {
             let rev = match (*fd, f.as_ref()) {
@@ -325,12 +368,12 @@ fn sys_ppoll(fds: usize, nfds: usize, tmo: usize) -> KResult<usize> {
             copy_out(fds, &out)?;
             return Ok(ready);
         }
-        // Sleep until a socket changes, re-checking other fds (the console) every 20 ms.
-        let g = crate::net::ready_generation();
-        crate::net::READY_WQ.wait_until_timeout(
-            || crate::net::ready_generation() != g,
-            (end - now).min(20_000_000),
-        );
+        // Sleep until something becomes ready (kernel/src/poll.rs), re-checking anyway
+        // every 20 ms for objects that don't notify.
+        crate::poll::wait(g, end);
+        if super::signal::interrupted() {
+            return Err(EINTR);
+        }
     }
 }
 

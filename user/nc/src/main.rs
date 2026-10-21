@@ -78,9 +78,12 @@ fn main(args: &rt::Args) -> i32 {
         let [host, port] = pos[..] else {
             return usage();
         };
-        let Some(addr) = SockAddr::parse(&alloc::format!("{host}:{port}"), 0) else {
-            eprintln!("nc: bad address {host}:{port} (numbers only)");
-            return 2;
+        let addr = match net::lookup(&alloc::format!("{host}:{port}"), 0) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("nc: {e}");
+                return 2;
+            }
         };
         if udp {
             peer = Some(addr);

@@ -55,6 +55,14 @@ fn main(_args: &rt::Args) -> i32 {
             Err(e) => println!("init: cannot start /bin/drop: {e}"),
         }
     }
+    // Alarms, timers and calendar alerts ring with every window closed.
+    match sys::spawn("/bin/alarmd", &["alarmd", "-q"], ENV) {
+        Ok(pid) => {
+            quiet(pid);
+            println!("  alarmd (pid {pid}): alarms, timers and calendar alerts");
+        }
+        Err(e) => println!("init: cannot start /bin/alarmd: {e}"),
+    }
     if let Ok(pid) = sys::spawn("/bin/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }

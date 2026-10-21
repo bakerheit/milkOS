@@ -1,0 +1,8 @@
+format 1
+name clock
+version 1.0.0
+description Clock: world clock, timer, stopwatch and alarms
+exec /bin/clock
+dock Clock #EBB650
+files
+payload-sha256 -

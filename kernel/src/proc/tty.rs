@@ -167,6 +167,7 @@ impl Tty {
             self.signal_foreground(s);
         }
         self.readers.wake_all();
+        crate::poll::notify();
     }
 
     /// Blocking read of at most one line.
@@ -230,6 +231,31 @@ impl Tty {
     pub fn write(&self, buf: &[u8]) -> KResult<usize> {
         (self.output)(buf);
         Ok(buf.len())
+    }
+
+/// A fresh terminal again (a pty being reused): default termios, no pending input or
+    /// EOF, no foreground group, the given size. Thread context.
+    pub fn reset(&self, rows: u16, cols: u16) {
+        {
+            let mut st = self.st.lock();
+            st.line.clear();
+            st.ready.clear();
+            st.eof = false;
+            st.esc = 0;
+            st.termios = default_termios();
+        }
+        self.fg_pgrp.store(0, Ordering::Relaxed);
+        self.winsize
+            .store((rows as u32) << 16 | cols as u32, Ordering::Relaxed);
+    }
+
+    /// The other end went away (a pty's master closed): SIGHUP to the foreground group,
+    /// and readers see end of file. Thread context.
+    pub fn hangup(&self) {
+        self.signal_foreground(signal::SIGHUP);
+        self.st.lock().eof = true;
+        self.readers.wake_all();
+        crate::poll::notify();
     }
 
     pub fn foreground(&self) -> u32 {

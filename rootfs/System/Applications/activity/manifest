@@ -1,0 +1,8 @@
+format 1
+name activity
+version 1.0.0
+description Activity Monitor: processes, CPU, memory, disk and the security log
+exec /bin/activity
+dock Activity #9CBF9B
+files
+payload-sha256 -

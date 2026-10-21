@@ -186,7 +186,9 @@ pub fn query(ms: u64) -> Result<Vec<Peer>, String> {
 /// Hello transcript both sides sign (with their role): binds both nonces, both identity
 /// keys and both ephemeral X25519 keys, so a signature can't be replayed into another
 /// session or for another peer, and nobody in the middle can swap the X25519 keys.
+#[allow(clippy::too_many_arguments)]
 pub fn transcript(
+    ctx: &str,
     role: &str,
     nonce_r: &str,
     nonce_s: &str,
@@ -196,7 +198,7 @@ pub fn transcript(
     dh_s: &[u8],
 ) -> String {
     alloc::format!(
-        "milkdrop-hello-v2 {role} {nonce_r} {nonce_s} {} {} {} {}",
+        "{ctx} {role} {nonce_r} {nonce_s} {} {} {} {}",
         hex(key_r),
         hex(key_s),
         hex(dh_r),
@@ -223,6 +225,7 @@ pub const MAX_RECORD: usize = 32 * 1024;
 
 impl Channel {
     pub fn derive(
+        ctx: &str,
         shared: &[u8; 32],
         nonce_r: &str,
         nonce_s: &str,
@@ -240,7 +243,10 @@ impl Channel {
                 .update(dh_s);
             h.finish()
         };
-        let (s2r, r2s) = (k(b"milkdrop-v2 key s->r"), k(b"milkdrop-v2 key r->s"));
+        let (s2r, r2s) = (
+            k(alloc::format!("{ctx} key s->r").as_bytes()),
+            k(alloc::format!("{ctx} key r->s").as_bytes()),
+        );
         let (tx, rx) = if sender { (s2r, r2s) } else { (r2s, s2r) };
         Channel {
             tx,

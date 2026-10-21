@@ -203,6 +203,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
     let (a0, a1, a2, a3) = (a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize);
     match nr {
         n if super::sock::handles(n) => super::sock::dispatch(n, a),
+        n if super::epoll::handles(n) => super::epoll::dispatch(n, a),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),
@@ -787,7 +788,7 @@ pub(super) fn file(fd: i64) -> KResult<Arc<OpenFile>> {
     current().inner.lock().fds.get(fd)
 }
 
-fn cwd() -> InodeRef {
+pub(super) fn cwd() -> InodeRef {
     current().inner.lock().cwd.clone()
 }
 
@@ -803,7 +804,7 @@ fn base(dirfd: i64) -> KResult<Option<InodeRef>> {
 /// Capability check for a filesystem path. Cheap no-op when the process's fs cap is
 /// unrestricted (the default); otherwise resolves `path` to an absolute path (relative to
 /// `dirfd`) and checks it against the grants, auditing a denial.
-fn check_fs(dirfd: i64, path: &str, write: bool, op: &str) -> KResult<()> {
+pub(super) fn check_fs(dirfd: i64, path: &str, write: bool, op: &str) -> KResult<()> {
     let caps = super::current_caps();
     if caps.fs.is_none() {
         return Ok(());
@@ -1172,7 +1173,11 @@ fn sys_fcntl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
         }
         F_GETFL => Ok(i.fds.get(fd)?.flags() as usize),
         F_SETFL => {
-            i.fds.get(fd)?.set_flags(arg as u32);
+            let f = i.fds.get(fd)?;
+            f.set_flags(arg as u32);
+            // Sockets keep their own copy of O_NONBLOCK for read(2) / write(2).
+            let _ = super::unix::of(&f);
+            let _ = crate::net::sockfile::of(&f);
             Ok(0)
         }
         _ => Err(EINVAL),

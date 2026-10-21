@@ -3,8 +3,17 @@ name = "drop"
 version.workspace = true
 edition.workspace = true
 
+# The shared code (identity, trust, the encrypted session) is the `milkdrop` library;
+# the programs are drop (Milk Drop), mssh / msshd (remote shell) and mscp (copy).
+[lib]
+name = "milkdrop"
+path = "src/lib.rs"
+test = false
+bench = false
+
 [[bin]]
 name = "drop"
+path = "src/main.rs"
 test = false
 bench = false
 

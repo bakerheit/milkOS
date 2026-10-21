@@ -14,11 +14,14 @@
 extern crate alloc;
 
 pub mod alloc_brk;
+pub mod epoll;
 pub mod io;
+pub mod mdns;
 pub mod net;
 pub mod sys;
 pub mod table;
 pub mod thread;
+pub mod unix;
 pub mod users;
 pub mod version;
 
@@ -36,11 +39,17 @@ pub use sys::Errno;
 pub struct Args {
     pub argv: Vec<&'static str>,
     pub envp: Vec<&'static str>,
+    /// The auxiliary vector (AT_* type, value), as the kernel's ELF loader built it.
+    pub auxv: Vec<(u64, u64)>,
 }
 
 impl Args {
     pub fn get(&self, i: usize) -> Option<&'static str> {
         self.argv.get(i).copied()
+    }
+    /// An auxv entry: e.g. `aux(AT_SECURE)` (23), `aux(AT_UID)` (11).
+    pub fn aux(&self, ty: u64) -> Option<u64> {
+        self.auxv.iter().find(|a| a.0 == ty).map(|a| a.1)
     }
     pub fn env(&self, key: &str) -> Option<&'static str> {
         self.envp
@@ -96,7 +105,13 @@ extern "C" fn rt_start(sp: *const u64) -> ! {
             envp.push(cstr(*e));
             e = e.add(1);
         }
-        Args { argv, envp }
+        let mut auxv = Vec::new();
+        let mut a = e.add(1) as *const u64;
+        while *a != 0 {
+            auxv.push((*a, *a.add(1)));
+            a = a.add(2);
+        }
+        Args { argv, envp, auxv }
     };
     // SAFETY: provided by the program through `main!`.
     let code = unsafe { __rt_main(&args) };

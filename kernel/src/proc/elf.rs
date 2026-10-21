@@ -197,6 +197,29 @@ const HWCAP: u64 = 0b11;
 
 /// Build the initial stack below `top`: strings, then (16-byte aligned) argc, argv[],
 /// NULL, envp[], NULL, auxv pairs, AT_NULL. Returns the initial sp.
+/// The ids the new image runs with, for the auxv (AT_UID, AT_EUID, AT_GID, AT_EGID) and
+/// AT_SECURE: set when the exec changed ids (a set-user-ID / set-group-ID program) or real
+/// and effective ids differ, so libc ignores LD_* style environment variables and the like.
+pub struct AuxIds {
+    pub uid: u32,
+    pub euid: u32,
+    pub gid: u32,
+    pub egid: u32,
+    pub secure: bool,
+}
+
+impl AuxIds {
+    pub fn of(c: &super::cred::Cred, setid_exec: bool) -> AuxIds {
+        AuxIds {
+            uid: c.ruid,
+            euid: c.euid,
+            gid: c.rgid,
+            egid: c.egid,
+            secure: setid_exec || c.ruid != c.euid || c.rgid != c.egid,
+        }
+    }
+}
+
 pub fn build_stack(
     space: &UserSpace,
     top: usize,
@@ -204,6 +227,7 @@ pub fn build_stack(
     envp: &[String],
     img: &Image,
     execfn: &str,
+    ids: &AuxIds,
 ) -> KResult<usize> {
     let mut sp = top;
     let push_bytes = |b: &[u8], sp: &mut usize| -> KResult<usize> {
@@ -247,13 +271,13 @@ pub fn build_stack(
         (AT_BASE, 0),
         (AT_FLAGS, 0),
         (AT_ENTRY, img.entry as u64),
-        (AT_UID, 0),
-        (AT_EUID, 0),
-        (AT_GID, 0),
-        (AT_EGID, 0),
+        (AT_UID, ids.uid as u64),
+        (AT_EUID, ids.euid as u64),
+        (AT_GID, ids.gid as u64),
+        (AT_EGID, ids.egid as u64),
         (AT_HWCAP, HWCAP),
         (AT_CLKTCK, crate::timer::TICK_HZ),
-        (AT_SECURE, 0),
+        (AT_SECURE, ids.secure as u64),
         (AT_RANDOM, random as u64),
         (AT_EXECFN, execfn_p as u64),
         (AT_NULL, 0),

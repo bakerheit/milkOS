@@ -994,6 +994,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_versions(t, VP);
     milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
+    milkfs_tree(t, &vol, VP);
     milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1917,6 +1918,105 @@ fn milkfs_fsck(
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.
+/// B+tree deletes: random operations against a model, then the shape after mass deletes.
+fn milkfs_tree(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: &str) {
+    use super::milkfs::{self as m, btree, format::*, items::LIVE};
+    use alloc::collections::BTreeMap;
+    // Random inserts / replaces / deletes of test items (an unused kind, objects far above
+    // any inode) with values of random size, committed now and then; the tree must equal
+    // a BTreeMap model throughout and shrink back when everything is deleted.
+    const KIND: u8 = 200;
+    const OBJ: u64 = 0x7000_0000_0000_0000;
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let mut model: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+    let base = vol
+        .state
+        .lock()
+        .verify_space()
+        .map(|s| s.allocated)
+        .unwrap_or(0);
+    let mut ok = true;
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        for i in 0..6000u32 {
+            let r = next();
+            let key = Key::new(OBJ + r % 400, KIND, (r >> 20) % 50);
+            if r >> 40 & 3 == 0 {
+                let had = model.remove(&key).is_some();
+                ok &= st.test_del(&key).is_ok_and(|f| f == had);
+            } else {
+                let len = (r >> 44) as usize % 300;
+                let v: Vec<u8> = (0..len).map(|j| (j as u64 ^ r) as u8).collect();
+                ok &= st.test_put(key, v.clone()).is_ok();
+                model.insert(key, v);
+            }
+            if i % 700 == 0 {
+                ok &= st.commit().is_ok();
+            }
+        }
+        let _ = st.commit();
+        let got = st.test_items(Key::new(OBJ, KIND, 0), Key::new(OBJ + 400, KIND + 1, 0));
+        ok &= got.is_ok_and(|g| g.len() == model.len() && g.into_iter().eq(model.clone()));
+        // Delete all but every 20th, check, then the rest.
+        let keys: Vec<Key> = model.keys().copied().collect();
+        for (i, k) in keys.iter().enumerate() {
+            if i % 20 != 0 {
+                ok &= st.test_del(k).is_ok_and(|f| f);
+                model.remove(k);
+            }
+        }
+        let _ = st.commit();
+        let got = st.test_items(Key::new(OBJ, KIND, 0), Key::new(OBJ + 400, KIND + 1, 0));
+        ok &= got.is_ok_and(|g| g.into_iter().eq(model.clone()));
+        let shape = btree::stats(&st.store, st.sb.root).unwrap_or_default();
+        ok &= shape.underfull == 0;
+        for k in model.keys() {
+            ok &= st.test_del(k).is_ok_and(|f| f);
+        }
+        let _ = st.commit();
+    }
+    t.ok(
+        ok,
+        "B+tree: 6000 random inserts/replaces/deletes match a model, no underfull nodes",
+    );
+    let after = vol.state.lock().verify_space();
+    t.ok(
+        after.is_ok_and(|s| s.allocated == base && s.leaked == 0 && s.free_but_used == 0),
+        "B+tree: back to the same size after deleting everything, space exact",
+    );
+    // Mass create / delete through the VFS (scripts/treetest.sh does 50 000).
+    match m::tree_test(&alloc::format!("{vp}/tt"), 3000) {
+        Ok((_, [s0, s1, s2, s3])) => {
+            t.ok(
+                s1.fill_pct() >= 70,
+                &alloc::format!("3000 files: tree {}% full", s1.fill_pct()),
+            );
+            t.ok(
+                s2.underfull == 0 && s2.height < s1.height && s2.nodes * 10 < s1.nodes,
+                &alloc::format!(
+                    "99% deleted: height {} -> {}, nodes {} -> {}, none underfull",
+                    s1.height,
+                    s2.height,
+                    s1.nodes,
+                    s2.nodes
+                ),
+            );
+            t.ok(
+                s3.height == s0.height && s3.nodes == s0.nodes && s3.items == s0.items,
+                "all deleted: the tree is as before",
+            );
+        }
+        Err(e) => t.ok(false, &alloc::format!("tree test: {e}")),
+    }
+}
+
 /// A file made straight in a volume's live tree (no VFS): returns its inode.
 fn raw_file(
     st: &mut super::milkfs::volume::State,

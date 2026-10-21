@@ -463,6 +463,26 @@ leaf items `key (17 B) | value length u16 | value` or internal entries
 `(object id u64, kind u8, offset u64)`, sorted in that order; child `i` of an internal node
 covers keys from its separator to the next one. Values are at most 1500 bytes.
 
+Tree shape (in memory, nothing on disk changes): a leaf that overflows is split evenly,
+except when the item that overflowed it starts an object newer than everything else in
+the leaf (inode numbers only grow, so that is file creation): then it splits at that
+object boundary and the left leaf stays full. On delete, a node left under a quarter full
+is merged with a neighbour if the two fit in one block, otherwise the two share their
+entries evenly; a root with one child is replaced by it. `scripts/treetest.sh [N]`
+(`/sys/fs/milkfs/treetest`: `DIR N` creates N empty files in DIR, deletes 99 of every 100,
+then the rest, printing the live tree's shape after each step), 50 000 files:
+
+| | before | even splits only + merge on delete | + object-boundary splits |
+|---|---|---|---|
+| 50 000 files | 3 levels, 2925 nodes, 52% full | same | 3 levels, 1818 nodes, 83% full |
+| 500 left (99% deleted) | 3 levels, 995 nodes, 2% full, 983 underfull | 2 levels, 51 nodes, 31% full, 0 underfull | 2 levels, 52 nodes, 30% full, 0 underfull |
+| all deleted | 1 leaf | 1 leaf | 1 leaf |
+| create / delete time | 671 / 1164 ms | 660 / 950 ms | 672 / 800 ms |
+
+The self-test runs 6000 random inserts, replaces and deletes against a `BTreeMap` model
+(commits in between, then 95% deleted: no underfull node, contents equal, space back to
+where it was) and the same create/delete test with 3000 files.
+
 | kind | key | value |
 |---|---|---|
 | 1 inode | `(ino, 1, 0)` | 68 B: mode u32 (`S_IF*` + perm), nlink u32, uid u32, gid u32, size u64, parent u64 (directories), atime/mtime/ctime as (i64 s, u32 ns) |
@@ -800,7 +820,6 @@ Where it comes from:
 - Snapshot and clone records live in the superblock (30 in total) instead of a volume
   tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
 - No reflink copies (v1 added multi-block runs and inline data).
-- B+tree deletion doesn't merge underfull nodes.
 - Batched commits (about 1 s). Reads are page-cached (see Page cache).
 - After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
   (fine at these sizes; proportional to metadata).

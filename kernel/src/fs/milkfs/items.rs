@@ -125,6 +125,21 @@ impl State {
         btree::remove(t, st, key)
     }
 
+    /// Raw item access for the self-test's B+tree model test (live tree).
+    pub fn test_put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
+        self.put(key, val)
+    }
+
+    pub fn test_del(&mut self, key: &Key) -> Result<bool> {
+        self.del(key)
+    }
+
+    pub fn test_items(&self, lo: Key, hi: Key) -> Result<Vec<(Key, Vec<u8>)>> {
+        let mut out = Vec::new();
+        self.view(LIVE, |r, s| btree::range(r, s, &lo, &hi, &mut out))?;
+        Ok(out)
+    }
+
     pub fn alloc_ino(&mut self) -> u64 {
         let i = self.next_ino;
         self.next_ino += 1;

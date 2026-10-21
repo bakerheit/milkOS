@@ -1,0 +1,16 @@
+[package]
+name = "calendar"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "calendar"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+timekit = { path = "../timekit" }
+timeio = { path = "../timeio" }

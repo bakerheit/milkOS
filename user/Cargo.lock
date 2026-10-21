@@ -18,6 +18,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "calendar"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "timeio",
+ "timekit",
+]
+
+[[package]]
 name = "clock"
 version = "0.0.1"
 dependencies = [

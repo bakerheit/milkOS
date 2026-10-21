@@ -1,5 +1,9 @@
 # Calendar, Clock and the alarm daemon
 
+Two windows (`/bin/calendar`, `/bin/clock`, dock tiles from `/System/Applications/<app>/manifest`), a
+background ringer (`alarmd`) and shell tools (`cal`, `alarm`, `timer`). The windows are built on
+`user/appkit` (the SPEC theme, buttons, segmented control, switch, chips, text fields, rings).
+
 Pure logic lives in `user/timekit` (no syscalls, unit-tested on the Mac); `user/timeio` is the
 system side (data files, the local clock, notifications); `user/timetools` has `alarmd` and the
 command-line tools. The Calendar and Clock windows are built on the same three crates.
@@ -53,9 +57,39 @@ cal | cal MONTH YEAR | cal list [DAYS] | cal add WHEN [HH:MM[-HH:MM]] TITLE [--r
 `in 5m` means the first whole minute at least five minutes from now (alarms and events have
 minute resolution). WHEN is `today`, `tomorrow`, `+3d`, a weekday name or `YYYY-MM-DD`.
 
+## The windows
+
+**Calendar** (940x620): sidebar with a search field, the mini month, the calendar list (click a
+name to show or hide it, Add calendar for a new one with any accent colour) and New event;
+toolbar with Day / Week / Month / Year, the title, Today and previous / next. Month cells show
+chips (a bar in the calendar colour, the colour at 27% as fill) and "+N more", which opens that
+day. Week and day have hour rows (scroll for the night), an all-day strip and a now line; the
+Year view has twelve mini months. Click a day to select it, double-click to make an event there
+(double-click an hour slot to fill in the time). The event sheet has Title, When (date, start, end,
+All day), Repeat (never, daily, weekly, monthly, yearly with every N and an until date), Alert
+(none, at time, 5 min, 15 min, 1 hour, 1 day), Calendar and Notes; Return saves, Esc cancels.
+Keys: arrows move the day, Return new event, `t` today, `d w m y` the views, `[` `]` previous and
+next, Cmd/Ctrl-F search, Cmd/Ctrl-N new event.
+
+**Clock** (600x560): Clock (analog face, the time at 4x), Alarms (rows with switches, the next ring
+in the status bar, an edit sheet with time, weekdays and label), Stopwatch (laps, the fastest and
+slowest marked with an arrow as well as colour) and Timer (a ring, presets, Custom, +1 min). A
+ringing alarm opens a small panel with Snooze 9 min and Stop and plays the alarm sound every two
+seconds. Cmd/Ctrl-1..4 switch tabs, Space starts the stopwatch.
+
+Differences from docs/ui-concepts/SPEC-APPS.md, all because only the 8x16 bitmap font exists and
+client windows have a fixed size: text is 16px everywhere (the spec's 12px chips are 18px high),
+the Calendar is 620 high so it fits above the dock on a 1024x768 screen, its sheet is taller than
+the spec's 400, the search field is in the sidebar (no room in the toolbar), times are 24-hour,
+and world clocks are left out (the machine has no time zone setting). Stubbed until the
+window-system engineer lands them: a Snooze/Open action on the toast, a menu bar item that shows
+a running timer, and the Today card hook; alarmd and Clock work without them.
+
 ## Tests
 
 - `scripts/timekit-test.sh`: the unit tests (dates across centuries, leap days, repeat rules,
   alerts across midnight, alarm/timer/stopwatch behaviour, file round trips and junk lines).
+- `scripts/apps-test.sh`: boots a desktop, opens Calendar and Clock, clicks through the views,
+  makes an event in the window and checks the file with `cal` (screenshots are kept).
 - `scripts/alarm-test.sh`: one boot rings an alarm, a timer and a calendar alert through alarmd;
   a second boot checks everything survived on the milkfs home folder.

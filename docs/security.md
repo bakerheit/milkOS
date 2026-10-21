@@ -1,4 +1,76 @@
-# Security: the audit log
+# Security
+
+Two parts: a **capability sandbox** (what a process is allowed to do) and the **audit log**
+(a tamper-evident record of what it did). The sandbox is below; the log follows.
+
+## The capability sandbox
+
+Files: `kernel/src/proc/caps.rs` (the model), enforcement in `proc/syscall.rs` (openat,
+execve, fork), `proc/sock.rs` (socket/connect/sendto) and `proc/mod.rs` (device opens);
+launcher `user/coreutils/src/bin/sandbox.rs`, wrapper `rt::sys::sandbox`.
+
+Every process carries a capability set:
+
+| cap | values | gates |
+|---|---|---|
+| `fs` | unrestricted (default), or a list of `path:r` / `path:rw` grants | openat, execve, and every *at path syscall through the same check |
+| `net` | `all` (default) / `local` (loopback + link-local only) / `none` | socket, connect, sendto |
+| `audio` | on (default) / off | open `/dev/audio` |
+| `clipboard` | on / off | open `/dev/clipboard` (wm wires the device) |
+| `windows` | on / off | open the wm device (`/dev/wm`/fb); the wm also checks it per request |
+| `spawn` | on / off | fork / clone without `CLONE_THREAD` (threads are always allowed) |
+
+**Inherited and shrink-only.** The set is shared by a thread group, copied into a child at
+fork, kept across execve, and can only ever lose capabilities. `sandbox(spec)` (the
+`MILK_SANDBOX` syscall) intersects the caller's set with the requested one: a tighter
+sandbox nested inside another can never regain what the outer dropped, and an fs grant is
+clamped to what the parent already allowed (and write only if the parent had write).
+
+**Default is everything**, so a normal process is unaffected — nothing is enforced until a
+process calls `sandbox`. Enforcement is also skipped entirely while `fs` is unrestricted,
+so the common path adds no cost.
+
+**Launcher**: `sandbox [--fs P:r|rw ...] [--net none|local|all] [--no-audio|--no-clipboard|
+--no-windows|--no-spawn] [--no-fs] CMD...`. It builds the spec, and when it restricts the
+filesystem it auto-grants read on the command's own binary (so it can still be exec'd).
+Example:
+
+```sh
+sandbox --fs ~/Documents:rw --fs /bin:r --net none --no-audio weird-tool
+```
+
+**Every denial is audited** as `sandbox.deny` (`op=`, the path/addr, what was needed);
+entering a sandbox logs `sandbox.enter` with the spec. So a denied open, exec, socket or
+fork leaves a chain-verified record of who tried what.
+
+**Matching is string based** on the normalised absolute path a request resolves to. A
+symlink that points out of a granted subtree is followed by the VFS and would escape the
+grant — a known gap (an early-LSM-style limitation); grants should name real directories,
+and a future version resolves to the inode. `..` is collapsed before matching, so it can't
+walk out. chroot and the sandbox compose: a jailed, sandboxed process is bounded by both.
+
+### Powerbox: granting one file by asking the user (design, no UI yet)
+
+A sandboxed process with no broad fs grant asks the window server to let the user pick a
+file; on confirmation the kernel adds *just that path* to the process's grants. The flow:
+
+1. The process calls a `powerbox_open(mode)` request (a new `MILK_POWERBOX` syscall, or a
+   message on the wm device). It blocks.
+2. The kernel asks the wm (which owns the screen and input) to show a file picker **in the
+   wm's own, trusted UI** — never drawn by the requesting process, so the process can't spoof
+   or pre-fill it. The request carries only the mode (open/save) and a suggested name.
+3. The user picks a file (or cancels). The wm returns the chosen absolute path to the
+   kernel.
+4. The kernel adds a single grant for exactly that path (`caps.with_fs_grant`, read for
+   open, read+write for save) to the process, opens it, and returns the fd. Cancel →
+   `ECANCELED`, no grant added.
+
+The grant is one file, added by the user's own action, so the sandbox stays shrink-only in
+spirit: the process never widens its own authority; the user does, per file, through trusted
+UI. `with_fs_grant` already exists in `caps.rs`; the kernel↔wm message and the picker are
+the wm agent's to wire. Audited as `powerbox.grant path=… mode=…`.
+
+# The audit log
 
 Files: `kernel/src/audit/` (log, SHA-256, `/dev/audit`), hooks in `proc/mod.rs` (exec),
 `fs/path.rs` (mount/unmount), `fs/milkfs/mod.rs` (snapshot, rollback, clones), `fs/ops.rs`

@@ -162,7 +162,36 @@ dependency), `remove snake` refused, `remove games`, `autoremove` (snake goes); 
 checks the image (moo2048 there, fortune and snake not, no clone), then a second boot of the
 same image runs moo2048 from the relinked `/bin`, and `audit verify` is OK across boots.
 
+## Running a tried app with its clone as `/` (per-process root)
+
+`milk try NAME` installs into a clone volume mounted at `/Volumes/Milk-try-NAME`. To run
+the app *as if that clone were the system root*, the kernel now has per-process roots
+(`chroot(2)`, syscall 51) and a `/bin/chroot` helper:
+
+```sh
+chroot /Volumes/Milk-try-NAME /bin/<app> [args...]
+```
+
+`chroot DIR [CMD]` sets the calling process's root to `DIR`, `chdir`s to the new `/`, then
+`execve`s `CMD` (default `/bin/msh`). The child and its descendants see `DIR` as `/`;
+absolute paths resolve under it and `..` at the root stays at the root (no escape through
+path resolution). The parent and the rest of the system are unaffected — it's a
+per-process view, not a global mount change, so several tried apps can run at once with
+different roots. The cwd is left as-is across `chroot` (as on Linux), which is why the
+helper does the `chdir("/")`.
+
+Proposed `milk run-try NAME`: look up the clone path (`/Volumes/Milk-try-NAME`), then
+`chroot <clone> /bin/<app>` (the app's exec name is in its installed manifest). milk owns
+this; the kernel side it needs is just `chroot`, already here. For GUI apps the clone must
+contain the app and its data under the usual paths; `/dev`, `/proc`, `/sys` inside the
+clone are only present if the clone has them (milkfs clones carry the tmpfs tree, so bind
+or re-mount those inside the jail if the app needs them — not wired yet).
+
+Caveat: `getdents64` on the chroot root still reports the real parent's inode number for
+`..` (path resolution is clamped, directory listing isn't); nothing leaks a usable path.
+
 ## Not done
 
-Version ranges beyond `>=`, conflicts/provides, key rotation or revocation lists, running a tried app *as if* the clone were `/` (needs
-per-process roots), the desktop reading `dock` entries.
+Version ranges beyond `>=`, conflicts/provides, key rotation or revocation lists, the desktop reading `dock`
+entries, wiring `milk run-try` to `chroot` (the syscall exists, see above), and a full mount namespace (chroot is a
+per-process root, not per-process mounts).

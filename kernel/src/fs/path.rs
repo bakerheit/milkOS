@@ -29,6 +29,22 @@ fn same(a: &InodeRef, b: &InodeRef) -> bool {
     a.ino() == b.ino() && a.dev() == b.dev()
 }
 
+/// Resolver for the calling thread's root directory (set by the process layer for chroot).
+/// Returns None (use the real root) for kernel threads or an un-chrooted process.
+type RootResolver = fn() -> Option<InodeRef>;
+static ROOT_HOOK: SpinLock<Option<RootResolver>> = SpinLock::new(None);
+
+/// Install the per-process root resolver (chroot). Call once at proc init.
+pub fn set_root_resolver(f: RootResolver) {
+    *ROOT_HOOK.lock() = Some(f);
+}
+
+/// The calling thread's root (its process's chroot root, or the real root).
+pub fn current_root() -> InodeRef {
+    let hook = *ROOT_HOOK.lock();
+    hook.and_then(|f| f()).unwrap_or_else(root)
+}
+
 /// The root directory of the whole tree. Panics before `fs::init`.
 pub fn root() -> InodeRef {
     MOUNTS
@@ -240,6 +256,8 @@ impl Parent {
 pub struct Walker {
     links: u32,
     depth: u32,
+    /// The calling thread's root, captured at construction; `..` never climbs past it.
+    root: InodeRef,
 }
 
 impl Default for Walker {
@@ -253,7 +271,16 @@ impl Walker {
         Walker {
             links: MAX_LINKS,
             depth: 0,
+            root: current_root(),
         }
+    }
+
+    /// Step to `name` from `cur`, but `..` at the (chroot) root stays at the root.
+    fn step_in(&self, cur: &InodeRef, name: &str) -> Result<InodeRef> {
+        if name == ".." && same(cur, &self.root) {
+            return Ok(cur.clone());
+        }
+        step(cur, name)
     }
 
     /// Count one symlink traversal against the budget.
@@ -276,7 +303,7 @@ impl Walker {
         }
         let mut cur = match base {
             Some(b) if !path.starts_with('/') => b.clone(),
-            _ => root(),
+            _ => self.root.clone(),
         };
         let trailing_slash = path.ends_with('/');
         let mut comps = path.split('/').filter(|c| !c.is_empty()).peekable();
@@ -286,7 +313,7 @@ impl Walker {
                 last = c;
                 break;
             }
-            let next = step(&cur, c)?;
+            let next = self.step_in(&cur, c)?;
             cur = if next.kind() == InodeType::Symlink {
                 self.follow(&cur, &next)?
             } else {
@@ -314,7 +341,7 @@ impl Walker {
         follow: bool,
     ) -> Result<InodeRef> {
         let p = self.parent(base, path)?;
-        let node = step(&p.dir, &p.name)?;
+        let node = self.step_in(&p.dir, &p.name)?;
         let node = if node.kind() == InodeType::Symlink && (follow || p.trailing_slash) {
             self.follow(&p.dir, &node)?
         } else {
@@ -346,7 +373,7 @@ impl Walker {
 /// Absolute path of a directory (for `getcwd`) or any inode still linked in the tree.
 /// Walks `..` and searches each parent for the child's inode number.
 pub fn path_of(inode: &InodeRef) -> Result<String> {
-    let root = root();
+    let root = current_root();
     let mut names: Vec<String> = Vec::new();
     let mut cur = inode.clone();
     loop {

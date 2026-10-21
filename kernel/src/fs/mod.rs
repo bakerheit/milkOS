@@ -42,7 +42,7 @@ pub use file::OpenFile;
 pub use node::{DirEntry, FileSystem, FsRef, Inode, InodeRef, InodeType, SetAttr, Stat, Timespec};
 pub use ops::*;
 #[allow(unused_imports)]
-pub use path::{bind, mount, path_of, root, sync_all, unmount};
+pub use path::{bind, current_root, mount, path_of, root, set_root_resolver, sync_all, unmount};
 
 use crate::kprintln;
 

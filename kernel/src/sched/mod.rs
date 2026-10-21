@@ -130,10 +130,13 @@ impl fmt::Display for Comm {
 pub struct UserState {
     /// Owning process.
     pub pid: u32,
-    /// Root table | ASID << 48.
+    /// Root table | ASID << 48 (shared by every thread of the process).
     pub ttbr0: u64,
     pub tpidr_el0: u64,
     pub fp: Box<FpState>,
+    /// CLONE_CHILD_CLEARTID / set_tid_address: on thread exit, zero `*clear_child_tid` and
+    /// futex-wake it. 0 = none.
+    pub clear_child_tid: usize,
 }
 
 pub struct Thread {
@@ -417,6 +420,8 @@ pub fn init() {
 
     gic::register(IPI_RESCHED, on_ipi).expect("reschedule IPI");
     gic::enable(IPI_RESCHED).ok();
+    gic::register(crate::tlb::IPI_SYNC, crate::tlb::on_sync_ipi).expect("TLB sync IPI");
+    gic::enable(crate::tlb::IPI_SYNC).ok();
     timer::set_tick_hook(on_tick);
     exceptions::set_irq_exit_hook(on_irq_exit);
     STARTED.store(true, Ordering::Release);
@@ -1024,6 +1029,20 @@ pub fn current_cpu_ns() -> u64 {
         let t = s.cur();
         t.cpu_ns + now.saturating_sub(t.switched_in_at)
     })
+}
+
+/// Set the current thread's clear_child_tid (set_tid_address).
+pub fn set_clear_child_tid(addr: usize) {
+    with(|s| {
+        if let Some(u) = s.cur().user.as_mut() {
+            u.clear_child_tid = addr;
+        }
+    });
+}
+
+/// Current thread's clear_child_tid (0 = none), for exit.
+pub fn current_clear_child_tid() -> usize {
+    with(|s| s.cur().user.as_ref().map_or(0, |u| u.clear_child_tid))
 }
 
 /// The live TPIDR_EL0 (the current user thread's TLS pointer).

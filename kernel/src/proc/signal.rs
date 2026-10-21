@@ -196,7 +196,7 @@ impl SigState {
 
 /// Post `sig` to `p`. Returns false if it was discarded (ignored).
 pub fn post(p: &Process, sig: u32, info: SigInfo) -> bool {
-    let tid = {
+    let threads = {
         let mut i = p.inner.lock();
         if !matches!(i.state, super::PState::Alive) {
             return false;
@@ -206,10 +206,13 @@ pub fn post(p: &Process, sig: u32, info: SigInfo) -> bool {
         }
         i.sig.pending |= bit(sig);
         i.sig.info[sig as usize - 1] = info;
-        i.tid
+        i.threads.clone()
     };
-    // Kick it out of any interruptible wait; it re-checks and sees the signal.
-    sched::wake(tid);
+    // Kick every thread out of any interruptible wait; whichever returns to EL0 first with
+    // the signal unblocked delivers it (the pending set is shared by the thread group).
+    for tid in threads {
+        sched::wake(tid);
+    }
     true
 }
 
@@ -287,7 +290,10 @@ pub fn interrupted() -> bool {
     if pid == 0 {
         return false;
     }
-    super::get(pid).is_some_and(|p| p.inner.lock().sig.deliverable() != 0)
+    super::get(pid).is_some_and(|p| {
+        let i = p.inner.lock();
+        i.group_exit.is_some() || i.sig.deliverable() != 0
+    })
 }
 
 // ---- syscalls ----------------------------------------------------------------------------

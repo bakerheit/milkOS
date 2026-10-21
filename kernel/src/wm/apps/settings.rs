@@ -587,7 +587,7 @@ impl WindowContents for Settings {
                     (true, true) => "Snapshot taken",
                     (true, false) => "Nothing changed since the last one",
                 };
-                super::super::notify("Time Machine", msg);
+                super::super::notify_as("Time Machine", "Time Machine", msg);
             }
             Hit::Sound(on) => {
                 pr.sound = on;

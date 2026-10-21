@@ -34,6 +34,8 @@ pub enum PanelKey {
     Tip,
     /// An open menu bar menu.
     Menu,
+    /// The notification centre (notif.rs).
+    Notif,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,7 +102,7 @@ pub struct Toast {
 // ---- dock ---------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum DockAction {
+pub(super) enum DockAction {
     App(App),
     /// A userland program, started with `proc::spawn`.
     Program(&'static str),
@@ -192,6 +194,11 @@ struct Tile {
     bg: Color,
     fg: Color,
     action: DockAction,
+}
+
+/// What dock tile `i` does (drag and drop asks).
+pub(super) fn dock_action(i: usize) -> Option<DockAction> {
+    tiles().into_iter().nth(i).map(|t| t.action)
 }
 
 fn dock_len() -> usize {
@@ -513,21 +520,37 @@ const TRACK_W: i32 = CC_W - 60;
 
 // ---- home cards ---------------------------------------------------------------------------
 
+/// Today's middle row: 3 cards (calendar, session, system), 4 from 1280 wide (+ recent
+/// notifications, card 6).
+pub fn today_cols() -> i32 {
+    if screen_w() >= 1280 { 4 } else { 3 }
+}
+
+/// How many Today cards there are (indices 0..n).
+pub fn card_count() -> u8 {
+    if today_cols() == 4 { 7 } else { 6 }
+}
+
 fn card_rect(i: u8) -> Rect {
     let y1 = 56 + 96 + CARD_GAP;
     let y2 = y1 + 228 + CARD_GAP;
+    let inner = screen_w() - 2 * CARD_MARGIN;
+    let cols = today_cols();
+    // SPEC's 296 at 1024 wide; the 4-column row shares the width.
+    let cw = if cols == 3 {
+        296
+    } else {
+        (inner - (cols - 1) * CARD_GAP) / cols
+    };
+    let half = (inner - CARD_GAP) / 2;
     match i {
-        0 => Rect::new(CARD_MARGIN, 56, screen_w() - 2 * CARD_MARGIN, 96),
-        1..=3 => Rect::new(
-            CARD_MARGIN + (i as i32 - 1) * (296 + CARD_GAP),
-            y1,
-            296,
-            228,
-        ),
+        0 => Rect::new(CARD_MARGIN, 56, inner, 96),
+        1..=3 => Rect::new(CARD_MARGIN + (i as i32 - 1) * (cw + CARD_GAP), y1, cw, 228),
+        6 => Rect::new(CARD_MARGIN + 3 * (cw + CARD_GAP), y1, cw, 228),
         _ => Rect::new(
-            CARD_MARGIN + (i as i32 - 4) * (456 + CARD_GAP),
+            CARD_MARGIN + (i as i32 - 4) * (half + CARD_GAP),
             y2,
-            456,
+            half,
             188,
         ),
     }
@@ -542,21 +565,24 @@ const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
 
 // ---- spaces -------------------------------------------------------------------------------
 
-/// Size of a window's overview cell: its surface scaled to fit 300x210 (never enlarged).
+/// The overview's measures are designed at 1024 wide and grow with the screen.
+fn sc(v: i32) -> i32 {
+    v * screen_w() / 1024
+}
+
+/// Size of a window's overview cell: its surface scaled to fit 300x210 (at 1024 wide;
+/// more on bigger screens), never enlarged.
 pub fn cell_size(w: i32, h: i32) -> (i32, i32) {
-    let k = (300 * 1024 / w.max(1)).min(210 * 1024 / h.max(1)).min(1024);
+    let (mw, mh) = (sc(300), sc(210));
+    let k = (mw * 1024 / w.max(1)).min(mh * 1024 / h.max(1)).min(1024);
     ((w * k / 1024).max(8), (h * k / 1024).max(8))
 }
 
 fn thumb_rect(i: usize, n: usize) -> Rect {
-    let total = n as i32 * THUMB_W + (n as i32 - 1) * THUMB_GAP;
+    let (tw, th) = (sc(THUMB_W), sc(THUMB_H));
+    let total = n as i32 * tw + (n as i32 - 1) * THUMB_GAP;
     let sx = (screen_w() - total) / 2;
-    Rect::new(
-        sx + i as i32 * (THUMB_W + THUMB_GAP),
-        SPACES_STRIP_Y,
-        THUMB_W,
-        THUMB_H,
-    )
+    Rect::new(sx + i as i32 * (tw + THUMB_GAP), SPACES_STRIP_Y, tw, th)
 }
 
 const SPACE_NAMES: [&str; 6] = ["Main", "Notes", "Play", "Work", "Extra", "More"];
@@ -584,11 +610,13 @@ impl Desktop {
             .enumerate()
             .map(|(i, w)| {
                 let (col, row) = (i as i32 % 3, i as i32 / 3);
-                let (sx, sy) = (60 + col * 330, 170 + row * 270);
+                let x0 = sc(60);
+                let y0 = SPACES_STRIP_Y + sc(THUMB_H) + sc(42);
+                let (sx, sy) = (x0 + col * sc(330), y0 + row * sc(270));
                 let (cw, ch) = cell_size(w.rect.w, w.rect.h);
                 (
                     w.id,
-                    Rect::new(sx + (300 - cw) / 2, sy + (210 - ch) / 2, cw, ch),
+                    Rect::new(sx + (sc(300) - cw) / 2, sy + (sc(210) - ch) / 2, cw, ch),
                 )
             })
             .collect()
@@ -611,7 +639,7 @@ impl Desktop {
                 v.push(dock);
             }
             Mode::Home => {
-                for i in 0..6 {
+                for i in 0..card_count() {
                     v.push(spec(
                         PanelKey::Card(i),
                         card_rect(i),
@@ -658,7 +686,7 @@ impl Desktop {
                 }
                 v.push(Layer::Label {
                     x: 0,
-                    y: 722,
+                    y: screen_h() - 46,
                     w: screen_w(),
                     text: String::from(
                         "Click a window to focus   Drag it to another space   Esc to leave",
@@ -692,6 +720,15 @@ impl Desktop {
             v.push(spec(
                 PanelKey::Control,
                 control_rect(),
+                R_CARD,
+                Style::GlassStrong,
+                true,
+            ));
+        }
+        if self.notif {
+            v.push(spec(
+                PanelKey::Notif,
+                super::notif::rect(),
                 R_CARD,
                 Style::GlassStrong,
                 true,
@@ -773,6 +810,7 @@ impl Desktop {
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
+            PanelKey::Notif => self.paint_notif(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
                 if let Some(t) = self.tip.and_then(|i| tiles().into_iter().nth(i)) {
@@ -1030,8 +1068,10 @@ impl Desktop {
             }
             1 => {
                 label(p, "CALENDAR");
+                // 38px columns in a 296 card; narrower cards squeeze them.
+                let col = ((w - 24) / 7).min(38);
                 for (k, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-                    p.text_center(12 + k as i32 * 38, 38, 40, d, COCOA, false);
+                    p.text_center(12 + k as i32 * col, col, 40, d, COCOA, false);
                 }
                 // Last week, this week, next week; today in the middle row.
                 let first = rtc::first_weekday(&t);
@@ -1049,14 +1089,14 @@ impl Desktop {
                     } else if n > len {
                         n -= len;
                     }
-                    let cx = 12 + (c % 7) * 38;
+                    let cx = 12 + (c % 7) * col;
                     let cy = 66 + (c / 7) * 34;
                     let today = c == 7 + t.weekday as i32;
                     if today {
-                        p.rrect(cx + 3, cy - 4, 32, 24, 12, STRAW, 255);
+                        p.rrect(cx + (col - 32) / 2, cy - 4, 32, 24, 12, STRAW, 255);
                     }
                     let s = format!("{n}");
-                    p.text_center(cx, 38, cy, &s, if today { MILK } else { ESPRESSO }, today);
+                    p.text_center(cx, col, cy, &s, if today { MILK } else { ESPRESSO }, today);
                 }
                 let m = format!("{} {}", rtc::MONTHS[t.month as usize - 1], t.year);
                 p.text(pad, 180, &m, COCOA);
@@ -1095,11 +1135,12 @@ impl Desktop {
                 for (k, (name, v, c)) in rows.into_iter().enumerate() {
                     let y = 44 + k as i32 * 34;
                     p.text(pad, y, name, ESPRESSO);
-                    p.rrect(64, y + 2, 200, 12, 6, SAND, 255);
+                    let bw = w - 64 - 32;
+                    p.rrect(64, y + 2, bw, 12, 6, SAND, 255);
                     p.rrect(
                         64,
                         y + 2,
-                        (200 * v.clamp(0, 100) / 100).max(12),
+                        (bw * v.clamp(0, 100) / 100).max(12),
                         12,
                         6,
                         c,
@@ -1108,6 +1149,28 @@ impl Desktop {
                 }
                 p.text(pad, 156, &format!("Up {}", fmt_uptime(now)), COCOA);
                 p.bold(pad, 180, "All systems fine", MATCHA);
+            }
+            6 => {
+                label(p, "RECENT");
+                let now = crate::timer::now_ns();
+                if self.history.is_empty() {
+                    p.text_p(pad, 44, "No notifications yet.", LATTE, false);
+                }
+                let max = ((w - 2 * pad) / 7) as usize;
+                for (k, n) in self.history.iter().rev().take(4).enumerate() {
+                    let y = 44 + k as i32 * 44;
+                    let t: String = n.title.chars().take(max).collect();
+                    p.text_p(pad, y, &t, ESPRESSO, true);
+                    let s = now.saturating_sub(n.at_ns) / 60_000_000_000;
+                    let sub = if s == 0 {
+                        format!("{}, just now", n.app)
+                    } else {
+                        format!("{}, {s} min ago", n.app)
+                    };
+                    let sub: String = sub.chars().take(max).collect();
+                    p.text_p(pad, y + 18, &sub, COCOA, false);
+                }
+                p.text(pad, 196, "Click the clock for all", LATTE);
             }
             4 => {
                 label(p, "NOTES");
@@ -1147,7 +1210,7 @@ impl Desktop {
             return;
         }
         // A tiny screen: each window of that space at its place, from the overview thumbnails.
-        let (aw, ah) = (w - 8, 58);
+        let (aw, ah) = (w - 8, h - 30);
         for win in self.windows.iter().filter(|x| x.space == i && !x.minimized) {
             let r = win.rect;
             let rr = Rect::new(
@@ -1161,7 +1224,7 @@ impl Desktop {
                 None => p.rrect_r(rr, 3, CREAM, 255),
             }
         }
-        p.text_p_center(0, w, 66, &space_label(i), COCOA, i == self.space);
+        p.text_p_center(0, w, h - 22, &space_label(i), COCOA, i == self.space);
         if i == self.space {
             p.rrect_stroke(0, 0, w, h, THUMB_R, SEL_BORDER, HONEY, 255);
         }
@@ -1178,8 +1241,14 @@ impl Desktop {
                     let m = if self.menu == Some(0) { None } else { Some(0) };
                     self.control = false;
                     self.set_menu(m);
+                } else if x
+                    >= screen_w() - MENU_PAD_X - super::fontx::prop_width(&self.status, false) - 6
+                {
+                    // The clock: the notification centre.
+                    self.toggle_notif();
                 } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
                     self.set_menu(None);
+                    self.notif = false;
                     self.control = !self.control;
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
@@ -1218,6 +1287,7 @@ impl Desktop {
                     self.invalidate(PanelKey::Toast(i));
                 }
             }
+            PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {
                 if hit(&Rect::new(148, 16, 124, CC_TILE_H), x, y) {
                     self.settings.focus_mode = !self.settings.focus_mode;

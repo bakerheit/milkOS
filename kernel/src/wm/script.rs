@@ -214,10 +214,10 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.key(Key::Right, Mods::CTRL);
         }
         "control" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
         }
         "dim" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
         "shell" => {
@@ -778,13 +778,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
         }
         // Overlays at 1440x900: Spaces, Today, Skim, the lock screen.
-        "big-spaces" | "big-today" | "big-skim" | "big-lock" => {
-            b.0.push(Step::Resolution(1440, 900));
+        "big-spaces" | "big-today" | "big-skim" | "big-lock" | "mid-today" | "mid-skim" => {
+            let (w, h) = if name.starts_with("mid") {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
             b.wait(600);
             match name {
                 "big-spaces" => b.key(Key::F(3), Mods::NONE),
-                "big-today" => b.key(Key::F(4), Mods::NONE),
-                "big-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("mo"),
+                "big-today" | "mid-today" => b.key(Key::F(4), Mods::NONE),
+                "big-skim" | "mid-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("o"),
                 _ => b.key(Key::Char('q'), Mods::META_CTRL),
             };
             b.wait(900);
@@ -799,12 +804,133 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.wait(800);
             b.0.push(Step::Bench);
         }
+        // Welcome, from the logo menu (it doesn't open by itself under demo scripts).
+        // Welcome buttons (window at (142, 40), body at (143, 73)).
+        "welcome" | "welcome-snap" | "welcome-versions" | "welcome-peek" | "welcome-dark"
+        | "welcome-spaces" | "welcome-dontshow" | "welcome-try" | "welcome-moo" => {
+            if name == "welcome-try" || name == "welcome-moo" {
+                // A package repo (scripts/wm-pkg-demo.sh serves one); moo2048 installed.
+                let url = host_test_url();
+                b.wait(300)
+                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .enter()
+                    .wait(300)
+                    .typ("milk update")
+                    .enter()
+                    .wait(2000);
+                if name == "welcome-moo" {
+                    b.typ("milk install moo2048").enter().wait(3000);
+                }
+            }
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            match name {
+                "welcome-snap" => b.click(304, 281).wait(1500),
+                "welcome-versions" => b.click(657, 281).wait(2500),
+                "welcome-peek" => b.click(696, 419).wait(1500).click(777, 419).wait(1500),
+                "welcome-dark" => b.click(300, 557).wait(1500),
+                "welcome-spaces" => b.click(635, 557).wait(1200),
+                "welcome-dontshow" => b.click(182, 614).wait(800),
+                "welcome-try" => b.click(306, 419).wait(8000),
+                "welcome-moo" => b.click(612, 419).wait(2000).click(777, 419).wait(1500),
+                _ => &mut b,
+            };
+        }
+        // Drag and drop from Files (window (96, 64); todo.txt is the second icon, at
+        // (421, 150)). The Terminal is at (440, 270) 520 x 290.
+        "dragterm" | "dragghost" => {
+            b.wait(300).typ("cat ").wait(200);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + 18 * i, 150 + 19 * i).wait(16);
+            }
+            if name == "dragterm" {
+                b.up().wait(300).enter().wait(800);
+            } else {
+                b.wait(400);
+            }
+        }
+        "dragnotes" | "dragdockterm" => {
+            // Onto the dock: Notes opens it; Terminal opens a tab in its folder.
+            let (tx, ty) = dock_icon_center(if name == "dragnotes" { 3 } else { 1 });
+            b.wait(300).to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1500);
+        }
+        "dragpkg" => {
+            // moo2048 installed (tile 9): drop todo.txt on its tile.
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            let (tx, ty) = dock_icon_center_of(9, 1);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(2000);
+            let (x, y) = dock_icon_center_of(1, 1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(600);
+            b.typ("audit --event sandbox").enter().wait(800);
+        }
+        "dragpeek" => {
+            // Peek (sandboxed, no fs) opens at (192, 112); move it aside, then drop todo.txt
+            // on it: the drop is the grant.
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.drag(450, 128, 650, 380, 10).wait(300);
+            b.click(300, 80).wait(300);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (800 - 421) * i / 16, 150 + (560 - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1200);
+            let (x, y) = dock_icon_center(1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(800);
+        }
+        // Notification centre: a few toasts from different apps, then click the clock.
+        "notif" | "notifempty" | "notifclear" => {
+            if name != "notifempty" {
+                b.wait(300).typ("notify 'Milk is ready'").enter().wait(300);
+                b.key(
+                    Key::Char('3'),
+                    Mods {
+                        meta: true,
+                        shift: true,
+                        ..Mods::NONE
+                    },
+                )
+                .wait(1200);
+                b.typ("notify 'Tea is brewing'").enter().wait(300);
+                b.key(Key::Char(' '), Mods::META)
+                    .wait(150)
+                    .typ("back up now")
+                    .wait(200);
+                b.enter().wait(800);
+            }
+            // The clock is the right end of the menu bar.
+            b.click(super::theme::screen_w() - 30, 14).wait(600);
+            if name == "notifclear" {
+                let r = super::notif::rect();
+                b.click(r.x + super::notif::W - 16 - 38, r.y + 160 + 9)
+                    .wait(500);
+            }
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }
         "lockmenu" => {
             // The logo's system menu > Lock Screen.
-            b.click(18, 14).wait(300).click(80, 196).wait(700);
+            b.click(18, 14).wait(300).click(80, 220).wait(700);
         }
         "lockprefs" => {
             // Settings > Display & Lock > 5 min.
@@ -874,6 +1000,13 @@ fn host_test_url() -> String {
     alloc::format!("http://10.0.2.2:{port}/")
 }
 
+/// Booted for a demo (any `opt/milkos/demo`, even "none"): the desktop then skips first-boot
+/// things like the Welcome window, whose clicks the demos don't expect. `firstboot` is the
+/// demo that wants them.
+pub static DEMO_BOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The `firstboot` demo: boot like a user would (it ends once the desktop is up).
+pub static FIRSTBOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn from_fw_cfg() -> Option<Script> {
     let f = fwcfg::find_file("opt/milkos/demo")?;
     // Heap, not stack: fw_cfg reads by DMA to this address, and thread stacks live in a
@@ -887,7 +1020,9 @@ pub fn from_fw_cfg() -> Option<Script> {
         .ok()?
         .trim_matches(char::from(0))
         .trim();
-    if name == "none" || name.is_empty() {
+    DEMO_BOOT.store(name != "firstboot", core::sync::atomic::Ordering::Relaxed);
+    FIRSTBOOT.store(name == "firstboot", core::sync::atomic::Ordering::Relaxed);
+    if name == "none" || name == "firstboot" || name.is_empty() {
         return None;
     }
     // slow-<demo>: the same demo with animations 20x slower (for catching them on camera).

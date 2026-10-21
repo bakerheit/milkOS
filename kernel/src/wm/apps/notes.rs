@@ -236,6 +236,14 @@ impl WindowContents for Notes {
         self.sync()
     }
 
+    fn drop_path(&mut self, path: &str) -> bool {
+        if !fsx::is_text(fsx::basename(path)) {
+            return false;
+        }
+        open_file(path);
+        true
+    }
+
     fn document_path(&self) -> Option<String> {
         Some(current_path())
     }

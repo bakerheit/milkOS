@@ -805,6 +805,11 @@ impl WindowContents for Music {
         true
     }
 
+    fn drop_path(&mut self, path: &str) -> bool {
+        play_path(path);
+        true
+    }
+
     fn tick(&mut self, now_ns: u64) -> bool {
         // New files in ~/Music (the seed thread, a download): rescan every few seconds.
         if now_ns.saturating_sub(self.last_scan) > 3_000_000_000 {

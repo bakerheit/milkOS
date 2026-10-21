@@ -71,6 +71,15 @@ pub trait WindowContents {
     fn document_path(&self) -> Option<alloc::string::String> {
         None
     }
+    /// A drag began at body (x, y): the path of the file being dragged there, if any
+    /// (Files). The desktop takes the drag over from then on.
+    fn drag_start(&mut self, _x: i32, _y: i32) -> Option<alloc::string::String> {
+        None
+    }
+    /// A file was dropped on the window. True if it did something with it.
+    fn drop_path(&mut self, _path: &str) -> bool {
+        false
+    }
     /// The window is finished (a dialog that has its answer): the desktop closes it.
     fn wants_close(&self) -> bool {
         false
@@ -102,6 +111,7 @@ pub enum App {
     Versions,
     /// The trusted Open / Save panel (powerbox.rs).
     Powerbox,
+    Welcome,
     /// A userland window client (`wm::client`), by its client id.
     Client(u32),
 }
@@ -118,6 +128,7 @@ impl App {
             App::Music => "Music",
             App::Versions => "Versions",
             App::Powerbox => "Open",
+            App::Welcome => "Welcome",
             App::Client(_) => "App",
         }
     }

@@ -863,14 +863,18 @@ impl Terminal {
     /// `cmd` once its shell is up.
     fn new_tab(&mut self, cmd: Option<&str>) {
         if self.tabs.len() >= tty::MAX {
-            super::super::notify("Terminal", "Nine tabs is all there are");
+            super::super::notify_as("Terminal", "Terminal", "Nine tabs is all there are");
             return;
         }
         let n = if self.tabs[0].tty != 0 {
             match tty::open_tab() {
                 Some(n) => n,
                 None => {
-                    super::super::notify("Terminal", "No free terminal for a new tab");
+                    super::super::notify_as(
+                        "Terminal",
+                        "Terminal",
+                        "No free terminal for a new tab",
+                    );
                     return;
                 }
             }
@@ -1039,6 +1043,21 @@ impl WindowContents for Terminal {
 
     fn scroll(&mut self, dy: i32) -> bool {
         self.tabs[self.active].scroll(dy)
+    }
+
+    /// A file dropped here: its quoted path typed at the prompt (no Enter), like macOS.
+    fn drop_path(&mut self, path: &str) -> bool {
+        let q = alloc::format!("{} ", super::super::dnd::quote(path));
+        let tab = &mut self.tabs[self.active];
+        if tab.tty != 0 {
+            for b in q.bytes() {
+                tty::input(tab.tty, b);
+            }
+        } else {
+            tab.input.push_str(&q);
+            tab.cursor = tab.input.chars().count();
+        }
+        true
     }
 
     fn close_part(&mut self) -> bool {

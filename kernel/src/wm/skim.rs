@@ -45,14 +45,16 @@ impl Kind {
         }
     }
 
-    /// How many results of this kind to show at most.
+    /// How many results of this kind to show at most (one more each with the extra rows of
+    /// a taller screen).
     fn cap(self) -> usize {
+        let more = (launch_rows() > LAUNCH_MAX_ROWS) as usize;
         match self {
             Kind::Calc | Kind::Command => 1,
-            Kind::App => 2,
-            Kind::Action => 2,
+            Kind::App => 2 + more,
+            Kind::Action => 2 + more,
             Kind::Setting => 1,
-            Kind::File => 2,
+            Kind::File => 2 + more,
         }
     }
 }
@@ -430,7 +432,7 @@ pub fn search(q: &str) -> Vec<Item> {
     groups
         .into_iter()
         .flat_map(|(_, g)| g)
-        .take(LAUNCH_MAX_ROWS)
+        .take(launch_rows())
         .collect()
 }
 

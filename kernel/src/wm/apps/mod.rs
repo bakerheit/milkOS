@@ -10,6 +10,7 @@ pub mod notes;
 pub mod settings;
 pub mod terminal;
 pub mod versions;
+pub mod welcome;
 
 use alloc::boxed::Box;
 
@@ -34,6 +35,10 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
         App::Versions => (
             Rect::new(110, 64, 800, 500),
             Box::new(versions::Versions::new()),
+        ),
+        App::Welcome => (
+            Rect::new((super::theme::screen_w() - 740) / 2, 40, 740, 606),
+            Box::new(welcome::Welcome::new()),
         ),
         App::Powerbox => (
             Rect::new(192, 120, 640, 460),

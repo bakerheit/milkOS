@@ -167,6 +167,15 @@ pub const LAUNCH_INPUT_H: i32 = 56;
 pub const LAUNCH_ROW_H: i32 = 48;
 pub const LAUNCH_GAP: i32 = 12;
 pub const LAUNCH_MAX_ROWS: usize = 6;
+
+/// Skim's result rows: SPEC's 6 at 768 high, more on taller screens.
+pub fn launch_rows() -> usize {
+    match screen_h() {
+        0..800 => LAUNCH_MAX_ROWS,
+        800..900 => 8,
+        _ => 9,
+    }
+}
 pub const LAUNCH_DIM_A: u8 = a(250);
 
 // ---- toast ----------------------------------------------------------------------------------

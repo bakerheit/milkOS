@@ -23,11 +23,13 @@ mod buffer;
 pub mod client;
 pub mod clipboard;
 mod ctl;
+mod dnd;
 mod event;
 mod fontx;
 mod icons;
 mod lock;
 mod menus;
+mod notif;
 mod packages;
 mod paint;
 mod png;
@@ -68,22 +70,42 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 // ---- public API ------------------------------------------------------------------------------
 
 /// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-/// Toasts posted from any thread: (title, subtitle, play the notify sound).
-static NOTIFY: SpinLock<Vec<(String, String, bool)>> = SpinLock::new(Vec::new());
+/// Toasts posted from any thread: (app, title, subtitle, play the notify sound).
+static NOTIFY: SpinLock<Vec<(String, String, String, bool)>> = SpinLock::new(Vec::new());
 
-/// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
-pub fn notify(title: &str, subtitle: &str) {
-    NOTIFY
-        .lock()
-        .push((String::from(title), String::from(subtitle), true));
+/// Who is posting: the calling process (e.g. /bin/notify), else the desktop itself.
+fn poster() -> String {
+    crate::proc::get(sched::current_pid())
+        .filter(|_| sched::current_pid() != 0)
+        .map_or(String::from("milkOS"), |p| {
+            String::from(p.inner.lock().name.as_str())
+        })
+}
+
+/// A toast on behalf of `app` (grouped under it in the notification centre).
+pub fn notify_as(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        true,
+    ));
     WAKE.wake_all();
 }
 
+/// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
+pub fn notify(title: &str, subtitle: &str) {
+    notify_as(&poster(), title, subtitle);
+}
+
 /// A toast without the notify sound (when the action had its own, e.g. the shutter).
-pub fn notify_quiet(title: &str, subtitle: &str) {
-    NOTIFY
-        .lock()
-        .push((String::from(title), String::from(subtitle), false));
+pub fn notify_quiet(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        false,
+    ));
     WAKE.wake_all();
 }
 
@@ -122,6 +144,8 @@ pub enum Request {
     NewTab(Option<String>),
     /// Show the lock screen.
     Lock,
+    /// Launch an installed package by name (sandboxed if it is a window app).
+    OpenPackage(String),
     /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
     Powerbox,
     /// Nothing to do: just run a frame (a background job has a result for an app).
@@ -178,6 +202,14 @@ pub fn run() {
     if res != (theme::screen_w(), theme::screen_h()) {
         d.set_resolution(res.0, res.1);
     }
+    // First boot (until "Don't show again"): the Welcome tour. Not under demo scripts,
+    // whose clicks assume the plain desktop.
+    if prefs::get().welcome && !script::DEMO_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        d.open(App::Welcome);
+    }
+    if script::FIRSTBOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        kprintln!("[demo] firstboot done");
+    }
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
@@ -228,8 +260,16 @@ enum Drag {
     },
     /// Pressed a traffic light; acts on release if still over it.
     Light { id: u32, which: usize },
-    /// Button went down in a window body: moves go to the client as drags.
-    Content { id: u32 },
+    /// Button went down in a window body at (x0, y0): moves go to the client as drags,
+    /// unless the first real move turns it into a file drag (`tried`: asked already).
+    Content {
+        id: u32,
+        x0: i32,
+        y0: i32,
+        tried: bool,
+    },
+    /// Dragging a file (dnd.rs).
+    File,
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
@@ -322,6 +362,11 @@ pub struct Desktop {
     /// Cmd+Shift+4 region selection (shot.rs); compose without cursor / overlay (capture).
     shot: Option<shot::Select>,
     shot_hide: bool,
+    /// A file being dragged (dnd.rs).
+    dnd: Option<dnd::Dnd>,
+    /// The notification centre is open, and what it lists (notif.rs).
+    notif: bool,
+    history: Vec<notif::Notice>,
 }
 
 impl Desktop {
@@ -371,6 +416,9 @@ impl Desktop {
             idle_skew: 0,
             shot: None,
             shot_hide: false,
+            dnd: None,
+            notif: false,
+            history: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -515,25 +563,28 @@ impl Desktop {
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
     fn launch(&mut self, path: &str) {
-        self.launch_with(path, None);
+        self.launch_with(path, None, None);
     }
 
     /// Start a program (or show its window if it runs), optionally sandboxed from its first
     /// instruction.
+    /// Returns the new process's pid (None if it was already running, or didn't start).
     fn launch_with(
         &mut self,
         path: &str,
         caps: Option<(alloc::sync::Arc<crate::proc::caps::Caps>, String)>,
-    ) {
+        arg: Option<&str>,
+    ) -> Option<u32> {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
-            return;
+            return None;
         }
         let spec = caps.as_ref().map(|c| c.1.clone());
+        let argv: Vec<&str> = core::iter::once(name).chain(arg).collect();
         let started = match caps {
-            Some((c, _)) => crate::proc::spawn_with_caps(path, &[name], c),
-            None => crate::proc::spawn(path, &[name]),
+            Some((c, _)) => crate::proc::spawn_with_caps(path, &argv, c),
+            None => crate::proc::spawn(path, &argv),
         };
         match started {
             Ok(pid) => {
@@ -552,11 +603,15 @@ impl Desktop {
                         if prefs::get().sound {
                             crate::audio::play_system(crate::audio::Sound::Error);
                         }
-                        notify(&name, "quit unexpectedly");
+                        notify_as(&name, &name, "quit unexpectedly");
                     }
                 }));
+                Some(pid)
             }
-            Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+            Err(e) => {
+                self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0));
+                None
+            }
         }
     }
 
@@ -572,6 +627,24 @@ impl Desktop {
 
     /// An installed package: its window app, or its program in a Terminal tab.
     fn launch_package(&mut self, p: &packages::Pkg) {
+        self.launch_package_with(p, None);
+    }
+
+    /// The same, with a file dropped on its dock tile: a running window app gets it as a
+    /// drop on its window; a new one starts with the file granted and as its argument.
+    fn launch_package_with(&mut self, p: &packages::Pkg, file: Option<&str>) {
+        if p.window
+            && let Some(f) = file
+            && let Some(id) = self.program_window(p.exec.rsplit('/').next().unwrap_or(""))
+        {
+            self.show_window(id);
+            if let Some(App::Client(cid)) = self.win(id).map(|w| w.app)
+                && let Err(e) = client::drop_file(cid, 0, 0, f)
+            {
+                self.post_toast(&p.label, &e);
+            }
+            return;
+        }
         if p.window {
             // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
             // system is their own /Applications/<name> read-only and ~/Library/<name>
@@ -580,17 +653,25 @@ impl Desktop {
             let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
             let lib = alloc::format!("/home/milk/Library/{}", p.dir);
             let _ = crate::fs::mkdir_all(&lib, 0o755);
+            let mut grants = alloc::vec![
+                crate::proc::caps::FsGrant {
+                    prefix: app_dir.clone(),
+                    write: false,
+                },
+                crate::proc::caps::FsGrant {
+                    prefix: lib.clone(),
+                    write: true,
+                },
+            ];
+            // A file dropped on the tile: the user's grant, read-only, just that file.
+            if let Some(f) = file {
+                grants.push(crate::proc::caps::FsGrant {
+                    prefix: String::from(f),
+                    write: false,
+                });
+            }
             let caps = crate::proc::caps::Caps {
-                fs: Some(alloc::vec![
-                    crate::proc::caps::FsGrant {
-                        prefix: app_dir.clone(),
-                        write: false,
-                    },
-                    crate::proc::caps::FsGrant {
-                        prefix: lib.clone(),
-                        write: true,
-                    },
-                ]),
+                fs: Some(grants),
                 net: crate::proc::caps::Net::None,
                 audio: true,
                 clipboard: false,
@@ -598,7 +679,15 @@ impl Desktop {
                 spawn: false,
             };
             let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
-            self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)));
+            if let Some(pid) =
+                self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)), file)
+                && let Some(f) = file
+            {
+                crate::audit::record(
+                    "powerbox.grant",
+                    &alloc::format!("pid={pid} path={f} mode=r via=drop"),
+                );
+            }
         } else {
             // By its /bin name when milk linked it there (a shorter tab label).
             let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
@@ -939,10 +1028,11 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
-        self.post_toast_with(title, sub, true);
+        self.post_toast_with("milkOS", title, sub, true);
     }
 
-    fn post_toast_with(&mut self, title: &str, sub: &str, sound: bool) {
+    fn post_toast_with(&mut self, app: &str, title: &str, sub: &str, sound: bool) {
+        self.record_notice(app, title, sub);
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
@@ -1181,6 +1271,9 @@ impl Desktop {
                 }
             }
         }
+        if let Some(g) = &self.dnd {
+            dnd::draw(g, &mut p, d);
+        }
         if let Some(s) = &self.shot
             && !self.shot_hide
         {
@@ -1230,9 +1323,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
-        for (t, s, sound) in posted {
-            self.post_toast_with(&t, &s, sound);
+        let posted: Vec<(String, String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
+        for (app, t, s, sound) in posted {
+            self.post_toast_with(&app, &t, &s, sound);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1251,6 +1344,13 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::Lock => self.lock_screen(),
+                Request::OpenPackage(name) => {
+                    packages::refresh();
+                    match packages::all().into_iter().find(|p| p.name == name) {
+                        Some(p) => self.launch_package(&p),
+                        None => self.post_toast(&name, "isn't installed (milk install it first)"),
+                    }
+                }
                 Request::Powerbox => {
                     if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
                         self.open(App::Powerbox);
@@ -1431,12 +1531,16 @@ impl Desktop {
             self.cpu_loads = loads;
             self.cpu_steps = steps;
             let st = self.status_text();
+            if st != self.status {
+                // A new minute: the centre's clock and "n min ago".
+                self.notif_tick();
+            }
             if st != self.status || changed {
                 self.status = st;
                 self.invalidate(PanelKey::MenuBar);
             }
             if self.mode == Mode::Home {
-                for i in 0..6 {
+                for i in 0..shell::card_count() {
                     self.invalidate(PanelKey::Card(i));
                 }
             }
@@ -1581,7 +1685,28 @@ impl Desktop {
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
             }
-            Some(Drag::Content { id }) => self.send_pointer(id, x, y, PointerKind::Drag),
+            Some(Drag::Content { id, x0, y0, tried }) => {
+                if !tried && (x - x0).pow(2) + (y - y0).pow(2) > 36 {
+                    self.drag = Some(Drag::Content {
+                        id,
+                        x0,
+                        y0,
+                        tried: true,
+                    });
+                    let path = self.win_mut(id).and_then(|w| {
+                        let b = window::body_rect(w.rect.w, w.rect.h);
+                        w.contents
+                            .drag_start(x0 - w.rect.x - b.x, y0 - w.rect.y - b.y)
+                    });
+                    if let Some(path) = path {
+                        self.drag = Some(Drag::File);
+                        self.dnd_start(id, path);
+                        return;
+                    }
+                }
+                self.send_pointer(id, x, y, PointerKind::Drag)
+            }
+            Some(Drag::File) => self.dnd_move(x, y),
             Some(Drag::Slider(i)) => self.slider_to(i, x),
             Some(_) => {}
             None => self.hover(x, y),
@@ -1729,6 +1854,10 @@ impl Desktop {
             self.control = false;
             return;
         }
+        if self.notif {
+            self.toggle_notif();
+            return;
+        }
         if self.mode != Mode::Desktop {
             if self.mode == Mode::Spaces {
                 self.set_mode(Mode::Desktop);
@@ -1767,7 +1896,12 @@ impl Desktop {
                 })
             }
             Some(Part::Body) => {
-                self.drag = Some(Drag::Content { id });
+                self.drag = Some(Drag::Content {
+                    id,
+                    x0: x,
+                    y0: y,
+                    tried: false,
+                });
                 self.send_pointer(id, x, y, PointerKind::Down(Button::Left));
             }
             None => {}
@@ -1795,9 +1929,10 @@ impl Desktop {
                     }
                 }
             }
-            Some(Drag::Content { id }) => {
+            Some(Drag::Content { id, .. }) => {
                 self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
             }
+            Some(Drag::File) => self.dnd_drop(),
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),
             Some(Drag::Slider(0)) => {
                 // Display brightness is a saved preference (Settings shows it too).
@@ -1845,6 +1980,7 @@ impl Desktop {
                 self.control = false;
                 return;
             }
+            Key::Escape if self.notif => return self.toggle_notif(),
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
             Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),

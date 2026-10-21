@@ -201,7 +201,7 @@ impl Files {
             super::music::play_path(&full);
             request(Request::OpenHere(App::Music));
         } else {
-            super::super::notify(&e.name, "No app opens this kind of file yet");
+            super::super::notify_as("Files", &e.name, "No app opens this kind of file yet");
         }
     }
 
@@ -241,10 +241,14 @@ impl Files {
         };
         let _ = crate::fs::sync_all();
         match r {
-            Ok(()) => {
-                super::super::notify(&format!("Restored {}", e.name), &format!("from {snap}"))
+            Ok(()) => super::super::notify_as(
+                "Files",
+                &format!("Restored {}", e.name),
+                &format!("from {snap}"),
+            ),
+            Err(err) => {
+                super::super::notify_as("Files", "Restore failed", &format!("{}: {err}", e.name))
             }
-            Err(err) => super::super::notify("Restore failed", &format!("{}: {err}", e.name)),
         }
     }
 
@@ -432,6 +436,19 @@ impl WindowContents for Files {
                 );
             }
         }
+    }
+
+    fn drag_start(&mut self, x: i32, y: i32) -> Option<String> {
+        if x < SIDEBAR_W || self.path == TM {
+            return None;
+        }
+        let i = (0..self.items.len()).find(|&i| {
+            let (cx, cy) = self.cell(i);
+            hit(&Rect::new(cx - 4, cy - 4, 100, 96), x, y)
+        })?;
+        self.selected = Some(i);
+        self.last_click = None;
+        Some(fsx::resolve(&self.path, &self.items[i].name))
     }
 
     fn document_path(&self) -> Option<String> {

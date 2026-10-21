@@ -97,6 +97,13 @@ pub enum Event {
     Scroll(i32),
     /// The user closed the window: clean up and exit.
     Close,
+    /// A file was dropped on the window at (x, y): `fd` is it, opened read-only for us
+    /// (the user's drop is the grant; read it, then close it).
+    Drop {
+        x: i32,
+        y: i32,
+        fd: i32,
+    },
 }
 
 fn word(b: &[u8], k: usize) -> u32 {
@@ -142,6 +149,11 @@ fn decode(b: &[u8; 32]) -> Option<Event> {
         },
         6 => Event::Scroll(extra),
         7 => Event::Close,
+        8 => Event::Drop {
+            x,
+            y,
+            fd: word(b, 3) as i32,
+        },
         _ => return None,
     })
 }

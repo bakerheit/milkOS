@@ -13,4 +13,4 @@ Needs Rust nightly via rustup (`brew install rustup`), and `qemu-system-aarch64`
 ## Layout
 - `kernel/`: the kernel crate (`no_std`). Entry is `kernel/src/boot.S`, then `kmain` in `main.rs`.
 - `scripts/`: run and test helpers.
-- `docs/`: design notes.
+- `docs/`: design notes (`docs/memory.md`: MMU, frame allocator, heap).

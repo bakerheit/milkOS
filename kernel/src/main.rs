@@ -1,10 +1,20 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 use core::arch::global_asm;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
+
+mod dtb;
+mod heap;
+mod mem;
+mod memtest;
+mod mmu;
+mod pmm;
+mod spin;
 
 global_asm!(include_str!("boot.S"));
 
@@ -41,6 +51,8 @@ pub fn console_writer() -> impl Write {
 pub extern "C" fn kmain() -> ! {
     kprintln!("milkOS 0.0.1 booting...");
     kprintln!("hello from the kernel");
+    mem::init();
+    memtest::run();
     loop {
         unsafe { core::arch::asm!("wfe") };
     }

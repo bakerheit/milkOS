@@ -209,7 +209,9 @@ pub fn current_caps() -> alloc::sync::Arc<caps::Caps> {
 /// Replace the current process's capability set (sandbox: only ever shrinks, enforced by
 /// the caller computing the intersection).
 pub fn set_caps(c: caps::Caps) {
-    current().inner.lock().caps = alloc::sync::Arc::new(c);
+    let p = current();
+    p.cred.lock().no_new_privs = true; // sandboxed: no sudo / su way out
+    p.inner.lock().caps = alloc::sync::Arc::new(c);
 }
 
 /// A user's grant of one file to process `pid` (a drag and drop onto its window, the
@@ -248,7 +250,11 @@ pub fn chroot(dir: InodeRef) -> KResult<()> {
     if dir.kind() != fs::InodeType::Dir {
         return Err(ENOTDIR);
     }
-    current().inner.lock().root_dir = Some(dir);
+    let p = current();
+    // Anyone may chroot (it only narrows what they see; `milk run-try` relies on it), but
+    // afterwards set-ID bits are ignored: a jail can't fake /etc/passwd for `su`.
+    p.cred.lock().no_new_privs = true;
+    p.inner.lock().root_dir = Some(dir);
     Ok(())
 }
 
@@ -605,11 +611,14 @@ pub fn spawn_thread(frame: &TrapFrame, tls: Option<u64>, clear_child_tid: usize)
 /// program; on failure the old image is untouched.
 pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String]) -> KResult<()> {
     let cwd = current().inner.lock().cwd.clone();
-    let st = fs::stat_at(Some(&cwd), path, true)?;
+    let node = fs::lookup_at(Some(&cwd), path, true)?;
+    let st = fs::perm::view(&node);
     if st.kind != fs::InodeType::File {
         return Err(EACCES);
     }
-    let f = fs::open_at(Some(&cwd), path, fs::abi::O_RDONLY, 0)?;
+    // Execute permission is what counts (read is not needed: the kernel reads it).
+    fs::perm::may(&node, fs::perm::X)?;
+    let f = fs::OpenFile::new(node, fs::abi::O_RDONLY);
     let mut data = alloc::vec![0u8; st.size as usize];
     let mut done = 0;
     while done < data.len() {

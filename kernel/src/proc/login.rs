@@ -278,6 +278,28 @@ pub fn init() {
     chmod_own("/etc/passwd", 0o644, 0, 0);
     chmod_own("/etc/group", 0o644, 0, 0);
     let a = session();
+    // The layout the permission model expects (docs/security.md):
+    //  /root 0700 root; /tmp 1777; /bin and /Applications root:admin 0775 (admins install
+    //  packages without sudo, like macOS); a milkfs volume root root:admin 0775; the
+    //  session user's home owned by them (a one-time migration for disks made before
+    //  users existed, where everything belongs to root).
+    let _ = fs::mkdir("/root", 0o700);
+    chmod_own("/root", 0o700, 0, 0);
+    chmod_own("/tmp", 0o1777, 0, 0);
+    chmod_own("/bin", 0o775, 0, cred::ADMIN_GID);
+    chmod_own("/Applications", 0o775, 0, cred::ADMIN_GID);
+    if let Ok(st) = fs::stat("/Volumes/Milk")
+        && st.uid == 0
+        && st.gid == 0
+    {
+        chmod_own("/Volumes/Milk", (st.perm | 0o775) & 0o7777, 0, cred::ADMIN_GID);
+    }
+    if let Ok(st) = fs::stat(&a.home)
+        && st.uid != a.uid
+    {
+        let n = fs::perm::chown_tree(&a.home, a.uid, a.gid);
+        crate::kprintln!("[login] {}: gave {n} files to {}", a.home, a.name);
+    }
     crate::kprintln!(
         "[login] session user {} (uid {}, gid {}, groups {:?}), home {}",
         a.name,

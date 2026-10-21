@@ -33,6 +33,10 @@ pub mod nr {
     pub const LINKAT: u64 = 37;
     pub const FTRUNCATE: u64 = 46;
     pub const FCHMODAT: u64 = 53;
+    pub const FACCESSAT: u64 = 48;
+    pub const FCHMOD: u64 = 52;
+    pub const FCHOWNAT: u64 = 54;
+    pub const FCHOWN: u64 = 55;
     pub const FCHDIR: u64 = 50;
     pub const UTIMENSAT: u64 = 88;
     pub const RENAMEAT2: u64 = 276;
@@ -119,6 +123,15 @@ pub mod nr {
 
 pub fn init() {
     exceptions::set_syscall_handler(handle);
+}
+
+/// chown's (uid, gid) with -1 meaning "leave alone".
+fn chown_attr(uid: u32, gid: u32) -> fs::SetAttr {
+    fs::SetAttr {
+        uid: (uid != u32::MAX).then_some(uid),
+        gid: (gid != u32::MAX).then_some(gid),
+        ..Default::default()
+    }
 }
 
 fn cred() -> super::cred::Cred {
@@ -220,7 +233,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         }
         nr::PIPE2 => sys_pipe2(a0, a[1] as u32),
         nr::FSTAT => {
-            let st = file(a[0] as i64)?.stat().to_linux();
+            let st = fs::perm::view(file(a[0] as i64)?.inode()).to_linux();
             copy_out(a1, st.as_bytes())?;
             Ok(0)
         }
@@ -256,7 +269,42 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             if ino.kind() != InodeType::Dir {
                 return Err(ENOTDIR);
             }
+            fs::perm::may(&ino, fs::perm::X)?;
             current().inner.lock().cwd = ino;
+            Ok(0)
+        }
+        nr::FACCESSAT => {
+            // mode: F_OK 0, X_OK 1, W_OK 2, R_OK 4. Checked against the effective ids.
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let n = fs::lookup_at(base.as_ref(), &path, true)?;
+            fs::perm::may(&n, a[2] as u32 & 7)?;
+            Ok(0)
+        }
+        nr::FCHMOD | nr::FCHOWN => {
+            let f = file(a[0] as i64)?;
+            let attr = if nr == nr::FCHMOD {
+                fs::SetAttr {
+                    perm: Some(a[1] as u32 & 0o7777),
+                    ..Default::default()
+                }
+            } else {
+                chown_attr(a[1] as u32, a[2] as u32)
+            };
+            let attr = fs::perm::check_setattr(f.inode(), &attr)?;
+            f.inode().setattr(&attr)?;
+            Ok(0)
+        }
+        nr::FCHOWNAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let follow = a[4] as u32 & abi::AT_SYMLINK_NOFOLLOW == 0;
+            fs::setattr_at(
+                base.as_ref(),
+                &path,
+                follow,
+                &chown_attr(a[2] as u32, a[3] as u32),
+            )?;
             Ok(0)
         }
         nr::CHROOT => {
@@ -1015,10 +1063,11 @@ fn sys_pipe2(fds: usize, flags: u32) -> KResult<usize> {
 fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResult<usize> {
     let path = user_path(path)?;
     let st = if path.is_empty() && flags & abi::AT_EMPTY_PATH != 0 {
-        file(dirfd)?.stat()
+        fs::perm::view(file(dirfd)?.inode())
     } else {
         let base = base(dirfd)?;
-        fs::stat_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?
+        let n = fs::lookup_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?;
+        fs::perm::view(&n)
     };
     copy_out(statbuf, st.to_linux().as_bytes())?;
     Ok(0)

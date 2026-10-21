@@ -2,8 +2,11 @@
 # Boot milkOS headless, run one scripted desktop demo (kernel/src/wm/script.rs), wait for it to
 # finish and save the screen as a PNG.
 #   scripts/wm-demo.sh DEMO [out.png] [extra qemu args...]
-# DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today hover menu movespace
-#        spaces space2 control dim toast bench tour, or "none" for the plain desktop.
+# DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today
+#        spaces space2 control dim toast menu logo movespace files browse shell hover bench tour
+#        stty paint paintclose desk desktoday dockpress select termselect minianim openanim
+#        shutdown panic, or "none" for the plain desktop. Prefix slow- to run animations 20x
+#        slower (e.g. SETTLE=0.3 scripts/wm-demo.sh slow-minianim) to catch one mid-flight.
 # Default out: /tmp/milk-DEMO.png; the serial log goes next to it. Only the qemu started here is
 # killed (by PID).
 set -euo pipefail

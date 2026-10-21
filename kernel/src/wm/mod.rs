@@ -16,6 +16,7 @@
 //! assumes it runs on the boot stack, so it can become a kernel thread once `proc` lands: put
 //! `Desktop::frame` in that thread's loop and replace the `wfi` with a sleep-until-event.
 
+pub mod actions;
 mod anim;
 mod apps;
 mod buffer;
@@ -32,6 +33,7 @@ pub mod prefs;
 mod rtc;
 mod script;
 mod shell;
+mod skim;
 mod theme;
 pub mod tty;
 mod wallpaper;
@@ -96,6 +98,8 @@ pub enum Request {
     /// New preferences from Settings: apply and save.
     Prefs(prefs::Prefs),
     Skim,
+    /// A new Terminal tab, optionally running a command in it (Skim's `> cmd`).
+    NewTab(Option<String>),
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -354,6 +358,7 @@ impl Desktop {
         d.status = d.status_text();
         apps::fsx::ensure_home();
         ctl::init();
+        actions::register_builtin();
         clipboard::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
@@ -1091,6 +1096,12 @@ impl Desktop {
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
+                Request::NewTab(cmd) => {
+                    if let Some(c) = cmd {
+                        apps::terminal::queue_command(&c);
+                    }
+                    self.open(App::Terminal);
+                }
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();

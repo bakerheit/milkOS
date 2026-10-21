@@ -24,6 +24,13 @@ use super::super::{Mode, Request, request, rtc, shell::fmt_uptime};
 use super::fsx;
 
 const MAX_LINES: usize = 2000;
+
+/// Commands to run in the Terminal (Skim's `> cmd`), typed into the shell on its next tick.
+static COMMANDS: crate::sync::SpinLock<Vec<String>> = crate::sync::SpinLock::new(Vec::new());
+
+pub fn queue_command(cmd: &str) {
+    COMMANDS.lock().push(String::from(cmd));
+}
 const PAD: i32 = 14;
 const LINE_H: i32 = 18;
 
@@ -746,6 +753,19 @@ impl WindowContents for Terminal {
     }
 
     fn tick(&mut self, _now: u64) -> bool {
+        let cmds: Vec<String> = core::mem::take(&mut *COMMANDS.lock());
+        for c in cmds {
+            if self.tty {
+                for b in c.bytes() {
+                    super::super::tty::input(b);
+                }
+                super::super::tty::input(b'\r');
+            } else {
+                self.input = c;
+                self.cursor = self.input.chars().count();
+                self.submit();
+            }
+        }
         let log = self.follow_log();
         let tty = self.tty && self.follow_tty();
         if log || tty {

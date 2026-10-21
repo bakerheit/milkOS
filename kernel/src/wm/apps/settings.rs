@@ -19,7 +19,7 @@ use super::super::window::{PointerInput, PointerKind, WindowContents};
 use super::super::{Request, icons, request};
 use super::fsx;
 
-const SECTIONS: [&str; 7] = [
+pub const SECTIONS: [&str; 7] = [
     "Appearance",
     "Wallpaper",
     "Display",
@@ -29,6 +29,13 @@ const SECTIONS: [&str; 7] = [
     "About",
 ];
 const TM: usize = 5;
+
+/// A section someone asked for (Skim's settings results); the Settings window picks it up.
+static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::new(None);
+
+pub fn show_section(i: usize) {
+    *PENDING.lock() = Some(i.min(SECTIONS.len() - 1));
+}
 const AUTO: &str = "/sys/fs/milkfs/auto";
 const TM_SNAPSHOTS: &str = "/sys/fs/milkfs/snapshots";
 
@@ -64,7 +71,7 @@ pub struct Settings {
 impl Settings {
     pub fn new() -> Settings {
         let mut s = Settings {
-            section: 0,
+            section: PENDING.lock().take().unwrap_or(0),
             hits: Vec::new(),
             thumbs: Vec::new(),
             pending: prefs::get(),
@@ -559,6 +566,14 @@ impl WindowContents for Settings {
     }
 
     fn tick(&mut self, now: u64) -> bool {
+        let asked = PENDING.lock().take();
+        if let Some(i) = asked {
+            self.section = i;
+            if i == TM {
+                self.read_tm();
+            }
+            return true;
+        }
         // Live sections (Time Machine countdown, About uptime) once a second.
         let s = now / 1_000_000_000;
         if s != self.last_sec && (self.section == TM || self.section == TM + 1) {

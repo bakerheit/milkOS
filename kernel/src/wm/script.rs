@@ -465,6 +465,33 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(400);
             b.typ("echo the screen was cleared").enter().wait(300);
         }
+        "skimsearch" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("note");
+        }
+        "skimcalc" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("= (2+2*3)^2/4 + 0.5");
+        }
+        "skimfile" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("todo");
+        }
+        "skimcmd" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("> ls /bin")
+                .wait(200)
+                .enter()
+                .wait(1200);
+        }
+        "skimaction" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("dark")
+                .wait(200)
+                .enter()
+                .wait(800);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

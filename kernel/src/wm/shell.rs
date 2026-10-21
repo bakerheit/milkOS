@@ -239,7 +239,7 @@ pub fn dock_icon_center(i: usize) -> (i32, i32) {
 
 // ---- launcher -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     App(App),
     Program(&'static str),
@@ -249,16 +249,16 @@ pub enum Action {
     NewSpace,
 }
 
-struct Entry {
-    name: &'static str,
-    sub: &'static str,
-    icon: Icon,
-    bg: Color,
-    fg: Color,
-    action: Action,
+pub struct Entry {
+    pub name: &'static str,
+    pub sub: &'static str,
+    pub icon: Icon,
+    pub bg: Color,
+    pub fg: Color,
+    pub action: Action,
 }
 
-const ENTRIES: [Entry; 11] = [
+pub const ENTRIES: [Entry; 11] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -351,7 +351,9 @@ const ENTRIES: [Entry; 11] = [
 
 pub struct Launcher {
     pub query: String,
+    /// Index into `items` (headers are not selectable).
     pub sel: usize,
+    pub items: Vec<super::skim::Item>,
 }
 
 /// Fuzzy subsequence match, case-insensitive. Higher is better; None if not all of `q` appears in
@@ -378,27 +380,61 @@ pub fn fuzzy(q: &str, name: &str) -> Option<i32> {
         last = Some(found);
         pos = found + 1;
     }
-    Some(score * 10 - n.len() as i32 / 4)
+    // A literal substring beats a scattered match by a lot, more so at a word start.
+    let name_l: String = n.iter().collect();
+    let ql: String = q.trim().to_ascii_lowercase();
+    let bonus = match name_l.find(&ql) {
+        Some(0) => 120,
+        Some(i) if n[i - 1] == ' ' || n[i - 1] == '.' || n[i - 1] == '-' => 100,
+        Some(_) => 60,
+        None => 0,
+    };
+    Some(score * 10 + bonus - n.len() as i32 / 4)
 }
 
 impl Launcher {
-    pub fn result_count(&self) -> usize {
-        self.results().len()
+    pub fn new() -> Launcher {
+        super::skim::refresh_index();
+        let mut l = Launcher {
+            query: String::new(),
+            sel: 0,
+            items: Vec::new(),
+        };
+        l.update();
+        l
     }
 
-    fn results(&self) -> Vec<&'static Entry> {
-        if self.query.trim().is_empty() {
-            return ENTRIES.iter().take(4).collect();
+    pub fn update(&mut self) {
+        self.items = super::skim::search(&self.query);
+        self.sel = 0;
+    }
+
+    pub fn result_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Row y offsets in the results panel: (y, height, header kind or item index).
+    fn layout(&self) -> Vec<(i32, i32, Option<super::skim::Kind>, Option<usize>)> {
+        let mut y = 8;
+        let mut v = Vec::new();
+        for (h, it) in super::skim::rows(&self.items) {
+            let rh = if h.is_some() {
+                super::skim::HEADER_H
+            } else {
+                LAUNCH_ROW_H
+            };
+            v.push((y, rh, h, it));
+            y += rh;
         }
-        let mut v: Vec<(i32, &'static Entry)> = ENTRIES
-            .iter()
-            .filter_map(|e| fuzzy(&self.query, e.name).map(|s| (s, e)))
-            .collect();
-        v.sort_by_key(|e| core::cmp::Reverse(e.0));
-        v.into_iter()
-            .take(LAUNCH_MAX_ROWS)
-            .map(|(_, e)| e)
-            .collect()
+        v
+    }
+
+    /// Item under panel y.
+    pub fn item_at(&self, y: i32) -> Option<usize> {
+        self.layout()
+            .into_iter()
+            .find(|&(ry, rh, _, it)| it.is_some() && y >= ry && y < ry + rh)
+            .and_then(|r| r.3)
     }
 }
 
@@ -406,8 +442,9 @@ fn launcher_x() -> i32 {
     (SCREEN_W - LAUNCH_W) / 2
 }
 
-fn results_height(n: usize) -> i32 {
-    16 + 24 + n.max(1) as i32 * LAUNCH_ROW_H + 28 + 8 + 8
+fn results_height(l: &Launcher) -> i32 {
+    let rows: i32 = l.layout().iter().map(|r| r.1).sum();
+    8 + rows.max(LAUNCH_ROW_H) + 36
 }
 
 // ---- control centre -----------------------------------------------------------------------
@@ -615,14 +652,13 @@ impl Desktop {
                 Style::GlassStrong,
                 true,
             ));
-            let n = l.results().len();
             v.push(spec(
                 PanelKey::LaunchResults,
                 Rect::new(
                     x,
                     LAUNCH_Y + LAUNCH_INPUT_H + LAUNCH_GAP,
                     LAUNCH_W,
-                    results_height(n),
+                    results_height(l),
                 ),
                 R_LAUNCHER,
                 Style::GlassStrong,
@@ -838,35 +874,35 @@ impl Desktop {
         let Some(l) = &self.launcher else {
             return;
         };
-        let res = l.results();
-        let label = if l.query.trim().is_empty() {
-            "SUGGESTIONS"
-        } else {
-            "TOP HITS"
-        };
-        p.text(16, 12, label, COCOA);
-        if res.is_empty() {
-            p.text(64, 40 + 16, "No matches", COCOA);
+        if l.items.is_empty() {
+            p.text_p(64, 8 + 16, "No matches", COCOA, false);
         }
-        for (i, e) in res.iter().enumerate() {
-            let y = 40 + i as i32 * LAUNCH_ROW_H;
-            let sel = i == l.sel.min(res.len() - 1);
-            if sel {
-                p.rrect(8, y, w - 16, LAUNCH_ROW_H, R_ROW, STRAW, SEL_ROW_A);
+        let sel = l.sel.min(l.items.len().saturating_sub(1));
+        for (y, rh, header, item) in l.layout() {
+            if let Some(k) = header {
+                p.text(16, y + 6, k.label(), COCOA);
+                continue;
+            }
+            let Some(i) = item else {
+                continue;
+            };
+            let e = &l.items[i];
+            if i == sel {
+                p.rrect(8, y, w - 16, rh, R_ROW, STRAW, SEL_ROW_A);
             }
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
-            p.text_p(64, y + 6, e.name, ESPRESSO, true);
-            p.text_p(64, y + 22, e.sub, COCOA, false);
-            if sel {
+            p.text_p(64, y + 6, &e.title, ESPRESSO, true);
+            p.text_p(64, y + 24, &e.sub, COCOA, false);
+            if i == sel {
                 p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
             }
         }
-        let fy = 40 + res.len().max(1) as i32 * LAUNCH_ROW_H + 8;
+        let fy = results_height(l) - 30;
         p.text_p(
             16,
             fy,
-            "Up/Down to choose    Enter to open    Esc to close",
+            "Tab next kind    = calculator    > run a command    Esc closes",
             COCOA,
             false,
         );
@@ -1096,11 +1132,10 @@ impl Desktop {
             }
             PanelKey::LaunchInput => {}
             PanelKey::LaunchResults => {
-                let row = (y - 40) / LAUNCH_ROW_H;
-                if y >= 40
-                    && let Some(l) = &mut self.launcher
+                if let Some(l) = &mut self.launcher
+                    && let Some(i) = l.item_at(y)
                 {
-                    l.sel = row as usize;
+                    l.sel = i;
                     self.launcher_activate();
                 }
             }
@@ -1196,10 +1231,7 @@ impl Desktop {
             self.close_launcher();
         } else {
             self.control = false;
-            self.launcher = Some(Launcher {
-                query: String::new(),
-                sel: 0,
-            });
+            self.launcher = Some(Launcher::new());
         }
     }
 
@@ -1216,21 +1248,26 @@ impl Desktop {
         let Some(l) = &mut self.launcher else {
             return;
         };
+        let n = l.items.len();
         match k.key {
             super::Key::Enter => return self.launcher_activate(),
             super::Key::Backspace => {
                 l.query.pop();
-                l.sel = 0;
+                l.update();
             }
             super::Key::Up => l.sel = l.sel.saturating_sub(1),
-            super::Key::Down | super::Key::Tab => {
-                let n = l.results().len();
-                l.sel = (l.sel + 1).min(n.saturating_sub(1));
+            super::Key::Down => l.sel = (l.sel + 1).min(n.saturating_sub(1)),
+            super::Key::Tab => {
+                // First item of the next kind (wrapping).
+                if n > 0 {
+                    let cur = l.items[l.sel.min(n - 1)].kind;
+                    l.sel = (l.sel..n).find(|&i| l.items[i].kind != cur).unwrap_or(0);
+                }
             }
             _ => match k.ch {
-                Some(c) if !c.is_control() && l.query.len() < 30 => {
+                Some(c) if !c.is_control() && l.query.len() < 60 => {
                     l.query.push(c);
-                    l.sel = 0;
+                    l.update();
                 }
                 _ => return,
             },
@@ -1242,12 +1279,35 @@ impl Desktop {
         let Some(l) = &self.launcher else {
             return;
         };
-        let res = l.results();
-        let Some(e) = res.get(l.sel.min(res.len().saturating_sub(1))) else {
+        let Some(e) = l.items.get(l.sel.min(l.items.len().saturating_sub(1))) else {
             return;
         };
-        let action = e.action;
+        let act = e.act.clone();
         self.close_launcher();
+        use super::skim::Act;
+        match act {
+            Act::Entry(a) => self.run_entry(a),
+            Act::Action(f) => f(),
+            Act::Open(path) => self.open_any(&path),
+            Act::Setting(i) => {
+                super::apps::settings::show_section(i);
+                self.open(App::Settings);
+            }
+            Act::Calc(r) => {
+                if !r.is_empty() {
+                    super::clipboard::set(&r);
+                    self.post_toast(&format!("= {r}"), "copied to the clipboard");
+                }
+            }
+            Act::Command(cmd) => {
+                if !cmd.is_empty() {
+                    super::request(super::Request::NewTab(Some(cmd)));
+                }
+            }
+        }
+    }
+
+    fn run_entry(&mut self, action: Action) {
         match action {
             Action::App(a) => self.open(a),
             Action::Program(p) => self.launch(p),

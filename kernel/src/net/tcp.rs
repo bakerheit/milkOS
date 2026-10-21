@@ -156,6 +156,8 @@ pub struct Tcb {
     rcv_adv: u32,
     /// Send MSS (min of the peer's option and ours), not counting options.
     pub mss: u16,
+    /// Times a "too big" from the path made the MSS smaller.
+    pub pmtu_drops: u32,
     /// Window scaling in use: the peer's shift (applied to its windows) and ours.
     pub snd_wscale: u8,
     pub rcv_wscale: u8,
@@ -255,6 +257,7 @@ impl Tcb {
             rcv_nxt: 0,
             rcv_adv: 0,
             mss: DEFAULT_MSS,
+            pmtu_drops: 0,
             snd_wscale: 0,
             rcv_wscale: 0,
             sack_ok: false,
@@ -1153,6 +1156,60 @@ fn find_listener(st: &Stack, local: SockAddr) -> Option<usize> {
     wild
 }
 
+/// An ICMP "too big" (fragmentation needed / packet too big) about a packet we sent from
+/// `qsrc` to `qdst` (`proto`, its first bytes `l4`): lower the path MTU. For TCP only if
+/// the quoted segment is in flight on a connection (RFC 5927), and then that connection
+/// shrinks its MSS and resends at once, without a congestion response (RFC 1191 6.4).
+pub fn too_big(st: &mut Stack, qsrc: IpAddr, qdst: IpAddr, proto: u8, l4: &[u8], mtu: usize) {
+    let now = st.now;
+    let ours = match qsrc {
+        IpAddr::V4(a) => a.is_loopback() || st.iface.is_our_addr(a),
+        IpAddr::V6(a) => a.is_loopback() || ipv6::is_ours(&st.iface, a),
+    };
+    if !ours || l4.len() < 8 {
+        st.pmtu.stats.ignored += 1;
+        return;
+    }
+    if proto != PROTO_TCP {
+        st.pmtu.learn(qdst, mtu, now);
+        return;
+    }
+    let local = SockAddr::new(qsrc, be16(l4, 0));
+    let remote = SockAddr::new(qdst, be16(l4, 2));
+    let seq = be32(l4, 4);
+    let found = st.socks.iter().find_map(|(i, s)| {
+        let t = &s.tcb;
+        (s.ty == SockType::Stream
+            && s.local == local
+            && s.remote == remote
+            && !matches!(t.state, TcpState::Listen | TcpState::Closed)
+            && seq.wrapping_sub(t.snd_una) <= t.snd_max.wrapping_sub(t.snd_una))
+        .then_some(i)
+    });
+    let Some(i) = found else {
+        st.pmtu.stats.ignored += 1;
+        return;
+    };
+    let Some(m) = st.pmtu.learn(qdst, mtu, now) else {
+        return;
+    };
+    let mss = super::pmtu::mss_for(qdst, m);
+    let t = &mut st.socks.get(i).unwrap().tcb;
+    if mss < t.mss {
+        t.mss = mss;
+        t.pmtu_drops += 1;
+        // What is in flight was too big: send it again, smaller, now.
+        t.snd_nxt = t.snd_una;
+        t.rtt_probe = None;
+        output(st, i);
+    }
+}
+
+/// The MSS we use at most towards `remote` (our MSS for the family, under its path MTU).
+fn path_mss(st: &Stack, local: IpAddr, remote: IpAddr) -> u16 {
+    our_mss(local).min(super::pmtu::mss_for(remote, st.pmtu.mtu(remote, st.now)))
+}
+
 /// The MSS we announce and accept at most on this family (MTU - IP - TCP headers).
 fn our_mss(a: IpAddr) -> u16 {
     if a.is_v6() { OUR_MSS6 } else { OUR_MSS }
@@ -1235,6 +1292,7 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
         (ls.nodelay, ls.family, ls.v6only)
     };
     let scope = st.rx_link;
+    let mss_max = path_mss(st, local.ip, remote.ip);
     let s = st.socks.get(c).unwrap();
     s.user_open = false;
     s.nodelay = nodelay;
@@ -1246,7 +1304,7 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
     let t = &mut s.tcb;
     t.start(
         initial_seq(local, remote, now),
-        seg.mss.unwrap_or(DEFAULT_MSS).min(our_mss(local.ip)),
+        seg.mss.unwrap_or(DEFAULT_MSS).min(mss_max),
     );
     t.state = TcpState::SynReceived;
     t.irs = seg.seq;
@@ -1275,6 +1333,11 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
 
 fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     let now = st.now;
+    let mss_max = {
+        let s = st.socks.get(i).unwrap();
+        let (l, r) = (s.local.ip, s.remote.ip);
+        path_mss(st, l, r)
+    };
     let s = st.socks.get(i).unwrap();
     let t = &mut s.tcb;
     let has_ack = seg.flags & ACK != 0;
@@ -1295,7 +1358,7 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     }
     t.irs = seg.seq;
     t.rcv_nxt = seg.seq.wrapping_add(1);
-    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(our_mss(s.local.ip));
+    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(mss_max);
 
     // Options: on only if both sides offered them (we always offer).
     if let Some(ws) = seg.wscale {
@@ -2138,10 +2201,11 @@ pub fn connect(st: &mut Stack, i: usize, remote: SockAddr) {
     if let Some(k) = st.tw.find(local, remote) {
         st.tw.remove(k);
     }
+    let mss_max = path_mss(st, local.ip, remote.ip);
     let s = st.socks.get(i).unwrap();
     let iss = initial_seq(local, remote, now);
     let t = &mut s.tcb;
-    t.start(iss, our_mss(local.ip));
+    t.start(iss, mss_max);
     t.state = TcpState::SynSent;
     t.connect_pending = true;
     st.stats.tcp_active_opens += 1;

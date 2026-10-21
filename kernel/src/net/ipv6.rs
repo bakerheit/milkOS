@@ -65,6 +65,25 @@ const ND_REACHABLE: u64 = 600 * S;
 const PENDING_MAX: usize = 16;
 const PENDING_NS: u64 = 3 * S;
 
+/// The upper-layer protocol of a first fragment, if its payload (from `o`, starting with
+/// header `next`) holds the rest of the header chain and 8 bytes of that header (20 for
+/// TCP): RFC 7112. None otherwise (the datagram is refused).
+fn upper_after(pkt: &[u8], mut o: usize, mut next: u8) -> Option<u8> {
+    for _ in 0..8 {
+        match next {
+            NH_DSTOPT | NH_ROUTING => {
+                let len = (*pkt.get(o + 1)? as usize + 1) * 8;
+                next = *pkt.get(o)?;
+                o += len;
+            }
+            NH_TCP => return (pkt.len() >= o + 20).then_some(next),
+            NH_HOP | NH_FRAG => return None,
+            _ => return (pkt.len() >= o + 8).then_some(next),
+        }
+    }
+    None
+}
+
 /// Interface index for scope ids and /proc (Linux numbering: lo 1, eth0 2, eth1 3).
 pub fn ifindex(link: Option<usize>) -> u32 {
     link.map_or(1, |k| k as u32 + 2)
@@ -252,6 +271,8 @@ pub struct State6 {
     want_ns: Vec<(usize, Ipv6)>,
     /// Echo replies to our pings: (from, identifier, sequence, payload bytes, when).
     pub ping_replies: Vec<(Ipv6, u16, u16, usize, u64)>,
+    /// The last fragment identification used (a scrambled counter, never 0).
+    pub frag_id: u32,
 }
 
 impl State6 {
@@ -261,6 +282,7 @@ impl State6 {
             parked: Vec::new(),
             want_ns: Vec::new(),
             ping_replies: Vec::new(),
+            frag_id: 0,
         }
     }
 }
@@ -504,6 +526,42 @@ pub fn send_on(
     Ok(())
 }
 
+/// Send `payload` (a whole upper-layer datagram of protocol `next`, checksum done) from
+/// `src` to `dst` as IPv6 fragments sized for the path MTU `mtu` (RFC 8200 4.5): each
+/// fragment's data a multiple of 8 bytes, one 32-bit identification for all of them.
+pub fn send_fragments(
+    st: &mut Stack,
+    src: Ipv6,
+    dst: Ipv6,
+    scope: Option<usize>,
+    next: u8,
+    payload: &[u8],
+    mtu: usize,
+) -> Result<()> {
+    let chunk = (mtu - HDR - 8) & !7;
+    st.ip6.frag_id = st
+        .ip6
+        .frag_id
+        .wrapping_mul(0x9e37_79b9)
+        .wrapping_add(0x6d69_6c6b)
+        | 1;
+    let id = st.ip6.frag_id;
+    for (k, part) in payload.chunks(chunk).enumerate() {
+        let off = k * chunk;
+        let more = off + part.len() < payload.len();
+        st.frags.stats6.creates += 1;
+        send(st, src, dst, scope, NH_FRAG, |b, _, _| {
+            b[0] = next;
+            b[1] = 0;
+            put16(b, 2, (off as u16) | more as u16);
+            put32(b, 4, id);
+            b[8..8 + part.len()].copy_from_slice(part);
+            8 + part.len()
+        })?;
+    }
+    Ok(())
+}
+
 /// NS for neighbours `send_on` found unresolved (sent from the net thread's tick or right
 /// after, where the whole stack is at hand).
 pub fn flush_ns(st: &mut Stack) {
@@ -679,9 +737,10 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
         st.ip6.stats.in_addr_errors += 1;
         return;
     }
-    // Extension headers.
+    // Extension headers. `nh_at`: where the byte naming the current header is.
     let mut next = pkt[6];
     let mut off = HDR;
+    let mut nh_at = 6;
     let mut first = true;
     loop {
         match next {
@@ -731,6 +790,7 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                     o += 2 + olen;
                 }
                 next = pkt[off];
+                nh_at = off;
                 off += len;
             }
             NH_ROUTING => {
@@ -747,6 +807,7 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                 }
                 let len = (pkt[off + 1] as usize + 1) * 8;
                 next = pkt[off];
+                nh_at = off;
                 off += len;
             }
             NH_FRAG => {
@@ -756,8 +817,19 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
                 }
                 let fo = be16(pkt, off + 2);
                 if fo & 0xfff9 != 0 {
-                    // A real fragment (offset or M set): no IPv6 reassembly.
-                    st.ip6.stats.frag_dropped += 1;
+                    // A real fragment (offset or M set): reassemble (net::frag), then the
+                    // whole datagram comes through here again, without a fragment header.
+                    let upper = if fo >> 3 == 0 {
+                        upper_after(pkt, off + 8, pkt[off])
+                    } else {
+                        None
+                    };
+                    let now = st.now;
+                    match st.frags.input6(now, pkt, off, nh_at, upper) {
+                        super::frag::Outcome::Done(whole) => input(st, link, &whole, src_mac),
+                        super::frag::Outcome::Dropped => st.ip6.stats.frag_dropped += 1,
+                        super::frag::Outcome::Pending => {}
+                    }
                     return;
                 }
                 next = pkt[off]; // atomic fragment (RFC 6946): just skip the header
@@ -840,6 +912,22 @@ fn icmp_input(
             }
             r.push((src, be16(p, 4), be16(p, 6), p.len() - 8, now));
             st.wake_any = true;
+        }
+        2 if p.len() >= 8 + HDR + 8 => {
+            // Packet too big: the quoted packet (after the 4-byte MTU) is one of ours.
+            let q = &p[8..];
+            let mtu = be32(p, 4) as usize;
+            let qs = Ipv6(q[8..24].try_into().unwrap());
+            let qd = Ipv6(q[24..40].try_into().unwrap());
+            // The upper layer, past any extension headers we put there (we only ever
+            // add a fragment header).
+            let (mut next, mut o) = (q[6], HDR);
+            if next == NH_FRAG && q.len() >= o + 8 {
+                next = q[o];
+                o += 8;
+            }
+            let l4 = q.get(o..).unwrap_or(&[]);
+            super::tcp::too_big(st, IpAddr::V6(qs), IpAddr::V6(qd), next, l4, mtu);
         }
         1..=4 => {}
         133..=137 if hop == 255 => {

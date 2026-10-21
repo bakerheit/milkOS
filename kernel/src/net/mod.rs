@@ -27,6 +27,7 @@ pub mod frag;
 pub mod icmp;
 pub mod iface;
 pub mod ipv6;
+pub mod pmtu;
 pub mod procnet;
 pub mod ring;
 pub mod selftest;
@@ -90,6 +91,8 @@ pub struct Stack {
     pub tw: tcp::TwTable,
     /// IP datagrams being reassembled.
     pub frags: frag::Reasm,
+    /// Path MTUs learned from ICMP (both families).
+    pub pmtu: pmtu::Cache,
     /// IPv6 (per-link state is in the links).
     pub ip6: ipv6::State6,
     pub dhcp: dhcp::Dhcp,
@@ -142,6 +145,7 @@ fn new_stack() -> Box<Stack> {
         socks: socket::Table::new(),
         tw: tcp::TwTable::new(),
         frags: frag::Reasm::new(),
+        pmtu: pmtu::Cache::new(),
         ip6: ipv6::State6::new(),
         dhcp: dhcp::Dhcp::new(),
         ping: icmp::PingTable::new(),
@@ -236,6 +240,7 @@ fn net_thread() {
             tcp::tick(st);
             ipv6::tick(st);
             st.frags.expire(now);
+            st.pmtu.expire(now);
             st.stats.ip_reasm_fails = st.frags.stats.fails;
         });
         if let Some(h) = http.as_mut() {
@@ -372,6 +377,15 @@ impl Stack {
 
     /// Deliver queued loopback packets (bounded, they may generate more).
     fn poll_loopback(&mut self) {
+        // Packets the emulated loopback path MTU refused: answer as a router would.
+        let lo_mtu = iface::LO_MTU.load(core::sync::atomic::Ordering::Relaxed) as usize;
+        for pkt in core::mem::take(&mut self.iface.lo_too_big) {
+            if pkt.first().is_some_and(|b| b >> 4 == 6) {
+                ipv6::send_error(self, None, 2, 0, lo_mtu as u32, &pkt);
+            } else if pkt.len() >= 20 && be16(&pkt, 6) & 0x4000 != 0 {
+                icmp::send_frag_needed(self, &pkt, lo_mtu as u16);
+            }
+        }
         for _ in 0..256 {
             let Some(pkt) = self.iface.lo_front() else {
                 return;
@@ -498,14 +512,16 @@ impl Stack {
         proto: u8,
         payload: &[u8],
     ) -> crate::fs::errno::Result<()> {
-        const CHUNK: usize = iface::MTU - IP_HDR; // 1480, a multiple of 8
+        // Fragments sized for the path MTU (1480 bytes of payload on a 1500 path).
+        let mtu = self.pmtu.mtu(dst.into(), self.now);
+        let chunk = (mtu - IP_HDR) & !7;
         let id = self.iface.next_ip_id();
         self.stats.ip_out_requests += 1;
-        for (k, part) in payload.chunks(CHUNK).enumerate() {
+        for (k, part) in payload.chunks(chunk).enumerate() {
             let f = iface::Frag {
                 id,
-                off8: (k * CHUNK / 8) as u16,
-                more: (k + 1) * CHUNK < payload.len(),
+                off8: (k * chunk / 8) as u16,
+                more: (k + 1) * chunk < payload.len(),
             };
             self.frags.stats.creates += 1;
             self.iface

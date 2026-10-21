@@ -113,6 +113,20 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, msg: &[u8], ip_pkt: &[u8]) {
             });
             st.wake_any = true;
         }
+        DEST_UNREACH if msg[1] == 4 && msg.len() >= 8 + 20 + 8 => {
+            // Fragmentation needed: the quoted packet is one of ours that didn't fit.
+            let q = &msg[8..];
+            let ihl = ((q[0] & 0x0f) as usize) * 4;
+            if q[0] >> 4 != 4 || ihl < 20 || q.len() < ihl + 8 {
+                return;
+            }
+            let (qs, qd) = (super::wire::ip_at(q, 12), super::wire::ip_at(q, 16));
+            let mtu = match be16(msg, 6) {
+                0 => super::pmtu::MIN4, // an old router that doesn't say (RFC 1191 5)
+                m => m as usize,
+            };
+            super::tcp::too_big(st, qs.into(), qd.into(), q[9], &q[ihl..], mtu);
+        }
         _ => {}
     }
 }
@@ -191,6 +205,30 @@ pub fn sendto(st: &mut Stack, i: usize, msg: &[u8], to: SockAddr) -> Result<usiz
         msg.len()
     })?;
     Ok(msg.len())
+}
+
+/// Fragmentation needed (type 3 code 4) with the next-hop MTU, about `orig`, a packet
+/// with DF that didn't fit (the loopback path MTU test plays the router).
+pub fn send_frag_needed(st: &mut Stack, orig: &[u8], mtu: u16) {
+    let ihl = ((orig[0] & 0x0f) as usize) * 4;
+    let quote = &orig[..(ihl + 8).min(orig.len())];
+    let to = super::wire::ip_at(orig, 12);
+    if to.is_unspecified() || to.is_broadcast() {
+        return;
+    }
+    st.stats.icmp_out_msgs += 1;
+    st.stats.icmp_out_dest_unreachs += 1;
+    let _ = st.send_ip(Ipv4::UNSPECIFIED, to, PROTO_ICMP, |b| {
+        b[0] = DEST_UNREACH;
+        b[1] = 4;
+        b[2..6].fill(0);
+        put16(b, 6, mtu);
+        b[8..8 + quote.len()].copy_from_slice(quote);
+        let n = 8 + quote.len();
+        let c = checksum(&b[..n]);
+        put16(b, 2, c);
+        n
+    });
 }
 
 /// Destination unreachable (`code` 2 = protocol, 3 = port) about `orig` (an IP packet we

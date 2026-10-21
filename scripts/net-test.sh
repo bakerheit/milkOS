@@ -107,10 +107,12 @@ grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
 for want in 'tcp lossy loopback 1/7: 256 KiB intact' 'tcp lossy loopback 1/3: 32 KiB intact' \
   'tcp TIME_WAIT: parked' 'ip fragments: 20000-byte UDP datagram' \
   'ipv6: eth0 fec0::[0-9a-f:]+/64 \(SLAAC, router fe80::2\), ping fec0::2' 'ipv6 extension headers: .* refused \(1\)' \
-  'dual-stack: .* V6ONLY ok, udp6 ok' 'tcp echo via \[fec0::2\]:[0-9]+: 512 KiB round trip'; do
+  'dual-stack: .* V6ONLY ok, udp6 ok' 'tcp echo via \[fec0::2\]:[0-9]+: 512 KiB round trip' \
+  'ipv6 fragments: .* overlap poisoned \(1\), header chain split refused, 1 reassembled' \
+  'path mtu: IPv6 path 1280 -> tcp mss 1220 .* IPv4 path 1000 -> tcp mss 960'; do
   grep -Eaq "\[net\] $want" "$LOG" || fail "self-test line missing: $want"
 done
-grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT|dual-stack|tcp echo)' "$LOG" | tr -d '\r' | sed 's/^/  /'
+grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT|dual-stack|tcp echo|path mtu)' "$LOG" | tr -d '\r' | sed 's/^/  /'
 
 echo "---- msh: network tools (socket syscalls from user space) ----"
 for _ in $(seq 300); do [ -e "$WORK/nc.listening" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done

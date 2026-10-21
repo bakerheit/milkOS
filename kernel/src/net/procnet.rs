@@ -474,7 +474,8 @@ impl fmt::Display for Hex32 {
 /// `/proc/net/snmp6`: one `Name value` per line, as Linux.
 pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     let s = &st.ip6.stats;
-    let rows: [(&str, u64); 19] = [
+    let f = &st.frags.stats6;
+    let rows: [(&str, u64); 25] = [
         ("Ip6InReceives", s.in_receives),
         ("Ip6InHdrErrors", s.in_hdr_errors),
         ("Ip6InAddrErrors", s.in_addr_errors),
@@ -483,7 +484,13 @@ pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         ("Ip6InDelivers", s.in_delivers),
         ("Ip6OutRequests", s.out_requests),
         ("Ip6OutNoRoutes", s.out_no_routes),
-        ("Ip6ReasmFails", s.frag_dropped),
+        ("Ip6ReasmReqds", f.reqds),
+        ("Ip6ReasmOKs", f.oks),
+        ("Ip6ReasmFails", f.fails),
+        ("Ip6ReasmTimeout", f.timeouts),
+        ("Ip6ReasmOverlaps", f.overlaps),
+        ("Ip6FragCreates", f.creates),
+        ("Ip6FragDropped", s.frag_dropped),
         ("Ip6InSourceRouteRefused", s.routing_refused),
         ("Icmp6InMsgs", s.icmp_in_msgs),
         ("Icmp6OutMsgs", s.icmp_out_msgs),
@@ -499,6 +506,25 @@ pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         writeln!(w, "{k:<32}{v}")?;
     }
     Ok(())
+}
+
+/// `/proc/net/pmtu` (milkOS): the path MTUs learned from ICMP, `DST MTU EXPIRES_IN_S`,
+/// then the counters.
+pub fn pmtu(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for e in &st.pmtu.entries {
+        writeln!(
+            w,
+            "{} {} {}",
+            e.dst,
+            e.mtu,
+            e.until.saturating_sub(st.now) / 1_000_000_000
+        )?;
+    }
+    writeln!(
+        w,
+        "# learned {} ignored {}",
+        st.pmtu.stats.learned, st.pmtu.stats.ignored
+    )
 }
 
 /// `/proc/net/ndisc` (milkOS): the IPv6 neighbour cache, `ADDR MAC STATE [router] DEV`.
@@ -532,6 +558,7 @@ pub const FILES: &[(&str, Gen)] = &[
     ("if_inet6", if_inet6),
     ("snmp6", snmp6),
     ("ndisc", ndisc),
+    ("pmtu", pmtu),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

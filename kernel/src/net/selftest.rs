@@ -300,8 +300,9 @@ fn test_ipv6() -> core::result::Result<(), String> {
 
 /// IPv6 extension headers, on crafted packets from ::1 to ::1 carrying an echo request:
 /// hop-by-hop + destination options (accepted), an atomic fragment (accepted), a routing
-/// header with segments left (refused, never routed), a real fragment (dropped), an
-/// unknown option whose action bits say "discard" (dropped).
+/// header with segments left (refused, never routed), a lone first fragment (held for
+/// reassembly, not answered), an unknown option whose action bits say "discard"
+/// (dropped).
 fn test_ipv6_ext() -> core::result::Result<(), String> {
     use super::wire::{finish, pseudo_sum6, sum};
     // ext: (next header value of each header, its bytes without the next-header byte).
@@ -346,6 +347,7 @@ fn test_ipv6_ext() -> core::result::Result<(), String> {
         })
     };
     let before = super::with(|st| st.ip6.stats);
+    let held0 = super::with(|st| st.frags.stats6.reqds);
     let inject =
         |p: Vec<u8>| super::with(|st| super::ipv6::input(st, None, &p, super::wire::Mac::ZERO));
     inject(packet(1, &[(0, padn), (60, padn)]));
@@ -359,18 +361,174 @@ fn test_ipv6_ext() -> core::result::Result<(), String> {
     inject(packet(5, &[(60, unknown_discard)]));
     let ok5 = !replies(5);
     let after = super::with(|st| st.ip6.stats);
+    let held = super::with(|st| st.frags.stats6.reqds) - held0;
     kprintln!(
-        "[net] ipv6 extension headers: hop-by-hop + dst options ok, atomic fragment ok, routing header with segments left refused ({}), fragment dropped ({}), discard-option dropped ({})",
+        "[net] ipv6 extension headers: hop-by-hop + dst options ok, atomic fragment ok, routing header with segments left refused ({}), lone fragment held ({}), discard-option dropped ({})",
         after.routing_refused - before.routing_refused,
-        after.frag_dropped - before.frag_dropped,
+        held,
         after.in_discards - before.in_discards
     );
     if !(ok1 && ok2 && ok3 && ok4 && ok5)
         || after.routing_refused != before.routing_refused + 1
-        || after.frag_dropped != before.frag_dropped + 1
+        || held != 1
         || after.in_discards != before.in_discards + 1
     {
         return Err(alloc::format!("results {ok1} {ok2} {ok3} {ok4} {ok5}"));
+    }
+    Ok(())
+}
+
+/// IPv6 reassembly on crafted fragments from ::1 to ::1 carrying a 2000-byte echo
+/// request: two fragments last-first (reassembled and answered), an overlapping pair
+/// (the datagram is poisoned), and a first fragment without the upper-layer header (a
+/// destination options header in it, the ICMPv6 header only in the second: refused, RFC
+/// 7112).
+fn test_fragments6() -> core::result::Result<(), String> {
+    use super::wire::{finish, pseudo_sum6, sum};
+    let lo = Ipv6::LOOPBACK;
+    let echo = |seq: u16| -> Vec<u8> {
+        let mut m = alloc::vec![128u8, 0, 0, 0, 0x6d, 0x6c, (seq >> 8) as u8, seq as u8];
+        m.extend((0..2000).map(|k| k as u8));
+        let c = finish(sum(&m, pseudo_sum6(lo, lo, 58, m.len())));
+        put16(&mut m, 2, c);
+        m
+    };
+    // An IPv6 packet with a fragment header: id, byte offset, more, next, data.
+    let frag = |id: u32, off: usize, more: bool, next: u8, data: &[u8]| -> Vec<u8> {
+        let mut p = alloc::vec![0u8; 48];
+        p[0] = 0x60;
+        put16(&mut p, 4, (8 + data.len()) as u16);
+        p[6] = 44;
+        p[7] = 64;
+        p[8..24].copy_from_slice(&lo.0);
+        p[24..40].copy_from_slice(&lo.0);
+        p[40] = next;
+        put16(&mut p, 42, off as u16 | more as u16);
+        p[44..48].copy_from_slice(&id.to_be_bytes());
+        p.extend_from_slice(data);
+        p
+    };
+    let inject =
+        |p: Vec<u8>| super::with(|st| super::ipv6::input(st, None, &p, super::wire::Mac::ZERO));
+    let replied = |seq: u16| {
+        wait_for(200, || {
+            super::with(|st| {
+                st.ip6
+                    .ping_replies
+                    .iter()
+                    .any(|&(_, id, sq, _, _)| id == 0x6d6c && sq == seq)
+            })
+        })
+    };
+    let before = super::with(|st| st.frags.stats6);
+    // 1. Last first.
+    let m = echo(21);
+    inject(frag(0x6d00_0001, 1232, false, 58, &m[1232..]));
+    inject(frag(0x6d00_0001, 0, true, 58, &m[..1232]));
+    let ok1 = replied(21);
+    // 2. Overlap: the second fragment starts 8 bytes inside the first.
+    let m = echo(22);
+    inject(frag(0x6d00_0002, 0, true, 58, &m[..1232]));
+    inject(frag(0x6d00_0002, 1224, false, 58, &m[1224..]));
+    let ok2 = !replied(22);
+    // 3. The header chain doesn't fit the first fragment: a destination options header
+    // (8 bytes) is all it holds, the ICMPv6 header comes in the second.
+    let m = echo(23);
+    let first = [58u8, 0, 1, 4, 0, 0, 0, 0]; // dst options: next 58, PadN
+    let ok3_seen = {
+        inject(frag(0x6d00_0003, 0, true, 60, &first));
+        inject(frag(0x6d00_0003, 8, false, 60, &m));
+        !replied(23)
+    };
+    let after = super::with(|st| st.frags.stats6);
+    kprintln!(
+        "[net] ipv6 fragments: 2000-byte echo in 2 fragments last-first answered, overlap poisoned ({}), header chain split refused, {} reassembled",
+        after.overlaps - before.overlaps,
+        after.oks - before.oks
+    );
+    if !(ok1 && ok2 && ok3_seen)
+        || after.overlaps != before.overlaps + 1
+        || after.oks != before.oks + 1
+    {
+        return Err(alloc::format!("results {ok1} {ok2} {ok3_seen}"));
+    }
+    Ok(())
+}
+
+/// Path MTU discovery over loopback, with loopback playing a path of a smaller MTU
+/// (`iface::LO_MTU`): too-big packets are answered by ICMPv6 "packet too big" / ICMP
+/// "fragmentation needed" as a router would. IPv6 at 1280: a TCP connection drops its MSS
+/// to 1220 mid-stream and the bytes still arrive intact, then a 4000-byte UDP datagram
+/// goes out in fragments of the path's size and comes back whole. IPv4 at 1000 the same
+/// way (MSS 960). The cache is cleared afterwards.
+fn test_pmtu() -> core::result::Result<(), String> {
+    use core::sync::atomic::Ordering;
+    let set_mtu = |m: u32| super::iface::LO_MTU.store(m, Ordering::Relaxed);
+    let run =
+        |fam: Family, lo: SockAddr, port: u16| -> core::result::Result<(u16, u32, usize), String> {
+            let l = socket::socket_family(fam, SockType::Stream).map_err(es)?;
+            let at = SockAddr::new(lo.ip, port);
+            socket::bind(l, at).map_err(es)?;
+            socket::listen(l, 2).map_err(es)?;
+            let c =
+                connect_fam(fam, at, 1000).map_err(|x| alloc::format!("connect {at}: {}", e(x)));
+            let c = match c {
+                Ok(c) => c,
+                Err(m) => {
+                    let _ = socket::close(l);
+                    return Err(m);
+                }
+            };
+            socket::wait(l, POLLIN, 1000 * MS);
+            let (a, _) = socket::accept(l).map_err(|x| alloc::format!("accept: {}", e(x)))?;
+            let r = pump(c, a, 64 * 1024, 10_000);
+            let (mss, drops) = super::with(|st| {
+                st.socks
+                    .get(c.slot())
+                    .map_or((0, 0), |s| (s.tcb.mss, s.tcb.pmtu_drops))
+            });
+            let mtu = super::with(|st| st.pmtu.mtu(lo.ip, st.now));
+            for s in [c, a, l] {
+                let _ = socket::close(s);
+            }
+            r?;
+            // A big UDP datagram after the path MTU is known: fragments of that size.
+            let u = socket::socket_family(fam, SockType::Dgram).map_err(es)?;
+            let v = socket::socket_family(fam, SockType::Dgram).map_err(es)?;
+            socket::bind(v, SockAddr::new(lo.ip, port + 1)).map_err(es)?;
+            let big: Vec<u8> = (0..4000).map(|k| (k * 7) as u8).collect();
+            let sent = socket::sendto(u, &big, SockAddr::new(lo.ip, port + 1));
+            socket::wait(v, POLLIN, 500 * MS);
+            let mut buf = alloc::vec![0u8; 4096];
+            let got = socket::recvfrom(v, &mut buf);
+            let _ = socket::close(u);
+            let _ = socket::close(v);
+            sent.map_err(|x| alloc::format!("udp send: {}", e(x)))?;
+            let (n, _) = got.map_err(|x| alloc::format!("udp: {}", e(x)))?;
+            if buf[..n] != big[..] {
+                return Err(alloc::format!("udp: {n} bytes back, not the 4000 sent"));
+            }
+            Ok((mss, drops, mtu))
+        };
+    set_mtu(1280);
+    let r6 = run(Family::V6, SockAddr::new(Ipv6::LOOPBACK, 0), 5030);
+    set_mtu(1000);
+    let r4 = run(Family::V4, SockAddr::new(Ipv4::LOCALHOST, 0), 5032);
+    set_mtu(0);
+    let learned = super::with(|st| {
+        let n = st.pmtu.stats.learned;
+        st.pmtu.clear();
+        n
+    });
+    let (mss6, d6, m6) = r6.map_err(|m| alloc::format!("IPv6: {m}"))?;
+    let (mss4, d4, m4) = r4.map_err(|m| alloc::format!("IPv4: {m}"))?;
+    kprintln!(
+        "[net] path mtu: IPv6 path 1280 -> tcp mss {mss6} ({d6} drop), 4000-byte udp in fragments ok; IPv4 path 1000 -> tcp mss {mss4} ({d4} drop), udp ok; {learned} learned"
+    );
+    if (m6, mss6, m4, mss4) != (1280, 1220, 1000, 960) || d6 == 0 || d4 == 0 {
+        return Err(alloc::format!(
+            "IPv6 mtu {m6} mss {mss6} drops {d6}, IPv4 mtu {m4} mss {mss4} drops {d4}"
+        ));
     }
     Ok(())
 }
@@ -908,6 +1066,8 @@ pub fn run() {
     }
     check("tcp time-wait", test_time_wait());
     check("ip fragments", test_fragments());
+    check("ipv6 fragments", test_fragments6());
+    check("path mtu", test_pmtu());
     check(
         "refused",
         match connect(SockAddr::new(Ipv4::LOCALHOST, 9), 1000) {

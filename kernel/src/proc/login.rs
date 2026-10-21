@@ -248,7 +248,10 @@ pub fn login(name: &str, password: &str) -> Result<Account, LoginError> {
             fix_layout(&a); // the primary volume brings its own home and /Applications
         }
         Err(crate::fs::Errno::ENODEV) => {} // nothing locked
-        Err(e) => crate::kprintln!("[login] {}: no disk opened with that password ({e})", a.name),
+        Err(e) => crate::kprintln!(
+            "[login] {}: no disk opened with that password ({e})",
+            a.name
+        ),
     }
     Ok(a)
 }

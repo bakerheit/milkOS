@@ -25,6 +25,8 @@ pub enum Icon {
     Calc,
     /// An app action in Skim: a little play triangle.
     Action,
+    /// An installed package: a box with its lid.
+    Package,
 }
 
 /// Draw `icon` as an `s` x `s` tile at (x, y), tile colour `bg` (blended at `bg_a`), glyph `fg`.
@@ -106,6 +108,11 @@ pub fn draw(
                 let wpx = (if k <= half { k } else { h - k }) * u(18) / half.max(1);
                 p.fill(x + u(17), y + top + k, wpx.max(1), 1, fg);
             }
+        }
+        Icon::Package => {
+            ring(p, 11, 17, 26, 21, u(3), th(3), fg);
+            rect(p, 9, 11, 30, 8, u(3), fg);
+            rect(p, 21, 23, 6, 3, 0, fg);
         }
         Icon::Calc => {
             rect(p, 11, 11, 11, 11, u(3), fg);

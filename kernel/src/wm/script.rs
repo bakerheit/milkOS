@@ -10,7 +10,7 @@ use crate::{fwcfg, kprintln};
 
 use super::Desktop;
 use super::event::{Button, Event, Key, Mods};
-use super::shell::dock_icon_center;
+use super::shell::{dock_icon_center, dock_icon_center_of};
 
 pub enum Step {
     Wait(u64),
@@ -615,6 +615,30 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // Lock, then a key unlocks (and is not typed into the Terminal).
             b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
             b.typ("x").wait(700);
+        }
+        // Packages (docs/packages.md), against a repo served by scripts/wm-pkg-demo.sh: install
+        // fortune and moo2048 from the Terminal; their dock tiles appear within 3 s.
+        "pkgdock" | "pkgrun" | "pkgfortune" => {
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install fortune").enter().wait(3000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            // Sorted by name: fortune is tile 9, moo2048 tile 10.
+            if name == "pkgrun" {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.click(x, y).wait(2000);
+            } else if name == "pkgfortune" {
+                let (x, y) = dock_icon_center_of(9, 2);
+                b.click(x, y).wait(2000);
+            } else {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.glide(x, y - 80, x, y, 6).wait(300);
+            }
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

@@ -106,6 +106,8 @@ enum DockAction {
     Program(&'static str),
     Home,
     Spaces,
+    /// An installed package (`packages::get(i)`).
+    Pkg(usize),
 }
 
 struct DockItem {
@@ -182,8 +184,45 @@ const DOCK: [DockItem; 9] = [
     },
 ];
 
+/// A dock tile as drawn: the built-in ones, then installed packages (packages.rs).
+struct Tile {
+    name: String,
+    /// None: a package, drawn as its colour with its initial.
+    icon: Option<Icon>,
+    bg: Color,
+    fg: Color,
+    action: DockAction,
+}
+
+fn dock_len() -> usize {
+    DOCK.len() + super::packages::count()
+}
+
+fn tiles() -> Vec<Tile> {
+    let mut v: Vec<Tile> = DOCK
+        .iter()
+        .map(|d| Tile {
+            name: String::from(d.name),
+            icon: Some(d.icon),
+            bg: d.bg,
+            fg: d.fg,
+            action: d.action,
+        })
+        .collect();
+    for (i, p) in super::packages::all().into_iter().enumerate() {
+        v.push(Tile {
+            name: p.label,
+            icon: None,
+            bg: p.color,
+            fg: INK,
+            action: DockAction::Pkg(i),
+        });
+    }
+    v
+}
+
 pub fn dock_rect() -> Rect {
-    let n = DOCK.len() as i32;
+    let n = dock_len() as i32;
     let w = 2 * DOCK_PAD + n * dock_icon() + (n - 1) * DOCK_GAP;
     Rect::new(
         (SCREEN_W - w) / 2,
@@ -197,7 +236,7 @@ pub fn dock_rect() -> Rect {
 pub fn dock_index(lx: i32) -> Option<usize> {
     let i = (lx - DOCK_PAD) / (dock_icon() + DOCK_GAP);
     let within = (lx - DOCK_PAD) % (dock_icon() + DOCK_GAP) < dock_icon();
-    (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
+    (lx >= DOCK_PAD && within && (i as usize) < dock_len()).then_some(i as usize)
 }
 
 impl Desktop {
@@ -207,9 +246,11 @@ impl Desktop {
             App::Client(c) => super::client::process_name(c),
             _ => None,
         };
-        let i = DOCK.iter().position(|d| match d.action {
+        let i = tiles().iter().position(|d| match d.action {
             DockAction::App(a) => a == app,
             DockAction::Program(p) => prog.as_deref() == p.rsplit('/').next(),
+            DockAction::Pkg(k) => super::packages::get(k)
+                .is_some_and(|p| prog.as_deref() == p.exec.rsplit('/').next()),
             _ => false,
         });
         match i {
@@ -229,9 +270,15 @@ impl Desktop {
 
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
+    dock_icon_center_of(i, 0)
+}
+
+/// The same once `extra` more tiles (packages) are in the dock: it grows from the centre.
+pub fn dock_icon_center_of(i: usize, extra: usize) -> (i32, i32) {
     let d = dock_rect();
+    let shift = (extra as i32 - super::packages::count() as i32) * (dock_icon() + DOCK_GAP) / 2;
     (
-        d.x + DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP) + dock_icon() / 2,
+        d.x - shift + DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP) + dock_icon() / 2,
         d.y + DOCK_PAD + dock_icon() / 2,
     )
 }
@@ -624,7 +671,8 @@ impl Desktop {
             && self.launcher.is_none()
         {
             let (cx, _) = dock_icon_center(i);
-            let w = super::fontx::prop_width(DOCK[i].name, false) + 24;
+            let name = tiles().get(i).map_or(String::new(), |t| t.name.clone());
+            let w = super::fontx::prop_width(&name, false) + 24;
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
@@ -727,8 +775,8 @@ impl Desktop {
             PanelKey::Control => self.paint_control(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
-                if let Some(i) = self.tip {
-                    p.text_p_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
+                if let Some(t) = self.tip.and_then(|i| tiles().into_iter().nth(i)) {
+                    p.text_p_center(0, w, 6, &t.name, ESPRESSO, false);
                 }
             }
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
@@ -781,19 +829,33 @@ impl Desktop {
     }
 
     fn paint_dock(&self, p: &mut Painter) {
-        for (i, it) in DOCK.iter().enumerate() {
+        for (i, it) in tiles().iter().enumerate() {
             let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
-            icons::draw(
-                p,
-                ix,
-                DOCK_PAD,
-                dock_icon(),
-                it.icon,
-                it.bg,
-                255,
-                it.fg,
-                false,
-            );
+            match it.icon {
+                Some(icon) => {
+                    icons::draw(p, ix, DOCK_PAD, dock_icon(), icon, it.bg, 255, it.fg, false)
+                }
+                None => {
+                    // A package: its colour and initial.
+                    let r = (dock_icon() * 24 + 50) / 100;
+                    p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, it.bg, 255);
+                    let c: String = it
+                        .name
+                        .chars()
+                        .take(1)
+                        .flat_map(char::to_uppercase)
+                        .collect();
+                    let cw = crate::font::str_width(&c, 2);
+                    p.text_x(
+                        ix + (dock_icon() - cw) / 2,
+                        DOCK_PAD + (dock_icon() - 32) / 2,
+                        &c,
+                        it.fg,
+                        2,
+                        true,
+                    );
+                }
+            }
             // SPEC hover / pressed: lighten 4% / darken 4%.
             let r = (dock_icon() * 24 + 50) / 100;
             if self.dock_pressed == Some(i) {
@@ -806,6 +868,8 @@ impl Desktop {
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
                 DockAction::Program(p) => self.running_program(p),
+                DockAction::Pkg(k) => super::packages::get(k)
+                    .is_some_and(|p| p.window && self.running_program(&p.exec)),
             };
             if running {
                 p.rrect(
@@ -1131,11 +1195,19 @@ impl Desktop {
                 };
                 self.dock_pressed = Some(i);
                 self.control = false;
-                match DOCK[i].action {
+                let Some(t) = tiles().into_iter().nth(i) else {
+                    return;
+                };
+                match t.action {
                     DockAction::App(a) => self.open(a),
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
                     DockAction::Program(path) => self.launch(path),
+                    DockAction::Pkg(k) => {
+                        if let Some(p) = super::packages::get(k) {
+                            self.launch_package(&p);
+                        }
+                    }
                 }
                 self.invalidate(PanelKey::Dock);
             }
@@ -1320,6 +1392,11 @@ impl Desktop {
             Act::Setting(i) => {
                 super::apps::settings::show_section(i);
                 self.open(App::Settings);
+            }
+            Act::Package(k) => {
+                if let Some(p) = super::packages::get(k) {
+                    self.launch_package(&p);
+                }
             }
             Act::Calc(r) => {
                 if !r.is_empty() {

@@ -65,6 +65,8 @@ pub enum Act {
     Setting(usize),
     Calc(String),
     Command(String),
+    /// An installed package (`packages::get`).
+    Package(usize),
 }
 
 #[derive(Clone)]
@@ -319,6 +321,32 @@ pub fn search(q: &str) -> Vec<Item> {
                     bg: e.bg,
                     fg: e.fg,
                     act: Act::Entry(e.action),
+                },
+            ));
+        }
+    }
+    // Installed packages, with the apps.
+    for (k, p) in super::packages::all().into_iter().enumerate() {
+        let score = if empty {
+            Some(50 - k as i32)
+        } else {
+            fuzzy(q, &p.label).or_else(|| fuzzy(q, &p.name))
+        };
+        if let Some(s) = score {
+            out.push((
+                s,
+                Item {
+                    kind: Kind::App,
+                    sub: if p.description.is_empty() {
+                        format!("Installed with milk ({})", p.name)
+                    } else {
+                        p.description.clone()
+                    },
+                    title: p.label,
+                    icon: Icon::Package,
+                    bg: p.color,
+                    fg: INK,
+                    act: Act::Package(k),
                 },
             ));
         }

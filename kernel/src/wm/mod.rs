@@ -28,6 +28,7 @@ mod fontx;
 mod icons;
 mod lock;
 mod menus;
+mod packages;
 mod paint;
 mod power;
 pub mod prefs;
@@ -509,6 +510,33 @@ impl Desktop {
                 }));
             }
             Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+        }
+    }
+
+    /// A tab in the open Terminal running `cmd`, or the Terminal itself (its first tab).
+    fn open_tab(&mut self, cmd: Option<String>) {
+        if self.windows.iter().any(|w| w.app == App::Terminal) {
+            apps::terminal::queue_tab(cmd);
+        } else if let Some(c) = cmd {
+            apps::terminal::queue_command(&c);
+        }
+        self.open(App::Terminal);
+    }
+
+    /// An installed package: its window app, or its program in a Terminal tab.
+    fn launch_package(&mut self, p: &packages::Pkg) {
+        if p.window {
+            self.launch(&p.exec);
+        } else {
+            // By its /bin name when milk linked it there (a shorter tab label).
+            let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
+            let bin = alloc::format!("/bin/{base}");
+            let cmd = if crate::fs::stat(&bin).is_ok() {
+                String::from(base)
+            } else {
+                p.exec.clone()
+            };
+            self.open_tab(Some(cmd));
         }
     }
 
@@ -1134,15 +1162,7 @@ impl Desktop {
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
                 Request::Lock => self.lock_screen(),
-                Request::NewTab(cmd) => {
-                    // A tab in the open Terminal, or the Terminal itself (its first tab).
-                    if self.windows.iter().any(|w| w.app == App::Terminal) {
-                        apps::terminal::queue_tab(cmd);
-                    } else if let Some(c) = cmd {
-                        apps::terminal::queue_command(&c);
-                    }
-                    self.open(App::Terminal);
-                }
+                Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();
@@ -1283,6 +1303,10 @@ impl Desktop {
         if sec != self.last_second {
             self.last_second = sec;
             ctl::set_status(self.status_report());
+            // Installed packages (dock tiles), every few seconds.
+            if sec % 3 == 1 && packages::refresh() {
+                self.invalidate(PanelKey::Dock);
+            }
             // Windows of userland clients that exited without destroying them.
             for cid in client::reap() {
                 if let Some(wid) = self

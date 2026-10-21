@@ -686,7 +686,7 @@ fn blockdev(t: &mut T) {
     // The scratch disk: the first one that does not hold milkfs.
     let Some(d) = super::blockdev::devices()
         .into_iter()
-        .find(|d| super::milkfs::probe(d).is_none())
+        .find(|d| super::milkfs::probe(d).is_none() && super::fat::probe(d).is_none())
     else {
         kprintln!("fs selftest: no block device, skipping disk checks");
         return;

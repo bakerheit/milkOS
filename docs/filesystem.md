@@ -22,6 +22,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `bcache.rs` | block cache: fixed-size LRU of 4 KiB buffers, write-back, `flush` = durable |
 | `ramdisk.rs` | RAM block device (the self-test's throwaway milkfs) |
 | `ninep.rs` | 9P2000.L client: the Mac shared folder at `/Volumes/Mac` |
+| `fat.rs` | FAT32 with VFAT long names, at `/Volumes/<LABEL>` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
 | `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
@@ -316,6 +317,32 @@ input-test.sh).
   clunked on the next request (never from `Drop`). msize 64 KiB, one request in flight,
   sleeping on a wait queue the virtio IRQ wakes.
 - Dev loop: copy a built program into `share/` and run `/Volumes/Mac/<name>` from msh.
+
+## FAT32 (`/Volumes/<LABEL>`)
+
+`kernel/src/fs/fat.rs`, `scripts/mkfat.sh`, `scripts/fattest.sh`.
+
+- Read/write FAT32 with VFAT long file names (UTF-16 LFN entries, checksummed, in front of
+  a generated `BASIS~N.EXT` alias; plain upper-case 8.3 names get no LFN; NT lower-case
+  flags honoured when reading). Names compare case-insensitively and keep their case.
+- Mounted automatically (`fat::automount` in `fs::init`) for every disk with a FAT32 boot
+  sector (512-byte sectors), at `/Volumes/<volume label>`. The scratch-disk self-test skips
+  FAT disks.
+- The whole FAT is cached in RAM; changed FAT sectors are written through to every copy at
+  the end of each operation; the FSInfo hint is set to "unknown" on the first write (valid
+  per the spec, fsck_msdos agrees). Data moves a cluster at a time.
+- FAT has no inodes: directories use their first cluster as inode number, files the
+  position of their 8.3 entry (updated on rename). No holes (gaps are written as zeros), no
+  symlinks/hard links (EPERM), permissions = the read-only bit, no uid/gid. Unlinking an
+  open file frees its data immediately.
+- Times: FAT stores local time; milkOS has no time zone and writes UTC (the RTC).
+- Make an image: `scripts/mkfat.sh [/tmp/IMAGE] [MiB] [LABEL]` (hdiutil attach -nomount +
+  newfs_msdos -F 32; /tmp only). Boot with it: `MILK_FAT=/tmp/milk-fat.img scripts/run.sh`.
+- `scripts/fattest.sh`: the Mac writes files (long names, spaces, non-ASCII, nested, 300 KB
+  random, 8.3 upper/lower, empty), milkOS reads them back out through `/Volumes/Mac` for
+  byte-exact compares, writes (long-name dir and file, 200 KB binary, rename to a long name,
+  delete, dir move), then the Mac attaches the image read-only and checks it all;
+  `fsck_msdos -n` before and after.
 
 ## Next steps
 

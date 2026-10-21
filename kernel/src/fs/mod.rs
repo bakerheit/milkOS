@@ -17,6 +17,7 @@ pub mod blockdev;
 pub mod clock;
 pub mod devfs;
 pub mod errno;
+pub mod fat;
 pub mod file;
 pub mod initramfs;
 pub mod milkfs;
@@ -84,4 +85,5 @@ pub fn init() {
     milkfs::automount();
     milkfs::setup_home();
     ninep::automount();
+    fat::automount();
 }

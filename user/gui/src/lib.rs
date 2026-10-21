@@ -433,7 +433,8 @@ impl Window {
     }
 
     /// A button (SPEC "Buttons"): 24 high is a fully rounded pill, taller is a dialog button
-    /// (radius 8). The label is bold and centred.
+    /// (radius 8). The label is bold and centred. A primary keeps its ink label in every
+    /// state: rest straw, `hover` #EA9AA4, `pressed` #DE7D89.
     /// `r` is (x, y, w, h).
     pub fn button(
         &mut self,
@@ -441,12 +442,22 @@ impl Window {
         label: &str,
         kind: ButtonKind,
         hover: bool,
+        pressed: bool,
         th: ButtonTheme,
     ) {
         let (x, y, w, h) = r;
         let r = if h <= 24 { h / 2 } else { 8 };
         let (fill, text, border) = match kind {
-            ButtonKind::Primary => (if hover { STRAW_HOVER } else { STRAW }, INK, None),
+            ButtonKind::Primary => {
+                let fill = if pressed {
+                    STRAW_PRESSED
+                } else if hover {
+                    STRAW_HOVER
+                } else {
+                    STRAW
+                };
+                (fill, INK, None)
+            }
             ButtonKind::Secondary => (th.oat, th.text, Some(th.sand)),
             ButtonKind::Danger => (DANGER, DANGER_FG, None),
             ButtonKind::Disabled => (th.oat, th.latte, Some(th.sand)),

@@ -179,6 +179,11 @@ impl<'a> Painter<'a> {
         p
     }
 
+    /// Where this painter's logical (0, 0) is in its buffer.
+    pub fn origin(&self) -> (i32, i32) {
+        (self.ox, self.oy)
+    }
+
     /// The clip rectangle in logical coordinates.
     pub fn clip(&self) -> Rect {
         Rect::new(

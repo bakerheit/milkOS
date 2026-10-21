@@ -1463,11 +1463,20 @@ impl Desktop {
         let focus = self.focus;
         let (desk, space) = (self.mode == Mode::Desktop, self.space);
         let mut redrawn: Vec<Rect> = Vec::new();
+        // The window the left button is held in: its buttons draw pressed (button.rs).
+        let held = match self.drag {
+            Some(Drag::Content { id, .. }) => Some(id),
+            _ => None,
+        };
+        let (px, py) = self.pointer;
         for w in &mut self.windows {
+            let at = (held == Some(w.id)).then(|| (px - w.rect.x, py - w.rect.y));
+            button::set_held(at);
             if desk && !w.minimized && w.space == space && w.render(focus == Some(w.id)) {
                 redrawn.push(w.rect);
             }
         }
+        button::set_held(None);
         for r in redrawn {
             self.damage(r);
         }
@@ -2054,7 +2063,11 @@ impl Desktop {
                 }
             }
             Some(Drag::Content { id, .. }) => {
-                self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
+                self.send_pointer(id, x, y, PointerKind::Up(Button::Left));
+                // Its pressed button lets go.
+                if let Some(w) = self.win_mut(id) {
+                    w.dirty = true;
+                }
             }
             Some(Drag::File) => self.dnd_drop(),
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),

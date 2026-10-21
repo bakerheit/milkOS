@@ -1131,6 +1131,25 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 _ => {}
             }
         }
+        // Button states (SPEC Buttons: a primary keeps its ink label when hovered and
+        // pressed). The pointer rests on the button's padding, clear of its label.
+        "button-hover" => {
+            // todo.txt selected: Share is a primary pill; hover its left padding.
+            b.click(425, 186).wait(300);
+            let sw = super::button::pill_w("Share");
+            b.glide(425, 186, 97 + 530 - 8 - sw + 4, 97 + 20, 8)
+                .wait(400);
+        }
+        "button-press" => {
+            // Settings (window (180, 80), body (181, 113)) > Sound, then hold the chosen
+            // "On" button (body (188, 100), 90 x 30) down at its left padding.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(241, 113 + 164).wait(300);
+            b.glide(241, 277, 181 + 188 + 8, 113 + 115, 8)
+                .wait(100)
+                .down()
+                .wait(400);
+        }
         "drop-bob-wait" | "drop-bob-accept" => {
             b.wait(300).typ("drop name bob").enter().wait(1500);
             b.typ("open milkdrop").enter().wait(1000);

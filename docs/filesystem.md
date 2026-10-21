@@ -37,7 +37,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | path | fs | what |
 |---|---|---|
 | `/` | tmpfs | root, everything in RAM |
-| `/Applications` | tmpfs | app bundles (empty for now) |
+| `/Applications` | milkfs (bind of `/Volumes/Milk/Applications`), tmpfs without a disk | packages (`milk install`, docs/packages.md), persistent |
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |

@@ -90,6 +90,7 @@
 /bin/store    target/user/aarch64-unknown-none-softfloat/release/store   755
 /bin/drop     target/user/aarch64-unknown-none-softfloat/release/drop   755
 /bin/tcpbench target/user/aarch64-unknown-none-softfloat/release/tcpbench 755
+/bin/netctl   target/user/aarch64-unknown-none-softfloat/release/netctl 755
 /bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
 /bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755
 /bin/dedupe  target/user/aarch64-unknown-none-softfloat/release/dedupe  755

@@ -374,6 +374,9 @@ and milkOS's `ifaddr` (`eth0 flags=UP,BROADCAST,RUNNING mtu=1500 ether=.. inet=.
 netmask=.. broadcast=.. inet6=ADDR/LEN,SCOPE[,tentative] (one per IPv6 address)
 router6=.. gateway=.. dns=.. dhcp=Bound`).
 
+Also milkOS's `hostname` (the running hostname), `pmtu` (learned path MTUs) and
+`igmp6` (the IPv6 groups each link is in, Linux columns, plus MLD counters).
+
 IPv6: `tcp6` and `udp6` (AF_INET6 sockets, the 32-digit Linux address form; `tcp`/`udp`
 list only AF_INET ones, so a dual-stack listener is in `tcp6`), `if_inet6` (Linux
 format: address, ifindex, prefix length, scope, flags, name), `snmp6` (`Name value`
@@ -390,7 +393,8 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
-| `drop id / name / list / send / recv / peers / forget / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
+| `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
+| `netctl [show] [-k]`, `netctl hostname / name / visible` | the network settings: interfaces, IPv4/IPv6, DHCP, DNS, hostname, the `.local` name, Milk Drop visibility; `-k` is the stable `key=value` contract for the Settings > Network panel | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/etc/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
 
 **Names in user programs** (getaddrinfo-style, both families: `rt::net::lookup_all(spec,
 default_port, Want::{Any,V4,V6})` gives every address in the order to try, IPv6 first as

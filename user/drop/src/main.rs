@@ -364,7 +364,9 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     let query = alloc::format!("{MAGIC} QUERY");
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        if now >= next {
+        // Hidden (`drop visible off`, netctl): no announcements, no answers.
+        let visible = ident::visible();
+        if now >= next && visible {
             // Both families: IPv4 for older peers, ff02::fb for IPv6 ones.
             let ann = current(&mut me);
             for (s, g) in &disc {
@@ -401,7 +403,10 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
                 if let Some(now) = ident::load() {
                     me = now;
                 }
-                answer_mdns(s, &buf[..n], from, &me.name, &names);
+                // Read now, not at the top of the loop: poll may have waited a second.
+                if ident::visible() {
+                    answer_mdns(s, &buf[..n], from, &me.name, &names);
+                }
             }
         }
         for (k, &(s, _)) in disc.iter().enumerate() {
@@ -414,7 +419,9 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
             let line = String::from_utf8_lossy(&buf[..n]);
             let line = line.trim_end();
             if line == query {
-                let _ = net::sendto(s, current(&mut me).as_bytes(), &from);
+                if ident::visible() {
+                    let _ = net::sendto(s, current(&mut me).as_bytes(), &from);
+                }
             } else if let Some(peer) = proto::parse_announce(line, from)
                 && peer.key != me.public
             {
@@ -547,7 +554,7 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 "not a Milk Drop hello or offer for this machine's key",
             )),
         },
-        "name" | "rotate" if !admin => {
+        "name" | "rotate" | "visible" if !admin => {
             audit(
                 "drop.refused",
                 &alloc::format!("{who} request={cmd} reason=not-an-administrator"),
@@ -566,6 +573,10 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 String::new()
             })
         }
+        "visible" if matches!(arg, "on" | "off") => ident::set_visible(arg == "on").map(|_| {
+            audit("drop.visible", &alloc::format!("visible={arg} by {who}"));
+            String::new()
+        }),
         "rotate" => ident::rotate(&id).map(|(old, new)| {
             audit(
                 "drop.rotate",
@@ -1182,7 +1193,7 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: drop id [--rotate] | name NEW | list [-w MS] | send [-4|-6] PEER FILE | recv [-y] [-k]\n       drop peers | forget NAME | daemon [-q] | selftest"
+        "usage: drop id [--rotate] | name NEW | list [-w MS] | send [-4|-6] PEER FILE | recv [-y] [-k]\n       drop visible [on|off]\n       drop peers | forget NAME | daemon [-q] | selftest"
     );
     2
 }
@@ -1203,6 +1214,23 @@ fn main(args: &rt::Args) -> i32 {
             Err(_) => return usage(),
         },
         ["peers"] => cmd_peers(),
+        ["visible"] => {
+            println!(
+                "drop: this machine is {} on the link",
+                if ident::visible() {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            );
+            Ok(())
+        }
+        ["visible", v @ ("on" | "off")] => ident::set_visible(*v == "on").map(|_| {
+            println!(
+                "drop: this machine is now {} on the link",
+                if *v == "on" { "visible" } else { "hidden" }
+            )
+        }),
         ["forget", n] => cmd_forget(n),
         ["send", peer, file] => cmd_send(peer, file, net::Want::Any),
         ["send", "-4", peer, file] => cmd_send(peer, file, net::Want::V4),

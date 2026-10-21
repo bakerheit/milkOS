@@ -545,6 +545,11 @@ pub fn igmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     )
 }
 
+/// `/proc/net/hostname` (milkOS): the hostname (uname's nodename, net::hostname).
+pub fn hostname(_st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    writeln!(w, "{}", super::hostname::get())
+}
+
 /// `/proc/net/pmtu` (milkOS): the path MTUs learned from ICMP, `DST MTU EXPIRES_IN_S`,
 /// then the counters.
 pub fn pmtu(st: &Stack, w: &mut dyn Write) -> fmt::Result {
@@ -597,6 +602,7 @@ pub const FILES: &[(&str, Gen)] = &[
     ("ndisc", ndisc),
     ("pmtu", pmtu),
     ("igmp6", igmp6),
+    ("hostname", hostname),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

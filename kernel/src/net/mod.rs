@@ -24,6 +24,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod errno;
 pub mod frag;
+pub mod hostname;
 pub mod icmp;
 pub mod iface;
 pub mod ipv6;
@@ -260,6 +261,7 @@ fn net_thread() {
 /// Bring the stack up: create it, add `/proc/net`, start DHCP on eth0 (if there is one)
 /// and the net thread. Call after `sched::init`.
 pub fn init() {
+    hostname::load();
     let have_dev = with(|st| {
         let now = st.now;
         st.iface.ll_start(now);

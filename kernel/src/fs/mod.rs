@@ -91,6 +91,7 @@ pub fn init() {
     milkfs::setup_home();
     milkfs::setup_applications();
     milkfs::setup_persistent_etc("/etc/milk/drop");
+    milkfs::setup_persistent_etc("/etc/milk/net");
     ninep::automount();
     fat::automount();
 }

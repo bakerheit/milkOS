@@ -94,7 +94,7 @@ echo "qemu: alice pid $QA, bob pid $QB"
 P='wait:msh:[^\n]*\$ '
 DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed|mismatch|timed out|closed|not a Milk Drop|only an administrator|service accounts))'
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
-  "$P" 'send:drop name alice' "$P" 'send:drop id' "$P" 'send:drop selftest' "$P" \
+  "$P" 'send:drop name alice' "$P" 'send:netctl hostname alicebox' "$P" 'send:drop id' "$P" 'send:drop selftest' "$P" \
   "done:$WORK/a1" "waitfile:$WORK/b1" \
   'send:drop list' "$P" \
   'send:drop send bob /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
@@ -110,6 +110,8 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|unknown|not resolved|no answer|Request timeout' "$P" \
   "waitfile:$WORK/bv6" \
   'send:drop send bob.local /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
+  "waitfile:$WORK/bhid" 'send:drop list' "$P" 'send:ping -6 -c 1 -W 500 bob.local' "$P" \
+  'send:echo milk | sudo -S -u nobody /bin/netctl visible off' "$P" "done:$WORK/alist" \
   'send:su milk -c "cat /etc/milk/drop/identity.secret"' "$P" \
   'send:su milk -c "drop name alice"' "$P" \
   'send:echo milk | sudo -S -u nobody /bin/drop name evil' "$P" \
@@ -135,6 +137,8 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
   'send:su milk -c "drop recv -y"' 'wait:receiving as' "done:$WORK/bm1" "wait:$DONE_RE" "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/bv6" "wait:$DONE_RE" "$P" \
+  'send:netctl visible off' "$P" 'send:netctl' "$P" "done:$WORK/bhid" "waitfile:$WORK/alist" \
+  'send:netctl visible on' "$P" \
   'send:ls -l /home/milk/Downloads' "$P" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
@@ -230,6 +234,15 @@ check "$B" "bob's receiver listens on eth1's IPv6 address too" "drop: receiving 
 check "$B" "bob got alice's file over IPv6" "drop: received /home/milk/Downloads/to-bob \(2\)\.bin \(1024 KiB\) from alice, sha256 $SHA_TO_BOB ok"
 check "$A" "audit: alice's send over IPv6" "user\.drop\.send +peer=bob fp=[0-9a-f]{16} addr=$B6 file=to-bob\.bin size=1048576 sha256=$SHA_TO_BOB .*result=ok"
 check "$B" "audit: bob's receive over IPv6" "user\.drop\.recv +peer=alice fp=[0-9a-f]{16} addr=$A6 .*result=ok"
+# Settings > Network through netctl: Milk Drop visibility and the hostname.
+check "$B" "netctl hides bob" "netctl: Milk Drop is now hidden on the VM link"
+check "$B" "netctl show says so" "^milk drop +hidden \\(no announcements, no \\.local answers\\)"
+check "$B" "netctl show names bob.local" "^local name +bob\\.local \\(the Milk Drop name\\)"
+check "$A" "hidden bob: drop list finds nobody" "drop: nobody answered on eth1"
+check "$A" "hidden bob: bob.local does not resolve" "ping: bob\\.local: no answer on the link"
+check "$A" "nobody may not change visibility" "netctl: visible: visible: only an administrator may change this machine's identity"
+check "$B" "netctl shows bob again" "netctl: Milk Drop is now visible on the VM link"
+check "$A" "netctl sets the hostname" "netctl: hostname is now alicebox \\(was milk\\)"
 # The wire (qemu filter-dump on eth1, both VMs): the hello and discovery are visible, the
 # file and its name are not.
 for vm in alice bob; do
@@ -266,7 +279,7 @@ boot alice 02:6d:6b:64:0a:0a "$PA" "$PB"
 QA=$!
 PIDS+=("$QA")
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice2.log" \
-  "$P" 'send:drop id' "$P" 'send:drop peers' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
+  "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
 for _ in $(seq 600); do [ -e "$WORK/alice2.done" ] && break; sleep 0.1; done
@@ -280,6 +293,9 @@ cat "$A2"; echo
 check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"
+check "$A2" "after reboot: the hostname netctl set (uname -n)" "^alicebox$"
+grep -aq "\[net\] hostname alicebox (from /etc/milk/net/hostname)" "$WORK/alice2.log" || fail "after reboot: the kernel did not apply /etc/milk/net/hostname"
+echo "  ok  after reboot: the kernel applied /etc/milk/net/hostname (persistent)"
 
 echo "---- a machine with a pre-CSPRNG (legacy) identity: carol ----"
 # A fresh image whose /etc/milk/drop holds an old-format secret (no rng= tag, as made by

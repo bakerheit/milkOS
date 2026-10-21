@@ -90,6 +90,7 @@ pub mod nr {
     pub const GETSID: u64 = 156;
     pub const SETSID: u64 = 157;
     pub const UNAME: u64 = 160;
+    pub const SETHOSTNAME: u64 = 161;
     pub const GETTIMEOFDAY: u64 = 169;
     pub const GETPID: u64 = 172;
     pub const GETPPID: u64 = 173;
@@ -543,6 +544,15 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             Ok(p.pid as usize)
         }
         nr::UNAME => sys_uname(a0),
+        nr::SETHOSTNAME => {
+            // sethostname(name, len): root only (net::hostname).
+            if cred().euid != 0 {
+                return Err(EPERM);
+            }
+            let b = copy_in(a0, (a1).min(crate::net::hostname::MAX + 1))?;
+            let n = core::str::from_utf8(&b).map_err(|_| EINVAL)?;
+            crate::net::hostname::set(n).map(|_| 0)
+        }
         nr::GETPID => Ok(sched::current_pid() as usize),
         nr::GETPPID => Ok(current().inner.lock().ppid as usize),
         nr::GETUID => Ok(cred().ruid as usize),
@@ -1369,9 +1379,10 @@ fn sys_clone(frame: &TrapFrame, flags: u64, newsp: usize) -> KResult<usize> {
 
 fn sys_uname(buf: usize) -> KResult<usize> {
     let mut u = [0u8; 65 * 6];
+    let host = crate::net::hostname::get();
     let fields = [
         "milkOS",
-        "milk",
+        host.as_str(),
         env!("MILKOS_VERSION"),
         concat!("#1 milkOS ", env!("MILKOS_VERSION"), " (aarch64, Rust)"),
         "aarch64",

@@ -8,6 +8,11 @@
 #   - bob sends alice a different 1 MiB file the other way,
 #   - bob gets a new key under the same name: alice refuses to send, loudly,
 #   - audit records (user.drop.*) on both,
+#   - as the ordinary user milk (the desktop's account): alice-as-milk sends bob-as-milk a
+#     file through each machine's root drop daemon (which signs for them over
+#     /run/drop.sock); it lands in bob's ~/Downloads owned by milk; milk can't read the
+#     machine's secret key; milk (an administrator) renames through the daemon, nobody
+#     is refused,
 #   - after shutdown, the host reads both received files out of the images and compares
 #     their SHA-256 with the originals, and a second boot of alice's image keeps her
 #     identity (same fingerprint: /etc/milk/drop is persistent).
@@ -84,7 +89,7 @@ PIDS+=("$QB")
 echo "qemu: alice pid $QA, bob pid $QB"
 
 P='wait:msh:[^\n]*\$ '
-DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed|mismatch|timed out|closed))'
+DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed|mismatch|timed out|closed|not a Milk Drop|only an administrator|service accounts))'
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   "$P" 'send:drop name alice' "$P" 'send:drop id' "$P" 'send:drop selftest' "$P" \
   "done:$WORK/a1" "waitfile:$WORK/b1" \
@@ -97,6 +102,11 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:drop id --rotate' "$P" \
   'send:drop forget bob' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/a4" "wait:$DONE_RE" "$P" \
+  "waitfile:$WORK/bm1" \
+  'send:su milk -c "drop send bob /Volumes/Milk/share/to-bob.bin"' "wait:$DONE_RE" "$P" \
+  'send:su milk -c "cat /etc/milk/drop/identity.secret"' "$P" \
+  'send:su milk -c "drop name alice"' "$P" \
+  'send:echo milk | sudo -S -u nobody /bin/drop name evil' "$P" \
   'send:drop peers' "$P" \
   'send:ls /home/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -117,6 +127,8 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "wait:$DONE_RE" "$P" "waitfile:$WORK/a4" \
   'send:drop list' "$P" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
+  'send:su milk -c "drop recv -y"' 'wait:receiving as' "done:$WORK/bm1" "wait:$DONE_RE" "$P" \
+  'send:ls -l /home/milk/Downloads' "$P" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -178,6 +190,18 @@ check "$B" "bob's receiver saw alice hang up on the changed key" "drop: the peer
 # Ctrl-C ends a drop recv blocked in accept (blocking socket calls take signals).
 grep -A2 'drop recv -k' "$B" | grep -q '^msh:' || fail "Ctrl-C did not stop drop recv -k"
 echo "  ok  Ctrl-C stops a drop recv blocked in accept"
+# As milk (not root): both ends through their machine's daemon.
+check "$B" "bob as milk received alice-as-milk's file" "drop: received /home/milk/Downloads/to-bob \\(1\\)\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
+[ "$(grep -Ec "drop: sent to-bob\.bin to bob: 1024 KiB" "$A")" -ge 2 ] || fail "alice as milk did not send (only root's send in the log)"
+echo "  ok  alice as milk sent to bob (signed by alice's daemon)"
+check "$B" "the file milk received is milk's" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob \\(1\\)\\.bin$"
+check "$B" "root's receive into milk's Downloads is milk's too" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob\\.bin$"
+grep -A1 'su milk -c "cat /etc/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
+echo "  ok  milk can't read /etc/milk/drop/identity.secret"
+check "$A" "milk (admin) renames through the daemon" "drop: this machine is now alice \\(was alice\\)"
+check "$A" "audit: the daemon's rename names who asked" "user\\.drop\\.rename +old=alice new=alice by uid=501 user=milk"
+check "$A" "nobody may not rename the machine" "drop: name: only an administrator may change this machine's identity"
+check "$A" "audit: the refusal" "user\\.drop\\.refused +uid=65534 user=nobody request=name reason=not-an-administrator"
 check "$A" "userland crypto vectors (rt::crypto)" "drop: selftest ok"
 check "$A" "X25519 vectors in userland" "drop: x25519 +8/8 vectors"
 check "$A" "a fresh key is from the kernel CSPRNG" "^rng: +kernel CSPRNG"

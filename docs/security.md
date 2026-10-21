@@ -328,6 +328,58 @@ shows the ticket, a forked child has none, revoke works, `auth -S` keeps it acro
 rate limit kicks in after three misses, and the records are in `/proc/audit`. The test
 password is the documented default `milk` (see "Users and credentials"), not a secret.
 
+## Milk Drop: one machine identity, per-user clients
+
+Milk Drop (docs/networking.md) authenticates *machines*: peers trust a machine's Ed25519
+key and see its name. When the desktop started running as milk instead of root, the old
+layout broke: `/etc/milk/drop` was root's, so the desktop user's `drop name` and `drop
+recv` failed writing the identity. Two models were possible:
+
+* **a per-user identity** in `~/.config/milk/drop`: each account would show up as its own
+  "machine" with its own key and name, two users on one Mac would look like two Macs, and
+  root's existing identity (the one peers already trust) would be orphaned;
+* **one machine identity used through a root service**: chosen. It matches what peers are
+  told (a machine), keeps the key peers already trust, and keeps the secret key out of
+  every user's reach.
+
+**The identity** lives in `/etc/milk/drop` (persistent, on the Milk volume):
+`identity.secret` 0600 root (the seed); `identity.pub`, `name` and `rotation` 0644 in a
+0755 directory (older machines made it 0700; the root side opens it up). Only root
+processes read the secret: the `drop` service (milkd, `user = root`) and root's own
+`drop`.
+
+**The daemon's request socket** `/run/drop.sock` (AF_UNIX stream, 0666, one request line per
+connection, a client gets 2 s), checked with SO_PEERCRED:
+
+| request | who | does |
+|---|---|---|
+| `sign HEX` | root and people's accounts (uid 500..59999), not service accounts like nobody | signs a Milk Drop hello transcript (`milkdrop-hello-v2 ...`, which must contain this machine's public key) or an offer (`milkdrop-offer-v1 ...`, bound to the session's nonces); anything else is refused |
+| `name NEW` | administrators (root or group admin) | renames the machine; `user.drop.rename old= new= by uid= user=` |
+| `rotate` | administrators | `drop id --rotate`; `user.drop.rotate ... by uid= user=` |
+
+Refusals of `name` / `rotate` are audited as `user.drop.refused uid= user= request=
+reason=not-an-administrator`. A user who can sign hellos can act as this machine toward
+peers, which is exactly what being allowed to use Milk Drop on it means; the oracle only
+signs the two Milk Drop contexts, so the key can't be used to sign anything else, and it
+never leaves the daemon.
+
+**The client** (`drop send/recv/list/peers/forget`) runs as the user and does the network
+and file work itself: it reads the file it sends with its own permissions (so the daemon
+can't be used to read someone else's files), and writes what it receives into the user's
+`~/Downloads` as that user. When root receives into a user's home (the console's HOME is
+`/home/milk`), the new folder and file are chowned to the home's owner. `/tmp/drop` (the
+daemon's peer cache and the "receiving" marker) is 1777, like /tmp.
+
+**Trust is per user.** Root's trusted peers are the machine's
+(`/etc/milk/drop/known_peers`); every other user has `~/.config/milk/drop/known_peers`,
+which starts as a copy of the machine's list the first time they trust or forget someone.
+So one user can't pin, or forget, a peer key for another. Without the daemon (eth1 down),
+non-root `drop` says the service isn't running; root's still works directly.
+
+**Tests**: `scripts/drop-test.sh` sends and receives as milk on both machines, checks
+the ownership in `ls -l`, that milk can't read the secret, an admin rename through the
+daemon and nobody's refusal.
+
 # The audit log
 
 Files: `kernel/src/audit/` (log, SHA-256, `/dev/audit`), hooks in `proc/mod.rs` (exec),

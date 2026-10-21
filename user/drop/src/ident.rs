@@ -1,6 +1,14 @@
-//! This machine's Milk Drop identity (an Ed25519 key pair and a name) and the peers it
-//! trusts (TOFU), all in /etc/milk/drop (persistent: the kernel binds it onto the Milk
-//! volume, see `milkfs::setup_persistent_etc`).
+//! This machine's Milk Drop identity (an Ed25519 key pair and a name) in /etc/milk/drop
+//! (persistent: the kernel binds it onto the Milk volume, see
+//! `milkfs::setup_persistent_etc`), and the peers each user trusts (TOFU).
+//!
+//! The identity belongs to the machine and is root's: `identity.secret` is 0600 root and
+//! only root processes read it (the `drop daemon` service, root's own `drop`). Everyone
+//! else gets the public half from `identity.pub` / `name` and asks the daemon to sign
+//! over `/run/drop.sock` ([`Identity::sign`]; docs/security.md, "Milk Drop: one machine
+//! identity, per-user clients"). Trust is per user: root's in /etc/milk/drop/known_peers,
+//! everyone else's in `~/.config/milk/drop/known_peers`, which starts as a copy of the
+//! machine's list.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -13,9 +21,66 @@ const NAME: &str = "/etc/milk/drop/name";
 const KNOWN: &str = "/etc/milk/drop/known_peers";
 
 pub struct Identity {
-    pub seed: [u8; 32],
+    /// The secret seed, when this process may read it (root); else signing goes through
+    /// the drop daemon.
+    pub seed: Option<[u8; 32]>,
     pub public: [u8; 32],
     pub name: String,
+}
+
+/// The drop daemon's request socket (AF_UNIX, SO_PEERCRED-checked).
+pub const SOCK: &str = "/run/drop.sock";
+
+/// Contexts the daemon signs for people's accounts (a Milk Drop hello transcript that
+/// names this machine's key, or an offer). Announcements, rotations and renames are the daemon's own.
+/// [0]: a hello transcript (must contain this machine's public key), [1]: an offer.
+pub const SIGNABLE: [&str; 2] = ["milkdrop-hello-v2 ", "milkdrop-offer-v1 "];
+
+impl Identity {
+    /// Sign `msg` with the machine key: directly for root, else through the daemon.
+    pub fn sign(&self, msg: &[u8]) -> Result<[u8; 64], String> {
+        if let Some(seed) = &self.seed {
+            return Ok(ed25519::sign(seed, msg));
+        }
+        let r = daemon(&alloc::format!("sign {}", hex(msg)))?;
+        ed25519::unhex::<64>(r.trim())
+            .ok_or_else(|| alloc::format!("the drop daemon sent a bad signature ({r:?})"))
+    }
+}
+
+/// One request to the drop daemon: `ok REST` -> Ok(REST), `error WHY` -> Err(WHY).
+pub fn daemon(req: &str) -> Result<String, String> {
+    use rt::unix::{self, Name};
+    let down =
+        || String::from("the Milk Drop service isn't running (`svc status drop`; it needs eth1)");
+    let fd = unix::socket(unix::SOCK_STREAM | unix::SOCK_CLOEXEC).map_err(|_| down())?;
+    if unix::connect(fd, &Name::Path(SOCK)).is_err() {
+        let _ = sys::close(fd);
+        return Err(down());
+    }
+    let r = (|| -> Result<String, String> {
+        sys::write_all(fd, alloc::format!("{req}\n").as_bytes()).map_err(|_| down())?;
+        let mut out = Vec::new();
+        let mut b = [0u8; 512];
+        while !out.ends_with(b"\n") {
+            match sys::read(fd, &mut b) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => out.extend_from_slice(&b[..n]),
+            }
+        }
+        Ok(String::from(String::from_utf8_lossy(&out).trim_end()))
+    })();
+    let _ = sys::close(fd);
+    let line = r?;
+    if let Some(rest) = line.strip_prefix("ok") {
+        Ok(String::from(rest.trim_start()))
+    } else {
+        Err(String::from(line.strip_prefix("error ").unwrap_or(&line)))
+    }
+}
+
+fn is_root() -> bool {
+    sys::geteuid() == 0
 }
 
 pub fn hex(b: &[u8]) -> String {
@@ -139,10 +204,16 @@ pub fn rotation(current: &[u8; 32]) -> Option<Rotation> {
 /// the new one (so peers that trusted it move over without a "key changed" refusal) and
 /// is then wiped. Returns (old public key, new identity).
 pub fn rotate(id: &Identity) -> Result<([u8; 32], Identity), String> {
+    let Some(old_seed) = &id.seed else {
+        // Not root: the daemon rotates (administrators only).
+        daemon("rotate")?;
+        let new = load().ok_or("the daemon rotated the key but it can't be read back")?;
+        return Ok((id.public, new));
+    };
     let mut seed = random::<32>();
     let public = ed25519::public_key(&seed);
     let sig = ed25519::sign(
-        &id.seed,
+        old_seed,
         crate::proto::rotation_msg(&id.public, &public).as_bytes(),
     );
     write_atomic(
@@ -158,7 +229,7 @@ pub fn rotate(id: &Identity) -> Result<([u8; 32], Identity), String> {
     )?;
     write_secret(&seed)?;
     let new = Identity {
-        seed,
+        seed: Some(seed),
         public,
         name: id.name.clone(),
     };
@@ -175,20 +246,52 @@ fn hostname() -> String {
         .unwrap_or_else(|| String::from("milk"))
 }
 
-/// The identity, if there is one (never creates it).
+fn name_or_default(public: &[u8; 32]) -> String {
+    text(NAME)
+        .map(|n| String::from(n.trim()))
+        .filter(|n| name_ok(n))
+        .unwrap_or_else(|| default_name(public))
+}
+
+/// The public half only (identity.pub, 0644): what a non-root client uses.
+fn load_public() -> Option<Identity> {
+    let t = text(PUBLIC)?;
+    let public = t.split_whitespace().nth(2).and_then(ed25519::unhex::<32>)?;
+    Some(Identity {
+        seed: None,
+        public,
+        name: name_or_default(&public),
+    })
+}
+
+/// The identity, if there is one (never creates it). With the secret for root.
 pub fn load() -> Option<Identity> {
+    if !is_root() {
+        return load_public();
+    }
     let t = text(SECRET)?;
     let seed = t.split_whitespace().nth(1).and_then(ed25519::unhex::<32>)?;
     let public = ed25519::public_key(&seed);
-    let name = text(NAME)
-        .map(|n| String::from(n.trim()))
-        .filter(|n| name_ok(n))
-        .unwrap_or_else(|| default_name(&public));
-    Some(Identity { seed, public, name })
+    Some(Identity {
+        seed: Some(seed),
+        public,
+        name: name_or_default(&public),
+    })
 }
 
-/// Load the identity, creating it on first use (true = just created).
+/// Load the identity, creating it on first use (true = just created). Only root makes
+/// one (the daemon does at boot); for anyone else there must be one already.
 pub fn load_or_create() -> Result<(Identity, bool), String> {
+    if !is_root() {
+        return load_public().map(|id| (id, false)).ok_or_else(|| {
+            String::from(
+                "this machine has no Milk Drop identity yet: the drop service makes one when eth1 is up (`svc status drop`)",
+            )
+        });
+    }
+    // Clients that aren't root read identity.pub and name, so the directory is 0755
+    // (the secret stays 0600). Older machines made it 0700.
+    let _ = sys::chmod(DIR, 0o755);
     if let Some(t) = text(SECRET) {
         let seed = t
             .split_whitespace()
@@ -196,13 +299,17 @@ pub fn load_or_create() -> Result<(Identity, bool), String> {
             .and_then(ed25519::unhex::<32>)
             .ok_or_else(|| alloc::format!("{SECRET} is damaged (move it away for a new one)"))?;
         let public = ed25519::public_key(&seed);
-        let name = text(NAME)
-            .map(|n| String::from(n.trim()))
-            .filter(|n| name_ok(n))
-            .unwrap_or_else(|| default_name(&public));
-        return Ok((Identity { seed, public, name }, false));
+        let name = name_or_default(&public);
+        return Ok((
+            Identity {
+                seed: Some(seed),
+                public,
+                name,
+            },
+            false,
+        ));
     }
-    let _ = sys::mkdir(DIR, 0o700);
+    let _ = sys::mkdir(DIR, 0o755);
     let seed = random::<32>();
     let public = ed25519::public_key(&seed);
     // A new key keeps the machine's name if it has one (peers then see a changed key).
@@ -211,7 +318,11 @@ pub fn load_or_create() -> Result<(Identity, bool), String> {
         .filter(|n| name_ok(n))
         .unwrap_or_else(|| default_name(&public));
     write_secret(&seed)?;
-    let id = Identity { seed, public, name };
+    let id = Identity {
+        seed: Some(seed),
+        public,
+        name,
+    };
     save_public(&id)?;
     Ok((id, true))
 }
@@ -235,6 +346,12 @@ pub fn set_name(id: &mut Identity, name: &str) -> Result<(), String> {
             "bad name {name:?}: 1-32 letters, digits, '.', '_' or '-'"
         ));
     }
+    if !is_root() {
+        // The name is the machine's: the daemon changes it (administrators only).
+        daemon(&alloc::format!("name {name}"))?;
+        id.name = String::from(name);
+        return Ok(());
+    }
     id.name = String::from(name);
     save_public(id)
 }
@@ -248,8 +365,22 @@ pub struct Known {
     pub since: u64,
 }
 
+/// Where this user's trusted peers live: root's are the machine's, everyone else has
+/// their own (so one user can't decide whom another trusts).
+fn known_path() -> String {
+    if is_root() {
+        return String::from(KNOWN);
+    }
+    let home = rt::users::by_uid(sys::getuid())
+        .map(|p| p.home)
+        .unwrap_or_else(|| String::from("/tmp"));
+    alloc::format!("{home}/.config/milk/drop/known_peers")
+}
+
 pub fn known() -> Vec<Known> {
-    text(KNOWN)
+    // A user who never trusted anyone yet starts from the machine's list.
+    text(&known_path())
+        .or_else(|| text(KNOWN))
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.starts_with('#'))
@@ -269,7 +400,20 @@ fn save_known(k: &[Known]) -> Result<(), String> {
     for e in k {
         s.push_str(&alloc::format!("{} {} {}\n", e.name, hex(&e.key), e.since));
     }
-    write_atomic(KNOWN, s.as_bytes(), 0o644)
+    let path = known_path();
+    if let Some((dir, _)) = path.rsplit_once('/') {
+        mkdir_all(dir, 0o700);
+    }
+    write_atomic(&path, s.as_bytes(), 0o644)
+}
+
+fn mkdir_all(dir: &str, mode: u32) {
+    let mut at = String::new();
+    for part in dir.split('/').filter(|p| !p.is_empty()) {
+        at.push('/');
+        at.push_str(part);
+        let _ = sys::mkdir(&at, mode);
+    }
 }
 
 #[derive(Clone)]

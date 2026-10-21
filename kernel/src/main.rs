@@ -18,6 +18,7 @@ mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
+mod fontx;
 mod fs;
 mod fwcfg;
 mod gfx;

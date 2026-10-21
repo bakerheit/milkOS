@@ -26,7 +26,8 @@ pub mod clipboard;
 mod ctl;
 mod dnd;
 mod event;
-mod fontx;
+/// The smooth and proportional faces live in the shared font code (the splash uses them).
+use crate::fontx;
 mod icons;
 mod lock;
 mod menus;

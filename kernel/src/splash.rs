@@ -1,6 +1,7 @@
 //! Boot splash: cream background, a milk drop, the name, and a thin progress bar.
 
 use crate::font::{self, GLYPH_H};
+use crate::fontx;
 use crate::gfx::{self, Color, DrawTarget, rgb};
 
 const CREAM: Color = rgb(0xFA, 0xF4, 0xE6);
@@ -70,22 +71,16 @@ pub fn draw(t: &mut dyn DrawTarget) {
     if let Some(a) = art_splash(t) {
         let stride = t.stride();
         a.decode_rows(t.pixels_mut(), stride);
+        // The wordmark in the desktop's smooth brand lettering (crate::fontx, 4x bold):
+        // "milk" espresso, "OS" blue; the caption in the UI's proportional face.
         let w = t.width() as i32;
         let scale = 4;
         let tx = (w - font::str_width("milkOS", scale)) / 2;
-        let x = font::draw_str(t, tx, ART_WORD_Y, "milk", ART_INK, None, scale);
-        font::draw_str(t, x, ART_WORD_Y, "OS", ART_BLUE, None, scale);
+        let x = fontx::draw_smooth(t, tx, ART_WORD_Y, "milk", ART_INK, scale, true);
+        fontx::draw_smooth(t, x, ART_WORD_Y, "OS", ART_BLUE, scale, true);
         let cap = "booting";
-        let cy = ART_BAR.1 + 24;
-        font::draw_str(
-            t,
-            (w - font::str_width(cap, 1)) / 2,
-            cy,
-            cap,
-            ART_COCOA,
-            None,
-            1,
-        );
+        let cx = (w - fontx::prop_width(cap, false)) / 2;
+        fontx::draw_prop(t, cx, ART_BAR.1 + 24, cap, ART_COCOA, false);
         bar(t, 0);
         return;
     }

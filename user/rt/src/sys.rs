@@ -467,3 +467,10 @@ pub fn read_file(path: &str) -> Result<Vec<u8>> {
     let _ = close(fd);
     r
 }
+
+pub const O_WRONLY: u32 = 1;
+
+/// ioctl(2) with an integer (or pointer) argument.
+pub fn ioctl(fd: i32, cmd: u32, arg: usize) -> Result<usize> {
+    sc(29, [fd as usize, cmd as usize, arg, 0, 0, 0])
+}

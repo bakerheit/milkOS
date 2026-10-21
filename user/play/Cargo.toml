@@ -1,0 +1,12 @@
+[package]
+name = "play"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "play"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

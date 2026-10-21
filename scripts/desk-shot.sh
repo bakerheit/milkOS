@@ -7,7 +7,8 @@
 # MILK_REPO=1: also build the toy package repo and serve it on 127.0.0.1:8765 (the guest's
 # default /etc/milk/repos URL, http://10.0.2.2:8765/) with an unrestricted user netdev;
 # otherwise the netdev is restricted. The serial log goes next to OUT. Only the qemu and
-# python processes started here are killed, by PID; the images live in a mktemp dir that
+# python processes started here are killed, by PID; a fresh image boots into the Welcome
+# tour, which is closed first ("Get started") unless DESK_WELCOME=1; the images live in a mktemp dir that
 # is removed at the end.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -56,7 +57,11 @@ QPID=$!
 for _ in $(seq 200); do grep -q "wm: desktop up" "$LOG" 2>/dev/null && break; sleep 0.1; done
 grep -q "wm: desktop up" "$LOG" || { tail -20 "$LOG" >&2; echo "desk-shot: desktop did not come up" >&2; exit 1; }
 sleep 1.5
-python3 -I scripts/qmp.py "$WORK/qmp.sock" "$@" screendump "$OUT"
+PRE=()
+if [ -z "${DESK_WELCOME:-}" ]; then
+  PRE=(move 785 615 click sleep 0.6)
+fi
+python3 -I scripts/qmp.py "$WORK/qmp.sock" "${PRE[@]}" "$@" screendump "$OUT"
 [ -s "$OUT" ] || { echo "desk-shot: no screenshot" >&2; exit 1; }
 echo "screenshot: $OUT"
 echo "serial log: $LOG"

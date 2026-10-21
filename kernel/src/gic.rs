@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::exceptions::TrapFrame;
 use crate::kprintln;
+use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{FnSlot, IrqGuard};
 
 const GICD_BASE: usize = 0x0800_0000;
@@ -72,11 +73,12 @@ pub enum Error {
 }
 
 static HANDLERS: [FnSlot; MAX_IRQS] = [const { FnSlot::new() }; MAX_IRQS];
-// Single-writer counters (the IRQ path): plain load/store, see sync.rs on atomics.
+// Interrupt counters, per CPU (atomic adds: several CPUs take interrupts).
 static SPURIOUS: AtomicU64 = AtomicU64::new(0);
 static NUM_IRQS: AtomicU32 = AtomicU32::new(0);
 /// Times each INTID has been taken (for /proc/interrupts). Written only by `handle_irq`.
-static COUNTS: [AtomicU64; MAX_IRQS] = [const { AtomicU64::new(0) }; MAX_IRQS];
+static COUNTS: [[AtomicU64; MAX_IRQS]; MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; MAX_IRQS] }; MAX_CPUS];
 
 #[inline]
 fn gicd_read(off: usize) -> u32 {
@@ -162,6 +164,30 @@ pub fn init() {
         lines,
         cpu_mask
     );
+}
+
+/// Bring up this (secondary) CPU's side of the GIC: its banked SGI/PPI state (enables,
+/// priorities) and its CPU interface. SGIs and PPIs that have a handler are enabled here
+/// too, since `enable` on the boot CPU only reached the boot CPU's banked copy.
+pub fn init_cpu() {
+    gicd_write(GICD_ICENABLER, !0);
+    gicd_write(GICD_ICPENDR, !0);
+    for n in 0..8 {
+        gicd_write(
+            GICD_IPRIORITYR + n * 4,
+            u32::from_ne_bytes([DEFAULT_PRIORITY; 4]),
+        );
+    }
+    let mut en = 0u32;
+    for (irq, h) in HANDLERS.iter().take(32).enumerate() {
+        if h.get::<Handler>().is_some() {
+            en |= 1 << irq;
+        }
+    }
+    gicd_write(GICD_ISENABLER, en);
+    gicc_write(GICC_PMR, 0xff);
+    gicc_write(GICC_BPR, 0);
+    gicc_write(GICC_CTLR, 1);
 }
 
 /// Attach `handler` to `irq`. Does not enable the interrupt; call [`enable`].
@@ -263,8 +289,14 @@ pub fn spurious_count() -> u64 {
 
 /// How many times `irq` has been taken since boot (0 for out-of-range INTIDs).
 pub fn irq_count(irq: u32) -> u64 {
+    (0..MAX_CPUS).map(|c| irq_count_cpu(irq, c)).sum()
+}
+
+/// How often `irq` was taken on `cpu`.
+pub fn irq_count_cpu(irq: u32, cpu: usize) -> u64 {
     COUNTS
-        .get(irq as usize)
+        .get(cpu)
+        .and_then(|c| c.get(irq as usize))
         .map_or(0, |c| c.load(Ordering::Relaxed))
 }
 
@@ -280,11 +312,11 @@ pub fn handle_irq(frame: &mut TrapFrame) {
     let iar = gicc_read(GICC_IAR);
     let irq = iar & 0x3ff;
     if irq >= 1020 {
-        SPURIOUS.store(SPURIOUS.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        SPURIOUS.fetch_add(1, Ordering::Relaxed);
         return; // spurious: no EOI
     }
-    if let Some(c) = COUNTS.get(irq as usize) {
-        c.store(c.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+    if let Some(c) = COUNTS[percpu::id()].get(irq as usize) {
+        c.fetch_add(1, Ordering::Relaxed);
     }
     match HANDLERS.get(irq as usize).and_then(|s| s.get::<Handler>()) {
         Some(h) => h(irq, frame),

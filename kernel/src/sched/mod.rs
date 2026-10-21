@@ -291,19 +291,7 @@ unsafe extern "C" {
 /// Turn the running boot code into thread 0 ("kmain"), create the idle thread and start
 /// preemption. Call once, after `timer::init`, with IRQs enabled or not.
 pub fn init() {
-    // FP/SIMD on for EL0 and EL1 (CPACR_EL1.FPEN = 0b11). Only user threads use it; the
-    // kernel is soft-float. Saved per user thread on switch.
-    // SAFETY: system register write.
-    unsafe {
-        asm!(
-            "mrs {t}, cpacr_el1",
-            "orr {t}, {t}, #(3 << 20)",
-            "msr cpacr_el1, {t}",
-            "isb",
-            t = out(reg) _,
-            options(nostack)
-        )
-    };
+    enable_fp();
 
     let main = Box::new(Thread {
         tid: 0,
@@ -346,6 +334,32 @@ pub fn init() {
         kstack::KSTACK_SIZE >> 10,
         timer::TICK_HZ
     );
+}
+
+/// FP/SIMD on for EL0 and EL1 (CPACR_EL1.FPEN = 0b11), on this CPU. Only user threads use
+/// it; the kernel is soft-float. Saved per user thread on switch.
+pub fn enable_fp() {
+    // SAFETY: system register write.
+    unsafe {
+        asm!(
+            "mrs {t}, cpacr_el1",
+            "orr {t}, {t}, #(3 << 20)",
+            "msr cpacr_el1, {t}",
+            "isb",
+            t = out(reg) _,
+            options(nostack)
+        )
+    };
+}
+
+/// A secondary CPU joins: for now it just takes interrupts (the scheduler doesn't use it
+/// yet).
+pub fn run_secondary(_cpu: usize, stack: KStack) -> ! {
+    core::mem::forget(stack);
+    loop {
+        // SAFETY: wait for an interrupt.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
+    }
 }
 
 fn idle_main(_: usize) {
@@ -686,6 +700,9 @@ fn arm_deadline(s: &Sched) {
 }
 
 fn on_deadline(_frame: &mut TrapFrame) {
+    if crate::percpu::id() != 0 {
+        return;
+    }
     with(|s| {
         s.wake_expired(timer::now_ns());
         arm_deadline(s);
@@ -693,6 +710,9 @@ fn on_deadline(_frame: &mut TrapFrame) {
 }
 
 fn on_tick(_frame: &mut TrapFrame) {
+    if crate::percpu::id() != 0 {
+        return; // secondaries don't schedule yet
+    }
     with(|s| {
         s.wake_expired(timer::now_ns());
         let cur_prio = s.cur().prio;
@@ -706,6 +726,9 @@ fn on_tick(_frame: &mut TrapFrame) {
 }
 
 fn on_irq_exit(_frame: &mut TrapFrame) {
+    if crate::percpu::id() != 0 {
+        return;
+    }
     if NEED_RESCHED.load(Ordering::Relaxed) && STARTED.load(Ordering::Relaxed) {
         schedule();
     }

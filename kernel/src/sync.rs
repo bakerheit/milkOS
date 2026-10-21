@@ -1,21 +1,8 @@
-//! Interrupt masking and locking for the (currently) single-core kernel.
+//! Interrupt masking and locking (SMP).
 //!
-//! Everything here is written so SMP is a drop-in later: [`SpinLock`] already has the
-//! final API (`lock()` returns a guard that derefs to the data and unlocks on drop). The
-//! only thing that changes is how the lock word is taken, in `SpinLock::acquire` /
-//! `try_acquire`, selected by the `atomic-locks` cargo feature:
-//!
-//! - default (no feature): IRQs masked + plain loads/stores. Correct on one core, where the
-//!   only possible contender is ourselves further up the stack, so a held lock is reported
-//!   as a deadlock panic instead of spinning forever.
-//! - `atomic-locks`: real compare-exchange spinlock, correct for SMP.
-//!
-//! Why the default avoids atomic read-modify-write: until the MMU is on, RAM is Device
-//! memory, and exclusive accesses (ldxr/stxr, which is what `swap`/`fetch_*`/
-//! `compare_exchange` compile to here) never succeed there, so they loop forever. Turn on
-//! `atomic-locks` only once the MMU maps RAM as Normal cacheable memory and that happens
-//! before the first lock is taken. Nothing else in the irq code uses atomic RMW either
-//! (checked: the default build contains no ldxr/stxr/LSE instructions).
+//! [`SpinLock`] masks IRQs on the local CPU and spins on an atomic compare-exchange
+//! against other CPUs. The `atomic-locks` cargo feature is gone: this is the only
+//! implementation now (the MMU is on everywhere before any lock is taken).
 
 // Public API surface for later subsystems (scheduler, drivers); not all of it is used yet.
 #![allow(dead_code)]
@@ -24,7 +11,7 @@ use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::mem::{size_of, transmute_copy};
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 /// PSTATE.I (IRQ mask) as it appears in DAIF.
 const DAIF_I: u64 = 1 << 7;
@@ -104,13 +91,17 @@ pub fn without_irqs<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// A lock that is safe to take from both thread context and IRQ handlers: holding it keeps
-/// IRQs masked on this core.
+/// IRQs masked on this CPU (so a holder is never preempted or interrupted), and other CPUs
+/// spin on an atomic compare-exchange. The word holds the owner's CPU index + 1, so taking
+/// a lock this CPU already holds is reported as a deadlock panic instead of spinning
+/// forever. Must not be used before the MMU is on (exclusives hang on Device memory);
+/// nothing is: `mem::init` turns the MMU on before the first lock.
 pub struct SpinLock<T> {
-    locked: AtomicBool,
+    owner: AtomicU32,
     data: UnsafeCell<T>,
 }
 
-// SAFETY: access to `data` is serialised by `locked` (plus IRQ masking on one core).
+// SAFETY: access to `data` is serialised by `owner`.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
 unsafe impl<T: Send> Send for SpinLock<T> {}
 
@@ -122,7 +113,7 @@ pub struct SpinLockGuard<'a, T> {
 impl<T> SpinLock<T> {
     pub const fn new(data: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            owner: AtomicU32::new(0),
             data: UnsafeCell::new(data),
         }
     }
@@ -148,48 +139,32 @@ impl<T> SpinLock<T> {
         })
     }
 
-    // --- the SMP seam: the only code that changes with `atomic-locks` ------------------
-
-    /// Single core, MMU off: no atomic RMW (it would hang on Device memory).
-    #[cfg(not(feature = "atomic-locks"))]
     #[inline]
-    fn try_acquire(&self) -> bool {
-        // IRQs are masked by the caller, and nothing else runs on this core.
-        if self.locked.load(Ordering::Acquire) {
-            return false;
-        }
-        self.locked.store(true, Ordering::Relaxed);
-        true
+    fn me() -> u32 {
+        crate::percpu::id() as u32 + 1
     }
 
-    #[cfg(not(feature = "atomic-locks"))]
-    #[inline]
-    fn acquire(&self) {
-        // With IRQs masked on one core, the holder can only be us: spinning would hang.
-        if !self.try_acquire() {
-            panic!("SpinLock deadlock: lock already held on this core");
-        }
-    }
-
-    /// SMP: needs the MMU on with RAM as Normal cacheable memory.
-    #[cfg(feature = "atomic-locks")]
     #[inline]
     fn try_acquire(&self) -> bool {
-        self.locked
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        self.owner
+            .compare_exchange(0, Self::me(), Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
 
-    #[cfg(feature = "atomic-locks")]
     #[inline]
     fn acquire(&self) {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
+        let me = Self::me();
+        loop {
+            match self
+                .owner
+                .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+            {
+                Ok(_) => return,
+                Err(o) if o == me => panic!("SpinLock deadlock: already held by this CPU"),
+                Err(_) => {}
+            }
             // Spin on a plain load so we don't hammer the line with exclusives.
-            while self.locked.load(Ordering::Relaxed) {
+            while self.owner.load(Ordering::Relaxed) != 0 {
                 core::hint::spin_loop();
             }
         }
@@ -197,7 +172,12 @@ impl<T> SpinLock<T> {
 
     #[inline]
     fn release(&self) {
-        self.locked.store(false, Ordering::Release);
+        self.owner.store(0, Ordering::Release);
+    }
+
+    /// Is the lock held (by anyone)? For crash dumps and assertions.
+    pub fn is_locked(&self) -> bool {
+        self.owner.load(Ordering::Relaxed) != 0
     }
 }
 

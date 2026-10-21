@@ -33,7 +33,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use super::errno::*;
 use super::signal::{self, SigInfo};
 use crate::sched::{self, Priority, WaitQueue};
-use crate::sync::{self, SpinLock};
+use crate::sync::SpinLock;
 use crate::uart;
 
 struct State {
@@ -394,7 +394,7 @@ impl State {
 /// Console output: the `kprintln!` sink (UART + screen). Invalid UTF-8 is replaced.
 pub fn console_output(b: &[u8]) {
     let s = String::from_utf8_lossy(b);
-    sync::without_irqs(|| {
+    crate::sink::with_print_lock(|| {
         let _ = crate::console_writer().write_str(&s);
     });
 }

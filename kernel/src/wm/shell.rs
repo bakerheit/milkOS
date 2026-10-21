@@ -445,6 +445,14 @@ pub fn dock_icon_center(i: usize) -> (i32, i32) {
     dock_icon_center_of(i, super::packages::count())
 }
 
+/// The centre of the dock tile called `name` (demo scripts).
+pub fn dock_tile_center(name: &str) -> Option<(i32, i32)> {
+    tiles()
+        .iter()
+        .position(|t| t.name == name)
+        .map(dock_icon_center)
+}
+
 /// The same once there are `extra` package tiles in the dock (it grows from the centre):
 /// for demos that install packages first.
 pub fn dock_icon_center_of(i: usize, extra: usize) -> (i32, i32) {

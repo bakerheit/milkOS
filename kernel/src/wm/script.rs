@@ -684,22 +684,25 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install fortune").enter().wait(3000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            // After the Store (tile 9), by name: fortune is tile 10, moo2048 tile 11.
+            // Installed apps come after the system ones (Store, Clock, ... from tile 9):
+            // fortune, then moo2048.
+            let sys = super::packages::count();
+            let (fortune, moo, n) = (9 + sys, 10 + sys, sys + 2);
             if name == "pkgrun" || name == "pkgsandbox" {
-                let (x, y) = dock_icon_center_of(11, 3);
+                let (x, y) = dock_icon_center_of(moo, n);
                 b.click(x, y).wait(2000);
             }
             if name == "pkgsandbox" {
                 // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
                 b.key(Key::Left, Mods::NONE).wait(300);
-                let (x, y) = dock_icon_center_of(1, 3);
+                let (x, y) = dock_icon_center_of(1, n);
                 b.click(x, y).wait(400);
                 b.typ("audit --event sandbox").enter().wait(800);
             } else if name == "pkgfortune" {
-                let (x, y) = dock_icon_center_of(10, 3);
+                let (x, y) = dock_icon_center_of(fortune, n);
                 b.click(x, y).wait(2000);
             } else {
-                let (x, y) = dock_icon_center_of(11, 3);
+                let (x, y) = dock_icon_center_of(moo, n);
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
         }
@@ -882,7 +885,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.up().wait(1500);
         }
         "dragpkg" => {
-            // moo2048 installed (tile 10, after the Store): drop todo.txt on its tile.
+            // moo2048 installed (after the system apps): drop todo.txt on its tile.
             let url = host_test_url();
             b.wait(300)
                 .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
@@ -891,14 +894,15 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk update").enter().wait(2000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            let (tx, ty) = dock_icon_center_of(10, 2);
+            let sys = super::packages::count();
+            let (tx, ty) = dock_icon_center_of(9 + sys, sys + 1);
             b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
                 b.to(425 + (tx - 425) * i / 16, 186 + (ty - 186) * i / 16)
                     .wait(16);
             }
             b.up().wait(2000);
-            let (x, y) = dock_icon_center_of(1, 2);
+            let (x, y) = dock_icon_center_of(1, sys + 1);
             b.click(x, y).wait(400);
             b.typ("audit --event powerbox").enter().wait(600);
             b.typ("audit --event sandbox").enter().wait(800);
@@ -971,7 +975,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .enter()
                     .wait(300);
             }
-            let (x, y) = dock_icon_center(9);
+            let (x, y) = super::shell::dock_tile_center("Store").unwrap_or(dock_icon_center(9));
             b.wait(300).click(x, y).wait(4000);
         }
         // The notification drawer (SPEC "Notification drawer"): the four mockup states.

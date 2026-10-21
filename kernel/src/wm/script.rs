@@ -301,6 +301,27 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(8);
             b.to(x, y).wait(30).down().wait(30).up();
         }
+        "lsbin" => {
+            b.wait(300).typ("ls /bin").enter().wait(600);
+        }
+        "sigint" => {
+            b.wait(300).typ("sleep 9").enter().wait(1000);
+            b.key(Key::Char('c'), Mods::CTRL)
+                .wait(400)
+                .typ("echo status $?")
+                .enter()
+                .wait(400);
+        }
+        "winsize" => {
+            // Shrink the Terminal from its corner, then ask the tty its size.
+            b.wait(300).typ("stty size").enter().wait(300);
+            b.drag(956, 556, 800, 500, 12).wait(200);
+            b.typ("stty size").enter().wait(400);
+        }
+        "utest" => {
+            // proc's userland test suite (fork / CoW, pipes, signals) from the desktop shell.
+            b.wait(300).typ("utest").enter().wait(6000);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

@@ -5,9 +5,9 @@ It follows `ART.md` and the tokens in `SPEC.md`. Open `contact-sheet.png` first.
 
 ## What is here
 - `icons/<app>-<size>.png` and `icons/<app>-<size>-dark.png`, for **files, terminal, browser, notes, paint, music, settings, text-editor, calendar, clock, preview, activity,
-  store, spaces**, at **512, 96, 48, 40, 36, 28, 20 and 16** px. RGBA with transparent corners (the tile radius is 24% of the size). The `-dark` file is identical to the
+  store, spaces, today, disk-utility, reminders**, at **512, 96, 48, 40, 36, 28, 20 and 16** px. RGBA with transparent corners (the tile radius is 24% of the size). The `-dark` file is identical to the
   light one for the accent tiles (honey, blue, straw, matcha, lavender: ink glyph in both themes); it differs for the neutral tiles (notes, paint, text-editor, calendar,
-  settings, spaces), mapped through the dark table of the spec (milk tile `#2E2520`, glyph `#F4EBE0`, latte tile `#8C7764`). Terminal and Activity keep the fixed Terminal
+  settings, spaces, today, reminders, and disk-utility on the sand tile), mapped through the dark table of the spec (milk tile `#2E2520`, glyph `#F4EBE0`, latte tile `#8C7764`). Terminal and Activity keep the fixed Terminal
   body colour in both themes, and their `-dark` files add a 1px `#4A3C34` edge so the tile does not vanish on dark glass.
 - `icons/file-<kind>-<size>[-dark].png` for the Files file types (**folder, document, image, audio, archive, package**) at **56 and 36** px: the folder on a honey tile, the
   others on milk tiles with one accent each.
@@ -23,12 +23,12 @@ It follows `ART.md` and the tokens in `SPEC.md`. Open `contact-sheet.png` first.
 ## The colour map (one tile colour per app)
 Files honey; Terminal espresso; Browser blue; Notes milk with a honey band; Text Editor milk with cocoa lines and a straw caret; Paint milk with four colour dots;
 Music straw; Calendar milk with a straw band and the date numeral; Clock matcha; Preview lavender; Settings latte; Activity Monitor espresso with a matcha graph line;
-Store straw with an ink bag and a milk sparkle; Spaces milk with four small windows (the current one straw).
+Store straw with an ink bag and a milk sparkle; Spaces milk with four small windows (the current one straw); Today milk with a honey half-sun on a cocoa horizon and three agenda lines (no numeral, no page); Reminders milk with a straw ring holding an ink check and two lines; Disk Utility sand (`#E2D5BD`, dark `#55463C`) with an ink drive and one small matcha health light. Calendar has no numeral baked in: the milk tile and straw band stay, and the middle holds only a faint 4 by 3 grid of cocoa dots (left out at 28 px and below) so the shell can paint today's date over it.
 
 ## Checks that were run
 - **Wallpapers:** `art/check-wallpaper.py` prints PASS for all eight regions on dawn, oat and night (`--dark`). Night is the tight one (its drawer region is about 7.7:1), which
   is why its moon and cow sit where they do: a bright thing under dark glass cannot reach 7:1, so they must not be moved into a glass region. The darkest value in Night is
-  above `#1E1915`. Oat is plain: a slow gradient, a hair of grain against banding and a highlight at 3%.
+  above `#1E1915`. Oat is plain: a slow gradient, a hair of grain against banding and a highlight at 3%. The clouds in Dawn are blurred on a layer that starts as the cloud colour at alpha 0 (a transparent black layer bleeds a dark rim); the cows are kept above the dock.
 - **Icons:** glyph about 55 to 60% of the tile, strokes at least 2 units on the 48 grid, ink on accent tiles, at most one small accent, a faint top light and a soft shadow.
   The sizes of 28, 20 and 16 are drawn again with heavier strokes (and, at 20 and 16, fewer details: no globe meridian, no clock ticks, fewer note lines, a six-tooth gear), not
   scaled down. Squint test: the contact sheet at half size still tells the icons apart by tile colour and shape. At 16 px Settings shows its teeth and Clock a hand.

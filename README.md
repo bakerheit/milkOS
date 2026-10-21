@@ -17,6 +17,8 @@ MILK_SMP=1 scripts/run.sh      # one CPU instead of four
 Needs Rust nightly via rustup (`brew install rustup`; the toolchain is pinned in `rust-toolchain.toml`)
 and `qemu-system-aarch64`. Boots with HVF acceleration on Apple Silicon.
 
+On first boot a Welcome tour shows the main ideas with buttons that really do them.
+
 Handy keys on the desktop: Ctrl/Cmd+Space opens Skim (the launcher), F3 opens Spaces, F4 opens Today.
 The dock has Files, Terminal, Browser, Notes, Paint, Music and Settings; installed packages add their own
 tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves and quarters.

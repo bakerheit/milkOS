@@ -1,0 +1,5 @@
+# milk package repositories, one URL per line. Hosts must be IP addresses or localhost
+# (milkOS does no name lookups for user programs). 10.0.2.2 is the Mac's 127.0.0.1 under
+# qemu user networking: scripts/milk-repo.sh serve 8765 serves packages/ there. The
+# default netdev in run.sh is restricted (no host access); scripts/pkg-test.sh opens it.
+http://10.0.2.2:8765/

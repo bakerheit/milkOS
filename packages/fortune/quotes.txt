@@ -1,0 +1,23 @@
+There is no use crying over spilt milk. Just snapshot before you pour.
+%
+Cream rises to the top. So does the most recently written block in a copy-on-write tree.
+%
+A watched pot never boils; a watched milkfs flushes every 250 ms anyway.
+%
+Got milk? Got snapshots? Then you have nothing to fear from rm -r.
+%
+The cow does not hurry, yet the grass is always eaten.
+%
+Skim the docs, but read the source.
+%
+Every glass of milk was once a promise a cow kept.
+%
+Whole milk, whole system: one kernel, written from scratch.
+%
+Udderly reliable: every record hashed, every hash chained.
+%
+Moo first, ask questions later. Then check the audit log.
+%
+Fresh milk keeps for a week. A clone keeps until you discard it.
+%
+The early cow gets the clover.

@@ -1,0 +1,12 @@
+[package]
+name = "milk"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "milk"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

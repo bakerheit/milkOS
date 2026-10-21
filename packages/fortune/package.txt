@@ -1,0 +1,7 @@
+name fortune
+version 1.0.0
+description Milk-themed quotes, one at a time
+exec bin/fortune
+dock Fortune #EBB650
+file bin/fortune = target/packages/aarch64-unknown-none-softfloat/release/fortune
+file share/fortune/quotes.txt = packages/fortune/quotes.txt

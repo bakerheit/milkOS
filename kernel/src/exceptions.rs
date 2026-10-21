@@ -78,8 +78,36 @@ global_asm!(
     OFF_SPSR = const offset_of!(TrapFrame, spsr),
     OFF_ESR = const offset_of!(TrapFrame, esr),
     OFF_FAR = const offset_of!(TrapFrame, far),
+    KSTACK_SHIFT = const crate::sched::kstack::KSTACK_SHIFT,
     HANDLER = sym exception_entry,
+    OVERFLOW = sym kstack_overflow,
 );
+
+/// Stack for reporting a kernel stack overflow (the overflowing stack is unusable).
+#[repr(C, align(16))]
+struct EmergencyStack([u8; 16 * 1024]);
+#[unsafe(no_mangle)]
+static mut __emergency_stack: EmergencyStack = EmergencyStack([0; 16 * 1024]);
+global_asm!(
+    ".global __emergency_stack_top",
+    ".set __emergency_stack_top, __emergency_stack + {size}",
+    size = const size_of::<EmergencyStack>(),
+);
+
+/// Called on the emergency stack when an EL1 exception would push its frame below the
+/// current kernel stack.
+extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
+    CRASHING.store(true, Ordering::Relaxed);
+    let (tid, name) = crate::sched::current_for_crash();
+    kprintln!("\n*** KERNEL STACK OVERFLOW ***");
+    kprintln!("  thread {tid} ({name}), sp would be {sp:#018x}");
+    kprintln!(
+        "  ELR_EL1 = {elr:#018x}  FAR_EL1 = {far:#018x}  ESR_EL1 = {esr:#010x} ({})",
+        ec_name((esr >> 26) & 0x3f)
+    );
+    kprintln!("*** halted ***");
+    halt();
+}
 
 unsafe extern "C" {
     static exception_vectors: u8;
@@ -109,8 +137,18 @@ pub type SyscallHandler = fn(frame: &mut TrapFrame, imm: u16);
 /// the frame redirected); false to treat it as fatal.
 pub type UserFaultHandler = fn(frame: &mut TrapFrame) -> bool;
 
+/// Hook run after every IRQ, once the interrupt has been acknowledged and ended (EOI), still
+/// with IRQs masked and on the interrupted context's kernel stack. The scheduler uses it to
+/// preempt: it may switch to another thread and come back here much later.
+pub type IrqExitHook = fn(frame: &mut TrapFrame);
+
 static SYSCALL: FnSlot = FnSlot::new();
 static USER_FAULT: FnSlot = FnSlot::new();
+static IRQ_EXIT: FnSlot = FnSlot::new();
+
+pub fn set_irq_exit_hook(h: IrqExitHook) {
+    IRQ_EXIT.set(h);
+}
 
 pub fn set_syscall_handler(h: SyscallHandler) {
     SYSCALL.set(h);
@@ -147,7 +185,12 @@ const EC_BRK64: u64 = 0x3c;
 extern "C" fn exception_entry(frame: &mut TrapFrame, vector: usize) {
     match vector % 4 {
         0 => sync(frame, vector),
-        1 => gic::handle_irq(frame),
+        1 => {
+            gic::handle_irq(frame);
+            if let Some(h) = IRQ_EXIT.get::<IrqExitHook>() {
+                h(frame);
+            }
+        }
         2 => crash(frame, vector, "FIQ (unexpected: we only use IRQ)"),
         _ => crash(frame, vector, "SError"),
     }
@@ -301,7 +344,7 @@ fn dump_inst_abort(frame: &TrapFrame, iss: u64) {
     }
 }
 
-fn fault_status(fsc: u64) -> &'static str {
+pub(crate) fn fault_status(fsc: u64) -> &'static str {
     match fsc {
         0x00 => "address size fault, level 0",
         0x01 => "address size fault, level 1",
@@ -330,7 +373,7 @@ fn fault_status(fsc: u64) -> &'static str {
     }
 }
 
-fn ec_name(ec: u64) -> &'static str {
+pub(crate) fn ec_name(ec: u64) -> &'static str {
     match ec {
         EC_UNKNOWN => "unknown reason",
         0x01 => "trapped WFI/WFE",

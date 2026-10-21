@@ -3,3 +3,9 @@
 # Example:        /bin/init             target/user/init                         755
 # A missing host file is skipped with a cargo warning, so the kernel still builds
 # before the user programs do. See docs/filesystem.md.
+
+# User programs (user/ workspace, built by kernel/build.rs before the archive is packed).
+/bin/init   target/user/aarch64-unknown-none-softfloat/release/init    755
+/bin/hello  target/user/aarch64-unknown-none-softfloat/release/hello   755
+/bin/msh    target/user/aarch64-unknown-none-softfloat/release/msh     755
+/bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755

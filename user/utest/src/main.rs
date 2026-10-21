@@ -1615,9 +1615,18 @@ fn t_svc() -> bool {
     let backoff = delays.len() >= 4
         && delays.windows(2).take(3).all(|w| w[1] == 2 * w[0])
         && delays[0] == 100;
-    // Dependencies.
+    // Dependencies. ut-needs-dead may start as soon as ut-oneshot is spawned (`after` is
+    // ordering on start, as in systemd) and is then stopped when the oneshot fails: give
+    // it up to 3 s to settle (stopping -> failed) before judging.
     let missing = status("ut-needs-missing");
-    let dead = status("ut-needs-dead");
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let mut dead = status("ut-needs-dead");
+    while !dead.contains("dependency failed: ut-oneshot")
+        && sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 3_000_000_000
+    {
+        sys::sleep_ms(100);
+        dead = status("ut-needs-dead");
+    }
     let deps = missing.contains("dependency failed: ut-no-such-unit")
         && dead.contains("dependency failed: ut-oneshot");
     if !deps {

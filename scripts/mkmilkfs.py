@@ -9,6 +9,14 @@
   mkmilkfs.py put   IMAGE PATH FILE [--v0]  copy a Mac file into the image (--v0: old-style
                                          one-block extents, for upgrade tests)
   mkmilkfs.py mkfs  ... --v0             make a format-v0 image (upgrade tests)
+  mkmilkfs.py mkfs  ... --encrypt [--recovery-out FILE]
+                                         an encrypted volume (asks for a passphrase; prints
+                                         the recovery key, or writes it to FILE)
+  mkmilkfs.py change-passphrase IMAGE    rewrap the volume key under a new passphrase
+  mkmilkfs.py selftest-crypto            this tool's crypto against the published vectors
+  Encrypted images: every command takes --passphrase-file FILE, --recovery KEY or
+  $MILKFS_PASSPHRASE (else it asks); new passphrases --new-passphrase-file FILE or
+  $MILKFS_NEW_PASSPHRASE.
   mkmilkfs.py mkdir IMAGE PATH [MODE]     make a directory (and its parents), mode octal (755)
   mkmilkfs.py populate IMAGE DIR N        add N files under DIR (100 per subdirectory dNNN;
                                          fNNNNN with .md / .txt / no extension in turn; small
@@ -39,8 +47,10 @@ import time
 
 BLOCK = 4096
 MAGIC = b"MILKFS01"
-VERSION = 1      # written by mkfs; 0, 1 and 2 (reflinks) are read
-MAX_VERSION = 2
+VERSION = 1      # written by mkfs; 0, 1, 2 (reflinks) and 3 (encrypted) are read
+MAX_VERSION = 3
+CRYPT_VERSION = 3
+SB_ENCRYPTED = 2
 MIN_VERSION = 0
 MAX_SNAPS = 30
 K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE = 1, 2, 3, 4, 5, 6
@@ -106,6 +116,281 @@ assert xxh64(b"") == 0xEF46DB3751D8E999, "xxh64 self-test"
 assert xxh64(b"abc") == 0x44BC2CF5AD770999, "xxh64 self-test"
 
 
+# ---- crypto (mirrors kernel/src/crypto and milkfs/crypt.rs; docs/crypto.md) ------------
+# Stdlib only. ChaCha20 uses the `cryptography` package for speed if it is installed (pure
+# Python otherwise), scrypt uses hashlib.scrypt or `cryptography` (pure Python is slow).
+import hashlib
+import hmac as _hmac
+
+KDF_LOG_N, KDF_R, KDF_P = 16, 8, 4
+SLOT_PASSPHRASE, SLOT_RECOVERY = 1, 2
+
+
+def _chacha_block(key, counter, nonce12, rounds_only=False):
+    def r(x, n):
+        return ((x << n) | (x >> (32 - n))) & 0xffffffff
+
+    s = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574] + list(struct.unpack("<8I", key)) + \
+        [counter] + list(struct.unpack("<3I", nonce12))
+    if rounds_only:  # HChaCha20: counter+nonce are the 16-byte nonce
+        pass
+    x = list(s)
+
+    def qr(a, b, c, d):
+        x[a] = (x[a] + x[b]) & 0xffffffff
+        x[d] = r(x[d] ^ x[a], 16)
+        x[c] = (x[c] + x[d]) & 0xffffffff
+        x[b] = r(x[b] ^ x[c], 12)
+        x[a] = (x[a] + x[b]) & 0xffffffff
+        x[d] = r(x[d] ^ x[a], 8)
+        x[c] = (x[c] + x[d]) & 0xffffffff
+        x[b] = r(x[b] ^ x[c], 7)
+
+    for _ in range(10):
+        qr(0, 4, 8, 12); qr(1, 5, 9, 13); qr(2, 6, 10, 14); qr(3, 7, 11, 15)
+        qr(0, 5, 10, 15); qr(1, 6, 11, 12); qr(2, 7, 8, 13); qr(3, 4, 9, 14)
+    if rounds_only:
+        return x
+    return struct.pack("<16I", *[(x[i] + s[i]) & 0xffffffff for i in range(16)])
+
+
+def hchacha20(key, n16):
+    c, n12 = struct.unpack_from("<I", n16)[0], n16[4:]
+    x = _chacha_block(key, c, n12, rounds_only=True)
+    return struct.pack("<8I", *(x[0:4] + x[12:16]))
+
+
+try:
+    from cryptography.hazmat.primitives.ciphers import Cipher as _Cipher, algorithms as _alg
+
+    def chacha20_xor(key, counter, nonce12, data):
+        c = _Cipher(_alg.ChaCha20(key, struct.pack("<I", counter) + nonce12), mode=None).encryptor()
+        return c.update(bytes(data))
+except ImportError:
+    def chacha20_xor(key, counter, nonce12, data):
+        out = bytearray(data)
+        for i in range(0, len(out), 64):
+            ks = _chacha_block(key, counter + i // 64, nonce12)
+            for j in range(min(64, len(out) - i)):
+                out[i + j] ^= ks[j]
+        return bytes(out)
+
+
+def xchacha20_xor(key, nonce24, counter, data):
+    return chacha20_xor(hchacha20(key, nonce24[:16]), counter, b"\0\0\0\0" + nonce24[16:], data)
+
+
+def poly1305(key, msg):
+    r = int.from_bytes(key[:16], "little") & 0x0ffffffc0ffffffc0ffffffc0fffffff
+    s, p, a = int.from_bytes(key[16:], "little"), (1 << 130) - 5, 0
+    for i in range(0, len(msg), 16):
+        a = (a + int.from_bytes(msg[i:i + 16] + b"\x01", "little")) * r % p
+    return ((a + s) & ((1 << 128) - 1)).to_bytes(16, "little")
+
+
+def _aead_tag(key, nonce12, aad, ct):
+    otk = _chacha_block(key, 0, nonce12)[:32]
+    pad = lambda b: b"\0" * ((16 - len(b) % 16) % 16)
+    return poly1305(otk, aad + pad(aad) + ct + pad(ct) + struct.pack("<QQ", len(aad), len(ct)))
+
+
+def xaead_seal(key, nonce24, aad, pt):
+    sub, n12 = hchacha20(key, nonce24[:16]), b"\0\0\0\0" + nonce24[16:]
+    ct = chacha20_xor(sub, 1, n12, pt)
+    return ct, _aead_tag(sub, n12, aad, ct)
+
+
+def xaead_open(key, nonce24, aad, ct, tag):
+    sub, n12 = hchacha20(key, nonce24[:16]), b"\0\0\0\0" + nonce24[16:]
+    if not _hmac.compare_digest(_aead_tag(sub, n12, aad, ct), tag):
+        return None
+    return chacha20_xor(sub, 1, n12, ct)
+
+
+def hmac256(key, data):
+    return _hmac.new(key, data, hashlib.sha256).digest()
+
+
+def _scrypt_py(pw, salt, n, r, p, dklen):
+    def salsa8(b):
+        x = list(b)
+
+        def R(a, k):
+            return ((a << k) | (a >> (32 - k))) & 0xffffffff
+        for _ in range(4):
+            for (a, b_, c, d) in ((4, 0, 12, 8), (9, 5, 1, 13), (14, 10, 6, 2), (3, 15, 11, 7)):
+                x[a] ^= R((x[b_] + x[c]) & 0xffffffff, 7); x[d] ^= R((x[a] + x[b_]) & 0xffffffff, 9)
+                x[c] ^= R((x[d] + x[a]) & 0xffffffff, 13); x[b_] ^= R((x[c] + x[d]) & 0xffffffff, 18)
+            for (a, b_, c, d) in ((1, 0, 3, 2), (6, 5, 4, 7), (11, 10, 9, 8), (12, 15, 14, 13)):
+                x[a] ^= R((x[b_] + x[c]) & 0xffffffff, 7); x[d] ^= R((x[a] + x[b_]) & 0xffffffff, 9)
+                x[c] ^= R((x[d] + x[a]) & 0xffffffff, 13); x[b_] ^= R((x[c] + x[d]) & 0xffffffff, 18)
+        return [(x[i] + b[i]) & 0xffffffff for i in range(16)]
+
+    def blockmix(B):
+        X, Y = B[-16:], []
+        for i in range(2 * r):
+            X = salsa8([X[k] ^ B[i * 16 + k] for k in range(16)])
+            Y.append(X)
+        return [w for i in list(range(0, 2 * r, 2)) + list(range(1, 2 * r, 2)) for w in Y[i]]
+
+    B = hashlib.pbkdf2_hmac("sha256", pw, salt, 1, p * 128 * r)
+    out = b""
+    for i in range(p):
+        X = list(struct.unpack("<%dI" % (32 * r), B[i * 128 * r:(i + 1) * 128 * r]))
+        V = []
+        for _ in range(n):
+            V.append(X)
+            X = blockmix(X)
+        for _ in range(n):
+            j = X[(2 * r - 1) * 16] & (n - 1)
+            X = blockmix([a ^ b for a, b in zip(X, V[j])])
+        out += struct.pack("<%dI" % (32 * r), *X)
+    return hashlib.pbkdf2_hmac("sha256", pw, out, 1, dklen)
+
+
+def scrypt(pw, salt, log_n, r, p, dklen=32):
+    n = 1 << log_n
+    if hasattr(hashlib, "scrypt"):
+        return hashlib.scrypt(pw, salt=salt, n=n, r=r, p=p, dklen=dklen, maxmem=256 << 20)
+    try:
+        from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+        return Scrypt(salt=salt, length=dklen, n=n, r=r, p=p).derive(pw)
+    except ImportError:
+        if n > 1024:
+            print("mkmilkfs: no fast scrypt here (pure Python): this takes a while...", file=sys.stderr)
+        return _scrypt_py(pw, salt, n, r, p, dklen)
+
+
+class VolumeKey:
+    def __init__(self, vk):
+        self.vk = vk
+        self.enc = hmac256(vk, b"milkfs v1 enc")
+        self.mac = hmac256(vk, b"milkfs v1 mac")
+
+    def tag(self, block, birth, data):
+        return struct.unpack("<Q", hmac256(self.mac, b"MKB1" + struct.pack("<QQ", block, birth) + data)[:8])[0]
+
+    def seal(self, block, birth, data):
+        t = self.tag(block, birth, data)
+        return xchacha20_xor(self.enc, struct.pack("<QQQ", t, block, birth), 0, data), t
+
+    def open(self, block, birth, csum, data):
+        pt = xchacha20_xor(self.enc, struct.pack("<QQQ", csum, block, birth), 0, data)
+        return pt if _hmac.compare_digest(struct.pack("<Q", self.tag(block, birth, pt)), struct.pack("<Q", csum)) else None
+
+    def sb_mac(self, sb_bytes):
+        return struct.unpack("<Q", hmac256(self.mac, b"MKSB" + sb_bytes[:4076])[:8])[0]
+
+
+def keyring_encode(uuid, slots):
+    b = bytearray(BLOCK)
+    b[0:4] = b"MKKR"
+    struct.pack_into("<I", b, 4, 1)
+    b[8:24] = uuid
+    struct.pack_into("<I", b, 24, len(slots))
+    for i, sl in enumerate(slots):
+        o = 32 + i * 128
+        b[o:o + 4] = bytes([sl["kind"], sl["log_n"], sl["r"], sl["p"]])
+        b[o + 8:o + 24], b[o + 24:o + 48] = sl["salt"], sl["nonce"]
+        b[o + 48:o + 80], b[o + 80:o + 96] = sl["wrapped"], sl["tag"]
+    return bytes(b)
+
+
+def keyring_decode(b):
+    if b[0:4] != b"MKKR" or struct.unpack_from("<I", b, 4)[0] != 1:
+        return None
+    n = struct.unpack_from("<I", b, 24)[0]
+    slots = []
+    for i in range(min(n, 16)):
+        o = 32 + i * 128
+        slots.append(dict(kind=b[o], log_n=b[o + 1], r=b[o + 2], p=b[o + 3], salt=bytes(b[o + 8:o + 24]),
+                          nonce=bytes(b[o + 24:o + 48]), wrapped=bytes(b[o + 48:o + 80]),
+                          tag=bytes(b[o + 80:o + 96])))
+    return bytes(b[8:24]), slots
+
+
+def _slot_aad(uuid, kind):
+    return b"milkfs slot" + uuid + bytes([kind])
+
+
+def parse_recovery(s):
+    h = s.replace("-", "").replace(" ", "")
+    if len(h) != 32:
+        return None
+    try:
+        return bytes.fromhex(h)
+    except ValueError:
+        return None
+
+
+def format_recovery(k):
+    h = k.hex().upper()
+    return "-".join(h[i:i + 4] for i in range(0, 32, 4))
+
+
+def _kek(slot, secret):
+    if slot["kind"] == SLOT_PASSPHRASE:
+        return scrypt(secret, slot["salt"], slot["log_n"], slot["r"], slot["p"])
+    return hmac256(slot["salt"], secret)
+
+
+def wrap_slot(uuid, vk, kind, secret):
+    sl = dict(kind=kind, log_n=KDF_LOG_N, r=KDF_R, p=KDF_P, salt=os.urandom(16), nonce=os.urandom(24))
+    sl["wrapped"], sl["tag"] = xaead_seal(_kek(sl, secret), sl["nonce"], _slot_aad(uuid, kind), vk)
+    return sl
+
+
+def unlock_slots(uuid, slots, secret):
+    """(volume key, slot index) for a passphrase or recovery key (str), or None."""
+    rec = parse_recovery(secret)
+    for i, sl in enumerate(slots):
+        if sl["kind"] == SLOT_RECOVERY and rec:
+            inp = rec
+        elif sl["kind"] == SLOT_PASSPHRASE:
+            inp = secret.encode()
+        else:
+            continue
+        vk = xaead_open(_kek(sl, inp), sl["nonce"], _slot_aad(uuid, sl["kind"]), sl["wrapped"], sl["tag"])
+        if vk is not None:
+            return vk, i
+    return None
+
+
+# The secret for encrypted images: --passphrase-file FILE, --recovery KEY, $MILKFS_PASSPHRASE,
+# or asked for on the terminal.
+SECRET = {"value": None, "file": None, "recovery": None}
+_KEYS = {}
+
+
+def get_secret(prompt="passphrase (or recovery key): "):
+    if SECRET["recovery"]:
+        return SECRET["recovery"]
+    if SECRET["file"]:
+        return open(SECRET["file"]).read().rstrip("\r\n")
+    if os.environ.get("MILKFS_PASSPHRASE"):
+        return os.environ["MILKFS_PASSPHRASE"]
+    import getpass
+    return getpass.getpass(prompt)
+
+
+def volume_key(img, sb):
+    """The unlocked key of an encrypted image (asks once per volume)."""
+    if sb["uuid"] in _KEYS:
+        return _KEYS[sb["uuid"]]
+    p = sb["keyring"]
+    ring = keyring_decode(img.raw(p[0])) if p[0] and xxh64(img.raw(p[0])) == p[2] else None
+    if not ring:
+        sys.exit(f"{img.path}: encrypted, but its keyring is unreadable")
+    got = unlock_slots(ring[0], ring[1], get_secret())
+    if not got:
+        sys.exit(f"{img.path}: wrong passphrase or recovery key")
+    k = VolumeKey(got[0])
+    if k.sb_mac(sb["raw"]) != sb["sb_mac"]:  # over the bytes on disk
+        sys.exit(f"{img.path}: the superblock's MAC doesn't match (altered?)")
+    _KEYS[sb["uuid"]] = k
+    return k
+
+
 def name_hash(b):
     h = 0xcbf29ce484222325
     for c in b:
@@ -158,6 +443,8 @@ def sb_encode(sb):
         struct.pack_into("<II", b, o + 120, 1 if s.get("clone") else 0, s.get("id", 0))
     struct.pack_into("<4I", b, 3992, *sb.get("auto", (0, 0, 0, 0)))
     struct.pack_into("<I", b, 4008, sb.get("flags", 0))
+    b[4052:4076] = ptr_pack(sb.get("keyring", (0, 0, 0)))
+    struct.pack_into("<Q", b, 4076, sb.get("sb_mac", 0))
     # No space map: this tool never writes one, so any commit from here drops the kernel's
     # (it would be stale); the next mount rebuilds it.
     struct.pack_into("<Q", b, BLOCK - 8, xxh64(bytes(b[:BLOCK - 8])))
@@ -185,7 +472,8 @@ def sb_decode(b):
     nino, created = struct.unpack_from("<QQ", b, 80)
     return dict(total=total, gen=gen, root=ptr_unpack(b, 32), dead=ptr_unpack(b, 56),
                 flags=struct.unpack_from("<I", b, 4008)[0], version=ver,
-                spacemap=ptr_unpack(b, 4016),
+                spacemap=ptr_unpack(b, 4016), keyring=ptr_unpack(b, 4052),
+                sb_mac=struct.unpack_from("<Q", b, 4076)[0], raw=bytes(b),
                 auto=struct.unpack_from("<4I", b, 3992),
                 next_ino=nino, created=created, uuid=bytes(b[96:112]),
                 label=cstr(b[112:144]), snaps=snaps)
@@ -244,8 +532,13 @@ def dirents_decode(v):
 # ---- image access --------------------------------------------------------------------
 class Image:
     def __init__(self, path):
+        self.path = path
         self.f = open(path, "rb")
         self.size = os.fstat(self.f.fileno()).st_size
+        self.key = None
+        sb = self.superblock()
+        if sb and sb["flags"] & SB_ENCRYPTED:
+            self.key = volume_key(self, sb)
 
     def raw(self, blk):
         self.f.seek(blk * BLOCK)
@@ -255,6 +548,11 @@ class Image:
     def read(self, p):
         blk, birth, csum = p
         b = self.raw(blk)
+        if self.key:
+            pt = self.key.open(blk, birth, csum, b)
+            if pt is None:
+                raise IOError(f"checksum (tag) mismatch in block {blk} (birth {birth})")
+            return pt
         if xxh64(b) != csum:
             raise IOError(f"checksum mismatch in block {blk} (birth {birth})")
         return b
@@ -349,7 +647,7 @@ def parse_size(s):
     return int(s[:-1]) * mult[s[-1].upper()] if s[-1].upper() in mult else int(s)
 
 
-def cmd_mkfs(path, size, label, force, version=None):
+def cmd_mkfs(path, size, label, force, version=None, encrypt=False, recovery_out=None):
     if os.path.exists(path):
         img = Image(path)
         if img.superblock() and not force:
@@ -366,6 +664,18 @@ def cmd_mkfs(path, size, label, force, version=None):
     sb = dict(total=total, gen=1, root=(2, 1, xxh64(leaf)), dead=(0, 0, 0), next_ino=2,
               version=VERSION if version is None else version,
               created=int(now), uuid=os.urandom(16), label=label, snaps=[])
+    ring = None
+    if encrypt:
+        secret = new_passphrase()
+        vk, rec = os.urandom(32), os.urandom(16)
+        key = VolumeKey(vk)
+        slots = [wrap_slot(sb["uuid"], vk, SLOT_PASSPHRASE, secret.encode()),
+                 wrap_slot(sb["uuid"], vk, SLOT_RECOVERY, rec)]
+        ring = keyring_encode(sb["uuid"], slots)
+        leaf, tag = key.seal(2, 1, leaf)
+        sb.update(root=(2, 1, tag), keyring=(3, 1, xxh64(ring)), flags=SB_ENCRYPTED,
+                  version=CRYPT_VERSION)
+        sb["sb_mac"] = key.sb_mac(sb_encode(sb))
     mode = "r+b" if os.path.exists(path) else "w+b"
     with open(path, mode) as f:
         f.truncate(size)
@@ -373,9 +683,90 @@ def cmd_mkfs(path, size, label, force, version=None):
         f.write(bytes(BLOCK))          # slot 0: no superblock
         f.write(sb_encode(sb))         # slot 1: generation 1
         f.write(leaf)                  # block 2: root leaf
+        if ring:
+            f.write(ring)              # block 3: keyring
         f.flush()
         os.fsync(f.fileno())
-    print(f"{path}: milkfs v{sb['version']}, {total} blocks of 4 KiB, label {label!r}")
+    print(f"{path}: milkfs v{sb['version']}, {total} blocks of 4 KiB, label {label!r}"
+          f"{', encrypted' if ring else ''}")
+    if ring:
+        msg = (f"Recovery key: {format_recovery(rec)}\n"
+               "Write it down and keep it somewhere safe: it unlocks the volume if the passphrase\n"
+               "is forgotten, and nothing else can.")
+        if recovery_out:
+            with open(recovery_out, "w") as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(format_recovery(rec) + "\n")
+            print(f"recovery key written to {recovery_out}")
+        else:
+            print(msg)
+
+
+def new_passphrase():
+    """A new passphrase: --new-passphrase-file, $MILKFS_NEW_PASSPHRASE, or asked twice."""
+    if SECRET.get("new_file"):
+        p = open(SECRET["new_file"]).read().rstrip("\r\n")
+    elif os.environ.get("MILKFS_NEW_PASSPHRASE"):
+        p = os.environ["MILKFS_NEW_PASSPHRASE"]
+    else:
+        import getpass
+        p = getpass.getpass("new passphrase: ")
+        if getpass.getpass("again: ") != p:
+            sys.exit("the passphrases differ")
+    if len(p) < 8:
+        sys.exit("a passphrase needs 8 characters or more")
+    return p
+
+
+def cmd_change_passphrase(path):
+    """Rewrap the volume key under a new passphrase (the current passphrase or the
+    recovery key unlocks it); a new keyring block and one commit, no data rewritten."""
+    img = Image(path)
+    sb = img.superblock()
+    if not sb["flags"] & SB_ENCRYPTED:
+        sys.exit(f"{path}: not encrypted")
+    uuid, slots = keyring_decode(img.raw(sb["keyring"][0]))
+    got = unlock_slots(uuid, slots, get_secret("current passphrase (or recovery key): "))
+    if not got:
+        sys.exit(f"{path}: wrong passphrase or recovery key")
+    vk, idx = got
+    new = new_passphrase()
+    slot = wrap_slot(uuid, vk, SLOT_PASSPHRASE, new.encode())
+    if slots[idx]["kind"] == SLOT_PASSPHRASE:
+        slots[idx] = slot
+    else:
+        i = next((i for i, x in enumerate(slots) if x["kind"] == SLOT_PASSPHRASE), None)
+        if i is None:
+            slots.append(slot)
+        else:
+            slots[i] = slot
+    w = Writer(path, img, sb)
+    sb = dict(sb, keyring=w.put_plain(keyring_encode(uuid, slots), sb["gen"] + 1))
+    w.commit(sb)
+    print(f"{path}: passphrase changed (volume key rewrapped, no data rewritten)")
+    return 0
+
+
+def cmd_selftest_crypto():
+    """The published vectors, on this tool's crypto (as the kernel does at boot)."""
+    H = bytes.fromhex
+    pt = (b"Ladies and Gentlemen of the class of '99: If I could offer you only one tip for "
+          b"the future, sunscreen would be it.")
+    k = bytes(range(32))
+    ok = [
+        ("chacha20 block", _chacha_block(k, 1, H("000000090000004a00000000")).hex().startswith("10f1e7e4d13b5915500fdd1fa32071c4")),
+        ("poly1305", poly1305(H("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"),
+                              b"Cryptographic Forum Research Group").hex() == "a8061dc1305136c6c22b8baf0c0127a9"),
+        ("hchacha20", hchacha20(k, H("000000090000004a0000000031415927")).hex() ==
+         "82413b4227b27bfed30e42508a877d73a0f9e4d58a74a853c12ec41326d3ecdc"),
+    ]
+    ct, tag = xaead_seal(H("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"),
+                         H("404142434445464748494a4b4c4d4e4f5051525354555657"), H("50515253c0c1c2c3c4c5c6c7"), pt)
+    ok.append(("xchacha20-poly1305", tag.hex() == "c0875924c1c7987947deafd8780acf49" and ct[:4].hex() == "bd6d179d"))
+    ok.append(("scrypt", scrypt(b"password", b"NaCl", 10, 8, 16, 64).hex().startswith("fdbabe1c9d3472007856e719")))
+    for name, good in ok:
+        print(("ok   " if good else "FAIL ") + name)
+    return 0 if all(g for _, g in ok) else 1
 
 
 def dirents_encode(lst):
@@ -404,6 +795,8 @@ def all_used(img, sb):
         used.update(p[0] for p in nodes)
     for head in [sb["dead"]] + [s["dead"] for s in sb["snaps"]]:
         used.update(p[0] for p in img.deadlist(head)[1])
+    if sb.get("keyring", (0, 0, 0))[0]:
+        used.add(sb["keyring"][0])
     return used
 
 
@@ -509,10 +902,21 @@ class Writer:
 
     def __init__(self, path, img, sb):
         self.f = open(path, "r+b")
+        self.key = img.key
         used = all_used(img, sb)
         self.free = (b for b in range(2, sb["total"]) if b not in used)
 
     def put(self, data, birth):
+        blk = next(self.free)
+        if self.key:
+            data, csum = self.key.seal(blk, birth, data)
+        else:
+            csum = xxh64(data)
+        self.f.seek(blk * BLOCK)
+        self.f.write(data)
+        return (blk, birth, csum)
+
+    def put_plain(self, data, birth):
         blk = next(self.free)
         self.f.seek(blk * BLOCK)
         self.f.write(data)
@@ -552,6 +956,10 @@ class Writer:
                     x["dead"] = (0, 0, 0)
         for x in add_snaps:
             sb2["snaps"].append(dict(x, gen=sb2["gen"], root=sb2["root"]))
+        if self.key:
+            sb2["version"] = max(sb2.get("version", 0), CRYPT_VERSION)
+            sb2["sb_mac"] = 0
+            sb2["sb_mac"] = self.key.sb_mac(sb_encode(sb2))
         self.f.flush()
         os.fsync(self.f.fileno())
         self.f.seek((sb2["gen"] % 2) * BLOCK)
@@ -1174,6 +1582,8 @@ def cmd_check(path, quiet):
         print(f"{path}: no valid milkfs superblock")
         return 1
     used = {0, 1}
+    if sb.get("keyring", (0, 0, 0))[0]:
+        used.add(sb["keyring"][0])  # encrypted: the keyring block
 
     def walk(root, what):
         nodes = []
@@ -1306,14 +1716,15 @@ def cmd_cat(path, p, snapshot):
 
 
 def main(argv):
-    if len(argv) < 2:
+    if not argv or (len(argv) < 2 and argv[0] != "selftest-crypto"):
         sys.exit(__doc__)
     cmd, args = argv[0], argv[1:]
     opts, pos = {}, []
     i = 0
     while i < len(args):
         a = args[i]
-        if a in ("--size", "--label", "--snapshot"):
+        if a in ("--size", "--label", "--snapshot", "--passphrase-file", "--recovery",
+                 "--new-passphrase-file", "--recovery-out"):
             opts[a] = args[i + 1]
             i += 2
         elif a.startswith("--"):
@@ -1322,9 +1733,18 @@ def main(argv):
         else:
             pos.append(a)
             i += 1
+    SECRET.update(file=opts.get("--passphrase-file"), recovery=opts.get("--recovery"),
+                  new_file=opts.get("--new-passphrase-file"))
     if cmd == "mkfs":
+        if "--encrypt" in opts and "--passphrase-file" in opts and "--new-passphrase-file" not in opts:
+            SECRET["new_file"] = opts["--passphrase-file"]
         cmd_mkfs(pos[0], parse_size(opts["--size"]) if "--size" in opts else None,
-                 opts.get("--label", "Milk"), "--force" in opts, 0 if "--v0" in opts else None)
+                 opts.get("--label", "Milk"), "--force" in opts, 0 if "--v0" in opts else None,
+                 "--encrypt" in opts, opts.get("--recovery-out"))
+    elif cmd == "change-passphrase":
+        return cmd_change_passphrase(pos[0])
+    elif cmd == "selftest-crypto":
+        return cmd_selftest_crypto()
     elif cmd == "check":
         if "--repair" in opts:
             return cmd_check_repair(pos[0])

@@ -100,13 +100,16 @@ impl Inode for DevNode {
                 Ok(buf.len())
             }
             Kind::Console => {
-                let mut w = crate::console_writer();
-                for chunk in buf.utf8_chunks() {
-                    let _ = w.write_str(chunk.valid());
-                    if !chunk.invalid().is_empty() {
-                        let _ = w.write_char('\u{fffd}');
+                // Under the print lock, so a write isn't torn by another CPU's output.
+                crate::sink::with_print_lock(|| {
+                    let mut w = crate::console_writer();
+                    for chunk in buf.utf8_chunks() {
+                        let _ = w.write_str(chunk.valid());
+                        if !chunk.invalid().is_empty() {
+                            let _ = w.write_char('\u{fffd}');
+                        }
                     }
-                }
+                });
                 Ok(buf.len())
             }
         }

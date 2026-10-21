@@ -45,10 +45,20 @@ fn interleave() {
     let s = core::str::from_utf8(&log).unwrap();
     let switches = log.windows(2).filter(|w| w[0] != w[1]).count();
     kprintln!("[sched-test] interleave: {s} ({switches} switches)");
-    assert!(
-        log.len() == 15 && switches >= 12,
-        "threads did not interleave"
-    );
+    if crate::percpu::count() == 1 {
+        assert!(
+            log.len() == 15 && switches >= 12,
+            "threads did not interleave"
+        );
+    } else {
+        // In parallel on several CPUs: no fixed order, but everyone finishes.
+        for c in *b"ABC" {
+            assert!(
+                log.iter().filter(|&&x| x == c).count() == 5,
+                "a thread lost steps"
+            );
+        }
+    }
 }
 
 /// Sleepers wake in deadline order, not too early; join returns exit codes.
@@ -235,7 +245,7 @@ fn churn() {
     for h in warm {
         h.join();
     }
-    super::reap();
+    super::reap_all();
     let before = pmm::stats().free_frames;
     for round in 0..10 {
         let hs: Vec<_> = (0..20)
@@ -250,13 +260,14 @@ fn churn() {
         drop(spawn("detached", || super::sleep_ms(1)));
     }
     super::sleep_ms(20);
-    super::reap();
+    super::reap_all();
     let after = pmm::stats().free_frames;
     kprintln!(
         "[sched-test] churn: 220 threads created and freed, pmm free frames {before} -> {after}, {} threads live",
         super::threads().len()
     );
-    assert!(after == before, "kernel stacks leaked");
+    // On SMP other threads may allocate/free meanwhile: only frames *missing* are a leak.
+    assert!(after >= before, "kernel stacks leaked");
 }
 
 #[cfg(feature = "kstack-overflow-test")]

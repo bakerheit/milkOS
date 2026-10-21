@@ -23,6 +23,15 @@ pub struct PerCpu {
     pub ticks: AtomicU64,
     /// Reschedule IPIs received.
     pub ipis: AtomicU64,
+    /// Context switches done on this CPU.
+    pub switches: AtomicU64,
+    /// MIDR_EL1 (CPU model), read on the CPU itself.
+    pub midr: AtomicU64,
+    /// Busy share of the last ~0.5 s, percent (the wm's menu-bar CPU meter reads this).
+    pub load_pct: AtomicU32,
+    /// busy / idle ns at the last load sample.
+    pub sample_busy: AtomicU64,
+    pub sample_idle: AtomicU64,
 }
 
 impl PerCpu {
@@ -37,6 +46,11 @@ impl PerCpu {
             busy_ns: AtomicU64::new(0),
             ticks: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
+            switches: AtomicU64::new(0),
+            midr: AtomicU64::new(0),
+            load_pct: AtomicU32::new(0),
+            sample_busy: AtomicU64::new(0),
+            sample_idle: AtomicU64::new(0),
         }
     }
 }
@@ -63,8 +77,22 @@ pub fn get(cpu: usize) -> &'static PerCpu {
     &CPUS[cpu]
 }
 
+/// Record this CPU's MIDR (call on the CPU itself).
+pub fn record_midr() {
+    let midr: u64;
+    // SAFETY: register read.
+    unsafe { core::arch::asm!("mrs {}, midr_el1", out(reg) midr, options(nomem, nostack)) };
+    this().midr.store(midr, Ordering::Relaxed);
+}
+
+/// Busy percentage of `cpu` over the last ~0.5 s (0..=100).
+pub fn load(cpu: usize) -> u32 {
+    CPUS[cpu].load_pct.load(Ordering::Relaxed)
+}
+
 /// Mark the boot CPU online. Call early (before secondaries).
 pub fn init_boot() {
+    record_midr();
     let mpidr: u64;
     // SAFETY: register read.
     unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack)) };

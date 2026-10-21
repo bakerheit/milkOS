@@ -187,6 +187,7 @@ pub fn init() -> usize {
 /// First Rust code on a secondary CPU (MMU and caches already on, stack set).
 extern "C" fn secondary_main(cpu: usize) -> ! {
     crate::exceptions::init();
+    percpu::record_midr();
     sched::enable_fp();
     gic::init_cpu();
     timer::init_cpu();

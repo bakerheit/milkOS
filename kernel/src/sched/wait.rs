@@ -1,10 +1,11 @@
 //! Blocking primitives on top of the scheduler: wait queues, a sleeping mutex, a counting
 //! semaphore.
 //!
-//! Lost wakeups can't happen because the condition check and the "go to sleep" step run
-//! with IRQs masked on our single core (a waker from IRQ context can't slip in between),
-//! and a thread-context waker can't run at all until we have switched away.
-//! TODO(smp): needs the scheduler lock held across check + enqueue + block.
+//! No lost wakeups, on any number of CPUs: a waiter first puts itself on the queue, then
+//! checks its condition, then blocks. A waker changes the condition, then pops a waiter
+//! and calls `sched::wake`. If that wake lands before the waiter has actually blocked, the
+//! scheduler records it (`wake_pending`) and the block returns at once. Wakeups can be
+//! spurious; `cond` decides.
 
 use alloc::collections::VecDeque;
 use core::cell::UnsafeCell;
@@ -39,12 +40,10 @@ impl WaitQueue {
                 sync::irq_disable();
                 continue;
             }
-            let me = super::current_tid();
-            {
-                let mut q = self.q.lock();
-                if !q.contains(&me) {
-                    q.push_back(me);
-                }
+            let me = self.enqueue();
+            if cond() {
+                self.remove(me);
+                break;
             }
             super::block_current();
         }
@@ -61,6 +60,9 @@ impl WaitQueue {
                 break true;
             }
             if crate::timer::now_ns() >= deadline {
+                if super::started() {
+                    self.remove(super::current_tid()); // no stale entry left behind
+                }
                 break false;
             }
             if !super::started() {
@@ -70,17 +72,29 @@ impl WaitQueue {
                 sync::irq_disable();
                 continue;
             }
-            let me = super::current_tid();
-            {
-                let mut q = self.q.lock();
-                if !q.contains(&me) {
-                    q.push_back(me);
-                }
+            let me = self.enqueue();
+            if cond() {
+                self.remove(me);
+                break true;
             }
             super::block_current_until(deadline);
         };
         sync::irq_restore(flags);
         ok
+    }
+
+    /// Put the calling thread on the queue (once).
+    fn enqueue(&self) -> super::Tid {
+        let me = super::current_tid();
+        let mut q = self.q.lock();
+        if !q.contains(&me) {
+            q.push_back(me);
+        }
+        me
+    }
+
+    fn remove(&self, tid: super::Tid) {
+        self.q.lock().retain(|&t| t != tid);
     }
 
     /// Wake the longest waiter. Returns false if nobody was waiting. IRQ-safe.

@@ -1,4 +1,4 @@
-//! Kernel threads and the scheduler (single core).
+//! Kernel threads and the scheduler (SMP).
 //!
 //! * Every thread has its own kernel stack ([`kstack::KStack`], guard page below) and a
 //!   saved [`Context`] (callee-saved registers, lr, sp). [`switch_context`] swaps them.
@@ -31,11 +31,12 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use crate::exceptions::{self, TrapFrame};
+use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{self, IrqGuard, SpinLock};
-use crate::{mmu, timer};
+use crate::{gic, mmu, timer};
 use kstack::KStack;
 
 pub type Tid = u32;
@@ -141,7 +142,7 @@ pub struct Thread {
     state: State,
     prio: Priority,
     ctx: Context,
-    /// `None` only for thread 0, which runs on the boot stack.
+    /// `None` only for thread 0 (boot stack); secondaries' idle threads own their boot stack.
     kstack: Option<KStack>,
     wake_at: u64,
     exit_code: i64,
@@ -150,60 +151,120 @@ pub struct Thread {
     /// CPU time used, in ns.
     cpu_ns: u64,
     switched_in_at: u64,
+    /// CPU it runs / last ran on.
+    cpu: usize,
+    /// Only ever runs on this CPU (idle threads; optional affinity).
+    pinned: Option<usize>,
+    /// A wake arrived while it was running (between "I'm on a wait queue" and "block"):
+    /// the next block returns at once instead of sleeping. This is what makes waits race
+    /// free across CPUs.
+    wake_pending: bool,
+    /// Set (under the lock) when its CPU decides to switch away from it, cleared once its
+    /// registers are saved. Another CPU must not load its context, and nobody may free it,
+    /// while this is set.
+    switching_out: AtomicBool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CpuSched {
+    current: Tid,
+    idle: Tid,
 }
 
 struct Sched {
     threads: BTreeMap<Tid, Box<Thread>>,
+    /// One global ready queue per priority (all CPUs pick from it).
     ready: [VecDeque<Tid>; NPRIO],
     sleeping: Vec<Tid>,
     /// Dead, detached threads waiting to have their stack freed.
     zombies: Vec<Tid>,
-    current: Tid,
-    idle: Tid,
+    cpus: [CpuSched; MAX_CPUS],
     next_tid: Tid,
 }
 
 impl Sched {
+    fn cur_tid(&self) -> Tid {
+        self.cpus[percpu::id()].current
+    }
+
     fn cur(&mut self) -> &mut Thread {
-        let c = self.current;
+        let c = self.cur_tid();
         self.threads.get_mut(&c).expect("current thread missing")
     }
 
-    fn pick(&mut self) -> Tid {
+    fn is_current_somewhere(&self, tid: Tid) -> bool {
+        percpu::online().any(|c| self.cpus[c].current == tid)
+    }
+
+    /// A dead thread whose stack nobody is using any more.
+    fn removable(&self, tid: Tid) -> bool {
+        self.threads.get(&tid).is_some_and(|t| {
+            t.state == State::Dead
+                && !t.switching_out.load(Ordering::Acquire)
+                && !self.is_current_somewhere(tid)
+        })
+    }
+
+    fn pick(&mut self, cpu: usize) -> Tid {
         for p in (1..NPRIO).rev() {
-            if let Some(t) = self.ready[p].pop_front() {
-                return t;
+            let q = &self.ready[p];
+            let pos = q.iter().position(|t| {
+                self.threads
+                    .get(t)
+                    .is_some_and(|t| t.pinned.is_none_or(|c| c == cpu))
+            });
+            if let Some(i) = pos {
+                return self.ready[p].remove(i).unwrap();
             }
         }
-        self.idle
+        self.cpus[cpu].idle
     }
 
-    fn highest_ready(&self) -> Option<Priority> {
-        (1..NPRIO)
-            .rev()
-            .find(|&p| !self.ready[p].is_empty())
-            .map(|p| match p {
-                1 => Priority::Low,
-                2 => Priority::Normal,
-                _ => Priority::High,
-            })
+    fn has_ready_for(&self, cpu: usize) -> Option<Priority> {
+        (1..NPRIO).rev().find_map(|p| {
+            self.ready[p]
+                .iter()
+                .any(|t| {
+                    self.threads
+                        .get(t)
+                        .is_some_and(|t| t.pinned.is_none_or(|c| c == cpu))
+                })
+                .then_some(match p {
+                    1 => Priority::Low,
+                    2 => Priority::Normal,
+                    _ => Priority::High,
+                })
+        })
     }
 
-    /// Make `tid` runnable. Never allocates (capacity is reserved in `add`), so it is fine
-    /// from IRQ context.
+    /// Make `tid` runnable and get a CPU to run it: an idle CPU if there is one, else one
+    /// running something less important. Never allocates (capacity is reserved in `add`),
+    /// so it is fine from IRQ context.
     fn make_ready(&mut self, tid: Tid) {
-        let idle = self.idle;
-        let cur_prio = self.cur().prio;
-        let cur_is_idle = self.current == idle;
         let Some(t) = self.threads.get_mut(&tid) else {
             return;
         };
         t.state = State::Ready;
         t.wake_at = 0;
-        let prio = t.prio;
+        let (prio, pinned) = (t.prio, t.pinned);
         self.ready[prio as usize].push_back(tid);
-        if cur_is_idle || prio > cur_prio {
-            NEED_RESCHED.store(true, Ordering::Relaxed);
+        let me = percpu::id();
+        let candidates = || percpu::online().filter(move |&c| pinned.is_none_or(|p| p == c));
+        // An idle CPU first (ourselves included).
+        let target = candidates()
+            .find(|&c| self.cpus[c].current == self.cpus[c].idle && c == me)
+            .or_else(|| candidates().find(|&c| self.cpus[c].current == self.cpus[c].idle))
+            .or_else(|| {
+                candidates()
+                    .filter(|&c| {
+                        self.threads
+                            .get(&self.cpus[c].current)
+                            .is_some_and(|r| r.prio < prio)
+                    })
+                    .min_by_key(|&c| self.threads.get(&self.cpus[c].current).map(|r| r.prio))
+            });
+        if let Some(c) = target {
+            kick(c);
         }
     }
 
@@ -260,13 +321,29 @@ impl Sched {
     }
 }
 
+/// Ask `cpu` to reschedule: locally just a flag, remotely the flag plus an SGI.
+fn kick(cpu: usize) {
+    percpu::get(cpu).need_resched.store(true, Ordering::Release);
+    if cpu != percpu::id() {
+        gic::send_sgi(IPI_RESCHED, 1 << cpu);
+    }
+}
+
+/// SGI used to make another CPU reschedule.
+pub const IPI_RESCHED: u32 = 0;
+
+fn on_ipi(_irq: u32, _frame: &mut TrapFrame) {
+    percpu::this().ipis.fetch_add(1, Ordering::Relaxed);
+    // The work happens in on_irq_exit (need_resched is set).
+}
+
 static SCHED: SpinLock<Option<Sched>> = SpinLock::new(None);
-static NEED_RESCHED: AtomicBool = AtomicBool::new(false);
 static STARTED: AtomicBool = AtomicBool::new(false);
-/// Mirror of `Sched::current`, readable without the lock (crash dumps, current_tid).
-static CURRENT: AtomicU32 = AtomicU32::new(0);
 /// Woken whenever any thread exits (joiners wait on it).
 static EXIT_WQ: WaitQueue = WaitQueue::new();
+/// Per CPU: the thread whose `switching_out` to clear once the switch has happened.
+static PREV: [AtomicPtr<Thread>; MAX_CPUS] =
+    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_CPUS];
 
 fn with<R>(f: impl FnOnce(&mut Sched) -> R) -> R {
     f(SCHED.lock().as_mut().expect("scheduler not initialised"))
@@ -288,49 +365,64 @@ unsafe extern "C" {
 
 // ---- setup ---------------------------------------------------------------------------
 
-/// Turn the running boot code into thread 0 ("kmain"), create the idle thread and start
-/// preemption. Call once, after `timer::init`, with IRQs enabled or not.
-pub fn init() {
-    enable_fp();
-
-    let main = Box::new(Thread {
-        tid: 0,
-        name: Comm::new("kmain"),
-        state: State::Running,
-        prio: Priority::Normal,
+fn thread_struct(tid: Tid, name: &str, prio: Priority, kstack: Option<KStack>) -> Box<Thread> {
+    Box::new(Thread {
+        tid,
+        name: Comm::new(name),
+        state: State::Ready,
+        prio,
         ctx: Context::default(),
-        kstack: None,
+        kstack,
         wake_at: 0,
         exit_code: 0,
-        detached: true,
+        detached: false,
         user: None,
         cpu_ns: 0,
-        switched_in_at: timer::now_ns(),
-    });
+        switched_in_at: 0,
+        cpu: 0,
+        pinned: None,
+        wake_pending: false,
+        switching_out: AtomicBool::new(false),
+    })
+}
+
+/// Turn the running boot code into thread 0 ("kmain"), create the boot CPU's idle thread
+/// and start preemption. Call once, after `timer::init`, before `smp::init`.
+pub fn init() {
+    enable_fp();
+    let mut main = thread_struct(0, "kmain", Priority::Normal, None);
+    main.state = State::Running;
+    main.detached = true;
+    main.switched_in_at = timer::now_ns();
     let mut s = Sched {
         threads: BTreeMap::new(),
         ready: [const { VecDeque::new() }; NPRIO],
         sleeping: Vec::new(),
         zombies: Vec::new(),
-        current: 0,
-        idle: 0,
+        cpus: [CpuSched::default(); MAX_CPUS],
         next_tid: 1,
     };
     s.add(main);
     *SCHED.lock() = Some(s);
 
-    let idle = new_kernel_thread("idle", Priority::Idle, idle_main, 0).expect("idle thread");
+    let mut idle = new_kernel_thread("idle", Priority::Idle, idle_main, 0).expect("idle thread");
+    idle.pinned = Some(0);
     with(|s| {
-        s.idle = idle.tid;
+        s.cpus[0].idle = idle.tid;
         s.add(idle);
     });
+    percpu::get(0)
+        .idle
+        .store(with(|s| s.cpus[0].idle), Ordering::Relaxed);
 
+    gic::register(IPI_RESCHED, on_ipi).expect("reschedule IPI");
+    gic::enable(IPI_RESCHED).ok();
     timer::set_tick_hook(on_tick);
     exceptions::set_irq_exit_hook(on_irq_exit);
     STARTED.store(true, Ordering::Release);
     crate::kprintln!(
         "[sched] up: kmain is tid 0, idle tid {}, {} KiB kernel stacks with guard, {} Hz preemption",
-        with(|s| s.idle),
+        with(|s| s.cpus[0].idle),
         kstack::KSTACK_SIZE >> 10,
         timer::TICK_HZ
     );
@@ -352,42 +444,55 @@ pub fn enable_fp() {
     };
 }
 
-/// A secondary CPU joins: for now it just takes interrupts (the scheduler doesn't use it
-/// yet).
-pub fn run_secondary(_cpu: usize, stack: KStack) -> ! {
-    core::mem::forget(stack);
-    loop {
-        // SAFETY: wait for an interrupt.
-        unsafe { asm!("wfi", options(nomem, nostack)) };
-    }
+/// A secondary CPU joins the scheduler: the code running now (on `stack`) becomes that
+/// CPU's idle thread. IRQs on.
+pub fn run_secondary(cpu: usize, stack: KStack) -> ! {
+    let idle = {
+        let _g = IrqGuard::new();
+        with(|s| {
+            let tid = s.alloc_tid();
+            let mut t = thread_struct(tid, "idle", Priority::Idle, Some(stack));
+            t.name = Comm::new(match cpu {
+                1 => "idle/1",
+                2 => "idle/2",
+                3 => "idle/3",
+                4 => "idle/4",
+                5 => "idle/5",
+                6 => "idle/6",
+                _ => "idle/7",
+            });
+            t.state = State::Running;
+            t.pinned = Some(cpu);
+            t.cpu = cpu;
+            t.switched_in_at = timer::now_ns();
+            s.add(t);
+            s.cpus[cpu] = CpuSched {
+                current: tid,
+                idle: tid,
+            };
+            tid
+        })
+    };
+    percpu::get(cpu).idle.store(idle, Ordering::Relaxed);
+    percpu::get(cpu).current.store(idle, Ordering::Relaxed);
+    idle_main(cpu);
+    unreachable!()
 }
 
 fn idle_main(_: usize) {
     loop {
         reap();
-        // SAFETY: wait for an interrupt; IRQs are unmasked in thread context.
+        let cpu = percpu::id();
+        if with(|s| s.has_ready_for(cpu).is_some()) {
+            yield_now();
+        }
+        // SAFETY: wait for an interrupt (a tick, a device, or a reschedule IPI); IRQs are
+        // unmasked in thread context, so a kick that races with this is taken first.
         unsafe { asm!("wfi", options(nomem, nostack)) };
     }
 }
 
 // ---- thread creation -------------------------------------------------------------------
-
-fn blank_thread(name: &str, prio: Priority, kstack: KStack) -> Box<Thread> {
-    Box::new(Thread {
-        tid: 0,
-        name: Comm::new(name),
-        state: State::Ready,
-        prio,
-        ctx: Context::default(),
-        kstack: Some(kstack),
-        wake_at: 0,
-        exit_code: 0,
-        detached: false,
-        user: None,
-        cpu_ns: 0,
-        switched_in_at: 0,
-    })
-}
 
 fn new_kernel_thread(
     name: &str,
@@ -397,12 +502,12 @@ fn new_kernel_thread(
 ) -> Option<Box<Thread>> {
     let kstack = KStack::new()?;
     let top = kstack.top() as u64;
-    let mut t = blank_thread(name, prio, kstack);
+    let tid = with(|s| s.alloc_tid());
+    let mut t = thread_struct(tid, name, prio, Some(kstack));
     t.ctx.regs[0] = entry as *const () as u64; // x19
     t.ctx.regs[1] = arg as u64; // x20
     t.ctx.regs[11] = thread_trampoline as *const () as u64; // lr
     t.ctx.sp = top;
-    t.tid = with(|s| s.alloc_tid());
     Some(t)
 }
 
@@ -415,8 +520,11 @@ extern "C" fn thread_start(entry: usize, arg: usize) -> ! {
     exit(0)
 }
 
-/// Runs first thing in every new thread, IRQs still masked.
-extern "C" fn first_run() {}
+/// Runs first thing in every new thread (IRQs still masked): finish the switch that got us
+/// here, as `schedule` does after `switch_context` returns.
+extern "C" fn first_run() {
+    after_switch();
+}
 
 /// Handle to a spawned thread. Dropping it detaches the thread.
 pub struct JoinHandle {
@@ -439,13 +547,16 @@ impl JoinHandle {
 impl Drop for JoinHandle {
     fn drop(&mut self) {
         let t = with(|s| {
-            let t = s.threads.get_mut(&self.tid)?;
-            if t.state == State::Dead {
-                s.threads.remove(&self.tid)
-            } else {
-                t.detached = true;
-                None
+            let state = s.threads.get(&self.tid)?.state;
+            if state == State::Dead {
+                if s.removable(self.tid) {
+                    return s.threads.remove(&self.tid);
+                }
+                s.zombies.push(self.tid); // still switching out: reap() frees it
+                return None;
             }
+            s.threads.get_mut(&self.tid)?.detached = true;
+            None
         });
         drop(t);
     }
@@ -453,8 +564,19 @@ impl Drop for JoinHandle {
 
 fn join_tid(tid: Tid) -> i64 {
     EXIT_WQ.wait_until(|| with(|s| s.threads.get(&tid).is_none_or(|t| t.state == State::Dead)));
-    let t = with(|s| s.threads.remove(&tid));
-    t.map_or(-1, |t| t.exit_code)
+    // It is dead, but its CPU may still be switching away from it: wait for that.
+    loop {
+        let r = with(|s| {
+            if !s.threads.contains_key(&tid) {
+                return Some(None);
+            }
+            s.removable(tid).then(|| s.threads.remove(&tid))
+        });
+        match r {
+            Some(t) => return t.map_or(-1, |t| t.exit_code),
+            None => core::hint::spin_loop(),
+        }
+    }
 }
 
 fn closure_entry<F: FnOnce() + Send + 'static>(arg: usize) {
@@ -470,9 +592,21 @@ pub fn spawn<F: FnOnce() + Send + 'static>(name: &str, f: F) -> JoinHandle {
 
 /// Start a kernel thread. Panics if out of memory for its stack.
 pub fn spawn_prio<F: FnOnce() + Send + 'static>(name: &str, prio: Priority, f: F) -> JoinHandle {
+    spawn_on(name, prio, None, f)
+}
+
+/// Start a kernel thread that only ever runs on `cpu` (None: any CPU).
+pub fn spawn_on<F: FnOnce() + Send + 'static>(
+    name: &str,
+    prio: Priority,
+    cpu: Option<usize>,
+    f: F,
+) -> JoinHandle {
     reap();
     let arg = Box::into_raw(Box::new(f)) as usize;
-    let t = new_kernel_thread(name, prio, closure_entry::<F>, arg).expect("spawn: out of memory");
+    let mut t =
+        new_kernel_thread(name, prio, closure_entry::<F>, arg).expect("spawn: out of memory");
+    t.pinned = cpu;
     let _g = IrqGuard::new();
     let tid = with(|s| {
         let tid = s.add(t);
@@ -492,7 +626,7 @@ pub fn spawn_user(name: &str, frame: &TrapFrame, user: UserState) -> Option<Tid>
     let frame_at = kstack.top() - fsz;
     // SAFETY: the top `fsz` bytes of a fresh stack we own; 16-byte aligned (fsz is).
     unsafe { (frame_at as *mut TrapFrame).write(*frame) };
-    let mut t = blank_thread(name, Priority::Normal, kstack);
+    let mut t = thread_struct(0, name, Priority::Normal, Some(kstack));
     t.ctx.regs[11] = user_trampoline as *const () as u64;
     t.ctx.sp = frame_at as u64;
     t.user = Some(user);
@@ -506,64 +640,170 @@ pub fn spawn_user(name: &str, frame: &TrapFrame, user: UserState) -> Option<Tid>
     }))
 }
 
-/// Free the stacks of dead, detached threads.
+/// Free the stacks of dead, detached threads (those no CPU is still leaving).
 pub fn reap() {
     let dead: Vec<Box<Thread>> = with(|s| {
-        let cur = s.current;
         let mut out = Vec::new();
-        s.zombies.retain(|&tid| {
-            if tid == cur {
-                return true;
+        let zombies = core::mem::take(&mut s.zombies);
+        for tid in zombies {
+            if s.removable(tid) {
+                if let Some(t) = s.threads.remove(&tid) {
+                    out.push(t);
+                }
+            } else if s.threads.contains_key(&tid) {
+                s.zombies.push(tid);
             }
-            if let Some(t) = s.threads.remove(&tid) {
-                out.push(t);
-            }
-            false
-        });
+        }
         out
     });
     drop(dead); // outside the lock: frees stacks (kernel page tables, pmm)
 }
 
+/// `reap`, and keep at it (up to 200 ms) until no thread of the given processes is left
+/// and no dead thread is waiting for its CPU to finish leaving it. For tests that count
+/// frames (a process can be a zombie while its thread is still on its way out).
+pub fn reap_all_of(pids: &[u32]) {
+    let t0 = timer::now_ns();
+    loop {
+        reap();
+        let done = with(|s| {
+            s.zombies.is_empty()
+                && !s
+                    .threads
+                    .values()
+                    .any(|t| t.user.as_ref().is_some_and(|u| pids.contains(&u.pid)))
+        });
+        if done || timer::now_ns() - t0 > 200_000_000 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+pub fn reap_all() {
+    reap_all_of(&[]);
+}
+
 // ---- switching -----------------------------------------------------------------------
 
-/// Switch to the best ready thread (possibly the current one again). IRQs must be masked.
-/// Returns when the calling thread is scheduled again.
-fn schedule() {
+/// What the current thread does as it calls into the scheduler.
+#[derive(Clone, Copy)]
+enum Leave {
+    /// Stays runnable (yield, preemption).
+    Yield,
+    /// Waits for `wake` (unless one is already pending); optional timeout (now_ns time).
+    Block(Option<u64>),
+    /// Sleeps until the given now_ns time.
+    Sleep(u64),
+    Exit(i64),
+}
+
+/// Leave the CPU as `how` says and run the best ready thread (possibly the current one
+/// again). IRQs must be masked. Returns when the calling thread runs again.
+fn schedule(how: Leave) {
     debug_assert!(!sync::irqs_enabled());
-    NEED_RESCHED.store(false, Ordering::Relaxed);
+    let cpu = percpu::id();
+    percpu::get(cpu)
+        .need_resched
+        .store(false, Ordering::Relaxed);
     let sw = with(|s| {
         let now = timer::now_ns();
-        let cur = s.current;
-        let idle = s.idle;
+        let cur = s.cpus[cpu].current;
+        let idle = s.cpus[cpu].idle;
+        let mut arm = false;
         {
-            let t = s.cur();
-            t.cpu_ns += now.saturating_sub(t.switched_in_at);
-            if t.state == State::Running {
-                t.state = State::Ready;
-                let prio = t.prio as usize;
-                if cur != idle {
-                    s.ready[prio].push_back(cur);
+            let t = s.threads.get_mut(&cur).expect("current thread missing");
+            let ran = now.saturating_sub(t.switched_in_at);
+            t.cpu_ns += ran;
+            t.switched_in_at = now;
+            let pc = percpu::get(cpu);
+            if cur == idle {
+                pc.idle_ns.fetch_add(ran, Ordering::Relaxed);
+            } else {
+                pc.busy_ns.fetch_add(ran, Ordering::Relaxed);
+            }
+            match how {
+                Leave::Yield => {
+                    if t.state == State::Running {
+                        t.state = State::Ready;
+                    }
+                }
+                Leave::Block(deadline) => {
+                    if t.wake_pending {
+                        t.wake_pending = false; // the wakeup already came: don't sleep
+                        return None;
+                    }
+                    t.state = State::Blocked;
+                    if let Some(d) = deadline {
+                        t.wake_at = d.max(1);
+                        arm = true;
+                    }
+                }
+                Leave::Sleep(d) => {
+                    t.state = State::Sleeping;
+                    t.wake_at = d;
+                    arm = true;
+                }
+                Leave::Exit(code) => {
+                    t.state = State::Dead;
+                    t.exit_code = code;
+                    if t.detached && t.kstack.is_some() {
+                        s.zombies.push(cur);
+                    }
                 }
             }
         }
-        let next = s.pick();
+        if arm {
+            if !s.sleeping.contains(&cur) {
+                s.sleeping.push(cur);
+            }
+            arm_deadline(s);
+        }
+        let runnable_again = s.threads[&cur].state == State::Ready;
+        if runnable_again && cur != idle {
+            let prio = s.threads[&cur].prio as usize;
+            s.ready[prio].push_back(cur);
+        }
+        let next = s.pick(cpu);
+        if next == cur {
+            s.threads.get_mut(&cur).unwrap().state = State::Running;
+            return None;
+        }
         let nt = s.threads.get_mut(&next).expect("picked a missing thread");
         nt.state = State::Running;
         nt.switched_in_at = now;
+        nt.cpu = cpu;
         let next_ptr: *mut Thread = &mut **nt;
-        if next == cur {
-            return None;
-        }
-        s.current = next;
-        CURRENT.store(next, Ordering::Relaxed);
-        let prev_ptr: *mut Thread = &mut **s.threads.get_mut(&cur).unwrap();
+        s.cpus[cpu].current = next;
+        percpu::get(cpu).current.store(next, Ordering::Relaxed);
+        percpu::get(cpu).switches.fetch_add(1, Ordering::Relaxed);
+        let pt = s.threads.get_mut(&cur).unwrap();
+        pt.switching_out.store(true, Ordering::Relaxed);
+        let prev_ptr: *mut Thread = &mut **pt;
         Some((prev_ptr, next_ptr))
     });
     if let Some((prev, next)) = sw {
-        // SAFETY: both threads stay allocated: prev is not reaped while it is current or
-        // until it is switched out (zombies skip the current thread), next is current now.
-        unsafe { switch(prev, next) };
+        // SAFETY: `next` is current on this CPU now, so nobody frees it; `prev` has
+        // switching_out set, so nobody frees or runs it until after_switch clears it.
+        unsafe {
+            // It may still be leaving another CPU: wait until its registers are saved.
+            while (*next).switching_out.load(Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            PREV[cpu].store(prev, Ordering::Relaxed);
+            switch(prev, next);
+        }
+        after_switch();
+    }
+}
+
+/// On the CPU that just switched: the previous thread's registers are saved, so it may
+/// now be run elsewhere or freed.
+fn after_switch() {
+    let p = PREV[percpu::id()].swap(core::ptr::null_mut(), Ordering::Relaxed);
+    if !p.is_null() {
+        // SAFETY: switching_out kept it alive until this store.
+        unsafe { (*p).switching_out.store(false, Ordering::Release) };
     }
 }
 
@@ -606,52 +846,48 @@ pub fn yield_now() {
         return;
     }
     let _g = IrqGuard::new();
-    schedule();
+    schedule(Leave::Yield);
 }
 
 /// Switch now if a wakeup asked for it and IRQs are on (i.e. we are allowed to block).
 pub fn preempt_point() {
-    if NEED_RESCHED.load(Ordering::Relaxed) && sync::irqs_enabled() {
+    if need_resched() && sync::irqs_enabled() {
         yield_now();
     }
 }
 
-/// True if something more deserving than the current thread is waiting.
+/// True if something more deserving than the current thread is waiting (on this CPU).
 pub fn need_resched() -> bool {
-    NEED_RESCHED.load(Ordering::Relaxed)
+    percpu::this().need_resched.load(Ordering::Relaxed)
 }
 
-/// Block the current thread until someone calls [`wake`] on it. IRQs must be masked and the
-/// caller must already have recorded the thread somewhere a waker will find it.
+/// Block the current thread until someone calls [`wake`] on it (returns at once if a wake
+/// already came since it last blocked). IRQs must be masked and the caller must already
+/// have recorded the thread somewhere a waker will find it.
 pub(crate) fn block_current() {
     debug_assert!(!sync::irqs_enabled());
-    with(|s| s.cur().state = State::Blocked);
-    schedule();
+    schedule(Leave::Block(None));
 }
 
 /// Like [`block_current`], but also wake up at `deadline_ns` (now_ns time) if nobody
 /// calls [`wake`] first. The caller re-checks its condition either way.
 pub(crate) fn block_current_until(deadline_ns: u64) {
     debug_assert!(!sync::irqs_enabled());
-    with(|s| {
-        let me = s.current;
-        let t = s.cur();
-        t.state = State::Blocked;
-        t.wake_at = deadline_ns.max(1);
-        if !s.sleeping.contains(&me) {
-            s.sleeping.push(me);
-        }
-        arm_deadline(s);
-    });
-    schedule();
+    schedule(Leave::Block(Some(deadline_ns)));
 }
 
-/// Make a blocked thread ready. Returns false if it was not blocked. IRQ-safe.
+/// Wake `tid`: a blocked thread becomes ready; one that is still running (about to block)
+/// gets a pending wake so its block returns at once. Returns false if it is neither
+/// (sleeping in sleep_until, dead, gone). IRQ-safe.
 pub fn wake(tid: Tid) -> bool {
     let _g = IrqGuard::new();
-    with(|s| match s.threads.get(&tid) {
+    with(|s| match s.threads.get_mut(&tid) {
         Some(t) if t.state == State::Blocked => {
             s.make_ready(tid);
+            true
+        }
+        Some(t) if t.state == State::Running || t.state == State::Ready => {
+            t.wake_pending = true;
             true
         }
         _ => false,
@@ -672,17 +908,7 @@ pub fn sleep_until(deadline_ns: u64) {
     if timer::now_ns() >= deadline_ns {
         return;
     }
-    with(|s| {
-        let me = s.current;
-        let t = s.cur();
-        t.wake_at = deadline_ns;
-        t.state = State::Sleeping;
-        if !s.sleeping.contains(&me) {
-            s.sleeping.push(me);
-        }
-        arm_deadline(s);
-    });
-    schedule();
+    schedule(Leave::Sleep(deadline_ns));
 }
 
 pub fn sleep_ns(ns: u64) {
@@ -693,6 +919,8 @@ pub fn sleep_ms(ms: u64) {
     sleep_ns(ms.saturating_mul(1_000_000));
 }
 
+/// Program this CPU's one-shot timer for the earliest sleeper. Any CPU can wake sleepers
+/// (they are on one global list); the tick re-checks as a fallback.
 fn arm_deadline(s: &Sched) {
     if let Some(at) = s.earliest_wake() {
         timer::set_deadline(at, on_deadline);
@@ -700,9 +928,6 @@ fn arm_deadline(s: &Sched) {
 }
 
 fn on_deadline(_frame: &mut TrapFrame) {
-    if crate::percpu::id() != 0 {
-        return;
-    }
     with(|s| {
         s.wake_expired(timer::now_ns());
         arm_deadline(s);
@@ -710,27 +935,33 @@ fn on_deadline(_frame: &mut TrapFrame) {
 }
 
 fn on_tick(_frame: &mut TrapFrame) {
-    if crate::percpu::id() != 0 {
-        return; // secondaries don't schedule yet
+    let cpu = percpu::id();
+    // Every 50 ticks (0.5 s): this CPU's busy percentage, for the menu bar / /proc/cpuload.
+    let pc = percpu::get(cpu);
+    if pc.ticks.load(Ordering::Relaxed).is_multiple_of(50) {
+        let (busy, idle) = cpu_times(cpu);
+        let db = busy.saturating_sub(pc.sample_busy.swap(busy, Ordering::Relaxed));
+        let di = idle.saturating_sub(pc.sample_idle.swap(idle, Ordering::Relaxed));
+        if let Some(pct) = (db * 100).checked_div(db + di) {
+            pc.load_pct.store(pct as u32, Ordering::Relaxed);
+        }
     }
     with(|s| {
         s.wake_expired(timer::now_ns());
-        let cur_prio = s.cur().prio;
-        let is_idle = s.current == s.idle;
-        if let Some(p) = s.highest_ready()
+        let cur = s.cpus[cpu].current;
+        let is_idle = cur == s.cpus[cpu].idle;
+        let cur_prio = s.threads.get(&cur).map_or(Priority::Idle, |t| t.prio);
+        if let Some(p) = s.has_ready_for(cpu)
             && (is_idle || p >= cur_prio)
         {
-            NEED_RESCHED.store(true, Ordering::Relaxed);
+            percpu::get(cpu).need_resched.store(true, Ordering::Relaxed);
         }
     });
 }
 
 fn on_irq_exit(_frame: &mut TrapFrame) {
-    if crate::percpu::id() != 0 {
-        return;
-    }
-    if NEED_RESCHED.load(Ordering::Relaxed) && STARTED.load(Ordering::Relaxed) {
-        schedule();
+    if need_resched() && STARTED.load(Ordering::Relaxed) {
+        schedule(Leave::Yield);
     }
 }
 
@@ -739,24 +970,17 @@ fn on_irq_exit(_frame: &mut TrapFrame) {
 /// End the current thread with `code`.
 pub fn exit(code: i64) -> ! {
     sync::irq_disable();
-    with(|s| {
-        let me = s.current;
-        let t = s.cur();
-        t.state = State::Dead;
-        t.exit_code = code;
-        if t.detached && t.kstack.is_some() {
-            s.zombies.push(me);
-        }
-    });
+    // Dead first (joiners check for it), then tell them, then leave for good.
+    with(|s| s.cur().state = State::Dead);
     EXIT_WQ.wake_all();
-    schedule();
+    schedule(Leave::Exit(code));
     unreachable!("dead thread rescheduled");
 }
 
 // ---- queries -------------------------------------------------------------------------
 
 pub fn current_tid() -> Tid {
-    CURRENT.load(Ordering::Relaxed)
+    percpu::this().current.load(Ordering::Relaxed)
 }
 
 /// Pid of the process the current thread belongs to (0 for kernel threads).
@@ -812,7 +1036,7 @@ pub fn current_tpidr_el0() -> u64 {
 
 /// For the stack-overflow report: no locking, no allocation.
 pub fn current_for_crash() -> (Tid, Comm) {
-    let tid = CURRENT.load(Ordering::Relaxed);
+    let tid = current_tid();
     let name = SCHED
         .try_lock()
         .and_then(|g| g.as_ref().and_then(|s| s.threads.get(&tid).map(|t| t.name)))
@@ -829,9 +1053,12 @@ pub struct ThreadInfo {
     pub state: State,
     pub prio: Priority,
     pub cpu_ns: u64,
+    /// CPU it runs on (Running) or last ran on.
+    pub cpu: usize,
 }
 
 pub fn threads() -> Vec<ThreadInfo> {
+    let now = timer::now_ns();
     with(|s| {
         s.threads
             .values()
@@ -841,7 +1068,13 @@ pub fn threads() -> Vec<ThreadInfo> {
                 name: t.name,
                 state: t.state,
                 prio: t.prio,
-                cpu_ns: t.cpu_ns,
+                cpu_ns: t.cpu_ns
+                    + if t.state == State::Running {
+                        now.saturating_sub(t.switched_in_at)
+                    } else {
+                        0
+                    },
+                cpu: t.cpu,
             })
             .collect()
     })
@@ -849,4 +1082,26 @@ pub fn threads() -> Vec<ThreadInfo> {
 
 pub fn started() -> bool {
     STARTED.load(Ordering::Acquire)
+}
+
+/// (busy ns, idle ns) of `cpu`, including the slice it is in right now.
+pub fn cpu_times(cpu: usize) -> (u64, u64) {
+    let pc = percpu::get(cpu);
+    let (mut busy, mut idle) = (
+        pc.busy_ns.load(Ordering::Relaxed),
+        pc.idle_ns.load(Ordering::Relaxed),
+    );
+    let now = timer::now_ns();
+    if let Some(g) = SCHED.try_lock()
+        && let Some(s) = g.as_ref()
+        && let Some(t) = s.threads.get(&s.cpus[cpu].current)
+    {
+        let running = now.saturating_sub(t.switched_in_at);
+        if s.cpus[cpu].current == s.cpus[cpu].idle {
+            idle += running;
+        } else {
+            busy += running;
+        }
+    }
+    (busy, idle)
 }

@@ -1,7 +1,7 @@
 //! fetch: HTTP/1.0 GET over the kernel's TCP stack.
-//!   fetch [-i] [http://]IP[:PORT][/PATH]     (-i: print the response headers too)
+//!   fetch [-i] [http://]HOST[:PORT][/PATH]     (-i: print the response headers too)
 //! The body goes to stdout; a summary line ("fetch: 200 OK, 1234 bytes in 5 ms") follows.
-//! Addresses only (or "localhost"): there is no resolver for user programs yet.
+//! Hosts: addresses, `localhost`, or `NAME.local` (mDNS on eth1, `rt::net::lookup`).
 
 #![no_std]
 #![no_main]
@@ -9,7 +9,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use rt::net::{self, SockAddr};
+use rt::net;
 use rt::sys;
 use rt::{eprintln, println};
 
@@ -25,7 +25,7 @@ fn main(args: &rt::Args) -> i32 {
         }
     }
     let Some(url) = url else {
-        eprintln!("usage: fetch [-i] [http://]IP[:PORT][/PATH]");
+        eprintln!("usage: fetch [-i] [http://]HOST[:PORT][/PATH]");
         return 2;
     };
     let rest = url.strip_prefix("http://").unwrap_or(url);
@@ -33,9 +33,12 @@ fn main(args: &rt::Args) -> i32 {
         Some(k) => (&rest[..k], &rest[k..]),
         None => (rest, "/"),
     };
-    let Some(addr) = SockAddr::parse(hostport, 80) else {
-        eprintln!("fetch: bad address '{hostport}' (want IP[:PORT])");
-        return 2;
+    let addr = match net::lookup(hostport, 80) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("fetch: {e}");
+            return 2;
+        }
     };
     let t0 = sys::clock_ns(1);
     let fd = match net::socket(net::SOCK_STREAM) {

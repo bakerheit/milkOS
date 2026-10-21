@@ -7,7 +7,7 @@
 //!   drop name NEW              change the name peers see
 //!   drop daemon [-q]           announce + answer queries (init starts it when eth1 exists)
 //!   drop list [-w MS]          peers on the link (MILK_TABLE=1: a table)
-//!   drop send PEER FILE        PEER: a name, a fingerprint prefix or an IPv4 address
+//!   drop send PEER FILE        PEER: a name, NAME.local, a fingerprint prefix or an IPv4 address
 //!   drop recv [-y] [-k]        accept one transfer into ~/Downloads (-y: no prompt,
 //!                              -k: keep receiving until Ctrl-C)
 //!   drop peers                 peers trusted on first use
@@ -29,17 +29,16 @@
 
 extern crate alloc;
 
-mod ident;
-mod proto;
+use milkdrop::session::{self, DROP};
+use milkdrop::{audit, ident, ip_str, proto};
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use ident::{Identity, Trust, fingerprint, hex};
-use proto::{Conn, MAGIC, Peer, XFER_PORT, XMAGIC, field};
-use rt::crypto::x25519;
+use proto::{Conn, MAGIC, Peer, XFER_PORT, field};
 use rt::net::{self, SockAddr};
 use rt::sha256::Sha256;
-use rt::{ed25519, eprintln, print, println, sys};
+use rt::{ed25519, eprintln, mdns, print, println, sys};
 
 rt::main!(main);
 
@@ -50,13 +49,6 @@ const RECEIVING: &str = "/tmp/drop/receiving";
 /// Sender side: largest file (it is read into memory).
 const MAX_SEND: u64 = 64 << 20;
 const CHUNK: usize = 16 * 1024;
-
-fn audit(event: &str, detail: &str) {
-    if let Ok(fd) = sys::open("/dev/audit", sys::O_WRONLY | sys::O_CLOEXEC) {
-        let _ = sys::write_all(fd, alloc::format!("{event} {detail}\n").as_bytes());
-        let _ = sys::close(fd);
-    }
-}
 
 fn text(p: &str) -> Option<String> {
     sys::read_file(p)
@@ -70,10 +62,6 @@ fn eth1_addr() -> Option<[u8; 4]> {
     let l = t.lines().find(|l| l.starts_with("eth1 "))?;
     let a = l.split(' ').find_map(|w| w.strip_prefix("inet="))?;
     SockAddr::parse(a, 0).map(|s| s.ip)
-}
-
-fn ip_str(ip: [u8; 4]) -> String {
-    alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
 }
 
 fn hostname() -> String {
@@ -199,7 +187,10 @@ fn cmd_rotate() -> Res<()> {
 /// `drop selftest`: the shared crypto crate's test vectors, run in userland.
 fn cmd_selftest() -> Res<()> {
     let mut all = true;
-    for (name, p, t) in rt::crypto::selftest() {
+    let mut v = rt::crypto::selftest();
+    let (p, t) = mdns::selftest();
+    v.push(("mdns", p, t));
+    for (name, p, t) in v {
         println!("drop: {name:<17} {p}/{t} vectors");
         all &= p == t;
     }
@@ -263,14 +254,25 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         },
     )
     .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
+    // The mDNS responder for `<name>.local` (rt::mdns), on the same link.
+    let mfd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
+    net::bind(
+        mfd,
+        &SockAddr {
+            ip: addr,
+            port: mdns::PORT,
+        },
+    )
+    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
     let _ = sys::mkdir("/tmp/drop", 0o755);
     if !quiet {
         println!(
-            "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}",
+            "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}, answering mDNS for {}.local",
             id.name,
             fingerprint(&id.public),
             ip_str(addr),
-            proto::DISC_PORT
+            proto::DISC_PORT,
+            id.name
         );
     }
     let host = hostname();
@@ -286,15 +288,44 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         }
         proto::announce(me, &host, sys::stat_path(RECEIVING, false).is_ok())
     };
-    let _ = net::set_recv_timeout(fd, 1000);
+    // Both sockets are only read once poll says so; the short timeout is a backstop.
+    let _ = net::set_recv_timeout(fd, 5);
+    let _ = net::set_recv_timeout(mfd, 5);
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
         if now >= next {
             let _ = net::sendto(fd, current(&mut me).as_bytes(), &proto::group());
             next = now + 10_000_000_000;
         }
+        let mut p = [
+            net::PollFd {
+                fd,
+                events: net::POLLIN,
+                revents: 0,
+            },
+            net::PollFd {
+                fd: mfd,
+                events: net::POLLIN,
+                revents: 0,
+            },
+        ];
+        if net::poll(&mut p, Some(1000)).is_err() {
+            sys::sleep_ms(100);
+            continue;
+        }
+        if p[1].revents & net::POLLIN != 0
+            && let Ok((n, from)) = net::recvfrom(mfd, &mut buf)
+        {
+            if let Some(now) = ident::load() {
+                me = now;
+            }
+            answer_mdns(mfd, &buf[..n], from, &me.name, addr);
+        }
+        if p[0].revents & net::POLLIN == 0 {
+            continue;
+        }
         let Ok((n, from)) = net::recvfrom(fd, &mut buf) else {
-            continue; // the 1 s timeout (or an error): go round
+            continue;
         };
         let line = String::from_utf8_lossy(&buf[..n]);
         let line = line.trim_end();
@@ -317,6 +348,25 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
                 ));
             }
             let _ = ident::write_atomic(PEERS_CACHE, s.as_bytes(), 0o644);
+        }
+    }
+}
+
+/// Answer an mDNS query if it asks for `<name>.local` (A or ANY): straight back to the
+/// asker for a legacy unicast query (source port not 5353, as rt::mdns::resolve sends),
+/// else to the group.
+fn answer_mdns(fd: i32, pkt: &[u8], from: SockAddr, name: &str, addr: [u8; 4]) {
+    let Some((id, qs)) = mdns::parse_query(pkt) else {
+        return;
+    };
+    let mine = alloc::format!("{name}.local");
+    for (q, ty) in qs {
+        if (ty == mdns::TYPE_A || ty == mdns::TYPE_ANY) && q.eq_ignore_ascii_case(&mine) {
+            let legacy = from.port != mdns::PORT;
+            let reply = mdns::answer_packet(if legacy { id } else { 0 }, &mine, addr, 10, legacy);
+            let to = if legacy { from } else { mdns::group() };
+            let _ = net::sendto(fd, &reply, &to);
+            return;
         }
     }
 }
@@ -387,30 +437,19 @@ fn cmd_forget(name: &str) -> Res<()> {
     }
 }
 
-/// Refuse a changed key, loudly.
-fn key_changed(role: &str, name: &str, old: &[u8; 32], new: &[u8; 32], addr: [u8; 4]) -> String {
-    eprintln!("drop: ************************************************************");
-    eprintln!("drop: WARNING: {name}'s KEY HAS CHANGED. Refusing to talk to it.");
-    eprintln!("drop:   trusted fingerprint: {}", fingerprint(old));
-    eprintln!("drop:   offered fingerprint: {}", fingerprint(new));
-    eprintln!("drop: Someone may be pretending to be {name}, or it was reinstalled.");
-    eprintln!("drop: If you know it was reinstalled: drop forget {name}");
-    eprintln!("drop: ************************************************************");
-    audit(
-        "drop.key_changed",
-        &alloc::format!(
-            "role={role} name={name} addr={} trusted_fp={} offered_fp={} action=refused",
-            ip_str(addr),
-            ident::fp_compact(old),
-            ident::fp_compact(new)
-        ),
-    );
-    alloc::format!("{name}'s key changed; refused")
-}
-
 fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
     if let Some(a) = SockAddr::parse(spec, XFER_PORT) {
         return Ok((a, None));
+    }
+    if mdns::is_local(spec) {
+        let ip = mdns::resolve(spec, 1500)?;
+        return Ok((
+            SockAddr {
+                ip,
+                port: XFER_PORT,
+            },
+            None,
+        ));
     }
     let peers = proto::query(1500)?;
     let flat = spec.replace(' ', "").to_ascii_lowercase();
@@ -442,66 +481,6 @@ fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
     }
 }
 
-/// Our side of the key agreement: an ephemeral X25519 key pair (fresh per connection).
-struct Ephemeral {
-    secret: [u8; 32],
-    public: [u8; 32],
-}
-
-impl Ephemeral {
-    fn new() -> Ephemeral {
-        let secret = ident::random::<32>();
-        Ephemeral {
-            public: x25519::public_key(&secret),
-            secret,
-        }
-    }
-    fn shared(mut self, peer: &[u8; 32]) -> Res<[u8; 32]> {
-        let s = x25519::shared(&self.secret, peer).ok_or("bad X25519 key from the peer");
-        rt::crypto::wipe(&mut self.secret);
-        Ok(s?)
-    }
-}
-
-/// ` rot=<old key>:<signature>` if our key replaced an older one.
-fn rot_field(id: &Identity) -> String {
-    ident::rotation(&id.public)
-        .map(|r| alloc::format!(" rot={}:{}", hex(&r.old), hex(&r.sig)))
-        .unwrap_or_default()
-}
-
-fn parse_rot(line: &str) -> Option<ident::Rotation> {
-    let (o, s) = field(line, "rot")?.split_once(':')?;
-    Some(ident::Rotation {
-        old: ed25519::unhex::<32>(o)?,
-        sig: ed25519::unhex::<64>(s)?,
-    })
-}
-
-/// Say what we decided about a peer's key and record it. Err for a refused change.
-fn settle_trust(role: &str, name: &str, key: &[u8; 32], t: &Trust, addr: [u8; 4]) -> Res<()> {
-    match t {
-        Trust::Changed { old } => Err(key_changed(role, name, old, key, addr)),
-        Trust::Rotated { old } => {
-            println!(
-                "drop: {name} rotated its key (signed by its old key {}): now {}",
-                fingerprint(old),
-                fingerprint(key)
-            );
-            audit(
-                "drop.key_rotated",
-                &alloc::format!(
-                    "role={role} name={name} old_fp={} new_fp={} action=accepted",
-                    ident::fp_compact(old),
-                    ident::fp_compact(key)
-                ),
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
 fn cmd_send(spec: &str, path: &str) -> Res<()> {
     let id = identity()?;
     let data = sys::read_file(path).map_err(|e| alloc::format!("{path}: {e}"))?;
@@ -521,87 +500,17 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
         });
     }
     let mut c = Conn::new(fd, 10_000);
-    // 1. The receiver's hello: identity key, nonce, ephemeral X25519 key.
-    let h = c.line()?;
-    let mut w = h.split(' ');
-    if w.next() != Some(XMAGIC) || w.next() != Some("HELLO") || w.next() != Some("recv") {
-        return Err(alloc::format!(
-            "{addr} doesn't speak Milk Drop 2 (encrypted); is it an older milkOS?"
-        ));
-    }
-    let rname = field(&h, "name")
-        .filter(|n| ident::name_ok(n))
-        .ok_or("bad hello")?;
-    let rkey = field(&h, "key")
-        .and_then(ed25519::unhex::<32>)
-        .ok_or("bad hello key")?;
-    let nonce_r = field(&h, "nonce")
-        .filter(|n| n.len() == 32)
-        .ok_or("bad hello nonce")?;
-    let rdh = field(&h, "dh")
-        .and_then(ed25519::unhex::<32>)
-        .ok_or("bad hello dh")?;
-    if let Some(p) = &announced
-        && p.key != rkey
-    {
-        audit(
-            "drop.send",
-            &alloc::format!(
-                "peer={rname} addr={} result=refused reason=key_not_announced",
-                ip_str(addr.ip)
-            ),
-        );
-        return Err(alloc::format!(
-            "{addr} answered with a key that {} did not announce; refused",
-            p.name
-        ));
-    }
-    let rrot = parse_rot(&h);
-    let trust = ident::trust_rotated(rname, &rkey, rrot.as_ref());
-    if let Trust::Changed { old } = &trust {
-        return Err(key_changed("send", rname, old, &rkey, addr.ip));
-    }
-    // 2. Our hello, signed over the transcript (which covers both X25519 keys).
-    let nonce_s = hex(&ident::random::<16>());
-    let eph = Ephemeral::new();
-    let sdh = eph.public;
-    let sig = ed25519::sign(
-        &id.seed,
-        proto::transcript("send", nonce_r, &nonce_s, &rkey, &id.public, &rdh, &sdh).as_bytes(),
-    );
-    c.send_line(&alloc::format!(
-        "{XMAGIC} HELLO send name={} key={} nonce={nonce_s} dh={} sig={}{}",
-        id.name,
-        hex(&id.public),
-        hex(&sdh),
-        hex(&sig),
-        rot_field(&id)
-    ))?;
-    // 3. The receiver proves its key, and so its X25519 key.
-    let a = c.line()?;
-    if let Some(reason) = a.strip_prefix("DECLINE ") {
-        return Err(alloc::format!("{rname} refused: {reason}"));
-    }
-    let rsig = a
-        .strip_prefix("AUTH sig=")
-        .and_then(ed25519::unhex::<64>)
-        .ok_or("bad AUTH")?;
-    if !ed25519::verify(
-        &rkey,
-        proto::transcript("recv", nonce_r, &nonce_s, &rkey, &id.public, &rdh, &sdh).as_bytes(),
-        &rsig,
-    ) {
-        audit(
-            "drop.send",
-            &alloc::format!(
-                "peer={rname} addr={} result=refused reason=bad_auth",
-                ip_str(addr.ip)
-            ),
-        );
-        return Err(alloc::format!("{rname} failed to prove its key; refused"));
-    }
-    settle_trust("send", rname, &rkey, &trust, addr.ip)?;
-    match &trust {
+    // The authenticated X25519 key agreement (milkdrop::session); encrypted from here on.
+    let mut sess = session::connect(
+        &mut c,
+        &id,
+        &DROP,
+        announced.as_ref().map(|p| &p.key),
+        addr.ip,
+    )?;
+    let (rname, rkey) = (sess.name.clone(), sess.key);
+    let rname = rname.as_str();
+    match &sess.trust {
         Trust::New => {
             println!(
                 "drop: {rname} is new: fingerprint {} (trusted on first use)",
@@ -620,19 +529,17 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
         Trust::Rotated { .. } => ident::remember(rname, &rkey)?,
         _ => println!("drop: {rname} ({}) verified", fingerprint(&rkey)),
     }
-    // Everything from here on is encrypted (X25519 -> per-direction ChaCha20-Poly1305).
-    let shared = eph.shared(&rdh)?;
-    let mut ch = proto::Channel::derive(&shared, nonce_r, &nonce_s, &rdh, &sdh, true);
-    let mut shared = shared;
-    rt::crypto::wipe(&mut shared);
+    let (nonce_r, nonce_s) = (sess.nonce_s.clone(), sess.nonce_c.clone());
+    let (nonce_r, nonce_s) = (nonce_r.as_str(), nonce_s.as_str());
+    let ch = &mut sess.ch;
     // 4. The signed offer.
     let size = data.len() as u64;
     let osig = ed25519::sign(
         &id.seed,
-        proto::offer_msg(nonce_r, &nonce_s, fname, size, &sha).as_bytes(),
+        proto::offer_msg(nonce_r, nonce_s, fname, size, &sha).as_bytes(),
     );
     c.send_eline(
-        &mut ch,
+        ch,
         &alloc::format!(
             "OFFER name={} size={size} sha256={sha} sig={}",
             proto::esc(fname),
@@ -645,7 +552,7 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
         &sha[..16]
     );
     c.set_timeout(120_000);
-    let r = c.eline(&mut ch)?;
+    let r = c.eline(ch)?;
     if r != "ACCEPT" {
         let reason = r.strip_prefix("DECLINE ").unwrap_or(&r);
         audit(
@@ -666,11 +573,11 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
     prog.at(0);
     while off < data.len() {
         let n = CHUNK.min(data.len() - off);
-        c.send_rec(&mut ch, &data[off..off + n])?;
+        c.send_rec(ch, &data[off..off + n])?;
         off += n;
         prog.at(off as u64);
     }
-    let v = c.eline(&mut ch)?;
+    let v = c.eline(ch)?;
     let ms = ((sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000).max(1);
     let ok = v == alloc::format!("DONE sha256={sha}");
     audit(
@@ -751,69 +658,14 @@ fn downloads(envp: &[&str]) -> String {
 
 /// Handle one incoming connection. Ok(true) = a file was received.
 fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> Res<bool> {
-    let nonce_r = hex(&ident::random::<16>());
-    let eph = Ephemeral::new();
-    let rdh = eph.public;
-    c.send_line(&alloc::format!(
-        "{XMAGIC} HELLO recv name={} key={} nonce={nonce_r} dh={}{}",
-        id.name,
-        hex(&id.public),
-        hex(&rdh),
-        rot_field(id)
-    ))?;
-    let h = c.line()?;
-    let mut w = h.split(' ');
-    if w.next() != Some(XMAGIC) || w.next() != Some("HELLO") || w.next() != Some("send") {
-        return Err(alloc::format!("{from}: not a Milk Drop 2 sender"));
-    }
-    let sname = field(&h, "name")
-        .filter(|n| ident::name_ok(n))
-        .ok_or("bad hello")?;
-    let skey = field(&h, "key")
-        .and_then(ed25519::unhex::<32>)
-        .ok_or("bad hello key")?;
-    let nonce_s = field(&h, "nonce")
-        .filter(|n| n.len() == 32)
-        .ok_or("bad nonce")?;
-    let sdh = field(&h, "dh")
-        .and_then(ed25519::unhex::<32>)
-        .ok_or("bad hello dh")?;
-    let ssig = field(&h, "sig")
-        .and_then(ed25519::unhex::<64>)
-        .ok_or("bad hello sig")?;
-    if !ed25519::verify(
-        &skey,
-        proto::transcript("send", &nonce_r, nonce_s, &id.public, &skey, &rdh, &sdh).as_bytes(),
-        &ssig,
-    ) {
-        audit(
-            "drop.recv",
-            &alloc::format!(
-                "peer={sname} addr={} result=refused reason=bad_hello",
-                ip_str(from.ip)
-            ),
-        );
-        let _ = c.send_line("DECLINE bad-signature");
-        return Err(alloc::format!(
-            "{sname} at {from}: hello signature doesn't verify; refused"
-        ));
-    }
-    let srot = parse_rot(&h);
-    let trust = ident::trust_rotated(sname, &skey, srot.as_ref());
-    if let Trust::Changed { old } = &trust {
-        let _ = c.send_line("DECLINE key-changed");
-        return Err(key_changed("recv", sname, old, &skey, from.ip));
-    }
-    let asig = ed25519::sign(
-        &id.seed,
-        proto::transcript("recv", &nonce_r, nonce_s, &id.public, &skey, &rdh, &sdh).as_bytes(),
-    );
-    c.send_line(&alloc::format!("AUTH sig={}", hex(&asig)))?;
-    // Encrypted from here on.
-    let mut shared = eph.shared(&sdh)?;
-    let mut ch = proto::Channel::derive(&shared, &nonce_r, nonce_s, &rdh, &sdh, false);
-    rt::crypto::wipe(&mut shared);
-    let o = c.eline(&mut ch)?;
+    // The authenticated X25519 key agreement (milkdrop::session); encrypted from here on.
+    let mut sess = session::accept(c, id, &DROP, from.ip)?;
+    let (sname, skey, trust) = (sess.name.clone(), sess.key, sess.trust.clone());
+    let sname = sname.as_str();
+    let (nonce_r, nonce_s) = (sess.nonce_s.clone(), sess.nonce_c.clone());
+    let nonce_s = nonce_s.as_str();
+    let ch = &mut sess.ch;
+    let o = c.eline(ch)?;
     let (Some(oname), Some(size), Some(sha), Some(osig)) = (
         field(&o, "name").map(proto::unesc),
         field(&o, "size").and_then(|s| s.parse::<u64>().ok()),
@@ -829,7 +681,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
             &osig,
         )
     {
-        let _ = c.send_eline(&mut ch, "DECLINE bad-offer");
+        let _ = c.send_eline(ch, "DECLINE bad-offer");
         return Err(alloc::format!(
             "{sname}: offer signature doesn't verify; refused"
         ));
@@ -860,7 +712,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
         ask("drop: accept? [y/N] ")
     };
     if !ok {
-        let _ = c.send_eline(&mut ch, "DECLINE declined-by-user");
+        let _ = c.send_eline(ch, "DECLINE declined-by-user");
         audit(
             "drop.decline",
             &alloc::format!(
@@ -872,7 +724,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
         println!("drop: declined");
         return Ok(false);
     }
-    settle_trust("recv", sname, &skey, &trust, from.ip)?;
+    session::settle_trust(&DROP, "recv", sname, &skey, &trust, from.ip)?;
     if !matches!(trust, Trust::Known { ref as_name } if as_name == sname) {
         ident::remember(sname, &skey)?;
         if matches!(trust, Trust::New) {
@@ -890,7 +742,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
         0o644,
     )
     .map_err(|e| alloc::format!("{part}: {e}"))?;
-    c.send_eline(&mut ch, "ACCEPT")?;
+    c.send_eline(ch, "ACCEPT")?;
     c.set_timeout(20_000);
     let mut h = Sha256::new();
     let mut got = 0u64;
@@ -898,7 +750,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
     prog.at(0);
     let r: Res<()> = (|| {
         while got < size {
-            let d = c.recv_rec(&mut ch)?;
+            let d = c.recv_rec(ch)?;
             if d.is_empty() || got + d.len() as u64 > size {
                 return Err(String::from(
                     "the sender sent more (or less) than it offered",
@@ -925,7 +777,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
     }
     let have = hex(&h.finish());
     if have != sha {
-        let _ = c.send_eline(&mut ch, &alloc::format!("BAD sha256={have}"));
+        let _ = c.send_eline(ch, &alloc::format!("BAD sha256={have}"));
         let _ = sys::unlink(&part);
         audit(
             "drop.recv",
@@ -941,7 +793,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
     }
     let dest = unique(dir, &name);
     sys::rename(&part, &dest).map_err(|e| alloc::format!("{dest}: {e}"))?;
-    let _ = c.send_eline(&mut ch, &alloc::format!("DONE sha256={have}"));
+    let _ = c.send_eline(ch, &alloc::format!("DONE sha256={have}"));
     audit(
         "drop.recv",
         &alloc::format!(

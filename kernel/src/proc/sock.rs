@@ -44,13 +44,15 @@ const SO_RCVTIMEO: u32 = 20;
 const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
+/// milkOS: allocate a pseudo-terminal (crate::pty); the master fd is returned.
+pub const MILK_OPENPTY: u64 = 0x1002;
 
 /// Is `nr` one of ours?
 pub fn handles(nr: u64) -> bool {
     use super::unixsys::{RECVMSG, SENDMSG, SOCKETPAIR};
     matches!(
         nr,
-        SOCKET | SOCKETPAIR | BIND..=SHUTDOWN | SENDMSG | RECVMSG | ACCEPT4 | PPOLL
+        SOCKET | SOCKETPAIR | BIND..=SHUTDOWN | SENDMSG | RECVMSG | ACCEPT4 | PPOLL | MILK_OPENPTY
     )
 }
 
@@ -84,6 +86,9 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
     );
     // AF_UNIX: its own module (proc/unix.rs); not gated by the net capability (paths by
     // the fs grants, abstract names by net, when connecting).
+    if nr == MILK_OPENPTY {
+        return sys_openpty(a[0] as usize, a[1] as u32);
+    }
     if nr == SOCKET && a[0] as u32 == super::unix::AF_UNIX {
         return super::unixsys::socket(a[1] as u32, a[2] as u32);
     }
@@ -191,6 +196,21 @@ fn timeout_of(fd: i64) -> u64 {
         .ok()
         .and_then(|f| sockfile::of(&f).ok().map(|s| s.rcv_timeout()))
         .unwrap_or(FOREVER)
+}
+
+/// MILK_OPENPTY(&mut slave_number: u32, flags): a free pty's master, as a new fd
+/// (O_CLOEXEC in `flags` = 0o2000000 sets close-on-exec).
+fn sys_openpty(slave_out: usize, flags: u32) -> KResult<usize> {
+    let (n, master) = crate::pty::open()?;
+    let fd = install(
+        OpenFile::new(master, crate::fs::abi::O_RDWR),
+        flags & crate::fs::abi::O_CLOEXEC != 0,
+    )?;
+    if slave_out != 0 {
+        copy_out(slave_out, &(n as u32).to_le_bytes())?;
+    }
+    crate::audit!("pty.open", "pty=ttyp{n} fd={fd}");
+    Ok(fd)
 }
 
 fn install(of: OpenFile, cloexec: bool) -> KResult<usize> {

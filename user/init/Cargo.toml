@@ -1,0 +1,12 @@
+[package]
+name = "init"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "init"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

@@ -26,7 +26,9 @@ mod mem;
 mod memtest;
 mod mmu;
 mod pmm;
+mod proc;
 mod ramfb;
+mod sched;
 mod selftest;
 mod sink;
 mod splash;
@@ -58,8 +60,11 @@ impl Write for Uart {
 #[macro_export]
 macro_rules! kprintln {
     ($($arg:tt)*) => {{
-        let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
-        let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
+        // IRQs off for the whole line so threads don't interleave mid-line.
+        $crate::sync::without_irqs(|| {
+            let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
+            let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
+        })
     }};
 }
 
@@ -87,9 +92,18 @@ pub extern "C" fn kmain() -> ! {
     memtest::run();
     fs::init();
     fs::selftest::run();
+    sched::init();
+    sched::selftest::run();
+    proc::init();
+    proc::start_init();
 
-    // The desktop owns the screen (and draws the mouse cursor) from here on.
-    wm::run();
+    // The desktop: compositor, window manager and shell, in its own thread. It owns the
+    // screen and draws the mouse cursor from here on.
+    sched::spawn_prio("wm", sched::Priority::High, wm::run);
+    // kmain is now just thread 0.
+    loop {
+        sched::sleep_ms(1000);
+    }
 }
 
 #[panic_handler]

@@ -242,7 +242,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
 
 pub fn from_fw_cfg() -> Option<Script> {
     let f = fwcfg::find_file("opt/milkos/demo")?;
-    let mut buf = [0u8; 32];
+    // Heap, not stack: fw_cfg reads by DMA to this address, and thread stacks live in a
+    // kernel-virtual window that isn't identity mapped.
+    let mut buf = alloc::vec![0u8; 32];
     let n = (f.size as usize).min(buf.len());
     if !fwcfg::read_file(f, &mut buf[..n]) {
         return None;
@@ -268,11 +270,6 @@ pub fn from_fw_cfg() -> Option<Script> {
 }
 
 impl Script {
-    /// Want the main loop to skip `wfi`? (Only between closely spaced steps.)
-    pub fn busy(&self) -> bool {
-        false
-    }
-
     /// Run due steps; at most one input event per frame, so each one gets composited. Returns
     /// true when the script is finished.
     pub fn step(&mut self, d: &mut Desktop, now: u64) -> bool {

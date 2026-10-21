@@ -16,9 +16,15 @@
 - Keep `cargo build` and `cargo clippy` warning-free, run `cargo fmt`.
 - Keep `kernel/src/main.rs` edits minimal (mod lines, init calls). Put real code in your own files.
 
-## Kernel facts (as of main 1b659a6)
+## Kernel facts (as of main after the proc merge)
 - Boot order in `kmain`: `exceptions::init` → `mem::init` (MMU + caches on) → `display::init` → `gic::init` →
-  `timer::init` → `uart::init` → `sync::irq_enable` → self-tests.
+  `timer::init` → `uart::init` → virtio → `sync::irq_enable` → self-tests → `fs::init` → `sched::init` →
+  sched self-test → `proc::init` → `proc::start_init` (PID 1 = `/bin/init`, which runs `msh` on the console).
+- Threads: `sched::spawn`/`spawn_prio`, `sleep_ms`, `sleep_until`, `yield_now`, `WaitQueue` (incl.
+  `wait_until_timeout`), `sched::Mutex`. Never block in an IRQ handler or while holding a `SpinLock`.
+- Ownership: `sched` owns `timer::set_tick_hook` and `timer::set_deadline` (don't call them elsewhere; use threads and
+  sleeps). The console tty (`proc/console.rs`) owns `uart::read_byte`. Processes and syscalls: `docs/processes.md`.
+  Files: `docs/filesystem.md`. User programs live in `user/` and are listed in `initramfs.list`.
 - Memory: identity map (VA == PA). Use `mmu::virt_to_phys` / `phys_to_virt` anyway, it is the one place that
   will change for higher-half. Heap via `alloc` (Vec/Box/BTreeMap fine). DMA / big buffers:
   `pmm::alloc_contiguous_zeroed(npages, align_frames)`, free with `pmm::free_contiguous`. No allocation in IRQ handlers.

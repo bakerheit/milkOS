@@ -36,8 +36,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{DirtyList, DrawTarget, Rect, Surface};
+use crate::sched::{self, WaitQueue};
 use crate::sync::SpinLock;
-use crate::{cursor, display, input, kprintln, timer, uart};
+use crate::{cursor, display, input, kprintln, timer};
 
 use buffer::Buffer;
 pub use event::{Button, Event, Key};
@@ -58,7 +59,20 @@ pub fn notify(title: &str, subtitle: &str) {
     NOTIFY
         .lock()
         .push((String::from(title), String::from(subtitle)));
+    WAKE.wake_all();
 }
+
+/// The wm thread sleeps here between frames; input, toasts and requests wake it early.
+static WAKE: WaitQueue = WaitQueue::new();
+
+fn on_input(_ev: &input::Event) {
+    WAKE.wake_all();
+}
+
+/// Frame period at 60 Hz.
+const FRAME_NS: u64 = 16_666_667;
+/// How long to sleep when nothing is moving (clocks, log followers and toasts still update).
+const IDLE_NS: u64 = 50_000_000;
 
 /// Things kernel code (and the built-in apps) can ask the desktop to do.
 pub enum Request {
@@ -73,6 +87,7 @@ static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
 /// Queue a request; it is handled at the start of the next frame.
 pub fn request(r: Request) {
     REQUESTS.lock().push(r);
+    WAKE.wake_all();
 }
 
 static STATS: SpinLock<Stats> = SpinLock::new(Stats {
@@ -91,12 +106,13 @@ pub fn stats() -> Stats {
     *STATS.lock()
 }
 
-/// Take over the screen and run the desktop forever. Falls back to the text console if there is
-/// no framebuffer or not enough memory.
-pub fn run() -> ! {
+/// Take over the screen and run the desktop forever. Runs as the "wm" kernel thread (see
+/// kmain): it sleeps between frames on a wait queue that input, toasts and requests kick, so it
+/// never spins. Falls back to the text console if there is no framebuffer or not enough memory.
+pub fn run() {
     let Some(fb) = display::take_framebuffer() else {
-        kprintln!("wm: no framebuffer, staying on the serial console");
-        idle_echo();
+        kprintln!("wm: no framebuffer, no desktop");
+        return;
     };
     let t0 = timer::now_ns();
     let mut d = match Desktop::new(fb) {
@@ -104,25 +120,40 @@ pub fn run() -> ! {
         Err(fb) => {
             kprintln!("wm: out of memory for the desktop, text console instead");
             display::console_fallback(fb);
-            idle_echo();
+            return;
         }
     };
     kprintln!(
-        "wm: desktop up in {} ms (wallpaper + blur + first frame)",
+        "wm: desktop up in {} ms (wallpaper + blur + first frame + fade)",
         (timer::now_ns() - t0) / 1_000_000
     );
+    if input::subscribe(on_input).is_err() {
+        kprintln!("wm: no input subscriber slot, polling at 60 Hz");
+    }
+    let mut next = timer::now_ns();
     loop {
-        d.frame();
-        d.idle();
+        let busy = d.frame();
+        let now = timer::now_ns();
+        // 60 Hz while something moves, a slow tick when idle; input wakes us at once.
+        next = if busy {
+            (next + FRAME_NS).max(now + FRAME_NS / 4)
+        } else {
+            now + IDLE_NS
+        };
+        WAKE.wait_until_timeout(
+            || input::pending() > 0 || !NOTIFY.lock().is_empty() || !REQUESTS.lock().is_empty(),
+            next.saturating_sub(now),
+        );
     }
 }
 
-fn idle_echo() -> ! {
-    loop {
-        uart::echo_pending();
-        while input::poll().is_some() {}
-        unsafe { core::arch::asm!("wfi") };
-    }
+/// CPU time of the scheduler's idle thread, for the busy percentage.
+fn idle_thread_ns() -> u64 {
+    sched::threads()
+        .iter()
+        .filter(|t| t.name.as_str() == "idle")
+        .map(|t| t.cpu_ns)
+        .sum()
 }
 
 // ---- the desktop -----------------------------------------------------------------------------
@@ -231,12 +262,11 @@ pub struct Desktop {
     damage: DirtyList<32>,
     pub stats: Stats,
     status: String,
-    uart: event::UartKeys,
     script: Option<script::Script>,
     /// Compose into the back buffer only (the boot fade-in does the first flush itself).
     hold_flush: bool,
-    // CPU accounting.
-    idle_ns: u64,
+    // CPU accounting: the idle thread's CPU time at the start of the last second.
+    idle_cpu_ns: u64,
     acct_start: u64,
     last_second: u64,
 }
@@ -288,10 +318,9 @@ impl Desktop {
             damage: DirtyList::new(),
             stats: Stats::default(),
             status: String::new(),
-            uart: event::UartKeys::default(),
             script: None,
             hold_flush: true,
-            idle_ns: 0,
+            idle_cpu_ns: idle_thread_ns(),
             acct_start: timer::now_ns(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
@@ -337,7 +366,7 @@ impl Desktop {
                 for (i, p) in self.fb.pixels_mut()[..n].iter_mut().enumerate() {
                     *p = crate::gfx::blend(src[i], back[i], a);
                 }
-                timer::delay_ms(14);
+                sched::sleep_ms(14);
             }
         }
         self.hold_flush = false;
@@ -833,18 +862,12 @@ impl Desktop {
 
     // ---- the frame loop -------------------------------------------------------------------------
 
-    /// One iteration: take input, update, render, composite.
-    pub fn frame(&mut self) {
+    /// One iteration: take input, update, render, composite. True if anything changed (or a
+    /// drag or demo script is running), so the next frame should come at the full 60 Hz.
+    pub fn frame(&mut self) -> bool {
         let now = timer::now_ns();
-        // Input: serial console keys, virtio input, then the demo script.
-        while let Some(b) = uart::read_byte() {
-            if let Some(ev) = self.uart.feed(b, now) {
-                self.handle(ev);
-            }
-        }
-        if let Some(ev) = self.uart.flush(now) {
-            self.handle(ev);
-        }
+        let frames = self.stats.frames;
+        // Input: virtio input, then the demo script.
         while let Some(ev) = input::poll() {
             if let Some(ev) = event::from_input(ev) {
                 self.handle(ev);
@@ -877,6 +900,12 @@ impl Desktop {
         self.tick(now);
         self.render_and_compose();
         *STATS.lock() = self.stats;
+        self.stats.frames != frames
+            || self.script.is_some()
+            || matches!(
+                self.drag,
+                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Slider(_))
+            )
     }
 
     /// Re-render stale window surfaces and panels, then composite the damage.
@@ -990,10 +1019,11 @@ impl Desktop {
         if sec != self.last_second {
             self.last_second = sec;
             let span = now - self.acct_start;
-            if let Some(idle) = (self.idle_ns * 100).checked_div(span) {
-                self.stats.cpu_pct = (100 - idle.min(100)) as u32;
+            let idle = idle_thread_ns();
+            if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {
+                self.stats.cpu_pct = (100 - pct.min(100)) as u32;
             }
-            self.idle_ns = 0;
+            self.idle_cpu_ns = idle;
             self.acct_start = now;
             let st = self.status_text();
             if st != self.status {
@@ -1009,16 +1039,6 @@ impl Desktop {
                 self.invalidate(PanelKey::Control);
             }
         }
-    }
-
-    /// Sleep until the next interrupt, counting the time as idle.
-    fn idle(&mut self) {
-        if self.script.as_ref().is_some_and(|s| s.busy()) {
-            return;
-        }
-        let t = timer::now_ns();
-        unsafe { core::arch::asm!("wfi") };
-        self.idle_ns += timer::now_ns() - t;
     }
 
     // ---- input ----------------------------------------------------------------------------------

@@ -20,7 +20,11 @@ SECTIONS
         __bss_end = .;
     }
 
-    . = ALIGN(4096);
+    /* Boot stack (later thread 0, "kmain"). Like every kernel stack it is the upper 64 KiB
+       of a 128 KiB-aligned slot, so the overflow check in exceptions.S (bit 16 of sp) works
+       on it too. See kernel/src/sched/kstack.rs. */
+    . = ALIGN(128K);
+    . += 64K;
     __stack_bottom = .;
     . += 64K;
     __stack_top = .;

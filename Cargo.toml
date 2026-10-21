@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["kernel"]
+# user/ is its own workspace (built by kernel/build.rs).
+exclude = ["user"]
 
 [profile.dev]
 panic = "abort"

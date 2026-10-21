@@ -1,0 +1,6 @@
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+[target.aarch64-unknown-none-softfloat]
+# user.ld comes from rt's build script (it is on the link search path).
+rustflags = ["-C", "link-arg=-Tuser.ld", "-C", "relocation-model=static"]

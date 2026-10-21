@@ -222,13 +222,7 @@ fn tcp_file(st: &Stack, w: &mut dyn Write, v6: bool) -> fmt::Result {
         .iter()
         .filter(|(_, s)| s.ty == SockType::Stream && in_file(s, v6))
         .count();
-    for (n, e) in st
-        .tw
-        .entries
-        .iter()
-        .filter(|e| e.local.ip.is_v6() == v6)
-        .enumerate()
-    {
+    for (n, e) in st.tw.entries.iter().filter(|e| e.v6_sock == v6).enumerate() {
         writeln!(
             w,
             "{:>4}: {}:{:04X} {}:{:04X} 06 00000000:00000000 03:{:08X} 00000000 {:>5} {:>8} 0 # TIME_WAIT",

@@ -21,10 +21,7 @@ pub const TYPE_ANY: u16 = 255;
 const CLASS_IN: u16 = 1;
 
 pub fn group() -> SockAddr {
-    SockAddr {
-        ip: GROUP,
-        port: PORT,
-    }
+    SockAddr::v4(GROUP, PORT)
 }
 
 fn be16(b: &[u8], i: usize) -> Option<u16> {

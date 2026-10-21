@@ -64,7 +64,7 @@ fn eth1_addr() -> Option<[u8; 4]> {
     let t = text("/proc/net/ifaddr")?;
     let l = t.lines().find(|l| l.starts_with("eth1 "))?;
     let a = l.split(' ').find_map(|w| w.strip_prefix("inet="))?;
-    SockAddr::parse(a, 0).map(|s| s.ip)
+    SockAddr::parse(a, 0).and_then(|s| s.ip.v4())
 }
 
 fn hostname() -> String {
@@ -197,6 +197,8 @@ fn cmd_selftest() -> Res<()> {
     let mut v = rt::crypto::selftest();
     let (p, t) = mdns::selftest();
     v.push(("mdns", p, t));
+    let (p, t) = net::selftest();
+    v.push(("addresses", p, t));
     for (name, p, t) in v {
         println!("drop: {name:<17} {p}/{t} vectors");
         all &= p == t;
@@ -255,24 +257,12 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     }
     let addr = addr.ok_or("no eth1 address (no VM-to-VM link); not announcing")?;
     let fd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(
-        fd,
-        &SockAddr {
-            ip: addr,
-            port: proto::DISC_PORT,
-        },
-    )
-    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
+    net::bind(fd, &SockAddr::v4(addr, proto::DISC_PORT))
+        .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
     // The mDNS responder for `<name>.local` (rt::mdns), on the same link.
     let mfd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(
-        mfd,
-        &SockAddr {
-            ip: addr,
-            port: mdns::PORT,
-        },
-    )
-    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
+    net::bind(mfd, &SockAddr::v4(addr, mdns::PORT))
+        .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
     shared_tmp();
     let ctl = control_socket();
     if let Err(e) = &ctl {
@@ -621,13 +611,7 @@ fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
     }
     if mdns::is_local(spec) {
         let ip = mdns::resolve(spec, 1500)?;
-        return Ok((
-            SockAddr {
-                ip,
-                port: XFER_PORT,
-            },
-            None,
-        ));
+        return Ok((SockAddr::v4(ip, XFER_PORT), None));
     }
     let peers = proto::query(1500)?;
     let flat = spec.replace(' ', "").to_ascii_lowercase();
@@ -643,13 +627,7 @@ fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
         Vec::new()
     };
     match pick.as_slice() {
-        [p] => Ok((
-            SockAddr {
-                ip: p.addr,
-                port: p.port,
-            },
-            Some((*p).clone()),
-        )),
+        [p] => Ok((SockAddr::new(p.addr, p.port), Some((*p).clone()))),
         [] => Err(alloc::format!(
             "no peer {spec:?} on the link (`drop list` shows who is around)"
         )),
@@ -668,7 +646,7 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
     let fname = path.rsplit('/').next().unwrap_or(path);
     let sha = hex(&rt::sha256::sha256(&data));
     let (addr, announced) = resolve(spec)?;
-    let fd = net::socket(net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
+    let fd = net::socket_for(&addr, net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
     if let Err(e) = net::connect(fd, &addr) {
         let _ = sys::close(fd);
         return Err(if e.0 == 111 {
@@ -1008,10 +986,7 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
     let addr = eth1_addr().ok_or("no eth1 address (Milk Drop needs the VM-to-VM link)")?;
     let l = net::socket(net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
     let _ = net::set_reuseaddr(l);
-    let me = SockAddr {
-        ip: addr,
-        port: XFER_PORT,
-    };
+    let me = SockAddr::v4(addr, XFER_PORT);
     net::bind(l, &me).map_err(|e| alloc::format!("bind {me}: {e} (another drop recv?)"))?;
     net::listen(l, 2).map_err(|e| alloc::format!("listen: {e}"))?;
     shared_tmp();

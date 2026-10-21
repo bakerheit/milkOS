@@ -1816,6 +1816,8 @@ pub struct TimeWait {
     pub ts_recent: u32,
     pub rcv_wscale: u8,
     pub deadline: u64,
+    /// It was an AF_INET6 socket's (listed in /proc/net/tcp6, IPv4 peers as ::ffff:).
+    pub v6_sock: bool,
 }
 
 pub struct TwTable {
@@ -1875,6 +1877,7 @@ fn park_if_time_wait(st: &mut Stack, i: usize) {
         ts_recent: t.ts_recent,
         rcv_wscale: t.rcv_wscale,
         deadline: t.deadline.unwrap_or(st.now + 2 * MSL),
+        v6_sock: s.family == super::socket::Family::V6,
     };
     st.tw.add(e);
     finished(st, i);

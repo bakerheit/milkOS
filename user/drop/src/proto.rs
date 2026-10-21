@@ -23,10 +23,7 @@ pub const XMAGIC: &str = "MILKDROP/2";
 const MAX_LINE: usize = 1024;
 
 pub fn group() -> SockAddr {
-    SockAddr {
-        ip: GROUP,
-        port: DISC_PORT,
-    }
+    SockAddr::v4(GROUP, DISC_PORT)
 }
 
 /// `key=value` field of a protocol line.
@@ -75,7 +72,7 @@ pub struct Peer {
     pub name: String,
     pub host: String,
     pub key: [u8; 32],
-    pub addr: [u8; 4],
+    pub addr: rt::net::Ip,
     pub port: u16,
     pub receiving: bool,
     /// Its rotation statement (`rot=old:sig`), if its key replaced an older one.

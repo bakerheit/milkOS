@@ -202,6 +202,31 @@ eth1, else the default gateway (eth0's).
   to our own link-local and to `fec0::2` (slirp), and crafted packets for each
   extension-header rule.
 
+### Dual stack: TCP and UDP over IPv6
+
+One socket layer for both families (`wire::IpAddr`, `SockAddr { ip: IpAddr, port }`):
+
+* **AF_INET6 sockets** carry a family, `v6only` (IPV6_V6ONLY) and a scope (the link of a
+  link-local peer or bind address). An AF_INET6 wildcard (`[::]`) listener is
+  **dual-stack** unless IPV6_V6ONLY: it takes IPv4 connections and datagrams too, and user
+  space sees their peers as `::ffff:a.b.c.d` (inside the stack an IPv4-mapped address is
+  just IPv4). Port sharing follows Linux: a dual-stack `[::]:P` and `0.0.0.0:P` clash
+  (`EADDRINUSE`), a v6-only one and an IPv4 one can share the port; for an IPv4 packet an
+  AF_INET listener beats a dual-stack one. AF_INET sockets refuse IPv6 addresses
+  (`EAFNOSUPPORT`), a v6-only socket refuses IPv4 ones (`ENETUNREACH`).
+* **TCP** over IPv6 is the same TCP (options, SACK, timers, TIME_WAIT); only the
+  checksum pseudo-header, the MSS (1440: 1500 - 40 - 20) and the output path differ. A
+  connection accepted on a link-local address keeps that link for its replies.
+* **UDP** over IPv6 requires the checksum (RFC 8200) and never fragments: 1452 bytes at
+  most (`EMSGSIZE`). Received datagrams remember the sender's link, which becomes
+  `sin6_scope_id` in recvfrom, so a reply to a link-local sender goes back out of the
+  same link.
+* **Ping sockets** over IPv6: `socket(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)`, echo request
+  type 128 in, replies (129) for the socket's identifier back.
+* Self-test (`dual-stack`): a v6 and a v4 client on one `[::]` listener over loopback
+  (peers `::1` and 127.0.0.1, MSS 1440), the V6ONLY sharing and clash rules, the two
+  "wrong family" errors, and a UDP datagram over `::1`.
+
 ## eth1: a second network for VM-to-VM links
 
 A second `virtio-net-device` becomes `eth1`. Interfaces are named in qemu command-line
@@ -242,7 +267,11 @@ use crate::net::socket::{self, SockType, SocketId, Shutdown, POLLIN, POLLOUT};
 use crate::net::wire::{Ipv4, SockAddr};
 
 pub fn socket(ty: SockType) -> Result<SocketId>                 // Stream (TCP) | Dgram (UDP); ENOBUFS when 32 are in use
+pub fn socket_family(f: Family, ty: SockType) -> Result<SocketId>   // Family::V6: AF_INET6 (dual-stack until set_v6only)
 pub fn socket_icmp() -> Result<SocketId>                        // ping socket (Dgram, ICMP echo; see the ping row below)
+pub fn socket_icmp6() -> Result<SocketId>                       // the same for ICMPv6 echo
+pub fn set_v6only(s, on) / v6only(s) / family(s)                // IPV6_V6ONLY (before bind; ENOPROTOOPT on AF_INET)
+pub fn set_scope(s, Option<usize>) / scope(s)                   // the link for a link-local address (sin6_scope_id)
 pub fn bind(s: SocketId, addr: SockAddr) -> Result<()>          // port 0 = ephemeral (49152..); EADDRINUSE, EADDRNOTAVAIL, EINVAL (bound)
 pub fn listen(s: SocketId, backlog: usize) -> Result<()>        // TCP; backlog clamped to 1..=16; autobinds
 pub fn accept(s: SocketId) -> Result<(SocketId, SockAddr)>      // EAGAIN if none ready; EINVAL if not listening
@@ -303,14 +332,14 @@ work on them (the last close closes the socket).
 
 | nr | call | notes |
 |---|---|---|
-| 198 | socket | `AF_INET` only (`EAFNOSUPPORT`); `SOCK_STREAM`/`SOCK_DGRAM` + `SOCK_NONBLOCK`/`SOCK_CLOEXEC`; protocol 0/6/17, or `SOCK_DGRAM` + 1 (`IPPROTO_ICMP`) for a ping socket |
-| 200 | bind | `struct sockaddr_in` (16 bytes) |
+| 198 | socket | `AF_INET` or `AF_INET6` (else `EAFNOSUPPORT`); `SOCK_STREAM`/`SOCK_DGRAM` + `SOCK_NONBLOCK`/`SOCK_CLOEXEC`; protocol 0/6/17, or `SOCK_DGRAM` + 1 (`IPPROTO_ICMP`, AF_INET) / 58 (`IPPROTO_ICMPV6`, AF_INET6) for a ping socket |
+| 200 | bind | `struct sockaddr_in` (16 bytes) on AF_INET, `struct sockaddr_in6` (28 bytes; `sin6_scope_id` = interface index: lo 1, eth0 2, eth1 3) on AF_INET6. Addresses written back to an AF_INET6 socket's caller are always `sockaddr_in6` (IPv4 peers as `::ffff:a.b.c.d`). A `sockaddr_in` on a dual-stack AF_INET6 socket is taken as the mapped address (lenient; Linux wants `sockaddr_in6`) |
 | 201 | listen | |
 | 202 / 242 | accept / accept4 | blocks unless non-blocking; accept4 flags `SOCK_NONBLOCK`/`SOCK_CLOEXEC` |
 | 203 | connect | blocks until connected or failed unless non-blocking (`EINPROGRESS`) |
 | 204 / 205 | getsockname / getpeername | |
 | 206 / 207 | sendto / recvfrom | `MSG_DONTWAIT`; blocking send queues everything before returning |
-| 208 / 209 | setsockopt / getsockopt | set: SO_RCVTIMEO (recv/recvfrom/read/accept give EAGAIN after it); SO_REUSEADDR, SO_KEEPALIVE, SO_SNDBUF, SO_RCVBUF, SO_REUSEPORT, SO_SNDTIMEO, TCP_NODELAY accepted and ignored; get: SO_ERROR, SO_TYPE; else `ENOPROTOOPT` |
+| 208 / 209 | setsockopt / getsockopt | set: SO_RCVTIMEO (recv/recvfrom/read/accept give EAGAIN after it); SO_REUSEADDR, SO_KEEPALIVE, SO_SNDBUF, SO_RCVBUF, SO_REUSEPORT, SO_SNDTIMEO, TCP_NODELAY accepted and ignored; IPV6_V6ONLY (level 41, option 26) set and get on AF_INET6 sockets; get: SO_ERROR, SO_TYPE; else `ENOPROTOOPT` |
 | 210 | shutdown | |
 | 73 | ppoll | any fd: sockets report real readiness, the console is readable once a line (or ^D) is typed, other files are always ready (`Inode::poll`, default POLLIN\|POLLOUT). Sleeps on the stack's readiness queue, re-checking non-socket fds every 20 ms. The sigmask is ignored. |
 
@@ -323,26 +352,37 @@ Not yet: `select`/`epoll`, `sendmsg`/`recvmsg`, `socketpair`, `MSG_PEEK`, `AF_UN
 `dev` (lo, eth0 counters), `arp`, `route` (Linux hex format), `tcp` (Linux columns, plus a
 `# STATE rexmit N rto Nms` comment per line), `udp`, `snmp` (Ip/Icmp/Tcp/Udp counters),
 and milkOS's `ifaddr` (`eth0 flags=UP,BROADCAST,RUNNING mtu=1500 ether=.. inet=..
-netmask=.. broadcast=.. gateway=.. dns=.. dhcp=Bound`).
+netmask=.. broadcast=.. inet6=ADDR/LEN,SCOPE[,tentative] (one per IPv6 address)
+router6=.. gateway=.. dns=.. dhcp=Bound`).
+
+IPv6: `tcp6` and `udp6` (AF_INET6 sockets, the 32-digit Linux address form; `tcp`/`udp`
+list only AF_INET ones, so a dual-stack listener is in `tcp6`), `if_inet6` (Linux
+format: address, ifindex, prefix length, scope, flags, name), `snmp6` (`Name value`
+lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cache).
 
 ## Userland tools (`user/`)
 
 | program | what | how |
 |---|---|---|
-| `ifconfig [IFACE]` | addresses, MAC, gateway/DNS/DHCP state, counters | `/proc/net/ifaddr` (milkOS, `key=value` per interface) + `/proc/net/dev` |
-| `netstat [-t] [-u] [-l] [-s]` | sockets, or protocol counters | `/proc/net/{tcp,udp,snmp}` |
-| `ping [-c N] [-i MS] [-s SIZE] [-W MS] ADDR` | ICMP echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged). `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
-| `nc [-u] HOST PORT`, `nc -l [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP) |
-| `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www) |
+| `ifconfig [IFACE]` | addresses (IPv6 as `inet6 ADDR  prefixlen N  scopeid 0x20<link>`), MAC, IPv6 router, gateway/DNS/DHCP state, counters | `/proc/net/ifaddr` (milkOS, `key=value` per interface) + `/proc/net/dev` |
+| `netstat [-t] [-u] [-l] [-s] [-4\|-6]` | sockets (tcp, tcp6, udp, udp6), or protocol counters | `/proc/net/{tcp,tcp6,udp,udp6,snmp,snmp6}` |
+| `ping [-4\|-6] [-c N] [-i MS] [-s SIZE] [-W MS] HOST` | ICMP / ICMPv6 echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged), or `(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)` with `-6` or an IPv6 address. `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
+| `nc [-4\|-6] [-u] HOST PORT`, `nc -l [-4\|-6] [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; `-l` listens on `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
+| `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
 | `drop id / name / list / send / recv / peers / forget / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
 
-**Names in user programs** (`rt::net::lookup(host_port, default_port)` /
-`rt::net::resolve(host)`, getaddrinfo-style, IPv4). `ping`, `fetch`, `nc` and
-`drop send` use it, and so does `mssh`:
+**Names in user programs** (getaddrinfo-style, both families: `rt::net::lookup_all(spec,
+default_port, Want::{Any,V4,V6})` gives every address in the order to try, IPv6 first as
+Linux orders them; `rt::net::connect_any(&addrs, ty)` connects to the first that answers;
+`lookup` / `resolve` give the first). `SPEC` is `HOST[:PORT]`, `[V6ADDR]:PORT` or a bare
+IPv6 address; `fe80::1%eth1` names the link. `ping`, `fetch`, `nc`, `tcpbench` and
+`drop send` use it. One address type for both families: `rt::net::SockAddr { ip: Ip,
+port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
 
-* a dotted quad, or `localhost` (127.0.0.1): no lookup;
+* a numeric address (dotted quad or IPv6): no lookup;
+* `localhost`: `::1` and 127.0.0.1 (`ping localhost` stays IPv4, `ping -6 localhost` is `::1`);
 * **`NAME.local`**: mDNS (RFC 6762) on eth1, `rt::mdns`. It uses the real DNS wire format
   on UDP 5353 and the group 224.0.0.251, sent as a "legacy unicast" query (an ephemeral
   source port, one retry, 1.5 s), and the A record comes straight back. The responder is

@@ -77,6 +77,8 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'wait@240:\[net\] selftest' "$P" \
   'send:ifconfig' 'wait:RX packets' "$P" \
   'send:ping -c 3 -i 200 10.0.2.2' 'wait:rtt min' "$P" \
+  'send:ping -6 -c 2 -i 200 fec0::2' 'wait:rtt min' "$P" \
+  'send:fetch -i http://[::1]/' 'wait:fetch: [^\n]* ms' "$P" \
   "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' "$P" \
   'send:fetch -i http://127.0.0.1/' 'wait:fetch: [^\n]* ms' "$P" \
   "send:fetch 10.0.2.2:$P_refused" 'wait:fetch: connect' "$P" \
@@ -84,6 +86,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'raw:\x04' "$P" \
   'send:nc -l 7777' 'wait:listening on tcp' "done:$WORK/nc.listening" 'wait:from the mac' "$P" \
   'send:netstat' 'wait:LISTEN' "$P" \
+  'send:netstat -6 -l' 'wait:LISTEN' "$P" \
   'send:top -b -n 2 -d 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
   'send:uptime' 'wait:load average' "$P" \
   'send:cat /proc/loadavg' "$P" \
@@ -124,7 +127,13 @@ grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
 [ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 2 ] || fail "fetch: expected two 200 OK"
 grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
 grep -q "nc: connection from 10.0.2.2:" "$LOG" || fail "nc -l: no connection"
-grep -q "tcp .* \*:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no :80 listener"
+grep -Eq "tcp6 .* \[::\]:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no [::]:80 listener (httpd, dual-stack)"
+grep -Eq "inet6 fe80::5054:ff:fe12:3456  prefixlen 64  scopeid 0x20<link>" "$LOG" || fail "ifconfig: no eth0 link-local inet6"
+grep -Eq "inet6 fec0::5054:ff:fe12:3456  prefixlen 64  scopeid 0x0<global>" "$LOG" || fail "ifconfig: no eth0 SLAAC inet6"
+grep -q "2 packets transmitted, 2 received, 0% packet loss" "$LOG" || fail "ping -6 fec0::2"
+grep -q "bytes from fec0::2: icmp_seq=1" "$LOG" || fail "ping -6: no reply line from fec0::2"
+[ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 3 ] || fail "fetch http://[::1]/: expected a third 200 OK"
+echo "ifconfig inet6, ping -6 fec0::2, fetch http://[::1]/ (httpd over IPv6), netstat tcp6 [::]:80: ok"
 T="$WORK/console.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T"
 grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"
 [ "$(grep -c '^top - .*load ' "$T")" -ge 2 ] || fail "top -b -n 2: expected two frames"

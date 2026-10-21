@@ -20,6 +20,7 @@ pub fn audit(event: &str, detail: &str) {
     }
 }
 
-pub fn ip_str(ip: [u8; 4]) -> alloc::string::String {
-    alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+/// An address as text (IPv4 dotted, IPv6 RFC 5952).
+pub fn ip_str(ip: impl Into<rt::net::Ip>) -> alloc::string::String {
+    alloc::format!("{}", ip.into())
 }

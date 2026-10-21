@@ -17,6 +17,12 @@ pub struct VolumeInfo {
     /// Whether the volume is encrypted, if the system says (an `encryption:` or `encrypted:` line
     /// in `info`); `None` when it does not.
     pub encrypted: Option<bool>,
+    /// "xchacha20-siv (per block; tag HMAC-SHA256/64)" and friends, when encrypted.
+    pub cipher: String,
+    pub key_wrap: String,
+    pub kdf: String,
+    /// "1 passphrase, 1 recovery".
+    pub key_slots: String,
 }
 
 pub const BLOCK_KB: u64 = 4;
@@ -77,6 +83,10 @@ pub fn parse_info(text: &str) -> Option<VolumeInfo> {
                     .unwrap_or(0)
             }
             "state" => v.state = val.to_string(),
+            "cipher" => v.cipher = val.to_string(),
+            "key wrap" => v.key_wrap = val.to_string(),
+            "kdf" => v.kdf = val.to_string(),
+            "key slots" => v.key_slots = val.to_string(),
             "encryption" | "encrypted" => {
                 v.encrypted = match val.split_whitespace().next() {
                     Some("on" | "yes" | "true" | "encrypted") => Some(true),
@@ -109,6 +119,84 @@ pub fn parse_locked(text: &str) -> Vec<Locked> {
             })
         })
         .collect()
+}
+
+/// One line of `/sys/fs/milkfs/lock`: an encrypted volume and its state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockEntry {
+    pub device: String,
+    pub label: String,
+    pub locked: bool,
+    /// Where it is mounted, when unlocked.
+    pub at: Option<String>,
+    /// The volume the session lives on: it can not be locked while logged in.
+    pub home: bool,
+}
+
+/// Parse `/sys/fs/milkfs/lock` ("vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)", "vdd Old locked").
+pub fn parse_lock(text: &str) -> Vec<LockEntry> {
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let (device, label, state) = (it.next()?, it.next()?, it.next()?);
+            let locked = match state {
+                "locked" => true,
+                "unlocked" => false,
+                _ => return None,
+            };
+            let at = l
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix("at="))
+                .map(|a| a.to_string());
+            Some(LockEntry {
+                device: device.to_string(),
+                label: label.to_string(),
+                locked,
+                at,
+                home: l.contains("(home:"),
+            })
+        })
+        .collect()
+}
+
+/// What a failed control write says: `/sys/fs/milkfs/error` is one line `CONTROL: ERRNO: reason`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlError {
+    pub control: String,
+    pub errno_name: String,
+    pub reason: String,
+}
+
+pub fn parse_error(text: &str) -> Option<ControlError> {
+    let line = text.lines().next()?.trim();
+    let (control, rest) = line.split_once(": ")?;
+    let (errno_name, reason) = rest.split_once(": ")?;
+    if control.contains(' ') || reason.is_empty() {
+        return None;
+    }
+    Some(ControlError {
+        control: control.to_string(),
+        errno_name: errno_name.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
+/// Who is using a volume, from a lock refusal's reason:
+/// "vdb (Vault) is in use: pid 16 (sleep): 1 open file; pid 10 (msh): working directory".
+pub fn holders(reason: &str) -> Vec<String> {
+    match reason.split_once(" is in use: ") {
+        Some((_, list)) => list
+            .split("; ")
+            .map(|h| h.trim().to_string())
+            .filter(|h| !h.is_empty())
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The text to write to `lock`: the device name.
+pub fn lock_request(device: &str) -> String {
+    device.to_string()
 }
 
 /// The text to write to `unlock` for a passphrase or recovery key (a device name picks which one).
@@ -169,6 +257,50 @@ mod tests {
         b.state = "BROKEN (read-only)".into();
         assert!(!b.healthy());
         assert_eq!(VolumeInfo::default().used_pct10(), 0);
+    }
+
+    #[test]
+    fn encryption_details() {
+        let t = alloc::format!(
+            "{INFO}encryption:  on\nlocked:      no\ncipher:      xchacha20-siv (per block; tag HMAC-SHA256/64)\nkey wrap:    xchacha20-poly1305\nkdf:         scrypt N=2^16 r=8 p=4\nkey slots:   1 passphrase, 1 recovery\n"
+        );
+        let v = parse_info(&t).unwrap();
+        assert_eq!(v.encrypted, Some(true));
+        assert_eq!(v.kdf, "scrypt N=2^16 r=8 p=4");
+        assert_eq!(v.key_slots, "1 passphrase, 1 recovery");
+        assert!(v.cipher.starts_with("xchacha20-siv"));
+        let off = parse_info(&alloc::format!("{INFO}encryption:  off\n")).unwrap();
+        assert_eq!((off.encrypted, off.cipher.as_str()), (Some(false), ""));
+    }
+
+    #[test]
+    fn lock_file_and_errors() {
+        let l = parse_lock(
+            "vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)\nvdb Vault unlocked at=/Volumes/Vault\nvdd Old locked\njunk\n",
+        );
+        assert_eq!(l.len(), 3);
+        assert!(l[0].home && !l[0].locked);
+        assert_eq!(
+            (l[1].at.as_deref(), l[1].home),
+            (Some("/Volumes/Vault"), false)
+        );
+        assert!(l[2].locked && l[2].at.is_none());
+        let e = parse_error("lock: EBUSY: vdb (Vault) is in use: pid 16 (sleep): 1 open file; pid 10 (msh): working directory\n").unwrap();
+        assert_eq!(
+            (e.control.as_str(), e.errno_name.as_str()),
+            ("lock", "EBUSY")
+        );
+        assert_eq!(
+            holders(&e.reason),
+            [
+                "pid 16 (sleep): 1 open file",
+                "pid 10 (msh): working directory"
+            ]
+        );
+        assert!(holders("no such thing").is_empty());
+        assert_eq!(parse_error(""), None);
+        assert_eq!(parse_error("garbage"), None);
+        assert_eq!(lock_request("vdb"), "vdb");
     }
 
     #[test]

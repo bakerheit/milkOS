@@ -726,7 +726,7 @@ impl App {
                 body,
                 danger,
             } => {
-                let r = self.frame(win, 520, 190, title, false);
+                let r = self.frame(win, 560, 130 + 22 * body.len() as i32, title, false);
                 for (i, l) in body.iter().enumerate() {
                     win.text(
                         r.x + 20,

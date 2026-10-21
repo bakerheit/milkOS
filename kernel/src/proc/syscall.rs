@@ -5,18 +5,17 @@
 //! preempted and can block); a pending reschedule is honoured on the way back to EL0.
 //! User memory is only touched through `UserSpace::copy_in/copy_out`, which validate it.
 //! Unknown numbers return ENOSYS and are logged once per number.
-//!
-//! The one non-Linux call is `MILK_PS` (4096), used by `ps` until /proc has per-process
-//! directories.
+//! There are no milkOS-specific syscalls: process information comes from /proc.
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::current;
 use super::errno::*;
+use super::signal;
 use super::uspace::{Perm, UserSpace};
-use super::{PState, current};
 use crate::exceptions::{self, TrapFrame};
 use crate::fs::{self, InodeRef, InodeType, OpenFile, abi};
 use crate::sched;
@@ -30,8 +29,16 @@ pub mod nr {
     pub const IOCTL: u64 = 29;
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
+    pub const SYMLINKAT: u64 = 36;
+    pub const LINKAT: u64 = 37;
+    pub const FTRUNCATE: u64 = 46;
+    pub const FCHMODAT: u64 = 53;
+    pub const FCHDIR: u64 = 50;
+    pub const UTIMENSAT: u64 = 88;
+    pub const RENAMEAT2: u64 = 276;
     pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
+    pub const PIPE2: u64 = 59;
     pub const CLOSE: u64 = 57;
     pub const GETDENTS64: u64 = 61;
     pub const LSEEK: u64 = 62;
@@ -41,6 +48,7 @@ pub mod nr {
     pub const WRITEV: u64 = 66;
     pub const PREAD64: u64 = 67;
     pub const PWRITE64: u64 = 68;
+    pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
     pub const EXIT: u64 = 93;
@@ -51,8 +59,17 @@ pub mod nr {
     pub const CLOCK_GETRES: u64 = 114;
     pub const CLOCK_NANOSLEEP: u64 = 115;
     pub const SCHED_YIELD: u64 = 124;
+    pub const KILL: u64 = 129;
+    pub const TKILL: u64 = 130;
+    pub const TGKILL: u64 = 131;
     pub const RT_SIGACTION: u64 = 134;
     pub const RT_SIGPROCMASK: u64 = 135;
+    pub const RT_SIGPENDING: u64 = 136;
+    pub const RT_SIGRETURN: u64 = 139;
+    pub const SETPGID: u64 = 154;
+    pub const GETPGID: u64 = 155;
+    pub const GETSID: u64 = 156;
+    pub const SETSID: u64 = 157;
     pub const UNAME: u64 = 160;
     pub const GETTIMEOFDAY: u64 = 169;
     pub const GETPID: u64 = 172;
@@ -70,8 +87,6 @@ pub mod nr {
     pub const MPROTECT: u64 = 226;
     pub const WAIT4: u64 = 260;
     pub const GETRANDOM: u64 = 278;
-    /// milkOS: fill an array of `PsEntry` (see `sys_ps`).
-    pub const MILK_PS: u64 = 4096;
     /// milkOS desktop windows (wm/client.rs, docs/processes.md): create, commit, event,
     /// title, destroy.
     pub const MILK_WIN_CREATE: u64 = 4100;
@@ -109,9 +124,7 @@ fn handle(frame: &mut TrapFrame, imm: u16) {
         Err(e) => e.neg() as u64,
     };
     sync::irq_disable();
-    if sched::need_resched() {
-        sched::yield_now();
-    }
+    // Rescheduling and signal delivery happen in proc::on_user_return.
 }
 
 fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
@@ -120,6 +133,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
     ];
     let (a0, a1, a2, a3) = (a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize);
     match nr {
+        n if super::sock::handles(n) => super::sock::dispatch(n, a),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),
@@ -142,11 +156,26 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             drop(e);
             Ok(0)
         }
-        nr::LSEEK => Ok(file(a[0] as i64)?.seek(a[1] as i64, a[2] as u32)? as usize),
+        nr::LSEEK => {
+            let f = file(a[0] as i64)?;
+            if f.inode().kind() == InodeType::Fifo {
+                return Err(ESPIPE);
+            }
+            Ok(f.seek(a[1] as i64, a[2] as u32)? as usize)
+        }
+        nr::PIPE2 => sys_pipe2(a0, a[1] as u32),
         nr::FSTAT => {
             let st = file(a[0] as i64)?.stat().to_linux();
             copy_out(a1, st.as_bytes())?;
             Ok(0)
+        }
+        nr::READLINKAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let t = fs::readlink_at(base.as_ref(), &path)?;
+            let n = t.len().min(a3);
+            copy_out(a2, &t.as_bytes()[..n])?;
+            Ok(n)
         }
         nr::NEWFSTATAT => sys_newfstatat(a[0] as i32 as i64, a1, a2, a[3] as u32),
         nr::GETDENTS64 => {
@@ -191,6 +220,52 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             }
             Ok(0)
         }
+        nr::SYMLINKAT => {
+            let target = user_path(a0)?;
+            let path = user_path(a2)?;
+            let base = base(a[1] as i32 as i64)?;
+            fs::symlink_at(&target, base.as_ref(), &path)?;
+            Ok(0)
+        }
+        nr::LINKAT => {
+            let (old, new) = (user_path(a1)?, user_path(a3)?);
+            let (ob, nb) = (base(a[0] as i32 as i64)?, base(a[2] as i32 as i64)?);
+            let follow = a[4] as u32 & abi::AT_SYMLINK_FOLLOW != 0;
+            fs::link_at(ob.as_ref(), &old, nb.as_ref(), &new, follow)?;
+            Ok(0)
+        }
+        nr::RENAMEAT2 => {
+            if a[4] != 0 {
+                return Err(EINVAL); // RENAME_NOREPLACE / EXCHANGE: not yet
+            }
+            let (old, new) = (user_path(a1)?, user_path(a3)?);
+            let (ob, nb) = (base(a[0] as i32 as i64)?, base(a[2] as i32 as i64)?);
+            fs::rename_at(ob.as_ref(), &old, nb.as_ref(), &new)?;
+            Ok(0)
+        }
+        nr::FTRUNCATE => {
+            file(a[0] as i64)?.truncate(a1 as u64)?;
+            Ok(0)
+        }
+        nr::FCHMODAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let attr = fs::SetAttr {
+                perm: Some(a[2] as u32 & 0o7777),
+                ..Default::default()
+            };
+            fs::setattr_at(base.as_ref(), &path, true, &attr)?;
+            Ok(0)
+        }
+        nr::FCHDIR => {
+            let ino = file(a[0] as i64)?.inode().clone();
+            if ino.kind() != InodeType::Dir {
+                return Err(ENOTDIR);
+            }
+            current().inner.lock().cwd = ino;
+            Ok(0)
+        }
+        nr::UTIMENSAT => sys_utimensat(a[0] as i32 as i64, a1, a2, a[3] as u32),
         nr::DUP => {
             let p = current();
             let mut i = p.inner.lock();
@@ -216,24 +291,16 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
 
         nr::EXIT | nr::EXIT_GROUP => super::exit_current(super::wstatus_exited(a[0] as i32)),
         nr::SET_TID_ADDRESS => Ok(sched::current_tid() as usize),
-        nr::NANOSLEEP => {
-            let ns = read_timespec(a0)?;
-            sched::sleep_ns(ns);
-            if a1 != 0 {
-                copy_out(a1, &[0u8; 16])?;
-            }
-            Ok(0)
-        }
+        nr::NANOSLEEP => sleep_interruptible(read_timespec(a0)?, a1),
         nr::CLOCK_NANOSLEEP => {
             const TIMER_ABSTIME: u64 = 1;
             let ns = read_timespec(a2)?;
             if a[1] & TIMER_ABSTIME != 0 {
                 let now = clock_ns(a[0] as u32)?;
-                sched::sleep_ns(ns.saturating_sub(now));
+                sleep_interruptible(ns.saturating_sub(now), 0)
             } else {
-                sched::sleep_ns(ns);
+                sleep_interruptible(ns, a3)
             }
-            Ok(0)
         }
         nr::CLOCK_GETTIME => {
             let ns = clock_ns(a[0] as u32)?;
@@ -260,15 +327,75 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             sched::yield_now();
             Ok(0)
         }
-        // No signals yet: accept and ignore, so libc start-up code is happy.
-        nr::RT_SIGACTION | nr::RT_SIGPROCMASK => {
-            if nr == nr::RT_SIGPROCMASK && a2 != 0 {
-                copy_out(a2, &[0u8; 8])?;
-            }
-            if nr == nr::RT_SIGACTION && a2 != 0 {
-                copy_out(a2, &[0u8; 32])?;
+        nr::RT_SIGACTION => {
+            let new = if a1 != 0 {
+                let b = copy_in(a1, 32)?;
+                let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                Some(signal::SigAction {
+                    handler: w(0),
+                    flags: w(1),
+                    restorer: w(2),
+                    mask: w(3),
+                })
+            } else {
+                None
+            };
+            let old = signal::sigaction(a[0] as u32, new)?;
+            if a2 != 0 {
+                copy_out(
+                    a2,
+                    &words(&[old.handler, old.flags, old.restorer, old.mask]),
+                )?;
             }
             Ok(0)
+        }
+        nr::RT_SIGPROCMASK => {
+            let set = if a1 != 0 {
+                Some(u64::from_le_bytes(copy_in(a1, 8)?.try_into().unwrap()))
+            } else {
+                None
+            };
+            let old = signal::sigprocmask(a[0] as u32, set)?;
+            if a2 != 0 {
+                copy_out(a2, &old.to_le_bytes())?;
+            }
+            Ok(0)
+        }
+        nr::RT_SIGPENDING => {
+            copy_out(a0, &signal::pending().to_le_bytes())?;
+            Ok(0)
+        }
+        nr::RT_SIGRETURN => signal::sigreturn(frame),
+        nr::KILL => signal::kill(a[0] as i32 as i64, a[1] as u32).map(|_| 0),
+        // One thread per process: a tid names its process.
+        nr::TKILL => signal::kill(tid_to_pid(a[0] as u32)? as i64, a[1] as u32).map(|_| 0),
+        nr::TGKILL => signal::kill(a[0] as i32 as i64, a[2] as u32).map(|_| 0),
+        nr::SETPGID => sys_setpgid(a[0] as u32, a[1] as u32),
+        nr::GETPGID => {
+            let p = if a[0] == 0 {
+                current()
+            } else {
+                super::get(a[0] as u32).ok_or(ESRCH)?
+            };
+            Ok(p.inner.lock().pgid as usize)
+        }
+        nr::GETSID => {
+            let p = if a[0] == 0 {
+                current()
+            } else {
+                super::get(a[0] as u32).ok_or(ESRCH)?
+            };
+            Ok(p.inner.lock().sid as usize)
+        }
+        nr::SETSID => {
+            let p = current();
+            if super::all().iter().any(|q| q.inner.lock().pgid == p.pid) {
+                return Err(EPERM); // already a group leader
+            }
+            let mut i = p.inner.lock();
+            i.pgid = p.pid;
+            i.sid = p.pid;
+            Ok(p.pid as usize)
         }
         nr::UNAME => sys_uname(a0),
         nr::GETPID => Ok(sched::current_pid() as usize),
@@ -313,7 +440,6 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             copy_out(a0, &buf[..n])?;
             Ok(n)
         }
-        nr::MILK_PS => sys_ps(a0, a1),
         nr::MILK_WIN_CREATE => sys_win_create(a0, a1, a2, a3, a[4] as usize),
         nr::MILK_WIN_COMMIT => {
             let r = crate::gfx::Rect::new(a1 as i32, a2 as i32, a3 as i32, a[4] as i32);
@@ -411,13 +537,13 @@ fn with_space<R>(f: impl FnOnce(&mut UserSpace) -> KResult<R>) -> KResult<R> {
     f(i.space.as_mut().ok_or(ESRCH)?)
 }
 
-fn copy_in(va: usize, len: usize) -> KResult<Vec<u8>> {
+pub(super) fn copy_in(va: usize, len: usize) -> KResult<Vec<u8>> {
     let mut v = alloc::vec![0u8; len];
     with_space(|s| s.copy_in(va, &mut v))?;
     Ok(v)
 }
 
-fn copy_out(va: usize, data: &[u8]) -> KResult<()> {
+pub(super) fn copy_out(va: usize, data: &[u8]) -> KResult<()> {
     with_space(|s| s.copy_out(va, data))
 }
 
@@ -429,7 +555,7 @@ fn words(w: &[u64]) -> Vec<u8> {
     w.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-fn file(fd: i64) -> KResult<Arc<OpenFile>> {
+pub(super) fn file(fd: i64) -> KResult<Arc<OpenFile>> {
     current().inner.lock().fds.get(fd)
 }
 
@@ -474,6 +600,59 @@ fn clock_ns(id: u32) -> KResult<u64> {
         2 | 3 => Ok(sched::current_cpu_ns()),
         _ => Err(EINVAL),
     }
+}
+
+/// nanosleep that a signal can cut short (EINTR, remaining time in `rem`).
+fn sleep_interruptible(ns: u64, rem: usize) -> KResult<usize> {
+    static NOBODY: sched::WaitQueue = sched::WaitQueue::new();
+    let start = timer::now_ns();
+    if NOBODY.wait_until_timeout(signal::interrupted, ns) {
+        if rem != 0 {
+            let left = ns.saturating_sub(timer::now_ns() - start);
+            write_timespec(rem, left)?;
+        }
+        return Err(EINTR);
+    }
+    Ok(0)
+}
+
+fn tid_to_pid(tid: u32) -> KResult<u32> {
+    sched::threads()
+        .into_iter()
+        .find(|t| t.tid == tid && t.pid != 0)
+        .map(|t| t.pid)
+        .ok_or(ESRCH)
+}
+
+/// setpgid(pid, pgid): only on yourself or your children, within your session.
+fn sys_setpgid(pid: u32, pgid: u32) -> KResult<usize> {
+    let me = current();
+    let target = if pid == 0 || pid == me.pid {
+        me.clone()
+    } else {
+        let t = super::get(pid).ok_or(ESRCH)?;
+        if t.inner.lock().ppid != me.pid {
+            return Err(ESRCH);
+        }
+        t
+    };
+    let pgid = if pgid == 0 { target.pid } else { pgid };
+    let my_sid = me.inner.lock().sid;
+    // Joining an existing group: it must be in our session.
+    if pgid != target.pid
+        && !super::all().iter().any(|q| {
+            let i = q.inner.lock();
+            i.pgid == pgid && i.sid == my_sid
+        })
+    {
+        return Err(EPERM);
+    }
+    let mut i = target.inner.lock();
+    if i.sid != my_sid || i.sid == target.pid {
+        return Err(EPERM); // other session, or a session leader
+    }
+    i.pgid = pgid;
+    Ok(0)
 }
 
 fn prot_to_perm(prot: u32) -> Option<Perm> {
@@ -569,6 +748,40 @@ fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> 
     Ok(fd as usize)
 }
 
+fn sys_pipe2(fds: usize, flags: u32) -> KResult<usize> {
+    if flags & !(abi::O_CLOEXEC | abi::O_NONBLOCK) != 0 {
+        return Err(EINVAL);
+    }
+    let nb = flags & abi::O_NONBLOCK;
+    let (r, w) = super::pipe::new(nb != 0);
+    let r = Arc::new(OpenFile::new(r, abi::O_RDONLY | nb));
+    let w = Arc::new(OpenFile::new(w, abi::O_WRONLY | nb));
+    let cloexec = flags & abi::O_CLOEXEC != 0;
+    let (rfd, wfd) = {
+        let p = current();
+        let mut i = p.inner.lock();
+        let rfd = i.fds.alloc(r, cloexec)?;
+        match i.fds.alloc(w, cloexec) {
+            Ok(wfd) => (rfd, wfd),
+            Err(e) => {
+                let _ = i.fds.close(rfd);
+                return Err(e);
+            }
+        }
+    };
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&(rfd as i32).to_le_bytes());
+    out[4..].copy_from_slice(&(wfd as i32).to_le_bytes());
+    if let Err(e) = copy_out(fds, &out) {
+        let p = current();
+        let mut i = p.inner.lock();
+        let _ = i.fds.close(rfd);
+        let _ = i.fds.close(wfd);
+        return Err(e);
+    }
+    Ok(0)
+}
+
 fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResult<usize> {
     let path = user_path(path)?;
     let st = if path.is_empty() && flags & abi::AT_EMPTY_PATH != 0 {
@@ -578,6 +791,41 @@ fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResul
         fs::stat_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?
     };
     copy_out(statbuf, st.to_linux().as_bytes())?;
+    Ok(0)
+}
+
+fn sys_utimensat(dirfd: i64, path: usize, times: usize, flags: u32) -> KResult<usize> {
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+    let now = fs::clock::now();
+    let (atime, mtime) = if times == 0 {
+        (Some(now), Some(now))
+    } else {
+        let b = copy_in(times, 32)?;
+        let ts = |o: usize| {
+            let sec = i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(b[o + 8..o + 16].try_into().unwrap());
+            match nsec {
+                UTIME_OMIT => None,
+                UTIME_NOW => Some(now),
+                _ => Some(fs::Timespec { sec, nsec }),
+            }
+        };
+        (ts(0), ts(16))
+    };
+    let attr = fs::SetAttr {
+        atime,
+        mtime,
+        ..Default::default()
+    };
+    let follow = flags & abi::AT_SYMLINK_NOFOLLOW == 0;
+    if path == 0 {
+        // futimens(fd, ...)
+        return file(dirfd)?.inode().setattr(&attr).map(|_| 0);
+    }
+    let p = user_path(path)?;
+    let base = base(dirfd)?;
+    fs::setattr_at(base.as_ref(), &p, follow, &attr)?;
     Ok(0)
 }
 
@@ -610,30 +858,23 @@ fn sys_fcntl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     }
 }
 
-fn is_console(f: &OpenFile) -> bool {
+fn tty_of(f: &OpenFile) -> Option<&'static super::tty::Tty> {
     let st = f.stat();
-    st.kind == InodeType::CharDev && st.rdev == fs::node::makedev(5, 1)
+    (st.kind == InodeType::CharDev)
+        .then(|| super::tty::by_rdev(st.rdev))
+        .flatten()
 }
 
 fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
     let f = file(fd)?;
-    if is_console(&f) {
-        let out = super::console::ioctl(cmd)?;
-        if arg != 0 {
-            copy_out(arg, &out)?;
-        }
-        return Ok(0);
-    }
-    // The desktop Terminal's tty (wm/tty.rs): termios and window size.
-    if crate::wm::tty::is_tty1(&f.stat()) {
-        let n = crate::wm::tty::ioctl_in_len(cmd);
-        let input = if n > 0 && arg != 0 {
-            copy_in(arg, n)?
-        } else {
-            Vec::new()
+    if let Some(tty) = tty_of(&f) {
+        let input = match super::tty::ioctl_in_size(cmd) {
+            0 => Vec::new(),
+            n => copy_in(arg, n)?,
         };
-        let out = crate::wm::tty::ioctl(cmd, &input).ok_or(ENOTTY)?;
-        if arg != 0 && !out.is_empty() {
+        if let Some(out) = tty.ioctl(cmd, &input)?
+            && arg != 0
+        {
             copy_out(arg, &out)?;
         }
         return Ok(0);
@@ -686,61 +927,4 @@ fn sys_uname(buf: usize) -> KResult<usize> {
     }
     copy_out(buf, &u)?;
     Ok(0)
-}
-
-/// One `MILK_PS` record (48 bytes, little endian):
-/// `pid u32, ppid u32, tid u32, state u8 ('R' 'S' 'Z'), kernel u8, pad u16,
-///  cpu_ns u64, rss_bytes u64, name [u8; 16]`.
-/// Kernel threads have pid 0 and kernel = 1. Returns the number of records written.
-fn sys_ps(buf: usize, len: usize) -> KResult<usize> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut rec =
-        |pid: u32, ppid: u32, tid: u32, st: u8, kern: bool, cpu: u64, rss: u64, name: &[u8; 16]| {
-            out.extend_from_slice(&pid.to_le_bytes());
-            out.extend_from_slice(&ppid.to_le_bytes());
-            out.extend_from_slice(&tid.to_le_bytes());
-            out.push(st);
-            out.push(kern as u8);
-            out.extend_from_slice(&[0, 0]);
-            out.extend_from_slice(&cpu.to_le_bytes());
-            out.extend_from_slice(&rss.to_le_bytes());
-            out.extend_from_slice(name);
-        };
-    for t in sched::threads() {
-        if t.state == sched::State::Dead {
-            continue;
-        }
-        let mut name = [0u8; 16];
-        let n = t.name.as_str().as_bytes();
-        name[..n.len()].copy_from_slice(n);
-        let (ppid, rss) = match super::get(t.pid).filter(|_| t.pid != 0) {
-            Some(p) => {
-                let i = p.inner.lock();
-                (i.ppid, i.space.as_ref().map_or(0, |s| s.resident()) as u64)
-            }
-            None => (0, 0),
-        };
-        rec(
-            t.pid,
-            ppid,
-            t.tid,
-            t.state.letter() as u8,
-            t.pid == 0,
-            t.cpu_ns,
-            rss,
-            &name,
-        );
-    }
-    for p in super::all() {
-        let i = p.inner.lock();
-        if let PState::Zombie(_) = i.state {
-            let mut name = [0u8; 16];
-            let n = i.name.as_str().as_bytes();
-            name[..n.len()].copy_from_slice(n);
-            rec(p.pid, i.ppid, i.tid, b'Z', false, 0, 0, &name);
-        }
-    }
-    let n = (len / 48).min(out.len() / 48);
-    copy_out(buf, &out[..n * 48])?;
-    Ok(n)
 }

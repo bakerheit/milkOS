@@ -25,6 +25,7 @@ mod klog;
 mod mem;
 mod memtest;
 mod mmu;
+mod net;
 mod pmm;
 mod proc;
 mod ramfb;
@@ -94,6 +95,8 @@ pub extern "C" fn kmain() -> ! {
     fs::selftest::run();
     sched::init();
     sched::selftest::run();
+    net::init();
+    net::selftest::run();
     proc::init();
     proc::start_init();
 

@@ -1,0 +1,12 @@
+[package]
+name = "snap"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "snap"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

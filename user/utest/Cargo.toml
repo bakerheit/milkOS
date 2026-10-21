@@ -1,0 +1,12 @@
+[package]
+name = "utest"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "utest"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

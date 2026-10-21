@@ -127,6 +127,23 @@ impl SynthDir {
         self.add_file(name, move || text.clone());
     }
 
+    /// A control file: reads give `read()`, each `write(2)` passes its bytes to `write`
+    /// (whose error is the write's error). Opening with O_TRUNC is fine.
+    pub fn add_control(
+        &self,
+        name: &str,
+        read: impl Fn() -> String + Send + Sync + 'static,
+        write: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+    ) {
+        let f = Arc::new(CtlFile {
+            dev: self.ids.dev,
+            ino: self.ids.next(),
+            read: Box::new(read),
+            write: Box::new(write),
+        });
+        self.add(name, f);
+    }
+
     pub fn add_symlink(&self, name: &str, target: &str) {
         let l = Arc::new(SynthLink {
             dev: self.ids.dev,
@@ -255,5 +272,47 @@ impl Inode for SynthLink {
     }
     fn readlink(&self) -> Result<String> {
         Ok(self.target.clone())
+    }
+}
+
+type ReadFn = Box<dyn Fn() -> String + Send + Sync>;
+type WriteFn = Box<dyn Fn(&[u8]) -> Result<()> + Send + Sync>;
+
+/// See [`SynthDir::add_control`].
+pub struct CtlFile {
+    dev: u64,
+    ino: u64,
+    read: ReadFn,
+    write: WriteFn,
+}
+
+impl Inode for CtlFile {
+    fn ino(&self) -> u64 {
+        self.ino
+    }
+    fn dev(&self) -> u64 {
+        self.dev
+    }
+    fn kind(&self) -> InodeType {
+        InodeType::File
+    }
+    fn stat(&self) -> Stat {
+        Stat::new(self.dev, self.ino, InodeType::File, 0o644)
+    }
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize> {
+        let text = (self.read)();
+        let Some(rest) = text.as_bytes().get(off as usize..) else {
+            return Ok(0);
+        };
+        let n = rest.len().min(buf.len());
+        buf[..n].copy_from_slice(&rest[..n]);
+        Ok(n)
+    }
+    fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
+        (self.write)(buf)?;
+        Ok(buf.len())
+    }
+    fn truncate(&self, _len: u64) -> Result<()> {
+        Ok(())
     }
 }

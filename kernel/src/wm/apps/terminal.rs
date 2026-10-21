@@ -332,7 +332,8 @@ impl WindowContents for Terminal {
         let cols = ((w - 2 * PAD) / 8).max(4) as usize;
         let rows = ((h - 2 * PAD + 2) / LINE_H).max(1) as usize;
         if self.tty {
-            super::super::tty::set_winsize(cols as u16, rows as u16, w as u16, h as u16);
+            // Tell programs on /dev/tty1 (TIOCGWINSZ); SIGWINCH only on a real change.
+            super::super::tty::set_winsize(rows as u16, cols as u16);
         }
         // The prompt line (with the cursor) is the last visual row.
         let prompt = if self.tty {

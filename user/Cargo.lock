@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "coreutils"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "desk"
 version = "0.0.1"
 dependencies = [
@@ -11,6 +18,13 @@ dependencies = [
 
 [[package]]
 name = "fault"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "fetch"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -57,7 +71,21 @@ name = "rt"
 version = "0.0.1"
 
 [[package]]
+name = "snap"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "stty"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "utest"
 version = "0.0.1"
 dependencies = [
  "rt",

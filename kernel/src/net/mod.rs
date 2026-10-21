@@ -23,6 +23,7 @@ pub mod arp;
 pub mod dhcp;
 pub mod dns;
 pub mod errno;
+pub mod frag;
 pub mod icmp;
 pub mod iface;
 pub mod procnet;
@@ -84,6 +85,10 @@ pub struct Stats {
 pub struct Stack {
     pub iface: Iface,
     pub socks: socket::Table,
+    /// TCP connections in TIME_WAIT (no socket slot of their own).
+    pub tw: tcp::TwTable,
+    /// IP datagrams being reassembled.
+    pub frags: frag::Reasm,
     pub dhcp: dhcp::Dhcp,
     pub ping: icmp::PingTable,
     pub stats: Stats,
@@ -129,6 +134,8 @@ fn new_stack() -> Box<Stack> {
     Box::new(Stack {
         iface: Iface::new(),
         socks: socket::Table::new(),
+        tw: tcp::TwTable::new(),
+        frags: frag::Reasm::new(),
         dhcp: dhcp::Dhcp::new(),
         ping: icmp::PingTable::new(),
         stats: Stats::default(),
@@ -218,6 +225,8 @@ fn net_thread() {
             st.iface.tick(now);
             dhcp::tick(st);
             tcp::tick(st);
+            st.frags.expire(now);
+            st.stats.ip_reasm_fails = st.frags.stats.fails;
         });
         if let Some(h) = http.as_mut() {
             services::run(h);
@@ -260,14 +269,15 @@ pub fn init() {
         drop(sched::spawn_prio("net", sched::Priority::High, net_thread));
     }
     kprintln!(
-        "[net] stack up: lo{}, {} sockets x 2 x {} KiB buffers, net thread started",
+        "[net] stack up: lo{}, {} sockets, buffers {} KiB auto-sized up to {} MiB, net thread started",
         match (have_dev, eth1) {
             (true, true) => " + eth0 (DHCP started) + eth1 (link-local)",
             (true, false) => " + eth0 (DHCP started)",
             _ => " only (no NIC)",
         },
         socket::MAX_SOCKETS,
-        socket::BUF_SIZE / 1024
+        socket::BUF_SIZE / 1024,
+        socket::MAX_BUF >> 20
     );
 }
 
@@ -287,11 +297,17 @@ impl Stack {
         let now = self.now;
         let mut d = now + 1_000_000_000;
         for (_, s) in self.socks.iter() {
-            if s.ty == socket::SockType::Stream {
-                for t in [s.tcb.timer, s.tcb.deadline].into_iter().flatten() {
-                    d = d.min(t);
-                }
+            if s.ty == socket::SockType::Stream
+                && let Some(t) = tcp::next_timer(&s.tcb)
+            {
+                d = d.min(t);
             }
+        }
+        if let Some(t) = self.tw.next_deadline() {
+            d = d.min(t);
+        }
+        if let Some(t) = self.frags.next_deadline() {
+            d = d.min(t);
         }
         if let Some(t) = self.dhcp.next_deadline() {
             d = d.min(t);
@@ -406,8 +422,12 @@ impl Stack {
             return;
         }
         if be16(pkt, 6) & 0x3fff != 0 {
-            // MF set or non-zero offset: we do not reassemble.
-            self.stats.ip_reasm_fails += 1;
+            // A fragment (MF set or a non-zero offset): reassemble (net::frag).
+            match self.frags.input(self.now, &pkt[..total], ihl, total) {
+                frag::Outcome::Done(whole) => self.ip_input(link, &whole, from_lo),
+                frag::Outcome::Pending | frag::Outcome::Dropped => {}
+            }
+            self.stats.ip_reasm_fails = self.frags.stats.fails;
             return;
         }
         let proto = pkt[9];
@@ -439,6 +459,40 @@ impl Stack {
                 }
             }
         }
+    }
+
+    /// Feed a raw IP packet in as if it had arrived on loopback (the self-test's crafted
+    /// fragments).
+    pub fn inject(&mut self, pkt: &[u8]) {
+        self.ip_input(None, pkt, true);
+    }
+
+    /// Send `payload` (a whole L4 datagram, too big for one packet) as IP fragments of
+    /// 1480 bytes (DF clear). Ok means every fragment was sent or queued.
+    pub fn send_ip_fragments(
+        &mut self,
+        src: Ipv4,
+        dst: Ipv4,
+        proto: u8,
+        payload: &[u8],
+    ) -> crate::fs::errno::Result<()> {
+        const CHUNK: usize = iface::MTU - IP_HDR; // 1480, a multiple of 8
+        let id = self.iface.next_ip_id();
+        self.stats.ip_out_requests += 1;
+        for (k, part) in payload.chunks(CHUNK).enumerate() {
+            let f = iface::Frag {
+                id,
+                off8: (k * CHUNK / 8) as u16,
+                more: (k + 1) * CHUNK < payload.len(),
+            };
+            self.frags.stats.creates += 1;
+            self.iface
+                .send_ip_ex(self.now, src, dst, proto, Some(f), |b| {
+                    b[..part.len()].copy_from_slice(part);
+                    part.len()
+                })?;
+        }
+        Ok(())
     }
 
     /// Send an IPv4 packet from `src` (unspecified = pick) to `dst`. Counts it.

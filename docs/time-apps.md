@@ -20,6 +20,7 @@ hand-edited file cannot lock an app. Writes go to a sibling file and are renamed
 | File | Written by | Lines |
 | --- | --- | --- |
 | `~/Library/Calendar/<Name>.cal` (one per calendar) | Calendar, `cal` | `calendar name colour [hidden]`, then `event id date start end repeat[:every] until alert title notes` |
+| `~/Library/Reminders/<Name>.rem` (one per list) | `remind` (Reminders app later) | `list name colour`, then `reminder id due time repeat[:every] until done alert title notes` |
 | `~/Library/Clock/alarms` | Clock, `alarm`, alarmd (switches off "once" alarms) | `alarm id HH:MM days on\|off label` |
 | `~/Library/Clock/timers` | Clock, `timer`, alarmd (removes finished ones) | `boot id`, then `timer id running\|paused deadline_ms\|remaining_ms total_ms label` |
 | `~/Library/Clock/recent` | Clock | custom timer minutes, newest first |
@@ -31,6 +32,12 @@ Calendars: `colour` is straw, matcha, blue, honey or lav. With no files the thre
 `alert` is minutes before the start (0 = at the time; an all-day event alerts at 09:00). A monthly
 event on the 31st happens on the last day of shorter months, a yearly 29 February on the 28th in
 other years. A hidden calendar is not drawn but still alerts.
+
+Reminders: `due` is a day or `-`, `time` is `HH:MM` or `-` (a due day without a time rings at 09:00),
+`done` is `-` or the day it was completed, `alert` is 1 (rings) or 0. Completing a repeating reminder moves its
+due day to the next one after today (skipping what was missed) instead of closing it; the last
+occurrence (past `until`) closes it. alarmd rings a reminder once, when its time passes; done ones
+never ring.
 
 Alarms: `days` is a weekday mask (bit 0 Monday ... bit 6 Sunday); 0 means once, and the alarm
 switches itself off after it rings. "Snooze 9 min" adds a once alarm.
@@ -57,6 +64,7 @@ paused is caught up, at most ten minutes of it; a clock stepped backwards rings 
 ```
 alarm [list] | add HH:MM [once|daily|weekdays|weekends|mon,wed,fri] [label] | add in 5m [label] | rm|on|off ID
 timer [list] | DURATION [label] (5m, 1h30m, 90s) | pause|resume|reset|rm ID
+remind [list [NAME]] | lists | add [--list NAME] [WHEN [HH:MM] | in 5m] TITLE [--repeat daily|weekly|monthly|yearly[:N]] [--until DATE] [--flag] | done|undone|flag|rm ID
 cal | cal MONTH YEAR | cal list [DAYS] | cal add WHEN [HH:MM[-HH:MM]] TITLE [--repeat daily|weekly|monthly|yearly[:N]] [--until DATE] [--alert MIN] | cal add in 5m TITLE | cal rm ID
 ```
 
@@ -90,6 +98,16 @@ the spec's 400, the search field is in the sidebar (no room in the toolbar), tim
 and world clocks are left out (the machine has no time zone setting). Stubbed until the
 window-system engineer lands them: a Snooze/Open action on the toast, a menu bar item that shows
 a running timer, and the Today card hook; alarmd and Clock work without them.
+
+**Reminders** (780x620): smart lists Today (due today plus overdue), Scheduled (grouped by day) and
+All, then your lists (Personal, Home, Work to start; Add list takes any accent colour). A quick-add
+field takes a title followed by a day, a time and a repeat in plain words ("Call mum tomorrow at
+5pm", "Water plants every 2 weeks", "Rent +3d 09:00"; `timekit::quickadd`), and a preview line shows
+how it was understood before Return adds it. Click a row to select it and again to edit in place
+(title, notes, date, time, repeat, list, alert); Space completes the selected row (a repeating one
+moves to its next day), Delete removes it with a 5 second Undo, and completed ones are in a
+collapsible group. alarmd rings each reminder once at its time (09:00 when it has a day only).
+Missing until the window system lands them: the toast's Done and Snooze actions and the Today card.
 
 ## Tests
 

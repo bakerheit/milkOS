@@ -11,11 +11,13 @@ use crate::fs::errno::Result;
 pub const HDR: usize = 8;
 /// Largest payload without IP fragmentation (1500 - 20 - 8).
 pub const MAX_PAYLOAD: usize = MTU - 20 - HDR;
+/// Largest datagram payload at all (65535 - 20 - 8): bigger ones go out as IP fragments.
+pub const MAX_DATAGRAM: usize = 65535 - 20 - HDR;
 const REC_HDR: usize = 8;
 
 /// Send one datagram from `src` to `dst` (no socket involved; DHCP uses this directly).
 pub fn send_raw(st: &mut Stack, src: SockAddr, dst: SockAddr, data: &[u8]) -> Result<()> {
-    if data.len() > MAX_PAYLOAD {
+    if data.len() > MAX_DATAGRAM {
         return Err(EMSGSIZE);
     }
     let src_ip = if src.ip.is_unspecified() && !dst.ip.is_broadcast() {
@@ -24,6 +26,21 @@ pub fn send_raw(st: &mut Stack, src: SockAddr, dst: SockAddr, data: &[u8]) -> Re
         src.ip
     };
     st.stats.udp_out_datagrams += 1;
+    if data.len() > MAX_PAYLOAD {
+        // Too big for one packet: the whole datagram, then IP fragments of it.
+        let n = HDR + data.len();
+        let mut d = alloc::vec![0u8; n];
+        put16(&mut d, 0, src.port);
+        put16(&mut d, 2, dst.port);
+        put16(&mut d, 4, n as u16);
+        d[HDR..].copy_from_slice(data);
+        let mut c = finish(sum(&d, pseudo_sum(src_ip, dst.ip, PROTO_UDP, n)));
+        if c == 0 {
+            c = 0xffff;
+        }
+        put16(&mut d, 6, c);
+        return st.send_ip_fragments(src_ip, dst.ip, PROTO_UDP, &d);
+    }
     st.send_ip(src_ip, dst.ip, PROTO_UDP, |b| {
         let n = HDR + data.len();
         put16(b, 0, src.port);
@@ -45,7 +62,7 @@ pub fn sendto(st: &mut Stack, i: usize, data: &[u8], to: SockAddr) -> Result<usi
     if to.port == 0 {
         return Err(EINVAL);
     }
-    if data.len() > MAX_PAYLOAD {
+    if data.len() > MAX_DATAGRAM {
         return Err(EMSGSIZE);
     }
     let s = st.socks.get(i).ok_or(EBADF)?;

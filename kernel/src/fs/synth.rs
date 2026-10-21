@@ -139,6 +139,27 @@ impl SynthDir {
             dev: self.ids.dev,
             ino: self.ids.next(),
             read: Box::new(read),
+            guard: None,
+            write: Box::new(write),
+        });
+        self.add(name, f);
+    }
+
+    /// A control file whose writes first pass `guard` (with the writer's own credentials,
+    /// before `write` runs as the kernel): an authorisation check beyond the open-time
+    /// permission bits. `guard`'s error is the write's error.
+    pub fn add_guarded_control(
+        &self,
+        name: &str,
+        read: impl Fn() -> String + Send + Sync + 'static,
+        guard: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+        write: impl Fn(&[u8]) -> Result<()> + Send + Sync + 'static,
+    ) {
+        let f = Arc::new(CtlFile {
+            dev: self.ids.dev,
+            ino: self.ids.next(),
+            read: Box::new(read),
+            guard: Some(Box::new(guard)),
             write: Box::new(write),
         });
         self.add(name, f);
@@ -283,6 +304,8 @@ pub struct CtlFile {
     dev: u64,
     ino: u64,
     read: ReadFn,
+    /// Checked before `write`, as the caller (see [`SynthDir::add_guarded_control`]).
+    guard: Option<WriteFn>,
     write: WriteFn,
 }
 
@@ -309,7 +332,11 @@ impl Inode for CtlFile {
         Ok(n)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
-        // Who may write was checked at open (fs/perm.rs); what it does is kernel work.
+        // Who may write was checked at open (fs/perm.rs), and by the guard if there is
+        // one; what it does is kernel work.
+        if let Some(g) = &self.guard {
+            g(buf)?;
+        }
         super::perm::as_kernel(|| (self.write)(buf))?;
         Ok(buf.len())
     }

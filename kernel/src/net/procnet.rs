@@ -177,6 +177,26 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
             t.rto / 1_000_000
         )?;
     }
+    // Connections in TIME_WAIT (kept without a socket, tcp::TwTable).
+    let base = st
+        .socks
+        .iter()
+        .filter(|(_, s)| s.ty == SockType::Stream)
+        .count();
+    for (n, e) in st.tw.entries.iter().enumerate() {
+        writeln!(
+            w,
+            "{:>4}: {:08X}:{:04X} {:08X}:{:04X} 06 00000000:00000000 03:{:08X} 00000000 {:>5} {:>8} 0 # TIME_WAIT",
+            base + n,
+            e.local.ip.proc_hex(),
+            e.local.port,
+            e.remote.ip.proc_hex(),
+            e.remote.port,
+            e.deadline.saturating_sub(now) / 10_000_000,
+            0,
+            0
+        )?;
+    }
     Ok(())
 }
 
@@ -215,11 +235,12 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     let s = &st.stats;
     writeln!(
         w,
-        "Ip: InReceives InHdrErrors InAddrErrors InUnknownProtos InDelivers OutRequests OutNoRoutes ReasmFails"
+        "Ip: InReceives InHdrErrors InAddrErrors InUnknownProtos InDelivers OutRequests OutNoRoutes ReasmFails ReasmReqds ReasmOKs ReasmTimeout ReasmOverlaps FragCreates"
     )?;
+    let f = &st.frags.stats;
     writeln!(
         w,
-        "Ip: {} {} {} {} {} {} {} {}",
+        "Ip: {} {} {} {} {} {} {} {} {} {} {} {} {}",
         s.ip_in_receives,
         s.ip_in_hdr_errors,
         s.ip_in_addr_errors,
@@ -227,7 +248,12 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         s.ip_in_delivers,
         s.ip_out_requests,
         s.ip_out_no_routes,
-        s.ip_reasm_fails
+        s.ip_reasm_fails,
+        f.reqds,
+        f.oks,
+        f.timeouts,
+        f.overlaps,
+        f.creates
     )?;
     writeln!(
         w,

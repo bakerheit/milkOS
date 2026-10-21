@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use super::errno::{self, *};
 use super::socket::{self, POLLIN, POLLOUT, SockType, SocketId};
-use super::wire::{Ipv4, SockAddr};
+use super::wire::{Ipv4, SockAddr, checksum, put16};
 use super::{dns, services};
 use crate::fs::errno::{Errno, Result};
 use crate::{fwcfg, kprintln, sched, timer};
@@ -210,28 +210,58 @@ fn test_loopback_tcp() -> core::result::Result<(), String> {
     Ok(())
 }
 
-/// Drop rate of the lossy-loopback test (every Nth packet). 3 passes too, just slower.
-const LOSSY_EVERY: u32 = 7;
+/// What a connection negotiated, and its recovery counters: (wscale, sack, ts,
+/// sack/recovery retransmissions, total retransmissions).
+fn tcb_info(id: SocketId) -> (u8, bool, bool, u32, u32) {
+    super::with(|st| {
+        st.socks
+            .get(id.slot())
+            .map(|s| {
+                let t = &s.tcb;
+                (
+                    t.rcv_wscale,
+                    t.sack_ok,
+                    t.ts_ok,
+                    t.sack_retrans,
+                    t.retransmits,
+                )
+            })
+            .unwrap_or_default()
+    })
+}
 
-/// TCP over a lossy loopback (every Nth packet dropped: data, ACKs, SYN and FIN alike).
-fn test_lossy_tcp() -> core::result::Result<(), String> {
+/// TCP over a lossy loopback (every `every`th packet dropped: data, ACKs, SYN and FIN
+/// alike): the bytes must arrive intact, with window scaling, SACK and timestamps on.
+fn test_lossy_tcp(every: u32, total: usize, port: u16) -> core::result::Result<(), String> {
     use super::iface::LO_DROP_EVERY;
-    let before = super::with(|st| st.stats.tcp_retrans_segs);
-    LO_DROP_EVERY.store(LOSSY_EVERY, core::sync::atomic::Ordering::Relaxed);
+    let before = super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
+    LO_DROP_EVERY.store(every, core::sync::atomic::Ordering::Relaxed);
     let r = (|| {
         let l = socket::socket(SockType::Stream).map_err(es)?;
-        socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, 5002)).map_err(es)?;
+        socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, port)).map_err(es)?;
         socket::listen(l, 4).map_err(es)?;
-        let c = connect(SockAddr::new(Ipv4::LOCALHOST, 5002), 10_000)
+        let c = connect(SockAddr::new(Ipv4::LOCALHOST, port), 30_000)
             .map_err(|x| alloc::format!("connect: {}", e(x)))?;
-        if socket::wait(l, POLLIN, 10_000 * MS) == 0 {
+        if socket::wait(l, POLLIN, 30_000 * MS) == 0 {
             return Err(String::from("accept: nothing queued"));
         }
         let (a, _) = socket::accept(l).map_err(es)?;
-        let total = 64 * 1024;
-        let r = pump(c, a, total, 60_000);
+        let r = pump(c, a, total, 120_000);
+        if r.is_err() {
+            super::with(|st| {
+                for id in [c, a] {
+                    if let Some(k) = st.socks.get(id.slot()) {
+                        kprintln!(
+                            "[net] debug: {}",
+                            super::tcp::debug_line(&k.tcb, k.tx.len(), st.now)
+                        );
+                    }
+                }
+            });
+        }
+        let info = tcb_info(c);
         socket::shutdown(c, socket::Shutdown::Write).map_err(es)?;
-        socket::wait(a, POLLIN, 10_000 * MS);
+        socket::wait(a, POLLIN, 30_000 * MS);
         let mut b = [0u8; 8];
         let eof = socket::recv(a, &mut b);
         let _ = socket::close(a);
@@ -241,22 +271,184 @@ fn test_lossy_tcp() -> core::result::Result<(), String> {
         if eof != Ok(0) {
             return Err(alloc::format!("no EOF after FIN: {eof:?}"));
         }
-        Ok((total, ns))
+        Ok((ns, info))
     })();
     LO_DROP_EVERY.store(0, core::sync::atomic::Ordering::Relaxed);
-    let (total, ns) = r?;
+    let (ns, (ws, sack, ts, sack_rx, rexmit)) = r?;
     let (after, dropped) =
         super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
     kprintln!(
-        "[net] tcp lossy loopback: {} KiB intact in {} ms with every {}th packet dropped ({} dropped, {} retransmissions)",
+        "[net] tcp lossy loopback 1/{every}: {} KiB intact in {} ms ({} packets dropped, {} retransmissions, {} by SACK recovery; wscale {ws} sack {} ts {})",
         total / 1024,
         ns / MS,
-        LOSSY_EVERY,
-        dropped,
-        after - before
+        dropped - before.1,
+        after - before.0,
+        sack_rx,
+        if sack { "on" } else { "off" },
+        if ts { "on" } else { "off" }
     );
-    if after == before {
+    if after == before.0 || rexmit == 0 {
         return Err(String::from("no retransmissions?"));
+    }
+    if ws == 0 || !sack || !ts {
+        return Err(String::from(
+            "window scaling / SACK / timestamps not negotiated",
+        ));
+    }
+    if sack_rx == 0 {
+        return Err(String::from(
+            "loss recovery never retransmitted from the scoreboard",
+        ));
+    }
+    Ok(())
+}
+
+/// TIME_WAIT: the side that closes first parks the pair in the TIME_WAIT table (no socket
+/// slot), and a new connection from the same local port reuses it.
+fn test_time_wait() -> core::result::Result<(), String> {
+    let l = socket::socket(SockType::Stream).map_err(es)?;
+    socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, 5004)).map_err(es)?;
+    socket::listen(l, 4).map_err(es)?;
+    let once = |port: u16| -> core::result::Result<SockAddr, String> {
+        let c = socket::socket(SockType::Stream).map_err(es)?;
+        socket::bind(c, SockAddr::new(Ipv4::LOCALHOST, port)).map_err(es)?;
+        match socket::connect(c, SockAddr::new(Ipv4::LOCALHOST, 5004)) {
+            Err(x) if x == EINPROGRESS => {}
+            Ok(()) => {}
+            Err(x) => return Err(alloc::format!("connect: {}", e(x))),
+        }
+        socket::wait(c, POLLOUT, 2000 * MS);
+        socket::connect(c, SockAddr::new(Ipv4::LOCALHOST, 5004))
+            .map_err(|x| alloc::format!("connect: {}", e(x)))?;
+        socket::wait(l, POLLIN, 2000 * MS);
+        let (a, _) = socket::accept(l).map_err(es)?;
+        let local = socket::local_addr(c).map_err(es)?;
+        // The client closes first (it ends up in TIME_WAIT), then the server.
+        let _ = socket::close(c);
+        socket::wait(a, POLLIN, 2000 * MS);
+        let _ = socket::close(a);
+        wait_for(2000, || {
+            super::with(|st| {
+                st.tw
+                    .find(local, SockAddr::new(Ipv4::LOCALHOST, 5004))
+                    .is_some()
+            })
+        });
+        Ok(local)
+    };
+    let r = (|| {
+        let used = socket::count();
+        let first = once(45678)?;
+        let parked = super::with(|st| {
+            st.tw
+                .find(first, SockAddr::new(Ipv4::LOCALHOST, 5004))
+                .is_some()
+        });
+        if !parked {
+            return Err(String::from("closed connection not in the TIME_WAIT table"));
+        }
+        if socket::count() > used {
+            return Err(String::from("TIME_WAIT still holds a socket slot"));
+        }
+        // Same 4-tuple again: allowed, the TIME_WAIT entry is reused.
+        once(45678)?;
+        Ok(())
+    })();
+    let _ = socket::close(l);
+    r?;
+    kprintln!("[net] tcp TIME_WAIT: parked without a socket (60 s), same pair reused ok");
+    Ok(())
+}
+
+/// IP fragments: a 20000-byte UDP datagram over loopback goes out as 14 fragments and comes
+/// back whole; crafted fragments check the overlap, tiny-fragment, out-of-order and timeout
+/// rules.
+fn test_fragments() -> core::result::Result<(), String> {
+    let before = super::with(|st| st.frags.stats);
+    let a = socket::socket(SockType::Dgram).map_err(es)?;
+    let b = socket::socket(SockType::Dgram).map_err(es)?;
+    socket::bind(b, SockAddr::new(Ipv4::LOCALHOST, 5005)).map_err(es)?;
+    let big: Vec<u8> = (0..20000).map(|k| pattern(k * 3)).collect();
+    let r = (|| {
+        socket::sendto(a, &big, SockAddr::new(Ipv4::LOCALHOST, 5005)).map_err(es)?;
+        socket::wait(b, POLLIN, 1000 * MS);
+        let mut buf = alloc::vec![0u8; 32768];
+        let (n, _) = socket::recvfrom(b, &mut buf).map_err(|x| alloc::format!("recv: {}", e(x)))?;
+        if buf[..n] != big[..] {
+            return Err(alloc::format!("got {n} bytes, not the 20000 sent"));
+        }
+        // Crafted fragments, UDP from 127.0.0.1:7 to :5005.
+        let frag = |id: u16, off: usize, more: bool, proto: u8, payload: &[u8]| -> Vec<u8> {
+            let mut p = alloc::vec![0u8; 20 + payload.len()];
+            p[0] = 0x45;
+            put16(&mut p, 2, (20 + payload.len()) as u16);
+            put16(&mut p, 4, id);
+            put16(&mut p, 6, (off / 8) as u16 | if more { 0x2000 } else { 0 });
+            p[8] = 64;
+            p[9] = proto;
+            p[12..16].copy_from_slice(&[127, 0, 0, 1]);
+            p[16..20].copy_from_slice(&[127, 0, 0, 1]);
+            let c = checksum(&p[..20]);
+            put16(&mut p, 10, c);
+            p[20..].copy_from_slice(payload);
+            p
+        };
+        // A UDP datagram of 8 + 24 bytes, checksum 0 (none).
+        let mut dg = alloc::vec![0u8; 32];
+        put16(&mut dg, 0, 7);
+        put16(&mut dg, 2, 5005);
+        put16(&mut dg, 4, 32);
+        for (k, x) in dg[8..].iter_mut().enumerate() {
+            *x = b'a' + k as u8;
+        }
+        // Out of order (last fragment first): delivered.
+        super::with(|st| {
+            st.inject(&frag(0x7001, 16, false, 17, &dg[16..]));
+            st.inject(&frag(0x7001, 0, true, 17, &dg[..16]));
+        });
+        socket::wait(b, POLLIN, 500 * MS);
+        let (n, _) = socket::recvfrom(b, &mut buf)
+            .map_err(|_| String::from("out-of-order fragments not reassembled"))?;
+        if buf[..n] != dg[8..] {
+            return Err(String::from("out-of-order reassembly: wrong bytes"));
+        }
+        // Overlap (bytes 8..24 sent twice, differently): the datagram is dropped.
+        let mut evil = dg.clone();
+        evil[20] = b'X';
+        super::with(|st| {
+            st.inject(&frag(0x7002, 0, true, 17, &dg[..16]));
+            st.inject(&frag(0x7002, 8, true, 17, &evil[8..24]));
+            st.inject(&frag(0x7002, 24, false, 17, &dg[24..]));
+        });
+        if socket::wait(b, POLLIN, 200 * MS) != 0 {
+            return Err(String::from("an overlapping datagram was delivered"));
+        }
+        // TCP fragment at offset 8 (RFC 1858): refused.
+        super::with(|st| st.inject(&frag(0x7003, 8, false, 6, &[0u8; 24])));
+        // A lone first fragment times out.
+        super::with(|st| {
+            st.inject(&frag(0x7004, 0, true, 17, &dg[..16]));
+            let later = st.now + super::frag::TIMEOUT + 1;
+            st.frags.expire(later);
+        });
+        Ok(())
+    })();
+    let _ = socket::close(a);
+    let _ = socket::close(b);
+    r?;
+    let after = super::with(|st| st.frags.stats);
+    let (oks, overlaps, timeouts, creates) = (
+        after.oks - before.oks,
+        after.overlaps - before.overlaps,
+        after.timeouts - before.timeouts,
+        after.creates - before.creates,
+    );
+    let fails = after.fails - before.fails;
+    kprintln!(
+        "[net] ip fragments: 20000-byte UDP datagram as {creates} fragments, reassembled; out of order ok; overlap dropped; tiny TCP fragment refused; timeout ok ({oks} reassembled, {overlaps} overlap, {timeouts} timed out, {fails} failed)"
+    );
+    if oks != 2 || overlaps != 1 || timeouts != 1 || creates != 14 || fails < 3 {
+        return Err(String::from("fragment counters don't add up"));
     }
     Ok(())
 }
@@ -440,7 +632,10 @@ pub fn run() {
     // 3. Loopback.
     check("udp loopback", test_loopback_udp());
     check("tcp loopback", test_loopback_tcp());
-    check("tcp lossy", test_lossy_tcp());
+    check("tcp lossy 1/7", test_lossy_tcp(7, 256 * 1024, 5002));
+    check("tcp lossy 1/3", test_lossy_tcp(3, 64 * 1024, 5003));
+    check("tcp time-wait", test_time_wait());
+    check("ip fragments", test_fragments());
     check(
         "refused",
         match connect(SockAddr::new(Ipv4::LOCALHOST, 9), 1000) {

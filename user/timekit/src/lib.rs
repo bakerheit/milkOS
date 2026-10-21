@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod cal;
 pub mod clock;
 pub mod date;
+pub mod quickadd;
 pub mod reminders;
 pub mod text;
 

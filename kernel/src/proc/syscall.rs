@@ -37,6 +37,8 @@ pub mod nr {
     pub const FCHMOD: u64 = 52;
     pub const FCHOWNAT: u64 = 54;
     pub const FCHOWN: u64 = 55;
+    pub const STATFS: u64 = 43;
+    pub const FSTATFS: u64 = 44;
     pub const FCHDIR: u64 = 50;
     pub const UTIMENSAT: u64 = 88;
     pub const RENAMEAT2: u64 = 276;
@@ -250,6 +252,18 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             Ok(n)
         }
         nr::NEWFSTATAT => sys_newfstatat(a[0] as i32 as i64, a1, a2, a[3] as u32),
+        nr::STATFS => {
+            let path = user_path(a0)?;
+            let base = base(abi::AT_FDCWD as i64)?;
+            let n = fs::lookup_at(base.as_ref(), &path, true)?;
+            copy_out(a1, fs::statfs_of(&n)?.to_linux().as_bytes())?;
+            Ok(0)
+        }
+        nr::FSTATFS => {
+            let st = fs::statfs_of(file(a[0] as i64)?.inode())?;
+            copy_out(a1, st.to_linux().as_bytes())?;
+            Ok(0)
+        }
         nr::GETDENTS64 => {
             let f = file(a[0] as i64)?;
             let mut buf = alloc::vec![0u8; a2.min(MAX_IO)];

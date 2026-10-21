@@ -1,0 +1,12 @@
+[package]
+name = "tcpbench"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tcpbench"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

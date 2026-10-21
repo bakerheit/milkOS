@@ -136,6 +136,8 @@ pub fn unmount(path: &str) -> Result<()> {
 struct BindFs {
     name: &'static str,
     root: InodeRef,
+    /// The file system `root` is in (for statfs), if it was mounted.
+    src: Option<FsRef>,
 }
 
 impl super::node::FileSystem for BindFs {
@@ -151,6 +153,12 @@ impl super::node::FileSystem for BindFs {
     fn sync(&self) -> Result<()> {
         self.root.sync()
     }
+    fn statfs(&self) -> Result<super::node::StatFs> {
+        match &self.src {
+            Some(fs) => fs.statfs(),
+            None => Ok(super::node::StatFs::empty(0, self.root.dev())),
+        }
+    }
 }
 
 /// Bind mount: make directory `src` also appear at `dst` (like `mount --bind`). Paths
@@ -160,13 +168,14 @@ pub fn bind(src: &str, dst: &str) -> Result<()> {
     if root.kind() != InodeType::Dir {
         return Err(Errno::ENOTDIR);
     }
-    let name = MOUNTS
+    let src = MOUNTS
         .lock()
         .iter()
         .rev()
         .find(|m| m.fs.dev() == root.dev())
-        .map_or("bind", |m| m.fs.name());
-    mount(dst, alloc::sync::Arc::new(BindFs { name, root }))
+        .map(|m| m.fs.clone());
+    let name = src.as_ref().map_or("bind", |f| f.name());
+    mount(dst, alloc::sync::Arc::new(BindFs { name, root, src }))
 }
 
 /// One line of `/proc/mounts`: (mount point, fs type, device number).
@@ -186,6 +195,16 @@ pub fn sync_all() -> Result<()> {
         }
     }
     r
+}
+
+/// The mounted file system whose device number is `dev` (the first mount of it, not a
+/// bind of it).
+pub fn fs_of_dev(dev: u64) -> Option<FsRef> {
+    MOUNTS
+        .lock()
+        .iter()
+        .find(|m| m.fs.dev() == dev)
+        .map(|m| m.fs.clone())
 }
 
 pub fn mounts() -> Vec<MountInfo> {

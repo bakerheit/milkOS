@@ -686,6 +686,20 @@ impl FileSystem for FatVol {
     fn sync(&self) -> Result<()> {
         self.dev.flush()
     }
+    /// Clusters: all of them and the free ones (FSInfo-exact, kept in memory).
+    fn statfs(&self) -> Result<super::node::StatFs> {
+        let free = self.st.lock().free as u64;
+        let mut s = super::node::StatFs::empty(super::node::MSDOS_MAGIC, self.devno);
+        s.bsize = self.cluster_bytes as u64;
+        s.blocks = self.nclusters as u64;
+        s.bfree = free;
+        s.bavail = free;
+        s.flags |= super::node::ST_NOSUID | super::node::ST_NODEV;
+        if !self.rw {
+            s.flags |= super::node::ST_RDONLY;
+        }
+        Ok(s)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -221,9 +221,67 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   wait queues): so VFS calls are thread context only, never from IRQ context and never
   while holding a `SpinLock` (that's also true because the VFS allocates).
 
+## statfs (`df`, Disk Utility)
+
+`statfs(2)` (syscall 43, a path, symlinks followed) and `fstatfs(2)` (44, an fd) answer
+for every file system; kernel side `fs::statfs(path)` / `fs::statfs_of(&inode)` ->
+`node::StatFs`, each file system's `FileSystem::statfs`. The file system is found by the
+inode's device number among the mounts (a bind mount like `/home/milk` answers for what
+it binds); a milkfs snapshot browsed under `.snapshots` (its own device number) answers
+through its volume; pipes and sockets get type 0 and zero sizes.
+
+Copied out as Linux's aarch64 `struct statfs` (asm-generic, 64-bit), 120 bytes, all
+little-endian:
+
+| offset | field | type | milkOS |
+|---|---|---|---|
+| 0 | `f_type` | i64 | magic number, below |
+| 8 | `f_bsize` | i64 | block size (bytes) |
+| 16 | `f_blocks` | u64 | size in blocks |
+| 24 | `f_bfree` | u64 | free blocks |
+| 32 | `f_bavail` | u64 | free blocks for unprivileged users (= `f_bfree`, nothing is reserved) |
+| 40 | `f_files` | u64 | inodes (0: no fixed inode table) |
+| 48 | `f_ffree` | u64 | free inodes |
+| 56 | `f_fsid` | i32[2] | file system id (low word first) |
+| 64 | `f_namelen` | i64 | longest name (255) |
+| 72 | `f_frsize` | i64 | = `f_bsize` |
+| 80 | `f_flags` | i64 | `ST_RDONLY` 1, `ST_NOSUID` 2, `ST_NODEV` 4, `ST_NOEXEC` 8, `ST_VALID` 0x20 (always) |
+| 88 | `f_spare` | i64[4] | 0 |
+
+| file system | `f_type` | block | size / free | flags, fsid |
+|---|---|---|---|---|
+| milkfs | `0x4d494c4b` ("MILK") | 4096 | the device's blocks / free in the space map (copy-on-write: a write needs free blocks even when it overwrites) | snapshots and a broken volume `ST_RDONLY`; fsid from the UUID (same for the live tree, snapshots and clones) |
+| tmpfs | `0x01021994` | 4096 | the cap, or without one used + free RAM / what's left of that | |
+| FAT32 | `0x4d44` (msdos) | cluster size | data clusters / free clusters (FSInfo, kept exact) | `ST_NOSUID ST_NODEV`, `ST_RDONLY` if mounted read-only |
+| 9p (`/Volumes/Mac`) | `0x01021997` | the Mac's | the Mac's numbers for the shared folder's disk (Tstatfs), so "free" is the Mac's free space | `ST_NOSUID ST_NODEV`, `ST_RDONLY` unless the share is writable |
+| proc, sysfs, devfs | `0x9fa0`, `0x62656572`, `0x1373` | 4096 | 0 / 0 | |
+
+User side: `rt::sys::statfs(path)`, `rt::sys::fstatfs(fd)` -> `rt::sys::StatFs` (with
+`type_name()`, `read_only()`). Tool: `df [-h] [-a] [PATH...]` (coreutils): without paths
+every mount in `/proc/mounts`, minus the ones with no storage (proc, sysfs, devfs) and
+repeats of one file system (binds), `-a` for all; 1K blocks, `-h` human; `(ro)` after a
+read-only mount. With `MILK_TABLE=1` a table: `mount type size used avail use_pct bsize
+blocks bfree bavail files ffree ro` (sizes in bytes; `use_pct` like GNU df: used /
+(used + avail), rounded up; empty for no storage).
+
+```text
+Type      1K-blocks       Used      Avail  Use%  Mounted on
+tmpfs        492356      10168     482188    3%  /
+milkfs        65536         40      65496    1%  /Volumes/Milk
+9p        482746440  381604980  101141460   80%  /Volumes/Mac (ro)
+vfat          64511          0      64510    1%  /Volumes/DFFAT
+```
+
+Tests: the self-test (`statfs_basics`: RAM file systems, the struct layout; on the
+milkfs test volume: sizes, a write and a delete moving the free count, a snapshot
+read-only) and `scripts/dftest.sh` (`df` against the Mac's numbers: the milkfs image's
+size, the FAT image's BPB and FSInfo, `os.statvfs` of the share, growth by a written
+file).
+
 ## Writing a file system
 
-Implement `FileSystem` (`name`, `dev` from `node::alloc_dev()`, `root`) and `Inode` for
+Implement `FileSystem` (`name`, `dev` from `node::alloc_dev()`, `root`, and `statfs` if it
+has storage; the default reports zero sizes) and `Inode` for
 your objects. Every `Inode` method has a default error, so only implement what you support.
 Names passed in are single components, never `.`/`..` (except `lookup("..")`, which every
 directory must answer; the root of a fs returns itself). Don't hold your own lock while
@@ -959,6 +1017,58 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
 - Test only: `-fw_cfg name=opt/milkos/passphrase,string=...` unlocks at boot (anyone who
   can start qemu sees it; for unattended test boots).
 
+**State in `/sys/fs/milkfs/info`** (the primary volume; Disk Utility's diskkit parses it):
+
+```text
+encryption:  on
+locked:      no
+cipher:      xchacha20-siv (per block; tag HMAC-SHA256/64)
+key wrap:    xchacha20-poly1305
+kdf:         scrypt N=2^16 r=8 p=4
+key slots:   1 passphrase, 1 recovery
+```
+
+`kdf` is the first passphrase slot's parameters (each slot has its own). A plain volume
+has just `encryption:  off`. `info` only describes a mounted volume, so `locked:` is
+always `no` there; locked volumes (not mounted, no `info`) are listed by
+`/sys/fs/milkfs/unlock` (`vda Milk locked`) and `/sys/fs/milkfs/lock`.
+
+**Locking again.** `snap lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
+can be locked), `/sys/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
+kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices locked):
+
+1. refuse if a send, receive or scrub is using the volume (EBUSY);
+2. commit the open transaction (an I/O error: that errno, nothing unmounted);
+3. unmount the live tree, so nothing new can be opened by path;
+4. look for anything still holding a file on it (any view: live, snapshots): every
+   process's open files, working directory and root directory are scanned, and the
+   volume's inode table tells about the rest (mappings, kernel threads). If anything is
+   found the volume is mounted back where it was and the lock is refused with EBUSY; the
+   reason names the processes:
+   `vdb (Vault) is in use: pid 16 (sleep): 1 open file; pid 10 (msh): working directory`;
+5. drop the key and the decoded tree nodes and mark the in-memory state unwritable (a
+   block written without the key would land in plaintext), invalidate the page cache for
+   every view's device number (no plaintext pages left), forget the volume and put the
+   device back on the locked list, where `unlock` finds it.
+
+`VolumeKey` wipes itself when its last holder drops it; the log line says whether that
+happened at the lock (`... locked, /Volumes/Vault unmounted, key wiped`) or will when a
+last reader lets go (`key wiped once its last reader finishes`). Freed heap memory is
+not zeroed beyond the key itself.
+
+**The home volume can't be locked.** `/home/milk`, `/Applications` and `/etc/milk/drop`
+are bound from the primary volume, and the logged-in session, the desktop and the
+indexer live on it, so locking it is refused (EBUSY: "you can't lock the volume you're
+logged into"); it locks at shutdown (the key is only ever in RAM). A secondary encrypted
+volume (a backup disk, a vault) locks and unlocks any number of times.
+`/sys/fs/milkfs/lock` reads as the encrypted volumes and their state:
+
+```text
+vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)
+vdb Vault unlocked at=/Volumes/Vault
+vdd Old locked
+```
+
 **Send/receive**: streams are **plaintext** (`snap send` decrypts; the stream carries
 xxh64 of plaintext blocks), so they can be checked and received anywhere, including on
 the Mac, and an encrypted target re-encrypts under its own key. Keep streams of an
@@ -1102,6 +1212,62 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
 `auto`; anything to `sync`; `vdX [label] [force]` to `mkfs`. msh has no redirection yet, so
 `user/snap` wraps them: `snap`, `snap info`, `snap create|delete|rollback NAME`,
 `snap clones`, `snap clone SNAP NAME`, `snap promote|discard NAME`, `snap auto [SETTINGS]`.
+
+### `/sys/fs/milkfs` reference: every file and its errors (for Disk Utility)
+
+**How errors come back.** A control is written with one `write(2)`; failure is that
+write's errno. Then `/sys/fs/milkfs/error` says why, one line:
+`CONTROL: ERRNO: reason` (e.g. `lock: EBUSY: vdb (Vault) is in use: pid 16 (sleep): 1
+open file`); a write that works empties it. It is the last failure on the system (not per
+process), so read it right after the failed write and check the control name. `snap`
+prints that reason. Writing nothing (a 0-byte write) does nothing at all.
+
+**Who may write.** At `open`: control files are root's, writable by root and the
+**admin** group (docs/security.md); anyone else gets EACCES from `open` itself (no
+`error` line, the control never ran). Then the destructive ones (marked **D** below,
+`fs::milkfs::DESTRUCTIVE`) pass `fs::milkfs::authorize(op, arg)` with the writer's
+credentials before running as the kernel: the one place that decides, by default "yes"
+(the open check is the rule); `fs::milkfs::set_authorizer(Some(rule))` installs a stricter
+one (proc's admin ticket), whose EACCES/EPERM and `set_reason` text show in `error`.
+`check` is only authorised for `repair`.
+
+Errors every control can give: ENODEV "no milkfs volume is mounted" / "the volume is
+encrypted and locked: unlock it first", EIO "disk or checksum error, or the volume went
+read-only after a failed write" (see the kernel log; `snap check`), ENOSPC "the volume is
+full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the usage.
+
+| file | read | write | errors (besides the common ones) |
+|---|---|---|---|
+| `info` | volume status, `key: value` lines (`label`, `device`, `generation`, `blocks`, `snapshots`, `state`, ..., `encryption: on\|off`; when on also `locked`, `cipher`, `key wrap`, `kdf`, `key slots`, see "Encryption at rest"); `no milkfs volume mounted` without one | - | - |
+| `snapshots` | `NAME gen=G created=T` per line | - | - |
+| `clones` | `NAME of=SNAP at=PATH` | - | - |
+| `error` | last failure, `CONTROL: ERRNO: reason` | - | - |
+| `snapshot` | = `snapshots` | `NAME` | EINVAL bad name (letters, digits, `. _ - :`), ENAMETOOLONG over 47, EEXIST name taken, ENOSPC "30 snapshots and clones at most: delete one first" |
+| `delete` **D** | = `snapshots` | `NAME` | ENOENT no such snapshot, EBUSY a clone is built on it or a send is reading it |
+| `rollback` **D** | = `snapshots` | `NAME` | ENOENT, EBUSY a newer snapshot that would go has a clone |
+| `clone` | = `clones` | `SNAP NAME` | as `snapshot`, plus ENOENT no such snapshot |
+| `discard` **D** | = `clones` | `NAME` | ENOENT no such clone |
+| `promote` **D** | = `clones` | `NAME` | ENOENT no such clone, EEXIST snapshot `before-NAME` exists, ENOSPC no record left for `before-NAME` |
+| `restore` **D** | - | `SNAPSHOT PATH` | ENOENT no such snapshot or the file isn't in it, EINVAL usage, EXDEV not on the primary volume, EISDIR a folder |
+| `versions` | last result | `PATH` | ENOENT no such file, EXDEV, EISDIR |
+| `diff` | last result | `A [B\|live]` | ENOENT no such snapshot, EINVAL usage |
+| `sync` | - | anything | (common) |
+| `auto` **D** | Time Machine settings | `on`, `off`, `now`, `interval=15m`, `keep=N`, `daily=N` | EINVAL anything else |
+| `scrub` | progress, errors, last result | `start`, `stop`, `rate=MB/s`, `auto=off\|on\|7d\|12h` | EBUSY already running, EINVAL |
+| `check` **D** (repair) | last report | `check` or `repair` | EINVAL |
+| `send` **D** | last result | `SNAP [FROM] PATH` | ENOENT no such snapshot (or the output's folder), EINVAL usage or FROM not older, ENOSPC no room for the stream |
+| `receive` **D** | last result | `PATH [TARGET] [force]` | ENOENT base snapshot not on the target (or no stream file), EBUSY target changed since the base (`force` rolls back) or a receive running, ENOTEMPTY full stream needs an empty volume, EEXIST snapshot exists, EINVAL not a stream / newer format / usage, EIO damaged or cut short (nothing changed) |
+| `dedupe` **D** | last result | `DIR` or `DIR dry` | ENOENT, ENOTDIR, EOPNOTSUPP not on milkfs, EINVAL |
+| `unlock` | locked volumes, `vdb Vault locked` | `[dev=NAME ]SECRET` | ENODEV nothing (of that name) locked, EACCES wrong passphrase or recovery key, EINVAL usage, EIO keyring unreadable |
+| `lock` **D** | encrypted volumes and state | `DEV`, `PATH`, `LABEL` or `all` | EBUSY in use (names the processes) / home volume / send, receive or scrub running (the reason says which), EINVAL not encrypted or already locked, ENODEV no such mounted volume |
+| `passwd` **D** | - | `OLD\nNEW` | EACCES OLD is wrong, EINVAL NEW under 8 characters or the volume isn't encrypted, EIO |
+| `mkfs` **D** | usage | `DEVICE [LABEL] [force]` | ENODEV no such device, EEXIST holds milkfs (add `force`), EBUSY the mounted volume, EINVAL label (1-31, no `/`) |
+| `bench` **D** | last result | `DIR N SIZE` | EINVAL usage |
+| `treetest` **D** | last result | `DIR N` | EINVAL usage |
+
+The reasons are in `explain()` in `kernel/src/fs/milkfs/mod.rs` (a control's own code can
+give a more exact one with `fail(errno, reason)`, as `lock` does); the self-test checks a
+sample of them and the authorisation hook (`milkfs_control_errors`).
 
 **mkfs** never runs on its own. In the kernel it is the explicit `mkfs()` call (or the
 `/sys/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless

@@ -45,10 +45,15 @@ DNS (see the resolver policy below).
   readiness change, and by API calls that arm an earlier timer. Each pass: drain rx, reclaim
   tx, run timers (TCP retransmission / persist / TIME_WAIT, ARP retries + expiry, DHCP), run
   the in-kernel services (HTTP on :80). Idle, it costs nothing (`ps` shows 0.00 s).
-* **Memory.** The device's rings and buffers and the socket buffers (32 sockets x 2 x 16 KiB,
-  one contiguous PMM block) are allocated once at boot. Frames are built straight into
-  device tx buffers; received frames are parsed in place in their rx buffer.
-* **Loopback**: 127/8 and our own address go into a 32-packet ring that `with` drains after
+* **Memory.** The device's rings and buffers are allocated once at boot.
+  * **Socket buffers** are per socket, from the PMM (`net::ring::Ring`): 64 KiB each way
+    to start. TCP grows them to 4 MiB as needed (below); all socket buffers together are
+    capped at 64 MiB.
+  * Frames are built straight into device tx buffers, and received frames are parsed in
+    place in their rx buffer.
+  * When a device or the loopback queue is full, TCP doesn't count that as a loss: it
+    stops and tries again 2 ms later.
+* **Loopback**: 127/8 and our own address go into a 256-packet ring that `with` drains after
   the call (bounded), so a loopback connect/accept/transfer completes inside the calls.
 
 ## Protocols
@@ -59,9 +64,22 @@ DNS (see the resolver policy below).
 * **Ethernet / ARP**: per-interface 32-entry cache, requests rate-limited to 1/s, 3 tries; up to 8 packets
   wait (3 s) for an answer, then are dropped. Entries live 10 minutes. The gateway is
   resolved right after DHCP.
-* **IPv4**: header checksum checked, DF set on everything we send, TTL 64. Fragments (MF or
-  offset) are dropped and counted (`ReasmFails`), we never fragment (UDP > 1472 bytes:
-  `EMSGSIZE`). Routing: loopback, on-link (per interface), link-local and multicast to
+* **IPv4**: header checksum checked, TTL 64. DF is set on everything sent whole: TCP
+  never needs fragments.
+  * **Fragmenting**: a UDP datagram over 1472 bytes (up to 65507) goes out as IP fragments
+    of 1480 bytes (`Stack::send_ip_fragments`). With an unresolved next hop only the first
+    8 wait for ARP.
+  * **Reassembly** (`net/frag.rs`) has limits:
+    * at most 16 datagrams at a time and 1 MiB buffered (the oldest goes first), each
+      dropped after 30 s;
+    * a bitmap of 8-byte blocks records what has arrived. **Any overlap**, an exact
+      duplicate included, poisons the datagram: it is dropped, and so are its later
+      fragments until the timeout (RFC 5722's rule, which defeats overlap tricks);
+    * it is also poisoned by: a fragment with MF that isn't a multiple of 8 bytes; more
+      than 65535 bytes; two different last fragments; data past the end; or, for TCP, a
+      fragment at offset 8 or a first fragment shorter than the TCP header (RFC 1858);
+    * the whole packet gets the first fragment's header and goes through `ip_input` again;
+    * `/proc/net/snmp` adds `ReasmReqds ReasmOKs ReasmTimeout ReasmOverlaps FragCreates`. Routing: loopback, on-link (per interface), link-local and multicast to
 eth1, else the default gateway (eth0's).
 * **ICMP**: echo replies; our pings (`socket::ping`); destination unreachable (port /
   protocol) for closed UDP ports and unknown protocols.
@@ -75,18 +93,61 @@ eth1, else the default gateway (eth0's).
   `dns::set_server`, which must be loopback or on our subnet (else `EPERM`). The DHCP DNS
   (slirp's 10.0.2.3, which forwards to the Mac's real resolver) is recorded but never used.
   Relax this deliberately when the project wants real name resolution.
-* **TCP**: RFC 9293 state machine (all 11 states), active and passive open, simultaneous
-  open, MSS option (we announce 1460, default 536), sliding window (16 KiB each way, no
-  window scaling needed), retransmission timer per RFC 6298 (RTO from SRTT/RTTVAR, min
-  200 ms, max 60 s, Karn's rule, exponential backoff that is reset by new ACKs), slow start /
-  congestion avoidance / fast retransmit on 3 duplicate ACKs, zero-window probes (persist
-  timer), out-of-order segments kept in the receive ring past its readable end (up to 8
-  holes) and committed when the hole fills, FIN in every state, RST rules (RFC 5961
-  challenge ACKs for in-window RST/SYN), RST for segments to closed ports, RST instead of FIN
-  when closing with unread data (as Linux). Limits: SYN retried 5 times (~31 s), data 10
-  times, then `ETIMEDOUT` (+RST). TIME_WAIT is 2 s (2 x MSL of 1 s; Linux: 60 s), orphaned
-  FIN_WAIT_2 30 s. No SACK, no timestamps, no delayed ACK, no Nagle, no keepalive, no
-  urgent data.
+* **TCP** (`net/tcp.rs`):
+  * **Basics.** The RFC 9293 state machine (all 11 states); active, passive and
+    simultaneous open; FIN in every state.
+  * **MSS.** We announce 1460 and assume 536 if the peer sends none. Data per segment is
+    the MSS minus the options it carries.
+  * **Options** (RFC 7323, RFC 2018), offered in our SYN and used when both sides agree:
+    * **Window scaling**: we use shift 7, so windows up to 8 MiB. A SYN's window is never
+      scaled.
+    * **Timestamps**: a millisecond clock. Every ACK of new data gives an RTT sample from
+      the echo. PAWS drops old duplicates (a TSval below TS.Recent).
+    * **SACK**: up to 3 blocks with timestamps (4 without), the newest first.
+  * **Retransmission timer** (RFC 6298): RTO from SRTT/RTTVAR, between 200 ms and 60 s.
+    Karn's rule applies when there are no timestamps. Backoff is exponential and reset by
+    new ACKs.
+  * **Congestion control**: slow start and congestion avoidance (RFC 5681), initial window
+    10 segments.
+  * **Loss recovery.** It starts on 3 duplicate ACKs, or with SACK when more than two
+    segments' worth is SACKed above the first hole (RFC 6675 IsLost).
+    * cwnd = ssthresh = flight/2.
+    * The holes below the highest SACKed byte are retransmitted first, the first one at
+      once and then while pipe < cwnd.
+    * Without SACK it is NewReno: one retransmission per partial ACK (RFC 6582).
+    * It ends when the ACK passes the recovery point.
+    * A timeout means slow start from `snd_una`, with the scoreboard dropped.
+  * **ACKs and Nagle.**
+    * Delayed ACKs: every second full segment, else after 40 ms. The ACK goes at once for
+      out-of-order data (with SACK), a filled hole, a FIN, or a window that opened by
+      2 MSS or half the buffer.
+    * Nagle, Minshall's variant: a small segment waits only while an earlier small one is
+      unacknowledged, so bulk transfers don't stall on their tail. `TCP_NODELAY` turns it
+      off.
+  * **Buffer auto-sizing.** The receive buffer doubles when the application reads more
+    than half of it in one round trip (RTT from timestamp echoes). The send buffer doubles
+    when it, not cwnd or the peer's window, is the limit. Both start at 64 KiB and stop at
+    4 MiB. `SO_RCVBUF` / `SO_SNDBUF` set a size and turn auto-sizing off for that buffer
+    (buffers only grow).
+  * **Out-of-order segments** are kept in the receive ring past its readable end (up to 32
+    ranges) and committed when the hole fills.
+  * **Zero windows**: zero-window probes (persist timer).
+  * **RST.**
+    * RFC 5961 challenge ACKs for in-window RST/SYN.
+    * RST for segments to closed ports.
+    * RST instead of FIN when closing with unread data (as Linux).
+  * **TIME_WAIT** lasts 2 x MSL = 60 s (as Linux), in a compact table (`tcp::TwTable`, up
+    to 512 entries, the oldest dropped first).
+    * An entry holds no socket slot or buffers, so short connections don't use up the 32
+      slots; it is parked there as soon as the user has closed the socket.
+    * In TIME_WAIT: a retransmitted FIN is re-ACKed (and the 2 MSL restarts), RSTs are
+      ignored (RFC 1337), and other segments get an ACK.
+    * A new SYN with a higher sequence number, or with timestamps a newer TSval, reuses the
+      pair (RFC 6191). Our own `connect` to a pair we hold in TIME_WAIT reuses it too (our
+      ISN is clock-based).
+    * `/proc/net/tcp` lists the entries (state 06).
+  * **Limits**: a SYN is retried 5 times (~31 s) and data 10 times, then `ETIMEDOUT`
+    (+RST). An orphaned FIN_WAIT_2 lasts 30 s. No keepalive, no urgent data.
 
 ## eth1: a second network for VM-to-VM links
 
@@ -380,6 +441,30 @@ drop-bob-wait`), two desktops with linked eth1s on private images.
 
 **Test**: `scripts/drop-test.sh` (below).
 
+## Throughput (`scripts/net-bench.sh`, `/bin/tcpbench`)
+
+`tcpbench send HOST:PORT MIB | recv HOST:PORT | sink PORT | source PORT MIB` times one TCP
+transfer (`send` waits for the peer's close, so the time covers delivery).
+`scripts/net-bench.sh [MIB]` boots two VMs, alice and bob, and runs three paths:
+
+* guest -> host: to a sink on the Mac's 127.0.0.1, through slirp;
+* host -> guest: from a source there;
+* guest -> guest: alice -> bob over eth1 (`-netdev dgram`).
+
+The host helper is `scripts/net_bench_host.py`, bound to 127.0.0.1.
+
+| | guest -> host | host -> guest | guest -> guest | notes |
+|---|---|---|---|---|
+| baseline (16 KiB windows, no scaling/SACK/timestamps, 2 s TIME_WAIT) | 98-105 MiB/s | 91-94 MiB/s | 34-37 MiB/s | 64 MiB per run, debug kernel, smp 4, three runs |
+| window scaling + timestamps + SACK, delayed ACKs, Nagle, auto-sized buffers (64 KiB -> 4 MiB) | 190-210 MiB/s | 366-395 MiB/s | 59-103 MiB/s | same; guest -> guest varies with drops on the dgram link (host UDP buffers), which SACK recovery repairs |
+
+Lossy loopback (boot self-test, every Nth packet dropped, data and ACKs alike):
+
+| | before | after |
+|---|---|---|
+| 1/7 | 64 KiB in 200-400 ms, go-back-N only | 256 KiB in ~2.2 s, 85 of 234 resends by SACK recovery |
+| 1/3 | (not tested) | 64 KiB in ~4.2 s, intact |
+
 ## In-kernel HTTP server (demo, off by default)
 
 `net/services.rs`, on the net thread, using only the socket API: `/` (HTML with the
@@ -390,11 +475,22 @@ fw_cfg config (net-test.sh uses 8080, for the `/big` window/retransmission check
 
 ## Tests
 
-**Boot self-test** (`net::selftest`, after the sched self-test, prints `[net] selftest ok`):
-DHCP (3 s timeout), 3 pings to the gateway, UDP over loopback, 256 KiB + 64 KiB TCP over
-loopback with an orderly close both ways, **64 KiB over a lossy loopback** (every 7th packet
-dropped: data, ACKs, SYN and FIN) to prove retransmission and reassembly, connection
-refused (RST), an HTTP GET to our own server, and the DNS policy. With the fw_cfg file
+**Boot self-test** (`net::selftest`, after the sched self-test, prints `[net] selftest ok`).
+It covers:
+
+* DHCP (3 s timeout) and 3 pings to the gateway;
+* UDP over loopback;
+* 256 KiB + 64 KiB TCP over loopback with an orderly close both ways;
+* **lossy loopback**: 256 KiB with every 7th packet dropped and 64 KiB with every 3rd
+  (data, ACKs, SYN and FIN alike). The bytes must arrive intact, with window scaling,
+  SACK and timestamps negotiated and SACK recovery doing some of the resending;
+* **TIME_WAIT**: the closing side parks the pair without a socket slot, and a new
+  connection on the same 4-tuple reuses it;
+* **IP fragments**:
+  * a 20000-byte UDP datagram over loopback, as 14 fragments, back whole;
+  * crafted fragments: last-first (reassembled), an overlapping pair (dropped), a TCP
+    fragment at offset 8 (refused), and a lone first fragment (times out);
+* connection refused (RST), an HTTP GET to our own server, and the DNS policy. With the fw_cfg file
 `opt/milkos/nettest` (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT`, passed
 by net-test.sh) also: 512 KiB TCP echo against the Mac, a `.test` lookup + NXDOMAIN against
 the Mac's test DNS server, a refused host port. It then prints /proc/net.
@@ -448,8 +544,7 @@ It kills only its own qemus and serial drivers, by PID.
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
 * `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8); AAAA.
-* Per-socket buffer sizes instead of the fixed 16 KiB pool; window scaling then.
-* Delayed ACKs and Nagle (fewer packets), SACK, IP fragment reassembly, keepalive.
+* Keepalive; ECN; a smarter congestion controller (CUBIC); D-SACK; RACK-TLP.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
   default gateway on eth0); IGMP if a multicast router ever appears.
 * Milk Drop: resumable transfers, several files or a folder per offer, a rotation chain

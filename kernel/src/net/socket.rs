@@ -6,9 +6,12 @@
 //! [`poll`] and sleep until [`super::set_wake_hook`] fires for that socket. Errors are Linux
 //! errno values (`fs::errno::Errno`), so the syscall layer returns `-(e.0)` unchanged.
 //!
-//! Sockets live in a fixed table of [`MAX_SOCKETS`] slots; each slot owns a receive and a
-//! send buffer of [`BUF_SIZE`] bytes, carved out of one pool allocated at boot. A
-//! [`SocketId`] is slot + generation, so a stale id (after close) gives `EBADF`.
+//! Sockets live in a fixed table of [`MAX_SOCKETS`] slots. Each socket owns a receive and
+//! a send buffer ([`super::ring::Ring`], PMM frames), [`BUF_SIZE`] bytes to start with;
+//! TCP grows them as a connection needs (auto-sizing, up to [`MAX_BUF`]) unless the user
+//! fixed a size with SO_RCVBUF / SO_SNDBUF. A [`SocketId`] is slot + generation, so a
+//! stale id (after close) gives `EBADF`. Connections in TIME_WAIT don't hold a slot
+//! (`tcp::TimeWait`).
 //!
 //! Full list in `docs/networking.md`.
 
@@ -21,12 +24,14 @@ use super::udp;
 use super::wire::{Ipv4, SockAddr};
 use super::{Stack, with};
 use crate::fs::errno::{Errno, Result};
-use crate::mmu::{PAGE_SIZE, phys_to_virt};
-use crate::pmm;
 
 pub const MAX_SOCKETS: usize = 32;
-/// Receive and send buffer size per socket (each).
-pub const BUF_SIZE: usize = 16 * 1024;
+/// Receive and send buffer size a socket starts with (each).
+pub const BUF_SIZE: usize = 64 * 1024;
+/// Largest a TCP buffer grows to (auto-sizing or SO_RCVBUF/SO_SNDBUF).
+pub const MAX_BUF: usize = 4 << 20;
+/// Smallest SO_RCVBUF/SO_SNDBUF we take.
+pub const MIN_BUF: usize = 4096;
 /// First ephemeral port (Linux's default range is 32768-60999; we use IANA's).
 const EPHEMERAL_LO: u16 = 49152;
 
@@ -115,14 +120,17 @@ pub struct Sock {
     /// echo messages; the local "port" is the echo identifier.
     pub icmp: bool,
     pub rx_drops: u64,
+    /// TCP_NODELAY: no Nagle (small segments go out at once).
+    pub nodelay: bool,
+    /// SO_RCVBUF / SO_SNDBUF fixed the size: no auto-sizing for that buffer.
+    pub rcvbuf_locked: bool,
+    pub sndbuf_locked: bool,
     pub tcb: Tcb,
 }
 
 pub struct Slot {
     pub gen_: u16,
     pub sock: Option<Sock>,
-    rx_mem: *mut u8,
-    tx_mem: *mut u8,
 }
 
 pub struct Table {
@@ -130,24 +138,13 @@ pub struct Table {
     next_port: u16,
 }
 
-// SAFETY: raw pointers are into the socket buffer pool, owned by the table.
-unsafe impl Send for Table {}
-
 impl Table {
     pub fn new() -> Table {
-        let pages = (MAX_SOCKETS * 2 * BUF_SIZE).div_ceil(PAGE_SIZE);
-        let pa = pmm::alloc_contiguous_zeroed(pages, 1).expect("net: socket buffer pool");
-        let base = phys_to_virt(pa) as *mut u8;
         let mut slots = Vec::with_capacity(MAX_SOCKETS);
-        for i in 0..MAX_SOCKETS {
-            // SAFETY: inside the pool, 2 * BUF_SIZE per slot.
-            let rx_mem = unsafe { base.add(i * 2 * BUF_SIZE) };
-            let tx_mem = unsafe { rx_mem.add(BUF_SIZE) };
+        for _ in 0..MAX_SOCKETS {
             slots.push(Slot {
                 gen_: 0,
                 sock: None,
-                rx_mem,
-                tx_mem,
             });
         }
         Table {
@@ -156,13 +153,14 @@ impl Table {
         }
     }
 
-    /// Take a free slot and put a fresh socket in it. Returns the slot index.
+    /// Take a free slot and put a fresh socket in it (with fresh buffers). Returns the slot
+    /// index, or None if every slot is taken or there is no buffer memory.
     pub fn alloc(&mut self, ty: SockType) -> Option<usize> {
         let i = self.slots.iter().position(|s| s.sock.is_none())?;
+        let rx = Ring::alloc(BUF_SIZE)?;
+        let tx = Ring::alloc(BUF_SIZE)?;
         let s = &mut self.slots[i];
         s.gen_ = s.gen_.wrapping_add(1);
-        // SAFETY: the slot's buffers are used only by the socket in that slot.
-        let (rx, tx) = unsafe { (Ring::new(s.rx_mem, BUF_SIZE), Ring::new(s.tx_mem, BUF_SIZE)) };
         s.sock = Some(Sock {
             ty,
             local: SockAddr::ANY,
@@ -177,6 +175,9 @@ impl Table {
             udp_connected: false,
             icmp: false,
             rx_drops: 0,
+            nodelay: false,
+            rcvbuf_locked: false,
+            sndbuf_locked: false,
             tcb: Tcb::new(),
         });
         Some(i)
@@ -545,6 +546,52 @@ pub fn poll(id: SocketId) -> u32 {
     })
 }
 
+/// SO_RCVBUF / SO_SNDBUF: give the buffer at least `bytes` (clamped to
+/// [`MIN_BUF`]..=[`MAX_BUF`]) and stop auto-sizing it. Buffers only grow (a smaller value
+/// just fixes the current size).
+pub fn set_buf(id: SocketId, receive: bool, bytes: usize) -> Result<()> {
+    with(|st| {
+        let (i, s) = st.socks.lookup(id)?;
+        let want = bytes.clamp(MIN_BUF, MAX_BUF);
+        let ok = if receive {
+            s.rcvbuf_locked = true;
+            s.rx.grow(want)
+        } else {
+            s.sndbuf_locked = true;
+            s.tx.grow(want)
+        };
+        if receive && ok {
+            // A bigger window: tell the peer.
+            tcp::output(st, i);
+        }
+        if ok { Ok(()) } else { Err(ENOBUFS) }
+    })
+}
+
+/// SO_RCVBUF / SO_SNDBUF: the buffer's size now.
+pub fn get_buf(id: SocketId, receive: bool) -> Result<usize> {
+    with(|st| {
+        let (_, s) = st.socks.lookup(id)?;
+        Ok(if receive { s.rx.cap() } else { s.tx.cap() })
+    })
+}
+
+/// TCP_NODELAY.
+pub fn set_nodelay(id: SocketId, on: bool) -> Result<()> {
+    with(|st| {
+        let (i, s) = st.socks.lookup(id)?;
+        s.nodelay = on;
+        if on {
+            tcp::output(st, i); // anything Nagle held back goes now
+        }
+        Ok(())
+    })
+}
+
+pub fn nodelay(id: SocketId) -> Result<bool> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.nodelay))
+}
+
 /// SO_ERROR: take the pending error, if any.
 pub fn take_error(id: SocketId) -> Result<Option<Errno>> {
     with(|st| {
@@ -595,7 +642,7 @@ pub fn send_capacity(id: SocketId) -> Result<usize> {
     with(|st| {
         let (_, s) = st.socks.lookup(id)?;
         Ok(match s.ty {
-            SockType::Dgram => udp::MAX_PAYLOAD,
+            SockType::Dgram => udp::MAX_DATAGRAM,
             SockType::Stream if s.tcb.state.can_send() && !s.shut_wr => s.tx.free(),
             SockType::Stream => 0,
         })

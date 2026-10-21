@@ -354,6 +354,27 @@ impl FileSystem for NineFs {
     fn root(&self) -> InodeRef {
         self.root.clone()
     }
+    /// Tstatfs on the root: the Mac's numbers for the shared folder's disk.
+    fn statfs(&self) -> Result<super::node::StatFs> {
+        let c = &self.shared.c;
+        let b = c.call(W::new(TSTATFS).u32(self.root.fid).done())?;
+        let mut r = R { b: &b, p: 0 };
+        let _type = r.u32()?;
+        let mut s = super::node::StatFs::empty(super::node::V9FS_MAGIC, self.shared.dev);
+        s.bsize = r.u32()? as u64;
+        s.blocks = r.u64()?;
+        s.bfree = r.u64()?;
+        s.bavail = r.u64()?;
+        s.files = r.u64()?;
+        s.ffree = r.u64()?;
+        let _fsid = r.u64()?;
+        s.namelen = r.u32()? as u64;
+        s.flags |= super::node::ST_NOSUID | super::node::ST_NODEV;
+        if !c.rw {
+            s.flags |= super::node::ST_RDONLY;
+        }
+        Ok(s)
+    }
 }
 
 pub struct NineInode {
@@ -772,7 +793,6 @@ pub fn mount(dev: Arc<P9Device>, path: &str, rw: bool) -> Result<()> {
             .done(),
     )?;
     let root_qid = R { b: &b, p: 0 }.qid()?;
-    let _ = TSTATFS;
     let shared = Arc::new(Shared {
         c,
         dev: alloc_dev(),

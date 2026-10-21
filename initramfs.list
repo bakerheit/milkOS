@@ -31,6 +31,7 @@
 /bin/passwd  target/user/aarch64-unknown-none-softfloat/release/passwd  4755
 /bin/clear   target/user/aarch64-unknown-none-softfloat/release/clear   755
 /bin/cp      target/user/aarch64-unknown-none-softfloat/release/cp      755
+/bin/df      target/user/aarch64-unknown-none-softfloat/release/df      755
 /bin/echo    target/user/aarch64-unknown-none-softfloat/release/echo    755
 /bin/env     target/user/aarch64-unknown-none-softfloat/release/env     755
 /bin/false   target/user/aarch64-unknown-none-softfloat/release/false   755
@@ -69,9 +70,12 @@
 /bin/alarm  target/user/aarch64-unknown-none-softfloat/release/alarm   755
 /bin/timer  target/user/aarch64-unknown-none-softfloat/release/timer   755
 /bin/cal    target/user/aarch64-unknown-none-softfloat/release/cal     755
+/bin/remind target/user/aarch64-unknown-none-softfloat/release/remind  755
 /bin/clock  target/user/aarch64-unknown-none-softfloat/release/clock   755
 /bin/calendar target/user/aarch64-unknown-none-softfloat/release/calendar 755
 /bin/activity target/user/aarch64-unknown-none-softfloat/release/activity 755
+/bin/reminders target/user/aarch64-unknown-none-softfloat/release/reminders 755
+/bin/diskutil target/user/aarch64-unknown-none-softfloat/release/diskutil 755
 
 # Network and sound tools (net agent).
 /bin/ifconfig target/user/aarch64-unknown-none-softfloat/release/ifconfig   755
@@ -85,6 +89,7 @@
 /bin/top      target/user/aarch64-unknown-none-softfloat/release/top   755
 /bin/store    target/user/aarch64-unknown-none-softfloat/release/store   755
 /bin/drop     target/user/aarch64-unknown-none-softfloat/release/drop   755
+/bin/tcpbench target/user/aarch64-unknown-none-softfloat/release/tcpbench 755
 /bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
 /bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755
 /bin/dedupe  target/user/aarch64-unknown-none-softfloat/release/dedupe  755

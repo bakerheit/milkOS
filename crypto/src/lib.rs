@@ -11,6 +11,9 @@
 //! | [`sha256`] | SHA-256 (FIPS 180-4) | NIST |
 //! | [`sha512`] | SHA-512 (FIPS 180-4) | NIST |
 //! | [`ed25519`] | Ed25519 signatures (RFC 8032) | RFC 8032 7.1 |
+//! | [`poly1305`] | Poly1305 one-time MAC (RFC 8439 2.5) | RFC 8439 2.5.2, A.3 |
+//! | [`aead`] | ChaCha20-Poly1305 AEAD (RFC 8439 2.8) | RFC 8439 2.8.2 + tamper checks |
+//! | [`x25519`] | X25519 key agreement (RFC 7748) | RFC 7748 5.2, 6.1, iterated x1000 |
 //!
 //! (The kernel's audit log keeps its own SHA-256, `kernel/src/audit/sha256.rs`, on
 //! purpose: `audit verify` checks the kernel's hashes with this independent copy.)
@@ -19,11 +22,14 @@
 
 extern crate alloc;
 
+pub mod aead;
 pub mod chacha20;
 pub mod ed25519;
 mod field25519;
+pub mod poly1305;
 pub mod sha256;
 pub mod sha512;
+pub mod x25519;
 
 /// Hex to a fixed-size array (None if malformed or the wrong length).
 pub fn unhex<const N: usize>(s: &str) -> Option<[u8; N]> {
@@ -88,5 +94,11 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, usize, usize)> {
     v.push(("sha512", p, t));
     let (p, t) = ed25519::selftest();
     v.push(("ed25519", p, t));
+    let (p, t) = poly1305::selftest();
+    v.push(("poly1305", p, t));
+    let (p, t) = aead::selftest();
+    v.push(("chacha20poly1305", p, t));
+    let (p, t) = x25519::selftest();
+    v.push(("x25519", p, t));
     v
 }

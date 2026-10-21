@@ -20,6 +20,9 @@ root cover it. `kernel/build.rs` watches it too, so userland rebuilds when it ch
 | `sha256` | SHA-256 (FIPS 180-4), streaming + one-shot | NIST |
 | `sha512` | SHA-512 (FIPS 180-4) | NIST |
 | `ed25519` | Ed25519 sign / verify (RFC 8032) | RFC 8032 7.1 |
+| `poly1305` | Poly1305 one-time MAC (RFC 8439 2.5), 26-bit limbs, streaming | RFC 8439 2.5.2 (one-shot + streamed), A.3 #6 and #7 (the 2^130-5 carries) |
+| `aead` | ChaCha20-Poly1305 (RFC 8439 2.8): `seal` / `open` (tag checked in constant time before decrypting) | RFC 8439 2.8.2, plus a flipped bit and a wrong AAD |
+| `x25519` | X25519 (RFC 7748): Montgomery ladder, constant-time swap, `public_key`, `shared` (None for an all-zero result) | RFC 7748 5.2 (both), 6.1, the iterated test after 1 and 1000 rounds |
 | `field25519` (private) | GF(2^255-19), shared by Ed25519 and X25519; constant-time `cswap` | via the curves |
 | crate root | `hex`, `unhex`, `unhex_vec`, `ct_eq` (constant-time compare), `wipe` (volatile zeroing) | |
 

@@ -169,7 +169,6 @@ impl Fe {
 
 impl Fe {
     /// Constant-time conditional swap (`swap` is 0 or 1), for the Montgomery ladder.
-    #[allow(dead_code)]
     pub(crate) fn cswap(a: &mut Fe, b: &mut Fe, swap: u64) {
         let m = 0u64.wrapping_sub(swap);
         for i in 0..5 {

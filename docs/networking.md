@@ -380,6 +380,22 @@ drop-bob-wait`), two desktops with linked eth1s on private images.
 
 **Test**: `scripts/drop-test.sh` (below).
 
+## Throughput (`scripts/net-bench.sh`, `/bin/tcpbench`)
+
+`tcpbench send HOST:PORT MIB | recv HOST:PORT | sink PORT | source PORT MIB` times one TCP
+transfer (`send` waits for the peer's close, so the time covers delivery).
+`scripts/net-bench.sh [MIB]` boots two VMs, alice and bob, and runs three paths:
+
+* guest -> host: to a sink on the Mac's 127.0.0.1, through slirp;
+* host -> guest: from a source there;
+* guest -> guest: alice -> bob over eth1 (`-netdev dgram`).
+
+The host helper is `scripts/net_bench_host.py`, bound to 127.0.0.1.
+
+| | guest -> host | host -> guest | guest -> guest | notes |
+|---|---|---|---|---|
+| baseline (16 KiB windows, no scaling/SACK/timestamps, 2 s TIME_WAIT) | 98-105 MiB/s | 91-94 MiB/s | 34-37 MiB/s | 64 MiB per run, debug kernel, smp 4, three runs |
+
 ## In-kernel HTTP server (demo, off by default)
 
 `net/services.rs`, on the net thread, using only the socket API: `/` (HTML with the

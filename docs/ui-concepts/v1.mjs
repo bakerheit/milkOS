@@ -141,10 +141,10 @@ function filesWin(x = 96, y = 64, focus = false) {
   return win(x, y, w, h, "Documents", body, { focus });
 }
 function shellWin(x = 440, y = 270, focus = true) {
-  const body = T(14, 46, "andrew@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
-    T(14, 90, "andrew@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
-    T(14, 134, "andrew@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
-  return win(x, y, 520, 290, "andrew: sh", body, { focus, dark: true });
+  const body = T(14, 46, "milk@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
+    T(14, 90, "milk@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
+    T(14, 134, "milk@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
+  return win(x, y, 520, 290, "milk: sh", body, { focus, dark: true });
 }
 
 /* ------------------------------ scenes ------------------------------ */
@@ -154,7 +154,7 @@ function sceneHome() {
   let h = WP + menubar("Home");
   const c = TOK.cards, p = c.pad;
   const card = (x, y, w, hh, label, inner) => glass(x, y, w, hh, c.r, T(p, p, label, `color:${col("cocoa")}`) + inner);
-  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning, Andrew", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
+  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
   const y1 = 56 + 96 + c.gap;
   h += card(48, y1, 296, 228, "CALENDAR", ["M", "T", "W", "T", "F", "S", "S"].map((d, i) => TC(12 + i * 38, 40, 38, d, `color:${col("cocoa")}`)).join("") +
     Array.from({ length: 21 }, (_, i) => { const n = i + 12, cx = 12 + (i % 7) * 38, cy = 66 + Math.floor(i / 7) * 34, today = n === 20; return (today ? B(cx + 3, cy - 4, 32, 24, `background:${col("straw")};border-radius:12px`) : "") + TC(cx, cy, 38, String(n > 31 ? n - 31 : n), today ? `color:${col("milk")};${BD}` : ""); }).join(""));

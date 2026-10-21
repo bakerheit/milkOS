@@ -31,7 +31,7 @@ function rewind() {
   h += B(272, 64, 728, 440, `background:linear-gradient(160deg,#F9EBD3,#EBD7BB);border-radius:14px;border:2px solid ${C.straw};overflow:hidden`,
     B(0, 0, 728, 28, `background:rgba(255,253,248,.7)`) + T(12, 6, "<b>Files</b>   File   Edit   View") + TR(716, 6, "9:12 AM", `color:${C.cocoa}`) +
     win(28, 48, 360, 250, "kernel notes.md", T(16, 46, "# milkOS kernel") + T(16, 66, "- boot on qemu virt") + T(16, 84, "- UART first, then display") + T(16, 102, "- heap next", `color:${C.cocoa}`) + T(16, 140, "TODO: interrupts", `background:${C.honey}55`), { shade: true }) +
-    win(240, 150, 440, 250, "andrew: sh", T(14, 46, "$ cargo build", `color:${C.cream}`) + T(14, 64, "   Compiling milkos-kernel", `color:${C.latte}`) + T(14, 82, "error: no global allocator", `color:${C.straw}`) + T(14, 100, "$ _", `color:${C.cream}`), { dark: true }));
+    win(240, 150, 440, 250, "milk: sh", T(14, 46, "$ cargo build", `color:${C.cream}`) + T(14, 64, "   Compiling milkos-kernel", `color:${C.latte}`) + T(14, 82, "error: no global allocator", `color:${C.straw}`) + T(14, 100, "$ _", `color:${C.cream}`), { dark: true }));
   // action bar under the viewer
   h += pill(272, 516, 190, "3 files changed since", false, 32) + T(474, 524, "Drag a window or file out", `color:${C.cocoa}`) +
     B(790, 516, 210, 32, `background:${C.esp};border-radius:16px`) + TC(790, 524, 210, "<b>Restore this moment</b>", `color:${C.cream}`);

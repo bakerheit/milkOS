@@ -190,7 +190,7 @@ check "clone listed while trying" "^try-snake of=milk-try-snake at=/Volumes/Milk
 echo "  ok  run-try snake: runs with its clone as / (chroot), sandboxed"
 check "run-try made a scratch dir in the clone" "^run-moo2048$"
 check "keep dropped the run-try scratch dir" "ls: /Volumes/Milk/tmp: "
-check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Applications/snake/bin/snake sandbox=fs=/:r,fs=/tmp/run-snake:rw"
+check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Applications/snake/bin/snake sandbox=fs=/Applications:r,fs=/Volumes/Milk-try-snake/Applications:r,fs=/tmp/run-snake:rw"
 check "audit: run-try entered the sandbox" "sandbox.enter .*net=local"
 check "discard" "milk: discarded clone try-snake"
 check "keep (promote)" "milk: kept moo2048 1.0.0: clone try-moo2048 is now the live system"

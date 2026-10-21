@@ -415,7 +415,6 @@ impl Terminal {
     }
 }
 
-/// Split `s` into chunks of at most `cols` characters.
 // ---- ANSI colour markers ------------------------------------------------------------------
 // Coloured output is kept in the scrollback as plain strings with marker characters from the
 // Private Use Area (U+F700 + colour index, + 0x20 when bold) where the colour changes. They take

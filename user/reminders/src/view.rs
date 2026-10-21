@@ -142,12 +142,17 @@ impl App {
             }
             win.disc(24, y + 13, 6, *c);
             bold_x(win, 40, y + 5, name, th.espresso, 1);
+            let count_col = if self.view == *v {
+                th.espresso
+            } else {
+                th.cocoa
+            };
             text_r(
                 win,
                 SIDE - 20,
                 y + 5,
                 &format!("{}", counts[i]),
-                th.cocoa,
+                count_col,
                 1,
             );
             self.hits.add(r, SMART + i as u32);
@@ -169,7 +174,12 @@ impl App {
             }
             win.disc(24, y + 13, 6, acc);
             win.text(40, y + 5, &widgets::fit(&name, SIDE - 40 - 40), th.espresso);
-            text_r(win, SIDE - 20, y + 5, &format!("{n}"), th.cocoa, 1);
+            let count_col = if self.view == View::List(i) {
+                th.espresso
+            } else {
+                th.cocoa
+            };
+            text_r(win, SIDE - 20, y + 5, &format!("{n}"), count_col, 1);
             self.hits.add(r, LIST + i as u32);
         }
         let bw = button_w("Add list", true);

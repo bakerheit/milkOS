@@ -28,6 +28,7 @@ mod icons;
 mod menus;
 mod paint;
 mod power;
+pub mod prefs;
 mod rtc;
 mod script;
 mod shell;
@@ -92,6 +93,8 @@ pub enum Request {
     ClientGone(u32),
     /// `open` from /dev/wm: an app name or an absolute path.
     OpenAny(String),
+    /// New preferences from Settings: apply and save.
+    Prefs(prefs::Prefs),
     Skim,
 }
 
@@ -295,7 +298,10 @@ impl Desktop {
             return Err(fb);
         };
         let t = timer::now_ns();
-        let Some(wp) = Wallpaper::new() else {
+        let pr = prefs::load();
+        theme::set_dark(pr.dark);
+        theme::set_dock_icon(pr.dock);
+        let Some(wp) = Wallpaper::new(pr.wallpaper_kind()) else {
             return Err(fb);
         };
         kprintln!(
@@ -320,7 +326,7 @@ impl Desktop {
             next_toast: 1,
             settings: Settings {
                 focus_mode: false,
-                brightness: 100,
+                brightness: pr.brightness,
                 volume: 40,
             },
             cache: BTreeMap::new(),
@@ -513,6 +519,35 @@ impl Desktop {
         }
     }
 
+    /// Apply new preferences (theme, wallpaper, brightness, dock size) and save them.
+    fn apply_prefs(&mut self, p: prefs::Prefs) {
+        let old = prefs::get();
+        prefs::set(p);
+        prefs::save(&p);
+        if p.dark != old.dark {
+            theme::set_dark(p.dark);
+        }
+        if p.dark != old.dark || p.wallpaper_kind() != old.wallpaper_kind() {
+            match Wallpaper::new(p.wallpaper_kind()) {
+                Some(wp) => self.wp = wp,
+                None => self.post_toast("Out of memory", "for the new wallpaper"),
+            }
+        }
+        if p.dock != old.dock {
+            theme::set_dock_icon(p.dock);
+        }
+        self.settings.brightness = p.brightness;
+        // Everything may look different: redraw every window and panel.
+        for w in &mut self.windows {
+            w.dirty = true;
+        }
+        self.cache.clear();
+        if self.mode == Mode::Spaces {
+            self.build_thumbs();
+        }
+        self.damage_all();
+    }
+
     /// The /dev/wm status text.
     fn status_report(&self) -> String {
         let mode = match self.mode {
@@ -655,7 +690,7 @@ impl Desktop {
 
     /// The area between the menu bar and the dock.
     fn work_area() -> Rect {
-        let dock_top = SCREEN_H - DOCK_BOTTOM - DOCK_H;
+        let dock_top = SCREEN_H - DOCK_BOTTOM - dock_h();
         Rect::new(0, MENU_H, SCREEN_W, dock_top - MENU_H)
     }
 
@@ -956,7 +991,7 @@ impl Desktop {
         }
         for l in layers {
             match l {
-                Layer::Dim(a) => p.fill_a(d.x, d.y, d.w, d.h, ESPRESSO, *a),
+                Layer::Dim(a) => p.fill_a(d.x, d.y, d.w, d.h, INK, *a),
                 Layer::Label {
                     x,
                     y,
@@ -1036,6 +1071,7 @@ impl Desktop {
                 Request::Mode(m) => self.toggle_mode(m),
                 Request::ClientCreate(id) => self.open(App::Client(id)),
                 Request::OpenAny(what) => self.open_any(&what),
+                Request::Prefs(p) => self.apply_prefs(p),
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();
@@ -1462,6 +1498,15 @@ impl Desktop {
                 self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
             }
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),
+            Some(Drag::Slider(0)) => {
+                // Display brightness is a saved preference (Settings shows it too).
+                let mut p = prefs::get();
+                if p.brightness != self.settings.brightness {
+                    p.brightness = self.settings.brightness;
+                    prefs::set(p);
+                    prefs::save(&p);
+                }
+            }
             Some(Drag::Move { .. }) => {
                 let s = self.stats;
                 if s.drag_frames > 0 {

@@ -1,5 +1,7 @@
-//! The 1.0 wallpaper, "dawn pasture" (SPEC: Wallpaper), drawn once at boot, plus the pre-blurred
-//! copies glass panels sample (SPEC: Glass). Integer maths only (the target is soft-float).
+//! Wallpapers: "dawn pasture" (the 1.0 one, SPEC: Wallpaper), "night pasture" (the dark
+//! theme's: moon, stars, the cow asleep) and plain "oat", each drawn once when chosen, plus
+//! the pre-blurred copies glass panels sample (SPEC: Glass), tinted with the theme's milk.
+//! Integer maths only (the target is soft-float).
 
 use crate::gfx::{Color, DrawTarget, blend, rgb};
 
@@ -16,11 +18,48 @@ pub struct Wallpaper {
     pub glass_strong: Buffer,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Dawn,
+    Night,
+    Oat,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 3] = [Kind::Dawn, Kind::Night, Kind::Oat];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Dawn => "Dawn pasture",
+            Kind::Night => "Night pasture",
+            Kind::Oat => "Oat",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Kind::Dawn => "dawn",
+            Kind::Night => "night",
+            Kind::Oat => "oat",
+        }
+    }
+}
+
+/// Draw wallpaper `kind` full screen into `b` (also used for the Settings previews).
+pub fn paint(b: &mut Buffer, kind: Kind) {
+    match kind {
+        Kind::Dawn => draw(b),
+        Kind::Night => draw_night(b),
+        Kind::Oat => draw_oat(b),
+    }
+}
+
 impl Wallpaper {
-    pub fn new() -> Option<Wallpaper> {
+    /// Wallpaper `kind`, with glass tinted for the current theme (`theme::tc(MILK)`).
+    pub fn new(kind: Kind) -> Option<Wallpaper> {
         let (w, h) = (SCREEN_W as usize, SCREEN_H as usize);
         let mut sharp = Buffer::new(w, h, 0)?;
-        draw(&mut sharp);
+        paint(&mut sharp, kind);
         let mut glass = Buffer::new(w, h, 0)?;
         copy(&sharp, &mut glass);
         for _ in 0..BLUR_PASSES {
@@ -29,8 +68,9 @@ impl Wallpaper {
         }
         let mut glass_strong = Buffer::new(w, h, 0)?;
         copy(&glass, &mut glass_strong);
-        tint(&mut glass, MILK, GLASS_A);
-        tint(&mut glass_strong, MILK, GLASS_STRONG_A);
+        let milk = tc(MILK);
+        tint(&mut glass, milk, GLASS_A);
+        tint(&mut glass_strong, milk, GLASS_STRONG_A);
         Some(Wallpaper {
             sharp,
             glass,
@@ -127,7 +167,7 @@ fn draw(b: &mut Buffer) {
     css_circle(b, 380, 590, 1100, rgb(0xB9, 0xD3, 0xB0), 255);
     css_circle(b, 760, 650, 700, rgb(0xA5, 0xC7, 0x9F), 255);
     // The tiny cow.
-    let mut p = Painter::new(b);
+    let mut p = Painter::raw(b);
     p.rrect(842, 636, 56, 30, 8, MILK, 255);
     p.rrect(852, 642, 14, 10, 4, ESPRESSO, 255);
     p.rrect(874, 650, 12, 8, 4, ESPRESSO, 255);
@@ -137,6 +177,78 @@ fn draw(b: &mut Buffer) {
     for lx in [846, 862, 878] {
         p.fill(lx, 664, 6, 14, ESPRESSO);
     }
+}
+
+/// Night pasture: a plum-to-navy sky, stars, a moon with a halo, dark hills, the cow asleep.
+fn draw_night(b: &mut Buffer) {
+    let (top, mid, bot) = (
+        rgb(0x1B, 0x1A, 0x2E),
+        rgb(0x2C, 0x24, 0x40),
+        rgb(0x4B, 0x35, 0x52),
+    );
+    let h = b.h() as u32;
+    let split = h * 55 / 100;
+    for y in 0..h {
+        let c = if y < split {
+            lerp(top, mid, y, split)
+        } else {
+            lerp(mid, bot, y - split, h - split)
+        };
+        b.fill_rect(0, y as i32, b.w(), 1, c);
+    }
+    // Stars: a fixed pseudo-random sprinkle over the upper sky, a few brighter ones.
+    let mut seed: u32 = 0x6d69_6c6b; // "milk"
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for i in 0..140 {
+        let x = (next() % SCREEN_W as u32) as i64;
+        let y = (next() % 470) as i64;
+        let a = (60 + next() % 180) as u8;
+        let big = i % 11 == 0;
+        let r16 = if big { 20 } else { 9 };
+        disc(b, 16 * x + 8, 16 * y + 8, r16, rgb(0xFF, 0xF6, 0xE4), a);
+    }
+    // Moon and halo where the sun is in the day.
+    css_circle(b, 720, 60, 200, rgb(0xFF, 0xF3, 0xDA), a(90));
+    css_circle(b, 760, 100, 120, rgb(0xF5, 0xEC, 0xD6), 255);
+    css_circle(b, 790, 110, 30, rgb(0xE4, 0xD9, 0xC0), 255); // craters
+    css_circle(b, 812, 160, 22, rgb(0xE4, 0xD9, 0xC0), 255);
+    css_circle(b, 770, 150, 14, rgb(0xE8, 0xDE, 0xC6), 255);
+    // Hills, night greens.
+    css_circle(b, -120, 500, 1040, rgb(0x3F, 0x55, 0x45), 255);
+    css_circle(b, 380, 590, 1100, rgb(0x35, 0x4B, 0x3C), 255);
+    css_circle(b, 760, 650, 700, rgb(0x2C, 0x41, 0x34), 255);
+    // The cow, lying down asleep: body on the grass, legs tucked, head resting, eyes shut.
+    let mut p = Painter::raw(b);
+    let cow = rgb(0xE9, 0xE2, 0xD6);
+    let spot = rgb(0x2A, 0x22, 0x1E);
+    p.rrect(842, 650, 56, 26, 10, cow, 255);
+    p.rrect(852, 655, 14, 9, 4, spot, 255);
+    p.rrect(874, 662, 12, 7, 4, spot, 255);
+    p.rrect(892, 656, 22, 20, 7, cow, 255); // head down low
+    p.fill(900, 664, 6, 2, spot); // closed eye
+    p.rrect(890, 652, 6, 7, 3, spot, 255);
+    p.rrect(846, 672, 12, 5, 2, cow, 255); // tucked legs
+    p.rrect(878, 672, 12, 5, 2, cow, 255);
+    // z z z
+    let z = rgb(0xF5, 0xEC, 0xD6);
+    p.text_a(918, 632, "z", z, 200, 1);
+    p.text_a(928, 618, "z", z, 170, 1);
+    p.text_a(940, 600, "Z", z, 140, 1);
+}
+
+/// Oat: a quiet cream-to-oat gradient with one soft milk glow.
+fn draw_oat(b: &mut Buffer) {
+    let (top, bot) = (rgb(0xFB, 0xF4, 0xE6), rgb(0xE6, 0xD9, 0xC2));
+    let h = b.h() as u32;
+    for y in 0..h {
+        b.fill_rect(0, y as i32, b.w(), 1, lerp(top, bot, y, h));
+    }
+    css_circle(b, 620, -220, 760, MILK, a(350));
 }
 
 /// One box-blur pass of radius `r` along a line of `n` pixels (`get`/`set` by index), edges

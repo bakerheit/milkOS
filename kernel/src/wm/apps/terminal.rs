@@ -131,7 +131,7 @@ impl Terminal {
                 (_, '\x1b') => self.esc = 1,
                 (_, '\n') => {
                     let l = core::mem::take(&mut self.cur);
-                    self.lines.push((l, CREAM));
+                    self.lines.push((l, TERM_FG));
                 }
                 (_, '\x08') => {
                     self.cur.pop();
@@ -279,7 +279,7 @@ impl Terminal {
         let line = core::mem::take(&mut self.input);
         self.cursor = 0;
         self.lines
-            .push((format!("{}{}", self.shell.prompt(), line), CREAM));
+            .push((format!("{}{}", self.shell.prompt(), line), TERM_FG));
         if !line.trim().is_empty() {
             self.history.push(line.clone());
         }
@@ -354,7 +354,7 @@ impl WindowContents for Terminal {
         }
         vis.reverse();
         for seg in &prompt_rows {
-            vis.push((seg.clone(), CREAM));
+            vis.push((seg.clone(), TERM_FG));
         }
         let max_back = vis.len().saturating_sub(rows);
         self.back = self.back.min(max_back);
@@ -391,10 +391,10 @@ impl WindowContents for Terminal {
             let row_on_screen = (vis.len() - prompt_rows.len() + r) as i32 - start as i32;
             let (x, y) = (PAD + ccol as i32 * 8, PAD + row_on_screen * LINE_H);
             if focused {
-                p.fill(x, y, 8, 16, CREAM);
+                p.fill(x, y, 8, 16, TERM_FG);
                 let ch = self.input.chars().nth(self.cursor).unwrap_or(' ');
                 let mut b = [0u8; 4];
-                p.text(x, y, ch.encode_utf8(&mut b), ESPRESSO);
+                p.text(x, y, ch.encode_utf8(&mut b), TERM_BG);
             } else {
                 p.rrect_stroke(x, y, 8, 16, 0, 1, LATTE, 255);
             }
@@ -427,7 +427,7 @@ impl WindowContents for Terminal {
             match k.key {
                 Key::Char('c') => {
                     let line = format!("{}{}^C", self.shell.prompt(), self.input);
-                    self.lines.push((line, CREAM));
+                    self.lines.push((line, TERM_FG));
                     self.input.clear();
                     self.cursor = 0;
                 }
@@ -802,10 +802,10 @@ impl Shell for BuiltinShell {
             "cowsay" => {
                 let t = if arg.is_empty() { "moo" } else { arg.as_str() };
                 let n = t.chars().count();
-                out.line(&format!(" {}", "_".repeat(n + 2)), CREAM);
-                out.line(&format!("< {t} >"), CREAM);
-                out.line(&format!(" {}", "-".repeat(n + 2)), CREAM);
-                out.line(COW, CREAM);
+                out.line(&format!(" {}", "_".repeat(n + 2)), TERM_FG);
+                out.line(&format!("< {t} >"), TERM_FG);
+                out.line(&format!(" {}", "-".repeat(n + 2)), TERM_FG);
+                out.line(COW, TERM_FG);
             }
             "exit" => out.out("there is nowhere to go. this is the kernel."),
             _ => out.bad(&format!("{cmd}: command not found (try 'help')")),

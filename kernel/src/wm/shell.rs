@@ -122,21 +122,21 @@ const DOCK: [DockItem; 9] = [
         name: "Files",
         icon: Icon::Folder,
         bg: HONEY,
-        fg: ESPRESSO,
+        fg: INK,
         action: DockAction::App(App::Files),
     },
     DockItem {
         name: "Terminal",
         icon: Icon::Term,
-        bg: ESPRESSO,
-        fg: CREAM,
+        bg: TERM_BG,
+        fg: TERM_FG,
         action: DockAction::App(App::Terminal),
     },
     DockItem {
         name: "Web",
         icon: Icon::Globe,
         bg: BLUE,
-        fg: ESPRESSO,
+        fg: INK,
         action: DockAction::Soon("Web"),
     },
     DockItem {
@@ -150,14 +150,14 @@ const DOCK: [DockItem; 9] = [
         name: "Paint",
         icon: Icon::Paint,
         bg: HONEY,
-        fg: ESPRESSO,
+        fg: INK,
         action: DockAction::Program("/bin/paint"),
     },
     DockItem {
         name: "Music",
         icon: Icon::Music,
         bg: STRAW,
-        fg: ESPRESSO,
+        fg: INK,
         action: DockAction::Soon("Music"),
     },
     DockItem {
@@ -185,19 +185,19 @@ const DOCK: [DockItem; 9] = [
 
 pub fn dock_rect() -> Rect {
     let n = DOCK.len() as i32;
-    let w = 2 * DOCK_PAD + n * DOCK_ICON + (n - 1) * DOCK_GAP;
+    let w = 2 * DOCK_PAD + n * dock_icon() + (n - 1) * DOCK_GAP;
     Rect::new(
         (SCREEN_W - w) / 2,
-        SCREEN_H - DOCK_BOTTOM - DOCK_H,
+        SCREEN_H - DOCK_BOTTOM - dock_h(),
         w,
-        DOCK_H,
+        dock_h(),
     )
 }
 
 /// Which dock icon is at `lx` pixels from the dock's left edge.
 pub fn dock_index(lx: i32) -> Option<usize> {
-    let i = (lx - DOCK_PAD) / (DOCK_ICON + DOCK_GAP);
-    let within = (lx - DOCK_PAD) % (DOCK_ICON + DOCK_GAP) < DOCK_ICON;
+    let i = (lx - DOCK_PAD) / (dock_icon() + DOCK_GAP);
+    let within = (lx - DOCK_PAD) % (dock_icon() + DOCK_GAP) < dock_icon();
     (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
 }
 
@@ -216,7 +216,7 @@ impl Desktop {
         match i {
             Some(i) => {
                 let (cx, cy) = dock_icon_center(i);
-                Rect::new(cx - DOCK_ICON / 2, cy - DOCK_ICON / 2, DOCK_ICON, DOCK_ICON)
+                Rect::new(cx - dock_icon() / 2, cy - dock_icon() / 2, dock_icon(), dock_icon())
             }
             None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
         }
@@ -227,8 +227,8 @@ impl Desktop {
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
     let d = dock_rect();
     (
-        d.x + DOCK_PAD + i as i32 * (DOCK_ICON + DOCK_GAP) + DOCK_ICON / 2,
-        d.y + DOCK_PAD + DOCK_ICON / 2,
+        d.x + DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP) + dock_icon() / 2,
+        d.y + DOCK_PAD + dock_icon() / 2,
     )
 }
 
@@ -258,8 +258,8 @@ const ENTRIES: [Entry; 9] = [
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
         icon: Icon::Term,
-        bg: ESPRESSO,
-        fg: CREAM,
+        bg: TERM_BG,
+        fg: TERM_FG,
         action: Action::App(App::Terminal),
     },
     Entry {
@@ -267,7 +267,7 @@ const ENTRIES: [Entry; 9] = [
         sub: "Browse files (placeholder until vfs)",
         icon: Icon::Folder,
         bg: HONEY,
-        fg: ESPRESSO,
+        fg: INK,
         action: Action::App(App::Files),
     },
     Entry {
@@ -291,7 +291,7 @@ const ENTRIES: [Entry; 9] = [
         sub: "Draw something (a userland app)",
         icon: Icon::Paint,
         bg: HONEY,
-        fg: ESPRESSO,
+        fg: INK,
         action: Action::Program("/bin/paint"),
     },
     Entry {
@@ -423,7 +423,7 @@ fn card_rect(i: u8) -> Rect {
 
 const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
     (App::Files, Icon::Folder, HONEY, FOLDER_A, COCOA),
-    (App::Terminal, Icon::Term, ESPRESSO, 255, CREAM),
+    (App::Terminal, Icon::Term, TERM_BG, 255, TERM_FG),
     (App::Notes, Icon::Note, CREAM, 255, ESPRESSO),
     (App::About, Icon::Gear, LATTE, 255, ESPRESSO),
 ];
@@ -646,7 +646,7 @@ impl Desktop {
             PanelKey::Dock => self.paint_dock(p),
             PanelKey::Toast(id) => {
                 if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
-                    icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, ESPRESSO, false);
+                    icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, INK, false);
                     p.text_p(64, 12, &t.title, ESPRESSO, true);
                     p.text_p(64, 32, &t.sub, COCOA, false);
                 }
@@ -697,16 +697,16 @@ impl Desktop {
 
     fn paint_dock(&self, p: &mut Painter) {
         for (i, it) in DOCK.iter().enumerate() {
-            let ix = DOCK_PAD + i as i32 * (DOCK_ICON + DOCK_GAP);
+            let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
             icons::draw(
-                p, ix, DOCK_PAD, DOCK_ICON, it.icon, it.bg, 255, it.fg, false,
+                p, ix, DOCK_PAD, dock_icon(), it.icon, it.bg, 255, it.fg, false,
             );
             // SPEC hover / pressed: lighten 4% / darken 4%.
-            let r = (DOCK_ICON * 24 + 50) / 100;
+            let r = (dock_icon() * 24 + 50) / 100;
             if self.dock_pressed == Some(i) {
-                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, 0, a(40));
+                p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, 0, a(40));
             } else if self.tip == Some(i) {
-                p.rrect(ix, DOCK_PAD, DOCK_ICON, DOCK_ICON, r, WHITE, a(40));
+                p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, WHITE, a(40));
             }
             let running = match it.action {
                 DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
@@ -717,8 +717,8 @@ impl Desktop {
             };
             if running {
                 p.rrect(
-                    ix + DOCK_ICON / 2 - DOCK_DOT / 2,
-                    DOCK_H - DOCK_DOT_GAP - DOCK_DOT + 1,
+                    ix + dock_icon() / 2 - DOCK_DOT / 2,
+                    dock_h() - DOCK_DOT_GAP - DOCK_DOT + 1,
                     DOCK_DOT,
                     DOCK_DOT,
                     2,

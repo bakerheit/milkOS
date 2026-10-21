@@ -93,6 +93,7 @@ fn launch(name: &str, entry_off: usize, x0: u64, x1: u64) -> u32 {
         fp: Box::new(FpState::zeroed()),
         sig: super::signal::SigState::new(),
         argv: alloc::vec::Vec::new(),
+        exe: alloc::string::String::from(name),
     })
     .expect("start")
 }

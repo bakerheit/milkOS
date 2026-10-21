@@ -117,7 +117,7 @@ fn builtin(argv: &[&str], last: &mut i32) -> Option<Builtin> {
         "help" => {
             println!("built-ins:");
             println!("  echo [words]     print words");
-            println!("  ps               processes and kernel threads");
+            println!("  ps [-k]          processes (-k: and kernel threads), from /proc");
             println!("  uname [-a]       system name");
             println!("  sleep SECS       sleep (fractions ok: 0.5)");
             println!("  cd [DIR], pwd    change / show directory");
@@ -146,7 +146,7 @@ fn builtin(argv: &[&str], last: &mut i32) -> Option<Builtin> {
             }
             None => println!("usage: sleep SECONDS"),
         },
-        "ps" => ps(),
+        "ps" => ps(arg(1) == Some("-k")),
         "pwd" => println!("{}", sys::getcwd().unwrap_or_default()),
         "cd" => {
             if let Err(e) = sys::chdir(arg(1).unwrap_or("/home/milk")) {
@@ -154,6 +154,10 @@ fn builtin(argv: &[&str], last: &mut i32) -> Option<Builtin> {
             }
         }
         "ls" => ls(arg(1).unwrap_or(".")),
+        "readlink" => match sys::readlink(arg(1).unwrap_or("")) {
+            Ok(t) => println!("{t}"),
+            Err(e) => println!("readlink: {e}"),
+        },
         "cat" => {
             for f in &argv[1..] {
                 cat(f);
@@ -183,9 +187,9 @@ fn parse_secs(s: &str) -> Option<u64> {
     Some(ns)
 }
 
-fn ps() {
-    let Ok(list) = sys::ps() else {
-        println!("ps: MILK_PS failed");
+fn ps(kernel: bool) {
+    let Ok(list) = sys::ps(kernel) else {
+        println!("ps: cannot read /proc");
         return;
     };
     println!("  PID  PPID   TID S     TIME     RSS  NAME");

@@ -1,5 +1,6 @@
 //! Kernel feature tests from user space, one per subcommand. Prints PASS/FAIL lines.
 //!   utest pipe    pipe + fork + dup2 + exec: read another program's stdout
+//!   utest proc    /proc/<pid> appears, describes the process, and goes away when reaped
 //!   utest signal  handlers, sigreturn, masks, EINTR, SIGCHLD, process groups, defaults
 //!   utest all     everything
 
@@ -278,11 +279,52 @@ fn t_signal() -> bool {
     ok
 }
 
+fn t_proc() -> bool {
+    let (r, w) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::close(w);
+        let mut b = [0u8; 1];
+        let _ = sys::read(r, &mut b); // wait for the parent
+        sys::exit(0);
+    }
+    let _ = sys::close(r);
+    let status = String::from_utf8_lossy(
+        &sys::read_file(&alloc::format!("/proc/{pid}/status")).unwrap_or_default(),
+    )
+    .into_owned();
+    let cmdline = sys::read_file(&alloc::format!("/proc/{pid}/cmdline")).unwrap_or_default();
+    let fds: Vec<String> = sys::read_dir(&alloc::format!("/proc/{pid}/fd"))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.0)
+        .filter(|n| n != "." && n != "..")
+        .collect();
+    let fd3 = sys::readlink(&alloc::format!("/proc/{pid}/fd/3")).unwrap_or_default();
+    let me = sys::readlink("/proc/self").unwrap_or_default();
+    let _ = sys::close(w);
+    let _ = sys::wait4(pid as i32, 0);
+    let gone = sys::read_file(&alloc::format!("/proc/{pid}/status")).is_err();
+    let ok = status.contains(&alloc::format!("PPid:\t{}", sys::getpid()))
+        && cmdline.starts_with(b"utest\0")
+        && fd3.starts_with("pipe:[")
+        && me == alloc::format!("{}", sys::getpid())
+        && gone;
+    check(
+        "/proc/<pid>",
+        ok,
+        &alloc::format!("fds {fds:?}, fd/3 -> {fd3}, /proc/self -> {me}, gone after reap: {gone}"),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
     if what == "pipe" || what == "all" {
         ok &= t_pipe();
+    }
+    if what == "proc" || what == "all" {
+        ok &= t_proc();
     }
     if what == "signal" || what == "all" {
         ok &= t_signal();

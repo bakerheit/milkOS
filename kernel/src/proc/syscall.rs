@@ -5,19 +5,17 @@
 //! preempted and can block); a pending reschedule is honoured on the way back to EL0.
 //! User memory is only touched through `UserSpace::copy_in/copy_out`, which validate it.
 //! Unknown numbers return ENOSYS and are logged once per number.
-//!
-//! The one non-Linux call is `MILK_PS` (4096), used by `ps` until /proc has per-process
-//! directories.
+//! There are no milkOS-specific syscalls: process information comes from /proc.
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::current;
 use super::errno::*;
 use super::signal;
 use super::uspace::{Perm, UserSpace};
-use super::{PState, current};
 use crate::exceptions::{self, TrapFrame};
 use crate::fs::{self, InodeRef, InodeType, OpenFile, abi};
 use crate::sched;
@@ -43,6 +41,7 @@ pub mod nr {
     pub const WRITEV: u64 = 66;
     pub const PREAD64: u64 = 67;
     pub const PWRITE64: u64 = 68;
+    pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
     pub const EXIT: u64 = 93;
@@ -81,8 +80,6 @@ pub mod nr {
     pub const MPROTECT: u64 = 226;
     pub const WAIT4: u64 = 260;
     pub const GETRANDOM: u64 = 278;
-    /// milkOS: fill an array of `PsEntry` (see `sys_ps`).
-    pub const MILK_PS: u64 = 4096;
 }
 
 pub fn init() {
@@ -156,6 +153,14 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             let st = file(a[0] as i64)?.stat().to_linux();
             copy_out(a1, st.as_bytes())?;
             Ok(0)
+        }
+        nr::READLINKAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let t = fs::readlink_at(base.as_ref(), &path)?;
+            let n = t.len().min(a3);
+            copy_out(a2, &t.as_bytes()[..n])?;
+            Ok(n)
         }
         nr::NEWFSTATAT => sys_newfstatat(a[0] as i32 as i64, a1, a2, a[3] as u32),
         nr::GETDENTS64 => {
@@ -374,7 +379,6 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             copy_out(a0, &buf[..n])?;
             Ok(n)
         }
-        nr::MILK_PS => sys_ps(a0, a1),
         _ => {
             let (w, b) = ((nr as usize / 64) % 8, nr % 64);
             if nr < 512 && REPORTED[w].fetch_or(1 << b, Ordering::Relaxed) & (1 << b) == 0 {
@@ -759,61 +763,4 @@ fn sys_uname(buf: usize) -> KResult<usize> {
     }
     copy_out(buf, &u)?;
     Ok(0)
-}
-
-/// One `MILK_PS` record (48 bytes, little endian):
-/// `pid u32, ppid u32, tid u32, state u8 ('R' 'S' 'Z'), kernel u8, pad u16,
-///  cpu_ns u64, rss_bytes u64, name [u8; 16]`.
-/// Kernel threads have pid 0 and kernel = 1. Returns the number of records written.
-fn sys_ps(buf: usize, len: usize) -> KResult<usize> {
-    let mut out: Vec<u8> = Vec::new();
-    let mut rec =
-        |pid: u32, ppid: u32, tid: u32, st: u8, kern: bool, cpu: u64, rss: u64, name: &[u8; 16]| {
-            out.extend_from_slice(&pid.to_le_bytes());
-            out.extend_from_slice(&ppid.to_le_bytes());
-            out.extend_from_slice(&tid.to_le_bytes());
-            out.push(st);
-            out.push(kern as u8);
-            out.extend_from_slice(&[0, 0]);
-            out.extend_from_slice(&cpu.to_le_bytes());
-            out.extend_from_slice(&rss.to_le_bytes());
-            out.extend_from_slice(name);
-        };
-    for t in sched::threads() {
-        if t.state == sched::State::Dead {
-            continue;
-        }
-        let mut name = [0u8; 16];
-        let n = t.name.as_str().as_bytes();
-        name[..n.len()].copy_from_slice(n);
-        let (ppid, rss) = match super::get(t.pid).filter(|_| t.pid != 0) {
-            Some(p) => {
-                let i = p.inner.lock();
-                (i.ppid, i.space.as_ref().map_or(0, |s| s.resident()) as u64)
-            }
-            None => (0, 0),
-        };
-        rec(
-            t.pid,
-            ppid,
-            t.tid,
-            t.state.letter() as u8,
-            t.pid == 0,
-            t.cpu_ns,
-            rss,
-            &name,
-        );
-    }
-    for p in super::all() {
-        let i = p.inner.lock();
-        if let PState::Zombie(_) = i.state {
-            let mut name = [0u8; 16];
-            let n = i.name.as_str().as_bytes();
-            name[..n.len()].copy_from_slice(n);
-            rec(p.pid, i.ppid, i.tid, b'Z', false, 0, 0, &name);
-        }
-    }
-    let n = (len / 48).min(out.len() / 48);
-    copy_out(buf, &out[..n * 48])?;
-    Ok(n)
 }

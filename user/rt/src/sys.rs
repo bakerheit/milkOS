@@ -76,6 +76,7 @@ pub mod nr {
     pub const LSEEK: usize = 62;
     pub const READ: usize = 63;
     pub const WRITE: usize = 64;
+    pub const READLINKAT: usize = 78;
     pub const FSTAT: usize = 80;
     pub const EXIT: usize = 93;
     pub const NANOSLEEP: usize = 101;
@@ -97,7 +98,6 @@ pub mod nr {
     pub const RT_SIGRETURN: usize = 139;
     pub const SETPGID: usize = 154;
     pub const GETPGID: usize = 155;
-    pub const MILK_PS: usize = 4096;
 }
 
 /// Raw syscall with up to six arguments.
@@ -278,6 +278,23 @@ pub fn read_dir(path: &str) -> Result<Vec<(String, u8)>> {
     Ok(out)
 }
 
+pub fn readlink(path: &str) -> Result<String> {
+    let p = cs(path);
+    let mut b = [0u8; 512];
+    let n = sc(
+        nr::READLINKAT,
+        [
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            b.as_mut_ptr() as usize,
+            b.len(),
+            0,
+            0,
+        ],
+    )?;
+    Ok(String::from_utf8_lossy(&b[..n]).into_owned())
+}
+
 pub fn getcwd() -> Result<String> {
     let mut b = [0u8; 512];
     let n = sc(nr::GETCWD, [b.as_mut_ptr() as usize, b.len(), 0, 0, 0, 0])?;
@@ -437,10 +454,30 @@ pub fn spawn(path: &str, argv: &[&str], envp: &[&str]) -> Result<u32> {
     }
 }
 
-/// One process/thread from the kernel's MILK_PS call.
+/// Read a whole (small) file, e.g. under /proc.
+pub fn read_file(path: &str) -> Result<Vec<u8>> {
+    let fd = open(path, O_RDONLY | O_CLOEXEC)?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        match read(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) => {
+                let _ = close(fd);
+                return Err(e);
+            }
+        }
+    }
+    let _ = close(fd);
+    Ok(out)
+}
+
+/// One process (from /proc/<pid>/status) or kernel thread (from /proc/threads).
 pub struct PsEntry {
     pub pid: u32,
     pub ppid: u32,
+    pub pgid: u32,
     pub tid: u32,
     pub state: char,
     pub kernel: bool,
@@ -449,31 +486,65 @@ pub struct PsEntry {
     pub name: String,
 }
 
-pub fn ps() -> Result<Vec<PsEntry>> {
-    let mut buf = alloc::vec![0u8; 48 * 256];
-    let n = sc(
-        nr::MILK_PS,
-        [buf.as_mut_ptr() as usize, buf.len(), 0, 0, 0, 0],
-    )?;
-    Ok(buf[..n * 48]
-        .chunks(48)
-        .map(|r| {
-            let u32_at = |o: usize| u32::from_le_bytes(r[o..o + 4].try_into().unwrap());
-            let u64_at = |o: usize| u64::from_le_bytes(r[o..o + 8].try_into().unwrap());
-            let name = &r[32..48];
-            let len = name.iter().position(|&b| b == 0).unwrap_or(16);
-            PsEntry {
-                pid: u32_at(0),
-                ppid: u32_at(4),
-                tid: u32_at(8),
-                state: r[12] as char,
-                kernel: r[13] != 0,
-                cpu_ns: u64_at(16),
-                rss: u64_at(24),
-                name: String::from_utf8_lossy(&name[..len]).into_owned(),
+/// Processes from /proc; with `kernel_threads`, also the kernel's own threads.
+pub fn ps(kernel_threads: bool) -> Result<Vec<PsEntry>> {
+    let mut out = Vec::new();
+    let mut pids: Vec<u32> = read_dir("/proc")?
+        .into_iter()
+        .filter_map(|(n, _)| n.parse().ok())
+        .collect();
+    pids.sort_unstable();
+    for pid in pids {
+        let Ok(st) = read_file(&alloc::format!("/proc/{pid}/status")) else {
+            continue; // exited meanwhile
+        };
+        let st = String::from_utf8_lossy(&st);
+        let field = |k: &str| {
+            st.lines()
+                .find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix(':')))
+                .map(|v| v.trim())
+                .unwrap_or("")
+        };
+        let num = |k: &str| {
+            field(k)
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0u64)
+        };
+        out.push(PsEntry {
+            pid,
+            ppid: num("PPid") as u32,
+            pgid: num("Pgid") as u32,
+            tid: num("Tid") as u32,
+            state: field("State").chars().next().unwrap_or('?'),
+            kernel: false,
+            cpu_ns: num("CpuNs"),
+            rss: num("VmRSS") * 1024,
+            name: String::from(field("Name")),
+        });
+    }
+    if kernel_threads {
+        let t = read_file("/proc/threads")?;
+        for l in String::from_utf8_lossy(&t).lines().skip(1) {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 6 || f[1] != "0" {
+                continue;
             }
-        })
-        .collect())
+            out.push(PsEntry {
+                pid: 0,
+                ppid: 0,
+                pgid: 0,
+                tid: f[0].parse().unwrap_or(0),
+                state: f[2].chars().next().unwrap_or('?'),
+                kernel: true,
+                cpu_ns: f[4].parse().unwrap_or(0),
+                rss: 0,
+                name: String::from(f[5]),
+            });
+        }
+    }
+    Ok(out)
 }
 
 // ---- signals -------------------------------------------------------------------------

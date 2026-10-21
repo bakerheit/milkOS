@@ -75,6 +75,22 @@ impl Perm {
     }
 }
 
+/// What a region of the address space is (for /proc/<pid>/maps).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RegionKind {
+    Image,
+    Heap,
+    Stack,
+    Anon,
+}
+
+pub struct Region {
+    pub start: VirtAddr,
+    pub end: VirtAddr,
+    pub perm: Perm,
+    pub kind: RegionKind,
+}
+
 #[derive(Clone, Copy)]
 struct Page {
     pa: PhysAddr,
@@ -136,6 +152,41 @@ impl UserSpace {
     /// Bytes of user memory mapped.
     pub fn resident(&self) -> usize {
         self.pages.len() * PAGE_SIZE
+    }
+
+    fn kind_of(&self, va: VirtAddr) -> RegionKind {
+        if va >= STACK_TOP - STACK_MAX {
+            RegionKind::Stack
+        } else if va >= MMAP_BASE {
+            RegionKind::Anon
+        } else if va >= self.brk_start && self.brk_start != 0 {
+            RegionKind::Heap
+        } else {
+            RegionKind::Image
+        }
+    }
+
+    /// Mapped pages merged into runs of the same permissions and kind.
+    pub fn regions(&self) -> Vec<Region> {
+        let mut out: Vec<Region> = Vec::new();
+        for (&va, p) in &self.pages {
+            let kind = self.kind_of(va);
+            if let Some(last) = out.last_mut()
+                && last.end == va
+                && last.perm == p.perm
+                && last.kind == kind
+            {
+                last.end += PAGE_SIZE;
+                continue;
+            }
+            out.push(Region {
+                start: va,
+                end: va + PAGE_SIZE,
+                perm: p.perm,
+                kind,
+            });
+        }
+        out
     }
 
     /// Map a fresh zeroed page at `va` (page aligned). If one is already there, widen its

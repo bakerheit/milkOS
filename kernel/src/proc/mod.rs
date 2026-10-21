@@ -13,6 +13,7 @@ pub mod elf;
 pub mod errno;
 pub mod fd;
 pub mod pipe;
+pub mod procfs;
 mod selftest;
 pub mod signal;
 pub mod syscall;
@@ -94,6 +95,8 @@ pub struct Inner {
     pub sig: signal::SigState,
     /// Command line of the current image (for /proc/<pid>/cmdline).
     pub argv: Vec<String>,
+    /// Absolute path of the current image (for /proc/<pid>/exe).
+    pub exe: String,
 }
 
 static PROCS: SpinLock<BTreeMap<Pid, Arc<Process>>> = SpinLock::new(BTreeMap::new());
@@ -102,6 +105,12 @@ static NEXT_PID: AtomicU32 = AtomicU32::new(2);
 static INIT_NEXT: AtomicBool = AtomicBool::new(false);
 /// Kernel threads waiting for processes they started (ppid 0).
 static KERNEL_CHILD_WQ: WaitQueue = WaitQueue::new();
+
+/// Forget a reaped process: process table and /proc/<pid>.
+fn release(pid: Pid) {
+    PROCS.lock().remove(&pid);
+    procfs::remove(pid);
+}
 
 pub fn get(pid: Pid) -> Option<Arc<Process>> {
     PROCS.lock().get(&pid).cloned()
@@ -122,6 +131,7 @@ pub fn all() -> Vec<Arc<Process>> {
 pub fn init() {
     mmu::prepare_kernel_slots();
     tty::init();
+    procfs::init();
     syscall::init();
     exceptions::set_user_fault_handler(on_user_fault);
     exceptions::set_user_return_hook(on_user_return);
@@ -154,6 +164,7 @@ struct Launch<'a> {
     fp: Box<FpState>,
     sig: signal::SigState,
     argv: Vec<String>,
+    exe: String,
 }
 
 /// Create a process and start its thread with `l.frame`.
@@ -181,11 +192,13 @@ fn start(l: Launch) -> KResult<Pid> {
             sid: l.sid.unwrap_or(pid),
             sig: l.sig,
             argv: l.argv,
+            exe: l.exe,
         }),
         child_wq: WaitQueue::new(),
     });
     // Visible before the thread can run (it may call getpid right away).
     PROCS.lock().insert(pid, p.clone());
+    procfs::add(pid);
     if let Some(parent) = (ppid != 0).then(|| get(ppid)).flatten() {
         parent.inner.lock().children.push(pid);
     }
@@ -201,7 +214,7 @@ fn start(l: Launch) -> KResult<Pid> {
             Ok(pid)
         }
         None => {
-            PROCS.lock().remove(&pid);
+            release(pid);
             if let Some(parent) = get(ppid) {
                 parent.inner.lock().children.retain(|&c| c != pid);
             }
@@ -256,6 +269,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         fp: Box::new(FpState::zeroed()),
         sig: signal::SigState::new(),
         argv,
+        exe: String::from(path),
     })
 }
 
@@ -280,6 +294,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         fp: Box::new(FpState::zeroed()),
         sig: signal::SigState::new(),
         argv,
+        exe: String::from(path),
     })
 }
 
@@ -306,7 +321,7 @@ pub fn wait_kernel_child(pid: Pid) -> i32 {
             PState::Alive => false,
         },
     });
-    PROCS.lock().remove(&pid);
+    release(pid);
     status
 }
 
@@ -315,7 +330,7 @@ pub fn wait_kernel_child(pid: Pid) -> i32 {
 /// fork(): copy the caller. The child resumes from the same syscall with x0 = 0.
 pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
     let parent = current();
-    let (space, fds, name, cwd, pgid, sid, sig, argv) = {
+    let (space, fds, name, cwd, pgid, sid, sig, argv, exe) = {
         let mut i = parent.inner.lock();
         let space = i.space.as_mut().ok_or(ESRCH)?.fork()?;
         (
@@ -327,6 +342,7 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
             i.sid,
             i.sig.for_child(),
             i.argv.clone(),
+            i.exe.clone(),
         )
     };
     let mut cf = *frame;
@@ -346,6 +362,7 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
         fp,
         sig,
         argv,
+        exe,
     })
 }
 
@@ -374,6 +391,12 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
         let mut i = me.inner.lock();
         i.name = Comm::new(basename(path));
         i.argv = argv.to_vec();
+        i.exe = if path.starts_with('/') {
+            String::from(path)
+        } else {
+            let base = fs::path_of(&i.cwd).unwrap_or_default();
+            alloc::format!("{}/{path}", base.trim_end_matches('/'))
+        };
         i.sig.on_exec();
         (i.space.replace(space), i.fds.take_cloexec())
     };
@@ -488,7 +511,7 @@ fn try_reap(me: &Process, want: i64, nohang: bool) -> Option<KResult<(Pid, i32)>
         let st = p.inner.lock().state;
         if let PState::Zombie(s) = st {
             me.inner.lock().children.retain(|&x| x != c);
-            PROCS.lock().remove(&c);
+            release(c);
             return Some(Ok((c, s)));
         }
     }

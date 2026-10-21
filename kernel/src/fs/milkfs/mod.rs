@@ -14,6 +14,7 @@
 
 pub mod btree;
 pub mod clone;
+pub mod convert;
 pub mod crashtest;
 pub mod crypt;
 pub mod diff;

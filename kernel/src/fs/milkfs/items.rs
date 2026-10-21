@@ -553,6 +553,32 @@ impl State {
         Ok(())
     }
 
+    /// Disk blocks `a..a + len` moved to `to..to + len` (an in-place conversion copied
+    /// them): move their shared-block counts in the current view along.
+    pub fn bref_move(&mut self, a: u64, len: u64, to: u64) -> Result<()> {
+        if self.version < REFLINK_VERSION {
+            return Ok(());
+        }
+        let b = a + len;
+        for (s, l, x) in self.bref_entries(self.cur, a, b)? {
+            let (lo, hi) = (s.max(a), (s + l).min(b));
+            self.del_bref(s)?;
+            if s < a {
+                self.put_bref(s, a - s, x)?;
+            }
+            self.put_bref(to + (lo - a), hi - lo, x)?;
+            if s + l > b {
+                self.put_bref(b, s + l - b, x)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Is any of disk blocks `a..b` shared within the current view?
+    pub fn bref_any(&self, a: u64, b: u64) -> Result<bool> {
+        Ok(self.version >= REFLINK_VERSION && !self.bref_entries(self.cur, a, b)?.is_empty())
+    }
+
     /// Drop one reference to blocks `i0..i1` of run `e`: shared ones lose a count, the
     /// others are released (birth rules).
     fn release_ext(&mut self, e: &Ext, i0: usize, i1: usize) -> Result<()> {

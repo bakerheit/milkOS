@@ -58,6 +58,13 @@ pub const K_ORPHAN: u8 = 7;
 /// blocks from there are referenced `1 + extra` times by this tree (reflink copies).
 /// Blocks without an entry are referenced once. Entries never overlap.
 pub const K_BREF: u8 = 8;
+/// v3, while converting (encrypting or decrypting in place): `(VOL_OBJ, K_CONVERT, 0)` ->
+/// [`ConvertState`], in the live tree.
+pub const K_CONVERT: u8 = 9;
+/// v3, while converting: `(VOL_OBJ, K_REMAP, old block)` -> `old csum u64 | new block u64 |
+/// new csum u64`: data block `old` was copied to `new` (same birth), so every tree that
+/// still points at `old` (with that checksum) is pointed at the copy instead.
+pub const K_REMAP: u8 = 10;
 /// Root directory inode number.
 pub const ROOT_INO: u64 = 1;
 /// Largest value stored in one leaf item (keeps a split leaf within a block).
@@ -190,7 +197,7 @@ impl BlockPtr {
 }
 
 /// B+tree key: (object id, kind, offset), sorted in that order. 17 bytes on disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Key {
     pub obj: u64,
     pub kind: u8,
@@ -287,6 +294,70 @@ pub const SB_BRANCHED: u32 = 1;
 /// Superblock flag: every block but the superblocks and the keyring is encrypted
 /// (see `crypt.rs`); `keyring` points at the wrapped volume keys.
 pub const SB_ENCRYPTED: u32 = 2;
+/// Superblock flag: an in-place conversion is under way (`convert.rs`): blocks are in
+/// either form (a pointer's checksum tells: plaintext xxh64 or the SIV tag), the keyring
+/// is there and the volume needs its key to mount. Without `SB_TO_PLAIN` it is being
+/// encrypted, with it decrypted.
+pub const SB_CONVERTING: u32 = 4;
+pub const SB_TO_PLAIN: u32 = 8;
+
+/// Does a volume with these superblock flags need its key to mount?
+pub const fn needs_key(flags: u32) -> bool {
+    flags & (SB_ENCRYPTED | SB_CONVERTING) != 0
+}
+
+/// Where an in-place conversion is (the `K_CONVERT` item): trees are done in the order
+/// live, snapshots (by generation), clones (by id), then a verification pass over all,
+/// then (encrypting) free space is overwritten.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConvertState {
+    /// 0 live, 1 snapshot `tree`, 2 clone `tree`, 3 verify, 4 wipe free space.
+    pub phase: u8,
+    pub tree: u64,
+    /// Next key to look at in the current tree (verify, wipe: next block in `cursor.off`).
+    pub cursor: Key,
+    /// Blocks rewritten so far, and the blocks in use when it started (progress).
+    pub done: u64,
+    pub total: u64,
+    /// Unix seconds when it started.
+    pub started: u64,
+    /// Verification passes that found blocks still to convert (the trees are redone).
+    pub passes: u32,
+}
+
+pub const CONVERT_LEN: usize = 1 + 8 + KEY_SIZE + 8 * 3 + 4;
+
+impl ConvertState {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(CONVERT_LEN);
+        v.push(self.phase);
+        v.extend_from_slice(&self.tree.to_le_bytes());
+        let mut k = [0u8; KEY_SIZE];
+        self.cursor.put(&mut k);
+        v.extend_from_slice(&k);
+        for x in [self.done, self.total, self.started] {
+            v.extend_from_slice(&x.to_le_bytes());
+        }
+        v.extend_from_slice(&self.passes.to_le_bytes());
+        v
+    }
+
+    pub fn decode(b: &[u8]) -> Option<ConvertState> {
+        if b.len() != CONVERT_LEN || b[0] > 4 {
+            return None;
+        }
+        let o = 9 + KEY_SIZE;
+        Some(ConvertState {
+            phase: b[0],
+            tree: le64(&b[1..]),
+            cursor: Key::get(&b[9..]),
+            done: le64(&b[o..]),
+            total: le64(&b[o + 8..]),
+            started: le64(&b[o + 16..]),
+            passes: u32::from_le_bytes(b[o + 24..o + 28].try_into().unwrap()),
+        })
+    }
+}
 
 // Superblock byte offsets.
 const SB_VERSION: usize = 8;

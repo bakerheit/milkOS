@@ -55,6 +55,9 @@ pub struct State {
     /// operations it holds.
     pub dirty_since: Option<u64>,
     pub batched_ops: u32,
+    /// An in-place conversion (encrypt / decrypt) under way: its state (also in the
+    /// `K_CONVERT` item), see `convert.rs`.
+    pub conv: Option<super::convert::ConvRun>,
 }
 
 /// A transaction is committed once it is this old ...
@@ -245,7 +248,7 @@ impl State {
         let t0 = crate::timer::now_ns();
         let name = String::from(dev.name());
         let sb = probe(&dev).ok_or(Errno::EINVAL)?;
-        let key = if sb.flags & SB_ENCRYPTED != 0 {
+        let key = if needs_key(sb.flags) {
             let k = key.ok_or(Errno::EACCES)?;
             // The MAC is over the bytes on disk (another writer may encode differently).
             let mut raw = [0u8; BLOCK];
@@ -275,6 +278,9 @@ impl State {
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
         store.crypt = key;
+        if sb.flags & SB_CONVERTING != 0 {
+            store.convert = Some(sb.flags & SB_TO_PLAIN == 0);
+        }
 
         let loaded = if sb.spacemap.is_none() {
             Err("absent (last written by the Mac tool or an older kernel)")
@@ -408,6 +414,7 @@ impl State {
             st.commit()?;
         }
         report.mount_ns = crate::timer::now_ns() - t0;
+        st.conv_load()?;
         Ok((st, report))
     }
 
@@ -444,6 +451,7 @@ impl State {
             st.commit()?;
         }
         report.mount_ns = crate::timer::now_ns() - t0;
+        st.conv_load()?;
         Ok((st, report))
     }
 
@@ -470,6 +478,7 @@ impl State {
             receiving: false,
             dirty_since: None,
             batched_ops: 0,
+            conv: None,
         }
     }
 

@@ -829,6 +829,55 @@ pub fn rm_rf(path: &str) {
     }
 }
 
+/// The Mac shared folder, if qemu provides one: read-only checks only (never writes into
+/// the user's folder, even when it is mounted read-write).
+fn mac_share(t: &mut T) {
+    let Ok(st) = ops::stat("/Volumes/Mac") else {
+        kprintln!("fs selftest: no Mac shared folder, skipping 9p checks");
+        return;
+    };
+    t.ok(st.kind == InodeType::Dir, "9p: /Volumes/Mac is a directory");
+    t.ok(
+        read_str("/proc/mounts").contains("9p /Volumes/Mac 9p"),
+        "9p in /proc/mounts",
+    );
+    let names: Vec<String> = ops::readdir("/Volumes/Mac")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    t.ok(
+        names.iter().any(|n| n == "README.txt"),
+        "9p readdir sees README.txt",
+    );
+    t.ok(
+        read_str("/Volumes/Mac/README.txt").starts_with("milkOS shared folder"),
+        "9p read",
+    );
+    t.ok(
+        ops::stat("/Volumes/Mac/README.txt")
+            .is_ok_and(|s| s.kind == InodeType::File && s.size > 100),
+        "9p stat",
+    );
+    t.ok(
+        ops::lookup("/Volumes/Mac/..").map(|i| i.ino()).ok()
+            == ops::lookup("/Volumes").map(|i| i.ino()).ok(),
+        "9p .. leaves the share",
+    );
+    t.err(
+        ops::stat("/Volumes/Mac/no-such-file"),
+        Errno::ENOENT,
+        "9p ENOENT",
+    );
+    if !super::ninep::is_rw() {
+        t.err(
+            ops::open("/Volumes/Mac/.selftest", O_WRONLY | O_CREAT, 0o644),
+            Errno::EROFS,
+            "9p read-only by default",
+        );
+    }
+}
+
 /// Space accounting on the mounted milkfs must be exact after every phase.
 fn milk_space(t: &mut T, v: &super::milkfs::Volume, what: &str) {
     let r = v.state.lock().verify_space();
@@ -1570,6 +1619,7 @@ pub fn run() {
     devfs(&mut t);
     procfs_sysfs(&mut t);
     blockdev(&mut t);
+    mac_share(&mut t);
     milkfs(&mut t);
     if t.failed != 0 {
         // Loud, but never a panic: a self-test must not take the machine down.

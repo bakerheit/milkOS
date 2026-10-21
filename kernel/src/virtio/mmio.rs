@@ -74,6 +74,7 @@ pub mod device_id {
     pub const CONSOLE: u32 = 3;
     pub const RNG: u32 = 4;
     pub const GPU: u32 = 16;
+    pub const P9: u32 = 9;
     pub const INPUT: u32 = 18;
 }
 

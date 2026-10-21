@@ -20,6 +20,7 @@ pub mod errno;
 pub mod file;
 pub mod initramfs;
 pub mod milkfs;
+pub mod ninep;
 pub mod node;
 pub mod ops;
 pub mod path;
@@ -82,4 +83,5 @@ pub fn init() {
     milkfs::crashtest::configure();
     milkfs::automount();
     milkfs::setup_home();
+    ninep::automount();
 }

@@ -21,10 +21,13 @@ INPUT_ARGS=(-global virtio-mmio.force-legacy=false
 # Scratch disk /tmp/milk-disk.img as virtio-blk (/dev/vda), see scripts/disk.sh.
 source scripts/disk.sh
 milk_disk_args
+# Mac shared folder at /Volumes/Mac (read-only unless MILK_SHARE_RW=1), scripts/share.sh.
+source scripts/share.sh
+milk_share_args
 # eth0: restricted user-mode networking (see scripts/netdev.sh); MILK_HTTP_PORT=8088 to
 # reach the guest's web server at http://127.0.0.1:8088/.
 source scripts/netdev.sh
 milk_net_args
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
-  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" \
+  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}"

@@ -21,6 +21,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
 | `bcache.rs` | block cache: fixed-size LRU of 4 KiB buffers, write-back, `flush` = durable |
 | `ramdisk.rs` | RAM block device (the self-test's throwaway milkfs) |
+| `ninep.rs` | 9P2000.L client: the Mac shared folder at `/Volumes/Mac` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
 | `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
@@ -41,6 +42,7 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
 | `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
+| `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
 | `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |
 | `/bin` | tmpfs | user programs from the initramfs |
 | `/etc` | tmpfs | `motd`, `hostname` (= `milk`) |
@@ -292,6 +294,28 @@ so one `run.sh` at a time). `screenshot.sh` attaches them with
 `snapshot=on,file.locking=off`: writes are discarded and any number of qemus can share them.
 The scratch test reads sector 0, then writes/reads/flushes the last 80 KiB directly, through
 `/dev/vdX` and through a 4-buffer bcache, and restores what was there.
+
+## Mac shared folder (virtio-9p, `/Volumes/Mac`)
+
+`kernel/src/virtio/p9.rs` (transport) + `kernel/src/fs/ninep.rs` (9P2000.L client and VFS
+objects), `scripts/share.sh` (qemu arguments, sourced by run.sh / screenshot.sh /
+input-test.sh).
+
+- **Exactly one host folder** is shared: `<main checkout>/share/` (`~/workspace/milkOS/share`),
+  found through `git rev-parse --git-common-dir` so every worktree uses the same one. There
+  is no option to share any other path. The folder is gitignored except its `README.txt`.
+- **Read-only by default**: qemu gets `readonly=on`, and the kernel refuses writes itself
+  (EROFS) unless the boot sets `-fw_cfg name=opt/milkos/share-rw,string=1`, which
+  `MILK_SHARE_RW=1 scripts/run.sh` does (and drops `readonly=on`).
+- qemu: `-fsdev local,id=fs0,path=<share>,security_model=mapped-xattr[,readonly=on]
+  -device virtio-9p-device,fsdev=fs0,mount_tag=mac`. `mapped-xattr` works on macOS; files
+  milkOS creates are mode 0600 on the Mac (owned by you), guest permissions live in xattrs.
+- Supported: lookup, readdir, stat, read; with rw: write, create, mkdir, symlink, unlink,
+  rmdir, rename, truncate, chmod/utimens, fsync. Inode numbers are qid paths. Each inode
+  keeps a walked path fid plus lazily opened read/write fids; fids no longer needed are
+  clunked on the next request (never from `Drop`). msize 64 KiB, one request in flight,
+  sleeping on a wait queue the virtio IRQ wakes.
+- Dev loop: copy a built program into `share/` and run `/Volumes/Mac/<name>` from msh.
 
 ## Next steps
 

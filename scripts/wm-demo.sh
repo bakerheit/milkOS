@@ -5,7 +5,9 @@
 # DEMOs: drag focus minimise restore zoom resize close type notes about launcher launch today
 #        spaces space2 control dim toast menu logo movespace files browse shell hover bench tour
 #        stty paint paintclose desk desktoday dockpress select termselect minianim openanim
-#        lsbin sigint winsize utest shutdown panic, or "none" for the plain desktop. Prefix slow- to run animations 20x
+#        lsbin sigint winsize utest settings dark wallpapers timemachine tm1 tm2 browser
+#        browselink browseback browserdeny browse2 browse3 (WM_HOSTNET + test server) ansi clear
+#        shutdown panic, or "none" for the plain desktop. Prefix slow- to run animations 20x
 #        slower (e.g. SETTLE=0.3 scripts/wm-demo.sh slow-minianim) to catch one mid-flight.
 # Default out: /tmp/milk-DEMO.png; the serial log goes next to it. Only the qemu started here is
 # killed (by PID).

@@ -71,6 +71,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "diskkit"
+version = "0.0.1"
+dependencies = [
+ "timekit",
+]
+
+[[package]]
 name = "drop"
 version = "0.0.1"
 dependencies = [

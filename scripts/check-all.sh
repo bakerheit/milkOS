@@ -51,6 +51,7 @@ TESTS=(
   "shot-test|q|600|scripts/shot-test.sh"
   "timekit-unit|q|300|scripts/timekit-test.sh"
   "sysview-unit|q|300|scripts/sysview-test.sh"
+  "diskkit-unit|q|300|scripts/diskkit-test.sh"
   "alarm-test|q|600|scripts/alarm-test.sh"
   "apps-test|q|600|scripts/apps-test.sh"
   "wm-demo-tour|q|300|scripts/wm-demo.sh tour @WORK@/tour.png"

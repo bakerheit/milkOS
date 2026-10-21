@@ -49,6 +49,25 @@ pub fn handles(nr: u64) -> bool {
     matches!(nr, SOCKET | BIND..=SHUTDOWN | ACCEPT4 | PPOLL)
 }
 
+/// Is `addr` reachable with only the Local network capability (loopback / link-local)?
+fn is_local_addr(addr: &SockAddr) -> bool {
+    addr.ip.is_loopback() || addr.ip.0[0] == 169 && addr.ip.0[1] == 254 || addr.ip.is_unspecified()
+}
+
+/// Deny if the calling process may not reach `addr` with its net capability.
+fn net_allows(addr: &SockAddr, op: &str) -> KResult<()> {
+    use super::caps::Net;
+    match super::current_caps().net {
+        Net::All => Ok(()),
+        Net::Local if is_local_addr(addr) => Ok(()),
+        Net::Local => Err(super::caps::deny(
+            op,
+            &alloc::format!("dst={} net=local-only", addr.ip),
+        )),
+        Net::None => Err(super::caps::deny(op, "net capability dropped")),
+    }
+}
+
 pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
     let fd = a[0] as i32 as i64;
     let (a1, a2, a3, a4, a5) = (
@@ -59,7 +78,12 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         a[5] as usize,
     );
     match nr {
-        SOCKET => sys_socket(a[0] as u32, a[1] as u32, a[2] as u32),
+        SOCKET => {
+            if super::current_caps().net == super::caps::Net::None {
+                return Err(super::caps::deny("socket", "net capability dropped"));
+            }
+            sys_socket(a[0] as u32, a[1] as u32, a[2] as u32)
+        }
         PPOLL => sys_ppoll(a[0] as usize, a1, a2),
         BIND => with_sock(fd, |s, _| socket::bind(s, read_addr(a1, a2)?).map(|_| 0)),
         LISTEN => with_sock(fd, |s, _| {
@@ -73,6 +97,7 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
         ACCEPT4 => sys_accept(fd, a1, a2, a3 as u32),
         CONNECT => with_sock(fd, |s, nb| {
             let addr = read_addr(a1, a2)?;
+            net_allows(&addr, "connect")?;
             let r = connect(s, addr, nb);
             if !matches!(r, Err(e) if e == nerr::EALREADY || e == nerr::EISCONN) {
                 net_event("net.connect", s, "dst", addr, &r);
@@ -88,6 +113,9 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
             } else {
                 None
             };
+            if let Some(to) = &to {
+                net_allows(to, "sendto")?;
+            }
             if let Some(to) = to {
                 let key = ((to.ip.to_u32() as u64) << 16 | to.port as u64) + 1;
                 let f = file(fd)?;

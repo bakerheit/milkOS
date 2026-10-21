@@ -6,6 +6,9 @@
 //!   utest tlb     mmap/munmap churn in 4 processes across CPUs; unmapped memory faults
 //!   utest cowsmp  4 children + parent write their copies of one buffer at once
 //!   utest par [N] [ms]  N processes computing in parallel vs 1: prints the speedup
+//!   utest threads 8 threads on a futex mutex, a condvar ping-pong, munmap under a thread
+//!   utest chroot  a child chroots into a subdir; "/" is remapped and ".." can't escape
+//!   utest sandbox a child drops caps; fs/net/spawn denials hit, grants still work
 //!   utest all     everything except par
 
 #![no_std]
@@ -538,6 +541,252 @@ fn t_par(n: usize, units: u64) -> bool {
     )
 }
 
+// ---- threads ----
+
+use rt::thread::{self, Condvar, Mutex};
+
+fn t_threads() -> bool {
+    let mut ok = true;
+
+    // 8 threads each increment a shared counter 10_000 times under a futex mutex.
+    let counter = alloc::sync::Arc::new(Mutex::new(0u64));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let c = counter.clone();
+            thread::spawn(move || {
+                for _ in 0..10_000 {
+                    *c.lock() += 1;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join();
+    }
+    let total = *counter.lock();
+    ok &= check(
+        "futex mutex: 8 x 10000",
+        total == 80_000,
+        &alloc::format!("counter = {total}"),
+    );
+
+    // Condvar ping-pong: two threads hand a turn back and forth 1000 times.
+    struct Pp {
+        turn: Mutex<u32>,
+        cv: Condvar,
+    }
+    let pp = alloc::sync::Arc::new(Pp {
+        turn: Mutex::new(0),
+        cv: Condvar::new(),
+    });
+    let n = 1000u32;
+    let a = {
+        let pp = pp.clone();
+        thread::spawn(move || {
+            for i in 0..n {
+                let mut g = pp.turn.lock();
+                while *g != i * 2 {
+                    g = pp.cv.wait(g);
+                }
+                *g += 1;
+                pp.cv.notify_all();
+            }
+        })
+    };
+    let b = {
+        let pp = pp.clone();
+        thread::spawn(move || {
+            for i in 0..n {
+                let mut g = pp.turn.lock();
+                while *g != i * 2 + 1 {
+                    g = pp.cv.wait(g);
+                }
+                *g += 1;
+                pp.cv.notify_all();
+            }
+        })
+    };
+    a.join();
+    b.join();
+    let final_turn = *pp.turn.lock();
+    ok &= check(
+        "condvar ping-pong",
+        final_turn == n * 2,
+        &alloc::format!("{n} rounds, turn counter {final_turn}"),
+    );
+
+    // munmap in one thread while another keeps running (the kernel must not fault, and the
+    // live mapping must stay valid). The worker spins touching its own buffer; the main
+    // thread maps and unmaps 200 regions meanwhile.
+    let stop = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let seen = alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0));
+    let worker = {
+        let (stop, seen) = (stop.clone(), seen.clone());
+        thread::spawn(move || {
+            let mut buf = alloc::vec![0u8; 4096];
+            let mut i = 0u64;
+            while !stop.load(core::sync::atomic::Ordering::Relaxed) {
+                let n = buf.len();
+                buf[(i as usize) % n] = i as u8;
+                i = i.wrapping_add(1);
+                core::hint::black_box(&buf);
+                seen.store(i, core::sync::atomic::Ordering::Relaxed);
+            }
+        })
+    };
+    for _ in 0..200 {
+        if let Ok(p) = sys::mmap_anon(64 << 10) {
+            // SAFETY: fresh mapping.
+            unsafe { core::ptr::write_volatile(p, 1) };
+            let _ = sys::munmap(p, 64 << 10);
+        }
+    }
+    let before = seen.load(core::sync::atomic::Ordering::Relaxed);
+    sys::sched_yield();
+    sys::sleep_ms(5);
+    let after = seen.load(core::sync::atomic::Ordering::Relaxed);
+    stop.store(true, core::sync::atomic::Ordering::Relaxed);
+    worker.join();
+    ok &= check(
+        "munmap while a thread runs",
+        after > before,
+        &alloc::format!("worker kept running ({before} -> {after} iterations)"),
+    );
+    ok
+}
+
+fn t_chroot() -> bool {
+    // Build a jail with one file, in a fresh process so our own root is untouched.
+    let _ = sys::mkdir("/tmp/jail", 0o755);
+    let _ = sys::mkdir("/tmp/jail/sub", 0o755);
+    {
+        let fd =
+            sys::open_mode("/tmp/jail/hello", sys::O_WRONLY | sys::O_CREAT, 0o644).unwrap_or(-1);
+        if fd >= 0 {
+            let _ = sys::write_all(
+                fd,
+                b"in jail
+",
+            );
+            let _ = sys::close(fd);
+        }
+    }
+    let (r, w) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::close(r);
+        let mut rc = 0u8;
+        if sys::chroot("/tmp/jail").is_err() {
+            rc = 1;
+        }
+        // "/hello" is now the jailed file; "/tmp" (the outer world) is gone.
+        let inside = sys::read_file("/hello")
+            .map(|d| {
+                d == b"in jail
+"
+            })
+            .unwrap_or(false);
+        let outer_gone = sys::stat_path("/tmp/jail", true).is_err();
+        // ".." from root can't escape: "/sub/../hello" stays inside.
+        let dotdot = sys::read_file("/sub/../hello")
+            .map(|d| {
+                d == b"in jail
+"
+            })
+            .unwrap_or(false);
+        let escape = sys::read_file("/../../etc/motd").is_ok();
+        if !(inside && outer_gone && dotdot && !escape) {
+            rc |= 2;
+        }
+        let _ = sys::write(w, &[rc]);
+        sys::exit(rc as i32)
+    }
+    let _ = sys::close(w);
+    let mut b = [0u8; 1];
+    let _ = sys::read(r, &mut b);
+    let _ = sys::close(r);
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    // Our own root is unchanged: the outer path still resolves here.
+    let parent_unaffected = sys::stat_path("/tmp/jail/hello", true).is_ok();
+    check(
+        "chroot jail",
+        st == 0 && parent_unaffected,
+        &alloc::format!("child rc {}, parent root intact: {parent_unaffected}", b[0]),
+    )
+}
+
+fn t_sandbox() -> bool {
+    let _ = sys::mkdir("/tmp/sb", 0o755);
+    {
+        let fd = sys::open_mode("/tmp/sb/ok", sys::O_WRONLY | sys::O_CREAT, 0o644).unwrap_or(-1);
+        if fd >= 0 {
+            let _ = sys::write_all(
+                fd, b"ok
+",
+            );
+            let _ = sys::close(fd);
+        }
+    }
+    let (r, w) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::close(r);
+        // Restrict: read-only under /tmp/sb, no network, no spawn.
+        sys::sandbox("fs=/tmp/sb:r net=none spawn=0").expect("sandbox");
+        let mut bits = 0u8;
+        // Granted read works.
+        if sys::read_file("/tmp/sb/ok")
+            .map(|d| {
+                d == b"ok
+"
+            })
+            .unwrap_or(false)
+        {
+            bits |= 1;
+        }
+        // Write under the read-only grant is denied.
+        if sys::open_mode("/tmp/sb/no", sys::O_WRONLY | sys::O_CREAT, 0o644).is_err() {
+            bits |= 2;
+        }
+        // Reading outside the grant is denied.
+        if sys::read_file("/etc/motd").is_err() {
+            bits |= 4;
+        }
+        // Opening a socket is denied (net=none).
+        if rt::net::socket(1).is_err() {
+            bits |= 8;
+        }
+        // fork is denied (spawn dropped).
+        match sys::fork() {
+            Ok(0) => sys::exit(0),
+            Ok(_) => {}
+            Err(_) => bits |= 16,
+        }
+        // Can't widen back: asking for full fs again stays denied.
+        let _ = sys::sandbox("net=all");
+        if sys::read_file("/etc/motd").is_err() {
+            bits |= 32;
+        }
+        let _ = sys::write(w, &[bits]);
+        sys::exit(bits as i32)
+    }
+    let _ = sys::close(w);
+    let mut b = [0u8; 1];
+    let _ = sys::read(r, &mut b);
+    let _ = sys::close(r);
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    // Our own caps are untouched: we can still read /etc/motd and open a socket.
+    let parent_ok = sys::read_file("/etc/motd").is_ok();
+    check(
+        "capability sandbox",
+        b[0] == 0b111111 && st == (0b111111 << 8) && parent_ok,
+        &alloc::format!(
+            "child checks {:#08b} (want 0b111111), parent unrestricted: {parent_ok}",
+            b[0]
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -554,6 +803,15 @@ fn main(args: &rt::Args) -> i32 {
         let n = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
         let ms = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(500);
         ok &= t_par(n, ms);
+    }
+    if what == "chroot" || what == "all" {
+        ok &= t_chroot();
+    }
+    if what == "sandbox" || what == "all" {
+        ok &= t_sandbox();
+    }
+    if what == "threads" || what == "all" {
+        ok &= t_threads();
     }
     if what == "cow" || what == "all" {
         ok &= t_cow();

@@ -201,6 +201,11 @@ impl UserSpace {
         self.space.as_mut().unwrap()
     }
 
+    /// Physical address a mapped user virtual address resolves to (futex keys).
+    pub fn translate(&self, va: VirtAddr) -> Option<PhysAddr> {
+        self.space.as_ref()?.translate(va)
+    }
+
     /// TTBR0_EL1 value for this space.
     pub fn ttbr0(&self) -> u64 {
         self.space.as_ref().unwrap().root() as u64 | self.asid.ttbr_bits()

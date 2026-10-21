@@ -40,6 +40,7 @@ mod splash;
 mod sync;
 mod sysstat;
 mod timer;
+mod tlb;
 mod uart;
 mod virtio;
 mod wm;

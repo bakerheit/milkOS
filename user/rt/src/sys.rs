@@ -97,6 +97,7 @@ pub mod nr {
     pub const UTIMENSAT: usize = 88;
     pub const RENAMEAT2: usize = 276;
     pub const CHDIR: usize = 49;
+    pub const CHROOT: usize = 51;
     pub const DUP: usize = 23;
     pub const DUP3: usize = 24;
     pub const FCNTL: usize = 25;
@@ -119,6 +120,8 @@ pub mod nr {
     pub const BRK: usize = 214;
     pub const MUNMAP: usize = 215;
     pub const CLONE: usize = 220;
+    pub const FUTEX: usize = 98;
+    pub const MILK_SANDBOX: usize = 0x1000;
     pub const EXECVE: usize = 221;
     pub const MMAP: usize = 222;
     pub const WAIT4: usize = 260;
@@ -530,6 +533,18 @@ pub fn getcwd() -> Result<String> {
     Ok(String::from_utf8_lossy(&b[..n.saturating_sub(1)]).into_owned())
 }
 
+/// Shrink this process's capabilities from a spec string (see /bin/sandbox). Only ever
+/// drops capabilities; takes effect for this process and everything it execs/forks.
+pub fn sandbox(spec: &str) -> Result<()> {
+    let s = cs(spec);
+    sc(nr::MILK_SANDBOX, [s.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
+}
+
+pub fn chroot(path: &str) -> Result<()> {
+    let p = cs(path);
+    sc(nr::CHROOT, [p.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
+}
+
 pub fn chdir(path: &str) -> Result<()> {
     let p = cs(path);
     sc(nr::CHDIR, [p.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
@@ -588,6 +603,36 @@ pub fn uname() -> Result<[String; 5]> {
 
 pub fn brk(addr: usize) -> usize {
     sc(nr::BRK, [addr, 0, 0, 0, 0, 0]).unwrap_or(0)
+}
+
+pub const FUTEX_WAIT: u32 = 0;
+pub const FUTEX_WAKE: u32 = 1;
+pub const FUTEX_PRIVATE: u32 = 128;
+
+/// futex(uaddr, FUTEX_WAIT_PRIVATE, val, timeout): sleep while *uaddr == val.
+pub fn futex_wait(uaddr: usize, val: u32, timeout_ns: Option<u64>) -> Result<()> {
+    let ts = timeout_ns.map(|ns| [ns / 1_000_000_000, ns % 1_000_000_000]);
+    let tp = ts.as_ref().map_or(0, |t| t.as_ptr() as usize);
+    sc(
+        nr::FUTEX,
+        [
+            uaddr,
+            (FUTEX_WAIT | FUTEX_PRIVATE) as usize,
+            val as usize,
+            tp,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// futex(uaddr, FUTEX_WAKE_PRIVATE, n): wake up to `n` waiters. Returns the number woken.
+pub fn futex_wake(uaddr: usize, n: usize) -> Result<usize> {
+    sc(
+        nr::FUTEX,
+        [uaddr, (FUTEX_WAKE | FUTEX_PRIVATE) as usize, n, 0, 0, 0],
+    )
 }
 
 pub fn mmap_anon(len: usize) -> Result<*mut u8> {

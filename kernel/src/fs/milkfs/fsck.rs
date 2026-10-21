@@ -37,6 +37,9 @@ pub struct CheckReport {
     pub repaired: Vec<String>,
     /// Damage that can't be repaired safely.
     pub unrepairable: Vec<String>,
+    /// Not damage: e.g. a torn superblock slot left by a commit interrupted mid-write
+    /// (the next commit overwrites it). `repair` still tidies these up.
+    pub notes: Vec<String>,
     pub inodes: usize,
     pub blocks_checked: u64,
 }
@@ -59,6 +62,9 @@ impl CheckReport {
                 "PROBLEMS"
             }
         );
+        for n in &self.notes {
+            s.push_str(&format!("note: {n}\n"));
+        }
         for p in &self.problems {
             s.push_str(&format!("problem: {p}\n"));
         }
@@ -88,9 +94,8 @@ impl State {
         let bad_slot = self.sb.generation > 1
             && Superblock::decode(&b).is_none_or(|o| o.generation >= self.sb.generation);
         if bad_slot {
-            rep.problems.push(format!(
-                "superblock slot {other} is damaged (slot {} is good)",
-                self.sb.generation % 2
+            rep.notes.push(format!(
+                "superblock slot {other} is torn (an interrupted commit; the next commit rewrites it)"
             ));
         }
 
@@ -114,9 +119,9 @@ impl State {
                             dirents.push((k.obj, d));
                         }
                     }
-                    K_EXTENT => {
-                        if let Some(p) = btree::extent_ptr(k, v) {
-                            extents.push((k.obj, k.off, p));
+                    K_EXTENT | K_EXT => {
+                        for (i, p) in data_ptrs(k, v).into_iter().enumerate() {
+                            extents.push((k.obj, k.off + i as u64, p));
                         }
                     }
                     _ => {}
@@ -231,7 +236,7 @@ impl State {
             ));
         }
 
-        if !repair || rep.problems.is_empty() {
+        if !repair || (rep.problems.is_empty() && !bad_slot) {
             return Ok(rep);
         }
 

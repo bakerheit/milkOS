@@ -296,7 +296,7 @@ impl State {
         // Content / metadata changes of files that kept their name.
         let mut touched: BTreeSet<u64> = BTreeSet::new();
         for k in old_items.keys().chain(new_items.keys()) {
-            if matches!(k.kind, K_INODE | K_EXTENT | K_SYMLINK)
+            if matches!(k.kind, K_INODE | K_EXTENT | K_EXT | K_INLINE | K_SYMLINK)
                 && old_items.get(k) != new_items.get(k)
             {
                 touched.insert(k.obj);

@@ -6,6 +6,9 @@
   mkmilkfs.py check IMAGE --repair       fix what is safe: damaged superblock slot, dangling
                                          entries, orphans, lost inodes (-> /lost+found),
                                          link counts, dir parents. Exit 2 = data damage left
+  mkmilkfs.py put   IMAGE PATH FILE [--v0]  copy a Mac file into the image (--v0: old-style
+                                         one-block extents, for upgrade tests)
+  mkmilkfs.py mkfs  ... --v0             make a format-v0 image (upgrade tests)
   mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
                                          sb data node
   mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]      (NAME may also be a clone)
@@ -21,9 +24,10 @@ import time
 
 BLOCK = 4096
 MAGIC = b"MILKFS01"
-VERSION = 0
+VERSION = 1      # written by mkfs; 0 and 1 are read
+MIN_VERSION = 0
 MAX_SNAPS = 30
-K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK = 1, 2, 3, 4
+K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE = 1, 2, 3, 4, 5, 6
 ROOT_INO = 1
 S_IFMT, S_IFDIR, S_IFREG, S_IFLNK = 0o170000, 0o040000, 0o100000, 0o120000
 M64 = (1 << 64) - 1
@@ -95,6 +99,16 @@ def ptr_pack(p):
     return struct.pack("<QQQ", *p)
 
 
+def data_ptrs(k, v):
+    """[(file block index, (block, birth, csum))] for a data item (v0 K_EXTENT, v1 K_EXT)."""
+    if k[1] == K_EXTENT:
+        return [(k[2], ptr_unpack(v))]
+    if k[1] == K_EXT:
+        block, birth, n = struct.unpack_from("<QQI", v)
+        return [(k[2] + i, (block + i, birth, struct.unpack_from("<Q", v, 20 + 8 * i)[0])) for i in range(n)]
+    return []
+
+
 def ptr_unpack(b, o=0):
     return struct.unpack_from("<QQQ", b, o)
 
@@ -106,7 +120,7 @@ def cstr(b):
 def sb_encode(sb):
     b = bytearray(BLOCK)
     b[0:8] = MAGIC
-    struct.pack_into("<IIQQ", b, 8, VERSION, BLOCK, sb["total"], sb["gen"])
+    struct.pack_into("<IIQQ", b, 8, sb.get("version", VERSION), BLOCK, sb["total"], sb["gen"])
     b[32:56] = ptr_pack(sb["root"])
     b[56:80] = ptr_pack(sb["dead"])
     struct.pack_into("<QQ", b, 80, sb["next_ino"], sb["created"])
@@ -133,7 +147,7 @@ def sb_decode(b):
     if b[0:8] != MAGIC or struct.unpack_from("<Q", b, BLOCK - 8)[0] != xxh64(b[:BLOCK - 8]):
         return None
     ver, bs, total, gen = struct.unpack_from("<IIQQ", b, 8)
-    if ver != VERSION or bs != BLOCK:
+    if not MIN_VERSION <= ver <= VERSION or bs != BLOCK:
         return None
     n = struct.unpack_from("<I", b, 144)[0]
     if n > MAX_SNAPS:
@@ -149,7 +163,7 @@ def sb_decode(b):
                           clone=bool(flags & 1), id=rid))
     nino, created = struct.unpack_from("<QQ", b, 80)
     return dict(total=total, gen=gen, root=ptr_unpack(b, 32), dead=ptr_unpack(b, 56),
-                flags=struct.unpack_from("<I", b, 4008)[0],
+                flags=struct.unpack_from("<I", b, 4008)[0], version=ver,
                 auto=struct.unpack_from("<4I", b, 3992),
                 next_ino=nino, created=created, uuid=bytes(b[96:112]),
                 label=cstr(b[112:144]), snaps=snaps)
@@ -284,10 +298,17 @@ class Tree:
 
     def read(self, ino):
         i = self.inode(ino)
+        inline = self.items.get((ino, K_INLINE, 0))
+        if inline is not None:
+            return bytes(inline[:i["size"]]).ljust(i["size"], b"\0")
+        blocks = {}
+        for k, v in self.items.items():
+            if k[0] == ino:
+                for idx, p in data_ptrs(k, v):
+                    blocks[idx] = p
         data = bytearray()
         for idx in range((i["size"] + BLOCK - 1) // BLOCK):
-            v = self.items.get((ino, K_EXTENT, idx))
-            data += self.img.read(ptr_unpack(v)) if v else bytes(BLOCK)
+            data += self.img.read(blocks[idx]) if idx in blocks else bytes(BLOCK)
         return bytes(data[:i["size"]])
 
 
@@ -306,7 +327,7 @@ def parse_size(s):
     return int(s[:-1]) * mult[s[-1].upper()] if s[-1].upper() in mult else int(s)
 
 
-def cmd_mkfs(path, size, label, force):
+def cmd_mkfs(path, size, label, force, version=None):
     if os.path.exists(path):
         img = Image(path)
         if img.superblock() and not force:
@@ -321,6 +342,7 @@ def cmd_mkfs(path, size, label, force):
     now = time.time()
     leaf = leaf_encode([((ROOT_INO, K_INODE, 0), inode_encode(S_IFDIR | 0o755, 2, 0, ROOT_INO, now))], 1)
     sb = dict(total=total, gen=1, root=(2, 1, xxh64(leaf)), dead=(0, 0, 0), next_ino=2,
+              version=VERSION if version is None else version,
               created=int(now), uuid=os.urandom(16), label=label, snaps=[])
     mode = "r+b" if os.path.exists(path) else "w+b"
     with open(path, mode) as f:
@@ -331,7 +353,7 @@ def cmd_mkfs(path, size, label, force):
         f.write(leaf)                  # block 2: root leaf
         f.flush()
         os.fsync(f.fileno())
-    print(f"{path}: milkfs v0, {total} blocks of 4 KiB, label {label!r}")
+    print(f"{path}: milkfs v{sb['version']}, {total} blocks of 4 KiB, label {label!r}")
 
 
 def dirents_encode(lst):
@@ -356,8 +378,7 @@ def all_used(img, sb):
     for root in [sb["root"]] + [s["root"] for s in sb["snaps"]]:
         nodes = []
         for k, v in img.items(root, nodes):
-            if k[1] == K_EXTENT:
-                used.add(ptr_unpack(v)[0])
+            used.update(p[0] for _, p in data_ptrs(k, v))
         used.update(p[0] for p in nodes)
     for head in [sb["dead"]] + [s["dead"] for s in sb["snaps"]]:
         used.update(p[0] for p in img.deadlist(head)[1])
@@ -480,7 +501,7 @@ def apply_repairs(items, sb, plan, log):
         bucket_edit(items, d, name, lambda l: [e for e in l if e[0] != name])
         log.append(f"removed entry {name} (missing inode)")
     for ino in plan["reclaim"]:
-        for k in [k for k in items if k[0] == ino and k[1] in (K_INODE, K_EXTENT, K_SYMLINK)]:
+        for k in [k for k in items if k[0] == ino and k[1] in (K_INODE, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE)]:
             del items[k]
         log.append(f"deleted orphan inode {ino}")
     for ino, n in plan["nlink"]:
@@ -531,16 +552,14 @@ def cmd_check_repair(path):
         return 2
     bad_data = []
     for k, v in live.items():
-        if k[1] == K_EXTENT:
+        for idx, p in data_ptrs(k, v):
             try:
-                img.read(ptr_unpack(v))
+                img.read(p)
             except IOError:
-                bad_data.append(f"inode {k[0]} data at offset {k[2] * BLOCK} fails its checksum")
+                bad_data.append(f"inode {k[0]} data at offset {idx * BLOCK} fails its checksum")
     problems, plan = analyse(img, sb, live)
-    if bad_slot:
-        problems.append(f"superblock slot {other} is damaged")
     log = []
-    if problems:
+    if problems or bad_slot:
         w = Writer(path, img, sb)
         sb = dict(sb)
         if any(plan.values()):
@@ -557,9 +576,70 @@ def cmd_check_repair(path):
         print("  repaired:", r)
     for b in bad_data:
         print("  cannot repair:", b)
-    print("repair:", "nothing to do" if not problems else f"{len(log)} repair(s)",
+    print("repair:", "nothing to do" if not log else f"{len(log)} repair(s)",
           "(data damage remains)" if bad_data else "")
     return 2 if bad_data else 0
+
+
+def cmd_put(path, dest, src, v0=False):
+    """Write host file SRC into the image at DEST (parent directories created). Data as v1
+    extents (or inline when small), or as v0 one-block extents with --v0."""
+    img = Image(path)
+    sb = img.superblock()
+    live = dict(img.items(sb["root"]))
+    data = open(src, "rb").read()
+    now = time.time()
+    sb = dict(sb)
+    if not v0:
+        sb["version"] = max(sb.get("version", 0), 1)  # v1 items: the image is v1 now
+    w = Writer(path, img, sb)
+    gen = sb["gen"] + 1
+    parts = [p for p in dest.split("/") if p]
+    d = ROOT_INO
+    for name in parts[:-1]:
+        hit = [ino for (o, k, _), v in live.items() if o == d and k == K_DIRENT
+               for n, ino, _ in dirents_decode(v) if n == name]
+        if hit:
+            d = hit[0]
+            continue
+        ino = sb["next_ino"]
+        sb["next_ino"] += 1
+        live[(ino, K_INODE, 0)] = inode_encode(S_IFDIR | 0o755, 2, 0, d, now)
+        bucket_edit(live, d, name, lambda l, n=name, i=ino: l + [(n, i, 4)])
+        pi = inode_decode(live[(d, K_INODE, 0)])
+        set_inode_field(live, d, 4, "<I", pi["nlink"] + 1)
+        d = ino
+    name = parts[-1]
+    if any(n == name for (o, k, _), v in live.items() if o == d and k == K_DIRENT
+           for n, _, _ in dirents_decode(v)):
+        sys.exit(f"{dest} exists")
+    ino = sb["next_ino"]
+    sb["next_ino"] += 1
+    live[(ino, K_INODE, 0)] = inode_encode(S_IFREG | 0o644, 1, len(data), d, now)
+    bucket_edit(live, d, name, lambda l: l + [(name, ino, 8)])
+    if len(data) <= 1024 and not v0:
+        live[(ino, K_INLINE, 0)] = data
+    else:
+        blocks = [data[i:i + BLOCK].ljust(BLOCK, b"\0") for i in range(0, len(data), BLOCK)]
+        if v0:
+            for i, blk in enumerate(blocks):
+                live[(ino, K_EXTENT, i)] = ptr_pack(w.put(blk, gen))
+        else:
+            for i in range(0, len(blocks), 128):
+                ptrs = [w.put(b, gen) for b in blocks[i:i + 128]]
+                # put() hands out increasing free blocks; split where they aren't consecutive
+                run = [ptrs[0]]
+                start = i
+                for j, p in enumerate(ptrs[1:], 1):
+                    if p[0] == run[-1][0] + 1:
+                        run.append(p)
+                        continue
+                    live[(ino, K_EXT, start)] = struct.pack("<QQI", run[0][0], gen, len(run)) + b"".join(struct.pack("<Q", x[2]) for x in run)
+                    run, start = [p], i + j
+                live[(ino, K_EXT, start)] = struct.pack("<QQI", run[0][0], gen, len(run)) + b"".join(struct.pack("<Q", x[2]) for x in run)
+    w.commit(sb, w.tree(live, gen))
+    print(f"{path}: {dest} ({len(data)} bytes{', v0 extents' if v0 else ''})")
+    return 0
 
 
 def cmd_corrupt(path, kind):
@@ -576,8 +656,8 @@ def cmd_corrupt(path, kind):
         f.seek(((sb["gen"] + 1) % 2) * BLOCK)
         f.write(b"\xab" * BLOCK)
     elif kind == "data":
-        ext = next(v for k, v in live.items() if k[1] == K_EXTENT)
-        f.seek(ptr_unpack(ext)[0] * BLOCK)
+        p = next(data_ptrs(k, v)[0][1] for k, v in live.items() if k[1] in (K_EXTENT, K_EXT))
+        f.seek(p[0] * BLOCK)
         f.write(bytes(BLOCK))
     elif kind == "node":
         nodes = []
@@ -632,13 +712,12 @@ def cmd_check(path, quiet):
             if prev is not None and k <= prev:
                 problems.append(f"{what}: keys out of order at {k}")
             prev = k
-            if k[1] == K_EXTENT:
-                p = ptr_unpack(v)
+            for idx, p in data_ptrs(k, v):
                 used.add(p[0])
                 try:
                     img.read(p)
                 except IOError as e:
-                    problems.append(f"{what}: inode {k[0]} block {k[2]}: {e}")
+                    problems.append(f"{what}: inode {k[0]} block {idx}: {e}")
         return dict(items)
 
     live = walk(sb["root"], "live")
@@ -682,11 +761,14 @@ def cmd_check(path, quiet):
         problems.append("no root directory")
     other = (sb["gen"] + 1) % 2
     o = sb_decode(img.raw(other))
+    notes = []
     if sb["gen"] > 1 and (o is None or o["gen"] >= sb["gen"]):
-        problems.append(f"superblock slot {other} is damaged (slot {sb['gen'] % 2} is good)")
+        # Not damage: what a commit interrupted mid-superblock-write leaves; the next
+        # commit overwrites that slot. --repair rewrites it now.
+        notes.append(f"superblock slot {other} is torn (an interrupted commit; the next commit rewrites it)")
 
     if not quiet or problems:
-        print(f"{path}: milkfs v0 label {sb['label']!r} generation {sb['gen']}, "
+        print(f"{path}: milkfs v{sb['version']} label {sb['label']!r} generation {sb['gen']}, "
               f"{len(inodes)} inodes, {len(used)}/{sb['total']} blocks used, "
               f"{len(sb['snaps'])} snapshot(s), {orphans} orphan(s)")
         if sb["flags"] & 1:
@@ -696,6 +778,8 @@ def cmd_check(path, quiet):
                 print(f"  clone {s['name']} (id {s['id']}) of the snapshot at gen {s['gen']}")
             else:
                 print(f"  snapshot {s['name']} gen {s['gen']}")
+    for n in notes:
+        print("  note:", n)
     for p in problems:
         print("  PROBLEM:", p)
     print("check:", "clean" if not problems else f"{len(problems)} problem(s)")
@@ -737,13 +821,15 @@ def main(argv):
             i += 1
     if cmd == "mkfs":
         cmd_mkfs(pos[0], parse_size(opts["--size"]) if "--size" in opts else None,
-                 opts.get("--label", "Milk"), "--force" in opts)
+                 opts.get("--label", "Milk"), "--force" in opts, 0 if "--v0" in opts else None)
     elif cmd == "check":
         if "--repair" in opts:
             return cmd_check_repair(pos[0])
         return cmd_check(pos[0], "--quiet" in opts)
     elif cmd == "corrupt":
         return cmd_corrupt(pos[0], pos[1])
+    elif cmd == "put":
+        return cmd_put(pos[0], pos[1], pos[2], "--v0" in opts)
     elif cmd == "ls":
         cmd_ls(pos[0], pos[1] if len(pos) > 1 else "/", opts.get("--snapshot"))
     elif cmd == "cat":

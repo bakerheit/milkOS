@@ -1834,9 +1834,11 @@ fn milkfs_fsck(
     let _ = dev.write_blocks(other * 8, &[0xAB; 4096]);
     let r = m::check(false).unwrap_or_default();
     t.ok(
-        r.problems.len() >= 4 && r.repaired.is_empty(),
+        r.problems.len() >= 3
+            && r.notes.iter().any(|n| n.contains("torn"))
+            && r.repaired.is_empty(),
         &alloc::format!(
-            "check finds the damage and changes nothing ({} problems)",
+            "check finds the damage and the torn slot, changes nothing ({} problems)",
             r.problems.len()
         ),
     );

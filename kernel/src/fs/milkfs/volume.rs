@@ -137,6 +137,7 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         clones: Vec::new(),
         auto: [0; 4],
         flags: 0,
+        version: VERSION,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -154,6 +155,12 @@ impl State {
             return Err(Errno::EINVAL);
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
+        if sb.version < VERSION {
+            kprintln!(
+                "milkfs: format v{} volume: it is upgraded to v{VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
+                sb.version
+            );
+        }
         // What's on disk now is the last committed generation (until this boot commits).
         super::crashtest::LAST_COMMIT.store(sb.generation, core::sync::atomic::Ordering::Relaxed);
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
@@ -340,6 +347,7 @@ impl State {
             clones: self.clones.clone(),
             auto: self.auto,
             flags: self.flags,
+            version: VERSION,
         };
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
@@ -397,9 +405,7 @@ pub fn reachable(
     {
         let mut node = |p: &BlockPtr| seen.insert(p.block);
         let mut item = |k: &Key, v: &[u8]| -> Result<()> {
-            if let Some(p) = btree::extent_ptr(k, v) {
-                data.push(p.block);
-            }
+            data.extend(data_ptrs(k, v).iter().map(|p| p.block));
             live_item(k, v)
         };
         btree::walk(store, sb.root, &mut node, &mut item)?;
@@ -407,9 +413,7 @@ pub fn reachable(
     for s in sb.snaps.iter().chain(sb.clones.iter()) {
         let mut node = |p: &BlockPtr| seen.insert(p.block);
         let mut item = |k: &Key, v: &[u8]| -> Result<()> {
-            if let Some(p) = btree::extent_ptr(k, v) {
-                data.push(p.block);
-            }
+            data.extend(data_ptrs(k, v).iter().map(|p| p.block));
             Ok(())
         };
         btree::walk(store, s.root, &mut node, &mut item)?;

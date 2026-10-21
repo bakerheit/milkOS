@@ -46,10 +46,14 @@ for kind in orphan dangling nlink parent sb; do
   # host repair
   H="$T/$kind-host.img"; cp "$BASE" "$H"
   $M corrupt "$H" "$kind" >/dev/null
-  if $M check "$H" >"$T/$kind-host.check1" 2>&1; then bad "host check missed $kind"; else
+  if [ "$kind" = sb ]; then
+    # A torn slot is what an interrupted commit leaves: a note, not a failed check.
+    { $M check "$H" >"$T/$kind-host.check1" 2>&1 && grep -q "note: superblock slot" "$T/$kind-host.check1"; } \
+      && ok "host check notes it: $(grep -m1 'note:' "$T/$kind-host.check1" | sed 's/^ *//')" || bad "host check of a torn slot"
+  elif $M check "$H" >"$T/$kind-host.check1" 2>&1; then bad "host check missed $kind"; else
     ok "host check finds it: $(grep -m1 PROBLEM "$T/$kind-host.check1" | sed 's/^ *//')"; fi
   $M check "$H" --repair >"$T/$kind-host.repair" 2>&1 && ok "host repair: $(grep -m1 repaired: "$T/$kind-host.repair" | sed 's/^ *//')" || bad "host repair of $kind"
-  $M check "$H" >/dev/null 2>&1 && ok "host check clean after repair" || bad "host check after repair"
+  { $M check "$H" >"$T/$kind-host.check2" 2>&1 && ! grep -q "note:" "$T/$kind-host.check2"; } && ok "host check clean after repair" || bad "host check after repair"
   boot "$H" crash-check "$T/$kind-host.boot"
   wait_for "CRASHCHECK" "$T/$kind-host.boot" 60 || true
   stop

@@ -372,10 +372,10 @@ impl Inode for MilkInode {
         }
         let size = self.vol.state.lock().inode(self.view, self.ino)?.size;
         let (view, ino) = (self.view, self.ino);
-        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, page| {
+        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, pages| {
             let st = self.vol.state.lock();
             let at = pg * crate::fs::pagecache::PAGE as u64;
-            st.read_data(view, ino, size, at, page).map(|_| ())
+            st.read_data(view, ino, size, at, pages).map(|_| ())
         })
     }
 

@@ -416,9 +416,16 @@ the differences are listed at the end of this section.
 | `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
 | `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
 
-### On-disk format v0
+### On-disk format (v0, v1)
 
-All integers little endian, 4 KiB blocks.
+All integers little endian, 4 KiB blocks. The current kernel writes **v1** = v0 plus two
+item kinds: multi-block runs (kind 5) and inline data (kind 6). It mounts v0 and v1. A v0
+volume mounts with the message `milkfs: format v0 volume: it is upgraded to v1 (...) by its
+first write; kernels older than that won't mount it then`: the first commit writes version 1
+into the superblock (v0 kernels refuse it: the version doesn't match). Old one-block extents
+(kind 3) stay readable forever and are rewritten as runs only when that part of the file is
+written. `mkmilkfs.py` reads both; `mkmilkfs.py mkfs --v0` and `put --v0` make v0 images
+(the upgrade test, `scripts/upgradetest.sh`, uses them).
 
 ```text
 block 0, 1   superblock slots: generation g is written to slot g % 2; mount takes the valid
@@ -437,7 +444,7 @@ itself.
 | off | field |
 |---|---|
 | 0 | magic `MILKFS01` |
-| 8 | version u32 = 0, 12: block size u32 = 4096 |
+| 8 | version u32 (0 or 1), 12: block size u32 = 4096 |
 | 16 | total blocks u64, 24: generation u64 |
 | 32 | live tree root: block pointer |
 | 56 | live dead list head: block pointer |
@@ -461,6 +468,8 @@ covers keys from its separator to the next one. Values are at most 1500 bytes.
 | 2 dirent | `(dir ino, 2, fnv1a64(name))` | every name in that dir with that hash: `ino u64 | d_type u8 | len u8 | name` repeated |
 | 3 extent | `(ino, 3, block index)` | block pointer of that 4 KiB of the file (absent = hole) |
 | 4 symlink | `(ino, 4, 0)` | target bytes (max 1024) |
+| 5 run (v1) | `(ino, 5, first block index)` | `block u64 | birth u64 | count u32 | count x xxh64 u64`: `count` (1..128) consecutive file blocks stored in consecutive disk blocks from `block`, one checksum per block |
+| 6 inline (v1) | `(ino, 6, 0)` | the whole file content, files up to 1024 bytes (no data block at all) |
 
 The root directory is inode 1 (its parent is itself). Inode numbers only grow.
 
@@ -633,7 +642,7 @@ files unlinked while open when the machine went down, like Linux's orphan list) 
 
 | damage | check finds | repair |
 |---|---|---|
-| a superblock slot is garbage | yes | rewritten from the good one (the next commit lands there; in the kernel any commit heals it) |
+| a superblock slot is garbage | yes, as a **note** (not a problem: a commit torn mid-superblock-write leaves exactly this, so crashed images still check clean) | rewritten from the good one (the next commit lands there; in the kernel any commit heals it) |
 | entry pointing at a missing inode | yes | entry removed |
 | inode with links but no entry | yes | linked into `/lost+found` as `#<ino>` |
 | inode with no links and no entry | yes | deleted |
@@ -705,18 +714,50 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
   fully landed), discards the clones, deletes the snapshots and checks space accounting is
   exact.
 
+### Performance (v1)
+
+What v1 changed, all measured with `scripts/cachebench.sh` (virtio disk, HVF, `-smp 4`;
+the create benchmark is `/sys/fs/milkfs/bench`: write N files of a size into a fresh
+directory and fsync, then read them all back with the page cache dropped):
+
+| | v0 | v1 |
+|---|---|---|
+| 300 x 1000 B: create | 30.6 ms, 323 blocks | 11.3 ms, 157 blocks |
+| 300 x 1000 B: read | 21.0 ms | 5.0 ms |
+| 100 x 20 KB: create / read | 29.3 / 50.0 ms | 8.5 / 10.2 ms |
+| 4 x 1 MiB: create / read | 48.0 / 91.2 ms | 5.1 / 9.0 ms |
+| 4 MiB read, page cache off | 46.6 ms | 21.4 ms |
+| 4 MiB read, page cache on, cold / warm | 64.8 / ~0.7 ms | 25.5 / ~0.7 ms |
+| FAT32 4 MiB read, page cache off | 43.8 ms | 3.0 ms |
+
+Where it comes from:
+- **Runs** (`K_EXT`): the allocator hands out consecutive blocks (`alloc_run`), one item
+  describes up to 128 of them, and a run is read with one device request (`bcache.read_run`:
+  one request for the missing blocks, cached ones overlaid). Writes inside a run trim or
+  split it (`drop_range`); every block keeps its own checksum, so partial reads still verify.
+- **Inline data** (`K_INLINE`): files up to 1 KiB live in the tree leaf, no data block; a
+  file that grows past that moves to runs.
+- **Decoded node cache** in `store.rs`: 512 decoded tree nodes keyed by (block, checksum),
+  so lookups don't re-read and re-parse the same nodes (inline data makes leaves fuller and
+  the tree a bit deeper; without this, small-file reads got slower). Keyed by checksum, so
+  it can never return a stale node.
+- **bcache flush coalescing**: up to 64 consecutive dirty blocks per write request.
+- **Page cache readahead**: a miss fills up to 16 pages with one file-system read.
+- FAT gains too: with the page cache off a read now reaches the file system in one call
+  (it used to be one 4 KiB page per call), so FAT's existing cluster-run reads cover all of it.
+
 ### Not in v0 (vs the design below)
 
 - Snapshot and clone records live in the superblock (30 in total) instead of a volume
   tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
 - No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
-- One extent per 4 KiB block (no multi-block extents, no inline data, no reflink copies).
+- No reflink copies (v1 added multi-block runs and inline data).
 - B+tree deletion doesn't merge underfull nodes.
 - Batched commits (about 1 s). Reads are page-cached (see Page cache).
 - After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
   (fine at these sizes; proportional to metadata).
 - One global lock per volume (`sched::Mutex<State>`), so operations on a volume serialise.
-- No permission checks (like the rest of the VFS), no xattrs, no fsck repair (check only).
+- No permission checks (like the rest of the VFS), no xattrs.
 - Rollback brings back files that were unlinked-but-open when the snapshot was taken; they
   are reclaimed right after.
 

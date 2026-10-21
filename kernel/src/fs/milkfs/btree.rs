@@ -15,8 +15,8 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::format::{
-    BLOCK, BlockPtr, DiskNode, INTERNAL_ENTRY, K_EXTENT, Key, LEAF_ITEM_OVERHEAD, MAX_VALUE,
-    NODE_HEADER, PTR_SIZE, decode_node, encode_internal, encode_leaf,
+    BLOCK, BlockPtr, DiskNode, INTERNAL_ENTRY, Key, LEAF_ITEM_OVERHEAD, MAX_VALUE, NODE_HEADER,
+    decode_node, encode_internal, encode_leaf,
 };
 use super::store::Store;
 use crate::fs::errno::{Errno, Result};
@@ -42,16 +42,22 @@ pub fn empty() -> Child {
     Child::Mem(Box::new(Node::Leaf(Vec::new())))
 }
 
+/// An owned, modifiable copy of the node at `p` (for copy-on-write).
 pub fn load(st: &Store, p: BlockPtr) -> Result<Node> {
-    let mut buf = [0u8; BLOCK];
-    st.read(p, &mut buf)?;
-    Ok(match decode_node(&buf)? {
-        DiskNode::Leaf(items) => Node::Leaf(items),
+    Ok(match &*st.node(p)? {
+        DiskNode::Leaf(items) => Node::Leaf(items.clone()),
         DiskNode::Internal(level, kids) => Node::Internal(
-            level,
-            kids.into_iter().map(|(k, p)| (k, Child::Disk(p))).collect(),
+            *level,
+            kids.iter().map(|(k, p)| (*k, Child::Disk(*p))).collect(),
         ),
     })
+}
+
+/// Read and decode the node at `p` (checksum verified). Used by `Store::node`'s cache.
+pub fn decode_at(st: &Store, p: BlockPtr) -> Result<DiskNode> {
+    let mut buf = [0u8; BLOCK];
+    st.read(p, &mut buf)?;
+    decode_node(&buf)
 }
 
 fn leaf_size(items: &[(Key, Vec<u8>)]) -> usize {
@@ -67,32 +73,44 @@ fn internal_fits(n: usize) -> bool {
 }
 
 /// Index of the child whose range contains `key`.
-fn child_index(kids: &[(Key, Child)], key: &Key) -> usize {
+fn child_index<T>(kids: &[(Key, T)], key: &Key) -> usize {
     kids.partition_point(|(k, _)| k <= key).saturating_sub(1)
 }
 
 // ---- reads --------------------------------------------------------------------------
 
-fn with_node<R>(c: &Child, st: &Store, f: impl FnOnce(&Node) -> Result<R>) -> Result<R> {
-    match c {
-        Child::Mem(n) => f(n),
-        Child::Disk(p) => f(&load(st, *p)?),
+fn leaf_get(items: &[(Key, Vec<u8>)], key: &Key) -> Option<Vec<u8>> {
+    items
+        .binary_search_by(|(k, _)| k.cmp(key))
+        .ok()
+        .map(|i| items[i].1.clone())
+}
+
+fn leaf_range(items: &[(Key, Vec<u8>)], lo: &Key, hi: &Key, out: &mut Vec<(Key, Vec<u8>)>) {
+    let start = items.partition_point(|(k, _)| k < lo);
+    for (k, v) in &items[start..] {
+        if k >= hi {
+            break;
+        }
+        out.push((*k, v.clone()));
     }
 }
 
 pub fn get(c: &Child, st: &Store, key: &Key) -> Result<Option<Vec<u8>>> {
-    with_node(c, st, |n| match n {
-        Node::Leaf(items) => Ok(items
-            .binary_search_by(|(k, _)| k.cmp(key))
-            .ok()
-            .map(|i| items[i].1.clone())),
-        Node::Internal(_, kids) => {
-            if kids.is_empty() {
-                return Ok(None);
+    match c {
+        Child::Mem(n) => match &**n {
+            Node::Leaf(items) => Ok(leaf_get(items, key)),
+            Node::Internal(_, kids) if kids.is_empty() => Ok(None),
+            Node::Internal(_, kids) => get(&kids[child_index(kids, key)].1, st, key),
+        },
+        Child::Disk(p) => match &*st.node(*p)? {
+            DiskNode::Leaf(items) => Ok(leaf_get(items, key)),
+            DiskNode::Internal(_, kids) if kids.is_empty() => Ok(None),
+            DiskNode::Internal(_, kids) => {
+                get(&Child::Disk(kids[child_index(kids, key)].1), st, key)
             }
-            get(&kids[child_index(kids, key)].1, st, key)
-        }
-    })
+        },
+    }
 }
 
 /// Every item with `lo <= key < hi`, in key order.
@@ -103,31 +121,35 @@ pub fn range(
     hi: &Key,
     out: &mut Vec<(Key, Vec<u8>)>,
 ) -> Result<()> {
-    with_node(c, st, |n| match n {
-        Node::Leaf(items) => {
-            let start = items.partition_point(|(k, _)| k < lo);
-            for (k, v) in &items[start..] {
-                if k >= hi {
-                    break;
+    match c {
+        Child::Mem(n) => match &**n {
+            Node::Leaf(items) => leaf_range(items, lo, hi, out),
+            Node::Internal(_, kids) if !kids.is_empty() => {
+                let first = child_index(kids, lo);
+                for (i, (k, child)) in kids.iter().enumerate().skip(first) {
+                    if i > first && *k >= *hi {
+                        break;
+                    }
+                    range(child, st, lo, hi, out)?;
                 }
-                out.push((*k, v.clone()));
             }
-            Ok(())
-        }
-        Node::Internal(_, kids) => {
-            if kids.is_empty() {
-                return Ok(());
-            }
-            let first = child_index(kids, lo);
-            for (i, (k, child)) in kids.iter().enumerate().skip(first) {
-                if i > first && *k >= *hi {
-                    break;
+            Node::Internal(..) => {}
+        },
+        Child::Disk(p) => match &*st.node(*p)? {
+            DiskNode::Leaf(items) => leaf_range(items, lo, hi, out),
+            DiskNode::Internal(_, kids) if !kids.is_empty() => {
+                let first = child_index(kids, lo);
+                for (i, (k, cp)) in kids.iter().enumerate().skip(first) {
+                    if i > first && *k >= *hi {
+                        break;
+                    }
+                    range(&Child::Disk(*cp), st, lo, hi, out)?;
                 }
-                range(child, st, lo, hi, out)?;
             }
-            Ok(())
-        }
-    })
+            DiskNode::Internal(..) => {}
+        },
+    }
+    Ok(())
 }
 
 // ---- writes -------------------------------------------------------------------------
@@ -324,24 +346,17 @@ pub fn walk(
     if p.is_none() || !node(&p) {
         return Ok(());
     }
-    match load(st, p)? {
-        Node::Leaf(items) => {
-            for (k, v) in &items {
+    match &*st.node(p)? {
+        DiskNode::Leaf(items) => {
+            for (k, v) in items {
                 item(k, v)?;
             }
         }
-        Node::Internal(_, kids) => {
-            for (_, c) in kids {
-                if let Child::Disk(cp) = c {
-                    walk(st, cp, node, item)?;
-                }
+        DiskNode::Internal(_, kids) => {
+            for (_, cp) in kids {
+                walk(st, *cp, node, item)?;
             }
         }
     }
     Ok(())
-}
-
-/// The data pointer stored in a `K_EXTENT` item value.
-pub fn extent_ptr(k: &Key, v: &[u8]) -> Option<BlockPtr> {
-    (k.kind == K_EXTENT && v.len() >= PTR_SIZE).then(|| BlockPtr::get(v))
 }

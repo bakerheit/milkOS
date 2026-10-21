@@ -54,6 +54,9 @@ pub struct Store {
     /// stay allocated (not reused, so nothing it is about to read is overwritten) but
     /// count as free in the space map; released when the scrub ends.
     held: Option<alloc::collections::BTreeSet<u64>>,
+    /// Encrypted volume: the unlocked key. Every block written gets sealed, every block
+    /// read opened (see `crypt.rs`); the checksum in a pointer is then the SIV tag.
+    pub crypt: Option<alloc::sync::Arc<super::crypt::VolumeKey>>,
 }
 
 #[derive(Default)]
@@ -85,6 +88,7 @@ impl Store {
             map_blocks: Vec::new(),
             recv_drops: None,
             held: None,
+            crypt: None,
         };
         s.mark(0);
         s.mark(1);
@@ -187,16 +191,40 @@ impl Store {
 
     /// Read `csums.len()` consecutive blocks starting at `block` into `out` (one device
     /// request for whatever isn't cached), verifying every block's checksum.
-    pub fn read_run(&self, block: u64, csums: &[u64], out: &mut [u8]) -> Result<()> {
+    pub fn read_run(&self, block: u64, birth: u64, csums: &[u64], out: &mut [u8]) -> Result<()> {
         self.cache
             .read_run(block, &mut out[..csums.len() * BLOCK])?;
         for (i, c) in csums.iter().enumerate() {
-            if xxh64(&out[i * BLOCK..(i + 1) * BLOCK]) != *c {
-                crate::kprintln!("milkfs: checksum mismatch in block {}", block + i as u64);
+            let b = block + i as u64;
+            if !self.verify(b, birth, *c, &mut out[i * BLOCK..(i + 1) * BLOCK]) {
+                crate::kprintln!("milkfs: checksum mismatch in block {b}");
                 return Err(Errno::EIO);
             }
         }
         Ok(())
+    }
+
+    /// The checksum of block `block` (born `birth`) about to be written with `data`:
+    /// xxh64 of it, or on an encrypted volume `data` is encrypted in place and the
+    /// checksum is its SIV tag.
+    pub fn seal(&self, block: u64, birth: u64, data: &mut [u8]) -> u64 {
+        match &self.crypt {
+            Some(k) => k.seal(block, birth, data),
+            None => xxh64(data),
+        }
+    }
+
+    /// `data` as read from block `block`: does it match `csum`? (Encrypted: decrypts it
+    /// in place and checks the tag.)
+    pub fn verify(&self, block: u64, birth: u64, csum: u64, data: &mut [u8]) -> bool {
+        match &self.crypt {
+            Some(k) => k.open(block, birth, csum, data),
+            None => xxh64(data) == csum,
+        }
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.crypt.is_some()
     }
 
     /// Drop a block the live tree referenced (see the module docs for the rules).
@@ -294,7 +322,7 @@ impl Store {
 
     pub fn read(&self, p: BlockPtr, out: &mut [u8; BLOCK]) -> Result<()> {
         self.cache.read(p.block, out)?;
-        if xxh64(out) != p.csum {
+        if !self.verify(p.block, p.birth, p.csum, out) {
             crate::kprintln!(
                 "milkfs: checksum mismatch in block {} (birth {})",
                 p.block,
@@ -307,6 +335,19 @@ impl Store {
 
     /// Write `data` to a freshly allocated block, born in this transaction.
     pub fn write_new(&mut self, data: &[u8; BLOCK]) -> Result<BlockPtr> {
+        let block = self.alloc()?;
+        let mut buf = *data;
+        let csum = self.seal(block, self.txn, &mut buf);
+        self.cache.write(block, &buf)?;
+        Ok(BlockPtr {
+            block,
+            birth: self.txn,
+            csum,
+        })
+    }
+
+    /// Write `data` unencrypted (the keyring: it must be readable before unlocking).
+    pub fn write_plain(&mut self, data: &[u8; BLOCK]) -> Result<BlockPtr> {
         let block = self.alloc()?;
         self.cache.write(block, data)?;
         Ok(BlockPtr {
@@ -350,11 +391,12 @@ impl Store {
             for (j, w) in bits.iter().skip(i * words).take(words).enumerate() {
                 buf[j * 8..j * 8 + 8].copy_from_slice(&w.to_le_bytes());
             }
+            let csum = self.seal(blk, self.txn, &mut buf);
             self.cache.write(blk, &buf)?;
             chunks.push(BlockPtr {
                 block: blk,
                 birth: self.txn,
-                csum: xxh64(&buf),
+                csum,
             });
         }
         let idx = MapIndex {
@@ -364,11 +406,12 @@ impl Store {
             chunks,
         };
         idx.encode(&mut buf);
+        let csum = self.seal(index_block, self.txn, &mut buf);
         self.cache.write(index_block, &buf)?;
         let ip = BlockPtr {
             block: index_block,
             birth: self.txn,
-            csum: xxh64(&buf),
+            csum,
         };
         self.map_blocks.push(ip);
         self.map_blocks.extend(idx.chunks.iter().copied());

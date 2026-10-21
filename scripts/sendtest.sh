@@ -30,6 +30,11 @@ source scripts/share.sh
 MILK_SHARE_RW=1 milk_share_args
 SHAREDIR="$(git rev-parse --path-format=absolute --git-common-dir)/../share"
 SHAREDIR="$(cd "$SHAREDIR" && pwd)"
+# Leftovers of runs that died without cleaning up (their process is gone).
+for d in "$SHAREDIR"/.vfs-sendtest-*; do
+  [ -d "$d" ] || continue
+  kill -0 "${d##*-}" 2>/dev/null || rm -rf "$d"
+done
 SUB=".vfs-sendtest-$$"
 mkdir -p "$SHAREDIR/$SUB"
 QPID=""
@@ -43,7 +48,7 @@ boot() { # name log commands...
   done
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
     -display none -monitor none -serial "unix:$SOCK,server,nowait" \
-    -global virtio-mmio.force-legacy=false "${drives[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
+    -global virtio-mmio.force-legacy=false "${drives[@]}" "${SHARE_ARGS[@]}" ${ENC_QEMU[@]+"${ENC_QEMU[@]}"} 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
@@ -62,9 +67,11 @@ boot() { # name log commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 
+source scripts/enc.sh
+milk_enc_setup "$T"
 SRC="$T/src.img"; BK="$T/backup.img"
-$M mkfs "$SRC" --size 64M >/dev/null
-$M mkfs "$BK" --size 64M --label Backup >/dev/null
+$M mkfs "$SRC" --size 64M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
+$M mkfs "$BK" --size 64M --label Backup ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 head -c 1500000 /dev/urandom > "$T/big.bin"
 $M put "$SRC" /data/big.bin "$T/big.bin" >/dev/null
 head -c 20000000 /dev/urandom > "$T/bulk.bin"
@@ -99,7 +106,7 @@ for s in s1 s2 s2-full; do
 done
 
 H="$T/host.img"; H2="$T/host2.img"
-$M mkfs "$H" --size 64M >/dev/null; $M mkfs "$H2" --size 64M >/dev/null
+$M mkfs "$H" --size 64M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null; $M mkfs "$H2" --size 64M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 $M receive "$H" "$SHAREDIR/$SUB/s2.stream" > "$T/h0.txt" 2>&1 && bad "host receive of an incremental without its base" || ok "host: incremental without its base refused: $(tail -1 "$T/h0.txt")"
 $M receive "$H" "$SHAREDIR/$SUB/s1.stream" >/dev/null && $M receive "$H" "$SHAREDIR/$SUB/s2.stream" >/dev/null \
   && ok "host: received s1 + s2 into a fresh image" || bad "host receive"
@@ -113,7 +120,7 @@ PY
 head -c $(( $(wc -c < "$SHAREDIR/$SUB/s1.stream") / 2 )) "$SHAREDIR/$SUB/s1.stream" > "$T/short.stream"
 for s in bad short; do
   $M verify-stream "$T/$s.stream" > "$T/$s.verify" && bad "verify-stream missed the $s stream" || ok "verify-stream: $(cat "$T/$s.verify" | sed 's/^.*BAD/BAD/')"
-  E="$T/empty-$s.img"; $M mkfs "$E" --size 16M >/dev/null; cp "$E" "$E.before"
+  E="$T/empty-$s.img"; $M mkfs "$E" --size 16M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null; cp "$E" "$E.before"
   $M receive "$E" "$T/$s.stream" >/dev/null 2>&1 && bad "host received the $s stream" || ok "host refuses the $s stream"
   cmp -s "$E" "$E.before" && ok "  and the image is untouched" || bad "  $s stream changed the image"
 done
@@ -132,7 +139,7 @@ for img in "$SRC" "$BK" "$H" "$H2"; do
   $M check "$img" > "$T/check.txt" 2>&1 && ok "check clean: $(basename "$img")$(grep -a 'shared by reflink' "$T/check.txt" | sed 's/^ */, /')" || { bad "check $(basename "$img")"; cat "$T/check.txt"; }
 done
 
-F="$T/fresh.img"; $M mkfs "$F" --size 32M --label Fresh >/dev/null
+F="$T/fresh.img"; $M mkfs "$F" --size 32M --label Fresh ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 DISKS="$T/src.img $F"
 boot b2 "$T/boot2.log" \
   "snap receive $S/s2.stream --to /Volumes/Fresh" \
@@ -146,7 +153,7 @@ echo "$L" | grep -aq "receive.*base snapshot isn't on the target" && ok "kernel 
 $M check "$F" > "$T/fresh.txt" 2>&1 && grep -q " 0 snapshot" "$T/fresh.txt" && [ "$($M tree "$F" | wc -l | tr -d ' ')" = 0 ] \
   && ok "the target is still empty and clean" || { bad "target after refused receives"; cat "$T/fresh.txt"; }
 
-C="$T/crash.img"; $M mkfs "$C" --size 64M --label Crash >/dev/null
+C="$T/crash.img"; $M mkfs "$C" --size 64M --label Crash ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 DISKS="$T/src.img $C"
 KILL_ON="snap receive $S/s2-full" KILL_AFTER=0.4 boot b3 "$T/boot3.log" \
   "snap receive $S/s2-full.stream --to /Volumes/Crash"

@@ -37,6 +37,19 @@ impl State {
         if i.mode & S_IFMT != S_IFREG {
             return Err(Errno::EISDIR);
         }
+        if self.store.encrypted() {
+            // Checksums are keyed tags bound to each block's address: identical contents
+            // in different blocks differ. Hash the contents instead (reads the file).
+            let mut buf = alloc::vec![0u8; i.size.min(1 << 20) as usize];
+            let mut h = alloc::vec::Vec::from(i.size.to_le_bytes());
+            let mut off = 0;
+            while off < i.size {
+                let n = self.read_data(view, ino, i.size, off, &mut buf)?;
+                h.extend_from_slice(&xxh64(&buf[..n]).to_le_bytes());
+                off += n as u64;
+            }
+            return Ok((xxh64(&h), i));
+        }
         let mut bytes = Vec::with_capacity(16 + 16 * 32);
         bytes.extend_from_slice(&i.size.to_le_bytes());
         for (idx, p) in self.extents(view, ino, 0)? {

@@ -33,11 +33,6 @@ pub fn write(s: &str) {
     }
 }
 
-/// Bytes written so far (a position to pass to [`read_since`] later).
-pub fn position() -> u64 {
-    RING.try_lock().map_or(0, |r| r.total)
-}
-
 /// Call `f` with the bytes written after position `from` (at most the last 32 KiB, in at most two
 /// slices, oldest first). Returns the new position.
 pub fn read_since(from: u64, mut f: impl FnMut(&[u8])) -> u64 {
@@ -48,7 +43,10 @@ pub fn read_since(from: u64, mut f: impl FnMut(&[u8])) -> u64 {
     if start >= r.total {
         return r.total;
     }
-    let (a, b) = ((start as usize) & (SIZE - 1), (r.total as usize) & (SIZE - 1));
+    let (a, b) = (
+        (start as usize) & (SIZE - 1),
+        (r.total as usize) & (SIZE - 1),
+    );
     if a < b {
         f(&r.buf[a..b]);
     } else {

@@ -15,8 +15,12 @@ use crate::pmm;
 const FRAMES_FROM: usize = 128 * 1024;
 
 enum Backing {
-    Heap(Vec<u32>),
-    Frames { pa: usize, pages: usize },
+    /// Kept only to own (and on drop free) the allocation.
+    Heap(#[allow(dead_code)] Vec<u32>),
+    Frames {
+        pa: usize,
+        pages: usize,
+    },
 }
 
 /// A `width` x `height` XRGB pixel buffer with `stride` pixels per row. The capacity can be

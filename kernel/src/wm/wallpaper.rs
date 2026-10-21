@@ -73,7 +73,11 @@ fn disc(b: &mut Buffer, cx16: i64, cy16: i64, r16: i64, c: Color, alpha: u8) {
         }
         let hw_out = outer2.isqrt();
         let inner2 = (r16 - 8) * (r16 - 8) - dy * dy;
-        let hw_in = if inner2 > 0 && r16 > 8 { inner2.isqrt() } else { -1 };
+        let hw_in = if inner2 > 0 && r16 > 8 {
+            inner2.isqrt()
+        } else {
+            -1
+        };
         let xa = ((cx16 - hw_out) / 16 - 1).max(0);
         let xb = ((cx16 + hw_out) / 16 + 2).min(w);
         let row = &mut px[y as usize * stride..y as usize * stride + w as usize];
@@ -152,7 +156,8 @@ fn blur_line(line: &mut [u32], tmp: &mut [u32], r: usize) {
         sb += p & 0xFF;
     }
     for (i, t) in tmp.iter_mut().enumerate().take(n) {
-        *t = (((sr + win / 2) / win) << 16) | (((sg + win / 2) / win) << 8) | ((sb + win / 2) / win);
+        *t =
+            (((sr + win / 2) / win) << 16) | (((sg + win / 2) / win) << 8) | ((sb + win / 2) / win);
         let add = at(i as isize + r as isize + 1);
         let sub = at(i as isize - r as isize);
         sr = sr + ((add >> 16) & 0xFF) - ((sub >> 16) & 0xFF);

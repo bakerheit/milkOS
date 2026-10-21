@@ -134,7 +134,10 @@ impl<'a> Painter<'a> {
 
     /// A painter on the same pixels, clipped further to `r` (logical).
     pub fn clipped(&mut self, r: Rect) -> Painter<'_> {
-        let b = intersect(&self.clip, &Rect::new(r.x + self.ox, r.y + self.oy, r.w, r.h));
+        let b = intersect(
+            &self.clip,
+            &Rect::new(r.x + self.ox, r.y + self.oy, r.w, r.h),
+        );
         Painter {
             px: &mut *self.px,
             stride: self.stride,
@@ -201,10 +204,6 @@ impl<'a> Painter<'a> {
                 *p = blend(*p, c, alpha);
             }
         }
-    }
-
-    pub fn fill_r(&mut self, r: Rect, c: Color) {
-        self.fill(r.x, r.y, r.w, r.h, c);
     }
 
     /// Filled anti-aliased rounded rect, blended at `alpha`.
@@ -361,6 +360,70 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// A window's shadow (SPEC: Shadows, window), drawn only where the window itself won't
+    /// cover it: around its opaque core, so most of the area costs nothing.
+    pub fn shadow_window(&mut self, r: Rect) {
+        let core = Rect::new(
+            r.x,
+            r.y + super::theme::R_WINDOW,
+            r.w,
+            r.h - 2 * super::theme::R_WINDOW,
+        );
+        let c = self.clip();
+        let (cr, cb) = (c.x + c.w, c.y + c.h);
+        let (kr, kb) = (core.x + core.w, core.y + core.h);
+        let parts = [
+            Rect::new(c.x, c.y, c.w, core.y - c.y),
+            Rect::new(c.x, kb, c.w, cb - kb),
+            Rect::new(c.x, core.y, core.x - c.x, core.h),
+            Rect::new(kr, core.y, cr - kr, core.h),
+        ];
+        for part in parts {
+            let part = intersect(&part, &c);
+            if !part.is_empty() {
+                self.clipped(part)
+                    .shadow(r, super::theme::R_WINDOW, &super::theme::SHADOW_WINDOW);
+            }
+        }
+    }
+
+    /// Blend an ARGB sprite (alpha in the top byte) with its top-left at (x, y).
+    pub fn sprite(&mut self, x: i32, y: i32, src: &[u32], w: usize, h: usize) {
+        let Some(b) = self.buf_rect(x, y, w as i32, h as i32) else {
+            return;
+        };
+        let (dx0, dy0) = (x + self.ox, y + self.oy);
+        for by in b.y..b.y + b.h {
+            let srow = &src[(by - dy0) as usize * w..][..w];
+            for bx in b.x..b.x + b.w {
+                let q = srow[(bx - dx0) as usize];
+                let a = (q >> 24) as u8;
+                if a != 0 {
+                    let p = &mut self.px[by as usize * self.stride + bx as usize];
+                    *p = blend(*p, q & 0x00FF_FFFF, a);
+                }
+            }
+        }
+    }
+
+    /// Nearest-neighbour scale all of `src` into the logical rect `dst` (tiny previews).
+    pub fn blit_scaled(&mut self, dst: Rect, src: &Buffer) {
+        let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {
+            return;
+        };
+        let (dx0, dy0) = (dst.x + self.ox, dst.y + self.oy);
+        let (sw, sh) = (src.w(), src.h());
+        for by in b.y..b.y + b.h {
+            let sy = ((by - dy0) * sh / dst.h).min(sh - 1);
+            let srow = src.row(sy as usize);
+            let base = by as usize * self.stride;
+            for bx in b.x..b.x + b.w {
+                let sx = ((bx - dx0) * sw / dst.w).min(sw - 1);
+                self.px[base + bx as usize] = srow[sx as usize];
+            }
+        }
+    }
+
     // ---- blits ------------------------------------------------------------------------------
 
     /// Copy the `w` x `h` block at (sx, sy) of `src` to logical (x, y).
@@ -448,23 +511,6 @@ impl<'a> Painter<'a> {
                 }
             }
         }
-    }
-
-    /// A glass panel background: the pre-tinted blurred wallpaper `glass` (screen-sized, same
-    /// coordinates) under the rect, through the rounded mask, then the 1px white inner border.
-    pub fn glass(&mut self, r: Rect, radius: i32, glass: &Buffer) {
-        let (gx, gy) = (r.x + self.ox, r.y + self.oy);
-        self.blit_rrect(r.x, r.y, glass, gx, gy, r.w, r.h, radius, 255);
-        self.rrect_stroke(
-            r.x,
-            r.y,
-            r.w,
-            r.h,
-            radius,
-            1,
-            super::theme::WHITE,
-            super::theme::GLASS_BORDER_A,
-        );
     }
 
     // ---- text -------------------------------------------------------------------------------

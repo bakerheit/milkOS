@@ -1,0 +1,1129 @@
+//! The shell around the windows: menu bar, dock, toasts, control centre, Skim launcher, Today home
+//! cards and the Spaces overview. Each is a panel (a cached buffer, see `Desktop::reconcile`) or a
+//! full-screen dim; this file says where each one is, how it paints and what clicks on it do.
+
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::font;
+use crate::gfx::{Color, Rect};
+use crate::{heap, pmm};
+
+use super::apps;
+use super::icons::{self, Icon};
+use super::paint::{Painter, hit};
+use super::rtc;
+use super::theme::*;
+use super::window::App;
+use super::{Desktop, Drag, Mode};
+
+// ---- layers -------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum PanelKey {
+    MenuBar,
+    Dock,
+    Toast(u32),
+    Control,
+    LaunchInput,
+    LaunchResults,
+    Card(u8),
+    Thumb(u8),
+    Cell(u32),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Style {
+    /// Glass at 0.55 with the 1px white inner border.
+    Glass,
+    /// Glass at 0.7 (launcher, control centre).
+    GlassStrong,
+    /// The menu bar: glass, square, white bottom edge.
+    Bar,
+    /// The painter fills it all itself.
+    Opaque,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PanelSpec {
+    pub key: PanelKey,
+    pub rect: Rect,
+    pub radius: i32,
+    pub style: Style,
+    pub shadow: bool,
+}
+
+pub enum Layer {
+    Panel(PanelSpec),
+    /// Espresso over everything below, at this alpha.
+    Dim(u8),
+    /// Bold centred text straight on whatever is below.
+    Label {
+        x: i32,
+        y: i32,
+        w: i32,
+        text: String,
+        color: Color,
+    },
+}
+
+/// Everything a panel paints: itself plus its float shadow.
+pub fn panel_bounds(r: Rect) -> Rect {
+    let mut b = r;
+    for (g, dy, _) in SHADOW_FLOAT {
+        b = b.union(&Rect::new(r.x - g, r.y - g + dy, r.w + 2 * g, r.h + 2 * g));
+    }
+    b
+}
+
+fn spec(key: PanelKey, rect: Rect, radius: i32, style: Style, shadow: bool) -> Layer {
+    Layer::Panel(PanelSpec {
+        key,
+        rect,
+        radius,
+        style,
+        shadow,
+    })
+}
+
+pub struct Toast {
+    pub id: u32,
+    pub title: String,
+    pub sub: String,
+    pub until_ns: u64,
+}
+
+// ---- dock ---------------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum DockAction {
+    App(App),
+    Home,
+    Spaces,
+    Soon(&'static str),
+}
+
+struct DockItem {
+    icon: Icon,
+    bg: Color,
+    fg: Color,
+    action: DockAction,
+}
+
+const DOCK: [DockItem; 8] = [
+    DockItem {
+        icon: Icon::Folder,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: DockAction::App(App::Files),
+    },
+    DockItem {
+        icon: Icon::Term,
+        bg: ESPRESSO,
+        fg: CREAM,
+        action: DockAction::App(App::Terminal),
+    },
+    DockItem {
+        icon: Icon::Globe,
+        bg: BLUE,
+        fg: ESPRESSO,
+        action: DockAction::Soon("Web"),
+    },
+    DockItem {
+        icon: Icon::Note,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: DockAction::App(App::Notes),
+    },
+    DockItem {
+        icon: Icon::Music,
+        bg: STRAW,
+        fg: ESPRESSO,
+        action: DockAction::Soon("Music"),
+    },
+    DockItem {
+        icon: Icon::Spaces,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: DockAction::Spaces,
+    },
+    DockItem {
+        icon: Icon::Cal,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: DockAction::Home,
+    },
+    DockItem {
+        icon: Icon::Gear,
+        bg: LATTE,
+        fg: ESPRESSO,
+        action: DockAction::App(App::About),
+    },
+];
+
+pub fn dock_rect() -> Rect {
+    let n = DOCK.len() as i32;
+    let w = 2 * DOCK_PAD + n * DOCK_ICON + (n - 1) * DOCK_GAP;
+    Rect::new(
+        (SCREEN_W - w) / 2,
+        SCREEN_H - DOCK_BOTTOM - DOCK_H,
+        w,
+        DOCK_H,
+    )
+}
+
+/// Centre x of dock icon `i` on screen (for scripts).
+pub fn dock_icon_center(i: usize) -> (i32, i32) {
+    let d = dock_rect();
+    (
+        d.x + DOCK_PAD + i as i32 * (DOCK_ICON + DOCK_GAP) + DOCK_ICON / 2,
+        d.y + DOCK_PAD + DOCK_ICON / 2,
+    )
+}
+
+// ---- launcher -----------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    App(App),
+    Home,
+    Spaces,
+    Control,
+    NewSpace,
+}
+
+struct Entry {
+    name: &'static str,
+    sub: &'static str,
+    icon: Icon,
+    bg: Color,
+    fg: Color,
+    action: Action,
+}
+
+const ENTRIES: [Entry; 8] = [
+    Entry {
+        name: "Terminal",
+        sub: "Kernel log and a tiny shell",
+        icon: Icon::Term,
+        bg: ESPRESSO,
+        fg: CREAM,
+        action: Action::App(App::Terminal),
+    },
+    Entry {
+        name: "Files",
+        sub: "Browse files (placeholder until vfs)",
+        icon: Icon::Folder,
+        bg: HONEY,
+        fg: ESPRESSO,
+        action: Action::App(App::Files),
+    },
+    Entry {
+        name: "Notes",
+        sub: "Jot things down",
+        icon: Icon::Note,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: Action::App(App::Notes),
+    },
+    Entry {
+        name: "About milkOS",
+        sub: "Version, memory, uptime, frame times",
+        icon: Icon::Gear,
+        bg: LATTE,
+        fg: ESPRESSO,
+        action: Action::App(App::About),
+    },
+    Entry {
+        name: "Today",
+        sub: "Widgets on the wallpaper (F4)",
+        icon: Icon::Cal,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: Action::Home,
+    },
+    Entry {
+        name: "Spaces",
+        sub: "Overview of your desktops (F3)",
+        icon: Icon::Spaces,
+        bg: MILK,
+        fg: ESPRESSO,
+        action: Action::Spaces,
+    },
+    Entry {
+        name: "Control centre",
+        sub: "Focus, display, sound",
+        icon: Icon::Clock,
+        bg: CREAM,
+        fg: ESPRESSO,
+        action: Action::Control,
+    },
+    Entry {
+        name: "New space",
+        sub: "Add a desktop",
+        icon: Icon::Spaces,
+        bg: CREAM,
+        fg: COCOA,
+        action: Action::NewSpace,
+    },
+];
+
+pub struct Launcher {
+    pub query: String,
+    pub sel: usize,
+}
+
+/// Fuzzy subsequence match, case-insensitive. Higher is better; None if not all of `q` appears in
+/// order. Consecutive letters and word starts score extra, so "ter" ranks Terminal first and
+/// "ab" finds About.
+pub fn fuzzy(q: &str, name: &str) -> Option<i32> {
+    let n: Vec<char> = name.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let mut score = 0;
+    let mut pos = 0usize;
+    let mut last: Option<usize> = None;
+    for qc in q.chars().map(|c| c.to_ascii_lowercase()) {
+        if qc == ' ' {
+            continue;
+        }
+        let found = (pos..n.len()).find(|&i| n[i] == qc)?;
+        score += 1;
+        if last.is_some_and(|l| l + 1 == found) {
+            score += 4;
+        }
+        if found == 0 || n[found - 1] == ' ' {
+            score += 6;
+        }
+        score -= (found - pos).min(5) as i32 / 2;
+        last = Some(found);
+        pos = found + 1;
+    }
+    Some(score * 10 - n.len() as i32 / 4)
+}
+
+impl Launcher {
+    fn results(&self) -> Vec<&'static Entry> {
+        if self.query.trim().is_empty() {
+            return ENTRIES.iter().take(4).collect();
+        }
+        let mut v: Vec<(i32, &'static Entry)> = ENTRIES
+            .iter()
+            .filter_map(|e| fuzzy(&self.query, e.name).map(|s| (s, e)))
+            .collect();
+        v.sort_by_key(|e| core::cmp::Reverse(e.0));
+        v.into_iter()
+            .take(LAUNCH_MAX_ROWS)
+            .map(|(_, e)| e)
+            .collect()
+    }
+}
+
+fn launcher_x() -> i32 {
+    (SCREEN_W - LAUNCH_W) / 2
+}
+
+fn results_height(n: usize) -> i32 {
+    16 + 24 + n.max(1) as i32 * LAUNCH_ROW_H + 28 + 8 + 8
+}
+
+// ---- control centre -----------------------------------------------------------------------
+
+pub fn control_rect() -> Rect {
+    Rect::new(SCREEN_W - CC_RIGHT - CC_W, CC_TOP, CC_W, CC_H)
+}
+
+const SLIDER_Y: [i32; 2] = [88, 160];
+const TRACK_X: i32 = 30;
+const TRACK_W: i32 = CC_W - 60;
+
+// ---- home cards ---------------------------------------------------------------------------
+
+fn card_rect(i: u8) -> Rect {
+    let y1 = 56 + 96 + CARD_GAP;
+    let y2 = y1 + 228 + CARD_GAP;
+    match i {
+        0 => Rect::new(CARD_MARGIN, 56, SCREEN_W - 2 * CARD_MARGIN, 96),
+        1..=3 => Rect::new(
+            CARD_MARGIN + (i as i32 - 1) * (296 + CARD_GAP),
+            y1,
+            296,
+            228,
+        ),
+        _ => Rect::new(
+            CARD_MARGIN + (i as i32 - 4) * (456 + CARD_GAP),
+            y2,
+            456,
+            188,
+        ),
+    }
+}
+
+const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
+    (App::Files, Icon::Folder, HONEY, FOLDER_A, COCOA),
+    (App::Terminal, Icon::Term, ESPRESSO, 255, CREAM),
+    (App::Notes, Icon::Note, CREAM, 255, ESPRESSO),
+    (App::About, Icon::Gear, LATTE, 255, ESPRESSO),
+];
+
+// ---- spaces -------------------------------------------------------------------------------
+
+/// Size of a window's overview cell: its surface scaled to fit 300x210 (never enlarged).
+pub fn cell_size(w: i32, h: i32) -> (i32, i32) {
+    let k = (300 * 1024 / w.max(1)).min(210 * 1024 / h.max(1)).min(1024);
+    ((w * k / 1024).max(8), (h * k / 1024).max(8))
+}
+
+fn thumb_rect(i: usize, n: usize) -> Rect {
+    let total = n as i32 * THUMB_W + (n as i32 - 1) * THUMB_GAP;
+    let sx = (SCREEN_W - total) / 2;
+    Rect::new(
+        sx + i as i32 * (THUMB_W + THUMB_GAP),
+        SPACES_STRIP_Y,
+        THUMB_W,
+        THUMB_H,
+    )
+}
+
+const SPACE_NAMES: [&str; 6] = ["Main", "Notes", "Play", "Work", "Extra", "More"];
+const MAX_SPACES: usize = 6;
+
+fn space_label(i: usize) -> String {
+    format!("{} {}", i + 1, SPACE_NAMES[i.min(SPACE_NAMES.len() - 1)])
+}
+
+pub fn fmt_uptime(ns: u64) -> String {
+    let s = ns / 1_000_000_000;
+    format!("{}h {:02}m", s / 3600, s / 60 % 60)
+}
+
+impl Desktop {
+    /// Overview cells: (window id, slot rect, cell rect).
+    fn cells(&self) -> Vec<(u32, Rect)> {
+        let ids: Vec<&super::window::Window> = self
+            .windows
+            .iter()
+            .filter(|w| w.space == self.space)
+            .take(6)
+            .collect();
+        ids.iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let (col, row) = (i as i32 % 3, i as i32 / 3);
+                let (sx, sy) = (60 + col * 330, 170 + row * 270);
+                let (cw, ch) = cell_size(w.rect.w, w.rect.h);
+                (
+                    w.id,
+                    Rect::new(sx + (300 - cw) / 2, sy + (210 - ch) / 2, cw, ch),
+                )
+            })
+            .collect()
+    }
+
+    /// The shell's layers this frame, bottom to top.
+    pub(super) fn layers(&self) -> Vec<Layer> {
+        let mut v = Vec::new();
+        let bar = spec(
+            PanelKey::MenuBar,
+            Rect::new(0, 0, SCREEN_W, MENU_H),
+            0,
+            Style::Bar,
+            false,
+        );
+        let dock = spec(PanelKey::Dock, dock_rect(), R_DOCK, Style::Glass, true);
+        match self.mode {
+            Mode::Desktop => {
+                v.push(bar);
+                v.push(dock);
+            }
+            Mode::Home => {
+                for i in 0..6 {
+                    v.push(spec(
+                        PanelKey::Card(i),
+                        card_rect(i),
+                        R_CARD,
+                        Style::Glass,
+                        true,
+                    ));
+                }
+                v.push(bar);
+                v.push(dock);
+            }
+            Mode::Spaces => {
+                v.push(Layer::Dim(SPACES_DIM_A));
+                v.push(bar);
+                let n = (self.nspaces + 1).min(MAX_SPACES + 1);
+                for i in 0..n {
+                    if i == MAX_SPACES {
+                        break;
+                    }
+                    let st = if i == self.space {
+                        Style::GlassStrong
+                    } else {
+                        Style::Glass
+                    };
+                    v.push(spec(
+                        PanelKey::Thumb(i as u8),
+                        thumb_rect(i, n.min(MAX_SPACES)),
+                        THUMB_R,
+                        st,
+                        true,
+                    ));
+                }
+                for (id, r) in self.cells() {
+                    v.push(spec(PanelKey::Cell(id), r, R_WINDOW, Style::Opaque, true));
+                    if let Some(w) = self.win(id) {
+                        v.push(Layer::Label {
+                            x: r.x - 20,
+                            y: r.y + r.h + 10,
+                            w: r.w + 40,
+                            text: String::from(w.contents.title()),
+                            color: MILK,
+                        });
+                    }
+                }
+                v.push(Layer::Label {
+                    x: 0,
+                    y: 722,
+                    w: SCREEN_W,
+                    text: String::from(
+                        "Click a window to focus   Drag it to another space   Esc to leave",
+                    ),
+                    color: MILK,
+                });
+            }
+        }
+        for (i, t) in self.toasts.iter().enumerate() {
+            let r = Rect::new(
+                SCREEN_W - TOAST_RIGHT - TOAST_W,
+                TOAST_TOP + i as i32 * (TOAST_H + 8),
+                TOAST_W,
+                TOAST_H,
+            );
+            v.push(spec(PanelKey::Toast(t.id), r, R_TOAST, Style::Glass, true));
+        }
+        if self.control {
+            v.push(spec(
+                PanelKey::Control,
+                control_rect(),
+                R_CARD,
+                Style::GlassStrong,
+                true,
+            ));
+        }
+        if let Some(l) = &self.launcher {
+            v.push(Layer::Dim(LAUNCH_DIM_A));
+            let x = launcher_x();
+            v.push(spec(
+                PanelKey::LaunchInput,
+                Rect::new(x, LAUNCH_Y, LAUNCH_W, LAUNCH_INPUT_H),
+                R_LAUNCHER,
+                Style::GlassStrong,
+                true,
+            ));
+            let n = l.results().len();
+            v.push(spec(
+                PanelKey::LaunchResults,
+                Rect::new(
+                    x,
+                    LAUNCH_Y + LAUNCH_INPUT_H + LAUNCH_GAP,
+                    LAUNCH_W,
+                    results_height(n),
+                ),
+                R_LAUNCHER,
+                Style::GlassStrong,
+                true,
+            ));
+        }
+        v
+    }
+
+    pub(super) fn status_text(&self) -> String {
+        let t = rtc::now();
+        format!(
+            "cpu {}%   {} {:02}:{:02}",
+            self.stats.cpu_pct,
+            &rtc::DAYS[t.weekday as usize][..3],
+            t.hour,
+            t.minute
+        )
+    }
+
+    fn app_title(&self) -> &'static str {
+        match self.mode {
+            Mode::Home => "Today",
+            Mode::Spaces => "Overview",
+            Mode::Desktop => self.focused_window().map_or("milkOS", |w| match w.app {
+                App::About => "milkOS",
+                a => a.name(),
+            }),
+        }
+    }
+
+    // ---- painting -------------------------------------------------------------------------
+
+    pub(super) fn paint_panel(&self, key: PanelKey, p: &mut Painter, w: i32, h: i32) {
+        match key {
+            PanelKey::MenuBar => self.paint_menubar(p, w),
+            PanelKey::Dock => self.paint_dock(p),
+            PanelKey::Toast(id) => {
+                if let Some(t) = self.toasts.iter().find(|t| t.id == id) {
+                    icons::draw(p, 12, 12, 40, Icon::Cal, HONEY, 0x88, ESPRESSO, false);
+                    p.bold(64, 12, &t.title, ESPRESSO);
+                    p.text(64, 32, &t.sub, COCOA);
+                }
+            }
+            PanelKey::Control => self.paint_control(p),
+            PanelKey::LaunchInput => self.paint_launch_input(p, w),
+            PanelKey::LaunchResults => self.paint_launch_results(p, w),
+            PanelKey::Card(i) => self.paint_card(i, p, w, h),
+            PanelKey::Thumb(i) => self.paint_thumb(i as usize, p, w, h),
+            PanelKey::Cell(id) => {
+                if let Some(t) = self.thumbs.get(&id) {
+                    p.blit(0, 0, t, 0, 0, w, h);
+                } else {
+                    p.fill(0, 0, w, h, MILK);
+                }
+                if self.focus == Some(id) {
+                    p.rrect_stroke(0, 0, w, h, R_WINDOW, SEL_BORDER, HONEY, 255);
+                } else {
+                    p.rrect_stroke(0, 0, w, h, R_WINDOW, 1, SAND, 255);
+                }
+            }
+        }
+    }
+
+    fn paint_menubar(&self, p: &mut Painter, w: i32) {
+        icons::logo(p, 12, 8, 13, ESPRESSO);
+        let mut x = p.bold(38, MENU_TEXT_Y, self.app_title(), ESPRESSO);
+        let menus: &[&str] = match self.mode {
+            Mode::Desktop => self
+                .focused_window()
+                .map_or(&["File", "Edit", "View", "Go", "Window", "Help"], |w| {
+                    w.contents.menus()
+                }),
+            _ => &["View", "Window", "Help"],
+        };
+        for m in menus {
+            x += 24;
+            x = p.text(x, MENU_TEXT_Y, m, ESPRESSO);
+        }
+        p.text_right(
+            w - MENU_PAD_X,
+            MENU_TEXT_Y,
+            &self.status,
+            ESPRESSO,
+            1,
+            false,
+        );
+    }
+
+    fn paint_dock(&self, p: &mut Painter) {
+        for (i, it) in DOCK.iter().enumerate() {
+            let ix = DOCK_PAD + i as i32 * (DOCK_ICON + DOCK_GAP);
+            icons::draw(
+                p, ix, DOCK_PAD, DOCK_ICON, it.icon, it.bg, 255, it.fg, false,
+            );
+            let running = match it.action {
+                DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
+                DockAction::Home => self.mode == Mode::Home,
+                DockAction::Spaces => self.mode == Mode::Spaces,
+                DockAction::Soon(_) => false,
+            };
+            if running {
+                p.rrect(
+                    ix + DOCK_ICON / 2 - DOCK_DOT / 2,
+                    DOCK_H - DOCK_DOT_GAP - DOCK_DOT + 1,
+                    DOCK_DOT,
+                    DOCK_DOT,
+                    2,
+                    COCOA,
+                    255,
+                );
+            }
+        }
+    }
+
+    fn paint_control(&self, p: &mut Painter) {
+        let s = &self.settings;
+        let tile = |p: &mut Painter, tx: i32, label: &str, sub: &str, on: bool| {
+            if on {
+                p.rrect(tx, 16, 124, CC_TILE_H, 16, STRAW, 255);
+            } else {
+                p.rrect(tx, 16, 124, CC_TILE_H, 16, MILK, a(700));
+            }
+            let (c1, c2) = if on { (MILK, MILK) } else { (ESPRESSO, COCOA) };
+            p.bold(tx + 14, 26, label, c1);
+            p.text(tx + 14, 46, sub, c2);
+        };
+        tile(p, 16, "Network", "not yet", false);
+        tile(
+            p,
+            148,
+            "Focus",
+            if s.focus_mode { "On" } else { "Off" },
+            s.focus_mode,
+        );
+        for (i, (label, v)) in [("Display", s.brightness), ("Sound", s.volume)]
+            .into_iter()
+            .enumerate()
+        {
+            let sy = SLIDER_Y[i];
+            p.rrect(16, sy, CC_W - 32, CC_TILE_H, 16, MILK, a(700));
+            p.bold(30, sy + 8, label, ESPRESSO);
+            p.rrect(TRACK_X, sy + 36, TRACK_W, CC_SLIDER_H, 4, COCOA, 0x40);
+            p.rrect(
+                TRACK_X,
+                sy + 36,
+                (TRACK_W * v / 100).max(8),
+                CC_SLIDER_H,
+                4,
+                ESPRESSO,
+                255,
+            );
+        }
+        let up = fmt_uptime(crate::timer::now_ns());
+        p.text(
+            18,
+            236,
+            &format!("Up {}   cpu {}%", up, self.stats.cpu_pct),
+            COCOA,
+        );
+        let t = rtc::now();
+        p.text(
+            18,
+            258,
+            &format!(
+                "{} {} {}",
+                &rtc::DAYS[t.weekday as usize][..3],
+                t.day,
+                rtc::MONTHS[t.month as usize - 1]
+            ),
+            COCOA,
+        );
+    }
+
+    fn paint_launch_input(&self, p: &mut Painter, w: i32) {
+        let Some(l) = &self.launcher else {
+            return;
+        };
+        icons::draw(p, 14, 8, 40, Icon::Globe, CREAM, 255, COCOA, false);
+        let end = if l.query.is_empty() {
+            p.text_x(66, 12, "Search", LATTE, 2, false);
+            66
+        } else {
+            p.text_x(66, 12, &l.query, ESPRESSO, 2, false)
+        };
+        p.fill(end, 12, 3, 32, ESPRESSO);
+        p.text_right(w - 20, 20, "esc", COCOA, 1, false);
+    }
+
+    fn paint_launch_results(&self, p: &mut Painter, w: i32) {
+        let Some(l) = &self.launcher else {
+            return;
+        };
+        let res = l.results();
+        let label = if l.query.trim().is_empty() {
+            "SUGGESTIONS"
+        } else {
+            "TOP HITS"
+        };
+        p.text(16, 12, label, COCOA);
+        if res.is_empty() {
+            p.text(64, 40 + 16, "No matches", COCOA);
+        }
+        for (i, e) in res.iter().enumerate() {
+            let y = 40 + i as i32 * LAUNCH_ROW_H;
+            let sel = i == l.sel.min(res.len() - 1);
+            if sel {
+                p.rrect(8, y, w - 16, LAUNCH_ROW_H, R_ROW, STRAW, SEL_ROW_A);
+            }
+            let border = e.bg == MILK || e.bg == CREAM;
+            icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
+            p.bold(64, y + 6, e.name, ESPRESSO);
+            p.text(64, y + 22, e.sub, COCOA);
+            if sel {
+                p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
+            }
+        }
+        let fy = 40 + res.len().max(1) as i32 * LAUNCH_ROW_H + 8;
+        p.text(
+            16,
+            fy,
+            "Up/Down to choose   Enter to open   Esc to close",
+            COCOA,
+        );
+    }
+
+    fn paint_card(&self, i: u8, p: &mut Painter, w: i32, _h: i32) {
+        let t = rtc::now();
+        let now = crate::timer::now_ns();
+        let pad = CARD_PAD;
+        let label = |p: &mut Painter, s: &str| {
+            p.text(pad, pad, s, COCOA);
+        };
+        match i {
+            0 => {
+                let greet = match t.hour {
+                    5..=11 => "Good morning, Andrew",
+                    12..=17 => "Good afternoon, Andrew",
+                    _ => "Good evening, Andrew",
+                };
+                p.text_x(pad + 8, 16, greet, ESPRESSO, 2, true);
+                let n = self.windows.len();
+                let line = format!(
+                    "{}, {} {}   {} window{} open",
+                    rtc::DAYS[t.weekday as usize],
+                    t.day,
+                    rtc::MONTHS[t.month as usize - 1],
+                    n,
+                    if n == 1 { "" } else { "s" }
+                );
+                p.text(pad + 8, 58, &line, COCOA);
+                let clock = format!("{:02}:{:02}", t.hour, t.minute);
+                p.text_right(w - 24, 16, &clock, ESPRESSO, 4, true);
+            }
+            1 => {
+                label(p, "CALENDAR");
+                for (k, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
+                    p.text_center(12 + k as i32 * 38, 38, 40, d, COCOA, false);
+                }
+                // Last week, this week, next week; today in the middle row.
+                let first = rtc::first_weekday(&t);
+                let _ = first;
+                let start = t.day as i32 - t.weekday as i32 - 7; // Monday of last week
+                let prev_len = rtc::days_in_month(
+                    if t.month == 1 { t.year - 1 } else { t.year },
+                    if t.month == 1 { 12 } else { t.month - 1 },
+                ) as i32;
+                let len = rtc::days_in_month(t.year, t.month) as i32;
+                for c in 0..21 {
+                    let mut n = start + c;
+                    if n < 1 {
+                        n += prev_len;
+                    } else if n > len {
+                        n -= len;
+                    }
+                    let cx = 12 + (c % 7) * 38;
+                    let cy = 66 + (c / 7) * 34;
+                    let today = c == 7 + t.weekday as i32;
+                    if today {
+                        p.rrect(cx + 3, cy - 4, 32, 24, 12, STRAW, 255);
+                    }
+                    let s = format!("{n}");
+                    p.text_center(cx, 38, cy, &s, if today { MILK } else { ESPRESSO }, today);
+                }
+                let m = format!("{} {}", rtc::MONTHS[t.month as usize - 1], t.year);
+                p.text(pad, 180, &m, COCOA);
+            }
+            2 => {
+                label(p, "SESSION");
+                p.text_x(pad, 44, &fmt_uptime(now), ESPRESSO, 2, true);
+                let n = self.windows.len();
+                p.text_x(
+                    pad,
+                    84,
+                    &format!("{} window{}", n, if n == 1 { "" } else { "s" }),
+                    ESPRESSO,
+                    2,
+                    false,
+                );
+                p.text(
+                    pad,
+                    124,
+                    &format!("space {} of {}", self.space + 1, self.nspaces),
+                    COCOA,
+                );
+                p.text(pad, 176, "F3 Spaces   Ctrl+Space Skim", COCOA);
+            }
+            3 => {
+                label(p, "SYSTEM");
+                let ps = pmm::stats();
+                let hs = heap::stats();
+                let mem_used = 100 - ps.free_frames * 100 / ps.total_frames.max(1);
+                let heap_used = hs.used * 100 / hs.total.max(1);
+                let rows = [
+                    ("cpu", self.stats.cpu_pct as i32, MATCHA),
+                    ("mem", mem_used as i32, HONEY),
+                    ("heap", heap_used as i32, BLUE),
+                ];
+                for (k, (name, v, c)) in rows.into_iter().enumerate() {
+                    let y = 44 + k as i32 * 34;
+                    p.text(pad, y, name, ESPRESSO);
+                    p.rrect(64, y + 2, 200, 12, 6, SAND, 255);
+                    p.rrect(
+                        64,
+                        y + 2,
+                        (200 * v.clamp(0, 100) / 100).max(12),
+                        12,
+                        6,
+                        c,
+                        255,
+                    );
+                }
+                p.text(pad, 156, &format!("Up {}", fmt_uptime(now)), COCOA);
+                p.bold(pad, 180, "All systems fine", MATCHA);
+            }
+            4 => {
+                label(p, "NOTES");
+                let lines = apps::notes::snapshot();
+                let mut y = 44;
+                for (k, l) in lines.iter().take(5).enumerate() {
+                    if k == 0 {
+                        p.bold(pad, y, l, ESPRESSO);
+                        y += 24;
+                    } else {
+                        p.text(pad, y, l, ESPRESSO);
+                        y += 18;
+                    }
+                }
+                let ago = apps::notes::edited_ago(now);
+                p.text(pad, 150, &ago, LATTE);
+            }
+            _ => {
+                label(p, "APPS");
+                for (k, (app, icon, bg, ba, fg)) in HOME_APPS.iter().enumerate() {
+                    let x = 16 + k as i32 * 106;
+                    let border = *bg == CREAM;
+                    icons::draw(p, x + 10, 44, 56, *icon, *bg, *ba, *fg, border);
+                    let name = match app {
+                        App::About => "About",
+                        a => a.name(),
+                    };
+                    p.text_center(x - 6, 92, 108, name, ESPRESSO, false);
+                }
+            }
+        }
+    }
+
+    fn paint_thumb(&self, i: usize, p: &mut Painter, w: i32, h: i32) {
+        if i >= self.nspaces {
+            p.text_center(0, w, 36, "+", COCOA, true);
+            return;
+        }
+        // A tiny screen: each window of that space at its place, from the overview thumbnails.
+        let (aw, ah) = (w - 8, 58);
+        for win in self.windows.iter().filter(|x| x.space == i && !x.minimized) {
+            let r = win.rect;
+            let rr = Rect::new(
+                4 + r.x * aw / SCREEN_W,
+                4 + (r.y - MENU_H).max(0) * ah / (SCREEN_H - MENU_H),
+                (r.w * aw / SCREEN_W).max(4),
+                (r.h * ah / (SCREEN_H - MENU_H)).max(4),
+            );
+            match self.thumbs.get(&win.id) {
+                Some(t) => p.blit_scaled(rr, t),
+                None => p.rrect_r(rr, 3, CREAM, 255),
+            }
+        }
+        p.text_center(0, w, 66, &space_label(i), COCOA, i == self.space);
+        if i == self.space {
+            p.rrect_stroke(0, 0, w, h, THUMB_R, SEL_BORDER, HONEY, 255);
+        }
+    }
+
+    // ---- clicks ---------------------------------------------------------------------------
+
+    pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
+        match key {
+            PanelKey::MenuBar => {
+                let sw = font::str_width(&self.status, 1);
+                if x < 30 {
+                    self.toggle_launcher();
+                } else if x >= SCREEN_W - MENU_PAD_X - sw - 8 {
+                    self.control = !self.control;
+                }
+            }
+            PanelKey::Dock => {
+                let i = (x - DOCK_PAD) / (DOCK_ICON + DOCK_GAP);
+                let within = (x - DOCK_PAD) % (DOCK_ICON + DOCK_GAP) < DOCK_ICON;
+                if x < DOCK_PAD || !within || i as usize >= DOCK.len() {
+                    return;
+                }
+                self.control = false;
+                match DOCK[i as usize].action {
+                    DockAction::App(a) => self.open(a),
+                    DockAction::Home => self.toggle_mode(Mode::Home),
+                    DockAction::Spaces => self.toggle_mode(Mode::Spaces),
+                    DockAction::Soon(name) => self.post_toast(name, "Not in milkOS yet. Soon!"),
+                }
+                self.invalidate(PanelKey::Dock);
+            }
+            PanelKey::Toast(id) => {
+                self.toasts.retain(|t| t.id != id);
+                let ids: Vec<u32> = self.toasts.iter().map(|t| t.id).collect();
+                for i in ids {
+                    self.invalidate(PanelKey::Toast(i));
+                }
+            }
+            PanelKey::Control => {
+                if hit(&Rect::new(148, 16, 124, CC_TILE_H), x, y) {
+                    self.settings.focus_mode = !self.settings.focus_mode;
+                    self.invalidate(PanelKey::Control);
+                }
+                for (i, sy) in SLIDER_Y.iter().enumerate() {
+                    if hit(&Rect::new(16, *sy, CC_W - 32, CC_TILE_H), x, y) {
+                        self.drag = Some(Drag::Slider(i));
+                        self.slider_to(i, x + control_rect().x);
+                    }
+                }
+            }
+            PanelKey::LaunchInput => {}
+            PanelKey::LaunchResults => {
+                let row = (y - 40) / LAUNCH_ROW_H;
+                if y >= 40
+                    && let Some(l) = &mut self.launcher
+                {
+                    l.sel = row as usize;
+                    self.launcher_activate();
+                }
+            }
+            PanelKey::Card(5) => {
+                for (k, (app, ..)) in HOME_APPS.iter().enumerate() {
+                    let ix = 16 + k as i32 * 106 + 10;
+                    if hit(&Rect::new(ix, 44, 56, 56), x, y) {
+                        self.set_mode(Mode::Desktop);
+                        self.open(*app);
+                    }
+                }
+            }
+            PanelKey::Card(_) => {}
+            PanelKey::Thumb(i) => {
+                let i = i as usize;
+                if i >= self.nspaces {
+                    self.nspaces = (self.nspaces + 1).min(MAX_SPACES);
+                } else {
+                    self.switch_space(i);
+                }
+                self.damage_all();
+                self.invalidate_spaces();
+            }
+            PanelKey::Cell(id) => {
+                self.drag = Some(Drag::Cell { id });
+            }
+        }
+    }
+
+    fn invalidate_spaces(&mut self) {
+        let keys: Vec<PanelKey> = self
+            .cache
+            .keys()
+            .filter(|k| matches!(k, PanelKey::Thumb(_) | PanelKey::Cell(_)))
+            .copied()
+            .collect();
+        for k in keys {
+            self.invalidate(k);
+        }
+    }
+
+    /// Release after dragging an overview cell: onto a space thumbnail moves the window there;
+    /// released where it was pressed focuses it and leaves the overview.
+    pub(super) fn drop_cell(&mut self, id: u32, x: i32, y: i32) {
+        let n = (self.nspaces + 1).min(MAX_SPACES);
+        for i in 0..self.nspaces {
+            if hit(&thumb_rect(i, n), x, y) {
+                if let Some(w) = self.win_mut(id) {
+                    w.space = i;
+                }
+                if self.focus == Some(id) {
+                    self.focus_top();
+                }
+                self.invalidate_spaces();
+                self.damage_all();
+                return;
+            }
+        }
+        if self
+            .cells()
+            .iter()
+            .any(|(cid, r)| *cid == id && hit(r, x, y))
+        {
+            self.show_window(id);
+        }
+    }
+
+    pub(super) fn slider_to(&mut self, i: usize, sx: i32) {
+        let x = sx - control_rect().x - TRACK_X;
+        let v = (x * 100 / TRACK_W).clamp(0, 100);
+        if i == 0 {
+            let v = v.max(20);
+            if v != self.settings.brightness {
+                self.settings.brightness = v;
+                self.damage_all();
+            }
+        } else {
+            self.settings.volume = v;
+        }
+        self.invalidate(PanelKey::Control);
+    }
+
+    // ---- launcher ---------------------------------------------------------------------------
+
+    pub(super) fn toggle_launcher(&mut self) {
+        if self.launcher.is_some() {
+            self.close_launcher();
+        } else {
+            self.control = false;
+            self.launcher = Some(Launcher {
+                query: String::new(),
+                sel: 0,
+            });
+        }
+    }
+
+    pub(super) fn close_launcher(&mut self) {
+        self.launcher = None;
+    }
+
+    fn launcher_changed(&mut self) {
+        self.invalidate(PanelKey::LaunchInput);
+        self.invalidate(PanelKey::LaunchResults);
+    }
+
+    pub(super) fn launcher_key(&mut self, k: &super::window::KeyInput) {
+        let Some(l) = &mut self.launcher else {
+            return;
+        };
+        match k.key {
+            super::Key::Enter => return self.launcher_activate(),
+            super::Key::Backspace => {
+                l.query.pop();
+                l.sel = 0;
+            }
+            super::Key::Up => l.sel = l.sel.saturating_sub(1),
+            super::Key::Down | super::Key::Tab => {
+                let n = l.results().len();
+                l.sel = (l.sel + 1).min(n.saturating_sub(1));
+            }
+            _ => match k.ch {
+                Some(c) if !c.is_control() && l.query.len() < 30 => {
+                    l.query.push(c);
+                    l.sel = 0;
+                }
+                _ => return,
+            },
+        }
+        self.launcher_changed();
+    }
+
+    fn launcher_activate(&mut self) {
+        let Some(l) = &self.launcher else {
+            return;
+        };
+        let res = l.results();
+        let Some(e) = res.get(l.sel.min(res.len().saturating_sub(1))) else {
+            return;
+        };
+        let action = e.action;
+        self.close_launcher();
+        match action {
+            Action::App(a) => self.open(a),
+            Action::Home => self.toggle_mode(Mode::Home),
+            Action::Spaces => self.toggle_mode(Mode::Spaces),
+            Action::Control => self.control = true,
+            Action::NewSpace => {
+                self.nspaces = (self.nspaces + 1).min(MAX_SPACES);
+                self.set_mode(Mode::Spaces);
+            }
+        }
+    }
+}

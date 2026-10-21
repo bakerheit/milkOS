@@ -1,9 +1,7 @@
 //! The window system's own input events, and the adapters that make them.
 //!
 //! The compositor only ever sees [`Event`]. Three sources feed it:
-//! * [`from_input`]: the virtio keyboard/tablet queue (`input::poll()`), once that branch merges.
-//!   It is written against the agreed `input::Event` shape and compiled out until then (search
-//!   for `MERGE(input)`).
+//! * [`from_input`]: the virtio keyboard/tablet queue (`input::poll()`).
 //! * [`UartKeys`]: bytes typed on the serial console (`scripts/run.sh` uses `-serial mon:stdio`),
 //!   decoded into key events, so the desktop is usable before the input driver lands.
 //! * `script`: canned event sequences for headless demos and benchmarks.
@@ -67,10 +65,18 @@ impl Mods {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Event {
     /// Absolute pointer position in screen pixels (1024x768).
-    PointerMove { x: i32, y: i32 },
-    Button { button: Button, down: bool },
+    PointerMove {
+        x: i32,
+        y: i32,
+    },
+    Button {
+        button: Button,
+        down: bool,
+    },
     /// Wheel: positive `dy` scrolls content down (towards the end).
-    Scroll { dy: i32 },
+    Scroll {
+        dy: i32,
+    },
     /// A key press (`down`) or release. `ch` is the text it types, if any.
     Key {
         key: Key,
@@ -100,67 +106,75 @@ impl Event {
     }
 }
 
-// MERGE(input): delete the `#[cfg(any())]` line below once `crate::input` exists, and call
-// `from_input` from `wm::poll_sources` (see the MERGE(input) note there). The input agent's queue
-// is `input::poll() -> Option<input::Event>` with KeyDown/KeyUp { key, ch, mods }, PointerMove
-// { x, y } (absolute, 1024x768), Button { button, down } and Scroll; adjust the names below to
-// whatever actually landed.
-#[cfg(any())]
+/// Map an `input::Event` (virtio keyboard + tablet) to ours. Modifier key presses themselves and
+/// side buttons are dropped (modifier state rides on every key event).
 pub fn from_input(ev: crate::input::Event) -> Option<Event> {
-    use crate::input as i;
-    let mods = |m: i::Modifiers| Mods {
-        shift: m.shift,
-        ctrl: m.ctrl,
-        alt: m.alt,
-        meta: m.meta,
+    use crate::input::{self as i, KeyCode as K};
+    let key_ev = |k: i::KeyEvent, down: bool| -> Option<Event> {
+        if k.key.is_modifier() {
+            return None;
+        }
+        let key = match k.key {
+            K::Enter | K::KpEnter => Key::Enter,
+            K::Backspace => Key::Backspace,
+            K::Delete => Key::Delete,
+            K::Tab => Key::Tab,
+            K::Escape => Key::Escape,
+            K::Up => Key::Up,
+            K::Down => Key::Down,
+            K::Left => Key::Left,
+            K::Right => Key::Right,
+            K::Home => Key::Home,
+            K::End => Key::End,
+            K::PageUp => Key::PageUp,
+            K::PageDown => Key::PageDown,
+            K::F1 => Key::F(1),
+            K::F2 => Key::F(2),
+            K::F3 => Key::F(3),
+            K::F4 => Key::F(4),
+            K::F5 => Key::F(5),
+            K::F6 => Key::F(6),
+            K::F7 => Key::F(7),
+            K::F8 => Key::F(8),
+            K::F9 => Key::F(9),
+            K::F10 => Key::F(10),
+            K::F11 => Key::F(11),
+            K::F12 => Key::F(12),
+            _ => match k.ch {
+                // Shortcuts match on the unshifted letter.
+                Some(c) => Key::Char(c.to_ascii_lowercase()),
+                None => Key::Other,
+            },
+        };
+        Some(Event::Key {
+            key,
+            ch: k.text(),
+            mods: Mods {
+                shift: k.mods.shift(),
+                ctrl: k.mods.ctrl(),
+                alt: k.mods.alt(),
+                meta: k.mods.meta(),
+            },
+            down,
+        })
     };
-    let key = |k: i::Key, ch: Option<char>| match k {
-        i::Key::Enter => Key::Enter,
-        i::Key::Backspace => Key::Backspace,
-        i::Key::Delete => Key::Delete,
-        i::Key::Tab => Key::Tab,
-        i::Key::Escape => Key::Escape,
-        i::Key::Up => Key::Up,
-        i::Key::Down => Key::Down,
-        i::Key::Left => Key::Left,
-        i::Key::Right => Key::Right,
-        i::Key::Home => Key::Home,
-        i::Key::End => Key::End,
-        i::Key::PageUp => Key::PageUp,
-        i::Key::PageDown => Key::PageDown,
-        i::Key::F(n) => Key::F(n),
-        _ => match ch {
-            Some(c) => Key::Char(c),
-            None => Key::Other,
-        },
-    };
-    Some(match ev {
-        i::Event::KeyDown { key: k, ch, modifiers } => Event::Key {
-            key: key(k, ch),
-            ch,
-            mods: mods(modifiers),
-            down: true,
-        },
-        i::Event::KeyUp { key: k, ch, modifiers } => Event::Key {
-            key: key(k, ch),
-            ch,
-            mods: mods(modifiers),
-            down: false,
-        },
-        i::Event::PointerMove { x, y } => Event::PointerMove {
-            x: x as i32,
-            y: y as i32,
-        },
-        i::Event::Button { button, down } => Event::Button {
+    match ev {
+        i::Event::KeyDown(k) => key_ev(k, true),
+        i::Event::KeyUp(k) => key_ev(k, false),
+        i::Event::PointerMove { x, y } => Some(Event::PointerMove { x, y }),
+        i::Event::Button { button, down, .. } => Some(Event::Button {
             button: match button {
                 i::MouseButton::Left => Button::Left,
                 i::MouseButton::Right => Button::Right,
                 i::MouseButton::Middle => Button::Middle,
+                _ => return None,
             },
             down,
-        },
-        i::Event::Scroll { dy, .. } => Event::Scroll { dy: dy as i32 },
-    })
+        }),
+        // input: dy > 0 is "up" (away from the user); ours: dy > 0 moves content towards its end.
+        i::Event::Scroll { dy, .. } if dy != 0 => Some(Event::Scroll { dy: -dy }),
+        i::Event::Scroll { .. } => None,
+    }
 }
 
 /// Turns serial console bytes into key events: printable ASCII, Enter, Backspace, Tab, Ctrl+letter,

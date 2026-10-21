@@ -20,7 +20,7 @@ KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 rm -f "$SOCK" "$OUT"
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \

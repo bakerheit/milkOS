@@ -89,7 +89,8 @@ const fn build_sprite() -> [u32; SPRITE_W * SPRITE_H] {
     out
 }
 
-static SPRITE: [u32; SPRITE_W * SPRITE_H] = build_sprite();
+/// The arrow as ARGB pixels (alpha in the top byte), `SPRITE_W` x `SPRITE_H`, hotspot [`HOTSPOT`].
+pub static SPRITE: [u32; SPRITE_W * SPRITE_H] = build_sprite();
 
 struct Cursor {
     fb: *mut u32,

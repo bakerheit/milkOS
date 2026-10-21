@@ -7,6 +7,8 @@
 //! [`BCache::write_through`] bypasses the write-back (and is what a file system uses for
 //! its commit record, after a `flush`).
 //!
+//! The lock is a `sched::Mutex`: it is held across device I/O, which sleeps.
+//!
 //! Ordering guarantee callers can rely on: after `flush` returns Ok, everything written
 //! before it is durable. Nothing else about write order is promised (evictions write early).
 
@@ -17,7 +19,7 @@ use alloc::vec::Vec;
 
 use super::blockdev::BlockRef;
 use super::errno::{Errno, Result};
-use crate::sync::SpinLock;
+use crate::sched::Mutex;
 
 /// Cache block size.
 pub const BLOCK: usize = 4096;
@@ -54,7 +56,7 @@ pub struct BCache {
     per_block: u64,
     blocks: u64,
     capacity: usize,
-    inner: SpinLock<Inner>,
+    inner: Mutex<Inner>,
 }
 
 impl BCache {
@@ -70,7 +72,7 @@ impl BCache {
             dev,
             per_block,
             capacity,
-            inner: SpinLock::new(Inner {
+            inner: Mutex::new(Inner {
                 bufs: Vec::new(),
                 map: BTreeMap::new(),
                 clock: 0,

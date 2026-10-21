@@ -23,6 +23,7 @@ use crate::fs::node::{
     DirEntry, FileSystem, Inode, InodeRef, InodeType, SetAttr, Stat, Timespec, alloc_dev,
     check_name, downcast,
 };
+use crate::sched::Mutex;
 use crate::sync::SpinLock;
 
 /// Name of the snapshot directory in the volume root.
@@ -31,7 +32,8 @@ pub const SNAPS_NAME: &str = ".snapshots";
 pub const SNAPS_INO: u64 = u64::MAX - 1;
 
 pub struct Volume {
-    pub state: SpinLock<State>,
+    /// Held across disk I/O (commits sleep on virtio-blk), so a sleeping mutex.
+    pub state: Mutex<State>,
     /// Device number of the live view; snapshots get their own (`snap_dev`).
     pub dev: u64,
     pub label: String,
@@ -63,7 +65,7 @@ impl Volume {
     pub fn new(state: State, device_name: &str) -> Arc<Volume> {
         let label = String::from(state.label());
         Arc::new_cyclic(|me| Volume {
-            state: SpinLock::new(state),
+            state: Mutex::new(state),
             dev: alloc_dev(),
             label,
             device_name: String::from(device_name),

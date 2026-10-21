@@ -262,6 +262,32 @@ fn diff_control(arg: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persistent machine state under `/etc` (Milk Drop's identity and trusted peers,
+/// `/etc/milk/drop`): bind `<volume><dir>` onto `<dir>`, seeded from the initramfs copy the
+/// first time, like the home directory. Without a volume it stays in RAM (a new identity
+/// every boot).
+pub fn setup_persistent_etc(dir: &str) {
+    let Some(vol) = mount_path() else { return };
+    let on_disk = format!("{vol}{dir}");
+    if crate::fs::ops::stat(&on_disk).is_err() {
+        let r = if crate::fs::ops::stat(dir).is_ok() {
+            crate::fs::ops::copy_tree(dir, &on_disk)
+        } else {
+            crate::fs::ops::mkdir_all(&on_disk, 0o700)
+        };
+        if let Err(e) = r {
+            kprintln!("milkfs: can't create {on_disk}: {e}; {dir} stays in RAM");
+            return;
+        }
+    }
+    if crate::fs::ops::stat(dir).is_err() {
+        let _ = crate::fs::ops::mkdir_all(dir, 0o700);
+    }
+    if let Err(e) = crate::fs::path::bind(&on_disk, dir) {
+        kprintln!("milkfs: bind {on_disk} -> {dir} failed: {e}");
+    }
+}
+
 /// Where packages live (`milk install`).
 pub const APPLICATIONS: &str = "/Applications";
 

@@ -7,6 +7,7 @@ use core::fmt::{self, Write};
 
 use super::Stack;
 use super::arp::ArpState;
+use super::iface::LINK_NAMES;
 use super::socket::SockType;
 use super::tcp::TcpState;
 use super::wire::Ipv4;
@@ -48,8 +49,10 @@ pub fn dev(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed"
     )?;
     dev_line(w, "lo", &st.iface.lo_stats, 0)?;
-    if let Some(d) = st.iface.dev.as_ref() {
-        dev_line(w, "eth0", &d.stats, st.iface.eth_extra_drops)?;
+    for (k, l) in st.iface.links.iter().enumerate() {
+        if let Some(d) = l.dev.as_ref() {
+            dev_line(w, LINK_NAMES[k], &d.stats, l.extra_drops)?;
+        }
     }
     Ok(())
 }
@@ -59,19 +62,21 @@ pub fn arp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         w,
         "IP address       HW type     Flags       HW address            Mask     Device"
     )?;
-    for e in st.iface.arp.entries.iter().flatten() {
-        let flags = if e.state == ArpState::Reachable {
-            0x2
-        } else {
-            0x0
-        };
-        let mut ip = String::new();
-        let _ = write!(ip, "{}", e.ip);
-        writeln!(
-            w,
-            "{:<16} 0x1         {:<#11x} {}     *        eth0",
-            ip, flags, e.mac
-        )?;
+    for (k, l) in st.iface.links.iter().enumerate() {
+        for e in l.arp.entries.iter().flatten() {
+            let flags = if e.state == ArpState::Reachable {
+                0x2
+            } else {
+                0x0
+            };
+            let mut ip = String::new();
+            let _ = write!(ip, "{}", e.ip);
+            writeln!(
+                w,
+                "{:<16} 0x1         {:<#11x} {}     *        {}",
+                ip, flags, e.mac, LINK_NAMES[k]
+            )?;
+        }
     }
     Ok(())
 }
@@ -81,28 +86,42 @@ pub fn route(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         w,
         "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT"
     )?;
-    let c = st.iface.cfg;
-    if !c.configured() {
-        return Ok(());
-    }
-    if let Some(gw) = c.gateway {
-        // RTF_UP | RTF_GATEWAY
+    for (k, l) in st.iface.links.iter().enumerate() {
+        let c = l.cfg;
+        if !l.up() || !c.configured() {
+            continue;
+        }
+        let name = LINK_NAMES[k];
+        if let Some(gw) = c.gateway {
+            // RTF_UP | RTF_GATEWAY
+            writeln!(
+                w,
+                "{name}\t{:08X}\t{:08X}\t0003\t0\t0\t0\t{:08X}\t0\t0\t0",
+                0,
+                gw.proc_hex(),
+                0
+            )?;
+        }
+        let net = Ipv4::from_u32(c.addr.to_u32() & c.mask.to_u32());
         writeln!(
             w,
-            "eth0\t{:08X}\t{:08X}\t0003\t0\t0\t0\t{:08X}\t0\t0\t0",
+            "{name}\t{:08X}\t{:08X}\t0001\t0\t0\t0\t{:08X}\t0\t0\t0",
+            net.proc_hex(),
             0,
-            gw.proc_hex(),
-            0
+            c.mask.proc_hex()
         )?;
+        if l.multicast() {
+            // 224.0.0.0/4 out of the link-local link (link-scope multicast, discovery).
+            writeln!(
+                w,
+                "{name}\t{:08X}\t{:08X}\t0001\t0\t0\t0\t{:08X}\t0\t0\t0",
+                Ipv4::new(224, 0, 0, 0).proc_hex(),
+                0,
+                Ipv4::new(240, 0, 0, 0).proc_hex()
+            )?;
+        }
     }
-    let net = Ipv4::from_u32(c.addr.to_u32() & c.mask.to_u32());
-    writeln!(
-        w,
-        "eth0\t{:08X}\t{:08X}\t0001\t0\t0\t0\t{:08X}\t0\t0\t0",
-        net.proc_hex(),
-        0,
-        c.mask.proc_hex()
-    )
+    Ok(())
 }
 
 /// `/proc/net/tcp` (Linux columns) plus, for humans, a trailing comment column with the
@@ -275,33 +294,43 @@ pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         "lo flags=UP,LOOPBACK,RUNNING mtu={} inet=127.0.0.1 netmask=255.0.0.0",
         super::iface::MTU
     )?;
-    let Some(d) = st.iface.dev.as_ref() else {
-        return Ok(());
-    };
-    let c = st.iface.cfg;
-    write!(
-        w,
-        "eth0 flags=UP,BROADCAST{} mtu={} ether={}",
-        if d.link_up() { ",RUNNING" } else { "" },
-        super::iface::MTU,
-        st.iface.mac
-    )?;
-    if c.configured() {
+    for (k, l) in st.iface.links.iter().enumerate() {
+        let Some(d) = l.dev.as_ref() else { continue };
+        let c = l.cfg;
         write!(
             w,
-            " inet={} netmask={} broadcast={}",
-            c.addr,
-            c.mask,
-            c.subnet_broadcast()
+            "{} flags=UP,BROADCAST{}{} mtu={} ether={}",
+            LINK_NAMES[k],
+            if l.ll.on { ",MULTICAST" } else { "" },
+            if d.link_up() { ",RUNNING" } else { "" },
+            super::iface::MTU,
+            l.mac
         )?;
+        if c.configured() {
+            write!(
+                w,
+                " inet={} netmask={} broadcast={}",
+                c.addr,
+                c.mask,
+                c.subnet_broadcast()
+            )?;
+        }
+        if let Some(g) = c.gateway {
+            write!(w, " gateway={g}")?;
+        }
+        if let Some(n) = c.dns {
+            write!(w, " dns={n}")?;
+        }
+        if k == 0 {
+            writeln!(w, " dhcp={:?}", st.dhcp.state)?;
+        } else if l.ll.on {
+            let state = if c.configured() { "bound" } else { "probing" };
+            writeln!(w, " linklocal={state} conflicts={}", l.ll.conflicts)?;
+        } else {
+            writeln!(w)?;
+        }
     }
-    if let Some(g) = c.gateway {
-        write!(w, " gateway={g}")?;
-    }
-    if let Some(n) = c.dns {
-        write!(w, " dns={n}")?;
-    }
-    writeln!(w, " dhcp={:?}", st.dhcp.state)
+    Ok(())
 }
 
 type Gen = fn(&Stack, &mut dyn Write) -> fmt::Result;

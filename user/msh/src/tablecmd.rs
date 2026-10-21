@@ -50,7 +50,7 @@ fn literal(ty: Ty, s: &str) -> Val {
             .ok()
             .or_else(|| parse_size(s))
             .map_or_else(|| Val::str(s), Val::Int),
-        Ty::Str => Val::str(s),
+        Ty::Str | Ty::Ver => Val::str(s),
     }
 }
 

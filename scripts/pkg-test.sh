@@ -77,6 +77,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:ls /Applications' "$P" \
   'send:milk try snake' 'wait:milk: (then|[^\n]*error)' "$P" \
   "send:$CL/Applications/snake/bin/snake --demo 400" 'wait:snake: demo over' "$P" \
+  'send:milk run-try snake --demo 300' 'wait:(snake: demo over|milk: [^\n]*(error|not|denied))' "$P" \
   'send:ls /Applications' "$P" \
   'send:ls /bin/snake' "$P" \
   "send:ls $CL/Applications" "$P" \
@@ -85,7 +86,10 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:cat /sys/fs/milkfs/clones' "$P" \
   'send:ls /Volumes' "$P" \
   'send:milk try moo2048' 'wait:milk: (then|[^\n]*error)' "$P" \
+  'send:milk run-try moo2048 --selftest' 'wait:(moo2048: selftest|milk: )' "$P" \
+  "send:ls /Volumes/Milk-try-moo2048/tmp" "$P" \
   'send:milk keep moo2048' 'wait:milk: (kept|[^\n]*error)' "$P" \
+  'send:ls /Volumes/Milk/tmp' "$P" \
   'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:milk list' "$P" \
   'send:milk selftest' 'wait:milk: selftest' "$P" \
@@ -104,6 +108,8 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:milk search fortune' "$P" \
   'send:milk upgrade fortune' 'wait:milk: (then|[^\n]*failed|[^\n]*error)' "$P" \
   'send:/Volumes/Milk-try-upgrade/Applications/fortune/bin/fortune -n 15' "$P" \
+  'send:milk run-try fortune -n 15' "$P" \
+  'send:audit --event sandbox' "$P" \
   'send:milk discard upgrade' 'wait:discarded' "$P" \
   'send:milk info fortune' "$P" \
   'send:milk upgrade -y' 'wait:milk: (kept|[^\n]*failed|[^\n]*error)' "$P" \
@@ -114,6 +120,9 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:milk remove games' "$P" \
   'send:milk autoremove' 'wait:autoremove: ' "$P" \
   'send:milk list' "$P" \
+  'send:milk list | where version > 1.0' "$P" \
+  'send:milk search | where status == available | select name version' "$P" \
+  'send:milk list | to-json' "$P" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
@@ -177,6 +186,12 @@ check "snake runs from the clone" "snake: demo over after [0-9]+ ticks, length [
 check "live /bin has no snake while trying" "ls: /bin/snake: "
 check "the clone has snake" "^snake$"
 check "clone listed while trying" "^try-snake of=milk-try-snake at=/Volumes/Milk-try-snake"
+[ "$(grep -c "snake: demo over after" "$S")" -ge 2 ] || fail "run-try snake did not run"
+echo "  ok  run-try snake: runs with its clone as / (chroot), sandboxed"
+check "run-try made a scratch dir in the clone" "^run-moo2048$"
+check "keep dropped the run-try scratch dir" "ls: /Volumes/Milk/tmp: "
+check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Applications/snake/bin/snake sandbox=fs=/:r,fs=/tmp/run-snake:rw"
+check "audit: run-try entered the sandbox" "sandbox.enter .*net=local"
 check "discard" "milk: discarded clone try-snake"
 check "keep (promote)" "milk: kept moo2048 1.0.0: clone try-moo2048 is now the live system"
 check "kept package runs from /bin" "moo2048: selftest ok"
@@ -198,6 +213,11 @@ check "search offers the upgrade" "^fortune +1.1.0 .*\\[installed 1.0.0, upgrade
 check "upgrade plan" "milk: upgrade fortune 1.0.0 -> 1.1.0"
 check "upgrade went into a clone" "milk: upgraded 1 package\\(s\\) in clone try-upgrade; the live system is untouched"
 check "the clone runs the new version" "If an upgrade sours, discard the clone"
+# run-try in the upgrade clone: /Applications/fortune inside the jail is the clone's 1.1.0
+# (the live one is 1.0.0 and has no 15th quote), so the new quote proves the root.
+fq=$(awk '/milk run-try fortune -n 15$/{f=1; next} f && /^msh:/{exit} f' "$S")
+echo "$fq" | grep -q "If an upgrade sours" || { echo "$fq"; fail "run-try fortune did not see the clone as /"; }
+echo "  ok  run-try fortune -n 15 sees the clone's 1.1.0 (the clone is its /)"
 check "discarded upgrade" "discarded clone try-upgrade; the live system never saw the upgrade"
 check "live still 1.0.0 after discard" "installed: +1.0.0 in /Applications/fortune"
 check "upgrade -y kept" "milk: kept the upgrade: clone try-upgrade is now the live system"
@@ -218,6 +238,15 @@ echo "  ok  install order: snake (dependency) before games"
 # The live fortune is 1.1.0 at the end: its 15th quote is new in 1.1.
 [ "$(grep -c "If an upgrade sours" "$S")" -ge 2 ] || fail "live fortune is not 1.1.0 after upgrade -y"
 echo "  ok  live fortune runs 1.1.0 after upgrade -y"
+# Structured output: `where version > 1.0` compares versions (1.0.0 is not > 1.0).
+awk '/milk list \| where version > 1.0$/{f=1; next} f && /^msh:/{exit} f' "$S" >"$WORK/where.txt"
+grep -Eq '^fortune +1\.1\.0 +no ' "$WORK/where.txt" || { cat "$WORK/where.txt"; fail "milk list | where: fortune 1.1.0 missing"; }
+grep -q '^moo2048' "$WORK/where.txt" && { cat "$WORK/where.txt"; fail "milk list | where version > 1.0 kept moo2048 1.0.0"; }
+echo "  ok  milk list | where version > 1.0 (fortune 1.1.0 in, moo2048 1.0.0 out)"
+awk '/where status == available \| select name version$/{f=1; next} f && /^msh:/{exit} f' "$S" >"$WORK/avail.txt"
+grep -Eq '^games +1\.0\.0$' "$WORK/avail.txt" && grep -Eq '^snake +1\.0\.0$' "$WORK/avail.txt" || { cat "$WORK/avail.txt"; fail "milk search | where status == available"; }
+echo "  ok  milk search | where status == available | select name version (games, snake)"
+check "milk list | to-json" '"name": ?"moo2048", ?"version": ?"1.0.0"'
 check "audit: install" "user.pkg.install +name=fortune version=1.0.0 sha256="
 check "audit: remove" "user.pkg.remove +name=fortune"
 check "audit: try" "user.pkg.try +name=snake"

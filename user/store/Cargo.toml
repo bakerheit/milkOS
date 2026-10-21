@@ -1,0 +1,13 @@
+[package]
+name = "store"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "store"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }

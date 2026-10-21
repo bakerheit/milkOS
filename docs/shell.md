@@ -86,6 +86,8 @@ pid:int<TAB>name:str<TAB>rss:int      column names and types (int, size, str)
 
 Fields escape `\` as `\\`, tab as `\t`, newline as `\n`. An empty field in an int column
 is "no value". The renderer right-aligns numbers and shows `size` columns as `1.5K`.
+A `ver` column holds version numbers and compares them semver-ish (`rt::version`:
+`1.10.0 > 1.9.0`, `1.2 == 1.2.0`, `1.0.0-rc.1 < 1.0.0`), so `where version > 1.0` means it.
 
 ### Columns of the producers
 
@@ -93,6 +95,9 @@ is "no value". The renderer right-aligns numbers and shows `size` columns as `1.
 * `ls`: `name:str, type:str (file dir link char block fifo), size:size, mode:str
   (rwxr-xr-x), modified:str`
 * `env`: `name:str, value:str`
+* `milk list`: `name:str, version:ver, auto:str (yes/no), description:str`
+* `milk search`: `name:str, version:ver (newest), installed:ver (empty if not), status:str
+  (installed / upgrade / available), description:str`
 
 ### Why this design
 

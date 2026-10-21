@@ -51,7 +51,7 @@ for _ in $(seq 50); do [ -s "$WORK/ports" ] && break; sleep 0.1; done
 [ -s "$WORK/ports" ] || fail "helper servers did not start"
 # shellcheck disable=SC1090
 eval "$(tr ' ' '\n' <"$WORK/ports" | sed 's/^/P_/')"
-CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused khttpd=8080"
+CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused khttpd=8080 lossy3=1"
 # Two more free host ports: the kernel httpd (guest :8080) and nc -l (guest :7777).
 read -r KH_PORT NC_PORT < <(python3 -I -c "
 import socket
@@ -74,7 +74,7 @@ echo "qemu pid $QPID, serial log $LOG"
 # Console: log everything; once msh is up, run the network tools.
 P='wait:msh:/\$ '
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  'wait:\[net\] selftest' "$P" \
+  'wait@240:\[net\] selftest' "$P" \
   'send:ifconfig' 'wait:RX packets' "$P" \
   'send:ping -c 3 -i 200 10.0.2.2' 'wait:rtt min' "$P" \
   "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' "$P" \
@@ -98,6 +98,12 @@ done
 echo "---- guest ----"
 awk '/^\[(net|virtio-net)\]/ { print; inproc = /\/proc\/net/; next } inproc && /^    / { print; next } { inproc = 0 }' "$LOG"
 grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
+for want in 'tcp lossy loopback 1/7: 256 KiB intact' 'tcp lossy loopback 1/3: 32 KiB intact' \
+  'tcp TIME_WAIT: parked' 'ip fragments: 20000-byte UDP datagram' \
+  'ipv6: eth0 fec0::[0-9a-f:]+/64 \(SLAAC, router fe80::2\), ping fec0::2' 'ipv6 extension headers: .* refused \(1\)'; do
+  grep -Eaq "\[net\] $want" "$LOG" || fail "self-test line missing: $want"
+done
+grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT)' "$LOG" | tr -d '\r' | sed 's/^/  /'
 
 echo "---- msh: network tools (socket syscalls from user space) ----"
 for _ in $(seq 300); do [ -e "$WORK/nc.listening" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done

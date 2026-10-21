@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use super::errno::{self, *};
 use super::socket::{self, POLLIN, POLLOUT, SockType, SocketId};
-use super::wire::{Ipv4, SockAddr, checksum, put16};
+use super::wire::{Ipv4, Ipv6, SockAddr, checksum, put16};
 use super::{dns, services};
 use crate::fs::errno::{Errno, Result};
 use crate::{fwcfg, kprintln, sched, timer};
@@ -31,6 +31,8 @@ struct Config {
     expect: Option<Ipv4>,
     refused: Option<SockAddr>,
     khttpd: Option<u16>,
+    /// `lossy3=1`: also the 1-in-3 loss test (slow: tens of seconds of RTO backoff).
+    heavy_loss: bool,
 }
 
 fn parse_addr(s: &str) -> Option<SockAddr> {
@@ -59,6 +61,7 @@ fn read_config() -> Config {
             Some(("expect", v)) => c.expect = Ipv4::parse(v),
             Some(("refused", v)) => c.refused = parse_addr(v),
             Some(("khttpd", v)) => c.khttpd = v.parse().ok(),
+            Some(("lossy3", v)) => c.heavy_loss = v == "1",
             _ => {}
         }
     }
@@ -210,9 +213,144 @@ fn test_loopback_tcp() -> core::result::Result<(), String> {
     Ok(())
 }
 
+/// One ICMPv6 echo round trip: Ok(rtt ns).
+fn ping6(dst: Ipv6, seq: u16, timeout_ms: u64) -> core::result::Result<u64, String> {
+    let t0 = timer::now_ns();
+    super::with(|st| super::ipv6::ping(st, dst, 0x6d6b, seq, b"milkOS ping6"))
+        .map_err(|x| alloc::format!("send: {}", e(x)))?;
+    let got = wait_for(timeout_ms, || {
+        super::with(|st| {
+            st.ip6
+                .ping_replies
+                .iter()
+                .any(|&(from, id, sq, _, _)| id == 0x6d6b && sq == seq && (from == dst || dst.is_multicast()))
+        })
+    });
+    if got {
+        Ok(timer::now_ns() - t0)
+    } else {
+        Err(alloc::format!("no echo reply from {dst}"))
+    }
+}
+
+fn test_ipv6() -> core::result::Result<(), String> {
+    // Link-local after DAD (0.5 s), then SLAAC from slirp's RA (it answers our RS).
+    let ll = wait_for(2000, || super::with(|st| st.iface.eth0().v6.link_local().is_some()));
+    let slaac = wait_for(4000, || {
+        super::with(|st| st.iface.eth0().v6.addr(super::ipv6::Origin::Slaac).is_some())
+    });
+    let (lla, ga, router) = super::with(|st| {
+        let v = &st.iface.eth0().v6;
+        (
+            v.link_local(),
+            v.addr(super::ipv6::Origin::Slaac),
+            v.router.map(|r| r.0),
+        )
+    });
+    if !ll {
+        return Err(String::from("no link-local address on eth0"));
+    }
+    let rtt_lo = ping6(Ipv6::LOOPBACK, 1, 500)?;
+    let rtt_ll = ping6(lla.unwrap(), 2, 500)?;
+    kprintln!(
+        "[net] ipv6: eth0 {} (link-local), ping ::1 {} us, own link-local {} us",
+        lla.unwrap(),
+        rtt_lo / 1000,
+        rtt_ll / 1000
+    );
+    if !slaac {
+        return Err(String::from("no SLAAC address (no router advertisement from slirp?)"));
+    }
+    // slirp's host: <prefix>::2 (as 10.0.2.2 for IPv4).
+    let ga = ga.unwrap();
+    let mut host = ga;
+    host.0[8..].copy_from_slice(&[0, 0, 0, 0, 0, 0, 0, 2]);
+    let rtt = ping6(host, 3, 2000)?;
+    kprintln!(
+        "[net] ipv6: eth0 {ga}/64 (SLAAC, router {}), ping {host} {}.{:03} ms",
+        router.unwrap_or_default(),
+        rtt / MS,
+        rtt % MS / 1000
+    );
+    Ok(())
+}
+
+/// IPv6 extension headers, on crafted packets from ::1 to ::1 carrying an echo request:
+/// hop-by-hop + destination options (accepted), an atomic fragment (accepted), a routing
+/// header with segments left (refused, never routed), a real fragment (dropped), an
+/// unknown option whose action bits say "discard" (dropped).
+fn test_ipv6_ext() -> core::result::Result<(), String> {
+    use super::wire::{finish, pseudo_sum6, sum};
+    // ext: (next header value of each header, its bytes without the next-header byte).
+    let packet = |seq: u16, ext: &[(u8, &[u8])]| -> Vec<u8> {
+        let mut icmp = alloc::vec![128u8, 0, 0, 0, 0x6d, 0x6c, (seq >> 8) as u8, seq as u8];
+        let c = finish(sum(&icmp, pseudo_sum6(Ipv6::LOOPBACK, Ipv6::LOOPBACK, 58, icmp.len())));
+        put16(&mut icmp, 2, c);
+        let mut body = Vec::new();
+        for (k, (_, bytes)) in ext.iter().enumerate() {
+            let next = ext.get(k + 1).map_or(58, |x| x.0);
+            body.push(next);
+            body.extend_from_slice(bytes);
+        }
+        body.extend_from_slice(&icmp);
+        let mut p = alloc::vec![0u8; 40];
+        p[0] = 0x60;
+        put16(&mut p, 4, body.len() as u16);
+        p[6] = ext.first().map_or(58, |x| x.0);
+        p[7] = 64;
+        p[8..24].copy_from_slice(&Ipv6::LOOPBACK.0);
+        p[24..40].copy_from_slice(&Ipv6::LOOPBACK.0);
+        p.extend_from_slice(&body);
+        p
+    };
+    // An 8-byte options header: hdr-ext-len 0, then 6 bytes of options.
+    let padn: &[u8] = &[0, 1, 4, 0, 0, 0, 0];
+    let unknown_discard: &[u8] = &[0, 0x41, 4, 0, 0, 0, 0]; // action 01: discard silently
+    let routing_live: &[u8] = &[0, 0, 1, 0, 0, 0, 0]; // type 0, segments left 1
+    let atomic: &[u8] = &[0, 0, 0, 0, 0, 0, 1]; // fragment header, offset 0, no M
+    let real_frag: &[u8] = &[0, 0, 1, 0, 0, 0, 2]; // M set
+    let replies = |seq: u16| {
+        wait_for(200, || {
+            super::with(|st| {
+                st.ip6
+                    .ping_replies
+                    .iter()
+                    .any(|&(_, id, sq, _, _)| id == 0x6d6c && sq == seq)
+            })
+        })
+    };
+    let before = super::with(|st| st.ip6.stats);
+    let inject = |p: Vec<u8>| super::with(|st| super::ipv6::input(st, None, &p, super::wire::Mac::ZERO));
+    inject(packet(1, &[(0, padn), (60, padn)]));
+    let ok1 = replies(1);
+    inject(packet(2, &[(44, atomic)]));
+    let ok2 = replies(2);
+    inject(packet(3, &[(43, routing_live)]));
+    let ok3 = !replies(3);
+    inject(packet(4, &[(44, real_frag)]));
+    let ok4 = !replies(4);
+    inject(packet(5, &[(60, unknown_discard)]));
+    let ok5 = !replies(5);
+    let after = super::with(|st| st.ip6.stats);
+    kprintln!(
+        "[net] ipv6 extension headers: hop-by-hop + dst options ok, atomic fragment ok, routing header with segments left refused ({}), fragment dropped ({}), discard-option dropped ({})",
+        after.routing_refused - before.routing_refused,
+        after.frag_dropped - before.frag_dropped,
+        after.in_discards - before.in_discards
+    );
+    if !(ok1 && ok2 && ok3 && ok4 && ok5)
+        || after.routing_refused != before.routing_refused + 1
+        || after.frag_dropped != before.frag_dropped + 1
+        || after.in_discards != before.in_discards + 1
+    {
+        return Err(alloc::format!("results {ok1} {ok2} {ok3} {ok4} {ok5}"));
+    }
+    Ok(())
+}
+
 /// What a connection negotiated, and its recovery counters: (wscale, sack, ts,
 /// sack/recovery retransmissions, total retransmissions).
-fn tcb_info(id: SocketId) -> (u8, bool, bool, u32, u32) {
+fn tcb_info(id: SocketId) -> (u8, bool, bool, u32, u32, u32, u32) {
     super::with(|st| {
         st.socks
             .get(id.slot())
@@ -224,6 +362,8 @@ fn tcb_info(id: SocketId) -> (u8, bool, bool, u32, u32) {
                     t.ts_ok,
                     t.sack_retrans,
                     t.retransmits,
+                    t.timeouts,
+                    t.max_rto_ms,
                 )
             })
             .unwrap_or_default()
@@ -274,11 +414,11 @@ fn test_lossy_tcp(every: u32, total: usize, port: u16) -> core::result::Result<(
         Ok((ns, info))
     })();
     LO_DROP_EVERY.store(0, core::sync::atomic::Ordering::Relaxed);
-    let (ns, (ws, sack, ts, sack_rx, rexmit)) = r?;
+    let (ns, (ws, sack, ts, sack_rx, rexmit, timeouts, max_rto)) = r?;
     let (after, dropped) =
         super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
     kprintln!(
-        "[net] tcp lossy loopback 1/{every}: {} KiB intact in {} ms ({} packets dropped, {} retransmissions, {} by SACK recovery; wscale {ws} sack {} ts {})",
+        "[net] tcp lossy loopback 1/{every}: {} KiB intact in {} ms ({} packets dropped, {} retransmissions, {} by SACK recovery, {timeouts} timeouts, longest RTO {max_rto} ms; wscale {ws} sack {} ts {})",
         total / 1024,
         ns / MS,
         dropped - before.1,
@@ -629,11 +769,19 @@ pub fn run() {
         );
     }
 
+    // 2b. IPv6: link-local and SLAAC addresses, echo to ::1 and to slirp's host.
+    if super::has_device() {
+        check("ipv6", test_ipv6());
+        check("ipv6 extension headers", test_ipv6_ext());
+    }
+
     // 3. Loopback.
     check("udp loopback", test_loopback_udp());
     check("tcp loopback", test_loopback_tcp());
     check("tcp lossy 1/7", test_lossy_tcp(7, 256 * 1024, 5002));
-    check("tcp lossy 1/3", test_lossy_tcp(3, 64 * 1024, 5003));
+    if cfg.heavy_loss {
+        check("tcp lossy 1/3", test_lossy_tcp(3, 32 * 1024, 5003));
+    }
     check("tcp time-wait", test_time_wait());
     check("ip fragments", test_fragments());
     check(

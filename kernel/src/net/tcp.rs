@@ -7,8 +7,10 @@
 //! * RFC 2018 SACK (receiver: up to 3-4 blocks, the newest first; sender: a scoreboard)
 //!   with SACK-based loss recovery in the style of RFC 6675 (pipe vs cwnd, holes below the
 //!   highest SACKed byte retransmitted first); without SACK, NewReno-style partial ACKs
-//!   (RFC 6582);
-//! * delayed ACKs (every second full segment, else after [`DELACK`]; at once for
+//!   (RFC 6582); limited transmit (RFC 3042) and early retransmit for small flights
+//!   (RFC 5827); sender-side silly window avoidance; cwnd in whole segments (SMSS);
+//! * delayed ACKs (once more than a full segment is unacknowledged, else after
+//!   [`DELACK`]; quick-ACK for a connection's first 16 segments; at once for
 //!   out-of-order data, a filled hole, a FIN or a window update) and Nagle (RFC 896;
 //!   off with TCP_NODELAY);
 //! * auto-sized buffers: the receive buffer doubles when the application reads more than
@@ -190,6 +192,9 @@ pub struct Tcb {
     pub kick: Option<u64>,
     /// Bytes received in order since our last ACK.
     unacked: u32,
+    /// Quick-ACK mode (as Linux): the first segments of a connection are ACKed at once,
+    /// so slow start isn't held up by delayed ACKs.
+    quickack: u8,
     /// End of the last small (sub-MSS) segment sent: Nagle (Minshall's variant) holds a
     /// small segment only while an earlier small one is unacknowledged.
     snd_sml: u32,
@@ -216,6 +221,9 @@ pub struct Tcb {
     pub backlog: u8,
     pub connect_pending: bool,
     pub retransmits: u32,
+    /// Retransmission timeouts, and the longest RTO waited for (ms).
+    pub timeouts: u32,
+    pub max_rto_ms: u32,
     /// Out-of-order data already written into the receive ring past its end, as absolute
     /// sequence ranges [start, end); `ooo_last` is the newest (reported first in SACK).
     ooo: [(u32, u32); MAX_OOO],
@@ -268,6 +276,7 @@ impl Tcb {
             delack: None,
             kick: None,
             unacked: 0,
+            quickack: 16,
             snd_sml: 0,
             cwnd: 0,
             ssthresh: u32::MAX,
@@ -286,6 +295,8 @@ impl Tcb {
             backlog: 0,
             connect_pending: false,
             retransmits: 0,
+            timeouts: 0,
+            max_rto_ms: 0,
             ooo: [(0, 0); MAX_OOO],
             nooo: 0,
             ooo_last: 0,
@@ -335,6 +346,12 @@ impl Tcb {
             n += 4 + 8 * self.nooo.min(self.max_sack_blocks() as u8) as usize;
         }
         n
+    }
+
+    /// Sender MSS for congestion control: payload of a full segment with the options every
+    /// segment carries (timestamps), so cwnd holds whole segments (RFC 5681 SMSS).
+    fn smss(&self) -> u32 {
+        (self.mss as u32).saturating_sub(if self.ts_ok { 12 } else { 0 }).max(64)
     }
 
     fn max_sack_blocks(&self) -> usize {
@@ -816,13 +833,27 @@ pub fn output(st: &mut Stack, i: usize) {
     if !matches!(t.state, TcpState::TimeWait | TcpState::FinWait2) {
         loop {
             let data_end = t.snd_una.wrapping_add(tx.len() as u32);
+            // Resending after a timeout: skip what the peer has SACKed.
+            if lt(t.snd_nxt, t.snd_max)
+                && let Some(end) = t.is_sacked(t.snd_nxt)
+            {
+                t.snd_nxt = if lt(data_end, end) { data_end } else { end };
+                continue;
+            }
             let in_flight = t.snd_nxt.wrapping_sub(t.snd_una);
             let outstanding = if t.in_recovery { t.pipe() } else { in_flight };
             if lt(t.snd_nxt, data_end) {
                 let off = in_flight as usize;
                 let unsent = data_end.wrapping_sub(t.snd_nxt) as usize;
                 let by_wnd = t.snd_wnd.saturating_sub(in_flight);
-                let by_cwnd = t.cwnd.saturating_sub(outstanding);
+                // Limited transmit (RFC 3042): each of the first two duplicate ACKs lets
+                // one more new segment out, to keep the ACK clock going.
+                let extra = if t.in_recovery {
+                    0
+                } else {
+                    t.dupacks.min(2) as u32 * t.smss()
+                };
+                let by_cwnd = (t.cwnd + extra).saturating_sub(outstanding);
                 let mut room = by_wnd.min(by_cwnd) as usize;
                 if room == 0 && t.force_probe {
                     room = 1; // zero-window probe
@@ -835,6 +866,12 @@ pub fn output(st: &mut Stack, i: usize) {
                         t.persist = true;
                         t.timer = Some(now + t.rto);
                     }
+                    break;
+                }
+                // Sender-side silly window avoidance (RFC 9293 3.8.6.2.1): no partial
+                // segment just because the window (cwnd or the peer's) has a sliver left;
+                // wait for a full one while anything is in flight.
+                if n < max && n < unsent && in_flight > 0 {
                     break;
                 }
                 // Nagle (Minshall): a small last piece waits while an earlier small segment
@@ -1153,6 +1190,7 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
         t.ts_recent = v;
         t.ts_recent_at = now;
     }
+    t.cwnd = 10 * t.smss(); // RFC 6928, in whole segments
     t.parent = Some(l as u16);
     let lt_ = &mut st.socks.get(l).unwrap().tcb;
     lt_.accq[lt_.accn as usize] = c as u16;
@@ -1184,7 +1222,7 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     t.irs = seg.seq;
     t.rcv_nxt = seg.seq.wrapping_add(1);
     t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(OUR_MSS);
-    t.cwnd = 10 * t.mss as u32;
+
     // Options: on only if both sides offered them (we always offer).
     if let Some(ws) = seg.wscale {
         t.snd_wscale = ws;
@@ -1203,6 +1241,7 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
             t.sample_rtt((tsval(now).wrapping_sub(e) as u64).max(1) * MS);
         }
     }
+    t.cwnd = 10 * t.smss(); // RFC 6928, in whole segments
     if has_ack {
         t.snd_una = seg.ack;
         t.snd_wnd = seg.wnd; // the SYN-ACK's window is not scaled
@@ -1446,7 +1485,7 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
         // New data got through: drop the timeout backoff (as BSD does). Without it, Karn's
         // rule (no samples from resent data) can leave the RTO doubled for good under loss.
         t.rto = t.rto_base;
-        let mss = t.mss as u32;
+        let mss = t.smss();
         if t.in_recovery {
             if ge(t.snd_una, t.recover) {
                 t.in_recovery = false; // full ACK: recovery is over
@@ -1477,10 +1516,14 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
     }
     // Enter loss recovery: three duplicate ACKs, or (with SACK) more than two segments'
     // worth SACKed above the first hole (RFC 6675 IsLost).
-    let mss = t.mss as u32;
+    // Early retransmit (RFC 5827): with fewer than 4 segments in flight, there can't be
+    // 3 duplicate ACKs, so the threshold is the flight minus one.
+    let mss = t.smss();
+    let segs = t.snd_max.wrapping_sub(t.snd_una).div_ceil(mss);
+    let thresh = if segs < 4 { segs.saturating_sub(1).max(1) } else { 3 };
     if !t.in_recovery
         && t.snd_una != t.snd_max
-        && (t.dupacks >= 3 || (t.sack_ok && t.sacked_bytes() > 2 * mss))
+        && (t.dupacks as u32 >= thresh || (t.sack_ok && t.sacked_bytes() >= thresh * mss))
     {
         let flight = t.snd_max.wrapping_sub(t.snd_una);
         t.ssthresh = (flight / 2).max(2 * mss);
@@ -1577,9 +1620,13 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
                         fin = false; // the FIN sat before data we already had: wait for it
                     }
                     t.unacked = t.unacked.saturating_add(n as u32);
-                    // Delayed ACK, except: a hole was (being) filled, two full segments
+                    // Delayed ACK, except: quick-ACK mode, a hole was (being) filled, two full segments
                     // are waiting, or the peer is pushing a short final piece.
-                    if had_ooo || t.unacked >= 2 * t.mss as u32 {
+                    // "Every second segment" counted in bytes as Linux does: more than one
+                    // full segment's worth unacknowledged (a full one plus a small one
+                    // counts, or Nagle on the other side would wait for our delayed ACK).
+                    if had_ooo || t.unacked > t.mss as u32 || t.quickack > 0 {
+                        t.quickack = t.quickack.saturating_sub(1);
                         t.ack_now = true;
                     } else if t.delack.is_none() {
                         t.delack = Some(now + DELACK);
@@ -1977,6 +2024,8 @@ fn on_timer(st: &mut Stack, i: usize) {
         return;
     }
     t.retries += 1;
+    t.timeouts += 1;
+    t.max_rto_ms = t.max_rto_ms.max((t.rto / MS) as u32);
     let handshake = matches!(t.state, TcpState::SynSent | TcpState::SynReceived);
     let limit = if handshake { SYN_RETRIES } else { DATA_RETRIES };
     if t.retries > limit {
@@ -2002,15 +2051,18 @@ fn on_timer(st: &mut Stack, i: usize) {
         t.retransmits += 1;
         t.snd_nxt = t.iss;
     } else {
-        // Timeout: back to slow start from snd_una, forgetting the SACK scoreboard (the
-        // receiver may have dropped what it SACKed, RFC 2018 8).
+        // Timeout: back to slow start from snd_una. The first time, keep the SACK
+        // scoreboard so the resend skips what the peer has; a second timeout in a row
+        // forgets it (the receiver may have dropped what it SACKed, RFC 2018 8).
         let flight = t.snd_max.wrapping_sub(t.snd_una);
-        let mss = t.mss as u32;
+        let mss = t.smss();
         t.ssthresh = (flight / 2).max(2 * mss);
         t.cwnd = mss;
         t.dupacks = 0;
         t.in_recovery = false;
-        t.nsacked = 0;
+        if t.retries >= 2 {
+            t.nsacked = 0;
+        }
         t.snd_nxt = t.snd_una;
     }
     let _ = now;

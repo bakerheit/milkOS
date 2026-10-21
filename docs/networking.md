@@ -149,6 +149,59 @@ eth1, else the default gateway (eth0's).
   * **Limits**: a SYN is retried 5 times (~31 s) and data 10 times, then `ETIMEDOUT`
     (+RST). An orphaned FIN_WAIT_2 lasts 30 s. No keepalive, no urgent data.
 
+## IPv6 (`net/ipv6.rs`)
+
+* **Addresses** (`/proc/net/if_inet6`, `ifconfig`):
+  * every link gets a link-local `fe80::<modified EUI-64 of the MAC>/64`;
+  * **eth0** gets a SLAAC address from qemu slirp's router advertisement: prefix
+    `fec0::/64`, router `fe80::2`, so `fec0::5054:ff:fe12:3456`. slirp's host is
+    `fec0::2`, as 10.0.2.2 is for IPv4, and it reaches the Mac's `::1`. `restrict=on`
+    keeps everything else in: IPv6 goes no further than IPv4 does;
+  * **eth1**, which has no router, also gets a unique-local address of its own,
+    `fd6d:696c:6b00:1::<EUI-64>/64` ("milk", subnet 1; a constant global ID, which is
+    fine on a private two-VM link), so the VMs reach each other without scope ids;
+  * `::1` is loopback;
+  * every address goes through duplicate address detection: one NS from `::` to its
+    solicited-node group, then 500 ms of quiet. A conflict (an NA for it, or another
+    host's DAD probe) drops the address, loudly.
+* **NDP** (RFC 4861):
+  * a neighbour cache per link, filled from NS/NA/RA link-layer options and our NS to the
+    solicited-node group (1 s retry, 3 tries, entries live 10 min);
+  * packets wait for an answer (16 at most, 3 s);
+  * RS on eth0 once its link-local is up (3 tries, 4 s apart). The RA gives the default
+    router, on-link prefixes, SLAAC prefixes (A flag, /64) and the MTU;
+  * ND messages are only taken with hop limit 255.
+* **Ethernet**: ethertype 0x86dd. Frames to `33:33:*` are taken on every link (NDP needs
+  them), and multicast goes out to `33:33:<last 32 bits>`.
+* **Routing and source selection**:
+  * `::1` and our own addresses go to loopback;
+  * a link-local or link-scope multicast destination goes out of the link given by the
+    scope id, else the link whose neighbour cache knows it, else eth1, else eth0;
+    `ff02::fb` goes to eth1;
+  * a destination on a link's prefix goes out of that link; anything else goes to the
+    default router (eth0's);
+  * the source is the link-local for link-local and multicast destinations, else the
+    address on the same prefix.
+* **ICMPv6** (RFC 4443):
+  * echo request/reply;
+  * destination unreachable (port, for closed UDP ports) and parameter problem;
+  * no errors about errors or about multicast destinations, at most 1232 bytes of the
+    offending packet quoted.
+* **Extension headers**:
+  * hop-by-hop options (only as the first header) and destination options: Pad1/PadN
+    are skipped, unknown options are handled by their action bits (skip, discard, or
+    discard with a parameter problem);
+  * **routing headers: no source routing, ever.** With segments left > 0 the packet is
+    dropped with a parameter problem (RFC 5095 deprecates type 0; we route for no one).
+    With 0 left the header is skipped;
+  * fragment headers: an atomic fragment (offset 0, no M, RFC 6946) is fine. Real
+    fragments are dropped and counted: there is no IPv6 reassembly, and we never send
+    fragments (UDP over IPv6 is capped at 1452 bytes);
+  * no next header (59) ends the packet.
+* **Boot self-test**: link-local and SLAAC on eth0, the router `fe80::2`, echo to `::1`,
+  to our own link-local and to `fec0::2` (slirp), and crafted packets for each
+  extension-header rule.
+
 ## eth1: a second network for VM-to-VM links
 
 A second `virtio-net-device` becomes `eth1`. Interfaces are named in qemu command-line

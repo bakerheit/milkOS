@@ -1,0 +1,363 @@
+// milkOS 1.0: the merged concept (01 Whole Milk shell + 03 Skim launcher + 06 Today home + 07 Spaces + 10 Glass look).
+// Every number the mockup uses comes from TOK, and SPEC.md is generated from the same TOK, so they cannot drift.
+// Run: node docs/ui-concepts/v1.mjs   (writes milkos-1.0.html and SPEC.md)
+import { B, T, TC, TR, TRi, icon, drop, X2, BD } from "./scenes.mjs";
+import { writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+export const TOK = {
+  screen: { w: 1024, h: 768, grid: 4 },
+  color: {
+    milk: ["#FFFDF8", "window body, cards, launcher"],
+    cream: ["#FBF6EC", "title bars, page background"],
+    oat: ["#EFE6D4", "sidebars, inactive fills"],
+    sand: ["#E2D5BD", "hairlines, borders, tracks"],
+    latte: ["#C4AE8F", "disabled text, inactive lights"],
+    cocoa: ["#7A6652", "secondary text"],
+    espresso: ["#3A2E28", "primary text, terminal background"],
+    straw: ["#E58C97", "accent (selection, close light, progress)"],
+    honey: ["#EBB650", "focus ring, minimise light, warnings"],
+    matcha: ["#9CBF9B", "success, zoom light, good meters"],
+    blue: ["#7F93C9", "info, links, disk meter"],
+    lav: ["#B9A9D6", "wallpaper only"],
+  },
+  text: {
+    ui: "Unifont 8x16, 1x, espresso. Secondary text cocoa. Disabled latte.",
+    bold: "Same glyphs drawn twice, second copy at +1px x (faux bold). Nicer font later: real bold.",
+    heading: "Unifont at 2x (16x32), bold.",
+    display: "Unifont at 4x (32x64), bold. Clock only.",
+    note: "No text smaller than 16px tall. Small caps labels are 8x16 uppercase in cocoa, not a smaller size.",
+  },
+  radius: { window: 12, dock: 20, launcher: 18, card: 20, toast: 16, button: 8, row: 12, chip: 8, tile: "24% of icon size", light: "circle d=12" },
+  menubar: { h: 28, padX: 12, itemGap: 24, textY: 6, fillAlpha: 0.55, borderBottom: "1px sand" },
+  dock: { h: 64, pad: 8, icon: 48, gap: 12, bottom: 12, dot: 4, dotGap: 4, fillAlpha: 0.55 },
+  window: { titleH: 32, lightD: 12, lightGap: 8, lightX: 14, lightY: 10, border: "1px sand", min: [240, 160], bodyPad: 16, sidebarW: 160, statusH: 24 },
+  glass: { blurRadius: 24, blurPasses: 3, fillAlpha: 0.55, borderAlpha: 0.75, border: "1px white", rule: "Only panels directly over the wallpaper are glass (menu bar, dock, launcher, toasts, control centre, home cards). Windows are opaque." },
+  shadow: {
+    color: "espresso (58,46,40)",
+    window: [{ grow: 10, dy: 12, a: 0.05 }, { grow: 5, dy: 8, a: 0.07 }, { grow: 0, dy: 4, a: 0.12 }],
+    float: [{ grow: 6, dy: 6, a: 0.05 }, { grow: 3, dy: 4, a: 0.07 }],
+    how: "Stack the listed rounded rects (grown by `grow` px on every side, moved down `dy`, alpha `a`). No blur needed.",
+  },
+  launcher: { w: 640, y: 140, inputH: 56, rowH: 48, gap: 12, maxRows: 6, dim: 0.25, iconIn: 40, iconRow: 36 },
+  toast: { w: 264, h: 64, right: 12, top: 40 },
+  control: { w: 288, h: 292, right: 12, top: 36, tileH: 56, sliderH: 8 },
+  cards: { pad: 16, gap: 16, r: 20, cols: 3 },
+  spaces: { stripY: 40, thumbW: 128, thumbH: 88, thumbGap: 12, thumbR: 10, dim: 0.35, selBorder: 4, windowScale: "≈0.29 (scaled blit)" },
+  wallpaper: "Dawn pasture: vertical gradient #FBE3C8 → #F3C3B8 → #C9B3D9, honey sun disc with halo, three overlapping matcha hill circles, tiny cow. Stored sharp (W) and pre-blurred (Wb = box blur r24 x3 passes, recomputed on change).",
+};
+const K = TOK.color;
+const col = (n) => K[n][0];
+
+/* ------------------------------ drawing kit ------------------------------ */
+const hex2rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+const rgba = (h, a) => `rgba(${hex2rgb(h).join(",")},${a})`;
+const ESP = "rgba(58,46,40,";
+
+function wallpaper() {
+  let h = B(0, 0, 1024, 768, `background:linear-gradient(180deg,#FBE3C8 0%,#F3C3B8 52%,#C9B3D9 100%)`);
+  h += B(700, 40, 240, 240, `border-radius:50%;background:rgba(255,253,248,.28)`);
+  h += B(740, 80, 160, 160, `border-radius:50%;background:${col("honey")}`);
+  h += B(-120, 500, 1040, 1040, `border-radius:50%;background:#CFE0C4`);
+  h += B(380, 590, 1100, 1100, `border-radius:50%;background:#B9D3B0`);
+  h += B(760, 650, 700, 700, `border-radius:50%;background:#A5C79F`);
+  // tiny cow
+  h += B(842, 636, 56, 30, `background:${col("milk")};border-radius:8px`) + B(852, 642, 14, 10, `background:${col("espresso")};border-radius:4px`) + B(874, 650, 12, 8, `background:${col("espresso")};border-radius:4px`)
+     + B(892, 630, 22, 22, `background:${col("milk")};border-radius:6px`) + B(902, 638, 6, 6, `background:${col("espresso")};border-radius:50%`) + B(890, 626, 6, 8, `background:${col("espresso")};border-radius:3px`)
+     + B(846, 664, 6, 14, `background:${col("espresso")}`) + B(862, 664, 6, 14, `background:${col("espresso")}`) + B(878, 664, 6, 14, `background:${col("espresso")}`);
+  return h;
+}
+const WP = wallpaper();
+
+function shadow(x, y, w, h, r, layers) {
+  return layers.map((l) => B(x - l.grow, y - l.grow + l.dy, w + 2 * l.grow, h + 2 * l.grow, `background:${ESP}${l.a});border-radius:${r + l.grow}px`)).join("");
+}
+// glass = pre-blurred wallpaper under the panel + milk tint + 1px white border
+function glass(x, y, w, h, r, inner = "", { float = true, alpha = TOK.glass.fillAlpha } = {}) {
+  const blurred = B(-x, -y, 1024, 768, `filter:blur(${TOK.glass.blurRadius / 2}px)`, WP);
+  return (float ? shadow(x, y, w, h, r, TOK.shadow.float) : "") +
+    B(x, y, w, h, `border-radius:${r}px;overflow:hidden`, blurred + B(0, 0, w, h, `background:rgba(255,253,248,${alpha})`)) +
+    B(x, y, w, h, `border-radius:${r}px;border:1px solid rgba(255,255,255,${TOK.glass.borderAlpha})`, "") +
+    B(x, y, w, h, "", inner);
+}
+const lightsX = (x, y, on = true) => {
+  const d = TOK.window.lightD, g = TOK.window.lightGap;
+  const cs = on ? [col("straw"), col("honey"), col("matcha")] : [col("latte"), col("latte"), col("latte")];
+  return cs.map((c, i) => B(x + i * (d + g), y, d, d, `background:${c};border-radius:50%`)).join("");
+};
+function win(x, y, w, h, title, body, { focus = true, dark = false } = {}) {
+  const t = TOK.window;
+  return shadow(x, y, w, h, TOK.radius.window, TOK.shadow.window) +
+    B(x, y, w, h, `background:${dark ? col("espresso") : col("milk")};border-radius:${TOK.radius.window}px;border:1px solid ${dark ? "#4A3C34" : col("sand")};overflow:hidden`,
+      B(0, 0, w, t.titleH, `background:${dark ? "#4A3C34" : col("cream")};border-bottom:1px solid ${dark ? "#4A3C34" : col("sand")}`) +
+      lightsX(t.lightX - 1, t.lightY - 1, focus) +
+      TC(0, 8, w, `<b>${title}</b>`, `color:${dark ? col("cream") : focus ? col("espresso") : col("cocoa")}`) + body);
+}
+function menubar(appName = "Files") {
+  const m = TOK.menubar;
+  return B(0, 0, 1024, m.h, `background:rgba(255,253,248,${m.fillAlpha});border-bottom:1px solid rgba(255,255,255,.75);overflow:hidden`, B(0, 0, 1024, 768, `filter:blur(${TOK.glass.blurRadius / 2}px)`, WP) + B(0, 0, 1024, m.h, `background:rgba(255,253,248,${m.fillAlpha})`)) +
+    drop(12, 8, 13) + T(38, m.textY, `<b>${appName}</b>${"   File   Edit   View   Go   Window   Help"}`) +
+    TR(1012, m.textY, "Wi-Fi   87%   Tue 10:41");
+}
+const dockItems = [["folder", col("honey")], ["term", col("espresso")], ["globe", col("blue")], ["note", col("milk")], ["music", col("straw")], ["photo", col("milk")], ["cal", col("milk")], ["gear", col("latte")]];
+function dock(running = [0, 1]) {
+  const d = TOK.dock, n = dockItems.length;
+  const w = d.pad * 2 + n * d.icon + (n - 1) * d.gap, x = (1024 - w) / 2, y = 768 - d.bottom - d.h;
+  let inner = "";
+  dockItems.forEach((it, i) => {
+    const ix = d.pad + i * (d.icon + d.gap);
+    inner += icon(ix, d.pad, d.icon, it[0], it[1], it[0] === "term" ? col("cream") : col("espresso"));
+    if (running.includes(i)) inner += B(ix + d.icon / 2 - d.dot / 2, d.h - d.dotGap - d.dot + 1, d.dot, d.dot, `background:${col("cocoa")};border-radius:2px`);
+  });
+  return glass(x, y, w, d.h, TOK.radius.dock, inner);
+}
+const toast = (title, sub) => {
+  const t = TOK.toast, x = 1024 - t.right - t.w;
+  return glass(x, t.top, t.w, t.h, TOK.radius.toast, icon(12, 12, 40, "cal", col("honey") + "88", col("espresso")) + T(64, 12, `<b>${title}</b>`) + T(64, 32, sub, `color:${col("cocoa")}`));
+};
+const dim = (a) => B(0, 0, 1024, 768, `background:${ESP}${a})`);
+
+/* ------------------------------ windows used in scenes ------------------------------ */
+function filesWin(x = 96, y = 64, focus = false) {
+  const t = TOK.window, w = 600, h = 400, sw = t.sidebarW;
+  let body = B(0, t.titleH, sw, h - t.titleH - 2, `background:${col("oat")};border-right:1px solid ${col("sand")}`);
+  body += T(16, 44 + 8, "FAVOURITES", `color:${col("cocoa")}`);
+  const fav = ["Documents", "Downloads", "Desktop", "Pictures", "Music"];
+  fav.forEach((f, i) => { body += (i === 0 ? B(8, 76 + i * 28, sw - 16, 24, `background:${col("straw")}55;border-radius:${TOK.radius.button}px`) : "") + T(18, 80 + i * 28, f); });
+  body += T(16, 232, "DEVICES", `color:${col("cocoa")}`) + T(18, 258, "milk-ssd") + T(18, 286, "Network");
+  const files = [["folder", "projects"], ["folder", "school"], ["doc", "todo.txt"], ["photo", "bike.png"], ["note", "ideas.md"], ["folder", "kernel"], ["doc", "notes.txt"], ["term", "run.sh"]];
+  files.forEach((f, i) => {
+    const cx = sw + 24 + (i % 4) * 100, cy = 52 + Math.floor(i / 4) * 108;
+    const isF = f[0] === "folder";
+    body += icon(cx + 12, cy, 56, f[0], isF ? col("honey") + "55" : col("cream"), isF ? col("cocoa") : col("espresso"), isF ? "" : `border:1px solid ${col("sand")}`) + TC(cx - 6, cy + 64, 92, f[1]);
+  });
+  body += B(0, h - t.statusH - 2, w, t.statusH, `background:${col("cream")};border-top:1px solid ${col("sand")}`) + T(sw + 12, h - t.statusH + 2, "8 items, 212 GB available", `color:${col("cocoa")}`);
+  return win(x, y, w, h, "Documents", body, { focus });
+}
+function shellWin(x = 440, y = 270, focus = true) {
+  const body = T(14, 46, "andrew@milk ~ % uname -a", `color:${col("cream")}`) + T(14, 64, "milkOS 1.0 aarch64", `color:${col("latte")}`) +
+    T(14, 90, "andrew@milk ~ % ls", `color:${col("cream")}`) + T(14, 108, "projects  school  todo.txt  ideas.md", `color:${col("matcha")}`) +
+    T(14, 134, "andrew@milk ~ % ", `color:${col("cream")}`) + B(142, 134, 8, 16, `background:${col("cream")}`);
+  return win(x, y, 520, 290, "andrew: sh", body, { focus, dark: true });
+}
+
+/* ------------------------------ scenes ------------------------------ */
+const sceneDesktop = () => WP + menubar() + filesWin() + shellWin() + toast("Dentist", "in 15 minutes") + dock();
+
+function sceneHome() {
+  let h = WP + menubar("Home");
+  const c = TOK.cards, p = c.pad;
+  const card = (x, y, w, hh, label, inner) => glass(x, y, w, hh, c.r, T(p, p, label, `color:${col("cocoa")}`) + inner);
+  h += glass(48, 56, 928, 96, c.r, T(p + 8, 16, "Good morning, Andrew", X2 + BD) + T(p + 8, 58, "Tuesday, 20 October   2 events today", `color:${col("cocoa")}`) + TR(928 - 24, 12, "10:41", "font-size:53.333px;line-height:64px;font-weight:700"), { float: true });
+  const y1 = 56 + 96 + c.gap;
+  h += card(48, y1, 296, 228, "CALENDAR", ["M", "T", "W", "T", "F", "S", "S"].map((d, i) => TC(12 + i * 38, 40, 38, d, `color:${col("cocoa")}`)).join("") +
+    Array.from({ length: 21 }, (_, i) => { const n = i + 12, cx = 12 + (i % 7) * 38, cy = 66 + Math.floor(i / 7) * 34, today = n === 20; return (today ? B(cx + 3, cy - 4, 32, 24, `background:${col("straw")};border-radius:12px`) : "") + TC(cx, cy, 38, String(n > 31 ? n - 31 : n), today ? `color:${col("milk")};${BD}` : ""); }).join(""));
+  h += card(48 + 296 + c.gap, y1, 296, 228, "NEXT UP", T(p, 44, "2:30 PM", X2 + BD) + T(p, 84, "Dentist", X2) + T(p, 124, "12 Elm St", `color:${col("cocoa")}`) + T(p, 176, "Then: pick up bike, 5:00", `color:${col("cocoa")}`));
+  h += card(48 + 2 * (296 + c.gap), y1, 296, 228, "SYSTEM",
+    [["cpu", 50, "matcha"], ["mem", 110, "honey"], ["disk", 40, "blue"]].map((m, i) => T(p, 44 + i * 34, m[0]) + B(64, 46 + i * 34, 200, 12, `background:${col("sand")};border-radius:6px`, B(0, 0, m[1], 12, `background:${col(m[2])};border-radius:6px`))).join("") +
+    T(p, 156, "Up 2h 14m", `color:${col("cocoa")}`) + T(p, 180, "All systems fine", `color:${col("matcha")};${BD}`));
+  const y2 = y1 + 228 + c.gap;
+  h += card(48, y2, 456, 188, "NOTES", T(p, 44, "# milkOS 1.0", BD) + T(p, 68, "- ship the compositor") + T(p, 86, "- pick a nicer font") + T(p, 104, "- boot logo, a milk drop") + T(p, 150, "Edited yesterday", `color:${col("latte")}`));
+  h += card(48 + 456 + c.gap, y2, 456, 188, "RECENT FILES", [["folder", "projects"], ["doc", "todo.txt"], ["photo", "bike.png"], ["note", "ideas.md"]].map((f, i) => {
+    const isF = f[0] === "folder", x = 16 + i * 106;
+    return icon(x + 10, 44, 56, f[0], isF ? col("honey") + "55" : col("cream"), isF ? col("cocoa") : col("espresso"), isF ? "" : `border:1px solid ${col("sand")}`) + TC(x - 6, 108, 92, f[1]);
+  }).join(""));
+  return h + dock([]);
+}
+
+function sceneLauncher() {
+  const L = TOK.launcher, x = (1024 - L.w) / 2;
+  let h = sceneDesktop() + dim(L.dim);
+  h += glass(x, L.y, L.w, L.inputH, TOK.radius.launcher, icon(14, 8, L.iconIn, "globe", col("cream"), col("cocoa")) + T(66, 12, "mus", X2) + B(66 + 3 * 16, 12, 3, 32, `background:${col("espresso")}`) + TRi(L.w, L.w - 20, 20, "esc", `color:${col("cocoa")}`), { alpha: 0.7 });
+  const ry = L.y + L.inputH + L.gap, rows = [["music", "Music", "Play and organise songs", col("straw")], ["doc", "Musl notes.txt", "~/school", col("cream")], ["gear", "Mute sound", "Settings, Audio", col("cream")]];
+  const hh = 16 + 24 + rows.length * L.rowH + 28 + 8;
+  let inner = T(16, 12, "APPLICATIONS", `color:${col("cocoa")}`);
+  rows.forEach((r, i) => {
+    const y = 40 + i * L.rowH;
+    inner += (i === 0 ? B(8, y, L.w - 16, L.rowH, `background:${col("straw")}44;border-radius:${TOK.radius.row}px`) : "") +
+      icon(16, y + 6, L.iconRow, r[0], r[3], col("espresso"), i ? `border:1px solid ${col("sand")}` : "") + T(64, y + 6, `<b>${r[1]}</b>`) + T(64, y + 26 - 4, r[2], `color:${col("cocoa")}`) + (i === 0 ? TRi(L.w, L.w - 20, y + 16, "Enter", `color:${col("cocoa")}`) : "");
+  });
+  inner += T(16, 40 + rows.length * L.rowH + 8, "Tab for actions   &gt; for commands   ? for help", `color:${col("cocoa")}`);
+  h += glass(x, ry, L.w, hh + 8, TOK.radius.launcher, inner, { alpha: 0.7 });
+  return h;
+}
+
+function sceneSpaces() {
+  const S = TOK.spaces;
+  let h = WP + dim(S.dim) + menubar("Overview");
+  const sp = [["1 Code", 1], ["2 Web", 0], ["3 Notes", 0], ["+", 0]];
+  const sx = (1024 - (sp.length * S.thumbW + (sp.length - 1) * S.thumbGap)) / 2;
+  sp.forEach((s, i) => { const x = sx + i * (S.thumbW + S.thumbGap); h += glass(x, S.stripY, S.thumbW, S.thumbH, S.thumbR, B(8, 8, 50, 34, `background:${col("cream")};border-radius:4px`) + B(64, 18, 52, 46, `background:${col("cream")};border-radius:4px`) + TC(0, 64, S.thumbW, s[0], `color:${col("cocoa")}`), { alpha: s[1] ? 0.85 : 0.5 }) + (s[1] ? B(x, S.stripY, S.thumbW, S.thumbH, `border:${S.selBorder}px solid ${col("honey")};border-radius:${S.thumbR}px`) : ""); });
+  const cell = (cx, cy, w, hh, title, body, sel) => shadow(cx, cy, w, hh, TOK.radius.window, TOK.shadow.float) +
+    B(cx, cy, w, hh, `background:${col("milk")};border-radius:${TOK.radius.window}px;border:${sel ? S.selBorder : 1}px solid ${sel ? col("honey") : col("sand")};overflow:hidden`,
+      B(0, 0, w, 26, `background:${col("cream")};border-bottom:1px solid ${col("sand")}`) + lightsX(10, 7, true).replace(/width:12px;height:12px/g, "width:12px;height:12px") + body) + TC(cx, cy + hh + 8, w, title, `color:${col("milk")}`);
+  h += cell(60, 170, 300, 210, "Files", icon(20, 44, 40, "folder", col("honey") + "55", col("cocoa")) + icon(80, 44, 40, "folder", col("honey") + "55", col("cocoa")) + icon(140, 44, 40, "doc", col("cream"), col("espresso")), false);
+  h += cell(390, 170, 300, 210, "Shell", B(0, 26, 300, 184, `background:${col("espresso")}`) + T(10, 40, "$ cargo build", `color:${col("cream")}`) + T(10, 58, "Finished in 2.1s", `color:${col("matcha")}`) + T(10, 76, "$ _", `color:${col("cream")}`), true);
+  h += cell(720, 170, 250, 210, "Notes", T(14, 40, "# ideas") + T(14, 58, "- milk drop"), false);
+  h += cell(60, 440, 300, 210, "Web", B(0, 26, 300, 28, `background:${col("oat")}`) + T(10, 32, "milk.example", `color:${col("cocoa")}`) + T(14, 70, "Welcome", X2), false);
+  h += cell(390, 440, 300, 210, "Music", icon(20, 44, 80, "music", col("straw"), col("espresso")) + T(116, 56, "Cream Soda Skies") + T(116, 76, "Lactose Intolerants", `color:${col("cocoa")}`), false);
+  h += cell(720, 440, 250, 210, "Settings", T(14, 40, "Display") + T(14, 64, "Sound") + T(14, 88, "Network"), false);
+  return h + TC(0, 722, 1024, "Click a window to focus   Drag a window to another space   Esc to leave", `color:${col("milk")}`);
+}
+
+function sceneControl() {
+  const c = TOK.control, x = 1024 - c.right - c.w;
+  const tile = (tx, ty, tw, label, sub, on) => B(tx, ty, tw, c.tileH, `background:${on ? col("straw") : "rgba(255,253,248,.7)"};border-radius:16px`) + T(tx + 14, ty + 10, `<b>${label}</b>`, on ? `color:${col("milk")}` : "") + T(tx + 14, ty + 30, sub, on ? `color:${col("milk")}` : `color:${col("cocoa")}`);
+  const slider = (sy, label, v) => B(16, sy, c.w - 32, c.tileH, "background:rgba(255,253,248,.7);border-radius:16px") + T(30, sy + 8, `<b>${label}</b>`) + B(30, sy + 36, c.w - 60, c.sliderH, "background:rgba(122,102,82,.25);border-radius:4px", B(0, 0, (c.w - 60) * v, c.sliderH, `background:${col("espresso")};border-radius:4px`));
+  const inner = tile(16, 16, 124, "Wi-Fi", "home-5G", false) + tile(148, 16, 124, "Focus", "On", true) + slider(88, "Display", 0.68) + slider(160, "Sound", 0.4) + T(18, 236, "Battery 87%   2h 14m", `color:${col("cocoa")}`) + T(18, 258, "Tue 20 October", `color:${col("cocoa")}`);
+  return WP + menubar() + filesWin(96, 64, false) + glass(x, c.top, c.w, c.h, TOK.radius.card, inner) + dock();
+}
+
+function sceneRedlines() {
+  let h = sceneDesktop();
+  const ln = (x, y, w, hh, c = "#D6334A") => B(x, y, w, hh, `border:1px dashed ${c}`);
+  const lab = (x, y, t) => T(x, y, `&nbsp;${t}&nbsp;`, `background:#D6334A;color:#fff;border-radius:4px`);
+  const m = TOK.menubar, d = TOK.dock, n = dockItems.length, dw = d.pad * 2 + n * d.icon + (n - 1) * d.gap, dx = (1024 - dw) / 2, dy = 768 - d.bottom - d.h, t = TOK.window;
+  h += B(0, 0, 1024, 768, "background:rgba(255,253,248,.0)");
+  h += ln(0, 0, 1024, m.h) + lab(300, 6, `menu bar h${m.h}, α${m.fillAlpha}, text y+${m.textY}`);
+  h += ln(dx, dy, dw, d.h) + lab(dx, dy - 22, `dock h${d.h}  r${TOK.radius.dock}  pad ${d.pad}  icon ${d.icon}  gap ${d.gap}`);
+  h += ln(dx, dy + d.h, dw, d.bottom) + lab(dx + dw + 8, dy + d.h - 6, `${d.bottom}px from bottom`);
+  h += ln(96, 64, 600, 400) + lab(300, 44, `window r${TOK.radius.window}, 1px sand border`);
+  h += ln(96, 64, 600, t.titleH) + lab(560, 72, `title bar h${t.titleH}`);
+  h += ln(96 + t.lightX - 1, 64 + t.lightY - 1, 3 * t.lightD + 2 * t.lightGap, t.lightD) + lab(96, 44, `lights d${t.lightD} gap${t.lightGap} @${t.lightX},${t.lightY}`);
+  h += ln(96, 64 + t.titleH, t.sidebarW, 366) + lab(100, 64 + t.titleH + 170, `sidebar w${t.sidebarW}`);
+  const tx = 1024 - TOK.toast.right - TOK.toast.w;
+  h += ln(tx, TOK.toast.top, TOK.toast.w, TOK.toast.h) + lab(tx - 30, TOK.toast.top + TOK.toast.h + 4, `toast ${TOK.toast.w}x${TOK.toast.h} r${TOK.radius.toast}`);
+  h += lab(440, 556, "window shadow: 3 stacked rounded rects (see SPEC)");
+  return h;
+}
+
+export const SLIDES = [
+  { id: "desktop", name: "Desktop", draw: sceneDesktop, from: "01 + 10", note: "Menu bar, dock and toast are glass over the wallpaper (pre-blurred copy). Windows are opaque with 12px corners and stacked-rect shadows. Focused window has coloured lights, the other greys out." },
+  { id: "home", name: "Home (Today)", draw: sceneHome, from: "06 + 10", note: "No windows open: the wallpaper becomes a glanceable home. Cards are the same glass panels. Same dock, so the shell never changes shape." },
+  { id: "launcher", name: "Launcher", draw: sceneLauncher, from: "03", note: "One key, type, Enter. Dims what is behind by 25%. Results show apps, files and commands in one list." },
+  { id: "spaces", name: "Spaces", draw: sceneSpaces, from: "07", note: "Scaled blits of each window's offscreen buffer (needs the per-window buffers), plus a strip of virtual desktops. Focused window gets a 4px honey border." },
+  { id: "control", name: "Control centre", draw: sceneControl, from: "10", note: "Quick settings panel from the menu bar. Glass again, so it costs one more pre-blurred-wallpaper sample, no live blur." },
+  { id: "redlines", name: "Redlines", draw: sceneRedlines, from: "spec", note: "The same desktop with the key measurements marked. Full numbers are in SPEC.md." },
+];
+
+/* ------------------------------ page ------------------------------ */
+const N = SLIDES.length;
+const idn = (i) => `s${((i % N) + N) % N}`;
+const svg = (s, cls = "") => `<svg class="scene ${cls}" viewBox="0 0 1024 768" role="img" aria-label="milkOS 1.0 mockup: ${s.name}"><foreignObject x="0" y="0" width="1024" height="768"><div class="stage">${s.draw()}</div></foreignObject></svg>`;
+const rules = SLIDES.map((s, i) => `#r-${idn(i)}:checked ~ .wrap .p-${idn(i)}{display:grid}
+#r-${idn(i)}:checked ~ .wrap .n-${idn(i)}{display:flex}
+#r-${idn(i)}:checked ~ .wrap .t-${idn(i)}{border-color:var(--accent)}`).join("\n");
+
+const page = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>milkOS 1.0 Mockup</title>
+<style>
+:root{--bg:#FBF6EC;--card:#FFFDF8;--line:#E2D5BD;--ink:#3A2E28;--mute:#7A6652;--accent:#C9684F}
+@media (prefers-color-scheme:dark){:root{--bg:#1E1915;--card:#2A231D;--line:#443A30;--ink:#F3EBDD;--mute:#B9A68C;--accent:#E9966F}}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.r{position:absolute;opacity:0;pointer-events:none}
+.wrap{max-width:1300px;margin:0 auto;padding:20px 16px 48px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:baseline;justify-content:space-between;margin-bottom:16px}
+h1{font-size:22px;margin:0}.sub{color:var(--mute);font-size:14px;max-width:760px}
+.nav{display:none;gap:8px;align-items:center}
+.btn{display:inline-block;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 16px;cursor:pointer;min-height:44px;line-height:26px;user-select:none}
+.btn:hover{border-color:var(--accent)}.btn:focus-visible,.thumb:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.count{min-width:64px;text-align:center;color:var(--mute)}
+.panel{display:none;grid-template-columns:minmax(0,1fr) 300px;gap:20px;align-items:start}
+@media(max-width:980px){.panel{grid-template-columns:1fr}}
+.stagebox{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px}
+.stagewrap{border-radius:6px;border:1px solid var(--line);overflow:hidden;line-height:0}
+.scene{display:block;width:100%;height:auto}
+.stage{width:1024px;height:768px;position:relative;overflow:hidden;font:13.333px/16px "Unifont","Menlo","SF Mono",ui-monospace,monospace;color:#3A2E28}
+.stage div{box-sizing:border-box}
+.notes{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
+.notes h2{margin:0 0 2px;font-size:20px}.notes .tag{color:var(--mute);margin:0 0 12px;font-size:14px}
+.strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;margin-top:20px}
+@media(max-width:700px){.strip{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.thumb{display:block;cursor:pointer;border:2px solid var(--line);border-radius:10px;background:var(--card);padding:6px}
+.thumb .tw{border-radius:4px;overflow:hidden;line-height:0}.thumb .tl{font-size:13px;margin-top:5px;padding:0 2px}
+${rules}
+</style></head><body>
+${SLIDES.map((s, i) => `<input class="r" type="radio" name="s" id="r-${idn(i)}"${i === 0 ? " checked" : ""}>`).join("")}
+<div class="wrap">
+<header><div><h1>milkOS 1.0: the merged look</h1><div class="sub">Concepts 01 Whole Milk + 03 Skim + 06 Today + 07 Spaces + 10 Glass, as one system. Glass is cheap: panels sample a wallpaper that was blurred once, never live. Numbers are in SPEC.md.</div></div>
+${SLIDES.map((s, i) => `<div class="nav n-${idn(i)}"><label class="btn" for="r-${idn(i - 1)}" role="button" tabindex="0" aria-label="Previous">&larr; Prev</label><span class="count">${i + 1} / ${N}</span><label class="btn" for="r-${idn(i + 1)}" role="button" tabindex="0" aria-label="Next">Next &rarr;</label></div>`).join("")}
+</header>
+${SLIDES.map((s, i) => `<article class="panel p-${idn(i)}"><div class="stagebox"><div class="stagewrap">${svg(s)}</div></div><aside class="notes"><h2>${s.name}</h2><p class="tag">from ${s.from}</p><p>${s.note}</p></aside></article>`).join("")}
+<div class="strip">${SLIDES.map((s, i) => `<label class="thumb t-${idn(i)}" for="r-${idn(i)}" tabindex="0" role="button" aria-label="Show ${s.name}"><div class="tw">${svg(s)}</div><div class="tl"><b>${s.name}</b></div></label>`).join("")}</div>
+</div>
+<script>addEventListener('keydown',function(e){var r=[].slice.call(document.querySelectorAll('.r')),c=r.findIndex(function(x){return x.checked});if(e.key==='ArrowRight')r[(c+1)%r.length].checked=true;else if(e.key==='ArrowLeft')r[(c-1+r.length)%r.length].checked=true;else if((e.key==='Enter'||e.key===' ')&&e.target.tagName==='LABEL'){e.preventDefault();e.target.click()}})</script>
+</body></html>`;
+
+/* ------------------------------ SPEC.md (generated from TOK) ------------------------------ */
+const sh = (arr) => arr.map((l, i) => `  ${i + 1}. grow ${l.grow}px, move down ${l.dy}px, alpha ${l.a}`).join("\n");
+const spec = `# milkOS 1.0 UI spec
+
+For the engineer building the compositor and shell. Generated from \`v1.mjs\` (the mockup uses the same numbers), so if you change a value there, regenerate. Mockup: \`milkos-1.0.html\`. Screen: ${TOK.screen.w}x${TOK.screen.h}, 32-bit. Layout snaps to a ${TOK.screen.grid}px grid.
+
+## Colour tokens (sRGB)
+| Token | Hex | Use |
+|---|---|---|
+${Object.entries(TOK.color).map(([k, v]) => `| ${k} | ${v[0]} | ${v[1]} |`).join("\n")}
+
+Alpha tints used: straw at 0x44 (27%) for selection rows, straw at 0x55 (33%) for sidebar selection, honey at 0x55 for folder tiles, espresso for shadows (below).
+
+## Type
+- ${TOK.text.ui}
+- Bold: ${TOK.text.bold}
+- Heading: ${TOK.text.heading}
+- Display: ${TOK.text.display}
+- ${TOK.text.note}
+
+## Corner radii (px)
+${Object.entries(TOK.radius).map(([k, v]) => `- ${k}: ${v}`).join("\n")}
+
+## Glass (the cheap version)
+- Keep two copies of the wallpaper: \`W\` (sharp) and \`Wb\` (box blur radius ${TOK.glass.blurRadius}, ${TOK.glass.blurPasses} passes). Rebuild \`Wb\` only when the wallpaper changes.
+- A glass panel = copy the \`Wb\` pixels under its rect, blend milk (#FFFDF8) at alpha ${TOK.glass.fillAlpha} (launcher and control surfaces: 0.7), then a 1px inner border, white at alpha ${TOK.glass.borderAlpha}.
+- ${TOK.glass.rule}
+- Live blur over windows is not supported. If a glass panel ever overlaps a window, draw it as plain milk at alpha 0.92.
+
+## Shadows
+Colour ${TOK.shadow.color}. ${TOK.shadow.how}
+- Window (focused or not):
+${sh(TOK.shadow.window)}
+- Floating panels (dock, toast, launcher, control centre, cards):
+${sh(TOK.shadow.float)}
+
+## Menu bar
+Height ${TOK.menubar.h}. Glass, fill alpha ${TOK.menubar.fillAlpha}, 1px white bottom edge. Left: logo drop 13x13 at x12, y8, then app name (bold) at x38, menu items separated by ${TOK.menubar.itemGap}px (3 spaces of 8px). Right: status text right-aligned, ${TOK.menubar.padX}px from edge. Text top at y${TOK.menubar.textY}.
+
+## Dock
+Height ${TOK.dock.h}, radius ${TOK.radius.dock}, glass. Padding ${TOK.dock.pad}, icons ${TOK.dock.icon}x${TOK.dock.icon}, gap ${TOK.dock.gap}. Width = ${TOK.dock.pad * 2} + n*${TOK.dock.icon} + (n-1)*${TOK.dock.gap}. Centred horizontally, ${TOK.dock.bottom}px above the bottom edge. Running app: ${TOK.dock.dot}x${TOK.dock.dot} dot in cocoa, ${TOK.dock.dotGap}px above the dock's bottom edge, centred under the icon. Icon tile radius is 24% of its size.
+
+## Window chrome
+- Radius ${TOK.radius.window}, 1px sand border (terminal: 1px #4A3C34), opaque body (milk; terminal espresso).
+- Title bar height ${TOK.window.titleH}, fill cream (terminal #4A3C34), 1px sand line under it. Title text bold, horizontally centred in the bar, top at y8.
+- Traffic lights: ${TOK.window.lightD}px circles, ${TOK.window.lightGap}px gap, first light's top-left at (${TOK.window.lightX},${TOK.window.lightY}) inside the window (border included). Order: close straw, minimise honey, zoom matcha. Unfocused window: all three latte, title text cocoa.
+- Minimum size ${TOK.window.min[0]}x${TOK.window.min[1]}. Body padding ${TOK.window.bodyPad}. Files sidebar width ${TOK.window.sidebarW} (oat, 1px sand right edge). Status bar height ${TOK.window.statusH} (cream, 1px sand top edge).
+
+## Launcher (Skim)
+Width ${TOK.launcher.w}, centred, top at y${TOK.launcher.y}. Input row height ${TOK.launcher.inputH}, radius ${TOK.radius.launcher}, glass alpha 0.7, query at 2x text, leading icon ${TOK.launcher.iconIn}. Results panel ${TOK.launcher.gap}px below, same radius. Result row height ${TOK.launcher.rowH}, radius ${TOK.radius.row}, selected row straw at 27%, icon ${TOK.launcher.iconRow}. Max ${TOK.launcher.maxRows} rows. Dims the screen behind with espresso at alpha ${TOK.launcher.dim}.
+
+## Toast / notification
+${TOK.toast.w}x${TOK.toast.h}, radius ${TOK.radius.toast}, glass, ${TOK.toast.right}px from the right edge, ${TOK.toast.top}px from the top. Icon 40x40 at (12,12), title bold at (64,12), subtitle cocoa at (64,32).
+
+## Control centre
+${TOK.control.w}x${TOK.control.h}, radius ${TOK.radius.card}, glass, ${TOK.control.right}px from right, ${TOK.control.top}px from top. Tiles/sliders ${TOK.control.tileH} high, radius 16, white at 70%. Slider track ${TOK.control.sliderH} high, fill espresso.
+
+## Home (Today) cards
+Radius ${TOK.cards.r}, padding ${TOK.cards.pad}, gap ${TOK.cards.gap}, ${TOK.cards.cols}-column grid inside 48px side margins. Labels are 8x16 uppercase cocoa.
+
+## Spaces (overview)
+Dim the wallpaper with espresso at ${TOK.spaces.dim}. Space strip at y${TOK.spaces.stripY}: thumbnails ${TOK.spaces.thumbW}x${TOK.spaces.thumbH}, gap ${TOK.spaces.thumbGap}, radius ${TOK.spaces.thumbR}; the current space has a ${TOK.spaces.selBorder}px honey border. Window cells are each window's offscreen buffer scaled ${TOK.spaces.windowScale}, with the title under it in milk. Focused window: ${TOK.spaces.selBorder}px honey border.
+
+## Wallpaper
+${TOK.wallpaper}
+
+## What the mockup does not show
+Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Ask Mary if one of these blocks you.
+`;
+
+const here = dirname(fileURLToPath(import.meta.url));
+writeFileSync(join(here, "milkos-1.0.html"), page);
+writeFileSync(join(here, "SPEC.md"), spec);
+console.log("wrote milkos-1.0.html", page.length, "bytes; SPEC.md", spec.length, "bytes");

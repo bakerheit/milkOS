@@ -1433,7 +1433,8 @@ def cmd_receive(path, stream, force):
                 idx.drop(*struct.unpack("<QQQ", p))
             elif t == R_DATA:
                 src = struct.unpack_from("<Q", p)[0]
-                blocks[src] = w.put(p[8:], gen)
+                # (our pointer, xxh64 of the plaintext: what the stream's extents name)
+                blocks[src] = (w.put(p[8:], gen), xxh64(p[8:]))
             elif t == R_EXTENT:
                 ino, start, old_end, src, cnt = struct.unpack_from("<QQQQI", p)
                 csums = struct.unpack_from(f"<{cnt}Q", p, 36)
@@ -1441,9 +1442,9 @@ def cmd_receive(path, stream, force):
                 ptrs = []
                 for i in range(cnt):
                     b = blocks.get(src + i)
-                    if b is None or b[2] != csums[i]:
+                    if b is None or b[1] != csums[i]:
                         raise StreamError(f"extent of inode {ino} refers to data the stream didn't carry")
-                    ptrs.append(b)
+                    ptrs.append(b[0])
                 i = 0
                 while i < cnt:
                     j = i + 1

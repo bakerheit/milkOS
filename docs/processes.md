@@ -175,13 +175,33 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
-| processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address, 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
+| files | 51 chroot, 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
+| processes | 220 clone (fork **and** CLONE_THREAD), 221 execve, 260 wait4, 93 exit (one thread), 94 exit_group, 98 futex (WAIT/WAKE + _PRIVATE), 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address, 99 set_robust_list (ignored), 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
 | signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
 | misc | 160 uname (sysname "milkOS"), 278 getrandom |
+| milkOS | 0x1000 sandbox (shrink capabilities; see docs/security.md) |
+
+### Threads, chroot, sandbox
+
+* **Threads** (`clone` with CLONE_VM|FS|FILES|SIGHAND|THREAD|SETTLS|PARENT_SETTID|
+  CHILD_SETTID|CHILD_CLEARTID): a thread shares the process's address space, fds, signal
+  handlers, cwd, pgid and capabilities; it has its own kernel stack, TPIDR_EL0, FP and
+  user stack. `Inner.threads` lists them. `exit` (93) ends one thread (clears
+  clear_child_tid + futex-wakes it); the last thread, or `exit_group` (94) / a fatal
+  signal, zombifies the whole process (siblings get EINTR out of blocking calls and exit
+  on return to EL0). Signals are posted to the thread group. **futex** (98) backs the
+  pthread mutex/condvar in `user/rt` (`rt::thread`). A multi-threaded process's
+  address-space teardown does an IPI TLB shootdown (`kernel/src/tlb.rs`); leaf
+  invalidation still uses the broadcast `tlbi…is`.
+* **Per-process root** (`chroot`, 51): the VFS resolver uses the calling thread's root for
+  absolute paths and clamps `..` at it (docs/packages.md for the `run a tried app with its
+  clone as /` flow).
+* **Capability sandbox**: each process carries a capability set, inherited and shrink-only,
+  enforced on openat/execve/fork/socket/device opens; denials are audited. Full model and
+  the powerbox design in docs/security.md.
 | milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which

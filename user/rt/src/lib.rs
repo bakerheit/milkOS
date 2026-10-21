@@ -14,9 +14,11 @@
 extern crate alloc;
 
 pub mod alloc_brk;
+pub mod ed25519;
 pub mod io;
 pub mod net;
 pub mod sha256;
+pub mod sha512;
 pub mod sys;
 pub mod table;
 

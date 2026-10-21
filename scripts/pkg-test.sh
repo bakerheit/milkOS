@@ -83,14 +83,41 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:milk keep moo2048' 'wait:milk: (kept|[^\n]*error)' "$P" \
   'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:milk list' "$P" \
+  'send:milk selftest' 'wait:milk: selftest' "$P" \
+  'send:milk keys' "$P" \
+  "done:$WORK/phase1" "waitfile:$WORK/tampered1" \
+  'send:milk install fortune' 'wait:milk: [^\n]*(refused|installed)' "$P" \
+  'send:milk install snake' 'wait:milk: [^\n]*(refused|installed)' "$P" \
+  'send:milk --insecure install snake' 'wait:milk: [^\n]*(installed|refused|error)' "$P" \
+  'send:milk remove snake' "$P" \
+  "done:$WORK/phase2" "waitfile:$WORK/tampered2" \
+  'send:milk update' 'wait:milk: [^\n]*(refused|updated)' "$P" \
+  'send:audit --event user.pkg.verify_fail' "$P" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
   'send:echo now > /sys/fs/milkfs/sync' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
+flip() { # flip one byte in the middle of a file (keeps its size)
+  python3 -I -c "
+import sys
+p = sys.argv[1]
+b = bytearray(open(p, 'rb').read())
+b[len(b) // 2] ^= 0x01
+open(p, 'wb').write(b)" "$1"
+}
 for _ in $(seq 1200); do
   [ -e "$WORK/drive.done" ] && break
+  if [ -e "$WORK/phase1" ] && [ ! -e "$WORK/tampered1" ]; then
+    flip "$WORK/repo/fortune-1.0.0.milkpkg" # signature (and sha256) no longer match
+    rm -f "$WORK/repo/snake-1.0.0.milkpkg.sig" # unsigned
+    touch "$WORK/tampered1"
+  fi
+  if [ -e "$WORK/phase2" ] && [ ! -e "$WORK/tampered2" ]; then
+    flip "$WORK/repo/index.txt" # the index signature no longer matches
+    touch "$WORK/tampered2"
+  fi
   kill -0 "$QPID" 2>/dev/null || fail "qemu exited"
   kill -0 "$DPID" 2>/dev/null || { cat "$WORK/drive.log" >&2; tail -30 "$LOG" >&2; fail "console session failed"; }
   sleep 0.1
@@ -126,6 +153,17 @@ check "clone listed while trying" "^try-snake of=milk-try-snake at=/Volumes/Milk
 check "discard" "milk: discarded clone try-snake"
 check "keep (promote)" "milk: kept moo2048 1.0.0: clone try-moo2048 is now the live system"
 check "kept package runs from /bin" "moo2048: selftest ok"
+check "milk selftest: RFC 8032 + FIPS vectors" "ed25519 16/16 RFC 8032 checks"
+check "update checked the index signature" "index.txt: signature ok \(key milk-test\)"
+check "install checked the package signature" "fortune-1.0.0.milkpkg: signature ok \(key milk-test\)"
+check "tampered package refused" "milk: fortune-1.0.0.milkpkg: BAD signature \(key milk-test\); refused"
+check "unsigned package refused" "milk: snake-1.0.0.milkpkg: unsigned \(no .sig: [^)]*\); refused"
+check "--insecure warns and installs" "WARNING: snake-1.0.0.milkpkg: unsigned"
+check "tampered index refused" "index.txt: BAD signature \(key milk-test\); refused"
+check "audit: verify failure (tampered package)" "user.pkg.verify_fail +what=fortune-1.0.0.milkpkg [^ ]* reason=BAD signature \(key milk-test\) insecure=false"
+check "audit: verify failure (unsigned, refused)" "user.pkg.verify_fail +what=snake-1.0.0.milkpkg [^ ]* reason=unsigned .* insecure=false"
+check "audit: verify failure (unsigned, --insecure)" "user.pkg.verify_fail +what=snake-1.0.0.milkpkg [^ ]* reason=unsigned .* insecure=true"
+check "audit: verify failure (tampered index)" "user.pkg.verify_fail +what=http://10.0.2.2:[0-9]+/index.txt [^ ]* reason=BAD signature"
 check "audit: install" "user.pkg.install +name=fortune version=1.0.0 sha256="
 check "audit: remove" "user.pkg.remove +name=fortune"
 check "audit: try" "user.pkg.try +name=snake"

@@ -13,6 +13,12 @@
 //!   milk keep NAME            promote that clone: the install becomes real
 //!   milk discard NAME         throw the clone away
 //!   milk relink [-q]          recreate the /bin links (/bin is in RAM; init runs this)
+//!   milk keys                 trusted signing keys (/etc/milk/keys/*.pub)
+//!   milk selftest             SHA-256, SHA-512, Ed25519 (RFC 8032) test vectors
+//!
+//! Signatures: index.txt and every package must carry a valid Ed25519 signature
+//! (`<file>.sig`) by a key in /etc/milk/keys, or milk refuses them (and writes a
+//! `user.pkg.verify_fail` audit record); `--insecure` accepts them anyway, still audited.
 //!
 //! Every install/remove/try/keep/discard is an audit record (`user.pkg.*`, written through
 //! /dev/audit, which the kernel turns into records; the snapshot/clone/promote steps are
@@ -39,6 +45,14 @@ const APPS: &str = "/Applications";
 const CACHE_DIR: &str = "/Applications/.milk";
 const CACHE: &str = "/Applications/.milk/index.txt";
 const MILKFS: &str = "/sys/fs/milkfs";
+const KEYS: &str = "/etc/milk/keys";
+
+/// --insecure: accept unsigned / badly signed indexes and packages (loudly, and audited).
+static INSECURE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn insecure() -> bool {
+    INSECURE.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 type Res<T> = Result<T, String>;
 
@@ -113,6 +127,113 @@ fn audit(event: &str, detail: &str) {
     }
 }
 
+// ---- signatures (Ed25519, rt::ed25519) ------------------------------------------------------
+
+fn key_name_ok(n: &str) -> bool {
+    (1..=32).contains(&n.len())
+        && n.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+/// The trusted public key `/etc/milk/keys/<name>.pub` (`ed25519 <hex> <name>`).
+fn trusted_key(name: &str) -> Option<[u8; 32]> {
+    if !key_name_ok(name) {
+        return None;
+    }
+    let t = text(&alloc::format!("{KEYS}/{name}.pub"))?;
+    t.lines().find_map(|l| {
+        let w: Vec<&str> = l.split_whitespace().collect();
+        (w.len() >= 2 && w[0] == "ed25519")
+            .then(|| rt::ed25519::unhex::<32>(w[1]))
+            .flatten()
+    })
+}
+
+/// Check `sig` (the `.sig` file: `ed25519 <key> <hex>`) over `data`. Ok(key name); on any
+/// failure an audit record, and Err unless --insecure.
+fn check_sig(what: &str, data: &[u8], sig: Result<Vec<u8>, String>, repo: &str) -> Res<String> {
+    let verdict = (|| -> Result<String, String> {
+        let sig = sig.map_err(|e| alloc::format!("unsigned (no .sig: {e})"))?;
+        let t = String::from_utf8_lossy(&sig).into_owned();
+        let w: Vec<&str> = t.split_whitespace().collect();
+        let [alg, key, hexsig] = w[..] else {
+            return Err(String::from("malformed .sig"));
+        };
+        if alg != "ed25519" {
+            return Err(alloc::format!("unknown signature algorithm {alg:?}"));
+        }
+        let pk = trusted_key(key)
+            .ok_or_else(|| alloc::format!("key {key:?} is not trusted (not in {KEYS})"))?;
+        let s = rt::ed25519::unhex::<64>(hexsig).ok_or("malformed signature")?;
+        if rt::ed25519::verify(&pk, data, &s) {
+            Ok(String::from(key))
+        } else {
+            Err(alloc::format!("BAD signature (key {key})"))
+        }
+    })();
+    match verdict {
+        Ok(k) => {
+            println!("milk: {what}: signature ok (key {k})");
+            Ok(k)
+        }
+        Err(why) => {
+            audit(
+                "pkg.verify_fail",
+                &alloc::format!(
+                    "what={what} repo={repo} reason={why} insecure={}",
+                    insecure()
+                ),
+            );
+            if insecure() {
+                eprintln!("milk: WARNING: {what}: {why}; continuing because of --insecure");
+                Ok(String::from("INSECURE"))
+            } else {
+                Err(alloc::format!(
+                    "{what}: {why}; refused (milk --insecure ... to override)"
+                ))
+            }
+        }
+    }
+}
+
+fn cmd_keys() {
+    let mut any = false;
+    for (n, _) in sys::read_dir(KEYS).unwrap_or_default() {
+        if let Some(name) = n.strip_suffix(".pub")
+            && let Some(k) = trusted_key(name)
+        {
+            println!("{name:<16} ed25519 {}", hex_bytes(&k));
+            any = true;
+        }
+    }
+    if !any {
+        println!("milk: no trusted keys in {KEYS}: every package will be refused");
+    }
+}
+
+fn hex_bytes(b: &[u8]) -> String {
+    let mut s = String::new();
+    for x in b {
+        s.push_str(&alloc::format!("{x:02x}"));
+    }
+    s
+}
+
+fn cmd_selftest() -> Res<()> {
+    let (a, an) = rt::sha256::selftest();
+    let (b, bn) = rt::sha512::selftest();
+    let (c, cn) = rt::ed25519::selftest();
+    println!(
+        "milk: sha256 {a}/{an} FIPS 180-4, sha512 {b}/{bn} FIPS 180-4, ed25519 {c}/{cn} RFC 8032 checks"
+    );
+    if a == an && b == bn && c == cn {
+        println!("milk: selftest ok");
+        Ok(())
+    } else {
+        Err(String::from("selftest FAILED"))
+    }
+}
+
 // ---- index ------------------------------------------------------------------------------
 
 struct Pkg {
@@ -175,6 +296,12 @@ fn cmd_update() -> Res<()> {
     for r in &list {
         let url = http::parse_url(r)?;
         let body = http::get(&url, "index.txt").map_err(|e| alloc::format!("{r}: {e}"))?;
+        check_sig(
+            &alloc::format!("{r}index.txt"),
+            &body,
+            http::get(&url, "index.txt.sig"),
+            r,
+        )?;
         let t = String::from_utf8_lossy(&body);
         let mut n = 0;
         for l in t
@@ -257,6 +384,13 @@ fn fetch_and_unpack(p: &Pkg, apps_root: &str) -> Res<Manifest> {
         p.name, p.version, p.size, p.repo
     );
     let data = http::get(&url, &p.file)?;
+    // Signature first (it covers the bytes), then the index's sha256.
+    check_sig(
+        &p.file,
+        &data,
+        http::get(&url, &alloc::format!("{}.sig", p.file)),
+        &p.repo,
+    )?;
     let got = hex(&sha256(&data));
     if got != p.sha256 {
         return Err(alloc::format!(
@@ -587,14 +721,24 @@ fn cmd_relink(quiet: bool) {
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: milk update | search [WORD] | info NAME | install NAME | remove NAME | list\n       milk try NAME | keep NAME | discard NAME | relink [-q]"
+        "usage: milk [--insecure] update | search [WORD] | info NAME | install NAME | remove NAME | list\n       milk [--insecure] try NAME | keep NAME | discard NAME | relink [-q] | keys | selftest"
     );
     2
 }
 
 fn main(args: &rt::Args) -> i32 {
-    let a: Vec<&str> = args.argv.iter().skip(1).copied().collect();
+    let mut a: Vec<&str> = args.argv.iter().skip(1).copied().collect();
+    if let Some(i) = a.iter().position(|x| *x == "--insecure") {
+        a.remove(i);
+        INSECURE.store(true, core::sync::atomic::Ordering::Relaxed);
+        eprintln!("milk: --insecure: unsigned or badly signed files will be accepted");
+    }
     let r = match a.as_slice() {
+        ["selftest"] => cmd_selftest(),
+        ["keys"] => {
+            cmd_keys();
+            Ok(())
+        }
         ["update"] => cmd_update(),
         ["search"] => cmd_search(None),
         ["search", w] => cmd_search(Some(w)),

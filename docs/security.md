@@ -218,6 +218,100 @@ through the powerbox. Terminal programs from packages run in the Terminal as bef
 direct open of `~/Documents/todo.txt` fails (EACCES, `sandbox.deny`), then opens and saves
 files only through the panel (wm demos `powerbox`, `powerboxpick`, `powerboxaudit`).
 
+## Authorisation tickets: admin rights for one process, for 5 minutes
+
+Destructive storage operations (Disk Utility, `snap`, `milk keep`) should not be open to
+every program a member of `admin` happens to run. Like macOS's authorisation panel, a
+process *asks* to be authorised, the user proves they are an administrator, and the kernel
+attaches a short-lived **admin ticket** to that one process. Files: `kernel/src/proc/auth.rs`
+(tickets, rate limit, audit), `sys_auth` in `proc/syscall.rs`, the `auth` tool
+(`user/coreutils/src/bin/auth.rs`), `rt::sys::authorize*`.
+
+**The ticket.** Held by the kernel, never by the process: (pid, the process's start time,
+the administrator's uid, expiry). Keying on the start time means a recycled pid gets
+nothing. A ticket
+
+* lasts 5 minutes (`auth::TICKET_NS`) from the grant; asking again renews it;
+* belongs to that process only: **not inherited** by fork (the child has another pid);
+  **kept across exec** (same process), which is how `auth CMD` works;
+* is dropped when the process exits, and on request (`rt::sys::auth_revoke`);
+* gives nothing but the check below: the process's uid, groups and capability sandbox are
+  unchanged (a sandboxed process with a ticket is still sandboxed).
+
+`/proc/<pid>/status` shows `Auth:\tadmin ticket from uid N, S s left` while one is valid.
+
+**What it unlocks.** `proc::auth::require(op)` passes for euid 0, the kernel itself, or a
+valid ticket, and otherwise fails with EPERM and an `auth.required` audit record. The
+filesystem keeps that check in one helper (`privileged()` in `fs/milkfs/mod.rs`), called
+by the destructive `/sys/fs/milkfs` controls: `delete`, `rollback`, `discard`, `promote`,
+`check` with repair, `passwd`, `receive` and `mkfs` (and `lock` once it lands). Opening the
+control files still needs the usual admin-group write access; the ticket is an extra
+requirement on top (a non-admin's process with a ticket still can't open them).
+Read-only and harmless controls (`snapshot`, `clone`, `scrub`, `send`, listings) are
+unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as euid 0 after
+their own password check.
+
+**Asking: the syscall.** `MILK_AUTH = 0x1003` (0x1002 is `MILK_OPENPTY`), `(op, a, b, c, d)`:
+
+| op | args | does | returns |
+|---|---|---|---|
+| 0 | reason, reason_len | ask the desktop's trusted panel | ms on the ticket; `EOPNOTSUPP` (95) without a desktop, `ECANCELED` (125) on Cancel; needs the `windows` capability |
+| 1 | password, len, user, user_len | check an administrator's password (the terminal path; empty user = the caller's own account) | ms on the ticket |
+| 2 | | revoke the caller's ticket | 0 |
+| 3 | | time left | ms (0 = none) |
+
+Errors for 0 and 1: `EACCES` wrong password (or unknown user), `EPERM` the account is not an
+administrator (root or group `admin`), `EAGAIN` rate-limited. The kernel copies the
+password in, checks it with `login::authenticate` (the same code as login, 500 ms per
+failure, reading `/etc/shadow` as the kernel) and zeroes its copy. Userland:
+`rt::sys::authorize(reason)`, `authorize_password(pw, user)`, `auth_revoke()`, `auth_left()`.
+
+**Kernel ↔ wm request.** The window manager is a kernel thread, so the request stays in
+the kernel, like the Powerbox: the wm registers its panel with
+`proc::auth::set_prompt(fn(pid, reason, default_user) -> Option<(user, password)>)`, and op
+0 calls it on the requesting thread, which blocks until the user answers. The panel is
+drawn by the wm, never the app: header "*exe* (pid N) wants to make changes", the reason
+string (256 bytes max, shown as text), user name (pre-filled with the session user),
+password, Cancel / OK. The password goes from the panel to `auth::grant` and never reaches
+the requesting process. With no prompt registered (no desktop) op 0 fails with
+`EOPNOTSUPP` at once and the program should point at `auth`. If the panel ever moves into a
+user-space window server, the same hook becomes an AF_UNIX service under milkd
+(`/run/authd.sock`, SO_PEERCRED-checked so only that service can answer); the syscall
+side doesn't change.
+
+**Terminal fallback: `auth`.** `auth [-S] [-u ADMIN] COMMAND [ARGS...]` asks for an
+administrator's password (your own account by default, `-u` for another; `-S` reads it from
+stdin for scripts), gets a ticket for *itself*, then execs COMMAND, which keeps it:
+`auth snap rollback before-upgrade`, `auth milk keep moo2048`. `auth -s` prints the ticket
+of the process it runs in, so `auth /bin/auth -s` shows a fresh one; there is nothing to
+revoke afterwards, because the ticket ends with COMMAND. Unlike `sudo` (set-user-ID root, runs COMMAND as root), `auth` runs
+COMMAND as you with only the ticket added. `snap` and `milk` print that hint on EPERM;
+`milk` first asks the panel itself (op 0), so the Store and Disk Utility get the panel
+without extra code.
+
+**Rate limit.** Per requesting real uid: after 3 wrong passwords in a row, every further
+request from that uid is refused with `EAGAIN` for 15 s, doubling with each further miss
+up to 10 minutes; a correct password resets the count. Each wrong try also costs the
+500 ms of `authenticate`. Lockouts are kept in RAM only, so a reboot clears them, which is
+acceptable for a single-user machine with console access.
+
+**Audit records** (`proc/auth.rs`): `auth.grant pid= exe= user= uid= via=panel|password
+for=300 s reason=`, `auth.deny pid= exe= user= via= reason=BadPassword|NoSuchUser|
+not-an-administrator|rate-limited (N s left)|cancelled`, `auth.revoke pid=`,
+`auth.required op=milkfs.<control>` (a privileged write refused for want of a ticket).
+`login.ok` / `login.fail` from `authenticate` appear alongside.
+
+**Effect on existing flows.** Anything that wrote those controls as a non-root admin now
+needs a ticket: `snap rollback/delete/...` and `milk try`'s keep/discard (and its
+auto-discard after a failed try) when run as `milk` rather than root. Boot-time and kernel
+callers (the fs self-test, `milk` under the root console in the tests) are unaffected.
+
+**Tests**: `utest auth` (as milk): admin group alone is refused, a wrong password is
+EACCES, the right one gives 5 minutes and the write gets past the check, `/proc/self/status`
+shows the ticket, a forked child has none, revoke works, `auth -S` keeps it across exec, the
+rate limit kicks in after three misses, and the records are in `/proc/audit`. The test
+password is the documented default `milk` (see "Users and credentials"), not a secret.
+
 # The audit log
 
 Files: `kernel/src/audit/` (log, SHA-256, `/dev/audit`), hooks in `proc/mod.rs` (exec),
@@ -253,6 +347,7 @@ or reordering a record breaks the chain at that point.
 | `audio.open` | /dev/audio (first write of a stream) | |
 | `user.*` | user tools through `/dev/audit` (e.g. `user.pkg.install`) | whatever the tool says |
 | `clipboard.read` | for the wm side to add (`audit::record`) | |
+| `auth.grant` / `.deny` / `.revoke` / `.required` | proc::auth (admin tickets) | pid, exe, user, via, reason / op |
 
 ## Where it lives
 

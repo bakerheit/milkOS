@@ -25,6 +25,15 @@ milk_disk_args
 # reach the guest's web server at http://127.0.0.1:8088/.
 source scripts/netdev.sh
 milk_net_args
+# Sound (virtio-sound): off by default. MILK_SOUND=1 plays through the Mac's speakers
+# (coreaudio); MILK_SOUND_WAV=/tmp/x.wav records to a WAV file instead (silent).
+SOUND_ARGS=()
+if [ -n "${MILK_SOUND_WAV:-}" ]; then
+  SOUND_ARGS=(-audiodev "wav,id=snd0,path=$MILK_SOUND_WAV,out.frequency=48000"
+    -device virtio-sound-device,audiodev=snd0)
+elif [ "${MILK_SOUND:-}" = 1 ]; then
+  SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
+fi
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" \
-  "${NET_ARGS[@]}"
+  "${NET_ARGS[@]}" "${SOUND_ARGS[@]}"

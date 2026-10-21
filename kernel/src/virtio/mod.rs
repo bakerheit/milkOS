@@ -2,13 +2,14 @@
 //!
 //! [`init`] walks the 32 virtio-mmio slots of qemu `virt` and hands each device it finds to
 //! its driver. Drivers so far: [`input`] (keyboard, tablet),
-//! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`).
+//! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`), [`sound`] (PCM output for `crate::audio`).
 
 pub mod blk;
 pub mod input;
 pub mod mmio;
 pub mod net;
 pub mod queue;
+pub mod sound;
 
 use crate::kprintln;
 use mmio::{Error, Transport, device_id};
@@ -21,6 +22,7 @@ fn name(id: u32) -> &'static str {
         device_id::RNG => "rng",
         device_id::GPU => "gpu",
         device_id::INPUT => "input",
+        device_id::SOUND => "sound",
         _ => "unknown",
     }
 }
@@ -53,6 +55,7 @@ pub fn init() {
             device_id::INPUT => input::attach(t),
             device_id::BLOCK => blk::attach(t),
             device_id::NET => net::attach(t),
+            device_id::SOUND => sound::attach(t),
             _ => Ok(()),
         };
         if let Err(e) = r {

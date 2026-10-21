@@ -344,7 +344,7 @@ impl State {
         let mut sink = Vec::new();
         let echo = if lflag & ECHO != 0 { echo } else { &mut sink };
         if self.esc == 1 {
-            self.esc = if b == b'[' { 2 } else { 0 };
+            self.esc = if b == b'[' || b == b'O' { 2 } else { 0 };
             return None;
         }
         if self.esc == 2 {

@@ -446,6 +446,25 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             b.typ("http://example.com/").enter().wait(800);
         }
+        "ansi" => {
+            b.wait(300);
+            b.typ(r"/bin/echo -e '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
+            b.typ(
+                r"/bin/echo -e '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
+            )
+            .enter()
+            .wait(300);
+        }
+        "clear" => {
+            b.wait(300)
+                .typ("ls /bin")
+                .enter()
+                .wait(400)
+                .typ("clear")
+                .enter()
+                .wait(400);
+            b.typ("echo the screen was cleared").enter().wait(300);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

@@ -13,6 +13,15 @@
 //! * A thread that belongs to a user process also carries its TTBR0 (address space + ASID),
 //!   TPIDR_EL0 and FP/SIMD registers, swapped on every switch.
 //!
+//! * Run queues ([`Policy`]): by default every CPU has its own ready queues (per priority).
+//!   A thread stays on the CPU it last ran on (warm caches and TLB). A wakeup goes to its
+//!   last CPU if that is idle; stays on the waker's CPU if that was its last (a pipe or
+//!   futex partner, about to block), with an idle CPU kicked as backup; else to an idle
+//!   CPU, else to one running something less important, else to the shortest queue. A CPU with nothing of its own *steals* the
+//!   longest-waiting thread from the busiest queue, and on the tick a CPU pulls one thread
+//!   from a queue two or more longer than its own. `Policy::Global` (one shared queue, the
+//!   old behaviour) stays selectable at run time for comparison: `echo global > /proc/sched`.
+//!
 //! Locking: all scheduler state is in one `SpinLock<Sched>`. `schedule` drops it before the
 //! actual register switch but keeps IRQs masked across it; the resumed thread puts its own
 //! IRQ state back.
@@ -154,8 +163,10 @@ pub struct Thread {
     /// CPU time used, in ns.
     cpu_ns: u64,
     switched_in_at: u64,
-    /// CPU it runs / last ran on.
+    /// CPU it runs / last ran on (for a new thread: where it was created).
     cpu: usize,
+    /// Has run at least once (so a change of `cpu` is a migration).
+    ran: bool,
     /// Only ever runs on this CPU (idle threads; optional affinity).
     pinned: Option<usize>,
     /// A wake arrived while it was running (between "I'm on a wait queue" and "block"):
@@ -174,10 +185,36 @@ struct CpuSched {
     idle: Tid,
 }
 
+/// How ready threads are queued (see the module docs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Policy {
+    /// One ready queue per priority shared by all CPUs.
+    Global,
+    /// Per-CPU ready queues with wake affinity, work stealing and tick-time balancing.
+    PerCpu,
+}
+
+type Queues = [VecDeque<Tid>; NPRIO];
+
+/// Scheduler counters, for /proc/sched.
+#[derive(Clone, Copy, Default)]
+pub struct CpuStats {
+    /// Threads taken from another CPU's queue by this CPU (idle steal or balance pull).
+    pub steals: u64,
+    /// Threads that started running here after last running on another CPU.
+    pub migrations_in: u64,
+    /// Ready threads queued here right now.
+    pub queued: usize,
+}
+
 struct Sched {
     threads: BTreeMap<Tid, Box<Thread>>,
-    /// One global ready queue per priority (all CPUs pick from it).
-    ready: [VecDeque<Tid>; NPRIO],
+    policy: Policy,
+    /// Policy::Global: the one ready queue per priority (all CPUs pick from it).
+    global: Queues,
+    /// Policy::PerCpu: each CPU's ready queues.
+    rq: [Queues; MAX_CPUS],
+    stats: [CpuStats; MAX_CPUS],
     sleeping: Vec<Tid>,
     /// Dead, detached threads waiting to have their stack freed.
     zombies: Vec<Tid>,
@@ -208,36 +245,143 @@ impl Sched {
         })
     }
 
+    fn runnable_on(&self, tid: Tid, cpu: usize) -> bool {
+        self.threads
+            .get(&tid)
+            .is_some_and(|t| t.pinned.is_none_or(|c| c == cpu))
+    }
+
+    fn prio_of(p: usize) -> Priority {
+        match p {
+            0 => Priority::Idle,
+            1 => Priority::Low,
+            2 => Priority::Normal,
+            _ => Priority::High,
+        }
+    }
+
+    /// Highest priority with a thread in `q` that may run on `cpu`, and its index there.
+    fn best_in(&self, q: &Queues, cpu: usize) -> Option<(usize, usize)> {
+        (1..NPRIO)
+            .rev()
+            .find_map(|p| Some((p, q[p].iter().position(|&t| self.runnable_on(t, cpu))?)))
+    }
+
+    fn queued(&self, cpu: usize) -> usize {
+        self.rq[cpu].iter().map(|q| q.len()).sum()
+    }
+
+    /// Per-CPU mode: what `cpu` should run next from another CPU's queue, if anything
+    /// beats its own best (`own`, a priority): a strictly higher priority, or anything at
+    /// all when it has nothing. Among equals, the busiest queue. (prio, source cpu, index)
+    fn steal_candidate(&self, cpu: usize, own: Option<usize>) -> Option<(usize, usize, usize)> {
+        let mut best: Option<(usize, usize, usize)> = None;
+        for c in percpu::online().filter(|&c| c != cpu) {
+            let Some((p, i)) = self.best_in(&self.rq[c], cpu) else {
+                continue;
+            };
+            if own.is_some_and(|o| p <= o) {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((bp, bc, _)) => p > bp || (p == bp && self.queued(c) > self.queued(bc)),
+            };
+            if better {
+                best = Some((p, c, i));
+            }
+        }
+        best
+    }
+
     fn pick(&mut self, cpu: usize) -> Tid {
-        for p in (1..NPRIO).rev() {
-            let q = &self.ready[p];
-            let pos = q.iter().position(|t| {
-                self.threads
-                    .get(t)
-                    .is_some_and(|t| t.pinned.is_none_or(|c| c == cpu))
-            });
-            if let Some(i) = pos {
-                return self.ready[p].remove(i).unwrap();
+        match self.policy {
+            Policy::Global => {
+                if let Some((p, i)) = self.best_in(&self.global, cpu) {
+                    return self.global[p].remove(i).unwrap();
+                }
+            }
+            Policy::PerCpu => {
+                let own = self.best_in(&self.rq[cpu], cpu);
+                if let Some((p, c, i)) = self.steal_candidate(cpu, own.map(|o| o.0)) {
+                    self.stats[cpu].steals += 1;
+                    return self.rq[c][p].remove(i).unwrap();
+                }
+                if let Some((p, i)) = own {
+                    return self.rq[cpu][p].remove(i).unwrap();
+                }
             }
         }
         self.cpus[cpu].idle
     }
 
     fn has_ready_for(&self, cpu: usize) -> Option<Priority> {
-        (1..NPRIO).rev().find_map(|p| {
-            self.ready[p]
+        let p = match self.policy {
+            Policy::Global => self.best_in(&self.global, cpu).map(|b| b.0),
+            Policy::PerCpu => {
+                let own = self.best_in(&self.rq[cpu], cpu).map(|b| b.0);
+                self.steal_candidate(cpu, own).map(|b| b.0).or(own)
+            }
+        };
+        p.map(Self::prio_of)
+    }
+
+    /// Should `cpu` switch away from what it runs now? (The tick's round-robin check.) A
+    /// busy CPU only takes a thread from another queue if it is more important than its
+    /// current one, so equal threads don't bounce between CPUs.
+    fn should_preempt(&self, cpu: usize) -> bool {
+        let idle = self.is_idle(cpu);
+        let cur = self.running_prio(cpu) as usize;
+        match self.policy {
+            Policy::Global => self
+                .best_in(&self.global, cpu)
+                .is_some_and(|(p, _)| idle || p >= cur),
+            Policy::PerCpu => {
+                let own = self.best_in(&self.rq[cpu], cpu).map(|b| b.0);
+                if idle {
+                    own.is_some() || self.steal_candidate(cpu, own).is_some()
+                } else {
+                    own.is_some_and(|p| p >= cur) || self.steal_candidate(cpu, Some(cur)).is_some()
+                }
+            }
+        }
+    }
+
+    /// Tick-time balancing (per-CPU mode): if some queue is at least two threads longer
+    /// than ours, pull its longest-waiting thread over. Fixes imbalance that stealing
+    /// alone doesn't (stealing only happens when a CPU runs dry).
+    fn balance(&mut self, cpu: usize) {
+        if self.policy != Policy::PerCpu {
+            return;
+        }
+        let mine = self.queued(cpu);
+        let Some(src) = percpu::online()
+            .filter(|&c| c != cpu && self.queued(c) >= mine + 2)
+            .max_by_key(|&c| self.queued(c))
+        else {
+            return;
+        };
+        for p in (1..NPRIO).rev() {
+            if let Some(i) = self.rq[src][p]
                 .iter()
-                .any(|t| {
-                    self.threads
-                        .get(t)
-                        .is_some_and(|t| t.pinned.is_none_or(|c| c == cpu))
-                })
-                .then_some(match p {
-                    1 => Priority::Low,
-                    2 => Priority::Normal,
-                    _ => Priority::High,
-                })
-        })
+                .position(|&t| self.runnable_on(t, cpu))
+            {
+                let tid = self.rq[src][p].remove(i).unwrap();
+                self.rq[cpu][p].push_back(tid);
+                self.stats[cpu].steals += 1;
+                return;
+            }
+        }
+    }
+
+    fn is_idle(&self, c: usize) -> bool {
+        self.cpus[c].current == self.cpus[c].idle
+    }
+
+    fn running_prio(&self, c: usize) -> Priority {
+        self.threads
+            .get(&self.cpus[c].current)
+            .map_or(Priority::Idle, |r| r.prio)
     }
 
     /// Make `tid` runnable and get a CPU to run it: an idle CPU if there is one, else one
@@ -249,25 +393,89 @@ impl Sched {
         };
         t.state = State::Ready;
         t.wake_at = 0;
-        let (prio, pinned) = (t.prio, t.pinned);
-        self.ready[prio as usize].push_back(tid);
+        let (prio, pinned, last) = (t.prio, t.pinned, t.cpu);
         let me = percpu::id();
         let candidates = || percpu::online().filter(move |&c| pinned.is_none_or(|p| p == c));
-        // An idle CPU first (ourselves included).
+        if self.policy == Policy::Global {
+            self.global[prio as usize].push_back(tid);
+            // An idle CPU first (ourselves included).
+            let target = candidates()
+                .find(|&c| self.is_idle(c) && c == me)
+                .or_else(|| candidates().find(|&c| self.is_idle(c)))
+                .or_else(|| {
+                    candidates()
+                        .filter(|&c| self.running_prio(c) < prio)
+                        .min_by_key(|&c| self.running_prio(c))
+                });
+            if let Some(c) = target {
+                kick(c);
+            }
+            return;
+        }
+        // Per-CPU. "Free" = idle, nothing queued, not already kicked.
+        // 1. Its last CPU if free (cache warm, nothing to wait for).
+        // 2. Woken by a thread on its own last CPU (a pipe/futex partner, typically about
+        //    to block): queue it right here, where it is cache hot; if we don't block soon,
+        //    a free CPU we kick steals it. (Not for new threads: those spread out. Only if
+        //    it preempts us or there is such a free CPU.)
+        // 3. Any free CPU, this one first.
+        // 4. One running something less important (its last CPU on a tie).
+        // 5. Else the shortest queue (its last CPU on a tie): the tick round-robins it.
+        let ran = t.ran;
+        let free = |c: usize| {
+            self.is_idle(c)
+                && self.queued(c) == 0
+                && !percpu::get(c).need_resched.load(Ordering::Relaxed)
+        };
+        let last_ok = candidates().any(|c| c == last);
+        if last_ok && free(last) {
+            self.rq[last][prio as usize].push_back(tid);
+            kick(last);
+            return;
+        }
+        if ran && last == me && last_ok {
+            let backup = percpu::online().find(|&c| c != me && free(c));
+            let preempt = self.running_prio(me) < prio;
+            // Strict priorities: if we won't preempt here and there is no free CPU to fall
+            // back on, but another CPU runs a less important (non-idle) thread, go there.
+            let lower_elsewhere =
+                candidates().any(|c| c != me && !self.is_idle(c) && self.running_prio(c) < prio);
+            if preempt || backup.is_some() || !lower_elsewhere {
+                self.rq[me][prio as usize].push_back(tid);
+                if preempt {
+                    kick(me);
+                } else if let Some(c) = backup {
+                    kick(c);
+                }
+                return;
+            }
+        }
         let target = candidates()
-            .find(|&c| self.cpus[c].current == self.cpus[c].idle && c == me)
-            .or_else(|| candidates().find(|&c| self.cpus[c].current == self.cpus[c].idle))
+            .find(|&c| c == me && free(c))
+            .or_else(|| candidates().find(|&c| free(c)))
             .or_else(|| {
                 candidates()
-                    .filter(|&c| {
-                        self.threads
-                            .get(&self.cpus[c].current)
-                            .is_some_and(|r| r.prio < prio)
-                    })
-                    .min_by_key(|&c| self.threads.get(&self.cpus[c].current).map(|r| r.prio))
+                    .filter(|&c| self.running_prio(c) < prio)
+                    .min_by_key(|&c| (self.running_prio(c), c != last))
             });
-        if let Some(c) = target {
-            kick(c);
+        let kick_it = target.is_some();
+        let target = target.unwrap_or_else(|| {
+            candidates()
+                .min_by_key(|&c| (self.queued(c), c != last))
+                .unwrap_or(last)
+        });
+        self.rq[target][prio as usize].push_back(tid);
+        if kick_it {
+            kick(target);
+        }
+    }
+
+    /// Queue the current thread of `cpu` again after it was preempted / yielded.
+    fn requeue(&mut self, cpu: usize, tid: Tid) {
+        let prio = self.threads[&tid].prio as usize;
+        match self.policy {
+            Policy::Global => self.global[prio].push_back(tid),
+            Policy::PerCpu => self.rq[cpu][prio].push_back(tid),
         }
     }
 
@@ -276,7 +484,7 @@ impl Sched {
         self.threads.insert(tid, t);
         // Reserve so make_ready / sleep never allocate (they run from IRQs).
         let n = self.threads.len();
-        for q in self.ready.iter_mut() {
+        for q in self.global.iter_mut().chain(self.rq.iter_mut().flatten()) {
             q.reserve(n.saturating_sub(q.len()));
         }
         self.sleeping.reserve(n.saturating_sub(self.sleeping.len()));
@@ -382,7 +590,8 @@ fn thread_struct(tid: Tid, name: &str, prio: Priority, kstack: Option<KStack>) -
         user: None,
         cpu_ns: 0,
         switched_in_at: 0,
-        cpu: 0,
+        cpu: percpu::id(),
+        ran: false,
         pinned: None,
         wake_pending: false,
         switching_out: AtomicBool::new(false),
@@ -399,7 +608,10 @@ pub fn init() {
     main.switched_in_at = timer::now_ns();
     let mut s = Sched {
         threads: BTreeMap::new(),
-        ready: [const { VecDeque::new() }; NPRIO],
+        policy: Policy::PerCpu,
+        global: [const { VecDeque::new() }; NPRIO],
+        rq: [const { [const { VecDeque::new() }; NPRIO] }; MAX_CPUS],
+        stats: [CpuStats::default(); MAX_CPUS],
         sleeping: Vec::new(),
         zombies: Vec::new(),
         cpus: [CpuSched::default(); MAX_CPUS],
@@ -766,8 +978,7 @@ fn schedule(how: Leave) {
         }
         let runnable_again = s.threads[&cur].state == State::Ready;
         if runnable_again && cur != idle {
-            let prio = s.threads[&cur].prio as usize;
-            s.ready[prio].push_back(cur);
+            s.requeue(cpu, cur);
         }
         let next = s.pick(cpu);
         if next == cur {
@@ -777,7 +988,13 @@ fn schedule(how: Leave) {
         let nt = s.threads.get_mut(&next).expect("picked a missing thread");
         nt.state = State::Running;
         nt.switched_in_at = now;
+        let migrated = nt.ran && nt.cpu != cpu;
+        nt.ran = true;
         nt.cpu = cpu;
+        if migrated {
+            s.stats[cpu].migrations_in += 1;
+        }
+        let nt = s.threads.get_mut(&next).unwrap();
         let next_ptr: *mut Thread = &mut **nt;
         s.cpus[cpu].current = next;
         percpu::get(cpu).current.store(next, Ordering::Relaxed);
@@ -953,12 +1170,8 @@ fn on_tick(_frame: &mut TrapFrame) {
     }
     with(|s| {
         s.wake_expired(timer::now_ns());
-        let cur = s.cpus[cpu].current;
-        let is_idle = cur == s.cpus[cpu].idle;
-        let cur_prio = s.threads.get(&cur).map_or(Priority::Idle, |t| t.prio);
-        if let Some(p) = s.has_ready_for(cpu)
-            && (is_idle || p >= cur_prio)
-        {
+        s.balance(cpu);
+        if s.should_preempt(cpu) {
             percpu::get(cpu).need_resched.store(true, Ordering::Relaxed);
         }
     });
@@ -1123,4 +1336,47 @@ pub fn cpu_times(cpu: usize) -> (u64, u64) {
         }
     }
     (busy, idle)
+}
+
+// ---- run-queue policy ------------------------------------------------------------------
+
+pub fn policy() -> Policy {
+    with(|s| s.policy)
+}
+
+/// Switch between the shared queue and per-CPU queues; queued threads move over.
+pub fn set_policy(p: Policy) {
+    let _g = IrqGuard::new();
+    with(|s| {
+        if s.policy == p {
+            return;
+        }
+        let mut moved: Vec<Tid> = Vec::new();
+        for q in s.global.iter_mut().chain(s.rq.iter_mut().flatten()) {
+            moved.extend(q.drain(..));
+        }
+        s.policy = p;
+        for tid in moved {
+            let (prio, cpu) = {
+                let t = &s.threads[&tid];
+                (t.prio as usize, t.pinned.unwrap_or(t.cpu))
+            };
+            match p {
+                Policy::Global => s.global[prio].push_back(tid),
+                Policy::PerCpu => s.rq[cpu][prio].push_back(tid),
+            }
+        }
+        for c in percpu::online() {
+            kick(c);
+        }
+    });
+}
+
+/// Per-CPU counters (steals, migrations, queue length).
+pub fn cpu_stats(cpu: usize) -> CpuStats {
+    with(|s| {
+        let mut st = s.stats[cpu];
+        st.queued = s.queued(cpu);
+        st
+    })
 }

@@ -189,6 +189,10 @@ pub fn init() -> usize {
         if smc { "smc" } else { "hvc" }
     );
     STARTED.store(n, Ordering::Release);
+    if n > 1 {
+        gic::spread_spis(true);
+        kprintln!("[smp] device IRQs spread over {n} CPUs (GICD_ITARGETSR, round robin)");
+    }
     n
 }
 

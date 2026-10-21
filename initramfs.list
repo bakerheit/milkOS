@@ -10,3 +10,30 @@
 /bin/msh    target/user/aarch64-unknown-none-softfloat/release/msh     755
 /bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755
 /bin/utest  target/user/aarch64-unknown-none-softfloat/release/utest   755
+
+# Coreutils (user/coreutils/src/bin/*.rs), one small binary each.
+/bin/cat     target/user/aarch64-unknown-none-softfloat/release/cat     755
+/bin/clear   target/user/aarch64-unknown-none-softfloat/release/clear   755
+/bin/cp      target/user/aarch64-unknown-none-softfloat/release/cp      755
+/bin/echo    target/user/aarch64-unknown-none-softfloat/release/echo    755
+/bin/env     target/user/aarch64-unknown-none-softfloat/release/env     755
+/bin/false   target/user/aarch64-unknown-none-softfloat/release/false   755
+/bin/free    target/user/aarch64-unknown-none-softfloat/release/free    755
+/bin/grep    target/user/aarch64-unknown-none-softfloat/release/grep    755
+/bin/head    target/user/aarch64-unknown-none-softfloat/release/head    755
+/bin/kill    target/user/aarch64-unknown-none-softfloat/release/kill    755
+/bin/ln      target/user/aarch64-unknown-none-softfloat/release/ln      755
+/bin/ls      target/user/aarch64-unknown-none-softfloat/release/ls      755
+/bin/mkdir   target/user/aarch64-unknown-none-softfloat/release/mkdir   755
+/bin/mv      target/user/aarch64-unknown-none-softfloat/release/mv      755
+/bin/ps      target/user/aarch64-unknown-none-softfloat/release/ps      755
+/bin/rm      target/user/aarch64-unknown-none-softfloat/release/rm      755
+/bin/sleep   target/user/aarch64-unknown-none-softfloat/release/sleep   755
+/bin/sort    target/user/aarch64-unknown-none-softfloat/release/sort    755
+/bin/tail    target/user/aarch64-unknown-none-softfloat/release/tail    755
+/bin/touch   target/user/aarch64-unknown-none-softfloat/release/touch   755
+/bin/true    target/user/aarch64-unknown-none-softfloat/release/true    755
+/bin/uname   target/user/aarch64-unknown-none-softfloat/release/uname   755
+/bin/uniq    target/user/aarch64-unknown-none-softfloat/release/uniq    755
+/bin/uptime  target/user/aarch64-unknown-none-softfloat/release/uptime  755
+/bin/wc      target/user/aarch64-unknown-none-softfloat/release/wc      755

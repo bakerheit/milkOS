@@ -66,9 +66,16 @@ pub type Result<T> = core::result::Result<T, Errno>;
 pub mod nr {
     pub const GETCWD: usize = 17;
     pub const MKDIRAT: usize = 34;
+    pub const UNLINKAT: usize = 35;
+    pub const SYMLINKAT: usize = 36;
+    pub const LINKAT: usize = 37;
+    pub const NEWFSTATAT: usize = 79;
+    pub const UTIMENSAT: usize = 88;
+    pub const RENAMEAT2: usize = 276;
     pub const CHDIR: usize = 49;
     pub const DUP: usize = 23;
     pub const DUP3: usize = 24;
+    pub const FCNTL: usize = 25;
     pub const OPENAT: usize = 56;
     pub const PIPE2: usize = 59;
     pub const CLOSE: usize = 57;
@@ -178,6 +185,199 @@ pub fn open(path: &str, flags: u32) -> Result<i32> {
     .map(|f| f as i32)
 }
 
+pub const O_WRONLY: u32 = 1;
+pub const O_RDWR: u32 = 2;
+pub const O_CREAT: u32 = 0o100;
+pub const O_EXCL: u32 = 0o200;
+pub const O_TRUNC: u32 = 0o1000;
+pub const O_APPEND: u32 = 0o2000;
+
+/// openat(AT_FDCWD, path, flags, mode).
+pub fn open_mode(path: &str, flags: u32, mode: u32) -> Result<i32> {
+    let p = cs(path);
+    sc(
+        nr::OPENAT,
+        [
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            flags as usize,
+            mode as usize,
+            0,
+            0,
+        ],
+    )
+    .map(|f| f as i32)
+}
+
+/// The fields of `struct stat` the tools use.
+#[derive(Clone, Copy, Default)]
+pub struct Stat {
+    pub ino: u64,
+    pub mode: u32,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub rdev: u64,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+impl Stat {
+    pub fn is_dir(&self) -> bool {
+        self.mode & 0o170000 == 0o040000
+    }
+    pub fn is_link(&self) -> bool {
+        self.mode & 0o170000 == 0o120000
+    }
+    /// 'd', '-', 'l', 'c', 'b', 'p', 's'
+    pub fn type_char(&self) -> char {
+        match self.mode & 0o170000 {
+            0o040000 => 'd',
+            0o120000 => 'l',
+            0o020000 => 'c',
+            0o060000 => 'b',
+            0o010000 => 'p',
+            0o140000 => 's',
+            _ => '-',
+        }
+    }
+}
+
+fn parse_stat(st: &[u8; 128]) -> Stat {
+    let u32_at = |o: usize| u32::from_le_bytes(st[o..o + 4].try_into().unwrap());
+    let u64_at = |o: usize| u64::from_le_bytes(st[o..o + 8].try_into().unwrap());
+    Stat {
+        ino: u64_at(8),
+        mode: u32_at(16),
+        nlink: u32_at(20),
+        uid: u32_at(24),
+        gid: u32_at(28),
+        rdev: u64_at(32),
+        size: u64_at(48),
+        mtime: u64_at(88) as i64,
+    }
+}
+
+/// stat (follow = true) or lstat (false).
+pub fn stat_path(path: &str, follow: bool) -> Result<Stat> {
+    let p = cs(path);
+    let mut st = [0u8; 128];
+    let flags = if follow { 0 } else { 0x100 };
+    sc(
+        nr::NEWFSTATAT,
+        [
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            st.as_mut_ptr() as usize,
+            flags,
+            0,
+            0,
+        ],
+    )?;
+    Ok(parse_stat(&st))
+}
+
+pub fn stat_fd(fd: i32) -> Result<Stat> {
+    let mut st = [0u8; 128];
+    sc(
+        nr::FSTAT,
+        [fd as usize, st.as_mut_ptr() as usize, 0, 0, 0, 0],
+    )?;
+    Ok(parse_stat(&st))
+}
+
+pub fn unlink(path: &str) -> Result<()> {
+    let p = cs(path);
+    sc(
+        nr::UNLINKAT,
+        [AT_FDCWD as usize, p.as_ptr() as usize, 0, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+pub fn rmdir(path: &str) -> Result<()> {
+    let p = cs(path);
+    sc(
+        nr::UNLINKAT,
+        [AT_FDCWD as usize, p.as_ptr() as usize, 0x200, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+pub fn rename(old: &str, new: &str) -> Result<()> {
+    let (o, n) = (cs(old), cs(new));
+    sc(
+        nr::RENAMEAT2,
+        [
+            AT_FDCWD as usize,
+            o.as_ptr() as usize,
+            AT_FDCWD as usize,
+            n.as_ptr() as usize,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+pub fn symlink(target: &str, path: &str) -> Result<()> {
+    let (t, p) = (cs(target), cs(path));
+    sc(
+        nr::SYMLINKAT,
+        [
+            t.as_ptr() as usize,
+            AT_FDCWD as usize,
+            p.as_ptr() as usize,
+            0,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+pub fn link(old: &str, new: &str) -> Result<()> {
+    let (o, n) = (cs(old), cs(new));
+    sc(
+        nr::LINKAT,
+        [
+            AT_FDCWD as usize,
+            o.as_ptr() as usize,
+            AT_FDCWD as usize,
+            n.as_ptr() as usize,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// Set atime and mtime to now (touch).
+pub fn touch_now(path: &str) -> Result<()> {
+    let p = cs(path);
+    sc(
+        nr::UTIMENSAT,
+        [AT_FDCWD as usize, p.as_ptr() as usize, 0, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
+/// (rows, cols) of the terminal on `fd`, if it is one.
+pub fn winsize(fd: i32) -> Option<(u16, u16)> {
+    let mut ws = [0u16; 4];
+    sc(
+        nr::IOCTL,
+        [fd as usize, 0x5413, ws.as_mut_ptr() as usize, 0, 0, 0],
+    )
+    .ok()?;
+    (ws[1] > 0).then_some((ws[0], ws[1]))
+}
+
+/// Terminal width for laying out columns: TIOCGWINSZ on stdout, else 80.
+pub fn term_cols() -> usize {
+    winsize(1).map_or(80, |(_, c)| c as usize)
+}
+
 pub fn mkdir(path: &str, mode: u32) -> Result<()> {
     let p = cs(path);
     sc(
@@ -218,6 +418,11 @@ pub fn dup2(old: i32, new: i32) -> Result<i32> {
         return Ok(new);
     }
     sc(nr::DUP3, [old as usize, new as usize, 0, 0, 0, 0]).map(|f| f as i32)
+}
+
+/// fcntl(F_DUPFD_CLOEXEC): a close-on-exec copy of `fd` at the lowest fd >= `min`.
+pub fn fcntl_dupfd(fd: i32, min: i32) -> Result<i32> {
+    sc(nr::FCNTL, [fd as usize, 1030, min as usize, 0, 0, 0]).map(|f| f as i32)
 }
 
 pub fn close(fd: i32) -> Result<()> {

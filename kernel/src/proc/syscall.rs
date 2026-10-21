@@ -29,6 +29,13 @@ pub mod nr {
     pub const IOCTL: u64 = 29;
     pub const MKDIRAT: u64 = 34;
     pub const UNLINKAT: u64 = 35;
+    pub const SYMLINKAT: u64 = 36;
+    pub const LINKAT: u64 = 37;
+    pub const FTRUNCATE: u64 = 46;
+    pub const FCHMODAT: u64 = 53;
+    pub const FCHDIR: u64 = 50;
+    pub const UTIMENSAT: u64 = 88;
+    pub const RENAMEAT2: u64 = 276;
     pub const CHDIR: u64 = 49;
     pub const OPENAT: u64 = 56;
     pub const PIPE2: u64 = 59;
@@ -205,6 +212,52 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             }
             Ok(0)
         }
+        nr::SYMLINKAT => {
+            let target = user_path(a0)?;
+            let path = user_path(a2)?;
+            let base = base(a[1] as i32 as i64)?;
+            fs::symlink_at(&target, base.as_ref(), &path)?;
+            Ok(0)
+        }
+        nr::LINKAT => {
+            let (old, new) = (user_path(a1)?, user_path(a3)?);
+            let (ob, nb) = (base(a[0] as i32 as i64)?, base(a[2] as i32 as i64)?);
+            let follow = a[4] as u32 & abi::AT_SYMLINK_FOLLOW != 0;
+            fs::link_at(ob.as_ref(), &old, nb.as_ref(), &new, follow)?;
+            Ok(0)
+        }
+        nr::RENAMEAT2 => {
+            if a[4] != 0 {
+                return Err(EINVAL); // RENAME_NOREPLACE / EXCHANGE: not yet
+            }
+            let (old, new) = (user_path(a1)?, user_path(a3)?);
+            let (ob, nb) = (base(a[0] as i32 as i64)?, base(a[2] as i32 as i64)?);
+            fs::rename_at(ob.as_ref(), &old, nb.as_ref(), &new)?;
+            Ok(0)
+        }
+        nr::FTRUNCATE => {
+            file(a[0] as i64)?.truncate(a1 as u64)?;
+            Ok(0)
+        }
+        nr::FCHMODAT => {
+            let path = user_path(a1)?;
+            let base = base(a[0] as i32 as i64)?;
+            let attr = fs::SetAttr {
+                perm: Some(a[2] as u32 & 0o7777),
+                ..Default::default()
+            };
+            fs::setattr_at(base.as_ref(), &path, true, &attr)?;
+            Ok(0)
+        }
+        nr::FCHDIR => {
+            let ino = file(a[0] as i64)?.inode().clone();
+            if ino.kind() != InodeType::Dir {
+                return Err(ENOTDIR);
+            }
+            current().inner.lock().cwd = ino;
+            Ok(0)
+        }
+        nr::UTIMENSAT => sys_utimensat(a[0] as i32 as i64, a1, a2, a[3] as u32),
         nr::DUP => {
             let p = current();
             let mut i = p.inner.lock();
@@ -662,6 +715,41 @@ fn sys_newfstatat(dirfd: i64, path: usize, statbuf: usize, flags: u32) -> KResul
         fs::stat_at(base.as_ref(), &path, flags & abi::AT_SYMLINK_NOFOLLOW == 0)?
     };
     copy_out(statbuf, st.to_linux().as_bytes())?;
+    Ok(0)
+}
+
+fn sys_utimensat(dirfd: i64, path: usize, times: usize, flags: u32) -> KResult<usize> {
+    const UTIME_NOW: i64 = (1 << 30) - 1;
+    const UTIME_OMIT: i64 = (1 << 30) - 2;
+    let now = fs::clock::now();
+    let (atime, mtime) = if times == 0 {
+        (Some(now), Some(now))
+    } else {
+        let b = copy_in(times, 32)?;
+        let ts = |o: usize| {
+            let sec = i64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+            let nsec = i64::from_le_bytes(b[o + 8..o + 16].try_into().unwrap());
+            match nsec {
+                UTIME_OMIT => None,
+                UTIME_NOW => Some(now),
+                _ => Some(fs::Timespec { sec, nsec }),
+            }
+        };
+        (ts(0), ts(16))
+    };
+    let attr = fs::SetAttr {
+        atime,
+        mtime,
+        ..Default::default()
+    };
+    let follow = flags & abi::AT_SYMLINK_NOFOLLOW == 0;
+    if path == 0 {
+        // futimens(fd, ...)
+        return file(dirfd)?.inode().setattr(&attr).map(|_| 0);
+    }
+    let p = user_path(path)?;
+    let base = base(dirfd)?;
+    fs::setattr_at(base.as_ref(), &p, follow, &attr)?;
     Ok(0)
 }
 

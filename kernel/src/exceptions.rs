@@ -17,7 +17,7 @@
 
 use core::arch::{asm, global_asm};
 use core::mem::{offset_of, size_of};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::sync::FnSlot;
 use crate::{gic, kprintln};
@@ -97,7 +97,7 @@ global_asm!(
 /// Called on the emergency stack when an EL1 exception would push its frame below the
 /// current kernel stack.
 extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
-    CRASHING.store(true, Ordering::Relaxed);
+    CRASHING.store(crate::percpu::id() + 1, Ordering::Relaxed);
     let (tid, name) = crate::sched::current_for_crash();
     kprintln!("\n*** KERNEL STACK OVERFLOW ***");
     kprintln!("  thread {tid} ({name}), sp would be {sp:#018x}");
@@ -245,7 +245,8 @@ fn sync(frame: &mut TrapFrame, vector: usize) {
 
 // ---- crash dump --------------------------------------------------------------------
 
-static CRASHING: AtomicBool = AtomicBool::new(false);
+/// CPU number + 1 of the CPU printing a crash dump (0: none).
+static CRASHING: AtomicUsize = AtomicUsize::new(0);
 
 fn halt() -> ! {
     unsafe { asm!("msr daifset, #0xf", options(nomem, nostack)) };
@@ -256,12 +257,33 @@ fn halt() -> ! {
 
 /// Print a crash dump for the trapped context and halt. Usable from any handler.
 pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
-    // A fault while printing the dump would recurse forever; bail out on the second entry.
-    if CRASHING.load(Ordering::Relaxed) {
-        kprintln!("\n*** DOUBLE FAULT while dumping a crash (vector {vector}) ***");
+    let cpu = crate::percpu::id();
+    // One full dump at a time. A fault while *this* CPU prints its dump is a real double
+    // fault (bail out, don't recurse); another CPU crashing at the same moment (two CPUs
+    // running a corrupted thread, say) gets a one-line summary and halts, so the first
+    // dump stays readable.
+    if let Err(owner) = CRASHING.compare_exchange(0, cpu + 1, Ordering::AcqRel, Ordering::Acquire) {
+        if owner == cpu + 1 {
+            kprintln!(
+                "\n*** DOUBLE FAULT on cpu {cpu} while dumping a crash (vector {vector}) ***"
+            );
+        } else {
+            // Let the first dump finish (bounded: it may itself be stuck).
+            let t0 = crate::timer::now_ns();
+            while crate::timer::now_ns() - t0 < 300_000_000 {
+                core::hint::spin_loop();
+            }
+            kprintln!(
+                "*** cpu {cpu} also crashed (cpu {} is dumping): {what}, vector {vector}, ESR {:#x}, ELR {:#x}, FAR {:#x}, lr {:#x}",
+                owner - 1,
+                frame.esr,
+                frame.elr,
+                frame.far,
+                frame.x[30]
+            );
+        }
         halt();
     }
-    CRASHING.store(true, Ordering::Relaxed);
 
     let esr = frame.esr;
     let ec = (esr >> 26) & 0x3f;
@@ -275,7 +297,8 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
     };
 
     kprintln!("\n*** KERNEL EXCEPTION: {what} ***");
-    kprintln!("  vector {vector} ({source})");
+    let (tid, name) = crate::sched::current_for_crash();
+    kprintln!("  vector {vector} ({source}), cpu {cpu}, thread {tid} ({name})");
     if vector % 4 == 0 {
         kprintln!(
             "  ESR_EL1 = {:#010x}  EC={:#04x} ({}) IL={} ISS={:#09x}",

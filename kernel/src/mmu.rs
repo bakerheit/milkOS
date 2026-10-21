@@ -4,14 +4,16 @@
 //! * [`AddressSpace`] is a page-table tree that can map/unmap/translate. It is
 //!   not tied to the kernel's own tables, so per-process spaces are just more
 //!   `AddressSpace::new` calls (see docs/memory.md).
-//! * [`init`] builds the boot identity map in a small static pool of tables
-//!   (no allocator, no locks: it runs with the MMU off) and turns the MMU and
-//!   caches on.
+//! * boot.S turns the MMU on with two static boot tables (identity in TTBR0, the same
+//!   1 GiB of RAM + 1 GiB of MMIO at KERNEL_BASE in TTBR1) and branches to the higher half.
+//! * [`init`] builds the kernel's real tables (a linear map of MMIO and all of RAM) in a
+//!   small static pool (no allocator yet), switches TTBR1 to them and empties TTBR0.
 //! * Every physical/virtual conversion goes through [`phys_to_virt`] and
-//!   [`virt_to_phys`], the only place that knows the kernel is identity mapped.
+//!   [`virt_to_phys`].
 
 use crate::pmm;
 use crate::sync::SpinLock;
+use core::arch::global_asm;
 use core::cell::UnsafeCell;
 
 pub type PhysAddr = usize;
@@ -22,10 +24,11 @@ const ENTRIES: usize = 512;
 /// Highest VA bit we use: 48-bit address space per TTBR.
 const VA_BITS: u32 = 48;
 
-/// Offset between a physical address and its kernel virtual address. 0 while
-/// RAM is identity mapped; a higher-half kernel changes only this (plus the
-/// mapping set up in `init`).
-const PHYS_OFFSET: usize = 0;
+/// Base of the kernel's linear map in the TTBR1 (upper) half: physical address `pa` is at
+/// virtual `KERNEL_BASE + pa`. The kernel image itself is linked inside it (linker.ld:
+/// VMA = KERNEL_BASE + load address).
+pub const KERNEL_BASE: usize = 0xffff_0000_0000_0000;
+const PHYS_OFFSET: usize = KERNEL_BASE;
 
 pub const fn phys_to_virt(pa: PhysAddr) -> VirtAddr {
     pa + PHYS_OFFSET
@@ -38,26 +41,49 @@ pub fn virt_to_phys(va: VirtAddr) -> PhysAddr {
     if (VMAP_BASE..VMAP_END).contains(&va) {
         return crate::sched::kstack::virt_to_phys(va);
     }
+    assert!(
+        va >= PHYS_OFFSET,
+        "virt_to_phys({va:#x}): not a kernel address (user or identity pointer?)"
+    );
     va - PHYS_OFFSET
 }
 
-// ---- layout of the 48-bit TTBR0 space -------------------------------------
+// ---- layout -----------------------------------------------------------------
 //
-// The kernel stays identity mapped and lives in the low L0 slots. Every user address space
-// shares those slots (same L1 tables, EL1-only, global) and owns the rest. See
-// docs/processes.md.
+// Higher-half kernel (see docs/memory.md):
+//   TTBR1 (0xffff_0000_0000_0000 ..): the kernel. A linear map of MMIO (first 1 GiB of
+//          PA) and all of RAM at KERNEL_BASE + pa (the image lives inside it), plus the
+//          kernel-stack window. Global, EL1-only.
+//   TTBR0 (0 .. 2^48): user space only. Kernel-only threads run with an empty TTBR0.
 
-/// L0 slots `[0, KERNEL_L0_SLOTS)` (512 GiB each) belong to the kernel: the identity map
-/// (devices + RAM), high PCIe MMIO and the kernel-stack window.
-pub const KERNEL_L0_SLOTS: usize = 2;
-/// First user virtual address (1 TiB).
-pub const USER_BASE: VirtAddr = KERNEL_L0_SLOTS << 39;
+/// First user virtual address. Page 0 stays unmapped so a null pointer faults. Linux's
+/// static binaries load at 0x400000; milkOS's own programs at 0x10000400000. Both fit.
+pub const USER_BASE: VirtAddr = 0x1000;
 /// One past the last user virtual address (top of the 48-bit TTBR0 range).
 pub const USER_END: VirtAddr = 1 << VA_BITS;
-/// Kernel-virtual window for things that need guard pages (kernel stacks). Inside L0 slot 0,
-/// above any RAM qemu virt can have, below high PCIe MMIO (512 GiB).
-pub const VMAP_BASE: VirtAddr = 0x7f_0000_0000;
-pub const VMAP_END: VirtAddr = 0x80_0000_0000;
+/// Kernel-virtual window for things that need guard pages (kernel stacks), in TTBR1 above
+/// the linear map.
+pub const VMAP_BASE: VirtAddr = 0xffff_8000_0000_0000;
+pub const VMAP_END: VirtAddr = 0xffff_8000_8000_0000;
+
+/// Which TTBR an [`AddressSpace`] is for: lower (TTBR0, user, top 16 VA bits 0) or upper
+/// (TTBR1, kernel, top 16 bits 1). A tree only answers for VAs of its own half.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Half {
+    Lower,
+    Upper,
+}
+
+impl Half {
+    /// The 48-bit table index part of `va` if it belongs to this half, else None.
+    fn index(self, va: VirtAddr) -> Option<usize> {
+        match (self, va >> VA_BITS) {
+            (Half::Lower, 0) => Some(va),
+            (Half::Upper, 0xffff) => Some(va & ((1 << VA_BITS) - 1)),
+            _ => None,
+        }
+    }
+}
 
 // ---- MAIR attribute slots (referenced by AttrIdx in descriptors) ----------
 const MAIR_DEVICE_NGNRE: u64 = 0x04;
@@ -185,6 +211,7 @@ impl TableAlloc for PmmTables {
 /// forever); a process space would add a `destroy` that walks and frees.
 pub struct AddressSpace {
     root: PhysAddr,
+    half: Half,
 }
 
 const fn level_shift(level: usize) -> u32 {
@@ -196,16 +223,17 @@ fn table_ptr(pa: PhysAddr) -> *mut u64 {
 }
 
 impl AddressSpace {
-    /// An empty address space with a fresh root table.
-    pub fn new(alloc: &mut dyn TableAlloc) -> Option<AddressSpace> {
+    /// An empty address space with a fresh root table, for TTBR0 or TTBR1 (`half`).
+    pub fn new(half: Half, alloc: &mut dyn TableAlloc) -> Option<AddressSpace> {
         Some(AddressSpace {
             root: alloc.alloc_table()?,
+            half,
         })
     }
 
     /// Wrap an existing, already-zeroed root table.
-    pub fn from_root(root: PhysAddr) -> AddressSpace {
-        AddressSpace { root }
+    pub fn from_root(half: Half, root: PhysAddr) -> AddressSpace {
+        AddressSpace { root, half }
     }
 
     /// Physical address of the root table (what goes in TTBRn_EL1).
@@ -213,25 +241,17 @@ impl AddressSpace {
         self.root
     }
 
-    /// A fresh user address space: a new root whose kernel slots point at the kernel's own
-    /// L1 tables (so kernel mappings, current and future, are shared), and nothing else.
-    /// Call [`prepare_kernel_slots`] once before the first one.
+    /// A fresh, empty user address space (TTBR0). The kernel lives in TTBR1, so nothing of
+    /// it is in here.
     pub fn new_user() -> Option<AddressSpace> {
-        let root = pmm::alloc_frame_zeroed()?;
-        let kroot = with_kernel_space(|k| k.root);
-        for slot in 0..KERNEL_L0_SLOTS {
-            // SAFETY: both are live root tables; slot < 512.
-            unsafe {
-                let d = table_ptr(kroot).add(slot).read_volatile();
-                table_ptr(root).add(slot).write_volatile(d);
-            }
-        }
-        Some(AddressSpace { root })
+        Some(AddressSpace {
+            root: pmm::alloc_frame_zeroed()?,
+            half: Half::Lower,
+        })
     }
 
-    /// Free the page-table pages of a space made by [`new_user`](Self::new_user): every
-    /// table under the user slots, and the root. The shared kernel tables are left alone.
-    /// Leaf frames are NOT freed.
+    /// Free the page-table pages of a space made by [`new_user`](Self::new_user), the root
+    /// included. Leaf frames are NOT freed.
     ///
     /// # Safety
     /// The space must not be live in any TTBR (or the TLB must be flushed for its ASID
@@ -249,7 +269,7 @@ impl AddressSpace {
             }
             pmm::free_frame(table);
         }
-        for slot in KERNEL_L0_SLOTS..ENTRIES {
+        for slot in 0..ENTRIES {
             // SAFETY: walking our own root.
             let desc = unsafe { table_ptr(self.root).add(slot).read_volatile() };
             if desc & DESC_VALID != 0 && desc & DESC_TABLE_OR_PAGE != 0 {
@@ -270,11 +290,12 @@ impl AddressSpace {
         attrs: MapAttrs,
         alloc: &mut dyn TableAlloc,
     ) -> Result<(), MapError> {
+        let iva = self.half.index(va).ok_or(MapError::BadRange)?;
         if len == 0
             || !va.is_multiple_of(PAGE_SIZE)
             || !pa.is_multiple_of(PAGE_SIZE)
             || !len.is_multiple_of(PAGE_SIZE)
-            || va.checked_add(len).is_none_or(|e| e > 1 << VA_BITS)
+            || iva.checked_add(len).is_none_or(|e| e > 1 << VA_BITS)
         {
             return Err(MapError::BadRange);
         }
@@ -363,9 +384,7 @@ impl AddressSpace {
 
     /// Software page-table walk. Returns the physical address `va` maps to.
     pub fn translate(&self, va: VirtAddr) -> Option<PhysAddr> {
-        if va >= 1 << VA_BITS {
-            return None;
-        }
+        let va = self.half.index(va)?;
         let mut table = self.root;
         for level in 0..4 {
             let slot = (va >> level_shift(level)) & (ENTRIES - 1);
@@ -390,7 +409,8 @@ impl AddressSpace {
     /// Unmap one 4 KiB page that was mapped as a page (not inside a block) and
     /// flush its TLB entry. Returns the physical page it pointed at.
     pub fn unmap_page(&mut self, va: VirtAddr) -> Option<PhysAddr> {
-        if !va.is_multiple_of(PAGE_SIZE) || va >= 1 << VA_BITS {
+        self.half.index(va)?;
+        if !va.is_multiple_of(PAGE_SIZE) {
             return None;
         }
         let mut table = self.root;
@@ -467,34 +487,92 @@ impl TableAlloc for BootTables {
 const DEVICE_END: usize = 0x4000_0000;
 const BLOCK_2M: usize = 2 << 20;
 
-/// Build the boot identity map and turn on the MMU, I-cache and D-cache.
-///
-/// `[0, DEVICE_END)` becomes Device-nGnRE; `[ram_base, ram_base+ram_size)`
-/// (rounded up to 2 MiB) becomes Normal write-back cacheable.
+/// TTBR0 for kernel-only threads: an empty table (any low address faults).
+#[repr(C, align(4096))]
+struct EmptyTable([u64; ENTRIES]);
+static EMPTY_TTBR0: EmptyTable = EmptyTable([0; ENTRIES]);
+static KERNEL_TTBR1: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+unsafe extern "C" {
+    /// boot.S: the boot tables (identity in TTBR0, same L0 in TTBR1). Kept for secondaries,
+    /// which turn their MMU on through them.
+    static boot_l0: Table;
+    fn mmu_switch_ttbr1(root: u64);
+}
+
+global_asm!(
+    include_str!("boot.S"),
+    MAIR = const MAIR_VALUE,
+    TCR = const TCR_BOOT,
+    SCTLR_ON = const SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I,
+    SCTLR_OFF = const SCTLR_A | SCTLR_WXN,
+    BLOCK_DEV = const BOOT_BLOCK_DEV,
+    BLOCK_RAM = const BOOT_BLOCK_RAM,
+);
+
+// The TTBR1 swap must run while nothing uses TTBR1: it is called at its *physical*
+// address, i.e. through the boot identity map in TTBR0, and touches no memory.
+global_asm!(
+    ".section .text",
+    ".global mmu_switch_ttbr1",
+    "mmu_switch_ttbr1:",
+    "    dsb ishst",
+    "    msr ttbr1_el1, x0",
+    "    isb",
+    "    tlbi vmalle1",
+    "    dsb nsh",
+    "    isb",
+    "    ret",
+);
+
+/// Build the kernel's final tables for TTBR1 (linear map of MMIO and all of RAM, at
+/// KERNEL_BASE + pa) and switch to them. The MMU is already on (boot.S, through the boot
+/// tables); afterwards TTBR0 is empty until a user thread loads its own.
 ///
 /// # Safety
-/// Call once, on core 0, with the MMU off, before anything uses atomics.
+/// Call once, on the boot CPU, before the frame allocator (tables come from the boot pool).
 pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
     let mut pool = BootTables { used: 0 };
-    let mut space = AddressSpace::new(&mut pool).expect("boot table pool empty");
+    let mut space = AddressSpace::new(Half::Upper, &mut pool).expect("boot table pool empty");
     space
-        .map(0, 0, DEVICE_END, MapAttrs::KERNEL_DEVICE, &mut pool)
+        .map(
+            phys_to_virt(0),
+            0,
+            DEVICE_END,
+            MapAttrs::KERNEL_DEVICE,
+            &mut pool,
+        )
         .expect("map device region");
     let ram_end = (ram_base + ram_size).next_multiple_of(BLOCK_2M);
     space
         .map(
-            ram_base,
+            phys_to_virt(ram_base),
             ram_base,
             ram_end - ram_base,
             MapAttrs::KERNEL_RAM,
             &mut pool,
         )
         .expect("map RAM");
-
-    // SAFETY: identity map covers this code, the stack and the UART, so the
-    // instruction after the SCTLR write is fetched from the same address.
-    unsafe { enable(space.root()) };
-
+    let root = space.root() as u64;
+    KERNEL_TTBR1.store(root, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: called at its physical address through the boot identity map in TTBR0; it
+    // only writes TTBR1 and flushes this CPU's TLB, then returns to our (kernel VA) caller,
+    // which the new tables map exactly as the boot tables did.
+    unsafe {
+        let pa = virt_to_phys(mmu_switch_ttbr1 as *const () as usize);
+        let f: extern "C" fn(u64) = core::mem::transmute(pa);
+        f(root);
+        // TTBR0 is user space from now on: kernel threads get an empty table.
+        core::arch::asm!(
+            "msr ttbr0_el1, {t}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
+            t = in(reg) kernel_ttbr0(),
+            options(nostack)
+        );
+    }
     *KERNEL_SPACE.lock() = Some(space);
 }
 
@@ -504,33 +582,25 @@ pub fn with_kernel_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> R {
     f(guard.as_mut().expect("MMU not initialised"))
 }
 
-/// Make sure every kernel L0 slot has an L1 table, so mappings the kernel adds later land in
-/// tables that user spaces already share. Call before creating the first user space.
-pub fn prepare_kernel_slots() {
-    with_kernel_space(|k| {
-        for slot in 0..KERNEL_L0_SLOTS {
-            // SAFETY: the kernel root is live; we only fill empty slots with a fresh table.
-            unsafe {
-                let e = table_ptr(k.root).add(slot);
-                if e.read_volatile() & DESC_VALID == 0 {
-                    let t = pmm::alloc_frame_zeroed().expect("no frame for kernel L1 table");
-                    e.write_volatile(t as u64 | DESC_TABLE_OR_PAGE | DESC_VALID);
-                }
-            }
-        }
-        // SAFETY: barrier only.
-        unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack)) };
-    });
+/// TTBR0 value for kernel-only threads: an empty table, ASID 0.
+pub fn kernel_ttbr0() -> u64 {
+    virt_to_phys(&raw const EMPTY_TTBR0 as usize) as u64
 }
 
-/// TTBR0 value for kernel-only threads: the kernel's own root, ASID 0.
-pub fn kernel_ttbr0() -> u64 {
-    with_kernel_space(|k| k.root as u64)
+/// TTBR1 value: the kernel's tables (for secondary CPUs).
+pub fn kernel_ttbr1() -> u64 {
+    KERNEL_TTBR1.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Physical address of the boot tables (identity map), which secondaries use as TTBR0
+/// while they turn their MMU on.
+pub fn boot_ttbr0() -> u64 {
+    virt_to_phys(&raw const boot_l0 as usize) as u64
 }
 
 /// Map an MMIO range into the kernel address space as Device memory.
-/// Everything below 1 GiB is already mapped; this is for PCIe high windows etc.
-/// Returns the virtual address (identity for now).
+/// The first 1 GiB of physical space is already mapped; this is for PCIe high windows etc.
+/// Returns the kernel virtual address.
 pub fn map_device(pa: PhysAddr, len: usize) -> Result<VirtAddr, MapError> {
     let start = pa & !(PAGE_SIZE - 1);
     let end = (pa + len).next_multiple_of(PAGE_SIZE);
@@ -561,58 +631,25 @@ const TCR_ORGN0_WBWA: u64 = 0b01 << 10;
 const TCR_SH0_INNER: u64 = 0b11 << 12;
 const TCR_TG0_4K: u64 = 0b00 << 14;
 const TCR_T1SZ: u64 = (64 - VA_BITS as u64) << 16;
-const TCR_EPD1: u64 = 1 << 23; // TTBR1 walks disabled until we have a higher half
+const TCR_IRGN1_WBWA: u64 = 0b01 << 24;
+const TCR_ORGN1_WBWA: u64 = 0b01 << 26;
+const TCR_SH1_INNER: u64 = 0b11 << 28;
 const TCR_TG1_4K: u64 = 0b10 << 30;
-
-unsafe fn enable(root: PhysAddr) {
-    // Physical address size: whatever the CPU supports, capped at 48 bits (0b101).
-    let mmfr0: u64;
-    // SAFETY: read-only system register.
-    unsafe {
-        core::arch::asm!("mrs {0}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack))
-    };
-    let ips = (mmfr0 & 0xf).min(0b101);
-
-    let tcr = TCR_T0SZ
-        | TCR_IRGN0_WBWA
-        | TCR_ORGN0_WBWA
-        | TCR_SH0_INNER
-        | TCR_TG0_4K
-        | TCR_T1SZ
-        | TCR_EPD1
-        | TCR_TG1_4K
-        | (ips << 32);
-
-    // SAFETY: see `init`. The table walker only sees descriptors we have
-    // already written (the dsb below orders them before the SCTLR write).
-    unsafe {
-        core::arch::asm!(
-            "msr mair_el1, {mair}",
-            "msr tcr_el1, {tcr}",
-            "msr ttbr0_el1, {root}",
-            "msr ttbr1_el1, xzr",
-            "isb",
-            // Start from a clean TLB and I-cache.
-            "tlbi vmalle1",
-            "ic iallu",
-            "dsb nsh",
-            "isb",
-            "mrs {tmp}, sctlr_el1",
-            "orr {tmp}, {tmp}, {on}",
-            "bic {tmp}, {tmp}, {off}",
-            "dsb sy",
-            "msr sctlr_el1, {tmp}",
-            "isb",
-            mair = in(reg) MAIR_VALUE,
-            tcr = in(reg) tcr,
-            root = in(reg) root as u64,
-            tmp = out(reg) _,
-            on = in(reg) SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I,
-            off = in(reg) SCTLR_A | SCTLR_WXN,
-            options(nostack)
-        );
-    }
-}
+/// TCR_EL1 without IPS (boot.S ORs in the CPU's physical address size, capped at 48 bits).
+const TCR_BOOT: u64 = TCR_T0SZ
+    | TCR_IRGN0_WBWA
+    | TCR_ORGN0_WBWA
+    | TCR_SH0_INNER
+    | TCR_TG0_4K
+    | TCR_T1SZ
+    | TCR_IRGN1_WBWA
+    | TCR_ORGN1_WBWA
+    | TCR_SH1_INNER
+    | TCR_TG1_4K;
+/// boot.S's 1 GiB block descriptors (address ORed in by boot.S): device (AttrIdx 0, XN)
+/// and RAM (AttrIdx 1, inner shareable, executable at EL1).
+const BOOT_BLOCK_DEV: u64 = DESC_VALID | DESC_AF | DESC_PXN | DESC_UXN | (0b10 << 8);
+const BOOT_BLOCK_RAM: u64 = DESC_VALID | DESC_AF | DESC_UXN | (1 << 2) | (0b11 << 8);
 
 /// True if SCTLR_EL1 reports MMU, D-cache and I-cache all enabled.
 pub fn caches_on() -> bool {

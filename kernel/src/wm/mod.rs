@@ -16,22 +16,33 @@
 //! assumes it runs on the boot stack, so it can become a kernel thread once `proc` lands: put
 //! `Desktop::frame` in that thread's loop and replace the `wfi` with a sleep-until-event.
 
+pub mod actions;
 mod anim;
 mod apps;
 mod buffer;
 pub mod client;
 pub mod clipboard;
 mod ctl;
+mod dnd;
 mod event;
 mod fontx;
 mod icons;
+mod lock;
 mod menus;
+mod notif;
+mod packages;
 mod paint;
+mod png;
 mod power;
+pub mod powerbox;
 pub mod prefs;
 mod rtc;
+mod screen;
 mod script;
 mod shell;
+mod shot;
+mod skim;
+mod snap;
 mod theme;
 pub mod tty;
 mod wallpaper;
@@ -59,13 +70,42 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 // ---- public API ------------------------------------------------------------------------------
 
 /// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-static NOTIFY: SpinLock<Vec<(String, String)>> = SpinLock::new(Vec::new());
+/// Toasts posted from any thread: (app, title, subtitle, play the notify sound).
+static NOTIFY: SpinLock<Vec<(String, String, String, bool)>> = SpinLock::new(Vec::new());
+
+/// Who is posting: the calling process (e.g. /bin/notify), else the desktop itself.
+fn poster() -> String {
+    crate::proc::get(sched::current_pid())
+        .filter(|_| sched::current_pid() != 0)
+        .map_or(String::from("milkOS"), |p| {
+            String::from(p.inner.lock().name.as_str())
+        })
+}
+
+/// A toast on behalf of `app` (grouped under it in the notification centre).
+pub fn notify_as(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        true,
+    ));
+    WAKE.wake_all();
+}
 
 /// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
 pub fn notify(title: &str, subtitle: &str) {
-    NOTIFY
-        .lock()
-        .push((String::from(title), String::from(subtitle)));
+    notify_as(&poster(), title, subtitle);
+}
+
+/// A toast without the notify sound (when the action had its own, e.g. the shutter).
+pub fn notify_quiet(app: &str, title: &str, subtitle: &str) {
+    NOTIFY.lock().push((
+        String::from(app),
+        String::from(title),
+        String::from(subtitle),
+        false,
+    ));
     WAKE.wake_all();
 }
 
@@ -80,6 +120,10 @@ fn on_input(_ev: &input::Event) {
 const FRAME_NS: u64 = 16_666_667;
 /// How long to sleep when nothing is moving (clocks, log followers and toasts still update).
 const IDLE_NS: u64 = 50_000_000;
+
+/// Set by the panic screen: the compositor stops flushing to the framebuffer (on SMP the wm
+/// thread may still be running on another CPU).
+pub static FROZEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Things kernel code (and the built-in apps) can ask the desktop to do.
 pub enum Request {
@@ -96,6 +140,14 @@ pub enum Request {
     /// New preferences from Settings: apply and save.
     Prefs(prefs::Prefs),
     Skim,
+    /// A new Terminal tab, optionally running a command in it (Skim's `> cmd`).
+    NewTab(Option<String>),
+    /// Show the lock screen.
+    Lock,
+    /// Launch an installed package by name (sandboxed if it is a window app).
+    OpenPackage(String),
+    /// A powerbox request is waiting for its Open / Save panel (powerbox.rs).
+    Powerbox,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -145,9 +197,23 @@ pub fn run() {
         "wm: desktop up in {} ms (wallpaper + blur + first frame + fade)",
         (timer::now_ns() - t0) / 1_000_000
     );
+    // A display mode saved in Settings.
+    let res = prefs::get().resolution;
+    if res != (theme::screen_w(), theme::screen_h()) {
+        d.set_resolution(res.0, res.1);
+    }
+    // First boot (until "Don't show again"): the Welcome tour. Not under demo scripts,
+    // whose clicks assume the plain desktop.
+    if prefs::get().welcome && !script::DEMO_BOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        d.open(App::Welcome);
+    }
+    if script::FIRSTBOOT.load(core::sync::atomic::Ordering::Relaxed) {
+        kprintln!("[demo] firstboot done");
+    }
     if input::subscribe(on_input).is_err() {
         kprintln!("wm: no input subscriber slot, polling at 60 Hz");
     }
+    powerbox::set_up();
     let mut next = timer::now_ns();
     loop {
         let busy = d.frame();
@@ -163,15 +229,6 @@ pub fn run() {
             next.saturating_sub(now),
         );
     }
-}
-
-/// CPU time of the scheduler's idle thread, for the busy percentage.
-fn idle_thread_ns() -> u64 {
-    sched::threads()
-        .iter()
-        .filter(|t| t.name.as_str() == "idle")
-        .map(|t| t.cpu_ns)
-        .sum()
 }
 
 // ---- the desktop -----------------------------------------------------------------------------
@@ -191,6 +248,8 @@ enum Drag {
         id: u32,
         dx: i32,
         dy: i32,
+        /// Not moved yet (a snapped / zoomed window unsnaps on its first move).
+        fresh: bool,
     },
     Resize {
         id: u32,
@@ -200,20 +259,21 @@ enum Drag {
         h0: i32,
     },
     /// Pressed a traffic light; acts on release if still over it.
-    Light {
-        id: u32,
-        which: usize,
-    },
-    /// Button went down in a window body: moves go to the client as drags.
+    Light { id: u32, which: usize },
+    /// Button went down in a window body at (x0, y0): moves go to the client as drags,
+    /// unless the first real move turns it into a file drag (`tried`: asked already).
     Content {
         id: u32,
+        x0: i32,
+        y0: i32,
+        tried: bool,
     },
+    /// Dragging a file (dnd.rs).
+    File,
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
-    Cell {
-        id: u32,
-    },
+    Cell { id: u32 },
     /// Pressed on something that acts on press only.
     Inert,
 }
@@ -264,6 +324,8 @@ pub struct Desktop {
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
+    /// Snap preview while dragging a window to an edge (snap.rs).
+    snap_preview: Option<Rect>,
     /// Running window animations (anim.rs).
     anims: Vec<anim::Anim>,
     /// Signature of the full-screen layers (dims) last composited.
@@ -274,6 +336,8 @@ pub struct Desktop {
     drag: Option<Drag>,
     /// Window whose traffic lights the pointer is over.
     hover_lights: Option<u32>,
+    /// Window whose body the pointer is over (hover states).
+    hover_body: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
     /// Dock item being pressed (drawn 4% darker until release).
@@ -287,16 +351,30 @@ pub struct Desktop {
     script: Option<script::Script>,
     /// Compose into the back buffer only (the boot fade-in does the first flush itself).
     hold_flush: bool,
-    // CPU accounting: the idle thread's CPU time at the start of the last second.
-    idle_cpu_ns: u64,
-    acct_start: u64,
+    /// Busy % per online CPU (menu bar meter), and the same quantised.
+    cpu_loads: Vec<u32>,
+    cpu_steps: Vec<u32>,
     last_second: u64,
+    /// The lock screen while it is up (or fading), lock.rs; its opacity this frame.
+    lock: Option<lock::Lock>,
+    lock_a: u8,
+    /// Last key press or click (the idle lock timer); demos add pretend idle time.
+    last_input: u64,
+    idle_skew: u64,
+    /// Cmd+Shift+4 region selection (shot.rs); compose without cursor / overlay (capture).
+    shot: Option<shot::Select>,
+    shot_hide: bool,
+    /// A file being dragged (dnd.rs).
+    dnd: Option<dnd::Dnd>,
+    /// The notification centre is open, and what it lists (notif.rs).
+    notif: bool,
+    history: Vec<notif::Notice>,
 }
 
 impl Desktop {
     fn new(fb: Surface<'static>) -> Result<Desktop, Surface<'static>> {
         rtc::init();
-        let Some(back) = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0) else {
+        let Some(back) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
             return Err(fb);
         };
         let t = timer::now_ns();
@@ -333,11 +411,22 @@ impl Desktop {
             },
             cache: BTreeMap::new(),
             anims: Vec::new(),
+            snap_preview: None,
+            lock: None,
+            lock_a: 0,
+            last_input: t,
+            idle_skew: 0,
+            shot: None,
+            shot_hide: false,
+            dnd: None,
+            notif: false,
+            history: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
             drag: None,
             hover_lights: None,
+            hover_body: None,
             tip: None,
             dock_pressed: None,
             menu: None,
@@ -347,13 +436,15 @@ impl Desktop {
             status: String::new(),
             script: None,
             hold_flush: true,
-            idle_cpu_ns: idle_thread_ns(),
-            acct_start: timer::now_ns(),
+            cpu_loads: Vec::new(),
+            cpu_steps: Vec::new(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
         d.status = d.status_text();
         apps::fsx::ensure_home();
+        apps::music::seed_library();
         ctl::init();
+        actions::register_builtin();
         clipboard::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
@@ -385,8 +476,8 @@ impl Desktop {
 
     /// Cross-fade from whatever is on screen (the boot splash) to the composed desktop.
     fn fade_in(&mut self) {
-        let n = (SCREEN_W * SCREEN_H) as usize;
-        let splash: Option<Buffer> = Buffer::new(SCREEN_W as usize, SCREEN_H as usize, 0);
+        let n = (screen_w() * screen_h()) as usize;
+        let splash: Option<Buffer> = Buffer::new(screen_w() as usize, screen_h() as usize, 0);
         if let Some(mut sp) = splash {
             sp.pixels_mut()[..n].copy_from_slice(&self.fb.pixels()[..n]);
             const STEPS: u32 = 12;
@@ -406,14 +497,14 @@ impl Desktop {
     // ---- damage -------------------------------------------------------------------------------
 
     fn damage(&mut self, r: Rect) {
-        let r = r.clipped(SCREEN_W as usize, SCREEN_H as usize);
+        let r = r.clipped(screen_w() as usize, screen_h() as usize);
         if !r.is_empty() {
             self.damage.add(r);
         }
     }
 
     fn damage_all(&mut self) {
-        self.damage(Rect::new(0, 0, SCREEN_W, SCREEN_H));
+        self.damage(Rect::new(0, 0, screen_w(), screen_h()));
     }
 
     fn cursor_rect(&self) -> Rect {
@@ -475,13 +566,37 @@ impl Desktop {
     /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
     /// a window, focus that instead.
     fn launch(&mut self, path: &str) {
+        self.launch_with(path, None, None);
+    }
+
+    /// Start a program (or show its window if it runs), optionally sandboxed from its first
+    /// instruction.
+    /// Returns the new process's pid (None if it was already running, or didn't start).
+    fn launch_with(
+        &mut self,
+        path: &str,
+        caps: Option<(alloc::sync::Arc<crate::proc::caps::Caps>, String)>,
+        arg: Option<&str>,
+    ) -> Option<u32> {
         let name = path.rsplit('/').next().unwrap_or(path);
         if let Some(id) = self.program_window(name) {
             self.show_window(id);
-            return;
+            return None;
         }
-        match crate::proc::spawn(path, &[name]) {
+        let spec = caps.as_ref().map(|c| c.1.clone());
+        let argv: Vec<&str> = core::iter::once(name).chain(arg).collect();
+        let started = match caps {
+            Some((c, _)) => crate::proc::spawn_with_caps(path, &argv, c),
+            None => crate::proc::spawn(path, &argv),
+        };
+        match started {
             Ok(pid) => {
+                if let Some(spec) = spec {
+                    crate::audit::record(
+                        "sandbox.enter",
+                        &alloc::format!("pid={pid} exe={path} spec={spec}"),
+                    );
+                }
                 kprintln!("wm: started {path} as pid {pid}");
                 let name = alloc::string::String::from(name);
                 drop(sched::spawn("reap-app", move || {
@@ -491,11 +606,101 @@ impl Desktop {
                         if prefs::get().sound {
                             crate::audio::play_system(crate::audio::Sound::Error);
                         }
-                        notify(&name, "quit unexpectedly");
+                        notify_as(&name, &name, "quit unexpectedly");
                     }
                 }));
+                Some(pid)
             }
-            Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+            Err(e) => {
+                self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0));
+                None
+            }
+        }
+    }
+
+    /// A tab in the open Terminal running `cmd`, or the Terminal itself (its first tab).
+    fn open_tab(&mut self, cmd: Option<String>) {
+        if self.windows.iter().any(|w| w.app == App::Terminal) {
+            apps::terminal::queue_tab(cmd);
+        } else if let Some(c) = cmd {
+            apps::terminal::queue_command(&c);
+        }
+        self.open(App::Terminal);
+    }
+
+    /// An installed package: its window app, or its program in a Terminal tab.
+    fn launch_package(&mut self, p: &packages::Pkg) {
+        self.launch_package_with(p, None);
+    }
+
+    /// The same, with a file dropped on its dock tile: a running window app gets it as a
+    /// drop on its window; a new one starts with the file granted and as its argument.
+    fn launch_package_with(&mut self, p: &packages::Pkg, file: Option<&str>) {
+        if p.window
+            && let Some(f) = file
+            && let Some(id) = self.program_window(p.exec.rsplit('/').next().unwrap_or(""))
+        {
+            self.show_window(id);
+            if let Some(App::Client(cid)) = self.win(id).map(|w| w.app)
+                && let Err(e) = client::drop_file(cid, 0, 0, f)
+            {
+                self.post_toast(&p.label, &e);
+            }
+            return;
+        }
+        if p.window {
+            // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
+            // system is their own /Applications/<name> read-only and ~/Library/<name>
+            // read-write; no network, no spawning, no clipboard; more only through the
+            // powerbox, one user-chosen file at a time.
+            let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
+            let lib = alloc::format!("/home/milk/Library/{}", p.dir);
+            let _ = crate::fs::mkdir_all(&lib, 0o755);
+            let mut grants = alloc::vec![
+                crate::proc::caps::FsGrant {
+                    prefix: app_dir.clone(),
+                    write: false,
+                },
+                crate::proc::caps::FsGrant {
+                    prefix: lib.clone(),
+                    write: true,
+                },
+            ];
+            // A file dropped on the tile: the user's grant, read-only, just that file.
+            if let Some(f) = file {
+                grants.push(crate::proc::caps::FsGrant {
+                    prefix: String::from(f),
+                    write: false,
+                });
+            }
+            let caps = crate::proc::caps::Caps {
+                fs: Some(grants),
+                net: crate::proc::caps::Net::None,
+                audio: true,
+                clipboard: false,
+                windows: true,
+                spawn: false,
+            };
+            let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
+            if let Some(pid) =
+                self.launch_with(&p.exec, Some((alloc::sync::Arc::new(caps), spec)), file)
+                && let Some(f) = file
+            {
+                crate::audit::record(
+                    "powerbox.grant",
+                    &alloc::format!("pid={pid} path={f} mode=r via=drop"),
+                );
+            }
+        } else {
+            // By its /bin name when milk linked it there (a shorter tab label).
+            let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
+            let bin = alloc::format!("/bin/{base}");
+            let cmd = if crate::fs::stat(&bin).is_ok() {
+                String::from(base)
+            } else {
+                p.exec.clone()
+            };
+            self.open_tab(Some(cmd));
         }
     }
 
@@ -510,6 +715,7 @@ impl Desktop {
             "spaces" => return self.toggle_mode(Mode::Spaces),
             "paint" => return self.launch("/bin/paint"),
             "browser" | "web" => return self.open(App::Browser),
+            "music" => return self.open(App::Music),
             _ if what.starts_with("http://") || what.starts_with("localhost") => {
                 apps::browser::open_url(what);
                 return self.open(App::Browser);
@@ -520,6 +726,9 @@ impl Desktop {
         if apps::fsx::is_dir(&path) {
             apps::files::show_path(&path);
             self.open(App::Files);
+        } else if path.to_ascii_lowercase().ends_with(".wav") && crate::fs::stat(&path).is_ok() {
+            apps::music::play_path(&path);
+            self.open(App::Music);
         } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
             self.launch(&path);
         } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
@@ -551,6 +760,14 @@ impl Desktop {
         if p.dock != old.dock {
             theme::set_dock_icon(p.dock);
         }
+        if p.resolution != (theme::screen_w(), theme::screen_h())
+            && !self.set_resolution(p.resolution.0, p.resolution.1)
+        {
+            self.post_toast(
+                "Can't switch the display",
+                "not enough memory for that size",
+            );
+        }
         self.settings.brightness = p.brightness;
         // Everything may look different: redraw every window and panel.
         for w in &mut self.windows {
@@ -571,7 +788,8 @@ impl Desktop {
             Mode::Spaces => "spaces",
         };
         let mut s = alloc::format!(
-            "mode {mode}\nspace {} of {}\nfocus {}\n",
+            "mode {mode}\nlocked {}\nspace {} of {}\nfocus {}\n",
+            if self.locked() { "yes" } else { "no" },
             self.space + 1,
             self.nspaces,
             self.focused_window().map_or("none", |w| w.contents.title())
@@ -705,8 +923,8 @@ impl Desktop {
 
     /// The area between the menu bar and the dock.
     fn work_area() -> Rect {
-        let dock_top = SCREEN_H - DOCK_BOTTOM - dock_h();
-        Rect::new(0, MENU_H, SCREEN_W, dock_top - MENU_H)
+        let dock_top = screen_h() - DOCK_BOTTOM - dock_h();
+        Rect::new(0, MENU_H, screen_w(), dock_top - MENU_H)
     }
 
     fn zoom(&mut self, id: u32) {
@@ -731,15 +949,14 @@ impl Desktop {
         let old = w.bounds();
         let (ww, _) = (w.rect.w, w.rect.h);
         // Keep the title bar reachable.
-        let x = x.clamp(80 - ww, SCREEN_W - 80);
-        let y = y.clamp(MENU_H, SCREEN_H - TITLE_H - 8);
+        let x = x.clamp(80 - ww, screen_w() - 80);
+        let y = y.clamp(MENU_H, screen_h() - TITLE_H - 8);
         let w = self.win_mut(id).unwrap();
         if (w.rect.x, w.rect.y) == (x, y) {
             return;
         }
         w.rect.x = x;
         w.rect.y = y;
-        w.restore = None;
         let new = w.bounds();
         self.damage(old);
         self.damage(new);
@@ -750,8 +967,8 @@ impl Desktop {
             return;
         };
         let r = w.rect;
-        let nw = nw.clamp(WIN_MIN_W, SCREEN_W - r.x.max(0));
-        let nh = nh.clamp(WIN_MIN_H, SCREEN_H - r.y);
+        let nw = nw.clamp(WIN_MIN_W, screen_w() - r.x.max(0));
+        let nh = nh.clamp(WIN_MIN_H, screen_h() - r.y);
         if (nw, nh) == (r.w, r.h) {
             return;
         }
@@ -814,11 +1031,16 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
+        self.post_toast_with("milkOS", title, sub, true);
+    }
+
+    fn post_toast_with(&mut self, app: &str, title: &str, sub: &str, sound: bool) {
+        self.record_notice(app, title, sub);
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
         }
-        if prefs::get().sound {
+        if sound && prefs::get().sound {
             crate::audio::play_system(crate::audio::Sound::Notify);
         }
         let id = self.next_toast;
@@ -881,21 +1103,18 @@ impl Desktop {
             self.dims = dims;
             self.damage_all();
         }
-        let vis: Vec<Rect> = self
-            .windows
-            .iter()
-            .filter(|w| self.visible(w))
-            .map(|w| w.rect)
-            .collect();
         let mut live: Vec<PanelKey> = Vec::new();
         for l in layers {
             let Layer::Panel(spec) = l else {
                 continue;
             };
             live.push(spec.key);
-            let solid = spec.style != Style::Opaque
-                && spec.style != Style::Bar
-                && vis.iter().any(|w| w.intersects(&spec.rect));
+            // SPEC Glass: live blur over windows isn't supported, so a glass panel is always
+            // composited over Wb (the blurred wallpaper) and drawn opaque: a window under the
+            // notification centre, control centre, a menu, a toast or Skim never shows
+            // through. (`solid`, plain milk blended over the windows, let their text read
+            // through at 8%.)
+            let solid = false;
             let ok = self
                 .cache
                 .get(&spec.key)
@@ -949,7 +1168,7 @@ impl Desktop {
             self.compose_rect(*d, layers, &vis, cur);
         }
         // Flush to ramfb.
-        if !self.hold_flush {
+        if !self.hold_flush && !FROZEN.load(core::sync::atomic::Ordering::Relaxed) {
             let fstride = self.fb.stride();
             let bstride = self.back.stride();
             let src = self.back.pixels();
@@ -979,6 +1198,14 @@ impl Desktop {
     }
 
     fn compose_rect(&mut self, d: Rect, layers: &[Layer], vis: &[usize], cur: Rect) {
+        if self.lock_a == 255 {
+            // Locked: nothing under the lock screen shows.
+            let mut p = Painter::new(&mut self.back);
+            let mut p = p.clipped(d);
+            lock::draw(&self.lock, &mut p, d, 255);
+            self.finish_rect(d, cur);
+            return;
+        }
         let mut p = Painter::new(&mut self.back);
         let mut p = p.clipped(d);
         // Skip everything under the topmost window that covers the whole rect.
@@ -1007,6 +1234,13 @@ impl Desktop {
         if !self.anims.is_empty() {
             anim::draw(&self.anims, &self.windows, &mut p, d);
         }
+        // Where a dragged window will snap.
+        if let Some(r) = self.snap_preview
+            && r.intersects(&d)
+        {
+            p.rrect_r(r, R_WINDOW, MILK, a(350));
+            p.rrect_stroke(r.x, r.y, r.w, r.h, R_WINDOW, 3, HONEY, a(850));
+        }
         for l in layers {
             match l {
                 Layer::Dim(a) => p.fill_a(d.x, d.y, d.w, d.h, INK, *a),
@@ -1031,17 +1265,34 @@ impl Desktop {
                     if spec.shadow {
                         p.shadow(spec.rect, spec.radius, &SHADOW_FLOAT);
                     }
-                    let a = if c.solid { GLASS_SOLID_A } else { 255 };
                     let r = spec.rect;
-                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, a);
+                    p.blit_rrect(r.x, r.y, &c.buf, 0, 0, r.w, r.h, spec.radius, 255);
                 }
             }
         }
+        if let Some(g) = &self.dnd {
+            dnd::draw(g, &mut p, d);
+        }
+        if let Some(s) = &self.shot
+            && !self.shot_hide
+        {
+            shot::draw(s, &mut p, d);
+        }
+        if self.lock_a > 0 {
+            lock::draw(&self.lock, &mut p, d, self.lock_a);
+        }
+        self.finish_rect(d, cur);
+    }
+
+    /// Brightness and the cursor, over everything.
+    fn finish_rect(&mut self, d: Rect, cur: Rect) {
+        let mut p = Painter::new(&mut self.back);
+        let mut p = p.clipped(d);
         if self.settings.brightness < 100 {
             let a = ((100 - self.settings.brightness) * 255 / 100 * 7 / 10) as u8;
             p.fill_a(d.x, d.y, d.w, d.h, 0, a);
         }
-        if cur.intersects(&d) {
+        if cur.intersects(&d) && !self.shot_hide {
             p.sprite(
                 cur.x,
                 cur.y,
@@ -1071,9 +1322,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String)> = core::mem::take(&mut *NOTIFY.lock());
-        for (t, s) in posted {
-            self.post_toast(&t, &s);
+        let posted: Vec<(String, String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
+        for (app, t, s, sound) in posted {
+            self.post_toast_with(&app, &t, &s, sound);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1091,6 +1342,20 @@ impl Desktop {
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
+                Request::Lock => self.lock_screen(),
+                Request::OpenPackage(name) => {
+                    packages::refresh();
+                    match packages::all().into_iter().find(|p| p.name == name) {
+                        Some(p) => self.launch_package(&p),
+                        None => self.post_toast(&name, "isn't installed (milk install it first)"),
+                    }
+                }
+                Request::Powerbox => {
+                    if !self.windows.iter().any(|w| w.app == App::Powerbox) && powerbox::pending() {
+                        self.open(App::Powerbox);
+                    }
+                }
+                Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();
@@ -1106,10 +1371,13 @@ impl Desktop {
         }
         self.tick(now);
         let animating = self.step_anims(now);
+        let fading = self.lock_tick(now);
+        self.lock_a = self.lock_alpha(timer::now_ns());
         self.render_and_compose();
         *STATS.lock() = self.stats;
         self.stats.frames != frames
             || animating
+            || fading
             || self.script.is_some()
             || matches!(
                 self.drag,
@@ -1223,11 +1491,25 @@ impl Desktop {
                 w.dirty = true;
             }
         }
+        // Dialogs that are done (the powerbox panel once answered or withdrawn).
+        let done: Vec<u32> = self
+            .windows
+            .iter()
+            .filter(|w| w.contents.wants_close())
+            .map(|w| w.id)
+            .collect();
+        for id in done {
+            self.close(id);
+        }
         // Once a second: CPU, clock, live panels.
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
             self.last_second = sec;
             ctl::set_status(self.status_report());
+            // Installed packages (dock tiles), every few seconds.
+            if sec % 3 == 1 && packages::refresh() {
+                self.invalidate(PanelKey::Dock);
+            }
             // Windows of userland clients that exited without destroying them.
             for cid in client::reap() {
                 if let Some(wid) = self
@@ -1239,20 +1521,25 @@ impl Desktop {
                     self.close_window(wid);
                 }
             }
-            let span = now - self.acct_start;
-            let idle = idle_thread_ns();
-            if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {
-                self.stats.cpu_pct = (100 - pct.min(100)) as u32;
-            }
-            self.idle_cpu_ns = idle;
-            self.acct_start = now;
+            // Per-CPU load (percpu, sampled on each CPU's tick) for the menu bar meter.
+            let loads: Vec<u32> = crate::percpu::online().map(crate::percpu::load).collect();
+            self.stats.cpu_pct = loads.iter().sum::<u32>() / loads.len().max(1) as u32;
+            // Redraw the meter only when a bar visibly changes (8 steps).
+            let steps: Vec<u32> = loads.iter().map(|l| l * 8 / 100).collect();
+            let changed = steps != self.cpu_steps;
+            self.cpu_loads = loads;
+            self.cpu_steps = steps;
             let st = self.status_text();
             if st != self.status {
+                // A new minute: the centre's clock and "n min ago".
+                self.notif_tick();
+            }
+            if st != self.status || changed {
                 self.status = st;
                 self.invalidate(PanelKey::MenuBar);
             }
             if self.mode == Mode::Home {
-                for i in 0..6 {
+                for i in 0..shell::card_count() {
                     self.invalidate(PanelKey::Card(i));
                 }
             }
@@ -1265,6 +1552,59 @@ impl Desktop {
     // ---- input ----------------------------------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) {
+        let press = matches!(
+            ev,
+            Event::Button { down: true, .. } | Event::Key { down: true, .. }
+        );
+        // Any activity (pointer and wheel too) restarts the idle-lock timer.
+        if press || matches!(ev, Event::PointerMove { .. } | Event::Scroll { .. }) {
+            self.last_input = timer::now_ns();
+            self.idle_skew = 0;
+        }
+        // Choosing a screenshot region: drag it out, Esc cancels; nothing else gets through.
+        if self.shot.is_some() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                    self.shot_move(x, y);
+                }
+                Event::Button {
+                    button: Button::Left,
+                    down,
+                } => {
+                    if down {
+                        self.shot_press();
+                    } else {
+                        self.shot_release();
+                    }
+                }
+                Event::Key {
+                    key: Key::Escape,
+                    down: true,
+                    ..
+                } => self.shot_cancel(),
+                _ => {}
+            }
+            return;
+        }
+        // Locked: the pointer moves, a click or a key unlocks, nothing else gets through.
+        if self.locked() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                }
+                // Not in the first moments: the locking key's auto-repeat would undo it.
+                _ if press && !self.lock_just_shown() => self.unlock_screen(),
+                _ => {}
+            }
+            return;
+        }
         // A click or key press finishes running animations.
         if !self.anims.is_empty()
             && matches!(
@@ -1284,6 +1624,10 @@ impl Desktop {
                 button: Button::Left,
                 down: false,
             } => self.release(),
+            Event::Button {
+                button: Button::Right,
+                down: true,
+            } => self.right_click(),
             Event::Button { .. } => {}
             Event::Scroll { dy } => {
                 let (x, y) = self.pointer;
@@ -1313,7 +1657,7 @@ impl Desktop {
     }
 
     fn pointer_move(&mut self, x: i32, y: i32) {
-        let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+        let (x, y) = (x.clamp(0, screen_w() - 1), y.clamp(0, screen_h() - 1));
         if (x, y) == self.pointer {
             return;
         }
@@ -1321,11 +1665,47 @@ impl Desktop {
         self.pointer = (x, y);
         self.damage(self.cursor_rect());
         match self.drag {
-            Some(Drag::Move { id, dx, dy }) => self.move_window(id, x - dx, y - dy),
+            Some(Drag::Move { id, dx, dy, fresh }) => {
+                let (mut dx, mut dy) = (dx, dy);
+                if fresh {
+                    if let Some((ndx, ndy)) = self.unsnap_for_drag(id, x, dx) {
+                        (dx, dy) = (ndx, ndy);
+                    }
+                    self.drag = Some(Drag::Move {
+                        id,
+                        dx,
+                        dy,
+                        fresh: false,
+                    });
+                }
+                self.move_window(id, x - dx, y - dy);
+                self.set_snap_preview(snap::zone_at(x, y));
+            }
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
             }
-            Some(Drag::Content { id }) => self.send_pointer(id, x, y, PointerKind::Drag),
+            Some(Drag::Content { id, x0, y0, tried }) => {
+                if !tried && (x - x0).pow(2) + (y - y0).pow(2) > 36 {
+                    self.drag = Some(Drag::Content {
+                        id,
+                        x0,
+                        y0,
+                        tried: true,
+                    });
+                    let path = self.win_mut(id).and_then(|w| {
+                        let b = window::body_rect(w.rect.w, w.rect.h);
+                        w.contents
+                            .drag_start(x0 - w.rect.x - b.x, y0 - w.rect.y - b.y)
+                    });
+                    if let Some(path) = path {
+                        self.drag = Some(Drag::File);
+                        self.dnd_start(id, path);
+                        return;
+                    }
+                }
+                self.send_pointer(id, x, y, PointerKind::Drag)
+            }
+            Some(Drag::File) => self.dnd_move(x, y),
             Some(Drag::Slider(i)) => self.slider_to(i, x),
             Some(_) => {}
             None => self.hover(x, y),
@@ -1340,19 +1720,15 @@ impl Desktop {
                 Layer::Panel(s) if s.key == PanelKey::LaunchResults => Some(s.rect),
                 _ => None,
             });
+            // The rows as laid out (kind headers in between), like a click.
             if let Some(r) = rows
                 && hit(&r, x, y)
-                && y - r.y >= 40
+                && let Some(row) = self.launcher.as_ref().and_then(|l| l.item_at(y - r.y))
+                && let Some(l) = &mut self.launcher
+                && row != l.sel
             {
-                let row = ((y - r.y - 40) / LAUNCH_ROW_H) as usize;
-                let n = self.launcher.as_ref().map_or(0, |l| l.result_count());
-                if let Some(l) = &mut self.launcher
-                    && row < n
-                    && row != l.sel
-                {
-                    l.sel = row;
-                    self.invalidate(PanelKey::LaunchResults);
-                }
+                l.sel = row;
+                self.invalidate(PanelKey::LaunchResults);
             }
         }
         if self.menu.is_some() {
@@ -1370,6 +1746,29 @@ impl Desktop {
                     self.menu_hover = row;
                     self.invalidate(PanelKey::Menu);
                 }
+            }
+        }
+        // Hover states inside window bodies.
+        let body = self.window_at(x, y).filter(|&id| {
+            self.mode == Mode::Desktop
+                && self
+                    .win(id)
+                    .is_some_and(|w| w.hit(x, y) == Some(Part::Body))
+        });
+        if body != self.hover_body
+            && let Some(old) = self.hover_body
+            && let Some(w) = self.win_mut(old)
+            && w.contents.hover(-1, -1)
+        {
+            w.dirty = true;
+        }
+        self.hover_body = body;
+        if let Some(id) = body
+            && let Some(w) = self.win_mut(id)
+        {
+            let b = window::body_rect(w.rect.w, w.rect.h);
+            if w.contents.hover(x - w.rect.x - b.x, y - w.rect.y - b.y) {
+                w.dirty = true;
             }
         }
         let hl = self.window_at(x, y).filter(|&id| {
@@ -1412,6 +1811,31 @@ impl Desktop {
         }
     }
 
+    /// Right button: closes menus and overlays; on a window body it focuses the window and
+    /// hands it the click (context menus, e.g. Files' Browse All Versions).
+    fn right_click(&mut self) {
+        let (x, y) = self.pointer;
+        if self.menu.is_some() || self.launcher.is_some() || self.control {
+            self.set_menu(None);
+            self.close_launcher();
+            self.control = false;
+            return;
+        }
+        if self.mode != Mode::Desktop {
+            return;
+        }
+        let Some(id) = self.window_at(x, y) else {
+            return;
+        };
+        self.set_focus(Some(id));
+        if self
+            .win(id)
+            .is_some_and(|w| w.hit(x, y) == Some(Part::Body))
+        {
+            self.send_pointer(id, x, y, PointerKind::Down(Button::Right));
+        }
+    }
+
     fn press(&mut self) {
         let (x, y) = self.pointer;
         self.drag = Some(Drag::Inert);
@@ -1448,6 +1872,10 @@ impl Desktop {
             self.control = false;
             return;
         }
+        if self.notif {
+            self.toggle_notif();
+            return;
+        }
         if self.mode != Mode::Desktop {
             if self.mode == Mode::Spaces {
                 self.set_mode(Mode::Desktop);
@@ -1473,6 +1901,7 @@ impl Desktop {
                     id,
                     dx: x - r.x,
                     dy: y - r.y,
+                    fresh: true,
                 })
             }
             Some(Part::Resize) => {
@@ -1485,7 +1914,12 @@ impl Desktop {
                 })
             }
             Some(Part::Body) => {
-                self.drag = Some(Drag::Content { id });
+                self.drag = Some(Drag::Content {
+                    id,
+                    x0: x,
+                    y0: y,
+                    tried: false,
+                });
                 self.send_pointer(id, x, y, PointerKind::Down(Button::Left));
             }
             None => {}
@@ -1513,9 +1947,10 @@ impl Desktop {
                     }
                 }
             }
-            Some(Drag::Content { id }) => {
+            Some(Drag::Content { id, .. }) => {
                 self.send_pointer(id, x, y, PointerKind::Up(Button::Left))
             }
+            Some(Drag::File) => self.dnd_drop(),
             Some(Drag::Cell { id }) => self.drop_cell(id, x, y),
             Some(Drag::Slider(0)) => {
                 // Display brightness is a saved preference (Settings shows it too).
@@ -1526,7 +1961,13 @@ impl Desktop {
                     prefs::save(&p);
                 }
             }
-            Some(Drag::Move { .. }) => {
+            Some(Drag::Move { id, .. }) => {
+                if self.snap_preview.is_some() {
+                    if let Some(z) = snap::zone_at(x, y) {
+                        self.snap_to(id, z);
+                    }
+                    self.set_snap_preview(None);
+                }
                 let s = self.stats;
                 if s.drag_frames > 0 {
                     kprintln!(
@@ -1547,16 +1988,33 @@ impl Desktop {
         // Global shortcuts.
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
+            Key::Char('q') if m.meta && m.ctrl => return self.lock_screen(),
+            // Screenshots: Cmd+Shift+3 the screen, Cmd+Shift+4 a region.
+            Key::Char('3' | '#') if m.meta && m.shift => return self.capture(None),
+            Key::Char('4' | '$') if m.meta && m.shift => return self.shot_region_start(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {
                 self.control = false;
                 return;
             }
+            Key::Escape if self.notif => return self.toggle_notif(),
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
-            Key::Up if m.ctrl => return self.toggle_mode(Mode::Spaces),
+            Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),
             Key::F(4) => return self.toggle_mode(Mode::Home),
+            // Ctrl+Alt+arrows: snap the focused window.
+            Key::Left | Key::Right | Key::Up | Key::Down if m.ctrl && m.alt => {
+                if let Some(id) = self.focus {
+                    match k.key {
+                        Key::Left => self.snap_to(id, snap::Zone::Left),
+                        Key::Right => self.snap_to(id, snap::Zone::Right),
+                        Key::Up => self.snap_to(id, snap::Zone::Fill),
+                        _ => self.unsnap(id),
+                    }
+                }
+                return;
+            }
             Key::Left if m.ctrl => return self.switch_space(self.space.saturating_sub(1)),
             Key::Right if m.ctrl => return self.switch_space(self.space + 1),
             _ => {}
@@ -1569,7 +2027,13 @@ impl Desktop {
             match k.key {
                 Key::Char('w') => {
                     if let Some(id) = self.focus {
-                        self.close(id);
+                        if let Some(w) = self.win_mut(id)
+                            && w.contents.close_part()
+                        {
+                            w.dirty = true;
+                        } else {
+                            self.close(id);
+                        }
                     }
                 }
                 Key::Char('m') => {

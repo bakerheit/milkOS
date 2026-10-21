@@ -11,7 +11,7 @@
 //! their directory entry (updated when renamed).
 //!
 //! Not supported: symlinks, hard links, permissions beyond the read-only bit, FAT12/16,
-//! sector sizes other than 512. The FSInfo free count is set to "unknown" on first write.
+//! sector sizes other than 512. The FSInfo free count is kept exact.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -261,7 +261,8 @@ struct FatState {
     fat: Vec<u32>,
     dirty: BTreeSet<u32>,
     hint: u32,
-    fsinfo_unknown: bool,
+    /// Free clusters (kept exact, written to FSInfo with the FAT).
+    free: u32,
 }
 
 pub struct FatVol {
@@ -315,7 +316,13 @@ impl FatVol {
 
     fn set_fat(&self, st: &mut FatState, c: u32, v: u32) {
         let e = &mut st.fat[c as usize];
+        let was_free = *e & 0x0FFF_FFFF == 0;
         *e = (*e & 0xF000_0000) | (v & 0x0FFF_FFFF);
+        match (was_free, v & 0x0FFF_FFFF == 0) {
+            (true, false) => st.free -= 1,
+            (false, true) => st.free += 1,
+            _ => {}
+        }
         st.dirty.insert(c * 4 / SECTOR as u32);
     }
 
@@ -343,8 +350,9 @@ impl FatVol {
         Ok(())
     }
 
-    /// Write dirty FAT sectors to every copy (and mark FSInfo's counts unknown once).
+    /// Write dirty FAT sectors to every copy, and FSInfo's free count / next-free hint.
     fn flush_fat(&self, st: &mut FatState) -> Result<()> {
+        let changed = !st.dirty.is_empty();
         for s in core::mem::take(&mut st.dirty) {
             let mut buf = [0u8; SECTOR];
             for (i, e) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -357,15 +365,15 @@ impl FatVol {
                 self.dev.write_blocks(sec, &buf)?;
             }
         }
-        if !st.fsinfo_unknown && self.bpb.fsinfo != 0 && self.bpb.fsinfo != 0xFFFF {
+        if changed && self.bpb.fsinfo != 0 && self.bpb.fsinfo != 0xFFFF {
             let mut b = [0u8; SECTOR];
             let sec = self.bpb.fsinfo as u64;
             self.dev.read_blocks(sec, &mut b)?;
-            if le32(&b, 0) == 0x4161_5252 {
-                b[488..496].fill(0xFF); // free count + next free: unknown
+            if le32(&b, 0) == 0x4161_5252 && le32(&b, 484) == 0x6141_7272 {
+                b[488..492].copy_from_slice(&st.free.to_le_bytes());
+                b[492..496].copy_from_slice(&st.hint.to_le_bytes());
                 self.dev.write_blocks(sec, &b)?;
             }
-            st.fsinfo_unknown = true;
         }
         Ok(())
     }
@@ -1216,6 +1224,10 @@ pub fn mount(dev: BlockRef, path: &str) -> Result<Arc<FatVol>> {
         s += n;
     }
     let rw = !dev.read_only();
+    let free = fat[2..nclusters as usize + 2]
+        .iter()
+        .filter(|&&e| e & 0x0FFF_FFFF == 0)
+        .count() as u32;
     let vol = Arc::new_cyclic(|me| FatVol {
         cluster_bytes: bpb.spc as usize * SECTOR,
         data_start,
@@ -1226,7 +1238,7 @@ pub fn mount(dev: BlockRef, path: &str) -> Result<Arc<FatVol>> {
             fat,
             dirty: BTreeSet::new(),
             hint: 2,
-            fsinfo_unknown: false,
+            free,
         }),
         inodes: SpinLock::new(BTreeMap::new()),
         me: me.clone(),

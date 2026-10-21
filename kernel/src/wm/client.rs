@@ -191,11 +191,16 @@ pub fn free(pa: usize, pages: usize) {
 pub fn reap() -> Vec<u32> {
     let alive =
         |pid: u32| proc::get(pid).is_some_and(|p| p.inner.lock().state == proc::PState::Alive);
-    let dead: Vec<u32> = CLIENTS
+    // Snapshot (id, pid) first: don't take process locks while holding CLIENTS.
+    let owners: Vec<(u32, u32)> = CLIENTS
         .lock()
         .iter()
-        .filter(|(_, cl)| !alive(cl.pid))
-        .map(|(&id, _)| id)
+        .map(|(&id, cl)| (id, cl.pid))
+        .collect();
+    let dead: Vec<u32> = owners
+        .into_iter()
+        .filter(|&(_, pid)| !alive(pid))
+        .map(|(id, _)| id)
         .collect();
     for &id in &dead {
         if let Some(cl) = CLIENTS.lock().remove(&id) {
@@ -227,6 +232,20 @@ pub fn info(id: u32) -> Option<(u32, u32, String)> {
         .lock()
         .get(&id)
         .map(|cl| (cl.w, cl.h, cl.title.clone()))
+}
+
+/// A file dropped onto client window `id` at body (x, y): the user's grant of that one
+/// file (`proc::grant_file`, read-only, audited as powerbox.grant via=drop), delivered as an
+/// open fd in a Drop event (kind 8: x, y, key = fd). The app reads it like any fd.
+pub fn drop_file(id: u32, x: i32, y: i32, path: &str) -> Result<(), String> {
+    let pid = CLIENTS
+        .lock()
+        .get(&id)
+        .map(|cl| cl.pid)
+        .ok_or_else(|| String::from("the window is gone"))?;
+    let fd = proc::grant_file(pid, path, false, "drop").map_err(|e| alloc::format!("{e}"))?;
+    push(id, encode(8, x, y, fd as u32, 0, 0));
+    Ok(())
 }
 
 fn push(id: u32, ev: [u8; EVENT_LEN]) {
@@ -376,7 +395,7 @@ fn button(b: Button) -> i32 {
 
 /// Where a new client window goes: cascaded from the top left of the work area.
 pub fn place(n: i32, w: i32, h: i32) -> Rect {
-    let x = (160 + n * 32).min(SCREEN_W - w).max(0);
-    let y = (80 + n * 32).min(SCREEN_H - h).max(MENU_H);
+    let x = (160 + n * 32).min(screen_w() - w).max(0);
+    let y = (80 + n * 32).min(screen_h() - h).max(MENU_H);
     Rect::new(x, y, w, h)
 }

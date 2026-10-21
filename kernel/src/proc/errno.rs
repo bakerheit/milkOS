@@ -28,5 +28,6 @@ pub const ESPIPE: Errno = Errno::ESPIPE;
 pub const ERANGE: Errno = Errno::ERANGE;
 pub const ENAMETOOLONG: Errno = Errno::ENAMETOOLONG;
 pub const ENOSYS: Errno = Errno::ENOSYS;
+pub const ECANCELED: Errno = Errno(125);
 
 pub type KResult<T> = Result<T, Errno>;

@@ -128,10 +128,10 @@ impl State {
             };
             let mut data = Vec::new();
             let mut item = |k: &Key, v: &[u8]| -> Result<()> {
-                if let Some(p) = btree::extent_ptr(k, v)
-                    && p.birth > c.generation
-                {
-                    data.push((p.block, p.birth));
+                for p in data_ptrs(k, v) {
+                    if p.birth > c.generation {
+                        data.push((p.block, p.birth));
+                    }
                 }
                 Ok(())
             };
@@ -140,6 +140,34 @@ impl State {
         }
         for (b, birth) in free {
             self.store.free_after_commit(b, birth);
+        }
+        self.clones.remove(k);
+        self.clone_trees.remove(&c.id);
+        self.meta_dirty = true;
+        self.commit()
+    }
+
+    /// A receive is done: clone `name` (built on snapshot `origin`, which the live tree
+    /// still equals) becomes the live tree, without branching history. The origin blocks
+    /// the clone dropped (recorded in `store.recv_drops`) become the live dead list, as if
+    /// the live tree had made those changes itself. EBUSY if the live tree moved on.
+    pub fn clone_fast_forward(&mut self, name: &str) -> Result<()> {
+        self.set_cur(super::items::LIVE)?;
+        self.commit()?;
+        let k = self.clone_index(name)?;
+        let c = self.clones[k].clone();
+        let origin = self
+            .snaps
+            .iter()
+            .find(|s| s.generation == c.generation)
+            .ok_or(Errno::ENOENT)?;
+        if self.sb.root != origin.root || !self.deadlist.is_none() {
+            return Err(Errno::EBUSY);
+        }
+        let drops = self.store.recv_drops.take().unwrap_or_default();
+        self.tree = Child::Disk(c.root);
+        if !self.branched() && !drops.is_empty() {
+            self.deadlist = self.store.write_deadlist(&drops, BlockPtr::NONE)?;
         }
         self.clones.remove(k);
         self.clone_trees.remove(&c.id);

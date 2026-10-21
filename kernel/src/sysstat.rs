@@ -54,7 +54,11 @@ fn sampler() {
 
 fn fixed(v: u64) -> String {
     let v = v + FIXED_1 / 200; // round to 2 decimals
-    alloc::format!("{}.{:02}", v >> FSHIFT, ((v & (FIXED_1 - 1)) * 100) >> FSHIFT)
+    alloc::format!(
+        "{}.{:02}",
+        v >> FSHIFT,
+        ((v & (FIXED_1 - 1)) * 100) >> FSHIFT
+    )
 }
 
 fn loadavg() -> String {

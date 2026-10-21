@@ -14,15 +14,15 @@
 #![allow(dead_code)]
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use crate::exceptions::TrapFrame;
 use crate::kprintln;
 use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{FnSlot, IrqGuard};
 
-const GICD_BASE: usize = 0x0800_0000;
-const GICC_BASE: usize = 0x0801_0000;
+const GICD_BASE: usize = crate::mmu::phys_to_virt(0x0800_0000);
+const GICC_BASE: usize = crate::mmu::phys_to_virt(0x0801_0000);
 
 // Distributor registers.
 const GICD_CTLR: usize = 0x000;
@@ -73,6 +73,12 @@ pub enum Error {
 }
 
 static HANDLERS: [FnSlot; MAX_IRQS] = [const { FnSlot::new() }; MAX_IRQS];
+/// Each CPU's GIC CPU-interface mask (what ITARGETSR0 reads on that CPU).
+static CPU_IF_MASK: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+/// SPIs are spread over the online CPUs (after [`spread_spis`]); else all go to CPU 0.
+static SPREAD: AtomicBool = AtomicBool::new(false);
+/// Round-robin cursor for the next SPI's CPU.
+static NEXT_CPU: AtomicU32 = AtomicU32::new(0);
 // Interrupt counters, per CPU (atomic adds: several CPUs take interrupts).
 static SPURIOUS: AtomicU64 = AtomicU64::new(0);
 static NUM_IRQS: AtomicU32 = AtomicU32::new(0);
@@ -140,6 +146,7 @@ pub fn init() {
         0 => 1,
         m => m,
     };
+    CPU_IF_MASK[0].store(cpu_mask, Ordering::Relaxed);
     for n in 0..lines.div_ceil(32) as usize {
         gicd_write(GICD_ICENABLER + n * 4, !0);
         gicd_write(GICD_ICPENDR + n * 4, !0);
@@ -170,6 +177,11 @@ pub fn init() {
 /// priorities) and its CPU interface. SGIs and PPIs that have a handler are enabled here
 /// too, since `enable` on the boot CPU only reached the boot CPU's banked copy.
 pub fn init_cpu() {
+    let m = (gicd_read(GICD_ITARGETSR) & 0xff) as u8;
+    CPU_IF_MASK[percpu::id()].store(
+        if m == 0 { 1 << percpu::id() } else { m },
+        Ordering::Relaxed,
+    );
     gicd_write(GICD_ICENABLER, !0);
     gicd_write(GICD_ICPENDR, !0);
     for n in 0..8 {
@@ -199,7 +211,53 @@ pub fn register(irq: u32, handler: Handler) -> Result<(), Error> {
         return Err(Error::Busy);
     }
     slot.set(handler);
+    if irq >= 32 && SPREAD.load(Ordering::Relaxed) {
+        let _ = set_target(irq, next_target());
+    }
     Ok(())
+}
+
+/// GIC CPU-interface mask of the next online CPU in round-robin order.
+fn next_target() -> u8 {
+    let n = percpu::count().max(1);
+    let k = NEXT_CPU.fetch_add(1, Ordering::Relaxed) as usize % n;
+    let cpu = percpu::online().nth(k).unwrap_or(0);
+    match CPU_IF_MASK[cpu].load(Ordering::Relaxed) {
+        0 => 1,
+        m => m,
+    }
+}
+
+/// IRQ affinity: route every SPI that has a handler to one online CPU, round robin
+/// (ITARGETSR), and keep doing that for SPIs registered later. `false` puts them all
+/// back on CPU 0. Call after the secondaries are up.
+pub fn spread_spis(spread: bool) {
+    SPREAD.store(spread, Ordering::Relaxed);
+    NEXT_CPU.store(0, Ordering::Relaxed);
+    let cpu0 = CPU_IF_MASK[0].load(Ordering::Relaxed).max(1);
+    for irq in 32..num_irqs() {
+        if is_registered(irq) {
+            let _ = set_target(irq, if spread { next_target() } else { cpu0 });
+        }
+    }
+}
+
+pub fn spis_spread() -> bool {
+    SPREAD.load(Ordering::Relaxed)
+}
+
+/// Which CPUs (our CPU numbers) `irq` is routed to. SGIs/PPIs: every CPU (banked).
+pub fn target_cpus(irq: u32) -> u32 {
+    if check(irq).is_err() {
+        return 0;
+    }
+    if irq < 32 {
+        return percpu::online().fold(0, |m, c| m | 1 << c);
+    }
+    let t = gicd_read8(GICD_ITARGETSR + irq as usize);
+    percpu::online()
+        .filter(|&c| t & CPU_IF_MASK[c].load(Ordering::Relaxed) != 0)
+        .fold(0, |m, c| m | 1 << c)
 }
 
 /// Detach whatever handler is on `irq` (and disable the interrupt first).

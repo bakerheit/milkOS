@@ -3,8 +3,25 @@
 
 use crate::gfx::{Color, rgb};
 
-pub const SCREEN_W: i32 = 1024;
-pub const SCREEN_H: i32 = 768;
+/// The screen size (the display mode, Settings > Display & Lock): 1024x768 at boot.
+static SCREEN: [core::sync::atomic::AtomicI32; 2] = [
+    core::sync::atomic::AtomicI32::new(1024),
+    core::sync::atomic::AtomicI32::new(768),
+];
+
+pub fn screen_w() -> i32 {
+    SCREEN[0].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn screen_h() -> i32 {
+    SCREEN[1].load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The desktop changed the display mode (wm thread).
+pub fn set_screen(w: i32, h: i32) {
+    SCREEN[0].store(w, core::sync::atomic::Ordering::Relaxed);
+    SCREEN[1].store(h, core::sync::atomic::Ordering::Relaxed);
+}
 
 // ---- colours ------------------------------------------------------------------------------
 pub const MILK: Color = rgb(0xFF, 0xFD, 0xF8);
@@ -97,8 +114,6 @@ pub const BLUR_PASSES: usize = 3;
 pub const GLASS_A: u8 = a(550);
 pub const GLASS_STRONG_A: u8 = a(700);
 pub const GLASS_BORDER_A: u8 = a(750);
-/// A glass panel over a window is plain milk at this alpha.
-pub const GLASS_SOLID_A: u8 = a(920);
 
 // ---- shadows (grow, dy, alpha) -------------------------------------------------------------
 pub const SHADOW_WINDOW: [(i32, i32, u8); 3] = [(10, 12, a(50)), (5, 8, a(70)), (0, 4, a(120))];
@@ -150,6 +165,15 @@ pub const LAUNCH_INPUT_H: i32 = 56;
 pub const LAUNCH_ROW_H: i32 = 48;
 pub const LAUNCH_GAP: i32 = 12;
 pub const LAUNCH_MAX_ROWS: usize = 6;
+
+/// Skim's result rows: SPEC's 6 at 768 high, more on taller screens.
+pub fn launch_rows() -> usize {
+    match screen_h() {
+        0..800 => LAUNCH_MAX_ROWS,
+        800..900 => 8,
+        _ => 9,
+    }
+}
 pub const LAUNCH_DIM_A: u8 = a(250);
 
 // ---- toast ----------------------------------------------------------------------------------

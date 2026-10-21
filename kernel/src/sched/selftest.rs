@@ -17,6 +17,7 @@ pub fn run() {
     preemption();
     churn();
     timeout();
+    stale_waiter();
     #[cfg(feature = "kstack-overflow-test")]
     overflow();
     kprintln!("[sched-test] PASS");
@@ -233,6 +234,54 @@ fn timeout() {
         "[sched-test] timed wait: timed out after {waited} us (20 ms), woken after {early} us (of 1 s)"
     );
     assert!(r2 && early < 500_000, "timed wait missed its wakeup");
+}
+
+/// Regression test for a lost wakeup: a waiter whose condition came true after a wakeup
+/// that wasn't from this queue (here: a leftover `wake_pending`) used to leave without
+/// taking itself off the queue. The next `wake_one` then popped that stale entry, "woke"
+/// a thread that wasn't waiting, and the real waiter behind it slept forever (seen as
+/// boots hanging in the mutex test with every CPU idle).
+fn stale_waiter() {
+    let q = Arc::new(super::WaitQueue::new());
+    // 1. Leave a pending wake on ourselves (a wake that arrived while we were running).
+    super::wake(super::current_tid());
+    // 2. Wait on `q` with a condition that is false, false, then true: enqueue, block
+    //    (returns at once on the pending wake), condition true -> leave.
+    let mut calls = 0;
+    q.wait_until(|| {
+        calls += 1;
+        calls >= 3
+    });
+    // 3. A real waiter blocks on `q`.
+    let flag = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let h = {
+        let (q, flag, done) = (q.clone(), flag.clone(), done.clone());
+        spawn("stale-waiter", move || {
+            q.wait_until(|| flag.load(Ordering::Acquire));
+            done.store(true, Ordering::Release);
+        })
+    };
+    super::sleep_ms(20); // let it block
+    // 4. One wake_one must reach it.
+    flag.store(true, Ordering::Release);
+    q.wake_one();
+    let t0 = timer::now_ns();
+    while !done.load(Ordering::Acquire) && timer::now_ns() - t0 < 200_000_000 {
+        super::sleep_ms(1);
+    }
+    let ok = done.load(Ordering::Acquire);
+    if !ok {
+        q.wake_all(); // don't leave it hanging, then fail
+    }
+    h.join();
+    kprintln!(
+        "[sched-test] stale waiter: wake_one reached the real waiter: {ok} (condition checks {calls})"
+    );
+    assert!(
+        ok,
+        "wake_one was swallowed by a stale wait-queue entry (lost wakeup)"
+    );
 }
 
 /// Spawn and join many threads; stacks and page tables must come back.

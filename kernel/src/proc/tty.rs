@@ -434,7 +434,12 @@ pub fn init() {
     uart::set_rx_hook(on_rx);
     drop(sched::spawn_prio("tty-uart", Priority::High, || {
         loop {
-            RX_WQ.wait_until(|| uart::available() > 0);
+            // The RX interrupt wakes us; the 1 s timeout is only a defence-in-depth re-check
+            // of the UART FIFO in case an interrupt is ever lost (uart::poll reports it).
+            if !RX_WQ.wait_until_timeout(|| uart::available() > 0, 1_000_000_000) {
+                uart::poll();
+                continue;
+            }
             let mut v = Vec::new();
             while let Some(b) = uart::read_byte() {
                 v.push(b);

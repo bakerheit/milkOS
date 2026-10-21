@@ -34,6 +34,8 @@ pub enum PanelKey {
     Tip,
     /// An open menu bar menu.
     Menu,
+    /// The notification centre (notif.rs).
+    Notif,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,13 +102,14 @@ pub struct Toast {
 // ---- dock ---------------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-enum DockAction {
+pub(super) enum DockAction {
     App(App),
     /// A userland program, started with `proc::spawn`.
     Program(&'static str),
     Home,
     Spaces,
-    Soon(&'static str),
+    /// An installed package (`packages::get(i)`).
+    Pkg(usize),
 }
 
 struct DockItem {
@@ -158,7 +161,7 @@ const DOCK: [DockItem; 9] = [
         icon: Icon::Music,
         bg: STRAW,
         fg: INK,
-        action: DockAction::Soon("Music"),
+        action: DockAction::App(App::Music),
     },
     DockItem {
         name: "Spaces",
@@ -183,12 +186,54 @@ const DOCK: [DockItem; 9] = [
     },
 ];
 
+/// A dock tile as drawn: the built-in ones, then installed packages (packages.rs).
+struct Tile {
+    name: String,
+    /// None: a package, drawn as its colour with its initial.
+    icon: Option<Icon>,
+    bg: Color,
+    fg: Color,
+    action: DockAction,
+}
+
+/// What dock tile `i` does (drag and drop asks).
+pub(super) fn dock_action(i: usize) -> Option<DockAction> {
+    tiles().into_iter().nth(i).map(|t| t.action)
+}
+
+fn dock_len() -> usize {
+    DOCK.len() + super::packages::count()
+}
+
+fn tiles() -> Vec<Tile> {
+    let mut v: Vec<Tile> = DOCK
+        .iter()
+        .map(|d| Tile {
+            name: String::from(d.name),
+            icon: Some(d.icon),
+            bg: d.bg,
+            fg: d.fg,
+            action: d.action,
+        })
+        .collect();
+    for (i, p) in super::packages::all().into_iter().enumerate() {
+        v.push(Tile {
+            name: p.label,
+            icon: None,
+            bg: p.color,
+            fg: INK,
+            action: DockAction::Pkg(i),
+        });
+    }
+    v
+}
+
 pub fn dock_rect() -> Rect {
-    let n = DOCK.len() as i32;
+    let n = dock_len() as i32;
     let w = 2 * DOCK_PAD + n * dock_icon() + (n - 1) * DOCK_GAP;
     Rect::new(
-        (SCREEN_W - w) / 2,
-        SCREEN_H - DOCK_BOTTOM - dock_h(),
+        (screen_w() - w) / 2,
+        screen_h() - DOCK_BOTTOM - dock_h(),
         w,
         dock_h(),
     )
@@ -198,7 +243,7 @@ pub fn dock_rect() -> Rect {
 pub fn dock_index(lx: i32) -> Option<usize> {
     let i = (lx - DOCK_PAD) / (dock_icon() + DOCK_GAP);
     let within = (lx - DOCK_PAD) % (dock_icon() + DOCK_GAP) < dock_icon();
-    (lx >= DOCK_PAD && within && (i as usize) < DOCK.len()).then_some(i as usize)
+    (lx >= DOCK_PAD && within && (i as usize) < dock_len()).then_some(i as usize)
 }
 
 impl Desktop {
@@ -208,9 +253,11 @@ impl Desktop {
             App::Client(c) => super::client::process_name(c),
             _ => None,
         };
-        let i = DOCK.iter().position(|d| match d.action {
+        let i = tiles().iter().position(|d| match d.action {
             DockAction::App(a) => a == app,
             DockAction::Program(p) => prog.as_deref() == p.rsplit('/').next(),
+            DockAction::Pkg(k) => super::packages::get(k)
+                .is_some_and(|p| prog.as_deref() == p.exec.rsplit('/').next()),
             _ => false,
         });
         match i {
@@ -223,23 +270,29 @@ impl Desktop {
                     dock_icon(),
                 )
             }
-            None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
+            None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
         }
     }
 }
 
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
+    dock_icon_center_of(i, 0)
+}
+
+/// The same once `extra` more tiles (packages) are in the dock: it grows from the centre.
+pub fn dock_icon_center_of(i: usize, extra: usize) -> (i32, i32) {
     let d = dock_rect();
+    let shift = (extra as i32 - super::packages::count() as i32) * (dock_icon() + DOCK_GAP) / 2;
     (
-        d.x + DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP) + dock_icon() / 2,
+        d.x - shift + DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP) + dock_icon() / 2,
         d.y + DOCK_PAD + dock_icon() / 2,
     )
 }
 
 // ---- launcher -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     App(App),
     Program(&'static str),
@@ -249,16 +302,16 @@ pub enum Action {
     NewSpace,
 }
 
-struct Entry {
-    name: &'static str,
-    sub: &'static str,
-    icon: Icon,
-    bg: Color,
-    fg: Color,
-    action: Action,
+pub struct Entry {
+    pub name: &'static str,
+    pub sub: &'static str,
+    pub icon: Icon,
+    pub bg: Color,
+    pub fg: Color,
+    pub action: Action,
 }
 
-const ENTRIES: [Entry; 11] = [
+pub const ENTRIES: [Entry; 12] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -308,6 +361,14 @@ const ENTRIES: [Entry; 11] = [
         action: Action::App(App::Browser),
     },
     Entry {
+        name: "Music",
+        sub: "Play the tunes in ~/Music and the system sounds",
+        icon: Icon::Music,
+        bg: STRAW,
+        fg: INK,
+        action: Action::App(App::Music),
+    },
+    Entry {
         name: "Settings",
         sub: "Theme, wallpaper, display, dock, Time Machine",
         icon: Icon::Gear,
@@ -351,7 +412,9 @@ const ENTRIES: [Entry; 11] = [
 
 pub struct Launcher {
     pub query: String,
+    /// Index into `items` (headers are not selectable).
     pub sel: usize,
+    pub items: Vec<super::skim::Item>,
 }
 
 /// Fuzzy subsequence match, case-insensitive. Higher is better; None if not all of `q` appears in
@@ -378,65 +441,125 @@ pub fn fuzzy(q: &str, name: &str) -> Option<i32> {
         last = Some(found);
         pos = found + 1;
     }
-    Some(score * 10 - n.len() as i32 / 4)
+    // A literal substring beats a scattered match by a lot, more so at a word start.
+    let name_l: String = n.iter().collect();
+    let ql: String = q.trim().to_ascii_lowercase();
+    let bonus = match name_l.find(&ql) {
+        Some(0) => 120,
+        Some(i) if n[i - 1] == ' ' || n[i - 1] == '.' || n[i - 1] == '-' => 100,
+        Some(_) => 60,
+        None => 0,
+    };
+    Some(score * 10 + bonus - n.len() as i32 / 4)
 }
 
 impl Launcher {
-    pub fn result_count(&self) -> usize {
-        self.results().len()
+    pub fn new() -> Launcher {
+        super::skim::refresh_index();
+        let mut l = Launcher {
+            query: String::new(),
+            sel: 0,
+            items: Vec::new(),
+        };
+        l.update();
+        l
     }
 
-    fn results(&self) -> Vec<&'static Entry> {
-        if self.query.trim().is_empty() {
-            return ENTRIES.iter().take(4).collect();
+    pub fn update(&mut self) {
+        self.items = super::skim::search(&self.query);
+        self.sel = 0;
+    }
+
+    /// Row y offsets in the results panel: (y, height, header kind or item index).
+    fn layout(&self) -> Vec<(i32, i32, Option<super::skim::Kind>, Option<usize>)> {
+        let mut y = 8;
+        let mut v = Vec::new();
+        for (h, it) in super::skim::rows(&self.items) {
+            let rh = if h.is_some() {
+                super::skim::HEADER_H
+            } else {
+                LAUNCH_ROW_H
+            };
+            v.push((y, rh, h, it));
+            y += rh;
         }
-        let mut v: Vec<(i32, &'static Entry)> = ENTRIES
-            .iter()
-            .filter_map(|e| fuzzy(&self.query, e.name).map(|s| (s, e)))
-            .collect();
-        v.sort_by_key(|e| core::cmp::Reverse(e.0));
-        v.into_iter()
-            .take(LAUNCH_MAX_ROWS)
-            .map(|(_, e)| e)
-            .collect()
+        v
+    }
+
+    /// Item under panel y.
+    pub fn item_at(&self, y: i32) -> Option<usize> {
+        self.layout()
+            .into_iter()
+            .find(|&(ry, rh, _, it)| it.is_some() && y >= ry && y < ry + rh)
+            .and_then(|r| r.3)
     }
 }
 
 fn launcher_x() -> i32 {
-    (SCREEN_W - LAUNCH_W) / 2
+    (screen_w() - LAUNCH_W) / 2
 }
 
-fn results_height(n: usize) -> i32 {
-    16 + 24 + n.max(1) as i32 * LAUNCH_ROW_H + 28 + 8 + 8
+fn results_height(l: &Launcher) -> i32 {
+    let rows: i32 = l.layout().iter().map(|r| r.1).sum();
+    8 + rows.max(LAUNCH_ROW_H) + 36
 }
 
 // ---- control centre -----------------------------------------------------------------------
 
 pub fn control_rect() -> Rect {
-    Rect::new(SCREEN_W - CC_RIGHT - CC_W, CC_TOP, CC_W, CC_H)
+    Rect::new(screen_w() - CC_RIGHT - CC_W, CC_TOP, CC_W, CC_H)
 }
 
 const SLIDER_Y: [i32; 2] = [88, 160];
 const TRACK_X: i32 = 30;
 const TRACK_W: i32 = CC_W - 60;
 
+/// The tiles inside glass panels (control centre, notification centre): milk at 0.7 over
+/// the glass in Whole milk; in Chocolate milk a shade lighter than the glass (oat), so they
+/// read as raised the same way.
+pub(super) fn tile_colour(solid: bool) -> (Color, u8) {
+    if solid {
+        (OAT, 255)
+    } else if super::theme::dark() {
+        (OAT, a(700))
+    } else {
+        (MILK, a(700))
+    }
+}
+
 // ---- home cards ---------------------------------------------------------------------------
+
+/// Today's middle row: 3 cards (calendar, session, system), 4 from 1280 wide (+ recent
+/// notifications, card 6).
+pub fn today_cols() -> i32 {
+    if screen_w() >= 1280 { 4 } else { 3 }
+}
+
+/// How many Today cards there are (indices 0..n).
+pub fn card_count() -> u8 {
+    if today_cols() == 4 { 7 } else { 6 }
+}
 
 fn card_rect(i: u8) -> Rect {
     let y1 = 56 + 96 + CARD_GAP;
     let y2 = y1 + 228 + CARD_GAP;
+    let inner = screen_w() - 2 * CARD_MARGIN;
+    let cols = today_cols();
+    // SPEC's 296 at 1024 wide; the 4-column row shares the width.
+    let cw = if cols == 3 {
+        296
+    } else {
+        (inner - (cols - 1) * CARD_GAP) / cols
+    };
+    let half = (inner - CARD_GAP) / 2;
     match i {
-        0 => Rect::new(CARD_MARGIN, 56, SCREEN_W - 2 * CARD_MARGIN, 96),
-        1..=3 => Rect::new(
-            CARD_MARGIN + (i as i32 - 1) * (296 + CARD_GAP),
-            y1,
-            296,
-            228,
-        ),
+        0 => Rect::new(CARD_MARGIN, 56, inner, 96),
+        1..=3 => Rect::new(CARD_MARGIN + (i as i32 - 1) * (cw + CARD_GAP), y1, cw, 228),
+        6 => Rect::new(CARD_MARGIN + 3 * (cw + CARD_GAP), y1, cw, 228),
         _ => Rect::new(
-            CARD_MARGIN + (i as i32 - 4) * (456 + CARD_GAP),
+            CARD_MARGIN + (i as i32 - 4) * (half + CARD_GAP),
             y2,
-            456,
+            half,
             188,
         ),
     }
@@ -451,21 +574,24 @@ const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
 
 // ---- spaces -------------------------------------------------------------------------------
 
-/// Size of a window's overview cell: its surface scaled to fit 300x210 (never enlarged).
+/// The overview's measures are designed at 1024 wide and grow with the screen.
+fn sc(v: i32) -> i32 {
+    v * screen_w() / 1024
+}
+
+/// Size of a window's overview cell: its surface scaled to fit 300x210 (at 1024 wide;
+/// more on bigger screens), never enlarged.
 pub fn cell_size(w: i32, h: i32) -> (i32, i32) {
-    let k = (300 * 1024 / w.max(1)).min(210 * 1024 / h.max(1)).min(1024);
+    let (mw, mh) = (sc(300), sc(210));
+    let k = (mw * 1024 / w.max(1)).min(mh * 1024 / h.max(1)).min(1024);
     ((w * k / 1024).max(8), (h * k / 1024).max(8))
 }
 
 fn thumb_rect(i: usize, n: usize) -> Rect {
-    let total = n as i32 * THUMB_W + (n as i32 - 1) * THUMB_GAP;
-    let sx = (SCREEN_W - total) / 2;
-    Rect::new(
-        sx + i as i32 * (THUMB_W + THUMB_GAP),
-        SPACES_STRIP_Y,
-        THUMB_W,
-        THUMB_H,
-    )
+    let (tw, th) = (sc(THUMB_W), sc(THUMB_H));
+    let total = n as i32 * tw + (n as i32 - 1) * THUMB_GAP;
+    let sx = (screen_w() - total) / 2;
+    Rect::new(sx + i as i32 * (tw + THUMB_GAP), SPACES_STRIP_Y, tw, th)
 }
 
 const SPACE_NAMES: [&str; 6] = ["Main", "Notes", "Play", "Work", "Extra", "More"];
@@ -493,11 +619,13 @@ impl Desktop {
             .enumerate()
             .map(|(i, w)| {
                 let (col, row) = (i as i32 % 3, i as i32 / 3);
-                let (sx, sy) = (60 + col * 330, 170 + row * 270);
+                let x0 = sc(60);
+                let y0 = SPACES_STRIP_Y + sc(THUMB_H) + sc(42);
+                let (sx, sy) = (x0 + col * sc(330), y0 + row * sc(270));
                 let (cw, ch) = cell_size(w.rect.w, w.rect.h);
                 (
                     w.id,
-                    Rect::new(sx + (300 - cw) / 2, sy + (210 - ch) / 2, cw, ch),
+                    Rect::new(sx + (sc(300) - cw) / 2, sy + (sc(210) - ch) / 2, cw, ch),
                 )
             })
             .collect()
@@ -508,7 +636,7 @@ impl Desktop {
         let mut v = Vec::new();
         let bar = spec(
             PanelKey::MenuBar,
-            Rect::new(0, 0, SCREEN_W, MENU_H),
+            Rect::new(0, 0, screen_w(), MENU_H),
             0,
             Style::Bar,
             false,
@@ -520,7 +648,7 @@ impl Desktop {
                 v.push(dock);
             }
             Mode::Home => {
-                for i in 0..6 {
+                for i in 0..card_count() {
                     v.push(spec(
                         PanelKey::Card(i),
                         card_rect(i),
@@ -567,8 +695,8 @@ impl Desktop {
                 }
                 v.push(Layer::Label {
                     x: 0,
-                    y: 722,
-                    w: SCREEN_W,
+                    y: screen_h() - 46,
+                    w: screen_w(),
                     text: String::from(
                         "Click a window to focus   Drag it to another space   Esc to leave",
                     ),
@@ -580,13 +708,14 @@ impl Desktop {
             && self.launcher.is_none()
         {
             let (cx, _) = dock_icon_center(i);
-            let w = super::fontx::prop_width(DOCK[i].name, false) + 24;
+            let name = tiles().get(i).map_or(String::new(), |t| t.name.clone());
+            let w = super::fontx::prop_width(&name, false) + 24;
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
         for (i, t) in self.toasts.iter().enumerate() {
             let r = Rect::new(
-                SCREEN_W - TOAST_RIGHT - TOAST_W,
+                screen_w() - TOAST_RIGHT - TOAST_W,
                 TOAST_TOP + i as i32 * (TOAST_H + 8),
                 TOAST_W,
                 TOAST_H,
@@ -605,6 +734,15 @@ impl Desktop {
                 true,
             ));
         }
+        if self.notif {
+            v.push(spec(
+                PanelKey::Notif,
+                super::notif::rect(),
+                R_CARD,
+                Style::GlassStrong,
+                true,
+            ));
+        }
         if let Some(l) = &self.launcher {
             v.push(Layer::Dim(LAUNCH_DIM_A));
             let x = launcher_x();
@@ -615,14 +753,13 @@ impl Desktop {
                 Style::GlassStrong,
                 true,
             ));
-            let n = l.results().len();
             v.push(spec(
                 PanelKey::LaunchResults,
                 Rect::new(
                     x,
                     LAUNCH_Y + LAUNCH_INPUT_H + LAUNCH_GAP,
                     LAUNCH_W,
-                    results_height(n),
+                    results_height(l),
                 ),
                 R_LAUNCHER,
                 Style::GlassStrong,
@@ -635,12 +772,21 @@ impl Desktop {
     pub(super) fn status_text(&self) -> String {
         let t = rtc::now();
         format!(
-            "cpu {}%   {} {:02}:{:02}",
-            self.stats.cpu_pct,
+            "{} {:02}:{:02}",
             &rtc::DAYS[t.weekday as usize][..3],
             t.hour,
             t.minute
         )
+    }
+
+    /// Width of the menu bar's right side: "cpu" + one bar per CPU + gap + the clock.
+    pub(super) fn status_width(&self) -> i32 {
+        let n = self.cpu_loads.len().max(1) as i32;
+        super::fontx::prop_width("cpu", false)
+            + 4
+            + n * 6
+            + 14
+            + super::fontx::prop_width(&self.status, false)
     }
 
     pub(super) fn app_title(&self) -> String {
@@ -673,10 +819,11 @@ impl Desktop {
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
+            PanelKey::Notif => self.paint_notif(p, solid),
             PanelKey::Menu => self.paint_menu(p, w),
             PanelKey::Tip => {
-                if let Some(i) = self.tip {
-                    p.text_p_center(0, w, 6, DOCK[i].name, ESPRESSO, false);
+                if let Some(t) = self.tip.and_then(|i| tiles().into_iter().nth(i)) {
+                    p.text_p_center(0, w, 6, &t.name, ESPRESSO, false);
                 }
             }
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
@@ -707,29 +854,55 @@ impl Desktop {
             p.text_p(x, MENU_TEXT_Y, &name, ESPRESSO, k == 0);
         }
         let sw = super::fontx::prop_width(&self.status, false);
+        let tx = w - MENU_PAD_X - sw;
+        p.text_p(tx, MENU_TEXT_Y, &self.status, ESPRESSO, false);
+        // A tiny per-CPU load meter: one bar per online CPU.
+        let n = self.cpu_loads.len().max(1) as i32;
+        let mx = tx - 14 - n * 6;
+        for (i, &l) in self.cpu_loads.iter().enumerate() {
+            let x = mx + i as i32 * 6;
+            p.rrect(x, 7, 4, 14, 2, SAND, 255);
+            let h = (14 * l.min(100) as i32 / 100).max(2);
+            let c = if l > 75 { HONEY } else { MATCHA };
+            p.rrect(x, 21 - h, 4, h, 2, c, 255);
+        }
         p.text_p(
-            w - MENU_PAD_X - sw,
+            mx - 4 - super::fontx::prop_width("cpu", false),
             MENU_TEXT_Y,
-            &self.status,
-            ESPRESSO,
+            "cpu",
+            COCOA,
             false,
         );
     }
 
     fn paint_dock(&self, p: &mut Painter) {
-        for (i, it) in DOCK.iter().enumerate() {
+        for (i, it) in tiles().iter().enumerate() {
             let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
-            icons::draw(
-                p,
-                ix,
-                DOCK_PAD,
-                dock_icon(),
-                it.icon,
-                it.bg,
-                255,
-                it.fg,
-                false,
-            );
+            match it.icon {
+                Some(icon) => {
+                    icons::draw(p, ix, DOCK_PAD, dock_icon(), icon, it.bg, 255, it.fg, false)
+                }
+                None => {
+                    // A package: its colour and initial.
+                    let r = (dock_icon() * 24 + 50) / 100;
+                    p.rrect(ix, DOCK_PAD, dock_icon(), dock_icon(), r, it.bg, 255);
+                    let c: String = it
+                        .name
+                        .chars()
+                        .take(1)
+                        .flat_map(char::to_uppercase)
+                        .collect();
+                    let cw = crate::font::str_width(&c, 2);
+                    p.text_x(
+                        ix + (dock_icon() - cw) / 2,
+                        DOCK_PAD + (dock_icon() - 32) / 2,
+                        &c,
+                        it.fg,
+                        2,
+                        true,
+                    );
+                }
+            }
             // SPEC hover / pressed: lighten 4% / darken 4%.
             let r = (dock_icon() * 24 + 50) / 100;
             if self.dock_pressed == Some(i) {
@@ -741,8 +914,9 @@ impl Desktop {
                 DockAction::App(a) => self.windows.iter().any(|w| w.app == a),
                 DockAction::Home => self.mode == Mode::Home,
                 DockAction::Spaces => self.mode == Mode::Spaces,
-                DockAction::Soon(_) => false,
                 DockAction::Program(p) => self.running_program(p),
+                DockAction::Pkg(k) => super::packages::get(k)
+                    .is_some_and(|p| p.window && self.running_program(&p.exec)),
             };
             if running {
                 p.rrect(
@@ -760,8 +934,7 @@ impl Desktop {
 
     fn paint_control(&self, p: &mut Painter, solid: bool) {
         let s = &self.settings;
-        // Tiles are milk at 0.7 over glass; over plain milk (solid mode) use oat so they show.
-        let (tbg, ta) = if solid { (OAT, 255) } else { (MILK, a(700)) };
+        let (tbg, ta) = tile_colour(solid);
         let tile = |p: &mut Painter, tx: i32, label: &str, sub: &str, on: bool| {
             if on {
                 p.rrect(tx, 16, 124, CC_TILE_H, 16, STRAW, 255);
@@ -772,7 +945,15 @@ impl Desktop {
             p.text_p(tx + 14, 26, label, c1, true);
             p.text_p(tx + 14, 46, sub, c2, false);
         };
-        tile(p, 16, "Network", "not yet", false);
+        let net = crate::net::config();
+        let addr = if !crate::net::has_device() {
+            String::from("no network")
+        } else if net.configured() {
+            format!("{}", net.addr)
+        } else {
+            String::from("waiting for DHCP")
+        };
+        tile(p, 16, "Network", &addr, false);
         tile(
             p,
             148,
@@ -838,35 +1019,35 @@ impl Desktop {
         let Some(l) = &self.launcher else {
             return;
         };
-        let res = l.results();
-        let label = if l.query.trim().is_empty() {
-            "SUGGESTIONS"
-        } else {
-            "TOP HITS"
-        };
-        p.text(16, 12, label, COCOA);
-        if res.is_empty() {
-            p.text(64, 40 + 16, "No matches", COCOA);
+        if l.items.is_empty() {
+            p.text_p(64, 8 + 16, "No matches", COCOA, false);
         }
-        for (i, e) in res.iter().enumerate() {
-            let y = 40 + i as i32 * LAUNCH_ROW_H;
-            let sel = i == l.sel.min(res.len() - 1);
-            if sel {
-                p.rrect(8, y, w - 16, LAUNCH_ROW_H, R_ROW, STRAW, SEL_ROW_A);
+        let sel = l.sel.min(l.items.len().saturating_sub(1));
+        for (y, rh, header, item) in l.layout() {
+            if let Some(k) = header {
+                p.text(16, y + 6, k.label(), COCOA);
+                continue;
+            }
+            let Some(i) = item else {
+                continue;
+            };
+            let e = &l.items[i];
+            if i == sel {
+                p.rrect(8, y, w - 16, rh, R_ROW, STRAW, SEL_ROW_A);
             }
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
-            p.text_p(64, y + 6, e.name, ESPRESSO, true);
-            p.text_p(64, y + 22, e.sub, COCOA, false);
-            if sel {
+            p.text_p(64, y + 6, &e.title, ESPRESSO, true);
+            p.text_p(64, y + 24, &e.sub, COCOA, false);
+            if i == sel {
                 p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
             }
         }
-        let fy = 40 + res.len().max(1) as i32 * LAUNCH_ROW_H + 8;
+        let fy = results_height(l) - 30;
         p.text_p(
             16,
             fy,
-            "Up/Down to choose    Enter to open    Esc to close",
+            "Tab next kind    = calculator    > run a command    Esc closes",
             COCOA,
             false,
         );
@@ -903,8 +1084,10 @@ impl Desktop {
             }
             1 => {
                 label(p, "CALENDAR");
+                // 38px columns in a 296 card; narrower cards squeeze them.
+                let col = ((w - 24) / 7).min(38);
                 for (k, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
-                    p.text_center(12 + k as i32 * 38, 38, 40, d, COCOA, false);
+                    p.text_center(12 + k as i32 * col, col, 40, d, COCOA, false);
                 }
                 // Last week, this week, next week; today in the middle row.
                 let first = rtc::first_weekday(&t);
@@ -922,14 +1105,14 @@ impl Desktop {
                     } else if n > len {
                         n -= len;
                     }
-                    let cx = 12 + (c % 7) * 38;
+                    let cx = 12 + (c % 7) * col;
                     let cy = 66 + (c / 7) * 34;
                     let today = c == 7 + t.weekday as i32;
                     if today {
-                        p.rrect(cx + 3, cy - 4, 32, 24, 12, STRAW, 255);
+                        p.rrect(cx + (col - 32) / 2, cy - 4, 32, 24, 12, STRAW, 255);
                     }
                     let s = format!("{n}");
-                    p.text_center(cx, 38, cy, &s, if today { MILK } else { ESPRESSO }, today);
+                    p.text_center(cx, col, cy, &s, if today { MILK } else { ESPRESSO }, today);
                 }
                 let m = format!("{} {}", rtc::MONTHS[t.month as usize - 1], t.year);
                 p.text(pad, 180, &m, COCOA);
@@ -968,11 +1151,12 @@ impl Desktop {
                 for (k, (name, v, c)) in rows.into_iter().enumerate() {
                     let y = 44 + k as i32 * 34;
                     p.text(pad, y, name, ESPRESSO);
-                    p.rrect(64, y + 2, 200, 12, 6, SAND, 255);
+                    let bw = w - 64 - 32;
+                    p.rrect(64, y + 2, bw, 12, 6, SAND, 255);
                     p.rrect(
                         64,
                         y + 2,
-                        (200 * v.clamp(0, 100) / 100).max(12),
+                        (bw * v.clamp(0, 100) / 100).max(12),
                         12,
                         6,
                         c,
@@ -981,6 +1165,28 @@ impl Desktop {
                 }
                 p.text(pad, 156, &format!("Up {}", fmt_uptime(now)), COCOA);
                 p.bold(pad, 180, "All systems fine", MATCHA);
+            }
+            6 => {
+                label(p, "RECENT");
+                let now = crate::timer::now_ns();
+                if self.history.is_empty() {
+                    p.text_p(pad, 44, "No notifications yet.", LATTE, false);
+                }
+                let max = ((w - 2 * pad) / 7) as usize;
+                for (k, n) in self.history.iter().rev().take(4).enumerate() {
+                    let y = 44 + k as i32 * 44;
+                    let t: String = n.title.chars().take(max).collect();
+                    p.text_p(pad, y, &t, ESPRESSO, true);
+                    let s = now.saturating_sub(n.at_ns) / 60_000_000_000;
+                    let sub = if s == 0 {
+                        format!("{}, just now", n.app)
+                    } else {
+                        format!("{}, {s} min ago", n.app)
+                    };
+                    let sub: String = sub.chars().take(max).collect();
+                    p.text_p(pad, y + 18, &sub, COCOA, false);
+                }
+                p.text(pad, 196, "Click the clock for all", LATTE);
             }
             4 => {
                 label(p, "NOTES");
@@ -1020,21 +1226,21 @@ impl Desktop {
             return;
         }
         // A tiny screen: each window of that space at its place, from the overview thumbnails.
-        let (aw, ah) = (w - 8, 58);
+        let (aw, ah) = (w - 8, h - 30);
         for win in self.windows.iter().filter(|x| x.space == i && !x.minimized) {
             let r = win.rect;
             let rr = Rect::new(
-                4 + r.x * aw / SCREEN_W,
-                4 + (r.y - MENU_H).max(0) * ah / (SCREEN_H - MENU_H),
-                (r.w * aw / SCREEN_W).max(4),
-                (r.h * ah / (SCREEN_H - MENU_H)).max(4),
+                4 + r.x * aw / screen_w(),
+                4 + (r.y - MENU_H).max(0) * ah / (screen_h() - MENU_H),
+                (r.w * aw / screen_w()).max(4),
+                (r.h * ah / (screen_h() - MENU_H)).max(4),
             );
             match self.thumbs.get(&win.id) {
                 Some(t) => p.blit_scaled(rr, t),
                 None => p.rrect_r(rr, 3, CREAM, 255),
             }
         }
-        p.text_p_center(0, w, 66, &space_label(i), COCOA, i == self.space);
+        p.text_p_center(0, w, h - 22, &space_label(i), COCOA, i == self.space);
         if i == self.space {
             p.rrect_stroke(0, 0, w, h, THUMB_R, SEL_BORDER, HONEY, 255);
         }
@@ -1045,12 +1251,20 @@ impl Desktop {
     pub(super) fn click_panel(&mut self, key: PanelKey, x: i32, y: i32) {
         match key {
             PanelKey::MenuBar => {
-                let sw = super::fontx::prop_width(&self.status, false);
+                let sw = self.status_width();
                 if x < 30 {
+                    // The logo: the system menu (About, Skim, Lock Screen, Restart ...).
+                    let m = if self.menu == Some(0) { None } else { Some(0) };
+                    self.control = false;
+                    self.set_menu(m);
+                } else if x
+                    >= screen_w() - MENU_PAD_X - super::fontx::prop_width(&self.status, false) - 6
+                {
+                    // The clock: the notification centre.
+                    self.toggle_notif();
+                } else if x >= screen_w() - MENU_PAD_X - sw - 8 {
                     self.set_menu(None);
-                    self.toggle_launcher();
-                } else if x >= SCREEN_W - MENU_PAD_X - sw - 8 {
-                    self.set_menu(None);
+                    self.notif = false;
                     self.control = !self.control;
                 } else if let Some(t) = self.menu_title_at(x) {
                     let m = if self.menu == Some(t) { None } else { Some(t) };
@@ -1066,12 +1280,19 @@ impl Desktop {
                 };
                 self.dock_pressed = Some(i);
                 self.control = false;
-                match DOCK[i].action {
+                let Some(t) = tiles().into_iter().nth(i) else {
+                    return;
+                };
+                match t.action {
                     DockAction::App(a) => self.open(a),
                     DockAction::Home => self.toggle_mode(Mode::Home),
                     DockAction::Spaces => self.toggle_mode(Mode::Spaces),
                     DockAction::Program(path) => self.launch(path),
-                    DockAction::Soon(name) => self.post_toast(name, "Not in milkOS yet. Soon!"),
+                    DockAction::Pkg(k) => {
+                        if let Some(p) = super::packages::get(k) {
+                            self.launch_package(&p);
+                        }
+                    }
                 }
                 self.invalidate(PanelKey::Dock);
             }
@@ -1082,6 +1303,7 @@ impl Desktop {
                     self.invalidate(PanelKey::Toast(i));
                 }
             }
+            PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {
                 if hit(&Rect::new(148, 16, 124, CC_TILE_H), x, y) {
                     self.settings.focus_mode = !self.settings.focus_mode;
@@ -1096,11 +1318,10 @@ impl Desktop {
             }
             PanelKey::LaunchInput => {}
             PanelKey::LaunchResults => {
-                let row = (y - 40) / LAUNCH_ROW_H;
-                if y >= 40
-                    && let Some(l) = &mut self.launcher
+                if let Some(l) = &mut self.launcher
+                    && let Some(i) = l.item_at(y)
                 {
-                    l.sel = row as usize;
+                    l.sel = i;
                     self.launcher_activate();
                 }
             }
@@ -1196,10 +1417,7 @@ impl Desktop {
             self.close_launcher();
         } else {
             self.control = false;
-            self.launcher = Some(Launcher {
-                query: String::new(),
-                sel: 0,
-            });
+            self.launcher = Some(Launcher::new());
         }
     }
 
@@ -1216,21 +1434,26 @@ impl Desktop {
         let Some(l) = &mut self.launcher else {
             return;
         };
+        let n = l.items.len();
         match k.key {
             super::Key::Enter => return self.launcher_activate(),
             super::Key::Backspace => {
                 l.query.pop();
-                l.sel = 0;
+                l.update();
             }
             super::Key::Up => l.sel = l.sel.saturating_sub(1),
-            super::Key::Down | super::Key::Tab => {
-                let n = l.results().len();
-                l.sel = (l.sel + 1).min(n.saturating_sub(1));
+            super::Key::Down => l.sel = (l.sel + 1).min(n.saturating_sub(1)),
+            super::Key::Tab => {
+                // First item of the next kind (wrapping).
+                if n > 0 {
+                    let cur = l.items[l.sel.min(n - 1)].kind;
+                    l.sel = (l.sel..n).find(|&i| l.items[i].kind != cur).unwrap_or(0);
+                }
             }
             _ => match k.ch {
-                Some(c) if !c.is_control() && l.query.len() < 30 => {
+                Some(c) if !c.is_control() && l.query.len() < 60 => {
                     l.query.push(c);
-                    l.sel = 0;
+                    l.update();
                 }
                 _ => return,
             },
@@ -1242,12 +1465,40 @@ impl Desktop {
         let Some(l) = &self.launcher else {
             return;
         };
-        let res = l.results();
-        let Some(e) = res.get(l.sel.min(res.len().saturating_sub(1))) else {
+        let Some(e) = l.items.get(l.sel.min(l.items.len().saturating_sub(1))) else {
             return;
         };
-        let action = e.action;
+        let act = e.act.clone();
         self.close_launcher();
+        use super::skim::Act;
+        match act {
+            Act::Entry(a) => self.run_entry(a),
+            Act::Action(f) => f(),
+            Act::Open(path) => self.open_any(&path),
+            Act::Setting(i) => {
+                super::apps::settings::show_section(i);
+                self.open(App::Settings);
+            }
+            Act::Package(k) => {
+                if let Some(p) = super::packages::get(k) {
+                    self.launch_package(&p);
+                }
+            }
+            Act::Calc(r) => {
+                if !r.is_empty() {
+                    super::clipboard::set(&r);
+                    self.post_toast(&format!("= {r}"), "copied to the clipboard");
+                }
+            }
+            Act::Command(cmd) => {
+                if !cmd.is_empty() {
+                    super::request(super::Request::NewTab(Some(cmd)));
+                }
+            }
+        }
+    }
+
+    fn run_entry(&mut self, action: Action) {
         match action {
             Action::App(a) => self.open(a),
             Action::Program(p) => self.launch(p),

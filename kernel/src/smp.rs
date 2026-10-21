@@ -3,9 +3,11 @@
 //! The CPU list and the PSCI conduit (`hvc` or `smc`) come from the device tree
 //! (`/cpus/cpu@N/reg` = MPIDR, `/psci/method`). Each secondary:
 //! 1. starts at `secondary_entry` (smp.S) at EL1 with the MMU off, x0 = its `BootBlock`;
-//! 2. loads the boot CPU's MAIR/TCR/TTBR0/SCTLR from that block (cleaned to the point of
-//!    coherency by the boot CPU, since the secondary reads it uncached) and turns the MMU
-//!    and caches on, then sets sp (its own 64 KiB kernel stack, with guard) and TPIDR_EL1;
+//! 2. loads the boot CPU's MAIR/TCR/SCTLR, the boot identity tables (TTBR0) and the
+//!    kernel's tables (TTBR1) from that block (cleaned to the point of coherency by the boot
+//!    CPU, since the secondary reads it uncached), turns the MMU and caches on, branches up
+//!    to the higher half, drops the identity map (empty TTBR0), then sets sp (its own
+//!    64 KiB kernel stack, with guard) and TPIDR_EL1;
 //! 3. runs `secondary_main`: vectors, FP, its GIC CPU interface and banked interrupts, its
 //!    virtual timer, then joins the scheduler as that CPU's idle thread.
 
@@ -14,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::percpu::{self, MAX_CPUS};
 use crate::sched::kstack::KStack;
-use crate::{gic, kprintln, mem, mmu, sched, sync, timer};
+use crate::{gic, kprintln, mem, mmu, sched, timer};
 
 /// What a secondary needs before it can run Rust. Layout shared with smp.S.
 #[repr(C, align(64))]
@@ -25,6 +27,8 @@ pub struct BootBlock {
     ttbr0: u64,
     sctlr: u64,
     cpu: u64,
+    ttbr1: u64,
+    ttbr0_final: u64,
 }
 
 static mut BOOT: [BootBlock; MAX_CPUS] = [const {
@@ -35,6 +39,8 @@ static mut BOOT: [BootBlock; MAX_CPUS] = [const {
         ttbr0: 0,
         sctlr: 0,
         cpu: 0,
+        ttbr1: 0,
+        ttbr0_final: 0,
     }
 }; MAX_CPUS];
 
@@ -107,7 +113,7 @@ fn discover() -> (heapless_list::List, bool) {
     let mut cpus = heapless_list::List::new();
     let mut smc = false;
     // SAFETY: the bootloader's DTB pointer (or 0).
-    if let Some(d) = unsafe { crate::dtb::Dtb::from_addr(mem::boot_dtb()) } {
+    if let Some(d) = unsafe { crate::dtb::Dtb::from_addr(mem::boot_dtb_ptr()) } {
         d.for_each_prop(|parent, node, _depth, prop, data| {
             if parent == b"cpus" && node.starts_with(b"cpu@") && prop == b"reg" {
                 let v = data.iter().fold(0u64, |acc, &b| acc << 8 | b as u64);
@@ -128,7 +134,7 @@ pub fn init() -> usize {
     USE_SMC.store(smc, Ordering::Relaxed);
     let boot_mpidr = percpu::get(0).mpidr.load(Ordering::Relaxed);
     let (mair, tcr, sctlr) = sysreg_state();
-    let ttbr0 = mmu::kernel_ttbr0();
+    let ttbr0 = mmu::boot_ttbr0();
     let ver = psci(PSCI_VERSION, 0, 0, 0);
     let mut next = 1usize;
     for &mpidr in cpus.as_slice() {
@@ -151,6 +157,8 @@ pub fn init() -> usize {
             b.ttbr0 = ttbr0;
             b.sctlr = sctlr;
             b.cpu = cpu as u64;
+            b.ttbr1 = mmu::kernel_ttbr1();
+            b.ttbr0_final = mmu::kernel_ttbr0();
             *(&raw mut STACKS).cast::<Option<KStack>>().add(cpu) = Some(stack);
             b as *const BootBlock as usize
         };
@@ -170,6 +178,18 @@ pub fn init() -> usize {
         }
         if !percpu::get(cpu).online.load(Ordering::Acquire) {
             kprintln!("[smp] cpu {cpu} (mpidr {mpidr:#x}) did not come up");
+            continue;
+        }
+        // And for it to join the scheduler (its idle thread exists), so whatever runs next
+        // (the scheduler self-test, drivers) starts with every CPU fully in.
+        let t0 = timer::now_ns();
+        while percpu::get(cpu).idle.load(Ordering::Acquire) == 0
+            && timer::now_ns() - t0 < 1_000_000_000
+        {
+            core::hint::spin_loop();
+        }
+        if percpu::get(cpu).idle.load(Ordering::Acquire) == 0 {
+            kprintln!("[smp] cpu {cpu} came online but did not join the scheduler");
         }
     }
     let n = percpu::count();
@@ -181,6 +201,10 @@ pub fn init() -> usize {
         if smc { "smc" } else { "hvc" }
     );
     STARTED.store(n, Ordering::Release);
+    if n > 1 {
+        gic::spread_spis(true);
+        kprintln!("[smp] device IRQs spread over {n} CPUs (GICD_ITARGETSR, round robin)");
+    }
     n
 }
 
@@ -199,7 +223,10 @@ extern "C" fn secondary_main(cpu: usize) -> ! {
         "[smp] cpu {cpu} up (mpidr {:#x})",
         percpu::get(cpu).mpidr.load(Ordering::Relaxed)
     );
-    sync::irq_enable();
+    // IRQs stay masked until the scheduler knows this CPU (run_secondary unmasks them):
+    // other CPUs may already route IRQs, IPIs and work here.
+    #[cfg(feature = "smp-join-delay")]
+    timer::delay_ms(200); // regression knob: the old IRQs-on window, made wide
     sched::run_secondary(cpu, stack)
 }
 

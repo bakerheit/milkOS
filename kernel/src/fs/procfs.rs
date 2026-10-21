@@ -24,7 +24,7 @@ pub fn root() -> Option<Arc<SynthDir>> {
 
 pub const VERSION: &str = concat!(
     "milkOS ",
-    env!("CARGO_PKG_VERSION"),
+    env!("MILKOS_VERSION"),
     " (aarch64, Rust no_std kernel) #1\n"
 );
 

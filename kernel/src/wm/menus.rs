@@ -2,7 +2,6 @@
 //! row styling as the launcher.) Clicking a title opens its menu, moving along the bar while one
 //! is open switches menus, clicking an item runs it, clicking anywhere else closes it.
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -34,6 +33,9 @@ pub enum MenuAction {
     Help,
     Restart,
     ShutDown,
+    Lock,
+    /// File > Browse Versions... for the focused window's document.
+    Versions,
     /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
     Key(char),
     /// Shown greyed out (no clipboard yet).
@@ -102,6 +104,7 @@ impl Desktop {
         if idx == 0 {
             return alloc::vec![
                 item("About milkOS", "", MenuAction::Open(App::About)),
+                item("Welcome to milkOS", "", MenuAction::Open(App::Welcome)),
                 sep(),
                 item("Skim", "Ctrl+Space", MenuAction::Skim),
                 item("Control centre", "", MenuAction::Control),
@@ -109,18 +112,30 @@ impl Desktop {
                 item("Minimise", "Cmd+M", win(MenuAction::Minimise)),
                 item("Close", "Cmd+W", win(MenuAction::Close)),
                 sep(),
+                item("Lock Screen", "Ctrl+Cmd+Q", MenuAction::Lock),
                 item("Restart", "", MenuAction::Restart),
                 item("Shut Down", "", MenuAction::ShutDown),
             ];
         }
         match name {
-            "File" | "Shell" => alloc::vec![
-                item("Open Terminal", "", MenuAction::Open(App::Terminal)),
-                item("Open Files", "", MenuAction::Open(App::Files)),
-                item("Open Notes", "", MenuAction::Open(App::Notes)),
-                sep(),
-                item("Close Window", "Cmd+W", win(MenuAction::Close)),
-            ],
+            "File" | "Shell" => {
+                let mut v = alloc::vec![
+                    item("Open Terminal", "", MenuAction::Open(App::Terminal)),
+                    item("Open Files", "", MenuAction::Open(App::Files)),
+                    item("Open Notes", "", MenuAction::Open(App::Notes)),
+                    sep(),
+                ];
+                let doc = has_win
+                    && self
+                        .focused_window()
+                        .is_some_and(|w| w.contents.document_path().is_some());
+                if doc {
+                    v.push(item("Browse Versions...", "", MenuAction::Versions));
+                    v.push(sep());
+                }
+                v.push(item("Close Window", "Cmd+W", win(MenuAction::Close)));
+                v
+            }
             "Edit" | "Format" => alloc::vec![
                 item("Undo", "Cmd+Z", MenuAction::Disabled),
                 sep(),
@@ -147,10 +162,15 @@ impl Desktop {
                     sep(),
                 ];
                 for w in &self.windows {
-                    let mark = if Some(w.id) == self.focus { "*" } else { "" };
                     v.push(Item {
-                        label: format!("{} {}", w.contents.title(), mark),
-                        key: if w.minimized { "minimised" } else { "" },
+                        label: String::from(w.contents.title()),
+                        key: if w.minimized {
+                            "minimised"
+                        } else if Some(w.id) == self.focus {
+                            "front"
+                        } else {
+                            ""
+                        },
                         action: Some(MenuAction::Focus(w.id)),
                     });
                 }
@@ -174,7 +194,7 @@ impl Desktop {
         let x = titles.get(idx)?.0;
         let items = self.menu_items(idx);
         let r = Rect::new(
-            (x - 12).min(SCREEN_W - MENU_W - 8),
+            (x - 12).min(screen_w() - MENU_W - 8),
             MENU_H + 2,
             MENU_W,
             Self::menu_height(&items),
@@ -274,6 +294,15 @@ impl Desktop {
                 self.set_mode(Mode::Spaces);
             }
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
+            MenuAction::Lock => self.lock_screen(),
+            MenuAction::Versions => {
+                if let Some(p) = self
+                    .focused_window()
+                    .and_then(|w| w.contents.document_path())
+                {
+                    super::apps::versions::show(&p);
+                }
+            }
             MenuAction::Restart => super::power::restart(),
             MenuAction::ShutDown => super::power::shut_down(),
             MenuAction::Key(c) => {

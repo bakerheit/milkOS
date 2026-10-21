@@ -2,7 +2,7 @@
 //! (fork/clone, execve, exit, wait4, reparenting to init, zombies).
 //!
 //! Each process runs at EL0 in its own [`uspace::UserSpace`] (TTBR0 + ASID); the kernel
-//! stays identity mapped in the low L0 slots of every space, EL1-only. Syscalls use the
+//! lives in the higher half (TTBR1), so all of TTBR0 is the process's. Syscalls use the
 //! Linux aarch64 ABI and numbers ([`syscall`]). Faults kill the process with a message,
 //! never the kernel. See docs/processes.md.
 
@@ -177,6 +177,37 @@ pub fn set_caps(c: caps::Caps) {
     current().inner.lock().caps = alloc::sync::Arc::new(c);
 }
 
+/// A user's grant of one file to process `pid` (a drag and drop onto its window, the
+/// desktop's counterpart of the powerbox): the same `caps.with_fs_grant` as MILK_POWERBOX,
+/// and the file opened into the process (returns the fd). Audited as
+/// `powerbox.grant pid= path= mode= via=`.
+pub fn grant_file(pid: Pid, path: &str, write: bool, via: &str) -> KResult<usize> {
+    let p = get(pid).ok_or(ESRCH)?;
+    let flags = if write {
+        fs::abi::O_RDWR
+    } else {
+        fs::abi::O_RDONLY
+    };
+    let f = alloc::sync::Arc::new(fs::open(path, flags, 0)?);
+    let fd = {
+        let mut i = p.inner.lock();
+        let grant = caps::FsGrant {
+            prefix: String::from(path),
+            write,
+        };
+        i.caps = alloc::sync::Arc::new(i.caps.with_fs_grant(grant));
+        i.fds.alloc(f, false)? as usize
+    };
+    crate::audit::record(
+        "powerbox.grant",
+        &alloc::format!(
+            "pid={pid} path={path} mode={} via={via}",
+            if write { "rw" } else { "r" }
+        ),
+    );
+    Ok(fd)
+}
+
 /// chroot: make `dir` the calling process's root. The cwd is left as is (as on Linux).
 pub fn chroot(dir: InodeRef) -> KResult<()> {
     if dir.kind() != fs::InodeType::Dir {
@@ -199,7 +230,6 @@ pub fn all() -> Vec<Arc<Process>> {
 /// Set up the process layer: syscalls, user-fault handling, the console. Runs the EL0
 /// smoke test. Call after `sched::init`.
 pub fn init() {
-    mmu::prepare_kernel_slots();
     tty::init();
     procfs::init();
     syscall::init();
@@ -335,6 +365,17 @@ fn basename(path: &str) -> &str {
 
 /// Start the program at `path` as a new process with the kernel as parent, on the console.
 pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
+    spawn_with_caps(path, argv, caps::Caps::all())
+}
+
+/// [`spawn`] with a capability set from the first instruction (the desktop runs packaged
+/// apps sandboxed this way; no window in which the program runs unrestricted). `cwd` is
+/// `/`, HOME is the user's home. The binary is loaded by the kernel, so it needs no grant.
+pub fn spawn_with_caps(
+    path: &str,
+    argv: &[&str],
+    caps: alloc::sync::Arc<caps::Caps>,
+) -> KResult<Pid> {
     let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
     let envp = [String::from("PATH=/bin"), String::from("HOME=/")];
@@ -355,7 +396,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         argv,
         exe: String::from(path),
         clear_child_tid: 0,
-        caps: caps::Caps::all(),
+        caps,
     })
 }
 
@@ -790,7 +831,7 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
         _ => "",
     };
     let addr = if matches!(ec, EC_DABT_LOWER | EC_IABT_LOWER | EC_PC_ALIGN) {
-        let hint = if (frame.far as usize) < mmu::USER_BASE {
+        let hint = if !(mmu::USER_BASE..mmu::USER_END).contains(&(frame.far as usize)) {
             " (not a user address)"
         } else {
             ""

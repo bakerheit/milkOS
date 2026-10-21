@@ -2,10 +2,11 @@
 # Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one).
 #   scripts/run.sh            window (cocoa) + serial on this terminal
 #   scripts/run.sh headless   no window, serial only (used for tests)
+# RELEASE=1: release kernel. MILK_FEATURES="a b": kernel cargo features (kernel/Cargo.toml).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-cargo build ${RELEASE:+--release} -q
+cargo build ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} -q
 PROFILE=debug
 [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
@@ -37,6 +38,10 @@ if [ -n "${MILK_SOUND_WAV:-}" ]; then
 elif [ "${MILK_SOUND:-}" = 1 ]; then
   SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
 fi
+# MILK_MONITOR=/tmp/x.sock adds a qemu monitor on that unix socket (debugging hangs:
+# `echo "info registers -a" | nc -U /tmp/x.sock`).
+MON_ARGS=()
+[ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
-  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
+  -kernel "$KERNEL" -serial mon:stdio ${MON_ARGS[@]+"${MON_ARGS[@]}"} "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

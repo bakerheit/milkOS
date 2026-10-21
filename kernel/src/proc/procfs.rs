@@ -370,7 +370,75 @@ fn cpuload() -> String {
     s
 }
 
-/// Install /proc/self, /proc/threads, /proc/cpuinfo, /proc/stat, /proc/cpuload.
+/// `/proc/sched` (milkOS): run-queue policy and per-CPU scheduler counters. Write
+/// `percpu` or `global` to switch policy (for benchmarks).
+fn sched_text() -> String {
+    let mut s = String::new();
+    let pol = match sched::policy() {
+        sched::Policy::PerCpu => "percpu",
+        sched::Policy::Global => "global",
+    };
+    let _ = writeln!(s, "policy {pol}");
+    let _ = writeln!(s, "cpu  queued  steals  migrations_in  switches");
+    for c in crate::percpu::online() {
+        let st = sched::cpu_stats(c);
+        let sw = crate::percpu::get(c)
+            .switches
+            .load(core::sync::atomic::Ordering::Relaxed);
+        let _ = writeln!(
+            s,
+            "{c:<4} {:<7} {:<7} {:<14} {sw}",
+            st.queued, st.steals, st.migrations_in
+        );
+    }
+    s
+}
+
+fn sched_write(b: &[u8]) -> Result<(), Errno> {
+    match core::str::from_utf8(b).map(str::trim) {
+        Ok("percpu") => sched::set_policy(sched::Policy::PerCpu),
+        Ok("global") => sched::set_policy(sched::Policy::Global),
+        _ => return Err(Errno::EINVAL),
+    }
+    Ok(())
+}
+
+/// `/proc/irq_affinity` (milkOS): "INTID cpus" for every SPI with a handler. Write
+/// `spread` (round robin over the online CPUs, the default with SMP) or `cpu0`.
+fn irq_affinity_text() -> String {
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "mode {}",
+        if crate::gic::spis_spread() {
+            "spread"
+        } else {
+            "cpu0"
+        }
+    );
+    for irq in 32..crate::gic::num_irqs() {
+        if crate::gic::is_registered(irq) {
+            let m = crate::gic::target_cpus(irq);
+            let cpus: Vec<String> = (0..32)
+                .filter(|c| m & 1 << c != 0)
+                .map(|c| format!("{c}"))
+                .collect();
+            let _ = writeln!(s, "{irq} {}", cpus.join(","));
+        }
+    }
+    s
+}
+
+fn irq_affinity_write(b: &[u8]) -> Result<(), Errno> {
+    match core::str::from_utf8(b).map(str::trim) {
+        Ok("spread") => crate::gic::spread_spis(true),
+        Ok("cpu0") => crate::gic::spread_spis(false),
+        _ => return Err(Errno::EINVAL),
+    }
+    Ok(())
+}
+
+/// Install /proc/self, /proc/threads, /proc/cpuinfo, /proc/stat, /proc/cpuload, /proc/sched.
 /// After fs::init.
 pub fn init() {
     let Some(root) = procfs::root() else { return };
@@ -380,6 +448,8 @@ pub fn init() {
     root.add_file("cpuinfo", cpuinfo);
     root.add_file("stat", stat);
     root.add_file("cpuload", cpuload);
+    root.add_control("sched", sched_text, sched_write);
+    root.add_control("irq_affinity", irq_affinity_text, irq_affinity_write);
 }
 
 /// Create /proc/<pid>.

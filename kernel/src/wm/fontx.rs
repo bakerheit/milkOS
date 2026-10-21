@@ -111,9 +111,9 @@ pub const fn width(scale: i32) -> i32 {
     SRC_W as i32 * scale
 }
 
-/// Sizes that get the smooth treatment.
+/// Sizes that get the smooth treatment (powers of two: Scale2x steps).
 pub fn smooth_scale(scale: i32) -> bool {
-    scale == 2 || scale == 4
+    scale == 2 || scale == 4 || scale == 8
 }
 
 // ---- proportional 1x ------------------------------------------------------------------------

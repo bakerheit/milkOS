@@ -44,6 +44,7 @@ impl Errno {
             39 => "ENOTEMPTY",
             4 => "EINTR",
             88 => "ENOTSOCK",
+            95 => "EOPNOTSUPP",
             97 => "EAFNOSUPPORT",
             98 => "EADDRINUSE",
             99 => "EADDRNOTAVAIL",
@@ -53,6 +54,7 @@ impl Errno {
             110 => "ETIMEDOUT",
             111 => "ECONNREFUSED",
             113 => "EHOSTUNREACH",
+            125 => "ECANCELED",
             _ => "E?",
         }
     }
@@ -122,6 +124,7 @@ pub mod nr {
     pub const CLONE: usize = 220;
     pub const FUTEX: usize = 98;
     pub const MILK_SANDBOX: usize = 0x1000;
+    pub const MILK_POWERBOX: usize = 0x1001;
     pub const EXECVE: usize = 221;
     pub const MMAP: usize = 222;
     pub const WAIT4: usize = 260;
@@ -400,6 +403,17 @@ pub fn winsize(fd: i32) -> Option<(u16, u16)> {
     (ws[1] > 0).then_some((ws[0], ws[1]))
 }
 
+/// `ioctl(dst, FICLONE, src)`: `dst` (open for writing) becomes a copy-on-write copy of
+/// `src` (open for reading), sharing its blocks. milkfs only (EXDEV across volumes,
+/// EOPNOTSUPP elsewhere).
+pub fn ficlone(src: i32, dst: i32) -> Result<()> {
+    sc(
+        nr::IOCTL,
+        [dst as usize, 0x4004_9409, src as usize, 0, 0, 0],
+    )
+    .map(|_| ())
+}
+
 /// Terminal width for laying out columns: TIOCGWINSZ on stdout, else 80.
 pub fn term_cols() -> usize {
     winsize(1).map_or(80, |(_, c)| c as usize)
@@ -538,6 +552,23 @@ pub fn getcwd() -> Result<String> {
 pub fn sandbox(spec: &str) -> Result<()> {
     let s = cs(spec);
     sc(nr::MILK_SANDBOX, [s.as_ptr() as usize, 0, 0, 0, 0, 0]).map(|_| ())
+}
+
+/// Powerbox: ask the user, through the desktop's own Open panel, for a file to read. Only
+/// the chosen file is granted to this process; returns it opened read-only. ECANCELED if
+/// the user cancels. Blocks until they decide.
+pub fn powerbox_open() -> Result<i32> {
+    sc(nr::MILK_POWERBOX, [0, 0, 0, 0, 0, 0]).map(|fd| fd as i32)
+}
+
+/// Powerbox Save panel (`name` is a suggestion the user can change): the chosen file is
+/// granted read+write, created or truncated, and returned opened read-write.
+pub fn powerbox_save(name: &str) -> Result<i32> {
+    sc(
+        nr::MILK_POWERBOX,
+        [1, name.as_ptr() as usize, name.len(), 0, 0, 0],
+    )
+    .map(|fd| fd as i32)
 }
 
 pub fn chroot(path: &str) -> Result<()> {

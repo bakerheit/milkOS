@@ -523,20 +523,161 @@ fn run_workers(n: usize, units: u64) -> u64 {
     (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000
 }
 
+/// (steals, migrations) summed over CPUs from /proc/sched (0s if it's missing).
+fn sched_counts() -> (u64, u64) {
+    let t = sys::read_file("/proc/sched").unwrap_or_default();
+    let t = String::from_utf8_lossy(&t);
+    let mut out = (0, 0);
+    for l in t
+        .lines()
+        .filter(|l| l.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        let f: Vec<u64> = l
+            .split_whitespace()
+            .filter_map(|x| x.parse().ok())
+            .collect();
+        if f.len() >= 4 {
+            out.0 += f[2];
+            out.1 += f[3];
+        }
+    }
+    out
+}
+
+fn sched_policy() -> String {
+    let t = sys::read_file("/proc/sched").unwrap_or_default();
+    String::from_utf8_lossy(&t)
+        .lines()
+        .next()
+        .and_then(|l| l.strip_prefix("policy "))
+        .unwrap_or("?")
+        .into()
+}
+
+/// Context-switch microbenchmarks (not pass/fail): pipe ping-pong between two processes
+/// and between two threads (a wake + block on each side per hop), and a sched_yield storm
+/// with 2 threads per CPU. Compare run-queue policies with `echo global > /proc/sched`.
+fn t_csw(rounds: u32) -> bool {
+    let cpus = sys::read_file("/proc/cpuinfo")
+        .map(|c| String::from_utf8_lossy(&c).matches("processor").count())
+        .unwrap_or(1);
+    let now = || sys::clock_ns(sys::CLOCK_MONOTONIC);
+
+    // Ping-pong over two pipes; `spawn_peer` starts the echoing side.
+    fn ping(rounds: u32, a_w: i32, b_r: i32) -> u64 {
+        let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+        let mut b = [0u8; 1];
+        for _ in 0..rounds {
+            sys::write(a_w, b"x").unwrap();
+            sys::read(b_r, &mut b).unwrap();
+        }
+        sys::clock_ns(sys::CLOCK_MONOTONIC) - t0
+    }
+    fn echo(rounds: u32, a_r: i32, b_w: i32) {
+        let mut b = [0u8; 1];
+        for _ in 0..rounds {
+            sys::read(a_r, &mut b).unwrap();
+            sys::write(b_w, &b).unwrap();
+        }
+    }
+
+    let delta = |c0: (u64, u64)| {
+        let c1 = sched_counts();
+        (c1.0 - c0.0, c1.1 - c0.1)
+    };
+
+    // Processes.
+    let c0 = sched_counts();
+    let (a_r, a_w) = sys::pipe().unwrap();
+    let (b_r, b_w) = sys::pipe().unwrap();
+    let pid = match sys::fork().unwrap() {
+        0 => {
+            echo(rounds, a_r, b_w);
+            sys::exit(0)
+        }
+        p => p,
+    };
+    let proc_ns = ping(rounds, a_w, b_r);
+    let _ = sys::wait4(pid as i32, 0);
+    for fd in [a_r, a_w, b_r, b_w] {
+        let _ = sys::close(fd);
+    }
+    let proc_m = delta(c0);
+
+    // Threads of one process.
+    let c0 = sched_counts();
+    let (a_r, a_w) = sys::pipe().unwrap();
+    let (b_r, b_w) = sys::pipe().unwrap();
+    let h = thread::spawn(move || echo(rounds, a_r, b_w));
+    let thr_ns = ping(rounds, a_w, b_r);
+    h.join();
+    for fd in [a_r, a_w, b_r, b_w] {
+        let _ = sys::close(fd);
+    }
+    let thr_m = delta(c0);
+
+    // Yield storm.
+    let c0 = sched_counts();
+    let n = 2 * cpus;
+    let per = rounds * 2;
+    let t0 = now();
+    let hs: Vec<_> = (0..n)
+        .map(|_| {
+            thread::spawn(move || {
+                for _ in 0..per {
+                    sys::sched_yield();
+                }
+            })
+        })
+        .collect();
+    for h in hs {
+        h.join();
+    }
+    let y_ns = now() - t0;
+    let y_m = delta(c0);
+    let total = n as u64 * per as u64;
+    check(
+        "context switch",
+        true,
+        &alloc::format!(
+            "[{}] pipe round trip: processes {:.1} us (steals {}, migrations {}), threads {:.1} us \
+             (steals {}, migrations {}); yield storm {n} threads x {per}: {:.2} us/yield, \
+             {} yields/s (steals {}, migrations {})",
+            sched_policy(),
+            proc_ns as f64 / rounds as f64 / 1000.0,
+            proc_m.0,
+            proc_m.1,
+            thr_ns as f64 / rounds as f64 / 1000.0,
+            thr_m.0,
+            thr_m.1,
+            y_ns as f64 / total as f64 / 1000.0,
+            total * 1_000_000_000 / y_ns.max(1),
+            y_m.0,
+            y_m.1
+        ),
+    )
+}
+
 fn t_par(n: usize, units: u64) -> bool {
     let cpus = sys::read_file("/proc/cpuinfo")
         .map(|c| String::from_utf8_lossy(&c).matches("processor").count())
         .unwrap_or(1);
     run_workers(1, units / 10 + 1); // warm-up (page cache, COW paths)
     let t1 = run_workers(1, units).min(run_workers(1, units));
+    let c0 = sched_counts();
     let tn = run_workers(n, units).min(run_workers(n, units));
+    let c1 = sched_counts();
     let speedup = (n as f64 * t1 as f64) / tn.max(1) as f64;
     check(
         "parallel speedup",
         true,
         &alloc::format!(
-            "{cpus} CPUs: 1 job {t1} ms, {n} jobs {tn} ms -> speedup {speedup:.2}x (ideal {:.0}x)",
-            (n.min(cpus)) as f64
+            "[{}] {cpus} CPUs: 1 job {t1} ms, {n} jobs {tn} ms -> speedup {speedup:.2}x \
+             (ideal {:.0}x); 2 runs of {n} jobs: steals {}, migrations {}",
+            sched_policy(),
+            (n.min(cpus)) as f64,
+            c1.0 - c0.0,
+            c1.1 - c0.1
         ),
     )
 }
@@ -787,6 +928,43 @@ fn t_sandbox() -> bool {
     )
 }
 
+/// The kernel lives in the higher half (TTBR1): a user pointer into it must be EFAULT for a
+/// syscall and SIGSEGV for a load, never a kernel read.
+fn t_kaddr() -> bool {
+    const KERNEL_IMAGE: usize = 0xffff_0000_4008_0000;
+    // SAFETY: never dereferenced here; the kernel must refuse it.
+    let kbuf = unsafe { core::slice::from_raw_parts(KERNEL_IMAGE as *const u8, 16) };
+    let w = sys::write(1, kbuf);
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        // SAFETY: deliberately not: must fault.
+        let v = unsafe { core::ptr::read_volatile(KERNEL_IMAGE as *const u8) };
+        sys::exit(v as i32);
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    check(
+        "kernel addresses",
+        w == Err(sys::Errno(14)) && st & 0x7f == sys::SIGSEGV,
+        &alloc::format!(
+            "write(kernel ptr) -> {w:?}, load from {KERNEL_IMAGE:#x}: {}",
+            sys::describe_status(st)
+        ),
+    )
+}
+
+/// A static Linux/aarch64 binary built with no milkOS knowledge (tests/linux/), linked at
+/// Linux's 0x400000: runs and passes its own checks.
+fn t_linux() -> bool {
+    let (out, st) = capture(&["/bin/linux-hello", "x"]);
+    let text = core::str::from_utf8(&out).unwrap_or("");
+    let oks = text.matches("  ok ").count();
+    check(
+        "Linux static binary at 0x400000",
+        st == 0 && text.contains("linux-hello: ALL OK"),
+        &alloc::format!("{oks} checks ok, {}", sys::describe_status(st)),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -804,6 +982,10 @@ fn main(args: &rt::Args) -> i32 {
         let ms = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(500);
         ok &= t_par(n, ms);
     }
+    if what == "csw" {
+        let rounds = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(5000);
+        ok &= t_csw(rounds);
+    }
     if what == "chroot" || what == "all" {
         ok &= t_chroot();
     }
@@ -818,6 +1000,12 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "proc" || what == "all" {
         ok &= t_proc();
+    }
+    if what == "linux" || what == "all" {
+        ok &= t_linux();
+    }
+    if what == "kaddr" || what == "all" {
+        ok &= t_kaddr();
     }
     if what == "signal" || what == "all" {
         ok &= t_signal();

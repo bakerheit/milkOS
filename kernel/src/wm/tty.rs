@@ -1,14 +1,18 @@
-//! `/dev/tty1`: the desktop Terminal's terminal device. It is a `proc::tty::Tty` (the
-//! same line discipline as the UART console: echo, editing, ^C -> SIGINT to the
-//! foreground process group, termios, window size), whose input comes from keys typed into
-//! the Terminal window ([`input`]) and whose output goes to a buffer the Terminal drains
-//! and draws ([`take_output`]).
+//! `/dev/tty1` .. `/dev/tty9`: the desktop Terminal's terminal devices, one per tab. Each is
+//! a `proc::tty::Tty` (the same line discipline as the UART console: echo, editing, ^C ->
+//! SIGINT to the foreground process group, termios, window size), whose input comes from
+//! keys typed into its tab ([`input`]) and whose output goes to a buffer the tab drains and
+//! draws ([`take_output`]).
 //!
-//! A kernel thread ("term-sh") keeps a `msh` running on it, restarting it when it exits.
+//! A kernel thread per tty ("term-shN") keeps a `msh` running on it while the tty is open,
+//! restarting it when it exits. tty1 is the Terminal's first tab and stays open for good
+//! (closing the window leaves its shell running, so reopening finds it as you left it);
+//! tty2.. belong to extra tabs: [`open_tab`] takes a free one, [`hangup`] closes it again
+//! (SIGHUP to its foreground job, SIGKILL to its msh; the thread then exits).
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::fs::node::makedev;
 use crate::fs::{self, Inode, InodeType, Stat};
@@ -17,60 +21,116 @@ use crate::sched;
 use crate::sync::SpinLock;
 use crate::{kprintln, proc};
 
-pub const PATH: &str = "/dev/tty1";
+/// How many ttys (and so Terminal tabs) there can be.
+pub const MAX: usize = 9;
 
-/// The terminal itself. 24 x 80 until the Terminal window reports its size.
-pub static TTY1: Tty = Tty::new("tty1", push_out, 24, 80);
+fn out1(b: &[u8]) {
+    push_out(1, b)
+}
+fn out2(b: &[u8]) {
+    push_out(2, b)
+}
+fn out3(b: &[u8]) {
+    push_out(3, b)
+}
+fn out4(b: &[u8]) {
+    push_out(4, b)
+}
+fn out5(b: &[u8]) {
+    push_out(5, b)
+}
+fn out6(b: &[u8]) {
+    push_out(6, b)
+}
+fn out7(b: &[u8]) {
+    push_out(7, b)
+}
+fn out8(b: &[u8]) {
+    push_out(8, b)
+}
+fn out9(b: &[u8]) {
+    push_out(9, b)
+}
 
-/// Bytes written by programs (and echo), waiting for the Terminal to draw them.
-static OUT: SpinLock<Vec<u8>> = SpinLock::new(Vec::new());
-/// Bumped on every output, so the Terminal can tell cheaply whether to drain.
-static OUT_GEN: AtomicU64 = AtomicU64::new(0);
-static STARTED: AtomicBool = AtomicBool::new(false);
+/// The terminals. 24 x 80 until their tab reports its size.
+static TTYS: [Tty; MAX] = [
+    Tty::new("tty1", out1, 24, 80),
+    Tty::new("tty2", out2, 24, 80),
+    Tty::new("tty3", out3, 24, 80),
+    Tty::new("tty4", out4, 24, 80),
+    Tty::new("tty5", out5, 24, 80),
+    Tty::new("tty6", out6, 24, 80),
+    Tty::new("tty7", out7, 24, 80),
+    Tty::new("tty8", out8, 24, 80),
+    Tty::new("tty9", out9, 24, 80),
+];
+
+/// Bytes written by programs (and echo), waiting for the tab to draw them.
+static OUT: [SpinLock<Vec<u8>>; MAX] = [const { SpinLock::new(Vec::new()) }; MAX];
+/// Bumped on every output, so a tab can tell cheaply whether to drain.
+static OUT_GEN: [AtomicU64; MAX] = [const { AtomicU64::new(0) }; MAX];
+/// /dev/ttyN exists and is in the tty registry.
+static PUBLISHED: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
+/// A tab wants a shell on it.
+static OPEN: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
+/// Its shell thread is running (a closed tty is free again once this is false).
+static THREAD: [AtomicBool; MAX] = [const { AtomicBool::new(false) }; MAX];
+/// The msh on it (0 while none).
+static SHELL: [AtomicU32; MAX] = [const { AtomicU32::new(0) }; MAX];
 
 const OUT_MAX: usize = 64 * 1024;
 
-fn push_out(b: &[u8]) {
+fn idx(n: usize) -> usize {
+    n.clamp(1, MAX) - 1
+}
+
+pub fn path(n: usize) -> alloc::string::String {
+    alloc::format!("/dev/tty{}", idx(n) + 1)
+}
+
+fn push_out(n: usize, b: &[u8]) {
+    let i = idx(n);
     {
-        let mut out = OUT.lock();
+        let mut out = OUT[i].lock();
         if out.len() + b.len() > OUT_MAX {
             let drop = (out.len() + b.len() - OUT_MAX).min(out.len());
             out.drain(..drop);
         }
         out.extend_from_slice(b);
     }
-    OUT_GEN.fetch_add(1, Ordering::Relaxed);
+    OUT_GEN[i].fetch_add(1, Ordering::Relaxed);
     super::WAKE.wake_all();
 }
 
-/// Feed one byte typed into the Terminal window (wm thread).
-pub fn input(b: u8) {
-    TTY1.input(&[b]);
+/// Feed one byte typed into tty `n`'s tab (wm thread).
+pub fn input(n: usize, b: u8) {
+    TTYS[idx(n)].input(&[b]);
 }
 
-/// The Terminal window's text area changed size: rows x cols character cells.
-/// Sends SIGWINCH to the foreground job when it actually changes.
-pub fn set_winsize(rows: u16, cols: u16) {
-    TTY1.set_winsize(rows, cols);
+/// Tab `n`'s text area changed size: rows x cols character cells. Sends SIGWINCH to the
+/// foreground job when it actually changes.
+pub fn set_winsize(n: usize, rows: u16, cols: u16) {
+    TTYS[idx(n)].set_winsize(rows, cols);
 }
 
-/// Take everything written since the last call. Cheap when nothing is new.
-pub fn take_output(seen_gen: &mut u64) -> Option<Vec<u8>> {
-    let g = OUT_GEN.load(Ordering::Relaxed);
+/// Take everything written to tty `n` since the last call. Cheap when nothing is new.
+pub fn take_output(n: usize, seen_gen: &mut u64) -> Option<Vec<u8>> {
+    let i = idx(n);
+    let g = OUT_GEN[i].load(Ordering::Relaxed);
     if g == *seen_gen {
         return None;
     }
     *seen_gen = g;
-    Some(core::mem::take(&mut *OUT.lock()))
+    Some(core::mem::take(&mut *OUT[i].lock()))
 }
 
 struct TtyNode {
-    ino: u64,
+    n: usize,
 }
 
 impl Inode for TtyNode {
     fn ino(&self) -> u64 {
-        self.ino
+        0x7770 + self.n as u64
     }
     fn dev(&self) -> u64 {
         0
@@ -79,70 +139,125 @@ impl Inode for TtyNode {
         InodeType::CharDev
     }
     fn stat(&self) -> Stat {
-        let mut st = Stat::new(0, self.ino, InodeType::CharDev, 0o620);
-        st.rdev = makedev(4, 1); // Linux tty1
+        let mut st = Stat::new(0, self.ino(), InodeType::CharDev, 0o620);
+        st.rdev = makedev(4, self.n as u32); // Linux ttyN
         st.blksize = 1024;
         st
     }
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> fs::Result<usize> {
-        TTY1.read(buf)
+        TTYS[idx(self.n)].read(buf)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> fs::Result<usize> {
-        TTY1.write(buf)
+        TTYS[idx(self.n)].write(buf)
     }
     fn truncate(&self, _len: u64) -> fs::Result<()> {
         Ok(())
     }
     /// poll(2): readable once a whole line (or raw bytes / ^D) is waiting; always writable.
     fn poll(&self) -> u32 {
-        if TTY1.readable() { 0x1 | 0x4 } else { 0x4 }
+        if TTYS[idx(self.n)].readable() {
+            0x1 | 0x4
+        } else {
+            0x4
+        }
     }
     // ioctls (termios, winsize, foreground group) are handled by the syscall layer through
-    // the tty registry (`proc::tty::register`, done in start_shell), not here.
+    // the tty registry (`proc::tty::register`, done in `publish`), not here.
 }
 
-/// Publish `/dev/tty1` and start the thread that keeps a shell on it. Idempotent. False if
-/// there is no `/bin/msh` (then the Terminal keeps its built-in shell).
-pub fn start_shell() -> bool {
-    if STARTED.load(Ordering::Relaxed) {
+fn publish(n: usize) -> bool {
+    let i = idx(n);
+    if PUBLISHED[i].load(Ordering::Acquire) {
         return true;
     }
-    if fs::stat("/bin/msh").is_err() {
-        return false;
-    }
-    if fs::stat(PATH).is_err()
-        && let Err(e) = fs::devfs::add_device("tty1", Arc::new(TtyNode { ino: 0x7771 }))
+    let name = alloc::format!("tty{}", i + 1);
+    if fs::stat(&path(n)).is_err()
+        && let Err(e) = fs::devfs::add_device(&name, Arc::new(TtyNode { n: i + 1 }))
     {
-        kprintln!("wm: cannot publish {PATH}: {e}");
+        kprintln!("wm: cannot publish {}: {e}", path(n));
         return false;
     }
-    proc::tty::register(makedev(4, 1), &TTY1);
-    STARTED.store(true, Ordering::Relaxed);
-    drop(sched::spawn("term-sh", || {
-        loop {
+    proc::tty::register(makedev(4, (i + 1) as u32), &TTYS[i]);
+    PUBLISHED[i].store(true, Ordering::Release);
+    true
+}
+
+/// Publish `/dev/ttyN` and start the thread that keeps a shell on it while it is open.
+/// Idempotent. False if there is no `/bin/msh` (then the Terminal keeps its built-in shell).
+pub fn start_shell(n: usize) -> bool {
+    let i = idx(n);
+    if fs::stat("/bin/msh").is_err() || !publish(n) {
+        return false;
+    }
+    OPEN[i].store(true, Ordering::Release);
+    if THREAD[i].swap(true, Ordering::AcqRel) {
+        return true;
+    }
+    let name = alloc::format!("term-sh{}", i + 1);
+    drop(sched::spawn(&name, move || {
+        let tty = path(i + 1);
+        while OPEN[i].load(Ordering::Acquire) {
             const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
-            match proc::spawn_on("/bin/msh", &["msh"], ENV, PATH, "/home/milk") {
+            match proc::spawn_on("/bin/msh", &["msh"], ENV, &tty, "/home/milk") {
                 Ok(pid) => {
-                    kprintln!("wm: msh pid {pid} on {PATH}");
+                    SHELL[i].store(pid, Ordering::Release);
+                    kprintln!("wm: msh pid {pid} on {tty}");
                     let st = proc::wait_kernel_child(pid);
-                    push_out(
-                        alloc::format!("\n[msh exited ({st:#x}), starting a new one]\n").as_bytes(),
-                    );
+                    SHELL[i].store(0, Ordering::Release);
+                    if OPEN[i].load(Ordering::Acquire) {
+                        push_out(
+                            i + 1,
+                            alloc::format!("\n[msh exited ({st:#x}), starting a new one]\n")
+                                .as_bytes(),
+                        );
+                    }
                 }
                 Err(e) => {
-                    kprintln!("wm: cannot start msh on {PATH}: errno {}", e.0);
+                    kprintln!("wm: cannot start msh on {tty}: errno {}", e.0);
                     sched::sleep_ms(2000);
                 }
             }
         }
+        // Closed: forget what it printed on the way out, then the tty is free again.
+        OUT[i].lock().clear();
+        THREAD[i].store(false, Ordering::Release);
     }));
     true
 }
 
-/// Is tty1 in canonical (line) mode? (The Terminal keeps Ctrl+L for itself only then.)
-pub fn canonical() -> bool {
+/// A free tty for a new tab (2..=MAX), with a shell starting on it. None if all are taken
+/// (or there is no msh).
+pub fn open_tab() -> Option<usize> {
+    let n = (2..=MAX).find(|&n| {
+        !OPEN[idx(n)].load(Ordering::Acquire) && !THREAD[idx(n)].load(Ordering::Acquire)
+    })?;
+    // Skip output left over from the tty's last user.
+    OUT[idx(n)].lock().clear();
+    start_shell(n).then_some(n)
+}
+
+/// A tab closed: hang its tty up. SIGHUP to the foreground job, SIGKILL to its msh; the
+/// shell thread notices and exits. tty1 is never hung up.
+pub fn hangup(n: usize) {
+    let i = idx(n);
+    if i == 0 {
+        return;
+    }
+    OPEN[i].store(false, Ordering::Release);
+    let fg = TTYS[i].foreground();
+    if fg != 0 {
+        let _ = proc::signal::kill(-(fg as i64), proc::signal::SIGHUP);
+    }
+    let pid = SHELL[i].load(Ordering::Acquire);
+    if pid != 0 {
+        let _ = proc::signal::kill(pid as i64, proc::signal::SIGKILL);
+    }
+}
+
+/// Is tty `n` in canonical (line) mode? (The Terminal keeps Ctrl+L for itself only then.)
+pub fn canonical(n: usize) -> bool {
     const ICANON: u32 = 0o2;
-    match TTY1.ioctl(proc::tty::TCGETS, &[]) {
+    match TTYS[idx(n)].ioctl(proc::tty::TCGETS, &[]) {
         Ok(Some(t)) if t.len() >= 16 => {
             u32::from_le_bytes([t[12], t[13], t[14], t[15]]) & ICANON != 0
         }

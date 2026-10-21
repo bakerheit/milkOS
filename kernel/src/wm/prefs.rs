@@ -25,6 +25,12 @@ pub struct Prefs {
     pub dock: i32,
     /// System sounds (toasts, crashes). Only audible with a sound device.
     pub sound: bool,
+    /// Lock the screen after this many minutes without input; 0 = never.
+    pub lock_mins: u32,
+    /// Display mode (one of `screen::MODES`).
+    pub resolution: (i32, i32),
+    /// Show the Welcome window at startup (until "Don't show again").
+    pub welcome: bool,
 }
 
 impl Prefs {
@@ -34,7 +40,13 @@ impl Prefs {
         brightness: 100,
         dock: 48,
         sound: true,
+        lock_mins: 0,
+        resolution: (1024, 768),
+        welcome: true,
     };
+
+    /// The idle times Settings offers (minutes; 0 = never).
+    pub const LOCK_CHOICES: [u32; 5] = [0, 1, 5, 15, 30];
 
     /// The wallpaper actually shown.
     pub fn wallpaper_kind(&self) -> Kind {
@@ -44,12 +56,19 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
             self.dock,
-            if self.sound { "on" } else { "off" }
+            if self.sound { "on" } else { "off" },
+            match self.lock_mins {
+                0 => String::from("never"),
+                m => format!("{m}"),
+            },
+            self.resolution.0,
+            self.resolution.1,
+            if self.welcome { "on" } else { "off" }
         )
     }
 
@@ -64,6 +83,16 @@ impl Prefs {
                 "theme" => p.dark = matches!(v, "chocolate" | "dark"),
                 "wallpaper" => p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v),
                 "sound" => p.sound = v != "off",
+                "welcome" => p.welcome = v != "off",
+                "lock" => p.lock_mins = v.parse().unwrap_or(0).min(24 * 60),
+                "resolution" => {
+                    if let Some((w, h)) = v.split_once('x')
+                        && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
+                        && super::screen::MODES.contains(&(w, h))
+                    {
+                        p.resolution = (w, h);
+                    }
+                }
                 "brightness" => p.brightness = v.parse().unwrap_or(100).clamp(20, 100),
                 "dock" => {
                     p.dock = match v.parse().unwrap_or(48) {

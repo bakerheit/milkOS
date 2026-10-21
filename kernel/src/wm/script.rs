@@ -10,7 +10,7 @@ use crate::{fwcfg, kprintln};
 
 use super::Desktop;
 use super::event::{Button, Event, Key, Mods};
-use super::shell::dock_icon_center;
+use super::shell::{dock_icon_center, dock_icon_center_of};
 
 pub enum Step {
     Wait(u64),
@@ -19,6 +19,12 @@ pub enum Step {
     Bench,
     Log(&'static str),
     Panic,
+    /// Pretend nobody touched anything for this many seconds (the idle lock).
+    Idle(u64),
+    /// Switch the display mode.
+    Resolution(i32, i32),
+    /// Chocolate milk (true) or Whole milk.
+    Theme(bool),
 }
 
 pub struct Script {
@@ -56,6 +62,39 @@ impl B {
     }
     fn click(&mut self, x: i32, y: i32) -> &mut Self {
         self.to(x, y).wait(30).down().wait(30).up().wait(60)
+    }
+    fn rclick(&mut self, x: i32, y: i32) -> &mut Self {
+        self.to(x, y).wait(30);
+        self.ev(Event::Button {
+            button: Button::Right,
+            down: true,
+        })
+        .wait(30)
+        .ev(Event::Button {
+            button: Button::Right,
+            down: false,
+        })
+        .wait(60)
+    }
+    /// In the Terminal: a file with three snapshotted versions and a newer current one.
+    fn herd(&mut self) -> &mut Self {
+        const F: &str = "/home/milk/Documents/herd.txt";
+        self.wait(300);
+        for (i, line) in ["- one cow", "- two cows", "- three cows", "- a calf!"]
+            .iter()
+            .enumerate()
+        {
+            let op = if i == 0 { ">" } else { ">>" };
+            self.typ(&alloc::format!("echo '{line}' {op} {F}"))
+                .enter()
+                .wait(250);
+            if i < 3 {
+                self.typ(&alloc::format!("snap create herd{}", i + 1))
+                    .enter()
+                    .wait(500);
+            }
+        }
+        self
     }
     /// Press at (x0, y0), glide to (x1, y1) in `n` steps of ~16 ms, release.
     fn drag(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, n: i32) -> &mut Self {
@@ -177,10 +216,10 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.key(Key::Right, Mods::CTRL);
         }
         "control" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
         }
         "dim" => {
-            b.click(1000, 14).wait(100);
+            b.click(915, 14).wait(100);
             b.drag(824, 160, 760, 160, 10);
         }
         "shell" => {
@@ -327,6 +366,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "lsbin" => {
             b.wait(300).typ("ls /bin").enter().wait(600);
         }
+        // Terminal tabs (the boot Terminal has the focus).
+        "tabs" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo second tab on $(tty)").enter().wait(300);
+            b.typ("echo second tab").enter().wait(300);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("ls /bin").enter().wait(600);
+        }
+        "tabswitch" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo this is tab 2").enter().wait(300);
+            b.key(Key::Char('1'), Mods::META).wait(300);
+            b.typ("echo back in tab 1").enter().wait(400);
+        }
+        "tabclose" => {
+            // Three tabs, close the third (Cmd+W), then ps in the first: msh on tty1 and
+            // tty2 only.
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('w'), Mods::META).wait(500);
+            b.key(Key::Char('1'), Mods::META).wait(200);
+            b.typ("ps").enter().wait(600);
+        }
+        "tabcmd" => {
+            // Skim's "> cmd" with the Terminal open: a new tab running it.
+            b.wait(300).key(Key::Char(' '), Mods::META).wait(150);
+            b.typ("> uname -a").wait(200).enter().wait(1200);
+        }
         "sigint" => {
             b.wait(300).typ("sleep 9").enter().wait(1000);
             b.key(Key::Char('c'), Mods::CTRL)
@@ -398,6 +465,42 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(593, 451).wait(300); // Restore
             b.click(137, 181).wait(400); // live Documents: it's back
         }
+        // Music: window at (300, 92), body at (301, 125), 458 wide. Play at body (229, 182);
+        // rows from body y 238 (MUSIC header at 214), SYSTEM SOUNDS header after them.
+        "music" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .key(Key::Char(' '), Mods::NONE)
+                .wait(3000);
+        }
+        "musicpause" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(1500);
+            b.click(301 + 229, 125 + 182).wait(800);
+        }
+        "musicseek" => {
+            // Play, then click three quarters along the progress bar.
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(600);
+            b.click(301 + 20 + 418 * 3 / 4, 125 + 135).wait(1200);
+        }
+        "musicsys" => {
+            // Second track down, then the chime from System Sounds (click selects, again plays).
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y).wait(800);
+            b.key(Key::Down, Mods::NONE).enter().wait(1000);
+            b.click(301 + 200, 125 + 318 + 12)
+                .wait(150)
+                .click(301 + 200, 125 + 318 + 12)
+                .wait(600);
+        }
         "browser" => {
             // Dock globe: the Browser opens milkOS's own home page (kernel httpd).
             let (x, y) = dock_icon_center(2);
@@ -465,6 +568,61 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(400);
             b.typ("echo the screen was cleared").enter().wait(300);
         }
+        "skimsearch" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("note");
+        }
+        "skimcalc" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("= (2+2*3)^2/4 + 0.5");
+        }
+        "skimfile" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("todo");
+        }
+        "skimcmd" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("> ls /bin")
+                .wait(200)
+                .enter()
+                .wait(1200);
+        }
+        "skimaction" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("dark")
+                .wait(200)
+                .enter()
+                .wait(800);
+        }
+        "snapleft" => {
+            // Drag Files to the left edge: preview, then let go (snaps to the left half).
+            b.drag(300, 80, 2, 300, 24);
+        }
+        "snappreview" => {
+            // Hold Files at the top-right corner: the quarter preview shows.
+            b.to(300, 80)
+                .wait(30)
+                .down()
+                .wait(30)
+                .glide(300, 80, 1021, 60, 24)
+                .wait(200);
+        }
+        "snapkeys" => {
+            // Terminal focused: Ctrl+Alt+Right, then Files to the left by dragging.
+            let ca = Mods {
+                ctrl: true,
+                alt: true,
+                ..Mods::NONE
+            };
+            b.key(Key::Right, ca).wait(200);
+            b.drag(300, 80, 2, 300, 20).wait(200);
+        }
+        "unsnap" => {
+            // Snap Files left, then drag it away from the edge: it gets its old size back.
+            b.drag(300, 80, 2, 300, 20).wait(200);
+            b.drag(200, 50, 500, 200, 20).wait(200);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }
@@ -485,6 +643,321 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "shutdown" => {
             b.click(60, 14).wait(100).click(80, 219);
+        }
+        // Lock screen.
+        "lock" => {
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+        }
+        "unlock" => {
+            // Lock, then a key unlocks (and is not typed into the Terminal).
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+            b.typ("x").wait(700);
+        }
+        // Packages (docs/packages.md), against a repo served by scripts/wm-pkg-demo.sh: install
+        // fortune and moo2048 from the Terminal; their dock tiles appear within 3 s.
+        "pkgdock" | "pkgrun" | "pkgfortune" | "pkgsandbox" => {
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install fortune").enter().wait(3000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            // Sorted by name: fortune is tile 9, moo2048 tile 10.
+            if name == "pkgrun" || name == "pkgsandbox" {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.click(x, y).wait(2000);
+            }
+            if name == "pkgsandbox" {
+                // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
+                b.key(Key::Left, Mods::NONE).wait(300);
+                let (x, y) = dock_icon_center_of(1, 2);
+                b.click(x, y).wait(400);
+                b.typ("audit --event sandbox").enter().wait(800);
+            } else if name == "pkgfortune" {
+                let (x, y) = dock_icon_center_of(9, 2);
+                b.click(x, y).wait(2000);
+            } else {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.glide(x, y - 80, x, y, 6).wait(300);
+            }
+        }
+        // Versions: Files (window (96, 64), body (97, 97)), herd.txt is the first icon.
+        "versions" | "versionsrestore" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(300);
+            b.click(321 + 40, 150 + 6 + 26 + 10).wait(1200);
+            if name == "versionsrestore" {
+                // One version further back (herd2), then Restore (window (110, 64) 800 x 500).
+                b.key(Key::Down, Mods::NONE).wait(300);
+                b.click(111 + 798 - 16 - 90, 97 + 466 - 44 + 22).wait(1200);
+            }
+        }
+        "filesctx" => {
+            b.herd();
+            let (x, y) = dock_icon_center(0);
+            b.click(x, y).wait(1500);
+            b.rclick(321, 150).wait(400);
+        }
+        "notesversions" => {
+            b.herd();
+            b.typ("open /home/milk/Documents/herd.txt")
+                .enter()
+                .wait(1000);
+            b.click(115, 14).wait(400).click(160, 130).wait(1200);
+        }
+        // Powerbox: peek sandboxes itself (no fs), asks for a file through the wm's panel.
+        "powerbox" | "powerboxpick" | "powerboxsave" | "powerboxaudit" => {
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.key(Key::Char('o'), Mods::NONE).wait(900);
+            if name != "powerbox" {
+                // Documents: ideas.md, todo.txt. Pick todo.txt.
+                b.key(Key::Down, Mods::NONE)
+                    .key(Key::Down, Mods::NONE)
+                    .wait(200)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxsave" || name == "powerboxaudit" {
+                // Save a copy: the suggested name, Enter.
+                b.key(Key::Char('s'), Mods::NONE)
+                    .wait(900)
+                    .enter()
+                    .wait(1000);
+            }
+            if name == "powerboxaudit" {
+                let (x, y) = dock_icon_center(1);
+                b.click(x, y).wait(400);
+                b.typ("clear").enter().wait(200);
+                b.typ("ls ~/Documents").enter().wait(300);
+                b.typ("audit --event powerbox").enter().wait(500);
+                b.typ("audit --event sandbox").enter().wait(800);
+            }
+        }
+        // Screenshots (Cmd+Shift+3 / 4), saved to ~/Pictures.
+        "shot" | "shotregion" | "shotselect" => {
+            let cs = Mods {
+                meta: true,
+                shift: true,
+                ..Mods::NONE
+            };
+            if name == "shot" {
+                b.wait(300).key(Key::Char('3'), cs).wait(2500);
+            } else {
+                b.wait(300).key(Key::Char('4'), cs).wait(300);
+                b.to(300, 90).wait(30).down().wait(30);
+                for i in 1..=12 {
+                    b.to(300 + 32 * i, 90 + 25 * i).wait(16);
+                }
+                if name == "shotregion" {
+                    b.up().wait(2500);
+                } else {
+                    b.wait(300);
+                }
+            }
+        }
+        // Display modes: Settings > Display & Lock > Resolution (buttons at body y 219).
+        "res1280" | "res1440" | "resback" | "res1440click" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            let i = if name == "res1280" { 1 } else { 2 };
+            b.click(181 + 188 + i * 112 + 52, 113 + 219).wait(1500);
+            if name == "res1440click" {
+                // The dock moved with the screen: Terminal's tile is now at (540, 856).
+                b.click(540, 856)
+                    .wait(600)
+                    .typ("echo clicked at 1440x900")
+                    .enter()
+                    .wait(500);
+            }
+            if name == "resback" {
+                // Settings stays where it was: 1024 x 768 is the first button.
+                b.click(181 + 188 + 52, 113 + 219).wait(1500);
+            }
+        }
+        // Overlays at 1440x900: Spaces, Today, Skim, the lock screen.
+        "big-spaces" | "big-today" | "big-skim" | "big-lock" | "mid-today" | "mid-skim" => {
+            let (w, h) = if name.starts_with("mid") {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
+            b.wait(600);
+            match name {
+                "big-spaces" => b.key(Key::F(3), Mods::NONE),
+                "big-today" | "mid-today" => b.key(Key::F(4), Mods::NONE),
+                "big-skim" | "mid-skim" => b.key(Key::Char(' '), Mods::META).wait(150).typ("o"),
+                _ => b.key(Key::Char('q'), Mods::META_CTRL),
+            };
+            b.wait(900);
+        }
+        "bench1280" | "bench1440" => {
+            let (w, h) = if name == "bench1280" {
+                (1280, 800)
+            } else {
+                (1440, 900)
+            };
+            b.0.push(Step::Resolution(w, h));
+            b.wait(800);
+            b.0.push(Step::Bench);
+        }
+        // Welcome, from the logo menu (it doesn't open by itself under demo scripts).
+        // Welcome buttons (window at (142, 40), body at (143, 73)).
+        "welcome" | "welcome-snap" | "welcome-versions" | "welcome-peek" | "welcome-dark"
+        | "welcome-spaces" | "welcome-dontshow" | "welcome-try" | "welcome-moo" => {
+            if name == "welcome-try" || name == "welcome-moo" {
+                // A package repo (scripts/wm-pkg-demo.sh serves one); moo2048 installed.
+                let url = host_test_url();
+                b.wait(300)
+                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .enter()
+                    .wait(300)
+                    .typ("milk update")
+                    .enter()
+                    .wait(2000);
+                if name == "welcome-moo" {
+                    b.typ("milk install moo2048").enter().wait(3000);
+                }
+            }
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            match name {
+                "welcome-snap" => b.click(304, 281).wait(1500),
+                "welcome-versions" => b.click(657, 281).wait(2500),
+                "welcome-peek" => b.click(696, 419).wait(1500).click(777, 419).wait(1500),
+                "welcome-dark" => b.click(300, 557).wait(1500),
+                "welcome-spaces" => b.click(635, 557).wait(1200),
+                "welcome-dontshow" => b.click(182, 614).wait(800),
+                "welcome-try" => b.click(306, 419).wait(8000),
+                "welcome-moo" => b.click(612, 419).wait(2000).click(777, 419).wait(1500),
+                _ => &mut b,
+            };
+        }
+        // Drag and drop from Files (window (96, 64); todo.txt is the second icon, at
+        // (421, 150)). The Terminal is at (440, 270) 520 x 290.
+        "dragterm" | "dragghost" => {
+            b.wait(300).typ("cat ").wait(200);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + 18 * i, 150 + 19 * i).wait(16);
+            }
+            if name == "dragterm" {
+                b.up().wait(300).enter().wait(800);
+            } else {
+                b.wait(400);
+            }
+        }
+        "dragnotes" | "dragdockterm" => {
+            // Onto the dock: Notes opens it; Terminal opens a tab in its folder.
+            let (tx, ty) = dock_icon_center(if name == "dragnotes" { 3 } else { 1 });
+            b.wait(300).to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1500);
+        }
+        "dragpkg" => {
+            // moo2048 installed (tile 9): drop todo.txt on its tile.
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            let (tx, ty) = dock_icon_center_of(9, 1);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(2000);
+            let (x, y) = dock_icon_center_of(1, 1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(600);
+            b.typ("audit --event sandbox").enter().wait(800);
+        }
+        "dragpeek" => {
+            // Peek (sandboxed, no fs) opens at (192, 112); move it aside, then drop todo.txt
+            // on it: the drop is the grant.
+            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.drag(450, 128, 650, 380, 10).wait(300);
+            b.click(300, 80).wait(300);
+            b.to(421, 150).wait(30).down().wait(30);
+            for i in 1..=16 {
+                b.to(421 + (800 - 421) * i / 16, 150 + (560 - 150) * i / 16)
+                    .wait(16);
+            }
+            b.up().wait(1200);
+            let (x, y) = dock_icon_center(1);
+            b.click(x, y).wait(400);
+            b.typ("audit --event powerbox").enter().wait(800);
+        }
+        // Notification centre: a few toasts from different apps, then click the clock.
+        "notif" | "notifempty" | "notifclear" => {
+            if name != "notifempty" {
+                b.wait(300).typ("notify 'Milk is ready'").enter().wait(300);
+                b.key(
+                    Key::Char('3'),
+                    Mods {
+                        meta: true,
+                        shift: true,
+                        ..Mods::NONE
+                    },
+                )
+                .wait(1200);
+                b.typ("notify 'Tea is brewing'").enter().wait(300);
+                b.key(Key::Char(' '), Mods::META)
+                    .wait(150)
+                    .typ("back up now")
+                    .wait(200);
+                b.enter().wait(800);
+            }
+            // The clock is the right end of the menu bar.
+            b.click(super::theme::screen_w() - 30, 14).wait(600);
+            if name == "notifclear" {
+                let r = super::notif::rect();
+                b.click(r.x + super::notif::W - 16 - 38, r.y + 160 + 9)
+                    .wait(500);
+            }
+        }
+        // Hover states: over a Welcome button, over a Settings section.
+        "hover-welcome" => {
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            b.glide(600, 500, 696, 419, 8).wait(300);
+        }
+        "hover-settings" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500);
+            b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8)
+                .wait(300);
+        }
+        "logomenu" => {
+            b.click(18, 14).wait(300);
+        }
+        "lockmenu" => {
+            // The logo's system menu > Lock Screen.
+            b.click(18, 14).wait(300).click(80, 220).wait(700);
+        }
+        "lockprefs" => {
+            // Settings > Display & Lock > 5 min.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 2 * 82 + 38, 113 + 325).wait(400);
+        }
+        "idlelock" => {
+            // Settings > Display & Lock > 1 min, then a minute of (pretend) idleness.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 82 + 38, 113 + 325).wait(300);
+            b.0.push(Step::Idle(61));
+            b.wait(800);
         }
         "logo" => {
             b.click(60, 14).glide(60, 14, 90, 60, 6);
@@ -540,6 +1013,13 @@ fn host_test_url() -> String {
     alloc::format!("http://10.0.2.2:{port}/")
 }
 
+/// Booted for a demo (any `opt/milkos/demo`, even "none"): the desktop then skips first-boot
+/// things like the Welcome window, whose clicks the demos don't expect. `firstboot` is the
+/// demo that wants them.
+pub static DEMO_BOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// The `firstboot` demo: boot like a user would (it ends once the desktop is up).
+pub static FIRSTBOOT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 pub fn from_fw_cfg() -> Option<Script> {
     let f = fwcfg::find_file("opt/milkos/demo")?;
     // Heap, not stack: fw_cfg reads by DMA to this address, and thread stacks live in a
@@ -553,7 +1033,9 @@ pub fn from_fw_cfg() -> Option<Script> {
         .ok()?
         .trim_matches(char::from(0))
         .trim();
-    if name == "none" || name.is_empty() {
+    DEMO_BOOT.store(name != "firstboot", core::sync::atomic::Ordering::Relaxed);
+    FIRSTBOOT.store(name == "firstboot", core::sync::atomic::Ordering::Relaxed);
+    if name == "none" || name == "firstboot" || name.is_empty() {
         return None;
     }
     // slow-<demo>: the same demo with animations 20x slower (for catching them on camera).
@@ -564,10 +1046,24 @@ pub fn from_fw_cfg() -> Option<Script> {
         }
         None => name,
     };
-    let Some(steps) = build(name) else {
+    // dark-<demo>: the same demo in Chocolate milk (the polish pass checks both themes).
+    let (inner, dark) = match name.strip_prefix("dark-") {
+        Some(n) => (n, true),
+        None => (name, false),
+    };
+    let steps = if inner == "none" {
+        Some(alloc::vec![Step::Log("done")])
+    } else {
+        build(inner)
+    };
+    let Some(mut steps) = steps else {
         kprintln!("[demo] unknown demo '{name}'");
         return None;
     };
+    if dark {
+        steps.insert(0, Step::Theme(true));
+        steps.insert(1, Step::Wait(400));
+    }
     kprintln!("[demo] {name}: {} steps", steps.len());
     Some(Script {
         name: String::from(name),
@@ -597,6 +1093,15 @@ impl Script {
                 }
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
+                Step::Idle(s) => d.pretend_idle(*s),
+                Step::Theme(dark) => {
+                    let mut p = super::prefs::get();
+                    p.dark = *dark;
+                    super::request(super::Request::Prefs(p));
+                }
+                Step::Resolution(w, h) => {
+                    d.set_resolution(*w, *h);
+                }
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

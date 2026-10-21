@@ -3,7 +3,6 @@
 
 extern crate alloc;
 
-use core::arch::global_asm;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
@@ -45,10 +44,13 @@ mod uart;
 mod virtio;
 mod wm;
 
-global_asm!(include_str!("boot.S"));
+// boot.S (the entry point) is included by mmu.rs, which owns the constants it uses.
 
 /// PL011 UART on qemu's virt machine.
-const UART0: *mut u32 = 0x0900_0000 as *mut u32;
+/// milkOS version, from `<repo>/VERSION` (kernel/build.rs).
+pub const VERSION: &str = env!("MILKOS_VERSION");
+
+const UART0: *mut u32 = mmu::phys_to_virt(0x0900_0000) as *mut u32;
 
 struct Uart;
 
@@ -89,7 +91,7 @@ pub extern "C" fn kmain() -> ! {
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
     display::init();
-    kprintln!("milkOS 0.0.1 booting...");
+    kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
 
     gic::init();

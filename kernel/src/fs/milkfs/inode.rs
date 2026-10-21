@@ -174,6 +174,9 @@ impl Volume {
         if i.nlink == 0 && !self.is_open(st.cur, ino) {
             st.delete_inode(ino)
         } else {
+            if i.nlink == 0 {
+                st.add_orphan(ino)?;
+            }
             st.put_inode(ino, &i)
         }
     }
@@ -194,6 +197,139 @@ impl FileSystem for Volume {
     fn sync(&self) -> Result<()> {
         self.state.lock().commit()
     }
+}
+
+/// `FICLONE` (Linux ioctl 0x40049409) / `cp --reflink`: `dst`'s contents become a
+/// copy-on-write copy of `src`'s, sharing every data block until either is written. Both
+/// must be regular files in the same view of the same milkfs volume (EXDEV otherwise,
+/// EOPNOTSUPP if `dst` isn't on milkfs, EINVAL for non-files or `src == dst`).
+pub fn reflink(src: &InodeRef, dst: &InodeRef) -> Result<()> {
+    let d = downcast::<MilkInode>(dst).ok_or(Errno::EOPNOTSUPP)?;
+    let s = downcast::<MilkInode>(src).ok_or(Errno::EXDEV)?;
+    if !Arc::ptr_eq(&s.vol, &d.vol) || s.view != d.view {
+        return Err(Errno::EXDEV);
+    }
+    d.ro()?;
+    let (sino, dino) = (s.ino, d.ino);
+    let _inv = Invalidate(d.dev, dino);
+    d.vol.txn(d.view, |st| {
+        let size = st.reflink(sino, dino)?;
+        let mut i = st.inode(st.cur, dino)?;
+        i.size = size;
+        let t = now();
+        i.mtime = t;
+        i.ctime = t;
+        st.put_inode(dino, &i)
+    })
+}
+
+/// The volume an inode is on (None: not milkfs).
+pub fn volume_of(i: &InodeRef) -> Option<Arc<Volume>> {
+    downcast::<MilkInode>(i).map(|m| m.vol.clone())
+}
+
+/// What [`dedupe`] did.
+#[derive(Clone, Debug, Default)]
+pub struct DedupeReport {
+    /// Regular files with data blocks looked at.
+    pub files: usize,
+    /// Groups of two or more files with the same size and content hash.
+    pub groups: usize,
+    /// Files now sharing the blocks of the first file of their group.
+    pub deduped: usize,
+    /// Files that already shared them.
+    pub already: usize,
+    /// Same hash but different bytes (left alone).
+    pub differ: usize,
+    /// Data blocks the deduped files now share instead of owning.
+    pub blocks: u64,
+    /// Net change of free blocks once committed (blocks a snapshot still has stay used
+    /// until that snapshot is deleted).
+    pub freed: i64,
+}
+
+/// Find regular files under directory `dir` (recursively, one volume view) with identical
+/// contents and make all but the first of each group share its blocks (reflink). Files are
+/// grouped by size and content hash (from the block checksums, no data read), then
+/// compared byte by byte before anything changes. Inodes (times, owner) are left as they
+/// are. `dry_run`: only report. One transaction, committed before returning.
+pub fn dedupe(dir: &InodeRef, dry_run: bool) -> Result<DedupeReport> {
+    let d = downcast::<MilkInode>(dir).ok_or(Errno::EOPNOTSUPP)?;
+    if d.kind != InodeType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    if !dry_run {
+        d.ro()?;
+    }
+    let (view, top) = (d.view, d.ino);
+    let mut rep = DedupeReport::default();
+    let free0 = d.vol.state.lock().store.free_blocks();
+    let run = |st: &mut State, rep: &mut DedupeReport| -> Result<()> {
+        let v = st.cur;
+        // Every regular file under `top` that has data blocks, by (size, hash).
+        let mut groups: BTreeMap<(u64, u64), Vec<u64>> = BTreeMap::new();
+        let mut dirs = alloc::vec![top];
+        while let Some(dir) = dirs.pop() {
+            for e in st.list(v, dir)? {
+                if e.dtype == InodeType::Dir.dirent_type() {
+                    dirs.push(e.ino);
+                } else if e.dtype == InodeType::File.dirent_type() && st.block_count(v, e.ino)? > 0
+                {
+                    let (h, i) = st.content_hash(v, e.ino)?;
+                    groups.entry((i.size, h)).or_default().push(e.ino);
+                    rep.files += 1;
+                }
+            }
+        }
+        let mut a = alloc::vec![0u8; 1 << 20];
+        let mut b = alloc::vec![0u8; 1 << 20];
+        for ((size, _), mut inos) in groups {
+            inos.sort_unstable();
+            inos.dedup(); // hard links
+            if inos.len() < 2 {
+                continue;
+            }
+            rep.groups += 1;
+            let keep = inos[0];
+            for &other in &inos[1..] {
+                if st.same_blocks(keep, other)? {
+                    rep.already += 1;
+                    continue;
+                }
+                let mut off = 0;
+                let mut equal = true;
+                while equal && off < size {
+                    let n = st.read_data(v, keep, size, off, &mut a)?;
+                    st.read_data(v, other, size, off, &mut b[..n])?;
+                    equal = a[..n] == b[..n];
+                    off += n as u64;
+                }
+                if !equal {
+                    rep.differ += 1;
+                    continue;
+                }
+                rep.deduped += 1;
+                rep.blocks += st.block_count(v, other)?;
+                if !dry_run {
+                    st.reflink(keep, other)?;
+                }
+            }
+        }
+        Ok(())
+    };
+    if dry_run {
+        let mut st = d.vol.state.lock();
+        st.set_cur(view)?;
+        let r = run(&mut st, &mut rep);
+        let _ = st.set_cur(LIVE);
+        r?;
+    } else {
+        d.vol.txn(view, |st| run(st, &mut rep))?;
+        let mut st = d.vol.state.lock();
+        st.commit()?;
+        rep.freed = st.store.free_blocks() as i64 - free0 as i64;
+    }
+    Ok(rep)
 }
 
 /// Drops a file's cached pages when it goes out of scope (after the change it guards,
@@ -298,7 +434,9 @@ impl MilkInode {
                     uid: d.uid,
                     gid: d.gid,
                     size,
-                    parent: if is_dir { dir } else { 0 },
+                    // Files record their (first) directory too: diff and versions use it
+                    // to find a path without scanning.
+                    parent: dir,
                     atime: t,
                     mtime: t,
                     ctime: t,
@@ -370,10 +508,10 @@ impl Inode for MilkInode {
         }
         let size = self.vol.state.lock().inode(self.view, self.ino)?.size;
         let (view, ino) = (self.view, self.ino);
-        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, page| {
+        crate::fs::pagecache::read(self.dev, ino, size, off, buf, |pg, pages| {
             let st = self.vol.state.lock();
             let at = pg * crate::fs::pagecache::PAGE as u64;
-            st.read_data(view, ino, size, at, page).map(|_| ())
+            st.read_data(view, ino, size, at, pages).map(|_| ())
         })
     }
 
@@ -644,8 +782,8 @@ impl Inode for MilkInode {
             )?;
             let mut s = st.inode(st.cur, src.ino)?;
             s.ctime = t;
+            s.parent = ndi;
             if moving_dir && od != ndi {
-                s.parent = ndi;
                 let mut o = st.inode(st.cur, od)?;
                 o.nlink -= 1;
                 st.put_inode(od, &o)?;

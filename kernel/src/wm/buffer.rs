@@ -87,7 +87,11 @@ impl Buffer {
             return true;
         }
         let (cw, ch) = (w + w / 4, h + h / 4);
-        match Buffer::with_capacity(w, h, cw.min(1024), ch.min(768), 0) {
+        let (sw, sh) = (
+            super::theme::screen_w() as usize,
+            super::theme::screen_h() as usize,
+        );
+        match Buffer::with_capacity(w, h, cw.min(sw), ch.min(sh), 0) {
             Some(b) => {
                 *self = b;
                 true

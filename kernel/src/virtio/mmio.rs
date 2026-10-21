@@ -18,7 +18,7 @@ use core::ptr::{read_volatile, write_volatile};
 use super::queue::Virtqueue;
 use crate::gic;
 
-pub const MMIO_BASE: usize = 0x0a00_0000;
+pub const MMIO_BASE: usize = crate::mmu::phys_to_virt(0x0a00_0000);
 pub const MMIO_STRIDE: usize = 0x200;
 pub const MMIO_SLOTS: usize = 32;
 /// "SPI n" of slot 0; slot `i` is SPI `MMIO_SPI_BASE + i`.

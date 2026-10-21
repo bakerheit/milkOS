@@ -8,15 +8,16 @@
 //!
 //! Leaves hold `(Key, value)` items, internal nodes `(separator, child)`; child `i` covers
 //! keys from its separator up to the next one (child 0's separator is ignored). Nodes split
-//! when their encoding outgrows a block. Deletion drops empty nodes but does not rebalance
-//! (v0: underfull nodes are allowed).
+//! when their encoding outgrows a block. On deletion a node left under a quarter full is
+//! merged with a sibling when both fit in one block, otherwise the two are rebalanced
+//! (split evenly again); a root left with one child is replaced by it.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::format::{
-    BLOCK, BlockPtr, DiskNode, INTERNAL_ENTRY, K_EXTENT, Key, LEAF_ITEM_OVERHEAD, MAX_VALUE,
-    NODE_HEADER, PTR_SIZE, decode_node, encode_internal, encode_leaf,
+    BLOCK, BlockPtr, DiskNode, INTERNAL_ENTRY, Key, LEAF_ITEM_OVERHEAD, MAX_VALUE, NODE_HEADER,
+    decode_node, encode_internal, encode_leaf,
 };
 use super::store::Store;
 use crate::fs::errno::{Errno, Result};
@@ -42,16 +43,22 @@ pub fn empty() -> Child {
     Child::Mem(Box::new(Node::Leaf(Vec::new())))
 }
 
+/// An owned, modifiable copy of the node at `p` (for copy-on-write).
 pub fn load(st: &Store, p: BlockPtr) -> Result<Node> {
-    let mut buf = [0u8; BLOCK];
-    st.read(p, &mut buf)?;
-    Ok(match decode_node(&buf)? {
-        DiskNode::Leaf(items) => Node::Leaf(items),
+    Ok(match &*st.node(p)? {
+        DiskNode::Leaf(items) => Node::Leaf(items.clone()),
         DiskNode::Internal(level, kids) => Node::Internal(
-            level,
-            kids.into_iter().map(|(k, p)| (k, Child::Disk(p))).collect(),
+            *level,
+            kids.iter().map(|(k, p)| (*k, Child::Disk(*p))).collect(),
         ),
     })
+}
+
+/// Read and decode the node at `p` (checksum verified). Used by `Store::node`'s cache.
+pub fn decode_at(st: &Store, p: BlockPtr) -> Result<DiskNode> {
+    let mut buf = [0u8; BLOCK];
+    st.read(p, &mut buf)?;
+    decode_node(&buf)
 }
 
 fn leaf_size(items: &[(Key, Vec<u8>)]) -> usize {
@@ -62,37 +69,52 @@ fn leaf_size(items: &[(Key, Vec<u8>)]) -> usize {
             .sum::<usize>()
 }
 
+/// Nodes (other than the root) below this many encoded bytes are underfull.
+pub const MIN_FILL: usize = BLOCK / 4;
+
 fn internal_fits(n: usize) -> bool {
     NODE_HEADER + n * INTERNAL_ENTRY <= BLOCK
 }
 
 /// Index of the child whose range contains `key`.
-fn child_index(kids: &[(Key, Child)], key: &Key) -> usize {
+fn child_index<T>(kids: &[(Key, T)], key: &Key) -> usize {
     kids.partition_point(|(k, _)| k <= key).saturating_sub(1)
 }
 
 // ---- reads --------------------------------------------------------------------------
 
-fn with_node<R>(c: &Child, st: &Store, f: impl FnOnce(&Node) -> Result<R>) -> Result<R> {
-    match c {
-        Child::Mem(n) => f(n),
-        Child::Disk(p) => f(&load(st, *p)?),
+fn leaf_get(items: &[(Key, Vec<u8>)], key: &Key) -> Option<Vec<u8>> {
+    items
+        .binary_search_by(|(k, _)| k.cmp(key))
+        .ok()
+        .map(|i| items[i].1.clone())
+}
+
+fn leaf_range(items: &[(Key, Vec<u8>)], lo: &Key, hi: &Key, out: &mut Vec<(Key, Vec<u8>)>) {
+    let start = items.partition_point(|(k, _)| k < lo);
+    for (k, v) in &items[start..] {
+        if k >= hi {
+            break;
+        }
+        out.push((*k, v.clone()));
     }
 }
 
 pub fn get(c: &Child, st: &Store, key: &Key) -> Result<Option<Vec<u8>>> {
-    with_node(c, st, |n| match n {
-        Node::Leaf(items) => Ok(items
-            .binary_search_by(|(k, _)| k.cmp(key))
-            .ok()
-            .map(|i| items[i].1.clone())),
-        Node::Internal(_, kids) => {
-            if kids.is_empty() {
-                return Ok(None);
+    match c {
+        Child::Mem(n) => match &**n {
+            Node::Leaf(items) => Ok(leaf_get(items, key)),
+            Node::Internal(_, kids) if kids.is_empty() => Ok(None),
+            Node::Internal(_, kids) => get(&kids[child_index(kids, key)].1, st, key),
+        },
+        Child::Disk(p) => match &*st.node(*p)? {
+            DiskNode::Leaf(items) => Ok(leaf_get(items, key)),
+            DiskNode::Internal(_, kids) if kids.is_empty() => Ok(None),
+            DiskNode::Internal(_, kids) => {
+                get(&Child::Disk(kids[child_index(kids, key)].1), st, key)
             }
-            get(&kids[child_index(kids, key)].1, st, key)
-        }
-    })
+        },
+    }
 }
 
 /// Every item with `lo <= key < hi`, in key order.
@@ -103,31 +125,35 @@ pub fn range(
     hi: &Key,
     out: &mut Vec<(Key, Vec<u8>)>,
 ) -> Result<()> {
-    with_node(c, st, |n| match n {
-        Node::Leaf(items) => {
-            let start = items.partition_point(|(k, _)| k < lo);
-            for (k, v) in &items[start..] {
-                if k >= hi {
-                    break;
+    match c {
+        Child::Mem(n) => match &**n {
+            Node::Leaf(items) => leaf_range(items, lo, hi, out),
+            Node::Internal(_, kids) if !kids.is_empty() => {
+                let first = child_index(kids, lo);
+                for (i, (k, child)) in kids.iter().enumerate().skip(first) {
+                    if i > first && *k >= *hi {
+                        break;
+                    }
+                    range(child, st, lo, hi, out)?;
                 }
-                out.push((*k, v.clone()));
             }
-            Ok(())
-        }
-        Node::Internal(_, kids) => {
-            if kids.is_empty() {
-                return Ok(());
-            }
-            let first = child_index(kids, lo);
-            for (i, (k, child)) in kids.iter().enumerate().skip(first) {
-                if i > first && *k >= *hi {
-                    break;
+            Node::Internal(..) => {}
+        },
+        Child::Disk(p) => match &*st.node(*p)? {
+            DiskNode::Leaf(items) => leaf_range(items, lo, hi, out),
+            DiskNode::Internal(_, kids) if !kids.is_empty() => {
+                let first = child_index(kids, lo);
+                for (i, (k, cp)) in kids.iter().enumerate().skip(first) {
+                    if i > first && *k >= *hi {
+                        break;
+                    }
+                    range(&Child::Disk(*cp), st, lo, hi, out)?;
                 }
-                range(child, st, lo, hi, out)?;
             }
-            Ok(())
-        }
-    })
+            DiskNode::Internal(..) => {}
+        },
+    }
+    Ok(())
 }
 
 // ---- writes -------------------------------------------------------------------------
@@ -174,11 +200,27 @@ fn insert_rec(
 ) -> Result<Option<(Key, Child)>> {
     match make_mut(c, st)? {
         Node::Leaf(items) => {
-            match items.binary_search_by(|(k, _)| k.cmp(&key)) {
-                Ok(i) => items[i].1 = val,
-                Err(i) => items.insert(i, (key, val)),
-            }
+            let new_obj = match items.binary_search_by(|(k, _)| k.cmp(&key)) {
+                Ok(i) => {
+                    items[i].1 = val;
+                    None
+                }
+                Err(i) => {
+                    items.insert(i, (key, val));
+                    // The first item of an object newer than every other in this leaf.
+                    (i > 0 && items[i - 1].0.obj < key.obj).then_some(i)
+                }
+            };
             if leaf_size(items) > BLOCK {
+                if let Some(i) = new_obj {
+                    // Inode numbers only grow, so this is how files get created: split at
+                    // the object boundary and leave the left leaf full instead of half.
+                    let right = items.split_off(i);
+                    if leaf_size(items) <= BLOCK && leaf_size(&right) <= BLOCK {
+                        return Ok(Some((right[0].0, Child::Mem(Box::new(Node::Leaf(right))))));
+                    }
+                    items.extend(right);
+                }
                 return Ok(Some(split_leaf(items)));
             }
             Ok(None)
@@ -248,19 +290,74 @@ fn remove_rec(c: &mut Child, st: &mut Store, key: &Key) -> Result<bool> {
             }
             let idx = child_index(kids, key);
             let found = remove_rec(&mut kids[idx].1, st, key)?;
-            let empty = match &kids[idx].1 {
-                Child::Mem(n) => match &**n {
-                    Node::Leaf(items) => items.is_empty(),
-                    Node::Internal(_, k) => k.is_empty(),
-                },
-                Child::Disk(_) => false,
+            let size = match &kids[idx].1 {
+                Child::Mem(n) => Some(node_bytes(n)),
+                Child::Disk(_) => None,
             };
-            if empty {
-                kids.remove(idx); // dirty, so its old block was already released
+            if size == Some(NODE_HEADER) {
+                kids.remove(idx); // empty; dirty, so its old block was already released
+            } else if size.is_some_and(|s| s < MIN_FILL) && kids.len() > 1 {
+                rebalance(kids, idx, st)?;
             }
             Ok(found)
         }
     }
+}
+
+/// Encoded size of a node.
+fn node_bytes(n: &Node) -> usize {
+    match n {
+        Node::Leaf(items) => leaf_size(items),
+        Node::Internal(_, kids) => NODE_HEADER + kids.len() * INTERNAL_ENTRY,
+    }
+}
+
+/// `kids[idx]` is underfull: merge it with a neighbour if the two fit in one block,
+/// otherwise share their entries evenly between the two.
+fn rebalance(kids: &mut Vec<(Key, Child)>, idx: usize, st: &mut Store) -> Result<()> {
+    let (l, r) = if idx + 1 < kids.len() {
+        (idx, idx + 1)
+    } else {
+        (idx - 1, idx)
+    };
+    make_mut(&mut kids[l].1, st)?;
+    make_mut(&mut kids[r].1, st)?;
+    let (rsep, right) = kids.remove(r);
+    let Child::Mem(right) = right else {
+        unreachable!()
+    };
+    let Child::Mem(left) = &mut kids[l].1 else {
+        unreachable!()
+    };
+    match (&mut **left, *right) {
+        (Node::Leaf(a), Node::Leaf(b)) => {
+            a.extend(b);
+            if leaf_size(a) > BLOCK {
+                let split = split_leaf(a);
+                kids.insert(r, split);
+            }
+        }
+        (Node::Internal(la, a), Node::Internal(lb, mut b)) if *la == lb => {
+            // The right node's first separator was implicit: it is the parent's.
+            if let Some(first) = b.first_mut() {
+                first.0 = rsep;
+            }
+            a.extend(b);
+            if !internal_fits(a.len()) {
+                let right = a.split_off(a.len() / 2);
+                let k = right[0].0;
+                let level = *la;
+                kids.insert(r, (k, Child::Mem(Box::new(Node::Internal(level, right)))));
+            }
+        }
+        (_, other) => {
+            // Siblings at different levels can't happen (all leaves are at one depth);
+            // leave the tree as it was rather than lose entries.
+            kids.insert(r, (rsep, Child::Mem(Box::new(other))));
+            return Err(Errno::EIO);
+        }
+    }
+    Ok(())
 }
 
 /// Remove `key`. Returns whether it was there.
@@ -324,24 +421,71 @@ pub fn walk(
     if p.is_none() || !node(&p) {
         return Ok(());
     }
-    match load(st, p)? {
-        Node::Leaf(items) => {
-            for (k, v) in &items {
+    match &*st.node(p)? {
+        DiskNode::Leaf(items) => {
+            for (k, v) in items {
                 item(k, v)?;
             }
         }
-        Node::Internal(_, kids) => {
-            for (_, c) in kids {
-                if let Child::Disk(cp) = c {
-                    walk(st, cp, node, item)?;
-                }
+        DiskNode::Internal(_, kids) => {
+            for (_, cp) in kids {
+                walk(st, *cp, node, item)?;
             }
         }
     }
     Ok(())
 }
 
-/// The data pointer stored in a `K_EXTENT` item value.
-pub fn extent_ptr(k: &Key, v: &[u8]) -> Option<BlockPtr> {
-    (k.kind == K_EXTENT && v.len() >= PTR_SIZE).then(|| BlockPtr::get(v))
+/// Shape of a committed tree (for tests and `/sys/fs/milkfs/treetest`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TreeStats {
+    /// Levels (a lone root leaf = 1).
+    pub height: u32,
+    pub nodes: u64,
+    pub leaves: u64,
+    pub items: u64,
+    /// Encoded bytes of all nodes (fill = bytes / (nodes * BLOCK)).
+    pub bytes: u64,
+    /// Nodes other than the root below a quarter full.
+    pub underfull: u64,
+}
+
+impl TreeStats {
+    pub fn fill_pct(&self) -> u64 {
+        if self.nodes == 0 {
+            0
+        } else {
+            self.bytes * 100 / (self.nodes * BLOCK as u64)
+        }
+    }
+}
+
+pub fn stats(st: &Store, root: BlockPtr) -> Result<TreeStats> {
+    fn rec(st: &Store, p: BlockPtr, depth: u32, s: &mut TreeStats) -> Result<()> {
+        s.nodes += 1;
+        s.height = s.height.max(depth);
+        let size = match &*st.node(p)? {
+            DiskNode::Leaf(items) => {
+                s.leaves += 1;
+                s.items += items.len() as u64;
+                leaf_size(items)
+            }
+            DiskNode::Internal(_, kids) => {
+                for (_, c) in kids {
+                    rec(st, *c, depth + 1, s)?;
+                }
+                NODE_HEADER + kids.len() * INTERNAL_ENTRY
+            }
+        };
+        s.bytes += size as u64;
+        if depth > 1 && size < MIN_FILL {
+            s.underfull += 1;
+        }
+        Ok(())
+    }
+    let mut s = TreeStats::default();
+    if !root.is_none() {
+        rec(st, root, 1, &mut s)?;
+    }
+    Ok(s)
 }

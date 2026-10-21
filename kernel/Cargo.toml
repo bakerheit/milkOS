@@ -1,6 +1,7 @@
 [package]
 name = "milkos-kernel"
-version = "0.0.1"
+# The milkOS version lives in <repo>/VERSION (kernel/build.rs: MILKOS_VERSION).
+version = "0.0.0"
 edition = "2024"
 
 [[bin]]
@@ -15,3 +16,6 @@ crash-test = []
 kstack-overflow-test = []
 # Log every syscall (pid, number, result) to the console.
 strace = []
+# Secondaries wait 200 ms between coming online and joining the scheduler (regression
+# test for IPIs/ticks/work reaching a CPU before it joined; see scripts/serial-soak.sh).
+smp-join-delay = []

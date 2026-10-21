@@ -145,7 +145,8 @@ impl Terminal {
         use super::super::tty;
         if k.mods.ctrl {
             match k.key {
-                Key::Char('l') => {
+                // Ctrl+L clears the window, unless a raw-mode program wants the key.
+                Key::Char('l') if tty::canonical() => {
                     self.lines.clear();
                     return true;
                 }
@@ -160,6 +161,27 @@ impl Terminal {
             Key::Enter => tty::input(b'\r'),
             Key::Backspace => tty::input(0x7f),
             Key::Tab => tty::input(b'\t'),
+            Key::Escape => tty::input(0x1b),
+            Key::Up | Key::Down | Key::Right | Key::Left | Key::Home | Key::End => {
+                // xterm sequences: swallowed by the line discipline in cooked mode, read by
+                // programs in raw mode.
+                let f = match k.key {
+                    Key::Up => b'A',
+                    Key::Down => b'B',
+                    Key::Right => b'C',
+                    Key::Left => b'D',
+                    Key::Home => b'H',
+                    _ => b'F',
+                };
+                for b in [0x1b, b'[', f] {
+                    tty::input(b);
+                }
+            }
+            Key::Delete => {
+                for b in *b"\x1b[3~" {
+                    tty::input(b);
+                }
+            }
             Key::PageUp => {
                 self.back += 8;
                 return true;
@@ -258,6 +280,9 @@ impl WindowContents for Terminal {
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, focused: bool) {
         let cols = ((w - 2 * PAD) / 8).max(4) as usize;
         let rows = ((h - 2 * PAD + 2) / LINE_H).max(1) as usize;
+        if self.tty {
+            super::super::tty::set_winsize(cols as u16, rows as u16, w as u16, h as u16);
+        }
         // The prompt line (with the cursor) is the last visual row.
         let prompt = if self.tty {
             self.cur.clone()

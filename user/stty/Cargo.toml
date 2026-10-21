@@ -1,0 +1,12 @@
+[package]
+name = "stty"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "stty"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

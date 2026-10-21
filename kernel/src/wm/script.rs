@@ -179,6 +179,27 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "browse" => {
             b.click(137, 153).wait(200);
         }
+        "stty" => {
+            b.wait(300)
+                .typ("stty")
+                .enter()
+                .wait(200)
+                .typ("stty size")
+                .enter()
+                .wait(200);
+            b.typ("stty -echo")
+                .enter()
+                .wait(200)
+                .typ("echo hidden")
+                .enter()
+                .wait(200);
+            b.typ("stty sane")
+                .enter()
+                .wait(200)
+                .typ("stty")
+                .enter()
+                .wait(300);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }

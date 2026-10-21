@@ -27,7 +27,7 @@ mod rtc;
 mod script;
 mod shell;
 mod theme;
-mod tty;
+pub mod tty;
 mod wallpaper;
 mod window;
 

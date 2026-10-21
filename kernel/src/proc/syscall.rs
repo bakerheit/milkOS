@@ -549,6 +549,20 @@ fn sys_ioctl(fd: i64, cmd: u32, arg: usize) -> KResult<usize> {
         }
         return Ok(0);
     }
+    // The desktop Terminal's tty (wm/tty.rs): termios and window size.
+    if crate::wm::tty::is_tty1(&f.stat()) {
+        let n = crate::wm::tty::ioctl_in_len(cmd);
+        let input = if n > 0 && arg != 0 {
+            copy_in(arg, n)?
+        } else {
+            Vec::new()
+        };
+        let out = crate::wm::tty::ioctl(cmd, &input).ok_or(ENOTTY)?;
+        if arg != 0 && !out.is_empty() {
+            copy_out(arg, &out)?;
+        }
+        return Ok(0);
+    }
     f.ioctl(cmd, arg)
 }
 

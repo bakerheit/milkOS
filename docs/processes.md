@@ -162,6 +162,24 @@ backspace, ^U, ^C drops the line, ^D at line start = EOF), one line per read, bl
 a wait queue the UART RX interrupt wakes. Before `sched::init` it returns EAGAIN (the fs
 self-test checks that). Nothing else may consume `uart::read_byte` now.
 
+### The desktop Terminal's tty: `/dev/tty1`
+
+`kernel/src/wm/tty.rs`, rdev 4:1. The Terminal window feeds it the keys typed into it and
+draws what is written to it; a `term-sh` kernel thread keeps `msh` running on it
+(`proc::spawn_on(path, argv, envp, tty, cwd)`, fds 0/1/2 = `FdTable::with_tty`).
+It has real termios state (`sys_ioctl` routes it to `wm::tty::ioctl`):
+
+* `TCGETS` / `TCSETS` / `TCSETSW` / `TCSETSF` with the 36-byte kernel `struct termios`
+  (four u32 flags, `c_line`, `c_cc[19]`). Honoured: `ICANON` (off = raw: every byte is
+  readable at once, VMIN 1 / VTIME 0), `ECHO`, `ISIG` (^C drops the line; no signals yet),
+  `ICRNL`, and `c_cc[VINTR, VERASE, VKILL, VEOF]`. Default is `stty sane`.
+* `TIOCGWINSZ` gives the Terminal's real size in cells (and pixels), updated when the window
+  is resized. `TIOCSWINSZ` sets it. No SIGWINCH yet: re-read it when you need it.
+* Arrow keys, Home/End, Delete and Esc arrive as xterm sequences (`ESC [ A` ...); cooked mode
+  swallows them, raw-mode programs see them.
+
+`/bin/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
+
 ## Userland (`user/`)
 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs

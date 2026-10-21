@@ -1,0 +1,13 @@
+[package]
+name = "rngd"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rngd"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+udrv = { path = "../udrv" }

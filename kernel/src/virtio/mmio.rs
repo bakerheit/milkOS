@@ -159,6 +159,32 @@ impl Transport {
         unsafe { write_volatile((self.base + off) as *mut u32, v) }
     }
 
+    /// A register access of `width` bytes (1, 2 or 4) at `off` inside this device's window,
+    /// for user-space drivers (`udrv`, which checks the offset).
+    pub fn read_raw(&self, off: usize, width: usize) -> u32 {
+        let p = self.base + off;
+        // SAFETY: inside this slot's MMIO window (the caller checks off + width <= 0x200).
+        unsafe {
+            match width {
+                1 => read_volatile(p as *const u8) as u32,
+                2 => read_volatile(p as *const u16) as u32,
+                _ => read_volatile(p as *const u32),
+            }
+        }
+    }
+
+    pub fn write_raw(&self, off: usize, width: usize, v: u32) {
+        let p = self.base + off;
+        // SAFETY: as in read_raw.
+        unsafe {
+            match width {
+                1 => write_volatile(p as *mut u8, v as u8),
+                2 => write_volatile(p as *mut u16, v as u16),
+                _ => write_volatile(p as *mut u32, v),
+            }
+        }
+    }
+
     pub fn status(&self) -> u32 {
         self.read(STATUS)
     }

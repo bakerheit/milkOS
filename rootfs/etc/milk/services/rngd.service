@@ -1,0 +1,9 @@
+# The virtio-rng driver in user space (docs/drivers.md): feeds the kernel CSPRNG through
+# /dev/entropy. Only when the boot option leaves rng to a user driver (the default); the
+# kernel's own driver covers for it whenever it isn't running.
+description = virtio-rng driver (user space)
+exec = /bin/rngd
+user = root
+restart = always
+if-contains = /proc/drivers rng policy=user
+sandbox = fs=/dev/entropy:rw net=none spawn=0 audio=0 clipboard=0 windows=0

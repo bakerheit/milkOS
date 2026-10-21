@@ -39,6 +39,9 @@ pub struct Caps {
     pub windows: bool,
     /// May fork / spawn new processes (threads are always allowed).
     pub spawn: bool,
+    /// May claim a device as a user-space driver (`MILK_DRIVER`; also needs euid 0).
+    /// docs/drivers.md.
+    pub driver: bool,
 }
 
 impl Caps {
@@ -51,6 +54,7 @@ impl Caps {
             clipboard: true,
             windows: true,
             spawn: true,
+            driver: true,
         })
     }
 
@@ -61,6 +65,7 @@ impl Caps {
             || !self.clipboard
             || !self.windows
             || !self.spawn
+            || !self.driver
     }
 
     /// Does the fs grant cover `path` (already normalised, absolute) for the wanted access?
@@ -112,12 +117,13 @@ impl Caps {
         };
         let b = |v: bool| if v { 1 } else { 0 };
         alloc::format!(
-            "{fs}{}net={net} audio={} clipboard={} windows={} spawn={}",
+            "{fs}{}net={net} audio={} clipboard={} windows={} spawn={} driver={}",
             if fs.is_empty() { "" } else { " " },
             b(self.audio),
             b(self.clipboard),
             b(self.windows),
-            b(self.spawn)
+            b(self.spawn),
+            b(self.driver)
         )
     }
 }
@@ -155,6 +161,7 @@ pub fn normalize(cwd: &str, path: &str) -> String {
 /// Parse a sandbox spec and return the capability set shrunk from `cur` (never widened).
 /// Tokens (whitespace separated):
 ///   `net=none|local|all`  `audio=0|1`  `clipboard=0|1`  `windows=0|1`  `spawn=0|1`
+///   `driver=0|1`
 ///   `fs=<path>:r|rw`  (adds a grant; any fs= switches to a restricted list)
 ///   `fs-none`  (restricted, no fs access)
 pub fn shrink(cur: &Caps, spec: &str) -> KResult<Caps> {
@@ -183,6 +190,7 @@ pub fn shrink(cur: &Caps, spec: &str) -> KResult<Caps> {
             "clipboard" => c.clipboard &= v != "0",
             "windows" => c.windows &= v != "0",
             "spawn" => c.spawn &= v != "0",
+            "driver" => c.driver &= v != "0",
             "fs-none" => {
                 fs_req.get_or_insert_with(Vec::new);
             }

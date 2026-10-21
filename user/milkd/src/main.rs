@@ -832,7 +832,7 @@ impl Milkd {
         let admin = peer.uid == 0
             || users::by_uid(peer.uid)
                 .is_some_and(|p| users::groups_of(&p.name, p.gid).contains(&ADMIN_GID));
-        let need_admin = matches!(cmd, "start" | "stop" | "restart" | "reload");
+        let need_admin = matches!(cmd, "start" | "stop" | "restart" | "reload" | "kill");
         if need_admin && !admin {
             self.log(
                 "milkd",
@@ -892,6 +892,28 @@ impl Milkd {
                 self.load();
                 self.schedule();
                 Ok(String::new())
+            }
+            // `kill UNIT [SIG]`: signal the unit's process (default SIGKILL) without
+            // stopping it, so its restart policy applies (crash tests: a driver killed
+            // mid-use, docs/drivers.md).
+            "kill" => {
+                let n = String::from(arg.unwrap_or(""));
+                let sig = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(9);
+                match self.units.get(&n) {
+                    None => Err(alloc::format!("no such unit {n}")),
+                    Some(u) if u.pid == 0 => Err(alloc::format!("{n} is not running")),
+                    Some(u) => {
+                        let pid = u.pid;
+                        let _ = sys::kill(pid as i32, sig);
+                        self.log(
+                            &n,
+                            "warn",
+                            peer.pid,
+                            &alloc::format!("signal {sig} sent to pid {pid} by uid {}", peer.uid),
+                        );
+                        Ok(alloc::format!("{n}\t{pid}\n"))
+                    }
+                }
             }
             _ => Err(alloc::format!("unknown request {cmd:?}")),
         };

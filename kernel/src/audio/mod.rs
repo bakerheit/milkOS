@@ -138,6 +138,31 @@ static UP: AtomicBool = AtomicBool::new(false);
 static REQUESTS: SpinLock<VecDeque<Sound>> = SpinLock::new(VecDeque::new());
 static CACHE: SpinLock<[Option<Arc<Vec<i16>>>; 4]> = SpinLock::new([None, None, None, None]);
 static SYS_PLAYED: AtomicU64 = AtomicU64::new(0);
+/// Periods played so far, whichever sink played them (serials as `Mixer::submitted`).
+static PLAYED: AtomicU64 = AtomicU64::new(0);
+
+/// Mixed periods for a user-space sound driver (soundd through /dev/pcm, docs/drivers.md).
+struct UserPcm {
+    queue: VecDeque<[i16; PERIOD_FRAMES * 2]>,
+    /// Taken by the driver, not reported played yet.
+    out: usize,
+    played: u64,
+}
+
+/// Periods queued + out for a user driver (80 ms).
+const USER_SLOTS: usize = 8;
+static UPCM: SpinLock<UserPcm> = SpinLock::new(UserPcm {
+    queue: VecDeque::new(),
+    out: 0,
+    played: 0,
+});
+/// soundd waits here for the next period.
+static PCM_WQ: WaitQueue = WaitQueue::new();
+
+/// A user-space driver took the sound device, or gave it back: re-plan at once.
+pub fn sink_changed() {
+    kick();
+}
 
 fn kick() {
     KICK.store(true, Ordering::Release);
@@ -276,7 +301,11 @@ fn drain(pid: u32) {
                     (!c.ring.is_empty() || c.ncarry > 0, c.last_period)
                 })
         };
-        let played = sound::with(|d| d.periods_played).unwrap_or(u64::MAX);
+        let played = if sound::present() || crate::udrv::user_owned(crate::udrv::Class::Sound) {
+            PLAYED.load(Ordering::Acquire)
+        } else {
+            u64::MAX // nothing will ever play it
+        };
         if (!queued && played >= last) || timer::now_ns() > end {
             return;
         }
@@ -316,8 +345,23 @@ fn mix(m: &mut Mixer, out: &mut [i16; PERIOD_FRAMES * 2]) -> bool {
     true
 }
 
+/// Forget finished system sounds and long-idle writers.
+fn gc(m: &mut Mixer, now: u64) {
+    m.clients.retain(|c| match c.key {
+        Key::System(_) => !c.idle(),
+        Key::Pid(_) => !c.idle() || now.saturating_sub(c.last_write) < CLIENT_GC_NS,
+    });
+}
+
+fn le_bytes(p: &[i16; PERIOD_FRAMES * 2], bytes: &mut [u8]) {
+    for (k, s) in p.iter().enumerate() {
+        bytes[2 * k..2 * k + 2].copy_from_slice(&s.to_le_bytes());
+    }
+}
+
 fn mixer_thread() {
     let mut buf = [0i16; PERIOD_FRAMES * 2];
+    let mut last_user = false;
     loop {
         // System sound requests (file loading happens here, in thread context).
         while let Some(s) = REQUESTS.lock().pop_front() {
@@ -332,22 +376,59 @@ fn mixer_thread() {
             }
         }
         let now = timer::now_ns();
-        sound::with(|d| {
-            d.reclaim();
+        let user = crate::udrv::user_owned(crate::udrv::Class::Sound);
+        if user != last_user {
+            // The sink changed hands. Whatever the old one held is gone: count it as
+            // played so SNDCTL_DSP_SYNC doesn't wait for it.
+            let m = MIXER.lock();
+            let mut u = UPCM.lock();
+            u.out = 0;
+            PLAYED.store(m.submitted - u.queue.len() as u64, Ordering::Release);
+            last_user = user;
+        }
+        if user {
+            // soundd: keep up to USER_SLOTS periods ready in /dev/pcm.
             let mut m = MIXER.lock();
-            let mut more = true;
-            while d.can_submit() {
+            let mut u = UPCM.lock();
+            let mut added = false;
+            while u.queue.len() + u.out < USER_SLOTS {
                 if !mix(&mut m, &mut buf) {
-                    more = false;
                     break;
                 }
                 m.last_data = now;
-                d.submit(|bytes| {
-                    for (k, s) in buf.iter().enumerate() {
-                        bytes[2 * k..2 * k + 2].copy_from_slice(&s.to_le_bytes());
-                    }
-                });
+                u.queue.push_back(buf);
+                added = true;
             }
+            gc(&mut m, now);
+            drop(u);
+            drop(m);
+            if added {
+                PCM_WQ.wake_all();
+                crate::poll::notify();
+            }
+        }
+        sound::with(|d| {
+            let n = d.reclaim();
+            PLAYED.fetch_add(n as u64, Ordering::AcqRel);
+            let mut m = MIXER.lock();
+            // Periods a user driver left behind go first.
+            let mut u = UPCM.lock();
+            let mut more = true;
+            while d.can_submit() {
+                let p = match u.queue.pop_front() {
+                    Some(p) => p,
+                    None => {
+                        if !mix(&mut m, &mut buf) {
+                            more = false;
+                            break;
+                        }
+                        m.last_data = now;
+                        buf
+                    }
+                };
+                d.submit(|bytes| le_bytes(&p, bytes));
+            }
+            drop(u);
             // Start once the device buffer is full, or when that is all there is.
             if !d.running() && d.in_flight() > 0 && (d.in_flight() >= PERIODS || !more) && d.start()
             {
@@ -360,14 +441,15 @@ fn mixer_thread() {
             {
                 d.stop();
             }
-            // Forget finished system sounds and long-idle writers.
-            m.clients.retain(|c| match c.key {
-                Key::System(_) => !c.idle(),
-                Key::Pid(_) => !c.idle() || now.saturating_sub(c.last_write) < CLIENT_GC_NS,
-            });
+            gc(&mut m, now);
         });
         SPACE_WQ.wake_all();
-        let busy = sound::with(|d| d.running() || d.in_flight() > 0).unwrap_or(false);
+        let busy = if user {
+            let u = UPCM.lock();
+            !u.queue.is_empty() || u.out > 0
+        } else {
+            sound::with(|d| d.running() || d.in_flight() > 0).unwrap_or(false)
+        };
         MIX_WQ.wait_until_timeout(
             || KICK.swap(false, Ordering::AcqRel),
             if busy { 50_000_000 } else { 1_000_000_000 },
@@ -438,6 +520,85 @@ impl Inode for AudioDev {
     }
 }
 
+/// `/dev/pcm` (0600 root): the mixed output for a user-space sound driver (soundd,
+/// docs/drivers.md). read: one 10 ms period (1920 bytes S16_LE 48 kHz stereo), blocking;
+/// write: a u32, how many periods it has played.
+struct PcmDev {
+    ino: u64,
+    dev: u64,
+}
+
+impl Inode for PcmDev {
+    fn ino(&self) -> u64 {
+        self.ino
+    }
+    fn dev(&self) -> u64 {
+        self.dev
+    }
+    fn kind(&self) -> InodeType {
+        InodeType::CharDev
+    }
+    fn stat(&self) -> Stat {
+        Stat::new(self.dev, self.ino, InodeType::CharDev, 0o600)
+    }
+    fn read_at(&self, _off: u64, buf: &mut [u8]) -> Result<usize> {
+        if buf.len() < PERIOD_FRAMES * FRAME_BYTES {
+            return Err(Errno::EINVAL);
+        }
+        loop {
+            if !crate::udrv::user_owned(crate::udrv::Class::Sound) {
+                return Err(Errno::ENODEV); // only for the driver holding the device
+            }
+            let p = {
+                let mut u = UPCM.lock();
+                let p = u.queue.pop_front();
+                if p.is_some() {
+                    u.out += 1;
+                }
+                p
+            };
+            if let Some(p) = p {
+                le_bytes(&p, &mut buf[..PERIOD_FRAMES * FRAME_BYTES]);
+                kick();
+                return Ok(PERIOD_FRAMES * FRAME_BYTES);
+            }
+            if crate::proc::signal::interrupted() {
+                return Err(Errno::EINTR);
+            }
+            PCM_WQ.wait_until_timeout(
+                || !UPCM.lock().queue.is_empty() || crate::proc::signal::interrupted(),
+                100_000_000,
+            );
+        }
+    }
+    fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
+        let Some(b) = buf.first_chunk::<4>() else {
+            return Err(Errno::EINVAL);
+        };
+        let n = u32::from_le_bytes(*b) as usize;
+        {
+            let mut u = UPCM.lock();
+            let n = n.min(u.out);
+            u.out -= n;
+            u.played += n as u64;
+            PLAYED.fetch_add(n as u64, Ordering::AcqRel);
+        }
+        SPACE_WQ.wake_all();
+        kick();
+        Ok(4)
+    }
+    fn truncate(&self, _len: u64) -> Result<()> {
+        Ok(())
+    }
+    fn poll(&self) -> u32 {
+        if UPCM.lock().queue.is_empty() {
+            0x4
+        } else {
+            0x1 | 0x4
+        }
+    }
+}
+
 fn proc_audio() -> String {
     let mut s = String::new();
     let m = MIXER.lock();
@@ -472,23 +633,34 @@ fn proc_audio() -> String {
         "system sounds played: {}",
         SYS_PLAYED.load(Ordering::Relaxed)
     );
-    if let Some((run, fl, played, xr, err)) = sound::with(|d| {
+    if crate::udrv::user_owned(crate::udrv::Class::Sound) {
+        let u = UPCM.lock();
+        let _ = writeln!(
+            s,
+            "device: user-space driver (soundd), {} periods ready, {} out, {} played",
+            u.queue.len(),
+            u.out,
+            u.played
+        );
+    } else if let Some((run, fl, played, xr, err, strays)) = sound::with(|d| {
         (
             d.running(),
             d.in_flight(),
             d.periods_played,
             d.xruns,
             d.ctl_errors,
+            d.strays,
         )
     }) {
         let _ = writeln!(
             s,
-            "device: {}, {} periods in flight, {} played, {} xruns, {} control errors",
+            "device: {}, {} periods in flight, {} played, {} xruns, {} control errors, {} strays",
             if run { "running" } else { "stopped" },
             fl,
             played,
             xr,
-            err
+            err,
+            strays
         );
     }
     s
@@ -509,6 +681,13 @@ pub fn init() {
     if let Err(e) = crate::fs::devfs::add_device("audio", node) {
         kprintln!("[audio] /dev/audio: {e:?}");
         return;
+    }
+    let pcm = Arc::new(PcmDev {
+        ino: 0x000a_0d11,
+        dev,
+    });
+    if let Err(e) = crate::fs::devfs::add_device("pcm", pcm) {
+        kprintln!("[audio] /dev/pcm: {e:?}");
     }
     if let Some(root) = crate::fs::procfs::root() {
         root.add_file("audio", proc_audio);

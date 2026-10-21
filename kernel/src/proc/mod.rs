@@ -263,6 +263,23 @@ pub fn chroot(dir: InodeRef) -> KResult<()> {
 }
 
 /// The process of the calling thread. Panics on a kernel thread.
+/// The calling process's open file `fd` (for kernel modules outside `proc`).
+pub fn fd_file(fd: i64) -> KResult<Arc<fs::OpenFile>> {
+    syscall::file(fd)
+}
+
+/// Run `f` on the calling process's address space.
+pub fn with_current_space<R>(f: impl FnOnce(&mut UserSpace) -> KResult<R>) -> KResult<R> {
+    let p = current();
+    let mut i = p.inner.lock();
+    f(i.space.as_mut().ok_or(ESRCH)?)
+}
+
+/// Copy `data` out to the calling process at `va`.
+pub fn copy_out_current(va: usize, data: &[u8]) -> KResult<()> {
+    with_current_space(|s| s.copy_out(va, data))
+}
+
 pub fn current() -> Arc<Process> {
     let pid = sched::current_pid();
     get(pid).expect("current(): not a user thread")
@@ -686,6 +703,7 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
     // SAFETY: user TLS register.
     unsafe { core::arch::asm!("msr tpidr_el0, xzr", options(nomem, nostack)) };
     drop(old); // no longer in TTBR0
+    crate::udrv::space_gone(me.pid);
     drop(cloexec);
     *frame = user_frame(entry, sp);
     let ppid = me.inner.lock().ppid;
@@ -774,6 +792,9 @@ fn finish_process(wstatus: i32) -> ! {
         crate::tlb::shootdown();
     }
     drop(space);
+    // Devices it drove as a user-space driver: reset, freed, back to the kernel driver
+    // (before its fds go, so the claim ends as "exited", not "fd closed").
+    crate::udrv::space_gone(me.pid);
     drop(fds);
     let pid = me.pid;
     drop(me); // sched::exit never returns: hold no references past here

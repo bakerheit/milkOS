@@ -1,0 +1,14 @@
+[package]
+name = "udrv"
+version.workspace = true
+edition.workspace = true
+
+# The userland side of user-space drivers (docs/drivers.md): a claimed device's registers,
+# DMA memory and interrupt fd, virtio-mmio setup, and a split virtqueue. Used by rngd and
+# soundd.
+[lib]
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

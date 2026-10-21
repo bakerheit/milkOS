@@ -27,7 +27,9 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - SMP on 4 CPUs (PSCI bring-up, real spinlocks, IPIs, TLB shootdown), preemptive scheduler, wait queues.
 - User processes at EL0 with their own address spaces, copy-on-write `fork`, threads and futexes, signals,
   job control, pipes, `chroot`. Over 80 Linux aarch64 syscalls (Linux numbering), plus a few milkOS ones.
-- Capability sandbox: a process only gets the files, network and devices it is granted (`sandbox`).
+- Capability sandbox: a process only gets the files, network and devices it is granted (`sandbox`). Apps
+  installed as packages run sandboxed, and get extra files only through the Powerbox, an Open/Save panel
+  drawn by milkOS itself.
 - Tamper-evident audit log: every exec, connection, mount, snapshot and sandbox denial in a SHA-256 hash
   chain (`audit`, `audit verify`).
 
@@ -49,7 +51,8 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - Menu bar, dock, Skim launcher, Today widgets, Spaces, notifications, control centre, a light and a dark
   ("Chocolate milk") theme.
 - Skim is a system-wide command bar: apps, app actions, files, settings, a calculator (`= 2+2`) and
-  shell commands (`> ls`). Windows snap to edges and corners. Lock screen.
+  shell commands (`> ls`). Windows snap to edges and corners. Lock screen. Browse All Versions for any
+  file on milkfs. Screenshots with Cmd+Shift+3/4 (PNG). Live resolution switching (1024x768 to 1440x900).
 - Apps: Terminal (real shell, tabs, colours), Music, Files (with Time Machine), Notes, Browser, Paint, Settings,
   About. User programs can open their own windows (`user/gui`).
 

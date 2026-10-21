@@ -313,6 +313,8 @@ fn fix_layout(a: &Account) {
     let _ = fs::mkdir("/root", 0o700);
     chmod_own("/root", 0o700, 0, 0);
     chmod_own("/tmp", 0o1777, 0, 0);
+    // Service sockets (AF_UNIX, tmpfs): root's, readable by all.
+    let _ = fs::mkdir("/run", 0o755);
     chmod_own("/bin", 0o775, 0, cred::ADMIN_GID);
     chmod_own("/Applications", 0o775, 0, cred::ADMIN_GID);
     // Package sources are an admin setting (the Store and `milk repo` edit it); the

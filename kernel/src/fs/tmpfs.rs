@@ -87,6 +87,8 @@ enum Data {
         parent: Weak<TmpNode>,
     },
     Symlink(String),
+    /// A socket or FIFO name: no contents (fs::node::Inode::mknod).
+    Special,
 }
 
 struct Inner {
@@ -254,6 +256,7 @@ impl Inode for TmpNode {
             ),
             Data::Dir { .. } => (PAGE_SIZE as u64, 0),
             Data::Symlink(t) => (t.len() as u64, 0),
+            Data::Special => (0, 0),
         };
         st
     }
@@ -419,6 +422,13 @@ impl Inode for TmpNode {
         self.add(name, InodeType::Symlink, 0o777, |_| {
             Data::Symlink(String::from(target))
         })
+    }
+
+    fn mknod(&self, name: &str, kind: InodeType, perm: u32) -> Result<InodeRef> {
+        if !matches!(kind, InodeType::Socket | InodeType::Fifo) {
+            return Err(Errno::EINVAL);
+        }
+        self.add(name, kind, perm, |_| Data::Special)
     }
 
     fn link(&self, name: &str, target: &InodeRef) -> Result<()> {

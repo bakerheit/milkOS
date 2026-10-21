@@ -1184,6 +1184,135 @@ fn t_wx() -> bool {
     )
 }
 
+/// AF_UNIX: socketpair, a path-named listener with peer credentials, fd passing across
+/// processes both ways, SCM_CREDENTIALS rules, abstract datagrams, socket file permission.
+fn t_unix() -> bool {
+    use rt::unix::{self, Name};
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    let me = sys::getpid();
+    let uid = sys::geteuid();
+    // 0: socketpair round trip.
+    let (a, b) = unix::socketpair(unix::SOCK_STREAM).unwrap();
+    let _ = sys::write_all(a, b"ping");
+    let mut buf = [0u8; 64];
+    t(sys::read(b, &mut buf).ok() == Some(4) && &buf[..4] == b"ping");
+    // 1: fd passing, parent -> child -> parent: the child gets our pipe's read end, reads
+    // what we wrote into it, and sends us back the read end of a pipe of its own.
+    let (pr, pw) = sys::pipe().unwrap();
+    let _ = sys::write_all(pw, b"through the pipe");
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let _ = sys::close(a);
+        let r = unix::recv_with(b, &mut buf, 4).unwrap();
+        let mut got = [0u8; 64];
+        let k = r
+            .fds
+            .first()
+            .map_or(0, |&fd| sys::read(fd, &mut got).unwrap_or(0));
+        let ok = r.n == 4 && &buf[..4] == b"fd!!" && &got[..k] == b"through the pipe";
+        let (cr, cw) = sys::pipe().unwrap();
+        let _ = sys::write_all(cw, b"from the child");
+        let _ = unix::send_with(b, if ok { b"ok" } else { b"no" }, &[cr], None);
+        sys::exit(0);
+    }
+    let _ = unix::send_with(a, b"fd!!", &[pr], None);
+    let _ = sys::close(pr); // the child has its own reference to it now
+    let r = unix::recv_with(a, &mut buf, 4).unwrap_or_default();
+    let mut got = [0u8; 64];
+    let k = r
+        .fds
+        .first()
+        .map_or(0, |&fd| sys::read(fd, &mut got).unwrap_or(0));
+    let _ = sys::wait4(child as i32, 0);
+    t(r.n == 2 && &buf[..2] == b"ok" && &got[..k] == b"from the child");
+    for fd in r.fds.iter().copied().chain([a, b, pw]) {
+        let _ = sys::close(fd);
+    }
+    // 2-3: a listener on a path; the client's and the server's view of each other.
+    let path = "/tmp/utest-unix.sock";
+    let _ = sys::unlink(path);
+    let l = unix::socket(unix::SOCK_STREAM).unwrap();
+    t(unix::bind(l, &Name::Path(path)).is_ok()
+        && unix::listen(l, 8).is_ok()
+        && sys::stat_path(path, false).is_ok_and(|s| s.type_char() == 's'));
+    let child = sys::fork().unwrap();
+    if child == 0 {
+        let c = unix::socket(unix::SOCK_STREAM).unwrap();
+        let ok = unix::connect(c, &Name::Path(path)).is_ok()
+            && unix::peer_cred(c).is_ok_and(|p| p.pid == me && p.uid == uid);
+        let _ = sys::write_all(c, if ok { b"y" } else { b"n" });
+        sys::exit(0);
+    }
+    let s = unix::accept(l, 0).unwrap();
+    let pc = unix::peer_cred(s).unwrap_or_default();
+    let k = sys::read(s, &mut buf).unwrap_or(0);
+    let _ = sys::wait4(child as i32, 0);
+    t(pc.pid == child && pc.uid == uid && k == 1 && buf[0] == b'y');
+    let _ = sys::close(s);
+    // 4: SO_PASSCRED: an honest record arrives; 5: a fake one is refused (unless root).
+    let (a, b) = unix::socketpair(unix::SOCK_DGRAM).unwrap();
+    let _ = unix::set_passcred(b, true);
+    let _ = sys::write_all(a, b"hi");
+    let r = unix::recv_with(b, &mut buf, 0).unwrap_or_default();
+    t(r.cred
+        .is_some_and(|c| c.pid == me && c.uid == sys::getuid()));
+    let fake = unix::Cred {
+        pid: 1,
+        uid: 0,
+        gid: 0,
+    };
+    let refused = matches!(
+        unix::send_with(a, b"x", &[], Some(fake)),
+        Err(sys::Errno(1))
+    );
+    t(refused || uid == 0);
+    let _ = sys::close(a);
+    let _ = sys::close(b);
+    // 6: abstract datagram names.
+    let srv = unix::socket(unix::SOCK_DGRAM).unwrap();
+    let cli = unix::socket(unix::SOCK_DGRAM).unwrap();
+    let name = alloc::format!("utest-{me}");
+    let _ = unix::bind(srv, &Name::Abstract(name.as_bytes()));
+    let _ = unix::sendto(cli, b"dgram", &Name::Abstract(name.as_bytes()));
+    let k = sys::read(srv, &mut buf).unwrap_or(0);
+    t(k == 5 && &buf[..5] == b"dgram");
+    let _ = sys::close(srv);
+    let _ = sys::close(cli);
+    // 7: the socket file's permissions apply: owner-only (0700) keeps others out.
+    let ok7 = if uid == 0 {
+        let _ = sys::chmod(path, 0o700);
+        let child = sys::fork().unwrap();
+        if child == 0 {
+            let _ = sys::setgroups(&[20]);
+            let _ = sys::setgid(20);
+            let _ = sys::setuid(501);
+            let c = unix::socket(unix::SOCK_STREAM).unwrap();
+            let denied = matches!(unix::connect(c, &Name::Path(path)), Err(sys::Errno(13)));
+            sys::exit(if denied { 0 } else { 1 });
+        }
+        let (_, st) = sys::wait4(child as i32, 0).unwrap();
+        st == 0
+    } else {
+        true // covered when utest runs as root
+    };
+    t(ok7);
+    let _ = sys::close(l);
+    let _ = sys::unlink(path);
+    let want = (1u32 << n) - 1;
+    check(
+        "AF_UNIX",
+        bits == want,
+        &alloc::format!("checks {bits:#b} (want {want:#b}); peer cred {pc:?}"),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1228,6 +1357,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "wx" || what == "all" {
         ok &= t_wx();
+    }
+    if what == "unix" || what == "all" {
+        ok &= t_unix();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

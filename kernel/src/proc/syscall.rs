@@ -753,7 +753,7 @@ pub(super) fn file(fd: i64) -> KResult<Arc<OpenFile>> {
     current().inner.lock().fds.get(fd)
 }
 
-fn cwd() -> InodeRef {
+pub(super) fn cwd() -> InodeRef {
     current().inner.lock().cwd.clone()
 }
 
@@ -769,7 +769,7 @@ fn base(dirfd: i64) -> KResult<Option<InodeRef>> {
 /// Capability check for a filesystem path. Cheap no-op when the process's fs cap is
 /// unrestricted (the default); otherwise resolves `path` to an absolute path (relative to
 /// `dirfd`) and checks it against the grants, auditing a denial.
-fn check_fs(dirfd: i64, path: &str, write: bool, op: &str) -> KResult<()> {
+pub(super) fn check_fs(dirfd: i64, path: &str, write: bool, op: &str) -> KResult<()> {
     let caps = super::current_caps();
     if caps.fs.is_none() {
         return Ok(());

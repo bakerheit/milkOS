@@ -30,6 +30,23 @@ struct Pipe {
     rd_wq: WaitQueue,
     /// Writers wait here for space / reader gone.
     wr_wq: WaitQueue,
+    /// Bumped on every read, write and close: the pipe's readiness event counter
+    /// (`Inode::poll_seq`, for edge-triggered epoll).
+    seq: AtomicU64,
+}
+
+impl Pipe {
+    /// Readiness changed: wake blocked peers and poll/select/epoll waiters.
+    fn changed(&self, readers: bool, writers: bool) {
+        self.seq.fetch_add(1, Ordering::Release);
+        if readers {
+            self.rd_wq.wake_all();
+        }
+        if writers {
+            self.wr_wq.wake_all();
+        }
+        crate::poll::notify();
+    }
 }
 
 pub struct PipeEnd {
@@ -62,6 +79,7 @@ pub fn new(nonblock: bool) -> (InodeRef, InodeRef) {
         writers: AtomicUsize::new(1),
         rd_wq: WaitQueue::new(),
         wr_wq: WaitQueue::new(),
+        seq: AtomicU64::new(0),
     });
     let ino = NEXT_INO.fetch_add(1, Ordering::Relaxed);
     let end = |write| -> InodeRef {
@@ -79,10 +97,10 @@ impl Drop for PipeEnd {
     fn drop(&mut self) {
         if self.write {
             self.pipe.writers.fetch_sub(1, Ordering::Relaxed);
-            self.pipe.rd_wq.wake_all();
+            self.pipe.changed(true, false);
         } else {
             self.pipe.readers.fetch_sub(1, Ordering::Relaxed);
-            self.pipe.wr_wq.wake_all();
+            self.pipe.changed(false, true);
         }
     }
 }
@@ -125,7 +143,7 @@ impl Inode for PipeEnd {
                         *o = v;
                     }
                     drop(b);
-                    p.wr_wq.wake_all();
+                    p.changed(false, true);
                     return Ok(n);
                 }
             }
@@ -167,7 +185,7 @@ impl Inode for PipeEnd {
                     b.extend(&data[done..done + n]);
                     done += n;
                     drop(b);
-                    p.rd_wq.wake_all();
+                    p.changed(true, false);
                     continue;
                 }
             }
@@ -188,5 +206,32 @@ impl Inode for PipeEnd {
 
     fn truncate(&self, _len: u64) -> crate::fs::Result<()> {
         Err(EINVAL)
+    }
+
+    /// Read end: POLLIN with data, POLLHUP once every writer is gone. Write end: POLLOUT
+    /// with room for an atomic write, POLLERR once every reader is gone.
+    fn poll(&self) -> u32 {
+        use crate::poll::*;
+        let p = &*self.pipe;
+        let len = p.buf.lock().len();
+        if self.write {
+            if p.readers.load(Ordering::Relaxed) == 0 {
+                POLLERR
+            } else if CAPACITY - len >= PIPE_BUF {
+                POLLOUT | POLLWRNORM
+            } else {
+                0
+            }
+        } else {
+            let mut r = if len > 0 { POLLIN | POLLRDNORM } else { 0 };
+            if p.writers.load(Ordering::Relaxed) == 0 {
+                r |= POLLHUP;
+            }
+            r
+        }
+    }
+
+    fn poll_seq(&self) -> u64 {
+        self.pipe.seq.load(Ordering::Acquire)
     }
 }

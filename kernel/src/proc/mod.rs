@@ -23,6 +23,8 @@ pub mod signal;
 pub mod sock;
 pub mod syscall;
 pub mod tty;
+pub mod unix;
+pub mod unixsys;
 pub mod uspace;
 
 use alloc::boxed::Box;

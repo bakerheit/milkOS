@@ -92,6 +92,20 @@ accounts (`/etc/passwd`, `/etc/group`, `/etc/shadow`) stay root's.
 root `root:admin 0775` (if it was plain root), and a one-time migration giving the session
 user's home to them when it still belongs to root (disks made before users existed).
 
+### Login and encrypted disks (milkfs)
+
+An encrypted milkfs volume (docs/filesystem.md) stays locked at boot. **At login** the
+password is tried on it: `proc::login::login` calls `fs::milkfs::unlock(password, None)`
+after a successful authentication, so a disk whose passphrase *is* the login password
+opens as the user logs in (FileVault style), binds its `/home/milk` and `/Applications`,
+and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
+different passphrase) is logged and the disk stays locked for `snap unlock`.
+**On `passwd`** (a user changing their own password, so the old one is known), the same
+change is tried on the primary volume (`/sys/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
+was unlocked with the old login password, its passphrase follows the new one. It is skipped
+when the new password is under 8 characters (milkfs's minimum), when root sets someone's
+password, and quietly does nothing for an unencrypted or differently protected disk.
+
 ### Login API for the desktop (`kernel/src/proc/login.rs`)
 
 ```rust

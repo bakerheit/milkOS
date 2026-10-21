@@ -237,9 +237,19 @@ pub fn set_session(acct: Account) {
 }
 
 /// Authenticate and switch the session user. Processes already running keep their ids.
+/// Then try the login password on any locked (encrypted) milkfs volume, so a disk whose
+/// passphrase is the login password opens at login, FileVault style (docs/security.md).
 pub fn login(name: &str, password: &str) -> Result<Account, LoginError> {
     let a = authenticate(name, password)?;
     set_session(a.clone());
+    match fs::milkfs::unlock(password, None) {
+        Ok(paths) => {
+            crate::kprintln!("[login] {}: unlocked {}", a.name, paths.join(" "));
+            fix_layout(&a); // the primary volume brings its own home and /Applications
+        }
+        Err(crate::fs::Errno::ENODEV) => {} // nothing locked
+        Err(e) => crate::kprintln!("[login] {}: no disk opened with that password ({e})", a.name),
+    }
     Ok(a)
 }
 
@@ -261,28 +271,41 @@ pub fn init() {
     {
         let _ = fs::write_file("/etc/shadow", &s);
     }
-    let chmod_own = |path: &str, perm: u32, uid: u32, gid: u32| {
-        let _ = fs::setattr_at(
-            None,
-            path,
-            true,
-            &fs::node::SetAttr {
-                perm: Some(perm),
-                uid: Some(uid),
-                gid: Some(gid),
-                ..Default::default()
-            },
-        );
-    };
     chmod_own("/etc/shadow", 0o600, 0, 0);
     chmod_own("/etc/passwd", 0o644, 0, 0);
     chmod_own("/etc/group", 0o644, 0, 0);
     let a = session();
-    // The layout the permission model expects (docs/security.md):
-    //  /root 0700 root; /tmp 1777; /bin and /Applications root:admin 0775 (admins install
-    //  packages without sudo, like macOS), /etc/milk/repos root:admin 0664; a milkfs
-    //  volume root root:admin 0775; the
-    //  session user's home owned by them (a one-time migration for disks made before
+    fix_layout(&a);
+    crate::kprintln!(
+        "[login] session user {} (uid {}, gid {}, groups {:?}), home {}",
+        a.name,
+        a.uid,
+        a.gid,
+        a.groups,
+        a.home
+    );
+}
+
+fn chmod_own(path: &str, perm: u32, uid: u32, gid: u32) {
+    let _ = fs::setattr_at(
+        None,
+        path,
+        true,
+        &fs::node::SetAttr {
+            perm: Some(perm),
+            uid: Some(uid),
+            gid: Some(gid),
+            ..Default::default()
+        },
+    );
+}
+
+/// The layout the permission model expects. At boot, and again after a login unlocked
+/// the primary volume (which binds its own /home/milk and /Applications).
+fn fix_layout(a: &Account) {
+    // docs/security.md: /root 0700 root; /tmp 1777; /bin and /Applications root:admin
+    // 0775 (admins install packages without sudo, like macOS), /etc/milk/repos root:admin
+    // 0664; a milkfs volume root root:admin 0775; the session user's home owned by them (a one-time migration for disks made before
     //  users existed, where everything belongs to root).
     let _ = fs::mkdir("/root", 0o700);
     chmod_own("/root", 0o700, 0, 0);
@@ -309,25 +332,30 @@ pub fn init() {
         let n = fs::perm::chown_tree(&a.home, a.uid, a.gid);
         crate::kprintln!("[login] {}: gave {n} files to {}", a.home, a.name);
     }
-    crate::kprintln!(
-        "[login] session user {} (uid {}, gid {}, groups {:?}), home {}",
-        a.name,
-        a.uid,
-        a.gid,
-        a.groups,
-        a.home
-    );
 }
 
-/// Boot self-test: the default accounts parse and the default password checks out.
+/// Boot self-test of the hash scheme against a fixed vector (scripts/mkpasswd.py's
+/// hash_pw(b"milk", bytes(range(16)), 5000)), and a look at the account files. It never
+/// depends on the actual passwords: those change (`passwd`, restored at boot).
 pub fn selftest() {
-    let m = lookup("milk").expect("no milk account in /etc/passwd");
-    assert!(m.uid == cred::MILK_UID && m.is_admin(), "milk: {m:?}");
-    assert!(lookup_uid(0).is_some_and(|r| r.name == "root"));
-    let h = shadow_hash("milk").expect("no milk entry in /etc/shadow");
-    assert!(
-        h.starts_with("$5m$") && !h.contains("milk"),
-        "shadow not hashed"
-    );
-    assert!(check_hash(&h, "milk") && !check_hash(&h, "milk "));
+    let salt: [u8; 16] = core::array::from_fn(|i| i as u8);
+    let want = "6558b3e8bb6ca30bb763d6c23f0e992c80b74f4ca0f21300e8d9e9bc25e1c89d";
+    let got: String = hash_password(b"milk", &salt, 5000)
+        .iter()
+        .map(|b| alloc::format!("{b:02x}"))
+        .collect();
+    assert!(got == want, "login: $5m$ hash mismatch: {got}");
+    let stored = alloc::format!("$5m$5000$000102030405060708090a0b0c0d0e0f${want}");
+    assert!(check_hash(&stored, "milk") && !check_hash(&stored, "milk "));
+    // The accounts are configuration: report, don't panic.
+    match lookup("milk") {
+        Some(m) if m.uid == cred::MILK_UID && m.is_admin() => {}
+        other => crate::kprintln!("[login] warning: unexpected milk account: {other:?}"),
+    }
+    if file("/etc/shadow").lines().any(|l| {
+        let h = l.split(':').nth(1).unwrap_or("");
+        !h.is_empty() && !h.starts_with("$5m$") && !h.starts_with('*') && !h.starts_with('!')
+    }) {
+        crate::kprintln!("[login] warning: /etc/shadow has an entry that is not a $5m$ hash");
+    }
 }

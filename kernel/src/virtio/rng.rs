@@ -66,6 +66,22 @@ pub fn attach(t: Transport) -> Result<(), Error> {
     Ok(())
 }
 
+/// Let go of the device for a user-space driver (`udrv`, docs/drivers.md): reset it (no
+/// request can be in flight: [`read`] waits for each under the lock, or abandons it before
+/// this reset stops the device) and free the queue and buffer pages.
+pub fn detach() {
+    let Some(d) = DEV.lock().take() else { return };
+    PRESENT.store(false, Ordering::Release);
+    d.t.reset();
+    let (desc, _, _) = d.q.addresses();
+    pmm::free_contiguous(desc as PhysAddr, 1);
+    pmm::free_contiguous(d.buf, 1);
+    kprintln!(
+        "[virtio-rng] slot {}: handed to a user-space driver",
+        d.t.slot()
+    );
+}
+
 /// Fill `out` (up to [`CHUNK`] bytes) from the device. Returns how many bytes it gave (0:
 /// no device, or no answer within `timeout_ns`). Thread or boot context; spins.
 pub fn read(out: &mut [u8], timeout_ns: u64) -> usize {

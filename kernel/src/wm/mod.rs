@@ -789,6 +789,7 @@ impl Desktop {
                 clipboard: false,
                 windows: true,
                 spawn: false,
+                driver: false,
             };
             let spec = alloc::format!("fs={app_dir}:r,fs={lib}:rw,net=none,clipboard=0,spawn=0");
             if let Some(pid) =

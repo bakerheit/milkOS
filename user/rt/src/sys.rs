@@ -1252,3 +1252,50 @@ pub fn auth_revoke() {
 pub fn auth_left() -> u64 {
     sc(MILK_AUTH, [3, 0, 0, 0, 0, 0]).unwrap_or(0) as u64
 }
+
+// ---- user-space drivers (docs/drivers.md) -----------------------------------------------
+
+const MILK_DRIVER: usize = 0x1010;
+
+/// Claim the first virtio device with this id (4 rng, 25 sound) as a user-space driver
+/// (root + the `driver` capability). Returns the device fd: read 8 bytes to wait for its
+/// interrupt, poll for POLLIN.
+pub fn driver_claim(virtio_id: u32) -> Result<i32> {
+    sc(MILK_DRIVER, [0, virtio_id as usize, 0, 0, 0, 0]).map(|fd| fd as i32)
+}
+
+/// Read a register (`width` 1, 2 or 4 bytes) in the device's virtio-mmio window.
+pub fn driver_read(fd: i32, off: usize, width: usize) -> Result<u32> {
+    sc(MILK_DRIVER, [1, fd as usize, off, width, 0, 0]).map(|v| v as u32)
+}
+
+pub fn driver_write(fd: i32, off: usize, v: u32, width: usize) -> Result<()> {
+    sc(MILK_DRIVER, [2, fd as usize, off, v as usize, width, 0]).map(|_| ())
+}
+
+/// Zeroed, physically contiguous DMA memory: (virtual address, physical address).
+pub fn driver_dma(fd: i32, bytes: usize) -> Result<(usize, u64)> {
+    let mut pa = 0u64;
+    let va = sc(
+        MILK_DRIVER,
+        [3, fd as usize, bytes, &mut pa as *mut u64 as usize, 0, 0],
+    )?;
+    Ok((va, pa))
+}
+
+/// Unmask the device's interrupt (after acknowledging it at the device).
+pub fn driver_arm(fd: i32) -> Result<()> {
+    sc(MILK_DRIVER, [4, fd as usize, 0, 0, 0, 0]).map(|_| ())
+}
+
+/// `slot=N irq=N base=0x... id=N`.
+pub fn driver_info(fd: i32) -> String {
+    let mut b = [0u8; 128];
+    match sc(
+        MILK_DRIVER,
+        [5, fd as usize, b.as_mut_ptr() as usize, b.len(), 0, 0],
+    ) {
+        Ok(n) => String::from_utf8_lossy(&b[..n]).into_owned(),
+        Err(_) => String::new(),
+    }
+}

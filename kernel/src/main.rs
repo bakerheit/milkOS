@@ -26,6 +26,7 @@ mod gic;
 mod heap;
 mod input;
 mod journal;
+mod udrv;
 mod klog;
 mod mem;
 mod memtest;
@@ -104,6 +105,7 @@ pub extern "C" fn kmain() -> ! {
     gic::init();
     timer::init();
     uart::init();
+    udrv::init_policy();
     virtio::init();
     crypto::init();
     sync::irq_enable();
@@ -120,6 +122,7 @@ pub extern "C" fn kmain() -> ! {
     net::init();
     net::selftest::run();
     audio::init();
+    udrv::init_files();
     proc::init();
     proc::start_init();
     fs::start_threads();

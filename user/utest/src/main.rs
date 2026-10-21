@@ -1784,6 +1784,150 @@ fn t_auth() -> bool {
     )
 }
 
+/// User-space driver interface (docs/drivers.md), on the virtio-rng device: rngd is
+/// stopped for the test and started again after.
+fn t_driver() -> bool {
+    use udrv::{Device, Queue};
+    if sys::geteuid() != 0 {
+        return check("driver", true, "skipped: needs root");
+    }
+    let drivers = || {
+        String::from_utf8_lossy(&sys::read_file("/proc/drivers").unwrap_or_default()).into_owned()
+    };
+    if !drivers().contains("rng policy=user") {
+        return check("driver", true, "skipped: no virtio-rng, or rng=kernel");
+    }
+    let owner_is = |who: &str| {
+        let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+        loop {
+            let d = drivers();
+            if d.lines().any(|l| l.starts_with("rng ") && l.contains(who)) {
+                return true;
+            }
+            if sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 > 3_000_000_000 {
+                return false;
+            }
+            sys::sleep_ms(50);
+        }
+    };
+    let _ = milkd("stop rngd");
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    t(owner_is("owner=kernel")); // 0: rngd let go, the kernel driver has it
+    let fd = sys::driver_claim(udrv::VIRTIO_RNG);
+    t(fd.is_ok()); // 1
+    let Ok(fd) = fd else {
+        let _ = milkd("start rngd");
+        return check("driver", false, &alloc::format!("claim: {fd:?}"));
+    };
+    let dev = Device { fd };
+    t(owner_is("/bin/utest")); // 2
+    t(matches!(
+        sys::driver_claim(udrv::VIRTIO_RNG),
+        Err(sys::Errno(16))
+    )); // 3: EBUSY
+    // 4: registers: our window only, 32-bit below the config space.
+    t(dev.r32(0) == 0x7472_6976
+        && matches!(sys::driver_read(fd, 0x200, 4), Err(sys::Errno(22)))
+        && matches!(sys::driver_read(fd, 0x70, 2), Err(sys::Errno(22))));
+    // 5: a queue pointed at kernel memory is refused at QueueReady.
+    let _ = dev.init(0);
+    let bad = dev.w32(udrv::QUEUE_SEL, 0).is_ok()
+        && dev.w32(udrv::QUEUE_NUM, 8).is_ok()
+        && dev.w32(udrv::QUEUE_DESC_LOW, 0x4008_0000).is_ok()
+        && dev.w32(udrv::QUEUE_DESC_HIGH, 0).is_ok()
+        && dev.w32(udrv::QUEUE_READY, 1).is_err();
+    t(bad);
+    // A real queue in our DMA memory.
+    let mut q = Queue::new(&dev, 8).expect("queue");
+    let set = dev.setup_queue(0, &q).and_then(|_| dev.driver_ok());
+    let _ = sys::driver_arm(fd);
+    // 6: a descriptor pointing outside our buffers is refused at notify (planted in the
+    // table only: the device never sees it).
+    q.set_desc(7, 0x4008_0000, 64);
+    t(set.is_ok() && dev.notify(0).is_err());
+    q.set_desc(7, 0, 0);
+    // 7: a good request goes through, and the interrupt arrives on the fd.
+    let (bva, bpa) = dev.dma(4096).expect("dma");
+    let head = q.add(&[], &[(bpa, 64)]).expect("add");
+    let sent = dev.notify(0).is_ok();
+    let mut got = 0u32;
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    while sent && sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 2_000_000_000 {
+        if let Some((h, len)) = q.pop_used() {
+            q.free(h);
+            if h == head {
+                got = len;
+                break;
+            }
+        }
+        let mut pf = [rt::net::PollFd {
+            fd,
+            events: rt::net::POLLIN,
+            revents: 0,
+        }];
+        if matches!(rt::net::poll(&mut pf, Some(500)), Ok(1..)) {
+            let _ = dev.wait();
+            dev.ack_and_arm();
+        }
+    }
+    // SAFETY: our DMA buffer.
+    let bytes = unsafe { core::slice::from_raw_parts(bva as *const u8, 64) };
+    t(got == 64 && bytes.iter().any(|&b| b != 0));
+    // 8: a forked child doesn't get the DMA page (touching it is a segfault).
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        // SAFETY: deliberately touching an address that must not be mapped here.
+        let v = unsafe { core::ptr::read_volatile(bva as *const u8) };
+        sys::exit(if v == 0xff { 0 } else { 1 }); // not reached: the read faults
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    t(st & 0x7f == 11);
+    // 9: a sandboxed (driver=0) or non-root process may not claim.
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let a = sys::sandbox("driver=0").is_ok()
+            && matches!(sys::driver_claim(udrv::VIRTIO_RNG), Err(sys::Errno(1)));
+        sys::exit(if a { 0 } else { 1 });
+    }
+    let (_, st1) = sys::wait4(pid as i32, 0).unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::setresuid(65534, 65534, 65534);
+        sys::exit(
+            if matches!(sys::driver_claim(udrv::VIRTIO_RNG), Err(sys::Errno(1))) {
+                0
+            } else {
+                1
+            },
+        );
+    }
+    let (_, st2) = sys::wait4(pid as i32, 0).unwrap();
+    t(st1 == 0 && st2 == 0);
+    // 10: closing the fd hands the device back to the kernel driver; the refusals were audited.
+    let _ = sys::close(fd);
+    t(owner_is("owner=kernel"));
+    let audit =
+        String::from_utf8_lossy(&sys::read_file("/proc/audit").unwrap_or_default()).into_owned();
+    t(audit.contains("driver.claim")
+        && audit.contains("driver.dma_refused")
+        && audit.contains("driver.release"));
+    let _ = milkd("start rngd");
+    let back = owner_is("/bin/rngd");
+    let want = (1u32 << n) - 1;
+    check(
+        "driver",
+        bits == want && back,
+        &alloc::format!("checks {bits:#b} (want {want:#b}); rngd back {back}"),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1840,6 +1984,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "auxv" || what == "all" {
         ok &= t_auxv(args);
+    }
+    if what == "driver" || what == "all" {
+        ok &= t_driver();
     }
     if what == "svc" || what == "all" {
         ok &= t_svc();

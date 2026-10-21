@@ -45,7 +45,7 @@ What the interface buys is that ordinary driver bugs stop being kernel crashes.
 * **The device itself.** A device can DMA anywhere no matter what the driver does. On qemu
   the devices are qemu's own code, and we trust them as we trust the hypervisor.
 
-## The interface: `MILK_DRIVER` (syscall 0x1004)
+## The interface: `MILK_DRIVER` (syscall 0x1010)
 
 Who may use it: **euid 0 and the `driver` capability**. `driver` is a removable capability
 like `spawn` or `net` (`sandbox ... driver=0`). It is on for root processes that weren't
@@ -78,8 +78,7 @@ rngd does a handful per request, soundd about four per 10 ms period.
 
 **DMA buffers.** `dma` memory is ordinary RAM from the kernel's frame allocator, owned by
 the device claim and not by the process. It is mapped into the process like a desktop
-window buffer, but never copied or shared by fork. The kernel never reads or writes
-through those user addresses on the process's behalf. The process sees exactly the
+window buffer, but never copied or shared by fork. The process sees exactly the
 physical addresses of its own buffers and nothing else. virtio-mmio on qemu `virt` is
 DMA-coherent, so a cacheable mapping is correct.
 
@@ -115,7 +114,7 @@ A user virtio-rng driver: one request queue and a 64-byte device-writable buffer
 30 s, and once at start, it reads 64 bytes from the device and writes them to
 **`/dev/entropy`**. That is a new device node, write-only, 0200 root. The kernel mixes
 what arrives there into the CSPRNG pool and counts it as hardware entropy
-(`/proc/net/rng` shows `source=rngd+jitter`). The
+(`/proc/rng` shows `source=rngd+jitter`). The
 kernel's reseed every 60 s or 1 MiB then uses what rngd fed. Without rngd the kernel's own
 driver comes back, and without any device the kernel reseeds from timer jitter alone, as
 before.

@@ -233,6 +233,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rngd"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "udrv",
+]
+
+[[package]]
 name = "rt"
 version = "0.0.1"
 dependencies = [
@@ -308,10 +316,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "udrv"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "utest"
 version = "0.0.1"
 dependencies = [
  "rt",
+ "udrv",
 ]
 
 [[package]]

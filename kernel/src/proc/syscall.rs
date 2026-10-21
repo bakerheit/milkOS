@@ -73,6 +73,9 @@ pub mod nr {
     pub const MILK_POWERBOX: u64 = 0x1001;
     /// Admin authorisation tickets (proc/auth.rs): (op, a, b, c, d).
     pub const MILK_AUTH: u64 = 0x1003; // 0x1002 is MILK_OPENPTY (proc/sock.rs)
+    /// User-space drivers (kernel/src/udrv.rs, docs/drivers.md): (op, a, b, c, d).
+    /// (0x1004..=0x1009 are the MILK_WIN_* calls below, written in decimal.)
+    pub const MILK_DRIVER: u64 = 0x1010;
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -209,6 +212,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         n if super::sock::handles(n) => super::sock::dispatch(n, a),
         n if super::epoll::handles(n) => super::epoll::dispatch(n, a),
         nr::MILK_AUTH => sys_auth(a0, a1, a2, a3, a[4] as usize),
+        nr::MILK_DRIVER => crate::udrv::sys(a0, a1, a2, a3, a[4] as usize),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),

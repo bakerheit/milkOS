@@ -835,7 +835,7 @@ fn milk_space(t: &mut T, v: &super::milkfs::Volume, what: &str) {
     match r {
         Ok(c) => t.ok(
             c.free_but_used == 0 && c.leaked == 0 && c.reachable == c.allocated,
-            what,
+            &alloc::format!("{what} ({c:?})"),
         ),
         Err(e) => t.ok(false, &alloc::format!("{what}: {e}")),
     }
@@ -938,6 +938,7 @@ fn milkfs_test_volume(t: &mut T) {
     );
     super::milkfs::set_test_override(Some(vol.clone()));
     milkfs_destructive(t, &vol, VP, D, &dev);
+    milkfs_clones(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -1351,6 +1352,164 @@ fn milkfs_destructive(
     let _ = ops::rmdir(&p("d2"));
     t.ok(ops::rmdir(d).is_ok(), "milkfs cleanup");
     milk_space(t, vol, "milkfs space exact after cleanup");
+}
+
+/// Clones on the test volume: try-before-install end to end.
+fn milkfs_clones(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    use super::milkfs as m;
+    let live = |n: &str| alloc::format!("{vp}/c/{n}");
+    let _ = ops::mkdir(&alloc::format!("{vp}/c"), 0o755);
+    let _ = ops::write_file(&live("config"), b"v1");
+    let _ = ops::write_file(&live("keep"), b"unchanged");
+    t.ok(m::snapshot("base").is_ok(), "snapshot for cloning");
+    let Some(cp) = t.must(m::clone("base", "try"), "clone base -> try") else {
+        return;
+    };
+    t.ok(
+        cp == "/Volumes/MilkTest-try",
+        "clone mounted at /Volumes/<label>-<name>",
+    );
+    let inc = |n: &str| alloc::format!("{cp}/c/{n}");
+    t.ok(
+        read_str(&inc("config")) == "v1",
+        "clone starts as the snapshot",
+    );
+    t.ok(
+        ops::write_file(&inc("config"), b"v2").is_ok()
+            && ops::write_file(&inc("installed.app"), b"new app").is_ok(),
+        "clone is writable",
+    );
+    t.ok(
+        read_str(&inc("config")) == "v2" && read_str(&live("config")) == "v1",
+        "clone writes don't touch the live volume",
+    );
+    t.err(
+        ops::stat(&live("installed.app")),
+        Errno::ENOENT,
+        "live doesn't see the clone's files",
+    );
+    t.ok(
+        read_str(&alloc::format!("{vp}/.snapshots/base/c/config")) == "v1",
+        "the origin snapshot doesn't change",
+    );
+    t.err(
+        ops::rename(&inc("config"), &live("x")),
+        Errno::EXDEV,
+        "rename between clone and live",
+    );
+    t.err(
+        m::delete_snapshot("base"),
+        Errno::EBUSY,
+        "a clone's origin can't be deleted",
+    );
+    t.ok(
+        read_str("/sys/fs/milkfs/clones").contains("try of=base at=/Volumes/MilkTest-try"),
+        "/sys/fs/milkfs/clones",
+    );
+    milk_space(t, vol, "milkfs space exact with a clone");
+
+    // Discard: a second clone with a big file, thrown away.
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/clone", b"base scratch").is_ok(),
+        "clone via /sys",
+    );
+    let big: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+    t.ok(
+        ops::write_file("/Volumes/MilkTest-scratch/big", &big).is_ok(),
+        "write in the second clone",
+    );
+    milk_space(t, vol, "milkfs space exact with two clones");
+    let free_with = vol.state.lock().store.free_blocks();
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/discard", b"scratch").is_ok(),
+        "discard via /sys",
+    );
+    let _ = super::sync_all();
+    t.ok(
+        vol.state.lock().store.free_blocks() >= free_with + 49,
+        "discard frees the clone's blocks",
+    );
+    t.err(
+        ops::stat("/Volumes/MilkTest-scratch"),
+        Errno::ENOENT,
+        "discarded clone unmounted",
+    );
+    milk_space(t, vol, "milkfs space exact after discard");
+
+    // The clone record and its tree survive a re-open of the device.
+    let _ = super::sync_all();
+    match super::milkfs::volume::State::open(dev.clone()) {
+        Ok((st2, r)) => {
+            let c = st2.clone_list();
+            let ok = r.problems == 0
+                && c.len() == 1
+                && c[0].name == "try"
+                && st2
+                    .lookup(super::milkfs::items::clone_view(c[0].id), 1, "c")
+                    .ok()
+                    .flatten()
+                    .and_then(|d| {
+                        st2.lookup(
+                            super::milkfs::items::clone_view(c[0].id),
+                            d.ino,
+                            "installed.app",
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .is_some();
+            t.ok(ok, "clone persists across a re-open");
+        }
+        Err(e) => t.ok(false, &alloc::format!("re-open the test volume: {e}")),
+    }
+
+    // Promote: the clone becomes live, the old live is kept as before-try.
+    let kept = m::promote_clone("try");
+    t.ok(kept.as_deref() == Ok("before-try"), "promote clone");
+    t.ok(
+        read_str(&live("config")) == "v2" && read_str(&live("installed.app")) == "new app",
+        "live is the clone after promote",
+    );
+    t.ok(
+        read_str(&live("keep")) == "unchanged",
+        "untouched files survive promote",
+    );
+    t.ok(
+        read_str(&alloc::format!("{vp}/.snapshots/before-try/c/config")) == "v1",
+        "old live kept as a snapshot",
+    );
+    t.err(
+        ops::stat("/Volumes/MilkTest-try"),
+        Errno::ENOENT,
+        "promoted clone unmounted",
+    );
+    milk_space(t, vol, "milkfs space exact after promote");
+    t.ok(
+        m::delete_snapshot("base").is_ok(),
+        "origin deletable once its clone is gone",
+    );
+    milk_space(t, vol, "milkfs space exact after deleting the old origin");
+    t.ok(
+        m::rollback("before-try").is_ok(),
+        "undo the install: rollback",
+    );
+    t.ok(
+        read_str(&live("config")) == "v1" && ops::stat(&live("installed.app")).is_err(),
+        "rollback undid the promote",
+    );
+    milk_space(t, vol, "milkfs space exact after undo");
+    t.ok(
+        m::delete_snapshot("before-try").is_ok(),
+        "delete before-try",
+    );
+    milk_space(t, vol, "milkfs space exact after clone round trip");
+    rm_rf(&alloc::format!("{vp}/c"));
+    milk_space(t, vol, "milkfs space exact after clone cleanup");
 }
 
 /// Small-file benchmark on the test volume: printed, not checked.

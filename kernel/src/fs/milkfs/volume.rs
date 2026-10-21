@@ -22,11 +22,19 @@ pub struct State {
     /// Last committed superblock.
     pub sb: Superblock,
     pub snaps: Vec<SnapRecord>,
+    /// Writable clones (records with `REC_CLONE`); their trees, once touched, are in
+    /// `clone_trees` (by clone id) until the next commit writes them.
+    pub clones: Vec<SnapRecord>,
+    pub clone_trees: BTreeMap<u32, Child>,
+    /// The view writes go to: `items::LIVE` or a clone view (`items::clone_view(id)`).
+    pub cur: u64,
     /// Live head's dead list (committed part; `store.dead_new` is prepended at commit).
     pub deadlist: BlockPtr,
     pub next_ino: u64,
     /// Automatic snapshot settings (superblock `auto`), see `timemachine`.
     pub auto: [u32; 4],
+    /// Superblock flags (`SB_BRANCHED`).
+    pub flags: u32,
     /// Superblock-only fields changed since the last commit.
     pub meta_dirty: bool,
     /// A commit failed: the in-memory state can't be trusted, refuse further writes.
@@ -126,7 +134,9 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         uuid: new_uuid(),
         label: String::from(label),
         snaps: Vec::new(),
+        clones: Vec::new(),
         auto: [0; 4],
+        flags: 0,
     };
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
@@ -145,6 +155,7 @@ impl State {
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
+        store.branched = sb.flags & SB_BRANCHED != 0;
 
         // Mark everything reachable. Shared subtrees are visited once.
         let mut inodes: BTreeMap<u64, InodeItem> = BTreeMap::new();
@@ -221,9 +232,13 @@ impl State {
             store,
             tree: Child::Disk(sb.root),
             snaps: sb.snaps.clone(),
+            clones: sb.clones.clone(),
+            clone_trees: BTreeMap::new(),
+            cur: super::items::LIVE,
             deadlist: sb.deadlist,
             next_ino: sb.next_ino,
             auto: sb.auto,
+            flags: sb.flags,
             sb,
             meta_dirty: false,
             broken: false,
@@ -241,7 +256,10 @@ impl State {
     }
 
     pub fn dirty(&self) -> bool {
-        self.tree.is_dirty() || !self.store.dead_new.is_empty() || self.meta_dirty
+        self.tree.is_dirty()
+            || !self.store.dead_new.is_empty()
+            || self.meta_dirty
+            || self.clone_trees.values().any(|t| t.is_dirty())
     }
 
     pub fn check_writable(&self) -> Result<()> {
@@ -285,6 +303,12 @@ impl State {
 
     fn commit_inner(&mut self) -> Result<Superblock> {
         let root = btree::write(&mut self.tree, &mut self.store)?;
+        for (id, tree) in self.clone_trees.iter_mut() {
+            let r = btree::write(tree, &mut self.store)?;
+            if let Some(c) = self.clones.iter_mut().find(|c| c.id == *id) {
+                c.root = r;
+            }
+        }
         if !self.store.dead_new.is_empty() {
             let entries = core::mem::take(&mut self.store.dead_new);
             self.deadlist = self.store.write_deadlist(&entries, self.deadlist)?;
@@ -300,7 +324,9 @@ impl State {
             uuid: self.sb.uuid,
             label: self.sb.label.clone(),
             snaps: self.snaps.clone(),
+            clones: self.clones.clone(),
             auto: self.auto,
+            flags: self.flags,
         };
         let cache = &self.store.cache;
         cache.flush()?; // 1. every new block is durable
@@ -365,7 +391,7 @@ pub fn reachable(
         };
         btree::walk(store, sb.root, &mut node, &mut item)?;
     }
-    for s in &sb.snaps {
+    for s in sb.snaps.iter().chain(sb.clones.iter()) {
         let mut node = |p: &BlockPtr| seen.insert(p.block);
         let mut item = |k: &Key, v: &[u8]| -> Result<()> {
             if let Some(p) = btree::extent_ptr(k, v) {
@@ -398,6 +424,46 @@ pub struct SpaceCheck {
 }
 
 impl State {
+    /// Exact space reclaim: commit, then free every allocated block the committed state
+    /// can't reach. Used once history is branched (dead lists can't be trusted then).
+    pub fn sweep(&mut self) -> Result<u64> {
+        self.commit()?;
+        let r = reachable(&self.store, &self.sb, &mut |_, _| Ok(()))?;
+        let mut n = 0;
+        for b in 2..self.store.total() {
+            if self.store.is_used(b) && !r.contains(&b) {
+                self.store.sweep_free(b);
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    pub fn branched(&self) -> bool {
+        self.flags & SB_BRANCHED != 0
+    }
+
+    /// Enter branched mode: drop every dead list (a sweep reclaims their blocks).
+    pub fn set_branched(&mut self) {
+        self.flags |= SB_BRANCHED;
+        self.store.branched = true;
+        self.store.dead_new.clear();
+        self.deadlist = BlockPtr::NONE;
+        for s in self.snaps.iter_mut() {
+            s.deadlist = BlockPtr::NONE;
+        }
+        self.meta_dirty = true;
+    }
+
+    /// No snapshots left: history is linear again.
+    pub fn maybe_unbranch(&mut self) {
+        if self.branched() && self.snaps.is_empty() {
+            self.flags &= !SB_BRANCHED;
+            self.store.branched = false;
+            self.meta_dirty = true;
+        }
+    }
+
     pub fn verify_space(&mut self) -> Result<SpaceCheck> {
         self.commit()?;
         let r = reachable(&self.store, &self.sb, &mut |_, _| Ok(()))?;

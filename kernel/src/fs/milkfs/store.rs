@@ -30,6 +30,12 @@ pub struct Store {
     hint: u64,
     pending_free: Vec<u64>,
     pub dead_new: Vec<DeadEntry>,
+    /// Writing to a clone of the snapshot at this generation: blocks born after it are the
+    /// clone's alone, older ones belong to the origin snapshot (never freed by the clone).
+    pub clone_origin: Option<u64>,
+    /// History is branched: no dead lists; a block a snapshot may still have is left
+    /// for the next reachability sweep instead.
+    pub branched: bool,
 }
 
 impl Store {
@@ -45,6 +51,8 @@ impl Store {
             hint: 2,
             pending_free: Vec::new(),
             dead_new: Vec::new(),
+            clone_origin: None,
+            branched: false,
         };
         s.mark(0);
         s.mark(1);
@@ -103,11 +111,20 @@ impl Store {
         if p.is_none() {
             return;
         }
+        if let Some(origin) = self.clone_origin {
+            // Clone tree: no snapshots of clones, so a clone-born block is unshared.
+            if p.birth >= self.txn {
+                self.unmark(p.block);
+            } else if p.birth > origin {
+                self.pending_free.push(p.block);
+            }
+            return;
+        }
         if p.birth >= self.txn {
             self.unmark(p.block);
         } else if p.birth > self.snap_gen {
             self.pending_free.push(p.block);
-        } else {
+        } else if !self.branched {
             self.dead_new.push(DeadEntry {
                 block: p.block,
                 birth: p.birth,
@@ -123,6 +140,11 @@ impl Store {
         } else {
             self.pending_free.push(block);
         }
+    }
+
+    /// Free a block a sweep found unreachable from the durable committed state.
+    pub fn sweep_free(&mut self, b: u64) {
+        self.unmark(b);
     }
 
     /// The commit is durable: hand back what it freed, start the next generation.

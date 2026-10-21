@@ -3,7 +3,7 @@
 
   mkmilkfs.py mkfs  IMAGE [--size 64M] [--label Milk] [--force]
   mkmilkfs.py check IMAGE [--quiet]      verify superblock, every checksum, namespace
-  mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]
+  mkmilkfs.py ls    IMAGE [PATH] [--snapshot NAME]      (NAME may also be a clone)
   mkmilkfs.py cat   IMAGE PATH [--snapshot NAME]
   mkmilkfs.py xxh64 HEXDATA               (for cross-checking the kernel's checksum)
 
@@ -134,11 +134,14 @@ def sb_decode(b):
     for i in range(n):
         o = 152 + i * 128
         g, c = struct.unpack_from("<QQ", b, o + 48)
+        flags, rid = struct.unpack_from("<II", b, o + 120)
         snaps.append(dict(name=cstr(b[o:o + 48]), gen=g, created=c, root=ptr_unpack(b, o + 64),
                           dead=ptr_unpack(b, o + 88),
-                          next_ino=struct.unpack_from("<Q", b, o + 112)[0]))
+                          next_ino=struct.unpack_from("<Q", b, o + 112)[0],
+                          clone=bool(flags & 1), id=rid))
     nino, created = struct.unpack_from("<QQ", b, 80)
     return dict(total=total, gen=gen, root=ptr_unpack(b, 32), dead=ptr_unpack(b, 56),
+                flags=struct.unpack_from("<I", b, 4008)[0],
                 next_ino=nino, created=created, uuid=bytes(b[96:112]),
                 label=cstr(b[112:144]), snaps=snaps)
 
@@ -356,7 +359,7 @@ def cmd_check(path, quiet):
 
     live = walk(sb["root"], "live")
     for s in sb["snaps"]:
-        walk(s["root"], f"snapshot {s['name']}")
+        walk(s["root"], f"{'clone' if s['clone'] else 'snapshot'} {s['name']}")
     for name, head in [("live", sb["dead"])] + [(s["name"], s["dead"]) for s in sb["snaps"]]:
         try:
             _, chain = img.deadlist(head)
@@ -395,8 +398,13 @@ def cmd_check(path, quiet):
         print(f"{path}: milkfs v0 label {sb['label']!r} generation {sb['gen']}, "
               f"{len(inodes)} inodes, {len(used)}/{sb['total']} blocks used, "
               f"{len(sb['snaps'])} snapshot(s), {orphans} orphan(s)")
+        if sb["flags"] & 1:
+            print("  history branched (a clone was promoted): no dead lists, sweeps reclaim space")
         for s in sb["snaps"]:
-            print(f"  snapshot {s['name']} gen {s['gen']}")
+            if s["clone"]:
+                print(f"  clone {s['name']} (id {s['id']}) of the snapshot at gen {s['gen']}")
+            else:
+                print(f"  snapshot {s['name']} gen {s['gen']}")
     for p in problems:
         print("  PROBLEM:", p)
     print("check:", "clean" if not problems else f"{len(problems)} problem(s)")

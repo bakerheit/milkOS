@@ -17,7 +17,6 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::format::MAX_SNAPS;
 use super::snap::SnapInfo;
 use super::volume::State;
 use crate::fs::errno::{Errno, Result};
@@ -151,8 +150,11 @@ impl State {
             name = format!("{base}-{n}");
             n += 1;
         }
-        if self.snaps.len() >= MAX_SNAPS {
-            let mut a = autos(self);
+        if self.records_full() {
+            let mut a: Vec<SnapInfo> = autos(self)
+                .into_iter()
+                .filter(|s| !self.is_origin(s.generation))
+                .collect();
             a.sort_by_key(|s| s.generation);
             match a.first() {
                 Some(oldest) => {
@@ -164,7 +166,10 @@ impl State {
         }
         let info = self.snap_create(&name)?;
         for victim in prune_plan(&autos(self), cfg.keep, cfg.daily) {
-            self.snap_delete(&victim)?;
+            match self.snap_delete(&victim) {
+                Ok(()) | Err(Errno::EBUSY) => {} // EBUSY: a clone's origin stays
+                Err(e) => return Err(e),
+            }
         }
         Ok(Some(info))
     }

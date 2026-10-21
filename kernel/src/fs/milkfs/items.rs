@@ -15,6 +15,22 @@ use super::volume::State;
 use crate::fs::errno::{Errno, Result};
 
 pub const LIVE: u64 = 0;
+/// Views with this bit are clones (low 32 bits = clone id); other non-zero views are
+/// snapshots (by generation, always far below 2^63).
+pub const CLONE_VIEW: u64 = 1 << 63;
+
+pub const fn clone_view(id: u32) -> u64 {
+    CLONE_VIEW | id as u64
+}
+
+pub const fn is_clone_view(view: u64) -> bool {
+    view & CLONE_VIEW != 0
+}
+
+/// A view that can be written: the live tree or a clone.
+pub const fn is_writable_view(view: u64) -> bool {
+    view == LIVE || is_clone_view(view)
+}
 
 /// Largest file milkfs v0 accepts.
 pub const MAX_FILE_SIZE: u64 = 1 << 32;
@@ -29,6 +45,18 @@ impl State {
         if view == LIVE {
             return f(&self.tree, &self.store);
         }
+        if is_clone_view(view) {
+            let id = view as u32;
+            if let Some(t) = self.clone_trees.get(&id) {
+                return f(t, &self.store);
+            }
+            let c = self
+                .clones
+                .iter()
+                .find(|c| c.id == id)
+                .ok_or(Errno::ENOENT)?;
+            return f(&Child::Disk(c.root), &self.store);
+        }
         let s = self
             .snaps
             .iter()
@@ -37,14 +65,64 @@ impl State {
         f(&Child::Disk(s.root), &self.store)
     }
 
-    fn put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
+    /// Direct writes at `view` (live or a clone), with the matching release rules.
+    pub fn set_cur(&mut self, view: u64) -> Result<()> {
+        if view == LIVE {
+            self.cur = LIVE;
+            self.store.clone_origin = None;
+            return Ok(());
+        }
+        if !is_clone_view(view) {
+            return Err(Errno::EROFS);
+        }
+        let c = self
+            .clones
+            .iter()
+            .find(|c| c.id == view as u32)
+            .ok_or(Errno::ENOENT)?;
+        self.store.clone_origin = Some(c.generation);
+        self.cur = view;
+        Ok(())
+    }
+
+    /// The tree writes go to, plus the store (split borrow).
+    fn wtree(&mut self) -> Result<(&mut Child, &mut Store)> {
         self.check_writable()?;
-        btree::insert(&mut self.tree, &mut self.store, key, val)
+        if self.cur != LIVE {
+            let id = self.cur as u32;
+            if !self.clone_trees.contains_key(&id) {
+                let root = self
+                    .clones
+                    .iter()
+                    .find(|c| c.id == id)
+                    .ok_or(Errno::ENOENT)?
+                    .root;
+                self.clone_trees.insert(id, Child::Disk(root));
+            }
+        }
+        let State {
+            tree,
+            clone_trees,
+            store,
+            cur,
+            ..
+        } = self;
+        let t = if *cur == LIVE {
+            tree
+        } else {
+            clone_trees.get_mut(&(*cur as u32)).ok_or(Errno::ENOENT)?
+        };
+        Ok((t, store))
+    }
+
+    fn put(&mut self, key: Key, val: Vec<u8>) -> Result<()> {
+        let (t, st) = self.wtree()?;
+        btree::insert(t, st, key, val)
     }
 
     fn del(&mut self, key: &Key) -> Result<bool> {
-        self.check_writable()?;
-        btree::remove(&mut self.tree, &mut self.store, key)
+        let (t, st) = self.wtree()?;
+        btree::remove(t, st, key)
     }
 
     pub fn alloc_ino(&mut self) -> u64 {
@@ -68,7 +146,7 @@ impl State {
 
     /// Remove an inode and everything it owns (extents, symlink target).
     pub fn delete_inode(&mut self, ino: u64) -> Result<()> {
-        for (idx, p) in self.extents(LIVE, ino, 0)? {
+        for (idx, p) in self.extents(self.cur, ino, 0)? {
             self.del(&Key::new(ino, K_EXTENT, idx))?;
             self.store.release(p);
         }
@@ -113,7 +191,7 @@ impl State {
     }
 
     pub fn add_dirent(&mut self, dir: u64, d: Dirent) -> Result<()> {
-        let (key, mut list) = self.dirent_bucket(LIVE, dir, &d.name)?;
+        let (key, mut list) = self.dirent_bucket(self.cur, dir, &d.name)?;
         if list.iter().any(|x| x.name == d.name) {
             return Err(Errno::EEXIST);
         }
@@ -122,7 +200,7 @@ impl State {
     }
 
     pub fn remove_dirent(&mut self, dir: u64, name: &str) -> Result<()> {
-        let (key, mut list) = self.dirent_bucket(LIVE, dir, name)?;
+        let (key, mut list) = self.dirent_bucket(self.cur, dir, name)?;
         let before = list.len();
         list.retain(|x| x.name != name);
         if list.len() == before {
@@ -229,7 +307,7 @@ impl State {
             let pos = off + done as u64;
             let (idx, in_blk) = (pos / BLOCK as u64, (pos % BLOCK as u64) as usize);
             let chunk = (BLOCK - in_blk).min(buf.len() - done);
-            let old = self.extent(LIVE, ino, idx)?;
+            let old = self.extent(self.cur, ino, idx)?;
             if chunk < BLOCK {
                 // Partial block: start from the old contents (or zeros, within EOF only).
                 match old {
@@ -259,13 +337,13 @@ impl State {
             return Ok(()); // growing: the new range is a hole
         }
         let keep = len.div_ceil(BLOCK as u64);
-        for (idx, p) in self.extents(LIVE, ino, keep)? {
+        for (idx, p) in self.extents(self.cur, ino, keep)? {
             self.del(&Key::new(ino, K_EXTENT, idx))?;
             self.store.release(p);
         }
         let tail = (len % BLOCK as u64) as usize;
         if tail != 0
-            && let Some(p) = self.extent(LIVE, ino, len / BLOCK as u64)?
+            && let Some(p) = self.extent(self.cur, ino, len / BLOCK as u64)?
         {
             let mut block = [0u8; BLOCK];
             self.store.read(p, &mut block)?;

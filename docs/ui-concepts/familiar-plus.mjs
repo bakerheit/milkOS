@@ -28,7 +28,7 @@ function tabs() {
       return icon(cx + 20, cy, 56, f[0], isF ? C.honey + "55" : C.cream, isF ? C.cocoa : C.esp, isF ? "" : `border:1px solid ${C.sand}`) + TC(cx - 6, cy + 64, 108, f[1]);
     }).join(""));
   // drop highlight on the tab strip
-  h += B(x + 84 + 3 * 150 - 4, y + 4, 150, 36, `background:${C.straw}33;border:2px dashed ${C.straw};border-radius:10px`) + T(x + 84 + 3 * 150 + 6, y + 12, "Drop to add as a tab", `color:${C.straw};${BD}`);
+  h += B(x + 84 + 3 * 150 - 4, y + 4, 184, 36, `background:${C.straw}33;border:2px dashed ${C.straw};border-radius:10px`) + T(x + 84 + 3 * 150 + 6, y + 12, "Drop to add as a tab", `color:${C.esp};${BD}`);
   // another window being dragged (ghost)
   h += shadow(560, 330, 330, 250, 12) + B(560, 330, 330, 250, `background:${C.milk};border-radius:12px;border:2px solid ${C.straw};opacity:.92;overflow:hidden`,
     B(0, 0, 330, 32, `background:${C.cream};border-bottom:1px solid ${C.sand}`) + lightsX(13, 10) + TC(0, 8, 330, "<b>todo.txt</b>") + T(18, 52, "[x] draft the UI spec") + T(18, 72, "[x] pick a look") + T(18, 92, "[ ] fix the allocator") + T(18, 112, "[ ] boot logo", `color:${C.cocoa}`));

@@ -61,3 +61,7 @@
 /bin/audit    target/user/aarch64-unknown-none-softfloat/release/audit   755
 /bin/milk     target/user/aarch64-unknown-none-softfloat/release/milk   755
 /bin/top      target/user/aarch64-unknown-none-softfloat/release/top   755
+
+# Linux binary compatibility: a static Linux/aarch64 program with no milkOS knowledge,
+# linked at 0x400000 (tests/linux/build.sh; the binary is committed).
+/bin/linux-hello  tests/linux/bin/linux-hello  755

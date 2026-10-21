@@ -202,6 +202,11 @@ is the to-do list for running a static musl binary. `--features strace` logs eve
 
 ### ELF loading and the initial stack
 
+Linux compatibility check: `tests/linux/linux-hello.c` is a freestanding C program
+(raw `svc #0` syscalls, no libc, no milkOS headers) built by `tests/linux/build.sh` with
+the host's bare-metal `aarch64-elf-gcc` as a static ET_EXEC at `0x400000`. The binary is
+committed and packed as `/bin/linux-hello`; `utest linux` runs it.
+
 `proc/elf.rs`: ELF64 aarch64, `ET_EXEC` in the user range, or `ET_DYN` without
 `PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
 permissions; overlapping pages take the union. The I-cache is synced after loading.

@@ -811,6 +811,19 @@ fn t_kaddr() -> bool {
     )
 }
 
+/// A static Linux/aarch64 binary built with no milkOS knowledge (tests/linux/), linked at
+/// Linux's 0x400000: runs and passes its own checks.
+fn t_linux() -> bool {
+    let (out, st) = capture(&["/bin/linux-hello", "x"]);
+    let text = core::str::from_utf8(&out).unwrap_or("");
+    let oks = text.matches("  ok ").count();
+    check(
+        "Linux static binary at 0x400000",
+        st == 0 && text.contains("linux-hello: ALL OK"),
+        &alloc::format!("{oks} checks ok, {}", sys::describe_status(st)),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -842,6 +855,9 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "proc" || what == "all" {
         ok &= t_proc();
+    }
+    if what == "linux" || what == "all" {
+        ok &= t_linux();
     }
     if what == "kaddr" || what == "all" {
         ok &= t_kaddr();

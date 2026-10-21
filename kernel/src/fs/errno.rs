@@ -10,6 +10,7 @@ pub struct Errno(pub i32);
 impl Errno {
     pub const EPERM: Errno = Errno(1);
     pub const ENOENT: Errno = Errno(2);
+    pub const EINTR: Errno = Errno(4);
     pub const EIO: Errno = Errno(5);
     pub const ENXIO: Errno = Errno(6);
     pub const EBADF: Errno = Errno(9);
@@ -46,6 +47,7 @@ impl Errno {
     pub const fn name(self) -> &'static str {
         match self.0 {
             1 => "EPERM",
+            4 => "EINTR",
             2 => "ENOENT",
             5 => "EIO",
             6 => "ENXIO",

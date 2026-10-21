@@ -465,6 +465,7 @@ itself.
 | 3992 | automatic snapshots: state u32 (0 default/1 on/2 off), interval s u32, keep u32, daily u32 (0 = default) |
 | 4008 | flags u32: 1 = `SB_BRANCHED` (a clone was promoted; see below) |
 | 4016 | space map index: block pointer (zero = none; kernels before the map write zeros here) |
+| 4040 | last full scrub u64 (unix s, 0 = never), 4048: scrub interval u32 (s; 0 = default 7 days, 2^32-1 = off) |
 | 4088 | xxh64 of bytes 0..4088 |
 
 **Tree node**: header `"MKND" | level u8 (0 = leaf) | pad u8 | count u16 | birth u64`, then
@@ -767,6 +768,44 @@ that snapshot is deleted (the report says how many were freed now):
 /Volumes/Milk/d: 4 file(s) with data, 1 group(s) of identical files, 2 now share, 1 already shared, 0 same hash but different
 978 block(s) (3912 KiB) shared, 980 block(s) freed now
 ```
+
+### Scrub
+
+`snap scrub` (start and wait), `snap scrub start|stop|status|rate=MB/s|auto=off|on|7d|12h`,
+`/sys/fs/milkfs/scrub` (read: status; write: the same words), kernel
+`fs::milkfs::scrub::scrub_volume`. A low-priority kernel thread (`milkfs-scrub`) reads
+every block reachable from each mounted volume's committed state (live tree, snapshots,
+clones, each shared subtree and shared data block once, dead-list chains, the space map)
+**straight from the disk** (no bcache, no node cache, no page cache) and checks its
+checksum. It runs on request and on a schedule (default every 7 days, never earlier than
+5 minutes after boot; the last full scrub's time and the interval live in the superblock).
+
+- Smooth: priority `Low` (every normal thread runs first), rate limited (default 32 MB/s,
+  token bucket; `rate=0` = unlimited), at most 128 KiB per read, the volume lock only to
+  start, to finish and to name a damaged file. fsstress (1600 ops) takes 141 ms alone and
+  148 ms with a 16 MB/s scrub running alongside (`scripts/scrubtest.sh`).
+- Consistent: it checks the state committed when it started. Blocks freed while it runs
+  are held back from reuse (`Store::hold_frees`; they count as free in the space map and in
+  space checks) and released at the end, so nothing it is about to read can be rewritten.
+- Reports: each checksum error with what the block is: data of a file with its path, the
+  offset and every tree that has that block (live, snapshots, clones), a tree node, a
+  dead-list or space-map block. Printed, in the status, and audit-logged
+  (`milkfs.scrub.error`). Nothing is repaired; restore a damaged file from a snapshot with
+  a good copy (`versions restore`), if any.
+
+```text
+$ snap scrub
+scrub: [run 1] done on /Volumes/Milk (requested): 9907 blocks (38 MiB) in 1228 ms, 32.0 MB/s, 2 error(s)
+rate: 32 MB/s, auto: every 7d, last full scrub of the primary volume: 2026-10-21T06:58:30
+error: block 3: data of /Volumes/Milk/docs/b.bin at offset 0 (live, snapshot s1)
+error: block 2: data of /Volumes/Milk/docs/old.bin at offset 0 (snapshot s1)
+```
+
+`scripts/scrubtest.sh`: a clean volume scrubs clean; the rate limit holds (8.0 MB/s at
+`rate=8`); with one bit flipped (on the Mac, `mkmilkfs.py corrupt IMAGE flip PATH
+[--snapshot S]`) in a live file and in a file only a snapshot still has, the scrub finds
+exactly those two, with paths and snapshots, and both are in the audit log; the self-test
+does the same on its RAM disk and checks the hold-back of frees.
 
 ### Send and receive (backups)
 

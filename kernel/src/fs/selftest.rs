@@ -997,6 +997,7 @@ fn milkfs_test_volume(t: &mut T) {
     milkfs_tree(t, &vol, VP);
     milkfs_reflink(t, &vol, VP);
     milkfs_sendrecv(t, VP);
+    milkfs_scrub(t, &vol, VP, &dev);
     milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
@@ -2343,6 +2344,85 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
     for f in ["sr1", "sr2", "sr3", "bad", "x"] {
         let _ = ops::unlink(&alloc::format!("/tmp/{f}.stream"));
     }
+}
+
+/// Scrub: damage a live file's block and a snapshot-only file's block behind every cache,
+/// scrub, and see both reported with their paths. And the hold-back of frees.
+fn milkfs_scrub(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    use super::milkfs::{self as m, items::LIVE, scrub};
+    let d = alloc::format!("{vp}/scrub");
+    let _ = ops::mkdir(&d, 0o755);
+    let body: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+    let _ = ops::write_file(&alloc::format!("{d}/a"), &body);
+    let _ = ops::write_file(&alloc::format!("{d}/b"), &body);
+    let _ = m::snapshot("sc1");
+    let _ = ops::unlink(&alloc::format!("{d}/b"));
+    let _ = super::sync_all();
+    let before = scrub::scrub_volume(vol, vp, "test", false);
+    t.ok(before.is_ok(), "scrub runs");
+    let n0 = before.map(|e| e.len()).unwrap_or(0);
+    // Damage the first data block of a (live) and of b (only in sc1).
+    let first = |view: u64, name: &str| {
+        let st = vol.state.lock();
+        let dir = st.resolve_in(view, "/scrub")?;
+        let ino = st.lookup(view, dir, name).ok()??.ino;
+        st.extents(view, ino, 0).ok()?.first().map(|x| x.1.block)
+    };
+    let snap_gen = vol
+        .state
+        .lock()
+        .snaps
+        .iter()
+        .find(|s| s.name == "sc1")
+        .map(|s| s.generation)
+        .unwrap_or(0);
+    for b in [first(LIVE, "a"), first(snap_gen, "b")]
+        .into_iter()
+        .flatten()
+    {
+        let mut blk = [0u8; 4096];
+        let _ = dev.read_blocks(b * 8, &mut blk);
+        blk[100] ^= 0x01; // one bit
+        let _ = dev.write_blocks(b * 8, &blk);
+    }
+    let errs = scrub::scrub_volume(vol, vp, "test", false).unwrap_or_default();
+    let has = |s: &str| errs.iter().any(|e| e.what.contains(s));
+    t.ok(
+        errs.len() == n0 + 2
+            && has(&alloc::format!("data of {d}/a at offset 0 (live, snapshot sc1)"))
+            && has(&alloc::format!("data of {d}/b at offset 0 (snapshot sc1)")),
+        &alloc::format!("scrub finds both flipped bits, with paths ({errs:?})"),
+    );
+    // Frees while a scrub holds them: not reused, space exact, released after.
+    {
+        let mut st = vol.state.lock();
+        st.store.hold_frees();
+    }
+    let free0 = vol.state.lock().store.free_blocks();
+    let _ = ops::unlink(&alloc::format!("{d}/a"));
+    let _ = m::delete_snapshot("sc1");
+    let _ = super::sync_all();
+    let (held, free1, sp) = {
+        let mut st = vol.state.lock();
+        let sp = st.verify_space();
+        (st.store.held_count(), st.store.free_blocks(), sp)
+    };
+    t.ok(
+        held >= 4 && free1 <= free0 && sp.is_ok_and(|s| s.leaked == 0 && s.free_but_used == 0),
+        &alloc::format!("frees during a scrub are held ({held} blocks), space still exact"),
+    );
+    vol.state.lock().store.release_held();
+    t.ok(
+        vol.state.lock().store.free_blocks() >= free1 + held,
+        "released when it ends",
+    );
+    milk_space(t, vol, "space exact after the scrub");
+    rm_rf(&d);
 }
 
 /// A file made straight in a volume's live tree (no VFS): returns its inode.

@@ -14,6 +14,8 @@
                                          mount-time and big-tree tests
   mkmilkfs.py corrupt IMAGE KIND         damage a TEST image: orphan dangling nlink parent
                                          sb smap bref data node
+  mkmilkfs.py corrupt IMAGE flip PATH [--snapshot NAME]
+                                         flip one bit in the first data block of PATH
   mkmilkfs.py verify-stream FILE         check a `snap send` stream (every record checksum,
                                          counts, chained hash) and describe it
   mkmilkfs.py receive IMAGE FILE [--force]  recreate the stream's snapshot in IMAGE (full:
@@ -1048,6 +1050,26 @@ def cmd_tree(path, snapshot):
     walk(ROOT_INO, "")
 
 
+def cmd_flip(path, fpath, snapshot):
+    img = Image(path)
+    t = tree_for(img, img.superblock(), snapshot)
+    ino = t.resolve(fpath)
+    ptrs = sorted(p for k, v in t.items.items() if k[0] == ino for p in data_ptrs(k, v))
+    if not ptrs:
+        sys.exit(f"{fpath}: no data blocks (inline or empty)")
+    blk = ptrs[0][1][0]
+    with open(path, "r+b") as f:
+        f.seek(blk * BLOCK + 100)
+        b = f.read(1)
+        f.seek(blk * BLOCK + 100)
+        f.write(bytes([b[0] ^ 1]))
+        f.flush()
+        os.fsync(f.fileno())
+    print(f"{path}: flipped a bit in block {blk} (first data block of {fpath}"
+          f"{' in snapshot ' + snapshot if snapshot else ''})")
+    return 0
+
+
 def cmd_corrupt(path, kind):
     """Damage a (private, test) image on purpose: orphan, dangling, nlink, parent, sb,
     data, node."""
@@ -1275,6 +1297,8 @@ def main(argv):
         if "--repair" in opts:
             return cmd_check_repair(pos[0])
         return cmd_check(pos[0], "--quiet" in opts)
+    elif cmd == "corrupt" and pos[1] == "flip":
+        return cmd_flip(pos[0], pos[2], opts.get("--snapshot"))
     elif cmd == "corrupt":
         return cmd_corrupt(pos[0], pos[1])
     elif cmd == "verify-stream":

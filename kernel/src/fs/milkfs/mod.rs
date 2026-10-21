@@ -20,6 +20,7 @@ pub mod format;
 pub mod fsck;
 pub mod inode;
 pub mod items;
+pub mod scrub;
 pub mod snap;
 pub mod store;
 pub mod stream;
@@ -94,17 +95,22 @@ pub fn mount_secondary(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountR
     crate::fs::ops::mkdir_all(path, 0o755)?;
     crate::fs::path::mount(path, vol.clone())?;
     let mut all = VOLUMES.lock();
-    all.retain(|w| w.strong_count() > 0);
-    all.push(Arc::downgrade(&vol));
+    all.retain(|(w, _)| w.strong_count() > 0);
+    all.push((Arc::downgrade(&vol), String::from(path)));
     Ok((vol, report))
 }
 
-/// Every mounted milkfs volume (for the flusher).
-static VOLUMES: SpinLock<alloc::vec::Vec<alloc::sync::Weak<Volume>>> =
+/// Every mounted milkfs volume and where (for the flusher and the scrub).
+#[allow(clippy::type_complexity)]
+static VOLUMES: SpinLock<alloc::vec::Vec<(alloc::sync::Weak<Volume>, String)>> =
     SpinLock::new(alloc::vec::Vec::new());
 
-fn all_volumes() -> alloc::vec::Vec<Arc<Volume>> {
-    VOLUMES.lock().iter().filter_map(|w| w.upgrade()).collect()
+pub(crate) fn all_volumes() -> alloc::vec::Vec<(Arc<Volume>, String)> {
+    VOLUMES
+        .lock()
+        .iter()
+        .filter_map(|(w, p)| w.upgrade().map(|v| (v, p.clone())))
+        .collect()
 }
 
 /// Mount every disk that holds milkfs at `/Volumes/<label>` (`/Volumes/<label>-<dev>`
@@ -867,12 +873,13 @@ pub fn start_threads() {
     drop(crate::sched::spawn("milkfs-flush", || {
         loop {
             crate::sched::sleep_ms(250);
-            for v in all_volumes() {
+            for (v, _) in all_volumes() {
                 let _ = v.state.lock().flush_if_due();
             }
         }
     }));
     timemachine::start();
+    scrub::start_thread();
 }
 
 /// Self-test only (before the scheduler runs, so nothing else can notice): point the
@@ -1098,6 +1105,7 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
             bench_create(d, n, sz).map(|_| ())
         },
     );
+    dir.add_control("scrub", scrub::status_text, |b| scrub::control(arg(b)?));
     dir.add_control(
         "send",
         || LAST_SEND.lock().clone(),

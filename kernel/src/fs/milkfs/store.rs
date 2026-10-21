@@ -50,6 +50,10 @@ pub struct Store {
     /// While a receive builds its clone: the origin's blocks the clone drops (the live
     /// tree's dead list once the clone becomes live, see `clone_fast_forward`).
     pub recv_drops: Option<Vec<DeadEntry>>,
+    /// While a scrub reads the committed state it started from: blocks freed meanwhile
+    /// stay allocated (not reused, so nothing it is about to read is overwritten) but
+    /// count as free in the space map; released when the scrub ends.
+    held: Option<alloc::collections::BTreeSet<u64>>,
 }
 
 #[derive(Default)]
@@ -80,6 +84,7 @@ impl Store {
             nodes: crate::sync::SpinLock::new(NodeCache::default()),
             map_blocks: Vec::new(),
             recv_drops: None,
+            held: None,
         };
         s.mark(0);
         s.mark(1);
@@ -239,15 +244,46 @@ impl Store {
 
     /// Free a block a sweep found unreachable from the durable committed state.
     pub fn sweep_free(&mut self, b: u64) {
-        self.unmark(b);
+        self.free_committed(b);
+    }
+
+    /// Free a block some committed state had (held back while a scrub runs).
+    fn free_committed(&mut self, b: u64) {
+        let used = self.is_used(b);
+        match self.held.as_mut() {
+            Some(h) if used => {
+                h.insert(b);
+            }
+            _ => self.unmark(b),
+        }
     }
 
     /// The commit is durable: hand back what it freed, start the next generation.
     pub fn committed(&mut self) {
         for b in core::mem::take(&mut self.pending_free) {
-            self.unmark(b);
+            self.free_committed(b);
         }
         self.txn += 1;
+    }
+
+    /// A scrub starts: hold freed blocks back until `release_held`.
+    pub fn hold_frees(&mut self) {
+        self.held.get_or_insert_with(Default::default);
+    }
+
+    /// The scrub is done: free what was held.
+    pub fn release_held(&mut self) {
+        for b in self.held.take().unwrap_or_default() {
+            self.unmark(b);
+        }
+    }
+
+    pub fn is_held(&self, b: u64) -> bool {
+        self.held.as_ref().is_some_and(|h| h.contains(&b))
+    }
+
+    pub fn held_count(&self) -> u64 {
+        self.held.as_ref().map_or(0, |h| h.len() as u64)
     }
 
     /// Something went wrong mid-commit: forget the frees so nothing reachable from the
@@ -301,7 +337,8 @@ impl Store {
             chunk_blocks.push(self.alloc()?);
         }
         let mut bits = self.bitmap.clone();
-        for &b in &self.pending_free {
+        let held = self.held.iter().flatten();
+        for &b in self.pending_free.iter().chain(held) {
             bits[(b / 64) as usize] &= !(1 << (b % 64));
         }
         let used: u64 = bits.iter().map(|w| w.count_ones() as u64).sum();

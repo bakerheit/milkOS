@@ -14,6 +14,9 @@
 //!   snap auto [SETTINGS]  automatic snapshots: show, or set e.g. `on interval=15m keep=8 daily=14`
 //!   snap send SNAP [--from OLDER] [-o FILE]
 //!                         SNAP as a stream (incremental from OLDER) to FILE or stdout
+//!   snap scrub [start|stop|status|rate=MB/s|auto=off|on|7d]
+//!                         verify every block's checksum in the background (no argument:
+//!                         start and wait for it, printing progress)
 //!   snap receive [FILE] [--to PATH] [--force]
 //!                         recreate the snapshot in a stream (FILE or stdin) on the milkfs
 //!                         volume PATH is on (default /Volumes/Milk); --force rolls the
@@ -235,8 +238,61 @@ fn receive(args: &[&str]) -> i32 {
     r
 }
 
+/// `snap scrub`: start it and follow /sys/fs/milkfs/scrub until it is done.
+fn scrub_wait() -> i32 {
+    const CTL: &str = "/sys/fs/milkfs/scrub";
+    let text = || {
+        sys::read_file(CTL)
+            .map(|d| alloc::string::String::from_utf8_lossy(&d).into_owned())
+            .unwrap_or_default()
+    };
+    let run = |t: &str| -> u64 {
+        t.split("[run ")
+            .nth(1)
+            .and_then(|x| x.split(']').next())
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(0)
+    };
+    let before = run(&text());
+    if control_quiet("scrub", "start") != 0 {
+        return 1;
+    }
+    let mut shown = u64::MAX;
+    for _ in 0..360_000 {
+        sys::sleep_ms(100);
+        let t = text();
+        let first = t.lines().next().unwrap_or("");
+        if run(first) <= before {
+            continue; // not picked up yet
+        }
+        if first.contains("] running") {
+            let pct = first
+                .split("blocks (")
+                .nth(1)
+                .and_then(|x| x.split('%').next())
+                .and_then(|x| x.parse::<u64>().ok())
+                .unwrap_or(0);
+            if shown == u64::MAX || pct / 25 != shown / 25 {
+                eprintln!("{first}");
+                shown = pct;
+            }
+            continue;
+        }
+        print!("{t}");
+        return if t.contains("\nerror:") { 3 } else { 0 };
+    }
+    eprintln!("snap: scrub: timed out waiting");
+    1
+}
+
 fn main(args: &rt::Args) -> i32 {
     match (args.get(1), args.get(2)) {
+        (Some("scrub"), None) => scrub_wait(),
+        (Some("scrub"), Some("status")) => cat("/sys/fs/milkfs/scrub"),
+        (Some("scrub"), Some(_)) => match control_quiet("scrub", &args.argv[2..].join(" ")) {
+            0 => cat("/sys/fs/milkfs/scrub"),
+            e => e,
+        },
         (Some("send"), _) => send(&args.argv[2..]),
         (Some("receive"), _) => receive(&args.argv[2..]),
         (None, _) | (Some("list"), _) => cat("/sys/fs/milkfs/snapshots"),

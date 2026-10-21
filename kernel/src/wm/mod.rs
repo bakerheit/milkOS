@@ -568,8 +568,10 @@ impl Desktop {
         {
             w.add_tab(app, contents);
             self.show_window(into);
+            self.set_focus(Some(into));
             self.damage_window(into);
             self.invalidate(PanelKey::Dock);
+            self.invalidate(PanelKey::MenuBar);
             return;
         }
         let id = self.next_id;

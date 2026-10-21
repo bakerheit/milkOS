@@ -1039,10 +1039,11 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         b.drag(96 + 84 + 166 + 60, 64 + 22, 560, 420, 12).wait(500);
                     }
                     "tabs-mixed" | "tabs-keys" | "tabs-close" => {
-                        // Notes too (it opens at (120, 96)): drag it onto the strip.
-                        let (x, y) = dock_icon_center(3);
+                        // Paint too (Notes already lives in space 2; Paint opens at
+                        // (255, 177)): drag it by its title bar onto the strip.
+                        let (x, y) = dock_icon_center(4);
                         b.click(x, y).wait(600);
-                        b.drag(340, 112, 330, 80, 12).wait(500);
+                        b.drag(420, 193, 330, 80, 12).wait(500);
                         if name == "tabs-keys" {
                             b.key(
                                 Key::Char('['),
@@ -1059,9 +1060,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
                         }
                     }
                     "tabs-plus" => {
-                        // The + after the tabs: Skim, then Music joins as a tab.
+                        // The + after the tabs: Skim, then Paint joins as a tab.
                         b.click(96 + 84 + 2 * 166 + 4 + 14, 64 + 22).wait(400);
-                        b.typ("music").wait(200).enter().wait(800);
+                        b.typ("paint").wait(200).enter().wait(800);
                     }
                     _ => {}
                 }

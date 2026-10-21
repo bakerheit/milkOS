@@ -9,6 +9,9 @@ outside: `exceptions.{S,rs}` (stack-overflow check, IRQ-exit hook), `uart.rs` (R
 Boot: `... fs::init → fs selftest → sched::init → sched selftest → proc::init (EL0 smoke
 test) → proc::start_init()`. kmain then is thread 0 and keeps polling input.
 
+SMP (bring-up, per-CPU data, locking, the scheduler's switch handshake, TLB policy,
+CPU load): `docs/smp.md`.
+
 ## Kernel threads (`sched`)
 
 ```rust

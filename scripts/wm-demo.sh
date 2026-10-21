@@ -24,7 +24,7 @@ rm -f "$SOCK" "$OUT" "$LOG"
 source scripts/disk.sh
 milk_disk_args shared
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and run milkOS in qemu.
+# Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one).
 #   scripts/run.sh            window (cocoa) + serial on this terminal
 #   scripts/run.sh headless   no window, serial only (used for tests)
 set -euo pipefail
@@ -25,6 +25,6 @@ milk_disk_args
 # reach the guest's web server at http://127.0.0.1:8088/.
 source scripts/netdev.sh
 milk_net_args
-exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
+exec qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" \
   "${NET_ARGS[@]}"

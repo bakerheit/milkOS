@@ -728,6 +728,27 @@ pub fn set_current_name(name: &str) {
     with(|s| s.cur().name = Comm::new(name));
 }
 
+/// Save the live FP/SIMD registers (the current user thread's) into `fp`.
+pub fn save_current_fp(fp: &mut FpState) {
+    // SAFETY: FP is enabled (init); writes 528 bytes into `fp`.
+    unsafe { fp_save(fp) };
+}
+
+/// Zero the live FP/SIMD registers (execve).
+pub fn reset_current_fp() {
+    let z = FpState::zeroed();
+    // SAFETY: as above.
+    unsafe { fp_restore(&z) };
+}
+
+/// The live TPIDR_EL0 (the current user thread's TLS pointer).
+pub fn current_tpidr_el0() -> u64 {
+    let v: u64;
+    // SAFETY: register read.
+    unsafe { asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
 /// For the stack-overflow report: no locking, no allocation.
 pub fn current_for_crash() -> (Tid, Comm) {
     let tid = CURRENT.load(Ordering::Relaxed);

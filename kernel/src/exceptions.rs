@@ -344,7 +344,7 @@ fn dump_inst_abort(frame: &TrapFrame, iss: u64) {
     }
 }
 
-fn fault_status(fsc: u64) -> &'static str {
+pub(crate) fn fault_status(fsc: u64) -> &'static str {
     match fsc {
         0x00 => "address size fault, level 0",
         0x01 => "address size fault, level 1",
@@ -373,7 +373,7 @@ fn fault_status(fsc: u64) -> &'static str {
     }
 }
 
-fn ec_name(ec: u64) -> &'static str {
+pub(crate) fn ec_name(ec: u64) -> &'static str {
     match ec {
         EC_UNKNOWN => "unknown reason",
         0x01 => "trapped WFI/WFE",

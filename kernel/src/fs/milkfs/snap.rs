@@ -195,10 +195,10 @@ impl State {
             };
             let mut data = Vec::new();
             let mut item = |k: &Key, v: &[u8]| -> Result<()> {
-                if let Some(p) = btree::extent_ptr(k, v)
-                    && p.birth > s.generation
-                {
-                    data.push((p.block, p.birth));
+                for p in data_ptrs(k, v) {
+                    if p.birth > s.generation {
+                        data.push((p.block, p.birth));
+                    }
                 }
                 Ok(())
             };

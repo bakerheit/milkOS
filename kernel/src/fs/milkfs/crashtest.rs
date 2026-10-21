@@ -13,11 +13,13 @@
 //! ```
 //!
 //! The workload writes self-describing files (`crash/f-K`, via `crash/.tmp-K` + rename),
-//! and takes, deletes and rolls back snapshots. The check proves the volume is exactly some
+//! makes reflink copies of them (`crash/r-K`, FICLONE) and plain copies that `dedupe` then
+//! shares (`crash/d-K`), deletes some, and takes, deletes and rolls back snapshots. The check proves the volume is exactly some
 //! committed generation: it mounts (superblock, checksums, namespace check), every file
 //! in the live tree and in every snapshot is complete and matches its own header (old or
-//! new, never a mix), the generation is the last committed one or the one in flight, and
-//! space accounting stays exact after deleting the snapshots (dead lists intact).
+//! new, never a mix), the generation is the last committed one or the one in flight,
+//! `check` finds nothing (namespace, shared-block counts), and space accounting stays exact
+//! after deleting the snapshots (dead lists intact).
 
 use alloc::format;
 use alloc::string::String;
@@ -240,6 +242,34 @@ fn writer() -> ! {
         if let Err(e) = ops::write_file(&tmp, &content(i)).and_then(|_| ops::rename(&tmp, &fin)) {
             kprintln!("crash-writer: iteration {i}: {e}");
         }
+        // Shared blocks: reflink copies, plain copies deduped later, deletes.
+        if i % 3 == 1 {
+            let r = ops::open(&fin, crate::fs::abi::O_RDONLY, 0).and_then(|s| {
+                let d = ops::open(
+                    &format!("{DIR}/r-{k}"),
+                    crate::fs::abi::O_WRONLY | crate::fs::abi::O_CREAT,
+                    0o644,
+                )?;
+                ops::ficlone(&s, &d)
+            });
+            if let Err(e) = r {
+                kprintln!("crash-writer: iteration {i}: reflink: {e}");
+            }
+        }
+        if i % 5 == 2
+            && let Ok(d) = ops::read_file(&fin)
+        {
+            let _ = ops::write_file(&format!("{DIR}/d-{k}"), &d);
+        }
+        if i % 15 == 7
+            && let Err(e) = super::dedupe(DIR, false)
+        {
+            kprintln!("crash-writer: iteration {i}: dedupe: {e}");
+        }
+        if i % 4 == 3 {
+            let _ = ops::unlink(&format!("{DIR}/r-{}", (k + 1) % SLOTS));
+            let _ = ops::unlink(&format!("{DIR}/d-{}", (k + 2) % SLOTS));
+        }
         if i % 25 == 0 {
             let _ = super::snapshot(&format!("crash-{i}"));
             // Keep at most 4, oldest first, skipping clone origins (EBUSY).
@@ -322,6 +352,20 @@ fn check() {
             &mut bad,
             &mut empty,
         );
+    }
+    // The full check (namespace, shared-block counts, space) on what the crash left.
+    match super::check(false) {
+        Ok(r) if r.clean() => {}
+        Ok(r) => {
+            for p in r.problems.iter().chain(r.unrepairable.iter()) {
+                kprintln!("CRASHCHECK: check: {p}");
+            }
+            bad += 1;
+        }
+        Err(e) => {
+            kprintln!("CRASHCHECK: check: {e}");
+            bad += 1;
+        }
     }
     let nsnaps = super::snapshots().map(|l| l.len()).unwrap_or(0);
     let branched = v.state.lock().branched();

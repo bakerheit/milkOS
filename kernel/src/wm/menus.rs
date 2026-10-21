@@ -34,6 +34,7 @@ pub enum MenuAction {
     Help,
     Restart,
     ShutDown,
+    Lock,
     /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
     Key(char),
     /// Shown greyed out (no clipboard yet).
@@ -109,6 +110,7 @@ impl Desktop {
                 item("Minimise", "Cmd+M", win(MenuAction::Minimise)),
                 item("Close", "Cmd+W", win(MenuAction::Close)),
                 sep(),
+                item("Lock Screen", "Ctrl+Cmd+Q", MenuAction::Lock),
                 item("Restart", "", MenuAction::Restart),
                 item("Shut Down", "", MenuAction::ShutDown),
             ];
@@ -274,6 +276,7 @@ impl Desktop {
                 self.set_mode(Mode::Spaces);
             }
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
+            MenuAction::Lock => self.lock_screen(),
             MenuAction::Restart => super::power::restart(),
             MenuAction::ShutDown => super::power::shut_down(),
             MenuAction::Key(c) => {

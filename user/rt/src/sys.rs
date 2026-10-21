@@ -44,6 +44,7 @@ impl Errno {
             39 => "ENOTEMPTY",
             4 => "EINTR",
             88 => "ENOTSOCK",
+            95 => "EOPNOTSUPP",
             97 => "EAFNOSUPPORT",
             98 => "EADDRINUSE",
             99 => "EADDRNOTAVAIL",
@@ -398,6 +399,17 @@ pub fn winsize(fd: i32) -> Option<(u16, u16)> {
     )
     .ok()?;
     (ws[1] > 0).then_some((ws[0], ws[1]))
+}
+
+/// `ioctl(dst, FICLONE, src)`: `dst` (open for writing) becomes a copy-on-write copy of
+/// `src` (open for reading), sharing its blocks. milkfs only (EXDEV across volumes,
+/// EOPNOTSUPP elsewhere).
+pub fn ficlone(src: i32, dst: i32) -> Result<()> {
+    sc(
+        nr::IOCTL,
+        [dst as usize, 0x4004_9409, src as usize, 0, 0, 0],
+    )
+    .map(|_| ())
 }
 
 /// Terminal width for laying out columns: TIOCGWINSZ on stdout, else 80.

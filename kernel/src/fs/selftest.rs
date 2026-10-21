@@ -986,11 +986,17 @@ fn milkfs_test_volume(t: &mut T) {
         report.problems == 0 && report.inodes == 1,
         "fresh volume mounts clean",
     );
-    super::milkfs::set_test_override(Some(vol.clone()));
+    super::milkfs::set_test_override(Some((vol.clone(), VP)));
     milkfs_destructive(t, &vol, VP, D, &dev);
     milkfs_clones(t, &vol, VP, &dev);
     page_cache(t, VP);
+    milkfs_diff(t, VP);
+    milkfs_versions(t, VP);
+    milkfs_fsck(t, &vol, VP, &dev);
     milkfs_bench(&vol, VP);
+    milkfs_tree(t, &vol, VP);
+    milkfs_reflink(t, &vol, VP);
+    milkfs_spacemap(t);
     super::milkfs::set_test_override(None);
     t.ok(super::unmount(VP).is_ok(), "unmount the test volume");
     let _ = ops::rmdir(VP);
@@ -1627,7 +1633,715 @@ fn page_cache(t: &mut T, vp: &str) {
     let _ = ops::unlink(&f);
 }
 
+/// `snap diff` on the test volume.
+fn milkfs_diff(t: &mut T, vp: &str) {
+    use super::milkfs::{self as m, diff::Change};
+    let p = |n: &str| alloc::format!("{vp}/dd/{n}");
+    let _ = ops::mkdir_all(&p("sub"), 0o755);
+    for (n, c) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        let _ = ops::write_file(&p(n), c.as_bytes());
+    }
+    for i in 0..300 {
+        let _ = ops::write_file(&p(&alloc::format!("sub/f{i:03}")), b"same");
+    }
+    t.ok(m::snapshot("d1").is_ok(), "diff: snapshot d1");
+    let _ = ops::write_file(&p("b"), b"B changed");
+    let _ = ops::unlink(&p("c"));
+    let _ = ops::write_file(&p("e"), b"new");
+    let _ = ops::rename(&p("a"), &p("sub/a2"));
+    let _ = ops::mkdir(&p("newdir"), 0o755);
+    t.ok(m::snapshot("d2").is_ok(), "diff: snapshot d2");
+    let _ = ops::write_file(&p("f"), b"after d2");
+    let want = alloc::vec![
+        Change::Modified(String::from("/dd/b")),
+        Change::Removed(String::from("/dd/c")),
+        Change::Added(String::from("/dd/e")),
+        Change::Added(String::from("/dd/newdir")),
+        Change::Renamed(String::from("/dd/a"), String::from("/dd/sub/a2")),
+    ];
+    let got = m::diff("d1", Some("d2"))
+        .map(|r| r.changes)
+        .unwrap_or_default();
+    t.ok(
+        got == want,
+        &alloc::format!("diff d1..d2 is exact ({got:?})"),
+    );
+    t.ok(
+        m::diff("d2", Some("d1")).map(|r| r.changes).ok() == Some(want),
+        "diff order doesn't matter",
+    );
+    t.ok(
+        m::diff("d2", None).map(|r| r.changes).ok()
+            == Some(alloc::vec![Change::Added(String::from("/dd/f"))]),
+        "diff snapshot..live",
+    );
+    t.ok(
+        m::diff("d2", Some("d2")).is_ok_and(|r| r.changes.is_empty()),
+        "diff of a snapshot with itself",
+    );
+    // One change among 300 files: only the path to it is read.
+    t.ok(m::snapshot("d3").is_ok(), "diff: snapshot d3");
+    let _ = ops::write_file(&p("sub/f123"), b"different");
+    match m::diff("d3", None) {
+        Ok(r) => t.ok(
+            r.changes == alloc::vec![Change::Modified(String::from("/dd/sub/f123"))]
+                && r.nodes_read <= 8,
+            &alloc::format!(
+                "diff reads only changed nodes ({} read, {} skipped)",
+                r.nodes_read,
+                r.subtrees_skipped
+            ),
+        ),
+        Err(e) => t.ok(false, &alloc::format!("diff d3..live: {e}")),
+    }
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/diff", b"d1 d2").is_ok()
+            && read_str("/sys/fs/milkfs/diff").contains("R /dd/a -> /dd/sub/a2"),
+        "/sys/fs/milkfs/diff",
+    );
+    t.err(
+        m::diff("nope", None),
+        Errno::ENOENT,
+        "diff of a missing snapshot",
+    );
+    for n in ["d1", "d2", "d3"] {
+        let _ = m::delete_snapshot(n);
+    }
+    rm_rf(&alloc::format!("{vp}/dd"));
+}
+
+/// Version history on the test volume.
+fn milkfs_versions(t: &mut T, vp: &str) {
+    use super::milkfs as m;
+    let f = alloc::format!("{vp}/doc.txt");
+    let snaps = || -> Vec<String> {
+        m::snapshots()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    };
+    let _ = ops::write_file(&f, b"version one");
+    let _ = m::snapshot("v1");
+    let _ = ops::write_file(&f, b"version two, longer");
+    let _ = m::snapshot("v2");
+    let _ = m::snapshot("v2b"); // same content: must collapse
+    let _ = ops::rename(&f, &alloc::format!("{vp}/renamed doc.txt"));
+    let f = alloc::format!("{vp}/renamed doc.txt");
+    let _ = ops::write_file(&f, b"three");
+    let v = m::versions(&f).unwrap_or_default();
+    let names: Vec<Option<String>> = v.iter().map(|x| x.snapshot.clone()).collect();
+    t.ok(
+        names == alloc::vec![Some(String::from("v1")), Some(String::from("v2")), None],
+        &alloc::format!("versions: distinct versions, renamed file followed ({names:?})"),
+    );
+    t.ok(
+        v.iter().map(|x| x.size).collect::<Vec<_>>() == alloc::vec![11, 19, 5]
+            && v[0].hash != v[1].hash,
+        "versions: sizes and hashes",
+    );
+    t.ok(
+        ops::write_file("/sys/fs/milkfs/versions", f.as_bytes()).is_ok()
+            && read_str("/sys/fs/milkfs/versions").contains("v2\t"),
+        "/sys/fs/milkfs/versions",
+    );
+    let before = snaps().len();
+    t.ok(m::restore_version(&f, "v1").is_ok(), "restore a version");
+    t.ok(read_str(&f) == "version one", "restored content");
+    t.ok(
+        snaps().len() == before + 1 && snaps().iter().any(|s| s.starts_with("pre-restore-")),
+        "restore kept the unsaved current version in a snapshot",
+    );
+    let before = snaps().len();
+    t.ok(
+        ops::write_file(
+            "/sys/fs/milkfs/restore",
+            alloc::format!("v2 {f}").as_bytes(),
+        )
+        .is_ok()
+            && read_str(&f) == "version two, longer",
+        "restore via /sys (path with a space)",
+    );
+    t.ok(
+        snaps().len() == before,
+        "no safety snapshot when the current version is kept",
+    );
+    t.err(
+        m::versions(&alloc::format!("{vp}/nope")),
+        Errno::ENOENT,
+        "versions of a missing file",
+    );
+    t.err(
+        m::versions("/etc/motd"),
+        Errno::EXDEV,
+        "versions outside the volume",
+    );
+    for s in snaps() {
+        let _ = m::delete_snapshot(&s);
+    }
+    let _ = ops::unlink(&f);
+}
+
+/// check / check --repair on the test volume, with damage made on purpose.
+fn milkfs_fsck(
+    t: &mut T,
+    vol: &alloc::sync::Arc<super::milkfs::Volume>,
+    vp: &str,
+    dev: &super::blockdev::BlockRef,
+) {
+    use super::milkfs::{self as m, format::*, items::LIVE};
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check: clean volume is clean",
+    );
+    let _ = ops::write_file(
+        &alloc::format!("{vp}/victim.txt"),
+        b"precious data, 4 KiB+".repeat(250).as_slice(),
+    );
+    let _ = ops::write_file(&alloc::format!("{vp}/keep.txt"), b"keep");
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        // An inode with a link but no entry, an entry to a missing inode, a wrong count.
+        let lost = st.alloc_ino();
+        let t0 = (1, 0);
+        let _ = st.put_inode(
+            lost,
+            &InodeItem {
+                mode: 0o100644,
+                nlink: 1,
+                parent: ROOT_INO,
+                atime: t0,
+                mtime: t0,
+                ctime: t0,
+                ..InodeItem::default()
+            },
+        );
+        let _ = st.add_dirent(
+            ROOT_INO,
+            Dirent {
+                ino: 999_999,
+                dtype: 8,
+                name: String::from("ghost"),
+            },
+        );
+        if let Ok(Some(d)) = st.lookup(LIVE, ROOT_INO, "keep.txt") {
+            let mut i = st.inode(LIVE, d.ino).unwrap();
+            i.nlink = 7;
+            let _ = st.put_inode(d.ino, &i);
+        }
+        let _ = st.commit();
+    }
+    let gen_slot = vol.state.lock().sb.generation % 2;
+    let other = 1 - gen_slot;
+    let _ = dev.write_blocks(other * 8, &[0xAB; 4096]);
+    let r = m::check(false).unwrap_or_default();
+    t.ok(
+        r.problems.len() >= 3
+            && r.notes.iter().any(|n| n.contains("torn"))
+            && r.repaired.is_empty(),
+        &alloc::format!(
+            "check finds the damage and the torn slot, changes nothing ({} problems)",
+            r.problems.len()
+        ),
+    );
+    t.ok(
+        read_str(&alloc::format!("{vp}/keep.txt")) == "keep",
+        "check alone leaves files alone",
+    );
+    let r = m::check(true).unwrap_or_default();
+    t.ok(
+        r.repaired.len() >= 4,
+        &alloc::format!("repair fixes it ({} repairs)", r.repaired.len()),
+    );
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check is clean after repair",
+    );
+    t.ok(
+        ops::readdir(&alloc::format!("{vp}/lost+found"))
+            .is_ok_and(|e| e.len() == 1 && e[0].name.starts_with('#')),
+        "unreferenced inode is in lost+found",
+    );
+    t.err(
+        ops::stat(&alloc::format!("{vp}/ghost")),
+        Errno::ENOENT,
+        "dangling entry removed",
+    );
+    t.ok(
+        ops::stat(&alloc::format!("{vp}/keep.txt")).is_ok_and(|s| s.nlink == 1),
+        "link count fixed",
+    );
+    let mut b = [0u8; 4096];
+    t.ok(
+        dev.read_blocks(other * 8, &mut b).is_ok() && Superblock::decode(&b).is_some(),
+        "damaged superblock slot rewritten",
+    );
+    // Data damage: overwrite a data block behind the cache, then check.
+    let blk = {
+        let st = vol.state.lock();
+        let ino = st
+            .lookup(LIVE, ROOT_INO, "victim.txt")
+            .ok()
+            .flatten()
+            .map(|d| d.ino);
+        ino.and_then(|i| st.extents(LIVE, i, 0).ok())
+            .and_then(|e| e.first().map(|x| x.1.block))
+    };
+    if let Some(blk) = blk {
+        let mut saved = [0u8; 4096];
+        let _ = dev.read_blocks(blk * 8, &mut saved);
+        let _ = dev.write_blocks(blk * 8, &[0u8; 4096]);
+        vol.state.lock().cache().discard();
+        let r = m::check(true).unwrap_or_default();
+        t.ok(
+            r.unrepairable
+                .iter()
+                .any(|u| u.contains("victim.txt") && u.contains("checksum")),
+            "bad data block reported with its path, not 'repaired'",
+        );
+        t.err(
+            ops::read_file(&alloc::format!("{vp}/victim.txt")),
+            Errno::EIO,
+            "reading it gives EIO",
+        );
+        let _ = dev.write_blocks(blk * 8, &saved);
+        vol.state.lock().cache().discard();
+        super::pagecache::drop_all();
+        t.ok(
+            m::check(false).is_ok_and(|r| r.clean()),
+            "clean again once the block is back",
+        );
+    }
+    rm_rf(&alloc::format!("{vp}/lost+found"));
+    let _ = ops::unlink(&alloc::format!("{vp}/victim.txt"));
+    let _ = ops::unlink(&alloc::format!("{vp}/keep.txt"));
+}
+
 /// Small-file benchmark on the test volume: printed, not checked.
+/// B+tree deletes: random operations against a model, then the shape after mass deletes.
+fn milkfs_tree(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: &str) {
+    use super::milkfs::{self as m, btree, format::*, items::LIVE};
+    use alloc::collections::BTreeMap;
+    // Random inserts / replaces / deletes of test items (an unused kind, objects far above
+    // any inode) with values of random size, committed now and then; the tree must equal
+    // a BTreeMap model throughout and shrink back when everything is deleted.
+    const KIND: u8 = 200;
+    const OBJ: u64 = 0x7000_0000_0000_0000;
+    let mut rng = 0x2545_f491_4f6c_dd1du64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let mut model: BTreeMap<Key, Vec<u8>> = BTreeMap::new();
+    let base = vol
+        .state
+        .lock()
+        .verify_space()
+        .map(|s| s.allocated)
+        .unwrap_or(0);
+    let mut ok = true;
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        for i in 0..6000u32 {
+            let r = next();
+            let key = Key::new(OBJ + r % 400, KIND, (r >> 20) % 50);
+            if r >> 40 & 3 == 0 {
+                let had = model.remove(&key).is_some();
+                ok &= st.test_del(&key).is_ok_and(|f| f == had);
+            } else {
+                let len = (r >> 44) as usize % 300;
+                let v: Vec<u8> = (0..len).map(|j| (j as u64 ^ r) as u8).collect();
+                ok &= st.test_put(key, v.clone()).is_ok();
+                model.insert(key, v);
+            }
+            if i % 700 == 0 {
+                ok &= st.commit().is_ok();
+            }
+        }
+        let _ = st.commit();
+        let got = st.test_items(Key::new(OBJ, KIND, 0), Key::new(OBJ + 400, KIND + 1, 0));
+        ok &= got.is_ok_and(|g| g.len() == model.len() && g.into_iter().eq(model.clone()));
+        // Delete all but every 20th, check, then the rest.
+        let keys: Vec<Key> = model.keys().copied().collect();
+        for (i, k) in keys.iter().enumerate() {
+            if i % 20 != 0 {
+                ok &= st.test_del(k).is_ok_and(|f| f);
+                model.remove(k);
+            }
+        }
+        let _ = st.commit();
+        let got = st.test_items(Key::new(OBJ, KIND, 0), Key::new(OBJ + 400, KIND + 1, 0));
+        ok &= got.is_ok_and(|g| g.into_iter().eq(model.clone()));
+        let shape = btree::stats(&st.store, st.sb.root).unwrap_or_default();
+        ok &= shape.underfull == 0;
+        for k in model.keys() {
+            ok &= st.test_del(k).is_ok_and(|f| f);
+        }
+        let _ = st.commit();
+    }
+    t.ok(
+        ok,
+        "B+tree: 6000 random inserts/replaces/deletes match a model, no underfull nodes",
+    );
+    let after = vol.state.lock().verify_space();
+    t.ok(
+        after.is_ok_and(|s| s.allocated == base && s.leaked == 0 && s.free_but_used == 0),
+        "B+tree: back to the same size after deleting everything, space exact",
+    );
+    // Mass create / delete through the VFS (scripts/treetest.sh does 50 000).
+    match m::tree_test(&alloc::format!("{vp}/tt"), 3000) {
+        Ok((_, [s0, s1, s2, s3])) => {
+            t.ok(
+                s1.fill_pct() >= 70,
+                &alloc::format!("3000 files: tree {}% full", s1.fill_pct()),
+            );
+            t.ok(
+                s2.underfull == 0 && s2.height < s1.height && s2.nodes * 10 < s1.nodes,
+                &alloc::format!(
+                    "99% deleted: height {} -> {}, nodes {} -> {}, none underfull",
+                    s1.height,
+                    s2.height,
+                    s1.nodes,
+                    s2.nodes
+                ),
+            );
+            t.ok(
+                s3.height == s0.height && s3.nodes == s0.nodes && s3.items == s0.items,
+                "all deleted: the tree is as before",
+            );
+        }
+        Err(e) => t.ok(false, &alloc::format!("tree test: {e}")),
+    }
+}
+
+/// Reflink copies (FICLONE) and dedupe: shared blocks, copy-on-write, exact space
+/// through snapshots, rollback and deletes, `check` of the shared-block table.
+fn milkfs_reflink(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: &str) {
+    use super::milkfs::{self as m, format::*, items::LIVE};
+    let dir = alloc::format!("{vp}/rl");
+    let p = |n: &str| alloc::format!("{dir}/{n}");
+    let _ = ops::mkdir(&dir, 0o755);
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i * 13 % 247) as u8).collect();
+    let _ = ops::write_file(&p("src"), &data);
+    let _ = super::sync_all();
+    let free = || vol.state.lock().store.free_blocks();
+    let blocks = |path: &str| ops::stat(path).map(|s| s.blocks).unwrap_or(0);
+    let clone = |src: &str, dst: &str| -> super::errno::Result<()> {
+        let s = ops::open(src, O_RDONLY, 0)?;
+        let d = ops::open(dst, O_WRONLY | O_CREAT, 0o644)?;
+        ops::ficlone(&s, &d)
+    };
+    let f0 = free();
+    t.ok(
+        clone(&p("src"), &p("copy")).is_ok(),
+        "FICLONE a 300 KB file",
+    );
+    let _ = super::sync_all();
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == data),
+        "the reflink copy reads the same",
+    );
+    let used = f0 - free();
+    t.ok(
+        used < 8 && blocks(&p("copy")) == blocks(&p("src")),
+        &alloc::format!("it shares the 74 data blocks ({used} blocks of metadata used)"),
+    );
+    t.ok(
+        vol.state.lock().version == REFLINK_VERSION,
+        "the volume is format v2 now (older kernels must refuse it)",
+    );
+    milk_space(t, vol, "space exact after a reflink");
+    // Copy-on-write: writing one copy leaves the other alone.
+    if let Ok(f) = ops::open(&p("copy"), O_WRONLY, 0) {
+        let _ = f.pwrite(b"changed in the copy", 100_000);
+    }
+    let mut want = data.clone();
+    want[100_000..100_019].copy_from_slice(b"changed in the copy");
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == want)
+            && ops::read_file(&p("src")).is_ok_and(|d| d == data),
+        "writing the copy doesn't touch the original",
+    );
+    milk_space(t, vol, "space exact after writing into a shared run");
+    // A snapshot holds both; delete the original, then the snapshot.
+    let _ = m::snapshot("rl-a");
+    let _ = ops::unlink(&p("src"));
+    t.ok(
+        ops::read_file(&p("copy")).is_ok_and(|d| d == want),
+        "the copy survives deleting the original",
+    );
+    milk_space(
+        t,
+        vol,
+        "space exact after deleting the original under a snapshot",
+    );
+    let _ = m::delete_snapshot("rl-a");
+    milk_space(t, vol, "space exact after deleting the snapshot");
+    // Reflink after a snapshot, then roll back to it.
+    let _ = m::snapshot("rl-b");
+    t.ok(
+        clone(&p("copy"), &p("copy2")).is_ok(),
+        "reflink after a snapshot",
+    );
+    let _ = ops::unlink(&p("copy"));
+    let _ = m::rollback("rl-b");
+    t.ok(
+        ops::stat(&p("copy2")).is_err() && ops::read_file(&p("copy")).is_ok_and(|d| d == want),
+        "rollback: the later reflink is gone, the file is back",
+    );
+    milk_space(t, vol, "space exact after the rollback");
+    let _ = m::delete_snapshot("rl-b");
+    // Small (inline) files are just copied; errors.
+    let _ = ops::write_file(&p("small"), b"tiny");
+    t.ok(
+        clone(&p("small"), &p("small2")).is_ok() && read_str(&p("small2")) == "tiny",
+        "reflink of an inline file copies it",
+    );
+    t.err(
+        clone(&dir, &p("x")),
+        Errno::EISDIR,
+        "reflink from a directory",
+    );
+    t.err(
+        clone(&p("small"), &p("small")),
+        Errno::EINVAL,
+        "reflink onto itself",
+    );
+    let _ = ops::write_file("/tmp/rl-tmpfs", b"on tmpfs");
+    t.err(
+        clone("/tmp/rl-tmpfs", &p("y")),
+        Errno::EXDEV,
+        "reflink from another file system",
+    );
+    let _ = ops::unlink("/tmp/rl-tmpfs");
+    // Dedupe: three identical files written separately, one same-size different one.
+    let other: Vec<u8> = data.iter().map(|b| b ^ 1).collect();
+    for n in ["d1", "d2", "d3"] {
+        let _ = ops::write_file(&p(n), &data);
+    }
+    let _ = ops::write_file(&p("d4"), &other);
+    let _ = super::sync_all();
+    let dry = m::dedupe(&dir, true);
+    t.ok(
+        dry.as_ref()
+            .is_ok_and(|r| r.deduped == 2 && r.blocks == 148),
+        &alloc::format!("dedupe dry run finds 2 files to share ({dry:?})"),
+    );
+    let f1 = free();
+    let r = m::dedupe(&dir, false);
+    t.ok(
+        r.as_ref().is_ok_and(|r| r.deduped == 2 && r.freed > 140) && free() > f1 + 140,
+        &alloc::format!("dedupe shares them and frees ~148 blocks ({r:?})"),
+    );
+    t.ok(
+        ["d1", "d2", "d3"]
+            .iter()
+            .all(|n| ops::read_file(&p(n)).is_ok_and(|d| d == data))
+            && ops::read_file(&p("d4")).is_ok_and(|d| d == other),
+        "deduped files read the same",
+    );
+    t.ok(
+        m::dedupe(&dir, false).is_ok_and(|r| r.already == 2 && r.deduped == 0),
+        "dedupe again: already shared",
+    );
+    milk_space(t, vol, "space exact after dedupe");
+    t.ok(
+        m::check(false).is_ok_and(|r| r.clean()),
+        "check: shared-block table matches the references",
+    );
+    // Damage the table (one count too low: deleting a copy would free a block in use).
+    {
+        let mut st = vol.state.lock();
+        let _ = st.set_cur(LIVE);
+        let b = st
+            .lookup(LIVE, st.resolve_in(LIVE, "/rl").unwrap_or(0), "d2")
+            .ok()
+            .flatten()
+            .and_then(|d| st.exts(LIVE, d.ino, 0, 1).ok())
+            .and_then(|e| e.first().map(|e| e.block));
+        if let Some(b) = b
+            && let Ok(ents) = st.bref_entries(LIVE, b, b + 1)
+            && let Some(&(s0, l, x)) = ents.first()
+        {
+            let _ = st.put_bref(s0, l, x - 1);
+        }
+        let _ = st.commit();
+    }
+    let found = m::check(false);
+    t.ok(
+        found
+            .as_ref()
+            .is_ok_and(|r| r.problems.iter().any(|p| p.contains("shared-block table"))),
+        "check finds a wrong shared-block count",
+    );
+    let fixed = m::check(true);
+    t.ok(
+        fixed.is_ok_and(|r| r.repaired.iter().any(|x| x.contains("rebuilt")))
+            && m::check(false).is_ok_and(|r| r.clean()),
+        "repair rebuilds the table",
+    );
+    // Everything goes; space comes back exactly.
+    rm_rf(&dir);
+    let _ = super::sync_all();
+    milk_space(t, vol, "space exact after deleting every copy");
+}
+
+/// A file made straight in a volume's live tree (no VFS): returns its inode.
+fn raw_file(
+    st: &mut super::milkfs::volume::State,
+    name: &str,
+    data: &[u8],
+    nlink: u32,
+) -> Option<u64> {
+    use super::milkfs::format::*;
+    let _ = st.set_cur(super::milkfs::items::LIVE);
+    let ino = st.alloc_ino();
+    let size = st.write_data(ino, 0, 0, data).ok()?;
+    st.put_inode(
+        ino,
+        &InodeItem {
+            mode: 0o100644,
+            nlink,
+            size,
+            parent: ROOT_INO,
+            ..InodeItem::default()
+        },
+    )
+    .ok()?;
+    if nlink > 0 {
+        st.add_dirent(
+            ROOT_INO,
+            Dirent {
+                ino,
+                dtype: 8,
+                name: String::from(name),
+            },
+        )
+        .ok()?;
+    }
+    Some(ino)
+}
+
+/// The persistent space map, on its own RAM disk driven through `State` (re-opens are
+/// "reboots"; dropping a State without a commit is a crash).
+fn milkfs_spacemap(t: &mut T) {
+    use super::blockdev::BlockRef;
+    use super::milkfs::format::*;
+    use super::milkfs::items::LIVE;
+    use super::milkfs::volume::State;
+    let Some(disk) = t.must(
+        super::ramdisk::RamDisk::new("ram1", 8 << 20),
+        "map RAM disk",
+    ) else {
+        return;
+    };
+    let dev: BlockRef = alloc::sync::Arc::new(disk);
+    if super::milkfs::mkfs(&dev, "MapTest", false).is_err() {
+        t.ok(false, "mkfs the map test volume");
+        return;
+    }
+    let exact = |st: &mut State| {
+        st.verify_space()
+            .is_ok_and(|s| s.leaked == 0 && s.free_but_used == 0 && s.reachable == s.allocated)
+    };
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "open the map test volume");
+        return;
+    };
+    t.ok(!r.fast, "fresh volume: no space map yet, scanned");
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let _ = raw_file(&mut st, "big", &big, 1);
+    let _ = raw_file(&mut st, "small", b"small", 1);
+    let _ = st.commit();
+    // Unlinked while open, then the machine goes down: on the orphan list.
+    let orphan = raw_file(&mut st, "", &big[..50_000], 0).unwrap_or(0);
+    let _ = st.add_orphan(orphan);
+    let _ = st.commit();
+    let committed = st.sb.generation;
+    drop(st); // crash: no further commit
+
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "re-open with a space map");
+        return;
+    };
+    t.ok(
+        r.fast && r.generation == committed,
+        &alloc::format!(
+            "re-open loads the space map, no scan ({} us)",
+            r.mount_ns / 1000
+        ),
+    );
+    t.ok(
+        r.orphans == 1 && st.inode(LIVE, orphan).is_err(),
+        "orphan list: the unlinked-while-open file is deleted at mount",
+    );
+    t.ok(exact(&mut st), "space exact after a mapped mount");
+    let mut b = vec![0u8; 300_000];
+    t.ok(
+        st.lookup(LIVE, ROOT_INO, "big")
+            .ok()
+            .flatten()
+            .and_then(|d| st.read_data(LIVE, d.ino, 300_000, 0, &mut b).ok())
+            == Some(300_000)
+            && b == big,
+        "data intact",
+    );
+
+    // Damage a bitmap chunk: mount notices (checksum) and rebuilds from the trees.
+    let map = st.sb.spacemap;
+    let chunk = st
+        .store
+        .read_map_index(map)
+        .ok()
+        .and_then(|i| i.chunks.first().copied());
+    drop(st);
+    if let Some(c) = chunk {
+        let _ = dev.write_blocks(c.block * 8, &[0x5au8; BLOCK]);
+    }
+    let Ok((mut st, r)) = State::open(dev.clone()) else {
+        t.ok(false, "re-open with a damaged space map");
+        return;
+    };
+    t.ok(
+        !r.fast && r.problems == 0,
+        "damaged space map: rebuilt by a scan",
+    );
+    t.ok(exact(&mut st), "space exact after the rebuild");
+    let _ = raw_file(&mut st, "after", b"x", 1);
+    let _ = st.commit();
+    drop(st);
+    let r = State::open(dev.clone()).map(|(_, r)| r.fast);
+    t.ok(r == Ok(true), "the next commit writes a good map again");
+
+    // A free map that lost a block in use: check finds it, repair marks it again.
+    let Ok((mut st, _)) = State::open(dev.clone()) else {
+        return;
+    };
+    let victim = st
+        .lookup(LIVE, ROOT_INO, "big")
+        .ok()
+        .flatten()
+        .and_then(|d| st.extents(LIVE, d.ino, 0).ok())
+        .and_then(|e| e.first().map(|x| x.1.block));
+    if let Some(v) = victim {
+        st.store.sweep_free(v);
+    }
+    let found = st.check(false).is_ok_and(|r| {
+        r.problems
+            .iter()
+            .any(|p| p.contains("1 reachable blocks marked free"))
+    });
+    t.ok(found, "check finds a block in use marked free");
+    let fixed = st
+        .check(true)
+        .is_ok_and(|r| r.repaired.iter().any(|x| x.contains("marked 1")));
+    t.ok(fixed && exact(&mut st), "repair marks it used again");
+}
+
 fn milkfs_bench(v: &super::milkfs::Volume, vp: &str) {
     let dir = alloc::format!("{vp}/.bench");
     rm_rf(&dir);

@@ -15,12 +15,15 @@
 pub mod btree;
 pub mod clone;
 pub mod crashtest;
+pub mod diff;
 pub mod format;
+pub mod fsck;
 pub mod inode;
 pub mod items;
 pub mod snap;
 pub mod store;
 pub mod timemachine;
+pub mod versions;
 pub mod volume;
 
 use alloc::format;
@@ -106,14 +109,22 @@ pub fn automount() {
             Ok((vol, r)) => {
                 let st = vol.state.lock();
                 kprintln!(
-                    "milkfs: {} mounted at {path}: generation {}, {} inodes, {}/{} blocks used, {} snapshot(s), check {}{}",
+                    "milkfs: {} mounted at {path} in {}.{:02} ms: generation {}, {}, {}/{} blocks used, {} snapshot(s), check {}{}",
                     dev.name(),
+                    r.mount_ns / 1_000_000,
+                    r.mount_ns / 10_000 % 100,
                     r.generation,
-                    r.inodes,
+                    if r.fast {
+                        String::from("space map current")
+                    } else {
+                        format!("{} inodes", r.inodes)
+                    },
                     r.used_blocks,
                     st.store.total(),
                     st.snaps.len(),
-                    if r.problems == 0 {
+                    if r.fast {
+                        "skipped (snap check)"
+                    } else if r.problems == 0 {
                         "clean"
                     } else {
                         "FOUND PROBLEMS"
@@ -172,6 +183,39 @@ pub fn setup_home() {
     }
 }
 
+// ---- diff ---------------------------------------------------------------------------
+
+/// What changed from snapshot `a` to snapshot `b` (or the live volume when `b` is `None`
+/// or `"live"`). The order of `a` and `b` doesn't matter: older -> newer.
+pub fn diff(a: &str, b: Option<&str>) -> Result<diff::DiffResult> {
+    primary()?.state.lock().diff(a, b)
+}
+
+static LAST_DIFF: SpinLock<String> = SpinLock::new(String::new());
+
+fn diff_control(arg: &str) -> Result<()> {
+    let mut w = arg.split_whitespace();
+    let a = w.next().ok_or(Errno::EINVAL)?;
+    let b = w.next();
+    if w.next().is_some() {
+        return Err(Errno::EINVAL);
+    }
+    let r = diff(a, b)?;
+    let mut s = format!(
+        "diff {a}..{}: {} change(s) ({} tree nodes read, {} unchanged subtrees skipped)\n",
+        b.unwrap_or("live"),
+        r.changes.len(),
+        r.nodes_read,
+        r.subtrees_skipped
+    );
+    for c in &r.changes {
+        s.push_str(&c.line());
+        s.push('\n');
+    }
+    *LAST_DIFF.lock() = s;
+    Ok(())
+}
+
 /// Where packages live (`milk install`).
 pub const APPLICATIONS: &str = "/Applications";
 
@@ -190,6 +234,266 @@ pub fn setup_applications() {
     if let Err(e) = crate::fs::path::bind(&on_disk, APPLICATIONS) {
         kprintln!("milkfs: bind {on_disk} -> {APPLICATIONS} failed: {e}");
     }
+}
+
+// ---- versions -----------------------------------------------------------------------
+
+pub use versions::Version;
+
+/// The live file at `path` (any VFS path, e.g. `/home/milk/Documents/ideas.md`), as
+/// (volume, inode number).
+fn live_file(path: &str) -> Result<(Arc<Volume>, u64)> {
+    let v = primary()?;
+    let i = crate::fs::ops::lookup(path)?;
+    if i.dev() != v.dev {
+        return Err(Errno::EXDEV); // not on the (live) milkfs volume
+    }
+    if i.kind() != crate::fs::node::InodeType::File {
+        return Err(Errno::EISDIR);
+    }
+    Ok((v, i.ino()))
+}
+
+/// The distinct versions of the file at `path` across the volume's snapshots, oldest
+/// first; the last entry is the current file (`snapshot: None`).
+pub fn versions(path: &str) -> Result<alloc::vec::Vec<Version>> {
+    let (v, ino) = live_file(path)?;
+    let st = v.state.lock();
+    st.versions_of(ino)
+}
+
+/// Put the content `path` had in `snapshot` back into the live file. If the current
+/// content isn't already kept in a snapshot, a `pre-restore-<time>` snapshot is taken
+/// first, so restoring never loses anything.
+pub fn restore_version(path: &str, snapshot: &str) -> Result<()> {
+    let (v, ino) = live_file(path)?;
+    let mount = api_volume_path().ok_or(Errno::ENODEV)?;
+    let (src, need_safety) = {
+        let st = v.state.lock();
+        let s = st
+            .snaps
+            .iter()
+            .find(|s| s.name == snapshot)
+            .ok_or(Errno::ENOENT)?;
+        let in_snap = match st.inode(s.generation, ino) {
+            Ok(_) => Some(ino),
+            Err(_) => st
+                .path_in(items::LIVE, ino)
+                .and_then(|p| st.resolve_in(s.generation, &p)),
+        }
+        .ok_or(Errno::ENOENT)?;
+        let rel = st.path_in(s.generation, in_snap).ok_or(Errno::ENOENT)?;
+        let (cur, _) = st.content_hash(items::LIVE, ino)?;
+        let kept = st.snaps.iter().any(|s| {
+            st.inode(s.generation, ino).is_ok()
+                && st
+                    .content_hash(s.generation, ino)
+                    .is_ok_and(|(h, _)| h == cur)
+        });
+        (format!("{mount}/.snapshots/{snapshot}{rel}"), !kept)
+    };
+    if need_safety {
+        let name = format!(
+            "pre-restore-{}",
+            timemachine::stamp(crate::fs::clock::now().sec as u64)
+        );
+        v.state.lock().snap_create(&name)?;
+    }
+    let data = crate::fs::ops::read_file(&src)?;
+    crate::fs::ops::write_file(path, &data)
+}
+
+static LAST_VERSIONS: SpinLock<String> = SpinLock::new(String::new());
+
+fn versions_control(path: &str) -> Result<()> {
+    let list = versions(path)?;
+    let mut s = format!("# {path}\n");
+    for x in list {
+        let _ = writeln!(
+            s,
+            "{}\t{}\t{}\t{}\t{:016x}",
+            x.snapshot.as_deref().unwrap_or("current"),
+            x.taken,
+            x.mtime,
+            x.size,
+            x.hash
+        );
+    }
+    *LAST_VERSIONS.lock() = s;
+    Ok(())
+}
+
+// ---- check / repair -----------------------------------------------------------------
+
+/// Check the primary volume; with `repair`, fix what is safe to fix (see `fsck`).
+pub fn check(repair: bool) -> Result<fsck::CheckReport> {
+    let v = primary()?;
+    let r = v.state.lock().check(repair);
+    if repair {
+        crate::fs::pagecache::invalidate_dev(v.dev);
+    }
+    r
+}
+
+static LAST_CHECK: SpinLock<String> = SpinLock::new(String::new());
+
+// ---- benchmark ----------------------------------------------------------------------
+
+static LAST_BENCH: SpinLock<String> = SpinLock::new(String::new());
+
+/// Create `n` files of `size` bytes in `dir` (on the primary volume), sync, read them
+/// back, delete them, sync; report the times, commits and blocks the files took.
+pub fn bench_create(dir: &str, n: usize, size: usize) -> Result<String> {
+    use crate::fs::ops;
+    let v = primary()?;
+    let _ = ops::mkdir_all(dir, 0o755);
+    crate::fs::sync_all()?;
+    let data: alloc::vec::Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let stat = |v: &Volume| {
+        let st = v.state.lock();
+        (st.commits, st.store.free_blocks())
+    };
+    let ((c0, f0), t0) = (stat(&v), crate::timer::now_ns());
+    for i in 0..n {
+        ops::write_file(&format!("{dir}/f{i}"), &data)?;
+    }
+    crate::fs::sync_all()?;
+    let ((c1, f1), t1) = (stat(&v), crate::timer::now_ns());
+    crate::fs::pagecache::drop_all();
+    let mut ok = 0;
+    for i in 0..n {
+        if ops::read_file(&format!("{dir}/f{i}")).is_ok_and(|d| d == data) {
+            ok += 1;
+        }
+    }
+    let t2 = crate::timer::now_ns();
+    for i in 0..n {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    let _ = ops::rmdir(dir);
+    crate::fs::sync_all()?;
+    let ((c3, _), t3) = (stat(&v), crate::timer::now_ns());
+    let ms = |a: u64, b: u64| format!("{}.{:01} ms", (b - a) / 1_000_000, (b - a) / 100_000 % 10);
+    let r = format!(
+        "{n} x {size} B: create {} ({} commits, {} blocks), read {} ({ok} ok), delete {} ({} commits)\n",
+        ms(t0, t1),
+        c1 - c0,
+        f0.saturating_sub(f1),
+        ms(t1, t2),
+        ms(t2, t3),
+        c3 - c1
+    );
+    kprintln!("milkfs bench: {}", r.trim_end());
+    *LAST_BENCH.lock() = r.clone();
+    Ok(r)
+}
+
+// ---- dedupe -------------------------------------------------------------------------
+
+pub use inode::DedupeReport;
+
+static LAST_DEDUPE: SpinLock<String> = SpinLock::new(String::new());
+
+/// Make identical files under `dir` (any VFS path on a milkfs volume) share their blocks;
+/// see [`inode::dedupe`]. `dry_run`: only report.
+pub fn dedupe(dir: &str, dry_run: bool) -> Result<DedupeReport> {
+    let d = crate::fs::ops::lookup(dir)?;
+    let r = inode::dedupe(&d, dry_run)?;
+    let mut s = format!(
+        "{dir}: {} file(s) with data, {} group(s) of identical files, {} {}, {} already shared, {} same hash but different\n",
+        r.files,
+        r.groups,
+        r.deduped,
+        if dry_run { "could share" } else { "now share" },
+        r.already,
+        r.differ
+    );
+    let _ = writeln!(
+        s,
+        "{} block(s) ({} KiB) {}{}",
+        r.blocks,
+        r.blocks * 4,
+        if dry_run { "would be shared" } else { "shared" },
+        if dry_run {
+            String::new()
+        } else {
+            format!(
+                ", {} block(s) freed now{}",
+                r.freed,
+                if (r.freed as u64) < r.blocks {
+                    " (snapshots keep the rest until they are deleted)"
+                } else {
+                    ""
+                }
+            )
+        }
+    );
+    audit_op(
+        "fs.dedupe",
+        &format!("dir={dir} dry_run={dry_run} deduped={}", r.deduped),
+        &Ok::<(), Errno>(()),
+    );
+    *LAST_DEDUPE.lock() = s;
+    Ok(r)
+}
+
+// ---- tree shape test --------------------------------------------------------------
+
+static LAST_TREETEST: SpinLock<String> = SpinLock::new(String::new());
+
+/// Shape of the primary volume's live tree (committed first).
+pub fn tree_stats() -> Result<btree::TreeStats> {
+    let v = primary()?;
+    let mut st = v.state.lock();
+    st.commit()?;
+    btree::stats(&st.store, st.sb.root)
+}
+
+fn stats_line(what: &str, s: &btree::TreeStats) -> String {
+    format!(
+        "{what:<22} height {}, {} nodes ({} leaves), {} items, fill {}%, {} underfull\n",
+        s.height,
+        s.nodes,
+        s.leaves,
+        s.items,
+        s.fill_pct(),
+        s.underfull
+    )
+}
+
+/// Create `n` empty files in `dir`, delete 99 of every 100, then the rest; the live
+/// tree's shape after each step.
+pub fn tree_test(dir: &str, n: usize) -> Result<(String, [btree::TreeStats; 4])> {
+    use crate::fs::ops;
+    let s0 = tree_stats()?;
+    ops::mkdir_all(dir, 0o755)?;
+    let t0 = crate::timer::now_ns();
+    for i in 0..n {
+        ops::write_file(&format!("{dir}/f{i}"), b"")?;
+    }
+    let s1 = tree_stats()?;
+    let t1 = crate::timer::now_ns();
+    for i in (0..n).filter(|i| i % 100 != 0) {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    let s2 = tree_stats()?;
+    for i in (0..n).step_by(100) {
+        ops::unlink(&format!("{dir}/f{i}"))?;
+    }
+    ops::rmdir(dir)?;
+    let s3 = tree_stats()?;
+    let t3 = crate::timer::now_ns();
+    let mut r = stats_line("before:", &s0);
+    r += &stats_line(&format!("{n} files:"), &s1);
+    r += &stats_line(&format!("{} left (99% deleted):", n.div_ceil(100)), &s2);
+    r += &stats_line("all deleted:", &s3);
+    r += &format!(
+        "create {} ms, delete {} ms\n",
+        (t1 - t0) / 1_000_000,
+        (t3 - t1) / 1_000_000
+    );
+    *LAST_TREETEST.lock() = r.clone();
+    Ok((r, [s0, s1, s2, s3]))
 }
 
 // ---- clones -------------------------------------------------------------------------
@@ -315,8 +619,29 @@ pub fn start_threads() {
 /// checks never reach the user's disk. `None` restores the real primary volume.
 static TEST_OVERRIDE: SpinLock<Option<Arc<Volume>>> = SpinLock::new(None);
 
-pub fn set_test_override(v: Option<Arc<Volume>>) {
-    *TEST_OVERRIDE.lock() = v;
+static TEST_OVERRIDE_PATH: SpinLock<String> = SpinLock::new(String::new());
+
+/// `path`: where the test volume is mounted.
+pub fn set_test_override(v: Option<(Arc<Volume>, &str)>) {
+    match v {
+        Some((v, path)) => {
+            *TEST_OVERRIDE.lock() = Some(v);
+            *TEST_OVERRIDE_PATH.lock() = String::from(path);
+        }
+        None => {
+            *TEST_OVERRIDE.lock() = None;
+            TEST_OVERRIDE_PATH.lock().clear();
+        }
+    }
+}
+
+/// Where the volume the API acts on is mounted (the test volume during the self-test).
+fn api_volume_path() -> Option<String> {
+    let t = TEST_OVERRIDE_PATH.lock().clone();
+    if !t.is_empty() {
+        return Some(t);
+    }
+    mount_path()
 }
 
 pub fn volume() -> Option<Arc<Volume>> {
@@ -493,6 +818,78 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         timemachine::control(arg(b)?)
     });
     dir.add_file("clones", clones_text);
+    dir.add_control(
+        "diff",
+        || LAST_DIFF.lock().clone(),
+        |b| diff_control(arg(b)?),
+    );
+    dir.add_control(
+        "bench",
+        || LAST_BENCH.lock().clone(),
+        |b| {
+            // `DIR N SIZE`
+            let mut w = arg(b)?.split_whitespace();
+            let (Some(d), Some(n), Some(sz)) = (w.next(), w.next(), w.next()) else {
+                return Err(Errno::EINVAL);
+            };
+            let n = n.parse().map_err(|_| Errno::EINVAL)?;
+            let sz = sz.parse().map_err(|_| Errno::EINVAL)?;
+            bench_create(d, n, sz).map(|_| ())
+        },
+    );
+    dir.add_control(
+        "dedupe",
+        || LAST_DEDUPE.lock().clone(),
+        |b| {
+            // `DIR` or `DIR dry`
+            let a = arg(b)?;
+            let (d, dry) = match a.strip_suffix(" dry") {
+                Some(d) => (d.trim(), true),
+                None => (a, false),
+            };
+            dedupe(d, dry).map(|_| ())
+        },
+    );
+    dir.add_control(
+        "treetest",
+        || LAST_TREETEST.lock().clone(),
+        |b| {
+            // `DIR N`
+            let mut w = arg(b)?.split_whitespace();
+            let (Some(d), Some(n)) = (w.next(), w.next()) else {
+                return Err(Errno::EINVAL);
+            };
+            let (r, _) = tree_test(d, n.parse().map_err(|_| Errno::EINVAL)?)?;
+            for l in r.lines() {
+                kprintln!("milkfs treetest: {l}");
+            }
+            Ok(())
+        },
+    );
+    dir.add_control(
+        "check",
+        || LAST_CHECK.lock().clone(),
+        |b| {
+            let repair = match arg(b)? {
+                "check" => false,
+                "repair" => true,
+                _ => return Err(Errno::EINVAL),
+            };
+            let r = check(repair)?;
+            *LAST_CHECK.lock() = r.text();
+            Ok(())
+        },
+    );
+    dir.add_control(
+        "versions",
+        || LAST_VERSIONS.lock().clone(),
+        |b| versions_control(arg(b)?),
+    );
+    dir.add_control("restore", String::new, |b| {
+        // `SNAPSHOT PATH` (the path may contain spaces).
+        let (snap, path) = arg(b)?.split_once(' ').ok_or(Errno::EINVAL)?;
+        restore_version(path.trim(), snap)
+    });
     dir.add_control("clone", clones_text, |b| {
         let mut w = arg(b)?.split_whitespace();
         let (Some(snap), Some(name), None) = (w.next(), w.next(), w.next()) else {

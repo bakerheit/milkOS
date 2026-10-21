@@ -1,4 +1,7 @@
-//! cp [-r] SRC... DEST
+//! cp [-r] [--reflink[=always|auto]] SRC... DEST
+//!
+//! --reflink / --reflink=always: share the source's blocks copy-on-write (FICLONE; milkfs
+//! only), fail if that isn't possible; --reflink=auto: fall back to copying.
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -6,7 +9,15 @@ use alloc::string::String;
 use rt::io::flags;
 use rt::sys;
 rt::main!(main);
-fn copy_file(src: &str, dst: &str) -> bool {
+
+#[derive(Clone, Copy, PartialEq)]
+enum Reflink {
+    Never,
+    Auto,
+    Always,
+}
+
+fn copy_file(src: &str, dst: &str, reflink: Reflink) -> bool {
     let inf = match sys::open(src, sys::O_RDONLY | sys::O_CLOEXEC) {
         Ok(f) => f,
         Err(e) => {
@@ -27,6 +38,20 @@ fn copy_file(src: &str, dst: &str) -> bool {
             return false;
         }
     };
+    if reflink != Reflink::Never {
+        match sys::ficlone(inf, outf) {
+            Ok(()) => {
+                let _ = (sys::close(inf), sys::close(outf));
+                return true;
+            }
+            Err(e) if reflink == Reflink::Always => {
+                rt::eprintln!("cp: {dst}: can't reflink: {e}");
+                let _ = (sys::close(inf), sys::close(outf));
+                return false;
+            }
+            Err(_) => {} // auto: copy instead
+        }
+    }
     let mut buf = [0u8; 4096];
     let mut ok = true;
     loop {
@@ -49,7 +74,7 @@ fn copy_file(src: &str, dst: &str) -> bool {
     let _ = (sys::close(inf), sys::close(outf));
     ok
 }
-fn copy(src: &str, dst: &str, recursive: bool) -> bool {
+fn copy(src: &str, dst: &str, recursive: bool, reflink: Reflink) -> bool {
     match sys::stat_path(src, true) {
         Ok(st) if st.is_dir() => {
             if !recursive {
@@ -60,12 +85,17 @@ fn copy(src: &str, dst: &str, recursive: bool) -> bool {
             let mut ok = true;
             for (n, _) in sys::read_dir(src).unwrap_or_default() {
                 if n != "." && n != ".." {
-                    ok &= copy(&coreutils::join(src, &n), &coreutils::join(dst, &n), true);
+                    ok &= copy(
+                        &coreutils::join(src, &n),
+                        &coreutils::join(dst, &n),
+                        true,
+                        reflink,
+                    );
                 }
             }
             ok
         }
-        Ok(_) => copy_file(src, dst),
+        Ok(_) => copy_file(src, dst, reflink),
         Err(e) => {
             rt::eprintln!("cp: {src}: {e}");
             false
@@ -73,10 +103,21 @@ fn copy(src: &str, dst: &str, recursive: bool) -> bool {
     }
 }
 fn main(args: &rt::Args) -> i32 {
-    let (f, a) = flags(&args.argv[1..]);
+    // Long options first (the short-flag parser would read "--reflink" as letters).
+    let mut reflink = Reflink::Never;
+    let mut rest = alloc::vec::Vec::new();
+    for &a in &args.argv[1..] {
+        match a {
+            "--reflink" | "--reflink=always" => reflink = Reflink::Always,
+            "--reflink=auto" => reflink = Reflink::Auto,
+            "--reflink=never" => reflink = Reflink::Never,
+            _ => rest.push(a),
+        }
+    }
+    let (f, a) = flags(&rest);
     let r = f.contains(&'r') || f.contains(&'R');
     if a.len() < 2 {
-        rt::eprintln!("usage: cp [-r] SRC... DEST");
+        rt::eprintln!("usage: cp [-r] [--reflink[=always|auto]] SRC... DEST");
         return 1;
     }
     let (srcs, dest) = a.split_at(a.len() - 1);
@@ -89,7 +130,7 @@ fn main(args: &rt::Args) -> i32 {
         } else {
             String::from(dest)
         };
-        ok &= copy(s, &t, r);
+        ok &= copy(s, &t, r, reflink);
     }
     if ok { 0 } else { 1 }
 }

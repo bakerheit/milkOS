@@ -15,9 +15,19 @@ use crate::fs::errno::{Errno, Result};
 
 pub const BLOCK: usize = 4096;
 pub const MAGIC: &[u8; 8] = b"MILKFS01";
-pub const VERSION: u32 = 0;
+/// Newest format this kernel reads. 1 = v0 + multi-block extents (`K_EXT`) and inline
+/// data (`K_INLINE`); 2 = v1 + shared blocks (reflink copies, `K_BREF`).
+pub const VERSION: u32 = 2;
+/// What a commit writes unless the volume has shared blocks: v0 volumes are upgraded to
+/// this by their first commit; a volume becomes v2 with its first reflink (older kernels
+/// would free a shared block while another file still uses it, so they must refuse it).
+pub const BASE_VERSION: u32 = 1;
+pub const REFLINK_VERSION: u32 = 2;
+/// Oldest format this kernel reads.
+pub const MIN_VERSION: u32 = 0;
 pub const NODE_MAGIC: &[u8; 4] = b"MKND";
 pub const DEAD_MAGIC: &[u8; 4] = b"MKDL";
+pub const MAP_MAGIC: &[u8; 4] = b"MKSM";
 
 pub const MAX_SNAPS: usize = 30;
 pub const SNAP_NAME_MAX: usize = 47;
@@ -28,7 +38,24 @@ pub const K_INODE: u8 = 1;
 pub const K_DIRENT: u8 = 2;
 pub const K_EXTENT: u8 = 3;
 pub const K_SYMLINK: u8 = 4;
+/// v1: a run of consecutive blocks: `(ino, K_EXT, first file block)` -> [`Ext`].
+pub const K_EXT: u8 = 5;
+/// v1: a small file's whole content: `(ino, K_INLINE, 0)` -> the bytes.
+pub const K_INLINE: u8 = 6;
+/// Files up to this size keep their data inline in the tree (no data block).
+pub const INLINE_MAX: usize = 1024;
+/// Longest run one `K_EXT` item describes (its value: 20 + 8 per block bytes).
+pub const MAX_RUN: u64 = 128;
 
+/// Object id of volume-wide items (not an inode: inode numbers only grow from 1).
+pub const VOL_OBJ: u64 = u64::MAX;
+/// `(VOL_OBJ, K_ORPHAN, ino)` -> empty: `ino` was unlinked while open; mount finishes
+/// deleting it (so a mount with a current space map needn't scan every inode).
+pub const K_ORPHAN: u8 = 7;
+/// v2: `(VOL_OBJ, K_BREF, first disk block)` -> `len u32 | extra u32`: the `len` disk
+/// blocks from there are referenced `1 + extra` times by this tree (reflink copies).
+/// Blocks without an entry are referenced once. Entries never overlap.
+pub const K_BREF: u8 = 8;
 /// Root directory inode number.
 pub const ROOT_INO: u64 = 1;
 /// Largest value stored in one leaf item (keeps a split leaf within a block).
@@ -237,6 +264,11 @@ pub struct Superblock {
     pub auto: [u32; 4],
     /// `SB_BRANCHED`, ...
     pub flags: u32,
+    /// Format version the superblock was written with (`MIN_VERSION..=VERSION`).
+    pub version: u32,
+    /// Persistent free-space map of exactly this generation (none: rebuild at mount).
+    /// Kernels that predate it write zeros here, which drops a map they made stale.
+    pub spacemap: BlockPtr,
 }
 
 /// Superblock flag: history is no longer linear (a clone was promoted), so dead lists
@@ -259,10 +291,12 @@ const SB_SNAPS: usize = 152;
 const SNAP_REC: usize = 128;
 const SB_AUTO: usize = 3992;
 const SB_FLAGS: usize = 4008;
+const SB_SPACEMAP: usize = 4016;
 const SB_CSUM: usize = BLOCK - 8;
 
 const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
-const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_CSUM);
+const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_SPACEMAP);
+const _: () = assert!(SB_SPACEMAP + PTR_SIZE <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -279,7 +313,7 @@ impl Superblock {
     pub fn encode(&self) -> [u8; BLOCK] {
         let mut b = [0u8; BLOCK];
         b[..8].copy_from_slice(MAGIC);
-        b[SB_VERSION..SB_VERSION + 4].copy_from_slice(&VERSION.to_le_bytes());
+        b[SB_VERSION..SB_VERSION + 4].copy_from_slice(&self.version.to_le_bytes());
         b[SB_BSIZE..SB_BSIZE + 4].copy_from_slice(&(BLOCK as u32).to_le_bytes());
         b[SB_TOTAL..SB_TOTAL + 8].copy_from_slice(&self.total_blocks.to_le_bytes());
         b[SB_GEN..SB_GEN + 8].copy_from_slice(&self.generation.to_le_bytes());
@@ -312,6 +346,7 @@ impl Superblock {
             b[SB_AUTO + i * 4..SB_AUTO + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
         b[SB_FLAGS..SB_FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
+        self.spacemap.put(&mut b[SB_SPACEMAP..]);
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
         b
@@ -322,7 +357,8 @@ impl Superblock {
         if &b[..8] != MAGIC || le64(&b[SB_CSUM..]) != xxh64(&b[..SB_CSUM]) {
             return None;
         }
-        if le32(&b[SB_VERSION..]) != VERSION || le32(&b[SB_BSIZE..]) != BLOCK as u32 {
+        let version = le32(&b[SB_VERSION..]);
+        if !(MIN_VERSION..=VERSION).contains(&version) || le32(&b[SB_BSIZE..]) != BLOCK as u32 {
             return None;
         }
         let n = le32(&b[SB_NSNAPS..]) as usize;
@@ -369,6 +405,8 @@ impl Superblock {
                 .collect(),
             auto: core::array::from_fn(|i| le32(&b[SB_AUTO + i * 4..])),
             flags: le32(&b[SB_FLAGS..]),
+            version,
+            spacemap: BlockPtr::get(&b[SB_SPACEMAP..]),
         })
     }
 }
@@ -384,6 +422,7 @@ pub const NODE_HEADER: usize = 16;
 pub const LEAF_ITEM_OVERHEAD: usize = KEY_SIZE + 2;
 pub const INTERNAL_ENTRY: usize = KEY_SIZE + PTR_SIZE;
 
+#[derive(Clone)]
 pub enum DiskNode {
     Leaf(Vec<(Key, Vec<u8>)>),
     Internal(u8, Vec<(Key, BlockPtr)>),
@@ -501,10 +540,61 @@ pub fn decode_dead(b: &[u8; BLOCK]) -> Result<(Vec<DeadEntry>, BlockPtr)> {
     Ok((entries, next))
 }
 
+// ---- space map ----------------------------------------------------------------------
+//
+// Index block: magic "MKSM" | pad u32 | generation u64 | total blocks u64 | used u64 |
+// chunk count u32 | pad u32 | chunk count x BlockPtr. Chunk i is a bitmap block for
+// blocks i*32768 .. (bit set = used). Written whole at every commit into fresh blocks.
+
+pub const MAP_HEADER: usize = 40;
+pub const MAP_BITS: u64 = (BLOCK * 8) as u64;
+pub const MAP_MAX_CHUNKS: usize = (BLOCK - MAP_HEADER) / PTR_SIZE;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapIndex {
+    pub generation: u64,
+    pub total: u64,
+    pub used: u64,
+    pub chunks: Vec<BlockPtr>,
+}
+
+impl MapIndex {
+    pub fn encode(&self, out: &mut [u8; BLOCK]) {
+        out.fill(0);
+        out[..4].copy_from_slice(MAP_MAGIC);
+        out[8..16].copy_from_slice(&self.generation.to_le_bytes());
+        out[16..24].copy_from_slice(&self.total.to_le_bytes());
+        out[24..32].copy_from_slice(&self.used.to_le_bytes());
+        out[32..36].copy_from_slice(&(self.chunks.len() as u32).to_le_bytes());
+        for (i, c) in self.chunks.iter().enumerate() {
+            c.put(&mut out[MAP_HEADER + i * PTR_SIZE..]);
+        }
+    }
+
+    pub fn decode(b: &[u8; BLOCK]) -> Option<MapIndex> {
+        if &b[..4] != MAP_MAGIC {
+            return None;
+        }
+        let n = le32(&b[32..]) as usize;
+        if n > MAP_MAX_CHUNKS {
+            return None;
+        }
+        Some(MapIndex {
+            generation: le64(&b[8..]),
+            total: le64(&b[16..]),
+            used: le64(&b[24..]),
+            chunks: (0..n)
+                .map(|i| BlockPtr::get(&b[MAP_HEADER + i * PTR_SIZE..]))
+                .collect(),
+        })
+    }
+}
+
 // ---- items --------------------------------------------------------------------------
 
 /// `K_INODE` value, 68 bytes: mode u32 (S_IF* | perm), nlink u32, uid u32, gid u32,
-/// size u64, parent u64 (directories: the containing directory; others 0), then
+/// size u64, parent u64 (the containing directory; for files the one they were created
+/// or last renamed into, 0 on files made before that was recorded), then
 /// atime, mtime, ctime as (i64 seconds, u32 nanoseconds).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InodeItem {
@@ -595,4 +685,108 @@ pub fn decode_dirents(b: &[u8]) -> Result<Vec<Dirent>> {
         p += 10 + n;
     }
     Ok(out)
+}
+
+// ---- multi-block extents (v1) -------------------------------------------------------
+
+/// A run of `csums.len()` consecutive data blocks starting at disk block `block`, holding
+/// file blocks `start..start + len`. All written in one transaction (`birth`); one
+/// checksum per block, so every block is still verified on its own. Value layout:
+/// `block u64 | birth u64 | count u32 | count x csum u64`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ext {
+    pub start: u64,
+    pub block: u64,
+    pub birth: u64,
+    pub csums: Vec<u64>,
+    /// A v0 one-block `K_EXTENT` item (so it is deleted under the right key).
+    pub legacy: bool,
+}
+
+impl Ext {
+    pub fn len(&self) -> u64 {
+        self.csums.len() as u64
+    }
+
+    pub fn end(&self) -> u64 {
+        self.start + self.len()
+    }
+
+    /// Pointer to the `i`-th block of the run.
+    pub fn ptr(&self, i: usize) -> BlockPtr {
+        BlockPtr {
+            block: self.block + i as u64,
+            birth: self.birth,
+            csum: self.csums[i],
+        }
+    }
+
+    pub fn key(&self, ino: u64) -> Key {
+        Key::new(ino, if self.legacy { K_EXTENT } else { K_EXT }, self.start)
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(20 + 8 * self.csums.len());
+        v.extend_from_slice(&self.block.to_le_bytes());
+        v.extend_from_slice(&self.birth.to_le_bytes());
+        v.extend_from_slice(&(self.csums.len() as u32).to_le_bytes());
+        for c in &self.csums {
+            v.extend_from_slice(&c.to_le_bytes());
+        }
+        v
+    }
+
+    /// From either item kind.
+    pub fn decode(k: &Key, v: &[u8]) -> Option<Ext> {
+        match k.kind {
+            K_EXTENT if v.len() >= PTR_SIZE => {
+                let p = BlockPtr::get(v);
+                Some(Ext {
+                    start: k.off,
+                    block: p.block,
+                    birth: p.birth,
+                    csums: alloc::vec![p.csum],
+                    legacy: true,
+                })
+            }
+            K_EXT if v.len() >= 20 => {
+                let n = le32(&v[16..]) as usize;
+                if v.len() < 20 + 8 * n || n == 0 {
+                    return None;
+                }
+                Some(Ext {
+                    start: k.off,
+                    block: le64(v),
+                    birth: le64(&v[8..]),
+                    csums: (0..n).map(|i| le64(&v[20 + 8 * i..])).collect(),
+                    legacy: false,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Every data block pointer an item refers to (none for non-data items).
+pub fn data_ptrs(k: &Key, v: &[u8]) -> Vec<BlockPtr> {
+    match Ext::decode(k, v) {
+        Some(e) => (0..e.csums.len()).map(|i| e.ptr(i)).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// `K_BREF` value: `len u32 | extra u32`.
+pub fn encode_bref(len: u64, extra: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&(len as u32).to_le_bytes());
+    v.extend_from_slice(&extra.to_le_bytes());
+    v
+}
+
+pub fn decode_bref(v: &[u8]) -> Option<(u64, u32)> {
+    if v.len() < 8 {
+        return None;
+    }
+    let (len, extra) = (le32(v) as u64, le32(&v[4..]));
+    (len > 0 && extra > 0).then_some((len, extra))
 }

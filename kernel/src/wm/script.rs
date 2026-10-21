@@ -10,7 +10,7 @@ use crate::{fwcfg, kprintln};
 
 use super::Desktop;
 use super::event::{Button, Event, Key, Mods};
-use super::shell::dock_icon_center;
+use super::shell::{dock_icon_center, dock_icon_center_of};
 
 pub enum Step {
     Wait(u64),
@@ -19,6 +19,8 @@ pub enum Step {
     Bench,
     Log(&'static str),
     Panic,
+    /// Pretend nobody touched anything for this many seconds (the idle lock).
+    Idle(u64),
 }
 
 pub struct Script {
@@ -327,6 +329,34 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "lsbin" => {
             b.wait(300).typ("ls /bin").enter().wait(600);
         }
+        // Terminal tabs (the boot Terminal has the focus).
+        "tabs" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo second tab on $(tty)").enter().wait(300);
+            b.typ("echo second tab").enter().wait(300);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("ls /bin").enter().wait(600);
+        }
+        "tabswitch" => {
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.typ("echo this is tab 2").enter().wait(300);
+            b.key(Key::Char('1'), Mods::META).wait(300);
+            b.typ("echo back in tab 1").enter().wait(400);
+        }
+        "tabclose" => {
+            // Three tabs, close the third (Cmd+W), then ps in the first: msh on tty1 and
+            // tty2 only.
+            b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('t'), Mods::META).wait(500);
+            b.key(Key::Char('w'), Mods::META).wait(500);
+            b.key(Key::Char('1'), Mods::META).wait(200);
+            b.typ("ps").enter().wait(600);
+        }
+        "tabcmd" => {
+            // Skim's "> cmd" with the Terminal open: a new tab running it.
+            b.wait(300).key(Key::Char(' '), Mods::META).wait(150);
+            b.typ("> uname -a").wait(200).enter().wait(1200);
+        }
         "sigint" => {
             b.wait(300).typ("sleep 9").enter().wait(1000);
             b.key(Key::Char('c'), Mods::CTRL)
@@ -398,6 +428,42 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(593, 451).wait(300); // Restore
             b.click(137, 181).wait(400); // live Documents: it's back
         }
+        // Music: window at (300, 92), body at (301, 125), 458 wide. Play at body (229, 182);
+        // rows from body y 238 (MUSIC header at 214), SYSTEM SOUNDS header after them.
+        "music" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .key(Key::Char(' '), Mods::NONE)
+                .wait(3000);
+        }
+        "musicpause" => {
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(1500);
+            b.click(301 + 229, 125 + 182).wait(800);
+        }
+        "musicseek" => {
+            // Play, then click three quarters along the progress bar.
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y)
+                .wait(800)
+                .click(301 + 229, 125 + 182)
+                .wait(600);
+            b.click(301 + 20 + 418 * 3 / 4, 125 + 135).wait(1200);
+        }
+        "musicsys" => {
+            // Second track down, then the chime from System Sounds (click selects, again plays).
+            let (x, y) = dock_icon_center(5);
+            b.click(x, y).wait(800);
+            b.key(Key::Down, Mods::NONE).enter().wait(1000);
+            b.click(301 + 200, 125 + 318 + 12)
+                .wait(150)
+                .click(301 + 200, 125 + 318 + 12)
+                .wait(600);
+        }
         "browser" => {
             // Dock globe: the Browser opens milkOS's own home page (kernel httpd).
             let (x, y) = dock_icon_center(2);
@@ -465,6 +531,61 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(400);
             b.typ("echo the screen was cleared").enter().wait(300);
         }
+        "skimsearch" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("note");
+        }
+        "skimcalc" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("= (2+2*3)^2/4 + 0.5");
+        }
+        "skimfile" => {
+            b.key(Key::Char(' '), Mods::META).wait(150).typ("todo");
+        }
+        "skimcmd" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("> ls /bin")
+                .wait(200)
+                .enter()
+                .wait(1200);
+        }
+        "skimaction" => {
+            b.key(Key::Char(' '), Mods::META)
+                .wait(150)
+                .typ("dark")
+                .wait(200)
+                .enter()
+                .wait(800);
+        }
+        "snapleft" => {
+            // Drag Files to the left edge: preview, then let go (snaps to the left half).
+            b.drag(300, 80, 2, 300, 24);
+        }
+        "snappreview" => {
+            // Hold Files at the top-right corner: the quarter preview shows.
+            b.to(300, 80)
+                .wait(30)
+                .down()
+                .wait(30)
+                .glide(300, 80, 1021, 60, 24)
+                .wait(200);
+        }
+        "snapkeys" => {
+            // Terminal focused: Ctrl+Alt+Right, then Files to the left by dragging.
+            let ca = Mods {
+                ctrl: true,
+                alt: true,
+                ..Mods::NONE
+            };
+            b.key(Key::Right, ca).wait(200);
+            b.drag(300, 80, 2, 300, 20).wait(200);
+        }
+        "unsnap" => {
+            // Snap Files left, then drag it away from the edge: it gets its old size back.
+            b.drag(300, 80, 2, 300, 20).wait(200);
+            b.drag(200, 50, 500, 200, 20).wait(200);
+        }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
         }
@@ -485,6 +606,60 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "shutdown" => {
             b.click(60, 14).wait(100).click(80, 219);
+        }
+        // Lock screen.
+        "lock" => {
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+        }
+        "unlock" => {
+            // Lock, then a key unlocks (and is not typed into the Terminal).
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+            b.typ("x").wait(700);
+        }
+        // Packages (docs/packages.md), against a repo served by scripts/wm-pkg-demo.sh: install
+        // fortune and moo2048 from the Terminal; their dock tiles appear within 3 s.
+        "pkgdock" | "pkgrun" | "pkgfortune" => {
+            let url = host_test_url();
+            b.wait(300)
+                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .enter()
+                .wait(300);
+            b.typ("milk update").enter().wait(2000);
+            b.typ("milk install fortune").enter().wait(3000);
+            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("clear").enter().wait(3500);
+            // Sorted by name: fortune is tile 9, moo2048 tile 10.
+            if name == "pkgrun" {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.click(x, y).wait(2000);
+            } else if name == "pkgfortune" {
+                let (x, y) = dock_icon_center_of(9, 2);
+                b.click(x, y).wait(2000);
+            } else {
+                let (x, y) = dock_icon_center_of(10, 2);
+                b.glide(x, y - 80, x, y, 6).wait(300);
+            }
+        }
+        "logomenu" => {
+            b.click(18, 14).wait(300);
+        }
+        "lockmenu" => {
+            // The logo's system menu > Lock Screen.
+            b.click(18, 14).wait(300).click(80, 196).wait(700);
+        }
+        "lockprefs" => {
+            // Settings > Display & Lock > 5 min.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 2 * 82 + 38, 113 + 249).wait(400);
+        }
+        "idlelock" => {
+            // Settings > Display & Lock > 1 min, then a minute of (pretend) idleness.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 82 + 38, 113 + 249).wait(300);
+            b.0.push(Step::Idle(61));
+            b.wait(800);
         }
         "logo" => {
             b.click(60, 14).glide(60, 14, 90, 60, 6);
@@ -597,6 +772,7 @@ impl Script {
                 }
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
+                Step::Idle(s) => d.pretend_idle(*s),
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

@@ -17,6 +17,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dedupe"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "desk"
 version = "0.0.1"
 dependencies = [
@@ -32,6 +39,13 @@ dependencies = [
 
 [[package]]
 name = "fetch"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "fsstress"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -149,6 +163,13 @@ dependencies = [
 
 [[package]]
 name = "utest"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
+name = "versions"
 version = "0.0.1"
 dependencies = [
  "rt",

@@ -22,6 +22,11 @@ pub enum Icon {
     Clock,
     Spaces,
     Paint,
+    Calc,
+    /// An app action in Skim: a little play triangle.
+    Action,
+    /// An installed package: a box with its lid.
+    Package,
 }
 
 /// Draw `icon` as an `s` x `s` tile at (x, y), tile colour `bg` (blended at `bg_a`), glyph `fg`.
@@ -94,6 +99,26 @@ pub fn draw(
             rect(p, 24, 14, 7, 7, u(4), BLUE);
             rect(p, 15, 27, 7, 7, u(4), MATCHA);
             p.circle(x + u(27), y + u(26), u(7), HONEY, 255);
+        }
+        Icon::Action => {
+            // A right-pointing triangle, one span per row.
+            let (top, h) = (u(13), u(22));
+            for k in 0..h {
+                let half = h / 2;
+                let wpx = (if k <= half { k } else { h - k }) * u(18) / half.max(1);
+                p.fill(x + u(17), y + top + k, wpx.max(1), 1, fg);
+            }
+        }
+        Icon::Package => {
+            ring(p, 11, 17, 26, 21, u(3), th(3), fg);
+            rect(p, 9, 11, 30, 8, u(3), fg);
+            rect(p, 21, 23, 6, 3, 0, fg);
+        }
+        Icon::Calc => {
+            rect(p, 11, 11, 11, 11, u(3), fg);
+            rect(p, 26, 11, 11, 11, u(3), fg);
+            rect(p, 11, 26, 11, 11, u(3), fg);
+            rect(p, 26, 26, 11, 11, u(3), STRAW);
         }
         Icon::Clock => {
             ring(p, 10, 10, 28, 28, u(14), th(3), fg);

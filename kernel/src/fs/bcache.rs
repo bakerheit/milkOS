@@ -176,6 +176,32 @@ impl BCache {
         Ok(())
     }
 
+    /// Read consecutive blocks `blk..` into `out` (a whole number of blocks). Blocks not
+    /// cached come from the device in one request and are not added to the cache (big
+    /// sequential reads would only push out metadata; the page cache keeps file data);
+    /// cached ones (possibly newer than the disk) are copied over that.
+    pub fn read_run(&self, blk: u64, out: &mut [u8]) -> Result<()> {
+        let n = out.len() / BLOCK;
+        if n == 0 {
+            return Ok(());
+        }
+        self.check(blk + n as u64 - 1)?;
+        let mut i = self.inner.lock();
+        i.clock += 1;
+        let cached: alloc::vec::Vec<(usize, usize)> = (0..n)
+            .filter_map(|k| i.map.get(&(blk + k as u64)).map(|&idx| (k, idx)))
+            .collect();
+        if cached.len() < n {
+            i.stats.misses += (n - cached.len()) as u64;
+            self.dev.read_blocks(blk * self.per_block, out)?;
+        }
+        i.stats.hits += cached.len() as u64;
+        for (k, idx) in cached {
+            out[k * BLOCK..(k + 1) * BLOCK].copy_from_slice(&*i.bufs[idx].data);
+        }
+        Ok(())
+    }
+
     /// Replace block `blk` with `data` (write-back: it reaches the disk later).
     pub fn write(&self, blk: u64, data: &Block) -> Result<()> {
         self.check(blk)?;
@@ -208,10 +234,28 @@ impl BCache {
             .filter(|&(_, &idx)| i.bufs[idx].dirty)
             .map(|(&b, &idx)| (b, idx))
             .collect();
-        for (blk, idx) in dirty {
-            self.dev_write(blk, &i.bufs[idx].data)?;
-            i.bufs[idx].dirty = false;
-            i.stats.writebacks += 1;
+        // Runs of consecutive blocks go out as one request each (up to 64 blocks).
+        let mut k = 0;
+        let mut run: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        while k < dirty.len() {
+            let mut j = k + 1;
+            while j < dirty.len() && j - k < 64 && dirty[j].0 == dirty[j - 1].0 + 1 {
+                j += 1;
+            }
+            if j - k == 1 {
+                self.dev_write(dirty[k].0, &i.bufs[dirty[k].1].data)?;
+            } else {
+                run.clear();
+                for &(_, idx) in &dirty[k..j] {
+                    run.extend_from_slice(&*i.bufs[idx].data);
+                }
+                self.dev.write_blocks(dirty[k].0 * self.per_block, &run)?;
+            }
+            for &(_, idx) in &dirty[k..j] {
+                i.bufs[idx].dirty = false;
+            }
+            i.stats.writebacks += (j - k) as u64;
+            k = j;
         }
         i.stats.flushes += 1;
         drop(i);

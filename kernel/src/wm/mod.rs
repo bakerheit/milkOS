@@ -16,6 +16,7 @@
 //! assumes it runs on the boot stack, so it can become a kernel thread once `proc` lands: put
 //! `Desktop::frame` in that thread's loop and replace the `wfi` with a sleep-until-event.
 
+pub mod actions;
 mod anim;
 mod apps;
 mod buffer;
@@ -25,13 +26,17 @@ mod ctl;
 mod event;
 mod fontx;
 mod icons;
+mod lock;
 mod menus;
+mod packages;
 mod paint;
 mod power;
 pub mod prefs;
 mod rtc;
 mod script;
 mod shell;
+mod skim;
+mod snap;
 mod theme;
 pub mod tty;
 mod wallpaper;
@@ -81,6 +86,10 @@ const FRAME_NS: u64 = 16_666_667;
 /// How long to sleep when nothing is moving (clocks, log followers and toasts still update).
 const IDLE_NS: u64 = 50_000_000;
 
+/// Set by the panic screen: the compositor stops flushing to the framebuffer (on SMP the wm
+/// thread may still be running on another CPU).
+pub static FROZEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Things kernel code (and the built-in apps) can ask the desktop to do.
 pub enum Request {
     Open(App),
@@ -96,6 +105,10 @@ pub enum Request {
     /// New preferences from Settings: apply and save.
     Prefs(prefs::Prefs),
     Skim,
+    /// A new Terminal tab, optionally running a command in it (Skim's `> cmd`).
+    NewTab(Option<String>),
+    /// Show the lock screen.
+    Lock,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -165,15 +178,6 @@ pub fn run() {
     }
 }
 
-/// CPU time of the scheduler's idle thread, for the busy percentage.
-fn idle_thread_ns() -> u64 {
-    sched::threads()
-        .iter()
-        .filter(|t| t.name.as_str() == "idle")
-        .map(|t| t.cpu_ns)
-        .sum()
-}
-
 // ---- the desktop -----------------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -191,6 +195,8 @@ enum Drag {
         id: u32,
         dx: i32,
         dy: i32,
+        /// Not moved yet (a snapped / zoomed window unsnaps on its first move).
+        fresh: bool,
     },
     Resize {
         id: u32,
@@ -200,20 +206,13 @@ enum Drag {
         h0: i32,
     },
     /// Pressed a traffic light; acts on release if still over it.
-    Light {
-        id: u32,
-        which: usize,
-    },
+    Light { id: u32, which: usize },
     /// Button went down in a window body: moves go to the client as drags.
-    Content {
-        id: u32,
-    },
+    Content { id: u32 },
     /// Dragging a control centre slider.
     Slider(usize),
     /// Dragging a window cell in the Spaces overview.
-    Cell {
-        id: u32,
-    },
+    Cell { id: u32 },
     /// Pressed on something that acts on press only.
     Inert,
 }
@@ -264,6 +263,8 @@ pub struct Desktop {
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
+    /// Snap preview while dragging a window to an edge (snap.rs).
+    snap_preview: Option<Rect>,
     /// Running window animations (anim.rs).
     anims: Vec<anim::Anim>,
     /// Signature of the full-screen layers (dims) last composited.
@@ -287,10 +288,16 @@ pub struct Desktop {
     script: Option<script::Script>,
     /// Compose into the back buffer only (the boot fade-in does the first flush itself).
     hold_flush: bool,
-    // CPU accounting: the idle thread's CPU time at the start of the last second.
-    idle_cpu_ns: u64,
-    acct_start: u64,
+    /// Busy % per online CPU (menu bar meter), and the same quantised.
+    cpu_loads: Vec<u32>,
+    cpu_steps: Vec<u32>,
     last_second: u64,
+    /// The lock screen while it is up (or fading), lock.rs; its opacity this frame.
+    lock: Option<lock::Lock>,
+    lock_a: u8,
+    /// Last key press or click (the idle lock timer); demos add pretend idle time.
+    last_input: u64,
+    idle_skew: u64,
 }
 
 impl Desktop {
@@ -333,6 +340,11 @@ impl Desktop {
             },
             cache: BTreeMap::new(),
             anims: Vec::new(),
+            snap_preview: None,
+            lock: None,
+            lock_a: 0,
+            last_input: t,
+            idle_skew: 0,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -347,13 +359,15 @@ impl Desktop {
             status: String::new(),
             script: None,
             hold_flush: true,
-            idle_cpu_ns: idle_thread_ns(),
-            acct_start: timer::now_ns(),
+            cpu_loads: Vec::new(),
+            cpu_steps: Vec::new(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
         d.status = d.status_text();
         apps::fsx::ensure_home();
+        apps::music::seed_library();
         ctl::init();
+        actions::register_builtin();
         clipboard::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
@@ -499,6 +513,33 @@ impl Desktop {
         }
     }
 
+    /// A tab in the open Terminal running `cmd`, or the Terminal itself (its first tab).
+    fn open_tab(&mut self, cmd: Option<String>) {
+        if self.windows.iter().any(|w| w.app == App::Terminal) {
+            apps::terminal::queue_tab(cmd);
+        } else if let Some(c) = cmd {
+            apps::terminal::queue_command(&c);
+        }
+        self.open(App::Terminal);
+    }
+
+    /// An installed package: its window app, or its program in a Terminal tab.
+    fn launch_package(&mut self, p: &packages::Pkg) {
+        if p.window {
+            self.launch(&p.exec);
+        } else {
+            // By its /bin name when milk linked it there (a shorter tab label).
+            let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
+            let bin = alloc::format!("/bin/{base}");
+            let cmd = if crate::fs::stat(&bin).is_ok() {
+                String::from(base)
+            } else {
+                p.exec.clone()
+            };
+            self.open_tab(Some(cmd));
+        }
+    }
+
     /// `open` from /dev/wm: an app by name, a folder (Files), a text file (Notes) or a program.
     fn open_any(&mut self, what: &str) {
         match what.to_ascii_lowercase().as_str() {
@@ -510,6 +551,7 @@ impl Desktop {
             "spaces" => return self.toggle_mode(Mode::Spaces),
             "paint" => return self.launch("/bin/paint"),
             "browser" | "web" => return self.open(App::Browser),
+            "music" => return self.open(App::Music),
             _ if what.starts_with("http://") || what.starts_with("localhost") => {
                 apps::browser::open_url(what);
                 return self.open(App::Browser);
@@ -520,6 +562,9 @@ impl Desktop {
         if apps::fsx::is_dir(&path) {
             apps::files::show_path(&path);
             self.open(App::Files);
+        } else if path.to_ascii_lowercase().ends_with(".wav") && crate::fs::stat(&path).is_ok() {
+            apps::music::play_path(&path);
+            self.open(App::Music);
         } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
             self.launch(&path);
         } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
@@ -571,7 +616,8 @@ impl Desktop {
             Mode::Spaces => "spaces",
         };
         let mut s = alloc::format!(
-            "mode {mode}\nspace {} of {}\nfocus {}\n",
+            "mode {mode}\nlocked {}\nspace {} of {}\nfocus {}\n",
+            if self.locked() { "yes" } else { "no" },
             self.space + 1,
             self.nspaces,
             self.focused_window().map_or("none", |w| w.contents.title())
@@ -739,7 +785,6 @@ impl Desktop {
         }
         w.rect.x = x;
         w.rect.y = y;
-        w.restore = None;
         let new = w.bounds();
         self.damage(old);
         self.damage(new);
@@ -949,7 +994,7 @@ impl Desktop {
             self.compose_rect(*d, layers, &vis, cur);
         }
         // Flush to ramfb.
-        if !self.hold_flush {
+        if !self.hold_flush && !FROZEN.load(core::sync::atomic::Ordering::Relaxed) {
             let fstride = self.fb.stride();
             let bstride = self.back.stride();
             let src = self.back.pixels();
@@ -979,6 +1024,14 @@ impl Desktop {
     }
 
     fn compose_rect(&mut self, d: Rect, layers: &[Layer], vis: &[usize], cur: Rect) {
+        if self.lock_a == 255 {
+            // Locked: nothing under the lock screen shows.
+            let mut p = Painter::new(&mut self.back);
+            let mut p = p.clipped(d);
+            lock::draw(&self.lock, &mut p, d, 255);
+            self.finish_rect(d, cur);
+            return;
+        }
         let mut p = Painter::new(&mut self.back);
         let mut p = p.clipped(d);
         // Skip everything under the topmost window that covers the whole rect.
@@ -1006,6 +1059,13 @@ impl Desktop {
         }
         if !self.anims.is_empty() {
             anim::draw(&self.anims, &self.windows, &mut p, d);
+        }
+        // Where a dragged window will snap.
+        if let Some(r) = self.snap_preview
+            && r.intersects(&d)
+        {
+            p.rrect_r(r, R_WINDOW, MILK, a(350));
+            p.rrect_stroke(r.x, r.y, r.w, r.h, R_WINDOW, 3, HONEY, a(850));
         }
         for l in layers {
             match l {
@@ -1037,6 +1097,16 @@ impl Desktop {
                 }
             }
         }
+        if self.lock_a > 0 {
+            lock::draw(&self.lock, &mut p, d, self.lock_a);
+        }
+        self.finish_rect(d, cur);
+    }
+
+    /// Brightness and the cursor, over everything.
+    fn finish_rect(&mut self, d: Rect, cur: Rect) {
+        let mut p = Painter::new(&mut self.back);
+        let mut p = p.clipped(d);
         if self.settings.brightness < 100 {
             let a = ((100 - self.settings.brightness) * 255 / 100 * 7 / 10) as u8;
             p.fill_a(d.x, d.y, d.w, d.h, 0, a);
@@ -1091,6 +1161,8 @@ impl Desktop {
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
+                Request::Lock => self.lock_screen(),
+                Request::NewTab(cmd) => self.open_tab(cmd),
                 Request::Skim => {
                     if self.launcher.is_none() {
                         self.toggle_launcher();
@@ -1106,10 +1178,13 @@ impl Desktop {
         }
         self.tick(now);
         let animating = self.step_anims(now);
+        let fading = self.lock_tick(now);
+        self.lock_a = self.lock_alpha(timer::now_ns());
         self.render_and_compose();
         *STATS.lock() = self.stats;
         self.stats.frames != frames
             || animating
+            || fading
             || self.script.is_some()
             || matches!(
                 self.drag,
@@ -1228,6 +1303,10 @@ impl Desktop {
         if sec != self.last_second {
             self.last_second = sec;
             ctl::set_status(self.status_report());
+            // Installed packages (dock tiles), every few seconds.
+            if sec % 3 == 1 && packages::refresh() {
+                self.invalidate(PanelKey::Dock);
+            }
             // Windows of userland clients that exited without destroying them.
             for cid in client::reap() {
                 if let Some(wid) = self
@@ -1239,15 +1318,16 @@ impl Desktop {
                     self.close_window(wid);
                 }
             }
-            let span = now - self.acct_start;
-            let idle = idle_thread_ns();
-            if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {
-                self.stats.cpu_pct = (100 - pct.min(100)) as u32;
-            }
-            self.idle_cpu_ns = idle;
-            self.acct_start = now;
+            // Per-CPU load (percpu, sampled on each CPU's tick) for the menu bar meter.
+            let loads: Vec<u32> = crate::percpu::online().map(crate::percpu::load).collect();
+            self.stats.cpu_pct = loads.iter().sum::<u32>() / loads.len().max(1) as u32;
+            // Redraw the meter only when a bar visibly changes (8 steps).
+            let steps: Vec<u32> = loads.iter().map(|l| l * 8 / 100).collect();
+            let changed = steps != self.cpu_steps;
+            self.cpu_loads = loads;
+            self.cpu_steps = steps;
             let st = self.status_text();
-            if st != self.status {
+            if st != self.status || changed {
                 self.status = st;
                 self.invalidate(PanelKey::MenuBar);
             }
@@ -1265,6 +1345,30 @@ impl Desktop {
     // ---- input ----------------------------------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) {
+        let press = matches!(
+            ev,
+            Event::Button { down: true, .. } | Event::Key { down: true, .. }
+        );
+        // Any activity (pointer and wheel too) restarts the idle-lock timer.
+        if press || matches!(ev, Event::PointerMove { .. } | Event::Scroll { .. }) {
+            self.last_input = timer::now_ns();
+            self.idle_skew = 0;
+        }
+        // Locked: the pointer moves, a click or a key unlocks, nothing else gets through.
+        if self.locked() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                }
+                // Not in the first moments: the locking key's auto-repeat would undo it.
+                _ if press && !self.lock_just_shown() => self.unlock_screen(),
+                _ => {}
+            }
+            return;
+        }
         // A click or key press finishes running animations.
         if !self.anims.is_empty()
             && matches!(
@@ -1321,7 +1425,22 @@ impl Desktop {
         self.pointer = (x, y);
         self.damage(self.cursor_rect());
         match self.drag {
-            Some(Drag::Move { id, dx, dy }) => self.move_window(id, x - dx, y - dy),
+            Some(Drag::Move { id, dx, dy, fresh }) => {
+                let (mut dx, mut dy) = (dx, dy);
+                if fresh {
+                    if let Some((ndx, ndy)) = self.unsnap_for_drag(id, x, dx) {
+                        (dx, dy) = (ndx, ndy);
+                    }
+                    self.drag = Some(Drag::Move {
+                        id,
+                        dx,
+                        dy,
+                        fresh: false,
+                    });
+                }
+                self.move_window(id, x - dx, y - dy);
+                self.set_snap_preview(snap::zone_at(x, y));
+            }
             Some(Drag::Resize { id, ox, oy, w0, h0 }) => {
                 self.resize_window(id, w0 + x - ox, h0 + y - oy)
             }
@@ -1473,6 +1592,7 @@ impl Desktop {
                     id,
                     dx: x - r.x,
                     dy: y - r.y,
+                    fresh: true,
                 })
             }
             Some(Part::Resize) => {
@@ -1526,7 +1646,13 @@ impl Desktop {
                     prefs::save(&p);
                 }
             }
-            Some(Drag::Move { .. }) => {
+            Some(Drag::Move { id, .. }) => {
+                if self.snap_preview.is_some() {
+                    if let Some(z) = snap::zone_at(x, y) {
+                        self.snap_to(id, z);
+                    }
+                    self.set_snap_preview(None);
+                }
                 let s = self.stats;
                 if s.drag_frames > 0 {
                     kprintln!(
@@ -1547,6 +1673,7 @@ impl Desktop {
         // Global shortcuts.
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
+            Key::Char('q') if m.meta && m.ctrl => return self.lock_screen(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {
@@ -1555,8 +1682,20 @@ impl Desktop {
             }
             Key::Escape if self.mode != Mode::Desktop => return self.set_mode(Mode::Desktop),
             Key::F(3) => return self.toggle_mode(Mode::Spaces),
-            Key::Up if m.ctrl => return self.toggle_mode(Mode::Spaces),
+            Key::Up if m.ctrl && !m.alt => return self.toggle_mode(Mode::Spaces),
             Key::F(4) => return self.toggle_mode(Mode::Home),
+            // Ctrl+Alt+arrows: snap the focused window.
+            Key::Left | Key::Right | Key::Up | Key::Down if m.ctrl && m.alt => {
+                if let Some(id) = self.focus {
+                    match k.key {
+                        Key::Left => self.snap_to(id, snap::Zone::Left),
+                        Key::Right => self.snap_to(id, snap::Zone::Right),
+                        Key::Up => self.snap_to(id, snap::Zone::Fill),
+                        _ => self.unsnap(id),
+                    }
+                }
+                return;
+            }
             Key::Left if m.ctrl => return self.switch_space(self.space.saturating_sub(1)),
             Key::Right if m.ctrl => return self.switch_space(self.space + 1),
             _ => {}
@@ -1569,7 +1708,13 @@ impl Desktop {
             match k.key {
                 Key::Char('w') => {
                     if let Some(id) = self.focus {
-                        self.close(id);
+                        if let Some(w) = self.win_mut(id)
+                            && w.contents.close_part()
+                        {
+                            w.dirty = true;
+                        } else {
+                            self.close(id);
+                        }
                     }
                 }
                 Key::Char('m') => {

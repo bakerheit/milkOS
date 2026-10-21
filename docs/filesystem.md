@@ -373,6 +373,25 @@ cache on is slightly slower. FAT reads also walk the cluster chain from a per-fi
 and read runs of contiguous clusters in one request (before that change, a cold 4 MiB FAT
 read took 289 ms).
 
+## SMP
+
+With 4 CPUs, file-system calls really run in parallel: user processes on different CPUs,
+the `milkfs-flush` and `timemachine` threads, virtio completions (IRQs on CPU 0, waiters
+anywhere). Locking that makes it safe: one `sched::Mutex` per milkfs volume and per FAT
+volume (and per bcache and virtio device), spinlocks only for short map updates and never
+held across I/O, always taken in one order (inode map -> node / fid / snapshot-dev locks,
+never back); page-cache fills run unlocked and are guarded by the invalidation epoch.
+
+`user/fsstress DIR [WORKERS] [ROUNDS] [READFILE]` forks workers (one per CPU and more)
+that write / read-verify / rename / delete files of varying size in parallel, make
+reflink copies on milkfs (verify, write into the copy, check the original is unchanged),
+optionally re-reading a shared file every round. `scripts/stressloop.sh [BOOTS]` runs it
+on fresh private milkfs + FAT32 images with Time Machine snapshotting every second, then
+`dedupe`, `snap check`, and on the Mac `mkmilkfs.py check` and `fsck_msdos -n`. Run on `-smp 4` for 8 boots, each with Time Machine
+snapshotting every second meanwhile: 8 workers x 20 rounds on milkfs and 4 x 8 on FAT32
+per boot, 0 errors, `mkmilkfs.py check` clean, `fsck_msdos` with nothing to fix. The test
+scripts (`crashtest.sh`, `fattest.sh`, `cachebench.sh`) boot `-smp ${MILK_SMP:-4}`.
+
 ## Next steps
 
 - Pipes (`InodeType::Fifo`) and `poll` on the wait queues; `O_NONBLOCK`.
@@ -389,9 +408,9 @@ the differences are listed at the end of this section.
 | file | what |
 |---|---|
 | `format.rs` | on-disk structures, xxh64, FNV-1a name hash (mirrored in `mkmilkfs.py`) |
-| `store.rs` | allocator (free map rebuilt at mount), birth-time release rules, checksummed block I/O, dead-list chains |
+| `store.rs` | allocator and its persistent space map, birth-time release rules, checksummed block I/O, dead-list chains, decoded node cache |
 | `btree.rs` | copy-on-write B+tree: dirty nodes in memory, written bottom-up at commit |
-| `volume.rs` | `State`, commit, mount (mark + namespace check + orphan reclaim), mkfs, space check |
+| `volume.rs` | `State`, commit, mount (space map, or mark + namespace check + orphan reclaim), mkfs, space check |
 | `items.rs` | inodes, directory entries, extents, symlinks, file data |
 | `snap.rs` | snapshot create / delete / rollback |
 | `clone.rs` | clones: create / discard / promote |
@@ -400,9 +419,19 @@ the differences are listed at the end of this section.
 | `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
 | `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
 
-### On-disk format v0
+### On-disk format (v0, v1, v2)
 
-All integers little endian, 4 KiB blocks.
+All integers little endian, 4 KiB blocks. The current kernel writes **v1** = v0 plus two
+item kinds: multi-block runs (kind 5) and inline data (kind 6), and **v2** = v1 plus shared
+blocks (kind 8, reflink copies) on a volume's first reflink: a kernel without reflinks
+would free a shared block while another file still uses it, so v1 kernels refuse a v2
+volume ("no valid superblock"). It mounts v0, v1 and v2. A v0
+volume mounts with the message `milkfs: format v0 volume: it is upgraded to v1 (...) by its
+first write; kernels older than that won't mount it then`: the first commit writes version 1
+into the superblock (v0 kernels refuse it: the version doesn't match). Old one-block extents
+(kind 3) stay readable forever and are rewritten as runs only when that part of the file is
+written. `mkmilkfs.py` reads both; `mkmilkfs.py mkfs --v0` and `put --v0` make v0 images
+(the upgrade test, `scripts/upgradetest.sh`, uses them).
 
 ```text
 block 0, 1   superblock slots: generation g is written to slot g % 2; mount takes the valid
@@ -421,7 +450,7 @@ itself.
 | off | field |
 |---|---|
 | 0 | magic `MILKFS01` |
-| 8 | version u32 = 0, 12: block size u32 = 4096 |
+| 8 | version u32 (0 or 1), 12: block size u32 = 4096 |
 | 16 | total blocks u64, 24: generation u64 |
 | 32 | live tree root: block pointer |
 | 56 | live dead list head: block pointer |
@@ -431,6 +460,7 @@ itself.
 | 152 | 30 records x 128 B (snapshots and clones): name [48], generation u64 (clone: its origin's), created u64, root pointer, dead list pointer, next_ino u64, flags u32 (1 = clone), id u32 (clones) |
 | 3992 | automatic snapshots: state u32 (0 default/1 on/2 off), interval s u32, keep u32, daily u32 (0 = default) |
 | 4008 | flags u32: 1 = `SB_BRANCHED` (a clone was promoted; see below) |
+| 4016 | space map index: block pointer (zero = none; kernels before the map write zeros here) |
 | 4088 | xxh64 of bytes 0..4088 |
 
 **Tree node**: header `"MKND" | level u8 (0 = leaf) | pad u8 | count u16 | birth u64`, then
@@ -439,17 +469,48 @@ leaf items `key (17 B) | value length u16 | value` or internal entries
 `(object id u64, kind u8, offset u64)`, sorted in that order; child `i` of an internal node
 covers keys from its separator to the next one. Values are at most 1500 bytes.
 
+Tree shape (in memory, nothing on disk changes): a leaf that overflows is split evenly,
+except when the item that overflowed it starts an object newer than everything else in
+the leaf (inode numbers only grow, so that is file creation): then it splits at that
+object boundary and the left leaf stays full. On delete, a node left under a quarter full
+is merged with a neighbour if the two fit in one block, otherwise the two share their
+entries evenly; a root with one child is replaced by it. `scripts/treetest.sh [N]`
+(`/sys/fs/milkfs/treetest`: `DIR N` creates N empty files in DIR, deletes 99 of every 100,
+then the rest, printing the live tree's shape after each step), 50 000 files:
+
+| | before | even splits only + merge on delete | + object-boundary splits |
+|---|---|---|---|
+| 50 000 files | 3 levels, 2925 nodes, 52% full | same | 3 levels, 1818 nodes, 83% full |
+| 500 left (99% deleted) | 3 levels, 995 nodes, 2% full, 983 underfull | 2 levels, 51 nodes, 31% full, 0 underfull | 2 levels, 52 nodes, 30% full, 0 underfull |
+| all deleted | 1 leaf | 1 leaf | 1 leaf |
+| create / delete time | 671 / 1164 ms | 660 / 950 ms | 672 / 800 ms |
+
+The self-test runs 6000 random inserts, replaces and deletes against a `BTreeMap` model
+(commits in between, then 95% deleted: no underfull node, contents equal, space back to
+where it was) and the same create/delete test with 3000 files.
+
 | kind | key | value |
 |---|---|---|
 | 1 inode | `(ino, 1, 0)` | 68 B: mode u32 (`S_IF*` + perm), nlink u32, uid u32, gid u32, size u64, parent u64 (directories), atime/mtime/ctime as (i64 s, u32 ns) |
 | 2 dirent | `(dir ino, 2, fnv1a64(name))` | every name in that dir with that hash: `ino u64 | d_type u8 | len u8 | name` repeated |
 | 3 extent | `(ino, 3, block index)` | block pointer of that 4 KiB of the file (absent = hole) |
 | 4 symlink | `(ino, 4, 0)` | target bytes (max 1024) |
+| 5 run (v1) | `(ino, 5, first block index)` | `block u64 | birth u64 | count u32 | count x xxh64 u64`: `count` (1..128) consecutive file blocks stored in consecutive disk blocks from `block`, one checksum per block |
+| 6 inline (v1) | `(ino, 6, 0)` | the whole file content, files up to 1024 bytes (no data block at all) |
+| 8 shared blocks (v2) | `(2^64-1, 8, first disk block)` | `len u32 | extra u32`: the `len` (at most 128) disk blocks from there are referenced `1 + extra` times by this tree; blocks without an entry once. Entries never overlap. |
+| 7 orphan | `(2^64-1, 7, ino)` | empty: `ino` has no links left but is still open; whoever deletes it removes the entry, mount finishes the delete if the machine went down first |
 
 The root directory is inode 1 (its parent is itself). Inode numbers only grow.
 
 **Dead-list block**: `"MKDL" | count u32 | next pointer (24 B) | count x (block u64, birth u64)`
 (254 per block). A chain is only ever prepended to or rewritten whole.
+
+**Space map**: an index block `"MKSM" | pad u32 | generation u64 | total blocks u64 |
+used u64 | chunk count u32 | pad u32 | chunk count x block pointer`, and the chunks: plain
+bitmaps, bit `b` of chunk `i` = block `i * 32768 + b` is in use. One index holds 169 chunks
+(volumes up to 22 GiB; bigger ones simply have no map and mount by scanning). Neither item
+kind 7 nor the map needs a format bump: kernels that predate them ignore kind 7 and write
+zeros at 4016, which drops a map they would have made stale.
 
 ### Transactions and crash consistency
 
@@ -465,7 +526,8 @@ after. A commit:
 1. The B+tree path to every changed item was copied into memory (old blocks released by the
    rules below); new data blocks went to freshly allocated blocks through the bcache.
 2. Commit writes the dirty nodes bottom-up into new blocks, prepends this transaction's
-   dead-list entries as a new chain block, `bcache.flush()` (everything durable),
+   dead-list entries as a new chain block, writes the space map (last, so it sees every
+   allocation), `bcache.flush()` (everything durable),
 3. writes the new superblock to slot `generation % 2` (**the commit point**), flushes again.
 
 A crash at any moment leaves the previous superblock valid and everything it references
@@ -478,16 +540,46 @@ dead lists are dropped and snapshot delete, rollback and promote reclaim space w
 exact **sweep** (free every allocated block the committed state can't reach, the same walk
 mount does). When no snapshots are left the history is linear again and the flag clears.
 
-**Free space is not stored.** Mount marks every block reachable from the chosen superblock
-(live tree, every snapshot tree, shared subtrees once, extents, dead-list chains); the rest is
-free. So the allocator can't be wrong after a crash. While a transaction is open a dropped
-block is: born in this transaction → reused at once; born after the newest snapshot → freed
-when the commit is durable; otherwise a snapshot still has it → live dead list.
+**Free space.** While a transaction is open a dropped block is: born in this transaction →
+reused at once; born after the newest snapshot → freed when the commit is durable;
+otherwise a snapshot still has it → live dead list.
 
-Mount also checks the live namespace (every entry points at an inode, directory parents
-and link counts match) and reclaims orphans (inodes with no entry: unlinked while open
-before a crash). It prints e.g. `milkfs: vda mounted at /Volumes/Milk: generation 1430,
-2 inodes, 4/16384 blocks used, 0 snapshot(s), check clean`.
+Every commit writes the **space map** of the generation it commits, into fresh blocks, as
+part of the commit: the allocator's bitmap minus what the commit frees (`pending_free`,
+the previous map among it) plus the map's own blocks. Because it is written before the
+superblock and the superblock points at it, it can't be out of date with the generation
+that wins at mount, crash or not. Mount loads it when it is intact: index and chunk
+checksums, generation stamp = the superblock's, size matches, bit count = the stored
+count, and the blocks the superblock points at (roots, dead-list heads, the map itself)
+marked used. Then it finishes the deletes on the orphan list and is done:
+
+```text
+milkfs: vda mounted at /Volumes/Milk in 0.37 ms: generation 29, space map current, ...
+```
+
+Otherwise (no map: made by `mkmilkfs.py`, last written by the Mac tool or an older kernel;
+damaged; stale) it says why and **rebuilds** it the old way: mark every block reachable
+from the superblock (live tree, every snapshot tree, shared subtrees once, extents,
+dead-list chains, the rest is free), check the live namespace (every entry points at an
+inode, directory parents and link counts match) and reclaim orphans (inodes with no entry
+and no links). The next commit writes a fresh map.
+
+```text
+milkfs: vda: space map absent (last written by the Mac tool or an older kernel): rebuilding it from the trees
+milkfs: vda mounted at /Volumes/Milk in 100.70 ms: generation 2, 20202 inodes, 3578/65536 blocks used, 0 snapshot(s), check clean
+```
+
+So a mapped mount does no namespace check: that is what `snap check` is for. On a branched
+volume the map also counts blocks waiting for the next sweep (as the in-memory map does);
+before the map, a reboot reclaimed those, now the next sweep (snapshot delete) does.
+
+Mount time, `scripts/mounttime.sh N` (N files made on the Mac, 100 per directory, every
+50th 8 KiB, the rest inline; virtio, `-smp 4`):
+
+| files | scan (no map: before, or after a Mac-side write) | with the space map |
+|---|---|---|
+| 20 000 (3 578 blocks) | 100-113 ms | 0.3-0.5 ms |
+| 100 000 (18 604 blocks) | 1 065-1 163 ms | 0.3-0.5 ms |
 
 ### Snapshots
 
@@ -534,6 +626,143 @@ has clones (EBUSY); clones can't be snapshotted (v0).
 The intended UI flow: snapshot (or take the newest auto snapshot) → clone → installer
 writes into `/Volumes/Milk-<name>` → user tries the app (run with that root once proc has
 per-process roots; today, from that path) → Keep = promote, Cancel = discard.
+
+### Diff (`snap diff`)
+
+`fs::milkfs::diff(a, b: Option<&str>) -> DiffResult { changes: Vec<Change>, nodes_read,
+subtrees_skipped }`, `Change::{Added, Removed, Modified, Renamed(old, new)}` with paths from
+the volume root. `b = None` or `"live"` = the live volume; the order of `a` and `b` doesn't
+matter. Shell: write `A [B]` to `/sys/fs/milkfs/diff`, read the result back;
+`snap diff A [B|live]` prints e.g.
+
+```
+diff before..live: 5 change(s) (2 tree nodes read, 0 unchanged subtrees skipped)
+A /home/milk/Documents/Plans 2026
+D /home/milk/Documents/todo.txt
+M /home/milk/README.txt
+R /dd/a -> /dd/sub/a2
+```
+
+Only changed nodes are read: walking the newer tree, a subtree whose pointer was born at or
+before the older snapshot is skipped (CoW: it's the same subtree in both), and those
+pointers are skipped in the older tree too; the items of the remaining leaves are compared.
+After a promote (branched history) shared subtrees are found by block-pointer equality
+against the older tree instead. One change among 300 files reads at most a handful of
+nodes (self-test checks <= 8). Files now record their parent directory (as directories
+always did), so paths are found without scanning; older files fall back to a scan.
+
+### Versions ("Browse All Versions")
+
+For a Versions panel (Notes, Files): the history of one file across the volume's snapshots.
+
+```rust
+// crate::fs::milkfs
+pub struct Version {
+    pub snapshot: Option<String>, // the (oldest) snapshot holding this content; None = current file
+    pub taken: u64,                // when that snapshot was taken (unix s); current: now
+    pub mtime: i64,                // the file's own mtime in that version
+    pub size: u64,
+    pub hash: u64,                 // content hash: equal = identical contents
+}
+pub fn versions(path: &str) -> Result<Vec<Version>>;            // oldest first, current last
+pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
+```
+
+- `path` is any VFS path to a regular file on the milkfs volume (`/home/milk/...`,
+  `/Volumes/Milk/...`, `/Applications/...`); elsewhere EXDEV, a directory EISDIR.
+- Distinct versions only: consecutive snapshots with the same content collapse into the
+  oldest one; if the current content equals the newest snapshot's, that entry is shown as
+  the current one. Hashes come from the extent checksums (no file data is read), so listing
+  is cheap even for big files.
+- The file is followed by inode number, so its history survives renames; where that inode
+  doesn't exist in a snapshot, the current path is tried (for editors that save via
+  write-temp + rename).
+- `restore_version` writes the snapshot's content into the live file (same inode, so open
+  editors see it on their next read). If the current content isn't in any snapshot, it first
+  takes snapshot `pre-restore-<time>`, so a restore never loses anything (and that version
+  shows up in the list). Fails with ENOSPC if the 30-record snapshot table is full.
+- To show a version's content, read `<volume>/.snapshots/<snapshot><path in volume>`, e.g.
+  `/Volumes/Milk/.snapshots/monday/home/milk/Documents/ideas.md` (read-only).
+- Shell: write a path to `/sys/fs/milkfs/versions` and read back tab-separated lines
+  `snapshot|current, taken, mtime, size, hash` (after a `# path` header); write
+  `SNAPSHOT PATH` to `/sys/fs/milkfs/restore`. Tool: `versions FILE`,
+  `versions restore FILE SNAPSHOT`:
+
+```
+/home/milk/Documents/ideas.md: 4 version(s)
+   1  2026-10-21 05:04      12 B  109ff1d8  in snapshot monday
+   2  2026-10-21 05:04      21 B  cf46a6a6  in snapshot tuesday
+   3  2026-10-21 05:04       6 B  a3f8b57b  in snapshot pre-restore-2026-10-21T05:04:10
+   *  2026-10-21 05:04      12 B  109ff1d8  (current)
+```
+
+### Check and repair (fsck)
+
+Never automatic: mount only finishes deferred deletes (inodes with no links left, i.e.
+files unlinked while open when the machine went down, like Linux's orphan list) and
+*reports* anything else (`check FOUND PROBLEMS`). Repairs happen only on request:
+
+- kernel: `fs::milkfs::check(repair) -> CheckReport`, `/sys/fs/milkfs/check` (write `check`
+  or `repair`, read the report), `snap check [--repair]`;
+- host: `scripts/mkmilkfs.py check IMAGE [--repair]` (exit 0 clean/repaired, 1 problems,
+  2 damage that can't be repaired).
+
+| damage | check finds | repair |
+|---|---|---|
+| a superblock slot is garbage | yes, as a **note** (not a problem: a commit torn mid-superblock-write leaves exactly this, so crashed images still check clean) | rewritten from the good one (the next commit lands there; in the kernel any commit heals it) |
+| entry pointing at a missing inode | yes | entry removed |
+| inode with links but no entry | yes | linked into `/lost+found` as `#<ino>` |
+| inode with no links and no entry | yes | deleted |
+| wrong link count / directory parent | yes | fixed |
+| allocated but unreachable blocks | yes (a note on a branched volume: they wait for the next sweep) | swept, and a corrected space map committed |
+| reachable blocks marked free | yes | marked used again (before anything else allocates) |
+| space map unreadable or wrong (host check compares it with the reachable blocks) | yes | kernel: mount already rebuilt it; host: dropped (the next mount rebuilds it) |
+| orphan-list entry for an inode that is gone or has links | yes | entry dropped |
+| shared-block counts that don't match the references (too low = deleting one copy would free a block another uses) | yes (not at mount: `check` counts every reference) | table rebuilt from the references |
+| a snapshot taken while the live table was wrong (it keeps the wrong counts) | host check: a note | none (snapshots are read-only); harmless unless rolled back to: then `check --repair` |
+| data block fails its checksum | yes, with the file's path | **no**: recover with `versions restore` / `snap rollback` |
+| tree node fails its checksum | yes (mount also refuses, EIO) | **no**: the image is left untouched |
+
+The host repair rewrites the live tree from the fixed item set into free blocks and commits a
+new superblock (snapshots untouched; if there are any, the volume switches to exact sweeps
+since the dead lists no longer describe the new tree). `mkmilkfs.py corrupt IMAGE
+{orphan,dangling,nlink,parent,sb,smap,bref,data,node}` damages a test image on purpose, and
+`scripts/fscktest.sh` runs every kind through both repairs (base image = a few seconds of
+the crash workload; after a repair the kernel's crash-check verifies every file).
+
+### Reflink copies and dedupe
+
+A file can share data blocks with another (copy-on-write): `cp --reflink SRC DST` (or
+`--reflink=auto`: copy if sharing isn't possible), the Linux `FICLONE` ioctl
+(`ioctl(dst_fd, 0x40049409, src_fd)`, `rt::sys::ficlone(src, dst)`, kernel
+`fs::ops::ficlone(&src, &dst)` / `fs::milkfs::inode::reflink`), and `dedupe`.
+
+- The copy gets the source's extent items with the same block pointers, and each shared
+  run gets a **shared-block entry** (kind 8) counting its extra references. Writing either
+  file is ordinary copy-on-write: the touched blocks get new ones, the old run is trimmed,
+  and dropping a reference to a shared block only lowers its count. Only the last
+  reference goes through the normal release rules (birth time, dead lists), which are
+  about which *trees* (live, snapshots) still have a block; the counts are per tree, so
+  snapshots and clones carry their own. Space accounting stays exact through snapshots,
+  deletes, rollbacks, clones and promotes (self-test and crash test).
+- Same view of the same volume only: EXDEV otherwise (other file system, other volume,
+  a snapshot or clone); EISDIR for directories, EINVAL for other non-files or a file onto
+  itself; EBADF unless the source is open for reading and the destination for writing.
+  Inline files (up to 1 KiB) are simply copied. The destination's times are updated.
+- 2 MB with `cp --reflink`: a handful of metadata blocks instead of 489 data blocks
+  (`scripts/reflinktest.sh`).
+
+**dedupe** (`dedupe [-n] DIR`, `/sys/fs/milkfs/dedupe` (`DIR` or `DIR dry`),
+`fs::milkfs::dedupe(dir, dry_run)`): every regular file with data blocks under `DIR` is
+grouped by size and content hash (from the block checksums, no data read); files in a
+group are compared byte by byte with the group's first file and, if equal, made to share
+its blocks. File times stay as they were. Blocks a snapshot still has stay used until
+that snapshot is deleted (the report says how many were freed now):
+
+```text
+/Volumes/Milk/d: 4 file(s) with data, 1 group(s) of identical files, 2 now share, 1 already shared, 0 same hash but different
+978 block(s) (3912 KiB) shared, 980 block(s) freed now
+```
 
 ### Persistent home
 
@@ -589,20 +818,59 @@ Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name
   every file in the live tree and all snapshots against its own header, checks the mounted
   generation is the last committed one (or exactly the in-flight one when its superblock
   fully landed), discards the clones, deletes the snapshots and checks space accounting is
-  exact.
+  exact. The host check also compares each crashed image's space map with the blocks
+  actually reachable (24/24 rounds exact).
+- `scripts/mounttime.sh [N]`: mount time with N files, with and without a space map.
+- `scripts/treetest.sh [N]`: B+tree shape after creating and deleting N files.
+- `scripts/reflinktest.sh`: `cp --reflink`, `--reflink=auto` / refusal on tmpfs, writing a
+  copy, `dedupe -n` / `dedupe` from the shell; byte-exact and clean on the Mac.
+- `scripts/stressloop.sh [BOOTS]`: parallel stress (see SMP).
+- Self-test, space map (own RAM disk, `State` re-opens as reboots): a fresh volume scans;
+  after commits a re-open loads the map; an unlinked-while-open file left at a "crash" is
+  deleted from the orphan list; a damaged chunk is noticed and rebuilt; a block in use
+  marked free is found by `check` and marked again by `check --repair`.
+
+### Performance (v1)
+
+What v1 changed, all measured with `scripts/cachebench.sh` (virtio disk, HVF, `-smp 4`;
+the create benchmark is `/sys/fs/milkfs/bench`: write N files of a size into a fresh
+directory and fsync, then read them all back with the page cache dropped):
+
+| | v0 | v1 |
+|---|---|---|
+| 300 x 1000 B: create | 30.6 ms, 323 blocks | 11.3 ms, 157 blocks |
+| 300 x 1000 B: read | 21.0 ms | 5.0 ms |
+| 100 x 20 KB: create / read | 29.3 / 50.0 ms | 8.5 / 10.2 ms |
+| 4 x 1 MiB: create / read | 48.0 / 91.2 ms | 5.1 / 9.0 ms |
+| 4 MiB read, page cache off | 46.6 ms | 21.4 ms |
+| 4 MiB read, page cache on, cold / warm | 64.8 / ~0.7 ms | 25.5 / ~0.7 ms |
+| FAT32 4 MiB read, page cache off | 43.8 ms | 3.0 ms |
+
+Where it comes from:
+- **Runs** (`K_EXT`): the allocator hands out consecutive blocks (`alloc_run`), one item
+  describes up to 128 of them, and a run is read with one device request (`bcache.read_run`:
+  one request for the missing blocks, cached ones overlaid). Writes inside a run trim or
+  split it (`drop_range`); every block keeps its own checksum, so partial reads still verify.
+- **Inline data** (`K_INLINE`): files up to 1 KiB live in the tree leaf, no data block; a
+  file that grows past that moves to runs.
+- **Decoded node cache** in `store.rs`: 512 decoded tree nodes keyed by (block, checksum),
+  so lookups don't re-read and re-parse the same nodes (inline data makes leaves fuller and
+  the tree a bit deeper; without this, small-file reads got slower). Keyed by checksum, so
+  it can never return a stale node.
+- **bcache flush coalescing**: up to 64 consecutive dirty blocks per write request.
+- **Page cache readahead**: a miss fills up to 16 pages with one file-system read.
+- FAT gains too: with the page cache off a read now reaches the file system in one call
+  (it used to be one 4 KiB page per call), so FAT's existing cluster-run reads cover all of it.
 
 ### Not in v0 (vs the design below)
 
 - Snapshot and clone records live in the superblock (30 in total) instead of a volume
   tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
-- No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
-- One extent per 4 KiB block (no multi-block extents, no inline data, no reflink copies).
-- B+tree deletion doesn't merge underfull nodes.
 - Batched commits (about 1 s). Reads are page-cached (see Page cache).
 - After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
   (fine at these sizes; proportional to metadata).
 - One global lock per volume (`sched::Mutex<State>`), so operations on a volume serialise.
-- No permission checks (like the rest of the VFS), no xattrs, no fsck repair (check only).
+- No permission checks (like the rest of the VFS), no xattrs.
 - Rollback brings back files that were unlinked-but-open when the snapshot was taken; they
   are reclaimed right after.
 
@@ -679,7 +947,7 @@ Old tree nodes go to the dead list / free list as above.
   dead list) of the System volume and installs into the clone. The app runs with the clone
   as its root. "Keep" makes the clone the System volume (pointer swap at the next commit);
   "Discard" deletes the clone and frees what only it used.
-- Cheap copies: `cp` of a large file can clone extents (reflink) instead of copying.
+- Cheap copies: `cp --reflink` shares extents instead of copying (done: see Reflink copies).
 
 ### How it plugs into this VFS
 

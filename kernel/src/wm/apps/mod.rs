@@ -5,6 +5,7 @@ pub mod about;
 pub mod browser;
 pub mod files;
 pub mod fsx;
+pub mod music;
 pub mod notes;
 pub mod settings;
 pub mod terminal;
@@ -28,6 +29,7 @@ pub fn create(app: App) -> (Rect, Box<dyn WindowContents>) {
             Rect::new(150, 56, 700, 520),
             Box::new(browser::Browser::new()),
         ),
+        App::Music => (Rect::new(300, 92, 460, 476), Box::new(music::Music::new())),
         App::Settings => (
             Rect::new(180, 80, 660, 420),
             Box::new(settings::Settings::new()),

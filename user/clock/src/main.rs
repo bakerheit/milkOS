@@ -543,7 +543,7 @@ impl App {
             cx,
             436,
             "Local time. World clocks need a time zone setting.",
-            th.latte,
+            th.cocoa,
             1,
         );
     }

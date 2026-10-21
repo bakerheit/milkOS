@@ -465,7 +465,7 @@ impl App {
             } else {
                 win.disc(22, y + 9, 7, acc);
             }
-            let tcol = if hidden { th.latte } else { th.espresso };
+            let tcol = if hidden { th.cocoa } else { th.espresso };
             win.text(36, y + 1, &widgets::fit(&name, SIDE - 48), tcol);
             self.hits
                 .add(Rect::new(8, y, SIDE - 16, 20), CAL_TOGGLE + i as u32);

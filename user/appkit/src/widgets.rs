@@ -163,7 +163,7 @@ pub fn chip(
 }
 
 /// A text field: milk fill, 1px sand border (honey ring when focused), the caret drawn when
-/// focused and `caret_on`. `placeholder` shows in latte when empty.
+/// focused and `caret_on`. `placeholder` shows in secondary text (cocoa) when empty: SPEC rule, latte is for disabled text only.
 pub fn field(
     win: &mut Window,
     th: &Theme,
@@ -182,7 +182,7 @@ pub fn field(
     let max_w = r.w - 16;
     let ty = r.y + (r.h - 16) / 2;
     if f.text.is_empty() && !placeholder.is_empty() {
-        win.text(r.x + 8, ty, &fit(placeholder, max_w), th.latte);
+        win.text(r.x + 8, ty, &fit(placeholder, max_w), th.cocoa);
     } else {
         // Scroll so the caret stays visible.
         let chars: alloc::vec::Vec<char> = f.text.chars().collect();

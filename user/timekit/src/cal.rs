@@ -82,6 +82,14 @@ impl Event {
         }
     }
 
+    /// The first day after `after` this event happens on (looking at most `MAX_RANGE_DAYS` ahead).
+    pub fn next_after(&self, after: Date) -> Option<Date> {
+        let start = after.days() + 1;
+        (start..start + MAX_RANGE_DAYS)
+            .map(Date::from_days)
+            .find(|&d| self.occurs_on(d))
+    }
+
     pub fn occurs_on(&self, d: Date) -> bool {
         if d < self.date || self.until.is_some_and(|u| d > u) {
             return false;
@@ -527,6 +535,19 @@ mod tests {
 
     fn d(y: i32, m: u8, dd: u8) -> Date {
         Date::new(y, m, dd).unwrap()
+    }
+
+    #[test]
+    fn next_after_finds_the_following_day() {
+        let mut e = Event::new(1, "x", d(2025, 1, 31));
+        e.repeat = Repeat::Monthly;
+        assert_eq!(e.next_after(d(2025, 1, 31)), Some(d(2025, 2, 28)));
+        assert_eq!(e.next_after(d(2025, 1, 1)), Some(d(2025, 1, 31)));
+        e.until = Some(d(2025, 3, 31));
+        assert_eq!(e.next_after(d(2025, 3, 31)), None);
+        let once = Event::new(2, "y", d(2025, 5, 5));
+        assert_eq!(once.next_after(d(2025, 5, 5)), None);
+        assert_eq!(once.next_after(d(2025, 5, 4)), Some(d(2025, 5, 5)));
     }
 
     #[test]

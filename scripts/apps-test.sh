@@ -69,9 +69,14 @@ tr -d '\r' < "$LOG" | grep -a "window .* Clock" >/dev/null && ok "the Clock wind
 [ "$(stat -f %z "$T/clock.png")" -gt 10000 ] && ok "Clock drew (screenshot $(stat -f %z "$T/clock.png") bytes)" || bad "Clock screenshot is empty"
 ser "send:open /bin/activity" "wait:$P"
 sleep 3
-q move 483 140 click sleep 2 screendump "$T/activity-security.png"
 ser "send:cat /dev/wm" "wait:$P"
+q screendump "$T/activity-processes.png"
+# The Security tab: the window's position is in /dev/wm (outer rect), the body starts 1px right
+# and 33px down; the tab is 347 right and 20 down of that.
+pos=$(tr -d '\r' < "$LOG" | grep -a "window .* Activity Monitor" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
+set -- $pos
+q move $(( $1 + 1 + 347 )) $(( $2 + 33 + 20 )) click sleep 2 screendump "$T/activity-security.png"
 tr -d '\r' < "$LOG" | grep -a "window .* Activity Monitor" >/dev/null && ok "the Activity Monitor window is on the desktop" || bad "no Activity Monitor window"
-differ "$T/clock.png" "$T/activity-security.png" && ok "Activity Monitor drew its own screen" || bad "Activity Monitor screenshot matches Clock"
+differ "$T/clock.png" "$T/activity-processes.png" && differ "$T/activity-processes.png" "$T/activity-security.png" && ok "Activity Monitor drew Processes, then a different Security screen" || bad "the Security tab did not open"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "apps-test: PASS (screenshots in $T)"; else echo "apps-test: FAIL (logs and screenshots in $T)"; exit 1; fi

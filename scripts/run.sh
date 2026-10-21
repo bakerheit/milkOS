@@ -15,5 +15,11 @@ KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 DISPLAY_ARGS=(-device ramfb -display cocoa)
 [ "${1:-}" = headless ] && DISPLAY_ARGS=(-display none)
+# virtio-input keyboard + tablet (absolute pointer); modern virtio-mmio (qemu defaults to legacy).
+INPUT_ARGS=(-global virtio-mmio.force-legacy=false
+  -device virtio-keyboard-device -device virtio-tablet-device)
+# Scratch disk /tmp/milk-disk.img as virtio-blk (/dev/vda), see scripts/disk.sh.
+source scripts/disk.sh
+milk_disk_args
 exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}"
+  -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}"

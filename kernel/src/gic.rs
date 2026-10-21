@@ -75,6 +75,8 @@ static HANDLERS: [FnSlot; MAX_IRQS] = [const { FnSlot::new() }; MAX_IRQS];
 // Single-writer counters (the IRQ path): plain load/store, see sync.rs on atomics.
 static SPURIOUS: AtomicU64 = AtomicU64::new(0);
 static NUM_IRQS: AtomicU32 = AtomicU32::new(0);
+/// Times each INTID has been taken (for /proc/interrupts). Written only by `handle_irq`.
+static COUNTS: [AtomicU64; MAX_IRQS] = [const { AtomicU64::new(0) }; MAX_IRQS];
 
 #[inline]
 fn gicd_read(off: usize) -> u32 {
@@ -259,6 +261,20 @@ pub fn spurious_count() -> u64 {
     SPURIOUS.load(Ordering::Relaxed)
 }
 
+/// How many times `irq` has been taken since boot (0 for out-of-range INTIDs).
+pub fn irq_count(irq: u32) -> u64 {
+    COUNTS
+        .get(irq as usize)
+        .map_or(0, |c| c.load(Ordering::Relaxed))
+}
+
+/// Is a handler registered for `irq`?
+pub fn is_registered(irq: u32) -> bool {
+    HANDLERS
+        .get(irq as usize)
+        .is_some_and(|s| s.get::<Handler>().is_some())
+}
+
 /// Called from the IRQ vector: acknowledge, run the registered handler, end the interrupt.
 pub fn handle_irq(frame: &mut TrapFrame) {
     let iar = gicc_read(GICC_IAR);
@@ -266,6 +282,9 @@ pub fn handle_irq(frame: &mut TrapFrame) {
     if irq >= 1020 {
         SPURIOUS.store(SPURIOUS.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
         return; // spurious: no EOI
+    }
+    if let Some(c) = COUNTS.get(irq as usize) {
+        c.store(c.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
     }
     match HANDLERS.get(irq as usize).and_then(|s| s.get::<Handler>()) {
         Some(h) => h(irq, frame),

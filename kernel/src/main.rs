@@ -8,16 +8,19 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod cursor;
 mod display;
 mod dtb;
 mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
+mod fs;
 mod fwcfg;
 mod gfx;
 mod gic;
 mod heap;
+mod input;
 mod mem;
 mod memtest;
 mod mmu;
@@ -30,6 +33,7 @@ mod splash;
 mod sync;
 mod timer;
 mod uart;
+mod virtio;
 
 global_asm!(include_str!("boot.S"));
 
@@ -79,16 +83,46 @@ pub extern "C" fn kmain() -> ! {
     gic::init();
     timer::init();
     uart::init();
+    virtio::init();
+    cursor::init();
     sync::irq_enable();
     selftest::run();
     memtest::run();
+    fs::init();
+    fs::selftest::run();
     sched::init();
     sched::selftest::run();
 
     loop {
         uart::echo_pending();
+        input_demo();
         unsafe { core::arch::asm!("wfi") };
     }
+}
+
+/// Demo until the window server exists: typed text echoes on the console, the mouse moves
+/// the cursor, buttons and scrolling are logged to the serial port only.
+fn input_demo() {
+    while let Some(ev) = input::poll() {
+        match ev {
+            input::Event::PointerMove { x, y } => cursor::move_to(x, y),
+            input::Event::KeyDown(k) => match k.text() {
+                Some('\x08') => kprint_str("\x08 \x08"),
+                Some(c) if c == '\n' || !c.is_control() => {
+                    let _ = console_writer().write_char(c);
+                }
+                _ => {}
+            },
+            input::Event::Button { .. } | input::Event::Scroll { .. } => {
+                let _ = writeln!(Uart, "[input] {ev:?}");
+            }
+            input::Event::KeyUp(_) => {}
+        }
+    }
+}
+
+fn kprint_str(s: &str) {
+    let _ = console_writer().write_str(s);
 }
 
 #[panic_handler]

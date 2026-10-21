@@ -57,9 +57,12 @@ HVF on an Apple Silicon Mac. Details are in `docs/` (one file per area).
 - `milk`, a package manager with Ed25519-signed packages and dependencies; `milk try`
   installs into a throwaway clone, kept or discarded.
 
+**Fixed before release**
+- Three intermittent hangs/crashes, each root-caused and covered by `scripts/serial-soak.sh`: a
+  lost PL011 RX interrupt (console stopped mid-line), a stale-waiter lost wakeup in `WaitQueue`,
+  and a CPU taking interrupts before joining the scheduler during SMP bring-up (boot crash).
+
 **Known limits**
-- An intermittent scheduler lost-wakeup can freeze the system with all CPUs idle (seen mostly
-  as the serial console stopping mid-line, once inside the boot self-test). A fix is in progress.
 - Kernel RAM is mapped RWX; processes have no user credentials yet, so file permission
   bits aren't checked (the capability sandbox is the access control).
 - milkfs: one volume per disk, at most 30 snapshots + clones, sends only from the

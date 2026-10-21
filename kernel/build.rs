@@ -2,13 +2,73 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
-    build_initramfs(Path::new(&dir).parent().unwrap());
+    let repo = Path::new(&dir).parent().unwrap();
+    // User programs first: the initramfs packs them (initramfs.list).
+    build_user(repo);
+    build_initramfs(repo);
+}
+
+// ---- user programs ------------------------------------------------------------------
+// <repo>/user is its own workspace (target, linker script). Build it with a nested
+// `cargo build --release` into <repo>/target/user, then check that every program
+// (user/<name>/src/main.rs) is listed in initramfs.list, so none silently goes missing.
+
+const USER_BIN_DIR: &str = "target/user/aarch64-unknown-none-softfloat/release";
+
+fn build_user(repo: &Path) {
+    let user = repo.join("user");
+    if !user.join("Cargo.toml").exists() {
+        return;
+    }
+    // A directory: cargo rescans everything under it for changes.
+    println!("cargo:rerun-if-changed={}", user.display());
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.current_dir(&user)
+        .args(["build", "--release", "--target-dir"])
+        .arg(repo.join("target/user"));
+    // Don't leak this (kernel) build's settings into the nested one.
+    for (k, _) in std::env::vars() {
+        if (k.starts_with("CARGO_") && k != "CARGO_HOME")
+            || k == "RUSTFLAGS"
+            || k == "RUSTC_WORKSPACE_WRAPPER"
+            || k == "RUSTC_WRAPPER"
+        {
+            cmd.env_remove(&k);
+        }
+    }
+    let o = cmd.output().expect("failed to run cargo for user/");
+    if !o.status.success() {
+        panic!(
+            "building user/ failed:\n{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        );
+    }
+    let list = fs::read_to_string(repo.join("initramfs.list")).unwrap_or_default();
+    for e in fs::read_dir(&user).unwrap().filter_map(|e| e.ok()) {
+        if !e.path().join("src/main.rs").exists() {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().into_owned();
+        let host = format!("{USER_BIN_DIR}/{name}");
+        assert!(
+            repo.join(&host).exists(),
+            "user program {name} was not built ({host})"
+        );
+        assert!(
+            list.lines()
+                .any(|l| l.split_whitespace().nth(1) == Some(host.as_str())),
+            "user program {name} is not in initramfs.list; add:\n/bin/{name}  {host}  755"
+        );
+    }
 }
 
 // ---- initramfs ----------------------------------------------------------------------

@@ -10,7 +10,7 @@ use super::errno::{Errno, Result};
 use super::node::{Inode, InodeRef, InodeType, Stat, makedev};
 use super::synth::{Ids, SynthDir, SynthFs};
 use crate::sync::SpinLock;
-use crate::{timer, uart};
+use crate::timer;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
@@ -86,20 +86,9 @@ impl Inode for DevNode {
                 }
                 Ok(buf.len())
             }
-            Kind::Console => {
-                // Non-blocking until the scheduler has wait queues: EAGAIN when empty.
-                let mut n = 0;
-                while n < buf.len() {
-                    match uart::read_byte() {
-                        Some(b) => {
-                            buf[n] = if b == b'\r' { b'\n' } else { b };
-                            n += 1;
-                        }
-                        None => break,
-                    }
-                }
-                if n == 0 { Err(Errno::EAGAIN) } else { Ok(n) }
-            }
+            // The tty line discipline (proc/console.rs): blocks until a line is typed once
+            // the scheduler runs; EAGAIN when empty before that.
+            Kind::Console => crate::proc::console::read(buf),
         }
     }
 

@@ -1,0 +1,12 @@
+[package]
+name = "msh"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "msh"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

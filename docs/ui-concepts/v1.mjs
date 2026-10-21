@@ -43,6 +43,9 @@ export const TOK = {
   launcher: { w: 640, y: 140, inputH: 56, rowH: 48, gap: 12, maxRows: 6, dim: 0.25, iconIn: 40, iconRow: 36 },
   toast: { w: 264, h: 64, right: 12, top: 40 },
   tabs: { stripH: 38, tabH: 32, tabY: 6, firstX: 84, minW: 96, maxW: 160, gap: 6, padL: 12, padR: 8, radiusTop: 10, closeHit: 20, plusW: 28, plusH: 24, plusR: 8, dropBorder: "2px dashed straw", dropFill: "straw at 20%" },
+  button: { pillH: 24, pillR: 12, dialogH: 28, dialogR: 8, padX: 14, minW: 88, ink: "#3A2E27", hover: "#EA9AA4", pressed: "#DE7D89", danger: "#B5473B" },
+  files: { toolbarH: 40, navD: 24, pathH: 24, searchW: 150, sidebarW: 168, statusH: 24 },
+  menuStatus: { glyph: 16, gap: 12, hitH: 28 },
   drawer: { w: 316, right: 12, top: 36, bottom: 12, pad: 12, cardH: 64, cardCompactH: 56, cardR: 14, iconIn: 36, headerH: 78, chipH: 26, dndH: 44, alpha: 0.78, toastSecs: 5 },
   control: { w: 288, h: 292, right: 12, top: 36, tileH: 56, sliderH: 8 },
   cards: { pad: 16, gap: 16, r: 20, cols: 3 },
@@ -440,6 +443,53 @@ Rules that come out of the numbers:
 - **cocoa changed (light):** #7A6652 was 4.40:1 on the sidebar, just under 4.5. It is now #6B5846 (5.45:1 on the sidebar). The dark cocoa #BEA890 is unchanged. Anything hard-coded to #7A6652 should move to the token.
 - **Disabled text (latte) is exempt** from the 4.5:1 rule but should not carry meaning on its own. The tab close x uses cocoa, not latte, for that reason.
 - **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
+
+## Buttons
+Added 2026-10-21 after a contrast check of the shipped screens: filled buttons were cream text on straw, 2.42:1. The fix keeps the pink and darkens the text. The text colour is the fixed ink (${TOK.button.ink}), not espresso, because espresso turns light in the dark theme.
+| Kind | Fill | Text | Contrast |
+|---|---|---|---|
+| Primary (filled) | straw ${LIGHT.straw} | ink ${TOK.button.ink}, bold | ${ratio(TOK.button.ink, LIGHT.straw).toFixed(2)}:1 |
+| Primary, hover | ${TOK.button.hover} | ink | ${ratio(TOK.button.ink, TOK.button.hover).toFixed(2)}:1 |
+| Primary, pressed | ${TOK.button.pressed} | ink | ${ratio(TOK.button.ink, TOK.button.pressed).toFixed(2)}:1 |
+| Secondary | oat, 1px sand border | primary text (espresso; #F4EBE0 in dark) | ${ratio(LIGHT.espresso, LIGHT.oat).toFixed(2)}:1 light, ${ratio(DARK.espresso, DARK.oat).toFixed(2)}:1 dark |
+| Danger | ${TOK.button.danger} | #FFFDF8 (fixed, not the milk token) | ${ratio("#FFFDF8", TOK.button.danger).toFixed(2)}:1 |
+| Disabled | oat, 1px sand border | latte (exempt from 4.5:1, never the only signal) | ${ratio(LIGHT.latte, LIGHT.oat).toFixed(2)}:1 |
+- Sizes: pill (inside cards, toasts, banners) height ${TOK.button.pillH}, fully rounded (radius ${TOK.button.pillR}), padding ${TOK.button.padX} each side. Dialog button (sheets, panels, Open/Save) height ${TOK.button.dialogH}, radius ${TOK.button.dialogR}, minimum width ${TOK.button.minW}. Text is bold (the faux bold).
+- Button row in a sheet: right-aligned, 8px apart, the primary on the far right, the cancel or secondary action to its left. A destructive primary uses the Danger kind.
+- Focus ring: 2px honey, 2px outside the button. Pressed buttons move nothing.
+- Where it applies: every filled straw pill (Welcome tour buttons, Restore this version, Share, Send), dialog buttons (Open, Cancel), and sheets. Straw is still used freely for fills without text on them (selection, progress, the traffic light).
+
+## Files window: toolbar, sidebar and status bar
+Proposal from the 2026-10 screen review. Today the window has only a sidebar, a grid and a status bar with an "up" pill squeezed into the corner.
+- Toolbar: ${TOK.files.toolbarH}px high, directly under the title bar, cream, 1px sand line below. Left to right at 12px padding: back and forward (${TOK.files.navD}px circles, oat; forward is latte when disabled), the path bar (${TOK.files.pathH}px high, radius ${TOK.files.pathH / 2}, milk with 1px sand, "Home > Documents", each part clickable, replaces the old "up" pill), search (${TOK.files.searchW}px wide, same style), the Share button (a secondary pill; primary while a file is selected), and a view menu button (list or grid).
+- Sidebar (${TOK.files.sidebarW} wide): FAVOURITES (Home, Documents, Downloads, Desktop, Pictures, Music), NEARBY (Milk Drop devices found on the link: a dot, green when the device is receiving and latte when not; dropping a file on a name sends it), SHARED (the Mac folder). "milk" and "Milk" are not good labels (they differ by a capital): name them "This machine" and "Milk disk". Time Machine is not a device: give it a clock button in the toolbar (it opens the versions view) and keep the "Browse All Versions" menu item.
+- Status bar: ${TOK.files.statusH} high. Left to right: "1 of 4 selected, 1.0 MB", then "212 GB available" on the right. Path text uses secondary text, never latte (latte on cream is 1.99:1).
+- Empty folder: a centred line in secondary text, "This folder is empty", and a faint dashed outline where dropped files would go.
+
+## Menu bar status area
+The right side of the menu bar today shows only the CPU meter and the clock, so there is nowhere to open the notification drawer from and no sign of Focus, network or sound. Right to left from the clock, ${TOK.menuStatus.gap}px apart, each a ${TOK.menuStatus.glyph}px glyph with a ${TOK.menuStatus.hitH}px high hit target:
+1. Clock (opens Today).
+2. CPU meter (opens Activity).
+3. Volume (opens the Control centre).
+4. Network (opens the Control centre).
+5. Focus moon, shown only while Focus is on.
+6. Bell with the unread count (opens the notification drawer). This is the one that must exist before the drawer ships.
+Icons are primary text colour, 1px lines on the 8x16 grid look; counts use the 18px straw badge from the Notification drawer section.
+
+## Milk Drop sheet (Files > Share)
+Mockups: share.html. Built on the existing \`drop\` commands only (docs/networking.md), so no new kernel work.
+- Sending: the Share button (or dropping a file on a NEARBY name) opens a sheet, ${520}px wide, radius 14, window shadow, header 44 (title "Milk Drop", Esc hint on the right), below the Files toolbar's title bar.
+- Device rows: 64 high, radius 12, 12px side margin, 12px between. Name bold, fingerprint in four groups of four (e.g. 3fa2 91bc 07de 44a1) in secondary text, a trust chip on the right (Known: matcha at 27%, New device: honey at 27%, KEY CHANGED: ${TOK.button.danger} with light text, Not receiving: latte and the row at 55% opacity with "open Milk Drop there"). Selected row: straw 20% fill and a 2px straw border.
+- Data: \`MILK_TABLE=1 drop list\` (name, address, fingerprint, receiving, trust). Rescan while the sheet is open (about every 3 seconds; one scan is about 1.5 s) and show a small spinner while scanning.
+- Footer: "Checked (SHA-256), not yet encrypted." in secondary text (honest, and it becomes "Encrypted" when encryption lands), Cancel (secondary) and Send (primary) dialog buttons.
+- Progress: a file chip, a 12px straw progress bar, and the numbers from \`drop: [####......]  40%  416 KiB / 1024 KiB\`. Cancel stops the transfer. \`drop: sent ...\` (exit 0) closes the sheet and shows the Received toast on the other machine; \`drop: <reason>\` (exit 1) shows the reason in an error row.
+- Incoming (a milkOS-owned panel in the Powerbox style, 644 wide): "alice wants to send you bike.png" with the size, and for a new device a honey panel with the fingerprint at 4x text, "Check this matches what alice sees", and "Accepting trusts this device from now on." Buttons: Decline (secondary) and Trust alice and accept (primary). A known device shows no panel and the buttons Decline and Accept. Driven by \`drop recv\`, which prints "wants to send you" then waits at "accept? [y/N]"; the panel writes y or n.
+- Key changed: a danger-coloured header ("bob's key has changed", "Sending is blocked until you decide"), the old and new fingerprints side by side, advice to compare them in person or by phone, and one danger button, Forget bob and re-verify (\`drop forget bob\`). Sending stays blocked until then.
+- Received toast: the Notification drawer's toast with two pill buttons, Show (in Files) and Open. Files land in ~/Downloads.
+- Nothing nearby: "No other milkOS machines found" with Look again and Close.
+
+## Shield (design only, parked, not scheduled)
+Mockups: shield.html. A read-only view of what each app can do and what it was refused. Nothing here needs new enforcement: it reads the capability sets and the audit log (docs/security.md). Any control that would change network access is drawn disabled and marked "parked, not scheduled". Do not queue engineering for this until the project owner says so. The first buildable version could be read-only: a title-bar button opening a panel (files, files you gave it, network, sound, clipboard, windows, recent activity), and Settings > Privacy with the audit log as sentences and an "intact" line from \`audit verify\`.
 
 ## What the mockup does not show
 Hover/pressed states (lighten fills 4% / darken 4%), animation (none required for 1.0; Spaces can snap), cursor, lock screen, text selection colour (straw at 27%). Raise it with the design owner if one of these blocks you.

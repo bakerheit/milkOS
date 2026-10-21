@@ -1223,6 +1223,15 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.glide(512, 420, x, y, 12).wait(400);
             }
         }
+        // The launch bounce: Paint hops while it starts. Run as slow-dock-bounce (hops 20x
+        // longer, the screenshot lands near the top of the first hop) and slow-dock-bounce-late
+        // (the small last hop once Paint's window is up).
+        "dock-bounce" | "dock-bounce-late" => {
+            let (x, y) = dock_icon_center(4);
+            b.glide(512, 420, x, y - 120, 8).wait(400);
+            b.click(x, y).to(x, y - 160);
+            b.wait(if name == "dock-bounce" { 3300 } else { 11500 });
+        }
         "settings-dock" => {
             // Settings > Dock: icon size, Magnification on / off and its size.
             let (x, y) = dock_icon_center(8);

@@ -412,6 +412,11 @@ pub struct Desktop {
     dock_layout: dock::Layout,
     dock_draws: Vec<shell::DockDraw>,
     dock_sprites: Vec<Option<DockSprite>>,
+    /// Icons hopping while their app starts, and whether the compositor draws the icons
+    /// this frame (magnified or hopping) instead of the dock panel.
+    bounces: Vec<dock::Bounce>,
+    was_hopping: bool,
+    dock_overlay: bool,
     /// Dock item being pressed (drawn 4% darker until release).
     dock_pressed: Option<usize>,
     /// Open menu bar menu (index into `menu_titles`) and the row under the pointer.
@@ -511,6 +516,9 @@ impl Desktop {
             dock_layout: dock::layout(0, dock_icon(), 0, 0, 100),
             dock_draws: Vec::new(),
             dock_sprites: Vec::new(),
+            bounces: Vec::new(),
+            was_hopping: false,
+            dock_overlay: false,
             dock_pressed: None,
             menu: None,
             menu_hover: None,
@@ -1598,20 +1606,62 @@ impl Desktop {
             self.dock_mag.eased(),
             p.magnify_pct,
         );
-        if l != self.dock_layout {
+        // Launch bounces: a hop until the app's window is up, then a small last one.
+        let mut lifts = alloc::vec![0i32; n];
+        let mut bounces = core::mem::take(&mut self.bounces);
+        bounces.retain_mut(|b| {
+            let up = shell::tile_up(self, b.tile);
+            if up && b.ready_ns.is_none() {
+                b.ready_ns = Some(now);
+            }
+            let size = l.slots.get(b.tile).map_or(base, |s| s.size);
+            match b.lift(now, size) {
+                Some(h) => {
+                    if let Some(v) = lifts.get_mut(b.tile) {
+                        *v = h;
+                    }
+                    true
+                }
+                None => false,
+            }
+        });
+        let hopping = !bounces.is_empty() || !self.bounces.is_empty();
+        self.bounces.extend(bounces);
+        if self.was_hopping && !hopping {
+            // The last hop landed: clear where it was.
+            let r = self.dock_layout.icons_rect();
+            let lift = base * 6 / 10;
+            self.damage(Rect::new(r.x, r.y - lift, r.w, r.h + lift));
+        }
+        let was_hopping = self.was_hopping;
+        self.was_hopping = hopping;
+        let overlay = l.magnified || hopping;
+        if l != self.dock_layout || overlay != self.dock_overlay {
             let before = self.dock_layout.icons_rect();
-            let was = self.dock_layout.magnified;
             self.damage(before);
             self.damage(l.icons_rect());
-            if was != l.magnified {
+            if overlay != self.dock_overlay {
                 // The panel switches between drawing the icons and only the bar.
                 self.invalidate(PanelKey::Dock);
             }
             self.dock_layout = l;
+            self.dock_overlay = overlay;
             self.invalidate(PanelKey::Tip);
         }
-        if self.dock_layout.magnified {
-            let draws = self.dock_draws(&self.dock_layout);
+        if self.dock_overlay {
+            let mut draws = self.dock_draws(&self.dock_layout);
+            for (d, &h) in draws.iter_mut().zip(&lifts) {
+                d.y -= h;
+            }
+            if hopping || was_hopping {
+                // The hop rises above the icons' usual extent (and its last frame must go).
+                let r = self.dock_layout.icons_rect();
+                let lift = base * 6 / 10;
+                self.damage(Rect::new(r.x, r.y - lift, r.w, r.h + lift));
+            } else if draws != self.dock_draws {
+                // Badges, dots or a pressed tint changed under the magnified icons.
+                self.damage(self.dock_layout.icons_rect());
+            }
             // Badges, dots or pressed state changed: redraw them too.
             let dark = theme::dark();
             self.dock_sprites.resize_with(draws.len(), || None);
@@ -1632,7 +1682,7 @@ impl Desktop {
         } else {
             self.dock_draws.clear();
         }
-        easing
+        easing || hopping
     }
 
     /// Re-render stale window surfaces and panels, then composite the damage.

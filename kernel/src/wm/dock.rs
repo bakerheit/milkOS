@@ -210,3 +210,57 @@ pub fn in_zone(l: &Layout, max_px: i32, x: i32, y: i32) -> bool {
     let top = l.bottom - max_px - 6;
     y >= top && y < l.bar.y + l.bar.h && x >= l.bar.x - 8 && x < l.bar.x + l.bar.w + 8
 }
+
+// ---- the launch bounce ----------------------------------------------------------------------
+
+/// One hop (up and down), ns.
+pub const HOP_NS: u64 = 400_000_000;
+/// How high a hop goes, as a fraction of the icon (x/1000).
+const HOP_H: i32 = 450;
+/// Give up bouncing after this long (the app never showed a window).
+const BOUNCE_MAX_NS: u64 = 10_000_000_000;
+
+/// An icon hopping while its app starts (macOS-style): full hops while waiting, then once
+/// the app's window is up the hop in flight lands and one small last hop follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounce {
+    pub tile: usize,
+    pub start_ns: u64,
+    /// When the app's first window appeared.
+    pub ready_ns: Option<u64>,
+}
+
+fn slow() -> u64 {
+    super::anim::SLOWMO
+        .load(core::sync::atomic::Ordering::Relaxed)
+        .max(1)
+}
+
+impl Bounce {
+    /// How far up the icon is at `now` (px, for an icon of `size`), or None once landed.
+    /// Each hop is a gravity parabola (fast up, slow at the top, fast down).
+    pub fn lift(&self, now: u64, size: i32) -> Option<i32> {
+        let hop = HOP_NS * slow();
+        let e = now.saturating_sub(self.start_ns);
+        if e > BOUNCE_MAX_NS * slow() {
+            return None;
+        }
+        let k = e / hop;
+        // Hops at full height until ready; then the current one lands, one half-height
+        // hop follows (at least two hops in all, so an instant app still gets a bounce).
+        let last_full = match self.ready_ns {
+            Some(r) => r.saturating_sub(self.start_ns) / hop,
+            None => u64::MAX,
+        };
+        let h = if k <= last_full {
+            HOP_H
+        } else if k == last_full + 1 {
+            HOP_H * 4 / 10
+        } else {
+            return None;
+        };
+        let u = ((e % hop) * 1024 / hop) as i64; // 0..1024 through this hop
+        let y = 4 * u * (1024 - u) / 1024; // 0..1024 at the top
+        Some((size as i64 * h as i64 * y / (1000 * 1024)) as i32)
+    }
+}

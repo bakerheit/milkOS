@@ -398,7 +398,22 @@ impl Desktop {
     pub(super) fn click_dock(&mut self, i: usize) {
         self.dock_pressed = Some(i);
         self.control = false;
+        // An app that is not running yet: its icon hops until its window is up.
+        let starting = !tile_up(self, i)
+            && tiles().get(i).is_some_and(|t| {
+                matches!(
+                    t.action,
+                    DockAction::App(_) | DockAction::Program(_) | DockAction::Pkg(_)
+                )
+            });
         self.activate_tile(i);
+        if starting && !self.bounces.iter().any(|b| b.tile == i) {
+            self.bounces.push(super::dock::Bounce {
+                tile: i,
+                start_ns: crate::timer::now_ns(),
+                ready_ns: None,
+            });
+        }
         self.invalidate(PanelKey::Dock);
     }
 
@@ -898,7 +913,7 @@ impl Desktop {
             Mode::Desktop => {
                 v.push(bar);
                 v.push(dock);
-                if self.dock_layout.magnified {
+                if self.dock_overlay {
                     v.push(Layer::DockIcons);
                 }
             }
@@ -1203,7 +1218,7 @@ impl Desktop {
 
     fn paint_dock(&self, p: &mut Painter) {
         // Magnified: the panel is only the glass bar; the compositor draws the icons.
-        if self.dock_layout.magnified {
+        if self.dock_overlay {
             return;
         }
         for (i, it) in tiles().iter().enumerate() {
@@ -1966,6 +1981,7 @@ pub(super) fn status_center(item: Status, cpus: usize) -> (i32, i32) {
 // ---- the magnified dock's icons (drawn by the compositor) -----------------------------------
 
 /// One dock icon as the compositor draws it while the dock is magnified.
+#[derive(Clone, PartialEq)]
 pub struct DockDraw {
     pub x: i32,
     pub y: i32,
@@ -2046,4 +2062,9 @@ pub fn draw_dock_icon(p: &mut Painter, d: &DockDraw, sprite: Option<(&str, &[u32
             255,
         );
     }
+}
+
+/// Is dock tile `i`'s app up (a window for it, or the mode it shows)? Ends its bounce.
+pub(super) fn tile_up(d: &super::Desktop, i: usize) -> bool {
+    tiles().get(i).is_some_and(|t| d.tile_running(t))
 }

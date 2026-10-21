@@ -97,9 +97,10 @@ fn why_op(op: &str, e: rt::Errno) -> alloc::string::String {
     let text = sys::read_file("/sys/fs/milkfs/error").unwrap_or_default();
     let text = core::str::from_utf8(&text).unwrap_or("").trim_end();
     if let Some(rest) = text.strip_prefix(op).and_then(|r| r.strip_prefix(": "))
-        && let Some((_, reason)) = rest.split_once(": ")
+        && let Some((name, reason)) = rest.split_once(": ")
     {
-        return alloc::format!("{reason} ({}, errno {})", e.name(), e.0);
+        // The kernel's errno name (rt's table is short).
+        return alloc::format!("{reason} ({name}, errno {})", e.0);
     }
     why(e)
 }

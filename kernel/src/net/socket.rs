@@ -142,7 +142,10 @@ impl Table {
     pub fn new() -> Table {
         let mut slots = Vec::with_capacity(MAX_SOCKETS);
         for _ in 0..MAX_SOCKETS {
-            slots.push(Slot { gen_: 0, sock: None });
+            slots.push(Slot {
+                gen_: 0,
+                sock: None,
+            });
         }
         Table {
             slots,
@@ -639,7 +642,7 @@ pub fn send_capacity(id: SocketId) -> Result<usize> {
     with(|st| {
         let (_, s) = st.socks.lookup(id)?;
         Ok(match s.ty {
-            SockType::Dgram => udp::MAX_PAYLOAD,
+            SockType::Dgram => udp::MAX_DATAGRAM,
             SockType::Stream if s.tcb.state.can_send() && !s.shut_wr => s.tx.free(),
             SockType::Stream => 0,
         })

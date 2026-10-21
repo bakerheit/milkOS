@@ -178,7 +178,11 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         )?;
     }
     // Connections in TIME_WAIT (kept without a socket, tcp::TwTable).
-    let base = st.socks.iter().filter(|(_, s)| s.ty == SockType::Stream).count();
+    let base = st
+        .socks
+        .iter()
+        .filter(|(_, s)| s.ty == SockType::Stream)
+        .count();
     for (n, e) in st.tw.entries.iter().enumerate() {
         writeln!(
             w,
@@ -231,11 +235,12 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     let s = &st.stats;
     writeln!(
         w,
-        "Ip: InReceives InHdrErrors InAddrErrors InUnknownProtos InDelivers OutRequests OutNoRoutes ReasmFails"
+        "Ip: InReceives InHdrErrors InAddrErrors InUnknownProtos InDelivers OutRequests OutNoRoutes ReasmFails ReasmReqds ReasmOKs ReasmTimeout ReasmOverlaps FragCreates"
     )?;
+    let f = &st.frags.stats;
     writeln!(
         w,
-        "Ip: {} {} {} {} {} {} {} {}",
+        "Ip: {} {} {} {} {} {} {} {} {} {} {} {} {}",
         s.ip_in_receives,
         s.ip_in_hdr_errors,
         s.ip_in_addr_errors,
@@ -243,7 +248,12 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         s.ip_in_delivers,
         s.ip_out_requests,
         s.ip_out_no_routes,
-        s.ip_reasm_fails
+        s.ip_reasm_fails,
+        f.reqds,
+        f.oks,
+        f.timeouts,
+        f.overlaps,
+        f.creates
     )?;
     writeln!(
         w,

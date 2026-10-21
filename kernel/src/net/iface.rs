@@ -377,8 +377,31 @@ impl Iface {
         proto: u8,
         fill: impl FnOnce(&mut [u8]) -> usize,
     ) -> Result<()> {
+        self.send_ip_ex(now, src, dst, proto, None, fill)
+    }
+
+    /// A fresh IP identification (for the fragments of one datagram).
+    pub fn next_ip_id(&mut self) -> u16 {
         let id = self.ip_id;
         self.ip_id = self.ip_id.wrapping_add(1);
+        id
+    }
+
+    /// [`send_ip`](Self::send_ip), optionally as one fragment of a bigger datagram (its
+    /// id, offset and more-fragments flag; DF is then clear).
+    pub fn send_ip_ex(
+        &mut self,
+        now: u64,
+        src: Ipv4,
+        dst: Ipv4,
+        proto: u8,
+        frag: Option<Frag>,
+        fill: impl FnOnce(&mut [u8]) -> usize,
+    ) -> Result<()> {
+        let id = match frag {
+            Some(f) => f.id,
+            None => self.next_ip_id(),
+        };
         match self.route(src, dst)? {
             Route::Loopback => {
                 let every = LO_DROP_EVERY.load(Ordering::Relaxed);
@@ -397,7 +420,7 @@ impl Iface {
                 // SAFETY: slot is free (not between head and head+count); MTU bytes each.
                 let buf =
                     unsafe { core::slice::from_raw_parts_mut(self.lo_buf.add(slot * MTU), MTU) };
-                let n = build_ip(buf, src, dst, proto, id, fill);
+                let n = build_ip(buf, src, dst, proto, id, frag, fill);
                 self.lo_len[slot] = n as u16;
                 self.lo_count += 1;
                 self.lo_stats.tx_packets += 1;
@@ -406,10 +429,10 @@ impl Iface {
                 self.lo_stats.rx_bytes += n as u64;
                 Ok(())
             }
-            Route::Flood(k, mac) => self.send_frame(k, mac, src, dst, proto, id, fill),
+            Route::Flood(k, mac) => self.send_frame(k, mac, src, dst, proto, id, frag, fill),
             Route::Ether(k, hop) => {
                 if let Some(mac) = self.links[k].arp.lookup(hop) {
-                    return self.send_frame(k, mac, src, dst, proto, id, fill);
+                    return self.send_frame(k, mac, src, dst, proto, id, frag, fill);
                 }
                 // Park the packet until ARP answers.
                 let Some(slot) = self.pending.iter().position(|p| !p.used) else {
@@ -420,7 +443,7 @@ impl Iface {
                 let buf = unsafe {
                     core::slice::from_raw_parts_mut(self.pending_buf.add(slot * MTU), MTU)
                 };
-                let n = build_ip(buf, src, dst, proto, id, fill);
+                let n = build_ip(buf, src, dst, proto, id, frag, fill);
                 self.pending[slot] = Pending {
                     used: true,
                     link: k as u8,
@@ -445,6 +468,7 @@ impl Iface {
         dst: Ipv4,
         proto: u8,
         id: u16,
+        frag: Option<Frag>,
         fill: impl FnOnce(&mut [u8]) -> usize,
     ) -> Result<()> {
         let l = &mut self.links[k];
@@ -452,7 +476,16 @@ impl Iface {
         let dev = l.dev.as_mut().ok_or(ENETDOWN)?;
         let ok = dev.send_with(|f| {
             eth_header(f, dst_mac, mac, ETHERTYPE_IPV4);
-            ETH_HDR + build_ip(&mut f[ETH_HDR..ETH_HDR + MTU], src, dst, proto, id, fill)
+            ETH_HDR
+                + build_ip(
+                    &mut f[ETH_HDR..ETH_HDR + MTU],
+                    src,
+                    dst,
+                    proto,
+                    id,
+                    frag,
+                    fill,
+                )
         });
         if ok { Ok(()) } else { Err(ENOBUFS) }
     }
@@ -641,12 +674,23 @@ pub fn eth_header(f: &mut [u8], dst: Mac, src: Mac, ethertype: u16) {
 }
 
 /// Build an IPv4 header + payload in `buf` (at least MTU long); returns the packet length.
+/// One fragment's place in its datagram.
+#[derive(Clone, Copy)]
+pub struct Frag {
+    pub id: u16,
+    /// Offset in 8-byte units.
+    pub off8: u16,
+    pub more: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_ip(
     buf: &mut [u8],
     src: Ipv4,
     dst: Ipv4,
     proto: u8,
     id: u16,
+    frag: Option<Frag>,
     fill: impl FnOnce(&mut [u8]) -> usize,
 ) -> usize {
     let n = fill(&mut buf[IP_HDR..MTU]).min(MTU - IP_HDR);
@@ -655,7 +699,13 @@ fn build_ip(
     buf[1] = 0;
     put16(buf, 2, total as u16);
     put16(buf, 4, id);
-    put16(buf, 6, 0x4000); // DF: we never fragment
+    // DF on everything we send whole (TCP never needs fragments; path MTU is the link's);
+    // a fragment carries its offset and MF.
+    let flags = match frag {
+        Some(f) => (f.off8 & 0x1fff) | if f.more { 0x2000 } else { 0 },
+        None => 0x4000,
+    };
+    put16(buf, 6, flags);
     buf[8] = 64;
     buf[9] = proto;
     put16(buf, 10, 0);

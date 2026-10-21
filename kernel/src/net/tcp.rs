@@ -205,6 +205,9 @@ pub struct Tcb {
     pub in_recovery: bool,
     recover: u32,
     high_rxt: u32,
+    /// The first retransmission of this recovery is still to go (it goes at once).
+    rec_first: bool,
+    /// Segments retransmitted by loss recovery (not by timeouts), all told.
     pub sack_retrans: u32,
     /// A connection not yet accepted: slot of its listener.
     pub parent: Option<u16>,
@@ -275,6 +278,7 @@ impl Tcb {
             in_recovery: false,
             recover: 0,
             high_rxt: 0,
+            rec_first: false,
             sack_retrans: 0,
             parent: None,
             accq: [0; MAX_BACKLOG],
@@ -581,6 +585,7 @@ impl Opts {
 
 /// Build and send one segment. `data`: (ring, offset from its head, length). False if it
 /// could not be queued (device or loopback queue full).
+#[allow(clippy::too_many_arguments)]
 fn emit(
     iface: &mut Iface,
     stats: &mut Stats,
@@ -766,7 +771,7 @@ pub fn output(st: &mut Stack, i: usize) {
         loop {
             // The first retransmission goes at once; without SACK (NewReno) one per partial
             // ACK; with SACK, as the pipe allows.
-            let forced = (t.high_rxt == t.snd_una && t.sack_retrans == 0) || t.nsacked == 0;
+            let forced = t.rec_first || t.nsacked == 0;
             if !forced && t.pipe() >= t.cwnd {
                 break;
             }
@@ -793,6 +798,7 @@ pub fn output(st: &mut Stack, i: usize) {
             stats.tcp_retrans_segs += 1;
             t.retransmits += 1;
             t.sack_retrans += 1;
+            t.rec_first = false;
             t.rtt_probe = None;
             t.high_rxt = a.wrapping_add(n.max(1) as u32);
             let e = t.rcv_nxt.wrapping_add(edge);
@@ -833,8 +839,12 @@ pub fn output(st: &mut Stack, i: usize) {
                 }
                 // Nagle (Minshall): a small last piece waits while an earlier small segment
                 // is unacknowledged, so bulk transfers never stall on their tail.
+                // Never for a resend (snd_nxt below snd_max after a timeout), or with
+                // nothing in flight (no ACK would come to release it).
                 if n < max
                     && n == unsent
+                    && in_flight > 0
+                    && !lt(t.snd_nxt, t.snd_max)
                     && gt(t.snd_sml, t.snd_una)
                     && !nodelay
                     && !t.fin_queued
@@ -1081,11 +1091,12 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8]) {
         park_if_time_wait(st, i);
         return;
     }
-    if let Some(k) = st.tw.find(local, remote) {
-        if !tw_input(st, k, &seg) {
-            return;
-        }
-        // A new SYN that may reuse the pair: the TIME_WAIT entry is gone, go on.
+    // A pair in TIME_WAIT: tw_input answers, unless it's a new SYN that may reuse the pair
+    // (the entry is then gone and the listener takes it).
+    if let Some(k) = st.tw.find(local, remote)
+        && !tw_input(st, k, &seg)
+    {
+        return;
     }
     if let Some(l) = find_listener(st, local) {
         listen_input(st, l, &seg, local, remote);
@@ -1477,7 +1488,7 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
         t.in_recovery = true;
         t.recover = t.snd_max;
         t.high_rxt = t.snd_una;
-        t.sack_retrans = 0;
+        t.rec_first = true;
     }
     // Window update (RFC 9293: only from a segment newer than the last update).
     if lt(t.snd_wl1, seg.seq) || (t.snd_wl1 == seg.seq && le(t.snd_wl2, seg.ack)) {
@@ -1915,6 +1926,33 @@ pub fn tick(st: &mut Stack) {
             output(st, i);
         }
     }
+}
+
+/// One line of a connection's sender and receiver state, for test failures.
+pub fn debug_line(t: &Tcb, txlen: usize, now: u64) -> alloc::string::String {
+    alloc::format!(
+        "{} una={} nxt={} max={} txlen={} wnd={} cwnd={} ssth={} pipe={} rec={} nsacked={} high_rxt={} sml={} timer={:?} kick={:?} delack={:?} rto={} rcv_nxt={} nooo={} dupacks={}",
+        t.state.name(),
+        t.snd_una.wrapping_sub(t.iss),
+        t.snd_nxt.wrapping_sub(t.iss),
+        t.snd_max.wrapping_sub(t.iss),
+        txlen,
+        t.snd_wnd,
+        t.cwnd,
+        t.ssthresh,
+        t.pipe(),
+        t.in_recovery,
+        t.nsacked,
+        t.high_rxt.wrapping_sub(t.iss),
+        t.snd_sml.wrapping_sub(t.iss),
+        t.timer.map(|d| d as i64 - now as i64),
+        t.kick.map(|d| d as i64 - now as i64),
+        t.delack.map(|d| d as i64 - now as i64),
+        t.rto / MS,
+        t.rcv_nxt.wrapping_sub(t.irs),
+        t.nooo,
+        t.dupacks
+    )
 }
 
 /// The earliest TCP timer of socket `t` (retransmission/persist, TIME_WAIT/FIN_WAIT_2,

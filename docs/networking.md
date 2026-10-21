@@ -64,9 +64,22 @@ DNS (see the resolver policy below).
 * **Ethernet / ARP**: per-interface 32-entry cache, requests rate-limited to 1/s, 3 tries; up to 8 packets
   wait (3 s) for an answer, then are dropped. Entries live 10 minutes. The gateway is
   resolved right after DHCP.
-* **IPv4**: header checksum checked, DF set on everything we send, TTL 64. Fragments (MF or
-  offset) are dropped and counted (`ReasmFails`), we never fragment (UDP > 1472 bytes:
-  `EMSGSIZE`). Routing: loopback, on-link (per interface), link-local and multicast to
+* **IPv4**: header checksum checked, TTL 64. DF is set on everything sent whole: TCP
+  never needs fragments.
+  * **Fragmenting**: a UDP datagram over 1472 bytes (up to 65507) goes out as IP fragments
+    of 1480 bytes (`Stack::send_ip_fragments`). With an unresolved next hop only the first
+    8 wait for ARP.
+  * **Reassembly** (`net/frag.rs`) has limits:
+    * at most 16 datagrams at a time and 1 MiB buffered (the oldest goes first), each
+      dropped after 30 s;
+    * a bitmap of 8-byte blocks records what has arrived. **Any overlap**, an exact
+      duplicate included, poisons the datagram: it is dropped, and so are its later
+      fragments until the timeout (RFC 5722's rule, which defeats overlap tricks);
+    * it is also poisoned by: a fragment with MF that isn't a multiple of 8 bytes; more
+      than 65535 bytes; two different last fragments; data past the end; or, for TCP, a
+      fragment at offset 8 or a first fragment shorter than the TCP header (RFC 1858);
+    * the whole packet gets the first fragment's header and goes through `ip_input` again;
+    * `/proc/net/snmp` adds `ReasmReqds ReasmOKs ReasmTimeout ReasmOverlaps FragCreates`. Routing: loopback, on-link (per interface), link-local and multicast to
 eth1, else the default gateway (eth0's).
 * **ICMP**: echo replies; our pings (`socket::ping`); destination unreachable (port /
   protocol) for closed UDP ports and unknown protocols.
@@ -454,11 +467,22 @@ fw_cfg config (net-test.sh uses 8080, for the `/big` window/retransmission check
 
 ## Tests
 
-**Boot self-test** (`net::selftest`, after the sched self-test, prints `[net] selftest ok`):
-DHCP (3 s timeout), 3 pings to the gateway, UDP over loopback, 256 KiB + 64 KiB TCP over
-loopback with an orderly close both ways, **64 KiB over a lossy loopback** (every 7th packet
-dropped: data, ACKs, SYN and FIN) to prove retransmission and reassembly, connection
-refused (RST), an HTTP GET to our own server, and the DNS policy. With the fw_cfg file
+**Boot self-test** (`net::selftest`, after the sched self-test, prints `[net] selftest ok`).
+It covers:
+
+* DHCP (3 s timeout) and 3 pings to the gateway;
+* UDP over loopback;
+* 256 KiB + 64 KiB TCP over loopback with an orderly close both ways;
+* **lossy loopback**: 256 KiB with every 7th packet dropped and 64 KiB with every 3rd
+  (data, ACKs, SYN and FIN alike). The bytes must arrive intact, with window scaling,
+  SACK and timestamps negotiated and SACK recovery doing some of the resending;
+* **TIME_WAIT**: the closing side parks the pair without a socket slot, and a new
+  connection on the same 4-tuple reuses it;
+* **IP fragments**:
+  * a 20000-byte UDP datagram over loopback, as 14 fragments, back whole;
+  * crafted fragments: last-first (reassembled), an overlapping pair (dropped), a TCP
+    fragment at offset 8 (refused), and a lone first fragment (times out);
+* connection refused (RST), an HTTP GET to our own server, and the DNS policy. With the fw_cfg file
 `opt/milkos/nettest` (`echo=IP:PORT dns=IP:PORT name=NAME expect=IP refused=IP:PORT`, passed
 by net-test.sh) also: 512 KiB TCP echo against the Mac, a `.test` lookup + NXDOMAIN against
 the Mac's test DNS server, a refused host port. It then prints /proc/net.

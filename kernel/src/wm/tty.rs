@@ -93,6 +93,10 @@ impl Inode for TtyNode {
     fn truncate(&self, _len: u64) -> fs::Result<()> {
         Ok(())
     }
+    /// poll(2): readable once a whole line (or raw bytes / ^D) is waiting; always writable.
+    fn poll(&self) -> u32 {
+        if TTY1.readable() { 0x1 | 0x4 } else { 0x4 }
+    }
     // ioctls (termios, winsize, foreground group) are handled by the syscall layer through
     // the tty registry (`proc::tty::register`, done in start_shell), not here.
 }

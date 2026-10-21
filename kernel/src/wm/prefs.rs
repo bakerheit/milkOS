@@ -23,6 +23,8 @@ pub struct Prefs {
     pub brightness: i32,
     /// Dock icon size: 40, 48 or 56.
     pub dock: i32,
+    /// System sounds (toasts, crashes). Only audible with a sound device.
+    pub sound: bool,
 }
 
 impl Prefs {
@@ -31,6 +33,7 @@ impl Prefs {
         wallpaper: None,
         brightness: 100,
         dock: 48,
+        sound: true,
     };
 
     /// The wallpaper actually shown.
@@ -41,11 +44,12 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
-            self.dock
+            self.dock,
+            if self.sound { "on" } else { "off" }
         )
     }
 
@@ -58,9 +62,8 @@ impl Prefs {
             let (k, v) = (k.trim(), v.trim());
             match k {
                 "theme" => p.dark = matches!(v, "chocolate" | "dark"),
-                "wallpaper" => {
-                    p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v)
-                }
+                "wallpaper" => p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v),
+                "sound" => p.sound = v != "off",
                 "brightness" => p.brightness = v.parse().unwrap_or(100).clamp(20, 100),
                 "dock" => {
                     p.dock = match v.parse().unwrap_or(48) {

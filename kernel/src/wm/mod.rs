@@ -481,8 +481,16 @@ impl Desktop {
         match crate::proc::spawn(path, &[name]) {
             Ok(pid) => {
                 kprintln!("wm: started {path} as pid {pid}");
+                let name = alloc::string::String::from(name);
                 drop(sched::spawn("reap-app", move || {
-                    crate::proc::wait_kernel_child(pid);
+                    let st = crate::proc::wait_kernel_child(pid);
+                    // Killed by a signal (a crash): say so, with the error sound.
+                    if st & 0x7f != 0 {
+                        if prefs::get().sound {
+                            crate::audio::play_system(crate::audio::Sound::Error);
+                        }
+                        notify(&name, "quit unexpectedly");
+                    }
                 }));
             }
             Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
@@ -802,6 +810,9 @@ impl Desktop {
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
+        }
+        if prefs::get().sound {
+            crate::audio::play_system(crate::audio::Sound::Notify);
         }
         let id = self.next_toast;
         self.next_toast += 1;

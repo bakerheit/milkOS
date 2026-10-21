@@ -216,7 +216,12 @@ impl Desktop {
         match i {
             Some(i) => {
                 let (cx, cy) = dock_icon_center(i);
-                Rect::new(cx - dock_icon() / 2, cy - dock_icon() / 2, dock_icon(), dock_icon())
+                Rect::new(
+                    cx - dock_icon() / 2,
+                    cy - dock_icon() / 2,
+                    dock_icon(),
+                    dock_icon(),
+                )
             }
             None => Rect::new(SCREEN_W / 2 - 24, SCREEN_H - 60, 48, 48),
         }
@@ -433,7 +438,7 @@ const HOME_APPS: [(App, Icon, Color, u8, Color); 4] = [
     (App::Files, Icon::Folder, HONEY, FOLDER_A, COCOA),
     (App::Terminal, Icon::Term, TERM_BG, 255, TERM_FG),
     (App::Notes, Icon::Note, CREAM, 255, ESPRESSO),
-    (App::About, Icon::Gear, LATTE, 255, ESPRESSO),
+    (App::Settings, Icon::Gear, LATTE, 255, ESPRESSO),
 ];
 
 // ---- spaces -------------------------------------------------------------------------------
@@ -707,7 +712,15 @@ impl Desktop {
         for (i, it) in DOCK.iter().enumerate() {
             let ix = DOCK_PAD + i as i32 * (dock_icon() + DOCK_GAP);
             icons::draw(
-                p, ix, DOCK_PAD, dock_icon(), it.icon, it.bg, 255, it.fg, false,
+                p,
+                ix,
+                DOCK_PAD,
+                dock_icon(),
+                it.icon,
+                it.bg,
+                255,
+                it.fg,
+                false,
             );
             // SPEC hover / pressed: lighten 4% / darken 4%.
             let r = (dock_icon() * 24 + 50) / 100;
@@ -984,7 +997,7 @@ impl Desktop {
                     let border = *bg == CREAM;
                     icons::draw(p, x + 10, 44, 56, *icon, *bg, *ba, *fg, border);
                     let name = match app {
-                        App::About => "About",
+                        App::Settings => "Settings",
                         a => a.name(),
                     };
                     p.text_center(x - 6, 92, 108, name, ESPRESSO, false);

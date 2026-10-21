@@ -28,6 +28,12 @@ source scripts/disk.sh
 # WM_DISK_RW=1: writable disks (use private images: MILK_FS=... MILK_DISK=...), to test that
 # things persist across boots.
 if [ -n "${WM_DISK_RW:-}" ]; then milk_disk_args; else milk_disk_args shared; fi
+# Sound: MILK_SOUND_WAV=/tmp/x.wav records system sounds to a WAV file (never the speakers).
+SOUND_ARGS=()
+if [ -n "${MILK_SOUND_WAV:-}" ]; then
+  SOUND_ARGS=(-audiodev "wav,id=snd0,path=$MILK_SOUND_WAV,out.frequency=48000"
+    -device virtio-sound-device,audiodev=snd0)
+fi
 # eth0, restricted, no port forwards (safe with other qemus running; scripts/netdev.sh).
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args
@@ -37,7 +43,7 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
-  -fw_cfg "name=opt/milkos/demo,string=$DEMO" "${DISK_ARGS[@]}" "${NET_ARGS[@]}" \
+  -fw_cfg "name=opt/milkos/demo,string=$DEMO" "${DISK_ARGS[@]}" "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"} \
   -monitor "unix:$SOCK,server,nowait" "$@" &
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT

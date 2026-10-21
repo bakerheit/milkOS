@@ -19,14 +19,16 @@ use super::super::window::{PointerInput, PointerKind, WindowContents};
 use super::super::{Request, icons, request};
 use super::fsx;
 
-const SECTIONS: [&str; 6] = [
+const SECTIONS: [&str; 7] = [
     "Appearance",
     "Wallpaper",
     "Display",
     "Dock",
+    "Sound",
     "Time Machine",
     "About",
 ];
+const TM: usize = 5;
 const AUTO: &str = "/sys/fs/milkfs/auto";
 const TM_SNAPSHOTS: &str = "/sys/fs/milkfs/snapshots";
 
@@ -40,6 +42,8 @@ enum Hit {
     TmToggle,
     TmNow,
     TmInterval(&'static str),
+    Sound(bool),
+    TestSound,
 }
 
 pub struct Settings {
@@ -117,7 +121,12 @@ impl Settings {
     }
 
     fn draw_appearance(&mut self, p: &mut Painter, x: i32) {
-        Self::heading(p, x, "Appearance", "The whole desktop follows it: windows, glass, Terminal.");
+        Self::heading(
+            p,
+            x,
+            "Appearance",
+            "The whole desktop follows it: windows, glass, Terminal.",
+        );
         let dark_now = self.pending.dark;
         for (i, (name, dark)) in [("Whole milk", false), ("Chocolate milk", true)]
             .into_iter()
@@ -134,7 +143,12 @@ impl Settings {
     }
 
     fn draw_wallpaper(&mut self, p: &mut Painter, x: i32) {
-        Self::heading(p, x, "Wallpaper", "Auto follows the theme: dawn by day, night with chocolate.");
+        Self::heading(
+            p,
+            x,
+            "Wallpaper",
+            "Auto follows the theme: dawn by day, night with chocolate.",
+        );
         self.build_thumbs();
         let cur = self.pending.wallpaper;
         let mut items: Vec<(Option<Kind>, &str)> = alloc::vec![(None, "Auto")];
@@ -165,7 +179,12 @@ impl Settings {
     }
 
     fn draw_display(&mut self, p: &mut Painter, x: i32, w: i32) {
-        Self::heading(p, x, "Display", "Brightness dims the whole screen (same as Control centre).");
+        Self::heading(
+            p,
+            x,
+            "Display",
+            "Brightness dims the whole screen (same as Control centre).",
+        );
         let r = Rect::new(x, 100, w - x - 32, CC_TILE_H);
         p.rrect_r(r, 16, OAT, 255);
         p.text_p(x + 14, 108, "Brightness", ESPRESSO, true);
@@ -181,7 +200,12 @@ impl Settings {
     }
 
     fn draw_dock(&mut self, p: &mut Painter, x: i32) {
-        Self::heading(p, x, "Dock", "Icon size. The dock stays centred, 12px above the bottom.");
+        Self::heading(
+            p,
+            x,
+            "Dock",
+            "Icon size. The dock stays centred, 12px above the bottom.",
+        );
         for (i, (name, px)) in [("Small", 40), ("Medium", 48), ("Large", 56)]
             .into_iter()
             .enumerate()
@@ -193,16 +217,75 @@ impl Settings {
                 p.rrect_stroke(r.x, r.y, r.w, r.h, 14, 2, HONEY, 255);
             }
             let s = px * 3 / 4;
-            icons::draw(p, r.x + (r.w - s) / 2, r.y + 14, s, icons::Icon::Folder, HONEY, 255, INK, false);
+            icons::draw(
+                p,
+                r.x + (r.w - s) / 2,
+                r.y + 14,
+                s,
+                icons::Icon::Folder,
+                HONEY,
+                255,
+                INK,
+                false,
+            );
             p.text_p_center(r.x, r.w, r.y + r.h - 26, name, ESPRESSO, on);
             self.hits.push((r, Hit::Dock(px)));
         }
     }
 
+    fn draw_sound(&mut self, p: &mut Painter, x: i32) {
+        Self::heading(
+            p,
+            x,
+            "Sound",
+            "System sounds: a soft tone for toasts, a low one when an app crashes.",
+        );
+        let on = self.pending.sound;
+        self.button(p, Rect::new(x, 100, 90, 30), "On", on, Hit::Sound(true));
+        self.button(
+            p,
+            Rect::new(x + 98, 100, 90, 30),
+            "Off",
+            !on,
+            Hit::Sound(false),
+        );
+        self.button(
+            p,
+            Rect::new(x + 210, 100, 130, 30),
+            "Play a sound",
+            false,
+            Hit::TestSound,
+        );
+        let dev = if crate::audio::available() {
+            "Sound device: virtio-snd"
+        } else {
+            "No sound device (boot with MILK_SOUND=1 to hear them)"
+        };
+        p.text_p(x, 150, dev, COCOA, false);
+        p.text_p(
+            x,
+            172,
+            "Focus mode in Control centre also keeps toasts quiet.",
+            COCOA,
+            false,
+        );
+    }
+
     fn draw_tm(&mut self, p: &mut Painter, x: i32) {
-        Self::heading(p, x, "Time Machine", "Automatic milkfs snapshots of your home folder.");
+        Self::heading(
+            p,
+            x,
+            "Time Machine",
+            "Automatic milkfs snapshots of your home folder.",
+        );
         if self.tm_status.is_empty() {
-            p.text_p(x, 100, "No milkfs disk is attached, so there is nothing to back up to.", COCOA, false);
+            p.text_p(
+                x,
+                100,
+                "No milkfs disk is attached, so there is nothing to back up to.",
+                COCOA,
+                false,
+            );
             return;
         }
         let on = self.tm_status.starts_with("on");
@@ -214,14 +297,32 @@ impl Settings {
             p.text_p(x + 96, 116, next, COCOA, false);
         }
         p.text_p(x, 140, "Snapshots", COCOA, false);
-        p.text_p(x + 96, 140, &format!("{} on /Volumes/Milk (see Files)", self.tm_count), ESPRESSO, false);
+        p.text_p(
+            x + 96,
+            140,
+            &format!("{} on /Volumes/Milk (see Files)", self.tm_count),
+            ESPRESSO,
+            false,
+        );
         let lbl = if on { "Turn off" } else { "Turn on" };
         self.button(p, Rect::new(x, 176, 110, 30), lbl, on, Hit::TmToggle);
-        self.button(p, Rect::new(x + 122, 176, 130, 30), "Back up now", false, Hit::TmNow);
+        self.button(
+            p,
+            Rect::new(x + 122, 176, 130, 30),
+            "Back up now",
+            false,
+            Hit::TmNow,
+        );
         p.text_p(x, 228, "Every", COCOA, false);
         for (i, iv) in ["15m", "1h", "6h"].into_iter().enumerate() {
             let sel = first.contains(&format!("interval={iv}"));
-            self.button(p, Rect::new(x + 60 + i as i32 * 64, 222, 56, 28), iv, sel, Hit::TmInterval(iv));
+            self.button(
+                p,
+                Rect::new(x + 60 + i as i32 * 64, 222, 56, 28),
+                iv,
+                sel,
+                Hit::TmInterval(iv),
+            );
         }
     }
 
@@ -230,15 +331,41 @@ impl Settings {
         icons::drop_shape(p, x + 40, 60, 21, 46, MILK);
         let x2 = p.text_x(x + 90, 30, "milk", ESPRESSO, 2, true);
         p.text_x(x2, 30, "OS", BLUE, 2, true);
-        p.text_p(x + 90, 70, "Version 1.0, kernel 0.0.1, aarch64 on qemu virt", COCOA, false);
+        p.text_p(
+            x + 90,
+            70,
+            "Version 1.0, kernel 0.0.1, aarch64 on qemu virt",
+            COCOA,
+            false,
+        );
         let s = pmm::stats();
         let h = heap::stats();
         let up = timer::now_ns() / 1_000_000_000;
         let rows = [
-            ("Memory", format!("{} of {} MiB free", (s.free_frames * 4096) >> 20, (s.total_frames * 4096) >> 20)),
-            ("Kernel heap", format!("{} KiB used of {} KiB", h.used >> 10, h.total >> 10)),
-            ("Uptime", format!("{}:{:02}:{:02}", up / 3600, up / 60 % 60, up % 60)),
-            ("Home", String::from(if fs::stat("/Volumes/Milk").is_ok() { "on milkfs (/Volumes/Milk)" } else { "in RAM (tmpfs)" })),
+            (
+                "Memory",
+                format!(
+                    "{} of {} MiB free",
+                    (s.free_frames * 4096) >> 20,
+                    (s.total_frames * 4096) >> 20
+                ),
+            ),
+            (
+                "Kernel heap",
+                format!("{} KiB used of {} KiB", h.used >> 10, h.total >> 10),
+            ),
+            (
+                "Uptime",
+                format!("{}:{:02}:{:02}", up / 3600, up / 60 % 60, up % 60),
+            ),
+            (
+                "Home",
+                String::from(if fs::stat("/Volumes/Milk").is_ok() {
+                    "on milkfs (/Volumes/Milk)"
+                } else {
+                    "in RAM (tmpfs)"
+                }),
+            ),
             ("Settings file", String::from(prefs::PATH)),
         ];
         for (i, (k, v)) in rows.iter().enumerate() {
@@ -285,7 +412,13 @@ fn preview(p: &mut Painter, r: Rect, dark: bool) {
     };
     q.rrect_r(r, 12, sky, 255);
     q.rrect(r.x, r.y + r.h - 46, r.w, 46, 12, hill, 255);
-    q.circle(r.x + r.w - 52, r.y + 14, 28, if dark { rgb(0xF5, 0xEC, 0xD6) } else { HONEY }, 255);
+    q.circle(
+        r.x + r.w - 52,
+        r.y + 14,
+        28,
+        if dark { rgb(0xF5, 0xEC, 0xD6) } else { HONEY },
+        255,
+    );
     // A window.
     let wr = Rect::new(r.x + 20, r.y + 22, 120, 76);
     q.rrect_r(wr, 6, pick(MILK), 255);
@@ -295,11 +428,25 @@ fn preview(p: &mut Painter, r: Rect, dark: bool) {
         q.circle(wr.x + 6 + i as i32 * 9, wr.y + 4, 6, c, 255);
     }
     for k in 0..3 {
-        q.fill(wr.x + 10, wr.y + 24 + k * 12, 70 - k * 14, 4, pick(ESPRESSO));
+        q.fill(
+            wr.x + 10,
+            wr.y + 24 + k * 12,
+            70 - k * 14,
+            4,
+            pick(ESPRESSO),
+        );
     }
     q.rrect_stroke(wr.x, wr.y, wr.w, wr.h, 6, 1, pick(SAND), 255);
     // The dock.
-    q.rrect(r.x + 48, r.y + r.h - 22, r.w - 96, 16, 6, pick(MILK), a(800));
+    q.rrect(
+        r.x + 48,
+        r.y + r.h - 22,
+        r.w - 96,
+        16,
+        6,
+        pick(MILK),
+        a(800),
+    );
 }
 
 impl WindowContents for Settings {
@@ -332,7 +479,8 @@ impl WindowContents for Settings {
             1 => self.draw_wallpaper(p, x),
             2 => self.draw_display(p, x, w),
             3 => self.draw_dock(p, x),
-            4 => self.draw_tm(p, x),
+            4 => self.draw_sound(p, x),
+            TM => self.draw_tm(p, x),
             _ => self.draw_about(p, x),
         }
     }
@@ -361,7 +509,7 @@ impl WindowContents for Settings {
         match h {
             Hit::Section(i) => {
                 self.section = i;
-                if i == 4 {
+                if i == TM {
                     self.read_tm();
                 }
             }
@@ -391,9 +539,18 @@ impl WindowContents for Settings {
                 self.read_tm();
                 super::super::notify(
                     "Time Machine",
-                    if ok { "Snapshot taken" } else { "Couldn't snapshot" },
+                    if ok {
+                        "Snapshot taken"
+                    } else {
+                        "Couldn't snapshot"
+                    },
                 );
             }
+            Hit::Sound(on) => {
+                pr.sound = on;
+                self.send(pr);
+            }
+            Hit::TestSound => crate::audio::play_system(crate::audio::Sound::Chime),
             Hit::TmInterval(iv) => {
                 let _ = fsx::ctl_write(AUTO, &format!("interval={iv}"));
                 self.read_tm();
@@ -405,9 +562,9 @@ impl WindowContents for Settings {
     fn tick(&mut self, now: u64) -> bool {
         // Live sections (Time Machine countdown, About uptime) once a second.
         let s = now / 1_000_000_000;
-        if s != self.last_sec && (self.section == 4 || self.section == 5) {
+        if s != self.last_sec && (self.section == TM || self.section == TM + 1) {
             self.last_sec = s;
-            if self.section == 4 {
+            if self.section == TM {
                 self.read_tm();
             }
             return true;

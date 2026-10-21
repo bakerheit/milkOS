@@ -1,0 +1,41 @@
+# Working on milkOS (for everyone, human or agent)
+
+## Setup
+- `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"` (rustup is keg-only). Nightly + `aarch64-unknown-none-softfloat`, pinned in `rust-toolchain.toml`.
+- `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only,
+  `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
+- qemu: `-M virt -accel hvf -cpu host`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
+- macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
+
+## Git
+- Each agent works only in its own worktree, `.claude/worktrees/<name>`, on branch `<name>`. Never touch `main`
+  or other worktrees. The lead merges. Don't merge `main` into your branch unless the lead asks.
+- Commit often with clear messages. End every commit message with
+  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
+- Never push (there is no remote), never force anything, never `--no-verify`, never bare `git stash`.
+- Keep `cargo build` and `cargo clippy` warning-free, run `cargo fmt`.
+- Keep `kernel/src/main.rs` edits minimal (mod lines, init calls). Put real code in your own files.
+
+## Kernel facts (as of main 1b659a6)
+- Boot order in `kmain`: `exceptions::init` → `mem::init` (MMU + caches on) → `display::init` → `gic::init` →
+  `timer::init` → `uart::init` → `sync::irq_enable` → self-tests.
+- Memory: identity map (VA == PA). Use `mmu::virt_to_phys` / `phys_to_virt` anyway, it is the one place that
+  will change for higher-half. Heap via `alloc` (Vec/Box/BTreeMap fine). DMA / big buffers:
+  `pmm::alloc_contiguous_zeroed(npages, align_frames)`, free with `pmm::free_contiguous`. No allocation in IRQ handlers.
+- Locks: `sync::SpinLock<T>` (masks IRQs), `sync::IrqGuard`, `sync::without_irqs`. RMW atomics are fine now that
+  the MMU is on (they hang only with the MMU off).
+- Interrupts: `gic::register(intid, handler)`; `gic::spi(n)`, `gic::ppi(n)`. Handlers get `&mut TrapFrame`, run
+  with IRQs masked: no blocking.
+- Time: `timer::now_ns()`, `timer::ticks()` (100 Hz), `timer::set_tick_hook`, `timer::set_deadline`. Use the virtual
+  counter only (CNTP traps under HVF).
+- Exceptions: `exceptions::set_syscall_handler`, `set_user_fault_handler`, `restore_frame(*const TrapFrame) -> !`.
+- Display: `gfx::{DrawTarget, Surface, Rect, DirtyList}`, rounded rects, alpha, `font::draw_str_alpha`.
+  `kprintln!` goes to UART + the screen console.
+
+## UI
+- Spec: `docs/ui-concepts/SPEC.md`, mockup `docs/ui-concepts/milkos-1.0.html` (by Mary, UI lead). Andrew picked
+  01 Whole Milk, 03 Skim, 06 Today, 07 Spaces, 10 Glass. Follow the spec numbers; ask the lead if one blocks you.
+- Every window has its own offscreen surface. Nothing but the compositor writes to the framebuffer.
+
+## Verifying
+- Prove it in qemu. For UI work, screenshot and actually look at the PNG. Paste boot logs in reports.

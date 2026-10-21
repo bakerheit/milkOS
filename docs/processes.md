@@ -304,9 +304,31 @@ without destroying them are closed and freed by the wm within a second.
 
 `kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
 first space): `open <app|absolute path>` (apps: files terminal notes about paint today
-spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
-<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
-write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+spaces milkdrop; a folder opens in Files, a text file in Notes, a `/bin` program runs),
+`notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`. An
+unknown command (or an unknown `notify` option) fails the write with `EINVAL`.
+
+**Notifications with buttons.** `notify` takes options after the subtitle, one per field:
+
+```text
+notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snooze\taction=Open:open /home/milk
+```
+
+* `app=<name>`: the group in the drawer and the icon (default: the writing program's name).
+* `id=<number>`: the poster's own number for this notice, sent back with an action.
+* `action=<label>[:<command>]`, up to two: buttons on the toast and on the drawer card (the
+  first is the primary). Pressing one marks the notice read, removes its toast and:
+  * with a command: runs it, no shell: the first word is an absolute path or a `/bin`
+    program, the rest its arguments; `open <what>` is done by the desktop itself (as the
+    `open` command above);
+  * without: sends the posting process's window an action event (kind 9 in the 32-byte
+    window event: `key` = the `id`, `mods` = the button's index). `user/gui` has
+    `gui::notify(app, title, sub, tag, &[labels])` and `Event::Action { tag, index }`. A
+    poster with no window gets nothing (the press is logged).
+
+The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
+LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
+`Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,
 `space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
 
 `user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative

@@ -22,7 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect};
-use crate::timer;
+use crate::{kprintln, timer};
 
 use super::icons::{self, Icon};
 use super::paint::{Painter, hit};
@@ -50,8 +50,36 @@ pub const TOAST_NS: u64 = 5_000_000_000;
 
 const CHIPS: [(&str, i32, i32); 3] = [("All", 14, 64), ("Mentions", 84, 96), ("Today", 186, 80)];
 
+/// A button on a notice (toast and drawer card).
+#[derive(Clone, Debug)]
+pub struct NoticeAction {
+    pub label: String,
+    /// What it runs: an absolute path or a /bin program and its words, or `open <what>`
+    /// (handled by the desktop). None: an event to the posting app's window.
+    pub cmd: Option<String>,
+}
+
+/// Where a notice's buttons go, left to right from (x, y): pills (SPEC Buttons).
+pub fn action_rects(actions: &[NoticeAction], x: i32, y: i32) -> Vec<Rect> {
+    let mut v = Vec::new();
+    let mut ax = x;
+    for a in actions.iter().take(2) {
+        let w = super::button::pill_w(&a.label);
+        v.push(Rect::new(ax, y, w, super::button::PILL_H));
+        ax += w + 8;
+    }
+    v
+}
+
+/// Extra height a notice with buttons needs (toast and card).
+pub const ACTIONS_H: i32 = 32;
+
 pub struct Notice {
     pub id: u64,
+    pub actions: Vec<NoticeAction>,
+    /// The posting process (0: the desktop) and its tag, for actions without a command.
+    pub owner: u32,
+    pub tag: u32,
     pub app: String,
     pub title: String,
     pub sub: String,
@@ -69,6 +97,8 @@ pub struct Drawer {
     pub collapsed: Vec<String>,
     pub sel: Option<u64>,
     pub hover: Option<u64>,
+    /// The notice button under the pointer: (notice, index).
+    pub action_hover: Option<(u64, usize)>,
     pub scroll: i32,
     pub next_id: u64,
 }
@@ -138,7 +168,8 @@ enum Row {
 }
 
 impl Desktop {
-    pub(super) fn record_notice(&mut self, app: &str, title: &str, sub: &str) -> u64 {
+    pub(super) fn record_notice_with(&mut self, p: &super::Post) -> u64 {
+        let (app, title, sub) = (p.app.as_str(), p.title.as_str(), p.sub.as_str());
         let id = self.drawer.next_id;
         self.drawer.next_id += 1;
         let app = if app == "milkOS" {
@@ -148,6 +179,9 @@ impl Desktop {
         };
         self.history.push(Notice {
             id,
+            actions: p.actions.iter().take(2).cloned().collect(),
+            owner: p.owner,
+            tag: p.tag,
             app,
             title: String::from(title),
             sub: String::from(sub),
@@ -261,7 +295,7 @@ impl Desktop {
                         CARD_COMPACT_H
                     } else {
                         CARD_H
-                    };
+                    } + if n.actions.is_empty() { 0 } else { ACTIONS_H };
                     rows.push(Row::Card { id: n.id, y, h });
                     y += h + CARD_GAP;
                 }
@@ -457,6 +491,20 @@ impl Desktop {
         }
         let bmax = ((w - 70) / 8).max(4) as usize;
         p.text_p(x + 56, y + 28, &cut(&n.sub, bmax), second, false);
+        // Its buttons: the first primary, the second secondary.
+        for (k, r) in action_rects(&n.actions, x + 56, y + h - ACTIONS_H - 4)
+            .into_iter()
+            .enumerate()
+        {
+            let kind = if k == 0 {
+                super::button::Kind::Primary
+            } else {
+                super::button::Kind::Secondary
+            };
+            let hov = self.drawer.action_hover == Some((n.id, k));
+            let st = super::button::State::hover(hov);
+            super::button::paint(p, r, &n.actions[k].label, kind, st);
+        }
     }
 
     /// The card / label / control at panel point (x, y).
@@ -486,6 +534,12 @@ impl Desktop {
                     return Some(NHit::Group(app));
                 }
                 Row::Card { id, y: cy, h } if y >= cy && y < cy + h && x >= PAD && x < PAD + cw => {
+                    if let Some(n) = self.history.iter().find(|n| n.id == id) {
+                        let rs = action_rects(&n.actions, PAD + 56, cy + h - ACTIONS_H - 4);
+                        if let Some(k) = rs.iter().position(|r| hit(r, x, y)) {
+                            return Some(NHit::Action(id, k));
+                        }
+                    }
                     let bx = PAD + cw - 12 - 24;
                     if self.drawer.hover == Some(id) && hit(&Rect::new(bx, cy + 4, 24, 24), x, y) {
                         return Some(NHit::Dismiss(id));
@@ -511,6 +565,7 @@ impl Desktop {
             Some(NHit::Dnd) => self.set_dnd(!self.settings.focus_mode),
             Some(NHit::Group(app)) => self.toggle_group(&app),
             Some(NHit::Dismiss(id)) => self.dismiss(id),
+            Some(NHit::Action(id, k)) => self.run_action(id, k),
             Some(NHit::Card(id)) => {
                 if self.drawer.sel == Some(id) {
                     self.open_source(id);
@@ -525,12 +580,18 @@ impl Desktop {
 
     /// The pointer over the drawer (panel coordinates; None = elsewhere): the dismiss x.
     pub(super) fn hover_notif(&mut self, at: Option<(i32, i32)>) {
-        let over = at.and_then(|(x, y)| match self.notif_hit(x, y) {
-            Some(NHit::Card(id) | NHit::Dismiss(id)) => Some(id),
+        let hit = at.and_then(|(x, y)| self.notif_hit(x, y));
+        let over = match hit {
+            Some(NHit::Card(id) | NHit::Dismiss(id) | NHit::Action(id, _)) => Some(id),
             _ => None,
-        });
-        if over != self.drawer.hover {
+        };
+        let button = match hit {
+            Some(NHit::Action(id, k)) => Some((id, k)),
+            _ => None,
+        };
+        if over != self.drawer.hover || button != self.drawer.action_hover {
             self.drawer.hover = over;
+            self.drawer.action_hover = button;
             self.invalidate(PanelKey::Notif);
         }
     }
@@ -549,6 +610,47 @@ impl Desktop {
         self.invalidate(PanelKey::Control);
         self.invalidate(PanelKey::MenuBar);
         self.invalidate(PanelKey::Notif);
+    }
+
+    /// A notice's button was pressed (toast or drawer card): run its command, or hand it
+    /// to the posting app's window (an action event with the app's tag and the index).
+    /// The notice is read and its toast goes.
+    pub(super) fn run_action(&mut self, id: u64, k: usize) {
+        let Some(n) = self.history.iter_mut().find(|n| n.id == id) else {
+            return;
+        };
+        n.unread = false;
+        let (owner, tag) = (n.owner, n.tag);
+        let Some(a) = n.actions.get(k).cloned() else {
+            return;
+        };
+        self.toasts.retain(|t| t.notice != id);
+        self.badges_changed();
+        self.damage_all();
+        match a.cmd.as_deref().map(str::trim) {
+            Some(c) if c.starts_with("open ") => {
+                super::request(super::Request::OpenAny(String::from(c[5..].trim())));
+            }
+            Some(c) => {
+                let words: Vec<&str> = c.split_whitespace().collect();
+                let Some(first) = words.first() else {
+                    return;
+                };
+                let path = if first.starts_with('/') {
+                    String::from(*first)
+                } else {
+                    format!("/bin/{first}")
+                };
+                if let Err(e) = crate::proc::spawn(&path, &words) {
+                    kprintln!("wm: notice action {c}: errno {}", e.0);
+                }
+            }
+            None => {
+                if !super::client::action(owner, tag, k as u32) {
+                    kprintln!("wm: notice action {}: pid {owner} has no window", a.label);
+                }
+            }
+        }
     }
 
     fn toggle_group(&mut self, app: &str) {
@@ -688,6 +790,8 @@ enum NHit {
     Group(String),
     Card(u64),
     Dismiss(u64),
+    /// A notice's button: (notice, index).
+    Action(u64, usize),
 }
 
 /// `s` cut to `n` characters, the last one "~".

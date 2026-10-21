@@ -102,16 +102,52 @@ pub struct Toast {
     pub until_ns: u64,
     /// Hovered: the time it had left when the pointer arrived (SPEC: toasts pause).
     pub paused: Option<u64>,
+    /// Its notice's buttons (pills under the text).
+    pub actions: Vec<super::notif::NoticeAction>,
 }
 
-/// Toast `i`'s place (SPEC: 264x64, 12 from the right, 40 from the top, stacked).
-pub fn toast_rect(i: usize) -> Rect {
-    Rect::new(
-        screen_w() - TOAST_RIGHT - TOAST_W,
-        TOAST_TOP + i as i32 * (TOAST_H + 8),
-        TOAST_W,
-        TOAST_H,
-    )
+impl Toast {
+    pub fn height(&self) -> i32 {
+        TOAST_H
+            + if self.actions.is_empty() {
+                0
+            } else {
+                super::notif::ACTIONS_H
+            }
+    }
+}
+
+/// The toasts' places (SPEC: 264 wide, 12 from the right, 40 from the top, stacked 8 apart;
+/// 64 high, more with buttons).
+pub fn toast_rects(toasts: &[Toast]) -> Vec<Rect> {
+    let mut y = TOAST_TOP;
+    toasts
+        .iter()
+        .map(|t| {
+            let r = Rect::new(screen_w() - TOAST_RIGHT - TOAST_W, y, TOAST_W, t.height());
+            y += t.height() + 8;
+            r
+        })
+        .collect()
+}
+
+/// The places toasts would have, given which have buttons (for demo scripts).
+pub fn toast_rects_for(with_actions: &[bool]) -> Vec<Rect> {
+    let mut y = TOAST_TOP;
+    with_actions
+        .iter()
+        .map(|&a| {
+            let h = TOAST_H + if a { super::notif::ACTIONS_H } else { 0 };
+            let r = Rect::new(screen_w() - TOAST_RIGHT - TOAST_W, y, TOAST_W, h);
+            y += h + 8;
+            r
+        })
+        .collect()
+}
+
+/// Where a toast's buttons are, in toast coordinates.
+fn toast_actions(t: &Toast) -> Vec<Rect> {
+    super::notif::action_rects(&t.actions, 64, TOAST_H - 6)
 }
 
 /// SPEC "Menu bar status area": 16px glyphs, 12px apart, right to left from the clock.
@@ -833,14 +869,8 @@ impl Desktop {
             let r = Rect::new(cx - w / 2, dock_rect().y - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
-        for (i, t) in self.toasts.iter().enumerate() {
-            v.push(spec(
-                PanelKey::Toast(t.id),
-                toast_rect(i),
-                R_TOAST,
-                Style::Glass,
-                true,
-            ));
+        for (t, r) in self.toasts.iter().zip(toast_rects(&self.toasts)) {
+            v.push(spec(PanelKey::Toast(t.id), r, R_TOAST, Style::Glass, true));
         }
         if let Some(m) = self.menu_layer() {
             v.push(m);
@@ -937,6 +967,16 @@ impl Desktop {
                     p.text_p(64, 12, &t.title, ESPRESSO, true);
                     p.text_right(w - 12, 12, "now", COCOA, 1, false);
                     p.text_p(64, 32, &t.sub, COCOA, false);
+                    // Its buttons: the first primary (SPEC Received toast: Show, Open).
+                    for (k, r) in toast_actions(t).into_iter().enumerate() {
+                        let kind = if k == 0 {
+                            super::button::Kind::Primary
+                        } else {
+                            super::button::Kind::Secondary
+                        };
+                        let st = super::button::State::hover(self.toast_hover == Some((t.id, k)));
+                        super::button::paint(p, r, &t.actions[k].label, kind, st);
+                    }
                 }
             }
             PanelKey::Control => self.paint_control(p, solid),
@@ -1428,9 +1468,16 @@ impl Desktop {
                 self.invalidate(PanelKey::Dock);
             }
             PanelKey::Toast(id) => {
-                // SPEC: clicking a toast opens the drawer on that item.
-                let notice = self.toasts.iter().find(|t| t.id == id).map(|t| t.notice);
-                self.open_notif(notice);
+                // A button runs its action; anywhere else opens the drawer on the item (SPEC).
+                let Some(t) = self.toasts.iter().find(|t| t.id == id) else {
+                    return;
+                };
+                let notice = t.notice;
+                if let Some(k) = toast_actions(t).iter().position(|r| hit(r, x, y)) {
+                    self.run_action(notice, k);
+                    return;
+                }
+                self.open_notif(Some(notice));
             }
             PanelKey::Notif => self.click_notif(x, y),
             PanelKey::Control => {

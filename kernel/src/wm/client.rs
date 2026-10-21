@@ -42,6 +42,8 @@ pub const EV_BUTTON_DOWN: u32 = 4;
 pub const EV_BUTTON_UP: u32 = 5;
 pub const EV_SCROLL: u32 = 6;
 pub const EV_CLOSE: u32 = 7;
+/// A button on one of the app's notices was pressed: key = the app's tag, mods = index.
+pub const EV_ACTION: u32 = 9;
 
 // Key codes for non-character keys (printable keys send their Unicode code point).
 pub const K_ENTER: u32 = 0x1_0001;
@@ -246,6 +248,22 @@ pub fn drop_file(id: u32, x: i32, y: i32, path: &str) -> Result<(), String> {
     let fd = proc::grant_file(pid, path, false, "drop").map_err(|e| alloc::format!("{e}"))?;
     push(id, encode(8, x, y, fd as u32, 0, 0));
     Ok(())
+}
+
+/// A notice button for the process `pid`: an action event to its first window. False if it
+/// has none.
+pub fn action(pid: u32, tag: u32, index: u32) -> bool {
+    let id = CLIENTS
+        .lock()
+        .iter()
+        .filter(|(_, cl)| cl.pid == pid && !cl.closed)
+        .map(|(id, _)| *id)
+        .min();
+    let Some(id) = id else {
+        return false;
+    };
+    push(id, encode(EV_ACTION, 0, 0, tag, index, 0));
+    true
 }
 
 fn push(id: u32, ev: [u8; EVENT_LEN]) {

@@ -4,7 +4,13 @@
 //! ```text
 //! open <app|absolute path>    files, terminal, notes, about, paint, today, spaces; a folder
 //!                             opens in Files, a text file in Notes, a /bin program runs
-//! notify <title>[\t<subtitle>]
+//! notify <title>[\t<subtitle>[\t<option>...]]
+//!                             options: app=<name> (the group and icon; default: the
+//!                             writing program), id=<number> (sent back with an action),
+//!                             action=<label>[:<command>] (up to two buttons: with a
+//!                             command, pressing it runs that program, an absolute path
+//!                             or a /bin name and its words, or `open <what>`; without
+//!                             one, the posting program's window gets an action event)
 //! today | spaces | desktop | skim | lock
 //! ```
 //!
@@ -41,8 +47,33 @@ pub fn command(line: &str) -> bool {
             true
         }
         "notify" => {
-            let (t, s) = rest.split_once('\t').unwrap_or((rest, ""));
-            notify(if t.is_empty() { "Hello" } else { t }, s);
+            let mut fields = rest.split('\t');
+            let t = fields.next().unwrap_or("");
+            let s = fields.next().unwrap_or("");
+            let (mut app, mut tag, mut actions) = (None, 0u32, Vec::new());
+            for f in fields {
+                match f.split_once('=') {
+                    Some(("app", v)) if !v.is_empty() => app = Some(v),
+                    Some(("id", v)) => tag = v.trim().parse().unwrap_or(0),
+                    Some(("action", v)) if !v.is_empty() => {
+                        let (label, cmd) = match v.split_once(':') {
+                            Some((l, c)) => (l, Some(String::from(c.trim()))),
+                            None => (v, None),
+                        };
+                        actions.push(super::notif::NoticeAction {
+                            label: String::from(label.trim()),
+                            cmd: cmd.filter(|c| !c.is_empty()),
+                        });
+                    }
+                    _ => return false,
+                }
+            }
+            let t = if t.is_empty() { "Hello" } else { t };
+            if app.is_none() && actions.is_empty() && tag == 0 {
+                notify(t, s);
+            } else {
+                super::notify_with(app, t, s, tag, actions);
+            }
             true
         }
         "today" => {

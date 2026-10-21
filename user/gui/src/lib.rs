@@ -128,6 +128,12 @@ pub enum Event {
     Scroll(i32),
     /// The user closed the window: clean up and exit.
     Close,
+    /// A button on one of this app's notices was pressed ([`notify`]): the `tag` the app
+    /// gave it and which button (0 or 1).
+    Action {
+        tag: u32,
+        index: u32,
+    },
     /// A file was dropped on the window at (x, y): `fd` is it, opened read-only for us
     /// (the user's drop is the grant; read it, then close it).
     Drop {
@@ -180,6 +186,10 @@ fn decode(b: &[u8; 32]) -> Option<Event> {
         },
         6 => Event::Scroll(extra),
         7 => Event::Close,
+        9 => Event::Action {
+            tag: word(b, 3),
+            index: word(b, 4),
+        },
         8 => Event::Drop {
             x,
             y,
@@ -478,6 +488,29 @@ impl Drop for Window {
         // SAFETY: plain integer; the kernel unmaps the buffer.
         unsafe { sys::syscall(WIN_DESTROY, [self.id as usize, 0, 0, 0, 0, 0]) };
     }
+}
+
+/// Post a notification from this app (/dev/wm `notify`, see docs/processes.md): `app` is the
+/// group and icon name, `tag` comes back in [`Event::Action`] when one of `actions` (up to
+/// two labels) is pressed. Returns false if there is no desktop.
+pub fn notify(app: &str, title: &str, sub: &str, tag: u32, actions: &[&str]) -> bool {
+    let clean = |s: &str| s.replace(['\t', '\n'], " ");
+    let mut line = alloc::format!(
+        "notify\t{}\t{}\tapp={}\tid={tag}",
+        clean(title),
+        clean(sub),
+        clean(app)
+    );
+    for a in actions.iter().take(2) {
+        line.push_str(&alloc::format!("\taction={}", clean(a).replace(':', " ")));
+    }
+    line.push('\n');
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY) else {
+        return false;
+    };
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
 }
 
 /// Blend `src` over `dst` at `a` (0..=255).

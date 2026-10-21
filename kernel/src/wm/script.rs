@@ -1150,7 +1150,33 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .down()
                 .wait(400);
         }
-        "drop-bob-wait" | "drop-bob-accept" => {
+        // Notification actions (/dev/wm notify action=...): a toast with two buttons; the
+        // first runs a command (a second notice), the drawer shows the same buttons.
+        "notif-actions" | "notif-action-run" | "notif-actions-drawer" => {
+            b.wait(300)
+                .typ("notify --app Clock --action \"Snooze:notify --app Clock Snoozed 5 minutes\" --action \"Open:open files\" \"Tea is ready\" Your 4 minute timer finished")
+                .enter()
+                .wait(600);
+            let first = super::shell::toast_rects_for(&[true])[0];
+            let sw = super::button::pill_w("Snooze");
+            let (bx, by) = (
+                first.x + 64 + sw / 2,
+                first.y + super::theme::TOAST_H - 6 + 12,
+            );
+            match name {
+                "notif-actions" => {
+                    b.glide(600, 400, bx - sw / 2 + 4, by, 8).wait(300);
+                }
+                "notif-action-run" => {
+                    b.click(bx, by).wait(800);
+                }
+                _ => {
+                    let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
+                    b.click(x, y).wait(600);
+                }
+            }
+        }
+        "drop-bob-wait" | "drop-bob-accept" | "drop-bob-received" => {
             b.wait(300).typ("drop name bob").enter().wait(1500);
             b.typ("open milkdrop").enter().wait(1000);
             if name == "drop-bob-wait" {
@@ -1161,7 +1187,11 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.wait(20000);
                 let aw = super::button::dialog_w("Trust alice and accept");
                 b.click(191 + 642 - 16 - aw / 2, 183 + 296 - 56 + 14 + 14)
-                    .wait(6000);
+                    .wait(if name == "drop-bob-received" {
+                        1500
+                    } else {
+                        6000
+                    });
             }
         }
         "tabs-terminal" => {

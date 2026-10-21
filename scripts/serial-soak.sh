@@ -10,7 +10,10 @@
 # wakeups and the scheduler's wakeups during boot.
 #
 #   scripts/serial-soak.sh [boots] [commands]   (default 5 14; 0 commands = boot tests only)
-#   MILK_SMP=1 for one CPU.
+#   MILK_SMP=1 for one CPU, RELEASE=1 for the release kernel (as run.sh).
+#   MILK_FEATURES=smp-join-delay: secondaries take 200 ms between coming online and
+#   joining the scheduler, so the self-tests run while CPUs join (the window of the
+#   release-boot crash: an IPI/tick on a CPU that hadn't joined jumped to PC 0).
 #
 # Private images (MILK_FS / MILK_DISK default to /tmp/serial-soak-*.img). On a failed
 # boot the UART registers and every CPU's registers (symbolized) are appended to its log
@@ -23,9 +26,11 @@ export MILK_FS="${MILK_FS:-/tmp/serial-soak-fs.img}"
 export MILK_DISK="${MILK_DISK:-/tmp/serial-soak-disk.img}"
 SMP="${MILK_SMP:-4}"
 LOGS="$(mktemp -d /tmp/serial-soak.XXXXXX)"
-ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
+PROFILE=debug
+[ -n "${RELEASE:-}" ] && PROFILE=release
+ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-cargo build -q || exit 1
+cargo build -q ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} || exit 1
 
 # has PATTERN: the log (CRs stripped) has a line matching the fixed string / regex.
 has() { tr -d '\r' < "$log" | grep -q "$@"; }
@@ -105,5 +110,5 @@ for b in $(seq 1 "$BOOTS"); do
   kill "$qpid" 2>/dev/null
   wait "$qpid" 2>/dev/null
 done
-echo "serial-soak (smp $SMP, $BOOTS boots x $CMDS commands): $pass passed, $fail failed. Logs: $LOGS"
+echo "serial-soak ($PROFILE${MILK_FEATURES:+ +$MILK_FEATURES}, smp $SMP, $BOOTS boots x $CMDS commands): $pass passed, $fail failed. Logs: $LOGS"
 [ "$fail" = 0 ]

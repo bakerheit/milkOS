@@ -19,6 +19,13 @@ milkOS runs on every CPU the device tree lists (`-smp 4` with `-accel hvf -cpu h
    `gic::init_cpu` (CPU interface + banked SGI/PPI enables for every registered SGI/PPI),
    `timer::init_cpu` (its own virtual-timer comparator), then `sched::run_secondary`: the
    code running on that stack becomes the CPU's idle thread.
+4. **IRQs stay masked until the CPU has joined the scheduler** (`run_secondary` unmasks
+   them), and `smp::init` waits for each CPU to *join*, not just come online. Before it
+   joins, a CPU's scheduler slot reads current = idle = tid 0 (kmain): an IPI or tick
+   taken there used to "switch away from kmain" on the wrong CPU and corrupt kmain's
+   context (crash at PC 0 / hang during `[sched-test]`). The scheduler also ignores
+   CPUs that haven't joined (no placement, stealing or kicks; `schedule` and the tick do
+   nothing there). Regression: `MILK_FEATURES=smp-join-delay scripts/serial-soak.sh`.
 
 Device interrupts (SPIs) are spread over the online CPUs once they are up
 (`gic::spread_spis`, round robin through GICD_ITARGETSR; SPIs registered later get the

@@ -5,7 +5,7 @@
 //! open <app|absolute path>    files, terminal, notes, about, paint, today, spaces; a folder
 //!                             opens in Files, a text file in Notes, a /bin program runs
 //! notify <title>[\t<subtitle>]
-//! today | spaces | desktop | skim
+//! today | spaces | desktop | skim | lock
 //! ```
 //!
 //! Reading it gives a status snapshot (`mode`, `space`, one `window` line per window).
@@ -59,6 +59,10 @@ pub fn command(line: &str) -> bool {
         }
         "skim" => {
             request(Request::Skim);
+            true
+        }
+        "lock" => {
+            request(Request::Lock);
             true
         }
         _ => false,

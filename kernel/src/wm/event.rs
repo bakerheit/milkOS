@@ -58,6 +58,11 @@ impl Mods {
         meta: true,
         ..Mods::NONE
     };
+    pub const META_CTRL: Mods = Mods {
+        meta: true,
+        ctrl: true,
+        ..Mods::NONE
+    };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

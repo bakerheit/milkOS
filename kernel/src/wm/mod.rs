@@ -26,6 +26,7 @@ mod ctl;
 mod event;
 mod fontx;
 mod icons;
+mod lock;
 mod menus;
 mod paint;
 mod power;
@@ -105,6 +106,8 @@ pub enum Request {
     Skim,
     /// A new Terminal tab, optionally running a command in it (Skim's `> cmd`).
     NewTab(Option<String>),
+    /// Show the lock screen.
+    Lock,
     /// Nothing to do: just run a frame (a background job has a result for an app).
     Wake,
 }
@@ -288,6 +291,12 @@ pub struct Desktop {
     cpu_loads: Vec<u32>,
     cpu_steps: Vec<u32>,
     last_second: u64,
+    /// The lock screen while it is up (or fading), lock.rs; its opacity this frame.
+    lock: Option<lock::Lock>,
+    lock_a: u8,
+    /// Last key press or click (the idle lock timer); demos add pretend idle time.
+    last_input: u64,
+    idle_skew: u64,
 }
 
 impl Desktop {
@@ -331,6 +340,10 @@ impl Desktop {
             cache: BTreeMap::new(),
             anims: Vec::new(),
             snap_preview: None,
+            lock: None,
+            lock_a: 0,
+            last_input: t,
+            idle_skew: 0,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -575,7 +588,8 @@ impl Desktop {
             Mode::Spaces => "spaces",
         };
         let mut s = alloc::format!(
-            "mode {mode}\nspace {} of {}\nfocus {}\n",
+            "mode {mode}\nlocked {}\nspace {} of {}\nfocus {}\n",
+            if self.locked() { "yes" } else { "no" },
             self.space + 1,
             self.nspaces,
             self.focused_window().map_or("none", |w| w.contents.title())
@@ -982,6 +996,14 @@ impl Desktop {
     }
 
     fn compose_rect(&mut self, d: Rect, layers: &[Layer], vis: &[usize], cur: Rect) {
+        if self.lock_a == 255 {
+            // Locked: nothing under the lock screen shows.
+            let mut p = Painter::new(&mut self.back);
+            let mut p = p.clipped(d);
+            lock::draw(&self.lock, &mut p, d, 255);
+            self.finish_rect(d, cur);
+            return;
+        }
         let mut p = Painter::new(&mut self.back);
         let mut p = p.clipped(d);
         // Skip everything under the topmost window that covers the whole rect.
@@ -1047,6 +1069,16 @@ impl Desktop {
                 }
             }
         }
+        if self.lock_a > 0 {
+            lock::draw(&self.lock, &mut p, d, self.lock_a);
+        }
+        self.finish_rect(d, cur);
+    }
+
+    /// Brightness and the cursor, over everything.
+    fn finish_rect(&mut self, d: Rect, cur: Rect) {
+        let mut p = Painter::new(&mut self.back);
+        let mut p = p.clipped(d);
         if self.settings.brightness < 100 {
             let a = ((100 - self.settings.brightness) * 255 / 100 * 7 / 10) as u8;
             p.fill_a(d.x, d.y, d.w, d.h, 0, a);
@@ -1101,6 +1133,7 @@ impl Desktop {
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
                 Request::Wake => {}
+                Request::Lock => self.lock_screen(),
                 Request::NewTab(cmd) => {
                     // A tab in the open Terminal, or the Terminal itself (its first tab).
                     if self.windows.iter().any(|w| w.app == App::Terminal) {
@@ -1125,10 +1158,13 @@ impl Desktop {
         }
         self.tick(now);
         let animating = self.step_anims(now);
+        let fading = self.lock_tick(now);
+        self.lock_a = self.lock_alpha(timer::now_ns());
         self.render_and_compose();
         *STATS.lock() = self.stats;
         self.stats.frames != frames
             || animating
+            || fading
             || self.script.is_some()
             || matches!(
                 self.drag,
@@ -1285,6 +1321,28 @@ impl Desktop {
     // ---- input ----------------------------------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) {
+        let press = matches!(
+            ev,
+            Event::Button { down: true, .. } | Event::Key { down: true, .. }
+        );
+        if press {
+            self.last_input = timer::now_ns();
+            self.idle_skew = 0;
+        }
+        // Locked: the pointer moves, a click or a key unlocks, nothing else gets through.
+        if self.locked() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                }
+                _ if press => self.unlock_screen(),
+                _ => {}
+            }
+            return;
+        }
         // A click or key press finishes running animations.
         if !self.anims.is_empty()
             && matches!(
@@ -1589,6 +1647,7 @@ impl Desktop {
         // Global shortcuts.
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
+            Key::Char('q') if m.meta && m.ctrl => return self.lock_screen(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {

@@ -25,6 +25,8 @@ pub struct Prefs {
     pub dock: i32,
     /// System sounds (toasts, crashes). Only audible with a sound device.
     pub sound: bool,
+    /// Lock the screen after this many minutes without input; 0 = never.
+    pub lock_mins: u32,
 }
 
 impl Prefs {
@@ -34,7 +36,11 @@ impl Prefs {
         brightness: 100,
         dock: 48,
         sound: true,
+        lock_mins: 0,
     };
+
+    /// The idle times Settings offers (minutes; 0 = never).
+    pub const LOCK_CHOICES: [u32; 5] = [0, 1, 5, 15, 30];
 
     /// The wallpaper actually shown.
     pub fn wallpaper_kind(&self) -> Kind {
@@ -44,12 +50,16 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
             self.dock,
-            if self.sound { "on" } else { "off" }
+            if self.sound { "on" } else { "off" },
+            match self.lock_mins {
+                0 => String::from("never"),
+                m => format!("{m}"),
+            }
         )
     }
 
@@ -64,6 +74,7 @@ impl Prefs {
                 "theme" => p.dark = matches!(v, "chocolate" | "dark"),
                 "wallpaper" => p.wallpaper = Kind::ALL.iter().copied().find(|kind| kind.key() == v),
                 "sound" => p.sound = v != "off",
+                "lock" => p.lock_mins = v.parse().unwrap_or(0).min(24 * 60),
                 "brightness" => p.brightness = v.parse().unwrap_or(100).clamp(20, 100),
                 "dock" => {
                     p.dock = match v.parse().unwrap_or(48) {

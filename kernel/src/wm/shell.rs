@@ -1110,8 +1110,10 @@ impl Desktop {
             PanelKey::MenuBar => {
                 let sw = self.status_width();
                 if x < 30 {
-                    self.set_menu(None);
-                    self.toggle_launcher();
+                    // The logo: the system menu (About, Skim, Lock Screen, Restart ...).
+                    let m = if self.menu == Some(0) { None } else { Some(0) };
+                    self.control = false;
+                    self.set_menu(m);
                 } else if x >= SCREEN_W - MENU_PAD_X - sw - 8 {
                     self.set_menu(None);
                     self.control = !self.control;

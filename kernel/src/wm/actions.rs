@@ -96,6 +96,7 @@ pub fn register_builtin() {
         set_dark(false)
     });
     register("Time Machine", "Back up now", back_up_now);
+    register("Desktop", "Lock screen", || request(Request::Lock));
     register("Desktop", "Show Today", || {
         request(Request::Mode(Mode::Home))
     });

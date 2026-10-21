@@ -19,6 +19,8 @@ pub enum Step {
     Bench,
     Log(&'static str),
     Panic,
+    /// Pretend nobody touched anything for this many seconds (the idle lock).
+    Idle(u64),
 }
 
 pub struct Script {
@@ -605,6 +607,36 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "shutdown" => {
             b.click(60, 14).wait(100).click(80, 219);
         }
+        // Lock screen.
+        "lock" => {
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+        }
+        "unlock" => {
+            // Lock, then a key unlocks (and is not typed into the Terminal).
+            b.wait(300).key(Key::Char('q'), Mods::META_CTRL).wait(700);
+            b.typ("x").wait(700);
+        }
+        "logomenu" => {
+            b.click(18, 14).wait(300);
+        }
+        "lockmenu" => {
+            // The logo's system menu > Lock Screen.
+            b.click(18, 14).wait(300).click(80, 196).wait(700);
+        }
+        "lockprefs" => {
+            // Settings > Display & Lock > 5 min.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 2 * 82 + 38, 113 + 249).wait(400);
+        }
+        "idlelock" => {
+            // Settings > Display & Lock > 1 min, then a minute of (pretend) idleness.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 112).wait(300);
+            b.click(181 + 188 + 82 + 38, 113 + 249).wait(300);
+            b.0.push(Step::Idle(61));
+            b.wait(800);
+        }
         "logo" => {
             b.click(60, 14).glide(60, 14, 90, 60, 6);
         }
@@ -716,6 +748,7 @@ impl Script {
                 }
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
+                Step::Idle(s) => d.pretend_idle(*s),
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

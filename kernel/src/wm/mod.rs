@@ -22,6 +22,7 @@ mod event;
 mod icons;
 mod menus;
 mod paint;
+mod power;
 mod rtc;
 mod script;
 mod shell;
@@ -41,6 +42,7 @@ use crate::{cursor, display, input, kprintln, timer, uart};
 use buffer::Buffer;
 pub use event::{Button, Event, Key};
 use paint::{Painter, contains, hit};
+pub use power::panic_screen;
 use shell::{Layer, PanelKey, PanelSpec, Style};
 use theme::*;
 use wallpaper::Wallpaper;
@@ -286,7 +288,7 @@ impl Desktop {
             script: None,
             idle_ns: 0,
             acct_start: timer::now_ns(),
-            last_second: 0,
+            last_second: timer::now_ns() / 1_000_000_000,
         };
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);

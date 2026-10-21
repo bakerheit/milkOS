@@ -56,11 +56,14 @@ pub fn draw(
             rect(p, 9, 19, 30, 18, u(3), fg);
         }
         Icon::Term => {
-            // ">_" in faux bold, roughly centred like the mockup's 18px glyphs.
+            // ">_" like the mockup's 18px bold glyphs: a heavy chevron and a thick underscore.
             let sc = if s >= 72 { 2 } else { 1 };
-            let tx = x + u(9);
+            let tx = x + u(8);
             let ty = y + (s - 16 * sc) / 2 - u(1);
-            p.text_x(tx, ty, ">_", fg, sc, true);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                p.text_a(tx + dx * sc, ty + dy * sc, ">", fg, 255, sc);
+            }
+            p.fill(tx + 8 * sc + u(2), ty + 13 * sc, u(11), th(3), fg);
         }
         Icon::Gear => {
             ring(p, 11, 11, 26, 26, u(13), th(5), fg);

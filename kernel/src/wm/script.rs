@@ -18,6 +18,7 @@ pub enum Step {
     Toast(&'static str, &'static str),
     Bench,
     Log(&'static str),
+    Panic,
 }
 
 pub struct Script {
@@ -178,6 +179,15 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.wait(300);
             b.0.push(Step::Toast("Build finished", "milkOS in 2.1 s"));
         }
+        "panic" => {
+            b.0.push(Step::Panic);
+        }
+        "shutdown" => {
+            b.click(60, 14).wait(100).click(80, 219);
+        }
+        "logo" => {
+            b.click(60, 14).glide(60, 14, 90, 60, 6);
+        }
         "bench" => {
             b.0.push(Step::Bench);
         }
@@ -259,6 +269,10 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
+                Step::Panic => {
+                    kprintln!("[demo] {} done", self.name);
+                    panic!("demo: deliberate panic to show the panic screen");
+                }
             }
         }
         false

@@ -92,6 +92,7 @@ pub extern "C" fn kmain() -> ! {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     kprintln!("\n*** KERNEL PANIC ***\n{info}");
+    wm::panic_screen(info);
     loop {
         unsafe { core::arch::asm!("wfe") };
     }

@@ -33,6 +33,8 @@ pub enum MenuAction {
     Control,
     NewSpace,
     Help,
+    Restart,
+    ShutDown,
     /// Shown greyed out (no clipboard yet).
     Disabled,
 }
@@ -96,23 +98,17 @@ impl Desktop {
         let has_win = self.focus.is_some() && self.mode == Mode::Desktop;
         let win = |a| if has_win { a } else { MenuAction::Disabled };
         if idx == 0 {
-            let app = self.focused_window().map(|w| w.app);
-            let about = match app {
-                Some(App::About) | None => String::from("About milkOS"),
-                Some(a) => format!("About {}", a.name()),
-            };
             return alloc::vec![
-                Item {
-                    label: about,
-                    key: "",
-                    action: Some(MenuAction::Open(App::About)),
-                },
+                item("About milkOS", "", MenuAction::Open(App::About)),
                 sep(),
                 item("Skim", "Ctrl+Space", MenuAction::Skim),
                 item("Control centre", "", MenuAction::Control),
                 sep(),
                 item("Minimise", "Cmd+M", win(MenuAction::Minimise)),
                 item("Close", "Cmd+W", win(MenuAction::Close)),
+                sep(),
+                item("Restart", "", MenuAction::Restart),
+                item("Shut Down", "", MenuAction::ShutDown),
             ];
         }
         match name {
@@ -275,6 +271,8 @@ impl Desktop {
                 self.set_mode(Mode::Spaces);
             }
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
+            MenuAction::Restart => super::power::restart(),
+            MenuAction::ShutDown => super::power::shut_down(),
             MenuAction::Disabled => {}
         }
     }

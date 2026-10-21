@@ -264,3 +264,47 @@ impl Bounce {
         Some((size as i64 * h as i64 * y / (1000 * 1024)) as i32)
     }
 }
+
+// ---- apps added and removed: the neighbours slide aside ----------------------------------
+
+/// How long the dock takes to make room for a new icon (or close a gap).
+pub const SLIDE_NS: u64 = 260_000_000;
+
+/// The dock as it was before its tiles changed, by tile name.
+#[derive(Clone, Debug)]
+pub struct Slide {
+    pub start_ns: u64,
+    pub from: Vec<(alloc::string::String, i32, i32)>,
+    pub from_bar: Rect,
+}
+
+impl Slide {
+    /// The eased progress (0..=ONE), or None when done.
+    pub fn progress(&self, now: u64) -> Option<i32> {
+        let d = SLIDE_NS * slow();
+        let e = now.saturating_sub(self.start_ns);
+        (e < d).then(|| smoothstep((e * ONE as u64 / d) as i32))
+    }
+
+    /// `l` part of the way from where things were: old icons slide from their old places,
+    /// new ones grow from nothing in theirs, the bar follows.
+    pub fn apply(&self, l: &mut Layout, names: &[alloc::string::String], e: i32) {
+        let lerp = |a: i32, b: i32| a + (b - a) * e / ONE;
+        for (s, n) in l.slots.iter_mut().zip(names) {
+            match self.from.iter().find(|(m, _, _)| m == n) {
+                Some(&(_, x, size)) => {
+                    s.x = lerp(x, s.x);
+                    s.size = lerp(size, s.size);
+                }
+                None => {
+                    let size = lerp(0, s.size).max(1);
+                    s.x += (s.size - size) / 2;
+                    s.size = size;
+                }
+            }
+        }
+        let b = self.from_bar;
+        l.bar = Rect::new(lerp(b.x, l.bar.x), l.bar.y, lerp(b.w, l.bar.w), l.bar.h);
+        l.magnified = true;
+    }
+}

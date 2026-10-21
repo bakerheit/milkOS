@@ -415,6 +415,9 @@ pub struct Desktop {
     /// Icons hopping while their app starts, and whether the compositor draws the icons
     /// this frame (magnified or hopping) instead of the dock panel.
     bounces: Vec<dock::Bounce>,
+    /// The dock's tiles last frame (names) and a slide in progress after they changed.
+    dock_names: Vec<String>,
+    dock_slide: Option<dock::Slide>,
     was_hopping: bool,
     dock_overlay: bool,
     /// Dock item being pressed (drawn 4% darker until release).
@@ -517,6 +520,8 @@ impl Desktop {
             dock_draws: Vec::new(),
             dock_sprites: Vec::new(),
             bounces: Vec::new(),
+            dock_names: Vec::new(),
+            dock_slide: None,
             was_hopping: false,
             dock_overlay: false,
             dock_pressed: None,
@@ -1599,13 +1604,48 @@ impl Desktop {
         self.dock_mag.target = if over { 1024 } else { 0 };
         let easing = self.dock_mag.step(now);
         let n = shell::dock_len();
-        let l = dock::layout(
+        let mut l = dock::layout(
             n,
             base,
             self.dock_mag.x,
             self.dock_mag.eased(),
             p.magnify_pct,
         );
+        // Tiles came or went: the others slide aside (or close the gap) from where they were.
+        let names = shell::dock_names();
+        if names != self.dock_names {
+            if !self.dock_names.is_empty() && self.dock_names.len() == self.dock_layout.slots.len()
+            {
+                let from = self
+                    .dock_names
+                    .iter()
+                    .zip(&self.dock_layout.slots)
+                    .map(|(n, s)| (n.clone(), s.x, s.size))
+                    .collect();
+                self.dock_slide = Some(dock::Slide {
+                    start_ns: now,
+                    from,
+                    from_bar: self.dock_layout.bar,
+                });
+            }
+            self.dock_names = names;
+        }
+        let sliding = match &self.dock_slide {
+            Some(sl) => match sl.progress(now) {
+                Some(e) => {
+                    let sl = sl.clone();
+                    sl.apply(&mut l, &self.dock_names, e);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        if !sliding && self.dock_slide.take().is_some() {
+            // Settled: one last full redraw of where it moved.
+            let r = self.dock_layout.icons_rect().union(&l.icons_rect());
+            self.damage(r);
+        }
         // Launch bounces: a hop until the app's window is up, then a small last one.
         let mut lifts = alloc::vec![0i32; n];
         let mut bounces = core::mem::take(&mut self.bounces);
@@ -1682,7 +1722,7 @@ impl Desktop {
         } else {
             self.dock_draws.clear();
         }
-        easing || hopping
+        easing || hopping || sliding
     }
 
     /// Re-render stale window surfaces and panels, then composite the damage.

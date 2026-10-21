@@ -30,8 +30,23 @@ pub enum Target {
     Dead(Box<Window>),
 }
 
+/// How a minimise / restore moves: the genie (the window pours into its dock icon, the
+/// bottom first) or a plain scale.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shape {
+    Scale,
+    /// Into the dock (true) or out of it (false).
+    Genie(bool),
+}
+
+/// The genie takes a little longer than the other animations (macOS's is about 0.5 s).
+pub const GENIE_NS: u64 = 380_000_000;
+
 pub struct Anim {
     pub target: Target,
+    shape: Shape,
+    /// 0..=1024 through the animation (the genie draws from this).
+    t: i32,
     from: Rect,
     to: Rect,
     a0: u8,
@@ -60,9 +75,16 @@ fn lerp(a: i32, b: i32, t: i32) -> i32 {
 
 impl Anim {
     fn at(&self, now: u64) -> (Rect, u8, bool) {
-        let dur = duration();
+        let dur = match self.shape {
+            Shape::Scale => duration(),
+            Shape::Genie(_) => GENIE_NS * SLOWMO.load(core::sync::atomic::Ordering::Relaxed),
+        };
         let el = now.saturating_sub(self.start).min(dur);
         let t = (el * 1024 / dur) as i64;
+        if let Shape::Genie(_) = self.shape {
+            // Everything it can touch, for damage; the shape itself comes from `t`.
+            return (self.from.union(&self.to), 255, el >= dur);
+        }
         // Ease out (cubic).
         let inv = 1024 - t;
         let e = (1024 - inv * inv * inv / (1024 * 1024)) as i32;
@@ -79,6 +101,18 @@ impl Anim {
 
 impl Desktop {
     fn add_anim(&mut self, target: Target, from: Rect, to: Rect, a0: u8, a1: u8) {
+        self.add_anim_shaped(target, from, to, a0, a1, Shape::Scale);
+    }
+
+    fn add_anim_shaped(
+        &mut self,
+        target: Target,
+        from: Rect,
+        to: Rect,
+        a0: u8,
+        a1: u8,
+        shape: Shape,
+    ) {
         // One animation per window.
         if let Target::Live(id) = &target {
             let id = *id;
@@ -88,6 +122,8 @@ impl Desktop {
         self.damage(shadowed(&from.union(&to)));
         self.anims.push(Anim {
             target,
+            shape,
+            t: 0,
             from,
             to,
             a0,
@@ -113,7 +149,7 @@ impl Desktop {
         if let Some(w) = self.win(id) {
             let r = w.rect;
             let dock = self.dock_slot(w.app);
-            self.add_anim(Target::Live(id), r, dock, 255, 90);
+            self.add_anim_shaped(Target::Live(id), r, dock, 255, 90, Shape::Genie(true));
         }
     }
 
@@ -121,7 +157,7 @@ impl Desktop {
         if let Some(w) = self.win(id) {
             let r = w.rect;
             let dock = self.dock_slot(w.app);
-            self.add_anim(Target::Live(id), dock, r, 90, 255);
+            self.add_anim_shaped(Target::Live(id), r, dock, 255, 90, Shape::Genie(false));
         }
     }
 
@@ -147,6 +183,11 @@ impl Desktop {
         let mut dmg = alloc::vec::Vec::new();
         self.anims.retain_mut(|a| {
             let (r, alpha, done) = a.at(now);
+            let dur = match a.shape {
+                Shape::Scale => duration(),
+                Shape::Genie(_) => GENIE_NS * SLOWMO.load(core::sync::atomic::Ordering::Relaxed),
+            };
+            a.t = (now.saturating_sub(a.start).min(dur) * 1024 / dur.max(1)) as i32;
             // Include the shadow area: the window's own shadow comes back when it ends.
             dmg.push(shadowed(&a.last.union(&r)));
             a.last = r;
@@ -174,7 +215,47 @@ pub fn draw(anims: &[Anim], windows: &[Window], p: &mut Painter, d: Rect) {
             },
             Target::Dead(w) => w,
         };
+        if let Shape::Genie(into) = a.shape {
+            // `from` is always the window, `to` the dock icon; restoring runs it backwards.
+            let t = if into { a.t } else { 1024 - a.t };
+            genie(p, d, &w.surf, a.from, a.to, t);
+            continue;
+        }
         let radius = (R_WINDOW * r.w / w.rect.w.max(1)).max(2);
         p.blit_scaled_rrect(r, &w.surf, radius, alpha);
+    }
+}
+
+/// 3t^2 - 2t^3 on 0..=1024.
+fn smooth(t: i32) -> i32 {
+    let t = t.clamp(0, 1024) as i64;
+    ((t * t * (3 * 1024 - 2 * t)) / (1024 * 1024)) as i32
+}
+
+/// The genie at `t` (0 = the window, 1024 = inside the dock icon `to`): its bottom heads for
+/// the icon first while its sides pinch in towards it, then the top follows it down. Each
+/// output row samples one row of the window, stretched between its interpolated edges.
+fn genie(p: &mut Painter, d: Rect, surf: &super::buffer::Buffer, from: Rect, to: Rect, t: i32) {
+    let fall = smooth(t * 1024 / 600); // the bottom reaches the icon by 60%
+    let follow = smooth((t - 230) * 1024 / 794); // the top starts after about a fifth
+    let pinch = smooth(t * 1024 / 520); // the sides pinch in early
+    let bottom = lerp(from.y + from.h, to.y + to.h, fall);
+    let top = lerp(from.y, to.y, follow).min(bottom - 1);
+    let h = (bottom - top).max(1);
+    let alpha = if t > 900 {
+        (255 - (t - 900) * 2).clamp(0, 255) as u8
+    } else {
+        255
+    };
+    let y0 = top.max(d.y);
+    let y1 = bottom.min(d.y + d.h);
+    for y in y0..y1 {
+        let v = (y - top) * 1024 / h; // 0 at the top of the shape, 1024 at the bottom
+        // The bottom rows pinch the most; once the top is on its way, everything follows.
+        let w = (pinch * smooth(v) / 1024).max(follow);
+        let x0 = lerp(from.x, to.x, w);
+        let x1 = lerp(from.x + from.w, to.x + to.w, w);
+        let sy = v * from.h / 1024;
+        p.blit_span(y, x0, x1, surf, sy, R_WINDOW, alpha);
     }
 }

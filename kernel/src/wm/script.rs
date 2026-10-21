@@ -19,6 +19,8 @@ pub enum Step {
     Bench,
     /// Sweep the pointer across the magnified dock, timing every frame.
     DockBench,
+    /// Rescan the installed apps now (instead of at the next 3 s poll).
+    Packages,
     Log(&'static str),
     Panic,
     /// Pretend nobody touched anything for this many seconds (the idle lock).
@@ -1232,6 +1234,30 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(x, y).to(x, y - 160);
             b.wait(if name == "dock-bounce" { 3300 } else { 11500 });
         }
+        // Minimise into the dock with the genie (slow-dock-genie catches it mid-flight;
+        // dock-genie-restore brings it back out from its dock icon).
+        "dock-genie" | "dock-genie-restore" => {
+            b.wait(300);
+            b.click(TERM_MIN.0, TERM_MIN.1);
+            if name == "dock-genie-restore" {
+                b.wait(800);
+                let (x, y) = dock_icon_center(1);
+                b.glide(600, 400, x, y - 100, 6).wait(300);
+                b.click(x, y).to(x, y - 120);
+            }
+            b.wait(if name == "dock-genie" { 3000 } else { 3600 });
+        }
+        // An app installed (a manifest dropped into /Applications, as an admin with sudo: the
+        // demo user's well-known default password): its tile grows in and the
+        // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
+        "dock-slide" => {
+            b.wait(300)
+                .typ("echo milk | sudo -S msh -c \"mkdir -p /Applications/hello && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /bin/hello\\ndock Hello #9CBF9B' > /Applications/hello/manifest\"")
+                .enter()
+                .wait(1500);
+            b.0.push(Step::Packages);
+            b.wait(1300);
+        }
         "settings-dock" => {
             // Settings > Dock: icon size, Magnification on / off and its size.
             let (x, y) = dock_icon_center(8);
@@ -1430,6 +1456,9 @@ impl Script {
                 Step::Toast(t, s) => d.post_toast(t, s),
                 Step::Bench => d.bench(),
                 Step::DockBench => d.bench_dock(),
+                Step::Packages => {
+                    super::packages::refresh();
+                }
                 Step::Idle(s) => d.pretend_idle(*s),
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);

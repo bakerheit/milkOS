@@ -448,17 +448,18 @@ impl Desktop {
                 .is_some_and(|p| prog.as_deref() == p.exec.rsplit('/').next()),
             _ => false,
         });
-        match i {
-            Some(i) => {
-                let (cx, cy) = dock_icon_center(i);
-                Rect::new(
-                    cx - dock_icon() / 2,
-                    cy - dock_icon() / 2,
-                    dock_icon(),
-                    dock_icon(),
-                )
-            }
-            None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
+        let l = &self.dock_layout;
+        match i.and_then(|i| l.slots.get(i)) {
+            // Where the icon is now (magnified or not).
+            Some(s) => Rect::new(s.x, l.bottom - s.size, s.size, s.size),
+            None => match i {
+                Some(i) => {
+                    let (cx, cy) = dock_icon_center(i);
+                    let s = dock_icon();
+                    Rect::new(cx - s / 2, cy - s / 2, s, s)
+                }
+                None => Rect::new(screen_w() / 2 - 24, screen_h() - 60, 48, 48),
+            },
         }
     }
 }
@@ -2062,6 +2063,11 @@ pub fn draw_dock_icon(p: &mut Painter, d: &DockDraw, sprite: Option<(&str, &[u32
             255,
         );
     }
+}
+
+/// The dock tiles' names, in order (to notice tiles coming and going).
+pub fn dock_names() -> Vec<String> {
+    tiles().into_iter().map(|t| t.name).collect()
 }
 
 /// Is dock tile `i`'s app up (a window for it, or the mode it shows)? Ends its bounce.

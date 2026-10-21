@@ -94,11 +94,15 @@ pub extern "C" fn kmain() -> ! {
     sched::init();
     sched::selftest::run();
     proc::init();
+    proc::start_init();
 
+    // kmain is now just thread 0. The console belongs to msh (no more uart::echo_pending
+    // here). Sleep between polls rather than wfi: a wfi loop would sit on its whole time
+    // slice whenever it is scheduled. The window server's loop goes here (or in its own
+    // thread, see docs/processes.md).
     loop {
-        uart::echo_pending();
         input_demo();
-        unsafe { core::arch::asm!("wfi") };
+        sched::sleep_ms(10);
     }
 }
 

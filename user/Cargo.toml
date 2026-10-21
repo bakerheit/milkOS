@@ -1,0 +1,21 @@
+# milkOS userland. A separate workspace (own target settings and linker script); the
+# kernel's build.rs builds it with `cargo build --release` into target/user, so a plain
+# `cargo build` at the repo root builds these too. See docs/processes.md.
+[workspace]
+resolver = "2"
+members = ["rt", "init", "hello", "msh", "fault"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+debug = false
+strip = true

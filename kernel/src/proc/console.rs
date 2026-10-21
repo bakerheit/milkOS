@@ -119,7 +119,13 @@ pub fn read(buf: &mut [u8]) -> KResult<usize> {
     let mut tty = TTY.lock();
     loop {
         if !tty.ready.is_empty() {
-            let n = buf.len().min(tty.ready.len());
+            // Canonical mode: at most one line per read.
+            let line_end = tty
+                .ready
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(usize::MAX, |i| i + 1);
+            let n = buf.len().min(tty.ready.len()).min(line_end);
             for (i, b) in tty.ready.drain(..n).enumerate() {
                 buf[i] = b;
             }

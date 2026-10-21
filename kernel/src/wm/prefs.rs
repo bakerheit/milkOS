@@ -97,5 +97,8 @@ pub fn save(p: &Prefs) {
     let _ = fs::mkdir_all("/home/milk/.config/milk", 0o755);
     if let Err(e) = fs::write_file(PATH, p.to_text().as_bytes()) {
         crate::kprintln!("wm: saving {PATH} failed: {e}");
+        return;
     }
+    // Make it durable now (home may be on milkfs): settings are rare, small writes.
+    let _ = fs::sync_all();
 }

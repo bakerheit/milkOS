@@ -163,6 +163,14 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// The same painter with theme mapping switched off (colours used as given): for
+    /// previews of the other theme, wallpaper thumbnails and such.
+    pub fn unthemed(&mut self) -> Painter<'_> {
+        let mut p = self.clipped(self.clip());
+        p.themed = false;
+        p
+    }
+
     /// A painter whose logical (0, 0) is this painter's (`r.x`, `r.y`), clipped to `r`.
     pub fn sub(&mut self, r: Rect) -> Painter<'_> {
         let mut p = self.clipped(r);

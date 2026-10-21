@@ -131,8 +131,20 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("write the window manager");
         }
         "about" => {
+            b.key(Key::Char(' '), Mods::META).wait(100).typ("about").wait(150).enter().wait(1200);
+        }
+        "settings" => {
             let (x, y) = dock_icon_center(8);
-            b.click(x, y).wait(1200);
+            b.click(x, y).wait(500);
+        }
+        "dark" => {
+            // Settings > Appearance > Chocolate milk.
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 188 + 212 + 98, 113 + 92 + 68).wait(800);
+        }
+        "wallpapers" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500).click(181 + 60, 113 + 44 + 28 + 12).wait(800);
         }
         "launcher" => {
             b.key(Key::Char(' '), Mods::META).wait(100).typ("te");

@@ -175,11 +175,11 @@ const DOCK: [DockItem; 9] = [
         action: DockAction::Home,
     },
     DockItem {
-        name: "About milkOS",
+        name: "Settings",
         icon: Icon::Gear,
         bg: LATTE,
         fg: ESPRESSO,
-        action: DockAction::App(App::About),
+        action: DockAction::App(App::Settings),
     },
 ];
 
@@ -253,7 +253,7 @@ struct Entry {
     action: Action,
 }
 
-const ENTRIES: [Entry; 9] = [
+const ENTRIES: [Entry; 10] = [
     Entry {
         name: "Terminal",
         sub: "Kernel log and a tiny shell",
@@ -293,6 +293,14 @@ const ENTRIES: [Entry; 9] = [
         bg: HONEY,
         fg: INK,
         action: Action::Program("/bin/paint"),
+    },
+    Entry {
+        name: "Settings",
+        sub: "Theme, wallpaper, display, dock, Time Machine",
+        icon: Icon::Gear,
+        bg: LATTE,
+        fg: ESPRESSO,
+        action: Action::App(App::Settings),
     },
     Entry {
         name: "Today",

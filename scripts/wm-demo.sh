@@ -25,7 +25,9 @@ KERNEL="$ELF.bin"
 rm -f "$SOCK" "$OUT" "$LOG"
 # Shared scratch disk: writes discarded, safe with other qemus running (scripts/disk.sh).
 source scripts/disk.sh
-milk_disk_args shared
+# WM_DISK_RW=1: writable disks (use private images: MILK_FS=... MILK_DISK=...), to test that
+# things persist across boots.
+if [ -n "${WM_DISK_RW:-}" ]; then milk_disk_args; else milk_disk_args shared; fi
 # eth0, restricted, no port forwards (safe with other qemus running; scripts/netdev.sh).
 source scripts/netdev.sh
 MILK_HTTP_PORT= milk_net_args

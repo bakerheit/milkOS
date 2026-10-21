@@ -69,6 +69,7 @@
 /bin/clock  target/user/aarch64-unknown-none-softfloat/release/clock   755
 /bin/calendar target/user/aarch64-unknown-none-softfloat/release/calendar 755
 /bin/activity target/user/aarch64-unknown-none-softfloat/release/activity 755
+/bin/reminders target/user/aarch64-unknown-none-softfloat/release/reminders 755
 
 # Network and sound tools (net agent).
 /bin/ifconfig target/user/aarch64-unknown-none-softfloat/release/ifconfig   755

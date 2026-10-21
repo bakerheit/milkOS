@@ -78,6 +78,8 @@ fn main(args: &rt::Args) -> i32 {
         rt::println!("calendar: no desktop to open a window on");
         return 1;
     };
+    // Resizable down to what the event sheet needs (the spec's 640x420 is too small for its sheet).
+    win.set_resizable(760, 580);
     let today = split_secs(timeio::now_secs()).0;
     let mut app = App {
         th: Theme::current(),
@@ -99,6 +101,9 @@ fn main(args: &rt::Args) -> i32 {
         let ev = win.event(500);
         match ev {
             Some(Event::Close) => break,
+            Some(Event::Resize { w, h }) => {
+                let _ = win.resize(w, h);
+            }
             Some(Event::Down { x, y, button: 1 }) => {
                 app.search_focus = false;
                 if let Some(id) = app.hits.at(x, y) {
@@ -256,7 +261,7 @@ impl App {
     fn draw(&mut self, win: &mut Window) {
         let th = self.th;
         self.hits.clear();
-        win.fill(0, 0, W, H, th.milk);
+        win.fill(0, 0, win.w, win.h, th.milk);
         self.draw_sidebar(win);
         self.draw_toolbar(win);
         if self.search.text.is_empty() {
@@ -282,8 +287,8 @@ impl App {
 
     fn draw_toolbar(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(SIDE, 0, W - SIDE, 40, th.cream);
-        widgets::hline(win, SIDE, 40, W - SIDE, th.sand);
+        win.fill(SIDE, 0, win.w - SIDE, 40, th.cream);
+        widgets::hline(win, SIDE, 40, win.w - SIDE, th.sand);
         let sel = match self.view {
             View::Day => 0,
             View::Week => 1,
@@ -301,7 +306,7 @@ impl App {
             VIEW,
         );
         // Right cluster: Today, previous, next.
-        let mut x = W - 12;
+        let mut x = win.w - 12;
         x -= 28;
         button(
             win,
@@ -391,8 +396,8 @@ impl App {
 
     fn draw_sidebar(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(0, 0, SIDE, H, th.oat);
-        widgets::vline(win, SIDE - 1, 0, H, th.sand);
+        win.fill(0, 0, SIDE, win.h, th.oat);
+        widgets::vline(win, SIDE - 1, 0, win.h, th.sand);
         // Search sits at the top of the sidebar (the toolbar has no room for it at 16px text).
         let caret = timeio::mono_ms() / 500 % 2 == 0;
         field(
@@ -455,7 +460,7 @@ impl App {
                 (c.name.clone(), c.colour.clone(), c.hidden)
             };
             let y = 250 + i as i32 * 26;
-            if y > H - 100 {
+            if y > win.h - 100 {
                 break;
             }
             let acc = th.accent(&colour);
@@ -471,7 +476,7 @@ impl App {
                 .add(Rect::new(8, y, SIDE - 16, 20), CAL_TOGGLE + i as u32);
         }
         let ny = 250 + self.set.cals.len() as i32 * 26;
-        if ny < H - 100 {
+        if ny < win.h - 100 {
             button(
                 win,
                 &th,
@@ -488,7 +493,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(12, H - 44, SIDE - 24, 28),
+            Rect::new(12, win.h - 44, SIDE - 24, 28),
             "New event",
             Kind::Primary,
             NEW_EVENT,
@@ -499,8 +504,8 @@ impl App {
 
     fn draw_status(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(SIDE, H - 24, W - SIDE, 24, th.cream);
-        widgets::hline(win, SIDE, H - 24, W - SIDE, th.sand);
+        win.fill(SIDE, win.h - 24, win.w - SIDE, 24, th.cream);
+        widgets::hline(win, SIDE, win.h - 24, win.w - SIDE, th.sand);
         let n = self.set.on(self.cursor).len();
         let wd = timekit::date::WEEKDAYS[self.cursor.weekday() as usize];
         let s = format!(
@@ -512,12 +517,12 @@ impl App {
                 n => format!("{n} events"),
             }
         );
-        win.text(SIDE + 12, H - 20, &s, th.cocoa);
+        win.text(SIDE + 12, win.h - 20, &s, th.cocoa);
     }
 
     /// The main area below the toolbar and above the status bar.
-    pub fn body() -> Rect {
-        Rect::new(SIDE, 41, W - SIDE, H - 41 - 24)
+    pub fn body(w: i32, h: i32) -> Rect {
+        Rect::new(SIDE, 41, w - SIDE, h - 41 - 24)
     }
 
     pub fn event_list(&self, d: Date) -> Vec<(usize, timekit::cal::Event)> {

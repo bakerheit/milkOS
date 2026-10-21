@@ -40,6 +40,53 @@ pub fn receive_request(stream: &str, target: Option<&str>, force: bool) -> Strin
     s
 }
 
+/// A backup passphrase is chosen like any other: at least 8 characters, one line, typed twice.
+pub fn check_backup_passphrase(pass: &str, again: &str) -> Result<(), &'static str> {
+    crate::fsinfo::check_passphrase(pass, again)
+}
+
+/// The text for the `send` control of a system that can encrypt backups: `SNAP [FROM] PATH`, then
+/// ` plaintext` for an unencrypted one, or a second line holding the passphrase for an encrypted one.
+/// (A plain volume's backup needs neither.)
+pub fn send_request_with(snap: &str, from: Option<&str>, out: &str, how: Protect) -> String {
+    let mut s = send_request(snap, from, out);
+    match how {
+        Protect::None => {}
+        Protect::Plaintext => s.push_str(" plaintext"),
+        Protect::Passphrase(p) => {
+            s.push('\n');
+            s.push_str(p);
+        }
+    }
+    s
+}
+
+/// How a backup of an encrypted volume is protected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Protect<'a> {
+    /// The volume is not encrypted: nothing to say.
+    None,
+    /// Written without encryption, on purpose.
+    Plaintext,
+    /// Encrypted under this passphrase.
+    Passphrase(&'a str),
+}
+
+/// `receive` with the passphrase of an encrypted backup on a second line (empty: none).
+pub fn receive_request_with(
+    stream: &str,
+    target: Option<&str>,
+    force: bool,
+    passphrase: &str,
+) -> String {
+    let mut s = receive_request(stream, target, force);
+    if !passphrase.is_empty() {
+        s.push('\n');
+        s.push_str(passphrase);
+    }
+    s
+}
+
 /// Which directory entries are backups.
 pub fn streams(names: &[String]) -> Vec<&String> {
     let mut v: Vec<&String> = names.iter().filter(|n| n.ends_with(".stream")).collect();
@@ -90,6 +137,37 @@ mod tests {
             receive_request("/x/m.stream", Some("/Volumes/Milk"), true),
             "/x/m.stream /Volumes/Milk force"
         );
+    }
+
+    #[test]
+    fn protected_requests() {
+        assert_eq!(
+            send_request_with("m", None, "/x/m.stream", Protect::None),
+            "m /x/m.stream"
+        );
+        assert_eq!(
+            send_request_with("m", Some("a"), "/x/m.stream", Protect::Plaintext),
+            "m a /x/m.stream plaintext"
+        );
+        assert_eq!(
+            send_request_with(
+                "m",
+                None,
+                "/x/m.stream",
+                Protect::Passphrase("correct horse")
+            ),
+            "m /x/m.stream\ncorrect horse"
+        );
+        assert_eq!(
+            receive_request_with("/x/m.stream", None, false, ""),
+            "/x/m.stream"
+        );
+        assert_eq!(
+            receive_request_with("/x/m.stream", Some("/V"), true, "pass word"),
+            "/x/m.stream /V force\npass word"
+        );
+        assert!(check_backup_passphrase("longenough", "longenough").is_ok());
+        assert!(check_backup_passphrase("short", "short").is_err());
     }
 
     #[test]

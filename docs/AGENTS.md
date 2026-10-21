@@ -6,6 +6,8 @@
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
   `MILK_MONITOR=/tmp/x.sock scripts/run.sh headless` adds a qemu monitor socket (`info registers -a` on a hang).
   `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).
+  `scripts/svc-test.sh` = milkd services (backoff, dependencies, svc permissions), admin tickets (`utest auth`) + the journal across a reboot.
+  Daemons are milkd services (`/etc/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.
 - qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 

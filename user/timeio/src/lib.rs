@@ -269,6 +269,49 @@ pub fn notify(title: &str, subtitle: &str) -> bool {
     ok
 }
 
+/// Show a toast with up to two buttons (/dev/wm `notify`, docs/processes.md). A button is a label and
+/// the command the desktop runs when it is pressed (an absolute path or a /bin program with its
+/// arguments, or `open <what>`; no shell), so a windowless daemon can offer Snooze and Done.
+pub fn notify_with(app: &str, title: &str, sub: &str, id: u32, actions: &[(&str, &str)]) -> bool {
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY | sys::O_CLOEXEC) else {
+        return false;
+    };
+    let mut line = format!(
+        "notify\t{}\t{}\tapp={}\tid={id}",
+        one_line(title),
+        one_line(sub),
+        one_line(app)
+    );
+    for (label, command) in actions.iter().take(2) {
+        line.push_str(&format!(
+            "\taction={}:{}",
+            one_line(label).replace(':', " "),
+            one_line(command)
+        ));
+    }
+    line.push('\n');
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
+}
+
+/// Show (or with empty `text`, clear) this app's countdown in the menu bar; it goes by itself 5
+/// seconds after the last call, so call it every second while it runs.
+pub fn menu_timer(app: &str, text: &str, open: &str) -> bool {
+    let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY | sys::O_CLOEXEC) else {
+        return false;
+    };
+    let line = format!(
+        "timer\t{}\tapp={}\topen={}\n",
+        one_line(text),
+        one_line(app),
+        one_line(open)
+    );
+    let ok = sys::write_all(fd, line.as_bytes()).is_ok();
+    let _ = sys::close(fd);
+    ok
+}
+
 /// Play the system chime without waiting for it (reap the child with [`reap_children`]).
 pub fn chime() {
     // No sound device (a headless VM): `play` would only complain on the console.

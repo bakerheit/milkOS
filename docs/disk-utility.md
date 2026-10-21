@@ -31,15 +31,30 @@ Long writes (send, receive, check, repair) run in a forked child so the window s
 sheet's result is the kernel's own one-line report. A wrong passphrase says "That was not the
 passphrase", never an errno; other errors give a sentence and "Details: error N".
 
+## Encrypted backups, and spare disks
+
+When the system lists its disks (`/sys/fs/milkfs/disks`), a backup of an encrypted volume is encrypted
+by default: the Back up sheet asks for a passphrase twice (`send` gets it on a second line) and offers
+"Not encrypted" as a choice (`plaintext`), which brings back the warning and the "I understand" box.
+Restore has an optional passphrase field (`receive` gets it on a second line); a wrong or missing one
+reads "The passphrase is wrong or missing for this backup". On a system without that file the sheet is
+the old one (unencrypted, with the warning). The sidebar also lists unmounted milkfs volumes and
+disks that are not milkfs. Formatting and encrypting a spare disk (the `mkfs` control) is not in the
+window yet; it needs a spec addendum from the UI lead first.
+
 ## Where it differs from the spec, and why
 - **No "snapshot first" box for Roll back or Replace.** Both delete every snapshot newer than the
   target (like `zfs rollback -r`), which includes the safety snapshot, so the box would promise
   something the kernel takes away. The sheet says how many newer snapshots go and to use Send first.
-- **Encryption status** is shown as "not reported" for an unlocked volume: `info` does not say whether
-  the volume is encrypted (diskkit already reads an `encryption:` line if the kernel adds one).
+- **Lock now** is enabled for an encrypted volume that is not the one the session lives on (a vault, a
+  backup disk): `/sys/fs/milkfs/lock`. The Milk disk itself is refused by the system, so its button is
+  disabled with the reason. A refusal names the programs using the volume ("pid 16 (sleep): 1 open
+  file"), read from `/sys/fs/milkfs/error`; every failed control write shows its real reason there
+  with "Details: lock EBUSY (error 16)".
+- **Usage of every volume** comes from `statfs` (FAT, the Mac share, other milkfs volumes, the
+  in-memory root); the Milk disk's usage still comes from `info`. Encryption state, cipher, KDF and
+  key slots come from `info`'s `encryption:` lines.
 - **Privilege:** writes to the control files are made as the user (the `admin` group may write them).
-  Error 13 reads "needs authorisation, and the system cannot ask for it yet" until the
-  authorisation panel and ticket exist.
-- **Other volumes:** name and kind only (no statfs for them yet). Free space of the Milk disk comes
-  from `info`; the in-memory root shows `Shmem`.
+  An open that fails with error 13 reads "needs authorisation, and the system cannot ask for it yet"
+  until the authorisation panel and ticket exist.
 - 900x620 instead of 640 high (it must clear the dock), 16px text, a wider confirm sheet (680).

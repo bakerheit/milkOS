@@ -14,7 +14,10 @@
 //!   drop forget NAME           stop trusting NAME (after a legitimate key change)
 //!
 //! Trust: every machine has an Ed25519 identity (/etc/milk/drop, made on first use from
-//! the kernel CSPRNG). Each connection makes fresh X25519 keys; both sides sign a hello
+//! the kernel CSPRNG). It is root's: the daemon (a root service) holds the secret and
+//! signs hellos and offers for other users' `drop` over /run/drop.sock (SO_PEERCRED;
+//! renaming and rotating need an administrator). Each user trusts peers on their own
+//! (~/.config/milk/drop/known_peers); files land in that user's ~/Downloads, theirs. Each connection makes fresh X25519 keys; both sides sign a hello
 //! transcript (both nonces, both identity keys, both X25519 keys), so the identities
 //! authenticate the key agreement. Everything after the hello (offer, answer, data,
 //! verdict) is ChaCha20-Poly1305 records, one key per direction, counter nonces. The
@@ -165,17 +168,21 @@ fn warn_legacy() {
 /// `drop id --rotate`: a new key from the kernel CSPRNG, signed by the old one.
 fn cmd_rotate() -> Res<()> {
     let id = identity()?;
+    let local = id.seed.is_some();
     let (old, new) = ident::rotate(&id)?;
-    audit(
-        "drop.rotate",
-        &alloc::format!(
-            "name={} old_fp={} new_fp={} key={}",
-            new.name,
-            ident::fp_compact(&old),
-            ident::fp_compact(&new.public),
-            hex(&new.public)
-        ),
-    );
+    // Through the daemon, the daemon writes the record (with who asked).
+    if local {
+        audit(
+            "drop.rotate",
+            &alloc::format!(
+                "name={} old_fp={} new_fp={} key={}",
+                new.name,
+                ident::fp_compact(&old),
+                ident::fp_compact(&new.public),
+                hex(&new.public)
+            ),
+        );
+    }
     println!("drop: rotated {}'s identity", new.name);
     println!("drop:   old fingerprint: {}", fingerprint(&old));
     println!("drop:   new fingerprint: {}", fingerprint(&new.public));
@@ -206,7 +213,9 @@ fn cmd_name(new: &str) -> Res<()> {
     let mut id = identity()?;
     let old = id.name.clone();
     ident::set_name(&mut id, new)?;
-    audit("drop.rename", &alloc::format!("old={old} new={new}"));
+    if id.seed.is_some() {
+        audit("drop.rename", &alloc::format!("old={old} new={new}"));
+    }
     println!("drop: this machine is now {new} (was {old})");
     Ok(())
 }
@@ -264,7 +273,15 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         },
     )
     .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
-    let _ = sys::mkdir("/tmp/drop", 0o755);
+    shared_tmp();
+    let ctl = control_socket();
+    if let Err(e) = &ctl {
+        eprintln!(
+            "drop: {} unavailable ({e}): other users can't send or receive",
+            ident::SOCK
+        );
+    }
+    let ctl = ctl.ok();
     if !quiet {
         println!(
             "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}, answering mDNS for {}.local",
@@ -297,7 +314,7 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
             let _ = net::sendto(fd, current(&mut me).as_bytes(), &proto::group());
             next = now + 10_000_000_000;
         }
-        let mut p = [
+        let mut p = Vec::from([
             net::PollFd {
                 fd,
                 events: net::POLLIN,
@@ -308,10 +325,22 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
                 events: net::POLLIN,
                 revents: 0,
             },
-        ];
+        ]);
+        if let Some(l) = ctl {
+            p.push(net::PollFd {
+                fd: l,
+                events: net::POLLIN,
+                revents: 0,
+            });
+        }
         if net::poll(&mut p, Some(1000)).is_err() {
             sys::sleep_ms(100);
             continue;
+        }
+        if let Some(l) = ctl
+            && p[2].revents & net::POLLIN != 0
+        {
+            serve_control(l);
         }
         if p[1].revents & net::POLLIN != 0
             && let Ok((n, from)) = net::recvfrom(mfd, &mut buf)
@@ -349,6 +378,155 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
             }
             let _ = ident::write_atomic(PEERS_CACHE, s.as_bytes(), 0o644);
         }
+    }
+}
+
+/// /tmp/drop holds the daemon's peer cache and the "someone is receiving" marker that any
+/// user's `drop recv` writes: sticky and world-writable, like /tmp.
+fn shared_tmp() {
+    let _ = sys::mkdir("/tmp/drop", 0o1777);
+    if sys::geteuid() == 0 {
+        let _ = sys::chmod("/tmp/drop", 0o1777);
+    }
+}
+
+/// The daemon's request socket (anyone may connect; requests are checked by SO_PEERCRED).
+fn control_socket() -> Res<i32> {
+    use rt::unix::{self, Name};
+    let _ = sys::mkdir("/run", 0o755);
+    let _ = sys::unlink(ident::SOCK);
+    let l = unix::socket(unix::SOCK_STREAM | unix::SOCK_CLOEXEC)
+        .map_err(|e| alloc::format!("socket: {e}"))?;
+    unix::bind(l, &Name::Path(ident::SOCK)).map_err(|e| alloc::format!("bind: {e}"))?;
+    let _ = sys::chmod(ident::SOCK, 0o666);
+    unix::listen(l, 8).map_err(|e| alloc::format!("listen: {e}"))?;
+    Ok(l)
+}
+
+/// One request on /run/drop.sock: read a line (a client gets 2 s), answer, hang up.
+fn serve_control(l: i32) {
+    use rt::unix;
+    let Ok(c) = unix::accept(l, unix::SOCK_CLOEXEC) else {
+        return;
+    };
+    let peer = unix::peer_cred(c).unwrap_or(unix::Cred {
+        pid: 0,
+        uid: u32::MAX,
+        gid: u32::MAX,
+    });
+    let mut line = Vec::new();
+    let mut b = [0u8; 2048];
+    for _ in 0..2 {
+        let mut pf = [net::PollFd {
+            fd: c,
+            events: net::POLLIN,
+            revents: 0,
+        }];
+        if !matches!(net::poll(&mut pf, Some(1000)), Ok(1..)) {
+            continue;
+        }
+        match sys::read(c, &mut b) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => line.extend_from_slice(&b[..n]),
+        }
+        if line.ends_with(b"\n") || line.len() > 8192 {
+            break;
+        }
+    }
+    let reply = control_request(String::from_utf8_lossy(&line).trim(), peer);
+    let _ = sys::write_all(c, reply.as_bytes());
+    let _ = sys::close(c);
+}
+
+fn unhex_vec(h: &str) -> Option<Vec<u8>> {
+    if h.len() % 2 != 0 || h.len() > 8192 {
+        return None;
+    }
+    (0..h.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// `sign HEX` (people's accounts: root and uid 500..60000, not service accounts such as
+/// nobody): a Milk Drop hello transcript or offer that names this machine's key;
+/// `name NEW` and `rotate`: administrators (root or group admin) only.
+fn control_request(line: &str, peer: rt::unix::Cred) -> String {
+    const ADMIN_GID: u32 = 80;
+    let acct = rt::users::by_uid(peer.uid);
+    let admin = peer.uid == 0
+        || acct
+            .as_ref()
+            .is_some_and(|p| rt::users::groups_of(&p.name, p.gid).contains(&ADMIN_GID));
+    let person = peer.uid == 0 || (500..60_000).contains(&peer.uid);
+    let who = alloc::format!(
+        "uid={} user={}",
+        peer.uid,
+        acct.as_ref().map_or("?", |p| p.name.as_str())
+    );
+    let Some(mut id) = ident::load() else {
+        return String::from("error this machine has no Milk Drop identity\n");
+    };
+    let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
+    let r: Res<String> = match cmd {
+        "sign" if !person => Err(String::from(
+            "Milk Drop is for people's accounts, not service accounts",
+        )),
+        "sign" => match unhex_vec(arg) {
+            // A hello transcript must name this machine's key (one side of it); an offer
+            // binds the session's two nonces instead.
+            Some(msg)
+                if core::str::from_utf8(&msg).is_ok_and(|m| {
+                    (m.starts_with(ident::SIGNABLE[0]) && m.contains(&hex(&id.public)))
+                        || m.starts_with(ident::SIGNABLE[1])
+                }) =>
+            {
+                id.sign(&msg).map(|s| hex(&s))
+            }
+            _ => Err(String::from(
+                "not a Milk Drop hello or offer for this machine's key",
+            )),
+        },
+        "name" | "rotate" if !admin => {
+            audit(
+                "drop.refused",
+                &alloc::format!("{who} request={cmd} reason=not-an-administrator"),
+            );
+            Err(alloc::format!(
+                "{cmd}: only an administrator may change this machine's identity"
+            ))
+        }
+        "name" => {
+            let old = id.name.clone();
+            ident::set_name(&mut id, arg).map(|_| {
+                audit(
+                    "drop.rename",
+                    &alloc::format!("old={old} new={arg} by {who}"),
+                );
+                String::new()
+            })
+        }
+        "rotate" => ident::rotate(&id).map(|(old, new)| {
+            audit(
+                "drop.rotate",
+                &alloc::format!(
+                    "name={} old_fp={} new_fp={} key={} by {who}",
+                    new.name,
+                    ident::fp_compact(&old),
+                    ident::fp_compact(&new.public),
+                    hex(&new.public)
+                ),
+            );
+            alloc::format!("{} {}", hex(&old), hex(&new.public))
+        }),
+        _ => Err(String::from(
+            "unknown request (sign HEX | name NEW | rotate)",
+        )),
+    };
+    match r {
+        Ok(v) if v.is_empty() => String::from("ok\n"),
+        Ok(v) => alloc::format!("ok {v}\n"),
+        Err(e) => alloc::format!("error {e}\n"),
     }
 }
 
@@ -534,10 +712,7 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
     let ch = &mut sess.ch;
     // 4. The signed offer.
     let size = data.len() as u64;
-    let osig = ed25519::sign(
-        &id.seed,
-        proto::offer_msg(nonce_r, nonce_s, fname, size, &sha).as_bytes(),
-    );
+    let osig = id.sign(proto::offer_msg(nonce_r, nonce_s, fname, size, &sha).as_bytes())?;
     c.send_eline(
         ch,
         &alloc::format!(
@@ -734,7 +909,21 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
             );
         }
     }
-    let _ = sys::mkdir(dir, 0o755);
+    // Root receiving into a user's home (the console's HOME is /home/milk): the folder
+    // and the file belong to that user, as if they had received it themselves.
+    let owner = if sys::geteuid() == 0 {
+        dir.rsplit_once('/')
+            .and_then(|(home, _)| sys::stat_path(home, true).ok())
+            .map(|st| (st.uid, st.gid))
+            .filter(|&(uid, _)| uid != 0)
+    } else {
+        None
+    };
+    if sys::mkdir(dir, 0o755).is_ok()
+        && let Some((uid, gid)) = owner
+    {
+        let _ = sys::chown(dir, uid, gid);
+    }
     let part = alloc::format!("{dir}/.{name}.part");
     let fd = sys::open_mode(
         &part,
@@ -793,6 +982,9 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
     }
     let dest = unique(dir, &name);
     sys::rename(&part, &dest).map_err(|e| alloc::format!("{dest}: {e}"))?;
+    if let Some((uid, gid)) = owner {
+        let _ = sys::chown(&dest, uid, gid);
+    }
     let _ = c.send_eline(ch, &alloc::format!("DONE sha256={have}"));
     audit(
         "drop.recv",
@@ -822,7 +1014,7 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
     };
     net::bind(l, &me).map_err(|e| alloc::format!("bind {me}: {e} (another drop recv?)"))?;
     net::listen(l, 2).map_err(|e| alloc::format!("listen: {e}"))?;
-    let _ = sys::mkdir("/tmp/drop", 0o755);
+    shared_tmp();
     let _ = ident::write_atomic(
         RECEIVING,
         alloc::format!("{}\n", sys::getpid()).as_bytes(),

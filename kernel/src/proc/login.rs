@@ -187,10 +187,14 @@ pub fn check_hash(stored: &str, password: &str) -> bool {
 }
 
 fn shadow_hash(name: &str) -> Option<String> {
-    file("/etc/shadow").lines().find_map(|l| {
-        let mut f = l.split(':');
-        (f.next()? == name).then(|| f.next().unwrap_or("").to_string())
-    })
+    // /etc/shadow is 0600 root: read it as the kernel, whoever asked (an admin ticket
+    // request comes from an ordinary user's process).
+    crate::fs::perm::as_kernel(|| file("/etc/shadow"))
+        .lines()
+        .find_map(|l| {
+            let mut f = l.split(':');
+            (f.next()? == name).then(|| f.next().unwrap_or("").to_string())
+        })
 }
 
 /// Check `password` for `name`. Kernel context reads /etc/shadow as root.

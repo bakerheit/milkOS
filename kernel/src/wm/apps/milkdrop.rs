@@ -1151,11 +1151,25 @@ impl WindowContents for Receiver {
                     .split_once(" from ")
                     .map(|(_, f)| String::from(f.split(',').next().unwrap_or("")))
                     .unwrap_or_default();
-                notify_as(
-                    "Milk Drop",
-                    &format!("Received {}", fsx::basename(&path)),
-                    &format!("from {from}, in Downloads"),
-                );
+                // The Received toast (SPEC): Show (in Files) and Open.
+                super::super::post(super::super::Post {
+                    app: String::from("Milk Drop"),
+                    title: format!("Received {}", fsx::basename(&path)),
+                    sub: format!("from {from}, in Downloads"),
+                    sound: true,
+                    actions: alloc::vec![
+                        super::super::notif::NoticeAction {
+                            label: String::from("Show"),
+                            cmd: Some(format!("open {}", fsx::parent(&path))),
+                        },
+                        super::super::notif::NoticeAction {
+                            label: String::from("Open"),
+                            cmd: Some(format!("open {path}")),
+                        },
+                    ],
+                    owner: 0,
+                    tag: 0,
+                });
                 self.state = RState::Received(path, from);
             } else if t == "drop: declined" {
                 self.state = RState::Waiting(self.me.0.clone(), self.me.1.clone());

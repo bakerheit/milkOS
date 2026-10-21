@@ -208,3 +208,155 @@ pub fn drop_shape(p: &mut Painter, cx: i32, cy: i32, r: i32, d: i32, c: Color) {
         }
     }
 }
+
+// ---- the artist's icons (crate::art) ------------------------------------------------------
+
+/// The art asset for an app, by the name the dock, Skim and the drawer use.
+pub fn art_name(app: &str) -> Option<&'static str> {
+    Some(match app {
+        "Files" => "files",
+        "Terminal" => "terminal",
+        "Browser" => "browser",
+        "Notes" => "notes",
+        "Paint" => "paint",
+        "Music" => "music",
+        "Settings" => "settings",
+        "Store" | "Milk Store" => "store",
+        "Today" => "today",
+        "Calendar" => "calendar",
+        "Spaces" => "spaces",
+        "Clock" => "clock",
+        "Preview" => "preview",
+        "Activity" | "Activity Monitor" => "activity",
+        "Text Editor" => "text-editor",
+        "Disk" | "Disk Utility" => "disk-utility",
+        "Reminders" => "reminders",
+        _ => return None,
+    })
+}
+
+/// The art for an installed app (a manifest): by its package name, its dock label
+/// ("Disk Utility" -> disk-utility), or a known alias; None: the drawn letter tile.
+pub fn package_art(pkg_name: &str, label: &str) -> Option<&'static str> {
+    let kebab: alloc::string::String = label
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let alias = match pkg_name {
+        "diskutil" => "disk-utility",
+        "texteditor" | "edit" => "text-editor",
+        _ => pkg_name,
+    };
+    let by_label = art_name(label).unwrap_or("");
+    crate::art::icon_named(&[pkg_name, alias, &kebab, by_label])
+}
+
+/// Tiles that are milk (no edge in the art): the shell draws their 1px sand edge.
+fn milk_tile(name: &str) -> bool {
+    matches!(
+        name,
+        "notes"
+            | "paint"
+            | "text-editor"
+            | "calendar"
+            | "spaces"
+            | "today"
+            | "reminders"
+            | "file-document"
+            | "file-image"
+            | "file-audio"
+            | "file-archive"
+            | "file-package"
+    )
+}
+
+/// Scaled copies of icons at sizes the art does not ship, made once per (name, size, theme).
+type ScaledIcons = alloc::collections::BTreeMap<(&'static str, i32, bool), &'static [u32]>;
+static SCALED: crate::sync::SpinLock<ScaledIcons> =
+    crate::sync::SpinLock::new(alloc::collections::BTreeMap::new());
+
+/// The pixels of art icon `name` at `s` px in the current theme.
+fn art_pixels(name: &str, s: i32) -> Option<(&'static str, &'static [u32])> {
+    let dark = super::theme::dark();
+    if let Some(i) = crate::art::icon(name, s, dark) {
+        return Some((i.name, i.pixels()));
+    }
+    let src = crate::art::icon_near(name, s, dark)?;
+    let key = (src.name, s, dark);
+    if let Some(px) = SCALED.lock().get(&key) {
+        return Some((src.name, px));
+    }
+    let px: &'static [u32] = alloc::boxed::Box::leak(
+        crate::art::scale_icon(src.pixels(), src.size as usize, s as usize).into_boxed_slice(),
+    );
+    SCALED.lock().insert(key, px);
+    Some((src.name, px))
+}
+
+/// Draw the artist's icon `name` as an `s` x `s` tile at (x, y). False if there is no such
+/// asset (draw the built-in one instead).
+pub fn art(p: &mut Painter, x: i32, y: i32, s: i32, name: &str) -> bool {
+    let Some((name, px)) = art_pixels(name, s) else {
+        return false;
+    };
+    p.sprite(x, y, px, s as usize, s as usize);
+    if name == "calendar" && s >= 28 {
+        // The art carries a sample date: today's instead, on the tile's milk.
+        let day = alloc::format!("{}", super::rtc::now().day);
+        let (sc, top) = if s >= 40 {
+            (2, s * 40 / 100)
+        } else {
+            (1, s * 42 / 100)
+        };
+        p.rrect(
+            x + s / 8,
+            y + top,
+            s - s / 4,
+            s - top - s / 10,
+            2,
+            MILK,
+            255,
+        );
+        let tw = crate::font::str_width(&day, sc) + if sc == 2 { 2 } else { 1 };
+        p.text_x(
+            x + (s - tw) / 2,
+            y + top + (s - top - 16 * sc) / 2 - 1,
+            &day,
+            ESPRESSO,
+            sc,
+            true,
+        );
+    }
+    if milk_tile(name) {
+        let r = (s * 24 + 50) / 100;
+        p.rrect_stroke(x, y, s, s, r, 1, SAND, 255);
+    }
+    true
+}
+
+/// An app's tile: the art if there is one, else the drawn glyph.
+#[allow(clippy::too_many_arguments)]
+pub fn app_tile(
+    p: &mut Painter,
+    x: i32,
+    y: i32,
+    s: i32,
+    app: &str,
+    icon: Icon,
+    bg: Color,
+    fg: Color,
+) {
+    if let Some(n) = art_name(app)
+        && art(p, x, y, s, n)
+    {
+        return;
+    }
+    draw(p, x, y, s, icon, bg, 255, fg, bg == MILK || bg == CREAM);
+}
+
+/// A file type tile for Files (folder, document, image, audio, archive, package).
+pub fn file_tile(p: &mut Painter, x: i32, y: i32, s: i32, kind: &str) -> bool {
+    art(p, x, y, s, &alloc::format!("file-{kind}"))
+}

@@ -71,6 +71,8 @@ pub mod nr {
     /// milkOS: ask the user for a file through the wm's trusted Open/Save panel (powerbox);
     /// the chosen path is granted to the caller and returned opened. docs/security.md.
     pub const MILK_POWERBOX: u64 = 0x1001;
+    /// Admin authorisation tickets (proc/auth.rs): (op, a, b, c, d).
+    pub const MILK_AUTH: u64 = 0x1003; // 0x1002 is MILK_OPENPTY (proc/sock.rs)
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -121,6 +123,7 @@ pub mod nr {
     pub const MILK_WIN_EVENT: u64 = 4102;
     pub const MILK_WIN_TITLE: u64 = 4103;
     pub const MILK_WIN_DESTROY: u64 = 4104;
+    pub const MILK_WIN_RESIZE: u64 = 4105;
 }
 
 pub fn init() {
@@ -205,6 +208,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
     match nr {
         n if super::sock::handles(n) => super::sock::dispatch(n, a),
         n if super::epoll::handles(n) => super::epoll::dispatch(n, a),
+        nr::MILK_AUTH => sys_auth(a0, a1, a2, a3, a[4] as usize),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),
@@ -678,6 +682,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
                 Err(EBADF)
             }
         }
+        nr::MILK_WIN_RESIZE => sys_win_resize(a0 as u32, a1, a2, a3, a[4] as u32),
         nr::MILK_WIN_DESTROY => {
             let (pa, pages) = crate::wm::client::destroy(current().pid, a0 as u32).ok_or(EBADF)?;
             // Unmap from this process first, then the frames can go back to the PMM.
@@ -732,6 +737,38 @@ fn sys_win_create(w: usize, h: usize, title: usize, tlen: usize, info: usize) ->
     out[20..24].copy_from_slice(&c.id.to_le_bytes());
     copy_out(info, &out)?;
     Ok(c.id as usize)
+}
+
+/// MILK_WIN_RESIZE(id, w, h, info, flags): with flags bit 0 (RESIZABLE), declare that this
+/// window handles resize events, down to `w` x `h` (nothing is reallocated, `info` unused).
+/// Without it, give the window a new `w` x `h` body (the old picture kept in its top-left):
+/// the old mapping goes away, the new one is described in `info` exactly as
+/// MILK_WIN_CREATE does (24 bytes: addr, w, h, stride, id). Returns 0.
+fn sys_win_resize(id: u32, w: usize, h: usize, info: usize, flags: u32) -> KResult<usize> {
+    let pid = current().pid;
+    if flags & 1 != 0 {
+        return if crate::wm::client::set_resizable(pid, id, w as u32, h as u32) {
+            Ok(0)
+        } else {
+            Err(EBADF)
+        };
+    }
+    let (c, (old_pa, old_pages)) =
+        crate::wm::client::resize(pid, id, w as u32, h as u32).ok_or(EINVAL)?;
+    let va = with_space(|s| {
+        let va = s.map_shared(c.pa, c.bytes)?;
+        s.unmap_shared(old_pa, old_pages * crate::mmu::PAGE_SIZE);
+        Ok(va)
+    })?;
+    crate::wm::client::free(old_pa, old_pages);
+    let mut out = [0u8; 24];
+    out[..8].copy_from_slice(&(va as u64).to_le_bytes());
+    out[8..12].copy_from_slice(&(w as u32).to_le_bytes());
+    out[12..16].copy_from_slice(&(h as u32).to_le_bytes());
+    out[16..20].copy_from_slice(&(w as u32).to_le_bytes());
+    out[20..24].copy_from_slice(&c.id.to_le_bytes());
+    copy_out(info, &out)?;
+    Ok(0)
 }
 
 // ---- helpers --------------------------------------------------------------------------
@@ -1001,6 +1038,51 @@ fn sys_openat(dirfd: i64, path: usize, flags: u32, mode: u32) -> KResult<usize> 
 /// caller's fs grants (just that file) and returned as an open fd. Cancel: ECANCELED, no
 /// grant. A signal: EINTR (the panel goes away). Needs the windows capability. Audited as
 /// `powerbox.grant` / `powerbox.cancel`.
+/// MILK_AUTH(op, ...): 0 = ask the desktop's trusted panel (reason, reason_len);
+/// 1 = with a password the caller read itself (password, len, user, user_len; user 0 =
+/// the caller's own account); 2 = revoke; 3 = milliseconds left (0: none).
+/// Returns the ticket's lifetime in ms for 0 / 1.
+fn sys_auth(op: usize, a1: usize, a2: usize, a3: usize, a4: usize) -> KResult<usize> {
+    use super::auth;
+    let text = |va: usize, len: usize| -> KResult<String> {
+        if va == 0 || len == 0 {
+            return Ok(String::new());
+        }
+        let b = copy_in(va, len.min(256))?;
+        Ok(String::from_utf8_lossy(&b).into_owned())
+    };
+    let ms = |ns: u64| (ns / 1_000_000) as usize;
+    match op {
+        0 => {
+            let reason = text(a1, a2)?;
+            if !super::current_caps().windows {
+                return Err(super::caps::deny("auth", "need=windows"));
+            }
+            auth::authorize_with_panel(&reason).map(ms)
+        }
+        1 => {
+            let mut pw = text(a1, a2)?;
+            let user = match text(a3, a4)? {
+                u if u.is_empty() => super::login::lookup_uid(cred().ruid)
+                    .map(|a| a.name)
+                    .ok_or(EPERM)?,
+                u => u,
+            };
+            let r = auth::grant(&user, &pw, "password", "terminal");
+            // Don't leave the password lying in the heap.
+            // SAFETY: overwriting our own String's bytes with zeros keeps it valid UTF-8.
+            unsafe { pw.as_bytes_mut().fill(0) };
+            r.map(ms)
+        }
+        2 => {
+            auth::revoke();
+            Ok(0)
+        }
+        3 => Ok(auth::left(sched::current_pid()).map_or(0, ms)),
+        _ => Err(EINVAL),
+    }
+}
+
 fn sys_powerbox(mode: usize, name: usize, name_len: usize) -> KResult<usize> {
     let caps = super::current_caps();
     if !caps.windows {

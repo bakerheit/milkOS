@@ -388,7 +388,9 @@ impl WindowContents for Panel {
             } else {
                 (CREAM, ESPRESSO)
             };
-            icons::draw(p, x0, y + 1, 22, icon, bg, 255, fg, !folder);
+            if !icons::file_tile(p, x0, y + 1, 22, fsx::art_kind(e)) {
+                icons::draw(p, x0, y + 1, 22, icon, bg, 255, fg, !folder);
+            }
             p.text_p(x0 + 32, y + 4, &e.name, ESPRESSO, false);
             if !folder {
                 let c = if self.sel == Some(i) { ESPRESSO } else { COCOA };

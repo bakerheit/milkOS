@@ -96,8 +96,13 @@ pub fn announce(id: &Identity, host: &str, receiving: bool) -> String {
             .map(|r| alloc::format!(" rot={}:{}", hex(&r.old), hex(&r.sig)))
             .unwrap_or_default()
     );
-    let sig = ed25519::sign(&id.seed, alloc::format!("{ANNOUNCE_CTX} {body}").as_bytes());
-    alloc::format!("{body} sig={}", hex(&sig))
+    // Only the daemon (root, holding the seed) announces; anyone else gets an unsigned
+    // line that peers ignore.
+    let sig = id
+        .sign(alloc::format!("{ANNOUNCE_CTX} {body}").as_bytes())
+        .map(|s| hex(&s))
+        .unwrap_or_default();
+    alloc::format!("{body} sig={sig}")
 }
 
 /// Parse and check an announcement (signature by the key it carries, fingerprint matches

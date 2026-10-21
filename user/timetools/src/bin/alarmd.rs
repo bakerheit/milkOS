@@ -23,9 +23,18 @@ rt::main!(main);
 const CATCH_UP_SECS: i64 = 600;
 const LOG_LIMIT: u64 = 64 * 1024;
 
-/// Show a toast and add a line to the log.
-fn ring(paths: &timeio::Paths, kind: &str, title: &str, sub: &str) {
-    timeio::notify(title, sub);
+/// What a toast offers: the app it belongs to, its number, and up to two buttons (label, command).
+struct Toast<'a> {
+    app: &'a str,
+    id: u32,
+    actions: &'a [(&'a str, &'a str)],
+}
+
+/// Show a toast (with its buttons) and add a line to the log.
+fn ring(paths: &timeio::Paths, kind: &str, title: &str, sub: &str, toast: Toast) {
+    if !timeio::notify_with(toast.app, title, sub, toast.id, toast.actions) {
+        timeio::notify(title, sub);
+    }
     let (day, sod) = timekit::date::split_secs(timeio::now_secs());
     let line = format!(
         "{} {:02}:{:02}:{:02} {kind}: {title} / {sub}\n",
@@ -92,7 +101,18 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
         } else {
             format!("{} ({})", label, fmt_hm(at))
         };
-        ring(paths, "alarm", "Alarm", &sub);
+        let snooze = format!("/bin/alarm snooze {id} 9");
+        ring(
+            paths,
+            "alarm",
+            "Alarm",
+            &sub,
+            Toast {
+                app: "Clock",
+                id: *id,
+                actions: &[("Snooze 9 min", &snooze), ("Open", "open /bin/clock")],
+            },
+        );
         // The panel plays the alarm sound until it is stopped; without it, one chime.
         if !timeio::open_alarm_panel(label, &fmt_hm(at)) {
             timeio::chime();
@@ -116,9 +136,35 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
     }
 }
 
+/// Whether a countdown is showing in the menu bar (so it is cleared once, not every second).
+static MENU_TIMER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Keep the soonest running timer in the menu bar, refreshed every second (the desktop drops it
+/// 5 seconds after the last refresh), and clear it when none is running.
+fn publish_menu_timer(list: &timekit::clock::Timers, mono_ms: u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let soonest = list
+        .list
+        .iter()
+        .filter(|t| t.running)
+        .map(|t| t.remaining_ms(mono_ms))
+        .min();
+    match soonest {
+        Some(ms) => {
+            timeio::menu_timer("Clock", &timekit::clock::fmt_countdown(ms), "/bin/clock");
+            MENU_TIMER.store(true, Relaxed);
+        }
+        None if MENU_TIMER.swap(false, Relaxed) => {
+            timeio::menu_timer("Clock", "", "/bin/clock");
+        }
+        None => {}
+    }
+}
+
 fn timers(paths: &timeio::Paths, mono_ms: u64) {
     let (mut list, _) = timeio::load_timers(paths);
     let done = list.take_due(mono_ms);
+    publish_menu_timer(&list, mono_ms);
     if done.is_empty() {
         return;
     }
@@ -128,7 +174,18 @@ fn timers(paths: &timeio::Paths, mono_ms: u64) {
         } else {
             t.label.clone()
         };
-        ring(paths, "timer", "Timer done", &sub);
+        let again = format!("/bin/timer {}s {}", (t.total_ms / 1000).max(1), t.label);
+        ring(
+            paths,
+            "timer",
+            "Timer done",
+            &sub,
+            Toast {
+                app: "Clock",
+                id: t.id,
+                actions: &[("Again", again.trim()), ("Open", "open /bin/clock")],
+            },
+        );
     }
     timeio::chime();
     // Drop the finished ones from a fresh copy of the file (the user may have added another).
@@ -152,13 +209,37 @@ fn calendar(paths: &timeio::Paths, from: i64, now: i64) {
         } else {
             format!("{} {at}", day.fmt())
         };
-        ring(paths, "event", &title, when.trim());
+        ring(
+            paths,
+            "event",
+            &title,
+            when.trim(),
+            Toast {
+                app: "Calendar",
+                id,
+                actions: &[("Open", "open /bin/calendar")],
+            },
+        );
     }
 }
 
 fn reminders(paths: &timeio::Paths, from: i64, now: i64) {
     let (set, _) = timeio::load_reminders(paths);
-    for (_, title, list, at) in set.rings_due(from, now) {
-        ring(paths, "reminder", &title, &format!("{list} {}", fmt_hm(at)));
+    for (id, title, list, at) in set.rings_due(from, now) {
+        let (done, snooze) = (
+            format!("/bin/remind done {id}"),
+            format!("/bin/remind snooze {id} 10"),
+        );
+        ring(
+            paths,
+            "reminder",
+            &title,
+            &format!("{list} {}", fmt_hm(at)),
+            Toast {
+                app: "Reminders",
+                id,
+                actions: &[("Done", &done), ("Snooze 10m", &snooze)],
+            },
+        );
     }
 }

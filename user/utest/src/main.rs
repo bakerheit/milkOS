@@ -1523,6 +1523,267 @@ fn t_auxv(args: &rt::Args) -> bool {
     check("auxv ids", ok, &detail)
 }
 
+/// One request to milkd over /run/milkd.sock; the reply up to and including ok / error.
+fn milkd(req: &str) -> String {
+    use rt::unix::{self, Name};
+    let Ok(fd) = unix::socket(unix::SOCK_STREAM) else {
+        return String::from("error\tsocket");
+    };
+    if unix::connect(fd, &Name::Path("/run/milkd.sock")).is_err() {
+        let _ = sys::close(fd);
+        return String::from("error\tconnect");
+    }
+    let _ = sys::write_all(fd, alloc::format!("{req}\n").as_bytes());
+    let mut out = Vec::new();
+    let mut b = [0u8; 1024];
+    loop {
+        match sys::read(fd, &mut b) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => out.extend_from_slice(&b[..n]),
+        }
+        let t = String::from_utf8_lossy(&out);
+        if t.ends_with("ok\n") || t.lines().last().is_some_and(|l| l.starts_with("error")) {
+            break;
+        }
+    }
+    let _ = sys::close(fd);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// milkd: a crashing service is restarted with doubling backoff, a missing / failed
+/// dependency is reported, start / stop over the socket work for root and admins and are
+/// refused for everyone else. Needs root (it writes /etc/milk/services).
+fn t_svc() -> bool {
+    if sys::geteuid() != 0 {
+        return check("services", true, "skipped: needs root");
+    }
+    let write = |name: &str, body: &str| {
+        let p = alloc::format!("/etc/milk/services/{name}.service");
+        if let Ok(fd) = sys::open_mode(&p, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o644) {
+            let _ = sys::write_all(fd, body.as_bytes());
+            let _ = sys::close(fd);
+        }
+    };
+    write(
+        "ut-crashy",
+        "description = crashes at once\nexec = /bin/false\nrestart = always\n",
+    );
+    write("ut-oneshot", "exec = /bin/false\nrestart = never\n");
+    write(
+        "ut-needs-missing",
+        "exec = /bin/sleep 60\nneeds = ut-no-such-unit\n",
+    );
+    write(
+        "ut-needs-dead",
+        "exec = /bin/sleep 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
+    );
+    write(
+        "ut-sleeper",
+        "description = sleeps\nexec = /bin/sleep 600\nuser = milk\nrestart = on-failure\n",
+    );
+    let reload = milkd("reload");
+    let status = |u: &str| milkd(&alloc::format!("status {u}"));
+    // Let the crasher go round a few times (100 + 200 + 400 + 800 ms ...).
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let mut st = String::new();
+    while sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 6_000_000_000 {
+        st = status("ut-crashy");
+        let restarts = st
+            .split('\t')
+            .nth(3)
+            .and_then(|x| x.parse::<u32>().ok())
+            .unwrap_or(0);
+        if restarts >= 4 {
+            break;
+        }
+        sys::sleep_ms(100);
+    }
+    // The journal has the delays: they double.
+    let delays: Vec<u64> = sys::read_file("/dev/journal")
+        .map(|j| {
+            String::from_utf8_lossy(&j)
+                .lines()
+                .filter(|l| l.split('\t').nth(6) == Some("ut-crashy"))
+                .filter_map(|l| {
+                    let m = l.split('\t').nth(8)?;
+                    let i = m.find(" in ")?;
+                    m[i + 4..].strip_suffix(" ms")?.parse().ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let backoff = delays.len() >= 4
+        && delays.windows(2).take(3).all(|w| w[1] == 2 * w[0])
+        && delays[0] == 100;
+    // Dependencies. ut-needs-dead may start as soon as ut-oneshot is spawned (`after` is
+    // ordering on start, as in systemd) and is then stopped when the oneshot fails: give
+    // it up to 3 s to settle (stopping -> failed) before judging.
+    let missing = status("ut-needs-missing");
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let mut dead = status("ut-needs-dead");
+    while !dead.contains("dependency failed: ut-oneshot")
+        && sys::clock_ns(sys::CLOCK_MONOTONIC) - t0 < 3_000_000_000
+    {
+        sys::sleep_ms(100);
+        dead = status("ut-needs-dead");
+    }
+    let deps = missing.contains("dependency failed: ut-no-such-unit")
+        && dead.contains("dependency failed: ut-oneshot");
+    if !deps {
+        println!("  needs-missing: {missing:?}\n  needs-dead: {dead:?}");
+    }
+    // Start / stop: root yes; milk (admin) yes; nobody refused.
+    sys::sleep_ms(300);
+    let up =
+        status("ut-sleeper").contains("\trunning\t") && status("ut-sleeper").contains("\tmilk\t");
+    let as_user = |uid: u32, gid: u32, req: &str| -> bool {
+        let pid = sys::fork().unwrap();
+        if pid == 0 {
+            let _ = sys::setgroups(&rt::users::groups_of(&rt::users::user_name(uid), gid));
+            let _ = sys::setgid(gid);
+            let _ = sys::setuid(uid);
+            let r = milkd(req);
+            sys::exit(if r.ends_with("ok\n") { 0 } else { 1 });
+        }
+        sys::wait4(pid as i32, 0).is_ok_and(|(_, st)| st == 0)
+    };
+    let nobody_stop = as_user(65534, 65534, "stop ut-sleeper");
+    let nobody_status = as_user(65534, 65534, "status ut-sleeper");
+    let still_up = status("ut-sleeper").contains("\trunning\t");
+    let milk_stop = as_user(501, 20, "stop ut-sleeper");
+    sys::sleep_ms(500);
+    let stopped = status("ut-sleeper").contains("\tinactive\t");
+    let root_start = milkd("start ut-sleeper").ends_with("ok\n");
+    sys::sleep_ms(300);
+    let restarted = status("ut-sleeper").contains("\trunning\t");
+    let control = !nobody_stop
+        && nobody_status
+        && still_up
+        && milk_stop
+        && stopped
+        && root_start
+        && restarted;
+    // Clean up: stop the test units, drop their files.
+    for u in [
+        "ut-crashy",
+        "ut-sleeper",
+        "ut-needs-missing",
+        "ut-needs-dead",
+        "ut-oneshot",
+    ] {
+        let _ = milkd(&alloc::format!("stop {u}"));
+        let _ = sys::unlink(&alloc::format!("/etc/milk/services/{u}.service"));
+    }
+    let ok = reload.ends_with("ok\n") && backoff && deps && up && control;
+    check(
+        "services",
+        ok,
+        &alloc::format!(
+            "crasher delays {delays:?} ({}); deps {deps}; sleeper up as milk {up}; nobody stop \
+             refused {}, nobody status {nobody_status}, milk (admin) stop {milk_stop}, root \
+             start {root_start}; last crasher status {:?}",
+            if backoff { "doubling" } else { "NOT doubling" },
+            !nobody_stop,
+            st.lines().next().unwrap_or("")
+        ),
+    )
+}
+
+/// Admin authorisation tickets: destructive milkfs controls need one (not just group
+/// admin); wrong password refused; a ticket works, isn't inherited by fork, survives exec
+/// (`auth`), shows in /proc, can be revoked; 3 wrong passwords lock the user out.
+fn t_auth() -> bool {
+    if sys::geteuid() == 0 {
+        return as_milk("auth", "authorisation");
+    }
+    let ctl = "/sys/fs/milkfs/delete";
+    if sys::stat_path(ctl, true).is_err() {
+        return check("authorisation", true, "skipped: no milkfs volume");
+    }
+    let del = || -> Option<i32> {
+        let fd = sys::open(ctl, sys::O_WRONLY).ok()?;
+        let r = sys::write(fd, b"no-such-snapshot-utest");
+        let _ = sys::close(fd);
+        Some(match r {
+            Ok(_) => 0,
+            Err(e) => e.0,
+        })
+    };
+    let mut bits = 0u32;
+    let mut n = 0;
+    let mut t = |ok: bool| {
+        if ok {
+            bits |= 1 << n;
+        }
+        n += 1;
+    };
+    t(del() == Some(1)); // 0: admin group alone: EPERM
+    t(matches!(
+        sys::authorize_password("wrong", ""),
+        Err(sys::Errno(13))
+    )); // 1
+    let granted = sys::authorize_password("milk", "");
+    t(granted.is_ok_and(|ms| ms >= 299_000)); // 2: 5 minutes
+    t(del().is_some_and(|e| e != 1)); // 3: past the permission check (no such snapshot)
+    let status = sys::read_file("/proc/self/status").unwrap_or_default();
+    t(String::from_utf8_lossy(&status).contains("Auth:\tadmin ticket from uid 501")); // 4
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        sys::exit(if sys::auth_left() == 0 && del() == Some(1) {
+            0
+        } else {
+            1
+        });
+    }
+    let (_, st) = sys::wait4(pid as i32, 0).unwrap();
+    t(st == 0); // 5: not inherited
+    sys::auth_revoke();
+    t(sys::auth_left() == 0 && del() == Some(1)); // 6: revoked
+    // 7: `auth` keeps the ticket across exec.
+    let (r, w) = sys::pipe().unwrap();
+    let (r2, w2) = sys::pipe().unwrap();
+    let pid = sys::fork().unwrap();
+    if pid == 0 {
+        let _ = sys::dup2(r, 0);
+        let _ = sys::dup2(w2, 1);
+        let _ = sys::execve("/bin/auth", &["auth", "-S", "/bin/auth", "-s"], &[]);
+        sys::exit(127);
+    }
+    let _ = sys::close(r);
+    let _ = sys::close(w2);
+    let _ = sys::write_all(w, b"milk\n");
+    let _ = sys::close(w);
+    let mut out = Vec::new();
+    let mut b = [0u8; 256];
+    while let Ok(k @ 1..) = sys::read(r2, &mut b) {
+        out.extend_from_slice(&b[..k]);
+    }
+    let _ = sys::close(r2);
+    let _ = sys::wait4(pid as i32, 0);
+    let out = String::from_utf8_lossy(&out);
+    t(out.contains("ticket: ") && out.contains("s left")); // 7
+    // 8: rate limit: three wrong in a row, then even the right one is refused for a while.
+    for _ in 0..3 {
+        let _ = sys::authorize_password("wrong", "");
+    }
+    let locked = sys::authorize_password("milk", "");
+    t(matches!(locked, Err(sys::Errno(11)))); // 8
+    let audit = sys::read_file("/proc/audit").unwrap_or_default();
+    let audit = String::from_utf8_lossy(&audit);
+    t(audit.contains("auth.grant")
+        && audit.contains("auth.deny")
+        && audit.contains("auth.required")); // 9
+    let want = (1u32 << n) - 1;
+    check(
+        "authorisation",
+        bits == want,
+        &alloc::format!(
+            "checks {bits:#b} (want {want:#b}); auth -s said {:?}",
+            out.trim()
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -1579,6 +1840,12 @@ fn main(args: &rt::Args) -> i32 {
     }
     if what == "auxv" || what == "all" {
         ok &= t_auxv(args);
+    }
+    if what == "svc" || what == "all" {
+        ok &= t_svc();
+    }
+    if what == "auth" || what == "all" {
+        ok &= t_auth();
     }
     if what == "creds" || what == "all" {
         ok &= t_creds();

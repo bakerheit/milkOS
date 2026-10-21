@@ -72,6 +72,8 @@ fn main(args: &rt::Args) -> i32 {
         rt::println!("reminders: no desktop to open a window on");
         return 1;
     };
+    // Resizable down to what the in-place editor needs (the spec says 560x400).
+    win.set_resizable(640, 520);
     let mut app = App {
         th: Theme::current(),
         set: timeio::load_reminders(&paths).0,
@@ -94,6 +96,9 @@ fn main(args: &rt::Args) -> i32 {
     loop {
         match win.event(500) {
             Some(Event::Close) => break,
+            Some(Event::Resize { w, h }) => {
+                let _ = win.resize(w, h);
+            }
             Some(Event::Down { x, y, button: 1 }) => {
                 app.quick_focus = false;
                 app.search_focus = false;
@@ -367,7 +372,7 @@ impl App {
     fn draw(&mut self, win: &mut Window) {
         let th = self.th;
         self.hits.clear();
-        win.fill(0, 0, W, H, th.milk);
+        win.fill(0, 0, win.w, win.h, th.milk);
         self.draw_sidebar(win);
         self.draw_main(win);
         if self.list_sheet.is_some() {

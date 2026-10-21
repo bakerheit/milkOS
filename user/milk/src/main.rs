@@ -128,14 +128,28 @@ fn text(path: &str) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// Write a control file under /sys/fs/milkfs.
+/// Write a control file under /sys/fs/milkfs. The destructive ones (delete, promote,
+/// discard, ...) need root or an admin ticket (docs/security.md, "Authorisation
+/// tickets"): on EPERM, ask the desktop's trusted panel once and retry; without a desktop,
+/// say how to get one from a terminal.
 fn milkfs(ctl: &str, arg: &str) -> Res<()> {
     let p = alloc::format!("{MILKFS}/{ctl}");
-    let fd =
-        sys::open(&p, sys::O_WRONLY | sys::O_CLOEXEC).map_err(|e| alloc::format!("{p}: {e}"))?;
-    let r = sys::write_all(fd, arg.as_bytes()).map_err(|e| alloc::format!("{p} <- {arg:?}: {e}"));
-    let _ = sys::close(fd);
-    r
+    let write = || -> Result<(), sys::Errno> {
+        let fd = sys::open(&p, sys::O_WRONLY | sys::O_CLOEXEC)?;
+        let r = sys::write_all(fd, arg.as_bytes());
+        let _ = sys::close(fd);
+        r
+    };
+    let mut r = write();
+    if matches!(r, Err(sys::Errno(1))) && sys::authorize(&alloc::format!("milk {ctl}")).is_ok() {
+        r = write();
+    }
+    r.map_err(|e| match e.0 {
+        1 => alloc::format!(
+            "{p}: needs an administrator's authorisation: run it as `auth milk ...` (or as root)"
+        ),
+        _ => alloc::format!("{p} <- {arg:?}: {e}"),
+    })
 }
 
 /// An audit record through /dev/audit (the kernel adds pid, exe, time, the hash chain).

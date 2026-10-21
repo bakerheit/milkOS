@@ -140,7 +140,7 @@ def dawn():
     r = 0.095 * H
     ImageDraw.Draw(sun).ellipse([0.745 * W - r, 0.215 * H - r, 0.745 * W + r, 0.215 * H + r], fill=HONEY + (255,))
     im.alpha_composite(sun)
-    clouds = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    clouds = Image.new("RGBA", (W, H), hexc("FFF4E6") + (0,))        # the layer starts as the cloud colour at alpha 0: PIL blurs RGB and alpha separately, so a transparent BLACK layer bled a dark rim
     for cx, cy, sc, a in ((0.20, 0.17, 1.0, 120), (0.46, 0.30, 0.8, 90), (0.10, 0.36, 0.7, 80)):
         for dx, dy, rx, ry in ((0, 0, 150, 38), (-90, 14, 100, 30), (100, 12, 110, 32), (30, -22, 90, 34)):
             blob(clouds, cx * W + dx * sc, cy * H + dy * sc, rx * sc, ry * sc, hexc("FFF4E6"), a)
@@ -154,7 +154,7 @@ def dawn():
     xs, ys = hill(im, 0.865, 0.040, (0.8, 1.7), (4.0, 1.1), hexc("93B692"), hexc("84A883"), 0.16)
     grass_texture(im, rng, 0.80 * H, hexc("7FA27E"), 70, 2600)
     flowers(im, rng, 90, 0.90 * H, 0.99 * H, [STRAW, HONEY, MILK], 5)
-    cow(im, 0.885 * W, 0.915 * H, 2.6)
+    cow(im, 0.855 * W, 0.885 * H, 2.6)
     cow(im, 0.62 * W, 0.80 * H, 1.2, flip=True)
     return im.convert("RGB")
 
@@ -182,7 +182,7 @@ def night():
     hill(im, 0.75, 0.040, (0.9, 2.1), (2.2, 0.3), hexc("2F4A4A"), hexc("284240"), 0.12)
     hill(im, 0.865, 0.040, (0.8, 1.7), (4.0, 1.1), hexc("27403C"), hexc("203733"), 0.10)
     grass_texture(im, rng, 0.80 * H, hexc("35544E"), 60, 2200)
-    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    glow = Image.new("RGBA", (W, H), HONEY + (0,))                    # the same: the glow layer starts as its own colour at alpha 0
     gd = ImageDraw.Draw(glow)
     for _ in range(26):
         x, y = rng.uniform(0.04 * W, 0.96 * W), rng.uniform(0.62 * H, 0.97 * H)
@@ -191,7 +191,7 @@ def night():
     d = ImageDraw.Draw(im)
     for _ in range(26):
         pass
-    cow(im, 0.885 * W, 0.935 * H, 2.4, sleeping=True, tone=hexc('978D98'))
+    cow(im, 0.845 * W, 0.868 * H, 2.4, sleeping=True, tone=hexc('978D98'))
     return im.convert("RGB")
 
 
@@ -289,8 +289,9 @@ def splash(night_mode):
     im = Image.new("RGBA", (W, H), bg + (255,))
     k = W / 1024.0
     cx, cy, r = W / 2, 345 * k, 60 * k
-    sh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(sh).ellipse([cx - 75 * k, 415 * k, cx + 75 * k, 430 * k], fill=(0, 0, 0, 80) if night_mode else (150, 130, 100, 60))
+    scol = (0, 0, 0, 80) if night_mode else (150, 130, 100, 60)
+    sh = Image.new("RGBA", (W, H), scol[:3] + (0,))
+    ImageDraw.Draw(sh).ellipse([cx - 75 * k, 415 * k, cx + 75 * k, 430 * k], fill=scol)
     im.alpha_composite(sh.filter(ImageFilter.GaussianBlur(6 * k)))
     if night_mode:
         im.alpha_composite(radial(W, H, cx, cy, 190 * k, hexc("7F93C9"), 0.16, 2.0))

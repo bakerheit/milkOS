@@ -51,6 +51,8 @@ pub const REPAIR: u32 = 71;
 pub const CHG_PASS: u32 = 80;
 pub const UNLOCK: u32 = 83;
 pub const BACKUP: u32 = 82;
+pub const LOCK: u32 = 81;
+pub const LOCK_OTHER: u32 = 84;
 pub const TM_NOW: u32 = 90;
 pub const TM_SETTINGS: u32 = 91;
 pub const SHEET: u32 = 10_000; // sheet controls
@@ -110,11 +112,16 @@ fn main(_args: &rt::Args) -> i32 {
         scroll: 0,
         last_refresh: 0,
     };
+    // Resizable down to what its sheets need (the spec says 680x480).
+    win.set_resizable(760, 560);
     app.disk.refresh();
     app.disk.share_rw = Some(data::probe_share());
     loop {
         match win.event(100) {
             Some(Event::Close) => break,
+            Some(Event::Resize { w, h }) => {
+                let _ = win.resize(w, h);
+            }
             Some(Event::Down { x, y, button: 1 }) => {
                 if let Some(id) = app.hits.at(x, y) {
                     app.click(id);
@@ -150,6 +157,8 @@ pub struct Row {
     pub kind: String,
     pub icon: Icon,
     pub locked: bool,
+    /// Where it is mounted, for usage and locking.
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -164,7 +173,7 @@ pub enum Icon {
 pub const ICON: i32 = 32;
 
 /// A volume's icon in its slot at (x, y). Today a plain tile (radius 24% of the size, as the SPEC
-/// says for tiles); the art pass replaces the body of this function with Chen's icons, drawn at
+/// says for tiles); the art pass replaces the body of this function with the art icons, drawn at
 /// `ICON` x `ICON` here, and nothing else in the window changes.
 fn volume_icon(win: &mut Window, th: &Theme, x: i32, y: i32, icon: Icon, locked: bool) {
     let tile = match icon {
@@ -189,6 +198,7 @@ impl App {
                 kind: format!("milkfs, {}", diskkit::fmt::kb(i.total_kb())),
                 icon: Icon::Disk,
                 locked: false,
+                path: Some(format!("/Volumes/{}", i.label)),
             }),
             None => {
                 for l in &d.locked {
@@ -197,6 +207,7 @@ impl App {
                         kind: String::from("locked"),
                         icon: Icon::Disk,
                         locked: true,
+                        path: None,
                     });
                 }
             }
@@ -211,29 +222,74 @@ impl App {
                 kind: format!("clone of {}", c.origin),
                 icon: Icon::Clone,
                 locked: false,
+                path: c.mount.clone(),
             });
         }
         for vol in d.other_volumes() {
+            let size = d
+                .usage_of(&vol.path)
+                .map(|u| format!(", {}", diskkit::fmt::kb(u.total_kb)))
+                .unwrap_or_default();
+            let (kind, icon) = match vol.kind {
+                VolKind::MacShare => (format!("shared with the Mac{size}"), Icon::Share),
+                VolKind::Fat => (format!("FAT32{size}"), Icon::Disk),
+                VolKind::Milk => (format!("milkfs{size}"), Icon::Disk),
+            };
             v.push(Row {
                 name: vol.name.clone(),
-                kind: String::from(match vol.kind {
-                    VolKind::MacShare => "shared with the Mac",
-                    VolKind::Fat => "FAT32",
-                    VolKind::Milk => "milkfs",
-                }),
-                icon: if vol.kind == VolKind::MacShare {
-                    Icon::Share
-                } else {
-                    Icon::Disk
-                },
+                kind,
+                icon,
                 locked: false,
+                path: Some(vol.path.clone()),
             });
+        }
+        // Other encrypted volumes that are locked (not mounted): listed so they can be unlocked.
+        if d.info.is_some() {
+            for l in &d.locked {
+                v.push(Row {
+                    name: l.label.clone(),
+                    kind: String::from("locked"),
+                    icon: Icon::Disk,
+                    locked: true,
+                    path: None,
+                });
+            }
+        }
+        // Disks the system lists that have no row yet: a milkfs volume that is not mounted, or a disk
+        // that is not milkfs at all.
+        if let Some(list) = &d.disks {
+            for e in list {
+                match &e.content {
+                    diskkit::disks::Content::Milkfs {
+                        state: diskkit::disks::State::Unmounted,
+                        label,
+                        ..
+                    } => v.push(Row {
+                        name: label.clone(),
+                        kind: format!("not mounted, {}", diskkit::fmt::kb(e.kb())),
+                        icon: Icon::Disk,
+                        locked: false,
+                        path: None,
+                    }),
+                    diskkit::disks::Content::Other => v.push(Row {
+                        name: e.name.clone(),
+                        kind: format!("other disk, {}", diskkit::fmt::kb(e.kb())),
+                        icon: Icon::Disk,
+                        locked: false,
+                        path: None,
+                    }),
+                    _ => {}
+                }
+            }
         }
         v.push(Row {
             name: String::from("In-memory root"),
-            kind: String::from("RAM, not kept"),
+            kind: d.usage_of("/").map_or(String::from("RAM, not kept"), |u| {
+                format!("RAM, {}", diskkit::fmt::kb(u.total_kb))
+            }),
             icon: Icon::Ram,
             locked: false,
+            path: Some(String::from("/")),
         });
         v
     }
@@ -288,10 +344,10 @@ impl App {
     fn draw(&mut self, win: &mut Window) {
         let th = self.th;
         self.hits.clear();
-        win.fill(0, 0, W, H, th.milk);
+        win.fill(0, 0, win.w, win.h, th.milk);
         self.draw_sidebar(win);
-        win.fill(SIDE, 0, W - SIDE, BAR, th.cream);
-        widgets::hline(win, SIDE, BAR, W - SIDE, th.sand);
+        win.fill(SIDE, 0, win.w - SIDE, BAR, th.cream);
+        widgets::hline(win, SIDE, BAR, win.w - SIDE, th.sand);
         let sel = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
         segmented(
             win,
@@ -317,11 +373,11 @@ impl App {
         }
         if let Some(j) = &self.job {
             let secs = timeio::mono_ms().saturating_sub(j.started_ms) / 1000;
-            win.fill(SIDE, H - 24, W - SIDE, 24, th.cream);
-            widgets::hline(win, SIDE, H - 24, W - SIDE, th.sand);
+            win.fill(SIDE, win.h - 24, win.w - SIDE, 24, th.cream);
+            widgets::hline(win, SIDE, win.h - 24, win.w - SIDE, th.sand);
             win.text(
                 SIDE + 12,
-                H - 20,
+                win.h - 20,
                 &format!("{} ... {} s", j.what, secs),
                 th.espresso,
             );
@@ -338,13 +394,13 @@ impl App {
 
     fn draw_sidebar(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(0, 0, SIDE, H, th.oat);
-        widgets::vline(win, SIDE - 1, 0, H, th.sand);
+        win.fill(0, 0, SIDE, win.h, th.oat);
+        widgets::vline(win, SIDE - 1, 0, win.h, th.sand);
         win.text(16, 14, "VOLUMES", th.cocoa);
         let rows = self.rows();
         for (i, r) in rows.iter().enumerate() {
             let y = 40 + i as i32 * 50;
-            if y + 50 > H {
+            if y + 50 > win.h {
                 break;
             }
             let rect = Rect::new(8, y, SIDE - 16, 46);
@@ -390,7 +446,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(W - 12 - bw, 10, bw, 24),
+            Rect::new(win.w - 12 - bw, 10, bw, 24),
             label,
             Kind::Primary,
             id,
@@ -425,7 +481,16 @@ impl App {
             _ => self.report = report.clone(),
         }
         self.disk.refresh();
-        if code != 0 {
+        if code == 13 && (what == "Restoring" || what == "Backing up") {
+            self.sheet = Some(Sheet::Message {
+                title: format!("{what} did not finish"),
+                body: alloc::vec![
+                    String::from("The passphrase is wrong or missing for this backup."),
+                    String::from("Details: error 13"),
+                ],
+                danger: true,
+            });
+        } else if code != 0 {
             self.fail(&format!("{what} did not finish"), code);
         } else if from != "check" {
             let line =

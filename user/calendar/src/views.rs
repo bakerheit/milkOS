@@ -32,7 +32,7 @@ impl App {
 
     pub fn draw_month(&mut self, win: &mut Window) {
         let th = self.th;
-        let b = App::body();
+        let b = App::body(win.w, win.h);
         let c = self.cursor;
         let first = Date {
             y: c.y,
@@ -124,7 +124,7 @@ impl App {
     /// The week (7 columns) or the day (1 column) with hour rows.
     pub fn draw_week(&mut self, win: &mut Window, cols: i32) {
         let th = self.th;
-        let b = App::body();
+        let b = App::body(win.w, win.h);
         let gutter = 56;
         let c = self.cursor;
         let first = if cols == 7 {
@@ -307,7 +307,7 @@ impl App {
 
     pub fn draw_year(&mut self, win: &mut Window) {
         let th = self.th;
-        let b = App::body();
+        let b = App::body(win.w, win.h);
         let year = self.cursor.y;
         let (cw, ch) = (b.w / 4, b.h / 3);
         for m in 0..12u8 {
@@ -368,7 +368,7 @@ impl App {
 
     pub fn draw_search(&mut self, win: &mut Window) {
         let th = self.th;
-        let b = App::body();
+        let b = App::body(win.w, win.h);
         let q: String = self.search.text.to_lowercase();
         bold_x(
             win,

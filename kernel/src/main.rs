@@ -7,6 +7,7 @@ use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
+mod art;
 mod audio;
 mod audit;
 mod crypto;
@@ -17,12 +18,14 @@ mod exceptions;
 mod fbcon;
 mod font;
 mod font_data;
+mod fontx;
 mod fs;
 mod fwcfg;
 mod gfx;
 mod gic;
 mod heap;
 mod input;
+mod journal;
 mod klog;
 mod mem;
 mod memtest;
@@ -75,8 +78,9 @@ macro_rules! kprintln {
         // IRQs off and the print lock held for the whole line, so threads and CPUs don't
         // interleave mid-line.
         $crate::sink::with_print_lock(|| {
-            let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
-            let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
+            // The console, and the journal (unit "kernel").
+            let _ = core::fmt::Write::write_fmt(&mut $crate::journal::Tee, format_args!($($arg)*));
+            let _ = core::fmt::Write::write_str(&mut $crate::journal::Tee, "\n");
         })
     }};
 }
@@ -111,6 +115,7 @@ pub extern "C" fn kmain() -> ! {
     smp::init();
     sched::selftest::run();
     audit::init();
+    journal::init();
     sysstat::init();
     net::init();
     net::selftest::run();

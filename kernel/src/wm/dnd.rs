@@ -237,7 +237,10 @@ pub(super) fn draw(d: &Dnd, p: &mut Painter, clip: Rect) {
         return;
     }
     let ix = g.x + (g.w - 40) / 2;
-    icons::draw(p, ix, g.y, 40, d.icon, CREAM, 230, ESPRESSO, true);
+    let kind = fsx::art_kind_of(&d.name, d.icon == Icon::Folder);
+    if !icons::file_tile(p, ix, g.y, 40, kind) {
+        icons::draw(p, ix, g.y, 40, d.icon, CREAM, 230, ESPRESSO, true);
+    }
     let lw = super::fontx::prop_width(&d.name, false) + 14;
     let lx = g.x + (g.w - lw) / 2;
     p.rrect(lx, g.y + 46, lw, 22, 8, HONEY, 235);

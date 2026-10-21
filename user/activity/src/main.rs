@@ -91,6 +91,8 @@ pub struct App {
     pub sec_scroll: i32,
     /// Rows drawn by the last frame, for the click ids.
     pub shown: Vec<u32>,
+    /// The window's height now (it can be resized).
+    pub win_h: i32,
 }
 
 fn main(_args: &rt::Args) -> i32 {
@@ -98,6 +100,8 @@ fn main(_args: &rt::Args) -> i32 {
         rt::println!("activity: no desktop to open a window on");
         return 1;
     };
+    // Resizable down to what the raw-record sheet needs (the spec says 560x360).
+    win.set_resizable(720, 480);
     let mut app = App {
         th: Theme::current(),
         tab: Tab::Processes,
@@ -118,6 +122,7 @@ fn main(_args: &rt::Args) -> i32 {
         verified_wall_ns: 0,
         sec_scroll: 0,
         shown: Vec::new(),
+        win_h: H,
     };
     app.s.refresh();
     let mut last = mono_ns() / 1_000_000;
@@ -125,6 +130,9 @@ fn main(_args: &rt::Args) -> i32 {
         let ev = win.event(100);
         match ev {
             Some(Event::Close) => break,
+            Some(Event::Resize { w, h }) => {
+                let _ = win.resize(w, h);
+            }
             Some(Event::Down { x, y, button: 1 }) => {
                 app.search_focus = false;
                 if let Some(id) = app.hits.at(x, y) {
@@ -349,15 +357,16 @@ impl App {
     /// How many table rows fit above the summary bar (and the detail panel).
     pub fn rows_visible(&self) -> i32 {
         let detail = if self.sel.is_some() { 158 } else { 0 };
-        (H - 24 - detail - 69) / 28
+        (self.win_h - 24 - detail - 69) / 28
     }
 
     // ---- drawing --------------------------------------------------------------------------
 
     fn draw(&mut self, win: &mut Window) {
         let th = self.th;
+        self.win_h = win.h;
         self.hits.clear();
-        win.fill(0, 0, W, H, th.milk);
+        win.fill(0, 0, win.w, win.h, th.milk);
         widgets::toolbar(win, &th);
         let sel = TABS.iter().position(|&t| t == self.tab).unwrap_or(0);
         let sw = segmented(
@@ -404,8 +413,8 @@ impl App {
 
     fn draw_summary(&mut self, win: &mut Window) {
         let th = self.th;
-        win.fill(0, H - 24, W, 24, th.cream);
-        widgets::hline(win, 0, H - 24, W, th.sand);
+        win.fill(0, win.h - 24, win.w, 24, th.cream);
+        widgets::hline(win, 0, win.h - 24, win.w, th.sand);
         let threads: u32 = self.s.procs.iter().map(|p| p.threads).sum();
         let m = &self.s.mem;
         let s = format!(
@@ -416,22 +425,24 @@ impl App {
             sysview::fmt::mb0(m.total_kb),
             self.s.total_cpu_pct()
         );
-        win.text(12, H - 20, &s, th.cocoa);
+        win.text(12, win.h - 20, &s, th.cocoa);
         let every = match INTERVALS[self.interval] {
             0 => String::from("paused (click to change)"),
             500 => String::from("updates every 0.5 s"),
             ms => format!("updates every {} s", ms / 1000),
         };
         let w = gui::str_width(&every, 1);
-        text_r(win, W - 12, H - 20, &every, th.cocoa, 1);
-        self.hits
-            .add(Rect::new(W - 12 - w - 4, H - 24, w + 8, 24), INTERVAL);
+        text_r(win, win.w - 12, win.h - 20, &every, th.cocoa, 1);
+        self.hits.add(
+            Rect::new(win.w - 12 - w - 4, win.h - 24, w + 8, 24),
+            INTERVAL,
+        );
     }
 
     fn draw_sheets(&mut self, win: &mut Window) {
         let th = self.th;
         if let Some(q) = &self.quit {
-            let r = Rect::new((W - 420) / 2, (H - 190) / 2, 420, 190);
+            let r = Rect::new((win.w - 420) / 2, (win.h - 190) / 2, 420, 190);
             win.rrect(
                 r.x - 1,
                 r.y + 6,
@@ -524,7 +535,7 @@ impl App {
                 false,
             );
         } else if let Some(i) = self.raw {
-            let r = Rect::new((W - 700) / 2, (H - 240) / 2, 700, 240);
+            let r = Rect::new((win.w - 700) / 2, (win.h - 240) / 2, 700, 240);
             win.rrect(
                 r.x - 1,
                 r.y + 6,

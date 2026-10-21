@@ -2,7 +2,7 @@
 
 use crate::charts;
 use crate::data::mono_ns;
-use crate::{App, EVENT, FILTER, H, PID_CLEAR, QUIT, ROW, SEC_JUMP, SHOW_FILES, SORT, VERIFY, W};
+use crate::{App, EVENT, FILTER, PID_CLEAR, QUIT, ROW, SEC_JUMP, SHOW_FILES, SORT, VERIFY};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -67,7 +67,7 @@ impl App {
             win,
             &th,
             &mut self.hits,
-            Rect::new(W - 12 - qw, 8, qw, 24),
+            Rect::new(win.w - 12 - qw, 8, qw, 24),
             "Quit",
             Kind::Danger,
             QUIT,
@@ -94,9 +94,22 @@ impl App {
                 ("Threads", SortKey::Threads, 0, 736)
             ]
         };
+        // The columns after the name follow the window's width.
+        let dx = win.w - crate::W;
+        let cols: Vec<(&str, SortKey, i32, i32)> = cols
+            .into_iter()
+            .map(|(l, k, x, r)| {
+                (
+                    l,
+                    k,
+                    if x > 16 { x + dx } else { x },
+                    if r > 0 { r + dx } else { 0 },
+                )
+            })
+            .collect();
         // Header (28 high).
-        win.fill(0, 41, W, 28, th.cream);
-        widgets::hline(win, 0, 68, W, th.sand);
+        win.fill(0, 41, win.w, 28, th.cream);
+        widgets::hline(win, 0, 68, win.w, th.sand);
         for (i, (label, key, x, right)) in cols.iter().enumerate() {
             let lw = gui::str_width(label, 1);
             let lx = if *right > 0 { right - lw } else { *x };
@@ -116,11 +129,11 @@ impl App {
             self.hits.add(r, SORT + i as u32);
         }
         if has_caps {
-            bold_x(win, 666, 47, "Sandbox", th.cocoa, 1);
+            bold_x(win, 666 + dx, 47, "Sandbox", th.cocoa, 1);
         }
         // Rows.
         let top = 69;
-        let area = H - 24 - top - if self.sel.is_some() { 158 } else { 0 };
+        let area = win.h - 24 - top - if self.sel.is_some() { 158 } else { 0 };
         let rows = self.rows_visible();
         let max_scroll = ((procs.len() as i32 - rows) * 28).max(0);
         self.scroll = self.scroll.clamp(0, max_scroll) / 28 * 28;
@@ -133,11 +146,11 @@ impl App {
             }
             let y = top + (n - first) as i32 * 28;
             let selected = self.sel == Some(p.pid);
-            let row = Rect::new(0, y, W, 28);
+            let row = Rect::new(0, y, win.w, 28);
             if selected {
-                win.fill(0, y, W, 28, Theme::tint(th.milk, th.straw, 0x33));
+                win.fill(0, y, win.w, 28, Theme::tint(th.milk, th.straw, 0x33));
             } else if n % 2 == 1 {
-                win.fill(0, y, W, 28, Theme::tint(th.milk, th.oat, 0x59));
+                win.fill(0, y, win.w, 28, Theme::tint(th.milk, th.oat, 0x59));
             }
             // Icon tile and name.
             win.rrect(16, y + 4, 20, 20, 5, tile_colour(&th, &p.name));
@@ -174,18 +187,18 @@ impl App {
                 };
                 if !label.is_empty() {
                     let w = gui::str_width(label, 1) + 20;
-                    win.rrect(666, y + 3, w, 22, 11, fill);
-                    win.text(676, y + 6, label, th.espresso);
+                    win.rrect(666 + dx, y + 3, w, 22, 11, fill);
+                    win.text(676 + dx, y + 6, label, th.espresso);
                 }
             }
             self.hits.add(row, ROW + n as u32);
         }
         if procs.is_empty() {
-            text_c(win, W / 2, 140, "No process matches.", th.cocoa, 1);
+            text_c(win, win.w / 2, 140, "No process matches.", th.cocoa, 1);
         }
         // The detail panel for the selected process.
         if let Some(p) = sel_proc {
-            let panel = Rect::new(12, H - 24 - 154, W - 24, 148);
+            let panel = Rect::new(12, win.h - 24 - 154, win.w - 24, 148);
             widgets::bordered(win, panel, 12, th.cream, th.sand);
             let parent = self.s.find(p.ppid).map_or(String::from("none"), |pp| {
                 format!("{} ({})", pp.name, pp.pid)
@@ -287,7 +300,7 @@ impl App {
     pub fn draw_cpu(&mut self, win: &mut Window) {
         let th = self.th;
         let n = self.s.cores.len();
-        let card_w = (W - 48) / 2;
+        let card_w = (win.w - 48) / 2;
         let card_h = 124;
         for (i, core) in self.s.cores.iter().enumerate() {
             let (cx, cy) = (
@@ -359,7 +372,7 @@ impl App {
             win.text(420, y + 22 + k as i32 * 20, label, th.cocoa);
             text_r(
                 win,
-                W - 16,
+                win.w - 16,
                 y + 22 + k as i32 * 20,
                 &format!("{v}"),
                 th.espresso,
@@ -380,7 +393,7 @@ impl App {
             th.espresso,
             2,
         );
-        let bar = Rect::new(16, 100, W - 32, 28);
+        let bar = Rect::new(16, 100, win.w - 32, 28);
         let other = m
             .total_kb
             .saturating_sub(apps + m.heap_used_kb + m.cache_kb + m.free_kb);
@@ -414,8 +427,8 @@ impl App {
             Pressure::Medium => ("Medium", th.honey),
             Pressure::High => ("High", th.danger),
         };
-        text_r(win, W - 16, 178, word, th.espresso, 1);
-        let g = Rect::new(16, 204, W - 32, 14);
+        text_r(win, win.w - 16, 178, word, th.espresso, 1);
+        let g = Rect::new(16, 204, win.w - 32, 14);
         let zone = |frac_a: i32, frac_b: i32| {
             ((g.x + g.w * frac_a / 100), (g.w * (frac_b - frac_a) / 100))
         };
@@ -436,16 +449,16 @@ impl App {
             win.text(16, y + 2, &widgets::fit(&p.name, 150), th.espresso);
             charts::bar(
                 win,
-                Rect::new(180, y + 4, W - 180 - 130, 14),
+                Rect::new(180, y + 4, win.w - 180 - 130, 14),
                 (p.rss_kb * 1000 / max) as u32,
                 ink(&th, "honey"),
                 th.oat,
             );
-            text_r(win, W - 16, y + 2, &fmt::mb(p.rss_kb), th.espresso, 1);
+            text_r(win, win.w - 16, y + 2, &fmt::mb(p.rss_kb), th.espresso, 1);
         }
         win.text(
             16,
-            H - 24 - 24,
+            win.h - 24 - 24,
             "The page cache is memory the system can give back whenever a program needs it.",
             th.cocoa,
         );
@@ -453,7 +466,7 @@ impl App {
 
     pub fn draw_disk(&mut self, win: &mut Window) {
         let th = self.th;
-        let card_w = (W - 48) / 2;
+        let card_w = (win.w - 48) / 2;
         let card_h = 150;
         for (i, (name, ring, rate, colour)) in [
             ("Reads", &self.s.disk_read, self.s.disk_rate.0, "blue"),
@@ -489,7 +502,7 @@ impl App {
             win.text(16, y, "Milk disk", th.espresso);
             text_r(
                 win,
-                W - 16,
+                win.w - 16,
                 y,
                 &format!("{} free of {}", fmt::mb0(free * 4), fmt::mb0(total * 4)),
                 th.cocoa,
@@ -497,7 +510,7 @@ impl App {
             );
             charts::bar(
                 win,
-                Rect::new(16, y + 24, W - 32, 14),
+                Rect::new(16, y + 24, win.w - 32, 14),
                 (used * 1000 / total.max(1)) as u32,
                 ink(&th, "blue"),
                 th.oat,
@@ -508,7 +521,7 @@ impl App {
         win.text(16, y, "Root (in memory)", th.espresso);
         text_r(
             win,
-            W - 16,
+            win.w - 16,
             y,
             &format!("{} used", fmt::mb(self.s.ram_disk_kb)),
             th.cocoa,
@@ -516,7 +529,7 @@ impl App {
         );
         charts::bar(
             win,
-            Rect::new(16, y + 24, W - 32, 14),
+            Rect::new(16, y + 24, win.w - 32, 14),
             (self.s.ram_disk_kb * 1000 / ram.max(1)) as u32,
             ink(&th, "honey"),
             th.oat,
@@ -526,7 +539,7 @@ impl App {
     pub fn draw_security(&mut self, win: &mut Window) {
         let th = self.th;
         // The banner.
-        let banner = Rect::new(12, 52, W - 24, 56);
+        let banner = Rect::new(12, 52, win.w - 24, 56);
         let (ok, title, line) = match &self.verdict {
             Some(v) if v.ok => (
                 true,
@@ -617,18 +630,18 @@ impl App {
         idx.reverse();
         let top = 152;
         let row_h = 48;
-        let rows = ((H - 24 - top) / row_h) as usize;
+        let rows = ((win.h - 24 - top) / row_h) as usize;
         let max_scroll = ((idx.len() as i32 - rows as i32) * row_h).max(0);
         self.sec_scroll = self.sec_scroll.clamp(0, max_scroll) / row_h * row_h;
         let first = (self.sec_scroll / row_h) as usize;
         if idx.is_empty() {
-            text_c(win, W / 2, top + 60, "Nothing to show.", th.cocoa, 1);
+            text_c(win, win.w / 2, top + 60, "Nothing to show.", th.cocoa, 1);
         }
         for (n, &i) in idx.iter().skip(first).take(rows).enumerate() {
             let r = &self.s.audit[i];
             let d = audit::describe(r);
             let y = top + n as i32 * row_h;
-            let row = Rect::new(12, y, W - 24, row_h - 4);
+            let row = Rect::new(12, y, win.w - 24, row_h - 4);
             if n % 2 == 1 {
                 win.rrect(
                     row.x,

@@ -765,6 +765,42 @@ fn blockdev(t: &mut T) {
             "read-modify-write kept the neighbours",
         );
     }
+    // Block cache over the same region: 4 buffers, 6 blocks written, so evictions write
+    // back early; everything must be on the disk after flush.
+    if lba % 8 == 0
+        && let Some(c) = t.must(super::bcache::BCache::new(d.clone(), 4), "bcache")
+    {
+        let base = lba / 8;
+        let blk = |n: u64| -> super::bcache::Block { [(n as u8).wrapping_mul(37) ^ 0x5a; 4096] };
+        for n in 0..6 {
+            let _ = c.write(base + n, &blk(n));
+        }
+        let mut b = [0u8; 4096];
+        t.ok(
+            (0..6).all(|n| c.read(base + n, &mut b).is_ok() && b == blk(n)),
+            "bcache reads its own writes",
+        );
+        let st = c.stats();
+        t.ok(
+            st.writebacks >= 2 && st.misses >= 6,
+            "bcache evicted and wrote back",
+        );
+        t.ok(
+            c.flush().is_ok() && c.usage().2 == 0,
+            "bcache flush leaves nothing dirty",
+        );
+        let mut raw = vec![0u8; 4096];
+        t.ok(
+            (0..6)
+                .all(|n| d.read_blocks((base + n) * 8, &mut raw).is_ok() && raw[..] == blk(n)[..]),
+            "bcache data is on the disk after flush",
+        );
+        t.err(
+            c.read(c.num_blocks(), &mut b),
+            Errno::ENXIO,
+            "bcache read past the end",
+        );
+    }
     t.ok(
         d.write_blocks(lba, &saved).is_ok()
             && d.read_blocks(lba, &mut back).is_ok()

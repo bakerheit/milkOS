@@ -24,10 +24,11 @@ pub fn run() {
 /// Three threads that yield after every step take turns.
 fn interleave() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let hs: Vec<_> = *b"ABC"
-        .into_iter()
+    let hs: Vec<_> = b"ABC"
+        .iter()
         .map(|c| {
             let log = log.clone();
+            let c = *c;
             spawn("interleave", move || {
                 for _ in 0..5 {
                     log.lock().push(c);
@@ -231,6 +232,7 @@ fn churn() {
 #[cfg(feature = "kstack-overflow-test")]
 fn overflow() {
     #[inline(never)]
+    #[allow(unconditional_recursion)]
     fn recurse(n: u64) -> u64 {
         let buf = [n; 64];
         core::hint::black_box(&buf);

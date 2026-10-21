@@ -1,111 +1,57 @@
-//! `/dev/tty1`: the desktop Terminal's terminal device. Same cooked line discipline as the
-//! console tty (`proc/console.rs`: echo, backspace, ^U, ^C drops the line, ^D at line start is
-//! EOF, one line per read), but its input comes from the window system (keys typed into the
-//! Terminal window, via [`input`]) and its output goes to a buffer the Terminal drains and draws
-//! ([`take_output`]), instead of the UART.
+//! `/dev/tty1`: the desktop Terminal's terminal device. It is a `proc::tty::Tty` (the
+//! same line discipline as the UART console: echo, editing, ^C -> SIGINT to the
+//! foreground process group, termios, window size), whose input comes from keys typed into
+//! the Terminal window ([`input`]) and whose output goes to a buffer the Terminal drains
+//! and draws ([`take_output`]).
 //!
 //! A kernel thread ("term-sh") keeps a `msh` running on it, restarting it when it exits.
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::fs::node::makedev;
 use crate::fs::{self, Inode, InodeType, Stat};
-use crate::sched::{self, WaitQueue};
+use crate::proc::tty::Tty;
+use crate::sched;
 use crate::sync::SpinLock;
 use crate::{kprintln, proc};
 
 pub const PATH: &str = "/dev/tty1";
 
-struct Tty {
-    /// The line being typed (cooked mode), not yet readable.
-    line: Vec<u8>,
-    /// Completed input, ready for `read`.
-    ready: VecDeque<u8>,
-    eof: bool,
-    /// Bytes written by the program (and echo), waiting for the Terminal to draw them.
-    out: Vec<u8>,
-}
+/// The terminal itself. 24 x 80 until the Terminal window reports its size.
+pub static TTY1: Tty = Tty::new("tty1", push_out, 24, 80);
 
-static TTY: SpinLock<Tty> = SpinLock::new(Tty {
-    line: Vec::new(),
-    ready: VecDeque::new(),
-    eof: false,
-    out: Vec::new(),
-});
-/// Readers wait here for a line.
-static RX_WQ: WaitQueue = WaitQueue::new();
+/// Bytes written by programs (and echo), waiting for the Terminal to draw them.
+static OUT: SpinLock<Vec<u8>> = SpinLock::new(Vec::new());
 /// Bumped on every output, so the Terminal can tell cheaply whether to drain.
 static OUT_GEN: AtomicU64 = AtomicU64::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 const OUT_MAX: usize = 64 * 1024;
 
-fn push_out(t: &mut Tty, b: &[u8]) {
-    if t.out.len() + b.len() > OUT_MAX {
-        let drop = (t.out.len() + b.len() - OUT_MAX).min(t.out.len());
-        t.out.drain(..drop);
+fn push_out(b: &[u8]) {
+    {
+        let mut out = OUT.lock();
+        if out.len() + b.len() > OUT_MAX {
+            let drop = (out.len() + b.len() - OUT_MAX).min(out.len());
+            out.drain(..drop);
+        }
+        out.extend_from_slice(b);
     }
-    t.out.extend_from_slice(b);
     OUT_GEN.fetch_add(1, Ordering::Relaxed);
     super::WAKE.wake_all();
 }
 
-/// Feed one byte typed into the Terminal window.
+/// Feed one byte typed into the Terminal window (wm thread).
 pub fn input(b: u8) {
-    let mut wake = false;
-    {
-        let mut t = TTY.lock();
-        match b {
-            b'\r' | b'\n' => {
-                push_out(&mut t, b"\n");
-                t.line.push(b'\n');
-                let l = core::mem::take(&mut t.line);
-                t.ready.extend(l);
-                wake = true;
-            }
-            0x7f | 0x08 => {
-                while let Some(c) = t.line.pop() {
-                    if c & 0xc0 != 0x80 {
-                        push_out(&mut t, b"\x08 \x08");
-                        break;
-                    }
-                }
-            }
-            0x15 => {
-                while let Some(c) = t.line.pop() {
-                    if c & 0xc0 != 0x80 {
-                        push_out(&mut t, b"\x08 \x08");
-                    }
-                }
-            }
-            0x03 => {
-                push_out(&mut t, b"^C\n");
-                t.line.clear();
-                t.ready.push_back(b'\n');
-                wake = true;
-            }
-            0x04 => {
-                if t.line.is_empty() {
-                    t.eof = true;
-                } else {
-                    let l = core::mem::take(&mut t.line);
-                    t.ready.extend(l);
-                }
-                wake = true;
-            }
-            b'\t' | 0x20.. => {
-                t.line.push(b);
-                push_out(&mut t, &[b]);
-            }
-            _ => {}
-        }
-    }
-    if wake {
-        RX_WQ.wake_all();
-    }
+    TTY1.input(&[b]);
+}
+
+/// The Terminal window's text area changed size: rows x cols character cells.
+/// Sends SIGWINCH to the foreground job when it actually changes.
+pub fn set_winsize(rows: u16, cols: u16) {
+    TTY1.set_winsize(rows, cols);
 }
 
 /// Take everything written since the last call. Cheap when nothing is new.
@@ -115,39 +61,7 @@ pub fn take_output(seen_gen: &mut u64) -> Option<Vec<u8>> {
         return None;
     }
     *seen_gen = g;
-    let mut t = TTY.lock();
-    Some(core::mem::take(&mut t.out))
-}
-
-fn read(buf: &mut [u8]) -> fs::Result<usize> {
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    loop {
-        {
-            let mut t = TTY.lock();
-            if !t.ready.is_empty() {
-                let line_end = t
-                    .ready
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(usize::MAX, |i| i + 1);
-                let n = buf.len().min(t.ready.len()).min(line_end);
-                for (i, b) in t.ready.drain(..n).enumerate() {
-                    buf[i] = b;
-                }
-                return Ok(n);
-            }
-            if t.eof {
-                t.eof = false;
-                return Ok(0);
-            }
-        }
-        RX_WQ.wait_until(|| {
-            let t = TTY.lock();
-            !t.ready.is_empty() || t.eof
-        });
-    }
+    Some(core::mem::take(&mut *OUT.lock()))
 }
 
 struct TtyNode {
@@ -171,23 +85,16 @@ impl Inode for TtyNode {
         st
     }
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> fs::Result<usize> {
-        read(buf)
+        TTY1.read(buf)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> fs::Result<usize> {
-        push_out(&mut TTY.lock(), buf);
-        Ok(buf.len())
+        TTY1.write(buf)
     }
     fn truncate(&self, _len: u64) -> fs::Result<()> {
         Ok(())
     }
-    /// isatty() only checks that TCGETS succeeds. (Filling in termios / winsize needs the
-    /// syscall layer's copy_out, which only the console gets today.)
-    fn ioctl(&self, cmd: u32, _arg: usize) -> fs::Result<usize> {
-        match cmd {
-            0x5401 | 0x5413 | 0x540f => Ok(0),
-            _ => Err(fs::Errno::ENOTTY),
-        }
-    }
+    // ioctls (termios, winsize, foreground group) are handled by the syscall layer through
+    // the tty registry (`proc::tty::register`, done in start_shell), not here.
 }
 
 /// Publish `/dev/tty1` and start the thread that keeps a shell on it. Idempotent. False if
@@ -205,6 +112,7 @@ pub fn start_shell() -> bool {
         kprintln!("wm: cannot publish {PATH}: {e}");
         return false;
     }
+    proc::tty::register(makedev(4, 1), &TTY1);
     STARTED.store(true, Ordering::Relaxed);
     drop(sched::spawn("term-sh", || {
         loop {
@@ -214,7 +122,6 @@ pub fn start_shell() -> bool {
                     kprintln!("wm: msh pid {pid} on {PATH}");
                     let st = proc::wait_kernel_child(pid);
                     push_out(
-                        &mut TTY.lock(),
                         alloc::format!("\n[msh exited ({st:#x}), starting a new one]\n").as_bytes(),
                     );
                 }
@@ -226,4 +133,15 @@ pub fn start_shell() -> bool {
         }
     }));
     true
+}
+
+/// Is tty1 in canonical (line) mode? (The Terminal keeps Ctrl+L for itself only then.)
+pub fn canonical() -> bool {
+    const ICANON: u32 = 0o2;
+    match TTY1.ioctl(proc::tty::TCGETS, &[]) {
+        Ok(Some(t)) if t.len() >= 16 => {
+            u32::from_le_bytes([t[12], t[13], t[14], t[15]]) & ICANON != 0
+        }
+        _ => true,
+    }
 }

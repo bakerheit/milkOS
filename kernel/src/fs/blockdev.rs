@@ -154,6 +154,10 @@ impl Inode for BlockDevNode {
     fn truncate(&self, _len: u64) -> Result<()> {
         Ok(()) // O_TRUNC on a device is ignored, as on Linux
     }
+
+    fn sync(&self) -> Result<()> {
+        self.disk.flush()
+    }
 }
 
 /// One line per disk, for logs: `vda: 131072 x 512 B (64 MiB), rw`.

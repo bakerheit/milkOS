@@ -406,6 +406,35 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// Scale all of `src` (nearest neighbour) into the logical rect `dst`, through a
+    /// rounded mask of radius `r`, blended at `alpha`. For window animations.
+    pub fn blit_scaled_rrect(&mut self, dst: Rect, src: &Buffer, r: i32, alpha: u8) {
+        let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {
+            return;
+        };
+        let r = r.clamp(0, dst.w.min(dst.h) / 2);
+        let t = corner(r);
+        let (dx0, dy0) = (dst.x + self.ox, dst.y + self.oy);
+        let (sw, sh) = (src.w(), src.h());
+        for by in b.y..b.y + b.h {
+            let j = by - dy0;
+            let sy = (j * sh / dst.h).min(sh - 1);
+            let srow = src.row(sy as usize);
+            let base = by as usize * self.stride;
+            for bx in b.x..b.x + b.w {
+                let i = bx - dx0;
+                let cov = rr_cov(t, r, dst.w, dst.h, i, j);
+                let a = mul_a(cov, alpha);
+                if a == 0 {
+                    continue;
+                }
+                let q = srow[((i * sw / dst.w).min(sw - 1)) as usize];
+                let p = &mut self.px[base + bx as usize];
+                *p = if a == 255 { q } else { blend(*p, q, a) };
+            }
+        }
+    }
+
     /// Nearest-neighbour scale all of `src` into the logical rect `dst` (tiny previews).
     pub fn blit_scaled(&mut self, dst: Rect, src: &Buffer) {
         let Some(b) = self.buf_rect(dst.x, dst.y, dst.w, dst.h) else {
@@ -438,6 +467,19 @@ impl<'a> Painter<'a> {
             let srow = src.row((sy + by - dy0) as usize);
             let s0 = (sx + b.x - dx0) as usize;
             let s = &srow[s0..s0 + b.w as usize];
+            self.span(by, b.x, b.x + b.w).copy_from_slice(s);
+        }
+    }
+
+    /// Copy a `w` x `h` block of raw pixels (`stride` per row) to logical (x, y).
+    pub fn blit_raw(&mut self, x: i32, y: i32, src: &[u32], stride: usize, w: i32, h: i32) {
+        let Some(b) = self.buf_rect(x, y, w, h) else {
+            return;
+        };
+        let (dx0, dy0) = (x + self.ox, y + self.oy);
+        for by in b.y..b.y + b.h {
+            let s0 = (by - dy0) as usize * stride + (b.x - dx0) as usize;
+            let s = &src[s0..s0 + b.w as usize];
             self.span(by, b.x, b.x + b.w).copy_from_slice(s);
         }
     }
@@ -576,13 +618,76 @@ impl<'a> Painter<'a> {
         self.text_a(x + 1, y, s, c, 255, 1)
     }
 
-    /// Scaled text, optionally faux bold (second copy `scale` px right so strokes stay even).
+    /// Scaled text, optionally faux bold. 2x and 4x are drawn smooth (fontx: Scale2x +
+    /// anti-aliasing from the Unifont bitmaps); other sizes are pixel-doubled.
     pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        if super::fontx::smooth_scale(scale) {
+            return self.text_smooth(x, y, s, c, scale, bold);
+        }
         let end = self.text_a(x, y, s, c, 255, scale);
         if bold {
             self.text_a(x + scale.max(1), y, s, c, 255, scale);
         }
         end
+    }
+
+    fn text_smooth(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        let (gw, gh) = (super::fontx::width(scale), GLYPH_H as i32 * scale);
+        let clip = self.clip();
+        let mut cx = x;
+        for ch in s.chars() {
+            let adv = GLYPH_W as i32 * scale;
+            if ch != ' '
+                && cx + gw > clip.x
+                && cx < clip.x + clip.w
+                && y + gh > clip.y
+                && y < clip.y + clip.h
+            {
+                let m = super::fontx::glyph(ch, scale, bold);
+                let Some(b) = self.buf_rect(cx, y, gw, gh) else {
+                    cx += adv;
+                    continue;
+                };
+                let (bx0, by0) = (cx + self.ox, y + self.oy);
+                for by in b.y..b.y + b.h {
+                    let mrow = &m[((by - by0) * gw) as usize..][..gw as usize];
+                    let base = by as usize * self.stride;
+                    for bx in b.x..b.x + b.w {
+                        let a = mrow[(bx - bx0) as usize];
+                        if a != 0 {
+                            let p = &mut self.px[base + bx as usize];
+                            *p = if a == 255 { c } else { blend(*p, c, a) };
+                        }
+                    }
+                }
+            }
+            cx += adv;
+        }
+        x + font::str_width(s, scale)
+    }
+
+    /// Proportional 1x text (fontx::prop_metrics), optionally faux bold. Returns the end x.
+    pub fn text_p(&mut self, x: i32, y: i32, s: &str, c: Color, bold: bool) -> i32 {
+        let mut cx = x;
+        for ch in s.chars() {
+            let (first, adv) = super::fontx::prop_metrics(ch);
+            if ch != ' ' {
+                let mut b = [0u8; 4];
+                let g = ch.encode_utf8(&mut b);
+                self.text_a(cx - first, y, g, c, 255, 1);
+                if bold {
+                    self.text_a(cx - first + 1, y, g, c, 255, 1);
+                }
+            }
+            cx += adv + (bold && super::fontx::PROPORTIONAL_UI) as i32;
+        }
+        cx - super::fontx::PROPORTIONAL_UI as i32
+    }
+
+    /// Proportional text centred in `[x, x+w)`.
+    pub fn text_p_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
+        let tx = x + (w - super::fontx::prop_width(s, bold)) / 2;
+        self.text_p(tx, y, s, c, bold);
     }
 
     /// Text centred in `[x, x+w)`.

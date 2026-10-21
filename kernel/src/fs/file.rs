@@ -142,6 +142,11 @@ impl OpenFile {
         self.inode.truncate(len)
     }
 
+    /// `fsync(2)` / `fdatasync(2)`.
+    pub fn fsync(&self) -> Result<()> {
+        self.inode.sync()
+    }
+
     /// `ioctl(2)`, passed straight to the inode.
     pub fn ioctl(&self, cmd: u32, arg: usize) -> Result<usize> {
         if self.flags() & O_PATH != 0 {

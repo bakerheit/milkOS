@@ -110,21 +110,60 @@ a kernel abort, and PAN doesn't matter.
 
 * One thread per process (no CLONE_THREAD yet). `Process { pid, inner: SpinLock<Inner>,
   child_wq }`; `Inner` has the `UserSpace`, the fd table, cwd (an `InodeRef`), children,
-  state (`Alive` / `Zombie(wait status)`).
-* **fork** (`clone` with flags = SIGCHLD): eager copy of every page (no copy-on-write
-  yet), same fds (shared `Arc<OpenFile>`, so shared offsets), FP regs and TPIDR_EL0
-  copied, child returns 0.
+  state (`Alive` / `Zombie(wait status)`), pgid / sid, signal state, argv, exe path.
+* **fork** (`clone` with flags = SIGCHLD): **copy-on-write**. Both spaces share every
+  frame (a global share count per frame); writable pages turn read-only in both, and the
+  first write faults and copies (or just re-enables write for the last owner). fds are
+  shared `Arc<OpenFile>`s (shared offsets); FP regs, TPIDR_EL0, pgid/sid, signal actions
+  and mask are inherited; pending signals are not. The kernel's `copy_out` breaks COW
+  first, because it writes through the identity map, which ignores the read-only bit.
 * **execve**: reads the file through the VFS (relative to cwd), loads it into a new
   space, only then swaps it in (a failed exec leaves the caller intact); drops
-  close-on-exec fds.
+  close-on-exec fds; handlers go back to SIG_DFL (SIG_IGN stays).
 * **exit**: switch TTBR0 away, free the address space and fds immediately, become a
-  zombie, hand children to init (pid 1), wake the parent. init exiting panics.
-* **wait4**: any child or a given pid, `WNOHANG`, Linux wait-status encoding.
-* **Faults** from EL0 kill only the process, e.g.
+  zombie, hand children to init (pid 1), SIGCHLD + wake the parent. init exiting panics.
+* **wait4**: a pid, any child (-1), own group (0) or group -N; `WNOHANG`; Linux wait
+  status encoding (signal | 0x80 for "core dumped"); EINTR on a signal.
+* **Faults** from EL0 go to the process's handler if it has one (SIGSEGV / SIGBUS /
+  SIGILL / SIGTRAP / SIGFPE), otherwise kill only the process with a message, e.g.
   `[proc] pid 8 (fault) killed by SIGSEGV: permission fault, level 1 reading 0x0 (not a
-  user address) at pc 0x100004000e8`. A translation fault just below the stack grows
-  it (up to 8 MiB). There are no signal handlers: the "signal" is just the wait status.
+  user address) at pc 0x100004000e8`. A translation fault just below the stack grows it
+  (up to 8 MiB); a write fault on a COW page copies it.
 * PID 1 is reserved for `/bin/init`; the EL0 boot test's processes get 2.. .
+
+### Pipes (`proc/pipe.rs`)
+
+`pipe2` gives two fds whose `OpenFile`s wrap a read-end and a write-end inode (Fifo) of a
+64 KiB ring, so dup/fork/close need nothing special: an end closes when its last
+`OpenFile` drops. Reads block while empty (EOF once no writer is left); writes block
+while full, are atomic up to 4 KiB (PIPE_BUF), and give SIGPIPE + EPIPE with no reader.
+Waits are interruptible (EINTR). O_NONBLOCK, O_CLOEXEC.
+
+### Signals (`proc/signal.rs`)
+
+* Per process: pending and blocked masks, 64 sigactions, the latest siginfo per signal
+  (classic signals don't queue). `kill(pid | 0 | -1 | -pgid, sig)`, `tkill`, `tgkill`.
+* Delivery on every return to EL0 (`exceptions::set_user_return_hook`, which also does
+  the deferred reschedule): default action terminate / terminate+core / ignore, or a
+  handler. The handler frame is the Linux aarch64 `rt_sigframe` (siginfo, ucontext with
+  sigcontext, an `fpsimd_context` record, a frame record); the handler gets x0 = signo,
+  x1 = &siginfo, x2 = &ucontext, lr = `sa_restorer` (required: there is no vDSO
+  trampoline yet; rt and libc set it). `rt_sigreturn` restores registers, FP/SIMD and the
+  mask, and only NZCV from the saved pstate.
+* SA_RESETHAND, SA_NODEFER, sa_mask; SIGKILL/SIGSTOP can't be caught, blocked or ignored.
+  Stopping (SIGSTOP/SIGTSTP/SIGTTIN/SIGTTOU) is not implemented: treated as ignored.
+  No SA_RESTART: interrupted calls return EINTR. No sigaltstack.
+* Blocking syscalls that return EINTR: read/write on pipes and ttys, wait4, nanosleep,
+  clock_nanosleep. `signal::interrupted()` is the check to use in any new wait.
+* Process groups and sessions: `setpgid`, `getpgid`, `setsid`, `getsid`; the terminal's
+  foreground group is set with TIOCSPGRP, and ^C / ^\ on a tty signal that group.
+
+### /proc (`proc/procfs.rs`)
+
+`/proc/<pid>/{status, stat, cmdline, maps, fd/N, cwd, exe}`, `/proc/self` and
+`/proc/threads` (every thread, kernel ones too), hung on the vfs's procfs root. Each
+pid directory appears when the process starts and goes when it is reaped. `ps` reads
+these (there are no milkOS-specific syscalls any more).
 
 ### Syscalls
 
@@ -133,13 +172,14 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 56 openat, 57 close, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 61 getdents64, 17 getcwd, 49 chdir, 34 mkdirat, 35 unlinkat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (console: TCGETS, TIOCGWINSZ) |
-| processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address |
+| files | 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
+| processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address, 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
+| signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |
 | memory | 214 brk, 222 mmap (anonymous private only), 215 munmap, 226 mprotect |
 | sockets | 198 socket, 200 bind, 201 listen, 202 accept, 242 accept4, 203 connect, 204 getsockname, 205 getpeername, 206 sendto, 207 recvfrom, 208 setsockopt, 209 getsockopt, 210 shutdown, 73 ppoll (`proc/sock.rs`, see docs/networking.md) |
-| misc | 160 uname (sysname "milkOS"), 278 getrandom, 134/135 rt_sigaction/rt_sigprocmask (accepted, ignored) |
-| milkOS | 4096 MILK_PS: array of 48-byte records (pid, ppid, tid, state, kernel?, cpu ns, rss, name) for `ps`, until /proc has per-process dirs |
+| misc | 160 uname (sysname "milkOS"), 278 getrandom |
+| milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
 is the to-do list for running a static musl binary. `--features strace` logs every call.
@@ -155,30 +195,117 @@ AT_EXECFN, ...), strings and 16 random bytes above it, sp 16-byte aligned.
 FP/SIMD is enabled at EL0 and saved per user thread on every switch (the kernel itself is
 soft-float and never touches it).
 
-### Console
+### Terminals (`proc/tty.rs`): the API for anyone adding one
 
-fd 0/1/2 of processes the kernel starts are one `open("/dev/console")`. Writes go to the
-`kprintln!` sink (devfs). Reads go to the tty in `proc/console.rs`: cooked mode (echo,
-backspace, ^U, ^C drops the line, ^D at line start = EOF), one line per read, blocking on
-a wait queue the UART RX interrupt wakes. Before `sched::init` it returns EAGAIN (the fs
-self-test checks that). Nothing else may consume `uart::read_byte` now.
+One line discipline, instantiated per terminal. Today: `proc::tty::CONSOLE` (UART,
+`/dev/console`, rdev 5:1) and `wm::tty::TTY1` (desktop Terminal, `/dev/tty1`, rdev 4:1).
+
+```rust
+pub static TERM: Tty = Tty::new("tty1", output_sink, rows, cols); // fn(&[u8]) sink
+proc::tty::register(makedev(4, 1), &TERM);   // ioctls on that device node route here
+TERM.input(bytes);                 // typed bytes; thread context (allocates, signals)
+TERM.read(buf) / TERM.write(buf)   // call from the device inode's read_at / write_at
+TERM.set_winsize(rows, cols);      // window resized: TIOCGWINSZ + SIGWINCH on change
+TERM.foreground() / set_foreground(pgid)   // what TIOCGPGRP / TIOCSPGRP do
+proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that tty
+```
+
+* Cooked mode by default: echo, backspace, ^U, Enter delivers a line, ^D at line start is
+  EOF, one line per read. ^C / ^\ flush input and send SIGINT / SIGQUIT to the
+  foreground process group (ISIG). Escape sequences are swallowed in cooked mode.
+* termios: TCGETS/TCSETS/TCSETSW/TCSETSF round-trip a Linux `struct termios` (60 bytes);
+  ICANON (off = raw bytes, read returns what's there), ECHO, ISIG, ICRNL are honoured.
+* ioctls are handled in the syscall layer via the registry (it needs user-memory copies):
+  TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP. The device inode's own
+  `ioctl` is not used for a registered tty.
+* `read` blocks (interruptible: EINTR), except before `sched::init` where it is EAGAIN
+  when empty (the fs self-test relies on that).
+* The UART is fed by the "tty-uart" kernel thread (sleeps on the RX interrupt), so ^C
+  works while nobody reads. `uart::read_byte` belongs to it.
+* Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
+  job stop/continue.
+
+### The desktop Terminal's tty: `/dev/tty1`
+
+`kernel/src/wm/tty.rs`: `TTY1`, a `proc::tty::Tty` (above) registered as rdev 4:1, so
+termios, window size, process groups and ^C -> SIGINT all come from the shared line
+discipline and the syscall layer's tty registry. What the Terminal window adds:
+
+* It feeds `TTY1.input` with the keys typed into it. Arrow keys, Home/End, Delete and Esc go
+  in as xterm sequences (`ESC [ A`, `ESC [ H`, `ESC [ 3 ~`, ...): cooked mode swallows them,
+  raw-mode programs read them. Ctrl+letters become control bytes; Cmd+C / Cmd+V copy and
+  paste instead.
+* It calls `TTY1.set_winsize(rows, cols)` with its real text area on every layout, so
+  `TIOCGWINSZ` follows window resizes and the foreground job gets SIGWINCH on a change.
+* A `term-sh` kernel thread keeps `msh` running on it (`proc::spawn_on`).
+
+`/bin/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
+
+### Desktop windows (`MILK_WIN_*`)
+
+A process can own a desktop window. Kernel side: `kernel/src/wm/client.rs` (+ the arms in
+`proc/syscall.rs`); user side: the `user/gui` crate. The window's body is a pixel buffer of
+contiguous PMM frames owned by the window system and mapped into the process with
+`UserSpace::map_shared` (pages marked `shared`: the space never frees them; `fork` gives the
+child a private copy).
+
+| nr | call | args → result |
+|---|---|---|
+| 4100 | `MILK_WIN_CREATE` | `(w, h, title, title_len, info)` → window id. Body up to 1000 x 700. Writes `struct { u64 addr; u32 w, h, stride, id; }` (24 bytes) to `info`: the XRGB pixels (`0x00RRGGBB`, `stride` = w) at `addr`, initially milk white. |
+| 4101 | `MILK_WIN_COMMIT` | `(id, x, y, w, h)` → 0. Shows what changed in that rect (w = 0: everything). The wm redraws the window on its next frame. |
+| 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
+| 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
+| 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |
+
+Errors: `EINVAL` (bad size), `EBADF` (no such window, or not the caller's), `EFAULT`.
+
+Event (little endian): `u32 kind, i32 x, i32 y, u32 key, u32 mods, i32 extra, 8 bytes reserved`.
+Kinds: 1 key down (`key` = Unicode code point, or 0x10001 Enter, 0x10002 Backspace, 0x10003
+Tab, 0x10004 Esc, 0x10005..8 Up/Down/Left/Right, 0x10009 Delete; `mods` bits shift 1, ctrl 2,
+alt 4, meta 8), 3 pointer moved with a button held (x, y in body coordinates), 4 / 5 button
+down / up (`extra` = 1 left, 2 right, 3 middle), 6 scroll (`extra` = dy, positive = towards
+the end), 7 close (the user closed the window: clean up and exit). 2 (key up) is reserved.
+
+Lifetime: closing the window on screen hides it at once and sends a close event; the buffer
+stays mapped until the process destroys the window or exits. Windows of processes that exit
+without destroying them are closed and freed by the wm within a second.
+
+`/bin/paint` is the example client (dock, Skim, or `paint` in a shell).
+
+### `/dev/wm` and the desktop tools
+
+`kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
+first space): `open <app|absolute path>` (apps: files terminal notes about paint today
+spaces; a folder opens in Files, a text file in Notes, a `/bin` program runs), `notify
+<title>[\t<subtitle>]`, `today`, `spaces`, `desktop`, `skim`. An unknown command fails the
+write with `EINVAL`. Reading gives a status snapshot (refreshed once a second): `mode`,
+`space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
+
+`user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
+paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and
+`cowsay [text]` (which just prints).
 
 ## Userland (`user/`)
 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs
 `cargo build --release` in `user/` into `target/user/` **before** it packs the
-initramfs, and fails the build if a program (`user/<name>/src/main.rs`) isn't listed in
-`initramfs.list`. So `cargo build` at the root builds everything and the programs land in
-`/bin`. Adding a program: `user/<name>/` + workspace member + one line in
+initramfs, and fails the build if a program isn't listed in `initramfs.list`. Programs
+are `user/<crate>/src/main.rs` (binary `<crate>`) and `user/<crate>/src/bin/<x>.rs`
+(binary `<x>`). So `cargo build` at the root builds everything and the programs land in
+`/bin`. Adding one: the source file (+ workspace member for a new crate) + one line in
 `initramfs.list`.
 
-* `rt`: `_start`, syscall wrappers (`rt::sys`), `print!`/`println!`/`eprintln!` (one
-  write per call), brk bump allocator, panic handler, `rt::main!(main)`.
-* `init`: banner, runs `hello`, keeps `msh` running (restarts it), reaps orphans.
-* `hello`: argv/env, uname, clocks, brk heap, mmap.
-* `msh`: built-ins `echo ps uname sleep exit help cd pwd ls cat mkdir`; runs `/bin/<name>`
-  (or a path) via fork + execve + wait4; `cmd &` runs in the background.
-* `fault`: `fault` (null read), `fault write`, `fault ill`, `fault stack N` (KiB).
+* `rt`: `_start`, syscall wrappers (`rt::sys`: files, processes, signals with an
+  `sa_restorer` trampoline, job control, /proc-based `ps`), `print!`/`println!`,
+  `rt::io` (buffered `Out`, `Lines`, `each_input`, flag parsing), `rt::table`
+  (structured pipes), brk bump allocator, panic handler, `rt::main!(main)`.
+* `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
+* `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
+  globs, job control with Ctrl-C, structured pipes).
+* `coreutils`: ls cat echo wc head tail grep sort uniq ps kill sleep mkdir rm mv cp ln
+  touch env uptime free uname true false clear, one binary each.
+* `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
+  `utest pipe | cow | proc | signal | all`).
 
 ## Moving the window server into a kernel thread
 
@@ -223,11 +350,11 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
 
 ## Not done yet / next
 
-* Copy-on-write fork, file-backed and shared mmap (tmpfs frames are page aligned already),
-  demand paging for brk/mmap, `PROT_NONE` (accepted, ignored).
-* Threads in a process (`CLONE_VM|CLONE_THREAD`, futex), signals (kill, handlers,
-  ^C → SIGINT), process groups / job control, pipes.
-* /proc/<pid>/ (then retire MILK_PS), per-process CPU accounting in /proc.
+* File-backed and shared mmap (tmpfs frames are page aligned already), demand paging for
+  brk/mmap, `PROT_NONE` (accepted, ignored).
+* Threads in a process (`CLONE_VM|CLONE_THREAD`, futex), job stop/continue (SIGTSTP,
+  `bg`), SA_RESTART, sigaltstack, a vDSO with a sigreturn trampoline.
+* Controlling-terminal rules (any process may TIOCSPGRP today), SIGTTIN/SIGTTOU.
 * 16-bit ASIDs (Apple silicon has them), SMP (scheduler lock across check+block,
-  per-CPU current thread via TPIDR_EL1).
+  per-CPU current thread via TPIDR_EL1, an atomic COW share-and-copy).
 * The higher-half kernel move (above), then static Linux binaries at 0x400000.

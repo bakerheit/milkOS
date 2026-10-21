@@ -86,9 +86,9 @@ impl Inode for DevNode {
                 }
                 Ok(buf.len())
             }
-            // The tty line discipline (proc/console.rs): blocks until a line is typed once
+            // The tty line discipline (proc/tty.rs): blocks until a line is typed once
             // the scheduler runs; EAGAIN when empty before that.
-            Kind::Console => crate::proc::console::read(buf),
+            Kind::Console => crate::proc::tty::CONSOLE.read(buf),
         }
     }
 
@@ -96,7 +96,7 @@ impl Inode for DevNode {
         match self.kind {
             // POLLIN only once a whole line (or ^D) is waiting; always writable.
             Kind::Console => {
-                if crate::proc::console::readable() {
+                if crate::proc::tty::CONSOLE.readable() {
                     0x1 | 0x4
                 } else {
                     0x4

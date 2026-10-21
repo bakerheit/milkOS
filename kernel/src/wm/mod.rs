@@ -16,9 +16,14 @@
 //! assumes it runs on the boot stack, so it can become a kernel thread once `proc` lands: put
 //! `Desktop::frame` in that thread's loop and replace the `wfi` with a sleep-until-event.
 
+mod anim;
 mod apps;
 mod buffer;
+pub mod client;
+pub mod clipboard;
+mod ctl;
 mod event;
+mod fontx;
 mod icons;
 mod menus;
 mod paint;
@@ -27,7 +32,7 @@ mod rtc;
 mod script;
 mod shell;
 mod theme;
-mod tty;
+pub mod tty;
 mod wallpaper;
 mod window;
 
@@ -81,6 +86,13 @@ pub enum Request {
     /// Open, and if the app's window is on another space, bring it to this one.
     OpenHere(App),
     Mode(Mode),
+    /// A process created a window (`client::create`).
+    ClientCreate(u32),
+    /// A process destroyed its window (or exited).
+    ClientGone(u32),
+    /// `open` from /dev/wm: an app name or an absolute path.
+    OpenAny(String),
+    Skim,
 }
 
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
@@ -247,6 +259,8 @@ pub struct Desktop {
     next_toast: u32,
     settings: Settings,
     cache: BTreeMap<PanelKey, CachedPanel>,
+    /// Running window animations (anim.rs).
+    anims: Vec<anim::Anim>,
     /// Signature of the full-screen layers (dims) last composited.
     dims: Vec<u8>,
     /// Spaces overview thumbnails, keyed by window id.
@@ -257,6 +271,8 @@ pub struct Desktop {
     hover_lights: Option<u32>,
     /// Dock item under the pointer (its name shows above it).
     tip: Option<usize>,
+    /// Dock item being pressed (drawn 4% darker until release).
+    dock_pressed: Option<usize>,
     /// Open menu bar menu (index into `menu_titles`) and the row under the pointer.
     menu: Option<usize>,
     menu_hover: Option<usize>,
@@ -308,12 +324,14 @@ impl Desktop {
                 volume: 40,
             },
             cache: BTreeMap::new(),
+            anims: Vec::new(),
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
             drag: None,
             hover_lights: None,
             tip: None,
+            dock_pressed: None,
             menu: None,
             menu_hover: None,
             damage: DirtyList::new(),
@@ -325,7 +343,10 @@ impl Desktop {
             acct_start: timer::now_ns(),
             last_second: timer::now_ns() / 1_000_000_000,
         };
+        d.status = d.status_text();
         apps::fsx::ensure_home();
+        ctl::init();
+        clipboard::init();
         // The mockup's desktop: Files behind, Terminal in front and focused.
         d.open(App::Files);
         d.open(App::Terminal);
@@ -438,6 +459,103 @@ impl Desktop {
         }
         self.set_focus(Some(id));
         self.damage_window(id);
+        if self.stats.frames > 0 {
+            self.anim_open(id); // not for the windows the desktop starts with
+        }
+    }
+
+    /// Start a userland program (kernel-parented; a small thread reaps it). If it already has
+    /// a window, focus that instead.
+    fn launch(&mut self, path: &str) {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if let Some(id) = self.program_window(name) {
+            self.show_window(id);
+            return;
+        }
+        match crate::proc::spawn(path, &[name]) {
+            Ok(pid) => {
+                kprintln!("wm: started {path} as pid {pid}");
+                drop(sched::spawn("reap-app", move || {
+                    crate::proc::wait_kernel_child(pid);
+                }));
+            }
+            Err(e) => self.post_toast("Can't start", &alloc::format!("{path}: errno {}", e.0)),
+        }
+    }
+
+    /// `open` from /dev/wm: an app by name, a folder (Files), a text file (Notes) or a program.
+    fn open_any(&mut self, what: &str) {
+        match what.to_ascii_lowercase().as_str() {
+            "files" | "finder" => return self.open(App::Files),
+            "terminal" | "term" | "sh" | "msh" => return self.open(App::Terminal),
+            "notes" => return self.open(App::Notes),
+            "about" | "about milkos" => return self.open(App::About),
+            "today" | "home" => return self.toggle_mode(Mode::Home),
+            "spaces" => return self.toggle_mode(Mode::Spaces),
+            "paint" => return self.launch("/bin/paint"),
+            _ => {}
+        }
+        let path = apps::fsx::resolve("/", what);
+        if apps::fsx::is_dir(&path) {
+            apps::files::show_path(&path);
+            self.open(App::Files);
+        } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
+            self.launch(&path);
+        } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
+            apps::notes::open_file(&path);
+            let sp = self.space;
+            if let Some(w) = self.windows.iter_mut().find(|w| w.app == App::Notes) {
+                w.space = sp;
+            }
+            self.open(App::Notes);
+        } else {
+            self.post_toast("Can't open", what);
+        }
+    }
+
+    /// The /dev/wm status text.
+    fn status_report(&self) -> String {
+        let mode = match self.mode {
+            Mode::Desktop => "desktop",
+            Mode::Home => "today",
+            Mode::Spaces => "spaces",
+        };
+        let mut s = alloc::format!(
+            "mode {mode}\nspace {} of {}\nfocus {}\n",
+            self.space + 1,
+            self.nspaces,
+            self.focused_window().map_or("none", |w| w.contents.title())
+        );
+        for w in &self.windows {
+            let r = w.rect;
+            s.push_str(&alloc::format!(
+                "window {} {}x{}+{}+{} space {}{} {}\n",
+                w.id,
+                r.w,
+                r.h,
+                r.x,
+                r.y,
+                w.space + 1,
+                if w.minimized { " minimised" } else { "" },
+                w.contents.title()
+            ));
+        }
+        s
+    }
+
+    /// A client window whose process is called `name`.
+    fn program_window(&self, name: &str) -> Option<u32> {
+        self.windows
+            .iter()
+            .find(|w| {
+                matches!(w.app, App::Client(c) if client::process_name(c).as_deref() == Some(name))
+            })
+            .map(|w| w.id)
+    }
+
+    fn running_program(&self, path: &str) -> bool {
+        self.program_window(path.rsplit('/').next().unwrap_or(path))
+            .is_some()
     }
 
     /// Make a window visible and focused: unminimise, switch to its space, leave overlays.
@@ -445,6 +563,7 @@ impl Desktop {
         let Some(w) = self.win_mut(id) else {
             return;
         };
+        let was_minimised = w.minimized;
         w.minimized = false;
         let sp = w.space;
         if self.mode != Mode::Desktop {
@@ -455,6 +574,9 @@ impl Desktop {
         }
         self.set_focus(Some(id));
         self.damage_window(id);
+        if was_minimised {
+            self.anim_restore(id);
+        }
     }
 
     fn damage_window(&mut self, id: u32) {
@@ -492,10 +614,22 @@ impl Desktop {
         self.set_focus(top);
     }
 
+    /// Close from the UI (traffic light, Cmd+W, menu). A client's window goes away at once and
+    /// the process gets a Close event.
     fn close(&mut self, id: u32) {
+        if let Some(App::Client(cid)) = self.win(id).map(|w| w.app) {
+            client::closed(cid);
+        }
+        self.close_window(id);
+    }
+
+    fn close_window(&mut self, id: u32) {
         self.damage_window(id);
         if let Some(i) = self.idx(id) {
-            self.windows.remove(i);
+            let w = self.windows.remove(i);
+            if self.visible(&w) {
+                self.anim_close(w);
+            }
         }
         self.thumbs.remove(&id);
         self.invalidate(PanelKey::Dock);
@@ -508,6 +642,7 @@ impl Desktop {
 
     fn minimise(&mut self, id: u32) {
         self.damage_window(id);
+        self.anim_minimise(id);
         if let Some(w) = self.win_mut(id) {
             w.minimized = true;
         }
@@ -753,7 +888,7 @@ impl Desktop {
         self.damage.clear();
         let mut px = 0u64;
         let vis: Vec<usize> = (0..self.windows.len())
-            .filter(|&i| self.visible(&self.windows[i]))
+            .filter(|&i| self.visible(&self.windows[i]) && !self.animating(self.windows[i].id))
             .collect();
         let cur = self.cursor_rect();
         for d in &rects {
@@ -815,6 +950,9 @@ impl Desktop {
             p.blit_rrect(
                 w.rect.x, w.rect.y, &w.surf, 0, 0, w.rect.w, w.rect.h, R_WINDOW, 255,
             );
+        }
+        if !self.anims.is_empty() {
+            anim::draw(&self.anims, &self.windows, &mut p, d);
         }
         for l in layers {
             match l {
@@ -896,12 +1034,27 @@ impl Desktop {
                     self.open(a);
                 }
                 Request::Mode(m) => self.toggle_mode(m),
+                Request::ClientCreate(id) => self.open(App::Client(id)),
+                Request::OpenAny(what) => self.open_any(&what),
+                Request::Skim => {
+                    if self.launcher.is_none() {
+                        self.toggle_launcher();
+                    }
+                }
+                Request::ClientGone(id) => {
+                    if let Some(w) = self.windows.iter().find(|w| w.app == App::Client(id)) {
+                        let wid = w.id;
+                        self.close_window(wid);
+                    }
+                }
             }
         }
         self.tick(now);
+        let animating = self.step_anims(now);
         self.render_and_compose();
         *STATS.lock() = self.stats;
         self.stats.frames != frames
+            || animating
             || self.script.is_some()
             || matches!(
                 self.drag,
@@ -1019,6 +1172,18 @@ impl Desktop {
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
             self.last_second = sec;
+            ctl::set_status(self.status_report());
+            // Windows of userland clients that exited without destroying them.
+            for cid in client::reap() {
+                if let Some(wid) = self
+                    .windows
+                    .iter()
+                    .find(|w| w.app == App::Client(cid))
+                    .map(|w| w.id)
+                {
+                    self.close_window(wid);
+                }
+            }
             let span = now - self.acct_start;
             let idle = idle_thread_ns();
             if let Some(pct) = ((idle - self.idle_cpu_ns.min(idle)) * 100).checked_div(span) {
@@ -1045,6 +1210,15 @@ impl Desktop {
     // ---- input ----------------------------------------------------------------------------------
 
     pub fn handle(&mut self, ev: Event) {
+        // A click or key press finishes running animations.
+        if !self.anims.is_empty()
+            && matches!(
+                ev,
+                Event::Button { down: true, .. } | Event::Key { down: true, .. }
+            )
+        {
+            self.skip_anims();
+        }
         match ev {
             Event::PointerMove { x, y } => self.pointer_move(x, y),
             Event::Button {
@@ -1105,6 +1279,27 @@ impl Desktop {
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
     fn hover(&mut self, x: i32, y: i32) {
+        // Skim: the selection follows the pointer over the results.
+        if self.launcher.is_some() {
+            let rows = self.layers().iter().find_map(|l| match l {
+                Layer::Panel(s) if s.key == PanelKey::LaunchResults => Some(s.rect),
+                _ => None,
+            });
+            if let Some(r) = rows
+                && hit(&r, x, y)
+                && y - r.y >= 40
+            {
+                let row = ((y - r.y - 40) / LAUNCH_ROW_H) as usize;
+                let n = self.launcher.as_ref().map_or(0, |l| l.result_count());
+                if let Some(l) = &mut self.launcher
+                    && row < n
+                    && row != l.sel
+                {
+                    l.sel = row;
+                    self.invalidate(PanelKey::LaunchResults);
+                }
+            }
+        }
         if self.menu.is_some() {
             if y < MENU_H {
                 if let Some(t) = self.menu_title_at(x) {
@@ -1143,6 +1338,7 @@ impl Desktop {
         if tip != self.tip {
             self.tip = tip;
             self.invalidate(PanelKey::Tip);
+            self.invalidate(PanelKey::Dock);
         }
     }
 
@@ -1210,7 +1406,13 @@ impl Desktop {
         let w = self.win(id).unwrap();
         let r = w.rect;
         match w.hit(x, y) {
-            Some(Part::Light(which)) => self.drag = Some(Drag::Light { id, which }),
+            Some(Part::Light(which)) => {
+                self.drag = Some(Drag::Light { id, which });
+                if let Some(w) = self.win_mut(id) {
+                    w.pressed_light = Some(which);
+                    w.dirty = true;
+                }
+            }
             Some(Part::Title) => {
                 self.drag = Some(Drag::Move {
                     id,
@@ -1237,8 +1439,15 @@ impl Desktop {
 
     fn release(&mut self) {
         let (x, y) = self.pointer;
+        if self.dock_pressed.take().is_some() {
+            self.invalidate(PanelKey::Dock);
+        }
         match self.drag.take() {
             Some(Drag::Light { id, which }) => {
+                if let Some(w) = self.win_mut(id) {
+                    w.pressed_light = None;
+                    w.dirty = true;
+                }
                 if let Some(w) = self.win(id)
                     && w.hit(x, y) == Some(Part::Light(which))
                 {
@@ -1292,6 +1501,7 @@ impl Desktop {
             return self.launcher_key(&k);
         }
         if m.meta {
+            let mut handled = true;
             match k.key {
                 Key::Char('w') => {
                     if let Some(id) = self.focus {
@@ -1304,9 +1514,12 @@ impl Desktop {
                     }
                 }
                 Key::Tab | Key::Char('`') => self.cycle_windows(),
-                _ => {}
+                // Everything else (Cmd+C / V / X / A ...) is the focused window's.
+                _ => handled = false,
             }
-            return;
+            if handled {
+                return;
+            }
         }
         if self.mode != Mode::Desktop {
             return;

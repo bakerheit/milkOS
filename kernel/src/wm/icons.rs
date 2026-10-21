@@ -21,6 +21,7 @@ pub enum Icon {
     Doc,
     Clock,
     Spaces,
+    Paint,
 }
 
 /// Draw `icon` as an `s` x `s` tile at (x, y), tile colour `bg` (blended at `bg_a`), glyph `fg`.
@@ -84,6 +85,15 @@ pub fn draw(
             rect(p, 14, 28, 11, 9, u(5), fg);
             rect(p, 23, 11, 3, 23, 0, fg);
             rect(p, 23, 11, 13, 5, u(2), fg);
+        }
+        Icon::Paint => {
+            // A milk palette with three paint dots and a thumb hole.
+            p.circle(x + u(9), y + u(10), u(30), MILK, 255);
+            p.circle(x + u(27), y + u(26), u(9), ESPRESSO, 0x30);
+            rect(p, 15, 17, 7, 7, u(4), STRAW);
+            rect(p, 24, 14, 7, 7, u(4), BLUE);
+            rect(p, 15, 27, 7, 7, u(4), MATCHA);
+            p.circle(x + u(27), y + u(26), u(7), HONEY, 255);
         }
         Icon::Clock => {
             ring(p, 10, 10, 28, 28, u(14), th(3), fg);

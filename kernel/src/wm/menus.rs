@@ -6,7 +6,6 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::font;
 use crate::gfx::Rect;
 
 use super::paint::Painter;
@@ -35,6 +34,8 @@ pub enum MenuAction {
     Help,
     Restart,
     ShutDown,
+    /// Send Cmd+<key> to the focused window (Edit menu: cut, copy, paste, select all).
+    Key(char),
     /// Shown greyed out (no clipboard yet).
     Disabled,
 }
@@ -63,17 +64,17 @@ fn sep() -> Item {
 
 impl Desktop {
     /// Menu bar titles: (x, width, name), index 0 is the app name.
-    pub(super) fn menu_titles(&self) -> Vec<(i32, i32, &'static str)> {
+    pub(super) fn menu_titles(&self) -> Vec<(i32, i32, String)> {
         let mut v = Vec::new();
         let name = self.app_title();
         let mut x = 38;
-        let w = font::str_width(name, 1) + 1;
+        let w = super::fontx::prop_width(&name, true);
         v.push((x, w, name));
         x += w;
         for m in self.menu_names() {
             x += 24;
-            let w = font::str_width(m, 1);
-            v.push((x, w, *m));
+            let w = super::fontx::prop_width(m, false);
+            v.push((x, w, String::from(*m)));
             x += w;
         }
         v
@@ -92,9 +93,10 @@ impl Desktop {
 
     pub(super) fn menu_items(&self, idx: usize) -> Vec<Item> {
         let titles = self.menu_titles();
-        let Some(&(_, _, name)) = titles.get(idx) else {
+        let Some((_, _, name)) = titles.get(idx) else {
             return Vec::new();
         };
+        let name = name.as_str();
         let has_win = self.focus.is_some() && self.mode == Mode::Desktop;
         let win = |a| if has_win { a } else { MenuAction::Disabled };
         if idx == 0 {
@@ -122,9 +124,10 @@ impl Desktop {
             "Edit" | "Format" => alloc::vec![
                 item("Undo", "Cmd+Z", MenuAction::Disabled),
                 sep(),
-                item("Cut", "Cmd+X", MenuAction::Disabled),
-                item("Copy", "Cmd+C", MenuAction::Disabled),
-                item("Paste", "Cmd+V", MenuAction::Disabled),
+                item("Cut", "Cmd+X", win(MenuAction::Key('x'))),
+                item("Copy", "Cmd+C", win(MenuAction::Key('c'))),
+                item("Paste", "Cmd+V", win(MenuAction::Key('v'))),
+                item("Select All", "Cmd+A", win(MenuAction::Key('a'))),
             ],
             "View" => alloc::vec![
                 item("Today", "F4", MenuAction::Today),
@@ -168,7 +171,7 @@ impl Desktop {
     pub(super) fn menu_layer(&self) -> Option<Layer> {
         let idx = self.menu?;
         let titles = self.menu_titles();
-        let &(x, _, _) = titles.get(idx)?;
+        let x = titles.get(idx)?.0;
         let items = self.menu_items(idx);
         let r = Rect::new(
             (x - 12).min(SCREEN_W - MENU_W - 8),
@@ -216,7 +219,7 @@ impl Desktop {
                 p.rrect(6, y, w - 12, ROW_H, 6, STRAW, SEL_ROW_A);
             }
             let c = if disabled { LATTE } else { ESPRESSO };
-            p.text(16, y + 4, &it.label, c);
+            p.text_p(16, y + 4, &it.label, c, false);
             if !it.key.is_empty() {
                 p.text_right(
                     w - 14,
@@ -273,6 +276,14 @@ impl Desktop {
             MenuAction::Help => self.post_toast("milkOS Help", "type 'help' in Terminal"),
             MenuAction::Restart => super::power::restart(),
             MenuAction::ShutDown => super::power::shut_down(),
+            MenuAction::Key(c) => {
+                self.handle(super::Event::Key {
+                    key: super::Key::Char(c),
+                    ch: None,
+                    mods: super::event::Mods::META,
+                    down: true,
+                });
+            }
             MenuAction::Disabled => {}
         }
     }
@@ -281,6 +292,6 @@ impl Desktop {
     pub(super) fn menu_title_at(&self, x: i32) -> Option<usize> {
         self.menu_titles()
             .iter()
-            .position(|&(tx, tw, _)| x >= tx - 8 && x < tx + tw + 8)
+            .position(|(tx, tw, _)| x >= tx - 8 && x < tx + tw + 8)
     }
 }

@@ -131,7 +131,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("write the window manager");
         }
         "about" => {
-            let (x, y) = dock_icon_center(7);
+            let (x, y) = dock_icon_center(8);
             b.click(x, y).wait(1200);
         }
         "launcher" => {
@@ -178,6 +178,149 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "browse" => {
             b.click(137, 153).wait(200);
+        }
+        "stty" => {
+            b.wait(300)
+                .typ("stty")
+                .enter()
+                .wait(200)
+                .typ("stty size")
+                .enter()
+                .wait(200);
+            b.typ("stty -echo")
+                .enter()
+                .wait(200)
+                .typ("echo hidden")
+                .enter()
+                .wait(200);
+            b.typ("stty sane")
+                .enter()
+                .wait(200)
+                .typ("stty")
+                .enter()
+                .wait(300);
+        }
+        "paint" => {
+            // Dock icon 4 is Paint. Its window lands at (192, 112); the canvas starts 48px
+            // into the body, so draw a smiling cow-ish face in screen coordinates.
+            let (x, y) = dock_icon_center(4);
+            b.click(x, y).wait(1200);
+            b.click(193 + 12 + 34 + 14, 145 + 24).wait(100); // straw swatch
+            b.drag(320, 280, 520, 280, 24).wait(50);
+            b.drag(520, 280, 520, 420, 16).wait(50);
+            b.drag(520, 420, 320, 420, 24).wait(50);
+            b.drag(320, 420, 320, 280, 16).wait(50);
+            b.click(193 + 12 + 4 * 34 + 14, 145 + 24).wait(100); // blue
+            b.drag(380, 340, 381, 341, 2).drag(460, 340, 461, 341, 2);
+            b.click(193 + 12 + 2 * 34 + 14, 145 + 24).wait(100); // honey
+            b.drag(370, 385, 420, 400, 10)
+                .drag(420, 400, 470, 385, 10)
+                .wait(300);
+        }
+        "paintclose" => {
+            let (x, y) = dock_icon_center(4);
+            b.click(x, y)
+                .wait(1200)
+                .click(192 + 14 + 6, 112 + 16)
+                .wait(800);
+            b.typ("ps").enter().wait(400);
+        }
+        "desk" => {
+            b.wait(300)
+                .typ("cowsay hello from userland")
+                .enter()
+                .wait(300);
+            b.typ("notify Tea is ready in 3 minutes").enter().wait(300);
+            b.typ("cat /dev/wm").enter().wait(300);
+            b.typ("open ~/Documents/todo.txt").enter().wait(600);
+        }
+        "desktoday" => {
+            b.wait(300).typ("today").enter().wait(600);
+        }
+        "minianim" => {
+            // Ends right after the release, so a quick screenshot catches the animation.
+            b.to(TERM_MIN.0, TERM_MIN.1).wait(30).down().wait(30).up();
+        }
+        "minianim2" => {
+            b.to(TERM_MIN.0, TERM_MIN.1)
+                .wait(30)
+                .down()
+                .wait(30)
+                .up()
+                .wait(4000);
+            b.key(Key::F(4), Mods::NONE)
+                .wait(300)
+                .key(Key::F(4), Mods::NONE)
+                .wait(300);
+        }
+        "dockpress" => {
+            // Hover the Terminal tile, then press (and hold) the Notes tile and a light.
+            let (x, y) = dock_icon_center(1);
+            b.glide(600, 500, x, y, 8).wait(200);
+            let (x, y) = dock_icon_center(3);
+            b.glide(x - 60, y, x, y, 4).down().wait(300);
+        }
+        "select" => {
+            // Notes: open it, drag-select two lines, copy, paste at the end.
+            let (x, y) = dock_icon_center(3);
+            b.click(x, y).wait(300);
+            // Notes body: window (120, 96), body at (121, 129), text at +16 / 20px lines.
+            b.drag(
+                121 + 16 + 16,
+                129 + 16 + 20 + 8,
+                121 + 16 + 8 * 18,
+                129 + 16 + 40 + 8,
+                10,
+            );
+            b.key(Key::Char('c'), Mods::META).key(Key::End, Mods::CTRL);
+            b.key(Key::Down, Mods::NONE)
+                .key(Key::Down, Mods::NONE)
+                .key(Key::Down, Mods::NONE);
+            b.key(Key::End, Mods::NONE).key(Key::Enter, Mods::NONE);
+            b.key(Key::Char('v'), Mods::META).wait(100);
+            b.drag(
+                121 + 16 + 16,
+                129 + 16 + 8,
+                121 + 16 + 8 * 11,
+                129 + 16 + 8,
+                6,
+            )
+            .wait(200);
+        }
+        "termselect" => {
+            // Terminal: select a few words of output with the mouse, copy, paste at the prompt.
+            b.wait(300).typ("echo milk and honey").enter().wait(300);
+            b.drag(455, 507 - 18 + 8, 455 + 8 * 14, 507 - 18 + 8, 8);
+            b.key(Key::Char('c'), Mods::META)
+                .key(Key::Char('v'), Mods::META)
+                .wait(200);
+            b.drag(455, 507 - 36 + 8, 455 + 8 * 10, 507 - 36 + 8, 6)
+                .wait(200);
+        }
+        "openanim" => {
+            let (x, y) = dock_icon_center(8);
+            b.to(x, y).wait(30).down().wait(30).up();
+        }
+        "lsbin" => {
+            b.wait(300).typ("ls /bin").enter().wait(600);
+        }
+        "sigint" => {
+            b.wait(300).typ("sleep 9").enter().wait(1000);
+            b.key(Key::Char('c'), Mods::CTRL)
+                .wait(400)
+                .typ("echo status $?")
+                .enter()
+                .wait(400);
+        }
+        "winsize" => {
+            // Shrink the Terminal from its corner, then ask the tty its size.
+            b.wait(300).typ("stty size").enter().wait(300);
+            b.drag(956, 556, 800, 500, 12).wait(200);
+            b.typ("stty size").enter().wait(400);
+        }
+        "utest" => {
+            // proc's userland test suite (fork / CoW, pipes, signals) from the desktop shell.
+            b.wait(300).typ("utest").enter().wait(6000);
         }
         "hover" => {
             b.glide(600, 400, 480, 286, 10);
@@ -250,6 +393,14 @@ pub fn from_fw_cfg() -> Option<Script> {
     if name == "none" || name.is_empty() {
         return None;
     }
+    // slow-<demo>: the same demo with animations 20x slower (for catching them on camera).
+    let name = match name.strip_prefix("slow-") {
+        Some(n) => {
+            super::anim::SLOWMO.store(20, core::sync::atomic::Ordering::Relaxed);
+            n
+        }
+        None => name,
+    };
     let Some(steps) = build(name) else {
         kprintln!("[demo] unknown demo '{name}'");
         return None;

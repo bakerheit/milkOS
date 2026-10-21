@@ -1,0 +1,14 @@
+# Desktop command-line tools: open, notify, today, spaces, cowsay. They talk to the window
+# system through /dev/wm (kernel/src/wm/ctl.rs). One crate, one binary per tool (src/bin/).
+[package]
+name = "desk"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

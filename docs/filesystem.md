@@ -20,6 +20,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `blockdev.rs` | `BlockDevice` trait, disk registry, `/dev/vdX` byte-offset inode |
 | `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
 | `bcache.rs` | block cache: fixed-size LRU of 4 KiB buffers, write-back, `flush` = durable |
+| `ramdisk.rs` | RAM block device (the self-test's throwaway milkfs) |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
 | `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
@@ -38,9 +39,9 @@ macOS-flavoured on top, Linux underneath, so both kinds of software find their w
 | `/` | tmpfs | root, everything in RAM |
 | `/Applications` | tmpfs | app bundles (empty for now) |
 | `/System` | tmpfs | OS files; `/System/Version.txt` |
-| `/home/milk` | tmpfs | the user's home (`$HOME`) |
+| `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
 | `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
-| `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots |
+| `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |
 | `/bin` | tmpfs | user programs from the initramfs |
 | `/etc` | tmpfs | `motd`, `hostname` (= `milk`) |
 | `/tmp` | tmpfs | mode `1777` |
@@ -314,6 +315,8 @@ the differences are listed at the end of this section.
 | `volume.rs` | `State`, commit, mount (mark + namespace check + orphan reclaim), mkfs, space check |
 | `items.rs` | inodes, directory entries, extents, symlinks, file data |
 | `snap.rs` | snapshot create / delete / rollback |
+| `clone.rs` | clones: create / discard / promote |
+| `timemachine.rs` | automatic snapshots thread, retention, `/sys/fs/milkfs/auto` |
 | `inode.rs` | VFS objects: `Volume` (the `FileSystem`), `MilkInode`, `.snapshots` |
 | `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
 | `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
@@ -346,7 +349,9 @@ itself.
 | 80 | next inode number u64, 88: created (unix s) u64 |
 | 96 | uuid [16], 112: label [32] (NUL padded) |
 | 144 | snapshot count u32 (max 30) |
-| 152 | 30 snapshot records x 128 B: name [48], generation u64, created u64, root pointer, dead list pointer, next_ino u64, 8 reserved |
+| 152 | 30 records x 128 B (snapshots and clones): name [48], generation u64 (clone: its origin's), created u64, root pointer, dead list pointer, next_ino u64, flags u32 (1 = clone), id u32 (clones) |
+| 3992 | automatic snapshots: state u32 (0 default/1 on/2 off), interval s u32, keep u32, daily u32 (0 = default) |
+| 4008 | flags u32: 1 = `SB_BRANCHED` (a clone was promoted; see below) |
 | 4088 | xxh64 of bytes 0..4088 |
 
 **Tree node**: header `"MKND" | level u8 (0 = leaf) | pad u8 | count u16 | birth u64`, then
@@ -369,8 +374,14 @@ The root directory is inode 1 (its parent is itself). Inode numbers only grow.
 
 ### Transactions and crash consistency
 
-Every mutating VFS call (write, create, mkdir, unlink, rmdir, rename, link, truncate,
-setattr) is one transaction, committed before the call returns (v0 is synchronous):
+Mutating VFS calls (write, create, mkdir, unlink, rmdir, rename, link, truncate, setattr)
+join the volume's open transaction. It is committed when it is **1 s old** (checked at the
+end of each operation and by the `milkfs-flush` thread every 250 ms), after **512
+operations**, when the bcache is 3/4 dirty, on `fsync`/`fdatasync`/`sync` (syscalls 82/83/81,
+`OpenFile::fsync`, `fs::sync_all`), and before any snapshot or clone operation. So a crash
+loses at most about a second of work, and always lands on a state between whole
+operations. 200 x 1 KiB files: 155 ms / 601 commits before batching, 1-8 ms / 2 commits
+after. A commit:
 
 1. The B+tree path to every changed item was copied into memory (old blocks released by the
    rules below); new data blocks went to freshly allocated blocks through the bcache.
@@ -381,6 +392,12 @@ setattr) is one transaction, committed before the call returns (v0 is synchronou
 A crash at any moment leaves the previous superblock valid and everything it references
 untouched; a torn superblock fails its checksum and the other slot wins. Blocks the commit
 freed only become reusable after it is durable.
+
+**Branched history.** Dead lists rely on history being linear (a block that leaves the
+live tree never comes back). Promoting a clone breaks that, so it sets `SB_BRANCHED`:
+dead lists are dropped and snapshot delete, rollback and promote reclaim space with an
+exact **sweep** (free every allocated block the committed state can't reach, the same walk
+mount does). When no snapshots are left the history is linear again and the flag clears.
 
 **Free space is not stored.** Mount marks every block reachable from the chosen superblock
 (live tree, every snapshot tree, shared subtrees once, extents, dead-list chains); the rest is
@@ -409,14 +426,58 @@ before a crash). It prints e.g. `milkfs: vda mounted at /Volumes/Milk: generatio
   live root to the snapshot's. The snapshot is kept. Inode objects hold only `(view, ino)`
   and inode numbers are never reused, so open files see ENOENT instead of stale data.
 
-Kernel API (`crate::fs::milkfs`): `probe(dev)`, `mkfs(dev, label, force)`, `mount(dev,
-path)`, `automount()`, `snapshot(name) -> SnapInfo`, `snapshots()`, `delete_snapshot(name)`,
-`rollback(name)`, `sync()`, `info()`, `volume()`.
+### Time Machine (automatic snapshots)
 
-Shell: `/sys/fs/milkfs/info` and `snapshots` (read); write a name to `snapshot`, `delete`,
-`rollback`; anything to `sync`; `vdX [label] [force]` to `mkfs`. msh has no redirection yet,
-so `user/snap` wraps them: `snap`, `snap info`, `snap create NAME`, `snap delete NAME`,
-`snap rollback NAME`.
+The `timemachine` kernel thread (started by `fs::start_threads()` after `proc::start_init`)
+snapshots the primary volume at boot and then every interval, as `auto-YYYY-MM-DDTHH:MM:SS`
+(RTC time), unless nothing changed since the newest snapshot (same committed root). Retention
+applies to `auto-` snapshots only: the newest `keep`, plus the newest of each day for the last
+`daily` days; manual snapshots and clone origins are never deleted; if the 30-record table
+is full the oldest auto snapshot makes room. Defaults: on, 15 min, keep 8, daily 14. Settings
+live in the superblock, so they persist: `/sys/fs/milkfs/auto` reads e.g. `on interval=15m
+keep=8 daily=14` / `next in 12m`; write `on`, `off`, `interval=30s|15m|2h`, `keep=K`,
+`daily=D`, `now` (`snap auto ...`). A snapshot is a root pointer plus one superblock commit.
+
+### Clones (try before install)
+
+A clone is a writable copy of a snapshot (O(1)), mounted as its own file system at
+`/Volumes/<label>-<name>` (and remounted at boot). It shares the origin's blocks until it
+writes; inside a clone, a dropped block born after the origin is the clone's own and is
+freed, an older one stays with the origin. The origin snapshot can't be deleted while it
+has clones (EBUSY); clones can't be snapshotted (v0).
+
+- `clone(snap, name) -> path`: make and mount it. Install into it, try it.
+- `discard_clone(name)`: unmount, free what the clone wrote.
+- `promote_clone(name) -> "before-<name>"`: the clone becomes the live volume; the live state
+  it replaces is kept as snapshot `before-<name>`, so `rollback before-<name>` undoes the
+  install. Sets `SB_BRANCHED` (above).
+
+The intended UI flow: snapshot (or take the newest auto snapshot) → clone → installer
+writes into `/Volumes/Milk-<name>` → user tries the app (run with that root once proc has
+per-process roots; today, from that path) → Keep = promote, Cancel = discard.
+
+### Persistent home
+
+With a milkfs volume, `/home/milk` is a **bind mount** of `<volume>/home/milk`
+(`fs::bind`): same inodes, `path_of`/getcwd still say `/home/milk`, `/Users/milk` follows.
+`milkfs::setup_home()` runs in `fs::init` right after automount, before the desktop creates
+its home folders; the first time it seeds the directory from the initramfs copy. Without a
+milkfs disk home stays on tmpfs. Snapshots and rollbacks of the volume include home.
+
+### Interfaces
+
+Kernel API (`crate::fs::milkfs`): `probe(dev)`, `mkfs(dev, label, force)`, `mount(dev, path)`
+(first becomes primary), `mount_secondary`, `automount()`, `setup_home()`, `start_threads()`,
+`snapshot(name) -> SnapInfo`, `snapshots()`, `delete_snapshot(name)`, `rollback(name)`,
+`clone(snap, name)`, `clones()`, `discard_clone(name)`, `promote_clone(name)`, `sync()`,
+`info()`, `volume()`, `user_volume()`, `mount_path()`. VFS: `fs::bind`, `fs::unmount`,
+`fs::sync_all`, `Inode::sync`, `FileSystem::sync`, `OpenFile::fsync`.
+
+Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name to
+`snapshot`, `delete`, `rollback`, `discard`, `promote`; `SNAP NAME` to `clone`; settings to
+`auto`; anything to `sync`; `vdX [label] [force]` to `mkfs`. msh has no redirection yet, so
+`user/snap` wraps them: `snap`, `snap info`, `snap create|delete|rollback NAME`,
+`snap clones`, `snap clone SNAP NAME`, `snap promote|discard NAME`, `snap auto [SETTINGS]`.
 
 **mkfs** never runs on its own. In the kernel it is the explicit `mkfs()` call (or the
 `/sys/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless
@@ -427,31 +488,40 @@ so `user/snap` wraps them: `snap`, `snap info`, `snap create NAME`, `snap delete
 
 ### Tests
 
-- Boot self-test (milkfs part, on `/Volumes/Milk/.selftest`, cleaned up afterwards): file
-  I/O, 300 KiB file, truncate, sparse, 60 files, rename/link/symlink/unlink-while-open,
-  getdents64, snapshots via the API and `/sys`, browsing, EROFS, rollback, delete, and
-  **exact space accounting** (allocated blocks == reachable blocks, no leak, nothing live
-  marked free) after every phase. xxh64 is checked against the reference vectors.
-- Persistence: every boot appends to `/Volumes/Milk/boot.log` and prints it.
+- Boot self-test, milkfs part. **The user's volume only gets read-only checks** (mounted,
+  info consistent, exact space accounting, home bound); verified byte-identical after a boot.
+  Everything destructive runs on a throwaway volume: a 16 MiB RAM disk (`fs/ramdisk.rs`),
+  mkfs'd, mounted at `/Volumes/.milk-selftest` (never the primary volume), with the snapshot
+  API and `/sys/fs/milkfs` pointed at it for the duration (`set_test_override`, before the
+  scheduler starts), then unmounted and its RAM checked to be back. It covers file I/O,
+  300 KiB file, truncate, sparse, 60 files, rename/link/symlink/unlink-while-open,
+  getdents64, bind mounts, snapshots via the API and `/sys`, browsing, EROFS, rollback,
+  delete, Time Machine naming/retention/settings, clones (create, isolation, origin pinned,
+  discard, persistence across a re-open, promote, undo), a small-file benchmark, and
+  **exact space accounting** (allocated == reachable, no leak, nothing live marked free)
+  after every phase. Failures print a loud `*** fs selftest: FAIL ***` line, never a panic.
 - `scripts/crashtest.sh [kills] [powercuts] [superblock-cuts]` (default 4 4 4) on a fresh
   `/tmp/milk-crash.img`. A writer workload (self-describing files via tmp + rename,
-  snapshots taken, deleted and rolled back) is interrupted by SIGKILL of qemu at a random
+  snapshots taken, deleted and rolled back, clones made, written into, promoted or
+  discarded, so branched history is covered too) is interrupted by SIGKILL of qemu at a random
   time, by an in-kernel power cut after N random sectors (the request in flight is torn,
   the machine halts), or by a cut during the K-th superblock write after T of its 8
   sectors. After each: host `mkmilkfs.py check`, then a check boot that mounts, verifies
   every file in the live tree and all snapshots against its own header, checks the mounted
   generation is the last committed one (or exactly the in-flight one when its superblock
-  fully landed), deletes the snapshots and checks space accounting is exact.
+  fully landed), discards the clones, deletes the snapshots and checks space accounting is
+  exact.
 
 ### Not in v0 (vs the design below)
 
-- Snapshot records live in the superblock (max 30) instead of a volume tree; one volume per
-  disk, no per-app volumes or clones yet (so no try-before-install yet).
+- Snapshot and clone records live in the superblock (30 in total) instead of a volume
+  tree; one volume per disk, no per-app volumes; clones can't be snapshotted.
 - No persistent space map (rebuilt at mount instead; mount time grows with metadata size).
 - One extent per 4 KiB block (no multi-block extents, no inline data, no reflink copies).
 - B+tree deletion doesn't merge underfull nodes.
-- Synchronous: one commit per operation (two device flushes each). No batching, no
-  background flusher thread, no page cache.
+- Batched commits (about 1 s), but no page cache: reads go through the bcache and the tree.
+- After a promote, deletes and rollbacks use a full reachability sweep instead of dead lists
+  (fine at these sizes; proportional to metadata).
 - One global lock per volume (`sched::Mutex<State>`), so operations on a volume serialise.
 - No permission checks (like the rest of the VFS), no xattrs, no fsck repair (check only).
 - Rollback brings back files that were unlinked-but-open when the snapshot was taken; they

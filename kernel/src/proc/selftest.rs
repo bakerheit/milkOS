@@ -80,20 +80,76 @@ fn launch(name: &str, entry_off: usize, x0: u64, x1: u64) -> u32 {
     let mut f = user_frame(IMAGE_BASE + entry_off, sp);
     f.x[0] = x0;
     f.x[1] = x1;
-    start(
+    start(super::Launch {
         name,
-        0,
-        s,
-        FdTable::with_console().unwrap(),
-        fs::root(),
-        &f,
-        0,
-        Box::new(FpState::zeroed()),
-    )
+        ppid: 0,
+        pgid: None,
+        sid: None,
+        space: s,
+        fds: FdTable::with_console().unwrap(),
+        cwd: fs::root(),
+        frame: &f,
+        tpidr_el0: 0,
+        fp: Box::new(FpState::zeroed()),
+        sig: super::signal::SigState::new(),
+        argv: alloc::vec::Vec::new(),
+        exe: alloc::string::String::from(name),
+    })
     .expect("start")
 }
 
+/// Pipes between kernel threads: 300 KB through the 64 KiB ring in odd-sized chunks,
+/// EOF when the writer goes, EPIPE when the reader goes.
+fn pipes() {
+    use crate::fs::{OpenFile, abi};
+    use alloc::sync::Arc;
+    let (r, w) = super::pipe::new(false);
+    let r = Arc::new(OpenFile::new(r, abi::O_RDONLY));
+    let w = OpenFile::new(w, abi::O_WRONLY);
+    const TOTAL: usize = 300_000;
+    let writer = sched::spawn("pipe-w", move || {
+        let mut sent = 0usize;
+        let mut chunk = 1usize;
+        while sent < TOTAL {
+            let n = chunk.min(TOTAL - sent);
+            let data: alloc::vec::Vec<u8> = (sent..sent + n).map(|i| (i * 7) as u8).collect();
+            assert!(w.write(&data).unwrap() == n);
+            sent += n;
+            chunk = chunk * 3 % 9001 + 1;
+        }
+        drop(w); // last write end: reader sees EOF
+    });
+    let mut got = 0usize;
+    let mut buf = [0u8; 1000];
+    loop {
+        let n = r.read(&mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        for (k, &b) in buf[..n].iter().enumerate() {
+            assert!(
+                b == ((got + k) * 7) as u8,
+                "pipe data corrupted at {}",
+                got + k
+            );
+        }
+        got += n;
+    }
+    writer.join();
+    let (r2, w2) = super::pipe::new(false);
+    drop(r2);
+    let w2 = OpenFile::new(w2, abi::O_WRONLY);
+    let e = w2.write(b"x");
+    kprintln!(
+        "[proc-test] pipe: {got} bytes between threads, EOF after writer closed, write with no reader -> {:?}",
+        e.err().map(|e| e.0)
+    );
+    assert!(got == TOTAL && e == Err(super::pipe::EPIPE));
+    let _ = r;
+}
+
 pub fn run() {
+    pipes();
     // Warm-up run so one-time page-table growth (kernel stacks) is out of the count.
     let w = launch("warmup", 0, 0, 0);
     wait_kernel_child(w);
@@ -113,7 +169,7 @@ pub fn run() {
     let after = pmm::stats().free_frames;
     kprintln!(
         "[proc-test] el0: pid {a} status {sa:#x}, pid {b} status {sb:#x} (FP kept across 40 switches), \
-         pid {c} status {sc:#x} (SIGSEGV), pmm {before} -> {after}, {} ASIDs in use",
+         pid {c} status {sc:#x} (SIGSEGV, core), pmm {before} -> {after}, {} ASIDs in use",
         super::asid::in_use()
     );
     assert!(
@@ -121,7 +177,7 @@ pub fn run() {
         "EL0 FP/syscall test failed"
     );
     assert!(
-        sc == wstatus_signaled(SIGSEGV),
+        sc == wstatus_signaled(SIGSEGV) | 0x80,
         "fault did not kill with SIGSEGV"
     );
     assert!(after == before, "process memory leaked");

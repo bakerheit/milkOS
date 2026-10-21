@@ -19,16 +19,23 @@ use super::super::window::{PointerInput, PointerKind, WindowContents};
 use super::super::{Request, icons, request};
 use super::fsx;
 
-const SECTIONS: [&str; 7] = [
+pub const SECTIONS: [&str; 7] = [
     "Appearance",
     "Wallpaper",
-    "Display",
+    "Display & Lock",
     "Dock",
     "Sound",
     "Time Machine",
     "About",
 ];
 const TM: usize = 5;
+
+/// A section someone asked for (Skim's settings results); the Settings window picks it up.
+static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::new(None);
+
+pub fn show_section(i: usize) {
+    *PENDING.lock() = Some(i.min(SECTIONS.len() - 1));
+}
 const AUTO: &str = "/sys/fs/milkfs/auto";
 const TM_SNAPSHOTS: &str = "/sys/fs/milkfs/snapshots";
 
@@ -44,6 +51,8 @@ enum Hit {
     TmInterval(&'static str),
     Sound(bool),
     TestSound,
+    LockAfter(u32),
+    LockNow,
 }
 
 pub struct Settings {
@@ -64,7 +73,7 @@ pub struct Settings {
 impl Settings {
     pub fn new() -> Settings {
         let mut s = Settings {
-            section: 0,
+            section: PENDING.lock().take().unwrap_or(0),
             hits: Vec::new(),
             thumbs: Vec::new(),
             pending: prefs::get(),
@@ -182,7 +191,7 @@ impl Settings {
         Self::heading(
             p,
             x,
-            "Display",
+            "Display & Lock",
             "Brightness dims the whole screen (same as Control centre).",
         );
         let r = Rect::new(x, 100, w - x - 32, CC_TILE_H);
@@ -197,6 +206,32 @@ impl Settings {
         p.circle(t.x + t.w * v / 100 - 8, t.y - 4, 16, MILK, 255);
         p.ring(t.x + t.w * v / 100 - 8, t.y - 4, 16, 1, SAND, 255);
         self.hits.push((grow_h(r, 0), Hit::Brightness));
+        // Lock screen: after how long without input, and a button to lock now.
+        let y = r.y + r.h + 28;
+        p.text_p(x, y, "Lock the screen after", ESPRESSO, true);
+        p.text_p(
+            x,
+            y + 20,
+            "No password: a click or any key unlocks. Ctrl+Cmd+Q locks at once.",
+            COCOA,
+            false,
+        );
+        for (i, &m) in Prefs::LOCK_CHOICES.iter().enumerate() {
+            let label = match m {
+                0 => String::from("Never"),
+                m => format!("{m} min"),
+            };
+            let b = Rect::new(x + i as i32 * 82, y + 50, 76, 30);
+            let on = self.pending.lock_mins == m;
+            self.button(p, b, &label, on, Hit::LockAfter(m));
+        }
+        self.button(
+            p,
+            Rect::new(x, y + 96, 120, 30),
+            "Lock now",
+            false,
+            Hit::LockNow,
+        );
     }
 
     fn draw_dock(&mut self, p: &mut Painter, x: i32) {
@@ -550,6 +585,11 @@ impl WindowContents for Settings {
                 self.send(pr);
             }
             Hit::TestSound => crate::audio::play_system(crate::audio::Sound::Chime),
+            Hit::LockAfter(m) => {
+                pr.lock_mins = m;
+                self.send(pr);
+            }
+            Hit::LockNow => request(Request::Lock),
             Hit::TmInterval(iv) => {
                 let _ = fsx::ctl_write(AUTO, &format!("interval={iv}"));
                 self.read_tm();
@@ -559,6 +599,14 @@ impl WindowContents for Settings {
     }
 
     fn tick(&mut self, now: u64) -> bool {
+        let asked = PENDING.lock().take();
+        if let Some(i) = asked {
+            self.section = i;
+            if i == TM {
+                self.read_tm();
+            }
+            return true;
+        }
         // Live sections (Time Machine countdown, About uptime) once a second.
         let s = now / 1_000_000_000;
         if s != self.last_sec && (self.section == TM || self.section == TM + 1) {

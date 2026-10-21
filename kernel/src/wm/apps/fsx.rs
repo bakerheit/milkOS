@@ -129,6 +129,8 @@ pub fn icon_for(e: &Entry) -> Icon {
                 Icon::Term
             } else if n.ends_with(".png") || n.ends_with(".jpg") {
                 Icon::Photo
+            } else if n.ends_with(".wav") {
+                Icon::Music
             } else {
                 Icon::Doc
             }

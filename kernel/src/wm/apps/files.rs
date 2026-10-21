@@ -189,6 +189,9 @@ impl Files {
         } else if fsx::is_text(&e.name) {
             notes::open_file(&full);
             request(Request::OpenHere(App::Notes));
+        } else if e.name.to_ascii_lowercase().ends_with(".wav") {
+            super::music::play_path(&full);
+            request(Request::OpenHere(App::Music));
         } else {
             super::super::notify(&e.name, "No app opens this kind of file yet");
         }

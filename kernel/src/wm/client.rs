@@ -191,11 +191,16 @@ pub fn free(pa: usize, pages: usize) {
 pub fn reap() -> Vec<u32> {
     let alive =
         |pid: u32| proc::get(pid).is_some_and(|p| p.inner.lock().state == proc::PState::Alive);
-    let dead: Vec<u32> = CLIENTS
+    // Snapshot (id, pid) first: don't take process locks while holding CLIENTS.
+    let owners: Vec<(u32, u32)> = CLIENTS
         .lock()
         .iter()
-        .filter(|(_, cl)| !alive(cl.pid))
-        .map(|(&id, _)| id)
+        .map(|(&id, cl)| (id, cl.pid))
+        .collect();
+    let dead: Vec<u32> = owners
+        .into_iter()
+        .filter(|&(_, pid)| !alive(pid))
+        .map(|(id, _)| id)
         .collect();
     for &id in &dead {
         if let Some(cl) = CLIENTS.lock().remove(&id) {

@@ -1039,9 +1039,11 @@ impl Desktop {
             let border = e.bg == MILK || e.bg == CREAM;
             icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
             p.text_p(64, y + 6, &e.title, ESPRESSO, true);
-            p.text_p(64, y + 24, &e.sub, COCOA, false);
+            // SPEC: no secondary text on a selected row.
+            let sub = if i == sel { ESPRESSO } else { COCOA };
+            p.text_p(64, y + 24, &e.sub, sub, false);
             if i == sel {
-                p.text_right(w - 20, y + 16, "Enter", COCOA, 1, false);
+                p.text_right(w - 20, y + 16, "Enter", ESPRESSO, 1, false);
             }
         }
         let fy = results_height(l) - 30;

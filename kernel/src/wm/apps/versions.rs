@@ -308,7 +308,8 @@ impl WindowContents for Versions {
             };
             let max = ((LIST_W - 48) / 7) as usize;
             let sub: String = sub.chars().take(max).collect();
-            p.text_p(36, y + 22, &sub, COCOA, false);
+            let c = if i == self.sel { ESPRESSO } else { COCOA };
+            p.text_p(36, y + 22, &sub, c, false);
             self.hits.push((r, Hit::Row(i)));
         }
         let x0 = LIST_W + 16;

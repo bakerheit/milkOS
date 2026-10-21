@@ -390,7 +390,8 @@ impl WindowContents for Panel {
             icons::draw(p, x0, y + 1, 22, icon, bg, 255, fg, !folder);
             p.text_p(x0 + 32, y + 4, &e.name, ESPRESSO, false);
             if !folder {
-                p.text_right(w - 24, y + 4, &fsx::human_size(e.size), COCOA, 1, false);
+                let c = if self.sel == Some(i) { ESPRESSO } else { COCOA };
+                p.text_right(w - 24, y + 4, &fsx::human_size(e.size), c, 1, false);
             }
             self.hits.push((r, Hit::Row(i)));
         }

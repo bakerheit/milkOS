@@ -245,7 +245,14 @@ impl Desktop {
                     w - 14,
                     y + 4,
                     it.key,
-                    if disabled { LATTE } else { COCOA },
+                    // SPEC: no secondary text on a selected (highlighted) row.
+                    if disabled {
+                        LATTE
+                    } else if self.menu_hover == Some(i) {
+                        ESPRESSO
+                    } else {
+                        COCOA
+                    },
                     1,
                     false,
                 );

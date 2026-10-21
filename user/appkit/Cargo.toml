@@ -1,0 +1,14 @@
+[package]
+name = "appkit"
+version.workspace = true
+edition.workspace = true
+
+# Shared look and widgets for the built-in apps: the SPEC theme (light and Chocolate milk), the
+# button kinds, segmented controls, switches, text fields and a few shapes. Built on `gui`.
+[lib]
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }

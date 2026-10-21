@@ -38,8 +38,14 @@ impl Paths {
         }
     }
 
+    /// The paths for the user this process runs as. Apps started from the dock get no useful
+    /// HOME (empty or "/"), so those fall back to the OS user's home.
     pub fn from_args(args: &rt::Args) -> Paths {
-        Paths::for_home(args.env("HOME").unwrap_or(DEFAULT_HOME))
+        let home = args
+            .env("HOME")
+            .filter(|h| h.len() > 1 && h.starts_with('/'))
+            .unwrap_or(DEFAULT_HOME);
+        Paths::for_home(home.trim_end_matches('/'))
     }
 
     /// `~/.cache/milk`: where alarmd keeps its log.
@@ -205,11 +211,26 @@ pub fn notify(title: &str, subtitle: &str) -> bool {
 
 /// Play the system chime without waiting for it (reap the child with [`reap_children`]).
 pub fn chime() {
+    // No sound device (a headless VM): `play` would only complain on the console.
+    if sys::stat_path("/dev/audio", true).is_err() {
+        return;
+    }
     let _ = sys::spawn(
         "/bin/play",
         &["play", "-n", "system", "chime"],
         &["PATH=/bin"],
     );
+}
+
+/// Open the ringing panel (Snooze / Stop with the alarm sound) for an alarm. False if Clock
+/// could not be started.
+pub fn open_alarm_panel(label: &str, hhmm: &str) -> bool {
+    sys::spawn(
+        "/bin/clock",
+        &["clock", "ring", label, hhmm],
+        &["PATH=/bin", "HOME=/home/milk"],
+    )
+    .is_ok()
 }
 
 /// Collect any children that have exited, so they do not pile up as zombies.

@@ -89,8 +89,11 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
             format!("{} ({})", label, fmt_hm(at))
         };
         ring(paths, "alarm", "Alarm", &sub);
+        // The panel plays the alarm sound until it is stopped; without it, one chime.
+        if !timeio::open_alarm_panel(label, &fmt_hm(at)) {
+            timeio::chime();
+        }
     }
-    timeio::chime();
     // Switch off the "once" alarms that just rang, on a fresh copy so an edit made while we
     // were ringing is not lost.
     let (mut fresh, _) = timeio::load_alarms(paths);

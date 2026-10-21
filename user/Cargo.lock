@@ -3,10 +3,29 @@
 version = 4
 
 [[package]]
+name = "appkit"
+version = "0.0.1"
+dependencies = [
+ "gui",
+ "rt",
+]
+
+[[package]]
 name = "audit"
 version = "0.0.1"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "clock"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "timeio",
+ "timekit",
 ]
 
 [[package]]

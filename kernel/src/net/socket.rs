@@ -532,6 +532,11 @@ pub fn take_error(id: SocketId) -> Result<Option<Errno>> {
     })
 }
 
+/// SO_TYPE.
+pub fn sock_type(id: SocketId) -> Result<SockType> {
+    with(|st| st.socks.lookup(id).map(|(_, s)| s.ty))
+}
+
 /// getsockname(2).
 pub fn local_addr(id: SocketId) -> Result<SockAddr> {
     with(|st| st.socks.lookup(id).map(|(_, s)| s.local))

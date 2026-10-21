@@ -2,7 +2,9 @@
 # End-to-end network test: boot milkOS headless with qemu user-mode networking and check
 #   - the kernel's boot self-test (DHCP, ping 10.0.2.2, loopback UDP/TCP, DNS policy, plus
 #     TCP echo / DNS / refused against the helpers below, all on the Mac's 127.0.0.1),
-#   - the guest's HTTP server on :80, from the Mac via hostfwd 127.0.0.1:$HTTP_PORT (curl).
+#   - the guest's HTTP server on :80, from the Mac via hostfwd 127.0.0.1:$HTTP_PORT (curl),
+#   - the socket syscalls: /bin/fetch typed into msh over the serial console, against a
+#     host HTTP helper (10.0.2.2:PORT), the guest's own server, and a refused port.
 #
 #   scripts/net-test.sh            HTTP_PORT=8088 by default (override: HTTP_PORT=9099 ...)
 #
@@ -14,11 +16,14 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 HTTP_PORT="${HTTP_PORT:-8088}"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/milk-net-test.XXXXXX")"
+# Short path: the serial unix socket lives here (macOS caps those at 104 bytes).
+WORK="$(mktemp -d /tmp/milk-net-test.XXXXXX)"
 LOG="$WORK/serial.log"
 QPID=""
 SPID=""
+DPID=""
 cleanup() {
+  [ -n "$DPID" ] && kill "$DPID" 2>/dev/null || true
   [ -n "$QPID" ] && kill "$QPID" 2>/dev/null || true
   [ -n "$SPID" ] && kill "$SPID" 2>/dev/null || true
   wait 2>/dev/null || true
@@ -32,7 +37,8 @@ ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 
-if python3 -c "import socket,sys; s=socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1])))" "$HTTP_PORT" 2>/dev/null; then :; else
+# Free? (SO_REUSEADDR like qemu's hostfwd, so TIME_WAIT leftovers of a previous run are fine.)
+if python3 -c "import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', int(sys.argv[1]))); s.listen()" "$HTTP_PORT" 2>/dev/null; then :; else
   fail "127.0.0.1:$HTTP_PORT is in use (set HTTP_PORT=...)"
 fi
 
@@ -44,16 +50,26 @@ for _ in $(seq 50); do [ -s "$WORK/ports" ] && break; sleep 0.1; done
 # shellcheck disable=SC1090
 eval "$(tr ' ' '\n' <"$WORK/ports" | sed 's/^/P_/')"
 CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused"
-echo "helpers: echo 127.0.0.1:$P_echo, dns 127.0.0.1:$P_dns, refused port $P_refused (pid $SPID)"
+echo "helpers: echo 127.0.0.1:$P_echo, dns 127.0.0.1:$P_dns, http 127.0.0.1:$P_http, refused port $P_refused (pid $SPID)"
+SERIAL="$WORK/serial.sock"
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -serial "file:$LOG" -display none \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:80" -device virtio-net-device,netdev=n0 \
   -fw_cfg "name=opt/milkos/nettest,string=$CFG" &
 QPID=$!
 echo "qemu pid $QPID, serial log $LOG"
+# Console: log everything; once msh is up, run fetch three times.
+python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
+  'wait:\[net\] selftest' 'wait:msh:/\$ ' \
+  "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' 'wait:msh:/\$ ' \
+  'send:fetch -i http://127.0.0.1/' 'wait:fetch: [^\n]* ms' 'wait:msh:/\$ ' \
+  "send:fetch 10.0.2.2:$P_refused" 'wait:fetch: connect' \
+  "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
+DPID=$!
 
 for _ in $(seq 600); do
   grep -q '\[net\] selftest' "$LOG" 2>/dev/null && break
@@ -63,6 +79,15 @@ done
 echo "---- guest ----"
 awk '/^\[(net|virtio-net)\]/ { print; inproc = /\/proc\/net/; next } inproc && /^    / { print; next } { inproc = 0 }' "$LOG"
 grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
+
+echo "---- msh: fetch (socket syscalls from user space) ----"
+for _ in $(seq 300); do [ -e "$WORK/drive.done" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
+[ -e "$WORK/drive.done" ] || { cat "$WORK/drive.log" >&2; fail "msh/fetch session did not finish"; }
+sleep 0.2
+sed -n '/msh:\/\$ fetch/,$p' "$LOG" | tr -d '\r'
+grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
+[ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 2 ] || fail "fetch: expected two 200 OK"
+grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
 
 echo "---- host curl -> guest :80 (via 127.0.0.1:$HTTP_PORT) ----"
 curl -sS -i --max-time 5 "http://127.0.0.1:$HTTP_PORT/" >"$WORK/index.txt" || fail "curl /"
@@ -101,4 +126,7 @@ code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$H
 echo "GET /nope: 404 ok"
 echo "---- host helper log ----"
 cat "$WORK/servers.log"
-echo "net-test: PASS (logs in $WORK)"
+cleanup
+trap - EXIT
+rm -rf "$WORK"
+echo "net-test: PASS"

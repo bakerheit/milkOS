@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fetch"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "hello"
 version = "0.0.1"
 dependencies = [

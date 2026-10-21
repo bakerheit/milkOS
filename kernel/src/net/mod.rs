@@ -30,6 +30,7 @@ pub mod ring;
 pub mod selftest;
 pub mod services;
 pub mod socket;
+pub mod sockfile;
 pub mod tcp;
 pub mod udp;
 pub mod wire;
@@ -170,6 +171,10 @@ fn deliver_wakeups(w: Woken) {
     }
     READY_GEN.fetch_add(1, Ordering::AcqRel);
     READY_WQ.wake_all();
+    // The in-kernel services live on the net thread: let it look too (loopback traffic
+    // never raises an IRQ). It stops once a pass changes nothing.
+    KICK.store(true, Ordering::Release);
+    NET_WQ.wake_all();
     if let Some(h) = WAKE_HOOK.get::<WakeHook>() {
         for &id in &w.ids[..w.n] {
             h(id);

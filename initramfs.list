@@ -9,3 +9,4 @@
 /bin/hello  target/user/aarch64-unknown-none-softfloat/release/hello   755
 /bin/msh    target/user/aarch64-unknown-none-softfloat/release/msh     755
 /bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755
+/bin/fetch  target/user/aarch64-unknown-none-softfloat/release/fetch   755

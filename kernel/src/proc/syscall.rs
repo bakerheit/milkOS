@@ -113,6 +113,7 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
     ];
     let (a0, a1, a2, a3) = (a[0] as usize, a[1] as usize, a[2] as usize, a[3] as usize);
     match nr {
+        n if super::sock::handles(n) => super::sock::dispatch(n, a),
         nr::READ => sys_read(a[0] as i64, a1, a2),
         nr::WRITE => sys_write(a[0] as i64, a1, a2),
         nr::READV => sys_readv(a[0] as i64, a1, a2),
@@ -336,13 +337,13 @@ fn with_space<R>(f: impl FnOnce(&mut UserSpace) -> KResult<R>) -> KResult<R> {
     f(i.space.as_mut().ok_or(ESRCH)?)
 }
 
-fn copy_in(va: usize, len: usize) -> KResult<Vec<u8>> {
+pub(super) fn copy_in(va: usize, len: usize) -> KResult<Vec<u8>> {
     let mut v = alloc::vec![0u8; len];
     with_space(|s| s.copy_in(va, &mut v))?;
     Ok(v)
 }
 
-fn copy_out(va: usize, data: &[u8]) -> KResult<()> {
+pub(super) fn copy_out(va: usize, data: &[u8]) -> KResult<()> {
     with_space(|s| s.copy_out(va, data))
 }
 
@@ -354,7 +355,7 @@ fn words(w: &[u64]) -> Vec<u8> {
     w.iter().flat_map(|x| x.to_le_bytes()).collect()
 }
 
-fn file(fd: i64) -> KResult<Arc<OpenFile>> {
+pub(super) fn file(fd: i64) -> KResult<Arc<OpenFile>> {
     current().inner.lock().fds.get(fd)
 }
 

@@ -6,10 +6,12 @@ user-mode networking):
   * a TCP echo server,
   * a tiny DNS server: A records for the names in NAMES, NXDOMAIN for everything else
     (it never forwards anything anywhere),
+  * an HTTP server with one page, /hello.txt (for the guest's `fetch` program),
 and reserves a "refused" port (bound, then closed: nothing listens there).
-Writes "echo=PORT dns=PORT refused=PORT" to the file given as argv[1], then serves until
+Writes "echo=PORT dns=PORT http=PORT refused=PORT" to the file given as argv[1], then serves until
 killed. Run it with `python3 -I` from a scratch directory.
 """
+import http.server
 import socket
 import socketserver
 import struct
@@ -27,6 +29,24 @@ class Echo(socketserver.BaseRequestHandler):
             if not data:
                 return
             self.request.sendall(data)
+
+
+HELLO = b"hello from the Mac's loopback, via qemu slirp, to milkOS fetch\n"
+
+
+class Http(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/hello.txt":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(HELLO)))
+            self.end_headers()
+            self.wfile.write(HELLO)
+        else:
+            self.send_error(404)
+
+    def log_message(self, fmt, *args):
+        print("http: " + fmt % args, flush=True)
 
 
 class TCPServer(socketserver.ThreadingTCPServer):
@@ -70,6 +90,8 @@ def dns_loop(sock):
 def main():
     out = sys.argv[1]
     echo = TCPServer((HOST, 0), Echo)
+    web = http.server.ThreadingHTTPServer((HOST, 0), Http)
+    threading.Thread(target=web.serve_forever, daemon=True).start()
     dns = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dns.bind((HOST, 0))
     r = socket.socket()
@@ -77,7 +99,10 @@ def main():
     refused = r.getsockname()[1]
     r.close()
     with open(out + ".tmp", "w") as f:
-        f.write(f"echo={echo.server_address[1]} dns={dns.getsockname()[1]} refused={refused}\n")
+        f.write(
+            f"echo={echo.server_address[1]} dns={dns.getsockname()[1]} "
+            f"http={web.server_address[1]} refused={refused}\n"
+        )
     import os
 
     os.rename(out + ".tmp", out)

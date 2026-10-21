@@ -17,14 +17,17 @@ build() {
   (cd packages && cargo build --release -q --target-dir "$REPO_ROOT/target/packages")
   mkdir -p "$dir"
   rm -f "$dir"/*.milkpkg "$dir"/index.txt
-  for spec in packages/*/package.txt; do
+  # Every spec: packages/<name>/package.txt, plus extra versions as package-<ver>.txt.
+  for spec in packages/*/package*.txt; do
     local name
     name=$(awk '$1 == "name" { print $2 }' "$spec")
     local ver
     ver=$(awk '$1 == "version" { print $2 }' "$spec")
     python3 -I scripts/mkpkg.py build "$spec" --root "$REPO_ROOT" -o "$dir/$name-$ver.milkpkg"
   done
-  python3 -I scripts/mkpkg.py index "$dir"
+  # Signed with the TEST-ONLY toy key (scripts/milk-test-key.secret): index.txt.sig and
+  # <pkg>.milkpkg.sig, checked by milk against /etc/milk/keys/milk-test.pub.
+  python3 -I scripts/mkpkg.py index "$dir" --key "${MILK_SIGNING_KEY:-scripts/milk-test-key.secret}"
 }
 
 serve() {

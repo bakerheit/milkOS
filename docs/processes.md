@@ -361,3 +361,21 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
 * 16-bit ASIDs (Apple silicon has them), SMP (scheduler lock across check+block,
   per-CPU current thread via TPIDR_EL1, an atomic COW share-and-copy).
 * The higher-half kernel move (above), then static Linux binaries at 0x400000.
+
+## Monitoring: `top`, `uptime`, `/proc/loadavg`, `/proc/diskstats`
+
+`kernel/src/sysstat.rs` (separate from the subsystems it measures) adds:
+
+* `/proc/loadavg`, Linux format (`0.08 0.02 0.01 3/13 14`): a `loadavg` kernel thread
+  counts runnable threads (Ready or Running, idle threads and itself excluded) every 5 s
+  into 1/5/15-minute exponential averages, in Linux's fixed point (FSHIFT 11).
+* `/proc/diskstats`, Linux's first 14 columns for disks whose driver counts I/O
+  (`BlockDevice::io_stats`, default `None`; virtio-blk keeps atomic counters).
+
+`top` (`user/top`): raw tty + ANSI, redraws in place; per-CPU bars (`/proc/cpuload`),
+memory, network (`/proc/net/dev`, all but lo) and disk (`/proc/diskstats`) rates, processes
+sorted by CPU (`/proc/<pid>/{stat,status,cmdline}`; %CPU of one CPU over the refresh). Keys:
+q quit, c / m / p sort by CPU / memory / pid, + / - refresh. Every line is clipped to the
+terminal width and no more rows than TIOCGWINSZ reports are drawn, so it also fits the
+desktop Terminal window. `top -b [-n N] [-d SECS]` prints plain frames (net-test checks
+it). `uptime` shows the load averages when `/proc/loadavg` exists.

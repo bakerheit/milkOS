@@ -17,6 +17,7 @@ A ustar tar, built deterministically by `scripts/mkpkg.py` (mtime 0, root:root, 
    description Milk-themed quotes, one at a time
    exec bin/fortune            # optional: what /bin/<basename> links to
    dock Fortune #EBB650        # optional: dock label and icon colour, for the desktop
+   depends snake moo2048>=1.0  # optional: packages installed first (milk), with minimum versions
    files bin/fortune share/fortune/quotes.txt
    payload-sha256 <hex>
    ```
@@ -36,6 +37,45 @@ fortune 1.0.0 <sha256 of the .milkpkg> 102400 fortune-1.0.0.milkpkg Milk-themed 
 `mkpkg.py build SPEC`, `index DIR`, `verify PKG`, `show PKG` (see the script's help; a spec
 is `packages/<name>/package.txt`).
 
+## Signatures
+
+Every repository file milk trusts is signed with **Ed25519** (RFC 8032), implemented from
+scratch twice: `user/rt/src/ed25519.rs` (+ `sha512.rs`) in the guest, pure python in
+`scripts/mkpkg.py` (only SHA-512 from hashlib). Both pass the RFC 8032 section 7.1
+vectors (TEST 1, 2, 3, SHA(abc): key derivation, signing, verifying, and a flipped byte
+rejected = 16/16): `milk selftest`, `mkpkg.py selftest`.
+
+* `FILE.sig` next to every `FILE` (`index.txt.sig`, `<pkg>.milkpkg.sig`): one line,
+  `ed25519 <key name> <128 hex chars>`, over the file's bytes.
+* Trusted keys: `/etc/milk/keys/<name>.pub`, `ed25519 <64 hex chars> <name>`; `milk keys`.
+* `milk update` checks the index signature before using the index; `install`/`try`/`upgrade`
+  check the package signature (then the index's sha256, then the payload sha256).
+* Unsigned, badly signed, or signed by an untrusted key: **refused**, with a
+  `user.pkg.verify_fail` audit record (`what`, `repo`, `reason`, `insecure=false`).
+  `milk --insecure ...` accepts it anyway, with a warning and the same record
+  (`insecure=true`).
+* Keys: `mkpkg.py keygen NAME DIR` (private `NAME.secret`, mode 600; public `NAME.pub`),
+  `mkpkg.py sign SECRET FILE`, `mkpkg.py index DIR --key SECRET` (signs the index and all
+  packages), `mkpkg.py verify-sig PUBFILE FILE`.
+* **The toy repo's key is TEST ONLY**: `rootfs/etc/milk/keys/milk-test.pub`, private half
+  committed at `scripts/milk-test-key.secret` (with a banner saying so). Anyone can sign
+  with it; remove it on a system that installs real software.
+* Not constant-time (fine for verifying public data; the signer is a host script).
+
+## Versions and dependencies
+
+Versions compare semver-ish (`user/milk/src/version.rs`, 10 checks in `milk selftest`):
+numeric parts as numbers (`1.2.10 > 1.2.9`, `1.2 == 1.2.0`), others as text, and a
+pre-release (`1.0.0-rc.1`) before its release. The index may list several versions of a
+package; milk takes the newest unless told `name=VER`.
+
+`depends a b>=1.2` in a manifest: milk downloads and verifies the package, then installs
+every dependency that is missing or too old (depth first, so dependencies always land
+before their dependents; cycles are refused), then unpacks the package. Packages pulled in
+as dependencies carry a `.auto` marker (`milk list` shows "(auto)"); installing one
+explicitly clears it; `milk autoremove` removes auto packages no installed package depends
+on (repeatedly, so chains go too). Upgrades keep the marker.
+
 ## Where packages live
 
 `/Applications/<name>/` (manifest, `.origin`, payload). With a milkfs volume,
@@ -51,9 +91,16 @@ milk never replaces a `/bin` entry that isn't one of its links. The index cache 
 milk update            fetch index.txt from every URL in /etc/milk/repos
 milk search [WORD]     name/description match; marks installed ones
 milk info NAME         index entry + installed manifest (files, exec, dock)
-milk install NAME      download; check the file's sha256 against the index; unpack; check the
-                       payload sha256 against the manifest; swap into /Applications/NAME; link
-milk remove NAME       unlink /bin, delete /Applications/NAME
+milk install NAME[=VER]  the newest version (or exactly VER); download; check the signature,
+                       the file's sha256 against the index, the payload sha256 against the
+                       manifest; dependencies first; swap into /Applications/NAME; link
+milk remove [--force] NAME  unlink /bin, delete /Applications/NAME; refused while another
+                       installed package depends on it (unless --force)
+milk autoremove        remove packages installed only as dependencies that nothing needs now
+milk upgrade [NAME] [-y]  newer versions of installed packages (and any new dependencies)
+                       into ONE clone, try-upgrade, as a transaction: any failure discards the
+                       clone, so live never sees half an upgrade. Then `milk keep upgrade` or
+                       `milk discard upgrade`; -y keeps it at once
 milk list              installed packages
 milk try NAME          snapshot milk-try-NAME, clone it as try-NAME (/Volumes/Milk-try-NAME),
                        install into the clone only; prints the path to run it from
@@ -101,13 +148,21 @@ Fresh private milkfs + scratch images in a mktemp dir, repo served on a free 127
 port, boot with an open user netdev, then in msh: update, search, info, install fortune
 (both hashes checked, /bin link), run it twice, list, remove (`/Applications` empty), try
 snake, run it from the clone, check the live `/Applications` and `/bin` don't have it,
-discard (no clone left), try moo2048 + keep, run it from `/bin`, `audit --event user.pkg`,
+discard (no clone left), try moo2048 + keep, run it from `/bin`, `milk selftest`, then the
+host tampers with the served repo: a flipped byte in `fortune.milkpkg` (install refused: BAD
+signature), `snake.milkpkg.sig` deleted (refused: unsigned; `--insecure` installs it with a
+warning), a flipped byte in `index.txt` (update refused), each with a
+`user.pkg.verify_fail` record; then the full repo comes back (5 packages, fortune 1.1.0
+and `games`, a meta-package that depends on snake and moo2048): install `fortune=1.0.0`,
+`search` offers the upgrade, `upgrade fortune` (1.1.0 runs from the clone, live stays 1.0.0),
+`discard upgrade`, `upgrade -y` (live is 1.1.0), `install games` (snake first, as a
+dependency), `remove snake` refused, `remove games`, `autoremove` (snake goes); then
+`audit --event user.pkg`,
 `audit --event milkfs`, `audit verify` (RAM and disk OK). After shutdown `mkmilkfs.py`
 checks the image (moo2048 there, fortune and snake not, no clone), then a second boot of the
 same image runs moo2048 from the relinked `/bin`, and `audit verify` is OK across boots.
 
 ## Not done
 
-Dependencies, upgrades beyond reinstall, signatures (the index's sha256 is only as
-trustworthy as the repo it came from), running a tried app *as if* the clone were `/` (needs
+Version ranges beyond `>=`, conflicts/provides, key rotation or revocation lists, running a tried app *as if* the clone were `/` (needs
 per-process roots), the desktop reading `dock` entries.

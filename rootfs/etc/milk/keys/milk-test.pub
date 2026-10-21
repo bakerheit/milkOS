@@ -1,0 +1,5 @@
+# TEST ONLY: the public key of the milkOS toy repository (scripts/milk-repo.sh).
+# Its private half is committed in scripts/milk-test-key.secret, so ANYONE can sign with
+# it. Trust it only for the toy repo; delete this file on a system that installs real
+# software, and add your own keys here (one <name>.pub per key, see docs/packages.md).
+ed25519 c9149c6b4c35ea4328e4a7e35e76111196a841b537444827d98fe09dd87901fc milk-test

@@ -84,6 +84,9 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'raw:\x04' "$P" \
   'send:nc -l 7777' 'wait:listening on tcp' "done:$WORK/nc.listening" 'wait:from the mac' "$P" \
   'send:netstat' 'wait:LISTEN' "$P" \
+  'send:top -b -n 2 -d 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
+  'send:uptime' 'wait:load average' "$P" \
+  'send:cat /proc/loadavg' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 
@@ -115,6 +118,13 @@ grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
 grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
 grep -q "nc: connection from 10.0.2.2:" "$LOG" || fail "nc -l: no connection"
 grep -q "tcp .* \*:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no :80 listener"
+T="$WORK/console.txt"; tr -d '\r' <"$LOG" >"$T"
+grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"
+[ "$(grep -c '^top - .*load ' "$T")" -ge 2 ] || fail "top -b -n 2: expected two frames"
+grep -Eq '^ +1 +0 S .* init$' "$T" || fail "top: init not in the process list"
+grep -Eq 'up [0-9:]+, [0-9]+ processes, load average: [0-9.]+, [0-9.]+, [0-9.]+' "$T" || fail "uptime: no load average"
+grep -Eq '^[0-9]+\.[0-9]{2} [0-9]+\.[0-9]{2} [0-9]+\.[0-9]{2} [0-9]+/[0-9]+ [0-9]+$' "$T" || fail "/proc/loadavg format"
+echo "top -b (2 frames, cpu bars, process list), uptime load average, /proc/loadavg: ok"
 
 echo "---- host curl -> userland httpd on guest :80 (via 127.0.0.1:$HTTP_PORT) ----"
 curl -sS -i --max-time 5 "http://127.0.0.1:$HTTP_PORT/" >"$WORK/index.txt" || fail "curl /"

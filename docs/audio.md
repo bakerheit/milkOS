@@ -54,13 +54,13 @@ and wakes the mixer thread. API used by `audio`: `with(|d| ...)`, `submit(fill)`
   until queued, not until played.
 * `ioctl(SNDCTL_DSP_SYNC = 0x5001)`: wait until this process's data has been played (its
   last period came back from the device; other writers may still be playing).
-* `ioctl(MILK_AUDIO_SYSTEM = 0x4d01, n)`: play system sound n (0 notify, 1 error, 2 chime).
+* `ioctl(MILK_AUDIO_SYSTEM = 0x4d01, n)`: play system sound n (0 notify, 1 error, 2 chime, 3 shutter).
 * `read`: `EINVAL` (no capture). `poll`: POLLOUT while the writer's ring has room.
 
 ### System sounds (for the desktop)
 
 ```rust
-crate::audio::play_system(crate::audio::Sound::Notify);   // or ::Error, ::Chime
+crate::audio::play_system(crate::audio::Sound::Notify);   // or ::Error, ::Chime, ::Shutter
 crate::audio::available() -> bool                         // is there a sound device?
 ```
 

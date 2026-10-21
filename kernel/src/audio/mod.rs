@@ -43,15 +43,18 @@ pub enum Sound {
     Notify,
     Error,
     Chime,
+    /// The desktop's screenshot shutter.
+    Shutter,
 }
 
 impl Sound {
-    pub const ALL: [Sound; 3] = [Sound::Notify, Sound::Error, Sound::Chime];
+    pub const ALL: [Sound; 4] = [Sound::Notify, Sound::Error, Sound::Chime, Sound::Shutter];
     pub fn file(self) -> &'static str {
         match self {
             Sound::Notify => "notify.wav",
             Sound::Error => "error.wav",
             Sound::Chime => "chime.wav",
+            Sound::Shutter => "shutter.wav",
         }
     }
 }
@@ -133,7 +136,7 @@ static SPACE_WQ: WaitQueue = WaitQueue::new();
 static KICK: AtomicBool = AtomicBool::new(false);
 static UP: AtomicBool = AtomicBool::new(false);
 static REQUESTS: SpinLock<VecDeque<Sound>> = SpinLock::new(VecDeque::new());
-static CACHE: SpinLock<[Option<Arc<Vec<i16>>>; 3]> = SpinLock::new([None, None, None]);
+static CACHE: SpinLock<[Option<Arc<Vec<i16>>>; 4]> = SpinLock::new([None, None, None, None]);
 static SYS_PLAYED: AtomicU64 = AtomicU64::new(0);
 
 fn kick() {
@@ -381,7 +384,8 @@ struct AudioDev {
 }
 
 const SNDCTL_DSP_SYNC: u32 = 0x5001;
-/// milkOS: play system sound `arg` (0 notify, 1 error, 2 chime) through [`play_system`].
+/// milkOS: play system sound `arg` (0 notify, 1 error, 2 chime, 3 shutter) through
+/// [`play_system`].
 pub const MILK_AUDIO_SYSTEM: u32 = 0x4d01;
 
 impl Inode for AudioDev {

@@ -734,6 +734,28 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.typ("audit --event sandbox").enter().wait(800);
             }
         }
+        // Screenshots (Cmd+Shift+3 / 4), saved to ~/Pictures.
+        "shot" | "shotregion" | "shotselect" => {
+            let cs = Mods {
+                meta: true,
+                shift: true,
+                ..Mods::NONE
+            };
+            if name == "shot" {
+                b.wait(300).key(Key::Char('3'), cs).wait(2500);
+            } else {
+                b.wait(300).key(Key::Char('4'), cs).wait(300);
+                b.to(300, 90).wait(30).down().wait(30);
+                for i in 1..=12 {
+                    b.to(300 + 32 * i, 90 + 25 * i).wait(16);
+                }
+                if name == "shotregion" {
+                    b.up().wait(2500);
+                } else {
+                    b.wait(300);
+                }
+            }
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }

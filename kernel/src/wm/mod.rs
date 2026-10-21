@@ -30,12 +30,14 @@ mod lock;
 mod menus;
 mod packages;
 mod paint;
+mod png;
 mod power;
 pub mod powerbox;
 pub mod prefs;
 mod rtc;
 mod script;
 mod shell;
+mod shot;
 mod skim;
 mod snap;
 mod theme;
@@ -65,13 +67,22 @@ use window::{App, KeyInput, Part, PointerInput, PointerKind, Window, WindowConte
 // ---- public API ------------------------------------------------------------------------------
 
 /// Toasts posted from anywhere (any context but IRQ handlers: it allocates).
-static NOTIFY: SpinLock<Vec<(String, String)>> = SpinLock::new(Vec::new());
+/// Toasts posted from any thread: (title, subtitle, play the notify sound).
+static NOTIFY: SpinLock<Vec<(String, String, bool)>> = SpinLock::new(Vec::new());
 
 /// Show a toast notification (SPEC: Toast) at the top right for a few seconds.
 pub fn notify(title: &str, subtitle: &str) {
     NOTIFY
         .lock()
-        .push((String::from(title), String::from(subtitle)));
+        .push((String::from(title), String::from(subtitle), true));
+    WAKE.wake_all();
+}
+
+/// A toast without the notify sound (when the action had its own, e.g. the shutter).
+pub fn notify_quiet(title: &str, subtitle: &str) {
+    NOTIFY
+        .lock()
+        .push((String::from(title), String::from(subtitle), false));
     WAKE.wake_all();
 }
 
@@ -302,6 +313,9 @@ pub struct Desktop {
     /// Last key press or click (the idle lock timer); demos add pretend idle time.
     last_input: u64,
     idle_skew: u64,
+    /// Cmd+Shift+4 region selection (shot.rs); compose without cursor / overlay (capture).
+    shot: Option<shot::Select>,
+    shot_hide: bool,
 }
 
 impl Desktop {
@@ -349,6 +363,8 @@ impl Desktop {
             lock_a: 0,
             last_input: t,
             idle_skew: 0,
+            shot: None,
+            shot_hide: false,
             dims: Vec::new(),
             thumbs: BTreeMap::new(),
             pointer: input::pointer(),
@@ -909,11 +925,15 @@ impl Desktop {
     }
 
     fn post_toast(&mut self, title: &str, sub: &str) {
+        self.post_toast_with(title, sub, true);
+    }
+
+    fn post_toast_with(&mut self, title: &str, sub: &str, sound: bool) {
         if self.settings.focus_mode {
             kprintln!("wm: toast held back (focus mode): {title} / {sub}");
             return;
         }
-        if prefs::get().sound {
+        if sound && prefs::get().sound {
             crate::audio::play_system(crate::audio::Sound::Notify);
         }
         let id = self.next_toast;
@@ -1147,6 +1167,11 @@ impl Desktop {
                 }
             }
         }
+        if let Some(s) = &self.shot
+            && !self.shot_hide
+        {
+            shot::draw(s, &mut p, d);
+        }
         if self.lock_a > 0 {
             lock::draw(&self.lock, &mut p, d, self.lock_a);
         }
@@ -1161,7 +1186,7 @@ impl Desktop {
             let a = ((100 - self.settings.brightness) * 255 / 100 * 7 / 10) as u8;
             p.fill_a(d.x, d.y, d.w, d.h, 0, a);
         }
-        if cur.intersects(&d) {
+        if cur.intersects(&d) && !self.shot_hide {
             p.sprite(
                 cur.x,
                 cur.y,
@@ -1191,9 +1216,9 @@ impl Desktop {
                 self.script = Some(s);
             }
         }
-        let posted: Vec<(String, String)> = core::mem::take(&mut *NOTIFY.lock());
-        for (t, s) in posted {
-            self.post_toast(&t, &s);
+        let posted: Vec<(String, String, bool)> = core::mem::take(&mut *NOTIFY.lock());
+        for (t, s, sound) in posted {
+            self.post_toast_with(&t, &s, sound);
         }
         let reqs: Vec<Request> = core::mem::take(&mut *REQUESTS.lock());
         for r in reqs {
@@ -1418,6 +1443,35 @@ impl Desktop {
         if press || matches!(ev, Event::PointerMove { .. } | Event::Scroll { .. }) {
             self.last_input = timer::now_ns();
             self.idle_skew = 0;
+        }
+        // Choosing a screenshot region: drag it out, Esc cancels; nothing else gets through.
+        if self.shot.is_some() {
+            match ev {
+                Event::PointerMove { x, y } => {
+                    let (x, y) = (x.clamp(0, SCREEN_W - 1), y.clamp(0, SCREEN_H - 1));
+                    self.damage(self.cursor_rect());
+                    self.pointer = (x, y);
+                    self.damage(self.cursor_rect());
+                    self.shot_move(x, y);
+                }
+                Event::Button {
+                    button: Button::Left,
+                    down,
+                } => {
+                    if down {
+                        self.shot_press();
+                    } else {
+                        self.shot_release();
+                    }
+                }
+                Event::Key {
+                    key: Key::Escape,
+                    down: true,
+                    ..
+                } => self.shot_cancel(),
+                _ => {}
+            }
+            return;
         }
         // Locked: the pointer moves, a click or a key unlocks, nothing else gets through.
         if self.locked() {
@@ -1768,6 +1822,9 @@ impl Desktop {
         match k.key {
             Key::Char(' ') if m.meta || m.ctrl => return self.toggle_launcher(),
             Key::Char('q') if m.meta && m.ctrl => return self.lock_screen(),
+            // Screenshots: Cmd+Shift+3 the screen, Cmd+Shift+4 a region.
+            Key::Char('3' | '#') if m.meta && m.shift => return self.capture(None),
+            Key::Char('4' | '$') if m.meta && m.shift => return self.shot_region_start(),
             Key::Escape if self.menu.is_some() => return self.set_menu(None),
             Key::Escape if self.launcher.is_some() => return self.close_launcher(),
             Key::Escape if self.control => {

@@ -12,10 +12,30 @@
 .equ OFF_SPSR,   {OFF_SPSR}
 .equ OFF_ESR,    {OFF_ESR}
 .equ OFF_FAR,    {OFF_FAR}
+.equ KSTACK_SHIFT, {KSTACK_SHIFT}
 
 .macro VECTOR idx
     .balign 0x80
     sub     sp, sp, #FRAME_SIZE
+    stp     x0, x1, [sp, #0]
+    mov     x1, #\idx
+    b       exc_common
+.endm
+
+// Same, for exceptions taken from EL1 on SP_EL1, with a kernel stack overflow check first.
+// Every kernel stack (and the boot stack) sits in the upper 64 KiB of a 128 KiB-aligned
+// slot whose lower half is unmapped (sched/kstack.rs), so bit KSTACK_SHIFT of a valid sp
+// is 1. If the frame we are about to push would land below the stack, that bit is 0: go to
+// the overflow handler on its own stack instead of faulting forever on the guard page.
+// sp can't be tested directly, so swap it through x0 without a scratch register.
+.macro VECTOR_KSTACK idx
+    .balign 0x80
+    sub     sp, sp, #FRAME_SIZE
+    add     sp, sp, x0              // sp = sp + x0
+    sub     x0, sp, x0              // x0 = old sp
+    tbz     x0, #KSTACK_SHIFT, kstack_overflow_entry
+    sub     x0, sp, x0              // x0 = old x0
+    sub     sp, sp, x0              // sp = old sp
     stp     x0, x1, [sp, #0]
     mov     x1, #\idx
     b       exc_common
@@ -31,10 +51,10 @@ exception_vectors:
     VECTOR 2    // fiq
     VECTOR 3    // serror
     // Current EL with SP_ELx (the kernel's normal state)
-    VECTOR 4
-    VECTOR 5
-    VECTOR 6
-    VECTOR 7
+    VECTOR_KSTACK 4
+    VECTOR_KSTACK 5
+    VECTOR_KSTACK 6
+    VECTOR_KSTACK 7
     // Lower EL, AArch64
     VECTOR 8
     VECTOR 9
@@ -47,6 +67,17 @@ exception_vectors:
     VECTOR 15
 
 .section .text, "ax"
+// x0 = the sp that overflowed, sp = garbage. Move to the emergency stack and report.
+kstack_overflow_entry:
+    ldr     x1, =__emergency_stack_top
+    mov     sp, x1
+    mrs     x1, elr_el1
+    mrs     x2, far_el1
+    mrs     x3, esr_el1
+    bl      {OVERFLOW}
+1:  b       1b
+.ltorg
+
 exc_common:
     stp     x2,  x3,  [sp, #16]
     stp     x4,  x5,  [sp, #32]

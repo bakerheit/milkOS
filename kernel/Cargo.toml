@@ -14,3 +14,5 @@ crash-test = []
 # Real compare-exchange SpinLock for SMP. Only once the MMU maps RAM as Normal memory:
 # atomic read-modify-write hangs on Device memory (MMU off).
 atomic-locks = []
+# Scheduler self-test ends with a thread recursing forever, to prove the stack guard.
+kstack-overflow-test = []

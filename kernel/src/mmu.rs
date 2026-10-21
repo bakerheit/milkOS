@@ -31,9 +31,33 @@ pub const fn phys_to_virt(pa: PhysAddr) -> VirtAddr {
     pa + PHYS_OFFSET
 }
 
-pub const fn virt_to_phys(va: VirtAddr) -> PhysAddr {
+/// Kernel virtual address to physical. Handles the linear map and the kernel-stack window
+/// ([`VMAP_BASE`]..[`VMAP_END`], see `sched/kstack.rs`): a kernel stack is physically
+/// contiguous, so a buffer on one is DMA-able as long as it doesn't straddle the stack's end.
+pub fn virt_to_phys(va: VirtAddr) -> PhysAddr {
+    if (VMAP_BASE..VMAP_END).contains(&va) {
+        return crate::sched::kstack::virt_to_phys(va);
+    }
     va - PHYS_OFFSET
 }
+
+// ---- layout of the 48-bit TTBR0 space -------------------------------------
+//
+// The kernel stays identity mapped and lives in the low L0 slots. Every user address space
+// shares those slots (same L1 tables, EL1-only, global) and owns the rest. See
+// docs/processes.md.
+
+/// L0 slots `[0, KERNEL_L0_SLOTS)` (512 GiB each) belong to the kernel: the identity map
+/// (devices + RAM), high PCIe MMIO and the kernel-stack window.
+pub const KERNEL_L0_SLOTS: usize = 2;
+/// First user virtual address (1 TiB).
+pub const USER_BASE: VirtAddr = KERNEL_L0_SLOTS << 39;
+/// One past the last user virtual address (top of the 48-bit TTBR0 range).
+pub const USER_END: VirtAddr = 1 << VA_BITS;
+/// Kernel-virtual window for things that need guard pages (kernel stacks). Inside L0 slot 0,
+/// above any RAM qemu virt can have, below high PCIe MMIO (512 GiB).
+pub const VMAP_BASE: VirtAddr = 0x7f_0000_0000;
+pub const VMAP_END: VirtAddr = 0x80_0000_0000;
 
 // ---- MAIR attribute slots (referenced by AttrIdx in descriptors) ----------
 const MAIR_DEVICE_NGNRE: u64 = 0x04;
@@ -187,6 +211,52 @@ impl AddressSpace {
     /// Physical address of the root table (what goes in TTBRn_EL1).
     pub fn root(&self) -> PhysAddr {
         self.root
+    }
+
+    /// A fresh user address space: a new root whose kernel slots point at the kernel's own
+    /// L1 tables (so kernel mappings, current and future, are shared), and nothing else.
+    /// Call [`prepare_kernel_slots`] once before the first one.
+    pub fn new_user() -> Option<AddressSpace> {
+        let root = pmm::alloc_frame_zeroed()?;
+        let kroot = with_kernel_space(|k| k.root);
+        for slot in 0..KERNEL_L0_SLOTS {
+            // SAFETY: both are live root tables; slot < 512.
+            unsafe {
+                let d = table_ptr(kroot).add(slot).read_volatile();
+                table_ptr(root).add(slot).write_volatile(d);
+            }
+        }
+        Some(AddressSpace { root })
+    }
+
+    /// Free the page-table pages of a space made by [`new_user`](Self::new_user): every
+    /// table under the user slots, and the root. The shared kernel tables are left alone.
+    /// Leaf frames are NOT freed.
+    ///
+    /// # Safety
+    /// The space must not be live in any TTBR (or the TLB must be flushed for its ASID
+    /// before it is reused).
+    pub unsafe fn destroy_user(self) {
+        unsafe fn free_tree(table: PhysAddr, level: usize) {
+            if level < 3 {
+                for slot in 0..ENTRIES {
+                    // SAFETY: walking tables the caller owns.
+                    let desc = unsafe { table_ptr(table).add(slot).read_volatile() };
+                    if desc & DESC_VALID != 0 && desc & DESC_TABLE_OR_PAGE != 0 {
+                        unsafe { free_tree((desc & DESC_ADDR_MASK) as usize, level + 1) };
+                    }
+                }
+            }
+            pmm::free_frame(table);
+        }
+        for slot in KERNEL_L0_SLOTS..ENTRIES {
+            // SAFETY: walking our own root.
+            let desc = unsafe { table_ptr(self.root).add(slot).read_volatile() };
+            if desc & DESC_VALID != 0 && desc & DESC_TABLE_OR_PAGE != 0 {
+                unsafe { free_tree((desc & DESC_ADDR_MASK) as usize, 1) };
+            }
+        }
+        pmm::free_frame(self.root);
     }
 
     /// Map `[va, va+len)` to `[pa, pa+len)`. Uses 1 GiB / 2 MiB blocks where
@@ -432,6 +502,30 @@ pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
 pub fn with_kernel_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> R {
     let mut guard = KERNEL_SPACE.lock();
     f(guard.as_mut().expect("MMU not initialised"))
+}
+
+/// Make sure every kernel L0 slot has an L1 table, so mappings the kernel adds later land in
+/// tables that user spaces already share. Call before creating the first user space.
+pub fn prepare_kernel_slots() {
+    with_kernel_space(|k| {
+        for slot in 0..KERNEL_L0_SLOTS {
+            // SAFETY: the kernel root is live; we only fill empty slots with a fresh table.
+            unsafe {
+                let e = table_ptr(k.root).add(slot);
+                if e.read_volatile() & DESC_VALID == 0 {
+                    let t = pmm::alloc_frame_zeroed().expect("no frame for kernel L1 table");
+                    e.write_volatile(t as u64 | DESC_TABLE_OR_PAGE | DESC_VALID);
+                }
+            }
+        }
+        // SAFETY: barrier only.
+        unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack)) };
+    });
+}
+
+/// TTBR0 value for kernel-only threads: the kernel's own root, ASID 0.
+pub fn kernel_ttbr0() -> u64 {
+    with_kernel_space(|k| k.root as u64)
 }
 
 /// Map an MMIO range into the kernel address space as Device memory.

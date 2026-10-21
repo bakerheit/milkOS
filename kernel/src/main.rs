@@ -28,12 +28,14 @@ mod mem;
 mod memtest;
 mod mmu;
 mod net;
+mod percpu;
 mod pmm;
 mod proc;
 mod ramfb;
 mod sched;
 mod selftest;
 mod sink;
+mod smp;
 mod splash;
 mod sync;
 mod timer;
@@ -63,8 +65,9 @@ impl Write for Uart {
 #[macro_export]
 macro_rules! kprintln {
     ($($arg:tt)*) => {{
-        // IRQs off for the whole line so threads don't interleave mid-line.
-        $crate::sync::without_irqs(|| {
+        // IRQs off and the print lock held for the whole line, so threads and CPUs don't
+        // interleave mid-line.
+        $crate::sink::with_print_lock(|| {
             let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
             let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
         })
@@ -80,6 +83,7 @@ pub fn console_writer() -> impl Write {
 pub extern "C" fn kmain() -> ! {
     // Vectors first, so a fault anywhere after this gets a crash dump.
     exceptions::init();
+    percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
     display::init();
@@ -96,6 +100,7 @@ pub extern "C" fn kmain() -> ! {
     fs::init();
     fs::selftest::run();
     sched::init();
+    smp::init();
     sched::selftest::run();
     audit::init();
     net::init();

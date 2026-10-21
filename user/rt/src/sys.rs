@@ -713,6 +713,8 @@ pub struct PsEntry {
     pub cpu_ns: u64,
     pub rss: u64,
     pub name: String,
+    /// CPU it runs on / last ran on.
+    pub psr: u32,
 }
 
 /// Processes from /proc; with `kernel_threads`, also the kernel's own threads.
@@ -751,13 +753,14 @@ pub fn ps(kernel_threads: bool) -> Result<Vec<PsEntry>> {
             cpu_ns: num("CpuNs"),
             rss: num("VmRSS") * 1024,
             name: String::from(field("Name")),
+            psr: num("Cpu") as u32,
         });
     }
     if kernel_threads {
         let t = read_file("/proc/threads")?;
         for l in String::from_utf8_lossy(&t).lines().skip(1) {
             let f: Vec<&str> = l.split_whitespace().collect();
-            if f.len() < 6 || f[1] != "0" {
+            if f.len() < 7 || f[1] != "0" {
                 continue;
             }
             out.push(PsEntry {
@@ -767,9 +770,10 @@ pub fn ps(kernel_threads: bool) -> Result<Vec<PsEntry>> {
                 tid: f[0].parse().unwrap_or(0),
                 state: f[2].chars().next().unwrap_or('?'),
                 kernel: true,
-                cpu_ns: f[4].parse().unwrap_or(0),
+                cpu_ns: f[5].parse().unwrap_or(0),
                 rss: 0,
-                name: String::from(f[5]),
+                name: String::from(f[6]),
+                psr: f[4].parse().unwrap_or(0),
             });
         }
     }

@@ -204,7 +204,7 @@ impl State {
             }
         }
         if self.len == QUEUE_LEN {
-            DROPPED.store(DROPPED.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            DROPPED.fetch_add(1, Ordering::Relaxed);
             return;
         }
         self.queue[(self.head + self.len) % QUEUE_LEN] = Some(ev);
@@ -235,7 +235,7 @@ static STATE: SpinLock<State> = SpinLock::new(State {
     len: 0,
 });
 
-// Written only with STATE held (plain load/store; see sync.rs on atomics before the MMU).
+// Events dropped because the queue was full.
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
 const MAX_SUBSCRIBERS: usize = 4;

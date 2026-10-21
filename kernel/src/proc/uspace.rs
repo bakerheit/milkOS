@@ -311,7 +311,11 @@ impl UserSpace {
                     PAGE_SIZE,
                 )
             };
-            release_frame(p.pa); // still owned by the other side(s)
+            // SMP: the other owner may have copied and let go meanwhile; if we turn out to
+            // be the last owner, the original is ours to free.
+            if release_frame(p.pa) {
+                pmm::free_frame(p.pa);
+            }
             p.pa = new;
         }
         p.cow = false;

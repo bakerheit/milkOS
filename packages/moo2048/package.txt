@@ -1,0 +1,6 @@
+name moo2048
+version 1.0.0
+description 2048 with cows: slide the tiles, merge the milk (a desktop window app)
+exec bin/moo2048
+dock Moo2048 #E58C97
+file bin/moo2048 = target/packages/aarch64-unknown-none-softfloat/release/moo2048

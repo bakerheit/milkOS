@@ -223,8 +223,26 @@ pub fn user_context() -> bool {
     sched::started() && sched::with_current_user(|u| u.is_some())
 }
 
+/// Serialises flushes against detaching (a flush writes with no spinlock held).
+static FLUSH: sched::Mutex<()> = sched::Mutex::new(());
+
+/// Stop writing to the log file (waits for a flush in progress). Records keep collecting.
+fn detach() {
+    let _f = FLUSH.lock();
+    let mut l = LOG.lock();
+    l.file = None;
+    l.sealed = None;
+}
+
+/// About to roll the volume back or promote a clone: stop writing to the file now, so no
+/// flush lands in the wrong tree. [`volume_rewound`] re-attaches afterwards.
+pub fn before_rewind() {
+    detach();
+}
+
 /// The volume was rolled back or replaced by a clone: re-read the file before appending.
 pub fn volume_rewound() {
+    detach();
     REATTACH.store(true, Ordering::Release);
     if THREAD.load(Ordering::Acquire) {
         KICK.store(true, Ordering::Release);
@@ -312,37 +330,56 @@ fn attach() -> Option<String> {
     let f = Arc::new(crate::fs::ops::open(LOG_PATH, O_WRONLY | O_APPEND | O_CREAT, 0o644).ok()?);
     let id = (f.inode().dev(), f.inode().ino());
     let mut summary = String::new();
+    let mut rechained = false;
     {
         let mut l = LOG.lock();
-        // Re-chain what has not been written yet onto the file's end.
-        let mut seq = v.last_seq + 1;
-        let mut prev = v.last_hash;
-        if v.records == 0 {
-            prev = [0; 32];
-            seq = 1;
+        // Where the file says the chain goes on.
+        let (seq0, prev0) = if v.records == 0 {
+            (1, [0; 32])
+        } else {
+            (v.last_seq + 1, v.last_hash)
+        };
+        let continues = l.ring.iter().any(|r| r.seq == seq0 && r.prev == prev0);
+        if continues {
+            // The file is a prefix of our chain (first attach of a fresh log, or a
+            // rollback/promote rewound it): (re)write everything after its end as it is.
+            for r in l.ring.iter_mut() {
+                r.persisted = r.seq < seq0;
+            }
+        } else {
+            // A different history (boot: early records were chained provisionally; or
+            // the ring no longer reaches back far enough): re-chain what the file does not
+            // have onto its end. Records only an older tree had are dropped from RAM.
+            rechained = true;
+            let keep: Vec<Rec> = l.ring.drain(..).filter(|r| !r.persisted).collect();
+            let (mut seq, mut prev) = (seq0, prev0);
+            for mut r in keep {
+                r.seq = seq;
+                r.prev = prev;
+                r.seal();
+                prev = r.hash;
+                seq += 1;
+                l.ring.push_back(r);
+            }
+            l.next_seq = seq;
+            l.last = prev;
         }
-        let keep: Vec<Rec> = l.ring.drain(..).filter(|r| !r.persisted).collect();
-        for mut r in keep {
-            r.seq = seq;
-            r.prev = prev;
-            r.seal();
-            prev = r.hash;
-            seq += 1;
-            l.ring.push_back(r);
-        }
-        l.next_seq = seq;
-        l.last = prev;
         l.file = Some(f);
         l.sealed = Some(id);
         let _ = write!(
             summary,
-            "{} has {} records (last seq {}), chain {}",
+            "{} has {} records (last seq {}), chain {}, {}",
             LOG_PATH,
             v.records,
             v.last_seq,
             match v.first_bad {
                 None => String::from("ok"),
                 Some(s) => alloc::format!("BROKEN at seq {s}"),
+            },
+            if rechained {
+                "new records re-chained onto its end"
+            } else {
+                "continuing it"
             }
         );
     }
@@ -362,6 +399,7 @@ fn attach() -> Option<String> {
 
 /// Write every unpersisted record to the file.
 fn flush() {
+    let _f = FLUSH.lock();
     let (file, lines) = {
         let mut l = LOG.lock();
         let Some(f) = l.file.clone() else { return };
@@ -389,22 +427,9 @@ fn flush() {
 fn persister() {
     loop {
         if REATTACH.swap(false, Ordering::AcqRel) {
-            // The file now ends earlier than our chain: records persisted since the
-            // snapshot are gone with the rewind. Drop them from RAM too (so /proc/audit
-            // stays one chain with the file), and re-chain the rest onto the file's end.
-            let lost_upto = {
-                let mut l = LOG.lock();
-                l.file = None;
-                l.sealed = None;
-                l.ring.retain(|r| !r.persisted);
-                l.next_seq - 1
-            };
-            record_as(
-                0,
-                "[kernel]",
-                "audit.reattach",
-                &alloc::format!("reason=volume_rewound ram_head_seq={lost_upto}"),
-            );
+            // The volume was rewound (already detached): note it, then attach again below,
+            // which re-appends whatever the rewound file no longer has.
+            record_as(0, "[kernel]", "audit.reattach", "reason=volume_rewound");
         }
         if LOG.lock().file.is_none()
             && volume_mounted()
@@ -448,6 +473,71 @@ fn proc_status() -> String {
     )
 }
 
+/// `/dev/audit` (write-only): lets privileged user tools (the `milk` package manager)
+/// add records without writing the log. Each line written is `<event> [detail...]`; the
+/// kernel records it as event `user.<event>` with the writer's pid and exe, so user records
+/// can neither pose as kernel events nor touch existing ones. `event`: 1-32 of
+/// `[a-z0-9._-]`. Anyone may write (all processes are uid 0 today); the `user.` prefix and
+/// the exe column say who it came from.
+struct AuditDev {
+    ino: u64,
+    dev: u64,
+}
+
+fn valid_event(e: &str) -> bool {
+    (1..=32).contains(&e.len())
+        && e.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(&c))
+}
+
+impl crate::fs::node::Inode for AuditDev {
+    fn ino(&self) -> u64 {
+        self.ino
+    }
+    fn dev(&self) -> u64 {
+        self.dev
+    }
+    fn kind(&self) -> crate::fs::node::InodeType {
+        crate::fs::node::InodeType::CharDev
+    }
+    fn stat(&self) -> crate::fs::node::Stat {
+        let mut st = crate::fs::node::Stat::new(
+            self.dev,
+            self.ino,
+            crate::fs::node::InodeType::CharDev,
+            0o222,
+        );
+        st.rdev = crate::fs::node::makedev(10, 0xad);
+        st
+    }
+    fn read_at(&self, _off: u64, _buf: &mut [u8]) -> crate::fs::errno::Result<usize> {
+        Err(crate::fs::errno::Errno::EINVAL) // read /proc/audit instead
+    }
+    fn write_at(&self, _off: u64, buf: &[u8]) -> crate::fs::errno::Result<usize> {
+        let text = core::str::from_utf8(buf).map_err(|_| crate::fs::errno::Errno::EINVAL)?;
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.len() > 16 {
+            return Err(crate::fs::errno::Errno::EINVAL);
+        }
+        let split = |l: &str| -> (String, String) {
+            let l = l.trim();
+            let (e, d) = l.split_once(' ').unwrap_or((l, ""));
+            (String::from(e), String::from(d.trim()))
+        };
+        if lines.iter().any(|l| !valid_event(&split(l).0)) {
+            return Err(crate::fs::errno::Errno::EINVAL);
+        }
+        for l in lines {
+            let (event, detail) = split(l);
+            record(&alloc::format!("user.{event}"), &detail);
+        }
+        Ok(buf.len())
+    }
+    fn truncate(&self, _len: u64) -> crate::fs::errno::Result<()> {
+        Ok(())
+    }
+}
+
 /// Boot: SHA-256 self-test, the first record, /proc/audit, the persister thread.
 /// After `sched::init` and `fs::init` (records made before this are kept and chained).
 pub fn init() {
@@ -462,6 +552,11 @@ pub fn init() {
     if let Some(root) = crate::fs::procfs::root() {
         root.add_file("audit", proc_text);
         root.add_file("audit_status", proc_status);
+    }
+    let dev = crate::fs::devfs::ids().map_or(0, |ids| ids.dev);
+    let node = Arc::new(AuditDev { ino: 0xad17, dev });
+    if let Err(e) = crate::fs::devfs::add_device("audit", node) {
+        kprintln!("[audit] /dev/audit: {e:?}");
     }
     THREAD.store(true, Ordering::Release);
     drop(sched::spawn_prio(

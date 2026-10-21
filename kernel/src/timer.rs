@@ -19,6 +19,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 
 use crate::exceptions::TrapFrame;
+use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{FnSlot, IrqGuard};
 use crate::{gic, kprintln};
 
@@ -29,15 +30,24 @@ pub const TIMER_IRQ: u32 = gic::ppi(11);
 
 const NO_DEADLINE: u64 = u64::MAX;
 
-// All of this is written either at init or from the timer IRQ / under IrqGuard on a single
-// core, so plain load/store is enough (see sync.rs).
+// FREQ, BOOT_COUNT and TICK_PERIOD are written once at init. Every CPU has its own
+// comparator, so the next tick and the one-shot deadline are per CPU, touched only by that
+// CPU (from its timer IRQ or with its IRQs masked).
 static FREQ: AtomicU64 = AtomicU64::new(0);
 static BOOT_COUNT: AtomicU64 = AtomicU64::new(0);
 static TICK_PERIOD: AtomicU64 = AtomicU64::new(0);
-static NEXT_TICK: AtomicU64 = AtomicU64::new(0);
+static NEXT_TICK: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Ticks of the boot CPU (the 100 Hz clock everyone reads).
 static TICKS: AtomicU64 = AtomicU64::new(0);
-/// Absolute counter value of the pending one-shot deadline, or NO_DEADLINE.
-static DEADLINE: AtomicU64 = AtomicU64::new(NO_DEADLINE);
+/// Absolute counter value of each CPU's pending one-shot deadline, or NO_DEADLINE.
+static DEADLINE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(NO_DEADLINE) }; MAX_CPUS];
+
+fn next_tick() -> &'static AtomicU64 {
+    &NEXT_TICK[percpu::id()]
+}
+fn deadline() -> &'static AtomicU64 {
+    &DEADLINE[percpu::id()]
+}
 
 /// Called on every tick (from IRQ context, IRQs masked). The scheduler's preemption point:
 /// it may rewrite `frame` or `restore_frame` another one.
@@ -136,7 +146,7 @@ pub fn set_deadline(at_ns: u64, cb: DeadlineCallback) {
         .load(Ordering::Relaxed)
         .wrapping_add(ns_to_ticks(at_ns));
     DEADLINE_CB.set(cb);
-    DEADLINE.store(at, Ordering::Release);
+    deadline().store(at, Ordering::Release);
     reprogram();
 }
 
@@ -148,21 +158,21 @@ pub fn set_timeout_ns(after_ns: u64, cb: DeadlineCallback) {
 /// Disarm the one-shot deadline, if any.
 pub fn cancel_deadline() {
     let _g = IrqGuard::new();
-    DEADLINE.store(NO_DEADLINE, Ordering::Release);
+    deadline().store(NO_DEADLINE, Ordering::Release);
     reprogram();
 }
 
 /// Absolute `now_ns()`-style time of the pending deadline, if one is armed.
 pub fn pending_deadline_ns() -> Option<u64> {
-    let d = DEADLINE.load(Ordering::Acquire);
+    let d = deadline().load(Ordering::Acquire);
     (d != NO_DEADLINE).then(|| ticks_to_ns(d.wrapping_sub(BOOT_COUNT.load(Ordering::Relaxed))))
 }
 
 /// Program the comparator for whichever of next-tick and deadline is sooner.
 /// Caller must have IRQs masked (or be the IRQ handler).
 fn reprogram() {
-    let next = NEXT_TICK.load(Ordering::Relaxed);
-    let dl = DEADLINE.load(Ordering::Relaxed);
+    let next = next_tick().load(Ordering::Relaxed);
+    let dl = deadline().load(Ordering::Relaxed);
     let target = if dl != NO_DEADLINE && (dl.wrapping_sub(next) as i64) < 0 {
         dl
     } else {
@@ -176,23 +186,26 @@ fn on_irq(_irq: u32, frame: &mut TrapFrame) {
     let now = counter();
 
     let mut tick = false;
-    let next = NEXT_TICK.load(Ordering::Relaxed);
+    let next = next_tick().load(Ordering::Relaxed);
     if (now.wrapping_sub(next) as i64) >= 0 {
         tick = true;
-        TICKS.store(TICKS.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+        if percpu::id() == 0 {
+            TICKS.fetch_add(1, Ordering::Relaxed);
+        }
+        percpu::this().ticks.fetch_add(1, Ordering::Relaxed);
         let period = TICK_PERIOD.load(Ordering::Relaxed);
         let mut n = next.wrapping_add(period);
         if (now.wrapping_sub(n) as i64) >= 0 {
             n = now.wrapping_add(period); // fell far behind (e.g. long IRQs-off): skip, don't burst
         }
-        NEXT_TICK.store(n, Ordering::Relaxed);
+        next_tick().store(n, Ordering::Relaxed);
     }
 
     let mut deadline_hit = false;
-    let dl = DEADLINE.load(Ordering::Relaxed);
+    let dl = deadline().load(Ordering::Relaxed);
     if dl != NO_DEADLINE && (now.wrapping_sub(dl) as i64) >= 0 {
         deadline_hit = true;
-        DEADLINE.store(NO_DEADLINE, Ordering::Relaxed);
+        deadline().store(NO_DEADLINE, Ordering::Relaxed);
     }
 
     // Reprogram first: this drops the interrupt condition before EOI, and lets the hooks
@@ -207,6 +220,18 @@ fn on_irq(_irq: u32, frame: &mut TrapFrame) {
     }
 }
 
+/// Start this (secondary) CPU's tick: its own comparator, same period. The PPI is enabled
+/// for this CPU by `gic::init_cpu`.
+pub fn init_cpu() {
+    let _g = IrqGuard::new();
+    next_tick().store(
+        counter() + TICK_PERIOD.load(Ordering::Relaxed),
+        Ordering::Relaxed,
+    );
+    deadline().store(NO_DEADLINE, Ordering::Relaxed);
+    reprogram();
+}
+
 /// Set up the clock, hook the timer PPI and start the 100 Hz tick. The GIC must already be
 /// initialised; IRQs still have to be unmasked by the caller.
 pub fn init() {
@@ -217,8 +242,8 @@ pub fn init() {
     BOOT_COUNT.store(now, Ordering::Relaxed);
     let period = f / TICK_HZ;
     TICK_PERIOD.store(period, Ordering::Relaxed);
-    NEXT_TICK.store(now + period, Ordering::Relaxed);
-    DEADLINE.store(NO_DEADLINE, Ordering::Relaxed);
+    next_tick().store(now + period, Ordering::Relaxed);
+    deadline().store(NO_DEADLINE, Ordering::Relaxed);
 
     gic::register(TIMER_IRQ, on_irq).expect("timer IRQ registration");
     // Level-triggered PPI: ISTATUS stays asserted until the comparator is moved.

@@ -3,7 +3,10 @@
 //!   utest cow     fork shares memory copy-on-write; writes stay private
 //!   utest proc    /proc/<pid> appears, describes the process, and goes away when reaped
 //!   utest signal  handlers, sigreturn, masks, EINTR, SIGCHLD, process groups, defaults
-//!   utest all     everything
+//!   utest tlb     mmap/munmap churn in 4 processes across CPUs; unmapped memory faults
+//!   utest cowsmp  4 children + parent write their copies of one buffer at once
+//!   utest par [N] [ms]  N processes computing in parallel vs 1: prints the speedup
+//!   utest all     everything except par
 
 #![no_std]
 #![no_main]
@@ -387,11 +390,170 @@ fn t_proc() -> bool {
     )
 }
 
+// ---- SMP stress ----
+
+extern "C" fn segv_exit42(_: i32) {
+    sys::exit(42)
+}
+
+fn t_tlb() -> bool {
+    let mut kids = Vec::new();
+    for k in 0..4u8 {
+        match sys::fork().unwrap() {
+            0 => {
+                for i in 0..300u32 {
+                    let len = 64 << 10;
+                    let p = sys::mmap_anon(len).unwrap_or(core::ptr::null_mut());
+                    if p.is_null() {
+                        sys::exit(2);
+                    }
+                    // SAFETY: fresh private mapping of `len` bytes.
+                    let s = unsafe { core::slice::from_raw_parts_mut(p, len) };
+                    let v = (i as u8) ^ k;
+                    for b in s.iter_mut().step_by(512) {
+                        *b = v;
+                    }
+                    if !s.iter().step_by(512).all(|&b| b == v) {
+                        sys::exit(3);
+                    }
+                    let _ = sys::munmap(p, len);
+                    sys::sched_yield(); // move around between CPUs
+                }
+                // A page we just unmapped must fault, on whatever CPU we are now.
+                let p = sys::mmap_anon(4096).unwrap();
+                // SAFETY: mapped.
+                unsafe { core::ptr::write_volatile(p, 1) };
+                let _ = sys::munmap(p, 4096);
+                sys::sched_yield();
+                sys::signal(sys::SIGSEGV, segv_exit42).unwrap();
+                // SAFETY: deliberately not mapped any more.
+                let v = unsafe { core::ptr::read_volatile(p) };
+                rt::println!("utest: stale TLB? read {v} from an unmapped page");
+                sys::exit(1)
+            }
+            pid => kids.push(pid),
+        }
+    }
+    let st: Vec<i32> = kids
+        .iter()
+        .map(|&k| sys::wait4(k as i32, 0).unwrap().1)
+        .collect();
+    check(
+        "TLB: 4 x 300 mmap/munmap across CPUs",
+        st.iter().all(|&s| s == 42 << 8),
+        &alloc::format!(
+            "statuses {:?} (42 = unmapped page faulted, as it must)",
+            st.iter().map(|s| s >> 8).collect::<Vec<_>>()
+        ),
+    )
+}
+
+fn t_cowsmp() -> bool {
+    const N: usize = 256 << 10;
+    let mut buf: Vec<u8> = alloc::vec![0xaa; N];
+    let mut kids = Vec::new();
+    for k in 1..=4u8 {
+        match sys::fork().unwrap() {
+            0 => {
+                for round in 0..20u8 {
+                    let v = k.wrapping_mul(16).wrapping_add(round);
+                    for b in buf.iter_mut().step_by(64) {
+                        *b = v;
+                    }
+                    sys::sched_yield();
+                    if !buf.iter().step_by(64).all(|&b| b == v) {
+                        sys::exit(3);
+                    }
+                }
+                sys::exit(0)
+            }
+            pid => kids.push(pid),
+        }
+    }
+    let mut parent_ok = true;
+    for round in 0..20u8 {
+        for b in buf.iter_mut().step_by(64) {
+            *b = 0xf0 ^ round;
+        }
+        sys::sched_yield();
+        parent_ok &= buf.iter().step_by(64).all(|&b| b == 0xf0 ^ round);
+    }
+    let st: Vec<i32> = kids
+        .iter()
+        .map(|&k| sys::wait4(k as i32, 0).unwrap().1)
+        .collect();
+    check(
+        "COW with 5 writers at once",
+        parent_ok && st.iter().all(|&s| s == 0),
+        &alloc::format!("parent kept its copy: {parent_ok}, children {st:?}"),
+    )
+}
+
+/// A chunk of pure CPU work (integer hashing), about `units` x 1 ms on one core.
+fn work(units: u64) -> u64 {
+    let mut x = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..units * 600_000 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x = core::hint::black_box(x);
+    }
+    x
+}
+
+/// Run `n` processes each doing `units` of work; wall time in ms.
+fn run_workers(n: usize, units: u64) -> u64 {
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    let mut kids = Vec::new();
+    for _ in 0..n {
+        match sys::fork().unwrap() {
+            0 => {
+                let r = work(units);
+                sys::exit((r & 1) as i32)
+            }
+            pid => kids.push(pid),
+        }
+    }
+    for k in kids {
+        let _ = sys::wait4(k as i32, 0);
+    }
+    (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000
+}
+
+fn t_par(n: usize, units: u64) -> bool {
+    let cpus = sys::read_file("/proc/cpuinfo")
+        .map(|c| String::from_utf8_lossy(&c).matches("processor").count())
+        .unwrap_or(1);
+    run_workers(1, units / 10 + 1); // warm-up (page cache, COW paths)
+    let t1 = run_workers(1, units).min(run_workers(1, units));
+    let tn = run_workers(n, units).min(run_workers(n, units));
+    let speedup = (n as f64 * t1 as f64) / tn.max(1) as f64;
+    check(
+        "parallel speedup",
+        true,
+        &alloc::format!(
+            "{cpus} CPUs: 1 job {t1} ms, {n} jobs {tn} ms -> speedup {speedup:.2}x (ideal {:.0}x)",
+            (n.min(cpus)) as f64
+        ),
+    )
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
     if what == "pipe" || what == "all" {
         ok &= t_pipe();
+    }
+    if what == "tlb" || what == "all" {
+        ok &= t_tlb();
+    }
+    if what == "cowsmp" || what == "all" {
+        ok &= t_cowsmp();
+    }
+    if what == "par" {
+        let n = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
+        let ms = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(500);
+        ok &= t_par(n, ms);
     }
     if what == "cow" || what == "all" {
         ok &= t_cow();

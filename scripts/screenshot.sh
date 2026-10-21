@@ -13,7 +13,8 @@ shift $(( $# > 2 ? 2 : $# )) || true
 SOCK="/tmp/milk-display.$$.sock"
 LOG="${OUT%.png}.serial.log"
 cargo build ${RELEASE:+--release} -q
-KERNEL="target/aarch64-unknown-none-softfloat/${RELEASE:+release}${RELEASE:-debug}/milkos-kernel"
+PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
+KERNEL="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 rm -f "$SOCK" "$OUT"
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \

@@ -6,10 +6,10 @@
 //! for the header + status, and a 64 KiB bounce buffer that data is copied through (so
 //! callers can pass any kernel buffer). Bigger transfers are split.
 //!
-//! Completion is polled with the device lock held (IRQs masked), with a 5 s timeout: there
-//! are no wait queues yet. The interrupt is still registered, only to acknowledge it (so it
-//! shows in `/proc/interrupts`). Once the scheduler can sleep, the IRQ handler should wake
-//! the waiter instead and the lock should become a sleeping mutex.
+//! Requests are thread context: the device lock is a `sched::Mutex`, and after kicking the
+//! queue the caller sleeps on [`BLK_WQ`] until the used ring moves (5 s timeout). The IRQ
+//! handler acknowledges the interrupt and wakes the queue. Before `sched::init` the wait
+//! is a `wfi` loop, so early boot (the fs self-test) uses the same path.
 //!
 //! [`fs::blockdev::BlockDevice`]: crate::fs::blockdev::BlockDevice
 
@@ -25,7 +25,7 @@ use crate::exceptions::TrapFrame;
 use crate::fs::blockdev::{self, BlockDevice};
 use crate::fs::errno::{Errno, Result};
 use crate::mmu::{PAGE_SIZE, PhysAddr, phys_to_virt};
-use crate::sync::SpinLock;
+use crate::sched::{Mutex, WaitQueue};
 use crate::{gic, kprintln, pmm, timer};
 
 const F_RO: u64 = 1 << 5;
@@ -48,6 +48,8 @@ const HDR_OFF: usize = 0;
 const STATUS_OFF: usize = 64;
 
 static COUNT: AtomicUsize = AtomicUsize::new(0);
+/// Woken by every virtio-blk interrupt; waiters re-check their own used ring.
+static BLK_WQ: WaitQueue = WaitQueue::new();
 
 struct Inner {
     t: Transport,
@@ -61,7 +63,7 @@ pub struct VirtioBlk {
     sectors: u64,
     ro: bool,
     can_flush: bool,
-    inner: SpinLock<Inner>,
+    inner: Mutex<Inner>,
 }
 
 fn virt(pa: PhysAddr) -> *mut u8 {
@@ -93,20 +95,31 @@ impl Inner {
         }
         let start = timer::now_ns();
         loop {
-            if let Some((id, _len)) = self.vq.pop_used() {
-                self.vq.free(id);
-                if id == head {
-                    break;
+            let mut done = None;
+            let vq = &mut self.vq;
+            let left = TIMEOUT_NS.saturating_sub(timer::now_ns() - start);
+            BLK_WQ.wait_until_timeout(
+                || {
+                    if done.is_none() {
+                        done = vq.pop_used();
+                    }
+                    done.is_some()
+                },
+                left,
+            );
+            match done {
+                Some((id, _len)) => {
+                    self.vq.free(id);
+                    if id == head {
+                        break;
+                    }
                 }
-                continue;
+                None => {
+                    kprintln!("[virtio-blk] request timed out (type {ty}, sector {sector})");
+                    return Err(Errno::EIO);
+                }
             }
-            if timer::now_ns() - start > TIMEOUT_NS {
-                kprintln!("[virtio-blk] request timed out (type {ty}, sector {sector})");
-                return Err(Errno::EIO);
-            }
-            core::hint::spin_loop();
         }
-        self.t.ack_interrupt();
         // SAFETY: as above.
         match unsafe { read_volatile(hdr.add(STATUS_OFF)) } {
             S_OK => Ok(()),
@@ -185,11 +198,11 @@ impl BlockDevice for VirtioBlk {
 }
 
 fn on_irq(irq: u32, _frame: &mut TrapFrame) {
-    // Completions are polled; just acknowledge so the line can fire again.
     let slot = (irq - gic::spi(mmio::MMIO_SPI_BASE)) as usize;
     if let Ok(t) = Transport::probe(slot) {
         t.ack_interrupt();
     }
+    BLK_WQ.wake_all();
 }
 
 /// Bring up a virtio-blk device and register it as `/dev/vd{a,b,...}`.
@@ -229,7 +242,7 @@ pub fn attach(t: Transport) -> core::result::Result<(), Error> {
         sectors,
         ro: features & F_RO != 0,
         can_flush: features & F_FLUSH != 0,
-        inner: SpinLock::new(Inner {
+        inner: Mutex::new(Inner {
             t,
             vq,
             hdr_pa,

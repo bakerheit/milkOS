@@ -25,6 +25,6 @@ milk_disk_args
 # reach the guest's web server at http://127.0.0.1:8088/.
 source scripts/netdev.sh
 milk_net_args
-exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
+exec qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" \
   "${NET_ARGS[@]}"

@@ -18,12 +18,16 @@ ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 rm -f "$SOCK" "$OUT" "$LOG"
+# Shared disks: writes discarded, safe with other qemus running (scripts/disk.sh).
+source scripts/disk.sh
+milk_disk_args shared
 
-qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M \
+qemu-system-aarch64 -M virt -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
   -device ramfb -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
+  "${DISK_ARGS[@]}" \
   -qmp "unix:$SOCK,server,nowait" &
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT

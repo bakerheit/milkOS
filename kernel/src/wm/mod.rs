@@ -454,6 +454,8 @@ impl Desktop {
         d.open(App::Notes);
         d.space = 0;
         d.focus_top();
+        // Apps from manifests before anything lays the dock out (demo scripts aim at it).
+        packages::refresh();
         let demo = script::from_fw_cfg();
         if demo.is_none() {
             d.post_toast("Welcome to milkOS", "Ctrl+Space: search");
@@ -636,6 +638,11 @@ impl Desktop {
     /// The same, with a file dropped on its dock tile: a running window app gets it as a
     /// drop on its window; a new one starts with the file granted and as its argument.
     fn launch_package_with(&mut self, p: &packages::Pkg, file: Option<&str>) {
+        // System apps (the Store) are part of the OS: not sandboxed.
+        if p.system && p.window {
+            self.launch_with(&p.exec, None, file);
+            return;
+        }
         if p.window
             && let Some(f) = file
             && let Some(id) = self.program_window(p.exec.rsplit('/').next().unwrap_or(""))

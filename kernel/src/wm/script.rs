@@ -263,27 +263,38 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(300);
         }
         "paint" => {
-            // Dock icon 4 is Paint. Its window lands at (192, 112); the canvas starts 48px
-            // into the body, so draw a smiling cow-ish face in screen coordinates.
+            // Dock icon 4 is Paint. Its window was designed at (192, 112) (client::place
+            // centres it now: (dx, dy) is the difference); the canvas starts 48px into the
+            // body, so draw a smiling cow-ish face in screen coordinates.
+            let (dx, dy) = paint_offset();
             let (x, y) = dock_icon_center(4);
             b.click(x, y).wait(1200);
-            b.click(193 + 12 + 34 + 14, 145 + 24).wait(100); // straw swatch
-            b.drag(320, 280, 520, 280, 24).wait(50);
-            b.drag(520, 280, 520, 420, 16).wait(50);
-            b.drag(520, 420, 320, 420, 24).wait(50);
-            b.drag(320, 420, 320, 280, 16).wait(50);
-            b.click(193 + 12 + 4 * 34 + 14, 145 + 24).wait(100); // blue
-            b.drag(380, 340, 381, 341, 2).drag(460, 340, 461, 341, 2);
-            b.click(193 + 12 + 2 * 34 + 14, 145 + 24).wait(100); // honey
-            b.drag(370, 385, 420, 400, 10)
-                .drag(420, 400, 470, 385, 10)
+            b.click(dx + 193 + 12 + 34 + 14, dy + 145 + 24).wait(100); // straw swatch
+            b.drag(dx + 320, dy + 280, dx + 520, dy + 280, 24).wait(50);
+            b.drag(dx + 520, dy + 280, dx + 520, dy + 420, 16).wait(50);
+            b.drag(dx + 520, dy + 420, dx + 320, dy + 420, 24).wait(50);
+            b.drag(dx + 320, dy + 420, dx + 320, dy + 280, 16).wait(50);
+            b.click(dx + 193 + 12 + 4 * 34 + 14, dy + 145 + 24)
+                .wait(100); // blue
+            b.drag(dx + 380, dy + 340, dx + 381, dy + 341, 2).drag(
+                dx + 460,
+                dy + 340,
+                dx + 461,
+                dy + 341,
+                2,
+            );
+            b.click(dx + 193 + 12 + 2 * 34 + 14, dy + 145 + 24)
+                .wait(100); // honey
+            b.drag(dx + 370, dy + 385, dx + 420, dy + 400, 10)
+                .drag(dx + 420, dy + 400, dx + 470, dy + 385, 10)
                 .wait(300);
         }
         "paintclose" => {
+            let (dx, dy) = paint_offset();
             let (x, y) = dock_icon_center(4);
             b.click(x, y)
                 .wait(1200)
-                .click(192 + 14 + 6, 112 + 16)
+                .click(dx + 192 + 14 + 6, dy + 112 + 16)
                 .wait(800);
             b.typ("ps").enter().wait(400);
         }
@@ -665,22 +676,22 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk install fortune").enter().wait(3000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            // Sorted by name: fortune is tile 9, moo2048 tile 10.
+            // After the Store (tile 9), by name: fortune is tile 10, moo2048 tile 11.
             if name == "pkgrun" || name == "pkgsandbox" {
-                let (x, y) = dock_icon_center_of(10, 2);
+                let (x, y) = dock_icon_center_of(11, 3);
                 b.click(x, y).wait(2000);
             }
             if name == "pkgsandbox" {
                 // moo2048 runs sandboxed: the audit log says so; play a move to show it works.
                 b.key(Key::Left, Mods::NONE).wait(300);
-                let (x, y) = dock_icon_center_of(1, 2);
+                let (x, y) = dock_icon_center_of(1, 3);
                 b.click(x, y).wait(400);
                 b.typ("audit --event sandbox").enter().wait(800);
             } else if name == "pkgfortune" {
-                let (x, y) = dock_icon_center_of(9, 2);
+                let (x, y) = dock_icon_center_of(10, 3);
                 b.click(x, y).wait(2000);
             } else {
-                let (x, y) = dock_icon_center_of(10, 2);
+                let (x, y) = dock_icon_center_of(11, 3);
                 b.glide(x, y - 80, x, y, 6).wait(300);
             }
         }
@@ -862,7 +873,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.up().wait(1500);
         }
         "dragpkg" => {
-            // moo2048 installed (tile 9): drop todo.txt on its tile.
+            // moo2048 installed (tile 10, after the Store): drop todo.txt on its tile.
             let url = host_test_url();
             b.wait(300)
                 .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
@@ -871,23 +882,26 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("milk update").enter().wait(2000);
             b.typ("milk install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
-            let (tx, ty) = dock_icon_center_of(9, 1);
+            let (tx, ty) = dock_icon_center_of(10, 2);
             b.to(421, 150).wait(30).down().wait(30);
             for i in 1..=16 {
                 b.to(421 + (tx - 421) * i / 16, 150 + (ty - 150) * i / 16)
                     .wait(16);
             }
             b.up().wait(2000);
-            let (x, y) = dock_icon_center_of(1, 1);
+            let (x, y) = dock_icon_center_of(1, 2);
             b.click(x, y).wait(400);
             b.typ("audit --event powerbox").enter().wait(600);
             b.typ("audit --event sandbox").enter().wait(800);
         }
         "dragpeek" => {
-            // Peek (sandboxed, no fs) opens at (192, 112); move it aside, then drop todo.txt
-            // on it: the drop is the grant.
+            // Peek (sandboxed, no fs) opens centred; drag it by its title bar so its body is
+            // at the bottom right, then drop todo.txt on it: the drop is the grant.
             b.wait(300).typ("open /bin/peek").enter().wait(1500);
-            b.drag(450, 128, 650, 380, 10).wait(300);
+            let r = super::client::place(1, 522, 374);
+            let (tx, ty) = (r.x + 258, r.y + 16);
+            b.drag(tx, ty, tx + (392 - r.x), ty + (364 - r.y), 10)
+                .wait(300);
             b.click(300, 80).wait(300);
             b.to(421, 150).wait(30).down().wait(30);
             for i in 1..=16 {
@@ -937,6 +951,19 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(x, y).wait(500);
             b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8)
                 .wait(300);
+        }
+        // The Milk Store (a system app, /System/Applications/store): tile 9.
+        "store" | "store-repo" => {
+            if name == "store-repo" {
+                // The toy repo scripts/wm-pkg-demo.sh serves.
+                let url = host_test_url();
+                b.wait(300)
+                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .enter()
+                    .wait(300);
+            }
+            let (x, y) = dock_icon_center(9);
+            b.wait(300).click(x, y).wait(4000);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);
@@ -995,6 +1022,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
 
 /// The test web server for the browse2 / browse3 demos: the Mac's 127.0.0.1 as seen from
 /// the guest (10.0.2.2, WM_HOSTNET=1), on the port in fw_cfg `opt/milkos/testport`.
+/// Where Paint's window is now vs. where the paint demos were written for (192, 112).
+fn paint_offset() -> (i32, i32) {
+    let r = super::client::place(1, 562, 414);
+    (r.x - 192, r.y - 112)
+}
+
 fn host_test_url() -> String {
     let port = fwcfg::find_file("opt/milkos/testport")
         .and_then(|f| {

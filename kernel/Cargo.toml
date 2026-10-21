@@ -16,3 +16,5 @@ crash-test = []
 atomic-locks = []
 # Scheduler self-test ends with a thread recursing forever, to prove the stack guard.
 kstack-overflow-test = []
+# Log every syscall (pid, number, result) to the console.
+strace = []

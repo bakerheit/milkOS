@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 use super::asid::Asid;
 use super::errno::*;
 use crate::mmu::{
-    AddressSpace, MapAttrs, MemType, PAGE_SIZE, PhysAddr, PmmTables, USER_BASE, USER_END,
-    VirtAddr, phys_to_virt,
+    AddressSpace, MapAttrs, MemType, PAGE_SIZE, PhysAddr, PmmTables, USER_BASE, USER_END, VirtAddr,
+    phys_to_virt,
 };
 use crate::pmm;
 
@@ -430,6 +430,34 @@ impl UserSpace {
             return Err(e);
         }
         Ok(va)
+    }
+
+    /// mprotect: set the permissions of the mapped pages in the range. PROT_NONE (`None`)
+    /// is accepted but leaves the pages as they are (no "mapped but inaccessible" yet).
+    pub fn protect(&mut self, addr: VirtAddr, len: usize, perm: Option<Perm>) -> KResult<()> {
+        if !addr.is_multiple_of(PAGE_SIZE) || !user_range_ok(addr, len) {
+            return Err(EINVAL);
+        }
+        let Some(perm) = perm else { return Ok(()) };
+        let pages: Vec<(VirtAddr, Page)> = self
+            .pages
+            .range(addr..page_up(addr + len))
+            .map(|(&v, &p)| (v, p))
+            .collect();
+        for (va, p) in pages {
+            if p.perm == perm {
+                continue;
+            }
+            self.space().unmap_page(va);
+            self.space()
+                .map(va, p.pa, PAGE_SIZE, perm.attrs(), &mut PmmTables)
+                .map_err(|_| ENOMEM)?;
+            self.pages.insert(va, Page { pa: p.pa, perm });
+            if perm.exec {
+                self.sync_icache();
+            }
+        }
+        Ok(())
     }
 
     pub fn munmap(&mut self, addr: VirtAddr, len: usize) -> KResult<()> {

@@ -53,5 +53,9 @@ impl Drop for Asid {
 }
 
 pub fn in_use() -> usize {
-    USED.lock().iter().map(|w| w.count_ones() as usize).sum::<usize>() - 1
+    USED.lock()
+        .iter()
+        .map(|w| w.count_ones() as usize)
+        .sum::<usize>()
+        - 1
 }

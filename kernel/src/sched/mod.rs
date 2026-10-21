@@ -741,6 +741,15 @@ pub fn reset_current_fp() {
     unsafe { fp_restore(&z) };
 }
 
+/// CPU time of the current thread so far, in ns.
+pub fn current_cpu_ns() -> u64 {
+    let now = timer::now_ns();
+    with(|s| {
+        let t = s.cur();
+        t.cpu_ns + now.saturating_sub(t.switched_in_at)
+    })
+}
+
 /// The live TPIDR_EL0 (the current user thread's TLS pointer).
 pub fn current_tpidr_el0() -> u64 {
     let v: u64;

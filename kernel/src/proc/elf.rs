@@ -131,7 +131,11 @@ pub fn load(space: &mut UserSpace, data: &[u8]) -> KResult<Image> {
             );
             return Err(ENOEXEC);
         }
-        if p.filesz > p.memsz || p.offset.checked_add(p.filesz).is_none_or(|e| e > data.len()) {
+        if p.filesz > p.memsz
+            || p.offset
+                .checked_add(p.filesz)
+                .is_none_or(|e| e > data.len())
+        {
             return Err(ENOEXEC);
         }
         let perm = Perm {
@@ -202,7 +206,7 @@ pub fn build_stack(
     execfn: &str,
 ) -> KResult<usize> {
     let mut sp = top;
-    let mut push_bytes = |b: &[u8], sp: &mut usize| -> KResult<usize> {
+    let push_bytes = |b: &[u8], sp: &mut usize| -> KResult<usize> {
         *sp -= b.len();
         space.poke(*sp, b)?;
         Ok(*sp)
@@ -217,7 +221,7 @@ pub fn build_stack(
         c.copy_from_slice(&x.to_le_bytes());
     }
     let random = push_bytes(&rnd, &mut sp)?;
-    let mut cstr = |s: &str, sp: &mut usize| -> KResult<usize> {
+    let cstr = |s: &str, sp: &mut usize| -> KResult<usize> {
         let mut v = Vec::with_capacity(s.len() + 1);
         v.extend_from_slice(s.as_bytes());
         v.push(0);

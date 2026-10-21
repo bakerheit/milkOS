@@ -1,11 +1,14 @@
-//! The console tty: fd 0/1/2 of every process started by the kernel, on the PL011 UART.
+//! The console tty behind `/dev/console` (fd 0/1/2 of every process the kernel starts):
+//! the input side. devfs's console node calls [`read`] and [`ioctl`]; writes stay in devfs
+//! (straight to the `kprintln!` sink).
 //!
-//! Output goes through the same sink as `kprintln!` (UART + screen console). Input is
-//! line-buffered ("cooked") in the kernel like a Unix tty: echo, backspace, ^U kills the
-//! line, ^C drops it, ^D at the start of a line is end-of-file, Enter delivers the line.
-//! Readers sleep on a wait queue that the UART RX interrupt kicks.
+//! Input is line-buffered ("cooked") like a Unix tty: echo, backspace, ^U kills the line,
+//! ^C drops it, ^D at the start of a line is end-of-file, Enter delivers the line. Readers
+//! sleep on a wait queue that the UART RX interrupt kicks. Before the scheduler is up there
+//! is nobody to wait for, so `read` is non-blocking then (EAGAIN when empty), which is
+//! what the fs boot self-test expects.
 //!
-//! MERGE NOTE (wm): a Terminal window can be a second implementation of this (same line
+//! MERGE NOTE (wm): a Terminal window can be a second instance of this (same line
 //! discipline, its own input queue fed by the keyboard driver, output drawn in the window).
 
 use alloc::collections::VecDeque;
@@ -14,11 +17,8 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use super::errno::*;
-use super::fs::{File, FileType, Stat};
-use crate::sched::{Mutex, WaitQueue};
+use crate::sched::{self, Mutex, WaitQueue};
 use crate::{sync, uart};
-
-pub struct Console;
 
 struct Tty {
     line: Vec<u8>,
@@ -111,51 +111,56 @@ impl Tty {
     }
 }
 
-impl File for Console {
-    fn read(&self, buf: &mut [u8]) -> KResult<usize> {
-        if buf.is_empty() {
+/// Blocking cooked read (see the module docs).
+pub fn read(buf: &mut [u8]) -> KResult<usize> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut tty = TTY.lock();
+    loop {
+        if !tty.ready.is_empty() {
+            let n = buf.len().min(tty.ready.len());
+            for (i, b) in tty.ready.drain(..n).enumerate() {
+                buf[i] = b;
+            }
+            return Ok(n);
+        }
+        if tty.eof {
+            tty.eof = false;
             return Ok(0);
         }
-        let mut tty = TTY.lock();
-        loop {
-            if !tty.ready.is_empty() {
-                let n = buf.len().min(tty.ready.len());
-                for (i, b) in tty.ready.drain(..n).enumerate() {
-                    buf[i] = b;
-                }
-                return Ok(n);
-            }
-            if tty.eof {
-                tty.eof = false;
-                return Ok(0);
+        if uart::available() == 0 {
+            if !sched::started() {
+                return Err(EAGAIN);
             }
             RX_WQ.wait_until(|| uart::available() > 0);
-            let mut echo = Vec::new();
-            while let Some(b) = uart::read_byte() {
-                tty.input(b, &mut echo);
-            }
-            if !echo.is_empty() {
-                write_bytes(&echo);
-            }
+        }
+        let mut echo = Vec::new();
+        while let Some(b) = uart::read_byte() {
+            tty.input(b, &mut echo);
+        }
+        if !echo.is_empty() {
+            write_bytes(&echo);
         }
     }
+}
 
-    fn write(&self, buf: &[u8]) -> KResult<usize> {
-        write_bytes(buf);
-        Ok(buf.len())
-    }
+const TCGETS: u32 = 0x5401;
+const TIOCGWINSZ: u32 = 0x5413;
+const TIOCGPGRP: u32 = 0x540f;
 
-    fn stat(&self) -> KResult<Stat> {
-        Ok(Stat {
-            ino: 4,
-            kind: FileType::CharDevice,
-            perm: 0o620,
-            size: 0,
-            rdev: (5 << 8) | 1, // like Linux's /dev/console (5, 1)
-        })
-    }
-
-    fn is_tty(&self) -> bool {
-        true
+/// The tty ioctls libc's `isatty` and friends use. Results that need user memory are
+/// returned as bytes for the syscall layer to copy out.
+pub fn ioctl(cmd: u32) -> KResult<Vec<u8>> {
+    match cmd {
+        // struct termios (asm-generic, 60 bytes): zeroed is good enough for isatty().
+        TCGETS => Ok(alloc::vec![0u8; 60]),
+        // struct winsize { rows, cols, xpixel, ypixel }: u16 each.
+        TIOCGWINSZ => Ok([25u16, 80, 0, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect()),
+        TIOCGPGRP => Ok(1u32.to_le_bytes().to_vec()),
+        _ => Err(ENOTTY),
     }
 }

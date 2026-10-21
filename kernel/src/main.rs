@@ -25,6 +25,7 @@ mod mem;
 mod memtest;
 mod mmu;
 mod pmm;
+mod proc;
 mod ramfb;
 mod sched;
 mod selftest;
@@ -92,6 +93,7 @@ pub extern "C" fn kmain() -> ! {
     fs::selftest::run();
     sched::init();
     sched::selftest::run();
+    proc::init();
 
     loop {
         uart::echo_pending();

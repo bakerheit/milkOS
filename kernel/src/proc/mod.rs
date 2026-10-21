@@ -13,8 +13,6 @@ pub mod console;
 pub mod elf;
 pub mod errno;
 pub mod fd;
-pub mod fs;
-mod initrd;
 mod selftest;
 pub mod syscall;
 pub mod uspace;
@@ -24,9 +22,10 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::exceptions::{self, TrapFrame};
+use crate::fs::{self, InodeRef};
 use crate::sched::{self, Comm, FpState, Tid, UserState, WaitQueue};
 use crate::sync::SpinLock;
 use crate::{kprintln, mmu, timer};
@@ -85,12 +84,14 @@ pub struct Inner {
     pub fds: FdTable,
     pub children: Vec<Pid>,
     pub tid: Tid,
-    pub cwd: String,
+    pub cwd: InodeRef,
     pub start_ns: u64,
 }
 
 static PROCS: SpinLock<BTreeMap<Pid, Arc<Process>>> = SpinLock::new(BTreeMap::new());
-static NEXT_PID: AtomicU32 = AtomicU32::new(1);
+/// PID 1 is reserved for init (start_init); everything else counts up from 2.
+static NEXT_PID: AtomicU32 = AtomicU32::new(2);
+static INIT_NEXT: AtomicBool = AtomicBool::new(false);
 /// Kernel threads waiting for processes they started (ppid 0).
 static KERNEL_CHILD_WQ: WaitQueue = WaitQueue::new();
 
@@ -115,32 +116,37 @@ pub fn init() {
     console::init();
     syscall::init();
     exceptions::set_user_fault_handler(on_user_fault);
+    let bin: Vec<String> = fs::readdir("/bin")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
     kprintln!(
-        "[proc] up: user range {:#x}.., programs at {:#x}, {} embedded: {}",
+        "[proc] up: user range {:#x}.., programs linked at {:#x}, /bin: {}",
         mmu::USER_BASE,
         uspace::IMAGE_BASE,
-        initrd::PROGRAMS.len(),
-        initrd::PROGRAMS
-            .iter()
-            .map(|p| p.0)
-            .collect::<Vec<_>>()
-            .join(" ")
+        bin.join(" ")
     );
     selftest::run();
 }
 
 /// Create a process around `space` and start its thread at `entry` with stack `sp`.
+#[allow(clippy::too_many_arguments)]
 fn start(
     name: &str,
     ppid: Pid,
     space: UserSpace,
     fds: FdTable,
-    cwd: String,
+    cwd: InodeRef,
     frame: &TrapFrame,
     tpidr_el0: u64,
     fp: Box<FpState>,
 ) -> KResult<Pid> {
-    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let pid = if INIT_NEXT.swap(false, Ordering::Relaxed) {
+        1
+    } else {
+        NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    };
     let ttbr0 = space.ttbr0();
     let p = Arc::new(Process {
         pid,
@@ -212,7 +218,7 @@ fn basename(path: &str) -> &str {
 
 /// Start the program at `path` as a new process with the kernel as parent, on the console.
 pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
-    let data = fs::read_all(path)?;
+    let data = fs::read_file(path)?;
     let argv: Vec<String> = argv.iter().map(|s| String::from(*s)).collect();
     let envp = [String::from("PATH=/bin"), String::from("HOME=/")];
     let (space, entry, sp) = load_image(&data, &argv, &envp, path)?;
@@ -220,8 +226,8 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         basename(path),
         0,
         space,
-        FdTable::with_console(),
-        String::from("/"),
+        FdTable::with_console()?,
+        fs::root(),
         &user_frame(entry, sp),
         0,
         Box::new(FpState::zeroed()),
@@ -230,10 +236,8 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
 
 /// Start `/bin/init` as PID 1. Call at the end of boot.
 pub fn start_init() {
-    assert!(
-        NEXT_PID.load(Ordering::Relaxed) == 1,
-        "start_init must create PID 1"
-    );
+    assert!(get(1).is_none(), "init already running");
+    INIT_NEXT.store(true, Ordering::Relaxed);
     match spawn("/bin/init", &["init"]) {
         Ok(pid) => kprintln!("[proc] started /bin/init as pid {pid}"),
         Err(e) => panic!("could not start /bin/init: errno {}", e.0),
@@ -286,7 +290,21 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
 /// execve(): replace the caller's image. On success `frame` is rewritten to enter the new
 /// program; on failure the old image is untouched.
 pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String]) -> KResult<()> {
-    let data = fs::read_all(path)?;
+    let cwd = current().inner.lock().cwd.clone();
+    let st = fs::stat_at(Some(&cwd), path, true)?;
+    if st.kind != fs::InodeType::File {
+        return Err(EACCES);
+    }
+    let f = fs::open_at(Some(&cwd), path, fs::abi::O_RDONLY, 0)?;
+    let mut data = alloc::vec![0u8; st.size as usize];
+    let mut done = 0;
+    while done < data.len() {
+        match f.read(&mut data[done..])? {
+            0 => break,
+            n => done += n,
+        }
+    }
+    data.truncate(done);
     let (space, entry, sp) = load_image(&data, argv, envp, path)?;
     let me = current();
     let ttbr0 = space.ttbr0();
@@ -456,7 +474,12 @@ fn on_user_fault(frame: &mut TrapFrame) -> bool {
         _ => "",
     };
     let addr = if matches!(ec, EC_DABT_LOWER | EC_IABT_LOWER | EC_PC_ALIGN) {
-        alloc::format!(" {:#x}", frame.far)
+        let hint = if (frame.far as usize) < mmu::USER_BASE {
+            " (not a user address)"
+        } else {
+            ""
+        };
+        alloc::format!(" {:#x}{hint}", frame.far)
     } else {
         String::new()
     };

@@ -85,7 +85,7 @@ impl App {
                     win.disc(nx + 4 * n.len() as i32, cell.y + 14, 12, th.straw);
                     win.text(nx, cell.y + 6, &n, th.ink);
                 } else {
-                    let col_t = if outside { th.latte } else { th.espresso };
+                    let col_t = if outside { th.cocoa } else { th.espresso };
                     win.text(nx, cell.y + 6, &n, col_t);
                 }
                 // Events: as many chips as fit, then "+N more".

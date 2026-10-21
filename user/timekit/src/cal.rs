@@ -177,16 +177,42 @@ impl Event {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+/// The accent names a calendar may use.
+pub const COLOURS: [&str; 5] = ["straw", "matcha", "blue", "honey", "lav"];
+
+/// When an alert on an all-day event rings (minutes since midnight).
+pub const ALL_DAY_ALERT_AT: u16 = 9 * 60;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Calendar {
+    pub name: String,
+    pub colour: String,
+    /// Not shown in the app (alerts still ring).
+    pub hidden: bool,
     pub events: Vec<Event>,
+}
+
+impl Default for Calendar {
+    fn default() -> Calendar {
+        Calendar::new("Personal", "straw")
+    }
 }
 
 /// Most days a range query scans, so a bad date cannot spin the app.
 pub const MAX_RANGE_DAYS: i64 = 3700;
 
 impl Calendar {
-    /// Parse a file. Returns the calendar and how many lines were skipped.
+    pub fn new(name: &str, colour: &str) -> Calendar {
+        Calendar {
+            name: name.to_string(),
+            colour: colour.to_string(),
+            hidden: false,
+            events: Vec::new(),
+        }
+    }
+
+    /// Parse a file. Returns the calendar and how many lines were skipped. Without a valid
+    /// header the calendar is "Personal" (the caller may rename it from the file name).
     pub fn parse(text: &str) -> (Calendar, usize) {
         let mut c = Calendar::default();
         let mut skipped = 0;
@@ -194,6 +220,17 @@ impl Calendar {
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         {
+            if l.starts_with("calendar\t") {
+                let f: Vec<&str> = l.split('\t').collect();
+                if f.len() >= 3 && !f[1].is_empty() && COLOURS.contains(&f[2]) {
+                    c.name = unesc(f[1]);
+                    c.colour = f[2].to_string();
+                    c.hidden = f.get(3) == Some(&"hidden");
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
             match Event::from_line(l) {
                 Some(e) if !c.events.iter().any(|x| x.id == e.id) => c.events.push(e),
                 _ => skipped += 1,
@@ -203,8 +240,11 @@ impl Calendar {
     }
 
     pub fn to_text(&self) -> String {
-        let mut o = String::from(
-            "# milkOS calendar: one event per line, tab-separated (see timekit/src/cal.rs)\n",
+        let mut o = format!(
+            "# milkOS calendar: a header, then one event per line, tab-separated (see timekit/src/cal.rs)\ncalendar\t{}\t{}{}\n",
+            esc(&self.name),
+            self.colour,
+            if self.hidden { "\thidden" } else { "" }
         );
         for e in &self.events {
             o.push_str(&e.line());
@@ -281,9 +321,10 @@ impl Calendar {
         for z in first.days()..=lastday.days().min(first.days() + MAX_RANGE_DAYS) + 1 {
             let d = Date::from_days(z);
             for e in self.events.iter().filter(|e| e.occurs_on(d)) {
-                let (Some(start), Some(alert)) = (e.start, e.alert) else {
+                let Some(alert) = e.alert else {
                     continue;
                 };
+                let start = e.start.unwrap_or(ALL_DAY_ALERT_AT);
                 let at = join_secs(d, 0) + start as i64 * 60 - alert as i64 * 60;
                 if at > last && at <= now {
                     out.push((e.id, d, e.title.clone()));
@@ -291,6 +332,192 @@ impl Calendar {
             }
         }
         out
+    }
+}
+
+/// Every calendar, with event ids unique across all of them (so `cal rm 7` is unambiguous).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalendarSet {
+    pub cals: Vec<Calendar>,
+}
+
+impl Default for CalendarSet {
+    fn default() -> CalendarSet {
+        CalendarSet::defaults()
+    }
+}
+
+impl CalendarSet {
+    /// Personal, Home and Work: what a fresh machine shows.
+    pub fn defaults() -> CalendarSet {
+        CalendarSet {
+            cals: alloc::vec![
+                Calendar::new("Personal", "straw"),
+                Calendar::new("Home", "matcha"),
+                Calendar::new("Work", "blue"),
+            ],
+        }
+    }
+
+    /// Build from the calendar folder: (file name without `.cal`, text) pairs. A file without a
+    /// header takes its name from the file. No files at all gives the three defaults. Returns
+    /// the set and how many lines were skipped.
+    pub fn from_files(files: &[(String, String)]) -> (CalendarSet, usize) {
+        if files.is_empty() {
+            return (CalendarSet::defaults(), 0);
+        }
+        let mut set = CalendarSet { cals: Vec::new() };
+        let mut skipped = 0;
+        let mut seen: Vec<u32> = Vec::new();
+        for (stem, text) in files {
+            let (mut c, sk) = Calendar::parse(text);
+            skipped += sk;
+            if !text.lines().any(|l| l.starts_with("calendar\t")) {
+                c.name = stem.clone();
+            }
+            let base = c.name.clone();
+            let mut n = 2;
+            while set.cals.iter().any(|o| o.name == c.name) {
+                c.name = format!("{base} {n}");
+                n += 1;
+            }
+            for e in &mut c.events {
+                if seen.contains(&e.id) {
+                    e.id = seen.iter().max().copied().unwrap_or(0) + 1;
+                }
+                seen.push(e.id);
+            }
+            set.cals.push(c);
+        }
+        (set, skipped)
+    }
+
+    /// The file a calendar is stored in: its name with anything odd replaced, plus `.cal`.
+    pub fn file_name(c: &Calendar) -> String {
+        let mut f: String = c
+            .name
+            .chars()
+            .take(40)
+            .map(|ch| {
+                if ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let t = f.trim();
+        f = if t.is_empty() || t.starts_with('.') {
+            "calendar".to_string()
+        } else {
+            t.to_string()
+        };
+        f.push_str(".cal");
+        f
+    }
+
+    pub fn next_id(&self) -> u32 {
+        self.cals
+            .iter()
+            .flat_map(|c| c.events.iter().map(|e| e.id))
+            .max()
+            .map_or(1, |m| m + 1)
+    }
+
+    /// Add an event to calendar `cal`, giving it a fresh id. Returns the id.
+    pub fn add(&mut self, cal: usize, mut e: Event) -> u32 {
+        e.id = self.next_id();
+        let id = e.id;
+        let cal = cal.min(self.cals.len() - 1);
+        self.cals[cal].events.push(e);
+        id
+    }
+
+    pub fn find(&self, id: u32) -> Option<(usize, usize)> {
+        self.cals
+            .iter()
+            .enumerate()
+            .find_map(|(ci, c)| c.events.iter().position(|e| e.id == id).map(|ei| (ci, ei)))
+    }
+
+    pub fn get(&self, id: u32) -> Option<(usize, &Event)> {
+        self.find(id)
+            .map(|(ci, ei)| (ci, &self.cals[ci].events[ei]))
+    }
+
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut Event> {
+        let (ci, ei) = self.find(id)?;
+        Some(&mut self.cals[ci].events[ei])
+    }
+
+    pub fn remove(&mut self, id: u32) -> bool {
+        match self.find(id) {
+            Some((ci, ei)) => {
+                self.cals[ci].events.remove(ei);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Move an event to another calendar (the id stays).
+    pub fn move_event(&mut self, id: u32, to: usize) -> bool {
+        let Some((ci, ei)) = self.find(id) else {
+            return false;
+        };
+        if to >= self.cals.len() {
+            return false;
+        }
+        let e = self.cals[ci].events.remove(ei);
+        self.cals[to].events.push(e);
+        true
+    }
+
+    /// The shown events on `d` (hidden calendars left out): (calendar index, event), all-day
+    /// first, then by time.
+    pub fn on(&self, d: Date) -> Vec<(usize, &Event)> {
+        let mut v: Vec<(usize, &Event)> = self
+            .cals
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.hidden)
+            .flat_map(|(ci, c)| {
+                c.events
+                    .iter()
+                    .filter(move |e| e.occurs_on(d))
+                    .map(move |e| (ci, e))
+            })
+            .collect();
+        v.sort_by(|a, b| a.1.day_key().cmp(&b.1.day_key()).then(a.1.id.cmp(&b.1.id)));
+        v
+    }
+
+    /// How many shown events happen on each day of a month (index 0 is the 1st).
+    pub fn month_counts(&self, y: i32, m: u8) -> Vec<u8> {
+        (1..=days_in_month(y, m))
+            .map(|d| self.on(Date { y, m, d }).len().min(255) as u8)
+            .collect()
+    }
+
+    /// Shown events from `from` to `to` inclusive, in date order.
+    pub fn between(&self, from: Date, to: Date) -> Vec<(Date, usize, &Event)> {
+        let mut out = Vec::new();
+        let (a, b) = (from.days(), to.days().min(from.days() + MAX_RANGE_DAYS));
+        for z in a..=b {
+            let d = Date::from_days(z);
+            for (ci, e) in self.on(d) {
+                out.push((d, ci, e));
+            }
+        }
+        out
+    }
+
+    /// Alerts due in (`last`, `now`] from every calendar, hidden ones too.
+    pub fn alerts_due(&self, last: i64, now: i64) -> Vec<(u32, Date, String)> {
+        self.cals
+            .iter()
+            .flat_map(|c| c.alerts_due(last, now))
+            .collect()
     }
 }
 
@@ -377,7 +604,7 @@ mod tests {
         let (back, skipped) = Calendar::parse(&text);
         assert_eq!(skipped, 0);
         assert_eq!(back, c);
-        assert_eq!(text.lines().count(), 3); // header + two events, notes did not break lines
+        assert_eq!(text.lines().count(), 4); // comment + header + two events, notes did not break lines
     }
 
     #[test]
@@ -473,12 +700,99 @@ mod tests {
     }
 
     #[test]
-    fn alert_needs_a_start_time() {
+    fn all_day_alert_rings_at_nine() {
         let mut c = Calendar::default();
-        let mut e = Event::new(0, "All day", d(2025, 1, 10));
-        e.alert = Some(10);
+        let mut e = Event::new(0, "Birthday", d(2025, 1, 10));
+        e.alert = Some(0);
         c.add(e);
-        let day = join_secs(d(2025, 1, 10), 0);
-        assert!(c.alerts_due(day - 86400, day + 86400).is_empty());
+        let nine = join_secs(d(2025, 1, 10), 9 * 3600);
+        assert_eq!(c.alerts_due(nine - 1, nine).len(), 1);
+        assert!(c.alerts_due(nine - 86400, nine - 1).is_empty());
+        // "1 day before" an all-day event: 09:00 the day before.
+        c.events[0].alert = Some(1440);
+        let eve = join_secs(d(2025, 1, 9), 9 * 3600);
+        assert_eq!(c.alerts_due(eve - 1, eve).len(), 1);
+    }
+
+    #[test]
+    fn header_roundtrip_and_bad_header() {
+        let mut c = Calendar::new("Work\tTeam", "blue");
+        c.hidden = true;
+        c.add(Event::new(0, "Review", d(2025, 1, 10)));
+        let (back, skipped) = Calendar::parse(&c.to_text());
+        assert_eq!((back, skipped), (c, 0));
+        let (c, skipped) = Calendar::parse("calendar\tX\tpurple\n");
+        assert_eq!((c.name.as_str(), skipped), ("Personal", 1)); // unknown colour: header ignored
+    }
+
+    fn set_with_two() -> CalendarSet {
+        let mut s = CalendarSet::defaults();
+        s.add(0, Event::new(0, "Dentist", d(2025, 2, 3)));
+        s.add(2, Event::new(0, "Review", d(2025, 2, 3)));
+        s
+    }
+
+    #[test]
+    fn set_ids_are_global_and_lookups_work() {
+        let mut s = set_with_two();
+        assert_eq!(s.cals.len(), 3);
+        assert_eq!(s.get(1).unwrap().0, 0);
+        assert_eq!(s.get(2).unwrap().0, 2);
+        assert_eq!(s.add(1, Event::new(0, "Groceries", d(2025, 2, 4))), 3);
+        assert!(s.move_event(3, 2));
+        assert_eq!(s.get(3).unwrap().0, 2);
+        assert!(!s.move_event(3, 9));
+        s.get_mut(3).unwrap().title = "Shopping".into();
+        assert_eq!(s.get(3).unwrap().1.title, "Shopping");
+        assert!(s.remove(1));
+        assert!(!s.remove(1));
+        assert!(s.get(1).is_none());
+    }
+
+    #[test]
+    fn hidden_calendars_leave_the_views_but_still_alert() {
+        let mut s = set_with_two();
+        let mut e = Event::new(0, "Standup", d(2025, 2, 3));
+        e.start = Some(600);
+        e.alert = Some(0);
+        s.add(2, e);
+        assert_eq!(s.on(d(2025, 2, 3)).len(), 3);
+        s.cals[2].hidden = true;
+        assert_eq!(s.on(d(2025, 2, 3)).len(), 1);
+        assert_eq!(s.month_counts(2025, 2)[2], 1);
+        let t = join_secs(d(2025, 2, 3), 600 * 60);
+        assert_eq!(s.alerts_due(t - 1, t).len(), 1);
+        assert_eq!(s.between(d(2025, 2, 1), d(2025, 2, 28)).len(), 1);
+    }
+
+    #[test]
+    fn from_files_names_dedupes_and_defaults() {
+        let (s, sk) = CalendarSet::from_files(&[]);
+        assert_eq!((s.cals.len(), sk), (3, 0));
+        let a = "calendar\tHome\tmatcha\nevent\t1\t2025-01-01\t-\t-\tnone\t-\t-\tA\t\n".to_string();
+        let b = "event\t1\t2025-01-02\t-\t-\tnone\t-\t-\tB\t\n".to_string(); // no header, clashing id
+        let c = "calendar\tHome\tblue\n".to_string(); // clashing name
+        let (s, sk) =
+            CalendarSet::from_files(&[("Home".into(), a), ("Garden".into(), b), ("x".into(), c)]);
+        assert_eq!(sk, 0);
+        let names: Vec<&str> = s.cals.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Home", "Garden", "Home 2"]);
+        let ids: Vec<u32> = s
+            .cals
+            .iter()
+            .flat_map(|c| c.events.iter().map(|e| e.id))
+            .collect();
+        assert_eq!(ids, [1, 2]); // the clash was renumbered
+    }
+
+    #[test]
+    fn file_names_are_safe() {
+        let n = |name: &str| CalendarSet::file_name(&Calendar::new(name, "straw"));
+        assert_eq!(n("Work"), "Work.cal");
+        assert_eq!(n("a/b\\c"), "a_b_c.cal");
+        assert_eq!(n(".."), "__.cal"); // no dots: never a hidden file or a path
+        assert_eq!(n(""), "calendar.cal");
+        assert_eq!(n("  "), "calendar.cal");
+        assert_eq!(n(".hidden"), "_hidden.cal");
     }
 }

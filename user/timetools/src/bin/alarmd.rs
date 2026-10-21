@@ -2,8 +2,8 @@
 //! and appends a line per ring to `~/.cache/milk/alarmd.log` (so a missed toast can be found).
 //! -q: say nothing at start.
 //!
-//! Started by init. Once a second it looks at three files (written by Clock and Calendar):
-//! `~/.config/milk/alarms`, `~/.config/milk/timers` and `~/Library/Calendar/events`. Nothing is
+//! Started by init. Once a second it looks at the files Clock and Calendar write:
+//! `~/Library/Clock/alarms`, `~/Library/Clock/timers` and `~/Library/Calendar/*.cal`. Nothing is
 //! cached, so an edit made by an app counts on the next tick. Time that passed while the VM was
 //! paused is caught up (at most ten minutes of it); a clock set backwards rings nothing.
 
@@ -53,7 +53,7 @@ fn main(args: &rt::Args) -> i32 {
     if !args.argv.contains(&"-q") {
         println!(
             "alarmd: watching {} {} {}",
-            paths.alarms, paths.timers, paths.calendar
+            paths.alarms, paths.timers, paths.calendars
         );
     }
     let mut last = timeio::now_secs();
@@ -69,7 +69,7 @@ fn main(args: &rt::Args) -> i32 {
         }
         let from = last.max(now - CATCH_UP_SECS);
         alarms(&paths, from, now);
-        timers(&paths, timeio::now_ms());
+        timers(&paths, timeio::mono_ms());
         calendar(&paths, from, now);
         last = now;
     }
@@ -109,9 +109,9 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
     }
 }
 
-fn timers(paths: &timeio::Paths, now_ms: u64) {
+fn timers(paths: &timeio::Paths, mono_ms: u64) {
     let (mut list, _) = timeio::load_timers(paths);
-    let done = list.take_due(now_ms);
+    let done = list.take_due(mono_ms);
     if done.is_empty() {
         return;
     }
@@ -133,13 +133,11 @@ fn timers(paths: &timeio::Paths, now_ms: u64) {
 }
 
 fn calendar(paths: &timeio::Paths, from: i64, now: i64) {
-    let (cal, _) = timeio::load_calendar(paths);
-    for (id, day, title) in cal.alerts_due(from, now) {
-        let at = cal
-            .events
-            .iter()
-            .find(|e| e.id == id)
-            .and_then(|e| e.start)
+    let (set, _) = timeio::load_calendars(paths);
+    for (id, day, title) in set.alerts_due(from, now) {
+        let at = set
+            .get(id)
+            .and_then(|(_, e)| e.start)
             .map_or(alloc::string::String::new(), fmt_hm);
         let (today, _) = timekit::date::split_secs(now);
         let when = if day == today {
@@ -147,6 +145,6 @@ fn calendar(paths: &timeio::Paths, from: i64, now: i64) {
         } else {
             format!("{} {at}", day.fmt())
         };
-        ring(paths, "event", &title, &when);
+        ring(paths, "event", &title, when.trim());
     }
 }

@@ -4,12 +4,16 @@
 //!
 //! ```text
 //! alarm  <id>  <HH:MM>  <days>  <on|off>  <label>
+//! boot   <boot id>
 //! timer  <id>  <running|paused>  <deadline_ms | remaining_ms>  <total_ms>  <label>
 //! ```
 //!
 //! `days` is a weekday mask (bit 0 = Monday ... bit 6 = Sunday); 0 means "once": the next time
 //! the clock reaches HH:MM, after which the alarm switches itself off. A running timer stores the
-//! local clock time (ms) it ends at; a paused one stores what is left.
+//! time (ms on the monotonic clock, so setting the wall clock does not disturb a timer) it ends at;
+//! a paused one stores what is left. The monotonic clock starts again at every boot, so the file
+//! names the boot it was written in and [`Timers::for_boot`] drops running timers from an
+//! earlier one.
 
 use crate::date::{Date, join_secs, split_secs};
 use crate::text::{esc, fmt_hm, parse_hm, unesc};
@@ -158,6 +162,13 @@ impl Alarms {
         out
     }
 
+    /// "Snooze 9 min": a new one-off alarm at the first whole minute `mins` minutes from now,
+    /// named after the alarm that rang. Returns its id.
+    pub fn snooze(&mut self, label: &str, now_secs: i64, mins: u32) -> u32 {
+        let (_, at) = crate::date::minute_after(now_secs, mins as u64 * 60_000);
+        self.add(Alarm::new(0, label, at, 0))
+    }
+
     /// The alarm that rings soonest after `after`: (id, time).
     pub fn next(&self, after: i64) -> Option<(u32, i64)> {
         self.list
@@ -173,7 +184,7 @@ pub struct Timer {
     pub label: String,
     pub total_ms: u64,
     pub running: bool,
-    /// Running: local clock time (ms) it ends. Paused: milliseconds left.
+    /// Running: the monotonic time (ms) it ends. Paused: milliseconds left.
     pub mark_ms: u64,
 }
 
@@ -248,6 +259,8 @@ impl Timer {
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Timers {
+    /// Which boot the running timers' deadlines belong to.
+    pub boot: u64,
     pub list: Vec<Timer>,
 }
 
@@ -259,6 +272,13 @@ impl Timers {
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
         {
+            if let Some(b) = l.strip_prefix("boot\t") {
+                match b.trim().parse() {
+                    Ok(b) => t.boot = b,
+                    Err(_) => skipped += 1,
+                }
+                continue;
+            }
             match Timer::from_line(l) {
                 Some(x) if !t.list.iter().any(|y| y.id == x.id) => t.list.push(x),
                 _ => skipped += 1,
@@ -268,8 +288,9 @@ impl Timers {
     }
 
     pub fn to_text(&self) -> String {
-        let mut o = String::from(
-            "# milkOS timers: one per line, tab-separated (see timekit/src/clock.rs)\n",
+        let mut o = format!(
+            "# milkOS timers: one per line, tab-separated (see timekit/src/clock.rs)\nboot\t{}\n",
+            self.boot
         );
         for t in &self.list {
             o.push_str(&t.line());
@@ -289,6 +310,18 @@ impl Timers {
         let n = self.list.len();
         self.list.retain(|t| t.id != id);
         self.list.len() != n
+    }
+
+    /// Make the file's timers belong to this boot. Running timers written in another boot lost
+    /// their deadline (the monotonic clock restarted), so they are dropped; paused ones keep
+    /// their remaining time. Returns how many were dropped.
+    pub fn for_boot(&mut self, boot: u64) -> usize {
+        let n = self.list.len();
+        if self.boot != boot {
+            self.list.retain(|t| !t.running);
+            self.boot = boot;
+        }
+        n - self.list.len()
     }
 
     /// Remove and return the running timers that have reached zero.
@@ -357,6 +390,36 @@ impl Stopwatch {
             })
             .collect()
     }
+}
+
+/// The timer presets offered as chips (minutes); "Custom" adds to the remembered list below.
+pub const PRESETS_MIN: [u32; 4] = [1, 5, 10, 25];
+
+/// The remembered custom durations (minutes, newest first, at most four, none that is already
+/// a built-in preset), from a line like `7 15 90`.
+pub fn parse_recent(text: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for w in text.split_whitespace() {
+        if let Ok(m) = w.parse::<u32>()
+            && (1..=1440).contains(&m)
+            && !PRESETS_MIN.contains(&m)
+            && !out.contains(&m)
+            && out.len() < 4
+        {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// Put `mins` first in the remembered list.
+pub fn remember(recent: &mut Vec<u32>, mins: u32) {
+    if !(1..=1440).contains(&mins) || PRESETS_MIN.contains(&mins) {
+        return;
+    }
+    recent.retain(|&m| m != mins);
+    recent.insert(0, mins);
+    recent.truncate(4);
 }
 
 /// "MM:SS.cc" (hundredths), or "H:MM:SS.cc" once past an hour.
@@ -618,6 +681,50 @@ mod tests {
         assert_eq!(later.len(), 1);
         assert_eq!(later[0].label, "long");
         assert_eq!(l.list.len(), 1);
+    }
+
+    #[test]
+    fn timers_from_an_earlier_boot_lose_their_running_ones() {
+        let mut l = Timers {
+            boot: 7,
+            list: Vec::new(),
+        };
+        l.add(Timer::start(0, "running", 60_000, 5_000));
+        let mut p = Timer::start(0, "paused", 90_000, 5_000);
+        p.pause(6_000);
+        l.add(p);
+        let (mut back, _) = Timers::parse(&l.to_text());
+        assert_eq!(back.boot, 7);
+        assert_eq!(back.clone().for_boot(7), 0); // same boot: nothing lost
+        assert_eq!(back.for_boot(8), 1);
+        assert_eq!(back.boot, 8);
+        assert_eq!(back.list.len(), 1);
+        assert_eq!(back.list[0].label, "paused");
+        assert_eq!(back.list[0].remaining_ms(0), 89_000);
+    }
+
+    #[test]
+    fn snooze_makes_a_once_alarm() {
+        let mut l = Alarms::default();
+        let id = l.snooze("Wake up", at(2025, 3, 3, 7, 0), 9);
+        let a = &l.list[0];
+        assert_eq!((a.id, a.at, a.days, a.enabled), (id, 7 * 60 + 9, 0, true));
+        assert_eq!(a.label, "Wake up");
+        let ring = at(2025, 3, 3, 7, 9);
+        assert_eq!(l.take_due(ring - 1, ring).len(), 1);
+    }
+
+    #[test]
+    fn recent_presets() {
+        assert_eq!(parse_recent("7 15 5 7 90 abc 0 99999 3 4"), [7, 15, 90, 3]);
+        let mut r = alloc::vec![7, 15, 90, 3];
+        remember(&mut r, 15);
+        assert_eq!(r, [15, 7, 90, 3]);
+        remember(&mut r, 42);
+        assert_eq!(r, [42, 15, 7, 90]);
+        remember(&mut r, 5); // a built-in preset is not remembered
+        remember(&mut r, 0);
+        assert_eq!(r, [42, 15, 7, 90]);
     }
 
     #[test]

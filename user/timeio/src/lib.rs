@@ -8,8 +8,9 @@ extern crate alloc;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use rt::sys;
-use timekit::cal::Calendar;
+use timekit::cal::CalendarSet;
 use timekit::clock::{Alarms, Timers};
 
 pub const DEFAULT_HOME: &str = "/home/milk";
@@ -17,29 +18,33 @@ pub const DEFAULT_HOME: &str = "/home/milk";
 /// Where the data files live.
 #[derive(Clone, Debug)]
 pub struct Paths {
+    /// `~/Library/Calendar`: one `<Name>.cal` file per calendar.
+    pub calendars: String,
     pub alarms: String,
     pub timers: String,
-    pub calendar: String,
+    /// The custom timer durations Clock remembers.
+    pub recent: String,
     home: String,
 }
 
 impl Paths {
     pub fn for_home(home: &str) -> Paths {
         Paths {
-            alarms: format!("{home}/.config/milk/alarms"),
-            timers: format!("{home}/.config/milk/timers"),
-            calendar: format!("{home}/Library/Calendar/events"),
+            calendars: format!("{home}/Library/Calendar"),
+            alarms: format!("{home}/Library/Clock/alarms"),
+            timers: format!("{home}/Library/Clock/timers"),
+            recent: format!("{home}/Library/Clock/recent"),
             home: String::from(home),
         }
+    }
+
+    pub fn from_args(args: &rt::Args) -> Paths {
+        Paths::for_home(args.env("HOME").unwrap_or(DEFAULT_HOME))
     }
 
     /// `~/.cache/milk`: where alarmd keeps its log.
     pub fn cache_dir(&self) -> String {
         format!("{}/.cache/milk", self.home)
-    }
-
-    pub fn from_args(args: &rt::Args) -> Paths {
-        Paths::for_home(args.env("HOME").unwrap_or(DEFAULT_HOME))
     }
 }
 
@@ -90,12 +95,64 @@ pub fn write_atomic(path: &str, text: &str) -> sys::Result<()> {
     sys::rename(&tmp, path)
 }
 
-pub fn load_calendar(p: &Paths) -> (Calendar, usize) {
-    Calendar::parse(&read_text(&p.calendar))
+/// Read every `*.cal` file in the calendar folder. No folder or no files gives the default
+/// calendars (Personal, Home, Work). Returns the set and how many lines were skipped.
+pub fn load_calendars(p: &Paths) -> (CalendarSet, usize) {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for (name, _) in sys::read_dir(&p.calendars).unwrap_or_default() {
+        if let Some(stem) = name.strip_suffix(".cal") {
+            files.push((
+                String::from(stem),
+                read_text(&format!("{}/{name}", p.calendars)),
+            ));
+        }
+    }
+    files.sort();
+    CalendarSet::from_files(&files)
 }
 
-pub fn save_calendar(p: &Paths, c: &Calendar) -> sys::Result<()> {
-    write_atomic(&p.calendar, &c.to_text())
+/// Write each calendar to its file, and remove the `.cal` files of calendars that are gone
+/// (renamed or deleted in the app).
+pub fn save_calendars(p: &Paths, set: &CalendarSet) -> sys::Result<()> {
+    let keep: Vec<String> = set.cals.iter().map(CalendarSet::file_name).collect();
+    for (c, f) in set.cals.iter().zip(&keep) {
+        write_atomic(&format!("{}/{f}", p.calendars), &c.to_text())?;
+    }
+    for (name, _) in sys::read_dir(&p.calendars).unwrap_or_default() {
+        if name.ends_with(".cal") && !keep.contains(&name) {
+            let _ = sys::unlink(&format!("{}/{name}", p.calendars));
+        }
+    }
+    Ok(())
+}
+
+/// A number that is the same for every process in this boot and different in the next one:
+/// timers store it so a running one from an earlier boot is not mistaken for a live one.
+pub fn boot_id() -> u64 {
+    const FILE: &str = "/run/boot-id";
+    let read = || {
+        sys::read_file(FILE).ok().and_then(|b| {
+            core::str::from_utf8(&b)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+    };
+    if let Some(id) = read() {
+        return id;
+    }
+    let id = (sys::clock_ns(sys::CLOCK_REALTIME)
+        ^ sys::clock_ns(sys::CLOCK_MONOTONIC).rotate_left(21)
+        ^ (sys::getpid() as u64) << 40)
+        | 1;
+    mkdir_p("/run");
+    match sys::open_mode(FILE, sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL, 0o644) {
+        Ok(fd) => {
+            let _ = sys::write_all(fd, format!("{id}\n").as_bytes());
+            let _ = sys::close(fd);
+            id
+        }
+        Err(_) => read().unwrap_or(id), // another process created it first
+    }
 }
 
 pub fn load_alarms(p: &Paths) -> (Alarms, usize) {
@@ -106,12 +163,27 @@ pub fn save_alarms(p: &Paths, a: &Alarms) -> sys::Result<()> {
     write_atomic(&p.alarms, &a.to_text())
 }
 
+/// The timers, belonging to this boot (see [`boot_id`]). Running timers written in an earlier
+/// boot are dropped.
 pub fn load_timers(p: &Paths) -> (Timers, usize) {
-    Timers::parse(&read_text(&p.timers))
+    let (mut t, skipped) = Timers::parse(&read_text(&p.timers));
+    t.for_boot(boot_id());
+    (t, skipped)
 }
 
 pub fn save_timers(p: &Paths, t: &Timers) -> sys::Result<()> {
+    let mut t = t.clone();
+    t.boot = boot_id();
     write_atomic(&p.timers, &t.to_text())
+}
+
+pub fn load_recent(p: &Paths) -> Vec<u32> {
+    timekit::clock::parse_recent(&read_text(&p.recent))
+}
+
+pub fn save_recent(p: &Paths, r: &[u32]) -> sys::Result<()> {
+    let line: Vec<String> = r.iter().map(|m| format!("{m}")).collect();
+    write_atomic(&p.recent, &(line.join(" ") + "\n"))
 }
 
 fn one_line(s: &str) -> String {

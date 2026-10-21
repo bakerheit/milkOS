@@ -13,18 +13,27 @@ All are plain text, one record per line, fields separated by tabs (tabs, newline
 inside a field are escaped). Lines that do not parse are skipped and counted, never fatal, so a
 hand-edited file cannot lock an app. Writes go to a sibling file and are renamed into place.
 
-| File | Written by | Line |
+| File | Written by | Lines |
 | --- | --- | --- |
-| `~/Library/Calendar/events` | Calendar, `cal` | `event id date start end repeat[:every] until alert title notes` |
-| `~/.config/milk/alarms` | Clock, `alarm`, alarmd (switches off "once" alarms) | `alarm id HH:MM days on\|off label` |
-| `~/.config/milk/timers` | Clock, `timer`, alarmd (removes finished ones) | `timer id running\|paused deadline_ms\|remaining_ms total_ms label` |
+| `~/Library/Calendar/<Name>.cal` (one per calendar) | Calendar, `cal` | `calendar name colour [hidden]`, then `event id date start end repeat[:every] until alert title notes` |
+| `~/Library/Clock/alarms` | Clock, `alarm`, alarmd (switches off "once" alarms) | `alarm id HH:MM days on\|off label` |
+| `~/Library/Clock/timers` | Clock, `timer`, alarmd (removes finished ones) | `boot id`, then `timer id running\|paused deadline_ms\|remaining_ms total_ms label` |
+| `~/Library/Clock/recent` | Clock | custom timer minutes, newest first |
 | `~/.cache/milk/alarmd.log` | alarmd | `date time kind: title / subtitle`, restarted at 64 KiB |
 
-`start`/`end` are `HH:MM` or `-` (all day); `repeat` is `none|daily|weekly|monthly|yearly`, with
-`:N` for every N; `alert` is minutes before the start. A monthly event on the 31st happens on the
-last day of shorter months, a yearly 29 February on the 28th in other years. `days` on an alarm is
-a weekday mask (bit 0 Monday ... bit 6 Sunday); 0 means once, and the alarm switches itself off
-after it rings.
+Calendars: `colour` is straw, matcha, blue, honey or lav. With no files the three defaults
+(Personal, Home, Work) are shown. Event ids are unique across all calendars. `start`/`end` are
+`HH:MM` or `-` (all day); `repeat` is `none|daily|weekly|monthly|yearly`, with `:N` for every N;
+`alert` is minutes before the start (0 = at the time; an all-day event alerts at 09:00). A monthly
+event on the 31st happens on the last day of shorter months, a yearly 29 February on the 28th in
+other years. A hidden calendar is not drawn but still alerts.
+
+Alarms: `days` is a weekday mask (bit 0 Monday ... bit 6 Sunday); 0 means once, and the alarm
+switches itself off after it rings. "Snooze 9 min" adds a once alarm.
+
+Timers run on the monotonic clock (setting the wall clock does not move them). That clock starts
+again at boot, so `timers` names the boot it was written in (`/run/boot-id`, a tmpfs file) and
+running timers from an earlier boot are dropped; paused ones keep their remaining time.
 
 ## alarmd
 

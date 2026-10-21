@@ -30,7 +30,7 @@ fn main(args: &rt::Args) -> i32 {
             paths.timers
         );
     }
-    let now = timeio::now_ms();
+    let now = timeio::mono_ms();
     let sub = args.get(1).unwrap_or("list");
     match sub {
         "list" | "ls" => {

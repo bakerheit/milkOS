@@ -25,7 +25,9 @@ mod mem;
 mod memtest;
 mod mmu;
 mod pmm;
+mod proc;
 mod ramfb;
+mod sched;
 mod selftest;
 mod sink;
 mod splash;
@@ -56,8 +58,11 @@ impl Write for Uart {
 #[macro_export]
 macro_rules! kprintln {
     ($($arg:tt)*) => {{
-        let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
-        let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
+        // IRQs off for the whole line so threads don't interleave mid-line.
+        $crate::sync::without_irqs(|| {
+            let _ = core::fmt::Write::write_fmt(&mut $crate::console_writer(), format_args!($($arg)*));
+            let _ = core::fmt::Write::write_str(&mut $crate::console_writer(), "\n");
+        })
     }};
 }
 
@@ -86,11 +91,18 @@ pub extern "C" fn kmain() -> ! {
     memtest::run();
     fs::init();
     fs::selftest::run();
+    sched::init();
+    sched::selftest::run();
+    proc::init();
+    proc::start_init();
 
+    // kmain is now just thread 0. The console belongs to msh (no more uart::echo_pending
+    // here). Sleep between polls rather than wfi: a wfi loop would sit on its whole time
+    // slice whenever it is scheduled. The window server's loop goes here (or in its own
+    // thread, see docs/processes.md).
     loop {
-        uart::echo_pending();
         input_demo();
-        unsafe { core::arch::asm!("wfi") };
+        sched::sleep_ms(10);
     }
 }
 

@@ -15,6 +15,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use crate::exceptions::TrapFrame;
 use crate::gic;
+use crate::sync::FnSlot;
 
 const UART_BASE: usize = 0x0900_0000;
 const UARTDR: usize = 0x00;
@@ -38,6 +39,13 @@ static HEAD: AtomicUsize = AtomicUsize::new(0);
 /// Written only by the reader.
 static TAIL: AtomicUsize = AtomicUsize::new(0);
 static OVERRUNS: AtomicU64 = AtomicU64::new(0);
+/// Called (IRQ context) after new bytes land in the ring; the console tty wakes readers.
+static RX_HOOK: FnSlot = FnSlot::new();
+
+/// Install the receive hook (IRQ context, IRQs masked: must not block or allocate).
+pub fn set_rx_hook(h: fn()) {
+    RX_HOOK.set(h);
+}
 
 #[inline]
 fn reg_read(off: usize) -> u32 {
@@ -87,6 +95,9 @@ fn on_irq(_irq: u32, _frame: &mut TrapFrame) {
         push((reg_read(UARTDR) & 0xff) as u8);
     }
     reg_write(UARTICR, INT_RX | INT_RT | INT_ERRORS);
+    if let Some(h) = RX_HOOK.get::<fn()>() {
+        h();
+    }
 }
 
 /// Hook up the RX interrupt. GIC must be initialised; IRQs still need unmasking.

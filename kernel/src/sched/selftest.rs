@@ -64,31 +64,62 @@ fn interleave() {
 
 /// Sleepers wake in deadline order, not too early; join returns exit codes.
 fn sleep_and_join() {
-    let order = Arc::new(Mutex::new(Vec::new()));
+    // Each sleeper records (ms, start, woke) with now_ns. What must hold under any load:
+    // nobody wakes early, wake times follow the deadlines (start + ms) within a tolerance,
+    // and nobody is absurdly late (a lost wakeup; a missed one-shot deadline is only one
+    // tick late because every tick re-checks sleepers). The order in which the threads
+    // then get to *run* (append to the log) is not asserted: under SMP and a loaded host
+    // a woken thread can wait for a CPU while a later one already runs elsewhere.
+    const TOLERANCE_NS: u64 = 100_000_000;
+    const LATE_LIMIT_NS: u64 = 2_000_000_000;
+    let log = Arc::new(Mutex::new(Vec::new()));
     let t0 = timer::now_ns();
     let hs: Vec<_> = [30u64, 10, 20]
         .into_iter()
         .map(|ms| {
-            let order = order.clone();
+            let log = log.clone();
             spawn("sleeper", move || {
                 let a = timer::now_ns();
                 super::sleep_ms(ms);
-                let slept = (timer::now_ns() - a) / 1000;
-                assert!(slept >= ms * 1000, "woke early: {slept} us < {ms} ms");
-                order.lock().push((ms, slept));
+                let woke = timer::now_ns();
+                log.lock().push((ms, a, woke));
                 super::exit(ms as i64 + 100);
             })
         })
         .collect();
     let codes: Vec<i64> = hs.into_iter().map(|h| h.join()).collect();
-    let order = order.lock();
+    let mut log = log.lock().clone();
+    log.sort_by_key(|&(ms, a, _)| a + ms * 1_000_000); // by deadline
+    let us = |ns: u64| ns / 1000;
     kprintln!(
-        "[sched-test] sleep: woke in order {:?} (ms, us slept), exit codes {:?}, {} ms total",
-        *order,
+        "[sched-test] sleep: by deadline {:?} (ms, us slept, us late), exit codes {:?}, {} ms total",
+        log.iter()
+            .map(|&(ms, a, w)| (ms, us(w - a), us(w - a - ms * 1_000_000)))
+            .collect::<Vec<_>>(),
         codes,
         (timer::now_ns() - t0) / 1_000_000
     );
-    assert!(order.iter().map(|o| o.0).eq([10, 20, 30]));
+    for &(ms, a, w) in &log {
+        assert!(
+            w - a >= ms * 1_000_000,
+            "sleeper {ms} ms woke early: {} us",
+            us(w - a)
+        );
+        assert!(
+            w - a - ms * 1_000_000 < LATE_LIMIT_NS,
+            "sleeper {ms} ms woke {} us late (lost wakeup?)",
+            us(w - a - ms * 1_000_000)
+        );
+    }
+    for p in log.windows(2) {
+        let ((m0, _, w0), (m1, _, w1)) = (p[0], p[1]);
+        assert!(
+            w1 + TOLERANCE_NS >= w0,
+            "wakeups out of deadline order: {m0} ms woke at {} us, {m1} ms at {} us",
+            us(w0 - t0),
+            us(w1 - t0)
+        );
+    }
     assert!(codes == [130, 110, 120]);
 }
 

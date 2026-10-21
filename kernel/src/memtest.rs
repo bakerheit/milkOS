@@ -413,11 +413,86 @@ fn test_heap() {
     );
 }
 
+/// DFSC of a data/instruction abort ESR: 0b0011LL = permission fault at level LL.
+fn perm_fault(esr: u64) -> bool {
+    esr & 0x3c == 0x0c
+}
+
+fn esr_desc(r: Result<(), u64>) -> String {
+    match r {
+        Ok(()) => String::from("no fault"),
+        Err(e) => format!(
+            "EC {:#x} {} level {}",
+            e >> 26,
+            if perm_fault(e) {
+                "permission fault"
+            } else {
+                "other fault"
+            },
+            e & 3
+        ),
+    }
+}
+
+/// Kernel W^X: text is not writable, rodata not writable, heap and stacks not executable,
+/// and the heap is still writable (the probes work). Faults are caught by
+/// `exceptions::probe_*`.
+fn test_wx() {
+    use crate::exceptions::{probe_exec, probe_write};
+    static RODATA: [u8; 8] = *b"readonly";
+    let text = test_wx as *const () as usize;
+    let rodata = RODATA.as_ptr() as usize;
+    // A heap buffer holding `ret`, made coherent for instruction fetch in case it ran.
+    let code = Box::new([0xd65f_03c0u32; 4]);
+    let heap = code.as_ptr() as usize;
+    // SAFETY: cache maintenance on our own buffer.
+    unsafe {
+        core::arch::asm!("dc cvau, {0}", "dsb ish", "ic ivau, {0}", "dsb ish", "isb",
+            in(reg) heap, options(nostack));
+    }
+    let stack_code = [0xd65f_03c0u32; 4];
+    let stack = stack_code.as_ptr() as usize;
+    let w_text = probe_write(text, 0);
+    let w_ro = probe_write(rodata, b'R');
+    let x_heap = probe_exec(heap);
+    let x_stack = probe_exec(stack);
+    let w_heap = probe_write(heap + 8, 0);
+    let ok = |r: &Result<(), u64>| r.is_err_and(perm_fault);
+    assert!(
+        ok(&w_text),
+        "W^X: write to kernel text: {}",
+        esr_desc(w_text)
+    );
+    assert!(ok(&w_ro), "W^X: write to kernel rodata: {}", esr_desc(w_ro));
+    assert!(ok(&x_heap), "W^X: jump into the heap: {}", esr_desc(x_heap));
+    assert!(
+        ok(&x_stack),
+        "W^X: jump into a kernel stack: {}",
+        esr_desc(x_stack)
+    );
+    assert!(w_heap.is_ok(), "W^X: heap not writable?");
+    assert!(RODATA == *b"readonly");
+    let sctlr: u64;
+    // SAFETY: register read.
+    unsafe { core::arch::asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack)) };
+    assert!(sctlr & (1 << 19) != 0, "W^X: SCTLR.WXN is off");
+    kprintln!(
+        "selftest: W^X ok: write to text ({}), to rodata ({}), jump into heap ({}) and \
+         stack ({}) all fault; heap writes work; SCTLR.WXN on",
+        esr_desc(w_text),
+        esr_desc(w_ro),
+        esr_desc(x_heap),
+        esr_desc(x_stack)
+    );
+    drop(core::hint::black_box(code));
+}
+
 pub fn run() {
     kprintln!("selftest: memory...");
     test_mmu();
     test_pmm();
     test_heap();
+    test_wx();
     let s = pmm::stats();
     let h = heap::stats();
     kprintln!(

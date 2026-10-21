@@ -1,6 +1,7 @@
 //! The kernel-facing path API. Every `*_at` function takes an optional base directory for
 //! relative paths (a process's cwd or a dirfd's inode); `None` means `/`. Absolute paths
-//! ignore the base. No permission checks yet: everything runs as root.
+//! ignore the base. Permission checks (rwx, sticky, ownership rules) are in fs/perm.rs and
+//! are made for the calling process; kernel threads are root.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,6 +15,7 @@ use super::file::OpenFile;
 use super::node::{DirEntry, InodeRef, InodeType, SetAttr, Stat, check_name};
 use super::notify::{self, Event};
 use super::path::{self, Walker};
+use super::perm::{self, R, W};
 
 /// `open(2)`. `mode` is used with O_CREAT (permission bits; apply the umask before).
 pub fn open(path: &str, flags: u32, mode: u32) -> Result<OpenFile> {
@@ -29,6 +31,7 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
     let mut w = Walker::new();
     let p = w.parent(base, path)?;
     let (mut dir, mut name, mut trailing) = (p.dir, p.name, p.trailing_slash);
+    let mut created = false;
     let node = loop {
         match path::step(&dir, &name) {
             Ok(node) => {
@@ -58,7 +61,10 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
                     return Err(Errno::EISDIR);
                 }
                 check_name(&name)?;
+                perm::may(&dir, W)?;
                 let n = dir.create(&name, mode & 0o7777)?;
+                perm::own_new(&n, &dir);
+                created = true;
                 if notify::active() {
                     notify::emit(Event::Created {
                         dir: notify::id(&dir),
@@ -74,6 +80,18 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
     };
     if (writable || flags & O_TRUNC != 0) && sealed(&node) {
         return Err(Errno::EPERM);
+    }
+    // The creator may open what it just made whatever its mode says (like Unix).
+    if !created && flags & O_PATH == 0 {
+        let mut mask = match flags & O_ACCMODE {
+            O_RDONLY => R,
+            O_WRONLY => W,
+            _ => R | W,
+        };
+        if flags & O_TRUNC != 0 {
+            mask |= W;
+        }
+        perm::may(&node, mask)?;
     }
     let is_dir = node.kind() == InodeType::Dir;
     if (trailing || flags & O_DIRECTORY != 0) && !is_dir {
@@ -139,7 +157,9 @@ pub fn mkdir_at(base: Option<&InodeRef>, path: &str, mode: u32) -> Result<()> {
         return Err(Errno::EEXIST);
     }
     check_name(&p.name)?;
+    perm::may(&p.dir, W)?;
     let n = p.dir.mkdir(&p.name, mode & 0o7777)?;
+    perm::own_new(&n, &p.dir);
     notify::emit(Event::Created {
         dir: notify::id(&p.dir),
         name: p.name,
@@ -190,8 +210,14 @@ pub fn unlink_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
     // delete).
     let obj = match path::step_raw(&p.dir, &p.name) {
         Ok(n) if sealed(&n) => return Err(Errno::EPERM),
-        Ok(n) => Some(notify::id(&n)),
-        Err(_) => None,
+        Ok(n) => {
+            perm::may_delete(&p.dir, &n)?;
+            Some(notify::id(&n))
+        }
+        Err(_) => {
+            perm::may(&p.dir, W)?;
+            None
+        }
     };
     p.dir.unlink(&p.name)?;
     if let Some(obj) = obj {
@@ -221,6 +247,7 @@ pub fn rmdir_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
     if path::is_mount_boundary(&raw) {
         return Err(Errno::EBUSY);
     }
+    perm::may_delete(&p.dir, &raw)?;
     let obj = notify::id(&raw);
     drop(raw);
     p.dir.rmdir(&p.name)?;
@@ -268,6 +295,15 @@ pub fn rename_at(
     if sealed(&src) || path::step_raw(&pn.dir, &pn.name).is_ok_and(|n| sealed(&n)) {
         return Err(Errno::EPERM);
     }
+    perm::may_delete(&po.dir, &src)?;
+    match path::step_raw(&pn.dir, &pn.name) {
+        Ok(dst) => perm::may_delete(&pn.dir, &dst)?,
+        Err(_) => perm::may(&pn.dir, W)?,
+    }
+    // A directory moving to another parent rewrites its `..`: needs write on it too.
+    if src.kind() == InodeType::Dir && !alloc::sync::Arc::ptr_eq(&po.dir, &pn.dir) {
+        perm::may(&src, W)?;
+    }
     po.dir.rename(&po.name, &pn.dir, &pn.name)?;
     notify::emit(Event::Renamed {
         from_dir: notify::id(&po.dir),
@@ -293,7 +329,9 @@ pub fn symlink_at(target: &str, base: Option<&InodeRef>, linkpath: &str) -> Resu
         return Err(Errno::EEXIST);
     }
     check_name(&p.name)?;
+    perm::may(&p.dir, W)?;
     let n = p.dir.symlink(&p.name, target)?;
+    perm::own_new(&n, &p.dir);
     notify::emit(Event::Created {
         dir: notify::id(&p.dir),
         name: p.name,
@@ -337,6 +375,7 @@ pub fn link_at(
     if p.dir.dev() != src.dev() {
         return Err(Errno::EXDEV);
     }
+    perm::may(&p.dir, W)?;
     p.dir.link(&p.name, &src)?;
     notify::emit(Event::Created {
         dir: notify::id(&p.dir),
@@ -359,6 +398,7 @@ pub fn truncate(path: &str, len: u64) -> Result<()> {
     if sealed(&n) {
         return Err(Errno::EPERM);
     }
+    perm::may(&n, W)?;
     match n.kind() {
         InodeType::Dir => Err(Errno::EISDIR),
         InodeType::File => {
@@ -375,7 +415,8 @@ pub fn truncate(path: &str, len: u64) -> Result<()> {
 /// chmod / chown / utimensat.
 pub fn setattr_at(base: Option<&InodeRef>, path: &str, follow: bool, attr: &SetAttr) -> Result<()> {
     let n = lookup_at(base, path, follow)?;
-    n.setattr(attr)?;
+    let a = perm::check_setattr(&n, attr)?;
+    n.setattr(&a)?;
     notify::emit(Event::Attr {
         obj: notify::id(&n),
     });

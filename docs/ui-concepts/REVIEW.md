@@ -32,7 +32,7 @@ Passing, for reference: Powerbox Cancel 10.58, Welcome "Get started" 12.90, Musi
 - The Skim "Control centre" result icon is a clock-like circle; use the same glyph as the menu bar item once it exists.
 - Spaces uses a lot of empty space when there are two windows; a larger scale would help but it is fine.
 - Empty states are missing in Files, Notes and Music (nothing to play). Draw one calm line and one action each.
-- Window titles for the Terminal read "andrew: msh". Fine, but if the account name changes make sure the title follows.
+- Window titles for the Terminal read "milk: msh". Fine, but if the account name changes make sure the title follows.
 
 ## What I would do next
 1. Apply the Buttons section everywhere (P0 1, 4, 6). Small and mechanical.

@@ -103,7 +103,7 @@ function verbs() {
   // who
   h += B(548, 270, 180, 330, `background:${C.milk};border:1px solid ${C.sand};border-radius:16px`, T(16, 14, "TO WHOM", `color:${C.cocoa}`) + ["Mum", "Sam", "Dad", "Alex", "Me"].map((p, i) => (i === 0 ? B(8, 42 + i * 52, 164, 44, `background:${C.straw}44;border-radius:10px`) : "") + circle(18, 50 + i * 52, 28, [C.straw, C.blue, C.matcha, C.honey, C.lav][i]) + T(58, 58 + i * 52, p)).join(""));
   // preview + do it
-  h += B(744, 270, 248, 330, `background:${C.milk};border:2px solid ${C.esp};border-radius:16px`, T(16, 14, "THIS WILL", `color:${C.cocoa}`) + T(16, 44, "Email bike.png") + T(16, 62, "(2.1 MB) to Mum") + T(16, 80, "from andrew@milk.", `color:${C.cocoa}`) + icon(16, 110, 64, "photo", C.cream, C.esp, `border:1px solid ${C.sand}`) + T(90, 124, "bike.png", `color:${C.cocoa}`) + T(90, 142, "800x600", `color:${C.cocoa}`) +
+  h += B(744, 270, 248, 330, `background:${C.milk};border:2px solid ${C.esp};border-radius:16px`, T(16, 14, "THIS WILL", `color:${C.cocoa}`) + T(16, 44, "Email bike.png") + T(16, 62, "(2.1 MB) to Mum") + T(16, 80, "from milk@milk.", `color:${C.cocoa}`) + icon(16, 110, 64, "photo", C.cream, C.esp, `border:1px solid ${C.sand}`) + T(90, 124, "bike.png", `color:${C.cocoa}`) + T(90, 142, "800x600", `color:${C.cocoa}`) +
     B(16, 230, 216, 48, `background:${C.esp};border-radius:24px`) + TC(16, 246, 216, "<b>Do it   &#9166;</b>", `color:${C.cream}`) + T(16, 290, "Undo for 30 seconds", `color:${C.cocoa}`));
   // history
   h += T(112, 626, "DONE TODAY", `color:${C.cocoa}`) + T(112, 650, "&#10003; Found notes.txt       &#10003; Printed todo.txt       &#10003; Played Cream Soda Skies", `color:${C.cocoa}`) +

@@ -3,6 +3,125 @@
 Two parts: a **capability sandbox** (what a process is allowed to do) and the **audit log**
 (a tamper-evident record of what it did). The sandbox is below; the log follows.
 
+## Users and credentials
+
+Two accounts by default (`rootfs/etc/passwd`, `group`, `shadow`):
+
+| user | uid | primary group | groups | home |
+|---|---|---|---|---|
+| `root` | 0 | `wheel` (0) | wheel, admin | `/root` |
+| `milk` | 501 | `staff` (20) | staff, **admin** (80) | `/home/milk` |
+
+The default password of both is `milk`. It is a **well-known default for a hobby OS (and
+the test suite's password), not a secret**: change it with `passwd`.
+
+* **Processes** carry real / effective / saved uid and gid plus supplementary groups
+  (`proc/cred.rs`), Linux rules: setuid, setgid, setreuid, setregid, setresuid,
+  setresgid, getresuid, getresgid, getgroups, setgroups (Linux numbers 143-150, 158,
+  159; get*id 174-177). Root (euid 0) may set anything; others only shuffle between
+  their real and saved ids. Ids are inherited across fork and kept across exec, except
+  set-user-ID / set-group-ID binaries (mode 4xxx / 2xxx) set the effective id to the
+  file's owner. Set-ID bits are ignored under `no_new_privs` (any chrooted or sandboxed
+  process) and on FAT and the 9p share. Every change is audited (`cred`, `setid.exec`).
+  `/proc/<pid>/status` shows `Uid:` / `Gid:` / `Groups:`.
+* **Who runs as whom.** The kernel and init are root. The desktop starts everything
+  (Terminal, apps, the Store) as the *session user*, `milk` at boot. The **serial
+  console** is the maintenance console: a root shell (HOME stays /home/milk, so the test
+  scripts that drive it keep working on host-built disk images, whose files belong to
+  root). `su milk` gives a milk shell there; `utest perms` / `utest creds` switch to milk
+  themselves.
+* **Passwords** are never stored in plain text: `/etc/shadow` (0600, root) holds
+  `$5m$<rounds>$<salt hex>$<digest hex>`, h = SHA-256(salt ‖ password) then rounds-1 times
+  h = SHA-256(h ‖ salt ‖ password), 5000 rounds, 16-byte random salt. Same code in the
+  kernel (`proc/login.rs`) and user space (`rt::users`); `scripts/mkpasswd.py` makes one
+  on the host. `passwd` also writes `/Volumes/Milk/.milkos/shadow`, which the kernel
+  restores into `/etc/shadow` at boot, so changes survive a reboot.
+* **Tools:** `whoami`, `id`, `su [user] [-c cmd]` (asks the *target's* password),
+  `sudo [-S] [-u user] cmd` (admins only, asks *your* password; `-S` reads it from stdin
+  for scripts; no credential caching), `passwd [user]`. `su`, `sudo` and `passwd` are
+  set-user-ID root (initramfs.list mode 4755). Failures cost a second.
+
+## Permissions
+
+Classic Unix rwx bits are enforced for user processes (`kernel/src/fs/perm.rs`, called
+from the VFS path walk and `fs/ops.rs`); kernel threads are root. The capability sandbox
+stays on top: an operation needs **both** the permission bits and the sandbox.
+
+* **Path walk:** search (x) on every directory passed through, including the last
+  component's parent.
+* **open:** r / w by the access mode (O_TRUNC needs w); creating needs w on the
+  directory, and the creator may open what it just made whatever its mode.
+  **exec** needs x (not r); root can only exec files with some x bit.
+* **unlink / rmdir / rename:** w + x on the directory; in a **sticky** directory (`/tmp`
+  is 1777) only the file's owner, the directory's owner or root. Moving a directory to
+  another parent also needs w on it (its `..`). **mkdir / symlink / link** need w on the
+  directory. **truncate** needs w.
+* **chmod:** owner or root (a non-root owner outside the file's group loses set-group-ID).
+  **chown:** root; the owner may change the group to one of its own. A non-root chown
+  clears set-ID bits. **utimes:** owner, root, or anyone who may write. Syscalls fchmodat,
+  fchmod, fchownat, fchown; faccessat checks with the effective ids.
+* **Ownership of new files:** the caller's euid and egid (or the directory's group if it
+  is set-group-ID). A kernel thread (the desktop saving into ~) gives a new file the
+  parent directory's owner, so the user's files stay the user's. On milkfs that is one
+  extra small transaction per create.
+* **Root (euid 0)** passes everything except the exec rule above.
+* **File systems without owners:** everything on FAT and the 9p Mac share shows as owned
+  by the session user (the "mounting user"), set-ID bits ignored. Terminals (`/dev/console`,
+  `/dev/ttyN`) belong to the session user. `/proc` and `/sys` control files (owner
+  writable) are also writable by group **admin**; what a control write triggers (mounting a
+  clone, a snapshot) runs as the kernel (`perm::as_kernel`), the check is at open.
+* `chroot` is allowed to anyone (it only narrows the view; `milk run-try` needs it) but
+  sets `no_new_privs`, as does the capability sandbox: set-ID binaries don't work in there.
+
+**Other users' processes** (Linux's default, `hidepid=0`): everyone can see every
+process in /proc and read its `status` (ids, threads, memory, and a `Caps:` line with its
+capability set in sandbox syntax, `all` if unrestricted), `stat` and `cmdline`, and
+`/proc/audit`, so `ps`, `top` and an Activity Monitor work for any user. Private to the
+process's user and root: `/proc/<pid>/maps` (0400, owned by its euid) and
+`/proc/<pid>/fd/` (0500). Signals follow Linux: root, or a sender whose real or effective
+uid is the target's real or saved uid; otherwise `kill` is EPERM (signal 0 included).
+
+**Admin group decision (milk install, the Store):** like macOS, the administrators group
+`admin` (80) owns the shared, installable places: `/Applications` and `/bin` are
+`root:admin 0775`, `/etc/milk/repos` (package sources) `root:admin 0664`. `milk` is in
+`admin`, so `milk install`, the Store and `milk relink` work without sudo; a non-admin user
+would need `sudo milk install`. The package signing keys (`/etc/milk/keys`) and the
+accounts (`/etc/passwd`, `/etc/group`, `/etc/shadow`) stay root's.
+
+**Boot layout** (`proc::login::init`): /root 0700, /tmp 1777, the above, a milkfs volume
+root `root:admin 0775` (if it was plain root), and a one-time migration giving the session
+user's home to them when it still belongs to root (disks made before users existed).
+
+### Login and encrypted disks (milkfs)
+
+An encrypted milkfs volume (docs/filesystem.md) stays locked at boot. **At login** the
+password is tried on it: `proc::login::login` calls `fs::milkfs::unlock(password, None)`
+after a successful authentication, so a disk whose passphrase *is* the login password
+opens as the user logs in (FileVault style), binds its `/home/milk` and `/Applications`,
+and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
+different passphrase) is logged and the disk stays locked for `snap unlock`.
+**On `passwd`** (a user changing their own password, so the old one is known), the same
+change is tried on the primary volume (`/sys/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
+was unlocked with the old login password, its passphrase follows the new one. It is skipped
+when the new password is under 8 characters (milkfs's minimum), when root sets someone's
+password, and quietly does nothing for an unencrypted or differently protected disk.
+
+### Login API for the desktop (`kernel/src/proc/login.rs`)
+
+```rust
+proc::login::authenticate(name, password) -> Result<Account, LoginError>
+proc::login::login(name, password) -> Result<Account, LoginError> // + becomes the session user
+proc::login::session() -> Account          // who is logged in (boot: milk)
+proc::login::set_session(account)          // no password check (e.g. after authenticate)
+proc::login::lookup(name) / lookup_uid(uid) -> Option<Account>
+Account { name, uid, gid, groups, gecos, home, shell } .cred() .env() .is_admin()
+```
+
+After `login`, everything the desktop starts (`proc::spawn`, `spawn_with_caps`,
+`spawn_on`) runs as that account; processes already running keep their ids. A failed
+try costs 500 ms and is audited (`login.fail`). The lock screen can become a login
+screen by calling `authenticate` (unlock) or `login` (switch user).
+
 ## The capability sandbox
 
 Files: `kernel/src/proc/caps.rs` (the model), enforcement in `proc/syscall.rs` (openat,

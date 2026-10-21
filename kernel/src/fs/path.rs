@@ -313,6 +313,8 @@ impl Walker {
                 last = c;
                 break;
             }
+            // Search permission on every directory we pass through (fs/perm.rs).
+            super::perm::may(&cur, super::perm::X)?;
             let next = self.step_in(&cur, c)?;
             cur = if next.kind() == InodeType::Symlink {
                 self.follow(&cur, &next)?
@@ -323,6 +325,8 @@ impl Walker {
         if cur.kind() != InodeType::Dir {
             return Err(Errno::ENOTDIR);
         }
+        // ... and on the one the last component lives in.
+        super::perm::may(&cur, super::perm::X)?;
         if last.len() > NAME_MAX {
             return Err(Errno::ENAMETOOLONG);
         }

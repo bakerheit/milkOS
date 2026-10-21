@@ -309,7 +309,8 @@ impl Inode for CtlFile {
         Ok(n)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
-        (self.write)(buf)?;
+        // Who may write was checked at open (fs/perm.rs); what it does is kernel work.
+        super::perm::as_kernel(|| (self.write)(buf))?;
         Ok(buf.len())
     }
     fn truncate(&self, _len: u64) -> Result<()> {

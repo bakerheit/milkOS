@@ -83,6 +83,86 @@ global_asm!(
     OVERFLOW = sym kstack_overflow,
 );
 
+// ---- fault probes (the W^X self-test) -----------------------------------------------
+//
+// `probe_write` stores one byte and `probe_exec` calls an address, both from EL1; if that
+// faults, `sync` sees the abort at a known pc, records ESR/FAR and resumes at the probe's
+// "faulted" exit instead of crashing. Nothing else uses them.
+
+global_asm!(
+    ".section .text",
+    ".global milk_probe_store",
+    "milk_probe_store:",
+    "    strb w1, [x0]",
+    "    mov x0, #0",
+    "    ret",
+    ".global milk_probe_store_fault",
+    "milk_probe_store_fault:",
+    "    mov x0, #1",
+    "    ret",
+    ".global milk_probe_call",
+    "milk_probe_call:",
+    "    stp x29, x30, [sp, #-16]!",
+    "    blr x0",
+    "    mov x0, #0",
+    "    b 1f",
+    ".global milk_probe_call_fault",
+    "milk_probe_call_fault:",
+    "    mov x0, #1",
+    "1:  ldp x29, x30, [sp], #16",
+    "    ret",
+);
+
+unsafe extern "C" {
+    fn milk_probe_store(addr: usize, v: u8) -> u64;
+    fn milk_probe_store_fault();
+    fn milk_probe_call(addr: usize) -> u64;
+    fn milk_probe_call_fault();
+}
+
+/// Address `probe_exec` is calling (an instruction abort there is the probe's).
+static PROBE_TARGET: AtomicUsize = AtomicUsize::new(0);
+static PROBE_ESR: AtomicUsize = AtomicUsize::new(0);
+
+/// Write `v` to `addr` from EL1. `Err(esr)` if it faulted (ESR_EL1 of the abort).
+pub fn probe_write(addr: usize, v: u8) -> Result<(), u64> {
+    // SAFETY: the stub only stores a byte; a fault is caught in `sync`.
+    if unsafe { milk_probe_store(addr, v) } == 0 {
+        Ok(())
+    } else {
+        Err(PROBE_ESR.load(Ordering::Relaxed) as u64)
+    }
+}
+
+/// Call the code at `addr` (it must be a function that just returns, if it runs at all).
+/// `Err(esr)` if fetching it faulted.
+pub fn probe_exec(addr: usize) -> Result<(), u64> {
+    PROBE_TARGET.store(addr, Ordering::Relaxed);
+    // SAFETY: `addr` is a `ret` the caller wrote, or faults (caught in `sync`).
+    let r = unsafe { milk_probe_call(addr) };
+    PROBE_TARGET.store(0, Ordering::Relaxed);
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(PROBE_ESR.load(Ordering::Relaxed) as u64)
+    }
+}
+
+/// A probe's abort: resume at its "faulted" exit. False if this abort isn't a probe's.
+fn probe_fault(frame: &mut TrapFrame, ec: u64) -> bool {
+    let elr = frame.elr as usize;
+    let resume = if ec == EC_DABT_SAME && elr == milk_probe_store as *const () as usize {
+        milk_probe_store_fault as *const () as usize
+    } else if ec == EC_IABT_SAME && elr != 0 && elr == PROBE_TARGET.load(Ordering::Relaxed) {
+        milk_probe_call_fault as *const () as usize
+    } else {
+        return false;
+    };
+    PROBE_ESR.store(frame.esr as usize, Ordering::Relaxed);
+    frame.elr = resume as u64;
+    true
+}
+
 /// Stack for reporting a kernel stack overflow (the overflowing stack is unusable).
 #[repr(C, align(16))]
 struct EmergencyStack([u8; 16 * 1024]);
@@ -239,6 +319,7 @@ fn sync(frame: &mut TrapFrame, vector: usize) {
             && USER_FAULT
                 .get::<UserFaultHandler>()
                 .is_some_and(|h| h(frame)) => {}
+        EC_DABT_SAME | EC_IABT_SAME if vector < 8 && probe_fault(frame, ec) => {}
         _ => crash(frame, vector, "synchronous exception"),
     }
 }

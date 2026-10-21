@@ -52,8 +52,8 @@ kernel's): `map`/`translate`/`unmap_page` refuse VAs of the other half.
 
 TCR: 4 KiB granule, 48-bit VA in both halves (4 levels), WB/WA walks, inner shareable,
 IPS from the CPU (capped at 48 bits). MAIR slots: 0 Device-nGnRE,
-1 Normal WB, 2 Normal non-cacheable, 3 Device-nGnRnE. SCTLR: M, C, I, SA on;
-WXN and alignment checking off (RAM is currently RWX; see "Not done").
+1 Normal WB, 2 Normal non-cacheable, 3 Device-nGnRnE. SCTLR: M, C, I, SA on, WXN on
+after the boot tables (see "W^X"); alignment checking off.
 
 ## APIs
 - `pmm::alloc_frame()`, `alloc_frame_zeroed()`, `free_frame(pa)`.
@@ -84,12 +84,23 @@ The 3 MiB ramfb static in `.bss` can move to `alloc_contiguous_zeroed(768, 1)`.
 tables for TTBR1 in its `BootBlock`, turns the MMU on, branches high, then swaps TTBR0
 for the empty table before running Rust.
 
-## W^X (not done)
-Per-section permissions need 4 KiB pages for the image and page-aligned section
-boundaries in `linker.ld`; `map` already picks pages when alignment demands.
+## W^X
+* **Kernel:** linker.ld page-aligns `.text`, `.rodata` and `.data`; `mmu::init` maps the
+  image by section in 4 KiB pages: text read + execute, rodata read only, data / bss /
+  boot stack read/write + execute-never. All other RAM (heap, page tables, user frames in
+  the linear map), the kernel stacks and MMIO are read/write + execute-never.
+  `SCTLR_EL1.WXN` (writable implies execute-never) is set once the CPU runs on these
+  tables (boot CPU in `mmu::init`, secondaries in smp.S): the boot tables are a single
+  writable + executable block. The boot self-test (`memtest::test_wx`) writes to text and
+  rodata and jumps into the heap and a stack through fault probes
+  (`exceptions::probe_write` / `probe_exec`); each must be a permission fault.
+* **User:** stacks, brk and anonymous memory are read/write, never executable; ELF
+  segments get exact permissions and where a page is shared by text and data, writable
+  wins (like Linux's later mapping). `mmap` / `mprotect` with PROT_WRITE | PROT_EXEC is
+  refused (EACCES): nothing on milkOS needs a JIT. `utest wx` checks that jumping into the
+  heap or stack and writing to text are SIGSEGV.
 
 ## Not done / hazards
-- Kernel RAM is mapped RWX (no W^X, no stack guard pages).
 - Single bank of RAM (the one containing the kernel); other DTB banks are ignored.
 - The boot tables cover only the first 1 GiB of RAM; everything up to `mmu::init`
   (DTB parsing) must stay inside it. qemu puts the image and DTB there.

@@ -48,7 +48,7 @@
   `kprintln!` goes to UART + the screen console.
 
 ## UI
-- Spec: `docs/ui-concepts/SPEC.md`, mockup `docs/ui-concepts/milkos-1.0.html` (the UI design). Andrew picked
+- Spec: `docs/ui-concepts/SPEC.md`, mockup `docs/ui-concepts/milkos-1.0.html` (the UI design). The project owner picked
   01 Whole Milk, 03 Skim, 06 Today, 07 Spaces, 10 Glass. Follow the spec numbers; ask the lead if one blocks you.
 - Every window has its own offscreen surface. Nothing but the compositor writes to the framebuffer.
 

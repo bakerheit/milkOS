@@ -27,6 +27,7 @@ pub mod notify;
 pub mod ops;
 pub mod pagecache;
 pub mod path;
+pub mod perm;
 pub mod procfs;
 pub mod ramdisk;
 pub mod search;

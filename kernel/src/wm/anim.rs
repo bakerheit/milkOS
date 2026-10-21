@@ -249,13 +249,26 @@ fn genie(p: &mut Painter, d: Rect, surf: &super::buffer::Buffer, from: Rect, to:
     };
     let y0 = top.max(d.y);
     let y1 = bottom.min(d.y + d.h);
+    let mut acc: alloc::vec::Vec<[u32; 4]> = alloc::vec::Vec::new();
+    // Edges in 1/256 px, source rows in 16.16: nothing rounds to whole pixels before the
+    // filter, so the squeezed window stays continuous.
+    let lerp256 =
+        |a: i32, b: i32, w: i32| ((a as i64) << 8) + (((b - a) as i64) << 8) * w as i64 / 1024;
     for y in y0..y1 {
-        let v = (y - top) * 1024 / h; // 0 at the top of the shape, 1024 at the bottom
+        let v = (2 * (y - top) + 1) * 512 / h; // the row's centre: 0 at the top, 1024 at the bottom
         // The bottom rows pinch the most; once the top is on its way, everything follows.
         let w = (pinch * smooth(v) / 1024).max(follow);
-        let x0 = lerp(from.x, to.x, w);
-        let x1 = lerp(from.x + from.w, to.x + to.w, w);
-        let sy = v * from.h / 1024;
-        p.blit_span(y, x0, x1, surf, sy, R_WINDOW, alpha);
+        let x0 = lerp256(from.x, to.x, w);
+        let x1 = lerp256(from.x + from.w, to.x + to.w, w);
+        // How far the edges move across this row (for anti-aliasing shallow edges).
+        let wt = (pinch * smooth((y - top) * 1024 / h) / 1024).max(follow);
+        let wb = (pinch * smooth((y + 1 - top) * 1024 / h) / 1024).max(follow);
+        let slope = (
+            lerp256(from.x, to.x, wb) - lerp256(from.x, to.x, wt),
+            lerp256(from.x + from.w, to.x + to.w, wb) - lerp256(from.x + from.w, to.x + to.w, wt),
+        );
+        let sy0 = (((y - top) as i64) << 16) * from.h as i64 / h as i64;
+        let sy1 = (((y + 1 - top) as i64) << 16) * from.h as i64 / h as i64;
+        p.blit_span_filtered(y, x0, x1, surf, sy0, sy1, slope, R_WINDOW, alpha, &mut acc);
     }
 }

@@ -125,30 +125,68 @@ pub fn image(name: &str) -> Option<&'static ImageArt> {
     IMAGES.iter().find(|i| i.name == name)
 }
 
-/// Area-average an ARGB square down (or nearest up) to `d` x `d`, alpha-weighted so edges
-/// stay clean.
+/// Per output pixel along one axis (`s` source px to `d` output px): the first source pixel
+/// and the weights (1/256) of the ones it reads. Shrinking: exact area coverage (a box over
+/// the fractional source interval). Growing: bilinear (the two nearest, by distance).
+fn axis_weights(s: usize, d: usize) -> Vec<(usize, Vec<u32>)> {
+    let mut out = Vec::with_capacity(d);
+    for o in 0..d {
+        if d <= s {
+            // [o*s/d, (o+1)*s/d) in 1/256 source px.
+            let (a, z) = ((o * s * 256 / d) as u64, ((o + 1) * s * 256 / d) as u64);
+            let first = (a / 256) as usize;
+            let mut w = Vec::new();
+            let mut c = first;
+            while ((c as u64) * 256) < z && c < s {
+                let ca = a.max(c as u64 * 256);
+                let cz = z.min((c as u64 + 1) * 256);
+                w.push((cz - ca) as u32);
+                c += 1;
+            }
+            out.push((first, w));
+        } else {
+            // The output centre, in 1/256 source px, less half a pixel.
+            let c = ((2 * o + 1) * s * 128 / d) as i64 - 128;
+            let c = c.clamp(0, (s as i64 - 1) * 256);
+            let (i, f) = ((c / 256) as usize, (c % 256) as u32);
+            if i + 1 < s && f > 0 {
+                out.push((i, alloc::vec![256 - f, f]));
+            } else {
+                out.push((i, alloc::vec![256]));
+            }
+        }
+    }
+    out
+}
+
+/// Resample an ARGB square to `d` x `d`: area-averaged when shrinking, bilinear when growing,
+/// alpha-weighted so edges stay clean. Every source pixel counts with its exact fractional
+/// share, so fractional sizes (the magnified dock) don't shimmer as the size changes.
 pub fn scale_icon(src: &[u32], s: usize, d: usize) -> Vec<u32> {
     let mut out = alloc::vec![0u32; d * d];
-    for dy in 0..d {
-        let (y0, y1) = (dy * s / d, ((dy + 1) * s / d).max(dy * s / d + 1));
-        for dx in 0..d {
-            let (x0, x1) = (dx * s / d, ((dx + 1) * s / d).max(dx * s / d + 1));
-            let (mut a, mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32, 0u32);
-            for y in y0..y1.min(s) {
-                for x in x0..x1.min(s) {
-                    let q = src[y * s + x];
-                    let qa = q >> 24;
+    let wts = axis_weights(s, d);
+    for (dy, (y0, wy)) in wts.iter().enumerate() {
+        for (dx, (x0, wx)) in wts.iter().enumerate() {
+            let (mut a, mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
+            for (j, &ky) in wy.iter().enumerate() {
+                let row = &src[(y0 + j) * s..(y0 + j + 1) * s];
+                for (i, &kx) in wx.iter().enumerate() {
+                    let k = (ky * kx) as u64;
+                    let q = row[x0 + i];
+                    let qa = (q >> 24) as u64 * k;
                     a += qa;
-                    r += (q >> 16 & 0xff) * qa;
-                    g += (q >> 8 & 0xff) * qa;
-                    b += (q & 0xff) * qa;
-                    n += 1;
+                    r += (q >> 16 & 0xff) as u64 * qa;
+                    g += (q >> 8 & 0xff) as u64 * qa;
+                    b += (q & 0xff) as u64 * qa;
+                    n += k;
                 }
             }
             if let (Some(r), Some(g), Some(b)) =
                 (r.checked_div(a), g.checked_div(a), b.checked_div(a))
             {
-                out[dy * d + dx] = (a / n.max(1)) << 24 | r << 16 | g << 8 | b;
+                let (r, g, b) = (r as u32, g as u32, b as u32);
+                let al = ((a + n / 2) / n.max(1)).min(255) as u32;
+                out[dy * d + dx] = al << 24 | r << 16 | g << 8 | b;
             }
         }
     }

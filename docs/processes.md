@@ -172,7 +172,7 @@ Implemented (number: name):
 
 | | |
 |---|---|
-| files | 56 openat, 57 close, 59 pipe2, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
+| files | 56 openat, 57 close, 59 pipe2, 81 sync, 82 fsync, 83 fdatasync, 63 read, 64 write, 65 readv, 66 writev, 67 pread64, 68 pwrite64, 62 lseek, 80 fstat, 79 newfstatat, 78 readlinkat, 61 getdents64, 17 getcwd, 49 chdir, 50 fchdir, 34 mkdirat, 35 unlinkat, 36 symlinkat, 37 linkat, 276 renameat2, 46 ftruncate, 53 fchmodat, 88 utimensat, 23 dup, 24 dup3, 25 fcntl, 29 ioctl (ttys: TCGETS, TCSETS*, TIOCGWINSZ, TIOCSWINSZ, TIOCGPGRP, TIOCSPGRP) |
 | processes | 220 clone (fork only), 221 execve, 260 wait4, 93 exit, 94 exit_group, 172 getpid, 173 getppid, 178 gettid, 174-177 get[e]uid/get[e]gid (0), 96 set_tid_address, 154 setpgid, 155 getpgid, 156 getsid, 157 setsid |
 | signals | 129 kill, 130 tkill, 131 tgkill, 134 rt_sigaction, 135 rt_sigprocmask, 136 rt_sigpending, 139 rt_sigreturn |
 | time | 101 nanosleep, 115 clock_nanosleep, 113 clock_gettime, 114 clock_getres, 169 gettimeofday, 124 sched_yield |

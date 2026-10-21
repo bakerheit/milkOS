@@ -209,7 +209,13 @@ pub struct SnapRecord {
     /// Blocks born before the previous snapshot that died between it and this one.
     pub deadlist: BlockPtr,
     pub next_ino: u64,
+    /// Clone records only: unique id (snapshots: 0).
+    pub id: u32,
 }
+
+/// Record flag: this entry of the table is a clone (`generation` = its origin snapshot's
+/// generation, `root` = the clone's own tree), not a snapshot.
+pub const REC_CLONE: u32 = 1;
 
 #[derive(Clone, Debug, Default)]
 pub struct Superblock {
@@ -224,7 +230,18 @@ pub struct Superblock {
     pub label: String,
     /// Oldest first (ascending generation).
     pub snaps: Vec<SnapRecord>,
+    /// Writable clones of snapshots. Share the record table with `snaps` (MAX_SNAPS total).
+    pub clones: Vec<SnapRecord>,
+    /// Automatic snapshot settings: [state (0 default, 1 on, 2 off), interval seconds,
+    /// keep last, keep daily]; 0 = default. Zeros on images made before they existed.
+    pub auto: [u32; 4],
+    /// `SB_BRANCHED`, ...
+    pub flags: u32,
 }
+
+/// Superblock flag: history is no longer linear (a clone was promoted), so dead lists
+/// are not kept and snapshot delete / rollback free space by an exact reachability sweep.
+pub const SB_BRANCHED: u32 = 1;
 
 // Superblock byte offsets.
 const SB_VERSION: usize = 8;
@@ -240,9 +257,12 @@ const SB_LABEL: usize = 112;
 const SB_NSNAPS: usize = 144;
 const SB_SNAPS: usize = 152;
 const SNAP_REC: usize = 128;
+const SB_AUTO: usize = 3992;
+const SB_FLAGS: usize = 4008;
 const SB_CSUM: usize = BLOCK - 8;
 
-const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_CSUM);
+const _: () = assert!(SB_SNAPS + MAX_SNAPS * SNAP_REC <= SB_AUTO);
+const _: () = assert!(SB_AUTO + 16 <= SB_FLAGS && SB_FLAGS + 4 <= SB_CSUM);
 
 fn put_str(b: &mut [u8], s: &str) {
     b.fill(0);
@@ -269,8 +289,15 @@ impl Superblock {
         b[SB_CREATED..SB_CREATED + 8].copy_from_slice(&self.created.to_le_bytes());
         b[SB_UUID..SB_UUID + 16].copy_from_slice(&self.uuid);
         put_str(&mut b[SB_LABEL..SB_LABEL + LABEL_MAX + 1], &self.label);
-        b[SB_NSNAPS..SB_NSNAPS + 4].copy_from_slice(&(self.snaps.len() as u32).to_le_bytes());
-        for (i, s) in self.snaps.iter().enumerate() {
+        let recs: Vec<(u32, &SnapRecord)> = self
+            .snaps
+            .iter()
+            .map(|s| (0, s))
+            .chain(self.clones.iter().map(|c| (REC_CLONE, c)))
+            .take(MAX_SNAPS)
+            .collect();
+        b[SB_NSNAPS..SB_NSNAPS + 4].copy_from_slice(&(recs.len() as u32).to_le_bytes());
+        for (i, (flags, s)) in recs.into_iter().enumerate() {
             let r = &mut b[SB_SNAPS + i * SNAP_REC..SB_SNAPS + (i + 1) * SNAP_REC];
             put_str(&mut r[0..48], &s.name);
             r[48..56].copy_from_slice(&s.generation.to_le_bytes());
@@ -278,7 +305,13 @@ impl Superblock {
             s.root.put(&mut r[64..]);
             s.deadlist.put(&mut r[88..]);
             r[112..120].copy_from_slice(&s.next_ino.to_le_bytes());
+            r[120..124].copy_from_slice(&flags.to_le_bytes());
+            r[124..128].copy_from_slice(&s.id.to_le_bytes());
         }
+        for (i, v) in self.auto.iter().enumerate() {
+            b[SB_AUTO + i * 4..SB_AUTO + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        b[SB_FLAGS..SB_FLAGS + 4].copy_from_slice(&self.flags.to_le_bytes());
         let c = xxh64(&b[..SB_CSUM]);
         b[SB_CSUM..].copy_from_slice(&c.to_le_bytes());
         b
@@ -296,17 +329,21 @@ impl Superblock {
         if n > MAX_SNAPS {
             return None;
         }
-        let snaps = (0..n)
+        let snaps: Vec<(u32, SnapRecord)> = (0..n)
             .map(|i| {
                 let r = &b[SB_SNAPS + i * SNAP_REC..SB_SNAPS + (i + 1) * SNAP_REC];
-                SnapRecord {
-                    name: get_str(&r[0..48]),
-                    generation: le64(&r[48..]),
-                    created: le64(&r[56..]),
-                    root: BlockPtr::get(&r[64..]),
-                    deadlist: BlockPtr::get(&r[88..]),
-                    next_ino: le64(&r[112..]),
-                }
+                (
+                    le32(&r[120..]),
+                    SnapRecord {
+                        name: get_str(&r[0..48]),
+                        generation: le64(&r[48..]),
+                        created: le64(&r[56..]),
+                        root: BlockPtr::get(&r[64..]),
+                        deadlist: BlockPtr::get(&r[88..]),
+                        next_ino: le64(&r[112..]),
+                        id: le32(&r[124..]),
+                    },
+                )
             })
             .collect();
         let mut uuid = [0u8; 16];
@@ -320,7 +357,18 @@ impl Superblock {
             created: le64(&b[SB_CREATED..]),
             uuid,
             label: get_str(&b[SB_LABEL..SB_LABEL + LABEL_MAX + 1]),
-            snaps,
+            snaps: snaps
+                .iter()
+                .filter(|(f, _)| f & REC_CLONE == 0)
+                .map(|(_, s)| s.clone())
+                .collect(),
+            clones: snaps
+                .iter()
+                .filter(|(f, _)| f & REC_CLONE != 0)
+                .map(|(_, s)| s.clone())
+                .collect(),
+            auto: core::array::from_fn(|i| le32(&b[SB_AUTO + i * 4..])),
+            flags: le32(&b[SB_FLAGS..]),
         })
     }
 }

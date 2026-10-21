@@ -296,6 +296,10 @@ pub trait Inode: AsAny + Send + Sync {
     fn setattr(&self, _attr: &SetAttr) -> Result<()> {
         Err(Errno::EPERM)
     }
+    /// `fsync`: make this file's changes durable. Default: nothing to do (RAM file systems).
+    fn sync(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// A mounted (or mountable) file system instance.
@@ -305,6 +309,10 @@ pub trait FileSystem: Send + Sync {
     /// Device number, `st_dev` of every inode in it.
     fn dev(&self) -> u64;
     fn root(&self) -> InodeRef;
+    /// `sync`: make everything durable. Default: nothing to do.
+    fn sync(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Linux `makedev`.

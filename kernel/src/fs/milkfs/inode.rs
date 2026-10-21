@@ -6,8 +6,8 @@
 //! tree. So a rollback needs no cache invalidation, and inode numbers are never reused
 //! (`next_ino` only grows) so a stale object can only ever see ENOENT.
 //!
-//! Every mutating call is its own transaction and commits before returning (v0 is
-//! synchronous: an `Ok` means it is on disk).
+//! Mutating calls join the volume's open transaction, committed about a second later (or
+//! on `fsync`/`sync`): see `Volume::txn`.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -15,7 +15,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use super::format::*;
-use super::items::LIVE;
+use super::items::{LIVE, is_writable_view};
 use super::volume::State;
 use crate::fs::clock;
 use crate::fs::errno::{Errno, Result};
@@ -41,7 +41,7 @@ pub struct Volume {
     inodes: SpinLock<BTreeMap<(u64, u64), Weak<MilkInode>>>,
     snap_devs: SpinLock<BTreeMap<u64, u64>>,
     /// Inodes whose last in-memory reference went away (unlinked-while-open cleanup).
-    reap: SpinLock<Vec<u64>>,
+    reap: SpinLock<Vec<(u64, u64)>>,
     me: Weak<Volume>,
 }
 
@@ -108,10 +108,10 @@ impl Volume {
         i
     }
 
-    fn is_open(&self, ino: u64) -> bool {
+    fn is_open(&self, view: u64, ino: u64) -> bool {
         self.inodes
             .lock()
-            .get(&(LIVE, ino))
+            .get(&(view, ino))
             .is_some_and(|w| w.strong_count() > 0)
     }
 
@@ -119,23 +119,31 @@ impl Volume {
         self.inode_obj(view, ROOT_INO, InodeType::Dir)
     }
 
-    /// Run a mutating operation on the live tree as one transaction.
-    pub fn txn<R>(&self, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
+    /// Run a mutating operation on the live tree. It joins the open transaction, which is
+    /// committed when it is about a second old (or big, or on sync), so a crash loses at
+    /// most the last second of work but never leaves part of an operation behind.
+    /// `view` is the live tree or a clone; writes and their release rules follow it.
+    pub fn txn<R>(&self, view: u64, f: impl FnOnce(&mut State) -> Result<R>) -> Result<R> {
         let reap = core::mem::take(&mut *self.reap.lock());
         let mut st = self.state.lock();
         st.check_writable()?;
-        for ino in reap {
-            if !self.is_open(ino)
-                && let Ok(i) = st.inode(LIVE, ino)
+        for (v, ino) in reap {
+            if st.set_cur(v).is_ok()
+                && !self.is_open(v, ino)
+                && let Ok(i) = st.inode(v, ino)
                 && i.nlink == 0
             {
-                st.delete_inode(ino)?;
+                let _ = st.delete_inode(ino);
             }
         }
-        let r = f(&mut st);
-        // Commit whatever happened, even on error (a failed op may have changed nothing,
-        // or a consistent prefix of the change: each tree update is a complete step).
-        let c = st.commit();
+        let r = match st.set_cur(view) {
+            Ok(()) => f(&mut st),
+            Err(e) => Err(e),
+        };
+        let _ = st.set_cur(LIVE);
+        // Keep whatever happened, even on error (a failed op changed nothing, or a complete
+        // prefix of its steps: each tree update is a whole step).
+        let c = st.op_done();
         let r = r?;
         c?;
         Ok(r)
@@ -146,9 +154,9 @@ impl Volume {
         if inos.is_empty() {
             return Ok(());
         }
-        self.txn(|st| {
+        self.txn(LIVE, |st| {
             for &ino in inos {
-                if !self.is_open(ino) && st.inode(LIVE, ino).is_ok_and(|i| i.nlink == 0) {
+                if !self.is_open(LIVE, ino) && st.inode(st.cur, ino).is_ok_and(|i| i.nlink == 0) {
                     st.delete_inode(ino)?;
                 }
             }
@@ -159,11 +167,11 @@ impl Volume {
     /// Drop one link to `ino` (its entry is already gone); delete it if that was the last
     /// and nothing has it open.
     fn drop_link(&self, st: &mut State, ino: u64) -> Result<()> {
-        let mut i = st.inode(LIVE, ino)?;
+        let mut i = st.inode(st.cur, ino)?;
         let is_dir = i.mode & S_IFMT_ == crate::fs::node::S_IFDIR;
         i.nlink = if is_dir { 0 } else { i.nlink.saturating_sub(1) };
         i.ctime = now();
-        if i.nlink == 0 && !self.is_open(ino) {
+        if i.nlink == 0 && !self.is_open(st.cur, ino) {
             st.delete_inode(ino)
         } else {
             st.put_inode(ino, &i)
@@ -183,6 +191,30 @@ impl FileSystem for Volume {
     fn root(&self) -> InodeRef {
         self.root_obj(LIVE)
     }
+    fn sync(&self) -> Result<()> {
+        self.state.lock().commit()
+    }
+}
+
+/// One view of a volume (a clone) mounted as its own file system.
+pub struct ViewFs {
+    pub vol: Arc<Volume>,
+    pub view: u64,
+}
+
+impl FileSystem for ViewFs {
+    fn name(&self) -> &'static str {
+        "milkfs"
+    }
+    fn dev(&self) -> u64 {
+        self.vol.view_dev(self.view)
+    }
+    fn root(&self) -> InodeRef {
+        self.vol.root_obj(self.view)
+    }
+    fn sync(&self) -> Result<()> {
+        self.vol.state.lock().commit()
+    }
 }
 
 /// A file, directory or symlink in the live tree (`view == 0`) or a snapshot.
@@ -197,15 +229,15 @@ pub struct MilkInode {
 
 impl Drop for MilkInode {
     fn drop(&mut self) {
-        if self.view == LIVE && self.kind != InodeType::Dir {
-            self.vol.reap.lock().push(self.ino);
+        if is_writable_view(self.view) && self.kind != InodeType::Dir {
+            self.vol.reap.lock().push((self.view, self.ino));
         }
     }
 }
 
 impl MilkInode {
     fn ro(&self) -> Result<()> {
-        if self.view != LIVE {
+        if !is_writable_view(self.view) {
             return Err(Errno::EROFS);
         }
         Ok(())
@@ -232,12 +264,12 @@ impl MilkInode {
         self.new_name(name)?;
         let kind = kind_of(mode);
         let dir = self.ino;
-        let ino = self.vol.txn(|st| {
-            let mut d = st.inode(LIVE, dir)?;
+        let ino = self.vol.txn(self.view, |st| {
+            let mut d = st.inode(st.cur, dir)?;
             if kind_of(d.mode) != InodeType::Dir {
                 return Err(Errno::ENOTDIR);
             }
-            if st.lookup(LIVE, dir, name)?.is_some() {
+            if st.lookup(st.cur, dir, name)?.is_some() {
                 return Err(Errno::EEXIST);
             }
             let ino = st.alloc_ino();
@@ -278,7 +310,7 @@ impl MilkInode {
             st.put_inode(dir, &d)?;
             Ok(ino)
         })?;
-        Ok(self.vol.inode_obj(LIVE, ino, kind))
+        Ok(self.vol.inode_obj(self.view, ino, kind))
     }
 }
 
@@ -341,8 +373,8 @@ impl Inode for MilkInode {
         }
         self.ro()?;
         let ino = self.ino;
-        self.vol.txn(|st| {
-            let mut i = st.inode(LIVE, ino)?;
+        self.vol.txn(self.view, |st| {
+            let mut i = st.inode(st.cur, ino)?;
             i.size = st.write_data(ino, i.size, off, buf)?;
             let t = now();
             i.mtime = t;
@@ -365,8 +397,8 @@ impl Inode for MilkInode {
             return Err(Errno::EFBIG);
         }
         let ino = self.ino;
-        self.vol.txn(|st| {
-            let mut i = st.inode(LIVE, ino)?;
+        self.vol.txn(self.view, |st| {
+            let mut i = st.inode(st.cur, ino)?;
             st.truncate_data(ino, i.size, len)?;
             i.size = len;
             let t = now();
@@ -381,7 +413,7 @@ impl Inode for MilkInode {
             return Err(Errno::ENOTDIR);
         }
         if name == ".." {
-            if self.view != LIVE && self.ino == ROOT_INO {
+            if !is_writable_view(self.view) && self.ino == ROOT_INO {
                 return Ok(Arc::new(SnapsDir::new(self.vol.clone())));
             }
             let parent = self.vol.state.lock().inode(self.view, self.ino)?.parent;
@@ -455,18 +487,18 @@ impl Inode for MilkInode {
         self.ro()?;
         self.new_name(name)?;
         let t = downcast::<MilkInode>(target).ok_or(Errno::EXDEV)?;
-        if !Arc::ptr_eq(&t.vol, &self.vol) || t.view != LIVE {
+        if !Arc::ptr_eq(&t.vol, &self.vol) || t.view != self.view {
             return Err(Errno::EXDEV);
         }
         if t.kind == InodeType::Dir {
             return Err(Errno::EPERM);
         }
         let (dir, ino, kind) = (self.ino, t.ino, t.kind);
-        self.vol.txn(|st| {
-            if st.lookup(LIVE, dir, name)?.is_some() {
+        self.vol.txn(self.view, |st| {
+            if st.lookup(st.cur, dir, name)?.is_some() {
                 return Err(Errno::EEXIST);
             }
-            let mut i = st.inode(LIVE, ino)?;
+            let mut i = st.inode(st.cur, ino)?;
             i.nlink += 1;
             i.ctime = now();
             st.put_inode(ino, &i)?;
@@ -478,7 +510,7 @@ impl Inode for MilkInode {
                     name: String::from(name),
                 },
             )?;
-            let mut d = st.inode(LIVE, dir)?;
+            let mut d = st.inode(st.cur, dir)?;
             d.mtime = now();
             d.ctime = d.mtime;
             st.put_inode(dir, &d)
@@ -492,14 +524,14 @@ impl Inode for MilkInode {
         }
         let dir = self.ino;
         let vol = self.vol.clone();
-        self.vol.txn(|st| {
-            let d = st.lookup(LIVE, dir, name)?.ok_or(Errno::ENOENT)?;
+        self.vol.txn(self.view, |st| {
+            let d = st.lookup(st.cur, dir, name)?.ok_or(Errno::ENOENT)?;
             if d.dtype == InodeType::Dir.dirent_type() {
                 return Err(Errno::EISDIR);
             }
             st.remove_dirent(dir, name)?;
             vol.drop_link(st, d.ino)?;
-            let mut di = st.inode(LIVE, dir)?;
+            let mut di = st.inode(st.cur, dir)?;
             di.mtime = now();
             di.ctime = di.mtime;
             st.put_inode(dir, &di)
@@ -512,17 +544,17 @@ impl Inode for MilkInode {
             return Err(Errno::EBUSY);
         }
         let dir = self.ino;
-        self.vol.txn(|st| {
-            let d = st.lookup(LIVE, dir, name)?.ok_or(Errno::ENOENT)?;
+        self.vol.txn(self.view, |st| {
+            let d = st.lookup(st.cur, dir, name)?.ok_or(Errno::ENOENT)?;
             if d.dtype != InodeType::Dir.dirent_type() {
                 return Err(Errno::ENOTDIR);
             }
-            if !st.list(LIVE, d.ino)?.is_empty() {
+            if !st.list(st.cur, d.ino)?.is_empty() {
                 return Err(Errno::ENOTEMPTY);
             }
             st.remove_dirent(dir, name)?;
             st.delete_inode(d.ino)?;
-            let mut di = st.inode(LIVE, dir)?;
+            let mut di = st.inode(st.cur, dir)?;
             di.nlink -= 1;
             di.mtime = now();
             di.ctime = di.mtime;
@@ -533,7 +565,7 @@ impl Inode for MilkInode {
     fn rename(&self, old: &str, new_dir: &InodeRef, new: &str) -> Result<()> {
         self.ro()?;
         let nd = downcast::<MilkInode>(new_dir).ok_or(Errno::EXDEV)?;
-        if !Arc::ptr_eq(&nd.vol, &self.vol) || nd.view != LIVE {
+        if !Arc::ptr_eq(&nd.vol, &self.vol) || nd.view != self.view {
             return Err(Errno::EXDEV);
         }
         nd.new_name(new)?;
@@ -542,9 +574,9 @@ impl Inode for MilkInode {
         }
         let (od, ndi) = (self.ino, nd.ino);
         let vol = self.vol.clone();
-        self.vol.txn(|st| {
-            let src = st.lookup(LIVE, od, old)?.ok_or(Errno::ENOENT)?;
-            let dst = st.lookup(LIVE, ndi, new)?;
+        self.vol.txn(self.view, |st| {
+            let src = st.lookup(st.cur, od, old)?.ok_or(Errno::ENOENT)?;
+            let dst = st.lookup(st.cur, ndi, new)?;
             let dir_t = InodeType::Dir.dirent_type();
             let moving_dir = src.dtype == dir_t;
             if let Some(dst) = &dst {
@@ -554,7 +586,7 @@ impl Inode for MilkInode {
                 match (moving_dir, dst.dtype == dir_t) {
                     (true, false) => return Err(Errno::ENOTDIR),
                     (false, true) => return Err(Errno::EISDIR),
-                    (true, true) if !st.list(LIVE, dst.ino)?.is_empty() => {
+                    (true, true) if !st.list(st.cur, dst.ino)?.is_empty() => {
                         return Err(Errno::ENOTEMPTY);
                     }
                     _ => {}
@@ -570,7 +602,7 @@ impl Inode for MilkInode {
                     if cur == ROOT_INO {
                         break;
                     }
-                    cur = st.inode(LIVE, cur)?.parent;
+                    cur = st.inode(st.cur, cur)?.parent;
                 }
             }
             let t = now();
@@ -579,7 +611,7 @@ impl Inode for MilkInode {
                 st.remove_dirent(ndi, new)?;
                 if dst.dtype == dir_t {
                     st.delete_inode(dst.ino)?;
-                    let mut n = st.inode(LIVE, ndi)?;
+                    let mut n = st.inode(st.cur, ndi)?;
                     n.nlink -= 1;
                     st.put_inode(ndi, &n)?;
                 } else {
@@ -594,26 +626,31 @@ impl Inode for MilkInode {
                     name: String::from(new),
                 },
             )?;
-            let mut s = st.inode(LIVE, src.ino)?;
+            let mut s = st.inode(st.cur, src.ino)?;
             s.ctime = t;
             if moving_dir && od != ndi {
                 s.parent = ndi;
-                let mut o = st.inode(LIVE, od)?;
+                let mut o = st.inode(st.cur, od)?;
                 o.nlink -= 1;
                 st.put_inode(od, &o)?;
-                let mut n = st.inode(LIVE, ndi)?;
+                let mut n = st.inode(st.cur, ndi)?;
                 n.nlink += 1;
                 st.put_inode(ndi, &n)?;
             }
             st.put_inode(src.ino, &s)?;
             for d in [od, ndi] {
-                let mut i = st.inode(LIVE, d)?;
+                let mut i = st.inode(st.cur, d)?;
                 i.mtime = t;
                 i.ctime = t;
                 st.put_inode(d, &i)?;
             }
             Ok(())
         })
+    }
+
+    fn sync(&self) -> Result<()> {
+        // One transaction covers the whole volume: committing it syncs this file.
+        self.vol.state.lock().commit()
     }
 
     fn readlink(&self) -> Result<String> {
@@ -627,8 +664,8 @@ impl Inode for MilkInode {
         self.ro()?;
         let ino = self.ino;
         let a = *a;
-        self.vol.txn(|st| {
-            let mut i = st.inode(LIVE, ino)?;
+        self.vol.txn(self.view, |st| {
+            let mut i = st.inode(st.cur, ino)?;
             if let Some(p) = a.perm {
                 i.mode = (i.mode & S_IFMT_) | (p & 0o7777);
             }

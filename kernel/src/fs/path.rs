@@ -89,11 +89,84 @@ pub fn mount(path: &str, fs: FsRef) -> Result<()> {
     Ok(())
 }
 
+/// Remove the most recent mount at `path` (exact mount path). EBUSY if something is
+/// mounted inside it, EINVAL if nothing is mounted there or it is `/`. Open files keep
+/// their file system alive until they close.
+pub fn unmount(path: &str) -> Result<()> {
+    let mut m = MOUNTS.lock();
+    let i = m
+        .iter()
+        .rposition(|x| x.path == path && x.covered.is_some())
+        .ok_or(Errno::EINVAL)?;
+    let root = m[i].root.clone();
+    if m.iter().any(|x| {
+        x.covered
+            .as_ref()
+            .is_some_and(|c| c.dev() == root.dev() && c.ino() == root.ino())
+    }) {
+        return Err(Errno::EBUSY);
+    }
+    let gone = m.remove(i);
+    drop(m);
+    drop(gone);
+    Ok(())
+}
+
+/// Another view of a directory that is already in the tree (a bind mount's "file
+/// system"): same inodes, same device number.
+struct BindFs {
+    name: &'static str,
+    root: InodeRef,
+}
+
+impl super::node::FileSystem for BindFs {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn dev(&self) -> u64 {
+        self.root.dev()
+    }
+    fn root(&self) -> InodeRef {
+        self.root.clone()
+    }
+    fn sync(&self) -> Result<()> {
+        self.root.sync()
+    }
+}
+
+/// Bind mount: make directory `src` also appear at `dst` (like `mount --bind`). Paths
+/// through `dst` and `path_of` report `dst`.
+pub fn bind(src: &str, dst: &str) -> Result<()> {
+    let root = Walker::new().resolve(None, src, true)?;
+    if root.kind() != InodeType::Dir {
+        return Err(Errno::ENOTDIR);
+    }
+    let name = MOUNTS
+        .lock()
+        .iter()
+        .rev()
+        .find(|m| m.fs.dev() == root.dev())
+        .map_or("bind", |m| m.fs.name());
+    mount(dst, alloc::sync::Arc::new(BindFs { name, root }))
+}
+
 /// One line of `/proc/mounts`: (mount point, fs type, device number).
 pub struct MountInfo {
     pub path: String,
     pub fs_name: &'static str,
     pub dev: u64,
+}
+
+/// `sync(2)`: ask every mounted file system to make its changes durable.
+pub fn sync_all() -> Result<()> {
+    let all: Vec<FsRef> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
+    let mut r = Ok(());
+    for fs in all {
+        if let Err(e) = fs.sync() {
+            r = Err(e);
+        }
+    }
+    r
 }
 
 pub fn mounts() -> Vec<MountInfo> {

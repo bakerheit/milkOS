@@ -27,6 +27,7 @@ pub mod frag;
 pub mod icmp;
 pub mod iface;
 pub mod ipv6;
+pub mod mld;
 pub mod pmtu;
 pub mod procnet;
 pub mod ring;
@@ -406,10 +407,10 @@ impl Stack {
         let dst = Mac([f[0], f[1], f[2], f[3], f[4], f[5]]);
         let l = &self.iface.links[k];
         let group = dst.0[0..3] == [0x01, 0x00, 0x5e] && l.multicast();
-        // IPv6 multicast (33:33:*): NDP needs it on every link.
-        let group6 = dst.0[0..2] == [0x33, 0x33];
+        // IPv6 multicast (33:33:*) only for groups the link is in (net::mld).
+        let group6 = dst.0[0..2] == [0x33, 0x33] && mld::member_mac(&l.v6, dst);
         if dst != l.mac && dst != Mac::BROADCAST && !group && !group6 {
-            return; // someone else's, or IPv4 multicast on a link that takes none
+            return; // someone else's, or multicast for a group this link isn't in
         }
         let src = Mac([f[6], f[7], f[8], f[9], f[10], f[11]]);
         match be16(f, 12) {

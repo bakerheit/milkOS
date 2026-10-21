@@ -455,6 +455,67 @@ fn test_fragments6() -> core::result::Result<(), String> {
     Ok(())
 }
 
+/// MLD and multicast membership on eth0: a UDP datagram to the group ff02::1:3 (as if
+/// from a neighbour) is dropped until a socket joins the group, delivered while it is
+/// joined, dropped again after it leaves; the joins and leaves go out as MLDv2 reports.
+fn test_mld() -> core::result::Result<(), String> {
+    use super::wire::{finish, pseudo_sum6, sum};
+    let g = Ipv6([0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 3]);
+    let from = Ipv6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99]);
+    let pkt = |seq: u8| -> Vec<u8> {
+        let mut u = alloc::vec![0u8, 99, 0x13, 0xb0, 0, 9, 0, 0, seq]; // 99 -> 5040
+        let c = finish(sum(&u, pseudo_sum6(from, g, 17, u.len())));
+        put16(&mut u, 6, if c == 0 { 0xffff } else { c });
+        let mut p = alloc::vec![0u8; 40];
+        p[0] = 0x60;
+        put16(&mut p, 4, u.len() as u16);
+        p[6] = 17;
+        p[7] = 1;
+        p[8..24].copy_from_slice(&from.0);
+        p[24..40].copy_from_slice(&g.0);
+        p.extend_from_slice(&u);
+        p
+    };
+    let s = socket::socket_family(Family::V6, SockType::Dgram).map_err(es)?;
+    socket::bind(s, SockAddr::new(Ipv6::UNSPECIFIED, 5040)).map_err(es)?;
+    let inject = |seq: u8| {
+        super::with(|st| super::ipv6::input(st, Some(0), &pkt(seq), super::wire::Mac::ZERO))
+    };
+    let got = |seq: u8| {
+        socket::wait(s, POLLIN, 100 * MS);
+        let mut b = [0u8; 8];
+        matches!(socket::recvfrom(s, &mut b), Ok((1, _)) if b[0] == seq)
+    };
+    let reports0 = super::with(|st| st.ip6.mld.reports_out);
+    inject(1);
+    let before = got(1);
+    socket::group6(s, g, Some(0), true).map_err(es)?;
+    let member = super::with(|st| super::mld::member(&st.iface.links[0].v6, g));
+    inject(2);
+    let during = got(2);
+    let reported = wait_for(1500, || super::with(|st| st.ip6.mld.reports_out > reports0));
+    socket::group6(s, g, Some(0), false).map_err(es)?;
+    inject(3);
+    let after = got(3);
+    let _ = socket::close(s);
+    let reports = if wait_for(3000, || {
+        super::with(|st| st.ip6.mld.reports_out >= reports0 + 2)
+    }) {
+        super::with(|st| st.ip6.mld.reports_out - reports0)
+    } else {
+        0
+    };
+    kprintln!(
+        "[net] mld: ff02::1:3 on eth0 dropped before the join, delivered while joined, dropped after leaving; {reports} MLDv2 reports"
+    );
+    if before || !member || !during || after || !reported {
+        return Err(alloc::format!(
+            "before {before} member {member} during {during} after {after} reported {reported}"
+        ));
+    }
+    Ok(())
+}
+
 /// Path MTU discovery over loopback, with loopback playing a path of a smaller MTU
 /// (`iface::LO_MTU`): too-big packets are answered by ICMPv6 "packet too big" / ICMP
 /// "fragmentation needed" as a router would. IPv6 at 1280: a TCP connection drops its MSS
@@ -1054,6 +1115,7 @@ pub fn run() {
     if super::has_device() {
         check("ipv6", test_ipv6());
         check("ipv6 extension headers", test_ipv6_ext());
+        check("mld", test_mld());
     }
 
     // 3. Loopback.

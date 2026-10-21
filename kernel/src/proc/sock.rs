@@ -50,6 +50,8 @@ const SO_RCVBUF: u32 = 8;
 const TCP_NODELAY: u32 = 1;
 const IPPROTO_IPV6: u32 = 41;
 const IPV6_V6ONLY: u32 = 26;
+const IPV6_JOIN_GROUP: u32 = 20;
+const IPV6_LEAVE_GROUP: u32 = 21;
 const SO_SNDTIMEO: u32 = 21;
 const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
@@ -350,6 +352,17 @@ fn setsockopt(fd: i64, level: u32, opt: u32, val: usize, len: usize) -> KResult<
                 return Err(EINVAL);
             }
             sf.set_rcv_timeout((sec as u64).saturating_mul(1_000_000_000) + usec as u64 * 1000);
+            Ok(0)
+        }
+        (IPPROTO_IPV6, IPV6_JOIN_GROUP | IPV6_LEAVE_GROUP) => {
+            // struct ipv6_mreq { in6_addr multiaddr; unsigned ifindex; }
+            if len < 20 {
+                return Err(EINVAL);
+            }
+            let b = copy_in(val, 20)?;
+            let g = Ipv6(b[0..16].try_into().unwrap());
+            let link = link_of_ifindex(u32::from_le_bytes(b[16..20].try_into().unwrap()))?;
+            socket::group6(sf.id, g, link, opt == IPV6_JOIN_GROUP)?;
             Ok(0)
         }
         (IPPROTO_IPV6, IPV6_V6ONLY) => {

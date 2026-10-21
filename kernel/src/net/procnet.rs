@@ -508,6 +508,43 @@ pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     Ok(())
 }
 
+/// `/proc/net/igmp6`: the IPv6 groups each link listens to (Linux columns: ifindex,
+/// name, group, users, flags, timer), then the MLD counters as a comment.
+pub fn igmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for (k, l) in st.iface.links.iter().enumerate() {
+        if !l.up() {
+            continue;
+        }
+        for g in super::mld::groups(&l.v6) {
+            let users =
+                l.v6.mld
+                    .joined()
+                    .iter()
+                    .find(|(j, _)| *j == g)
+                    .map_or(1, |&(_, n)| n);
+            writeln!(
+                w,
+                "{:<4} {:<15} {} {:>5} {:08X} {:>5}",
+                ipv6::ifindex(Some(k)),
+                LINK_NAMES[k],
+                Hex32(g),
+                users,
+                if g == super::wire::Ipv6::ALL_NODES {
+                    0x0c
+                } else {
+                    0x04
+                },
+                0
+            )?;
+        }
+    }
+    writeln!(
+        w,
+        "# mld queries_in {} reports_out {}",
+        st.ip6.mld.queries_in, st.ip6.mld.reports_out
+    )
+}
+
 /// `/proc/net/pmtu` (milkOS): the path MTUs learned from ICMP, `DST MTU EXPIRES_IN_S`,
 /// then the counters.
 pub fn pmtu(st: &Stack, w: &mut dyn Write) -> fmt::Result {
@@ -559,6 +596,7 @@ pub const FILES: &[(&str, Gen)] = &[
     ("snmp6", snmp6),
     ("ndisc", ndisc),
     ("pmtu", pmtu),
+    ("igmp6", igmp6),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

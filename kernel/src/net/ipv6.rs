@@ -135,6 +135,8 @@ pub struct Link6 {
     nd: Vec<NdEntry>,
     rs_sent: u8,
     rs_next: u64,
+    /// Multicast memberships and MLD reporting (net::mld).
+    pub mld: super::mld::LinkMld,
 }
 
 impl Link6 {
@@ -147,6 +149,7 @@ impl Link6 {
             nd: Vec::new(),
             rs_sent: 0,
             rs_next: 0,
+            mld: super::mld::LinkMld::new(),
         }
     }
 
@@ -273,6 +276,7 @@ pub struct State6 {
     pub ping_replies: Vec<(Ipv6, u16, u16, usize, u64)>,
     /// The last fragment identification used (a scrambled counter, never 0).
     pub frag_id: u32,
+    pub mld: super::mld::MldStats,
 }
 
 impl State6 {
@@ -283,6 +287,10 @@ impl State6 {
             want_ns: Vec::new(),
             ping_replies: Vec::new(),
             frag_id: 0,
+            mld: super::mld::MldStats {
+                queries_in: 0,
+                reports_out: 0,
+            },
         }
     }
 }
@@ -377,6 +385,11 @@ fn route(iface: &Iface, dst: Ipv6, scope: Option<usize>) -> Option<(usize, Ipv6)
         .find_map(|(k, l)| l.v6.router.map(|(r, _)| (k, r)))
 }
 
+/// The link multicast to `g` goes out of (and is joined on, without an interface).
+pub fn mcast_link(iface: &Iface, g: Ipv6) -> Option<usize> {
+    route(iface, g, None).map(|(k, _)| k)
+}
+
 /// Our source address for `dst` (RFC 6724, the simple cases): ::1 for loopback, the
 /// link-local for link-local or link-scope multicast, else an address on the same prefix,
 /// else eth0's SLAAC address.
@@ -433,6 +446,19 @@ pub fn send(
     fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
 ) -> Result<()> {
     send_hop(st, src, dst, scope, next, 64, fill)
+}
+
+/// [`send`] with the next header and hop limit given (MLD: a hop-by-hop header, hop 1).
+pub fn send_raw(
+    st: &mut Stack,
+    src: Ipv6,
+    dst: Ipv6,
+    scope: Option<usize>,
+    next: u8,
+    hop: u8,
+    fill: impl FnOnce(&mut [u8], Ipv6, Ipv6) -> usize,
+) -> Result<()> {
+    send_hop(st, src, dst, scope, next, hop, fill)
 }
 
 fn send_hop(
@@ -728,11 +754,13 @@ pub fn input(st: &mut Stack, link: Option<usize>, pkt: &[u8], src_mac: Mac) {
         st.ip6.stats.in_addr_errors += 1;
         return;
     }
-    // Ours: a unicast address (tentative ones only for NDP), a link-scope group, loopback.
-    let ours = link.is_none()
-        || is_ours(&st.iface, dst)
-        || dst.is_link_multicast()
-        || st.iface.links.iter().any(|l| l.v6.has(dst, true));
+    // Ours: a unicast address (tentative ones only for NDP), a group the link is in
+    // (net::mld), loopback.
+    let ours = match link {
+        None => true,
+        Some(k) if dst.is_multicast() => super::mld::member(&st.iface.links[k].v6, dst),
+        Some(_) => is_ours(&st.iface, dst) || st.iface.links.iter().any(|l| l.v6.has(dst, true)),
+    };
     if !ours {
         st.ip6.stats.in_addr_errors += 1;
         return;
@@ -930,6 +958,11 @@ fn icmp_input(
             super::tcp::too_big(st, IpAddr::V6(qs), IpAddr::V6(qd), next, l4, mtu);
         }
         1..=4 => {}
+        130 if hop == 1 && src.is_link_local() => {
+            if let Some(k) = link {
+                super::mld::query(st, k, p);
+            }
+        }
         133..=137 if hop == 255 => {
             st.ip6.stats.nd_in += 1;
             if let Some(k) = link {
@@ -1141,6 +1174,7 @@ pub fn tick(st: &mut Stack) {
         for ip in ask {
             send_ns(st, k, ip, Ipv6::UNSPECIFIED, true);
         }
+        super::mld::tick(st, k);
     }
     st.ip6
         .parked
@@ -1160,6 +1194,9 @@ pub fn next_deadline(st: &Stack) -> Option<u64> {
         }
         if l.v6.nd.iter().any(|e| e.state == NdState::Incomplete) {
             min(st.now + ND_RETRY / 4);
+        }
+        if let Some(t) = super::mld::next_deadline(&l.v6, st.now) {
+            min(t);
         }
     }
     if !st.ip6.parked.is_empty() {

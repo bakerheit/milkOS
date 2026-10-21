@@ -16,6 +16,7 @@ pub const ENOTSOCK: Errno = Errno(88);
 pub const EDESTADDRREQ: Errno = Errno(89);
 pub const EMSGSIZE: Errno = Errno(90);
 pub const ENOPROTOOPT: Errno = Errno(92);
+pub const ENODEV: Errno = Errno(19);
 pub const EPROTONOSUPPORT: Errno = Errno(93);
 pub const EAFNOSUPPORT: Errno = Errno(97);
 pub const EADDRINUSE: Errno = Errno(98);

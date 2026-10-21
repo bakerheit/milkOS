@@ -194,13 +194,32 @@ eth1, else the default gateway (eth0's).
   * **routing headers: no source routing, ever.** With segments left > 0 the packet is
     dropped with a parameter problem (RFC 5095 deprecates type 0; we route for no one).
     With 0 left the header is skipped;
-  * fragment headers: an atomic fragment (offset 0, no M, RFC 6946) is fine. Real
-    fragments are dropped and counted: there is no IPv6 reassembly, and we never send
-    fragments (UDP over IPv6 is capped at 1452 bytes);
+  * fragment headers: an atomic fragment (offset 0, no M, RFC 6946) is skipped. Real
+    fragments are reassembled (`net/frag.rs`, the same table and limits as IPv4: 16
+    datagrams, 1 MiB, 30 s; any overlap poisons the datagram, RFC 5722). The first
+    fragment must hold the whole header chain and 8 bytes of the upper-layer header (20
+    for TCP), RFC 7112. The reassembled packet (fragment header removed) goes through
+    IPv6 input again. UDP over IPv6 sends fragments above the path MTU (up to 65527
+    bytes); TCP never needs them;
   * no next header (59) ends the packet.
+* **Multicast and MLD** (`net/mld.rs`, MLDv2 host side, RFC 3810): a link takes IPv6
+  multicast only for groups it is in: all-nodes, the solicited-node group of each of its
+  addresses, and the groups sockets joined (IPV6_JOIN_GROUP, `struct ipv6_mreq`); the
+  Ethernet filter checks `33:33:<group>` the same way. Joins and leaves go to `ff02::16`
+  as state-change reports (twice, 1 s apart; link-local source, hop limit 1, router alert
+  in a hop-by-hop header); queries get a current-state report within their maximum
+  response time (at most 1 s). No source filtering. `/proc/net/igmp6` lists the groups.
+* **Path MTU discovery** (`net/pmtu.rs`, both families; RFC 1191, RFC 8201): ICMP
+  fragmentation needed (IPv4 TCP goes out with DF) and ICMPv6 packet too big lower the
+  path MTU to that destination (floors 552 and 1280, only down, 10 minutes). For TCP only
+  when the quoted segment is in flight on the connection (RFC 5927); the connection then
+  takes the smaller MSS and resends at once, without a congestion response. New
+  connections start under the cached path MTU, UDP fragments at it. `/proc/net/pmtu`.
 * **Boot self-test**: link-local and SLAAC on eth0, the router `fe80::2`, echo to `::1`,
-  to our own link-local and to `fec0::2` (slirp), and crafted packets for each
-  extension-header rule.
+  to our own link-local and to `fec0::2` (slirp), crafted packets for each
+  extension-header rule, reassembly (fragments last-first, an overlap, a split header
+  chain), MLD membership (a group's datagram is dropped before a join and after the
+  leave), and path MTU over loopback (below).
 
 ### Dual stack: TCP and UDP over IPv6
 
@@ -456,6 +475,13 @@ MILKDROP/1 ANNOUNCE name=alice host=milk port=5360 [addr6=<eth1 IPv6>] key=<64 h
 takes it only if it is on `fd6d:696c:6b00:1::/64`, so an announcement can't point
 transfers anywhere else.
 
+Discovery runs over both families: the same announcements and QUERYs also go to
+`[ff02::fb]:5359` from eth1's IPv6 address (the daemon joins `ff02::fb` on eth1 first;
+MLD reports it). The IPv4 announcement stays for older peers. A peer heard both ways is
+one entry: its IPv4 address stays `addr` (what `drop send NAME` uses) and the IPv6 one is
+`addr6`; a peer heard only over IPv6 (an IPv6-only machine) has an IPv6 `addr`. The
+daemon, `drop recv` and `drop id` work with either family alone.
+
 `sig` is Ed25519 over `milkdrop-announce-v1 <the line before " sig=">` with the key it
 carries, and `fp` must match that key, so an announcement can't be altered in flight or
 claim someone else's key. It can be replayed, though, and trust is not decided here.
@@ -606,6 +632,12 @@ It covers:
   SACK and timestamps negotiated and SACK recovery doing some of the resending;
 * **TIME_WAIT**: the closing side parks the pair without a socket slot, and a new
   connection on the same 4-tuple reuses it;
+* **Path MTU** over loopback, which plays a smaller-MTU path (`iface::LO_MTU`) and answers
+  too-big packets as a router would: IPv6 at 1280, a TCP connection drops to MSS 1220
+  mid-stream and its 64 KiB arrive intact, then a 4000-byte UDP datagram goes out in
+  1280-byte fragments and comes back whole; IPv4 at 1000 the same (MSS 960);
+* **MLD**: a UDP datagram to `ff02::1:3` on eth0 is dropped until a socket joins it,
+  delivered while joined, dropped after the leave, with MLDv2 reports for both;
 * **IP fragments**:
   * a 20000-byte UDP datagram over loopback, as 14 fragments, back whole;
   * crafted fragments: last-first (reassembled), an overlapping pair (dropped), a TCP
@@ -681,9 +713,9 @@ It kills only its own qemus and serial drivers, by PID.
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
 * `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8).
-* IPv6: reassembly and path MTU discovery (we never fragment and assume 1500); privacy
-  addresses (RFC 8981); MLD (no multicast router on these links, so no need yet); Milk
-  Drop discovery over `ff02::fb` (announcements are IPv4 multicast and carry `addr6`).
+* IPv6: privacy addresses (RFC 8981); MLD source filtering and MLDv1 compatibility;
+  IGMP for IPv4 (still no multicast router on these links); PMTU black-hole detection
+  (RFC 4821) for paths that drop ICMP.
 * Keepalive; ECN; a smarter congestion controller (CUBIC); D-SACK; RACK-TLP.
 * A routing table proper (today: per-link subnets, link-local/multicast to eth1, the
   default gateway on eth0); IGMP if a multicast router ever appears.

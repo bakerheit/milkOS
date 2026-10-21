@@ -240,6 +240,10 @@ for vm in alice bob; do
   grep -aq "to-bob.bin" "$WORK/$vm-eth1.pcap" && fail "$vm capture: the file name went over the wire in plaintext"
   grep -aq "sha256=" "$WORK/$vm-eth1.pcap" && fail "$vm capture: the offer went over the wire in plaintext"
 done
+# IPv6 on the wire: discovery announcements to [ff02::fb]:5359, and MLDv2 reports that
+# join ff02::fb (to ff02::16, hop limit 1, router alert) before any of it.
+python3 -I scripts/pcap_v6.py "$WORK/alice-eth1.pcap" || fail "alice's capture: IPv6 discovery / MLD (see above)"
+echo "  ok  alice announces over ff02::fb too, after an MLDv2 report joining it"
 echo "  ok  eth1 captures (filter-dump): hello + discovery visible; canary text, file name and offer never in plaintext ($(wc -c <"$WORK/alice-eth1.pcap" | tr -d ' ') bytes captured on alice)"
 FP_A=$(sed -n 's/^drop:   new fingerprint: *//p' "$A" | head -1)
 [ -n "$FP_A" ] || fail "no fingerprint in alice's drop id"

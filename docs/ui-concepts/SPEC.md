@@ -74,11 +74,11 @@ One look for every tab strip, so a Terminal's tabs and a Files window that has a
 - Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
 - Inactive tab: no fill, no border, title in secondary text. Hover: oat at 60% fill.
 - Title: one line, cut with "~" to fit (about 13 characters in the default 144px tab). Terminal tabs read "1 msh", "2 msh".
-- Close x: the letter x in secondary text, right-aligned with 8px right padding, hit target 20x20. Shown on every tab at rest (not only on hover). Hover: a 20px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
+- Close x: the letter x in the secondary colour of the tab it sits on (a light tab: secondary text; a Terminal-coloured tab: #BEA890 in any window, so a Terminal tab merged into a light window must not use the light cocoa, which is only 1.94:1 on the Terminal fill), right-aligned with 8px right padding, hit target 20x20. Shown on every tab at rest (not only on hover). Hover: a 20px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
 - New tab (+): 28x24, radius 8, oat fill, 4px after the last tab, the "+" centred.
 - Terminal tabs: same geometry with Terminal colours. Bar and border #4A3C34, active tab fill is the Terminal body #3A2E29 with Terminal text #FBF6ED, inactive title and close x in the dark cocoa #BEA890 (4.63:1 on the bar; the lighter latte would be only 2.48:1), hover circle #55463C. These colours are the same in the light and dark themes.
-- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, 2px dashed straw border, radius 10, with "Drop to add as a tab" in straw, bold. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
-- Keys: Ctrl-T new tab, Ctrl-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Ctrl-1 to Ctrl-9 jump.
+- Dragging a tab or a window onto a strip: the dragged item is lifted with the floating shadow. The drop target on the strip is a rounded rect where the new tab would go, straw at 20% fill, 2px dashed straw border, radius 10, with "Drop to add as a tab" in primary text, bold (straw text on the straw tint is only 1.96:1; the dashed straw border carries the colour), and at least 176px wide so the label fits. The dragged window ghost is at 92% opacity with a 2px straw border. Dragging a tab out of its strip makes it a window again.
+- Keys: Cmd-T new tab, Cmd-W close tab, Ctrl-Tab and Ctrl-Shift-Tab next and previous, Cmd-1 to Cmd-9 jump. The first build kept the existing Terminal keys Cmd-T and Cmd-W, so the spec now matches it. Ctrl may be accepted as an alias where it is free.
 - Notifications attached to tabs (a dot on the strip) are parked for later and not part of this spec.
 
 ## Launcher (Skim)
@@ -91,12 +91,12 @@ Width 640, centred, top at y140. Input row height 56, radius 18, glass alpha 0.7
 Chosen look (Andrew, 2026-10-21). Panel 316 wide, 12px from the right edge, from y36 down to 12px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius 18, glass at alpha 0.78, floating shadow. Inner padding 12.
 - Header (78px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), 26px high, fully rounded, selected chip espresso with cream text.
 - Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
-- Card: width drawer minus 24, height 64 (compact 56), radius 14, milk at 82% with a 1px white edge. App icon 36x36 at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long. Selected card: straw at 13% fill and a 1px straw border.
-- Today card: label, then up to three events (time bold, title). Do Not Disturb row: 44px high at the bottom with a switch (44x24, straw when on).
+- Card: width drawer minus 24, height 64 (compact 56), radius 14, milk at 82% with a 1px white edge. App icon 36x36 at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long (use a real ellipsis, U+2026, if the font draws it). Selected card: straw at 13% fill and a 1px straw border.
+- Today card: label, then up to three events (time bold, title). Focus row (the label is "Focus", not "Do Not Disturb": it is the same single setting as the Control centre Focus tile, with the sub-line "On until 12:00" while on): 44px high at the bottom with a switch (44x24, straw when on).
 - Opening: click the menu bar bell, or Ctrl-N. Closing: Esc, or click outside. Snap open (no animation required).
 - Keys: Up/Down select, Return opens the source app or window, Backspace dismisses the selected card, Left/Right collapse or expand a group, Tab cycles the filter chips.
 - Arrival: a toast (above) shows for 5 seconds, pauses while hovered, and clicking it opens the drawer on that item. If the drawer is open, the new card appears at the top of its group instead.
-- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Do Not Disturb holds toasts and sounds but still collects cards, and shows a moon on the bell.
+- Badges: the menu bar bell shows the total unread count; dock icons show their own app's count (straw circle, 18px, milk 2px ring). Focus holds toasts and sounds but still collects cards, and shows a moon on the bell.
 
 ## Control centre
 288x292, radius 20, glass, 12px from right, 36px from top. Tiles/sliders 56 high, radius 16, white at 70%. Slider track 8 high, fill espresso.
@@ -174,6 +174,7 @@ Rules that come out of the numbers:
 - **Secondary text never goes on a selected row.** A selected row is straw at 27% over the surface. Primary text on it is fine in both themes; secondary text on it is only about 3.3:1 in dark, so use primary there.
 - **cocoa changed (light):** #7A6652 was 4.40:1 on the sidebar, just under 4.5. It is now #6B5846 (5.45:1 on the sidebar). The dark cocoa #BEA890 is unchanged. Anything hard-coded to #7A6652 should move to the token.
 - **Disabled text (latte) is exempt** from the 4.5:1 rule but should not carry meaning on its own. The tab close x uses cocoa, not latte, for that reason.
+- **Dimming an inactive window must not drop its text below 4.5:1.** In the dark theme the shipped inactive Terminal text is #8C7764 on #3A2E29, 3.08:1 (the light theme uses #C4AE8F on the same body, 6.11:1). Use #BEA890 (5.74:1) for dimmed Terminal text, or dim the window with a veil instead of recolouring the text.
 - **Hairlines** (sand) are decorative dividers, about 1.3:1 to 1.7:1 in dark. Where a border is the only thing showing a control's edge (inputs, buttons), add a fill or use a stronger edge.
 
 ## Buttons

@@ -33,23 +33,23 @@ function expanded() {
   h += glass(x, y, w, hh, TOK.radius.launcher, inner, { alpha: D.alpha });
   return h;
 }
-/* 4: all caught up, Do Not Disturb on */
+/* 4: all caught up, Focus on */
 function empty() {
   let h = desktop(0, true) + dock([0, 1]);
   const x = 1024 - D.right - D.w, y = D.top, w = D.w, hh = 768 - D.top - D.bottom;
   let inner = T(18, 14, "<b>Notifications</b>") + pill(14, 46, 64, "All", true, D.chipH) + pill(84, 46, 96, "Mentions", false, D.chipH) + pill(186, 46, 80, "Today", false, D.chipH);
   inner += circle(w / 2 - 36, 150, 72, C.matcha + "66", `border:3px solid ${C.matcha}`) + TC(w / 2 - 36, 168, 72, "&#10003;", "font-size:26.667px;line-height:32px;color:" + C.esp) + TC(0, 244, w, "<b>All caught up</b>") + TC(0, 266, w, "Nothing needs you right now.", `color:${C.cocoa}`);
   inner += B(12, 320, w - 24, 110, `background:rgba(255,253,248,.82);border:1px solid rgba(255,255,255,.9);border-radius:14px`, T(14, 10, "TODAY", `color:${C.cocoa}`) + T(14, 32, "<b>2:30 PM</b>  Dentist") + T(14, 52, "5:00 PM  Pick up bike", `color:${C.cocoa}`) + T(14, 72, "7:30 PM  Dinner", `color:${C.cocoa}`));
-  inner += B(12, hh - 62, w - 24, D.dndH, `background:${C.lav}44;border:1px solid ${C.lav};border-radius:14px`, T(14, 14, "Do Not Disturb  until 12:00") + switchUi(w - 24 - 58, 10, true));
+  inner += B(12, hh - 62, w - 24, D.dndH, `background:${C.lav}44;border:1px solid ${C.lav};border-radius:14px`, T(14, 14, "Focus  on until 12:00") + switchUi(w - 24 - 58, 10, true));
   h += glass(x, y, w, hh, TOK.radius.launcher, inner, { alpha: D.alpha });
   h += T(40, 590, "Moon on the bell: toasts and sounds are held,", `color:${C.esp}`) + T(40, 608, "but cards still collect in the drawer.", `color:${C.esp}`);
   return h;
 }
 const SLIDES = [
   { id: "arrive", n: "1", name: "A notification arrives", tag: "Toast, then it settles in the drawer", draw: arrive, cost: "easy", fam: "A message lands while you work.", nw: "A toast (264 by 64) slides in top right and stays 5 seconds, pausing while the pointer is on it. The menu bar bell and the app's dock icon pick up a count.", helps: "Clicking the toast opens the drawer on that item. Ignore it and it is waiting in the drawer.", why: "Toast and badge only. Reuses the toast and glass panels already in the spec.", els: ["Toast (264x64)", "Bell count", "Dock badge", "5 second timer", "Pause on hover"], font: "Keep the toast title to about 10 characters and the body to about 22." },
-  { id: "open", n: "2", name: "Drawer open", tag: "The chosen look", draw: side, cost: "easy", fam: "Click the bell or press Ctrl-N.", nw: "Grouped cards, filter chips, today's events and Do Not Disturb. Esc or a click outside closes it.", helps: "Selected card has the straw outline.", why: "One glass panel and a list of cards.", els: ["Header and chips", "Groups", "Cards", "Today card", "Do Not Disturb"], font: "Bodies are cut with a tilde around 30 characters." },
+  { id: "open", n: "2", name: "Drawer open", tag: "The chosen look", draw: side, cost: "easy", fam: "Click the bell or press Ctrl-N.", nw: "Grouped cards, filter chips, today's events and Focus. Esc or a click outside closes it.", helps: "Selected card has the straw outline.", why: "One glass panel and a list of cards.", els: ["Header and chips", "Groups", "Cards", "Today card", "Focus"], font: "Bodies are cut with a tilde around 30 characters." },
   { id: "expanded", n: "3", name: "Working in the drawer", tag: "Groups, keys and dismissing", draw: expanded, cost: "easy", fam: "Arrow keys move through the list.", nw: "A group is expanded to show all four messages, the selected card shows a small x on hover, and the keys are listed (Return opens the source, Backspace dismisses, Left and Right collapse a group).", helps: "Everything works from the keyboard first, with the pointer as a bonus.", why: "A selection index, a collapsed flag per group and a delete.", els: ["Expandable groups", "Selection outline", "Hover x", "Key map"], font: "Group arrows are plain characters, no icons needed." },
-  { id: "empty", n: "4", name: "All caught up", tag: "Empty state with Do Not Disturb on", draw: empty, cost: "easy", fam: "Nothing is waiting.", nw: "A calm check mark, today's events, and Do Not Disturb switched on until 12:00 (lavender row, moon on the bell). Toasts and sounds are held, but cards still collect.", helps: "A quiet drawer feels like a reward, not an empty box.", why: "One empty-state layout and a timer for Do Not Disturb.", els: ["Empty state", "Today card", "DND row", "Moon on the bell"], font: "The check is a plain character at 2x." },
+  { id: "empty", n: "4", name: "All caught up", tag: "Empty state with Focus on", draw: empty, cost: "easy", fam: "Nothing is waiting.", nw: "A calm check mark, today's events, and Focus switched on until 12:00 (lavender row, moon on the bell). Toasts and sounds are held, but cards still collect.", helps: "A quiet drawer feels like a reward, not an empty box.", why: "One empty-state layout and a timer for Focus.", els: ["Empty state", "Today card", "DND row", "Moon on the bell"], font: "The check is a plain character at 2x." },
 ];
 /* ------------------------------ page ------------------------------ */
 const N = SLIDES.length;

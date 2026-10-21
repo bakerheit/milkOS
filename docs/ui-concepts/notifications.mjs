@@ -52,7 +52,7 @@ function side() {
   inner += T(18, 364, "SYSTEM", `color:${C.cocoa}`) + card(12, 386, w - 24, NOTE.upd) + card(12, 458, w - 24, NOTE.bld, { compact: true });
   // today card
   inner += B(12, 536, w - 24, 110, `background:rgba(255,253,248,.82);border:1px solid rgba(255,255,255,.9);border-radius:14px`, T(14, 10, "TODAY", `color:${C.cocoa}`) + T(14, 32, "<b>2:30 PM</b>  Dentist") + T(14, 52, "5:00 PM  Pick up bike", `color:${C.cocoa}`) + T(14, 72, "7:30 PM  Dinner", `color:${C.cocoa}`));
-  inner += B(12, hh - 62, w - 24, 44, `background:rgba(255,253,248,.82);border:1px solid rgba(255,255,255,.9);border-radius:14px`, T(14, 14, "Do Not Disturb") + B(w - 90, 10, 44, 24, `background:${C.sand};border-radius:12px`, circle(2, 2, 20, C.milk)));
+  inner += B(12, hh - 62, w - 24, 44, `background:rgba(255,253,248,.82);border:1px solid rgba(255,255,255,.9);border-radius:14px`, T(14, 14, "Focus") + B(w - 90, 10, 44, 24, `background:${C.sand};border-radius:12px`, circle(2, 2, 20, C.milk)));
   h += glass(x, y, w, hh, 18, inner, { alpha: 0.78 });
   return h;
 }
@@ -137,9 +137,9 @@ function attached() {
 }
 
 const SLIDES = [
-  { id: "side", n: "1", name: "Side drawer", tag: "The familiar one: slides in from the right", draw: side, cost: "easy", fam: "Exactly what macOS, Windows and Android users expect: a panel from the right edge, notifications grouped by app, today's events, a Do Not Disturb switch.", nw: "Groups are collapsible, the filter chips (All, Mentions, Today) are built in, and the selected notification can be acted on from the keyboard. Nothing surprising, which is the point.",
+  { id: "side", n: "1", name: "Side drawer", tag: "The familiar one: slides in from the right", draw: side, cost: "easy", fam: "Exactly what macOS, Windows and Android users expect: a panel from the right edge, notifications grouped by app, today's events, a Focus switch.", nw: "Groups are collapsible, the filter chips (All, Mentions, Today) are built in, and the selected notification can be acted on from the keyboard. Nothing surprising, which is the point.",
     helps: "Everyone. It is the safe default and the baseline to compare the others against.", why: "A glass panel, a list of cards and a group header. The only logic is grouping and a read/unread flag. Easiest of the five.",
-    els: ["Edge drawer (glass)", "Grouped cards", "Filter chips", "Today card", "Do Not Disturb", "Clear all / per group"], font: "Card text is cropped around 30 characters in Unifont; a proportional font would fit more." },
+    els: ["Edge drawer (glass)", "Grouped cards", "Filter chips", "Today card", "Focus", "Clear all / per group"], font: "Card text is cropped around 30 characters in Unifont; a proportional font would fit more." },
   { id: "shade", n: "2", name: "Top shade", tag: "A curtain from the menu bar with quick settings", draw: shade, cost: "medium", fam: "Phone-style pull-down: quick toggles and sliders on the left, notifications on the right, one gesture from the menu bar.", nw: "It merges notification centre and control centre into one place, wide enough to use on a desktop. Music controls sit with the toggles, and the shade covers the screen only as far as it needs to.",
     helps: "People who want one panel for everything, and anyone coming from a phone.", why: "Same pieces as the side drawer plus toggles and sliders. The extra cost is a pull-down animation (or just snap it open) and dimming the desktop behind it.",
     els: ["Menu bar pull-down", "Quick-setting tiles", "Sliders", "Media row", "Notification list", "Pull handle"], font: "Tile labels read well in Unifont. Sliders carry the look." },

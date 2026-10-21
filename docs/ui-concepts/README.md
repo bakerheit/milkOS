@@ -39,3 +39,5 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 
 ## Review and new designs (October 2026)
 `REVIEW.md` is a prioritised review of the shipped screens against the spec. `share.html` is the Milk Drop sheet (Files > Share, send, incoming, key changed). `shield.html` is a read-only app-permissions design, parked and not scheduled. Source: `share.mjs`. New SPEC sections: Buttons, Files window, Menu bar status area, Milk Drop sheet, Shield.
+
+`REVIEW-DRAWER-TABS.md` reviews the notification drawer and window tabs builds against the spec.

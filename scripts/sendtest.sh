@@ -15,6 +15,10 @@
 #           and truncated ones too, and the volume stays empty.
 #   boot 3: qemu is killed in the middle of receiving the full s2 (20 MB); the target is
 #           then either complete or untouched, and (boot 4) receiving again works.
+# Encrypted streams: s1 is also sent with --encrypt (verified, received on the Mac, a wrong
+# passphrase refused in the kernel). With MILK_ENCRYPT=1 every stream is encrypted (the
+# default from an encrypted volume; a --plaintext one is checked to be plain), so the
+# whole test runs on encrypted streams. The stream passphrase is a fake test value.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -77,6 +81,12 @@ $M put "$SRC" /data/big.bin "$T/big.bin" >/dev/null
 head -c 20000000 /dev/urandom > "$T/bulk.bin"
 $M put "$SRC" /bulk/bulk.bin "$T/bulk.bin" >/dev/null
 D=/Volumes/Milk/data; S=/Volumes/Mac/$SUB
+export MILKFS_STREAM_PASSPHRASE="fake-stream-passphrase"
+echo "$MILKFS_STREAM_PASSPHRASE" > "$SHAREDIR/$SUB/sp"; echo "wrong-fake-passphrase" > "$SHAREDIR/$SUB/wrong"
+SPF=""; EXTRA_SEND="snap info"
+if [ "${MILK_ENCRYPT:-0}" = 1 ]; then
+  SPF=" --passphrase-file $S/sp"; EXTRA_SEND="snap send s1 --plaintext -o $S/s1-plain.stream"
+fi
 DISKS="$SRC $BK"
 boot b1 "$T/boot1.log" \
   "cp --reflink $D/big.bin $D/big-copy.bin" \
@@ -86,12 +96,14 @@ boot b1 "$T/boot1.log" \
   "echo more >> $D/small.txt" "rm $D/sub/n.txt" "mv $D/big-copy.bin $D/sub/moved.bin" \
   "echo appended >> $D/big.bin" "echo brand new > $D/new.txt" "echo rewritten > $D/link-target.txt" \
   "snap create s2" \
-  "snap send s1 -o $S/s1.stream" \
-  "snap send s2 --from s1 -o $S/s2.stream" \
-  "snap send s2 > $S/s2-full.stream" \
-  "snap receive $S/s1.stream --to /Volumes/Backup" \
-  "snap receive $S/s2.stream --to /Volumes/Backup" \
-  "snap receive $S/s2.stream --to /Volumes/Backup" \
+  "snap send s1 -o $S/s1.stream$SPF" \
+  "snap send s2 --from s1 -o $S/s2.stream$SPF" \
+  "snap send s2$SPF > $S/s2-full.stream" \
+  "snap send s1 --encrypt --passphrase-file $S/sp -o $S/s1-sealed.stream" \
+  "$EXTRA_SEND" \
+  "snap receive $S/s1.stream --to /Volumes/Backup$SPF" \
+  "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
+  "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "ls /Volumes/Backup/data /Volumes/Backup/.snapshots" \
   "echo now > /sys/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/boot1.log")"
@@ -99,7 +111,21 @@ echo "$L" | grep -a "^snap: sent\|^snap: received\|^snap: receive" | sed 's/^/  
 [ "$(echo "$L" | grep -ac '^snap: received')" = 2 ] && ok "kernel: received s1 (full) and s2 (incremental) on /Volumes/Backup" || bad "kernel receives"
 echo "$L" | grep -aq "receive.*already has a snapshot of that name (EEXIST" && ok "receiving s2 again is refused (EEXIST)" || bad "second receive of s2"
 
-for s in s1 s2 s2-full; do
+magic() { head -c 8 "$SHAREDIR/$SUB/$1.stream"; }
+inner() { grep -aq MILKSTRM "$SHAREDIR/$SUB/$1.stream"; }
+[ "$(magic s1-sealed)" = MILKSTRX ] && ! inner s1-sealed && ok "send --encrypt: an encrypted stream (envelope first, no plaintext header inside)" || bad "s1-sealed not encrypted"
+if [ "${MILK_ENCRYPT:-0}" = 1 ]; then
+  [ "$(magic s1)" = MILKSTRX ] && [ "$(magic s2)" = MILKSTRX ] && [ "$(magic s2-full)" = MILKSTRX ] && ! inner s2-full \
+    && ok "from an encrypted volume every stream is encrypted by default" || bad "default streams from an encrypted volume"
+  inner s1-plain && [ "$(magic s1-plain)" != MILKSTRX ] && ok "--plaintext opts out" || bad "--plaintext"
+else
+  inner s1 && ok "from a plain volume streams stay plaintext by default" || bad "plain default"
+fi
+echo "$L" | grep -aq "^snap: sent s1, encrypted to $S/s1-sealed.stream" && ok "snap reports the stream encrypted" || bad "send report"
+MILKFS_STREAM_PASSPHRASE=wrong-fake-passphrase $M verify-stream "$SHAREDIR/$SUB/s1-sealed.stream" > "$T/wrong.verify" 2>&1 \
+  && bad "Mac: a wrong stream passphrase opened it" || ok "Mac: $(sed 's/^.*BAD/BAD/' "$T/wrong.verify")"
+
+for s in s1 s2 s2-full s1-sealed; do
   if $M verify-stream "$SHAREDIR/$SUB/$s.stream" > "$T/$s.verify"; then
     ok "verify-stream $s: $(sed -n 2p "$T/$s.verify" | sed 's/^ *//')"
   else bad "verify-stream $s: $(cat "$T/$s.verify")"; fi
@@ -111,6 +137,8 @@ $M receive "$H" "$SHAREDIR/$SUB/s2.stream" > "$T/h0.txt" 2>&1 && bad "host recei
 $M receive "$H" "$SHAREDIR/$SUB/s1.stream" >/dev/null && $M receive "$H" "$SHAREDIR/$SUB/s2.stream" >/dev/null \
   && ok "host: received s1 + s2 into a fresh image" || bad "host receive"
 $M receive "$H2" "$SHAREDIR/$SUB/s2-full.stream" >/dev/null && ok "host: received the full s2 into another" || bad "host receive full s2"
+H3="$T/host3.img"; $M mkfs "$H3" --size 64M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
+$M receive "$H3" "$SHAREDIR/$SUB/s1-sealed.stream" >/dev/null && ok "host: received the --encrypt stream" || bad "host receive of the encrypted stream"
 
 # Damaged / truncated copies.
 cp "$SHAREDIR/$SUB/s1.stream" "$T/bad.stream"
@@ -133,6 +161,7 @@ for s in s1 s2; do
     diff -q "$T/src-$s.tree" "$T/$img-$s.tree" >/dev/null && ok "$s on the $img image is identical to the source ($(wc -l < "$T/src-$s.tree" | tr -d ' ') paths)" || { bad "$s differs on $img"; diff "$T/src-$s.tree" "$T/$img-$s.tree" | head; }
   done
 done
+$M tree "$H3" --snapshot s1 | diff -q - "$T/src-s1.tree" >/dev/null && ok "s1 through an encrypted stream on the Mac is identical" || bad "s1 via encrypted stream differs"
 $M tree "$H2" --snapshot s2 > "$T/host2-s2.tree"
 diff -q "$T/src-s2.tree" "$T/host2-s2.tree" >/dev/null && ok "full s2 received on the Mac is identical too" || bad "full s2 differs"
 for img in "$SRC" "$BK" "$H" "$H2"; do
@@ -142,28 +171,30 @@ done
 F="$T/fresh.img"; $M mkfs "$F" --size 32M --label Fresh ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 DISKS="$T/src.img $F"
 boot b2 "$T/boot2.log" \
-  "snap receive $S/s2.stream --to /Volumes/Fresh" \
-  "snap receive $S/bad.stream --to /Volumes/Fresh" \
-  "snap receive $S/short.stream --to /Volumes/Fresh" \
+  "snap receive $S/s2.stream --to /Volumes/Fresh$SPF" \
+  "snap receive $S/bad.stream --to /Volumes/Fresh$SPF" \
+  "snap receive $S/short.stream --to /Volumes/Fresh$SPF" \
+  "snap receive $S/s1-sealed.stream --to /Volumes/Fresh --passphrase-file $S/wrong" \
   "ls /Volumes/Fresh"
 L="$(tr -d '\r' < "$T/boot2.log")"
 echo "$L" | grep -a "^snap: receive" | sed 's/^/    /'
 echo "$L" | grep -aq "receive.*base snapshot isn't on the target" && ok "kernel refuses an incremental whose base is missing" || bad "kernel: missing base"
 [ "$(echo "$L" | grep -ac 'receive.*damaged or cut short (nothing was changed) (EIO')" = 2 ] && ok "kernel refuses the damaged and the truncated stream" || bad "kernel: bad streams"
+echo "$L" | grep -aq "snap: receive: wrong passphrase for the stream (EACCES" && ok "kernel refuses a wrong stream passphrase" || bad "kernel: wrong stream passphrase"
 $M check "$F" > "$T/fresh.txt" 2>&1 && grep -q " 0 snapshot" "$T/fresh.txt" && [ "$($M tree "$F" | wc -l | tr -d ' ')" = 0 ] \
   && ok "the target is still empty and clean" || { bad "target after refused receives"; cat "$T/fresh.txt"; }
 
 C="$T/crash.img"; $M mkfs "$C" --size 64M --label Crash ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 DISKS="$T/src.img $C"
 KILL_ON="snap receive $S/s2-full" KILL_AFTER=0.4 boot b3 "$T/boot3.log" \
-  "snap receive $S/s2-full.stream --to /Volumes/Crash"
+  "snap receive $S/s2-full.stream --to /Volumes/Crash$SPF"
 $M check "$C" > "$T/crash1.txt" 2>&1 && ok "after a kill mid-receive the target checks clean" || { bad "target after a kill mid-receive"; cat "$T/crash1.txt"; }
 if [ "$($M tree "$C" | wc -l | tr -d ' ')" = 0 ]; then
   ok "  and is untouched (the receive hadn't finished; $(grep -a -c 'clone' "$T/crash1.txt" | tr -d ' ') hidden clone record left)"
 elif $M tree "$C" --snapshot s2 2>/dev/null | diff -q - "$T/src-s2.tree" >/dev/null; then
   ok "  and is complete (the receive finished before the kill)"
 else bad "  partly received"; fi
-boot b4 "$T/boot4.log" "snap receive $S/s2-full.stream --to /Volumes/Crash" "echo now > /sys/fs/milkfs/sync"
+boot b4 "$T/boot4.log" "snap receive $S/s2-full.stream --to /Volumes/Crash$SPF" "echo now > /sys/fs/milkfs/sync"
 $M tree "$C" --snapshot s2 > "$T/crash-s2.tree" 2>/dev/null
 if diff -q "$T/crash-s2.tree" "$T/src-s2.tree" >/dev/null && $M check "$C" > "$T/crash2.txt" 2>&1 && ! grep -q "clone" "$T/crash2.txt"; then
   ok "receiving again works (leftover clone discarded): s2 identical, check clean"

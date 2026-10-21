@@ -899,16 +899,58 @@ pub struct SendReport {
     pub data_blocks: u64,
     pub bytes: u64,
     pub ms: u64,
+    pub encrypted: bool,
+}
+
+/// How a send protects its stream.
+#[derive(Clone, Copy)]
+pub enum StreamCrypt<'a> {
+    /// Encrypted under this passphrase (8 characters or more).
+    Passphrase(&'a str),
+    /// Plaintext, even from an encrypted volume (`plaintext`, `snap send --plaintext`).
+    Plain,
+    /// Plaintext from a plain volume; refused (EINVAL) from an encrypted one, whose
+    /// streams are encrypted unless asked otherwise.
+    Default,
+}
+
+/// A control write's text and the optional secret on its second line: `(first line,
+/// secret)`. The secret is everything after the first newline (trailing CR/LF removed).
+fn split_secret(t: &str) -> (&str, Option<&str>) {
+    match t.split_once('\n') {
+        Some((a, b)) => {
+            let b = b.trim_end_matches(['\n', '\r']);
+            (a, (!b.is_empty()).then_some(b))
+        }
+        None => (t, None),
+    }
 }
 
 /// Write snapshot `snap` of the primary volume as a stream to `out` (a file path),
 /// incremental from the older snapshot `from`. The volume isn't locked while the stream
 /// is written (it may go onto the volume itself); the snapshots read can't be deleted
 /// meanwhile (EBUSY).
-pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
+pub fn send(snap: &str, from: Option<&str>, out: &str, crypt: StreamCrypt) -> Result<SendReport> {
     use crate::fs::abi::{O_CREAT, O_TRUNC, O_WRONLY};
     use stream::{Encoder, Plan, Record};
     let v = primary()?;
+    let pass = match crypt {
+        StreamCrypt::Passphrase(p) if p.len() < 8 => {
+            return fail(
+                Errno::EINVAL,
+                "a stream passphrase needs 8 characters or more",
+            );
+        }
+        StreamCrypt::Passphrase(p) => Some(p),
+        StreamCrypt::Plain => None,
+        StreamCrypt::Default if v.state.lock().store.encrypted() => {
+            return fail(
+                Errno::EINVAL,
+                "the volume is encrypted, so its streams are too: give a passphrase (`snap send` asks), or `plaintext`",
+            );
+        }
+        StreamCrypt::Default => None,
+    };
     let t0 = crate::timer::now_ns();
     let plan = {
         let mut st = v.state.lock();
@@ -918,8 +960,11 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
     };
     let gens = plan.gens.clone();
     let r = (|| -> Result<SendReport> {
+        let mut enc = match pass {
+            Some(p) => Encoder::sealed(p.as_bytes())?,
+            None => Encoder::default(),
+        };
         let f = crate::fs::ops::open(out, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
-        let mut enc = Encoder::default();
         let write = |enc: &mut Encoder, f: &crate::fs::OpenFile| -> Result<()> {
             let mut b = &enc.buf[..];
             while !b.is_empty() {
@@ -980,6 +1025,7 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
             data_blocks: enc.data_blocks,
             bytes: enc.bytes,
             ms: (crate::timer::now_ns() - t0) / 1_000_000,
+            encrypted: enc.encrypted(),
         })
     })();
     {
@@ -992,9 +1038,10 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
     }
     let text = match &r {
         Ok(s) => format!(
-            "sent {snap}{} to {out}: {} records, {} data blocks, {} bytes in {} ms\n",
+            "sent {snap}{}{} to {out}: {} records, {} data blocks, {} bytes in {} ms\n",
             from.map(|f| format!(" (incremental from {f})"))
                 .unwrap_or_default(),
+            if s.encrypted { ", encrypted" } else { "" },
             s.records,
             s.data_blocks,
             s.bytes,
@@ -1005,7 +1052,11 @@ pub fn send(snap: &str, from: Option<&str>, out: &str) -> Result<SendReport> {
     *LAST_SEND.lock() = text;
     audit_op(
         "milkfs.send",
-        &format!("snapshot={snap} from={} out={out}", from.unwrap_or("-")),
+        &format!(
+            "snapshot={snap} from={} out={out} encrypted={}",
+            from.unwrap_or("-"),
+            pass.is_some()
+        ),
         &r,
     );
     r
@@ -1020,6 +1071,7 @@ pub struct RecvReport {
     pub data_blocks: u64,
     pub bytes: u64,
     pub ms: u64,
+    pub encrypted: bool,
 }
 
 /// The milkfs volume a VFS path is on.
@@ -1032,7 +1084,13 @@ pub fn volume_at(path: &str) -> Result<Arc<Volume>> {
 /// incremental ones need the base snapshot (ENOENT otherwise) and a live tree unchanged
 /// since it (EBUSY; `force`: roll back to it first). Atomic: nothing changes unless the
 /// whole stream checks out.
-pub fn receive(path: &str, target: Option<&str>, force: bool) -> Result<RecvReport> {
+/// An encrypted stream needs its `passphrase` (EACCES without or with a wrong one).
+pub fn receive(
+    path: &str,
+    target: Option<&str>,
+    force: bool,
+    passphrase: Option<&str>,
+) -> Result<RecvReport> {
     use crate::fs::abi::O_RDONLY;
     use stream::{Decoder, Record};
     let v = match target {
@@ -1041,8 +1099,8 @@ pub fn receive(path: &str, target: Option<&str>, force: bool) -> Result<RecvRepo
     };
     let t0 = crate::timer::now_ns();
     let f = crate::fs::ops::open(path, O_RDONLY, 0)?;
-    let mut rd = Decoder::new(|b: &mut [u8]| f.read(b));
     let r = (|| -> Result<RecvReport> {
+        let mut rd = Decoder::open(|b: &mut [u8]| f.read(b), passphrase.map(str::as_bytes))?;
         let Record::Header(h) = rd.next()? else {
             return Err(Errno::EINVAL);
         };
@@ -1089,13 +1147,15 @@ pub fn receive(path: &str, target: Option<&str>, force: bool) -> Result<RecvRepo
             data_blocks: blocks,
             bytes: rd.bytes,
             ms: (crate::timer::now_ns() - t0) / 1_000_000,
+            encrypted: rd.encrypted(),
         })
     })();
     let text = match &r {
         Ok(s) => format!(
-            "received {}{} from {path}: {} items, {} data blocks, {} bytes in {} ms\n",
+            "received {}{}{} from {path}: {} items, {} data blocks, {} bytes in {} ms\n",
             s.snapshot,
             if s.incremental { " (incremental)" } else { "" },
+            if s.encrypted { ", encrypted" } else { "" },
             s.items,
             s.data_blocks,
             s.bytes,
@@ -1592,7 +1652,7 @@ fn tid() -> u32 {
 }
 
 /// Fail with `e` and say why (in `/sys/fs/milkfs/error` when it came from a control).
-fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
+pub(crate) fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
     let (t, why) = (tid(), why.into());
     let mut r = REASON.lock();
     r.retain(|(x, _)| *x != t);
@@ -1658,7 +1718,9 @@ fn explain(name: &str, e: Errno) -> &'static str {
         ("passwd", E::EACCES) => "the current passphrase (or recovery key) is wrong",
         ("passwd", E::EINVAL) => "write `OLD\nNEW`; the new passphrase needs 8 characters or more",
         ("send", E::ENOENT) => "no such snapshot (or the output's folder doesn't exist)",
-        ("send", E::EINVAL) => "write `SNAP [FROM] PATH`; FROM must be older than SNAP",
+        ("send", E::EINVAL) => {
+            "write `SNAP [FROM] PATH [plaintext]` (and `\\nPASSPHRASE` to encrypt); FROM must be older than SNAP"
+        }
         ("send", E::ENOSPC) => "no room for the stream where it's going",
         ("receive", E::ENOENT) => {
             "the stream's base snapshot isn't on the target (or no such stream file)"
@@ -1667,6 +1729,7 @@ fn explain(name: &str, e: Errno) -> &'static str {
             "the target changed since the base snapshot (`force` rolls it back), or a receive is already running"
         }
         ("receive", E::ENOTEMPTY) => "a full stream needs an empty volume",
+        ("receive", E::EACCES) => "the stream is encrypted: its passphrase is missing or wrong",
         ("receive", E::EEXIST) => "the target already has a snapshot of that name",
         ("receive", E::EINVAL) => {
             "not a milkfs stream, a newer stream format, or bad arguments (`PATH [TARGET] [force]`)"
@@ -1914,13 +1977,30 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         "send",
         || LAST_SEND.lock().clone(),
         |b| {
-            // `SNAP [FROM] PATH`
-            let w: alloc::vec::Vec<&str> = arg(b)?.split_whitespace().collect();
-            match w.as_slice() {
-                [s, p] => send(s, None, p).map(|_| ()),
-                [s, f, p] => send(s, Some(f), p).map(|_| ()),
-                _ => Err(Errno::EINVAL),
-            }
+            // `SNAP [FROM] PATH [plaintext]`, optionally `\nPASSPHRASE` (encrypted)
+            let mut raw = alloc::vec::Vec::from(b);
+            let r = (|| {
+                let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+                let (line, pass) = split_secret(t);
+                let mut w: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+                let plain = w.last() == Some(&"plaintext");
+                if plain {
+                    w.pop();
+                }
+                let crypt = match (pass, plain) {
+                    (Some(_), true) => return Err(Errno::EINVAL),
+                    (Some(p), false) => StreamCrypt::Passphrase(p),
+                    (None, true) => StreamCrypt::Plain,
+                    (None, false) => StreamCrypt::Default,
+                };
+                match w.as_slice() {
+                    [s, p] => send(s, None, p, crypt).map(|_| ()),
+                    [s, f, p] => send(s, Some(f), p, crypt).map(|_| ()),
+                    _ => Err(Errno::EINVAL),
+                }
+            })();
+            crate::crypto::wipe(&mut raw);
+            r
         },
     );
     guarded(
@@ -1928,17 +2008,24 @@ pub fn sysfs(dir: &Arc<SynthDir>) {
         "receive",
         || LAST_RECEIVE.lock().clone(),
         |b| {
-            // `PATH [TARGET] [force]`
-            let mut w: alloc::vec::Vec<&str> = arg(b)?.split_whitespace().collect();
-            let force = w.last() == Some(&"force");
-            if force {
-                w.pop();
-            }
-            match w.as_slice() {
-                [p] => receive(p, None, force).map(|_| ()),
-                [p, t] => receive(p, Some(t), force).map(|_| ()),
-                _ => Err(Errno::EINVAL),
-            }
+            // `PATH [TARGET] [force]`, optionally `\nPASSPHRASE` (an encrypted stream)
+            let mut raw = alloc::vec::Vec::from(b);
+            let r = (|| {
+                let t = core::str::from_utf8(&raw).map_err(|_| Errno::EINVAL)?;
+                let (line, pass) = split_secret(t);
+                let mut w: alloc::vec::Vec<&str> = line.split_whitespace().collect();
+                let force = w.last() == Some(&"force");
+                if force {
+                    w.pop();
+                }
+                match w.as_slice() {
+                    [p] => receive(p, None, force, pass).map(|_| ()),
+                    [p, t] => receive(p, Some(t), force, pass).map(|_| ()),
+                    _ => Err(Errno::EINVAL),
+                }
+            })();
+            crate::crypto::wipe(&mut raw);
+            r
         },
     );
     guarded(

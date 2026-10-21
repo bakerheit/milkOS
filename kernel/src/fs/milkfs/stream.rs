@@ -7,6 +7,9 @@
 //! blocks and a chained hash of every record checksum, so a truncated, reordered or
 //! damaged stream is refused before anything becomes visible. Layout in
 //! `docs/filesystem.md`; `scripts/mkmilkfs.py verify-stream` / `receive` read it too.
+//! An encrypted stream (`snap send --encrypt`, the default from an encrypted volume) is the
+//! same records, each sealed with XChaCha20-Poly1305 under a per-stream key behind a
+//! passphrase envelope (`crypt::StreamKey`); `Encoder::sealed` / `Decoder::open`.
 //!
 //! What is sent is tree items, not blocks: inodes, directory entries, symlinks, inline
 //! data as they are; file data as `EXTENT` records (file range + the sender's block
@@ -32,6 +35,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::btree::{self, Child};
+use super::crypt::{ENVELOPE_LEN, SEAL_LAST, SEALED_MAGIC, StreamKey};
 use super::format::*;
 use super::items::{LIVE, clone_view};
 use super::snap::{SnapInfo, check_snap_name};
@@ -177,6 +181,8 @@ impl StreamHeader {
 }
 
 /// Builds a stream in memory; the caller writes `buf` out and clears it as it goes.
+/// With `seal` (an encrypted stream, see [`StreamKey`]) every record is sealed as it is
+/// added; [`Encoder::sealed`] puts the envelope first.
 #[derive(Default)]
 pub struct Encoder {
     pub buf: Vec<u8>,
@@ -184,9 +190,26 @@ pub struct Encoder {
     pub data_blocks: u64,
     pub bytes: u64,
     chain: u64,
+    seal: Option<StreamKey>,
 }
 
 impl Encoder {
+    /// An encrypted stream under `passphrase`.
+    pub fn sealed(passphrase: &[u8]) -> Result<Encoder> {
+        let (k, env) = StreamKey::create(passphrase)?;
+        let mut e = Encoder {
+            seal: Some(k),
+            ..Encoder::default()
+        };
+        e.buf.extend_from_slice(&env);
+        e.bytes = env.len() as u64;
+        Ok(e)
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.seal.is_some()
+    }
+
     fn rec(&mut self, t: u8, payload: &[u8]) {
         let start = self.buf.len();
         self.buf.push(t);
@@ -196,6 +219,10 @@ impl Encoder {
         self.buf.extend_from_slice(payload);
         let c = xxh64(&self.buf[start..]);
         self.buf.extend_from_slice(&c.to_le_bytes());
+        if let Some(k) = &mut self.seal {
+            let plain = self.buf.split_off(start);
+            k.seal_record(&plain, t == R_END, &mut self.buf);
+        }
         self.bytes += (self.buf.len() - start) as u64;
         if t != R_END {
             self.chain = chain_step(self.chain, c);
@@ -264,13 +291,20 @@ impl Encoder {
 }
 
 /// Reads records from `read` (fills part of a buffer, 0 = end), checking every
-/// checksum and, at `END`, the counts and the chained hash.
+/// checksum and, at `END`, the counts and the chained hash. An encrypted stream (it
+/// starts with the [`StreamKey`] envelope) is opened with the passphrase given to
+/// [`Decoder::open`] and every record is authenticated before it is looked at.
 pub struct Decoder<R: FnMut(&mut [u8]) -> Result<usize>> {
     read: R,
     pub records: u64,
     pub data_blocks: u64,
     pub bytes: u64,
     chain: u64,
+    /// Bytes read ahead (the first 8, to tell plain from encrypted).
+    pending: Vec<u8>,
+    seal: Option<StreamKey>,
+    /// The sealed record flagged last (END) has been read.
+    last: bool,
 }
 
 impl<R: FnMut(&mut [u8]) -> Result<usize>> Decoder<R> {
@@ -281,11 +315,58 @@ impl<R: FnMut(&mut [u8]) -> Result<usize>> Decoder<R> {
             data_blocks: 0,
             bytes: 0,
             chain: 0,
+            pending: Vec::new(),
+            seal: None,
+            last: false,
         }
     }
 
+    /// Start reading a stream that may be encrypted: `passphrase` opens it if it is
+    /// (EACCES, with the reason, if it is and none or the wrong one was given; the
+    /// passphrase is ignored for a plain stream).
+    pub fn open(read: R, passphrase: Option<&[u8]>) -> Result<Self> {
+        let mut d = Decoder::new(read);
+        let mut m = [0u8; 8];
+        d.fill(&mut m)?;
+        if &m != SEALED_MAGIC {
+            d.pending = m.to_vec();
+            return Ok(d);
+        }
+        let mut env = [0u8; ENVELOPE_LEN];
+        env[..8].copy_from_slice(&m);
+        d.fill(&mut env[8..])?;
+        let Some(p) = passphrase else {
+            return super::fail(
+                Errno::EACCES,
+                "the stream is encrypted: give its passphrase",
+            );
+        };
+        d.seal = Some(match StreamKey::open(&env, p) {
+            Ok(k) => k,
+            Err(Errno::EACCES) => {
+                return super::fail(Errno::EACCES, "wrong passphrase for the stream");
+            }
+            Err(Errno::EINVAL) => {
+                return super::fail(
+                    Errno::EINVAL,
+                    "an encrypted stream this kernel can't read (version or parameters)",
+                );
+            }
+            Err(e) => return Err(e),
+        });
+        Ok(d)
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.seal.is_some()
+    }
+
     fn fill(&mut self, buf: &mut [u8]) -> Result<()> {
-        let mut got = 0;
+        let mut got = self.pending.len().min(buf.len());
+        buf[..got].copy_from_slice(&self.pending[..got]);
+        self.pending.drain(..got);
+        self.bytes += got as u64;
+        let from = got;
         while got < buf.len() {
             let n = (self.read)(&mut buf[got..])?;
             if n == 0 {
@@ -293,20 +374,49 @@ impl<R: FnMut(&mut [u8]) -> Result<usize>> Decoder<R> {
             }
             got += n;
         }
-        self.bytes += buf.len() as u64;
+        self.bytes += (buf.len() - from) as u64;
         Ok(())
     }
 
-    pub fn next(&mut self) -> Result<Record> {
+    /// The next record's bytes (header, payload, checksum), opened if sealed.
+    fn raw(&mut self) -> Result<Vec<u8>> {
         let mut h = [0u8; 8];
         self.fill(&mut h)?;
-        let (t, len) = (h[0], le32(&h[4..]) as usize);
-        if len > RECORD_MAX || h[1..4] != [0; 3] {
+        if self.seal.is_none() {
+            let len = le32(&h[4..]) as usize;
+            if len > RECORD_MAX || h[1..4] != [0; 3] {
+                return Err(Errno::EIO);
+            }
+            let mut rec = alloc::vec![0u8; 8 + len + 8];
+            rec[..8].copy_from_slice(&h);
+            self.fill(&mut rec[8..])?;
+            return Ok(rec);
+        }
+        if self.last {
+            return Err(Errno::EIO); // nothing may follow the last record
+        }
+        let len = le32(&h) as usize;
+        if len > RECORD_MAX + 16 {
             return Err(Errno::EIO);
         }
-        let mut rec = alloc::vec![0u8; 8 + len + 8];
-        rec[..8].copy_from_slice(&h);
-        self.fill(&mut rec[8..])?;
+        let mut body = alloc::vec![0u8; len + 16];
+        self.fill(&mut body)?;
+        let flags = self.seal.as_mut().unwrap().open_record(&h, &mut body)?;
+        self.last = flags & SEAL_LAST != 0;
+        // A sealed record is exactly one plain record; END and only END is flagged last.
+        if body.len() < 16
+            || le32(&body[4..]) as usize + 16 != body.len()
+            || body[1..4] != [0; 3]
+            || (body[0] == R_END) != self.last
+        {
+            return Err(Errno::EIO);
+        }
+        Ok(body)
+    }
+
+    pub fn next(&mut self) -> Result<Record> {
+        let rec = self.raw()?;
+        let (t, len) = (rec[0], le32(&rec[4..]) as usize);
         let c = le64(&rec[8 + len..]);
         if xxh64(&rec[..8 + len]) != c {
             return Err(Errno::EIO); // damaged record

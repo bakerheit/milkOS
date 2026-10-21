@@ -2221,13 +2221,25 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
     let _ = ops::write_file(&src("third"), b"third snapshot");
     let _ = m::snapshot("sr3");
     t.ok(
-        m::send("sr1", None, "/tmp/sr1.stream").is_ok()
-            && m::send("sr2", Some("sr1"), "/tmp/sr2.stream").is_ok()
-            && m::send("sr3", Some("sr2"), "/tmp/sr3.stream").is_ok(),
+        m::send("sr1", None, "/tmp/sr1.stream", m::StreamCrypt::Default).is_ok()
+            && m::send(
+                "sr2",
+                Some("sr1"),
+                "/tmp/sr2.stream",
+                m::StreamCrypt::Default,
+            )
+            .is_ok()
+            && m::send(
+                "sr3",
+                Some("sr2"),
+                "/tmp/sr3.stream",
+                m::StreamCrypt::Default,
+            )
+            .is_ok(),
         "send sr1 (full), sr2 and sr3 (incremental)",
     );
     t.err(
-        m::send("sr1", Some("sr2"), "/tmp/x.stream"),
+        m::send("sr1", Some("sr2"), "/tmp/x.stream", m::StreamCrypt::Default),
         Errno::EINVAL,
         "send: the base must be older",
     );
@@ -2252,13 +2264,13 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
             .collect::<Vec<_>>()
     };
     t.err(
-        m::receive("/tmp/sr2.stream", Some(RP), false),
+        m::receive("/tmp/sr2.stream", Some(RP), false, None),
         Errno::ENOENT,
         "receive: an incremental whose base is missing is refused",
     );
     t.ok(
-        m::receive("/tmp/sr1.stream", Some(RP), false).is_ok()
-            && m::receive("/tmp/sr2.stream", Some(RP), false).is_ok(),
+        m::receive("/tmp/sr1.stream", Some(RP), false, None).is_ok()
+            && m::receive("/tmp/sr2.stream", Some(RP), false, None).is_ok(),
         "receive sr1, then sr2 on top",
     );
     let same = |snap: &str, n: &str| {
@@ -2284,7 +2296,7 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
         "the target has exactly sr1 and sr2",
     );
     t.err(
-        m::receive("/tmp/sr2.stream", Some(RP), false),
+        m::receive("/tmp/sr2.stream", Some(RP), false, None),
         Errno::EEXIST,
         "receiving sr2 again is refused",
     );
@@ -2297,7 +2309,7 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
     let _ = ops::write_file("/tmp/bad.stream", &bad);
     let before = tv.state.lock().verify_space().map(|s| s.allocated);
     t.err(
-        m::receive("/tmp/bad.stream", Some(RP), false),
+        m::receive("/tmp/bad.stream", Some(RP), false, None),
         Errno::EIO,
         "a damaged stream is refused",
     );
@@ -2312,12 +2324,12 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
     // Written since the base: refused, unless forced (rolled back to sr2 first).
     let _ = ops::write_file(&alloc::format!("{RP}/sr/local"), b"local change");
     t.err(
-        m::receive("/tmp/sr3.stream", Some(RP), false),
+        m::receive("/tmp/sr3.stream", Some(RP), false, None),
         Errno::EBUSY,
         "target changed since the base: refused",
     );
     t.ok(
-        m::receive("/tmp/sr3.stream", Some(RP), true).is_ok()
+        m::receive("/tmp/sr3.stream", Some(RP), true, None).is_ok()
             && ops::stat(&alloc::format!("{RP}/sr/local")).is_err()
             && read_str(&alloc::format!("{RP}/sr/third")) == "third snapshot",
         "--force: rolled back to sr2, then sr3 received",
@@ -2336,16 +2348,104 @@ fn milkfs_sendrecv(t: &mut T, vp: &str) {
         "target space exact after deleting the received snapshots",
     );
     let _ = super::unmount(RP);
-    let _ = ops::rmdir(RP);
     drop(tv);
+    milkfs_sendrecv_sealed(t, vp, &dev, RP);
+    let _ = ops::rmdir(RP);
     drop(dev);
     for s in ["sr1", "sr2", "sr3"] {
         let _ = m::delete_snapshot(s);
     }
     rm_rf(&alloc::format!("{vp}/sr"));
-    for f in ["sr1", "sr2", "sr3", "bad", "x"] {
+    for f in [
+        "sr1", "sr2", "sr3", "bad", "x", "sr1x", "sr2x", "badx", "shortx",
+    ] {
         let _ = ops::unlink(&alloc::format!("/tmp/{f}.stream"));
     }
+}
+
+/// Encrypted streams: sealed on the way out (no plaintext in the file), refused without
+/// or with a wrong passphrase, refused when altered or cut short, received with the
+/// right one (onto `dev`, formatted again, at `rp`).
+fn milkfs_sendrecv_sealed(t: &mut T, vp: &str, dev: &super::blockdev::BlockRef, rp: &str) {
+    use super::milkfs as m;
+    const PASS: &str = "fake-stream-passphrase";
+    let enc = |p| m::StreamCrypt::Passphrase(p);
+    t.ok(
+        m::send("sr1", None, "/tmp/sr1x.stream", enc(PASS)).is_ok_and(|r| r.encrypted)
+            && m::send("sr2", Some("sr1"), "/tmp/sr2x.stream", enc(PASS)).is_ok(),
+        "send sr1 and sr2 encrypted",
+    );
+    t.err(
+        m::send("sr1", None, "/tmp/x.stream", enc("short")),
+        Errno::EINVAL,
+        "a stream passphrase under 8 characters is refused",
+    );
+    let raw = ops::read_file("/tmp/sr1x.stream").unwrap_or_default();
+    let has = |n: &[u8]| raw.windows(n.len()).any(|w| w == n);
+    t.ok(
+        raw.starts_with(b"MILKSTRX") && !has(b"small one") && !has(b"MILKSTRM") && !has(b"sr1"),
+        "the encrypted stream has no plaintext (names, file contents, inner header)",
+    );
+    if m::mkfs(dev, "RecvSealed", true).is_err() {
+        t.ok(false, "mkfs the sealed-receive target");
+        return;
+    }
+    let Some((tv, _)) = t.must(m::mount_secondary(dev.clone(), rp), "mount it") else {
+        return;
+    };
+    t.err(
+        m::receive("/tmp/sr1x.stream", Some(rp), false, None),
+        Errno::EACCES,
+        "an encrypted stream without its passphrase is refused",
+    );
+    t.err(
+        m::receive(
+            "/tmp/sr1x.stream",
+            Some(rp),
+            false,
+            Some("wrong-fake-passphrase"),
+        ),
+        Errno::EACCES,
+        "a wrong stream passphrase is refused",
+    );
+    let mut bad = raw.clone();
+    let mid = bad.len() / 2;
+    if let Some(b) = bad.get_mut(mid) {
+        *b ^= 1;
+    }
+    let _ = ops::write_file("/tmp/badx.stream", &bad);
+    let _ = ops::write_file("/tmp/shortx.stream", &raw[..raw.len().saturating_sub(40)]);
+    t.err(
+        m::receive("/tmp/badx.stream", Some(rp), false, Some(PASS)),
+        Errno::EIO,
+        "an altered encrypted stream is refused",
+    );
+    t.err(
+        m::receive("/tmp/shortx.stream", Some(rp), false, Some(PASS)),
+        Errno::EIO,
+        "a cut-short encrypted stream is refused",
+    );
+    t.ok(
+        tv.state.lock().snap_list().is_empty(),
+        "and nothing was received",
+    );
+    t.ok(
+        m::receive("/tmp/sr1x.stream", Some(rp), false, Some(PASS)).is_ok_and(|r| r.encrypted)
+            && m::receive("/tmp/sr2x.stream", Some(rp), false, Some(PASS)).is_ok(),
+        "the right passphrase: sr1, then sr2 received",
+    );
+    let a = ops::read_file(&alloc::format!("{vp}/.snapshots/sr2/sr/big"));
+    let b = ops::read_file(&alloc::format!("{rp}/.snapshots/sr2/sr/big"));
+    t.ok(
+        a.is_ok() && a == b,
+        "received through encryption: same contents",
+    );
+    let r = tv.state.lock().check(false);
+    t.ok(
+        r.is_ok_and(|r| r.clean()),
+        "sealed-receive target check clean",
+    );
+    let _ = super::unmount(rp);
 }
 
 /// Scrub: damage a live file's block and a snapshot-only file's block behind every cache,

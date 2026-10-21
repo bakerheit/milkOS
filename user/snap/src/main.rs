@@ -12,8 +12,10 @@
 //!   snap promote NAME     the clone becomes the volume (old state kept as before-NAME)
 //!   snap discard NAME     throw the clone away
 //!   snap auto [SETTINGS]  automatic snapshots: show, or set e.g. `on interval=15m keep=8 daily=14`
-//!   snap send SNAP [--from OLDER] [-o FILE]
-//!                         SNAP as a stream (incremental from OLDER) to FILE or stdout
+//!   snap send SNAP [--from OLDER] [-o FILE] [--encrypt | --plaintext] [--passphrase-file F]
+//!                         SNAP as a stream (incremental from OLDER) to FILE or stdout;
+//!                         encrypted (asks for a passphrase) with --encrypt, and by
+//!                         default when the volume is encrypted (--plaintext: not)
 //!   snap scrub [start|stop|status|rate=MB/s|auto=off|on|7d]
 //!                         verify every block's checksum in the background (no argument:
 //!                         start and wait for it, printing progress)
@@ -22,10 +24,11 @@
 //!   snap lock [DEV|PATH]  lock unlocked encrypted volumes again (sync, unmount, wipe the
 //!                         key); not the one /home/milk is on. No argument: every one
 //!   snap passwd           change the primary volume's passphrase (rewraps the key)
-//!   snap receive [FILE] [--to PATH] [--force]
+//!   snap receive [FILE] [--to PATH] [--force] [--passphrase-file F]
 //!                         recreate the snapshot in a stream (FILE or stdin) on the milkfs
 //!                         volume PATH is on (default /Volumes/Milk); --force rolls the
-//!                         target back to the stream's base first
+//!                         target back to the stream's base first; an encrypted stream
+//!                         asks for its passphrase
 
 #![no_std]
 #![no_main]
@@ -173,27 +176,96 @@ fn report(ctl: &str) {
     }
 }
 
+/// Is the primary volume encrypted (its `info` says `encryption: on`)?
+fn volume_encrypted() -> bool {
+    let i = sys::read_file("/sys/fs/milkfs/info").unwrap_or_default();
+    core::str::from_utf8(&i)
+        .unwrap_or("")
+        .lines()
+        .any(|l| l.starts_with("encryption:") && l.ends_with(" on"))
+}
+
+/// A stream passphrase: from `file` (its first line), else asked for (twice when `new`).
+fn stream_passphrase(file: Option<&str>, new: bool) -> Option<alloc::string::String> {
+    if let Some(f) = file {
+        let d = sys::read_file(f).ok()?;
+        let s = core::str::from_utf8(&d).ok()?.lines().next()?.trim_end();
+        return (!s.is_empty()).then(|| alloc::string::String::from(s));
+    }
+    let p = ask(if new {
+        "Passphrase for the stream (8 characters or more): "
+    } else {
+        "Passphrase of the stream: "
+    })?;
+    if new && ask("Again: ")? != p {
+        eprintln!("snap: the passphrases differ");
+        return None;
+    }
+    Some(p)
+}
+
+/// Write `text` to control `op`; the error (with the kernel's reason) is printed, and
+/// returned for retries.
+fn write_ctl(op: &str, text: &str) -> Result<(), rt::Errno> {
+    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let r = sys::open(&path, O_WRONLY).and_then(|fd| {
+        let r = sys::write(fd, text.as_bytes());
+        let _ = sys::close(fd);
+        r
+    });
+    if let Err(e) = r {
+        eprintln!("snap: {op}: {}", why_op(op, e));
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn send(args: &[&str]) -> i32 {
     let (mut snap, mut from, mut out) = (None, None, None);
+    let (mut encrypt, mut plaintext, mut pfile) = (false, false, None);
     let mut it = args.iter();
     while let Some(&a) = it.next() {
         match a {
             "--from" => from = it.next().copied(),
             "-o" => out = it.next().copied(),
+            "--encrypt" => encrypt = true,
+            "--plaintext" => plaintext = true,
+            "--passphrase-file" => pfile = it.next().copied(),
             s => snap = Some(s),
         }
     }
-    let Some(snap) = snap else {
-        eprintln!("usage: snap send SNAP [--from OLDER] [-o FILE]");
+    let Some(snap) = snap.filter(|_| !(plaintext && (encrypt || pfile.is_some()))) else {
+        eprintln!(
+            "usage: snap send SNAP [--from OLDER] [-o FILE] [--encrypt | --plaintext] [--passphrase-file FILE]"
+        );
         return 2;
     };
     let tmp = alloc::format!("/tmp/.snap-send-{}", sys::getpid());
     let path = out.map(abs).unwrap_or_else(|| tmp.clone());
-    let req = match from {
+    let mut req = match from {
         Some(f) => alloc::format!("{snap} {f} {path}"),
         None => alloc::format!("{snap} {path}"),
     };
-    if control_quiet("send", &req) != 0 {
+    // Encrypted when asked, or by default from an encrypted volume.
+    let sealed = !plaintext && (encrypt || pfile.is_some() || volume_encrypted());
+    if plaintext {
+        req.push_str(" plaintext");
+    }
+    let ok = if sealed {
+        let Some(p) = stream_passphrase(pfile, true) else {
+            return 1;
+        };
+        req.push('\n');
+        req.push_str(&p);
+        let r = write_ctl("send", &req).is_ok();
+        // The secret was in `req`: overwrite it.
+        // SAFETY: zero bytes are valid UTF-8.
+        unsafe { req.as_bytes_mut().fill(0) };
+        r
+    } else {
+        write_ctl("send", &req).is_ok()
+    };
+    if !ok {
         let _ = sys::unlink(&tmp);
         return 1;
     }
@@ -213,13 +285,25 @@ fn send(args: &[&str]) -> i32 {
     0
 }
 
+/// Does the stream file start with the encrypted-stream envelope?
+fn stream_sealed(path: &str) -> bool {
+    let Ok(fd) = sys::open(path, sys::O_RDONLY) else {
+        return false;
+    };
+    let mut m = [0u8; 8];
+    let n = sys::read(fd, &mut m).unwrap_or(0);
+    let _ = sys::close(fd);
+    n == 8 && &m == b"MILKSTRX"
+}
+
 fn receive(args: &[&str]) -> i32 {
-    let (mut file, mut to, mut force) = (None, None, false);
+    let (mut file, mut to, mut force, mut pfile) = (None, None, false, None);
     let mut it = args.iter();
     while let Some(&a) = it.next() {
         match a {
             "--to" => to = it.next().copied(),
             "--force" | "-F" => force = true,
+            "--passphrase-file" => pfile = it.next().copied(),
             f => file = Some(f),
         }
     }
@@ -243,19 +327,48 @@ fn receive(args: &[&str]) -> i32 {
             tmp.clone()
         }
     };
-    let mut req = path;
+    let mut req = path.clone();
     if let Some(t) = to {
         req = alloc::format!("{req} {}", abs(t));
     }
     if force {
         req.push_str(" force");
     }
-    let r = control_quiet("receive", &req);
+    let r = if !stream_sealed(&path) {
+        write_ctl("receive", &req).is_ok()
+    } else if file.is_none() && pfile.is_none() {
+        eprintln!(
+            "snap: the stream on stdin is encrypted: give its passphrase with --passphrase-file FILE"
+        );
+        false
+    } else {
+        let mut ok = false;
+        for attempt in 0..if pfile.is_some() { 1 } else { 3 } {
+            let Some(p) = stream_passphrase(pfile, false) else {
+                break;
+            };
+            let mut t = alloc::format!("{req}\n{p}");
+            let r = write_ctl("receive", &t);
+            // SAFETY: zero bytes are valid UTF-8.
+            unsafe { t.as_bytes_mut().fill(0) };
+            match r {
+                Ok(()) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) if e.0 == 13 && attempt < 2 && pfile.is_none() => {
+                    eprintln!("snap: try again")
+                }
+                Err(_) => break,
+            }
+        }
+        ok
+    };
     let _ = sys::unlink(&tmp);
-    if r == 0 {
+    if r {
         report("/sys/fs/milkfs/receive");
     }
-    r
+    if r { 0 } else { 1 }
 }
 
 /// `snap scrub`: start it and follow /sys/fs/milkfs/scrub until it is done.
@@ -493,7 +606,7 @@ fn main(args: &rt::Args) -> i32 {
         }
         _ => {
             eprintln!(
-                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | unlock [DEV] | lock [DEV|PATH] | passwd | scrub [...] | auto [on|off|interval=15m|keep=K|daily=D|now] | send SNAP [--from OLDER] [-o FILE] | receive [FILE] [--to PATH] [--force]]"
+                "usage: snap [list | info | create NAME | delete NAME | rollback NAME | diff A [B|live] | check [--repair] | clones | clone SNAP NAME | promote NAME | discard NAME | unlock [DEV] | lock [DEV|PATH] | passwd | scrub [...] | auto [on|off|interval=15m|keep=K|daily=D|now] | send SNAP [--from OLDER] [-o FILE] [--encrypt|--plaintext] | receive [FILE] [--to PATH] [--force] [--passphrase-file F]]"
             );
             2
         }

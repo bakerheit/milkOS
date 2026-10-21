@@ -1069,11 +1069,12 @@ vdb Vault unlocked at=/Volumes/Vault
 vdd Old locked
 ```
 
-**Send/receive**: streams are **plaintext** (`snap send` decrypts; the stream carries
-xxh64 of plaintext blocks), so they can be checked and received anywhere, including on
-the Mac, and an encrypted target re-encrypts under its own key. Keep streams of an
-encrypted volume somewhere encrypted (an encrypted Mac disk, or receive them into another
-encrypted volume).
+**Send/receive**: streams from an encrypted volume are **encrypted by default** under a
+passphrase of their own (`snap send` asks for it; `--plaintext` opts out); see "Encrypted
+streams" under Send and receive. Inside, a stream carries plaintext and xxh64 of
+plaintext blocks (never the volume's keyed tags), so any milkfs (or the Mac tool) with
+the stream passphrase can check and receive it, and an encrypted target re-encrypts
+under its own key.
 
 **Mac**: `mkmilkfs.py mkfs IMAGE --encrypt [--recovery-out FILE]` (asks for a passphrase
 twice, prints the recovery key; or `--passphrase-file`), `mkmilkfs.py change-passphrase
@@ -1122,15 +1123,21 @@ does the same on its RAM disk and checks the hold-back of frees.
 
 ### Send and receive (backups)
 
-`snap send SNAP [--from OLDER] [-o FILE]` writes snapshot SNAP of the primary volume as a
-stream (full, or incremental from the older snapshot OLDER) to FILE or stdout;
-`snap receive [FILE] [--to PATH] [--force]` recreates it on the milkfs volume PATH is on
-(stdin if no FILE; default the primary volume). Kernel: `fs::milkfs::send(snap, from,
-out_path)`, `fs::milkfs::receive(path, target, force)`; `/sys/fs/milkfs/send`
-(`SNAP [FROM] PATH`) and `/sys/fs/milkfs/receive` (`PATH [TARGET] [force]`), each readable
-for the last report. Mac: `mkmilkfs.py verify-stream FILE`, `mkmilkfs.py receive IMAGE FILE
-[--force]`, `mkmilkfs.py tree IMAGE [--snapshot S]` (paths, modes, sizes, mtimes, content
-hashes: diff two to compare). So a backup can live on the Mac:
+`snap send SNAP [--from OLDER] [-o FILE] [--encrypt | --plaintext] [--passphrase-file F]`
+writes snapshot SNAP of the primary volume as a stream (full, or incremental from the
+older snapshot OLDER) to FILE or stdout; `snap receive [FILE] [--to PATH] [--force]
+[--passphrase-file F]` recreates it on the milkfs volume PATH is on (stdin if no FILE;
+default the primary volume). Kernel: `fs::milkfs::send(snap, from, out_path, crypt)`
+(`StreamCrypt::Passphrase(p)`, `Plain` or `Default`), `fs::milkfs::receive(path, target,
+force, passphrase)`; `/sys/fs/milkfs/send` (`SNAP [FROM] PATH [plaintext]`, then
+optionally a newline and the stream passphrase) and `/sys/fs/milkfs/receive` (`PATH
+[TARGET] [force]`, then optionally a newline and the passphrase), each readable for the
+last report (`sent s1, encrypted to ...`). Mac: `mkmilkfs.py verify-stream FILE`,
+`mkmilkfs.py receive IMAGE FILE [--force]`, `mkmilkfs.py seal-stream FILE OUT` (encrypt
+a plaintext stream), `mkmilkfs.py tree IMAGE [--snapshot S]` (paths, modes, sizes,
+mtimes, content hashes: diff two to compare); encrypted streams take
+`--stream-passphrase-file F` or `$MILKFS_STREAM_PASSPHRASE` (else they ask). So a backup
+can live on the Mac:
 
 ```text
 snap send monday -o /Volumes/Mac/backups/monday.stream          # (rw share)
@@ -1162,6 +1169,36 @@ open: if the receiver has them from the base, they are removed), the orphan list
 shared-block table. Data removal is by file range, so the receiver may lay blocks out
 differently from the sender.
 
+**Encrypted streams** (`snap send --encrypt`; the default from an encrypted volume,
+`--plaintext` to opt out; from a plain volume the default is plaintext). The plaintext
+stream above is wrapped record by record:
+
+```text
+envelope (128 bytes, plaintext, authenticated):
+   0 "MILKSTRX"   8 version u32 = 1   12 log_n u8, r u8, p u8, kind u8 = 1 (passphrase)
+  16 salt [16]   32 record nonce prefix [16]   48 wrap nonce [24]   72 wrapped stream key [32]
+ 104 wrap tag [16]   120 zero [8]
+then for record i = 0, 1, ...:  len u32 | flags u32 (1 = last) | ciphertext [len] | tag [16]
+
+KEK         = scrypt(passphrase, salt, N = 2^log_n, r, p)          (2^16, 8, 4 for new streams)
+wrapped|tag = XChaCha20-Poly1305(KEK, wrap nonce, aad = "milkfs stream key" | envelope[0..48], SK)
+record i    = XChaCha20-Poly1305(SK, nonce = prefix | i u64,
+                                 aad = "MKSR" | i u64 | len u32 | flags u32, plaintext record)
+```
+
+SK is a random 256-bit key per stream. The envelope's fields that matter (format, KDF
+parameters, salt, nonce prefix) are authenticated by the key unwrap, the rest is the
+wrap itself: an altered envelope reads as a wrong passphrase (EACCES). Each sealed record
+is exactly one plaintext record; the counter in nonce and aad catches reordered, dropped
+or replayed records, the "last" flag (set on END and only END) a stream cut at a record
+boundary, and nothing may follow it (EIO for all of these, before anything changes: the
+receive is atomic as below). The inner checksums and chained hash are still checked.
+Nothing is in the clear but the envelope: snapshot and volume names, times and sizes are
+inside. New stream passphrases need 8 characters. Receive needs the passphrase: EACCES
+"the stream is encrypted: give its passphrase" / "wrong passphrase for the stream"; KDF
+parameters above 128 MiB of scrypt memory are refused (EINVAL). Cost: about 0.35 s of
+scrypt per send and per receive, then XChaCha20-Poly1305 at about 45 MB/s here.
+
 **Receive** is atomic. It applies the records to a hidden clone (`.recv`) of the base
 snapshot (for a full stream: of a `.recv-base` snapshot of the empty target, deleted
 afterwards); only when the `END` record checks out (counts and chained hash: a missing,
@@ -1178,7 +1215,10 @@ stream (EIO). A crash mid-receive leaves the target as it was plus the hidden cl
 being deleted (EBUSY) and doesn't hold the volume lock while it writes, so the stream can
 go onto the volume itself.
 
-`scripts/sendtest.sh`: full + incremental + full-to-stdout sends into the rw Mac share;
+`scripts/sendtest.sh`: full + incremental + full-to-stdout sends into the rw Mac share,
+plus an `--encrypt` one (verified and received on the Mac, a wrong passphrase refused on
+both sides); with `MILK_ENCRYPT=1` everything runs on encrypted streams (the default from
+an encrypted volume; `--plaintext` checked to opt out);
 `verify-stream` on the Mac; receives in milkOS (onto a second disk) and on the Mac; the
 s1 / s2 trees identical on source, received volume and Mac-received images; damaged and
 truncated streams refused with the target byte-for-byte untouched; a missing base
@@ -1255,8 +1295,8 @@ full", ENOMEM. Arguments are whitespace-trimmed; an empty one is EINVAL with the
 | `auto` **D** | Time Machine settings | `on`, `off`, `now`, `interval=15m`, `keep=N`, `daily=N` | EINVAL anything else |
 | `scrub` | progress, errors, last result | `start`, `stop`, `rate=MB/s`, `auto=off\|on\|7d\|12h` | EBUSY already running, EINVAL |
 | `check` **D** (repair) | last report | `check` or `repair` | EINVAL |
-| `send` **D** | last result | `SNAP [FROM] PATH` | ENOENT no such snapshot (or the output's folder), EINVAL usage or FROM not older, ENOSPC no room for the stream |
-| `receive` **D** | last result | `PATH [TARGET] [force]` | ENOENT base snapshot not on the target (or no stream file), EBUSY target changed since the base (`force` rolls back) or a receive running, ENOTEMPTY full stream needs an empty volume, EEXIST snapshot exists, EINVAL not a stream / newer format / usage, EIO damaged or cut short (nothing changed) |
+| `send` **D** | last result | `SNAP [FROM] PATH [plaintext]` [`\nPASSPHRASE`] | ENOENT no such snapshot (or the output's folder), EINVAL usage, FROM not older, passphrase under 8, or no passphrase from an encrypted volume without `plaintext`, ENOSPC no room for the stream |
+| `receive` **D** | last result | `PATH [TARGET] [force]` [`\nPASSPHRASE`] | ENOENT base snapshot not on the target (or no stream file), EBUSY target changed since the base (`force` rolls back) or a receive running, ENOTEMPTY full stream needs an empty volume, EEXIST snapshot exists, EINVAL not a stream / newer format / usage, EIO damaged or cut short (nothing changed), EACCES an encrypted stream without or with the wrong passphrase |
 | `dedupe` **D** | last result | `DIR` or `DIR dry` | ENOENT, ENOTDIR, EOPNOTSUPP not on milkfs, EINVAL |
 | `unlock` | locked volumes, `vdb Vault locked` | `[dev=NAME ]SECRET` | ENODEV nothing (of that name) locked, EACCES wrong passphrase or recovery key, EINVAL usage, EIO keyring unreadable |
 | `lock` **D** | encrypted volumes and state | `DEV`, `PATH`, `LABEL` or `all` | EBUSY in use (names the processes) / home volume / send, receive or scrub running (the reason says which), EINVAL not encrypted or already locked, ENODEV no such mounted volume |

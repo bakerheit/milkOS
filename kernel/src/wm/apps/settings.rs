@@ -15,7 +15,9 @@ use super::super::paint::{self, Painter, hit};
 use super::super::prefs::{self, Prefs};
 use super::super::theme::*;
 use super::super::wallpaper::{self, Kind};
-use super::super::window::{PointerInput, PointerKind, WindowContents};
+use super::super::window::{
+    PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
+};
 use super::super::{Request, icons, request};
 use super::fsx;
 
@@ -69,6 +71,7 @@ pub struct Settings {
     tm_status: String,
     tm_count: usize,
     last_sec: u64,
+    hover: Option<(i32, i32)>,
 }
 
 impl Settings {
@@ -83,6 +86,7 @@ impl Settings {
             tm_status: String::new(),
             tm_count: 0,
             last_sec: 0,
+            hover: None,
         };
         s.read_tm();
         s
@@ -527,6 +531,19 @@ impl WindowContents for Settings {
             TM => self.draw_tm(p, x),
             _ => self.draw_about(p, x),
         }
+        if let Some(i) = hover_index(&self.hits, self.hover) {
+            let (r, h) = self.hits[i];
+            match h {
+                Hit::Section(s) if s == self.section => {}
+                Hit::Section(_) => paint_hover(p, r, true),
+                Hit::Brightness => {}
+                _ => paint_hover(p, r, false),
+            }
+        }
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        hover_move(&self.hits, &mut self.hover, x, y)
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {

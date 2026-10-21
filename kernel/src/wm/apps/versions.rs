@@ -20,7 +20,9 @@ use crate::sync::SpinLock;
 use super::super::event::Key;
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
-use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
+use super::super::window::{
+    App, KeyInput, PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
+};
 use super::super::{Request, notify_as, request, rtc};
 use super::{fsx, notes};
 
@@ -66,6 +68,7 @@ pub struct Versions {
     /// First timeline row shown (rows are newest first).
     scroll: usize,
     rows_visible: usize,
+    hover: Option<(i32, i32)>,
 }
 
 /// Where a version's content can be read: `<volume>/.snapshots/<snapshot><path in volume>`.
@@ -119,6 +122,7 @@ impl Versions {
             hits: Vec::new(),
             scroll: 0,
             rows_visible: 6,
+            hover: None,
         };
         if let Some(p) = PENDING.lock().take() {
             v.load(&p);
@@ -318,7 +322,7 @@ impl WindowContents for Versions {
         let ph = h - 16 - BAR_H - 8;
         let chosen_label = match self.list.get(self.sel) {
             Some(v) if v.snapshot.is_some() => when(v.taken),
-            _ => String::from("Now (current)"),
+            _ => String::from("Current file"),
         };
         Self::draw_pane(
             p,
@@ -331,7 +335,7 @@ impl WindowContents for Versions {
         Self::draw_pane(
             p,
             Rect::new(x0 + pw + 12, 14, pw, ph),
-            "Now",
+            "Current file",
             &self.current,
             &self.chosen,
             MATCHA,
@@ -362,6 +366,16 @@ impl WindowContents for Versions {
         if can {
             self.hits.push((br, Hit::Restore));
         }
+        if let Some(i) = hover_index(&self.hits, self.hover) {
+            let (r, h) = self.hits[i];
+            if h != Hit::Row(self.sel) {
+                paint_hover(p, r, matches!(h, Hit::Row(_)));
+            }
+        }
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        hover_move(&self.hits, &mut self.hover, x, y)
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {

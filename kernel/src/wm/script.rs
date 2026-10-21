@@ -927,6 +927,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .wait(500);
             }
         }
+        // Hover states: over a Welcome button, over a Settings section.
+        "hover-welcome" => {
+            b.click(18, 14).wait(300).click(90, 72).wait(800);
+            b.glide(600, 500, 696, 419, 8).wait(300);
+        }
+        "hover-settings" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500);
+            b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8).wait(300);
+        }
         "logomenu" => {
             b.click(18, 14).wait(300);
         }

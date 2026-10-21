@@ -30,7 +30,9 @@ use super::super::event::Key;
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
-use super::super::window::{KeyInput, PointerInput, PointerKind, WindowContents};
+use super::super::window::{
+    KeyInput, PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
+};
 use super::fsx;
 
 pub const LIBRARY: &str = "/home/milk/Music";
@@ -511,6 +513,7 @@ pub struct Music {
     bars: [u8; BANDS],
     last_draw: u64,
     last_scan: u64,
+    hover: Option<(i32, i32)>,
 }
 
 impl Music {
@@ -523,6 +526,7 @@ impl Music {
             bars: [0; BANDS],
             last_draw: 0,
             last_scan: timer::now_ns(),
+            hover: None,
         }
     }
 
@@ -770,6 +774,19 @@ impl WindowContents for Music {
         if self.lib.is_empty() {
             p.text_p(20, y, "No WAV files in ~/Music yet.", LATTE, false);
         }
+        if let Some(i) = hover_index(&self.hits, self.hover) {
+            let (r, h) = self.hits[i];
+            match h {
+                Hit::Row(k) if k == self.sel => {}
+                Hit::Row(_) => paint_hover(p, r, true),
+                Hit::Progress => {}
+                _ => paint_hover(p, r, false),
+            }
+        }
+    }
+
+    fn hover(&mut self, x: i32, y: i32) -> bool {
+        hover_move(&self.hits, &mut self.hover, x, y)
     }
 
     fn pointer(&mut self, e: &PointerInput) -> bool {

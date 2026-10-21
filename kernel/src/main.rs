@@ -39,6 +39,7 @@ mod smp;
 mod splash;
 mod sync;
 mod timer;
+mod tlb;
 mod uart;
 mod virtio;
 mod wm;

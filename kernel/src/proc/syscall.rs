@@ -57,6 +57,8 @@ pub mod nr {
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
+    pub const FUTEX: u64 = 98;
+    pub const SET_ROBUST_LIST: u64 = 99;
     pub const NANOSLEEP: u64 = 101;
     pub const CLOCK_GETTIME: u64 = 113;
     pub const CLOCK_GETRES: u64 = 114;
@@ -294,8 +296,23 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         nr::SYNC => crate::fs::sync_all().map(|_| 0),
         nr::FSYNC | nr::FDATASYNC => file(a[0] as i64)?.fsync().map(|_| 0),
 
-        nr::EXIT | nr::EXIT_GROUP => super::exit_current(super::wstatus_exited(a[0] as i32)),
-        nr::SET_TID_ADDRESS => Ok(sched::current_tid() as usize),
+        nr::EXIT => super::thread_exit(super::wstatus_exited(a[0] as i32)),
+        nr::EXIT_GROUP => super::exit_current(super::wstatus_exited(a[0] as i32)),
+        nr::SET_TID_ADDRESS => {
+            super::set_clear_child_tid(a0);
+            Ok(sched::current_tid() as usize)
+        }
+        nr::SET_ROBUST_LIST => Ok(0), // accepted, ignored (no robust-futex cleanup)
+        nr::FUTEX => {
+            let timeout = if a3 != 0
+                && (a[1] as u32 & super::futex::CMD_WAIT_MASK) == super::futex::FUTEX_WAIT
+            {
+                Some(read_timespec(a3)?)
+            } else {
+                None
+            };
+            super::futex::futex(a0, a[1] as u32, a[2] as u32, timeout)
+        }
         nr::NANOSLEEP => sleep_interruptible(read_timespec(a0)?, a1),
         nr::CLOCK_NANOSLEEP => {
             const TIMER_ABSTIME: u64 = 1;
@@ -904,17 +921,72 @@ fn sys_mmap(addr: usize, len: usize, prot: u32, flags: u32, fd: i64) -> KResult<
 
 // ---- processes ------------------------------------------------------------------------
 
+// aarch64 clone(flags, stack, parent_tid, child_tid, tls).
+const CLONE_VM: u64 = 0x100;
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
+const CLONE_SIGHAND: u64 = 0x800;
+const CLONE_THREAD: u64 = 0x10000;
+const CLONE_SETTLS: u64 = 0x80000;
+const CLONE_PARENT_SETTID: u64 = 0x100000;
+const CLONE_CHILD_CLEARTID: u64 = 0x200000;
+const CLONE_CHILD_SETTID: u64 = 0x1000000;
+const CSIGNAL: u64 = 0xff;
+
 fn sys_clone(frame: &TrapFrame, flags: u64, newsp: usize) -> KResult<usize> {
     const SIGCHLD: u64 = 17;
-    // Plain fork() only: exit signal SIGCHLD (or none), no sharing flags.
-    if flags & !0xff != 0 || !(flags == SIGCHLD || flags == 0) {
+    let (ptid, ctid, tls) = (frame.x[2] as usize, frame.x[3] as usize, frame.x[4]);
+    if flags & CLONE_THREAD != 0 {
+        // A new thread: these must all be shared (what pthreads passes).
+        const NEED: u64 = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND;
+        if flags & NEED != NEED {
+            return Err(EINVAL);
+        }
+        let mut f = *frame;
+        f.x[0] = 0;
+        if newsp != 0 {
+            f.sp_el0 = newsp as u64;
+        }
+        let clear = if flags & CLONE_CHILD_CLEARTID != 0 {
+            ctid
+        } else {
+            0
+        };
+        let tls = (flags & CLONE_SETTLS != 0).then_some(tls);
+        let tid = super::spawn_thread(&f, tls, clear)?;
+        if flags & CLONE_PARENT_SETTID != 0 {
+            copy_out(ptid, &(tid as i32).to_le_bytes())?;
+        }
+        if flags & CLONE_CHILD_SETTID != 0 {
+            with_space(|s| s.copy_out(ctid, &(tid as i32).to_le_bytes()))?;
+        }
+        return Ok(tid as usize);
+    }
+    // Otherwise a fork(): only a plain child (optionally with an exit signal) is supported.
+    if flags & !CSIGNAL != 0
+        && flags & !(CSIGNAL | CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | CLONE_PARENT_SETTID) != 0
+    {
+        return Err(ENOSYS);
+    }
+    if flags & CSIGNAL != SIGCHLD && flags & CSIGNAL != 0 {
         return Err(ENOSYS);
     }
     let mut f = *frame;
     if newsp != 0 {
         f.sp_el0 = newsp as u64;
     }
-    Ok(super::fork(&f)? as usize)
+    let pid = super::fork_with(
+        &f,
+        if flags & CLONE_CHILD_CLEARTID != 0 {
+            ctid
+        } else {
+            0
+        },
+    )?;
+    if flags & CLONE_PARENT_SETTID != 0 {
+        copy_out(ptid, &(pid as i32).to_le_bytes())?;
+    }
+    Ok(pid as usize)
 }
 
 fn sys_uname(buf: usize) -> KResult<usize> {

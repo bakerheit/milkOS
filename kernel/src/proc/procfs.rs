@@ -189,7 +189,7 @@ fn status(pid: Pid) -> String {
     let _ = writeln!(s, "Gid:\t0\t0\t0\t0");
     let _ = writeln!(s, "FDSize:\t{}", i.fds.count());
     let _ = writeln!(s, "VmRSS:\t{rss} kB");
-    let _ = writeln!(s, "Threads:\t1");
+    let _ = writeln!(s, "Threads:\t{}", i.threads.len().max(1));
     let _ = writeln!(s, "SigPnd:\t{:016x}", i.sig.pending);
     let _ = writeln!(s, "SigBlk:\t{:016x}", i.sig.blocked);
     let _ = writeln!(s, "SigIgn:\t{ign:016x}");

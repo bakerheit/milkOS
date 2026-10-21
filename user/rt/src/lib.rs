@@ -19,6 +19,7 @@ pub mod net;
 pub mod sha256;
 pub mod sys;
 pub mod table;
+pub mod thread;
 
 use alloc::string::String;
 use alloc::vec::Vec;

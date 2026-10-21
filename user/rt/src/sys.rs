@@ -119,6 +119,7 @@ pub mod nr {
     pub const BRK: usize = 214;
     pub const MUNMAP: usize = 215;
     pub const CLONE: usize = 220;
+    pub const FUTEX: usize = 98;
     pub const EXECVE: usize = 221;
     pub const MMAP: usize = 222;
     pub const WAIT4: usize = 260;
@@ -588,6 +589,36 @@ pub fn uname() -> Result<[String; 5]> {
 
 pub fn brk(addr: usize) -> usize {
     sc(nr::BRK, [addr, 0, 0, 0, 0, 0]).unwrap_or(0)
+}
+
+pub const FUTEX_WAIT: u32 = 0;
+pub const FUTEX_WAKE: u32 = 1;
+pub const FUTEX_PRIVATE: u32 = 128;
+
+/// futex(uaddr, FUTEX_WAIT_PRIVATE, val, timeout): sleep while *uaddr == val.
+pub fn futex_wait(uaddr: usize, val: u32, timeout_ns: Option<u64>) -> Result<()> {
+    let ts = timeout_ns.map(|ns| [ns / 1_000_000_000, ns % 1_000_000_000]);
+    let tp = ts.as_ref().map_or(0, |t| t.as_ptr() as usize);
+    sc(
+        nr::FUTEX,
+        [
+            uaddr,
+            (FUTEX_WAIT | FUTEX_PRIVATE) as usize,
+            val as usize,
+            tp,
+            0,
+            0,
+        ],
+    )
+    .map(|_| ())
+}
+
+/// futex(uaddr, FUTEX_WAKE_PRIVATE, n): wake up to `n` waiters. Returns the number woken.
+pub fn futex_wake(uaddr: usize, n: usize) -> Result<usize> {
+    sc(
+        nr::FUTEX,
+        [uaddr, (FUTEX_WAKE | FUTEX_PRIVATE) as usize, n, 0, 0, 0],
+    )
 }
 
 pub fn mmap_anon(len: usize) -> Result<*mut u8> {

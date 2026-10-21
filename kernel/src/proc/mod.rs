@@ -12,6 +12,7 @@ pub mod asid;
 pub mod elf;
 pub mod errno;
 pub mod fd;
+pub mod futex;
 pub mod pipe;
 pub mod procfs;
 mod selftest;
@@ -87,7 +88,10 @@ pub struct Inner {
     pub space: Option<UserSpace>,
     pub fds: FdTable,
     pub children: Vec<Pid>,
+    /// Group-leader thread (= the pid's main thread).
     pub tid: Tid,
+    /// Every live thread of this process (the leader included).
+    pub threads: Vec<Tid>,
     pub cwd: InodeRef,
     pub start_ns: u64,
     /// Process group and session (job control).
@@ -98,6 +102,11 @@ pub struct Inner {
     pub argv: Vec<String>,
     /// Absolute path of the current image (for /proc/<pid>/exe).
     pub exe: String,
+    /// Set by exit_group / a fatal signal: every thread drains and the process zombifies
+    /// with this wait status.
+    pub group_exit: Option<i32>,
+    /// Ever had more than one thread (so address-space teardown needs a TLB shootdown).
+    pub ever_threaded: bool,
 }
 
 static PROCS: SpinLock<BTreeMap<Pid, Arc<Process>>> = SpinLock::new(BTreeMap::new());
@@ -171,6 +180,7 @@ struct Launch<'a> {
     sig: signal::SigState,
     argv: Vec<String>,
     exe: String,
+    clear_child_tid: usize,
 }
 
 /// Create a process and start its thread with `l.frame`.
@@ -181,6 +191,7 @@ fn start(l: Launch) -> KResult<Pid> {
         NEXT_PID.fetch_add(1, Ordering::Relaxed)
     };
     let (name, ppid, frame, tpidr_el0, fp) = (l.name, l.ppid, l.frame, l.tpidr_el0, l.fp);
+    let clear_child_tid = l.clear_child_tid;
     let ttbr0 = l.space.ttbr0();
     let p = Arc::new(Process {
         pid,
@@ -192,6 +203,7 @@ fn start(l: Launch) -> KResult<Pid> {
             fds: l.fds,
             children: Vec::new(),
             tid: 0,
+            threads: Vec::new(),
             cwd: l.cwd,
             start_ns: timer::now_ns(),
             pgid: l.pgid.unwrap_or(pid),
@@ -199,6 +211,8 @@ fn start(l: Launch) -> KResult<Pid> {
             sig: l.sig,
             argv: l.argv,
             exe: l.exe,
+            group_exit: None,
+            ever_threaded: false,
         }),
         child_wq: WaitQueue::new(),
     });
@@ -213,10 +227,13 @@ fn start(l: Launch) -> KResult<Pid> {
         ttbr0,
         tpidr_el0,
         fp,
+        clear_child_tid,
     };
     match sched::spawn_user(name, frame, user) {
         Some(tid) => {
-            p.inner.lock().tid = tid;
+            let mut i = p.inner.lock();
+            i.tid = tid;
+            i.threads.push(tid);
             Ok(pid)
         }
         None => {
@@ -276,6 +293,7 @@ pub fn spawn(path: &str, argv: &[&str]) -> KResult<Pid> {
         sig: signal::SigState::new(),
         argv,
         exe: String::from(path),
+        clear_child_tid: 0,
     })
 }
 
@@ -301,6 +319,7 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
         sig: signal::SigState::new(),
         argv,
         exe: String::from(path),
+        clear_child_tid: 0,
     })
 }
 
@@ -335,6 +354,11 @@ pub fn wait_kernel_child(pid: Pid) -> i32 {
 
 /// fork(): copy the caller. The child resumes from the same syscall with x0 = 0.
 pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
+    fork_with(frame, 0)
+}
+
+/// fork(), recording `clear_child_tid` for the child (CLONE_CHILD_CLEARTID).
+pub fn fork_with(frame: &TrapFrame, clear_child_tid: usize) -> KResult<Pid> {
     let parent = current();
     let (space, fds, name, cwd, pgid, sid, sig, argv, exe) = {
         let mut i = parent.inner.lock();
@@ -369,7 +393,36 @@ pub fn fork(frame: &TrapFrame) -> KResult<Pid> {
         sig,
         argv,
         exe,
+        clear_child_tid,
     })
+}
+
+/// set_tid_address: record where to clear + futex-wake on this thread's exit.
+pub fn set_clear_child_tid(addr: usize) {
+    sched::set_clear_child_tid(addr);
+}
+
+/// clone() with CLONE_THREAD: add a thread to the *current* process. It shares the address
+/// space, fds, signal handlers, cwd and pgid; it has its own kernel stack, TPIDR_EL0
+/// (`tls`), FP state and user stack (`frame.sp_el0`). Returns the new tid.
+pub fn spawn_thread(frame: &TrapFrame, tls: Option<u64>, clear_child_tid: usize) -> KResult<Tid> {
+    let me = current();
+    let (ttbr0, name) = {
+        let i = me.inner.lock();
+        (i.space.as_ref().ok_or(ESRCH)?.ttbr0(), i.name)
+    };
+    let user = UserState {
+        pid: me.pid,
+        ttbr0,
+        tpidr_el0: tls.unwrap_or_else(sched::current_tpidr_el0),
+        fp: Box::new(FpState::zeroed()),
+        clear_child_tid,
+    };
+    let tid = sched::spawn_user(name.as_str(), frame, user).ok_or(ENOMEM)?;
+    let mut i = me.inner.lock();
+    i.threads.push(tid);
+    i.ever_threaded = true;
+    Ok(tid)
 }
 
 /// execve(): replace the caller's image. On success `frame` is rewritten to enter the new
@@ -426,8 +479,62 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
     Ok(())
 }
 
-/// End the calling process with wait status `wstatus`.
+/// End the calling thread. If it is the last thread of its process, the process zombifies;
+/// otherwise only this thread dies (its stack is reaped). Handles clear_child_tid.
+pub fn thread_exit(code: i32) -> ! {
+    let me = current();
+    let tid = sched::current_tid();
+    let ctid = sched::current_clear_child_tid();
+    if ctid != 0 {
+        if let Some(s) = me.inner.lock().space.as_mut() {
+            let _ = s.copy_out(ctid, &0u32.to_le_bytes());
+        }
+        futex::wake_addr(ctid);
+    }
+    let last = {
+        let mut i = me.inner.lock();
+        i.threads.retain(|&t| t != tid);
+        i.threads.is_empty()
+    };
+    if last {
+        drop(me);
+        finish_process(code);
+    }
+    drop(me);
+    sched::exit(code as i64)
+}
+
+/// exit_group / a fatal signal: end every thread of the process, then zombify it.
 pub fn exit_current(wstatus: i32) -> ! {
+    let me = current();
+    let my_tid = sched::current_tid();
+    let others: Vec<Tid> = {
+        let mut i = me.inner.lock();
+        if i.group_exit.is_none() {
+            i.group_exit = Some(wstatus);
+        }
+        i.threads.iter().copied().filter(|&t| t != my_tid).collect()
+    };
+    // Nudge the others: interrupted() is now true for them (group_exit set), so their
+    // blocking syscalls return EINTR and they exit on the way back to EL0.
+    for t in &others {
+        sched::wake(*t);
+    }
+    // Wait for them to leave (they remove themselves from `threads`).
+    let t0 = timer::now_ns();
+    while me.inner.lock().threads.iter().any(|&t| t != my_tid) {
+        if timer::now_ns() - t0 > 2_000_000_000 {
+            break; // give up after 2 s rather than hang; should not happen
+        }
+        sched::sleep_ms(1);
+    }
+    me.inner.lock().threads.clear();
+    drop(me);
+    finish_process(wstatus)
+}
+
+/// Zombify the current process (its last thread is exiting) with `wstatus`.
+fn finish_process(wstatus: i32) -> ! {
     let me = current();
     let kttbr = mmu::kernel_ttbr0();
     sched::with_current_user(|u| {
@@ -446,6 +553,11 @@ pub fn exit_current(wstatus: i32) -> ! {
             i.ppid,
         )
     };
+    // If other threads ever ran in this space on other CPUs, make sure none is mid
+    // page-table walk before we free the tables.
+    if me.inner.lock().ever_threaded {
+        crate::tlb::shootdown();
+    }
     drop(space);
     drop(fds);
     let pid = me.pid;
@@ -530,6 +642,14 @@ fn try_reap(me: &Process, want: i64, nohang: bool) -> Option<KResult<(Pid, i32)>
 fn on_user_return(frame: &mut TrapFrame) {
     if sched::need_resched() {
         sched::yield_now();
+    }
+    // A sibling called exit_group (or took a fatal signal): this thread exits too.
+    if let Some(p) = get(sched::current_pid()) {
+        let code = p.inner.lock().group_exit;
+        drop(p);
+        if let Some(code) = code {
+            thread_exit(code);
+        }
     }
     signal::deliver(frame);
 }

@@ -6,6 +6,7 @@
 //!   utest tlb     mmap/munmap churn in 4 processes across CPUs; unmapped memory faults
 //!   utest cowsmp  4 children + parent write their copies of one buffer at once
 //!   utest par [N] [ms]  N processes computing in parallel vs 1: prints the speedup
+//!   utest threads 8 threads on a futex mutex, a condvar ping-pong, munmap under a thread
 //!   utest all     everything except par
 
 #![no_std]
@@ -538,6 +539,120 @@ fn t_par(n: usize, units: u64) -> bool {
     )
 }
 
+// ---- threads ----
+
+use rt::thread::{self, Condvar, Mutex};
+
+fn t_threads() -> bool {
+    let mut ok = true;
+
+    // 8 threads each increment a shared counter 10_000 times under a futex mutex.
+    let counter = alloc::sync::Arc::new(Mutex::new(0u64));
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let c = counter.clone();
+            thread::spawn(move || {
+                for _ in 0..10_000 {
+                    *c.lock() += 1;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join();
+    }
+    let total = *counter.lock();
+    ok &= check(
+        "futex mutex: 8 x 10000",
+        total == 80_000,
+        &alloc::format!("counter = {total}"),
+    );
+
+    // Condvar ping-pong: two threads hand a turn back and forth 1000 times.
+    struct Pp {
+        turn: Mutex<u32>,
+        cv: Condvar,
+    }
+    let pp = alloc::sync::Arc::new(Pp {
+        turn: Mutex::new(0),
+        cv: Condvar::new(),
+    });
+    let n = 1000u32;
+    let a = {
+        let pp = pp.clone();
+        thread::spawn(move || {
+            for i in 0..n {
+                let mut g = pp.turn.lock();
+                while *g != i * 2 {
+                    g = pp.cv.wait(g);
+                }
+                *g += 1;
+                pp.cv.notify_all();
+            }
+        })
+    };
+    let b = {
+        let pp = pp.clone();
+        thread::spawn(move || {
+            for i in 0..n {
+                let mut g = pp.turn.lock();
+                while *g != i * 2 + 1 {
+                    g = pp.cv.wait(g);
+                }
+                *g += 1;
+                pp.cv.notify_all();
+            }
+        })
+    };
+    a.join();
+    b.join();
+    let final_turn = *pp.turn.lock();
+    ok &= check(
+        "condvar ping-pong",
+        final_turn == n * 2,
+        &alloc::format!("{n} rounds, turn counter {final_turn}"),
+    );
+
+    // munmap in one thread while another keeps running (the kernel must not fault, and the
+    // live mapping must stay valid). The worker spins touching its own buffer; the main
+    // thread maps and unmaps 200 regions meanwhile.
+    let stop = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
+    let seen = alloc::sync::Arc::new(core::sync::atomic::AtomicU64::new(0));
+    let worker = {
+        let (stop, seen) = (stop.clone(), seen.clone());
+        thread::spawn(move || {
+            let mut buf = alloc::vec![0u8; 4096];
+            let mut i = 0u64;
+            while !stop.load(core::sync::atomic::Ordering::Relaxed) {
+                let n = buf.len();
+                buf[(i as usize) % n] = i as u8;
+                i = i.wrapping_add(1);
+                core::hint::black_box(&buf);
+                seen.store(i, core::sync::atomic::Ordering::Relaxed);
+            }
+        })
+    };
+    for _ in 0..200 {
+        if let Ok(p) = sys::mmap_anon(64 << 10) {
+            // SAFETY: fresh mapping.
+            unsafe { core::ptr::write_volatile(p, 1) };
+            let _ = sys::munmap(p, 64 << 10);
+        }
+    }
+    let before = seen.load(core::sync::atomic::Ordering::Relaxed);
+    sys::sched_yield();
+    sys::sleep_ms(5);
+    let after = seen.load(core::sync::atomic::Ordering::Relaxed);
+    stop.store(true, core::sync::atomic::Ordering::Relaxed);
+    worker.join();
+    ok &= check(
+        "munmap while a thread runs",
+        after > before,
+        &alloc::format!("worker kept running ({before} -> {after} iterations)"),
+    );
+    ok
+}
+
 fn main(args: &rt::Args) -> i32 {
     let what = args.get(1).unwrap_or("all");
     let mut ok = true;
@@ -554,6 +669,9 @@ fn main(args: &rt::Args) -> i32 {
         let n = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
         let ms = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(500);
         ok &= t_par(n, ms);
+    }
+    if what == "threads" || what == "all" {
+        ok &= t_threads();
     }
     if what == "cow" || what == "all" {
         ok &= t_cow();

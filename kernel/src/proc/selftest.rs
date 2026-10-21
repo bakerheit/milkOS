@@ -94,6 +94,7 @@ fn launch(name: &str, entry_off: usize, x0: u64, x1: u64) -> u32 {
         sig: super::signal::SigState::new(),
         argv: alloc::vec::Vec::new(),
         exe: alloc::string::String::from(name),
+        clear_child_tid: 0,
     })
     .expect("start")
 }

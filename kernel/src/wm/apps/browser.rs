@@ -139,7 +139,10 @@ pub struct Response {
     pub url: Url,
 }
 
-fn get_once(url: &Url) -> Result<(u16, Vec<(String, String)>, Vec<u8>), String> {
+/// Status, headers (lower-case names), body.
+type Raw = (u16, Vec<(String, String)>, Vec<u8>);
+
+fn get_once(url: &Url) -> Result<Raw, String> {
     let s = socket::socket(SockType::Stream).map_err(|e| format!("socket: {e}"))?;
     let close = |s| {
         let _ = socket::close(s);

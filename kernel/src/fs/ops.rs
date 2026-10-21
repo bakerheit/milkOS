@@ -303,6 +303,31 @@ pub fn chmod(path: &str, perm: u32) -> Result<()> {
     )
 }
 
+/// Copy the tree at `src` into directory `dst` (created if missing): files, directories,
+/// symlinks. Existing files in `dst` are replaced.
+pub fn copy_tree(src: &str, dst: &str) -> Result<()> {
+    mkdir_all(dst, 0o755)?;
+    for e in readdir(src)? {
+        let (s, d) = (
+            alloc::format!("{src}/{}", e.name),
+            alloc::format!("{dst}/{}", e.name),
+        );
+        match e.kind {
+            InodeType::Dir => copy_tree(&s, &d)?,
+            InodeType::Symlink => match symlink(&readlink(&s)?, &d) {
+                Ok(()) | Err(Errno::EEXIST) => {}
+                Err(err) => return Err(err),
+            },
+            InodeType::File => {
+                write_file(&d, &read_file(&s)?)?;
+                let _ = chmod(&d, lstat(&s)?.perm);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Read a whole file (reads until EOF, so synthetic files with size 0 work too).
 pub fn read_file(path: &str) -> Result<Vec<u8>> {
     let f = open(path, O_RDONLY, 0)?;

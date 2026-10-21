@@ -61,10 +61,10 @@ impl State {
     /// Snapshot the live tree as it is now (after committing anything pending).
     pub fn snap_create(&mut self, name: &str) -> Result<SnapInfo> {
         check_snap_name(name)?;
-        if self.snaps.iter().any(|s| s.name == name) {
+        if self.name_taken(name) {
             return Err(Errno::EEXIST);
         }
-        if self.snaps.len() >= MAX_SNAPS {
+        if self.records_full() {
             return Err(Errno::ENOSPC);
         }
         self.commit()?;
@@ -85,6 +85,7 @@ impl State {
             root: self.sb.root,
             deadlist: self.deadlist,
             next_ino: self.next_ino,
+            id: 0,
         };
         let info = SnapInfo {
             name: rec.name.clone(),
@@ -107,6 +108,17 @@ impl State {
             .iter()
             .position(|s| s.name == name)
             .ok_or(Errno::ENOENT)?;
+        if self.is_origin(self.snaps[k].generation) {
+            return Err(Errno::EBUSY); // a clone is built on it
+        }
+        if self.branched() {
+            // No dead lists after a promote: drop the record, then sweep exactly.
+            self.snaps.remove(k);
+            self.update_snap_gen();
+            self.maybe_unbranch();
+            self.meta_dirty = true;
+            return self.sweep().map(|_| ());
+        }
         let prev_gen = if k == 0 {
             0
         } else {
@@ -152,11 +164,23 @@ impl State {
             .iter()
             .position(|s| s.name == name)
             .ok_or(Errno::ENOENT)?;
+        if self.snaps[k + 1..]
+            .iter()
+            .any(|s| self.is_origin(s.generation))
+        {
+            return Err(Errno::EBUSY); // a newer snapshot that would go has a clone
+        }
         while self.snaps.len() > k + 1 {
             let newest = self.snaps.last().unwrap().name.clone();
             self.snap_delete(&newest)?;
         }
         let s = self.snaps[k].clone();
+        if self.branched() {
+            // Birth times don't say what the snapshot shares after a promote: sweep.
+            self.tree = btree::Child::Disk(s.root);
+            self.meta_dirty = true;
+            return self.sweep().map(|_| ());
+        }
         // Free everything the live tree has that was born after the snapshot. CoW means a
         // node born at or before it has an entirely old subtree, so skip those.
         let mut free = Vec::new();

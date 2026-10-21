@@ -219,7 +219,7 @@ fn snap_names() -> Vec<String> {
         .unwrap_or_default()
         .into_iter()
         .map(|s| s.name)
-        .filter(|n| n.starts_with("crash-"))
+        .filter(|n| n.starts_with("crash-") || n.starts_with("before-"))
         .collect()
 }
 
@@ -242,15 +242,36 @@ fn writer() -> ! {
         }
         if i % 25 == 0 {
             let _ = super::snapshot(&format!("crash-{i}"));
+            // Keep at most 4, oldest first, skipping clone origins (EBUSY).
             let names = snap_names();
-            if names.len() > 3 {
-                let _ = super::delete_snapshot(&names[0]);
+            let mut excess = names.len().saturating_sub(4);
+            for n in names {
+                if excess == 0 {
+                    break;
+                }
+                if super::delete_snapshot(&n).is_ok() {
+                    excess -= 1;
+                }
             }
         }
         if i % 70 == 0
             && let Some(newest) = snap_names().last()
         {
             let _ = super::rollback(newest);
+        }
+        // Try-before-install: clone the newest snapshot, write into the clone, then keep
+        // it (promote: the volume's history becomes branched) or throw it away.
+        if i % 40 == 20
+            && let Some(origin) = snap_names().into_iter().rfind(|n| n.starts_with("crash-"))
+        {
+            let name = format!("cl-{i}");
+            if let Ok(path) = super::clone(&origin, &name) {
+                let _ = ops::mkdir_all(&format!("{path}/crash"), 0o755);
+                let _ = ops::write_file(&format!("{path}/crash/f-{}", i % SLOTS), &content(i));
+                if (i / 40) % 2 != 0 || super::promote_clone(&name).is_err() {
+                    let _ = super::discard_clone(&name);
+                }
+            }
         }
         if i % 10 == 0 {
             kprintln!("crash-writer: iteration {i}");
@@ -293,10 +314,31 @@ fn check() {
             &mut empty,
         );
     }
+    let clones = super::clones().unwrap_or_default();
+    for c in &clones {
+        check_dir(
+            &format!("/Volumes/Milk-{}/crash", c.name),
+            &mut ok,
+            &mut bad,
+            &mut empty,
+        );
+    }
     let nsnaps = super::snapshots().map(|l| l.len()).unwrap_or(0);
-    // Dead lists must still be right: delete every snapshot, then the allocator must
-    // match what is reachable exactly.
-    for n in snap_names() {
+    let branched = v.state.lock().branched();
+    // Dead lists (or, once branched, sweeps) must still be right: discard every clone,
+    // delete every snapshot, then the allocator must match what is reachable exactly.
+    for c in &clones {
+        if let Err(e) = super::discard_clone(&c.name) {
+            kprintln!("CRASHCHECK: discard clone {}: {e}", c.name);
+            bad += 1;
+        }
+    }
+    let all: Vec<String> = super::snapshots()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    for n in all {
         if let Err(e) = super::delete_snapshot(&n) {
             kprintln!("CRASHCHECK: delete snapshot {n}: {e}");
             bad += 1;
@@ -306,9 +348,11 @@ fn check() {
     let space_ok = matches!(space, Ok(c) if c.leaked == 0 && c.free_but_used == 0);
     let pass = bad == 0 && space_ok;
     kprintln!(
-        "CRASHCHECK {}: mounted generation {generation}, {live} live files ok, {} snapshot files ok ({nsnaps} snapshots), {empty} empty tmp, {bad} bad, space {:?}",
+        "CRASHCHECK {}: mounted generation {generation}, {live} live files ok, {} snapshot/clone files ok ({nsnaps} snapshots, {} clones{}), {empty} empty tmp, {bad} bad, space {:?}",
         if pass { "PASS" } else { "FAIL" },
         ok - live,
+        clones.len(),
+        if branched { ", history branched" } else { "" },
         space
     );
 }

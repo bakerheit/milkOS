@@ -51,6 +51,9 @@ pub mod nr {
     pub const READLINKAT: u64 = 78;
     pub const NEWFSTATAT: u64 = 79;
     pub const FSTAT: u64 = 80;
+    pub const SYNC: u64 = 81;
+    pub const FSYNC: u64 = 82;
+    pub const FDATASYNC: u64 = 83;
     pub const EXIT: u64 = 93;
     pub const EXIT_GROUP: u64 = 94;
     pub const SET_TID_ADDRESS: u64 = 96;
@@ -288,6 +291,8 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
         }
         nr::FCNTL => sys_fcntl(a[0] as i64, a[1] as u32, a2),
         nr::IOCTL => sys_ioctl(a[0] as i64, a[1] as u32, a2),
+        nr::SYNC => crate::fs::sync_all().map(|_| 0),
+        nr::FSYNC | nr::FDATASYNC => file(a[0] as i64)?.fsync().map(|_| 0),
 
         nr::EXIT | nr::EXIT_GROUP => super::exit_current(super::wstatus_exited(a[0] as i32)),
         nr::SET_TID_ADDRESS => Ok(sched::current_tid() as usize),

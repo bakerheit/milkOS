@@ -394,8 +394,15 @@ fn button(b: Button) -> i32 {
 }
 
 /// Where a new client window goes: cascaded from the top left of the work area.
+/// Where a new client window goes: centred in the area between the menu bar and the dock,
+/// nudged 24 px down-right per window already placed (n) so they don't stack exactly, and
+/// clamped on-screen (a window bigger than the area sits at its top left, below the bar).
 pub fn place(n: i32, w: i32, h: i32) -> Rect {
-    let x = (160 + n * 32).min(screen_w() - w).max(0);
-    let y = (80 + n * 32).min(screen_h() - h).max(MENU_H);
+    let area = super::Desktop::work_area();
+    let step = (n % 4) * 24;
+    let x = area.x + (area.w - w) / 2 + step;
+    let y = area.y + (area.h - h) / 2 + step;
+    let x = x.min(screen_w() - w).max(0);
+    let y = y.min(area.y + area.h - h).max(MENU_H);
     Rect::new(x, y, w, h)
 }

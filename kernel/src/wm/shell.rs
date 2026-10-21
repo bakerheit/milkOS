@@ -277,10 +277,11 @@ impl Desktop {
 
 /// Centre x of dock icon `i` on screen (for scripts).
 pub fn dock_icon_center(i: usize) -> (i32, i32) {
-    dock_icon_center_of(i, 0)
+    dock_icon_center_of(i, super::packages::count())
 }
 
-/// The same once `extra` more tiles (packages) are in the dock: it grows from the centre.
+/// The same once there are `extra` package tiles in the dock (it grows from the centre):
+/// for demos that install packages first.
 pub fn dock_icon_center_of(i: usize, extra: usize) -> (i32, i32) {
     let d = dock_rect();
     let shift = (extra as i32 - super::packages::count() as i32) * (dock_icon() + DOCK_GAP) / 2;

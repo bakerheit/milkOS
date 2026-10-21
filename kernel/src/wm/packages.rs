@@ -1,6 +1,10 @@
-//! Installed `milk` packages on the desktop (docs/packages.md): every
-//! `/Applications/<name>/manifest` with a `dock Label #RRGGBB` line gets a dock tile (after
-//! the built-in ones) and a Skim entry. Its program is the manifest's `exec`.
+//! Apps from manifests on the desktop (docs/packages.md): every
+//! `/System/Applications/<name>/manifest` (system apps that ship with milkOS, like the
+//! Store) and `/Applications/<name>/manifest` (installed `milk` packages) with a
+//! `dock Label #RRGGBB` line gets a dock tile (after the built-in ones, system apps first)
+//! and a Skim entry. Its program is the manifest's `exec`: relative to the app's folder,
+//! or an absolute path (`exec /bin/store`). System apps run unsandboxed (the Store runs
+//! /bin/milk, which writes /Applications and makes clones); installed ones sandboxed.
 //!
 //! Window apps (they link `user/gui`) start like Paint, as a process whose window is the
 //! app; terminal programs (fortune, snake) open in a new Terminal tab. Which is which: the
@@ -20,6 +24,8 @@ use crate::gfx::{Color, rgb};
 use crate::sync::SpinLock;
 
 pub const DIR: &str = "/Applications";
+/// Apps that ship with the system.
+pub const SYSTEM_DIR: &str = "/System/Applications";
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pkg {
@@ -34,6 +40,8 @@ pub struct Pkg {
     pub exec: String,
     /// Opens its own window (else it runs in a Terminal tab).
     pub window: bool,
+    /// Ships with the system (/System/Applications): runs unsandboxed.
+    pub system: bool,
 }
 
 struct Cache {
@@ -67,7 +75,7 @@ fn links_gui(path: &str) -> bool {
     bytes.windows(needle.len()).any(|w| w == needle.as_slice())
 }
 
-fn parse(name: &str, text: &str) -> Option<Pkg> {
+fn parse(base: &str, name: &str, text: &str) -> Option<Pkg> {
     let (mut label, mut color, mut exec, mut desc, mut kind) =
         (None, None, None, String::new(), None);
     let mut pname = String::from(name);
@@ -103,7 +111,12 @@ fn parse(name: &str, text: &str) -> Option<Pkg> {
             _ => {}
         }
     }
-    let exec = format!("{DIR}/{name}/{}", exec?);
+    let exec = exec?;
+    let exec = if exec.starts_with('/') {
+        exec
+    } else {
+        format!("{base}/{name}/{exec}")
+    };
     // Only real files under the package (no .. tricks; milk refuses those anyway).
     if exec.contains("/../") || fs::stat(&exec).is_err() {
         return None;
@@ -117,20 +130,32 @@ fn parse(name: &str, text: &str) -> Option<Pkg> {
         window,
         name: pname,
         dir: String::from(name),
+        system: base == SYSTEM_DIR,
     })
 }
 
-/// Rescan /Applications. True if the list changed.
+/// Rescan /System/Applications and /Applications. True if the list changed.
 pub fn refresh() -> bool {
     let mut found: Vec<(String, u64, Pkg)> = Vec::new();
-    let mut entries = fs::readdir(DIR).unwrap_or_default();
-    entries.sort_by(|a, b| a.name.cmp(&b.name));
     let old: Vec<(String, u64, Pkg)> = CACHE.lock().pkgs.clone();
+    for base in [SYSTEM_DIR, DIR] {
+        scan(base, &old, &mut found);
+    }
+    let changed = found.len() != old.len() || found.iter().zip(&old).any(|(a, b)| a.2 != b.2);
+    if changed {
+        CACHE.lock().pkgs = found;
+    }
+    changed
+}
+
+fn scan(base: &str, old: &[(String, u64, Pkg)], found: &mut Vec<(String, u64, Pkg)>) {
+    let mut entries = fs::readdir(base).unwrap_or_default();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
     for e in entries {
         if e.name.starts_with('.') {
             continue;
         }
-        let path = format!("{DIR}/{}/manifest", e.name);
+        let path = format!("{base}/{}/manifest", e.name);
         let Ok(st) = fs::stat(&path) else {
             continue;
         };
@@ -140,16 +165,11 @@ pub fn refresh() -> bool {
         }
         if let Some(pkg) = fs::read_to_string(&path)
             .ok()
-            .and_then(|t| parse(&e.name, &t))
+            .and_then(|t| parse(base, &e.name, &t))
         {
             found.push((path, st.size, pkg));
         }
     }
-    let changed = found.len() != old.len() || found.iter().zip(&old).any(|(a, b)| a.2 != b.2);
-    if changed {
-        CACHE.lock().pkgs = found;
-    }
-    changed
 }
 
 /// The packages with dock entries, in name order.

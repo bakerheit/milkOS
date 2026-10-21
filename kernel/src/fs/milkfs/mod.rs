@@ -215,7 +215,13 @@ fn unmount_clone(name: &str) {
 pub fn clone(snap: &str, name: &str) -> Result<String> {
     let v = primary()?;
     let id = v.state.lock().clone_create(snap, name)?;
-    mount_clone(&v, name, id)
+    let r = mount_clone(&v, name, id);
+    audit_op(
+        "milkfs.clone",
+        &alloc::format!("snap={snap} name={name}"),
+        &r,
+    );
+    r
 }
 
 pub fn clones() -> Result<alloc::vec::Vec<CloneInfo>> {
@@ -227,7 +233,9 @@ pub fn discard_clone(name: &str) -> Result<()> {
     let v = primary()?;
     v.state.lock().clone_index_check(name)?;
     unmount_clone(name);
-    v.state.lock().clone_discard(name)
+    let r = v.state.lock().clone_discard(name);
+    audit_op("milkfs.clone.discard", &alloc::format!("name={name}"), &r);
+    r
 }
 
 /// Make clone `name` the live volume. The live state it replaces is kept as snapshot
@@ -238,7 +246,16 @@ pub fn promote_clone(name: &str) -> Result<String> {
     let mut keep = format!("before-{name}");
     keep.truncate(format::SNAP_NAME_MAX);
     unmount_clone(name);
-    v.state.lock().clone_promote(name, &keep)?;
+    let r = v.state.lock().clone_promote(name, &keep);
+    audit_op(
+        "milkfs.clone.promote",
+        &alloc::format!("name={name} kept_as={keep}"),
+        &r,
+    );
+    r?;
+    if user_op() {
+        crate::audit::volume_rewound();
+    }
     Ok(keep)
 }
 
@@ -286,7 +303,9 @@ fn primary() -> Result<Arc<Volume>> {
 
 /// Take a snapshot of the primary volume.
 pub fn snapshot(name: &str) -> Result<SnapInfo> {
-    primary()?.state.lock().snap_create(name)
+    let r = primary()?.state.lock().snap_create(name);
+    audit_op("milkfs.snapshot", &alloc::format!("name={name}"), &r);
+    r
 }
 
 pub fn snapshots() -> Result<alloc::vec::Vec<SnapInfo>> {
@@ -305,7 +324,28 @@ pub fn rollback(name: &str) -> Result<()> {
         st.snap_rollback(name)?;
         st.unlinked_inodes()?
     };
-    v.reclaim(&zombies)
+    let r = v.reclaim(&zombies);
+    audit_op("milkfs.rollback", &alloc::format!("to={name}"), &r);
+    if user_op() {
+        crate::audit::volume_rewound();
+    }
+    r
+}
+
+/// Is the public API working on the user's volume (not a self-test volume)?
+fn user_op() -> bool {
+    TEST_OVERRIDE.lock().is_none()
+}
+
+/// Audit a user-volume operation (self-test volumes are not audited).
+fn audit_op<T>(event: &str, detail: &str, r: &Result<T>) {
+    if user_op() {
+        let d = match r {
+            Ok(_) => alloc::format!("{detail} result=ok"),
+            Err(e) => alloc::format!("{detail} result={e:?}"),
+        };
+        crate::audit::record(event, &d);
+    }
 }
 
 /// Commit anything pending (v0 commits every operation already, so this is cheap).

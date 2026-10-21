@@ -416,6 +416,8 @@ pub fn exec(frame: &mut TrapFrame, path: &str, argv: &[String], envp: &[String])
     drop(old); // no longer in TTBR0
     drop(cloexec);
     *frame = user_frame(entry, sp);
+    let ppid = me.inner.lock().ppid;
+    crate::audit!("exec", "ppid={ppid} argv={}", argv.join(" "));
     Ok(())
 }
 

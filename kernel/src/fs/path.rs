@@ -80,12 +80,14 @@ pub fn mount(path: &str, fs: FsRef) -> Result<()> {
         Some(dir)
     };
     let root = fs.root();
+    let name = fs.name();
     MOUNTS.lock().push(Mount {
         covered,
         root,
         fs,
         path: String::from(path),
     });
+    crate::audit!("fs.mount", "path={path} fs={name}");
     Ok(())
 }
 
@@ -109,6 +111,7 @@ pub fn unmount(path: &str) -> Result<()> {
     let gone = m.remove(i);
     drop(m);
     drop(gone);
+    crate::audit!("fs.unmount", "path={path}");
     Ok(())
 }
 

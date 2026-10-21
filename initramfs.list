@@ -56,3 +56,4 @@
 /bin/nc       target/user/aarch64-unknown-none-softfloat/release/nc   755
 /bin/httpd    target/user/aarch64-unknown-none-softfloat/release/httpd   755
 /bin/play     target/user/aarch64-unknown-none-softfloat/release/play   755
+/bin/audit    target/user/aarch64-unknown-none-softfloat/release/audit   755

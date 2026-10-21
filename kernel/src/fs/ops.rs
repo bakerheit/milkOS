@@ -62,6 +62,9 @@ pub fn open_at(base: Option<&InodeRef>, path: &str, flags: u32, mode: u32) -> Re
             Err(e) => return Err(e),
         }
     };
+    if (writable || flags & O_TRUNC != 0) && sealed(&node) {
+        return Err(Errno::EPERM);
+    }
     let is_dir = node.kind() == InodeType::Dir;
     if (trailing || flags & O_DIRECTORY != 0) && !is_dir {
         return Err(Errno::ENOTDIR);
@@ -163,6 +166,9 @@ pub fn unlink_at(base: Option<&InodeRef>, path: &str) -> Result<()> {
             Errno::ENOTDIR
         });
     }
+    if path::step_raw(&p.dir, &p.name).is_ok_and(|n| sealed(&n)) {
+        return Err(Errno::EPERM);
+    }
     p.dir.unlink(&p.name)
 }
 
@@ -218,6 +224,9 @@ pub fn rename_at(
         && path::is_mount_boundary(&dst)
     {
         return Err(Errno::EBUSY);
+    }
+    if sealed(&src) || path::step_raw(&pn.dir, &pn.name).is_ok_and(|n| sealed(&n)) {
+        return Err(Errno::EPERM);
     }
     po.dir.rename(&po.name, &pn.dir, &pn.name)
 }
@@ -276,9 +285,18 @@ pub fn link_at(
     p.dir.link(&p.name, &src)
 }
 
+/// The audit log file is append-only for the kernel: user processes may not open it for
+/// writing, truncate, rename, replace or unlink it (EPERM). See `crate::audit`.
+fn sealed(node: &InodeRef) -> bool {
+    crate::audit::sealed(node) && crate::audit::user_context()
+}
+
 /// `truncate(2)`.
 pub fn truncate(path: &str, len: u64) -> Result<()> {
     let n = lookup(path)?;
+    if sealed(&n) {
+        return Err(Errno::EPERM);
+    }
     match n.kind() {
         InodeType::Dir => Err(Errno::EISDIR),
         InodeType::File => n.truncate(len),

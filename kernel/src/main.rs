@@ -9,6 +9,7 @@ use core::panic::PanicInfo;
 use core::ptr::write_volatile;
 
 mod audio;
+mod audit;
 mod cursor;
 mod display;
 mod dtb;
@@ -96,6 +97,7 @@ pub extern "C" fn kmain() -> ! {
     fs::selftest::run();
     sched::init();
     sched::selftest::run();
+    audit::init();
     net::init();
     net::selftest::run();
     audio::init();

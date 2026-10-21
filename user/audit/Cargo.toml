@@ -1,0 +1,12 @@
+[package]
+name = "audit"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "audit"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

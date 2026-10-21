@@ -34,27 +34,10 @@ fn main(_args: &rt::Args) -> i32 {
             quiet(pid);
         }
     }
-    // The web server for :80 (the kernel's own httpd is off by default).
-    if sys::read_file("/srv/www/index.html").is_ok() {
-        match sys::spawn("/bin/httpd", &["httpd", "-q", "/srv/www"], ENV) {
-            Ok(pid) => {
-                quiet(pid);
-                println!("  httpd (pid {pid}) serving /srv/www on :80");
-            }
-            Err(e) => println!("init: cannot start /bin/httpd: {e}"),
-        }
-    }
+    // Services (httpd, the Milk Drop daemon, ...): milkd starts and supervises them from
+    // /etc/milk/services (docs/processes.md, "Services"). init restarts milkd if it exits.
+    start_milkd();
 
-    // Milk Drop, if there is a VM-to-VM link (eth1): announce this machine there.
-    if sys::read_file("/proc/net/ifaddr").is_ok_and(|t| t.windows(5).any(|w| w == b"eth1 ")) {
-        match sys::spawn("/bin/drop", &["drop", "daemon", "-q"], ENV) {
-            Ok(pid) => {
-                quiet(pid);
-                println!("  drop (pid {pid}): Milk Drop on eth1");
-            }
-            Err(e) => println!("init: cannot start /bin/drop: {e}"),
-        }
-    }
     if let Ok(pid) = sys::spawn("/bin/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }
@@ -77,7 +60,20 @@ fn main(_args: &rt::Args) -> i32 {
     }
 }
 
-/// Our own background helpers (chime, httpd): reaped without a message when they exit 0.
+static mut MILKD: u32 = 0;
+
+fn start_milkd() {
+    match sys::spawn("/bin/milkd", &["milkd"], ENV) {
+        Ok(pid) => {
+            // SAFETY: init is single-threaded.
+            unsafe { MILKD = pid };
+            println!("  milkd (pid {pid}): service manager, /run/milkd.sock");
+        }
+        Err(e) => println!("init: cannot start /bin/milkd: {e}"),
+    }
+}
+
+/// Our own background helpers (the chime): reaped without a message when they exit 0.
 static mut QUIET: [u32; 4] = [0; 4];
 
 fn quiet(pid: u32) {
@@ -100,6 +96,15 @@ fn wait_for(pid: u32) -> i32 {
     loop {
         match sys::wait4(-1, 0) {
             Ok((p, st)) if p == pid => return st,
+            // SAFETY: single-threaded.
+            Ok((p, st)) if p == unsafe { MILKD } => {
+                println!(
+                    "init: milkd exited ({}), restarting it",
+                    sys::describe_status(st)
+                );
+                sys::sleep_ms(500);
+                start_milkd();
+            }
             Ok((p, 0)) if is_quiet(p) => {}
             Ok((p, st)) => println!("init: reaped pid {p} ({})", sys::describe_status(st)),
             Err(e) => {

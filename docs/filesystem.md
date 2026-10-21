@@ -514,9 +514,14 @@ and the words of text files.
 - **Stored** at `~/.cache/milk/index` (on milkfs: survives reboots), written 2 s after
   things go quiet (at most every 30 s while busy), via a temp file + rename. Format:
   `"MKSX" | version u32 | roots | entries (path, kind, size, mtime, folder, words) | xxh64`.
-  At boot it is loaded and **verified**: the roots are walked comparing size and mtime,
-  and only changed or new files are read again; without a usable file (missing, damaged,
-  other roots or version) the index is built from scratch.
+  A `sync` (`sync(2)`, `fs::sync_all`, the milkfs `sync` control) saves it first when it
+  changed since the last save (`search::flush`), so a machine turned off right after a
+  sync comes back to the index it had. At boot it is loaded and **verified**: the roots
+  are walked comparing size and mtime, and only changed or new files are read again;
+  queries are answered from the loaded index meanwhile (state `verifying`); without a
+  usable file (missing, damaged, other roots or version) the index is built from scratch
+  (queries wait for it: `spot: the index isn't ready yet`). `spot --wait` waits for
+  `ready`, `spot --wait-index` for any index to query.
 
 Numbers (`scripts/searchtest.sh`, 5051 entries, `-smp 4`): built from scratch in 170 ms;
 after a reboot loaded in 9 ms and verified in ~590 ms (cold caches: the walk reads every

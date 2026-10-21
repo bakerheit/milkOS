@@ -1863,6 +1863,7 @@ fn audit_op<T>(event: &str, detail: &str, r: &Result<T>) {
 
 /// Commit anything pending (v0 commits every operation already, so this is cheap).
 pub fn sync() -> Result<()> {
+    let _ = crate::fs::search::flush(); // the search index lives on it
     primary()?.state.lock().commit()
 }
 

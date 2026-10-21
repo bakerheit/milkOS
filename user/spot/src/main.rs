@@ -5,6 +5,9 @@
 //!   spot -l WORDS...        with kind, size, date and where it matched
 //!   spot -n N ...           at most N results (default 50)
 //!   spot --status           the index: state, size, roots
+//!   spot --wait             wait until the index is ready (built, or loaded and verified)
+//!   spot --wait-index       wait until there is an index to query (a saved one answers
+//!                           while it is being verified)
 //!   spot --rebuild          index again from scratch
 //!
 //! Filters: kind:md (or text, image, audio, folder), in:Documents (or in:/path),
@@ -50,7 +53,11 @@ fn date(t: i64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", secs / 3600, secs / 60 % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}",
+        secs / 3600,
+        secs / 60 % 60
+    )
 }
 
 fn human(n: u64) -> String {
@@ -91,6 +98,33 @@ fn main(args: &rt::Args) -> i32 {
                     }
                 };
             }
+            "--wait" | "--wait-index" => {
+                // --wait: until the index is ready (built, or loaded and verified);
+                // --wait-index: until there is one to query (a loaded one answers while it
+                // is verified). At most 10 minutes.
+                let any = a == "--wait-index";
+                for _ in 0..6000 {
+                    let s = read(&format!("{DIR}/status")).unwrap_or_default();
+                    let ready = s
+                        .lines()
+                        .any(|l| l.split_whitespace().collect::<Vec<_>>() == ["state:", "ready"]);
+                    let some = s.lines().any(|l| {
+                        l.strip_prefix("index:")
+                            .and_then(|r| r.split_whitespace().next())
+                            .is_some_and(|n| n != "0")
+                    });
+                    if ready || (any && some) {
+                        println!(
+                            "spot: the index is {}",
+                            if ready { "ready" } else { "loaded" }
+                        );
+                        return 0;
+                    }
+                    sys::sleep_ms(100);
+                }
+                eprintln!("spot: the index still isn't ready after 10 minutes");
+                return 1;
+            }
             "--rebuild" => {
                 return match write(&format!("{DIR}/rebuild"), "1") {
                     Ok(()) => {
@@ -104,7 +138,9 @@ fn main(args: &rt::Args) -> i32 {
                 };
             }
             "-h" | "--help" => {
-                eprintln!("usage: spot [-l] [-n N] WORDS... (kind:md in:Documents modified:today) | --status | --rebuild");
+                eprintln!(
+                    "usage: spot [-l] [-n N] WORDS... (kind:md in:Documents modified:today) | --status | --rebuild"
+                );
                 return 0;
             }
             w => words.push(w),

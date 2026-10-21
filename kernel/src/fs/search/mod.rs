@@ -382,6 +382,10 @@ pub(super) static REBUILD: AtomicBool = AtomicBool::new(false);
 /// An event couldn't be applied as is (the tree moved on before we got to it): verify
 /// once the queue is empty.
 static STALE: AtomicBool = AtomicBool::new(false);
+/// The index changed since it was last saved.
+static DIRTY: AtomicBool = AtomicBool::new(false);
+/// One save at a time (the indexer's own, and `flush` from a sync).
+static SAVING: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Default)]
 pub struct Status {
@@ -768,7 +772,21 @@ fn decode(b: &[u8]) -> Option<(Vec<String>, BTreeMap<String, Entry>)> {
     Some((roots, out))
 }
 
+/// Save the index now if it changed since the last save (`sync(2)`, the milkfs `sync`
+/// control, shutting down): so a machine turned off right after a change doesn't come
+/// back to an older saved index. Nothing to do while it is being built or verified (the
+/// saved one is still the newest complete one).
+pub fn flush() -> Result<()> {
+    if DIRTY.load(Ordering::Acquire) && status().state == "ready" {
+        save()?;
+    }
+    Ok(())
+}
+
 fn save() -> Result<()> {
+    let _one = SAVING.lock();
+    // Cleared before encoding: a change made meanwhile sets it again.
+    DIRTY.store(false, Ordering::Release);
     let data = match INDEX.lock().as_ref() {
         Some(ix) => encode(ix),
         None => return Ok(()),
@@ -776,8 +794,12 @@ fn save() -> Result<()> {
     let dir = parent(INDEX_PATH);
     crate::fs::ops::mkdir_all(dir, 0o700)?;
     let tmp = format!("{INDEX_PATH}.tmp");
-    crate::fs::ops::write_file(&tmp, &data)?;
-    crate::fs::ops::rename(&tmp, INDEX_PATH)?;
+    let r = crate::fs::ops::write_file(&tmp, &data)
+        .and_then(|_| crate::fs::ops::rename(&tmp, INDEX_PATH));
+    if r.is_err() {
+        DIRTY.store(true, Ordering::Release);
+    }
+    r?;
     let mut s = STATUS.lock();
     s.saves += 1;
     s.last_save_ns = crate::timer::now_ns();
@@ -813,8 +835,21 @@ fn thread() {
     let t0 = crate::timer::now_ns();
     match load() {
         Some(saved) => {
-            set_state("verifying");
             let n = saved.len();
+            // Queries work on the saved index at once, while it is checked against the
+            // disk (only files whose size or time changed are read again).
+            let mut quick = Index::default();
+            for r in roots() {
+                if let Ok(st) = crate::fs::ops::stat(&r) {
+                    quick.roots.push((r, (st.dev, st.ino)));
+                }
+            }
+            for e in saved.values() {
+                quick.insert(e.clone());
+            }
+            *INDEX.lock() = Some(quick);
+            STATUS.lock().origin = format!("loaded {n} entries from {INDEX_PATH}, verifying");
+            set_state("verifying");
             let t1 = crate::timer::now_ns();
             let (ix, reused) = scan(saved, &mut lim);
             let total = ix.by_path.len();
@@ -854,22 +889,27 @@ fn thread() {
             );
             set_state("ready");
             dirty_since.get_or_insert(crate::timer::now_ns());
+            DIRTY.store(true, Ordering::Release);
         }
         if let Some(e) = w.next(200_000_000)
             && handle(e, &mut lim)
         {
             dirty_since.get_or_insert(crate::timer::now_ns());
+            DIRTY.store(true, Ordering::Release);
         }
         if w.pending() == 0 && STALE.swap(false, Ordering::AcqRel) {
             verify(&mut lim, "caught up with a moved tree");
             dirty_since.get_or_insert(crate::timer::now_ns());
+            DIRTY.store(true, Ordering::Release);
         }
         // Save once things have been quiet for 2 s (or every 30 s while busy).
         if let Some(t) = dirty_since {
             let now = crate::timer::now_ns();
             let quiet = w.pending() == 0;
             if (quiet && now - t >= 2_000_000_000) || now - t >= 30_000_000_000 {
-                let _ = save();
+                if DIRTY.load(Ordering::Acquire) {
+                    let _ = save(); // (a sync may have saved it already)
+                }
                 dirty_since = None;
             }
         }
@@ -941,5 +981,12 @@ pub fn roundtrip_ok() -> bool {
 pub fn reset() {
     *INDEX.lock() = None;
     ROOTS.lock().clear();
-    set_state("starting");
+    STALE.store(false, Ordering::Release);
+    DIRTY.store(false, Ordering::Release);
+    let mut s = STATUS.lock();
+    s.origin.clear();
+    s.events = 0;
+    s.saves = 0;
+    s.last_save_ns = 0;
+    s.state = "starting";
 }

@@ -25,6 +25,8 @@
 /bin/svc     target/user/aarch64-unknown-none-softfloat/release/svc     755
 /bin/auth    target/user/aarch64-unknown-none-softfloat/release/auth    755
 /bin/milkd   target/user/aarch64-unknown-none-softfloat/release/milkd   755
+/bin/rngd    target/user/aarch64-unknown-none-softfloat/release/rngd    755
+/bin/soundd  target/user/aarch64-unknown-none-softfloat/release/soundd  755
 # Set-user-ID root (4755): they check a password themselves, then switch ids.
 /bin/su      target/user/aarch64-unknown-none-softfloat/release/su      4755
 /bin/sudo    target/user/aarch64-unknown-none-softfloat/release/sudo    4755
@@ -90,6 +92,7 @@
 /bin/store    target/user/aarch64-unknown-none-softfloat/release/store   755
 /bin/drop     target/user/aarch64-unknown-none-softfloat/release/drop   755
 /bin/tcpbench target/user/aarch64-unknown-none-softfloat/release/tcpbench 755
+/bin/netctl   target/user/aarch64-unknown-none-softfloat/release/netctl 755
 /bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
 /bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755
 /bin/dedupe  target/user/aarch64-unknown-none-softfloat/release/dedupe  755

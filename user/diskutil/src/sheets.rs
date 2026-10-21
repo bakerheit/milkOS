@@ -15,6 +15,8 @@ const LINK: u32 = SHEET + 4;
 const FIELD: u32 = SHEET + 10; // + index
 const CHIP_A: u32 = SHEET + 100; // + index
 const CHIP_B: u32 = SHEET + 300; // + index
+const CHIP_P: u32 = SHEET + 500; // encrypted backup
+const CHIP_P_1: u32 = SHEET + 501; // unencrypted backup
 
 pub enum Action {
     Rollback(String),
@@ -22,7 +24,7 @@ pub enum Action {
     DiscardClone(String),
     KeepClone(String),
     Repair,
-    Replace { stream: String },
+    Replace { stream: String, pass: String },
 }
 
 pub struct Confirm {
@@ -50,6 +52,11 @@ pub struct NewClone {
 }
 
 pub struct Backup {
+    /// 0: encrypted under a passphrase (a backup of an encrypted volume); 1: written unencrypted.
+    pub protect: usize,
+    pub pass: [Field; 2],
+    /// Which field has the keyboard: 0 the path, 1 and 2 the passphrase and its repeat.
+    pub focus: usize,
     pub snap: usize,
     /// Index into the older snapshots, or `None` for a full backup.
     pub from: Option<usize>,
@@ -59,6 +66,9 @@ pub struct Backup {
 }
 
 pub struct Restore {
+    /// The passphrase of an encrypted backup (empty for a plain one).
+    pub pass: Field,
+    pub focus: bool,
     pub files: Vec<String>,
     pub pick: usize,
     pub replace: bool,
@@ -109,7 +119,17 @@ fn masked(f: &Field) -> Field {
     }
 }
 
+/// A copy of a field with its text shown as stars.
+fn masked_field(f: &Field) -> Field {
+    masked(f)
+}
+
 impl App {
+    /// Does this system encrypt backups of an encrypted volume (it lists disks) and is the volume one?
+    fn encrypted_backups(&self) -> bool {
+        self.disk.disks.is_some() && self.disk.info.as_ref().and_then(|i| i.encrypted) == Some(true)
+    }
+
     fn safety_name(&self) -> String {
         let (d, sod) = timekit::date::split_secs(timeio::now_secs());
         format!("safety-{}-{:02}{:02}", d.fmt(), sod / 3600, sod / 60 % 60)
@@ -170,6 +190,9 @@ impl App {
             .unwrap_or(self.disk.snaps.len() - 1);
         let path = backup::path(&self.disk.snaps[snap].name, None);
         self.sheet = Some(Sheet::Backup(Backup {
+            protect: 0,
+            pass: [Field::new("", 80), Field::new("", 80)],
+            focus: 0,
             snap,
             from: None,
             path: Field::new(&path, 120),
@@ -181,6 +204,8 @@ impl App {
     pub fn open_restore(&mut self) {
         let files = data::backup_files();
         self.sheet = Some(Sheet::Restore(Restore {
+            pass: Field::new("", 80),
+            focus: false,
             files,
             pick: 0,
             replace: false,
@@ -351,11 +376,11 @@ impl App {
                     data::spawn_write("Repairing the volume", "check", "repair", timeio::mono_ms());
                 Ok(())
             }
-            Action::Replace { stream } => {
+            Action::Replace { stream, pass } => {
                 self.job = data::spawn_write(
                     "Restoring",
                     "receive",
-                    &backup::receive_request(stream, None, true),
+                    &backup::receive_request_with(stream, None, true, pass),
                     timeio::mono_ms(),
                 );
                 Ok(())
@@ -455,14 +480,41 @@ impl App {
                     b.understood = !b.understood;
                     self.sheet = Some(Sheet::Backup(b));
                 }
+                CHIP_P | CHIP_P_1 => {
+                    b.protect = (id - CHIP_P) as usize;
+                    b.error = None;
+                    self.sheet = Some(Sheet::Backup(b));
+                }
+                f if (FIELD..FIELD + 3).contains(&f) => {
+                    b.focus = (f - FIELD) as usize;
+                    self.sheet = Some(Sheet::Backup(b));
+                }
                 OK => {
-                    let ready = b.understood && self.disk.share_rw == Some(true);
-                    if !ready {
+                    let enc_flow = self.encrypted_backups();
+                    // A plain copy (of any volume, or chosen) needs the "I understand" box.
+                    let plain_copy = !enc_flow || b.protect == 1;
+                    let ready = self.disk.share_rw == Some(true) && (!plain_copy || b.understood);
+                    if enc_flow
+                        && b.protect == 0
+                        && let Err(e) =
+                            backup::check_backup_passphrase(&b.pass[0].text, &b.pass[1].text)
+                    {
+                        b.error = Some(e);
+                        self.sheet = Some(Sheet::Backup(b));
+                    } else if !ready {
                         self.sheet = Some(Sheet::Backup(b));
                     } else {
                         let from = b.from.map(|i| self.disk.snaps[i].name.clone());
                         let snap = self.disk.snaps[b.snap].name.clone();
-                        let req = backup::send_request(&snap, from.as_deref(), &b.path.text);
+                        let how = if !enc_flow {
+                            backup::Protect::None
+                        } else if b.protect == 1 {
+                            backup::Protect::Plaintext
+                        } else {
+                            backup::Protect::Passphrase(&b.pass[0].text)
+                        };
+                        let req =
+                            backup::send_request_with(&snap, from.as_deref(), &b.path.text, how);
                         let _ = data::ctl("send", "");
                         self.job = data::spawn_write("Backing up", "send", &req, timeio::mono_ms());
                     }
@@ -486,6 +538,10 @@ impl App {
             },
             Sheet::Restore(mut r) => match id {
                 CANCEL => {}
+                FIELD => {
+                    r.focus = true;
+                    self.sheet = Some(Sheet::Restore(r));
+                }
                 SWITCH => {
                     r.replace = !r.replace;
                     self.sheet = Some(Sheet::Restore(r));
@@ -507,14 +563,17 @@ impl App {
                                 )),
                                 snap_first: None,
                                 verb: "Replace",
-                                action: Action::Replace { stream },
+                                action: Action::Replace {
+                                    stream,
+                                    pass: r.pass.text.clone(),
+                                },
                             }));
                         } else {
                             let _ = data::ctl("receive", "");
                             self.job = data::spawn_write(
                                 "Restoring",
                                 "receive",
-                                &backup::receive_request(&stream, None, false),
+                                &backup::receive_request_with(&stream, None, false, &r.pass.text),
                                 timeio::mono_ms(),
                             );
                         }
@@ -622,15 +681,21 @@ impl App {
             },
             Some(Sheet::Backup(b)) => match k {
                 Key::Escape => self.sheet = None,
+                Key::Tab => b.focus = (b.focus + 1) % 3,
                 _ => {
-                    b.path.key(k, m);
+                    b.error = None;
+                    match b.focus {
+                        0 => b.path.key(k, m),
+                        n => b.pass[n - 1].key(k, m),
+                    };
                 }
             },
-            Some(Sheet::Restore(_)) => {
-                if k == Key::Escape {
-                    self.sheet = None;
+            Some(Sheet::Restore(r)) => match k {
+                Key::Escape => self.sheet = None,
+                _ => {
+                    r.pass.key(k, m);
                 }
-            }
+            },
             Some(Sheet::Unlock(u)) => match k {
                 Key::Escape => self.sheet = None,
                 Key::Enter => self.sheet_click(OK),
@@ -657,7 +722,7 @@ impl App {
 
     fn frame(&self, win: &mut Window, w: i32, h: i32, title: &str, danger: bool) -> Rect {
         let th = self.th;
-        let r = Rect::new((W - w) / 2, (H - h) / 2, w, h);
+        let r = Rect::new((win.w - w) / 2, (win.h - h) / 2, w, h);
         win.rrect(
             r.x - 1,
             r.y + 6,
@@ -891,7 +956,8 @@ impl App {
                 self.buttons(win, r, "Make clone", Kind::Primary, true);
             }
             Sheet::Backup(b) => {
-                let r = self.frame(win, 600, 470, "Back up", false);
+                let enc_flow = self.encrypted_backups();
+                let r = self.frame(win, 600, if enc_flow { 540 } else { 470 }, "Back up", false);
                 let x = r.x + 20;
                 win.text(x, r.y + 58, "SNAPSHOT", th.cocoa);
                 let mut cx = x;
@@ -959,44 +1025,116 @@ impl App {
                     Rect::new(x, r.y + 256, r.w - 40, 28),
                     &b.path,
                     "",
-                    true,
+                    b.focus == 0,
                     caret,
                     FIELD,
                 );
-                let wr = Rect::new(x, r.y + 296, r.w - 40, 56);
-                widgets::bordered(win, wr, 10, Theme::tint(th.milk, th.honey, 0x22), th.honey);
-                win.text(
-                    wr.x + 12,
-                    wr.y + 8,
-                    "This backup is not encrypted.",
-                    th.espresso,
-                );
-                win.text(
-                    wr.x + 12,
-                    wr.y + 28,
-                    "Anyone who gets the file can read everything in it.",
-                    th.espresso,
-                );
-                checkbox(
-                    win,
-                    &th,
-                    &mut self.hits,
-                    x,
-                    r.y + 366,
-                    b.understood,
-                    "I understand",
-                    CHECKBOX,
-                );
                 let rw = self.disk.share_rw == Some(true);
-                if !rw {
-                    win.text(x, r.y + 394, "The Mac folder is read-only. Start milkOS with MILK_SHARE_RW=1 to back up to the Mac.", th.danger);
-                } else if let Some(e) = b.error {
-                    win.text(x, r.y + 394, e, th.danger);
+                // A backup of an encrypted volume is encrypted by default, under a passphrase of
+                // its own; a plain copy is a choice. A plain volume's backup is a plain copy.
+                let plain_copy = !enc_flow || b.protect == 1;
+                let mut y = r.y + 296;
+                if enc_flow {
+                    let mut cx = x;
+                    cx += chip(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        cx,
+                        y,
+                        "Encrypted with a passphrase",
+                        b.protect == 0,
+                        CHIP_P,
+                    ) + 6;
+                    chip(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        cx,
+                        y,
+                        "Not encrypted",
+                        b.protect == 1,
+                        CHIP_P_1,
+                    );
+                    y += 36;
                 }
-                self.buttons(win, r, "Send", Kind::Primary, b.understood && rw);
+                if enc_flow && b.protect == 0 {
+                    let half = (r.w - 40 - 16) / 2;
+                    win.text(x, y, "PASSPHRASE", th.cocoa);
+                    win.text(x + half + 16, y, "AGAIN", th.cocoa);
+                    field(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        Rect::new(x, y + 20, half, 28),
+                        &masked_field(&b.pass[0]),
+                        "",
+                        b.focus == 1,
+                        caret,
+                        FIELD + 1,
+                    );
+                    field(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        Rect::new(x + half + 16, y + 20, half, 28),
+                        &masked_field(&b.pass[1]),
+                        "",
+                        b.focus == 2,
+                        caret,
+                        FIELD + 2,
+                    );
+                    win.text(
+                        x,
+                        y + 58,
+                        "Keep it: the backup can not be opened without it.",
+                        th.cocoa,
+                    );
+                    y += 82;
+                } else {
+                    let wr = Rect::new(x, y, r.w - 40, 56);
+                    widgets::bordered(win, wr, 10, Theme::tint(th.milk, th.honey, 0x22), th.honey);
+                    win.text(
+                        wr.x + 12,
+                        wr.y + 8,
+                        "This backup is not encrypted.",
+                        th.espresso,
+                    );
+                    win.text(
+                        wr.x + 12,
+                        wr.y + 28,
+                        "Anyone who gets the file can read everything in it.",
+                        th.espresso,
+                    );
+                    checkbox(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        x,
+                        wr.bottom() + 10,
+                        b.understood,
+                        "I understand",
+                        CHECKBOX,
+                    );
+                    y = wr.bottom() + 38;
+                }
+                if !rw {
+                    win.text(x, y, "The Mac folder is read-only. Start milkOS with MILK_SHARE_RW=1 to back up to the Mac.", th.danger);
+                } else if let Some(e) = b.error {
+                    win.text(x, y, e, th.danger);
+                }
+                let ready = rw && (!plain_copy || b.understood);
+                self.buttons(win, r, "Send", Kind::Primary, ready);
             }
             Sheet::Restore(rs) => {
-                let r = self.frame(win, 560, 330, "Restore from file", false);
+                let can_encrypt = self.disk.disks.is_some();
+                let r = self.frame(
+                    win,
+                    560,
+                    if can_encrypt { 400 } else { 330 },
+                    "Restore from file",
+                    false,
+                );
                 let x = r.x + 20;
                 win.text(
                     x,
@@ -1047,6 +1185,25 @@ impl App {
                     },
                     th.cocoa,
                 );
+                if can_encrypt {
+                    win.text(
+                        x,
+                        r.y + 266,
+                        "PASSPHRASE (ONLY IF THE BACKUP IS ENCRYPTED)",
+                        th.cocoa,
+                    );
+                    field(
+                        win,
+                        &th,
+                        &mut self.hits,
+                        Rect::new(x, r.y + 286, r.w - 40, 28),
+                        &masked_field(&rs.pass),
+                        "",
+                        rs.focus,
+                        caret,
+                        FIELD,
+                    );
+                }
                 self.buttons(win, r, "Receive", Kind::Primary, !rs.files.is_empty());
             }
             Sheet::Unlock(u) => {

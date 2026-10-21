@@ -44,10 +44,12 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 
 `dock-alternatives.html`: six alternatives to the dock (left rail, taskbar, apps in the menu bar, auto-hide with previews, dots pill, corner fan), with the screen space each costs. Source `dock-alternatives.mjs`.
 
+`dock-alternatives-2.html`: six more dock ideas that are not an icon strip at an edge (Rooms, Recents strip, Edge slots, Keypad, Trays, Selection-aware dock). Source `dock-alternatives-2.mjs`.
+
 ## Art direction
 `ART.md` is the art direction for icons, wallpapers, the boot splash and sounds. `art-direction.html` is the visual reference, `art/check-wallpaper.py` checks a wallpaper against the glass-contrast rule. Source: `art-direction.mjs`.
 
 ## Built-in apps
 `SPEC-APPS.md` specifies Activity Monitor, Text Editor, Calendar, Clock/Timer and Preview, built only on what the system can do today. `apps.html` has the 17 mockups. Source: `apps.mjs`.
 
-`SPEC-DISK-REMINDERS.md` specifies Disk Utility (a GUI over milkfs: snapshots and diff, clones, scrub, encryption, backups, a shared confirm sheet) and Reminders (lists, due dates, repeat, rung by the alarm daemon). `disk-reminders.html` has the 11 mockups. Source: `disk-reminders.mjs`.
+`SPEC-DISK-REMINDERS.md` specifies Disk Utility (a GUI over milkfs: snapshots and diff, clones, scrub, encryption, erasing and formatting a spare disk, encrypting in place, backups and restore with passphrases, a shared confirm sheet) and Reminders (lists, due dates, repeat, rung by the alarm daemon). `disk-reminders.html` has the 18 mockups. Source: `disk-reminders.mjs`.

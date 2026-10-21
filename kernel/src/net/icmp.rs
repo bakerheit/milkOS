@@ -3,7 +3,9 @@
 
 use super::Stack;
 use super::iface::PROTO_ICMP;
-use super::wire::{Ipv4, SockAddr, be16, checksum, put16};
+use super::ipv6;
+use super::socket::Family;
+use super::wire::{IpAddr, Ipv4, SockAddr, be16, checksum, put16};
 use crate::fs::errno::Result;
 use crate::timer;
 
@@ -86,12 +88,13 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, msg: &[u8], ip_pkt: &[u8]) {
                 // A ping socket's reply?
                 let target = st.socks.iter().find(|(_, s)| {
                     s.icmp
+                        && s.family == Family::V4
                         && s.owns_port
                         && s.local.port == id
-                        && (!s.udp_connected || s.remote.ip == src)
+                        && (!s.udp_connected || s.remote.ip == IpAddr::V4(src))
                 });
                 if let Some((i, _)) = target {
-                    super::udp::queue(st, i, SockAddr::new(src, 0), msg);
+                    super::udp::queue(st, i, SockAddr::new(src, 0), None, msg);
                 }
                 return;
             }
@@ -109,6 +112,20 @@ pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, msg: &[u8], ip_pkt: &[u8]) {
                 bytes: msg.len(),
             });
             st.wake_any = true;
+        }
+        DEST_UNREACH if msg[1] == 4 && msg.len() >= 8 + 20 + 8 => {
+            // Fragmentation needed: the quoted packet is one of ours that didn't fit.
+            let q = &msg[8..];
+            let ihl = ((q[0] & 0x0f) as usize) * 4;
+            if q[0] >> 4 != 4 || ihl < 20 || q.len() < ihl + 8 {
+                return;
+            }
+            let (qs, qd) = (super::wire::ip_at(q, 12), super::wire::ip_at(q, 16));
+            let mtu = match be16(msg, 6) {
+                0 => super::pmtu::MIN4, // an old router that doesn't say (RFC 1191 5)
+                m => m as usize,
+            };
+            super::tcp::too_big(st, qs.into(), qd.into(), q[9], &q[ihl..], mtu);
         }
         _ => {}
     }
@@ -137,17 +154,23 @@ pub fn send_ping(st: &mut Stack, dst: Ipv4, seq: u16) -> Result<()> {
     })
 }
 
-/// sendto on a ping socket (slot `i`): `msg` is an ICMP echo request; we set the
-/// identifier (the socket's local "port", bound on first use) and the checksum.
+/// sendto on a ping socket (slot `i`): `msg` is an ICMP echo request (ICMPv6 type 128 on
+/// an AF_INET6 one); we set the identifier (the socket's local "port", bound on first use)
+/// and the checksum.
 pub fn sendto(st: &mut Stack, i: usize, msg: &[u8], to: SockAddr) -> Result<usize> {
     use super::errno::*;
-    if msg.len() < 8 || msg[0] != ECHO_REQUEST || msg[1] != 0 {
+    let s = st.socks.get(i).ok_or(EBADF)?;
+    let v6 = s.family == Family::V6;
+    if v6 != to.ip.is_v6() {
+        return Err(EAFNOSUPPORT);
+    }
+    let want = if v6 { 128 } else { ECHO_REQUEST };
+    if msg.len() < 8 || msg[0] != want || msg[1] != 0 {
         return Err(EINVAL);
     }
-    if msg.len() > super::udp::MAX_PAYLOAD + 8 {
+    if msg.len() > super::udp::MAX_PAYLOAD + 8 - if v6 { 20 } else { 0 } {
         return Err(EMSGSIZE);
     }
-    let s = st.socks.get(i).ok_or(EBADF)?;
     if !s.owns_port {
         let p = st.socks.ephemeral(super::socket::SockType::Dgram)?;
         let s = st.socks.get(i).unwrap();
@@ -155,10 +178,25 @@ pub fn sendto(st: &mut Stack, i: usize, msg: &[u8], to: SockAddr) -> Result<usiz
         s.owns_port = true;
     }
     let s = st.socks.get(i).unwrap();
-    let (src, id) = (s.local.ip, s.local.port);
+    let (src, id, scope) = (s.local.ip, s.local.port, s.scope);
+    if let (IpAddr::V6(d6), true) = (to.ip, v6) {
+        let s6 = src.v6().unwrap_or(super::wire::Ipv6::UNSPECIFIED);
+        ipv6::send_icmp(st, s6, d6, scope, 64, 128, 0, |b| {
+            // b starts after type/code/checksum; send_icmp fills those in.
+            let body = &msg[4..];
+            b[..body.len()].copy_from_slice(body);
+            put16(b, 0, id);
+            body.len()
+        })?;
+        return Ok(msg.len());
+    }
+    let (src, dst) = (
+        src.v4().unwrap_or_default(),
+        to.ip.v4().ok_or(EAFNOSUPPORT)?,
+    );
     st.stats.icmp_out_msgs += 1;
     st.stats.icmp_out_echos += 1;
-    st.send_ip(src, to.ip, PROTO_ICMP, |b| {
+    st.send_ip(src, dst, PROTO_ICMP, |b| {
         b[..msg.len()].copy_from_slice(msg);
         put16(b, 4, id);
         put16(b, 2, 0);
@@ -167,6 +205,30 @@ pub fn sendto(st: &mut Stack, i: usize, msg: &[u8], to: SockAddr) -> Result<usiz
         msg.len()
     })?;
     Ok(msg.len())
+}
+
+/// Fragmentation needed (type 3 code 4) with the next-hop MTU, about `orig`, a packet
+/// with DF that didn't fit (the loopback path MTU test plays the router).
+pub fn send_frag_needed(st: &mut Stack, orig: &[u8], mtu: u16) {
+    let ihl = ((orig[0] & 0x0f) as usize) * 4;
+    let quote = &orig[..(ihl + 8).min(orig.len())];
+    let to = super::wire::ip_at(orig, 12);
+    if to.is_unspecified() || to.is_broadcast() {
+        return;
+    }
+    st.stats.icmp_out_msgs += 1;
+    st.stats.icmp_out_dest_unreachs += 1;
+    let _ = st.send_ip(Ipv4::UNSPECIFIED, to, PROTO_ICMP, |b| {
+        b[0] = DEST_UNREACH;
+        b[1] = 4;
+        b[2..6].fill(0);
+        put16(b, 6, mtu);
+        b[8..8 + quote.len()].copy_from_slice(quote);
+        let n = 8 + quote.len();
+        let c = checksum(&b[..n]);
+        put16(b, 2, c);
+        n
+    });
 }
 
 /// Destination unreachable (`code` 2 = protocol, 3 = port) about `orig` (an IP packet we

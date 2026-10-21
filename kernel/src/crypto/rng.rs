@@ -109,6 +109,17 @@ pub fn add_entropy(data: &[u8]) {
     RNG.lock().pool.update(data);
 }
 
+/// Bytes from a hardware source driven by a user-space driver (rngd through /dev/entropy,
+/// docs/drivers.md): mixed in like the kernel driver's and counted as device bytes. They
+/// never replace the pool, so a broken driver can't make it worse than jitter alone.
+pub fn add_device_entropy(data: &[u8]) {
+    RNG.lock().pool.update(data);
+    FROM_DEVICE.fetch_add(data.len() as u64, Ordering::Relaxed);
+    FROM_USER_DRIVER.fetch_add(data.len() as u64, Ordering::Relaxed);
+}
+
+static FROM_USER_DRIVER: AtomicU64 = AtomicU64::new(0);
+
 /// Seed the generator. Boot, after `virtio::init` (so virtio-rng is attached).
 pub fn init() {
     let mut pool = Sha256::new();
@@ -196,16 +207,21 @@ pub fn next_u64() -> u64 {
 
 /// `/proc`-style one-line status.
 pub fn status() -> alloc::string::String {
+    let source = if crate::udrv::user_owned(crate::udrv::Class::Rng) {
+        "rngd+jitter"
+    } else if vrng::present() {
+        "virtio-rng+jitter"
+    } else if FROM_DEVICE.load(Ordering::Relaxed) > 0 {
+        "jitter (no driver right now)"
+    } else {
+        "jitter-only(WEAK)"
+    };
     alloc::format!(
-        "seeded={} source={} reseeds={} device_bytes={} output_bytes={}\n",
+        "seeded={} source={source} reseeds={} device_bytes={} user_driver_bytes={} output_bytes={}\n",
         seeded() as u8,
-        if WEAK.load(Ordering::Relaxed) {
-            "jitter-only(WEAK)"
-        } else {
-            "virtio-rng+jitter"
-        },
         RESEEDS.load(Ordering::Relaxed),
         FROM_DEVICE.load(Ordering::Relaxed),
+        FROM_USER_DRIVER.load(Ordering::Relaxed),
         OUTPUT.load(Ordering::Relaxed)
     )
 }

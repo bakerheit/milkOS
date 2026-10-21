@@ -26,7 +26,8 @@ milk_disk_args
 source scripts/share.sh
 milk_share_args
 # eth0: restricted user-mode networking (see scripts/netdev.sh); MILK_HTTP_PORT=8088 to
-# reach the guest's web server at http://127.0.0.1:8088/.
+# reach the guest's web server at http://127.0.0.1:8088/. MILK_V6ONLY=1: a v6-only boot
+# (no IPv4 in slirp or on the guest's links).
 source scripts/netdev.sh
 milk_net_args
 # Sound (virtio-sound): off by default. MILK_SOUND=1 plays through the Mac's speakers
@@ -42,6 +43,9 @@ fi
 # `echo "info registers -a" | nc -U /tmp/x.sock`).
 MON_ARGS=()
 [ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
+# MILK_DRIVERS="rng=kernel sound=user": which driver runs each device, the kernel's or the
+# user-space one (default: user for both, the kernel's as the fallback; docs/drivers.md).
+[ -n "${MILK_DRIVERS:-}" ] && MON_ARGS+=(-fw_cfg "name=opt/milkos/drivers,string=$MILK_DRIVERS")
 exec qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial mon:stdio ${MON_ARGS[@]+"${MON_ARGS[@]}"} "${DISPLAY_ARGS[@]}" "${INPUT_ARGS[@]}" "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \
   "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}

@@ -59,12 +59,33 @@ fn text(p: &str) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
+/// eth1's IPv6 address on the VM link prefix (fd6d:696c:6b00:1::/64), once DAD is done.
+fn eth1_addr6() -> Option<rt::net::Ip> {
+    let t = text("/proc/net/ifaddr")?;
+    let l = t.lines().find(|l| l.starts_with("eth1 "))?;
+    l.split(' ')
+        .filter_map(|w| w.strip_prefix("inet6="))
+        .filter(|v| !v.contains(",tentative"))
+        .filter_map(|v| rt::net::Ip::parse(v.split('/').next()?))
+        .find(proto::on_vm_link6)
+}
+
+/// Does eth1 run IPv4 at all (its link-local probing, `linklocal=` in ifaddr)? Not in a
+/// v6-only boot.
+fn eth1_has_v4() -> bool {
+    text("/proc/net/ifaddr").is_some_and(|t| {
+        t.lines()
+            .find(|l| l.starts_with("eth1 "))
+            .is_some_and(|l| l.contains(" linklocal="))
+    })
+}
+
 /// eth1's IPv4 address, if the link is up and configured.
 fn eth1_addr() -> Option<[u8; 4]> {
     let t = text("/proc/net/ifaddr")?;
     let l = t.lines().find(|l| l.starts_with("eth1 "))?;
     let a = l.split(' ').find_map(|w| w.strip_prefix("inet="))?;
-    SockAddr::parse(a, 0).map(|s| s.ip)
+    SockAddr::parse(a, 0).and_then(|s| s.ip.v4())
 }
 
 fn hostname() -> String {
@@ -139,12 +160,19 @@ fn cmd_id() -> Res<()> {
     println!("name:        {}", id.name);
     println!("fingerprint: {}", fingerprint(&id.public));
     println!("public key:  {}", hex(&id.public));
-    match eth1_addr() {
-        Some(a) => println!(
+    let on: Vec<String> = eth1_addr()
+        .map(rt::net::Ip::V4)
+        .into_iter()
+        .chain(eth1_addr6())
+        .map(|a| alloc::format!("{a}"))
+        .collect();
+    if on.is_empty() {
+        println!("link:        no eth1 (Milk Drop needs the VM-to-VM link)");
+    } else {
+        println!(
             "link:        eth1 {} (transfers on port {XFER_PORT})",
-            ip_str(a)
-        ),
-        None => println!("link:        no eth1 (Milk Drop needs the VM-to-VM link)"),
+            on.join(" and ")
+        );
     }
     println!("keys:        {}", ident::DIR);
     if let Some(r) = ident::rotation(&id.public) {
@@ -197,6 +225,8 @@ fn cmd_selftest() -> Res<()> {
     let mut v = rt::crypto::selftest();
     let (p, t) = mdns::selftest();
     v.push(("mdns", p, t));
+    let (p, t) = net::selftest();
+    v.push(("addresses", p, t));
     for (name, p, t) in v {
         println!("drop: {name:<17} {p}/{t} vectors");
         all &= p == t;
@@ -245,34 +275,57 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         );
         id = new;
     }
-    let mut addr = None;
+    // eth1's addresses: IPv4 link-local (169.254/16, a few seconds of ARP probing) unless
+    // the link runs without IPv4, and the IPv6 VM-link address (DAD: half a second).
+    let (mut addr, mut addr6) = (None, None);
     for _ in 0..100 {
         addr = eth1_addr();
-        if addr.is_some() {
+        addr6 = eth1_addr6();
+        if (addr.is_some() || !eth1_has_v4()) && addr6.is_some() {
             break;
         }
         sys::sleep_ms(100);
     }
-    let addr = addr.ok_or("no eth1 address (no VM-to-VM link); not announcing")?;
-    let fd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(
-        fd,
-        &SockAddr {
-            ip: addr,
-            port: proto::DISC_PORT,
-        },
-    )
-    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), proto::DISC_PORT))?;
-    // The mDNS responder for `<name>.local` (rt::mdns), on the same link.
-    let mfd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    net::bind(
-        mfd,
-        &SockAddr {
-            ip: addr,
-            port: mdns::PORT,
-        },
-    )
-    .map_err(|e| alloc::format!("bind {}:{}: {e}", ip_str(addr), mdns::PORT))?;
+    if addr.is_none() && addr6.is_none() {
+        return Err(String::from(
+            "no eth1 address (no VM-to-VM link); not announcing",
+        ));
+    }
+    // Per family: the discovery socket (port 5359, with its group) and the mDNS responder
+    // (5353), bound to eth1's address so nothing on eth0 reaches them. Over IPv6 both join
+    // ff02::fb on eth1 (MLD), or the link wouldn't take the group's traffic.
+    let bind_udp = |a: SockAddr| -> Option<i32> {
+        let s = net::socket_for(&a, net::SOCK_DGRAM).ok()?;
+        if a.ip.is_v6() {
+            let _ = net::set_v6only(s, true);
+        }
+        let joined = !a.ip.is_v6() || net::group6(s, mdns::GROUP6, 3, true).is_ok();
+        if joined && net::bind(s, &a).is_ok() {
+            let _ = net::set_recv_timeout(s, 5);
+            Some(s)
+        } else {
+            eprintln!("drop: can't use {a} (bind or group join failed)");
+            let _ = sys::close(s);
+            None
+        }
+    };
+    let mut disc: Vec<(i32, SockAddr)> = Vec::new();
+    let mut mdns_fds: Vec<i32> = Vec::new();
+    let mut names: Vec<rt::net::Ip> = Vec::new();
+    if let Some(a) = addr {
+        let ip = rt::net::Ip::V4(a);
+        disc.extend(bind_udp(SockAddr::new(ip, proto::DISC_PORT)).map(|s| (s, proto::group())));
+        mdns_fds.extend(bind_udp(SockAddr::new(ip, mdns::PORT)));
+        names.push(ip);
+    }
+    if let Some(a6) = addr6 {
+        disc.extend(bind_udp(SockAddr::new(a6, proto::DISC_PORT)).map(|s| (s, proto::group6())));
+        mdns_fds.extend(bind_udp(SockAddr::new(a6, mdns::PORT)));
+        names.push(a6);
+    }
+    if disc.is_empty() {
+        return Err(String::from("no discovery socket on eth1; not announcing"));
+    }
     shared_tmp();
     let ctl = control_socket();
     if let Err(e) = &ctl {
@@ -283,17 +336,20 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     }
     let ctl = ctl.ok();
     if !quiet {
+        let on: Vec<String> = names.iter().map(|a| alloc::format!("{a}")).collect();
+        let groups: Vec<String> = disc.iter().map(|(_, g)| alloc::format!("{g}")).collect();
         println!(
-            "drop: {} (fingerprint {}) on eth1 {}, announcing to 224.0.0.251:{}, answering mDNS for {}.local",
+            "drop: {} (fingerprint {}) on eth1 {}, announcing to {}, answering mDNS for {}.local",
             id.name,
             fingerprint(&id.public),
-            ip_str(addr),
-            proto::DISC_PORT,
+            on.join(" and "),
+            groups.join(" and "),
             id.name
         );
     }
     let host = hostname();
-    let mut heard: Vec<(Peer, u64)> = Vec::new();
+    let mut heard: Vec<Peer> = Vec::new();
+    let mut seen: Vec<([u8; 32], u64)> = Vec::new();
     let mut next = 0u64;
     let mut buf = [0u8; 1500];
     let mut me = id;
@@ -303,80 +359,91 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
         if let Some(now) = ident::load() {
             *me = now;
         }
-        proto::announce(me, &host, sys::stat_path(RECEIVING, false).is_ok())
+        proto::announce(me, &host, sys::stat_path(RECEIVING, false).is_ok(), addr6)
     };
-    // Both sockets are only read once poll says so; the short timeout is a backstop.
-    let _ = net::set_recv_timeout(fd, 5);
-    let _ = net::set_recv_timeout(mfd, 5);
+    let query = alloc::format!("{MAGIC} QUERY");
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        if now >= next {
-            let _ = net::sendto(fd, current(&mut me).as_bytes(), &proto::group());
+        // Hidden (`drop visible off`, netctl): no announcements, no answers.
+        let visible = ident::visible();
+        if now >= next && visible {
+            // Both families: IPv4 for older peers, ff02::fb for IPv6 ones.
+            let ann = current(&mut me);
+            for (s, g) in &disc {
+                let _ = net::sendto(*s, ann.as_bytes(), g);
+            }
             next = now + 10_000_000_000;
         }
-        let mut p = Vec::from([
-            net::PollFd {
+        // Poll set: discovery sockets, then mDNS sockets, then the control socket.
+        let mut p: Vec<net::PollFd> = disc
+            .iter()
+            .map(|(s, _)| *s)
+            .chain(mdns_fds.iter().copied())
+            .chain(ctl)
+            .map(|fd| net::PollFd {
                 fd,
                 events: net::POLLIN,
                 revents: 0,
-            },
-            net::PollFd {
-                fd: mfd,
-                events: net::POLLIN,
-                revents: 0,
-            },
-        ]);
-        if let Some(l) = ctl {
-            p.push(net::PollFd {
-                fd: l,
-                events: net::POLLIN,
-                revents: 0,
-            });
-        }
+            })
+            .collect();
         if net::poll(&mut p, Some(1000)).is_err() {
             sys::sleep_ms(100);
             continue;
         }
+        let ready = |k: usize| p[k].revents & net::POLLIN != 0;
         if let Some(l) = ctl
-            && p[2].revents & net::POLLIN != 0
+            && ready(p.len() - 1)
         {
             serve_control(l);
         }
-        if p[1].revents & net::POLLIN != 0
-            && let Ok((n, from)) = net::recvfrom(mfd, &mut buf)
-        {
-            if let Some(now) = ident::load() {
-                me = now;
+        for (k, &s) in mdns_fds.iter().enumerate() {
+            if ready(disc.len() + k)
+                && let Ok((n, from)) = net::recvfrom(s, &mut buf)
+            {
+                if let Some(now) = ident::load() {
+                    me = now;
+                }
+                // Read now, not at the top of the loop: poll may have waited a second.
+                if ident::visible() {
+                    answer_mdns(s, &buf[..n], from, &me.name, &names);
+                }
             }
-            answer_mdns(mfd, &buf[..n], from, &me.name, addr);
         }
-        if p[0].revents & net::POLLIN == 0 {
-            continue;
-        }
-        let Ok((n, from)) = net::recvfrom(fd, &mut buf) else {
-            continue;
-        };
-        let line = String::from_utf8_lossy(&buf[..n]);
-        let line = line.trim_end();
-        if line == alloc::format!("{MAGIC} QUERY") {
-            let _ = net::sendto(fd, current(&mut me).as_bytes(), &from);
-        } else if let Some(peer) = proto::parse_announce(line, from)
-            && peer.key != me.public
-        {
-            heard.retain(|(p, _)| p.key != peer.key);
-            heard.push((peer, sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000));
-            let mut s = String::new();
-            for (p, t) in &heard {
-                s.push_str(&alloc::format!(
-                    "{} {} {} {} {}\n",
-                    p.name,
-                    ip_str(p.addr),
-                    ident::fp_compact(&p.key),
-                    p.receiving as u8,
-                    t
-                ));
+        for (k, &(s, _)) in disc.iter().enumerate() {
+            if !ready(k) {
+                continue;
             }
-            let _ = ident::write_atomic(PEERS_CACHE, s.as_bytes(), 0o644);
+            let Ok((n, from)) = net::recvfrom(s, &mut buf) else {
+                continue;
+            };
+            let line = String::from_utf8_lossy(&buf[..n]);
+            let line = line.trim_end();
+            if line == query {
+                if ident::visible() {
+                    let _ = net::sendto(s, current(&mut me).as_bytes(), &from);
+                }
+            } else if let Some(peer) = proto::parse_announce(line, from)
+                && peer.key != me.public
+            {
+                let key = peer.key;
+                proto::merge(&mut heard, peer);
+                let t = sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000;
+                seen.retain(|(k, _)| *k != key);
+                seen.push((key, t));
+                let mut out = String::new();
+                for p in &heard {
+                    let t = seen.iter().find(|(k, _)| *k == p.key).map_or(0, |x| x.1);
+                    out.push_str(&alloc::format!(
+                        "{} {} {} {} {}\n",
+                        p.name,
+                        ip_str(p.addr),
+                        ident::fp_compact(&p.key),
+                        p.receiving as u8,
+                        t
+                    ));
+                }
+                let _ = ident::write_atomic(PEERS_CACHE, out.as_bytes(), 0o644);
+            }
         }
     }
 }
@@ -487,7 +554,7 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 "not a Milk Drop hello or offer for this machine's key",
             )),
         },
-        "name" | "rotate" if !admin => {
+        "name" | "rotate" | "visible" if !admin => {
             audit(
                 "drop.refused",
                 &alloc::format!("{who} request={cmd} reason=not-an-administrator"),
@@ -506,6 +573,10 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
                 String::new()
             })
         }
+        "visible" if matches!(arg, "on" | "off") => ident::set_visible(arg == "on").map(|_| {
+            audit("drop.visible", &alloc::format!("visible={arg} by {who}"));
+            String::new()
+        }),
         "rotate" => ident::rotate(&id).map(|(old, new)| {
             audit(
                 "drop.rotate",
@@ -530,22 +601,35 @@ fn control_request(line: &str, peer: rt::unix::Cred) -> String {
     }
 }
 
-/// Answer an mDNS query if it asks for `<name>.local` (A or ANY): straight back to the
+/// Answer an mDNS query (over either family) if it asks for `<name>.local`: A, AAAA or
+/// ANY, with eth1's IPv4 and IPv6 addresses (`addrs`) as asked. Straight back to the
 /// asker for a legacy unicast query (source port not 5353, as rt::mdns::resolve sends),
-/// else to the group.
-fn answer_mdns(fd: i32, pkt: &[u8], from: SockAddr, name: &str, addr: [u8; 4]) {
+/// else to the group of the family it came in on.
+fn answer_mdns(fd: i32, pkt: &[u8], from: SockAddr, name: &str, addrs: &[rt::net::Ip]) {
     let Some((id, qs)) = mdns::parse_query(pkt) else {
         return;
     };
     let mine = alloc::format!("{name}.local");
-    for (q, ty) in qs {
-        if (ty == mdns::TYPE_A || ty == mdns::TYPE_ANY) && q.eq_ignore_ascii_case(&mine) {
-            let legacy = from.port != mdns::PORT;
-            let reply = mdns::answer_packet(if legacy { id } else { 0 }, &mine, addr, 10, legacy);
-            let to = if legacy { from } else { mdns::group() };
-            let _ = net::sendto(fd, &reply, &to);
-            return;
-        }
+    let types: Vec<u16> = qs
+        .iter()
+        .filter(|(q, _)| q.eq_ignore_ascii_case(&mine))
+        .map(|(_, ty)| *ty)
+        .collect();
+    let legacy = from.port != mdns::PORT;
+    if let Some(reply) = mdns::answer_packet(
+        if legacy { id } else { 0 },
+        &mine,
+        &types,
+        addrs,
+        10,
+        legacy,
+    ) {
+        let to = match (legacy, from.ip.is_v6()) {
+            (true, _) => from,
+            (false, true) => mdns::group6(),
+            (false, false) => mdns::group(),
+        };
+        let _ = net::sendto(fd, &reply, &to);
     }
 }
 
@@ -615,17 +699,20 @@ fn cmd_forget(name: &str) -> Res<()> {
     }
 }
 
-fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
+/// Where to send for `spec` (an address, `NAME.local`, a drop name or fingerprint
+/// prefix): the addresses to try in order, and the announcement it matched, if any. A
+/// peer found by discovery is reached over IPv4 unless `want` is V6 (then its announced
+/// eth1 IPv6 address); `.local` names come back IPv6 first, as getaddrinfo orders them.
+fn resolve(spec: &str, want: net::Want) -> Res<(Vec<SockAddr>, Option<Peer>)> {
     if let Some(a) = SockAddr::parse(spec, XFER_PORT) {
-        return Ok((a, None));
+        return Ok((alloc::vec![a], None));
     }
     if mdns::is_local(spec) {
-        let ip = mdns::resolve(spec, 1500)?;
+        let ips = mdns::resolve(spec, 1500, want)?;
         return Ok((
-            SockAddr {
-                ip,
-                port: XFER_PORT,
-            },
+            ips.into_iter()
+                .map(|ip| SockAddr::new(ip, XFER_PORT))
+                .collect(),
             None,
         ));
     }
@@ -643,11 +730,12 @@ fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
         Vec::new()
     };
     match pick.as_slice() {
+        [p] if want == net::Want::V6 => match p.addr6 {
+            Some(a6) => Ok((alloc::vec![SockAddr::new(a6, p.port)], Some((*p).clone()))),
+            None => Err(alloc::format!("{} announces no IPv6 address", p.name)),
+        },
         [p] => Ok((
-            SockAddr {
-                ip: p.addr,
-                port: p.port,
-            },
+            alloc::vec![SockAddr::new(p.addr, p.port)],
             Some((*p).clone()),
         )),
         [] => Err(alloc::format!(
@@ -659,7 +747,7 @@ fn resolve(spec: &str) -> Res<(SockAddr, Option<Peer>)> {
     }
 }
 
-fn cmd_send(spec: &str, path: &str) -> Res<()> {
+fn cmd_send(spec: &str, path: &str, want: net::Want) -> Res<()> {
     let id = identity()?;
     let data = sys::read_file(path).map_err(|e| alloc::format!("{path}: {e}"))?;
     if data.len() as u64 > MAX_SEND {
@@ -667,16 +755,33 @@ fn cmd_send(spec: &str, path: &str) -> Res<()> {
     }
     let fname = path.rsplit('/').next().unwrap_or(path);
     let sha = hex(&rt::sha256::sha256(&data));
-    let (addr, announced) = resolve(spec)?;
-    let fd = net::socket(net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    if let Err(e) = net::connect(fd, &addr) {
-        let _ = sys::close(fd);
-        return Err(if e.0 == 111 {
+    let (addrs, announced) = resolve(spec, want)?;
+    // The first address that takes the connection (refused everywhere: not receiving).
+    let mut conn = None;
+    let mut refused = false;
+    let mut last = String::new();
+    for addr in &addrs {
+        let fd =
+            net::socket_for(addr, net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
+        match net::connect(fd, addr) {
+            Ok(()) => {
+                conn = Some((fd, *addr));
+                break;
+            }
+            Err(e) => {
+                let _ = sys::close(fd);
+                refused |= e.0 == 111;
+                last = alloc::format!("connect {addr}: {e}");
+            }
+        }
+    }
+    let Some((fd, addr)) = conn else {
+        return Err(if refused {
             alloc::format!("{spec} isn't receiving (run `drop recv` on it)")
         } else {
-            alloc::format!("connect {addr}: {e}")
+            last
         });
-    }
+    };
     let mut c = Conn::new(fd, 10_000);
     // The authenticated X25519 key agreement (milkdrop::session); encrypted from here on.
     let mut sess = session::connect(
@@ -1005,31 +1110,69 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
 
 fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
     let id = identity()?;
-    let addr = eth1_addr().ok_or("no eth1 address (Milk Drop needs the VM-to-VM link)")?;
-    let l = net::socket(net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
-    let _ = net::set_reuseaddr(l);
-    let me = SockAddr {
-        ip: addr,
-        port: XFER_PORT,
-    };
-    net::bind(l, &me).map_err(|e| alloc::format!("bind {me}: {e} (another drop recv?)"))?;
-    net::listen(l, 2).map_err(|e| alloc::format!("listen: {e}"))?;
+    // A listener per eth1 address (IPv4 link-local, IPv6 VM-link, v6-only): only eth1, a
+    // transfer never arrives through eth0.
+    let mut ls: Vec<(i32, SockAddr)> = Vec::new();
+    let wants: Vec<SockAddr> = eth1_addr()
+        .map(|a| SockAddr::v4(a, XFER_PORT))
+        .into_iter()
+        .chain(eth1_addr6().map(|a6| SockAddr::new(a6, XFER_PORT)))
+        .collect();
+    if wants.is_empty() {
+        return Err(String::from(
+            "no eth1 address (Milk Drop needs the VM-to-VM link)",
+        ));
+    }
+    for me in wants {
+        let s =
+            net::socket_for(&me, net::SOCK_STREAM).map_err(|e| alloc::format!("socket: {e}"))?;
+        if me.ip.is_v6() {
+            let _ = net::set_v6only(s, true);
+        }
+        let _ = net::set_reuseaddr(s);
+        if let Err(e) = net::bind(s, &me).and_then(|_| net::listen(s, 2)) {
+            let _ = sys::close(s);
+            for (o, _) in ls {
+                let _ = sys::close(o);
+            }
+            return Err(alloc::format!("bind {me}: {e} (another drop recv?)"));
+        }
+        ls.push((s, me));
+    }
     shared_tmp();
     let _ = ident::write_atomic(
         RECEIVING,
         alloc::format!("{}\n", sys::getpid()).as_bytes(),
         0o644,
     );
+    let on: Vec<String> = ls.iter().map(|(_, a)| alloc::format!("{a}")).collect();
     println!(
-        "drop: receiving as {} (fingerprint {}) on {me}; files go to {}",
+        "drop: receiving as {} (fingerprint {}) on {}; files go to {}",
         id.name,
         fingerprint(&id.public),
+        on.join(" and "),
         dir
     );
     let r = loop {
-        let (fd, from) = match net::accept(l) {
-            Ok(x) => x,
+        let mut pf: Vec<net::PollFd> = ls
+            .iter()
+            .map(|&(fd, _)| net::PollFd {
+                fd,
+                events: net::POLLIN,
+                revents: 0,
+            })
+            .collect();
+        match net::poll(&mut pf, None) {
+            Ok(_) => {}
             Err(e) if e.0 == 4 => continue,
+            Err(e) => break Err(alloc::format!("poll: {e}")),
+        }
+        let Some(which) = pf.iter().find(|p| p.revents != 0).map(|p| p.fd) else {
+            continue;
+        };
+        let (fd, from) = match net::accept(which) {
+            Ok(x) => x,
+            Err(e) if e.0 == 4 || e.0 == 11 => continue,
             Err(e) => break Err(alloc::format!("accept: {e}")),
         };
         let mut c = Conn::new(fd, 10_000);
@@ -1042,13 +1185,15 @@ fn cmd_recv(yes: bool, keep: bool, dir: &str) -> Res<()> {
         }
     };
     let _ = sys::unlink(RECEIVING);
-    let _ = sys::close(l);
+    for (s, _) in ls {
+        let _ = sys::close(s);
+    }
     r
 }
 
 fn usage() -> i32 {
     eprintln!(
-        "usage: drop id [--rotate] | name NEW | list [-w MS] | send PEER FILE | recv [-y] [-k]\n       drop peers | forget NAME | daemon [-q] | selftest"
+        "usage: drop id [--rotate] | name NEW | list [-w MS] | send [-4|-6] PEER FILE | recv [-y] [-k]\n       drop visible [on|off]\n       drop peers | forget NAME | daemon [-q] | selftest"
     );
     2
 }
@@ -1069,8 +1214,27 @@ fn main(args: &rt::Args) -> i32 {
             Err(_) => return usage(),
         },
         ["peers"] => cmd_peers(),
+        ["visible"] => {
+            println!(
+                "drop: this machine is {} on the link",
+                if ident::visible() {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            );
+            Ok(())
+        }
+        ["visible", v @ ("on" | "off")] => ident::set_visible(*v == "on").map(|_| {
+            println!(
+                "drop: this machine is now {} on the link",
+                if *v == "on" { "visible" } else { "hidden" }
+            )
+        }),
         ["forget", n] => cmd_forget(n),
-        ["send", peer, file] => cmd_send(peer, file),
+        ["send", peer, file] => cmd_send(peer, file, net::Want::Any),
+        ["send", "-4", peer, file] => cmd_send(peer, file, net::Want::V4),
+        ["send", "-6", peer, file] => cmd_send(peer, file, net::Want::V6),
         ["recv", rest @ ..] if rest.iter().all(|f| matches!(*f, "-y" | "-k")) => cmd_recv(
             rest.contains(&"-y"),
             rest.contains(&"-k"),

@@ -7,8 +7,10 @@
 //! * RFC 2018 SACK (receiver: up to 3-4 blocks, the newest first; sender: a scoreboard)
 //!   with SACK-based loss recovery in the style of RFC 6675 (pipe vs cwnd, holes below the
 //!   highest SACKed byte retransmitted first); without SACK, NewReno-style partial ACKs
-//!   (RFC 6582);
-//! * delayed ACKs (every second full segment, else after [`DELACK`]; at once for
+//!   (RFC 6582); limited transmit (RFC 3042) and early retransmit for small flights
+//!   (RFC 5827); sender-side silly window avoidance; cwnd in whole segments (SMSS);
+//! * delayed ACKs (once more than a full segment is unacknowledged, else after
+//!   [`DELACK`]; quick-ACK for a connection's first 16 segments; at once for
 //!   out-of-order data, a filled hole, a FIN or a window update) and Nagle (RFC 896;
 //!   off with TCP_NODELAY);
 //! * auto-sized buffers: the receive buffer doubles when the application reads more than
@@ -26,16 +28,19 @@ use super::Stack;
 use super::Stats;
 use super::errno::*;
 use super::iface::{Iface, PROTO_TCP};
+use super::ipv6::{self, State6};
 use super::ring::Ring;
 use super::socket::{
     MAX_BUF, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLRDHUP, POLLRDNORM, POLLWRNORM, SockType,
 };
-use super::wire::{Ipv4, SockAddr, be16, be32, finish, pseudo_sum, put16, put32, sum};
+use super::wire::{IpAddr, Ipv4, Ipv6, SockAddr, be16, be32, finish, l4_sum, put16, put32, sum};
 use crate::fs::errno::{Errno, Result};
 
 pub const MAX_BACKLOG: usize = 16;
 /// MSS we announce and use at most (1500 MTU - 40).
 pub const OUR_MSS: u16 = 1460;
+/// The same over IPv6 (1500 - 40 - 20).
+pub const OUR_MSS6: u16 = 1440;
 /// MSS assumed when the peer sends no option (RFC 9293).
 const DEFAULT_MSS: u16 = 536;
 /// Our window scale shift: 65535 << 7 = 8 MiB, above `socket::MAX_BUF`.
@@ -151,6 +156,8 @@ pub struct Tcb {
     rcv_adv: u32,
     /// Send MSS (min of the peer's option and ours), not counting options.
     pub mss: u16,
+    /// Times a "too big" from the path made the MSS smaller.
+    pub pmtu_drops: u32,
     /// Window scaling in use: the peer's shift (applied to its windows) and ours.
     pub snd_wscale: u8,
     pub rcv_wscale: u8,
@@ -190,6 +197,9 @@ pub struct Tcb {
     pub kick: Option<u64>,
     /// Bytes received in order since our last ACK.
     unacked: u32,
+    /// Quick-ACK mode (as Linux): the first segments of a connection are ACKed at once,
+    /// so slow start isn't held up by delayed ACKs.
+    quickack: u8,
     /// End of the last small (sub-MSS) segment sent: Nagle (Minshall's variant) holds a
     /// small segment only while an earlier small one is unacknowledged.
     snd_sml: u32,
@@ -216,6 +226,9 @@ pub struct Tcb {
     pub backlog: u8,
     pub connect_pending: bool,
     pub retransmits: u32,
+    /// Retransmission timeouts, and the longest RTO waited for (ms).
+    pub timeouts: u32,
+    pub max_rto_ms: u32,
     /// Out-of-order data already written into the receive ring past its end, as absolute
     /// sequence ranges [start, end); `ooo_last` is the newest (reported first in SACK).
     ooo: [(u32, u32); MAX_OOO],
@@ -244,6 +257,7 @@ impl Tcb {
             rcv_nxt: 0,
             rcv_adv: 0,
             mss: DEFAULT_MSS,
+            pmtu_drops: 0,
             snd_wscale: 0,
             rcv_wscale: 0,
             sack_ok: false,
@@ -268,6 +282,7 @@ impl Tcb {
             delack: None,
             kick: None,
             unacked: 0,
+            quickack: 16,
             snd_sml: 0,
             cwnd: 0,
             ssthresh: u32::MAX,
@@ -286,6 +301,8 @@ impl Tcb {
             backlog: 0,
             connect_pending: false,
             retransmits: 0,
+            timeouts: 0,
+            max_rto_ms: 0,
             ooo: [(0, 0); MAX_OOO],
             nooo: 0,
             ooo_last: 0,
@@ -335,6 +352,14 @@ impl Tcb {
             n += 4 + 8 * self.nooo.min(self.max_sack_blocks() as u8) as usize;
         }
         n
+    }
+
+    /// Sender MSS for congestion control: payload of a full segment with the options every
+    /// segment carries (timestamps), so cwnd holds whole segments (RFC 5681 SMSS).
+    fn smss(&self) -> u32 {
+        (self.mss as u32)
+            .saturating_sub(if self.ts_ok { 12 } else { 0 })
+            .max(64)
     }
 
     fn max_sack_blocks(&self) -> usize {
@@ -517,9 +542,9 @@ fn initial_seq(local: SockAddr, remote: SockAddr, now: u64) -> u32 {
     }
     let mut h = crate::crypto::sha256::Sha256::new();
     h.update(&key.to_le_bytes());
-    h.update(&local.ip.0);
+    h.update(local.ip.bytes());
     h.update(&local.port.to_be_bytes());
-    h.update(&remote.ip.0);
+    h.update(remote.ip.bytes());
     h.update(&remote.port.to_be_bytes());
     let d = h.finish();
     u32::from_le_bytes([d[0], d[1], d[2], d[3]]).wrapping_add((now / 4000) as u32)
@@ -548,12 +573,12 @@ struct Opts {
 }
 
 impl Opts {
-    fn write(&self, b: &mut [u8]) -> usize {
+    fn write(&self, b: &mut [u8], mss: u16) -> usize {
         let mut k = 0;
         if self.syn {
             b[0] = 2;
             b[1] = 4;
-            put16(b, 2, OUR_MSS);
+            put16(b, 2, mss);
             k = 4;
             if self.sack_ok {
                 b[k..k + 4].copy_from_slice(&[1, 1, 4, 2]);
@@ -585,45 +610,89 @@ impl Opts {
 
 /// Build and send one segment. `data`: (ring, offset from its head, length). False if it
 /// could not be queued (device or loopback queue full).
-#[allow(clippy::too_many_arguments)]
-fn emit(
-    iface: &mut Iface,
-    stats: &mut Stats,
+/// The parts of the stack that sending a segment touches (so `output` can hold the
+/// socket table at the same time).
+struct Out<'a> {
+    iface: &'a mut Iface,
+    ip6: &'a mut State6,
+    stats: &'a mut Stats,
     now: u64,
+}
+
+fn emit(
+    out: &mut Out,
     local: SockAddr,
     remote: SockAddr,
+    scope: Option<usize>,
     h: Hdr,
     o: &Opts,
     data: Option<(&Ring, usize, usize)>,
 ) -> bool {
-    stats.tcp_out_segs += 1;
-    stats.ip_out_requests += 1;
+    out.stats.tcp_out_segs += 1;
+    out.stats.ip_out_requests += 1;
     if h.flags & RST != 0 {
-        stats.tcp_out_rsts += 1;
+        out.stats.tcp_out_rsts += 1;
     }
-    iface
-        .send_ip(now, local.ip, remote.ip, PROTO_TCP, |b| {
-            put16(b, 0, local.port);
-            put16(b, 2, remote.port);
-            put32(b, 4, h.seq);
-            put32(b, 8, h.ack);
-            let ol = o.write(&mut b[20..60]);
-            let hl = 20 + ol;
-            b[12] = ((hl / 4) << 4) as u8;
-            b[13] = h.flags;
-            put16(b, 14, h.wnd);
-            put16(b, 16, 0);
-            put16(b, 18, 0);
-            let mut n = hl;
-            if let Some((ring, off, len)) = data {
-                let len = len.min(b.len() - hl);
-                n += ring.peek_at(off, &mut b[hl..hl + len]);
-            }
-            let c = finish(sum(&b[..n], pseudo_sum(local.ip, remote.ip, PROTO_TCP, n)));
-            put16(b, 16, c);
-            n
-        })
-        .is_ok()
+    let seg = |b: &mut [u8], src: IpAddr, dst: IpAddr| {
+        put16(b, 0, local.port);
+        put16(b, 2, remote.port);
+        put32(b, 4, h.seq);
+        put32(b, 8, h.ack);
+        let ol = o.write(&mut b[20..60], our_mss(local.ip));
+        let hl = 20 + ol;
+        b[12] = ((hl / 4) << 4) as u8;
+        b[13] = h.flags;
+        put16(b, 14, h.wnd);
+        put16(b, 16, 0);
+        put16(b, 18, 0);
+        let mut n = hl;
+        if let Some((ring, off, len)) = data {
+            let len = len.min(b.len() - hl);
+            n += ring.peek_at(off, &mut b[hl..hl + len]);
+        }
+        let c = finish(sum(&b[..n], l4_sum(src, dst, PROTO_TCP, n)));
+        put16(b, 16, c);
+        n
+    };
+    match (local.ip, remote.ip) {
+        (IpAddr::V6(l6), IpAddr::V6(r6)) => ipv6::send_on(
+            out.iface,
+            out.ip6,
+            out.now,
+            l6,
+            r6,
+            scope,
+            ipv6::NH_TCP,
+            64,
+            |b, s, d| seg(b, s.into(), d.into()),
+        )
+        .is_ok(),
+        (l, r) => {
+            let (l4, r4) = (l.v4().unwrap_or_default(), r.v4().unwrap_or_default());
+            out.iface
+                .send_ip(out.now, l4, r4, PROTO_TCP, |b| seg(b, l, r))
+                .is_ok()
+        }
+    }
+}
+
+/// [`emit`] with the whole stack at hand.
+fn emit_st(
+    st: &mut Stack,
+    local: SockAddr,
+    remote: SockAddr,
+    scope: Option<usize>,
+    h: Hdr,
+    o: &Opts,
+) -> bool {
+    let now = st.now;
+    let mut out = Out {
+        iface: &mut st.iface,
+        ip6: &mut st.ip6,
+        stats: &mut st.stats,
+        now,
+    };
+    emit(&mut out, local, remote, scope, h, o, None)
 }
 
 fn plain_hdr(seq: u32, ack: u32, flags: u8) -> Hdr {
@@ -645,17 +714,9 @@ fn reset_for(st: &mut Stack, local: SockAddr, remote: SockAddr, seg: &Seg) {
     } else {
         plain_hdr(0, seg.seq.wrapping_add(seg.len()), RST | ACK)
     };
-    let now = st.now;
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        local,
-        remote,
-        h,
-        &Opts::default(),
-        None,
-    );
+    // A link-local peer: answer on the link it came from.
+    let scope = st.rx_link;
+    emit_st(st, local, remote, scope, h, &Opts::default());
 }
 
 /// Our receive window in bytes (free buffer space, as much as the scale can express).
@@ -712,13 +773,20 @@ pub fn output(st: &mut Stack, i: usize) {
         iface,
         socks,
         stats,
+        ip6,
         ..
     } = st;
+    let mut out = Out {
+        iface,
+        ip6,
+        stats,
+        now,
+    };
     let Some(s) = socks.get(i) else { return };
     if s.ty != SockType::Stream {
         return;
     }
-    let (local, remote) = (s.local, s.remote);
+    let (local, remote, scope) = (s.local, s.remote, s.scope);
     let nodelay = s.nodelay;
     let t = &mut s.tcb;
     let tx = &s.tx;
@@ -742,7 +810,7 @@ pub fn output(st: &mut Stack, i: usize) {
                     ts: (!synack || t.ts_ok).then(|| (tsval(now), t.ts_recent)),
                     ..Opts::default()
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, None) {
+                if !emit(&mut out, local, remote, scope, h, &o, None) {
                     t.kick = Some(now + KICK);
                     return;
                 }
@@ -791,11 +859,11 @@ pub fn output(st: &mut Stack, i: usize) {
                 flags: ACK | if fin { FIN } else { 0 },
                 wnd,
             };
-            if !emit(iface, stats, now, local, remote, h, &o, Some((tx, off, n))) {
+            if !emit(&mut out, local, remote, scope, h, &o, Some((tx, off, n))) {
                 t.kick = Some(now + KICK);
                 return;
             }
-            stats.tcp_retrans_segs += 1;
+            out.stats.tcp_retrans_segs += 1;
             t.retransmits += 1;
             t.sack_retrans += 1;
             t.rec_first = false;
@@ -816,13 +884,27 @@ pub fn output(st: &mut Stack, i: usize) {
     if !matches!(t.state, TcpState::TimeWait | TcpState::FinWait2) {
         loop {
             let data_end = t.snd_una.wrapping_add(tx.len() as u32);
+            // Resending after a timeout: skip what the peer has SACKed.
+            if lt(t.snd_nxt, t.snd_max)
+                && let Some(end) = t.is_sacked(t.snd_nxt)
+            {
+                t.snd_nxt = if lt(data_end, end) { data_end } else { end };
+                continue;
+            }
             let in_flight = t.snd_nxt.wrapping_sub(t.snd_una);
             let outstanding = if t.in_recovery { t.pipe() } else { in_flight };
             if lt(t.snd_nxt, data_end) {
                 let off = in_flight as usize;
                 let unsent = data_end.wrapping_sub(t.snd_nxt) as usize;
                 let by_wnd = t.snd_wnd.saturating_sub(in_flight);
-                let by_cwnd = t.cwnd.saturating_sub(outstanding);
+                // Limited transmit (RFC 3042): each of the first two duplicate ACKs lets
+                // one more new segment out, to keep the ACK clock going.
+                let extra = if t.in_recovery {
+                    0
+                } else {
+                    t.dupacks.min(2) as u32 * t.smss()
+                };
+                let by_cwnd = (t.cwnd + extra).saturating_sub(outstanding);
                 let mut room = by_wnd.min(by_cwnd) as usize;
                 if room == 0 && t.force_probe {
                     room = 1; // zero-window probe
@@ -835,6 +917,12 @@ pub fn output(st: &mut Stack, i: usize) {
                         t.persist = true;
                         t.timer = Some(now + t.rto);
                     }
+                    break;
+                }
+                // Sender-side silly window avoidance (RFC 9293 3.8.6.2.1): no partial
+                // segment just because the window (cwnd or the peer's) has a sliver left;
+                // wait for a full one while anything is in flight.
+                if n < max && n < unsent && in_flight > 0 {
                     break;
                 }
                 // Nagle (Minshall): a small last piece waits while an earlier small segment
@@ -867,13 +955,13 @@ pub fn output(st: &mut Stack, i: usize) {
                     flags,
                     wnd,
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, Some((tx, off, n))) {
+                if !emit(&mut out, local, remote, scope, h, &o, Some((tx, off, n))) {
                     t.kick = Some(now + KICK);
                     return;
                 }
                 let fresh = !lt(t.snd_nxt, t.snd_max);
                 if !fresh {
-                    stats.tcp_retrans_segs += 1;
+                    out.stats.tcp_retrans_segs += 1;
                     t.retransmits += 1;
                 }
                 t.snd_nxt = t.snd_nxt.wrapping_add(n as u32);
@@ -907,7 +995,7 @@ pub fn output(st: &mut Stack, i: usize) {
                     flags: FIN | ACK,
                     wnd,
                 };
-                if !emit(iface, stats, now, local, remote, h, &o, None) {
+                if !emit(&mut out, local, remote, scope, h, &o, None) {
                     t.kick = Some(now + KICK);
                     return;
                 }
@@ -937,7 +1025,7 @@ pub fn output(st: &mut Stack, i: usize) {
             flags: ACK,
             wnd,
         };
-        if emit(iface, stats, now, local, remote, h, &o, None) {
+        if emit(&mut out, local, remote, scope, h, &o, None) {
             let e = t.rcv_nxt.wrapping_add(edge);
             acked_now(t, e);
         } else {
@@ -1054,26 +1142,99 @@ fn find_listener(st: &Stack, local: SockAddr) -> Option<usize> {
         if s.ty != SockType::Stream || s.tcb.state != TcpState::Listen {
             continue;
         }
-        if s.local.port != local.port {
+        if s.local.port != local.port || !super::socket::takes(s, local.ip) {
             continue;
         }
         if s.local.ip == local.ip {
             return Some(i);
         }
-        if s.local.ip.is_unspecified() {
+        // An IPv4 wildcard beats a dual-stack IPv6 one for IPv4 (as Linux picks).
+        if wild.is_none() || !s.local.ip.is_v6() {
             wild = Some(i);
         }
     }
     wild
 }
 
-/// A TCP segment arrived (IP payload, addresses from the IP header).
-pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8]) {
-    st.stats.tcp_in_segs += 1;
-    if dst.is_broadcast() || dst.is_multicast() || src.is_broadcast() {
+/// An ICMP "too big" (fragmentation needed / packet too big) about a packet we sent from
+/// `qsrc` to `qdst` (`proto`, its first bytes `l4`): lower the path MTU. For TCP only if
+/// the quoted segment is in flight on a connection (RFC 5927), and then that connection
+/// shrinks its MSS and resends at once, without a congestion response (RFC 1191 6.4).
+pub fn too_big(st: &mut Stack, qsrc: IpAddr, qdst: IpAddr, proto: u8, l4: &[u8], mtu: usize) {
+    let now = st.now;
+    let ours = match qsrc {
+        IpAddr::V4(a) => a.is_loopback() || st.iface.is_our_addr(a),
+        IpAddr::V6(a) => a.is_loopback() || ipv6::is_ours(&st.iface, a),
+    };
+    if !ours || l4.len() < 8 {
+        st.pmtu.stats.ignored += 1;
         return;
     }
-    if finish(sum(p, pseudo_sum(src, dst, PROTO_TCP, p.len()))) != 0 {
+    if proto != PROTO_TCP {
+        st.pmtu.learn(qdst, mtu, now);
+        return;
+    }
+    let local = SockAddr::new(qsrc, be16(l4, 0));
+    let remote = SockAddr::new(qdst, be16(l4, 2));
+    let seq = be32(l4, 4);
+    let found = st.socks.iter().find_map(|(i, s)| {
+        let t = &s.tcb;
+        (s.ty == SockType::Stream
+            && s.local == local
+            && s.remote == remote
+            && !matches!(t.state, TcpState::Listen | TcpState::Closed)
+            && seq.wrapping_sub(t.snd_una) <= t.snd_max.wrapping_sub(t.snd_una))
+        .then_some(i)
+    });
+    let Some(i) = found else {
+        st.pmtu.stats.ignored += 1;
+        return;
+    };
+    let Some(m) = st.pmtu.learn(qdst, mtu, now) else {
+        return;
+    };
+    let mss = super::pmtu::mss_for(qdst, m);
+    let t = &mut st.socks.get(i).unwrap().tcb;
+    if mss < t.mss {
+        t.mss = mss;
+        t.pmtu_drops += 1;
+        // What is in flight was too big: send it again, smaller, now.
+        t.snd_nxt = t.snd_una;
+        t.rtt_probe = None;
+        output(st, i);
+    }
+}
+
+/// The MSS we use at most towards `remote` (our MSS for the family, under its path MTU).
+fn path_mss(st: &Stack, local: IpAddr, remote: IpAddr) -> u16 {
+    our_mss(local).min(super::pmtu::mss_for(remote, st.pmtu.mtu(remote, st.now)))
+}
+
+/// The MSS we announce and accept at most on this family (MTU - IP - TCP headers).
+fn our_mss(a: IpAddr) -> u16 {
+    if a.is_v6() { OUR_MSS6 } else { OUR_MSS }
+}
+
+/// A TCP segment arrived over IPv4 (IP payload, addresses from the IP header).
+pub fn input(st: &mut Stack, src: Ipv4, dst: Ipv4, p: &[u8]) {
+    st.rx_link = None;
+    segment(st, src.into(), dst.into(), p);
+}
+
+/// A TCP segment arrived over IPv6 on link `link` (None: loopback).
+pub fn input6(st: &mut Stack, src: Ipv6, dst: Ipv6, p: &[u8], link: Option<usize>) {
+    // Link-local pairs are only meaningful with their link: remember it for replies.
+    st.rx_link = link.filter(|_| dst.is_link_local() || src.is_link_local());
+    segment(st, IpAddr::V6(src), IpAddr::V6(dst), p);
+    st.rx_link = None;
+}
+
+fn segment(st: &mut Stack, src: IpAddr, dst: IpAddr, p: &[u8]) {
+    st.stats.tcp_in_segs += 1;
+    if dst.is_broadcast() || dst.is_multicast() || src.is_broadcast() || src.is_multicast() {
+        return;
+    }
+    if finish(sum(p, l4_sum(src, dst, PROTO_TCP, p.len()))) != 0 {
         st.stats.tcp_in_errs += 1;
         return;
     }
@@ -1126,16 +1287,24 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
         return;
     };
     let now = st.now;
-    let nodelay = st.socks.get(l).unwrap().nodelay;
+    let (nodelay, family, v6only) = {
+        let ls = st.socks.get(l).unwrap();
+        (ls.nodelay, ls.family, ls.v6only)
+    };
+    let scope = st.rx_link;
+    let mss_max = path_mss(st, local.ip, remote.ip);
     let s = st.socks.get(c).unwrap();
     s.user_open = false;
     s.nodelay = nodelay;
+    s.family = family;
+    s.v6only = v6only;
+    s.scope = scope;
     s.local = local;
     s.remote = remote;
     let t = &mut s.tcb;
     t.start(
         initial_seq(local, remote, now),
-        seg.mss.unwrap_or(DEFAULT_MSS).min(OUR_MSS),
+        seg.mss.unwrap_or(DEFAULT_MSS).min(mss_max),
     );
     t.state = TcpState::SynReceived;
     t.irs = seg.seq;
@@ -1153,6 +1322,7 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
         t.ts_recent = v;
         t.ts_recent_at = now;
     }
+    t.cwnd = 10 * t.smss(); // RFC 6928, in whole segments
     t.parent = Some(l as u16);
     let lt_ = &mut st.socks.get(l).unwrap().tcb;
     lt_.accq[lt_.accn as usize] = c as u16;
@@ -1163,6 +1333,11 @@ fn listen_input(st: &mut Stack, l: usize, seg: &Seg, local: SockAddr, remote: So
 
 fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     let now = st.now;
+    let mss_max = {
+        let s = st.socks.get(i).unwrap();
+        let (l, r) = (s.local.ip, s.remote.ip);
+        path_mss(st, l, r)
+    };
     let s = st.socks.get(i).unwrap();
     let t = &mut s.tcb;
     let has_ack = seg.flags & ACK != 0;
@@ -1183,8 +1358,8 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
     }
     t.irs = seg.seq;
     t.rcv_nxt = seg.seq.wrapping_add(1);
-    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(OUR_MSS);
-    t.cwnd = 10 * t.mss as u32;
+    t.mss = seg.mss.unwrap_or(DEFAULT_MSS).min(mss_max);
+
     // Options: on only if both sides offered them (we always offer).
     if let Some(ws) = seg.wscale {
         t.snd_wscale = ws;
@@ -1203,6 +1378,7 @@ fn syn_sent_input(st: &mut Stack, i: usize, seg: &Seg) {
             t.sample_rtt((tsval(now).wrapping_sub(e) as u64).max(1) * MS);
         }
     }
+    t.cwnd = 10 * t.smss(); // RFC 6928, in whole segments
     if has_ack {
         t.snd_una = seg.ack;
         t.snd_wnd = seg.wnd; // the SYN-ACK's window is not scaled
@@ -1446,7 +1622,7 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
         // New data got through: drop the timeout backoff (as BSD does). Without it, Karn's
         // rule (no samples from resent data) can leave the RTO doubled for good under loss.
         t.rto = t.rto_base;
-        let mss = t.mss as u32;
+        let mss = t.smss();
         if t.in_recovery {
             if ge(t.snd_una, t.recover) {
                 t.in_recovery = false; // full ACK: recovery is over
@@ -1477,10 +1653,18 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
     }
     // Enter loss recovery: three duplicate ACKs, or (with SACK) more than two segments'
     // worth SACKed above the first hole (RFC 6675 IsLost).
-    let mss = t.mss as u32;
+    // Early retransmit (RFC 5827): with fewer than 4 segments in flight, there can't be
+    // 3 duplicate ACKs, so the threshold is the flight minus one.
+    let mss = t.smss();
+    let segs = t.snd_max.wrapping_sub(t.snd_una).div_ceil(mss);
+    let thresh = if segs < 4 {
+        segs.saturating_sub(1).max(1)
+    } else {
+        3
+    };
     if !t.in_recovery
         && t.snd_una != t.snd_max
-        && (t.dupacks >= 3 || (t.sack_ok && t.sacked_bytes() > 2 * mss))
+        && (t.dupacks as u32 >= thresh || (t.sack_ok && t.sacked_bytes() >= thresh * mss))
     {
         let flight = t.snd_max.wrapping_sub(t.snd_una);
         t.ssthresh = (flight / 2).max(2 * mss);
@@ -1537,17 +1721,8 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
                 if orphan {
                     // Data for a socket nobody will read: abort (as Linux does).
                     let h = plain_hdr(t.snd_nxt, 0, RST);
-                    let (l, r) = (s.local, s.remote);
-                    emit(
-                        &mut st.iface,
-                        &mut st.stats,
-                        now,
-                        l,
-                        r,
-                        h,
-                        &Opts::default(),
-                        None,
-                    );
+                    let (l, r, sc) = (s.local, s.remote, s.scope);
+                    emit_st(st, l, r, sc, h, &Opts::default());
                     finished(st, i);
                     return;
                 }
@@ -1577,9 +1752,13 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
                         fin = false; // the FIN sat before data we already had: wait for it
                     }
                     t.unacked = t.unacked.saturating_add(n as u32);
-                    // Delayed ACK, except: a hole was (being) filled, two full segments
+                    // Delayed ACK, except: quick-ACK mode, a hole was (being) filled, two full segments
                     // are waiting, or the peer is pushing a short final piece.
-                    if had_ooo || t.unacked >= 2 * t.mss as u32 {
+                    // "Every second segment" counted in bytes as Linux does: more than one
+                    // full segment's worth unacknowledged (a full one plus a small one
+                    // counts, or Nagle on the other side would wait for our delayed ACK).
+                    if had_ooo || t.unacked > t.mss as u32 || t.quickack > 0 {
+                        t.quickack = t.quickack.saturating_sub(1);
                         t.ack_now = true;
                     } else if t.delack.is_none() {
                         t.delack = Some(now + DELACK);
@@ -1700,6 +1879,8 @@ pub struct TimeWait {
     pub ts_recent: u32,
     pub rcv_wscale: u8,
     pub deadline: u64,
+    /// It was an AF_INET6 socket's (listed in /proc/net/tcp6, IPv4 peers as ::ffff:).
+    pub v6_sock: bool,
 }
 
 pub struct TwTable {
@@ -1759,6 +1940,7 @@ fn park_if_time_wait(st: &mut Stack, i: usize) {
         ts_recent: t.ts_recent,
         rcv_wscale: t.rcv_wscale,
         deadline: t.deadline.unwrap_or(st.now + 2 * MSL),
+        v6_sock: s.family == super::socket::Family::V6,
     };
     st.tw.add(e);
     finished(st, i);
@@ -1797,16 +1979,8 @@ fn tw_input(st: &mut Stack, k: usize, seg: &Seg) -> bool {
         flags: ACK,
         wnd: 0,
     };
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        e.local,
-        e.remote,
-        h,
-        &o,
-        None,
-    );
+    let scope = st.rx_link;
+    emit_st(st, e.local, e.remote, scope, h, &o);
     false
 }
 
@@ -1869,17 +2043,9 @@ fn send_rst_now(st: &mut Stack, i: usize) {
     let now = st.now;
     let Some(s) = st.socks.get(i) else { return };
     let h = plain_hdr(s.tcb.snd_nxt, s.tcb.rcv_nxt, RST | ACK);
-    let (l, r) = (s.local, s.remote);
-    emit(
-        &mut st.iface,
-        &mut st.stats,
-        now,
-        l,
-        r,
-        h,
-        &Opts::default(),
-        None,
-    );
+    let (l, r, sc) = (s.local, s.remote, s.scope);
+    let _ = now;
+    emit_st(st, l, r, sc, h, &Opts::default());
 }
 
 // ---- timers -------------------------------------------------------------------------------------
@@ -1977,6 +2143,8 @@ fn on_timer(st: &mut Stack, i: usize) {
         return;
     }
     t.retries += 1;
+    t.timeouts += 1;
+    t.max_rto_ms = t.max_rto_ms.max((t.rto / MS) as u32);
     let handshake = matches!(t.state, TcpState::SynSent | TcpState::SynReceived);
     let limit = if handshake { SYN_RETRIES } else { DATA_RETRIES };
     if t.retries > limit {
@@ -2002,15 +2170,18 @@ fn on_timer(st: &mut Stack, i: usize) {
         t.retransmits += 1;
         t.snd_nxt = t.iss;
     } else {
-        // Timeout: back to slow start from snd_una, forgetting the SACK scoreboard (the
-        // receiver may have dropped what it SACKed, RFC 2018 8).
+        // Timeout: back to slow start from snd_una. The first time, keep the SACK
+        // scoreboard so the resend skips what the peer has; a second timeout in a row
+        // forgets it (the receiver may have dropped what it SACKed, RFC 2018 8).
         let flight = t.snd_max.wrapping_sub(t.snd_una);
-        let mss = t.mss as u32;
+        let mss = t.smss();
         t.ssthresh = (flight / 2).max(2 * mss);
         t.cwnd = mss;
         t.dupacks = 0;
         t.in_recovery = false;
-        t.nsacked = 0;
+        if t.retries >= 2 {
+            t.nsacked = 0;
+        }
         t.snd_nxt = t.snd_una;
     }
     let _ = now;
@@ -2030,10 +2201,11 @@ pub fn connect(st: &mut Stack, i: usize, remote: SockAddr) {
     if let Some(k) = st.tw.find(local, remote) {
         st.tw.remove(k);
     }
+    let mss_max = path_mss(st, local.ip, remote.ip);
     let s = st.socks.get(i).unwrap();
     let iss = initial_seq(local, remote, now);
     let t = &mut s.tcb;
-    t.start(iss, OUR_MSS);
+    t.start(iss, mss_max);
     t.state = TcpState::SynSent;
     t.connect_pending = true;
     st.stats.tcp_active_opens += 1;

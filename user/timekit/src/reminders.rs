@@ -36,6 +36,8 @@ pub struct Reminder {
     pub done: Option<Date>,
     /// Ring when it falls due (on by default).
     pub alert: bool,
+    /// A snooze: ring again at this day and minute (the due day does not change).
+    pub snooze: Option<(Date, u16)>,
 }
 
 impl Reminder {
@@ -51,6 +53,7 @@ impl Reminder {
             until: None,
             done: None,
             alert: true,
+            snooze: None,
         }
     }
 
@@ -65,6 +68,12 @@ impl Reminder {
             d,
             self.time.unwrap_or(DEFAULT_RING_AT) as u32 * 60,
         ))
+    }
+
+    /// When the snooze rings, in local seconds.
+    pub fn snooze_secs(&self) -> Option<i64> {
+        let (d, m) = self.snooze?;
+        Some(join_secs(d, m as u32 * 60))
     }
 
     /// Past its due day and still open.
@@ -87,6 +96,7 @@ impl Reminder {
         if self.is_done() {
             return false;
         }
+        self.snooze = None;
         if self.repeat != Repeat::None
             && let Some(due) = self.due
             && let Some(next) = self.as_event(due).next_after(due.max(today))
@@ -110,7 +120,7 @@ impl Reminder {
             repeat_name(self.repeat).to_string()
         };
         format!(
-            "reminder\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "reminder\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.id,
             self.due.map_or("-".to_string(), |d| d.fmt()),
             self.time.map_or("-".to_string(), fmt_hm),
@@ -120,6 +130,11 @@ impl Reminder {
             u8::from(self.alert),
             esc(&self.title),
             esc(&self.notes),
+            self.snooze.map_or("-".to_string(), |(d, m)| format!(
+                "{}@{}",
+                d.fmt(),
+                fmt_hm(m)
+            )),
         )
     }
 
@@ -163,6 +178,13 @@ impl Reminder {
             },
             title: unesc(f[8]),
             notes: f.get(9).map_or(String::new(), |n| unesc(n)),
+            snooze: match f.get(10) {
+                None | Some(&"-") => None,
+                Some(s) => {
+                    let (d, t) = s.split_once('@')?;
+                    Some((Date::parse(d)?, parse_hm(t)?))
+                }
+            },
         })
     }
 }
@@ -435,16 +457,17 @@ impl ReminderSet {
         }
         for l in &self.lists {
             for r in l.items.iter().filter(|r| !r.is_done() && r.alert) {
-                if let Some(t) = r.ring_secs()
-                    && t > last
-                    && t <= now
-                {
-                    out.push((
-                        r.id,
-                        r.title.clone(),
-                        l.name.clone(),
-                        r.time.unwrap_or(DEFAULT_RING_AT),
-                    ));
+                // The due time, and the snooze time if there is one.
+                for (t, at) in [
+                    (r.ring_secs(), r.time.unwrap_or(DEFAULT_RING_AT)),
+                    (r.snooze_secs(), r.snooze.map_or(0, |(_, m)| m)),
+                ] {
+                    if let Some(t) = t
+                        && t > last
+                        && t <= now
+                    {
+                        out.push((r.id, r.title.clone(), l.name.clone(), at));
+                    }
                 }
             }
         }
@@ -642,6 +665,36 @@ mod tests {
         s.get_mut(id).unwrap().alert = false;
         let sooner = join_secs(d(2025, 3, 3), 10 * 3600);
         assert!(s.rings_due(sooner - 1, sooner).is_empty());
+    }
+
+    #[test]
+    fn a_snooze_rings_again_and_survives_the_file() {
+        let mut s = set();
+        let id = s.lists[0]
+            .items
+            .iter()
+            .find(|r| r.title == "sooner")
+            .unwrap()
+            .id;
+        s.get_mut(id).unwrap().snooze = Some((d(2025, 3, 3), 10 * 60 + 10));
+        let (back, _) = ReminderList::parse(&s.lists[0].to_text());
+        assert_eq!(
+            back.items.iter().find(|r| r.id == id).unwrap().snooze,
+            Some((d(2025, 3, 3), 610))
+        );
+        let at = join_secs(d(2025, 3, 3), 10 * 3600 + 600);
+        let hits = s.rings_due(at - 1, at);
+        assert_eq!((hits.len(), hits[0].3), (1, 610));
+        // Completing it clears the snooze; old files without the column read as no snooze.
+        s.get_mut(id).unwrap().complete(d(2025, 3, 3));
+        assert!(s.get(id).unwrap().1.snooze.is_none());
+        let (old, skipped) = ReminderList::parse("reminder\t1\t-\t-\tnone\t-\t-\t1\told\t\n");
+        assert_eq!(
+            (old.items.len(), skipped, old.items[0].snooze),
+            (1, 0, None)
+        );
+        let (bad, skipped) = ReminderList::parse("reminder\t1\t-\t-\tnone\t-\t-\t1\tx\t\tsoon\n");
+        assert_eq!((bad.items.len(), skipped), (0, 1));
     }
 
     #[test]

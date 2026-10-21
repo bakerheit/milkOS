@@ -10,8 +10,9 @@
 #
 #   scripts/net-test.sh            HTTP_PORT=8088 by default (override: HTTP_PORT=9099 ...)
 #
-# Network safety: everything binds to 127.0.0.1 only; the guest is told (fw_cfg
-# opt/milkos/nettest) to contact only 10.0.2.2 = the Mac's loopback. Work files go to a
+# Network safety: everything binds to the loopback only (127.0.0.1, and ::1 for the IPv6
+# echo server); the guest is told (fw_cfg opt/milkos/nettest) to contact only 10.0.2.2 and
+# fec0::2 = the Mac's loopback. Work files go to a
 # fresh mktemp dir. Only the qemu and python processes started here are killed, by PID.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -51,14 +52,14 @@ for _ in $(seq 50); do [ -s "$WORK/ports" ] && break; sleep 0.1; done
 [ -s "$WORK/ports" ] || fail "helper servers did not start"
 # shellcheck disable=SC1090
 eval "$(tr ' ' '\n' <"$WORK/ports" | sed 's/^/P_/')"
-CFG="echo=10.0.2.2:$P_echo dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused khttpd=8080"
+CFG="echo=10.0.2.2:$P_echo echo6=[fec0::2]:$P_echo6 dns=10.0.2.2:$P_dns name=echo.milk.test expect=10.0.2.2 refused=10.0.2.2:$P_refused khttpd=8080 lossy3=1"
 # Two more free host ports: the kernel httpd (guest :8080) and nc -l (guest :7777).
 read -r KH_PORT NC_PORT < <(python3 -I -c "
 import socket
 ss = [socket.socket() for _ in range(2)]
 for s in ss: s.bind(('127.0.0.1', 0))
 print(*[s.getsockname()[1] for s in ss])")
-echo "helpers: echo 127.0.0.1:$P_echo, dns 127.0.0.1:$P_dns, http 127.0.0.1:$P_http, refused port $P_refused (pid $SPID)"
+echo "helpers: echo 127.0.0.1:$P_echo and [::1]:$P_echo6, dns 127.0.0.1:$P_dns, http 127.0.0.1:$P_http, refused port $P_refused (pid $SPID)"
 SERIAL="$WORK/serial.sock"
 
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
@@ -74,16 +75,27 @@ echo "qemu pid $QPID, serial log $LOG"
 # Console: log everything; once msh is up, run the network tools.
 P='wait:msh:/\$ '
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  'wait:\[net\] selftest' "$P" \
+  'wait@240:\[net\] selftest' "$P" \
   'send:ifconfig' 'wait:RX packets' "$P" \
   'send:ping -c 3 -i 200 10.0.2.2' 'wait:rtt min' "$P" \
+  'send:ping -6 -c 2 -i 200 fec0::2' 'wait:rtt min' "$P" \
+  'send:fetch -i http://[::1]/' 'wait:fetch: [^\n]* ms' "$P" \
   "send:fetch http://10.0.2.2:$P_http/hello.txt" 'wait:fetch: [^\n]* ms' "$P" \
   'send:fetch -i http://127.0.0.1/' 'wait:fetch: [^\n]* ms' "$P" \
   "send:fetch 10.0.2.2:$P_refused" 'wait:fetch: connect' "$P" \
   "send:nc 10.0.2.2 $P_echo" 'send:hello through nc' 'wait:hello through nc\r?\n\r?hello through nc' \
   'raw:\x04' "$P" \
+  "send:nc -6 fec0::2 $P_echo6" 'send:hello over IPv6' 'wait:hello over IPv6\r?\n\r?hello over IPv6' \
+  'raw:\x04' "$P" \
   'send:nc -l 7777' 'wait:listening on tcp' "done:$WORK/nc.listening" 'wait:from the mac' "$P" \
   'send:netstat' 'wait:LISTEN' "$P" \
+  'send:netstat -6 -l' 'wait:LISTEN' "$P" \
+  'send:netctl' 'wait:milk drop' "$P" \
+  'send:netctl -k' 'wait:drop_visible=' "$P" \
+  'send:netctl hostname milkbox' "$P" \
+  'send:uname -n' "$P" \
+  'send:cat /proc/net/hostname' "$P" \
+  'send:netctl hostname bad_name!' "$P" \
   'send:top -b -n 2 -d 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
   'send:uptime' 'wait:load average' "$P" \
   'send:cat /proc/loadavg' "$P" \
@@ -98,6 +110,16 @@ done
 echo "---- guest ----"
 awk '/^\[(net|virtio-net)\]/ { print; inproc = /\/proc\/net/; next } inproc && /^    / { print; next } { inproc = 0 }' "$LOG"
 grep -q '\[net\] selftest ok' "$LOG" || fail "guest self-test did not pass"
+for want in 'tcp lossy loopback 1/7: 256 KiB intact' 'tcp lossy loopback 1/3: 32 KiB intact' \
+  'tcp TIME_WAIT: parked' 'ip fragments: 20000-byte UDP datagram' \
+  'ipv6: eth0 fec0::[0-9a-f:]+/64 \(SLAAC, router fe80::2\), ping fec0::2' 'ipv6 extension headers: .* refused \(1\)' \
+  'dual-stack: .* V6ONLY ok, udp6 ok' 'tcp echo via \[fec0::2\]:[0-9]+: 512 KiB round trip' \
+  'ipv6 fragments: .* overlap poisoned \(1\), header chain split refused, 1 reassembled' \
+  'path mtu: IPv6 path 1280 -> tcp mss 1220 .* IPv4 path 1000 -> tcp mss 960' \
+  'mld: ff02::1:3 on eth0 dropped before the join, delivered while joined, dropped after leaving'; do
+  grep -Eaq "\[net\] $want" "$LOG" || fail "self-test line missing: $want"
+done
+grep -Ea '\[net\] (tcp lossy|ipv6|ip fragments|tcp TIME_WAIT|dual-stack|tcp echo|path mtu|mld)' "$LOG" | tr -d '\r' | sed 's/^/  /'
 
 echo "---- msh: network tools (socket syscalls from user space) ----"
 for _ in $(seq 300); do [ -e "$WORK/nc.listening" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.1; done
@@ -117,7 +139,25 @@ grep -q "hello from the Mac's loopback" "$LOG" || fail "fetch from host helper"
 [ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 2 ] || fail "fetch: expected two 200 OK"
 grep -q "fetch: connect 10.0.2.2:$P_refused: connection refused" "$LOG" || fail "fetch: refused port"
 grep -q "nc: connection from 10.0.2.2:" "$LOG" || fail "nc -l: no connection"
-grep -q "tcp .* \*:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no :80 listener"
+# Typed once, echoed back once by the host's [::1] server (the drive waited for both).
+[ "$(grep -c 'hello over IPv6' "$LOG")" -ge 2 ] || fail "nc -6 fec0::2: no echo from the host's [::1] server"
+grep -Eq "tcp6 .* \[::\]:80 .* LISTEN" <(tr -d '\r' <"$LOG") || fail "netstat: no [::]:80 listener (httpd, dual-stack)"
+grep -Eq "inet6 fe80::5054:ff:fe12:3456  prefixlen 64  scopeid 0x20<link>" "$LOG" || fail "ifconfig: no eth0 link-local inet6"
+grep -Eq "inet6 fec0::5054:ff:fe12:3456  prefixlen 64  scopeid 0x0<global>" "$LOG" || fail "ifconfig: no eth0 SLAAC inet6"
+grep -q "2 packets transmitted, 2 received, 0% packet loss" "$LOG" || fail "ping -6 fec0::2"
+grep -q "bytes from fec0::2: icmp_seq=1" "$LOG" || fail "ping -6: no reply line from fec0::2"
+[ "$(grep -c 'fetch: 200 OK' "$LOG")" -ge 3 ] || fail "fetch http://[::1]/: expected a third 200 OK"
+T0="$WORK/console0.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T0"
+grep -q "^iface.eth0.ipv4=10.0.2.15/24$" "$T0" || fail "netctl -k: eth0 ipv4"
+grep -q "^iface.eth0.ipv6=fe80::5054:ff:fe12:3456/64,link fec0::5054:ff:fe12:3456/64,global$" "$T0" || fail "netctl -k: eth0 ipv6"
+grep -q "^iface.eth0.dhcp=Bound$" "$T0" || fail "netctl -k: eth0 dhcp"
+grep -q "^hostname=milk$" "$T0" || fail "netctl -k: hostname"
+grep -Eq "^hostname +milk$" "$T0" || fail "netctl show: hostname"
+grep -q "netctl: hostname is now milkbox (was milk)" "$T0" || fail "netctl hostname milkbox"
+[ "$(grep -cx 'milkbox' "$T0")" -ge 2 ] || fail "uname -n / /proc/net/hostname after netctl hostname"
+grep -q "netctl: hostname bad_name!: .*(1-63 letters, digits and '-')" "$T0" || fail "netctl: a bad hostname was not refused"
+echo "netctl show / -k (interfaces, v4 + v6, DHCP, hostname), hostname set (uname, /proc/net/hostname), bad name refused: ok"
+echo "ifconfig inet6, ping -6 fec0::2, fetch http://[::1]/ (httpd over IPv6), netstat tcp6 [::]:80: ok"
 T="$WORK/console.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T"
 grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"
 [ "$(grep -c '^top - .*load ' "$T")" -ge 2 ] || fail "top -b -n 2: expected two frames"

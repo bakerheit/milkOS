@@ -33,7 +33,7 @@ fn main(args: &rt::Args) -> i32 {
         Some(k) => (&rest[..k], &rest[k..]),
         None => (rest, "/"),
     };
-    let addr = match net::lookup(hostport, 80) {
+    let addrs = match net::lookup_all(hostport, 80, net::Want::Any) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("fetch: {e}");
@@ -41,17 +41,13 @@ fn main(args: &rt::Args) -> i32 {
         }
     };
     let t0 = sys::clock_ns(1);
-    let fd = match net::socket(net::SOCK_STREAM) {
-        Ok(fd) => fd,
+    let (fd, addr) = match net::connect_any(&addrs, net::SOCK_STREAM) {
+        Ok(x) => x,
         Err(e) => {
-            eprintln!("fetch: socket: {e}");
+            eprintln!("fetch: {e}");
             return 1;
         }
     };
-    if let Err(e) = net::connect(fd, &addr) {
-        eprintln!("fetch: connect {addr}: {e}");
-        return 1;
-    }
     let req = alloc::format!(
         "GET {path} HTTP/1.0\r\nHost: {hostport}\r\nUser-Agent: milkOS-fetch\r\nConnection: close\r\n\r\n"
     );

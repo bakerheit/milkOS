@@ -187,6 +187,8 @@ pub struct MountInfo {
 
 /// `sync(2)`: ask every mounted file system to make its changes durable.
 pub fn sync_all() -> Result<()> {
+    // The search index first (a file on these file systems).
+    let _ = super::search::flush();
     let all: Vec<FsRef> = MOUNTS.lock().iter().map(|m| m.fs.clone()).collect();
     let mut r = Ok(());
     for fs in all {

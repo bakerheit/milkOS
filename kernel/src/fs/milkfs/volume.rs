@@ -55,6 +55,9 @@ pub struct State {
     /// operations it holds.
     pub dirty_since: Option<u64>,
     pub batched_ops: u32,
+    /// An in-place conversion (encrypt / decrypt) under way: its state (also in the
+    /// `K_CONVERT` item), see `convert.rs`.
+    pub conv: Option<super::convert::ConvRun>,
 }
 
 /// A transaction is committed once it is this old ...
@@ -114,6 +117,23 @@ pub fn new_uuid() -> [u8; 16] {
 
 /// Format `dev`: an empty root directory at generation 1.
 pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
+    mkfs_with(dev, label, None).map(|_| ())
+}
+
+/// A new volume encrypted under `passphrase` (a random volume key in a passphrase
+/// slot), plus a recovery slot if `recovery`: returns the recovery key, formatted for
+/// people (shown once; it isn't stored anywhere).
+pub fn mkfs_encrypted(
+    dev: &BlockRef,
+    label: &str,
+    passphrase: &str,
+    recovery: bool,
+) -> Result<Option<String>> {
+    mkfs_with(dev, label, Some((passphrase, recovery)))
+}
+
+fn mkfs_with(dev: &BlockRef, label: &str, enc: Option<(&str, bool)>) -> Result<Option<String>> {
+    use super::crypt;
     let cache = BCache::new(dev.clone(), 8)?;
     let total = cache.num_blocks();
     if total < 16 {
@@ -135,35 +155,80 @@ pub fn mkfs(dev: &BlockRef, label: &str) -> Result<()> {
         1,
         &mut leaf,
     );
+    let uuid = new_uuid();
+    // Encrypted: a random volume key, wrapped in the keyring (block 3, plaintext).
+    let mut keyring = BlockPtr::NONE;
+    let mut shown = None;
+    let key = match enc {
+        None => None,
+        Some((pass, recovery)) => {
+            let mut vk = [0u8; 32];
+            crate::crypto::rng::fill(&mut vk);
+            let key = crypt::VolumeKey::from_master(&vk);
+            crate::crypto::wipe(&mut vk);
+            let mut ring = Keyring {
+                uuid,
+                slots: alloc::vec![crypt::wrap(&uuid, &key, SLOT_PASSPHRASE, pass.as_bytes())?],
+            };
+            if recovery {
+                let mut rk = [0u8; 16];
+                crate::crypto::rng::fill(&mut rk);
+                ring.slots
+                    .push(crypt::wrap(&uuid, &key, SLOT_RECOVERY, &rk)?);
+                shown = Some(crypt::format_recovery(&rk));
+                crate::crypto::wipe(&mut rk);
+            }
+            let b = ring.encode();
+            cache.write(3, &b)?;
+            keyring = BlockPtr {
+                block: 3,
+                birth: 1,
+                csum: xxh64(&b),
+            };
+            Some(key)
+        }
+    };
+    let csum = match &key {
+        Some(k) => k.seal(2, 1, &mut leaf),
+        None => xxh64(&leaf),
+    };
     cache.write(2, &leaf)?;
-    let sb = Superblock {
+    let mut sb = Superblock {
         total_blocks: total,
         generation: 1,
         root: BlockPtr {
             block: 2,
             birth: 1,
-            csum: xxh64(&leaf),
+            csum,
         },
         deadlist: BlockPtr::NONE,
         next_ino: ROOT_INO + 1,
         created: t.0 as u64,
-        uuid: new_uuid(),
+        uuid,
         label: String::from(label),
         snaps: Vec::new(),
         clones: Vec::new(),
         auto: [0; 4],
-        flags: 0,
-        version: BASE_VERSION,
+        flags: if key.is_some() { SB_ENCRYPTED } else { 0 },
+        version: if key.is_some() {
+            CRYPT_VERSION
+        } else {
+            BASE_VERSION
+        },
         spacemap: BlockPtr::NONE,
         last_scrub: 0,
         scrub_every: 0,
-        keyring: BlockPtr::NONE,
+        keyring,
         sb_mac: 0,
     };
+    if let Some(k) = &key {
+        sb.sb_mac = k.sb_mac(&sb.encode());
+    }
     cache.write(0, &[0u8; BLOCK])?; // invalidate slot 0 (an older fs's superblock)
     cache.flush()?;
     cache.write_through(1, &sb.encode())?;
-    cache.flush()
+    cache.flush()?;
+    Ok(shown)
 }
 
 impl State {
@@ -183,7 +248,7 @@ impl State {
         let t0 = crate::timer::now_ns();
         let name = String::from(dev.name());
         let sb = probe(&dev).ok_or(Errno::EINVAL)?;
-        let key = if sb.flags & SB_ENCRYPTED != 0 {
+        let key = if needs_key(sb.flags) {
             let k = key.ok_or(Errno::EACCES)?;
             // The MAC is over the bytes on disk (another writer may encode differently).
             let mut raw = [0u8; BLOCK];
@@ -213,6 +278,9 @@ impl State {
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
         store.crypt = key;
+        if sb.flags & SB_CONVERTING != 0 {
+            store.convert = Some(sb.flags & SB_TO_PLAIN == 0);
+        }
 
         let loaded = if sb.spacemap.is_none() {
             Err("absent (last written by the Mac tool or an older kernel)")
@@ -346,6 +414,7 @@ impl State {
             st.commit()?;
         }
         report.mount_ns = crate::timer::now_ns() - t0;
+        st.conv_load()?;
         Ok((st, report))
     }
 
@@ -382,6 +451,7 @@ impl State {
             st.commit()?;
         }
         report.mount_ns = crate::timer::now_ns() - t0;
+        st.conv_load()?;
         Ok((st, report))
     }
 
@@ -408,6 +478,7 @@ impl State {
             receiving: false,
             dirty_since: None,
             batched_ops: 0,
+            conv: None,
         }
     }
 

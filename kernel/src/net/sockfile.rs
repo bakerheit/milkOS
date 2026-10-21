@@ -97,10 +97,10 @@ pub fn recv(
     buf: &mut [u8],
     nonblock: bool,
     timeout_ns: u64,
-) -> Result<(usize, super::wire::SockAddr)> {
+) -> Result<(usize, super::wire::SockAddr, Option<usize>)> {
     let end = crate::timer::now_ns().saturating_add(timeout_ns);
     loop {
-        match socket::recvfrom(id, buf) {
+        match socket::recvfrom_scoped(id, buf) {
             Err(e) if e == EAGAIN && !nonblock => {
                 let left = end.saturating_sub(crate::timer::now_ns());
                 if left == 0 {
@@ -171,7 +171,7 @@ impl Inode for SocketFile {
         st
     }
     fn read_at(&self, _off: u64, buf: &mut [u8]) -> Result<usize> {
-        recv(self.id, buf, self.nonblocking(), self.rcv_timeout()).map(|(n, _)| n)
+        recv(self.id, buf, self.nonblocking(), self.rcv_timeout()).map(|(n, _, _)| n)
     }
     fn write_at(&self, _off: u64, buf: &[u8]) -> Result<usize> {
         send(self.id, buf, None, self.nonblocking())

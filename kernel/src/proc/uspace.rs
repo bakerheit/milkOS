@@ -110,6 +110,9 @@ struct Page {
     foreign: bool,
     /// Copy-on-write: logically writable but mapped read-only until the first write.
     cow: bool,
+    /// A user driver's DMA buffer (`udrv`): owned by the device claim, not inherited by
+    /// fork (a child has no business with the device's memory).
+    nofork: bool,
 }
 
 impl Page {
@@ -119,6 +122,7 @@ impl Page {
             perm,
             cow: false,
             foreign: false,
+            nofork: false,
         }
     }
 
@@ -511,6 +515,9 @@ impl UserSpace {
         n.stack_low = self.stack_low;
         let pages: Vec<(VirtAddr, Page)> = self.pages.iter().map(|(&v, &p)| (v, p)).collect();
         for (va, mut p) in pages {
+            if p.nofork {
+                continue;
+            }
             if p.foreign {
                 // A desktop window buffer: the child gets its own private snapshot (the
                 // window stays the parent's), and the parent's mapping is left alone.
@@ -660,6 +667,16 @@ impl UserSpace {
     /// (a desktop window's pixel buffer), read/write, at a fresh address in the mmap area.
     /// The owner keeps the frames alive until the process has unmapped them or exited.
     pub fn map_shared(&mut self, pa: PhysAddr, len: usize) -> KResult<VirtAddr> {
+        self.map_foreign(pa, len, false)
+    }
+
+    /// [`map_shared`](Self::map_shared) for a user driver's DMA buffer: the same, but a
+    /// fork doesn't copy it (docs/drivers.md).
+    pub fn map_dma(&mut self, pa: PhysAddr, len: usize) -> KResult<VirtAddr> {
+        self.map_foreign(pa, len, true)
+    }
+
+    fn map_foreign(&mut self, pa: PhysAddr, len: usize, nofork: bool) -> KResult<VirtAddr> {
         let len = page_up(len);
         let va = self.mmap_next;
         if len == 0 || va + len > STACK_TOP - STACK_MAX {
@@ -688,6 +705,7 @@ impl UserSpace {
                     perm: Perm::RW,
                     cow: false,
                     foreign: true,
+                    nofork,
                 },
             );
         }

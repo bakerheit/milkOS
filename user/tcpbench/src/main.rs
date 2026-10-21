@@ -7,8 +7,8 @@
 //!   tcpbench source PORT MIB        listen, take one connection, send MIB MiB, close
 //!
 //! Prints one line: `tcpbench: send 32 MiB in 1234 ms = 25.9 MiB/s (local -> peer)`.
-//! HOST as in rt::net::lookup (numbers, localhost, NAME.local). scripts/net-bench.sh
-//! drives it.
+//! HOST as in rt::net::lookup (numbers, `[v6]:PORT`, localhost, NAME.local; every address
+//! tried in turn). Servers listen on [::], both families. scripts/net-bench.sh drives it.
 
 #![no_std]
 #![no_main]
@@ -71,9 +71,9 @@ fn recv_all(fd: i32) -> Result<u64, rt::Errno> {
 }
 
 fn listen_one(port: u16) -> Result<(i32, SockAddr), rt::Errno> {
-    let l = net::socket(net::SOCK_STREAM)?;
+    let l = net::socket6(net::SOCK_STREAM)?;
     let _ = net::set_reuseaddr(l);
-    net::bind(l, &SockAddr { ip: [0; 4], port })?;
+    net::bind(l, &SockAddr::any6(port))?;
     net::listen(l, 1)?;
     let r = net::accept(l);
     let _ = sys::close(l);
@@ -88,17 +88,14 @@ fn main(args: &rt::Args) -> i32 {
     };
     match a.as_slice() {
         ["send" | "recv", hp, rest @ ..] => {
-            let addr = match net::lookup(hp, 5001) {
+            let addrs = match net::lookup_all(hp, 5001, net::Want::Any) {
                 Ok(x) => x,
                 Err(e) => return fail("address", e),
             };
-            let fd = match net::socket(net::SOCK_STREAM) {
-                Ok(f) => f,
-                Err(e) => return fail("socket", alloc::format!("{e}")),
+            let (fd, addr) = match net::connect_any(&addrs, net::SOCK_STREAM) {
+                Ok(x) => x,
+                Err(e) => return fail("connect", e),
             };
-            if let Err(e) = net::connect(fd, &addr) {
-                return fail(&alloc::format!("connect {addr}"), alloc::format!("{e}"));
-            }
             let t0 = now_ms();
             if a[0] == "send" {
                 let Some(mib) = rest.first().and_then(|m| m.parse().ok()) else {

@@ -86,7 +86,11 @@ echo "$A" | grep -q "^milkfs .* /home/milk$" && ok "df -a shows the bind too" ||
 out "df -h" | grep -q "^milkfs .*M .* /Volumes/Milk$" && ok "df -h: human sizes" || bad "df -h"
 T1="$(out "MILK_TABLE=1 df")"
 echo "$T1" | grep -q "use_pct" && echo "$T1" | grep -q "/Volumes/Milk" && ok "MILK_TABLE=1: a table with use_pct" || bad "table output: $(echo "$T1" | head -3)"
-[ "$(echo "$P1" | col /home/milk 3)" = "$(echo "$P1" | col /Volumes/Milk 3)" ] && ok "df /home/milk = df /Volumes/Milk (fstatfs)" || bad "home vs volume"
+# Same file system: same size; used may move a little between the two calls (the
+# search index or Time Machine writing meanwhile).
+hu=$(echo "$P1" | col /home/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
+[ "$(echo "$P1" | col /home/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
+  && ok "df /home/milk = df /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
 u0=$(echo "$DF" | col /Volumes/Milk 3); u1=$(out "df /Volumes/Milk" | col /Volumes/Milk 3)
 big=$(( $(out "wc -c /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
 [ -n "$u0" ] && [ -n "$u1" ] && [ "$big" -gt 1024 ] && [ $((u1 - u0)) -ge "$big" ] && [ $((u1 - u0)) -le $((big + big / 10 + 64)) ] \

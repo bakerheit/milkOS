@@ -54,6 +54,7 @@ pub fn init() {
             t.vendor_id(),
             t.irq()
         );
+        let (slot, irq, id) = (t.slot(), t.irq(), t.device_id());
         let r = match t.device_id() {
             device_id::INPUT => input::attach(t),
             device_id::BLOCK => blk::attach(t),
@@ -63,8 +64,32 @@ pub fn init() {
             device_id::RNG => rng::attach(t),
             _ => Ok(()),
         };
-        if let Err(e) = r {
-            kprintln!("[virtio] slot {slot}: driver failed: {e:?}");
+        match r {
+            // Devices a user-space driver may take over (docs/drivers.md).
+            Ok(()) if id == device_id::RNG && rng::present() => crate::udrv::register(
+                slot,
+                irq,
+                id,
+                crate::udrv::Class::Rng,
+                crate::udrv::Hooks {
+                    detach: rng::detach,
+                    attach: rng::attach,
+                    quiesce: None,
+                },
+            ),
+            Ok(()) if id == device_id::SOUND && sound::present() => crate::udrv::register(
+                slot,
+                irq,
+                id,
+                crate::udrv::Class::Sound,
+                crate::udrv::Hooks {
+                    detach: sound::detach,
+                    attach: sound::attach,
+                    quiesce: Some(sound::quiesce),
+                },
+            ),
+            Ok(()) => {}
+            Err(e) => kprintln!("[virtio] slot {slot}: driver failed: {e:?}"),
         }
     }
     if legacy > 0 {

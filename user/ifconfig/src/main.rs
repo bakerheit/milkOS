@@ -1,6 +1,7 @@
 //! ifconfig: show network interfaces (read-only; addresses come from DHCP).
 //!   ifconfig [IFACE]
-//! Reads /proc/net/ifaddr (milkOS: one `key=value` line per interface) and /proc/net/dev.
+//! Reads /proc/net/ifaddr (milkOS: one `key=value` line per interface, `inet6=` once per
+//! IPv6 address) and /proc/net/dev.
 
 #![no_std]
 #![no_main]
@@ -80,6 +81,34 @@ fn main(args: &rt::Args) -> i32 {
                 l.push_str(&alloc::format!("  broadcast {b}"));
             }
             println!("{l}");
+        } else if get("ipv4") == Some("off") {
+            println!("        inet off (IPv6 only)");
+        }
+        // Linux style: `inet6 ADDR  prefixlen N  scopeid 0x20<link>`.
+        for v in kv.iter().filter(|(k, _)| *k == "inet6").map(|(_, v)| *v) {
+            let mut parts = v.split(',');
+            let (addr, plen) = parts
+                .next()
+                .unwrap_or("")
+                .split_once('/')
+                .unwrap_or((v, "?"));
+            let mut scope = "0x0<global>";
+            let mut extra = String::new();
+            for f in parts {
+                match f {
+                    "link" => scope = "0x20<link>",
+                    "host" => scope = "0x10<host>",
+                    "tentative" => extra.push_str("  (tentative)"),
+                    _ => {}
+                }
+            }
+            if addr == "::1" {
+                scope = "0x10<host>";
+            }
+            println!("        inet6 {addr}  prefixlen {plen}  scopeid {scope}{extra}");
+        }
+        if let Some(r) = get("router6") {
+            println!("        router6 {r}");
         }
         if let Some(m) = get("ether") {
             println!("        ether {m}");

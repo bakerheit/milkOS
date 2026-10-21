@@ -1,4 +1,5 @@
-//! `/proc/net/{dev,arp,route,tcp,udp,snmp}` in the Linux formats (close enough for
+//! `/proc/net/{dev,arp,route,tcp,udp,snmp}` and the IPv6 ones (`tcp6`, `udp6`, `if_inet6`,
+//! `snmp6`, `ndisc`) in the Linux formats (close enough for
 //! `cat`, `netstat`-style parsers and humans). Each writer takes any `fmt::Write`, so the
 //! HTTP demo can serve the same text from a fixed buffer.
 
@@ -8,12 +9,35 @@ use core::fmt::{self, Write};
 use super::Stack;
 use super::arp::ArpState;
 use super::iface::LINK_NAMES;
-use super::socket::SockType;
+use super::ipv6;
+use super::socket::{Family, Sock, SockType};
 use super::tcp::TcpState;
-use super::wire::Ipv4;
+use super::wire::{IpAddr, Ipv4};
 use super::with;
 use crate::fs::procfs;
 use crate::virtio::net::DevStats;
+
+/// An address in /proc's hex: IPv4 as one native-endian u32, IPv6 as four of them (so
+/// `::1` is `00000000000000000000000001000000`, as Linux prints it on little-endian).
+struct Hex(IpAddr, bool);
+
+impl fmt::Display for Hex {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if !self.1 {
+            return write!(f, "{:08X}", self.0.v4().unwrap_or_default().proc_hex());
+        }
+        let b = self.0.to_v6_mapped().0;
+        for c in b.chunks(4) {
+            write!(f, "{:08X}", u32::from_le_bytes([c[0], c[1], c[2], c[3]]))?;
+        }
+        Ok(())
+    }
+}
+
+/// Does socket `s` belong in the IPv6 (`v6`) or IPv4 file?
+fn in_file(s: &Sock, v6: bool) -> bool {
+    (s.family == Family::V6) == v6
+}
 
 fn dev_line(w: &mut dyn Write, name: &str, s: &DevStats, extra_drop: u64) -> fmt::Result {
     writeln!(
@@ -127,15 +151,30 @@ pub fn route(st: &Stack, w: &mut dyn Write) -> fmt::Result {
 /// `/proc/net/tcp` (Linux columns) plus, for humans, a trailing comment column with the
 /// state name, retransmit count and RTO.
 pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    tcp_file(st, w, false)
+}
+
+/// `/proc/net/tcp6`: the AF_INET6 sockets (IPv4 peers of dual-stack ones as ::ffff:a.b.c.d).
+pub fn tcp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    tcp_file(st, w, true)
+}
+
+fn tcp_file(st: &Stack, w: &mut dyn Write, v6: bool) -> fmt::Result {
+    let pad = if v6 { 24 } else { 0 };
     writeln!(
         w,
-        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode"
+        "  sl  {:<w1$}local_address {:<w1$}rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode",
+        "",
+        "",
+        w1 = pad
     )?;
     let now = st.now;
     for (n, (_, s)) in st
         .socks
         .iter()
-        .filter(|(_, s)| s.ty == SockType::Stream && s.tcb.state != TcpState::Closed)
+        .filter(|(_, s)| {
+            s.ty == SockType::Stream && s.tcb.state != TcpState::Closed && in_file(s, v6)
+        })
         .enumerate()
     {
         let t = &s.tcb;
@@ -157,11 +196,11 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         };
         writeln!(
             w,
-            "{:>4}: {:08X}:{:04X} {:08X}:{:04X} {:02X} {:08X}:{:08X} {:02X}:{:08X} {:08X} {:>5} {:>8} {} # {} rexmit {} rto {}ms",
+            "{:>4}: {}:{:04X} {}:{:04X} {:02X} {:08X}:{:08X} {:02X}:{:08X} {:08X} {:>5} {:>8} {} # {} rexmit {} rto {}ms",
             n,
-            s.local.ip.proc_hex(),
+            Hex(s.local.ip, v6),
             s.local.port,
-            s.remote.ip.proc_hex(),
+            Hex(s.remote.ip, v6),
             s.remote.port,
             t.state.linux_code(),
             txq,
@@ -177,20 +216,20 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
             t.rto / 1_000_000
         )?;
     }
-    // Connections in TIME_WAIT (kept without a socket, tcp::TwTable).
+    // Connections in TIME_WAIT (kept without a socket, tcp::TwTable), by address family.
     let base = st
         .socks
         .iter()
-        .filter(|(_, s)| s.ty == SockType::Stream)
+        .filter(|(_, s)| s.ty == SockType::Stream && in_file(s, v6))
         .count();
-    for (n, e) in st.tw.entries.iter().enumerate() {
+    for (n, e) in st.tw.entries.iter().filter(|e| e.v6_sock == v6).enumerate() {
         writeln!(
             w,
-            "{:>4}: {:08X}:{:04X} {:08X}:{:04X} 06 00000000:00000000 03:{:08X} 00000000 {:>5} {:>8} 0 # TIME_WAIT",
+            "{:>4}: {}:{:04X} {}:{:04X} 06 00000000:00000000 03:{:08X} 00000000 {:>5} {:>8} 0 # TIME_WAIT",
             base + n,
-            e.local.ip.proc_hex(),
+            Hex(e.local.ip, v6),
             e.local.port,
-            e.remote.ip.proc_hex(),
+            Hex(e.remote.ip, v6),
             e.remote.port,
             e.deadline.saturating_sub(now) / 10_000_000,
             0,
@@ -201,23 +240,35 @@ pub fn tcp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
 }
 
 pub fn udp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    udp_file(st, w, false)
+}
+
+pub fn udp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    udp_file(st, w, true)
+}
+
+fn udp_file(st: &Stack, w: &mut dyn Write, v6: bool) -> fmt::Result {
+    let pad = if v6 { 24 } else { 0 };
     writeln!(
         w,
-        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops"
+        "  sl  {:<w1$}local_address {:<w1$}rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops",
+        "",
+        "",
+        w1 = pad
     )?;
     for (n, (_, s)) in st
         .socks
         .iter()
-        .filter(|(_, s)| s.ty == SockType::Dgram && s.owns_port)
+        .filter(|(_, s)| s.ty == SockType::Dgram && s.owns_port && !s.icmp && in_file(s, v6))
         .enumerate()
     {
         writeln!(
             w,
-            "{:>5}: {:08X}:{:04X} {:08X}:{:04X} {:02X} {:08X}:{:08X} 00:00000000 00000000 {:>5} {:>8} {} 2 0000000000000000 {}",
+            "{:>5}: {}:{:04X} {}:{:04X} {:02X} {:08X}:{:08X} 00:00000000 00000000 {:>5} {:>8} {} 2 0000000000000000 {}",
             n,
-            s.local.ip.proc_hex(),
+            Hex(s.local.ip, v6),
             s.local.port,
-            s.remote.ip.proc_hex(),
+            Hex(s.remote.ip, v6),
             s.remote.port,
             if s.udp_connected { 1 } else { 7 },
             0,
@@ -317,7 +368,7 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
 pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     writeln!(
         w,
-        "lo flags=UP,LOOPBACK,RUNNING mtu={} inet=127.0.0.1 netmask=255.0.0.0",
+        "lo flags=UP,LOOPBACK,RUNNING mtu={} inet=127.0.0.1 netmask=255.0.0.0 inet6=::1/128",
         super::iface::MTU
     )?;
     for (k, l) in st.iface.links.iter().enumerate() {
@@ -347,13 +398,190 @@ pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
         if let Some(n) = c.dns {
             write!(w, " dns={n}")?;
         }
-        if k == 0 {
+        // Every IPv6 address: inet6=ADDR/LEN,SCOPE[,tentative] (tentative while DAD runs).
+        for a in &l.v6.addrs {
+            write!(
+                w,
+                " inet6={}/{},{}{}",
+                a.addr,
+                a.plen,
+                if a.addr.is_link_local() {
+                    "link"
+                } else {
+                    "global"
+                },
+                if a.tentative { ",tentative" } else { "" }
+            )?;
+        }
+        if let Some((r, _)) = l.v6.router {
+            write!(w, " router6={r}")?;
+        }
+        if st.iface.v4_off {
+            writeln!(w, " ipv4=off")?;
+        } else if k == 0 {
             writeln!(w, " dhcp={:?}", st.dhcp.state)?;
         } else if l.ll.on {
             let state = if c.configured() { "bound" } else { "probing" };
             writeln!(w, " linklocal={state} conflicts={}", l.ll.conflicts)?;
         } else {
             writeln!(w)?;
+        }
+    }
+    Ok(())
+}
+
+/// `/proc/net/if_inet6`: address, ifindex, prefix length, scope, flags, name (all hex but
+/// the name), one line per address.
+pub fn if_inet6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    writeln!(
+        w,
+        "{} 01 80 10 80       lo",
+        Hex32(super::wire::Ipv6::LOOPBACK)
+    )?;
+    for (k, l) in st.iface.links.iter().enumerate() {
+        for a in &l.v6.addrs {
+            let scope = if a.addr.is_link_local() { 0x20 } else { 0x00 };
+            // IFA_F_TENTATIVE 0x40, IFA_F_PERMANENT 0x80 (link-local and the VM-link ULA).
+            let mut flags = if a.tentative { 0x40 } else { 0 };
+            if a.origin != ipv6::Origin::Slaac {
+                flags |= 0x80;
+            }
+            writeln!(
+                w,
+                "{} {:02x} {:02x} {:02x} {:02x} {:>8}",
+                Hex32(a.addr),
+                ipv6::ifindex(Some(k)),
+                a.plen,
+                scope,
+                flags,
+                LINK_NAMES[k]
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// 32 lowercase hex digits, byte order as on the wire (the if_inet6 format).
+struct Hex32(super::wire::Ipv6);
+
+impl fmt::Display for Hex32 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for b in self.0.0 {
+            write!(f, "{b:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// `/proc/net/snmp6`: one `Name value` per line, as Linux.
+pub fn snmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    let s = &st.ip6.stats;
+    let f = &st.frags.stats6;
+    let rows: [(&str, u64); 25] = [
+        ("Ip6InReceives", s.in_receives),
+        ("Ip6InHdrErrors", s.in_hdr_errors),
+        ("Ip6InAddrErrors", s.in_addr_errors),
+        ("Ip6InUnknownProtos", s.in_unknown_protos),
+        ("Ip6InDiscards", s.in_discards),
+        ("Ip6InDelivers", s.in_delivers),
+        ("Ip6OutRequests", s.out_requests),
+        ("Ip6OutNoRoutes", s.out_no_routes),
+        ("Ip6ReasmReqds", f.reqds),
+        ("Ip6ReasmOKs", f.oks),
+        ("Ip6ReasmFails", f.fails),
+        ("Ip6ReasmTimeout", f.timeouts),
+        ("Ip6ReasmOverlaps", f.overlaps),
+        ("Ip6FragCreates", f.creates),
+        ("Ip6FragDropped", s.frag_dropped),
+        ("Ip6InSourceRouteRefused", s.routing_refused),
+        ("Icmp6InMsgs", s.icmp_in_msgs),
+        ("Icmp6OutMsgs", s.icmp_out_msgs),
+        ("Icmp6InEchos", s.icmp_in_echos),
+        ("Icmp6InEchoReplies", s.icmp_in_echo_reps),
+        ("Icmp6OutEchoReplies", s.icmp_out_echo_reps),
+        ("Icmp6OutErrors", s.icmp_out_errors),
+        ("Icmp6InNeighborDiscovery", s.nd_in),
+        ("Icmp6OutNeighborDiscovery", s.nd_out),
+        ("Ip6DadConflicts", s.dad_conflicts),
+    ];
+    for (k, v) in rows {
+        writeln!(w, "{k:<32}{v}")?;
+    }
+    Ok(())
+}
+
+/// `/proc/net/igmp6`: the IPv6 groups each link listens to (Linux columns: ifindex,
+/// name, group, users, flags, timer), then the MLD counters as a comment.
+pub fn igmp6(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for (k, l) in st.iface.links.iter().enumerate() {
+        if !l.up() {
+            continue;
+        }
+        for g in super::mld::groups(&l.v6) {
+            let users =
+                l.v6.mld
+                    .joined()
+                    .iter()
+                    .find(|(j, _)| *j == g)
+                    .map_or(1, |&(_, n)| n);
+            writeln!(
+                w,
+                "{:<4} {:<15} {} {:>5} {:08X} {:>5}",
+                ipv6::ifindex(Some(k)),
+                LINK_NAMES[k],
+                Hex32(g),
+                users,
+                if g == super::wire::Ipv6::ALL_NODES {
+                    0x0c
+                } else {
+                    0x04
+                },
+                0
+            )?;
+        }
+    }
+    writeln!(
+        w,
+        "# mld queries_in {} reports_out {}",
+        st.ip6.mld.queries_in, st.ip6.mld.reports_out
+    )
+}
+
+/// `/proc/net/hostname` (milkOS): the hostname (uname's nodename, net::hostname).
+pub fn hostname(_st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    writeln!(w, "{}", super::hostname::get())
+}
+
+/// `/proc/net/pmtu` (milkOS): the path MTUs learned from ICMP, `DST MTU EXPIRES_IN_S`,
+/// then the counters.
+pub fn pmtu(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for e in &st.pmtu.entries {
+        writeln!(
+            w,
+            "{} {} {}",
+            e.dst,
+            e.mtu,
+            e.until.saturating_sub(st.now) / 1_000_000_000
+        )?;
+    }
+    writeln!(
+        w,
+        "# learned {} ignored {}",
+        st.pmtu.stats.learned, st.pmtu.stats.ignored
+    )
+}
+
+/// `/proc/net/ndisc` (milkOS): the IPv6 neighbour cache, `ADDR MAC STATE [router] DEV`.
+pub fn ndisc(st: &Stack, w: &mut dyn Write) -> fmt::Result {
+    for (k, l) in st.iface.links.iter().enumerate() {
+        for (ip, mac, reach, router) in l.v6.neighbours() {
+            writeln!(
+                w,
+                "{ip} lladdr {mac} {}{} dev {}",
+                if reach { "REACHABLE" } else { "INCOMPLETE" },
+                if router { " router" } else { "" },
+                LINK_NAMES[k]
+            )?;
         }
     }
     Ok(())
@@ -369,6 +597,14 @@ pub const FILES: &[(&str, Gen)] = &[
     ("udp", udp),
     ("snmp", snmp),
     ("ifaddr", ifaddr),
+    ("tcp6", tcp6),
+    ("udp6", udp6),
+    ("if_inet6", if_inet6),
+    ("snmp6", snmp6),
+    ("ndisc", ndisc),
+    ("pmtu", pmtu),
+    ("igmp6", igmp6),
+    ("hostname", hostname),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

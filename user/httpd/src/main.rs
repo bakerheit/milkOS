@@ -1,7 +1,7 @@
 //! httpd: serve a directory over HTTP/1.0 (GET and HEAD, one request per connection).
 //!   httpd [-p PORT] [-q] [DIR]       defaults: port 80, /srv/www
 //! Directories serve their index.html, or a listing. Paths with ".." are refused. -q: no
-//! request log. init starts `httpd -q /srv/www` at boot.
+//! request log. init starts `httpd -q /srv/www` at boot. Listens on [::] (IPv6 and IPv4).
 //!
 //! `/status` is generated: a system dashboard (CPU per core, memory, uptime, load,
 //! network totals, recent audit events) in the HTML subset the desktop Browser renders.
@@ -38,7 +38,7 @@ fn main(args: &rt::Args) -> i32 {
         }
     }
     let root = root.trim_end_matches('/');
-    let s = match net::socket(net::SOCK_STREAM) {
+    let s = match net::socket6(net::SOCK_STREAM) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("httpd: socket: {e}");
@@ -46,7 +46,7 @@ fn main(args: &rt::Args) -> i32 {
         }
     };
     let _ = net::set_reuseaddr(s);
-    if let Err(e) = net::bind(s, &SockAddr { ip: [0; 4], port }) {
+    if let Err(e) = net::bind(s, &SockAddr::any6(port)) {
         eprintln!("httpd: bind :{port}: {e}");
         return 1;
     }

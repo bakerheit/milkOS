@@ -14,6 +14,8 @@
                                          the recovery key, or writes it to FILE)
   mkmilkfs.py change-passphrase IMAGE    rewrap the volume key under a new passphrase
   mkmilkfs.py selftest-crypto            this tool's crypto against the published vectors
+  An image milkOS is encrypting or decrypting in place is read in either form (check
+  counts both); commands that write refuse it until milkOS has finished.
   Encrypted images: every command takes --passphrase-file FILE, --recovery KEY or
   $MILKFS_PASSPHRASE (else it asks); new passphrases --new-passphrase-file FILE or
   $MILKFS_NEW_PASSPHRASE.
@@ -29,6 +31,9 @@
                                          flip one bit in the first data block of PATH
   mkmilkfs.py verify-stream FILE         check a `snap send` stream (every record checksum,
                                          counts, chained hash) and describe it
+  mkmilkfs.py seal-stream FILE OUT        encrypt a plaintext stream (asks for a passphrase)
+  Encrypted streams (verify-stream, receive): --stream-passphrase-file FILE or
+  $MILKFS_STREAM_PASSPHRASE (else it asks).
   mkmilkfs.py receive IMAGE FILE [--force]  recreate the stream's snapshot in IMAGE (full:
                                          IMAGE must be empty; incremental: its base must be
                                          there, --force rolls the live tree back to it)
@@ -51,6 +56,9 @@ VERSION = 1      # written by mkfs; 0, 1, 2 (reflinks) and 3 (encrypted) are rea
 MAX_VERSION = 3
 CRYPT_VERSION = 3
 SB_ENCRYPTED = 2
+SB_CONVERTING = 4       # being encrypted (or, with SB_TO_PLAIN, decrypted) in place:
+SB_TO_PLAIN = 8         # a block is in either form, its pointer's checksum says which
+K_CONVERT, K_REMAP = 9, 10  # (VOL_OBJ, ...) items of a conversion in progress
 MIN_VERSION = 0
 MAX_SNAPS = 30
 K_INODE, K_DIRENT, K_EXTENT, K_SYMLINK, K_EXT, K_INLINE = 1, 2, 3, 4, 5, 6
@@ -196,15 +204,29 @@ def _aead_tag(key, nonce12, aad, ct):
 
 def xaead_seal(key, nonce24, aad, pt):
     sub, n12 = hchacha20(key, nonce24[:16]), b"\0\0\0\0" + nonce24[16:]
+    if _FastAEAD:
+        out = _FastAEAD(sub).encrypt(n12, bytes(pt), aad)
+        return out[:-16], out[-16:]
     ct = chacha20_xor(sub, 1, n12, pt)
     return ct, _aead_tag(sub, n12, aad, ct)
 
 
 def xaead_open(key, nonce24, aad, ct, tag):
     sub, n12 = hchacha20(key, nonce24[:16]), b"\0\0\0\0" + nonce24[16:]
+    if _FastAEAD:
+        try:
+            return _FastAEAD(sub).decrypt(n12, bytes(ct) + bytes(tag), aad)
+        except Exception:
+            return None
     if not _hmac.compare_digest(_aead_tag(sub, n12, aad, ct), tag):
         return None
     return chacha20_xor(sub, 1, n12, ct)
+
+
+try:  # ChaCha20-Poly1305 (IETF) from `cryptography` when installed: same bytes, faster
+    from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305 as _FastAEAD
+except ImportError:
+    _FastAEAD = None
 
 
 def hmac256(key, data):
@@ -360,6 +382,20 @@ def unlock_slots(uuid, slots, secret):
 # or asked for on the terminal.
 SECRET = {"value": None, "file": None, "recovery": None}
 _KEYS = {}
+
+
+def get_stream_secret(new=False):
+    """An encrypted stream's passphrase: --stream-passphrase-file FILE,
+    $MILKFS_STREAM_PASSPHRASE, or asked for (twice for a new one)."""
+    if SECRET.get("stream_file"):
+        return open(SECRET["stream_file"]).read().splitlines()[0]
+    if os.environ.get("MILKFS_STREAM_PASSPHRASE"):
+        return os.environ["MILKFS_STREAM_PASSPHRASE"]
+    import getpass
+    p = getpass.getpass("stream passphrase: ")
+    if new and getpass.getpass("again: ") != p:
+        sys.exit("mkmilkfs: the passphrases differ")
+    return p
 
 
 def get_secret(prompt="passphrase (or recovery key): "):
@@ -537,7 +573,9 @@ class Image:
         self.size = os.fstat(self.f.fileno()).st_size
         self.key = None
         sb = self.superblock()
-        if unlock and sb and sb["flags"] & SB_ENCRYPTED:
+        self.converting = bool(sb and sb["flags"] & SB_CONVERTING)
+        self.forms = {"plain": set(), "sealed": set()}  # blocks read, by form
+        if unlock and sb and sb["flags"] & (SB_ENCRYPTED | SB_CONVERTING):
             self.key = volume_key(self, sb)
 
     def raw(self, blk):
@@ -548,10 +586,14 @@ class Image:
     def read(self, p):
         blk, birth, csum = p
         b = self.raw(blk)
+        if self.converting and xxh64(b) == csum:
+            self.forms["plain"].add(blk)
+            return b  # not converted yet: plain
         if self.key:
             pt = self.key.open(blk, birth, csum, b)
             if pt is None:
                 raise IOError(f"checksum (tag) mismatch in block {blk} (birth {birth})")
+            self.forms["sealed"].add(blk)
             return pt
         if xxh64(b) != csum:
             raise IOError(f"checksum mismatch in block {blk} (birth {birth})")
@@ -647,7 +689,17 @@ def parse_size(s):
     return int(s[:-1]) * mult[s[-1].upper()] if s[-1].upper() in mult else int(s)
 
 
+def label_ok(label):
+    """The kernel's rule (fs::milkfs::label_ok): 1-31 bytes of UTF-8, no '/', no control
+    characters, not starting with '.'."""
+    b = label.encode()
+    return 1 <= len(b) <= 31 and not label.startswith(".") and not any(
+        c == "/" or ord(c) < 0x20 or 0x7f <= ord(c) < 0xa0 for c in label)
+
+
 def cmd_mkfs(path, size, label, force, version=None, encrypt=False, recovery_out=None):
+    if not label_ok(label):
+        sys.exit(f"bad label {label!r}: 1-31 bytes of UTF-8, no '/', no control characters, not starting with '.'")
     if os.path.exists(path):
         img = Image(path, unlock=False)  # only "is there a milkfs?" (no key needed)
         if img.superblock() and not force:
@@ -901,6 +953,9 @@ class Writer:
     """Writes new blocks into blocks the current superblock doesn't reach."""
 
     def __init__(self, path, img, sb):
+        if sb["flags"] & SB_CONVERTING:
+            sys.exit(f"{path}: being converted (encrypted or decrypted) in place: "
+                     "let milkOS finish that first")
         self.f = open(path, "r+b")
         self.key = img.key
         used = all_used(img, sb)
@@ -1283,23 +1338,129 @@ def chain_step(chain, csum):
     return xxh64(struct.pack("<QQ", chain, csum))
 
 
-def read_stream(path):
-    """Yield (type, payload) of every record, checking each checksum and, at the end, the
-    counts and the chained hash. The header is decoded into a dict (type R_HEADER)."""
+SEALED_MAGIC, ENVELOPE_LEN, SEAL_LAST = b"MILKSTRX", 128, 1
+_STREAM_KEYS = {}
+
+
+class StreamKey:
+    """An encrypted stream's key and record counter (layout: kernel crypt.rs StreamKey)."""
+
+    def __init__(self, key, prefix):
+        self.key, self.prefix, self.next = key, prefix, 0
+
+    @staticmethod
+    def wrap_aad(env):
+        return b"milkfs stream key" + env[:48]
+
+    @classmethod
+    def create(cls, passphrase):
+        env = bytearray(ENVELOPE_LEN)
+        env[0:8] = SEALED_MAGIC
+        env[8:16] = struct.pack("<I4B", 1, 16, 8, 4, 1)
+        env[16:72] = os.urandom(56)  # salt, record nonce prefix, wrap nonce
+        sk = os.urandom(32)
+        kek = scrypt(passphrase.encode(), bytes(env[16:32]), 16, 8, 4)
+        ct, tag = xaead_seal(kek, bytes(env[48:72]), cls.wrap_aad(bytes(env)), sk)
+        env[72:104], env[104:120] = ct, tag
+        return cls(sk, bytes(env[32:48])), bytes(env)
+
+    @classmethod
+    def open(cls, env, passphrase):
+        ver, log_n, r, p, kind = struct.unpack_from("<I4B", env, 8)
+        if env[:8] != SEALED_MAGIC or ver != 1 or kind != 1 or env[120:] != bytes(8) \
+                or not 1 <= log_n <= 20 or 128 * r * (1 << log_n) > 128 << 20 or not 1 <= p <= 16:
+            raise StreamError("an encrypted stream this tool can't read (version or parameters)")
+        kek = scrypt(passphrase.encode(), env[16:32], log_n, r, p)
+        sk = xaead_open(kek, env[48:72], cls.wrap_aad(env), env[72:104], env[104:120])
+        if sk is None:
+            raise StreamError("wrong passphrase for the stream (or its envelope was altered)")
+        return cls(sk, env[32:48])
+
+    def _na(self, ln, flags):
+        return (self.prefix + struct.pack("<Q", self.next),
+                b"MKSR" + struct.pack("<QII", self.next, ln, flags))
+
+    def seal(self, rec, last):
+        flags = SEAL_LAST if last else 0
+        n, a = self._na(len(rec), flags)
+        ct, tag = xaead_seal(self.key, n, a, rec)
+        self.next += 1
+        return struct.pack("<II", len(rec), flags) + ct + tag
+
+    def open_record(self, hdr, body):
+        ln, flags = struct.unpack("<II", hdr)
+        if len(body) != ln + 16 or flags & ~SEAL_LAST:
+            raise StreamError(f"bad sealed record {self.next}")
+        n, a = self._na(ln, flags)
+        pt = xaead_open(self.key, n, a, body[:ln], body[ln:])
+        if pt is None:
+            raise StreamError(f"sealed record {self.next} doesn't authenticate (altered, reordered or replaced)")
+        self.next += 1
+        return pt, flags
+
+
+def stream_is_sealed(path):
+    with open(path, "rb") as f:
+        return f.read(8) == SEALED_MAGIC
+
+
+def _raw_records(path):
+    """Yield the raw bytes (header | payload | xxh64) of each record, opening an encrypted
+    stream with its passphrase (asked once per file)."""
     f = open(path, "rb")
-    records = data = chain = 0
-    first = True
+    m = f.read(8)
+    if m != SEALED_MAGIC:
+        f.seek(0)
+        while True:
+            h = f.read(8)
+            if len(h) < 8:
+                raise StreamError("truncated (no END record)")
+            ln = struct.unpack_from("<I", h, 4)[0]
+            if h[1:4] != b"\0\0\0" or ln > 64 << 10:
+                raise StreamError(f"bad record header at byte {f.tell() - 8}")
+            rest = f.read(ln + 8)
+            if len(rest) < ln + 8:
+                raise StreamError("truncated record")
+            yield h + rest
+            if h[0] == R_END:
+                return
+    env = m + f.read(ENVELOPE_LEN - 8)
+    if len(env) < ENVELOPE_LEN:
+        raise StreamError("truncated envelope")
+    if path not in _STREAM_KEYS:
+        _STREAM_KEYS[path] = get_stream_secret()
+    k = StreamKey.open(env, _STREAM_KEYS[path])
+    last = False
     while True:
         h = f.read(8)
+        if not h and last:
+            return
         if len(h) < 8:
             raise StreamError("truncated (no END record)")
-        t, ln = h[0], struct.unpack_from("<I", h, 4)[0]
-        if h[1:4] != b"\0\0\0" or ln > 64 << 10:
-            raise StreamError(f"bad record header at byte {f.tell() - 8}")
-        rest = f.read(ln + 8)
-        if len(rest) < ln + 8:
+        if last:
+            raise StreamError("data after the last record")
+        ln = struct.unpack_from("<I", h)[0]
+        if ln > (64 << 10) + 16:
+            raise StreamError("bad sealed record length")
+        body = f.read(ln + 16)
+        if len(body) < ln + 16:
             raise StreamError("truncated record")
-        p, c = rest[:ln], struct.unpack_from("<Q", rest, ln)[0]
+        rec, flags = k.open_record(h, body)
+        last = bool(flags & SEAL_LAST)
+        if len(rec) < 16 or struct.unpack_from("<I", rec, 4)[0] + 16 != len(rec) or (rec[0] == R_END) != last:
+            raise StreamError(f"bad record inside sealed record {k.next - 1}")
+        yield rec
+
+
+def read_stream(path):
+    """Yield (type, payload) of every record, checking each checksum and, at the end, the
+    counts and the chained hash. The header is decoded into a dict (type R_HEADER). An
+    encrypted stream is opened with its passphrase (get_stream_secret)."""
+    records = data = chain = 0
+    first = True
+    for rec in _raw_records(path):
+        h, t, ln = rec[:8], rec[0], struct.unpack_from("<I", rec, 4)[0]
+        p, c = rec[8:8 + ln], struct.unpack_from("<Q", rec, 8 + ln)[0]
         if xxh64(h + p) != c:
             raise StreamError(f"checksum mismatch in record {records} ({R_NAMES.get(t, t)})")
         if first and t != R_HEADER:
@@ -1332,6 +1493,29 @@ def read_stream(path):
             yield t, p
 
 
+def cmd_seal_stream(src, dst):
+    """Encrypt a plaintext stream (after checking it all) under a new passphrase."""
+    if stream_is_sealed(src):
+        sys.exit(f"{src}: already encrypted")
+    try:
+        recs = list(_raw_records(src))
+        for _ in read_stream(src):
+            pass
+    except StreamError as e:
+        print(f"{src}: BAD stream: {e}")
+        return 1
+    p = get_stream_secret(new=True)
+    if len(p) < 8:
+        sys.exit("mkmilkfs: a stream passphrase needs 8 characters or more")
+    k, env = StreamKey.create(p)
+    with open(dst, "wb") as f:
+        f.write(env)
+        for i, r in enumerate(recs):
+            f.write(k.seal(r, i == len(recs) - 1))
+    print(f"{dst}: {len(recs)} records sealed")
+    return 0
+
+
 def key_unpack(p):
     return struct.unpack_from("<QBQ", p)
 
@@ -1347,7 +1531,8 @@ def cmd_verify_stream(path):
         print(f"{path}: BAD stream: {e}")
         return 1
     kind = f"incremental from {hd['base']!r} (created {hd['base_created']})" if hd["incremental"] else "full"
-    print(f"{path}: milkfs stream v1, snapshot {hd['snap']!r} of {hd['label']!r} "
+    enc = ", encrypted (XChaCha20-Poly1305 records, scrypt-wrapped key)" if stream_is_sealed(path) else ""
+    print(f"{path}: milkfs stream v1{enc}, snapshot {hd['snap']!r} of {hd['label']!r} "
           f"(created {hd['snap_created']}), {kind}")
     print("  " + ", ".join(f"{counts[t]} {R_NAMES[t]}" for t in sorted(counts) if t not in (R_HEADER, R_END)))
     print(f"  {os.path.getsize(path)} bytes, every checksum and the END record check out")
@@ -1687,6 +1872,13 @@ def cmd_check(path, quiet):
               "none (the next mount rebuilds it)" if not sb["spacemap"][0] else "BAD")
         if sb["flags"] & 1:
             print("  history branched (a clone was promoted): no dead lists, sweeps reclaim space")
+        if sb["flags"] & SB_CONVERTING:
+            print(f"  encryption: being {'decrypted' if sb['flags'] & SB_TO_PLAIN else 'encrypted'} in place: "
+                  f"{len(img.forms['sealed'])} block(s) read sealed, {len(img.forms['plain'])} plain")
+        elif sb["flags"] & SB_ENCRYPTED:
+            print("  encryption: on")
+        else:
+            print("  encryption: off")
         for s in sb["snaps"]:
             if s["clone"]:
                 print(f"  clone {s['name']} (id {s['id']}) of the snapshot at gen {s['gen']}")
@@ -1725,7 +1917,7 @@ def main(argv):
     while i < len(args):
         a = args[i]
         if a in ("--size", "--label", "--snapshot", "--passphrase-file", "--recovery",
-                 "--new-passphrase-file", "--recovery-out"):
+                 "--new-passphrase-file", "--recovery-out", "--stream-passphrase-file"):
             opts[a] = args[i + 1]
             i += 2
         elif a.startswith("--"):
@@ -1735,7 +1927,8 @@ def main(argv):
             pos.append(a)
             i += 1
     SECRET.update(file=opts.get("--passphrase-file"), recovery=opts.get("--recovery"),
-                  new_file=opts.get("--new-passphrase-file"))
+                  new_file=opts.get("--new-passphrase-file"),
+                  stream_file=opts.get("--stream-passphrase-file"))
     if cmd == "mkfs":
         if "--encrypt" in opts and "--passphrase-file" in opts and "--new-passphrase-file" not in opts:
             SECRET["new_file"] = opts["--passphrase-file"]
@@ -1756,6 +1949,8 @@ def main(argv):
         return cmd_corrupt(pos[0], pos[1])
     elif cmd == "verify-stream":
         return cmd_verify_stream(pos[0])
+    elif cmd == "seal-stream":
+        return cmd_seal_stream(pos[0], pos[1])
     elif cmd == "receive":
         return cmd_receive(pos[0], pos[1], "--force" in opts)
     elif cmd == "tree":

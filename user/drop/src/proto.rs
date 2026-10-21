@@ -23,10 +23,33 @@ pub const XMAGIC: &str = "MILKDROP/2";
 const MAX_LINE: usize = 1024;
 
 pub fn group() -> SockAddr {
+    SockAddr::v4(GROUP, DISC_PORT)
+}
+
+/// Discovery over IPv6: [ff02::fb%eth1]:5359 (the mDNS group, our own port).
+pub fn group6() -> SockAddr {
     SockAddr {
-        ip: GROUP,
+        ip: rt::net::Ip::V6(rt::mdns::GROUP6),
         port: DISC_PORT,
+        scope: 3,
     }
+}
+
+/// Add `p` to `peers`, one entry per key. Heard over both families, a peer keeps its IPv4
+/// address as `addr` (what `drop send NAME` uses, and older peers only speak IPv4) and its
+/// IPv6 one as `addr6`; heard only over IPv6 (an IPv6-only machine), `addr` is IPv6.
+pub fn merge(peers: &mut Vec<Peer>, mut p: Peer) {
+    let Some(old) = peers.iter_mut().find(|x| x.key == p.key) else {
+        peers.push(p);
+        return;
+    };
+    if p.addr.is_v6() && !old.addr.is_v6() {
+        p.addr6 = p.addr6.or(Some(p.addr)).filter(on_vm_link6);
+        p.addr = old.addr;
+    } else if !p.addr.is_v6() {
+        p.addr6 = p.addr6.or(old.addr6);
+    }
+    *old = p;
 }
 
 /// `key=value` field of a protocol line.
@@ -75,7 +98,9 @@ pub struct Peer {
     pub name: String,
     pub host: String,
     pub key: [u8; 32],
-    pub addr: [u8; 4],
+    pub addr: rt::net::Ip,
+    /// Its eth1 IPv6 address (the VM link's fd6d:696c:6b00:1::/64), if it announced one.
+    pub addr6: Option<rt::net::Ip>,
     pub port: u16,
     pub receiving: bool,
     /// Its rotation statement (`rot=old:sig`), if its key replaced an older one.
@@ -84,11 +109,24 @@ pub struct Peer {
 
 const ANNOUNCE_CTX: &str = "milkdrop-announce-v1";
 
-/// Our signed announcement: who we are, where transfers go, whether `drop recv` is on.
-pub fn announce(id: &Identity, host: &str, receiving: bool) -> String {
+/// The VM link's IPv6 prefix (kernel `ipv6::VM_LINK_PREFIX`): the only place an
+/// announced `addr6` may point.
+pub const VM_LINK6: [u8; 8] = [0xfd, 0x6d, 0x69, 0x6c, 0x6b, 0x00, 0x00, 0x01];
+
+/// Is `ip` on the VM link's IPv6 prefix?
+pub fn on_vm_link6(ip: &rt::net::Ip) -> bool {
+    matches!(ip, rt::net::Ip::V6(b) if b[..8] == VM_LINK6)
+}
+
+/// Our signed announcement: who we are, where transfers go (eth1's IPv6 address too, if it
+/// has one), whether `drop recv` is on.
+pub fn announce(id: &Identity, host: &str, receiving: bool, addr6: Option<rt::net::Ip>) -> String {
     let body = alloc::format!(
-        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT} key={} fp={} recv={}{}",
+        "{MAGIC} ANNOUNCE name={} host={host} port={XFER_PORT}{} key={} fp={} recv={}{}",
         id.name,
+        addr6
+            .map(|a| alloc::format!(" addr6={a}"))
+            .unwrap_or_default(),
         hex(&id.public),
         ident::fp_compact(&id.public),
         receiving as u8,
@@ -133,6 +171,10 @@ pub fn parse_announce(line: &str, from: SockAddr) -> Option<Peer> {
         host: String::from(field(body, "host").unwrap_or("?")),
         key,
         addr: from.ip,
+        // Signed with the rest, and only ever an address on the VM link.
+        addr6: field(body, "addr6")
+            .and_then(rt::net::Ip::parse)
+            .filter(on_vm_link6),
         port: field(body, "port")?.parse().ok()?,
         receiving: field(body, "recv") == Some("1"),
         rot: field(body, "rot").and_then(|r| {
@@ -147,12 +189,32 @@ pub fn parse_announce(line: &str, from: SockAddr) -> Option<Peer> {
 
 /// Ask the link who is there: one multicast QUERY, then collect answers for `ms`.
 pub fn query(ms: u64) -> Result<Vec<Peer>, String> {
-    let fd = net::socket(net::SOCK_DGRAM).map_err(|e| alloc::format!("socket: {e}"))?;
+    // Ask over both families: 224.0.0.251 and ff02::fb (answers come back unicast).
+    let mut socks: Vec<(i32, SockAddr)> = Vec::new();
+    if let Ok(fd) = net::socket(net::SOCK_DGRAM) {
+        socks.push((fd, group()));
+    }
+    if let Ok(fd) = net::socket6(net::SOCK_DGRAM) {
+        let _ = net::set_v6only(fd, true);
+        socks.push((fd, group6()));
+    }
     let q = alloc::format!("{MAGIC} QUERY");
+    let ask = |socks: &[(i32, SockAddr)]| {
+        let mut err = None;
+        let mut any = false;
+        for (fd, g) in socks {
+            match net::sendto(*fd, q.as_bytes(), g) {
+                Ok(_) => any = true,
+                Err(e) => err = Some(e),
+            }
+        }
+        if any { Ok(()) } else { Err(err) }
+    };
     let r = (|| {
-        net::sendto(fd, q.as_bytes(), &group()).map_err(|e| {
+        ask(&socks).map_err(|e| {
             alloc::format!(
-                "query on 224.0.0.251:{DISC_PORT}: {e} (no eth1? Milk Drop needs the VM-to-VM link)"
+                "query on 224.0.0.251 and ff02::fb port {DISC_PORT}: {} (no eth1? Milk Drop needs the VM-to-VM link)",
+                e.map_or(String::from("no socket"), |e| alloc::format!("{e}"))
             )
         })?;
         let end = rt::sys::clock_ns(rt::sys::CLOCK_MONOTONIC) + ms * 1_000_000;
@@ -166,23 +228,41 @@ pub fn query(ms: u64) -> Result<Vec<Peer>, String> {
             }
             if !resent && now + ms * 1_000_000 / 2 >= end {
                 // One retry halfway (a datagram can be lost).
-                let _ = net::sendto(fd, q.as_bytes(), &group());
+                let _ = ask(&socks);
                 resent = true;
             }
-            let _ = net::set_recv_timeout(fd, ((end - now) / 1_000_000).clamp(1, 100));
-            let Ok((n, from)) = net::recvfrom(fd, &mut buf) else {
+            let mut pf: Vec<net::PollFd> = socks
+                .iter()
+                .map(|(fd, _)| net::PollFd {
+                    fd: *fd,
+                    events: net::POLLIN,
+                    revents: 0,
+                })
+                .collect();
+            if !matches!(
+                net::poll(&mut pf, Some(((end - now) / 1_000_000).clamp(1, 100))),
+                Ok(1..)
+            ) {
                 continue;
-            };
-            let line = String::from_utf8_lossy(&buf[..n]);
-            if let Some(peer) = parse_announce(line.trim_end(), from)
-                && !peers.iter().any(|x| x.key == peer.key)
-            {
-                peers.push(peer);
+            }
+            for (k, (fd, _)) in socks.iter().enumerate() {
+                if pf[k].revents & net::POLLIN == 0 {
+                    continue;
+                }
+                let Ok((n, from)) = net::recvfrom(*fd, &mut buf) else {
+                    continue;
+                };
+                let line = String::from_utf8_lossy(&buf[..n]);
+                if let Some(peer) = parse_announce(line.trim_end(), from) {
+                    merge(&mut peers, peer);
+                }
             }
         }
         Ok(peers)
     })();
-    let _ = rt::sys::close(fd);
+    for (fd, _) in socks {
+        let _ = rt::sys::close(fd);
+    }
     r
 }
 

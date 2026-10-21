@@ -185,6 +185,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "netctl"
+version = "0.0.1"
+dependencies = [
+ "drop",
+ "rt",
+]
+
+[[package]]
 name = "netstat"
 version = "0.0.1"
 dependencies = [
@@ -233,6 +241,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rngd"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "udrv",
+]
+
+[[package]]
 name = "rt"
 version = "0.0.1"
 dependencies = [
@@ -244,6 +260,14 @@ name = "snap"
 version = "0.0.1"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "soundd"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "udrv",
 ]
 
 [[package]]
@@ -308,10 +332,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "udrv"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "utest"
 version = "0.0.1"
 dependencies = [
  "rt",
+ "udrv",
 ]
 
 [[package]]

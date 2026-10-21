@@ -112,7 +112,7 @@ pub fn key_changed(
     name: &str,
     old: &[u8; 32],
     new: &[u8; 32],
-    addr: [u8; 4],
+    addr: rt::net::Ip,
 ) -> String {
     let a = p.app;
     eprintln!("{a}: ************************************************************");
@@ -141,7 +141,7 @@ pub fn settle_trust(
     name: &str,
     key: &[u8; 32],
     trust: &Trust,
-    addr: [u8; 4],
+    addr: rt::net::Ip,
 ) -> Result<(), String> {
     match trust {
         Trust::Changed { old } => Err(key_changed(p, role, name, old, key, addr)),
@@ -190,7 +190,7 @@ pub fn connect(
     id: &Identity,
     p: &Protocol,
     announced: Option<&[u8; 32]>,
-    addr: [u8; 4],
+    addr: rt::net::Ip,
 ) -> Result<Session, String> {
     let h = c.line()?;
     let Some((name, key, nonce_s, sdh)) = parse_hello(p, &h, p.server_role) else {
@@ -275,7 +275,12 @@ pub fn connect(
 /// The accepting side. A changed key is refused (DECLINE key-changed); otherwise the
 /// caller decides what to do with `trust` (remember a new key, report a rotation with
 /// [`settle_trust`]) once it has decided to go on.
-pub fn accept(c: &mut Conn, id: &Identity, p: &Protocol, from: [u8; 4]) -> Result<Session, String> {
+pub fn accept(
+    c: &mut Conn,
+    id: &Identity,
+    p: &Protocol,
+    from: rt::net::Ip,
+) -> Result<Session, String> {
     let nonce_s = hex(&ident::random::<16>());
     let eph = Ephemeral::new();
     let sdh = eph.public;

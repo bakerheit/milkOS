@@ -47,6 +47,7 @@ boot b1 "ps | grep alarmd" \
   "alarm add 03:15 weekdays pills" "alarm add in 5s ring-test" "timer 6s tea-test" \
   "cal add in 5s standup-test --alert 0" "cal add tomorrow 12:00 lunch-test --repeat weekly" \
   "remind add in 5s call-the-plumber" "remind add tomorrow stretch --repeat weekly" "remind add undated-thing" "remind add Pick up parcel friday at 5pm" \
+  "alarm snooze 1 30" "remind snooze 3 15" "grep undated /home/milk/Library/Reminders/Personal.rem" \
   "alarm list" "timer list" "cal list 3" "cal" "remind list" \
   "sleep 30" "sleep 30" "sleep 20" \
   "cat $LOGF" "alarm list" "timer list" "cal list 3" "remind done 2" "remind done 3" "remind list" \
@@ -55,6 +56,8 @@ L="$T/b1.log"
 out "$L" "ps | grep alarmd" | grep -q "alarmd" && ok "alarmd is running (started by init)" || bad "alarmd not running"
 out "$L" "alarm list" | head -3 | sed 's/^/    /'
 out "$L" "cat $LOGF" | sed 's/^/    log: /'
+[ "$(out "$L" "alarm list" | grep -c pills)" = 2 ] && ok "alarm snooze made a one-off copy of the alarm" || bad "alarm snooze: $(out "$L" "alarm list")"
+out "$L" "grep undated /home/milk/Library/Reminders/Personal.rem" | grep -q "@" && ok "remind snooze stored a snooze time" || bad "remind snooze: $(out "$L" "grep undated /home/milk/Library/Reminders/Personal.rem")"
 out "$L" "cat $LOGF" | grep -q "timer: Timer done / tea-test" && ok "the timer rang" || bad "no timer ring in the log"
 out "$L" "cat $LOGF" | grep -q "alarm: Alarm / ring-test" && ok "the alarm rang" || bad "no alarm ring in the log"
 out "$L" "cat $LOGF" | grep -q "event: standup-test / Today " && ok "the calendar alert rang" || bad "no event alert in the log"

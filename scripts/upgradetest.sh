@@ -57,7 +57,7 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files list /Volumes/Milk" "wait:$P" \
   "send:files list /Users/milk/Sites" "wait:$P" \
   "send:text show /System/Settings/milk/drop/name" "wait:$P" \
-  "send:uname -n" "wait:$P" \
+  "send:system info" "wait:$P" \
   "send:apps list" "wait:$P" \
   "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
   "send:print UPGRADE""-DONE" "wait:UPGRADE-DONE" "done:$T/done" &
@@ -85,7 +85,7 @@ echo "$L" | grep -aq "milkfs: /Users/milk is /Volumes/Milk/Users/milk (persisten
 echo "$L" | grep -aq "^written before the move" && ok "a file from the old home reads at /Users/milk" || bad "old home file"
 echo "$L" | grep -a -A3 'files list /Users/milk/Sites$' | grep -aq "index.html" && ok "the moved home got ~/Sites" || bad "no ~/Sites"
 echo "$L" | grep -aq "^old-machine$" && ok "Milk Drop's settings are at /System/Settings/milk/drop" || bad "drop settings"
-echo "$L" | grep -aq "^oldbox$" && ok "the hostname moved with /System/Settings/milk/net" || bad "hostname"
+echo "$L" | grep -Eaq "^name +oldbox$" && ok "the hostname moved with /System/Settings/milk/net" || bad "hostname"
 echo "$L" | grep -aEq "^hello +1\.0\.0" && ok "the installed package is in /Apps (apps list)" || bad "package in /Apps"
 $M ls "$IMG" / > "$T/root.txt"
 grep -Eq " (home|Applications|etc)$" "$T/root.txt" && { cat "$T/root.txt"; bad "old folders left on the volume"; } || ok "no home, Applications or etc left on the volume"

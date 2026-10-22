@@ -93,11 +93,11 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:network' 'wait:milk drop' "$P" \
   'send:network status --keys' 'wait:drop_visible=' "$P" \
   'send:network name milkbox' "$P" \
-  'send:uname -n' "$P" \
+  'send:system info' "$P" \
   'send:text show /proc/net/hostname' "$P" \
   'send:network name bad_name!' "$P" \
-  'send:top -b -n 2 -d 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
-  'send:uptime' 'wait:load average' "$P" \
+  'send:processes watch --plain --frames 2 --every 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
+  'send:system uptime' 'wait:15 minutes' "$P" \
   'send:text show /proc/loadavg' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
@@ -154,17 +154,17 @@ grep -q "^iface.eth0.dhcp=Bound$" "$T0" || fail "network status --keys: eth0 dhc
 grep -q "^hostname=milk$" "$T0" || fail "network status --keys: hostname"
 grep -Eq "^hostname +milk$" "$T0" || fail "network status: hostname"
 grep -q "network: the hostname is now milkbox (was milk)" "$T0" || fail "network name milkbox"
-[ "$(grep -cx 'milkbox' "$T0")" -ge 2 ] || fail "uname -n / /proc/net/hostname after network name"
+grep -Eqx 'name +milkbox' "$T0" && grep -qx 'milkbox' "$T0" || fail "system info / /proc/net/hostname after network name"
 grep -q "network name: bad_name! can't be a hostname (1-63 letters, digits and '-')" "$T0" || fail "network name: a bad hostname was not refused"
-echo "network status / --keys (interfaces, v4 + v6, DHCP, hostname), network name (uname, /proc/net/hostname), bad name refused: ok"
+echo "network status / --keys (interfaces, v4 + v6, DHCP, hostname), network name (system info, /proc/net/hostname), bad name refused: ok"
 echo "network status ipv6, network ping -6 fec0::2, network get http://[::1]/ (httpd over IPv6), network connections tcp6 [::]:80: ok"
 T="$WORK/console.txt"; python3 -I scripts/console_clean.py "$LOG" >"$T"
-grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "top: no cpu0 bar"
-[ "$(grep -c '^top - .*load ' "$T")" -ge 2 ] || fail "top -b -n 2: expected two frames"
-grep -Eq '^ +1 +0 S .* init$' "$T" || fail "top: init not in the process list"
-grep -Eq 'up [0-9:]+, [0-9]+ processes, load average: [0-9.]+, [0-9.]+, [0-9.]+' "$T" || fail "uptime: no load average"
+grep -Eq '^cpu0 +\[[| ]+\] +[0-9]+%' "$T" || fail "processes watch: no cpu0 bar"
+[ "$(grep -c '^processes watch - .*load ' "$T")" -ge 2 ] || fail "processes watch --plain --frames 2: expected two frames"
+grep -Eq '^ +1 +0 S .* init$' "$T" || fail "processes watch: init not in the process list"
+grep -Eq '^up .* \(since [A-Z][a-z]{2} +[0-9]+ [0-9]{2}:[0-9]{2}\), [0-9]+ processes, load [0-9.]+ [0-9.]+ [0-9.]+ \(1, 5, 15 minutes\)$' "$T" || fail "system uptime: no load average"
 grep -Eq '^[0-9]+\.[0-9]{2} [0-9]+\.[0-9]{2} [0-9]+\.[0-9]{2} [0-9]+/[0-9]+ [0-9]+$' "$T" || fail "/proc/loadavg format"
-echo "top -b (2 frames, cpu bars, process list), uptime load average, /proc/loadavg: ok"
+echo "processes watch --plain (2 frames, cpu bars, process list), system uptime load average, /proc/loadavg: ok"
 
 echo "---- host curl -> userland httpd on guest :80 (via 127.0.0.1:$HTTP_PORT) ----"
 curl -sS -i --max-time 5 "http://127.0.0.1:$HTTP_PORT/" >"$WORK/index.txt" || fail "curl /"

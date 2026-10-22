@@ -6,7 +6,7 @@
 //! * `/System/Settings/shadow` `name:hash:` (root only, 0600). `hash` is
 //!   `$5m$<rounds>$<salt hex>$<digest hex>`: h = SHA-256(salt ‖ password), then
 //!   `rounds - 1` times h = SHA-256(h ‖ salt ‖ password). Never plain text. The same
-//!   scheme is in user/rt (`rt::users`), which `su`, `sudo` and `passwd` use.
+//!   scheme is in user/rt (`rt::users`), which `users` and `admin` use.
 //!
 //! **API for the desktop** (the lock screen can become a login screen with it):
 //! * [`authenticate`]`(name, password) -> Result<Account, LoginError>`: check a password.
@@ -311,7 +311,7 @@ fn chmod_own(path: &str, perm: u32, uid: u32, gid: u32) {
 /// the primary volume (which binds its own /Users/milk and /Apps).
 fn fix_layout(a: &Account) {
     // docs/security.md: /Users/root 0700 root; /tmp 1777; /Commands and /Apps root:admin
-    // 0775 (admins install packages without sudo, like macOS), /System/Settings/milk/repos root:admin
+    // 0775 (admins install packages without `admin`, like macOS), /System/Settings/milk/repos root:admin
     // 0664; a milkfs volume root root:admin 0775; the session user's home owned by them (a one-time migration for disks made before
     //  users existed, where everything belongs to root).
     let _ = fs::mkdir("/Users/root", 0o700);

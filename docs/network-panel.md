@@ -89,7 +89,7 @@ value.
   local name 1-32 of `[A-Za-z0-9._-]`. The command still decides.
 - **Who may change what.** The desktop account (milk) is an administrator, so name and
   visibility work without a password. Setting the hostname needs root: run it through the
-  system's usual elevation (`sudo network name NAME` asks for the password; show the
+  system's usual elevation (`admin network name NAME` asks for the password; show the
   sheet the desktop uses elsewhere for that). Don't grey a control out just because the
   user isn't root; let the command refuse.
 - **Persistence.** All three survive a reboot on a machine with a Milk volume:

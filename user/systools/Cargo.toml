@@ -1,0 +1,50 @@
+[package]
+name = "systools"
+version.workspace = true
+edition.workspace = true
+
+# Processes, services, this computer and its accounts from the command line:
+#   processes  list, watch, stop, signal, signals, info (replaces ps, top and kill)
+#   services   list, status, start, stop, restart, signal, reload, logs (replaces svc and log)
+#   system     info, memory, uptime (replaces uname, uptime and free)
+#   users      me, list, password, switch (replaces whoami, id, passwd and su; set-user-ID root)
+#   admin      COMMAND..., run, ticket, status (replaces sudo and auth; set-user-ID root)
+# The rules are in user/syskit (host-tested); this crate does the system calls.
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "processes"
+path = "src/bin/processes.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "services"
+path = "src/bin/services.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "system"
+path = "src/bin/system.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "users"
+path = "src/bin/users.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "admin"
+path = "src/bin/admin.rs"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+syskit = { path = "../syskit" }
+sysview = { path = "../sysview" }

@@ -71,7 +71,7 @@ Passphrases are asked for without echo; --passphrase-file FILE reads one instead
 encrypt, decrypt, send, receive). An encrypted volume's streams are encrypted: send
 --plaintext doesn't, send --encrypt does from a plain one. format --encrypt and encrypt show
 the recovery key once (--recovery-out FILE writes it to FILE, --no-recovery makes none).
-The destructive ones need an administrator: auth disks ... (or root).
+The destructive ones need an administrator: admin ticket disks ... (or root).
 ";
 
 const MILKFS: &str = "/System/Kernel/fs/milkfs";

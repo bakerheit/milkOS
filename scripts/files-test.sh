@@ -169,13 +169,13 @@ s B1 \
   "OLDPWD= msh -c 'go back'" \
   "files create /tmp/locked/" \
   "chmod 700 /tmp/locked" \
-  "su milk -c 'go /tmp/locked'" \
+  "users switch milk --command 'go /tmp/locked'" \
   "cd /tmp" \
   "pwd" \
   "where" \
   "where cpu > 5" \
   "files info 5" \
-  "ps | filter name == msh | select name" \
+  "processes list | filter name == msh | select name" \
   "help" \
   "print now > /System/Kernel/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
@@ -260,14 +260,14 @@ check "a file" "go gotest/notes.txt" "go: gotest/notes.txt is a file, not a fold
 check "a file in the middle of the path" "go gotest/notes.txt/x" "go: gotest/notes.txt/x doesn't exist (part of its path is a file, not a folder)"
 check "one folder at a time" "go gotest inner" "go takes one folder (put quotes around a name with spaces)"
 check "go back with nowhere to go back to" "OLDPWD= msh -c 'go back'" "go: there's no folder to go back to yet"
-check "a folder you can't open" "su milk -c 'go /tmp/locked'" "go: you can't open /tmp/locked"
+check "a folder you can't open" "users switch milk --command 'go /tmp/locked'" "go: you can't open /tmp/locked"
 # (out stops at a line starting "msh:", so these look at the line after the command.)
 gone() { echo "$L1" | grep -A1 -F "\$ $1" | grep -Fq "msh: $1: command not found" && ok "$1 is gone" || bad "$1 still runs: $(echo "$L1" | grep -A1 -F "\$ $1" | tail -1)"; }
 gone cd; gone pwd
 check "a failed go stays put" "where" "/Users/milk" 5
 check "where with arguments is an error" "where cpu > 5" "where takes no arguments; to filter a table use filter"
 check "and its > made no file" "files info 5" "5 doesn't exist"
-check "filter COL OP V is the table filter" "ps | filter name == msh | select name" "msh"
+check "filter COL OP V is the table filter" "processes list | filter name == msh | select name" "msh"
 check "help: go" "help" "go FOLDER        change folder: go Documents, go .., go /Apps"
 check "help: where" "help" "where            print the folder you're in"
 check "help: filter" "help" "structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r]"
@@ -276,13 +276,13 @@ echo "== boot 2: trashd ran at boot"
 L2="$(boot b2 \
   "send:pause 2" "wait:$P" \
   "send:trash list" "wait:$P" \
-  "send:log -u trashd" "wait:$P" \
-  "send:svc status trashd" "wait:$P")"
+  "send:services logs trashd" "wait:$P" \
+  "send:services status trashd" "wait:$P")"
 echo "$L2" > "$T/b2.txt"
 L1="$L2"
 out "trash list" | grep -q "boot.txt" && bad "boot.txt still in the Trash after boot" || ok "trashd deleted the 2001 item at boot"
 check "the other item is still there" "trash list" "keep.txt"
-check "trashd says so in the journal" "log -u trashd" "/Users/milk/.Trash: deleted 1 item for good (after 1 day)"
-check "trashd is a running milkd service" "svc status trashd" "running"
+check "trashd says so in the journal" "services logs trashd" "/Users/milk/.Trash: deleted 1 item for good (after 1 day)"
+check "trashd is a running milkd service" "services status trashd" "running"
 
 [ "$FAIL" = 0 ] && { echo "files-test: PASS"; rm -rf "$T"; } || { echo "files-test: FAIL (logs in $T)"; exit 1; }

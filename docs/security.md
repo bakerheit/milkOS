@@ -13,7 +13,7 @@ Two accounts by default (`rootfs/etc/passwd`, `group`, `shadow`):
 | `milk` | 501 | `staff` (20) | staff, **admin** (80) | `/Users/milk` |
 
 The default password of both is `milk`. It is a **well-known default for a hobby OS (and
-the test suite's password), not a secret**: change it with `passwd`.
+the test suite's password), not a secret**: change it with `users password`.
 
 * **Processes** carry real / effective / saved uid and gid plus supplementary groups
   (`proc/cred.rs`), Linux rules: setuid, setgid, setreuid, setregid, setresuid,
@@ -28,18 +28,29 @@ the test suite's password), not a secret**: change it with `passwd`.
   (Terminal, apps, the Store) as the *session user*, `milk` at boot. The **serial
   console** is the maintenance console: a root shell (HOME stays /Users/milk, so the test
   scripts that drive it keep working on host-built disk images, whose files belong to
-  root). `su milk` gives a milk shell there; `utest perms` / `utest creds` switch to milk
+  root). `users switch milk` gives a milk shell there; `utest perms` / `utest creds` switch to milk
   themselves.
 * **Passwords** are never stored in plain text: `/System/Settings/shadow` (0600, root) holds
   `$5m$<rounds>$<salt hex>$<digest hex>`, h = SHA-256(salt ‖ password) then rounds-1 times
   h = SHA-256(h ‖ salt ‖ password), 5000 rounds, 16-byte random salt. Same code in the
   kernel (`proc/login.rs`) and user space (`rt::users`); `scripts/mkpasswd.py` makes one
-  on the host. `passwd` also writes `/Volumes/Milk/.milkos/shadow`, which the kernel
+  on the host. `users password` also writes `/Volumes/Milk/.milkos/shadow`, which the kernel
   restores into `/System/Settings/shadow` at boot, so changes survive a reboot.
-* **Tools:** `whoami`, `id`, `su [user] [-c cmd]` (asks the *target's* password),
-  `sudo [-S] [-u user] cmd` (admins only, asks *your* password; `-S` reads it from stdin
-  for scripts; no credential caching), `passwd [user]`. `su`, `sudo` and `passwd` are
-  set-user-ID root (initramfs.list mode 4755). Failures cost a second.
+* **Tools** (`user/systools`; they replaced whoami, id, su, passwd, sudo and auth):
+  `users me` (name, id, groups), `users list`, `users switch [NAME] [--command CMD]` (asks
+  the *target's* password; default root), `users password [NAME]` (your own after the
+  current one; root sets anyone's), `admin [--user NAME] [--stdin] COMMAND...` (admins
+  only, asks *your* password, three tries; `--stdin` says the password comes from stdin,
+  for scripts; no credential caching), `admin ticket COMMAND...` (below) and `admin
+  status`. `users` and `admin` are set-user-ID root (initramfs.list mode 4755): `users
+  password`, `users switch` and `admin COMMAND` use it, and every other subcommand gives
+  root up first, for good (`setresuid` to the real uid), so it runs with the caller's own
+  rights (`users me` therefore reports the real uid). A wrong password costs a second and
+  is written to the audit log as `user.password.fail via=users-switch|users-password|admin
+  user=<whose password> uid=<caller>` (through `/dev/audit`, so the kernel adds the pid and
+  program). The command `admin` runs as root gets a clean environment made from the target
+  account (PATH=/Commands, HOME, USER, LOGNAME, the caller's TERM if it is a plain name)
+  plus `ADMIN_USER=<you>`, not the caller's.
 
 ## Permissions
 
@@ -84,8 +95,8 @@ uid is the target's real or saved uid; otherwise `kill` is EPERM (signal 0 inclu
 **Admin group decision (apps install, the Store):** like macOS, the administrators group
 `admin` (80) owns the shared, installable places: `/Apps` and `/Commands` are
 `root:admin 0775`, `/System/Settings/milk/repos` (package sources) `root:admin 0664`. `milk` is in
-`admin`, so `apps install`, the Store and `apps relink` work without sudo; a non-admin user
-would need `sudo apps install`. The package signing keys (`/System/Settings/milk/keys`) and the
+`admin`, so `apps install`, the Store and `apps relink` work without `admin`; a non-admin user
+would need `admin apps install`. The package signing keys (`/System/Settings/milk/keys`) and the
 accounts (`/System/Settings/passwd`, `/System/Settings/group`, `/System/Settings/shadow`) stay root's.
 
 **Boot layout** (`proc::login::init`): /Users/root 0700, /tmp 1777, the above, a milkfs volume
@@ -100,7 +111,7 @@ after a successful authentication, so a disk whose passphrase *is* the login pas
 opens as the user logs in (FileVault style), binds its `/Users/milk` and `/Apps`,
 and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
 different passphrase) is logged and the disk stays locked for `disks unlock`.
-**On `passwd`** (a user changing their own password, so the old one is known), the same
+**On `users password`** (a user changing their own password, so the old one is known), the same
 change is tried on the primary volume (`/System/Kernel/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
 was unlocked with the old login password, its passphrase follows the new one. It is skipped
 when the new password is under 8 characters (milkfs's minimum), when root sets someone's
@@ -224,8 +235,8 @@ Destructive storage operations (Disk Utility, `disks`, `apps keep`) should not b
 every program a member of `admin` happens to run. Like macOS's authorisation panel, a
 process *asks* to be authorised, the user proves they are an administrator, and the kernel
 attaches a short-lived **admin ticket** to that one process. Files: `kernel/src/proc/auth.rs`
-(tickets, rate limit, audit), `sys_auth` in `proc/syscall.rs`, the `auth` tool
-(`user/coreutils/src/bin/auth.rs`), `rt::sys::authorize*`.
+(tickets, rate limit, audit), `sys_auth` in `proc/syscall.rs`, `admin ticket`
+(`user/systools/src/bin/admin.rs`), `rt::sys::authorize*`.
 
 **The ticket.** Held by the kernel, never by the process: (pid, the process's start time,
 the administrator's uid, expiry). Keying on the start time means a recycled pid gets
@@ -233,7 +244,7 @@ nothing. A ticket
 
 * lasts 5 minutes (`auth::TICKET_NS`) from the grant; asking again renews it;
 * belongs to that process only: **not inherited** by fork (the child has another pid);
-  **kept across exec** (same process), which is how `auth CMD` works;
+  **kept across exec** (same process), which is how `admin ticket CMD` works;
 * is dropped when the process exits, and on request (`rt::sys::auth_revoke`);
 * gives nothing but the check below: the process's uid, groups and capability sandbox are
   unchanged (a sandboxed process with a ticket is still sandboxed).
@@ -252,8 +263,8 @@ installs the ticket rule with `fs::milkfs::set_authorizer`; a refusal is EPERM, 
 which `disks` prints. Opening the control files still needs the usual admin-group write
 access; the ticket is an extra requirement on top (a non-admin's process with a ticket
 still can't open them). Harmless controls (`snapshot`, `clone`, `scrub`, `sync`, listings)
-are unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as euid 0 after
-their own password check. Kernel threads (the desktop, Time Machine) are the kernel and
+are unchanged. `users password`, `users switch` and `admin COMMAND` run set-user-ID
+root, so they pass as euid 0 after their own password check. Kernel threads (the desktop, Time Machine) are the kernel and
 pass.
 
 **Until the panel exists (transitional).** The wm's trusted panel isn't built yet, and
@@ -289,18 +300,23 @@ drawn by the wm, never the app: header "*exe* (pid N) wants to make changes", th
 string (256 bytes max, shown as text), user name (pre-filled with the session user),
 password, Cancel / OK. The password goes from the panel to `auth::grant` and never reaches
 the requesting process. With no prompt registered (no desktop) op 0 fails with
-`EOPNOTSUPP` at once and the program should point at `auth`. If the panel ever moves into a
+`EOPNOTSUPP` at once and the program should point at `admin ticket`. If the panel ever moves into a
 user-space window server, the same hook becomes an AF_UNIX service under milkd
 (`/System/Services/Sockets/authd.sock`, SO_PEERCRED-checked so only that service can answer); the syscall
 side doesn't change.
 
-**Terminal fallback: `auth`.** `auth [-S] [-u ADMIN] COMMAND [ARGS...]` asks for an
-administrator's password (your own account by default, `-u` for another; `-S` reads it from
-stdin for scripts), gets a ticket for *itself*, then execs COMMAND, which keeps it:
-`auth disks rollback before-upgrade`, `auth apps keep moo2048`. `auth -s` prints the ticket
-of the process it runs in, so `auth /Commands/auth -s` shows a fresh one; there is nothing to
-revoke afterwards, because the ticket ends with COMMAND. Unlike `sudo` (set-user-ID root, runs COMMAND as root), `auth` runs
-COMMAND as you with only the ticket added. `disks` and `apps` print that hint on EPERM;
+**Terminal fallback: `admin ticket`.** `admin ticket [--user ADMIN] [--stdin] COMMAND
+[ARGS...]` (it replaced `auth`) asks for an administrator's password (your own account by
+default, `--user` for another; `--stdin` for scripts), gets a ticket for *itself*, then
+execs COMMAND, which keeps it: `admin ticket disks rollback before-upgrade`, `admin ticket
+apps keep moo2048`. `admin status` prints the ticket of the process it runs in, so `admin
+ticket admin status` shows a fresh one; there is nothing to revoke afterwards (no `admin
+lock`), because the ticket ends with COMMAND, and nothing to unlock for a whole session
+(no `admin unlock`), because a ticket is never inherited. `admin` is set-user-ID root, but
+`ticket` gives root up for good before it asks, so COMMAND runs exactly as you with only
+the ticket added, unlike `admin COMMAND` (runs it as root). `ticket`, `status`, `run` and
+`help` are `admin`'s own words: a command with one of those names runs with `admin run
+NAME` (or its path). `disks` and `apps` print that hint on EPERM;
 `apps` first asks the panel itself (op 0), so the Store and Disk Utility get the panel
 without extra code.
 
@@ -324,7 +340,7 @@ callers (the fs self-test, `apps` under the root console in the tests) are unaff
 
 **Tests**: `utest auth` (as milk): admin group alone is refused, a wrong password is
 EACCES, the right one gives 5 minutes and the write gets past the check, `/proc/self/status`
-shows the ticket, a forked child has none, revoke works, `auth -S` keeps it across exec, the
+shows the ticket, a forked child has none, revoke works, `admin ticket` keeps it across exec, the
 rate limit kicks in after three misses, and the records are in `/proc/audit`. The test
 password is the documented default `milk` (see "Users and credentials"), not a secret.
 

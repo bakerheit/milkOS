@@ -383,7 +383,9 @@ fn set_hostname(name: &str) -> i32 {
     let old = hostname();
     if let Err(e) = sys::sethostname(name) {
         if e.0 == 1 {
-            eprintln!("network name: only root can change the hostname (sudo network name {name})");
+            eprintln!(
+                "network name: only root can change the hostname (admin network name {name})"
+            );
         } else {
             eprintln!("network name: {name} can't be a hostname (1-63 letters, digits and '-')");
         }

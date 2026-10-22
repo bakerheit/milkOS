@@ -165,7 +165,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "type" => {
             b.wait(300).typ("help").enter().wait(300);
-            b.typ("ps").enter().wait(300).typ("uname -a");
+            b.typ("processes list").enter().wait(300).typ("system info");
         }
         "notes" => {
             let (x, y) = dock_icon_center(3);
@@ -303,7 +303,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(1200)
                 .click(dx + 192 + 14 + 6, dy + 112 + 16)
                 .wait(800);
-            b.typ("ps").enter().wait(400);
+            b.typ("processes list").enter().wait(400);
         }
         "desk" => {
             b.wait(300)
@@ -399,18 +399,18 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("print back in tab 1").enter().wait(400);
         }
         "tabclose" => {
-            // Three tabs, close the third (Cmd+W), then ps in the first: msh on tty1 and
+            // Three tabs, close the third (Cmd+W), then processes list in the first: msh on tty1 and
             // tty2 only.
             b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
             b.key(Key::Char('t'), Mods::META).wait(500);
             b.key(Key::Char('w'), Mods::META).wait(500);
             b.key(Key::Char('1'), Mods::META).wait(200);
-            b.typ("ps").enter().wait(600);
+            b.typ("processes list").enter().wait(600);
         }
         "tabcmd" => {
             // Skim's "> cmd" with the Terminal open: a new tab running it.
             b.wait(300).key(Key::Char(' '), Mods::META).wait(150);
-            b.typ("> uname -a").wait(200).enter().wait(1200);
+            b.typ("> system info").wait(200).enter().wait(1200);
         }
         "sigint" => {
             b.wait(300).typ("pause 9").enter().wait(1000);
@@ -1262,12 +1262,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             b.wait(if name == "dock-genie" { 3000 } else { 3600 });
         }
-        // An app installed (a manifest dropped into /Apps, as an admin with sudo: the
+        // An app installed (a manifest dropped into /Apps, as an administrator with `admin`: the
         // demo user's well-known default password): its tile grows in and the
         // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
         "dock-slide" => {
             b.wait(300)
-                .typ("print milk | sudo -S msh -c \"files create /Apps/hello/ && print --escapes 'format 1\\nname hello\\nversion 1.0.0\\nexec /System/Developer/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
+                .typ("print milk | admin --stdin msh -c \"files create /Apps/hello/ && print --escapes 'format 1\\nname hello\\nversion 1.0.0\\nexec /System/Developer/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
                 .enter()
                 .wait(1500);
             b.0.push(Step::Packages);

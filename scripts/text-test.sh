@@ -4,7 +4,7 @@
 #          without the flag;
 #   text:  show (several files, --numbers, a pipe, -, a missing file, a folder), first and last
 #          (N, the default 10, several files, a pipe), find (plain, --ignore-case, --invert,
-#          --numbers, --count, --names, several files, a pipe from ps, exit codes 0 / 1 / 2, a
+#          --numbers, --count, --names, several files, a pipe from processes list, exit codes 0 / 1 / 2, a
 #          missing TEXT, a short flag refused), sort (--reverse, --unique, --numbers, --field),
 #          unique (--count, --repeated, as a table for filter / get), count (the table, one
 #          count as a bare number, a pipe, a total row, as a table for msh), help, an unknown
@@ -93,7 +93,7 @@ B=(); s B \
   "text find --count milk m.txt" \
   "text find --names milk m.txt a.txt" \
   "text find milk m.txt a.txt" \
-  "ps | text find msh" \
+  "processes list | text find msh" \
   'text find nothing-here m.txt; print rc=$?' \
   'text find milk m.txt > /dev/null; print rc=$?' \
   'text find milk nowhere.txt; print rc=$?' \
@@ -203,7 +203,7 @@ is "--numbers" "text find --numbers honey m.txt" "2:honey"
 is "--count" "text find --count milk m.txt" "1"
 is "--names" "text find --names milk m.txt a.txt" "m.txt"
 is "several files: name:line" "text find milk m.txt a.txt" "m.txt:milkshake"
-check "in a pipe from ps" "ps | text find msh" "msh"
+check "in a pipe from processes list" "processes list | text find msh" "msh"
 is "exits 1 when nothing matches" 'text find nothing-here m.txt; print rc=$?' "rc=1"
 is "exits 0 when something does" 'text find milk m.txt > /dev/null; print rc=$?' "rc=0"
 is "exits 2 when a file can't be read" 'text find milk nowhere.txt; print rc=$?' "$(printf 'text: nowhere.txt doesn'"'"'t exist\nrc=2')"

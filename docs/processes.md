@@ -222,8 +222,8 @@ never notify), and scan again. `ppoll` (73), `pselect6` (72) and epoll all sit o
 
 `/proc/<pid>/{status, stat, cmdline, maps, fd/N, cwd, exe}`, `/proc/self` and
 `/proc/threads` (every thread, kernel ones too), hung on the vfs's procfs root. Each
-pid directory appears when the process starts and goes when it is reaped. `ps` reads
-these (there are no milkOS-specific syscalls any more).
+pid directory appears when the process starts and goes when it is reaped. `processes`
+reads these (there are no milkOS-specific syscalls any more).
 
 ### Syscalls
 
@@ -424,19 +424,19 @@ paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `space
 restarts it if it ever exits; init itself keeps only reaping orphans and the console
 shell. milkd reads every `/System/Settings/milk/services/<name>.service`, starts the enabled ones in
 dependency order, supervises them (restart with backoff), captures their stdout and
-stderr into the journal, and answers `svc` over `/System/Services/Sockets/milkd.sock`. Kernel threads are not
+stderr into the journal, and answers `services` over `/System/Services/Sockets/milkd.sock`. Kernel threads are not
 services.
 
 ### The service file format
 
 Plain text, one `key = value` per line, `#` starts a comment, blank lines ignored, keys
-case-sensitive, unknown keys are reported (`svc status` shows a warning) and ignored. The
+case-sensitive, unknown keys are reported (`services status` shows a warning) and ignored. The
 file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 characters.
 
 | key | value | default |
 |---|---|---|
 | `exec` | the program and its arguments, split on spaces; `"..."` quotes one argument. The program is an absolute path. **Required.** | |
-| `description` | one line for `svc list` | |
+| `description` | one line for `services list` | |
 | `user` | account to run as (name from /System/Settings/passwd). The service gets that user's uid, gid, groups, HOME, USER; never set-ID tricks needed. | `root` |
 | `restart` | `always` (whenever it exits), `on-failure` (exit status != 0 or killed by a signal), `never` | `on-failure` |
 | `after` | units (space separated) to start before this one: ordering only | |
@@ -466,12 +466,13 @@ socket = /System/Services/Sockets/clockd.sock
 **Restart and backoff.** After an unexpected exit milkd waits 100 ms, then doubles the
 wait on every quick failure (one that ran less than 10 s) up to 30 s; a run of 10 s or
 more resets it. After 8 quick failures in a row the unit is `failed` and left alone
-until `svc start` / `svc restart`. `svc stop` sends SIGTERM, then SIGKILL after 3 s.
+until `services start` / `services restart`. `services stop` sends SIGTERM, then SIGKILL
+after 3 s.
 
 **Logs.** A service's stdout and stderr go (line by line) to the journal with its unit
-name and level `info` (stdout) / `err` (stderr); `log -u <unit>` shows them.
+name and level `info` (stdout) / `err` (stderr); `services logs <unit>` shows them.
 
-### The journal (`kernel/src/journal.rs`, `log`)
+### The journal (`kernel/src/journal.rs`, `services logs`)
 
 One structured log for the kernel and the services: every entry has a sequence number,
 a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`,
@@ -487,18 +488,23 @@ a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`
 * The `journald` kernel thread appends new entries to
   `/Volumes/Milk/var/log/journal/current.log` (root:admin 0640) every 2 s and rotates it
   at 512 KiB to `journal.1` .. `journal.3`: about 2 MiB of history across reboots.
-* `log [-u UNIT]... [--since 30s|10m|2h|1d|UNIXTIME] [-n N] [-p LEVEL] [-b] [-f]`: old boots
-  from the files, then the live ring; `-b` this boot only, `-f` follow, `-p warn` only
-  warnings and errors, `-u user` every `user/...` unit. `MILK_TABLE=1`: a table (time,
-  boot, seq, unit, pid, uid, level, message).
+* `services logs [UNIT...] [--since 30s|10m|2h|1d|UNIXTIME] [--last N] [--level LEVEL]
+  [--this-boot] [--follow]`: old boots from the files, then the live ring; `--this-boot`
+  this boot only, `--follow` follow, `--level warn` only warnings and errors, `user` every
+  `user/...` unit. `MILK_TABLE=1`: a table (time, boot, seq, name, pid, uid, level,
+  message). Root and administrators only, like `/dev/journal`.
 
-**`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
-`svc kill <unit> [sig]`, `svc logs <unit>` = `log -u <unit>`): talks to milkd over
-`/System/Services/Sockets/milkd.sock` (AF_UNIX stream, one text request per line, `SO_PEERCRED` decides):
-anyone may `list` / `status`; `start`, `stop`, `restart`, `kill` need root or the `admin`
-group. `kill` signals the unit's process (default SIGKILL) without stopping the unit, so
-its restart policy brings it back (how `scripts/driver-crash-test.sh` crashes a driver).
-`MILK_TABLE=1` gives tables.
+**`services`** (`services list`, `services status [NAME]`, `services start|stop|restart
+NAME`, `services signal NAME [SIGNAL]`, `services reload`, `services logs`; it replaced
+`svc` and `log`): talks to milkd over `/System/Services/Sockets/milkd.sock` (AF_UNIX
+stream, one text request per line, `SO_PEERCRED` decides): anyone may `list` / `status`;
+`start`, `stop`, `restart`, `signal` and `reload` need root or the `admin` group (milkd's
+own requests keep their names: `kill` is `services signal`). `signal` signals the unit's
+process (default KILL) without stopping the unit, so its restart policy brings it back
+(how `scripts/driver-crash-test.sh` crashes a driver). milkd's errors come out in plain
+English ("there's no service called x"). `MILK_TABLE=1` gives tables. The rules (help,
+arguments, the journal filters, milkd's replies) are in `user/syskit`, host-tested by
+`scripts/syskit-test.sh`; `scripts/systools-test.sh` drives every subcommand in a VM.
 
 ## Userland (`user/`)
 
@@ -514,7 +520,7 @@ service in `/System/Services` (with a `.service` file in
 for a new crate) + one line in `initramfs.list`.
 
 * `rt`: `_start`, syscall wrappers (`rt::sys`: files, processes, signals with an
-  `sa_restorer` trampoline, job control, /proc-based `ps`), `print!`/`println!`,
+  `sa_restorer` trampoline, job control, /proc-based `rt::sys::ps`), `print!`/`println!`,
   `rt::io` (buffered `Out`, `Lines`, `each_input`, flag parsing), `rt::table`
   (structured pipes), the heap (`rt::heap`, below), panic handler, `rt::main!(main)`.
 * `heapkit`: the heap allocator every program gets as its global allocator. Size classes
@@ -528,7 +534,11 @@ for a new crate) + one line in `initramfs.list`.
 * `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).
-* `coreutils`: ps kill uptime free uname true false clear, one program each.
+* `coreutils`: chmod chown df true false clear (and chroot, sandbox in /System/Developer),
+  one program each.
+* `systools`: `processes`, `services`, `system`, `users` and `admin` (they replaced ps, top,
+  kill, svc, log, uname, uptime, free, whoami, id, passwd, su, sudo and auth); the rules are in
+  `syskit`.
 * `texttools`: `text` (show, first, last, find, sort, unique, count: it replaced cat, head,
   tail, grep, sort, uniq and wc), `print` (echo) and `pause` (sleep); the rules are in
   `textkit` (docs/shell.md, "Text, print, pause and variables").
@@ -591,7 +601,7 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
   per-CPU current thread via TPIDR_EL1, an atomic COW share-and-copy).
 * The higher-half kernel move (above), then static Linux programs at 0x400000.
 
-## Monitoring: `top`, `uptime`, `/proc/loadavg`, `/proc/diskstats`
+## Monitoring: `processes`, `system`, `/proc/loadavg`, `/proc/diskstats`
 
 `kernel/src/sysstat.rs` (separate from the subsystems it measures) adds:
 
@@ -601,10 +611,24 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
 * `/proc/diskstats`, Linux's first 14 columns for disks whose driver counts I/O
   (`BlockDevice::io_stats`, default `None`; virtio-blk keeps atomic counters).
 
-`top` (`user/top`): raw tty + ANSI, redraws in place; per-CPU bars (`/proc/cpuload`),
+`processes watch` (`user/systools/src/watch.rs`, it replaced `top`): raw tty + ANSI,
+redraws in place; per-CPU bars (`/proc/cpuload`),
 memory, network (`/proc/net/dev`, all but lo) and disk (`/proc/diskstats`) rates, processes
 sorted by CPU (`/proc/<pid>/{stat,status,cmdline}`; %CPU of one CPU over the refresh). Keys:
 q quit, c / m / p sort by CPU / memory / pid, + / - refresh. Every line is clipped to the
 terminal width and no more rows than TIOCGWINSZ reports are drawn, so it also fits the
-desktop Terminal window. `top -b [-n N] [-d SECS]` prints plain frames (net-test checks
-it). `uptime` shows the load averages when `/proc/loadavg` exists.
+desktop Terminal window. `processes watch --plain [--frames N] [--every SECS]` prints plain
+frames (net-test checks it). `system uptime` shows the load averages when `/proc/loadavg`
+exists.
+
+**`processes`** (it replaced `ps`, `top` and `kill`): `list [--kernel]` (ps's columns with
+plain names: PID, parent, group, thread, state as a word, core, CPU time, memory, name; a
+table for msh), `watch`, `stop [--now] NAME|PID` (TERM, or KILL with `--now`), `signal
+NAME|PID SIGNAL` (any signal kill took, by name or number), `signals` (the list),
+`info NAME|PID` (command line, program, owner, groups, memory, CPU, open files, sandbox in
+words, admin ticket). A NAME more than one process has is refused with their PIDs unless
+`--all`; `--group PGID` is kill's negative PID. **`system`** (it replaced `uname`,
+`uptime` and `free`): `info` (name, version, kernel, machine, uptime, CPUs, memory),
+`memory` (`/proc/meminfo` in Activity Monitor's groups, with what "Other kernel" is made
+of), `uptime`. There is no `system restart` or `shutdown`: only the desktop's milk menu can
+do that (PSCI from the window manager, `kernel/src/wm/power.rs`), with no system call yet.

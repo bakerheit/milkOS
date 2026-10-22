@@ -1245,25 +1245,15 @@ impl Shell for BuiltinShell {
                 out.out("          go FOLDER (go: home, go back)  where  text show FILE");
                 out.out("          print words > file");
                 out.out("          edit <file> (opens it in Notes)");
-                out.out("system:   uname uptime date mem log whoami clear");
+                out.out(
+                    "system:   system [info|uptime|memory]  users me  services logs  date clear",
+                );
                 out.out("desktop:  open <files|notes|about|terminal>  notify <text>");
                 out.out("          today  spaces  cowsay [text]");
                 out.out("keys: Ctrl+Space Skim, F3 Spaces, F4 Today, Ctrl+Left/Right spaces,");
                 out.out("      Cmd+W close, Cmd+M minimise, Cmd+Tab cycle windows");
             }
             "clear" => return ShellResult::Clear,
-            "uname" => {
-                if arg.contains('a') {
-                    out.out(concat!(
-                        "milkOS milk ",
-                        env!("MILKOS_VERSION"),
-                        " aarch64 qemu-virt"
-                    ));
-                } else {
-                    out.out("milkOS");
-                }
-            }
-            "uptime" => out.out(&format!("up {}", fmt_uptime(timer::now_ns()))),
             "date" => {
                 let t = rtc::now();
                 out.out(&format!(
@@ -1277,28 +1267,55 @@ impl Shell for BuiltinShell {
                     t.second
                 ));
             }
-            "mem" | "free" => {
-                let s = pmm::stats();
-                let h = heap::stats();
-                out.out(&format!(
-                    "ram  {} MiB total, {} MiB free",
-                    (s.total_frames * 4096) >> 20,
-                    (s.free_frames * 4096) >> 20
-                ));
-                out.out(&format!(
-                    "heap {} KiB total, {} KiB used, {} free blocks",
-                    h.total >> 10,
-                    h.used >> 10,
-                    h.free_blocks
-                ));
-            }
-            "log" | "dmesg" => {
-                let mut text = String::new();
-                klog::read_since(0, |b| text.push_str(core::str::from_utf8(b).unwrap_or("?")));
-                for l in text.lines() {
-                    out.out(l);
+            // The built-in versions of a few msh commands (user/systools has the whole thing).
+            "system" => match rest.first().copied().unwrap_or("info") {
+                "info" => {
+                    let s = pmm::stats();
+                    out.out("name     milk");
+                    out.out(concat!("system   milkOS ", env!("MILKOS_VERSION")));
+                    out.out("machine  aarch64 qemu-virt");
+                    out.out(&format!("uptime   {}", fmt_uptime(timer::now_ns())));
+                    out.out(&format!(
+                        "memory   {} MiB, {} MiB free",
+                        (s.total_frames * 4096) >> 20,
+                        (s.free_frames * 4096) >> 20
+                    ));
                 }
-            }
+                "uptime" => out.out(&format!("up {}", fmt_uptime(timer::now_ns()))),
+                "memory" => {
+                    let s = pmm::stats();
+                    let h = heap::stats();
+                    out.out(&format!(
+                        "ram  {} MiB total, {} MiB free",
+                        (s.total_frames * 4096) >> 20,
+                        (s.free_frames * 4096) >> 20
+                    ));
+                    out.out(&format!(
+                        "heap {} KiB total, {} KiB used, {} free blocks",
+                        h.total >> 10,
+                        h.used >> 10,
+                        h.free_blocks
+                    ));
+                }
+                other => out.bad(&format!(
+                    "system: there's no system {other} here (info, uptime, memory)"
+                )),
+            },
+            "users" => match rest.first().copied().unwrap_or("me") {
+                "me" => out.out(user_name()),
+                other => out.bad(&format!("users: there's no users {other} here (me)")),
+            },
+            "services" => match rest.first().copied() {
+                // The kernel's log: what the built-in shell can see without milkd.
+                Some("logs") => {
+                    let mut text = String::new();
+                    klog::read_since(0, |b| text.push_str(core::str::from_utf8(b).unwrap_or("?")));
+                    for l in text.lines() {
+                        out.out(l);
+                    }
+                }
+                _ => out.bad("services: only services logs works here (the kernel's log)"),
+            },
             "print" => match arg.split_once('>') {
                 Some((text, file)) => {
                     let (append, file) = match file.strip_prefix('>') {
@@ -1319,7 +1336,6 @@ impl Shell for BuiltinShell {
                 }
                 None => out.out(&arg),
             },
-            "whoami" => out.out(user_name()),
             "hostname" => out.out("milk"),
             // A little of `files` (user/filetools has the whole thing, in msh).
             "files" => {

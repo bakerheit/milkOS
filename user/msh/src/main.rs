@@ -958,21 +958,25 @@ fn help() {
     println!("  where            print the folder you're in");
     println!("  exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
-    println!("programs (/Commands): files trash text print pause ps kill");
-    println!("  uptime free uname true false clear   (files help: files and folders)");
+    println!("programs (/Commands): files trash text print pause processes services system");
+    println!("  users admin true false clear   (NOUN help: what it does)");
     println!("  (text help: show, first, last, find, sort, unique and count lines)");
     println!("  network disks apps search   (network help, disks help, ...: what each one does)");
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
-        "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list,"
+        "  first N, last N, get COL, count, table, to-json; producers: processes list, files list,"
     );
-    println!("  variables list, text count, network status/connections, disks list/snapshots,");
+    println!(
+        "  trash list, variables list, text count, network status/connections, disks list/snapshots,"
+    );
     println!("  apps list/search, search WORDS");
-    println!("try: ps | text find msh,  text show /System/Settings/motd | text count --lines");
+    println!(
+        "try: processes list | text find msh,  text show /System/Settings/motd | text count --lines"
+    );
     println!("     files list -l /Commands | text sort --numbers --field 5 | text last 3");
     println!(
-        "     ps | filter rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
+        "     processes list | filter memory > 1M | sort-by name,  files list /Commands | sort-by size -r"
     );
 }
 

@@ -131,7 +131,7 @@ drops its share, and whoever turns out to be the last owner frees the original.
   the user column: milkOS doesn't split user/system yet), plus `intr`, `ctxt`, `btime`,
   `processes`, `procs_running`.
 * `/proc/interrupts`: one column per CPU; SGI 0 is "IPI rescheduling".
-* `/proc/threads`: has a PSR column (CPU); `/proc/<pid>/status` has `Cpu:`; `ps` shows PSR.
+* `/proc/threads`: has a PSR column (CPU); `/proc/<pid>/status` has `Cpu:`; `processes list` shows it (CORE).
 * **CPU % per core (for the wm's menu bar)**: `crate::percpu::load(cpu) -> u32` (busy
   percent over the last ~0.5 s, sampled on each CPU's tick), `crate::percpu::online()`
   and `count()`. For user space: `/proc/cpuload` ("cpuN PERCENT" lines). Cumulative:

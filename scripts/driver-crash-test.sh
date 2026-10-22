@@ -2,7 +2,7 @@
 # User-space drivers crash test (docs/drivers.md), SILENT (qemu's wav audiodev records):
 #   boot 1 (default policy: rng and sound are user drivers): rngd and soundd hold their
 #     devices; a 5 s 440 Hz tone plays; 1.5 s in, both drivers are killed with SIGKILL
-#     (`svc kill`). Checks:
+#     (`services signal`). Checks:
 #       - the kernel never crashes,
 #       - milkd restarts each within a second (journal, monotonic ms) and it takes its
 #         device back (/proc/drivers: claims=2, releases=1),
@@ -75,8 +75,8 @@ boot b1 "$WORK/b1.wav" "" -- \
   'send:text show /proc/drivers' "$P" \
   'send:play tone 440 5 &' "$P" \
   'send:pause 1.5' "$P" \
-  'send:svc kill soundd' "$P" \
-  'send:svc kill rngd' "$P" \
+  'send:services signal soundd' "$P" \
+  'send:services signal rngd' "$P" \
   'send:pause 1.5' "$P" \
   'send:text show /proc/drivers' "$P" \
   'send:text show /proc/rng' "$P" \
@@ -142,8 +142,8 @@ echo "---- boot 2: drivers=rng=kernel sound=kernel ----"
 boot b2 "$WORK/b2.wav" "rng=kernel sound=kernel" -- \
   'send:pause 1.5' "$P" \
   'send:text show /proc/drivers' "$P" \
-  'send:svc status soundd' "$P" \
-  'send:svc status rngd' "$P" \
+  'send:services status soundd' "$P" \
+  'send:services status rngd' "$P" \
   'send:play tone 660 0.5' "$P" \
   'send:text show /proc/audio' 'wait:device:[^\n]*\n' "$P" \
   'send:text show /proc/rng' "$P"
@@ -151,7 +151,7 @@ B2="$WORK/b2.txt"
 sed -n '/msh:\/\$ text show \/proc\/drivers/,$p' "$B2"
 grep -Eq "^rng policy=kernel .*owner=kernel claims=0" "$B2" || fail "boot 2: rng isn't the kernel's"
 grep -Eq "^sound policy=kernel .*owner=kernel claims=0" "$B2" || fail "boot 2: sound isn't the kernel's"
-[ "$(grep -c 'state: skipped (/proc/drivers does not contain' "$B2")" -ge 2 ] || fail "boot 2: the driver units should be skipped"
+[ "$(grep -Ec 'state +skipped \(/proc/drivers does not contain' "$B2")" -ge 2 ] || fail "boot 2: the driver units should be skipped"
 grep -Eq "^device: (running|stopped)" "$B2" || fail "boot 2: the kernel driver isn't playing"
 grep -q "source=virtio-rng+jitter" "$B2" || fail "boot 2: the kernel rng driver isn't the source"
 ok "boot 2: kernel drivers only (units skipped, /proc/drivers policy=kernel)"

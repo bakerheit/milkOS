@@ -6,7 +6,7 @@
 //! * uid 0 (effective) is root: it passes every permission check (`fs::perm`) and may
 //!   change ids freely. Everyone else follows the setuid(2) family's rules below.
 //! * `no_new_privs`: once set (by `chroot` or the capability sandbox) set-ID bits are
-//!   ignored on exec, so a jailed or sandboxed process can't become root through `sudo`.
+//!   ignored on exec, so a jailed or sandboxed process can't become root through `admin`.
 
 use super::errno::*;
 
@@ -18,7 +18,7 @@ pub const ROOT_UID: u32 = 0;
 pub const WHEEL_GID: u32 = 0;
 /// Group `staff`: every regular user's primary group.
 pub const STAFF_GID: u32 = 20;
-/// Group `admin`: may write /Apps and the /proc and /System/Kernel control files, may sudo.
+/// Group `admin`: may write /Apps and the /proc and /System/Kernel control files, may use `admin`.
 pub const ADMIN_GID: u32 = 80;
 /// The default user, `milk`.
 pub const MILK_UID: u32 = 501;

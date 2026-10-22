@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Memory leak test for long-running user processes: boot with a desktop on private images, open
-# Activity Monitor, start `top -b -d 1` in the background, then keep milkd and alarmd busy (svc
-# and alarm commands) for SECS seconds. `ps` is read after a warm-up and again at the end; the
-# resident size of top, milkd, alarmd and activity must not grow by more than LIMIT_KB (the
+# Activity Monitor, start `processes watch --plain --every 1` in the background, then keep milkd
+# and alarmd busy (services and alarm commands) for SECS seconds. `processes list` is read after
+# a warm-up and again at the end; the resident size of the watch, milkd, alarmd and activity
+# must not grow by more than LIMIT_KB (the
 # allocator returns freed memory, so a steady loop stays flat; plus an eighth of the process's
 # size, for the batching of what it gives back). Every other process's growth is
 # printed too, for information. About SECS + 40 seconds.
@@ -44,27 +45,32 @@ ser() { # steps...: run console steps, wait for them to finish, disconnect
   kill "$d" 2>/dev/null || true; wait "$d" 2>/dev/null || true
   [ -e "$T/ser.$n" ] || { echo "leak-test: the console stopped answering (step $n)"; tail -20 "$LOG"; exit 1; }
 }
-# `ps` output as "name rssK" lines (the first line of each PID: the process, not its other
-# threads), from the part of the log between markers $1 and $2.
+# `processes list` output as "name rssK" lines (one per PID), from the part of the log between
+# markers $1 and $2. The background watch (PID $WATCH) is "watch"; the list itself, also called
+# processes, is left out.
 psrss() {
-  tr -d '\r' < "$LOG" | awk -v a="$1" -v b="$2" '$0 ~ a {on=1; next} $0 ~ b {on=0} on && $1 ~ /^[0-9]+$/ && !seen[$1]++ {print $NF, $(NF-1)}' | sed 's/K$//'
+  tr -d '\r' < "$LOG" | awk -v a="$1" -v b="$2" -v w="$WATCH" '$0 ~ a {on=1; next} $0 ~ b {on=0}
+    on && $1 ~ /^[0-9]+$/ && !seen[$1]++ { if ($1 == w) print "watch", $(NF-1); else if ($NF != "processes") print $NF, $(NF-1) }' | sed 's/K$//'
 }
 
 ser "wait:$P" "send:pause 1" "wait:$P" "send:open activity" "wait:$P"
-ser "send:top -b -n $((SECS + 60)) -d 1 > /dev/null &" "wait:$P" "send:pause 10" "wait:$P"
-ser "send:print LEAK""-A" "wait:$P" "send:ps" "wait:$P" "send:print LEAK""-A-END" "wait:$P"
-# Keep milkd and alarmd answering while top and Activity Monitor refresh every second.
+ser "send:processes watch --plain --frames $((SECS + 60)) --every 1 > /dev/null &" "wait:$P" "send:pause 10" "wait:$P"
+# msh prints "[N] PGID" for the background job: the watch's PID.
+WATCH="$(tr -d '\r' < "$LOG" | sed -n 's/^\[[0-9][0-9]*\] \([0-9][0-9]*\)$/\1/p' | tail -1)"
+[ -n "$WATCH" ] || { echo "leak-test: no PID for the background processes watch"; exit 1; }
+ser "send:print LEAK""-A" "wait:$P" "send:processes list" "wait:$P" "send:print LEAK""-A-END" "wait:$P"
+# Keep milkd and alarmd answering while the watch and Activity Monitor refresh every second.
 t0=$SECONDS
 while [ $((SECONDS - t0)) -lt "$SECS" ]; do
-  ser "send:svc list > /dev/null" "wait:$P" "send:svc status alarmd > /dev/null" "wait:$P" \
+  ser "send:services list > /dev/null" "wait:$P" "send:services status alarmd > /dev/null" "wait:$P" \
     "send:alarm list > /dev/null" "wait:$P" "send:pause 4" "wait:$P"
 done
-ser "send:print LEAK""-B" "wait:$P" "send:ps" "wait:$P" "send:print LEAK""-B-END" "wait:$P"
+ser "send:print LEAK""-B" "wait:$P" "send:processes list" "wait:$P" "send:print LEAK""-B-END" "wait:$P"
 psrss '^LEAK-A$' '^LEAK-A-END$' | sort > "$T/a.txt"
 psrss '^LEAK-B$' '^LEAK-B-END$' | sort > "$T/b.txt"
 echo "  resident size after the warm-up and $((SECONDS - t0)) s later (KiB):"
 join "$T/a.txt" "$T/b.txt" | awk '{printf "    %-12s %7d -> %7d  (%+d)\n", $1, $2, $3, $3 - $2}'
-for p in top milkd alarmd activity; do
+for p in watch milkd alarmd activity; do
   a=$(awk -v p="$p" '$1 == p {print $2; exit}' "$T/a.txt")
   b=$(awk -v p="$p" '$1 == p {print $2; exit}' "$T/b.txt")
   if [ -z "$a" ] || [ -z "$b" ]; then bad "$p was not running at both samples"; continue; fi

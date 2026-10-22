@@ -37,17 +37,15 @@
 # programs; coreutils (user/coreutils/src/bin/*.rs) are one small program each.
 /Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
 /Commands/disks                                   target/user/aarch64-unknown-none-softfloat/release/disks      755
-/Commands/whoami                                  target/user/aarch64-unknown-none-softfloat/release/whoami     755
-/Commands/id                                      target/user/aarch64-unknown-none-softfloat/release/id         755
 /Commands/chmod                                   target/user/aarch64-unknown-none-softfloat/release/chmod      755
 /Commands/chown                                   target/user/aarch64-unknown-none-softfloat/release/chown      755
-/Commands/log                                     target/user/aarch64-unknown-none-softfloat/release/log        755
-/Commands/svc                                     target/user/aarch64-unknown-none-softfloat/release/svc        755
-/Commands/auth                                    target/user/aarch64-unknown-none-softfloat/release/auth       755
-# Set-user-ID root (4755): they check a password themselves, then switch ids.
-/Commands/su                                      target/user/aarch64-unknown-none-softfloat/release/su         4755
-/Commands/sudo                                    target/user/aarch64-unknown-none-softfloat/release/sudo       4755
-/Commands/passwd                                  target/user/aarch64-unknown-none-softfloat/release/passwd     4755
+/Commands/processes                               target/user/aarch64-unknown-none-softfloat/release/processes  755
+/Commands/services                                target/user/aarch64-unknown-none-softfloat/release/services   755
+/Commands/system                                  target/user/aarch64-unknown-none-softfloat/release/system     755
+# Set-user-ID root (4755): they check a password themselves, then switch ids (users:
+# password and switch; admin: COMMAND as root). Their other subcommands give root up first.
+/Commands/users                                   target/user/aarch64-unknown-none-softfloat/release/users      4755
+/Commands/admin                                   target/user/aarch64-unknown-none-softfloat/release/admin      4755
 /Commands/clear                                   target/user/aarch64-unknown-none-softfloat/release/clear      755
 # Files and folders (files replaced mv cp touch rm mkdir ls ln), and the Trash.
 /Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
@@ -57,12 +55,7 @@
 /Commands/print                                   target/user/aarch64-unknown-none-softfloat/release/print      755
 /Commands/pause                                   target/user/aarch64-unknown-none-softfloat/release/pause      755
 /Commands/false                                   target/user/aarch64-unknown-none-softfloat/release/false      755
-/Commands/free                                    target/user/aarch64-unknown-none-softfloat/release/free       755
-/Commands/kill                                    target/user/aarch64-unknown-none-softfloat/release/kill       755
-/Commands/ps                                      target/user/aarch64-unknown-none-softfloat/release/ps         755
 /Commands/true                                    target/user/aarch64-unknown-none-softfloat/release/true       755
-/Commands/uname                                   target/user/aarch64-unknown-none-softfloat/release/uname      755
-/Commands/uptime                                  target/user/aarch64-unknown-none-softfloat/release/uptime     755
 /Commands/stty                                    target/user/aarch64-unknown-none-softfloat/release/stty       755
 /Commands/open                                    target/user/aarch64-unknown-none-softfloat/release/open       755
 /Commands/notify                                  target/user/aarch64-unknown-none-softfloat/release/notify     755
@@ -77,7 +70,6 @@
 /Commands/play                                    target/user/aarch64-unknown-none-softfloat/release/play       755
 /Commands/audit                                   target/user/aarch64-unknown-none-softfloat/release/audit      755
 /Commands/apps                                    target/user/aarch64-unknown-none-softfloat/release/apps       755
-/Commands/top                                     target/user/aarch64-unknown-none-softfloat/release/top        755
 /Commands/drop                                    target/user/aarch64-unknown-none-softfloat/release/drop       755
 /Commands/versions                                target/user/aarch64-unknown-none-softfloat/release/versions   755
 /Commands/search                                  target/user/aarch64-unknown-none-softfloat/release/search     755

@@ -149,7 +149,7 @@ fn milkfs(ctl: &str, arg: &str) -> Res<()> {
     }
     r.map_err(|e| match e.0 {
         1 => alloc::format!(
-            "{p}: needs an administrator's authorisation: run it as `auth apps ...` (or as root)"
+            "{p}: needs an administrator's authorisation: run it as `admin ticket apps ...` (or as root)"
         ),
         _ => alloc::format!("{p} <- {arg:?}: {e}"),
     })
@@ -1298,7 +1298,7 @@ usage: apps COMMAND ...    apps from the package repositories, signed and checke
 
 Every package and package list must be signed by a trusted key; --insecure accepts one that
 isn't (loudly, and audited). Installing, removing, trying, keeping and discarding are audit
-records (audit --event user.pkg). Changing the system needs an administrator: auth apps ...
+records (audit --event user.pkg). Changing the system needs an administrator: admin ticket apps ...
 ";
 
 fn usage(what: &str) -> i32 {

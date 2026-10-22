@@ -214,7 +214,7 @@ pub fn current_caps() -> alloc::sync::Arc<caps::Caps> {
 /// the caller computing the intersection).
 pub fn set_caps(c: caps::Caps) {
     let p = current();
-    p.cred.lock().no_new_privs = true; // sandboxed: no sudo / su way out
+    p.cred.lock().no_new_privs = true; // sandboxed: no admin / users switch way out
     p.inner.lock().caps = alloc::sync::Arc::new(c);
 }
 
@@ -778,7 +778,6 @@ fn finish_process(wstatus: i32) -> ! {
     sched::set_ttbr0(kttbr);
     let (space, fds, children, ppid) = {
         let mut i = me.inner.lock();
-        i.state = PState::Zombie(wstatus);
         (
             i.space.take(),
             core::mem::take(&mut i.fds),
@@ -796,6 +795,12 @@ fn finish_process(wstatus: i32) -> ! {
     // (before its fds go, so the claim ends as "exited", not "fd closed").
     crate::udrv::space_gone(me.pid);
     drop(fds);
+    // Only now a zombie, so only now reapable: its memory and files are gone first (Linux
+    // closes them before telling the parent, too). A parent that reaps a child and then
+    // looks at the pipes it wrote to sees their end; when the zombie came first, a parent
+    // polling with WNOHANG on another CPU could reap it while its pipe ends were still
+    // open (milkd then kept the old pipes of a restarted service and blocked on them).
+    me.inner.lock().state = PState::Zombie(wstatus);
     let pid = me.pid;
     drop(me); // sched::exit never returns: hold no references past here
     if pid == 1 {

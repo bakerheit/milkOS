@@ -3,7 +3,7 @@
 //! user; when real accounts land (/System/Settings/passwd, milk is uid 501) this returns the logged-in
 //! user's name instead and every caller follows.
 
-/// The session user's display name (Terminal titles and prompt, `whoami`, the lock screen,
+/// The session user's display name (Terminal titles and prompt, `users me`, the lock screen,
 /// the Today greeting, the drawer's Mentions chip).
 pub fn user_name() -> &'static str {
     "milk"

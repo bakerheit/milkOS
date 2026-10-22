@@ -11,7 +11,9 @@ pub fn why(errno: i32) -> String {
         2 => {
             "there's no snapshot or clone by that name (for a receive: the stream's base snapshot isn't on the target)"
         }
-        1 => "needs an administrator's authorisation: run it as `auth disks ...` (or as root)",
+        1 => {
+            "needs an administrator's authorisation: run it as `admin ticket disks ...` (or as root)"
+        }
         5 => "a disk error, or a damaged stream",
         13 => "wrong passphrase or recovery key",
         16 => {
@@ -77,7 +79,7 @@ mod tests {
     #[test]
     fn words() {
         assert_eq!(why(17), "that name is taken (error 17)");
-        assert!(why(1).contains("`auth disks ...`"));
+        assert!(why(1).contains("`admin ticket disks ...`"));
         assert_eq!(why(9999), "failed (error 9999)");
         assert_eq!(
             kernel_reason("clone", "clone: EBUSY: the snapshot is being sent\n", 16).as_deref(),

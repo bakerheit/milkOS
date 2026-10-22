@@ -66,37 +66,52 @@ ser() { # steps...: run console steps, wait for them to finish, disconnect
 }
 q() { python3 scripts/qmp.py "$QMP" "$@"; }
 out() { tr -d '\r' < "$LOG" | awk -v c="$1" 'on && /^msh:/ {on=0} !on && ($0 == c || ($0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c)) {on=1; buf=""; next} on {buf = buf $0 "\n"} END {printf "%s", buf}'; }
-differ() { ! cmp -s "$1" "$2"; }
+# Screenshots wait for the screen (scripts/shotwait.py) instead of sleeping: shot NAME [REF] takes
+# $T/NAME.png once the picture has settled and, with REF, differs from $T/REF.png; same / differ
+# compare two of them ignoring the menu bar, the caret and the pointer. A shot that times out
+# still leaves its picture, and the check that follows then fails.
+shot() { python3 scripts/shotwait.py "$QMP" "$T/$1.png" ${2:+--differ-from "$T/$2.png"} || true; }
+same() { python3 scripts/shotwait.py --same "$T/$1.png" "$T/$2.png"; }
+differ() { python3 scripts/shotwait.py --differ "$T/$1.png" "$T/$2.png"; }
 
 ser "wait:$P"
 q move 785 615 click sleep 1
+# wait_window PATTERN: poll /dev/wm until a window matching PATTERN is listed (up to ~30 s).
+wait_window() {
+  for _ in $(seq 30); do
+    ser "send:cat /dev/wm" "wait:$P"
+    out "cat /dev/wm" | grep -aq "window .* $1" && return 0
+    sleep 1
+  done
+  return 1
+}
 ser "send:/Apps/preview/preview /Users/milk/Pictures/a-checker.png &" "wait:$P"
-sleep 3
-ser "send:cat /dev/wm" "wait:$P"
-out "cat /dev/wm" | grep -a "window .* a-checker.png\|window .* Preview" >/dev/null && ok "the Preview window is on the desktop" || bad "no Preview window"
-q screendump "$T/1-png.png"
-q key right sleep 1 screendump "$T/2-ppm.png"
-q key right sleep 1 screendump "$T/3-bmp.png"
-q key right sleep 1 screendump "$T/4-damaged.png"
-q key right sleep 1 screendump "$T/5-pdf.png"
-q key right sleep 1 screendump "$T/6-wrapped.png"
-differ "$T/1-png.png" "$T/2-ppm.png" && differ "$T/2-ppm.png" "$T/3-bmp.png" && differ "$T/3-bmp.png" "$T/4-damaged.png" && differ "$T/4-damaged.png" "$T/5-pdf.png" && ok "each picture, the damaged file and the PDF drew a different screen" || bad "stepping through the folder did not change the screen"
-cmp -s "$T/1-png.png" "$T/6-wrapped.png" && ok "the strip wraps from the last file back to the first" || bad "stepping past the last file did not return to the first"
-q key meta_l-i sleep 1 screendump "$T/7-info.png"
-differ "$T/6-wrapped.png" "$T/7-info.png" && ok "Cmd-I opened the info panel" || bad "Cmd-I did nothing"
-q key esc sleep 0.5
-q key meta_l-equal sleep 0.5 key meta_l-equal sleep 0.5 key meta_l-equal sleep 0.5 key meta_l-equal sleep 1 screendump "$T/8-200.png"
-differ "$T/6-wrapped.png" "$T/8-200.png" && ok "Cmd-+ stepped the zoom up to 200%" || bad "Cmd-+ did nothing"
+wait_window "a-checker.png\|Preview" && ok "the Preview window is on the desktop" || bad "no Preview window"
+shot 1-png
+q key right; shot 2-ppm 1-png
+q key right; shot 3-bmp 2-ppm
+q key right; shot 4-damaged 3-bmp
+q key right; shot 5-pdf 4-damaged
+q key right; shot 6-wrapped 5-pdf
+differ 1-png 2-ppm && differ 2-ppm 3-bmp && differ 3-bmp 4-damaged && differ 4-damaged 5-pdf && ok "each picture, the damaged file and the PDF drew a different screen" || bad "stepping through the folder did not change the screen"
+same 1-png 6-wrapped && ok "the strip wraps from the last file back to the first" || bad "stepping past the last file did not return to the first"
+# On the gradient (400 x 300): big enough to zoom past the window and pan.
+q key right; shot 7-grad 6-wrapped
+q key meta_l-i; shot 7b-info 7-grad
+differ 7-grad 7b-info && ok "Cmd-I opened the info panel" || bad "Cmd-I did nothing"
+q key esc
+q key meta_l-equal sleep 0.3 key meta_l-equal sleep 0.3 key meta_l-equal sleep 0.3 key meta_l-equal; shot 8-200 7-grad
+differ 7-grad 8-200 && ok "Cmd-+ stepped the zoom up to 200%" || bad "Cmd-+ did nothing"
 # Rotate the picture (Cmd-R) and pan it with a drag.
-q key meta_l-r sleep 1 screendump "$T/9-rotated.png"
-differ "$T/8-200.png" "$T/9-rotated.png" && ok "Cmd-R rotated the picture" || bad "Cmd-R did nothing"
-q move 600 400 button left down move 560 380 move 520 360 button left up sleep 1 screendump "$T/10-panned.png"
-differ "$T/9-rotated.png" "$T/10-panned.png" && ok "dragging panned the picture" || bad "the drag did not move the picture"
-# The PDF's text view: back one file from the first, then the Show text button.
-q key meta_l-0 sleep 0.5 key left sleep 1
+q key meta_l-r; shot 9-rotated 8-200
+differ 8-200 9-rotated && ok "Cmd-R rotated the picture" || bad "Cmd-R did nothing"
+q move 600 400 button left down move 560 380 move 520 360 button left up; shot 10-panned 9-rotated
+differ 9-rotated 10-panned && ok "dragging panned the picture" || bad "the drag did not move the picture"
+# The PDF's text view: fit, three files on to the PDF, then the Show text button.
+q key meta_l-0 sleep 0.3 key right sleep 0.3 key right sleep 0.3 key right; shot 5b-pdf 10-panned
 ser "send:cat /dev/wm" "wait:$P"
 set -- $(out "cat /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
-q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 411 )) click sleep 1 screendump "$T/11-text.png"
-differ "$T/5-pdf.png" "$T/11-text.png" && ok "Show text opened the text view" || bad "Show text did nothing"
+q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 411 )) click; shot 11-text 5b-pdf
+differ 5b-pdf 11-text && ok "Show text opened the text view" || bad "Show text did nothing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "preview-test: PASS (screenshots in $T)"; else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi

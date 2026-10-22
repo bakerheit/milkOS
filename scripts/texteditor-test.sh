@@ -57,43 +57,72 @@ ser() { # steps...: run console steps, wait for them to finish, disconnect
 q() { python3 scripts/qmp.py "$QMP" "$@"; }
 # Output of the LAST time the command typed as $1 ran, up to the next prompt.
 out() { tr -d '\r' < "$LOG" | awk -v c="$1" 'on && /^msh:/ {on=0} !on && ($0 == c || ($0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c)) {on=1; buf=""; next} on {buf = buf $0 "\n"} END {printf "%s", buf}'; }
-differ() { ! cmp -s "$1" "$2"; }
+# Screenshots wait for the screen (scripts/shotwait.py) instead of sleeping: shot NAME [REF] takes
+# $T/NAME.png once the picture has settled and, with REF, differs from $T/REF.png; same / differ
+# compare two of them ignoring the menu bar, the caret and the pointer. A shot that times out
+# still leaves its picture, and the check that follows then fails.
+shot() { python3 scripts/shotwait.py "$QMP" "$T/$1.png" ${2:+--differ-from "$T/$2.png"} || true; }
+differ() { python3 scripts/shotwait.py --differ "$T/$1.png" "$T/$2.png"; }
+# wait_window PATTERN: poll /dev/wm until a window matching PATTERN is listed (up to ~30 s).
+wait_window() {
+  for _ in $(seq 30); do
+    ser "send:cat /dev/wm" "wait:$P"
+    out "cat /dev/wm" | grep -aq "window .* $1" && return 0
+    sleep 1
+  done
+  return 1
+}
+# wait_gone PATTERN: the same, until no window matches.
+wait_gone() {
+  for _ in $(seq 30); do
+    ser "send:cat /dev/wm" "wait:$P"
+    out "cat /dev/wm" | grep -aq "window .* $1" || return 0
+    sleep 1
+  done
+  return 1
+}
+# file_has WORD / file_lacks WORD: poll the saved file (up to ~20 s) until it has / lacks WORD.
+file_poll() { # has|lacks WORD
+  for _ in $(seq 20); do
+    ser "send:cat /Users/milk/sample.rs" "wait:$P"
+    if out "cat /Users/milk/sample.rs" | grep -q "$2"; then [ "$1" = has ] && return 0; else [ "$1" = lacks ] && return 0; fi
+    sleep 1
+  done
+  return 1
+}
 # The window's position (outer rect) from /dev/wm: "window ... WxH+X+Y".
 winpos() { out "cat /dev/wm" | grep -a "window .* $1" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/'; }
 
 ser "wait:$P"
 q move 785 615 click sleep 1
 ser "send:/Apps/texteditor/texteditor /Users/milk/sample.rs &" "wait:$P"
-sleep 3
-ser "send:cat /dev/wm" "wait:$P"
+wait_window "sample.rs" && ok "the editor window (sample.rs) is on the desktop" || bad "no editor window"
 set -- $(winpos "sample.rs")
-[ -n "${1:-}" ] && ok "the editor window (sample.rs) is on the desktop" || { bad "no editor window"; }
 X=$(( ${1:-0} + 1 )); Y=$(( ${2:-0} + 33 ))   # body origin
-q screendump "$T/rust.png"
+shot rust
 # Click at the end of the file's last line and type; the editor starts with the caret at the top.
-q move $((X + 300)) $((Y + 100)) click sleep 0.5 type 'ZZ' sleep 0.5 screendump "$T/typed.png"
-q key meta_l-s sleep 1
-ser "send:cat /Users/milk/sample.rs" "wait:$P"
-out "cat /Users/milk/sample.rs" | grep -q "ZZ" && ok "typing then Cmd-S wrote the change to the file" || bad "the saved file has no ZZ: $(out 'cat /Users/milk/sample.rs' | head -3)"
+q move $((X + 300)) $((Y + 100)) click sleep 0.5 type 'ZZ'; shot typed
+q key meta_l-s
+file_poll has ZZ && ok "typing then Cmd-S wrote the change to the file" || bad "the saved file has no ZZ: $(out 'cat /Users/milk/sample.rs' | head -3)"
 # Undo and save again: back to the original.
-q key meta_l-z sleep 0.5 screendump "$T/undone.png" key meta_l-s sleep 1
-ser "send:cat /Users/milk/sample.rs" "wait:$P"
-out "cat /Users/milk/sample.rs" | grep -q "ZZ" && bad "undo then save still has ZZ" || ok "Cmd-Z then Cmd-S restored the file"
+q key meta_l-z; shot undone
+q key meta_l-s
+file_poll lacks ZZ && ok "Cmd-Z then Cmd-S restored the file" || bad "undo then save still has ZZ"
 # Find: the bar opens, the match is highlighted.
-q key meta_l-f sleep 0.5 type 'println' sleep 0.5 screendump "$T/find.png"
-differ "$T/typed.png" "$T/find.png" && ok "the find bar changed the window" || bad "the find bar did nothing"
+q key meta_l-f sleep 0.3 type 'println'; shot find undone
+differ undone find && ok "the find bar changed the window" || bad "the find bar did nothing"
 q key esc sleep 0.3
-q key meta_l-q sleep 1 screendump "$T/quit.png"
-ser "send:cat /dev/wm" "wait:$P"
-out "cat /dev/wm" | grep -a "window .* sample.rs" >/dev/null && bad "Cmd-Q left the window open" || ok "Cmd-Q closed the clean editor"
+q key meta_l-q
+wait_gone "sample.rs" && ok "Cmd-Q closed the clean editor" || bad "Cmd-Q left the window open"
+shot quit
 # A long prose file: wrapped. A binary file: the sheet.
 ser "send:/Apps/texteditor/texteditor /Users/milk/prose.txt &" "wait:$P"
-sleep 3
-q screendump "$T/prose.png"
+wait_window "prose.txt" || bad "no window for prose.txt"
+shot prose quit
 ser "send:/Apps/texteditor/texteditor /Users/milk/bin.dat &" "wait:$P"
-sleep 3
-q screendump "$T/binary.png"
-differ "$T/rust.png" "$T/prose.png" && differ "$T/prose.png" "$T/binary.png" && ok "prose and binary files drew differently" || bad "screens did not change"
+wait_window "bin.dat" || bad "no window for bin.dat"
+shot binary prose
+differ rust prose && differ prose binary && ok "prose and binary files drew differently" || bad "screens did not change"
 ser "send:cat /dev/wm" "wait:$P"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "texteditor-test: PASS (screenshots in $T)"; else echo "texteditor-test: FAIL (logs and screenshots in $T)"; exit 1; fi

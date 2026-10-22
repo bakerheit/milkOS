@@ -1,0 +1,8 @@
+format 1
+name texteditor
+version 1.0.0
+description Text Editor: plain text and code, with find and replace, undo and colours
+exec texteditor
+dock Text Editor #B9A9D6
+files
+payload-sha256 -

@@ -1,0 +1,15 @@
+[package]
+name = "texteditor"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "texteditor"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+textbuf = { path = "../textbuf" }

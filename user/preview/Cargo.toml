@@ -1,0 +1,16 @@
+[package]
+name = "preview"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "preview"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+imgdec = { path = "../imgdec" }
+textbuf = { path = "../textbuf" }

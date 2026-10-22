@@ -60,7 +60,8 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
   shell commands (`> files list`). Windows snap to edges and corners. Lock screen. Browse All Versions for any
   file on milkfs. Screenshots with Cmd+Shift+3/4 (PNG). Live resolution switching (1024x768 to 1440x900).
 - Apps: Terminal (real shell, tabs, colours), Music, Files (with Time Machine), Notes, Browser, Paint, Settings,
-  About. User programs can open their own windows (`user/gui`).
+  About, Text Editor (`docs/text-editor.md`), Preview for PNG, PPM and BMP pictures and a peek into PDFs
+  (`docs/preview.md`). User programs can open their own windows (`user/gui`).
 
 **Userland**
 - `msh`, a shell with pipelines, redirection, job control and structured pipes:

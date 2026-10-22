@@ -69,10 +69,12 @@ fn assignment(w: &Word) -> Option<(String, Word)> {
     Some((String::from(name), value))
 }
 
-/// `where COL` so far, with no operator yet: the next `<` / `>` is the comparison.
-/// (Later ones, as in `where size > 1M > out`, are ordinary redirections.)
-fn is_where(c: &Command) -> bool {
-    matches!(c.words.first().and_then(|w| w.first()), Some(Part::Lit(s, false)) if s == "where")
+/// `filter COL` so far, with no operator yet: the next `<` / `>` is the comparison.
+/// (Later ones, as in `filter size > 1M > out`, are ordinary redirections.) The old
+/// spelling `where COL > V` is read the same way, so it gets `where`'s "takes no
+/// arguments" error instead of quietly creating a file named V.
+fn is_filter(c: &Command) -> bool {
+    matches!(c.words.first().and_then(|w| w.first()), Some(Part::Lit(s, false)) if s == "filter" || s == "where")
         && c.words.first().is_some_and(|w| w.len() == 1)
         && c.words.len() == 2
 }
@@ -121,8 +123,8 @@ pub fn parse(toks: Vec<Tok>) -> Result<Vec<Item>, String> {
                     cur_cmd.words.push(w);
                 }
             }
-            // In `where COL > 100` the comparison operators are words, not redirections.
-            Some(Tok::Redir(fd, kind)) if is_where(&cur_cmd) => {
+            // In `filter COL > 100` the comparison operators are words, not redirections.
+            Some(Tok::Redir(fd, kind)) if is_filter(&cur_cmd) => {
                 let op = match kind {
                     RedirKind::In => "<",
                     RedirKind::Out => ">",

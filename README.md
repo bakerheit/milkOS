@@ -67,7 +67,7 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 
 **Userland**
 - `msh`, a shell with pipelines, redirection, job control and structured pipes:
-  `ps | where rss > 100 | sort-by name`. `go Documents` changes folder (`go` alone: home,
+  `ps | filter rss > 100 | sort-by name`. `go Documents` changes folder (`go` alone: home,
   `go back`: the one before) and `where` says where you are; there is no `cd` or `pwd`.
 - `files`, one command for files and folders in plain English (`files create notes.txt`,
   `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`

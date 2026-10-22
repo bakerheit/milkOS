@@ -55,7 +55,7 @@ out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done &&
 G=/Users/milk/gen
 boot b1 "spot --wait" "spot --status" "spot --status" \
   "spot uniq01234" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
-  "spot f0499" "spot -n 3 kind:txt cherry | where kind == txt | count" \
+  "spot f0499" "spot -n 3 kind:txt cherry | filter kind == txt | count" \
   "echo quokka sighting near the dam > /Users/milk/new-note.txt" "sleep 1" "spot quokka" \
   "files move /Users/milk/new-note.txt $G/d007/quokka.md" "sleep 1" "spot -l quokka" \
   "files delete --now $G/d007/quokka.md" "sleep 1" "spot quokka" \
@@ -74,7 +74,7 @@ c=$(out "$L1" "spot -n 10000 in:d042" | grep -c "^$G/d042/" || true)
 [ "$c" = 100 ] && ok "in:d042: the folder's 100 files" || bad "in:d042: $c"
 c=$(out "$L1" "spot f0499" | grep -c "^$G" || true)
 [ "$c" = 10 ] && [ "$(out "$L1" "spot f0499" | head -1)" = "$G/d049/f04990.txt" ] && ok "name prefix f0499: 10 files" || bad "f0499: $c"
-[ "$(out "$L1" "spot -n 3 kind:txt cherry | where kind == txt | count" | tail -1 | tr -d ' ')" = 3 ] && ok "structured pipe: spot | where kind == txt | count" || bad "structured pipe: $(out "$L1" "spot -n 3 kind:txt cherry | where kind == txt | count")"
+[ "$(out "$L1" "spot -n 3 kind:txt cherry | filter kind == txt | count" | tail -1 | tr -d ' ')" = 3 ] && ok "structured pipe: spot | filter kind == txt | count" || bad "structured pipe: $(out "$L1" "spot -n 3 kind:txt cherry | filter kind == txt | count")"
 [ "$(out "$L1" "spot quokka" | head -1)" = /Users/milk/new-note.txt ] && ok "a new file is found within 1 s" || bad "new file: $(out "$L1" "spot quokka")"
 out "$L1" "spot -l quokka" | grep -q "md .*content.* $G/d007/quokka.md$" && ok "a rename shows the new path (and kind) within 1 s" || bad "rename: $(out "$L1" "spot -l quokka")"
 tr -d '\r' < "$L1" | grep -aq 'spot: nothing found for "quokka"' && ok "a delete is gone within 1 s" || bad "delete still found"

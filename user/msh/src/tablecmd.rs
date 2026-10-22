@@ -1,4 +1,4 @@
-//! Table commands for structured pipes (docs/shell.md): where, sort-by, select, first,
+//! Table commands for structured pipes (docs/shell.md): filter, sort-by, select, first,
 //! last, get, count, table, to-json. Each runs as a pipeline stage (in a forked child):
 //! read stdin as a table (or columnar text), transform, write.
 
@@ -11,13 +11,13 @@ use rt::{eprintln, sys};
 pub fn is_table_cmd(name: &str) -> bool {
     matches!(
         name,
-        "where" | "sort-by" | "select" | "first" | "last" | "get" | "count" | "table" | "to-json"
+        "filter" | "sort-by" | "select" | "first" | "last" | "get" | "count" | "table" | "to-json"
     )
 }
 
 /// Commands whose output is a table (the rest print text).
 pub fn emits_table(name: &str) -> bool {
-    matches!(name, "where" | "sort-by" | "select" | "first" | "last")
+    matches!(name, "filter" | "sort-by" | "select" | "first" | "last")
 }
 
 fn read_stdin() -> Vec<u8> {
@@ -62,12 +62,12 @@ fn op_of(rest: &str) -> &str {
     rest[..end].trim()
 }
 
-fn where_(t: &mut Table, args: &[String]) -> Result<(), i32> {
+fn filter(t: &mut Table, args: &[String]) -> Result<(), i32> {
     if args.len() < 2 {
-        eprintln!("usage: where COLUMN OP VALUE   (OP: == != < <= > >= =~ !~)");
+        eprintln!("usage: filter COLUMN OP VALUE   (OP: == != < <= > >= =~ !~)");
         return Err(2);
     }
-    let c = column(t, "where", &args[0])?;
+    let c = column(t, "filter", &args[0])?;
     let ty = t.cols[c].1;
     // The operator may arrive split ("> = 100" from `>=`, since the lexer cuts at '>').
     let rest = args[1..].join(" ");
@@ -88,7 +88,7 @@ fn where_(t: &mut Table, args: &[String]) -> Result<(), i32> {
     let lit = literal(ty, &raw);
     if ty.numeric() && !matches!(lit, Val::Int(_)) && !matches!(op_of(&rest), "=~" | "!~") {
         eprintln!(
-            "where: column '{}' is a number; '{raw}' isn't (sizes may use K, M, G)",
+            "filter: column '{}' is a number; '{raw}' isn't (sizes may use K, M, G)",
             args[0]
         );
         return Err(2);
@@ -116,7 +116,7 @@ fn where_(t: &mut Table, args: &[String]) -> Result<(), i32> {
         op,
         "==" | "=" | "!=" | "<" | "<=" | ">" | ">=" | "=~" | "!~"
     ) {
-        eprintln!("where: unknown operator '{op}' (== != < <= > >= =~ !~)");
+        eprintln!("filter: unknown operator '{op}' (== != < <= > >= =~ !~)");
         return Err(2);
     }
     t.rows.retain(|r| keep(r.get(c).unwrap_or(&Val::Nil)));
@@ -131,7 +131,7 @@ pub fn run(argv: &[String]) -> i32 {
     let mut out = Out::stdout();
     let r: Result<(), i32> = (|| {
         match cmd {
-            "where" => where_(&mut t, args)?,
+            "filter" => filter(&mut t, args)?,
             "sort-by" => {
                 let Some(name) = args.iter().find(|a| !a.starts_with('-')) else {
                     eprintln!("usage: sort-by COLUMN [-r]");

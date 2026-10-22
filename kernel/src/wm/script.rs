@@ -231,7 +231,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "shell" => {
             b.wait(300)
-                .typ("pwd")
+                .typ("where")
                 .enter()
                 .wait(200)
                 .typ("files list")
@@ -1398,7 +1398,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.click(TERM_ZOOM.0, TERM_ZOOM.1).wait(400);
             b.typ("clear").enter().wait(200);
             for c in [
-                "cd ~/Documents",
+                "go ~/Documents",
                 "files create plans.txt drafts/2026/",
                 "files copy todo.txt drafts",
                 "files list -l",
@@ -1412,7 +1412,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "trash-files" | "trash-dock" | "settings-trash" => {
             b.wait(300).typ("clear").enter().wait(200);
             for c in [
-                "cd ~",
+                "go",
                 "files create 'old notes.txt' sketches/cows/ Documents/draft.md",
                 "files copy Documents/todo.txt todo-copy.txt",
                 "files delete 'old notes.txt' sketches todo-copy.txt Documents/draft.md",

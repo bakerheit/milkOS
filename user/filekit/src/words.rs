@@ -33,6 +33,16 @@ pub fn say_read(shown: &str, errno: i32) -> String {
     }
 }
 
+/// Why the shell's `go` couldn't get into `shown`. `is_file`: `shown` is there but isn't a
+/// folder.
+pub fn say_go(shown: &str, errno: i32, is_file: bool) -> String {
+    match errno {
+        _ if is_file => format!("{shown} is a file, not a folder"),
+        1 | 13 => format!("you can't open {shown}"),
+        e => say(shown, e),
+    }
+}
+
 /// "1 item", "3 items".
 pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -92,6 +102,12 @@ mod tests {
         assert_eq!(say_read("x", 13), "you don't have permission to read x");
         assert_eq!(say_read("x", 2), "x doesn't exist");
         assert_eq!(say("x", 9999), "x: failed (error 9999)");
+        assert_eq!(say_go("Documents", 2, false), "Documents doesn't exist");
+        assert_eq!(
+            say_go("notes.txt", 20, true),
+            "notes.txt is a file, not a folder"
+        );
+        assert_eq!(say_go("/locked", 13, false), "you can't open /locked");
     }
 
     #[test]

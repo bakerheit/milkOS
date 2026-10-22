@@ -123,7 +123,7 @@ EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
   "cat /sys/fs/milkfs/info" "cat /sys/fs/milkfs/lock" \
   "snap lock Milk" "snap lock Plain" \
   "echo kept across the lock > /Volumes/Vault/notes.txt" \
-  "cd /Volumes/Vault" "snap lock Vault" "cd /" \
+  "go /Volumes/Vault" "snap lock Vault" "go /" \
   "sleep 4 < /Volumes/Vault/notes.txt &" "snap lock Vault" "cat /sys/fs/milkfs/error" "sleep 5" \
   "snap lock Vault" "files list /Volumes" "cat /Volumes/Vault/notes.txt" "cat /sys/fs/milkfs/lock" \
   "raw:snap unlock" "wait:Passphrase" "raw:$P2" "wait:unlocked" "wait:msh:" \

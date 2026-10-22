@@ -15,6 +15,12 @@
   `copy`, `move` (across disks too), `rename`, `delete`, `info`, `list`, `link`, `help`, with
   errors in plain English. It replaces `ls`, `cp`, `mv`, `rm`, `mkdir`, `touch` and `ln`,
   which are gone. A slash at the end of a path means a folder: on a file it is an error.
+- `go` and `where` instead of `cd` and `pwd`, which are gone: `go Documents`, `go ..`,
+  `go /Apps`, `go` (home), `go back` (the folder before; a folder called back is
+  `go ./back`); `where` prints the folder you're in, in pipes too (`where` with arguments
+  is still the table filter). Errors in plain English ("Documents doesn't exist",
+  "notes.txt is a file, not a folder", "you can't open ..."). In msh and the Terminal's
+  built-in shell.
 - A real Trash: `files delete` moves things to `~/.Trash` (or a disk's own `.Trash`),
   `files delete --now` skips it, `trash list`, `trash restore`, `trash empty`. The `trashd`
   service deletes things for good after 30 days, or what Settings > Trash says (or never).

@@ -211,7 +211,7 @@ impl Desktop {
                     } else {
                         fsx::parent(&path)
                     };
-                    self.open_tab(Some(format!("cd {}", quote(&dir))));
+                    self.open_tab(Some(format!("go {}", quote(&dir))));
                 }
                 Some(DockAction::Pkg(k)) => {
                     if let Some(p) = super::packages::get(k) {

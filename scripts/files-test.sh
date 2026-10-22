@@ -10,7 +10,9 @@
 #           refused with the --now hint, a disk's own Trash (a milkfs clone), trash empty
 #           (asks; --yes doesn't); auto-empty: trashd --once with Settings' days at 1 and a
 #           pretend clock (--later), and "never"; then an item whose record says it was
-#           deleted in 2001 is left in the Trash;
+#           deleted in 2001 is left in the Trash; msh's go and where: relative, .., absolute,
+#           go back, ./back, home, in a pipe and a redirection, the plain-English errors (and
+#           "you can't open" as another user), cd and pwd gone, `where COL OP V` still a filter;
 #   boot 2: trashd (a milkd service) deleted it at boot, says so in the journal, and the
 #           Trash's other item is still there.
 # Fresh /tmp directory; only the qemus started here are killed.
@@ -54,7 +56,7 @@ trap 'kill -9 "${QPID:-}" 2>/dev/null || true' EXIT
 # Steps: "send:CMD" "wait:PROMPT" for each command, appended to the array named first.
 s() { local a="$1" c; shift; for c in "$@"; do eval "$a+=(\"send:\$c\" \"wait:\$P\")"; done; }
 B1=(); s B1 \
-  "cd ~" \
+  "go" \
   "files create notes.txt projects/a/b/" \
   "echo hello > notes.txt" \
   "files create notes.txt" \
@@ -144,6 +146,34 @@ s B1 \
   "echo path = /Users/milk/boot.txt > ~/.Trash/.trashinfo/boot.txt" \
   "echo deleted = 1000000000 >> ~/.Trash/.trashinfo/boot.txt" \
   "trash list" \
+  "files create gotest/back/ gotest/inner/ gotest/notes.txt" \
+  "go gotest/inner" \
+  "where | cat" \
+  "go .." \
+  "where" \
+  "go back" \
+  "where > /tmp/where.txt" \
+  "cat /tmp/where.txt" \
+  "go /Apps" \
+  "where" \
+  "go /Users/milk/gotest" \
+  "go ./back" \
+  "where" \
+  "go" \
+  "where" \
+  "go gotest/missing" \
+  "go gotest/notes.txt" \
+  "go gotest/notes.txt/x" \
+  "go gotest inner" \
+  "OLDPWD= msh -c 'go back'" \
+  "files create /tmp/locked/" \
+  "chmod 700 /tmp/locked" \
+  "su milk -c 'go /tmp/locked'" \
+  "cd /tmp" \
+  "pwd" \
+  "where" \
+  "ps | where name == msh | select name" \
+  "help" \
   "echo now > /sys/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
 echo "$L1" > "$T/b1.txt"
@@ -214,6 +244,27 @@ check "and it is gone" "trash list" "The Trash is empty." 7
 check "trash = never: kept 400 days later" "trash list" "keep.txt" 8
 check "days left: never" "trash list" "never" 8
 check "an item from 2001 is due" "trash list" "boot.txt" 9
+
+echo "== go and where"
+check "go into a folder two deep; where in a pipe" "where | cat" "/Users/milk/gotest/inner"
+check "go .." "where" "/Users/milk/gotest"
+check "go back, where > file" "cat /tmp/where.txt" "/Users/milk/gotest/inner"
+check "go /Apps (absolute)" "where" "/Apps" 2
+check "go ./back reaches a folder called back" "where" "/Users/milk/gotest/back" 3
+[ "$(out "where" 4 | tr -d ' \r')" = "/Users/milk" ] && ok "go with no folder goes home" || bad "go home: $(out "where" 4)"
+check "a missing folder" "go gotest/missing" "go: gotest/missing doesn't exist"
+check "a file" "go gotest/notes.txt" "go: gotest/notes.txt is a file, not a folder"
+check "a file in the middle of the path" "go gotest/notes.txt/x" "go: gotest/notes.txt/x doesn't exist (part of its path is a file, not a folder)"
+check "one folder at a time" "go gotest inner" "go takes one folder (put quotes around a name with spaces)"
+check "go back with nowhere to go back to" "OLDPWD= msh -c 'go back'" "go: there's no folder to go back to yet"
+check "a folder you can't open" "su milk -c 'go /tmp/locked'" "go: you can't open /tmp/locked"
+# (out stops at a line starting "msh:", so these look at the line after the command.)
+gone() { echo "$L1" | grep -A1 -F "\$ $1" | grep -Fq "msh: $1: command not found" && ok "$1 is gone" || bad "$1 still runs: $(echo "$L1" | grep -A1 -F "\$ $1" | tail -1)"; }
+gone cd; gone pwd
+check "a failed go stays put" "where" "/Users/milk" 5
+check "where COL OP V is still the table filter" "ps | where name == msh | select name" "msh"
+check "help: go" "help" "go FOLDER        change folder: go Documents, go .., go /Apps"
+check "help: where" "help" "where            print the folder you're in"
 
 echo "== boot 2: trashd ran at boot"
 L2="$(boot b2 \

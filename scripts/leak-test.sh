@@ -50,16 +50,16 @@ psrss() {
   tr -d '\r' < "$LOG" | awk -v a="$1" -v b="$2" '$0 ~ a {on=1; next} $0 ~ b {on=0} on && $1 ~ /^[0-9]+$/ && !seen[$1]++ {print $NF, $(NF-1)}' | sed 's/K$//'
 }
 
-ser "wait:$P" "send:sleep 1" "wait:$P" "send:open activity" "wait:$P"
-ser "send:top -b -n $((SECS + 60)) -d 1 > /dev/null &" "wait:$P" "send:sleep 10" "wait:$P"
-ser "send:echo LEAK""-A" "wait:$P" "send:ps" "wait:$P" "send:echo LEAK""-A-END" "wait:$P"
+ser "wait:$P" "send:pause 1" "wait:$P" "send:open activity" "wait:$P"
+ser "send:top -b -n $((SECS + 60)) -d 1 > /dev/null &" "wait:$P" "send:pause 10" "wait:$P"
+ser "send:print LEAK""-A" "wait:$P" "send:ps" "wait:$P" "send:print LEAK""-A-END" "wait:$P"
 # Keep milkd and alarmd answering while top and Activity Monitor refresh every second.
 t0=$SECONDS
 while [ $((SECONDS - t0)) -lt "$SECS" ]; do
   ser "send:svc list > /dev/null" "wait:$P" "send:svc status alarmd > /dev/null" "wait:$P" \
-    "send:alarm list > /dev/null" "wait:$P" "send:sleep 4" "wait:$P"
+    "send:alarm list > /dev/null" "wait:$P" "send:pause 4" "wait:$P"
 done
-ser "send:echo LEAK""-B" "wait:$P" "send:ps" "wait:$P" "send:echo LEAK""-B-END" "wait:$P"
+ser "send:print LEAK""-B" "wait:$P" "send:ps" "wait:$P" "send:print LEAK""-B-END" "wait:$P"
 psrss '^LEAK-A$' '^LEAK-A-END$' | sort > "$T/a.txt"
 psrss '^LEAK-B$' '^LEAK-B-END$' | sort > "$T/b.txt"
 echo "  resident size after the warm-up and $((SECONDS - t0)) s later (KiB):"

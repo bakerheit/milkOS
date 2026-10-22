@@ -79,8 +79,8 @@ q move 785 615 click sleep 1
 # wait_window PATTERN: poll /dev/wm until a window matching PATTERN is listed (up to ~30 s).
 wait_window() {
   for _ in $(seq 30); do
-    ser "send:cat /dev/wm" "wait:$P"
-    out "cat /dev/wm" | grep -aq "window .* $1" && return 0
+    ser "send:text show /dev/wm" "wait:$P"
+    out "text show /dev/wm" | grep -aq "window .* $1" && return 0
     sleep 1
   done
   return 1
@@ -109,8 +109,8 @@ q move 600 400 button left down move 560 380 move 520 360 button left up; shot 1
 differ 9-rotated 10-panned && ok "dragging panned the picture" || bad "the drag did not move the picture"
 # The PDF's text view: fit, three files on to the PDF, then the Show text button.
 q key meta_l-0 sleep 0.3 key right sleep 0.3 key right sleep 0.3 key right; shot 5b-pdf 10-panned
-ser "send:cat /dev/wm" "wait:$P"
-set -- $(out "cat /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
+ser "send:text show /dev/wm" "wait:$P"
+set -- $(out "text show /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
 q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 411 )) click; shot 11-text 5b-pdf
 differ 5b-pdf 11-text && ok "Show text opened the text view" || bad "Show text did nothing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"

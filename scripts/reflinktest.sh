@@ -34,43 +34,43 @@ D=/Volumes/Milk/d
 # A second for milkd's service lines to finish (one landing inside the first command's echo
 # hides it from free() below).
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:sleep 1" "wait:$P" \
-  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
+  "send:pause 1" "wait:$P" \
+  "send:text show /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:files copy --reflink $D/big.bin $D/copy.bin" "wait:$P" \
-  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
-  "send:echo patched >> $D/copy.bin" "wait:$P" \
+  "send:text show /System/Kernel/fs/milkfs/info" "wait:$P" \
+  "send:print patched >> $D/copy.bin" "wait:$P" \
   "send:files copy --reflink=auto $D/big.bin /tmp/auto.bin" "wait:$P" \
   "send:files copy --reflink $D/big.bin /tmp/always.bin" "wait:$P" \
   "send:files copy /tmp/auto.bin $D/dup1.bin" "wait:$P" \
   "send:files copy /tmp/auto.bin $D/dup2.bin" "wait:$P" \
-  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
-  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
+  "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+  "send:text show /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:dedupe -n $D" "wait:$P" \
   "send:dedupe $D" "wait:$P" \
   "send:dedupe $D" "wait:$P" \
-  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
+  "send:text show /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:snap check" "wait:$P" \
-  "send:grep RootFiles /proc/meminfo" "wait:$P" \
+  "send:text find RootFiles /proc/meminfo" "wait:$P" \
   "send:files copy --reflink=auto /Commands/cowsay $D/cowsay.auto" "wait:$P" \
   "send:files copy --reflink /Commands/cowsay $D/cowsay.always" "wait:$P" \
   "send:$D/cowsay.auto copied-cow" "wait:$P" \
-  "send:echo appended >> /Commands/cowsay" "wait:$P" \
+  "send:print appended >> /Commands/cowsay" "wait:$P" \
   "send:cowsay written-cow" "wait:$P" \
-  "send:grep RootFiles /proc/meminfo" "wait:$P" \
+  "send:text find RootFiles /proc/meminfo" "wait:$P" \
   "send:files copy /Commands/cowsay $D/cowsay.written" "wait:$P" \
   "send:files delete --now /Commands/cowsay" "wait:$P" \
   "send:files info /Commands/cowsay" "wait:$P" \
-  "send:grep RootFiles /proc/meminfo" "wait:$P" \
-  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
-  "send:echo REFLINK""-DONE" "wait:REFLINK-DONE" "done:$T/done" &
+  "send:text find RootFiles /proc/meminfo" "wait:$P" \
+  "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+  "send:print REFLINK""-DONE" "wait:REFLINK-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
 sleep 2
 kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 L="$(tr -d '\r' < "$LOG")"
-# Free blocks as printed by the N-th `cat /System/Kernel/fs/milkfs/info` typed at the shell.
-free() { echo "$L" | awk '/^msh:.*\$ cat \/System\/Kernel\/fs\/milkfs\/info/{want=1} want && /^blocks:/{print; want=0}' |
+# Free blocks as printed by the N-th `text show /System/Kernel/fs/milkfs/info` typed at the shell.
+free() { echo "$L" | awk '/^msh:.*\$ text show \/System\/Kernel\/fs\/milkfs\/info/{want=1} want && /^blocks:/{print; want=0}' |
   sed -n "${1}p" | sed 's/.*total, \([0-9]*\) free.*/\1/'; }
 f1=$(free 1); f2=$(free 2); f3=$(free 3); f4=$(free 4)
 [ -n "$f1" ] && [ $((f1 - f2)) -lt 10 ] && ok "files copy --reflink of 2 MB used $((f1 - f2)) blocks (metadata only)" || bad "reflink space ($f1 -> $f2)"
@@ -92,9 +92,9 @@ $M cat "$IMG" /d/cowsay.always >/dev/null 2>&1 && bad "--reflink from a built-in
 echo "$L" | grep -aq "copied-cow" && ok "the copied built-in program runs" || bad "cowsay.auto did not run"
 echo "$L" | grep -aq "written-cow" && ok "a built-in program still runs after a write to it (its own copy now)" || bad "cowsay after the write"
 cmp -s <($M cat "$IMG" /d/cowsay.written) <(cat "$COW_SRC"; echo appended) && ok "the written built-in file reads as the original plus the append" || bad "cowsay.written"
-# RootFiles as printed by the N-th `grep RootFiles /proc/meminfo` typed at the shell (it
+# RootFiles as printed by the N-th `text find RootFiles /proc/meminfo` typed at the shell (it
 # includes the 2 MB /tmp/auto.bin from above).
-rf() { echo "$L" | awk '/^msh:.*\$ grep RootFiles/{want=1; next} want && /^RootFiles:/{print $2; want=0}' | sed -n "${1}p"; }
+rf() { echo "$L" | awk '/^msh:.*\$ text find RootFiles/{want=1; next} want && /^RootFiles:/{print $2; want=0}' | sed -n "${1}p"; }
 r1=$(rf 1); r2=$(rf 2); r3=$(rf 3)
 csz=$(stat -f %z "$COW_SRC")
 [ -n "$r1" ] && [ "$r1" -lt $((2000000 / 1024 + 1024)) ] && ok "built-in files take no RAM of their own: RootFiles ${r1} kB, of which /tmp/auto.bin is 1953" || bad "RootFiles before: $r1 kB"

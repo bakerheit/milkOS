@@ -43,7 +43,7 @@ boot() { # name commands...
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo SEARCH""-DONE" "wait:SEARCH-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print SEARCH""-DONE" "wait:SEARCH-DONE" "done:$T/$name.done" &
   local DPID=$!
   for _ in $(seq 3000); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1
@@ -54,12 +54,12 @@ boot() { # name commands...
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
 G=/Users/milk/gen
 boot b1 "spot --wait" "spot --status" "spot --status" \
-  "spot uniq01234" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
+  "spot uniq01234" "text first 1 /System/Kernel/fs/search/query" "spot -n 10000 mango" "text first 1 /System/Kernel/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
   "spot f0499" "spot -n 3 kind:txt cherry | filter kind == txt | count" \
-  "echo quokka sighting near the dam > /Users/milk/new-note.txt" "sleep 1" "spot quokka" \
-  "files move /Users/milk/new-note.txt $G/d007/quokka.md" "sleep 1" "spot -l quokka" \
-  "files delete --now $G/d007/quokka.md" "sleep 1" "spot quokka" \
-  "echo now > /System/Kernel/fs/milkfs/sync" "sleep 3" "spot --status"
+  "print quokka sighting near the dam > /Users/milk/new-note.txt" "pause 1" "spot quokka" \
+  "files move /Users/milk/new-note.txt $G/d007/quokka.md" "pause 1" "spot -l quokka" \
+  "files delete --now $G/d007/quokka.md" "pause 1" "spot quokka" \
+  "print now > /System/Kernel/fs/milkfs/sync" "pause 3" "spot --status"
 L1="$T/b1.log"
 st="$(out "$L1" "spot --status" | grep "origin" | head -1 | sed 's/^origin: *//')"
 echo "    first boot: $st"

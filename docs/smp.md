@@ -63,7 +63,7 @@ the new wait-queue protocol below.
 * **Per-CPU ready queues** (one per priority per CPU), still under the one `SCHED` lock
   (at 4 CPUs the lock isn't the cost; cross-CPU traffic is). A thread runs where it ran
   last. `Policy::Global` (the old single shared queue) can be switched to at run time
-  for comparison: `echo global > /proc/sched` (`percpu` to go back). `/proc/sched` shows
+  for comparison: `print global > /proc/sched` (`percpu` to go back). `/proc/sched` shows
   the policy and per CPU: queued, steals, migrations in, switches.
 * **Placement** (`make_ready`, per-CPU policy): "free" = idle, nothing queued, no kick
   pending. (1) its last CPU if free; (2) woken from its own last CPU (pipe/futex
@@ -148,7 +148,7 @@ drops its share, and whoever turns out to be the last owner frees the original.
 * Benchmarks (not pass/fail): `utest par N [units]` (N CPU-bound processes vs 1; prints
   speedup, steals, migrations) and `utest csw [rounds]` (pipe ping-pong between
   processes and between threads, sched_yield storm). Compare policies with
-  `echo global > /proc/sched` / `echo percpu > /proc/sched`.
+  `print global > /proc/sched` / `print percpu > /proc/sched`.
 * `utest par N MS`: N processes doing MS units of pure CPU work vs one; prints the
   speedup. Measured (debug kernel, HVF on the host's cores):
 

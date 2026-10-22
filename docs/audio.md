@@ -98,7 +98,7 @@ Generated with the python3 stdlib, committed with its outputs (48 kHz mono 16-bi
 
 Boots with the wav backend, lets init play the chime, types into msh: `play tone 440 0.5`,
 `play tone 1000 0.25`, `play tone 660 1.2 0.25 &` + `play tone 440 0.4 0.25` (two writers),
-`play system notify`, `play /System/Sounds/error.wav`, `cat /proc/audio`, stops
+`play system notify`, `play /System/Sounds/error.wav`, `text show /proc/audio`, stops
 qemu gracefully (it writes the WAV header on exit) and checks the file with
 `wav_check.py`: 48 kHz stereo; chime G5 then C6; 440 Hz for 0.48 s (+ramps); 1000 Hz for
 0.24 s; a 660 Hz stretch with 440 Hz mixed in (100 ms Goertzel windows: both at -12 dB, then

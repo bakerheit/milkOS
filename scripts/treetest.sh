@@ -24,8 +24,8 @@ QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:echo /Volumes/Milk/tt $N > /System/Kernel/fs/milkfs/treetest" "wait:$P" \
-  "send:echo TREE""-DONE" "wait:TREE-DONE" "done:$T/done" &
+  "send:print /Volumes/Milk/tt $N > /System/Kernel/fs/milkfs/treetest" "wait:$P" \
+  "send:print TREE""-DONE" "wait:TREE-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 3000); do [ -e "$T/done" ] && break; sleep 0.2; done
 sleep 2

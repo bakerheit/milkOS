@@ -47,7 +47,7 @@ Constants and the two boot jobs below are in `fs/layout.rs`.
   Sites          the built-in web server's pages (httpd serves ~/Sites on :80)
 /Volumes         disks, USB sticks, the Mac's shared folder
 /System          the OS's own files
-  Services       background helpers: milkd, alarmd, httpd, rngd, soundd
+  Services       background helpers: milkd, alarmd, httpd, rngd, soundd, trashd
   Startup        init, the first program (PID 1)
   Settings       system settings: passwd, group, shadow, hostname, motd, milk/...
   Fonts          font licences

@@ -28,7 +28,10 @@ QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
 D=/Volumes/Milk/d
+# A second for milkd's service lines to finish (one landing inside the first command's echo
+# hides it from free() below).
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
+  "send:sleep 1" "wait:$P" \
   "send:cat /sys/fs/milkfs/info" "wait:$P" \
   "send:files copy --reflink $D/big.bin $D/copy.bin" "wait:$P" \
   "send:cat /sys/fs/milkfs/info" "wait:$P" \

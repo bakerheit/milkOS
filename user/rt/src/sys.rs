@@ -245,6 +245,8 @@ pub fn open_mode(path: &str, flags: u32, mode: u32) -> Result<i32> {
 /// The fields of `struct stat` the tools use.
 #[derive(Clone, Copy, Default)]
 pub struct Stat {
+    /// The file system it is on (one number per mounted volume or snapshot).
+    pub dev: u64,
     pub ino: u64,
     pub mode: u32,
     pub nlink: u32,
@@ -252,7 +254,10 @@ pub struct Stat {
     pub gid: u32,
     pub rdev: u64,
     pub size: u64,
+    /// Last read, last written, last changed (written, renamed, chmod...): seconds.
+    pub atime: i64,
     pub mtime: i64,
+    pub ctime: i64,
 }
 
 impl Stat {
@@ -280,6 +285,7 @@ fn parse_stat(st: &[u8; 128]) -> Stat {
     let u32_at = |o: usize| u32::from_le_bytes(st[o..o + 4].try_into().unwrap());
     let u64_at = |o: usize| u64::from_le_bytes(st[o..o + 8].try_into().unwrap());
     Stat {
+        dev: u64_at(0),
         ino: u64_at(8),
         mode: u32_at(16),
         nlink: u32_at(20),
@@ -287,7 +293,9 @@ fn parse_stat(st: &[u8; 128]) -> Stat {
         gid: u32_at(28),
         rdev: u64_at(32),
         size: u64_at(48),
+        atime: u64_at(72) as i64,
         mtime: u64_at(88) as i64,
+        ctime: u64_at(104) as i64,
     }
 }
 
@@ -413,6 +421,16 @@ pub fn rmdir(path: &str) -> Result<()> {
 }
 
 pub fn rename(old: &str, new: &str) -> Result<()> {
+    rename_flags(old, new, 0)
+}
+
+/// `renameat2(..., RENAME_NOREPLACE)`: like `rename`, but EEXIST instead of replacing
+/// something already at `new`.
+pub fn rename_noreplace(old: &str, new: &str) -> Result<()> {
+    rename_flags(old, new, 1)
+}
+
+fn rename_flags(old: &str, new: &str, flags: usize) -> Result<()> {
     let (o, n) = (cs(old), cs(new));
     sc(
         nr::RENAMEAT2,
@@ -421,7 +439,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
             o.as_ptr() as usize,
             AT_FDCWD as usize,
             n.as_ptr() as usize,
-            0,
+            flags,
             0,
         ],
     )

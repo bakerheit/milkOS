@@ -16,6 +16,7 @@
 /System/Services/milkd                            target/user/aarch64-unknown-none-softfloat/release/milkd      755
 /System/Services/rngd                             target/user/aarch64-unknown-none-softfloat/release/rngd       755
 /System/Services/soundd                           target/user/aarch64-unknown-none-softfloat/release/soundd     755
+/System/Services/trashd                           target/user/aarch64-unknown-none-softfloat/release/trashd     755
 
 # Apps: one folder each, the program next to its manifest (rootfs/Apps/<name>/manifest).
 # Paint and Peek have no dock line in theirs (the desktop has its own Paint tile; Peek is
@@ -52,7 +53,9 @@
 /Commands/sudo                                    target/user/aarch64-unknown-none-softfloat/release/sudo       4755
 /Commands/passwd                                  target/user/aarch64-unknown-none-softfloat/release/passwd     4755
 /Commands/clear                                   target/user/aarch64-unknown-none-softfloat/release/clear      755
-/Commands/cp                                      target/user/aarch64-unknown-none-softfloat/release/cp         755
+# Files and folders (files replaced mv cp touch rm mkdir ls ln), and the Trash.
+/Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
+/Commands/trash                                   target/user/aarch64-unknown-none-softfloat/release/trash      755
 /Commands/df                                      target/user/aarch64-unknown-none-softfloat/release/df         755
 /Commands/echo                                    target/user/aarch64-unknown-none-softfloat/release/echo       755
 /Commands/env                                     target/user/aarch64-unknown-none-softfloat/release/env        755
@@ -61,16 +64,10 @@
 /Commands/grep                                    target/user/aarch64-unknown-none-softfloat/release/grep       755
 /Commands/head                                    target/user/aarch64-unknown-none-softfloat/release/head       755
 /Commands/kill                                    target/user/aarch64-unknown-none-softfloat/release/kill       755
-/Commands/ln                                      target/user/aarch64-unknown-none-softfloat/release/ln         755
-/Commands/ls                                      target/user/aarch64-unknown-none-softfloat/release/ls         755
-/Commands/mkdir                                   target/user/aarch64-unknown-none-softfloat/release/mkdir      755
-/Commands/mv                                      target/user/aarch64-unknown-none-softfloat/release/mv         755
 /Commands/ps                                      target/user/aarch64-unknown-none-softfloat/release/ps         755
-/Commands/rm                                      target/user/aarch64-unknown-none-softfloat/release/rm         755
 /Commands/sleep                                   target/user/aarch64-unknown-none-softfloat/release/sleep      755
 /Commands/sort                                    target/user/aarch64-unknown-none-softfloat/release/sort       755
 /Commands/tail                                    target/user/aarch64-unknown-none-softfloat/release/tail       755
-/Commands/touch                                   target/user/aarch64-unknown-none-softfloat/release/touch      755
 /Commands/true                                    target/user/aarch64-unknown-none-softfloat/release/true       755
 /Commands/uname                                   target/user/aarch64-unknown-none-softfloat/release/uname      755
 /Commands/uniq                                    target/user/aarch64-unknown-none-softfloat/release/uniq       755

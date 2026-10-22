@@ -1,0 +1,38 @@
+[package]
+name = "filetools"
+version.workspace = true
+edition.workspace = true
+
+# Files and the Trash from the command line (docs/filesystem.md, "Files and the Trash"):
+#   files   create, copy, move, rename, delete, info, list, link (replaces mv cp touch rm
+#           mkdir ls ln)
+#   trash   list, restore and empty the Trash
+#   trashd  the service that deletes things for good once they've been in the Trash longer
+#           than Settings > Trash says (at boot, then once a day)
+# The rules are in user/filekit (host-tested); this crate does the file system calls.
+[lib]
+test = false
+bench = false
+
+[[bin]]
+name = "files"
+path = "src/bin/files.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "trash"
+path = "src/bin/trash.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "trashd"
+path = "src/bin/trashd.rs"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+filekit = { path = "../filekit" }
+coreutils = { path = "../coreutils" }

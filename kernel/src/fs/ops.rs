@@ -290,12 +290,32 @@ pub fn rename_at(
     new_base: Option<&InodeRef>,
     new: &str,
 ) -> Result<()> {
+    rename_at_flags(old_base, old, new_base, new, false)
+}
+
+/// `rename(2)` that never replaces anything: EEXIST if `new` exists (`RENAME_NOREPLACE`).
+/// `files move` and the Trash use it so nothing is overwritten by accident.
+pub fn rename_noreplace(old: &str, new: &str) -> Result<()> {
+    rename_at_flags(None, old, None, new, true)
+}
+
+/// `renameat2(2)` with flags 0 or `RENAME_NOREPLACE` (`noreplace`).
+pub fn rename_at_flags(
+    old_base: Option<&InodeRef>,
+    old: &str,
+    new_base: Option<&InodeRef>,
+    new: &str,
+    noreplace: bool,
+) -> Result<()> {
     let po = Walker::new().parent(old_base, old)?;
     let pn = Walker::new().parent(new_base, new)?;
     if po.is_special() || pn.is_special() {
         return Err(Errno::EBUSY);
     }
     check_name(&pn.name)?;
+    if noreplace && path::step_raw(&pn.dir, &pn.name).is_ok() {
+        return Err(Errno::EEXIST);
+    }
     if po.dir.dev() != pn.dir.dev() {
         return Err(Errno::EXDEV);
     }

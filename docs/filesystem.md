@@ -147,6 +147,7 @@ pub fn unlink(path: &str) -> Result<()>;                          // + unlink_at
 pub fn rmdir(path: &str) -> Result<()>;                           // + rmdir_at (AT_REMOVEDIR)
 pub fn rename(old: &str, new: &str) -> Result<()>;
 pub fn rename_at(ob: Option<&InodeRef>, old: &str, nb: Option<&InodeRef>, new: &str) -> Result<()>;
+pub fn rename_noreplace(old: &str, new: &str) -> Result<()>;      // EEXIST instead of replacing
 pub fn symlink(target: &str, linkpath: &str) -> Result<()>;      // + symlink_at(target, base, linkpath)
 pub fn readlink(path: &str) -> Result<String>;                    // + readlink_at
 pub fn link(old: &str, new: &str) -> Result<()>;                  // + link_at(.., follow)
@@ -248,6 +249,8 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   or renamed (`EBUSY`); renames and links across file systems give `EXDEV`.
 - POSIX rename rules: replaces a file or an *empty* directory, `EINVAL` for moving a
   directory into its own subtree, no-op when both names are the same inode.
+  `renameat2(..., RENAME_NOREPLACE)` (`fs::rename_noreplace`) gives `EEXIST` instead of
+  replacing (what `files move` and the Trash use); `RENAME_EXCHANGE` is `EINVAL`.
 - Unlinked files stay readable through open `OpenFile`s; tmpfs frees the pages when the
   last reference goes (checked by the self-test against the PMM free count).
 - tmpfs: data lives in whole PMM frames (page-aligned: `mmap` can map them directly later),

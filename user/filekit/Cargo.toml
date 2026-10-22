@@ -1,0 +1,14 @@
+[package]
+name = "filekit"
+# Spelled out (not inherited from user/Cargo.toml): the kernel depends on it from outside
+# this workspace.
+version = "0.0.1"
+edition = "2024"
+
+# The rules behind `files`, `trash` and the Files app's Trash: paths and the trailing-slash
+# rule, where a copy or move lands, the Trash's metadata and names, how long things stay in
+# the Trash, plain-English error words. Pure (no syscalls), so the kernel (Files) and user
+# space (`files`, `trash`, `trashd`) share it and the tests run on the host:
+# `scripts/filekit-test.sh`.
+[lib]
+bench = false

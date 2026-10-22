@@ -343,7 +343,7 @@ child a private copy).
 | nr | call | args → result |
 |---|---|---|
 | 4100 | `MILK_WIN_CREATE` | `(w, h, title, title_len, info)` → window id. Body up to 1000 x 700. Writes `struct { u64 addr; u32 w, h, stride, id; }` (24 bytes) to `info`: the XRGB pixels (`0x00RRGGBB`, `stride` = w) at `addr`, initially milk white. |
-| 4101 | `MILK_WIN_COMMIT` | `(id, x, y, w, h)` → 0. Shows what changed in that rect (w = 0: everything). The wm redraws the window on its next frame. |
+| 4101 | `MILK_WIN_COMMIT` | `(id, x, y, w, h)` → 0. The client's "frame done": the changed rect (w = 0: everything) is copied from the shared buffer into the window server's own copy, and the wm redraws the window from that copy on its next frame. The shared buffer is the app's drawing board (clear and redraw it freely); only committed pixels are ever shown, so a half-drawn frame can't tear. Draw, then commit. |
 | 4102 | `MILK_WIN_EVENT` | `(id, ev, timeout_ms)` → 1 with a 32-byte event at `ev`, or 0 on timeout. Blocks up to `timeout_ms` (0 = poll). |
 | 4103 | `MILK_WIN_TITLE` | `(id, title, len)` → 0. |
 | 4104 | `MILK_WIN_DESTROY` | `(id)` → 0. Unmaps the buffer from the caller, frees it, removes the window. |

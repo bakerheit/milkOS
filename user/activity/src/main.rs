@@ -153,14 +153,21 @@ fn main(_args: &rt::Args) -> i32 {
         }
         let now = mono_ns() / 1_000_000;
         let every = INTERVALS[app.interval];
+        let mut refreshed = false;
         if every != 0 && now.saturating_sub(last) >= every {
             last = now;
             app.s.refresh();
             app.th = Theme::current();
+            refreshed = true;
         }
         app.check_quit(now);
-        app.draw(&mut win);
-        win.commit();
+        // A pointer drag or a button release changes nothing here: don't redraw the whole
+        // window for each one (the clock-driven parts still redraw on the 100 ms timeout).
+        let quiet = matches!(ev, Some(Event::Drag { .. } | Event::Up { .. }));
+        if !quiet || refreshed {
+            app.draw(&mut win);
+            win.commit();
+        }
     }
     0
 }

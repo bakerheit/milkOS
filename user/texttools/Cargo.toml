@@ -1,0 +1,39 @@
+[package]
+name = "texttools"
+version.workspace = true
+edition.workspace = true
+
+# Text from the command line (docs/shell.md, "Text, print, pause and variables"):
+#   text    show, first, last, find, sort, unique, count (replaces cat head tail grep sort
+#           uniq wc)
+#   print   print words (replaces echo)
+#   pause   wait a while: pause 5, pause 500ms, pause 2m (replaces sleep)
+# msh's `variables` (it replaced env, export, set and unset) is built into the shell.
+# The rules are in user/textkit (host-tested); this crate does the reading and writing.
+[lib]
+path = "src/lib.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "text"
+path = "src/bin/text.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "print"
+path = "src/bin/print.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "pause"
+path = "src/bin/pause.rs"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+filekit = { path = "../filekit" }
+textkit = { path = "../textkit" }

@@ -71,20 +71,20 @@ boot() {
 
 echo "---- boot 1: kill rngd and soundd mid-use ----"
 boot b1 "$WORK/b1.wav" "" -- \
-  'send:sleep 2' "$P" \
-  'send:cat /proc/drivers' "$P" \
+  'send:pause 2' "$P" \
+  'send:text show /proc/drivers' "$P" \
   'send:play tone 440 5 &' "$P" \
-  'send:sleep 1.5' "$P" \
+  'send:pause 1.5' "$P" \
   'send:services signal soundd' "$P" \
   'send:services signal rngd' "$P" \
-  'send:sleep 1.5' "$P" \
-  'send:cat /proc/drivers' "$P" \
-  'send:cat /proc/rng' "$P" \
-  'send:sleep 3.5' "$P" \
-  'send:cat /proc/audio' 'wait:device:[^\n]*\n' "$P" \
-  'send:cat /dev/journal' "$P"
+  'send:pause 1.5' "$P" \
+  'send:text show /proc/drivers' "$P" \
+  'send:text show /proc/rng' "$P" \
+  'send:pause 3.5' "$P" \
+  'send:text show /proc/audio' 'wait:device:[^\n]*\n' "$P" \
+  'send:text show /dev/journal' "$P"
 B1="$WORK/b1.txt"
-sed -n '/msh:\/\$ cat \/proc\/drivers/,/msh:\/\$ cat \/dev\/journal/p' "$B1"
+sed -n '/msh:\/\$ text show \/proc\/drivers/,/msh:\/\$ text show \/dev\/journal/p' "$B1"
 grep -Eqi "panic|kernel exception|\[exc\]" "$B1" && fail "the kernel crashed (see $B1)"
 ok "the kernel kept running (no crash in the log)"
 python3 -I - "$B1" <<'PY' || fail "boot 1 checks"
@@ -94,7 +94,7 @@ def must(desc, cond):
     if not cond:
         sys.exit(f"missing: {desc}")
     print(f"  ok  {desc}")
-blocks = text.split("msh:/$ cat /proc/drivers")
+blocks = text.split("msh:/$ text show /proc/drivers")
 before, after = blocks[1], blocks[2]
 must("before: soundd and rngd hold their devices",
      re.search(r"^sound policy=user .*owner=pid \d+ \(/System/Services/soundd\) claims=1", before, re.M)
@@ -107,7 +107,7 @@ must("the CSPRNG is fed by rngd again", re.search(r"source=rngd\+jitter .*user_d
      and int(re.search(r"user_driver_bytes=(\d+)", after).group(1)) >= 128)
 must("soundd is playing at the end", "device: user-space driver (soundd)" in blocks[-1])
 # The journal: seq boot mono_ms wall pid uid unit level message.
-j = [l.split("\t") for l in text.split("msh:/$ cat /dev/journal", 1)[1].splitlines()]
+j = [l.split("\t") for l in text.split("msh:/$ text show /dev/journal", 1)[1].splitlines()]
 j = [f for f in j if len(f) == 9]
 for unit, ready in (("soundd", "is ours"), ("rngd", "is ours")):
     ev = [(int(f[2]), f[8]) for f in j if f[6] == unit]
@@ -140,15 +140,15 @@ PY
 
 echo "---- boot 2: drivers=rng=kernel sound=kernel ----"
 boot b2 "$WORK/b2.wav" "rng=kernel sound=kernel" -- \
-  'send:sleep 1.5' "$P" \
-  'send:cat /proc/drivers' "$P" \
+  'send:pause 1.5' "$P" \
+  'send:text show /proc/drivers' "$P" \
   'send:services status soundd' "$P" \
   'send:services status rngd' "$P" \
   'send:play tone 660 0.5' "$P" \
-  'send:cat /proc/audio' 'wait:device:[^\n]*\n' "$P" \
-  'send:cat /proc/rng' "$P"
+  'send:text show /proc/audio' 'wait:device:[^\n]*\n' "$P" \
+  'send:text show /proc/rng' "$P"
 B2="$WORK/b2.txt"
-sed -n '/msh:\/\$ cat \/proc\/drivers/,$p' "$B2"
+sed -n '/msh:\/\$ text show \/proc\/drivers/,$p' "$B2"
 grep -Eq "^rng policy=kernel .*owner=kernel claims=0" "$B2" || fail "boot 2: rng isn't the kernel's"
 grep -Eq "^sound policy=kernel .*owner=kernel claims=0" "$B2" || fail "boot 2: sound isn't the kernel's"
 [ "$(grep -Ec 'state +skipped \(/proc/drivers does not contain' "$B2")" -ge 2 ] || fail "boot 2: the driver units should be skipped"

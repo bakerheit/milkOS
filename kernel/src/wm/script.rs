@@ -90,7 +90,7 @@ impl B {
             .enumerate()
         {
             let op = if i == 0 { ">" } else { ">>" };
-            self.typ(&alloc::format!("echo '{line}' {op} {F}"))
+            self.typ(&alloc::format!("print '{line}' {op} {F}"))
                 .enter()
                 .wait(250);
             if i < 3 {
@@ -237,7 +237,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("files list")
                 .enter()
                 .wait(200);
-            b.typ("cat /System/Settings/motd").enter().wait(300);
+            b.typ("text show /System/Settings/motd").enter().wait(300);
         }
         "files" => {
             // Files: sidebar Home, double-click Documents, double-click ideas.md (opens Notes).
@@ -259,7 +259,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("stty -echo")
                 .enter()
                 .wait(200)
-                .typ("echo hidden")
+                .typ("print hidden")
                 .enter()
                 .wait(200);
             b.typ("stty sane")
@@ -311,7 +311,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .enter()
                 .wait(300);
             b.typ("notify Tea is ready in 3 minutes").enter().wait(300);
-            b.typ("cat /dev/wm").enter().wait(300);
+            b.typ("text show /dev/wm").enter().wait(300);
             b.typ("open ~/Documents/todo.txt").enter().wait(600);
         }
         "desktoday" => {
@@ -369,7 +369,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "termselect" => {
             // Terminal: select a few words of output with the mouse, copy, paste at the prompt.
-            b.wait(300).typ("echo milk and honey").enter().wait(300);
+            b.wait(300).typ("print milk and honey").enter().wait(300);
             b.drag(455, 507 - 18 + 8, 455 + 8 * 14, 507 - 18 + 8, 8);
             b.key(Key::Char('c'), Mods::META)
                 .key(Key::Char('v'), Mods::META)
@@ -387,16 +387,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // Terminal tabs (the boot Terminal has the focus).
         "tabs" => {
             b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
-            b.typ("echo second tab on $(tty)").enter().wait(300);
-            b.typ("echo second tab").enter().wait(300);
+            b.typ("print second tab on $(tty)").enter().wait(300);
+            b.typ("print second tab").enter().wait(300);
             b.key(Key::Char('t'), Mods::META).wait(500);
             b.typ("files list /Commands").enter().wait(600);
         }
         "tabswitch" => {
             b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
-            b.typ("echo this is tab 2").enter().wait(300);
+            b.typ("print this is tab 2").enter().wait(300);
             b.key(Key::Char('1'), Mods::META).wait(300);
-            b.typ("echo back in tab 1").enter().wait(400);
+            b.typ("print back in tab 1").enter().wait(400);
         }
         "tabclose" => {
             // Three tabs, close the third (Cmd+W), then processes list in the first: msh on tty1 and
@@ -413,10 +413,10 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("> system info").wait(200).enter().wait(1200);
         }
         "sigint" => {
-            b.wait(300).typ("sleep 9").enter().wait(1000);
+            b.wait(300).typ("pause 9").enter().wait(1000);
             b.key(Key::Char('c'), Mods::CTRL)
                 .wait(400)
-                .typ("echo status $?")
+                .typ("print status $?")
                 .enter()
                 .wait(400);
         }
@@ -578,9 +578,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "ansi" => {
             b.wait(300);
-            b.typ(r"/Commands/echo -e '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
+            b.typ(r"/Commands/print --escapes '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
             b.typ(
-                r"/Commands/echo -e '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
+                r"/Commands/print --escapes '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
             )
             .enter()
             .wait(300);
@@ -593,7 +593,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("clear")
                 .enter()
                 .wait(400);
-            b.typ("echo the screen was cleared").enter().wait(300);
+            b.typ("print the screen was cleared").enter().wait(300);
         }
         "skimsearch" => {
             b.key(Key::Char(' '), Mods::META).wait(150).typ("note");
@@ -685,7 +685,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "pkgdock" | "pkgrun" | "pkgfortune" | "pkgsandbox" => {
             let url = host_test_url();
             b.wait(300)
-                .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
+                .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
             b.typ("milk update").enter().wait(2000);
@@ -801,7 +801,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // The dock moved with the screen: Terminal's tile is now at (540, 856).
                 b.click(540, 856)
                     .wait(600)
-                    .typ("echo clicked at 1440x900")
+                    .typ("print clicked at 1440x900")
                     .enter()
                     .wait(500);
             }
@@ -845,7 +845,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // A package repo (scripts/wm-pkg-demo.sh serves one); moo2048 installed.
                 let url = host_test_url();
                 b.wait(300)
-                    .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
+                    .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                     .enter()
                     .wait(300)
                     .typ("milk update")
@@ -871,7 +871,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // Drag and drop from Files (window (96, 64); todo.txt is the second icon, at
         // (425, 186)). The Terminal is at (440, 270) 520 x 290.
         "dragterm" | "dragghost" => {
-            b.wait(300).typ("cat ").wait(200);
+            b.wait(300).typ("text show ").wait(200);
             b.to(425, 186).wait(30).down().wait(30);
             for i in 1..=16 {
                 b.to(425 + 18 * i, 186 + 17 * i).wait(16);
@@ -896,7 +896,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // moo2048 installed (after the system apps): drop todo.txt on its tile.
             let url = host_test_url();
             b.wait(300)
-                .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
+                .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
             b.typ("milk update").enter().wait(2000);
@@ -979,7 +979,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // The toy repo scripts/wm-pkg-demo.sh serves.
                 let url = host_test_url();
                 b.wait(300)
-                    .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
+                    .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                     .enter()
                     .wait(300);
             }
@@ -1119,7 +1119,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // alice trusted another key for bob before: his key "has changed".
                 let old = "11".repeat(32);
                 b.typ(&alloc::format!(
-                    "echo bob {old} 1792500000 >> /System/Settings/milk/drop/known_peers"
+                    "print bob {old} 1792500000 >> /System/Settings/milk/drop/known_peers"
                 ))
                 .enter()
                 .wait(500);
@@ -1204,7 +1204,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // timer does; dark too.
         "menu-timer" => {
             b.wait(300)
-                .typ("echo -e 'timer\\t04:32\\tapp=Clock' > /dev/wm")
+                .typ("print --escapes 'timer\\t04:32\\tapp=Clock' > /dev/wm")
                 .enter()
                 .wait(600);
             let (x, y) = status_center(Status::Bell, crate::percpu::online().count());
@@ -1267,7 +1267,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
         "dock-slide" => {
             b.wait(300)
-                .typ("echo milk | admin --stdin msh -c \"files create /Apps/hello/ && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /System/Developer/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
+                .typ("print milk | admin --stdin msh -c \"files create /Apps/hello/ && print --escapes 'format 1\\nname hello\\nversion 1.0.0\\nexec /System/Developer/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
                 .enter()
                 .wait(1500);
             b.0.push(Step::Packages);
@@ -1307,7 +1307,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "tabs-terminal" => {
             // The Terminal alone with two shells: its tabs are the window's strip.
             b.wait(300).key(Key::Char('t'), Mods::META).wait(600);
-            b.typ("echo second shell").enter().wait(300);
+            b.typ("print second shell").enter().wait(300);
         }
         "logomenu" => {
             b.click(18, 14).wait(300);

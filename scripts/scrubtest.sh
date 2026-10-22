@@ -41,7 +41,7 @@ boot() { # name commands...
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo SCRUB""-DONE" "wait:SCRUB-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print SCRUB""-DONE" "wait:SCRUB-DONE" "done:$T/$name.done" &
   local DPID=$!
   for _ in $(seq 3000); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1.5
@@ -49,7 +49,7 @@ boot() { # name commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 boot b1 \
-  "snap create s1" "files delete --now /Volumes/Milk/docs/old.bin" "echo now > /System/Kernel/fs/milkfs/sync" \
+  "snap create s1" "files delete --now /Volumes/Milk/docs/old.bin" "print now > /System/Kernel/fs/milkfs/sync" \
   "snap scrub rate=0" "snap scrub" \
   "snap scrub rate=8" "snap scrub" \
   "/System/Developer/fsstress /Volumes/Milk/st 4 10" \
@@ -66,13 +66,13 @@ echo "$L" | grep -a -A1 "snap scrub status" | grep -aq "running" && ok "the scru
 echo "$L" | grep -a "^fsstress:" | grep -q " 0 error" && ok "fsstress clean" || bad "fsstress"
 $M corrupt "$IMG" flip /docs/b.bin | sed 's/^/    /'
 $M corrupt "$IMG" flip /docs/old.bin --snapshot s1 | sed 's/^/    /'
-boot b2 "snap scrub" "cat /Volumes/Milk/docs/b.bin > /dev/null" "audit --event milkfs.scrub"
+boot b2 "snap scrub" "text show /Volumes/Milk/docs/b.bin > /dev/null" "audit --event milkfs.scrub"
 L="$(tr -d '\r' < "$T/b2.log")"
 echo "$L" | grep -a "^error: block" | sed 's/^/    /'
 echo "$L" | grep -a "^error: block .*data of /Volumes/Milk/docs/b.bin at offset 0 (live" | grep -aq "snapshot s1" && ok "live file reported with its path (and the snapshots sharing the block)" || bad "live file not reported"
 echo "$L" | grep -a "^error: block .*data of /Volumes/Milk/docs/old.bin at offset 0 (snapshot" | grep -aq "snapshot s1" && ok "snapshot-only file reported with its path and the snapshots that have it" || bad "snapshot file not reported"
 [ "$(echo "$L" | grep -ac '^error: block')" = 2 ] && ok "exactly two errors" || bad "error count"
-echo "$L" | grep -a -A1 "cat /Volumes/Milk/docs/b.bin" | grep -aq "checksum mismatch in block" && ok "reading the damaged file fails its checksum (EIO)" || bad "read of damaged file"
+echo "$L" | grep -a -A1 "text show /Volumes/Milk/docs/b.bin" | grep -aq "checksum mismatch in block" && ok "reading the damaged file fails its checksum (EIO)" || bad "read of damaged file"
 [ "$(echo "$L" | grep -a "milkfs.scrub.error" | grep -vc "audit --event")" -ge 2 ] && ok "both in the audit log" || bad "audit log"
 echo
 [ $FAIL = 0 ] && echo "scrubtest: PASS ($T)" || echo "scrubtest: FAIL ($T)"

@@ -48,7 +48,7 @@ window yet; it needs a spec addendum from the UI lead first.
   something the kernel takes away. The sheet says how many newer snapshots go and to use Send first.
 - **Lock now** is enabled for an encrypted volume that is not the one the session lives on (a vault, a
   backup disk): `/System/Kernel/fs/milkfs/lock`. The Milk disk itself is refused by the system, so its button is
-  disabled with the reason. A refusal names the programs using the volume ("pid 16 (sleep): 1 open
+  disabled with the reason. A refusal names the programs using the volume ("pid 16 (pause): 1 open
   file"), read from `/System/Kernel/fs/milkfs/error`; every failed control write shows its real reason there
   with "Details: lock EBUSY (error 16)".
 - **Usage of every volume** comes from `statfs` (FAT, the Mac share, other milkfs volumes, the

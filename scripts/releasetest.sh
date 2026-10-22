@@ -40,7 +40,7 @@ headless() { # name commands...
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo REL""-DONE" "wait:REL-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print REL""-DONE" "wait:REL-DONE" "done:$T/$name.done" &
   local DPID=$!
   for _ in $(seq 900); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1.5
@@ -48,8 +48,8 @@ headless() { # name commands...
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
-headless h1 "system info" "cat /proc/version" "files list /Users/milk" "files list /Apps" "cat /Volumes/Mac/README.txt" \
-  "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /Users/milk/note.txt" "echo now > /System/Kernel/fs/milkfs/sync"
+headless h1 "system info" "text show /proc/version" "files list /Users/milk" "files list /Apps" "text show /Volumes/Mac/README.txt" \
+  "print nope > /Volumes/Mac/x.txt" "print saved by the release test > /Users/milk/note.txt" "print now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/h1.log")"
 [ -e "$T/h1.done" ] && ok "headless: boots to msh" || { bad "headless boot"; tail -5 "$T/h1.out"; }
 echo "$L" | grep -aq "milkfs: vd[a-z] mounted at /Volumes/Milk " && ok "the bundled Milk disk is mounted at /Volumes/Milk" || bad "Milk disk not mounted"
@@ -58,8 +58,8 @@ echo "$L" | grep -a -A2 "files list /Users/milk$" | grep -aq "README.txt" && ok 
 echo "$L" | grep -aq "files list /Apps$" && ! echo "$L" | grep -a -A1 "files list /Apps$" | grep -aq "doesn't exist" && ok "/Apps present" || bad "/Apps"
 echo "$L" | grep -Eaq "^system +milkOS $V$" && echo "$L" | grep -aq "^milkOS $V (aarch64" && ok "version $V in system info and /proc/version" || bad "version strings"
 echo "$L" | grep -aq "Files you put in this folder show up inside milkOS" && ok "share readable" || bad "share not readable"
-echo "$L" | grep -a -A1 "echo nope > /Volumes/Mac/x.txt" | grep -aqi "read-only\|EROFS\|denied\|EACCES" && [ ! -e "$B/share/x.txt" ] && ok "share is read-only" || bad "share writable?"
-headless h2 "cat /Users/milk/note.txt"
+echo "$L" | grep -a -A1 "print nope > /Volumes/Mac/x.txt" | grep -aqi "read-only\|EROFS\|denied\|EACCES" && [ ! -e "$B/share/x.txt" ] && ok "share is read-only" || bad "share writable?"
+headless h2 "text show /Users/milk/note.txt"
 L="$(tr -d '\r' < "$T/h2.log")"
 echo "$L" | grep -aq "^saved by the release test" && ok "second boot: the note saved in ~ is still there" || bad "note not persistent"
 python3 scripts/mkmilkfs.py check "$B/disks/milk.img" --quiet >/dev/null && ok "the bundle's milk.img checks clean on the Mac" || bad "milk.img check"

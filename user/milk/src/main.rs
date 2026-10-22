@@ -1135,7 +1135,7 @@ fn cmd_keep(name: &str) -> Res<()> {
             ),
         );
         println!(
-            "milk: kept the upgrade: clone {c} is now the live system (undo: echo before-{c} > {MILKFS}/rollback)"
+            "milk: kept the upgrade: clone {c} is now the live system (undo: print before-{c} > {MILKFS}/rollback)"
         );
         return Ok(());
     }
@@ -1154,7 +1154,7 @@ fn cmd_keep(name: &str) -> Res<()> {
         ),
     );
     println!(
-        "milk: kept {} {}: clone {c} is now the live system (undo: echo before-{c} > {MILKFS}/rollback)",
+        "milk: kept {} {}: clone {c} is now the live system (undo: print before-{c} > {MILKFS}/rollback)",
         man.name, man.version
     );
     Ok(())

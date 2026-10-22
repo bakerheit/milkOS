@@ -1242,7 +1242,8 @@ impl Shell for BuiltinShell {
         match cmd {
             "help" => {
                 out.out("files:    files list [-l] | create NAME | delete [--now] PATH,  trash");
-                out.out("          go FOLDER (go: home, go back)  where  cat  echo text > file");
+                out.out("          go FOLDER (go: home, go back)  where  text show FILE");
+                out.out("          print words > file");
                 out.out("          edit <file> (opens it in Notes)");
                 out.out(
                     "system:   system [info|uptime|memory]  users me  services logs  date clear",
@@ -1315,7 +1316,7 @@ impl Shell for BuiltinShell {
                 }
                 _ => out.bad("services: only services logs works here (the kernel's log)"),
             },
-            "echo" => match arg.split_once('>') {
+            "print" => match arg.split_once('>') {
                 Some((text, file)) => {
                     let (append, file) = match file.strip_prefix('>') {
                         Some(f) => (true, f.trim()),
@@ -1330,7 +1331,7 @@ impl Shell for BuiltinShell {
                     data.push_str(text.trim());
                     data.push('\n');
                     if let Err(e) = fs::write_file(&p, data.as_bytes()) {
-                        out.bad(&format!("echo: {file}: {e}"));
+                        out.bad(&format!("print: {file}: {e}"));
                     }
                 }
                 None => out.out(&arg),
@@ -1415,18 +1416,20 @@ impl Shell for BuiltinShell {
                 }
             }
             "where" => out.out(&self.cwd.clone()),
-            "cat" => {
-                for a in &rest {
+            // A little of `text` (user/texttools has the whole thing, in msh).
+            "text" if rest.first() == Some(&"show") => {
+                for a in &rest[1..] {
                     match fs::read_to_string(&self.path(a)) {
                         Ok(t) => {
                             for l in t.lines() {
                                 out.out(l);
                             }
                         }
-                        Err(e) => out.bad(&format!("cat: {a}: {e}")),
+                        Err(e) => out.bad(&format!("text: {a}: {e}")),
                     }
                 }
             }
+            "text" => out.out("text show FILE (msh has the rest: text help)"),
             "edit" => {
                 if arg.is_empty() {
                     request(Request::OpenHere(App::Notes));

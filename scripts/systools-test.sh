@@ -41,7 +41,7 @@ boot() { # name steps...
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
   QPID=$!
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:echo SYSTOOLS""-DONE" "wait:SYSTOOLS-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:print SYSTOOLS""-DONE" "wait:SYSTOOLS-DONE" "done:$T/$name.done" &
   DPID=$!
   for _ in $(seq 1200); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1
@@ -59,23 +59,23 @@ ask() { local a="$1" c="$2"; shift 2; eval "$a+=(\"send:\$c\")"
   while [ $# -gt 0 ]; do eval "$a+=(\"wait:\$1\" \"send:\$2\")"; shift 2; done; eval "$a+=(\"wait:\$P\")"; }
 AS_MILK="users switch milk --command"
 B=(); s B \
-  "sleep 1" \
+  "pause 1" \
   "processes help" "services help" "system help" "users help" "admin help" \
   "processes" \
   "MILK_TABLE=1 processes list" \
   "processes list --kernel" \
   "processes list | filter name == init | select pid" \
   "processes watch --plain --frames 2 --every 1" \
-  "sleep 300 &" \
-  "processes stop sleep" \
-  "sleep 1" \
-  "processes list | grep -c ' sleep$'" \
-  "sleep 301 &" "sleep 302 &" \
-  "processes stop sleep" \
-  "processes stop --now --all sleep" \
-  "sleep 303 &" \
-  "processes signal sleep usr1" \
-  "processes signal sleep NOPE" \
+  "pause 300 &" \
+  "processes stop pause" \
+  "pause 1" \
+  "processes list | text find --count ' pause'" \
+  "pause 301 &" "pause 302 &" \
+  "processes stop pause" \
+  "processes stop --now --all pause" \
+  "pause 303 &" \
+  "processes signal pause usr1" \
+  "processes signal pause NOPE" \
   "processes signals" \
   "processes info 1" \
   "processes info init" \
@@ -89,24 +89,24 @@ B=(); s B \
   "MILK_TABLE=1 services list" \
   "services status nope" \
   "services restart alarmd" \
-  "sleep 1" \
+  "pause 1" \
   "services signal alarmd" \
-  "sleep 1" \
+  "pause 1" \
   "services reload" \
   "admin --user nobody services stop alarmd" \
-  "echo $MARK > /dev/journal" \
-  "services logs | grep -c $MARK" \
-  "services logs user/echo --last 1" \
-  "services logs --since 10m --level info user/echo | grep -c $MARK" \
-  "services logs --level err user/echo | grep -c $MARK" \
+  "print $MARK > /dev/journal" \
+  "services logs | text find --count $MARK" \
+  "services logs user/print --last 1" \
+  "services logs --since 10m --level info user/print | text find --count $MARK" \
+  "services logs --level err user/print | text find --count $MARK" \
   "services logs --since soon" \
   "admin --user nobody services logs" \
-  "services logs --follow user/echo > /tmp/follow.txt &" \
-  "sleep 1" \
-  "echo followed-$MARK > /dev/journal" \
-  "sleep 1" \
+  "services logs --follow user/print > /tmp/follow.txt &" \
+  "pause 1" \
+  "print followed-$MARK > /dev/journal" \
+  "pause 1" \
   "processes stop --all services" \
-  "cat /tmp/follow.txt" \
+  "text show /tmp/follow.txt" \
   "system" \
   "system uptime" \
   "system memory" \
@@ -127,13 +127,13 @@ ask B "users password milk" "New password" "one1" "Type it again" "two2"
 s B \
   "$AS_MILK 'users password root'" \
   "admin users me" \
-  "$AS_MILK 'echo milk | FOO=bar admin --stdin env'" \
-  "$AS_MILK 'echo -e \"no\\nnope\\nnah\" | admin --stdin users me'" \
+  "$AS_MILK 'print milk | FOO=bar admin --stdin msh -c \"variables list\"'" \
+  "$AS_MILK 'print --escapes \"no\\nnope\\nnah\" | admin --stdin users me'" \
   "admin --user nobody admin users me" \
   "admin run status" \
   "admin status" \
-  "$AS_MILK 'echo milk | admin ticket --stdin admin status'" \
-  "$AS_MILK 'echo wrong | admin ticket --stdin admin status'" \
+  "$AS_MILK 'print milk | admin ticket --stdin admin status'" \
+  "$AS_MILK 'print wrong | admin ticket --stdin admin status'" \
   "admin" \
   "audit --event user.password.fail" \
   "ps" "top" "kill 1" "svc list" "log" "uname" "uptime" "free" "whoami" "id" "passwd" "su" "sudo id" "auth -s"
@@ -172,12 +172,12 @@ checkre "--kernel: the kernel's threads, no PID" "processes list --kernel" "^   
 [ "$(out "processes list | filter name == init | select pid" | tr -d ' \r' | grep -cx 1)" = 1 ] && ok "filter and select on the table" || bad "filter: $(out "processes list | filter name == init | select pid" | head -3 | tr '\n' '|')"
 [ "$(out "processes watch --plain --frames 2 --every 1" | grep -c '^processes watch - .*load ')" = 2 ] && ok "watch --plain --frames 2: two frames" || bad "watch frames"
 checkre "watch: CPU bars" "processes watch --plain --frames 2 --every 1" "^cpu0 +\\[[| ]+\\] +[0-9]+%"
-checkre "stop asks politely" "processes stop sleep" "^asked sleep \\(PID [0-9]+\\) to stop$"
-count "and it stopped" "processes list | grep -c ' sleep\$'" 0
-checkre "a name two processes have is refused, with their PIDs" "processes stop sleep" "^processes stop: 2 processes are called sleep \\(PIDs [0-9]+, [0-9]+\\): say which with processes stop PID, or add --all for every one$" 2
-[ "$(out "processes stop --now --all sleep" | grep -Ec '^stopped sleep \(PID [0-9]+\)$')" = 2 ] && ok "--now --all stops both at once" || bad "--now --all: $(out "processes stop --now --all sleep" | tr '\n' '|')"
-checkre "signal by name" "processes signal sleep usr1" "^sent USR1 to sleep \\(PID [0-9]+\\)$"
-check "a signal that doesn't exist" "processes signal sleep NOPE" "processes signal: there's no signal NOPE (processes signals lists them)"
+checkre "stop asks politely" "processes stop pause" "^asked pause \\(PID [0-9]+\\) to stop$"
+count "and it stopped" "processes list | text find --count ' pause'" 0
+checkre "a name two processes have is refused, with their PIDs" "processes stop pause" "^processes stop: 2 processes are called pause \\(PIDs [0-9]+, [0-9]+\\): say which with processes stop PID, or add --all for every one$" 2
+[ "$(out "processes stop --now --all pause" | grep -Ec '^stopped pause \(PID [0-9]+\)$')" = 2 ] && ok "--now --all stops both at once" || bad "--now --all: $(out "processes stop --now --all pause" | tr '\n' '|')"
+checkre "signal by name" "processes signal pause usr1" "^sent USR1 to pause \\(PID [0-9]+\\)$"
+check "a signal that doesn't exist" "processes signal pause NOPE" "processes signal: there's no signal NOPE (processes signals lists them)"
 check "signals lists them" "processes signals" "15  TERM   please stop (the polite one)"
 checkre "info by PID: name" "processes info 1" "^name +init$"
 checkre "info: the user" "processes info 1" "^user +root \\(0\\)$"
@@ -200,13 +200,13 @@ check "restart" "services restart alarmd" "restarted alarmd"
 checkre "signal (KILL), the restart policy applies" "services signal alarmd" "^sent KILL to alarmd \\(PID [0-9]+\\); its restart policy applies$"
 check "reload" "services reload" "read the service files again"
 check "stop is for administrators" "admin --user nobody services stop alarmd" "services stop: only an administrator can stop services (try admin services stop ...)"
-count "logs: the marker is in the journal" "services logs | grep -c $MARK" 1
-checkre "logs by name, --last 1" "services logs user/echo --last 1" "^[A-Z][a-z]{2} +[0-9]+ [0-9:]{8} user/echo\\[[0-9]+\\]: $MARK$"
-count "--since 10m --level info" "services logs --since 10m --level info user/echo | grep -c $MARK" 1
-count "--level err leaves it out" "services logs --level err user/echo | grep -c $MARK" 0
+count "logs: the marker is in the journal" "services logs | text find --count $MARK" 1
+checkre "logs by name, --last 1" "services logs user/print --last 1" "^[A-Z][a-z]{2} +[0-9]+ [0-9:]{8} user/print\\[[0-9]+\\]: $MARK$"
+count "--since 10m --level info" "services logs --since 10m --level info user/print | text find --count $MARK" 1
+count "--level err leaves it out" "services logs --level err user/print | text find --count $MARK" 0
 check "a bad --since" "services logs --since soon" "services logs: --since wants 30s, 10m, 2h, 1d or a Unix time"
 check "the journal is for administrators" "admin --user nobody services logs" "services logs: only root and administrators can read the journal (try admin services logs)"
-checkre "--follow saw a new entry" "cat /tmp/follow.txt" "user/echo\\[[0-9]+\\]: followed-$MARK$"
+checkre "--follow saw a new entry" "text show /tmp/follow.txt" "user/print\\[[0-9]+\\]: followed-$MARK$"
 checkre "the follow was stopped by name" "processes stop --all services" "^asked services \\(PID [0-9]+\\) to stop$"
 
 echo "== system"
@@ -245,21 +245,21 @@ check "password: only your own" "$AS_MILK 'users password root'" "users password
 
 echo "== admin"
 checkre "admin COMMAND as root" "admin users me" "^id +0$"
-E="$AS_MILK 'echo milk | FOO=bar admin --stdin env'"
+E="$AS_MILK 'print milk | FOO=bar admin --stdin msh -c \"variables list\"'"
 check "as milk with the password: root's home" "$E" "HOME=/Users/root"
 check "a clean PATH" "$E" "PATH=/Commands"
 check "ADMIN_USER says who" "$E" "ADMIN_USER=milk"
 out "$E" | grep -q "FOO=bar" && bad "the caller's environment reached the root command" || ok "the caller's environment stays behind"
-W="$AS_MILK 'echo -e \"no\\nnope\\nnah\" | admin --stdin users me'"
+W="$AS_MILK 'print --escapes \"no\\nnope\\nnah\" | admin --stdin users me'"
 [ "$(out "$W" | grep -c "That's not the password. Try again.")" = 3 ] && ok "three tries" || bad "three tries: $(out "$W" | tr '\n' '|')"
 check "then nothing runs" "$W" "admin: that's not the password for milk; nothing was run"
 check "nobody isn't an administrator" "admin --user nobody admin users me" "admin: nobody isn't an administrator (only group admin can use admin)"
 check "run: a command with one of admin's own names" "admin run status" "admin: there's no command status"
 checkre "status as root" "admin status" "^administrator +yes \\(root\\)$"
 checkre "status: no ticket" "admin status" "^ticket +none"
-checkre "ticket: a fresh ticket for the command" "$AS_MILK 'echo milk | admin ticket --stdin admin status'" "^ticket +[0-9]+ s left \\(this process only\\)$"
-checkre "ticket: the command runs as you" "$AS_MILK 'echo milk | admin ticket --stdin admin status'" "you +milk \\(501\\)$"
-check "ticket: a wrong password" "$AS_MILK 'echo wrong | admin ticket --stdin admin status'" "admin ticket: that's not the password for milk"
+checkre "ticket: a fresh ticket for the command" "$AS_MILK 'print milk | admin ticket --stdin admin status'" "^ticket +[0-9]+ s left \\(this process only\\)$"
+checkre "ticket: the command runs as you" "$AS_MILK 'print milk | admin ticket --stdin admin status'" "you +milk \\(501\\)$"
+check "ticket: a wrong password" "$AS_MILK 'print wrong | admin ticket --stdin admin status'" "admin ticket: that's not the password for milk"
 check "admin with nothing: the help" "admin" "usage: admin COMMAND ...    run a command as an administrator"
 for via in users-switch users-password admin; do
   check "the audit log has the wrong password ($via)" "audit --event user.password.fail" "via=$via"

@@ -197,6 +197,7 @@ version = "0.0.1"
 dependencies = [
  "filekit",
  "rt",
+ "textkit",
 ]
 
 [[package]]
@@ -366,6 +367,19 @@ dependencies = [
  "gui",
  "rt",
  "textbuf",
+]
+
+[[package]]
+name = "textkit"
+version = "0.0.1"
+
+[[package]]
+name = "texttools"
+version = "0.0.1"
+dependencies = [
+ "filekit",
+ "rt",
+ "textkit",
 ]
 
 [[package]]

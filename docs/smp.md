@@ -63,7 +63,7 @@ the new wait-queue protocol below.
 * **Per-CPU ready queues** (one per priority per CPU), still under the one `SCHED` lock
   (at 4 CPUs the lock isn't the cost; cross-CPU traffic is). A thread runs where it ran
   last. `Policy::Global` (the old single shared queue) can be switched to at run time
-  for comparison: `echo global > /proc/sched` (`percpu` to go back). `/proc/sched` shows
+  for comparison: `print global > /proc/sched` (`percpu` to go back). `/proc/sched` shows
   the policy and per CPU: queued, steals, migrations in, switches.
 * **Placement** (`make_ready`, per-CPU policy): "free" = idle, nothing queued, no kick
   pending. (1) its last CPU if free; (2) woken from its own last CPU (pipe/futex
@@ -131,7 +131,7 @@ drops its share, and whoever turns out to be the last owner frees the original.
   the user column: milkOS doesn't split user/system yet), plus `intr`, `ctxt`, `btime`,
   `processes`, `procs_running`.
 * `/proc/interrupts`: one column per CPU; SGI 0 is "IPI rescheduling".
-* `/proc/threads`: has a PSR column (CPU); `/proc/<pid>/status` has `Cpu:`; `ps` shows PSR.
+* `/proc/threads`: has a PSR column (CPU); `/proc/<pid>/status` has `Cpu:`; `processes list` shows it (CORE).
 * **CPU % per core (for the wm's menu bar)**: `crate::percpu::load(cpu) -> u32` (busy
   percent over the last ~0.5 s, sampled on each CPU's tick), `crate::percpu::online()`
   and `count()`. For user space: `/proc/cpuload` ("cpuN PERCENT" lines). Cumulative:
@@ -148,7 +148,7 @@ drops its share, and whoever turns out to be the last owner frees the original.
 * Benchmarks (not pass/fail): `utest par N [units]` (N CPU-bound processes vs 1; prints
   speedup, steals, migrations) and `utest csw [rounds]` (pipe ping-pong between
   processes and between threads, sched_yield storm). Compare policies with
-  `echo global > /proc/sched` / `echo percpu > /proc/sched`.
+  `print global > /proc/sched` / `print percpu > /proc/sched`.
 * `utest par N MS`: N processes doing MS units of pure CPU work vs one; prints the
   speedup. Measured (debug kernel, HVF on the host's cores):
 

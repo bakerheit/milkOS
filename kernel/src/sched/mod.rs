@@ -20,7 +20,7 @@
 //!   CPU, else to one running something less important, else to the shortest queue. A CPU with nothing of its own *steals* the
 //!   longest-waiting thread from the busiest queue, and on the tick a CPU pulls one thread
 //!   from a queue two or more longer than its own. `Policy::Global` (one shared queue, the
-//!   old behaviour) stays selectable at run time for comparison: `echo global > /proc/sched`.
+//!   old behaviour) stays selectable at run time for comparison: `print global > /proc/sched`.
 //!
 //! Locking: all scheduler state is in one `SpinLock<Sched>`. `schedule` drops it before the
 //! actual register switch but keeps IRQs masked across it; the resumed thread puts its own

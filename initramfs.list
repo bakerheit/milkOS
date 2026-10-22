@@ -1,6 +1,6 @@
 # Extra files packed into the initramfs, on top of everything in rootfs/.
 # One per line:   <path in the image>   <host path, relative to the repo root>   [octal mode]
-# Example:        /Commands/cat         target/user/.../release/cat              755
+# Example:        /Commands/text        target/user/.../release/text             755
 # A missing host file is skipped with a cargo warning, so the kernel still builds
 # before the user programs do. See docs/filesystem.md ("The tree") for where things go:
 # an app (it has a window) in /Apps/<name>/, a command (you type it) in /Commands, a
@@ -38,7 +38,6 @@
 /Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
 /Commands/snap                                    target/user/aarch64-unknown-none-softfloat/release/snap       755
 /Commands/fetch                                   target/user/aarch64-unknown-none-softfloat/release/fetch      755
-/Commands/cat                                     target/user/aarch64-unknown-none-softfloat/release/cat        755
 /Commands/chmod                                   target/user/aarch64-unknown-none-softfloat/release/chmod      755
 /Commands/chown                                   target/user/aarch64-unknown-none-softfloat/release/chown      755
 /Commands/processes                               target/user/aarch64-unknown-none-softfloat/release/processes  755
@@ -52,18 +51,13 @@
 # Files and folders (files replaced mv cp touch rm mkdir ls ln), and the Trash.
 /Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
 /Commands/trash                                   target/user/aarch64-unknown-none-softfloat/release/trash      755
+# Text (text replaced cat head tail grep sort uniq wc), print (echo) and pause (sleep).
+/Commands/text                                    target/user/aarch64-unknown-none-softfloat/release/text       755
+/Commands/print                                   target/user/aarch64-unknown-none-softfloat/release/print      755
+/Commands/pause                                   target/user/aarch64-unknown-none-softfloat/release/pause      755
 /Commands/df                                      target/user/aarch64-unknown-none-softfloat/release/df         755
-/Commands/echo                                    target/user/aarch64-unknown-none-softfloat/release/echo       755
-/Commands/env                                     target/user/aarch64-unknown-none-softfloat/release/env        755
 /Commands/false                                   target/user/aarch64-unknown-none-softfloat/release/false      755
-/Commands/grep                                    target/user/aarch64-unknown-none-softfloat/release/grep       755
-/Commands/head                                    target/user/aarch64-unknown-none-softfloat/release/head       755
-/Commands/sleep                                   target/user/aarch64-unknown-none-softfloat/release/sleep      755
-/Commands/sort                                    target/user/aarch64-unknown-none-softfloat/release/sort       755
-/Commands/tail                                    target/user/aarch64-unknown-none-softfloat/release/tail       755
 /Commands/true                                    target/user/aarch64-unknown-none-softfloat/release/true       755
-/Commands/uniq                                    target/user/aarch64-unknown-none-softfloat/release/uniq       755
-/Commands/wc                                      target/user/aarch64-unknown-none-softfloat/release/wc         755
 /Commands/stty                                    target/user/aarch64-unknown-none-softfloat/release/stty       755
 /Commands/open                                    target/user/aarch64-unknown-none-softfloat/release/open       755
 /Commands/notify                                  target/user/aarch64-unknown-none-softfloat/release/notify     755

@@ -1,0 +1,12 @@
+[package]
+name = "textkit"
+version.workspace = true
+edition.workspace = true
+
+# The rules behind `text`, `print`, `pause` and msh's `variables`: lengths of time ("5s",
+# "2m", "500ms"), print's backslash escapes, how `text find` matches, how `text sort` orders,
+# `text unique` and `text count`, the help text and plain-English errors, variable names and
+# `variables run NAME=v COMMAND`. Pure (no syscalls), so the tests run on the host:
+# `scripts/textkit-test.sh`.
+[lib]
+bench = false

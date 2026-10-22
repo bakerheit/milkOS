@@ -53,19 +53,19 @@ psrss() {
     on && $1 ~ /^[0-9]+$/ && !seen[$1]++ { if ($1 == w) print "watch", $(NF-1); else if ($NF != "processes") print $NF, $(NF-1) }' | sed 's/K$//'
 }
 
-ser "wait:$P" "send:sleep 1" "wait:$P" "send:open activity" "wait:$P"
-ser "send:processes watch --plain --frames $((SECS + 60)) --every 1 > /dev/null &" "wait:$P" "send:sleep 10" "wait:$P"
+ser "wait:$P" "send:pause 1" "wait:$P" "send:open activity" "wait:$P"
+ser "send:processes watch --plain --frames $((SECS + 60)) --every 1 > /dev/null &" "wait:$P" "send:pause 10" "wait:$P"
 # msh prints "[N] PGID" for the background job: the watch's PID.
 WATCH="$(tr -d '\r' < "$LOG" | sed -n 's/^\[[0-9][0-9]*\] \([0-9][0-9]*\)$/\1/p' | tail -1)"
 [ -n "$WATCH" ] || { echo "leak-test: no PID for the background processes watch"; exit 1; }
-ser "send:echo LEAK""-A" "wait:$P" "send:processes list" "wait:$P" "send:echo LEAK""-A-END" "wait:$P"
+ser "send:print LEAK""-A" "wait:$P" "send:processes list" "wait:$P" "send:print LEAK""-A-END" "wait:$P"
 # Keep milkd and alarmd answering while the watch and Activity Monitor refresh every second.
 t0=$SECONDS
 while [ $((SECONDS - t0)) -lt "$SECS" ]; do
   ser "send:services list > /dev/null" "wait:$P" "send:services status alarmd > /dev/null" "wait:$P" \
-    "send:alarm list > /dev/null" "wait:$P" "send:sleep 4" "wait:$P"
+    "send:alarm list > /dev/null" "wait:$P" "send:pause 4" "wait:$P"
 done
-ser "send:echo LEAK""-B" "wait:$P" "send:processes list" "wait:$P" "send:echo LEAK""-B-END" "wait:$P"
+ser "send:print LEAK""-B" "wait:$P" "send:processes list" "wait:$P" "send:print LEAK""-B-END" "wait:$P"
 psrss '^LEAK-A$' '^LEAK-A-END$' | sort > "$T/a.txt"
 psrss '^LEAK-B$' '^LEAK-B-END$' | sort > "$T/b.txt"
 echo "  resident size after the warm-up and $((SECONDS - t0)) s later (KiB):"

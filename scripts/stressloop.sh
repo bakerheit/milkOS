@@ -32,13 +32,13 @@ for b in $(seq "$BOOTS"); do
   QPID=$!
   P='msh:[^\n]*\$ '
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-    "send:echo interval=1s > /System/Kernel/fs/milkfs/auto" "wait:$P" \
+    "send:print interval=1s > /System/Kernel/fs/milkfs/auto" "wait:$P" \
     "send:/System/Developer/fsstress /Volumes/Milk/stress 8 20" "wait:$P" \
     "send:/System/Developer/fsstress /Volumes/STRESS/stress 4 8" "wait:$P" \
     "send:dedupe /Volumes/Milk/stress" "wait:$P" \
     "send:snap check" "wait:$P" \
-    "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
-    "send:echo STRESS""-DONE" "wait:STRESS-DONE" "done:$T/done$b" &
+    "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+    "send:print STRESS""-DONE" "wait:STRESS-DONE" "done:$T/done$b" &
   DPID=$!
   for _ in $(seq 3000); do [ -e "$T/done$b" ] && break; sleep 0.2; done
   sleep 2

@@ -75,6 +75,9 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - `processes` (list, watch, stop, signal, info), `services` (list, status, start, stop, restart,
   logs: the journal), `system` (info, memory, uptime), `users` (me, list, password, switch) and
   `admin` (run a command as root, or with an administrator's ticket), each with `help`.
+- `text` for lines of text (`text show`, `text find`, `text first`, `text last`, `text sort`,
+  `text unique`, `text count`, `text help`), `print` and `pause`; msh's `variables` built-in
+  (`list`, `get`, `set`, `remove`, `run`).
 - Coreutils and `milk`, a package manager with signed packages, where `milk try` installs into a
   throwaway clone of the filesystem that you then keep or discard.
 

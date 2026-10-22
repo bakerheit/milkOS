@@ -326,7 +326,7 @@ fn tmpfs_rom(t: &mut T) {
     t.ok(files() == f0, "rom test files gone, their pages freed");
     // The built-in files are in the image, not copied (until written).
     t.ok(
-        is_rom("/System/Version.txt") && is_rom("/Commands/cat"),
+        is_rom("/System/Version.txt") && is_rom("/Commands/text"),
         "built-in files read from the kernel image",
     );
     t.ok(
@@ -2946,7 +2946,7 @@ fn milkfs_bench(v: &super::milkfs::Volume, vp: &str) {
 
 /// Print a few inspectable files so they show up in the boot log.
 fn show(path: &str) {
-    kprintln!("$ cat {path}");
+    kprintln!("$ text show {path}");
     kprintln!("{}", read_str(path).trim_end());
 }
 

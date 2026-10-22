@@ -33,7 +33,7 @@ boot() { # name steps...
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
   QPID=$!
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:echo SVC""-DONE" "wait:SVC-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:print SVC""-DONE" "wait:SVC-DONE" "done:$T/$name.done" &
   DPID=$!
   for _ in $(seq 900); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1
@@ -48,9 +48,9 @@ L1="$(boot b1 \
   "send:/System/Developer/utest auth" "wait:$P" \
   "send:services" "wait:$P" \
   "send:MILK_TABLE=1 services list" "wait:$P" \
-  "send:echo $MARK > /dev/journal" "wait:$P" \
-  "send:sleep 3" "wait:$P" \
-  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P")"
+  "send:print $MARK > /dev/journal" "wait:$P" \
+  "send:pause 3" "wait:$P" \
+  "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P")"
 echo "$L1" > "$T/b1.txt"
 echo "$L1" | grep -q "utest: PASS services" && ok "$(echo "$L1" | grep -m1 'utest: PASS services' | cut -c1-200)" || bad "utest svc"
 echo "$L1" | grep -q "utest: PASS authorisation" && ok "$(echo "$L1" | grep -m1 '(as milk) utest: PASS authorisation' | cut -c1-200)" || bad "utest auth"
@@ -58,9 +58,9 @@ echo "$L1" | grep -Eq "^httpd +running" && ok "httpd runs as a milkd service" ||
 echo "$L1" | grep -q "^name:str	state:str" && ok "services list as a table" || bad "services table"
 
 L2="$(boot b2 \
-  "send:services logs | grep $MARK" "wait:$P" \
-  "send:services logs --this-boot | grep -c $MARK" "wait:$P")"
+  "send:services logs | text find $MARK" "wait:$P" \
+  "send:services logs --this-boot | text find --count $MARK" "wait:$P")"
 echo "$L2" > "$T/b2.txt"
-echo "$L2" | grep -q "user/echo\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/echo.*$MARK")" || bad "marker not in the journal after reboot"
-echo "$L2" | grep -A1 "services logs --this-boot | grep -c" | grep -qx 0 && ok "services logs --this-boot shows only this boot" || bad "services logs --this-boot"
+echo "$L2" | grep -q "user/print\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/print.*$MARK")" || bad "marker not in the journal after reboot"
+echo "$L2" | grep -A1 "services logs --this-boot | text find --count" | grep -qx 0 && ok "services logs --this-boot shows only this boot" || bad "services logs --this-boot"
 [ "$FAIL" = 0 ] && echo "svc-test: PASS ($T)" || { echo "svc-test: FAIL ($T)"; exit 1; }

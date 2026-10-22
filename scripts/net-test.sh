@@ -94,11 +94,11 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:netctl -k' 'wait:drop_visible=' "$P" \
   'send:netctl hostname milkbox' "$P" \
   'send:system info' "$P" \
-  'send:cat /proc/net/hostname' "$P" \
+  'send:text show /proc/net/hostname' "$P" \
   'send:netctl hostname bad_name!' "$P" \
   'send:processes watch --plain --frames 2 --every 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
   'send:system uptime' 'wait:15 minutes' "$P" \
-  'send:cat /proc/loadavg' "$P" \
+  'send:text show /proc/loadavg' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 

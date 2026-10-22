@@ -60,6 +60,6 @@ L2="$(boot b2 \
   "send:log | text find $MARK" "wait:$P" \
   "send:log -b | text find --count $MARK" "wait:$P")"
 echo "$L2" > "$T/b2.txt"
-echo "$L2" | grep -q "user/echo\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/echo.*$MARK")" || bad "marker not in the journal after reboot"
+echo "$L2" | grep -q "user/print\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/print.*$MARK")" || bad "marker not in the journal after reboot"
 echo "$L2" | grep -A1 "log -b | text find --count" | grep -qx 0 && ok "log -b shows only this boot" || bad "log -b"
 [ "$FAIL" = 0 ] && echo "svc-test: PASS ($T)" || { echo "svc-test: FAIL ($T)"; exit 1; }

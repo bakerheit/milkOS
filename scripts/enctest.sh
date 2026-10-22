@@ -141,7 +141,7 @@ echo "$L" | grep -aq "snap: lock Vault: .*is in use: pid [0-9]* (pause): 1 open 
 echo "$L" | grep -aq "^lock: EBUSY: .*(pause): 1 open file" && ok "/System/Kernel/fs/milkfs/error has the reason" || bad "error file"
 echo "$L" | grep -aq "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted, key wiped$" && ok "Vault locked, key wiped" || bad "lock log"
 echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
-echo "$L" | grep -aq "cat: /Volumes/Vault/notes.txt: " && ok "its files are gone until unlock" || bad "file readable while locked?"
+echo "$L" | grep -aq "text: /Volumes/Vault/notes.txt doesn.t exist" && ok "its files are gone until unlock" || bad "file readable while locked?"
 echo "$L" | grep -aq "^vd. Vault locked" && ok "listed as locked" || bad "not listed locked"
 [ "$(echo "$L" | grep -ac '^kept across the lock')" -ge 1 ] && echo "$L" | grep -aq "snap: Vault unlocked" && ok "unlock after lock: the file is back" || bad "unlock after lock"
 [ "$(echo "$L" | grep -ac "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted")" = 2 ] && ok "snap lock (no argument) locks every lockable volume" || bad "snap lock without argument"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the screenshot shutter sound (python3 stdlib only), committed as
-rootfs/System/Library/Sounds/shutter.wav (crate::audio::Sound::Shutter):
+rootfs/System/Sounds/shutter.wav (crate::audio::Sound::Shutter):
 
     python3 scripts/gen_shutter.py [OUT.wav]
 

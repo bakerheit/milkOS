@@ -20,7 +20,7 @@ ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 IMG="$T/a.img"
 rm -f "$IMG"
 $M mkfs "$IMG" --size 64M >/dev/null
-$M mkdir "$IMG" /home/milk >/dev/null
+$M mkdir "$IMG" /Users/milk >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
@@ -47,7 +47,7 @@ differ() { ! cmp -s "$1" "$2"; }
 
 ser "wait:$P"
 q move 785 615 click sleep 1
-ser "send:cal add today 09:00 Seeded event --calendar Work" "wait:$P" "send:open /bin/calendar" "wait:$P"
+ser "send:cal add today 09:00 Seeded event --calendar Work" "wait:$P" "send:open calendar" "wait:$P"
 sleep 3
 q screendump "$T/cal-month.png"
 q move 333 92 click sleep 1 screendump "$T/cal-week.png"
@@ -57,17 +57,17 @@ q move 398 92 click sleep 1 screendump "$T/cal-month2.png"
 differ "$T/cal-month.png" "$T/cal-week.png" && differ "$T/cal-week.png" "$T/cal-day.png" && differ "$T/cal-day.png" "$T/cal-year.png" && ok "Day, Week, Month and Year each draw something different" || bad "the view buttons changed nothing"
 # A new event through the window: the New event button, a title, Return.
 q move 152 662 click sleep 1 type 'From the window' sleep 0.3 screendump "$T/cal-sheet.png" key ret sleep 1.5
-ser "send:cal list 2" "wait:$P" "send:ls -l /home/milk/Library/Calendar" "wait:$P" "send:cat /dev/wm" "wait:$P"
+ser "send:cal list 2" "wait:$P" "send:ls -l /Users/milk/Library/Calendar" "wait:$P" "send:cat /dev/wm" "wait:$P"
 out "cal list 2" | grep -q "Seeded event" && ok "the seeded event is in the calendar file" || bad "seeded event missing"
 out "cal list 2" | grep -q "From the window" && ok "an event made in the window reached the file" || bad "the window's event did not reach the file: $(out "cal list 2")"
 out "cat /dev/wm" | grep -q "Calendar" && ok "the Calendar window is on the desktop" || bad "no Calendar window in /dev/wm"
-ser "send:open /bin/clock" "wait:$P"
+ser "send:open clock" "wait:$P"
 sleep 3
 q screendump "$T/clock.png"
 ser "send:cat /dev/wm" "wait:$P"
 tr -d '\r' < "$LOG" | grep -a "window .* Clock" >/dev/null && ok "the Clock window is on the desktop" || bad "no Clock window"
 [ "$(stat -f %z "$T/clock.png")" -gt 10000 ] && ok "Clock drew (screenshot $(stat -f %z "$T/clock.png") bytes)" || bad "Clock screenshot is empty"
-ser "send:open /bin/activity" "wait:$P"
+ser "send:open activity" "wait:$P"
 sleep 3
 ser "send:cat /dev/wm" "wait:$P"
 q screendump "$T/activity-processes.png"
@@ -78,7 +78,7 @@ set -- $pos
 q move $(( $1 + 1 + 347 )) $(( $2 + 33 + 20 )) click sleep 2 screendump "$T/activity-security.png"
 tr -d '\r' < "$LOG" | grep -a "window .* Activity Monitor" >/dev/null && ok "the Activity Monitor window is on the desktop" || bad "no Activity Monitor window"
 differ "$T/clock.png" "$T/activity-processes.png" && differ "$T/activity-processes.png" "$T/activity-security.png" && ok "Activity Monitor drew Processes, then a different Security screen" || bad "the Security tab did not open"
-ser "send:remind add Quick thing tomorrow at 5pm" "wait:$P" "send:open /bin/reminders" "wait:$P"
+ser "send:remind add Quick thing tomorrow at 5pm" "wait:$P" "send:open reminders" "wait:$P"
 sleep 3
 q screendump "$T/reminders.png"
 ser "send:cat /dev/wm" "wait:$P" "send:remind list" "wait:$P"

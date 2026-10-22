@@ -97,11 +97,11 @@ def must(desc, cond):
 blocks = text.split("msh:/$ cat /proc/drivers")
 before, after = blocks[1], blocks[2]
 must("before: soundd and rngd hold their devices",
-     re.search(r"^sound policy=user .*owner=pid \d+ \(/bin/soundd\) claims=1", before, re.M)
-     and re.search(r"^rng policy=user .*owner=pid \d+ \(/bin/rngd\) claims=1", before, re.M))
+     re.search(r"^sound policy=user .*owner=pid \d+ \(/System/Services/soundd\) claims=1", before, re.M)
+     and re.search(r"^rng policy=user .*owner=pid \d+ \(/System/Services/rngd\) claims=1", before, re.M))
 must("after: both taken back by restarted drivers (claims=2, releases=1)",
-     re.search(r"^sound policy=user .*owner=pid \d+ \(/bin/soundd\) claims=2 releases=1", after, re.M)
-     and re.search(r"^rng policy=user .*owner=pid \d+ \(/bin/rngd\) claims=2 releases=1", after, re.M))
+     re.search(r"^sound policy=user .*owner=pid \d+ \(/System/Services/soundd\) claims=2 releases=1", after, re.M)
+     and re.search(r"^rng policy=user .*owner=pid \d+ \(/System/Services/rngd\) claims=2 releases=1", after, re.M))
 must("the kernel driver covered the gap", "[udrv] sound released by pid" in text and "kernel driver takes over" in text)
 must("the CSPRNG is fed by rngd again", re.search(r"source=rngd\+jitter .*user_driver_bytes=(\d+)", after)
      and int(re.search(r"user_driver_bytes=(\d+)", after).group(1)) >= 128)

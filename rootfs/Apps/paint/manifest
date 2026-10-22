@@ -1,0 +1,7 @@
+format 1
+name paint
+version 1.0.0
+description Paint: draw with the mouse, save to ~/Pictures
+exec paint
+files
+payload-sha256 -

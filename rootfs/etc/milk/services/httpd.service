@@ -1,8 +1,0 @@
-# The web server on :80 (the kernel's own httpd is off by default).
-description = serving /srv/www on :80
-exec = /bin/httpd -q /srv/www
-user = nobody
-restart = on-failure
-if-exists = /srv/www/index.html
-# Read-only web root, /proc for the status page, the network, no new processes.
-sandbox = fs=/srv/www:r fs=/proc:r net=all spawn=0

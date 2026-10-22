@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # statfs/fstatfs and `df` against the Mac's own numbers (private images in a fresh /tmp
 # directory; the Mac share read-only; only the qemu started here is killed, by PID).
-#   milkfs (64 MiB image): size = the image; used grows by what's written (cat /bin/*); a
-#          snapshot reports read-only; df /home/milk = the volume (bind mounts not repeated)
+#   milkfs (64 MiB image): size = the image; used grows by what's written (cat /Commands/*); a
+#          snapshot reports read-only; df /Users/milk = the volume (bind mounts not repeated)
 #   FAT32 (64 MiB, mkfat.sh): size and free space = the image's BPB and FSInfo
 #   9p (/Volumes/Mac): size = what the Mac says about the share's disk (os.statvfs)
 #   tmpfs has a size; proc, sysfs, devfs show only with -a, all zero
@@ -33,11 +33,13 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
-args=("wait:$P")
+# A first command that only lets the boot finish: services still starting print their
+# banners over the first prompt, so a real command typed there wouldn't sit on its own line.
+args=("wait:$P" "send:sleep 1" "wait:$P")
 for c in \
   "df" "df -a" "df -h" "MILK_TABLE=1 df" \
-  "df /Volumes/Milk /home/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
-  "cat /bin/* > /Volumes/Milk/big.bin" "echo now > /sys/fs/milkfs/sync" "wc -c /Volumes/Milk/big.bin" "df /Volumes/Milk" \
+  "df /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
+  "cat /Commands/* > /Volumes/Milk/big.bin" "echo now > /sys/fs/milkfs/sync" "wc -c /Volumes/Milk/big.bin" "df /Volumes/Milk" \
   "snap create dfsnap" "df /Volumes/Milk/.snapshots/dfsnap" \
   "df /no/such/path"; do
   args+=("send:$c" "wait:$P")
@@ -57,7 +59,7 @@ echo "$DF" | sed 's/^/    /'
 fs_kb=$(( $(stat -f %z "$T/fs.img") / 1024 ))
 [ "$(echo "$DF" | col /Volumes/Milk 2)" = "$fs_kb" ] && ok "milkfs size = the image ($fs_kb K)" || bad "milkfs size: $(echo "$DF" | col /Volumes/Milk 2), want $fs_kb"
 [ "$(echo "$DF" | col /Volumes/Milk 1)" = milkfs ] && ok "milkfs type" || bad "milkfs type"
-echo "$DF" | grep -q " /home/milk$" && bad "df repeats the /home/milk bind" || ok "the /home/milk bind isn't repeated"
+echo "$DF" | grep -q " /Users/milk$" && bad "df repeats the /Users/milk bind" || ok "the /Users/milk bind isn't repeated"
 echo "$DF" | grep -qE " /(proc|sys|dev)$" && bad "proc/sys/dev listed without -a" || ok "proc, sysfs, devfs hidden without -a"
 read -r fat_kb fat_free_kb < <(python3 - "$T/fat.img" <<'EOF'
 import struct, sys
@@ -76,21 +78,21 @@ got=$(echo "$DF" | col /Volumes/Mac 2)
 [ -n "$got" ] && python3 -c "import sys; a,b=int(sys.argv[1]),int(sys.argv[2]); sys.exit(0 if abs(a-b) <= b//100 else 1)" "$got" "$mac_kb" \
   && ok "9p size = the Mac's disk ($got K)" || bad "9p size: $got, Mac says $mac_kb"
 echo "$DF" | grep -q "^9p .* /Volumes/Mac (ro)$" && ok "the read-only share says (ro)" || bad "share not shown read-only"
-P1="$(out "df /Volumes/Milk /home/milk /Volumes/DFFAT /Volumes/Mac /tmp")"
+P1="$(out "df /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp")"
 tmp=$(echo "$P1" | col /tmp 2)
 [ -n "$tmp" ] && [ "$tmp" -gt 0 ] && ok "tmpfs /tmp has a size ($tmp K)" || bad "tmpfs size"
 A="$(out "df -a")"
 echo "$A" | grep -qE "^proc +0 +0 +0 +- +/proc$" && echo "$A" | grep -qE "^sysfs +0 .* /sys$" && echo "$A" | grep -qE "^devfs +0 .* /dev$" \
   && ok "df -a: proc, sysfs, devfs with zero sizes" || bad "df -a zero-size file systems"
-echo "$A" | grep -q "^milkfs .* /home/milk$" && ok "df -a shows the bind too" || bad "df -a bind"
+echo "$A" | grep -q "^milkfs .* /Users/milk$" && ok "df -a shows the bind too" || bad "df -a bind"
 out "df -h" | grep -q "^milkfs .*M .* /Volumes/Milk$" && ok "df -h: human sizes" || bad "df -h"
 T1="$(out "MILK_TABLE=1 df")"
 echo "$T1" | grep -q "use_pct" && echo "$T1" | grep -q "/Volumes/Milk" && ok "MILK_TABLE=1: a table with use_pct" || bad "table output: $(echo "$T1" | head -3)"
 # Same file system: same size; used may move a little between the two calls (the
 # search index or Time Machine writing meanwhile).
-hu=$(echo "$P1" | col /home/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
-[ "$(echo "$P1" | col /home/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
-  && ok "df /home/milk = df /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
+hu=$(echo "$P1" | col /Users/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
+[ "$(echo "$P1" | col /Users/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
+  && ok "df /Users/milk = df /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
 u0=$(echo "$DF" | col /Volumes/Milk 3); u1=$(out "df /Volumes/Milk" | col /Volumes/Milk 3)
 big=$(( $(out "wc -c /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
 [ -n "$u0" ] && [ -n "$u1" ] && [ "$big" -gt 1024 ] && [ $((u1 - u0)) -ge "$big" ] && [ $((u1 - u0)) -le $((big + big / 10 + 64)) ] \

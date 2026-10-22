@@ -20,6 +20,7 @@ pub mod errno;
 pub mod fat;
 pub mod file;
 pub mod initramfs;
+pub mod layout;
 pub mod milkfs;
 pub mod ninep;
 pub mod node;
@@ -50,19 +51,21 @@ pub use path::{bind, current_root, mount, path_of, root, set_root_resolver, sync
 use crate::kprintln;
 
 /// Directories created on the root tmpfs before anything else is unpacked.
-/// (path, permissions)
+/// (path, permissions). The plain-English layout: `fs::layout`, docs/filesystem.md.
 const SKELETON: &[(&str, u32)] = &[
-    ("/Applications", 0o755),
+    ("/Apps", 0o755),
+    ("/Commands", 0o755),
     ("/System", 0o755),
-    ("/bin", 0o755),
+    ("/System/Services", 0o755),
+    ("/System/Settings", 0o755),
+    ("/System/Startup", 0o755),
+    ("/Users", 0o755),
+    ("/Users/milk", 0o755),
+    ("/Volumes", 0o755),
     ("/dev", 0o755),
-    ("/etc", 0o755),
-    ("/home", 0o755),
-    ("/home/milk", 0o755),
     ("/proc", 0o555),
     ("/sys", 0o555),
     ("/tmp", 0o1777),
-    ("/Volumes", 0o755),
 ];
 
 /// Start the file systems' kernel threads (call after `sched::init`).
@@ -79,10 +82,9 @@ pub fn init() {
     for &(dir, perm) in SKELETON {
         mkdir(dir, perm).expect("fs: create skeleton");
     }
-    // macOS spelling of the home directory parent.
-    symlink("home", "/Users").expect("fs: /Users symlink");
     kprintln!("fs: tmpfs mounted at /");
     initramfs::load();
+    layout::record_builtin_apps();
     devfs::init().expect("fs: mount /dev");
     procfs::init(root).expect("fs: mount /proc");
     sysfs::init().expect("fs: mount /sys");
@@ -90,8 +92,8 @@ pub fn init() {
     milkfs::automount();
     milkfs::setup_home();
     milkfs::setup_applications();
-    milkfs::setup_persistent_etc("/etc/milk/drop");
-    milkfs::setup_persistent_etc("/etc/milk/net");
+    milkfs::setup_persistent_etc("/System/Settings/milk/drop");
+    milkfs::setup_persistent_etc("/System/Settings/milk/net");
     ninep::automount();
     fat::automount();
 }

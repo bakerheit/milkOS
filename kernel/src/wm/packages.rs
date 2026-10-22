@@ -1,10 +1,11 @@
-//! Apps from manifests on the desktop (docs/packages.md): every
-//! `/System/Applications/<name>/manifest` (system apps that ship with milkOS, like the
-//! Store) and `/Applications/<name>/manifest` (installed `milk` packages) with a
-//! `dock Label #RRGGBB` line gets a dock tile (after the built-in ones, system apps first)
-//! and a Skim entry. Its program is the manifest's `exec`: relative to the app's folder,
-//! or an absolute path (`exec /bin/store`). System apps run unsandboxed (the Store runs
-//! /bin/milk, which writes /Applications and makes clones); installed ones sandboxed.
+//! Apps from manifests on the desktop (docs/packages.md): every `/Apps/<name>/manifest`
+//! with a `dock Label #RRGGBB` line gets a dock tile (after the desktop's own ones,
+//! built-in apps first, then installed `milk` packages) and a Skim entry. Built-in apps
+//! ship with milkOS (the Store, Calendar, ...: `fs::layout::is_builtin_app`); installed
+//! ones carry milk's `.origin` file. Its program is the manifest's `exec`: relative to the
+//! app's folder (`exec store`), or an absolute path. Built-in apps run unsandboxed (the
+//! Store runs /Commands/milk, which writes /Apps and makes clones); installed ones
+//! sandboxed.
 //!
 //! Window apps (they link `user/gui`) start like Paint, as a process whose window is the
 //! app; terminal programs (fortune, snake) open in a new Terminal tab. Which is which: the
@@ -23,24 +24,22 @@ use crate::fs;
 use crate::gfx::{Color, rgb};
 use crate::sync::SpinLock;
 
-pub const DIR: &str = "/Applications";
-/// Apps that ship with the system.
-pub const SYSTEM_DIR: &str = "/System/Applications";
+pub const DIR: &str = crate::fs::layout::APPS;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Pkg {
     pub name: String,
-    /// Its directory under /Applications.
+    /// Its directory under /Apps.
     pub dir: String,
     /// Dock label.
     pub label: String,
     pub color: Color,
     pub description: String,
-    /// The program: /Applications/<name>/<exec>.
+    /// The program: /Apps/<name>/<exec>.
     pub exec: String,
     /// Opens its own window (else it runs in a Terminal tab).
     pub window: bool,
-    /// Ships with the system (/System/Applications): runs unsandboxed.
+    /// Ships with milkOS (a built-in app): runs unsandboxed.
     pub system: bool,
 }
 
@@ -130,17 +129,17 @@ fn parse(base: &str, name: &str, text: &str) -> Option<Pkg> {
         window,
         name: pname,
         dir: String::from(name),
-        system: base == SYSTEM_DIR,
+        system: crate::fs::layout::is_builtin_app(name),
     })
 }
 
-/// Rescan /System/Applications and /Applications. True if the list changed.
+/// Rescan /Apps. True if the list changed.
 pub fn refresh() -> bool {
     let mut found: Vec<(String, u64, Pkg)> = Vec::new();
     let old: Vec<(String, u64, Pkg)> = CACHE.lock().pkgs.clone();
-    for base in [SYSTEM_DIR, DIR] {
-        scan(base, &old, &mut found);
-    }
+    scan(DIR, &old, &mut found);
+    // Built-in apps first, then installed ones (each in name order).
+    found.sort_by_key(|(_, _, p)| !p.system);
     let changed = found.len() != old.len() || found.iter().zip(&old).any(|(a, b)| a.2 != b.2);
     if changed {
         CACHE.lock().pkgs = found;

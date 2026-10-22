@@ -1,4 +1,4 @@
-//! chroot DIR [CMD [ARGS...]]   run CMD (default /bin/msh) with DIR as /.
+//! chroot DIR [CMD [ARGS...]]   run CMD (default /Commands/msh) with DIR as /.
 //! Used by `milk` to run a tried app as if its clone volume were the root.
 #![no_std]
 #![no_main]
@@ -19,7 +19,7 @@ fn main(args: &rt::Args) -> i32 {
     let argv: Vec<&str> = if args.argv.len() > 2 {
         args.argv[2..].to_vec()
     } else {
-        alloc::vec!["/bin/msh"]
+        alloc::vec!["/Commands/msh"]
     };
     let path = argv[0];
     let e = sys::execve(path, &argv, &args.envp);

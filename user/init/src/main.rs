@@ -8,7 +8,12 @@ use rt::{println, sys};
 
 rt::main!(main);
 
-const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "USER=root", "TERM=dumb"];
+const ENV: &[&str] = &[
+    "PATH=/Commands",
+    "HOME=/Users/milk",
+    "USER=root",
+    "TERM=dumb",
+];
 
 fn main(_args: &rt::Args) -> i32 {
     let u = sys::uname().unwrap_or_default();
@@ -20,34 +25,34 @@ fn main(_args: &rt::Args) -> i32 {
         u[2],
         u[4]
     );
-    println!("  user space is running. Starting /bin/hello, then the shell.");
+    println!("  user space is running. Starting /Commands/hello, then the shell.");
     println!();
 
-    // Installed packages: recreate their /bin links (/bin is in RAM, /Applications is not).
-    if let Ok(pid) = sys::spawn("/bin/milk", &["milk", "relink", "-q"], ENV) {
+    // Installed packages: recreate their /Commands links (/Commands is in RAM, /Apps is not).
+    if let Ok(pid) = sys::spawn("/Commands/milk", &["milk", "relink", "-q"], ENV) {
         wait_for(pid);
     }
     // The boot chime, if there is a sound device (it plays while we go on).
     if let Ok(fd) = sys::open("/dev/audio", sys::O_WRONLY | sys::O_CLOEXEC) {
         let _ = sys::close(fd);
-        if let Ok(pid) = sys::spawn("/bin/play", &["play", "-n", "chime"], ENV) {
+        if let Ok(pid) = sys::spawn("/Commands/play", &["play", "-n", "chime"], ENV) {
             quiet(pid);
         }
     }
     // Services (httpd, the Milk Drop daemon, ...): milkd starts and supervises them from
-    // /etc/milk/services (docs/processes.md, "Services"). init restarts milkd if it exits.
+    // /System/Settings/milk/services (docs/processes.md, "Services"). init restarts milkd if it exits.
     start_milkd();
 
-    if let Ok(pid) = sys::spawn("/bin/hello", &["hello", "from", "init"], ENV) {
+    if let Ok(pid) = sys::spawn("/Commands/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }
     loop {
         // The serial console is the maintenance console: a root shell (the desktop
-        // session runs as milk; see docs/security.md). HOME stays /home/milk.
-        let sh = match sys::spawn("/bin/msh", &["msh"], ENV) {
+        // session runs as milk; see docs/security.md). HOME stays /Users/milk.
+        let sh = match sys::spawn("/Commands/msh", &["msh"], ENV) {
             Ok(p) => p,
             Err(e) => {
-                println!("init: cannot start /bin/msh: {e}");
+                println!("init: cannot start /Commands/msh: {e}");
                 sys::sleep_ms(1000);
                 continue;
             }
@@ -63,13 +68,13 @@ fn main(_args: &rt::Args) -> i32 {
 static mut MILKD: u32 = 0;
 
 fn start_milkd() {
-    match sys::spawn("/bin/milkd", &["milkd"], ENV) {
+    match sys::spawn("/System/Services/milkd", &["milkd"], ENV) {
         Ok(pid) => {
             // SAFETY: init is single-threaded.
             unsafe { MILKD = pid };
             println!("  milkd (pid {pid}): service manager, /run/milkd.sock");
         }
-        Err(e) => println!("init: cannot start /bin/milkd: {e}"),
+        Err(e) => println!("init: cannot start /System/Services/milkd: {e}"),
     }
 }
 

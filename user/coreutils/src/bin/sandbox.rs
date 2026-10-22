@@ -66,7 +66,7 @@ fn main(args: &rt::Args) -> i32 {
     let path = if argv[0].contains('/') {
         String::from(argv[0])
     } else {
-        alloc::format!("/bin/{}", argv[0])
+        alloc::format!("/Commands/{}", argv[0])
     };
     // If the filesystem is being restricted, the command's own binary must stay readable
     // or it couldn't be exec'd. (A no-op when fs is left unrestricted.)

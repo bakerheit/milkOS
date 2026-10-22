@@ -1,5 +1,0 @@
-# Alarms, timers and calendar alerts ring with every window closed (Clock, Calendar).
-description = alarms, timers and calendar alerts
-exec = /bin/alarmd -q
-user = milk
-restart = always

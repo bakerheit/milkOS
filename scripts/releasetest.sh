@@ -2,8 +2,8 @@
 # Test the release bundle the way someone else would get it: build it (release.sh),
 # unzip dist/milkOS-<V>.zip into a fresh /tmp directory outside the repo, and run its
 # milkOS.command with a PATH that has no cargo/rustup:
-#   1. --headless: boots to msh; the bundled milkfs disk is mounted and is /home/milk
-#      (not new: made by release.sh); /Applications is there; version is right; the share
+#   1. --headless: boots to msh; the bundled milkfs disk is mounted and is /Users/milk
+#      (not new: made by release.sh); /Apps is there; version is right; the share
 #      is readable but not writable; a note saved to ~ is written out
 #   2. --headless again: the note is still there (persistent)
 #   3. windowed (cocoa), once, briefly: a screendump through the monitor socket, then
@@ -48,18 +48,18 @@ headless() { # name commands...
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
-headless h1 "uname -a" "cat /proc/version" "ls /home/milk" "ls /Applications" "cat /Volumes/Mac/README.txt" \
-  "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /home/milk/note.txt" "echo now > /sys/fs/milkfs/sync"
+headless h1 "uname -a" "cat /proc/version" "ls /Users/milk" "ls /Apps" "cat /Volumes/Mac/README.txt" \
+  "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /Users/milk/note.txt" "echo now > /sys/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/h1.log")"
 [ -e "$T/h1.done" ] && ok "headless: boots to msh" || { bad "headless boot"; tail -5 "$T/h1.out"; }
 echo "$L" | grep -aq "milkfs: vd[a-z] mounted at /Volumes/Milk " && ok "the bundled Milk disk is mounted at /Volumes/Milk" || bad "Milk disk not mounted"
-echo "$L" | grep -aq "milkfs: /home/milk is /Volumes/Milk/home/milk (persistent)" && ok "/home/milk is on it (the skeleton made by release.sh, not new)" || bad "home not on the Milk disk"
-echo "$L" | grep -a -A2 "ls /home/milk$" | grep -aq "README.txt" && ok "home skeleton present" || bad "home skeleton"
-echo "$L" | grep -aq "^\$ ls /Applications\|ls /Applications$" && ! echo "$L" | grep -a -A1 "ls /Applications$" | grep -aq "No such\|ENOENT" && ok "/Applications present" || bad "/Applications"
+echo "$L" | grep -aq "milkfs: /Users/milk is /Volumes/Milk/Users/milk (persistent)" && ok "/Users/milk is on it (the skeleton made by release.sh, not new)" || bad "home not on the Milk disk"
+echo "$L" | grep -a -A2 "ls /Users/milk$" | grep -aq "README.txt" && ok "home skeleton present" || bad "home skeleton"
+echo "$L" | grep -aq "^\$ ls /Apps\|ls /Apps$" && ! echo "$L" | grep -a -A1 "ls /Apps$" | grep -aq "No such\|ENOENT" && ok "/Apps present" || bad "/Apps"
 echo "$L" | grep -aq "milkOS milk $V" && echo "$L" | grep -aq "^milkOS $V (aarch64" && ok "version $V in uname and /proc/version" || bad "version strings"
 echo "$L" | grep -aq "Files you put in this folder show up inside milkOS" && ok "share readable" || bad "share not readable"
 echo "$L" | grep -a -A1 "echo nope > /Volumes/Mac/x.txt" | grep -aqi "read-only\|EROFS\|denied\|EACCES" && [ ! -e "$B/share/x.txt" ] && ok "share is read-only" || bad "share writable?"
-headless h2 "cat /home/milk/note.txt"
+headless h2 "cat /Users/milk/note.txt"
 L="$(tr -d '\r' < "$T/h2.log")"
 echo "$L" | grep -aq "^saved by the release test" && ok "second boot: the note saved in ~ is still there" || bad "note not persistent"
 python3 scripts/mkmilkfs.py check "$B/disks/milk.img" --quiet >/dev/null && ok "the bundle's milk.img checks clean on the Mac" || bad "milk.img check"

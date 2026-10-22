@@ -3,7 +3,7 @@
 //!
 //! The shell is a hook: today [`BuiltinShell`] answers a handful of commands in-kernel. Once
 //! `proc` and `vfs` land, implement [`Shell`] for a proxy that writes the line to a userland
-//! `/bin/sh` process's stdin and appends whatever it prints (and `run` can return before the
+//! `/Commands/msh` process's stdin and appends whatever it prints (and `run` can return before the
 //! command finishes: push output later from `tick`).
 
 use alloc::boxed::Box;

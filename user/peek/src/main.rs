@@ -117,7 +117,7 @@ fn main(_args: &rt::Args) -> i32 {
         }
     };
     // Show that the sandbox holds: a plain open of a real file is refused.
-    let probe = "/home/milk/Documents/todo.txt";
+    let probe = "/Users/milk/Documents/todo.txt";
     let direct = match sys::open(probe, sys::O_RDONLY) {
         Ok(fd) => {
             let _ = sys::close(fd);

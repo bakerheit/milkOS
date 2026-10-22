@@ -42,7 +42,7 @@ fn main(args: &rt::Args) -> i32 {
     let path = if a[0].contains('/') {
         String::from(a[0])
     } else {
-        alloc::format!("/bin/{}", a[0])
+        alloc::format!("/Commands/{}", a[0])
     };
     let envs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
     let e = rt::sys::execve(&path, a, &envs);

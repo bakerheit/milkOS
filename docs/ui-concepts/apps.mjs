@@ -54,8 +54,8 @@ function amProcesses() {
   });
   // detail panel for selected row
   const dy = 104 + 10 * 28 + 8;
-  b += B(12, dy, w - 24, 150, `background:${C.cream};border:1px solid ${C.sand};border-radius:12px`, T(16, 12, "<b>moo2048</b>   pid 21   started 10:32   parent msh (11)") + T(16, 36, "/Applications/moo2048", `color:#6B5846`) +
-    T(16, 62, "Can read", `color:#6B5846`) + T(110, 62, "its own folder, 2 files you chose") + T(16, 82, "Network", `color:#6B5846`) + T(110, 82, "none") + T(16, 102, "Refused", `color:#6B5846`) + T(110, 102, "1 time today (/etc/passwd)", `color:#B5473B`) + T(16, 126, "Open files 4   Threads 1", `color:#6B5846`) + pill(w - 24 - 170, 10, 74, "Show Files", "secondary") + pill(w - 24 - 90, 10, 78, "Security", "secondary"));
+  b += B(12, dy, w - 24, 150, `background:${C.cream};border:1px solid ${C.sand};border-radius:12px`, T(16, 12, "<b>moo2048</b>   pid 21   started 10:32   parent msh (11)") + T(16, 36, "/Apps/moo2048", `color:#6B5846`) +
+    T(16, 62, "Can read", `color:#6B5846`) + T(110, 62, "its own folder, 2 files you chose") + T(16, 82, "Network", `color:#6B5846`) + T(110, 82, "none") + T(16, 102, "Refused", `color:#6B5846`) + T(110, 102, "1 time today (/System/Settings/passwd)", `color:#B5473B`) + T(16, 126, "Open files 4   Threads 1", `color:#6B5846`) + pill(w - 24 - 170, 10, 74, "Show Files", "secondary") + pill(w - 24 - 90, 10, 78, "Security", "secondary"));
   // summary bar
   b += B(0, hh - 28, w, 26, `background:${C.cream};border-top:1px solid ${C.sand}`) + T(16, hh - 24, "10 processes   14 threads   Memory 124 MB of 512 MB   CPU 11%", `color:#6B5846`) + TRi(w, w - 16, hh - 24, "updates every 1 s", `color:#6B5846`);
   return h + appWin(x, y, w, hh, "Activity Monitor", b);
@@ -84,13 +84,13 @@ function amMemory() {
   return h + appWin(x, y, w, hh, "Activity Monitor", b);
 }
 const SEC_EVENTS = [
-  ["10:41", "peek was refused", "tried to read /etc/passwd", "#B5473B", "sandbox.deny"],
+  ["10:41", "peek was refused", "tried to read /System/Settings/passwd", "#B5473B", "sandbox.deny"],
   ["10:40", "You gave peek a file", "~/Documents/todo.txt through the Open panel", C.matcha, "powerbox.grant"],
   ["10:32", "moo2048 started", "sandboxed: own folder only, no network", C.matcha, "sandbox.enter"],
   ["10:12", "fortune was installed", "package from the Milk Store", C.blue, "user.pkg.install"],
   ["10:05", "Milk Drop received bike.png", "from alice, checked OK", C.matcha, "user.drop.recv"],
   ["09:58", "bob's key was trusted", "first use of a new device", C.honey, "user.drop.trust"],
-  ["09:40", "Terminal started a program", "/bin/ls", C.latte, "exec"],
+  ["09:40", "Terminal started a program", "/Commands/ls", C.latte, "exec"],
 ];
 function amSecurity() {
   let h = base("Activity Monitor") + dock([1]);
@@ -276,7 +276,7 @@ const SLIDES = [
   { id: "am-procs", n: "1", name: "Activity Monitor: Processes", tag: "A table of what is running", draw: amProcesses, cost: "medium", fam: "A process table like Activity Monitor or top: name, PID, state, CPU %, memory, threads, with a search box and a Quit button.", nw: "A Sandbox column shows which apps are confined, and the detail panel says in words what the selected app can read, whether it has network, and what it was refused today.", helps: "Anyone asking what is using the computer, and whether an app is behaving.", why: "Reads /proc once a second. See SPEC-APPS.md.", els: ["Tabs", "Process table", "Sandbox chip", "Detail panel", "Summary bar"], font: "Right-align numbers so the digits line up." },
   { id: "am-cpu", n: "2", name: "Activity Monitor: CPU", tag: "Per-core graphs", draw: amCpu, cost: "easy", fam: "Four live graphs, one per core, plus load.", nw: "Sixty seconds of history per core, load averages, the busiest processes, and interrupt rates.", helps: "Spotting a runaway process or a busy core.", why: "From /proc/cpuload, /proc/loadavg and /proc/interrupts.", els: ["Per-core charts", "Load line", "Busiest list", "Interrupt rates"], font: "Charts are rectangles, one column per second." },
   { id: "am-mem", n: "3", name: "Activity Monitor: Memory", tag: "Where the memory went", draw: amMemory, cost: "easy", fam: "A stacked bar of used and free memory, pressure, and the biggest users.", nw: "Page cache is shown separately (memory the system can give back) so a full-looking bar does not worry anyone.", helps: "Understanding memory without a lecture.", why: "From /proc/meminfo and each process's VmRSS.", els: ["Stacked bar", "Pressure gauge", "Biggest users"], font: "One headline sentence in 2x text." },
-  { id: "am-sec", n: "4", name: "Activity Monitor: Security", tag: "Sandbox denials and audit events as sentences", draw: amSecurity, cost: "medium", fam: "A timeline with filter chips, like an activity feed.", nw: "The audit log read as sentences (peek was refused /etc/passwd, You gave peek a file, moo2048 started sandboxed). A green line says the log is intact, from the tamper-evident chain.", helps: "Seeing what apps tried to do, and trusting the record.", why: "Reads /proc/audit (permission being added) and runs the audit verify check. Read only.", els: ["Intact banner", "Filter chips", "Event timeline", "Raw record on click"], font: "Dots and the line carry the look." },
+  { id: "am-sec", n: "4", name: "Activity Monitor: Security", tag: "Sandbox denials and audit events as sentences", draw: amSecurity, cost: "medium", fam: "A timeline with filter chips, like an activity feed.", nw: "The audit log read as sentences (peek was refused /System/Settings/passwd, You gave peek a file, moo2048 started sandboxed). A green line says the log is intact, from the tamper-evident chain.", helps: "Seeing what apps tried to do, and trusting the record.", why: "Reads /proc/audit (permission being added) and runs the audit verify check. Read only.", els: ["Intact banner", "Filter chips", "Event timeline", "Raw record on click"], font: "Dots and the line carry the look." },
   { id: "te-edit", n: "5", name: "Text Editor", tag: "Plain text with line numbers and light colour", draw: () => teEdit(false, false), cost: "medium", fam: "A plain editor: gutter, current-line highlight, status bar.", nw: "Light syntax colours that all pass 4.5:1 in both themes, soft wrap, undo that groups typing, and Versions from the filesystem for free.", helps: "Writing code and notes without an IDE.", why: "Starts from scratch: line layout, wrapping and undo are new work for the app engineer.", els: ["Gutter", "Current line", "Syntax colours", "Status bar"], font: "Unifont at 8x16 with 18 px line height." },
   { id: "te-find", n: "6", name: "Text Editor: Find and Replace", tag: "A bar under the title", draw: () => teEdit(false, true), cost: "easy", fam: "Cmd-F opens a find bar with next and previous and a match count.", nw: "All matches are tinted honey and the current one straw. Replace and Replace All sit in the same bar, no dialog.", helps: "Fast edits.", why: "A search over the buffer and a highlight layer.", els: ["Find field", "Count", "Prev/next", "Case toggle", "Replace"], font: "Short labels only." },
   { id: "te-tabs", n: "7", name: "Text Editor: tabs and Markdown", tag: "Many files, one window", draw: teTabs, cost: "medium", fam: "Tabs as in the Tabs spec; the dot on a tab means unsaved changes.", nw: "Markdown gets light styling (bold headings, a coloured bullet, a tinted code span) without rendering it. Autosave is off by default for files; Notes keeps its autosave.", helps: "Working on several files.", why: "Uses the shared tab strip; Markdown styling is a line-based pass.", els: ["Tab strip", "Unsaved dot", "Markdown styling", "Soft wrap"], font: "Bold is the faux bold." },
@@ -350,7 +350,7 @@ Reads and writes per second as two charts (blue and straw), free space per mount
 The audit log as a timeline of plain-English events, read only. At the top a banner: **"Log is intact"** (matcha at 13%, matcha border) with the record count and the time of the last verification, and a Verify again button (secondary) that runs the same check as \`audit verify\`; if the chain is broken the banner is Danger: "The log has been changed", with the first bad record. Filter chips: All, Refused, Files, Programs, Installs, Milk Drop. Search. Each event: a coloured dot (Danger for refusals, matcha for grants and starts, blue for installs, honey for trust decisions, latte for ordinary programs), a bold sentence, a secondary line with the detail, the time on the right and the raw event name (e.g. sandbox.deny) under it. Clicking an event shows the raw record.
 | Raw event | Sentence |
 |---|---|
-| sandbox.deny | "peek was refused /etc/passwd" |
+| sandbox.deny | "peek was refused /System/Settings/passwd" |
 | powerbox.grant | "You gave peek a file" (path in the detail) |
 | sandbox.enter | "moo2048 started, sandboxed" |
 | exec | "Terminal started a program" |

@@ -6,7 +6,7 @@
 //! says it is done. If rngd dies, the kernel resets the device and its own driver takes
 //! over again; milkd restarts rngd.
 //!
-//!   rngd            run (milkd starts it: /etc/milk/services/rngd.service)
+//!   rngd            run (milkd starts it: /System/Settings/milk/services/rngd.service)
 //!   rngd -1         one request, print how many bytes went in, exit (tests)
 
 #![no_std]

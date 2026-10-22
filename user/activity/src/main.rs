@@ -294,7 +294,7 @@ impl App {
     }
 
     fn verify(&mut self) {
-        let out = data::capture("/bin/audit", &["audit", "verify"]);
+        let out = data::capture("/Commands/audit", &["audit", "verify"]);
         self.verdict = sysview::audit::parse_verify(&out);
         self.verified_wall_ns = data::wall_ns();
     }

@@ -18,7 +18,7 @@ Files: `kernel/src/{dtb,mmu,pmm,heap,mem,memtest,spin}.rs`, header + DTB hand-of
 6. `memtest::run` is the boot self-test (panics on failure).
 
 ### Why a flat Image, not the ELF
-qemu passes a DTB in `x0` only when it boots an arm64 *Image* (a flat binary
+qemu passes a DTB in `x0` only when it boots an arm64 *Image* (a flat file
 with the 64-byte Linux header). A plain ELF gets `x0 = 0` and no DTB anywhere
 in RAM (checked with `info roms`). So `boot.S` starts with an Image header and
 `scripts/run.sh` runs `llvm-objcopy -O binary` and boots the `.bin`. The ELF

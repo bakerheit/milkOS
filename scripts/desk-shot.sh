@@ -5,7 +5,7 @@
 # The commands are scripts/qmp.py's (type, key, move, click, sleep, screendump, ...); a
 # final screendump to OUT.png is added. The Terminal window has the keyboard focus at boot.
 # MILK_REPO=1: also build the toy package repo and serve it on 127.0.0.1:8765 (the guest's
-# default /etc/milk/repos URL, http://10.0.2.2:8765/) with an unrestricted user netdev;
+# default /System/Settings/milk/repos URL, http://10.0.2.2:8765/) with an unrestricted user netdev;
 # otherwise the netdev is restricted. The serial log goes next to OUT. Only the qemu and
 # python processes started here are killed, by PID; a fresh image boots into the Welcome
 # tour, which is closed first ("Get started") unless DESK_WELCOME=1; the images live in a mktemp dir that

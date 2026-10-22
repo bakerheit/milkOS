@@ -1,0 +1,8 @@
+format 1
+name reminders
+version 1.0.0
+description Reminders: lists, due dates and repeats
+exec reminders
+dock Reminders #B9A9D6
+files
+payload-sha256 -

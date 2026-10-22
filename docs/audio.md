@@ -2,7 +2,7 @@
 
 Files: `kernel/src/virtio/sound.rs` (driver), `kernel/src/audio/` (mixer, /dev/audio,
 system sounds, WAV decoding), `user/play`, `scripts/gen_sounds.py` (system sounds, outputs
-in `rootfs/System/Library/Sounds/`), `scripts/audio-test.sh` + `scripts/wav_check.py`.
+in `rootfs/System/Sounds/`), `scripts/audio-test.sh` + `scripts/wav_check.py`.
 
 ## Running it
 
@@ -66,7 +66,7 @@ crate::audio::available() -> bool                         // is there a sound de
 
 Non-blocking and safe from any thread (not from IRQ handlers: it takes a spinlock, which
 is fine there too, but there's no reason to). The mixer thread loads
-`/System/Library/Sounds/{notify,error,chime}.wav` on first use (cached), decodes them (any
+`/System/Sounds/{notify,error,chime}.wav` on first use (cached), decodes them (any
 16-bit PCM WAV; mono/rate converted) and mixes them in. Without a sound device it does
 nothing. The wm hook is not wired: that's the wm side's call.
 
@@ -98,7 +98,7 @@ Generated with the python3 stdlib, committed with its outputs (48 kHz mono 16-bi
 
 Boots with the wav backend, lets init play the chime, types into msh: `play tone 440 0.5`,
 `play tone 1000 0.25`, `play tone 660 1.2 0.25 &` + `play tone 440 0.4 0.25` (two writers),
-`play system notify`, `play /System/Library/Sounds/error.wav`, `cat /proc/audio`, stops
+`play system notify`, `play /System/Sounds/error.wav`, `cat /proc/audio`, stops
 qemu gracefully (it writes the WAV header on exit) and checks the file with
 `wav_check.py`: 48 kHz stereo; chime G5 then C6; 440 Hz for 0.48 s (+ramps); 1000 Hz for
 0.24 s; a 660 Hz stretch with 440 Hz mixed in (100 ms Goertzel windows: both at -12 dB, then

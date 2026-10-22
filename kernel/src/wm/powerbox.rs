@@ -173,12 +173,12 @@ pub fn pending() -> bool {
 // ---- the panel ---------------------------------------------------------------------------
 
 const PLACES: [(&str, &str); 6] = [
-    ("Home", "/home/milk"),
-    ("Documents", "/home/milk/Documents"),
-    ("Downloads", "/home/milk/Downloads"),
-    ("Desktop", "/home/milk/Desktop"),
-    ("Pictures", "/home/milk/Pictures"),
-    ("Music", "/home/milk/Music"),
+    ("Home", "/Users/milk"),
+    ("Documents", "/Users/milk/Documents"),
+    ("Downloads", "/Users/milk/Downloads"),
+    ("Desktop", "/Users/milk/Desktop"),
+    ("Pictures", "/Users/milk/Pictures"),
+    ("Music", "/Users/milk/Music"),
 ];
 const SIDE_W: i32 = 150;
 const HEAD_H: i32 = 64;
@@ -233,7 +233,7 @@ impl Panel {
             last_click: None,
             hover: None,
         };
-        p.go("/home/milk/Documents");
+        p.go("/Users/milk/Documents");
         p
     }
 

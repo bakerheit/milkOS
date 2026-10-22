@@ -73,11 +73,21 @@ pub struct Versions {
 }
 
 /// Where a version's content can be read: `<volume>/.snapshots/<snapshot><path in volume>`.
-/// The home folder and /Applications are binds of the same paths on the volume.
+/// The home folder and /Apps are binds of the same paths on the volume. A snapshot taken
+/// before the folder layout changed has the home at `home/<user>` (fs::layout::migrate).
 pub fn snapshot_path(path: &str, snapshot: &str) -> Option<String> {
     let vol = milkfs::mount_path()?;
     let rel = path.strip_prefix(vol.as_str()).unwrap_or(path);
-    Some(format!("{vol}/.snapshots/{snapshot}{rel}"))
+    let p = format!("{vol}/.snapshots/{snapshot}{rel}");
+    if fs::lstat(&p).is_err()
+        && let Some(rest) = rel.strip_prefix("/Users/")
+    {
+        let old = format!("{vol}/.snapshots/{snapshot}/home/{rest}");
+        if fs::lstat(&old).is_ok() {
+            return Some(old);
+        }
+    }
+    Some(p)
 }
 
 fn preview(path: &str) -> Preview {

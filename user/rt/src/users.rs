@@ -1,4 +1,4 @@
-//! Accounts for user programs: /etc/passwd, /etc/group, /etc/shadow and the `$5m$`
+//! Accounts for user programs: /System/Settings/passwd, /System/Settings/group, /System/Settings/shadow and the `$5m$`
 //! password hash (the same scheme as the kernel's kernel/src/proc/login.rs):
 //! h = SHA-256(salt ‖ password), then `rounds - 1` times h = SHA-256(h ‖ salt ‖ password),
 //! stored as `$5m$<rounds>$<salt hex>$<digest hex>`.
@@ -11,7 +11,7 @@ use crate::sys;
 
 pub const ROUNDS: u32 = 5000;
 pub const ADMIN_GID: u32 = 80;
-pub const SHADOW: &str = "/etc/shadow";
+pub const SHADOW: &str = "/System/Settings/shadow";
 /// passwd also writes here so a changed password survives a reboot (the kernel restores it).
 pub const PERSISTENT_SHADOW: &str = "/Volumes/Milk/.milkos/shadow";
 
@@ -47,7 +47,10 @@ fn parse(line: &str) -> Option<Passwd> {
 }
 
 pub fn all() -> Vec<Passwd> {
-    text("/etc/passwd").lines().filter_map(parse).collect()
+    text("/System/Settings/passwd")
+        .lines()
+        .filter_map(parse)
+        .collect()
 }
 
 pub fn by_name(name: &str) -> Option<Passwd> {
@@ -65,7 +68,7 @@ pub fn user_name(uid: u32) -> String {
 
 /// (name, gid, members) for every group.
 pub fn groups() -> Vec<(String, u32, Vec<String>)> {
-    text("/etc/group")
+    text("/System/Settings/group")
         .lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split(':').collect();
@@ -158,7 +161,7 @@ pub fn check_hash(stored: &str, password: &str) -> bool {
     got.iter().zip(&want).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0
 }
 
-/// `user`'s hash from /etc/shadow (needs root to read).
+/// `user`'s hash from /System/Settings/shadow (needs root to read).
 pub fn shadow_hash(user: &str) -> Option<String> {
     text(SHADOW).lines().find_map(|l| {
         let mut f = l.split(':');
@@ -185,7 +188,7 @@ fn write_atomic(path: &str, data: &[u8], mode: u32) -> sys::Result<()> {
     sys::rename(&tmp, path)
 }
 
-/// Replace `user`'s hash in /etc/shadow (and its persistent copy, if the disk is there).
+/// Replace `user`'s hash in /System/Settings/shadow (and its persistent copy, if the disk is there).
 pub fn set_shadow_hash(user: &str, hash: &str) -> sys::Result<()> {
     let mut found = false;
     let mut out = String::new();
@@ -249,7 +252,7 @@ pub fn become_user(p: &Passwd) -> sys::Result<()> {
 /// Environment for a login shell of `p`.
 pub fn login_env(p: &Passwd) -> Vec<String> {
     alloc::vec![
-        String::from("PATH=/bin"),
+        String::from("PATH=/Commands"),
         alloc::format!("HOME={}", p.home),
         alloc::format!("USER={}", p.name),
         alloc::format!("LOGNAME={}", p.name),

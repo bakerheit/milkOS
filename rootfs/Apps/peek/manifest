@@ -1,0 +1,7 @@
+format 1
+name peek
+version 1.0.0
+description Peek: a sandboxed text viewer that opens files only through the Open panel
+exec peek
+files
+payload-sha256 -

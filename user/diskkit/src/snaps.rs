@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn diffs() {
-        let t = "diff before..live: 5 change(s) (2 tree nodes read, 0 unchanged subtrees skipped)\nA /home/milk/Documents/Plans 2026\nD /home/milk/Documents/todo.txt\nM /home/milk/README.txt\nR /dd/a -> /dd/sub/a2\nweird\n";
+        let t = "diff before..live: 5 change(s) (2 tree nodes read, 0 unchanged subtrees skipped)\nA /Users/milk/Documents/Plans 2026\nD /Users/milk/Documents/todo.txt\nM /Users/milk/README.txt\nR /dd/a -> /dd/sub/a2\nweird\n";
         let d = parse_diff(t);
         assert!(d.header.starts_with("before..live: 5 change(s)"));
         assert_eq!(d.changes.len(), 4);
@@ -387,7 +387,7 @@ mod tests {
             d.changes[0],
             Change {
                 kind: ChangeKind::Added,
-                path: "/home/milk/Documents/Plans 2026".into(),
+                path: "/Users/milk/Documents/Plans 2026".into(),
                 to: None
             }
         );

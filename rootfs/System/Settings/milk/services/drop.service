@@ -1,0 +1,7 @@
+# Milk Drop: share files with nearby milkOS machines over the VM-to-VM link.
+description = Milk Drop on eth1
+exec = /Commands/drop daemon -q
+user = root
+restart = on-failure
+if-contains = /proc/net/ifaddr eth1 
+console = yes

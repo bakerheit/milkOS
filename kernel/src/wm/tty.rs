@@ -187,10 +187,10 @@ fn publish(n: usize) -> bool {
 }
 
 /// Publish `/dev/ttyN` and start the thread that keeps a shell on it while it is open.
-/// Idempotent. False if there is no `/bin/msh` (then the Terminal keeps its built-in shell).
+/// Idempotent. False if there is no `/Commands/msh` (then the Terminal keeps its built-in shell).
 pub fn start_shell(n: usize) -> bool {
     let i = idx(n);
-    if fs::stat("/bin/msh").is_err() || !publish(n) {
+    if fs::stat("/Commands/msh").is_err() || !publish(n) {
         return false;
     }
     OPEN[i].store(true, Ordering::Release);
@@ -201,8 +201,8 @@ pub fn start_shell(n: usize) -> bool {
     drop(sched::spawn(&name, move || {
         let tty = path(i + 1);
         while OPEN[i].load(Ordering::Acquire) {
-            const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
-            match proc::spawn_on("/bin/msh", &["msh"], ENV, &tty, "/home/milk") {
+            const ENV: &[&str] = &["PATH=/Commands", "HOME=/Users/milk", "TERM=dumb"];
+            match proc::spawn_on("/Commands/msh", &["msh"], ENV, &tty, "/Users/milk") {
                 Ok(pid) => {
                     SHELL[i].store(pid, Ordering::Release);
                     kprintln!("wm: msh pid {pid} on {tty}");
@@ -303,7 +303,7 @@ impl Job {
         // Raw-ish: no echo would be nicer, but the prompts we answer are line based and
         // the echoed answer is harmless.
         let tty = path(n);
-        match proc::spawn_on(exe, argv, env, &tty, "/home/milk") {
+        match proc::spawn_on(exe, argv, env, &tty, "/Users/milk") {
             Ok(pid) => {
                 JOB_PID[i].store(pid, Ordering::Release);
                 let name = alloc::format!("job-tty{}", i + 1);

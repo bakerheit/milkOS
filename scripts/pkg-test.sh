@@ -4,7 +4,7 @@
 #   1. build packages/ into a repo dir and serve it with python3 http.server on 127.0.0.1
 #      (a free port; the guest reaches it as 10.0.2.2:PORT)
 #   2. boot, and in msh: milk update / search / info, install fortune, run it, list, remove;
-#      try snake in a clone, run it from the clone, check the live /Applications and /bin
+#      try snake in a clone, run it from the clone, check the live /Apps and /Commands
 #      never saw it, discard; try moo2048 and keep it (promote), run its self-test;
 #      audit trail (user.pkg.* + milkfs.*) and `audit verify`
 #   3. after shutdown, look inside the image with mkmilkfs.py: moo2048 is on disk, fortune
@@ -65,7 +65,7 @@ QPID=$!
 P='wait:msh:[^\n]*\$ '
 CL=/Volumes/Milk-try-snake
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  "$P" "send:echo http://10.0.2.2:$PORT/ > /etc/milk/repos" "$P" \
+  "$P" "send:echo http://10.0.2.2:$PORT/ > /System/Settings/milk/repos" "$P" \
   'send:milk update' 'wait:index updated' "$P" \
   'send:milk search' "$P" \
   'send:milk info fortune' "$P" \
@@ -74,13 +74,15 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:fortune' "$P" \
   'send:milk list' "$P" \
   'send:milk remove fortune' "$P" \
-  'send:ls /Applications' "$P" \
+  'send:ls /Apps/fortune' "$P" \
+  'send:ls /Apps' "$P" \
+  'send:milk remove store' "$P" \
   'send:milk try snake' 'wait:milk: (then|[^\n]*error)' "$P" \
-  "send:$CL/Applications/snake/bin/snake --demo 400" 'wait:snake: demo over' "$P" \
+  "send:$CL/Apps/snake/snake --demo 400" 'wait:snake: demo over' "$P" \
   'send:milk run-try snake --demo 300' 'wait:(snake: demo over|milk: [^\n]*(error|not|denied))' "$P" \
-  'send:ls /Applications' "$P" \
-  'send:ls /bin/snake' "$P" \
-  "send:ls $CL/Applications" "$P" \
+  'send:ls /Apps/snake' "$P" \
+  'send:ls /Commands/snake' "$P" \
+  "send:ls $CL/Apps" "$P" \
   'send:cat /sys/fs/milkfs/clones' "$P" \
   'send:milk discard snake' 'wait:discarded' "$P" \
   'send:cat /sys/fs/milkfs/clones' "$P" \
@@ -107,7 +109,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:milk install fortune=1.0.0' 'wait:milk: (installed|[^\n]*refused|[^\n]*error)' "$P" \
   'send:milk search fortune' "$P" \
   'send:milk upgrade fortune' 'wait:milk: (then|[^\n]*failed|[^\n]*error)' "$P" \
-  'send:/Volumes/Milk-try-upgrade/Applications/fortune/bin/fortune -n 15' "$P" \
+  'send:/Volumes/Milk-try-upgrade/Apps/fortune/fortune -n 15' "$P" \
   'send:milk run-try fortune -n 15' "$P" \
   'send:audit --event sandbox' "$P" \
   'send:milk discard upgrade' 'wait:discarded' "$P" \
@@ -179,24 +181,28 @@ check "search lists snake" "^snake +1.0.0 "
 check "info shows the sha256" "^sha256: +[0-9a-f]{64}"
 check "install verified the package sha256" "milk: sha256 [0-9a-f]{16}\.\.\. ok"
 check "install verified the payload sha256" "milk: payload sha256 [0-9a-f]{16}\.\.\. ok \(2 files\)"
-check "install linked /bin/fortune" "/bin/fortune -> /Applications/fortune/bin/fortune"
+check "install linked /Commands/fortune" "/Commands/fortune -> /Apps/fortune/fortune"
 check "fortune runs (quote 1)" "There is no use crying over spilt milk"
 check "fortune runs (random)" "-- milkOS fortune \(12 quotes\)"
 check "remove" "milk: removed fortune 1.0.0"
+check "removed from /Apps" "ls: /Apps/fortune: "
+check "built-in apps are in /Apps" "(^| )store( |$)"
+check "milk leaves built-in apps alone" "milk: store is a built-in app, not a package"
 check "try: installed into the clone only" "snake 1.0.0 is installed in clone try-snake only"
 check "snake runs from the clone" "snake: demo over after [0-9]+ ticks, length [0-9]+"
-check "live /bin has no snake while trying" "ls: /bin/snake: "
-check "the clone has snake" "^snake$"
+check "live /Commands has no snake while trying" "ls: /Commands/snake: "
+check "live /Apps has no snake while trying" "ls: /Apps/snake: "
+check "the clone has snake" "(^| )snake( |$)"
 check "clone listed while trying" "^try-snake of=milk-try-snake at=/Volumes/Milk-try-snake"
 [ "$(grep -c "snake: demo over after" "$S")" -ge 2 ] || fail "run-try snake did not run"
 echo "  ok  run-try snake: runs with its clone as / (chroot), sandboxed"
 check "run-try made a scratch dir in the clone" "^run-moo2048$"
 check "keep dropped the run-try scratch dir" "ls: /Volumes/Milk/tmp: "
-check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Applications/snake/bin/snake sandbox=fs=/Applications:r,fs=/Volumes/Milk-try-snake/Applications:r,fs=/tmp/run-snake:rw"
+check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Apps/snake/snake sandbox=fs=/Apps:r,fs=/Volumes/Milk-try-snake/Apps:r,fs=/tmp/run-snake:rw"
 check "audit: run-try entered the sandbox" "sandbox.enter .*net=local"
 check "discard" "milk: discarded clone try-snake"
 check "keep (promote)" "milk: kept moo2048 1.0.0: clone try-moo2048 is now the live system"
-check "kept package runs from /bin" "moo2048: selftest ok"
+check "kept package runs from /Commands" "moo2048: selftest ok"
 check "milk selftest: RFC 8032 + FIPS vectors" "ed25519 16/16 RFC 8032 checks"
 check "update checked the index signature" "index.txt: signature ok \(key milk-test\)"
 check "install checked the package signature" "fortune-1.0.0.milkpkg: signature ok \(key milk-test\)"
@@ -210,21 +216,21 @@ check "audit: verify failure (unsigned, --insecure)" "user.pkg.verify_fail +what
 check "audit: verify failure (tampered index)" "user.pkg.verify_fail +what=http://10.0.2.2:[0-9]+/index.txt [^ ]* reason=BAD signature"
 check "milk selftest: version compare" "milk: version compare 10/10 checks"
 check "restored repo: 5 packages" "milk: index updated, 5 packages"
-check "pinned install of an older version" "milk: installed fortune 1.0.0 in /Applications/fortune"
+check "pinned install of an older version" "milk: installed fortune 1.0.0 in /Apps/fortune"
 check "search offers the upgrade" "^fortune +1.1.0 .*\\[installed 1.0.0, upgrade available\\]"
 check "upgrade plan" "milk: upgrade fortune 1.0.0 -> 1.1.0"
 check "upgrade went into a clone" "milk: upgraded 1 package\\(s\\) in clone try-upgrade; the live system is untouched"
 check "the clone runs the new version" "If an upgrade sours, discard the clone"
-# run-try in the upgrade clone: /Applications/fortune inside the jail is the clone's 1.1.0
+# run-try in the upgrade clone: /Apps/fortune inside the jail is the clone's 1.1.0
 # (the live one is 1.0.0 and has no 15th quote), so the new quote proves the root.
 fq=$(awk '/milk run-try fortune -n 15$/{f=1; next} f && /^msh:/{exit} f' "$S")
 echo "$fq" | grep -q "If an upgrade sours" || { echo "$fq"; fail "run-try fortune did not see the clone as /"; }
 echo "  ok  run-try fortune -n 15 sees the clone's 1.1.0 (the clone is its /)"
 check "discarded upgrade" "discarded clone try-upgrade; the live system never saw the upgrade"
-check "live still 1.0.0 after discard" "installed: +1.0.0 in /Applications/fortune"
+check "live still 1.0.0 after discard" "installed: +1.0.0 in /Apps/fortune"
 check "upgrade -y kept" "milk: kept the upgrade: clone try-upgrade is now the live system"
 check "dependency announced" "milk: games needs snake"
-check "dependency installed as such" "milk: installed snake 1.0.0 in /Applications/snake \\(as a dependency\\)"
+check "dependency installed as such" "milk: installed snake 1.0.0 in /Apps/snake \\(as a dependency\\)"
 check "remove refused while needed" "milk: snake is needed by games"
 check "info lists depends" "depends: +snake moo2048>=1.0"
 check "autoremove took the orphan" "milk: autoremove: 1 package\\(s\\) removed"
@@ -233,7 +239,7 @@ check "audit: upgrade kept" "user.pkg.keep +name=upgrade clone=try-upgrade now=.
 check "audit: dependency install" "user.pkg.install +name=snake version=1.0.0 .* auto=true"
 check "audit: autoremove" "user.pkg.remove +name=snake version=1.0.0 reason=autoremove"
 # Dependencies first: snake is installed before games.
-sl=$(grep -n "milk: installed snake 1.0.0 in /Applications/snake (as a dependency)" "$S" | head -1 | cut -d: -f1)
+sl=$(grep -n "milk: installed snake 1.0.0 in /Apps/snake (as a dependency)" "$S" | head -1 | cut -d: -f1)
 gl=$(grep -n "milk: installed games 1.0.0" "$S" | head -1 | cut -d: -f1)
 [ -n "$sl" ] && [ -n "$gl" ] && [ "$sl" -lt "$gl" ] || fail "dependency order (snake line $sl, games line $gl)"
 echo "  ok  install order: snake (dependency) before games"
@@ -254,29 +260,29 @@ check "audit: remove" "user.pkg.remove +name=fortune"
 check "audit: try" "user.pkg.try +name=snake"
 check "audit: discard" "user.pkg.discard +name=snake"
 check "audit: keep" "user.pkg.keep +name=moo2048"
-check "audit: kernel saw the clone" "/bin/milk +milkfs.clone +snap=milk-try-snake name=try-snake result=ok"
+check "audit: kernel saw the clone" "/Commands/milk +milkfs.clone +snap=milk-try-snake name=try-snake result=ok"
 check "audit: kernel saw the discard" "milkfs.clone.discard +name=try-snake result=ok"
 check "audit: kernel saw the promote" "milkfs.clone.promote +name=try-moo2048 kept_as=before-try-moo2048 result=ok"
 check "audit verify: RAM ring OK" "audit verify: /proc/audit: OK"
 check "audit verify: persisted log OK" "audit verify: /Volumes/Milk/var/log/audit.log: OK"
-# Both `ls /Applications` (after remove, and while snake sat in the clone) print nothing
-# (the index cache is a dot directory): the next line is the prompt.
-if grep -A1 '\$ ls /Applications$' "$S" | grep -v -- '--' | grep -v '\$ ls /Applications$' | grep -qv '^msh:'; then
-  fail "/Applications not empty after remove / while trying"
-fi
-echo "  ok  live /Applications empty after remove and while snake was only in the clone"
+# `milk list` never shows the built-in apps (they have no .origin): after keep, only moo2048.
+awk '/milk keep moo2048$/{k=1} k && /\$ milk list$/{f=1; next} f && /^msh:/{exit} f' "$S" >"$WORK/list1.txt"
+grep -q '^moo2048' "$WORK/list1.txt" && ! grep -Eq '^(store|calendar|clock) ' "$WORK/list1.txt" \
+  || { cat "$WORK/list1.txt"; fail "milk list shows built-in apps"; }
+echo "  ok  milk list: packages only (moo2048), not the built-in apps"
 
 echo "---- on disk (mkmilkfs.py, after shutdown) ----"
 python3 -I scripts/mkmilkfs.py check "$WORK/fs.img" | tail -3
-python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" /Applications | tee "$WORK/apps.txt"
+python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" /Apps | tee "$WORK/apps.txt"
 grep -q " moo2048$" "$WORK/apps.txt" || fail "moo2048 not on disk after keep"
+grep -q " store$" "$WORK/apps.txt" || fail "the built-in apps are not in the volume's Apps folder"
 grep -q " fortune$" "$WORK/apps.txt" || fail "fortune (1.1.0) not on disk"
-python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" /Applications/fortune/manifest | grep -q "^version 1.1.0$" || fail "fortune on disk is not 1.1.0"
+python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" /Apps/fortune/manifest | grep -q "^version 1.1.0$" || fail "fortune on disk is not 1.1.0"
 grep -q " snake$" "$WORK/apps.txt" && fail "snake on disk after autoremove"
 grep -q " games$" "$WORK/apps.txt" && fail "games on disk after remove"
 python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" / | grep -q "try-snake" && fail "clone left behind"
 python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" /var/log/audit.log | grep -c "user.pkg" | sed 's/^/audit.log on disk: user.pkg records: /'
-echo "  ok  disk: moo2048 kept, fortune upgraded to 1.1.0, games removed, snake autoremoved"
+echo "  ok  disk: moo2048 kept, fortune upgraded to 1.1.0, games removed, snake autoremoved, built-in apps there"
 echo "---- second boot of the same image ----"
 rm -f "$SERIAL" "$WORK/drive.done"
 LOG2="$WORK/serial2.log"
@@ -286,7 +292,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   "${DISK_ARGS[@]}" -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 2>>"$WORK/qemu.err" &
 QPID=$!
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG2" \
-  "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
+  "$P" 'send:sleep 1' "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:milk list' "$P" 'send:fortune -n 15' "$P" 'send:audit verify' 'wait:audit.log: [A-Z]+' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive2.log" 2>&1 &
 DPID=$!
@@ -304,7 +310,7 @@ DPID=""
 S="$WORK/session2.txt"
 python3 -I scripts/console_clean.py "$LOG2" | sed -n '/msh:[^ ]*\$ moo2048/,$p' >"$S"
 cat "$S"
-check "after reboot: init relinked /bin/moo2048 and it runs" "moo2048: selftest ok"
+check "after reboot: init relinked /Commands/moo2048 and it runs" "moo2048: selftest ok"
 check "after reboot: still installed" "^moo2048 +1.0.0"
 check "after reboot: fortune is 1.1.0" "^fortune +1.1.0"
 check "after reboot: audit chain OK across boots" "audit verify: /Volumes/Milk/var/log/audit.log: OK"

@@ -2,7 +2,7 @@
 //!
 //! Without PATHs: every mount in /proc/mounts, skipping the ones with no storage of their
 //! own (proc, sysfs, devfs) and repeats of the same file system (bind mounts like
-//! /home/milk); `-a` shows them all. Sizes in 1K blocks, `-h` human-readable. With
+//! /Users/milk); `-a` shows them all. Sizes in 1K blocks, `-h` human-readable. With
 //! MILK_TABLE=1 the output is a table: mount, type, size, used, avail, use_pct, bsize,
 //! blocks, bfree, bavail, files, ffree, ro.
 #![no_std]

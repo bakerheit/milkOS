@@ -49,7 +49,7 @@ Reads and writes per second as two charts (blue and straw), free space per mount
 The audit log as a timeline of plain-English events, read only. At the top a banner: **"Log is intact"** (matcha at 13%, matcha border) with the record count and the time of the last verification, and a Verify again button (secondary) that runs the same check as `audit verify`; if the chain is broken the banner is Danger: "The log has been changed", with the first bad record. Filter chips: All, Refused, Files, Programs, Installs, Milk Drop. Search. Each event: a coloured dot (Danger for refusals, matcha for grants and starts, blue for installs, honey for trust decisions, latte for ordinary programs), a bold sentence, a secondary line with the detail, the time on the right and the raw event name (e.g. sandbox.deny) under it. Clicking an event shows the raw record.
 | Raw event | Sentence |
 |---|---|
-| sandbox.deny | "peek was refused /etc/passwd" |
+| sandbox.deny | "peek was refused /System/Settings/passwd" |
 | powerbox.grant | "You gave peek a file" (path in the detail) |
 | sandbox.enter | "moo2048 started, sandboxed" |
 | exec | "Terminal started a program" |

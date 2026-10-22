@@ -60,7 +60,7 @@ impl State {
         Ok((xxh64(&bytes), i))
     }
 
-    /// Resolve a volume-relative path (`/home/milk/x`) in `view` to an inode.
+    /// Resolve a volume-relative path (`/Users/milk/x`) in `view` to an inode.
     pub fn resolve_in(&self, view: u64, path: &str) -> Option<u64> {
         let mut cur = ROOT_INO;
         for part in path.split('/').filter(|p| !p.is_empty()) {

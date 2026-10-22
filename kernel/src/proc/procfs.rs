@@ -7,7 +7,7 @@
 //! /proc/<pid>/stat      the one-line Linux format (pid (comm) state ppid pgrp ... rss)
 //! /proc/<pid>/cmdline   argv, NUL separated
 //! /proc/<pid>/maps      start-end perms offset dev inode name, one line per region
-//! /proc/<pid>/fd/N      symlinks: "/dev/console", "/home/milk/x", "pipe:[3]"
+//! /proc/<pid>/fd/N      symlinks: "/dev/console", "/Users/milk/x", "pipe:[3]"
 //! /proc/<pid>/cwd, exe  symlinks
 //! /proc/self            symlink to the caller's pid
 //! /proc/threads         TID PID STATE PRIO CPU_NS NAME for every thread

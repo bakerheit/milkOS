@@ -1,6 +1,6 @@
 # Disk Utility
 
-`/bin/diskutil` (dock tile from `/System/Applications/diskutil/manifest`), following
+`/Apps/diskutil/diskutil` (dock tile from `/Apps/diskutil/manifest`), following
 docs/ui-concepts/SPEC-DISK-REMINDERS.md section 1. The window is `user/diskutil`; everything that can
 be decided without a syscall is in `user/diskkit` (unit tests: `scripts/diskkit-test.sh`). No
 kernel changes: it reads and writes `/sys/fs/milkfs/*` and reads `/proc/mounts`.

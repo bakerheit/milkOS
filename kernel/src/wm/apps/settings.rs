@@ -537,7 +537,7 @@ impl Settings {
             p.text_p(x, y + 36, &body.truncate(who, room), COCOA, false);
             y += 36;
         }
-        let uni = "GNU Unifont draws Terminal and Notes. Licences: /System/Library/Fonts.";
+        let uni = "GNU Unifont draws Terminal and Notes. Licences: /System/Fonts.";
         p.text_p(x, y + 26, &body.truncate(uni, room), ESPRESSO, false);
     }
 

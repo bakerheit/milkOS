@@ -302,7 +302,7 @@ const DOCK: [DockItem; 9] = [
         icon: Icon::Paint,
         bg: HONEY,
         fg: INK,
-        action: DockAction::Program("/bin/paint"),
+        action: DockAction::Program("/Apps/paint/paint"),
     },
     DockItem {
         name: "Music",
@@ -549,7 +549,7 @@ pub const ENTRIES: [Entry; 13] = [
         icon: Icon::Paint,
         bg: HONEY,
         fg: INK,
-        action: Action::Program("/bin/paint"),
+        action: Action::Program("/Apps/paint/paint"),
     },
     Entry {
         name: "Milk Drop",

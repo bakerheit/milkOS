@@ -402,11 +402,11 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 | `netstat [-t] [-u] [-l] [-s] [-4\|-6]` | sockets (tcp, tcp6, udp, udp6), or protocol counters | `/proc/net/{tcp,tcp6,udp,udp6,snmp,snmp6}` |
 | `ping [-4\|-6] [-c N] [-i MS] [-s SIZE] [-W MS] HOST` | ICMP / ICMPv6 echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged), or `(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)` with `-6` or an IPv6 address. `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
 | `nc [-4\|-6] [-u] HOST PORT`, `nc -l [-4\|-6] [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; `-l` listens on `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
-| `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by init as `httpd -q /srv/www` on :80 (rootfs/srv/www), listening on `[::]:80` (IPv6 and IPv4) |
+| `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by milkd as `httpd -q /Users/milk/Sites` on :80 (rootfs/Users/milk/Sites), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
 | `fetch [-i] URL` | HTTP GET | |
 | `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
-| `netctl [show] [-k]`, `netctl hostname / name / visible` | the network settings: interfaces, IPv4/IPv6, DHCP, DNS, hostname, the `.local` name, Milk Drop visibility; `-k` is the stable `key=value` contract for the Settings > Network panel | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/etc/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
+| `netctl [show] [-k]`, `netctl hostname / name / visible` | the network settings: interfaces, IPv4/IPv6, DHCP, DNS, hostname, the `.local` name, Milk Drop visibility; `-k` is the stable `key=value` contract for the Settings > Network panel | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/System/Settings/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
 
 **Names in user programs** (getaddrinfo-style, both families: `rt::net::lookup_all(spec,
 default_port, Want::{Any,V4,V6})` gives every address in the order to try, IPv6 first as
@@ -442,22 +442,22 @@ port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
 ## Milk Drop (`user/drop`)
 
 AirDrop-style sharing between two milkOS machines on the eth1 link. Everything is
-userland except the eth1 link itself and one tiny fs hook (`/etc/milk/drop` is persistent).
+userland except the eth1 link itself and one tiny fs hook (`/System/Settings/milk/drop` is persistent).
 
-**Identity.** Each machine has an Ed25519 key pair (`rt::ed25519`) in `/etc/milk/drop/`
+**Identity.** Each machine has an Ed25519 key pair (`rt::ed25519`) in `/System/Settings/milk/drop/`
 (`identity.secret`, the seed, 0600 root; `identity.pub`; `name`; `known_peers`, root's
 trust list), made the first time root's `drop` runs. That is normally the `drop` service
 (milkd, as root) at boot. The identity is the machine's: other users' `drop` reads only the
 public half and has the daemon sign over `/run/drop.sock`, and each user keeps their own
 trust list in `~/.config/milk/drop/known_peers`. The model is in docs/security.md, "Milk
 Drop: one machine identity, per-user clients". On a machine with a
-Milk volume, `fs::init` binds `/Volumes/Milk/etc/milk/drop` onto it
+Milk volume, `fs::init` binds `/Volumes/Milk/System/Settings/milk/drop` onto it
 (`milkfs::setup_persistent_etc`), so the identity and the trusted peers survive reboots.
 The fingerprint people compare is the first 8 bytes of SHA-256(public key) in four groups
 (`3fa2 91bc 07de 44a1`). The default name is `<hostname>-<first 4 fingerprint digits>`;
 `drop name alice` changes it. The secret is only as safe as root: it is 0600 root, so
 ordinary users' programs can't read it (root's can). `milk run-try` sandboxes keep tried apps away from
-their clone's `/etc`. Keys come from the kernel CSPRNG (`/dev/urandom`: ChaCha20 seeded
+their clone's `/System/Settings`. Keys come from the kernel CSPRNG (`/dev/urandom`: ChaCha20 seeded
 from virtio-rng, docs/crypto.md), and `identity.secret` records that (`rng=kernel-csprng`).
 
 **Old keys must be rotated.** Identities made before the kernel CSPRNG came from a weak
@@ -468,7 +468,7 @@ rotated it ...`, a `user.drop.rotate ... reason=legacy-rng` record), and `drop i
 if one is still there. `drop id --rotate` does the same by hand, any time:
 
 * a new seed from the CSPRNG;
-* the old key signs `milkdrop-rotate-v1 <old> <new>`, kept in `/etc/milk/drop/rotation`
+* the old key signs `milkdrop-rotate-v1 <old> <new>`, kept in `/System/Settings/milk/drop/rotation`
   and sent as `rot=<old>:<sig>` in announcements and hellos;
 * the old secret is overwritten.
 
@@ -594,7 +594,7 @@ drop-bob-wait`), two desktops with linked eth1s on private images.
 
 **Test**: `scripts/drop-test.sh` (below).
 
-## Throughput (`scripts/net-bench.sh`, `/bin/tcpbench`)
+## Throughput (`scripts/net-bench.sh`, `/Commands/tcpbench`)
 
 `tcpbench send HOST:PORT MIB | recv HOST:PORT | sink PORT | source PORT MIB` times one TCP
 transfer (`send` waits for the peer's close, so the time covers delivery).
@@ -706,7 +706,7 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
   Before that, alice `drop forget`s bob's unsigned new key;
 * `drop selftest` (the crypto vectors in userland), `rng: kernel CSPRNG` on new keys, and
   the kernel's `[crypto]` / `[rng]` boot lines;
-* a third boot, carol, on an image whose `/etc/milk/drop` holds an old-format secret
+* a third boot, carol, on an image whose `/System/Settings/milk/drop` holds an old-format secret
   (a fixed seed with no `rng=` tag): her daemon rotates it at boot. On disk afterwards
   the old seed is gone, the new one is tagged, and the rotation statement is kept;
 * **the wire**: qemu `-object filter-dump` writes each VM's eth1 traffic to a pcap. The
@@ -745,7 +745,7 @@ two UDP ports on 127.0.0.1.
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.
-* `/etc/hosts`; mDNS name probing and conflict resolution (RFC 6762 8).
+* `/System/Settings/hosts`; mDNS name probing and conflict resolution (RFC 6762 8).
 * IPv6: privacy addresses (RFC 8981); MLD source filtering and MLDv1 compatibility;
   IGMP for IPv4 (still no multicast router on these links); PMTU black-hole detection
   (RFC 4821) for paths that drop ICMP.

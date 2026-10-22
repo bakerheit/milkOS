@@ -13,10 +13,10 @@
 
 Signatures (Ed25519, RFC 8032, implemented below in pure python; hashlib only for
 SHA-512): FILE.sig is one line `ed25519 <key name> <128 hex chars>` over FILE's bytes.
-milk looks the key name up in /etc/milk/keys/<name>.pub (`ed25519 <64 hex chars> <name>`).
+milk looks the key name up in /System/Settings/milk/keys/<name>.pub (`ed25519 <64 hex chars> <name>`).
 
 A .milkpkg is a ustar tar: first member `manifest`, then the payload files under their
-install paths (relative to /Applications/<name>/). Deterministic: mtime 0, uid/gid 0,
+install paths (relative to /Apps/<name>/). Deterministic: mtime 0, uid/gid 0,
 sorted payload, so the same inputs give the same bytes (and sha256).
 
 manifest (text, `key value` per line):
@@ -24,10 +24,10 @@ manifest (text, `key value` per line):
     name fortune
     version 1.0.0
     description Milk-themed quotes, one at a time
-    exec bin/fortune                       (optional: what /bin/<name> links to)
+    exec fortune                           (optional: the program; /Commands/<name> links to it)
     dock Fortune #EBB650                   (optional: dock label and icon colour)
     depends snake moo2048>=1.0             (optional: installed first, by milk)
-    files bin/fortune share/fortune/quotes.txt
+    files fortune quotes.txt
     payload-sha256 <hex>
 
 payload-sha256 = SHA-256 over, for each path in `files` order:
@@ -38,10 +38,10 @@ Spec file (packages/<name>/package.txt), paths relative to --root (default: repo
     name fortune
     version 1.0.0
     description Milk-themed quotes, one at a time
-    exec bin/fortune
+    exec fortune
     dock Fortune #EBB650
-    file bin/fortune = target/packages/aarch64-unknown-none-softfloat/release/fortune
-    file share/fortune/quotes.txt = packages/fortune/quotes.txt
+    file fortune = target/packages/aarch64-unknown-none-softfloat/release/fortune
+    file quotes.txt = packages/fortune/quotes.txt
 
 index.txt: `# milk repo index v1`, then one line per package:
     <name> <version> <sha256 of the .milkpkg> <size> <file name> <description...>
@@ -338,7 +338,7 @@ def cmd_keygen(name, outdir, test):
     pp = os.path.join(outdir, f"{name}.pub")
     note = "# TEST ONLY key (toy repository).\n" if test else ""
     open(pp, "w").write(note + f"ed25519 {pub.hex()} {name}\n")
-    print(f"{sp} (private), {pp} (public: copy to /etc/milk/keys/)")
+    print(f"{sp} (private), {pp} (public: copy to /System/Settings/milk/keys/)")
 
 
 def cmd_verify_sig(pubfile, path):

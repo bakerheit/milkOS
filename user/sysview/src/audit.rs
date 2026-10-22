@@ -412,9 +412,9 @@ mod tests {
     #[test]
     fn parses_and_unescapes() {
         let r = parse_record(
-            "65 1792589641138472000 16 /bin/cat exec ppid=10%20argv=cat%20/proc/meminfo e4a6 1c73",
+            "65 1792589641138472000 16 /Commands/cat exec ppid=10%20argv=cat%20/proc/meminfo e4a6 1c73",
         )
-        .unwrap_or_else(|| rec("exec", "/bin/cat", "ppid=10%20argv=cat%20/proc/meminfo"));
+        .unwrap_or_else(|| rec("exec", "/Commands/cat", "ppid=10%20argv=cat%20/proc/meminfo"));
         assert_eq!(r.event, "exec");
         assert_eq!(r.detail, "ppid=10 argv=cat /proc/meminfo");
         assert_eq!(kv(&r.detail, "argv"), Some("cat /proc/meminfo"));
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn kv_values_may_hold_spaces_and_equals() {
-        let d = "op=open path=/home/milk/My%20File=1 need=r";
+        let d = "op=open path=/Users/milk/My%20File=1 need=r";
         assert_eq!(kv(d, "op"), Some("open"));
         assert_eq!(kv(d, "need"), Some("r"));
         let d2 = "op=open path=/a b/c need=r";
@@ -437,52 +437,52 @@ mod tests {
     fn the_spec_table() {
         let d = describe(&rec(
             "sandbox.deny",
-            "/bin/peek",
-            "op=open%20path=/etc/passwd%20need=r",
+            "/Apps/peek/peek",
+            "op=open%20path=/System/Settings/passwd%20need=r",
         ));
-        assert_eq!(d.sentence, "peek was refused /etc/passwd");
+        assert_eq!(d.sentence, "peek was refused /System/Settings/passwd");
         assert_eq!(d.dot, Dot::Danger);
         assert!(d.filters.contains(&Filter::Refused));
         let d = describe(&rec(
             "powerbox.grant",
-            "/bin/peek",
-            "pid=5%20path=/home/milk/a.txt%20mode=r",
+            "/Apps/peek/peek",
+            "pid=5%20path=/Users/milk/a.txt%20mode=r",
         ));
         assert_eq!(d.sentence, "You gave peek a file");
-        assert_eq!(d.detail, "/home/milk/a.txt");
+        assert_eq!(d.detail, "/Users/milk/a.txt");
         assert_eq!(d.dot, Dot::Good);
         let d = describe(&rec(
             "sandbox.enter",
             "[kernel]",
-            "pid=9%20exe=/Applications/moo2048/moo2048%20spec=fs-none",
+            "pid=9%20exe=/Apps/moo2048/moo2048%20spec=fs-none",
         ));
         assert_eq!(d.sentence, "moo2048 started, sandboxed");
         let d = describe(&rec(
             "exec",
-            "/bin/cat",
+            "/Commands/cat",
             "ppid=10%20argv=cat%20/proc/meminfo",
         ));
         assert_eq!(d.sentence, "cat was started");
         assert_eq!(d.detail, "cat /proc/meminfo");
         let d = describe(&rec(
             "user.pkg.install",
-            "/bin/milk",
+            "/Commands/milk",
             "name=fortune%20version=1",
         ));
         assert_eq!(d.sentence, "fortune was installed");
         assert_eq!(d.dot, Dot::Info);
         let d = describe(&rec(
             "user.drop.recv",
-            "/bin/drop",
+            "/Commands/drop",
             "file=bike.png%20from=alice",
         ));
         assert_eq!(d.sentence, "Milk Drop received bike.png from alice");
-        let d = describe(&rec("user.drop.trust", "/bin/drop", "peer=bob"));
+        let d = describe(&rec("user.drop.trust", "/Commands/drop", "peer=bob"));
         assert_eq!(
             (d.sentence.as_str(), d.dot),
             ("bob's key was trusted", Dot::Trust)
         );
-        let d = describe(&rec("user.drop.key_changed", "/bin/drop", "peer=bob"));
+        let d = describe(&rec("user.drop.key_changed", "/Commands/drop", "peer=bob"));
         assert_eq!(
             (d.sentence.as_str(), d.dot),
             ("bob's key changed", Dot::Danger)
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn unknown_events_show_their_name() {
-        let d = describe(&rec("weird.thing", "/bin/x", "a=b"));
+        let d = describe(&rec("weird.thing", "/Commands/x", "a=b"));
         assert_eq!(d.sentence, "weird.thing");
         assert_eq!(d.dot, Dot::Plain);
         assert!(d.filters.is_empty());
@@ -504,8 +504,12 @@ mod tests {
 
     #[test]
     fn filters_and_search() {
-        let deny = rec("sandbox.deny", "/bin/peek", "op=open%20path=/etc/passwd");
-        let exec = rec("exec", "/bin/cat", "argv=cat%20x");
+        let deny = rec(
+            "sandbox.deny",
+            "/Apps/peek/peek",
+            "op=open%20path=/System/Settings/passwd",
+        );
+        let exec = rec("exec", "/Commands/cat", "argv=cat%20x");
         assert!(
             matches(&deny, Filter::All)
                 && matches(&deny, Filter::Refused)
@@ -544,7 +548,7 @@ mod tests {
     fn network_denials_read_naturally() {
         let d = describe(&rec(
             "sandbox.deny",
-            "/bin/peek",
+            "/Apps/peek/peek",
             "op=connect%20addr=10.0.2.2:80",
         ));
         assert_eq!(d.sentence, "peek was refused a network connection");

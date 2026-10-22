@@ -21,9 +21,9 @@ for demo in shot shotregion; do
   rm -f "$WORK/fs.img" "$WORK/disk.img"
   WM_DISK_RW=1 MILK_FS="$WORK/fs.img" MILK_DISK="$WORK/disk.img" MILK_SOUND_WAV="$WORK/$demo.wav" \
     scripts/wm-demo.sh "$demo" "$WORK/$demo-qemu.png" >/dev/null
-  name=$(python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" /home/milk/Pictures | awk '/Screenshot/ { $1=$2=$3=""; sub(/^ +/, ""); print; exit }')
+  name=$(python3 -I scripts/mkmilkfs.py ls "$WORK/fs.img" /Users/milk/Pictures | awk '/Screenshot/ { $1=$2=$3=""; sub(/^ +/, ""); print; exit }')
   [ -n "$name" ] || { echo "$demo: FAIL no screenshot in ~/Pictures"; ok=0; continue; }
-  python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" "/home/milk/Pictures/$name" >"$WORK/$demo.png"
+  python3 -I scripts/mkmilkfs.py cat "$WORK/fs.img" "/Users/milk/Pictures/$name" >"$WORK/$demo.png"
   sips -g pixelWidth -g pixelHeight "$WORK/$demo.png" | tail -2 | tr '\n' ' '; echo
   at=0,0; [ "$demo" = shotregion ] && at=300,90
   out=$(python3 -I scripts/png_check.py "$WORK/$demo.png" "$WORK/$demo-qemu.png" --at "$at" \

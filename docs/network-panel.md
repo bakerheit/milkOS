@@ -70,7 +70,7 @@ The rules:
   duplicate address detection).
 
 Kernel side, `netctl` reads `/proc/net/ifaddr` and `/proc/net/hostname`; the Milk Drop
-side, `/etc/milk/drop` (`name`, `visible`). The panel shouldn't read those directly: their
+side, `/System/Settings/milk/drop` (`name`, `visible`). The panel shouldn't read those directly: their
 formats are the kernel's and the daemon's, and `netctl -k` is the contract.
 
 ## The controls
@@ -93,7 +93,7 @@ value.
   sheet the desktop uses elsewhere for that). Don't grey a control out just because the
   user isn't root; let the command refuse.
 - **Persistence.** All three survive a reboot on a machine with a Milk volume:
-  `/etc/milk/net/hostname`, which the kernel applies at boot, and `/etc/milk/drop/name` and
+  `/System/Settings/milk/net/hostname`, which the kernel applies at boot, and `/System/Settings/milk/drop/name` and
   `visible`. Without a volume they last until shutdown. The panel can say "Changes are kept
   on the Milk volume" when `/Volumes/Milk` is mounted.
 - **Audit.** Every change is logged: `net.hostname`, `drop.rename`, `drop.visible`, with

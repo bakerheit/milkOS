@@ -2,4 +2,4 @@ name games
 version 1.0.0
 description The milkOS games: snake and moo2048 (a meta-package: its dependencies)
 depends snake moo2048>=1.0
-file share/games/README.txt = packages/games/README.txt
+file README.txt = packages/games/README.txt

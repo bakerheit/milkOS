@@ -21,7 +21,7 @@ use super::super::window::{
 use super::super::{Mode, Request, packages, prefs, request};
 use super::{files, fsx, versions};
 
-const SAMPLE: &str = "/home/milk/Documents/Welcome note.txt";
+const SAMPLE: &str = "/Users/milk/Documents/Welcome note.txt";
 const SAMPLE_VERSIONS: [&str; 3] = [
     "Things to try in milkOS:\n- Ctrl+Space\n",
     "Things to try in milkOS:\n- Ctrl+Space\n- F3 for Spaces\n",
@@ -63,9 +63,9 @@ fn has_milkfs() -> bool {
     fs::milkfs::mount_path().is_some()
 }
 
-/// A repo URL in /etc/milk/repos (reachable or not: milk will say).
+/// A repo URL in /System/Settings/milk/repos (reachable or not: milk will say).
 fn has_repo() -> bool {
-    fs::read_to_string("/etc/milk/repos").is_ok_and(|t| {
+    fs::read_to_string("/System/Settings/milk/repos").is_ok_and(|t| {
         t.lines().any(|l| {
             l.trim_start().starts_with("http://") || l.trim_start().starts_with("https://")
         })
@@ -157,14 +157,14 @@ impl Welcome {
                 lines: if repo {
                     [
                         "milk try installs into a throwaway",
-                        "clone of the disk: keep it or bin it.",
+                        "clone of the disk: keep it or toss it.",
                         "Needs the repo: milk-repo.sh serve.",
                     ]
                 } else {
                     [
                         "milk try installs into a throwaway",
                         "clone of the disk. No package repo",
-                        "is set up in /etc/milk/repos.",
+                        "is set up in /System/Settings/milk/repos.",
                     ]
                 },
                 icon: Icon::Package,
@@ -263,7 +263,7 @@ impl Welcome {
                 String::from("moo2048: its own folder, no network")
             }
             Do::Peek => {
-                request(Request::OpenAny(String::from("/bin/peek")));
+                request(Request::OpenAny(String::from("peek")));
                 String::from("Refused! Press o in Peek to pick a file")
             }
             Do::Audit => {

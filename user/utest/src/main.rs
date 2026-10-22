@@ -61,7 +61,7 @@ fn capture(argv: &[&str]) -> (Vec<u8>, i32) {
 }
 
 fn t_pipe() -> bool {
-    let (out, st) = capture(&["/bin/hello", "piped"]);
+    let (out, st) = capture(&["/Commands/hello", "piped"]);
     let text = String::from_utf8_lossy(&out);
     let lines = text.lines().count();
     let mut ok = check(
@@ -890,7 +890,7 @@ fn t_sandbox() -> bool {
             bits |= 2;
         }
         // Reading outside the grant is denied.
-        if sys::read_file("/etc/motd").is_err() {
+        if sys::read_file("/System/Settings/motd").is_err() {
             bits |= 4;
         }
         // Opening a socket is denied (net=none).
@@ -905,7 +905,7 @@ fn t_sandbox() -> bool {
         }
         // Can't widen back: asking for full fs again stays denied.
         let _ = sys::sandbox("net=all");
-        if sys::read_file("/etc/motd").is_err() {
+        if sys::read_file("/System/Settings/motd").is_err() {
             bits |= 32;
         }
         let _ = sys::write(w, &[bits]);
@@ -916,8 +916,8 @@ fn t_sandbox() -> bool {
     let _ = sys::read(r, &mut b);
     let _ = sys::close(r);
     let (_, st) = sys::wait4(pid as i32, 0).unwrap();
-    // Our own caps are untouched: we can still read /etc/motd and open a socket.
-    let parent_ok = sys::read_file("/etc/motd").is_ok();
+    // Our own caps are untouched: we can still read /System/Settings/motd and open a socket.
+    let parent_ok = sys::read_file("/System/Settings/motd").is_ok();
     check(
         "capability sandbox",
         b[0] == 0b111111 && st == (0b111111 << 8) && parent_ok,
@@ -952,14 +952,14 @@ fn t_kaddr() -> bool {
     )
 }
 
-/// A static Linux/aarch64 binary built with no milkOS knowledge (tests/linux/), linked at
+/// A static Linux/aarch64 program built with no milkOS knowledge (tests/linux/), linked at
 /// Linux's 0x400000: runs and passes its own checks.
 fn t_linux() -> bool {
-    let (out, st) = capture(&["/bin/linux-hello", "x"]);
+    let (out, st) = capture(&["/Commands/linux-hello", "x"]);
     let text = core::str::from_utf8(&out).unwrap_or("");
     let oks = text.matches("  ok ").count();
     check(
-        "Linux static binary at 0x400000",
+        "Linux static program at 0x400000",
         st == 0 && text.contains("linux-hello: ALL OK"),
         &alloc::format!("{oks} checks ok, {}", sys::describe_status(st)),
     )
@@ -988,7 +988,7 @@ fn t_creds() -> bool {
             0 => {
                 sys::dup2(r, 0).unwrap();
                 sys::dup2(w2, 1).unwrap();
-                let _ = sys::execve("/bin/sudo", &["sudo", "-S", "/bin/id", "-u"], &[]);
+                let _ = sys::execve("/Commands/sudo", &["sudo", "-S", "/Commands/id", "-u"], &[]);
                 sys::exit(127)
             }
             p => p,
@@ -1016,8 +1016,8 @@ fn t_creds() -> bool {
 /// Run `utest <what>` as the milk user (`su milk -c`: root needs no password), for the
 /// tests that are about being unprivileged, when utest itself runs as root (the console).
 fn as_milk(what: &str, name: &str) -> bool {
-    let cmd = alloc::format!("/bin/utest {what}");
-    let (out, st) = capture(&["/bin/su", "milk", "-c", &cmd]);
+    let cmd = alloc::format!("/Commands/utest {what}");
+    let (out, st) = capture(&["/Commands/su", "milk", "-c", &cmd]);
     let text = String::from_utf8_lossy(&out);
     for l in text.lines() {
         println!("  (as milk) {l}");
@@ -1038,7 +1038,7 @@ fn sudo(argv: &[&str]) -> i32 {
             sys::dup2(r, 0).unwrap();
             let mut v = alloc::vec!["sudo", "-S"];
             v.extend_from_slice(argv);
-            let _ = sys::execve("/bin/sudo", &v, &[]);
+            let _ = sys::execve("/Commands/sudo", &v, &[]);
             sys::exit(127)
         }
         p => p,
@@ -1065,11 +1065,11 @@ fn t_perms() -> bool {
         }
         n += 1;
     };
-    // 0: /etc/shadow unreadable; 1: /etc/passwd not writable; 2: can't create in /etc.
-    t(eacces(sys::open("/etc/shadow", sys::O_RDONLY)));
-    t(eacces(sys::open("/etc/passwd", sys::O_WRONLY)));
+    // 0: /System/Settings/shadow unreadable; 1: /System/Settings/passwd not writable; 2: can't create in /System/Settings.
+    t(eacces(sys::open("/System/Settings/shadow", sys::O_RDONLY)));
+    t(eacces(sys::open("/System/Settings/passwd", sys::O_WRONLY)));
     t(eacces(sys::open_mode(
-        "/etc/utest",
+        "/System/Settings/utest",
         sys::O_WRONLY | sys::O_CREAT,
         0o644,
     )));
@@ -1102,16 +1102,19 @@ fn t_perms() -> bool {
     let _ = sys::rmdir(d);
     // 9: sticky /tmp: root's file there can't be removed by us; 10: but by root.
     let rf = "/tmp/utest-rootfile";
-    let made = sudo(&["/bin/touch", rf]) == 0;
+    let made = sudo(&["/Commands/touch", rf]) == 0;
     t(made && matches!(sys::unlink(rf), Err(sys::Errno(1))));
-    t(sudo(&["/bin/rm", rf]) == 0 && sys::stat_path(rf, true).is_err());
-    // 11: both must allow: a sandbox grant of /etc doesn't open /etc/shadow, and a file
+    t(sudo(&["/Commands/rm", rf]) == 0 && sys::stat_path(rf, true).is_err());
+    // 11: both must allow: a sandbox grant of /System/Settings doesn't open /System/Settings/shadow, and a file
     // the permissions allow is still out of reach outside the grant.
     let pid = sys::fork().unwrap();
     if pid == 0 {
-        sys::sandbox("fs=/etc:r net=none").expect("sandbox");
-        let shadow = matches!(sys::open("/etc/shadow", sys::O_RDONLY), Err(sys::Errno(13)));
-        let passwd = sys::read_file("/etc/passwd").is_ok();
+        sys::sandbox("fs=/System/Settings:r net=none").expect("sandbox");
+        let shadow = matches!(
+            sys::open("/System/Settings/shadow", sys::O_RDONLY),
+            Err(sys::Errno(13))
+        );
+        let passwd = sys::read_file("/System/Settings/passwd").is_ok();
         let outside = sys::read_file(f).is_err();
         sys::exit(if shadow && passwd && outside { 0 } else { 1 });
     }
@@ -1489,7 +1492,7 @@ fn t_auxv(args: &rt::Args) -> bool {
     if sys::geteuid() == 0 {
         // A set-user-ID root copy of utest, run by milk: euid 0, uid 501, AT_SECURE 1.
         let copy = "/tmp/utest-suid";
-        let made = sys::read_file("/bin/utest").ok().and_then(|data| {
+        let made = sys::read_file("/Commands/utest").ok().and_then(|data| {
             let fd =
                 sys::open_mode(copy, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o755).ok()?;
             let r = sys::write_all(fd, &data);
@@ -1552,13 +1555,13 @@ fn milkd(req: &str) -> String {
 
 /// milkd: a crashing service is restarted with doubling backoff, a missing / failed
 /// dependency is reported, start / stop over the socket work for root and admins and are
-/// refused for everyone else. Needs root (it writes /etc/milk/services).
+/// refused for everyone else. Needs root (it writes /System/Settings/milk/services).
 fn t_svc() -> bool {
     if sys::geteuid() != 0 {
         return check("services", true, "skipped: needs root");
     }
     let write = |name: &str, body: &str| {
-        let p = alloc::format!("/etc/milk/services/{name}.service");
+        let p = alloc::format!("/System/Settings/milk/services/{name}.service");
         if let Ok(fd) = sys::open_mode(&p, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o644) {
             let _ = sys::write_all(fd, body.as_bytes());
             let _ = sys::close(fd);
@@ -1566,20 +1569,20 @@ fn t_svc() -> bool {
     };
     write(
         "ut-crashy",
-        "description = crashes at once\nexec = /bin/false\nrestart = always\n",
+        "description = crashes at once\nexec = /Commands/false\nrestart = always\n",
     );
-    write("ut-oneshot", "exec = /bin/false\nrestart = never\n");
+    write("ut-oneshot", "exec = /Commands/false\nrestart = never\n");
     write(
         "ut-needs-missing",
-        "exec = /bin/sleep 60\nneeds = ut-no-such-unit\n",
+        "exec = /Commands/sleep 60\nneeds = ut-no-such-unit\n",
     );
     write(
         "ut-needs-dead",
-        "exec = /bin/sleep 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
+        "exec = /Commands/sleep 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
     );
     write(
         "ut-sleeper",
-        "description = sleeps\nexec = /bin/sleep 600\nuser = milk\nrestart = on-failure\n",
+        "description = sleeps\nexec = /Commands/sleep 600\nuser = milk\nrestart = on-failure\n",
     );
     let reload = milkd("reload");
     let status = |u: &str| milkd(&alloc::format!("status {u}"));
@@ -1672,7 +1675,9 @@ fn t_svc() -> bool {
         "ut-oneshot",
     ] {
         let _ = milkd(&alloc::format!("stop {u}"));
-        let _ = sys::unlink(&alloc::format!("/etc/milk/services/{u}.service"));
+        let _ = sys::unlink(&alloc::format!(
+            "/System/Settings/milk/services/{u}.service"
+        ));
     }
     let ok = reload.ends_with("ok\n") && backoff && deps && up && control;
     check(
@@ -1746,7 +1751,11 @@ fn t_auth() -> bool {
     if pid == 0 {
         let _ = sys::dup2(r, 0);
         let _ = sys::dup2(w2, 1);
-        let _ = sys::execve("/bin/auth", &["auth", "-S", "/bin/auth", "-s"], &[]);
+        let _ = sys::execve(
+            "/Commands/auth",
+            &["auth", "-S", "/Commands/auth", "-s"],
+            &[],
+        );
         sys::exit(127);
     }
     let _ = sys::close(r);
@@ -1827,7 +1836,7 @@ fn t_driver() -> bool {
         return check("driver", false, &alloc::format!("claim: {fd:?}"));
     };
     let dev = Device { fd };
-    t(owner_is("/bin/utest")); // 2
+    t(owner_is("/Commands/utest")); // 2
     t(matches!(
         sys::driver_claim(udrv::VIRTIO_RNG),
         Err(sys::Errno(16))
@@ -1919,7 +1928,7 @@ fn t_driver() -> bool {
         && audit.contains("driver.dma_refused")
         && audit.contains("driver.release"));
     let _ = milkd("start rngd");
-    let back = owner_is("/bin/rngd");
+    let back = owner_is("/System/Services/rngd");
     let want = (1u32 << n) - 1;
     check(
         "driver",

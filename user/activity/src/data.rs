@@ -44,7 +44,7 @@ pub struct Sampler {
     pub ram_disk_kb: u64,
     pub audit: Vec<Record>,
     pub total_records: u64,
-    /// uid -> account name, from /etc/passwd.
+    /// uid -> account name, from /System/Settings/passwd.
     pub users: Vec<(u32, String)>,
     prev_ns: u64,
     prev_disk: Option<(u64, u64)>,
@@ -141,7 +141,7 @@ impl Sampler {
             self.audit = audit::parse_log(&text("/proc/audit"));
         }
         if self.users.is_empty() {
-            self.users = text("/etc/passwd")
+            self.users = text("/System/Settings/passwd")
                 .lines()
                 .filter_map(|l| {
                     let f: Vec<&str> = l.split(':').collect();
@@ -193,7 +193,7 @@ pub fn capture(path: &str, argv: &[&str]) -> String {
         Ok(0) => {
             let _ = sys::dup2(w, 1);
             let _ = sys::dup2(w, 2);
-            let _ = sys::execve(path, argv, &["PATH=/bin"]);
+            let _ = sys::execve(path, argv, &["PATH=/Commands"]);
             sys::exit(127);
         }
         Ok(pid) => {

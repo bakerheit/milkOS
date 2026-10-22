@@ -141,7 +141,7 @@ fn build_user(repo: &Path) {
         assert!(
             list.lines()
                 .any(|l| l.split_whitespace().nth(1) == Some(host.as_str())),
-            "user program {name} is not in initramfs.list; add:\n/bin/{name}  {host}  755"
+            "user program {name} is not in initramfs.list; add (a command; an app goes in /Apps/<name>/, a service in /System/Services):\n/Commands/{name}  {host}  755"
         );
     }
 }

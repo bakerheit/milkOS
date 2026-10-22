@@ -6,7 +6,7 @@
 //!   older than 30 s)
 //! * Settings sections
 //! * `= 2+2*3` the calculator: + - * / % ^, parentheses, decimals
-//! * `> ls /bin` a shell command, run in a new Terminal tab
+//! * `> ls /Commands` a shell command, run in a new Terminal tab
 
 use alloc::format;
 use alloc::string::String;
@@ -138,7 +138,7 @@ pub fn refresh_index() {
         return;
     }
     let mut paths = Vec::new();
-    walk("/home/milk", 0, &mut paths);
+    walk("/Users/milk", 0, &mut paths);
     let mut ix = INDEX.lock();
     ix.paths = paths;
     ix.built_ns = now.max(1);

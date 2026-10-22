@@ -3,13 +3,13 @@
 //!
 //! ```text
 //! open <app|absolute path>    files, terminal, notes, about, paint, today, spaces; a folder
-//!                             opens in Files, a text file in Notes, a /bin program runs
+//!                             opens in Files, a text file in Notes, a /Commands program runs
 //! notify <title>[\t<subtitle>[\t<option>...]]
 //!                             options: app=<name> (the group and icon; default: the
 //!                             writing program), id=<number> (sent back with an action),
 //!                             action=<label>[:<command>] (up to two buttons: with a
 //!                             command, pressing it runs that program, an absolute path
-//!                             or a /bin name and its words, or `open <what>`; without
+//!                             or a /Commands name and its words, or `open <what>`; without
 //!                             one, the posting program's window gets an action event)
 //! timer <text>[\t<option>...]  a countdown in the menu bar ("04:32"), one per app, gone
 //!                             5 s after the last refresh or with empty text; options:
@@ -19,7 +19,7 @@
 //! ```
 //!
 //! Reading it gives a status snapshot (`mode`, `space`, one `window` line per window).
-//! The `/bin/open`, `/bin/notify`, `/bin/today` and `/bin/spaces` programs are thin wrappers.
+//! The `/Commands/open`, `/Commands/notify`, `/Commands/today` and `/Commands/spaces` programs are thin wrappers.
 
 use alloc::string::String;
 use alloc::sync::Arc;

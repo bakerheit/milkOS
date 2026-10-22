@@ -83,7 +83,7 @@ impl B {
     }
     /// In the Terminal: a file with three snapshotted versions and a newer current one.
     fn herd(&mut self) -> &mut Self {
-        const F: &str = "/home/milk/Documents/herd.txt";
+        const F: &str = "/Users/milk/Documents/herd.txt";
         self.wait(300);
         for (i, line) in ["- one cow", "- two cows", "- three cows", "- a calf!"]
             .iter()
@@ -237,7 +237,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("ls")
                 .enter()
                 .wait(200);
-            b.typ("cat /etc/motd").enter().wait(300);
+            b.typ("cat /System/Settings/motd").enter().wait(300);
         }
         "files" => {
             // Files: sidebar Home, double-click Documents, double-click ideas.md (opens Notes).
@@ -382,7 +382,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.to(x, y).wait(30).down().wait(30).up();
         }
         "lsbin" => {
-            b.wait(300).typ("ls /bin").enter().wait(600);
+            b.wait(300).typ("ls /Commands").enter().wait(600);
         }
         // Terminal tabs (the boot Terminal has the focus).
         "tabs" => {
@@ -390,7 +390,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("echo second tab on $(tty)").enter().wait(300);
             b.typ("echo second tab").enter().wait(300);
             b.key(Key::Char('t'), Mods::META).wait(500);
-            b.typ("ls /bin").enter().wait(600);
+            b.typ("ls /Commands").enter().wait(600);
         }
         "tabswitch" => {
             b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
@@ -575,16 +575,16 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "ansi" => {
             b.wait(300);
-            b.typ(r"/bin/echo -e '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
+            b.typ(r"/Commands/echo -e '\e[31mred \e[32mgreen \e[33myellow \e[34mblue \e[35mmagenta \e[36mcyan\e[0m'").enter().wait(300);
             b.typ(
-                r"/bin/echo -e '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
+                r"/Commands/echo -e '\e[1;31mbold red \e[1;32mbold green \e[90mgrey\e[0m back to plain'",
             )
             .enter()
             .wait(300);
         }
         "clear" => {
             b.wait(300)
-                .typ("ls /bin")
+                .typ("ls /Commands")
                 .enter()
                 .wait(400)
                 .typ("clear")
@@ -606,7 +606,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "skimcmd" => {
             b.key(Key::Char(' '), Mods::META)
                 .wait(150)
-                .typ("> ls /bin")
+                .typ("> ls /Commands")
                 .wait(200)
                 .enter()
                 .wait(1200);
@@ -682,7 +682,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "pkgdock" | "pkgrun" | "pkgfortune" | "pkgsandbox" => {
             let url = host_test_url();
             b.wait(300)
-                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
             b.typ("milk update").enter().wait(2000);
@@ -733,14 +733,14 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "notesversions" => {
             b.herd();
-            b.typ("open /home/milk/Documents/herd.txt")
+            b.typ("open /Users/milk/Documents/herd.txt")
                 .enter()
                 .wait(1000);
             b.click(115, 14).wait(400).click(160, 130).wait(1200);
         }
         // Powerbox: peek sandboxes itself (no fs), asks for a file through the wm's panel.
         "powerbox" | "powerboxpick" | "powerboxsave" | "powerboxaudit" => {
-            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.wait(300).typ("open peek").enter().wait(1500);
             b.key(Key::Char('o'), Mods::NONE).wait(900);
             if name != "powerbox" {
                 // Documents: ideas.md, todo.txt. Pick todo.txt.
@@ -842,7 +842,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // A package repo (scripts/wm-pkg-demo.sh serves one); moo2048 installed.
                 let url = host_test_url();
                 b.wait(300)
-                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
                     .enter()
                     .wait(300)
                     .typ("milk update")
@@ -893,7 +893,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             // moo2048 installed (after the system apps): drop todo.txt on its tile.
             let url = host_test_url();
             b.wait(300)
-                .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
             b.typ("milk update").enter().wait(2000);
@@ -915,7 +915,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "dragpeek" => {
             // Peek (sandboxed, no fs) opens centred; drag it by its title bar so its body is
             // at the bottom right, then drop todo.txt on it: the drop is the grant.
-            b.wait(300).typ("open /bin/peek").enter().wait(1500);
+            b.wait(300).typ("open peek").enter().wait(1500);
             let r = super::client::place(1, 522, 374);
             let (tx, ty) = (r.x + 258, r.y + 16);
             b.drag(tx, ty, tx + (392 - r.x), ty + (364 - r.y), 10)
@@ -970,13 +970,13 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.glide(600, 400, 181 + 60, 113 + 44 + 2 * 28 + 12, 8)
                 .wait(300);
         }
-        // The Milk Store (a system app, /System/Applications/store): tile 9.
+        // The Milk Store (a system app, /Apps/store): tile 9.
         "store" | "store-repo" => {
             if name == "store-repo" {
                 // The toy repo scripts/wm-pkg-demo.sh serves.
                 let url = host_test_url();
                 b.wait(300)
-                    .typ(&alloc::format!("echo {url} > /etc/milk/repos"))
+                    .typ(&alloc::format!("echo {url} > /System/Settings/milk/repos"))
                     .enter()
                     .wait(300);
             }
@@ -1116,7 +1116,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 // alice trusted another key for bob before: his key "has changed".
                 let old = "11".repeat(32);
                 b.typ(&alloc::format!(
-                    "echo bob {old} 1792500000 >> /etc/milk/drop/known_peers"
+                    "echo bob {old} 1792500000 >> /System/Settings/milk/drop/known_peers"
                 ))
                 .enter()
                 .wait(500);
@@ -1259,12 +1259,12 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             b.wait(if name == "dock-genie" { 3000 } else { 3600 });
         }
-        // An app installed (a manifest dropped into /Applications, as an admin with sudo: the
+        // An app installed (a manifest dropped into /Apps, as an admin with sudo: the
         // demo user's well-known default password): its tile grows in and the
         // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
         "dock-slide" => {
             b.wait(300)
-                .typ("echo milk | sudo -S msh -c \"mkdir -p /Applications/hello && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /bin/hello\\ndock Hello #9CBF9B' > /Applications/hello/manifest\"")
+                .typ("echo milk | sudo -S msh -c \"mkdir -p /Apps/hello && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /Commands/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
                 .enter()
                 .wait(1500);
             b.0.push(Step::Packages);

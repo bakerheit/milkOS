@@ -9,7 +9,7 @@ kernel keeps running. Two drivers use it: **rngd** (virtio-rng) and **soundd**
 
 Files: `kernel/src/udrv.rs` (the interface), `user/udrv` (the userland side: register
 access, DMA, a split virtqueue), `user/rngd`, `user/soundd`, the units in
-`/etc/milk/services/`, `scripts/driver-crash-test.sh`.
+`/System/Settings/milk/services/`, `scripts/driver-crash-test.sh`.
 
 ## Threat model
 
@@ -192,7 +192,7 @@ doesn't wait for them.
 
 ## Supervision
 
-Both are milkd services (`/etc/milk/services/rngd.service`, `soundd.service`):
+Both are milkd services (`/System/Settings/milk/services/rngd.service`, `soundd.service`):
 
 * `user = root` and `restart = always`;
 * a sandbox with only the one device node they need (`fs=/dev/entropy:rw` /

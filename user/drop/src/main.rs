@@ -13,7 +13,7 @@
 //!   drop peers                 peers trusted on first use
 //!   drop forget NAME           stop trusting NAME (after a legitimate key change)
 //!
-//! Trust: every machine has an Ed25519 identity (/etc/milk/drop, made on first use from
+//! Trust: every machine has an Ed25519 identity (/System/Settings/milk/drop, made on first use from
 //! the kernel CSPRNG). It is root's: the daemon (a root service) holds the secret and
 //! signs hellos and offers for other users' `drop` over /run/drop.sock (SO_PEERCRED;
 //! renaming and rotating need an administrator). Each user trusts peers on their own
@@ -932,7 +932,7 @@ fn downloads(envp: &[&str]) -> String {
     let home = envp
         .iter()
         .find_map(|e| e.strip_prefix("HOME="))
-        .unwrap_or("/home/milk");
+        .unwrap_or("/Users/milk");
     alloc::format!("{home}/Downloads")
 }
 
@@ -1014,7 +1014,7 @@ fn serve(id: &Identity, c: &mut Conn, from: SockAddr, yes: bool, dir: &str) -> R
             );
         }
     }
-    // Root receiving into a user's home (the console's HOME is /home/milk): the folder
+    // Root receiving into a user's home (the console's HOME is /Users/milk): the folder
     // and the file belong to that user, as if they had received it themselves.
     let owner = if sys::geteuid() == 0 {
         dir.rsplit_once('/')

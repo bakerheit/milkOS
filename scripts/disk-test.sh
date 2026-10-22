@@ -27,7 +27,7 @@ VAULT="$T/vault.img"; PW="vault-test-passphrase-not-real"
 printf '%s\n' "$PW" > "$T/pw"
 rm -f "$VAULT"
 $M mkfs "$VAULT" --size 32M --label Vault --encrypt --passphrase-file "$T/pw" --recovery-out "$T/vault-recovery" >/dev/null
-$M mkdir "$IMG" /home/milk >/dev/null
+$M mkdir "$IMG" /Users/milk >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
@@ -54,7 +54,7 @@ out() { tr -d '\r' < "$LOG" | awk -v c="$1" '/^msh:/ { if (on) {on=0}; if (subst
 
 ser "wait:$P"
 q move 785 615 click sleep 1
-ser "send:snap create first-one" "wait:$P" "send:echo hello > /home/milk/Documents/new.txt" "wait:$P" "send:snap create second-one" "wait:$P" "send:snap clone first-one try1" "wait:$P" "send:open /bin/diskutil" "wait:$P"
+ser "send:snap create first-one" "wait:$P" "send:echo hello > /Users/milk/Documents/new.txt" "wait:$P" "send:snap create second-one" "wait:$P" "send:snap clone first-one try1" "wait:$P" "send:open diskutil" "wait:$P"
 sleep 3
 ser "send:cat /dev/wm" "wait:$P"
 pos=$(tr -d '\r' < "$LOG" | grep -a "window .* Disk Utility" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
@@ -85,9 +85,9 @@ click 313 129                      # the row first-one
 click 440 286                      # Roll back...
 q screendump "$T/rollback-sheet.png"
 click 722 407                      # the Danger button "Roll back"
-ser "send:snap" "wait:$P" "send:ls /home/milk/Documents" "wait:$P"
+ser "send:snap" "wait:$P" "send:ls /Users/milk/Documents" "wait:$P"
 out "snap" | grep -q "^snap-" && bad "a newer snapshot survived the rollback" || ok "Roll back deleted the snapshots newer than first-one"
-out "ls /home/milk/Documents" | grep -q "new.txt" && bad "new.txt survived the rollback" || ok "Roll back undid the change made after the snapshot"
+out "ls /Users/milk/Documents" | grep -q "new.txt" && bad "new.txt survived the rollback" || ok "Roll back undid the change made after the snapshot"
 click 506 23                       # Health tab
 click 837 23 2                     # Scrub now
 q screendump "$T/health.png"

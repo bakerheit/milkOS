@@ -1,5 +1,5 @@
 //! passwd [user]: change a password. Users change their own (they type the current one
-//! first); root changes anyone's. Writes /etc/shadow (0600, salted `$5m$` hash) and a
+//! first); root changes anyone's. Writes /System/Settings/shadow (0600, salted `$5m$` hash) and a
 //! copy on the milkfs disk so it survives reboots. Set-user-ID root.
 #![no_std]
 #![no_main]
@@ -57,7 +57,7 @@ fn main(args: &rt::Args) -> i32 {
             0
         }
         Err(e) => {
-            rt::eprintln!("passwd: cannot write /etc/shadow: {e}");
+            rt::eprintln!("passwd: cannot write /System/Settings/shadow: {e}");
             1
         }
     }

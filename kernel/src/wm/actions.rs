@@ -46,7 +46,7 @@ fn new_note() {
     // ~/Documents/Note N.md, the first N that is free.
     let mut n = 1;
     let path = loop {
-        let p = alloc::format!("/home/milk/Documents/Note {n}.md");
+        let p = alloc::format!("/Users/milk/Documents/Note {n}.md");
         if crate::fs::stat(&p).is_err() {
             break p;
         }
@@ -87,8 +87,8 @@ pub fn register_builtin() {
     register("Terminal", "New Terminal tab", || {
         request(Request::NewTab(None))
     });
-    register("Files", "Go to Downloads", || go("/home/milk/Downloads"));
-    register("Files", "Go to Documents", || go("/home/milk/Documents"));
+    register("Files", "Go to Downloads", || go("/Users/milk/Downloads"));
+    register("Files", "Go to Documents", || go("/Users/milk/Documents"));
     register("Files", "Show Time Machine", || go("timemachine:"));
     register("Settings", "Use dark theme (Chocolate milk)", || {
         set_dark(true)
@@ -112,7 +112,7 @@ pub fn register_builtin() {
         if music::now().track.is_some() {
             music::toggle();
         } else {
-            music::play_path("/home/milk/Music/morning-pasture.wav");
+            music::play_path("/Users/milk/Music/morning-pasture.wav");
             request(Request::Open(App::Music));
         }
     });

@@ -1,13 +1,13 @@
 //! Milk Store: a desktop window (user/gui) for the `milk` package manager.
 //!
 //! It lists the packages of the milk index (name, version, description, a coloured tile,
-//! installed / upgrade / trying badges), shows details, and runs `/bin/milk` for Install,
+//! installed / upgrade / trying badges), shows details, and runs `/Commands/milk` for Install,
 //! Try (in a milkfs clone), Keep, Discard, Remove, Upgrade, Update and Upgrade all, showing
-//! milk's output live and the result. Everything goes through `/bin/milk`, so signatures,
+//! milk's output live and the result. Everything goes through `/Commands/milk`, so signatures,
 //! clones and audit records work exactly as on the command line.
 //!
 //! Data: `MILK_TABLE=1 milk search` (milk's structured output, parsed with rt::table), the
-//! index cache for versions and sizes, installed manifests (`/Applications/<name>/manifest`,
+//! index cache for versions and sizes, installed manifests (`/Apps/<name>/manifest`,
 //! whose `dock` colour becomes the tile colour), `/sys/fs/milkfs/clones` for "trying".
 //!
 //! Keys (also what scripted tests use): Up/Down select, i install, t try, o/Enter run the
@@ -16,7 +16,7 @@
 //!
 //! Theme: the SPEC tokens ("Whole milk"). The wm does not publish its theme in /dev/wm's
 //! status yet, so the Store reads `theme = chocolate` from the desktop's settings file
-//! (`/home/milk/.config/milk/settings`) and then uses the "Chocolate milk" values (the same
+//! (`/Users/milk/.config/milk/settings`) and then uses the "Chocolate milk" values (the same
 //! mapping as the wm's theme table).
 
 #![no_std]
@@ -44,8 +44,13 @@ const BTN_Y: i32 = 290;
 /// SPEC Buttons: dialog buttons are 28 high.
 const BTN_H: i32 = 28;
 const LOG_Y: i32 = 338;
-const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
-const ENV_TABLE: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb", "MILK_TABLE=1"];
+const ENV: &[&str] = &["PATH=/Commands", "HOME=/Users/milk", "TERM=dumb"];
+const ENV_TABLE: &[&str] = &[
+    "PATH=/Commands",
+    "HOME=/Users/milk",
+    "TERM=dumb",
+    "MILK_TABLE=1",
+];
 
 /// The palette in use (SPEC tokens, or their "Chocolate milk" values).
 struct Theme {
@@ -67,7 +72,7 @@ fn theme() -> Theme {
         .map(|t| matches!(t.trim(), "dark" | "chocolate"))
         .unwrap_or_else(|| {
             // The wm's own settings file (kernel/src/wm/prefs.rs): `theme = chocolate|whole`.
-            text("/home/milk/.config/milk/settings").lines().any(|l| {
+            text("/Users/milk/.config/milk/settings").lines().any(|l| {
                 let (k, v) = l.split_once('=').unwrap_or((l, ""));
                 k.trim() == "theme" && matches!(v.trim(), "chocolate" | "dark")
             })
@@ -125,7 +130,7 @@ impl Pkg {
     }
 }
 
-/// Run /bin/milk and collect its stdout (blocking; for quick, local queries).
+/// Run /Commands/milk and collect its stdout (blocking; for quick, local queries).
 fn capture(args: &[&str], env: &[&str]) -> Vec<u8> {
     let Ok((r, w)) = sys::pipe() else {
         return Vec::new();
@@ -136,7 +141,7 @@ fn capture(args: &[&str], env: &[&str]) -> Vec<u8> {
         Ok(0) => {
             let _ = sys::dup2(w, 1);
             let _ = sys::dup2(w, 2);
-            let _ = sys::execve("/bin/milk", &argv, env);
+            let _ = sys::execve("/Commands/milk", &argv, env);
             sys::exit(127);
         }
         Ok(pid) => {
@@ -187,13 +192,13 @@ fn load() -> Vec<Pkg> {
         return Vec::new();
     };
     let clones = text("/sys/fs/milkfs/clones");
-    let cache = text("/Applications/.milk/index.txt");
+    let cache = text("/Apps/.milk/index.txt");
     t.rows
         .iter()
         .map(|r| {
             let name = r[cn].text();
             let installed = Some(r[ci].text()).filter(|v| !v.is_empty());
-            let manifest = text(&alloc::format!("/Applications/{name}/manifest"));
+            let manifest = text(&alloc::format!("/Apps/{name}/manifest"));
             let field = |k: &str| {
                 manifest
                     .lines()
@@ -217,7 +222,7 @@ fn load() -> Vec<Pkg> {
                 trying: clones
                     .lines()
                     .any(|l| l.split(' ').next() == Some(&alloc::format!("try-{name}"))),
-                auto: sys::stat_path(&alloc::format!("/Applications/{name}/.auto"), false).is_ok(),
+                auto: sys::stat_path(&alloc::format!("/Apps/{name}/.auto"), false).is_ok(),
                 depends: field("depends").unwrap_or_default(),
                 version: r[cv].text(),
                 desc: r[cd].text(),
@@ -231,7 +236,7 @@ fn load() -> Vec<Pkg> {
         .collect()
 }
 
-/// A running /bin/milk.
+/// A running /Commands/milk.
 struct Job {
     pid: u32,
     fd: i32,
@@ -356,7 +361,7 @@ impl App {
             Ok(0) => {
                 let _ = sys::dup2(w, 1);
                 let _ = sys::dup2(w, 2);
-                let _ = sys::execve("/bin/milk", &argv, ENV);
+                let _ = sys::execve("/Commands/milk", &argv, ENV);
                 sys::exit(127);
             }
             Ok(pid) => {
@@ -544,7 +549,7 @@ impl App {
             self.win
                 .text(LIST_X + 16, TOP + 52, "Update fetches it from", cocoa);
             self.win
-                .text(LIST_X + 16, TOP + 70, "/etc/milk/repos.", cocoa);
+                .text(LIST_X + 16, TOP + 70, "/System/Settings/milk/repos.", cocoa);
         }
         let pkgs = self.pkgs.clone();
         for (i, p) in pkgs.iter().enumerate() {
@@ -738,7 +743,7 @@ fn main(_args: &rt::Args) -> i32 {
             return 1;
         }
     };
-    let repo = text("/etc/milk/repos")
+    let repo = text("/System/Settings/milk/repos")
         .lines()
         .map(|l| l.trim())
         .find(|l| !l.is_empty() && !l.starts_with('#'))

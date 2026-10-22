@@ -31,9 +31,14 @@ use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowConte
 use super::super::{Request, notify_as, request};
 use super::fsx;
 
-const DROP: &str = "/bin/drop";
-const ENV: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb"];
-const ENV_TABLE: &[&str] = &["PATH=/bin", "HOME=/home/milk", "TERM=dumb", "MILK_TABLE=1"];
+const DROP: &str = "/Commands/drop";
+const ENV: &[&str] = &["PATH=/Commands", "HOME=/Users/milk", "TERM=dumb"];
+const ENV_TABLE: &[&str] = &[
+    "PATH=/Commands",
+    "HOME=/Users/milk",
+    "TERM=dumb",
+    "MILK_TABLE=1",
+];
 /// Rescan this long after the last scan finished.
 const RESCAN_NS: u64 = 3_000_000_000;
 

@@ -1,5 +1,5 @@
-//! Spotlight-style search: an index of the files under a few roots (default `/home/milk`
-//! and `/Applications`): names, paths, kinds, sizes, modification times, and the words of
+//! Spotlight-style search: an index of the files under a few roots (default `/Users/milk`
+//! and `/Apps`): names, paths, kinds, sizes, modification times, and the words of
 //! text files, kept up to date from VFS change notifications (`fs::notify`) by a
 //! low-priority thread, stored at `~/.cache/milk/index` so it survives reboots.
 //!
@@ -34,9 +34,9 @@ use crate::sync::SpinLock;
 pub use query::{Hit, Query, parse, query, results_text, sysfs};
 
 /// Where the index is kept.
-pub const INDEX_PATH: &str = "/home/milk/.cache/milk/index";
+pub const INDEX_PATH: &str = "/Users/milk/.cache/milk/index";
 /// Default roots.
-pub const DEFAULT_ROOTS: &[&str] = &["/home/milk", "/Applications"];
+pub const DEFAULT_ROOTS: &[&str] = &["/Users/milk", "/Apps"];
 /// Text files are read (for their words) up to this size.
 pub const TEXT_CAP: u64 = 512 << 10;
 /// Most distinct words kept per file.

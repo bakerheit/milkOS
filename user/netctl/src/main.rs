@@ -4,13 +4,13 @@
 //!   netctl [show] [-k]        interfaces, IPv4 and IPv6 addresses, DHCP, DNS, the
 //!                             hostname, the .local name, Milk Drop visibility
 //!                             (-k: stable key=value lines for programs)
-//!   netctl hostname [NAME]    show / set the hostname (root; kept in /etc/milk/net)
+//!   netctl hostname [NAME]    show / set the hostname (root; kept in /System/Settings/milk/net)
 //!   netctl name [NAME]        show / set the .local name (the Milk Drop name;
 //!                             administrators, through the drop daemon)
 //!   netctl visible [on|off]   show / set Milk Drop visibility: off = no discovery
 //!                             announcements or answers, no .local answers (administrators)
 //!
-//! Reads /proc/net/ifaddr (kernel), uname (hostname) and /etc/milk/drop (name,
+//! Reads /proc/net/ifaddr (kernel), uname (hostname) and /System/Settings/milk/drop (name,
 //! visibility). Exit 0 on success, 1 on a refused or failed change, 2 on bad usage.
 
 #![no_std]
@@ -25,7 +25,7 @@ use rt::{eprintln, println, sys};
 
 rt::main!(main);
 
-const HOSTNAME_FILE: &str = "/etc/milk/net/hostname";
+const HOSTNAME_FILE: &str = "/System/Settings/milk/net/hostname";
 
 fn usage() -> i32 {
     eprintln!("usage: netctl [show] [-k] | hostname [NAME] | name [NAME] | visible [on|off]");
@@ -215,14 +215,14 @@ fn set_hostname(name: &str) -> i32 {
         );
         return 1;
     }
-    // Kept for the next boot (persistent with a Milk volume), and /etc/hostname to match.
-    let _ = sys::mkdir("/etc/milk", 0o755);
-    let _ = sys::mkdir("/etc/milk/net", 0o755);
+    // Kept for the next boot (persistent with a Milk volume), and /System/Settings/hostname to match.
+    let _ = sys::mkdir("/System/Settings/milk", 0o755);
+    let _ = sys::mkdir("/System/Settings/milk/net", 0o755);
     let line = alloc::format!("{name}\n");
     if let Err(e) = ident::write_atomic(HOSTNAME_FILE, line.as_bytes(), 0o644) {
         eprintln!("netctl: {HOSTNAME_FILE}: {e} (the name is set until reboot)");
     }
-    let _ = ident::write_atomic("/etc/hostname", line.as_bytes(), 0o644);
+    let _ = ident::write_atomic("/System/Settings/hostname", line.as_bytes(), 0o644);
     audit(
         "net.hostname",
         &alloc::format!("old={old} new={name} uid={}", sys::geteuid()),

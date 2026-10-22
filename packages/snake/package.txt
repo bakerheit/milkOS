@@ -1,6 +1,6 @@
 name snake
 version 1.0.0
 description The classic snake, in the terminal (raw mode + escape codes)
-exec bin/snake
+exec snake
 dock Snake #9CBF9B
-file bin/snake = target/packages/aarch64-unknown-none-softfloat/release/snake
+file snake = target/packages/aarch64-unknown-none-softfloat/release/snake

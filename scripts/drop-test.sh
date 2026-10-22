@@ -18,7 +18,7 @@
 #     eth1 fd6d:696c:6b00:1::/64 addresses),
 #   - after shutdown, the host reads both received files out of the images and compares
 #     their SHA-256 with the originals, and a second boot of alice's image keeps her
-#     identity (same fingerprint: /etc/milk/drop is persistent).
+#     identity (same fingerprint: /System/Settings/milk/drop is persistent).
 #
 # Network safety: the only sockets on the Mac are qemu's two UDP ports on 127.0.0.1; no
 # internet, no host servers. Work files in a mktemp dir; only the qemus and drivers
@@ -111,12 +111,12 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   "waitfile:$WORK/bv6" \
   'send:drop send bob.local /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/bhid" 'send:drop list' "$P" 'send:ping -6 -c 1 -W 500 bob.local' "$P" \
-  'send:echo milk | sudo -S -u nobody /bin/netctl visible off' "$P" "done:$WORK/alist" \
-  'send:su milk -c "cat /etc/milk/drop/identity.secret"' "$P" \
+  'send:echo milk | sudo -S -u nobody /Commands/netctl visible off' "$P" "done:$WORK/alist" \
+  'send:su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$P" \
   'send:su milk -c "drop name alice"' "$P" \
-  'send:echo milk | sudo -S -u nobody /bin/drop name evil' "$P" \
+  'send:echo milk | sudo -S -u nobody /Commands/drop name evil' "$P" \
   'send:drop peers' "$P" \
-  'send:ls /home/milk/Downloads' "$P" \
+  'send:ls /Users/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
   'send:echo now > /sys/fs/milkfs/sync' "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
@@ -129,7 +129,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "waitfile:$WORK/a2" \
   'send:drop list' "$P" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
-  'send:mv /etc/milk/drop/identity.secret /etc/milk/drop/old.secret' "$P" \
+  'send:mv /System/Settings/milk/drop/identity.secret /System/Settings/milk/drop/old.secret' "$P" \
   'send:drop id' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b3" \
   "wait:$DONE_RE" "$P" "waitfile:$WORK/a4" \
@@ -139,7 +139,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/bv6" "wait:$DONE_RE" "$P" \
   'send:netctl visible off' "$P" 'send:netctl' "$P" "done:$WORK/bhid" "waitfile:$WORK/alist" \
   'send:netctl visible on' "$P" \
-  'send:ls -l /home/milk/Downloads' "$P" \
+  'send:ls -l /Users/milk/Downloads' "$P" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -175,23 +175,23 @@ check() { # file label regex
 check "$A" "alice: eth1 link-local from her MAC" "\\[net\\] eth1: link-local address 169\\.254\\.10\\.10/16"
 check "$B" "bob: eth1 link-local from his MAC" "\\[net\\] eth1: link-local address 169\\.254\\.11\\.11/16"
 check "$A" "eth0 is still slirp + DHCP" "\\[net\\] dhcp: 10\\.0\\.2\\.15"
-check "$A" "alice: identity made at first boot" "drop: new identity milk-[0-9a-f]{4} \\(fingerprint [0-9a-f ]{19}\\) in /etc/milk/drop"
+check "$A" "alice: identity made at first boot" "drop: new identity milk-[0-9a-f]{4} \\(fingerprint [0-9a-f ]{19}\\) in /System/Settings/milk/drop"
 check "$A" "init started the Milk Drop daemon" "drop \\(pid [0-9]+\\): Milk Drop on eth1"
 check "$A" "alice discovers bob (new, receiving)" "^bob +169\\.254\\.11\\.11 +[0-9a-f ]{19} +yes +new "
 check "$A" "first contact: bob's fingerprint shown, TOFU" "drop: bob is new: fingerprint [0-9a-f ]{19} \\(trusted on first use\\)"
 check "$B" "bob's prompt names alice, NEW, with her fingerprint" "drop: alice \\(NEW peer, fingerprint [0-9a-f ]{19}; accepting trusts this key from now on\\) wants to send you to-bob\\.bin \\(1024 KiB\\), encrypted\\."
 check "$A" "alice's progress reaches 100%" "drop: \\[##########\\] 100%  1024 KiB / 1024 KiB"
-check "$B" "bob verified the SHA-256 (the host's hash)" "drop: received /home/milk/Downloads/to-bob\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
+check "$B" "bob verified the SHA-256 (the host's hash)" "drop: received /Users/milk/Downloads/to-bob\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
 check "$A" "alice: bob confirmed the hash" "drop: sent to-bob\\.bin to bob: 1024 KiB in [0-9]+ ms"
 check "$B" "bob discovers alice (known now)" "^alice +169\\.254\\.10\\.10 +[0-9a-f ]{19} +yes +known "
 check "$B" "the other way: bob's sender side knows alice" "drop: alice \\([0-9a-f ]{19}\\) verified"
-check "$A" "alice verified bob's file" "drop: received /home/milk/Downloads/to-alice\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
+check "$A" "alice verified bob's file" "drop: received /Users/milk/Downloads/to-alice\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
 check "$A" "alice's prompt: bob is known (no NEW)" "drop: bob \\(fingerprint [0-9a-f ]{19}\\) wants to send you to-alice\\.bin"
 check "$B" "bob: a new identity (same name) after losing the old key" "drop: new identity bob \\(fingerprint"
 check "$A" "changed key refused, loudly" "drop: WARNING: bob's KEY HAS CHANGED\\. Refusing to talk to it\\."
 check "$A" "the send failed because of it" "drop: bob's key changed; refused"
 check "$A" "audit: alice's send" "user\\.drop\\.send +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-bob\\.bin size=1048576 sha256=$SHA_TO_BOB enc=x25519-chacha20poly1305 result=ok"
-check "$A" "audit: alice's receive" "user\\.drop\\.recv +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-alice\\.bin size=1048576 sha256=$SHA_TO_ALICE saved=/home/milk/Downloads/to-alice\\.bin enc=x25519-chacha20poly1305 result=ok"
+check "$A" "audit: alice's receive" "user\\.drop\\.recv +peer=bob fp=[0-9a-f]{16} addr=169\\.254\\.11\\.11 file=to-alice\\.bin size=1048576 sha256=$SHA_TO_ALICE saved=/Users/milk/Downloads/to-alice\\.bin enc=x25519-chacha20poly1305 result=ok"
 check "$A" "audit: the refused key change" "user\\.drop\\.key_changed +role=send name=bob addr=169\\.254\\.11\\.11 trusted_fp=[0-9a-f]{16} offered_fp=[0-9a-f]{16} action=refused"
 check "$A" "audit: first-use trust" "user\\.drop\\.trust +name=bob fp=[0-9a-f]{16} role=send"
 check "$B" "audit: bob's receive" "user\\.drop\\.recv +peer=alice .* result=ok"
@@ -202,13 +202,13 @@ check "$B" "bob's receiver saw alice hang up on the changed key" "drop: the peer
 grep -A2 'drop recv -k' "$B" | grep -q '^msh:' || fail "Ctrl-C did not stop drop recv -k"
 echo "  ok  Ctrl-C stops a drop recv blocked in accept"
 # As milk (not root): both ends through their machine's daemon.
-check "$B" "bob as milk received alice-as-milk's file" "drop: received /home/milk/Downloads/to-bob \\(1\\)\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
+check "$B" "bob as milk received alice-as-milk's file" "drop: received /Users/milk/Downloads/to-bob \\(1\\)\\.bin \\(1024 KiB\\) from alice, sha256 $SHA_TO_BOB ok"
 [ "$(grep -Ec "drop: sent to-bob\.bin to bob: 1024 KiB" "$A")" -ge 2 ] || fail "alice as milk did not send (only root's send in the log)"
 echo "  ok  alice as milk sent to bob (signed by alice's daemon)"
 check "$B" "the file milk received is milk's" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob \\(1\\)\\.bin$"
 check "$B" "root's receive into milk's Downloads is milk's too" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob\\.bin$"
-grep -A1 'su milk -c "cat /etc/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
-echo "  ok  milk can't read /etc/milk/drop/identity.secret"
+grep -A1 'su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
+echo "  ok  milk can't read /System/Settings/milk/drop/identity.secret"
 check "$A" "milk (admin) renames through the daemon" "drop: this machine is now alice \\(was alice\\)"
 check "$A" "audit: the daemon's rename names who asked" "user\\.drop\\.rename +old=alice new=alice by uid=501 user=milk"
 check "$A" "nobody may not rename the machine" "drop: name: only an administrator may change this machine's identity"
@@ -222,7 +222,7 @@ check "$A" "alice rotated her key" "drop: the old key signed the new one"
 check "$B" "bob sees alice's rotation in drop list" "^alice +169\\.254\\.10\\.10 +[0-9a-f ]{19} +yes +rotated "
 check "$B" "bob accepts the rotated key (signed by the old one)" "drop: alice rotated its key \\(signed by its old key [0-9a-f ]{19}\\): now [0-9a-f ]{19}"
 check "$A" "drop forget: bob's new key is first contact again" "drop: forgot bob; its next key will be trusted on first use"
-check "$A" "alice receives over the rotated key" "drop: received /home/milk/Downloads/to-alice \\(1\\)\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
+check "$A" "alice receives over the rotated key" "drop: received /Users/milk/Downloads/to-alice \\(1\\)\\.bin \\(1024 KiB\\) from bob, sha256 $SHA_TO_ALICE ok"
 check "$B" "audit: the accepted rotation" "user\\.drop\\.key_rotated +role=send name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} action=accepted"
 check "$A" "audit: the rotation" "user\\.drop\\.rotate +name=alice old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16}"
 # IPv6 between the two VMs over eth1 (EUI-64 of 02:6d:6b:64:0b:0b = 6d:6bff:fe64:b0b).
@@ -231,7 +231,7 @@ B6='fd6d:696c:6b00:1:6d:6bff:fe64:b0b'
 check "$A" "ping -6 bob.local: AAAA over ff02::fb, echo over eth1" "bytes from $B6: icmp_seq=1"
 check "$A" "ping -6 bob.local: both replies" "2 packets transmitted, 2 received, 0% packet loss"
 check "$B" "bob's receiver listens on eth1's IPv6 address too" "drop: receiving as bob .* and \[$B6\]:[0-9]+"
-check "$B" "bob got alice's file over IPv6" "drop: received /home/milk/Downloads/to-bob \(2\)\.bin \(1024 KiB\) from alice, sha256 $SHA_TO_BOB ok"
+check "$B" "bob got alice's file over IPv6" "drop: received /Users/milk/Downloads/to-bob \(2\)\.bin \(1024 KiB\) from alice, sha256 $SHA_TO_BOB ok"
 check "$A" "audit: alice's send over IPv6" "user\.drop\.send +peer=bob fp=[0-9a-f]{16} addr=$B6 file=to-bob\.bin size=1048576 sha256=$SHA_TO_BOB .*result=ok"
 check "$B" "audit: bob's receive over IPv6" "user\.drop\.recv +peer=alice fp=[0-9a-f]{16} addr=$A6 .*result=ok"
 # Settings > Network through netctl: Milk Drop visibility and the hostname.
@@ -265,13 +265,13 @@ echo "---- on disk (mkmilkfs.py, after shutdown) ----"
 for vm in alice bob; do
   python3 -I scripts/mkmilkfs.py check "$WORK/$vm-fs.img" --quiet || fail "$vm's image doesn't check"
 done
-GOT_B=$(python3 -I scripts/mkmilkfs.py cat "$WORK/bob-fs.img" /home/milk/Downloads/to-bob.bin | shasum -a 256 | cut -d' ' -f1)
-GOT_A=$(python3 -I scripts/mkmilkfs.py cat "$WORK/alice-fs.img" /home/milk/Downloads/to-alice.bin | shasum -a 256 | cut -d' ' -f1)
+GOT_B=$(python3 -I scripts/mkmilkfs.py cat "$WORK/bob-fs.img" /Users/milk/Downloads/to-bob.bin | shasum -a 256 | cut -d' ' -f1)
+GOT_A=$(python3 -I scripts/mkmilkfs.py cat "$WORK/alice-fs.img" /Users/milk/Downloads/to-alice.bin | shasum -a 256 | cut -d' ' -f1)
 [ "$GOT_B" = "$SHA_TO_BOB" ] || fail "bob's to-bob.bin on disk: $GOT_B, sent $SHA_TO_BOB"
 [ "$GOT_A" = "$SHA_TO_ALICE" ] || fail "alice's to-alice.bin on disk: $GOT_A, sent $SHA_TO_ALICE"
 echo "  ok  both received files on disk match the host's originals (SHA-256)"
-python3 -I scripts/mkmilkfs.py cat "$WORK/alice-fs.img" /etc/milk/drop/known_peers | grep -q "^bob " || fail "alice's known_peers has no bob on disk"
-echo "  ok  alice's trusted peers are on her disk (/etc/milk/drop/known_peers)"
+python3 -I scripts/mkmilkfs.py cat "$WORK/alice-fs.img" /System/Settings/milk/drop/known_peers | grep -q "^bob " || fail "alice's known_peers has no bob on disk"
+echo "  ok  alice's trusted peers are on her disk (/System/Settings/milk/drop/known_peers)"
 
 echo "---- second boot of alice's image (alone) ----"
 rm -f "$WORK/alice.sock" "$WORK/alice2.done"
@@ -279,7 +279,7 @@ boot alice 02:6d:6b:64:0a:0a "$PA" "$PB"
 QA=$!
 PIDS+=("$QA")
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice2.log" \
-  "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
+  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
 for _ in $(seq 600); do [ -e "$WORK/alice2.done" ] && break; sleep 0.1; done
@@ -294,19 +294,19 @@ check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"
 check "$A2" "after reboot: the hostname netctl set (uname -n)" "^alicebox$"
-grep -aq "\[net\] hostname alicebox (from /etc/milk/net/hostname)" "$WORK/alice2.log" || fail "after reboot: the kernel did not apply /etc/milk/net/hostname"
-echo "  ok  after reboot: the kernel applied /etc/milk/net/hostname (persistent)"
+grep -aq "\[net\] hostname alicebox (from /System/Settings/milk/net/hostname)" "$WORK/alice2.log" || fail "after reboot: the kernel did not apply /System/Settings/milk/net/hostname"
+echo "  ok  after reboot: the kernel applied /System/Settings/milk/net/hostname (persistent)"
 
 echo "---- a machine with a pre-CSPRNG (legacy) identity: carol ----"
-# A fresh image whose /etc/milk/drop holds an old-format secret (no rng= tag, as made by
+# A fresh image whose /System/Settings/milk/drop holds an old-format secret (no rng= tag, as made by
 # the weak generator): the daemon must rotate it at boot, signed by the old key.
 LEGACY_SEED=$(python3 -I -c "print('42' * 32)")
 python3 -I scripts/mkmilkfs.py mkfs "$WORK/carol-fs.img" --size 64M --label Milk >/dev/null
-python3 -I scripts/mkmilkfs.py mkdir "$WORK/carol-fs.img" /etc/milk/drop 700 >/dev/null
+python3 -I scripts/mkmilkfs.py mkdir "$WORK/carol-fs.img" /System/Settings/milk/drop 700 >/dev/null
 printf 'ed25519-seed %s\n# Milk Drop identity of this machine: never copy it anywhere.\n' "$LEGACY_SEED" >"$WORK/legacy.secret"
 printf 'carol\n' >"$WORK/legacy.name"
-python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/identity.secret "$WORK/legacy.secret" >/dev/null
-python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /etc/milk/drop/name "$WORK/legacy.name" >/dev/null
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /System/Settings/milk/drop/identity.secret "$WORK/legacy.secret" >/dev/null
+python3 -I scripts/mkmilkfs.py put "$WORK/carol-fs.img" /System/Settings/milk/drop/name "$WORK/legacy.name" >/dev/null
 dd if=/dev/zero of="$WORK/carol-disk.img" bs=1m count=0 seek=64 2>/dev/null
 read -r PC PD < <(python3 -I -c "
 import socket
@@ -334,10 +334,10 @@ check "$C" "the daemon rotated the legacy identity at boot" "drop: carol's ident
 check "$C" "drop id: rotated, now from the kernel CSPRNG" "^rotated: +from [0-9a-f ]{19} \\(signed by it\\)"
 check "$C" "drop id: the new key's RNG" "^rng: +kernel CSPRNG"
 check "$C" "audit: rotation because of the legacy RNG" "user\\.drop\\.rotate +name=carol old_fp=[0-9a-f]{16} new_fp=[0-9a-f]{16} key=[0-9a-f]{64} reason=legacy-rng"
-python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/identity.secret >"$WORK/carol.secret"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /System/Settings/milk/drop/identity.secret >"$WORK/carol.secret"
 grep -q "rng=kernel-csprng" "$WORK/carol.secret" || fail "carol's secret on disk isn't tagged rng=kernel-csprng"
 grep -q "$LEGACY_SEED" "$WORK/carol.secret" && fail "carol's legacy seed is still on disk"
-python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /etc/milk/drop/rotation | grep -q "^ed25519-rotate " || fail "no rotation statement on carol's disk"
+python3 -I scripts/mkmilkfs.py cat "$WORK/carol-fs.img" /System/Settings/milk/drop/rotation | grep -q "^ed25519-rotate " || fail "no rotation statement on carol's disk"
 echo "  ok  on disk: the legacy seed is gone, the new one is tagged, the rotation statement is kept"
 
 cleanup

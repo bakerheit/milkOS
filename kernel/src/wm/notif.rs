@@ -54,7 +54,7 @@ const CHIPS: [(&str, i32, i32); 3] = [("All", 14, 64), ("Mentions", 84, 96), ("T
 #[derive(Clone, Debug)]
 pub struct NoticeAction {
     pub label: String,
-    /// What it runs: an absolute path or a /bin program and its words, or `open <what>`
+    /// What it runs: an absolute path or a /Commands program and its words, or `open <what>`
     /// (handled by the desktop). None: an event to the posting app's window.
     pub cmd: Option<String>,
 }
@@ -639,7 +639,7 @@ impl Desktop {
                 let path = if first.starts_with('/') {
                     String::from(*first)
                 } else {
-                    format!("/bin/{first}")
+                    format!("/Commands/{first}")
                 };
                 if let Err(e) = crate::proc::spawn(&path, &words) {
                     kprintln!("wm: notice action {c}: errno {}", e.0);

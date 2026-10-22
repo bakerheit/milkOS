@@ -2,7 +2,7 @@
 # Build tests/linux/linux-hello with the host's bare-metal aarch64-elf-gcc (no libc, no
 # downloads): a static Linux/aarch64 ET_EXEC linked at 0x400000. The output is committed
 # (bin/linux-hello) so the kernel build doesn't need the cross compiler; rerun this after
-# editing the source. initramfs.list puts it at /bin/linux-hello.
+# editing the source. initramfs.list puts it at /Commands/linux-hello.
 set -euo pipefail
 cd "$(dirname "$0")"
 CC=${CC:-aarch64-elf-gcc}

@@ -1,0 +1,12 @@
+
+            _ _ _     ___  ____
+  _ __ ___ (_) | | __/ _ \/ ___|
+ | '_ ` _ \| | | |/ / | | \___ \
+ | | | | | | | |   <| |_| |___) |
+ |_| |_| |_|_|_|_|\_\\___/|____/
+
+ Welcome to milkOS @VERSION@. Pour yourself a glass.
+
+ Your files live in /Users/milk. Apps are in /Apps, the commands you
+ can type in /Commands, and milkOS itself in /System.
+ Everything is inspectable: try /proc and /sys.

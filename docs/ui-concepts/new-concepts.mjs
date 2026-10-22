@@ -83,7 +83,7 @@ function scroll() {
   h += cell(48, 1, "ls ~/photos", 160,
     [0, 1, 2, 3, 4, 5].map((i) => B(14 + i * 108, 44, 98, 76, `background:${[C.peach, C.matcha, C.blue, C.honey, C.lav, C.straw][i]};border-radius:8px`) + TC(14 + i * 108, 124, 98, ["bike.png", "trail.png", "lake.png", "sun.png", "dusk.png", "tree.png"][i], `color:${C.cocoa}`)).join("") + T(14, 142, "6 images, 12 MB   (click to open, drag to copy)", `color:${C.cocoa}`));
   h += cell(228, 2, "disk", 124,
-    [["/", 70, C.matcha, "70 GB free"], ["/home", 160, C.honey, "40 GB free"], ["/tmp", 18, C.matcha, "1 GB used"]].map((d, i) => T(14, 44 + i * 26, d[0].padEnd(7)) + B(80, 46 + i * 26, 420, 14, `background:${C.sand};border-radius:7px`, B(0, 0, d[1] * 2.4, 14, `background:${d[2]};border-radius:7px`)) + T(516, 44 + i * 26, d[3], `color:${C.cocoa}`)).join(""), true);
+    [["/", 70, C.matcha, "70 GB free"], ["/Users", 160, C.honey, "40 GB free"], ["/tmp", 18, C.matcha, "1 GB used"]].map((d, i) => T(14, 44 + i * 26, d[0].padEnd(7)) + B(80, 46 + i * 26, 420, 14, `background:${C.sand};border-radius:7px`, B(0, 0, d[1] * 2.4, 14, `background:${d[2]};border-radius:7px`)) + T(516, 44 + i * 26, d[3], `color:${C.cocoa}`)).join(""), true);
   h += cell(372, 3, "edit todo.txt", 150,
     B(14, 42, 672, 96, `background:${C.cream};border:1px solid ${C.sand};border-radius:8px`) + T(24, 52, "[x] draft the UI spec") + T(24, 70, "[x] pick a look") + T(24, 88, "[ ] fix the allocator") + B(168, 88, 8, 16, `background:${C.esp}`) + T(24, 106, "[ ] boot logo", `color:${C.cocoa}`));
   h += cell(542, 4, "play cream-soda-skies", 96,

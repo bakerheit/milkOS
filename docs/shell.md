@@ -5,18 +5,18 @@
 ## Plain Unix shell
 
 ```sh
-ls -l /bin | sort -n -k5 | tail -3          # pipelines
+ls -l /Commands | sort -n -k5 | tail -3          # pipelines
 echo hi > /tmp/f; echo there >> /tmp/f      # redirection: > >> < 2> 2>&1
-grep milk /etc/motd && echo found || echo no
+grep milk /System/Settings/motd && echo found || echo no
 X=1; export Y=2; echo "$X $Y ${X}0 $? $$" ~ # variables, $? $$ ~, '...' "..." quoting
-ls /bin/u*                                  # globs (* ?) in the last path component
+ls /Commands/u*                                  # globs (* ?) in the last path component
 sleep 10 &                                  # background job: jobs, fg %1, wait
 ```
 
 Ctrl-C kills the foreground job, never the shell: every pipeline runs in its own process
 group, which owns the terminal (TIOCSPGRP) while it runs; the shell catches SIGINT itself.
 Built-ins: `cd pwd exit export unset set jobs fg wait source help`. Everything else is a
-program on `$PATH` (`/bin`). Details: comments at the top of `user/msh/src/main.rs`.
+program on `$PATH` (`/Commands`). Details: comments at the top of `user/msh/src/main.rs`.
 
 ## Structured pipes
 
@@ -27,7 +27,7 @@ tables, Nushell style:
 ```sh
 ps | where rss > 100 | sort-by name          # filter + sort, shown as an aligned table
 ps | where name == msh | select pid rss
-ls /bin | where size > 100K | sort-by size -r | first 3
+ls /Commands | where size > 100K | sort-by size -r | first 3
 ps | sort-by cpu -r | first 1 | get name     # -> plain text: one value per line
 ps | where state == R | count
 ls / | to-json

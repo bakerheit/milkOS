@@ -122,7 +122,7 @@ fn poster_pid() -> u32 {
     }
 }
 
-/// Who is posting: the calling process (e.g. /bin/notify), else the desktop itself.
+/// Who is posting: the calling process (e.g. /Commands/notify), else the desktop itself.
 fn poster() -> String {
     crate::proc::get(sched::current_pid())
         .filter(|_| sched::current_pid() != 0)
@@ -216,6 +216,14 @@ pub enum Request {
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
 
 /// Queue a request; it is handled at the start of the next frame.
+/// `/Apps/<name>/<name>` of a built-in app (Paint, Peek: apps with no dock line of their
+/// own). An installed package's program only starts through its tile (sandboxed).
+fn builtin_app_program(path: &str) -> bool {
+    path.strip_prefix("/Apps/")
+        .and_then(|r| r.split_once('/'))
+        .is_some_and(|(name, prog)| prog == name && crate::fs::layout::is_builtin_app(name))
+}
+
 pub fn request(r: Request) {
     REQUESTS.lock().push(r);
     WAKE.wake_all();
@@ -794,11 +802,11 @@ impl Desktop {
         }
         if p.window {
             // Packaged window apps run sandboxed (docs/security.md): windows yes; the file
-            // system is their own /Applications/<name> read-only and ~/Library/<name>
+            // system is their own /Apps/<name> read-only and ~/Library/<name>
             // read-write; no network, no spawning, no clipboard; more only through the
             // powerbox, one user-chosen file at a time.
             let app_dir = alloc::format!("{}/{}", packages::DIR, p.dir);
-            let lib = alloc::format!("/home/milk/Library/{}", p.dir);
+            let lib = alloc::format!("/Users/milk/Library/{}", p.dir);
             let _ = crate::fs::mkdir_all(&lib, 0o755);
             let mut grants = alloc::vec![
                 crate::proc::caps::FsGrant {
@@ -837,9 +845,9 @@ impl Desktop {
                 );
             }
         } else {
-            // By its /bin name when milk linked it there (a shorter tab label).
+            // By its /Commands name when milk linked it there (a shorter tab label).
             let base = p.exec.rsplit('/').next().unwrap_or(&p.exec);
-            let bin = alloc::format!("/bin/{base}");
+            let bin = alloc::format!("/Commands/{base}");
             let cmd = if crate::fs::stat(&bin).is_ok() {
                 String::from(base)
             } else {
@@ -858,7 +866,7 @@ impl Desktop {
             "about" | "about milkos" => return self.open(App::About),
             "today" | "home" => return self.toggle_mode(Mode::Home),
             "spaces" => return self.toggle_mode(Mode::Spaces),
-            "paint" => return self.launch("/bin/paint"),
+            "paint" => return self.launch("/Apps/paint/paint"),
             "browser" | "web" => return self.open(App::Browser),
             "music" => return self.open(App::Music),
             "milkdrop" | "milk drop" => return self.open(App::Drop),
@@ -868,21 +876,38 @@ impl Desktop {
             }
             _ => {}
         }
-        // A program by name (`open clock`): /bin/<name>.
+        // An app by name (`open clock`, `open fortune`): one in /Apps, then a command.
         if !what.contains('/') && !what.is_empty() {
-            let bin = alloc::format!("/bin/{}", what.to_ascii_lowercase());
-            if crate::fs::stat(&bin).is_ok() {
-                return self.launch(&bin);
+            let name = what.to_ascii_lowercase();
+            if let Some(p) = packages::all()
+                .into_iter()
+                .find(|p| p.dir == name || p.label.to_ascii_lowercase() == name)
+            {
+                return self.launch_package(&p);
+            }
+            let app = alloc::format!("{}/{name}/{name}", packages::DIR);
+            if crate::fs::layout::is_builtin_app(&name) && crate::fs::stat(&app).is_ok() {
+                return self.launch(&app);
+            }
+            let cmd = alloc::format!("{}/{name}", crate::fs::layout::COMMANDS);
+            if crate::fs::stat(&cmd).is_ok() {
+                return self.launch(&cmd);
             }
         }
         let path = apps::fsx::resolve("/", what);
+        // An app's program by path (`open /Apps/clock/clock`): as if its tile was clicked.
+        if let Some(p) = packages::all().into_iter().find(|p| p.exec == path) {
+            return self.launch_package(&p);
+        }
         if apps::fsx::is_dir(&path) {
             apps::files::show_path(&path);
             self.open(App::Files);
         } else if path.to_ascii_lowercase().ends_with(".wav") && crate::fs::stat(&path).is_ok() {
             apps::music::play_path(&path);
             self.open(App::Music);
-        } else if path.starts_with("/bin/") && crate::fs::stat(&path).is_ok() {
+        } else if (path.starts_with("/Commands/") || builtin_app_program(&path))
+            && crate::fs::stat(&path).is_ok()
+        {
             self.launch(&path);
         } else if crate::fs::stat(&path).is_ok() && apps::fsx::is_text(&path) {
             apps::notes::open_file(&path);

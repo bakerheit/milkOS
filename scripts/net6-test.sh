@@ -68,7 +68,7 @@ DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed
 python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'wait@240:\[net\] selftest' "$P" 'send:drop name bob' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b1" "wait:$DONE_RE" "$P" \
-  'send:ls /home/milk/Downloads' "$P" "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
+  'send:ls /Users/milk/Downloads' "$P" "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
 PIDS+=($!)
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'wait@240:\[net\] selftest' "$P" 'send:drop name alice' "$P" \
@@ -118,7 +118,7 @@ check "$A" "ping -6 to slirp" "2 packets transmitted, 2 received, 0% packet loss
 check "$A" "IPv4 ping refused" "ping: sendto: .*(unreachable|101)"
 check "$A" "fetch from the Mac's ::1" "hello from the Mac's loopback, via qemu slirp, to milkOS fetch"
 check "$A" "fetch from her own httpd over [::1]" "fetch: 200 OK, [0-9]+ bytes from \\[::1\\]:80"
-[ "$(grep -c 'served by /bin/httpd' "$A")" -ge 2 ] || fail "fetch localhost: no page (localhost must reach ::1)"
+[ "$(grep -c 'served by /System/Services/httpd' "$A")" -ge 2 ] || fail "fetch localhost: no page (localhost must reach ::1)"
 echo "  ok  fetch http://localhost/ reaches httpd over ::1"
 [ "$(grep -c 'hello over IPv6 only' "$A")" -ge 2 ] || fail "nc -6: no echo from the Mac's [::1] server"
 echo "  ok  nc -6 to the Mac's echo server"
@@ -127,5 +127,5 @@ check "$A" "drop list finds bob over IPv6 alone" "^bob +$B6 +[0-9a-f ]{19} +yes 
 check "$A" "ping -6 bob.local (AAAA over ff02::fb)" "bytes from $B6: icmp_seq=1"
 check "$A" "drop send bob over IPv6" "drop: sent v6\\.txt to bob"
 check "$B" "bob's receiver: only the IPv6 address" "drop: receiving as bob \\(fingerprint [0-9a-f ]{19}\\) on \\[$B6\\]:5360;"
-check "$B" "bob got the file" "drop: received /home/milk/Downloads/v6\\.txt"
+check "$B" "bob got the file" "drop: received /Users/milk/Downloads/v6\\.txt"
 echo "net6-test: PASS"

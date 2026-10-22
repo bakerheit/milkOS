@@ -1,6 +1,6 @@
 # Activity Monitor
 
-`/bin/activity` (dock tile from `/System/Applications/activity/manifest`). The window is
+`/Apps/activity/activity` (dock tile from `/Apps/activity/manifest`). The window is
 `user/activity`; everything that can be decided without a syscall is in `user/sysview` and has
 unit tests (`scripts/sysview-test.sh`). It follows docs/ui-concepts/SPEC-APPS.md, section 1.
 
@@ -11,7 +11,7 @@ click "updates every 1 s" in the summary bar to step through 0.5, 1, 2, 5 second
 
 | Tab | Files |
 | --- | --- |
-| Processes | `/proc/<pid>/status` (Name, State, PPid, Uid, VmRSS, Threads, CpuNs, StartNs, Caps), `/proc/<pid>/exe`, `cwd`, `fd` (private to the process's user, so a count only shows for your own), `/etc/passwd` for user names |
+| Processes | `/proc/<pid>/status` (Name, State, PPid, Uid, VmRSS, Threads, CpuNs, StartNs, Caps), `/proc/<pid>/exe`, `cwd`, `fd` (private to the process's user, so a count only shows for your own), `/System/Settings/passwd` for user names |
 | CPU | `/proc/cpuload` (per core), `/proc/loadavg`, `/proc/interrupts` |
 | Memory | `/proc/meminfo`, the processes' VmRSS |
 | Disk | `/proc/diskstats` (sectors read and written), `/sys/fs/milkfs/info` (blocks free), `Shmem` in meminfo for the in-memory root |
@@ -41,7 +41,7 @@ The mapping from raw event to sentence is `sysview::audit::describe`.
 - **Capabilities in words**: the Sandbox column and the detail panel's "Can read" and "Network" come
   from the `Caps:` line (`all`, or `fs=<paths|all|none> net=<none|local|all> audio=0|1 ...`, see
   docs/security.md). "Sandboxed" is any line but `all`; "System" marks init. "Its own folder" is a
-  grant under `/Applications/` or `~/Library/`; other grants are counted as files or places you chose.
+  grant under `/Apps/` or `~/Library/`; other grants are counted as files or places you chose.
 - **Free space per volume**: only the Milk disk (from milkfs `info`) and the in-memory root; other
   volumes need a statfs call.
 - **Text size**: 16px text everywhere (the only font), so rows and chips are a little taller than

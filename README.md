@@ -40,6 +40,9 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - milkfs, our own copy-on-write filesystem: snapshots, rollback, writable clones, per-file versions,
   `snap diff`, automatic Time Machine snapshots, crash-tested (kill, power cut, torn superblock), `check --repair`.
 - Your home folder lives on milkfs, so files survive reboots.
+- Folders in plain English: `/Apps` (apps you open), `/Commands` (what you type in Terminal),
+  `/Users/milk` (your home), `/Volumes` (disks) and `/System` (milkOS itself). Details in
+  `docs/filesystem.md`.
 - FAT32 with long names, a page cache, and a shared folder with the Mac (`share/` here is `/Volumes/Mac` there).
 
 **Network and sound**
@@ -68,7 +71,8 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - `kernel/`: the kernel crate (`no_std`). Entry is `kernel/src/boot.S`, then `kmain` in `main.rs`.
 - `user/`: user programs and the `rt` runtime library, packed into the initramfs (`initramfs.list`).
 - `packages/`: toy packages for `milk` (`fortune`, `snake`, `moo2048`, `games`).
-- `rootfs/`: files copied into the initramfs (`/etc`, system sounds, the web root).
+- `rootfs/`: files copied into the initramfs (`/Apps` manifests, `/System/Settings`, system sounds,
+  the home skeleton with the web root `~/Sites`).
 - `scripts/`: run and test scripts. The main tests: `net-test.sh`, `pkg-test.sh`, `audio-test.sh`,
   `crashtest.sh`, `fattest.sh`, `wm-demo.sh <demo>`, `input-test.sh`, `screenshot.sh`.
   `check-all.sh` runs all of them in turn and prints one table (`--full` for the long ones).
@@ -90,6 +94,6 @@ The desktop's UI text is one of five typefaces, picked in Settings > Appearance 
 [Atkinson Hyperlegible Next](https://github.com/googlefonts/atkinson-hyperlegible-next) under the
 SIL Open Font License 1.1, and [Ubuntu Sans](https://github.com/canonical/Ubuntu-Sans-fonts) under the
 Ubuntu Font Licence 1.0 (licences and copyright lines in `assets/fonts/`, and in the image at
-`/System/Library/Fonts/`). `scripts/gen_sysfont.py` renders them into the glyph bitmaps in
+`/System/Fonts/`). `scripts/gen_sysfont.py` renders them into the glyph bitmaps in
 `kernel/src/sysfont/`; it names the exact files it uses (from the Google Fonts repository) and their
 hashes. The .ttf files are not in this repository.

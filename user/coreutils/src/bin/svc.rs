@@ -143,8 +143,8 @@ fn main(args: &rt::Args) -> i32 {
         ("reload", _) => String::from("reload"),
         ("kill", Some(u)) => alloc::format!("kill {u} {}", args.get(3).unwrap_or("9")),
         ("logs", Some(u)) => {
-            let e = sys::execve("/bin/log", &["log", "-u", u], &[]);
-            rt::eprintln!("svc: /bin/log: {e}");
+            let e = sys::execve("/Commands/log", &["log", "-u", u], &[]);
+            rt::eprintln!("svc: /Commands/log: {e}");
             return 1;
         }
         _ => {

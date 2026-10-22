@@ -3,7 +3,7 @@
 #   scripts/milk-repo.sh build [DIR]          build + package + index into DIR (/tmp/milk-repo)
 #   scripts/milk-repo.sh serve [PORT] [DIR]   serve DIR on 127.0.0.1:PORT (8765) until ^C
 # The guest reaches it as http://10.0.2.2:PORT/ (qemu user networking maps that to the
-# Mac's 127.0.0.1); put that URL in the guest's /etc/milk/repos (the default already is
+# Mac's 127.0.0.1); put that URL in the guest's /System/Settings/milk/repos (the default already is
 # http://10.0.2.2:8765/). The server binds 127.0.0.1 only and is killed by its exact PID.
 # `run.sh` restricts the guest network (no host access), so the repo is reachable only from
 # boots with an unrestricted user netdev, like scripts/pkg-test.sh's.
@@ -26,7 +26,7 @@ build() {
     python3 -I scripts/mkpkg.py build "$spec" --root "$REPO_ROOT" -o "$dir/$name-$ver.milkpkg"
   done
   # Signed with the TEST-ONLY toy key (scripts/milk-test-key.secret): index.txt.sig and
-  # <pkg>.milkpkg.sig, checked by milk against /etc/milk/keys/milk-test.pub.
+  # <pkg>.milkpkg.sig, checked by milk against /System/Settings/milk/keys/milk-test.pub.
   python3 -I scripts/mkpkg.py index "$dir" --key "${MILK_SIGNING_KEY:-scripts/milk-test-key.secret}"
 }
 

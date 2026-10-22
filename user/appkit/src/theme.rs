@@ -89,7 +89,7 @@ impl Theme {
         let status = read("/dev/wm");
         let dark = match status.lines().find_map(|l| l.strip_prefix("theme ")) {
             Some(t) => matches!(t.trim(), "dark" | "chocolate"),
-            None => read("/home/milk/.config/milk/settings").lines().any(|l| {
+            None => read("/Users/milk/.config/milk/settings").lines().any(|l| {
                 let (k, v) = l.split_once('=').unwrap_or((l, ""));
                 k.trim() == "theme" && matches!(v.trim(), "chocolate" | "dark")
             }),

@@ -11,7 +11,7 @@ use crate::sync::SpinLock;
 
 use super::wallpaper::Kind;
 
-pub const PATH: &str = "/home/milk/.config/milk/settings";
+pub const PATH: &str = "/Users/milk/.config/milk/settings";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Prefs {
@@ -141,7 +141,7 @@ pub fn load() -> Prefs {
 }
 
 pub fn save(p: &Prefs) {
-    let _ = fs::mkdir_all("/home/milk/.config/milk", 0o755);
+    let _ = fs::mkdir_all("/Users/milk/.config/milk", 0o755);
     if let Err(e) = fs::write_file(PATH, p.to_text().as_bytes()) {
         crate::kprintln!("wm: saving {PATH} failed: {e}");
         return;

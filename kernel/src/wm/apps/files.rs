@@ -29,13 +29,14 @@ use super::fsx::{self, Entry};
 use super::milkdrop;
 use super::notes;
 
-const FAVS: [(&str, &str); 6] = [
+const FAVS: [(&str, &str); 7] = [
     ("Home", fsx::HOME),
-    ("Documents", "/home/milk/Documents"),
-    ("Downloads", "/home/milk/Downloads"),
-    ("Desktop", "/home/milk/Desktop"),
-    ("Pictures", "/home/milk/Pictures"),
-    ("Music", "/home/milk/Music"),
+    ("Apps", crate::fs::layout::APPS),
+    ("Documents", "/Users/milk/Documents"),
+    ("Downloads", "/Users/milk/Downloads"),
+    ("Desktop", "/Users/milk/Desktop"),
+    ("Pictures", "/Users/milk/Pictures"),
+    ("Music", "/Users/milk/Music"),
 ];
 const VOLUME: &str = "/Volumes/Milk";
 const MAC: &str = "/Volumes/Mac";
@@ -271,7 +272,7 @@ impl Files {
             now: 0,
         };
         let start = PENDING.lock().take();
-        f.show(start.as_deref().unwrap_or("/home/milk/Documents"));
+        f.show(start.as_deref().unwrap_or("/Users/milk/Documents"));
         f
     }
 
@@ -1113,8 +1114,12 @@ impl WindowContents for Files {
             if e.y >= TOOL_H + 76 && (row as usize) < self.snaps.len() && e.x >= x - 8 {
                 let name = self.snaps[row as usize].name.clone();
                 let root = format!("{SNAPDIR}/{name}");
-                let home = format!("{root}/home/milk");
-                self.go(if fsx::is_dir(&home) { &home } else { &root });
+                // The home in the snapshot (`home/milk` in one from before the layout change).
+                let home = [format!("{root}/Users/milk"), format!("{root}/home/milk")]
+                    .into_iter()
+                    .find(|h| fsx::is_dir(h))
+                    .unwrap_or(root);
+                self.go(&home);
                 return true;
             }
             return false;

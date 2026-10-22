@@ -1,6 +1,6 @@
 //! notify [--app NAME] [--id N] [--action LABEL[:COMMAND]]... <title> [subtitle...]
 //! Show a toast on the desktop (and a card in the notification drawer). Up to two
-//! --action buttons: with a command, pressing one runs it (an absolute path or a /bin
+//! --action buttons: with a command, pressing one runs it (an absolute path or a /Commands
 //! program and its words, or `open <what>`); without, the posting app's window gets an
 //! action event. --app sets the group and icon (default: notify), --id a number sent back.
 

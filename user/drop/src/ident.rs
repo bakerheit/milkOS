@@ -1,4 +1,4 @@
-//! This machine's Milk Drop identity (an Ed25519 key pair and a name) in /etc/milk/drop
+//! This machine's Milk Drop identity (an Ed25519 key pair and a name) in /System/Settings/milk/drop
 //! (persistent: the kernel binds it onto the Milk volume, see
 //! `milkfs::setup_persistent_etc`), and the peers each user trusts (TOFU).
 //!
@@ -6,7 +6,7 @@
 //! only root processes read it (the `drop daemon` service, root's own `drop`). Everyone
 //! else gets the public half from `identity.pub` / `name` and asks the daemon to sign
 //! over `/run/drop.sock` ([`Identity::sign`]; docs/security.md, "Milk Drop: one machine
-//! identity, per-user clients"). Trust is per user: root's in /etc/milk/drop/known_peers,
+//! identity, per-user clients"). Trust is per user: root's in /System/Settings/milk/drop/known_peers,
 //! everyone else's in `~/.config/milk/drop/known_peers`, which starts as a copy of the
 //! machine's list.
 
@@ -14,11 +14,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use rt::{ed25519, sys};
 
-pub const DIR: &str = "/etc/milk/drop";
-const SECRET: &str = "/etc/milk/drop/identity.secret";
-const PUBLIC: &str = "/etc/milk/drop/identity.pub";
-const NAME: &str = "/etc/milk/drop/name";
-const KNOWN: &str = "/etc/milk/drop/known_peers";
+pub const DIR: &str = "/System/Settings/milk/drop";
+const SECRET: &str = "/System/Settings/milk/drop/identity.secret";
+const PUBLIC: &str = "/System/Settings/milk/drop/identity.pub";
+const NAME: &str = "/System/Settings/milk/drop/name";
+const KNOWN: &str = "/System/Settings/milk/drop/known_peers";
 
 pub struct Identity {
     /// The secret seed, when this process may read it (root); else signing goes through
@@ -33,7 +33,7 @@ pub const SOCK: &str = "/run/drop.sock";
 /// "off" here hides the machine: the daemon stops announcing and answering discovery and
 /// mDNS queries (it still signs for local users and `drop recv` still takes transfers
 /// from peers that know the address). Absent or "on": visible.
-pub const VISIBLE: &str = "/etc/milk/drop/visible";
+pub const VISIBLE: &str = "/System/Settings/milk/drop/visible";
 
 /// Is this machine visible on the link (Milk Drop discovery and `<name>.local`)?
 pub fn visible() -> bool {
@@ -197,7 +197,7 @@ fn write_secret(seed: &[u8; 32]) -> Result<(), String> {
     )
 }
 
-const ROTATION: &str = "/etc/milk/drop/rotation";
+const ROTATION: &str = "/System/Settings/milk/drop/rotation";
 
 /// A rotation statement: the previous key and its signature over "old -> new".
 #[derive(Clone)]

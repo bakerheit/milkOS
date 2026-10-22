@@ -39,7 +39,7 @@ pub fn absolute(arg: &str) -> String {
         return String::from(arg); // an app name: files, notes, paint ...
     }
     if let Some(rest) = arg.strip_prefix("~") {
-        return format!("/home/milk{rest}");
+        return format!("/Users/milk{rest}");
     }
     let cwd = sys::getcwd().unwrap_or_else(|_| String::from("/"));
     if cwd == "/" {

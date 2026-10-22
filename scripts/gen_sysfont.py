@@ -14,7 +14,7 @@ script refuses files whose hash differs, so a regenerated bake matches the commi
 
 Figtree, IBM Plex Sans, Fira Sans and Atkinson Hyperlegible Next are under the SIL Open Font
 License 1.1; Ubuntu Sans (the 2023 family) is under the Ubuntu Font Licence 1.0. The licence
-texts and copyright lines are in assets/fonts/ (and in the image, /System/Library/Fonts/).
+texts and copyright lines are in assets/fonts/ (and in the image, /System/Fonts/).
 
 What gets baked (sizes are the em in pixels, chosen to sit where the 8x16 Unifont cells sat):
     body  13 px in a 16 px line, baseline 13: Regular, Medium, Bold, all of Latin-1 + U+FFFD

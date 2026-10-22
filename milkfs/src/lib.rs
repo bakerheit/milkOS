@@ -51,3 +51,6 @@ pub mod versions;
 pub mod volume;
 
 pub(crate) use platform::fail;
+
+#[cfg(test)]
+mod tests;

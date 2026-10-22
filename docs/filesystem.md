@@ -1,6 +1,7 @@
 # File systems
 
-Files: `kernel/src/fs/` (milkfs in `fs/milkfs/`), `kernel/src/virtio/blk.rs`,
+Files: `kernel/src/fs/` (milkfs: the `milkfs` crate in `<repo>/milkfs`, its VFS glue in
+`fs/milkfs/`), `kernel/src/virtio/blk.rs`,
 `kernel/build.rs` (initramfs packer), `rootfs/`, `initramfs.list`, `scripts/disk.sh`,
 `scripts/mkmilkfs.py`, `scripts/crashtest.sh`, `user/snap`.
 One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interrupts`.
@@ -732,7 +733,9 @@ let s: search::Status = search::status(); // s.state: "starting" | "building" |
 
 ## milkfs v0 (implemented)
 
-`kernel/src/fs/milkfs/`, host tool `scripts/mkmilkfs.py`, crash test `scripts/crashtest.sh`.
+The `milkfs` crate (`<repo>/milkfs`, `no_std` + `alloc`, see "The milkfs crate" below) with
+the kernel's VFS glue in `kernel/src/fs/milkfs/`; host tool `scripts/mkmilkfs.py`, crash test
+`scripts/crashtest.sh`, host tests `scripts/milkfs-test.sh`.
 Mounted at `/Volumes/<label>` (`/Volumes/Milk`). Every disk with milkfs is mounted, at
 `/Volumes/<label>` (or `/Volumes/<label>-<dev>` if taken); the **primary** volume (home,
 Time Machine, the snapshot API, `/sys/fs/milkfs`) is the one labelled `Milk`, else the first
@@ -742,17 +745,49 @@ the differences are listed at the end of this section.
 
 | file | what |
 |---|---|
-| `format.rs` | on-disk structures, xxh64, FNV-1a name hash (mirrored in `mkmilkfs.py`) |
-| `store.rs` | allocator and its persistent space map, birth-time release rules, checksummed block I/O, dead-list chains, decoded node cache |
-| `btree.rs` | copy-on-write B+tree: dirty nodes in memory, written bottom-up at commit |
-| `volume.rs` | `State`, commit, mount (space map, or mark + namespace check + orphan reclaim), mkfs, space check |
-| `items.rs` | inodes, directory entries, extents, symlinks, file data |
-| `snap.rs` | snapshot create / delete / rollback |
-| `clone.rs` | clones: create / discard / promote |
-| `timemachine.rs` | automatic snapshots thread, retention, `/sys/fs/milkfs/auto` |
-| `inode.rs` | VFS objects: `Volume` (the `FileSystem`), `MilkInode`, `.snapshots` |
-| `crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
-| `mod.rs` | kernel API, automount, `/sys/fs/milkfs` |
+| `milkfs/src/format.rs` | on-disk structures, xxh64, FNV-1a name hash (mirrored in `mkmilkfs.py`) |
+| `milkfs/src/store.rs` | allocator and its persistent space map, birth-time release rules, checksummed block I/O, dead-list chains, decoded node cache |
+| `milkfs/src/bcache.rs` | the 4 KiB write-back block cache over the disk |
+| `milkfs/src/btree.rs` | copy-on-write B+tree: dirty nodes in memory, written bottom-up at commit |
+| `milkfs/src/volume.rs` | `State`, commit, mount (space map, or mark + namespace check + orphan reclaim), mkfs, space check |
+| `milkfs/src/items.rs` | inodes, directory entries, extents, symlinks, file data, shared blocks |
+| `milkfs/src/ops.rs` | create, link, unlink, rmdir, rename, write, truncate, reflink, dedupe (what the VFS objects call) |
+| `milkfs/src/snap.rs` | snapshot create / delete / rollback |
+| `milkfs/src/clone.rs` | clones: create / discard / promote |
+| `milkfs/src/diff.rs`, `versions.rs` | `snap diff`, a file's versions |
+| `milkfs/src/stream.rs` | send / receive streams and the drivers that write and apply them |
+| `milkfs/src/crypt.rs`, `convert.rs` | encryption at rest, encrypting / decrypting in place |
+| `milkfs/src/fsck.rs`, `scrub.rs` | `check [--repair]`, the scrub walk |
+| `milkfs/src/timemachine.rs` | automatic snapshots: settings, retention, the snapshot |
+| `kernel/src/fs/milkfs/inode.rs` | VFS objects: `Volume` (the `FileSystem`), `MilkInode`, `.snapshots` |
+| `kernel/src/fs/milkfs/scrub.rs`, `timemachine.rs` | their threads, rate limit, status, `/sys/fs/milkfs/scrub` and `/auto` |
+| `kernel/src/fs/milkfs/platform.rs` | the kernel as the crate's `Platform` |
+| `kernel/src/fs/milkfs/crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
+| `kernel/src/fs/milkfs/mod.rs` | kernel API, automount, unlock / lock, `/sys/fs/milkfs` |
+
+### The milkfs crate
+
+The file system builds for the kernel and for the Mac, so most of it is tested on the Mac in
+seconds (`scripts/milkfs-test.sh`) instead of in qemu. The kernel depends on it like it does
+on `milkcrypto` and re-exports its modules under the old paths (`fs::milkfs::format`,
+`fs::milkfs::volume::State`, ...); `fs::errno`, the file-type ABI in `fs::node` (`InodeType`,
+`S_IF*`, `DT_*`, `Timespec`), `fs::blockdev::BlockDevice` and `fs::bcache` are the crate's
+too. What the crate gets from its host:
+
+- a disk: `blockdev::BlockDevice` (the kernel's drivers; on the Mac, memory or a file);
+- `platform::Platform`, installed once (`set_platform`; the kernel's in
+  `kernel/src/fs/milkfs/platform.rs`, first thing in `fs::init`): wall-clock time,
+  monotonic time, a counter (UUID seed), random bytes, scrypt (the kernel's in page
+  frames), a log line, the reason for an error (`/sys/fs/milkfs/error`), and locks
+  (`RawLock`: a sleeping one, the kernel's `sched::Mutex`, for the block cache, which is
+  held across disk I/O; a spinning one, its IRQ-masking `SpinLock`, for the node cache);
+- `volume::StateAccess`: how the drivers that must not hold the volume lock across slow
+  work (scrub, send, receive) take it, a step at a time (the kernel's `Volume`);
+- `scrub::ScrubRunner` (stop, progress, rate limit) and `stream::StreamSink` (the output).
+
+`LAST_COMMIT` (the last generation whose commit completed, for the crash test's power-cut
+report) is the crate's. The kernel keeps the VFS (`inode.rs`, the page cache), the
+threads, `/sys/fs/milkfs`, unlock and lock, the audit log, and the crash-test modes.
 
 ### On-disk format (v0, v1, v2)
 
@@ -1106,7 +1141,7 @@ A milkfs volume can be encrypted ("FileVault"): every block except the two super
 and the keyring is encrypted and authenticated; without the passphrase (or the recovery
 key) the volume doesn't mount. Crypto: the shared `milkcrypto` crate (`crypto/`: XChaCha20-Poly1305,
 HMAC-SHA256, scrypt; from scratch, published test
-vectors at boot; see docs/crypto.md); milkfs part: `kernel/src/fs/milkfs/crypt.rs`.
+vectors at boot; see docs/crypto.md); milkfs part: `milkfs/src/crypt.rs`.
 
 **Keys.** A random 256-bit volume key VK (made on the Mac with `os.urandom` at `mkfs
 --encrypt`). Never stored in the clear: the keyring block (plaintext, pointed at by the
@@ -1227,7 +1262,7 @@ passphrase or the recovery key) makes an encrypted one plain again. Underneath:
 a second line; `rate=MB` alone changes the speed, 0 = unlimited) and
 `/sys/fs/milkfs/decrypt` (`[dev=NAME]`, the secret on a second line); kernel
 `fs::milkfs::encrypt_in_place(dev, passphrase, recovery_out)`,
-`decrypt_in_place(dev, secret)`; `kernel/src/fs/milkfs/convert.rs`.
+`decrypt_in_place(dev, secret)`; `milkfs/src/convert.rs`.
 
 How (crash-safe because it is copy-on-write all the way):
 
@@ -1585,6 +1620,24 @@ sample of them and the authorisation hook (`milkfs_control_errors`).
 
 ### Tests
 
+- Host tests, `scripts/milkfs-test.sh` (`milkfs-unit` in check-all, smoke set): the crate on
+  the Mac (`milkfs/src/tests/`), a few seconds. The harness has a memory disk, a disk that
+  loses power (`CrashDisk`: after N write requests, after N sectors with the request in
+  flight torn, inside the K-th superblock write after T of its 8 sectors, or with a
+  volatile write cache that keeps any subset of the unflushed writes, in any order, some
+  torn), a fake clock and a seeded RNG per test thread, and a small file API over `State`
+  doing what the VFS objects do. Tests by the guest test they stand in for: `basic`
+  (format, mount, read, write, namespace rules, batching, orphans, the space map), `btree`
+  (a model test, splits and merges, `treetest`), `fsck` (`fscktest`'s damage kinds),
+  `reflink` (`reflinktest`), `snapshots` (snapshots, clones, diff, versions, Time Machine),
+  `send` (`sendtest`), `scrub` (`scrubtest`), `crypt` (`enctest`), `convert`
+  (`converttest`), `upgrade` (`upgradetest`'s v0 image), `crash` (`crashtest`: kill, power
+  cut and superblock rounds, a sweep of 48 cut points over one stretch, and the write-cache
+  rounds qemu can't do), `compat` (mkfs byte-identical to an image main's kernel wrote,
+  with its clock and UUID seed replayed; every structure re-encodes to the same bytes;
+  `MILKFS_COMPAT_IMAGE=FILE` checks an image another milkfs wrote, `MILKFS_MKFS_IMAGE=FILE`
+  another kernel's fresh mkfs, `MILKFS_EXPORT_IMAGE=FILE` writes one for the other way).
+  `MILKFS_TEST_LOG=1` shows the file system's log lines.
 - Boot self-test, milkfs part. **The user's volume only gets read-only checks** (mounted,
   info consistent, exact space accounting, home bound); verified byte-identical after a boot.
   Everything destructive runs on a throwaway volume: a 16 MiB RAM disk (`fs/ramdisk.rs`),

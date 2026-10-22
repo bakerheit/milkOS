@@ -8,6 +8,7 @@ linked into both worlds:
 |---|---|---|
 | kernel | `kernel/Cargo.toml` path dependency; `kernel/src/crypto/mod.rs` re-exports it as `crate::crypto::*` | `crypto::rng`: the CSPRNG behind `/dev/random`, `/dev/urandom`, getrandom(278) |
 | userland | `user/rt/Cargo.toml` path dependency; `rt::crypto` (plus the old paths `rt::sha256`, `rt::sha512`, `rt::ed25519`) | nothing: programs use the primitives directly |
+| milkfs | `milkfs/Cargo.toml` path dependency (the file system crate, kernel and host tests) | nothing: random bytes and scrypt's memory come from its host (`milkfs::platform`) |
 
 `crypto` is a member of the root (kernel) workspace, so `cargo clippy` / `cargo fmt` at the
 root cover it. `kernel/build.rs` watches it too, so userland rebuilds when it changes.
@@ -40,7 +41,7 @@ wiped (the kernel heap never shrinks); the fs self-test runs RFC 7914's vector t
 **HMAC-SHA256** is the PRF (key derivation, milkfs's per-block synthetic IV, where a PRF is
 required and Poly1305, a one-time MAC, wouldn't do). Users: milkfs encryption at rest
 and encrypted `snap send` streams (XChaCha20-Poly1305 per record with a counter nonce,
-scrypt-wrapped stream key; `kernel/src/fs/milkfs/crypt.rs`, docs/filesystem.md); its salts and nonces come from
+scrypt-wrapped stream key; `milkfs/src/crypt.rs`, docs/filesystem.md); its salts and nonces come from
 `crypto::rng::fill`. `scripts/mkmilkfs.py` has its own stdlib-only copy for the Mac side
 (`mkmilkfs.py selftest-crypto` runs the same vectors).
 

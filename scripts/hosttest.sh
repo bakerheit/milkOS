@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Run the unit tests of one pure userland crate on the Mac and say how many ran:
+# Run the unit tests of one pure crate on the Mac and say how many ran:
 #   scripts/hosttest.sh CRATE NAME      e.g. scripts/hosttest.sh timekit timekit-unit
+# CRATE is a userland crate (user/CRATE, the user workspace) or one of the root workspace's
+# (<repo>/CRATE, e.g. milkfs).
 # Only the library's tests are run (`--lib`: the empty doc-test pass printed "0 passed" after the
 # real one and made a log look like nothing ran). It fails if any test fails, if the output has no
 # test result, or if zero tests ran, and ends with "NAME: N passed".
@@ -11,7 +13,7 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 CRATE="${1:?usage: hosttest.sh CRATE NAME}"; NAME="${2:-$CRATE-unit}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$REPO/user"
+if [ -f "$REPO/$CRATE/Cargo.toml" ]; then cd "$REPO"; else cd "$REPO/user"; fi
 OUT="$(cargo test -p "$CRATE" --lib --target aarch64-apple-darwin --target-dir "$REPO/target/host-tests" 2>&1)"; RC=$?
 echo "$OUT"
 [ "$RC" = 0 ] || { echo "$NAME: FAIL (cargo test exited $RC)"; exit 1; }

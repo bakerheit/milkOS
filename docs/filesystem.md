@@ -17,7 +17,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `tmpfs.rs` | RAM fs, mounted at `/` |
 | `synth.rs` | building blocks for kernel-generated fs (dirs, generated files, symlinks) |
 | `devfs.rs`, `procfs.rs`, `sysfs.rs` | `/dev`, `/proc`, `/System/Kernel` (sysfs) |
-| `initramfs.rs` | cpio newc reader, unpacks the built-in archive into `/` |
+| `initramfs.rs` | cpio newc reader, unpacks the built-in archive into `/` without copying: each file reads its bytes in place from the kernel image until the first write or growing truncate gives it its own pages (`TmpNode::set_rom`, copy-on-write) |
 | `blockdev.rs` | `BlockDevice` trait, disk registry, `/dev/vdX` byte-offset inode |
 | `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
 | `bcache.rs` | block cache: fixed-size LRU of 4 KiB buffers, write-back, `flush` = durable |

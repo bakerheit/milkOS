@@ -97,7 +97,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:cat /proc/net/hostname' "$P" \
   'send:netctl hostname bad_name!' "$P" \
   'send:processes watch --plain --frames 2 --every 1' 'wait:COMMAND[^$]*COMMAND' "$P" \
-  'send:system uptime' 'wait:minutes)' "$P" \
+  'send:system uptime' 'wait:15 minutes' "$P" \
   'send:cat /proc/loadavg' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!

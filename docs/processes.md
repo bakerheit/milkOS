@@ -516,7 +516,15 @@ for a new crate) + one line in `initramfs.list`.
 * `rt`: `_start`, syscall wrappers (`rt::sys`: files, processes, signals with an
   `sa_restorer` trampoline, job control, /proc-based `ps`), `print!`/`println!`,
   `rt::io` (buffered `Out`, `Lines`, `each_input`, flag parsing), `rt::table`
-  (structured pipes), brk bump allocator, panic handler, `rt::main!(main)`.
+  (structured pipes), the heap (`rt::heap`, below), panic handler, `rt::main!(main)`.
+* `heapkit`: the heap allocator every program gets as its global allocator. Size classes
+  (16 B to 2 KiB) in runs for small blocks, coalescing free lists for the rest, all in the
+  brk arena. Freed memory is reused; free space is given back to the kernel (the break
+  shrinks at the top, and whole free pages inside the arena are munmapped, then taken back
+  with `mmap(MAP_FIXED)` when reused), so a long-running process's RSS follows its live
+  data. A spinlock makes it safe with `rt::thread`; signal handlers must not allocate. Pure,
+  host-tested: `scripts/heapkit-test.sh`. `scripts/leak-test.sh` boots a desktop and checks
+  that top, milkd, alarmd and Activity Monitor stay flat for a minute.
 * `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).

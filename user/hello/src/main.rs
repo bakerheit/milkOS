@@ -33,10 +33,13 @@ fn main(args: &rt::Args) -> i32 {
     // Heap via brk.
     let v: Vec<u64> = (0..100_000).collect();
     let sum: u64 = v.iter().sum();
-    let (next, brk) = rt::alloc_brk::stats();
+    let h = rt::heap::stats();
     println!(
-        "  heap: summed {} u64s = {sum}, brk heap at {next:#x}..{brk:#x}",
-        v.len()
+        "  heap: summed {} u64s = {sum}, brk heap at {:#x}..{:#x}, {} KiB free",
+        v.len(),
+        h.start,
+        h.end,
+        h.free / 1024
     );
 
     // Anonymous mmap.

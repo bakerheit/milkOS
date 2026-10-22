@@ -56,6 +56,18 @@
   that reorders unflushed writes), covering what the qemu milkfs tests check below the VFS;
   check-all runs it in the smoke set.
 
+**Memory**
+- A real heap for every program (`user/heapkit`, the global allocator in `rt::heap`). The old
+  one was a bump allocator that only took back the most recent block, so long-running
+  processes grew without end (Activity Monitor, top and milkd most of all). Now: size
+  classes for small blocks, coalescing free lists for the rest, realloc in place, and free
+  memory goes back to the kernel (the break shrinks; free pages inside the heap are
+  munmapped and taken back with `mmap(MAP_FIXED)` when reused). A lock makes it safe with
+  `rt::thread`. In 3 minutes of a busy desktop Activity Monitor went from 2.6 to 18.5 MB
+  before and stays at about 2.3 MB now; top went from 0.5 to 5.3 MB and stays at 0.3 MB.
+  `scripts/heapkit-test.sh` (host, smoke set) and `scripts/leak-test.sh` (a desktop for a
+  minute, default set) check it.
+
 ## 0.1.0 (2026-10-21)
 
 The first release: everything below exists and is tested, on qemu `virt` (aarch64) with

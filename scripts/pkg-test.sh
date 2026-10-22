@@ -292,7 +292,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   "${DISK_ARGS[@]}" -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 2>>"$WORK/qemu.err" &
 QPID=$!
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG2" \
-  "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
+  "$P" 'send:sleep 1' "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:milk list' "$P" 'send:fortune -n 15' "$P" 'send:audit verify' 'wait:audit.log: [A-Z]+' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive2.log" 2>&1 &
 DPID=$!

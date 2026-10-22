@@ -464,6 +464,33 @@ fn an_empty_new_buffer_is_clean_and_changing_eol_dirties() {
 }
 
 #[test]
+fn version_changes_with_the_text_only() {
+    let mut b = buf("abc");
+    let v = b.version();
+    b.set_cursor(p(0, 1), false);
+    b.select_all();
+    assert_eq!(b.version(), v);
+    b.insert_char('x');
+    let v2 = b.version();
+    assert_ne!(v2, v);
+    b.undo();
+    assert_ne!(b.version(), v2);
+    let v3 = b.version();
+    b.redo();
+    assert_ne!(b.version(), v3);
+}
+
+#[test]
+fn find_in_line_lists_the_matches_of_one_line() {
+    let b = buf("ab ab\nxx\nAB");
+    assert_eq!(b.find_in_line(0, "ab", CS), vec![(0, 2), (3, 5)]);
+    assert_eq!(b.find_in_line(2, "ab", CI), vec![(0, 2)]);
+    assert!(b.find_in_line(1, "ab", CS).is_empty());
+    assert!(b.find_in_line(0, "", CS).is_empty());
+    assert!(b.find_in_line(99, "ab", CS).is_empty());
+}
+
+#[test]
 fn history_is_capped() {
     let mut b = Buffer::new();
     for i in 0..(crate::MAX_UNDO + 50) {
@@ -771,6 +798,232 @@ fn random_edits_match_a_model_and_undo_redo_walks_back_and_forth() {
             b.text(),
             *states.last().unwrap(),
             "seed {seed}: redo all the way"
+        );
+    }
+}
+
+// ---- view: wrapping and screen maths ----------------------------------------------------------
+
+mod view_tests {
+    use crate::syntax::{Lang, Role, State, highlight, states};
+    use crate::view::*;
+    use crate::{Buffer, Pos};
+
+    fn buf(s: &str) -> Buffer {
+        Buffer::from_bytes(s.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn no_wrap_is_one_row_per_line() {
+        let b = buf("abc\n\nlonger line here");
+        let rows = layout(&b, 5, false);
+        assert_eq!(rows.len(), 3);
+        assert_eq!((rows[2].start, rows[2].end), (0, 16));
+        assert!(rows.iter().all(|r| r.first));
+        // An empty buffer still has a row.
+        assert_eq!(layout(&Buffer::new(), 10, true).len(), 1);
+    }
+
+    #[test]
+    fn wrap_breaks_after_a_space_or_hard() {
+        let b = buf("aaa bbb ccc ddd");
+        let rows = layout(&b, 8, true);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|r| {
+                b.line(r.line)
+                    .chars()
+                    .skip(r.start)
+                    .take(r.end - r.start)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(text, ["aaa bbb ", "ccc ddd"]);
+        assert!(rows[0].first && !rows[1].first);
+        // No space to break at: cut at the width.
+        let b = buf("abcdefghijklmnopqrstuvwxyz");
+        let rows = layout(&b, 10, true);
+        assert_eq!(
+            rows.iter().map(|r| r.end - r.start).collect::<Vec<_>>(),
+            [10, 10, 6]
+        );
+        // The rows tile the line exactly.
+        for w in 1..30 {
+            let b = buf("the quick brown fox jumps over the lazy dog\nand again");
+            let rows = layout(&b, w, true);
+            for line in 0..b.line_count() {
+                let mine: Vec<_> = rows.iter().filter(|r| r.line == line).collect();
+                assert_eq!(mine[0].start, 0);
+                assert_eq!(mine.last().unwrap().end, b.line_len(line));
+                for pair in mine.windows(2) {
+                    assert_eq!(pair[0].end, pair[1].start);
+                }
+                assert!(mine.iter().all(|r| r.end - r.start <= w.max(1)));
+            }
+        }
+    }
+
+    #[test]
+    fn locate_and_pos_at_agree() {
+        let b = buf("aaa bbb ccc ddd\n\nxyz");
+        let rows = layout(&b, 8, true);
+        for line in 0..b.line_count() {
+            for col in 0..=b.line_len(line) {
+                let p = Pos::new(line, col);
+                let (row, c) = locate(&rows, p);
+                assert_eq!(rows[row].line, line);
+                let back = pos_at(&rows, row, c);
+                // A position at a wrap point comes back as itself; the end of a wrapped row
+                // can't be clicked, so it maps to the last char there.
+                if col == b.line_len(line) || col < rows[row].end {
+                    assert_eq!(back, p, "{p:?}");
+                }
+            }
+        }
+        // Past the end of a short row.
+        assert_eq!(pos_at(&rows, 2, 50), Pos::new(1, 0));
+        assert_eq!(pos_at(&rows, 3, 50), Pos::new(2, 3));
+    }
+
+    #[test]
+    fn tabs_line_up() {
+        assert_eq!(display_col("\tx", 1, 4), 4);
+        assert_eq!(display_col("ab\tx", 3, 4), 4);
+        assert_eq!(display_col("abcd\tx", 5, 4), 8);
+        assert_eq!(display_col("a", 10, 4), 1);
+        assert_eq!(col_at_display("ab\tx", 3, 4), 2); // inside the tab
+        assert_eq!(col_at_display("ab\tx", 4, 4), 3);
+        assert_eq!(col_at_display("ab", 99, 4), 2);
+        let cells: String = expand_tabs("a\tb", 0, 3, 0, 4).into_iter().collect();
+        assert_eq!(cells, "a   b");
+        let cells: String = expand_tabs("a\tb", 1, 3, 1, 4).into_iter().collect();
+        assert_eq!(cells, "   b");
+    }
+
+    #[test]
+    fn bracket_matching() {
+        let b = buf("fn f(a: (u8, [u8; 2])) {\n    g()\n}");
+        // The caret just after "(" at col 4 matches the closing one.
+        let (here, other) = match_bracket(&b, Pos::new(0, 5), 50).unwrap();
+        assert_eq!((here, other), (Pos::new(0, 4), Pos::new(0, 21)));
+        // On the closing bracket, going back.
+        let (_, other) = match_bracket(&b, Pos::new(0, 21), 50).unwrap();
+        assert_eq!(other, Pos::new(0, 4));
+        // Braces across lines.
+        let (_, other) = match_bracket(&b, Pos::new(0, 23), 50).unwrap();
+        assert_eq!(other, Pos::new(2, 0));
+        // Nothing next to the caret, or no partner.
+        assert!(match_bracket(&b, Pos::new(0, 1), 50).is_none());
+        assert!(match_bracket(&buf("(("), Pos::new(0, 1), 50).is_none());
+        // Out of reach.
+        assert!(match_bracket(&b, Pos::new(0, 23), 1).is_none());
+    }
+
+    fn spans(lang: Lang, s: &str) -> Vec<(String, Role)> {
+        let mut st = State::default();
+        let cs: Vec<char> = s.chars().collect();
+        highlight(lang, s, &mut st)
+            .into_iter()
+            .map(|(a, b, r)| (cs[a..b].iter().collect(), r))
+            .collect()
+    }
+
+    #[test]
+    fn rust_roles() {
+        let s = spans(Lang::Rust, "let x = \"a // b\" + 42; // note");
+        assert_eq!(
+            s,
+            [
+                ("let".into(), Role::Keyword),
+                ("\"a // b\"".into(), Role::String),
+                ("42".into(), Role::Number),
+                ("// note".into(), Role::Comment)
+            ]
+        );
+        // A lifetime isn't a string, a char literal is.
+        assert_eq!(
+            spans(Lang::Rust, "fn f<'a>(x: &'a str)"),
+            [("fn".into(), Role::Keyword)]
+        );
+        assert_eq!(
+            spans(Lang::Rust, "let c = 'x';")[1],
+            ("'x'".into(), Role::String)
+        );
+        // Identifiers that merely contain keywords or digits are plain.
+        assert!(spans(Lang::Rust, "letter foo2 iffy").is_empty());
+        // Escapes inside strings.
+        assert_eq!(
+            spans(Lang::Rust, r#""a\"b" x"#),
+            [(r#""a\"b""#.into(), Role::String)]
+        );
+    }
+
+    #[test]
+    fn block_comments_carry_over_lines() {
+        let lines = ["int a; /* start", "still comment", "end */ int b;"];
+        let st = states(Lang::C, lines.iter().copied());
+        assert!(!st[0].block_comment && st[1].block_comment && st[2].block_comment);
+        let mut s = st[2];
+        let sp = highlight(Lang::C, lines[2], &mut s);
+        assert_eq!(sp[0], (0, 6, Role::Comment));
+        assert_eq!(sp[1], (7, 10, Role::Keyword));
+        assert!(!s.block_comment);
+    }
+
+    #[test]
+    fn c_and_shell_and_plain() {
+        assert_eq!(
+            spans(Lang::C, "#include <x.h>"),
+            [("#include <x.h>".into(), Role::Keyword)]
+        );
+        assert_eq!(
+            spans(Lang::Shell, "echo '$HOME' # c"),
+            [
+                ("'$HOME'".into(), Role::String),
+                ("# c".into(), Role::Comment)
+            ]
+        );
+        assert_eq!(
+            spans(Lang::Shell, "if [ -n x ]; then"),
+            [("if".into(), Role::Keyword), ("then".into(), Role::Keyword)]
+        );
+        assert!(spans(Lang::Plain, "fn let 42 // x").is_empty());
+        assert_eq!(Lang::from_file_name("main.RS"), Lang::Rust);
+        assert_eq!(Lang::from_file_name("a.h"), Lang::C);
+        assert_eq!(Lang::from_file_name("run.sh"), Lang::Shell);
+        assert_eq!(Lang::from_file_name("Makefile"), Lang::Shell);
+        assert_eq!(Lang::from_file_name("README.md"), Lang::Markdown);
+        assert_eq!(Lang::from_file_name("notes.txt"), Lang::Plain);
+        assert_eq!(Lang::from_file_name("noext"), Lang::Plain);
+        assert!(Lang::Markdown.wraps_by_default() && !Lang::Rust.wraps_by_default());
+    }
+
+    #[test]
+    fn markdown_roles() {
+        assert_eq!(
+            spans(Lang::Markdown, "# Title"),
+            [("# Title".into(), Role::Heading)]
+        );
+        assert!(spans(Lang::Markdown, "#hashtag").is_empty());
+        assert_eq!(
+            spans(Lang::Markdown, "- item with `code` and **bold**"),
+            [
+                ("- ".into(), Role::Marker),
+                ("`code`".into(), Role::Code),
+                ("**bold**".into(), Role::Strong)
+            ]
+        );
+        assert_eq!(
+            spans(Lang::Markdown, "12. step")[0],
+            ("12. ".into(), Role::Marker)
+        );
+        let lines = ["text", "```rust", "# not a heading", "```", "# real"];
+        let st = states(Lang::Markdown, lines.iter().copied());
+        assert!(!st[1].fence && st[2].fence && st[3].fence && !st[4].fence);
+        let mut s = st[2];
+        assert_eq!(
+            highlight(Lang::Markdown, lines[2], &mut s),
+            [(0, 15, Role::Code)]
         );
     }
 }

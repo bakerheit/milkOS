@@ -20,6 +20,9 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub mod syntax;
+pub mod view;
+
 /// How many undo groups are kept.
 pub const MAX_UNDO: usize = 1000;
 
@@ -112,6 +115,8 @@ pub struct Buffer {
     open: Option<Kind>,
     next_id: u64,
     saved_id: Option<u64>,
+    /// Bumped on every change to the text (edit, undo, redo), so views can cache.
+    version: u64,
     /// Id of the state with an empty undo stack (changes when old history is dropped).
     base_id: u64,
     /// Loaded from a file that was just one line break (an empty buffer can't tell it from "").
@@ -181,6 +186,7 @@ impl Buffer {
             open: None,
             next_id: 1,
             saved_id: Some(0),
+            version: 0,
             base_id: 0,
             lone_newline: false,
             auto_indent: true,
@@ -302,6 +308,11 @@ impl Buffer {
     }
 
     // ---- reading --------------------------------------------------------------------------
+
+    /// A number that changes whenever the text does.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
 
     pub fn line_count(&self) -> usize {
         self.lines.len()
@@ -577,6 +588,7 @@ impl Buffer {
 
     /// Remove `a..b` (a <= b, both valid) and return the removed text.
     fn raw_delete(&mut self, a: Pos, b: Pos) -> String {
+        self.version += 1;
         let removed = self.slice(a, b);
         let (ba, bb) = (
             byte_of(self.line(a.line), a.col),
@@ -595,6 +607,7 @@ impl Buffer {
 
     /// Insert `s` (only `\n` for line breaks) at `p`; returns where it ends.
     fn raw_insert(&mut self, p: Pos, s: &str) -> Pos {
+        self.version += 1;
         let end = end_of(p, s);
         let at = byte_of(self.line(p.line), p.col);
         if !s.contains('\n') {
@@ -1052,6 +1065,15 @@ impl Buffer {
             }
             None => false,
         }
+    }
+
+    /// The matches of `needle` on one line, as (start col, end col).
+    pub fn find_in_line(&self, line: usize, needle: &str, o: FindOpts) -> Vec<(usize, usize)> {
+        if needle.is_empty() || needle.contains('\n') {
+            return Vec::new();
+        }
+        let n: Vec<char> = needle.chars().collect();
+        self.matches_in(line, &n, o)
     }
 
     /// How many matches of `needle` there are in the whole buffer.

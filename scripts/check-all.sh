@@ -64,6 +64,7 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "check-all: -j wants a number of at least 1 
 # name | set (s = smoke, q = default, f = full only) | time limit in seconds | mode (par/solo) | command
 # The default set also runs in --full, sometimes with bigger numbers (serial-soak).
 TESTS=(
+  "public-check|s|120|solo|scripts/public-check.sh"
   "serial-soak|q|900|par|scripts/serial-soak.sh 2 6"
   "net-test|s|600|par|scripts/net-test.sh"
   "pkg-test|s|600|par|scripts/pkg-test.sh"

@@ -14,7 +14,7 @@ Both builds follow the spec closely. Two real bugs and a handful of spec updates
 | 1 | The last row says "Do Not Disturb", but Focus is the single setting and the Control centre calls it Focus. Two names for one switch. | P1 | Spec updated: the row is labelled "Focus" with the sub-line "On until 12:00" while on. Change the label in the build. |
 | 2 | Truncated text ends in "~" ("Screenshot 2026~"). It reads like a typo. | P2 | Use a real ellipsis (U+2026) if the font draws it, else keep "~". Spec notes this. |
 | 3 | The header "Notifications" is heavier than the mockup. | P2 | Fine as built. No change. |
-| 4 | The test notifications in the screenshots and the demo script use a real person's first name as a fake sender. The repo is public. | P1 | Use neutral fake names (Sam, Alex) in the demo script and regenerate the screenshots. |
+| 4 | The test notifications in the screenshots and the demo script use a real person's first name as a fake sender. The repo is public. | P1 | Use neutral fake names (Sam, Robin) in the demo script and regenerate the screenshots. |
 
 ## Window tabs
 **Matches the spec:** the 38px strip, tab height 32 starting at y6, 10px rounded tops, the active tab joining the content, the close x on the right of every tab, the "+" button, the Terminal tab strip colours (#4A3C34 bar, #3A2E29 active, #BEA890 inactive, 4.63:1 on the bar), and the dark theme. Terminal tabs "1 msh" and "2 msh" read well.

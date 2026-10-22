@@ -66,4 +66,8 @@
   `--smoke` is one test per area (under 2 minutes; run it on every change), `--full` adds the long
   soak/crash/stress runs, `--only REGEX` picks some, `--list` shows them. The default set gates a push: run it
   before asking the lead to merge. A new test that can't share the machine gets mode `solo` in the table.
+- `scripts/public-check.sh` (also the first test in check-all) keeps the public repo clean: it fails on names from a
+  local list (kept outside the repo, see the script header), e-mail addresses other than noreply ones, host home
+  paths, key material and ticket ids, in the working tree and in commits not on origin/main. Run it before
+  committing. Without the local list it skips the names rule and says so.
 - Prove it in qemu. For UI work, screenshot and actually look at the PNG. Paste boot logs in reports.

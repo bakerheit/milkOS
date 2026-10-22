@@ -7,6 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect};
+use crate::sysfont::Font;
 use crate::{heap, pmm};
 
 use super::apps;
@@ -232,7 +233,7 @@ pub fn timers_gen() -> u32 {
 
 /// A timer item's width: the stopwatch glyph, the text, the straw tint's padding.
 fn timer_w(text: &str) -> i32 {
-    8 + 12 + 4 + super::fontx::prop_width(text, false) + 8
+    8 + 12 + 4 + crate::sysfont::width(text, false) + 8
 }
 
 /// The menu bar timer: a straw-tinted pill with a small stopwatch and the text.
@@ -817,15 +818,8 @@ fn paint_tile(p: &mut Painter, x: i32, y: i32, s: i32, t: &Tile) {
                 .flat_map(char::to_uppercase)
                 .collect();
             let scale = if s >= 44 { 2 } else { 1 };
-            let cw = crate::font::str_width(&c, scale);
-            p.text_x(
-                x + (s - cw) / 2,
-                y + (s - 16 * scale) / 2,
-                &c,
-                t.fg,
-                scale,
-                true,
-            );
+            let f = crate::sysfont::Font::ui(scale, crate::sysfont::Weight::Bold);
+            p.text_f(x + (s - f.width(&c)) / 2, f.center_caps(y, s), &c, t.fg, f);
         }
     }
 }
@@ -987,7 +981,7 @@ impl Desktop {
                     (s.x + s.size / 2, (l.bottom - s.size).min(l.bar.y))
                 });
             let name = tiles().get(i).map_or(String::new(), |t| t.name.clone());
-            let w = super::fontx::prop_width(&name, false) + 24;
+            let w = crate::sysfont::width(&name, false) + 24;
             let r = Rect::new(cx - w / 2, top - 8 - 28, w, 28);
             v.push(spec(PanelKey::Tip, r, R_BUTTON, Style::Glass, true));
         }
@@ -1374,10 +1368,19 @@ impl Desktop {
             if !art {
                 icons::draw(p, 16, y + 6, 36, e.icon, e.bg, 255, e.fg, border);
             }
-            p.text_p(64, y + 6, &e.title, ESPRESSO, true);
+            // Clear of "Enter" on the right.
+            let room = w - 64 - 72;
+            let title = Font::body(true).truncate(&e.title, room);
+            p.text_p(64, y + 6, &title, ESPRESSO, true);
             // SPEC: no secondary text on a selected row.
             let sub = if i == sel { ESPRESSO } else { COCOA };
-            p.text_p(64, y + 24, &e.sub, sub, false);
+            p.text_p(
+                64,
+                y + 24,
+                &Font::body(false).truncate(&e.sub, room),
+                sub,
+                false,
+            );
             if i == sel {
                 p.text_right(w - 20, y + 16, "Enter", ESPRESSO, 1, false);
             }
@@ -1519,19 +1522,18 @@ impl Desktop {
                 if self.history.is_empty() {
                     p.text_p(pad, 44, "No notifications yet.", COCOA, false);
                 }
-                let max = ((w - 2 * pad) / 7) as usize;
+                let max = w - 2 * pad;
+                let (body, bold) = (Font::body(false), Font::body(true));
                 for (k, n) in self.history.iter().rev().take(4).enumerate() {
                     let y = 44 + k as i32 * 44;
-                    let t: String = n.title.chars().take(max).collect();
-                    p.text_p(pad, y, &t, ESPRESSO, true);
+                    p.text_p(pad, y, &bold.truncate(&n.title, max), ESPRESSO, true);
                     let s = now.saturating_sub(n.at_ns) / 60_000_000_000;
                     let sub = if s == 0 {
                         format!("{}, just now", n.app)
                     } else {
                         format!("{}, {s} min ago", n.app)
                     };
-                    let sub: String = sub.chars().take(max).collect();
-                    p.text_p(pad, y + 18, &sub, COCOA, false);
+                    p.text_p(pad, y + 18, &body.truncate(&sub, max), COCOA, false);
                 }
                 p.text(pad, 196, "Click the clock for all", COCOA);
             }
@@ -1539,14 +1541,11 @@ impl Desktop {
                 label(p, "NOTES");
                 let lines = apps::notes::snapshot();
                 let mut y = 44;
+                let max = w - 2 * pad;
                 for (k, l) in lines.iter().take(5).enumerate() {
-                    if k == 0 {
-                        p.bold(pad, y, l, ESPRESSO);
-                        y += 24;
-                    } else {
-                        p.text(pad, y, l, ESPRESSO);
-                        y += 18;
-                    }
+                    let f = Font::body(k == 0);
+                    p.text_f(pad, y, &f.truncate(l, max), ESPRESSO, f);
+                    y += if k == 0 { 24 } else { 18 };
                 }
                 let ago = apps::notes::edited_ago(now);
                 p.text(pad, 150, &ago, COCOA);
@@ -1559,7 +1558,7 @@ impl Desktop {
                         break;
                     };
                     paint_tile(p, r.x, r.y, HOME_ICON, t);
-                    let name: String = t.name.chars().take(10).collect();
+                    let name = Font::body(false).truncate(&t.name, r.w + 36);
                     p.text_p_center(
                         r.x - 20,
                         r.w + 40,
@@ -1950,7 +1949,7 @@ pub(super) fn status_clock() -> String {
 pub(super) fn status_layout(clock: &str, cpus: usize, focus: bool) -> Vec<(Status, i32, i32)> {
     let n = cpus.max(1) as i32;
     let mut items = alloc::vec![
-        (Status::Clock, super::fontx::prop_width(clock, false)),
+        (Status::Clock, crate::sysfont::width(clock, false)),
         (Status::Cpu, n * 6 - 2),
         (Status::Volume, 16),
         (Status::Network, 16),
@@ -2031,15 +2030,9 @@ pub fn draw_dock_icon(p: &mut Painter, d: &DockDraw, sprite: Option<(&str, &[u32
                 } else {
                     1
                 };
-                let cw = crate::font::str_width(&d.letter, scale);
-                p.text_x(
-                    x + (s - cw) / 2,
-                    y + (s - 16 * scale) / 2,
-                    &d.letter,
-                    d.fg,
-                    scale,
-                    true,
-                );
+                let f = crate::sysfont::Font::ui(scale, crate::sysfont::Weight::Bold);
+                let cw = f.width(&d.letter);
+                p.text_f(x + (s - cw) / 2, f.center_caps(y, s), &d.letter, d.fg, f);
             }
         },
     }

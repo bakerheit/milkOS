@@ -72,12 +72,12 @@ impl Desktop {
         let mut v = Vec::new();
         let name = self.app_title();
         let mut x = 38;
-        let w = super::fontx::prop_width(&name, true);
+        let w = crate::sysfont::width(&name, true);
         v.push((x, w, name));
         x += w;
         for m in self.menu_names() {
             x += 24;
-            let w = super::fontx::prop_width(m, false);
+            let w = crate::sysfont::width(m, false);
             v.push((x, w, String::from(*m)));
             x += w;
         }
@@ -205,15 +205,31 @@ impl Desktop {
             .sum::<i32>()
     }
 
+    /// A menu's width: at least MENU_W, wider when a label and its shortcut need it.
+    fn menu_width(items: &[Item]) -> i32 {
+        items
+            .iter()
+            .map(|i| {
+                let key = if i.key.is_empty() {
+                    0
+                } else {
+                    24 + crate::sysfont::width(i.key, false)
+                };
+                16 + crate::sysfont::width(&i.label, false) + key + 14
+            })
+            .fold(MENU_W, i32::max)
+    }
+
     pub(super) fn menu_layer(&self) -> Option<Layer> {
         let idx = self.menu?;
         let titles = self.menu_titles();
         let x = titles.get(idx)?.0;
         let items = self.menu_items(idx);
+        let mw = Self::menu_width(&items);
         let r = Rect::new(
-            (x - 12).min(screen_w() - MENU_W - 8),
+            (x - 12).min(screen_w() - mw - 8),
             MENU_H + 2,
-            MENU_W,
+            mw,
             Self::menu_height(&items),
         );
         Some(Layer::Panel(PanelSpec {

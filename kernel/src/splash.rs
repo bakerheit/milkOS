@@ -1,8 +1,7 @@
 //! Boot splash: cream background, a milk drop, the name, and a thin progress bar.
 
-use crate::font::{self, GLYPH_H};
-use crate::fontx;
 use crate::gfx::{self, Color, DrawTarget, rgb};
+use crate::sysfont::{BRAND, Font, Weight};
 
 const CREAM: Color = rgb(0xFA, 0xF4, 0xE6);
 const WHITE: Color = rgb(0xFF, 0xFD, 0xF8);
@@ -71,16 +70,17 @@ pub fn draw(t: &mut dyn DrawTarget) {
     if let Some(a) = art_splash(t) {
         let stride = t.stride();
         a.decode_rows(t.pixels_mut(), stride);
-        // The wordmark in the desktop's smooth brand lettering (crate::fontx, 4x bold):
-        // "milk" espresso, "OS" blue; the caption in the UI's proportional face.
+        // The wordmark in the brand lettering (crate::sysfont::BRAND, 4x bold): "milk"
+        // espresso, "OS" blue; the caption in the UI font (the default family: the splash
+        // is up before the settings are read).
         let w = t.width() as i32;
-        let scale = 4;
-        let tx = (w - font::str_width("milkOS", scale)) / 2;
-        let x = fontx::draw_smooth(t, tx, ART_WORD_Y, "milk", ART_INK, scale, true);
-        fontx::draw_smooth(t, x, ART_WORD_Y, "OS", ART_BLUE, scale, true);
+        let mark = Font::of(BRAND, 4, Weight::Bold);
+        let tx = (w - mark.width("milkOS")) / 2;
+        let x = mark.draw(t, tx, ART_WORD_Y, "milk", ART_INK);
+        mark.draw(t, x, ART_WORD_Y, "OS", ART_BLUE);
         let cap = "booting";
-        let cx = (w - fontx::prop_width(cap, false)) / 2;
-        fontx::draw_prop(t, cx, ART_BAR.1 + 24, cap, ART_COCOA, false);
+        let body = Font::ui(1, Weight::Regular);
+        body.draw(t, (w - body.width(cap)) / 2, ART_BAR.1 + 24, cap, ART_COCOA);
         bar(t, 0);
         return;
     }
@@ -121,23 +121,21 @@ pub fn draw(t: &mut dyn DrawTarget) {
     });
 
     // Name. "milk" dark, "OS" in the drop blue.
-    let scale = 4;
-    let name_w = font::str_width("milkOS", scale);
-    let tx = (w - name_w) / 2;
+    let mark = Font::of(BRAND, 4, Weight::Bold);
+    let tx = (w - mark.width("milkOS")) / 2;
     let ty = cy + R + 56;
-    let x = font::draw_str(t, tx, ty, "milk", SLATE, None, scale);
-    font::draw_str(t, x, ty, "OS", BLUE, None, scale);
+    let x = mark.draw(t, tx, ty, "milk", SLATE);
+    mark.draw(t, x, ty, "OS", BLUE);
 
     // Quiet caption.
     let cap = "booting";
-    font::draw_str(
+    let body = Font::ui(1, Weight::Regular);
+    body.draw(
         t,
-        (w - font::str_width(cap, 1)) / 2,
-        ty + GLYPH_H as i32 * scale + 56,
+        (w - body.width(cap)) / 2,
+        ty + mark.line_height() + 56,
         cap,
         MUTED,
-        None,
-        1,
     );
     bar(t, 0);
 }

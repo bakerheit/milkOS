@@ -17,9 +17,9 @@ use crate::net::socket::{self, POLLIN, POLLOUT, SockType};
 use crate::net::wire::{Ipv4, SockAddr};
 use crate::sched;
 use crate::sync::SpinLock;
+use crate::sysfont::{Font, Weight};
 
 use super::super::event::Key;
-use super::super::fontx;
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
 use super::super::theme::*;
@@ -740,14 +740,8 @@ impl Browser {
                 Load::Idle => self.address.clone(),
             }
         };
-        let max = ((ar.w - 44) / 8).max(4) as usize;
-        let n = shown.chars().count();
-        let vis: String = if n > max {
-            shown.chars().skip(n - max).collect()
-        } else {
-            shown
-        };
-        let end = p.text(ar.x + 32, ar.y + 6, &vis, ESPRESSO);
+        let vis = Font::body(false).tail(&shown, ar.w - 44);
+        let end = p.text(ar.x + 32, ar.y + 6, vis, ESPRESSO);
         if self.editing {
             p.fill(end + 1, ar.y + 6, 2, 16, ESPRESSO);
         }
@@ -785,7 +779,7 @@ impl Browser {
                     p.rrect(x0, y, maxw, h, R_ROW, OAT, 255);
                     let mut q = p.clipped(Rect::new(x0, y, maxw, h));
                     for (k, l) in lines.iter().enumerate() {
-                        q.text(x0 + indent, y + 8 + k as i32 * 18, l, ESPRESSO);
+                        q.mono(x0 + indent, y + 8 + k as i32 * 18, l, ESPRESSO);
                     }
                 }
                 y += h + gap;
@@ -810,13 +804,8 @@ impl Browser {
                     }
                 }
             }
-            let width = |s: &str, bold: bool| {
-                if scale == 1 {
-                    fontx::prop_width(s, bold)
-                } else {
-                    crate::font::str_width(s, scale)
-                }
-            };
+            let font = |bold: bool| Font::ui(scale, Weight::bold(bold));
+            let width = |s: &str, bold: bool| font(bold).width(s);
             for (wd, r) in &words {
                 if wd == "\n" {
                     x = x0 + indent;
@@ -826,7 +815,7 @@ impl Browser {
                 let bold = bold_all || r.bold;
                 if wd == " " {
                     if x > x0 + indent {
-                        x += if scale == 1 { 5 } else { 16 };
+                        x += font(bold).advance(' ');
                     }
                     continue;
                 }
@@ -846,13 +835,9 @@ impl Browser {
                     && y + line_h > 0
                     && y < self.view_h
                 {
-                    if scale == 1 {
-                        p.text_p(x, y, wd, c, bold);
-                    } else {
-                        p.text_x(x, y, wd, c, scale, bold);
-                    }
+                    p.text_f(x, y, wd, c, font(bold));
                     if r.link.is_some() {
-                        p.fill(x, y + 16 * scale, ww, 1, BLUE);
+                        p.fill(x, y + font(bold).baseline() + scale + 1, ww, 1, BLUE);
                     }
                 }
                 if let Some(href) = &r.link {

@@ -322,8 +322,9 @@ impl WindowContents for Welcome {
         icons::drop_shape(p, 44, 52, 18, 40, BLUE);
         icons::drop_shape(p, 44, 52, 14, 32, MILK);
         let x2 = p.text_x(78, 20, "Welcome to ", ESPRESSO, 2, true);
-        let x3 = p.text_x(x2, 20, "milk", ESPRESSO, 2, true);
-        p.text_x(x3, 20, "OS", BLUE, 2, true);
+        let mark = crate::sysfont::Font::of(crate::sysfont::BRAND, 2, crate::sysfont::Weight::Bold);
+        let x3 = p.text_f(x2, 20, "milk", ESPRESSO, mark);
+        p.text_f(x3, 20, "OS", BLUE, mark);
         p.text_p(
             78,
             58,
@@ -403,8 +404,9 @@ impl WindowContents for Welcome {
         self.hits
             .push((Rect::new(cb.x, cb.y - 4, end - cb.x + 6, 26), Do::DontShow));
         if !self.said.is_empty() {
-            let max = ((w - 2 * x0 - 380) / 7).max(8) as usize;
-            let s: String = self.said.chars().take(max).collect();
+            // Clear of "Get started" on the right.
+            let room = w - x0 - 132 - 16 - (end + 24);
+            let s = crate::sysfont::Font::body(false).truncate(&self.said, room);
             p.text_p(end + 24, fy + 5, &s, COCOA, false);
         }
         let go = Rect::new(w - x0 - 132, fy, 132, 28);

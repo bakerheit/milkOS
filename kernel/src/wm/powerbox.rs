@@ -391,10 +391,17 @@ impl WindowContents for Panel {
             if !icons::file_tile(p, x0, y + 1, 22, fsx::art_kind(e)) {
                 icons::draw(p, x0, y + 1, 22, icon, bg, 255, fg, !folder);
             }
-            p.text_p(x0 + 32, y + 4, &e.name, ESPRESSO, false);
+            let size = if folder {
+                String::new()
+            } else {
+                fsx::human_size(e.size)
+            };
+            let room = w - 24 - crate::sysfont::width(&size, false) - 12 - (x0 + 32);
+            let name = crate::sysfont::Font::body(false).truncate(&e.name, room);
+            p.text_p(x0 + 32, y + 4, &name, ESPRESSO, false);
             if !folder {
                 let c = if self.sel == Some(i) { ESPRESSO } else { COCOA };
-                p.text_right(w - 24, y + 4, &fsx::human_size(e.size), c, 1, false);
+                p.text_right(w - 24, y + 4, &size, c, 1, false);
             }
             self.hits.push((r, Hit::Row(i)));
         }

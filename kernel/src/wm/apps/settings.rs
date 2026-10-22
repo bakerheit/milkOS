@@ -1,4 +1,4 @@
-//! Settings: Appearance (Whole milk / Chocolate milk), Wallpaper, Display (brightness), Dock
+//! Settings: Appearance (Whole milk / Chocolate milk, the UI font), Wallpaper, Display (brightness), Dock
 //! (icon size), Time Machine (milkfs automatic snapshots, via /sys/fs/milkfs/auto) and About.
 //! Changes go to the desktop as `Request::Prefs` (applied at once, saved to
 //! ~/.config/milk/settings); Time Machine settings live on the milkfs volume itself.
@@ -8,6 +8,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect, rgb};
+use crate::sysfont::{self, BRAND, Font, Weight};
 use crate::{fs, heap, pmm, timer};
 
 use super::super::buffer::Buffer;
@@ -46,6 +47,8 @@ const TM_SNAPSHOTS: &str = "/sys/fs/milkfs/snapshots";
 enum Hit {
     Section(usize),
     Theme(bool),
+    /// A UI font (index into `sysfont::FAMILIES`).
+    Font(usize),
     Wallpaper(Option<Kind>),
     Brightness,
     /// Dock magnification on / off, and its size slider.
@@ -163,6 +166,31 @@ impl Settings {
             }
             p.text_p_center(r.x, r.w, r.y + r.h + 12, name, ESPRESSO, dark == dark_now);
             self.hits.push((grow_h(r, 34), Hit::Theme(dark)));
+        }
+        // The UI font, each name in its own face; switches live (the desktop redraws).
+        let fy = 276;
+        p.text_p(x, fy, "Font", ESPRESSO, true);
+        p.text_p(
+            x,
+            fy + 20,
+            "Menus, windows and apps. Terminal and Notes stay monospace.",
+            COCOA,
+            false,
+        );
+        for (i, fam) in sysfont::FAMILIES.iter().enumerate() {
+            let (col, row) = (i as i32 % 2, i as i32 / 2);
+            let r = Rect::new(x + col * 212, fy + 48 + row * 46, 196, 36);
+            let on = self.pending.font == i;
+            p.rrect_r(r, 12, if on { OAT } else { CREAM }, 255);
+            if on {
+                p.rrect_stroke(r.x, r.y, r.w, r.h, 12, 2, HONEY, 255);
+            } else {
+                p.rrect_stroke(r.x, r.y, r.w, r.h, 12, 1, SAND, 255);
+            }
+            let f = Font::of(i, 1, Weight::bold(on));
+            let label = f.truncate(fam.name, r.w - 16);
+            p.text_center_f(r.x, r.w, r.y + (r.h - 16) / 2, &label, ESPRESSO, f);
+            self.hits.push((r, Hit::Font(i)));
         }
     }
 
@@ -447,8 +475,9 @@ impl Settings {
     fn draw_about(&mut self, p: &mut Painter, x: i32) {
         icons::drop_shape(p, x + 40, 60, 26, 56, BLUE);
         icons::drop_shape(p, x + 40, 60, 21, 46, MILK);
-        let x2 = p.text_x(x + 90, 30, "milk", ESPRESSO, 2, true);
-        p.text_x(x2, 30, "OS", BLUE, 2, true);
+        let mark = Font::of(BRAND, 2, Weight::Bold);
+        let x2 = p.text_f(x + 90, 30, "milk", ESPRESSO, mark);
+        p.text_f(x2, 30, "OS", BLUE, mark);
         p.text_p(
             x + 90,
             70,
@@ -491,6 +520,31 @@ impl Settings {
             p.text_p(x, y, k, COCOA, false);
             p.text_p(x + 120, y, v, ESPRESSO, false);
         }
+        // Font credits (the licences ship in the image too): each family's name, then its
+        // copyright line (without the trailing project URL).
+        let mut y = 280;
+        p.text_p(x, y, "Fonts", ESPRESSO, true);
+        let room = 448;
+        let body = Font::body(false);
+        for fam in sysfont::FAMILIES.iter() {
+            let who = fam
+                .copyright
+                .split(" (http")
+                .next()
+                .unwrap_or(fam.copyright);
+            p.text_p(x, y + 22, fam.name, ESPRESSO, false);
+            p.text_p(x, y + 38, &body.truncate(who, room), COCOA, false);
+            y += 38;
+        }
+        let uni = "GNU Unifont, for Terminal and Notes (OFL 1.1 / GPLv2+)";
+        p.text_p(x, y + 26, uni, ESPRESSO, false);
+        p.text_p(
+            x,
+            y + 50,
+            "SIL Open Font License 1.1. Texts in /System/Library/Fonts.",
+            COCOA,
+            false,
+        );
     }
 
     fn set_brightness_at(&mut self, x: i32) {
@@ -669,6 +723,10 @@ impl WindowContents for Settings {
             }
             Hit::Theme(dark) => {
                 pr.dark = dark;
+                self.send(pr);
+            }
+            Hit::Font(i) => {
+                pr.font = i;
                 self.send(pr);
             }
             Hit::Wallpaper(k) => {

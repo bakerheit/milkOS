@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use crate::font::{self, GLYPH_H, GLYPH_W};
 use crate::gfx::{Color, DrawTarget, Rect, blend};
 use crate::sync::SpinLock;
+use crate::sysfont::{Font, Weight};
 
 use super::buffer::Buffer;
 
@@ -816,9 +817,106 @@ impl<'a> Painter<'a> {
     }
 
     // ---- text -------------------------------------------------------------------------------
+    //
+    // UI text is the system font (crate::sysfont): proportional, anti-aliased, in the family
+    // chosen in Settings. `y` is the top of a line box `16 * scale` pixels tall. Grids that
+    // need fixed cells (Terminal, Notes' editor, icon glyphs) use the `mono` calls (Unifont).
 
-    /// Draw `s` at (x, y), `scale`x, blended at `alpha`. Returns the x after the last glyph.
-    pub fn text_a(&mut self, x: i32, y: i32, s: &str, c: Color, alpha: u8, scale: i32) -> i32 {
+    /// Draw `s` in `f` with the top of its line box at `y`, blended at `alpha`. Returns the
+    /// end x.
+    pub fn text_fa(&mut self, x: i32, y: i32, s: &str, c: Color, f: Font, alpha: u8) -> i32 {
+        let c = self.col(c);
+        let clip = self.clip();
+        let lh = f.line_height();
+        // Whole line outside the clip (vertically, with room for accents and descenders).
+        if y + lh + lh / 4 <= clip.y || y - lh / 4 >= clip.y + clip.h {
+            return x + f.width(s);
+        }
+        let base = y + f.baseline();
+        let cl = self.clip;
+        let (ox, oy) = (self.ox, self.oy);
+        let stride = self.stride;
+        let px = &mut *self.px;
+        f.layout(x, s, |pen, g, mag| {
+            let gx = pen + g.left * mag + ox;
+            let gy = base - g.top * mag + oy;
+            if gx >= cl.x + cl.w || gx + g.w * mag <= cl.x {
+                return;
+            }
+            if gy >= cl.y + cl.h || gy + g.h * mag <= cl.y {
+                return;
+            }
+            g.spans(mag, |sx, sy, len, cov| {
+                let by = gy + sy;
+                if by < cl.y || by >= cl.y + cl.h {
+                    return;
+                }
+                let x0 = (gx + sx).max(cl.x);
+                let x1 = (gx + sx + len).min(cl.x + cl.w);
+                if x0 >= x1 {
+                    return;
+                }
+                let a = if alpha == 255 {
+                    cov
+                } else {
+                    ((cov as u32 * alpha as u32 + 127) / 255) as u8
+                };
+                let base = by as usize * stride;
+                for p in &mut px[base + x0 as usize..base + x1 as usize] {
+                    *p = if a == 255 { c } else { blend(*p, c, a) };
+                }
+            });
+        })
+    }
+
+    /// Draw `s` in `f` (opaque). Returns the end x.
+    pub fn text_f(&mut self, x: i32, y: i32, s: &str, c: Color, f: Font) -> i32 {
+        self.text_fa(x, y, s, c, f, 255)
+    }
+
+    /// Body text in the UI font, optionally bold. Returns the end x.
+    pub fn text_p(&mut self, x: i32, y: i32, s: &str, c: Color, bold: bool) -> i32 {
+        self.text_f(x, y, s, c, Font::body(bold))
+    }
+
+    pub fn text(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
+        self.text_p(x, y, s, c, false)
+    }
+
+    pub fn bold(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
+        self.text_p(x, y, s, c, true)
+    }
+
+    /// UI text at `scale` (line boxes of `16 * scale`), optionally bold. Returns the end x.
+    pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
+        self.text_f(x, y, s, c, Font::ui(scale, Weight::bold(bold)))
+    }
+
+    /// Body text centred in `[x, x+w)`.
+    pub fn text_p_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
+        self.text_center_f(x, w, y, s, c, Font::body(bold));
+    }
+
+    /// Body text centred in `[x, x+w)`.
+    pub fn text_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
+        self.text_center_f(x, w, y, s, c, Font::body(bold));
+    }
+
+    /// Text in `f` centred in `[x, x+w)`.
+    pub fn text_center_f(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, f: Font) {
+        let tx = x + (w - f.width(s)) / 2;
+        self.text_f(tx, y, s, c, f);
+    }
+
+    /// Text right-aligned so it ends at `xr`.
+    pub fn text_right(&mut self, xr: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) {
+        let f = Font::ui(scale, Weight::bold(bold));
+        self.text_f(xr - f.width(s), y, s, c, f);
+    }
+
+    /// Monospace Unifont cells (8x16 per char at `scale`), blended at `alpha`: for grids and
+    /// icon glyphs, not UI text. Returns the x after the last cell.
+    pub fn mono_a(&mut self, x: i32, y: i32, s: &str, c: Color, alpha: u8, scale: i32) -> i32 {
         let c = self.col(c);
         let gw = GLYPH_W as i32 * scale;
         let gh = GLYPH_H as i32 * scale;
@@ -834,6 +932,11 @@ impl<'a> Painter<'a> {
             cx += gw;
         }
         x + font::str_width(s, scale)
+    }
+
+    /// Monospace Unifont text at 1x (8 px a char). Returns the end x.
+    pub fn mono(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
+        self.mono_a(x, y, s, c, 255, 1)
     }
 
     fn glyph(&mut self, x: i32, y: i32, ch: char, c: Color, alpha: u8, scale: i32) {
@@ -867,105 +970,6 @@ impl<'a> Painter<'a> {
                 }
             }
         }
-    }
-
-    pub fn text(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
-        self.text_a(x, y, s, c, 255, 1)
-    }
-
-    /// Faux bold (SPEC): the glyphs twice, the second copy 1px to the right.
-    pub fn bold(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
-        self.text_a(x, y, s, c, 255, 1);
-        self.text_a(x + 1, y, s, c, 255, 1)
-    }
-
-    /// Scaled text, optionally faux bold. 2x and 4x are drawn smooth (fontx: Scale2x +
-    /// anti-aliasing from the Unifont bitmaps); other sizes are pixel-doubled.
-    pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
-        if super::fontx::smooth_scale(scale) {
-            return self.text_smooth(x, y, s, c, scale, bold);
-        }
-        let end = self.text_a(x, y, s, c, 255, scale);
-        if bold {
-            self.text_a(x + scale.max(1), y, s, c, 255, scale);
-        }
-        end
-    }
-
-    fn text_smooth(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) -> i32 {
-        let c = self.col(c);
-        let (gw, gh) = (super::fontx::width(scale), GLYPH_H as i32 * scale);
-        let clip = self.clip();
-        let mut cx = x;
-        for ch in s.chars() {
-            let adv = GLYPH_W as i32 * scale;
-            if ch != ' '
-                && cx + gw > clip.x
-                && cx < clip.x + clip.w
-                && y + gh > clip.y
-                && y < clip.y + clip.h
-            {
-                let m = super::fontx::glyph(ch, scale, bold);
-                let Some(b) = self.buf_rect(cx, y, gw, gh) else {
-                    cx += adv;
-                    continue;
-                };
-                let (bx0, by0) = (cx + self.ox, y + self.oy);
-                for by in b.y..b.y + b.h {
-                    let mrow = &m[((by - by0) * gw) as usize..][..gw as usize];
-                    let base = by as usize * self.stride;
-                    for bx in b.x..b.x + b.w {
-                        let a = mrow[(bx - bx0) as usize];
-                        if a != 0 {
-                            let p = &mut self.px[base + bx as usize];
-                            *p = if a == 255 { c } else { blend(*p, c, a) };
-                        }
-                    }
-                }
-            }
-            cx += adv;
-        }
-        x + font::str_width(s, scale)
-    }
-
-    /// Proportional 1x text (fontx::prop_metrics), optionally faux bold. Returns the end x.
-    pub fn text_p(&mut self, x: i32, y: i32, s: &str, c: Color, bold: bool) -> i32 {
-        let mut cx = x;
-        for ch in s.chars() {
-            let (first, adv) = super::fontx::prop_metrics(ch);
-            if ch != ' ' {
-                let mut b = [0u8; 4];
-                let g = ch.encode_utf8(&mut b);
-                self.text_a(cx - first, y, g, c, 255, 1);
-                if bold {
-                    self.text_a(cx - first + 1, y, g, c, 255, 1);
-                }
-            }
-            cx += adv + (bold && super::fontx::PROPORTIONAL_UI) as i32;
-        }
-        cx - super::fontx::PROPORTIONAL_UI as i32
-    }
-
-    /// Proportional text centred in `[x, x+w)`.
-    pub fn text_p_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
-        let tx = x + (w - super::fontx::prop_width(s, bold)) / 2;
-        self.text_p(tx, y, s, c, bold);
-    }
-
-    /// Text centred in `[x, x+w)`.
-    pub fn text_center(&mut self, x: i32, w: i32, y: i32, s: &str, c: Color, bold: bool) {
-        let tx = x + (w - font::str_width(s, 1)) / 2;
-        if bold {
-            self.bold(tx, y, s, c);
-        } else {
-            self.text(tx, y, s, c);
-        }
-    }
-
-    /// Text right-aligned so it ends at `xr`.
-    pub fn text_right(&mut self, xr: i32, y: i32, s: &str, c: Color, scale: i32, bold: bool) {
-        let tx = xr - font::str_width(s, scale) - if bold { scale } else { 0 };
-        self.text_x(tx, y, s, c, scale, bold);
     }
 }
 

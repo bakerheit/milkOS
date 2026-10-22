@@ -301,12 +301,14 @@ impl WindowContents for Notes {
             }
             let shown: String = l.chars().take(cols).collect();
             if l.starts_with('#') {
-                p.bold(PAD, y, &shown, ESPRESSO);
+                // The editor is a monospace grid (columns = cells): Unifont.
+                p.mono(PAD, y, &shown, ESPRESSO);
+                p.mono(PAD + 1, y, &shown, ESPRESSO);
             } else if l.starts_with("- ") {
-                p.text(PAD, y, &shown[..2.min(shown.len())], HONEY);
-                p.text(PAD + 16, y, shown.get(2..).unwrap_or(""), ESPRESSO);
+                p.mono(PAD, y, &shown[..2.min(shown.len())], HONEY);
+                p.mono(PAD + 16, y, shown.get(2..).unwrap_or(""), ESPRESSO);
             } else {
-                p.text(PAD, y, &shown, ESPRESSO);
+                p.mono(PAD, y, &shown, ESPRESSO);
             }
             if focused && i == row {
                 let cx = PAD + col.min(cols) as i32 * 8;

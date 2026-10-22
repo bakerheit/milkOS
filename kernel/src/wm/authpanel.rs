@@ -277,19 +277,14 @@ impl WindowContents for AuthPanel {
             return;
         };
         padlock(p, 20, 18, 48);
-        p.text_p(
-            84,
-            20,
-            &format!("{} wants to make changes.", r.exe),
-            ESPRESSO,
-            true,
-        );
+        let who = format!("{} wants to make changes.", r.exe);
+        let who = crate::sysfont::Font::body(true).truncate(&who, w - 84 - 20);
+        p.text_p(84, 20, &who, ESPRESSO, true);
         p.text_p(84, 40, "Enter your password to allow this.", COCOA, false);
         // What it asked for, as the app put it (just text).
         let rr = Rect::new(20, 80, w - 40, 44);
         p.rrect_r(rr, 10, OAT, 255);
-        let max = ((rr.w - 24) / 7).max(8) as usize;
-        let reason: String = r.reason.chars().take(max).collect();
+        let reason = crate::sysfont::Font::body(false).truncate(&r.reason, rr.w - 24);
         p.text_p(rr.x + 12, rr.y + 6, &reason, ESPRESSO, false);
         p.text_p(
             rr.x + 12,

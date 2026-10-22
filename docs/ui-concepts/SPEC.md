@@ -21,10 +21,12 @@ For the engineer building the compositor and shell. Generated from `v1.mjs` (the
 Alpha tints used: straw at 0x44 (27%) for selection rows, straw at 0x55 (33%) for sidebar selection, honey at 0x55 for folder tiles, espresso for shadows (below).
 
 ## Type
-- Unifont 8x16, 1x, espresso. Secondary text cocoa. Disabled latte.
-- Bold: Same glyphs drawn twice, second copy at +1px x (faux bold). Nicer font later: real bold.
-- Heading: Unifont at 2x (16x32), bold.
-- Display: Unifont at 4x (32x64), bold. Clock only.
+- The system font (`kernel/src/sysfont.rs`): Figtree by default, or IBM Plex Sans, Fira Sans or Atkinson Hyperlegible Next (Settings > Appearance > Font). 13px in a 16px line, espresso. Secondary text cocoa. Disabled latte.
+- Bold: the face's real Bold (Medium is baked too).
+- Heading: 26px in a 32px line (scale 2), bold.
+- Display: 52px in a 64px line (scale 4), bold. Clock and big tile letters. The lock screen clock is 104px regular (scale 8).
+- Monospace grids (Terminal, Notes' editor, Versions' file preview, the console) stay Unifont 8x16.
+- The "milkOS" wordmark is always Figtree Bold.
 - No text smaller than 16px tall. Small caps labels are 8x16 uppercase in cocoa, not a smaller size.
 
 ## Corner radii (px)
@@ -73,7 +75,7 @@ One look for every tab strip, so a Terminal's tabs and a Files window that has a
 - Tab: height 32, top y6 inside the strip (so it touches the line under the strip), width between 96 and 160 (tabs share the strip equally, never narrower than 96), 6px between tabs. The first tab starts at x84. Corner radius 10px on the top corners only, square at the bottom. Padding 12px left, 8px right.
 - Active tab: fill is the window body colour (milk), 1px sand border on the top, left and right but not the bottom, so it joins the content. Title in primary text, bold.
 - Inactive tab: no fill, no border, title in secondary text. Hover: oat at 60% fill.
-- Title: one line, cut with "~" to fit (about 13 characters in the default 144px tab). Terminal tabs read "1 msh", "2 msh".
+- Title: one line, cut with "..." to fit the default 144px tab. Terminal tabs read "1 msh", "2 msh".
 - Close x: the letter x in the secondary colour of the tab it sits on (a light tab: secondary text; a Terminal-coloured tab: #BEA890 in any window, so a Terminal tab merged into a light window must not use the light cocoa, which is only 1.94:1 on the Terminal fill), right-aligned with 8px right padding, hit target 20x20. Shown on every tab at rest (not only on hover). Hover: a 20px circle in sand appears behind it and the x turns primary text. Pressing it closes the tab; closing the last tab closes the window.
 - New tab (+): 28x24, radius 8, oat fill, 4px after the last tab, the "+" centred.
 - Terminal tabs: same geometry with Terminal colours. Bar and border #4A3C34, active tab fill is the Terminal body #3A2E29 with Terminal text #FBF6ED, inactive title and close x in the dark cocoa #BEA890 (4.63:1 on the bar; the lighter latte would be only 2.48:1), hover circle #55463C. These colours are the same in the light and dark themes.
@@ -91,7 +93,7 @@ Width 640, centred, top at y140. Input row height 56, radius 18, glass alpha 0.7
 Chosen look (Andrew, 2026-10-21). Panel 316 wide, 12px from the right edge, from y36 down to 12px above the bottom edge. It is drawn above the dock, so it covers the dock's right end while open. Radius 18, glass at alpha 0.78, floating shadow. Inner padding 12.
 - Header (78px): "Notifications" at the top left, "Clear all" right-aligned in cocoa, then filter chips (All, Mentions, Today), 26px high, fully rounded, selected chip espresso with cream text.
 - Group label: 8x16 uppercase cocoa ("MESSAGES"), count right-aligned. Groups collapse and expand.
-- Card: width drawer minus 24, height 64 (compact 56), radius 14, milk at 82% with a 1px white edge. App icon 36x36 at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "~" when too long (the font only covers U+0020 to U+00FF, so there is no ellipsis character). Selected card: straw at 13% fill and a 1px straw border.
+- Card: width drawer minus 24, height 64 (compact 56), radius 14, milk at 82% with a 1px white edge. App icon 36x36 at (10,10); title bold at (56,8); time right-aligned in cocoa at the same line; one line of body in cocoa at (56,28), cut with "..." when too long (the font only covers U+0020 to U+00FF, so there is no ellipsis character). Selected card: straw at 13% fill and a 1px straw border.
 - Today card: label, then up to three events (time bold, title). Focus row (the label is "Focus", not "Do Not Disturb": it is the same single setting as the Control centre Focus tile, with the sub-line "On until 12:00" while on): 44px high at the bottom with a switch (44x24, straw when on).
 - Opening: click the menu bar bell, or Ctrl-N. Closing: Esc, or click outside. Snap open (no animation required).
 - Keys: Up/Down select, Return opens the source app or window, Backspace dismisses the selected card, Left/Right collapse or expand a group, Tab cycles the filter chips.

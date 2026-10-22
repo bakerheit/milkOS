@@ -1355,6 +1355,50 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(500);
             b.0.push(Step::Toast("Tour done", "it's all yours"));
         }
+        // Settings > Appearance > Font: font-<key> picks that family (font-figtree, font-plex,
+        // font-fira, font-atkinson); fontcycle picks every one in turn, then Figtree again,
+        // and opens the Today view, Spaces and the launcher in between (a switch must re-lay
+        // out everything without a panic). The cards: 196 x 36, two columns 212 apart, from
+        // body (188, 324) of the Settings window at (180, 80).
+        n if n == "fontcycle"
+            || n.strip_prefix("font-")
+                .is_some_and(|k| crate::sysfont::find(k).is_some()) =>
+        {
+            let card = |i: usize| {
+                let (col, row) = (i as i32 % 2, i as i32 / 2);
+                (181 + 188 + col * 212 + 98, 113 + 324 + row * 46 + 18)
+            };
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500);
+            if let Some(i) = n.strip_prefix("font-").and_then(crate::sysfont::find) {
+                let (cx, cy) = card(i);
+                b.click(cx, cy).wait(600);
+            } else {
+                let n = crate::sysfont::FAMILIES.len();
+                for i in (1..n).chain([0]) {
+                    let (cx, cy) = card(i);
+                    b.click(cx, cy).wait(400);
+                    b.key(Key::F(4), Mods::NONE).wait(500);
+                    b.key(Key::F(4), Mods::NONE).wait(300);
+                    b.key(Key::F(3), Mods::NONE).wait(500);
+                    b.key(Key::Escape, Mods::NONE).wait(300);
+                    b.key(Key::Char(' '), Mods::META)
+                        .wait(150)
+                        .typ("se")
+                        .wait(300);
+                    b.key(Key::Escape, Mods::NONE).wait(300);
+                }
+                b.0.push(Step::Log("fontcycle: every font drawn"));
+            }
+        }
+        // Settings > About: the system details and the font credits.
+        "settings-about" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
+                .click(181 + 60, 113 + 44 + 6 * 28 + 12)
+                .wait(400);
+        }
         _ => return None,
     }
     b.0.push(Step::Log("done"));

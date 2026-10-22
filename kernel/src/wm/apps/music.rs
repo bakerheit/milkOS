@@ -666,7 +666,9 @@ impl WindowContents for Music {
                 String::from("Pick a tune below, or press Space"),
             ),
         };
-        p.text_x(tx, 22, &title, ESPRESSO, 1, true);
+        let room = w - tx - 20;
+        let title = crate::sysfont::Font::body(true).truncate(&title, room);
+        p.text_p(tx, 22, &title, ESPRESSO, true);
         let note = if let Some(e) = &now.error {
             e.clone()
         } else if now.silent && now.playing {
@@ -674,6 +676,7 @@ impl WindowContents for Music {
         } else {
             sub
         };
+        let note = crate::sysfont::Font::body(false).truncate(&note, room);
         p.text_p(tx, 42, &note, COCOA, false);
         // Visualizer: 12 bars, rising fast and falling slowly.
         for (b, v) in self.bars.iter_mut().zip(now.levels) {
@@ -766,9 +769,12 @@ impl WindowContents for Music {
                 let c = if now.playing { HONEY } else { LATTE };
                 triangle(p, 22, y + 7, 12, c);
             }
-            p.text_p(40, y + 5, &t.title, ESPRESSO, cur == Some(i));
+            let len = length(t.frames);
+            let room = w - 22 - crate::sysfont::width(&len, false) - 12 - 40;
+            let f = crate::sysfont::Font::body(cur == Some(i));
+            p.text_f(40, y + 5, &f.truncate(&t.title, room), ESPRESSO, f);
             let c = if self.sel == i { ESPRESSO } else { COCOA };
-            p.text_right(w - 22, y + 5, &length(t.frames), c, 1, false);
+            p.text_right(w - 22, y + 5, &len, c, 1, false);
             self.hits.push((r, Hit::Row(i)));
             y += ROW_H;
         }

@@ -265,21 +265,9 @@ pub fn plus_rect(n: usize, w: i32, x0: i32) -> Rect {
     )
 }
 
-/// `s` cut with "~" to fit `px` pixels of proportional text.
+/// `s` cut with "..." to fit `px` pixels of body text.
 pub fn fit(s: &str, px: i32, bold: bool) -> alloc::string::String {
-    if super::fontx::prop_width(s, bold) <= px {
-        return alloc::string::String::from(s);
-    }
-    let mut out = alloc::string::String::new();
-    for c in s.chars() {
-        out.push(c);
-        if super::fontx::prop_width(&out, bold) + 8 > px {
-            out.pop();
-            break;
-        }
-    }
-    out.push('~');
-    out
+    crate::sysfont::Font::body(bold).truncate(s, px)
 }
 
 /// Draw a SPEC tab strip at the top of `p` (`w` wide, starting at x0). `hover` / `close_hover`
@@ -747,18 +735,8 @@ impl Window {
             (false, true) => ESPRESSO,
             (false, false) => COCOA,
         };
-        let title = title.as_str();
         // Keep the title clear of the lights.
-        let max_chars = ((w - 2 * 80) / 8).max(0) as usize;
-        let t: &str = if title.chars().count() > max_chars {
-            let end = title
-                .char_indices()
-                .nth(max_chars)
-                .map_or(title.len(), |(i, _)| i);
-            &title[..end]
-        } else {
-            title
-        };
+        let t = fit(title.as_str(), (w - 2 * 80).max(0), true);
         match &strip {
             Some(s) => {
                 let (fill, text) = if dark {
@@ -780,7 +758,7 @@ impl Window {
             }
             // The drop target takes the title's place while a window hovers here.
             None if self.drop_hint => {}
-            None => p.text_p_center(0, w, 9, t, tc, true),
+            None => p.text_p_center(0, w, 9, &t, tc, true),
         }
         if self.drop_hint {
             let n = strip.as_ref().map_or(1, |s| s.titles.len());

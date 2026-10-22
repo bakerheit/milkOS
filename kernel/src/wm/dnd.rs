@@ -44,7 +44,7 @@ pub struct Dnd {
 }
 
 fn ghost_rect(pos: (i32, i32), name: &str) -> Rect {
-    let w = super::fontx::prop_width(name, false).max(40) + 20;
+    let w = crate::sysfont::width(name, false).max(40) + 20;
     Rect::new(pos.0 + 8, pos.1 + 6, w.max(56), 74)
 }
 
@@ -240,7 +240,7 @@ pub(super) fn draw(d: &Dnd, p: &mut Painter, clip: Rect) {
     if !icons::file_tile(p, ix, g.y, 40, kind) {
         icons::draw(p, ix, g.y, 40, d.icon, CREAM, 230, ESPRESSO, true);
     }
-    let lw = super::fontx::prop_width(&d.name, false) + 14;
+    let lw = crate::sysfont::width(&d.name, false) + 14;
     let lx = g.x + (g.w - lw) / 2;
     p.rrect(lx, g.y + 46, lw, 22, 8, HONEY, 235);
     p.text_p(lx + 7, g.y + 49, &d.name, INK, false);

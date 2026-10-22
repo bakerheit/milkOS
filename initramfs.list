@@ -101,3 +101,10 @@
 # Linux binary compatibility: a static Linux/aarch64 program with no milkOS knowledge,
 # linked at 0x400000 (tests/linux/build.sh; the binary is committed).
 /bin/linux-hello  tests/linux/bin/linux-hello  755
+
+# Font licences (the desktop's baked system fonts, kernel/src/sysfont.rs, and Unifont).
+/System/Library/Fonts/FIGTREE-OFL.txt                    assets/fonts/FIGTREE-OFL.txt                    644
+/System/Library/Fonts/IBM-PLEX-SANS-OFL.txt              assets/fonts/IBM-PLEX-SANS-OFL.txt              644
+/System/Library/Fonts/FIRA-SANS-OFL.txt                  assets/fonts/FIRA-SANS-OFL.txt                  644
+/System/Library/Fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt assets/fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt 644
+/System/Library/Fonts/UNIFONT-LICENSE.txt                assets/fonts/UNIFONT-LICENSE.txt                644

@@ -1,5 +1,5 @@
 //! chroot DIR [CMD [ARGS...]]   run CMD (default /Commands/msh) with DIR as /.
-//! Used by `milk` to run a tried app as if its clone volume were the root.
+//! Used by `apps run` to run a tried app as if its clone volume were the root.
 #![no_std]
 #![no_main]
 extern crate alloc;

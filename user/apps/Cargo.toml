@@ -1,0 +1,12 @@
+[package]
+name = "apps"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "apps"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }

@@ -961,12 +961,14 @@ fn help() {
     println!("programs (/Commands): files trash text print pause ps kill");
     println!("  uptime free uname true false clear   (files help: files and folders)");
     println!("  (text help: show, first, last, find, sort, unique and count lines)");
+    println!("  network disks apps search   (network help, disks help, ...: what each one does)");
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
         "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list,"
     );
-    println!("  variables list, text count");
+    println!("  variables list, text count, network status/connections, disks list/snapshots,");
+    println!("  apps list/search, search WORDS");
     println!("try: ps | text find msh,  text show /System/Settings/motd | text count --lines");
     println!("     files list -l /Commands | text sort --numbers --field 5 | text last 3");
     println!(

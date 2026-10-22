@@ -67,6 +67,32 @@
   that reorders unflushed writes), covering what the qemu milkfs tests check below the VFS;
   check-all runs it in the smoke set.
 
+**Network, disks, apps and search**
+- `network` replaces `ifconfig`, `netstat`, `ping`, `nc`, `netctl` and `fetch`, which are gone:
+  `network status` (links, addresses, counters, the hostname and Milk Drop; `--keys` for
+  the Settings > Network panel), `connections`, `counters`, `ping HOST`, `get URL` (`--save
+  FILE`, never overwriting without `--replace`), `connect HOST PORT`, `listen PORT`,
+  `name [NAME]` (the hostname; `--local` the .local name), `hide` and `show` (Milk Drop
+  visibility), `help`. Options are spelled out (`--count 3`, `--ipv6`), short forms kept.
+- `disks` replaces `df`, `snap` and `dedupe`, which are gone: `list` (free space), `devices`,
+  `info`, `snapshots`, `snapshot NAME`, `delete`, `rollback`, `changes A [B]` (was diff),
+  `auto`, `clones`, `clone`, `keep` (was promote), `discard`, `check`, `verify` (was scrub),
+  `format` (was mkfs), `encrypt`, `decrypt`, `lock`, `unlock`, `passphrase` (was passwd),
+  `send`, `receive`, `dedupe PATH`, `help`. Same checks, prompts and secrets handling; the
+  stream temp files for `send` to stdout and `receive` from stdin are now made O_EXCL,
+  mode 0600 (security review SR-25, user-space half).
+- `apps` replaces the `milk` package manager, which is gone (the user, the folders and the
+  package format keep the milk name): `list`, `search`, `info`, `install`, `remove`
+  (`--unused` was autoremove), `update`, `upgrade` (`--yes`), `try`, `run` (was run-try),
+  `keep`, `discard`, `relink`, `repos` (new), `keys`, `selftest`, `help`. Signatures,
+  checksums and audit records are unchanged. The Store and init use it.
+- `search` replaces `spot`, which is gone, with the same options spelled out: `--long`,
+  `--limit N`, `--status`, `--wait`, `--wait-index`, `--rebuild`.
+- `network status`, `connections`, `counters`, `disks list`, `devices`, `snapshots`,
+  `clones`, `apps list`, `apps search` and `search` give msh tables. The parsing and wording
+  are in `user/cmdkit` (host tests, smoke set); `scripts/net-disks-apps-test.sh` tests every
+  subcommand in a VM.
+
 **Memory**
 - A real heap for every program (`user/heapkit`, the global allocator in `rt::heap`). The old
   one was a bump allocator that only took back the most recent block, so long-running

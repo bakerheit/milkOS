@@ -1,4 +1,4 @@
-//! `snap send` / `snap receive`: a snapshot as a byte stream (ZFS-send style), full or
+//! `disks send` / `disks receive`: a snapshot as a byte stream (ZFS-send style), full or
 //! incremental from an older snapshot, and recreating it on another milkfs volume.
 //!
 //! The stream is a sequence of records, each `type u8 | 3 x 0 | length u32 | payload |
@@ -7,7 +7,7 @@
 //! blocks and a chained hash of every record checksum, so a truncated, reordered or
 //! damaged stream is refused before anything becomes visible. Layout in
 //! `docs/filesystem.md`; `scripts/mkmilkfs.py verify-stream` / `receive` read it too.
-//! An encrypted stream (`snap send --encrypt`, the default from an encrypted volume) is the
+//! An encrypted stream (`disks send --encrypt`, the default from an encrypted volume) is the
 //! same records, each sealed with XChaCha20-Poly1305 under a per-stream key behind a
 //! passphrase envelope (`crypt::StreamKey`); `Encoder::sealed` / `Decoder::open`.
 //!
@@ -17,7 +17,7 @@
 //! never leave it), each data block once as a `DATA` record before its first use,
 //! so reflink copies stay shared on the receiver. Data removal is by file range (`DROP`),
 //! so the receiver may lay its blocks out differently. An incremental stream holds only
-//! the items that differ (found like `snap diff`, reading only changed nodes): removals
+//! the items that differ (found like `disks changes`, reading only changed nodes): removals
 //! first, then changes in key order. Changed data runs are sent whole. Not sent: files
 //! with no links left (unlinked while open), the orphan list, the shared-block table (the
 //! receiver recounts it).

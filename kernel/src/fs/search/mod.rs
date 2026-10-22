@@ -6,7 +6,7 @@
 //! - [`query()`]`(q, limit)` (`query.rs`): words and prefixes, ranked (name > content, newer first),
 //!   with filters `kind:md`, `in:Documents`, `modified:today`. See docs/filesystem.md.
 //! - `/System/Kernel/fs/search`: `query` (write a query, read the results), `status`, `roots`,
-//!   `rebuild`. Tool: `spot`.
+//!   `rebuild`. Tool: `search`.
 //!
 //! The indexer starts from the saved index (if its format and roots match), then walks the
 //! roots once comparing size and mtime, re-reading only what changed (a "verify" scan);

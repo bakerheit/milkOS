@@ -473,7 +473,7 @@ fn proc_status() -> String {
     )
 }
 
-/// `/dev/audit` (write-only): lets privileged user tools (the `milk` package manager)
+/// `/dev/audit` (write-only): lets privileged user tools (the `apps` package manager)
 /// add records without writing the log. Each line written is `<event> [detail...]`; the
 /// kernel records it as event `user.<event>` with the writer's pid and exe, so user records
 /// can neither pose as kernel events nor touch existing ones. `event`: 1-32 of

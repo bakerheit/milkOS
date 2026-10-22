@@ -29,7 +29,7 @@
                                          sb smap bref data node
   mkmilkfs.py corrupt IMAGE flip PATH [--snapshot NAME]
                                          flip one bit in the first data block of PATH
-  mkmilkfs.py verify-stream FILE         check a `snap send` stream (every record checksum,
+  mkmilkfs.py verify-stream FILE         check a `disks send` stream (every record checksum,
                                          counts, chained hash) and describe it
   mkmilkfs.py seal-stream FILE OUT        encrypt a plaintext stream (asks for a passphrase)
   Encrypted streams (verify-stream, receive): --stream-passphrase-file FILE or

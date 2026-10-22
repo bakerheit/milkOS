@@ -364,7 +364,7 @@ fn cmd_daemon(quiet: bool) -> Res<()> {
     let query = alloc::format!("{MAGIC} QUERY");
     loop {
         let now = sys::clock_ns(sys::CLOCK_MONOTONIC);
-        // Hidden (`drop visible off`, netctl): no announcements, no answers.
+        // Hidden (`drop visible off`, `network hide`): no announcements, no answers.
         let visible = ident::visible();
         if now >= next && visible {
             // Both families: IPv4 for older peers, ff02::fb for IPv6 ones.

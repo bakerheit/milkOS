@@ -65,8 +65,8 @@ for kind in orphan dangling nlink parent sb smap bref; do
   boot "$K" normal "$LOG" "$SOCK"
   P='msh:[^\n]*\$ '
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-    "send:snap check" "wait:$P" "send:snap check --repair" "wait:$P" \
-    "send:snap check" "wait:$P" "send:print FSCK""-DONE" "wait:FSCK-DONE" "done:$T/$kind.done" &
+    "send:disks check" "wait:$P" "send:disks check --repair" "wait:$P" \
+    "send:disks check" "wait:$P" "send:print FSCK""-DONE" "wait:FSCK-DONE" "done:$T/$kind.done" &
   DPID=$!
   for _ in $(seq 600); do [ -e "$T/$kind.done" ] && break; sleep 0.2; done
   sleep 0.5; stop; kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
@@ -74,21 +74,21 @@ for kind in orphan dangling nlink parent sb smap bref; do
   if [ "$kind" = smap ]; then
     echo "$L" | grep -aq "vda: space map chunk unreadable: rebuilding" && ok "mount notices the damaged space map and rebuilds it" || bad "mount didn't notice the space map"
   elif [ "$kind" = bref ]; then
-    # Mount doesn't count references; `snap check` does.
-    echo "$L" | awk '/snap check$/{n++} n==1' | grep -aq "shared-block table" && ok "kernel check finds it (mount leaves it alone)" || bad "kernel check missed $kind"
+    # Mount doesn't count references; `disks check` does.
+    echo "$L" | awk '/disks check$/{n++} n==1' | grep -aq "shared-block table" && ok "kernel check finds it (mount leaves it alone)" || bad "kernel check missed $kind"
   elif [ "$kind" != sb ]; then
     echo "$L" | grep -aq "check FOUND PROBLEMS" && ok "mount reports it (and doesn't repair)" || bad "mount didn't report $kind"
   fi
-  if echo "$L" | grep -a -A3 'snap check --repair$' | grep -aq "repaired:"; then
+  if echo "$L" | grep -a -A3 'disks check --repair$' | grep -aq "repaired:"; then
     ok "kernel repair: $(echo "$L" | grep -a -m1 'repaired:' | sed 's/^ *//')"
-  elif [ "$kind" = sb ] && echo "$L" | awk '/snap check$/{n++} n==1' | grep -aq "checksummed: clean"; then
+  elif [ "$kind" = sb ] && echo "$L" | awk '/disks check$/{n++} n==1' | grep -aq "checksummed: clean"; then
     ok "kernel: the damaged slot is where the next commit goes, so the boot's first commit already rewrote it"
-  elif [ "$kind" = smap ] && echo "$L" | awk '/snap check$/{n++} n==1' | grep -aq "checksummed: clean"; then
+  elif [ "$kind" = smap ] && echo "$L" | awk '/disks check$/{n++} n==1' | grep -aq "checksummed: clean"; then
     ok "kernel: mount rebuilt the map and the next commit wrote a good one"
   else
     bad "kernel repair of $kind"
   fi
-  echo "$L" | awk '/snap check$/{n++} n==2' | grep -aq "checksummed: clean" && ok "kernel check clean after repair" || bad "kernel check after repair"
+  echo "$L" | awk '/disks check$/{n++} n==2' | grep -aq "checksummed: clean" && ok "kernel check clean after repair" || bad "kernel check after repair"
   $M check "$K" >/dev/null 2>&1 && ok "host check clean after kernel repair" || bad "host check after kernel repair"
 done
 

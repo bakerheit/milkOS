@@ -1,4 +1,4 @@
-//! `snap diff`: what changed between two snapshots, or a snapshot and the live volume.
+//! `disks changes`: what changed between two snapshots, or a snapshot and the live volume.
 //!
 //! Only changed tree nodes are read. Walking the newer tree, any subtree whose pointer was
 //! born at or before the older snapshot is skipped: copy-on-write means it is still the

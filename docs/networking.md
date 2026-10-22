@@ -2,7 +2,7 @@
 
 Files: `kernel/src/virtio/net.rs` (driver), `kernel/src/net/` (stack, socket API, /proc/net,
 demo server, self-test), `kernel/src/proc/sock.rs` (socket syscalls), `user/rt/src/net.rs` +
-`user/fetch` (user side), `scripts/net-test.sh` + helpers (end-to-end test).
+`user/network` + `user/cmdkit` (the `network` command), `scripts/net-test.sh` + helpers (end-to-end test).
 
 Everything is written from scratch (no crates). IPv4 only: up to two Ethernet interfaces
 (`eth0`, the slirp NIC with DHCP; `eth1`, an optional VM-to-VM link with a link-local
@@ -15,7 +15,7 @@ address, see "eth1" below) plus loopback (`lo`).
 | `scripts/run.sh` / `screenshot.sh` | `-netdev user,id=n0,restrict=on` + `virtio-net-device` (`scripts/netdev.sh`). The guest gets 10.0.2.15 by DHCP and can ping 10.0.2.2; slirp lets it reach nothing else (no host, no internet; it also hands out no router/DNS in this mode). |
 | `MILK_HTTP_PORT=8088 scripts/run.sh` | also forwards `127.0.0.1:8088` on the Mac to the guest's port 80: `curl http://127.0.0.1:8088/`. Opt-in so parallel qemus don't fight over the port. |
 | `scripts/net-test.sh` | the full end-to-end test (below). Unrestricted slirp, but every host-side helper binds to 127.0.0.1 and the guest is only told about 10.0.2.2 (= the Mac's loopback). |
-| in msh | `ifconfig`, `netstat [-t] [-u] [-l] [-s]`, `ping [-c N] [-i MS] 10.0.2.2`, `fetch http://127.0.0.1/`, `nc HOST PORT` / `nc -l PORT`, `text show /proc/net/tcp`. Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
+| in msh | `network status`, `network connections [--tcp] [--udp] [--listening]`, `network counters`, `network ping [--count N] [--interval MS] 10.0.2.2`, `network get http://127.0.0.1/`, `network connect HOST PORT` / `network listen PORT`, `text show /proc/net/tcp` (`network help` lists them all). Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
 
 Network safety rule for tests: only qemu's own gateway/DHCP (10.0.2.2) and servers we start
 on the Mac at 127.0.0.1 (seen from the guest as 10.0.2.2:PORT). No internet hosts, no real
@@ -151,7 +151,7 @@ eth1, else the default gateway (eth0's).
 
 ## IPv6 (`net/ipv6.rs`)
 
-* **Addresses** (`/proc/net/if_inet6`, `ifconfig`):
+* **Addresses** (`/proc/net/if_inet6`, `network status`):
   * every link gets a link-local `fe80::<modified EUI-64 of the MAC>/64`;
   * **eth0** gets a SLAAC address from qemu slirp's router advertisement: prefix
     `fec0::/64`, router `fe80::2`, so `fec0::5054:ff:fe12:3456`. slirp's host is
@@ -252,7 +252,8 @@ One socket layer for both families (`wire::IpAddr`, `SockAddr { ip: IpAddr, port
 off the wire: no DHCP on eth0, no 169.254 link-local on eth1, ARP and IPv4 neither sent
 nor taken on any link (sends get `ENETUNREACH`). Loopback keeps 127.0.0.1, as on Linux.
 slirp itself runs with `ipv4=off`. Everything else works over IPv6 alone: SLAAC, the
-tools (`ping -6`, `fetch`, `nc`, `netstat`, `ifconfig`/`netctl` show IPv4 as off),
+tools (`network ping -6`, `network get`, `network connect`, `network connections`, and
+`network status` shows IPv4 as off),
 `localhost` (`::1` first), httpd on `[::]:80`, Milk Drop (discovery over `ff02::fb`,
 `.local` by AAAA, transfers between the VM-link addresses). `scripts/net6-test.sh` proves
 it. One limit is slirp's: this qemu's `hostfwd` only forwards IPv4, so nothing on the Mac
@@ -284,7 +285,7 @@ one (slirp) stays eth0 with DHCP exactly as before. eth1:
   including broadcasts and multicast, go to the one peer. `scripts/drop-test.sh` boots such
   a pair.
 * `/proc/net/dev`, `arp`, `route` (169.254/16 and 224/4 on eth1) and `ifaddr`
-  (`linklocal=bound|probing conflicts=N`) list eth1; `ifconfig` shows it.
+  (`linklocal=bound|probing conflicts=N`) list eth1; `network status` shows it.
 
 ## The kernel socket API (`kernel/src/net/socket.rs`)
 
@@ -398,26 +399,27 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 
 | program | what | how |
 |---|---|---|
-| `ifconfig [IFACE]` | addresses (IPv6 as `inet6 ADDR  prefixlen N  scopeid 0x20<link>`), MAC, IPv6 router, gateway/DNS/DHCP state, counters | `/proc/net/ifaddr` (milkOS, `key=value` per interface) + `/proc/net/dev` |
-| `netstat [-t] [-u] [-l] [-s] [-4\|-6]` | sockets (tcp, tcp6, udp, udp6), or protocol counters | `/proc/net/{tcp,tcp6,udp,udp6,snmp,snmp6}` |
-| `ping [-4\|-6] [-c N] [-i MS] [-s SIZE] [-W MS] HOST` | ICMP / ICMPv6 echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged), or `(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)` with `-6` or an IPv6 address. `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). |
-| `nc [-4\|-6] [-u] HOST PORT`, `nc -l [-4\|-6] [-u] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; `-l` listens on `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
+| `network status [LINK] [--keys]` | each link: up or down, MAC, MTU, flags, IPv4 (address/prefix, netmask, broadcast, DHCP state, link-local), gateway and DNS, every IPv6 address with its scope (`link`, `global`, `host`, `(tentative)`), the IPv6 router, packet and byte counters; above them the hostname, the `.local` name and Milk Drop visibility. `--keys` is the stable `key=value` contract for the Settings > Network panel; a table for msh | `/proc/net/ifaddr` (milkOS, `key=value` per link) + `/proc/net/dev`, uname, the drop daemon's files |
+| `network connections [--tcp] [--udp] [--listening] [--ipv4\|--ipv6]`, `network counters` | sockets (tcp, tcp6, udp, udp6; a table for msh), or protocol counters | `/proc/net/{tcp,tcp6,udp,udp6,snmp,snmp6}` |
+| `network ping [--ipv4\|--ipv6] [--count N] [--interval MS] [--size BYTES] [--timeout MS] HOST` | ICMP / ICMPv6 echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged), or `(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)` with `--ipv6` or an IPv6 address. `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). Short forms: `-c`, `-i`, `-s`, `-W`, `-4`, `-6`. |
+| `network connect [-4\|-6] [--udp] HOST PORT`, `network listen [-4\|-6] [--udp] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; listen uses `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by milkd as `httpd -q /Users/milk/Sites` on :80 (rootfs/Users/milk/Sites), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
-| `fetch [-i] URL` | HTTP GET | |
+| `network get [--headers] [--save FILE [--replace]] URL` | HTTP GET: the body to the screen or FILE (an existing FILE only with `--replace`), a summary line on stderr | `http://` only (no TLS) |
 | `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
-| `netctl [show] [-k]`, `netctl hostname / name / visible` | the network settings: interfaces, IPv4/IPv6, DHCP, DNS, hostname, the `.local` name, Milk Drop visibility; `-k` is the stable `key=value` contract for the Settings > Network panel | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/System/Settings/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
+| `network name [--local] [NAME]`, `network hide`, `network show` | the hostname, the `.local` (Milk Drop) name, Milk Drop visibility | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/System/Settings/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
 
 **Names in user programs** (getaddrinfo-style, both families: `rt::net::lookup_all(spec,
 default_port, Want::{Any,V4,V6})` gives every address in the order to try, IPv6 first as
 Linux orders them; `rt::net::connect_any(&addrs, ty)` connects to the first that answers;
 `lookup` / `resolve` give the first). `SPEC` is `HOST[:PORT]`, `[V6ADDR]:PORT` or a bare
-IPv6 address; `fe80::1%eth1` names the link. `ping`, `fetch`, `nc`, `tcpbench` and
+IPv6 address; `fe80::1%eth1` names the link. `network ping`, `get`, `connect`, `tcpbench` and
 `drop send` use it. One address type for both families: `rt::net::SockAddr { ip: Ip,
 port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
 
 * a numeric address (dotted quad or IPv6): no lookup;
-* `localhost`: `::1` and 127.0.0.1 (`ping localhost` stays IPv4, `ping -6 localhost` is `::1`);
+* `localhost`: `::1` and 127.0.0.1 (`network ping localhost` stays IPv4, `network ping -6
+  localhost` is `::1`);
 * **`NAME.local`**: mDNS (RFC 6762) on eth1, `rt::mdns`. It uses the real DNS wire format
   on UDP 5353, over IPv6 to `ff02::fb` (asking AAAA and A) and over IPv4 to 224.0.0.251
   (asking A and AAAA), each a "legacy unicast" query (an ephemeral source port, one
@@ -433,7 +435,7 @@ port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
   Milk Drop name (`drop name bob` -> `bob.local`), since every machine's hostname is `milk`.
   There is no probing for name conflicts: two machines with one name both answer, and
   the first answer wins.
-* **anything else is refused** (`ping: example.com: not resolved: milkOS resolves only
+* **anything else is refused** (`network ping: example.com: not resolved: milkOS resolves only
   numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are
   refused`). The kernel's DNS policy for its own callers (`.test` only, see DNS above) is
   unchanged. Multicast never leaves through eth0, so `.local` lookups can't reach slirp or
@@ -456,7 +458,7 @@ Milk volume, `fs::init` binds `/Volumes/Milk/System/Settings/milk/drop` onto it
 The fingerprint people compare is the first 8 bytes of SHA-256(public key) in four groups
 (`3fa2 91bc 07de 44a1`). The default name is `<hostname>-<first 4 fingerprint digits>`;
 `drop name alice` changes it. The secret is only as safe as root: it is 0600 root, so
-ordinary users' programs can't read it (root's can). `milk run-try` sandboxes keep tried apps away from
+ordinary users' programs can't read it (root's can). `apps run` sandboxes keep tried apps away from
 their clone's `/System/Settings`. Keys come from the kernel CSPRNG (`/dev/urandom`: ChaCha20 seeded
 from virtio-rng, docs/crypto.md), and `identity.secret` records that (`rng=kernel-csprng`).
 
@@ -678,11 +680,13 @@ lookup + NXDOMAIN against the Mac's test DNS server, a refused host port. It the
 
 **`scripts/net-test.sh`**: starts `scripts/net_test_servers.py` (TCP echo on 127.0.0.1
 and on `::1` (v6-only), test DNS and HTTP on 127.0.0.1, from a mktemp dir), boots with
-hostfwds for guest :80 (userland httpd), :8080 (kernel httpd) and :7777 (nc -l), checks
-the self-test, types `ifconfig` (inet6 lines checked), `ping`, `ping -6 fec0::2`, four
-`fetch`es (one to `http://[::1]/`, the userland httpd over IPv6), `nc` to the host echo
-server and `nc -6 fec0::2` to the `::1` one (then ^D), `nc -l 7777` (the Mac connects and
-sends a line), `netstat` (httpd's `[::]:80` in tcp6) and `netstat -6 -l` into msh over the serial
+hostfwds for guest :80 (userland httpd), :8080 (kernel httpd) and :7777 (`network listen`),
+checks the self-test, types `network status` (ipv6 lines checked), `network ping`, `network
+ping -6 fec0::2`, four `network get`s (one to `http://[::1]/`, the userland httpd over
+IPv6), `network connect` to the host echo server and `network connect --ipv6 fec0::2` to
+the `::1` one (then ^D), `network listen 7777` (the Mac connects and sends a line),
+`network connections` (httpd's `[::]:80` in tcp6), `network connections --ipv6
+--listening`, `network status --keys` and `network name` into msh over the serial
 console (`scripts/serial_drive.py`), then from the Mac: the userland httpd (`/`, a file, a
 listing, 404, 403 for `..`, 301) and the kernel httpd (`/big` content verified, 4 parallel
 `/big`, `/net`, 404). Kills only the qemu and
@@ -724,7 +728,7 @@ UDP ports on 127.0.0.1, with MACs 02:6d:6b:64:0a:0a / :0b:0b (so 169.254.10.10 /
   cat`) and compares their SHA-256 with the originals, and finds alice's `known_peers` on
   her disk;
 * a second boot of alice's image: same name, same fingerprint, bob still trusted;
-* **IPv6 between the VMs over eth1**: alice `ping -6 bob.local` (AAAA over `ff02::fb`,
+* **IPv6 between the VMs over eth1**: alice `network ping -6 bob.local` (AAAA over `ff02::fb`,
   then ICMPv6 to bob's `fd6d:696c:6b00:1:6d:6bff:fe64:b0b`) and `drop send bob.local`,
   which goes over IPv6 (IPv6 first): bob's receiver listens on both eth1 addresses, gets
   the file intact, and both audit records carry the IPv6 addresses.
@@ -734,10 +738,11 @@ It kills only its own qemus and serial drivers, by PID.
 **`scripts/net6-test.sh`**: the v6-only boot, two VMs. alice's self-test must show IPv4
 really off (no address on eth0/eth1, 10.0.2.2 refused, loopback IPv4 fine) and pass
 everything else, including a TCP echo over IPv6 to the Mac's `::1`. Her tools work over
-IPv6 alone: ping -6 to slirp, fetch from the Mac's `::1` (an HTTP helper bound there) and
-from her own httpd (`[::1]` and `localhost`), `nc -6` to the Mac's echo server, IPv4
+IPv6 alone: `network ping -6` to slirp, `network get` from the Mac's `::1` (an HTTP helper
+bound there) and from her own httpd (`[::1]` and `localhost`), `network connect -6` to the
+Mac's echo server, IPv4
 shown as off. Then Milk Drop between alice and bob with no IPv4 anywhere: `drop list`
-finds bob at his VM-link IPv6 address, `ping -6 bob.local`, and `drop send bob` delivers a
+finds bob at his VM-link IPv6 address, `network ping -6 bob.local`, and `drop send bob` delivers a
 file. The host helpers bind `::1`/127.0.0.1 only, bob's slirp is restricted, and eth1 is
 two UDP ports on 127.0.0.1.
 

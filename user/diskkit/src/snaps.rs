@@ -1,4 +1,4 @@
-//! Snapshots, clones, automatic snapshots (Time Machine) and `snap diff` output.
+//! Snapshots, clones, automatic snapshots (Time Machine) and `disks changes` output.
 
 use alloc::format;
 use alloc::string::{String, ToString};

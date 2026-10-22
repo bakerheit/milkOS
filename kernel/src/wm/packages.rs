@@ -1,10 +1,10 @@
 //! Apps from manifests on the desktop (docs/packages.md): every `/Apps/<name>/manifest`
 //! with a `dock Label #RRGGBB` line gets a dock tile (after the desktop's own ones,
-//! built-in apps first, then installed `milk` packages) and a Skim entry. Built-in apps
+//! built-in apps first, then installed packages (`apps install`)) and a Skim entry. Built-in apps
 //! ship with milkOS (the Store, Calendar, ...: `fs::layout::is_builtin_app`); installed
-//! ones carry milk's `.origin` file. Its program is the manifest's `exec`: relative to the
+//! ones carry the `.origin` file `apps` writes. Its program is the manifest's `exec`: relative to the
 //! app's folder (`exec store`), or an absolute path. Built-in apps run unsandboxed (the
-//! Store runs /Commands/milk, which writes /Apps and makes clones); installed ones
+//! Store runs /Commands/apps, which writes /Apps and makes clones); installed ones
 //! sandboxed.
 //!
 //! Window apps (they link `user/gui`) start like Paint, as a process whose window is the
@@ -116,7 +116,7 @@ fn parse(base: &str, name: &str, text: &str) -> Option<Pkg> {
     } else {
         format!("{base}/{name}/{exec}")
     };
-    // Only real files under the package (no .. tricks; milk refuses those anyway).
+    // Only real files under the package (no .. tricks; `apps` refuses those anyway).
     if exec.contains("/../") || fs::stat(&exec).is_err() {
         return None;
     }

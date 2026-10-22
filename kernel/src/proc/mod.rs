@@ -255,7 +255,7 @@ pub fn chroot(dir: InodeRef) -> KResult<()> {
         return Err(ENOTDIR);
     }
     let p = current();
-    // Anyone may chroot (it only narrows what they see; `milk run-try` relies on it), but
+    // Anyone may chroot (it only narrows what they see; `apps run` relies on it), but
     // afterwards set-ID bits are ignored: a jail can't fake /System/Settings/passwd for `su`.
     p.cred.lock().no_new_privs = true;
     p.inner.lock().root_dir = Some(dir);

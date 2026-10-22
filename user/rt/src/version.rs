@@ -1,4 +1,4 @@
-//! Version numbers compared semver-ish (shared by `milk` and the `ver` table column type):
+//! Version numbers compared semver-ish (shared by `apps` and the `ver` table column type):
 //! numeric parts as numbers (`1.2.10 > 1.2.9`, missing parts are 0 so `1.2 == 1.2.0`),
 //! other parts as text, and a pre-release (`1.0.0-rc.1`, after a `-`) before its release.
 

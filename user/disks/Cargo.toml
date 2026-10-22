@@ -1,0 +1,18 @@
+[package]
+name = "disks"
+version.workspace = true
+edition.workspace = true
+
+# `disks`: one command for disks, volumes and snapshots (it replaced df, snap and dedupe).
+# It talks to milkfs through /System/Kernel/fs/milkfs (docs/filesystem.md); the parsing and
+# wording are in user/cmdkit and user/diskkit (host-tested).
+[[bin]]
+name = "disks"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+cmdkit = { path = "../cmdkit" }
+diskkit = { path = "../diskkit" }
+filekit = { path = "../filekit" }

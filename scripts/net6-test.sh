@@ -4,9 +4,10 @@
 # v6only=1); slirp itself runs without IPv4 (ipv4=off). eth1 links them over qemu dgram.
 #   - alice's boot self-test: no IPv4 on eth0/eth1, IPv4 to 10.0.2.2 refused, every
 #     loopback and IPv6 test, a TCP echo over IPv6 to the Mac's ::1 (as fec0::2);
-#   - alice's tools over IPv6 only: ifconfig / netctl (IPv4 off), ping -6 to slirp, fetch
-#     from the Mac's ::1 and from her own httpd ([::1] and localhost), nc -6 to the Mac's
-#     echo server, netstat -6, and ping 10.0.2.2 failing;
+#   - alice's tools over IPv6 only: network status / status --keys (IPv4 off), network ping
+#     -6 to slirp, network get from the Mac's ::1 and from her own httpd ([::1] and
+#     localhost), network connect -6 to the Mac's echo server, network connections, and
+#     network ping 10.0.2.2 failing;
 #   - Milk Drop between the two over IPv6 alone: discovery over ff02::fb, bob.local by
 #     AAAA, a file sent by drop name, received and checked.
 #
@@ -72,19 +73,19 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
 PIDS+=($!)
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'wait@240:\[net\] selftest' "$P" 'send:drop name alice' "$P" \
-  'send:ifconfig' 'wait:RX packets' "$P" \
-  'send:netctl -k' 'wait:drop_visible=' "$P" \
-  'send:ping -6 -c 2 -i 200 fec0::2' 'wait:rtt min|packet loss' "$P" \
-  'send:ping -c 1 -W 500 10.0.2.2' "$P" \
-  "send:fetch http://[fec0::2]:$P_http6/hello.txt" 'wait:fetch: [^\n]*' "$P" \
-  'send:fetch http://[::1]/about.txt' 'wait:fetch: [^\n]*' "$P" \
-  'send:fetch http://localhost/about.txt' 'wait:fetch: [^\n]*' "$P" \
-  "send:nc -6 fec0::2 $P_echo6" 'send:hello over IPv6 only' 'wait:hello over IPv6 only\r?\n\r?hello over IPv6 only' \
+  'send:network status' 'wait:sent +[0-9]+ packets' "$P" \
+  'send:network status --keys' 'wait:drop_visible=' "$P" \
+  'send:network ping -6 --count 2 --interval 200 fec0::2' 'wait:rtt min|packet loss' "$P" \
+  'send:network ping --count 1 --timeout 500 10.0.2.2' "$P" \
+  "send:network get http://[fec0::2]:$P_http6/hello.txt" 'wait:network get: [^\n]*' "$P" \
+  'send:network get http://[::1]/about.txt' 'wait:network get: [^\n]*' "$P" \
+  'send:network get http://localhost/about.txt' 'wait:network get: [^\n]*' "$P" \
+  "send:network connect -6 fec0::2 $P_echo6" 'send:hello over IPv6 only' 'wait:hello over IPv6 only\r?\n\r?hello over IPv6 only' \
   'raw:\x04' "$P" \
-  'send:netstat -l' "$P" \
+  'send:network connections --listening' "$P" \
   "waitfile:$WORK/b1" \
   'send:drop list' "$P" \
-  'send:ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|packet loss|no answer' "$P" \
+  'send:network ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|packet loss|no answer' "$P" \
   'send:print milk drop over ipv6 only > /tmp/v6.txt' "$P" \
   'send:drop send bob /tmp/v6.txt' "wait:$DONE_RE" "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
@@ -110,21 +111,21 @@ check "$A" "self-test: SLAAC from slirp without IPv4" "\\[net\\] ipv6: eth0 fec0
 check "$A" "self-test: TCP echo to the Mac's ::1" "\\[net\\] tcp echo via \\[fec0::2\\]:[0-9]+: 512 KiB round trip"
 check "$A" "self-test: everything else passed" "\\[net\\] selftest ok"
 grep -q "\\[net\\] FAIL" "$A" && fail "a self-test failed: $(grep '\[net\] FAIL' "$A" | head -1)"
-check "$A" "ifconfig: no IPv4 on eth0, its IPv6 addresses" "inet6 fec0::5054:ff:fe12:3456  prefixlen 64"
-check "$A" "ifconfig: IPv4 shown as off" "^        inet off \\(IPv6 only\\)$"
-check "$A" "netctl: IPv4 off on eth0 and eth1" "^iface\\.eth1\\.ipv4=off$"
-check "$A" "netctl: no DHCP on eth0" "^iface\\.eth0\\.ipv4=off$"
-check "$A" "ping -6 to slirp" "2 packets transmitted, 2 received, 0% packet loss"
-check "$A" "IPv4 ping refused" "ping: sendto: .*(unreachable|101)"
-check "$A" "fetch from the Mac's ::1" "hello from the Mac's loopback, via qemu slirp, to milkOS fetch"
-check "$A" "fetch from her own httpd over [::1]" "fetch: 200 OK, [0-9]+ bytes from \\[::1\\]:80"
-[ "$(grep -c 'served by /System/Services/httpd' "$A")" -ge 2 ] || fail "fetch localhost: no page (localhost must reach ::1)"
-echo "  ok  fetch http://localhost/ reaches httpd over ::1"
-[ "$(grep -c 'hello over IPv6 only' "$A")" -ge 2 ] || fail "nc -6: no echo from the Mac's [::1] server"
-echo "  ok  nc -6 to the Mac's echo server"
+check "$A" "network status: no IPv4 on eth0, its IPv6 addresses" "ipv6       fec0::5054:ff:fe12:3456/64  global"
+check "$A" "network status: IPv4 shown as off" "^  ipv4       off \\(IPv6 only\\)"
+check "$A" "network status --keys: IPv4 off on eth0 and eth1" "^iface\\.eth1\\.ipv4=off$"
+check "$A" "network status --keys: no DHCP on eth0" "^iface\\.eth0\\.ipv4=off$"
+check "$A" "network ping -6 to slirp" "2 packets transmitted, 2 received, 0% packet loss"
+check "$A" "IPv4 ping refused" "network ping: couldn't send: .*(unreachable|101)"
+check "$A" "network get from the Mac's ::1" "hello from the Mac's loopback, via qemu slirp, to milkOS network get"
+check "$A" "network get from her own httpd over [::1]" "network get: 200 OK, [0-9]+ bytes from \\[::1\\]:80"
+[ "$(grep -c 'served by /System/Services/httpd' "$A")" -ge 2 ] || fail "network get localhost: no page (localhost must reach ::1)"
+echo "  ok  network get http://localhost/ reaches httpd over ::1"
+[ "$(grep -c 'hello over IPv6 only' "$A")" -ge 2 ] || fail "network connect -6: no echo from the Mac's [::1] server"
+echo "  ok  network connect -6 to the Mac's echo server"
 check "$A" "httpd listens on [::]:80" "tcp6 .* \\[::\\]:80 .* LISTEN"
 check "$A" "drop list finds bob over IPv6 alone" "^bob +$B6 +[0-9a-f ]{19} +yes +new "
-check "$A" "ping -6 bob.local (AAAA over ff02::fb)" "bytes from $B6: icmp_seq=1"
+check "$A" "network ping -6 bob.local (AAAA over ff02::fb)" "bytes from $B6: icmp_seq=1"
 check "$A" "drop send bob over IPv6" "drop: sent v6\\.txt to bob"
 check "$B" "bob's receiver: only the IPv6 address" "drop: receiving as bob \\(fingerprint [0-9a-f ]{19}\\) on \\[$B6\\]:5360;"
 check "$B" "bob got the file" "drop: received /Users/milk/Downloads/v6\\.txt"

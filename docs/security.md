@@ -70,7 +70,7 @@ stays on top: an operation needs **both** the permission bits and the sandbox.
   `/dev/ttyN`) belong to the session user. `/proc` and `/System/Kernel` control files (owner
   writable) are also writable by group **admin**; what a control write triggers (mounting a
   clone, a snapshot) runs as the kernel (`perm::as_kernel`), the check is at open.
-* `chroot` is allowed to anyone (it only narrows the view; `milk run-try` needs it) but
+* `chroot` is allowed to anyone (it only narrows the view; `apps run` needs it) but
   sets `no_new_privs`, as does the capability sandbox: set-ID programs don't work in there.
 
 **Other users' processes** (Linux's default, `hidepid=0`): everyone can see every
@@ -81,11 +81,11 @@ process's user and root: `/proc/<pid>/maps` (0400, owned by its euid) and
 `/proc/<pid>/fd/` (0500). Signals follow Linux: root, or a sender whose real or effective
 uid is the target's real or saved uid; otherwise `kill` is EPERM (signal 0 included).
 
-**Admin group decision (milk install, the Store):** like macOS, the administrators group
+**Admin group decision (apps install, the Store):** like macOS, the administrators group
 `admin` (80) owns the shared, installable places: `/Apps` and `/Commands` are
 `root:admin 0775`, `/System/Settings/milk/repos` (package sources) `root:admin 0664`. `milk` is in
-`admin`, so `milk install`, the Store and `milk relink` work without sudo; a non-admin user
-would need `sudo milk install`. The package signing keys (`/System/Settings/milk/keys`) and the
+`admin`, so `apps install`, the Store and `apps relink` work without sudo; a non-admin user
+would need `sudo apps install`. The package signing keys (`/System/Settings/milk/keys`) and the
 accounts (`/System/Settings/passwd`, `/System/Settings/group`, `/System/Settings/shadow`) stay root's.
 
 **Boot layout** (`proc::login::init`): /Users/root 0700, /tmp 1777, the above, a milkfs volume
@@ -99,7 +99,7 @@ password is tried on it: `proc::login::login` calls `fs::milkfs::unlock(password
 after a successful authentication, so a disk whose passphrase *is* the login password
 opens as the user logs in (FileVault style), binds its `/Users/milk` and `/Apps`,
 and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
-different passphrase) is logged and the disk stays locked for `snap unlock`.
+different passphrase) is logged and the disk stays locked for `disks unlock`.
 **On `passwd`** (a user changing their own password, so the old one is known), the same
 change is tried on the primary volume (`/System/Kernel/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
 was unlocked with the old login password, its passphrase follows the new one. It is skipped
@@ -207,7 +207,7 @@ goes through the same path: `proc::grant_file(pid, path, write=false, via="drop"
 (docs/processes.md). A dock tile drop on an app that isn't running starts it sandboxed with
 the file in its grants and as its argument. Peek shows dropped files (wm demo `dragpeek`).
 
-**Packaged window apps run sandboxed** (desktop dock / Skim launches of `milk` packages
+**Packaged window apps run sandboxed** (desktop dock / Skim launches of installed packages
 whose program links `user/gui`): `proc::spawn_with_caps` starts them with `fs` =
 `/Apps/<name>:r` + `~/Library/<name>:rw` (created first), `net none`, no clipboard,
 no spawning, windows and audio on — from the first instruction (no window in which they run
@@ -220,7 +220,7 @@ files only through the panel (wm demos `powerbox`, `powerboxpick`, `powerboxaudi
 
 ## Authorisation tickets: admin rights for one process, for 5 minutes
 
-Destructive storage operations (Disk Utility, `snap`, `milk keep`) should not be open to
+Destructive storage operations (Disk Utility, `disks`, `apps keep`) should not be open to
 every program a member of `admin` happens to run. Like macOS's authorisation panel, a
 process *asks* to be authorised, the user proves they are an administrator, and the kernel
 attaches a short-lived **admin ticket** to that one process. Files: `kernel/src/proc/auth.rs`
@@ -249,7 +249,7 @@ only), `auto` (its `keep=` prunes snapshots), `lock`, `passwd`, and `send`, `ben
 `treetest`, `dedupe` (they write and delete files anywhere as the kernel). `proc::auth::init`
 installs the ticket rule with `fs::milkfs::set_authorizer`; a refusal is EPERM, and
 `set_reason` puts "needs an administrator's authorisation ..." in `/System/Kernel/fs/milkfs/error`,
-which `snap` prints. Opening the control files still needs the usual admin-group write
+which `disks` prints. Opening the control files still needs the usual admin-group write
 access; the ticket is an extra requirement on top (a non-admin's process with a ticket
 still can't open them). Harmless controls (`snapshot`, `clone`, `scrub`, `sync`, listings)
 are unchanged. `passwd` and `su`/`sudo` are set-user-ID root, so they pass as euid 0 after
@@ -297,11 +297,11 @@ side doesn't change.
 **Terminal fallback: `auth`.** `auth [-S] [-u ADMIN] COMMAND [ARGS...]` asks for an
 administrator's password (your own account by default, `-u` for another; `-S` reads it from
 stdin for scripts), gets a ticket for *itself*, then execs COMMAND, which keeps it:
-`auth snap rollback before-upgrade`, `auth milk keep moo2048`. `auth -s` prints the ticket
+`auth disks rollback before-upgrade`, `auth apps keep moo2048`. `auth -s` prints the ticket
 of the process it runs in, so `auth /Commands/auth -s` shows a fresh one; there is nothing to
 revoke afterwards, because the ticket ends with COMMAND. Unlike `sudo` (set-user-ID root, runs COMMAND as root), `auth` runs
-COMMAND as you with only the ticket added. `snap` and `milk` print that hint on EPERM;
-`milk` first asks the panel itself (op 0), so the Store and Disk Utility get the panel
+COMMAND as you with only the ticket added. `disks` and `apps` print that hint on EPERM;
+`apps` first asks the panel itself (op 0), so the Store and Disk Utility get the panel
 without extra code.
 
 **Rate limit.** Per requesting real uid: after 3 wrong passwords in a row, every further
@@ -318,9 +318,9 @@ not-an-administrator|rate-limited (N s left)|cancelled`, `auth.revoke pid=`,
 `login.ok` / `login.fail` from `authenticate` appear alongside.
 
 **Effect on existing flows.** Anything that wrote those controls as a non-root admin now
-needs a ticket: `snap rollback/delete/send/...`, `dedupe`, and `milk try`'s keep/discard
+needs a ticket: `disks rollback/delete/send/...`, `disks dedupe`, and `apps try`'s keep/discard
 (and its auto-discard after a failed try) when run as `milk` rather than root. Boot-time and kernel
-callers (the fs self-test, `milk` under the root console in the tests) are unaffected.
+callers (the fs self-test, `apps` under the root console in the tests) are unaffected.
 
 **Tests**: `utest auth` (as milk): admin group alone is refused, a wrong password is
 EACCES, the right one gives 5 minutes and the write gets past the check, `/proc/self/status`
@@ -428,10 +428,10 @@ or reordering a record breaks the chain at that point.
 * **Sealed**: user processes get `EPERM` opening the file for writing, with `O_TRUNC`,
   truncating, renaming or replacing it, or unlinking it (`fs::ops` checks the inode). Only
   the kernel appends.
-* **Rewinds**: a milkfs rollback or clone promote (e.g. `milk keep`) rewinds the file too.
+* **Rewinds**: a milkfs rollback or clone promote (e.g. `apps keep`) rewinds the file too.
   The persister detaches *before* the rewind (so no flush lands in the wrong tree), and on
   re-attach, if the rewound file is a prefix of the chain in RAM, it re-appends what the file
-  lost, unchanged: the chain stays one chain (`audit verify` OK after `milk keep`). Only if
+  lost, unchanged: the chain stays one chain (`audit verify` OK after `apps keep`). Only if
   the ring no longer reaches back that far do the lost records stay with the old snapshot.
 
 ## Writing records from user space: `/dev/audit`
@@ -440,7 +440,7 @@ Write-only. Each line written is `<event> [detail...]` (`event`: 1-32 of `[a-z0-
 the kernel records it as `user.<event>` with the writer's pid, exe and the time. So a tool
 can add records but can't pose as the kernel (`user.` prefix), can't choose its pid or exe,
 and can't touch existing records. Today any process may write (everything is uid 0); the
-exe column says who did. `milk` uses it for `user.pkg.*`.
+exe column says who did. `apps` uses it for `user.pkg.*`.
 
 ## The `audit` tool
 

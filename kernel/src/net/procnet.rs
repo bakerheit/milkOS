@@ -363,7 +363,7 @@ pub fn snmp(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     )
 }
 
-/// milkOS-specific: one line per interface, `key=value` fields (what `ifconfig` reads;
+/// milkOS-specific: one line per interface, `key=value` fields (what `network status` reads;
 /// Linux gets these from ioctls instead).
 pub fn ifaddr(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     writeln!(

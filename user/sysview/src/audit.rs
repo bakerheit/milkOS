@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(d.detail, "text show /proc/meminfo");
         let d = describe(&rec(
             "user.pkg.install",
-            "/Commands/milk",
+            "/Commands/apps",
             "name=fortune%20version=1",
         ));
         assert_eq!(d.sentence, "fortune was installed");

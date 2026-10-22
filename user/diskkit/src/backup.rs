@@ -1,4 +1,4 @@
-//! Backups: `snap send` to a stream file on the Mac share and `snap receive` from one.
+//! Backups: `disks send` to a stream file on the Mac share and `disks receive` from one.
 
 use alloc::format;
 use alloc::string::{String, ToString};

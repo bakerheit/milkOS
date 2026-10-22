@@ -26,7 +26,7 @@ build() {
     python3 -I scripts/mkpkg.py build "$spec" --root "$REPO_ROOT" -o "$dir/$name-$ver.milkpkg"
   done
   # Signed with the TEST-ONLY toy key (scripts/milk-test-key.secret): index.txt.sig and
-  # <pkg>.milkpkg.sig, checked by milk against /System/Settings/milk/keys/milk-test.pub.
+  # <pkg>.milkpkg.sig, checked by `apps` against /System/Settings/milk/keys/milk-test.pub.
   python3 -I scripts/mkpkg.py index "$dir" --key "${MILK_SIGNING_KEY:-scripts/milk-test-key.secret}"
 }
 

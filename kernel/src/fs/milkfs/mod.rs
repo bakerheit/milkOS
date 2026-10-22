@@ -241,7 +241,7 @@ pub fn automount() {
                         );
                     }
                     kprintln!(
-                        "milkfs: {} ({}) is encrypted and locked: `snap unlock` (or write the passphrase to /System/Kernel/fs/milkfs/unlock)",
+                        "milkfs: {} ({}) is encrypted and locked: `disks unlock` (or write the passphrase to /System/Kernel/fs/milkfs/unlock)",
                         dev.name(),
                         sb.label
                     );
@@ -313,7 +313,7 @@ fn mount_found(
                 st.store.total(),
                 st.snaps.len(),
                 if r.fast {
-                    "skipped (snap check)"
+                    "skipped (disks check)"
                 } else if r.problems == 0 {
                     "clean"
                 } else {
@@ -356,7 +356,7 @@ static LOCKED: SpinLock<alloc::vec::Vec<BlockRef>> = SpinLock::new(alloc::vec::V
 
 /// TEST ONLY: a passphrase handed in by qemu (`-fw_cfg name=opt/milkos/passphrase,...`),
 /// so test scripts (crashtest.sh on an encrypted volume) can boot unattended. Anyone
-/// who can start qemu can read it; real use goes through `snap unlock`.
+/// who can start qemu can read it; real use goes through `disks unlock`.
 pub(crate) fn test_passphrase() -> Option<String> {
     let f = crate::fwcfg::find_file("opt/milkos/passphrase")?;
     let mut buf = alloc::vec![0u8; f.size as usize];
@@ -631,7 +631,7 @@ fn lock_one(v: &Arc<Volume>, path: &str, home: Option<&Arc<Volume>>) -> Result<(
         if scrub::running_on(path) {
             return fail(
                 Errno::EBUSY,
-                format!("{dev}: a scrub is reading it (`snap scrub stop`, or wait)"),
+                format!("{dev}: a scrub is reading it (`disks verify stop`, or wait)"),
             );
         }
         if let Err(e) = st.commit() {
@@ -845,7 +845,7 @@ pub fn encrypt_in_place(
     if scrub::running() {
         return fail(
             Errno::EBUSY,
-            "a scrub is reading the volume: wait or `snap scrub stop`",
+            "a scrub is reading the volume: wait or `disks verify stop`",
         );
     }
     let uuid = {
@@ -927,7 +927,7 @@ pub fn decrypt_in_place(dev: Option<&str>, secret: &str) -> Result<()> {
     if scrub::running() {
         return fail(
             Errno::EBUSY,
-            "a scrub is reading the volume: wait or `snap scrub stop`",
+            "a scrub is reading the volume: wait or `disks verify stop`",
         );
     }
     let r = v.state.lock().convert_decrypt_begin(secret);
@@ -1056,12 +1056,12 @@ pub fn setup_persistent_etc(dir: &str) {
     }
 }
 
-/// Where apps live: the built-in ones and the packages `milk install` adds.
+/// Where apps live: the built-in ones and the packages `apps install` adds.
 pub const APPLICATIONS: &str = crate::fs::layout::APPS;
 
 /// Persistent apps: bind `<volume>/Apps` onto `/Apps` (created the first time), so
 /// installed packages survive reboots and are part of the volume's snapshots and clones
-/// (`milk try`). The built-in apps are copied in first (`fs::layout::sync_builtin_apps`),
+/// (`apps try`). The built-in apps are copied in first (`fs::layout::sync_builtin_apps`),
 /// so both kinds are in the one folder. Without a volume it stays on tmpfs (built-in apps
 /// only, from the initramfs).
 pub fn setup_applications() {
@@ -1244,7 +1244,7 @@ pub use stream::SendReport;
 pub enum StreamCrypt<'a> {
     /// Encrypted under this passphrase (8 characters or more).
     Passphrase(&'a str),
-    /// Plaintext, even from an encrypted volume (`plaintext`, `snap send --plaintext`).
+    /// Plaintext, even from an encrypted volume (`plaintext`, `disks send --plaintext`).
     Plain,
     /// Plaintext from a plain volume; refused (EINVAL) from an encrypted one, whose
     /// streams are encrypted unless asked otherwise.
@@ -1282,7 +1282,7 @@ pub fn send(snap: &str, from: Option<&str>, out: &str, crypt: StreamCrypt) -> Re
         StreamCrypt::Default if v.state.lock().store.encrypted() => {
             return fail(
                 Errno::EINVAL,
-                "the volume is encrypted, so its streams are too: give a passphrase (`snap send` asks), or `plaintext`",
+                "the volume is encrypted, so its streams are too: give a passphrase (`disks send` asks), or `plaintext`",
             );
         }
         StreamCrypt::Default => None,
@@ -1670,7 +1670,7 @@ fn primary() -> Result<Arc<Volume>> {
         Some(v) => Ok(v),
         None if !LOCKED.lock().is_empty() => fail(
             Errno::ENODEV,
-            "the volume is encrypted and locked: unlock it first (`snap unlock`)",
+            "the volume is encrypted and locked: unlock it first (`disks unlock`)",
         ),
         None => fail(Errno::ENODEV, "no milkfs volume is mounted"),
     }
@@ -2039,7 +2039,7 @@ fn explain(name: &str, e: Errno) -> &'static str {
         (_, E::ENOSPC) => "the volume is full",
         (_, E::ENODEV) => "no milkfs volume is mounted",
         (_, E::EIO) => {
-            "disk or checksum error, or the volume went read-only after a failed write (see the kernel log; `snap check`)"
+            "disk or checksum error, or the volume went read-only after a failed write (see the kernel log; `disks check`)"
         }
         (_, E::EROFS) => "read-only (a snapshot, or a read-only volume)",
         (_, E::ENOMEM) => "out of memory",

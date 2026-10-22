@@ -1,17 +1,17 @@
-//! Milk Store: a desktop window (user/gui) for the `milk` package manager.
+//! Milk Store: a desktop window (user/gui) for the `apps` package manager.
 //!
-//! It lists the packages of the milk index (name, version, description, a coloured tile,
-//! installed / upgrade / trying badges), shows details, and runs `/Commands/milk` for Install,
+//! It lists the packages of the repositories' index (name, version, description, a coloured tile,
+//! installed / upgrade / trying badges), shows details, and runs `/Commands/apps` for Install,
 //! Try (in a milkfs clone), Keep, Discard, Remove, Upgrade, Update and Upgrade all, showing
-//! milk's output live and the result. Everything goes through `/Commands/milk`, so signatures,
+//! its output live and the result. Everything goes through `/Commands/apps`, so signatures,
 //! clones and audit records work exactly as on the command line.
 //!
-//! Data: `MILK_TABLE=1 milk search` (milk's structured output, parsed with rt::table), the
+//! Data: `MILK_TABLE=1 apps search` (its structured output, parsed with rt::table), the
 //! index cache for versions and sizes, installed manifests (`/Apps/<name>/manifest`,
 //! whose `dock` colour becomes the tile colour), `/System/Kernel/fs/milkfs/clones` for "trying".
 //!
 //! Keys (also what scripted tests use): Up/Down select, i install, t try, o/Enter run the
-//! tried app (`milk run-try`: its clone as /, sandboxed), k keep,
+//! tried app (`apps run`: its clone as /, sandboxed), k keep,
 //! d discard, r remove, u upgrade, g update (get the index), a upgrade all, q quit.
 //!
 //! Theme: the SPEC tokens ("Whole milk"). The wm does not publish its theme in /dev/wm's
@@ -130,18 +130,18 @@ impl Pkg {
     }
 }
 
-/// Run /Commands/milk and collect its stdout (blocking; for quick, local queries).
+/// Run /Commands/apps and collect its stdout (blocking; for quick, local queries).
 fn capture(args: &[&str], env: &[&str]) -> Vec<u8> {
     let Ok((r, w)) = sys::pipe() else {
         return Vec::new();
     };
-    let mut argv = alloc::vec!["milk"];
+    let mut argv = alloc::vec!["apps"];
     argv.extend_from_slice(args);
     match sys::fork() {
         Ok(0) => {
             let _ = sys::dup2(w, 1);
             let _ = sys::dup2(w, 2);
-            let _ = sys::execve("/Commands/milk", &argv, env);
+            let _ = sys::execve("/Commands/apps", &argv, env);
             sys::exit(127);
         }
         Ok(pid) => {
@@ -236,7 +236,7 @@ fn load() -> Vec<Pkg> {
         .collect()
 }
 
-/// A running /Commands/milk.
+/// A running /Commands/apps.
 struct Job {
     pid: u32,
     fd: i32,
@@ -354,14 +354,14 @@ impl App {
         // Only our end is non-blocking (the child's writes must not fail when full).
         // SAFETY: fcntl(fd, F_SETFL, O_RDONLY | O_NONBLOCK).
         unsafe { sys::syscall(25, [r as usize, 4, 0o4000, 0, 0, 0]) };
-        let mut argv = alloc::vec!["milk"];
+        let mut argv = alloc::vec!["apps"];
         argv.extend_from_slice(args);
         let label = argv.join(" ");
         match sys::fork() {
             Ok(0) => {
                 let _ = sys::dup2(w, 1);
                 let _ = sys::dup2(w, 2);
-                let _ = sys::execve("/Commands/milk", &argv, ENV);
+                let _ = sys::execve("/Commands/apps", &argv, ENV);
                 sys::exit(127);
             }
             Ok(pid) => {
@@ -389,20 +389,20 @@ impl App {
         let verb = match a {
             Act::Install => "install",
             Act::Try => "try",
-            Act::Run => "run-try",
+            Act::Run => "run",
             Act::Keep => "keep",
             Act::Discard => "discard",
             Act::Remove => "remove",
             Act::Upgrade => "upgrade",
         };
         if a == Act::Upgrade {
-            self.start(&[verb, &name, "-y"]);
+            self.start(&[verb, &name, "--yes"]);
         } else {
             self.start(&[verb, &name]);
         }
     }
 
-    /// Read what milk printed; reap it when it is done. True if anything changed.
+    /// Read what apps printed; reap it when it is done. True if anything changed.
     fn pump(&mut self) -> bool {
         let Some(job) = self.job.as_ref() else {
             return false;
@@ -712,7 +712,7 @@ impl App {
             } else if (W - 16 - 104..W - 16).contains(&x)
                 && self.pkgs.iter().any(|p| p.upgradable())
             {
-                self.start(&["upgrade", "-y"]);
+                self.start(&["upgrade", "--yes"]);
             }
             return;
         }
@@ -800,7 +800,7 @@ fn main(_args: &rt::Args) -> i32 {
                     Key::Char('g') => app.start(&["update"]),
                     Key::Char('a') => {
                         if app.pkgs.iter().any(|p| p.upgradable()) {
-                            app.start(&["upgrade", "-y"]);
+                            app.start(&["upgrade", "--yes"]);
                         }
                     }
                     Key::Char('q') => return 0,

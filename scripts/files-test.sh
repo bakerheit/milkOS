@@ -111,15 +111,15 @@ B1=(); s B1 \
   "files delete /Volumes/FATT/x.txt" \
   "files delete --now /Volumes/FATT/x.txt" \
   "files list /Volumes/FATT" \
-  "snap create files1" \
-  "snap clone files1 ftry" \
+  "disks snapshot files1" \
+  "disks clone files1 ftry" \
   "files create /Volumes/Milk-ftry/vol.txt" \
   "files delete /Volumes/Milk-ftry/vol.txt" \
   "files list -a /Volumes/Milk-ftry/.Trash" \
   "trash list" \
   "trash restore vol.txt" \
   "files list /Volumes/Milk-ftry" \
-  "snap discard ftry" \
+  "disks discard ftry" \
   "trash list"
 B1+=("send:trash empty" "wait:\[y/N\]" "send:n" "wait:$P")
 s B1 \

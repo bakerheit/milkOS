@@ -1,0 +1,13 @@
+[package]
+name = "cmdkit"
+version.workspace = true
+edition.workspace = true
+
+# The parsing and wording behind `network`, `disks`, `apps` and `search`: options
+# (`--count 3`, `-c 3`, `--save=FILE`, `-tl`), /proc/net and milkfs text, URLs, error words.
+# Pure (no syscalls), so the tests run on the host: `scripts/cmdkit-test.sh`.
+[lib]
+bench = false
+
+[dependencies]
+filekit = { path = "../filekit" }

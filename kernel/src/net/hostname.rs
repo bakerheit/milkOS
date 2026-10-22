@@ -1,6 +1,6 @@
 //! The machine's hostname: uname's nodename, set with sethostname(2) (root only). The
 //! default is `milk`; at boot `net::init` applies `/System/Settings/milk/net/hostname` if it exists
-//! (persistent on a machine with a Milk volume, like `/System/Settings/milk/drop`). `netctl hostname`
+//! (persistent on a machine with a Milk volume, like `/System/Settings/milk/drop`). `network name`
 //! writes that file and sets the running name.
 
 use alloc::string::String;

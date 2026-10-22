@@ -84,8 +84,28 @@ impl Buffer {
         Some(b)
     }
 
-    /// Change the visible size. Reuses the allocation if it is big enough, otherwise
-    /// reallocates with some headroom. Contents are unspecified afterwards. False if out of memory.
+    /// Change the visible size to exactly `w` x `h`: the allocation is kept only if it is
+    /// that size already, so no headroom is left over (a one-shot change: zoom, snap, a tab
+    /// strip). Contents are unspecified afterwards. False if out of memory (nothing changed).
+    pub fn resize_exact(&mut self, w: usize, h: usize) -> bool {
+        if self.stride == w.max(1).next_multiple_of(4) && self.cap_rows == h.max(1) {
+            self.width = w;
+            self.height = h;
+            return true;
+        }
+        match Buffer::new(self.kind, w, h, 0) {
+            Some(b) => {
+                *self = b;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Change the visible size while it keeps changing (a resize drag). Reuses the allocation
+    /// if it is big enough, otherwise reallocates with some headroom; [`resize_exact`]
+    /// (Self::resize_exact) gives the headroom back when the drag ends. Contents are
+    /// unspecified afterwards. False if out of memory.
     pub fn resize(&mut self, w: usize, h: usize) -> bool {
         if w <= self.stride && h <= self.cap_rows {
             self.width = w;
@@ -104,6 +124,11 @@ impl Buffer {
             }
             None => false,
         }
+    }
+
+    /// Is the allocation bigger than the visible size needs?
+    pub fn has_headroom(&self) -> bool {
+        self.stride != self.width.max(1).next_multiple_of(4) || self.cap_rows != self.height.max(1)
     }
 
     pub fn w(&self) -> i32 {

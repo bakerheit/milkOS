@@ -100,8 +100,8 @@ after `Shmem`, in kB:
 | `RootFiles` | tmpfs file data that is not in the image (written or changed files) |
 | `PageCache` | the disk page cache (`fs/pagecache.rs`) |
 | `Display` | the framebuffer (virtio-gpu backing or ramfb) and the compositor's back buffer |
-| `Wallpaper` | the wallpaper and its two blurred glass copies |
-| `WindowBuffers` | window surfaces, userland windows' shared and front buffers |
+| `Wallpaper` | the wallpaper and its blurred glass copy (the stronger glass is blended from it when its panel is drawn) |
+| `WindowBuffers` | window surfaces (exactly their size, except during a resize drag), userland windows' shared and front buffers |
 | `PanelCaches` | cached panels (menu bar, dock, toasts), Spaces thumbnails, the lock screen |
 | `Devices` | virtqueues, DMA buffers, RAM disks |
 | `Other` | the rest of MemTotal - MemFree: frames allocated without a `Use` |

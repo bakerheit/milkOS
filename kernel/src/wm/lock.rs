@@ -19,6 +19,7 @@ use super::buffer::Buffer;
 use super::icons;
 use super::paint::Painter;
 use super::theme::*;
+use super::wallpaper::{Glass, Wallpaper};
 use super::{Desktop, rtc};
 
 const FADE_NS: u64 = 220_000_000;
@@ -42,9 +43,10 @@ fn fade_ns() -> u64 {
 const CLOCK_SCALE: i32 = 8;
 const CLOCK_Y: i32 = 176;
 
-fn paint(buf: &mut Buffer, glass: &Buffer) {
+fn paint(buf: &mut Buffer, wp: &Wallpaper) {
     let mut p = Painter::new(buf);
-    p.blit_same(Rect::new(0, 0, screen_w(), screen_h()), glass);
+    let all = Rect::new(0, 0, screen_w(), screen_h());
+    wp.glass(&mut p, 0, 0, all, Glass::Normal);
     // A soft veil so the clock reads on any wallpaper.
     p.fill_a(0, 0, screen_w(), screen_h(), MILK, a(250));
     let t = rtc::now();
@@ -128,7 +130,7 @@ impl Desktop {
         ) else {
             return;
         };
-        paint(&mut buf, &self.wp.glass);
+        paint(&mut buf, &self.wp);
         // Close the transient things: they would be stale (or confusing) after unlocking.
         self.close_launcher();
         self.set_menu(None);
@@ -162,7 +164,7 @@ impl Desktop {
 
     /// The display mode changed: a lock screen that is up gets a buffer of the new size.
     pub(super) fn relayout_lock(&mut self) {
-        let glass = &self.wp.glass;
+        let wp = &self.wp;
         if let Some(l) = self.lock.as_mut()
             && let Some(mut buf) = Buffer::new(
                 Use::PanelCaches,
@@ -171,7 +173,7 @@ impl Desktop {
                 0,
             )
         {
-            paint(&mut buf, glass);
+            paint(&mut buf, wp);
             l.buf = buf;
         }
     }
@@ -195,7 +197,7 @@ impl Desktop {
             }
             return false;
         }
-        let glass = &self.wp.glass;
+        let wp = &self.wp;
         let Some(l) = self.lock.as_mut() else {
             return false;
         };
@@ -209,7 +211,7 @@ impl Desktop {
         let new_minute = m != l.minute;
         if new_minute {
             l.minute = m;
-            paint(&mut l.buf, glass);
+            paint(&mut l.buf, wp);
         }
         // After the fade in, one more full frame at full opacity.
         let settle = !fading && !l.settled;

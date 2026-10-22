@@ -1,6 +1,9 @@
 //! Wallpapers: "dawn pasture" (the 1.0 one, SPEC: Wallpaper), "night pasture" (the dark
 //! theme's: moon, stars, the cow asleep) and plain "oat", each drawn once when chosen, plus
-//! the pre-blurred copies glass panels sample (SPEC: Glass), tinted with the theme's milk.
+//! the pre-blurred copy glass panels sample (SPEC: Glass), tinted with the theme's milk.
+//! The stronger glass (launcher, control centre) blends a little more milk over that copy
+//! when its panel is rendered ([`Wallpaper::glass`]), instead of keeping a second tinted
+//! full-screen copy; the panels redrawn every frame (dock, menu bar) use the copy as is.
 //! Integer maths only (the target is soft-float).
 
 use crate::gfx::{Color, DrawTarget, Rect, blend, rgb};
@@ -14,9 +17,24 @@ pub struct Wallpaper {
     /// W: the sharp wallpaper.
     pub sharp: Buffer,
     /// Wb (box blur r24 x3) with milk blended over at 0.55: the menu bar / dock / toast glass.
-    pub glass: Buffer,
-    /// Wb with milk at 0.7: launcher and control centre glass.
-    pub glass_strong: Buffer,
+    glass: Buffer,
+    /// The milk blended over Wb (`theme::tc(MILK)` when this wallpaper was made).
+    milk: Color,
+}
+
+/// Milk over the 0.55 glass that makes it the 0.7 one: 1 - (1 - 0.7) / (1 - 0.55), rounded
+/// (within one level of blending 0.7 over Wb directly).
+const STRONG_OVER_GLASS: u8 = ((255 * (GLASS_STRONG_A as u32 - GLASS_A as u32)
+    + (255 - GLASS_A as u32) / 2)
+    / (255 - GLASS_A as u32)) as u8;
+
+/// How much milk a glass panel has over the blur.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Glass {
+    /// 0.55: the menu bar, dock, toasts, the lock screen.
+    Normal,
+    /// 0.7: the launcher and control centre.
+    Strong,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,13 +67,21 @@ impl Kind {
 /// Draw wallpaper `kind` full screen into `b` (also used for the Settings previews).
 pub fn paint(b: &mut Buffer, kind: Kind) {
     // The artist's wallpaper (crate::art), scaled to cover this size; the drawn one if
-    // there is none.
+    // there is none. Decoded straight into `b`, or (another size) into frames freed right
+    // after: a full-screen temporary on the kernel heap would stay with the heap for good.
     if let Some(a) = crate::art::image(&alloc::format!("wallpaper-{}", kind.key())) {
-        let (w, h) = (b.w() as usize, b.h() as usize);
-        let px = a.scaled(w, h);
-        let mut p = Painter::raw(b);
-        p.blit_raw(0, 0, &px, w, w as i32, h as i32);
-        return;
+        let (w, h, stride) = (b.w() as usize, b.h() as usize, b.stride());
+        let (sw, sh) = (a.w as usize, a.h as usize);
+        if (sw, sh) == (w, h) {
+            a.decode_rows(b.pixels_mut(), stride);
+            return;
+        }
+        if let Some(mut src) = Buffer::new(Use::Wallpaper, sw, sh, 0) {
+            let ss = src.stride();
+            a.decode_rows(src.pixels_mut(), ss);
+            crate::art::scale_cover(src.pixels(), ss, sw, sh, b.pixels_mut(), stride, w, h);
+            return;
+        }
     }
     match kind {
         Kind::Dawn => draw(b),
@@ -76,16 +102,17 @@ impl Wallpaper {
             blur_rows(&mut glass, BLUR_RADIUS);
             blur_cols(&mut glass, BLUR_RADIUS);
         }
-        let mut glass_strong = Buffer::new(Use::Wallpaper, w, h, 0)?;
-        copy(&glass, &mut glass_strong);
         let milk = tc(MILK);
         tint(&mut glass, milk, GLASS_A);
-        tint(&mut glass_strong, milk, GLASS_STRONG_A);
-        Some(Wallpaper {
-            sharp,
-            glass,
-            glass_strong,
-        })
+        Some(Wallpaper { sharp, glass, milk })
+    }
+
+    /// Paint the glass under the screen rect `src` at (x, y) of `p`, at `strength`.
+    pub fn glass(&self, p: &mut Painter, x: i32, y: i32, src: Rect, strength: Glass) {
+        match strength {
+            Glass::Normal => p.blit(x, y, &self.glass, src.x, src.y, src.w, src.h),
+            Glass::Strong => p.blit_tinted(x, y, &self.glass, src, self.milk, STRONG_OVER_GLASS),
+        }
     }
 }
 

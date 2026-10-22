@@ -1175,9 +1175,16 @@ impl Desktop {
         if (nw, nh) == (r.w, r.h) {
             return;
         }
+        // While the edge is being dragged the surface keeps some headroom (release() gives
+        // it back); any other resize gets exactly its size.
+        let live = matches!(self.drag, Some(Drag::Resize { id: d, .. }) if d == id);
         self.damage_window(id);
         let w = self.win_mut(id).unwrap();
-        w.set_rect(Rect::new(r.x, r.y, nw, nh));
+        if live {
+            w.set_rect_live(Rect::new(r.x, r.y, nw, nh));
+        } else {
+            w.set_rect(Rect::new(r.x, r.y, nw, nh));
+        }
         w.restore = None;
         self.damage_window(id);
     }
@@ -1281,11 +1288,11 @@ impl Desktop {
             match spec.style {
                 Style::Glass | Style::GlassStrong | Style::Bar if !solid => {
                     let g = if spec.style == Style::GlassStrong {
-                        &self.wp.glass_strong
+                        wallpaper::Glass::Strong
                     } else {
-                        &self.wp.glass
+                        wallpaper::Glass::Normal
                     };
-                    p.blit(0, 0, g, r.x, r.y, r.w, r.h);
+                    self.wp.glass(&mut p, 0, 0, r, g);
                 }
                 Style::Glass | Style::GlassStrong | Style::Bar => p.fill(0, 0, r.w, r.h, MILK),
                 Style::Opaque => {}
@@ -2531,6 +2538,11 @@ impl Desktop {
                     p.brightness = self.settings.brightness;
                     prefs::set(p);
                     prefs::save(&p);
+                }
+            }
+            Some(Drag::Resize { id, .. }) => {
+                if let Some(w) = self.win_mut(id) {
+                    w.fit();
                 }
             }
             Some(Drag::Move { id, .. }) if self.drop_window(id) => {

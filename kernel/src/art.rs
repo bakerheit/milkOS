@@ -64,22 +64,6 @@ impl ImageArt {
             }
         }
     }
-
-    /// Decode into `out` (w * h pixels, 0x00RRGGBB).
-    pub fn decode(&self, out: &mut [u32]) {
-        self.decode_rows(out, self.w as usize);
-    }
-
-    /// Decoded, scaled to cover `w` x `h` (centred, the overflow cropped).
-    pub fn scaled(&self, w: usize, h: usize) -> Vec<u32> {
-        let (sw, sh) = (self.w as usize, self.h as usize);
-        let mut src = alloc::vec![0u32; sw * sh];
-        self.decode(&mut src);
-        if (sw, sh) == (w, h) {
-            return src;
-        }
-        scale_cover(&src, sw, sh, w, h)
-    }
 }
 
 include!(concat!(env!("OUT_DIR"), "/art/art.rs"));
@@ -193,14 +177,24 @@ pub fn scale_icon(src: &[u32], s: usize, d: usize) -> Vec<u32> {
     out
 }
 
-/// Scale an RGB image to cover `dw` x `dh` (aspect kept, centred, the rest cropped):
-/// bilinear when growing, an area average when shrinking.
-pub fn scale_cover(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u32> {
+/// Scale an RGB image (`sw` x `sh`, rows `ss` pixels apart) to cover `dw` x `dh` (aspect
+/// kept, centred, the rest cropped) into `out` (rows `os` pixels apart): bilinear when
+/// growing, an area average when shrinking. No allocation.
+#[allow(clippy::too_many_arguments)]
+pub fn scale_cover(
+    src: &[u32],
+    ss: usize,
+    sw: usize,
+    sh: usize,
+    out: &mut [u32],
+    os: usize,
+    dw: usize,
+    dh: usize,
+) {
     // The scale (16.16) and the source window that maps onto the destination.
     let k = ((dw << 16) / sw).max((dh << 16) / sh).max(1);
     let (vw, vh) = ((dw << 16) / k, (dh << 16) / k); // source pixels shown
     let (ox, oy) = ((sw - vw.min(sw)) / 2, (sh - vh.min(sh)) / 2);
-    let mut out = alloc::vec![0u32; dw * dh];
     let ch = |c: u32, s: u32| (c >> s) & 0xff;
     if k >= 1 << 16 {
         // Growing: bilinear.
@@ -214,15 +208,15 @@ pub fn scale_cover(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> V
                 let sx = ox + (fx >> 16).min(vw.saturating_sub(1));
                 let tx = (fx & 0xffff) as u32 >> 8;
                 let sx1 = (sx + 1).min(sw - 1);
-                let (p00, p10) = (src[sy * sw + sx], src[sy * sw + sx1]);
-                let (p01, p11) = (src[sy1 * sw + sx], src[sy1 * sw + sx1]);
+                let (p00, p10) = (src[sy * ss + sx], src[sy * ss + sx1]);
+                let (p01, p11) = (src[sy1 * ss + sx], src[sy1 * ss + sx1]);
                 let mut c = 0;
                 for s in [16, 8, 0] {
                     let top = ch(p00, s) * (256 - tx) + ch(p10, s) * tx;
                     let bot = ch(p01, s) * (256 - tx) + ch(p11, s) * tx;
                     c |= ((top * (256 - ty) + bot * ty) >> 16) << s;
                 }
-                out[y * dw + x] = c;
+                out[y * os + x] = c;
             }
         }
     } else {
@@ -235,7 +229,7 @@ pub fn scale_cover(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> V
                 let x1 = (ox + (x + 1) * vw / dw).max(x0 + 1).min(sw);
                 let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
                 for yy in y0..y1 {
-                    for &q in &src[yy * sw + x0..yy * sw + x1] {
+                    for &q in &src[yy * ss + x0..yy * ss + x1] {
                         r += ch(q, 16);
                         g += ch(q, 8);
                         b += ch(q, 0);
@@ -243,9 +237,8 @@ pub fn scale_cover(src: &[u32], sw: usize, sh: usize, dw: usize, dh: usize) -> V
                     }
                 }
                 let n = n.max(1);
-                out[y * dw + x] = (r / n) << 16 | (g / n) << 8 | (b / n);
+                out[y * os + x] = (r / n) << 16 | (g / n) << 8 | (b / n);
             }
         }
     }
-    out
 }

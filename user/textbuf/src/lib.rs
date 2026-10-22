@@ -292,6 +292,11 @@ impl Buffer {
         self.lossy
     }
 
+    /// The next edit starts a new undo group (a pause in typing).
+    pub fn break_undo_group(&mut self) {
+        self.open = None;
+    }
+
     /// Unsaved changes? Undoing back to the saved state makes it clean again.
     pub fn is_dirty(&self) -> bool {
         self.saved_id != Some(self.top_id())

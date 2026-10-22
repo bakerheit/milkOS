@@ -325,6 +325,16 @@ name = "textbuf"
 version = "0.0.1"
 
 [[package]]
+name = "texteditor"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "textbuf",
+]
+
+[[package]]
 name = "timeio"
 version = "0.0.1"
 dependencies = [

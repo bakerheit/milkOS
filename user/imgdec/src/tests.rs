@@ -54,9 +54,7 @@ fn every_png_fixture_decodes_to_exactly_the_expected_pixels() {
 
 // ---- PNG: the kernel's own encoder (screenshots) -------------------------------------------
 
-#[allow(dead_code)]
-#[path = "../../../kernel/src/wm/png.rs"]
-mod kpng;
+use crate::kernel_png as kpng;
 
 #[test]
 fn decodes_what_the_kernel_png_encoder_writes() {
@@ -720,4 +718,157 @@ fn flattening_over_a_background() {
     assert_eq!(Image::flatten_pixel(0xFF123456, 0xFFFFFF), 0x123456);
     assert_eq!(Image::flatten_pixel(0x00123456, 0xABCDEF), 0xABCDEF);
     assert_eq!(Image::flatten_pixel(0x80000000, 0xFFFFFF), 0x7F7F7F);
+}
+
+// ---- PDF -----------------------------------------------------------------------------------------
+
+mod pdf_tests {
+    use crate::pdf::inspect;
+    use crate::{ImgError, decode};
+
+    fn pdf(parts: &[&[u8]]) -> Vec<u8> {
+        let mut v = b"%PDF-1.4\n".to_vec();
+        for p in parts {
+            v.extend_from_slice(p);
+        }
+        v.extend_from_slice(b"\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+        v
+    }
+
+    const PAGES2: &[u8] = b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /Contents 5 0 R >> endobj\n4 0 obj << /Type/Page /Parent 2 0 R >> endobj\n";
+
+    #[test]
+    fn counts_pages_and_reads_plain_text() {
+        let content = b"BT /F1 12 Tf 72 700 Td (Hello, \\(PDF\\) world) Tj 0 -14 Td [(Sec) 20 (ond) -400 (line)] TJ T* (third) Tj ET";
+        let stream = [
+            &b"5 0 obj << /Length 99 >>\nstream\n"[..],
+            content,
+            b"\nendstream\nendobj\n",
+        ]
+        .concat();
+        let info = inspect(&pdf(&[PAGES2, &stream])).unwrap();
+        assert_eq!(info.pages, Some(2));
+        assert_eq!(info.text, "Hello, (PDF) world\nSecond line\nthird");
+        assert!(!info.encrypted && !info.limited);
+    }
+
+    #[test]
+    fn reads_flate_streams() {
+        let z = [
+            0x78, 0xda, 0x73, 0x0a, 0x51, 0xd0, 0x77, 0x33, 0x54, 0x30, 0x34, 0x52, 0x08, 0x49,
+            0x53, 0x30, 0x37, 0x52, 0x30, 0x37, 0x30, 0x50, 0x08, 0x49, 0x51, 0xd0, 0x70, 0xce,
+            0xcf, 0x2d, 0x28, 0x4a, 0x2d, 0x2e, 0x4e, 0x4d, 0x51, 0xc8, 0x48, 0xcd, 0xc9, 0xc9,
+            0xd7, 0x54, 0x08, 0xc9, 0x52, 0x30, 0x50, 0xd0, 0x35, 0x34, 0x01, 0x49, 0x47, 0x6b,
+            0x84, 0xe7, 0x17, 0x69, 0x2a, 0xe8, 0x1a, 0x03, 0x55, 0x6b, 0xe4, 0xa4, 0x68, 0xc6,
+            0x2a, 0x84, 0x78, 0x29, 0xb8, 0x86, 0x00, 0x00, 0x0f, 0x62, 0x14, 0x3d,
+        ];
+        let mut stream = b"5 0 obj << /Filter /FlateDecode /Length 1 >>\nstream\n".to_vec();
+        stream.extend_from_slice(&z);
+        stream.extend_from_slice(b"\nendstream\nendobj\n");
+        let info = inspect(&pdf(&[PAGES2, &stream])).unwrap();
+        assert_eq!(info.text, "Compressed hello\nWor ld");
+    }
+
+    #[test]
+    fn escapes_and_odd_operators() {
+        let content =
+            b"BT (a\\101\\n b) Tj (it's) ' ET BT <48656c6c6f> Tj ET % a comment (not text) Tj\n";
+        let stream = [&b"5 0 obj << >>\nstream\n"[..], content, b"\nendstream\n"].concat();
+        let info = inspect(&pdf(&[&stream])).unwrap();
+        assert!(info.text.starts_with("aA\n b"), "{:?}", info.text);
+        assert!(info.text.contains("it's"));
+        assert!(info.text.contains("Hello"));
+        assert!(!info.text.contains("not text"));
+    }
+
+    #[test]
+    fn glyph_id_fonts_are_flagged_not_shown() {
+        let content = b"BT <00480065006C006C006F> Tj ET";
+        let stream = [&b"5 0 obj << >>\nstream\n"[..], content, b"\nendstream\n"].concat();
+        let info = inspect(&pdf(&[&stream])).unwrap();
+        assert!(info.limited);
+        assert_eq!(info.text, "");
+    }
+
+    #[test]
+    fn encrypted_files_are_reported() {
+        let info = inspect(&pdf(&[PAGES2, b"6 0 obj << /Encrypt 7 0 R >>\n"])).unwrap();
+        assert!(info.encrypted && info.limited);
+        assert_eq!(info.pages, Some(2));
+        assert_eq!(info.text, "");
+    }
+
+    #[test]
+    fn images_and_unknown_filters_are_skipped_safely() {
+        let img = [
+            &b"6 0 obj << /Subtype /Image /Filter /DCTDecode >>\nstream\n"[..],
+            &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3],
+            b"\nendstream\n",
+        ]
+        .concat();
+        let other =
+            [&b"7 0 obj << /Filter /LZWDecode >>\nstream\nBT (x) Tj ET\nendstream\n"[..]].concat();
+        let info = inspect(&pdf(&[PAGES2, &img, &other])).unwrap();
+        assert_eq!(info.text, "");
+        assert!(info.limited);
+    }
+
+    #[test]
+    fn not_a_pdf_and_no_panics_on_garbage() {
+        assert!(matches!(inspect(b"hello"), Err(ImgError::Unrecognised(_))));
+        let good = pdf(&[PAGES2, b"5 0 obj << >>\nstream\nBT (x) Tj ET\nendstream\n"]);
+        for cut in 0..good.len() {
+            let _ = inspect(&good[..cut]);
+        }
+        for i in 0..good.len() {
+            let mut b = good.clone();
+            b[i] ^= 0xFF;
+            let _ = inspect(&b);
+        }
+        // A flate stream that lies about itself.
+        let bad =
+            pdf(&[b"5 0 obj << /Filter /FlateDecode >>\nstream\n\x78\x9c\xff\xff\nendstream\n"]);
+        assert!(inspect(&bad).unwrap().limited);
+        // decode() says what a PDF is.
+        assert!(decode(&good).unwrap_err().message().contains("PDF"));
+    }
+}
+
+// ---- rotation and PNG output ------------------------------------------------------------------------
+
+#[test]
+fn rotation_turns_a_quarter_and_four_make_the_original() {
+    let a = Image {
+        w: 3,
+        h: 2,
+        px: vec![1, 2, 3, 4, 5, 6],
+    };
+    // Clockwise: the left column (1, 4) becomes the top row, read upwards.
+    let cw = a.rotated(true);
+    assert_eq!((cw.w, cw.h), (2, 3));
+    assert_eq!(cw.px, vec![4, 1, 5, 2, 6, 3]);
+    let ccw = a.rotated(false);
+    assert_eq!(ccw.px, vec![3, 6, 2, 5, 1, 4]);
+    assert_eq!(cw.rotated(false), a);
+    assert_eq!(a.rotated(true).rotated(true).rotated(true).rotated(true), a);
+}
+
+#[test]
+fn saved_pngs_decode_back_to_the_same_picture() {
+    let mut px = vec![0u32; 50 * 40];
+    for (i, p) in px.iter_mut().enumerate() {
+        *p = 0xFF00_0000 | ((i as u32).wrapping_mul(2654435761) >> 8 & 0xFF_FFFF);
+    }
+    let a = Image { w: 50, h: 40, px };
+    assert_eq!(decode(&a.to_png()).unwrap(), a);
+    // Transparent pixels are written over white.
+    let t = Image {
+        w: 2,
+        h: 1,
+        px: vec![0x00123456, 0xFF010203],
+    };
+    assert_eq!(
+        decode(&t.to_png()).unwrap().px,
+        vec![0xFFFF_FFFF, 0xFF010203]
+    );
 }

@@ -15,9 +15,15 @@ use alloc::vec::Vec;
 
 pub mod bmp;
 pub mod inflate;
+pub mod pdf;
 pub mod png;
 pub mod pnm;
 mod scale;
+
+// The window system's screenshot encoder, shared as it is (fixed Huffman deflate, LZ77).
+#[allow(dead_code)]
+#[path = "../../../kernel/src/wm/png.rs"]
+mod kernel_png;
 
 /// The most pixels an image may have (width x height): 8 million, so at most 32 MB decoded.
 pub const MAX_PIXELS: usize = 8 * 1024 * 1024;
@@ -77,6 +83,30 @@ impl Image {
     /// bigger (so zooming in shows the pixels).
     pub fn scaled(&self, w: usize, h: usize) -> Result<Image, ImgError> {
         scale::scaled(self, w, h)
+    }
+
+    /// Turned a quarter clockwise (`cw`) or anticlockwise.
+    pub fn rotated(&self, cw: bool) -> Image {
+        let (w, h) = (self.w, self.h);
+        let mut px = alloc::vec![0u32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                // The new image is h wide and w tall.
+                let (nx, ny) = if cw { (h - 1 - y, x) } else { (y, w - 1 - x) };
+                px[ny * h + nx] = self.px[y * w + x];
+            }
+        }
+        Image { w: h, h: w, px }
+    }
+
+    /// The picture as a PNG file (8-bit RGB: transparent areas are flattened onto white).
+    pub fn to_png(&self) -> Vec<u8> {
+        let flat: Vec<u32> = self
+            .px
+            .iter()
+            .map(|&p| Image::flatten_pixel(p, 0xFF_FFFF))
+            .collect();
+        kernel_png::encode(&flat, self.w, self.h, self.w)
     }
 
     /// The largest size that fits `max_w` x `max_h` with the same shape (never below 1 x 1).

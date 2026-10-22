@@ -36,8 +36,7 @@
 # Commands: what Terminal finds on PATH (/Commands). The user/ workspace's command-line
 # programs; coreutils (user/coreutils/src/bin/*.rs) are one small program each.
 /Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
-/Commands/snap                                    target/user/aarch64-unknown-none-softfloat/release/snap       755
-/Commands/fetch                                   target/user/aarch64-unknown-none-softfloat/release/fetch      755
+/Commands/disks                                   target/user/aarch64-unknown-none-softfloat/release/disks      755
 /Commands/cat                                     target/user/aarch64-unknown-none-softfloat/release/cat        755
 /Commands/whoami                                  target/user/aarch64-unknown-none-softfloat/release/whoami     755
 /Commands/id                                      target/user/aarch64-unknown-none-softfloat/release/id         755
@@ -54,7 +53,6 @@
 # Files and folders (files replaced mv cp touch rm mkdir ls ln), and the Trash.
 /Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
 /Commands/trash                                   target/user/aarch64-unknown-none-softfloat/release/trash      755
-/Commands/df                                      target/user/aarch64-unknown-none-softfloat/release/df         755
 /Commands/echo                                    target/user/aarch64-unknown-none-softfloat/release/echo       755
 /Commands/env                                     target/user/aarch64-unknown-none-softfloat/release/env        755
 /Commands/false                                   target/user/aarch64-unknown-none-softfloat/release/false      755
@@ -81,19 +79,14 @@
 /Commands/timer                                   target/user/aarch64-unknown-none-softfloat/release/timer      755
 /Commands/cal                                     target/user/aarch64-unknown-none-softfloat/release/cal        755
 /Commands/remind                                  target/user/aarch64-unknown-none-softfloat/release/remind     755
-/Commands/ifconfig                                target/user/aarch64-unknown-none-softfloat/release/ifconfig   755
-/Commands/netstat                                 target/user/aarch64-unknown-none-softfloat/release/netstat    755
-/Commands/ping                                    target/user/aarch64-unknown-none-softfloat/release/ping       755
-/Commands/nc                                      target/user/aarch64-unknown-none-softfloat/release/nc         755
+/Commands/network                                 target/user/aarch64-unknown-none-softfloat/release/network    755
 /Commands/play                                    target/user/aarch64-unknown-none-softfloat/release/play       755
 /Commands/audit                                   target/user/aarch64-unknown-none-softfloat/release/audit      755
-/Commands/milk                                    target/user/aarch64-unknown-none-softfloat/release/milk       755
+/Commands/apps                                    target/user/aarch64-unknown-none-softfloat/release/apps       755
 /Commands/top                                     target/user/aarch64-unknown-none-softfloat/release/top        755
 /Commands/drop                                    target/user/aarch64-unknown-none-softfloat/release/drop       755
-/Commands/netctl                                  target/user/aarch64-unknown-none-softfloat/release/netctl     755
 /Commands/versions                                target/user/aarch64-unknown-none-softfloat/release/versions   755
-/Commands/dedupe                                  target/user/aarch64-unknown-none-softfloat/release/dedupe     755
-/Commands/spot                                    target/user/aarch64-unknown-none-softfloat/release/spot       755
+/Commands/search                                  target/user/aarch64-unknown-none-softfloat/release/search     755
 
 # Developer tools: test harnesses and demos, not things you type day to day. Not on PATH;
 # the test scripts run them by full path (/System/Developer/utest).

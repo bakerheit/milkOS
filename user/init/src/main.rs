@@ -29,7 +29,7 @@ fn main(_args: &rt::Args) -> i32 {
     println!();
 
     // Installed packages: recreate their /Commands links (/Commands is in RAM, /Apps is not).
-    if let Ok(pid) = sys::spawn("/Commands/milk", &["milk", "relink", "-q"], ENV) {
+    if let Ok(pid) = sys::spawn("/Commands/apps", &["apps", "relink", "--quiet"], ENV) {
         wait_for(pid);
     }
     // The boot chime, if there is a sound device (it plays while we go on).

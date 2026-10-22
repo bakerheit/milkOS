@@ -1,0 +1,17 @@
+[package]
+name = "network"
+version.workspace = true
+edition.workspace = true
+
+# `network`: one command for the network (it replaced ifconfig, netstat, ping, nc, netctl and
+# fetch). The parsing and wording are in user/cmdkit (host-tested); this crate does the calls.
+[[bin]]
+name = "network"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+drop = { path = "../drop" }
+cmdkit = { path = "../cmdkit" }
+filekit = { path = "../filekit" }

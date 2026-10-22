@@ -1,5 +1,5 @@
 //! Reflink copies and dedupe (`scripts/reflinktest.sh`): a reflink copy of 2 MB costs only
-//! metadata, writing into it leaves the original alone, `dedupe -n` only reports, `dedupe`
+//! metadata, writing into it leaves the original alone, `disks dedupe --dry-run` only reports, `disks dedupe`
 //! makes plain copies share and frees their blocks, a second one finds them shared
 //! already, check is clean (shared-block table, space map), the format becomes v2, every
 //! file byte-exact; and the self-test's reflink checks (errors, snapshots).

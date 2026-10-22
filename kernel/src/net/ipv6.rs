@@ -15,7 +15,7 @@
 //!   for an answer are parked (up to 16, 3 s). RS go out at start (3 tries, 4 s apart).
 //!   An RA sets the default router (eth0), on-link prefixes and the MTU. NDP messages
 //!   must come with hop limit 255 (RFC 4861 7.1).
-//! * **ICMPv6.** Echo request/reply (also for `ping -6` and the self-test), destination
+//! * **ICMPv6.** Echo request/reply (also for `network ping --ipv6` and the self-test), destination
 //!   unreachable (port, for closed UDP ports), parameter problem (bad or unknown extension
 //!   headers). There are no errors about errors or about multicast.
 //! * **Extension headers.**

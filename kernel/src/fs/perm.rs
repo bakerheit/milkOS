@@ -143,7 +143,7 @@ const ADMIN_GID: u32 = 80;
 /// The ownership and mode the checks use: [`stat`] plus two mappings: terminals
 /// (`/dev/console`, `/dev/ttyN`, mode 0620) belong to the session user, and /proc and /System/Kernel
 /// control files (owner-writable) are writable by the `admin` group, so administrators can
-/// use them without sudo.
+/// use them without `admin`.
 pub fn view(node: &InodeRef) -> Stat {
     let mut st = stat(node);
     // Terminals (major 4 ttyN, 5 console; mode 0620) are the session user's, whichever

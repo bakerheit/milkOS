@@ -1,0 +1,13 @@
+[package]
+name = "search"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "search"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+cmdkit = { path = "../cmdkit" }

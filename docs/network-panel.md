@@ -1,7 +1,7 @@
 # Settings > Network: design note
 
 For whoever builds the panel (the wm side). The networking side gives the data and the
-controls. The panel only reads text and runs `netctl`; it never parses kernel structures
+controls. The panel only reads text and runs `network`; it never parses kernel structures
 or writes network files itself. Everything here exists and is tested (`scripts/net-test.sh`,
 `scripts/drop-test.sh`).
 
@@ -17,7 +17,7 @@ One window, three groups.
 | Local name | `bob.local` | `local_fqdn=` | The Milk Drop name plus `.local`, answered by mDNS on the VM link. Editable (admin). Empty if the machine has no Milk Drop identity yet (the drop service makes one at first boot). |
 | Visible to nearby Macs | on | `drop_visible=on\|off` | A switch (admin). Off: no discovery announcements, no answers to `drop list` or `.local` lookups. Transfers from peers that already know the address still work. |
 
-**Interfaces**, one card each, in the order `netctl -k` gives them (`lo`, `eth0`, `eth1`).
+**Interfaces**, one card each, in the order `network status --keys` gives them (`lo`, `eth0`, `eth1`).
 Show `lo` collapsed or not at all.
 
 | field | key (`iface.NAME.`) | example | notes |
@@ -39,7 +39,7 @@ show as text: `ifaddr`, `if_inet6`, `route`, `ndisc` (IPv6 neighbours), `arp`, `
 
 ## Where the data comes from
 
-Run `netctl -k`. It prints stable `key=value` lines, one per field, and the panel splits each
+Run `network status --keys`. It prints stable `key=value` lines, one per field, and the panel splits each
 line at the first `=`:
 
 ```text
@@ -69,27 +69,27 @@ The rules:
   to the panel; addresses change on their own (DHCP, SLAAC, link-local probing,
   duplicate address detection).
 
-Kernel side, `netctl` reads `/proc/net/ifaddr` and `/proc/net/hostname`; the Milk Drop
+Kernel side, `network` reads `/proc/net/ifaddr` and `/proc/net/hostname`; the Milk Drop
 side, `/System/Settings/milk/drop` (`name`, `visible`). The panel shouldn't read those directly: their
-formats are the kernel's and the daemon's, and `netctl -k` is the contract.
+formats are the kernel's and the daemon's, and `network status --keys` is the contract.
 
 ## The controls
 
-Each control is one `netctl` command. Exit status 0 means done. Anything else: show the
-command's stderr line, minus its `netctl: ` prefix, under the field, and keep the old
+Each control is one `network` command. Exit status 0 means done. Anything else: show the
+command's stderr line, minus its `network VERB: ` prefix (`network name: `, `network hide: `), under the field, and keep the old
 value.
 
 | control | command | who | errors to expect |
 |---|---|---|---|
-| Hostname | `netctl hostname NAME` | root | `(root only)`; `(1-63 letters, digits and '-')` |
-| Local name | `netctl name NAME` (with or without `.local`) | administrators (root, group `admin`) | `bad name ...: 1-32 letters, digits, '.', '_' or '-'`; `only an administrator may change this machine's identity`; `the Milk Drop service isn't running` |
-| Visible | `netctl visible on\|off` | administrators | `only an administrator ...`; `the Milk Drop service isn't running` |
+| Hostname | `network name NAME` | root | `only root can change the hostname`; `NAME can't be a hostname (1-63 letters, digits and '-')` |
+| Local name | `network name --local NAME` (with or without `.local`) | administrators (root, group `admin`) | `bad name ...: 1-32 letters, digits, '.', '_' or '-'`; `only an administrator may change this machine's identity`; `the Milk Drop service isn't running` |
+| Visible | `network show` / `network hide` | administrators | `only an administrator ...`; `the Milk Drop service isn't running` |
 
 - **Validate while typing**, with the same rules: hostname `^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`,
   local name 1-32 of `[A-Za-z0-9._-]`. The command still decides.
 - **Who may change what.** The desktop account (milk) is an administrator, so name and
   visibility work without a password. Setting the hostname needs root: run it through the
-  system's usual elevation (`admin netctl hostname NAME` asks for the password; show the
+  system's usual elevation (`admin network name NAME` asks for the password; show the
   sheet the desktop uses elsewhere for that). Don't grey a control out just because the
   user isn't root; let the command refuse.
 - **Persistence.** All three survive a reboot on a machine with a Milk volume:
@@ -116,4 +116,4 @@ value.
 
 There is no static IPv4 configuration, no DNS server setting (user programs don't use
 one), no Wi-Fi, and no per-interface enable/disable. Ask the network side if the panel
-needs one of these; each would be a new `netctl` verb with the same contract.
+needs one of these; each would be a new `network` verb with the same contract.

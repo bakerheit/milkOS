@@ -51,7 +51,7 @@ fn fixture() -> Vec<u8> {
 fn mkfs_writes_what_mains_kernel_wrote() {
     setup(120);
     same_as_mkfs(&fixture());
-    // Another kernel's `snap mkfs` (e.g. this branch's), to compare the same way.
+    // Another kernel's `disks format` (e.g. this branch's), to compare the same way.
     if let Some(p) = std::env::var_os("MILKFS_MKFS_IMAGE") {
         same_as_mkfs(&std::fs::read(&p).unwrap());
         std::eprintln!("compat: {} is what mkfs writes", p.to_string_lossy());

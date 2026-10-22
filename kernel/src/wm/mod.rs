@@ -1590,7 +1590,7 @@ impl Desktop {
                     packages::refresh();
                     match packages::all().into_iter().find(|p| p.name == name) {
                         Some(p) => self.launch_package(&p),
-                        None => self.post_toast(&name, "isn't installed (milk install it first)"),
+                        None => self.post_toast(&name, "isn't installed (apps install it first)"),
                     }
                 }
                 Request::Powerbox => {

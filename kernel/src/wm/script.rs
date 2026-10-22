@@ -94,7 +94,7 @@ impl B {
                 .enter()
                 .wait(250);
             if i < 3 {
-                self.typ(&alloc::format!("snap create herd{}", i + 1))
+                self.typ(&alloc::format!("disks snapshot herd{}", i + 1))
                     .enter()
                     .wait(500);
             }
@@ -688,9 +688,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
-            b.typ("milk update").enter().wait(2000);
-            b.typ("milk install fortune").enter().wait(3000);
-            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("apps update").enter().wait(2000);
+            b.typ("apps install fortune").enter().wait(3000);
+            b.typ("apps install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
             // Installed apps come after the system ones (Store, Clock, ... from tile 9):
             // fortune, then moo2048.
@@ -848,11 +848,11 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                     .enter()
                     .wait(300)
-                    .typ("milk update")
+                    .typ("apps update")
                     .enter()
                     .wait(2000);
                 if name == "welcome-moo" {
-                    b.typ("milk install moo2048").enter().wait(3000);
+                    b.typ("apps install moo2048").enter().wait(3000);
                 }
             }
             b.click(18, 14).wait(300).click(90, 72).wait(800);
@@ -899,8 +899,8 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ(&alloc::format!("print {url} > /System/Settings/milk/repos"))
                 .enter()
                 .wait(300);
-            b.typ("milk update").enter().wait(2000);
-            b.typ("milk install moo2048").enter().wait(3000);
+            b.typ("apps update").enter().wait(2000);
+            b.typ("apps install moo2048").enter().wait(3000);
             b.typ("clear").enter().wait(3500);
             let sys = super::packages::count();
             let (tx, ty) = dock_icon_center_of(9 + sys, sys + 1);

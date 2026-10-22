@@ -6,7 +6,7 @@ user-mode networking) and ::1 (the guest reaches it as fec0::2, slirp's IPv6 hos
   * a TCP echo server on each,
   * a tiny DNS server: A records for the names in NAMES, NXDOMAIN for everything else
     (it never forwards anything anywhere),
-  * an HTTP server with one page, /hello.txt (for the guest's `fetch` program), on each,
+  * an HTTP server with one page, /hello.txt (for the guest's `network get`), on each,
 and reserves a "refused" port (bound, then closed: nothing listens there).
 Writes "echo=PORT echo6=PORT dns=PORT http=PORT http6=PORT refused=PORT" to the file given as argv[1], then serves until
 killed. Run it with `python3 -I` from a scratch directory.
@@ -31,7 +31,7 @@ class Echo(socketserver.BaseRequestHandler):
             self.request.sendall(data)
 
 
-HELLO = b"hello from the Mac's loopback, via qemu slirp, to milkOS fetch\n"
+HELLO = b"hello from the Mac's loopback, via qemu slirp, to milkOS network get\n"
 
 
 class Http(http.server.BaseHTTPRequestHandler):

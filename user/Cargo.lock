@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "apps"
+version = "0.0.1"
+dependencies = [
+ "rt",
+]
+
+[[package]]
 name = "audit"
 version = "0.0.1"
 dependencies = [
@@ -50,14 +57,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "coreutils"
+name = "cmdkit"
 version = "0.0.1"
 dependencies = [
- "rt",
+ "filekit",
 ]
 
 [[package]]
-name = "dedupe"
+name = "coreutils"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -75,6 +82,16 @@ name = "diskkit"
 version = "0.0.1"
 dependencies = [
  "timekit",
+]
+
+[[package]]
+name = "disks"
+version = "0.0.1"
+dependencies = [
+ "cmdkit",
+ "diskkit",
+ "filekit",
+ "rt",
 ]
 
 [[package]]
@@ -98,13 +115,6 @@ dependencies = [
 
 [[package]]
 name = "fault"
-version = "0.0.1"
-dependencies = [
- "rt",
-]
-
-[[package]]
-name = "fetch"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -156,25 +166,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ifconfig"
-version = "0.0.1"
-dependencies = [
- "rt",
-]
-
-[[package]]
 name = "imgdec"
 version = "0.0.1"
 
 [[package]]
 name = "init"
-version = "0.0.1"
-dependencies = [
- "rt",
-]
-
-[[package]]
-name = "milk"
 version = "0.0.1"
 dependencies = [
  "rt",
@@ -201,24 +197,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "nc"
+name = "network"
 version = "0.0.1"
 dependencies = [
- "rt",
-]
-
-[[package]]
-name = "netctl"
-version = "0.0.1"
-dependencies = [
+ "cmdkit",
  "drop",
- "rt",
-]
-
-[[package]]
-name = "netstat"
-version = "0.0.1"
-dependencies = [
+ "filekit",
  "rt",
 ]
 
@@ -235,13 +219,6 @@ name = "peek"
 version = "0.0.1"
 dependencies = [
  "gui",
- "rt",
-]
-
-[[package]]
-name = "ping"
-version = "0.0.1"
-dependencies = [
  "rt",
 ]
 
@@ -291,9 +268,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "snap"
+name = "search"
 version = "0.0.1"
 dependencies = [
+ "cmdkit",
  "rt",
 ]
 
@@ -303,13 +281,6 @@ version = "0.0.1"
 dependencies = [
  "rt",
  "udrv",
-]
-
-[[package]]
-name = "spot"
-version = "0.0.1"
-dependencies = [
- "rt",
 ]
 
 [[package]]

@@ -18,7 +18,7 @@ kernel changes: it reads and writes `/System/Kernel/fs/milkfs/*` and reads `/pro
   errors with paths, and a structure check (Check, Repair...).
 - **Security:** encryption status, Change passphrase..., Lock now (drawn disabled: there is no lock
   call), the recovery-key note, and the backup warning with Back up...
-- **Back up / Restore:** Send writes `snap send` to a stream file in `/Volumes/Mac/backups` (the
+- **Back up / Restore:** Send writes `disks send` to a stream file in `/Volumes/Mac/backups` (the
   folder must be writable: milkOS started with `MILK_SHARE_RW=1`; otherwise the sheet says so and
   Send stays disabled), after an "I understand" box about the missing encryption. Restore picks a
   stream there and receives it; "Replace existing" goes through the confirm sheet.

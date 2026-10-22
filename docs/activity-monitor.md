@@ -14,7 +14,7 @@ click "updates every 1 s" in the summary bar to step through 0.5, 1, 2, 5 second
 | Processes | `/proc/<pid>/status` (Name, State, PPid, Uid, VmRSS, Threads, CpuNs, StartNs, Caps), `/proc/<pid>/exe`, `cwd`, `fd` (private to the process's user, so a count only shows for your own), `/System/Settings/passwd` for user names |
 | CPU | `/proc/cpuload` (per core), `/proc/loadavg`, `/proc/interrupts` |
 | Memory | `/proc/meminfo`, the processes' VmRSS |
-| Disk | `/proc/diskstats` (sectors read and written), `/sys/fs/milkfs/info` (blocks free), `Shmem` in meminfo for the in-memory root |
+| Disk | `/proc/diskstats` (sectors read and written), `/System/Kernel/fs/milkfs/info` (blocks free), `Shmem` in meminfo for the in-memory root |
 | Security | `/proc/audit`, `/proc/audit_status`, and `audit verify` run as a program |
 
 CPU percent is the change in `CpuNs` between two looks over the wall time between them, so 100% is

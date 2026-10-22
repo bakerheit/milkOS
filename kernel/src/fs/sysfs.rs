@@ -1,10 +1,10 @@
-//! sysfs at `/sys`: the hardware the kernel was handed, as files.
+//! sysfs at `/System/Kernel`: the hardware the kernel was handed, as files.
 //!
-//! `/sys/devices/platform/<addr>.<name>/` has one directory per top-level device-tree node
+//! `/System/Kernel/devices/platform/<addr>.<name>/` has one directory per top-level device-tree node
 //! that describes a device (`compatible` or `reg`), with `compatible`, `reg`, `interrupts`
 //! and `driver` (which milkOS subsystem, if any, drives it). virtio-mmio slots with
 //! nothing plugged in are left out; populated ones get a `virtio_device` file.
-//! `/sys/kernel/version` mirrors `/proc/version`.
+//! `/System/Kernel/kernel/version` mirrors `/proc/version`.
 
 use alloc::format;
 use alloc::string::String;
@@ -179,7 +179,7 @@ fn reg_pairs(reg: &[u32]) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// Build sysfs and mount it on `/sys`.
+/// Build sysfs and mount it on `/System/Kernel`.
 pub fn init() -> Result<()> {
     let fs = SynthFs::new("sysfs");
     let root = fs.root_dir();
@@ -253,6 +253,6 @@ pub fn init() -> Result<()> {
     super::pagecache::sysfs(&root.add_dir("fs").add_dir("pagecache"));
     root.add_dir("kernel")
         .add_file("version", || String::from(procfs::VERSION));
-    super::mount("/sys", Arc::clone(&fs) as _)?;
+    super::mount(super::layout::KERNEL, Arc::clone(&fs) as _)?;
     Ok(())
 }

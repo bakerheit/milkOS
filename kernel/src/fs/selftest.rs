@@ -476,12 +476,14 @@ fn paths_and_mounts(t: &mut T) {
             "/etc",
             "/home",
             "/srv",
+            "/run",
+            "/sys",
             "/Applications",
             "/System/Library",
         ]
         .iter()
         .all(|p| ops::lstat(p).is_err()),
-        "no old Unix folders (clean break)",
+        "no old Unix folders (clean break; /run and /sys are under /System)",
     );
     t.ok(
         ops::lookup("/dev/..").map(|i| i.ino()).ok() == Some(path::root().ino()),
@@ -548,16 +550,41 @@ fn initramfs(t: &mut T) {
         "/System/Services",
         "/System/Settings",
         "/System/Startup",
+        "/System/Kernel",
+        "/System/Services/Sockets",
+        "/System/Developer",
         "/Users/milk",
         "/Volumes",
+        "/dev",
         "/proc",
-        "/sys",
+        "/tmp",
     ] {
         t.ok(
             ops::stat(d).map(|s| s.kind).ok() == Some(InodeType::Dir),
             "skeleton dir exists",
         );
     }
+    t.ok(
+        ["hello", "fault", "utest", "fsstress", "linux-hello"]
+            .iter()
+            .all(|n| ops::lstat(&alloc::format!("/Commands/{n}")).is_err()),
+        "test tools are in /System/Developer, not /Commands",
+    );
+    let shown: Vec<String> = ops::readdir("/")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .filter(|n| !filekit::path::hidden("/", n))
+        .collect();
+    t.ok(
+        ["Apps", "Commands", "System", "Users", "Volumes"]
+            .iter()
+            .all(|n| shown.iter().any(|x| x == n))
+            && !shown
+                .iter()
+                .any(|n| n == "dev" || n == "proc" || n == "tmp"),
+        "a listing of / hides dev, proc and tmp",
+    );
 }
 
 fn devfs(t: &mut T) {
@@ -657,7 +684,7 @@ fn procfs_sysfs(t: &mut T) {
         mounts.contains("tmpfs / tmpfs")
             && mounts.contains("devfs /dev devfs")
             && mounts.contains("proc /proc proc")
-            && mounts.contains("sysfs /sys sysfs"),
+            && mounts.contains("sysfs /System/Kernel sysfs"),
         "/proc/mounts",
     );
     t.err(
@@ -674,29 +701,30 @@ fn procfs_sysfs(t: &mut T) {
         ops::stat("/proc/meminfo").map(|s| s.size).ok() == Some(0),
         "procfs st_size 0",
     );
-    let devs = ops::readdir("/sys/devices/platform").unwrap_or_default();
+    let devs = ops::readdir("/System/Kernel/devices/platform").unwrap_or_default();
     t.ok(
         devs.iter().any(|e| e.name == "9000000.pl011"),
-        "/sys/devices/platform lists the UART",
+        "/System/Kernel/devices/platform lists the UART",
     );
     t.ok(
-        read_str("/sys/devices/platform/9000000.pl011/compatible").contains("arm,pl011"),
+        read_str("/System/Kernel/devices/platform/9000000.pl011/compatible").contains("arm,pl011"),
         "sysfs compatible",
     );
     t.ok(
-        read_str("/sys/devices/platform/9000000.pl011/reg").starts_with("0x9000000 0x1000"),
+        read_str("/System/Kernel/devices/platform/9000000.pl011/reg")
+            .starts_with("0x9000000 0x1000"),
         "sysfs reg",
     );
     t.ok(
-        read_str("/sys/kernel/version") == read_str("/proc/version"),
-        "/sys/kernel/version",
+        read_str("/System/Kernel/kernel/version") == read_str("/proc/version"),
+        "/System/Kernel/kernel/version",
     );
     t.ok(
-        ops::lookup("/sys/devices/platform/..")
+        ops::lookup("/System/Kernel/devices/platform/..")
             .and_then(|i| path::path_of(&i))
             .ok()
             .as_deref()
-            == Some("/sys/devices"),
+            == Some("/System/Kernel/devices"),
         "sysfs .. and path_of",
     );
 }
@@ -944,7 +972,7 @@ fn milkfs_user_volume(t: &mut T) {
         "user volume in /proc/mounts",
     );
     let generation = v.state.lock().sb.generation;
-    let info = read_str("/sys/fs/milkfs/info");
+    let info = read_str("/System/Kernel/fs/milkfs/info");
     t.ok(
         info.contains("state:       ok")
             && info.contains(&alloc::format!("generation:  {generation}")),
@@ -1310,17 +1338,17 @@ fn milkfs_destructive(
 
     // the shell interface
     t.ok(
-        ops::write_file("/sys/fs/milkfs/snapshot", b"selftest-b\n").is_ok(),
-        "snapshot via /sys",
+        ops::write_file("/System/Kernel/fs/milkfs/snapshot", b"selftest-b\n").is_ok(),
+        "snapshot via /System/Kernel",
     );
-    let list = read_str("/sys/fs/milkfs/snapshots");
+    let list = read_str("/System/Kernel/fs/milkfs/snapshots");
     t.ok(
         list.contains("selftest-a gen=") && list.contains("selftest-b gen="),
-        "/sys/fs/milkfs/snapshots",
+        "/System/Kernel/fs/milkfs/snapshots",
     );
     t.ok(
-        read_str("/sys/fs/milkfs/info").contains("label:       MilkTest"),
-        "/sys/fs/milkfs/info",
+        read_str("/System/Kernel/fs/milkfs/info").contains("label:       MilkTest"),
+        "/System/Kernel/fs/milkfs/info",
     );
     let _ = ops::write_file(&p("b.txt"), b"third version");
     t.ok(
@@ -1336,8 +1364,8 @@ fn milkfs_destructive(
 
     // rollback to the first snapshot (deletes selftest-b)
     t.ok(
-        ops::write_file("/sys/fs/milkfs/rollback", b"selftest-a").is_ok(),
-        "rollback via /sys",
+        ops::write_file("/System/Kernel/fs/milkfs/rollback", b"selftest-a").is_ok(),
+        "rollback via /System/Kernel",
     );
     t.ok(
         read_str(&p("b.txt")) == before,
@@ -1407,13 +1435,18 @@ fn milkfs_destructive(
         let v = vol.clone();
         let saved = v.state.lock().auto_config();
         t.ok(
-            super::ops::write_file("/sys/fs/milkfs/auto", b"interval=30s keep=3 daily=2").is_ok()
+            super::ops::write_file(
+                "/System/Kernel/fs/milkfs/auto",
+                b"interval=30s keep=3 daily=2",
+            )
+            .is_ok()
                 && v.state.lock().sb.auto == [1, 30, 3, 2]
-                && read_str("/sys/fs/milkfs/auto").starts_with("on interval=30s keep=3 daily=2"),
-            "/sys/fs/milkfs/auto sets and persists the settings",
+                && read_str("/System/Kernel/fs/milkfs/auto")
+                    .starts_with("on interval=30s keep=3 daily=2"),
+            "/System/Kernel/fs/milkfs/auto sets and persists the settings",
         );
         t.err(
-            super::ops::write_file("/sys/fs/milkfs/auto", b"interval=x"),
+            super::ops::write_file("/System/Kernel/fs/milkfs/auto", b"interval=x"),
             Errno::EINVAL,
             "bad auto setting",
         );
@@ -1498,15 +1531,16 @@ fn milkfs_clones(
         "a clone's origin can't be deleted",
     );
     t.ok(
-        read_str("/sys/fs/milkfs/clones").contains("try of=base at=/Volumes/MilkTest-try"),
-        "/sys/fs/milkfs/clones",
+        read_str("/System/Kernel/fs/milkfs/clones")
+            .contains("try of=base at=/Volumes/MilkTest-try"),
+        "/System/Kernel/fs/milkfs/clones",
     );
     milk_space(t, vol, "milkfs space exact with a clone");
 
     // Discard: a second clone with a big file, thrown away.
     t.ok(
-        ops::write_file("/sys/fs/milkfs/clone", b"base scratch").is_ok(),
-        "clone via /sys",
+        ops::write_file("/System/Kernel/fs/milkfs/clone", b"base scratch").is_ok(),
+        "clone via /System/Kernel",
     );
     let big: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
     t.ok(
@@ -1516,8 +1550,8 @@ fn milkfs_clones(
     milk_space(t, vol, "milkfs space exact with two clones");
     let free_with = vol.state.lock().store.free_blocks();
     t.ok(
-        ops::write_file("/sys/fs/milkfs/discard", b"scratch").is_ok(),
-        "discard via /sys",
+        ops::write_file("/System/Kernel/fs/milkfs/discard", b"scratch").is_ok(),
+        "discard via /System/Kernel",
     );
     let _ = super::sync_all();
     t.ok(
@@ -1724,9 +1758,9 @@ fn milkfs_diff(t: &mut T, vp: &str) {
         Err(e) => t.ok(false, &alloc::format!("diff d3..live: {e}")),
     }
     t.ok(
-        ops::write_file("/sys/fs/milkfs/diff", b"d1 d2").is_ok()
-            && read_str("/sys/fs/milkfs/diff").contains("R /dd/a -> /dd/sub/a2"),
-        "/sys/fs/milkfs/diff",
+        ops::write_file("/System/Kernel/fs/milkfs/diff", b"d1 d2").is_ok()
+            && read_str("/System/Kernel/fs/milkfs/diff").contains("R /dd/a -> /dd/sub/a2"),
+        "/System/Kernel/fs/milkfs/diff",
     );
     t.err(
         m::diff("nope", None),
@@ -1770,9 +1804,9 @@ fn milkfs_versions(t: &mut T, vp: &str) {
         "versions: sizes and hashes",
     );
     t.ok(
-        ops::write_file("/sys/fs/milkfs/versions", f.as_bytes()).is_ok()
-            && read_str("/sys/fs/milkfs/versions").contains("v2\t"),
-        "/sys/fs/milkfs/versions",
+        ops::write_file("/System/Kernel/fs/milkfs/versions", f.as_bytes()).is_ok()
+            && read_str("/System/Kernel/fs/milkfs/versions").contains("v2\t"),
+        "/System/Kernel/fs/milkfs/versions",
     );
     let before = snaps().len();
     t.ok(m::restore_version(&f, "v1").is_ok(), "restore a version");
@@ -1784,12 +1818,12 @@ fn milkfs_versions(t: &mut T, vp: &str) {
     let before = snaps().len();
     t.ok(
         ops::write_file(
-            "/sys/fs/milkfs/restore",
+            "/System/Kernel/fs/milkfs/restore",
             alloc::format!("v2 {f}").as_bytes(),
         )
         .is_ok()
             && read_str(&f) == "version two, longer",
-        "restore via /sys (path with a space)",
+        "restore via /System/Kernel (path with a space)",
     );
     t.ok(
         snaps().len() == before,
@@ -2939,13 +2973,16 @@ fn notify_and_search(t: &mut T) {
     rm_rf(R);
 }
 
-/// `/sys/fs/milkfs` controls (on the test volume): the errno of a bad write, and
-/// `/sys/fs/milkfs/error` saying why; the authorisation hook for destructive ones.
+/// `/System/Kernel/fs/milkfs` controls (on the test volume): the errno of a bad write, and
+/// `/System/Kernel/fs/milkfs/error` saying why; the authorisation hook for destructive ones.
 fn milkfs_control_errors(t: &mut T) {
     let ctl = |name: &str, arg: &str| {
-        ops::write_file(&alloc::format!("/sys/fs/milkfs/{name}"), arg.as_bytes())
+        ops::write_file(
+            &alloc::format!("/System/Kernel/fs/milkfs/{name}"),
+            arg.as_bytes(),
+        )
     };
-    let error = || read_str("/sys/fs/milkfs/error");
+    let error = || read_str("/System/Kernel/fs/milkfs/error");
     use super::milkfs::label_ok;
     t.ok(
         label_ok("Milk")
@@ -3159,7 +3196,7 @@ fn statfs_basics(t: &mut T) {
     );
     for (p, magic) in [
         ("/proc", n::PROC_MAGIC),
-        ("/sys/fs", n::SYSFS_MAGIC),
+        ("/System/Kernel/fs", n::SYSFS_MAGIC),
         ("/dev/null", n::DEVFS_MAGIC),
     ] {
         let s = ops::statfs(p);
@@ -3307,13 +3344,13 @@ pub fn run() {
     ] {
         show(p);
     }
-    kprintln!("$ files list /sys/devices/platform");
-    let names: Vec<String> = ops::readdir("/sys/devices/platform")
+    kprintln!("$ files list /System/Kernel/devices/platform");
+    let names: Vec<String> = ops::readdir("/System/Kernel/devices/platform")
         .unwrap_or_default()
         .into_iter()
         .map(|e| e.name)
         .collect();
     kprintln!("{}", names.join("  "));
-    show("/sys/fs/milkfs/info");
+    show("/System/Kernel/fs/milkfs/info");
     show("/System/Settings/motd");
 }

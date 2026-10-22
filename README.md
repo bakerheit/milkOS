@@ -1,7 +1,7 @@
 # milkOS
 
 A hobby operating system for 64-bit ARM, written in Rust and run in qemu on a Mac. The kernel and
-userland are inspired by Linux (Linux syscall numbers, `/proc`, `/sys`, a POSIX-ish shell); the desktop
+userland are inspired by Linux (Linux syscall numbers, `/proc`, `/dev`, a POSIX-ish shell); the desktop
 is inspired by macOS (menu bar, dock, glass, Spaces, a launcher).
 
 ![The milkOS desktop](docs/screenshots/desktop.png)
@@ -42,7 +42,9 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - Your home folder lives on milkfs, so files survive reboots. Deleted things go to a real Trash
   (`~/.Trash`, or a disk's own), and are deleted for good after 30 days (Settings > Trash).
 - Folders in plain English: `/Apps` (apps you open), `/Commands` (what you type in Terminal),
-  `/Users/milk` (your home), `/Volumes` (disks) and `/System` (milkOS itself). Details in
+  `/Users/milk` (your home), `/Volumes` (disks) and `/System` (milkOS itself: its services and
+  their sockets, settings, kernel controls, and the test tools in `/System/Developer`). `/dev`,
+  `/proc` and `/tmp` stay for Linux and POSIX programs, hidden in listings. Details in
   `docs/filesystem.md`.
 - FAT32 with long names, a page cache, and a shared folder with the Mac (`share/` here is `/Volumes/Mac` there).
 

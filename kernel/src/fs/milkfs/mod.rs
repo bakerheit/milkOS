@@ -6,11 +6,11 @@
 //! modules re-exported here under their old paths. This is the kernel's side:
 //! - `inode`: the VFS objects (`Volume`, `MilkInode`, `.snapshots`).
 //! - `platform`: the kernel as the crate's `Platform` (clock, RNG, scrypt, log, locks).
-//! - `scrub`, `timemachine`: their kernel threads and `/sys/fs/milkfs` files.
+//! - `scrub`, `timemachine`: their kernel threads and `/System/Kernel/fs/milkfs` files.
 //! - `crashtest`: the crash-test modes (power cuts, the writer workload, the check).
 //!
 //! Kernel API: [`mkfs`], [`probe`], [`mount`], [`automount`], [`snapshot`], [`snapshots`],
-//! [`delete_snapshot`], [`rollback`], [`sync`], [`info`]. Shell API: `/sys/fs/milkfs/*`.
+//! [`delete_snapshot`], [`rollback`], [`sync`], [`info`]. Shell API: `/System/Kernel/fs/milkfs/*`.
 
 pub use ::milkfs::{
     btree, clone, convert, crypt, diff, format, fsck, items, snap, stream, versions, volume,
@@ -38,7 +38,7 @@ pub use inode::Volume;
 pub use snap::SnapInfo;
 pub use volume::MountReport;
 
-/// The volume the snapshot API and `/sys/fs/milkfs` act on (the first one mounted).
+/// The volume the snapshot API and `/System/Kernel/fs/milkfs` act on (the first one mounted).
 static PRIMARY: SpinLock<Option<Arc<Volume>>> = SpinLock::new(None);
 
 /// The superblock of `dev` if it holds milkfs.
@@ -154,7 +154,7 @@ pub fn mkfs_encrypted(
 }
 
 /// Open the milkfs on `dev` and mount it at `path` (created if missing). The first
-/// volume mounted with this becomes the primary one (snapshot API, `/sys/fs/milkfs`).
+/// volume mounted with this becomes the primary one (snapshot API, `/System/Kernel/fs/milkfs`).
 pub fn mount(dev: BlockRef, path: &str) -> Result<(Arc<Volume>, MountReport)> {
     mount_keyed(dev, path, None, true)
 }
@@ -241,7 +241,7 @@ pub fn automount() {
                         );
                     }
                     kprintln!(
-                        "milkfs: {} ({}) is encrypted and locked: `snap unlock` (or write the passphrase to /sys/fs/milkfs/unlock)",
+                        "milkfs: {} ({}) is encrypted and locked: `snap unlock` (or write the passphrase to /System/Kernel/fs/milkfs/unlock)",
                         dev.name(),
                         sb.label
                     );
@@ -735,7 +735,7 @@ fn volume_named(dev: Option<&str>) -> Result<Arc<Volume>> {
 static CONVERT_RATE_MB: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static CONVERT_THREAD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 static THREADS_STARTED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// The last conversion that finished or failed (for `/sys/fs/milkfs/encrypt`).
+/// The last conversion that finished or failed (for `/System/Kernel/fs/milkfs/encrypt`).
 static LAST_CONVERT: SpinLock<String> = SpinLock::new(String::new());
 
 /// Make sure the conversion thread runs if any mounted volume is being converted (after
@@ -831,7 +831,7 @@ fn convert_thread() {
 /// Encrypt the volume `dev` names (default the primary one) in place under `passphrase`
 /// (8 characters or more), in the background; with `recovery_out` also a recovery key,
 /// written there (O_EXCL, 0600). The volume stays usable; from the first commit on it
-/// needs the passphrase to mount. Progress: `info`, `/sys/fs/milkfs/encrypt`.
+/// needs the passphrase to mount. Progress: `info`, `/System/Kernel/fs/milkfs/encrypt`.
 pub fn encrypt_in_place(
     dev: Option<&str>,
     passphrase: &str,
@@ -944,7 +944,7 @@ pub fn decrypt_in_place(dev: Option<&str>, secret: &str) -> Result<()> {
     r
 }
 
-/// `/sys/fs/milkfs/encrypt` (and `decrypt`) read: each converting volume's progress, or
+/// `/System/Kernel/fs/milkfs/encrypt` (and `decrypt`) read: each converting volume's progress, or
 /// the last result.
 fn convert_status() -> String {
     let mut s = String::new();
@@ -1624,7 +1624,7 @@ pub fn start_threads() {
 }
 
 /// Self-test only (before the scheduler runs, so nothing else can notice): point the
-/// primary-volume API and `/sys/fs/milkfs` at a throwaway test volume, so destructive
+/// primary-volume API and `/System/Kernel/fs/milkfs` at a throwaway test volume, so destructive
 /// checks never reach the user's disk. `None` restores the real primary volume.
 static TEST_OVERRIDE: SpinLock<Option<Arc<Volume>>> = SpinLock::new(None);
 
@@ -1755,7 +1755,7 @@ pub fn sync() -> Result<()> {
     primary()?.state.lock().commit()
 }
 
-/// Human-readable status of the primary volume (`/sys/fs/milkfs/info`).
+/// Human-readable status of the primary volume (`/System/Kernel/fs/milkfs/info`).
 pub fn info() -> String {
     let Some(v) = volume() else {
         return String::from("no milkfs volume mounted\n");
@@ -1803,7 +1803,7 @@ pub fn info() -> String {
         c.hits, c.misses, c.writebacks
     );
     if st.store.encrypted() {
-        // Mounted means unlocked (a locked volume isn't mounted: /sys/fs/milkfs/unlock).
+        // Mounted means unlocked (a locked volume isn't mounted: /System/Kernel/fs/milkfs/unlock).
         let _ = writeln!(
             s,
             "encryption:  {}",
@@ -1847,7 +1847,7 @@ pub fn info() -> String {
     s
 }
 
-/// `/sys/fs/milkfs/disks`: every block device, one line each:
+/// `/System/Kernel/fs/milkfs/disks`: every block device, one line each:
 /// `NAME BYTES rw|ro milkfs plain|encrypted mounted=PATH|locked|unmounted LABEL` (the
 /// label last: it may hold spaces), or `NAME BYTES rw|ro other` (no milkfs: FAT, blank,
 /// a scratch disk). What `mkfs` can be pointed at.
@@ -1912,14 +1912,14 @@ fn clones_text() -> String {
 
 /// Why the calling thread's current control write is failing (set by [`fail`]).
 static REASON: SpinLock<alloc::vec::Vec<(u32, String)>> = SpinLock::new(alloc::vec::Vec::new());
-/// `/sys/fs/milkfs/error`: the last failed control write, `CONTROL: ERRNO: reason`.
+/// `/System/Kernel/fs/milkfs/error`: the last failed control write, `CONTROL: ERRNO: reason`.
 static LAST_ERROR: SpinLock<String> = SpinLock::new(String::new());
 
 fn tid() -> u32 {
     crate::sched::current_tid()
 }
 
-/// Fail with `e` and say why (in `/sys/fs/milkfs/error` when it came from a control).
+/// Fail with `e` and say why (in `/System/Kernel/fs/milkfs/error` when it came from a control).
 pub(crate) fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
     let (t, why) = (tid(), why.into());
     let mut r = REASON.lock();
@@ -1939,7 +1939,7 @@ fn take_reason() -> Option<String> {
     Some(r.swap_remove(i).1)
 }
 
-/// Run control `name`'s write, keeping `/sys/fs/milkfs/error` current: cleared when a
+/// Run control `name`'s write, keeping `/System/Kernel/fs/milkfs/error` current: cleared when a
 /// write succeeds, `name: ERRNO: reason` when it fails.
 fn run_control(name: &str, f: impl FnOnce() -> Result<()>) -> Result<()> {
     let _ = take_reason();
@@ -2097,7 +2097,7 @@ pub fn authorize(op: &str, arg: &[u8]) -> Result<()> {
 }
 
 /// For an [`Authorizer`] (or anything under a control write): the reason shown in
-/// `/sys/fs/milkfs/error` for the error about to be returned.
+/// `/System/Kernel/fs/milkfs/error` for the error about to be returned.
 pub fn set_reason(why: &str) {
     let _ = fail::<()>(Errno::EINVAL, why);
 }
@@ -2136,7 +2136,7 @@ fn arg(buf: &[u8]) -> Result<&str> {
     Ok(s)
 }
 
-/// `/sys/fs/milkfs/`: `info`, `snapshots` (read); `snapshot`, `delete`, `rollback`,
+/// `/System/Kernel/fs/milkfs/`: `info`, `snapshots` (read); `snapshot`, `delete`, `rollback`,
 /// `sync`, `mkfs` (write a name / `vdX [label] [force]`).
 pub fn sysfs(dir: &Arc<SynthDir>) {
     dir.add_file("info", info);

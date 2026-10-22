@@ -245,7 +245,7 @@ impl Panel {
         let Ok(mut items) = fsx::list(dir) else {
             return;
         };
-        items.retain(|e| !e.name.starts_with('.'));
+        items.retain(|e| !filekit::path::hidden(dir, &e.name));
         items.sort_by(|a, b| {
             (b.kind == InodeType::Dir)
                 .cmp(&(a.kind == InodeType::Dir))

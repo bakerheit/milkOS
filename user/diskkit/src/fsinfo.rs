@@ -1,4 +1,4 @@
-//! `/sys/fs/milkfs/info` and the list of locked volumes.
+//! `/System/Kernel/fs/milkfs/info` and the list of locked volumes.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -107,7 +107,7 @@ pub struct Locked {
     pub label: String,
 }
 
-/// Parse `/sys/fs/milkfs/unlock` ("vda Milk locked" per line).
+/// Parse `/System/Kernel/fs/milkfs/unlock` ("vda Milk locked" per line).
 pub fn parse_locked(text: &str) -> Vec<Locked> {
     text.lines()
         .filter_map(|l| {
@@ -121,7 +121,7 @@ pub fn parse_locked(text: &str) -> Vec<Locked> {
         .collect()
 }
 
-/// One line of `/sys/fs/milkfs/lock`: an encrypted volume and its state.
+/// One line of `/System/Kernel/fs/milkfs/lock`: an encrypted volume and its state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockEntry {
     pub device: String,
@@ -133,7 +133,7 @@ pub struct LockEntry {
     pub home: bool,
 }
 
-/// Parse `/sys/fs/milkfs/lock` ("vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)", "vdd Old locked").
+/// Parse `/System/Kernel/fs/milkfs/lock` ("vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)", "vdd Old locked").
 pub fn parse_lock(text: &str) -> Vec<LockEntry> {
     text.lines()
         .filter_map(|l| {
@@ -159,7 +159,7 @@ pub fn parse_lock(text: &str) -> Vec<LockEntry> {
         .collect()
 }
 
-/// What a failed control write says: `/sys/fs/milkfs/error` is one line `CONTROL: ERRNO: reason`.
+/// What a failed control write says: `/System/Kernel/fs/milkfs/error` is one line `CONTROL: ERRNO: reason`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ControlError {
     pub control: String,

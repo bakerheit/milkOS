@@ -43,13 +43,13 @@ Alarms: `days` is a weekday mask (bit 0 Monday ... bit 6 Sunday); 0 means once, 
 switches itself off after it rings. "Snooze 9 min" adds a once alarm.
 
 Timers run on the monotonic clock (setting the wall clock does not move them). That clock starts
-again at boot, so `timers` names the boot it was written in (`/run/boot-id`, a tmpfs file) and
+again at boot, so `timers` names the boot it was written in (`/System/Services/Sockets/boot-id`, a tmpfs file) and
 running timers from an earlier boot are dropped; paused ones keep their remaining time.
 
 **Who owns what.** alarmd is started by init, so it runs as root, but the files are the user's.
 Whatever root creates in a user's folder (folders, the alarms and timers files alarmd rewrites)
 is given to the owner of the parent folder (`timeio::write_atomic`, `mkdir_p`), so the user's apps
-can still change it. The boot id file (`/run/boot-id`) is made by alarmd at start and read by
+can still change it. The boot id file (`/System/Services/Sockets/boot-id`) is made by alarmd at start and read by
 everyone; if it cannot be made, processes fall back to the wall clock minus the monotonic clock.
 
 ## Toasts, the menu bar and resizing

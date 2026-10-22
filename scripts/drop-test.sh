@@ -10,7 +10,7 @@
 #   - audit records (user.drop.*) on both,
 #   - as the ordinary user milk (the desktop's account): alice-as-milk sends bob-as-milk a
 #     file through each machine's root drop daemon (which signs for them over
-#     /run/drop.sock); it lands in bob's ~/Downloads owned by milk; milk can't read the
+#     /System/Services/Sockets/drop.sock); it lands in bob's ~/Downloads owned by milk; milk can't read the
 #     machine's secret key; milk (an administrator) renames through the daemon, nobody
 #     is refused,
 #   - IPv6 between the VMs over eth1: alice resolves bob.local over mDNS on ff02::fb
@@ -118,7 +118,7 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:drop peers' "$P" \
   'send:files list /Users/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
-  'send:echo now > /sys/fs/milkfs/sync' "$P" \
+  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
@@ -143,7 +143,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
-  'send:echo now > /sys/fs/milkfs/sync' "$P" \
+  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
 DB=$!
 PIDS+=("$DB")
@@ -318,7 +318,7 @@ QC=$!
 PIDS+=("$QC")
 python3 -I scripts/serial_drive.py "$WORK/carol.sock" "$WORK/carol.log" \
   "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:audit --event user.drop' "$P" \
-  'send:echo now > /sys/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
+  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
 DC=$!
 PIDS+=("$DC")
 for _ in $(seq 600); do [ -e "$WORK/carol.done" ] && break; sleep 0.1; done

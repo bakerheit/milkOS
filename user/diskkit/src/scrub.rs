@@ -1,4 +1,4 @@
-//! `/sys/fs/milkfs/scrub`: what it is doing, what it found, and the words to control it.
+//! `/System/Kernel/fs/milkfs/scrub`: what it is doing, what it found, and the words to control it.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

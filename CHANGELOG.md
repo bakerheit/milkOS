@@ -27,6 +27,13 @@
   and `/System` with `Services`, `Startup`, `Settings`, `Fonts`, `Sounds` and `Music`.
   A clean break: no links with the old names. `open <app>` finds apps by name; Files has
   Apps in its sidebar.
+- The last Unix folders that only milkOS itself used moved under `/System`: the service
+  sockets (`/run`) are in `/System/Services/Sockets`, the kernel controls (`/sys`) in
+  `/System/Kernel` (`/System/Kernel/fs/milkfs/...`). `/dev`, `/proc` and `/tmp` stay for
+  Linux and POSIX programs, hidden in Files and in `files list /` (`--all` shows them).
+- Test and developer tools (`utest`, `fault`, `hello`, `fsstress`, `tcpbench`, `linux-hello`,
+  `chroot`, `sandbox`) moved out of `/Commands` into `/System/Developer`, which is not on
+  `PATH`.
 - Existing disks move over once at boot (or when a login unlocks them): `home/<user>`,
   `Applications` and `etc/milk/{drop,net}` are renamed inside the volume, the home gets
   `~/Sites`, and old snapshots still open in Files and Versions.

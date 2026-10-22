@@ -144,7 +144,7 @@ s B1 \
   "echo path = /Users/milk/boot.txt > ~/.Trash/.trashinfo/boot.txt" \
   "echo deleted = 1000000000 >> ~/.Trash/.trashinfo/boot.txt" \
   "trash list" \
-  "echo now > /sys/fs/milkfs/sync"
+  "echo now > /System/Kernel/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
 echo "$L1" > "$T/b1.txt"
 

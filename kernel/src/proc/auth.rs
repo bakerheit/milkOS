@@ -3,7 +3,7 @@
 //! A process asks to be authorised; the user proves they are an administrator with a
 //! password (in the desktop's trusted panel, or typed in a terminal); the kernel then
 //! attaches a ticket to *that process* for 5 minutes. Privileged operations (the
-//! destructive /sys/fs/milkfs controls) accept euid 0 or a valid ticket ([`require`]).
+//! destructive /System/Kernel/fs/milkfs controls) accept euid 0 or a valid ticket ([`require`]).
 //!
 //! * Per process: keyed on pid + process start time, so a recycled pid gets nothing; not
 //!   inherited by fork; kept across exec (same process); dropped at exit; revocable.
@@ -120,7 +120,7 @@ fn is_desktop_app(pid: u32) -> bool {
 }
 
 /// The rule for milkfs's destructive controls (`fs::milkfs::DESTRUCTIVE`, through
-/// `fs::milkfs::authorize`): root or a ticket, with the reason in /sys/fs/milkfs/error.
+/// `fs::milkfs::authorize`): root or a ticket, with the reason in /System/Kernel/fs/milkfs/error.
 ///
 /// Transitional: until the window manager registers its trusted panel ([`set_prompt`]),
 /// a desktop app has no way to ask for a ticket, so apps the desktop started keep the

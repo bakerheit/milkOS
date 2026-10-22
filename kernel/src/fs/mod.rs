@@ -5,8 +5,8 @@
 //! - `file`: `OpenFile` (inode + offset + flags), what fd tables hold.
 //! - `ops`: the path-based kernel API (`open`, `stat`, `mkdir`, ...), re-exported here.
 //! - `abi`: Linux userspace layouts (`struct stat`, `linux_dirent64`, `O_*` flags).
-//! - file systems: `tmpfs` (root), `devfs` (/dev), `procfs` (/proc), `sysfs` (/sys), all but
-//!   tmpfs built on `synth`; `initramfs` unpacks the built-in archive into the root.
+//! - file systems: `tmpfs` (root), `devfs` (/dev), `procfs` (/proc), `sysfs` (/System/Kernel),
+//!   all but tmpfs built on `synth`; `initramfs` unpacks the built-in archive into the root.
 
 // Public API surface for the syscall layer; not all of it is used inside the kernel yet.
 #![allow(dead_code)]
@@ -52,19 +52,23 @@ use crate::kprintln;
 
 /// Directories created on the root tmpfs before anything else is unpacked.
 /// (path, permissions). The plain-English layout: `fs::layout`, docs/filesystem.md.
+/// `/dev`, `/proc` and `/tmp` stay at the top because Linux and POSIX programs expect them
+/// there; listings hide them (`filekit::path::HIDDEN_AT_ROOT`).
 const SKELETON: &[(&str, u32)] = &[
-    ("/Apps", 0o755),
-    ("/Commands", 0o755),
+    (layout::APPS, 0o755),
+    (layout::COMMANDS, 0o755),
     ("/System", 0o755),
-    ("/System/Services", 0o755),
-    ("/System/Settings", 0o755),
-    ("/System/Startup", 0o755),
-    ("/Users", 0o755),
+    (layout::DEVELOPER, 0o755),
+    (layout::KERNEL, 0o555),
+    (layout::SERVICES, 0o755),
+    (layout::SOCKETS, 0o755),
+    (layout::SETTINGS, 0o755),
+    (layout::STARTUP, 0o755),
+    (layout::USERS, 0o755),
     ("/Users/milk", 0o755),
     ("/Volumes", 0o755),
     ("/dev", 0o755),
     ("/proc", 0o555),
-    ("/sys", 0o555),
     ("/tmp", 0o1777),
 ];
 
@@ -88,7 +92,7 @@ pub fn init() {
     layout::record_builtin_apps();
     devfs::init().expect("fs: mount /dev");
     procfs::init(root).expect("fs: mount /proc");
-    sysfs::init().expect("fs: mount /sys");
+    sysfs::init().expect("fs: mount /System/Kernel (sysfs)");
     milkfs::crashtest::configure();
     milkfs::automount();
     milkfs::setup_home();

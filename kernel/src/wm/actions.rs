@@ -64,7 +64,7 @@ fn set_dark(on: bool) {
 }
 
 fn back_up_now() {
-    let ok = super::apps::fsx::ctl_write("/sys/fs/milkfs/auto", "now").is_ok();
+    let ok = super::apps::fsx::ctl_write("/System/Kernel/fs/milkfs/auto", "now").is_ok();
     super::notify_as(
         "Time Machine",
         "Time Machine",

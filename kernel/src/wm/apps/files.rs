@@ -66,7 +66,7 @@ const CELL_H: i32 = 108;
 const LIST_TOP: i32 = TOOL_H + 8;
 const LIST_ROW: i32 = 28;
 
-/// One milkfs snapshot, from /sys/fs/milkfs/snapshots ("name gen=G created=T").
+/// One milkfs snapshot, from /System/Kernel/fs/milkfs/snapshots ("name gen=G created=T").
 struct Snap {
     name: String,
     generation: u64,
@@ -74,7 +74,7 @@ struct Snap {
 }
 
 fn snapshots() -> Vec<Snap> {
-    let text = crate::fs::read_to_string("/sys/fs/milkfs/snapshots").unwrap_or_default();
+    let text = crate::fs::read_to_string("/System/Kernel/fs/milkfs/snapshots").unwrap_or_default();
     let mut v: Vec<Snap> = text
         .lines()
         .filter_map(|l| {
@@ -130,7 +130,7 @@ fn available(path: &str) -> Option<u64> {
     if !on_milk {
         return None;
     }
-    let info = crate::fs::read_to_string("/sys/fs/milkfs/info").ok()?;
+    let info = crate::fs::read_to_string("/System/Kernel/fs/milkfs/info").ok()?;
     let line = info.lines().find(|l| l.starts_with("blocks:"))?;
     let free: u64 = line
         .split(',')
@@ -161,10 +161,11 @@ fn size_label(n: u64) -> String {
     }
 }
 
-/// A folder's entries as Files shows them: dot files (.config, .cache) hidden.
+/// A folder's entries as Files shows them: dot files (.config, .cache) hidden, and in `/`
+/// the Unix plumbing (`/dev`, `/proc`, `/tmp`; `filekit::path::hidden`).
 fn listing(path: &str) -> crate::fs::Result<Vec<Entry>> {
     let mut v = fsx::list(path)?;
-    v.retain(|e| !e.name.starts_with('.'));
+    v.retain(|e| !filekit::path::hidden(path, &e.name));
     Ok(v)
 }
 

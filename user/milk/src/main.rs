@@ -56,7 +56,7 @@ const REPOS: &str = "/System/Settings/milk/repos";
 const APPS: &str = "/Apps";
 const CACHE_DIR: &str = "/Apps/.milk";
 const CACHE: &str = "/Apps/.milk/index.txt";
-const MILKFS: &str = "/sys/fs/milkfs";
+const MILKFS: &str = "/System/Kernel/fs/milkfs";
 const KEYS: &str = "/System/Settings/milk/keys";
 
 /// --insecure: accept unsigned / badly signed indexes and packages (loudly, and audited).
@@ -129,7 +129,7 @@ fn text(path: &str) -> Option<String> {
         .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
-/// Write a control file under /sys/fs/milkfs. The destructive ones (delete, promote,
+/// Write a control file under /System/Kernel/fs/milkfs. The destructive ones (delete, promote,
 /// discard, ...) need root or an admin ticket (docs/security.md, "Authorisation
 /// tickets"): on EPERM, ask the desktop's trusted panel once and retry; without a desktop,
 /// say how to get one from a terminal.
@@ -952,7 +952,7 @@ fn snap_name(name: &str) -> String {
     alloc::format!("milk-try-{name}")
 }
 
-/// Mount path of clone `c` (from /sys/fs/milkfs/clones: `<name> of=<snap> at=<path>`).
+/// Mount path of clone `c` (from /System/Kernel/fs/milkfs/clones: `<name> of=<snap> at=<path>`).
 fn clone_path(c: &str) -> Option<String> {
     text(&alloc::format!("{MILKFS}/clones"))?
         .lines()

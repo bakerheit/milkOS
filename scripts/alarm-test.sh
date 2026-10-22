@@ -54,7 +54,7 @@ boot b1 "ps | grep alarmd" \
   "alarm list" "timer list" "cal list 3" "cal" "remind list" \
   "sleep 30" "sleep 30" "sleep 20" \
   "cat $LOGF" "alarm list" "timer list" "cal list 3" "remind done 2" "remind done 3" "remind list" \
-  "echo now > /sys/fs/milkfs/sync" "sleep 3"
+  "echo now > /System/Kernel/fs/milkfs/sync" "sleep 3"
 L="$T/b1.log"
 out "$L" "ps | grep alarmd" | grep -q "alarmd" && ok "alarmd is running (started by init)" || bad "alarmd not running"
 out "$L" "alarm list" | head -3 | sed 's/^/    /'

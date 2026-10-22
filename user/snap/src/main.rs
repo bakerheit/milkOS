@@ -1,4 +1,4 @@
-//! `snap`: milkfs snapshots from the shell, via the control files in /sys/fs/milkfs.
+//! `snap`: milkfs snapshots from the shell, via the control files in /System/Kernel/fs/milkfs.
 //!
 //!   snap                  list snapshots of /Volumes/Milk
 //!   snap create NAME      take one (browse it at /Volumes/Milk/.snapshots/NAME)
@@ -104,10 +104,10 @@ fn why(e: rt::Errno) -> alloc::string::String {
     alloc::format!("{text} (errno {})", e.0)
 }
 
-/// Why control `op` just failed: the kernel's reason from /sys/fs/milkfs/error when it
+/// Why control `op` just failed: the kernel's reason from /System/Kernel/fs/milkfs/error when it
 /// is about `op` (`op: ERRNO: reason`), else the errno in words.
 fn why_op(op: &str, e: rt::Errno) -> alloc::string::String {
-    let text = sys::read_file("/sys/fs/milkfs/error").unwrap_or_default();
+    let text = sys::read_file("/System/Kernel/fs/milkfs/error").unwrap_or_default();
     let text = core::str::from_utf8(&text).unwrap_or("").trim_end();
     if let Some(rest) = text.strip_prefix(op).and_then(|r| r.strip_prefix(": "))
         && let Some((name, reason)) = rest.split_once(": ")
@@ -120,7 +120,7 @@ fn why_op(op: &str, e: rt::Errno) -> alloc::string::String {
 
 /// Like `control` but silent on success (for commands whose result is read back).
 fn control_quiet(op: &str, arg: &str) -> i32 {
-    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let path = alloc::format!("/System/Kernel/fs/milkfs/{op}");
     let r = sys::open(&path, O_WRONLY).and_then(|fd| {
         let r = sys::write(fd, arg.as_bytes());
         let _ = sys::close(fd);
@@ -136,7 +136,7 @@ fn control_quiet(op: &str, arg: &str) -> i32 {
 }
 
 fn control(op: &str, name: &str) -> i32 {
-    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let path = alloc::format!("/System/Kernel/fs/milkfs/{op}");
     let r = sys::open(&path, O_WRONLY).and_then(|fd| {
         let r = sys::write(fd, name.as_bytes());
         let _ = sys::close(fd);
@@ -188,7 +188,7 @@ fn report(ctl: &str) {
 
 /// Is the primary volume encrypted (its `info` says `encryption: on`)?
 fn volume_encrypted() -> bool {
-    let i = sys::read_file("/sys/fs/milkfs/info").unwrap_or_default();
+    let i = sys::read_file("/System/Kernel/fs/milkfs/info").unwrap_or_default();
     core::str::from_utf8(&i)
         .unwrap_or("")
         .lines()
@@ -217,7 +217,7 @@ fn stream_passphrase(file: Option<&str>, new: bool) -> Option<alloc::string::Str
 /// Write `text` to control `op`; the error (with the kernel's reason) is printed, and
 /// returned for retries.
 fn write_ctl(op: &str, text: &str) -> Result<(), rt::Errno> {
-    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let path = alloc::format!("/System/Kernel/fs/milkfs/{op}");
     let r = sys::open(&path, O_WRONLY).and_then(|fd| {
         let r = sys::write(fd, text.as_bytes());
         let _ = sys::close(fd);
@@ -279,7 +279,7 @@ fn send(args: &[&str]) -> i32 {
         let _ = sys::unlink(&tmp);
         return 1;
     }
-    report("/sys/fs/milkfs/send");
+    report("/System/Kernel/fs/milkfs/send");
     if out.is_none() {
         let r = sys::open(&tmp, sys::O_RDONLY).and_then(|fd| {
             let r = pump(fd, 1);
@@ -376,14 +376,14 @@ fn receive(args: &[&str]) -> i32 {
     };
     let _ = sys::unlink(&tmp);
     if r {
-        report("/sys/fs/milkfs/receive");
+        report("/System/Kernel/fs/milkfs/receive");
     }
     if r { 0 } else { 1 }
 }
 
-/// `snap scrub`: start it and follow /sys/fs/milkfs/scrub until it is done.
+/// `snap scrub`: start it and follow /System/Kernel/fs/milkfs/scrub until it is done.
 fn scrub_wait() -> i32 {
-    const CTL: &str = "/sys/fs/milkfs/scrub";
+    const CTL: &str = "/System/Kernel/fs/milkfs/scrub";
     let text = || {
         sys::read_file(CTL)
             .map(|d| alloc::string::String::from_utf8_lossy(&d).into_owned())
@@ -467,7 +467,7 @@ fn ask(prompt: &str) -> Option<alloc::string::String> {
 
 /// Write a secret to a control file; errors are reported without it.
 fn send_secret(op: &str, text: &str) -> i32 {
-    let path = alloc::format!("/sys/fs/milkfs/{op}");
+    let path = alloc::format!("/System/Kernel/fs/milkfs/{op}");
     let r = sys::open(&path, O_WRONLY).and_then(|fd| {
         let r = sys::write(fd, text.as_bytes());
         let _ = sys::close(fd);
@@ -483,7 +483,7 @@ fn send_secret(op: &str, text: &str) -> i32 {
 }
 
 fn unlock(dev: Option<&str>) -> i32 {
-    let locked = sys::read_file("/sys/fs/milkfs/unlock").unwrap_or_default();
+    let locked = sys::read_file("/System/Kernel/fs/milkfs/unlock").unwrap_or_default();
     let locked = core::str::from_utf8(&locked).unwrap_or("");
     let target = locked
         .lines()
@@ -515,14 +515,14 @@ fn unlock(dev: Option<&str>) -> i32 {
 }
 
 fn lock(target: Option<&str>) -> i32 {
-    let r = sys::open("/sys/fs/milkfs/lock", O_WRONLY).and_then(|fd| {
+    let r = sys::open("/System/Kernel/fs/milkfs/lock", O_WRONLY).and_then(|fd| {
         let r = sys::write(fd, target.unwrap_or("all").as_bytes());
         let _ = sys::close(fd);
         r
     });
     match r {
         Ok(_) => {
-            let st = sys::read_file("/sys/fs/milkfs/lock").unwrap_or_default();
+            let st = sys::read_file("/System/Kernel/fs/milkfs/lock").unwrap_or_default();
             let st = core::str::from_utf8(&st).unwrap_or("");
             // Every locked volume, the one just locked among them.
             for l in st.lines().filter(|l| l.ends_with(" locked")) {
@@ -637,11 +637,11 @@ fn mkfs(args: &[&str], home: Option<&str>) -> i32 {
     0
 }
 
-/// Follow `/sys/fs/milkfs/encrypt` until no volume is being converted.
+/// Follow `/System/Kernel/fs/milkfs/encrypt` until no volume is being converted.
 fn convert_wait() -> i32 {
     let mut shown = u64::MAX;
     loop {
-        let t = sys::read_file("/sys/fs/milkfs/encrypt").unwrap_or_default();
+        let t = sys::read_file("/System/Kernel/fs/milkfs/encrypt").unwrap_or_default();
         let t = alloc::string::String::from_utf8_lossy(&t).into_owned();
         let Some(l) = t.lines().find(|l| l.contains(": converting: ")) else {
             print!(
@@ -785,22 +785,22 @@ fn main(args: &rt::Args) -> i32 {
         (Some("mkfs"), _) => mkfs(&args.argv[2..], args.env("HOME")),
         (Some("encrypt"), _) => convert(&args.argv[2..], true, args.env("HOME")),
         (Some("decrypt"), _) => convert(&args.argv[2..], false, args.env("HOME")),
-        (Some("disks"), _) => cat("/sys/fs/milkfs/disks"),
+        (Some("disks"), _) => cat("/System/Kernel/fs/milkfs/disks"),
         (Some("passwd"), _) => passwd(),
         (Some("scrub"), None) => scrub_wait(),
-        (Some("scrub"), Some("status")) => cat("/sys/fs/milkfs/scrub"),
+        (Some("scrub"), Some("status")) => cat("/System/Kernel/fs/milkfs/scrub"),
         (Some("scrub"), Some(_)) => match control_quiet("scrub", &args.argv[2..].join(" ")) {
-            0 => cat("/sys/fs/milkfs/scrub"),
+            0 => cat("/System/Kernel/fs/milkfs/scrub"),
             e => e,
         },
         (Some("send"), _) => send(&args.argv[2..]),
         (Some("receive"), _) => receive(&args.argv[2..]),
-        (None, _) | (Some("list"), _) => cat("/sys/fs/milkfs/snapshots"),
-        (Some("info"), _) => cat("/sys/fs/milkfs/info"),
+        (None, _) | (Some("list"), _) => cat("/System/Kernel/fs/milkfs/snapshots"),
+        (Some("info"), _) => cat("/System/Kernel/fs/milkfs/info"),
         (Some("diff"), Some(a)) => {
             let b = args.get(3).unwrap_or("live");
             match control_quiet("diff", &alloc::format!("{a} {b}")) {
-                0 => cat("/sys/fs/milkfs/diff"),
+                0 => cat("/System/Kernel/fs/milkfs/diff"),
                 e => e,
             }
         }
@@ -812,13 +812,13 @@ fn main(args: &rt::Args) -> i32 {
             };
             match control_quiet("check", mode) {
                 0 => {
-                    cat("/sys/fs/milkfs/check");
+                    cat("/System/Kernel/fs/milkfs/check");
                     0
                 }
                 e => e,
             }
         }
-        (Some("clones"), _) => cat("/sys/fs/milkfs/clones"),
+        (Some("clones"), _) => cat("/System/Kernel/fs/milkfs/clones"),
         (Some("clone"), Some(snap)) => match args.get(3) {
             Some(name) => control("clone", &alloc::format!("{snap} {name}")),
             None => {
@@ -827,7 +827,7 @@ fn main(args: &rt::Args) -> i32 {
             }
         },
         (Some(op @ ("promote" | "discard")), Some(name)) => control(op, name),
-        (Some("auto"), None) => cat("/sys/fs/milkfs/auto"),
+        (Some("auto"), None) => cat("/System/Kernel/fs/milkfs/auto"),
         (Some("auto"), Some(_)) => control("auto", &args.argv[2..].join(" ")),
         (Some(op @ ("create" | "delete" | "rollback")), Some(name)) => {
             control(if op == "create" { "snapshot" } else { op }, name)

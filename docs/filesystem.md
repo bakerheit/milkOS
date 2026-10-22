@@ -16,7 +16,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `errno.rs` | `Errno` with Linux values |
 | `tmpfs.rs` | RAM fs, mounted at `/` |
 | `synth.rs` | building blocks for kernel-generated fs (dirs, generated files, symlinks) |
-| `devfs.rs`, `procfs.rs`, `sysfs.rs` | `/dev`, `/proc`, `/sys` |
+| `devfs.rs`, `procfs.rs`, `sysfs.rs` | `/dev`, `/proc`, `/System/Kernel` (sysfs) |
 | `initramfs.rs` | cpio newc reader, unpacks the built-in archive into `/` |
 | `blockdev.rs` | `BlockDevice` trait, disk registry, `/dev/vdX` byte-offset inode |
 | `../virtio/blk.rs` | virtio-blk driver implementing `BlockDevice` |
@@ -24,7 +24,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `ramdisk.rs` | RAM block device (the self-test's throwaway milkfs) |
 | `ninep.rs` | 9P2000.L client: the Mac shared folder at `/Volumes/Mac` |
 | `fat.rs` | FAT32 with VFAT long names, at `/Volumes/<LABEL>` |
-| `pagecache.rs` | page cache for milkfs and FAT reads, `/sys/fs/pagecache` |
+| `pagecache.rs` | page cache for milkfs and FAT reads, `/System/Kernel/fs/pagecache` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
 | `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /System/Settings/motd` |
@@ -39,7 +39,9 @@ procfs and sysfs, then mounts the first disk that holds milkfs at `/Volumes/<lab
 Plain English on top: three kinds of program, each with its own folder. An **app** has a
 window (`/Apps`), a **command** is what you type in Terminal (`/Commands`, the shell's
 `PATH`), a **service** runs in the background (`/System/Services`, started by milkd).
-Constants and the two boot jobs below are in `fs/layout.rs`.
+Test harnesses and developer tools are a fourth, kept out of the way in
+`/System/Developer` (not on `PATH`). Constants and the two boot jobs below are in
+`fs/layout.rs`.
 
 ```text
 /Apps            apps you open: the built-in ones and the packages milk installs
@@ -49,14 +51,32 @@ Constants and the two boot jobs below are in `fs/layout.rs`.
 /Volumes         disks, USB sticks, the Mac's shared folder
 /System          the OS's own files
   Services       background helpers: milkd, alarmd, httpd, rngd, soundd, trashd
+    Sockets      their sockets (milkd.sock, drop.sock), made at boot
   Startup        init, the first program (PID 1)
   Settings       system settings: passwd, group, shadow, hostname, motd, milk/...
+  Kernel         the kernel's controls and hardware (sysfs): fs/milkfs/..., devices/...
+  Developer      test harnesses and developer tools: utest, fault, linux-hello, ...
   Fonts          font licences
   Sounds         the system sounds (chime, notify, error, shutter)
   Music          the tunes ~/Music is seeded with
   Version.txt
-/dev /proc /sys /tmp /run   (Linux-style, for programs that expect them)
+/dev /proc /tmp  Unix plumbing that Linux and POSIX programs expect; hidden in listings
 ```
+
+**What stays Unix, and why.** A folder keeps a Unix name at the top only if software from
+outside milkOS needs it there: `/dev` (`/dev/null`, `/dev/zero`, the terminals), `/proc`
+(Linux programs read `/proc/self/...`, `/proc/version`, `/proc/<pid>`; `linux-hello` reads
+`/proc/version`) and `/tmp` (POSIX). Everything only milkOS's own code uses lives under
+`/System` with a plain name: the service sockets (once `/run`) in
+`/System/Services/Sockets`, the kernel controls (once `/sys`: milkOS's own files, not
+Linux's sysfs layout, so no outside program looks there) in `/System/Kernel`. There are no
+links with the old names.
+
+**Hidden.** The three that stay are hidden in listings of `/`: Files (and the open and
+save sheets) never shows them, `files list /` leaves them out unless `--all` (`-a`), like
+dot files. They are still there for anything that opens them by path (`files list /tmp`
+works, and `open /tmp` shows it in Files). The list is `filekit::path::HIDDEN_AT_ROOT`, one place
+shared by the kernel (Files) and `files`.
 
 | path | fs | what |
 |---|---|---|
@@ -70,18 +90,34 @@ Constants and the two boot jobs below are in `fs/layout.rs`.
 | `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
 | `/System` | tmpfs | the OS's own files; `/System/Version.txt` |
 | `/System/Services` | tmpfs | background programs, started and supervised by milkd (docs/processes.md, "Services") |
+| `/System/Services/Sockets` | tmpfs | the services' sockets (`milkd.sock`, `drop.sock`) and `boot-id` (docs/time-apps.md); made at boot, root's, 0755 |
 | `/System/Startup` | tmpfs | `init`, the first program the kernel starts |
 | `/System/Settings` | tmpfs | `passwd`, `group`, `shadow`, `hostname` (= `milk`), `motd`, `milk/` (`repos`, `keys/`, `services/`) |
 | `/System/Settings/milk/drop`, `.../milk/net` | milkfs (binds of `/Volumes/Milk/System/Settings/milk/...`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), the hostname; persistent |
+| `/System/Kernel` | sysfs | `devices/platform/*`, `kernel/version`, `fs/milkfs/*` (snapshot control), `fs/search/*`, `fs/pagecache/*` |
+| `/System/Developer` | tmpfs | test harnesses and developer tools (below); not on `PATH` |
 | `/System/Fonts`, `/System/Sounds`, `/System/Music` | tmpfs | font licences, system sounds, the seed tunes for ~/Music |
-| `/tmp` | tmpfs | mode `1777` |
-| `/run` | tmpfs | service sockets (`/run/milkd.sock`) |
-| `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) |
-| `/proc` | proc | `meminfo uptime version interrupts mounts` |
-| `/sys` | sysfs | `devices/platform/*`, `kernel/version`, `fs/milkfs/*` (snapshot control) |
+| `/tmp` | tmpfs | mode `1777` (hidden in listings of `/`) |
+| `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) (hidden) |
+| `/proc` | proc | `meminfo uptime version interrupts mounts` (hidden) |
 
-There are no `/bin`, `/etc`, `/home`, `/srv` or `/Applications` folders, and no links
-with those names: a clean break (the self-test checks they are gone).
+There are no `/bin`, `/etc`, `/home`, `/srv`, `/run`, `/sys` or `/Applications` folders,
+and no links with those names: a clean break (the self-test checks they are gone).
+
+**`/System/Developer`.** The programs that test milkOS or show off a kernel feature, not
+ones you type day to day. The test scripts run them by full path
+(`/System/Developer/utest svc`); to type them by name, `export PATH=/Commands:/System/Developer`.
+
+| program | what |
+|---|---|
+| `utest` | the kernel feature tests from user space (`utest pipe`, `utest svc`, `utest linux`, ...) |
+| `hello` | says hello and pokes a few syscalls; init runs it once at boot |
+| `fault` | misbehaves on purpose (bad pointer, stack overflow) to show only the process dies |
+| `fsstress` | parallel file-system stress (scrubtest, stressloop) |
+| `tcpbench` | TCP throughput (scripts/net-bench.sh) |
+| `linux-hello` | a static Linux/aarch64 program with no milkOS knowledge: the compatibility test |
+| `chroot` | runs a command with a folder as `/` (`milk` uses the `chroot(2)` call itself) |
+| `sandbox` | runs a command with fewer capabilities (milkd and `milk` use `sandbox(2)` themselves) |
 
 **Built-in apps on the disk.** `/Apps` is one folder for both kinds of app, but the
 built-in ones arrive in RAM (the initramfs) and the installed ones live on the volume. So
@@ -96,7 +132,9 @@ never lists, replaces or removes them, and the desktop runs only those unsandbox
 `etc/milk/{drop,net}`. `layout::migrate` (run by `milkfs::setup_home`, at boot or when a
 login unlocks the volume, before anything is bound) moves them once, by renames inside the
 volume: `home/<user>` to `Users/<user>`, `Applications` to `Apps`,
-`etc/milk/drop` and `etc/milk/net` to `System/Settings/milk/`. The moved home gets the
+`etc/milk/drop` and `etc/milk/net` to `System/Settings/milk/`. (`/run` and `/sys` need
+nothing: they were never on a disk, both are made at boot, and nothing kept on a volume
+names them.) The moved home gets the
 shipped `~/Sites` (the web pages used to be in RAM, at `/srv/www`) and loses its search
 index (a cache with the old paths; it is rebuilt). It logs `layout: moved ...` and audits
 `fs.layout.migrate`. Snapshots taken before keep the old names (they are read-only):
@@ -120,7 +158,7 @@ files rename OLD NEW          in place; NEW is a name, not a path
 files delete PATH...          to the Trash
 files delete --now PATH...    for good
 files info PATH...            kind, size (or items), where, which disk, dates, owner, permissions
-files list [-l] [-a] [PATH]   folders first, "name/" for folders; --long, --all (dot files)
+files list [-l] [-a] [PATH]   folders first, "name/" for folders; --long, --all (dot files, /dev /proc /tmp)
 files link TARGET NAME        a symbolic link
 trash [list]                  name, where it was, when deleted, days left
 trash restore NAME|PATH...    back where it was; refused if something is there now
@@ -564,7 +602,7 @@ The file system's read path fills a missing page outside the cache lock.
   inserted, so a racing write can't leave stale data behind.
 - Not cached: 9p (the Mac can change files underneath), tmpfs (already RAM), devices.
 - No `mmap` of files yet (that's proc/uspace's side).
-- `/sys/fs/pagecache/`: `stats`, `enabled` (write 0/1), `drop`, `bench` (write a path: it
+- `/System/Kernel/fs/pagecache/`: `stats`, `enabled` (write 0/1), `drop`, `bench` (write a path: it
   is read twice, cold then warm, and the timings are printed and readable from `bench`).
 
 Measured with `scripts/cachebench.sh` (4 MiB random file, real virtio disks, HVF):
@@ -640,8 +678,8 @@ while let Some(ev) = w.next(200_000_000) {          // wait up to 200 ms
 ## Search (`fs::search`)
 
 `kernel/src/fs/search/` (`mod.rs`: the index and its thread; `query.rs`: queries and
-`/sys/fs/search`). A Spotlight-style index of everything under its roots (default
-`/Users/milk` and `/Apps`; `/sys/fs/search/roots`): path, name, kind, size, mtime,
+`/System/Kernel/fs/search`). A Spotlight-style index of everything under its roots (default
+`/Users/milk` and `/Apps`; `/System/Kernel/fs/search/roots`): path, name, kind, size, mtime,
 and the words of text files.
 
 - **Kinds**: the extension for known ones (`md`, `txt`, `rs`, `toml`, `html`, `json`, `py`,
@@ -711,7 +749,7 @@ let s: search::Status = search::status(); // s.state: "starting" | "building" |
   (a `sched::Mutex`) for the length of the query, no I/O. The results are sorted.
 - `search::parse(q, now)` splits a query without running it (e.g. to show filter chips).
 
-### `/sys/fs/search` and `spot`
+### `/System/Kernel/fs/search` and `spot`
 
 - `query`: write `[limit=N] QUERY`, read back `# N result(s) for "QUERY" in T us`, then one
   line per hit: `score<TAB>kind<TAB>size<TAB>mtime<TAB>matched<TAB>path` (the last query
@@ -738,7 +776,7 @@ the kernel's VFS glue in `kernel/src/fs/milkfs/`; host tool `scripts/mkmilkfs.py
 `scripts/crashtest.sh`, host tests `scripts/milkfs-test.sh`.
 Mounted at `/Volumes/<label>` (`/Volumes/Milk`). Every disk with milkfs is mounted, at
 `/Volumes/<label>` (or `/Volumes/<label>-<dev>` if taken); the **primary** volume (home,
-Time Machine, the snapshot API, `/sys/fs/milkfs`) is the one labelled `Milk`, else the first
+Time Machine, the snapshot API, `/System/Kernel/fs/milkfs`) is the one labelled `Milk`, else the first
 found (qemu's disk order isn't the command line's). Others are plain volumes, e.g. backup
 targets for `snap receive`. The design it follows is the sketch below;
 the differences are listed at the end of this section.
@@ -760,10 +798,10 @@ the differences are listed at the end of this section.
 | `milkfs/src/fsck.rs`, `scrub.rs` | `check [--repair]`, the scrub walk |
 | `milkfs/src/timemachine.rs` | automatic snapshots: settings, retention, the snapshot |
 | `kernel/src/fs/milkfs/inode.rs` | VFS objects: `Volume` (the `FileSystem`), `MilkInode`, `.snapshots` |
-| `kernel/src/fs/milkfs/scrub.rs`, `timemachine.rs` | their threads, rate limit, status, `/sys/fs/milkfs/scrub` and `/auto` |
+| `kernel/src/fs/milkfs/scrub.rs`, `timemachine.rs` | their threads, rate limit, status, `/System/Kernel/fs/milkfs/scrub` and `/auto` |
 | `kernel/src/fs/milkfs/platform.rs` | the kernel as the crate's `Platform` |
 | `kernel/src/fs/milkfs/crashtest.rs` | fw_cfg-selected crash workloads and checker (inert on a normal boot) |
-| `kernel/src/fs/milkfs/mod.rs` | kernel API, automount, unlock / lock, `/sys/fs/milkfs` |
+| `kernel/src/fs/milkfs/mod.rs` | kernel API, automount, unlock / lock, `/System/Kernel/fs/milkfs` |
 
 ### The milkfs crate
 
@@ -778,7 +816,7 @@ too. What the crate gets from its host:
 - `platform::Platform`, installed once (`set_platform`; the kernel's in
   `kernel/src/fs/milkfs/platform.rs`, first thing in `fs::init`): wall-clock time,
   monotonic time, a counter (UUID seed), random bytes, scrypt (the kernel's in page
-  frames), a log line, the reason for an error (`/sys/fs/milkfs/error`), and locks
+  frames), a log line, the reason for an error (`/System/Kernel/fs/milkfs/error`), and locks
   (`RawLock`: a sleeping one, the kernel's `sched::Mutex`, for the block cache, which is
   held across disk I/O; a spinning one, its IRQ-masking `SpinLock`, for the node cache);
 - `volume::StateAccess`: how the drivers that must not hold the volume lock across slow
@@ -787,7 +825,7 @@ too. What the crate gets from its host:
 
 `LAST_COMMIT` (the last generation whose commit completed, for the crash test's power-cut
 report) is the crate's. The kernel keeps the VFS (`inode.rs`, the page cache), the
-threads, `/sys/fs/milkfs`, unlock and lock, the audit log, and the crash-test modes.
+threads, `/System/Kernel/fs/milkfs`, unlock and lock, the audit log, and the crash-test modes.
 
 ### On-disk format (v0, v1, v2)
 
@@ -846,7 +884,7 @@ the leaf (inode numbers only grow, so that is file creation): then it splits at 
 object boundary and the left leaf stays full. On delete, a node left under a quarter full
 is merged with a neighbour if the two fit in one block, otherwise the two share their
 entries evenly; a root with one child is replaced by it. `scripts/treetest.sh [N]`
-(`/sys/fs/milkfs/treetest`: `DIR N` creates N empty files in DIR, deletes 99 of every 100,
+(`/System/Kernel/fs/milkfs/treetest`: `DIR N` creates N empty files in DIR, deletes 99 of every 100,
 then the rest, printing the live tree's shape after each step), 50 000 files:
 
 | | before | even splits only + merge on delete | + object-boundary splits |
@@ -976,7 +1014,7 @@ snapshots the primary volume at boot and then every interval, as `auto-YYYY-MM-D
 applies to `auto-` snapshots only: the newest `keep`, plus the newest of each day for the last
 `daily` days; manual snapshots and clone origins are never deleted; if the 30-record table
 is full the oldest auto snapshot makes room. Defaults: on, 15 min, keep 8, daily 14. Settings
-live in the superblock, so they persist: `/sys/fs/milkfs/auto` reads e.g. `on interval=15m
+live in the superblock, so they persist: `/System/Kernel/fs/milkfs/auto` reads e.g. `on interval=15m
 keep=8 daily=14` / `next in 12m`; write `on`, `off`, `interval=30s|15m|2h`, `keep=K`,
 `daily=D`, `now` (`snap auto ...`). A snapshot is a root pointer plus one superblock commit.
 
@@ -1003,7 +1041,7 @@ per-process roots; today, from that path) → Keep = promote, Cancel = discard.
 `fs::milkfs::diff(a, b: Option<&str>) -> DiffResult { changes: Vec<Change>, nodes_read,
 subtrees_skipped }`, `Change::{Added, Removed, Modified, Renamed(old, new)}` with paths from
 the volume root. `b = None` or `"live"` = the live volume; the order of `a` and `b` doesn't
-matter. Shell: write `A [B]` to `/sys/fs/milkfs/diff`, read the result back;
+matter. Shell: write `A [B]` to `/System/Kernel/fs/milkfs/diff`, read the result back;
 `snap diff A [B|live]` prints e.g.
 
 ```
@@ -1054,9 +1092,9 @@ pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
   shows up in the list). Fails with ENOSPC if the 30-record snapshot table is full.
 - To show a version's content, read `<volume>/.snapshots/<snapshot><path in volume>`, e.g.
   `/Volumes/Milk/.snapshots/monday/Users/milk/Documents/ideas.md` (read-only).
-- Shell: write a path to `/sys/fs/milkfs/versions` and read back tab-separated lines
+- Shell: write a path to `/System/Kernel/fs/milkfs/versions` and read back tab-separated lines
   `snapshot|current, taken, mtime, size, hash` (after a `# path` header); write
-  `SNAPSHOT PATH` to `/sys/fs/milkfs/restore`. Tool: `versions FILE`,
+  `SNAPSHOT PATH` to `/System/Kernel/fs/milkfs/restore`. Tool: `versions FILE`,
   `versions restore FILE SNAPSHOT`:
 
 ```
@@ -1073,7 +1111,7 @@ Never automatic: mount only finishes deferred deletes (inodes with no links left
 files unlinked while open when the machine went down, like Linux's orphan list) and
 *reports* anything else (`check FOUND PROBLEMS`). Repairs happen only on request:
 
-- kernel: `fs::milkfs::check(repair) -> CheckReport`, `/sys/fs/milkfs/check` (write `check`
+- kernel: `fs::milkfs::check(repair) -> CheckReport`, `/System/Kernel/fs/milkfs/check` (write `check`
   or `repair`, read the report), `snap check [--repair]`;
 - host: `scripts/mkmilkfs.py check IMAGE [--repair]` (exit 0 clean/repaired, 1 problems,
   2 damage that can't be repaired).
@@ -1123,7 +1161,7 @@ A file can share data blocks with another (copy-on-write): `files copy --reflink
 - 2 MB with `files copy --reflink`: a handful of metadata blocks instead of 489 data blocks
   (`scripts/reflinktest.sh`).
 
-**dedupe** (`dedupe [-n] DIR`, `/sys/fs/milkfs/dedupe` (`DIR` or `DIR dry`),
+**dedupe** (`dedupe [-n] DIR`, `/System/Kernel/fs/milkfs/dedupe` (`DIR` or `DIR dry`),
 `fs::milkfs::dedupe(dir, dry_run)`): every regular file with data blocks under `DIR` is
 grouped by size and content hash (from the block checksums, no data read); files in a
 group are compared byte by byte with the group's first file and, if equal, made to share
@@ -1183,14 +1221,14 @@ keyring) refuses to mount. Encrypted volumes are format v3: older kernels refuse
 **Unlocking.** At boot an encrypted volume is found but stays unmounted, "locked":
 
 ```text
-milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphrase to /sys/fs/milkfs/unlock)
+milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphrase to /System/Kernel/fs/milkfs/unlock)
 ```
 
 - `snap unlock [DEV]` asks for the passphrase (or the recovery key) without echoing it,
   three tries; `snap passwd` changes the passphrase (asks for the current one or the
   recovery key, then the new one twice).
-- `/sys/fs/milkfs/unlock`: read: the locked volumes (`vda Milk locked`); write
-  `[dev=NAME ]SECRET`. `/sys/fs/milkfs/passwd`: write `OLD\nNEW`. Wrong: EACCES.
+- `/System/Kernel/fs/milkfs/unlock`: read: the locked volumes (`vda Milk locked`); write
+  `[dev=NAME ]SECRET`. `/System/Kernel/fs/milkfs/passwd`: write `OLD\nNEW`. Wrong: EACCES.
 - Kernel: `fs::milkfs::unlock(secret, dev) -> Result<Vec<String>>` (mount paths),
   `fs::milkfs::change_passphrase(old, new)`, `fs::milkfs::locked()`. If the volume is the
   primary one (labelled Milk), unlocking it binds `/Users/milk` and `/Apps` onto
@@ -1205,7 +1243,7 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
 **Making one in milkOS** (no Mac needed): `snap mkfs DEV [LABEL] [--force] --encrypt
 [--recovery-out FILE | --no-recovery] [--passphrase-file F]` asks for the passphrase twice
 (not echoed) and shows the recovery key once (`snap: recovery key: XXXX-...`), or writes
-it to FILE. Underneath: `/sys/fs/milkfs/mkfs` takes `DEV [LABEL] [force] encrypt
+it to FILE. Underneath: `/System/Kernel/fs/milkfs/mkfs` takes `DEV [LABEL] [force] encrypt
 [recovery=FILE]` and then, on a second line of the same write, the passphrase (8
 characters or more; wiped after use, never logged or audited); kernel
 `fs::milkfs::mkfs_encrypted(dev, label, force, passphrase, recovery_out)`. A random
@@ -1213,7 +1251,7 @@ volume key (CSPRNG) goes into a passphrase slot (scrypt 2^16/8/4) and, with `rec
 a recovery slot whose 128-bit key is written to FILE (created with O_EXCL, mode 0600,
 owned like its folder; snap's temporary one in the home folder is read and removed). The
 layout is what `mkmilkfs.py mkfs --encrypt` makes (root leaf sealed, keyring in block 3,
-format v3, `sb_mac`). The new volume is left locked (listed by `/sys/fs/milkfs/unlock`):
+format v3, `sb_mac`). The new volume is left locked (listed by `/System/Kernel/fs/milkfs/unlock`):
 `snap unlock DEV` mounts it. `mkfs` refuses a mounted device (EBUSY, any mounted volume,
 not just the primary one).
 
@@ -1226,7 +1264,7 @@ disk that holds milkfs needs `force` (EEXIST otherwise), and works on any disk t
 mounted, a locked encrypted one included; a mounted one (the home volume always is) is
 refused with EBUSY.
 
-`/sys/fs/milkfs/disks` lists every block device, for choosing what to format:
+`/System/Kernel/fs/milkfs/disks` lists every block device, for choosing what to format:
 
 ```text
 vda 25165824 rw milkfs encrypted mounted=/Volumes/Fresh Fresh
@@ -1238,7 +1276,7 @@ vdc 67108864 rw other
 last since it may contain spaces, or `NAME BYTES rw|ro other` for anything that isn't
 milkfs: FAT, blank, a scratch disk.) `snap disks` prints it.
 
-**State in `/sys/fs/milkfs/info`** (the primary volume; Disk Utility's diskkit parses it):
+**State in `/System/Kernel/fs/milkfs/info`** (the primary volume; Disk Utility's diskkit parses it):
 
 ```text
 encryption:  on
@@ -1252,15 +1290,15 @@ key slots:   1 passphrase, 1 recovery
 `kdf` is the first passphrase slot's parameters (each slot has its own). A plain volume
 has just `encryption:  off`. `info` only describes a mounted volume, so `locked:` is
 always `no` there; locked volumes (not mounted, no `info`) are listed by
-`/sys/fs/milkfs/unlock` (`vda Milk locked`) and `/sys/fs/milkfs/lock`.
+`/System/Kernel/fs/milkfs/unlock` (`vda Milk locked`) and `/System/Kernel/fs/milkfs/lock`.
 
 **Encrypting in place** (and back). `snap encrypt [DEV] [--recovery-out FILE |
 --no-recovery] [--rate MB] [--wait]` encrypts a plain volume (default the primary one) in
 the background, while it is in use; `snap decrypt [DEV] [--wait]` (asks for the
 passphrase or the recovery key) makes an encrypted one plain again. Underneath:
-`/sys/fs/milkfs/encrypt` (`[dev=NAME] [recovery=FILE] [rate=MB]`, the new passphrase on
+`/System/Kernel/fs/milkfs/encrypt` (`[dev=NAME] [recovery=FILE] [rate=MB]`, the new passphrase on
 a second line; `rate=MB` alone changes the speed, 0 = unlimited) and
-`/sys/fs/milkfs/decrypt` (`[dev=NAME]`, the secret on a second line); kernel
+`/System/Kernel/fs/milkfs/decrypt` (`[dev=NAME]`, the secret on a second line); kernel
 `fs::milkfs::encrypt_in_place(dev, passphrase, recovery_out)`,
 `decrypt_in_place(dev, secret)`; `milkfs/src/convert.rs`.
 
@@ -1314,7 +1352,7 @@ conversion:  encrypt 24% (385/1486 blocks), live tree
 (`encrypt|decrypt PCT% (DONE/TOTAL blocks), PHASE[, paused: REASON]`, PHASE `live tree`,
 `snapshot NAME`, `clone NAME`, `verifying` or `clearing free space`; TOTAL is the blocks
 in use at the start, DONE can pass it, PCT stays below 100 until it is done.)
-`/sys/fs/milkfs/encrypt` reads `vda (Milk) at /Volumes/Milk: converting: encrypt 24% ...`
+`/System/Kernel/fs/milkfs/encrypt` reads `vda (Milk) at /Volumes/Milk: converting: encrypt 24% ...`
 per converting volume, then the last result (`... encrypted in place, done`).
 
 Tests: `scripts/converttest.sh` (a volume filled by the crash writer: files, reflink and
@@ -1326,7 +1364,7 @@ passphrase) and enctest boots 5-6 (the home volume encrypted while in use, what 
 refused meanwhile, locked at the next boot, decrypted back).
 
 **Locking again.** `snap lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
-can be locked), `/sys/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
+can be locked), `/System/Kernel/fs/milkfs/lock` (write `vdb`, `/Volumes/Vault`, `Vault` or `all`),
 kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices locked):
 
 1. refuse if a send, receive or scrub is using the volume (EBUSY);
@@ -1353,7 +1391,7 @@ are bound from the primary volume, and the logged-in session, the desktop and th
 indexer live on it, so locking it is refused (EBUSY: "you can't lock the volume you're
 logged into"); it locks at shutdown (the key is only ever in RAM). A secondary encrypted
 volume (a backup disk, a vault) locks and unlocks any number of times.
-`/sys/fs/milkfs/lock` reads as the encrypted volumes and their state:
+`/System/Kernel/fs/milkfs/lock` reads as the encrypted volumes and their state:
 
 ```text
 vdc Milk unlocked at=/Volumes/Milk (home: can't be locked)
@@ -1381,7 +1419,7 @@ milkOS has finished.
 ### Scrub
 
 `snap scrub` (start and wait), `snap scrub start|stop|status|rate=MB/s|auto=off|on|7d|12h`,
-`/sys/fs/milkfs/scrub` (read: status; write: the same words), kernel
+`/System/Kernel/fs/milkfs/scrub` (read: status; write: the same words), kernel
 `fs::milkfs::scrub::scrub_volume`. A low-priority kernel thread (`milkfs-scrub`) reads
 every block reachable from each mounted volume's committed state (live tree, snapshots,
 clones, each shared subtree and shared data block once, dead-list chains, the space map,
@@ -1428,8 +1466,8 @@ older snapshot OLDER) to FILE or stdout; `snap receive [FILE] [--to PATH] [--for
 [--passphrase-file F]` recreates it on the milkfs volume PATH is on (stdin if no FILE;
 default the primary volume). Kernel: `fs::milkfs::send(snap, from, out_path, crypt)`
 (`StreamCrypt::Passphrase(p)`, `Plain` or `Default`), `fs::milkfs::receive(path, target,
-force, passphrase)`; `/sys/fs/milkfs/send` (`SNAP [FROM] PATH [plaintext]`, then
-optionally a newline and the stream passphrase) and `/sys/fs/milkfs/receive` (`PATH
+force, passphrase)`; `/System/Kernel/fs/milkfs/send` (`SNAP [FROM] PATH [plaintext]`, then
+optionally a newline and the stream passphrase) and `/System/Kernel/fs/milkfs/receive` (`PATH
 [TARGET] [force]`, then optionally a newline and the passphrase), each readable for the
 last report (`sent s1, encrypted to ...`). Mac: `mkmilkfs.py verify-stream FILE`,
 `mkmilkfs.py receive IMAGE FILE [--force]`, `mkmilkfs.py seal-stream FILE OUT` (encrypt
@@ -1546,16 +1584,16 @@ Kernel API (`crate::fs::milkfs`): `probe(dev)`, `mkfs(dev, label, force)`, `moun
 `info()`, `volume()`, `user_volume()`, `mount_path()`. VFS: `fs::bind`, `fs::unmount`,
 `fs::sync_all`, `Inode::sync`, `FileSystem::sync`, `OpenFile::fsync`.
 
-Shell: `/sys/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name to
+Shell: `/System/Kernel/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); write a name to
 `snapshot`, `delete`, `rollback`, `discard`, `promote`; `SNAP NAME` to `clone`; settings to
 `auto`; anything to `sync`; `vdX [label] [force]` to `mkfs`. msh has no redirection yet, so
 `user/snap` wraps them: `snap`, `snap info`, `snap create|delete|rollback NAME`,
 `snap clones`, `snap clone SNAP NAME`, `snap promote|discard NAME`, `snap auto [SETTINGS]`.
 
-### `/sys/fs/milkfs` reference: every file and its errors (for Disk Utility)
+### `/System/Kernel/fs/milkfs` reference: every file and its errors (for Disk Utility)
 
 **How errors come back.** A control is written with one `write(2)`; failure is that
-write's errno. Then `/sys/fs/milkfs/error` says why, one line:
+write's errno. Then `/System/Kernel/fs/milkfs/error` says why, one line:
 `CONTROL: ERRNO: reason` (e.g. `lock: EBUSY: vdb (Vault) is in use: pid 16 (sleep): 1
 open file`); a write that works empties it. It is the last failure on the system (not per
 process), so read it right after the failed write and check the control name. `snap`
@@ -1612,7 +1650,7 @@ give a more exact one with `fail(errno, reason)`, as `lock` does); the self-test
 sample of them and the authorisation hook (`milkfs_control_errors`).
 
 **mkfs** never runs on its own. In the kernel it is the explicit `mkfs()` call (or the
-`/sys/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless
+`/System/Kernel/fs/milkfs/mkfs` file); it refuses a disk that already holds milkfs (EEXIST) unless
 `force`, and always refuses the mounted volume (EBUSY). On the Mac:
 `scripts/mkmilkfs.py mkfs IMAGE [--size 64M] [--label Milk] [--force]`, same refusal.
 `mkmilkfs.py check IMAGE` is a host fsck (every checksum, key order, namespace),
@@ -1642,10 +1680,10 @@ sample of them and the authorisation hook (`milkfs_control_errors`).
   info consistent, exact space accounting, home bound); verified byte-identical after a boot.
   Everything destructive runs on a throwaway volume: a 16 MiB RAM disk (`fs/ramdisk.rs`),
   mkfs'd, mounted at `/Volumes/.milk-selftest` (never the primary volume), with the snapshot
-  API and `/sys/fs/milkfs` pointed at it for the duration (`set_test_override`, before the
+  API and `/System/Kernel/fs/milkfs` pointed at it for the duration (`set_test_override`, before the
   scheduler starts), then unmounted and its RAM checked to be back. It covers file I/O,
   300 KiB file, truncate, sparse, 60 files, rename/link/symlink/unlink-while-open,
-  getdents64, bind mounts, snapshots via the API and `/sys`, browsing, EROFS, rollback,
+  getdents64, bind mounts, snapshots via the API and `/System/Kernel`, browsing, EROFS, rollback,
   delete, Time Machine naming/retention/settings, clones (create, isolation, origin pinned,
   discard, persistence across a re-open, promote, undo), a small-file benchmark, and
   **exact space accounting** (allocated == reachable, no leak, nothing live marked free)
@@ -1675,7 +1713,7 @@ sample of them and the authorisation hook (`milkfs_control_errors`).
 ### Performance (v1)
 
 What v1 changed, all measured with `scripts/cachebench.sh` (virtio disk, HVF, `-smp 4`;
-the create benchmark is `/sys/fs/milkfs/bench`: write N files of a size into a fresh
+the create benchmark is `/System/Kernel/fs/milkfs/bench`: write N files of a size into a fresh
 directory and fsync, then read them all back with the page cache dropped):
 
 | | v0 | v1 |
@@ -1802,7 +1840,7 @@ Old tree nodes go to the dead list / free list as above.
   block cache, CoW on write). An inode cache (`BTreeMap<ino, Weak<MilkInode>>`) keeps one
   object per inode, which the VFS's `(dev, ino)` identity relies on for mount points.
 - Mounted with `fs::mount("/Volumes/<label>", fs)`, or as `/` with tmpfs kept for `/tmp`
-  and `/dev`, `/proc`, `/sys` on top.
+  and `/dev`, `/proc`, `/System/Kernel` on top.
 - Snapshot control needs a small kernel API (`fs::snapshot(path, name)`,
   `fs::rollback(path, name)`, `fs::clone_volume`) exposed to userspace via `ioctl` on the
   volume root (`Inode::ioctl` exists for this) or a milkOS-specific syscall.

@@ -105,7 +105,7 @@ boot b1 "$T/boot1.log" \
   "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "files list /Volumes/Backup/data /Volumes/Backup/.snapshots" \
-  "echo now > /sys/fs/milkfs/sync"
+  "echo now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/boot1.log")"
 echo "$L" | grep -a "^snap: sent\|^snap: received\|^snap: receive" | sed 's/^/    /'
 [ "$(echo "$L" | grep -ac '^snap: received')" = 2 ] && ok "kernel: received s1 (full) and s2 (incremental) on /Volumes/Backup" || bad "kernel receives"
@@ -194,7 +194,7 @@ if [ "$($M tree "$C" | wc -l | tr -d ' ')" = 0 ]; then
 elif $M tree "$C" --snapshot s2 2>/dev/null | diff -q - "$T/src-s2.tree" >/dev/null; then
   ok "  and is complete (the receive finished before the kill)"
 else bad "  partly received"; fi
-boot b4 "$T/boot4.log" "snap receive $S/s2-full.stream --to /Volumes/Crash$SPF" "echo now > /sys/fs/milkfs/sync"
+boot b4 "$T/boot4.log" "snap receive $S/s2-full.stream --to /Volumes/Crash$SPF" "echo now > /System/Kernel/fs/milkfs/sync"
 $M tree "$C" --snapshot s2 > "$T/crash-s2.tree" 2>/dev/null
 if diff -q "$T/crash-s2.tree" "$T/src-s2.tree" >/dev/null && $M check "$C" > "$T/crash2.txt" 2>&1 && ! grep -q "clone" "$T/crash2.txt"; then
   ok "receiving again works (leftover clone discarded): s2 identical, check clean"

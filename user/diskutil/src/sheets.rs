@@ -243,7 +243,7 @@ impl App {
         let mut lines = Vec::new();
         match data::ctl("diff", &snaps::diff_request(&name, None)) {
             Ok(()) => {
-                let d = snaps::parse_diff(&data::text("/sys/fs/milkfs/diff"));
+                let d = snaps::parse_diff(&data::text("/System/Kernel/fs/milkfs/diff"));
                 let n = |k: ChangeKind| d.changes.iter().filter(|c| c.kind == k).count();
                 lines.push(format!(
                     "{} change{} since then ({} added, {} changed, {} deleted, {} moved) will be undone.",

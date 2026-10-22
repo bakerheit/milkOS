@@ -41,7 +41,7 @@ pub fn kind_of(name: &str) -> SnapKind {
     }
 }
 
-/// Parse `/sys/fs/milkfs/snapshots` ("name gen=N created=SECS"), oldest first as the kernel gives it.
+/// Parse `/System/Kernel/fs/milkfs/snapshots` ("name gen=N created=SECS"), oldest first as the kernel gives it.
 pub fn parse_snapshots(text: &str) -> Vec<Snap> {
     text.lines()
         .filter_map(|l| {
@@ -84,7 +84,7 @@ pub struct Clone_ {
     pub mount: Option<String>,
 }
 
-/// Parse `/sys/fs/milkfs/clones` ("name of=SNAP at=/Volumes/Milk-name").
+/// Parse `/System/Kernel/fs/milkfs/clones` ("name of=SNAP at=/Volumes/Milk-name").
 pub fn parse_clones(text: &str) -> Vec<Clone_> {
     text.lines()
         .filter_map(|l| {
@@ -128,7 +128,7 @@ pub struct AutoSettings {
     pub count: u32,
 }
 
-/// Parse `/sys/fs/milkfs/auto`: "on interval=15m keep=8 daily=14" / "next in 12m" / "N automatic snapshot(s)".
+/// Parse `/System/Kernel/fs/milkfs/auto`: "on interval=15m keep=8 daily=14" / "next in 12m" / "N automatic snapshot(s)".
 pub fn parse_auto(text: &str) -> Option<AutoSettings> {
     let mut a = AutoSettings {
         enabled: false,

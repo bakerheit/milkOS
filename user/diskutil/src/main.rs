@@ -1,5 +1,5 @@
 //! Disk Utility: a window over milkfs (docs/ui-concepts/SPEC-DISK-REMINDERS.md, section 1).
-//! Everything comes from /sys/fs/milkfs and /proc/mounts; the logic is in `user/diskkit`.
+//! Everything comes from /System/Kernel/fs/milkfs and /proc/mounts; the logic is in `user/diskkit`.
 //! Destructive actions go through one confirm sheet.
 
 #![no_std]
@@ -475,7 +475,7 @@ impl App {
         };
         let (what, from) = (j.what.clone(), j.report_from);
         self.job = None;
-        let report = data::text(&format!("/sys/fs/milkfs/{from}"));
+        let report = data::text(&format!("/System/Kernel/fs/milkfs/{from}"));
         match from {
             "check" => self.check_report = report.clone(),
             _ => self.report = report.clone(),

@@ -13,7 +13,7 @@
 //! Filters: kind:md (or text, image, audio, folder), in:Documents (or in:/path),
 //! modified:today|yesterday|week|month|3d|12h. Under msh's structured pipes
 //! (MILK_TABLE=1) it emits a table: path, name, kind, size, modified, score, matched.
-//! Talks to /sys/fs/search.
+//! Talks to /System/Kernel/fs/search.
 
 #![no_std]
 #![no_main]
@@ -27,7 +27,7 @@ use rt::{eprintln, print, println, sys};
 
 rt::main!(main);
 
-const DIR: &str = "/sys/fs/search";
+const DIR: &str = "/System/Kernel/fs/search";
 
 fn read(path: &str) -> Result<String, rt::Errno> {
     sys::read_file(path).map(|d| String::from_utf8_lossy(&d).into_owned())

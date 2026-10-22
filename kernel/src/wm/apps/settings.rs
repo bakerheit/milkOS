@@ -1,5 +1,5 @@
 //! Settings: Appearance (Whole milk / Chocolate milk, the UI font), Wallpaper, Display (brightness), Dock
-//! (icon size), Time Machine (milkfs automatic snapshots, via /sys/fs/milkfs/auto), Trash (how
+//! (icon size), Time Machine (milkfs automatic snapshots, via /System/Kernel/fs/milkfs/auto), Trash (how
 //! long deleted things wait before trashd deletes them for good) and About.
 //! Changes go to the desktop as `Request::Prefs` (applied at once, saved to
 //! ~/.config/milk/settings); Time Machine settings live on the milkfs volume itself.
@@ -46,8 +46,8 @@ static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::ne
 pub fn show_section(i: usize) {
     *PENDING.lock() = Some(i.min(SECTIONS.len() - 1));
 }
-const AUTO: &str = "/sys/fs/milkfs/auto";
-const TM_SNAPSHOTS: &str = "/sys/fs/milkfs/snapshots";
+const AUTO: &str = "/System/Kernel/fs/milkfs/auto";
+const TM_SNAPSHOTS: &str = "/System/Kernel/fs/milkfs/snapshots";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hit {

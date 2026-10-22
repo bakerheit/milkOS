@@ -5,7 +5,7 @@
 //! The identity belongs to the machine and is root's: `identity.secret` is 0600 root and
 //! only root processes read it (the `drop daemon` service, root's own `drop`). Everyone
 //! else gets the public half from `identity.pub` / `name` and asks the daemon to sign
-//! over `/run/drop.sock` ([`Identity::sign`]; docs/security.md, "Milk Drop: one machine
+//! over `/System/Services/Sockets/drop.sock` ([`Identity::sign`]; docs/security.md, "Milk Drop: one machine
 //! identity, per-user clients"). Trust is per user: root's in /System/Settings/milk/drop/known_peers,
 //! everyone else's in `~/.config/milk/drop/known_peers`, which starts as a copy of the
 //! machine's list.
@@ -29,7 +29,7 @@ pub struct Identity {
 }
 
 /// The drop daemon's request socket (AF_UNIX, SO_PEERCRED-checked).
-pub const SOCK: &str = "/run/drop.sock";
+pub const SOCK: &str = "/System/Services/Sockets/drop.sock";
 /// "off" here hides the machine: the daemon stops announcing and answering discovery and
 /// mDNS queries (it still signs for local users and `drop recv` still takes transfers
 /// from peers that know the address). Absent or "on": visible.

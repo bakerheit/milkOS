@@ -6,7 +6,7 @@
 //! lock (it does I/O and sleeps). Writers invalidate: [`invalidate`] drops an inode's pages
 //! (on write / truncate), [`invalidate_dev`] a whole file system view (rollback, promote).
 //!
-//! `/sys/fs/pagecache/`: `stats`, `enabled` (write 0/1), `drop` (write anything), `bench`
+//! `/System/Kernel/fs/pagecache/`: `stats`, `enabled` (write 0/1), `drop` (write anything), `bench`
 //! (write a path: read it twice, cold then warm, and report).
 
 use alloc::collections::BTreeMap;
@@ -259,7 +259,7 @@ pub fn bench(path: &str) -> Result<String> {
     Ok(r)
 }
 
-/// `/sys/fs/pagecache/`.
+/// `/System/Kernel/fs/pagecache/`.
 pub fn sysfs(dir: &alloc::sync::Arc<super::synth::SynthDir>) {
     dir.add_file("stats", stats);
     dir.add_control(

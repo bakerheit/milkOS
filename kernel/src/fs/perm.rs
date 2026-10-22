@@ -69,7 +69,7 @@ pub fn who() -> Who {
 static ELEVATED: SpinLock<Vec<u32>> = SpinLock::new(Vec::new());
 
 /// Run `f` with the calling thread treated as the kernel (root) by the VFS. For control
-/// files: the permission check happens when the user opens one (`/sys/fs/milkfs/clone`,
+/// files: the permission check happens when the user opens one (`/System/Kernel/fs/milkfs/clone`,
 /// admin group), the action it triggers (mounting a clone under /Volumes) is the kernel's.
 pub fn as_kernel<R>(f: impl FnOnce() -> R) -> R {
     let tid = crate::sched::current_tid();
@@ -141,7 +141,7 @@ use super::node::{InodeType, SetAttr, Stat};
 const ADMIN_GID: u32 = 80;
 
 /// The ownership and mode the checks use: [`stat`] plus two mappings: terminals
-/// (`/dev/console`, `/dev/ttyN`, mode 0620) belong to the session user, and /proc and /sys
+/// (`/dev/console`, `/dev/ttyN`, mode 0620) belong to the session user, and /proc and /System/Kernel
 /// control files (owner-writable) are writable by the `admin` group, so administrators can
 /// use them without sudo.
 pub fn view(node: &InodeRef) -> Stat {

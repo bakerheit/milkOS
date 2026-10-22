@@ -1,4 +1,4 @@
-//! Queries over the search index, and `/sys/fs/search`. See docs/filesystem.md.
+//! Queries over the search index, and `/System/Kernel/fs/search`. See docs/filesystem.md.
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -220,7 +220,7 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
-// ---- /sys/fs/search -------------------------------------------------------------------
+// ---- /System/Kernel/fs/search -------------------------------------------------------------------
 
 static LAST: SpinLock<String> = SpinLock::new(String::new());
 
@@ -246,7 +246,7 @@ pub fn results_text(q: &str, limit: usize) -> Result<String> {
     Ok(s)
 }
 
-/// `/sys/fs/search`.
+/// `/System/Kernel/fs/search`.
 pub fn sysfs(dir: &alloc::sync::Arc<SynthDir>) {
     dir.add_control(
         "query",

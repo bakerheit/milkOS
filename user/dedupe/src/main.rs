@@ -8,7 +8,7 @@
 //! Files are grouped by size and content hash (from milkfs's block checksums, no data
 //! read), compared, then all but the first of a group get its blocks. File times and
 //! owners stay as they were. Blocks a snapshot still has stay used until that snapshot
-//! is deleted. Talks to /sys/fs/milkfs/dedupe.
+//! is deleted. Talks to /System/Kernel/fs/milkfs/dedupe.
 
 #![no_std]
 #![no_main]
@@ -22,7 +22,7 @@ use rt::{eprintln, print, sys};
 
 rt::main!(main);
 
-const CTL: &str = "/sys/fs/milkfs/dedupe";
+const CTL: &str = "/System/Kernel/fs/milkfs/dedupe";
 
 fn read_all(path: &str) -> Result<String, rt::Errno> {
     let fd = sys::open(path, sys::O_RDONLY)?;

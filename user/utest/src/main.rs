@@ -61,7 +61,7 @@ fn capture(argv: &[&str]) -> (Vec<u8>, i32) {
 }
 
 fn t_pipe() -> bool {
-    let (out, st) = capture(&["/Commands/hello", "piped"]);
+    let (out, st) = capture(&["/System/Developer/hello", "piped"]);
     let text = String::from_utf8_lossy(&out);
     let lines = text.lines().count();
     let mut ok = check(
@@ -382,7 +382,11 @@ fn t_proc() -> bool {
     let _ = sys::wait4(pid as i32, 0);
     let gone = sys::read_file(&alloc::format!("/proc/{pid}/status")).is_err();
     let ok = status.contains(&alloc::format!("PPid:\t{}", sys::getpid()))
-        && cmdline.starts_with(b"utest\0")
+        // argv[0] as typed: `utest` on a PATH, or `/System/Developer/utest`.
+        && cmdline
+            .split(|&b| b == 0)
+            .next()
+            .is_some_and(|a0| a0 == b"utest" || a0.ends_with(b"/utest"))
         && fd3.starts_with("pipe:[")
         && me == alloc::format!("{}", sys::getpid())
         && gone;
@@ -955,7 +959,7 @@ fn t_kaddr() -> bool {
 /// A static Linux/aarch64 program built with no milkOS knowledge (tests/linux/), linked at
 /// Linux's 0x400000: runs and passes its own checks.
 fn t_linux() -> bool {
-    let (out, st) = capture(&["/Commands/linux-hello", "x"]);
+    let (out, st) = capture(&["/System/Developer/linux-hello", "x"]);
     let text = core::str::from_utf8(&out).unwrap_or("");
     let oks = text.matches("  ok ").count();
     check(
@@ -1016,7 +1020,7 @@ fn t_creds() -> bool {
 /// Run `utest <what>` as the milk user (`su milk -c`: root needs no password), for the
 /// tests that are about being unprivileged, when utest itself runs as root (the console).
 fn as_milk(what: &str, name: &str) -> bool {
-    let cmd = alloc::format!("/Commands/utest {what}");
+    let cmd = alloc::format!("/System/Developer/utest {what}");
     let (out, st) = capture(&["/Commands/su", "milk", "-c", &cmd]);
     let text = String::from_utf8_lossy(&out);
     for l in text.lines() {
@@ -1492,14 +1496,16 @@ fn t_auxv(args: &rt::Args) -> bool {
     if sys::geteuid() == 0 {
         // A set-user-ID root copy of utest, run by milk: euid 0, uid 501, AT_SECURE 1.
         let copy = "/tmp/utest-suid";
-        let made = sys::read_file("/Commands/utest").ok().and_then(|data| {
-            let fd =
-                sys::open_mode(copy, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o755).ok()?;
-            let r = sys::write_all(fd, &data);
-            let _ = sys::close(fd);
-            r.ok()?;
-            sys::chmod(copy, 0o4755).ok()
-        });
+        let made = sys::read_file("/System/Developer/utest")
+            .ok()
+            .and_then(|data| {
+                let fd = sys::open_mode(copy, sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC, 0o755)
+                    .ok()?;
+                let r = sys::write_all(fd, &data);
+                let _ = sys::close(fd);
+                r.ok()?;
+                sys::chmod(copy, 0o4755).ok()
+            });
         let (r, w) = sys::pipe().unwrap();
         let pid = sys::fork().unwrap();
         if pid == 0 {
@@ -1526,13 +1532,13 @@ fn t_auxv(args: &rt::Args) -> bool {
     check("auxv ids", ok, &detail)
 }
 
-/// One request to milkd over /run/milkd.sock; the reply up to and including ok / error.
+/// One request to milkd over /System/Services/Sockets/milkd.sock; the reply up to and including ok / error.
 fn milkd(req: &str) -> String {
     use rt::unix::{self, Name};
     let Ok(fd) = unix::socket(unix::SOCK_STREAM) else {
         return String::from("error\tsocket");
     };
-    if unix::connect(fd, &Name::Path("/run/milkd.sock")).is_err() {
+    if unix::connect(fd, &Name::Path("/System/Services/Sockets/milkd.sock")).is_err() {
         let _ = sys::close(fd);
         return String::from("error\tconnect");
     }
@@ -1701,7 +1707,7 @@ fn t_auth() -> bool {
     if sys::geteuid() == 0 {
         return as_milk("auth", "authorisation");
     }
-    let ctl = "/sys/fs/milkfs/delete";
+    let ctl = "/System/Kernel/fs/milkfs/delete";
     if sys::stat_path(ctl, true).is_err() {
         return check("authorisation", true, "skipped: no milkfs volume");
     }
@@ -1836,7 +1842,7 @@ fn t_driver() -> bool {
         return check("driver", false, &alloc::format!("claim: {fd:?}"));
     };
     let dev = Device { fd };
-    t(owner_is("/Commands/utest")); // 2
+    t(owner_is("/System/Developer/utest")); // 2
     t(matches!(
         sys::driver_claim(udrv::VIRTIO_RNG),
         Err(sys::Errno(16))

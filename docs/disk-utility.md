@@ -3,7 +3,7 @@
 `/Apps/diskutil/diskutil` (dock tile from `/Apps/diskutil/manifest`), following
 docs/ui-concepts/SPEC-DISK-REMINDERS.md section 1. The window is `user/diskutil`; everything that can
 be decided without a syscall is in `user/diskkit` (unit tests: `scripts/diskkit-test.sh`). No
-kernel changes: it reads and writes `/sys/fs/milkfs/*` and reads `/proc/mounts`.
+kernel changes: it reads and writes `/System/Kernel/fs/milkfs/*` and reads `/proc/mounts`.
 
 ## What it does
 - **Sidebar:** the primary volume, its clones, the Mac share, the in-memory root; a locked
@@ -33,7 +33,7 @@ passphrase", never an errno; other errors give a sentence and "Details: error N"
 
 ## Encrypted backups, and spare disks
 
-When the system lists its disks (`/sys/fs/milkfs/disks`), a backup of an encrypted volume is encrypted
+When the system lists its disks (`/System/Kernel/fs/milkfs/disks`), a backup of an encrypted volume is encrypted
 by default: the Back up sheet asks for a passphrase twice (`send` gets it on a second line) and offers
 "Not encrypted" as a choice (`plaintext`), which brings back the warning and the "I understand" box.
 Restore has an optional passphrase field (`receive` gets it on a second line); a wrong or missing one
@@ -47,9 +47,9 @@ window yet; it needs a spec addendum from the UI lead first.
   target (like `zfs rollback -r`), which includes the safety snapshot, so the box would promise
   something the kernel takes away. The sheet says how many newer snapshots go and to use Send first.
 - **Lock now** is enabled for an encrypted volume that is not the one the session lives on (a vault, a
-  backup disk): `/sys/fs/milkfs/lock`. The Milk disk itself is refused by the system, so its button is
+  backup disk): `/System/Kernel/fs/milkfs/lock`. The Milk disk itself is refused by the system, so its button is
   disabled with the reason. A refusal names the programs using the volume ("pid 16 (sleep): 1 open
-  file"), read from `/sys/fs/milkfs/error`; every failed control write shows its real reason there
+  file"), read from `/System/Kernel/fs/milkfs/error`; every failed control write shows its real reason there
   with "Details: lock EBUSY (error 16)".
 - **Usage of every volume** comes from `statfs` (FAT, the Mac share, other milkfs volumes, the
   in-memory root); the Milk disk's usage still comes from `info`. Encryption state, cipher, KDF and

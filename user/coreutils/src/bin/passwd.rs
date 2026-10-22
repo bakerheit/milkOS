@@ -64,12 +64,15 @@ fn main(args: &rt::Args) -> i32 {
 }
 
 /// Keep an encrypted disk whose passphrase was the login password opening at login: try
-/// the same change on the primary milkfs volume (/sys/fs/milkfs/passwd, `OLD\nNEW`).
+/// the same change on the primary milkfs volume (/System/Kernel/fs/milkfs/passwd, `OLD\nNEW`).
 fn sync_disk_passphrase(old: &str, new: &str) {
     if new.len() < 8 {
         return; // milkfs passphrases need 8+ characters: the disk keeps its own
     }
-    let Ok(fd) = sys::open("/sys/fs/milkfs/passwd", sys::O_WRONLY | sys::O_CLOEXEC) else {
+    let Ok(fd) = sys::open(
+        "/System/Kernel/fs/milkfs/passwd",
+        sys::O_WRONLY | sys::O_CLOEXEC,
+    ) else {
         return; // no milkfs
     };
     let r = sys::write(fd, alloc::format!("{old}\n{new}").as_bytes());

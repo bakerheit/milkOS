@@ -436,7 +436,7 @@ pub fn walk(
     Ok(())
 }
 
-/// Shape of a committed tree (for tests and `/sys/fs/milkfs/treetest`).
+/// Shape of a committed tree (for tests and `/System/Kernel/fs/milkfs/treetest`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TreeStats {
     /// Levels (a lone root leaf = 1).

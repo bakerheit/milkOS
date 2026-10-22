@@ -1,8 +1,0 @@
-format 1
-name diskutil
-version 1.0.0
-description Disk Utility: usage, snapshots, clones, scrub, encryption and backups
-exec /bin/diskutil
-dock Disk #EBB650
-files
-payload-sha256 -

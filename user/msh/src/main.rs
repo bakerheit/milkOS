@@ -6,7 +6,7 @@
 //! * Job control: each pipeline runs in its own process group, which gets the terminal
 //!   while it runs, so Ctrl-C kills the job and not the shell. `jobs`, `fg [%N]`, `wait`.
 //! * Built-ins: cd pwd exit export unset set jobs fg wait help source
-//! * Everything else is a program found on $PATH (the coreutils live in /bin).
+//! * Everything else is a program found on $PATH (the coreutils live in /Commands).
 //! * `msh -c 'commands'` and `msh FILE` run non-interactively.
 
 #![no_std]
@@ -84,7 +84,7 @@ fn main(args: &rt::Args) -> i32 {
         }
     }
     if sh.get("PATH").is_empty() {
-        sh.set("PATH", "/bin", true);
+        sh.set("PATH", "/Commands", true);
     }
     match (args.get(1), args.get(2)) {
         (Some("-c"), Some(cmd)) => {
@@ -105,7 +105,7 @@ fn main(args: &rt::Args) -> i32 {
         let _ = sys::tcsetpgrp(0, sh.pgid);
         let _ = sys::signal(sys::SIGINT, on_sigint);
         let _ = sys::signal(sys::SIGQUIT, on_sigint);
-        println!("msh: milk shell. 'help' for built-ins; programs live in /bin.");
+        println!("msh: milk shell. 'help' for built-ins; programs live in /Commands.");
     }
     let mut line = Vec::new();
     loop {
@@ -824,13 +824,15 @@ fn help() {
     println!("  NAME=v, export NAME[=v], unset NAME, set     variables");
     println!("  cd [DIR|-], pwd, exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
-    println!("programs (/bin): ls cat echo wc head tail grep sort uniq ps kill sleep");
+    println!("programs (/Commands): ls cat echo wc head tail grep sort uniq ps kill sleep");
     println!("  mkdir rm mv cp ln touch env uptime free uname true false clear");
     println!("  hello fault utest");
     println!("structured pipes (docs/shell.md): where COL OP V, sort-by COL [-r], select COL..,");
     println!("  first N, last N, get COL, count, table, to-json; producers: ps ls env");
-    println!("try: ps | grep msh,  ls -l /bin | sort -n -k5 | tail -3,  cat /etc/motd | wc -l");
-    println!("     ps | where rss > 100 | sort-by name,  ls /bin | sort-by size -r | first 3");
+    println!(
+        "try: ps | grep msh,  ls -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
+    );
+    println!("     ps | where rss > 100 | sort-by name,  ls /Commands | sort-by size -r | first 3");
 }
 
 // ---- globbing --------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//! Music: plays WAVs from ~/Music and /System/Library/Sounds through /dev/audio.
+//! Music: plays WAVs from ~/Music and /System/Sounds through /dev/audio.
 //!
 //! The player is global (one "music" kernel thread, the state in [`PLAYER`]); the window is
 //! a view of it, and closing the window stops playback. The thread decodes a whole track
@@ -11,7 +11,7 @@
 //! Without a sound device the thread paces itself with the timer and plays silently, so the
 //! app still works (and the demos run) on machines started without one.
 //!
-//! ~/Music is seeded on first boot with the tunes in /System/Library/Music
+//! ~/Music is seeded on first boot with the tunes in /System/Music
 //! (scripts/gen_music.py).
 
 use alloc::collections::VecDeque;
@@ -35,10 +35,10 @@ use super::super::window::{
 };
 use super::fsx;
 
-pub const LIBRARY: &str = "/home/milk/Music";
-const SEEDS: &str = "/System/Library/Music";
+pub const LIBRARY: &str = "/Users/milk/Music";
+const SEEDS: &str = "/System/Music";
 const SOUNDS: &str = crate::audio::SOUND_DIR;
-const SEEDED: &str = "/home/milk/.config/milk/music-seeded";
+const SEEDED: &str = "/Users/milk/.config/milk/music-seeded";
 
 const RATE: u64 = 48_000;
 /// Frames per write (20 ms).
@@ -171,7 +171,7 @@ pub fn seed_library() {
                 }
             }
         }
-        let _ = fs::mkdir_all("/home/milk/.config/milk", 0o755);
+        let _ = fs::mkdir_all("/Users/milk/.config/milk", 0o755);
         let _ = fs::write_file(SEEDED, b"1\n");
     }));
 }

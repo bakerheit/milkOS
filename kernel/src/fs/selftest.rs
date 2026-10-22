@@ -1,5 +1,5 @@
 //! Boot self-test for the VFS, tmpfs, initramfs, devfs and procfs/sysfs. Panics on failure
-//! (like `memtest`), then prints `/etc/motd`.
+//! (like `memtest`), then prints `/System/Settings/motd`.
 
 use alloc::string::String;
 use alloc::vec;
@@ -390,33 +390,33 @@ fn errno_paths(t: &mut T) {
         "create in missing dir",
     );
     t.err(
-        ops::open("/etc/motd", O_RDONLY | O_CREAT | O_EXCL, 0),
+        ops::open("/System/Settings/motd", O_RDONLY | O_CREAT | O_EXCL, 0),
         Errno::EEXIST,
         "O_EXCL on existing",
     );
     t.err(
-        ops::open("/etc/motd/x", O_RDONLY, 0),
+        ops::open("/System/Settings/motd/x", O_RDONLY, 0),
         Errno::ENOTDIR,
         "file used as dir",
     );
     t.err(
-        ops::open("/etc/motd/", O_RDONLY, 0),
+        ops::open("/System/Settings/motd/", O_RDONLY, 0),
         Errno::ENOTDIR,
         "trailing slash on a file",
     );
     t.err(
-        ops::open("/etc", O_WRONLY, 0),
+        ops::open("/System/Settings", O_WRONLY, 0),
         Errno::EISDIR,
         "open dir for writing",
     );
     t.err(
-        ops::open("/etc/motd", O_RDONLY | O_DIRECTORY, 0),
+        ops::open("/System/Settings/motd", O_RDONLY | O_DIRECTORY, 0),
         Errno::ENOTDIR,
         "O_DIRECTORY on a file",
     );
     t.err(ops::open("", O_RDONLY, 0), Errno::ENOENT, "empty path");
     t.err(
-        ops::open("/etc/motd", O_ACCMODE, 0),
+        ops::open("/System/Settings/motd", O_ACCMODE, 0),
         Errno::EINVAL,
         "bad access mode",
     );
@@ -432,7 +432,7 @@ fn errno_paths(t: &mut T) {
         Errno::ENAMETOOLONG,
         "name > 255",
     );
-    if let Some(f) = t.must(ops::open("/etc/motd", O_RDONLY, 0), "open motd") {
+    if let Some(f) = t.must(ops::open("/System/Settings/motd", O_RDONLY, 0), "open motd") {
         t.err(f.write(b"x"), Errno::EBADF, "write on O_RDONLY");
         t.err(f.truncate(0), Errno::EINVAL, "ftruncate on O_RDONLY");
     }
@@ -444,7 +444,7 @@ fn errno_paths(t: &mut T) {
     }
     t.ok(ops::unlink("/tmp/wo").is_ok(), "unlink /tmp/wo");
     t.err(
-        ops::rename("/etc/hostname", "/dev/hostname"),
+        ops::rename("/System/Settings/hostname", "/dev/hostname"),
         Errno::EXDEV,
         "rename across mounts",
     );
@@ -463,13 +463,25 @@ fn errno_paths(t: &mut T) {
 
 fn paths_and_mounts(t: &mut T) {
     t.ok(
-        read_str("/home/milk/../../etc/hostname") == "milk\n",
+        read_str("/Users/milk/../../System/Settings/hostname") == "milk\n",
         "../.. walk",
     );
-    t.ok(read_str("//etc///hostname") == "milk\n", "repeated slashes");
     t.ok(
-        read_str("/Users/milk/README.txt").contains("home directory"),
-        "/Users -> home symlink",
+        read_str("//System/Settings///hostname") == "milk\n",
+        "repeated slashes",
+    );
+    t.ok(
+        [
+            "/bin",
+            "/etc",
+            "/home",
+            "/srv",
+            "/Applications",
+            "/System/Library",
+        ]
+        .iter()
+        .all(|p| ops::lstat(p).is_err()),
+        "no old Unix folders (clean break)",
     );
     t.ok(
         ops::lookup("/dev/..").map(|i| i.ino()).ok() == Some(path::root().ino()),
@@ -484,50 +496,59 @@ fn paths_and_mounts(t: &mut T) {
             .and_then(|i| path::path_of(&i))
             .unwrap_or_default()
     };
-    t.ok(pathof("/home/milk") == "/home/milk", "path_of /home/milk");
     t.ok(
-        pathof("/Users/milk") == "/home/milk",
-        "path_of through a symlink",
+        pathof("/Users/milk") == "/Users/milk",
+        "path_of /Users/milk",
+    );
+    t.ok(
+        pathof("/System/Settings/milk/..") == "/System/Settings",
+        "path_of through ..",
     );
     t.ok(
         pathof("/dev") == "/dev" && pathof("/") == "/",
         "path_of across a mount",
     );
-    if let Some(home) = t.must(ops::lookup("/home"), "lookup /home") {
+    if let Some(home) = t.must(ops::lookup("/Users"), "lookup /Users") {
         t.ok(
             ops::stat_at(Some(&home), "milk/README.txt", true).is_ok(),
             "relative path from a base dir",
         );
         t.ok(
-            ops::stat_at(Some(&home), "/etc/motd", true).is_ok(),
+            ops::stat_at(Some(&home), "/System/Settings/motd", true).is_ok(),
             "absolute path ignores the base",
         );
     }
 }
 
 fn initramfs(t: &mut T) {
-    t.ok(read_str("/etc/hostname") == "milk\n", "/etc/hostname");
     t.ok(
-        read_str("/etc/motd").contains("Welcome to milkOS"),
-        "/etc/motd",
+        read_str("/System/Settings/hostname") == "milk\n",
+        "/System/Settings/hostname",
+    );
+    t.ok(
+        read_str("/System/Settings/motd").contains("Welcome to milkOS"),
+        "/System/Settings/motd",
     );
     t.ok(
         read_str("/System/Version.txt").contains("ProductName:    milkOS"),
         "/System/Version.txt",
     );
     t.ok(
-        read_str("/home/milk/README.txt").starts_with("Hi"),
-        "/home/milk/README.txt",
+        read_str("/Users/milk/README.txt").starts_with("Hi"),
+        "/Users/milk/README.txt",
     );
     t.ok(
         ops::stat("/tmp").map(|s| s.perm).ok() == Some(0o1777),
         "/tmp is sticky + world-writable",
     );
     for d in [
-        "/Applications",
+        "/Apps",
+        "/Commands",
         "/System",
-        "/bin",
-        "/home/milk",
+        "/System/Services",
+        "/System/Settings",
+        "/System/Startup",
+        "/Users/milk",
         "/Volumes",
         "/proc",
         "/sys",
@@ -930,11 +951,11 @@ fn milkfs_user_volume(t: &mut T) {
         "user volume info consistent",
     );
     milk_space(t, &v, "user volume space accounting exact");
-    // Persistent home: /home/milk is a bind mount of <volume>/home/milk.
+    // Persistent home: /Users/milk is a bind mount of <volume>/Users/milk.
     let vol_dev = ops::stat(&vp).map(|s| s.dev).ok();
     t.ok(
-        ops::stat("/home/milk").map(|s| s.dev).ok() == vol_dev,
-        "/home/milk is on milkfs",
+        ops::stat("/Users/milk").map(|s| s.dev).ok() == vol_dev,
+        "/Users/milk is on milkfs",
     );
     let pathof = |p: &str| {
         ops::lookup(p)
@@ -942,15 +963,15 @@ fn milkfs_user_volume(t: &mut T) {
             .unwrap_or_default()
     };
     t.ok(
-        pathof("/home/milk") == "/home/milk",
-        "path_of home is /home/milk",
+        pathof("/Users/milk") == "/Users/milk",
+        "path_of home is /Users/milk",
     );
     t.ok(
-        pathof("/Users/milk") == "/home/milk",
-        "/Users/milk is the same home",
+        ops::stat("/Apps").map(|s| s.dev).ok() == vol_dev && pathof("/Apps") == "/Apps",
+        "/Apps is on milkfs",
     );
     t.err(
-        ops::rmdir(&alloc::format!("{vp}/home/milk")),
+        ops::rmdir(&alloc::format!("{vp}/Users/milk")),
         Errno::EBUSY,
         "the bound home can't be removed",
     );
@@ -961,6 +982,9 @@ fn milkfs_test_volume(t: &mut T) {
     use super::blockdev::BlockRef;
     const VP: &str = "/Volumes/.milk-selftest";
     const D: &str = "/Volumes/.milk-selftest/t";
+    // Pages cached before the test (the boot copying the built-in apps onto the user
+    // volume) would come back at the drop_all below and spoil the count: drop them first.
+    super::pagecache::drop_all();
     let free0 = pmm::stats().free_frames;
     let heap0 = crate::heap::stats().total;
     let Some(disk) = t.must(super::ramdisk::RamDisk::new("ram0", 16 << 20), "RAM disk") else {
@@ -1777,7 +1801,7 @@ fn milkfs_versions(t: &mut T, vp: &str) {
         "versions of a missing file",
     );
     t.err(
-        m::versions("/etc/motd"),
+        m::versions("/System/Settings/motd"),
         Errno::EXDEV,
         "versions outside the volume",
     );
@@ -2750,7 +2774,7 @@ fn crypto(t: &mut T) {
 }
 
 /// fs::notify events, and the search index over a small tmpfs tree (built and updated
-/// synchronously here; the real indexer thread starts later, on /home/milk).
+/// synchronously here; the real indexer thread starts later, on /Users/milk).
 fn notify_and_search(t: &mut T) {
     use super::notify::{self, Event};
     use super::search;
@@ -3291,5 +3315,5 @@ pub fn run() {
         .collect();
     kprintln!("{}", names.join("  "));
     show("/sys/fs/milkfs/info");
-    show("/etc/motd");
+    show("/System/Settings/motd");
 }

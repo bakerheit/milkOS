@@ -69,7 +69,7 @@ pub fn check(data: &[u8]) -> Result<(), &'static str> {
         return Err("not ELF64 little-endian");
     }
     if u16_at(data, 18) != Ok(EM_AARCH64) {
-        return Err("not an aarch64 binary");
+        return Err("not an aarch64 program");
     }
     match u16_at(data, 16) {
         Ok(ET_EXEC) | Ok(ET_DYN) => Ok(()),
@@ -104,7 +104,7 @@ pub fn load(space: &mut UserSpace, data: &[u8]) -> KResult<Image> {
         });
     }
     if phdrs.iter().any(|p| p.kind == PT_INTERP) {
-        crate::kprintln!("[exec] refused: dynamically linked (PT_INTERP); only static binaries");
+        crate::kprintln!("[exec] refused: dynamically linked (PT_INTERP); only static programs");
         return Err(ENOEXEC);
     }
     let bias = if etype == ET_DYN {

@@ -18,7 +18,7 @@ pub const ROOT_UID: u32 = 0;
 pub const WHEEL_GID: u32 = 0;
 /// Group `staff`: every regular user's primary group.
 pub const STAFF_GID: u32 = 20;
-/// Group `admin`: may write /Applications and the /proc and /sys control files, may sudo.
+/// Group `admin`: may write /Apps and the /proc and /sys control files, may sudo.
 pub const ADMIN_GID: u32 = 80;
 /// The default user, `milk`.
 pub const MILK_UID: u32 = 501;

@@ -3,7 +3,7 @@
 Files: `user/milk` (the tool), `scripts/mkpkg.py` (format, host side),
 `scripts/milk-repo.sh` (build + serve the toy repo), `packages/` (fortune, snake, moo2048),
 `scripts/pkg-test.sh` (end-to-end test), `rootfs/etc/milk/repos`. Kernel bits: `/dev/audit`
-(docs/security.md) and the persistent `/Applications` bind (`milkfs::setup_applications`).
+(docs/security.md) and the persistent `/Apps` bind (`milkfs::setup_applications`).
 
 ## Format (`.milkpkg`)
 
@@ -15,13 +15,13 @@ A ustar tar, built deterministically by `scripts/mkpkg.py` (mtime 0, root:root, 
    name fortune
    version 1.0.0
    description Milk-themed quotes, one at a time
-   exec bin/fortune            # optional: what /bin/<basename> links to
+   exec fortune                # optional: the program; /Commands/<basename> links to it
    dock Fortune #EBB650        # optional: dock label and icon colour, for the desktop
    depends snake moo2048>=1.0  # optional: packages installed first (milk), with minimum versions
-   files bin/fortune share/fortune/quotes.txt
+   files fortune quotes.txt
    payload-sha256 <hex>
    ```
-2. the payload files, at their install paths (relative to `/Applications/<name>/`).
+2. the payload files, at their install paths (relative to `/Apps/<name>/`).
 
 `payload-sha256` is SHA-256 over, for each path in `files` order: the path, a 0 byte, the
 size as u64 little endian, the bytes. Names: 1-24 of `[A-Za-z0-9_-]`; payload paths may not
@@ -47,7 +47,7 @@ rejected = 16/16): `milk selftest`, `mkpkg.py selftest`.
 
 * `FILE.sig` next to every `FILE` (`index.txt.sig`, `<pkg>.milkpkg.sig`): one line,
   `ed25519 <key name> <128 hex chars>`, over the file's bytes.
-* Trusted keys: `/etc/milk/keys/<name>.pub`, `ed25519 <64 hex chars> <name>`; `milk keys`.
+* Trusted keys: `/System/Settings/milk/keys/<name>.pub`, `ed25519 <64 hex chars> <name>`; `milk keys`.
 * `milk update` checks the index signature before using the index; `install`/`try`/`upgrade`
   check the package signature (then the index's sha256, then the payload sha256).
 * Unsigned, badly signed, or signed by an untrusted key: **refused**, with a
@@ -78,23 +78,27 @@ on (repeatedly, so chains go too). Upgrades keep the marker.
 
 ## Where packages live
 
-`/Applications/<name>/` (manifest, `.origin`, payload). With a milkfs volume,
-`/Applications` is a bind mount of `/Volumes/Milk/Applications`, so packages persist and are
-part of every snapshot and clone; without one it's tmpfs. `/bin` is in RAM, so the links
-`/bin/<x> -> /Applications/<name>/<exec>` are recreated at boot by init (`milk relink -q`).
-milk never replaces a `/bin` entry that isn't one of its links. The index cache is
-`/Applications/.milk/index.txt`.
+`/Apps/<name>/` (manifest, `.origin`, payload: the toy packages put their program at the
+top, `/Apps/fortune/fortune`). The built-in apps (Store, Calendar, Clock, ...) sit in the
+same folder, without an `.origin`: milk never lists, replaces or removes those (`milk
+remove store` says it is a built-in app), and refuses a package with a built-in app's name.
+With a milkfs volume, `/Apps` is a bind mount of `/Volumes/Milk/Apps`, so packages persist
+and are part of every snapshot and clone; without one it's tmpfs (built-in apps only).
+docs/filesystem.md, "The tree", has how the built-in apps get onto the disk. `/Commands` is in RAM, so the links
+`/Commands/<x> -> /Apps/<name>/<exec>` are recreated at boot by init (`milk relink -q`).
+milk never replaces a `/Commands` entry that isn't one of its links. The index cache is
+`/Apps/.milk/index.txt`.
 
 ## Commands
 
 ```text
-milk update            fetch index.txt from every URL in /etc/milk/repos
+milk update            fetch index.txt from every URL in /System/Settings/milk/repos
 milk search [WORD]     name/description match; marks installed ones
 milk info NAME         index entry + installed manifest (files, exec, dock)
 milk install NAME[=VER]  the newest version (or exactly VER); download; check the signature,
                        the file's sha256 against the index, the payload sha256 against the
-                       manifest; dependencies first; swap into /Applications/NAME; link
-milk remove [--force] NAME  unlink /bin, delete /Applications/NAME; refused while another
+                       manifest; dependencies first; swap into /Apps/NAME; link
+milk remove [--force] NAME  unlink /Commands, delete /Apps/NAME; refused while another
                        installed package depends on it (unless --force)
 milk autoremove        remove packages installed only as dependencies that nothing needs now
 milk upgrade [NAME] [-y]  newer versions of installed packages (and any new dependencies)
@@ -107,13 +111,13 @@ milk try NAME          snapshot milk-try-NAME, clone it as try-NAME (/Volumes/Mi
 milk run-try [--no-sandbox] NAME [ARGS]  run the tried app with its clone as / (chroot)
                        in a sandbox (below); also finds NAME inside the try-upgrade clone
 milk keep NAME         drop run-try's scratch dirs, promote the clone (it becomes the live
-                       volume), link /bin; the state
+                       volume), link /Commands; the state
                        before is snapshot before-try-NAME (rollback to undo)
 milk discard NAME      discard the clone and its snapshot; the live system never changed
-milk relink [-q]       recreate /bin links
+milk relink [-q]       recreate /Commands links
 ```
 
-Repositories (`/etc/milk/repos`, one URL per line): `http://IP[:PORT]/path/` with an IP
+Repositories (`/System/Settings/milk/repos`, one URL per line): `http://IP[:PORT]/path/` with an IP
 address or `localhost` only, never a name (user programs have no resolver, and the repo is a
 server on the Mac's 127.0.0.1, seen as 10.0.2.2). The default line is
 `http://10.0.2.2:8765/`, what `scripts/milk-repo.sh serve` uses; run.sh's netdev is
@@ -121,20 +125,20 @@ restricted, so only boots with an open user netdev (pkg-test.sh) can reach it.
 
 SHA-256 is `rt::sha256`, the same code `audit verify` uses. Every install / remove / try /
 keep / discard writes a `user.pkg.*` audit record through `/dev/audit`, and the kernel logs
-the snapshot / clone / promote / discard itself (`milkfs.*`, attributed to `/bin/milk`):
+the snapshot / clone / promote / discard itself (`milkfs.*`, attributed to `/Commands/milk`):
 
 ```text
-29 ... /bin/milk  user.pkg.install name=fortune version=1.0.0 sha256=ff3f... from=http://10.0.2.2:PORT/fortune-1.0.0.milkpkg
-39 ... /bin/milk  milkfs.clone     snap=milk-try-snake name=try-snake result=ok
-41 ... /bin/milk  user.pkg.try     name=snake ... clone=try-snake at=/Volumes/Milk-try-snake
-61 ... /bin/milk  milkfs.clone.promote name=try-moo2048 kept_as=before-try-moo2048 result=ok
-62 ... /bin/milk  user.pkg.keep    name=moo2048 ... undo=rollback:before-try-moo2048
+29 ... /Commands/milk  user.pkg.install name=fortune version=1.0.0 sha256=ff3f... from=http://10.0.2.2:PORT/fortune-1.0.0.milkpkg
+39 ... /Commands/milk  milkfs.clone     snap=milk-try-snake name=try-snake result=ok
+41 ... /Commands/milk  user.pkg.try     name=snake ... clone=try-snake at=/Volumes/Milk-try-snake
+61 ... /Commands/milk  milkfs.clone.promote name=try-moo2048 kept_as=before-try-moo2048 result=ok
+62 ... /Commands/milk  user.pkg.keep    name=moo2048 ... undo=rollback:before-try-moo2048
 ```
 
-## Milk Store (`/bin/store`)
+## Milk Store (`/Apps/store/store`)
 
-A desktop window (user/gui, MILK_WIN syscalls) over `/bin/milk`. Type `store` in the
-Terminal, or use its dock entry (below).
+A desktop window (user/gui, MILK_WIN syscalls) over `/Commands/milk`. Use its dock entry
+(below), or type `open store` in the Terminal.
 
 * The list comes from `MILK_TABLE=1 milk search` (the structured output, parsed with
   `rt::table`), plus the index cache (versions, size), installed manifests (`depends`, and
@@ -145,7 +149,7 @@ Terminal, or use its dock entry (below).
   buttons Install, Try, Keep, Discard, Remove, Upgrade, each enabled only when it makes
   sense (Keep/Discard only while trying, Upgrade only with a newer version). The top bar
   has Update (`milk update`) and Upgrade all (`milk upgrade -y`).
-* Every action runs `/bin/milk` (fork, a pipe on stdout+stderr, the read end
+* Every action runs `/Commands/milk` (fork, a pipe on stdout+stderr, the read end
   non-blocking); the log box shows its output live, word-wrapped, with a moving progress
   strip, then a `done` / `failed` chip from the exit status, and the list is reloaded. So
   signatures, clones, `-y` and audit records are exactly the command line's. Upgrade from
@@ -158,9 +162,10 @@ Terminal, or use its dock entry (below).
   `r` remove, `u` upgrade, `g` update, `a` upgrade all, `q` quit.
 * Theme: SPEC tokens. The wm doesn't publish its theme in `/dev/wm`'s status; the Store
   looks for a `theme dark` line there first, then `theme = chocolate` (the wm's own prefs line) in
-  `/home/milk/.config/milk/settings`, and then uses the wm's "Chocolate milk" values.
-* Dock entry: `rootfs/System/Applications/store/manifest` is a milk-format manifest with
-  `exec /bin/store` and `dock Store #E58C97`, for the desktop's manifest dock reading.
+  `/Users/milk/.config/milk/settings`, and then uses the wm's "Chocolate milk" values.
+* Dock entry: `rootfs/Apps/store/manifest` is a milk-format manifest with
+  `exec store` (the program next to it, `/Apps/store/store`) and `dock Store #E58C97`, for
+  the desktop's manifest dock reading.
 
 ## The toy packages (`packages/`)
 
@@ -169,8 +174,8 @@ A sibling cargo workspace (same target and linker script as `user/`, uses `user/
 (default `/tmp/milk-repo`) builds and packages them; `serve [PORT] [DIR]` runs
 `python3 -m http.server --bind 127.0.0.1` on them, stopped by its PID.
 
-* `fortune`: milk-themed quotes (`-a` all, `-n N`); reads its quotes file next to its
-  `bin/`, so it works from a clone path too.
+* `fortune`: milk-themed quotes (`-a` all, `-n N`); reads `quotes.txt` next to the program,
+  so it works from a clone path too.
 * `snake`: raw-mode terminal snake (TCSETS, ANSI escapes, ppoll clock): arrows/WASD, p, q.
   `snake --demo N` runs an autopilot with no input.
 * `moo2048`: 2048 in a desktop window (gui), tiles named drop, sip, glass, ... COW.
@@ -180,9 +185,9 @@ A sibling cargo workspace (same target and linker script as `user/`, uses `user/
 
 Fresh private milkfs + scratch images in a mktemp dir, repo served on a free 127.0.0.1
 port, boot with an open user netdev, then in msh: update, search, info, install fortune
-(both hashes checked, /bin link), run it twice, list, remove (`/Applications` empty), try
-snake, run it from the clone, check the live `/Applications` and `/bin` don't have it,
-discard (no clone left), try moo2048 + keep, run it from `/bin`, `milk selftest`, then the
+(both hashes checked, /Commands link), run it twice, list, remove (gone from `/Apps`; `milk remove store` refused: a built-in app), try
+snake, run it from the clone, check the live `/Apps` and `/Commands` don't have it,
+discard (no clone left), try moo2048 + keep, run it from `/Commands`, `milk selftest`, then the
 host tampers with the served repo: a flipped byte in `fortune.milkpkg` (install refused: BAD
 signature), `snake.milkpkg.sig` deleted (refused: unsigned; `--insecure` installs it with a
 warning), a flipped byte in `index.txt` (update refused), each with a
@@ -193,21 +198,21 @@ and `games`, a meta-package that depends on snake and moo2048): install `fortune
 dependency), `remove snake` refused, `remove games`, `autoremove` (snake goes); then
 `audit --event user.pkg`,
 `audit --event milkfs`, `audit verify` (RAM and disk OK). After shutdown `mkmilkfs.py`
-checks the image (moo2048 there, fortune and snake not, no clone), then a second boot of the
-same image runs moo2048 from the relinked `/bin`, and `audit verify` is OK across boots.
+checks the image (moo2048, fortune 1.1.0 and the built-in apps there, snake and games not, no clone), then a second boot of the
+same image runs moo2048 from the relinked `/Commands`, and `audit verify` is OK across boots.
 
 ## Running a tried app with its clone as `/` (per-process root)
 
 `milk try NAME` installs into a clone volume mounted at `/Volumes/Milk-try-NAME`. To run
 the app *as if that clone were the system root*, the kernel now has per-process roots
-(`chroot(2)`, syscall 51) and a `/bin/chroot` helper:
+(`chroot(2)`, syscall 51) and a `/Commands/chroot` helper:
 
 ```sh
-chroot /Volumes/Milk-try-NAME /bin/<app> [args...]
+chroot /Volumes/Milk-try-NAME /Commands/<app> [args...]
 ```
 
 `chroot DIR [CMD]` sets the calling process's root to `DIR`, `chdir`s to the new `/`, then
-`execve`s `CMD` (default `/bin/msh`). The child and its descendants see `DIR` as `/`;
+`execve`s `CMD` (default `/Commands/msh`). The child and its descendants see `DIR` as `/`;
 absolute paths resolve under it and `..` at the root stays at the root (no escape through
 path resolution). The parent and the rest of the system are unaffected — it's a
 per-process view, not a global mount change, so several tried apps can run at once with
@@ -219,21 +224,21 @@ helper does the `chdir("/")`.
 1. Finds the clone: `try-NAME`, or `try-upgrade` if NAME is in it; reads the app's `exec`
    from the clone's manifest; makes a scratch dir `/tmp/run-NAME` inside the clone.
 2. Writes `user.pkg.run_try name= version= clone= root= exec= sandbox=` to the audit log.
-3. `chroot(<clone>)`, `chdir("/")`: `/Applications` is now the clone's, nothing else
+3. `chroot(<clone>)`, `chdir("/")`: `/Apps` is now the clone's, nothing else
    resolves.
-4. Unless `--no-sandbox`, `sandbox("fs=/Applications:r fs=<clone>/Applications:r
+4. Unless `--no-sandbox`, `sandbox("fs=/Apps:r fs=<clone>/Apps:r
    fs=/tmp/run-NAME:rw fs=<clone>/tmp/run-NAME:rw net=local clipboard=0")` (the kernel logs
-   `sandbox.enter`): the clone's `/Applications` read-only and nothing else of it (its
-   `/home/milk` and `/etc`, including the copy of `/etc/milk/drop`'s secret key, stay
+   `sandbox.enter`): the clone's `/Apps` read-only and nothing else of it (its
+   `/Users/milk` and `/System/Settings`, including the copy of `/System/Settings/milk/drop`'s secret key, stay
    unreadable), the scratch dir writable (each named both ways, because grants match the
    jailed absolute path or the real path for a cwd-relative one), loopback/link-local network only, no clipboard;
    audio, windows and spawn stay on, so window apps and sounds work.
-5. execve `/Applications/NAME/<exec>` with `PATH=/Applications/NAME/bin`,
+5. execve `/Apps/NAME/<exec>` with `PATH=/Apps/NAME`,
    `HOME=TMPDIR=/tmp/run-NAME`, and TERM / MILK_* passed through. milk *becomes* the app:
    same pid, same terminal, its exit status.
 
 `milk keep` removes `tmp/run-*` from the clone before promoting it, so scratch never lands
-on the live volume. Inside the jail there is no `/dev`, `/proc`, `/sys` or `/bin` (the clone
+on the live volume. Inside the jail there is no `/dev`, `/proc`, `/sys` or `/Commands` (the clone
 is the user volume, which has none): static apps that use stdio, tty ioctls and the window
 syscalls work (fortune, snake, moo2048); an app that needs device nodes would need bind
 mounts inside the jail, which aren't wired. pkg-test checks it: snake's demo through

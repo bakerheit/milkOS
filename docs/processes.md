@@ -73,7 +73,7 @@ from a stack buffer still works (as long as it doesn't cross the stack's top).
 ```text
 TTBR0 (48-bit), the current process only (an empty table for kernel threads):
   0 .. 0x1000                   unmapped (null pointers fault)
-  0x40_0000                     where static Linux binaries link (ET_EXEC loads as linked)
+  0x40_0000                     where static Linux programs link (ET_EXEC loads as linked)
   0x100_0040_0000               IMAGE_BASE: milkOS programs (user/rt/user.ld), static-pie
                                 brk right after the image
   0x200_0000_0000 (2 TiB) ..    MMAP_BASE: anonymous mmap, bump allocated upwards
@@ -125,7 +125,7 @@ a kernel abort, and PAN doesn't matter.
   `[proc] pid 8 (fault) killed by SIGSEGV: permission fault, level 1 reading 0x0 (not a
   user address) at pc 0x100004000e8`. A translation fault just below the stack grows it
   (up to 8 MiB); a write fault on a COW page copies it.
-* PID 1 is reserved for `/bin/init`; the EL0 boot test's processes get 2.. .
+* PID 1 is reserved for `/System/Startup/init`; the EL0 boot test's processes get 2.. .
 
 ### Pipes (`proc/pipe.rs`)
 
@@ -264,14 +264,14 @@ Implemented (number: name):
 | milkOS desktop | 4100 MILK_WIN_CREATE, 4101 MILK_WIN_COMMIT, 4102 MILK_WIN_EVENT, 4103 MILK_WIN_TITLE, 4104 MILK_WIN_DESTROY, 4105 MILK_WIN_RESIZE (see "Desktop windows" below) |
 
 Anything else returns ENOSYS and logs `syscall N not implemented` once per number, which
-is the to-do list for running a static musl binary. `--features strace` logs every call.
+is the to-do list for running a static musl program. `--features strace` logs every call.
 
 ### ELF loading and the initial stack
 
 Linux compatibility check: `tests/linux/linux-hello.c` is a freestanding C program
 (raw `svc #0` syscalls, no libc, no milkOS headers) built by `tests/linux/build.sh` with
-the host's bare-metal `aarch64-elf-gcc` as a static ET_EXEC at `0x400000`. The binary is
-committed and packed as `/bin/linux-hello`; `utest linux` runs it.
+the host's bare-metal `aarch64-elf-gcc` as a static ET_EXEC at `0x400000`. The program is
+committed and packed as `/Commands/linux-hello`; `utest linux` runs it.
 
 `proc/elf.rs`: ELF64 aarch64, `ET_EXEC` in the user range, or `ET_DYN` without
 `PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
@@ -294,7 +294,7 @@ TERM.input(bytes);                 // typed bytes; thread context (allocates, si
 TERM.read(buf) / TERM.write(buf)   // call from the device inode's read_at / write_at
 TERM.set_winsize(rows, cols);      // window resized: TIOCGWINSZ + SIGWINCH on change
 TERM.foreground() / set_foreground(pgid)   // what TIOCGPGRP / TIOCSPGRP do
-proc::spawn_on("/bin/msh", argv, envp, "/dev/tty1", cwd)   // a process on that tty
+proc::spawn_on("/Commands/msh", argv, envp, "/dev/tty1", cwd)   // a process on that tty
 ```
 
 * Cooked mode by default: echo, backspace, ^U, Enter delivers a line, ^D at line start is
@@ -330,7 +330,7 @@ discipline and the syscall layer's tty registry. What the Terminal window adds:
   `TIOCGWINSZ` follows window resizes and the foreground job gets SIGWINCH on a change.
 * A `term-sh` kernel thread keeps `msh` running on it (`proc::spawn_on`).
 
-`/bin/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
+`/Commands/stty` shows and changes it (`stty`, `stty size`, `stty raw`, `stty sane`, `stty -echo`).
 
 ### Desktop windows (`MILK_WIN_*`)
 
@@ -373,27 +373,27 @@ Lifetime: closing the window on screen hides it at once and sends a close event;
 stays mapped until the process destroys the window or exits. Windows of processes that exit
 without destroying them are closed and freed by the wm within a second.
 
-`/bin/paint` is the example client (dock, Skim, or `paint` in a shell).
+`/Apps/paint/paint` is the example client (dock, Skim, or `open paint` in a shell).
 
 ### `/dev/wm` and the desktop tools
 
 `kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
 first space): `open <app|absolute path>` (apps: files terminal notes about paint today
-spaces milkdrop; a folder opens in Files, a text file in Notes, a `/bin` program runs),
+spaces milkdrop; a folder opens in Files, a text file in Notes, a `/Commands` program runs),
 `notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`. An
 unknown command (or an unknown `notify` option) fails the write with `EINVAL`.
 
 **Notifications with buttons.** `notify` takes options after the subtitle, one per field:
 
 ```text
-notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snooze\taction=Open:open /home/milk
+notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snooze\taction=Open:open /Users/milk
 ```
 
 * `app=<name>`: the group in the drawer and the icon (default: the writing program's name).
 * `id=<number>`: the poster's own number for this notice, sent back with an action.
 * `action=<label>[:<command>]`, up to two: buttons on the toast and on the drawer card (the
   first is the primary). Pressing one marks the notice read, removes its toast and:
-  * with a command: runs it, no shell: the first word is an absolute path or a `/bin`
+  * with a command: runs it, no shell: the first word is an absolute path or a `/Commands`
     program, the rest its arguments; `open <what>` is done by the desktop itself (as the
     `open` command above);
   * without: sends the posting process's window an action event (kind 9 in the 32-byte
@@ -404,7 +404,7 @@ notify\tTea is ready\tYour 4 minute timer finished\tapp=Clock\tid=7\taction=Snoo
 **A timer in the menu bar.** `timer <text>[\t<option>...]` shows a countdown left of the
 bell ("04:32", a stopwatch on a straw tint), one per app, so a Clock timer stays visible
 after its window closes. Options: `app=<name>` (default: the writing program) and
-`open=<what>` (what a click opens, as for `open`; default the app, e.g. `/bin/clock`).
+`open=<what>` (what a click opens, as for `open`; default the app, e.g. `/Apps/clock/clock`).
 Empty text clears it; an item not refreshed for 5 s goes by itself, so a publisher
 refreshes it every second and one that dies leaves nothing behind. `user/gui`:
 `gui::menu_timer(app, text, open)`.
@@ -422,7 +422,7 @@ paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `space
 
 `milkd` (`user/milkd`) is the service manager. init (PID 1) starts it first thing and
 restarts it if it ever exits; init itself keeps only reaping orphans and the console
-shell. milkd reads every `/etc/milk/services/<name>.service`, starts the enabled ones in
+shell. milkd reads every `/System/Settings/milk/services/<name>.service`, starts the enabled ones in
 dependency order, supervises them (restart with backoff), captures their stdout and
 stderr into the journal, and answers `svc` over `/run/milkd.sock`. Kernel threads are not
 services.
@@ -437,11 +437,11 @@ file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 charact
 |---|---|---|
 | `exec` | the program and its arguments, split on spaces; `"..."` quotes one argument. The program is an absolute path. **Required.** | |
 | `description` | one line for `svc list` | |
-| `user` | account to run as (name from /etc/passwd). The service gets that user's uid, gid, groups, HOME, USER; never set-ID tricks needed. | `root` |
+| `user` | account to run as (name from /System/Settings/passwd). The service gets that user's uid, gid, groups, HOME, USER; never set-ID tricks needed. | `root` |
 | `restart` | `always` (whenever it exits), `on-failure` (exit status != 0 or killed by a signal), `never` | `on-failure` |
 | `after` | units (space separated) to start before this one: ordering only | |
 | `needs` | units that must be up (running, listening, or exited with status 0) for this one to start; if one of them fails, is skipped, stopped or isn't there, this unit is not started (or is stopped if it was running) and its status says `dependency failed: <unit>` | |
-| `sandbox` | a capability spec, exactly as for the `sandbox` syscall (docs/security.md): one `fs=PATH:r` or `fs=PATH:rw` token per grant (`fs=/srv/www:r fs=/proc:r`), `fs-none`, `net=none|local|all`, `audio=0`, `clipboard=0`, `windows=0`, `spawn=0` (no fork). The service's own binary is granted read automatically; the sandbox is applied just before the exec, after the user switch. | none (unrestricted) |
+| `sandbox` | a capability spec, exactly as for the `sandbox` syscall (docs/security.md): one `fs=PATH:r` or `fs=PATH:rw` token per grant (`fs=/Users/milk/Sites:r fs=/proc:r`), `fs-none`, `net=none|local|all`, `audio=0`, `clipboard=0`, `windows=0`, `spawn=0` (no fork). The service's own program file is granted read automatically; the sandbox is applied just before the exec, after the user switch. | none (unrestricted) |
 | `socket` | socket activation: milkd creates this AF_UNIX listening socket (a path, mode 0660, owned by `user`, group admin), and starts the service on the first connection, handing it the listener as **fd 3** with `LISTEN_FDS=1` / `LISTEN_PID` in the environment, like systemd. | |
 | `cwd` | working directory | `/` |
 | `env` | extra environment, space-separated `KEY=VALUE` | |
@@ -450,16 +450,16 @@ file name (without `.service`) is the unit name: `[a-z0-9-]`, at most 32 charact
 | `enabled` | `yes` / `no`: started at boot | `yes` |
 | `console` | `yes`: also echo the unit's output on the system console (milkd's stdout) | `no` |
 
-Example (`/etc/milk/services/clockd.service`):
+Example (`/System/Settings/milk/services/clockd.service`):
 
 ```text
 # Alarms and timers for the desktop.
 description = clock daemon: alarms
-exec = /bin/clockd --quiet
+exec = /System/Services/clockd --quiet
 user = milk
 restart = always
 after = drop
-sandbox = fs=/home/milk/Library/Clock:rw net=none spawn=0
+sandbox = fs=/Users/milk/Library/Clock:rw net=none spawn=0
 socket = /run/clockd.sock
 ```
 
@@ -505,10 +505,13 @@ its restart policy brings it back (how `scripts/driver-crash-test.sh` crashes a 
 A separate cargo workspace (soft-float target, `user/rt/user.ld`). `kernel/build.rs` runs
 `cargo build --release` in `user/` into `target/user/` **before** it packs the
 initramfs, and fails the build if a program isn't listed in `initramfs.list`. Programs
-are `user/<crate>/src/main.rs` (binary `<crate>`) and `user/<crate>/src/bin/<x>.rs`
-(binary `<x>`). So `cargo build` at the root builds everything and the programs land in
-`/bin`. Adding one: the source file (+ workspace member for a new crate) + one line in
-`initramfs.list`.
+are `user/<crate>/src/main.rs` (program `<crate>`) and `user/<crate>/src/bin/<x>.rs`
+(program `<x>`). So `cargo build` at the root builds everything, and `initramfs.list` puts
+each program where its kind goes (docs/filesystem.md, "The tree"): a command in
+`/Commands`, an app in `/Apps/<name>/` (with a manifest in `rootfs/Apps/<name>/`), a
+service in `/System/Services` (with a `.service` file in
+`rootfs/System/Settings/milk/services/`). Adding one: the source file (+ workspace member
+for a new crate) + one line in `initramfs.list`.
 
 * `rt`: `_start`, syscall wrappers (`rt::sys`: files, processes, signals with an
   `sa_restorer` trampoline, job control, /proc-based `ps`), `print!`/`println!`,
@@ -518,7 +521,7 @@ are `user/<crate>/src/main.rs` (binary `<crate>`) and `user/<crate>/src/bin/<x>.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).
 * `coreutils`: ls cat echo wc head tail grep sort uniq ps kill sleep mkdir rm mv cp ln
-  touch env uptime free uname true false clear, one binary each.
+  touch env uptime free uname true false clear, one program each.
 * `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
   `utest pipe | cow | proc | signal | all`).
 
@@ -572,7 +575,7 @@ where `next_frame_ns += 16_666_667` (60 Hz). Things to respect:
 * Controlling-terminal rules (any process may TIOCSPGRP today), SIGTTIN/SIGTTOU.
 * 16-bit ASIDs (Apple silicon has them), SMP (scheduler lock across check+block,
   per-CPU current thread via TPIDR_EL1, an atomic COW share-and-copy).
-* The higher-half kernel move (above), then static Linux binaries at 0x400000.
+* The higher-half kernel move (above), then static Linux programs at 0x400000.
 
 ## Monitoring: `top`, `uptime`, `/proc/loadavg`, `/proc/diskstats`
 

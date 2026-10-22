@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn finds_disks() {
-        let t = "tmpfs / tmpfs rw 0 0\ndevfs /dev devfs rw 0 0\nmilkfs /Volumes/Milk milkfs rw 0 0\nmilkfs /home/milk milkfs rw 0 0\nvfat /Volumes/USB vfat rw 0 0\n9p /Volumes/Mac 9p rw 0 0\nmilkfs /Volumes/Milk-try1 milkfs rw 0 0\nproc /proc proc rw 0 0\n";
+        let t = "tmpfs / tmpfs rw 0 0\ndevfs /dev devfs rw 0 0\nmilkfs /Volumes/Milk milkfs rw 0 0\nmilkfs /Users/milk milkfs rw 0 0\nvfat /Volumes/USB vfat rw 0 0\n9p /Volumes/Mac 9p rw 0 0\nmilkfs /Volumes/Milk-try1 milkfs rw 0 0\nproc /proc proc rw 0 0\n";
         let v = volumes(t);
         let names: Vec<(&str, Kind)> = v.iter().map(|x| (x.name.as_str(), x.kind)).collect();
         assert_eq!(

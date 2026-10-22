@@ -101,7 +101,7 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
         } else {
             format!("{} ({})", label, fmt_hm(at))
         };
-        let snooze = format!("/bin/alarm snooze {id} 9");
+        let snooze = format!("/Commands/alarm snooze {id} 9");
         ring(
             paths,
             "alarm",
@@ -110,7 +110,7 @@ fn alarms(paths: &timeio::Paths, from: i64, now: i64) {
             Toast {
                 app: "Clock",
                 id: *id,
-                actions: &[("Snooze 9 min", &snooze), ("Open", "open /bin/clock")],
+                actions: &[("Snooze 9 min", &snooze), ("Open", "open clock")],
             },
         );
         // The panel plays the alarm sound until it is stopped; without it, one chime.
@@ -151,11 +151,15 @@ fn publish_menu_timer(list: &timekit::clock::Timers, mono_ms: u64) {
         .min();
     match soonest {
         Some(ms) => {
-            timeio::menu_timer("Clock", &timekit::clock::fmt_countdown(ms), "/bin/clock");
+            timeio::menu_timer(
+                "Clock",
+                &timekit::clock::fmt_countdown(ms),
+                "/Apps/clock/clock",
+            );
             MENU_TIMER.store(true, Relaxed);
         }
         None if MENU_TIMER.swap(false, Relaxed) => {
-            timeio::menu_timer("Clock", "", "/bin/clock");
+            timeio::menu_timer("Clock", "", "/Apps/clock/clock");
         }
         None => {}
     }
@@ -174,7 +178,11 @@ fn timers(paths: &timeio::Paths, mono_ms: u64) {
         } else {
             t.label.clone()
         };
-        let again = format!("/bin/timer {}s {}", (t.total_ms / 1000).max(1), t.label);
+        let again = format!(
+            "/Commands/timer {}s {}",
+            (t.total_ms / 1000).max(1),
+            t.label
+        );
         ring(
             paths,
             "timer",
@@ -183,7 +191,7 @@ fn timers(paths: &timeio::Paths, mono_ms: u64) {
             Toast {
                 app: "Clock",
                 id: t.id,
-                actions: &[("Again", again.trim()), ("Open", "open /bin/clock")],
+                actions: &[("Again", again.trim()), ("Open", "open clock")],
             },
         );
     }
@@ -217,7 +225,7 @@ fn calendar(paths: &timeio::Paths, from: i64, now: i64) {
             Toast {
                 app: "Calendar",
                 id,
-                actions: &[("Open", "open /bin/calendar")],
+                actions: &[("Open", "open calendar")],
             },
         );
     }
@@ -227,8 +235,8 @@ fn reminders(paths: &timeio::Paths, from: i64, now: i64) {
     let (set, _) = timeio::load_reminders(paths);
     for (id, title, list, at) in set.rings_due(from, now) {
         let (done, snooze) = (
-            format!("/bin/remind done {id}"),
-            format!("/bin/remind snooze {id} 10"),
+            format!("/Commands/remind done {id}"),
+            format!("/Commands/remind snooze {id} 10"),
         );
         ring(
             paths,

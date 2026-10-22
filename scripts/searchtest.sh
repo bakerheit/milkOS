@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The search index on a private image (fresh /tmp directory; only qemus started here are
-# killed). The image gets N files (default 5000) under /home/milk/gen with known words
+# killed). The image gets N files (default 5000) under /Users/milk/gen with known words
 # (mkmilkfs.py populate: "uniqNNNNN" once each, FRUITS[i % 7], .md/.txt/no extension).
 #   boot 1: the index builds; queries return exactly the expected files (unique word,
 #           fruit counts, kind:/in: filters, name prefix, a structured pipe); a new file
@@ -27,8 +27,8 @@ ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/s.img"
 $M mkfs "$IMG" --size 256M >/dev/null
-$M mkdir "$IMG" /home/milk >/dev/null
-$M populate "$IMG" /home/milk/gen "$N" >/dev/null
+$M mkdir "$IMG" /Users/milk >/dev/null
+$M populate "$IMG" /Users/milk/gen "$N" >/dev/null
 expect() { python3 -c "n=$N; print(sum(1 for i in range(n) if $1))"; }
 QPID=""
 trap '[ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true' EXIT
@@ -52,12 +52,12 @@ boot() { # name commands...
 }
 # Output of the command typed as $2 in log $1, up to the next prompt.
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
-G=/home/milk/gen
+G=/Users/milk/gen
 boot b1 "spot --wait" "spot --status" "spot --status" \
   "spot uniq01234" "head -1 /sys/fs/search/query" "spot -n 10000 mango" "head -1 /sys/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
   "spot f0499" "spot -n 3 kind:txt cherry | where kind == txt | count" \
-  "echo quokka sighting near the dam > /home/milk/new-note.txt" "sleep 1" "spot quokka" \
-  "mv /home/milk/new-note.txt $G/d007/quokka.md" "sleep 1" "spot -l quokka" \
+  "echo quokka sighting near the dam > /Users/milk/new-note.txt" "sleep 1" "spot quokka" \
+  "mv /Users/milk/new-note.txt $G/d007/quokka.md" "sleep 1" "spot -l quokka" \
   "rm $G/d007/quokka.md" "sleep 1" "spot quokka" \
   "echo now > /sys/fs/milkfs/sync" "sleep 3" "spot --status"
 L1="$T/b1.log"
@@ -75,7 +75,7 @@ c=$(out "$L1" "spot -n 10000 in:d042" | grep -c "^$G/d042/" || true)
 c=$(out "$L1" "spot f0499" | grep -c "^$G" || true)
 [ "$c" = 10 ] && [ "$(out "$L1" "spot f0499" | head -1)" = "$G/d049/f04990.txt" ] && ok "name prefix f0499: 10 files" || bad "f0499: $c"
 [ "$(out "$L1" "spot -n 3 kind:txt cherry | where kind == txt | count" | tail -1 | tr -d ' ')" = 3 ] && ok "structured pipe: spot | where kind == txt | count" || bad "structured pipe: $(out "$L1" "spot -n 3 kind:txt cherry | where kind == txt | count")"
-[ "$(out "$L1" "spot quokka" | head -1)" = /home/milk/new-note.txt ] && ok "a new file is found within 1 s" || bad "new file: $(out "$L1" "spot quokka")"
+[ "$(out "$L1" "spot quokka" | head -1)" = /Users/milk/new-note.txt ] && ok "a new file is found within 1 s" || bad "new file: $(out "$L1" "spot quokka")"
 out "$L1" "spot -l quokka" | grep -q "md .*content.* $G/d007/quokka.md$" && ok "a rename shows the new path (and kind) within 1 s" || bad "rename: $(out "$L1" "spot -l quokka")"
 tr -d '\r' < "$L1" | grep -aq 'spot: nothing found for "quokka"' && ok "a delete is gone within 1 s" || bad "delete still found"
 out "$L1" "spot --status" | tail -6 | grep -q "saves" && ok "saved: $(out "$L1" "spot --status" | tail -5 | grep events | sed 's/^events: *//')" || bad "no save"

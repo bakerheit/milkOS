@@ -1,6 +1,6 @@
 # Calendar, Clock and the alarm daemon
 
-Two windows (`/bin/calendar`, `/bin/clock`, dock tiles from `/System/Applications/<app>/manifest`), a
+Two windows (`/Apps/calendar/calendar`, `/Apps/clock/clock`, dock tiles from `/Apps/<app>/manifest`), a
 background ringer (`alarmd`) and shell tools (`cal`, `alarm`, `timer`). The windows are built on
 `user/appkit` (the SPEC theme, buttons, segmented control, switch, chips, text fields, rings).
 
@@ -59,10 +59,10 @@ alarmd posts every ring as a toast with up to two buttons that run a command (do
 
 | Ring | Buttons |
 | --- | --- |
-| Alarm | Snooze 9 min (`/bin/alarm snooze ID 9`), Open (the Clock) |
-| Timer done | Again (`/bin/timer <seconds>s <label>`), Open |
+| Alarm | Snooze 9 min (`/Commands/alarm snooze ID 9`), Open (the Clock) |
+| Timer done | Again (`/Commands/timer <seconds>s <label>`), Open |
 | Calendar alert | Open (the Calendar) |
-| Reminder | Done (`/bin/remind done ID`), Snooze 10m (`/bin/remind snooze ID 10`) |
+| Reminder | Done (`/Commands/remind done ID`), Snooze 10m (`/Commands/remind snooze ID 10`) |
 
 A reminder's snooze is the last column of its line (`YYYY-MM-DD@HH:MM`); it rings again then and
 leaves the due day alone; completing the reminder clears it. A ringing alarm still opens the small

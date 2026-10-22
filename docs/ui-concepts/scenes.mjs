@@ -155,7 +155,7 @@ function s05(){
   h+=pane(660,40,356,270,'clock + disks',
     T(12,16,'10:41:07',X3+BD)+T(12,72,'Tuesday 20 October',`color:${C.cocoa}`)+
     T(12,108,'/       ')+B(80,110,240,12,`background:${C.sand}`,B(0,0,70,12,`background:${C.matcha}`))+
-    T(12,132,'/home   ')+B(80,134,240,12,`background:${C.sand}`,B(0,0,160,12,`background:${C.honey}`))+
+    T(12,132,'/Users   ')+B(80,134,240,12,`background:${C.sand}`,B(0,0,160,12,`background:${C.honey}`))+
     T(12,156,'/tmp    ')+B(80,158,240,12,`background:${C.sand}`,B(0,0,18,12,`background:${C.matcha}`)),false);
   h+=pane(660,330,356,400,'jobs',
     T(12,16,'ID  CMD          STATE',`color:${C.cocoa}`)+T(12,38,' 1  display      running')+T(12,56,' 2  input        running')+T(12,74,' 3  shell        running')+T(12,92,' 4  cargo build  done',`color:${C.matcha}`)+

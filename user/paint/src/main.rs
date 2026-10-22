@@ -118,7 +118,7 @@ impl App {
                 data.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
             }
         }
-        let path = "/home/milk/Pictures/painting.ppm";
+        let path = "/Users/milk/Pictures/painting.ppm";
         const O_WRONLY: u32 = 1;
         const O_CREAT: u32 = 0o100;
         const O_TRUNC: u32 = 0o1000;

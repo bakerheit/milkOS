@@ -1,0 +1,8 @@
+# The web server on :80 (the kernel's own httpd is off by default).
+description = serving /Users/milk/Sites on :80
+exec = /System/Services/httpd -q /Users/milk/Sites
+user = nobody
+restart = on-failure
+if-exists = /Users/milk/Sites/index.html
+# Read-only web root, /proc for the status page, the network, no new processes.
+sandbox = fs=/Users/milk/Sites:r fs=/proc:r net=all spawn=0

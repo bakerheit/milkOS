@@ -1,6 +1,6 @@
 //! The machine's hostname: uname's nodename, set with sethostname(2) (root only). The
-//! default is `milk`; at boot `net::init` applies `/etc/milk/net/hostname` if it exists
-//! (persistent on a machine with a Milk volume, like `/etc/milk/drop`). `netctl hostname`
+//! default is `milk`; at boot `net::init` applies `/System/Settings/milk/net/hostname` if it exists
+//! (persistent on a machine with a Milk volume, like `/System/Settings/milk/drop`). `netctl hostname`
 //! writes that file and sets the running name.
 
 use alloc::string::String;
@@ -10,7 +10,7 @@ use crate::fs::errno::Result;
 use crate::sync::SpinLock;
 
 pub const MAX: usize = 63;
-pub const PERSIST: &str = "/etc/milk/net/hostname";
+pub const PERSIST: &str = "/System/Settings/milk/net/hostname";
 
 const fn initial() -> ([u8; MAX], usize) {
     let mut b = [0u8; MAX];

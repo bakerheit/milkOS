@@ -1,111 +1,115 @@
 # Extra files packed into the initramfs, on top of everything in rootfs/.
 # One per line:   <path in the image>   <host path, relative to the repo root>   [octal mode]
-# Example:        /bin/init             target/user/init                         755
+# Example:        /Commands/hello       target/user/.../release/hello            755
 # A missing host file is skipped with a cargo warning, so the kernel still builds
-# before the user programs do. See docs/filesystem.md.
+# before the user programs do. See docs/filesystem.md ("The tree") for where things go:
+# an app (it has a window) in /Apps/<name>/, a command (you type it) in /Commands, a
+# service (it runs in the background, milkd starts it) in /System/Services.
 
-# User programs (user/ workspace, built by kernel/build.rs before the archive is packed).
-/bin/init   target/user/aarch64-unknown-none-softfloat/release/init    755
-/bin/hello  target/user/aarch64-unknown-none-softfloat/release/hello   755
-/bin/msh    target/user/aarch64-unknown-none-softfloat/release/msh     755
-/bin/fault  target/user/aarch64-unknown-none-softfloat/release/fault   755
-/bin/snap   target/user/aarch64-unknown-none-softfloat/release/snap    755
-/bin/fetch  target/user/aarch64-unknown-none-softfloat/release/fetch   755
-/bin/utest  target/user/aarch64-unknown-none-softfloat/release/utest   755
+# The first program (PID 1).
+/System/Startup/init                              target/user/aarch64-unknown-none-softfloat/release/init       755
 
-# Coreutils (user/coreutils/src/bin/*.rs), one small binary each.
-/bin/cat     target/user/aarch64-unknown-none-softfloat/release/cat     755
-/bin/chroot  target/user/aarch64-unknown-none-softfloat/release/chroot  755
-/bin/sandbox target/user/aarch64-unknown-none-softfloat/release/sandbox 755
-/bin/whoami  target/user/aarch64-unknown-none-softfloat/release/whoami  755
-/bin/id      target/user/aarch64-unknown-none-softfloat/release/id      755
-/bin/chmod   target/user/aarch64-unknown-none-softfloat/release/chmod   755
-/bin/chown   target/user/aarch64-unknown-none-softfloat/release/chown   755
-/bin/log     target/user/aarch64-unknown-none-softfloat/release/log     755
-/bin/svc     target/user/aarch64-unknown-none-softfloat/release/svc     755
-/bin/auth    target/user/aarch64-unknown-none-softfloat/release/auth    755
-/bin/milkd   target/user/aarch64-unknown-none-softfloat/release/milkd   755
-/bin/rngd    target/user/aarch64-unknown-none-softfloat/release/rngd    755
-/bin/soundd  target/user/aarch64-unknown-none-softfloat/release/soundd  755
+# Services: background helpers, started and supervised by milkd from
+# /System/Settings/milk/services (milkd itself is started by init).
+/System/Services/alarmd                           target/user/aarch64-unknown-none-softfloat/release/alarmd     755
+/System/Services/httpd                            target/user/aarch64-unknown-none-softfloat/release/httpd      755
+/System/Services/milkd                            target/user/aarch64-unknown-none-softfloat/release/milkd      755
+/System/Services/rngd                             target/user/aarch64-unknown-none-softfloat/release/rngd       755
+/System/Services/soundd                           target/user/aarch64-unknown-none-softfloat/release/soundd     755
+
+# Apps: one folder each, the program next to its manifest (rootfs/Apps/<name>/manifest).
+# Paint and Peek have no dock line in theirs (the desktop has its own Paint tile; Peek is
+# the powerbox demo).
+/Apps/activity/activity                           target/user/aarch64-unknown-none-softfloat/release/activity   755
+/Apps/calendar/calendar                           target/user/aarch64-unknown-none-softfloat/release/calendar   755
+/Apps/clock/clock                                 target/user/aarch64-unknown-none-softfloat/release/clock      755
+/Apps/diskutil/diskutil                           target/user/aarch64-unknown-none-softfloat/release/diskutil   755
+/Apps/paint/paint                                 target/user/aarch64-unknown-none-softfloat/release/paint      755
+/Apps/peek/peek                                   target/user/aarch64-unknown-none-softfloat/release/peek       755
+/Apps/reminders/reminders                         target/user/aarch64-unknown-none-softfloat/release/reminders  755
+/Apps/store/store                                 target/user/aarch64-unknown-none-softfloat/release/store      755
+
+# Commands: what Terminal finds on PATH (/Commands). The user/ workspace's command-line
+# programs; coreutils (user/coreutils/src/bin/*.rs) are one small program each.
+/Commands/hello                                   target/user/aarch64-unknown-none-softfloat/release/hello      755
+/Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
+/Commands/fault                                   target/user/aarch64-unknown-none-softfloat/release/fault      755
+/Commands/snap                                    target/user/aarch64-unknown-none-softfloat/release/snap       755
+/Commands/fetch                                   target/user/aarch64-unknown-none-softfloat/release/fetch      755
+/Commands/utest                                   target/user/aarch64-unknown-none-softfloat/release/utest      755
+/Commands/cat                                     target/user/aarch64-unknown-none-softfloat/release/cat        755
+/Commands/chroot                                  target/user/aarch64-unknown-none-softfloat/release/chroot     755
+/Commands/sandbox                                 target/user/aarch64-unknown-none-softfloat/release/sandbox    755
+/Commands/whoami                                  target/user/aarch64-unknown-none-softfloat/release/whoami     755
+/Commands/id                                      target/user/aarch64-unknown-none-softfloat/release/id         755
+/Commands/chmod                                   target/user/aarch64-unknown-none-softfloat/release/chmod      755
+/Commands/chown                                   target/user/aarch64-unknown-none-softfloat/release/chown      755
+/Commands/log                                     target/user/aarch64-unknown-none-softfloat/release/log        755
+/Commands/svc                                     target/user/aarch64-unknown-none-softfloat/release/svc        755
+/Commands/auth                                    target/user/aarch64-unknown-none-softfloat/release/auth       755
 # Set-user-ID root (4755): they check a password themselves, then switch ids.
-/bin/su      target/user/aarch64-unknown-none-softfloat/release/su      4755
-/bin/sudo    target/user/aarch64-unknown-none-softfloat/release/sudo    4755
-/bin/passwd  target/user/aarch64-unknown-none-softfloat/release/passwd  4755
-/bin/clear   target/user/aarch64-unknown-none-softfloat/release/clear   755
-/bin/cp      target/user/aarch64-unknown-none-softfloat/release/cp      755
-/bin/df      target/user/aarch64-unknown-none-softfloat/release/df      755
-/bin/echo    target/user/aarch64-unknown-none-softfloat/release/echo    755
-/bin/env     target/user/aarch64-unknown-none-softfloat/release/env     755
-/bin/false   target/user/aarch64-unknown-none-softfloat/release/false   755
-/bin/free    target/user/aarch64-unknown-none-softfloat/release/free    755
-/bin/grep    target/user/aarch64-unknown-none-softfloat/release/grep    755
-/bin/head    target/user/aarch64-unknown-none-softfloat/release/head    755
-/bin/kill    target/user/aarch64-unknown-none-softfloat/release/kill    755
-/bin/ln      target/user/aarch64-unknown-none-softfloat/release/ln      755
-/bin/ls      target/user/aarch64-unknown-none-softfloat/release/ls      755
-/bin/mkdir   target/user/aarch64-unknown-none-softfloat/release/mkdir   755
-/bin/mv      target/user/aarch64-unknown-none-softfloat/release/mv      755
-/bin/ps      target/user/aarch64-unknown-none-softfloat/release/ps      755
-/bin/rm      target/user/aarch64-unknown-none-softfloat/release/rm      755
-/bin/sleep   target/user/aarch64-unknown-none-softfloat/release/sleep   755
-/bin/sort    target/user/aarch64-unknown-none-softfloat/release/sort    755
-/bin/tail    target/user/aarch64-unknown-none-softfloat/release/tail    755
-/bin/touch   target/user/aarch64-unknown-none-softfloat/release/touch   755
-/bin/true    target/user/aarch64-unknown-none-softfloat/release/true    755
-/bin/uname   target/user/aarch64-unknown-none-softfloat/release/uname   755
-/bin/uniq    target/user/aarch64-unknown-none-softfloat/release/uniq    755
-/bin/uptime  target/user/aarch64-unknown-none-softfloat/release/uptime  755
-/bin/wc      target/user/aarch64-unknown-none-softfloat/release/wc      755
+/Commands/su                                      target/user/aarch64-unknown-none-softfloat/release/su         4755
+/Commands/sudo                                    target/user/aarch64-unknown-none-softfloat/release/sudo       4755
+/Commands/passwd                                  target/user/aarch64-unknown-none-softfloat/release/passwd     4755
+/Commands/clear                                   target/user/aarch64-unknown-none-softfloat/release/clear      755
+/Commands/cp                                      target/user/aarch64-unknown-none-softfloat/release/cp         755
+/Commands/df                                      target/user/aarch64-unknown-none-softfloat/release/df         755
+/Commands/echo                                    target/user/aarch64-unknown-none-softfloat/release/echo       755
+/Commands/env                                     target/user/aarch64-unknown-none-softfloat/release/env        755
+/Commands/false                                   target/user/aarch64-unknown-none-softfloat/release/false      755
+/Commands/free                                    target/user/aarch64-unknown-none-softfloat/release/free       755
+/Commands/grep                                    target/user/aarch64-unknown-none-softfloat/release/grep       755
+/Commands/head                                    target/user/aarch64-unknown-none-softfloat/release/head       755
+/Commands/kill                                    target/user/aarch64-unknown-none-softfloat/release/kill       755
+/Commands/ln                                      target/user/aarch64-unknown-none-softfloat/release/ln         755
+/Commands/ls                                      target/user/aarch64-unknown-none-softfloat/release/ls         755
+/Commands/mkdir                                   target/user/aarch64-unknown-none-softfloat/release/mkdir      755
+/Commands/mv                                      target/user/aarch64-unknown-none-softfloat/release/mv         755
+/Commands/ps                                      target/user/aarch64-unknown-none-softfloat/release/ps         755
+/Commands/rm                                      target/user/aarch64-unknown-none-softfloat/release/rm         755
+/Commands/sleep                                   target/user/aarch64-unknown-none-softfloat/release/sleep      755
+/Commands/sort                                    target/user/aarch64-unknown-none-softfloat/release/sort       755
+/Commands/tail                                    target/user/aarch64-unknown-none-softfloat/release/tail       755
+/Commands/touch                                   target/user/aarch64-unknown-none-softfloat/release/touch      755
+/Commands/true                                    target/user/aarch64-unknown-none-softfloat/release/true       755
+/Commands/uname                                   target/user/aarch64-unknown-none-softfloat/release/uname      755
+/Commands/uniq                                    target/user/aarch64-unknown-none-softfloat/release/uniq       755
+/Commands/uptime                                  target/user/aarch64-unknown-none-softfloat/release/uptime     755
+/Commands/wc                                      target/user/aarch64-unknown-none-softfloat/release/wc         755
+/Commands/stty                                    target/user/aarch64-unknown-none-softfloat/release/stty       755
+/Commands/open                                    target/user/aarch64-unknown-none-softfloat/release/open       755
+/Commands/notify                                  target/user/aarch64-unknown-none-softfloat/release/notify     755
+/Commands/today                                   target/user/aarch64-unknown-none-softfloat/release/today      755
+/Commands/spaces                                  target/user/aarch64-unknown-none-softfloat/release/spaces     755
+/Commands/cowsay                                  target/user/aarch64-unknown-none-softfloat/release/cowsay     755
+/Commands/alarm                                   target/user/aarch64-unknown-none-softfloat/release/alarm      755
+/Commands/timer                                   target/user/aarch64-unknown-none-softfloat/release/timer      755
+/Commands/cal                                     target/user/aarch64-unknown-none-softfloat/release/cal        755
+/Commands/remind                                  target/user/aarch64-unknown-none-softfloat/release/remind     755
+/Commands/ifconfig                                target/user/aarch64-unknown-none-softfloat/release/ifconfig   755
+/Commands/netstat                                 target/user/aarch64-unknown-none-softfloat/release/netstat    755
+/Commands/ping                                    target/user/aarch64-unknown-none-softfloat/release/ping       755
+/Commands/nc                                      target/user/aarch64-unknown-none-softfloat/release/nc         755
+/Commands/play                                    target/user/aarch64-unknown-none-softfloat/release/play       755
+/Commands/audit                                   target/user/aarch64-unknown-none-softfloat/release/audit      755
+/Commands/milk                                    target/user/aarch64-unknown-none-softfloat/release/milk       755
+/Commands/top                                     target/user/aarch64-unknown-none-softfloat/release/top        755
+/Commands/drop                                    target/user/aarch64-unknown-none-softfloat/release/drop       755
+/Commands/tcpbench                                target/user/aarch64-unknown-none-softfloat/release/tcpbench   755
+/Commands/netctl                                  target/user/aarch64-unknown-none-softfloat/release/netctl     755
+/Commands/versions                                target/user/aarch64-unknown-none-softfloat/release/versions   755
+/Commands/fsstress                                target/user/aarch64-unknown-none-softfloat/release/fsstress   755
+/Commands/dedupe                                  target/user/aarch64-unknown-none-softfloat/release/dedupe     755
+/Commands/spot                                    target/user/aarch64-unknown-none-softfloat/release/spot       755
 
-# Desktop (wm): stty, the Paint window client, and the /dev/wm tools (user/desk).
-/bin/stty   target/user/aarch64-unknown-none-softfloat/release/stty    755
-/bin/paint  target/user/aarch64-unknown-none-softfloat/release/paint   755
-/bin/peek   target/user/aarch64-unknown-none-softfloat/release/peek    755
-/bin/open   target/user/aarch64-unknown-none-softfloat/release/open    755
-/bin/notify target/user/aarch64-unknown-none-softfloat/release/notify  755
-/bin/today  target/user/aarch64-unknown-none-softfloat/release/today   755
-/bin/spaces target/user/aarch64-unknown-none-softfloat/release/spaces  755
-/bin/cowsay target/user/aarch64-unknown-none-softfloat/release/cowsay  755
-
-# Alarms, timers and calendar alerts, with every window closed (started by init).
-/bin/alarmd target/user/aarch64-unknown-none-softfloat/release/alarmd  755
-/bin/alarm  target/user/aarch64-unknown-none-softfloat/release/alarm   755
-/bin/timer  target/user/aarch64-unknown-none-softfloat/release/timer   755
-/bin/cal    target/user/aarch64-unknown-none-softfloat/release/cal     755
-/bin/remind target/user/aarch64-unknown-none-softfloat/release/remind  755
-/bin/clock  target/user/aarch64-unknown-none-softfloat/release/clock   755
-/bin/calendar target/user/aarch64-unknown-none-softfloat/release/calendar 755
-/bin/activity target/user/aarch64-unknown-none-softfloat/release/activity 755
-/bin/reminders target/user/aarch64-unknown-none-softfloat/release/reminders 755
-/bin/diskutil target/user/aarch64-unknown-none-softfloat/release/diskutil 755
-
-# Network and sound tools (net agent).
-/bin/ifconfig target/user/aarch64-unknown-none-softfloat/release/ifconfig   755
-/bin/netstat  target/user/aarch64-unknown-none-softfloat/release/netstat   755
-/bin/ping     target/user/aarch64-unknown-none-softfloat/release/ping   755
-/bin/nc       target/user/aarch64-unknown-none-softfloat/release/nc   755
-/bin/httpd    target/user/aarch64-unknown-none-softfloat/release/httpd   755
-/bin/play     target/user/aarch64-unknown-none-softfloat/release/play   755
-/bin/audit    target/user/aarch64-unknown-none-softfloat/release/audit   755
-/bin/milk     target/user/aarch64-unknown-none-softfloat/release/milk   755
-/bin/top      target/user/aarch64-unknown-none-softfloat/release/top   755
-/bin/store    target/user/aarch64-unknown-none-softfloat/release/store   755
-/bin/drop     target/user/aarch64-unknown-none-softfloat/release/drop   755
-/bin/tcpbench target/user/aarch64-unknown-none-softfloat/release/tcpbench 755
-/bin/netctl   target/user/aarch64-unknown-none-softfloat/release/netctl 755
-/bin/versions target/user/aarch64-unknown-none-softfloat/release/versions 755
-/bin/fsstress target/user/aarch64-unknown-none-softfloat/release/fsstress 755
-/bin/dedupe  target/user/aarch64-unknown-none-softfloat/release/dedupe  755
-/bin/spot    target/user/aarch64-unknown-none-softfloat/release/spot    755
-
-# Linux binary compatibility: a static Linux/aarch64 program with no milkOS knowledge,
-# linked at 0x400000 (tests/linux/build.sh; the binary is committed).
-/bin/linux-hello  tests/linux/bin/linux-hello  755
+# Linux program compatibility: a static Linux/aarch64 program with no milkOS knowledge,
+# linked at 0x400000 (tests/linux/build.sh; the program is committed).
+/Commands/linux-hello                             tests/linux/bin/linux-hello                                   755
 
 # Font licences (the desktop's baked system fonts, kernel/src/sysfont.rs, and Unifont).
-/System/Library/Fonts/FIGTREE-OFL.txt                    assets/fonts/FIGTREE-OFL.txt                    644
-/System/Library/Fonts/IBM-PLEX-SANS-OFL.txt              assets/fonts/IBM-PLEX-SANS-OFL.txt              644
-/System/Library/Fonts/FIRA-SANS-OFL.txt                  assets/fonts/FIRA-SANS-OFL.txt                  644
-/System/Library/Fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt assets/fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt 644
-/System/Library/Fonts/UBUNTU-SANS-UFL.txt                assets/fonts/UBUNTU-SANS-UFL.txt                644
-/System/Library/Fonts/UNIFONT-LICENSE.txt                assets/fonts/UNIFONT-LICENSE.txt                644
+/System/Fonts/FIGTREE-OFL.txt                     assets/fonts/FIGTREE-OFL.txt                                  644
+/System/Fonts/IBM-PLEX-SANS-OFL.txt               assets/fonts/IBM-PLEX-SANS-OFL.txt                            644
+/System/Fonts/FIRA-SANS-OFL.txt                   assets/fonts/FIRA-SANS-OFL.txt                                644
+/System/Fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt  assets/fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt               644
+/System/Fonts/UBUNTU-SANS-UFL.txt                 assets/fonts/UBUNTU-SANS-UFL.txt                              644
+/System/Fonts/UNIFONT-LICENSE.txt                 assets/fonts/UNIFONT-LICENSE.txt                              644

@@ -6,7 +6,7 @@
  * (argc, argv, envp, auxv at sp). Linked at Linux's default 0x400000 as an ET_EXEC.
  * Built by tests/linux/build.sh with the host's bare-metal aarch64-elf-gcc.
  *
- * Exercises: write, getpid, brk, mmap/munmap, openat/read/close (/etc/hostname),
+ * Exercises: write, getpid, brk, mmap/munmap, openat/read/close (/proc/version),
  * exit_group, plus the stack layout (argc/argv/auxv AT_PAGESZ). Prints one line per
  * check and "linux-hello: ALL OK" at the end; exit status = number of failures.
  */
@@ -154,16 +154,16 @@ int cmain(u64 *sp) {
     }
     check("mmap: 64 KiB anonymous, zeroed, writable, munmap", mmap_ok);
 
-    /* openat + read + close: /etc/hostname. */
-    i64 fd = sys6(SYS_openat, AT_FDCWD, (i64) "/etc/hostname", O_RDONLY, 0, 0, 0);
-    char host[64];
-    i64 n = fd >= 0 ? sys3(SYS_read, fd, host, sizeof host - 1) : -1;
-    if (n > 0 && host[n - 1] == '\n') n--;
-    host[n > 0 ? n : 0] = 0;
-    puts_("  /etc/hostname -> \"");
-    puts_(host);
+    /* openat + read + close: /proc/version. */
+    i64 fd = sys6(SYS_openat, AT_FDCWD, (i64) "/proc/version", O_RDONLY, 0, 0, 0);
+    char line[64];
+    i64 n = fd >= 0 ? sys3(SYS_read, fd, line, sizeof line - 1) : -1;
+    if (n > 0 && line[n - 1] == '\n') n--;
+    line[n > 0 ? n : 0] = 0;
+    puts_("  /proc/version -> \"");
+    puts_(line);
     puts_("\"\n");
-    check("openat/read/close /etc/hostname", fd >= 0 && n > 0 && sys3(SYS_close, fd, 0, 0) == 0);
+    check("openat/read/close /proc/version", fd >= 0 && n > 0 && sys3(SYS_close, fd, 0, 0) == 0);
 
     /* Errors come back as -errno. */
     check("openat of a missing file -> -ENOENT",

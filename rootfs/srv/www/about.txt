@@ -1,1 +1,0 @@
-milkOS /srv/www: files here are served by /bin/httpd on port 80.

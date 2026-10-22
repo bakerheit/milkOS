@@ -14,7 +14,7 @@ use timekit::cal::CalendarSet;
 use timekit::clock::{Alarms, Timers};
 use timekit::reminders::ReminderSet;
 
-pub const DEFAULT_HOME: &str = "/home/milk";
+pub const DEFAULT_HOME: &str = "/Users/milk";
 
 /// Where the data files live.
 #[derive(Clone, Debug)]
@@ -270,7 +270,7 @@ pub fn notify(title: &str, subtitle: &str) -> bool {
 }
 
 /// Show a toast with up to two buttons (/dev/wm `notify`, docs/processes.md). A button is a label and
-/// the command the desktop runs when it is pressed (an absolute path or a /bin program with its
+/// the command the desktop runs when it is pressed (an absolute path or a /Commands program with its
 /// arguments, or `open <what>`; no shell), so a windowless daemon can offer Snooze and Done.
 pub fn notify_with(app: &str, title: &str, sub: &str, id: u32, actions: &[(&str, &str)]) -> bool {
     let Ok(fd) = sys::open("/dev/wm", sys::O_WRONLY | sys::O_CLOEXEC) else {
@@ -319,9 +319,9 @@ pub fn chime() {
         return;
     }
     let _ = sys::spawn(
-        "/bin/play",
+        "/Commands/play",
         &["play", "-n", "system", "chime"],
-        &["PATH=/bin"],
+        &["PATH=/Commands"],
     );
 }
 
@@ -329,9 +329,9 @@ pub fn chime() {
 /// could not be started.
 pub fn open_alarm_panel(label: &str, hhmm: &str) -> bool {
     sys::spawn(
-        "/bin/clock",
+        "/Apps/clock/clock",
         &["clock", "ring", label, hhmm],
-        &["PATH=/bin", "HOME=/home/milk"],
+        &["PATH=/Commands", "HOME=/Users/milk"],
     )
     .is_ok()
 }

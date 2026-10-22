@@ -5,7 +5,7 @@
 #   - the network tools typed into msh over the serial console: ifconfig, ping, netstat,
 #     fetch (host helper, the guest's own servers, a refused port), nc (to the host echo
 #     server, and nc -l reached from the Mac),
-#   - from the Mac (curl): the userland /bin/httpd on guest :80 via 127.0.0.1:$HTTP_PORT,
+#   - from the Mac (curl): the userland /System/Services/httpd on guest :80 via 127.0.0.1:$HTTP_PORT,
 #     and the kernel's httpd (enabled for the test on guest :8080) via a free port.
 #
 #   scripts/net-test.sh            HTTP_PORT=8088 by default (override: HTTP_PORT=9099 ...)
@@ -170,7 +170,7 @@ echo "---- host curl -> userland httpd on guest :80 (via 127.0.0.1:$HTTP_PORT) -
 curl -sS -i --max-time 5 "http://127.0.0.1:$HTTP_PORT/" >"$WORK/index.txt" || fail "curl /"
 tr -d '\r' <"$WORK/index.txt"
 grep -q "Hello from milkOS userland" "$WORK/index.txt" || fail "index page content"
-curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/about.txt" | grep -q "served by /bin/httpd" || fail "about.txt"
+curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/about.txt" | grep -q "served by /System/Services/httpd" || fail "about.txt"
 curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/notes/" | grep -q 'href="hello.txt"' || fail "directory listing"
 for t in "/missing 404" "/../etc/motd 403" "/notes 301"; do
   set -- $t
@@ -179,7 +179,7 @@ for t in "/missing 404" "/../etc/motd 403" "/notes 301"; do
 done
 echo "userland httpd: /, /about.txt, /notes/ listing, 404, 403 (..), 301 ok"
 curl -sS --max-time 5 "http://127.0.0.1:$HTTP_PORT/status" >"$WORK/status.html" || fail "curl /status"
-for want in '<title>milkOS status</title>' '<h2>CPU</h2>' 'cpu0  \[' '<h2>Memory</h2>' '<h2>Recent audit events</h2>' '<b>exec</b> /bin/'; do
+for want in '<title>milkOS status</title>' '<h2>CPU</h2>' 'cpu0  \[' '<h2>Memory</h2>' '<h2>Recent audit events</h2>' '<b>exec</b> /Commands/'; do
   grep -q "$want" "$WORK/status.html" || { cat "$WORK/status.html"; fail "/status: no $want"; }
 done
 echo "userland httpd /status: CPU, memory, network, recent audit events ok ($(wc -c <"$WORK/status.html") bytes)"

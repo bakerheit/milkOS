@@ -1,5 +1,5 @@
 //! open <app|path>...: open apps (files, terminal, notes, about, paint, today, spaces),
-//! folders (in Files), text files (in Notes) or /bin programs on the desktop.
+//! folders (in Files), text files (in Notes) or /Commands programs on the desktop.
 
 #![no_std]
 #![no_main]

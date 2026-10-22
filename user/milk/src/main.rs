@@ -1,13 +1,13 @@
 //! milk: the milkOS package manager. Packages are .milkpkg files (ustar + manifest, see
-//! scripts/mkpkg.py and docs/packages.md) from repositories listed in /etc/milk/repos.
+//! scripts/mkpkg.py and docs/packages.md) from repositories listed in /System/Settings/milk/repos.
 //!
 //!   milk update               fetch every repository's index.txt
 //!   milk search [WORD]        packages whose name or description contains WORD
 //!   milk info NAME            index entry, and the installed manifest if installed
 //!   milk install NAME[=VER]   download, verify (signature, sha256 of the file, then of the
-//!                             payload), dependencies first; unpack into /Applications/NAME/,
-//!                             link /bin/NAME. The newest version unless =VER.
-//!   milk remove [--force] NAME  delete /Applications/NAME and its /bin link (refused while
+//!                             payload), dependencies first; unpack into /Apps/NAME/,
+//!                             link /Commands/NAME. The newest version unless =VER.
+//!   milk remove [--force] NAME  delete /Apps/NAME and its /Commands link (refused while
 //!                             another installed package depends on it, unless --force)
 //!   milk autoremove           remove packages installed only as dependencies that nothing
 //!                             needs any more
@@ -19,16 +19,16 @@
 //!                             live system is untouched (run it from the clone's path)
 //!   milk run-try [--no-sandbox] NAME [ARGS...]
 //!                             run the tried app with its clone as / (chroot), sandboxed:
-//!                             the clone's /Applications read-only, /tmp/run-NAME
+//!                             the clone's /Apps read-only, /tmp/run-NAME
 //!                             read-write, net local only
 //!   milk keep NAME            promote that clone: the install becomes real
 //!   milk discard NAME         throw the clone away
-//!   milk relink [-q]          recreate the /bin links (/bin is in RAM; init runs this)
-//!   milk keys                 trusted signing keys (/etc/milk/keys/*.pub)
+//!   milk relink [-q]          recreate the /Commands links (/Commands is in RAM; init runs this)
+//!   milk keys                 trusted signing keys (/System/Settings/milk/keys/*.pub)
 //!   milk selftest             SHA-256, SHA-512, Ed25519 (RFC 8032) test vectors
 //!
 //! Signatures: index.txt and every package must carry a valid Ed25519 signature
-//! (`<file>.sig`) by a key in /etc/milk/keys, or milk refuses them (and writes a
+//! (`<file>.sig`) by a key in /System/Settings/milk/keys, or milk refuses them (and writes a
 //! `user.pkg.verify_fail` audit record); `--insecure` accepts them anyway, still audited.
 //!
 //! Every install/remove/try/keep/discard is an audit record (`user.pkg.*`, written through
@@ -52,12 +52,12 @@ use rt::{eprintln, println, sys};
 
 rt::main!(main);
 
-const REPOS: &str = "/etc/milk/repos";
-const APPS: &str = "/Applications";
-const CACHE_DIR: &str = "/Applications/.milk";
-const CACHE: &str = "/Applications/.milk/index.txt";
+const REPOS: &str = "/System/Settings/milk/repos";
+const APPS: &str = "/Apps";
+const CACHE_DIR: &str = "/Apps/.milk";
+const CACHE: &str = "/Apps/.milk/index.txt";
 const MILKFS: &str = "/sys/fs/milkfs";
-const KEYS: &str = "/etc/milk/keys";
+const KEYS: &str = "/System/Settings/milk/keys";
 
 /// --insecure: accept unsigned / badly signed indexes and packages (loudly, and audited).
 static INSECURE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -168,7 +168,7 @@ fn key_name_ok(n: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
-/// The trusted public key `/etc/milk/keys/<name>.pub` (`ed25519 <hex> <name>`).
+/// The trusted public key `/System/Settings/milk/keys/<name>.pub` (`ed25519 <hex> <name>`).
 fn trusted_key(name: &str) -> Option<[u8; 32]> {
     if !key_name_ok(name) {
         return None;
@@ -382,11 +382,22 @@ fn cmd_update() -> Res<()> {
     Ok(())
 }
 
+/// Is `<root>/<name>` a package milk installed? (It has milk's `.origin` file. The apps
+/// that ship with milkOS sit in the same folder without one: milk leaves them alone.)
+fn is_package(root: &str, name: &str) -> bool {
+    exists(&alloc::format!("{root}/{name}/.origin"))
+}
+
+/// `<root>/<name>` is there but not milk's: a built-in app (or something an admin put there).
+fn not_ours(root: &str, name: &str) -> bool {
+    exists(&alloc::format!("{root}/{name}")) && !is_package(root, name)
+}
+
 fn installed(root: &str) -> Vec<(String, Manifest)> {
     let mut v: Vec<(String, Manifest)> = sys::read_dir(root)
         .unwrap_or_default()
         .into_iter()
-        .filter(|(n, _)| !n.starts_with('.'))
+        .filter(|(n, _)| !n.starts_with('.') && is_package(root, n))
         .filter_map(|(n, _)| {
             let m = Manifest::parse(&text(&alloc::format!("{root}/{n}/manifest"))?)?;
             Some((n, m))
@@ -525,6 +536,12 @@ fn fetch_verified(p: &Pkg) -> Res<Fetched> {
 /// Unpack a verified package into `<apps_root>/<name>/` (next to it first, then swapped in).
 /// `auto`: installed only as a dependency (`milk autoremove` may take it away).
 fn unpack(p: &Pkg, f: &Fetched, apps_root: &str, auto: bool) -> Res<()> {
+    if not_ours(apps_root, &f.man.name) {
+        return Err(alloc::format!(
+            "{apps_root}/{} is a built-in app, not a package; not replacing it",
+            f.man.name
+        ));
+    }
     let ents = tar::entries(&f.data)?;
     let dest = alloc::format!("{apps_root}/{}", f.man.name);
     let tmp = alloc::format!("{apps_root}/.{}.new", f.man.name);
@@ -564,6 +581,9 @@ fn unpack(p: &Pkg, f: &Fetched, apps_root: &str, auto: bool) -> Res<()> {
 }
 
 fn installed_version(root: &str, name: &str) -> Option<String> {
+    if !is_package(root, name) {
+        return None;
+    }
     text(&alloc::format!("{root}/{name}/manifest"))
         .and_then(|t| Manifest::parse(&t))
         .map(|m| m.version)
@@ -576,7 +596,7 @@ fn is_auto(root: &str, name: &str) -> bool {
 /// What one install transaction did: (name, version, sha256, repo+file, auto).
 type Done = Vec<(String, String, String, String, bool)>;
 
-/// Install `spec` (`name`, `name=VER`) into `root` (an /Applications directory), its
+/// Install `spec` (`name`, `name=VER`) into `root` (an /Apps directory), its
 /// dependencies first (depth first, so the order is always dependencies before
 /// dependents; cycles are refused). `min`: the version a dependent needs. `auto`: as a
 /// dependency. `upgrade`: replace an installed older version. Returns what was installed.
@@ -667,16 +687,16 @@ fn dependents(root: &str, name: &str) -> Vec<String> {
         .collect()
 }
 
-/// /bin/<basename(exec)> -> /Applications/<name>/<exec>, unless /bin has something else
+/// /Commands/<basename(exec)> -> /Apps/<name>/<exec>, unless /Commands has something else
 /// by that name.
 fn link(man: &Manifest, quiet: bool) -> Res<()> {
     let Some(exec) = &man.exec else { return Ok(()) };
     let base = exec.rsplit('/').next().unwrap_or(exec);
     let target = alloc::format!("{APPS}/{}/{exec}", man.name);
-    let bin = alloc::format!("/bin/{base}");
+    let bin = alloc::format!("/Commands/{base}");
     match sys::readlink(&bin) {
         Ok(t) if t == target => return Ok(()),
-        Ok(t) if t.starts_with("/Applications/") => {
+        Ok(t) if t.starts_with("/Apps/") => {
             let _ = sys::unlink(&bin);
         }
         _ if exists(&bin) => {
@@ -696,7 +716,7 @@ fn link(man: &Manifest, quiet: bool) -> Res<()> {
 fn unlink_bin(man: &Manifest) {
     if let Some(exec) = &man.exec {
         let base = exec.rsplit('/').next().unwrap_or(exec);
-        let bin = alloc::format!("/bin/{base}");
+        let bin = alloc::format!("/Commands/{base}");
         if sys::readlink(&bin).is_ok_and(|t| t.starts_with(&alloc::format!("{APPS}/{}/", man.name)))
         {
             let _ = sys::unlink(&bin);
@@ -727,6 +747,9 @@ fn cmd_install(spec: &str) -> Res<()> {
 
 fn remove_one(name: &str, why: &str) -> Res<()> {
     let dir = alloc::format!("{APPS}/{name}");
+    if not_ours(APPS, name) {
+        return Err(alloc::format!("{name} is a built-in app, not a package"));
+    }
     let man = text(&alloc::format!("{dir}/manifest"))
         .and_then(|t| Manifest::parse(&t))
         .ok_or_else(|| alloc::format!("{name} is not installed"))?;
@@ -876,7 +899,8 @@ fn cmd_info(name: &str) -> Res<()> {
         println!("sha256:      {}", p.sha256);
         println!("from:        {}{}", p.repo, p.file);
     }
-    match text(&alloc::format!("{APPS}/{name}/manifest")).and_then(|t| Manifest::parse(&t)) {
+    let man = text(&alloc::format!("{APPS}/{name}/manifest")).and_then(|t| Manifest::parse(&t));
+    match man.filter(|_| is_package(APPS, name)) {
         Some(m) => {
             let auto = if is_auto(APPS, name) {
                 " (as a dependency)"
@@ -885,7 +909,10 @@ fn cmd_info(name: &str) -> Res<()> {
             };
             println!("installed:   {} in {APPS}/{name}{auto}", m.version);
             if let Some(e) = &m.exec {
-                println!("runs as:     /bin/{}", e.rsplit('/').next().unwrap_or(e));
+                println!(
+                    "runs as:     /Commands/{}",
+                    e.rsplit('/').next().unwrap_or(e)
+                );
             }
             if let Some(d) = &m.dock {
                 println!("dock:        {d}");
@@ -937,7 +964,7 @@ fn clone_path(c: &str) -> Option<String> {
         .filter(|p| p != "-")
 }
 
-/// Make a fresh snapshot + clone for `label`; returns the clone's /Applications path.
+/// Make a fresh snapshot + clone for `label`; returns the clone's /Apps path.
 fn open_clone(label: &str) -> Res<(String, String)> {
     let (c, snap) = (clone_name(label), snap_name(label));
     if clone_path(&c).is_some() {
@@ -1111,7 +1138,7 @@ fn cmd_keep(name: &str) -> Res<()> {
         );
         return Ok(());
     }
-    // The promoted clone is the live volume now; /Applications shows it.
+    // The promoted clone is the live volume now; /Apps shows it.
     let man = text(&alloc::format!("{APPS}/{name}/manifest"))
         .and_then(|t| Manifest::parse(&t))
         .ok_or_else(|| alloc::format!("{name} not found in {APPS} after promoting {c}"))?;
@@ -1138,9 +1165,9 @@ fn run_scratch(name: &str) -> String {
 }
 
 /// `milk run-try [--no-sandbox] NAME [ARGS...]`: run a tried app *as if its clone were the
-/// system*. milk chroots into the clone (so `/Applications` is the clone's, and nothing
+/// system*. milk chroots into the clone (so `/Apps` is the clone's, and nothing
 /// outside it resolves), then, unless `--no-sandbox`, enters a capability sandbox: the
-/// clone's /Applications read-only (nothing else of it), a scratch dir read-write (`/tmp/run-NAME` in the clone, also HOME and
+/// clone's /Apps read-only (nothing else of it), a scratch dir read-write (`/tmp/run-NAME` in the clone, also HOME and
 /// TMPDIR), network loopback/link-local only, no clipboard. Then milk *becomes* the app
 /// (execve), so it keeps the terminal, the pid and the exit status. Works for `try NAME`
 /// clones and for a package inside the `try-upgrade` clone.
@@ -1168,7 +1195,7 @@ fn cmd_run_try(name: &str, sandboxed: bool, extra: &[&str], envp: &[&str]) -> Re
     mkdir_all(&alloc::format!("{root}{scratch}"))?;
     // Grants are matched on the path a request names: the jailed absolute path, or the
     // real path for a cwd-relative one, so each is granted in both spellings. Only the
-    // clone's /Applications is readable: not its /home or /etc (e.g. /etc/milk/drop holds
+    // clone's /Apps is readable: not its /Users or /System/Settings (e.g. /System/Settings/milk/drop holds
     // this machine's Milk Drop secret key, and the clone has a copy of it).
     let spec = if sandboxed {
         alloc::format!(
@@ -1191,7 +1218,7 @@ fn cmd_run_try(name: &str, sandboxed: bool, extra: &[&str], envp: &[&str]) -> Re
         sys::sandbox(&spec).map_err(|e| alloc::format!("sandbox: {e}"))?;
     }
     let mut env = alloc::vec![
-        alloc::format!("PATH={APPS}/{name}/bin"),
+        alloc::format!("PATH={APPS}/{name}"),
         alloc::format!("HOME={scratch}"),
         alloc::format!("TMPDIR={scratch}"),
     ];

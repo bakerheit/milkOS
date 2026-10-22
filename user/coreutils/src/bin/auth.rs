@@ -4,7 +4,7 @@
 //! own user id; the ticket only unlocks what asks for one (the destructive
 //! /sys/fs/milkfs controls, `fs::milkfs::DESTRUCTIVE`: delete, rollback, discard, promote,
 //! receive, send, lock, passwd, check repair, ...). -S reads the password from stdin (scripts). `auth -s`: this process's
-//! ticket (`auth /bin/auth -s` shows a fresh one). Unlike sudo, COMMAND runs as you.
+//! ticket (`auth /Commands/auth -s` shows a fresh one). Unlike sudo, COMMAND runs as you.
 #![no_std]
 #![no_main]
 extern crate alloc;
@@ -68,7 +68,7 @@ fn main(args: &rt::Args) -> i32 {
     let path = if cmd[0].contains('/') {
         alloc::string::String::from(cmd[0])
     } else {
-        alloc::format!("/bin/{}", cmd[0])
+        alloc::format!("/Commands/{}", cmd[0])
     };
     let e = sys::execve(&path, cmd, &args.envp);
     rt::eprintln!("auth: {}: {e}", cmd[0]);

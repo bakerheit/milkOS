@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print an /etc/shadow password hash in milkOS's `$5m$` format (proc/login.rs,
+"""Print an /System/Settings/shadow password hash in milkOS's `$5m$` format (proc/login.rs,
 user/rt/src/users.rs): h = SHA-256(salt + password), then rounds-1 times
 h = SHA-256(h + salt + password).
 

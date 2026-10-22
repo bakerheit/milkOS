@@ -8,7 +8,7 @@
   `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).
   `scripts/svc-test.sh` = milkd services (backoff, dependencies, svc permissions), admin tickets (`utest auth`) + the journal across a reboot.
   `scripts/driver-crash-test.sh` = user-space drivers (rngd, soundd; docs/drivers.md) killed mid-use: restarted, audio keeps playing, no panic; `MILK_DRIVERS="rng=kernel sound=kernel"` for the in-kernel drivers only.
-  Daemons are milkd services (`/etc/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.
+  Daemons are milkd services (`/System/Settings/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.
 - qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 
@@ -26,7 +26,7 @@
 ## Kernel facts (as of main after the proc merge)
 - Boot order in `kmain`: `exceptions::init` → `mem::init` (MMU + caches on) → `display::init` → `gic::init` →
   `timer::init` → `uart::init` → virtio → `sync::irq_enable` → self-tests → `fs::init` → `sched::init` →
-  `smp::init` (CPUs 1-3 via PSCI) → sched self-test → `proc::init` → `proc::start_init` (PID 1 = `/bin/init`, which runs `msh` on the console).
+  `smp::init` (CPUs 1-3 via PSCI) → sched self-test → `proc::init` → `proc::start_init` (PID 1 = `/System/Startup/init`, which runs `msh` on the console).
 - Threads: `sched::spawn`/`spawn_prio`, `sleep_ms`, `sleep_until`, `yield_now`, `WaitQueue` (incl.
   `wait_until_timeout`), `sched::Mutex`. Never block in an IRQ handler or while holding a `SpinLock`.
 - Ownership: `sched` owns `timer::set_tick_hook` and `timer::set_deadline` (don't call them elsewhere; use threads and
@@ -40,7 +40,7 @@
   state needs a real lock or atomics; "single core, plain load/store is fine" is no longer true. See `docs/smp.md`.
 - Processes can be multi-threaded (clone CLONE_THREAD, futex, `user/rt` thread/Mutex/Condvar); freeing a
   multi-threaded process's page tables goes through `tlb::shootdown`. `chroot` and the capability sandbox
-  (`proc/caps.rs`, `/bin/sandbox`, model in `docs/security.md`) exist; caps default to "everything", so existing
+  (`proc/caps.rs`, `/Commands/sandbox`, model in `docs/security.md`) exist; caps default to "everything", so existing
   code is unaffected, but new device opens or syscalls that touch files/net/audio/clipboard/windows should check them.
 - Locks: `sync::SpinLock<T>` (masks IRQs, really spins across CPUs, panics on same-CPU re-entry), `sync::IrqGuard`,
   `sync::without_irqs`, `sched::Mutex` for anything that may sleep.

@@ -4,7 +4,7 @@
 # chime, then types into msh over the serial console:
 #   play tone 440 0.5 | play tone 1000 0.25 | play tone 660 1.2 0.25 & + play tone 440 0.4
 #   (two writers: the mixer) | play system notify (kernel play_system) |
-#   play /System/Library/Sounds/error.wav (WAV file) | cat /proc/audio
+#   play /System/Sounds/error.wav (WAV file) | cat /proc/audio
 # and checks the recording with scripts/wav_check.py: every sound present, in order, at the
 # right pitch and length, the mix containing both tones, nothing clipped.
 #   scripts/audio-test.sh [out.wav]     (default: a mktemp dir, removed on PASS)
@@ -47,7 +47,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:play tone 660 1.2 0.25 &' "$P" 'send:play tone 440 0.4 0.25' "$P" \
   'send:sleep 1' "$P" \
   'send:play system notify' "$P" 'send:sleep 0.6' "$P" \
-  'send:play /System/Library/Sounds/error.wav' "$P" \
+  'send:play /System/Sounds/error.wav' "$P" \
   'send:cat /proc/audio' 'wait:device:[^\n]*\n' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!

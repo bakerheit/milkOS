@@ -625,7 +625,7 @@ pub fn getcwd() -> Result<String> {
     Ok(String::from_utf8_lossy(&b[..n.saturating_sub(1)]).into_owned())
 }
 
-/// Shrink this process's capabilities from a spec string (see /bin/sandbox). Only ever
+/// Shrink this process's capabilities from a spec string (see /Commands/sandbox). Only ever
 /// drops capabilities; takes effect for this process and everything it execs/forks.
 pub fn sandbox(spec: &str) -> Result<()> {
     let s = cs(spec);

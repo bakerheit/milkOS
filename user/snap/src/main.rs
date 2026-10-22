@@ -22,7 +22,7 @@
 //!   snap unlock [DEV]     unlock an encrypted volume (asks for the passphrase, or the
 //!                         recovery key) and mount it
 //!   snap lock [DEV|PATH]  lock unlocked encrypted volumes again (sync, unmount, wipe the
-//!                         key); not the one /home/milk is on. No argument: every one
+//!                         key); not the one /Users/milk is on. No argument: every one
 //!   snap passwd           change the primary volume's passphrase (rewraps the key)
 //!   snap encrypt [DEV] [--recovery-out FILE | --no-recovery] [--rate MB] [--wait]
 //!                         encrypt a plain volume in place, in the background (asks for

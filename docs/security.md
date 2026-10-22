@@ -9,8 +9,8 @@ Two accounts by default (`rootfs/etc/passwd`, `group`, `shadow`):
 
 | user | uid | primary group | groups | home |
 |---|---|---|---|---|
-| `root` | 0 | `wheel` (0) | wheel, admin | `/root` |
-| `milk` | 501 | `staff` (20) | staff, **admin** (80) | `/home/milk` |
+| `root` | 0 | `wheel` (0) | wheel, admin | `/Users/root` |
+| `milk` | 501 | `staff` (20) | staff, **admin** (80) | `/Users/milk` |
 
 The default password of both is `milk`. It is a **well-known default for a hobby OS (and
 the test suite's password), not a secret**: change it with `passwd`.
@@ -20,22 +20,22 @@ the test suite's password), not a secret**: change it with `passwd`.
   setresgid, getresuid, getresgid, getgroups, setgroups (Linux numbers 143-150, 158,
   159; get*id 174-177). Root (euid 0) may set anything; others only shuffle between
   their real and saved ids. Ids are inherited across fork and kept across exec, except
-  set-user-ID / set-group-ID binaries (mode 4xxx / 2xxx) set the effective id to the
+  set-user-ID / set-group-ID programs (mode 4xxx / 2xxx) set the effective id to the
   file's owner. Set-ID bits are ignored under `no_new_privs` (any chrooted or sandboxed
   process) and on FAT and the 9p share. Every change is audited (`cred`, `setid.exec`).
   `/proc/<pid>/status` shows `Uid:` / `Gid:` / `Groups:`.
 * **Who runs as whom.** The kernel and init are root. The desktop starts everything
   (Terminal, apps, the Store) as the *session user*, `milk` at boot. The **serial
-  console** is the maintenance console: a root shell (HOME stays /home/milk, so the test
+  console** is the maintenance console: a root shell (HOME stays /Users/milk, so the test
   scripts that drive it keep working on host-built disk images, whose files belong to
   root). `su milk` gives a milk shell there; `utest perms` / `utest creds` switch to milk
   themselves.
-* **Passwords** are never stored in plain text: `/etc/shadow` (0600, root) holds
+* **Passwords** are never stored in plain text: `/System/Settings/shadow` (0600, root) holds
   `$5m$<rounds>$<salt hex>$<digest hex>`, h = SHA-256(salt ‖ password) then rounds-1 times
   h = SHA-256(h ‖ salt ‖ password), 5000 rounds, 16-byte random salt. Same code in the
   kernel (`proc/login.rs`) and user space (`rt::users`); `scripts/mkpasswd.py` makes one
   on the host. `passwd` also writes `/Volumes/Milk/.milkos/shadow`, which the kernel
-  restores into `/etc/shadow` at boot, so changes survive a reboot.
+  restores into `/System/Settings/shadow` at boot, so changes survive a reboot.
 * **Tools:** `whoami`, `id`, `su [user] [-c cmd]` (asks the *target's* password),
   `sudo [-S] [-u user] cmd` (admins only, asks *your* password; `-S` reads it from stdin
   for scripts; no credential caching), `passwd [user]`. `su`, `sudo` and `passwd` are
@@ -71,7 +71,7 @@ stays on top: an operation needs **both** the permission bits and the sandbox.
   writable) are also writable by group **admin**; what a control write triggers (mounting a
   clone, a snapshot) runs as the kernel (`perm::as_kernel`), the check is at open.
 * `chroot` is allowed to anyone (it only narrows the view; `milk run-try` needs it) but
-  sets `no_new_privs`, as does the capability sandbox: set-ID binaries don't work in there.
+  sets `no_new_privs`, as does the capability sandbox: set-ID programs don't work in there.
 
 **Other users' processes** (Linux's default, `hidepid=0`): everyone can see every
 process in /proc and read its `status` (ids, threads, memory, and a `Caps:` line with its
@@ -82,13 +82,13 @@ process's user and root: `/proc/<pid>/maps` (0400, owned by its euid) and
 uid is the target's real or saved uid; otherwise `kill` is EPERM (signal 0 included).
 
 **Admin group decision (milk install, the Store):** like macOS, the administrators group
-`admin` (80) owns the shared, installable places: `/Applications` and `/bin` are
-`root:admin 0775`, `/etc/milk/repos` (package sources) `root:admin 0664`. `milk` is in
+`admin` (80) owns the shared, installable places: `/Apps` and `/Commands` are
+`root:admin 0775`, `/System/Settings/milk/repos` (package sources) `root:admin 0664`. `milk` is in
 `admin`, so `milk install`, the Store and `milk relink` work without sudo; a non-admin user
-would need `sudo milk install`. The package signing keys (`/etc/milk/keys`) and the
-accounts (`/etc/passwd`, `/etc/group`, `/etc/shadow`) stay root's.
+would need `sudo milk install`. The package signing keys (`/System/Settings/milk/keys`) and the
+accounts (`/System/Settings/passwd`, `/System/Settings/group`, `/System/Settings/shadow`) stay root's.
 
-**Boot layout** (`proc::login::init`): /root 0700, /tmp 1777, the above, a milkfs volume
+**Boot layout** (`proc::login::init`): /Users/root 0700, /tmp 1777, the above, a milkfs volume
 root `root:admin 0775` (if it was plain root), and a one-time migration giving the session
 user's home to them when it still belongs to root (disks made before users existed).
 
@@ -97,7 +97,7 @@ user's home to them when it still belongs to root (disks made before users exist
 An encrypted milkfs volume (docs/filesystem.md) stays locked at boot. **At login** the
 password is tried on it: `proc::login::login` calls `fs::milkfs::unlock(password, None)`
 after a successful authentication, so a disk whose passphrase *is* the login password
-opens as the user logs in (FileVault style), binds its `/home/milk` and `/Applications`,
+opens as the user logs in (FileVault style), binds its `/Users/milk` and `/Apps`,
 and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
 different passphrase) is logged and the disk stays locked for `snap unlock`.
 **On `passwd`** (a user changing their own password, so the old one is known), the same
@@ -151,11 +151,11 @@ so the common path adds no cost.
 
 **Launcher**: `sandbox [--fs P:r|rw ...] [--net none|local|all] [--no-audio|--no-clipboard|
 --no-windows|--no-spawn] [--no-fs] CMD...`. It builds the spec, and when it restricts the
-filesystem it auto-grants read on the command's own binary (so it can still be exec'd).
+filesystem it auto-grants read on the command's own program file (so it can still be exec'd).
 Example:
 
 ```sh
-sandbox --fs ~/Documents:rw --fs /bin:r --net none --no-audio weird-tool
+sandbox --fs ~/Documents:rw --fs /Commands:r --net none --no-audio weird-tool
 ```
 
 **Every denial is audited** as `sandbox.deny` (`op=`, the path/addr, what was needed);
@@ -209,12 +209,12 @@ the file in its grants and as its argument. Peek shows dropped files (wm demo `d
 
 **Packaged window apps run sandboxed** (desktop dock / Skim launches of `milk` packages
 whose program links `user/gui`): `proc::spawn_with_caps` starts them with `fs` =
-`/Applications/<name>:r` + `~/Library/<name>:rw` (created first), `net none`, no clipboard,
+`/Apps/<name>:r` + `~/Library/<name>:rw` (created first), `net none`, no clipboard,
 no spawning, windows and audio on — from the first instruction (no window in which they run
 unrestricted). Audited as `sandbox.enter pid= exe= spec=`. Anything else they need comes
 through the powerbox. Terminal programs from packages run in the Terminal as before.
 
-**Demo**: `/bin/peek` sandboxes itself (`fs-none net=none spawn=0 clipboard=0`), shows that a
+**Demo**: `/Apps/peek/peek` sandboxes itself (`fs-none net=none spawn=0 clipboard=0`), shows that a
 direct open of `~/Documents/todo.txt` fails (EACCES, `sandbox.deny`), then opens and saves
 files only through the panel (wm demos `powerbox`, `powerboxpick`, `powerboxaudit`).
 
@@ -278,7 +278,7 @@ panel on EPERM and retry. disk-test then has to type the test password into the 
 Errors for 0 and 1: `EACCES` wrong password (or unknown user), `EPERM` the account is not an
 administrator (root or group `admin`), `EAGAIN` rate-limited. The kernel copies the
 password in, checks it with `login::authenticate` (the same code as login, 500 ms per
-failure, reading `/etc/shadow` as the kernel) and zeroes its copy. Userland:
+failure, reading `/System/Settings/shadow` as the kernel) and zeroes its copy. Userland:
 `rt::sys::authorize(reason)`, `authorize_password(pw, user)`, `auth_revoke()`, `auth_left()`.
 
 **Kernel ↔ wm request.** The window manager is a kernel thread, so the request stays in
@@ -298,7 +298,7 @@ side doesn't change.
 administrator's password (your own account by default, `-u` for another; `-S` reads it from
 stdin for scripts), gets a ticket for *itself*, then execs COMMAND, which keeps it:
 `auth snap rollback before-upgrade`, `auth milk keep moo2048`. `auth -s` prints the ticket
-of the process it runs in, so `auth /bin/auth -s` shows a fresh one; there is nothing to
+of the process it runs in, so `auth /Commands/auth -s` shows a fresh one; there is nothing to
 revoke afterwards, because the ticket ends with COMMAND. Unlike `sudo` (set-user-ID root, runs COMMAND as root), `auth` runs
 COMMAND as you with only the ticket added. `snap` and `milk` print that hint on EPERM;
 `milk` first asks the panel itself (op 0), so the Store and Disk Utility get the panel
@@ -332,7 +332,7 @@ password is the documented default `milk` (see "Users and credentials"), not a s
 
 Milk Drop (docs/networking.md) authenticates *machines*: peers trust a machine's Ed25519
 key and see its name. When the desktop started running as milk instead of root, the old
-layout broke: `/etc/milk/drop` was root's, so the desktop user's `drop name` and `drop
+layout broke: `/System/Settings/milk/drop` was root's, so the desktop user's `drop name` and `drop
 recv` failed writing the identity. Two models were possible:
 
 * **a per-user identity** in `~/.config/milk/drop`: each account would show up as its own
@@ -342,7 +342,7 @@ recv` failed writing the identity. Two models were possible:
   told (a machine), keeps the key peers already trust, and keeps the secret key out of
   every user's reach.
 
-**The identity** lives in `/etc/milk/drop` (persistent, on the Milk volume):
+**The identity** lives in `/System/Settings/milk/drop` (persistent, on the Milk volume):
 `identity.secret` 0600 root (the seed); `identity.pub`, `name` and `rotation` 0644 in a
 0755 directory (older machines made it 0700; the root side opens it up). Only root
 processes read the secret: the `drop` service (milkd, `user = root`) and root's own
@@ -367,11 +367,11 @@ never leaves the daemon.
 and file work itself: it reads the file it sends with its own permissions (so the daemon
 can't be used to read someone else's files), and writes what it receives into the user's
 `~/Downloads` as that user. When root receives into a user's home (the console's HOME is
-`/home/milk`), the new folder and file are chowned to the home's owner. `/tmp/drop` (the
+`/Users/milk`), the new folder and file are chowned to the home's owner. `/tmp/drop` (the
 daemon's peer cache and the "receiving" marker) is 1777, like /tmp.
 
 **Trust is per user.** Root's trusted peers are the machine's
-(`/etc/milk/drop/known_peers`); every other user has `~/.config/milk/drop/known_peers`,
+(`/System/Settings/milk/drop/known_peers`); every other user has `~/.config/milk/drop/known_peers`,
 which starts as a copy of the machine's list the first time they trust or forget someone.
 So one user can't pin, or forget, a peer key for another. Without the daemon (eth1 down),
 non-root `drop` says the service isn't running; root's still works directly.

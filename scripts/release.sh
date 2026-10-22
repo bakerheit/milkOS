@@ -5,7 +5,7 @@
 #     README.txt                      for non-developers
 #     kernel.bin                      release kernel (flat arm64 Image, initramfs inside)
 #     disks/milk.img                  milkfs volume "Milk", made here with mkmilkfs.py:
-#                                     /home/milk (the home skeleton) and /Applications
+#                                     /Users/milk (the home skeleton) and /Apps
 #     disks/scratch.img               scratch disk (the boot self-test's)
 #     share/README.txt                the Mac shared folder, empty, read-only in milkOS
 #   dist/milkOS-<VERSION>.zip         the same folder, zipped (ditto: modes kept)
@@ -29,13 +29,13 @@ grep -aq "milkOS $V (aarch64" "$OUT/kernel.bin" || { echo "release: kernel.bin i
 
 echo "== disks"
 $M mkfs "$OUT/disks/milk.img" --size "$MILK_SIZE" --label Milk >/dev/null
-$M mkdir "$OUT/disks/milk.img" /home/milk >/dev/null
-$M mkdir "$OUT/disks/milk.img" /Applications >/dev/null
-(cd rootfs/home/milk && find . -type d | sort) | while read -r d; do
-  [ "$d" = . ] || $M mkdir "$OUT/disks/milk.img" "/home/milk/${d#./}" >/dev/null
+$M mkdir "$OUT/disks/milk.img" /Users/milk >/dev/null
+$M mkdir "$OUT/disks/milk.img" /Apps >/dev/null
+(cd rootfs/Users/milk && find . -type d | sort) | while read -r d; do
+  [ "$d" = . ] || $M mkdir "$OUT/disks/milk.img" "/Users/milk/${d#./}" >/dev/null
 done
-(cd rootfs/home/milk && find . -type f ! -name .DS_Store | sort) | while read -r f; do
-  $M put "$OUT/disks/milk.img" "/home/milk/${f#./}" "rootfs/home/milk/$f" >/dev/null
+(cd rootfs/Users/milk && find . -type f ! -name .DS_Store | sort) | while read -r f; do
+  $M put "$OUT/disks/milk.img" "/Users/milk/${f#./}" "rootfs/Users/milk/$f" >/dev/null
 done
 $M check "$OUT/disks/milk.img" --quiet >/dev/null
 dd if=/dev/zero of="$OUT/disks/scratch.img" bs=1m count=0 seek=64 2>/dev/null

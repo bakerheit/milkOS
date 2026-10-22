@@ -8,8 +8,8 @@ use crate::fs::{self, InodeType};
 
 use super::super::icons::Icon;
 
-pub const HOME: &str = "/home/milk";
-pub const DOCS: &str = "/home/milk/Documents";
+pub const HOME: &str = "/Users/milk";
+pub const DOCS: &str = "/Users/milk/Documents";
 
 /// The usual folders in the home directory, and a starter file, if they are missing.
 pub fn ensure_home() {

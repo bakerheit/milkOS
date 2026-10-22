@@ -8,7 +8,19 @@
   switched live (saved as `font = <key>`). Baked at build time by `scripts/gen_sysfont.py`
   at 13, 26, 52 and 104 px (Regular, Medium, Bold): 451 KiB of glyphs, the kernel image
   grew 492 KiB. Terminal, Notes and the console stay on Unifont. Credits in Settings >
-  About, licences in `/System/Library/Fonts`.
+  About, licences in `/System/Fonts`.
+
+**Files**
+- Plain-English folders instead of `/bin`, `/etc`, `/home` and `/srv`: `/Apps` (apps you
+  open, built-in and installed, one folder each), `/Commands` (what you type in Terminal;
+  `PATH=/Commands`), `/Users/<name>` (homes, root's too), `~/Sites` (the web server's pages),
+  and `/System` with `Services`, `Startup`, `Settings`, `Fonts`, `Sounds` and `Music`.
+  A clean break: no links with the old names. `open <app>` finds apps by name; Files has
+  Apps in its sidebar.
+- Existing disks move over once at boot (or when a login unlocks them): `home/<user>`,
+  `Applications` and `etc/milk/{drop,net}` are renamed inside the volume, the home gets
+  `~/Sites`, and old snapshots still open in Files and Versions.
+- The toy packages put their program at the top of their folder (`/Apps/fortune/fortune`).
 
 ## 0.1.0 (2026-10-21)
 

@@ -156,10 +156,10 @@ pub fn explain_caps(caps: &str) -> Option<CapsView> {
         "none" => "Nothing".to_string(),
         list => {
             let grants: Vec<&str> = list.split(',').filter(|g| !g.is_empty()).collect();
-            // Its own folder: /Applications/<app> or ~/Library/<app> (the two the system gives a packaged app).
+            // Its own folder: /Apps/<app> or ~/Library/<app> (the two the system gives a packaged app).
             let own = |g: &str| {
                 let path = g.rsplit_once(':').map_or(g, |(p, _)| p);
-                path.starts_with("/Applications/") || path.contains("/Library/")
+                path.starts_with("/Apps/") || path.contains("/Library/")
             };
             let own_n = grants.iter().filter(|g| own(g)).count();
             let files = grants.len() - own_n;
@@ -188,7 +188,7 @@ pub fn explain_caps(caps: &str) -> Option<CapsView> {
 mod tests {
     use super::*;
 
-    const STATUS: &str = "Name:\tmoo2048\nState:\tS (sleeping)\nTgid:\t12\nPid:\t12\nPPid:\t4\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t2048 kB\nThreads:\t3\nCpuNs:\t5000000\nStartNs:\t1000\nCaps:\tfs=/Applications/moo2048:r,/home/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0\n";
+    const STATUS: &str = "Name:\tmoo2048\nState:\tS (sleeping)\nTgid:\t12\nPid:\t12\nPPid:\t4\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t2048 kB\nThreads:\t3\nCpuNs:\t5000000\nStartNs:\t1000\nCaps:\tfs=/Apps/moo2048:r,/Users/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0\n";
 
     #[test]
     fn parses_a_status() {
@@ -229,17 +229,18 @@ mod tests {
     fn caps_in_plain_english() {
         let v = explain_caps("all").unwrap();
         assert_eq!((v.can_read.as_str(), v.network), ("Everything", "Yes"));
-        let v = explain_caps("fs=/Applications/moo2048:r,/home/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0").unwrap();
+        let v = explain_caps("fs=/Apps/moo2048:r,/Users/milk/Library/moo2048:rw net=none audio=1 clipboard=0 windows=1 spawn=0").unwrap();
         assert_eq!((v.can_read.as_str(), v.network), ("Its own folder", "None"));
-        let v = explain_caps("fs=/Applications/x:r,/home/milk/Documents/a.txt:r,/home/milk/Documents/b.txt:rw net=local audio=0 clipboard=0 windows=1 spawn=0").unwrap();
+        let v = explain_caps("fs=/Apps/x:r,/Users/milk/Documents/a.txt:r,/Users/milk/Documents/b.txt:rw net=local audio=0 clipboard=0 windows=1 spawn=0").unwrap();
         assert_eq!(
             (v.can_read.as_str(), v.network),
             ("Its own folder and 2 files you chose", "Local only")
         );
         let v = explain_caps("fs=none net=none audio=0 clipboard=0 windows=0 spawn=0").unwrap();
         assert_eq!(v.can_read, "Nothing");
-        let v = explain_caps("fs=/home/milk/a.txt:r net=all audio=1 clipboard=1 windows=1 spawn=1")
-            .unwrap();
+        let v =
+            explain_caps("fs=/Users/milk/a.txt:r net=all audio=1 clipboard=1 windows=1 spawn=1")
+                .unwrap();
         assert_eq!(v.can_read, "1 place you chose");
         assert_eq!(explain_caps(""), None);
         assert_eq!(explain_caps("garbage"), None);

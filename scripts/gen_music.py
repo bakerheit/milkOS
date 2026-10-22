@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate the two tunes milkOS seeds ~/Music with (python3 stdlib only). The outputs are
-committed in rootfs/System/Library/Music/; the desktop copies them into ~/Music on first
+committed in rootfs/System/Music/; the desktop copies them into ~/Music on first
 boot. Rerun after changing anything here:
 
     python3 scripts/gen_music.py [OUTDIR]

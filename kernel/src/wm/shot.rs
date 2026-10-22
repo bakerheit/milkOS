@@ -15,7 +15,7 @@ use super::paint::Painter;
 use super::theme::*;
 use super::{Desktop, notify_as, notify_quiet, prefs, rtc};
 
-pub const DIR: &str = "/home/milk/Pictures";
+pub const DIR: &str = "/Users/milk/Pictures";
 
 /// The dim outside the selection (and over everything before the drag starts).
 const VEIL: u8 = a(250);

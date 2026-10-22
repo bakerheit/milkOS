@@ -1,0 +1,8 @@
+format 1
+name store
+version 1.0.0
+description Milk Store: browse, try, install and upgrade milk packages
+exec store
+dock Store #E58C97
+files
+payload-sha256 -

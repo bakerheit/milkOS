@@ -1,9 +1,9 @@
 //! User accounts and the desktop session's user: the kernel side of `login`.
 //!
 //! The account database is plain files, as on Unix:
-//! * `/etc/passwd` `name:x:uid:gid:full name:home:shell` (world readable)
-//! * `/etc/group`  `name:x:gid:member,member` (world readable)
-//! * `/etc/shadow` `name:hash:` (root only, 0600). `hash` is
+//! * `/System/Settings/passwd` `name:x:uid:gid:full name:home:shell` (world readable)
+//! * `/System/Settings/group`  `name:x:gid:member,member` (world readable)
+//! * `/System/Settings/shadow` `name:hash:` (root only, 0600). `hash` is
 //!   `$5m$<rounds>$<salt hex>$<digest hex>`: h = SHA-256(salt ‖ password), then
 //!   `rounds - 1` times h = SHA-256(h ‖ salt ‖ password). Never plain text. The same
 //!   scheme is in user/rt (`rt::users`), which `su`, `sudo` and `passwd` use.
@@ -51,7 +51,7 @@ impl Account {
     /// Environment for a process started for this account.
     pub fn env(&self) -> Vec<String> {
         alloc::vec![
-            String::from("PATH=/bin"),
+            String::from("PATH=/Commands"),
             alloc::format!("HOME={}", self.home),
             alloc::format!("USER={}", self.name),
             alloc::format!("LOGNAME={}", self.name),
@@ -59,7 +59,7 @@ impl Account {
         ]
     }
 
-    /// Built in, for a system with no /etc/passwd (or a broken one).
+    /// Built in, for a system with no /System/Settings/passwd (or a broken one).
     fn fallback_milk() -> Account {
         Account {
             name: String::from("milk"),
@@ -67,8 +67,8 @@ impl Account {
             gid: cred::STAFF_GID,
             groups: alloc::vec![cred::STAFF_GID, cred::ADMIN_GID],
             gecos: String::from("Milk"),
-            home: String::from("/home/milk"),
-            shell: String::from("/bin/msh"),
+            home: String::from("/Users/milk"),
+            shell: String::from("/Commands/msh"),
         }
     }
 }
@@ -101,10 +101,10 @@ fn parse_passwd(line: &str) -> Option<Account> {
     })
 }
 
-/// Groups `name` (primary group `gid`) is in, from /etc/group.
+/// Groups `name` (primary group `gid`) is in, from /System/Settings/group.
 fn groups_of(name: &str, gid: u32) -> Vec<u32> {
     let mut out = alloc::vec![gid];
-    for line in file("/etc/group").lines() {
+    for line in file("/System/Settings/group").lines() {
         let f: Vec<&str> = line.split(':').collect();
         if f.len() < 4 {
             continue;
@@ -118,7 +118,7 @@ fn groups_of(name: &str, gid: u32) -> Vec<u32> {
 }
 
 fn find(pred: impl Fn(&Account) -> bool) -> Option<Account> {
-    let mut a = file("/etc/passwd")
+    let mut a = file("/System/Settings/passwd")
         .lines()
         .filter_map(parse_passwd)
         .find(|a| pred(a))?;
@@ -134,9 +134,9 @@ pub fn lookup_uid(uid: u32) -> Option<Account> {
     find(|a| a.uid == uid)
 }
 
-/// Name of group `gid` from /etc/group.
+/// Name of group `gid` from /System/Settings/group.
 pub fn group_name(gid: u32) -> Option<String> {
-    file("/etc/group").lines().find_map(|l| {
+    file("/System/Settings/group").lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();
         (f.len() >= 3 && f[2].parse() == Ok(gid)).then(|| f[0].to_string())
     })
@@ -187,9 +187,9 @@ pub fn check_hash(stored: &str, password: &str) -> bool {
 }
 
 fn shadow_hash(name: &str) -> Option<String> {
-    // /etc/shadow is 0600 root: read it as the kernel, whoever asked (an admin ticket
+    // /System/Settings/shadow is 0600 root: read it as the kernel, whoever asked (an admin ticket
     // request comes from an ordinary user's process).
-    crate::fs::perm::as_kernel(|| file("/etc/shadow"))
+    crate::fs::perm::as_kernel(|| file("/System/Settings/shadow"))
         .lines()
         .find_map(|l| {
             let mut f = l.split(':');
@@ -197,7 +197,7 @@ fn shadow_hash(name: &str) -> Option<String> {
         })
 }
 
-/// Check `password` for `name`. Kernel context reads /etc/shadow as root.
+/// Check `password` for `name`. Kernel context reads /System/Settings/shadow as root.
 pub fn authenticate(name: &str, password: &str) -> Result<Account, LoginError> {
     let r = (|| {
         let acct = lookup(name).ok_or(LoginError::NoSuchUser)?;
@@ -249,7 +249,7 @@ pub fn login(name: &str, password: &str) -> Result<Account, LoginError> {
     match fs::milkfs::unlock(password, None) {
         Ok(paths) => {
             crate::kprintln!("[login] {}: unlocked {}", a.name, paths.join(" "));
-            fix_layout(&a); // the primary volume brings its own home and /Applications
+            fix_layout(&a); // the primary volume brings its own home and /Apps
         }
         Err(crate::fs::Errno::ENODEV) => {} // nothing locked
         Err(e) => crate::kprintln!(
@@ -267,20 +267,20 @@ pub fn session_cred() -> Cred {
 
 // ---- boot ------------------------------------------------------------------------------
 
-/// Where `passwd` keeps a copy of /etc/shadow that survives reboots (on the milkfs disk).
+/// Where `passwd` keeps a copy of /System/Settings/shadow that survives reboots (on the milkfs disk).
 pub const PERSISTENT_SHADOW: &str = "/Volumes/Milk/.milkos/shadow";
 
-/// Boot: restore a persisted /etc/shadow, fix the ownership and modes the account and
+/// Boot: restore a persisted /System/Settings/shadow, fix the ownership and modes the account and
 /// permission model depends on, resolve the session user. After the file systems are up.
 pub fn init() {
     if let Ok(s) = fs::read_file(PERSISTENT_SHADOW)
         && !s.is_empty()
     {
-        let _ = fs::write_file("/etc/shadow", &s);
+        let _ = fs::write_file("/System/Settings/shadow", &s);
     }
-    chmod_own("/etc/shadow", 0o600, 0, 0);
-    chmod_own("/etc/passwd", 0o644, 0, 0);
-    chmod_own("/etc/group", 0o644, 0, 0);
+    chmod_own("/System/Settings/shadow", 0o600, 0, 0);
+    chmod_own("/System/Settings/passwd", 0o644, 0, 0);
+    chmod_own("/System/Settings/group", 0o644, 0, 0);
     let a = session();
     fix_layout(&a);
     crate::kprintln!(
@@ -308,22 +308,22 @@ fn chmod_own(path: &str, perm: u32, uid: u32, gid: u32) {
 }
 
 /// The layout the permission model expects. At boot, and again after a login unlocked
-/// the primary volume (which binds its own /home/milk and /Applications).
+/// the primary volume (which binds its own /Users/milk and /Apps).
 fn fix_layout(a: &Account) {
-    // docs/security.md: /root 0700 root; /tmp 1777; /bin and /Applications root:admin
-    // 0775 (admins install packages without sudo, like macOS), /etc/milk/repos root:admin
+    // docs/security.md: /Users/root 0700 root; /tmp 1777; /Commands and /Apps root:admin
+    // 0775 (admins install packages without sudo, like macOS), /System/Settings/milk/repos root:admin
     // 0664; a milkfs volume root root:admin 0775; the session user's home owned by them (a one-time migration for disks made before
     //  users existed, where everything belongs to root).
-    let _ = fs::mkdir("/root", 0o700);
-    chmod_own("/root", 0o700, 0, 0);
+    let _ = fs::mkdir("/Users/root", 0o700);
+    chmod_own("/Users/root", 0o700, 0, 0);
     chmod_own("/tmp", 0o1777, 0, 0);
     // Service sockets (AF_UNIX, tmpfs): root's, readable by all.
     let _ = fs::mkdir("/run", 0o755);
-    chmod_own("/bin", 0o775, 0, cred::ADMIN_GID);
-    chmod_own("/Applications", 0o775, 0, cred::ADMIN_GID);
+    chmod_own("/Commands", 0o775, 0, cred::ADMIN_GID);
+    chmod_own("/Apps", 0o775, 0, cred::ADMIN_GID);
     // Package sources are an admin setting (the Store and `milk repo` edit it); the
-    // trusted signing keys in /etc/milk/keys stay root's.
-    chmod_own("/etc/milk/repos", 0o664, 0, cred::ADMIN_GID);
+    // trusted signing keys in /System/Settings/milk/keys stay root's.
+    chmod_own("/System/Settings/milk/repos", 0o664, 0, cred::ADMIN_GID);
     if let Ok(st) = fs::stat("/Volumes/Milk")
         && st.uid == 0
         && st.gid == 0
@@ -361,10 +361,12 @@ pub fn selftest() {
         Some(m) if m.uid == cred::MILK_UID && m.is_admin() => {}
         other => crate::kprintln!("[login] warning: unexpected milk account: {other:?}"),
     }
-    if file("/etc/shadow").lines().any(|l| {
+    if file("/System/Settings/shadow").lines().any(|l| {
         let h = l.split(':').nth(1).unwrap_or("");
         !h.is_empty() && !h.starts_with("$5m$") && !h.starts_with('*') && !h.starts_with('!')
     }) {
-        crate::kprintln!("[login] warning: /etc/shadow has an entry that is not a $5m$ hash");
+        crate::kprintln!(
+            "[login] warning: /System/Settings/shadow has an entry that is not a $5m$ hash"
+        );
     }
 }

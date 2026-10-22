@@ -95,7 +95,7 @@ impl State {
         }
     }
 
-    /// Path of `ino` in `view`, from the volume root (`/home/milk/a.txt`).
+    /// Path of `ino` in `view`, from the volume root (`/Users/milk/a.txt`).
     pub fn path_in(&self, view: u64, ino: u64) -> Option<String> {
         let mut names: Vec<String> = Vec::new();
         let mut cur = ino;

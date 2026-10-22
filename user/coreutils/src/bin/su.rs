@@ -49,7 +49,7 @@ fn main(args: &rt::Args) -> i32 {
     let env: Vec<&str> = env.iter().map(String::as_str).collect();
     let _ = sys::chdir(&target.home);
     let shell = if target.shell.is_empty() {
-        "/bin/msh"
+        "/Commands/msh"
     } else {
         target.shell.as_str()
     };

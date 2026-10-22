@@ -6,7 +6,7 @@
 #           is refused; the recovery key opens it.
 #   boot 1: no passphrase given: the volume stays locked (not mounted, home in RAM); a
 #           wrong passphrase is refused; `snap unlock` with the right one mounts it and
-#           it becomes /home/milk; files written there; `snap passwd` changes the
+#           it becomes /Users/milk; files written there; `snap passwd` changes the
 #           passphrase (rewrap only).
 #   Mac:    the old passphrase no longer opens it, the new one and the recovery key do;
 #           check clean; the canary and the new files' text are still not on the disk.
@@ -91,8 +91,8 @@ boot b1 - \
   "cat /sys/fs/milkfs/unlock" "ls /Volumes" \
   "raw:snap unlock" "wait:Passphrase" "raw:wrong-fake-passphrase" "wait:try again" "wait:Passphrase" "raw:$P1" "wait:unlocked" \
   "wait:msh:" \
-  "cat /home/milk/../milk/README.txt" "cat /Volumes/Milk/docs/canary-file.txt" \
-  "echo written inside milkOS: $CANARY-2 > /home/milk/inside.txt" \
+  "cat /Users/milk/../milk/README.txt" "cat /Volumes/Milk/docs/canary-file.txt" \
+  "echo written inside milkOS: $CANARY-2 > /Users/milk/inside.txt" \
   "raw:snap passwd" "wait:Current" "raw:$P1" "wait:New passphrase" "raw:$P2" "wait:again" "raw:$P2" "wait:changed" \
   "wait:msh:" "echo now > /sys/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/b1.log")"
@@ -102,16 +102,16 @@ echo "$L" | awk '/\$ ls \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -a
 echo "$L" | grep -aq "wrong passphrase or recovery key" && ok "a wrong passphrase is refused" || bad "wrong passphrase accepted?"
 echo "$L" | grep -aq "snap: Milk unlocked" && ok "snap unlock mounts it" || bad "snap unlock"
 echo "$L" | grep -aq "$P1" && bad "the passphrase was echoed" || ok "the passphrase isn't echoed or logged"
-echo "$L" | grep -aq "milkfs: /home/milk is /Volumes/Milk/home/milk" && ok "it becomes /home/milk" || bad "home not on the unlocked volume"
+echo "$L" | grep -aq "milkfs: /Users/milk is /Volumes/Milk/Users/milk" && ok "it becomes /Users/milk" || bad "home not on the unlocked volume"
 echo "$L" | grep -aq "^$CANARY and some text around it" && ok "the Mac-written file reads back" || bad "canary file"
 echo "$L" | grep -aq "snap: passphrase changed" && ok "snap passwd rewraps the key" || bad "snap passwd"
 
 $M check "$IMG" --passphrase-file "$T/p1" >/dev/null 2>&1 && bad "the old passphrase still opens it" || ok "Mac: the old passphrase no longer opens it"
 $M check "$IMG" --passphrase-file "$T/p2" > "$T/check.txt" 2>&1 && ok "Mac: the new passphrase opens it, check clean" || { bad "new passphrase / check"; cat "$T/check.txt"; }
-[ "$($M cat "$IMG" /home/milk/inside.txt --recovery "$REC")" = "written inside milkOS: $CANARY-2" ] && ok "Mac: the recovery key still opens it; the file written in milkOS is there" || bad "recovery after passwd"
+[ "$($M cat "$IMG" /Users/milk/inside.txt --recovery "$REC")" = "written inside milkOS: $CANARY-2" ] && ok "Mac: the recovery key still opens it; the file written in milkOS is there" || bad "recovery after passwd"
 grep -aq "$CANARY" "$IMG" && bad "plaintext on the disk after milkOS wrote" || ok "raw image after milkOS wrote: no canary, no plaintext"
 
-boot b2 "$REC" "cat /home/milk/inside.txt" "snap scrub"
+boot b2 "$REC" "cat /Users/milk/inside.txt" "snap scrub"
 L="$(tr -d '\r' < "$T/b2.log")"
 echo "$L" | grep -aq "^written inside milkOS: $CANARY-2" && ok "boot 2 (recovery key): the file is there" || bad "boot 2 file"
 echo "$L" | grep -a "^scrub: \[run" | grep -q " 0 error" && ok "scrub of the encrypted volume: clean" || bad "scrub: $(echo "$L" | grep -a '^scrub:' | head -2)"
@@ -134,7 +134,7 @@ echo "$I" | grep -q "^encryption:  on$" && echo "$I" | grep -q "^locked:      no
   && echo "$I" | grep -q "^kdf:         scrypt N=2^16 r=8 p=4$" && echo "$I" | grep -q "^key slots:   1 passphrase, 1 recovery$" \
   && ok "info: encryption on, unlocked, cipher, KDF, key slots" || bad "info encryption lines: $(echo "$I" | tail -6)"
 echo "$L" | grep -a -A4 "cat /sys/fs/milkfs/lock" | grep -aq "Milk unlocked at=/Volumes/Milk (home: can't be locked)" && ok "lock file: home volume marked" || bad "lock file listing"
-echo "$L" | grep -aq "snap: lock Milk: .*holds /home/milk.*you can't lock the volume you're logged into.*(EBUSY" && ok "locking the home volume: EBUSY, says why" || bad "home lock refusal"
+echo "$L" | grep -aq "snap: lock Milk: .*holds /Users/milk.*you can't lock the volume you're logged into.*(EBUSY" && ok "locking the home volume: EBUSY, says why" || bad "home lock refusal"
 echo "$L" | grep -aq "snap: lock Plain: .*isn't encrypted.*(EINVAL" && ok "locking a plain volume: EINVAL, says why" || bad "plain lock refusal"
 echo "$L" | grep -aq "snap: lock Vault: .*is in use: pid [0-9]* (msh): working directory.*(EBUSY" && ok "busy (cwd): names the shell" || bad "cwd busy: $(echo "$L" | grep -a 'snap: lock Vault' | head -1)"
 echo "$L" | grep -aq "snap: lock Vault: .*is in use: pid [0-9]* (sleep): 1 open file (EBUSY" && ok "busy (open file): names the process" || bad "open-file busy: $(echo "$L" | grep -a 'snap: lock Vault' | sed -n 2p)"

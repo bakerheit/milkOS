@@ -94,7 +94,7 @@ impl Caps {
 
 /// True if `path` is `prefix` itself or inside it. Both are normalised absolute paths.
 impl Caps {
-    /// One line in the sandbox's own spec syntax (`fs=/etc:r fs=/tmp/x:rw net=local
+    /// One line in the sandbox's own spec syntax (`fs=/System/Settings:r fs=/tmp/x:rw net=local
     /// audio=0 ...`, so it can be fed back to `sandbox`), or `all` when unrestricted. For
     /// /proc/<pid>/status.
     pub fn summary(&self) -> String {

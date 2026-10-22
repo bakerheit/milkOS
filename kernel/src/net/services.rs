@@ -1,6 +1,6 @@
 //! In-kernel demo services, run by the net thread after every pass: a tiny HTTP/1.0 server,
 //! off by default ([`enable`] starts it on a port; the boot self-test does when
-//! `scripts/net-test.sh` asks with `khttpd=PORT`). Userland `/bin/httpd` serves :80. It only uses the public socket API (non-blocking), so it doubles as a
+//! `scripts/net-test.sh` asks with `khttpd=PORT`). Userland `/System/Services/httpd` serves :80. It only uses the public socket API (non-blocking), so it doubles as a
 //! test of it. Pages:
 //!
 //! - `/`         a small HTML page with the interface configuration;
@@ -68,7 +68,7 @@ pub fn big_bytes(off: usize, out: &mut [u8]) {
 static PENDING: SpinLock<Option<Http>> = SpinLock::new(None);
 static PORT: AtomicU64 = AtomicU64::new(0);
 
-/// Start the kernel HTTP server on `port` (it is off by default; userland `/bin/httpd`
+/// Start the kernel HTTP server on `port` (it is off by default; userland `/System/Services/httpd`
 /// normally owns :80). The port is listening when this returns. Thread context.
 pub fn enable(port: u16) -> crate::fs::errno::Result<()> {
     let s = socket::socket(SockType::Stream)?;

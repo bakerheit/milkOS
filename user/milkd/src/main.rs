@@ -1,6 +1,6 @@
 //! milkd: the service manager (docs/processes.md, "Services").
 //!
-//! Started by init (PID 1) as root. Reads /etc/milk/services/*.service, starts the enabled
+//! Started by init (PID 1) as root. Reads /System/Settings/milk/services/*.service, starts the enabled
 //! units in dependency order as their declared users with their sandbox, restarts them
 //! with backoff, forwards their stdout / stderr to the journal (/dev/journal), and serves
 //! `svc` on /run/milkd.sock (AF_UNIX, SO_PEERCRED: anyone may list / status, start / stop /
@@ -20,7 +20,7 @@ use rt::{sys, users};
 
 rt::main!(main);
 
-const DIR: &str = "/etc/milk/services";
+const DIR: &str = "/System/Settings/milk/services";
 const SOCK: &str = "/run/milkd.sock";
 const ADMIN_GID: u32 = 80;
 const BACKOFF_START_MS: u64 = 100;

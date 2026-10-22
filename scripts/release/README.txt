@@ -27,7 +27,7 @@ Two windows appear: the milkOS screen, and a Terminal window that is milkOS's co
 
 Your files and the Mac
 ----------------------
-- Your milkOS home folder (/home/milk) lives in disks/milk.img. Keep the whole milkOS
+- Your milkOS home folder (/Users/milk) lives in disks/milk.img. Keep the whole milkOS
   folder together; to start over, replace disks/milk.img with a fresh copy from the zip.
 - Anything you put in the "share" folder next to this file shows up inside milkOS as
   /Volumes/Mac (read-only: milkOS can look but not change it).

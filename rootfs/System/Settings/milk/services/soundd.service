@@ -1,0 +1,9 @@
+# The virtio-sound driver in user space (docs/drivers.md). The mixer stays in the kernel;
+# soundd takes its 10 ms periods from /dev/pcm and plays them. Only when the boot option
+# leaves sound to a user driver; the kernel's own driver covers whenever it isn't running.
+description = virtio-sound driver (user space)
+exec = /System/Services/soundd
+user = root
+restart = always
+if-contains = /proc/drivers sound policy=user
+sandbox = fs=/dev/pcm:rw net=none spawn=0 clipboard=0 windows=0

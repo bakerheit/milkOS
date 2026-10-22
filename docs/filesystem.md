@@ -26,7 +26,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `pagecache.rs` | page cache for milkfs and FAT reads, `/sys/fs/pagecache` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
-| `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /etc/motd` |
+| `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /System/Settings/motd` |
 
 Boot: `kmain` calls `fs::init()` after `memtest::run()`, then `fs::selftest::run()`.
 `fs::init` mounts tmpfs on `/`, creates the skeleton, unpacks the initramfs, mounts devfs,
@@ -35,24 +35,72 @@ procfs and sysfs, then mounts the first disk that holds milkfs at `/Volumes/<lab
 
 ## The tree
 
-macOS-flavoured on top, Linux underneath, so both kinds of software find their way.
+Plain English on top: three kinds of program, each with its own folder. An **app** has a
+window (`/Apps`), a **command** is what you type in Terminal (`/Commands`, the shell's
+`PATH`), a **service** runs in the background (`/System/Services`, started by milkd).
+Constants and the two boot jobs below are in `fs/layout.rs`.
+
+```text
+/Apps            apps you open: the built-in ones and the packages milk installs
+/Commands        what you type in Terminal (PATH=/Commands)
+/Users/milk      the user's home ($HOME); /Users/root is root's
+  Sites          the built-in web server's pages (httpd serves ~/Sites on :80)
+/Volumes         disks, USB sticks, the Mac's shared folder
+/System          the OS's own files
+  Services       background helpers: milkd, alarmd, httpd, rngd, soundd
+  Startup        init, the first program (PID 1)
+  Settings       system settings: passwd, group, shadow, hostname, motd, milk/...
+  Fonts          font licences
+  Sounds         the system sounds (chime, notify, error, shutter)
+  Music          the tunes ~/Music is seeded with
+  Version.txt
+/dev /proc /sys /tmp /run   (Linux-style, for programs that expect them)
+```
 
 | path | fs | what |
 |---|---|---|
 | `/` | tmpfs | root, everything in RAM |
-| `/Applications` | milkfs (bind of `/Volumes/Milk/Applications`), tmpfs without a disk | packages (`milk install`, docs/packages.md), persistent |
-| `/System` | tmpfs | OS files; `/System/Version.txt` |
-| `/home/milk` | milkfs (bind of `/Volumes/Milk/home/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
-| `/etc/milk/drop` | milkfs (bind of `/Volumes/Milk/etc/milk/drop`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), persistent |
-| `/Users` | symlink → `home` | macOS spelling: `/Users/milk` == `/home/milk` |
-| `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
+| `/Apps` | milkfs (bind of `/Volumes/Milk/Apps`), tmpfs without a disk | one folder per app: its `manifest` and program. Built-in apps come from the initramfs and are copied into the volume's folder at boot (below); `milk install` adds packages (docs/packages.md), persistent |
+| `/Commands` | tmpfs | command-line programs from the initramfs, plus `milk`'s links to installed packages (remade at boot) |
+| `/Users` | tmpfs | homes: `/Users/milk`, `/Users/root` (0700) |
+| `/Users/milk` | milkfs (bind of `/Volumes/Milk/Users/milk`), tmpfs without a disk | the user's home (`$HOME`), persistent |
+| `/Users/milk/Sites` | (in the home) | the web root `httpd` serves (`/System/Settings/milk/services/httpd.service`) |
 | `/Volumes` | tmpfs | disks: `/Volumes/Milk` is the milkfs volume, `/Volumes/Milk/.snapshots/<name>` its snapshots, `/Volumes/Milk-<name>` its clones |
-| `/bin` | tmpfs | user programs from the initramfs |
-| `/etc` | tmpfs | `motd`, `hostname` (= `milk`) |
+| `/Volumes/Mac` | 9p | the Mac's `share/` folder (read-only unless `MILK_SHARE_RW=1`) |
+| `/System` | tmpfs | the OS's own files; `/System/Version.txt` |
+| `/System/Services` | tmpfs | background programs, started and supervised by milkd (docs/processes.md, "Services") |
+| `/System/Startup` | tmpfs | `init`, the first program the kernel starts |
+| `/System/Settings` | tmpfs | `passwd`, `group`, `shadow`, `hostname` (= `milk`), `motd`, `milk/` (`repos`, `keys/`, `services/`) |
+| `/System/Settings/milk/drop`, `.../milk/net` | milkfs (binds of `/Volumes/Milk/System/Settings/milk/...`, `milkfs::setup_persistent_etc`), tmpfs without a disk | Milk Drop's identity and trusted peers (docs/networking.md), the hostname; persistent |
+| `/System/Fonts`, `/System/Sounds`, `/System/Music` | tmpfs | font licences, system sounds, the seed tunes for ~/Music |
 | `/tmp` | tmpfs | mode `1777` |
+| `/run` | tmpfs | service sockets (`/run/milkd.sock`) |
 | `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) |
 | `/proc` | proc | `meminfo uptime version interrupts mounts` |
 | `/sys` | sysfs | `devices/platform/*`, `kernel/version`, `fs/milkfs/*` (snapshot control) |
+
+There are no `/bin`, `/etc`, `/home`, `/srv` or `/Applications` folders, and no links
+with those names: a clean break (the self-test checks they are gone).
+
+**Built-in apps on the disk.** `/Apps` is one folder for both kinds of app, but the
+built-in ones arrive in RAM (the initramfs) and the installed ones live on the volume. So
+before the volume's `Apps` folder is bound onto `/Apps`, `layout::sync_builtin_apps`
+copies each built-in app into it, only when the copy differs (a new milkOS version), and
+removes built-in apps an older milkOS left that this one no longer ships (the list is
+in `/Volumes/Milk/.milkos/builtin-apps`). Built-in apps have no `.origin` file; `milk`
+never lists, replaces or removes them, and the desktop runs only those unsandboxed
+(`layout::is_builtin_app`: shipped in this initramfs and no `.origin`).
+
+**Older disks.** A volume made before this layout has `home/milk`, `Applications` and
+`etc/milk/{drop,net}`. `layout::migrate` (run by `milkfs::setup_home`, at boot or when a
+login unlocks the volume, before anything is bound) moves them once, by renames inside the
+volume: `home/<user>` to `Users/<user>`, `Applications` to `Apps`,
+`etc/milk/drop` and `etc/milk/net` to `System/Settings/milk/`. The moved home gets the
+shipped `~/Sites` (the web pages used to be in RAM, at `/srv/www`) and loses its search
+index (a cache with the old paths; it is rebuilt). It logs `layout: moved ...` and audits
+`fs.layout.migrate`. Snapshots taken before keep the old names (they are read-only):
+Files' Time Machine view and Versions look for `home/milk` there too. A clone made before
+the move gets moved the boot after it is kept (promoted).
 
 ## Kernel API (for the syscall layer)
 
@@ -106,7 +154,7 @@ pub fn truncate(path: &str, len: u64) -> Result<()>;
 pub fn chmod(path: &str, perm: u32) -> Result<()>;
 pub fn setattr_at(base: Option<&InodeRef>, path: &str, follow: bool, a: &SetAttr) -> Result<()>;
 
-// whole files (loading ELF binaries etc.)
+// whole files (loading ELF programs etc.)
 pub fn read_file(path: &str) -> Result<Vec<u8>>;
 pub fn read_to_string(path: &str) -> Result<String>;
 pub fn write_file(path: &str, data: &[u8]) -> Result<()>;
@@ -226,7 +274,7 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
 `statfs(2)` (syscall 43, a path, symlinks followed) and `fstatfs(2)` (44, an fd) answer
 for every file system; kernel side `fs::statfs(path)` / `fs::statfs_of(&inode)` ->
 `node::StatFs`, each file system's `FileSystem::statfs`. The file system is found by the
-inode's device number among the mounts (a bind mount like `/home/milk` answers for what
+inode's device number among the mounts (a bind mount like `/Users/milk` answers for what
 it binds); a milkfs snapshot browsed under `.snapshots` (its own device number) answers
 through its volume; pipes and sockets get type 0 and zero sizes.
 
@@ -297,24 +345,27 @@ inode numbers). `procfs::root()` gives the `/proc` root for `/proc/<pid>` and `/
 
 `kernel/build.rs` packs a cpio newc archive into `$OUT_DIR/initramfs.cpio`, which
 `fs/initramfs.rs` embeds with `include_bytes!` and unpacks into `/` at boot (after the
-skeleton, so it can add to `/bin`, `/etc`, ...). Entries are sorted, uid/gid 0, mtime 0:
+skeleton, so it can add to `/Commands`, `/System/Settings`, ...). Entries are sorted, uid/gid 0, mtime 0:
 the archive is reproducible. Two ways in:
 
 1. **Files checked into git**: put them under `rootfs/` at the same path they should have
-   at runtime (`rootfs/etc/motd` → `/etc/motd`). Permissions come from the host file;
+   at runtime (`rootfs/System/Settings/motd` → `/System/Settings/motd`, `rootfs/Apps/<name>/manifest`). Permissions come from the host file;
    symlinks are kept as symlinks.
 2. **Build outputs** (user programs): list them in `initramfs.list` at the repo root, one
-   per line, `<path in image> <host path relative to repo root> [octal mode]`:
+   per line, `<path in image> <host path relative to repo root> [octal mode]`. A command
+   goes in `/Commands`, an app in `/Apps/<name>/` (next to its manifest in rootfs/), a
+   service in `/System/Services`:
 
    ```
-   /bin/init   target/user/aarch64-unknown-none/release/init   755
-   /bin/sh     target/user/aarch64-unknown-none/release/sh     755
+   /System/Startup/init   target/user/aarch64-unknown-none/release/init   755
+   /Commands/msh          target/user/aarch64-unknown-none/release/msh    755
+   /Apps/paint/paint      target/user/aarch64-unknown-none/release/paint  755
    ```
 
    Parent directories are created as needed. A missing host file is skipped with a
    `cargo:warning` (so the kernel still builds before the user programs are), and cargo
    re-runs the packer when any listed file changes. Build the user programs first, then
-   `cargo build` the kernel. `fs::read_file("/bin/init")` then hands you the ELF.
+   `cargo build` the kernel. `fs::read_file("/System/Startup/init")` then hands you the ELF.
 
 ## Block devices
 
@@ -401,7 +452,7 @@ input-test.sh).
   newfs_msdos -F 32; /tmp only). Boot with it: `MILK_FAT=/tmp/milk-fat.img scripts/run.sh`.
 - `scripts/fattest.sh`: the Mac writes files (long names, spaces, non-ASCII, nested, 300 KB
   random, 8.3 upper/lower, empty), milkOS reads them back out through `/Volumes/Mac` for
-  byte-exact compares, writes (long-name dir and file, 200 KB binary, rename to a long name,
+  byte-exact compares, writes (long-name dir and file, 200 KB non-text file, rename to a long name,
   delete, dir move), then the Mac attaches the image read-only and checks it all;
   `fsck_msdos -n` before and after.
 
@@ -425,7 +476,7 @@ Measured with `scripts/cachebench.sh` (4 MiB random file, real virtio disks, HVF
 
 | | cache off, 2nd read | cache on, 1st read | cache on, 2nd read |
 |---|---|---|---|
-| milkfs (`/home/milk`) | 38 ms (104 MiB/s) | 48 ms (83 MiB/s) | 0.66 ms (6.0 GiB/s) |
+| milkfs (`/Users/milk`) | 38 ms (104 MiB/s) | 48 ms (83 MiB/s) | 0.66 ms (6.0 GiB/s) |
 | FAT32 (512 B clusters) | 34 ms (118 MiB/s) | 39 ms (103 MiB/s) | 0.39 ms (10 GiB/s) |
 
 Filling the cache costs a frame allocation and a copy per page, so a first read with the
@@ -477,7 +528,7 @@ while let Some(ev) = w.next(200_000_000) {          // wait up to 200 ms
 - Objects are `(dev, ino)` ids (`notify::id(&inode)`), not paths: a path costs a walk up
   `..`, depends on the caller's root (chroot) and has several spellings with bind mounts.
   A watcher that wants paths maps directory ids to paths itself (the search indexer does;
-  `/home/milk` and `/Volumes/Milk/home/milk` are then the same directory).
+  `/Users/milk` and `/Volumes/Milk/Users/milk` are then the same directory).
 - Emitted by `fs::ops` (`open_at` with O_CREAT/O_TRUNC, `mkdir_at`, `symlink_at`,
   `link_at`, `unlink_at`, `rmdir_at`, `rename_at`, `truncate`, `setattr_at`, `ficlone`)
   and by `OpenFile` (`Modified` when the last reference to an open file that was written
@@ -495,7 +546,7 @@ while let Some(ev) = w.next(200_000_000) {          // wait up to 200 ms
 
 `kernel/src/fs/search/` (`mod.rs`: the index and its thread; `query.rs`: queries and
 `/sys/fs/search`). A Spotlight-style index of everything under its roots (default
-`/home/milk` and `/Applications`; `/sys/fs/search/roots`): path, name, kind, size, mtime,
+`/Users/milk` and `/Apps`; `/sys/fs/search/roots`): path, name, kind, size, mtime,
 and the words of text files.
 
 - **Kinds**: the extension for known ones (`md`, `txt`, `rs`, `toml`, `html`, `json`, `py`,
@@ -550,7 +601,7 @@ today, 4 this week, 2 this month); ties newest first, then by path.
 use crate::fs::search;
 let hits: Vec<search::Hit> = search::query("plan kind:md", 20)?;  // limit 0 = 50
 for h in hits {
-    // h.path: "/home/milk/Documents/Project Plan.md"
+    // h.path: "/Users/milk/Documents/Project Plan.md"
     // h.kind: "md" | "txt" | "folder" | "png" | "text" | "data" | ...
     // h.size (bytes), h.mtime (unix seconds), h.score (higher is better),
     // h.matched: "name" | "content" | "name+content" | "" (filters only)
@@ -828,9 +879,9 @@ matter. Shell: write `A [B]` to `/sys/fs/milkfs/diff`, read the result back;
 
 ```
 diff before..live: 5 change(s) (2 tree nodes read, 0 unchanged subtrees skipped)
-A /home/milk/Documents/Plans 2026
-D /home/milk/Documents/todo.txt
-M /home/milk/README.txt
+A /Users/milk/Documents/Plans 2026
+D /Users/milk/Documents/todo.txt
+M /Users/milk/README.txt
 R /dd/a -> /dd/sub/a2
 ```
 
@@ -859,8 +910,8 @@ pub fn versions(path: &str) -> Result<Vec<Version>>;            // oldest first,
 pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
 ```
 
-- `path` is any VFS path to a regular file on the milkfs volume (`/home/milk/...`,
-  `/Volumes/Milk/...`, `/Applications/...`); elsewhere EXDEV, a directory EISDIR.
+- `path` is any VFS path to a regular file on the milkfs volume (`/Users/milk/...`,
+  `/Volumes/Milk/...`, `/Apps/...`); elsewhere EXDEV, a directory EISDIR.
 - Distinct versions only: consecutive snapshots with the same content collapse into the
   oldest one; if the current content equals the newest snapshot's, that entry is shown as
   the current one. Hashes come from the extent checksums (no file data is read), so listing
@@ -873,14 +924,14 @@ pub fn restore_version(path: &str, snapshot: &str) -> Result<()>;
   takes snapshot `pre-restore-<time>`, so a restore never loses anything (and that version
   shows up in the list). Fails with ENOSPC if the 30-record snapshot table is full.
 - To show a version's content, read `<volume>/.snapshots/<snapshot><path in volume>`, e.g.
-  `/Volumes/Milk/.snapshots/monday/home/milk/Documents/ideas.md` (read-only).
+  `/Volumes/Milk/.snapshots/monday/Users/milk/Documents/ideas.md` (read-only).
 - Shell: write a path to `/sys/fs/milkfs/versions` and read back tab-separated lines
   `snapshot|current, taken, mtime, size, hash` (after a `# path` header); write
   `SNAPSHOT PATH` to `/sys/fs/milkfs/restore`. Tool: `versions FILE`,
   `versions restore FILE SNAPSHOT`:
 
 ```
-/home/milk/Documents/ideas.md: 4 version(s)
+/Users/milk/Documents/ideas.md: 4 version(s)
    1  2026-10-21 05:04      12 B  109ff1d8  in snapshot monday
    2  2026-10-21 05:04      21 B  cf46a6a6  in snapshot tuesday
    3  2026-10-21 05:04       6 B  a3f8b57b  in snapshot pre-restore-2026-10-21T05:04:10
@@ -1013,7 +1064,7 @@ milkfs: vda (Milk) is encrypted and locked: `snap unlock` (or write the passphra
   `[dev=NAME ]SECRET`. `/sys/fs/milkfs/passwd`: write `OLD\nNEW`. Wrong: EACCES.
 - Kernel: `fs::milkfs::unlock(secret, dev) -> Result<Vec<String>>` (mount paths),
   `fs::milkfs::change_passphrase(old, new)`, `fs::milkfs::locked()`. If the volume is the
-  primary one (labelled Milk), unlocking it binds `/home/milk` and `/Applications` onto
+  primary one (labelled Milk), unlocking it binds `/Users/milk` and `/Apps` onto
   it, mounts its clones and tells the search indexer to rescan, as boot would have; until
   then home is the RAM copy, and no other disk takes the primary role.
 - For proc's login: after a successful login, `fs::milkfs::unlock(password, None)` opens
@@ -1168,7 +1219,7 @@ happened at the lock (`... locked, /Volumes/Vault unmounted, key wiped`) or will
 last reader lets go (`key wiped once its last reader finishes`). Freed heap memory is
 not zeroed beyond the key itself.
 
-**The home volume can't be locked.** `/home/milk`, `/Applications` and `/etc/milk/drop`
+**The home volume can't be locked.** `/Users/milk`, `/Apps` and `/System/Settings/milk/drop`
 are bound from the primary volume, and the logged-in session, the desktop and the
 indexer live on it, so locking it is refused (EBUSY: "you can't lock the volume you're
 logged into"); it locks at shutdown (the key is only ever in RAM). A secondary encrypted
@@ -1351,10 +1402,10 @@ copies of the old data; sends come from the primary volume.
 
 ### Persistent home
 
-With a milkfs volume, `/home/milk` is a **bind mount** of `<volume>/home/milk`
-(`fs::bind`): same inodes, `path_of`/getcwd still say `/home/milk`, `/Users/milk` follows.
+With a milkfs volume, `/Users/milk` is a **bind mount** of `<volume>/Users/milk`
+(`fs::bind`): same inodes, `path_of`/getcwd still say `/Users/milk`.
 `milkfs::setup_home()` runs in `fs::init` right after automount, before the desktop creates
-its home folders; the first time it seeds the directory from the initramfs copy. Without a
+its home folders; it first moves a volume with the old layout over (`layout::migrate`, "The tree"), and the first time it seeds the directory from the initramfs copy (with `~/Sites`). Without a
 milkfs disk home stays on tmpfs. Snapshots and rollbacks of the volume include home.
 
 ### Interfaces
@@ -1581,7 +1632,7 @@ Old tree nodes go to the dead list / free list as above.
 
 ### What the OS builds on it
 
-- **Volumes**: `/` (System), `/home/milk` (user data), one per app's data
+- **Volumes**: `/` (System), `/Users/milk` (user data), one per app's data
   (`~/Library/<App>`), mounted from the same disk. Shown under `/Volumes`.
 - **Per-app undo**: the system snapshots an app's data volume when the app starts and at
   intervals (a ring of N). "Undo what this app did" rolls the volume back to a snapshot

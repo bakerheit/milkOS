@@ -79,7 +79,7 @@ fn main(args: &rt::Args) -> i32 {
     let path = if prog.contains('/') {
         String::from(prog)
     } else {
-        alloc::format!("/bin/{prog}")
+        alloc::format!("/Commands/{prog}")
     };
     let e = sys::execve(&path, cmdv, &env);
     rt::eprintln!("sudo: {prog}: {e}");

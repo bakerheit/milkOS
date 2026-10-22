@@ -441,7 +441,7 @@ pub fn locked() -> alloc::vec::Vec<(String, String)> {
 /// Unlock and mount locked encrypted volumes with `secret` (a passphrase or the
 /// recovery key): the one on `dev` or every one it opens. Returns where they were
 /// mounted. EACCES if it opens none, ENODEV if nothing is locked. If it was the
-/// primary volume, home, /Applications and its clones are set up as at boot.
+/// primary volume, home, /Apps and its clones are set up as at boot.
 pub fn unlock(secret: &str, dev: Option<&str>) -> Result<alloc::vec::Vec<String>> {
     let cands: alloc::vec::Vec<BlockRef> = LOCKED
         .lock()
@@ -544,7 +544,7 @@ fn names_volume(v: &Volume, path: &str, t: &str) -> bool {
 /// list for `unlock`. Refused:
 /// * EBUSY if a process has a file open on it or works in it (the reason names them),
 ///   something is mounted inside it, or a scrub, send or receive is using it;
-/// * EBUSY for the primary volume: `/home/milk`, `/Applications` and `/etc/milk/drop`
+/// * EBUSY for the primary volume: `/Users/milk`, `/Apps` and `/System/Settings/milk/drop`
 ///   are bound from it (you can't lock the disk you're logged into; it locks at
 ///   shutdown);
 /// * EINVAL if it isn't encrypted; ENODEV if no such (unlocked) volume.
@@ -980,13 +980,16 @@ pub fn mount_path() -> Option<String> {
 }
 
 /// The user's home directory on the primary volume.
-pub const HOME: &str = "/home/milk";
+pub const HOME: &str = "/Users/milk";
 
-/// Persistent home: bind `<volume>/home/milk` onto `/home/milk` (seeding it from the
-/// initramfs copy the first time). Without a volume, `/home/milk` stays on tmpfs. Runs
-/// in `fs::init`, before the desktop creates its folders in the home directory.
+/// Persistent home: bind `<volume>/Users/milk` onto `/Users/milk` (seeding it from the
+/// initramfs copy the first time). Without a volume, `/Users/milk` stays on tmpfs. Runs
+/// in `fs::init`, before the desktop creates its folders in the home directory. First,
+/// a volume with the old layout (`home/milk`, `Applications`, `etc/milk`) is moved over
+/// (`fs::layout::migrate`).
 pub fn setup_home() {
     let Some(vol) = mount_path() else { return };
+    crate::fs::layout::migrate(&vol);
     let on_disk = format!("{vol}{HOME}");
     let fresh = crate::fs::ops::stat(&on_disk).is_err();
     if fresh && let Err(e) = crate::fs::ops::copy_tree(HOME, &on_disk) {
@@ -1035,10 +1038,10 @@ fn diff_control(arg: &str) -> Result<()> {
     Ok(())
 }
 
-/// Persistent machine state under `/etc` (Milk Drop's identity and trusted peers,
-/// `/etc/milk/drop`): bind `<volume><dir>` onto `<dir>`, seeded from the initramfs copy the
-/// first time, like the home directory. Without a volume it stays in RAM (a new identity
-/// every boot).
+/// Persistent machine settings under `/System/Settings` (Milk Drop's identity and trusted
+/// peers, `/System/Settings/milk/drop`; the hostname, `/System/Settings/milk/net`): bind
+/// `<volume><dir>` onto `<dir>`, seeded from the initramfs copy the first time, like the
+/// home directory. Without a volume it stays in RAM (a new identity every boot).
 pub fn setup_persistent_etc(dir: &str) {
     let Some(vol) = mount_path() else { return };
     let on_disk = format!("{vol}{dir}");
@@ -1061,12 +1064,14 @@ pub fn setup_persistent_etc(dir: &str) {
     }
 }
 
-/// Where packages live (`milk install`).
-pub const APPLICATIONS: &str = "/Applications";
+/// Where apps live: the built-in ones and the packages `milk install` adds.
+pub const APPLICATIONS: &str = crate::fs::layout::APPS;
 
-/// Persistent applications: bind `<volume>/Applications` onto `/Applications` (created
-/// empty the first time), so installed packages survive reboots and are part of the
-/// volume's snapshots and clones (`milk try`). Without a volume it stays on tmpfs.
+/// Persistent apps: bind `<volume>/Apps` onto `/Apps` (created the first time), so
+/// installed packages survive reboots and are part of the volume's snapshots and clones
+/// (`milk try`). The built-in apps are copied in first (`fs::layout::sync_builtin_apps`),
+/// so both kinds are in the one folder. Without a volume it stays on tmpfs (built-in apps
+/// only, from the initramfs).
 pub fn setup_applications() {
     let Some(vol) = mount_path() else { return };
     let on_disk = format!("{vol}{APPLICATIONS}");
@@ -1076,6 +1081,7 @@ pub fn setup_applications() {
         kprintln!("milkfs: can't create {on_disk}: {e}; {APPLICATIONS} stays in RAM");
         return;
     }
+    crate::fs::layout::sync_builtin_apps(&vol, &on_disk);
     if let Err(e) = crate::fs::path::bind(&on_disk, APPLICATIONS) {
         kprintln!("milkfs: bind {on_disk} -> {APPLICATIONS} failed: {e}");
     }
@@ -1085,7 +1091,7 @@ pub fn setup_applications() {
 
 pub use versions::Version;
 
-/// The live file at `path` (any VFS path, e.g. `/home/milk/Documents/ideas.md`), as
+/// The live file at `path` (any VFS path, e.g. `/Users/milk/Documents/ideas.md`), as
 /// (volume, inode number).
 fn live_file(path: &str) -> Result<(Arc<Volume>, u64)> {
     let v = primary()?;

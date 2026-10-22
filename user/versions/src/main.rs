@@ -80,7 +80,7 @@ fn absolute(p: &str) -> String {
 fn why(e: rt::Errno) -> &'static str {
     match e.0 {
         2 => "no such file, or not in that snapshot",
-        18 => "not on the milkfs volume (only /Volumes/Milk and /home/milk have versions)",
+        18 => "not on the milkfs volume (only /Volumes/Milk and /Users/milk have versions)",
         21 => "not a regular file",
         28 => "no room for the safety snapshot (30 snapshots + clones at most)",
         _ => e.msg(),

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generate milkOS's system sounds (python3 stdlib only). The outputs are committed in
-rootfs/System/Library/Sounds/; rerun after changing anything here:
+rootfs/System/Sounds/; rerun after changing anything here:
 
     python3 scripts/gen_sounds.py [OUTDIR]
 

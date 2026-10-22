@@ -256,7 +256,7 @@ pub fn chroot(dir: InodeRef) -> KResult<()> {
     }
     let p = current();
     // Anyone may chroot (it only narrows what they see; `milk run-try` relies on it), but
-    // afterwards set-ID bits are ignored: a jail can't fake /etc/passwd for `su`.
+    // afterwards set-ID bits are ignored: a jail can't fake /System/Settings/passwd for `su`.
     p.cred.lock().no_new_privs = true;
     p.inner.lock().root_dir = Some(dir);
     Ok(())
@@ -305,13 +305,13 @@ pub fn init() {
     let sess = login::session();
     fs::perm::set_mount_owner(sess.uid, sess.gid);
     exceptions::set_user_return_hook(on_user_return);
-    let bin: Vec<String> = fs::readdir("/bin")
+    let bin: Vec<String> = fs::readdir("/Commands")
         .unwrap_or_default()
         .into_iter()
         .map(|e| e.name)
         .collect();
     kprintln!(
-        "[proc] up: user range {:#x}.., programs linked at {:#x}, /bin: {}",
+        "[proc] up: user range {:#x}.., programs linked at {:#x}, /Commands: {}",
         mmu::USER_BASE,
         uspace::IMAGE_BASE,
         bin.join(" ")
@@ -518,20 +518,20 @@ pub fn spawn_on(path: &str, argv: &[&str], envp: &[&str], tty: &str, cwd: &str) 
     })
 }
 
-/// Start `/bin/init` as PID 1. Call at the end of boot.
+/// Start `/System/Startup/init` as PID 1. Call at the end of boot.
 pub fn start_init() {
     assert!(get(1).is_none(), "init already running");
     INIT_NEXT.store(true, Ordering::Relaxed);
-    let env = [String::from("PATH=/bin"), String::from("HOME=/")];
+    let env = [String::from("PATH=/Commands"), String::from("HOME=/")];
     match spawn_as(
-        "/bin/init",
+        "/System/Startup/init",
         &["init"],
         caps::Caps::all(),
         cred::Cred::root(),
         &env,
     ) {
-        Ok(pid) => kprintln!("[proc] started /bin/init as pid {pid}"),
-        Err(e) => panic!("could not start /bin/init: errno {}", e.0),
+        Ok(pid) => kprintln!("[proc] started /System/Startup/init as pid {pid}"),
+        Err(e) => panic!("could not start /System/Startup/init: errno {}", e.0),
     }
 }
 

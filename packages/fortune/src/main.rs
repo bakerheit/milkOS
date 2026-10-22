@@ -2,8 +2,8 @@
 //!   fortune            a random one
 //!   fortune -a         all of them
 //!   fortune -n N       quote number N
-//! Reads share/fortune/quotes.txt next to its bin/ directory (so it also works when run
-//! from a try-before-install clone), else /Applications/fortune/..., else built-in copies.
+//! Reads quotes.txt next to the program (so it also works when run from a try-before-install
+//! clone), else /Apps/fortune/quotes.txt, else the built-in copy.
 //! Quotes are separated by lines holding a single `%`, like the classic fortune files.
 
 #![no_std]
@@ -32,12 +32,13 @@ fn random() -> u64 {
 
 fn quotes_text(argv0: &str) -> String {
     let mut tries = Vec::new();
-    if let Some((dir, _)) = argv0.rsplit_once("/bin/") {
-        tries.push(alloc::format!("{dir}/share/fortune/quotes.txt"));
+    if let Some((dir, _)) = argv0.rsplit_once('/')
+        && !dir.is_empty()
+        && !dir.ends_with("/Commands")
+    {
+        tries.push(alloc::format!("{dir}/quotes.txt"));
     }
-    tries.push(String::from(
-        "/Applications/fortune/share/fortune/quotes.txt",
-    ));
+    tries.push(String::from("/Apps/fortune/quotes.txt"));
     for p in tries {
         if let Ok(b) = sys::read_file(&p) {
             return String::from_utf8_lossy(&b).into_owned();

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmarks on real virtio disks (private images). Page cache: a 4 MiB file on milkfs (/home/milk, private
+# Benchmarks on real virtio disks (private images). Page cache: a 4 MiB file on milkfs (/Users/milk, private
 # image) and on FAT32 (scripts/mkfat.sh image), each read twice with the page cache off,
 # then on (/sys/fs/pagecache/bench). milkfs create/read/delete of 300 x 1000 B,
 # 100 x 20 KB and 4 x 1 MiB files (/sys/fs/milkfs/bench). Everything in a fresh /tmp directory; the file comes
@@ -28,18 +28,18 @@ trap 'kill -9 "$QPID" 2>/dev/null || true; rm -rf "$SHARE_DIR/$SUB"' EXIT
 P='msh:[^\n]*\$ '
 B=/sys/fs/pagecache
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:cp /Volumes/Mac/$SUB/big.bin /home/milk/big.bin" "wait:$P" \
+  "send:cp /Volumes/Mac/$SUB/big.bin /Users/milk/big.bin" "wait:$P" \
   "send:cp /Volumes/Mac/$SUB/big.bin /Volumes/MILKFAT/big.bin" "wait:$P" \
   "send:echo 0 > $B/enabled" "wait:$P" \
-  "send:echo /home/milk/big.bin > $B/bench" "wait:$P" \
+  "send:echo /Users/milk/big.bin > $B/bench" "wait:$P" \
   "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
   "send:echo 1 > $B/enabled" "wait:$P" \
-  "send:echo /home/milk/big.bin > $B/bench" "wait:$P" \
+  "send:echo /Users/milk/big.bin > $B/bench" "wait:$P" \
   "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
   "send:cat $B/stats" "wait:$P" \
-  "send:echo /home/milk/b1 300 1000 > /sys/fs/milkfs/bench" "wait:$P" \
-  "send:echo /home/milk/b2 100 20000 > /sys/fs/milkfs/bench" "wait:$P" \
-  "send:echo /home/milk/b3 4 1048576 > /sys/fs/milkfs/bench" "wait:$P" \
+  "send:echo /Users/milk/b1 300 1000 > /sys/fs/milkfs/bench" "wait:$P" \
+  "send:echo /Users/milk/b2 100 20000 > /sys/fs/milkfs/bench" "wait:$P" \
+  "send:echo /Users/milk/b3 4 1048576 > /sys/fs/milkfs/bench" "wait:$P" \
   "send:echo CACHEBENCH""-DONE" "wait:CACHEBENCH-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done

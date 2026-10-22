@@ -1,7 +1,7 @@
 //! httpd: serve a directory over HTTP/1.0 (GET and HEAD, one request per connection).
-//!   httpd [-p PORT] [-q] [DIR]       defaults: port 80, /srv/www
+//!   httpd [-p PORT] [-q] [DIR]       defaults: port 80, /Users/milk/Sites
 //! Directories serve their index.html, or a listing. Paths with ".." are refused. -q: no
-//! request log. init starts `httpd -q /srv/www` at boot. Listens on [::] (IPv6 and IPv4).
+//! request log. milkd starts `httpd -q /Users/milk/Sites` at boot (its service file). Listens on [::] (IPv6 and IPv4).
 //!
 //! `/status` is generated: a system dashboard (CPU per core, memory, uptime, load,
 //! network totals, recent audit events) in the HTML subset the desktop Browser renders.
@@ -24,7 +24,7 @@ const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 
 fn main(args: &rt::Args) -> i32 {
-    let (mut port, mut quiet, mut root) = (80u16, false, "/srv/www");
+    let (mut port, mut quiet, mut root) = (80u16, false, "/Users/milk/Sites");
     let mut it = args.argv.iter().skip(1);
     while let Some(a) = it.next() {
         match *a {

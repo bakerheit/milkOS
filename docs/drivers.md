@@ -23,7 +23,7 @@ What the interface buys is that ordinary driver bugs stop being kernel crashes.
 
 | a buggy driver | result |
 |---|---|
-| crashes, is killed (`kill -9`), exits, or execs | the kernel resets the device (Status = 0, which stops its DMA), then frees the driver's DMA buffers, unregisters its interrupt, and hands the device back to the in-kernel driver if the policy says so. milkd restarts the driver with backoff |
+| crashes, is killed (`processes stop --now`), exits, or execs | the kernel resets the device (Status = 0, which stops its DMA), then frees the driver's DMA buffers, unregisters its interrupt, and hands the device back to the in-kernel driver if the policy says so. milkd restarts the driver with backoff |
 | touches a register outside its device | refused: register access goes through the kernel, bounded to the device's own 0x200-byte virtio-mmio window |
 | reads or writes kernel memory, or another process's | impossible with the CPU: it can only map the DMA buffers it allocated |
 | points a queue at memory it didn't allocate (QueueDesc/Driver/Device) | refused when it sets QueueReady (EPERM, audited `driver.dma_refused`) |
@@ -31,7 +31,7 @@ What the interface buys is that ordinary driver bugs stop being kernel crashes.
 | uses indirect descriptors | refused (the check doesn't follow them) |
 | never acknowledges or re-arms its interrupt | that interrupt stays masked: no storm. The kernel masks the line when it fires and only the driver's explicit re-arm unmasks it |
 | allocates DMA memory without end | capped per device (256 KiB) |
-| hangs | the device stops working (no sound, no fresh entropy) and nothing else does. milkd doesn't detect hangs; `kill` it and milkd restarts it |
+| hangs | the device stops working (no sound, no fresh entropy) and nothing else does. milkd doesn't detect hangs; `processes stop` it (or `services signal` it) and milkd restarts it |
 | feeds the kernel bad entropy (rngd) | mixed into the pool, never replaces it; the boot seed and jitter stay in. Worst case is the jitter-only fallback |
 
 **What still trusts the driver (and the device):**
@@ -201,7 +201,7 @@ Both are milkd services (`/System/Settings/milk/services/rngd.service`, `soundd.
 * output into the journal as `rngd` / `soundd`;
 * conditional on the policy (`if-contains = /proc/drivers rng policy=user`).
 
-milkd's backoff starts at 100 ms. `svc kill UNIT [SIG]` signals a unit without stopping
+milkd's backoff starts at 100 ms. `services signal UNIT [SIGNAL]` signals a unit without stopping
 it, so the restart policy applies.
 
 `scripts/driver-crash-test.sh` (in check-all):

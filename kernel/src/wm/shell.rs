@@ -1641,7 +1641,7 @@ impl Desktop {
                         Status::Cpu => {
                             self.close_notif();
                             self.control = false;
-                            self.open_tab(Some(String::from("top")));
+                            self.open_tab(Some(String::from("processes watch")));
                         }
                         Status::Volume | Status::Network | Status::Focus => {
                             self.close_notif();

@@ -46,7 +46,7 @@ boot() { # name commands...
 # Output of the command typed as $2 in log $1, up to the next prompt.
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
 LOGF=/Users/milk/.cache/milk/alarmd.log
-boot b1 "ps | grep alarmd" \
+boot b1 "processes list | grep alarmd" \
   "alarm add 03:15 weekdays pills" "alarm add in 5s ring-test" "timer 6s tea-test" \
   "cal add in 5s standup-test --alert 0" "cal add tomorrow 12:00 lunch-test --repeat weekly" \
   "remind add in 5s call-the-plumber" "remind add tomorrow stretch --repeat weekly" "remind add undated-thing" "remind add Pick up parcel friday at 5pm" \
@@ -56,7 +56,7 @@ boot b1 "ps | grep alarmd" \
   "cat $LOGF" "alarm list" "timer list" "cal list 3" "remind done 2" "remind done 3" "remind list" \
   "echo now > /System/Kernel/fs/milkfs/sync" "sleep 3"
 L="$T/b1.log"
-out "$L" "ps | grep alarmd" | grep -q "alarmd" && ok "alarmd is running (started by init)" || bad "alarmd not running"
+out "$L" "processes list | grep alarmd" | grep -q "alarmd" && ok "alarmd is running (started by init)" || bad "alarmd not running"
 out "$L" "alarm list" | head -3 | sed 's/^/    /'
 out "$L" "cat $LOGF" | sed 's/^/    log: /'
 [ "$(out "$L" "alarm list" | grep -c pills)" = 2 ] && ok "alarm snooze made a one-off copy of the alarm" || bad "alarm snooze: $(out "$L" "alarm list")"

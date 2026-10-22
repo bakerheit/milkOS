@@ -142,7 +142,7 @@ fn milkfs_rule(op: &str) -> crate::fs::Result<()> {
         return Ok(());
     }
     crate::fs::milkfs::set_reason(
-        "needs an administrator's authorisation: run the command under `auth` (e.g. `auth snap delete NAME`) or approve it in the desktop's password panel",
+        "needs an administrator's authorisation: run the command under `admin ticket` (e.g. `admin ticket snap delete NAME`) or approve it in the desktop's password panel",
     );
     Err(crate::fs::Errno::EPERM)
 }

@@ -44,7 +44,7 @@ DNS (see the resolver policy below).
   interrupt status and calls `wake_all`, nothing else: no lock, no allocation), by any
   readiness change, and by API calls that arm an earlier timer. Each pass: drain rx, reclaim
   tx, run timers (TCP retransmission / persist / TIME_WAIT, ARP retries + expiry, DHCP), run
-  the in-kernel services (HTTP on :80). Idle, it costs nothing (`ps` shows 0.00 s).
+  the in-kernel services (HTTP on :80). Idle, it costs nothing (`processes list` shows 0.00 s).
 * **Memory.** The device's rings and buffers are allocated once at boot.
   * **Socket buffers** are per socket, from the PMM (`net::ring::Ring`): 64 KiB each way
     to start. TCP grows them to 4 MiB as needed (below); all socket buffers together are

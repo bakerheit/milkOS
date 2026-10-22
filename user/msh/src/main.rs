@@ -846,18 +846,18 @@ fn help() {
     println!("  where            print the folder you're in");
     println!("  exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
-    println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
-    println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
+    println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq processes");
+    println!(
+        "  services system users admin sleep env true false clear   (NOUN help: what it does)"
+    );
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
-        "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"
+        "  first N, last N, get COL, count, table, to-json; producers: processes list, files list, ..."
     );
+    println!("try: processes list | grep msh,  files list -l /Commands | sort -n -k5 | tail -3");
     println!(
-        "try: ps | grep msh,  files list -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
-    );
-    println!(
-        "     ps | filter rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
+        "     processes list | filter memory > 1M | sort-by name,  files list /Commands | sort-by size -r"
     );
 }
 

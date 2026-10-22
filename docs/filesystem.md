@@ -218,7 +218,7 @@ about once a day: each home's (`/Users/*/.Trash`, with that home's setting) and 
 (each person's items with their own setting), deleting for good what has been there longer.
 It runs as root but does each Trash in a child that has become that Trash's owner, so it
 never deletes with more rights than they have (links are removed, never followed). It logs
-what it deleted to the journal (`log -u trashd`). `trashd --once [--later DAYS]` does one
+what it deleted to the journal (`services logs trashd`). `trashd --once [--later DAYS]` does one
 pass now, pretending it is DAYS later (for tests).
 
 **Desktop.** Files: Cmd+Backspace, Delete, or Move to Trash in the right-click menu; the

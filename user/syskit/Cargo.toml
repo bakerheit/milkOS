@@ -1,0 +1,15 @@
+[package]
+name = "syskit"
+version.workspace = true
+edition.workspace = true
+
+# The rules behind `processes`, `services`, `system`, `users` and `admin` (user/systools): their
+# help, how their arguments are read, signal names, picking a process by name or number, the
+# journal's lines and filters, milkd's replies, uptimes and the memory groups, all in plain
+# English. Pure (no syscalls), so the unit tests run on the host: `scripts/syskit-test.sh`.
+[lib]
+bench = false
+
+[dependencies]
+filekit = { path = "../filekit" }
+sysview = { path = "../sysview" }

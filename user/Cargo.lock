@@ -327,6 +327,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "syskit"
+version = "0.0.1"
+dependencies = [
+ "filekit",
+ "sysview",
+]
+
+[[package]]
+name = "systools"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "syskit",
+ "sysview",
+]
+
+[[package]]
 name = "sysview"
 version = "0.0.1"
 
@@ -370,13 +387,6 @@ dependencies = [
  "rt",
  "timeio",
  "timekit",
-]
-
-[[package]]
-name = "top"
-version = "0.0.1"
-dependencies = [
- "rt",
 ]
 
 [[package]]

@@ -1,17 +1,12 @@
-//! top: a full-screen system monitor (raw tty + ANSI escapes): per-CPU bars, memory,
-//! network and disk rates, processes sorted by CPU.
-//!   top              interactive: q quit, c sort by CPU, m sort by memory, p by pid,
-//!                    + / - refresh faster / slower
-//!   top -b [-n N] [-d SECS]   batch: N plain-text frames (default 1), no escapes, no raw
-//!                    mode (for logs and tests)
+//! `processes watch`: a full-screen system monitor (raw tty + ANSI escapes): per-CPU bars,
+//! memory, network and disk rates, processes sorted by CPU.
+//!   processes watch     interactive: q quit, c sort by CPU, m sort by memory, p by pid,
+//!                       + / - refresh faster / slower
+//!   processes watch --plain [--frames N] [--every SECS]   N plain-text frames (default 1),
+//!                       no escapes, no raw mode (for logs and tests)
 //! Reads /proc/cpuload, /proc/stat, /proc/meminfo, /proc/loadavg, /proc/net/dev,
 //! /proc/diskstats and /proc/<pid>/{stat,status,cmdline}. Works on the UART console and in
 //! the desktop Terminal (both are ttys; the size comes from TIOCGWINSZ).
-
-#![no_std]
-#![no_main]
-
-extern crate alloc;
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -19,8 +14,6 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use rt::net::{POLLIN, PollFd};
 use rt::{print, sys};
-
-rt::main!(main);
 
 const TCGETS: usize = 0x5401;
 const TCSETS: usize = 0x5402;
@@ -261,7 +254,7 @@ fn frame(
     let load = text("/proc/loadavg");
     let la: Vec<&str> = load.split_whitespace().take(3).collect();
     lines.push(alloc::format!(
-        "top - {:02}:{:02}:{:02} up {}:{:02}:{:02}, {} procs, load {}",
+        "processes watch - {:02}:{:02}:{:02} up {}:{:02}:{:02}, {} processes, load {}",
         wall / 3600 % 24,
         wall / 60 % 60,
         wall % 60,
@@ -372,22 +365,16 @@ fn frame(
     (out, now)
 }
 
-fn main(args: &rt::Args) -> i32 {
-    let a: Vec<&str> = args.argv.iter().skip(1).copied().collect();
-    let batch = a.contains(&"-b");
-    let get = |flag: &str| {
-        a.iter()
-            .position(|x| *x == flag)
-            .and_then(|i| a.get(i + 1))
-            .and_then(|v| v.parse::<u64>().ok())
-    };
-    let mut delay_ms = get("-d").map_or(1000, |s| s.clamp(1, 60) * 1000);
+/// Run the view: `plain` prints `frames` plain-text frames `every_secs` apart; otherwise the
+/// interactive full-screen view until q.
+pub fn run(plain: bool, frames: u64, every_secs: u64) -> i32 {
+    let mut delay_ms = every_secs.clamp(1, 60) * 1000;
     let (rows, cols) =
         sys::winsize(1).map_or((24, 80), |(r, c)| (r.max(10) as usize, c.max(40) as usize));
     let mut ps = procs();
     let mut prev = sample(&ps);
-    if batch {
-        let n = get("-n").unwrap_or(1).max(1);
+    if plain {
+        let n = frames.max(1);
         for i in 0..n {
             sys::sleep_ms(if i == 0 { 500 } else { delay_ms });
             ps = procs();
@@ -408,7 +395,9 @@ fn main(args: &rt::Args) -> i32 {
         return 0;
     }
     let Some(old) = raw_mode() else {
-        rt::eprintln!("top: stdin is not a terminal (try top -b)");
+        rt::eprintln!(
+            "processes watch: this isn't a terminal (processes watch --plain prints plain text)"
+        );
         return 1;
     };
     print!("\x1b[?25l\x1b[2J");

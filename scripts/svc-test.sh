@@ -2,11 +2,12 @@
 # Services and the journal, on a private milkfs image, two boots:
 #   boot 1: `utest svc` (a crashing unit restarted with doubling backoff, failed
 #           dependencies reported, start/stop over /System/Services/Sockets/milkd.sock allowed for root and
-#           admins and refused for others), httpd running as a milkd service, `svc`
+#           admins and refused for others), httpd running as a milkd service, `services`
 #           tables; `utest auth` (admin tickets: refused without one, granted with the
 #           documented test password `milk`, not inherited, revocable, kept across exec,
 #           rate limited, audited); a marker written to the journal, flushed to disk;
-#   boot 2: the marker is still in `log` (from the previous boot's file), not in `log -b`.
+#   boot 2: the marker is still in `services logs` (from the previous boot's file), not in
+#           `services logs --this-boot`.
 # Fresh /tmp directory; only the qemus started here are killed.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -45,8 +46,8 @@ trap 'kill -9 "${QPID:-}" 2>/dev/null || true' EXIT
 L1="$(boot b1 \
   "send:/System/Developer/utest svc" "wait:$P" \
   "send:/System/Developer/utest auth" "wait:$P" \
-  "send:svc" "wait:$P" \
-  "send:MILK_TABLE=1 svc list" "wait:$P" \
+  "send:services" "wait:$P" \
+  "send:MILK_TABLE=1 services list" "wait:$P" \
   "send:echo $MARK > /dev/journal" "wait:$P" \
   "send:sleep 3" "wait:$P" \
   "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P")"
@@ -54,12 +55,12 @@ echo "$L1" > "$T/b1.txt"
 echo "$L1" | grep -q "utest: PASS services" && ok "$(echo "$L1" | grep -m1 'utest: PASS services' | cut -c1-200)" || bad "utest svc"
 echo "$L1" | grep -q "utest: PASS authorisation" && ok "$(echo "$L1" | grep -m1 '(as milk) utest: PASS authorisation' | cut -c1-200)" || bad "utest auth"
 echo "$L1" | grep -Eq "^httpd +running" && ok "httpd runs as a milkd service" || bad "httpd not running under milkd"
-echo "$L1" | grep -q "^unit:str	state:str" && ok "svc list as a table" || bad "svc table"
+echo "$L1" | grep -q "^name:str	state:str" && ok "services list as a table" || bad "services table"
 
 L2="$(boot b2 \
-  "send:log | grep $MARK" "wait:$P" \
-  "send:log -b | grep -c $MARK" "wait:$P")"
+  "send:services logs | grep $MARK" "wait:$P" \
+  "send:services logs --this-boot | grep -c $MARK" "wait:$P")"
 echo "$L2" > "$T/b2.txt"
 echo "$L2" | grep -q "user/echo\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/echo.*$MARK")" || bad "marker not in the journal after reboot"
-echo "$L2" | grep -A1 "log -b | grep -c" | grep -qx 0 && ok "log -b shows only this boot" || bad "log -b"
+echo "$L2" | grep -A1 "services logs --this-boot | grep -c" | grep -qx 0 && ok "services logs --this-boot shows only this boot" || bad "services logs --this-boot"
 [ "$FAIL" = 0 ] && echo "svc-test: PASS ($T)" || { echo "svc-test: FAIL ($T)"; exit 1; }

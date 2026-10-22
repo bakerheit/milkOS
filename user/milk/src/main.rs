@@ -147,7 +147,7 @@ fn milkfs(ctl: &str, arg: &str) -> Res<()> {
     }
     r.map_err(|e| match e.0 {
         1 => alloc::format!(
-            "{p}: needs an administrator's authorisation: run it as `auth milk ...` (or as root)"
+            "{p}: needs an administrator's authorisation: run it as `admin ticket milk ...` (or as root)"
         ),
         _ => alloc::format!("{p} <- {arg:?}: {e}"),
     })

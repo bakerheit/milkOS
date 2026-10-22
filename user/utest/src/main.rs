@@ -969,8 +969,8 @@ fn t_linux() -> bool {
     )
 }
 
-/// Credentials: an unprivileged process can't raise its ids; sudo (set-user-ID root, asks
-/// for the caller's password) and su can.
+/// Credentials: an unprivileged process can't raise its ids; `admin` (set-user-ID root, asks
+/// for the caller's password) and `users switch` can.
 fn t_creds() -> bool {
     if sys::geteuid() == 0 {
         return as_milk("creds", "credentials");
@@ -984,7 +984,7 @@ fn t_creds() -> bool {
         ok &= sys::setresuid(u32::MAX, 0, u32::MAX).is_err();
         detail += ", setuid(0)/setgroups/setresuid refused";
     }
-    // sudo with the right and the wrong password (-S: from stdin).
+    // admin with the right and the wrong password (from stdin).
     let run = |pw: &str| {
         let (r, w) = sys::pipe().unwrap();
         let (r2, w2) = sys::pipe().unwrap();
@@ -992,7 +992,11 @@ fn t_creds() -> bool {
             0 => {
                 sys::dup2(r, 0).unwrap();
                 sys::dup2(w2, 1).unwrap();
-                let _ = sys::execve("/Commands/sudo", &["sudo", "-S", "/Commands/id", "-u"], &[]);
+                let _ = sys::execve(
+                    "/Commands/admin",
+                    &["admin", "--stdin", "/Commands/users", "me"],
+                    &[],
+                );
                 sys::exit(127)
             }
             p => p,
@@ -1012,16 +1016,22 @@ fn t_creds() -> bool {
     };
     let (good, gst) = run("milk");
     let (bad, bst) = run("wrong");
-    ok &= good == "0" && gst == 0 && bad.is_empty() && bst != 0;
-    detail += &alloc::format!("; sudo good -> {good:?} ({gst}), bad -> {bad:?} ({bst})");
+    // `users me` as root: an "id  0" line.
+    let root = good
+        .lines()
+        .any(|l| l.split_whitespace().eq(["id", "0"]));
+    ok &= root && gst == 0 && bad.is_empty() && bst != 0;
+    let first = good.lines().find(|l| l.starts_with("id")).unwrap_or("");
+    detail += &alloc::format!("; admin good -> {first:?} ({gst}), bad -> {bad:?} ({bst})");
     check("credentials", ok, &detail)
 }
 
-/// Run `utest <what>` as the milk user (`su milk -c`: root needs no password), for the
+/// Run `utest <what>` as the milk user (`users switch milk --command`: root needs no
+/// password), for the
 /// tests that are about being unprivileged, when utest itself runs as root (the console).
 fn as_milk(what: &str, name: &str) -> bool {
     let cmd = alloc::format!("/System/Developer/utest {what}");
-    let (out, st) = capture(&["/Commands/su", "milk", "-c", &cmd]);
+    let (out, st) = capture(&["/Commands/users", "switch", "milk", "--command", &cmd]);
     let text = String::from_utf8_lossy(&out);
     for l in text.lines() {
         println!("  (as milk) {l}");
@@ -1029,20 +1039,20 @@ fn as_milk(what: &str, name: &str) -> bool {
     check(
         name,
         st == 0 && text.contains("ALL PASS"),
-        &alloc::format!("as milk via su: {}", sys::describe_status(st)),
+        &alloc::format!("as milk via users switch: {}", sys::describe_status(st)),
     )
 }
 
-/// Run `argv` through `sudo -S` with the default test password ("milk", see
+/// Run `argv` through `admin --stdin` with the default test password ("milk", see
 /// docs/security.md). Returns the wait status.
-fn sudo(argv: &[&str]) -> i32 {
+fn as_admin(argv: &[&str]) -> i32 {
     let (r, w) = sys::pipe().unwrap();
     let pid = match sys::fork().unwrap() {
         0 => {
             sys::dup2(r, 0).unwrap();
-            let mut v = alloc::vec!["sudo", "-S"];
+            let mut v = alloc::vec!["admin", "--stdin"];
             v.extend_from_slice(argv);
-            let _ = sys::execve("/Commands/sudo", &v, &[]);
+            let _ = sys::execve("/Commands/admin", &v, &[]);
             sys::exit(127)
         }
         p => p,
@@ -1106,9 +1116,10 @@ fn t_perms() -> bool {
     let _ = sys::rmdir(d);
     // 9: sticky /tmp: root's file there can't be removed by us; 10: but by root.
     let rf = "/tmp/utest-rootfile";
-    let made = sudo(&["/Commands/files", "create", rf]) == 0;
+    let made = as_admin(&["/Commands/files", "create", rf]) == 0;
     t(made && matches!(sys::unlink(rf), Err(sys::Errno(1))));
-    t(sudo(&["/Commands/files", "delete", "--now", rf]) == 0 && sys::stat_path(rf, true).is_err());
+    t(as_admin(&["/Commands/files", "delete", "--now", rf]) == 0
+        && sys::stat_path(rf, true).is_err());
     // 11: both must allow: a sandbox grant of /System/Settings doesn't open /System/Settings/shadow, and a file
     // the permissions allow is still out of reach outside the grant.
     let pid = sys::fork().unwrap();
@@ -1702,7 +1713,7 @@ fn t_svc() -> bool {
 
 /// Admin authorisation tickets: destructive milkfs controls need one (not just group
 /// admin); wrong password refused; a ticket works, isn't inherited by fork, survives exec
-/// (`auth`), shows in /proc, can be revoked; 3 wrong passwords lock the user out.
+/// (`admin ticket`), shows in /proc, can be revoked; 3 wrong passwords lock the user out.
 fn t_auth() -> bool {
     if sys::geteuid() == 0 {
         return as_milk("auth", "authorisation");
@@ -1750,7 +1761,7 @@ fn t_auth() -> bool {
     t(st == 0); // 5: not inherited
     sys::auth_revoke();
     t(sys::auth_left() == 0 && del() == Some(1)); // 6: revoked
-    // 7: `auth` keeps the ticket across exec.
+    // 7: `admin ticket` keeps the ticket across exec (`admin status` reports it).
     let (r, w) = sys::pipe().unwrap();
     let (r2, w2) = sys::pipe().unwrap();
     let pid = sys::fork().unwrap();
@@ -1758,8 +1769,8 @@ fn t_auth() -> bool {
         let _ = sys::dup2(r, 0);
         let _ = sys::dup2(w2, 1);
         let _ = sys::execve(
-            "/Commands/auth",
-            &["auth", "-S", "/Commands/auth", "-s"],
+            "/Commands/admin",
+            &["admin", "ticket", "--stdin", "/Commands/admin", "status"],
             &[],
         );
         sys::exit(127);
@@ -1776,7 +1787,7 @@ fn t_auth() -> bool {
     let _ = sys::close(r2);
     let _ = sys::wait4(pid as i32, 0);
     let out = String::from_utf8_lossy(&out);
-    t(out.contains("ticket: ") && out.contains("s left")); // 7
+    t(out.contains("ticket") && out.contains("s left (this process only)")); // 7
     // 8: rate limit: three wrong in a row, then even the right one is refused for a while.
     for _ in 0..3 {
         let _ = sys::authorize_password("wrong", "");
@@ -1793,8 +1804,11 @@ fn t_auth() -> bool {
         "authorisation",
         bits == want,
         &alloc::format!(
-            "checks {bits:#b} (want {want:#b}); auth -s said {:?}",
-            out.trim()
+            "checks {bits:#b} (want {want:#b}); admin status said {:?}",
+            out.lines()
+                .find(|l| l.starts_with("ticket"))
+                .unwrap_or("")
+                .trim()
         ),
     )
 }

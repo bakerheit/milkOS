@@ -70,8 +70,9 @@ impl Identity {
 /// One request to the drop daemon: `ok REST` -> Ok(REST), `error WHY` -> Err(WHY).
 pub fn daemon(req: &str) -> Result<String, String> {
     use rt::unix::{self, Name};
-    let down =
-        || String::from("the Milk Drop service isn't running (`svc status drop`; it needs eth1)");
+    let down = || {
+        String::from("the Milk Drop service isn't running (`services status drop`; it needs eth1)")
+    };
     let fd = unix::socket(unix::SOCK_STREAM | unix::SOCK_CLOEXEC).map_err(|_| down())?;
     if unix::connect(fd, &Name::Path(SOCK)).is_err() {
         let _ = sys::close(fd);
@@ -304,7 +305,7 @@ pub fn load_or_create() -> Result<(Identity, bool), String> {
     if !is_root() {
         return load_public().map(|id| (id, false)).ok_or_else(|| {
             String::from(
-                "this machine has no Milk Drop identity yet: the drop service makes one when eth1 is up (`svc status drop`)",
+                "this machine has no Milk Drop identity yet: the drop service makes one when eth1 is up (`services status drop`)",
             )
         });
     }

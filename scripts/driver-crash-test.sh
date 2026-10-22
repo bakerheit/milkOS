@@ -2,7 +2,7 @@
 # User-space drivers crash test (docs/drivers.md), SILENT (qemu's wav audiodev records):
 #   boot 1 (default policy: rng and sound are user drivers): rngd and soundd hold their
 #     devices; a 5 s 440 Hz tone plays; 1.5 s in, both drivers are killed with SIGKILL
-#     (`svc kill`). Checks:
+#     (`services signal`). Checks:
 #       - the kernel never crashes,
 #       - milkd restarts each within a second (journal, monotonic ms) and it takes its
 #         device back (/proc/drivers: claims=2, releases=1),
@@ -75,8 +75,8 @@ boot b1 "$WORK/b1.wav" "" -- \
   'send:cat /proc/drivers' "$P" \
   'send:play tone 440 5 &' "$P" \
   'send:sleep 1.5' "$P" \
-  'send:svc kill soundd' "$P" \
-  'send:svc kill rngd' "$P" \
+  'send:services signal soundd' "$P" \
+  'send:services signal rngd' "$P" \
   'send:sleep 1.5' "$P" \
   'send:cat /proc/drivers' "$P" \
   'send:cat /proc/rng' "$P" \
@@ -142,8 +142,8 @@ echo "---- boot 2: drivers=rng=kernel sound=kernel ----"
 boot b2 "$WORK/b2.wav" "rng=kernel sound=kernel" -- \
   'send:sleep 1.5' "$P" \
   'send:cat /proc/drivers' "$P" \
-  'send:svc status soundd' "$P" \
-  'send:svc status rngd' "$P" \
+  'send:services status soundd' "$P" \
+  'send:services status rngd' "$P" \
   'send:play tone 660 0.5' "$P" \
   'send:cat /proc/audio' 'wait:device:[^\n]*\n' "$P" \
   'send:cat /proc/rng' "$P"

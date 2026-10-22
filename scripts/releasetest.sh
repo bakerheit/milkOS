@@ -48,7 +48,7 @@ headless() { # name commands...
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
-headless h1 "uname -a" "cat /proc/version" "files list /Users/milk" "files list /Apps" "cat /Volumes/Mac/README.txt" \
+headless h1 "system info" "cat /proc/version" "files list /Users/milk" "files list /Apps" "cat /Volumes/Mac/README.txt" \
   "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /Users/milk/note.txt" "echo now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/h1.log")"
 [ -e "$T/h1.done" ] && ok "headless: boots to msh" || { bad "headless boot"; tail -5 "$T/h1.out"; }
@@ -56,7 +56,7 @@ echo "$L" | grep -aq "milkfs: vd[a-z] mounted at /Volumes/Milk " && ok "the bund
 echo "$L" | grep -aq "milkfs: /Users/milk is /Volumes/Milk/Users/milk (persistent)" && ok "/Users/milk is on it (the skeleton made by release.sh, not new)" || bad "home not on the Milk disk"
 echo "$L" | grep -a -A2 "files list /Users/milk$" | grep -aq "README.txt" && ok "home skeleton present" || bad "home skeleton"
 echo "$L" | grep -aq "files list /Apps$" && ! echo "$L" | grep -a -A1 "files list /Apps$" | grep -aq "doesn't exist" && ok "/Apps present" || bad "/Apps"
-echo "$L" | grep -aq "milkOS milk $V" && echo "$L" | grep -aq "^milkOS $V (aarch64" && ok "version $V in uname and /proc/version" || bad "version strings"
+echo "$L" | grep -Eaq "^system +milkOS $V$" && echo "$L" | grep -aq "^milkOS $V (aarch64" && ok "version $V in system info and /proc/version" || bad "version strings"
 echo "$L" | grep -aq "Files you put in this folder show up inside milkOS" && ok "share readable" || bad "share not readable"
 echo "$L" | grep -a -A1 "echo nope > /Volumes/Mac/x.txt" | grep -aqi "read-only\|EROFS\|denied\|EACCES" && [ ! -e "$B/share/x.txt" ] && ok "share is read-only" || bad "share writable?"
 headless h2 "cat /Users/milk/note.txt"

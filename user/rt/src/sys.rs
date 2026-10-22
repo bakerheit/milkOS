@@ -1241,7 +1241,9 @@ pub fn set_echo(fd: i32, on: bool) -> Option<bool> {
     const TCGETS: u32 = 0x5401;
     const TCSETS: u32 = 0x5402;
     const ECHO: u32 = 0o10;
-    let mut t = [0u8; 36];
+    // The kernel's termios is 60 bytes (kernel/src/proc/tty.rs: TCGETS writes, TCSETS reads,
+    // that many). A smaller buffer here let TCGETS write past it, over this stack frame.
+    let mut t = [0u8; 60];
     ioctl(fd, TCGETS, t.as_mut_ptr() as usize).ok()?;
     let lflag = u32::from_le_bytes([t[12], t[13], t[14], t[15]]);
     let was = lflag & ECHO != 0;

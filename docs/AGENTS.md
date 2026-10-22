@@ -6,7 +6,8 @@
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
   `MILK_MONITOR=/tmp/x.sock scripts/run.sh headless` adds a qemu monitor socket (`info registers -a` on a hang).
   `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).
-  `scripts/svc-test.sh` = milkd services (backoff, dependencies, svc permissions), admin tickets (`utest auth`) + the journal across a reboot.
+  `scripts/svc-test.sh` = milkd services (backoff, dependencies, `services` permissions), admin tickets (`utest auth`) + the journal across a reboot.
+  `scripts/systools-test.sh` = `processes`, `services`, `system`, `users`, `admin` end to end in a VM; `scripts/syskit-test.sh` = their rules (user/syskit) on the Mac.
   `scripts/milkfs-test.sh` = the file system's host tests (the `milkfs` crate on the Mac, seconds, no VM; docs/filesystem.md).
   `scripts/driver-crash-test.sh` = user-space drivers (rngd, soundd; docs/drivers.md) killed mid-use: restarted, audio keeps playing, no panic; `MILK_DRIVERS="rng=kernel sound=kernel"` for the in-kernel drivers only.
   Daemons are milkd services (`/System/Settings/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.

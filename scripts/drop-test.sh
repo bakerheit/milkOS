@@ -106,15 +106,15 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:drop forget bob' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/a4" "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/bm1" \
-  'send:su milk -c "drop send bob /Volumes/Milk/share/to-bob.bin"' "wait:$DONE_RE" "$P" \
+  'send:users switch milk --command "drop send bob /Volumes/Milk/share/to-bob.bin"' "wait:$DONE_RE" "$P" \
   'send:ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|unknown|not resolved|no answer|Request timeout' "$P" \
   "waitfile:$WORK/bv6" \
   'send:drop send bob.local /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/bhid" 'send:drop list' "$P" 'send:ping -6 -c 1 -W 500 bob.local' "$P" \
-  'send:echo milk | sudo -S -u nobody /Commands/netctl visible off' "$P" "done:$WORK/alist" \
-  'send:su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$P" \
-  'send:su milk -c "drop name alice"' "$P" \
-  'send:echo milk | sudo -S -u nobody /Commands/drop name evil' "$P" \
+  'send:echo milk | admin --user nobody --stdin /Commands/netctl visible off' "$P" "done:$WORK/alist" \
+  'send:users switch milk --command "cat /System/Settings/milk/drop/identity.secret"' "$P" \
+  'send:users switch milk --command "drop name alice"' "$P" \
+  'send:echo milk | admin --user nobody --stdin /Commands/drop name evil' "$P" \
   'send:drop peers' "$P" \
   'send:files list /Users/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -135,7 +135,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "wait:$DONE_RE" "$P" "waitfile:$WORK/a4" \
   'send:drop list' "$P" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
-  'send:su milk -c "drop recv -y"' 'wait:receiving as' "done:$WORK/bm1" "wait:$DONE_RE" "$P" \
+  'send:users switch milk --command "drop recv -y"' 'wait:receiving as' "done:$WORK/bm1" "wait:$DONE_RE" "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/bv6" "wait:$DONE_RE" "$P" \
   'send:netctl visible off' "$P" 'send:netctl' "$P" "done:$WORK/bhid" "waitfile:$WORK/alist" \
   'send:netctl visible on' "$P" \
@@ -207,7 +207,7 @@ check "$B" "bob as milk received alice-as-milk's file" "drop: received /Users/mi
 echo "  ok  alice as milk sent to bob (signed by alice's daemon)"
 check "$B" "the file milk received is milk's" "^file +[rwx-]{9} +milk +[a-z]+ +1048576 .*to-bob \\(1\\)\\.bin$"
 check "$B" "root's receive into milk's Downloads is milk's too" "^file +[rwx-]{9} +milk +[a-z]+ +1048576 .*to-bob\\.bin$"
-grep -A1 'su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
+grep -A1 'users switch milk --command "cat /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
 echo "  ok  milk can't read /System/Settings/milk/drop/identity.secret"
 check "$A" "milk (admin) renames through the daemon" "drop: this machine is now alice \\(was alice\\)"
 check "$A" "audit: the daemon's rename names who asked" "user\\.drop\\.rename +old=alice new=alice by uid=501 user=milk"
@@ -279,7 +279,7 @@ boot alice 02:6d:6b:64:0a:0a "$PA" "$PB"
 QA=$!
 PIDS+=("$QA")
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice2.log" \
-  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
+  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:system info' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
 for _ in $(seq 600); do [ -e "$WORK/alice2.done" ] && break; sleep 0.1; done
@@ -293,7 +293,7 @@ cat "$A2"; echo
 check "$A2" "after reboot: same name" "^name: +alice$"
 check "$A2" "after reboot: same fingerprint ($FP_A)" "^fingerprint: +$FP_A$"
 check "$A2" "after reboot: bob still trusted" "^bob +[0-9a-f ]{19}"
-check "$A2" "after reboot: the hostname netctl set (uname -n)" "^alicebox$"
+check "$A2" "after reboot: the hostname netctl set (system info)" "^name +alicebox$"
 grep -aq "\[net\] hostname alicebox (from /System/Settings/milk/net/hostname)" "$WORK/alice2.log" || fail "after reboot: the kernel did not apply /System/Settings/milk/net/hostname"
 echo "  ok  after reboot: the kernel applied /System/Settings/milk/net/hostname (persistent)"
 

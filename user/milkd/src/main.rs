@@ -3,7 +3,7 @@
 //! Started by init (PID 1) as root. Reads /System/Settings/milk/services/*.service, starts the enabled
 //! units in dependency order as their declared users with their sandbox, restarts them
 //! with backoff, forwards their stdout / stderr to the journal (/dev/journal), and serves
-//! `svc` on /System/Services/Sockets/milkd.sock (AF_UNIX, SO_PEERCRED: anyone may list / status, start / stop /
+//! `services` on /System/Services/Sockets/milkd.sock (AF_UNIX, SO_PEERCRED: anyone may list / status, start / stop /
 //! restart / reload need root or group admin). One thread, an epoll loop.
 
 #![no_std]
@@ -76,7 +76,7 @@ enum State {
     Listening,
     /// Exited and not restarted (exit status).
     Exited(i32),
-    /// Stopped by `svc stop`, or never enabled.
+    /// Stopped by `services stop`, or never enabled.
     Inactive,
     Skipped(String),
     Failed(String),
@@ -100,7 +100,7 @@ struct Unit {
     out_buf: Vec<u8>,
     err_buf: Vec<u8>,
     listen_fd: i32,
-    /// Start again once it's down (svc restart).
+    /// Start again once it's down (`services restart`).
     restart_after_stop: bool,
     /// Being stopped because a unit it needs went down: it ends up Failed with this.
     dep_failed: Option<String>,
@@ -893,9 +893,9 @@ impl Milkd {
                 self.schedule();
                 Ok(String::new())
             }
-            // `kill UNIT [SIG]`: signal the unit's process (default SIGKILL) without
-            // stopping it, so its restart policy applies (crash tests: a driver killed
-            // mid-use, docs/drivers.md).
+            // `kill UNIT [SIG]` (`services signal`): signal the unit's process (default
+            // SIGKILL) without stopping it, so its restart policy applies (crash tests: a
+            // driver killed mid-use, docs/drivers.md).
             "kill" => {
                 let n = String::from(arg.unwrap_or(""));
                 let sig = it.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(9);

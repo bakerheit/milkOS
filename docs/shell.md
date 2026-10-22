@@ -37,7 +37,7 @@ and `OLDPWD` for programs that read them.
 
 `where` only ever prints the current folder, in a pipeline too, and takes no arguments:
 `where cpu > 5` says `where takes no arguments; to filter a table use filter`. Filtering
-a table is `filter` (`ps | filter rss > 100`, below).
+a table is `filter` (`processes list | filter memory > 1M`, below).
 
 ## Structured pipes
 
@@ -46,19 +46,23 @@ Plain text pipes stay exactly as they are. On top of that, some commands can pas
 tables, Nushell style:
 
 ```sh
-ps | filter rss > 100 | sort-by name         # filter + sort, shown as an aligned table
-ps | filter name == msh | select pid rss
+processes list | filter memory > 1M | sort-by name    # filter + sort, an aligned table
+processes list | filter name == msh | select pid memory
 files list /Commands | filter size > 100K | sort-by size -r | first 3
-ps | sort-by cpu -r | first 1 | get name     # -> plain text: one value per line
-ps | filter state == R | count
+processes list | sort-by cpu_ms -r | first 1 | get name  # -> plain text: one value a line
+processes list | filter state == running | count
+services list | filter state != running | select name detail
+users list | filter admin == yes | get name
+system memory | sort-by size -r | first 3
 files list / | to-json
 cat /proc/threads | filter PRIO > 1          # plain text with a header row works too
-ps | grep msh                                # a text tool after ps: ps prints text
+processes list | grep msh                    # a text tool after it: it prints text
 ```
 
 ### Rules
 
-1. **Producers** (`ps`, `files list`, `trash list`, `env`, ...) print normal text, unless the environment variable
+1. **Producers** (`processes list`, `services list`, `users list`, `system memory`,
+   `files list`, `trash list`, `env`, ...) print normal text, unless the environment variable
    `MILK_TABLE=1` is set, then they print a table. They never guess from the fd.
 2. **msh decides**, per pipeline stage, from the command names:
    * a stage whose next stage is a table command gets `MILK_TABLE=1`;
@@ -66,11 +70,12 @@ ps | grep msh                                # a text tool after ps: ps prints t
    * wherever a table would flow into something that isn't a table command (a text
      tool, or the end of the pipeline: the terminal or a `>` file), msh inserts an
      implicit `table` stage that renders it as aligned text.
-   So `ps | grep msh` is a plain text pipe, and `ps | filter ... | grep x` renders the
+   So `processes list | grep msh` is a plain text pipe, and `processes list | filter ... |
+   grep x` renders the
    table to text before `grep` sees it.
 3. **Table commands** given text instead of a table treat the first line as a header and
    split every line on runs of spaces (numbers become ints). So any columnar text works:
-   `/proc/threads`, `df`-style output, a `ps` run without msh.
+   `/proc/threads`, `df`-style output, a `processes list` run without msh.
 
 ### Table commands (msh built-ins, run as pipeline stages)
 
@@ -87,12 +92,12 @@ ps | grep msh                                # a text tool after ps: ps prints t
 
 `filter`'s operators are words, not shell redirections: in `filter COL > 100` the first
 `<`, `>`, `<=`, `>=` after the column is the comparison (msh's parser makes that one
-exception), and anything later is a real redirection, so `ps | filter rss > 100 > out`
+exception), and anything later is a real redirection, so `processes list | filter memory > 1M > out`
 writes the rendered table to `out`.
 
 Values: `int` and `size` columns compare numerically; a `size` literal may have a unit
-(`100K`, `2M`, `1G`; bare numbers are bytes). `str` columns compare as text. `rss` in
-`ps` is an `int` in KiB (like Linux `ps`), so `filter rss > 100` means more than 100 KiB.
+(`100K`, `2M`, `1G`; bare numbers are bytes). `str` columns compare as text. `memory` in
+`processes list` is a `size`, so `filter memory > 1M` means more than a megabyte.
 
 ### Wire format (`rt::table`)
 
@@ -112,7 +117,15 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 
 ### Columns of the producers
 
-* `ps`: `pid ppid pgid tid:int, state:str, cpu:int (ms), rss:int (KiB), name:str`
+* `processes list`: `pid parent group thread:int, state:str (running sleeping zombie),
+  core:int (the CPU), cpu_ms:int (CPU time), memory:size, name:str` (`--kernel`: the
+  kernel's threads too, with no pid, parent, group or memory)
+* `services list` / `services status`: `name state:str, pid restarts uptime:int (seconds),
+  user detail description:str`; `services logs`: `time:int (Unix), boot:str, seq:int,
+  name:str, pid uid:int, level:str, message:str`
+* `users list`: `name:str, id:int, group groups admin (yes/no) home shell full_name:str`
+* `system memory`: `group:str (Activity Monitor's: Apps, Kernel heap, ...), size:size,
+  percent:str`
 * `files list`: `name:str, kind:str (file folder link device pipe socket), size:size,
   mode:str (rwxr-xr-x), owner:str, modified:str`
 * `trash list`: `name:str, from:str (where it was), deleted:str, days_left:int (empty:
@@ -134,4 +147,4 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 ### Not done (ideas)
 
 Nested values (lists, records), `group-by`, `update`, `to-csv` / `from-csv`, tables
-from more tools (`df`, `free`, `/proc/<pid>` as `ps -l`), colour in the renderer.
+from more tools (`df`, `processes info` as a row), colour in the renderer.

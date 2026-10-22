@@ -48,6 +48,33 @@
   `~/Sites`, and old snapshots still open in Files and Versions.
 - The toy packages put their program at the top of their folder (`/Apps/fortune/fortune`).
 
+**Processes, services and accounts**
+- Five commands with plain verbs replace fourteen, which are gone (no aliases):
+  `processes` (`list`, `watch`, `stop [--now]`, `signal`, `signals`, `info`) replaces `ps`,
+  `top` and `kill`; `services` (`list`, `status`, `start`, `stop`, `restart`, `signal`,
+  `reload`, `logs [--follow] [--since 10m] [--last N] [--level L] [--this-boot]`) replaces
+  `svc` and `log`; `system` (`info`, `memory`, `uptime`) replaces `uname`, `uptime` and
+  `free`; `users` (`me`, `list`, `password`, `switch`) replaces `whoami`, `id`, `passwd` and
+  `su`; `admin COMMAND` replaces `sudo`, and `admin ticket COMMAND` / `admin status`
+  replace `auth`. Each has `help` in the format `files help` uses, errors in plain English
+  ("there's no process called x", "only an administrator can stop services"), and a table
+  for msh where it prints rows (`processes list | filter memory > 1M`, `users list`,
+  `services list`, `system memory`). `processes stop NAME` refuses a name two processes
+  share and lists their PIDs (`--all` for every one). `system memory` shows the new
+  `/proc/meminfo` breakdown in Activity Monitor's groups. There is no `system restart` or
+  `shutdown` yet: only the desktop's menu can.
+- `users` and `admin` are set-user-ID root like `su`, `sudo` and `passwd` were, with the same
+  checks; their other subcommands give root up first. `admin` now gives the root command a
+  clean environment from the target account (PATH, HOME, USER, LOGNAME, TERM, plus
+  `ADMIN_USER`) instead of the caller's, and wrong passwords for `users switch`,
+  `users password` and `admin` are in the audit log (`user.password.fail`).
+- Fixed: asking for a password on a terminal (`rt::users::read_password`, used by all of
+  them) wrote 24 bytes past its termios buffer on the stack; the kernel's termios is 60
+  bytes, the buffer was 36.
+- The rules are in `user/syskit` (host tests: `scripts/syskit-test.sh`, smoke set), the
+  commands in `user/systools`; `scripts/systools-test.sh` (default set) runs every
+  subcommand in a VM and checks the old names are gone.
+
 **File system**
 - milkfs is its own crate (`<repo>/milkfs`, `no_std`, shared with the kernel like the crypto
   crate), with the kernel's VFS glue in `kernel/src/fs/milkfs`. Nothing changes on disk or in

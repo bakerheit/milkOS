@@ -14,11 +14,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::Rect;
+use crate::sysfont::Font;
 use crate::timer;
 
 use super::super::button::{self, Kind, State};
 use super::super::event::Key;
-use super::super::fontx;
 use super::super::icons::{self, Icon};
 use super::super::paint::{Painter, hit};
 use super::super::rtc;
@@ -569,10 +569,10 @@ impl Files {
         p.rrect_stroke(bar.x, bar.y, bar.w, bar.h, 12, 1, SAND, 255);
         let crumbs = self.crumbs();
         let sep = "  >  ";
-        let sep_w = fontx::prop_width(sep, false);
+        let sep_w = crate::sysfont::width(sep, false);
         let widths: Vec<i32> = crumbs
             .iter()
-            .map(|(l, _)| fontx::prop_width(l, false))
+            .map(|(l, _)| crate::sysfont::width(l, false))
             .collect();
         // Leave out leading parts until it fits (a "~" stands for them).
         let room = bar.w - 24;
@@ -615,10 +615,8 @@ impl Files {
         if self.search.is_empty() && !self.searching {
             p.text_p(search.x + 12, search.y + 4, "Search", COCOA, false);
         } else {
-            let max = ((search.w - 28) / 7).max(4) as usize;
-            let n = self.search.chars().count();
-            let shown: String = self.search.chars().skip(n.saturating_sub(max)).collect();
-            let end = p.text_p(search.x + 12, search.y + 4, &shown, ESPRESSO, false);
+            let shown = Font::body(false).tail(&self.search, search.w - 28);
+            let end = p.text_p(search.x + 12, search.y + 4, shown, ESPRESSO, false);
             if self.searching {
                 p.fill(end + 1, search.y + 4, 2, 16, ESPRESSO);
             }
@@ -695,9 +693,11 @@ impl Files {
                 // A dot: matcha while that machine is receiving, latte when not.
                 let on = self.nearby.iter().any(|(n, rv)| n == name && *rv);
                 p.circle(18, r.y + 8, 9, if on { MATCHA } else { LATTE }, 255);
-                p.text(34, r.y + 4, &r.label, ESPRESSO);
+                let l = Font::body(false).truncate(&r.label, SIDE_W - 34 - 10);
+                p.text(34, r.y + 4, &l, ESPRESSO);
             } else {
-                p.text(18, r.y + 4, &r.label, ESPRESSO);
+                let l = Font::body(false).truncate(&r.label, SIDE_W - 18 - 10);
+                p.text(18, r.y + 4, &l, ESPRESSO);
             }
         }
     }
@@ -706,21 +706,13 @@ impl Files {
         let x = SIDE_W + 20;
         let top = TOOL_H;
         p.text_x(x, top + 14, "Time Machine", ESPRESSO, 2, true);
-        p.text_p(
-            x,
-            top + 50,
-            "Snapshots of the Milk disk. Open one to browse it, select a file, Restore.",
-            COCOA,
-            false,
-        );
+        let body = Font::body(false);
+        let room = w - x - 16;
+        let intro = "Snapshots of the Milk disk: open one to browse it or restore files.";
+        p.text_p(x, top + 50, &body.truncate(intro, room), COCOA, false);
         if self.snaps.is_empty() {
-            p.text_p(
-                x,
-                top + 84,
-                "No snapshots yet (Settings > Time Machine > Back up now).",
-                COCOA,
-                false,
-            );
+            let none = "No snapshots yet (Settings > Time Machine > Back up now).";
+            p.text_p(x, top + 84, &body.truncate(none, room), COCOA, false);
         }
         for (i, sn) in self.snaps.iter().enumerate() {
             let y = top + 76 + i as i32 * 44 - self.scroll * 44;
@@ -809,12 +801,14 @@ impl Files {
                         icon != Icon::Folder,
                     );
                 }
-                p.text_p(r.x + 40, r.y + 5, &e.name, ESPRESSO, false);
                 let what = if e.kind == crate::fs::InodeType::Dir {
                     String::from("folder")
                 } else {
                     fsx::human_size(e.size)
                 };
+                let room = r.w - 40 - 10 - crate::sysfont::width(&what, false) - 12;
+                let name = Font::body(false).truncate(&e.name, room);
+                p.text_p(r.x + 40, r.y + 5, &name, ESPRESSO, false);
                 p.text_right(
                     r.x + r.w - 10,
                     r.y + 5,
@@ -833,13 +827,7 @@ impl Files {
                 icons::draw(p, cx + 12, cy, 56, icon, bg, ba, fg, icon != Icon::Folder);
             }
             // Names longer than the cell get cut.
-            let name: String = if e.name.chars().count() > 11 {
-                let mut s: String = e.name.chars().take(10).collect();
-                s.push('~');
-                s
-            } else {
-                e.name.clone()
-            };
+            let name = Font::body(false).truncate(&e.name, 92);
             p.text_center(cx - 6, 92, cy + 64, &name, ESPRESSO, false);
         }
     }

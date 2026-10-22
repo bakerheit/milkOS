@@ -294,9 +294,9 @@ fn draw_night(b: &mut Buffer) {
     p.rrect(878, 672, 12, 5, 2, cow, 255);
     // z z z
     let z = rgb(0xF5, 0xEC, 0xD6);
-    p.text_a(918, 632, "z", z, 200, 1);
-    p.text_a(928, 618, "z", z, 170, 1);
-    p.text_a(940, 600, "Z", z, 140, 1);
+    p.mono_a(918, 632, "z", z, 200, 1);
+    p.mono_a(928, 618, "z", z, 170, 1);
+    p.mono_a(940, 600, "Z", z, 140, 1);
 }
 
 /// Oat: a quiet cream-to-oat gradient with one soft milk glow.

@@ -11,6 +11,7 @@
 use alloc::format;
 
 use crate::gfx::Rect;
+use crate::sysfont::{Font, Weight};
 use crate::timer;
 
 use super::buffer::Buffer;
@@ -36,7 +37,7 @@ fn fade_ns() -> u64 {
     FADE_NS * super::anim::SLOWMO.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Clock geometry: 8x smooth digits.
+/// Clock geometry: 8x digits (the system font's 104 px face).
 const CLOCK_SCALE: i32 = 8;
 const CLOCK_Y: i32 = 176;
 
@@ -47,7 +48,7 @@ fn paint(buf: &mut Buffer, glass: &Buffer) {
     p.fill_a(0, 0, screen_w(), screen_h(), MILK, a(250));
     let t = rtc::now();
     let clock = format!("{:02}:{:02}", t.hour, t.minute);
-    let cw = crate::font::str_width(&clock, CLOCK_SCALE);
+    let cw = Font::ui(CLOCK_SCALE, Weight::Regular).width(&clock);
     p.text_x(
         (screen_w() - cw) / 2,
         CLOCK_Y,
@@ -62,7 +63,7 @@ fn paint(buf: &mut Buffer, glass: &Buffer) {
         t.day,
         rtc::MONTHS[t.month as usize - 1]
     );
-    let dw = crate::font::str_width(&date, 2);
+    let dw = Font::ui(2, Weight::Bold).width(&date);
     p.text_x(
         (screen_w() - dw) / 2,
         CLOCK_Y + 16 * CLOCK_SCALE + 18,

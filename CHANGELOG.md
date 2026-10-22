@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+**Desktop**
+- Real system fonts: UI text is anti-aliased Figtree (default), IBM Plex Sans, Fira Sans,
+  Atkinson Hyperlegible Next or Ubuntu Sans, picked in Settings > Appearance > Font and
+  switched live (saved as `font = <key>`). Baked at build time by `scripts/gen_sysfont.py`
+  at 13, 26, 52 and 104 px (Regular, Medium, Bold): 451 KiB of glyphs, the kernel image
+  grew 492 KiB. Terminal, Notes and the console stay on Unifont. Credits in Settings >
+  About, licences in `/System/Library/Fonts`.
+
 ## 0.1.0 (2026-10-21)
 
 The first release: everything below exists and is tested, on qemu `virt` (aarch64) with

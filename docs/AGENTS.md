@@ -49,7 +49,9 @@
 - Time: `timer::now_ns()`, `timer::ticks()` (100 Hz), `timer::set_tick_hook`, `timer::set_deadline`. Use the virtual
   counter only (CNTP traps under HVF).
 - Exceptions: `exceptions::set_syscall_handler`, `set_user_fault_handler`, `restore_frame(*const TrapFrame) -> !`.
-- Display: `gfx::{DrawTarget, Surface, Rect, DirtyList}`, rounded rects, alpha, `font::draw_str_alpha`.
+- Display: `gfx::{DrawTarget, Surface, Rect, DirtyList}`, rounded rects, alpha, `font::draw_str_alpha` (Unifont cells).
+  Desktop UI text goes through `sysfont::Font` (measure with `width`/`truncate`, draw with the painter's `text_*`);
+  never assume 8 px a character outside monospace grids.
   `kprintln!` goes to UART + the screen console.
 
 ## UI

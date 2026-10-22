@@ -174,7 +174,7 @@ pub(super) fn draw(s: &Select, p: &mut Painter, d: Rect) {
     p.fill(r.x - 1, r.y, 1, r.h, MILK);
     p.fill(r.x + r.w, r.y, 1, r.h, MILK);
     let label = format!("{} x {}", r.w, r.h);
-    let lw = crate::font::str_width(&label, 1) + 12;
+    let lw = crate::sysfont::width(&label, false) + 12;
     let (lx, ly) = (
         (r.x + r.w - lw).max(0),
         if r.y + r.h + 26 < screen_h() {

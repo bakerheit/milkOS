@@ -19,6 +19,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect};
+use crate::sysfont::{Font, Weight};
 
 use super::super::button::{self, DANGER, DANGER_FG, Kind, State};
 use super::super::event::Key;
@@ -465,7 +466,8 @@ impl Sheet {
             Phase::Pick if self.scanned && self.peers.is_empty() => {
                 let cy = Self::HEADER + 18;
                 sp.circle(w / 2 - 36, cy, 72, OAT, 255);
-                sp.text_x(w / 2 - 8, cy + 20, "?", COCOA, 2, true);
+                let f = Font::ui(2, Weight::Bold);
+                sp.text_center_f(w / 2 - 36, 72, f.center_caps(cy, 72), "?", COCOA, f);
                 sp.text_p_center(
                     0,
                     w,
@@ -555,7 +557,7 @@ impl Sheet {
                         (Trust::Rotated, _) => ("Key rotated", MATCHA, a(270), ESPRESSO),
                         (Trust::Known, _) => ("Known", MATCHA, a(270), ESPRESSO),
                     };
-                    let cw = super::super::fontx::prop_width(label, true) + 24;
+                    let cw = crate::sysfont::width(label, true) + 24;
                     let chip = Rect::new(rr.x + rr.w - 12 - cw, y + 9, cw, 24);
                     sp.rrect_r(chip, 12, fill, fa);
                     sp.text_p_center(chip.x, chip.w, chip.y + 4, label, text, true);
@@ -644,8 +646,7 @@ impl Sheet {
                 sp.rrect_r(er, 12, DANGER, a(120));
                 sp.rrect_stroke(er.x, er.y, er.w, er.h, 12, 1, DANGER, 255);
                 sp.text_p(er.x + 14, er.y + 12, "Not sent", ESPRESSO, true);
-                let max = ((er.w - 28) / 7) as usize;
-                let t: String = reason.chars().take(max).collect();
+                let t = Font::body(false).truncate(reason, er.w - 28);
                 sp.text_p(er.x + 14, er.y + 36, &t, ESPRESSO, false);
                 let close = Rect::new(w - 16 - 88, by, 88, button::DIALOG_H);
                 let back = Rect::new(close.x - 8 - 88, by, 88, button::DIALOG_H);
@@ -664,7 +665,8 @@ impl Sheet {
                 let y = Self::HEADER + 1;
                 sp.fill(0, y, w, 64, DANGER);
                 sp.circle(16, y + 10, 44, DANGER_FG, 255);
-                sp.text_x(30, y + 16, "!", DANGER, 2, true);
+                let f = Font::ui(2, Weight::Bold);
+                sp.text_center_f(16, 44, f.center_caps(y + 10, 44), "!", DANGER, f);
                 sp.text_p(
                     72,
                     y + 12,
@@ -981,8 +983,7 @@ impl WindowContents for Receiver {
             matches!(self.state, RState::Error(_)),
         );
         p.text_p(84, 18, &line1, ESPRESSO, true);
-        let max = ((w - 100) / 7).max(8) as usize;
-        let l2: String = line2.chars().take(max).collect();
+        let l2 = Font::body(false).truncate(&line2, w - 100);
         p.text_p(84, 40, &l2, COCOA, false);
         p.fill(0, 80, w, 1, SAND);
         let fy = h - 56;
@@ -1004,12 +1005,12 @@ impl WindowContents for Receiver {
                 );
                 // The fingerprint, big enough to read out loud.
                 let groups: Vec<&str> = fp.split(' ').collect();
-                let gw = 4 * 16;
-                let total = groups.len() as i32 * gw + (groups.len() as i32 - 1) * 24;
+                let f = Font::ui(2, Weight::Bold);
+                let gap = 24;
+                let total: i32 = groups.iter().map(|g| f.width(g) + gap).sum::<i32>() - gap;
                 let mut x = r.x + (r.w - total) / 2;
                 for g in groups {
-                    p.text_x(x, r.y + 56, g, ESPRESSO, 2, true);
-                    x += gw + 24;
+                    x = p.text_f(x, r.y + 56, g, ESPRESSO, f) + gap;
                 }
                 p.text_p(
                     r.x + 16,

@@ -83,6 +83,17 @@ pub fn run() {
         crate::uart::overruns()
     );
 
+    // 6. The baked system fonts decode (every family, size, weight and Latin-1 glyph).
+    let t = timer::now_ns();
+    let fonts_ok = crate::sysfont::selftest();
+    kprintln!(
+        "[selftest] system fonts: {} families {} in {} ms",
+        crate::sysfont::FAMILIES.len(),
+        if fonts_ok { "ok" } else { "BROKEN" },
+        (timer::now_ns() - t) / 1_000_000
+    );
+    assert!(fonts_ok, "baked system fonts are broken");
+
     #[cfg(feature = "crash-test")]
     crash_test();
 

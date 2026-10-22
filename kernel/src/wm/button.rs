@@ -14,7 +14,6 @@
 use crate::gfx::{Color, Rect, rgb};
 use crate::sync::SpinLock;
 
-use super::fontx;
 use super::paint::Painter;
 use super::theme::{COCOA, ESPRESSO, HONEY, INK, LATTE, OAT, R_BUTTON, SAND, STRAW};
 
@@ -64,12 +63,12 @@ pub fn set_held(at: Option<(i32, i32)>) {
 
 /// The width of a pill for `label`.
 pub fn pill_w(label: &str) -> i32 {
-    fontx::prop_width(label, true) + 2 * PILL_PAD
+    crate::sysfont::width(label, true) + 2 * PILL_PAD
 }
 
 /// The width of a dialog button for `label`.
 pub fn dialog_w(label: &str) -> i32 {
-    (fontx::prop_width(label, true) + 2 * 16).max(DIALOG_MIN_W)
+    (crate::sysfont::width(label, true) + 2 * 16).max(DIALOG_MIN_W)
 }
 
 /// Paint a button filling `r`. Its radius follows its height: a 24px pill is fully rounded,

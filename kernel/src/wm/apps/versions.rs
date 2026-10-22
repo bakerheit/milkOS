@@ -232,8 +232,9 @@ impl Versions {
                     if !others.contains(l.as_str()) {
                         bp.fill_a(-6, y - 1, body.w - 8, LINE_H, tint, 0x50);
                     }
+                    // File contents: a monospace grid, like Notes.
                     let s: String = l.chars().take(cols).collect();
-                    bp.text(0, y, &s, ESPRESSO);
+                    bp.mono(0, y, &s, ESPRESSO);
                 }
                 if lines.is_empty() {
                     bp.text_p(0, 0, "(empty)", COCOA, false);
@@ -307,8 +308,7 @@ impl WindowContents for Versions {
                 Some(s) => format!("{}  {}", fsx::human_size(v.size), s),
                 None => format!("{}  current file", fsx::human_size(v.size)),
             };
-            let max = ((LIST_W - 48) / 7) as usize;
-            let sub: String = sub.chars().take(max).collect();
+            let sub = crate::sysfont::Font::body(false).truncate(&sub, LIST_W - 48);
             let c = if i == self.sel { ESPRESSO } else { COCOA };
             p.text_p(36, y + 22, &sub, c, false);
             self.hits.push((r, Hit::Row(i)));

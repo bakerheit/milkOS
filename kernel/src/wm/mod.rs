@@ -29,8 +29,6 @@ mod ctl;
 mod dnd;
 mod dock;
 mod event;
-/// The smooth and proportional faces live in the shared font code (the splash uses them).
-use crate::fontx;
 mod icons;
 mod lock;
 mod menus;
@@ -470,6 +468,7 @@ impl Desktop {
         let t = timer::now_ns();
         let pr = prefs::load();
         theme::set_dark(pr.dark);
+        crate::sysfont::set_current(pr.font);
         theme::set_dock_icon(pr.dock);
         let Some(wp) = Wallpaper::new(pr.wallpaper_kind()) else {
             return Err(fb);
@@ -915,6 +914,12 @@ impl Desktop {
         }
         if p.dock != old.dock {
             theme::set_dock_icon(p.dock);
+        }
+        if p.font != old.font {
+            // Text is measured as it is drawn, so redrawing everything (below) re-lays it out.
+            crate::sysfont::set_current(p.font);
+            self.relayout_lock();
+            kprintln!("wm: font {}", crate::sysfont::FAMILIES[p.font].name);
         }
         if p.resolution != (theme::screen_w(), theme::screen_h())
             && !self.set_resolution(p.resolution.0, p.resolution.1)

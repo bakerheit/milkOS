@@ -476,9 +476,9 @@ impl Desktop {
         // SPEC: everything primary on the selected card.
         let second = if sel { ESPRESSO } else { COCOA };
         let time = clock_hm(n.at_ns);
-        let tw = super::fontx::prop_width(&time, false);
-        let tmax = ((w - 56 - 12 - tw - 8) / 8).max(4) as usize;
-        p.text_p(x + 56, y + 8, &cut(&n.title, tmax), ESPRESSO, true);
+        let tw = crate::sysfont::width(&time, false);
+        let tmax = (w - 56 - 12 - tw - 8).max(32);
+        p.text_p(x + 56, y + 8, &cut(&n.title, tmax, true), ESPRESSO, true);
         let hovered = self.drawer.hover == Some(n.id);
         if hovered {
             // The x that dismisses it (where the time is).
@@ -489,8 +489,8 @@ impl Desktop {
         } else {
             p.text_right(x + w - 12, y + 8, &time, second, 1, false);
         }
-        let bmax = ((w - 70) / 8).max(4) as usize;
-        p.text_p(x + 56, y + 28, &cut(&n.sub, bmax), second, false);
+        let bmax = (w - 70).max(32);
+        p.text_p(x + 56, y + 28, &cut(&n.sub, bmax, false), second, false);
         // Its buttons: the first primary, the second secondary.
         for (k, r) in action_rects(&n.actions, x + 56, y + h - ACTIONS_H - 4)
             .into_iter()
@@ -794,14 +794,9 @@ enum NHit {
     Action(u64, usize),
 }
 
-/// `s` cut to `n` characters, the last one "~".
-fn cut(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return String::from(s);
-    }
-    let mut c: String = s.chars().take(n.saturating_sub(1)).collect();
-    c.push('~');
-    c
+/// `s` cut to `px` pixels of body text, with "...".
+fn cut(s: &str, px: i32, bold: bool) -> String {
+    crate::sysfont::Font::body(bold).truncate(s, px)
 }
 
 /// A group's arrow: pointing down (open) or right (collapsed), 8 px.

@@ -2,6 +2,7 @@
 
 use alloc::format;
 
+use crate::sysfont::{BRAND, Font, Weight};
 use crate::{heap, pmm, timer};
 
 use super::super::icons;
@@ -39,10 +40,10 @@ impl WindowContents for About {
         icons::drop_shape(p, cx, 76, 30, 66, BLUE);
         icons::drop_shape(p, cx, 76, 25, 55, MILK);
         p.circle(cx - 16, 74, 8, rgb_shine(), 255);
-        let name_w = crate::font::str_width("milkOS", 2) + 2;
-        let x = cx - name_w / 2;
-        let x2 = p.text_x(x, 124, "milk", ESPRESSO, 2, true);
-        p.text_x(x2, 124, "OS", BLUE, 2, true);
+        let mark = Font::of(BRAND, 2, Weight::Bold);
+        let x = cx - mark.width("milkOS") / 2;
+        let x2 = p.text_f(x, 124, "milk", ESPRESSO, mark);
+        p.text_f(x2, 124, "OS", BLUE, mark);
         p.text_center(
             0,
             w,

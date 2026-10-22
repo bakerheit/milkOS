@@ -561,9 +561,9 @@ fn draw_row(
     let flush = |p: &mut Painter, run: &mut String, cx: &mut i32, fg: u32, bold: bool| {
         if !run.is_empty() {
             let c = ansi(fg, bold, base);
-            p.text(*cx, y, run, c);
+            p.mono(*cx, y, run, c);
             if bold {
-                p.text(*cx + 1, y, run, c);
+                p.mono(*cx + 1, y, run, c);
             }
             *cx += 8 * run.chars().count() as i32;
             run.clear();
@@ -678,7 +678,7 @@ impl Tab {
                 p.fill(x, y, 8, 16, TERM_FG);
                 let ch = self.input.chars().nth(self.cursor).unwrap_or(' ');
                 let mut b = [0u8; 4];
-                p.text(x, y, ch.encode_utf8(&mut b), TERM_BG);
+                p.mono(x, y, ch.encode_utf8(&mut b), TERM_BG);
             } else {
                 p.rrect_stroke(x, y, 8, 16, 0, 1, TERM_DIM, 255);
             }

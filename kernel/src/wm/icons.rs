@@ -67,7 +67,7 @@ pub fn draw(
             let tx = x + u(8);
             let ty = y + (s - 16 * sc) / 2 - u(1);
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                p.text_a(tx + dx * sc, ty + dy * sc, ">", fg, 255, sc);
+                p.mono_a(tx + dx * sc, ty + dy * sc, ">", fg, 255, sc);
             }
             p.fill(tx + 8 * sc + u(2), ty + 13 * sc, u(11), th(3), fg);
         }
@@ -340,14 +340,14 @@ pub fn art_finish(p: &mut Painter, x: i32, y: i32, s: i32, name: &str) {
             MILK,
             255,
         );
-        let tw = crate::font::str_width(&day, sc) + if sc == 2 { 2 } else { 1 };
-        p.text_x(
-            x + (s - tw) / 2,
-            y + top + (s - top - 16 * sc) / 2 - 1,
+        let f = crate::sysfont::Font::ui(sc, crate::sysfont::Weight::Bold);
+        let (by, bh) = (y + top, s - top - s / 10);
+        p.text_f(
+            x + (s - f.width(&day)) / 2,
+            f.center_caps(by, bh),
             &day,
             ESPRESSO,
-            sc,
-            true,
+            f,
         );
     }
     if milk_tile(name) {

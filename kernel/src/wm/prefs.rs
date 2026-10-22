@@ -1,4 +1,4 @@
-//! Desktop preferences: theme, wallpaper, brightness, dock size. Kept in
+//! Desktop preferences: theme, wallpaper, font, brightness, dock size. Kept in
 //! `~/.config/milk/settings` as plain `key = value` lines, so they survive reboots once home
 //! lives on milkfs. The Settings app edits them through `Request::Prefs`; the desktop applies
 //! and saves.
@@ -35,6 +35,8 @@ pub struct Prefs {
     /// percent of the dock size (125..=200).
     pub magnify: bool,
     pub magnify_pct: i32,
+    /// The UI font: an index into `sysfont::FAMILIES`, saved by its key (`font = figtree`).
+    pub font: usize,
 }
 
 impl Prefs {
@@ -49,6 +51,7 @@ impl Prefs {
         welcome: true,
         magnify: true,
         magnify_pct: 175,
+        font: crate::sysfont::DEFAULT,
     };
 
     /// The idle times Settings offers (minutes; 0 = never).
@@ -62,7 +65,7 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\nmagnify = {}\nmagnify_size = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\nmagnify = {}\nmagnify_size = {}\nfont = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
@@ -76,7 +79,8 @@ impl Prefs {
             self.resolution.1,
             if self.welcome { "on" } else { "off" },
             if self.magnify { "on" } else { "off" },
-            self.magnify_pct
+            self.magnify_pct,
+            crate::sysfont::FAMILIES[self.font.min(crate::sysfont::FAMILIES.len() - 1)].key
         )
     }
 
@@ -93,6 +97,7 @@ impl Prefs {
                 "sound" => p.sound = v != "off",
                 "welcome" => p.welcome = v != "off",
                 "magnify" => p.magnify = v != "off",
+                "font" => p.font = crate::sysfont::find(v).unwrap_or(crate::sysfont::DEFAULT),
                 "magnify_size" => p.magnify_pct = v.parse().unwrap_or(175).clamp(125, 200),
                 "lock" => p.lock_mins = v.parse().unwrap_or(0).min(24 * 60),
                 "resolution" => {

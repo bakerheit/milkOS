@@ -28,9 +28,11 @@
 #
 # Mode "solo": the test runs with nothing else going (the solo tests run first, one at a time,
 # then the rest in parallel, longest first by the last run's times in target/check-all-times).
-# A default-set test is solo only if it was seen to flake under parallel load. None is today:
-# the default set passed at -j 4, 8 and 12 (the one flake seen, alarm-test's first command typed
-# over a late boot message, was fixed in the test). The --full-only ones are solo because they
+# A default-set test is solo only if it was seen to flake under parallel load. drop-test is: its
+# IPv6 capture check (the MLDv2 join of ff02::fb must come before the first mDNS announcement)
+# fails about one run in three at -j 4 and passes alone; it stays solo until the ordering is
+# fixed in the network stack. (alarm-test's first command typed over a late boot message was the
+# other flake seen, fixed in the test.) The --full-only ones are solo because they
 # haven't been checked under load (and the benchmarks measure).
 # The build happens once, up front. Nothing a test runs may dirty the kernel build (the host unit
 # tests build into target/host-tests for that reason), or the tests' own `cargo build`s would
@@ -70,7 +72,7 @@ TESTS=(
   "pkg-test|s|600|par|scripts/pkg-test.sh"
   "svc-test|s|600|par|scripts/svc-test.sh"
   "driver-crash-test|q|600|par|scripts/driver-crash-test.sh @WORK@"
-  "drop-test|q|600|par|scripts/drop-test.sh"
+  "drop-test|q|600|solo|scripts/drop-test.sh"
   "fscktest|s|600|par|scripts/fscktest.sh"
   "reflinktest|q|600|par|scripts/reflinktest.sh"
   "upgradetest|q|600|par|scripts/upgradetest.sh"

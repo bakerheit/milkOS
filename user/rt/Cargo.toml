@@ -10,3 +10,5 @@ bench = false
 [dependencies]
 # The shared crypto primitives (<repo>/crypto, also linked into the kernel).
 milkcrypto = { path = "../../crypto" }
+# The heap allocator (<repo>/user/heapkit), installed as the global allocator in heap.rs.
+heapkit = { path = "../heapkit" }

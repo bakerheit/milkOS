@@ -1,5 +1,5 @@
 //! Tiny runtime for milkOS user programs: `_start`, Linux aarch64 syscall wrappers,
-//! `print!`/`println!`, a brk-backed bump allocator and a panic handler.
+//! `print!`/`println!`, the heap allocator (user/heapkit on brk) and a panic handler.
 //!
 //! A program looks like:
 //! ```ignore
@@ -13,8 +13,8 @@
 
 extern crate alloc;
 
-pub mod alloc_brk;
 pub mod epoll;
+pub mod heap;
 pub mod io;
 pub mod mdns;
 pub mod net;

@@ -17,6 +17,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "heapkit"
+version = "0.0.1"
+
+[[package]]
 name = "milkcrypto"
 version = "0.0.1"
 
@@ -32,6 +36,7 @@ dependencies = [
 name = "rt"
 version = "0.0.1"
 dependencies = [
+ "heapkit",
  "milkcrypto",
 ]
 

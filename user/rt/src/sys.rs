@@ -787,6 +787,18 @@ pub fn mmap_prot(len: usize, prot: u32) -> Result<*mut u8> {
     .map(|a| a as *mut u8)
 }
 
+/// Fresh zeroed read/write pages at exactly `[addr, addr+len)` (MAP_FIXED: whatever was
+/// mapped there is replaced). The heap uses it to take back pages it gave up with munmap.
+pub fn mmap_fixed(addr: usize, len: usize) -> Result<()> {
+    const PROT_RW: usize = 3;
+    const MAP_PRIVATE_ANON_FIXED: usize = 0x32;
+    sc(
+        nr::MMAP,
+        [addr, len, PROT_RW, MAP_PRIVATE_ANON_FIXED, usize::MAX, 0],
+    )
+    .map(|_| ())
+}
+
 /// mprotect(2) on `[addr, addr+len)`.
 pub fn mprotect(addr: usize, len: usize, prot: u32) -> Result<()> {
     sc(226, [addr, len, prot as usize, 0, 0, 0]).map(|_| ())

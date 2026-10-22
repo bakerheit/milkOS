@@ -1,0 +1,10 @@
+[package]
+name = "heapkit"
+version.workspace = true
+edition.workspace = true
+
+# The user-space heap allocator (rt makes it every program's global allocator). No syscalls:
+# the brk arena comes in through a trait, so the unit tests run on the host
+# (`scripts/heapkit-test.sh`).
+[lib]
+bench = false

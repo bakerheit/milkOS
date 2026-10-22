@@ -5,7 +5,7 @@
 //! thread, the rate limit, the status file and the audit log around it.
 //!
 //! A low-priority kernel thread (`milkfs-scrub`) runs it on request (`/System/Kernel/fs/milkfs/scrub`,
-//! `snap scrub`) and on a schedule (default: every 7 days, at the earliest 5 minutes after
+//! `disks verify`) and on a schedule (default: every 7 days, at the earliest 5 minutes after
 //! boot; the time of the last full scrub is kept in the superblock). It is rate limited
 //! (default 32 MB/s, a token bucket), reads at most 128 KiB per request, never holds the
 //! volume lock while reading (only to start, to end and to name a damaged file), and

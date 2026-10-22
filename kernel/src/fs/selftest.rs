@@ -1867,7 +1867,7 @@ fn page_cache(t: &mut T, vp: &str) {
     let _ = ops::unlink(&f);
 }
 
-/// `snap diff` on the test volume.
+/// `disks changes` on the test volume.
 fn milkfs_diff(t: &mut T, vp: &str) {
     use super::milkfs::{self as m, diff::Change};
     let p = |n: &str| alloc::format!("{vp}/dd/{n}");
@@ -2424,7 +2424,7 @@ fn milkfs_reflink(t: &mut T, vol: &alloc::sync::Arc<super::milkfs::Volume>, vp: 
     milk_space(t, vol, "space exact after deleting every copy");
 }
 
-/// snap send / receive between the test volume and a second RAM-disk volume.
+/// disks send / receive between the test volume and a second RAM-disk volume.
 fn milkfs_sendrecv(t: &mut T, vp: &str) {
     use super::blockdev::BlockRef;
     use super::milkfs as m;

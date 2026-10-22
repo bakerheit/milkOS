@@ -4,7 +4,7 @@
 # Machine snapshotting every second meanwhile:
 #   fsstress /Volumes/Milk/stress 8 20      (8 workers on 4 CPUs; reflink copies too)
 #   fsstress /Volumes/STRESS/stress 4 8     (FAT32)
-#   dedupe /Volumes/Milk/stress, snap check, sync
+#   disks dedupe /Volumes/Milk/stress, disks check, sync
 # then on the Mac: mkmilkfs.py check (namespace, checksums, shared blocks, space map) and
 # fsck_msdos -n (nothing to fix). Only qemus started here are killed.
 set -euo pipefail
@@ -35,8 +35,8 @@ for b in $(seq "$BOOTS"); do
     "send:echo interval=1s > /System/Kernel/fs/milkfs/auto" "wait:$P" \
     "send:/System/Developer/fsstress /Volumes/Milk/stress 8 20" "wait:$P" \
     "send:/System/Developer/fsstress /Volumes/STRESS/stress 4 8" "wait:$P" \
-    "send:dedupe /Volumes/Milk/stress" "wait:$P" \
-    "send:snap check" "wait:$P" \
+    "send:disks dedupe /Volumes/Milk/stress" "wait:$P" \
+    "send:disks check" "wait:$P" \
     "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
     "send:echo STRESS""-DONE" "wait:STRESS-DONE" "done:$T/done$b" &
   DPID=$!

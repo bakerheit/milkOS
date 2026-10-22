@@ -54,7 +54,7 @@ out() { tr -d '\r' < "$LOG" | awk -v c="$1" '/^msh:/ { if (on) {on=0}; if (subst
 
 ser "wait:$P"
 q move 785 615 click sleep 1
-ser "send:snap create first-one" "wait:$P" "send:echo hello > /Users/milk/Documents/new.txt" "wait:$P" "send:snap create second-one" "wait:$P" "send:snap clone first-one try1" "wait:$P" "send:open diskutil" "wait:$P"
+ser "send:disks snapshot first-one" "wait:$P" "send:echo hello > /Users/milk/Documents/new.txt" "wait:$P" "send:disks snapshot second-one" "wait:$P" "send:disks clone first-one try1" "wait:$P" "send:open diskutil" "wait:$P"
 sleep 3
 ser "send:cat /dev/wm" "wait:$P"
 pos=$(tr -d '\r' < "$LOG" | grep -a "window .* Disk Utility" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
@@ -66,8 +66,8 @@ click 342 23                       # Snapshots tab
 click 313 159                      # the row second-one
 q screendump "$T/snapshots.png"
 click 820 23                       # Take snapshot (toolbar)
-ser "send:snap" "wait:$P"
-out "snap" | grep -q "^snap-" && ok "Take snapshot made a snapshot" || bad "no new snapshot: $(out snap)"
+ser "send:disks snapshots" "wait:$P"
+out "disks snapshots" | grep -q "^snap-" && ok "Take snapshot made a snapshot" || bad "no new snapshot: $(out "disks snapshots")"
 click 313 159                      # the row second-one again (taking a snapshot selects the new one)
 click 824 286                      # Delete...
 q screendump "$T/delete-sheet.png"
@@ -78,15 +78,15 @@ click 698 376                      # the Danger button "Delete snapshot"
 sleep 1
 q screendump "$T/auth-panel.png"
 q type "milk" sleep 0.3 screendump "$T/auth-panel-typed.png" key ret sleep 2
-ser "send:snap" "wait:$P"
-out "snap" | grep -q "second-one" && bad "second-one is still there after Delete" || ok "Delete snapshot removed it (after the confirm sheet)"
-out "snap" | grep -q "first-one" && ok "the other snapshots are untouched" || bad "first-one vanished"
+ser "send:disks snapshots" "wait:$P"
+out "disks snapshots" | grep -q "second-one" && bad "second-one is still there after Delete" || ok "Delete snapshot removed it (after the confirm sheet)"
+out "disks snapshots" | grep -q "first-one" && ok "the other snapshots are untouched" || bad "first-one vanished"
 click 313 129                      # the row first-one
 click 440 286                      # Roll back...
 q screendump "$T/rollback-sheet.png"
 click 722 407                      # the Danger button "Roll back"
-ser "send:snap" "wait:$P" "send:files list /Users/milk/Documents" "wait:$P"
-out "snap" | grep -q "^snap-" && bad "a newer snapshot survived the rollback" || ok "Roll back deleted the snapshots newer than first-one"
+ser "send:disks snapshots" "wait:$P" "send:files list /Users/milk/Documents" "wait:$P"
+out "disks snapshots" | grep -q "^snap-" && bad "a newer snapshot survived the rollback" || ok "Roll back deleted the snapshots newer than first-one"
 out "files list /Users/milk/Documents" | grep -q "new.txt" && bad "new.txt survived the rollback" || ok "Roll back undid the change made after the snapshot"
 click 506 23                       # Health tab
 click 837 23 2                     # Scrub now

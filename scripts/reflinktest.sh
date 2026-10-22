@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reflink copies and dedupe from userspace on a private image: `cp --reflink` (FICLONE),
 # `--reflink=auto` falling back to a copy on tmpfs, `--reflink` refusing there, writing
-# into a copy, `dedupe -n` / `dedupe` of plain copies, `snap check`; then on the Mac:
+# into a copy, `disks dedupe --dry-run` / `disks dedupe` of plain copies, `disks check`; then on the Mac:
 # check clean (shared-block table, space map), v2, every file byte-exact. Built-in files
 # (read in place from the kernel image, copied on write): copied to the disk with
 # --reflink=auto (a plain copy, byte-exact, runs), --reflink refused, appended to, deleted,
@@ -45,11 +45,11 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files copy /tmp/auto.bin $D/dup2.bin" "wait:$P" \
   "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
   "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
-  "send:dedupe -n $D" "wait:$P" \
-  "send:dedupe $D" "wait:$P" \
-  "send:dedupe $D" "wait:$P" \
+  "send:disks dedupe --dry-run $D" "wait:$P" \
+  "send:disks dedupe $D" "wait:$P" \
+  "send:disks dedupe $D" "wait:$P" \
   "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
-  "send:snap check" "wait:$P" \
+  "send:disks check" "wait:$P" \
   "send:grep RootFiles /proc/meminfo" "wait:$P" \
   "send:files copy --reflink=auto /Commands/cowsay $D/cowsay.auto" "wait:$P" \
   "send:files copy --reflink /Commands/cowsay $D/cowsay.always" "wait:$P" \
@@ -77,7 +77,7 @@ f1=$(free 1); f2=$(free 2); f3=$(free 3); f4=$(free 4)
 echo "$L" | grep -aq "can't reflink" && ok "files copy --reflink to tmpfs refuses: $(echo "$L" | grep -a -m1 "can't reflink")" || bad "--reflink to tmpfs"
 echo "$L" | grep -a "could share\|now share\|already shared\|shared, \|would be shared" | sed 's/^/    /'
 [ -n "$f3" ] && [ $((f4 - f3)) -gt 900 ] && ok "dedupe freed $((f4 - f3)) blocks (two 2 MB copies)" || bad "dedupe space ($f3 -> $f4)"
-echo "$L" | grep -a -A2 "snap check$" | grep -aq "checksummed: clean" && ok "kernel check clean" || bad "kernel check"
+echo "$L" | grep -a -A2 "disks check$" | grep -aq "checksummed: clean" && ok "kernel check clean" || bad "kernel check"
 $M check "$IMG" > "$T/check.txt" 2>&1 && ok "host check clean: $(grep -a 'shared by reflink' "$T/check.txt" | sed 's/^ *//')" || { bad "host check"; cat "$T/check.txt"; }
 grep -q "milkfs v2" "$T/check.txt" && ok "image is v2 (shared blocks)" || bad "version"
 { cat "$T/big.bin"; printf 'patched\n'; } > "$T/copy.want"

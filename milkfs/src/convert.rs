@@ -1,5 +1,5 @@
 //! Encrypting a plain volume in place, and decrypting an encrypted one back
-//! (`snap encrypt` / `snap decrypt`, docs/filesystem.md "Encrypting in place").
+//! (`disks encrypt` / `disks decrypt`, docs/filesystem.md "Encrypting in place").
 //!
 //! **Copy-on-write, a leaf at a time.** While `SB_CONVERTING` is set a block may be in
 //! either form; a pointer says which (its checksum is the plaintext xxh64 or the SIV tag,

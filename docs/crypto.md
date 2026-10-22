@@ -40,7 +40,7 @@ BLAKE2b). milkfs uses N = 2^16, r = 8, p = 4 (64 MiB, ~0.35 s). In the kernel,
 wiped (the kernel heap never shrinks); the fs self-test runs RFC 7914's vector through it.
 **HMAC-SHA256** is the PRF (key derivation, milkfs's per-block synthetic IV, where a PRF is
 required and Poly1305, a one-time MAC, wouldn't do). Users: milkfs encryption at rest
-and encrypted `snap send` streams (XChaCha20-Poly1305 per record with a counter nonce,
+and encrypted `disks send` streams (XChaCha20-Poly1305 per record with a counter nonce,
 scrypt-wrapped stream key; `milkfs/src/crypt.rs`, docs/filesystem.md); its salts and nonces come from
 `crypto::rng::fill`. `scripts/mkmilkfs.py` has its own stdlib-only copy for the Mac side
 (`mkmilkfs.py selftest-crypto` runs the same vectors).
@@ -92,7 +92,7 @@ The kernel's audit log keeps its own SHA-256 (`kernel/src/audit/sha256.rs`) on p
   * TCP initial sequence numbers: RFC 6528, SHA-256 of the 4-tuple keyed by a boot-time
     secret from the RNG, plus a 4 µs clock.
 * **Userland users of the primitives**:
-  * `milk`: Ed25519 package signatures, SHA-256;
+  * `apps`: Ed25519 package signatures, SHA-256;
   * `audit verify`: SHA-256;
   * Milk Drop (`user/drop`): Ed25519 identities, X25519 per connection,
     ChaCha20-Poly1305 records, SHA-256; `drop selftest` runs every vector in userland.

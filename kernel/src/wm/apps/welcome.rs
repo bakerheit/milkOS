@@ -1,6 +1,6 @@
 //! Welcome to milkOS: a short tour of what is different here, shown on first boot (until
 //! "Don't show again") and from the logo menu. Every button really does the thing:
-//! a Time Machine snapshot, Versions of a sample note, `milk try` in a Terminal tab,
+//! a Time Machine snapshot, Versions of a sample note, `apps try` in a Terminal tab,
 //! sandboxed apps and the audit log, Chocolate milk, Spaces. Cards that can't work on
 //! this machine (no Milk disk, no package repo, moo2048 not installed) say why instead.
 
@@ -156,13 +156,13 @@ impl Welcome {
                 title: "Try before you install",
                 lines: if repo {
                     [
-                        "milk try installs into a throwaway",
+                        "apps try installs into a throwaway",
                         "clone of the disk: keep it or toss it.",
                         "Needs the repo: milk-repo.sh serve.",
                     ]
                 } else {
                     [
-                        "milk try installs into a throwaway",
+                        "apps try installs into a throwaway",
                         "clone of the disk. No package repo",
                         "is set up in /System/Settings/milk/repos.",
                     ]
@@ -171,7 +171,7 @@ impl Welcome {
                 bg: LAV,
                 fg: INK,
                 buttons: alloc::vec![(
-                    String::from("milk try fortune"),
+                    String::from("apps try fortune"),
                     (repo && tm).then_some(Do::TryFortune)
                 )],
             },
@@ -186,7 +186,7 @@ impl Welcome {
                 } else {
                     [
                         "Installed apps see only their own",
-                        "folder (milk install moo2048 for one).",
+                        "folder (apps install moo2048 for one).",
                         "Peek sees nothing and is refused.",
                     ]
                 },
@@ -255,8 +255,8 @@ impl Welcome {
                 Err(e) => e,
             },
             Do::TryFortune => {
-                request(Request::NewTab(Some(String::from("milk try fortune"))));
-                String::from("Then: milk keep fortune, or discard")
+                request(Request::NewTab(Some(String::from("apps try fortune"))));
+                String::from("Then: apps keep fortune, or discard")
             }
             Do::Moo => {
                 request(Request::OpenPackage(String::from("moo2048")));

@@ -2,7 +2,7 @@
 //!
 //! | folder | what |
 //! |---|---|
-//! | `/Apps` | apps you open: the ones that ship with milkOS and the ones `milk` installs |
+//! | `/Apps` | apps you open: the ones that ship with milkOS and the ones `apps` installs |
 //! | `/Commands` | what you type in Terminal (`PATH`) |
 //! | `/Users/<name>` | homes: `/Users/milk` (persistent), `/Users/root` |
 //! | `/Volumes` | disks, USB sticks, the Mac's shared folder |
@@ -65,7 +65,7 @@ pub fn record_builtin_apps() {
 
 /// Does `name` (a folder under `/Apps`) ship with milkOS? (The desktop runs those
 /// unsandboxed.) It must be a name this initramfs brought, with no `.origin` (a folder
-/// `milk` installed is never a built-in app, whatever its name), and a root-owned folder
+/// `apps` installed is never a built-in app, whatever its name), and a root-owned folder
 /// nobody else can write: `/Apps` is admin-writable, so an admin could swap a folder, but
 /// only for one of their own, which then runs like any installed app.
 pub fn is_builtin_app(name: &str) -> bool {

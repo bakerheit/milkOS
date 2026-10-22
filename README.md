@@ -38,7 +38,7 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 **Storage**
 - VFS with tmpfs root, initramfs, devfs, procfs, sysfs.
 - milkfs, our own copy-on-write filesystem: snapshots, rollback, writable clones, per-file versions,
-  `snap diff`, automatic Time Machine snapshots, crash-tested (kill, power cut, torn superblock), `check --repair`.
+  `disks changes`, automatic Time Machine snapshots, crash-tested (kill, power cut, torn superblock), `check --repair`.
 - Your home folder lives on milkfs, so files survive reboots. Deleted things go to a real Trash
   (`~/.Trash`, or a disk's own), and are deleted for good after 30 days (Settings > Trash).
 - Folders in plain English: `/Apps` (apps you open), `/Commands` (what you type in Terminal),
@@ -50,8 +50,8 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 
 **Network and sound**
 - virtio-net with our own TCP/IP stack (Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP), sockets,
-  `ifconfig`, `ping`, `netstat`, `nc`, `fetch`, `httpd`. Traffic stays inside qemu's private network
-  and the Mac's loopback.
+  `network` (status, connections, ping, get, connect, listen, names; `network help`), `httpd`.
+  Traffic stays inside qemu's private network and the Mac's loopback.
 - virtio-sound with a mixer, `/dev/audio`, `play`, a boot chime and system sounds.
 
 **Desktop**
@@ -72,13 +72,15 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - `files`, one command for files and folders in plain English (`files create notes.txt`,
   `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`
   (list, restore, empty).
-- Coreutils, `top`, and `milk`, a package manager with signed packages, where `milk try` installs into a
-  throwaway clone of the filesystem that you then keep or discard.
+- Coreutils, `top`, `disks` (free space, snapshots, clones, encryption, backups), `search` (files
+  by name and text), and `apps`, a package manager with signed packages, where `apps try`
+  installs into a throwaway clone of the filesystem that you then keep or discard. Each one's
+  `help` lists what it does.
 
 ## Layout
 - `kernel/`: the kernel crate (`no_std`). Entry is `kernel/src/boot.S`, then `kmain` in `main.rs`.
 - `user/`: user programs and the `rt` runtime library, packed into the initramfs (`initramfs.list`).
-- `packages/`: toy packages for `milk` (`fortune`, `snake`, `moo2048`, `games`).
+- `packages/`: toy packages for `apps` (`fortune`, `snake`, `moo2048`, `games`).
 - `rootfs/`: files copied into the initramfs (`/Apps` manifests, `/System/Settings`, system sounds,
   the home skeleton with the web root `~/Sites`).
 - `scripts/`: run and test scripts. The main tests: `net-test.sh`, `pkg-test.sh`, `audio-test.sh`,

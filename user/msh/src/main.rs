@@ -848,10 +848,14 @@ fn help() {
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
     println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
     println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
+    println!("  network disks apps search   (network help, disks help, ...: what each one does)");
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
         "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"
+    );
+    println!(
+        "  also network status/connections, disks list/snapshots, apps list/search, search WORDS"
     );
     println!(
         "try: ps | grep msh,  files list -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"

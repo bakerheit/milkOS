@@ -58,7 +58,7 @@ ps | grep msh                                # a text tool after ps: ps prints t
 
 ### Rules
 
-1. **Producers** (`ps`, `files list`, `trash list`, `env`, ...) print normal text, unless the environment variable
+1. **Producers** (`ps`, `files list`, `trash list`, `env`, `network status`, `disks list`, ...) print normal text, unless the environment variable
    `MILK_TABLE=1` is set, then they print a table. They never guess from the fd.
 2. **msh decides**, per pipeline stage, from the command names:
    * a stage whose next stage is a table command gets `MILK_TABLE=1`;
@@ -70,7 +70,7 @@ ps | grep msh                                # a text tool after ps: ps prints t
    table to text before `grep` sees it.
 3. **Table commands** given text instead of a table treat the first line as a header and
    split every line on runs of spaces (numbers become ints). So any columnar text works:
-   `/proc/threads`, `df`-style output, a `ps` run without msh.
+   `/proc/threads`, `disks list`-style output, a `ps` run without msh.
 
 ### Table commands (msh built-ins, run as pipeline stages)
 
@@ -118,9 +118,22 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 * `trash list`: `name:str, from:str (where it was), deleted:str, days_left:int (empty:
   never), size:size, trash:str (the Trash folder it is in)`
 * `env`: `name:str, value:str`
-* `milk list`: `name:str, version:ver, auto:str (yes/no), description:str`
-* `milk search`: `name:str, version:ver (newest), installed:ver (empty if not), status:str
+* `apps list`: `name:str, version:ver, auto:str (yes/no), description:str`
+* `apps search`: `name:str, version:ver (newest), installed:ver (empty if not), status:str
   (installed / upgrade / available), description:str`
+* `network status`: `link:str, state:str (up/down), mac:str, mtu:int, ipv4:str, ipv6:str,
+  gateway dns dhcp flags:str, received sent:size, received_packets received_errors
+  received_dropped sent_packets sent_errors sent_dropped:int`
+* `network connections`: `proto:str, local:str, remote:str, state:str (TCP only),
+  received_queue send_queue:int`; `network counters`: `proto:str, name:str, value:int`
+* `disks list`: `mount:str, type:str, size used avail:size, use_pct:int, bsize blocks bfree
+  bavail files ffree:int, ro:str (ro/rw)`
+* `disks devices`: `device:str, size:size, ro:str, content:str (milkfs/other), encrypted:str,
+  state:str (mounted/locked/unmounted), mount:str, label:str`
+* `disks snapshots`: `name:str, generation:int, created:str, kind:str (taken / automatic /
+  before a keep)`; `disks clones`: `name:str, snapshot:str, mount:str`
+* `search WORDS`: `path:str, name:str, kind:str, size:size, modified:str, score:int,
+  matched:str`
 
 ### Why this design
 
@@ -134,4 +147,4 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 ### Not done (ideas)
 
 Nested values (lists, records), `group-by`, `update`, `to-csv` / `from-csv`, tables
-from more tools (`df`, `free`, `/proc/<pid>` as `ps -l`), colour in the renderer.
+from more tools (`free`, `/proc/<pid>` as `ps -l`), colour in the renderer.

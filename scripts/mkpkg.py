@@ -13,7 +13,7 @@
 
 Signatures (Ed25519, RFC 8032, implemented below in pure python; hashlib only for
 SHA-512): FILE.sig is one line `ed25519 <key name> <128 hex chars>` over FILE's bytes.
-milk looks the key name up in /System/Settings/milk/keys/<name>.pub (`ed25519 <64 hex chars> <name>`).
+`apps` looks the key name up in /System/Settings/milk/keys/<name>.pub (`ed25519 <64 hex chars> <name>`).
 
 A .milkpkg is a ustar tar: first member `manifest`, then the payload files under their
 install paths (relative to /Apps/<name>/). Deterministic: mtime 0, uid/gid 0,
@@ -26,13 +26,13 @@ manifest (text, `key value` per line):
     description Milk-themed quotes, one at a time
     exec fortune                           (optional: the program; /Commands/<name> links to it)
     dock Fortune #EBB650                   (optional: dock label and icon colour)
-    depends snake moo2048>=1.0             (optional: installed first, by milk)
+    depends snake moo2048>=1.0             (optional: installed first, by `apps`)
     files fortune quotes.txt
     payload-sha256 <hex>
 
 payload-sha256 = SHA-256 over, for each path in `files` order:
     path bytes, 0x00, u64 little-endian size, file bytes
-(the milk tool recomputes it after extracting, with the same SHA-256 code as `audit`).
+(`apps` recomputes it after extracting, with the same SHA-256 code as `audit`).
 
 Spec file (packages/<name>/package.txt), paths relative to --root (default: repo root):
     name fortune

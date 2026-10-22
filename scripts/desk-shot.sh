@@ -49,7 +49,7 @@ fi
 
 rm -f "$OUT" "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
-  -kernel "$KERNEL" -serial "file:$LOG" -device ramfb -display none \
+  -kernel "$KERNEL" -serial "file:$LOG" -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   "${DISK_ARGS[@]}" "${NET[@]}" -qmp "unix:$WORK/qmp.sock,server,nowait" 2>"$WORK/qemu.err" &

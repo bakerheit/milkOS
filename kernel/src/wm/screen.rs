@@ -2,14 +2,15 @@
 //! Lock (saved as `resolution = WxH`, applied again at boot).
 //!
 //! A switch allocates the new back buffer and wallpaper first (so running out of memory
-//! leaves the old mode untouched), then re-configures ramfb (`ramfb::set_mode`: a new
-//! framebuffer, a fresh RAMFBCfg), tells input the new pointer space, drops every cached
-//! panel (they re-layout from `screen_w/h`: menu bar, dock, toasts, Skim), clamps windows
+//! leaves the old mode untouched), then re-configures the display (`display::set_mode`: a
+//! new framebuffer, and a new virtio-gpu resource + SET_SCANOUT or a fresh RAMFBCfg), tells
+//! input the new pointer space, drops every cached panel (they re-layout from
+//! `screen_w/h`: menu bar, dock, toasts, Skim), clamps windows
 //! into the new work area (zoomed / snapped ones are re-fitted to it), rebuilds the lock
 //! screen if it is up, and redraws everything.
 
 use crate::gfx::Rect;
-use crate::{input, kprintln, ramfb, timer};
+use crate::{display, input, kprintln, timer};
 
 use super::Desktop;
 use super::buffer::Buffer;
@@ -41,7 +42,7 @@ impl Desktop {
             theme::set_screen(old_w, old_h);
             return false;
         };
-        let Some(fb) = ramfb::set_mode(w as usize, h as usize) else {
+        let Some(fb) = display::set_mode(w as usize, h as usize) else {
             theme::set_screen(old_w, old_h);
             return false;
         };

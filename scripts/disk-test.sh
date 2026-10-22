@@ -31,7 +31,7 @@ $M mkdir "$IMG" /home/milk >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
-  -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device ramfb -display none \
+  -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
   -drive "file=$VAULT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 \

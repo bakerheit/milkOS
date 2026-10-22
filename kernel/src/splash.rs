@@ -164,11 +164,14 @@ pub fn bar(t: &mut dyn DrawTarget, percent: i32) {
 
 /// Show the splash for about `ms` milliseconds, then fade to `to` (or leave it up if `None`).
 pub fn show(t: &mut dyn DrawTarget, ms: u64, to: Option<Color>) {
+    // Each step goes to the screen whole (display::sync waits until it is there).
     draw(t);
+    crate::display::sync();
     const STEPS: i32 = 40;
     for i in 1..=STEPS {
         delay_ms(ms / STEPS as u64);
         bar(t, i * 100 / STEPS);
+        crate::display::sync();
     }
     let Some(to) = to else {
         return;
@@ -176,6 +179,8 @@ pub fn show(t: &mut dyn DrawTarget, ms: u64, to: Option<Color>) {
     for _ in 0..6 {
         let (w, h) = (t.width() as i32, t.height() as i32);
         t.fill_rect_alpha(0, 0, w, h, to, 70);
+        crate::display::sync();
     }
     t.clear(to);
+    crate::display::sync();
 }

@@ -9,7 +9,8 @@
 //! * Shell panels are rendered once into small cached buffers (glass background baked in) and
 //!   re-rendered only when their content changes.
 //! * Changes add rectangles to a `gfx::DirtyList`; each frame composites only those rectangles
-//!   into the back buffer and copies them to the ramfb framebuffer. Inside a damaged rect,
+//!   into the back buffer, copies them to the framebuffer and presents them as one frame
+//!   (`display`: virtio-gpu, or ramfb). Inside a damaged rect,
 //!   everything under the topmost window that fully covers it is skipped.
 //!
 //! Threading: today [`run`] is the kmain loop (poll input, update, composite, `wfi`). Nothing here
@@ -600,11 +601,13 @@ impl Desktop {
                 for (i, p) in self.fb.pixels_mut()[..n].iter_mut().enumerate() {
                     *p = crate::gfx::blend(src[i], back[i], a);
                 }
+                display::sync();
                 sched::sleep_ms(14);
             }
         }
         self.hold_flush = false;
         self.fb.pixels_mut()[..n].copy_from_slice(&self.back.pixels()[..n]);
+        display::sync();
     }
 
     // ---- damage -------------------------------------------------------------------------------
@@ -1340,8 +1343,10 @@ impl Desktop {
             px += (d.w * d.h) as u64;
             self.compose_rect(*d, layers, &vis, cur);
         }
-        // Flush to ramfb.
+        // Flush to the screen: the whole frame at once (display.rs). Waits first if the
+        // display might still be reading the previous one.
         if !self.hold_flush && !FROZEN.load(core::sync::atomic::Ordering::Relaxed) {
+            display::wait();
             let fstride = self.fb.stride();
             let bstride = self.back.stride();
             let src = self.back.pixels();
@@ -1353,6 +1358,7 @@ impl Desktop {
                     dst[f + x0..f + x1].copy_from_slice(&src[s + x0..s + x1]);
                 }
             }
+            display::present(&rects);
         }
         let us = (timer::now_ns() - t0) / 1000;
         self.stats.frames += 1;

@@ -63,7 +63,7 @@ fi
 if [ "$HEADLESS" = 1 ]; then
   DISPLAY_ARGS=(-display none)
 else
-  DISPLAY_ARGS=(-device ramfb -display cocoa)
+  DISPLAY_ARGS=(-device virtio-gpu-device -display cocoa)
 fi
 SOUND_ARGS=()
 [ "$SOUND" = 1 ] && SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)

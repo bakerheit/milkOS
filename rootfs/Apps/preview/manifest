@@ -1,0 +1,8 @@
+format 1
+name preview
+version 1.0.0
+description Preview: pictures (PNG, PPM, BMP) and a look inside PDFs
+exec preview
+dock Preview #7F93C9
+files
+payload-sha256 -

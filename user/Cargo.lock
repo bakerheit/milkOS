@@ -159,6 +159,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "imgdec"
+version = "0.0.1"
+
+[[package]]
 name = "init"
 version = "0.0.1"
 dependencies = [
@@ -244,6 +248,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "preview"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "imgdec",
+ "rt",
+ "textbuf",
+]
+
+[[package]]
 name = "reminders"
 version = "0.0.1"
 dependencies = [
@@ -315,6 +330,20 @@ name = "tcpbench"
 version = "0.0.1"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "textbuf"
+version = "0.0.1"
+
+[[package]]
+name = "texteditor"
+version = "0.0.1"
+dependencies = [
+ "appkit",
+ "gui",
+ "rt",
+ "textbuf",
 ]
 
 [[package]]

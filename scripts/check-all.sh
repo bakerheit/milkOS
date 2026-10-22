@@ -64,6 +64,7 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "check-all: -j wants a number of at least 1 
 # name | set (s = smoke, q = default, f = full only) | time limit in seconds | mode (par/solo) | command
 # The default set also runs in --full, sometimes with bigger numbers (serial-soak).
 TESTS=(
+  "public-check|s|120|solo|scripts/public-check.sh"
   "serial-soak|q|900|par|scripts/serial-soak.sh 2 6"
   "net-test|s|600|par|scripts/net-test.sh"
   "pkg-test|s|600|par|scripts/pkg-test.sh"
@@ -86,10 +87,14 @@ TESTS=(
   "sysview-unit|s|300|par|scripts/sysview-test.sh"
   "diskkit-unit|s|300|par|scripts/diskkit-test.sh"
   "filekit-unit|s|300|par|scripts/filekit-test.sh"
+  "textbuf-unit|s|300|par|scripts/textbuf-test.sh"
+  "imgdec-unit|s|300|par|scripts/imgdec-test.sh"
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
   "files-test|q|600|par|scripts/files-test.sh"
   "alarm-test|q|600|par|scripts/alarm-test.sh"
   "apps-test|s|600|par|scripts/apps-test.sh"
+  "texteditor-test|q|600|par|scripts/texteditor-test.sh"
+  "preview-test|q|600|par|scripts/preview-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"
   "wm-demo-tour|s|300|par|scripts/wm-demo.sh tour @WORK@/tour.png"
   "flicker-test|q|300|par|scripts/flicker-test.sh 150"

@@ -1,0 +1,10 @@
+[package]
+name = "imgdec"
+version.workspace = true
+edition.workspace = true
+
+# Image decoders for Preview: PNG (all colour types and depths, Adam7), PPM/PGM/PBM (P1-P6) and
+# BMP, plus box/nearest scaling. no_std + alloc, no dependencies (the inflate is ours), so it
+# also builds and tests on the Mac:
+#   cd user && cargo test -p imgdec --target aarch64-apple-darwin
+[lib]

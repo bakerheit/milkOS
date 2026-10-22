@@ -26,6 +26,7 @@
 /Apps/clock/clock                                 target/user/aarch64-unknown-none-softfloat/release/clock      755
 /Apps/diskutil/diskutil                           target/user/aarch64-unknown-none-softfloat/release/diskutil   755
 /Apps/texteditor/texteditor                       target/user/aarch64-unknown-none-softfloat/release/texteditor  755
+/Apps/preview/preview                             target/user/aarch64-unknown-none-softfloat/release/preview     755
 /Apps/paint/paint                                 target/user/aarch64-unknown-none-softfloat/release/paint      755
 /Apps/peek/peek                                   target/user/aarch64-unknown-none-softfloat/release/peek       755
 /Apps/reminders/reminders                         target/user/aarch64-unknown-none-softfloat/release/reminders  755

@@ -92,6 +92,8 @@ TESTS=(
   "files-test|q|600|par|scripts/files-test.sh"
   "alarm-test|q|600|par|scripts/alarm-test.sh"
   "apps-test|s|600|par|scripts/apps-test.sh"
+  "texteditor-test|q|600|par|scripts/texteditor-test.sh"
+  "preview-test|q|600|par|scripts/preview-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"
   "wm-demo-tour|s|300|par|scripts/wm-demo.sh tour @WORK@/tour.png"
   "flicker-test|q|300|par|scripts/flicker-test.sh 150"

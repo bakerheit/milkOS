@@ -32,6 +32,14 @@
   `~/Sites`, and old snapshots still open in Files and Versions.
 - The toy packages put their program at the top of their folder (`/Apps/fortune/fortune`).
 
+**File system**
+- milkfs is its own crate (`<repo>/milkfs`, `no_std`, shared with the kernel like the crypto
+  crate), with the kernel's VFS glue in `kernel/src/fs/milkfs`. Nothing changes on disk or in
+  behaviour. It builds for the Mac too: `scripts/milkfs-test.sh` runs the file system there in
+  a few seconds (memory disks, a fake clock, a seeded RNG, power cuts at many points, a drive
+  that reorders unflushed writes), covering what the qemu milkfs tests check below the VFS;
+  check-all runs it in the smoke set.
+
 ## 0.1.0 (2026-10-21)
 
 The first release: everything below exists and is tested, on qemu `virt` (aarch64) with

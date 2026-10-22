@@ -1,6 +1,8 @@
 //! Background scrub: read every block reachable from a volume's committed state (live
 //! tree, every snapshot and clone, shared subtrees and shared data once, dead-list chains,
 //! the space map) straight from the disk, bypassing the caches, and check its checksum.
+//! The scrub itself is the milkfs crate's (`milkfs::scrub`, re-exported here); this is the
+//! thread, the rate limit, the status file and the audit log around it.
 //!
 //! A low-priority kernel thread (`milkfs-scrub`) runs it on request (`/sys/fs/milkfs/scrub`,
 //! `snap scrub`) and on a schedule (default: every 7 days, at the earliest 5 minutes after
@@ -19,7 +21,6 @@
 //! damaged file can be restored from a snapshot that has a good copy
 //! (`versions restore`), a damaged node needs `check` (it can't be repaired either).
 
-use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -27,10 +28,9 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use super::format::*;
+pub use ::milkfs::scrub::*;
+
 use super::inode::Volume;
-use super::items::{LIVE, clone_view};
-use crate::fs::blockdev::BlockRef;
 use crate::fs::errno::{Errno, Result};
 use crate::kprintln;
 use crate::sync::SpinLock;
@@ -41,8 +41,6 @@ pub const DEFAULT_RATE_MB: u32 = 32;
 pub const DEFAULT_EVERY_S: u64 = 7 * 86_400;
 /// Scheduled scrubs wait this long after boot.
 const FIRST_DELAY_NS: u64 = 300_000_000_000;
-/// Blocks per read request (128 KiB).
-const CHUNK: u64 = 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Phase {
@@ -50,13 +48,6 @@ pub enum Phase {
     Running,
     Done,
     Stopped,
-}
-
-#[derive(Clone, Debug)]
-pub struct ScrubError {
-    pub block: u64,
-    /// e.g. "data of /Volumes/Milk/docs/b.bin at offset 0 (live)".
-    pub what: String,
 }
 
 #[derive(Clone, Debug)]
@@ -320,130 +311,44 @@ impl Limiter {
     }
 }
 
-/// Where a block was found (for naming it in a report).
-#[derive(Clone)]
-enum Owner {
-    Node(String),
-    /// View it was found in (names the file), ino, file offset. Every tree holding the
-    /// block is looked up when the error is named.
-    Data(u64, u64, u64),
-    Meta(&'static str),
-}
-
-struct Scan {
-    dev: BlockRef,
-    /// Encrypted volume: blocks are opened (decrypted + tag checked) with this.
-    key: Option<Arc<super::crypt::VolumeKey>>,
-    per: u64,
-    nodes: BTreeSet<u64>,
-    data: BTreeSet<u64>,
-    bad: Vec<(u64, Owner)>,
-    done: u64,
+/// The kernel's side of a scrub: the stop flag, the rate limit, the status file, and
+/// whether it counts as the primary volume's last full scrub.
+struct Runner<'a> {
+    v: &'a Arc<Volume>,
+    path: &'a str,
+    why: &'static str,
     status: bool,
     lim: Limiter,
-    buf: Vec<u8>,
 }
 
-impl Scan {
-    /// Read `n` consecutive blocks from `block` raw into `self.buf`.
-    fn read(&mut self, block: u64, n: u64) -> Result<()> {
-        if STOP.load(Ordering::Relaxed) {
-            return Err(Errno::EINTR);
-        }
-        let len = (n as usize) * BLOCK;
-        self.buf.resize(len, 0);
-        let r = self.dev.read_blocks(block * self.per, &mut self.buf[..len]);
-        self.lim.account(len);
-        self.done += n;
+impl ::milkfs::scrub::ScrubRunner for Runner<'_> {
+    fn started(&mut self, total: u64) {
         if self.status {
             let mut s = STATUS.lock();
-            s.done = self.done;
+            s.phase = Phase::Running;
+            s.runs += 1;
+            s.why = self.why;
+            s.volume = String::from(self.path);
+            s.started_ns = self.lim.start;
+            s.total = total;
+            s.done = 0;
+            s.bytes = 0;
+            s.errors.clear();
+        }
+    }
+    fn stop(&self) -> bool {
+        STOP.load(Ordering::Relaxed)
+    }
+    fn read(&mut self, n: usize, done: u64) {
+        self.lim.account(n);
+        if self.status {
+            let mut s = STATUS.lock();
+            s.done = done;
             s.bytes = self.lim.bytes;
         }
-        r
     }
-
-    /// Is the `i`-th block of the last read (disk block `block`, born `birth`) intact?
-    /// (Encrypted: decrypts it in place, so a node can be decoded afterwards.)
-    fn check(&mut self, i: u64, block: u64, birth: u64, csum: u64) -> bool {
-        let b = &mut self.buf[(i as usize) * BLOCK..(i as usize + 1) * BLOCK];
-        match &self.key {
-            Some(k) => k.open(block, birth, csum, b),
-            None => xxh64(b) == csum,
-        }
-    }
-
-    fn tree(&mut self, label: &str, view: u64, root: BlockPtr) -> Result<()> {
-        let mut stack = alloc::vec![root];
-        while let Some(p) = stack.pop() {
-            if p.is_none() || !self.nodes.insert(p.block) {
-                continue;
-            }
-            let ok = match self.read(p.block, 1) {
-                Ok(()) => self.check(0, p.block, p.birth, p.csum),
-                Err(Errno::EINTR) => return Err(Errno::EINTR),
-                Err(_) => false,
-            };
-            if !ok {
-                self.bad.push((p.block, Owner::Node(String::from(label))));
-                continue; // can't trust what it points to
-            }
-            let node = decode_node(self.buf[..BLOCK].try_into().unwrap())?;
-            match node {
-                DiskNode::Internal(_, kids) => stack.extend(kids.iter().map(|(_, c)| *c)),
-                DiskNode::Leaf(items) => {
-                    for (k, v) in &items {
-                        if let Some(e) = Ext::decode(k, v) {
-                            self.run(view, k.obj, &e)?;
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn run(&mut self, view: u64, ino: u64, e: &Ext) -> Result<()> {
-        let n = e.len();
-        let mut i = 0;
-        while i < n {
-            let c = CHUNK.min(n - i);
-            if (i..i + c).all(|j| self.data.contains(&(e.block + j))) {
-                i += c;
-                continue;
-            }
-            let read = self.read(e.block + i, c);
-            if read == Err(Errno::EINTR) {
-                return read;
-            }
-            for j in 0..c {
-                let b = e.block + i + j;
-                if !self.data.insert(b) {
-                    continue;
-                }
-                if read.is_err() || !self.check(j, b, e.birth, e.csums[(i + j) as usize]) {
-                    let off = (e.start + i + j) * BLOCK as u64;
-                    self.bad.push((b, Owner::Data(view, ino, off)));
-                }
-            }
-            i += c;
-        }
-        Ok(())
-    }
-
-    fn meta(&mut self, p: BlockPtr, what: &'static str) -> Result<bool> {
-        if p.is_none() || !self.nodes.insert(p.block) {
-            return Ok(false);
-        }
-        let ok = match self.read(p.block, 1) {
-            Ok(()) => self.check(0, p.block, p.birth, p.csum),
-            Err(Errno::EINTR) => return Err(Errno::EINTR),
-            Err(_) => false,
-        };
-        if !ok {
-            self.bad.push((p.block, Owner::Meta(what)));
-        }
-        Ok(ok)
+    fn records_last_scrub(&self) -> bool {
+        super::user_volume().is_some_and(|p| Arc::ptr_eq(&p, self.v))
     }
 }
 
@@ -462,140 +367,23 @@ pub fn scrub_volume(
         return Ok(Vec::new());
     }
     let t0 = crate::timer::now_ns();
-    let key = v.state.lock().store.crypt.clone();
-    let (dev, trees, heads, map, total, keyring, uuid) = {
-        let mut st = v.state.lock();
-        st.commit()?;
-        st.store.hold_frees();
-        let mut trees = alloc::vec![(String::from("live"), LIVE, st.sb.root)];
-        trees.extend(
-            st.snaps
-                .iter()
-                .map(|s| (format!("snapshot {}", s.name), s.generation, s.root)),
-        );
-        trees.extend(
-            st.clones
-                .iter()
-                .map(|c| (format!("clone {}", c.name), clone_view(c.id), c.root)),
-        );
-        let mut heads = alloc::vec![st.deadlist];
-        heads.extend(st.snaps.iter().map(|s| s.deadlist));
-        let total = st.store.total() - st.store.free_blocks();
-        (
-            st.store.cache.device().clone(),
-            trees,
-            heads,
-            st.sb.spacemap,
-            total,
-            st.keyring,
-            st.sb.uuid,
-        )
-    };
-    if user {
-        let mut s = STATUS.lock();
-        s.phase = Phase::Running;
-        s.runs += 1;
-        s.why = why;
-        s.volume = String::from(path);
-        s.started_ns = t0;
-        s.total = total;
-        s.done = 0;
-        s.bytes = 0;
-        s.errors.clear();
-    }
-    let per = (BLOCK / dev.block_size()) as u64;
-    let mut sc = Scan {
-        dev,
-        key,
-        per,
-        nodes: BTreeSet::new(),
-        data: BTreeSet::new(),
-        bad: Vec::new(),
-        done: 0,
+    let mut run = Runner {
+        v,
+        path,
+        why,
         status: user,
         lim: Limiter {
             start: t0,
             bytes: 0,
             sleep,
         },
-        buf: Vec::new(),
     };
-    let walked = (|| -> Result<()> {
-        for (label, view, root) in &trees {
-            sc.tree(label, *view, *root)?;
-        }
-        for h in heads {
-            let mut p = h;
-            while sc.meta(p, "dead-list block")? {
-                let b: &[u8; BLOCK] = sc.buf[..BLOCK].try_into().unwrap();
-                p = decode_dead(b)
-                    .map(|(_, next)| next)
-                    .unwrap_or(BlockPtr::NONE);
-            }
-        }
-        // The keyring (encrypted volumes): plaintext, so its checksum is a plain xxh64
-        // even with the key; and it must still decode, for this volume.
-        if !keyring.is_none() && sc.nodes.insert(keyring.block) {
-            let ok = match sc.read(keyring.block, 1) {
-                Ok(()) => {
-                    let b: &[u8; BLOCK] = sc.buf[..BLOCK].try_into().unwrap();
-                    xxh64(b) == keyring.csum
-                        && Keyring::decode(b).is_some_and(|r| r.uuid == uuid && !r.slots.is_empty())
-                }
-                Err(Errno::EINTR) => return Err(Errno::EINTR),
-                Err(_) => false,
-            };
-            if !ok {
-                sc.bad
-                    .push((keyring.block, Owner::Meta("keyring (the wrapped keys)")));
-            }
-        }
-        if sc.meta(map, "space-map index")? {
-            let b: &[u8; BLOCK] = sc.buf[..BLOCK].try_into().unwrap();
-            for c in MapIndex::decode(b).map(|i| i.chunks).unwrap_or_default() {
-                sc.meta(c, "space-map block")?;
-            }
-        }
-        Ok(())
-    })();
-    // Done reading: free what was held, and name what was found.
-    let mut errors = Vec::new();
-    {
-        let mut st = v.state.lock();
-        st.store.release_held();
-        for (block, owner) in &sc.bad {
-            let what = match owner {
-                Owner::Node(t) => format!("tree node of {t}"),
-                Owner::Meta(m) => String::from(*m),
-                Owner::Data(view, ino, off) => {
-                    let p = st
-                        .path_in(*view, *ino)
-                        .map(|p| format!("{path}{p}"))
-                        .unwrap_or_else(|| format!("inode {ino}"));
-                    // Every tree that has this block there (shared subtrees were read once).
-                    let idx = off / BLOCK as u64;
-                    let holders: Vec<&str> = trees
-                        .iter()
-                        .filter(|(_, tv, _)| {
-                            st.exts(*tv, *ino, idx, idx + 1).is_ok_and(|es| {
-                                es.iter().any(|e| e.block + (idx - e.start) == *block)
-                            })
-                        })
-                        .map(|(l, _, _)| l.as_str())
-                        .collect();
-                    format!("data of {p} at offset {off} ({})", holders.join(", "))
-                }
-            };
-            errors.push(ScrubError {
-                block: *block,
-                what,
-            });
-        }
-        if walked.is_ok() && super::user_volume().is_some_and(|p| Arc::ptr_eq(&p, v)) {
-            st.scrub.0 = now_unix();
-            st.meta_dirty = true; // persisted with the next commit
-        }
-    }
+    let Scrubbed {
+        walked,
+        errors,
+        done,
+        bytes,
+    } = ::milkfs::scrub::scrub(&**v, path, &mut run)?;
     let el = crate::timer::now_ns() - t0;
     for e in &errors {
         kprintln!(
@@ -617,10 +405,10 @@ pub fn scrub_volume(
             Err(Errno::EINTR) => "stopped",
             Err(_) => "failed",
         },
-        sc.done,
-        sc.lim.bytes >> 20,
+        done,
+        bytes >> 20,
         el / 1_000_000,
-        sc.lim.bytes as f64 / 1_048_576.0 / (el.max(1) as f64 / 1e9),
+        bytes as f64 / 1_048_576.0 / (el.max(1) as f64 / 1e9),
         errors.len(),
         match &walked {
             Err(e) if *e != Errno::EINTR => format!(" ({e})"),

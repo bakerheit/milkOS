@@ -5,15 +5,16 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::btree::{self, Child};
 use super::format::*;
 use super::store::Store;
-use crate::fs::bcache::BCache;
-use crate::fs::blockdev::BlockRef;
-use crate::fs::errno::{Errno, Result};
-use crate::fs::node::{S_IFDIR, S_IFMT};
-use crate::kprintln;
+use crate::abi::{S_IFDIR, S_IFMT};
+use crate::bcache::BCache;
+use crate::blockdev::BlockRef;
+use crate::errno::{Errno, Result};
+use crate::log;
 
 pub struct State {
     pub store: Store,
@@ -60,6 +61,17 @@ pub struct State {
     pub conv: Option<super::convert::ConvRun>,
 }
 
+/// The last generation whose commit completed (what a power cut leaves on the disk, for
+/// the kernel's crash test report).
+pub static LAST_COMMIT: AtomicU64 = AtomicU64::new(0);
+
+/// A volume's [`State`] behind its lock (the kernel's `Volume`, a test's): what the
+/// drivers that must not hold the lock across slow work (scrub, send, receive) take it
+/// through, a step at a time.
+pub trait StateAccess {
+    fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R;
+}
+
 /// A transaction is committed once it is this old ...
 pub const COMMIT_DELAY_NS: u64 = 1_000_000_000;
 /// ... or holds this many operations (bounds the dirty tree kept in memory).
@@ -99,12 +111,12 @@ pub fn probe(dev: &BlockRef) -> Option<Superblock> {
 }
 
 fn now() -> (i64, u32) {
-    let t = crate::fs::clock::now();
+    let t = crate::platform::now();
     (t.sec, t.nsec as u32)
 }
 
 pub fn new_uuid() -> [u8; 16] {
-    let mut x = crate::timer::counter() ^ 0x6d69_6c6b_6673_0001;
+    let mut x = crate::platform::platform().counter() ^ 0x6d69_6c6b_6673_0001;
     let mut u = [0u8; 16];
     for chunk in u.chunks_mut(8) {
         x ^= x << 13;
@@ -163,20 +175,20 @@ fn mkfs_with(dev: &BlockRef, label: &str, enc: Option<(&str, bool)>) -> Result<O
         None => None,
         Some((pass, recovery)) => {
             let mut vk = [0u8; 32];
-            crate::crypto::rng::fill(&mut vk);
+            crate::platform::fill_random(&mut vk);
             let key = crypt::VolumeKey::from_master(&vk);
-            crate::crypto::wipe(&mut vk);
+            milkcrypto::wipe(&mut vk);
             let mut ring = Keyring {
                 uuid,
                 slots: alloc::vec![crypt::wrap(&uuid, &key, SLOT_PASSPHRASE, pass.as_bytes())?],
             };
             if recovery {
                 let mut rk = [0u8; 16];
-                crate::crypto::rng::fill(&mut rk);
+                crate::platform::fill_random(&mut rk);
                 ring.slots
                     .push(crypt::wrap(&uuid, &key, SLOT_RECOVERY, &rk)?);
                 shown = Some(crypt::format_recovery(&rk));
-                crate::crypto::wipe(&mut rk);
+                milkcrypto::wipe(&mut rk);
             }
             let b = ring.encode();
             cache.write(3, &b)?;
@@ -245,7 +257,7 @@ impl State {
         dev: BlockRef,
         key: Option<Arc<super::crypt::VolumeKey>>,
     ) -> Result<(State, MountReport)> {
-        let t0 = crate::timer::now_ns();
+        let t0 = crate::platform::now_ns();
         let name = String::from(dev.name());
         let sb = probe(&dev).ok_or(Errno::EINVAL)?;
         let key = if needs_key(sb.flags) {
@@ -254,8 +266,8 @@ impl State {
             let mut raw = [0u8; BLOCK];
             let per = (BLOCK / dev.block_size()) as u64;
             dev.read_blocks((sb.generation % 2) * per, &mut raw)?;
-            if !crate::crypto::ct_eq(&k.sb_mac(&raw).to_le_bytes(), &sb.sb_mac.to_le_bytes()) {
-                kprintln!("milkfs: {name}: superblock MAC mismatch (altered?): not mounting");
+            if !milkcrypto::ct_eq(&k.sb_mac(&raw).to_le_bytes(), &sb.sb_mac.to_le_bytes()) {
+                log!("milkfs: {name}: superblock MAC mismatch (altered?): not mounting");
                 return Err(Errno::EIO);
             }
             Some(k)
@@ -268,13 +280,13 @@ impl State {
         }
         let snap_gen = sb.snaps.iter().map(|s| s.generation).max().unwrap_or(0);
         if sb.version < BASE_VERSION {
-            kprintln!(
+            log!(
                 "milkfs: format v{} volume: it is upgraded to v{BASE_VERSION} (multi-block extents, inline data) by its first write; kernels older than that won't mount it then",
                 sb.version
             );
         }
         // What's on disk now is the last committed generation (until this boot commits).
-        super::crashtest::LAST_COMMIT.store(sb.generation, core::sync::atomic::Ordering::Relaxed);
+        LAST_COMMIT.store(sb.generation, Ordering::Relaxed);
         let mut store = Store::new(cache, sb.total_blocks, sb.generation + 1, snap_gen);
         store.branched = sb.flags & SB_BRANCHED != 0;
         store.crypt = key;
@@ -301,7 +313,7 @@ impl State {
             Ok(()) => return Self::open_fast(store, sb, t0),
             // (Generation 1 = just made by mkfs: nothing to say.)
             Err(why) if sb.generation > 1 => {
-                kprintln!("milkfs: {name}: space map {why}: rebuilding it from the trees")
+                log!("milkfs: {name}: space map {why}: rebuilding it from the trees")
             }
             Err(_) => {}
         }
@@ -343,13 +355,13 @@ impl State {
             match inodes.get(&d.ino) {
                 None => {
                     problems += 1;
-                    kprintln!("milkfs: check: {dir}/{} -> missing inode {}", d.name, d.ino);
+                    log!("milkfs: check: {dir}/{} -> missing inode {}", d.name, d.ino);
                 }
                 Some(i) if i.mode & S_IFMT == S_IFDIR => {
                     *subdirs.entry(*dir).or_default() += 1;
                     if i.parent != *dir {
                         problems += 1;
-                        kprintln!("milkfs: check: dir {} parent {} != {dir}", d.ino, i.parent);
+                        log!("milkfs: check: dir {} parent {} != {dir}", d.ino, i.parent);
                     }
                 }
                 _ => {}
@@ -366,7 +378,7 @@ impl State {
                 } else {
                     // Links but no entry: damage. Mount never repairs; `check --repair` does.
                     problems += 1;
-                    kprintln!(
+                    log!(
                         "milkfs: check: inode {ino} has {} link(s) but no entry",
                         i.nlink
                     );
@@ -380,11 +392,11 @@ impl State {
             };
             if i.nlink != want {
                 problems += 1;
-                kprintln!("milkfs: check: inode {ino} nlink {} != {want}", i.nlink);
+                log!("milkfs: check: inode {ino} nlink {} != {want}", i.nlink);
             }
         }
         if !inodes.contains_key(&ROOT_INO) {
-            kprintln!("milkfs: check: no root directory");
+            log!("milkfs: check: no root directory");
             return Err(Errno::EIO);
         }
 
@@ -413,7 +425,7 @@ impl State {
             }
             st.commit()?;
         }
-        report.mount_ns = crate::timer::now_ns() - t0;
+        report.mount_ns = crate::platform::now_ns() - t0;
         st.conv_load()?;
         Ok((st, report))
     }
@@ -450,7 +462,7 @@ impl State {
             }
             st.commit()?;
         }
-        report.mount_ns = crate::timer::now_ns() - t0;
+        report.mount_ns = crate::platform::now_ns() - t0;
         st.conv_load()?;
         Ok((st, report))
     }
@@ -506,8 +518,7 @@ impl State {
         let r = self.commit_inner();
         match r {
             Ok(sb) => {
-                super::crashtest::LAST_COMMIT
-                    .store(sb.generation, core::sync::atomic::Ordering::Relaxed);
+                LAST_COMMIT.store(sb.generation, Ordering::Relaxed);
                 self.sb = sb;
                 self.store.committed();
                 self.meta_dirty = false;
@@ -517,7 +528,7 @@ impl State {
                 Ok(())
             }
             Err(e) => {
-                kprintln!(
+                log!(
                     "milkfs: commit of generation {} failed: {e}",
                     self.store.txn
                 );
@@ -580,7 +591,7 @@ impl State {
     /// An operation finished: commit if the batch is old or big enough, or the block cache
     /// is filling up with dirty buffers. Otherwise the transaction stays open.
     pub fn op_done(&mut self) -> Result<()> {
-        let now = crate::timer::now_ns();
+        let now = crate::platform::now_ns();
         if !self.dirty() {
             return Ok(());
         }
@@ -599,7 +610,7 @@ impl State {
     /// For the flusher thread: commit if the open transaction is older than the delay.
     pub fn flush_if_due(&mut self) -> Result<()> {
         match self.dirty_since {
-            Some(t) if crate::timer::now_ns() - t >= COMMIT_DELAY_NS => self.commit(),
+            Some(t) if crate::platform::now_ns() - t >= COMMIT_DELAY_NS => self.commit(),
             _ => Ok(()),
         }
     }

@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use super::btree;
 use super::format::*;
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 /// Public view of one snapshot.
 #[derive(Clone, Debug)]
@@ -87,7 +87,7 @@ impl State {
         let rec = SnapRecord {
             name: String::from(name),
             generation: self.sb.generation,
-            created: created.unwrap_or(crate::fs::clock::now().sec as u64),
+            created: created.unwrap_or(crate::platform::now().sec as u64),
             root: self.sb.root,
             deadlist: self.deadlist,
             next_ino: self.next_ino,

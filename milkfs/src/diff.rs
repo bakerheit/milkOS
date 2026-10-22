@@ -23,8 +23,8 @@ use super::btree;
 use super::format::*;
 use super::items::LIVE;
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
-use crate::fs::node::{S_IFDIR, S_IFMT};
+use crate::abi::{S_IFDIR, S_IFMT};
+use crate::errno::{Errno, Result};
 
 /// Items by key.
 pub type ItemMap = BTreeMap<Key, Vec<u8>>;

@@ -19,7 +19,7 @@ use super::btree::{self, Child};
 use super::format::*;
 use super::snap::check_snap_name;
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 #[derive(Clone, Debug)]
 pub struct CloneInfo {
@@ -86,7 +86,7 @@ impl State {
         self.clones.push(SnapRecord {
             name: String::from(name),
             generation: s.generation,
-            created: crate::fs::clock::now().sec as u64,
+            created: crate::platform::now().sec as u64,
             root: s.root,
             deadlist: BlockPtr::NONE,
             next_ino: self.next_ino,

@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 use super::format::*;
 use super::items::LIVE;
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
-use crate::fs::node::{S_IFMT, S_IFREG};
+use crate::abi::{S_IFMT, S_IFREG};
+use crate::errno::{Errno, Result};
 
 /// One distinct version of a file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,7 +101,7 @@ impl State {
             );
         }
         let (hash, item) = self.content_hash(LIVE, ino)?;
-        let now = crate::fs::clock::now().sec as u64;
+        let now = crate::platform::now().sec as u64;
         if out.last().is_some_and(|l| l.hash == hash) {
             // The current content is the newest snapshot's: show it as current.
             out.pop();

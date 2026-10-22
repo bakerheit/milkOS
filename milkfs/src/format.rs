@@ -11,7 +11,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 pub const BLOCK: usize = 4096;
 pub const MAGIC: &[u8; 8] = b"MILKFS01";
@@ -801,6 +801,8 @@ pub struct Ext {
 }
 
 impl Ext {
+    /// Blocks in the run (never zero: an empty run isn't stored).
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> u64 {
         self.csums.len() as u64
     }

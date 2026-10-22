@@ -76,6 +76,7 @@ pub fn start_threads() {
 
 /// Mount the root tmpfs and build the standard layout. Call once, after the heap is up.
 pub fn init() {
+    milkfs::platform::install();
     clock::init();
     let root = tmpfs::TmpFs::new(0);
     mount("/", root.clone()).expect("fs: mount root tmpfs");

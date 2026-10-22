@@ -21,8 +21,8 @@ use super::format::{
     BLOCK, BlockPtr, DEAD_PER_BLOCK, DeadEntry, MAP_BITS, MAP_MAX_CHUNKS, MapIndex, decode_dead,
     encode_dead, xxh64,
 };
-use crate::fs::bcache::BCache;
-use crate::fs::errno::{Errno, Result};
+use crate::bcache::BCache;
+use crate::errno::{Errno, Result};
 
 pub struct Store {
     pub cache: Arc<BCache>,
@@ -44,7 +44,7 @@ pub struct Store {
     pub branched: bool,
     /// Decoded tree nodes by (block, checksum): blocks are copy-on-write and only reused
     /// with new contents (a new checksum), so an entry can never be stale.
-    nodes: crate::sync::SpinLock<NodeCache>,
+    nodes: crate::sync::Lock<NodeCache>,
     /// Blocks of the space map the last commit wrote (index first): freed by the next.
     map_blocks: Vec<BlockPtr>,
     /// While a receive builds its clone: the origin's blocks the clone drops (the live
@@ -88,7 +88,7 @@ impl Store {
             dead_new: Vec::new(),
             clone_origin: None,
             branched: false,
-            nodes: crate::sync::SpinLock::new(NodeCache::default()),
+            nodes: crate::sync::Lock::spin(NodeCache::default()),
             map_blocks: Vec::new(),
             recv_drops: None,
             held: None,
@@ -207,7 +207,7 @@ impl Store {
         for (i, c) in csums.iter().enumerate() {
             let b = block + i as u64;
             if !self.verify(b, birth, *c, &mut out[i * BLOCK..(i + 1) * BLOCK]) {
-                crate::kprintln!("milkfs: checksum mismatch in block {b}");
+                crate::log!("milkfs: checksum mismatch in block {b}");
                 return Err(Errno::EIO);
             }
         }
@@ -373,7 +373,7 @@ impl Store {
     pub fn read(&self, p: BlockPtr, out: &mut [u8; BLOCK]) -> Result<()> {
         self.cache.read(p.block, out)?;
         if !self.verify(p.block, p.birth, p.csum, out) {
-            crate::kprintln!(
+            crate::log!(
                 "milkfs: checksum mismatch in block {} (birth {})",
                 p.block,
                 p.birth

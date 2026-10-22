@@ -84,11 +84,12 @@ The console font is [GNU Unifont](https://unifoundry.com/unifont/) 13.0.06 (8x16
 used under the SIL Open Font License 1.1. Licence text: `assets/fonts/UNIFONT-LICENSE.txt`. Terminal,
 Notes and the other monospace grids use it too.
 
-The desktop's UI text is one of four typefaces, picked in Settings > Appearance (Figtree by default):
+The desktop's UI text is one of five typefaces, picked in Settings > Appearance (Figtree by default):
 [Figtree](https://github.com/erikdkennedy/figtree), [IBM Plex Sans](https://github.com/IBM/plex),
 [Fira Sans](https://github.com/mozilla/Fira) and
-[Atkinson Hyperlegible Next](https://github.com/googlefonts/atkinson-hyperlegible-next), all under the
-SIL Open Font License 1.1 (licences and copyright lines in `assets/fonts/`, and in the image at
+[Atkinson Hyperlegible Next](https://github.com/googlefonts/atkinson-hyperlegible-next) under the
+SIL Open Font License 1.1, and [Ubuntu Sans](https://github.com/canonical/Ubuntu-Sans-fonts) under the
+Ubuntu Font Licence 1.0 (licences and copyright lines in `assets/fonts/`, and in the image at
 `/System/Library/Fonts/`). `scripts/gen_sysfont.py` renders them into the glyph bitmaps in
 `kernel/src/sysfont/`; it names the exact files it uses (from the Google Fonts repository) and their
 hashes. The .ttf files are not in this repository.

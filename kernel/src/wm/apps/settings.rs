@@ -520,9 +520,9 @@ impl Settings {
             p.text_p(x, y, k, COCOA, false);
             p.text_p(x + 120, y, v, ESPRESSO, false);
         }
-        // Font credits (the licences ship in the image too): each family's name, then its
-        // copyright line (without the trailing project URL).
-        let mut y = 280;
+        // Font credits (the licences ship in the image too): each family's name and
+        // licence, then its copyright line (without the trailing project URL).
+        let mut y = 268;
         p.text_p(x, y, "Fonts", ESPRESSO, true);
         let room = 448;
         let body = Font::body(false);
@@ -532,19 +532,13 @@ impl Settings {
                 .split(" (http")
                 .next()
                 .unwrap_or(fam.copyright);
-            p.text_p(x, y + 22, fam.name, ESPRESSO, false);
-            p.text_p(x, y + 38, &body.truncate(who, room), COCOA, false);
-            y += 38;
+            let end = p.text_p(x, y + 20, fam.name, ESPRESSO, false);
+            p.text_p(end + 8, y + 20, fam.licence, COCOA, false);
+            p.text_p(x, y + 36, &body.truncate(who, room), COCOA, false);
+            y += 36;
         }
-        let uni = "GNU Unifont, for Terminal and Notes (OFL 1.1 / GPLv2+)";
-        p.text_p(x, y + 26, uni, ESPRESSO, false);
-        p.text_p(
-            x,
-            y + 50,
-            "SIL Open Font License 1.1. Texts in /System/Library/Fonts.",
-            COCOA,
-            false,
-        );
+        let uni = "GNU Unifont draws Terminal and Notes. Licences: /System/Library/Fonts.";
+        p.text_p(x, y + 26, &body.truncate(uni, room), ESPRESSO, false);
     }
 
     fn set_brightness_at(&mut self, x: i32) {

@@ -21,7 +21,7 @@ For the engineer building the compositor and shell. Generated from `v1.mjs` (the
 Alpha tints used: straw at 0x44 (27%) for selection rows, straw at 0x55 (33%) for sidebar selection, honey at 0x55 for folder tiles, espresso for shadows (below).
 
 ## Type
-- The system font (`kernel/src/sysfont.rs`): Figtree by default, or IBM Plex Sans, Fira Sans or Atkinson Hyperlegible Next (Settings > Appearance > Font). 13px in a 16px line, espresso. Secondary text cocoa. Disabled latte.
+- The system font (`kernel/src/sysfont.rs`): Figtree by default, or IBM Plex Sans, Fira Sans, Atkinson Hyperlegible Next or Ubuntu Sans (Settings > Appearance > Font). 13px in a 16px line, espresso. Secondary text cocoa. Disabled latte.
 - Bold: the face's real Bold (Medium is baked too).
 - Heading: 26px in a 32px line (scale 2), bold.
 - Display: 52px in a 64px line (scale 4), bold. Clock and big tile letters. The lock screen clock is 104px regular (scale 8).

@@ -12,9 +12,9 @@ The .ttf files are not part of the repository: every file is listed below with t
 comes from (the Google Fonts repository, pinned to one commit) and its sha256, and the
 script refuses files whose hash differs, so a regenerated bake matches the committed one.
 
-All four families are SIL Open Font License 1.1; the licence texts and copyright lines are in
-assets/fonts/. (Ubuntu Sans is not here: its 2023 release is under the Ubuntu Font Licence
-1.0, not the OFL.)
+Figtree, IBM Plex Sans, Fira Sans and Atkinson Hyperlegible Next are under the SIL Open Font
+License 1.1; Ubuntu Sans (the 2023 family) is under the Ubuntu Font Licence 1.0. The licence
+texts and copyright lines are in assets/fonts/ (and in the image, /System/Library/Fonts/).
 
 What gets baked (sizes are the em in pixels, chosen to sit where the 8x16 Unifont cells sat):
     body  13 px in a 16 px line, baseline 13: Regular, Medium, Bold, all of Latin-1 + U+FFFD
@@ -39,45 +39,69 @@ import urllib.request
 
 from PIL import Image, ImageDraw, ImageFont
 
-GF = "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/ofl/"
+GF = "https://raw.githubusercontent.com/google/fonts/45e3d5269e4a17d823f6d84470bc084dc5ae46f6/"
 
-# key, display name, files: either {"var": (path, sha256)} for a variable font with a wght
-# axis, or {weight: (path, sha256)} for static files. Paths are relative to GF.
+OFL = "SIL Open Font License 1.1"
+UFL = "Ubuntu Font Licence 1.0"
+
+# key, display name, files, (licence file, sha256), licence name, copyright line (None: the
+# licence file's first line). Files are {"var": (path, sha256)} for a variable font with a
+# wght axis, or {weight: (path, sha256)} for static files. Paths are relative to GF. The
+# order is the Settings order; prefs store the key, so new families go at the end.
 FAMILIES = [
     (
         "figtree",
         "Figtree",
-        {"var": ("figtree/Figtree[wght].ttf",
+        {"var": ("ofl/figtree/Figtree[wght].ttf",
                  "26ad3db9b31ff7dde67a91ff515d022d2f495cd506590699cf264f0bfe6fb714")},
-        ("figtree/OFL.txt", "140d37233e7f3ce7313798befa9600893bcceaf41a55fa0fa5ad52f7f657a268"),
+        ("ofl/figtree/OFL.txt", "140d37233e7f3ce7313798befa9600893bcceaf41a55fa0fa5ad52f7f657a268"),
+        OFL,
+        None,
     ),
     (
         "plex",
         "IBM Plex Sans",
-        {"var": ("ibmplexsans/IBMPlexSans[wdth,wght].ttf",
+        {"var": ("ofl/ibmplexsans/IBMPlexSans[wdth,wght].ttf",
                  "3b031aa4216174205bd8471f88a49b91f093169e9e87bd5262242bc5967fe2e3")},
-        ("ibmplexsans/OFL.txt", "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"),
+        ("ofl/ibmplexsans/OFL.txt", "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"),
+        OFL,
+        None,
     ),
     (
         "fira",
         "Fira Sans",
         {
-            400: ("firasans/FiraSans-Regular.ttf",
+            400: ("ofl/firasans/FiraSans-Regular.ttf",
                   "c29556a2719bf613ef3d5e070e40d903a8965d9c081beca1375dc1e6e0f93c23"),
-            500: ("firasans/FiraSans-Medium.ttf",
+            500: ("ofl/firasans/FiraSans-Medium.ttf",
                   "cbc1842cbed8c1d1146ba7c9db97d8f28c9bedfd25f41c5b0e1259ca48622328"),
-            700: ("firasans/FiraSans-Bold.ttf",
+            700: ("ofl/firasans/FiraSans-Bold.ttf",
                   "a4d8e149ecdd4874a0726eb0af894488b3b31c423d6b0017c8f415ed1b795b45"),
         },
-        ("firasans/OFL.txt", "8f24842e9174beda18a556c2ae7d54f5dc444340c19a3a9ef77e23bca366adbd"),
+        ("ofl/firasans/OFL.txt", "8f24842e9174beda18a556c2ae7d54f5dc444340c19a3a9ef77e23bca366adbd"),
+        OFL,
+        None,
     ),
     (
         "atkinson",
         "Atkinson Hyperlegible Next",
-        {"var": ("atkinsonhyperlegiblenext/AtkinsonHyperlegibleNext[wght].ttf",
+        {"var": ("ofl/atkinsonhyperlegiblenext/AtkinsonHyperlegibleNext[wght].ttf",
                  "5a455d1cfa099b601ab70751bb9673e8fe1854dc4500c80e1a220d0d75e31745")},
-        ("atkinsonhyperlegiblenext/OFL.txt",
+        ("ofl/atkinsonhyperlegiblenext/OFL.txt",
          "aca6a428580965d2297d1b718042dd427c2a9443ece3b0d02d758e161e0c4030"),
+        OFL,
+        None,
+    ),
+    (
+        "ubuntu",
+        "Ubuntu Sans",
+        {"var": ("ufl/ubuntusans/UbuntuSans[wdth,wght].ttf",
+                 "37e90bba45a2a1172d9f6078e45daebaa1b4e537943205cc1309f142a254fe40")},
+        ("ufl/ubuntusans/LICENCE.txt",
+         "2f0015108d68627bd788d313f529c21ff4da2c2c42a5e1f3883acc83480f9002"),
+        UFL,
+        # From the family's METADATA.pb in the same directory (the licence has none).
+        "Copyright 2011, 2022, 2023 Canonical Ltd.",
     ),
 ]
 
@@ -104,7 +128,7 @@ def sha256(p):
 
 
 def all_files():
-    for _, _, files, lic in FAMILIES:
+    for _, _, files, lic, _, _ in FAMILIES:
         yield from files.values()
         yield lic
 
@@ -256,23 +280,24 @@ def main():
     outdir.mkdir(exist_ok=True)
     rs = [
         "// @generated by scripts/gen_sysfont.py. Do not edit by hand.",
-        "// Baked from fonts under the SIL Open Font License 1.1, see assets/fonts/.",
+        "// Baked from fonts under the SIL OFL 1.1 and the Ubuntu Font Licence 1.0, see assets/fonts/.",
         "",
         "use crate::sysfont::{Face, Family};",
         "",
         f"pub static FAMILIES: [Family; {len(FAMILIES)}] = [",
     ]
     total = 0
-    for key, name, files, lic in FAMILIES:
+    for key, name, files, lic, licence, copyright in FAMILIES:
         blob, faces = bake_family(d, key, files)
         (outdir / f"{key}.bin").write_bytes(blob)
         total += len(blob)
         print(f"{key}: {len(blob)} bytes")
-        cr = copyright_line(d, lic[0]).replace("\\", "\\\\").replace('"', '\\"')
+        cr = (copyright or copyright_line(d, lic[0])).replace("\\", "\\\\").replace('"', '\\"')
         rs.append("    Family {")
         rs.append(f'        key: "{key}",')
         rs.append(f'        name: "{name}",')
         rs.append(f'        copyright: "{cr}",')
+        rs.append(f'        licence: "{licence}",')
         rs.append(f'        blob: include_bytes!("sysfont/{key}.bin"),')
         rs.append("        faces: &[")
         for fname, wt, size, line, ascent, first, n in faces:

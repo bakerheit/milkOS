@@ -2,8 +2,9 @@
 //!
 //! The glyphs are baked at build time by `scripts/gen_sysfont.py` (FreeType's hinted grey
 //! coverage, 4 bits a pixel, cropped to the ink) into `sysfont/<family>.bin`, indexed by the
-//! generated `sysfont_data.rs`. Four families (all SIL OFL 1.1, see `assets/fonts/`), each at
-//! the sizes the UI uses:
+//! generated `sysfont_data.rs`. Five families (Figtree, IBM Plex Sans, Fira Sans and Atkinson
+//! Hyperlegible Next under the SIL OFL 1.1, Ubuntu Sans under the Ubuntu Font Licence 1.0; see
+//! `assets/fonts/`), each at the sizes the UI uses:
 //!
 //! | scale | em     | line box | baseline | weights                 | characters          |
 //! |-------|--------|----------|----------|-------------------------|---------------------|
@@ -45,8 +46,10 @@ pub struct Family {
     /// The settings-file value (`font = figtree`).
     pub key: &'static str,
     pub name: &'static str,
-    /// The copyright line of its licence (credits).
+    /// Its copyright line (credits).
     pub copyright: &'static str,
+    /// Its licence ("SIL Open Font License 1.1", "Ubuntu Font Licence 1.0").
+    pub licence: &'static str,
     /// Glyph records (12 bytes each) then coverage data, see `scripts/gen_sysfont.py`.
     pub blob: &'static [u8],
     pub faces: &'static [Face],

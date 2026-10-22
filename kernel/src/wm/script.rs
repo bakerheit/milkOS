@@ -428,7 +428,10 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "utest" => {
             // proc's userland test suite (fork / CoW, pipes, signals) from the desktop shell.
-            b.wait(300).typ("utest").enter().wait(6000);
+            b.wait(300)
+                .typ("/System/Developer/utest")
+                .enter()
+                .wait(6000);
         }
         "tm1" => {
             // Settings > Time Machine > Back up now, close Settings, delete a file, then
@@ -1264,7 +1267,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
         "dock-slide" => {
             b.wait(300)
-                .typ("echo milk | sudo -S msh -c \"files create /Apps/hello/ && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /Commands/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
+                .typ("echo milk | sudo -S msh -c \"files create /Apps/hello/ && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /System/Developer/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
                 .enter()
                 .wait(1500);
             b.0.push(Step::Packages);

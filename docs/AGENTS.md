@@ -41,7 +41,7 @@
   state needs a real lock or atomics; "single core, plain load/store is fine" is no longer true. See `docs/smp.md`.
 - Processes can be multi-threaded (clone CLONE_THREAD, futex, `user/rt` thread/Mutex/Condvar); freeing a
   multi-threaded process's page tables goes through `tlb::shootdown`. `chroot` and the capability sandbox
-  (`proc/caps.rs`, `/Commands/sandbox`, model in `docs/security.md`) exist; caps default to "everything", so existing
+  (`proc/caps.rs`, `/System/Developer/sandbox`, model in `docs/security.md`) exist; caps default to "everything", so existing
   code is unaffected, but new device opens or syscalls that touch files/net/audio/clipboard/windows should check them.
 - Locks: `sync::SpinLock<T>` (masks IRQs, really spins across CPUs, panics on same-CPU re-entry), `sync::IrqGuard`,
   `sync::without_irqs`, `sched::Mutex` for anything that may sleep.

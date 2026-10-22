@@ -1,4 +1,4 @@
-//! `/sys/fs/milkfs/disks`: every block device the system found, one line each:
+//! `/System/Kernel/fs/milkfs/disks`: every block device the system found, one line each:
 //!
 //! ```text
 //! vda 67108864 rw milkfs plain mounted=/Volumes/Milk Milk

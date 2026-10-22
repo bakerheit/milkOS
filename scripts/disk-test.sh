@@ -91,12 +91,12 @@ out "files list /Users/milk/Documents" | grep -q "new.txt" && bad "new.txt survi
 click 506 23                       # Health tab
 click 837 23 2                     # Scrub now
 q screendump "$T/health.png"
-ser "send:cat /sys/fs/milkfs/scrub" "wait:$P"
-out "cat /sys/fs/milkfs/scrub" | grep -q "scrub: \[run [0-9]" && ok "Scrub now started a scrub" || bad "no scrub: $(out "cat /sys/fs/milkfs/scrub")"
+ser "send:cat /System/Kernel/fs/milkfs/scrub" "wait:$P"
+out "cat /System/Kernel/fs/milkfs/scrub" | grep -q "scrub: \[run [0-9]" && ok "Scrub now started a scrub" || bad "no scrub: $(out "cat /System/Kernel/fs/milkfs/scrub")"
 # The Vault: lock it from the window (it is not the volume the session lives on), see it listed as
 # locked, unlock it again with the passphrase.
-ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
-out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "the Vault was unlocked at boot" || bad "no unlocked Vault: $(out "cat /sys/fs/milkfs/lock")"
+ser "send:cat /System/Kernel/fs/milkfs/lock" "wait:$P"
+out "cat /System/Kernel/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "the Vault was unlocked at boot" || bad "no unlocked Vault: $(out "cat /System/Kernel/fs/milkfs/lock")"
 click 100 163                      # the Vault row in the sidebar
 q screendump "$T/vault.png"
 # While a program holds a file on it, Lock now is refused and the sheet names the program.
@@ -104,18 +104,18 @@ ser "send:echo x > /Volumes/Vault/x.txt" "wait:$P" "send:sleep 12 < /Volumes/Vau
 click 258 226 2                    # Lock now (refused)
 q screendump "$T/busy.png"
 q key ret sleep 0.5
-ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
-out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "a busy Vault was not locked" || bad "the Vault was locked while in use"
+ser "send:cat /System/Kernel/fs/milkfs/lock" "wait:$P"
+out "cat /System/Kernel/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "a busy Vault was not locked" || bad "the Vault was locked while in use"
 ser "send:sleep 13" "wait:$P"
 click 258 226 3                    # Lock now
-ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
-out "cat /sys/fs/milkfs/lock" | grep -q "Vault locked" && ok "Lock now locked the Vault" || bad "Vault not locked: $(out "cat /sys/fs/milkfs/lock")"
+ser "send:cat /System/Kernel/fs/milkfs/lock" "wait:$P"
+out "cat /System/Kernel/fs/milkfs/lock" | grep -q "Vault locked" && ok "Lock now locked the Vault" || bad "Vault not locked: $(out "cat /System/Kernel/fs/milkfs/lock")"
 click 100 163                      # the locked Vault row
 click 278 212                      # Unlock...
 q type "wrong-passphrase" key ret sleep 3 screendump "$T/wrong.png"
 q key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace key backspace
 q type "$PW" key ret sleep 4
-ser "send:cat /sys/fs/milkfs/lock" "wait:$P"
-out "cat /sys/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "Unlock with the passphrase mounted the Vault again" || bad "Vault still locked: $(out "cat /sys/fs/milkfs/lock")"
+ser "send:cat /System/Kernel/fs/milkfs/lock" "wait:$P"
+out "cat /System/Kernel/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "Unlock with the passphrase mounted the Vault again" || bad "Vault still locked: $(out "cat /System/Kernel/fs/milkfs/lock")"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "disk-test: PASS (screenshots in $T)"; else echo "disk-test: FAIL (logs and screenshots in $T)"; exit 1; fi

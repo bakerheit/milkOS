@@ -143,7 +143,7 @@ getpeername, and `sendmsg` (211) / `recvmsg` (212) with control messages. User s
 `rt::unix`.
 
 * **Names.** A path: `bind` makes a socket node (`S_IFSOCK`, `files list -l` shows `socket`, mode
-  0755 like Linux with umask 022) on tmpfs (`/tmp`, `/run`); connecting needs write
+  0755 like Linux with umask 022) on tmpfs (`/tmp`, `/System/Services/Sockets`); connecting needs write
   permission on it (fs/perm.rs) and, under the capability sandbox, an fs grant for it.
   Unlinking the node only hides the socket. An abstract name (`sun_path[0] == 0`) lives
   in a kernel table until the socket closes; the sandbox treats it like the network
@@ -170,12 +170,12 @@ getpeername, and `sendmsg` (211) / `recvmsg` (212) with control messages. User s
 
 **Design note (not done yet): system services over AF_UNIX.** The Powerbox and other
 services that today are `/dev` files (`/dev/wm`, `/dev/clipboard`, `/dev/audit`) could be
-sockets under `/run` (e.g. `/run/powerbox.sock`, root:admin 0660 or per-service groups)
+sockets under `/System/Services/Sockets` (e.g. `/System/Services/Sockets/powerbox.sock`, root:admin 0660 or per-service groups)
 served by a kernel thread or a user daemon. The server checks `SO_PEERCRED` (and the
 caller's `/proc/<pid>/status` `Caps:` line) instead of trusting whoever opened a device,
 answers requests with SCM_RIGHTS (the Powerbox hands back the chosen file as an fd, so
 the sandboxed caller never needs an fs grant), and gets one connection per client with a
-clean hangup when the client dies. Migrating means: a socket per service in `/run`, a small
+clean hangup when the client dies. Migrating means: a socket per service in `/System/Services/Sockets`, a small
 request/response protocol, and the clients (rt, the wm) switching from `open("/dev/..")`
 to `connect`.
 
@@ -271,7 +271,7 @@ is the to-do list for running a static musl program. `--features strace` logs ev
 Linux compatibility check: `tests/linux/linux-hello.c` is a freestanding C program
 (raw `svc #0` syscalls, no libc, no milkOS headers) built by `tests/linux/build.sh` with
 the host's bare-metal `aarch64-elf-gcc` as a static ET_EXEC at `0x400000`. The program is
-committed and packed as `/Commands/linux-hello`; `utest linux` runs it.
+committed and packed as `/System/Developer/linux-hello`; `utest linux` runs it.
 
 `proc/elf.rs`: ELF64 aarch64, `ET_EXEC` in the user range, or `ET_DYN` without
 `PT_INTERP` (static-pie, loaded at `IMAGE_BASE`). Each `PT_LOAD` gets exact R/W/X page
@@ -424,7 +424,7 @@ paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `space
 restarts it if it ever exits; init itself keeps only reaping orphans and the console
 shell. milkd reads every `/System/Settings/milk/services/<name>.service`, starts the enabled ones in
 dependency order, supervises them (restart with backoff), captures their stdout and
-stderr into the journal, and answers `svc` over `/run/milkd.sock`. Kernel threads are not
+stderr into the journal, and answers `svc` over `/System/Services/Sockets/milkd.sock`. Kernel threads are not
 services.
 
 ### The service file format
@@ -460,7 +460,7 @@ user = milk
 restart = always
 after = drop
 sandbox = fs=/Users/milk/Library/Clock:rw net=none spawn=0
-socket = /run/clockd.sock
+socket = /System/Services/Sockets/clockd.sock
 ```
 
 **Restart and backoff.** After an unexpected exit milkd waits 100 ms, then doubles the
@@ -494,7 +494,7 @@ a boot id, monotonic and wall time, pid, uid, unit, level (`err`, `warn`, `info`
 
 **`svc`** (`svc list`, `svc status [unit]`, `svc start|stop|restart <unit>`,
 `svc kill <unit> [sig]`, `svc logs <unit>` = `log -u <unit>`): talks to milkd over
-`/run/milkd.sock` (AF_UNIX stream, one text request per line, `SO_PEERCRED` decides):
+`/System/Services/Sockets/milkd.sock` (AF_UNIX stream, one text request per line, `SO_PEERCRED` decides):
 anyone may `list` / `status`; `start`, `stop`, `restart`, `kill` need root or the `admin`
 group. `kill` signals the unit's process (default SIGKILL) without stopping the unit, so
 its restart policy brings it back (how `scripts/driver-crash-test.sh` crashes a driver).
@@ -526,7 +526,8 @@ for a new crate) + one line in `initramfs.list`.
   cp, mv, rm, mkdir, touch and ln), `trash` and the `trashd` service (docs/filesystem.md,
   "Files and the Trash"); the rules are in `filekit`, which the kernel's Files app shares.
 * `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
-  `utest pipe | cow | proc | signal | all`).
+  `utest pipe | cow | proc | signal | all`), `fsstress`, `tcpbench`: test tools, in
+  `/System/Developer` (not on `PATH`; docs/filesystem.md, "The tree").
 
 ## Moving the window server into a kernel thread
 

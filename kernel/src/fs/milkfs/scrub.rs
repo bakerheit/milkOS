@@ -4,7 +4,7 @@
 //! The scrub itself is the milkfs crate's (`milkfs::scrub`, re-exported here); this is the
 //! thread, the rate limit, the status file and the audit log around it.
 //!
-//! A low-priority kernel thread (`milkfs-scrub`) runs it on request (`/sys/fs/milkfs/scrub`,
+//! A low-priority kernel thread (`milkfs-scrub`) runs it on request (`/System/Kernel/fs/milkfs/scrub`,
 //! `snap scrub`) and on a schedule (default: every 7 days, at the earliest 5 minutes after
 //! boot; the time of the last full scrub is kept in the superblock). It is rate limited
 //! (default 32 MB/s, a token bucket), reads at most 128 KiB per request, never holds the
@@ -163,7 +163,7 @@ fn run_all(why: &'static str) {
     ACTIVE.store(false, Ordering::Release);
 }
 
-/// `/sys/fs/milkfs/scrub` write: `start`, `stop`, `rate=MB/s` (0 = unlimited),
+/// `/System/Kernel/fs/milkfs/scrub` write: `start`, `stop`, `rate=MB/s` (0 = unlimited),
 /// `auto=off|on|7d|12h|...`.
 pub fn control(cmd: &str) -> Result<()> {
     for w in cmd.split_whitespace() {
@@ -233,7 +233,7 @@ fn every_text(every: u32) -> String {
     }
 }
 
-/// `/sys/fs/milkfs/scrub` read.
+/// `/System/Kernel/fs/milkfs/scrub` read.
 pub fn status_text() -> String {
     let s = status();
     let mut out = String::new();
@@ -353,7 +353,7 @@ impl ::milkfs::scrub::ScrubRunner for Runner<'_> {
 }
 
 /// Scrub one volume (`path`: where it is mounted, for naming files). `user`: a real
-/// volume (rate limit, `/sys/fs/milkfs/scrub` status, audit log); false for the
+/// volume (rate limit, `/System/Kernel/fs/milkfs/scrub` status, audit log); false for the
 /// self-test (before the scheduler runs).
 pub fn scrub_volume(
     v: &Arc<Volume>,

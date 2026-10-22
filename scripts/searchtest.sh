@@ -54,12 +54,12 @@ boot() { # name commands...
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
 G=/Users/milk/gen
 boot b1 "spot --wait" "spot --status" "spot --status" \
-  "spot uniq01234" "head -1 /sys/fs/search/query" "spot -n 10000 mango" "head -1 /sys/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
+  "spot uniq01234" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango" "head -1 /System/Kernel/fs/search/query" "spot -n 10000 mango kind:md" "spot -n 10000 in:d042" \
   "spot f0499" "spot -n 3 kind:txt cherry | where kind == txt | count" \
   "echo quokka sighting near the dam > /Users/milk/new-note.txt" "sleep 1" "spot quokka" \
   "files move /Users/milk/new-note.txt $G/d007/quokka.md" "sleep 1" "spot -l quokka" \
   "files delete --now $G/d007/quokka.md" "sleep 1" "spot quokka" \
-  "echo now > /sys/fs/milkfs/sync" "sleep 3" "spot --status"
+  "echo now > /System/Kernel/fs/milkfs/sync" "sleep 3" "spot --status"
 L1="$T/b1.log"
 st="$(out "$L1" "spot --status" | grep "origin" | head -1 | sed 's/^origin: *//')"
 echo "    first boot: $st"

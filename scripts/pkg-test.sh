@@ -83,9 +83,9 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:files list /Apps/snake' "$P" \
   'send:files list /Commands/snake' "$P" \
   "send:files list $CL/Apps" "$P" \
-  'send:cat /sys/fs/milkfs/clones' "$P" \
+  'send:cat /System/Kernel/fs/milkfs/clones' "$P" \
   'send:milk discard snake' 'wait:discarded' "$P" \
-  'send:cat /sys/fs/milkfs/clones' "$P" \
+  'send:cat /System/Kernel/fs/milkfs/clones' "$P" \
   'send:files list /Volumes' "$P" \
   'send:milk try moo2048' 'wait:milk: (then|[^\n]*error)' "$P" \
   'send:milk run-try moo2048 --selftest' 'wait:(moo2048: selftest|milk: )' "$P" \
@@ -128,7 +128,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
-  'send:echo now > /sys/fs/milkfs/sync' "$P" \
+  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 flip() { # flip one byte in the middle of a file (keeps its size)

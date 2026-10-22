@@ -849,7 +849,7 @@ fn help() {
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
     println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
     println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
-    println!("  hello fault utest");
+    println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): where COL OP V, sort-by COL [-r], select COL..,");
     println!(
         "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"

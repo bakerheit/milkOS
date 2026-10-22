@@ -32,22 +32,22 @@ D=/Volumes/Milk/d
 # hides it from free() below).
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:sleep 1" "wait:$P" \
-  "send:cat /sys/fs/milkfs/info" "wait:$P" \
+  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:files copy --reflink $D/big.bin $D/copy.bin" "wait:$P" \
-  "send:cat /sys/fs/milkfs/info" "wait:$P" \
+  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:echo patched >> $D/copy.bin" "wait:$P" \
   "send:files copy --reflink=auto $D/big.bin /tmp/auto.bin" "wait:$P" \
   "send:files copy --reflink $D/big.bin /tmp/always.bin" "wait:$P" \
   "send:files copy /tmp/auto.bin $D/dup1.bin" "wait:$P" \
   "send:files copy /tmp/auto.bin $D/dup2.bin" "wait:$P" \
-  "send:echo now > /sys/fs/milkfs/sync" "wait:$P" \
-  "send:cat /sys/fs/milkfs/info" "wait:$P" \
+  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:dedupe -n $D" "wait:$P" \
   "send:dedupe $D" "wait:$P" \
   "send:dedupe $D" "wait:$P" \
-  "send:cat /sys/fs/milkfs/info" "wait:$P" \
+  "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:snap check" "wait:$P" \
-  "send:echo now > /sys/fs/milkfs/sync" "wait:$P" \
+  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
   "send:echo REFLINK""-DONE" "wait:REFLINK-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
@@ -55,8 +55,8 @@ sleep 2
 kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 L="$(tr -d '\r' < "$LOG")"
-# Free blocks as printed by the N-th `cat /sys/fs/milkfs/info` typed at the shell.
-free() { echo "$L" | awk '/^msh:.*\$ cat \/sys\/fs\/milkfs\/info/{want=1} want && /^blocks:/{print; want=0}' |
+# Free blocks as printed by the N-th `cat /System/Kernel/fs/milkfs/info` typed at the shell.
+free() { echo "$L" | awk '/^msh:.*\$ cat \/System\/Kernel\/fs\/milkfs\/info/{want=1} want && /^blocks:/{print; want=0}' |
   sed -n "${1}p" | sed 's/.*total, \([0-9]*\) free.*/\1/'; }
 f1=$(free 1); f2=$(free 2); f3=$(free 3); f4=$(free 4)
 [ -n "$f1" ] && [ $((f1 - f2)) -lt 10 ] && ok "files copy --reflink of 2 MB used $((f1 - f2)) blocks (metadata only)" || bad "reflink space ($f1 -> $f2)"

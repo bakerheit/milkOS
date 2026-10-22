@@ -59,7 +59,7 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:cat /System/Settings/milk/drop/name" "wait:$P" \
   "send:uname -n" "wait:$P" \
   "send:milk list" "wait:$P" \
-  "send:echo now > /sys/fs/milkfs/sync" "wait:$P" \
+  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
   "send:echo UPGRADE""-DONE" "wait:UPGRADE-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 600); do [ -e "$T/done" ] && break; sleep 0.2; done

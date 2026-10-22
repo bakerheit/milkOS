@@ -4,7 +4,7 @@
 //!   versions restore FILE SNAPSHOT    put that version back (the current one is kept in a
 //!                                     snapshot first if it isn't in one already)
 //!
-//! Talks to /sys/fs/milkfs/versions and /sys/fs/milkfs/restore.
+//! Talks to /System/Kernel/fs/milkfs/versions and /System/Kernel/fs/milkfs/restore.
 
 #![no_std]
 #![no_main]
@@ -89,11 +89,11 @@ fn why(e: rt::Errno) -> &'static str {
 
 fn list(file: &str) -> i32 {
     let path = absolute(file);
-    if let Err(e) = write_ctl("/sys/fs/milkfs/versions", &path) {
+    if let Err(e) = write_ctl("/System/Kernel/fs/milkfs/versions", &path) {
         eprintln!("versions: {path}: {}", why(e));
         return 1;
     }
-    let text = read_all("/sys/fs/milkfs/versions").unwrap_or_default();
+    let text = read_all("/System/Kernel/fs/milkfs/versions").unwrap_or_default();
     let rows: Vec<Vec<&str>> = text
         .lines()
         .filter(|l| !l.starts_with('#'))
@@ -127,7 +127,10 @@ fn list(file: &str) -> i32 {
 
 fn restore(file: &str, snap: &str) -> i32 {
     let path = absolute(file);
-    match write_ctl("/sys/fs/milkfs/restore", &alloc::format!("{snap} {path}")) {
+    match write_ctl(
+        "/System/Kernel/fs/milkfs/restore",
+        &alloc::format!("{snap} {path}"),
+    ) {
         Ok(()) => {
             println!("versions: restored {path} from {snap}");
             0

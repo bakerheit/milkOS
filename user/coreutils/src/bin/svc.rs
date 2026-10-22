@@ -1,6 +1,6 @@
 //! svc list | status [UNIT] | start UNIT | stop UNIT | restart UNIT | kill UNIT [SIG] |
 //! reload | logs UNIT
-//! Talks to milkd over /run/milkd.sock. Anyone may list / status; start, stop, restart,
+//! Talks to milkd over /System/Services/Sockets/milkd.sock. Anyone may list / status; start, stop, restart,
 //! kill and reload need root or group admin (milkd checks the caller with SO_PEERCRED).
 //! `kill` signals the unit's process (default 9) without stopping the unit, so milkd
 //! restarts it per its policy (crash tests).
@@ -15,7 +15,7 @@ use rt::sys;
 use rt::unix::{self, Name};
 rt::main!(main);
 
-const SOCK: &str = "/run/milkd.sock";
+const SOCK: &str = "/System/Services/Sockets/milkd.sock";
 
 /// Send one request, return the reply lines (without the final ok / error line) or the error.
 fn ask(req: &str) -> Result<Vec<String>, String> {

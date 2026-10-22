@@ -56,7 +56,7 @@ pub trait Platform: Sync {
     /// One line of log (no trailing newline in `args`).
     fn log(&self, args: fmt::Arguments<'_>);
     /// Why the error about to be returned happened, in words (the kernel shows it next to
-    /// the errno in `/sys/fs/milkfs/error`). See [`fail`].
+    /// the errno in `/System/Kernel/fs/milkfs/error`). See [`fail`].
     fn set_reason(&self, why: &str);
     /// A new, unlocked lock of `kind`.
     fn new_lock(&self, kind: LockKind) -> Box<dyn RawLock>;

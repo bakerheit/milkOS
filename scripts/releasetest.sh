@@ -49,7 +49,7 @@ headless() { # name commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 headless h1 "uname -a" "cat /proc/version" "files list /Users/milk" "files list /Apps" "cat /Volumes/Mac/README.txt" \
-  "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /Users/milk/note.txt" "echo now > /sys/fs/milkfs/sync"
+  "echo nope > /Volumes/Mac/x.txt" "echo saved by the release test > /Users/milk/note.txt" "echo now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/h1.log")"
 [ -e "$T/h1.done" ] && ok "headless: boots to msh" || { bad "headless boot"; tail -5 "$T/h1.out"; }
 echo "$L" | grep -aq "milkfs: vd[a-z] mounted at /Volumes/Milk " && ok "the bundled Milk disk is mounted at /Volumes/Milk" || bad "Milk disk not mounted"

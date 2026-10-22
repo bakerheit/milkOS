@@ -49,11 +49,11 @@ boot() { # name commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 boot b1 \
-  "snap create s1" "files delete --now /Volumes/Milk/docs/old.bin" "echo now > /sys/fs/milkfs/sync" \
+  "snap create s1" "files delete --now /Volumes/Milk/docs/old.bin" "echo now > /System/Kernel/fs/milkfs/sync" \
   "snap scrub rate=0" "snap scrub" \
   "snap scrub rate=8" "snap scrub" \
-  "fsstress /Volumes/Milk/st 4 10" \
-  "snap scrub rate=16" "snap scrub start" "fsstress /Volumes/Milk/st2 4 10" "snap scrub status" "snap scrub rate=32"
+  "/System/Developer/fsstress /Volumes/Milk/st 4 10" \
+  "snap scrub rate=16" "snap scrub start" "/System/Developer/fsstress /Volumes/Milk/st2 4 10" "snap scrub status" "snap scrub rate=32"
 L="$(tr -d '\r' < "$T/b1.log")"
 echo "$L" | grep -a "^scrub: \[run [12]\] done" | sort -u | sed 's/^/    /'
 echo "$L" | grep -a -m1 "^scrub: \[run 1\] done" | grep -q " 0 error" && ok "clean volume: no errors" || bad "clean scrub"

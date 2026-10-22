@@ -6,13 +6,16 @@
 //! | `/Commands` | what you type in Terminal (`PATH`) |
 //! | `/Users/<name>` | homes: `/Users/milk` (persistent), `/Users/root` |
 //! | `/Volumes` | disks, USB sticks, the Mac's shared folder |
-//! | `/System` | the OS's own files: `Services`, `Startup`, `Settings`, `Fonts`, `Sounds`, `Music` |
+//! | `/System` | the OS's own files: `Services` (and their `Sockets`), `Startup`, `Settings`, `Kernel` (kernel controls), `Developer` (test tools), `Fonts`, `Sounds`, `Music` |
+//! | `/dev`, `/proc`, `/tmp` | Unix plumbing Linux and POSIX programs expect; hidden in listings |
 //!
 //! Two jobs live here, both run while a milkfs volume becomes the primary one (at boot, or
 //! when a login unlocks it), before its folders are bound over the RAM copies:
 //!
 //! * [`migrate`]: a volume made before this layout (`home/milk`, `Applications`,
 //!   `etc/milk/drop`, `etc/milk/net`) is moved over once, by renames inside the volume.
+//!   (`/run` and `/sys`, now `/System/Services/Sockets` and `/System/Kernel`, need nothing:
+//!   both are made at boot, never on a disk, and nothing a volume keeps names them.)
 //! * [`sync_builtin_apps`]: the apps that ship in the initramfs (unpacked into the RAM
 //!   `/Apps`) are copied into the volume's `Apps` folder, which is then bound onto `/Apps`,
 //!   so built-in and installed apps sit side by side in one folder. A copy is only
@@ -33,7 +36,13 @@ pub const COMMANDS: &str = "/Commands";
 pub const USERS: &str = "/Users";
 pub const SETTINGS: &str = "/System/Settings";
 pub const SERVICES: &str = "/System/Services";
+/// The services' AF_UNIX sockets (`milkd.sock`, `drop.sock`), made at boot (tmpfs).
+pub const SOCKETS: &str = "/System/Services/Sockets";
 pub const STARTUP: &str = "/System/Startup";
+/// sysfs: the kernel's controls and the hardware it was handed (`fs/milkfs/*`, `devices/`).
+pub const KERNEL: &str = "/System/Kernel";
+/// Test harnesses and developer tools (`utest`, `fault`, `linux-hello`, ...), not on PATH.
+pub const DEVELOPER: &str = "/System/Developer";
 
 /// Where the volume remembers which built-in apps it holds copies of.
 const BUILTIN_LIST: &str = "/.milkos/builtin-apps";

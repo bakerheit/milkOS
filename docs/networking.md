@@ -448,7 +448,7 @@ userland except the eth1 link itself and one tiny fs hook (`/System/Settings/mil
 (`identity.secret`, the seed, 0600 root; `identity.pub`; `name`; `known_peers`, root's
 trust list), made the first time root's `drop` runs. That is normally the `drop` service
 (milkd, as root) at boot. The identity is the machine's: other users' `drop` reads only the
-public half and has the daemon sign over `/run/drop.sock`, and each user keeps their own
+public half and has the daemon sign over `/System/Services/Sockets/drop.sock`, and each user keeps their own
 trust list in `~/.config/milk/drop/known_peers`. The model is in docs/security.md, "Milk
 Drop: one machine identity, per-user clients". On a machine with a
 Milk volume, `fs::init` binds `/Volumes/Milk/System/Settings/milk/drop` onto it
@@ -594,7 +594,7 @@ drop-bob-wait`), two desktops with linked eth1s on private images.
 
 **Test**: `scripts/drop-test.sh` (below).
 
-## Throughput (`scripts/net-bench.sh`, `/Commands/tcpbench`)
+## Throughput (`scripts/net-bench.sh`, `/System/Developer/tcpbench`)
 
 `tcpbench send HOST:PORT MIB | recv HOST:PORT | sink PORT | source PORT MIB` times one TCP
 transfer (`send` waits for the peer's close, so the time covers delivery).

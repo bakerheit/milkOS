@@ -185,7 +185,7 @@ pub fn save_reminders(p: &Paths, set: &ReminderSet) -> sys::Result<()> {
 /// A number that is the same for every process in this boot and different in the next one:
 /// timers store it so a running one from an earlier boot is not mistaken for a live one.
 pub fn boot_id() -> u64 {
-    const FILE: &str = "/run/boot-id";
+    const FILE: &str = "/System/Services/Sockets/boot-id";
     let read = || {
         sys::read_file(FILE).ok().and_then(|b| {
             core::str::from_utf8(&b)
@@ -200,7 +200,7 @@ pub fn boot_id() -> u64 {
         ^ sys::clock_ns(sys::CLOCK_MONOTONIC).rotate_left(21)
         ^ (sys::getpid() as u64) << 40)
         | 1;
-    mkdir_p("/run");
+    mkdir_p("/System/Services/Sockets");
     match sys::open_mode(FILE, sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL, 0o644) {
         Ok(fd) => {
             let _ = sys::write_all(fd, format!("{id}\n").as_bytes());

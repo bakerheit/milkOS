@@ -239,7 +239,7 @@ impl Welcome {
 
     fn run(&mut self, d: Do) {
         self.said = match d {
-            Do::Snapshot => match fsx::ctl_write("/sys/fs/milkfs/auto", "now") {
+            Do::Snapshot => match fsx::ctl_write("/System/Kernel/fs/milkfs/auto", "now") {
                 Ok(()) => {
                     files::show_path("timemachine:");
                     request(Request::OpenHere(super::super::window::App::Files));

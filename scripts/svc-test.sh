@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Services and the journal, on a private milkfs image, two boots:
 #   boot 1: `utest svc` (a crashing unit restarted with doubling backoff, failed
-#           dependencies reported, start/stop over /run/milkd.sock allowed for root and
+#           dependencies reported, start/stop over /System/Services/Sockets/milkd.sock allowed for root and
 #           admins and refused for others), httpd running as a milkd service, `svc`
 #           tables; `utest auth` (admin tickets: refused without one, granted with the
 #           documented test password `milk`, not inherited, revocable, kept across exec,
@@ -43,13 +43,13 @@ boot() { # name steps...
 trap 'kill -9 "${QPID:-}" 2>/dev/null || true' EXIT
 
 L1="$(boot b1 \
-  "send:utest svc" "wait:$P" \
-  "send:utest auth" "wait:$P" \
+  "send:/System/Developer/utest svc" "wait:$P" \
+  "send:/System/Developer/utest auth" "wait:$P" \
   "send:svc" "wait:$P" \
   "send:MILK_TABLE=1 svc list" "wait:$P" \
   "send:echo $MARK > /dev/journal" "wait:$P" \
   "send:sleep 3" "wait:$P" \
-  "send:echo now > /sys/fs/milkfs/sync" "wait:$P")"
+  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P")"
 echo "$L1" > "$T/b1.txt"
 echo "$L1" | grep -q "utest: PASS services" && ok "$(echo "$L1" | grep -m1 'utest: PASS services' | cut -c1-200)" || bad "utest svc"
 echo "$L1" | grep -q "utest: PASS authorisation" && ok "$(echo "$L1" | grep -m1 '(as milk) utest: PASS authorisation' | cut -c1-200)" || bad "utest auth"

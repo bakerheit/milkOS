@@ -8,7 +8,7 @@
 //!
 //! Data: `MILK_TABLE=1 milk search` (milk's structured output, parsed with rt::table), the
 //! index cache for versions and sizes, installed manifests (`/Apps/<name>/manifest`,
-//! whose `dock` colour becomes the tile colour), `/sys/fs/milkfs/clones` for "trying".
+//! whose `dock` colour becomes the tile colour), `/System/Kernel/fs/milkfs/clones` for "trying".
 //!
 //! Keys (also what scripted tests use): Up/Down select, i install, t try, o/Enter run the
 //! tried app (`milk run-try`: its clone as /, sandboxed), k keep,
@@ -191,7 +191,7 @@ fn load() -> Vec<Pkg> {
     ) else {
         return Vec::new();
     };
-    let clones = text("/sys/fs/milkfs/clones");
+    let clones = text("/System/Kernel/fs/milkfs/clones");
     let cache = text("/Apps/.milk/index.txt");
     t.rows
         .iter()

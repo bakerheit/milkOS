@@ -143,7 +143,7 @@ A desktop window (user/gui, MILK_WIN syscalls) over `/Commands/milk`. Use its do
 * The list comes from `MILK_TABLE=1 milk search` (the structured output, parsed with
   `rt::table`), plus the index cache (versions, size), installed manifests (`depends`, and
   the `dock` colour as the tile colour; packages that aren't installed get an accent picked
-  by a hash of the name) and `/sys/fs/milkfs/clones` (`try-<name>` means "trying").
+  by a hash of the name) and `/System/Kernel/fs/milkfs/clones` (`try-<name>` means "trying").
 * Rows: tile, name, description, and one badge: `installed` (matcha), `<ver> new` (honey,
   an upgrade), `trying` (blue), or the version. The card shows the details and the
   buttons Install, Try, Keep, Discard, Remove, Upgrade, each enabled only when it makes
@@ -205,10 +205,10 @@ same image runs moo2048 from the relinked `/Commands`, and `audit verify` is OK 
 
 `milk try NAME` installs into a clone volume mounted at `/Volumes/Milk-try-NAME`. To run
 the app *as if that clone were the system root*, the kernel now has per-process roots
-(`chroot(2)`, syscall 51) and a `/Commands/chroot` helper:
+(`chroot(2)`, syscall 51) and a `/System/Developer/chroot` helper:
 
 ```sh
-chroot /Volumes/Milk-try-NAME /Commands/<app> [args...]
+/System/Developer/chroot /Volumes/Milk-try-NAME /Commands/<app> [args...]
 ```
 
 `chroot DIR [CMD]` sets the calling process's root to `DIR`, `chdir`s to the new `/`, then
@@ -238,7 +238,7 @@ helper does the `chdir("/")`.
    same pid, same terminal, its exit status.
 
 `milk keep` removes `tmp/run-*` from the clone before promoting it, so scratch never lands
-on the live volume. Inside the jail there is no `/dev`, `/proc`, `/sys` or `/Commands` (the clone
+on the live volume. Inside the jail there is no `/dev`, `/proc`, `/System/Kernel` or `/Commands` (the clone
 is the user volume, which has none): static apps that use stdio, tty ioctls and the window
 syscalls work (fortune, snake, moo2048); an app that needs device nodes would need bind
 mounts inside the jail, which aren't wired. pkg-test checks it: snake's demo through

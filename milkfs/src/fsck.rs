@@ -1,5 +1,5 @@
 //! `check [--repair]`: consistency check of a mounted milkfs volume, and the repairs that
-//! are safe. Only on request (`/sys/fs/milkfs/check`, `snap check`): mount never repairs
+//! are safe. Only on request (`/System/Kernel/fs/milkfs/check`, `snap check`): mount never repairs
 //! beyond reclaiming inodes with no links left (deferred deletes of files that were open).
 //!
 //! Checked: both superblock slots; every live tree node and data block checksum; the

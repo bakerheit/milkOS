@@ -120,7 +120,7 @@ impl Sampler {
         }
         self.prev_irq = Some(cur);
         // The Milk volume's free space.
-        self.milk_blocks = text("/sys/fs/milkfs/info").lines().find_map(|l| {
+        self.milk_blocks = text("/System/Kernel/fs/milkfs/info").lines().find_map(|l| {
             let rest = l.strip_prefix("blocks:")?;
             let mut it = rest.split_whitespace();
             let total: u64 = it.next()?.parse().ok()?;

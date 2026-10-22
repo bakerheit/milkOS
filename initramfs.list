@@ -1,10 +1,11 @@
 # Extra files packed into the initramfs, on top of everything in rootfs/.
 # One per line:   <path in the image>   <host path, relative to the repo root>   [octal mode]
-# Example:        /Commands/hello       target/user/.../release/hello            755
+# Example:        /Commands/cat         target/user/.../release/cat              755
 # A missing host file is skipped with a cargo warning, so the kernel still builds
 # before the user programs do. See docs/filesystem.md ("The tree") for where things go:
 # an app (it has a window) in /Apps/<name>/, a command (you type it) in /Commands, a
-# service (it runs in the background, milkd starts it) in /System/Services.
+# service (it runs in the background, milkd starts it) in /System/Services, a test or
+# developer tool in /System/Developer.
 
 # The first program (PID 1).
 /System/Startup/init                              target/user/aarch64-unknown-none-softfloat/release/init       755
@@ -34,15 +35,10 @@
 
 # Commands: what Terminal finds on PATH (/Commands). The user/ workspace's command-line
 # programs; coreutils (user/coreutils/src/bin/*.rs) are one small program each.
-/Commands/hello                                   target/user/aarch64-unknown-none-softfloat/release/hello      755
 /Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
-/Commands/fault                                   target/user/aarch64-unknown-none-softfloat/release/fault      755
 /Commands/snap                                    target/user/aarch64-unknown-none-softfloat/release/snap       755
 /Commands/fetch                                   target/user/aarch64-unknown-none-softfloat/release/fetch      755
-/Commands/utest                                   target/user/aarch64-unknown-none-softfloat/release/utest      755
 /Commands/cat                                     target/user/aarch64-unknown-none-softfloat/release/cat        755
-/Commands/chroot                                  target/user/aarch64-unknown-none-softfloat/release/chroot     755
-/Commands/sandbox                                 target/user/aarch64-unknown-none-softfloat/release/sandbox    755
 /Commands/whoami                                  target/user/aarch64-unknown-none-softfloat/release/whoami     755
 /Commands/id                                      target/user/aarch64-unknown-none-softfloat/release/id         755
 /Commands/chmod                                   target/user/aarch64-unknown-none-softfloat/release/chmod      755
@@ -94,16 +90,24 @@
 /Commands/milk                                    target/user/aarch64-unknown-none-softfloat/release/milk       755
 /Commands/top                                     target/user/aarch64-unknown-none-softfloat/release/top        755
 /Commands/drop                                    target/user/aarch64-unknown-none-softfloat/release/drop       755
-/Commands/tcpbench                                target/user/aarch64-unknown-none-softfloat/release/tcpbench   755
 /Commands/netctl                                  target/user/aarch64-unknown-none-softfloat/release/netctl     755
 /Commands/versions                                target/user/aarch64-unknown-none-softfloat/release/versions   755
-/Commands/fsstress                                target/user/aarch64-unknown-none-softfloat/release/fsstress   755
 /Commands/dedupe                                  target/user/aarch64-unknown-none-softfloat/release/dedupe     755
 /Commands/spot                                    target/user/aarch64-unknown-none-softfloat/release/spot       755
 
+# Developer tools: test harnesses and demos, not things you type day to day. Not on PATH;
+# the test scripts run them by full path (/System/Developer/utest).
+/System/Developer/hello                           target/user/aarch64-unknown-none-softfloat/release/hello      755
+/System/Developer/fault                           target/user/aarch64-unknown-none-softfloat/release/fault      755
+/System/Developer/utest                           target/user/aarch64-unknown-none-softfloat/release/utest      755
+/System/Developer/chroot                          target/user/aarch64-unknown-none-softfloat/release/chroot     755
+/System/Developer/sandbox                         target/user/aarch64-unknown-none-softfloat/release/sandbox    755
+/System/Developer/tcpbench                        target/user/aarch64-unknown-none-softfloat/release/tcpbench   755
+/System/Developer/fsstress                        target/user/aarch64-unknown-none-softfloat/release/fsstress   755
+
 # Linux program compatibility: a static Linux/aarch64 program with no milkOS knowledge,
-# linked at 0x400000 (tests/linux/build.sh; the program is committed).
-/Commands/linux-hello                             tests/linux/bin/linux-hello                                   755
+# linked at 0x400000 (tests/linux/build.sh; the program is committed). `utest linux` runs it.
+/System/Developer/linux-hello                     tests/linux/bin/linux-hello                                   755
 
 # Font licences (the desktop's baked system fonts, kernel/src/sysfont.rs, and Unifont).
 /System/Fonts/FIGTREE-OFL.txt                     assets/fonts/FIGTREE-OFL.txt                                  644

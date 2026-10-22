@@ -174,7 +174,7 @@ s B1 \
   "where" \
   "ps | where name == msh | select name" \
   "help" \
-  "echo now > /sys/fs/milkfs/sync"
+  "echo now > /System/Kernel/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
 echo "$L1" > "$T/b1.txt"
 

@@ -1,4 +1,4 @@
-//! Reading /sys/fs/milkfs and /proc/mounts, and writing the control files.
+//! Reading /System/Kernel/fs/milkfs and /proc/mounts, and writing the control files.
 
 use alloc::format;
 use alloc::string::String;
@@ -10,7 +10,7 @@ use diskkit::scrub::{self, Status};
 use diskkit::snaps::{self, AutoSettings, Clone_, Snap};
 use rt::sys;
 
-const DIR: &str = "/sys/fs/milkfs";
+const DIR: &str = "/System/Kernel/fs/milkfs";
 
 pub fn text(p: &str) -> String {
     sys::read_file(p)
@@ -43,9 +43,9 @@ pub struct Disk {
     pub auto: Option<AutoSettings>,
     pub scrub: Option<Status>,
     pub locked: Vec<Locked>,
-    /// Encrypted volumes and whether they can be locked (`/sys/fs/milkfs/lock`).
+    /// Encrypted volumes and whether they can be locked (`/System/Kernel/fs/milkfs/lock`).
     pub lock: Vec<LockEntry>,
-    /// Every block device (`/sys/fs/milkfs/disks`), on a system that lists them. Its presence also
+    /// Every block device (`/System/Kernel/fs/milkfs/disks`), on a system that lists them. Its presence also
     /// means backups of an encrypted volume can be encrypted.
     pub disks: Option<Vec<DiskEntry>>,
     pub volumes: Vec<Volume>,
@@ -150,7 +150,7 @@ pub fn usage_of(path: &str) -> Option<Usage> {
     })
 }
 
-/// Why the last control write failed (`/sys/fs/milkfs/error`); read it right after the write.
+/// Why the last control write failed (`/System/Kernel/fs/milkfs/error`); read it right after the write.
 pub fn last_error() -> Option<ControlError> {
     fsinfo::parse_error(&text(&format!("{DIR}/error")))
 }

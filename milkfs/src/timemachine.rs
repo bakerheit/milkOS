@@ -7,12 +7,12 @@
 //! `daily` days. If the 30-entry snapshot table is full, the oldest auto snapshot goes first.
 //!
 //! Settings live in the superblock (so they survive reboots) and are changed through
-//! `/sys/fs/milkfs/auto`: write `on`, `off`, `interval=30s|15m|2h`, `keep=K`, `daily=D`,
+//! `/System/Kernel/fs/milkfs/auto`: write `on`, `off`, `interval=30s|15m|2h`, `keep=K`, `daily=D`,
 //! `now` (space separated). A snapshot costs one commit plus a superblock write: no data
 //! is copied.
 //!
 //! This is the policy and the snapshotting (pure, host-tested); the thread, the
-//! `/sys/fs/milkfs/auto` file and the last-run time are the kernel's
+//! `/System/Kernel/fs/milkfs/auto` file and the last-run time are the kernel's
 //! (`kernel/src/fs/milkfs/timemachine.rs`).
 
 use alloc::format;
@@ -184,7 +184,7 @@ pub fn interval_text(s: u64) -> String {
     }
 }
 
-/// An interval as `/sys/fs/milkfs/auto` takes it: `30s`, `15m`, `2h`, or a bare number
+/// An interval as `/System/Kernel/fs/milkfs/auto` takes it: `30s`, `15m`, `2h`, or a bare number
 /// of minutes.
 pub fn parse_interval(v: &str) -> Option<u64> {
     let (num, mult) = match v.as_bytes().last()? {

@@ -25,7 +25,7 @@ fn main(_args: &rt::Args) -> i32 {
         u[2],
         u[4]
     );
-    println!("  user space is running. Starting /Commands/hello, then the shell.");
+    println!("  user space is running. Starting /System/Developer/hello, then the shell.");
     println!();
 
     // Installed packages: recreate their /Commands links (/Commands is in RAM, /Apps is not).
@@ -43,7 +43,7 @@ fn main(_args: &rt::Args) -> i32 {
     // /System/Settings/milk/services (docs/processes.md, "Services"). init restarts milkd if it exits.
     start_milkd();
 
-    if let Ok(pid) = sys::spawn("/Commands/hello", &["hello", "from", "init"], ENV) {
+    if let Ok(pid) = sys::spawn("/System/Developer/hello", &["hello", "from", "init"], ENV) {
         wait_for(pid);
     }
     loop {
@@ -72,7 +72,7 @@ fn start_milkd() {
         Ok(pid) => {
             // SAFETY: init is single-threaded.
             unsafe { MILKD = pid };
-            println!("  milkd (pid {pid}): service manager, /run/milkd.sock");
+            println!("  milkd (pid {pid}): service manager, /System/Services/Sockets/milkd.sock");
         }
         Err(e) => println!("init: cannot start /System/Services/milkd: {e}"),
     }

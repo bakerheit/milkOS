@@ -39,7 +39,7 @@ args=("wait:$P" "send:sleep 1" "wait:$P")
 for c in \
   "df" "df -a" "df -h" "MILK_TABLE=1 df" \
   "df /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
-  "cat /Commands/* > /Volumes/Milk/big.bin" "echo now > /sys/fs/milkfs/sync" "wc -c /Volumes/Milk/big.bin" "df /Volumes/Milk" \
+  "cat /Commands/* > /Volumes/Milk/big.bin" "echo now > /System/Kernel/fs/milkfs/sync" "wc -c /Volumes/Milk/big.bin" "df /Volumes/Milk" \
   "snap create dfsnap" "df /Volumes/Milk/.snapshots/dfsnap" \
   "df /no/such/path"; do
   args+=("send:$c" "wait:$P")
@@ -60,7 +60,7 @@ fs_kb=$(( $(stat -f %z "$T/fs.img") / 1024 ))
 [ "$(echo "$DF" | col /Volumes/Milk 2)" = "$fs_kb" ] && ok "milkfs size = the image ($fs_kb K)" || bad "milkfs size: $(echo "$DF" | col /Volumes/Milk 2), want $fs_kb"
 [ "$(echo "$DF" | col /Volumes/Milk 1)" = milkfs ] && ok "milkfs type" || bad "milkfs type"
 echo "$DF" | grep -q " /Users/milk$" && bad "df repeats the /Users/milk bind" || ok "the /Users/milk bind isn't repeated"
-echo "$DF" | grep -qE " /(proc|sys|dev)$" && bad "proc/sys/dev listed without -a" || ok "proc, sysfs, devfs hidden without -a"
+echo "$DF" | grep -qE " /(proc|System/Kernel|dev)$" && bad "proc/sys/dev listed without -a" || ok "proc, sysfs, devfs hidden without -a"
 read -r fat_kb fat_free_kb < <(python3 - "$T/fat.img" <<'EOF'
 import struct, sys
 b = open(sys.argv[1], 'rb').read(1024)
@@ -82,7 +82,7 @@ P1="$(out "df /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp")"
 tmp=$(echo "$P1" | col /tmp 2)
 [ -n "$tmp" ] && [ "$tmp" -gt 0 ] && ok "tmpfs /tmp has a size ($tmp K)" || bad "tmpfs size"
 A="$(out "df -a")"
-echo "$A" | grep -qE "^proc +0 +0 +0 +- +/proc$" && echo "$A" | grep -qE "^sysfs +0 .* /sys$" && echo "$A" | grep -qE "^devfs +0 .* /dev$" \
+echo "$A" | grep -qE "^proc +0 +0 +0 +- +/proc$" && echo "$A" | grep -qE "^sysfs +0 .* /System/Kernel$" && echo "$A" | grep -qE "^devfs +0 .* /dev$" \
   && ok "df -a: proc, sysfs, devfs with zero sizes" || bad "df -a zero-size file systems"
 echo "$A" | grep -q "^milkfs .* /Users/milk$" && ok "df -a shows the bind too" || bad "df -a bind"
 out "df -h" | grep -q "^milkfs .*M .* /Volumes/Milk$" && ok "df -h: human sizes" || bad "df -h"

@@ -67,7 +67,7 @@ stays on top: an operation needs **both** the permission bits and the sandbox.
 * **Root (euid 0)** passes everything except the exec rule above.
 * **File systems without owners:** everything on FAT and the 9p Mac share shows as owned
   by the session user (the "mounting user"), set-ID bits ignored. Terminals (`/dev/console`,
-  `/dev/ttyN`) belong to the session user. `/proc` and `/sys` control files (owner
+  `/dev/ttyN`) belong to the session user. `/proc` and `/System/Kernel` control files (owner
   writable) are also writable by group **admin**; what a control write triggers (mounting a
   clone, a snapshot) runs as the kernel (`perm::as_kernel`), the check is at open.
 * `chroot` is allowed to anyone (it only narrows the view; `milk run-try` needs it) but
@@ -101,7 +101,7 @@ opens as the user logs in (FileVault style), binds its `/Users/milk` and `/Apps`
 and gets the ownership/layout fix-up. ENODEV (nothing locked) is quiet; EACCES (a
 different passphrase) is logged and the disk stays locked for `snap unlock`.
 **On `passwd`** (a user changing their own password, so the old one is known), the same
-change is tried on the primary volume (`/sys/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
+change is tried on the primary volume (`/System/Kernel/fs/milkfs/passwd`, `OLD\nNEW`): if the disk
 was unlocked with the old login password, its passphrase follows the new one. It is skipped
 when the new password is under 8 characters (milkfs's minimum), when root sets someone's
 password, and quietly does nothing for an unencrypted or differently protected disk.
@@ -248,7 +248,7 @@ credentials before every control in `fs::milkfs::DESTRUCTIVE` (docs/filesystem.m
 only), `auto` (its `keep=` prunes snapshots), `lock`, `passwd`, and `send`, `bench`,
 `treetest`, `dedupe` (they write and delete files anywhere as the kernel). `proc::auth::init`
 installs the ticket rule with `fs::milkfs::set_authorizer`; a refusal is EPERM, and
-`set_reason` puts "needs an administrator's authorisation ..." in `/sys/fs/milkfs/error`,
+`set_reason` puts "needs an administrator's authorisation ..." in `/System/Kernel/fs/milkfs/error`,
 which `snap` prints. Opening the control files still needs the usual admin-group write
 access; the ticket is an extra requirement on top (a non-admin's process with a ticket
 still can't open them). Harmless controls (`snapshot`, `clone`, `scrub`, `sync`, listings)
@@ -291,7 +291,7 @@ password, Cancel / OK. The password goes from the panel to `auth::grant` and nev
 the requesting process. With no prompt registered (no desktop) op 0 fails with
 `EOPNOTSUPP` at once and the program should point at `auth`. If the panel ever moves into a
 user-space window server, the same hook becomes an AF_UNIX service under milkd
-(`/run/authd.sock`, SO_PEERCRED-checked so only that service can answer); the syscall
+(`/System/Services/Sockets/authd.sock`, SO_PEERCRED-checked so only that service can answer); the syscall
 side doesn't change.
 
 **Terminal fallback: `auth`.** `auth [-S] [-u ADMIN] COMMAND [ARGS...]` asks for an
@@ -348,7 +348,7 @@ recv` failed writing the identity. Two models were possible:
 processes read the secret: the `drop` service (milkd, `user = root`) and root's own
 `drop`.
 
-**The daemon's request socket** `/run/drop.sock` (AF_UNIX stream, 0666, one request line per
+**The daemon's request socket** `/System/Services/Sockets/drop.sock` (AF_UNIX stream, 0666, one request line per
 connection, a client gets 2 s), checked with SO_PEERCRED:
 
 | request | who | does |

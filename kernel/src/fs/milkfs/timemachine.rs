@@ -1,5 +1,5 @@
 //! "Time Machine" in the kernel: the `timemachine` thread that snapshots the primary
-//! volume on its schedule, and `/sys/fs/milkfs/auto`. The policy and the snapshotting are
+//! volume on its schedule, and `/System/Kernel/fs/milkfs/auto`. The policy and the snapshotting are
 //! in the milkfs crate (`milkfs::timemachine`, re-exported here).
 
 use alloc::format;
@@ -60,7 +60,7 @@ pub fn start() {
     );
 }
 
-/// `/sys/fs/milkfs/auto`, read side.
+/// `/System/Kernel/fs/milkfs/auto`, read side.
 pub fn status() -> String {
     let Some(v) = super::volume() else {
         return String::from("no milkfs volume\n");
@@ -87,7 +87,7 @@ pub fn status() -> String {
     s
 }
 
-/// `/sys/fs/milkfs/auto`, write side.
+/// `/System/Kernel/fs/milkfs/auto`, write side.
 pub fn control(cmd: &str) -> Result<()> {
     let v = super::volume().ok_or(Errno::ENODEV)?;
     let mut c = v.state.lock().auto_config();

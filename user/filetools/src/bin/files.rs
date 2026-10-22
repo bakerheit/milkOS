@@ -750,8 +750,10 @@ fn list(c: &mut Ctx, o: &Opts, paths: &[&str]) {
             }
         };
         let mut v: Vec<(String, Stat)> = Vec::new();
+        let abs = path::resolve(&c.cwd, d);
         for (n, _) in list {
-            if n == "." || n == ".." || (n.starts_with('.') && !o.all) {
+            // Dot files, and /dev /proc /tmp in the root (filekit::path::hidden).
+            if n == "." || n == ".." || (!o.all && path::hidden(&abs, &n)) {
                 continue;
             }
             let st = sys::stat_path(&path::join(d, &n), false).unwrap_or_default();

@@ -1094,7 +1094,7 @@ impl App {
         };
         match data::ctl("diff", &snaps::diff_request(&name, None)) {
             Ok(()) => {
-                let d = snaps::parse_diff(&data::text("/sys/fs/milkfs/diff"));
+                let d = snaps::parse_diff(&data::text("/System/Kernel/fs/milkfs/diff"));
                 let head = format!(
                     "{name} compared with the live volume: {} change{}",
                     d.changes.len(),
@@ -1138,7 +1138,7 @@ impl App {
         }
     }
 
-    /// Show why a control write failed: the kernel's own reason from `/sys/fs/milkfs/error` when
+    /// Show why a control write failed: the kernel's own reason from `/System/Kernel/fs/milkfs/error` when
     /// it has one (with the processes holding a volume when a lock is refused), else our words.
     pub fn fail(&mut self, title: &str, errno: i32) {
         let mut body: Vec<String> = Vec::new();

@@ -7,7 +7,7 @@
 //!   **abstract** name (`sun_path[0] == 0`, a kernel-only namespace that vanishes with the
 //!   socket; the sandbox treats it like the network: denied under `net=none`). Unlinking
 //!   the path doesn't close the socket, it just can't be found any more. Socket nodes can
-//!   only be made on tmpfs (`/tmp`, `/run`).
+//!   only be made on tmpfs (`/tmp`, `/System/Services/Sockets`).
 //! * **SCM_RIGHTS**: `sendmsg` can carry open files; the receiver gets new fds for the
 //!   same open file descriptions (shared offset and flags), like dup across processes. On
 //!   a stream they arrive with the first byte of their write; a read never runs past the

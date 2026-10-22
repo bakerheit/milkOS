@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # milkfs B+tree shape under mass create/delete: boots a fresh private image, has the
 # kernel create N empty files (default 50000) in one directory, delete 99 of every 100,
-# then the rest (/sys/fs/milkfs/treetest), and prints the live tree's height, node count,
+# then the rest (/System/Kernel/fs/milkfs/treetest), and prints the live tree's height, node count,
 # fill and underfull nodes after each step. Then the host check. Fresh /tmp directory;
 # only the qemu started here is killed.
 set -euo pipefail
@@ -24,7 +24,7 @@ QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:echo /Volumes/Milk/tt $N > /sys/fs/milkfs/treetest" "wait:$P" \
+  "send:echo /Volumes/Milk/tt $N > /System/Kernel/fs/milkfs/treetest" "wait:$P" \
   "send:echo TREE""-DONE" "wait:TREE-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 3000); do [ -e "$T/done" ] && break; sleep 0.2; done

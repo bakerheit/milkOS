@@ -906,7 +906,9 @@ impl Desktop {
         } else if path.to_ascii_lowercase().ends_with(".wav") && crate::fs::stat(&path).is_ok() {
             apps::music::play_path(&path);
             self.open(App::Music);
-        } else if (path.starts_with("/Commands/") || builtin_app_program(&path))
+        } else if (path.starts_with("/Commands/")
+            || path.starts_with("/System/Developer/")
+            || builtin_app_program(&path))
             && crate::fs::stat(&path).is_ok()
         {
             self.launch(&path);

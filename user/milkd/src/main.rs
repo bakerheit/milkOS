@@ -3,7 +3,7 @@
 //! Started by init (PID 1) as root. Reads /System/Settings/milk/services/*.service, starts the enabled
 //! units in dependency order as their declared users with their sandbox, restarts them
 //! with backoff, forwards their stdout / stderr to the journal (/dev/journal), and serves
-//! `svc` on /run/milkd.sock (AF_UNIX, SO_PEERCRED: anyone may list / status, start / stop /
+//! `svc` on /System/Services/Sockets/milkd.sock (AF_UNIX, SO_PEERCRED: anyone may list / status, start / stop /
 //! restart / reload need root or group admin). One thread, an epoll loop.
 
 #![no_std]
@@ -21,7 +21,7 @@ use rt::{sys, users};
 rt::main!(main);
 
 const DIR: &str = "/System/Settings/milk/services";
-const SOCK: &str = "/run/milkd.sock";
+const SOCK: &str = "/System/Services/Sockets/milkd.sock";
 const ADMIN_GID: u32 = 80;
 const BACKOFF_START_MS: u64 = 100;
 const BACKOFF_MAX_MS: u64 = 30_000;
@@ -975,7 +975,7 @@ fn main(_args: &rt::Args) -> i32 {
         rt::eprintln!("milkd: epoll_create1 failed");
         return 1;
     };
-    let _ = sys::mkdir("/run", 0o755);
+    let _ = sys::mkdir("/System/Services/Sockets", 0o755);
     let _ = sys::unlink(SOCK);
     let listener =
         unix::socket(unix::SOCK_STREAM | unix::SOCK_CLOEXEC | unix::SOCK_NONBLOCK).unwrap_or(-1);

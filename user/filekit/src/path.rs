@@ -135,6 +135,18 @@ pub fn is_within(inner: &str, outer: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// The Unix plumbing at the top of the tree: Linux and POSIX programs expect `/dev`,
+/// `/proc` and `/tmp` there, so they stay, but listings of `/` leave them out (`files list`
+/// without `--all`, Files). Everything milkOS's own code uses lives under `/System`.
+pub const HIDDEN_AT_ROOT: &[&str] = &["dev", "proc", "tmp"];
+
+/// Does a listing of `dir` leave `name` out unless asked for everything? Dot files
+/// everywhere, and [`HIDDEN_AT_ROOT`] in the root. `dir` is absolute (any spelling of the
+/// root counts: `/`, `//`, `/.`, `/System/..`).
+pub fn hidden(dir: &str, name: &str) -> bool {
+    name.starts_with('.') || (HIDDEN_AT_ROOT.contains(&name) && resolve("/", dir) == "/")
+}
+
 /// A new name for `files rename` (a name, not a path). Err is the message.
 pub fn check_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -266,6 +278,15 @@ mod tests {
         assert!(check_name("a/b").unwrap_err().contains("files move"));
         assert!(check_name("..").is_err());
         assert!(check_name("").is_err());
+    }
+
+    #[test]
+    fn hiding() {
+        assert!(hidden("/", "dev") && hidden("/", "proc") && hidden("/", "tmp"));
+        assert!(hidden("//", "tmp") && hidden("/.", "proc") && hidden("/System/..", "dev"));
+        assert!(!hidden("/", "System") && !hidden("/", "Apps") && !hidden("/", "Volumes"));
+        assert!(!hidden("/Users/milk", "tmp") && !hidden("/System", "dev"));
+        assert!(hidden("/Users/milk", ".Trash") && hidden("/", ".milkos"));
     }
 
     #[test]

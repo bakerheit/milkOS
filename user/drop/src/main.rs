@@ -15,7 +15,7 @@
 //!
 //! Trust: every machine has an Ed25519 identity (/System/Settings/milk/drop, made on first use from
 //! the kernel CSPRNG). It is root's: the daemon (a root service) holds the secret and
-//! signs hellos and offers for other users' `drop` over /run/drop.sock (SO_PEERCRED;
+//! signs hellos and offers for other users' `drop` over /System/Services/Sockets/drop.sock (SO_PEERCRED;
 //! renaming and rotating need an administrator). Each user trusts peers on their own
 //! (~/.config/milk/drop/known_peers); files land in that user's ~/Downloads, theirs. Each connection makes fresh X25519 keys; both sides sign a hello
 //! transcript (both nonces, both identity keys, both X25519 keys), so the identities
@@ -460,7 +460,7 @@ fn shared_tmp() {
 /// The daemon's request socket (anyone may connect; requests are checked by SO_PEERCRED).
 fn control_socket() -> Res<i32> {
     use rt::unix::{self, Name};
-    let _ = sys::mkdir("/run", 0o755);
+    let _ = sys::mkdir("/System/Services/Sockets", 0o755);
     let _ = sys::unlink(ident::SOCK);
     let l = unix::socket(unix::SOCK_STREAM | unix::SOCK_CLOEXEC)
         .map_err(|e| alloc::format!("socket: {e}"))?;
@@ -470,7 +470,7 @@ fn control_socket() -> Res<i32> {
     Ok(l)
 }
 
-/// One request on /run/drop.sock: read a line (a client gets 2 s), answer, hang up.
+/// One request on /System/Services/Sockets/drop.sock: read a line (a client gets 2 s), answer, hang up.
 fn serve_control(l: i32) {
     use rt::unix;
     let Ok(c) = unix::accept(l, unix::SOCK_CLOEXEC) else {

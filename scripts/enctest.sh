@@ -159,7 +159,7 @@ IMG="$BLANK" EXTRA_DISKS="" boot b4 - \
   "print made in milkOS: $CANARY-3 > /Volumes/Fresh/fresh.txt" "snap mkfs vda Again --force" \
   "text show /System/Kernel/fs/milkfs/disks" "print now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/b4.log")"
-D4() { echo "$L" | awk -v n="$1" '/\$ text show \/System\/Kernel\/fs\/milkfs\/disks$/{c++; on=(c==n); next} on && /^msh:/{on=0} on'; }
+D4() { echo "$L" | awk -v n="$1" '/(^|\$ )text show \/System\/Kernel\/fs\/milkfs\/disks$/{c++; on=(c==n); next} on && /^msh:/{on=0} on'; }
 D4 1 | grep -q "^vda 25165824 rw other$" && ok "disks: the blank disk (24 MiB, no milkfs)" || bad "disks before mkfs: $(D4 1)"
 echo "$L" | grep -aq "^snap: vda formatted as an encrypted milkfs volume" && ok "snap mkfs --encrypt formats it" || bad "snap mkfs --encrypt"
 REC4="$(echo "$L" | sed -n 's/^snap: recovery key: //p' | head -1)"

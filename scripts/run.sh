@@ -14,7 +14,7 @@ ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 # the kernel a device tree pointer (x0) for Image boots.
 KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
-DISPLAY_ARGS=(-device ramfb -display cocoa)
+DISPLAY_ARGS=(-device virtio-gpu-device -display cocoa)
 [ "${1:-}" = headless ] && DISPLAY_ARGS=(-display none)
 # virtio-input keyboard + tablet (absolute pointer); modern virtio-mmio (qemu defaults to legacy).
 INPUT_ARGS=(-global virtio-mmio.force-legacy=false

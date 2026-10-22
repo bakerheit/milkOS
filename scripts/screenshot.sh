@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot milkOS headless with ramfb, wait, and save the screen as a PNG (via the qemu monitor).
+# Boot milkOS headless with virtio-gpu, wait, and save the screen as a PNG (via the qemu monitor).
 #   scripts/screenshot.sh [out.png] [seconds-to-wait] [extra qemu args...]
 # Defaults: /tmp/milk-screen.png after 4 s (the boot splash lasts ~1 s). Prints the serial log
 # path too. To see the splash itself, pass a short wait like 0.5.
@@ -31,7 +31,7 @@ MILK_HTTP_PORT= milk_net_args
 
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
-  -device ramfb -display none \
+  -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" "${NET_ARGS[@]}" \

@@ -3,9 +3,9 @@
 
 use core::fmt::Write;
 
+use crate::display;
 use crate::font;
 use crate::gfx::{DrawTarget, Surface};
-use crate::ramfb;
 
 use super::theme::*;
 
@@ -54,11 +54,11 @@ impl Write for Fixed {
 pub fn panic_screen(info: &core::panic::PanicInfo) {
     // Other CPUs keep running: stop the compositor from painting over the card.
     super::FROZEN.store(true, core::sync::atomic::Ordering::SeqCst);
-    let Some(ptr) = ramfb::framebuffer() else {
+    let Some(ptr) = display::framebuffer() else {
         return;
     };
     // SAFETY: the static framebuffer; we are panicking, nothing else will draw again.
-    let (fw, fh) = ramfb::size();
+    let (fw, fh) = display::size();
     let mut fb = unsafe { Surface::from_raw(ptr, fw, fh, fw) };
     let mut msg = Fixed {
         buf: [0; 1024],
@@ -106,4 +106,5 @@ pub fn panic_screen(info: &core::panic::PanicInfo) {
         255,
         1,
     );
+    display::sync_panic();
 }

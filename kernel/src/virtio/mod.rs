@@ -3,8 +3,11 @@
 //! [`init`] walks the 32 virtio-mmio slots of qemu `virt` and hands each device it finds to
 //! its driver. Drivers so far: [`input`] (keyboard, tablet),
 //! [`blk`] (disks, registered with `fs::blockdev`), [`net`] (eth0 for `crate::net`), [`sound`] (PCM output for `crate::audio`), [`rng`] (entropy for `crate::crypto::rng`).
+//! [`gpu`] (the display) is not attached here: `display::init` brings it up earlier, so the
+//! walk below leaves it alone.
 
 pub mod blk;
+pub mod gpu;
 pub mod input;
 pub mod mmio;
 pub mod net;

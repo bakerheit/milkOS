@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot milkOS headless with ramfb + virtio keyboard/tablet, drive input over QMP, save the screen.
+# Boot milkOS headless with virtio-gpu + virtio keyboard/tablet, drive input over QMP, save the screen.
 #   scripts/input-test.sh [out.png] [qmp.py commands...]
 # Default out: /tmp/milk-input.png. Without commands it types a line, moves the pointer and clicks
 # (see DEFAULT below). Waits for the boot self-test to finish before sending anything.
@@ -27,7 +27,7 @@ milk_share_args
 
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
-  -device ramfb -display none \
+  -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" \

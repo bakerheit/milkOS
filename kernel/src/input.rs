@@ -7,7 +7,7 @@
 //! pointer and button state and turns key reports into typed [`KeyEvent`]s with the US
 //! layout applied.
 //!
-//! Coordinates are screen pixels, (0, 0) top left, clamped to [`screen_size`] (the ramfb
+//! Coordinates are screen pixels, (0, 0) top left, clamped to [`screen_size`] (the display
 //! size by default).
 //!
 //! Locking: one [`SpinLock`] around the state and queue. Producers run in IRQ context (IRQs
@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 pub use keymap::KeyCode;
 
-use crate::ramfb;
+use crate::display;
 use crate::sync::{FnSlot, SpinLock};
 
 /// Modifier state carried by every key event.
@@ -225,10 +225,10 @@ impl State {
 static STATE: SpinLock<State> = SpinLock::new(State {
     held: 0,
     caps: false,
-    x: ramfb::WIDTH as i32 / 2,
-    y: ramfb::HEIGHT as i32 / 2,
-    width: ramfb::WIDTH as i32,
-    height: ramfb::HEIGHT as i32,
+    x: display::WIDTH as i32 / 2,
+    y: display::HEIGHT as i32 / 2,
+    width: display::WIDTH as i32,
+    height: display::HEIGHT as i32,
     buttons: 0,
     queue: [None; QUEUE_LEN],
     head: 0,
@@ -300,7 +300,7 @@ pub fn pointer() -> (i32, i32) {
     (s.x, s.y)
 }
 
-/// Pointer coordinate space (defaults to the ramfb size).
+/// Pointer coordinate space (defaults to the boot display size).
 pub fn screen_size() -> (i32, i32) {
     let s = STATE.lock();
     (s.width, s.height)

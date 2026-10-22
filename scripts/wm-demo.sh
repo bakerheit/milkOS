@@ -48,7 +48,7 @@ fi
 
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -rtc base=localtime \
   -kernel "$KERNEL" -serial "file:$LOG" \
-  -device ramfb -display none \
+  -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   -fw_cfg "name=opt/milkos/demo,string=$DEMO" "${DISK_ARGS[@]}" "${NET_ARGS[@]}" ${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"} \

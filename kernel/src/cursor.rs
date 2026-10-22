@@ -1,9 +1,10 @@
-//! The mouse cursor: a small arrow sprite alpha-blended straight onto the ramfb framebuffer.
+//! The mouse cursor: a small arrow sprite alpha-blended straight onto the framebuffer.
 //!
 //! It saves the pixels under it before drawing and puts them back before it moves, so it
 //! never damages what is underneath. Anything else that draws on the framebuffer must take
 //! the cursor off first, or it would draw over the sprite (and the saved pixels would go
-//! stale): wrap such drawing in a [`suspend`] guard. The console (`sink.rs`) does.
+//! stale): wrap such drawing in a [`suspend`] guard. The console (`sink.rs`) does. Every
+//! change goes through the display protocol (`display::wait`, draw, `display::sync`).
 //!
 //! Self-contained on purpose: once a compositor exists, the cursor becomes its top layer and
 //! this module either goes away or keeps only the sprite.
@@ -16,8 +17,8 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::display::{self, HEIGHT, WIDTH};
 use crate::gfx::{Color, blend};
-use crate::ramfb::{self, HEIGHT, WIDTH};
 use crate::sync::SpinLock;
 
 /// The arrow: `X` outline, `.` fill, anything else transparent. Hotspot is the tip (0, 0).
@@ -142,6 +143,7 @@ impl Cursor {
             return;
         }
         let (ox, oy) = (self.x - HOTSPOT.0, self.y - HOTSPOT.1);
+        display::wait();
         let fb = self.fb;
         let save = &mut self.save;
         for_each_px(ox, oy, |si, fi| {
@@ -158,12 +160,14 @@ impl Cursor {
             }
         });
         self.drawn_at = Some((ox, oy));
+        display::sync();
     }
 
     fn erase(&mut self) {
         let Some((ox, oy)) = self.drawn_at.take() else {
             return;
         };
+        display::wait();
         let fb = self.fb;
         let save = &self.save;
         for_each_px(ox, oy, |si, fi| {
@@ -172,12 +176,13 @@ impl Cursor {
                 unsafe { write_volatile(fb.add(fi), save[si]) };
             }
         });
+        display::sync();
     }
 }
 
 /// Show the cursor at the current pointer position. Does nothing without a framebuffer.
 pub fn init() {
-    let Some(fb) = ramfb::framebuffer() else {
+    let Some(fb) = display::framebuffer() else {
         return;
     };
     let (x, y) = crate::input::pointer();

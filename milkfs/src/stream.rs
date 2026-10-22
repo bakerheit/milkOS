@@ -40,7 +40,7 @@ use super::format::*;
 use super::items::{LIVE, clone_view};
 use super::snap::{SnapInfo, check_snap_name};
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 pub const STREAM_MAGIC: &[u8; 8] = b"MILKSTRM";
 pub const STREAM_VERSION: u32 = 1;
@@ -414,6 +414,8 @@ impl<R: FnMut(&mut [u8]) -> Result<usize>> Decoder<R> {
         Ok(body)
     }
 
+    /// The next record (a fallible read, so not an `Iterator`).
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Record> {
         let rec = self.raw()?;
         let (t, len) = (rec[0], le32(&rec[4..]) as usize);

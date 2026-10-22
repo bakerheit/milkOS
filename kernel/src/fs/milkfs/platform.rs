@@ -42,6 +42,9 @@ impl Platform for Kernel {
     fn log(&self, args: fmt::Arguments<'_>) {
         crate::kprintln!("{args}");
     }
+    fn set_reason(&self, why: &str) {
+        super::set_reason(why);
+    }
     fn new_lock(&self, kind: LockKind) -> Box<dyn RawLock> {
         match kind {
             LockKind::Sleeping => Box::new(Sleeping(Mutex::new(()))),

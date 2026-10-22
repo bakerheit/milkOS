@@ -41,7 +41,7 @@ use super::crypt::VolumeKey;
 use super::format::*;
 use super::items::{LIVE, clone_view};
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 const PH_LIVE: u8 = 0;
 const PH_SNAP: u8 = 1;
@@ -237,7 +237,7 @@ impl State {
         self.set_branched();
         let state = ConvertState {
             total: used,
-            started: crate::fs::clock::now().sec.max(0) as u64,
+            started: crate::platform::now().sec.max(0) as u64,
             ..ConvertState::default()
         };
         self.conv = Some(ConvRun {
@@ -404,7 +404,7 @@ impl State {
                         copy.push(i);
                     }
                     None => {
-                        crate::kprintln!("milkfs: convert: checksum mismatch in block {b}");
+                        crate::log!("milkfs: convert: checksum mismatch in block {b}");
                         return Err(Errno::EIO);
                     }
                 }
@@ -759,7 +759,7 @@ impl State {
             return r;
         }
         if let Err(e) = r {
-            crate::kprintln!("milkfs: convert: a batch failed: {e}");
+            crate::log!("milkfs: convert: a batch failed: {e}");
             return Err(e);
         }
         if let Some(c) = self.conv.as_mut() {
@@ -782,9 +782,7 @@ impl State {
     fn verify_done(&mut self, st: &mut ConvertState) -> Result<Step> {
         let left = self.conv.as_ref().unwrap().left;
         if left > 0 {
-            crate::kprintln!(
-                "milkfs: convert: {left} block(s) still in the old form: another pass"
-            );
+            crate::log!("milkfs: convert: {left} block(s) still in the old form: another pass");
             st.passes += 1;
             st.phase = PH_LIVE;
             st.tree = 0;
@@ -840,7 +838,7 @@ impl State {
         self.maybe_unbranch();
         self.sweep()?;
         if let Some(s) = done {
-            crate::kprintln!(
+            crate::log!(
                 "milkfs: {} done: {} block(s) rewritten{}",
                 if to_sealed {
                     "encryption"

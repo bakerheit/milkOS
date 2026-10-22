@@ -1,35 +1,26 @@
 //! milkfs v0: a copy-on-write file system with instant snapshots. See
 //! `docs/filesystem.md` ("milkfs") for the format and the design.
 //!
-//! - `format`: on-disk structures (superblock, nodes, dead lists, items), xxh64.
-//! - `store`: block allocation (free map rebuilt at mount), birth-time release rules.
-//! - `btree`: the CoW B+tree.
-//! - `volume`: transaction / commit, mount (mark + check + orphan reclaim), mkfs.
-//! - `items`: inodes, directory entries, extents, file data on top of the tree.
-//! - `snap`: snapshot create / delete / rollback.
+//! The file system itself is the milkfs crate (`<repo>/milkfs`: format, store, B+tree,
+//! volume, items, snapshots, clones, diff, send / receive, encryption, check, scrub), its
+//! modules re-exported here under their old paths. This is the kernel's side:
 //! - `inode`: the VFS objects (`Volume`, `MilkInode`, `.snapshots`).
+//! - `platform`: the kernel as the crate's `Platform` (clock, RNG, scrypt, log, locks).
+//! - `scrub`, `timemachine`: their kernel threads and `/sys/fs/milkfs` files.
+//! - `crashtest`: the crash-test modes (power cuts, the writer workload, the check).
 //!
 //! Kernel API: [`mkfs`], [`probe`], [`mount`], [`automount`], [`snapshot`], [`snapshots`],
 //! [`delete_snapshot`], [`rollback`], [`sync`], [`info`]. Shell API: `/sys/fs/milkfs/*`.
 
-pub mod btree;
-pub mod clone;
-pub mod convert;
+pub use ::milkfs::{
+    btree, clone, convert, crypt, diff, format, fsck, items, snap, stream, versions, volume,
+};
+
 pub mod crashtest;
-pub mod crypt;
-pub mod diff;
-pub mod format;
-pub mod fsck;
 pub mod inode;
-pub mod items;
 pub mod platform;
 pub mod scrub;
-pub mod snap;
-pub mod store;
-pub mod stream;
 pub mod timemachine;
-pub mod versions;
-pub mod volume;
 
 use alloc::format;
 use alloc::string::String;

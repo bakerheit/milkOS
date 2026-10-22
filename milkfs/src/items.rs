@@ -12,7 +12,7 @@ use super::btree::{self, Child};
 use super::format::*;
 use super::store::Store;
 use super::volume::State;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 pub const LIVE: u64 = 0;
 /// Views with this bit are clones (low 32 bits = clone id); other non-zero views are
@@ -621,7 +621,7 @@ impl State {
     /// data goes, then it shares every block of `src` (small inline data is just copied).
     /// Returns the size `dst` must get. The caller updates the inode.
     pub fn reflink(&mut self, src: u64, dst: u64) -> Result<u64> {
-        use crate::fs::node::{S_IFDIR, S_IFMT, S_IFREG};
+        use crate::abi::{S_IFDIR, S_IFMT, S_IFREG};
         self.not_converting()?;
         let si = self.inode(self.cur, src)?;
         let di = self.inode(self.cur, dst)?;

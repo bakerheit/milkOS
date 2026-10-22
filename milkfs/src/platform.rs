@@ -1,15 +1,17 @@
 //! What milkfs needs from the system it runs in, besides a [`BlockDevice`]: the time, random
-//! bytes, scrypt's memory, a log, and locks. The kernel implements [`Platform`] once
+//! bytes, scrypt's memory, a log (and a place for an error's reason), and locks. The kernel implements [`Platform`] once
 //! (`kernel/src/fs/milkfs/platform.rs`) and installs it with [`set_platform`] before the
 //! first volume is touched; the host tests install theirs (fake clock, seeded RNG).
 //!
 //! [`BlockDevice`]: crate::blockdev::BlockDevice
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::fmt;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::abi::Timespec;
+use crate::errno::{Errno, Result};
 
 /// A lock's raw operations. Built by [`Platform::new_lock`]; [`crate::sync::Lock`] puts the
 /// data and a guard around it.
@@ -53,6 +55,9 @@ pub trait Platform: Sync {
     ) -> Option<()>;
     /// One line of log (no trailing newline in `args`).
     fn log(&self, args: fmt::Arguments<'_>);
+    /// Why the error about to be returned happened, in words (the kernel shows it next to
+    /// the errno in `/sys/fs/milkfs/error`). See [`fail`].
+    fn set_reason(&self, why: &str);
     /// A new, unlocked lock of `kind`.
     fn new_lock(&self, kind: LockKind) -> Box<dyn RawLock>;
 }
@@ -85,6 +90,12 @@ pub fn now_ns() -> u64 {
 /// Random bytes (see [`Platform::fill_random`]).
 pub fn fill_random(buf: &mut [u8]) {
     platform().fill_random(buf)
+}
+
+/// Fail with `e` and say why (see [`Platform::set_reason`]).
+pub fn fail<T>(e: Errno, why: impl Into<String>) -> Result<T> {
+    platform().set_reason(&why.into());
+    Err(e)
 }
 
 /// Log a line through the platform: `log!("milkfs: {x}")`.

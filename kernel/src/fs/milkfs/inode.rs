@@ -214,6 +214,13 @@ impl Volume {
 
 const S_IFMT_: u32 = crate::fs::node::S_IFMT;
 
+/// The crate's drivers (scrub, send, receive) take the state lock through this.
+impl ::milkfs::volume::StateAccess for Volume {
+    fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+        f(&mut self.state.lock())
+    }
+}
+
 impl FileSystem for Volume {
     fn name(&self) -> &'static str {
         "milkfs"

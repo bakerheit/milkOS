@@ -80,7 +80,7 @@ let va = mmu::phys_to_virt(pa) as *mut u8;                   // CPU pointer
 Use `align_frames` for rings with alignment needs. qemu's emulated devices are
 cache-coherent with the guest, so no cache maintenance is needed in qemu. On real
 hardware you would map the buffer `MemType::NormalNc` or clean/invalidate.
-The 3 MiB ramfb static in `.bss` can move to `alloc_contiguous_zeroed(768, 1)`.
+ramfb takes its 3 MiB framebuffer this way too, and only when it is the display (not with virtio-gpu).
 
 ## Where the memory goes
 Every allocatable frame has a one-byte `pmm::Use` tag (an array after the bitmap, 1 byte per

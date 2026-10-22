@@ -75,7 +75,8 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
   the home skeleton with the web root `~/Sites`).
 - `scripts/`: run and test scripts. The main tests: `net-test.sh`, `pkg-test.sh`, `audio-test.sh`,
   `crashtest.sh`, `fattest.sh`, `wm-demo.sh <demo>`, `input-test.sh`, `screenshot.sh`.
-  `check-all.sh` runs all of them in turn and prints one table (`--full` for the long ones).
+  `check-all.sh` runs all of them, four at a time (`-j N`), and prints one table (`--smoke` for a quick
+  one-per-area check, `--full` for the long ones).
 - `docs/`: design notes, one per area: `memory`, `processes`, `smp`, `filesystem`, `networking`, `audio`,
   `packages`, `security`, `shell`, plus `AGENTS.md` (how to work on milkOS) and `ui-concepts/` (the UI spec
   and mockups). Screenshots are in `docs/screenshots/`.

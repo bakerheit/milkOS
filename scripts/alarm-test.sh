@@ -31,7 +31,10 @@ boot() { # name commands...
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  # A first command that only lets the boot finish: a service starting late (seen with other
+  # tests running: "[udrv] rng ... claimed") prints over the first prompt, and a command typed
+  # there isn't on a prompt line of its own, so out() can't find its output.
+  local args=("wait:$P" "send:sleep 1" "wait:$P")
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo ALARM""-DONE" "wait:ALARM-DONE" "done:$T/$name.done" &
   local DPID=$!

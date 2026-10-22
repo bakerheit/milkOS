@@ -56,8 +56,8 @@ pub enum Mode {
 }
 
 static MODE: SpinLock<Option<Mode>> = SpinLock::new(None);
-/// Last generation whose commit completed (for the power-cut report).
-pub static LAST_COMMIT: AtomicU64 = AtomicU64::new(0);
+/// Last generation whose commit completed (for the power-cut report): kept by the volume.
+pub use ::milkfs::volume::LAST_COMMIT;
 
 /// Read the requested mode from fw_cfg. Call before `automount`.
 pub fn configure() {

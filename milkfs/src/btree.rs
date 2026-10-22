@@ -20,7 +20,7 @@ use super::format::{
     decode_node, encode_internal, encode_leaf,
 };
 use super::store::Store;
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
 
 pub enum Node {
     Leaf(Vec<(Key, Vec<u8>)>),

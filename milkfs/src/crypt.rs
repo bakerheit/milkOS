@@ -38,8 +38,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::format::*;
-use crate::crypto::{ct_eq, hmac, wipe, xchacha20};
-use crate::fs::errno::{Errno, Result};
+use crate::errno::{Errno, Result};
+use milkcrypto::{ct_eq, hmac, wipe, xchacha20};
 
 /// scrypt parameters for new passphrase slots: N = 2^16, r = 8, p = 4: 64 MiB, ~0.35 s.
 pub const KDF_LOG_N: u8 = 16;
@@ -152,7 +152,7 @@ pub fn format_recovery(k: &[u8; 16]) -> String {
 fn kek(slot: &KeySlot, secret: &[u8]) -> Option<[u8; 32]> {
     let mut k = [0u8; 32];
     match slot.kind {
-        SLOT_PASSPHRASE => crate::crypto::frames::scrypt(
+        SLOT_PASSPHRASE => crate::platform::platform().scrypt(
             secret,
             &slot.salt,
             slot.log_n,
@@ -200,8 +200,8 @@ pub fn wrap(ring_uuid: &[u8; 16], key: &VolumeKey, kind: u8, secret: &[u8]) -> R
         p: KDF_P,
         ..KeySlot::default()
     };
-    crate::crypto::rng::fill(&mut s.salt);
-    crate::crypto::rng::fill(&mut s.nonce);
+    crate::platform::fill_random(&mut s.salt);
+    crate::platform::fill_random(&mut s.nonce);
     let mut k = kek(&s, secret).ok_or(Errno::ENOMEM)?;
     s.wrapped = key.vk;
     s.tag = xchacha20::seal(&k, &s.nonce, &aad(ring_uuid, kind), &mut s.wrapped);
@@ -321,24 +321,25 @@ impl StreamKey {
         env[..8].copy_from_slice(SEALED_MAGIC);
         env[8..12].copy_from_slice(&SEALED_VERSION.to_le_bytes());
         env[12..16].copy_from_slice(&[KDF_LOG_N, KDF_R, KDF_P, SLOT_PASSPHRASE]);
-        crate::crypto::rng::fill(&mut env[16..48]);
-        crate::crypto::rng::fill(&mut env[48..72]);
+        crate::platform::fill_random(&mut env[16..48]);
+        crate::platform::fill_random(&mut env[48..72]);
         let mut sk = StreamKey {
             key: [0; 32],
             prefix: env[32..48].try_into().unwrap(),
             next: 0,
         };
-        crate::crypto::rng::fill(&mut sk.key);
+        crate::platform::fill_random(&mut sk.key);
         let mut kek = [0u8; 32];
-        crate::crypto::frames::scrypt(
-            passphrase,
-            &env[16..32],
-            KDF_LOG_N,
-            KDF_R as u32,
-            KDF_P as u32,
-            &mut kek,
-        )
-        .ok_or(Errno::ENOMEM)?;
+        crate::platform::platform()
+            .scrypt(
+                passphrase,
+                &env[16..32],
+                KDF_LOG_N,
+                KDF_R as u32,
+                KDF_P as u32,
+                &mut kek,
+            )
+            .ok_or(Errno::ENOMEM)?;
         let mut w = sk.key;
         let nonce: [u8; 24] = env[48..72].try_into().unwrap();
         let tag = xchacha20::seal(&kek, &nonce, &stream_wrap_aad(&env), &mut w);
@@ -356,7 +357,7 @@ impl StreamKey {
             || u32::from_le_bytes(env[8..12].try_into().unwrap()) != SEALED_VERSION
             || kind != SLOT_PASSPHRASE
             || env[120..] != [0; 8]
-            || !crate::crypto::scrypt::params_ok(log_n, r as u32, p as u32)
+            || !milkcrypto::scrypt::params_ok(log_n, r as u32, p as u32)
             || log_n > 20
             || 128 * r as u64 * (1u64 << log_n) > 128 << 20 // at most 128 MiB of scrypt
             || p > 16
@@ -364,15 +365,16 @@ impl StreamKey {
             return Err(Errno::EINVAL);
         }
         let mut kek = [0u8; 32];
-        crate::crypto::frames::scrypt(
-            passphrase,
-            &env[16..32],
-            log_n,
-            r as u32,
-            p as u32,
-            &mut kek,
-        )
-        .ok_or(Errno::ENOMEM)?;
+        crate::platform::platform()
+            .scrypt(
+                passphrase,
+                &env[16..32],
+                log_n,
+                r as u32,
+                p as u32,
+                &mut kek,
+            )
+            .ok_or(Errno::ENOMEM)?;
         let mut sk = StreamKey {
             key: env[72..104].try_into().unwrap(),
             prefix: env[32..48].try_into().unwrap(),

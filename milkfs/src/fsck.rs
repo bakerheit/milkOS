@@ -27,8 +27,8 @@ use super::btree;
 use super::format::*;
 use super::items::LIVE;
 use super::volume::State;
-use crate::fs::errno::Result;
-use crate::fs::node::{InodeType, S_IFDIR, S_IFMT};
+use crate::abi::{InodeType, S_IFDIR, S_IFMT};
+use crate::errno::Result;
 
 pub const LOST_FOUND: &str = "lost+found";
 
@@ -119,7 +119,7 @@ impl State {
                     if k.kind == K_ORPHAN {
                         orphan_list.push(k.off);
                     } else if k.kind == K_BREF {
-                        let (len, extra) = decode_bref(v).ok_or(crate::fs::errno::Errno::EIO)?;
+                        let (len, extra) = decode_bref(v).ok_or(crate::errno::Errno::EIO)?;
                         brefs.push((k.off, len, extra));
                     }
                     return Ok(());
@@ -435,7 +435,7 @@ impl State {
             return Ok(d.ino);
         }
         let ino = self.alloc_ino();
-        let t = crate::fs::clock::now();
+        let t = crate::platform::now();
         let t = (t.sec, t.nsec as u32);
         self.put_inode(
             ino,

@@ -88,6 +88,7 @@ TESTS=(
   "filekit-unit|s|300|par|scripts/filekit-test.sh"
   "textbuf-unit|s|300|par|scripts/textbuf-test.sh"
   "imgdec-unit|s|300|par|scripts/imgdec-test.sh"
+  "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
   "files-test|q|600|par|scripts/files-test.sh"
   "alarm-test|q|600|par|scripts/alarm-test.sh"
   "apps-test|s|600|par|scripts/apps-test.sh"

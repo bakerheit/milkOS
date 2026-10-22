@@ -10,6 +10,7 @@
 //! screen if it is up, and redraws everything.
 
 use crate::gfx::Rect;
+use crate::pmm::Use;
 use crate::{display, input, kprintln, timer};
 
 use super::Desktop;
@@ -32,7 +33,7 @@ impl Desktop {
         let t0 = timer::now_ns();
         let (old_w, old_h) = (screen_w(), screen_h());
         let old_area = Desktop::work_area();
-        let Some(back) = Buffer::new(w as usize, h as usize, 0) else {
+        let Some(back) = Buffer::new(Use::Display, w as usize, h as usize, 0) else {
             return false;
         };
         // The wallpaper paints at screen_w/h.

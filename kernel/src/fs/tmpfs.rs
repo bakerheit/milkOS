@@ -6,6 +6,12 @@
 //! `BTreeMap` (sorted names). Each node has its own `SpinLock`; every namespace change
 //! (create, mkdir, link, unlink, rmdir, rename) also holds the fs-wide `ns` lock, which is
 //! what makes multi-node changes like rename atomic and keeps lock nesting deadlock-free.
+//!
+//! Files unpacked from the initramfs don't copy their data: they point at it inside the
+//! kernel image ([`TmpNode::set_rom`], read-only, the image is resident anyway). The first
+//! write, or a truncate that grows the file, gives the file its own pages and copies the
+//! bytes into them (copy-on-write); a truncate that shrinks it just shortens the view.
+//! Only own pages count as used space (`used_bytes`, Shmem, statfs).
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -96,6 +102,9 @@ enum Data {
     File {
         size: u64,
         pages: Vec<Option<PhysAddr>>,
+        /// The contents, still in the kernel image (see the module docs). While set,
+        /// `pages` is empty and `size == rom.len()`.
+        rom: Option<&'static [u8]>,
     },
     Dir {
         entries: BTreeMap<String, Arc<TmpNode>>,
@@ -218,7 +227,7 @@ impl TmpNode {
         if s.max_pages != 0 && s.pages.load(Ordering::Relaxed) >= s.max_pages {
             return Err(Errno::ENOSPC);
         }
-        let pa = pmm::alloc_frame_zeroed().ok_or(Errno::ENOSPC)?;
+        let pa = pmm::alloc_frame_zeroed_as(pmm::Use::Files).ok_or(Errno::ENOSPC)?;
         s.pages.fetch_add(1, Ordering::Relaxed);
         Ok(pa)
     }
@@ -226,6 +235,74 @@ impl TmpNode {
     fn release_page(&self, pa: PhysAddr) {
         pmm::free_frame(pa);
         self.shared.pages.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    /// Copy-on-write: a file still reading from the kernel image gets its own pages with
+    /// the same bytes. On failure (no memory) nothing changed.
+    fn unshare(
+        &self,
+        pages: &mut Vec<Option<PhysAddr>>,
+        rom: &mut Option<&'static [u8]>,
+    ) -> Result<()> {
+        let Some(bytes) = *rom else {
+            return Ok(());
+        };
+        let mut own: Vec<Option<PhysAddr>> = Vec::new();
+        own.try_reserve_exact(bytes.len().div_ceil(PAGE_SIZE))
+            .map_err(|_| Errno::ENOMEM)?;
+        for chunk in bytes.chunks(PAGE_SIZE) {
+            match self.reserve_page() {
+                Ok(pa) => {
+                    // SAFETY: a fresh frame of ours; chunk.len() <= PAGE_SIZE.
+                    unsafe { ptr::copy_nonoverlapping(chunk.as_ptr(), page_ptr(pa), chunk.len()) };
+                    own.push(Some(pa));
+                }
+                Err(e) => {
+                    for pa in own.into_iter().flatten() {
+                        self.release_page(pa);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        *pages = own;
+        *rom = None;
+        Ok(())
+    }
+
+    /// Make this (regular) file's contents `data`, which stays where it is: no copy, no
+    /// pages used until someone writes. For the initramfs, whose archive lives in the
+    /// kernel image for good. Any pages it had are freed.
+    pub fn set_rom(&self, data: &'static [u8]) -> Result<()> {
+        if data.len() as u64 > MAX_FILE_SIZE {
+            return Err(Errno::EFBIG);
+        }
+        let old = {
+            let mut i = self.inner.lock();
+            let i = &mut *i;
+            let Data::File { size, pages, rom } = &mut i.data else {
+                return Err(if self.kind == InodeType::Dir {
+                    Errno::EISDIR
+                } else {
+                    Errno::EINVAL
+                });
+            };
+            *size = data.len() as u64;
+            *rom = Some(data);
+            let now = clock::now();
+            i.mtime = now;
+            i.ctime = now;
+            core::mem::take(pages)
+        };
+        for pa in old.into_iter().flatten() {
+            self.release_page(pa);
+        }
+        Ok(())
+    }
+
+    /// Is the file's data still the kernel image's (no pages of its own)?
+    pub fn is_rom(&self) -> bool {
+        matches!(self.inner.lock().data, Data::File { rom: Some(_), .. })
     }
 }
 
@@ -266,7 +343,14 @@ impl Inode for TmpNode {
         st.mtime = i.mtime;
         st.ctime = i.ctime;
         (st.size, st.blocks) = match &i.data {
-            Data::File { size, pages } => (
+            // A file in the image counts the pages it would take (as if stored here).
+            Data::File {
+                size, rom: Some(_), ..
+            } => (
+                *size,
+                size.div_ceil(PAGE_SIZE as u64) * (PAGE_SIZE as u64 / 512),
+            ),
+            Data::File { size, pages, .. } => (
                 *size,
                 pages.iter().flatten().count() as u64 * (PAGE_SIZE as u64 / 512),
             ),
@@ -279,7 +363,7 @@ impl Inode for TmpNode {
 
     fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<usize> {
         let i = self.inner.lock();
-        let Data::File { size, pages } = &i.data else {
+        let Data::File { size, pages, rom } = &i.data else {
             return Err(if self.kind == InodeType::Dir {
                 Errno::EISDIR
             } else {
@@ -290,6 +374,10 @@ impl Inode for TmpNode {
             return Ok(0);
         }
         let n = buf.len().min((*size - off) as usize);
+        if let Some(bytes) = rom {
+            buf[..n].copy_from_slice(&bytes[off as usize..off as usize + n]);
+            return Ok(n);
+        }
         let mut done = 0;
         while done < n {
             let pos = off as usize + done;
@@ -315,13 +403,14 @@ impl Inode for TmpNode {
         }
         let mut i = self.inner.lock();
         let i = &mut *i;
-        let Data::File { size, pages } = &mut i.data else {
+        let Data::File { size, pages, rom } = &mut i.data else {
             return Err(if self.kind == InodeType::Dir {
                 Errno::EISDIR
             } else {
                 Errno::EINVAL
             });
         };
+        self.unshare(pages, rom)?;
         let need = (end as usize).div_ceil(PAGE_SIZE);
         if pages.len() < need {
             pages.resize(need, None);
@@ -368,13 +457,22 @@ impl Inode for TmpNode {
         {
             let mut i = self.inner.lock();
             let i = &mut *i;
-            let Data::File { size, pages } = &mut i.data else {
+            let Data::File { size, pages, rom } = &mut i.data else {
                 return Err(if self.kind == InodeType::Dir {
                     Errno::EISDIR
                 } else {
                     Errno::EINVAL
                 });
             };
+            match *rom {
+                // Still the image's: shrinking is a shorter view (nothing to copy, and
+                // nothing at all when it goes to 0); growing needs pages of its own.
+                Some(bytes) if len <= *size => {
+                    *rom = (len > 0).then(|| &bytes[..len as usize]);
+                }
+                Some(_) => self.unshare(pages, rom)?,
+                None => {}
+            }
             if len < *size {
                 let keep = (len as usize).div_ceil(PAGE_SIZE);
                 freed.extend(pages.drain(keep.min(pages.len())..).flatten());
@@ -423,6 +521,7 @@ impl Inode for TmpNode {
         self.add(name, InodeType::File, perm, |_| Data::File {
             size: 0,
             pages: Vec::new(),
+            rom: None,
         })
     }
 

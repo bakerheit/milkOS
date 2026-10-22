@@ -9,11 +9,67 @@
 //! Frames from the start of RAM to the end of the bitmap (kernel image, boot
 //! stack, the bitmap itself) are marked used at init and never handed out;
 //! other ranges (the device tree blob) are excluded with [`reserve`].
+//!
+//! Every allocatable frame also has a one-byte [`Use`] tag (an array next to the bitmap),
+//! so `/proc/meminfo` can say what the memory is for. Allocations start as
+//! [`Use::Other`]; callers that matter say what theirs are with the `*_as` allocators or
+//! [`set_use`]. A free resets the tag, so the counts can't drift when an owner forgets.
 
 use crate::mmu::{PAGE_SIZE, PhysAddr, phys_to_virt};
 use crate::sync::SpinLock;
 
 const BITS: usize = 64;
+
+/// What an allocated frame is for (`/proc/meminfo`, docs/memory.md "Where the memory goes").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Use {
+    Free = 0,
+    /// Allocated by someone who didn't say what for.
+    Other,
+    /// Reserved after boot (the device tree blob).
+    Boot,
+    /// Chunks of the kernel heap.
+    Heap,
+    /// Page-table pages (user address spaces, kernel stacks' mappings).
+    PageTables,
+    KernelStacks,
+    /// User processes' private pages (anonymous memory, stacks, loaded programs).
+    AppPages,
+    /// tmpfs file data (the root file system, /tmp).
+    Files,
+    PageCache,
+    /// Framebuffers (virtio-gpu backing, ramfb) and the compositor's back buffer.
+    Display,
+    /// The desktop picture and its blurred (glass) copies.
+    Wallpaper,
+    /// Window surfaces, and userland windows' shared and front buffers.
+    WindowBuffers,
+    /// Cached panels (menu bar, dock, toasts), Spaces thumbnails, the lock screen.
+    PanelCaches,
+    /// Device rings and DMA buffers, RAM disks.
+    Devices,
+}
+
+impl Use {
+    pub const COUNT: usize = 14;
+    pub const ALL: [Use; Use::COUNT] = [
+        Use::Free,
+        Use::Other,
+        Use::Boot,
+        Use::Heap,
+        Use::PageTables,
+        Use::KernelStacks,
+        Use::AppPages,
+        Use::Files,
+        Use::PageCache,
+        Use::Display,
+        Use::Wallpaper,
+        Use::WindowBuffers,
+        Use::PanelCaches,
+        Use::Devices,
+    ];
+}
 
 pub struct Pmm {
     /// Physical address of frame 0 (start of RAM).
@@ -26,6 +82,10 @@ pub struct Pmm {
     /// Frames below this index are firmware/kernel and permanently used.
     reserved: usize,
     bitmap: *mut u64,
+    /// One [`Use`] byte per frame.
+    tags: *mut u8,
+    /// Frames per [`Use`] (index = the tag).
+    uses: [usize; Use::COUNT],
 }
 
 // SAFETY: the raw pointer refers to RAM owned exclusively by the Pmm.
@@ -37,6 +97,15 @@ pub struct PmmStats {
     pub total_frames: usize,
     pub reserved_frames: usize,
     pub free_frames: usize,
+    /// Allocated frames per [`Use`] (index = `Use as usize`; `Free` is always 0 here).
+    pub uses: [usize; Use::COUNT],
+}
+
+impl PmmStats {
+    /// Frames tagged `u`.
+    pub fn of(&self, u: Use) -> usize {
+        self.uses[u as usize]
+    }
 }
 
 impl Pmm {
@@ -69,6 +138,17 @@ impl Pmm {
         self.base + frame * PAGE_SIZE
     }
 
+    /// Retag `count` frames from `first` (all allocated) as `u`.
+    fn tag(&mut self, first: usize, count: usize, u: Use) {
+        for f in first..first + count {
+            // SAFETY: f < self.frames (callers check), the tag array has `frames` bytes.
+            let t = unsafe { &mut *self.tags.add(f) };
+            self.uses[*t as usize] -= 1;
+            *t = u as u8;
+            self.uses[u as usize] += 1;
+        }
+    }
+
     /// First free frame at or after `from` (wrapping once), as an index.
     fn find_free(&self, from: usize) -> Option<usize> {
         let words = self.frames.div_ceil(BITS);
@@ -89,17 +169,18 @@ impl Pmm {
         None
     }
 
-    fn alloc(&mut self) -> Option<PhysAddr> {
+    fn alloc(&mut self, u: Use) -> Option<PhysAddr> {
         let frame = self.find_free(self.hint.max(self.reserved))?;
         self.set_used(frame);
         self.free -= 1;
         self.hint = frame + 1;
+        self.tag(frame, 1, u);
         Some(self.frame_addr(frame))
     }
 
     /// Find `count` consecutive free frames whose first frame's address is a
     /// multiple of `align_frames` frames (a power of two).
-    fn alloc_contiguous(&mut self, count: usize, align_frames: usize) -> Option<PhysAddr> {
+    fn alloc_contiguous(&mut self, count: usize, align_frames: usize, u: Use) -> Option<PhysAddr> {
         if count == 0 || count > self.free || !align_frames.is_power_of_two() {
             return None;
         }
@@ -124,6 +205,7 @@ impl Pmm {
             }
             self.free -= count;
             self.hint = start + count;
+            self.tag(start, count, u);
             return Some(self.frame_addr(start));
         }
         None
@@ -147,6 +229,7 @@ impl Pmm {
             );
             self.set_free(f);
         }
+        self.tag(first, count, Use::Free);
         self.free += count;
         self.hint = self.hint.min(first);
     }
@@ -168,20 +251,22 @@ fn with<R>(f: impl FnOnce(&mut Pmm) -> R) -> R {
 pub unsafe fn init(base: PhysAddr, size: usize, reserved_end: PhysAddr) {
     assert!(base.is_multiple_of(PAGE_SIZE));
     let frames = size / PAGE_SIZE;
-    let bitmap_bytes = frames.div_ceil(BITS) * 8;
     let bitmap_pa = reserved_end.next_multiple_of(PAGE_SIZE);
-    let bitmap_end = (bitmap_pa + bitmap_bytes).next_multiple_of(PAGE_SIZE);
+    let bitmap_end = (bitmap_pa + metadata_bytes(size)).next_multiple_of(PAGE_SIZE);
     assert!(bitmap_end <= base + size, "pmm: RAM too small");
     let reserved = (bitmap_end - base) / PAGE_SIZE;
 
     let bitmap = phys_to_virt(bitmap_pa) as *mut u64;
     let words = frames.div_ceil(BITS);
-    // SAFETY: the bitmap region is inside RAM and unused.
+    let tags = bitmap.wrapping_add(words).cast::<u8>();
+    // SAFETY: the bitmap and tag regions are inside RAM and unused.
     unsafe {
         // All used, then punch out the allocatable range.
         for i in 0..words {
             bitmap.add(i).write(!0);
         }
+        // Tags: the reserved low region is nobody's (not counted), the rest free.
+        core::ptr::write_bytes(tags, Use::Free as u8, frames);
     }
     let mut pmm = Pmm {
         base,
@@ -190,12 +275,22 @@ pub unsafe fn init(base: PhysAddr, size: usize, reserved_end: PhysAddr) {
         hint: reserved,
         reserved,
         bitmap,
+        tags,
+        uses: [0; Use::COUNT],
     };
     for f in reserved..frames {
         pmm.set_free(f);
     }
     pmm.free = frames - reserved;
+    pmm.uses[Use::Free as usize] = frames - reserved;
     *PMM.lock() = Some(pmm);
+}
+
+/// Bytes of allocator metadata (bitmap + tags) for `size` bytes of RAM; it sits right
+/// after the kernel image.
+pub const fn metadata_bytes(size: usize) -> usize {
+    let frames = size / PAGE_SIZE;
+    frames.div_ceil(BITS) * 8 + frames
 }
 
 /// Mark `[pa, pa+len)` (rounded out to whole frames) as in use, e.g. the device
@@ -212,19 +307,32 @@ pub fn reserve(pa: PhysAddr, len: usize) {
             if f < p.frames && !p.is_used(f) {
                 p.set_used(f);
                 p.free -= 1;
+                if f >= p.reserved {
+                    p.tag(f, 1, Use::Boot);
+                }
             }
         }
     });
 }
 
-/// Allocate one 4 KiB frame (contents unspecified).
+/// Allocate one 4 KiB frame (contents unspecified), counted as [`Use::Other`].
 pub fn alloc_frame() -> Option<PhysAddr> {
-    with(|p| p.alloc())
+    alloc_frame_as(Use::Other)
+}
+
+/// [`alloc_frame`] counted as `u`.
+pub fn alloc_frame_as(u: Use) -> Option<PhysAddr> {
+    with(|p| p.alloc(u))
 }
 
 /// Allocate one 4 KiB frame filled with zeroes.
 pub fn alloc_frame_zeroed() -> Option<PhysAddr> {
-    let pa = alloc_frame()?;
+    alloc_frame_zeroed_as(Use::Other)
+}
+
+/// [`alloc_frame_zeroed`] counted as `u`.
+pub fn alloc_frame_zeroed_as(u: Use) -> Option<PhysAddr> {
+    let pa = alloc_frame_as(u)?;
     // SAFETY: we own the frame and RAM is mapped.
     unsafe { core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, PAGE_SIZE) };
     Some(pa)
@@ -234,15 +342,42 @@ pub fn alloc_frame_zeroed() -> Option<PhysAddr> {
 /// `align_frames` frames (power of two, 1 for no constraint). Use this for DMA
 /// buffers and virtqueues. Contents unspecified.
 pub fn alloc_contiguous(count: usize, align_frames: usize) -> Option<PhysAddr> {
-    with(|p| p.alloc_contiguous(count, align_frames))
+    alloc_contiguous_as(Use::Other, count, align_frames)
+}
+
+/// [`alloc_contiguous`] counted as `u`.
+pub fn alloc_contiguous_as(u: Use, count: usize, align_frames: usize) -> Option<PhysAddr> {
+    with(|p| p.alloc_contiguous(count, align_frames, u))
 }
 
 /// Like [`alloc_contiguous`] but zeroed.
 pub fn alloc_contiguous_zeroed(count: usize, align_frames: usize) -> Option<PhysAddr> {
-    let pa = alloc_contiguous(count, align_frames)?;
+    alloc_contiguous_zeroed_as(Use::Other, count, align_frames)
+}
+
+/// [`alloc_contiguous_zeroed`] counted as `u`.
+pub fn alloc_contiguous_zeroed_as(u: Use, count: usize, align_frames: usize) -> Option<PhysAddr> {
+    let pa = alloc_contiguous_as(u, count, align_frames)?;
     // SAFETY: we own the frames and RAM is mapped.
     unsafe { core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, count * PAGE_SIZE) };
     Some(pa)
+}
+
+/// Count `count` allocated frames from `pa` as `u` from now on (e.g. a buffer that changed
+/// owner). Panics if any of them is free or outside allocatable RAM.
+pub fn set_use(pa: PhysAddr, count: usize, u: Use) {
+    with(|p| {
+        let first = (pa - p.base) / PAGE_SIZE;
+        assert!(
+            first >= p.reserved && first + count <= p.frames,
+            "pmm: set_use outside allocatable RAM"
+        );
+        assert!(
+            (first..first + count).all(|f| p.is_used(f)),
+            "pmm: set_use on a free frame"
+        );
+        p.tag(first, count, u);
+    });
 }
 
 /// Free one frame. Panics on double free or a foreign address.
@@ -261,6 +396,11 @@ pub fn stats() -> PmmStats {
         total_frames: p.frames,
         reserved_frames: p.reserved,
         free_frames: p.free,
+        uses: {
+            let mut u = p.uses;
+            u[Use::Free as usize] = 0;
+            u
+        },
     })
 }
 

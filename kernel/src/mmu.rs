@@ -217,7 +217,7 @@ pub struct PmmTables;
 
 impl TableAlloc for PmmTables {
     fn alloc_table(&mut self) -> Option<PhysAddr> {
-        pmm::alloc_frame_zeroed()
+        pmm::alloc_frame_zeroed_as(pmm::Use::PageTables)
     }
 }
 
@@ -259,7 +259,7 @@ impl AddressSpace {
     /// it is in here.
     pub fn new_user() -> Option<AddressSpace> {
         Some(AddressSpace {
-            root: pmm::alloc_frame_zeroed()?,
+            root: pmm::alloc_frame_zeroed_as(pmm::Use::PageTables)?,
             half: Half::Lower,
         })
     }

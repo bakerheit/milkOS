@@ -257,7 +257,7 @@ impl Gpu {
     /// Make a `w` x `h` resource over fresh frames and scan it out. On failure nothing changed.
     fn switch(&mut self, w: usize, h: usize) -> Option<(PhysAddr, usize)> {
         let pages = (w * h * BPP).div_ceil(PAGE_SIZE);
-        let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+        let pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::Display, pages, 1)?;
         let id = self.res + 1;
         let ok = self.create_2d(id, w, h);
         if !(ok && self.attach(id, pa, w * h * BPP) && self.scanout(id, w, h)) {
@@ -373,9 +373,9 @@ pub fn init(t: Transport, w: usize, h: usize) -> Option<Surface<'static>> {
         return None;
     }
     let (Some(qpa), Some(cmd), Some(sync)) = (
-        pmm::alloc_contiguous_zeroed(1, 1),
-        pmm::alloc_contiguous_zeroed(1, 1),
-        pmm::alloc_contiguous_zeroed(1, 1),
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1),
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1),
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1),
     ) else {
         fail(&t, &[]);
         return None;

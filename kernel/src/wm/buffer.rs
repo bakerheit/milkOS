@@ -3,13 +3,14 @@
 //! Small buffers come from the kernel heap. Anything of [`FRAMES_FROM`] bytes or more is taken as
 //! physically contiguous frames straight from the PMM (and given back on drop), so big windows
 //! don't fragment the heap, and so a buffer can later be mapped into a userland client's address
-//! space as shared memory without copying.
+//! space as shared memory without copying. Those frames are counted in `/proc/meminfo`
+//! under the buffer's [`Use`] (window surfaces, wallpaper, panel caches, the back buffer).
 
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, DrawTarget};
 use crate::mmu::{PAGE_SIZE, phys_to_virt};
-use crate::pmm;
+use crate::pmm::{self, Use};
 
 /// Buffers at least this big (bytes) use contiguous PMM frames.
 const FRAMES_FROM: usize = 128 * 1024;
@@ -33,19 +34,23 @@ pub struct Buffer {
     /// Rows the allocation can hold at this stride.
     cap_rows: usize,
     backing: Backing,
+    /// What its frames count as in `/proc/meminfo`.
+    kind: Use,
 }
 
 // SAFETY: the buffer exclusively owns its memory.
 unsafe impl Send for Buffer {}
 
 impl Buffer {
-    /// A buffer of exactly `w` x `h` filled with `fill`. `None` if out of memory.
-    pub fn new(w: usize, h: usize, fill: Color) -> Option<Buffer> {
-        Self::with_capacity(w, h, w, h, fill)
+    /// A buffer of exactly `w` x `h` filled with `fill`, counted as `kind`. `None` if out of
+    /// memory.
+    pub fn new(kind: Use, w: usize, h: usize, fill: Color) -> Option<Buffer> {
+        Self::with_capacity(kind, w, h, w, h, fill)
     }
 
     /// A `w` x `h` buffer that can grow to `cap_w` x `cap_h` without reallocating.
     pub fn with_capacity(
+        kind: Use,
         w: usize,
         h: usize,
         cap_w: usize,
@@ -58,7 +63,7 @@ impl Buffer {
         let bytes = n * 4;
         let (ptr, backing) = if bytes >= FRAMES_FROM {
             let pages = bytes.div_ceil(PAGE_SIZE);
-            let pa = pmm::alloc_contiguous(pages, 1)?;
+            let pa = pmm::alloc_contiguous_as(kind, pages, 1)?;
             (phys_to_virt(pa) as *mut u32, Backing::Frames { pa, pages })
         } else {
             let mut v: Vec<u32> = Vec::new();
@@ -73,13 +78,34 @@ impl Buffer {
             stride,
             cap_rows: rows,
             backing,
+            kind,
         };
         b.clear(fill);
         Some(b)
     }
 
-    /// Change the visible size. Reuses the allocation if it is big enough, otherwise
-    /// reallocates with some headroom. Contents are unspecified afterwards. False if out of memory.
+    /// Change the visible size to exactly `w` x `h`: the allocation is kept only if it is
+    /// that size already, so no headroom is left over (a one-shot change: zoom, snap, a tab
+    /// strip). Contents are unspecified afterwards. False if out of memory (nothing changed).
+    pub fn resize_exact(&mut self, w: usize, h: usize) -> bool {
+        if self.stride == w.max(1).next_multiple_of(4) && self.cap_rows == h.max(1) {
+            self.width = w;
+            self.height = h;
+            return true;
+        }
+        match Buffer::new(self.kind, w, h, 0) {
+            Some(b) => {
+                *self = b;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Change the visible size while it keeps changing (a resize drag). Reuses the allocation
+    /// if it is big enough, otherwise reallocates with some headroom; [`resize_exact`]
+    /// (Self::resize_exact) gives the headroom back when the drag ends. Contents are
+    /// unspecified afterwards. False if out of memory.
     pub fn resize(&mut self, w: usize, h: usize) -> bool {
         if w <= self.stride && h <= self.cap_rows {
             self.width = w;
@@ -91,13 +117,18 @@ impl Buffer {
             super::theme::screen_w() as usize,
             super::theme::screen_h() as usize,
         );
-        match Buffer::with_capacity(w, h, cw.min(sw), ch.min(sh), 0) {
+        match Buffer::with_capacity(self.kind, w, h, cw.min(sw), ch.min(sh), 0) {
             Some(b) => {
                 *self = b;
                 true
             }
             None => false,
         }
+    }
+
+    /// Is the allocation bigger than the visible size needs?
+    pub fn has_headroom(&self) -> bool {
+        self.stride != self.width.max(1).next_multiple_of(4) || self.cap_rows != self.height.max(1)
     }
 
     pub fn w(&self) -> i32 {

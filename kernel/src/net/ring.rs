@@ -39,7 +39,7 @@ fn take(cap: usize) -> Option<(PhysAddr, *mut u8)> {
         IN_USE.fetch_sub(bytes, Ordering::AcqRel);
         return None;
     }
-    let Some(pa) = pmm::alloc_contiguous(pages, 1) else {
+    let Some(pa) = pmm::alloc_contiguous_as(pmm::Use::Devices, pages, 1) else {
         IN_USE.fetch_sub(bytes, Ordering::AcqRel);
         return None;
     };

@@ -744,6 +744,44 @@ impl<'a> Painter<'a> {
         }
     }
 
+    /// [`blit`](Self::blit) the `src` block of `src_buf` to (x, y) with `c` (as given, not
+    /// themed) blended over every pixel at `alpha` (the stronger glass, from the normal one).
+    pub fn blit_tinted(
+        &mut self,
+        x: i32,
+        y: i32,
+        src_buf: &Buffer,
+        src: Rect,
+        c: Color,
+        alpha: u8,
+    ) {
+        let (sx, sy, w, h) = (src.x, src.y, src.w, src.h);
+        let (x, sx, w) = if sx < 0 {
+            (x - sx, 0, w + sx)
+        } else {
+            (x, sx, w)
+        };
+        let (y, sy, h) = if sy < 0 {
+            (y - sy, 0, h + sy)
+        } else {
+            (y, sy, h)
+        };
+        let w = w.min(src_buf.w() - sx);
+        let h = h.min(src_buf.h() - sy);
+        let Some(b) = self.buf_rect(x, y, w, h) else {
+            return;
+        };
+        let (dx0, dy0) = (x + self.ox, y + self.oy);
+        for by in b.y..b.y + b.h {
+            let srow = src_buf.row((sy + by - dy0) as usize);
+            let s0 = (sx + b.x - dx0) as usize;
+            let s = &srow[s0..s0 + b.w as usize];
+            for (d, &q) in self.span(by, b.x, b.x + b.w).iter_mut().zip(s) {
+                *d = blend(q, c, alpha);
+            }
+        }
+    }
+
     /// Copy a `w` x `h` block of raw pixels (`stride` per row) to logical (x, y).
     pub fn blit_raw(&mut self, x: i32, y: i32, src: &[u32], stride: usize, w: i32, h: i32) {
         let Some(b) = self.buf_rect(x, y, w, h) else {

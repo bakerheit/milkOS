@@ -78,7 +78,7 @@ impl Front {
     /// A milk-white `w` x `h` picture. `None` if out of memory.
     fn new(w: u32, h: u32) -> Option<Front> {
         let pages = ((w * h * 4) as usize).div_ceil(PAGE_SIZE);
-        let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+        let pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::WindowBuffers, pages, 1)?;
         let f = Front { pa, pages, w, h };
         // SAFETY: fresh frames we own.
         unsafe { f.pixels_mut().fill(MILK) };
@@ -161,7 +161,7 @@ pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
     let bytes = (w * h * 4) as usize;
     let pages = bytes.div_ceil(PAGE_SIZE);
     let front = Front::new(w, h)?;
-    let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+    let pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::WindowBuffers, pages, 1)?;
     // Start milk-white rather than black.
     // SAFETY: fresh frames we own.
     unsafe {
@@ -215,7 +215,7 @@ pub fn resize(pid: u32, id: u32, w: u32, h: u32) -> Option<(Created, (usize, usi
     let bytes = (w * h * 4) as usize;
     let pages = bytes.div_ceil(PAGE_SIZE);
     let new_front = Front::new(w, h)?;
-    let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+    let pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::WindowBuffers, pages, 1)?;
     let mut c = CLIENTS.lock();
     let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
         drop(c);

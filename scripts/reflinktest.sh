@@ -2,7 +2,10 @@
 # Reflink copies and dedupe from userspace on a private image: `cp --reflink` (FICLONE),
 # `--reflink=auto` falling back to a copy on tmpfs, `--reflink` refusing there, writing
 # into a copy, `dedupe -n` / `dedupe` of plain copies, `snap check`; then on the Mac:
-# check clean (shared-block table, space map), v2, every file byte-exact.
+# check clean (shared-block table, space map), v2, every file byte-exact. Built-in files
+# (read in place from the kernel image, copied on write): copied to the disk with
+# --reflink=auto (a plain copy, byte-exact, runs), --reflink refused, appended to, deleted,
+# and the RAM they take (RootFiles) before and after.
 # Fresh /tmp directory; only the qemu started here is killed.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -47,6 +50,17 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:dedupe $D" "wait:$P" \
   "send:cat /System/Kernel/fs/milkfs/info" "wait:$P" \
   "send:snap check" "wait:$P" \
+  "send:grep RootFiles /proc/meminfo" "wait:$P" \
+  "send:files copy --reflink=auto /Commands/cowsay $D/cowsay.auto" "wait:$P" \
+  "send:files copy --reflink /Commands/cowsay $D/cowsay.always" "wait:$P" \
+  "send:$D/cowsay.auto copied-cow" "wait:$P" \
+  "send:echo appended >> /Commands/cowsay" "wait:$P" \
+  "send:cowsay written-cow" "wait:$P" \
+  "send:grep RootFiles /proc/meminfo" "wait:$P" \
+  "send:files copy /Commands/cowsay $D/cowsay.written" "wait:$P" \
+  "send:files delete --now /Commands/cowsay" "wait:$P" \
+  "send:files info /Commands/cowsay" "wait:$P" \
+  "send:grep RootFiles /proc/meminfo" "wait:$P" \
   "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
   "send:echo REFLINK""-DONE" "wait:REFLINK-DONE" "done:$T/done" &
 DPID=$!
@@ -71,6 +85,22 @@ cmp -s <($M cat "$IMG" /d/copy.bin) "$T/copy.want" && ok "written copy is byte-e
 for f in big.bin dup1.bin dup2.bin; do
   cmp -s <($M cat "$IMG" /d/$f) "$T/big.bin" && ok "$f is byte-exact" || bad "$f"
 done
+# Built-in files.
+COW_SRC="target/user/aarch64-unknown-none-softfloat/release/cowsay"
+cmp -s <($M cat "$IMG" /d/cowsay.auto) "$COW_SRC" && ok "built-in /Commands/cowsay copied to the disk (--reflink=auto) byte-exact" || bad "cowsay.auto"
+$M cat "$IMG" /d/cowsay.always >/dev/null 2>&1 && bad "--reflink from a built-in (tmpfs) file made a copy" || ok "--reflink from a built-in file refuses"
+echo "$L" | grep -aq "copied-cow" && ok "the copied built-in program runs" || bad "cowsay.auto did not run"
+echo "$L" | grep -aq "written-cow" && ok "a built-in program still runs after a write to it (its own copy now)" || bad "cowsay after the write"
+cmp -s <($M cat "$IMG" /d/cowsay.written) <(cat "$COW_SRC"; echo appended) && ok "the written built-in file reads as the original plus the append" || bad "cowsay.written"
+# RootFiles as printed by the N-th `grep RootFiles /proc/meminfo` typed at the shell (it
+# includes the 2 MB /tmp/auto.bin from above).
+rf() { echo "$L" | awk '/^msh:.*\$ grep RootFiles/{want=1; next} want && /^RootFiles:/{print $2; want=0}' | sed -n "${1}p"; }
+r1=$(rf 1); r2=$(rf 2); r3=$(rf 3)
+csz=$(stat -f %z "$COW_SRC")
+[ -n "$r1" ] && [ "$r1" -lt $((2000000 / 1024 + 1024)) ] && ok "built-in files take no RAM of their own: RootFiles ${r1} kB, of which /tmp/auto.bin is 1953" || bad "RootFiles before: $r1 kB"
+[ -n "$r2" ] && [ $((r2 - r1)) -ge $((csz / 1024)) ] && [ $((r2 - r1)) -le $((csz / 1024 + 8)) ] && ok "writing to a built-in file copies it: RootFiles $r1 -> $r2 kB (the file is $((csz / 1024)) kB)" || bad "RootFiles after the write: $r1 -> $r2 (file $csz bytes)"
+[ -n "$r3" ] && [ "$r3" -le "$r1" ] && ok "deleting it frees its pages: RootFiles $r3 kB" || bad "RootFiles after delete: $r3"
+echo "$L" | grep -a -A1 "files info /Commands/cowsay" | grep -aqi "no such\|not found\|doesn't exist" && ok "the deleted built-in file is gone" || bad "cowsay still there: $(echo "$L" | grep -a -A1 "files info /Commands/cowsay")"
 echo
 [ $FAIL = 0 ] && echo "reflinktest: PASS ($T)" || echo "reflinktest: FAIL ($T)"
 exit $FAIL

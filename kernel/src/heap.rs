@@ -175,7 +175,7 @@ impl Heap {
         // Worst case the block start is `align` short of aligned.
         let need = size + if align > PAGE_SIZE { align } else { 0 };
         let frames = need.div_ceil(PAGE_SIZE).max(GROW_FRAMES);
-        let Some(pa) = pmm::alloc_contiguous(frames, 1) else {
+        let Some(pa) = pmm::alloc_contiguous_as(pmm::Use::Heap, frames, 1) else {
             return false;
         };
         self.add_chunk(pa, frames);
@@ -235,7 +235,8 @@ static HEAP: KernelHeap = KernelHeap(SpinLock::new(Heap::new()));
 
 /// Give the heap its first chunk. Call after `pmm::init`.
 pub fn init() {
-    let pa = pmm::alloc_contiguous(INITIAL_FRAMES, 1).expect("heap: no memory for initial chunk");
+    let pa = pmm::alloc_contiguous_as(pmm::Use::Heap, INITIAL_FRAMES, 1)
+        .expect("heap: no memory for initial chunk");
     HEAP.0.lock().add_chunk(pa, INITIAL_FRAMES);
 }
 

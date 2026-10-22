@@ -1,14 +1,23 @@
 //! The boot initramfs: a cpio "newc" archive built from `rootfs/` + `initramfs.list` by
 //! `kernel/build.rs`, embedded in the kernel image and unpacked into the root tmpfs.
+//! Unpacking copies no file data: each tmpfs file points at its bytes in the archive
+//! (`TmpNode::set_rom`) until something writes to it.
 
 use alloc::string::String;
 
+use super::abi::{O_CREAT, O_TRUNC, O_WRONLY};
 use super::errno::{Errno, Result};
-use super::node::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
+use super::node::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG, downcast};
 use super::ops;
+use super::tmpfs::TmpNode;
 use crate::kprintln;
 
 static ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initramfs.cpio"));
+
+/// Size of the built-in archive (it lives in the kernel image's read-only data).
+pub fn archive_len() -> usize {
+    ARCHIVE.len()
+}
 
 /// One archive member.
 pub struct Entry<'a> {
@@ -72,9 +81,20 @@ pub fn entries(archive: &[u8]) -> impl Iterator<Item = Result<Entry<'_>>> {
     })
 }
 
+/// Create or replace the file at `path` with `data`, which outlives the file (the archive):
+/// on tmpfs the file just points at it, elsewhere the bytes are written.
+fn put_file(path: &str, data: &'static [u8]) -> Result<()> {
+    let f = ops::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
+    if let Some(node) = downcast::<TmpNode>(f.inode()) {
+        return node.set_rom(data);
+    }
+    drop(f);
+    ops::write_file(path, data)
+}
+
 /// Unpack `archive` under `/`. Directories that already exist are fine.
 /// Returns (files, dirs, symlinks, bytes).
-pub fn unpack(archive: &[u8]) -> Result<(usize, usize, usize, usize)> {
+pub fn unpack(archive: &'static [u8]) -> Result<(usize, usize, usize, usize)> {
     let (mut files, mut dirs, mut links, mut bytes) = (0, 0, 0, 0);
     for e in entries(archive) {
         let e = e?;
@@ -99,7 +119,7 @@ pub fn unpack(archive: &[u8]) -> Result<(usize, usize, usize, usize)> {
                 dirs += 1;
             }
             S_IFREG => {
-                ops::write_file(&path, e.data)?;
+                put_file(&path, e.data)?;
                 ops::chmod(&path, perm)?;
                 files += 1;
                 bytes += e.data.len();

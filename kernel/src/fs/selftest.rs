@@ -200,6 +200,141 @@ fn tmpfs_big_and_sparse(t: &mut T) {
     );
 }
 
+/// 9000 bytes standing in for a file in the kernel image.
+static ROM: [u8; 9000] = {
+    let mut a = [0u8; 9000];
+    let mut i = 0;
+    while i < a.len() {
+        a[i] = (i * 7 + i / 4096) as u8;
+        i += 1;
+    }
+    a
+};
+
+/// Files whose data is the kernel image's (the initramfs): read in place, copied on the
+/// first write or growing truncate, never counted as tmpfs pages until then.
+fn tmpfs_rom(t: &mut T) {
+    use super::tmpfs::TmpNode;
+    let files = || pmm::stats().of(pmm::Use::Files);
+    let rom_file = |path: &str| -> Option<super::file::OpenFile> {
+        let f = ops::open(path, O_RDWR | O_CREAT | O_TRUNC, 0o644).ok()?;
+        super::node::downcast::<TmpNode>(f.inode())?
+            .set_rom(&ROM)
+            .ok()?;
+        Some(f)
+    };
+    let is_rom = |path: &str| {
+        ops::lookup(path)
+            .ok()
+            .and_then(|i| super::node::downcast::<TmpNode>(&i).map(|n| n.is_rom()))
+            == Some(true)
+    };
+    let f0 = files();
+    let Some(f) = t.must(
+        rom_file("/tmp/t/rom").ok_or(Errno::EIO),
+        "a file over static bytes",
+    ) else {
+        return;
+    };
+    t.ok(
+        f.stat().size == 9000 && files() == f0 && is_rom("/tmp/t/rom"),
+        "rom file: 9000 bytes, no pages of its own",
+    );
+    t.ok(
+        ops::read_file("/tmp/t/rom").ok().as_deref() == Some(&ROM[..]),
+        "rom file reads its bytes",
+    );
+    let mut mid = [0u8; 100];
+    t.ok(
+        f.pread(&mut mid, 4050).ok() == Some(100) && mid[..] == ROM[4050..4150],
+        "rom file: a read across a page boundary",
+    );
+    // A hard link shares it; the first write copies, the static bytes stay as they were.
+    t.ok(
+        ops::link("/tmp/t/rom", "/tmp/t/rom-link").is_ok(),
+        "link rom file",
+    );
+    let before = ROM[5000];
+    t.ok(
+        f.pwrite(b"Z", 5000).ok() == Some(1),
+        "write into a rom file",
+    );
+    let back = ops::read_file("/tmp/t/rom-link").unwrap_or_default();
+    t.ok(
+        back.len() == 9000
+            && back[5000] == b'Z'
+            && back[..5000] == ROM[..5000]
+            && back[5001..] == ROM[5001..],
+        "after the write: own copy with the change, seen through the link",
+    );
+    t.ok(
+        ROM[5000] == before && files() == f0 + 3 && !is_rom("/tmp/t/rom"),
+        "copy-on-write: 3 pages of its own, the original untouched",
+    );
+    // Truncates: shrinking stays in place, growing copies, to 0 drops the view.
+    let Some(g) = t.must(rom_file("/tmp/t/rom2").ok_or(Errno::EIO), "second rom file") else {
+        return;
+    };
+    t.ok(
+        g.truncate(100).is_ok() && is_rom("/tmp/t/rom2") && files() == f0 + 3,
+        "shrinking a rom file copies nothing",
+    );
+    t.ok(
+        ops::read_file("/tmp/t/rom2").ok().as_deref() == Some(&ROM[..100]),
+        "shrunk rom file reads its first 100 bytes",
+    );
+    t.ok(
+        g.truncate(200).is_ok() && !is_rom("/tmp/t/rom2") && files() == f0 + 4,
+        "growing a rom file gives it a page",
+    );
+    let grown = ops::read_file("/tmp/t/rom2").unwrap_or_default();
+    t.ok(
+        grown.len() == 200 && grown[..100] == ROM[..100] && grown[100..].iter().all(|&b| b == 0),
+        "grown rom file: its bytes, then zeros",
+    );
+    let Some(h) = t.must(rom_file("/tmp/t/rom3").ok_or(Errno::EIO), "third rom file") else {
+        return;
+    };
+    t.ok(
+        h.truncate(0).is_ok() && h.stat().size == 0 && files() == f0 + 4,
+        "truncating a rom file to 0 copies nothing",
+    );
+    t.ok(
+        h.write(b"hi").ok() == Some(2)
+            && ops::read_file("/tmp/t/rom3").ok().as_deref() == Some(&b"hi"[..]),
+        "then it is an ordinary file",
+    );
+    // O_TRUNC over a rom file (how a program replaces one) copies nothing either.
+    drop(rom_file("/tmp/t/rom4"));
+    let f1 = files();
+    t.ok(
+        ops::write_file("/tmp/t/rom4", b"new").is_ok()
+            && ops::read_file("/tmp/t/rom4").ok().as_deref() == Some(&b"new"[..])
+            && files() == f1 + 1,
+        "replacing a rom file (O_TRUNC) writes only the new data",
+    );
+    drop((f, g, h));
+    for p in [
+        "/tmp/t/rom",
+        "/tmp/t/rom-link",
+        "/tmp/t/rom2",
+        "/tmp/t/rom3",
+        "/tmp/t/rom4",
+    ] {
+        let _ = ops::unlink(p);
+    }
+    t.ok(files() == f0, "rom test files gone, their pages freed");
+    // The built-in files are in the image, not copied (until written).
+    t.ok(
+        is_rom("/System/Version.txt") && is_rom("/Commands/cat"),
+        "built-in files read from the kernel image",
+    );
+    t.ok(
+        pmm::stats().of(pmm::Use::Files) * 4096 < super::initramfs::archive_len() / 4,
+        "the built-in files take no tmpfs pages",
+    );
+}
+
 fn tmpfs_namespace(t: &mut T) {
     // rename a file
     t.ok(
@@ -655,6 +790,42 @@ fn procfs_sysfs(t: &mut T) {
     t.ok(
         total_kb == pmm::stats().total_frames * 4,
         "MemTotal matches the PMM",
+    );
+    // The breakdown after Shmem adds up to MemTotal - MemFree (each line rounds down on
+    // its own, so it may fall short by under 1 kB a line), and the heap's frames are
+    // exactly its size.
+    let kb = |key: &str| -> usize {
+        mi.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
+            .and_then(|v| v.split_whitespace().next()?.parse().ok())
+            .unwrap_or(usize::MAX / 4)
+    };
+    let parts = [
+        "KernelHeap",
+        "KernelImage",
+        "BuiltinFiles",
+        "BootReserved",
+        "PageTables",
+        "KernelStacks",
+        "AppPages",
+        "RootFiles",
+        "PageCache",
+        "Display",
+        "Wallpaper",
+        "WindowBuffers",
+        "PanelCaches",
+        "Devices",
+        "Other",
+    ];
+    let sum: usize = parts.iter().map(|k| kb(k)).sum();
+    let used = kb("MemTotal") - kb("MemFree");
+    t.ok(
+        sum <= used && used - sum < parts.len(),
+        "/proc/meminfo breakdown adds up to MemTotal - MemFree",
+    );
+    t.ok(
+        crate::heap::stats().total == pmm::stats().of(pmm::Use::Heap) * 4096,
+        "the kernel heap's frames are tagged Heap",
     );
     let up = read_str("/proc/uptime");
     let secs: f32 = up
@@ -3313,6 +3484,7 @@ pub fn run() {
     };
     tmpfs_basics(&mut t);
     tmpfs_big_and_sparse(&mut t);
+    tmpfs_rom(&mut t);
     tmpfs_namespace(&mut t);
     errno_paths(&mut t);
     paths_and_mounts(&mut t);

@@ -727,7 +727,8 @@ pub fn sys(op: usize, a: usize, b: usize, c: usize, d: usize) -> KResult<usize> 
                 if claim.dma_pages() + pages > DMA_MAX_PAGES {
                     return Err(ENOMEM);
                 }
-                let pa = pmm::alloc_contiguous_zeroed(pages, 1).ok_or(ENOMEM)?;
+                let pa =
+                    pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, pages, 1).ok_or(ENOMEM)?;
                 claim.dma.push((pa, pages));
                 Ok(pa)
             })?;

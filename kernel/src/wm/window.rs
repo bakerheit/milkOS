@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect};
+use crate::pmm::Use;
 
 use super::buffer::Buffer;
 use super::event::{Button, Key, Mods};
@@ -438,7 +439,7 @@ impl Window {
         space: usize,
         contents: Box<dyn WindowContents>,
     ) -> Option<Window> {
-        let surf = Buffer::new(rect.w as usize, rect.h as usize, MILK)?;
+        let surf = Buffer::new(Use::WindowBuffers, rect.w as usize, rect.h as usize, MILK)?;
         Some(Window {
             id,
             app,
@@ -658,13 +659,37 @@ impl Window {
 
     /// Change size (keeps the surface allocation when it can). Marks dirty.
     pub fn set_rect(&mut self, r: Rect) {
+        self.set_rect_with(r, false);
+    }
+
+    /// [`set_rect`](Self::set_rect) for a size that keeps changing (a resize drag): the
+    /// surface may keep headroom, so not every step reallocates. [`fit`](Self::fit) after.
+    pub fn set_rect_live(&mut self, r: Rect) {
+        self.set_rect_with(r, true);
+    }
+
+    fn set_rect_with(&mut self, r: Rect, live: bool) {
         if r.w != self.rect.w || r.h != self.rect.h {
-            if !self.surf.resize(r.w as usize, r.h as usize) {
+            let (w, h) = (r.w as usize, r.h as usize);
+            let ok = if live {
+                self.surf.resize(w, h)
+            } else {
+                self.surf.resize_exact(w, h)
+            };
+            if !ok {
                 return; // out of memory: keep the old size
             }
             self.dirty = true;
         }
         self.rect = r;
+    }
+
+    /// Give back the surface's resize headroom (a resize drag ended).
+    pub fn fit(&mut self) {
+        let (w, h) = (self.rect.w as usize, self.rect.h as usize);
+        if self.surf.has_headroom() && self.surf.resize_exact(w, h) {
+            self.dirty = true;
+        }
     }
 
     /// Redraw the surface if needed (or if the focus state changed). True if it was redrawn.

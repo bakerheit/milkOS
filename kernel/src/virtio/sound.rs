@@ -333,7 +333,7 @@ pub fn quiesce(t: &Transport, queues: &[crate::udrv::QueueRegs]) {
         }
         core::hint::spin_loop();
     }
-    let Some(scratch) = pmm::alloc_contiguous_zeroed(1, 1) else {
+    let Some(scratch) = pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1) else {
         return;
     };
     let sp = scratch as u64;
@@ -393,7 +393,7 @@ fn queue(t: &Transport, idx: u16, want: usize) -> Result<Virtqueue, Error> {
         return Err(Error::BadQueue);
     }
     let size = 1u16 << (usize::BITS - 1 - max.leading_zeros());
-    let pa = pmm::alloc_contiguous_zeroed(1, 1).ok_or(Error::BadQueue)?;
+    let pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1).ok_or(Error::BadQueue)?;
     // SAFETY: fresh zeroed frame, identity mapped, owned by this queue from now on.
     let vq = unsafe { Virtqueue::new(phys_to_virt(pa) as *mut QueueMem, size) };
     t.setup_queue(idx, &vq)?;
@@ -420,9 +420,11 @@ pub fn attach(t: Transport) -> Result<(), Error> {
         t.fail();
         Error::BadQueue
     };
-    let ctl_pa = pmm::alloc_contiguous_zeroed(1, 1).ok_or_else(|| fail(&t))?;
+    let ctl_pa =
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1).ok_or_else(|| fail(&t))?;
     let slot_pages = (SLOTS * SLOT_STRIDE + EVENTS * 8).div_ceil(PAGE_SIZE);
-    let slots_pa = pmm::alloc_contiguous_zeroed(slot_pages, 1).ok_or_else(|| fail(&t))?;
+    let slots_pa = pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, slot_pages, 1)
+        .ok_or_else(|| fail(&t))?;
     let ev_pa = slots_pa + SLOTS * SLOT_STRIDE;
     let mut ev_of = [0u8; MAX_QUEUE_SIZE];
     for k in 0..EVENTS {

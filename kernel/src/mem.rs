@@ -69,11 +69,11 @@ pub fn init() {
     };
     let ram_end = ram.base + ram.size;
 
-    // 2. The bitmap goes right after the kernel image. If the device tree sits
+    // 2. The bitmap (and the frame tags) go right after the kernel image. If the device tree sits
     // there (a loader that puts it next to the kernel), start the bitmap after it.
     let mut low_end = kend;
     if let Some(d) = &dtb {
-        let bitmap_len = (ram.size / PAGE_SIZE).div_ceil(64) * 8 + PAGE_SIZE;
+        let bitmap_len = pmm::metadata_bytes(ram.size) + PAGE_SIZE;
         let dbase = mmu::virt_to_phys(d.base());
         let dend = dbase + d.total_size();
         if dbase < kend + bitmap_len && dend > kend {

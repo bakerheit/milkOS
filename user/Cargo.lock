@@ -187,6 +187,7 @@ dependencies = [
 name = "msh"
 version = "0.0.1"
 dependencies = [
+ "filekit",
  "rt",
 ]
 

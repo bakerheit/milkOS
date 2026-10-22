@@ -15,8 +15,29 @@ sleep 10 &                                  # background job: jobs, fg %1, wait
 
 Ctrl-C kills the foreground job, never the shell: every pipeline runs in its own process
 group, which owns the terminal (TIOCSPGRP) while it runs; the shell catches SIGINT itself.
-Built-ins: `cd pwd exit export unset set jobs fg wait source help`. Everything else is a
+Built-ins: `go where exit export unset set jobs fg wait source help`. Everything else is a
 program on `$PATH` (`/Commands`). Details: comments at the top of `user/msh/src/main.rs`.
+
+## Moving around: go and where
+
+```sh
+go Documents        # into a folder (relative to where you are)
+go ..               # up one
+go /Apps            # an absolute path
+go                  # home
+go back             # back to the folder you were in before the last go
+go ./back           # a folder that is really called "back"
+where               # print the folder you're in; works in pipes: where | cat, where > f
+```
+
+There is no `cd` or `pwd` (like `ls`, `cp` and `mv`, which `files` replaced): typing them
+gives `command not found`. Errors are in plain English: `go: Documents doesn't exist`,
+`go: notes.txt is a file, not a folder`, `go: you can't open /Users/root`. `go` sets `PWD`
+and `OLDPWD` for programs that read them.
+
+`where` on its own is the current folder; with arguments it is the table filter
+(`ps | where rss > 100`, below). msh tells them apart by the arguments, so a bare `where`
+in a pipeline prints the folder and never becomes a table stage.
 
 ## Structured pipes
 

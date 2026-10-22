@@ -174,9 +174,43 @@ pub fn landing(src: &str, dst: &str, dst_slash: bool, dest: Dest) -> Result<Stri
     }
 }
 
+/// Where the shell's `go ARGS` goes: no argument is `home`, `back` is `previous` (the folder
+/// before the last `go`; empty if there wasn't one), anything else is that path. A folder
+/// that is really called `back` is `go ./back`. Err is the message.
+pub fn go_target(args: &[&str], home: &str, previous: &str) -> Result<String, String> {
+    match args {
+        [] => Ok(String::from(home)),
+        ["back"] if previous.is_empty() => Err(String::from("there's no folder to go back to yet")),
+        ["back"] => Ok(String::from(previous)),
+        [p] => Ok(String::from(*p)),
+        _ => Err(String::from(
+            "go takes one folder (put quotes around a name with spaces)",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go() {
+        assert_eq!(
+            go_target(&[], "/Users/milk", "/tmp").unwrap(),
+            "/Users/milk"
+        );
+        assert_eq!(go_target(&["back"], "/Users/milk", "/tmp").unwrap(), "/tmp");
+        assert_eq!(
+            go_target(&["./back"], "/Users/milk", "/tmp").unwrap(),
+            "./back"
+        );
+        assert_eq!(go_target(&[".."], "/Users/milk", "").unwrap(), "..");
+        assert_eq!(
+            go_target(&["back"], "/Users/milk", "").unwrap_err(),
+            "there's no folder to go back to yet"
+        );
+        assert!(go_target(&["a", "b"], "/", "").is_err());
+    }
 
     #[test]
     fn slash_split() {

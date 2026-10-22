@@ -1148,6 +1148,8 @@ impl WindowContents for Terminal {
 /// The in-kernel stand-in for a real shell. Works on the real file system (`crate::fs`).
 pub struct BuiltinShell {
     cwd: String,
+    /// The folder before the last `go`, for `go back` (empty at first).
+    prev: String,
     prompt: String,
 }
 
@@ -1155,6 +1157,7 @@ impl BuiltinShell {
     pub fn new() -> BuiltinShell {
         let mut s = BuiltinShell {
             cwd: String::from(fsx::HOME),
+            prev: String::new(),
             prompt: String::new(),
         };
         s.set_prompt();
@@ -1239,7 +1242,7 @@ impl Shell for BuiltinShell {
         match cmd {
             "help" => {
                 out.out("files:    files list [-l] | create NAME | delete [--now] PATH,  trash");
-                out.out("          cd pwd cat  echo text > file");
+                out.out("          go FOLDER (go: home, go back)  where  cat  echo text > file");
                 out.out("          edit <file> (opens it in Notes)");
                 out.out("system:   uname uptime date mem log whoami clear");
                 out.out("desktop:  open <files|notes|about|terminal>  notify <text>");
@@ -1375,16 +1378,27 @@ impl Shell for BuiltinShell {
                     out.out(&format!("{}  (from {})", it.name, fsx::pretty(it.from())));
                 }
             }
-            "cd" => {
-                let p = self.path(if arg.is_empty() { "~" } else { arg.as_str() });
-                if fsx::is_dir(&p) {
-                    self.cwd = p;
-                    self.set_prompt();
-                } else {
-                    out.bad(&format!("cd: {arg}: not a directory"));
+            "go" => {
+                let args: &[&str] = if arg.is_empty() { &[] } else { &[arg.as_str()] };
+                match filekit::path::go_target(args, "~", &self.prev) {
+                    Ok(dir) => {
+                        let p = self.path(&dir);
+                        if fsx::is_dir(&p) {
+                            self.prev = core::mem::replace(&mut self.cwd, p);
+                            self.set_prompt();
+                        } else {
+                            let is_file = fs::stat(&p).is_ok();
+                            let errno = if is_file { 20 } else { 2 };
+                            out.bad(&format!(
+                                "go: {}",
+                                filekit::words::say_go(&dir, errno, is_file)
+                            ));
+                        }
+                    }
+                    Err(m) => out.bad(&format!("go: {m}")),
                 }
             }
-            "pwd" => out.out(&self.cwd.clone()),
+            "where" => out.out(&self.cwd.clone()),
             "cat" => {
                 for a in &rest {
                     match fs::read_to_string(&self.path(a)) {

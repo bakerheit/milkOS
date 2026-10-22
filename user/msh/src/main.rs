@@ -5,7 +5,10 @@
 //! * `NAME=value` (shell variable), `export NAME[=value]`, `unset`, `NAME=value cmd`
 //! * Job control: each pipeline runs in its own process group, which gets the terminal
 //!   while it runs, so Ctrl-C kills the job and not the shell. `jobs`, `fg [%N]`, `wait`.
-//! * Built-ins: cd pwd exit export unset set jobs fg wait help source
+//! * Built-ins: go where exit export unset set jobs fg wait help source. `go [FOLDER|back]`
+//!   changes folder (no argument: home; `back`: the one before; a folder called back is
+//!   `go ./back`); `where` alone prints the current folder (`where COL OP V` is the table
+//!   filter, below). There is no `cd` or `pwd`.
 //! * Everything else is a program found on $PATH (the coreutils live in /Commands).
 //! * `msh -c 'commands'` and `msh FILE` run non-interactively.
 
@@ -170,8 +173,21 @@ fn read_line(out: &mut Vec<u8>) -> Line {
 }
 
 const BUILTINS: &[&str] = &[
-    "cd", "pwd", "exit", "export", "unset", "set", "jobs", "fg", "wait", "help", "source", ".",
+    "go", "exit", "export", "unset", "set", "jobs", "fg", "wait", "help", "source", ".",
 ];
+
+/// `where` on its own prints the current folder; with arguments it is the table filter.
+fn is_where_here(argv: &[String]) -> bool {
+    argv.len() == 1 && argv[0] == "where"
+}
+
+fn is_builtin(argv: &[String]) -> bool {
+    argv.first().is_some_and(|a| BUILTINS.contains(&a.as_str())) || is_where_here(argv)
+}
+
+fn is_table(argv: &[String]) -> bool {
+    argv.first().is_some_and(|a| tablecmd::is_table_cmd(a)) && !is_where_here(argv)
+}
 
 impl Shell {
     fn get(&self, k: &str) -> String {
@@ -365,7 +381,7 @@ impl Shell {
                 self.last = 0;
                 return None;
             }
-            if BUILTINS.contains(&argv[0].as_str()) {
+            if is_builtin(&argv) {
                 let saved = self.apply_redirs(&c.redirs, true);
                 let Some(saved) = saved else {
                     self.last = 1;
@@ -632,14 +648,12 @@ impl Shell {
         for i in 0..n {
             let mut st = core::mem::take(&mut stages[i]);
             let me = name(&st);
-            let next_is_table = stages
-                .get(i + 1)
-                .is_some_and(|s| tablecmd::is_table_cmd(&name(s)));
-            if next_is_table && !tablecmd::is_table_cmd(&me) {
+            let next_is_table = stages.get(i + 1).is_some_and(|s| is_table(&s.argv));
+            if next_is_table && !is_table(&st.argv) {
                 st.assigns
                     .push((String::from("MILK_TABLE"), String::from("1")));
             }
-            let render = tablecmd::emits_table(&me) && !next_is_table;
+            let render = is_table(&st.argv) && tablecmd::emits_table(&me) && !next_is_table;
             let mut moved = Vec::new();
             if render {
                 st.redirs.retain(|r| {
@@ -668,13 +682,13 @@ impl Shell {
         if argv.is_empty() {
             return 0;
         }
-        if BUILTINS.contains(&argv[0].as_str()) {
+        if is_builtin(argv) {
             return match self.builtin(argv) {
                 Some(c) => c,
                 None => self.last,
             };
         }
-        if tablecmd::is_table_cmd(&argv[0]) {
+        if is_table(argv) {
             return tablecmd::run(argv);
         }
         let Some(path) = self.find(&argv[0]) else {
@@ -694,27 +708,31 @@ impl Shell {
         let arg = |i: usize| argv.get(i).map(|s| s.as_str());
         let mut rc = 0;
         match argv[0].as_str() {
-            "cd" => {
-                let home = self.get("HOME");
-                let dir = match arg(1) {
-                    Some("-") => self.get("OLDPWD"),
-                    Some(d) => String::from(d),
-                    None => home,
-                };
-                let old = sys::getcwd().unwrap_or_default();
-                match sys::chdir(&dir) {
-                    Ok(()) => {
-                        self.set("OLDPWD", &old, true);
-                        let new = sys::getcwd().unwrap_or_default();
-                        self.set("PWD", &new, true);
+            "go" => {
+                let args: Vec<&str> = argv[1..].iter().map(|s| s.as_str()).collect();
+                match filekit::path::go_target(&args, &self.get("HOME"), &self.get("OLDPWD")) {
+                    Ok(dir) => {
+                        let old = sys::getcwd().unwrap_or_default();
+                        match sys::chdir(&dir) {
+                            Ok(()) => {
+                                self.set("OLDPWD", &old, true);
+                                let new = sys::getcwd().unwrap_or_default();
+                                self.set("PWD", &new, true);
+                            }
+                            Err(e) => {
+                                let is_file = sys::stat_path(&dir, true).is_ok_and(|s| !s.is_dir());
+                                eprintln!("go: {}", filekit::words::say_go(&dir, e.0, is_file));
+                                rc = 1;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("cd: {dir}: {e}");
-                        rc = 1;
+                    Err(m) => {
+                        eprintln!("go: {m}");
+                        rc = 2;
                     }
                 }
             }
-            "pwd" => println!("{}", sys::getcwd().unwrap_or_default()),
+            "where" => println!("{}", sys::getcwd().unwrap_or_default()),
             "exit" => {
                 let code = arg(1).and_then(|s| s.parse().ok()).unwrap_or(self.last);
                 return Some(code);
@@ -822,7 +840,12 @@ fn help() {
     println!("  > f, >> f, < f, 2> f, 2>&1       redirection");
     println!("  $VAR ${{VAR}} $? $$ ~ * ?        expansion; '...' and \"...\" quote");
     println!("  NAME=v, export NAME[=v], unset NAME, set     variables");
-    println!("  cd [DIR|-], pwd, exit [N], jobs, fg [%N], wait, source FILE, help");
+    println!("  go FOLDER        change folder: go Documents, go .., go /Apps");
+    println!(
+        "  go, go back      go home; back to the last folder (a folder named back: go ./back)"
+    );
+    println!("  where            print the folder you're in");
+    println!("  exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
     println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
     println!("  sleep env uptime free uname true false clear   (files help: files and folders)");

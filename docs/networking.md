@@ -505,7 +505,7 @@ claim someone else's key. It can be replayed, though, and trust is not decided h
 every message and never makes a key. `drop list` multicasts a QUERY (and once more halfway
 through), collects answers for 1.5 s, and prints name, address, fingerprint, receiving and
 trust (`new` / `known` / `KEY CHANGED`). With `MILK_TABLE=1` it writes a structured table
-(`drop list | where receiving == yes`). The daemon also keeps what it hears in
+(`drop list | filter receiving == yes`). The daemon also keeps what it hears in
 `/tmp/drop/peers` (`name ip fp recv seen`).
 
 **Transfer** (TCP 5360, on eth1's address only, while `drop recv` runs): protocol 2,

@@ -17,10 +17,13 @@
   which are gone. A slash at the end of a path means a folder: on a file it is an error.
 - `go` and `where` instead of `cd` and `pwd`, which are gone: `go Documents`, `go ..`,
   `go /Apps`, `go` (home), `go back` (the folder before; a folder called back is
-  `go ./back`); `where` prints the folder you're in, in pipes too (`where` with arguments
-  is still the table filter). Errors in plain English ("Documents doesn't exist",
+  `go ./back`); `where` prints the folder you're in, in pipes too, and takes no
+  arguments. Errors in plain English ("Documents doesn't exist",
   "notes.txt is a file, not a folder", "you can't open ..."). In msh and the Terminal's
   built-in shell.
+- msh's table filter is now `filter` instead of `where`, same syntax and operators:
+  `ps | filter rss > 100`, `files list | filter size > 1M`. `where` with arguments says
+  "where takes no arguments; to filter a table use filter".
 - A real Trash: `files delete` moves things to `~/.Trash` (or a disk's own `.Trash`),
   `files delete --now` skips it, `trash list`, `trash restore`, `trash empty`. The `trashd`
   service deletes things for good after 30 days, or what Settings > Trash says (or never).

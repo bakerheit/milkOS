@@ -760,7 +760,7 @@ let s: search::Status = search::status(); // s.state: "starting" | "building" |
 - `spot WORDS...` (like macOS `mdfind`): paths, best first; `-l` adds kind, size, date and
   where it matched; `-n N`; `--status`, `--rebuild`. Under msh structured pipes
   (`MILK_TABLE=1`) it emits a table (`path name kind size modified score matched`):
-  `spot -n 100 kind:md cow | where size > 1K | sort-by modified -r`.
+  `spot -n 100 kind:md cow | filter size > 1K | sort-by modified -r`.
 
 ## Next steps
 

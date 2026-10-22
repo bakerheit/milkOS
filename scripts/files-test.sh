@@ -12,7 +12,8 @@
 #           pretend clock (--later), and "never"; then an item whose record says it was
 #           deleted in 2001 is left in the Trash; msh's go and where: relative, .., absolute,
 #           go back, ./back, home, in a pipe and a redirection, the plain-English errors (and
-#           "you can't open" as another user), cd and pwd gone, `where COL OP V` still a filter;
+#           "you can't open" as another user), cd and pwd gone, `where` with arguments is
+#           an error (no stray file from its `>`), the table filter is `filter COL OP V`;
 #   boot 2: trashd (a milkd service) deleted it at boot, says so in the journal, and the
 #           Trash's other item is still there.
 # Fresh /tmp directory; only the qemus started here are killed.
@@ -172,7 +173,9 @@ s B1 \
   "cd /tmp" \
   "pwd" \
   "where" \
-  "ps | where name == msh | select name" \
+  "where cpu > 5" \
+  "files info 5" \
+  "ps | filter name == msh | select name" \
   "help" \
   "echo now > /System/Kernel/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
@@ -262,9 +265,12 @@ check "a folder you can't open" "su milk -c 'go /tmp/locked'" "go: you can't ope
 gone() { echo "$L1" | grep -A1 -F "\$ $1" | grep -Fq "msh: $1: command not found" && ok "$1 is gone" || bad "$1 still runs: $(echo "$L1" | grep -A1 -F "\$ $1" | tail -1)"; }
 gone cd; gone pwd
 check "a failed go stays put" "where" "/Users/milk" 5
-check "where COL OP V is still the table filter" "ps | where name == msh | select name" "msh"
+check "where with arguments is an error" "where cpu > 5" "where takes no arguments; to filter a table use filter"
+check "and its > made no file" "files info 5" "5 doesn't exist"
+check "filter COL OP V is the table filter" "ps | filter name == msh | select name" "msh"
 check "help: go" "help" "go FOLDER        change folder: go Documents, go .., go /Apps"
 check "help: where" "help" "where            print the folder you're in"
+check "help: filter" "help" "structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r]"
 
 echo "== boot 2: trashd ran at boot"
 L2="$(boot b2 \

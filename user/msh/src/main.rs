@@ -7,8 +7,8 @@
 //!   while it runs, so Ctrl-C kills the job and not the shell. `jobs`, `fg [%N]`, `wait`.
 //! * Built-ins: go where exit export unset set jobs fg wait help source. `go [FOLDER|back]`
 //!   changes folder (no argument: home; `back`: the one before; a folder called back is
-//!   `go ./back`); `where` alone prints the current folder (`where COL OP V` is the table
-//!   filter, below). There is no `cd` or `pwd`.
+//!   `go ./back`); `where` prints the current folder and takes no arguments (the table
+//!   filter is `filter COL OP V`). There is no `cd` or `pwd`.
 //! * Everything else is a program found on $PATH (the coreutils live in /Commands).
 //! * `msh -c 'commands'` and `msh FILE` run non-interactively.
 
@@ -173,20 +173,15 @@ fn read_line(out: &mut Vec<u8>) -> Line {
 }
 
 const BUILTINS: &[&str] = &[
-    "go", "exit", "export", "unset", "set", "jobs", "fg", "wait", "help", "source", ".",
+    "go", "where", "exit", "export", "unset", "set", "jobs", "fg", "wait", "help", "source", ".",
 ];
 
-/// `where` on its own prints the current folder; with arguments it is the table filter.
-fn is_where_here(argv: &[String]) -> bool {
-    argv.len() == 1 && argv[0] == "where"
-}
-
 fn is_builtin(argv: &[String]) -> bool {
-    argv.first().is_some_and(|a| BUILTINS.contains(&a.as_str())) || is_where_here(argv)
+    argv.first().is_some_and(|a| BUILTINS.contains(&a.as_str()))
 }
 
 fn is_table(argv: &[String]) -> bool {
-    argv.first().is_some_and(|a| tablecmd::is_table_cmd(a)) && !is_where_here(argv)
+    argv.first().is_some_and(|a| tablecmd::is_table_cmd(a))
 }
 
 impl Shell {
@@ -732,6 +727,10 @@ impl Shell {
                     }
                 }
             }
+            "where" if argv.len() > 1 => {
+                eprintln!("where takes no arguments; to filter a table use filter");
+                rc = 2;
+            }
             "where" => println!("{}", sys::getcwd().unwrap_or_default()),
             "exit" => {
                 let code = arg(1).and_then(|s| s.parse().ok()).unwrap_or(self.last);
@@ -850,7 +849,7 @@ fn help() {
     println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
     println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
-    println!("structured pipes (docs/shell.md): where COL OP V, sort-by COL [-r], select COL..,");
+    println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
         "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"
     );
@@ -858,7 +857,7 @@ fn help() {
         "try: ps | grep msh,  files list -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
     );
     println!(
-        "     ps | where rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
+        "     ps | filter rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
     );
 }
 

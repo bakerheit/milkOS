@@ -29,7 +29,7 @@ const QUICK_MS: u64 = 10_000;
 const MAX_QUICK_FAILURES: u32 = 8;
 const STOP_GRACE_MS: u64 = 3_000;
 
-// epoll data tags: kind << 32 | index
+// epoll data tags: kind << 32 | index (a unit's id, or an fd for clients and output pipes)
 const TAG_LISTENER: u64 = 1 << 32;
 const TAG_CLIENT: u64 = 2 << 32;
 const TAG_OUT: u64 = 3 << 32;
@@ -210,6 +210,11 @@ struct Milkd {
     journal: i32,
     listener: i32,
     clients: BTreeMap<i32, Vec<u8>>,
+    /// Every open stdout / stderr read end: fd -> (unit, stderr?). A unit's previous run
+    /// can still have one here (a restart while the old process's output is unread): its
+    /// events carry the fd, so they are always read from the pipe they are about, and never
+    /// from the new run's pipe, which a read would then block on.
+    pipes: BTreeMap<i32, (String, bool)>,
     next_id: u64,
 }
 
@@ -475,9 +480,10 @@ impl Milkd {
         };
         let _ = sys::close(ow);
         let _ = sys::close(ew);
-        let idx = self.index_of(n);
-        let _ = ep::add(self.ep, or, EPOLLIN, TAG_OUT | idx);
-        let _ = ep::add(self.ep, er, EPOLLIN, TAG_ERR | idx);
+        let _ = ep::add(self.ep, or, EPOLLIN, TAG_OUT | or as u64);
+        let _ = ep::add(self.ep, er, EPOLLIN, TAG_ERR | er as u64);
+        self.pipes.insert(or, (String::from(n), false));
+        self.pipes.insert(er, (String::from(n), true));
         let u = self.units.get_mut(n).unwrap();
         u.pid = pid;
         u.out_fd = or;
@@ -574,16 +580,13 @@ impl Milkd {
         );
     }
 
-    /// Forward complete lines (all of it at EOF) from a unit's stdout / stderr.
-    fn pump(&mut self, n: &str, err: bool) {
-        let fd = if err {
-            self.units[n].err_fd
-        } else {
-            self.units[n].out_fd
-        };
-        if fd < 0 {
+    /// Forward complete lines (all of it at EOF) from one of a unit's stdout / stderr pipes
+    /// (epoll said `fd` is readable).
+    fn pump(&mut self, fd: i32) {
+        let Some((n, err)) = self.pipes.get(&fd).cloned() else {
             return;
-        }
+        };
+        let n = n.as_str();
         let mut b = [0u8; 2048];
         let eof = match sys::read(fd, &mut b) {
             Ok(0) | Err(_) => true,
@@ -598,10 +601,12 @@ impl Milkd {
         if eof {
             let _ = ep::del(self.ep, fd);
             let _ = sys::close(fd);
+            self.pipes.remove(&fd);
             let u = self.units.get_mut(n).unwrap();
-            if err {
+            if u.err_fd == fd {
                 u.err_fd = -1;
-            } else {
+            }
+            if u.out_fd == fd {
                 u.out_fd = -1;
             }
         }
@@ -632,14 +637,15 @@ impl Milkd {
     }
 
     fn drain_output(&mut self, n: &str, _final: bool) {
-        for err in [false, true] {
+        let fds: Vec<i32> = self
+            .pipes
+            .iter()
+            .filter(|(_, (u, _))| u == n)
+            .map(|(&fd, _)| fd)
+            .collect();
+        for fd in fds {
             for _ in 0..64 {
-                let fd = if err {
-                    self.units[n].err_fd
-                } else {
-                    self.units[n].out_fd
-                };
-                if fd < 0 {
+                if !self.pipes.contains_key(&fd) {
                     break;
                 }
                 // Non-blocking peek via epoll: only read while it's readable.
@@ -651,7 +657,7 @@ impl Milkd {
                 if !ready {
                     break;
                 }
-                self.pump(n, err);
+                self.pump(fd);
             }
         }
     }
@@ -970,6 +976,9 @@ fn main(_args: &rt::Args) -> i32 {
         rt::eprintln!("milkd: must run as root (init starts it)");
         return 1;
     }
+    // A client that hangs up before its answer is written must not take the service
+    // manager down with SIGPIPE: the write fails with EPIPE instead.
+    let _ = sys::sigaction(sys::SIGPIPE, sys::SIG_IGN);
     let journal = sys::open("/dev/journal", sys::O_WRONLY | sys::O_CLOEXEC).unwrap_or(-1);
     let Ok(epfd) = ep::create() else {
         rt::eprintln!("milkd: epoll_create1 failed");
@@ -991,6 +1000,7 @@ fn main(_args: &rt::Args) -> i32 {
         journal,
         listener,
         clients: BTreeMap::new(),
+        pipes: BTreeMap::new(),
         next_id: 0,
     };
     m.note(&alloc::format!(
@@ -1010,11 +1020,7 @@ fn main(_args: &rt::Args) -> i32 {
                     }
                 }
                 TAG_CLIENT => m.client_readable(idx as i32),
-                TAG_OUT | TAG_ERR => {
-                    if let Some(n) = m.by_index(idx) {
-                        m.pump(&n, tag == TAG_ERR);
-                    }
-                }
+                TAG_OUT | TAG_ERR => m.pump(idx as i32),
                 TAG_ACTIVATE => {
                     if let Some(n) = m.by_index(idx) {
                         let fd = m.units[&n].listen_fd;

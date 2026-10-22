@@ -7,7 +7,8 @@
 #   (by name, a bad signal), signals, info (by PID and name), --group, a PID that isn't
 #   there, a process milk may not stop; services list / status (text, a table, one, a
 #   missing one), restart, signal, reload, stop refused for nobody, logs (a marker, by
-#   name, --last, --since, --level, --follow, refused for nobody, a bad --since); system
+#   name, --last, --since, --level, --follow, refused for nobody, a bad --since), ten
+#   restart + signal pairs back to back (milkd keeps answering); system
 #   info / memory (Activity Monitor's groups, a table) / uptime, restart refused with the
 #   hint; users me (root, milk), list (and a table), switch (to milk with and without a
 #   password, a wrong password, a missing user), password (milk's own, a wrong current one,
@@ -58,6 +59,8 @@ s() { local a="$1" c; shift; for c in "$@"; do eval "$a+=(\"send:\$c\" \"wait:\$
 ask() { local a="$1" c="$2"; shift 2; eval "$a+=(\"send:\$c\")"
   while [ $# -gt 0 ]; do eval "$a+=(\"wait:\$1\" \"send:\$2\")"; shift 2; done; eval "$a+=(\"wait:\$P\")"; }
 AS_MILK="users switch milk --command"
+# Ten restart + signal pairs on one line, back to back (msh has no loops).
+PAIRS="services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null; services restart alarmd > /dev/null; services signal alarmd > /dev/null"
 B=(); s B \
   "pause 1" \
   "processes help" "services help" "system help" "users help" "admin help" \
@@ -93,6 +96,12 @@ B=(); s B \
   "services signal alarmd" \
   "pause 1" \
   "services reload" \
+  "$PAIRS" \
+  "pause 1" \
+  "services status alarmd" \
+  "services start alarmd" \
+  "pause 1" \
+  "services status alarmd" \
   "admin --user nobody services stop alarmd" \
   "print $MARK > /dev/journal" \
   "services logs | text find --count $MARK" \
@@ -199,6 +208,8 @@ check "a service that isn't there" "services status nope" "services status: ther
 check "restart" "services restart alarmd" "restarted alarmd"
 checkre "signal (KILL), the restart policy applies" "services signal alarmd" "^sent KILL to alarmd \\(PID [0-9]+\\); its restart policy applies$"
 check "reload" "services reload" "read the service files again"
+checkre "ten restarts and kills back to back: milkd still answers (and gave up on the quick failures)" "services status alarmd" "^  state +(running|restarting|failed)" 2
+checkre "services start after that: running again" "services status alarmd" "^  state +running$" 3
 check "stop is for administrators" "admin --user nobody services stop alarmd" "services stop: only an administrator can stop services (try admin services stop ...)"
 count "logs: the marker is in the journal" "services logs | text find --count $MARK" 1
 checkre "logs by name, --last 1" "services logs user/print --last 1" "^[A-Z][a-z]{2} +[0-9]+ [0-9:]{8} user/print\\[[0-9]+\\]: $MARK$"

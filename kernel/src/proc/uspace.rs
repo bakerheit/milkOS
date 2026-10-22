@@ -282,7 +282,7 @@ impl UserSpace {
             }
             return Ok(p.pa);
         }
-        let pa = pmm::alloc_frame_zeroed().ok_or(ENOMEM)?;
+        let pa = pmm::alloc_frame_zeroed_as(pmm::Use::AppPages).ok_or(ENOMEM)?;
         if self
             .space()
             .map(va, pa, PAGE_SIZE, perm.attrs(), &mut PmmTables)
@@ -317,7 +317,7 @@ impl UserSpace {
             return false;
         }
         if frame_shared(p.pa) {
-            let Some(new) = pmm::alloc_frame() else {
+            let Some(new) = pmm::alloc_frame_as(pmm::Use::AppPages) else {
                 return false;
             };
             // SAFETY: two distinct whole frames.

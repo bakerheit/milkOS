@@ -12,7 +12,10 @@ use gui::{Color, Window};
 use sysview::audit::{self, Dot};
 use sysview::fmt;
 use sysview::proc::{Proc, SortKey, is_system, sandbox_label};
-use sysview::system::Pressure;
+use sysview::system::{MemPart, Pressure};
+
+/// The Memory bar's "Windows" slice (no theme colour left that reads apart from the others).
+const WINDOWS_TEAL: Color = 0x8EC3C7;
 
 /// A chart line colour: the darker "ink" accents on the light theme (so thin lines hold 3:1
 /// against cream), the plain accents on the dark one.
@@ -394,41 +397,53 @@ impl App {
             2,
         );
         let bar = Rect::new(16, 100, win.w - 32, 28);
-        let other = m
-            .total_kb
-            .saturating_sub(apps + m.heap_used_kb + m.cache_kb + m.free_kb);
-        let segs = [
-            (apps, th.honey),
-            (m.heap_used_kb, th.blue),
-            (other, th.sand),
-            (m.cache_kb, th.lav),
-            (m.free_kb, th.oat),
-        ];
+        let colour = |part: MemPart| match part {
+            MemPart::Apps => th.honey,
+            MemPart::KernelHeap => th.blue,
+            MemPart::KernelImage => th.latte,
+            MemPart::Files => th.matcha,
+            MemPart::Screen => th.straw,
+            MemPart::Windows => WINDOWS_TEAL,
+            MemPart::OtherKernel => th.sand,
+            MemPart::PageCache => th.lav,
+            MemPart::Free => th.oat,
+        };
+        let parts = m.parts(apps);
+        let segs: Vec<(u64, Color)> = parts.iter().map(|&(p, kb)| (kb, colour(p))).collect();
         charts::stacked(win, bar, &segs, m.total_kb, th.oat);
-        // Legend.
-        let legend = [
-            ("Apps", apps, th.honey),
-            ("Kernel heap", m.heap_used_kb, th.blue),
-            ("System", other, th.sand),
-            ("Page cache", m.cache_kb, th.lav),
-            ("Free", m.free_kb, th.oat),
-        ];
-        let mut x = 16;
-        for (name, kb, c) in legend {
-            win.rrect(x, 142, 14, 14, 4, c);
-            let t = format!("{name} {}", fmt::mb0(kb));
-            win.text(x + 20, 141, &t, th.espresso);
-            x += 20 + gui::str_width(&t, 1) + 22;
+        // Legend, wrapping onto a second row.
+        let (mut x, mut y) = (16, 142);
+        for &(part, kb) in &parts {
+            let t = format!("{} {}", part.label(), fmt::mb0(kb));
+            let w = 20 + gui::str_width(&t, 1) + 22;
+            if x > 16 && x + w - 22 > win.w - 16 {
+                (x, y) = (16, y + 24);
+            }
+            win.rrect(x, y + 1, 14, 14, 4, colour(part));
+            win.text(x + 20, y, &t, th.espresso);
+            x += w;
         }
+        // What "Other kernel" is made of (only a kernel with the breakdown says).
+        if m.kernel.present {
+            y += 24;
+            let mut t = String::from("Other kernel:");
+            for (i, (name, kb)) in m.other_kernel_detail().iter().enumerate() {
+                t.push_str(if i == 0 { " " } else { ", " });
+                t.push_str(&format!("{name} {}.{}", kb / 1024, kb % 1024 * 10 / 1024));
+            }
+            t.push_str(" MB");
+            win.text(16, y, &widgets::fit(&t, win.w - 32), th.cocoa);
+        }
+        let dy = y - 142;
         // Pressure.
-        bold_x(win, 16, 178, "Memory pressure", th.espresso, 1);
+        bold_x(win, 16, 178 + dy, "Memory pressure", th.espresso, 1);
         let (word, _) = match m.pressure() {
             Pressure::Low => ("Low", th.matcha),
             Pressure::Medium => ("Medium", th.honey),
             Pressure::High => ("High", th.danger),
         };
-        text_r(win, win.w - 16, 178, word, th.espresso, 1);
-        let g = Rect::new(16, 204, win.w - 32, 14);
+        text_r(win, win.w - 16, 178 + dy, word, th.espresso, 1);
+        let g = Rect::new(16, 204 + dy, win.w - 32, 14);
         let zone = |frac_a: i32, frac_b: i32| {
             ((g.x + g.w * frac_a / 100), (g.w * (frac_b - frac_a) / 100))
         };
@@ -440,12 +455,12 @@ impl App {
         let mx = g.x + g.w * used_pct / 100;
         win.fill(mx - 1, g.y - 4, 3, g.h + 8, th.espresso);
         // The biggest processes.
-        bold_x(win, 16, 244, "Biggest processes", th.espresso, 1);
+        bold_x(win, 16, 244 + dy, "Biggest processes", th.espresso, 1);
         let mut v = self.s.procs.clone();
         sysview::proc::sort(&mut v, SortKey::Memory, true);
         let max = v.first().map_or(1, |p| p.rss_kb.max(1));
         for (k, p) in v.iter().take(6).enumerate() {
-            let y = 270 + k as i32 * 28;
+            let y = 270 + dy + k as i32 * 28;
             win.text(16, y + 2, &widgets::fit(&p.name, 150), th.espresso);
             charts::bar(
                 win,

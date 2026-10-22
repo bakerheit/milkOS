@@ -231,12 +231,17 @@ impl Settings {
         if !self.thumbs.is_empty() {
             return;
         }
-        let Some(mut full) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
+        let Some(mut full) = Buffer::new(
+            pmm::Use::Wallpaper,
+            screen_w() as usize,
+            screen_h() as usize,
+            0,
+        ) else {
             return;
         };
         for k in Kind::ALL {
             wallpaper::paint(&mut full, k);
-            if let Some(mut t) = Buffer::new(152, 114, 0) {
+            if let Some(mut t) = Buffer::new(pmm::Use::Wallpaper, 152, 114, 0) {
                 paint::downscale(&full, &mut t);
                 self.thumbs.push((k, t));
             }

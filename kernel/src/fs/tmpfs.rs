@@ -218,7 +218,7 @@ impl TmpNode {
         if s.max_pages != 0 && s.pages.load(Ordering::Relaxed) >= s.max_pages {
             return Err(Errno::ENOSPC);
         }
-        let pa = pmm::alloc_frame_zeroed().ok_or(Errno::ENOSPC)?;
+        let pa = pmm::alloc_frame_zeroed_as(pmm::Use::Files).ok_or(Errno::ENOSPC)?;
         s.pages.fetch_add(1, Ordering::Relaxed);
         Ok(pa)
     }

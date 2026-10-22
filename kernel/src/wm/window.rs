@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::gfx::{Color, Rect};
+use crate::pmm::Use;
 
 use super::buffer::Buffer;
 use super::event::{Button, Key, Mods};
@@ -438,7 +439,7 @@ impl Window {
         space: usize,
         contents: Box<dyn WindowContents>,
     ) -> Option<Window> {
-        let surf = Buffer::new(rect.w as usize, rect.h as usize, MILK)?;
+        let surf = Buffer::new(Use::WindowBuffers, rect.w as usize, rect.h as usize, MILK)?;
         Some(Window {
             id,
             app,

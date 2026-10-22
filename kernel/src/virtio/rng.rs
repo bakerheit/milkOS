@@ -49,8 +49,8 @@ pub fn attach(t: Transport) -> Result<(), Error> {
     }
     let size = 1u16 << (15 - n.leading_zeros()); // largest power of two <= n
     let (Some(qpa), Some(buf)) = (
-        pmm::alloc_contiguous_zeroed(1, 1),
-        pmm::alloc_contiguous_zeroed(1, 1),
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1),
+        pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, 1, 1),
     ) else {
         t.fail();
         return Err(Error::BadQueue);

@@ -273,7 +273,7 @@ pub fn attach(t: Transport) -> Result<(), Error> {
         t.fail();
         Error::BadQueue
     };
-    let alloc = |n| pmm::alloc_contiguous_zeroed(n, 1);
+    let alloc = |n| pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, n, 1);
     let pages = |bufs: usize| (bufs * BUF_SIZE).div_ceil(PAGE_SIZE);
     let (Some(rxq_pa), Some(txq_pa), Some(rx_bufs), Some(tx_bufs)) =
         (alloc(1), alloc(1), alloc(pages(nrx)), alloc(pages(ntx)))

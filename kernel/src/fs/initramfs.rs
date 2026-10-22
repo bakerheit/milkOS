@@ -10,6 +10,11 @@ use crate::kprintln;
 
 static ARCHIVE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/initramfs.cpio"));
 
+/// Size of the built-in archive (it lives in the kernel image's read-only data).
+pub fn archive_len() -> usize {
+    ARCHIVE.len()
+}
+
 /// One archive member.
 pub struct Entry<'a> {
     pub name: &'a str,

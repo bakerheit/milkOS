@@ -656,6 +656,42 @@ fn procfs_sysfs(t: &mut T) {
         total_kb == pmm::stats().total_frames * 4,
         "MemTotal matches the PMM",
     );
+    // The breakdown after Shmem adds up to MemTotal - MemFree (each line rounds down on
+    // its own, so it may fall short by under 1 kB a line), and the heap's frames are
+    // exactly its size.
+    let kb = |key: &str| -> usize {
+        mi.lines()
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(':'))
+            .and_then(|v| v.split_whitespace().next()?.parse().ok())
+            .unwrap_or(usize::MAX / 4)
+    };
+    let parts = [
+        "KernelHeap",
+        "KernelImage",
+        "BuiltinFiles",
+        "BootReserved",
+        "PageTables",
+        "KernelStacks",
+        "AppPages",
+        "RootFiles",
+        "PageCache",
+        "Display",
+        "Wallpaper",
+        "WindowBuffers",
+        "PanelCaches",
+        "Devices",
+        "Other",
+    ];
+    let sum: usize = parts.iter().map(|k| kb(k)).sum();
+    let used = kb("MemTotal") - kb("MemFree");
+    t.ok(
+        sum <= used && used - sum < parts.len(),
+        "/proc/meminfo breakdown adds up to MemTotal - MemFree",
+    );
+    t.ok(
+        crate::heap::stats().total == pmm::stats().of(pmm::Use::Heap) * 4096,
+        "the kernel heap's frames are tagged Heap",
+    );
     let up = read_str("/proc/uptime");
     let secs: f32 = up
         .split_whitespace()

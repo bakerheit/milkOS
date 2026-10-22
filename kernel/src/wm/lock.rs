@@ -11,6 +11,7 @@
 use alloc::format;
 
 use crate::gfx::Rect;
+use crate::pmm::Use;
 use crate::sysfont::{Font, Weight};
 use crate::timer;
 
@@ -119,7 +120,12 @@ impl Desktop {
         if self.locked() {
             return;
         }
-        let Some(mut buf) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
+        let Some(mut buf) = Buffer::new(
+            Use::PanelCaches,
+            screen_w() as usize,
+            screen_h() as usize,
+            0,
+        ) else {
             return;
         };
         paint(&mut buf, &self.wp.glass);
@@ -158,7 +164,12 @@ impl Desktop {
     pub(super) fn relayout_lock(&mut self) {
         let glass = &self.wp.glass;
         if let Some(l) = self.lock.as_mut()
-            && let Some(mut buf) = Buffer::new(screen_w() as usize, screen_h() as usize, 0)
+            && let Some(mut buf) = Buffer::new(
+                Use::PanelCaches,
+                screen_w() as usize,
+                screen_h() as usize,
+                0,
+            )
         {
             paint(&mut buf, glass);
             l.buf = buf;

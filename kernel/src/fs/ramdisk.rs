@@ -26,7 +26,7 @@ impl RamDisk {
         let n = bytes.div_ceil(PAGE_SIZE);
         let mut frames = Vec::with_capacity(n);
         for _ in 0..n {
-            match pmm::alloc_frame_zeroed() {
+            match pmm::alloc_frame_zeroed_as(pmm::Use::Devices) {
                 Some(f) => frames.push(f),
                 None => {
                     for f in frames {

@@ -239,7 +239,7 @@ pub fn attach(t: Transport) -> core::result::Result<(), Error> {
         return Err(Error::BadQueue);
     }
     let qsize = 1u16 << (usize::BITS - 1 - qsize.leading_zeros()); // power of two
-    let alloc = |n| pmm::alloc_contiguous_zeroed(n, 1).ok_or(Error::BadQueue);
+    let alloc = |n| pmm::alloc_contiguous_zeroed_as(pmm::Use::Devices, n, 1).ok_or(Error::BadQueue);
     let qmem_pa = alloc(1)?;
     let hdr_pa = alloc(1)?;
     let bounce_pa = alloc(BOUNCE_PAGES)?;

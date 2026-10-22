@@ -72,7 +72,9 @@ fn lookup(key: Key, at: usize, out: &mut [u8]) -> bool {
 }
 
 fn insert(key: Key, page: &[u8; PAGE], epoch: u64) {
-    let Some(pa) = pmm::alloc_frame() else { return };
+    let Some(pa) = pmm::alloc_frame_as(pmm::Use::PageCache) else {
+        return;
+    };
     // SAFETY: fresh frame.
     unsafe { core::ptr::copy_nonoverlapping(page.as_ptr(), page_ptr(pa), PAGE) };
     let mut freed = None;

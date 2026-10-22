@@ -61,6 +61,9 @@ after the boot tables (see "W^X"); alignment checking off.
   Alignment is in frames and relative to physical address 0 (so
   `align_frames = 512` gives a 2 MiB-aligned run). Double free panics.
 - `pmm::reserve(pa, len)`, `pmm::stats()`.
+- `pmm::alloc_frame_as(Use)`, `alloc_frame_zeroed_as`, `alloc_contiguous_as(Use, count, align)`,
+  `alloc_contiguous_zeroed_as`, `set_use(pa, count, Use)`: the same, saying what the frames are
+  for (see "Where the memory goes"). The plain ones count as `Use::Other`.
 - `alloc::{Box, Vec, String, ...}` just work (`heap.rs` is the `#[global_allocator]`).
   Address-ordered free list, 16-byte granularity, coalescing, grows in >= 1 MiB
   contiguous chunks from the PMM, never shrinks. Don't allocate in IRQ context.
@@ -78,6 +81,36 @@ Use `align_frames` for rings with alignment needs. qemu's emulated devices are
 cache-coherent with the guest, so no cache maintenance is needed in qemu. On real
 hardware you would map the buffer `MemType::NormalNc` or clean/invalidate.
 The 3 MiB ramfb static in `.bss` can move to `alloc_contiguous_zeroed(768, 1)`.
+
+## Where the memory goes
+Every allocatable frame has a one-byte `pmm::Use` tag (an array after the bitmap, 1 byte per
+4 KiB). Allocations say what they are for (`*_as` allocators, `set_use`); a free resets the
+tag, so a count can't drift when an owner forgets to update it. `/proc/meminfo` prints them
+after `Shmem`, in kB:
+
+| Line | What |
+| --- | --- |
+| `KernelImage` | the kernel image (text, rodata, data, bss, boot stack) without the built-in files |
+| `BuiltinFiles` | the initramfs archive, inside the image's rodata |
+| `BootReserved` | RAM below the image, the PMM's bitmap and tags, the device tree blob |
+| `KernelHeap` (above) | the heap's chunks, used or free (the heap never shrinks) |
+| `PageTables` | page-table pages of user spaces and the kernel stacks' mappings |
+| `KernelStacks` | kernel thread stacks |
+| `AppPages` | user processes' private pages, each counted once (COW-shared ones too) |
+| `RootFiles` | tmpfs file data that is not in the image (written or changed files) |
+| `PageCache` | the disk page cache (`fs/pagecache.rs`) |
+| `Display` | the framebuffer (virtio-gpu backing or ramfb) and the compositor's back buffer |
+| `Wallpaper` | the wallpaper and its two blurred glass copies |
+| `WindowBuffers` | window surfaces, userland windows' shared and front buffers |
+| `PanelCaches` | cached panels (menu bar, dock, toasts), Spaces thumbnails, the lock screen |
+| `Devices` | virtqueues, DMA buffers, RAM disks |
+| `Other` | the rest of MemTotal - MemFree: frames allocated without a `Use` |
+
+They add up to `MemTotal - MemFree` (the fs self-test checks it). Window buffers under
+128 KiB come from the heap (`wm/buffer.rs`) and are counted there. Activity Monitor's Memory
+tab draws them as Apps, Kernel heap, Kernel image, Files in RAM, Screen (display, wallpaper,
+panel caches), Windows, Other kernel (stacks, page tables, devices, boot, unaccounted), Page
+cache and Free.
 
 ## Secondary CPUs
 `smp.S` gets the boot identity tables (`mmu::boot_ttbr0()`) for TTBR0 and the kernel's

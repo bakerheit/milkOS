@@ -4,6 +4,7 @@
 //! Integer maths only (the target is soft-float).
 
 use crate::gfx::{Color, DrawTarget, Rect, blend, rgb};
+use crate::pmm::Use;
 
 use super::buffer::Buffer;
 use super::paint::Painter;
@@ -67,15 +68,15 @@ impl Wallpaper {
     /// Wallpaper `kind`, with glass tinted for the current theme (`theme::tc(MILK)`).
     pub fn new(kind: Kind) -> Option<Wallpaper> {
         let (w, h) = (screen_w() as usize, screen_h() as usize);
-        let mut sharp = Buffer::new(w, h, 0)?;
+        let mut sharp = Buffer::new(Use::Wallpaper, w, h, 0)?;
         paint(&mut sharp, kind);
-        let mut glass = Buffer::new(w, h, 0)?;
+        let mut glass = Buffer::new(Use::Wallpaper, w, h, 0)?;
         copy(&sharp, &mut glass);
         for _ in 0..BLUR_PASSES {
             blur_rows(&mut glass, BLUR_RADIUS);
             blur_cols(&mut glass, BLUR_RADIUS);
         }
-        let mut glass_strong = Buffer::new(w, h, 0)?;
+        let mut glass_strong = Buffer::new(Use::Wallpaper, w, h, 0)?;
         copy(&glass, &mut glass_strong);
         let milk = tc(MILK);
         tint(&mut glass, milk, GLASS_A);

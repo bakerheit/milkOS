@@ -52,7 +52,7 @@ pub fn set_mode(w: usize, h: usize) -> Option<Surface<'static>> {
     }
     let file = fwcfg::find_file("etc/ramfb")?;
     let pages = (w * h * BPP).div_ceil(4096);
-    let pa = crate::pmm::alloc_contiguous_zeroed(pages, 1)?;
+    let pa = crate::pmm::alloc_contiguous_zeroed_as(crate::pmm::Use::Display, pages, 1)?;
     let va = crate::mmu::phys_to_virt(pa);
     // Heap, not stack: fw_cfg writes by DMA from this address.
     let mut cfg = alloc::vec![0u8; 28];

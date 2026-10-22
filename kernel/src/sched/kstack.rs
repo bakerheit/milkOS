@@ -41,7 +41,7 @@ pub struct KStack {
 impl KStack {
     /// Allocate and map a stack. `None` if out of frames or slots.
     pub fn new() -> Option<KStack> {
-        let pa = pmm::alloc_contiguous(PAGES, 1)?;
+        let pa = pmm::alloc_contiguous_as(pmm::Use::KernelStacks, PAGES, 1)?;
         let slot = {
             let _g = ALLOC.lock();
             let found = (0..MAX_SLOTS).find(|&i| SLOT_PA[i].load(Ordering::Relaxed) == 0);

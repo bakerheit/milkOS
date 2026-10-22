@@ -60,6 +60,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::gfx::{DirtyList, DrawTarget, Rect, Surface};
+use crate::pmm::Use;
 use crate::sched::{self, WaitQueue};
 use crate::sync::SpinLock;
 use crate::{cursor, display, input, kprintln, timer};
@@ -471,7 +472,8 @@ pub struct Desktop {
 impl Desktop {
     fn new(fb: Surface<'static>) -> Result<Desktop, Surface<'static>> {
         rtc::init();
-        let Some(back) = Buffer::new(screen_w() as usize, screen_h() as usize, 0) else {
+        let Some(back) = Buffer::new(Use::Display, screen_w() as usize, screen_h() as usize, 0)
+        else {
             return Err(fb);
         };
         let t = timer::now_ns();
@@ -599,7 +601,8 @@ impl Desktop {
     /// Cross-fade from whatever is on screen (the boot splash) to the composed desktop.
     fn fade_in(&mut self) {
         let n = (screen_w() * screen_h()) as usize;
-        let splash: Option<Buffer> = Buffer::new(screen_w() as usize, screen_h() as usize, 0);
+        let splash: Option<Buffer> =
+            Buffer::new(Use::Display, screen_w() as usize, screen_h() as usize, 0);
         if let Some(mut sp) = splash {
             sp.pixels_mut()[..n].copy_from_slice(&self.fb.pixels()[..n]);
             const STEPS: u32 = 12;
@@ -1214,7 +1217,7 @@ impl Desktop {
         }
         for w in &self.windows {
             let (tw, th) = shell::cell_size(w.rect.w, w.rect.h);
-            if let Some(mut b) = Buffer::new(tw as usize, th as usize, MILK) {
+            if let Some(mut b) = Buffer::new(Use::PanelCaches, tw as usize, th as usize, MILK) {
                 paint::downscale(&w.surf, &mut b);
                 self.thumbs.insert(w.id, b);
             }
@@ -1272,7 +1275,7 @@ impl Desktop {
 
     fn render_panel(&self, spec: &PanelSpec, solid: bool) -> Option<Buffer> {
         let r = spec.rect;
-        let mut buf = Buffer::new(r.w as usize, r.h as usize, MILK)?;
+        let mut buf = Buffer::new(Use::PanelCaches, r.w as usize, r.h as usize, MILK)?;
         {
             let mut p = Painter::new(&mut buf);
             match spec.style {

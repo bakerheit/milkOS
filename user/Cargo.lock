@@ -159,6 +159,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "imgdec"
+version = "0.0.1"
+
+[[package]]
 name = "init"
 version = "0.0.1"
 dependencies = [

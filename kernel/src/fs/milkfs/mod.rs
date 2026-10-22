@@ -1237,14 +1237,7 @@ static LAST_SEND: SpinLock<String> = SpinLock::new(String::new());
 static LAST_RECEIVE: SpinLock<String> = SpinLock::new(String::new());
 
 /// What a send wrote.
-#[derive(Clone, Debug, Default)]
-pub struct SendReport {
-    pub records: u64,
-    pub data_blocks: u64,
-    pub bytes: u64,
-    pub ms: u64,
-    pub encrypted: bool,
-}
+pub use stream::SendReport;
 
 /// How a send protects its stream.
 #[derive(Clone, Copy)]
@@ -1276,7 +1269,6 @@ fn split_secret(t: &str) -> (&str, Option<&str>) {
 /// meanwhile (EBUSY).
 pub fn send(snap: &str, from: Option<&str>, out: &str, crypt: StreamCrypt) -> Result<SendReport> {
     use crate::fs::abi::{O_CREAT, O_TRUNC, O_WRONLY};
-    use stream::{Encoder, Plan, Record};
     let v = primary()?;
     let pass = match crypt {
         StreamCrypt::Passphrase(p) if p.len() < 8 => {
@@ -1295,91 +1287,24 @@ pub fn send(snap: &str, from: Option<&str>, out: &str, crypt: StreamCrypt) -> Re
         }
         StreamCrypt::Default => None,
     };
-    let t0 = crate::timer::now_ns();
-    let plan = {
-        let mut st = v.state.lock();
-        let p = st.send_plan(snap, from)?;
-        st.busy_snaps.extend(p.gens.iter().copied());
-        p
-    };
-    let gens = plan.gens.clone();
-    let r = (|| -> Result<SendReport> {
-        let mut enc = match pass {
-            Some(p) => Encoder::sealed(p.as_bytes())?,
-            None => Encoder::default(),
-        };
-        let f = crate::fs::ops::open(out, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
-        let write = |enc: &mut Encoder, f: &crate::fs::OpenFile| -> Result<()> {
-            let mut b = &enc.buf[..];
+    /// The stream file, opened once the stream's key is made.
+    struct Out(crate::fs::OpenFile);
+    impl stream::StreamSink for Out {
+        fn write(&mut self, b: &[u8]) -> Result<()> {
+            let mut b = b;
             while !b.is_empty() {
-                let n = f.write(b)?;
+                let n = self.0.write(b)?;
                 b = &b[n..];
             }
-            enc.buf.clear();
             Ok(())
-        };
-        enc.record(&Record::Header(plan.header.clone()));
-        let mut sent = alloc::collections::BTreeSet::new();
-        let mut data = alloc::vec::Vec::new();
-        for p in plan.recs {
-            match p {
-                Plan::Item(k, val) => enc.record(&Record::Item(k, val)),
-                Plan::Delete(k) => enc.record(&Record::Delete(k)),
-                Plan::Drop(ino, from, to) => enc.record(&Record::Drop { ino, from, to }),
-                Plan::Extent { ino, old_end, ext } => {
-                    data.resize(ext.csums.len() * format::BLOCK, 0);
-                    v.state
-                        .lock()
-                        .store
-                        .read_run(ext.block, ext.birth, &ext.csums, &mut data)?;
-                    for (i, chunk) in data.chunks(format::BLOCK).enumerate() {
-                        let src = ext.block + i as u64;
-                        if sent.insert(src) {
-                            enc.record(&Record::Data {
-                                src,
-                                data: chunk.to_vec(),
-                            });
-                        }
-                    }
-                    // The stream carries plaintext and its xxh64 (on an encrypted
-                    // volume the pointers hold keyed tags, meaningless elsewhere).
-                    let csums = data.chunks(format::BLOCK).map(format::xxh64).collect();
-                    enc.record(&Record::Extent {
-                        ino,
-                        start: ext.start,
-                        old_end,
-                        src: ext.block,
-                        csums,
-                    });
-                }
-            }
-            if enc.buf.len() >= 1 << 20 {
-                write(&mut enc, &f)?;
-            }
         }
-        enc.record(&Record::End {
-            records: 0,
-            data: 0,
-            chain: 0,
-        });
-        write(&mut enc, &f)?;
-        f.fsync()?;
-        Ok(SendReport {
-            records: enc.records + 1,
-            data_blocks: enc.data_blocks,
-            bytes: enc.bytes,
-            ms: (crate::timer::now_ns() - t0) / 1_000_000,
-            encrypted: enc.encrypted(),
-        })
-    })();
-    {
-        let mut st = v.state.lock();
-        for g in gens {
-            if let Some(i) = st.busy_snaps.iter().position(|&x| x == g) {
-                st.busy_snaps.remove(i);
-            }
+        fn finish(&mut self) -> Result<()> {
+            self.0.fsync()
         }
     }
+    let r = stream::send(&*v, snap, from, pass.map(str::as_bytes), || {
+        crate::fs::ops::open(out, O_WRONLY | O_CREAT | O_TRUNC, 0o644).map(Out)
+    });
     let text = match &r {
         Ok(s) => format!(
             "sent {snap}{}{} to {out}: {} records, {} data blocks, {} bytes in {} ms\n",
@@ -1407,16 +1332,7 @@ pub fn send(snap: &str, from: Option<&str>, out: &str, crypt: StreamCrypt) -> Re
 }
 
 /// What a receive did.
-#[derive(Clone, Debug, Default)]
-pub struct RecvReport {
-    pub snapshot: String,
-    pub incremental: bool,
-    pub items: u64,
-    pub data_blocks: u64,
-    pub bytes: u64,
-    pub ms: u64,
-    pub encrypted: bool,
-}
+pub use stream::RecvReport;
 
 /// The milkfs volume a VFS path is on.
 pub fn volume_at(path: &str) -> Result<Arc<Volume>> {
@@ -1436,64 +1352,24 @@ pub fn receive(
     passphrase: Option<&str>,
 ) -> Result<RecvReport> {
     use crate::fs::abi::O_RDONLY;
-    use stream::{Decoder, Record};
     let v = match target {
         Some(t) => volume_at(t)?,
         None => primary()?,
     };
     let t0 = crate::timer::now_ns();
     let f = crate::fs::ops::open(path, O_RDONLY, 0)?;
-    let r = (|| -> Result<RecvReport> {
-        let mut rd = Decoder::open(|b: &mut [u8]| f.read(b), passphrase.map(str::as_bytes))?;
-        let Record::Header(h) = rd.next()? else {
-            return Err(Errno::EINVAL);
-        };
-        let mut ctx = v.state.lock().recv_begin(&h, force)?;
-        let applied = (|| -> Result<()> {
-            let mut batch = alloc::vec::Vec::new();
-            loop {
-                let rec = rd.next()?;
-                let end = matches!(rec, Record::End { .. });
-                let cut = !matches!(rec, Record::Data { .. });
-                if !end {
-                    batch.push(rec);
-                }
-                if end || (cut && batch.len() >= 64) {
-                    let mut st = v.state.lock();
-                    st.recv_apply(&mut ctx, core::mem::take(&mut batch))?;
-                    if ctx.unused.is_empty() {
-                        st.op_done()?;
-                    }
-                }
-                if end {
-                    return Ok(());
-                }
-            }
-        })();
-        let mut st = v.state.lock();
-        let (items, blocks) = (ctx.items, ctx.blocks);
-        match applied {
-            Ok(()) => {
-                st.recv_finish(&mut ctx, &h)?;
-            }
-            Err(e) => {
-                st.recv_abort(&ctx);
-                return Err(e);
-            }
-        }
-        drop(st);
+    let r = stream::receive(
+        &*v,
+        |b: &mut [u8]| f.read(b),
+        force,
+        passphrase.map(str::as_bytes),
+    )
+    .map(|mut rep| {
         crate::fs::pagecache::invalidate_dev(v.dev);
         crate::fs::notify::rescan(v.dev);
-        Ok(RecvReport {
-            snapshot: h.snap.clone(),
-            incremental: h.incremental,
-            items,
-            data_blocks: blocks,
-            bytes: rd.bytes,
-            ms: (crate::timer::now_ns() - t0) / 1_000_000,
-            encrypted: rd.encrypted(),
-        })
-    })();
+        rep.ms = (crate::timer::now_ns() - t0) / 1_000_000;
+        rep
+    });
     let text = match &r {
         Ok(s) => format!(
             "received {}{}{} from {path}: {} items, {} data blocks, {} bytes in {} ms\n",

@@ -39,7 +39,7 @@ use super::crypt::{ENVELOPE_LEN, SEAL_LAST, SEALED_MAGIC, StreamKey};
 use super::format::*;
 use super::items::{LIVE, clone_view};
 use super::snap::{SnapInfo, check_snap_name};
-use super::volume::State;
+use super::volume::{State, StateAccess};
 use crate::errno::{Errno, Result};
 
 pub const STREAM_MAGIC: &[u8; 8] = b"MILKSTRM";
@@ -842,4 +842,191 @@ impl State {
         }
         self.receiving = false;
     }
+}
+
+// ---- send / receive drivers ---------------------------------------------------------
+//
+// The volume lock is taken a step at a time (through a `StateAccess`), never while the
+// stream is written or read: the stream may live on the volume itself.
+
+/// Where a send writes its stream (the kernel: a file).
+pub trait StreamSink {
+    fn write(&mut self, b: &[u8]) -> Result<()>;
+    /// Everything is written: make it durable.
+    fn finish(&mut self) -> Result<()>;
+}
+
+/// What a send wrote.
+#[derive(Clone, Debug, Default)]
+pub struct SendReport {
+    pub records: u64,
+    pub data_blocks: u64,
+    pub bytes: u64,
+    pub ms: u64,
+    pub encrypted: bool,
+}
+
+/// Write snapshot `snap` of the volume as a stream, incremental from the older snapshot
+/// `from`; encrypted under `passphrase` if there is one. `open` makes the sink, once the
+/// stream's key is made and before any record is written. The snapshots read can't be
+/// deleted meanwhile (EBUSY).
+pub fn send<A: StateAccess, S: StreamSink>(
+    v: &A,
+    snap: &str,
+    from: Option<&str>,
+    passphrase: Option<&[u8]>,
+    open: impl FnOnce() -> Result<S>,
+) -> Result<SendReport> {
+    let t0 = crate::platform::now_ns();
+    let plan = v.with_state(|st| {
+        let p = st.send_plan(snap, from)?;
+        st.busy_snaps.extend(p.gens.iter().copied());
+        Ok::<_, Errno>(p)
+    })?;
+    let gens = plan.gens.clone();
+    let r = (|| -> Result<SendReport> {
+        let mut enc = match passphrase {
+            Some(p) => Encoder::sealed(p)?,
+            None => Encoder::default(),
+        };
+        let mut f = open()?;
+        let write = |enc: &mut Encoder, f: &mut S| -> Result<()> {
+            f.write(&enc.buf)?;
+            enc.buf.clear();
+            Ok(())
+        };
+        enc.record(&Record::Header(plan.header.clone()));
+        let mut sent = BTreeSet::new();
+        let mut data = Vec::new();
+        for p in plan.recs {
+            match p {
+                Plan::Item(k, val) => enc.record(&Record::Item(k, val)),
+                Plan::Delete(k) => enc.record(&Record::Delete(k)),
+                Plan::Drop(ino, from, to) => enc.record(&Record::Drop { ino, from, to }),
+                Plan::Extent { ino, old_end, ext } => {
+                    data.resize(ext.csums.len() * BLOCK, 0);
+                    v.with_state(|st| {
+                        st.store
+                            .read_run(ext.block, ext.birth, &ext.csums, &mut data)
+                    })?;
+                    for (i, chunk) in data.chunks(BLOCK).enumerate() {
+                        let src = ext.block + i as u64;
+                        if sent.insert(src) {
+                            enc.record(&Record::Data {
+                                src,
+                                data: chunk.to_vec(),
+                            });
+                        }
+                    }
+                    // The stream carries plaintext and its xxh64 (on an encrypted
+                    // volume the pointers hold keyed tags, meaningless elsewhere).
+                    let csums = data.chunks(BLOCK).map(xxh64).collect();
+                    enc.record(&Record::Extent {
+                        ino,
+                        start: ext.start,
+                        old_end,
+                        src: ext.block,
+                        csums,
+                    });
+                }
+            }
+            if enc.buf.len() >= 1 << 20 {
+                write(&mut enc, &mut f)?;
+            }
+        }
+        enc.record(&Record::End {
+            records: 0,
+            data: 0,
+            chain: 0,
+        });
+        write(&mut enc, &mut f)?;
+        f.finish()?;
+        Ok(SendReport {
+            records: enc.records + 1,
+            data_blocks: enc.data_blocks,
+            bytes: enc.bytes,
+            ms: (crate::platform::now_ns() - t0) / 1_000_000,
+            encrypted: enc.encrypted(),
+        })
+    })();
+    v.with_state(|st| {
+        for g in gens {
+            if let Some(i) = st.busy_snaps.iter().position(|&x| x == g) {
+                st.busy_snaps.remove(i);
+            }
+        }
+    });
+    r
+}
+
+/// What a receive did.
+#[derive(Clone, Debug, Default)]
+pub struct RecvReport {
+    pub snapshot: String,
+    pub incremental: bool,
+    pub items: u64,
+    pub data_blocks: u64,
+    pub bytes: u64,
+    pub ms: u64,
+    pub encrypted: bool,
+}
+
+/// Recreate the snapshot in the stream `read` gives on the volume. Full streams need an
+/// empty volume; incremental ones need the base snapshot (ENOENT otherwise) and a live
+/// tree unchanged since it (EBUSY; `force`: roll back to it first). Atomic: nothing
+/// changes unless the whole stream checks out. An encrypted stream needs its
+/// `passphrase` (EACCES without or with a wrong one). The volume's live contents changed
+/// on success: the caller drops what it cached.
+pub fn receive<A: StateAccess>(
+    v: &A,
+    read: impl FnMut(&mut [u8]) -> Result<usize>,
+    force: bool,
+    passphrase: Option<&[u8]>,
+) -> Result<RecvReport> {
+    let t0 = crate::platform::now_ns();
+    let mut rd = Decoder::open(read, passphrase)?;
+    let Record::Header(h) = rd.next()? else {
+        return Err(Errno::EINVAL);
+    };
+    let mut ctx = v.with_state(|st| st.recv_begin(&h, force))?;
+    let applied = (|| -> Result<()> {
+        let mut batch = Vec::new();
+        loop {
+            let rec = rd.next()?;
+            let end = matches!(rec, Record::End { .. });
+            let cut = !matches!(rec, Record::Data { .. });
+            if !end {
+                batch.push(rec);
+            }
+            if end || (cut && batch.len() >= 64) {
+                v.with_state(|st| -> Result<()> {
+                    st.recv_apply(&mut ctx, core::mem::take(&mut batch))?;
+                    if ctx.unused.is_empty() {
+                        st.op_done()?;
+                    }
+                    Ok(())
+                })?;
+            }
+            if end {
+                return Ok(());
+            }
+        }
+    })();
+    let (items, blocks) = (ctx.items, ctx.blocks);
+    v.with_state(|st| match applied {
+        Ok(()) => st.recv_finish(&mut ctx, &h).map(|_| ()),
+        Err(e) => {
+            st.recv_abort(&ctx);
+            Err(e)
+        }
+    })?;
+    Ok(RecvReport {
+        snapshot: h.snap.clone(),
+        incremental: h.incremental,
+        items,
+        data_blocks: blocks,
+        bytes: rd.bytes,
+        ms: (crate::platform::now_ns() - t0) / 1_000_000,
+        encrypted: rd.encrypted(),
+    })
 }

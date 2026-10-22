@@ -193,23 +193,6 @@ impl Volume {
             Ok(())
         })
     }
-
-    /// Drop one link to `ino` (its entry is already gone); delete it if that was the last
-    /// and nothing has it open.
-    fn drop_link(&self, st: &mut State, ino: u64) -> Result<()> {
-        let mut i = st.inode(st.cur, ino)?;
-        let is_dir = i.mode & S_IFMT_ == crate::fs::node::S_IFDIR;
-        i.nlink = if is_dir { 0 } else { i.nlink.saturating_sub(1) };
-        i.ctime = now();
-        if i.nlink == 0 && !self.is_open(st.cur, ino) {
-            st.delete_inode(ino)
-        } else {
-            if i.nlink == 0 {
-                st.add_orphan(ino)?;
-            }
-            st.put_inode(ino, &i)
-        }
-    }
 }
 
 const S_IFMT_: u32 = crate::fs::node::S_IFMT;
@@ -273,15 +256,7 @@ pub fn reflink(src: &InodeRef, dst: &InodeRef) -> Result<()> {
     d.ro()?;
     let (sino, dino) = (s.ino, d.ino);
     let _inv = Invalidate(d.dev, dino);
-    d.vol.txn(d.view, |st| {
-        let size = st.reflink(sino, dino)?;
-        let mut i = st.inode(st.cur, dino)?;
-        i.size = size;
-        let t = now();
-        i.mtime = t;
-        i.ctime = t;
-        st.put_inode(dino, &i)
-    })
+    d.vol.txn(d.view, |st| st.reflink_file(sino, dino))
 }
 
 /// The volume an inode is on (None: not milkfs).
@@ -290,24 +265,7 @@ pub fn volume_of(i: &InodeRef) -> Option<Arc<Volume>> {
 }
 
 /// What [`dedupe`] did.
-#[derive(Clone, Debug, Default)]
-pub struct DedupeReport {
-    /// Regular files with data blocks looked at.
-    pub files: usize,
-    /// Groups of two or more files with the same size and content hash.
-    pub groups: usize,
-    /// Files now sharing the blocks of the first file of their group.
-    pub deduped: usize,
-    /// Files that already shared them.
-    pub already: usize,
-    /// Same hash but different bytes (left alone).
-    pub differ: usize,
-    /// Data blocks the deduped files now share instead of owning.
-    pub blocks: u64,
-    /// Net change of free blocks once committed (blocks a snapshot still has stay used
-    /// until that snapshot is deleted).
-    pub freed: i64,
-}
+pub use ::milkfs::ops::DedupeReport;
 
 /// Find regular files under directory `dir` (recursively, one volume view) with identical
 /// contents and make all but the first of each group share its blocks (reflink). Files are
@@ -326,59 +284,7 @@ pub fn dedupe(dir: &InodeRef, dry_run: bool) -> Result<DedupeReport> {
     let (view, top) = (d.view, d.ino);
     let mut rep = DedupeReport::default();
     let free0 = d.vol.state.lock().store.free_blocks();
-    let run = |st: &mut State, rep: &mut DedupeReport| -> Result<()> {
-        let v = st.cur;
-        // Every regular file under `top` that has data blocks, by (size, hash).
-        let mut groups: BTreeMap<(u64, u64), Vec<u64>> = BTreeMap::new();
-        let mut dirs = alloc::vec![top];
-        while let Some(dir) = dirs.pop() {
-            for e in st.list(v, dir)? {
-                if e.dtype == InodeType::Dir.dirent_type() {
-                    dirs.push(e.ino);
-                } else if e.dtype == InodeType::File.dirent_type() && st.block_count(v, e.ino)? > 0
-                {
-                    let (h, i) = st.content_hash(v, e.ino)?;
-                    groups.entry((i.size, h)).or_default().push(e.ino);
-                    rep.files += 1;
-                }
-            }
-        }
-        let mut a = alloc::vec![0u8; 1 << 20];
-        let mut b = alloc::vec![0u8; 1 << 20];
-        for ((size, _), mut inos) in groups {
-            inos.sort_unstable();
-            inos.dedup(); // hard links
-            if inos.len() < 2 {
-                continue;
-            }
-            rep.groups += 1;
-            let keep = inos[0];
-            for &other in &inos[1..] {
-                if st.same_blocks(keep, other)? {
-                    rep.already += 1;
-                    continue;
-                }
-                let mut off = 0;
-                let mut equal = true;
-                while equal && off < size {
-                    let n = st.read_data(v, keep, size, off, &mut a)?;
-                    st.read_data(v, other, size, off, &mut b[..n])?;
-                    equal = a[..n] == b[..n];
-                    off += n as u64;
-                }
-                if !equal {
-                    rep.differ += 1;
-                    continue;
-                }
-                rep.deduped += 1;
-                rep.blocks += st.block_count(v, other)?;
-                if !dry_run {
-                    st.reflink(keep, other)?;
-                }
-            }
-        }
-        Ok(())
-    };
+    let run = |st: &mut State, rep: &mut DedupeReport| st.dedupe(top, dry_run, rep);
     if dry_run {
         let mut st = d.vol.state.lock();
         st.set_cur(view)?;
@@ -475,54 +381,9 @@ impl MilkInode {
         self.new_name(name)?;
         let kind = kind_of(mode);
         let dir = self.ino;
-        let ino = self.vol.txn(self.view, |st| {
-            let mut d = st.inode(st.cur, dir)?;
-            if kind_of(d.mode) != InodeType::Dir {
-                return Err(Errno::ENOTDIR);
-            }
-            if st.lookup(st.cur, dir, name)?.is_some() {
-                return Err(Errno::EEXIST);
-            }
-            let ino = st.alloc_ino();
-            let t = now();
-            let is_dir = kind == InodeType::Dir;
-            let mut size = 0;
-            if let Some(target) = target {
-                st.set_symlink(ino, target)?;
-                size = target.len() as u64;
-            }
-            st.put_inode(
-                ino,
-                &InodeItem {
-                    mode,
-                    nlink: if is_dir { 2 } else { 1 },
-                    uid: d.uid,
-                    gid: d.gid,
-                    size,
-                    // Files record their (first) directory too: diff and versions use it
-                    // to find a path without scanning.
-                    parent: dir,
-                    atime: t,
-                    mtime: t,
-                    ctime: t,
-                },
-            )?;
-            st.add_dirent(
-                dir,
-                Dirent {
-                    ino,
-                    dtype: kind.dirent_type(),
-                    name: String::from(name),
-                },
-            )?;
-            if is_dir {
-                d.nlink += 1;
-            }
-            d.mtime = t;
-            d.ctime = t;
-            st.put_inode(dir, &d)?;
-            Ok(ino)
-        })?;
+        let ino = self
+            .vol
+            .txn(self.view, |st| st.create_node(dir, name, mode, target))?;
         Ok(self.vol.inode_obj(self.view, ino, kind))
     }
 }
@@ -591,15 +452,7 @@ impl Inode for MilkInode {
         self.ro()?;
         let ino = self.ino;
         let _inv = Invalidate(self.dev, ino);
-        self.vol.txn(self.view, |st| {
-            let mut i = st.inode(st.cur, ino)?;
-            i.size = st.write_data(ino, i.size, off, buf)?;
-            let t = now();
-            i.mtime = t;
-            i.ctime = t;
-            st.put_inode(ino, &i)?;
-            Ok(buf.len())
-        })
+        self.vol.txn(self.view, |st| st.write_file(ino, off, buf))
     }
 
     fn truncate(&self, len: u64) -> Result<()> {
@@ -616,15 +469,7 @@ impl Inode for MilkInode {
         }
         let ino = self.ino;
         let _inv = Invalidate(self.dev, ino);
-        self.vol.txn(self.view, |st| {
-            let mut i = st.inode(st.cur, ino)?;
-            st.truncate_data(ino, i.size, len)?;
-            i.size = len;
-            let t = now();
-            i.mtime = t;
-            i.ctime = t;
-            st.put_inode(ino, &i)
-        })
+        self.vol.txn(self.view, |st| st.truncate_file(ino, len))
     }
 
     fn lookup(&self, name: &str) -> Result<InodeRef> {
@@ -713,27 +558,8 @@ impl Inode for MilkInode {
             return Err(Errno::EPERM);
         }
         let (dir, ino, kind) = (self.ino, t.ino, t.kind);
-        self.vol.txn(self.view, |st| {
-            if st.lookup(st.cur, dir, name)?.is_some() {
-                return Err(Errno::EEXIST);
-            }
-            let mut i = st.inode(st.cur, ino)?;
-            i.nlink += 1;
-            i.ctime = now();
-            st.put_inode(ino, &i)?;
-            st.add_dirent(
-                dir,
-                Dirent {
-                    ino,
-                    dtype: kind.dirent_type(),
-                    name: String::from(name),
-                },
-            )?;
-            let mut d = st.inode(st.cur, dir)?;
-            d.mtime = now();
-            d.ctime = d.mtime;
-            st.put_inode(dir, &d)
-        })
+        self.vol
+            .txn(self.view, |st| st.link_node(dir, name, ino, kind))
     }
 
     fn unlink(&self, name: &str) -> Result<()> {
@@ -744,16 +570,7 @@ impl Inode for MilkInode {
         let dir = self.ino;
         let vol = self.vol.clone();
         self.vol.txn(self.view, |st| {
-            let d = st.lookup(st.cur, dir, name)?.ok_or(Errno::ENOENT)?;
-            if d.dtype == InodeType::Dir.dirent_type() {
-                return Err(Errno::EISDIR);
-            }
-            st.remove_dirent(dir, name)?;
-            vol.drop_link(st, d.ino)?;
-            let mut di = st.inode(st.cur, dir)?;
-            di.mtime = now();
-            di.ctime = di.mtime;
-            st.put_inode(dir, &di)
+            st.unlink_node(dir, name, &|v, ino| vol.is_open(v, ino))
         })
     }
 
@@ -763,22 +580,7 @@ impl Inode for MilkInode {
             return Err(Errno::EBUSY);
         }
         let dir = self.ino;
-        self.vol.txn(self.view, |st| {
-            let d = st.lookup(st.cur, dir, name)?.ok_or(Errno::ENOENT)?;
-            if d.dtype != InodeType::Dir.dirent_type() {
-                return Err(Errno::ENOTDIR);
-            }
-            if !st.list(st.cur, d.ino)?.is_empty() {
-                return Err(Errno::ENOTEMPTY);
-            }
-            st.remove_dirent(dir, name)?;
-            st.delete_inode(d.ino)?;
-            let mut di = st.inode(st.cur, dir)?;
-            di.nlink -= 1;
-            di.mtime = now();
-            di.ctime = di.mtime;
-            st.put_inode(dir, &di)
-        })
+        self.vol.txn(self.view, |st| st.rmdir_node(dir, name))
     }
 
     fn rename(&self, old: &str, new_dir: &InodeRef, new: &str) -> Result<()> {
@@ -794,76 +596,7 @@ impl Inode for MilkInode {
         let (od, ndi) = (self.ino, nd.ino);
         let vol = self.vol.clone();
         self.vol.txn(self.view, |st| {
-            let src = st.lookup(st.cur, od, old)?.ok_or(Errno::ENOENT)?;
-            let dst = st.lookup(st.cur, ndi, new)?;
-            let dir_t = InodeType::Dir.dirent_type();
-            let moving_dir = src.dtype == dir_t;
-            if let Some(dst) = &dst {
-                if dst.ino == src.ino {
-                    return Ok(());
-                }
-                match (moving_dir, dst.dtype == dir_t) {
-                    (true, false) => return Err(Errno::ENOTDIR),
-                    (false, true) => return Err(Errno::EISDIR),
-                    (true, true) if !st.list(st.cur, dst.ino)?.is_empty() => {
-                        return Err(Errno::ENOTEMPTY);
-                    }
-                    _ => {}
-                }
-            }
-            if moving_dir {
-                // Not into its own subtree: walk up from the target directory.
-                let mut cur = ndi;
-                loop {
-                    if cur == src.ino {
-                        return Err(Errno::EINVAL);
-                    }
-                    if cur == ROOT_INO {
-                        break;
-                    }
-                    cur = st.inode(st.cur, cur)?.parent;
-                }
-            }
-            let t = now();
-            st.remove_dirent(od, old)?;
-            if let Some(dst) = &dst {
-                st.remove_dirent(ndi, new)?;
-                if dst.dtype == dir_t {
-                    st.delete_inode(dst.ino)?;
-                    let mut n = st.inode(st.cur, ndi)?;
-                    n.nlink -= 1;
-                    st.put_inode(ndi, &n)?;
-                } else {
-                    vol.drop_link(st, dst.ino)?;
-                }
-            }
-            st.add_dirent(
-                ndi,
-                Dirent {
-                    ino: src.ino,
-                    dtype: src.dtype,
-                    name: String::from(new),
-                },
-            )?;
-            let mut s = st.inode(st.cur, src.ino)?;
-            s.ctime = t;
-            s.parent = ndi;
-            if moving_dir && od != ndi {
-                let mut o = st.inode(st.cur, od)?;
-                o.nlink -= 1;
-                st.put_inode(od, &o)?;
-                let mut n = st.inode(st.cur, ndi)?;
-                n.nlink += 1;
-                st.put_inode(ndi, &n)?;
-            }
-            st.put_inode(src.ino, &s)?;
-            for d in [od, ndi] {
-                let mut i = st.inode(st.cur, d)?;
-                i.mtime = t;
-                i.ctime = t;
-                st.put_inode(d, &i)?;
-            }
-            Ok(())
+            st.rename_node(od, old, ndi, new, &|v, ino| vol.is_open(v, ino))
         })
     }
 

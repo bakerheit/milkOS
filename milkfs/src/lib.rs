@@ -15,9 +15,10 @@
 //! - `btree`: the CoW B+tree.
 //! - `volume`: transaction / commit, mount (mark + check + orphan reclaim), mkfs.
 //! - `items`: inodes, directory entries, extents, file data, shared blocks (reflink).
+//! - `ops`: create, link, unlink, rename, write, truncate, dedupe (what the VFS calls).
 //! - `snap`, `clone`: snapshots (create / delete / rollback) and writable clones.
 //! - `diff`, `versions`, `stream`: what changed between trees, a file's versions,
-//!   send / receive streams.
+//!   send / receive streams (and the drivers that write and read them).
 //! - `crypt`, `convert`: encryption at rest, encrypting or decrypting in place.
 //! - `fsck`, `scrub`: the full check (and repair), reading every block back.
 //! - `timemachine`: automatic snapshots' policy.
@@ -38,6 +39,7 @@ pub mod errno;
 pub mod format;
 pub mod fsck;
 pub mod items;
+pub mod ops;
 pub mod platform;
 pub mod scrub;
 pub mod snap;

@@ -127,6 +127,23 @@ impl<T> SpinLock<T> {
         }
     }
 
+    /// Take the lock without a guard, IRQs masked first as in [`SpinLock::lock`], for a raw
+    /// lock interface (milkfs's `RawLock`). Returns the IRQ state for [`SpinLock::raw_unlock`].
+    pub fn raw_lock(&self) -> u64 {
+        let flags = irq_save();
+        self.acquire();
+        flags
+    }
+
+    /// Release a lock taken with [`SpinLock::raw_lock`] and put the IRQ mask back.
+    ///
+    /// # Safety
+    /// The caller holds the lock (from `raw_lock`) and `flags` is what that returned.
+    pub unsafe fn raw_unlock(&self, flags: u64) {
+        self.release();
+        irq_restore(flags);
+    }
+
     /// Try to take the lock without blocking.
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         let irq = IrqGuard::new();

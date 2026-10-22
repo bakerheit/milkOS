@@ -12,6 +12,8 @@ bench = false
 [dependencies]
 # Shared crypto primitives (also used by userland through rt): <repo>/crypto.
 milkcrypto = { path = "../crypto" }
+# The milkfs file system (no_std, host-tested): <repo>/milkfs. fs/milkfs is its VFS glue.
+milkfs = { path = "../milkfs" }
 # The rules behind files and the Trash, shared with user space (pure, host-tested):
 # <repo>/user/filekit.
 filekit = { path = "../user/filekit" }

@@ -185,6 +185,17 @@ impl<T: ?Sized> Mutex<T> {
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         self.try_acquire().then_some(MutexGuard { m: self })
     }
+
+    /// Release the mutex without a guard (what dropping one does), for a raw lock
+    /// interface that takes it with `lock` and forgets the guard (milkfs's `RawLock`).
+    ///
+    /// # Safety
+    /// The caller holds the mutex and its guard is gone without having been dropped.
+    pub unsafe fn force_unlock(&self) {
+        self.locked.store(false, Ordering::Release);
+        self.wq.wake_one();
+        super::preempt_point();
+    }
 }
 
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
@@ -204,9 +215,8 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        self.m.locked.store(false, Ordering::Release);
-        self.m.wq.wake_one();
-        super::preempt_point();
+        // SAFETY: this guard holds it.
+        unsafe { self.m.force_unlock() }
     }
 }
 

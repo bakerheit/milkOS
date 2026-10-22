@@ -22,6 +22,7 @@ pub mod format;
 pub mod fsck;
 pub mod inode;
 pub mod items;
+pub mod platform;
 pub mod scrub;
 pub mod snap;
 pub mod store;

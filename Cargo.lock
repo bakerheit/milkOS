@@ -11,9 +11,14 @@ name = "milkcrypto"
 version = "0.0.1"
 
 [[package]]
+name = "milkfs"
+version = "0.0.1"
+
+[[package]]
 name = "milkos-kernel"
 version = "0.0.0"
 dependencies = [
  "filekit",
  "milkcrypto",
+ "milkfs",
 ]

@@ -1,0 +1,13 @@
+[package]
+name = "milkfs"
+version = "0.0.1"
+edition = "2024"
+
+# The milkfs file system (format, B+tree, store, volume, snapshots, clones, send/receive,
+# encryption, check, scrub), no_std + alloc, shared by the kernel (kernel/src/fs/milkfs is
+# the VFS glue) and the host tests (`scripts/milkfs-test.sh`: a file- or memory-backed disk,
+# a fake clock, a seeded RNG, power cuts). What it needs from its host is in `platform`
+# and `blockdev`. See docs/filesystem.md ("The milkfs crate").
+[lib]
+bench = false
+doctest = false

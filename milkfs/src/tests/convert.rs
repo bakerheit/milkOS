@@ -271,3 +271,28 @@ fn what_is_refused_while_converting() {
     fs.check_clean();
     fs.space_exact();
 }
+
+/// Known problem (on main too, same code): a conversion's batch commits can leave the
+/// live tree's shared-block table not matching its references until the tree is done
+/// (`check` reports it; finishing the conversion makes it right). converttest fails when
+/// a crash lands in such a window. `cargo test ... -- --ignored` shows it here.
+#[test]
+#[ignore = "known: shared-block counts mid-conversion (see the comment)"]
+fn every_committed_step_of_a_conversion_checks_clean() {
+    for seed in 0..40u64 {
+        setup(1000 + seed);
+        let (_d, fs) = Fs::fresh(64);
+        workload::run(&fs, 60 + seed * 7);
+        fs.commit().unwrap();
+        let k = keys(fs.st().sb.uuid);
+        start(&fs, &k, true);
+        loop {
+            let r = fs.st().convert_step(64).unwrap();
+            let c = fs.st().check(false).unwrap();
+            assert!(c.clean(), "seed {seed}: {}", c.text());
+            if r == Step::Done {
+                break;
+            }
+        }
+    }
+}

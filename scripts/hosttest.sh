@@ -4,11 +4,15 @@
 # Only the library's tests are run (`--lib`: the empty doc-test pass printed "0 passed" after the
 # real one and made a log look like nothing ran). It fails if any test fails, if the output has no
 # test result, or if zero tests ran, and ends with "NAME: N passed".
+# Built into <repo>/target/host-tests, not user/target: kernel/build.rs watches all of user/, so
+# writing there made the next `cargo build` rebuild the kernel (and, with check-all -j, replace
+# it under the tests already running).
 set -uo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 CRATE="${1:?usage: hosttest.sh CRATE NAME}"; NAME="${2:-$CRATE-unit}"
-cd "$(dirname "$0")/../user"
-OUT="$(cargo test -p "$CRATE" --lib --target aarch64-apple-darwin 2>&1)"; RC=$?
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO/user"
+OUT="$(cargo test -p "$CRATE" --lib --target aarch64-apple-darwin --target-dir "$REPO/target/host-tests" 2>&1)"; RC=$?
 echo "$OUT"
 [ "$RC" = 0 ] || { echo "$NAME: FAIL (cargo test exited $RC)"; exit 1; }
 PASSED="$(echo "$OUT" | sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' | awk '{s += $1} END {print s + 0}')"

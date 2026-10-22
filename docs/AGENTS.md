@@ -60,7 +60,9 @@
 - Every window has its own offscreen surface. Nothing but the compositor writes to the framebuffer.
 
 ## Verifying
-- `scripts/check-all.sh` runs every test script one after another (private images, time limits, one pass/fail
-  table, non-zero exit on any fail; about 8 minutes). `--full` adds the long soak/crash/stress runs, `--only REGEX`
-  picks some, `--list` shows them. Run it before asking the lead to merge.
+- `scripts/check-all.sh` runs every test script, four at a time (private images and ports per test, time limits,
+  one pass/fail table with the wall time, non-zero exit on any fail; about 5 minutes, `-j 1` for one at a time).
+  `--smoke` is one test per area (under 2 minutes; run it on every change), `--full` adds the long
+  soak/crash/stress runs, `--only REGEX` picks some, `--list` shows them. The default set gates a push: run it
+  before asking the lead to merge. A new test that can't share the machine gets mode `solo` in the table.
 - Prove it in qemu. For UI work, screenshot and actually look at the PNG. Paste boot logs in reports.

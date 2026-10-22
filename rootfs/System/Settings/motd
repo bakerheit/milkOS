@@ -9,4 +9,4 @@
 
  Your files live in /Users/milk. Apps are in /Apps, the commands you
  can type in /Commands, and milkOS itself in /System.
- Everything is inspectable: try /proc and /sys.
+ Everything is inspectable: try /proc and /sys. files help: files and folders.

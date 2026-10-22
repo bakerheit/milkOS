@@ -19,7 +19,7 @@ Double-click "milkOS.command". The first time, macOS may say it can't check the 
 right-click (or Control-click) milkOS.command, choose Open, then Open again.
 
 Two windows appear: the milkOS screen, and a Terminal window that is milkOS's console
-(you can type commands there too, like "ls" or "help").
+(you can type commands there too, like "files list" or "help").
 
 - Sound is off. To hear it, run it from Terminal as:  ./milkOS.command --sound
 - To quit, close the milkOS window (or type Ctrl-A, then X, in the Terminal window).

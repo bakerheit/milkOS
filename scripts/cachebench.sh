@@ -28,8 +28,8 @@ trap 'kill -9 "$QPID" 2>/dev/null || true; rm -rf "$SHARE_DIR/$SUB"' EXIT
 P='msh:[^\n]*\$ '
 B=/sys/fs/pagecache
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:cp /Volumes/Mac/$SUB/big.bin /Users/milk/big.bin" "wait:$P" \
-  "send:cp /Volumes/Mac/$SUB/big.bin /Volumes/MILKFAT/big.bin" "wait:$P" \
+  "send:files copy /Volumes/Mac/$SUB/big.bin /Users/milk/big.bin" "wait:$P" \
+  "send:files copy /Volumes/Mac/$SUB/big.bin /Volumes/MILKFAT/big.bin" "wait:$P" \
   "send:echo 0 > $B/enabled" "wait:$P" \
   "send:echo /Users/milk/big.bin > $B/bench" "wait:$P" \
   "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \

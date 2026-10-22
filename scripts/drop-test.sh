@@ -116,7 +116,7 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'send:su milk -c "drop name alice"' "$P" \
   'send:echo milk | sudo -S -u nobody /Commands/drop name evil' "$P" \
   'send:drop peers' "$P" \
-  'send:ls /Users/milk/Downloads' "$P" \
+  'send:files list /Users/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
   'send:echo now > /sys/fs/milkfs/sync' "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
@@ -129,7 +129,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "waitfile:$WORK/a2" \
   'send:drop list' "$P" \
   'send:drop send alice /Volumes/Milk/share/to-alice.bin' "wait:$DONE_RE" "$P" \
-  'send:mv /System/Settings/milk/drop/identity.secret /System/Settings/milk/drop/old.secret' "$P" \
+  'send:files move /System/Settings/milk/drop/identity.secret /System/Settings/milk/drop/old.secret' "$P" \
   'send:drop id' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b3" \
   "wait:$DONE_RE" "$P" "waitfile:$WORK/a4" \
@@ -139,7 +139,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/bv6" "wait:$DONE_RE" "$P" \
   'send:netctl visible off' "$P" 'send:netctl' "$P" "done:$WORK/bhid" "waitfile:$WORK/alist" \
   'send:netctl visible on' "$P" \
-  'send:ls -l /Users/milk/Downloads' "$P" \
+  'send:files list -l /Users/milk/Downloads' "$P" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
@@ -206,7 +206,7 @@ check "$B" "bob as milk received alice-as-milk's file" "drop: received /Users/mi
 [ "$(grep -Ec "drop: sent to-bob\.bin to bob: 1024 KiB" "$A")" -ge 2 ] || fail "alice as milk did not send (only root's send in the log)"
 echo "  ok  alice as milk sent to bob (signed by alice's daemon)"
 check "$B" "the file milk received is milk's" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob \\(1\\)\\.bin$"
-check "$B" "root's receive into milk's Downloads is milk's too" "^-[rwx-]{9} +[0-9]+ milk +[a-z]+ +1048576 .*to-bob\\.bin$"
+check "$B" "root's receive into milk's Downloads is milk's too" "^file +[rwx-]{9} +milk +[a-z]+ +1048576 .*to-bob\\.bin$"
 grep -A1 'su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
 echo "  ok  milk can't read /System/Settings/milk/drop/identity.secret"
 check "$A" "milk (admin) renames through the daemon" "drop: this machine is now alice \\(was alice\\)"

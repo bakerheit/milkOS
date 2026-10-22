@@ -7,7 +7,7 @@
 //! ```ignore
 //! static TERM: Tty = Tty::new("tty1", draw_bytes, 40, 120);   // output sink, rows, cols
 //! tty::register(makedev(4, 1), &TERM);   // so ioctl(TIOCSPGRP/...) on its device node works
-//! TERM.input(b"ls\r");                   // feed typed bytes (thread context, not IRQs)
+//! TERM.input(b"files list\r");           // feed typed bytes (thread context, not IRQs)
 //! TERM.read(buf) / TERM.write(buf)       // what the device node's read_at/write_at call
 //! ```
 //! `input` runs the line discipline: echo through the output sink, backspace, ^U kills the

@@ -54,23 +54,23 @@ trap 'kill -9 "$QPID" 2>/dev/null || true; rm -rf "$X"' EXIT
 F=/Volumes/MILKFAT; O="/Volumes/Mac/$SHARE_SUB"
 P='msh:[^\n]*\$ '
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:ls -l $F" "wait:$P" \
+  "send:files list -l $F" "wait:$P" \
   "send:cat \"$F/A Long File Name With Spaces.txt\"" "wait:$P" \
-  "send:cp \"$F/A Long File Name With Spaces.txt\" $O/long.txt" "wait:$P" \
-  "send:cp $F/R*markdown $O/unicode.txt" "wait:$P" \
-  "send:cp \"$F/Projects/milkOS notes/ideas for later.md\" $O/deep.txt" "wait:$P" \
-  "send:cp $F/data.bin $O/data.bin" "wait:$P" \
-  "send:cp $F/readme.txt $O/readme.txt" "wait:$P" \
-  "send:cp $F/CAPS.TXT $O/caps.txt" "wait:$P" \
-  "send:mkdir \"$F/Made In milkOS\"" "wait:$P" \
+  "send:files copy \"$F/A Long File Name With Spaces.txt\" $O/long.txt" "wait:$P" \
+  "send:files copy $F/R*markdown $O/unicode.txt" "wait:$P" \
+  "send:files copy \"$F/Projects/milkOS notes/ideas for later.md\" $O/deep.txt" "wait:$P" \
+  "send:files copy $F/data.bin $O/data.bin" "wait:$P" \
+  "send:files copy $F/readme.txt $O/readme.txt" "wait:$P" \
+  "send:files copy $F/CAPS.TXT $O/caps.txt" "wait:$P" \
+  "send:files create \"$F/Made In milkOS/\"" "wait:$P" \
   "send:echo hello from milkOS > \"$F/Made In milkOS/a pretty long file name from milkOS.txt\"" "wait:$P" \
-  "send:cp $O/payload.bin \"$F/Made In milkOS/Copied Binary Payload.bin\"" "wait:$P" \
-  "send:mv $F/readme.txt \"$F/Renamed To A Long Name.txt\"" "wait:$P" \
-  "send:rm $F/CAPS.TXT" "wait:$P" \
-  "send:mv \"$F/Projects/milkOS notes\" \"$F/Projects/Notes Moved\"" "wait:$P" \
-  "send:cp \"$F/Made In milkOS/Copied Binary Payload.bin\" $O/readback.bin" "wait:$P" \
-  "send:cp \"$F/Renamed To A Long Name.txt\" $O/renamed.txt" "wait:$P" \
-  "send:ls -l \"$F\" \"$F/Made In milkOS\" \"$F/Projects\"" "wait:$P" \
+  "send:files copy $O/payload.bin \"$F/Made In milkOS/Copied Binary Payload.bin\"" "wait:$P" \
+  "send:files move $F/readme.txt \"$F/Renamed To A Long Name.txt\"" "wait:$P" \
+  "send:files delete --now $F/CAPS.TXT" "wait:$P" \
+  "send:files move \"$F/Projects/milkOS notes\" \"$F/Projects/Notes Moved\"" "wait:$P" \
+  "send:files copy \"$F/Made In milkOS/Copied Binary Payload.bin\" $O/readback.bin" "wait:$P" \
+  "send:files copy \"$F/Renamed To A Long Name.txt\" $O/renamed.txt" "wait:$P" \
+  "send:files list -l \"$F\" \"$F/Made In milkOS\" \"$F/Projects\"" "wait:$P" \
   "send:echo FATTEST""-DONE" "wait:FATTEST-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
@@ -80,7 +80,7 @@ kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 [ -e "$T/done" ] || { bad "milkOS session did not finish"; tail -20 "$LOG"; }
 grep -a "^fat: " "$LOG" | sed 's/^/  /'
 echo "  milkOS sees, after its writes:"
-tr -d '\r' < "$LOG" | sed -n '/^msh:[^$]*\$ ls -l "\/Volumes\/MILKFAT" /,/FATTEST-DONE/p' | grep -v FATTEST | sed 's/^/  | /'
+tr -d '\r' < "$LOG" | sed -n '/^msh:[^$]*\$ files list -l "\/Volumes\/MILKFAT" /,/FATTEST-DONE/p' | grep -v FATTEST | sed 's/^/  | /'
 
 echo "== check what milkOS read (byte-exact via the share)"
 for pair in "long.txt:A Long File Name With Spaces.txt" "unicode.txt:Résumé (draft) v2.markdown" \

@@ -1102,9 +1102,9 @@ fn t_perms() -> bool {
     let _ = sys::rmdir(d);
     // 9: sticky /tmp: root's file there can't be removed by us; 10: but by root.
     let rf = "/tmp/utest-rootfile";
-    let made = sudo(&["/Commands/touch", rf]) == 0;
+    let made = sudo(&["/Commands/files", "create", rf]) == 0;
     t(made && matches!(sys::unlink(rf), Err(sys::Errno(1))));
-    t(sudo(&["/Commands/rm", rf]) == 0 && sys::stat_path(rf, true).is_err());
+    t(sudo(&["/Commands/files", "delete", "--now", rf]) == 0 && sys::stat_path(rf, true).is_err());
     // 11: both must allow: a sandbox grant of /System/Settings doesn't open /System/Settings/shadow, and a file
     // the permissions allow is still out of reach outside the grant.
     let pid = sys::fork().unwrap();

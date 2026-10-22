@@ -377,7 +377,7 @@ So one user can't pin, or forget, a peer key for another. Without the daemon (et
 non-root `drop` says the service isn't running; root's still works directly.
 
 **Tests**: `scripts/drop-test.sh` sends and receives as milk on both machines, checks
-the ownership in `ls -l`, that milk can't read the secret, an admin rename through the
+the ownership in `files list -l`, that milk can't read the secret, an admin rename through the
 daemon and nobody's refusal.
 
 # The audit log

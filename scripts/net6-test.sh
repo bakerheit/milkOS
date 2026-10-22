@@ -68,7 +68,7 @@ DONE_RE='drop: (sent|received|[^\n]*(refused|declined|isn.t|no peer|error|failed
 python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   'wait@240:\[net\] selftest' "$P" 'send:drop name bob' "$P" \
   'send:drop recv -y' 'wait:receiving as' "done:$WORK/b1" "wait:$DONE_RE" "$P" \
-  'send:ls /Users/milk/Downloads' "$P" "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
+  'send:files list /Users/milk/Downloads' "$P" "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
 PIDS+=($!)
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   'wait@240:\[net\] selftest' "$P" 'send:drop name alice' "$P" \

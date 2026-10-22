@@ -824,15 +824,19 @@ fn help() {
     println!("  NAME=v, export NAME[=v], unset NAME, set     variables");
     println!("  cd [DIR|-], pwd, exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
-    println!("programs (/Commands): ls cat echo wc head tail grep sort uniq ps kill sleep");
-    println!("  mkdir rm mv cp ln touch env uptime free uname true false clear");
+    println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
+    println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
     println!("  hello fault utest");
     println!("structured pipes (docs/shell.md): where COL OP V, sort-by COL [-r], select COL..,");
-    println!("  first N, last N, get COL, count, table, to-json; producers: ps ls env");
     println!(
-        "try: ps | grep msh,  ls -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
+        "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"
     );
-    println!("     ps | where rss > 100 | sort-by name,  ls /Commands | sort-by size -r | first 3");
+    println!(
+        "try: ps | grep msh,  files list -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
+    );
+    println!(
+        "     ps | where rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
+    );
 }
 
 // ---- globbing --------------------------------------------------------------------------

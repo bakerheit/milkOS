@@ -256,7 +256,7 @@ function s09(){
   // shell window
   h+=B(380,330,560,330,`background:${C.esp};border-radius:12px;box-shadow:0 14px 34px rgba(60,40,30,.4);overflow:hidden`,
      B(0,0,560,40,`background:#4A3C34`)+TC(60,12,440,'<b>Shell</b>',`color:${C.cream}`)+TRi(560,546,12,'x',`color:${C.sand}`)+
-     T(14,56,'$ ls projects',`color:${C.cream}`)+T(14,74,'kernel  web  notes.txt',`color:${C.matcha}`)+T(14,100,'$ git log --oneline -3',`color:${C.cream}`)+T(14,118,'a1b2c3d boot the framebuffer',`color:${C.latte}`)+T(14,136,'9f8e7d6 add UART output',`color:${C.latte}`)+T(14,162,'$ ',`color:${C.cream}`)+B(30,162,8,16,`background:${C.cream}`));
+     T(14,56,'$ files list projects',`color:${C.cream}`)+T(14,74,'kernel  web  notes.txt',`color:${C.matcha}`)+T(14,100,'$ git log --oneline -3',`color:${C.cream}`)+T(14,118,'a1b2c3d boot the framebuffer',`color:${C.latte}`)+T(14,136,'9f8e7d6 add UART output',`color:${C.latte}`)+T(14,162,'$ ',`color:${C.cream}`)+B(30,162,8,16,`background:${C.cream}`));
   // notification
   h+=B(740,44,264,66,`background:rgba(255,253,248,.95);border-radius:12px;border:1px solid ${C.sand};box-shadow:0 8px 20px rgba(90,64,40,.2)`,icon(10,12,40,'cal',C.honey+'66',C.esp)+T(60,12,'<b>Dentist</b>')+T(60,32,'in 15 minutes',`color:${C.cocoa}`));
   return h;

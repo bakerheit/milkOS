@@ -85,9 +85,9 @@ click 313 129                      # the row first-one
 click 440 286                      # Roll back...
 q screendump "$T/rollback-sheet.png"
 click 722 407                      # the Danger button "Roll back"
-ser "send:snap" "wait:$P" "send:ls /Users/milk/Documents" "wait:$P"
+ser "send:snap" "wait:$P" "send:files list /Users/milk/Documents" "wait:$P"
 out "snap" | grep -q "^snap-" && bad "a newer snapshot survived the rollback" || ok "Roll back deleted the snapshots newer than first-one"
-out "ls /Users/milk/Documents" | grep -q "new.txt" && bad "new.txt survived the rollback" || ok "Roll back undid the change made after the snapshot"
+out "files list /Users/milk/Documents" | grep -q "new.txt" && bad "new.txt survived the rollback" || ok "Roll back undid the change made after the snapshot"
 click 506 23                       # Health tab
 click 837 23 2                     # Scrub now
 q screendump "$T/health.png"

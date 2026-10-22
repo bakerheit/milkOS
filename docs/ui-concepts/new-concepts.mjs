@@ -80,7 +80,7 @@ function scroll() {
   h += B(0, 0, 1024, 32, `background:${C.esp}`) + T(14, 8, "<b>Scroll</b>   notebook: milkOS work", `color:${C.cream}`) + TR(1008, 8, "Tue 10:41   87%", `color:${C.sand}`);
   const cell = (y, n, cmd, hh, body, pinned) => B(24, y, 700, hh, `background:${C.milk};border:1px solid ${C.sand};border-radius:12px;overflow:hidden`,
     B(0, 0, 700, 30, `background:${C.oat};border-bottom:1px solid ${C.sand}`) + T(12, 7, `[${n}]`, `color:${C.cocoa}`) + T(48, 7, `<b>${cmd}</b>`) + TR(688, 7, pinned ? "pinned   &#9679;" : "pin   &#9675;   &#8943;", `color:${pinned ? C.straw : C.cocoa}`) + body);
-  h += cell(48, 1, "ls ~/photos", 160,
+  h += cell(48, 1, "files list ~/photos", 160,
     [0, 1, 2, 3, 4, 5].map((i) => B(14 + i * 108, 44, 98, 76, `background:${[C.peach, C.matcha, C.blue, C.honey, C.lav, C.straw][i]};border-radius:8px`) + TC(14 + i * 108, 124, 98, ["bike.png", "trail.png", "lake.png", "sun.png", "dusk.png", "tree.png"][i], `color:${C.cocoa}`)).join("") + T(14, 142, "6 images, 12 MB   (click to open, drag to copy)", `color:${C.cocoa}`));
   h += cell(228, 2, "disk", 124,
     [["/", 70, C.matcha, "70 GB free"], ["/Users", 160, C.honey, "40 GB free"], ["/tmp", 18, C.matcha, "1 GB used"]].map((d, i) => T(14, 44 + i * 26, d[0].padEnd(7)) + B(80, 46 + i * 26, 420, 14, `background:${C.sand};border-radius:7px`, B(0, 0, d[1] * 2.4, 14, `background:${d[2]};border-radius:7px`)) + T(516, 44 + i * 26, d[3], `color:${C.cocoa}`)).join(""), true);
@@ -145,7 +145,7 @@ const SLIDES = [
     els: ["Infinite surface + dot grid", "Cluster labels", "Cards that become windows", "Connector lines", "Zoom control", "Minimap", "Pan by drag or keys"],
     font: "Never shrink the Unifont bitmap. Far-zoom labels are drawn at 2x or 4x, which is on-brand and crisp. This is the concept that suits a bitmap font best." },
   { id: "scroll", n: "C", name: "Scroll", tag: "A notebook shell where every command leaves a live card", draw: scroll, cost: "medium",
-    idea: "The terminal's output is not text, it is a card. ls shows thumbnails, disk shows bars, edit opens an editor inline, play shows a player. Cards stay in the notebook, can be re-run, and can be pinned to a rail where they keep updating.",
+    idea: "The terminal's output is not text, it is a card. files list shows thumbnails, disk shows bars, edit opens an editor inline, play shows a player. Cards stay in the notebook, can be re-run, and can be pinned to a rail where they keep updating.",
     new_: "A shell and a dashboard in one. Linux soul (everything is a command) with a UI that is allowed to show pictures, bars and controls.",
     why: "No window manager needed, which makes it the cheapest of the four. You need a cell list, a handful of output renderers (text, table, image grid, bar, player) and a pin rail. Start with text-only cells and add renderers one at a time.",
     els: ["Notebook of cells", "Rich output cards", "Prompt with completions", "Pinned live rail", "Re-run / reorder cells", "Command palette"],

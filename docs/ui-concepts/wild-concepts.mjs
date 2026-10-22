@@ -47,7 +47,7 @@ function patchbay() {
     T(16, 112, "Keep shape") + B(150, 110, 44, 22, `background:${C.straw};border-radius:11px`, circle(24, 2, 18, C.milk)) + T(16, 150, "Quality") + B(16, 176, 190, 8, `background:${C.sand};border-radius:4px`, B(0, 0, 150, 8, `background:${C.straw};border-radius:4px`)) + T(16, 214, "85", `color:${C.cocoa}`) +
     B(16, 260, 190, 1, `background:${C.sand}`) + T(16, 276, "Takes: images", `color:${C.cocoa}`) + T(16, 296, "Gives: images", `color:${C.cocoa}`) + T(16, 330, "Drag a wire from a dot", `color:${C.cocoa}`) + T(16, 348, "to rewire. Click a wire", `color:${C.cocoa}`) + T(16, 366, "to peek at what flows.", `color:${C.cocoa}`));
   // the same thing as a shell command
-  h += B(180, 600, 600, 130, `background:${C.esp};border-radius:12px`, T(16, 14, "The same patch as a command (read only):", `color:${C.latte}`) + T(16, 44, "$ ls ~/photos/bike | resize 800 | mail mum", `color:${C.cream}`) + T(16, 66, "$ mic | denoise 0.6 &gt; bike.wav", `color:${C.cream}`) + T(16, 100, "Every box is a normal program. Wires are pipes.", `color:${C.matcha}`));
+  h += B(180, 600, 600, 130, `background:${C.esp};border-radius:12px`, T(16, 14, "The same patch as a command (read only):", `color:${C.latte}`) + T(16, 44, "$ files list ~/photos/bike | resize 800 | mail mum", `color:${C.cream}`) + T(16, 66, "$ mic | denoise 0.6 &gt; bike.wav", `color:${C.cream}`) + T(16, 100, "Every box is a normal program. Wires are pipes.", `color:${C.matcha}`));
   return h;
 }
 

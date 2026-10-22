@@ -718,6 +718,18 @@ impl<'a> Painter<'a> {
 
     /// Copy the `w` x `h` block at (sx, sy) of `src` to logical (x, y).
     pub fn blit(&mut self, x: i32, y: i32, src: &Buffer, sx: i32, sy: i32, w: i32, h: i32) {
+        // A source block starting off the source's top or left (a panel hanging off the
+        // screen, like a wide magnified dock): start where the source does.
+        let (x, sx, w) = if sx < 0 {
+            (x - sx, 0, w + sx)
+        } else {
+            (x, sx, w)
+        };
+        let (y, sy, h) = if sy < 0 {
+            (y - sy, 0, h + sy)
+        } else {
+            (y, sy, h)
+        };
         let w = w.min(src.w() - sx);
         let h = h.min(src.h() - sy);
         let Some(b) = self.buf_rect(x, y, w, h) else {

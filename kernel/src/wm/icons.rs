@@ -27,6 +27,9 @@ pub enum Icon {
     Action,
     /// An installed package: a box with its lid.
     Package,
+    /// The Trash: a can with its lid on, and with paper in it (full).
+    Trash,
+    TrashFull,
 }
 
 /// Draw `icon` as an `s` x `s` tile at (x, y), tile colour `bg` (blended at `bg_a`), glyph `fg`.
@@ -162,6 +165,19 @@ pub fn draw(
             rect(p, 19, 17, 10, 2, 0, fg);
             rect(p, 19, 23, 10, 2, 0, fg);
         }
+        Icon::Trash | Icon::TrashFull => {
+            if icon == Icon::Trash {
+                rect(p, 21, 9, 7, 4, u(2), fg);
+                rect(p, 12, 13, 24, 3, u(1), fg);
+            } else {
+                rect(p, 15, 11, 9, 7, u(4), MILK);
+                rect(p, 24, 10, 10, 8, u(4), STRAW);
+            }
+            ring(p, 14, 18, 20, 21, u(3), th(3), fg);
+            for a in [20, 24, 28] {
+                rect(p, a - 1, 22, 2, 12, 0, fg);
+            }
+        }
         Icon::Spaces => {
             rect(p, 9, 13, 14, 10, u(2), fg);
             rect(p, 25, 13, 14, 10, u(2), fg);
@@ -231,6 +247,7 @@ pub fn art_name(app: &str) -> Option<&'static str> {
         "Text Editor" => "text-editor",
         "Disk" | "Disk Utility" => "disk-utility",
         "Reminders" => "reminders",
+        "Trash" => "trash",
         _ => return None,
     })
 }

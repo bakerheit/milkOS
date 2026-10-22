@@ -49,6 +49,7 @@ mod skim;
 mod snap;
 mod tabs;
 mod theme;
+pub mod trash;
 pub mod tty;
 mod wallpaper;
 mod window;
@@ -1999,6 +2000,11 @@ impl Desktop {
             ctl::set_status(self.status_report());
             // Installed packages (dock tiles), every few seconds.
             if sec % 3 == 1 && packages::refresh() {
+                self.invalidate(PanelKey::Dock);
+            }
+            // The Trash's dock icon: empty or full (files delete, trashd, Files).
+            trash::refresh();
+            if trash::take_change() {
                 self.invalidate(PanelKey::Dock);
             }
             // Windows of userland clients that exited without destroying them.

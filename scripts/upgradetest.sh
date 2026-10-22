@@ -50,12 +50,12 @@ P='msh:[^\n]*\$ '
 D=/Volumes/Milk/docs
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:cat $D/small.txt" "wait:$P" \
-  "send:cp $D/data.bin $D/copy.bin" "wait:$P" \
+  "send:files copy $D/data.bin $D/copy.bin" "wait:$P" \
   "send:echo appended by milkOS >> $D/data.bin" "wait:$P" \
   "send:echo new small > $D/small.txt" "wait:$P" \
   "send:cat /Users/milk/Documents/old-note.txt" "wait:$P" \
-  "send:ls /Volumes/Milk" "wait:$P" \
-  "send:ls /Users/milk/Sites" "wait:$P" \
+  "send:files list /Volumes/Milk" "wait:$P" \
+  "send:files list /Users/milk/Sites" "wait:$P" \
   "send:cat /System/Settings/milk/drop/name" "wait:$P" \
   "send:uname -n" "wait:$P" \
   "send:milk list" "wait:$P" \
@@ -83,7 +83,7 @@ echo "$L" | grep -a "layout: moved" | sed 's/^/  /'
 echo "$L" | grep -aq "layout: moved /Volumes/Milk to the new folder layout" && ok "the boot moved the old layout" || bad "no layout move logged"
 echo "$L" | grep -aq "milkfs: /Users/milk is /Volumes/Milk/Users/milk (persistent)" && ok "the moved home is /Users/milk" || bad "home bind"
 echo "$L" | grep -aq "^written before the move" && ok "a file from the old home reads at /Users/milk" || bad "old home file"
-echo "$L" | grep -a -A3 'ls /Users/milk/Sites$' | grep -aq "index.html" && ok "the moved home got ~/Sites" || bad "no ~/Sites"
+echo "$L" | grep -a -A3 'files list /Users/milk/Sites$' | grep -aq "index.html" && ok "the moved home got ~/Sites" || bad "no ~/Sites"
 echo "$L" | grep -aq "^old-machine$" && ok "Milk Drop's settings are at /System/Settings/milk/drop" || bad "drop settings"
 echo "$L" | grep -aq "^oldbox$" && ok "the hostname moved with /System/Settings/milk/net" || bad "hostname"
 echo "$L" | grep -aEq "^hello +1\.0\.0" && ok "the installed package is in /Apps (milk list)" || bad "package in /Apps"

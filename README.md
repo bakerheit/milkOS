@@ -21,7 +21,7 @@ On first boot a Welcome tour shows the main ideas with buttons that really do th
 
 Handy keys on the desktop: Ctrl/Cmd+Space opens Skim (the launcher), F3 opens Spaces, F4 opens Today.
 The dock has Files, Terminal, Browser, Notes, Paint, Music and Settings; installed packages add their own
-tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves and quarters.
+tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves and quarters.
 
 ## What's in it
 **Kernel**
@@ -39,7 +39,8 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - VFS with tmpfs root, initramfs, devfs, procfs, sysfs.
 - milkfs, our own copy-on-write filesystem: snapshots, rollback, writable clones, per-file versions,
   `snap diff`, automatic Time Machine snapshots, crash-tested (kill, power cut, torn superblock), `check --repair`.
-- Your home folder lives on milkfs, so files survive reboots.
+- Your home folder lives on milkfs, so files survive reboots. Deleted things go to a real Trash
+  (`~/.Trash`, or a disk's own), and are deleted for good after 30 days (Settings > Trash).
 - Folders in plain English: `/Apps` (apps you open), `/Commands` (what you type in Terminal),
   `/Users/milk` (your home), `/Volumes` (disks) and `/System` (milkOS itself). Details in
   `docs/filesystem.md`.
@@ -56,7 +57,7 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 - Menu bar, dock, Skim launcher, Today widgets, Spaces, notifications, control centre, a light and a dark
   ("Chocolate milk") theme.
 - Skim is a system-wide command bar: apps, app actions, files, settings, a calculator (`= 2+2`) and
-  shell commands (`> ls`). Windows snap to edges and corners. Lock screen. Browse All Versions for any
+  shell commands (`> files list`). Windows snap to edges and corners. Lock screen. Browse All Versions for any
   file on milkfs. Screenshots with Cmd+Shift+3/4 (PNG). Live resolution switching (1024x768 to 1440x900).
 - Apps: Terminal (real shell, tabs, colours), Music, Files (with Time Machine), Notes, Browser, Paint, Settings,
   About. User programs can open their own windows (`user/gui`).
@@ -64,6 +65,9 @@ tiles. Ctrl+Cmd+Q locks the screen, and Ctrl+Alt+arrows snap windows to halves a
 **Userland**
 - `msh`, a shell with pipelines, redirection, job control and structured pipes:
   `ps | where rss > 100 | sort-by name`.
+- `files`, one command for files and folders in plain English (`files create notes.txt`,
+  `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`
+  (list, restore, empty).
 - Coreutils, `top`, and `milk`, a package manager with signed packages, where `milk try` installs into a
   throwaway clone of the filesystem that you then keep or discard.
 

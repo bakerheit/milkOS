@@ -5,6 +5,11 @@
 //! (folders here, text files in Notes, WAVs in Music), Backspace goes to the parent folder,
 //! the wheel scrolls.
 //!
+//! Delete (Cmd+Backspace, the Delete key, or Move to Trash in the right-click menu) moves the
+//! selection to the Trash (wm/trash.rs, the same Trash as `files delete`). The sidebar's
+//! Trash, and the dock's Trash, show it: where each thing came from and how long it has
+//! left, Restore for the selected one, Empty Trash (asks first).
+//!
 //! Share (the toolbar pill, File > Share..., or dropping a file on a NEARBY device) opens
 //! the Milk Drop sheet over the body (apps/milkdrop.rs). NEARBY lists the machines the
 //! `drop daemon` has heard (/tmp/drop/peers, no waiting).
@@ -24,12 +29,12 @@ use super::super::paint::{Painter, hit};
 use super::super::rtc;
 use super::super::theme::*;
 use super::super::window::{App, KeyInput, PointerInput, PointerKind, WindowContents};
-use super::super::{Request, request};
+use super::super::{Request, request, trash};
 use super::fsx::{self, Entry};
 use super::milkdrop;
 use super::notes;
 
-const FAVS: [(&str, &str); 7] = [
+const FAVS: [(&str, &str); 8] = [
     ("Home", fsx::HOME),
     ("Apps", crate::fs::layout::APPS),
     ("Documents", "/Users/milk/Documents"),
@@ -37,7 +42,13 @@ const FAVS: [(&str, &str); 7] = [
     ("Desktop", "/Users/milk/Desktop"),
     ("Pictures", "/Users/milk/Pictures"),
     ("Music", "/Users/milk/Music"),
+    ("Trash", TRASH),
 ];
+/// The Trash view (wm::trash: ~/.Trash and the disks' own Trashes), not a real path.
+pub const TRASH: &str = "trash:";
+/// The Trash view's rows: two lines each, under its heading.
+const TRASH_TOP: i32 = TOOL_H + 80;
+const TRASH_ROW: i32 = 44;
 const VOLUME: &str = "/Volumes/Milk";
 const MAC: &str = "/Volumes/Mac";
 const SNAPDIR: &str = "/Volumes/Milk/.snapshots";
@@ -215,6 +226,12 @@ pub struct Files {
     /// The Milk Drop sheet, while sharing.
     share: Option<milkdrop::Sheet>,
     now: u64,
+    /// The Trash view's items (in the order shown), Empty Trash asking "for good?", and
+    /// its buttons (from the last draw).
+    trash: Vec<trash::Item>,
+    confirm_empty: bool,
+    empty_btn: Rect,
+    cancel_btn: Rect,
 }
 
 /// What the `drop daemon` heard on the link ("name ip fp recv seen" lines).
@@ -230,8 +247,9 @@ fn nearby() -> Vec<(String, bool)> {
 
 const DROP_PREFIX: &str = "drop:";
 
-/// The right-click menu's rows.
-const CTX: [&str; 2] = ["Open", "Browse All Versions..."];
+/// The right-click menu's rows: for a file or folder, and for something in the Trash.
+const CTX: [&str; 3] = ["Open", "Browse All Versions...", "Move to Trash"];
+const CTX_TRASH: [&str; 2] = ["Restore", "Delete for Good"];
 const CTX_W: i32 = 210;
 const CTX_ROW: i32 = 26;
 
@@ -270,6 +288,10 @@ impl Files {
             nearby: nearby(),
             share: None,
             now: 0,
+            trash: Vec::new(),
+            confirm_empty: false,
+            empty_btn: Rect::new(0, 0, 0, 0),
+            cancel_btn: Rect::new(0, 0, 0, 0),
         };
         let start = PENDING.lock().take();
         f.show(start.as_deref().unwrap_or("/Users/milk/Documents"));
@@ -306,6 +328,7 @@ impl Files {
         self.path = String::from(path);
         self.title = match (path, in_snapshot(path)) {
             (TM, _) => String::from("Time Machine"),
+            (TRASH, _) => String::from("Trash"),
             ("/", _) => String::from("This machine"),
             (VOLUME, _) => String::from("Milk disk"),
             (p, Some((snap, _))) => format!("{} ({snap})", fsx::basename(p)),
@@ -316,11 +339,34 @@ impl Files {
         self.last_click = None;
         self.search.clear();
         self.searching = false;
+        self.confirm_empty = false;
         self.avail = available(path);
         self.reload();
     }
 
     fn reload(&mut self) {
+        if self.path == TRASH {
+            self.trash = trash::items();
+            self.all = self
+                .trash
+                .iter()
+                .map(|t| Entry {
+                    name: t.name.clone(),
+                    kind: if t.dir {
+                        crate::fs::InodeType::Dir
+                    } else {
+                        crate::fs::InodeType::File
+                    },
+                    size: t.size,
+                })
+                .collect();
+            self.error = None;
+            self.filter();
+            if self.trash.is_empty() {
+                self.confirm_empty = false;
+            }
+            return;
+        }
         if self.path == TM {
             self.snaps = snapshots();
             self.all.clear();
@@ -343,7 +389,12 @@ impl Files {
 
     /// Apply the search to the listing.
     fn filter(&mut self) {
-        let q = self.search.to_ascii_lowercase();
+        // The Trash isn't searched: its rows stay in step with `self.trash`.
+        let q = if self.path == TRASH {
+            String::new()
+        } else {
+            self.search.to_ascii_lowercase()
+        };
         self.items = self
             .all
             .iter()
@@ -362,6 +413,10 @@ impl Files {
     /// Item `i`'s hit rect (grid cell or list row), in body coordinates.
     fn item_rect(&self, i: usize) -> Rect {
         let i = i as i32;
+        if self.path == TRASH {
+            let y = TRASH_TOP + (i - self.scroll) * TRASH_ROW;
+            return Rect::new(SIDE_W + 8, y, self.size.0 - SIDE_W - 16, TRASH_ROW - 4);
+        }
         if self.list {
             let y = LIST_TOP + (i - self.scroll) * LIST_ROW;
             Rect::new(SIDE_W + 8, y, self.size.0 - SIDE_W - 16, LIST_ROW - 2)
@@ -390,6 +445,10 @@ impl Files {
         let Some(e) = self.items.get(i) else {
             return;
         };
+        if self.path == TRASH {
+            super::super::notify_as("Files", &e.name, "It's in the Trash: Restore it to open it");
+            return;
+        }
         let full = fsx::resolve(&self.path, &e.name);
         if fsx::is_dir(&full) {
             self.go(&full);
@@ -466,6 +525,9 @@ impl Files {
         if self.path == TM {
             return alloc::vec![(String::from("Time Machine"), String::from(TM))];
         }
+        if self.path == TRASH {
+            return alloc::vec![(String::from("Trash"), String::from(TRASH))];
+        }
         let mut v = Vec::new();
         let (root_label, root, rest) = if let Some(r) = self.path.strip_prefix(fsx::HOME) {
             ("Home", String::from(fsx::HOME), r)
@@ -522,8 +584,13 @@ impl Files {
         }
     }
 
-    fn ctx_rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
-        let rh = CTX.len() as i32 * CTX_ROW + 12;
+    /// The right-click menu's rows here.
+    fn ctx_rows(&self) -> &'static [&'static str] {
+        if self.path == TRASH { &CTX_TRASH } else { &CTX }
+    }
+
+    fn ctx_rect(&self, x: i32, y: i32, w: i32, h: i32) -> Rect {
+        let rh = self.ctx_rows().len() as i32 * CTX_ROW + 12;
         Rect::new(x.min(w - CTX_W - 4), y.min(h - rh - 4), CTX_W, rh)
     }
 
@@ -736,6 +803,142 @@ impl Files {
         }
     }
 
+    /// The Trash: a heading with Empty Trash, then one row per item (where it came from,
+    /// when it was deleted, how long it has left).
+    fn draw_trash(&mut self, p: &mut Painter, w: i32, h: i32) {
+        let x = SIDE_W + 20;
+        let top = TOOL_H;
+        p.text_x(x, top + 14, "Trash", ESPRESSO, 2, true);
+        let body = Font::body(false);
+        let intro = match trash::keep() {
+            filekit::trash::Keep::Forever => {
+                String::from("Things stay here until you empty the Trash (Settings > Trash).")
+            }
+            k => format!(
+                "Things are deleted for good after {} here (Settings > Trash).",
+                k.label()
+            ),
+        };
+        // Empty Trash, top right; after one click it asks "for good?" (and Cancel).
+        let n = self.trash.len();
+        let (label, kind) = if self.confirm_empty {
+            (
+                format!("Delete {n} item{} for good", if n == 1 { "" } else { "s" }),
+                Kind::Danger,
+            )
+        } else if n == 0 {
+            (String::from("Empty Trash"), Kind::Disabled)
+        } else {
+            (String::from("Empty Trash"), Kind::Secondary)
+        };
+        let bw = button::pill_w(&label);
+        self.empty_btn = Rect::new(w - 16 - bw, top + 16, bw, button::PILL_H);
+        let st = State::hover(self.hovering(&self.empty_btn));
+        button::paint(p, self.empty_btn, &label, kind, st);
+        self.cancel_btn = Rect::new(0, 0, 0, 0);
+        if self.confirm_empty {
+            let cw = button::pill_w("Cancel");
+            self.cancel_btn = Rect::new(self.empty_btn.x - 8 - cw, top + 16, cw, button::PILL_H);
+            let st = State::hover(self.hovering(&self.cancel_btn));
+            button::paint(p, self.cancel_btn, "Cancel", Kind::Secondary, st);
+        }
+        p.text_p(
+            x,
+            top + 50,
+            &body.truncate(&intro, w - x - 16),
+            COCOA,
+            false,
+        );
+        if self.trash.is_empty() {
+            let area = Rect::new(SIDE_W, TRASH_TOP, w - SIDE_W, h - TRASH_TOP - STATUS_H);
+            let msg = "The Trash is empty";
+            p.text_p_center(area.x, area.w, area.y + area.h / 2 - 20, msg, COCOA, false);
+            return;
+        }
+        for (i, it) in self.trash.iter().enumerate() {
+            let r = self.item_rect(i);
+            if r.y < TRASH_TOP - 4 || r.y > h {
+                continue;
+            }
+            let sel = self.selected == Some(i);
+            if sel {
+                p.rrect_r(r, R_ROW, STRAW, SEL_ROW_A);
+            }
+            let kind = fsx::art_kind_of(&it.name, it.dir);
+            if !icons::file_tile(p, r.x + 8, r.y + 4, 32, kind) {
+                let icon = if it.dir { Icon::Folder } else { Icon::Doc };
+                icons::draw(p, r.x + 8, r.y + 4, 32, icon, CREAM, 255, ESPRESSO, true);
+            }
+            let left = match trash::days_left(it) {
+                None => String::from("kept until you empty the Trash"),
+                Some(0) => String::from("goes today"),
+                Some(1) => String::from("1 day left"),
+                Some(d) => format!("{d} days left"),
+            };
+            let lw = crate::sysfont::width(&left, false);
+            let room = r.w - 48 - lw - 24;
+            p.text_p(
+                r.x + 48,
+                r.y + 3,
+                &body.truncate(&it.name, room),
+                ESPRESSO,
+                true,
+            );
+            let from = if it.from().is_empty() {
+                String::from("from: unknown")
+            } else {
+                format!("from {}", fsx::pretty(&fsx::parent(it.from())))
+            };
+            let sub = format!("{from}, deleted {}", trash::when(it));
+            let c = if sel { ESPRESSO } else { COCOA };
+            p.text_p(r.x + 48, r.y + 21, &body.truncate(&sub, room), c, false);
+            p.text_right(r.x + r.w - 10, r.y + 12, &left, c, 1, false);
+        }
+    }
+
+    /// Move item `i` (of this folder) to the Trash.
+    fn move_to_trash(&mut self, i: usize) {
+        if self.path == TM || self.path == TRASH || in_snapshot(&self.path).is_some() {
+            return;
+        }
+        let Some(e) = self.items.get(i) else {
+            return;
+        };
+        let full = fsx::resolve(&self.path, &e.name);
+        if let Err(m) = trash::move_to_trash(&full) {
+            super::super::notify_as("Files", "Can't move it to the Trash", &m);
+        }
+        self.selected = None;
+        self.reload();
+    }
+
+    fn restore_from_trash(&mut self, i: usize) {
+        let Some(it) = self.trash.get(i).cloned() else {
+            return;
+        };
+        match trash::restore(&it) {
+            Ok(to) => super::super::notify_as(
+                "Files",
+                &format!("Put back {}", it.name),
+                &fsx::pretty(&fsx::parent(&to)),
+            ),
+            Err(m) => super::super::notify_as("Files", &format!("Can't restore {}", it.name), &m),
+        }
+        self.selected = None;
+        self.reload();
+    }
+
+    fn delete_for_good(&mut self, i: usize) {
+        let Some(it) = self.trash.get(i).cloned() else {
+            return;
+        };
+        if let Err(m) = trash::delete(&it) {
+            super::super::notify_as("Files", &format!("Can't delete {}", it.name), &m);
+        }
+        self.selected = None;
+        self.reload();
+    }
+
     fn draw_items(&self, p: &mut Painter, w: i32, h: i32) {
         if let Some(e) = &self.error {
             p.text_p(
@@ -847,6 +1050,26 @@ impl Files {
             );
             return;
         }
+        if self.path == TRASH {
+            let n = self.trash.len();
+            let total: u64 = self.trash.iter().map(|t| t.size).sum();
+            let what = if n == 0 {
+                String::from("Empty")
+            } else {
+                format!(
+                    "{n} item{}, {}",
+                    if n == 1 { "" } else { "s" },
+                    size_label(total)
+                )
+            };
+            p.text(SIDE_W + 12, sy + 4, &what, COCOA);
+            if self.selected.is_some() {
+                let r = Self::restore_chip(w, h);
+                let st = State::hover(self.hovering(&r));
+                button::paint(p, r, "Restore", Kind::Primary, st);
+            }
+            return;
+        }
         let n = self.items.len();
         let info = match self.selected.and_then(|i| self.items.get(i)) {
             Some(e) if e.kind == crate::fs::InodeType::Dir => format!("1 of {n} selected"),
@@ -895,7 +1118,10 @@ impl Files {
     fn draw_files(&mut self, p: &mut Painter, w: i32, h: i32) {
         self.size = (w, h);
         let area_h = h - TOOL_H - STATUS_H;
-        if self.list {
+        if self.path == TRASH {
+            self.cols = 1;
+            self.rows_visible = ((h - STATUS_H - TRASH_TOP) / TRASH_ROW).max(1);
+        } else if self.list {
             self.cols = 1;
             self.rows_visible = ((area_h - 8) / LIST_ROW).max(1);
         } else {
@@ -909,6 +1135,8 @@ impl Files {
             let mut gp = p.clipped(Rect::new(SIDE_W, TOOL_H, w - SIDE_W, area_h));
             if self.path == TM {
                 self.draw_snapshots(&mut gp, w);
+            } else if self.path == TRASH {
+                self.draw_trash(&mut gp, w, h);
             } else {
                 self.draw_items(&mut gp, w, h);
             }
@@ -916,7 +1144,7 @@ impl Files {
         self.draw_status(p, w, h);
         // The right-click menu, over everything.
         if let Some((x, y, i)) = self.ctx {
-            let r = Self::ctx_rect(x, y, w, h);
+            let r = self.ctx_rect(x, y, w, h);
             p.shadow(r, 10, &SHADOW_FLOAT);
             p.rrect_r(r, 10, MILK, 255);
             p.rrect_stroke(r.x, r.y, r.w, r.h, 10, 1, SAND, 255);
@@ -924,8 +1152,10 @@ impl Files {
                 .items
                 .get(i)
                 .is_some_and(|e| e.kind != crate::fs::InodeType::Dir);
-            for (k, label) in CTX.iter().enumerate() {
-                let enabled = k == 0 || file;
+            let trash_view = self.path == TRASH;
+            let snap = in_snapshot(&self.path).is_some();
+            for (k, label) in self.ctx_rows().iter().enumerate() {
+                let enabled = trash_view || k == 0 || (k == 1 && file) || (k == 2 && !snap);
                 p.text_p(
                     r.x + 14,
                     r.y + 6 + k as i32 * CTX_ROW + 4,
@@ -999,7 +1229,7 @@ impl WindowContents for Files {
     }
 
     fn drag_start(&mut self, x: i32, y: i32) -> Option<String> {
-        if self.path == TM {
+        if self.path == TM || self.path == TRASH {
             return None;
         }
         let i = self.item_at(x, y)?;
@@ -1010,7 +1240,9 @@ impl WindowContents for Files {
 
     fn document_path(&self) -> Option<String> {
         let e = self.items.get(self.selected?)?;
-        (e.kind != crate::fs::InodeType::Dir && in_snapshot(&self.path).is_none())
+        (e.kind != crate::fs::InodeType::Dir
+            && in_snapshot(&self.path).is_none()
+            && self.path != TRASH)
             .then(|| fsx::resolve(&self.path, &e.name))
     }
 
@@ -1044,16 +1276,20 @@ impl WindowContents for Files {
         }
         // An open right-click menu takes the next click.
         if let Some((x, y, i)) = self.ctx.take() {
-            let r = Self::ctx_rect(x, y, self.size.0, self.size.1);
+            let r = self.ctx_rect(x, y, self.size.0, self.size.1);
             if hit(&r, e.x, e.y) {
-                let k = ((e.y - r.y - 6) / CTX_ROW).clamp(0, CTX.len() as i32 - 1);
-                match k {
-                    0 => self.open(i),
-                    _ => {
+                let n = self.ctx_rows().len() as i32;
+                let k = ((e.y - r.y - 6) / CTX_ROW).clamp(0, n - 1);
+                match (self.path == TRASH, k) {
+                    (true, 0) => self.restore_from_trash(i),
+                    (true, _) => self.delete_for_good(i),
+                    (false, 0) => self.open(i),
+                    (false, 1) => {
                         if let Some(p) = self.document_path() {
                             super::versions::show(&p);
                         }
                     }
+                    (false, _) => self.move_to_trash(i),
                 }
             }
             return true;
@@ -1131,6 +1367,37 @@ impl WindowContents for Files {
             self.restore();
             return true;
         }
+        if self.path == TRASH {
+            if hit(&self.empty_btn, e.x, e.y) {
+                if self.confirm_empty {
+                    self.confirm_empty = false;
+                    let (ok, bad) = trash::empty();
+                    if bad > 0 {
+                        super::super::notify_as(
+                            "Files",
+                            "Some things couldn't be deleted",
+                            &format!("{ok} deleted, {bad} still in the Trash"),
+                        );
+                    }
+                    self.selected = None;
+                    self.reload();
+                } else if !self.trash.is_empty() {
+                    self.confirm_empty = true;
+                }
+                return true;
+            }
+            let asked = self.confirm_empty;
+            self.confirm_empty = false;
+            if asked && hit(&self.cancel_btn, e.x, e.y) {
+                return true;
+            }
+            if let Some(i) = self.selected
+                && hit(&Self::restore_chip(self.size.0, self.size.1), e.x, e.y)
+            {
+                self.restore_from_trash(i);
+                return true;
+            }
+        }
         let sel = self.item_at(e.x, e.y);
         let now = timer::now_ns();
         if let Some(i) = sel
@@ -1202,6 +1469,15 @@ impl WindowContents for Files {
             }
             Key::Char(']') if k.mods.meta => {
                 self.go_forward();
+                true
+            }
+            // Cmd+Backspace or Delete: the selection goes to the Trash.
+            Key::Backspace | Key::Delete
+                if (k.key == Key::Delete || k.mods.meta) && self.selected.is_some() =>
+            {
+                if let Some(i) = self.selected {
+                    self.move_to_trash(i);
+                }
                 true
             }
             Key::Backspace | Key::Up if k.key == Key::Backspace || k.mods.meta => {
@@ -1279,6 +1555,18 @@ impl WindowContents for Files {
         if near != self.nearby {
             self.nearby = near;
             sheet = true;
+        }
+        if self.path == TRASH {
+            let n = trash::items();
+            let same = n.len() == self.trash.len()
+                && n.iter()
+                    .zip(&self.trash)
+                    .all(|(a, b)| a.path() == b.path() && a.deleted() == b.deleted());
+            if !same {
+                self.reload();
+                return true;
+            }
+            return sheet;
         }
         if self.path == TM {
             let n = snapshots();

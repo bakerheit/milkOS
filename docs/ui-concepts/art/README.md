@@ -5,7 +5,7 @@ It follows `ART.md` and the tokens in `SPEC.md`. Open `contact-sheet.png` first.
 
 ## What is here
 - `icons/<app>-<size>.png` and `icons/<app>-<size>-dark.png`, for **files, terminal, browser, notes, paint, music, settings, text-editor, calendar, clock, preview, activity,
-  store, spaces, today, disk-utility, reminders**, at **512, 96, 48, 40, 36, 28, 20 and 16** px. RGBA with transparent corners (the tile radius is 24% of the size). The `-dark` file is identical to the
+  store, spaces, today, disk-utility, reminders, trash, trash-full**, at **512, 96, 48, 40, 36, 28, 20 and 16** px. RGBA with transparent corners (the tile radius is 24% of the size). The `-dark` file is identical to the
   light one for the accent tiles (honey, blue, straw, matcha, lavender: ink glyph in both themes); it differs for the neutral tiles (notes, paint, text-editor, calendar,
   settings, spaces, today, reminders, and disk-utility on the sand tile), mapped through the dark table of the spec (milk tile `#2E2520`, glyph `#F4EBE0`, latte tile `#8C7764`). Terminal and Activity keep the fixed Terminal
   body colour in both themes, and their `-dark` files add a 1px `#4A3C34` edge so the tile does not vanish on dark glass.
@@ -23,7 +23,7 @@ It follows `ART.md` and the tokens in `SPEC.md`. Open `contact-sheet.png` first.
 ## The colour map (one tile colour per app)
 Files honey; Terminal espresso; Browser blue; Notes milk with a honey band; Text Editor milk with cocoa lines and a straw caret; Paint milk with four colour dots;
 Music straw; Calendar milk with a straw band and the date numeral; Clock matcha; Preview lavender; Settings latte; Activity Monitor espresso with a matcha graph line;
-Store straw with an ink bag and a milk sparkle; Spaces milk with four small windows (the current one straw); Today milk with a honey half-sun on a cocoa horizon and three agenda lines (no numeral, no page); Reminders milk with a straw ring holding an ink check and two lines; Disk Utility sand (`#E2D5BD`, dark `#55463C`) with an ink drive and one small matcha health light. Calendar has no numeral baked in: the milk tile and straw band stay, and the middle holds only a faint 4 by 3 grid of cocoa dots (left out at 28 px and below) so the shell can paint today's date over it.
+Store straw with an ink bag and a milk sparkle; Spaces milk with four small windows (the current one straw); Today milk with a honey half-sun on a cocoa horizon and three agenda lines (no numeral, no page); Reminders milk with a straw ring holding an ink check and two lines; Disk Utility sand (`#E2D5BD`, dark `#55463C`) with an ink drive and one small matcha health light; the Trash sand with an espresso can, its lid on when empty, and for the full one the lid off with crumpled paper over the rim (one straw sheet). Calendar has no numeral baked in: the milk tile and straw band stay, and the middle holds only a faint 4 by 3 grid of cocoa dots (left out at 28 px and below) so the shell can paint today's date over it.
 
 ## Checks that were run
 - **Wallpapers:** `art/check-wallpaper.py` prints PASS for all eight regions on dawn, oat and night (`--dark`). Night is the tight one (its drawer region is about 7.7:1), which

@@ -142,7 +142,7 @@ bind / listen / accept4 / connect / sendto / recvfrom / shutdown / getsockname /
 getpeername, and `sendmsg` (211) / `recvmsg` (212) with control messages. User side:
 `rt::unix`.
 
-* **Names.** A path: `bind` makes a socket node (`S_IFSOCK`, `ls -l` shows `s`, mode
+* **Names.** A path: `bind` makes a socket node (`S_IFSOCK`, `files list -l` shows `socket`, mode
   0755 like Linux with umask 022) on tmpfs (`/tmp`, `/run`); connecting needs write
   permission on it (fs/perm.rs) and, under the capability sandbox, an fs grant for it.
   Unlinking the node only hides the socket. An abstract name (`sun_path[0] == 0`) lives
@@ -520,8 +520,11 @@ for a new crate) + one line in `initramfs.list`.
 * `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).
-* `coreutils`: ls cat echo wc head tail grep sort uniq ps kill sleep mkdir rm mv cp ln
-  touch env uptime free uname true false clear, one program each.
+* `coreutils`: cat echo wc head tail grep sort uniq ps kill sleep env uptime free uname
+  true false clear, one program each.
+* `filetools`: `files` (create, copy, move, rename, delete, info, list, link: it replaced ls,
+  cp, mv, rm, mkdir, touch and ln), `trash` and the `trashd` service (docs/filesystem.md,
+  "Files and the Trash"); the rules are in `filekit`, which the kernel's Files app shares.
 * `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
   `utest pipe | cow | proc | signal | all`).
 

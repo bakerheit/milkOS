@@ -88,7 +88,7 @@ boot() { # name [fw_cfg passphrase or -] commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 boot b1 - \
-  "cat /sys/fs/milkfs/unlock" "ls /Volumes" \
+  "cat /sys/fs/milkfs/unlock" "files list /Volumes" \
   "raw:snap unlock" "wait:Passphrase" "raw:wrong-fake-passphrase" "wait:try again" "wait:Passphrase" "raw:$P1" "wait:unlocked" \
   "wait:msh:" \
   "cat /Users/milk/../milk/README.txt" "cat /Volumes/Milk/docs/canary-file.txt" \
@@ -98,7 +98,7 @@ boot b1 - \
 L="$(tr -d '\r' < "$T/b1.log")"
 echo "$L" | grep -aq "vda (Milk) is encrypted and locked" && ok "boot 1: the volume is locked at boot" || bad "not reported locked"
 echo "$L" | grep -a -A2 "cat /sys/fs/milkfs/unlock" | grep -aq "vda Milk locked" && ok "/sys/fs/milkfs/unlock lists it" || bad "unlock file"
-echo "$L" | awk '/\$ ls \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Milk" && bad "mounted while locked" || ok "not mounted while locked"
+echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Milk" && bad "mounted while locked" || ok "not mounted while locked"
 echo "$L" | grep -aq "wrong passphrase or recovery key" && ok "a wrong passphrase is refused" || bad "wrong passphrase accepted?"
 echo "$L" | grep -aq "snap: Milk unlocked" && ok "snap unlock mounts it" || bad "snap unlock"
 echo "$L" | grep -aq "$P1" && bad "the passphrase was echoed" || ok "the passphrase isn't echoed or logged"
@@ -125,7 +125,7 @@ EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
   "echo kept across the lock > /Volumes/Vault/notes.txt" \
   "cd /Volumes/Vault" "snap lock Vault" "cd /" \
   "sleep 4 < /Volumes/Vault/notes.txt &" "snap lock Vault" "cat /sys/fs/milkfs/error" "sleep 5" \
-  "snap lock Vault" "ls /Volumes" "cat /Volumes/Vault/notes.txt" "cat /sys/fs/milkfs/lock" \
+  "snap lock Vault" "files list /Volumes" "cat /Volumes/Vault/notes.txt" "cat /sys/fs/milkfs/lock" \
   "raw:snap unlock" "wait:Passphrase" "raw:$P2" "wait:unlocked" "wait:msh:" \
   "cat /Volumes/Vault/notes.txt" "echo second > /Volumes/Vault/two.txt" "snap lock"
 L="$(tr -d '\r' < "$T/b3.log")"
@@ -140,7 +140,7 @@ echo "$L" | grep -aq "snap: lock Vault: .*is in use: pid [0-9]* (msh): working d
 echo "$L" | grep -aq "snap: lock Vault: .*is in use: pid [0-9]* (sleep): 1 open file (EBUSY" && ok "busy (open file): names the process" || bad "open-file busy: $(echo "$L" | grep -a 'snap: lock Vault' | sed -n 2p)"
 echo "$L" | grep -aq "^lock: EBUSY: .*(sleep): 1 open file" && ok "/sys/fs/milkfs/error has the reason" || bad "error file"
 echo "$L" | grep -aq "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted, key wiped$" && ok "Vault locked, key wiped" || bad "lock log"
-echo "$L" | awk '/\$ ls \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
+echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
 echo "$L" | grep -aq "cat: /Volumes/Vault/notes.txt: " && ok "its files are gone until unlock" || bad "file readable while locked?"
 echo "$L" | grep -aq "^vd. Vault locked" && ok "listed as locked" || bad "not listed locked"
 [ "$(echo "$L" | grep -ac '^kept across the lock')" -ge 1 ] && echo "$L" | grep -aq "snap: Vault unlocked" && ok "unlock after lock: the file is back" || bad "unlock after lock"
@@ -183,7 +183,7 @@ $M put "$PL" /docs/c5.txt "$T/c5.txt" >/dev/null && $M put "$PL" /docs/r5.bin "$
 IMG="$PL" EXTRA_DISKS="" boot b5 - \
   "snap create s5" \
   "raw:snap encrypt --no-recovery --rate 1" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:started" "wait:msh:" \
-  "cat /sys/fs/milkfs/info" "cp --reflink /Volumes/Milk/docs/r5.bin /Volumes/Milk/docs/copy.bin" \
+  "cat /sys/fs/milkfs/info" "files copy --reflink /Volumes/Milk/docs/r5.bin /Volumes/Milk/docs/copy.bin" \
   "snap rollback s5" \
   "raw:snap encrypt --no-recovery" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:msh:" \
   "echo made while encrypting: $CANARY-6 > /Volumes/Milk/docs/during.txt" \
@@ -191,7 +191,7 @@ IMG="$PL" EXTRA_DISKS="" boot b5 - \
 L="$(tr -d '\r' < "$T/b5.log")"
 echo "$L" | grep -q "^encryption:  converting$" && echo "$L" | grep -Eq "^conversion:  encrypt [0-9]+% \([0-9]+/[0-9]+ blocks\), " \
   && ok "info while encrypting: converting, with progress ($(echo "$L" | sed -n 's/^conversion:  //p' | head -1))" || bad "info while converting"
-echo "$L" | grep -aq "cp: .*being converted\|cp: .*EBUSY\|cp: .*busy" && ok "a reflink copy is refused while converting" || bad "reflink during conversion: $(echo "$L" | grep -a '^cp:' | head -1)"
+echo "$L" | grep -aq "files: can't reflink .*busy\|files: .*EBUSY" && ok "a reflink copy is refused while converting" || bad "reflink during conversion: $(echo "$L" | grep -a '^files:' | head -1)"
 echo "$L" | grep -aq "snap: rollback s5: the volume is being converted" && ok "rollback is refused while converting" || bad "rollback during conversion"
 echo "$L" | grep -aq "snap: encrypt: it is being converted already (EBUSY" && ok "a second encrypt is refused (EBUSY)" || bad "second encrypt: $(echo "$L" | grep -a 'snap: encrypt' | tail -1)"
 echo "$L" | grep -aq "milkfs: vda (Milk) at /Volumes/Milk: encrypted in place, done\|milkfs: encryption done" && ok "it finished (in the background, the volume in use)" || bad "didn't finish: $(echo "$L" | grep -a 'convert\|in place' | tail -2)"

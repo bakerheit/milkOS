@@ -12,6 +12,9 @@ bench = false
 [dependencies]
 # Shared crypto primitives (also used by userland through rt): <repo>/crypto.
 milkcrypto = { path = "../crypto" }
+# The rules behind files and the Trash, shared with user space (pure, host-tested):
+# <repo>/user/filekit.
+filekit = { path = "../user/filekit" }
 
 [features]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.

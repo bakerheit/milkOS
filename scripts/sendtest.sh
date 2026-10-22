@@ -89,11 +89,11 @@ if [ "${MILK_ENCRYPT:-0}" = 1 ]; then
 fi
 DISKS="$SRC $BK"
 boot b1 "$T/boot1.log" \
-  "cp --reflink $D/big.bin $D/big-copy.bin" \
+  "files copy --reflink $D/big.bin $D/big-copy.bin" \
   "echo hello > $D/small.txt" \
-  "mkdir $D/sub" "echo nested > $D/sub/n.txt" "ln -s small.txt $D/link" \
+  "files create $D/sub/" "echo nested > $D/sub/n.txt" "files link small.txt $D/link" \
   "snap create s1" \
-  "echo more >> $D/small.txt" "rm $D/sub/n.txt" "mv $D/big-copy.bin $D/sub/moved.bin" \
+  "echo more >> $D/small.txt" "files delete --now $D/sub/n.txt" "files move $D/big-copy.bin $D/sub/moved.bin" \
   "echo appended >> $D/big.bin" "echo brand new > $D/new.txt" "echo rewritten > $D/link-target.txt" \
   "snap create s2" \
   "snap send s1 -o $S/s1.stream$SPF" \
@@ -104,7 +104,7 @@ boot b1 "$T/boot1.log" \
   "snap receive $S/s1.stream --to /Volumes/Backup$SPF" \
   "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "snap receive $S/s2.stream --to /Volumes/Backup$SPF" \
-  "ls /Volumes/Backup/data /Volumes/Backup/.snapshots" \
+  "files list /Volumes/Backup/data /Volumes/Backup/.snapshots" \
   "echo now > /sys/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/boot1.log")"
 echo "$L" | grep -a "^snap: sent\|^snap: received\|^snap: receive" | sed 's/^/    /'
@@ -175,7 +175,7 @@ boot b2 "$T/boot2.log" \
   "snap receive $S/bad.stream --to /Volumes/Fresh$SPF" \
   "snap receive $S/short.stream --to /Volumes/Fresh$SPF" \
   "snap receive $S/s1-sealed.stream --to /Volumes/Fresh --passphrase-file $S/wrong" \
-  "ls /Volumes/Fresh"
+  "files list /Volumes/Fresh"
 L="$(tr -d '\r' < "$T/boot2.log")"
 echo "$L" | grep -a "^snap: receive" | sed 's/^/    /'
 echo "$L" | grep -aq "receive.*base snapshot isn't on the target" && ok "kernel refuses an incremental whose base is missing" || bad "kernel: missing base"

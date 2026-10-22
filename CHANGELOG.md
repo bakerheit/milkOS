@@ -11,6 +11,16 @@
   About, licences in `/System/Fonts`.
 
 **Files**
+- `files`, one command for files and folders: `create` (a trailing slash makes a folder),
+  `copy`, `move` (across disks too), `rename`, `delete`, `info`, `list`, `link`, `help`, with
+  errors in plain English. It replaces `ls`, `cp`, `mv`, `rm`, `mkdir`, `touch` and `ln`,
+  which are gone. A slash at the end of a path means a folder: on a file it is an error.
+- A real Trash: `files delete` moves things to `~/.Trash` (or a disk's own `.Trash`),
+  `files delete --now` skips it, `trash list`, `trash restore`, `trash empty`. The `trashd`
+  service deletes things for good after 30 days, or what Settings > Trash says (or never).
+  Files deletes to it too and shows it in its sidebar (Restore, Empty Trash); the dock has a
+  Trash at its right end, empty or full.
+- `renameat2` takes `RENAME_NOREPLACE`.
 - Plain-English folders instead of `/bin`, `/etc`, `/home` and `/srv`: `/Apps` (apps you
   open, built-in and installed, one folder each), `/Commands` (what you type in Terminal;
   `PATH=/Commands`), `/Users/<name>` (homes, root's too), `~/Sites` (the web server's pages),

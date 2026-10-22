@@ -57,7 +57,7 @@ q move 398 92 click sleep 1 screendump "$T/cal-month2.png"
 differ "$T/cal-month.png" "$T/cal-week.png" && differ "$T/cal-week.png" "$T/cal-day.png" && differ "$T/cal-day.png" "$T/cal-year.png" && ok "Day, Week, Month and Year each draw something different" || bad "the view buttons changed nothing"
 # A new event through the window: the New event button, a title, Return.
 q move 152 662 click sleep 1 type 'From the window' sleep 0.3 screendump "$T/cal-sheet.png" key ret sleep 1.5
-ser "send:cal list 2" "wait:$P" "send:ls -l /Users/milk/Library/Calendar" "wait:$P" "send:cat /dev/wm" "wait:$P"
+ser "send:cal list 2" "wait:$P" "send:files list -l /Users/milk/Library/Calendar" "wait:$P" "send:cat /dev/wm" "wait:$P"
 out "cal list 2" | grep -q "Seeded event" && ok "the seeded event is in the calendar file" || bad "seeded event missing"
 out "cal list 2" | grep -q "From the window" && ok "an event made in the window reached the file" || bad "the window's event did not reach the file: $(out "cal list 2")"
 out "cat /dev/wm" | grep -q "Calendar" && ok "the Calendar window is on the desktop" || bad "no Calendar window in /dev/wm"

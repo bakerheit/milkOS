@@ -49,7 +49,7 @@ boot() { # name commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 boot b1 \
-  "snap create s1" "rm /Volumes/Milk/docs/old.bin" "echo now > /sys/fs/milkfs/sync" \
+  "snap create s1" "files delete --now /Volumes/Milk/docs/old.bin" "echo now > /sys/fs/milkfs/sync" \
   "snap scrub rate=0" "snap scrub" \
   "snap scrub rate=8" "snap scrub" \
   "fsstress /Volumes/Milk/st 4 10" \

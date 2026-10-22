@@ -1,0 +1,9 @@
+# Empties the Trash on its own: anything in a Trash longer than its owner's Settings > Trash
+# says (30 days unless changed; "never" keeps everything) is deleted for good, at boot and
+# then about once a day. Each person's Trash is done as them (trashd becomes its owner).
+description = Trash: deletes old things for good
+exec = /System/Services/trashd -q
+user = root
+restart = on-failure
+# Homes and disks only, read the accounts; no network, sound, clipboard or windows.
+sandbox = fs=/Users:rw fs=/Volumes:rw fs=/System/Settings:r net=none audio=0 clipboard=0 windows=0

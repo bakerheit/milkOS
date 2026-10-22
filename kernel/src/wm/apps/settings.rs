@@ -1,5 +1,6 @@
 //! Settings: Appearance (Whole milk / Chocolate milk, the UI font), Wallpaper, Display (brightness), Dock
-//! (icon size), Time Machine (milkfs automatic snapshots, via /sys/fs/milkfs/auto) and About.
+//! (icon size), Time Machine (milkfs automatic snapshots, via /sys/fs/milkfs/auto), Trash (how
+//! long deleted things wait before trashd deletes them for good) and About.
 //! Changes go to the desktop as `Request::Prefs` (applied at once, saved to
 //! ~/.config/milk/settings); Time Machine settings live on the milkfs volume itself.
 
@@ -16,23 +17,28 @@ use super::super::button::{self, Kind as BKind, State};
 use super::super::paint::{self, Painter, hit};
 use super::super::prefs::{self, Prefs};
 use super::super::theme::*;
+use super::super::trash;
 use super::super::wallpaper::{self, Kind};
 use super::super::window::{
     PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
 };
 use super::super::{Request, icons, request};
 use super::fsx;
+use filekit::trash::Keep;
 
-pub const SECTIONS: [&str; 7] = [
+pub const SECTIONS: [&str; 8] = [
     "Appearance",
     "Wallpaper",
     "Display & Lock",
     "Dock",
     "Sound",
     "Time Machine",
+    "Trash",
     "About",
 ];
 const TM: usize = 5;
+const TRASH: usize = 6;
+const ABOUT: usize = 7;
 
 /// A section someone asked for (Skim's settings results); the Settings window picks it up.
 static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::new(None);
@@ -63,6 +69,10 @@ enum Hit {
     LockAfter(u32),
     LockNow,
     Resolution(i32, i32),
+    /// Settings > Trash: how long things stay, show it, empty it.
+    TrashKeep(Keep),
+    TrashShow,
+    TrashEmpty,
 }
 
 pub struct Settings {
@@ -82,6 +92,9 @@ pub struct Settings {
     tm_count: usize,
     last_sec: u64,
     hover: Option<(i32, i32)>,
+    /// What is in the Trash (items, bytes), and Empty Trash asking "for good?".
+    trash_now: (usize, u64),
+    trash_confirm: bool,
 }
 
 impl Settings {
@@ -99,7 +112,10 @@ impl Settings {
             tm_count: 0,
             last_sec: 0,
             hover: None,
+            trash_now: (0, 0),
+            trash_confirm: false,
         };
+        s.read_trash();
         s.read_tm();
         s
     }
@@ -107,6 +123,99 @@ impl Settings {
     fn send(&mut self, p: Prefs) {
         self.pending = p;
         request(Request::Prefs(p));
+    }
+
+    fn read_trash(&mut self) {
+        let items = trash::items();
+        self.trash_now = (items.len(), items.iter().map(|i| i.size).sum());
+        if items.is_empty() {
+            self.trash_confirm = false;
+        }
+    }
+
+    fn draw_trash(&mut self, p: &mut Painter, x: i32) {
+        Self::heading(
+            p,
+            x,
+            "Trash",
+            "Deleted things wait in the Trash, then they're deleted for good.",
+        );
+        p.text_p(x, 96, "Delete things for good after", ESPRESSO, true);
+        let cur = self.pending.trash;
+        let mut choices: Vec<Keep> = Prefs::TRASH_CHOICES
+            .iter()
+            .map(|&d| Keep::Days(d))
+            .collect();
+        if !choices.contains(&cur) && cur != Keep::Forever {
+            choices.push(cur);
+            choices.sort_by_key(|k| match k {
+                Keep::Days(d) => *d,
+                Keep::Forever => u32::MAX,
+            });
+        }
+        choices.push(Keep::Forever);
+        let mut bx = x;
+        for k in choices {
+            let label = match k {
+                Keep::Forever => String::from("Never"),
+                k => k.label(),
+            };
+            let bw = button::pill_w(&label).max(72);
+            self.button(
+                p,
+                Rect::new(bx, 122, bw, 30),
+                &label,
+                cur == k,
+                Hit::TrashKeep(k),
+            );
+            bx += bw + 8;
+        }
+        let (n, bytes) = self.trash_now;
+        let now = if n == 0 {
+            String::from("The Trash is empty.")
+        } else {
+            format!(
+                "In the Trash now: {n} item{}, {}.",
+                if n == 1 { "" } else { "s" },
+                filekit::words::size(bytes)
+            )
+        };
+        p.text_p(x, 178, &now, COCOA, false);
+        self.button(
+            p,
+            Rect::new(x, 206, 140, 30),
+            "Show the Trash",
+            false,
+            Hit::TrashShow,
+        );
+        let (label, kind) = if self.trash_confirm {
+            (
+                format!("Delete {n} item{} for good", if n == 1 { "" } else { "s" }),
+                BKind::Danger,
+            )
+        } else if n == 0 {
+            (String::from("Empty Trash"), BKind::Disabled)
+        } else {
+            (String::from("Empty Trash"), BKind::Secondary)
+        };
+        let r = Rect::new(x + 152, 206, button::pill_w(&label).max(120), 30);
+        let hov = self.hover.is_some_and(|(hx, hy)| hit(&r, hx, hy));
+        button::paint(p, r, &label, kind, State::hover(hov));
+        self.hits.push((r, Hit::TrashEmpty));
+        p.text_p(
+            x,
+            262,
+            "Checked at startup and then once a day. In Terminal:",
+            COCOA,
+            false,
+        );
+        p.text_p(
+            x,
+            282,
+            "trash list, trash restore NAME, trash empty; files delete --now skips it.",
+            COCOA,
+            false,
+        );
     }
 
     fn read_tm(&mut self) {
@@ -647,6 +756,7 @@ impl WindowContents for Settings {
             3 => self.draw_dock(p, x),
             4 => self.draw_sound(p, x),
             TM => self.draw_tm(p, x),
+            TRASH => self.draw_trash(p, x),
             _ => self.draw_about(p, x),
         }
         if let Some(i) = hover_index(&self.hits, self.hover) {
@@ -664,7 +774,10 @@ impl WindowContents for Settings {
                 | Hit::TestSound
                 | Hit::TmToggle
                 | Hit::TmNow
-                | Hit::TmInterval(_) => {}
+                | Hit::TmInterval(_)
+                | Hit::TrashKeep(_)
+                | Hit::TrashShow
+                | Hit::TrashEmpty => {}
                 _ => paint_hover(p, r, false),
             }
         }
@@ -708,12 +821,42 @@ impl WindowContents for Settings {
             return false;
         };
         let mut pr = self.pending;
+        if h != Hit::TrashEmpty {
+            self.trash_confirm = false;
+        }
         match h {
             Hit::Section(i) => {
                 self.section = i;
                 if i == TM {
                     self.read_tm();
                 }
+                if i == TRASH {
+                    self.read_trash();
+                }
+            }
+            Hit::TrashKeep(k) => {
+                pr.trash = k;
+                self.send(pr);
+            }
+            Hit::TrashShow => {
+                super::files::show_path(super::files::TRASH);
+                request(Request::Open(super::super::window::App::Files));
+            }
+            Hit::TrashEmpty => {
+                if self.trash_confirm {
+                    self.trash_confirm = false;
+                    let (_, bad) = trash::empty();
+                    if bad > 0 {
+                        super::super::notify_as(
+                            "Settings",
+                            "Some things couldn't be deleted",
+                            "They're still in the Trash",
+                        );
+                    }
+                } else if self.trash_now.0 > 0 {
+                    self.trash_confirm = true;
+                }
+                self.read_trash();
             }
             Hit::Theme(dark) => {
                 pr.dark = dark;
@@ -788,14 +931,20 @@ impl WindowContents for Settings {
             if i == TM {
                 self.read_tm();
             }
+            if i == TRASH {
+                self.read_trash();
+            }
             return true;
         }
         // Live sections (Time Machine countdown, About uptime) once a second.
         let s = now / 1_000_000_000;
-        if s != self.last_sec && (self.section == TM || self.section == TM + 1) {
+        if s != self.last_sec && matches!(self.section, TM | TRASH | ABOUT) {
             self.last_sec = s;
             if self.section == TM {
                 self.read_tm();
+            }
+            if self.section == TRASH {
+                self.read_trash();
             }
             return true;
         }

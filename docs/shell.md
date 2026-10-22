@@ -5,11 +5,11 @@
 ## Plain Unix shell
 
 ```sh
-ls -l /Commands | sort -n -k5 | tail -3          # pipelines
+files list -l /Commands | sort -n -k5 | tail -3  # pipelines
 echo hi > /tmp/f; echo there >> /tmp/f      # redirection: > >> < 2> 2>&1
 grep milk /System/Settings/motd && echo found || echo no
 X=1; export Y=2; echo "$X $Y ${X}0 $? $$" ~ # variables, $? $$ ~, '...' "..." quoting
-ls /Commands/u*                                  # globs (* ?) in the last path component
+files list /Commands/u*                          # globs (* ?) in the last path component
 sleep 10 &                                  # background job: jobs, fg %1, wait
 ```
 
@@ -27,17 +27,17 @@ tables, Nushell style:
 ```sh
 ps | where rss > 100 | sort-by name          # filter + sort, shown as an aligned table
 ps | where name == msh | select pid rss
-ls /Commands | where size > 100K | sort-by size -r | first 3
+files list /Commands | where size > 100K | sort-by size -r | first 3
 ps | sort-by cpu -r | first 1 | get name     # -> plain text: one value per line
 ps | where state == R | count
-ls / | to-json
+files list / | to-json
 cat /proc/threads | where PRIO > 1           # plain text with a header row works too
 ps | grep msh                                # a text tool after ps: ps prints text
 ```
 
 ### Rules
 
-1. **Producers** (`ps`, `ls`, `env`) print normal text, unless the environment variable
+1. **Producers** (`ps`, `files list`, `trash list`, `env`, ...) print normal text, unless the environment variable
    `MILK_TABLE=1` is set, then they print a table. They never guess from the fd.
 2. **msh decides**, per pipeline stage, from the command names:
    * a stage whose next stage is a table command gets `MILK_TABLE=1`;
@@ -92,8 +92,10 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 ### Columns of the producers
 
 * `ps`: `pid ppid pgid tid:int, state:str, cpu:int (ms), rss:int (KiB), name:str`
-* `ls`: `name:str, type:str (file dir link char block fifo), size:size, mode:str
-  (rwxr-xr-x), modified:str`
+* `files list`: `name:str, kind:str (file folder link device pipe socket), size:size,
+  mode:str (rwxr-xr-x), owner:str, modified:str`
+* `trash list`: `name:str, from:str (where it was), deleted:str, days_left:int (empty:
+  never), size:size, trash:str (the Trash folder it is in)`
 * `env`: `name:str, value:str`
 * `milk list`: `name:str, version:ver, auto:str (yes/no), description:str`
 * `milk search`: `name:str, version:ver (newest), installed:ver (empty if not), status:str

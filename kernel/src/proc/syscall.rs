@@ -368,12 +368,13 @@ fn dispatch(frame: &mut TrapFrame, nr: u64) -> KResult<usize> {
             Ok(0)
         }
         nr::RENAMEAT2 => {
-            if a[4] != 0 {
-                return Err(EINVAL); // RENAME_NOREPLACE / EXCHANGE: not yet
+            // RENAME_NOREPLACE (1) only; RENAME_EXCHANGE / WHITEOUT: not yet.
+            if a[4] & !1 != 0 {
+                return Err(EINVAL);
             }
             let (old, new) = (user_path(a1)?, user_path(a3)?);
             let (ob, nb) = (base(a[0] as i32 as i64)?, base(a[2] as i32 as i64)?);
-            fs::rename_at(ob.as_ref(), &old, nb.as_ref(), &new)?;
+            fs::rename_at_flags(ob.as_ref(), &old, nb.as_ref(), &new, a[4] & 1 != 0)?;
             Ok(0)
         }
         nr::FTRUNCATE => {

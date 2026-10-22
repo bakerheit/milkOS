@@ -96,6 +96,7 @@ impl Desktop {
                 DockAction::App(App::Music) => is_wav(path),
                 DockAction::App(App::Files) | DockAction::App(App::Terminal) => true,
                 DockAction::Pkg(k) => !dir && super::packages::get(k).is_some_and(|p| p.window),
+                DockAction::Trash => true,
                 _ => false,
             };
             let sl = self.dock_layout.slots[i];
@@ -216,6 +217,12 @@ impl Desktop {
                     if let Some(p) = super::packages::get(k) {
                         self.launch_package_with(&p, Some(&path));
                     }
+                }
+                Some(DockAction::Trash) => {
+                    if let Err(m) = super::trash::move_to_trash(&path) {
+                        super::notify_as("Files", "Can't move it to the Trash", &m);
+                    }
+                    self.invalidate(super::shell::PanelKey::Dock);
                 }
                 _ => {}
             },

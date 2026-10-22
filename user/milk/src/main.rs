@@ -95,7 +95,8 @@ fn mkdir_all(path: &str) -> Res<()> {
         cur.push('/');
         cur.push_str(part);
         if sys::stat_path(&cur, true).is_err() {
-            sys::mkdir(&cur, 0o755).map_err(|e| alloc::format!("mkdir {cur}: {e}"))?;
+            sys::mkdir(&cur, 0o755)
+                .map_err(|e| alloc::format!("can't make the folder {cur}: {e}"))?;
         }
     }
     Ok(())
@@ -116,9 +117,9 @@ fn rm_rf(path: &str) -> Res<()> {
                 rm_rf(&alloc::format!("{path}/{name}"))?;
             }
         }
-        sys::rmdir(path).map_err(|e| alloc::format!("rmdir {path}: {e}"))
+        sys::rmdir(path).map_err(|e| alloc::format!("can't delete the folder {path}: {e}"))
     } else {
-        sys::unlink(path).map_err(|e| alloc::format!("rm {path}: {e}"))
+        sys::unlink(path).map_err(|e| alloc::format!("can't delete {path}: {e}"))
     }
 }
 
@@ -706,7 +707,7 @@ fn link(man: &Manifest, quiet: bool) -> Res<()> {
         }
         _ => {}
     }
-    sys::symlink(&target, &bin).map_err(|e| alloc::format!("ln -s {target} {bin}: {e}"))?;
+    sys::symlink(&target, &bin).map_err(|e| alloc::format!("can't link {bin} to {target}: {e}"))?;
     if !quiet {
         println!("milk: {bin} -> {target}");
     }

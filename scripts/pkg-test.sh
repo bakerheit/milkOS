@@ -74,24 +74,24 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:fortune' "$P" \
   'send:milk list' "$P" \
   'send:milk remove fortune' "$P" \
-  'send:ls /Apps/fortune' "$P" \
-  'send:ls /Apps' "$P" \
+  'send:files list /Apps/fortune' "$P" \
+  'send:files list /Apps' "$P" \
   'send:milk remove store' "$P" \
   'send:milk try snake' 'wait:milk: (then|[^\n]*error)' "$P" \
   "send:$CL/Apps/snake/snake --demo 400" 'wait:snake: demo over' "$P" \
   'send:milk run-try snake --demo 300' 'wait:(snake: demo over|milk: [^\n]*(error|not|denied))' "$P" \
-  'send:ls /Apps/snake' "$P" \
-  'send:ls /Commands/snake' "$P" \
-  "send:ls $CL/Apps" "$P" \
+  'send:files list /Apps/snake' "$P" \
+  'send:files list /Commands/snake' "$P" \
+  "send:files list $CL/Apps" "$P" \
   'send:cat /sys/fs/milkfs/clones' "$P" \
   'send:milk discard snake' 'wait:discarded' "$P" \
   'send:cat /sys/fs/milkfs/clones' "$P" \
-  'send:ls /Volumes' "$P" \
+  'send:files list /Volumes' "$P" \
   'send:milk try moo2048' 'wait:milk: (then|[^\n]*error)' "$P" \
   'send:milk run-try moo2048 --selftest' 'wait:(moo2048: selftest|milk: )' "$P" \
-  "send:ls /Volumes/Milk-try-moo2048/tmp" "$P" \
+  "send:files list /Volumes/Milk-try-moo2048/tmp" "$P" \
   'send:milk keep moo2048' 'wait:milk: (kept|[^\n]*error)' "$P" \
-  'send:ls /Volumes/Milk/tmp' "$P" \
+  'send:files list /Volumes/Milk/tmp' "$P" \
   'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:milk list' "$P" \
   'send:milk selftest' 'wait:milk: selftest' "$P" \
@@ -185,19 +185,19 @@ check "install linked /Commands/fortune" "/Commands/fortune -> /Apps/fortune/for
 check "fortune runs (quote 1)" "There is no use crying over spilt milk"
 check "fortune runs (random)" "-- milkOS fortune \(12 quotes\)"
 check "remove" "milk: removed fortune 1.0.0"
-check "removed from /Apps" "ls: /Apps/fortune: "
-check "built-in apps are in /Apps" "(^| )store( |$)"
+check "removed from /Apps" "files: /Apps/fortune doesn't exist"
+check "built-in apps are in /Apps" "(^| )store/( |$)"
 check "milk leaves built-in apps alone" "milk: store is a built-in app, not a package"
 check "try: installed into the clone only" "snake 1.0.0 is installed in clone try-snake only"
 check "snake runs from the clone" "snake: demo over after [0-9]+ ticks, length [0-9]+"
-check "live /Commands has no snake while trying" "ls: /Commands/snake: "
-check "live /Apps has no snake while trying" "ls: /Apps/snake: "
-check "the clone has snake" "(^| )snake( |$)"
+check "live /Commands has no snake while trying" "files: /Commands/snake doesn't exist"
+check "live /Apps has no snake while trying" "files: /Apps/snake doesn't exist"
+check "the clone has snake" "(^| )snake/( |$)"
 check "clone listed while trying" "^try-snake of=milk-try-snake at=/Volumes/Milk-try-snake"
 [ "$(grep -c "snake: demo over after" "$S")" -ge 2 ] || fail "run-try snake did not run"
 echo "  ok  run-try snake: runs with its clone as / (chroot), sandboxed"
-check "run-try made a scratch dir in the clone" "^run-moo2048$"
-check "keep dropped the run-try scratch dir" "ls: /Volumes/Milk/tmp: "
+check "run-try made a scratch dir in the clone" "^run-moo2048/$"
+check "keep dropped the run-try scratch dir" "files: /Volumes/Milk/tmp doesn't exist"
 check "audit: run-try (chroot + sandbox)" "user.pkg.run_try +name=snake version=1.0.0 clone=try-snake root=/Volumes/Milk-try-snake exec=/Apps/snake/snake sandbox=fs=/Apps:r,fs=/Volumes/Milk-try-snake/Apps:r,fs=/tmp/run-snake:rw"
 check "audit: run-try entered the sandbox" "sandbox.enter .*net=local"
 check "discard" "milk: discarded clone try-snake"

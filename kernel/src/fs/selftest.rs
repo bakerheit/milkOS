@@ -3307,7 +3307,7 @@ pub fn run() {
     ] {
         show(p);
     }
-    kprintln!("$ ls /sys/devices/platform");
+    kprintln!("$ files list /sys/devices/platform");
     let names: Vec<String> = ops::readdir("/sys/devices/platform")
         .unwrap_or_default()
         .into_iter()

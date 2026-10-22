@@ -47,7 +47,7 @@ Constants and the two boot jobs below are in `fs/layout.rs`.
   Sites          the built-in web server's pages (httpd serves ~/Sites on :80)
 /Volumes         disks, USB sticks, the Mac's shared folder
 /System          the OS's own files
-  Services       background helpers: milkd, alarmd, httpd, rngd, soundd
+  Services       background helpers: milkd, alarmd, httpd, rngd, soundd, trashd
   Startup        init, the first program (PID 1)
   Settings       system settings: passwd, group, shadow, hostname, motd, milk/...
   Fonts          font licences
@@ -102,6 +102,97 @@ index (a cache with the old paths; it is rebuilt). It logs `layout: moved ...` a
 Files' Time Machine view and Versions look for `home/milk` there too. A clone made before
 the move gets moved the boot after it is kept (promoted).
 
+## Files and the Trash
+
+One command for files and folders, `files` (`user/filetools`; it replaced `ls`, `cp`, `mv`,
+`rm`, `mkdir`, `touch` and `ln`, which are gone), and a real Trash shared by `files`, the
+`trash` command, the `trashd` service, Files and the dock. The rules live in `user/filekit`
+(pure, host-tested with `scripts/filekit-test.sh`); the kernel's Files app uses the same
+crate (`kernel/src/wm/trash.rs`).
+
+```text
+files create notes.txt        an empty file (an existing file just gets its time set to now)
+files create projects/a/      a folder: the trailing slash decides; parents too (mkdir -p)
+files copy SRC... DST         folders with everything in them; --reflink[=auto] shares blocks
+files move SRC... DST         rename or move, folders too; across disks: copy, then delete
+files rename OLD NEW          in place; NEW is a name, not a path
+files delete PATH...          to the Trash
+files delete --now PATH...    for good
+files info PATH...            kind, size (or items), where, which disk, dates, owner, permissions
+files list [-l] [-a] [PATH]   folders first, "name/" for folders; --long, --all (dot files)
+files link TARGET NAME        a symbolic link
+trash [list]                  name, where it was, when deleted, days left
+trash restore NAME|PATH...    back where it was; refused if something is there now
+trash empty [--yes]           for good (asks first)
+```
+
+* **The trailing slash.** On `create` it decides file or folder. Everywhere else what is on
+  disk decides, and a slash only says "a folder": `files delete projects` and
+  `files delete projects/` both delete the folder, `files delete notes.txt/` on a file is an
+  error ("notes.txt is a file, not a folder"), never a guess. A slash on a link to a folder
+  means the folder for `list` and `info`, and is an error for the commands that change things.
+* **Destinations.** When DST is a folder, `copy` and `move` put SRC inside it; a slash on DST
+  means it must be a folder that is there. Nothing is overwritten unless `--replace` (a file
+  over a file only). `move` renames with `RENAME_NOREPLACE`; on `EXDEV` it copies, and deletes
+  the original only once the copy is whole (a failed copy is removed again).
+* **Errors** are sentences: "notes.txt doesn't exist", "projects is a folder, not a file",
+  "backup/notes.txt already exists (add --replace to overwrite it)" (`filekit::words`).
+* **Tables.** `files list` and `trash list` give msh a table when it asks (docs/shell.md).
+
+**Where things go.** `files delete` (and Files, and a drop on the dock's Trash) renames the
+item into a Trash on its own disk, never copying it:
+
+| the item is on | its Trash |
+|---|---|
+| the same file system as your home (`/Users/milk` is on the Milk disk) | `~/.Trash` (0700, yours) |
+| another milkfs (or tmpfs) disk mounted at `/Volumes/<disk>` | `/Volumes/<disk>/.Trash` (1777, sticky; each item's record says whose it is) |
+| a FAT disk, the Mac's shared folder, the RAM root (`/tmp`), `/proc`... | none: `files delete` says so and offers `files delete --now` |
+| a read-only disk (a snapshot, the Mac folder without `MILK_SHARE_RW`) | none: it can't be deleted at all |
+
+**Layout and records.** Items sit in the Trash folder under their own name; a second
+`notes.txt` becomes `notes 2.txt` (`filekit::trash::free_name`), so nothing in the Trash is
+ever overwritten. Each item has a small text file in `.trashinfo/` with the same name:
+
+```text
+# milkOS Trash: where this item came from (trash restore puts it back)
+path = /Users/milk/Documents/notes.txt
+deleted = 1792537265
+uid = 501
+```
+
+The record is written first, create-exclusive (`O_EXCL`: two deletes never pick one name),
+then the item is renamed in with `RENAME_NOREPLACE`; restoring renames it back (refusing if
+something is at the old path now, making missing parent folders) and then removes the record.
+So a crash leaves at worst a record with no item (ignored; `trashd` removes it after an hour)
+or an item with no record (listed as from "(unknown)", aged by its change time, which a
+rename sets). Everything is renames and small files on the same disk, so it survives reboots
+like any other file. Root deleting into someone's home Trash keeps the Trash and the records
+theirs (chown to the home's owner). Deleting something that is already in a Trash deletes it
+for good.
+
+**How long things stay.** `trash = 30` (days, 1..3650) or `trash = never` in
+`~/.config/milk/settings`, the desktop settings file; Settings > Trash sets it (1, 7, 30 or
+90 days, or Never; another number typed into the file shows as its own choice). The default
+is 30. **`trashd`** (`/System/Services/trashd`, a milkd service,
+`/System/Settings/milk/services/trashd.service`) goes through every Trash at boot and then
+about once a day: each home's (`/Users/*/.Trash`, with that home's setting) and each disk's
+(each person's items with their own setting), deleting for good what has been there longer.
+It runs as root but does each Trash in a child that has become that Trash's owner, so it
+never deletes with more rights than they have (links are removed, never followed). It logs
+what it deleted to the journal (`log -u trashd`). `trashd --once [--later DAYS]` does one
+pass now, pretending it is DAYS later (for tests).
+
+**Desktop.** Files: Cmd+Backspace, Delete, or Move to Trash in the right-click menu; the
+sidebar's Trash lists what is there (where from, when, days left) with Restore for the
+selected item, Restore / Delete for Good on right-click, and Empty Trash (a second click on
+"Delete N items for good" confirms). The dock's last tile is the Trash, empty or full (it
+looks once a second); clicking it opens the Trash in Files, dropping a file on it deletes the
+file to the Trash.
+
+**Tests:** `scripts/filekit-test.sh` (the rules, on the Mac) and `scripts/files-test.sh` (both
+commands end to end in qemu, including a disk's own Trash, the FAT refusal and `trashd`
+deleting at boot).
+
 ## Kernel API (for the syscall layer)
 
 All in `crate::fs`. `Result<T> = core::result::Result<T, Errno>`. A syscall returns
@@ -147,6 +238,7 @@ pub fn unlink(path: &str) -> Result<()>;                          // + unlink_at
 pub fn rmdir(path: &str) -> Result<()>;                           // + rmdir_at (AT_REMOVEDIR)
 pub fn rename(old: &str, new: &str) -> Result<()>;
 pub fn rename_at(ob: Option<&InodeRef>, old: &str, nb: Option<&InodeRef>, new: &str) -> Result<()>;
+pub fn rename_noreplace(old: &str, new: &str) -> Result<()>;      // EEXIST instead of replacing
 pub fn symlink(target: &str, linkpath: &str) -> Result<()>;      // + symlink_at(target, base, linkpath)
 pub fn readlink(path: &str) -> Result<String>;                    // + readlink_at
 pub fn link(old: &str, new: &str) -> Result<()>;                  // + link_at(.., follow)
@@ -248,6 +340,8 @@ ENAMETOOLONG 36, ENOSYS 38, ENOTEMPTY 39, ELOOP 40, EOPNOTSUPP 95.
   or renamed (`EBUSY`); renames and links across file systems give `EXDEV`.
 - POSIX rename rules: replaces a file or an *empty* directory, `EINVAL` for moving a
   directory into its own subtree, no-op when both names are the same inode.
+  `renameat2(..., RENAME_NOREPLACE)` (`fs::rename_noreplace`) gives `EEXIST` instead of
+  replacing (what `files move` and the Trash use); `RENAME_EXCHANGE` is `EINVAL`.
 - Unlinked files stay readable through open `OpenFile`s; tmpfs frees the pages when the
   last reference goes (checked by the self-test against the PMM free count).
 - tmpfs: data lives in whole PMM frames (page-aligned: `mmap` can map them directly later),
@@ -974,7 +1068,7 @@ the crash workload; after a repair the kernel's crash-check verifies every file)
 
 ### Reflink copies and dedupe
 
-A file can share data blocks with another (copy-on-write): `cp --reflink SRC DST` (or
+A file can share data blocks with another (copy-on-write): `files copy --reflink SRC DST` (or
 `--reflink=auto`: copy if sharing isn't possible), the Linux `FICLONE` ioctl
 (`ioctl(dst_fd, 0x40049409, src_fd)`, `rt::sys::ficlone(src, dst)`, kernel
 `fs::ops::ficlone(&src, &dst)` / `fs::milkfs::inode::reflink`), and `dedupe`.
@@ -991,7 +1085,7 @@ A file can share data blocks with another (copy-on-write): `cp --reflink SRC DST
   a snapshot or clone); EISDIR for directories, EINVAL for other non-files or a file onto
   itself; EBADF unless the source is open for reading and the destination for writing.
   Inline files (up to 1 KiB) are simply copied. The destination's times are updated.
-- 2 MB with `cp --reflink`: a handful of metadata blocks instead of 489 data blocks
+- 2 MB with `files copy --reflink`: a handful of metadata blocks instead of 489 data blocks
   (`scripts/reflinktest.sh`).
 
 **dedupe** (`dedupe [-n] DIR`, `/sys/fs/milkfs/dedupe` (`DIR` or `DIR dry`),
@@ -1172,7 +1266,7 @@ its cursor; there is nothing to press. **While converting**: reads and writes wo
 snapshots can be taken and deleted, `send` works (from an encrypted-or-converting volume
 the stream is encrypted by default), Time Machine keeps going. Refused with EBUSY (they
 could add a reference to an old-form block, or would race with it): reflink copies
-(`cp --reflink`, FICLONE), `dedupe`, `rollback`, `clone`, `promote`, `receive`, `lock`,
+(`files copy --reflink`, FICLONE), `dedupe`, `rollback`, `clone`, `promote`, `receive`, `lock`,
 `passwd`, `scrub` (and a scrub running refuses the start), a second `encrypt`/`decrypt`.
 
 `info` while converting:
@@ -1517,7 +1611,7 @@ sample of them and the authorisation hook (`milkfs_control_errors`).
   actually reachable (24/24 rounds exact).
 - `scripts/mounttime.sh [N]`: mount time with N files, with and without a space map.
 - `scripts/treetest.sh [N]`: B+tree shape after creating and deleting N files.
-- `scripts/reflinktest.sh`: `cp --reflink`, `--reflink=auto` / refusal on tmpfs, writing a
+- `scripts/reflinktest.sh`: `files copy --reflink`, `--reflink=auto` / refusal on tmpfs, writing a
   copy, `dedupe -n` / `dedupe` from the shell; byte-exact and clean on the Mac.
 - `scripts/stressloop.sh [BOOTS]`: parallel stress (see SMP).
 - Self-test, space map (own RAM disk, `State` re-opens as reboots): a fresh volume scans;
@@ -1642,7 +1736,7 @@ Old tree nodes go to the dead list / free list as above.
   dead list) of the System volume and installs into the clone. The app runs with the clone
   as its root. "Keep" makes the clone the System volume (pointer swap at the next commit);
   "Discard" deletes the clone and frees what only it used.
-- Cheap copies: `cp --reflink` shares extents instead of copying (done: see Reflink copies).
+- Cheap copies: `files copy --reflink` shares extents instead of copying (done: see Reflink copies).
 
 ### How it plugs into this VFS
 

@@ -1,6 +1,6 @@
 //! `/proc/net/{dev,arp,route,tcp,udp,snmp}` and the IPv6 ones (`tcp6`, `udp6`, `if_inet6`,
 //! `snmp6`, `ndisc`) in the Linux formats (close enough for
-//! `cat`, `netstat`-style parsers and humans). Each writer takes any `fmt::Write`, so the
+//! `text show`, `netstat`-style parsers and humans). Each writer takes any `fmt::Write`, so the
 //! HTTP demo can serve the same text from a fixed buffer.
 
 use alloc::string::String;

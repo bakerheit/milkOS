@@ -65,7 +65,7 @@ QPID=$!
 P='wait:msh:[^\n]*\$ '
 CL=/Volumes/Milk-try-snake
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  "$P" "send:echo http://10.0.2.2:$PORT/ > /System/Settings/milk/repos" "$P" \
+  "$P" "send:print http://10.0.2.2:$PORT/ > /System/Settings/milk/repos" "$P" \
   'send:apps update' 'wait:index updated' "$P" \
   'send:apps repos' "$P" \
   'send:apps search' "$P" \
@@ -84,9 +84,9 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:files list /Apps/snake' "$P" \
   'send:files list /Commands/snake' "$P" \
   "send:files list $CL/Apps" "$P" \
-  'send:cat /System/Kernel/fs/milkfs/clones' "$P" \
+  'send:text show /System/Kernel/fs/milkfs/clones' "$P" \
   'send:apps discard snake' 'wait:discarded' "$P" \
-  'send:cat /System/Kernel/fs/milkfs/clones' "$P" \
+  'send:text show /System/Kernel/fs/milkfs/clones' "$P" \
   'send:files list /Volumes' "$P" \
   'send:apps try moo2048' 'wait:apps: (then|[^\n]*error)' "$P" \
   'send:apps run moo2048 --selftest' 'wait:(moo2048: selftest|apps: )' "$P" \
@@ -129,7 +129,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:audit --event user.pkg' "$P" \
   'send:audit --event milkfs' "$P" \
   'send:audit verify' "$P" \
-  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
+  'send:print now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 flip() { # flip one byte in the middle of a file (keeps its size)
@@ -172,7 +172,7 @@ S="$WORK/session.txt"
 # From the first command on. Asynchronous kernel lines (timemachine's boot snapshot, the
 # audit log re-attaching after a promote) can land inside a command's echo:
 # console_clean.py puts them back on their own lines first.
-python3 -I scripts/console_clean.py "$LOG" | sed -n '/echo http:\/\/10.0.2.2:/,$p' >"$S"
+python3 -I scripts/console_clean.py "$LOG" | sed -n '/print http:\/\/10.0.2.2:/,$p' >"$S"
 echo "---- msh ----"
 cat "$S"
 echo "---- checks ----"
@@ -294,7 +294,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   "${DISK_ARGS[@]}" -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 2>>"$WORK/qemu.err" &
 QPID=$!
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG2" \
-  "$P" 'send:sleep 1' "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
+  "$P" 'send:pause 1' "$P" 'send:moo2048 --selftest' 'wait:moo2048: selftest' "$P" \
   'send:apps list' "$P" 'send:fortune -n 15' "$P" 'send:audit verify' 'wait:audit.log: [A-Z]+' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive2.log" 2>&1 &
 DPID=$!

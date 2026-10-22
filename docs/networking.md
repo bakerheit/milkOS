@@ -15,7 +15,7 @@ address, see "eth1" below) plus loopback (`lo`).
 | `scripts/run.sh` / `screenshot.sh` | `-netdev user,id=n0,restrict=on` + `virtio-net-device` (`scripts/netdev.sh`). The guest gets 10.0.2.15 by DHCP and can ping 10.0.2.2; slirp lets it reach nothing else (no host, no internet; it also hands out no router/DNS in this mode). |
 | `MILK_HTTP_PORT=8088 scripts/run.sh` | also forwards `127.0.0.1:8088` on the Mac to the guest's port 80: `curl http://127.0.0.1:8088/`. Opt-in so parallel qemus don't fight over the port. |
 | `scripts/net-test.sh` | the full end-to-end test (below). Unrestricted slirp, but every host-side helper binds to 127.0.0.1 and the guest is only told about 10.0.2.2 (= the Mac's loopback). |
-| in msh | `network status`, `network connections [--tcp] [--udp] [--listening]`, `network counters`, `network ping [--count N] [--interval MS] 10.0.2.2`, `network get http://127.0.0.1/`, `network connect HOST PORT` / `network listen PORT`, `cat /proc/net/tcp` (`network help` lists them all). Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
+| in msh | `network status`, `network connections [--tcp] [--udp] [--listening]`, `network counters`, `network ping [--count N] [--interval MS] 10.0.2.2`, `network get http://127.0.0.1/`, `network connect HOST PORT` / `network listen PORT`, `text show /proc/net/tcp` (`network help` lists them all). Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
 
 Network safety rule for tests: only qemu's own gateway/DHCP (10.0.2.2) and servers we start
 on the Mac at 127.0.0.1 (seen from the guest as 10.0.2.2:PORT). No internet hosts, no real

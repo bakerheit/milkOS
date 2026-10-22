@@ -2,10 +2,11 @@
 //!
 //! * `a | b | c`, `> >> < 2> 2>&1`, `&&`, `||`, `;`, `&` (background job)
 //! * `$VAR`, `${VAR}`, `$?`, `$$`, `~`, '...' and "..." quoting, `\` escapes, `*`/`?` globs
-//! * `NAME=value` (shell variable), `export NAME[=value]`, `unset`, `NAME=value cmd`
+//! * `NAME=value` (shell variable), `NAME=value cmd`, and the `variables` built-in: list, get,
+//!   set NAME=value (exported), remove, run NAME=value CMD (it replaced env, export, set, unset)
 //! * Job control: each pipeline runs in its own process group, which gets the terminal
 //!   while it runs, so Ctrl-C kills the job and not the shell. `jobs`, `fg [%N]`, `wait`.
-//! * Built-ins: go where exit export unset set jobs fg wait help source. `go [FOLDER|back]`
+//! * Built-ins: go where exit variables jobs fg wait help source. `go [FOLDER|back]`
 //!   changes folder (no argument: home; `back`: the one before; a folder called back is
 //!   `go ./back`); `where` prints the current folder and takes no arguments (the table
 //!   filter is `filter COL OP V`). There is no `cd` or `pwd`.
@@ -173,11 +174,34 @@ fn read_line(out: &mut Vec<u8>) -> Line {
 }
 
 const BUILTINS: &[&str] = &[
-    "go", "where", "exit", "export", "unset", "set", "jobs", "fg", "wait", "help", "source", ".",
+    "go",
+    "where",
+    "exit",
+    "variables",
+    "jobs",
+    "fg",
+    "wait",
+    "help",
+    "source",
+    ".",
 ];
 
 fn is_builtin(argv: &[String]) -> bool {
     argv.first().is_some_and(|a| BUILTINS.contains(&a.as_str()))
+}
+
+/// `variables run NAME=value... CMD ARGS`, as (assignments, CMD ARGS): it runs like
+/// `NAME=value CMD ARGS` would. None: not that, or not well formed (the built-in says why).
+fn run_form(argv: &[String]) -> Option<textkit::vars::Run> {
+    if argv.len() < 2 || argv[0] != "variables" || argv[1] != "run" {
+        return None;
+    }
+    textkit::vars::split_run(&argv[2..]).ok()
+}
+
+/// Did the stage's own assignments ask for a table (`MILK_TABLE=1`, docs/shell.md)?
+fn wants_table(assigns: &[(String, String)]) -> bool {
+    assigns.iter().any(|(k, v)| k == "MILK_TABLE" && v == "1")
 }
 
 fn is_table(argv: &[String]) -> bool {
@@ -376,13 +400,18 @@ impl Shell {
                 self.last = 0;
                 return None;
             }
-            if is_builtin(&argv) {
+            if is_builtin(&argv) && run_form(&argv).is_none() {
                 let saved = self.apply_redirs(&c.redirs, true);
                 let Some(saved) = saved else {
                     self.last = 1;
                     return None;
                 };
-                let r = self.builtin(&argv);
+                let assigns: Vec<(String, String)> = c
+                    .assigns
+                    .iter()
+                    .map(|(k, v)| (k.clone(), self.expand_one(v)))
+                    .collect();
+                let r = self.builtin(&argv, wants_table(&assigns));
                 self.restore(Some(saved));
                 return r;
             }
@@ -627,14 +656,21 @@ impl Shell {
     fn plan(&self, p: &Pipeline) -> Vec<Stage> {
         let mut stages: Vec<Stage> = p
             .iter()
-            .map(|c| Stage {
-                argv: self.expand_words(&c.words),
-                assigns: c
-                    .assigns
-                    .iter()
-                    .map(|(k, v)| (k.clone(), self.expand_one(v)))
-                    .collect(),
-                redirs: c.redirs.clone(),
+            .map(|c| {
+                let mut st = Stage {
+                    argv: self.expand_words(&c.words),
+                    assigns: c
+                        .assigns
+                        .iter()
+                        .map(|(k, v)| (k.clone(), self.expand_one(v)))
+                        .collect(),
+                    redirs: c.redirs.clone(),
+                };
+                if let Some((assigns, cmd)) = run_form(&st.argv) {
+                    st.assigns.extend(assigns);
+                    st.argv = cmd;
+                }
+                st
             })
             .collect();
         let name = |s: &Stage| s.argv.first().cloned().unwrap_or_default();
@@ -678,7 +714,7 @@ impl Shell {
             return 0;
         }
         if is_builtin(argv) {
-            return match self.builtin(argv) {
+            return match self.builtin(argv, wants_table(assigns)) {
                 Some(c) => c,
                 None => self.last,
             };
@@ -699,7 +735,8 @@ impl Shell {
     }
 
     /// Run a built-in. Some(code) = exit the shell.
-    fn builtin(&mut self, argv: &[String]) -> Option<i32> {
+    /// `table`: msh asked for a table (only `variables list` makes one).
+    fn builtin(&mut self, argv: &[String], table: bool) -> Option<i32> {
         let arg = |i: usize| argv.get(i).map(|s| s.as_str());
         let mut rc = 0;
         match argv[0].as_str() {
@@ -736,32 +773,7 @@ impl Shell {
                 let code = arg(1).and_then(|s| s.parse().ok()).unwrap_or(self.last);
                 return Some(code);
             }
-            "export" => {
-                if argv.len() == 1 {
-                    for (k, v) in self.vars.iter().filter(|(_, v)| v.exported) {
-                        println!("export {k}={}", v.value);
-                    }
-                }
-                for a in &argv[1..] {
-                    match a.split_once('=') {
-                        Some((k, v)) => self.set(k, v, true),
-                        None => {
-                            let v = self.get(a);
-                            self.set(a, &v, true);
-                        }
-                    }
-                }
-            }
-            "unset" => {
-                for a in &argv[1..] {
-                    self.vars.remove(a.as_str());
-                }
-            }
-            "set" => {
-                for (k, v) in &self.vars {
-                    println!("{k}={}", v.value);
-                }
-            }
+            "variables" => rc = self.variables(&argv[1..], table),
             "jobs" => {
                 self.reap_jobs(true);
                 for j in &self.jobs {
@@ -823,6 +835,103 @@ impl Shell {
         self.last = rc;
         None
     }
+
+    /// `variables list | get | set | remove | run | help` (help: textkit::help::VARIABLES).
+    /// `run` with a command never gets here: run_form turns it into `NAME=value CMD`.
+    fn variables(&mut self, args: &[String], table: bool) -> i32 {
+        use textkit::vars;
+        let verb = args.first().map_or("list", |s| s.as_str());
+        let rest = args.get(1..).unwrap_or_default();
+        match verb {
+            "list" if !rest.is_empty() => {
+                eprintln!("variables list takes nothing more (variables get NAME shows one)");
+                2
+            }
+            "list" if table => {
+                use rt::table::{Table, Ty, Val};
+                let mut t =
+                    Table::new(&[("name", Ty::Str), ("value", Ty::Str), ("exported", Ty::Str)]);
+                for (k, v) in &self.vars {
+                    let e = if v.exported { "yes" } else { "no" };
+                    t.push(alloc::vec![Val::str(k), Val::str(&v.value), Val::str(e)]);
+                }
+                let mut out = rt::io::Out::stdout();
+                t.write(&mut out);
+                out.flush();
+                0
+            }
+            "list" => {
+                let mut out = rt::io::Out::stdout();
+                for (k, v) in &self.vars {
+                    out.line(&format!("{k}={}", v.value));
+                }
+                out.flush();
+                0
+            }
+            "get" => match rest {
+                [name] => match self.vars.get(name.as_str()) {
+                    Some(v) => {
+                        println!("{}", v.value);
+                        0
+                    }
+                    None if !vars::valid_name(name) => {
+                        eprintln!("variables get: {}", vars::bad_name(name));
+                        2
+                    }
+                    None => {
+                        eprintln!("variables get: {name} isn't set");
+                        1
+                    }
+                },
+                _ => {
+                    eprintln!("usage: variables get NAME   (variables help lists them all)");
+                    2
+                }
+            },
+            "set" => match vars::parse_set(rest) {
+                Ok(list) => {
+                    for (k, v) in list {
+                        let v = v.unwrap_or_else(|| self.get(&k));
+                        self.set(&k, &v, true);
+                    }
+                    0
+                }
+                Err(m) => {
+                    eprintln!("{m}");
+                    2
+                }
+            },
+            "remove" if rest.is_empty() => {
+                eprintln!("usage: variables remove NAME...   (variables help lists them all)");
+                2
+            }
+            "remove" => {
+                let mut rc = 0;
+                for name in rest {
+                    if self.vars.remove(name.as_str()).is_none() {
+                        eprintln!("variables remove: {name} isn't set");
+                        rc = 1;
+                    }
+                }
+                rc
+            }
+            "run" => {
+                // Well-formed ones were rewritten before they got here.
+                if let Err(m) = vars::split_run(rest) {
+                    eprintln!("{m}");
+                }
+                2
+            }
+            "help" | "--help" | "-h" => {
+                print!("{}", textkit::help::VARIABLES);
+                0
+            }
+            _ => {
+                eprintln!("variables: there's no variables {verb} (variables help lists them)");
+                2
+            }
+        }
+    }
 }
 
 fn status_code(st: i32) -> i32 {
@@ -838,7 +947,10 @@ fn help() {
     println!("  a | b | c        pipeline        a && b, a || b, a; b, a &   lists");
     println!("  > f, >> f, < f, 2> f, 2>&1       redirection");
     println!("  $VAR ${{VAR}} $? $$ ~ * ?        expansion; '...' and \"...\" quote");
-    println!("  NAME=v, export NAME[=v], unset NAME, set     variables");
+    println!(
+        "  NAME=v           a variable for this shell; variables set NAME=v: programs get it too"
+    );
+    println!("  variables        list, get NAME, remove NAME, run NAME=v CMD   (variables help)");
     println!("  go FOLDER        change folder: go Documents, go .., go /Apps");
     println!(
         "  go, go back      go home; back to the last folder (a folder named back: go ./back)"
@@ -846,20 +958,19 @@ fn help() {
     println!("  where            print the folder you're in");
     println!("  exit [N], jobs, fg [%N], wait, source FILE, help");
     println!("  Ctrl-C stops the running job; Ctrl-D at an empty prompt leaves.");
-    println!("programs (/Commands): files trash cat echo wc head tail grep sort uniq ps kill");
-    println!("  sleep env uptime free uname true false clear   (files help: files and folders)");
+    println!("programs (/Commands): files trash text print pause ps kill");
+    println!("  uptime free uname true false clear   (files help: files and folders)");
+    println!("  (text help: show, first, last, find, sort, unique and count lines)");
     println!("  network disks apps search   (network help, disks help, ...: what each one does)");
     println!("  test tools, not on PATH: /System/Developer (hello fault utest ...)");
     println!("structured pipes (docs/shell.md): filter COL OP V, sort-by COL [-r], select COL..,");
     println!(
-        "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list, env"
+        "  first N, last N, get COL, count, table, to-json; producers: ps, files list, trash list,"
     );
-    println!(
-        "  also network status/connections, disks list/snapshots, apps list/search, search WORDS"
-    );
-    println!(
-        "try: ps | grep msh,  files list -l /Commands | sort -n -k5 | tail -3,  cat /System/Settings/motd | wc -l"
-    );
+    println!("  variables list, text count, network status/connections, disks list/snapshots,");
+    println!("  apps list/search, search WORDS");
+    println!("try: ps | text find msh,  text show /System/Settings/motd | text count --lines");
+    println!("     files list -l /Commands | text sort --numbers --field 5 | text last 3");
     println!(
         "     ps | filter rss > 100 | sort-by name,  files list /Commands | sort-by size -r | first 3"
     );

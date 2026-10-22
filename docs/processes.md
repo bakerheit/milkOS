@@ -311,7 +311,7 @@ proc::spawn_on("/Commands/msh", argv, envp, "/dev/tty1", cwd)   // a process on 
   1 s timeout that runs `uart::poll` as a fallback: it rescues bytes if an RX interrupt
   was ever lost and logs "recovered by poll" once), so ^C works while nobody reads.
   `uart::read_byte` belongs to it. Regression test: `scripts/serial-soak.sh [boots]
-  [commands]` types `echo tickK` once a second over serial; every tick must come back
+  [commands]` types `print tickK` once a second over serial; every tick must come back
   and the fallback must never fire.
 * Not yet: sessions / controlling-tty rules (any process may TIOCSPGRP), SIGTTIN/SIGTTOU,
   job stop/continue.
@@ -528,8 +528,10 @@ for a new crate) + one line in `initramfs.list`.
 * `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).
-* `coreutils`: cat echo wc head tail grep sort uniq ps kill sleep env uptime free uname
-  true false clear, one program each.
+* `coreutils`: ps kill uptime free uname true false clear, one program each.
+* `texttools`: `text` (show, first, last, find, sort, unique, count: it replaced cat, head,
+  tail, grep, sort, uniq and wc), `print` (echo) and `pause` (sleep); the rules are in
+  `textkit` (docs/shell.md, "Text, print, pause and variables").
 * `filetools`: `files` (create, copy, move, rename, delete, info, list, link: it replaced ls,
   cp, mv, rm, mkdir, touch and ln), `trash` and the `trashd` service (docs/filesystem.md,
   "Files and the Trash"); the rules are in `filekit`, which the kernel's Files app shares.

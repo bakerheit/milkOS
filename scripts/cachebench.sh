@@ -30,17 +30,17 @@ B=/System/Kernel/fs/pagecache
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files copy /Volumes/Mac/$SUB/big.bin /Users/milk/big.bin" "wait:$P" \
   "send:files copy /Volumes/Mac/$SUB/big.bin /Volumes/MILKFAT/big.bin" "wait:$P" \
-  "send:echo 0 > $B/enabled" "wait:$P" \
-  "send:echo /Users/milk/big.bin > $B/bench" "wait:$P" \
-  "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
-  "send:echo 1 > $B/enabled" "wait:$P" \
-  "send:echo /Users/milk/big.bin > $B/bench" "wait:$P" \
-  "send:echo /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
-  "send:cat $B/stats" "wait:$P" \
-  "send:echo /Users/milk/b1 300 1000 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
-  "send:echo /Users/milk/b2 100 20000 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
-  "send:echo /Users/milk/b3 4 1048576 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
-  "send:echo CACHEBENCH""-DONE" "wait:CACHEBENCH-DONE" "done:$T/done" &
+  "send:print 0 > $B/enabled" "wait:$P" \
+  "send:print /Users/milk/big.bin > $B/bench" "wait:$P" \
+  "send:print /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
+  "send:print 1 > $B/enabled" "wait:$P" \
+  "send:print /Users/milk/big.bin > $B/bench" "wait:$P" \
+  "send:print /Volumes/MILKFAT/big.bin > $B/bench" "wait:$P" \
+  "send:text show $B/stats" "wait:$P" \
+  "send:print /Users/milk/b1 300 1000 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
+  "send:print /Users/milk/b2 100 20000 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
+  "send:print /Users/milk/b3 4 1048576 > /System/Kernel/fs/milkfs/bench" "wait:$P" \
+  "send:print CACHEBENCH""-DONE" "wait:CACHEBENCH-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
 kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true

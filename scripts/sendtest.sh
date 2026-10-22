@@ -57,7 +57,7 @@ boot() { # name log commands...
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
-  python3 scripts/serial_drive.py "$SOCK" "$log" "${args[@]}" "send:echo SEND""-DONE" "wait:SEND-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$log" "${args[@]}" "send:print SEND""-DONE" "wait:SEND-DONE" "done:$T/$name.done" &
   local DPID=$!
   if [ -n "${KILL_ON:-}" ]; then
     # Kill qemu KILL_AFTER seconds after the command matching KILL_ON was typed.
@@ -90,11 +90,11 @@ fi
 DISKS="$SRC $BK"
 boot b1 "$T/boot1.log" \
   "files copy --reflink $D/big.bin $D/big-copy.bin" \
-  "echo hello > $D/small.txt" \
-  "files create $D/sub/" "echo nested > $D/sub/n.txt" "files link small.txt $D/link" \
+  "print hello > $D/small.txt" \
+  "files create $D/sub/" "print nested > $D/sub/n.txt" "files link small.txt $D/link" \
   "disks snapshot s1" \
-  "echo more >> $D/small.txt" "files delete --now $D/sub/n.txt" "files move $D/big-copy.bin $D/sub/moved.bin" \
-  "echo appended >> $D/big.bin" "echo brand new > $D/new.txt" "echo rewritten > $D/link-target.txt" \
+  "print more >> $D/small.txt" "files delete --now $D/sub/n.txt" "files move $D/big-copy.bin $D/sub/moved.bin" \
+  "print appended >> $D/big.bin" "print brand new > $D/new.txt" "print rewritten > $D/link-target.txt" \
   "disks snapshot s2" \
   "disks send s1 -o $S/s1.stream$SPF" \
   "disks send s2 --from s1 -o $S/s2.stream$SPF" \
@@ -105,7 +105,7 @@ boot b1 "$T/boot1.log" \
   "disks receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "disks receive $S/s2.stream --to /Volumes/Backup$SPF" \
   "files list /Volumes/Backup/data /Volumes/Backup/.snapshots" \
-  "echo now > /System/Kernel/fs/milkfs/sync"
+  "print now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/boot1.log")"
 echo "$L" | grep -a "^disks: sent\|^disks: received\|^disks receive" | sed 's/^/    /'
 [ "$(echo "$L" | grep -ac '^disks: received')" = 2 ] && ok "kernel: received s1 (full) and s2 (incremental) on /Volumes/Backup" || bad "kernel receives"
@@ -194,7 +194,7 @@ if [ "$($M tree "$C" | wc -l | tr -d ' ')" = 0 ]; then
 elif $M tree "$C" --snapshot s2 2>/dev/null | diff -q - "$T/src-s2.tree" >/dev/null; then
   ok "  and is complete (the receive finished before the kill)"
 else bad "  partly received"; fi
-boot b4 "$T/boot4.log" "disks receive $S/s2-full.stream --to /Volumes/Crash$SPF" "echo now > /System/Kernel/fs/milkfs/sync"
+boot b4 "$T/boot4.log" "disks receive $S/s2-full.stream --to /Volumes/Crash$SPF" "print now > /System/Kernel/fs/milkfs/sync"
 $M tree "$C" --snapshot s2 > "$T/crash-s2.tree" 2>/dev/null
 if diff -q "$T/crash-s2.tree" "$T/src-s2.tree" >/dev/null && $M check "$C" > "$T/crash2.txt" 2>&1 && ! grep -q "clone" "$T/crash2.txt"; then
   ok "receiving again works (leftover clone discarded): s2 identical, check clean"

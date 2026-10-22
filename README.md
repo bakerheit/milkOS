@@ -72,6 +72,9 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - `files`, one command for files and folders in plain English (`files create notes.txt`,
   `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`
   (list, restore, empty).
+- `text` for lines of text (`text show`, `text find`, `text first`, `text last`, `text sort`,
+  `text unique`, `text count`, `text help`), `print` and `pause`; msh's `variables` built-in
+  (`list`, `get`, `set`, `remove`, `run`).
 - Coreutils, `top`, `disks` (free space, snapshots, clones, encryption, backups), `search` (files
   by name and text), and `apps`, a package manager with signed packages, where `apps try`
   installs into a throwaway clone of the filesystem that you then keep or discard. Each one's

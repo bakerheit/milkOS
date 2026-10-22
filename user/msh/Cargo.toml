@@ -11,3 +11,4 @@ bench = false
 [dependencies]
 rt = { path = "../rt" }
 filekit = { path = "../filekit" }
+textkit = { path = "../textkit" }

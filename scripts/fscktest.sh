@@ -66,7 +66,7 @@ for kind in orphan dangling nlink parent sb smap bref; do
   P='msh:[^\n]*\$ '
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
     "send:disks check" "wait:$P" "send:disks check --repair" "wait:$P" \
-    "send:disks check" "wait:$P" "send:echo FSCK""-DONE" "wait:FSCK-DONE" "done:$T/$kind.done" &
+    "send:disks check" "wait:$P" "send:print FSCK""-DONE" "wait:FSCK-DONE" "done:$T/$kind.done" &
   DPID=$!
   for _ in $(seq 600); do [ -e "$T/$kind.done" ] && break; sleep 0.2; done
   sleep 0.5; stop; kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true

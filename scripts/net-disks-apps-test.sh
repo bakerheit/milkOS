@@ -43,7 +43,7 @@ SOCK="$T/s.sock" LOG="$T/serial.log"
 # Steps: "send:CMD" "wait:PROMPT" for each command.
 S=()
 s() { local c; for c in "$@"; do S+=("send:$c" "wait:$P"); done; }
-s "sleep 1" \
+s "pause 1" \
   "ifconfig" "netstat" "ping" "nc" "netctl" "fetch" "df" "snap" "dedupe" "milk" "spot" \
   "network help" \
   "network" \
@@ -64,11 +64,11 @@ s "sleep 1" \
   "network get --save /tmp/page.html http://127.0.0.1/" \
   "network get --save /tmp/page.html http://127.0.0.1/" \
   "network get --save /tmp/page.html --replace http://127.0.0.1/" \
-  "cat /tmp/page.html" \
+  "text show /tmp/page.html" \
   "network get https://127.0.0.1/" \
-  "sleep 3 | network listen 7070 &" \
-  "sleep 1" \
-  "echo hello over loopback | network connect 127.0.0.1 7070" \
+  "pause 3 | network listen 7070 &" \
+  "pause 1" \
+  "print hello over loopback | network connect 127.0.0.1 7070" \
   "wait" \
   "network name testbox" \
   "network name" \
@@ -88,9 +88,9 @@ s "disks help" \
   "disks devices" \
   "MILK_TABLE=1 disks devices" \
   "disks info" \
-  "echo one > /Users/milk/a.txt" \
+  "print one > /Users/milk/a.txt" \
   "disks snapshot s1" \
-  "echo two > /Users/milk/a.txt" \
+  "print two > /Users/milk/a.txt" \
   "disks snapshot s2" \
   "disks snapshots" \
   "MILK_TABLE=1 disks snapshots" \
@@ -99,13 +99,13 @@ s "disks help" \
   "disks clone s1 c1" \
   "disks clones" \
   "MILK_TABLE=1 disks clones" \
-  "cat /Volumes/Milk-c1/Users/milk/a.txt" \
+  "text show /Volumes/Milk-c1/Users/milk/a.txt" \
   "disks discard c1" \
   "disks clone s1 c2" \
   "disks keep c2" \
-  "cat /Users/milk/a.txt" \
+  "text show /Users/milk/a.txt" \
   "disks rollback before-c2" \
-  "cat /Users/milk/a.txt" \
+  "text show /Users/milk/a.txt" \
   "disks delete s2" \
   "disks snapshots" \
   "disks auto" \
@@ -124,18 +124,18 @@ s "disks help" \
   "disks send s1 > /tmp/s1b.stream" \
   "disks receive /tmp/s1.stream --to /Volumes/Spare" \
   "files list /Volumes/Spare/.snapshots" \
-  "cat /tmp/s1b.stream | disks receive --to /Volumes/Spare" \
-  "echo fake-spare-passphrase > /tmp/sp" \
+  "text show /tmp/s1b.stream | disks receive --to /Volumes/Spare" \
+  "print fake-spare-passphrase > /tmp/sp" \
   "disks encrypt vdb --passphrase-file /tmp/sp --no-recovery --wait" \
   "disks lock Spare" \
   "disks devices" \
-  "echo fake-spare-passphrase | disks unlock vdb" \
-  "cat /Volumes/Spare/.snapshots/s1/Users/milk/a.txt" \
+  "print fake-spare-passphrase | disks unlock vdb" \
+  "text show /Volumes/Spare/.snapshots/s1/Users/milk/a.txt" \
   "disks decrypt vdb --passphrase-file /tmp/sp --wait" \
   "disks format vda Blank" \
   "disks format vdc" \
   "disks devices" \
-  "echo old-fake > /tmp/pp" "echo new-fake-pass >> /tmp/pp" "echo new-fake-pass >> /tmp/pp" \
+  "print old-fake > /tmp/pp" "print new-fake-pass >> /tmp/pp" "print new-fake-pass >> /tmp/pp" \
   "disks passphrase < /tmp/pp" \
   "disks snapshot" \
   "disks repair" \
@@ -145,7 +145,7 @@ s "apps help" \
   "apps list" \
   "apps keys" \
   "apps repos" \
-  "echo http://127.0.0.1:1/ > /System/Settings/milk/repos" \
+  "print http://127.0.0.1:1/ > /System/Settings/milk/repos" \
   "apps repos" \
   "apps selftest" \
   "apps search" \
@@ -163,8 +163,8 @@ s "apps help" \
   "apps frobnicate"
 s "search help" \
   "search --wait" \
-  "echo zebracorn lives here > /Users/milk/zebra.txt" \
-  "sleep 1" \
+  "print zebracorn lives here > /Users/milk/zebra.txt" \
+  "pause 1" \
   "search zebracorn" \
   "search --long zebracorn" \
   "search --limit 1 zebracorn lives" \
@@ -174,7 +174,7 @@ s "search help" \
   "search --rebuild" \
   "search --wait-index" \
   "search --fuzzy x" \
-  "echo now > /System/Kernel/fs/milkfs/sync"
+  "print now > /System/Kernel/fs/milkfs/sync"
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
   -display none -monitor none -serial "unix:$SOCK,server,nowait" \
@@ -187,7 +187,7 @@ qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait@240:$P" "${S[@]}" \
-  "send:echo NDA""-DONE" "wait:NDA-DONE" "done:$T/done" &
+  "send:print NDA""-DONE" "wait:NDA-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 1500); do [ -e "$T/done" ] && break; kill -0 "$DPID" 2>/dev/null || break; sleep 0.2; done
 sleep 1
@@ -238,7 +238,7 @@ check "get --headers" "network get --headers http://127.0.0.1/" "^HTTP/1\\.[01] 
 check "get --save" "network get --save /tmp/page.html http://127.0.0.1/" "saved to /tmp/page\\.html"
 check "get --save won't overwrite" "network get --save /tmp/page.html http://127.0.0.1/" "/tmp/page\\.html already exists \\(add --replace to overwrite it\\)" 2
 check "get --save --replace does" "network get --save /tmp/page.html --replace http://127.0.0.1/" "saved to /tmp/page\\.html"
-check "the saved page" "cat /tmp/page.html" "<"
+check "the saved page" "text show /tmp/page.html" "<"
 check "https is refused in words" "network get https://127.0.0.1/" "only http:// addresses work"
 echo "$L" | grep -q "network listen: listening on tcp \\[::\\]:7070 (IPv6 and IPv4)" && ok "listen" || bad "listen: no 'listening on' line"
 echo "$L" | grep -q "network listen: connection from 127\\.0\\.0\\.1:" && ok "connect reached listen" || bad "no connection from 127.0.0.1"
@@ -274,12 +274,12 @@ check "changes since a snapshot" "disks changes s1" "a\\.txt"
 check "clone" "disks clone s1 c1" "disks: made clone c1 of snapshot s1, at /Volumes/Milk-c1"
 check "clones" "disks clones" "^c1 of=s1 at=/Volumes/Milk-c1"
 check "clones as a table" "MILK_TABLE=1 disks clones" "name:str	snapshot:str	mount:str"
-check "the clone has s1's file" "cat /Volumes/Milk-c1/Users/milk/a.txt" "^one$"
+check "the clone has s1's file" "text show /Volumes/Milk-c1/Users/milk/a.txt" "^one$"
 check "discard" "disks discard c1" "disks: discarded clone c1"
 check "keep" "disks keep c2" "disks: clone c2 is now the volume \\(the old state is snapshot before-c2\\)"
-check "after keep the volume is the clone" "cat /Users/milk/a.txt" "^one$"
+check "after keep the volume is the clone" "text show /Users/milk/a.txt" "^one$"
 check "rollback" "disks rollback before-c2" "disks: the volume is back to snapshot before-c2"
-check "after rollback the file is back" "cat /Users/milk/a.txt" "^two$" 2
+check "after rollback the file is back" "text show /Users/milk/a.txt" "^two$" 2
 check "delete" "disks delete s2" "disks: deleted snapshot s2"
 out "disks snapshots" 2 | grep -q "^s2 " && bad "s2 is still there" || ok "  and it's gone"
 check "auto shows the settings" "disks auto" "interval"
@@ -294,12 +294,12 @@ check "dedupe off milkfs says so" "disks dedupe /tmp" "disks dedupe: /tmp isn't 
 check "send to a file" "disks send s1 --output /tmp/s1.stream" "disks: sent s1"
 check "receive into Spare" "disks receive /tmp/s1.stream --to /Volumes/Spare" "disks: received"
 check "  the snapshot is there" "files list /Volumes/Spare/.snapshots" "s1/"
-check "receive from stdin (sent to stdout) refused: already there" "cat /tmp/s1b.stream | disks receive --to /Volumes/Spare" "disks receive: .*\\(EEXIST"
+check "receive from stdin (sent to stdout) refused: already there" "text show /tmp/s1b.stream | disks receive --to /Volumes/Spare" "disks receive: .*\\(EEXIST"
 check "encrypt Spare in place" "disks encrypt vdb --passphrase-file /tmp/sp --no-recovery --wait" "encrypted in place, done"
 check "lock" "disks lock Spare" "^disks: vdb Spare locked$"
 check "  devices says locked" "disks devices" "^vdb [0-9]+ rw milkfs encrypted locked Spare$" 2
-check "unlock (passphrase from a pipe)" "echo fake-spare-passphrase | disks unlock vdb" "disks: Spare unlocked"
-check "  the received snapshot survived" "cat /Volumes/Spare/.snapshots/s1/Users/milk/a.txt" "^one$"
+check "unlock (passphrase from a pipe)" "print fake-spare-passphrase | disks unlock vdb" "disks: Spare unlocked"
+check "  the received snapshot survived" "text show /Volumes/Spare/.snapshots/s1/Users/milk/a.txt" "^one$"
 check "decrypt" "disks decrypt vdb --passphrase-file /tmp/sp --wait" "decrypted in place, done"
 check "format the blank disk" "disks format vda Blank" "disks: vda formatted \\(milkfs, mounted at the next boot\\)"
 check "format refuses the mounted volume" "disks format vdc" "disks format vdc: vdc is mounted.*\\(EBUSY"

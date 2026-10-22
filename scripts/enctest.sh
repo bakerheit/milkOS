@@ -80,7 +80,7 @@ boot() { # name [fw_cfg passphrase or -] commands...
       *) args+=("send:$c" "wait:$P") ;;
     esac
   done
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo ENC""-DONE" "wait:ENC-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print ENC""-DONE" "wait:ENC-DONE" "done:$T/$name.done" &
   local DPID=$!
   for _ in $(seq 1500); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1.5
@@ -88,16 +88,16 @@ boot() { # name [fw_cfg passphrase or -] commands...
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
 boot b1 - \
-  "cat /System/Kernel/fs/milkfs/unlock" "files list /Volumes" \
+  "text show /System/Kernel/fs/milkfs/unlock" "files list /Volumes" \
   "raw:disks unlock" "wait:Passphrase" "raw:wrong-fake-passphrase" "wait:try again" "wait:Passphrase" "raw:$P1" "wait:unlocked" \
   "wait:msh:" \
-  "cat /Users/milk/../milk/README.txt" "cat /Volumes/Milk/docs/canary-file.txt" \
-  "echo written inside milkOS: $CANARY-2 > /Users/milk/inside.txt" \
+  "text show /Users/milk/../milk/README.txt" "text show /Volumes/Milk/docs/canary-file.txt" \
+  "print written inside milkOS: $CANARY-2 > /Users/milk/inside.txt" \
   "raw:disks passphrase" "wait:Current" "raw:$P1" "wait:New passphrase" "raw:$P2" "wait:again" "raw:$P2" "wait:changed" \
-  "wait:msh:" "echo now > /System/Kernel/fs/milkfs/sync"
+  "wait:msh:" "print now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/b1.log")"
 echo "$L" | grep -aq "vda (Milk) is encrypted and locked" && ok "boot 1: the volume is locked at boot" || bad "not reported locked"
-echo "$L" | grep -a -A2 "cat /System/Kernel/fs/milkfs/unlock" | grep -aq "vda Milk locked" && ok "/System/Kernel/fs/milkfs/unlock lists it" || bad "unlock file"
+echo "$L" | grep -a -A2 "text show /System/Kernel/fs/milkfs/unlock" | grep -aq "vda Milk locked" && ok "/System/Kernel/fs/milkfs/unlock lists it" || bad "unlock file"
 echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Milk" && bad "mounted while locked" || ok "not mounted while locked"
 echo "$L" | grep -aq "wrong passphrase or recovery key" && ok "a wrong passphrase is refused" || bad "wrong passphrase accepted?"
 echo "$L" | grep -aq "disks: Milk unlocked" && ok "disks unlock mounts it" || bad "disks unlock"
@@ -111,7 +111,7 @@ $M check "$IMG" --passphrase-file "$T/p2" > "$T/check.txt" 2>&1 && ok "Mac: the 
 [ "$($M cat "$IMG" /Users/milk/inside.txt --recovery "$REC")" = "written inside milkOS: $CANARY-2" ] && ok "Mac: the recovery key still opens it; the file written in milkOS is there" || bad "recovery after passwd"
 grep -aq "$CANARY" "$IMG" && bad "plaintext on the disk after milkOS wrote" || ok "raw image after milkOS wrote: no canary, no plaintext"
 
-boot b2 "$REC" "cat /Users/milk/inside.txt" "disks verify"
+boot b2 "$REC" "text show /Users/milk/inside.txt" "disks verify"
 L="$(tr -d '\r' < "$T/b2.log")"
 echo "$L" | grep -aq "^written inside milkOS: $CANARY-2" && ok "boot 2 (recovery key): the file is there" || bad "boot 2 file"
 echo "$L" | grep -a "^scrub: \[run" | grep -q " 0 error" && ok "scrub of the encrypted volume: clean" || bad "scrub: $(echo "$L" | grep -a '^scrub:' | head -2)"
@@ -120,28 +120,28 @@ VAULT="$T/vault.img" PLAIN="$T/plain.img"
 $M mkfs "$VAULT" --size 32M --label Vault --encrypt --passphrase-file "$T/p2" --recovery-out "$T/vault-recovery" >/dev/null
 $M mkfs "$PLAIN" --size 16M --label Plain >/dev/null
 EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
-  "cat /System/Kernel/fs/milkfs/info" "cat /System/Kernel/fs/milkfs/lock" \
+  "text show /System/Kernel/fs/milkfs/info" "text show /System/Kernel/fs/milkfs/lock" \
   "disks lock Milk" "disks lock Plain" \
-  "echo kept across the lock > /Volumes/Vault/notes.txt" \
+  "print kept across the lock > /Volumes/Vault/notes.txt" \
   "go /Volumes/Vault" "disks lock Vault" "go /" \
-  "sleep 4 < /Volumes/Vault/notes.txt &" "disks lock Vault" "cat /System/Kernel/fs/milkfs/error" "sleep 5" \
-  "disks lock Vault" "files list /Volumes" "cat /Volumes/Vault/notes.txt" "cat /System/Kernel/fs/milkfs/lock" \
+  "pause 4 < /Volumes/Vault/notes.txt &" "disks lock Vault" "text show /System/Kernel/fs/milkfs/error" "pause 5" \
+  "disks lock Vault" "files list /Volumes" "text show /Volumes/Vault/notes.txt" "text show /System/Kernel/fs/milkfs/lock" \
   "raw:disks unlock" "wait:Passphrase" "raw:$P2" "wait:unlocked" "wait:msh:" \
-  "cat /Volumes/Vault/notes.txt" "echo second > /Volumes/Vault/two.txt" "disks lock"
+  "text show /Volumes/Vault/notes.txt" "print second > /Volumes/Vault/two.txt" "disks lock"
 L="$(tr -d '\r' < "$T/b3.log")"
-I="$(echo "$L" | awk '/\$ cat \/System\/Kernel\/fs\/milkfs\/info$/{on=1;next} on && /^msh:/{exit} on')"
+I="$(echo "$L" | awk '/\$ text show \/System\/Kernel\/fs\/milkfs\/info$/{on=1;next} on && /^msh:/{exit} on')"
 echo "$I" | grep -q "^encryption:  on$" && echo "$I" | grep -q "^locked:      no$" && echo "$I" | grep -q "^cipher:      xchacha20-siv" \
   && echo "$I" | grep -q "^kdf:         scrypt N=2^16 r=8 p=4$" && echo "$I" | grep -q "^key slots:   1 passphrase, 1 recovery$" \
   && ok "info: encryption on, unlocked, cipher, KDF, key slots" || bad "info encryption lines: $(echo "$I" | tail -6)"
-echo "$L" | grep -a -A4 "cat /System/Kernel/fs/milkfs/lock" | grep -aq "Milk unlocked at=/Volumes/Milk (home: can't be locked)" && ok "lock file: home volume marked" || bad "lock file listing"
+echo "$L" | grep -a -A4 "text show /System/Kernel/fs/milkfs/lock" | grep -aq "Milk unlocked at=/Volumes/Milk (home: can't be locked)" && ok "lock file: home volume marked" || bad "lock file listing"
 echo "$L" | grep -aq "disks lock Milk: .*holds /Users/milk.*you can't lock the volume you're logged into.*(EBUSY" && ok "locking the home volume: EBUSY, says why" || bad "home lock refusal"
 echo "$L" | grep -aq "disks lock Plain: .*isn't encrypted.*(EINVAL" && ok "locking a plain volume: EINVAL, says why" || bad "plain lock refusal"
 echo "$L" | grep -aq "disks lock Vault: .*is in use: pid [0-9]* (msh): working directory.*(EBUSY" && ok "busy (cwd): names the shell" || bad "cwd busy: $(echo "$L" | grep -a 'disks lock Vault' | head -1)"
-echo "$L" | grep -aq "disks lock Vault: .*is in use: pid [0-9]* (sleep): 1 open file (EBUSY" && ok "busy (open file): names the process" || bad "open-file busy: $(echo "$L" | grep -a 'disks lock Vault' | sed -n 2p)"
-echo "$L" | grep -aq "^lock: EBUSY: .*(sleep): 1 open file" && ok "/System/Kernel/fs/milkfs/error has the reason" || bad "error file"
+echo "$L" | grep -aq "disks lock Vault: .*is in use: pid [0-9]* (pause): 1 open file (EBUSY" && ok "busy (open file): names the process" || bad "open-file busy: $(echo "$L" | grep -a 'disks lock Vault' | sed -n 2p)"
+echo "$L" | grep -aq "^lock: EBUSY: .*(pause): 1 open file" && ok "/System/Kernel/fs/milkfs/error has the reason" || bad "error file"
 echo "$L" | grep -aq "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted, key wiped$" && ok "Vault locked, key wiped" || bad "lock log"
 echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
-echo "$L" | grep -aq "cat: /Volumes/Vault/notes.txt: " && ok "its files are gone until unlock" || bad "file readable while locked?"
+echo "$L" | grep -aq "text: /Volumes/Vault/notes.txt doesn.t exist" && ok "its files are gone until unlock" || bad "file readable while locked?"
 echo "$L" | grep -aq "^vd. Vault locked" && ok "listed as locked" || bad "not listed locked"
 [ "$(echo "$L" | grep -ac '^kept across the lock')" -ge 1 ] && echo "$L" | grep -aq "disks: Vault unlocked" && ok "unlock after lock: the file is back" || bad "unlock after lock"
 [ "$(echo "$L" | grep -ac "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted")" = 2 ] && ok "disks lock (no argument) locks every lockable volume" || bad "disks lock without argument"
@@ -152,14 +152,14 @@ grep -aq "kept across the lock" "$VAULT" && bad "Vault plaintext on the disk" ||
 BLANK="$T/blank.img"; P3="third-fake-test-passphrase"
 dd if=/dev/zero of="$BLANK" bs=1m count=24 2>/dev/null
 IMG="$BLANK" EXTRA_DISKS="" boot b4 - \
-  "cat /System/Kernel/fs/milkfs/disks" \
+  "text show /System/Kernel/fs/milkfs/disks" \
   "raw:disks format vda Fresh --encrypt" "wait:Passphrase for the new" "raw:$P3" "wait:Again" "raw:$P3" "wait:recovery key: " \
-  "wait:msh:" "cat /System/Kernel/fs/milkfs/disks" \
+  "wait:msh:" "text show /System/Kernel/fs/milkfs/disks" \
   "raw:disks unlock vda" "wait:Passphrase" "raw:$P3" "wait:unlocked" "wait:msh:" \
-  "echo made in milkOS: $CANARY-3 > /Volumes/Fresh/fresh.txt" "disks format vda Again --force" \
-  "cat /System/Kernel/fs/milkfs/disks" "echo now > /System/Kernel/fs/milkfs/sync"
+  "print made in milkOS: $CANARY-3 > /Volumes/Fresh/fresh.txt" "disks format vda Again --force" \
+  "text show /System/Kernel/fs/milkfs/disks" "print now > /System/Kernel/fs/milkfs/sync"
 L="$(tr -d '\r' < "$T/b4.log")"
-D4() { echo "$L" | awk -v n="$1" '/\$ cat \/System\/Kernel\/fs\/milkfs\/disks$/{c++; on=(c==n); next} on && /^msh:/{on=0} on'; }
+D4() { echo "$L" | awk -v n="$1" '/(^|\$ )text show \/System\/Kernel\/fs\/milkfs\/disks$/{c++; on=(c==n); next} on && /^msh:/{on=0} on'; }
 D4 1 | grep -q "^vda 25165824 rw other$" && ok "disks: the blank disk (24 MiB, no milkfs)" || bad "disks before mkfs: $(D4 1)"
 echo "$L" | grep -aq "^disks: vda formatted as an encrypted milkfs volume" && ok "disks format --encrypt formats it" || bad "disks format --encrypt"
 REC4="$(echo "$L" | sed -n 's/^disks: recovery key: //p' | head -1)"
@@ -183,11 +183,11 @@ $M put "$PL" /docs/c5.txt "$T/c5.txt" >/dev/null && $M put "$PL" /docs/r5.bin "$
 IMG="$PL" EXTRA_DISKS="" boot b5 - \
   "disks snapshot s5" \
   "raw:disks encrypt --no-recovery --rate 1" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:started" "wait:msh:" \
-  "cat /System/Kernel/fs/milkfs/info" "files copy --reflink /Volumes/Milk/docs/r5.bin /Volumes/Milk/docs/copy.bin" \
+  "text show /System/Kernel/fs/milkfs/info" "files copy --reflink /Volumes/Milk/docs/r5.bin /Volumes/Milk/docs/copy.bin" \
   "disks rollback s5" \
   "raw:disks encrypt --no-recovery" "wait:New passphrase" "raw:$P5" "wait:Again" "raw:$P5" "wait:msh:" \
-  "echo made while encrypting: $CANARY-6 > /Volumes/Milk/docs/during.txt" \
-  "echo rate=0 > /System/Kernel/fs/milkfs/encrypt" "sleep 6" "cat /System/Kernel/fs/milkfs/encrypt" "cat /System/Kernel/fs/milkfs/info"
+  "print made while encrypting: $CANARY-6 > /Volumes/Milk/docs/during.txt" \
+  "print rate=0 > /System/Kernel/fs/milkfs/encrypt" "pause 6" "text show /System/Kernel/fs/milkfs/encrypt" "text show /System/Kernel/fs/milkfs/info"
 L="$(tr -d '\r' < "$T/b5.log")"
 echo "$L" | grep -q "^encryption:  converting$" && echo "$L" | grep -Eq "^conversion:  encrypt [0-9]+% \([0-9]+/[0-9]+ blocks\), " \
   && ok "info while encrypting: converting, with progress ($(echo "$L" | sed -n 's/^conversion:  //p' | head -1))" || bad "info while converting"
@@ -207,14 +207,14 @@ MILKFS_PASSPHRASE= $M check "$PL" > /dev/null 2>&1 < /dev/null && bad "Mac opene
 
 IMG="$PL" EXTRA_DISKS="" boot b6 - \
   "raw:disks unlock" "wait:Passphrase" "raw:$P5" "wait:unlocked" "wait:msh:" \
-  "cat /Volumes/Milk/docs/during.txt" \
+  "text show /Volumes/Milk/docs/during.txt" \
   "raw:disks decrypt --wait" "wait:Passphrase" "raw:$P5" "wait:decrypted in place" "wait:msh:" \
-  "cat /System/Kernel/fs/milkfs/info"
+  "text show /System/Kernel/fs/milkfs/info"
 L="$(tr -d '\r' < "$T/b6.log")"
 echo "$L" | grep -aq "vda (Milk) is encrypted and locked" && ok "boot 6: locked at boot" || bad "boot 6 not locked"
 echo "$L" | grep -aq "^made while encrypting: $CANARY-6" && ok "unlocked: the file is there" || bad "boot 6 file"
 echo "$L" | grep -aq "disks: vda (Milk) at /Volumes/Milk: decrypted in place, done" && ok "disks decrypt --wait: done" || bad "decrypt: $(echo "$L" | grep -a 'disks' | tail -2)"
-echo "$L" | awk '/\$ cat \/System\/Kernel\/fs\/milkfs\/info$/{on=1; next} on && /^msh:/{on=0} on' | grep -q "^encryption:  off$" && ok "info: encryption off" || bad "info after decrypt"
+echo "$L" | awk '/\$ text show \/System\/Kernel\/fs\/milkfs\/info$/{on=1; next} on && /^msh:/{on=0} on' | grep -q "^encryption:  off$" && ok "info: encryption off" || bad "info after decrypt"
 MILKFS_PASSPHRASE= $M check "$PL" > "$T/check6.txt" 2>&1 < /dev/null && grep -q "encryption: off" "$T/check6.txt" \
   && [ "$(MILKFS_PASSPHRASE= $M cat "$PL" /docs/during.txt < /dev/null)" = "made while encrypting: $CANARY-6" ] \
   && ok "Mac: plain again, readable with no passphrase, check clean" || { bad "Mac after decrypt"; cat "$T/check6.txt"; }

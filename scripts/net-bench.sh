@@ -55,16 +55,16 @@ PIDS+=("$!")
 P='wait:msh:[^\n]*\$ '
 DONE='wait:tcpbench: [^\n]*(MiB/s|: )'
 python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
-  "$P" 'send:sleep 1' "$P" 'send:/System/Developer/tcpbench sink 5001' "done:$WORK/b1" "$DONE" "$P" \
+  "$P" 'send:pause 1' "$P" 'send:/System/Developer/tcpbench sink 5001' "done:$WORK/b1" "$DONE" "$P" \
   "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
 PIDS+=("$!")
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
-  "$P" 'send:sleep 1' "$P" \
+  "$P" 'send:pause 1' "$P" \
   "send:/System/Developer/tcpbench send 10.0.2.2:$H_sink $MIB" "$DONE" "$P" \
   "send:/System/Developer/tcpbench recv 10.0.2.2:$H_source" "$DONE" "$P" \
-  "waitfile:$WORK/b1" 'send:sleep 1' "$P" \
+  "waitfile:$WORK/b1" 'send:pause 1' "$P" \
   "send:/System/Developer/tcpbench send 169.254.11.11:5001 $MIB" "$DONE" "$P" \
-  'send:cat /proc/net/snmp' "$P" \
+  'send:text show /proc/net/snmp' "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
 PIDS+=("$!")
 for _ in $(seq 1800); do

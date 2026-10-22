@@ -21,6 +21,17 @@
   arguments. Errors in plain English ("Documents doesn't exist",
   "notes.txt is a file, not a folder", "you can't open ..."). In msh and the Terminal's
   built-in shell.
+- `text`, one command for lines of text: `show`, `first [N]`, `last [N]`, `find`, `sort`,
+  `unique`, `count`, `help`, reading what's piped in when there's no file. It replaces `cat`,
+  `head`, `tail`, `grep`, `sort`, `uniq` and `wc`, which are gone; their flags are spelled out
+  (`text find --ignore-case --invert --numbers --count --names`, `text sort --reverse
+  --numbers --unique --field N`, `text unique --count --repeated`, `text count --lines
+  --words --bytes`). `text count` and `text unique --count` give msh a table. `print`
+  replaces `echo` (`--no-newline`, `--escapes`, and -n / -e still work), `pause` replaces
+  `sleep` (`pause 5`, `5s`, `2m`, `500ms`). Errors in plain English.
+- msh's `variables` built-in replaces `env` and the `export`, `set` and `unset` built-ins:
+  `variables list` (a table too), `get NAME`, `set NAME=value` (exported), `remove NAME`,
+  `run NAME=value COMMAND`. `NAME=value` and `NAME=value COMMAND` work as before.
 - msh's table filter is now `filter` instead of `where`, same syntax and operators:
   `ps | filter rss > 100`, `files list | filter size > 1M`. `where` with arguments says
   "where takes no arguments; to filter a table use filter".

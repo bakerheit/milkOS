@@ -27,7 +27,7 @@ One small change outside: `gic.rs` counts interrupts per INTID for `/proc/interr
 | `pagecache.rs` | page cache for milkfs and FAT reads, `/System/Kernel/fs/pagecache` |
 | `milkfs/` | milkfs v0, the copy-on-write snapshot file system (below), at `/Volumes/Milk` |
 | `clock.rs` | wall-clock for timestamps (PL031 RTC read once + uptime) |
-| `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `cat /System/Settings/motd` |
+| `selftest.rs` | boot self-test (247 checks with both disks), then prints `/proc/*`, appends to `/Volumes/Milk/boot.log`, `text show /System/Settings/motd` |
 
 Boot: `kmain` calls `fs::init()` after `memtest::run()`, then `fs::selftest::run()`.
 `fs::init` mounts tmpfs on `/`, creates the skeleton, unpacks the initramfs, mounts devfs,
@@ -106,7 +106,7 @@ and no links with those names: a clean break (the self-test checks they are gone
 
 **`/System/Developer`.** The programs that test milkOS or show off a kernel feature, not
 ones you type day to day. The test scripts run them by full path
-(`/System/Developer/utest svc`); to type them by name, `export PATH=/Commands:/System/Developer`.
+(`/System/Developer/utest svc`); to type them by name, `variables set PATH=/Commands:/System/Developer`.
 
 | program | what |
 |---|---|
@@ -1377,7 +1377,7 @@ kernel `fs::milkfs::lock(Some(target) | None) -> Result<Vec<String>>` (devices l
    volume's inode table tells about the rest (mappings, kernel threads). If anything is
    found the volume is mounted back where it was and the lock is refused with EBUSY; the
    reason names the processes:
-   `vdb (Vault) is in use: pid 16 (sleep): 1 open file; pid 10 (msh): working directory`;
+   `vdb (Vault) is in use: pid 16 (pause): 1 open file; pid 10 (msh): working directory`;
 5. drop the key and the decoded tree nodes and mark the in-memory state unwritable (a
    block written without the key would land in plaintext), invalidate the page cache for
    every view's device number (no plaintext pages left), forget the volume and put the
@@ -1595,7 +1595,7 @@ Shell: `/System/Kernel/fs/milkfs/info`, `snapshots`, `clones`, `auto` (read); wr
 
 **How errors come back.** A control is written with one `write(2)`; failure is that
 write's errno. Then `/System/Kernel/fs/milkfs/error` says why, one line:
-`CONTROL: ERRNO: reason` (e.g. `lock: EBUSY: vdb (Vault) is in use: pid 16 (sleep): 1
+`CONTROL: ERRNO: reason` (e.g. `lock: EBUSY: vdb (Vault) is in use: pid 16 (pause): 1
 open file`); a write that works empties it. It is the last failure on the system (not per
 process), so read it right after the failed write and check the control name. `disks`
 prints that reason. Writing nothing (a 0-byte write) does nothing at all.

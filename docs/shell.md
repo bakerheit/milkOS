@@ -1,21 +1,22 @@
 # msh, the milk shell
 
-`user/msh` (shell), `user/coreutils` (tools), `user/rt/src/table.rs` (the table format).
+`user/msh` (shell), `user/coreutils` and `user/texttools` (tools), `user/rt/src/table.rs` (the
+table format).
 
 ## Plain Unix shell
 
 ```sh
-files list -l /Commands | sort -n -k5 | tail -3  # pipelines
-echo hi > /tmp/f; echo there >> /tmp/f      # redirection: > >> < 2> 2>&1
-grep milk /System/Settings/motd && echo found || echo no
-X=1; export Y=2; echo "$X $Y ${X}0 $? $$" ~ # variables, $? $$ ~, '...' "..." quoting
-files list /Commands/u*                          # globs (* ?) in the last path component
-sleep 10 &                                  # background job: jobs, fg %1, wait
+files list -l /Commands | text sort --numbers --field 5 | text last 3   # pipelines
+print hi > /tmp/f; print there >> /tmp/f    # redirection: > >> < 2> 2>&1
+text find milk /System/Settings/motd && print found || print no
+X=1; variables set Y=2; print "$X $Y ${X}0 $? $$" ~   # variables, $? $$ ~, '...' "..." quoting
+files list /Commands/u*                     # globs (* ?) in the last path component
+pause 10 &                                  # background job: jobs, fg %1, wait
 ```
 
 Ctrl-C kills the foreground job, never the shell: every pipeline runs in its own process
 group, which owns the terminal (TIOCSPGRP) while it runs; the shell catches SIGINT itself.
-Built-ins: `go where exit export unset set jobs fg wait source help`. Everything else is a
+Built-ins: `go where exit variables jobs fg wait source help`. Everything else is a
 program on `$PATH` (`/Commands`). Details: comments at the top of `user/msh/src/main.rs`.
 
 ## Moving around: go and where
@@ -27,7 +28,7 @@ go /Apps            # an absolute path
 go                  # home
 go back             # back to the folder you were in before the last go
 go ./back           # a folder that is really called "back"
-where               # print the folder you're in; works in pipes: where | cat, where > f
+where               # print the folder you're in; works in pipes: where | text show, where > f
 ```
 
 There is no `cd` or `pwd` (like `ls`, `cp` and `mv`, which `files` replaced): typing them
@@ -38,6 +39,49 @@ and `OLDPWD` for programs that read them.
 `where` only ever prints the current folder, in a pipeline too, and takes no arguments:
 `where cpu > 5` says `where takes no arguments; to filter a table use filter`. Filtering
 a table is `filter` (`ps | filter rss > 100`, below).
+
+## Text, print, pause and variables
+
+`text` replaced `cat`, `head`, `tail`, `grep`, `sort`, `uniq` and `wc`; `print` replaced
+`echo`; `pause` replaced `sleep`; the `variables` built-in replaced `env` and msh's `export`,
+`set` and `unset`. The old names are gone (`command not found`). The rules (options,
+matching, sorting, counting, lengths of time, escapes, the help lists) are in `user/textkit`,
+tested on the Mac (`scripts/textkit-test.sh`); `scripts/text-test.sh` runs them in milkOS.
+
+```sh
+text show notes.txt todo.txt         # print files (cat); --numbers numbers the lines
+text first 5 notes.txt               # the first 5 lines (head; 10 without a number)
+text last 3 /System/Settings/motd    # the last 3 (tail)
+ps | text find msh                   # lines with "msh" in them (grep): plain text, no pattern
+text find --ignore-case --numbers milk notes.txt   # also --invert, --count, --names
+files list | text sort --reverse     # sort; --numbers, --unique, --field N (from field N on)
+text sort words.txt | text unique --count   # uniq -c; --repeated: only lines that repeat
+text count notes.txt                 # lines, words, bytes as a table (wc)
+text count --lines notes.txt         # one count, one input: just the number
+print hello world                    # echo; --no-newline (-n), --escapes (-e: \n \t \e \\ \c)
+pause 5                              # sleep: 5, 5s, 2m, 1h, 500ms, 0.5
+variables list                       # every variable (env, set): NAME=value lines
+variables get HOME                   # one value
+variables set EDITOR=texteditor      # set and export (export NAME=value)
+variables remove EDITOR              # unset
+variables run LANG=C ps              # env NAME=value cmd (the same as LANG=C ps)
+```
+
+Every `text` command reads what's piped in when it has no FILE (or for `-`), and `text
+help`, `print --help`, `pause help` and `variables help` list everything. Errors are in plain
+English (`text: notes.txt doesn't exist`, `pause: 5x isn't a length of time (try 5, 5s, 2m or
+500ms)`, `variables get: EDITOR isn't set`). `text find` exits 0 when something matched, 1
+when nothing did and 2 when a file couldn't be read, as grep did. `text count` and `text
+unique --count` give a table to msh's table commands (`text count *.txt | filter lines > 10`),
+and so does `variables list` (columns `name`, `value`, `exported`: yes or no).
+
+`variables` is a shell built-in because it changes the shell itself. `NAME=value` on its own
+still sets a variable for this shell only; `variables set NAME=value` also passes it to every
+program the shell starts (what `export` did), and `variables set NAME` passes on one that is
+already set. `variables list` shows them all, the way `set` did (`env` showed only the
+exported ones; the table's `exported` column tells them apart). `variables run NAME=value...
+COMMAND` runs COMMAND with those set, for it only, exactly like `NAME=value COMMAND`; env's
+`-i` (start from an empty environment) is gone.
 
 ## Structured pipes
 
@@ -52,13 +96,14 @@ files list /Commands | filter size > 100K | sort-by size -r | first 3
 ps | sort-by cpu -r | first 1 | get name     # -> plain text: one value per line
 ps | filter state == R | count
 files list / | to-json
-cat /proc/threads | filter PRIO > 1          # plain text with a header row works too
-ps | grep msh                                # a text tool after ps: ps prints text
+text show /proc/threads | filter PRIO > 1    # plain text with a header row works too
+ps | text find msh                           # a text tool after ps: ps prints text
 ```
 
 ### Rules
 
-1. **Producers** (`ps`, `files list`, `trash list`, `env`, `network status`, `disks list`, ...) print normal text, unless the environment variable
+1. **Producers** (`ps`, `files list`, `trash list`, `variables list`, `text count`, `network status`,
+   `disks list`, ...) print normal text, unless the environment variable
    `MILK_TABLE=1` is set, then they print a table. They never guess from the fd.
 2. **msh decides**, per pipeline stage, from the command names:
    * a stage whose next stage is a table command gets `MILK_TABLE=1`;
@@ -66,8 +111,8 @@ ps | grep msh                                # a text tool after ps: ps prints t
    * wherever a table would flow into something that isn't a table command (a text
      tool, or the end of the pipeline: the terminal or a `>` file), msh inserts an
      implicit `table` stage that renders it as aligned text.
-   So `ps | grep msh` is a plain text pipe, and `ps | filter ... | grep x` renders the
-   table to text before `grep` sees it.
+   So `ps | text find msh` is a plain text pipe, and `ps | filter ... | text find x` renders
+   the table to text before `text find` sees it.
 3. **Table commands** given text instead of a table treat the first line as a header and
    split every line on runs of spaces (numbers become ints). So any columnar text works:
    `/proc/threads`, `disks list`-style output, a `ps` run without msh.
@@ -96,7 +141,7 @@ Values: `int` and `size` columns compare numerically; a `size` literal may have 
 
 ### Wire format (`rt::table`)
 
-Line-based UTF-8, so it survives any byte pipe and is readable with `cat`:
+Line-based UTF-8, so it survives any byte pipe and is readable with `text show`:
 
 ```text
 \x1emilk-table 1                      first line: ASCII RS + magic + version
@@ -117,7 +162,10 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
   mode:str (rwxr-xr-x), owner:str, modified:str`
 * `trash list`: `name:str, from:str (where it was), deleted:str, days_left:int (empty:
   never), size:size, trash:str (the Trash folder it is in)`
-* `env`: `name:str, value:str`
+* `variables list`: `name:str, value:str, exported:str (yes/no)`
+* `text count`: `lines:int, words:int, bytes:int, file:str` (only the counts asked for;
+  `file` only when files were named, a `total` row for several)
+* `text unique --count`: `count:int, line:str`
 * `apps list`: `name:str, version:ver, auto:str (yes/no), description:str`
 * `apps search`: `name:str, version:ver (newest), installed:ver (empty if not), status:str
   (installed / upgrade / available), description:str`

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # statfs/fstatfs and `disks list` against the Mac's own numbers (private images in a fresh /tmp
 # directory; the Mac share read-only; only the qemu started here is killed, by PID).
-#   milkfs (64 MiB image): size = the image; used grows by what's written (cat /Commands/*); a
+#   milkfs (64 MiB image): size = the image; used grows by what's written (text show /Commands/*); a
 #          snapshot reports read-only; disks list /Users/milk = the volume (bind mounts not repeated)
 #   FAT32 (64 MiB, mkfat.sh): size and free space = the image's BPB and FSInfo
 #   9p (/Volumes/Mac): size = what the Mac says about the share's disk (os.statvfs)
@@ -35,16 +35,16 @@ trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
 # A first command that only lets the boot finish: services still starting print their
 # banners over the first prompt, so a real command typed there wouldn't sit on its own line.
-args=("wait:$P" "send:sleep 1" "wait:$P")
+args=("wait:$P" "send:pause 1" "wait:$P")
 for c in \
   "disks list" "disks list --all" "disks list --human" "MILK_TABLE=1 disks list" \
   "disks list /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
-  "cat /Commands/* > /Volumes/Milk/big.bin" "echo now > /System/Kernel/fs/milkfs/sync" "wc -c /Volumes/Milk/big.bin" "disks list /Volumes/Milk" \
+  "text show /Commands/* > /Volumes/Milk/big.bin" "print now > /System/Kernel/fs/milkfs/sync" "text count --bytes /Volumes/Milk/big.bin" "disks list /Volumes/Milk" \
   "disks snapshot dfsnap" "disks list /Volumes/Milk/.snapshots/dfsnap" \
   "disks list /no/such/path"; do
   args+=("send:$c" "wait:$P")
 done
-python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:echo DF""-DONE" "wait:DF-DONE" "done:$T/done" &
+python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print DF""-DONE" "wait:DF-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
 kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
@@ -94,7 +94,7 @@ hu=$(echo "$P1" | col /Users/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
 [ "$(echo "$P1" | col /Users/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
   && ok "disks list /Users/milk = disks list /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
 u0=$(echo "$DF" | col /Volumes/Milk 3); u1=$(out "disks list /Volumes/Milk" | col /Volumes/Milk 3)
-big=$(( $(out "wc -c /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
+big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
 [ -n "$u0" ] && [ -n "$u1" ] && [ "$big" -gt 1024 ] && [ $((u1 - u0)) -ge "$big" ] && [ $((u1 - u0)) -le $((big + big / 10 + 64)) ] \
   && ok "$big K written: used $u0 -> $u1 K" || bad "used: $u0 -> $u1 K after writing $big K"
 out "disks list /Volumes/Milk/.snapshots/dfsnap" | grep -q "^milkfs .* /Volumes/Milk/.snapshots/dfsnap (ro)$" && ok "a snapshot: milkfs, read-only" || bad "snapshot statfs"

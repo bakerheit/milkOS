@@ -1,0 +1,9 @@
+[package]
+name = "textbuf"
+version.workspace = true
+edition.workspace = true
+
+# The Text Editor's buffer: lines, cursor and selection, undo/redo, find/replace, UTF-8 in and
+# out. No syscalls and no dependencies, so it also builds and tests on the Mac:
+#   cd user && cargo test -p textbuf --target aarch64-apple-darwin
+[lib]

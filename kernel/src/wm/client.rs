@@ -8,18 +8,25 @@
 //! destroys the window (after it unmapped them) or once the process is gone. Closing the
 //! window on screen only hides it and sends a Close event; the frames stay until then.
 //!
+//! Two buffers per window. The *shared* buffer is the client's drawing board: it clears and
+//! redraws it at will, mid-frame states and all. The *front* buffer is the compositor's copy,
+//! private to the kernel: [`commit`] (the client's "frame done") copies the committed rect from
+//! the shared buffer into it, under a lock the compositor also takes while it reads. So the
+//! screen only ever shows frames the client called done, never a half-drawn one.
+//!
 //! The wm thread sees a client window as a normal [`WindowContents`] ([`ClientView`]) that
-//! blits the shared buffer into the window body.
+//! blits the front buffer into the window body.
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::gfx::Rect;
 use crate::mmu::{PAGE_SIZE, phys_to_virt};
-use crate::sched::WaitQueue;
+use crate::sched::{Mutex, WaitQueue};
 use crate::sync::SpinLock;
 use crate::{pmm, proc};
 
@@ -58,7 +65,63 @@ pub const K_LEFT: u32 = 0x1_0007;
 pub const K_RIGHT: u32 = 0x1_0008;
 pub const K_DELETE: u32 = 0x1_0009;
 
+/// The compositor's copy of a client window's last committed picture (`w` x `h`, stride `w`).
+/// Frames are contiguous PMM memory, given back on drop.
+struct Front {
+    pa: usize,
+    pages: usize,
+    w: u32,
+    h: u32,
+}
+
+impl Front {
+    /// A milk-white `w` x `h` picture. `None` if out of memory.
+    fn new(w: u32, h: u32) -> Option<Front> {
+        let pages = ((w * h * 4) as usize).div_ceil(PAGE_SIZE);
+        let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
+        let f = Front { pa, pages, w, h };
+        // SAFETY: fresh frames we own.
+        unsafe { f.pixels_mut().fill(MILK) };
+        Some(f)
+    }
+
+    fn pixels(&self) -> &[u32] {
+        // SAFETY: the frames are ours for as long as the Front lives; only whoever holds the
+        // lock around it reaches this.
+        unsafe {
+            core::slice::from_raw_parts(
+                phys_to_virt(self.pa) as *const u32,
+                (self.w * self.h) as usize,
+            )
+        }
+    }
+
+    /// # Safety
+    /// The caller has exclusive access (the lock around the Front, or it is not shared yet).
+    #[allow(clippy::mut_from_ref)]
+    unsafe fn pixels_mut(&self) -> &mut [u32] {
+        // SAFETY: see above.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                phys_to_virt(self.pa) as *mut u32,
+                (self.w * self.h) as usize,
+            )
+        }
+    }
+}
+
+impl Drop for Front {
+    fn drop(&mut self) {
+        pmm::free_contiguous(self.pa, self.pages);
+    }
+}
+
+type SharedFront = Arc<Mutex<Front>>;
+
 struct Client {
+    /// What the compositor shows (see the module docs). The Arc is cloned out of [`CLIENTS`]
+    /// before the (sleeping) lock inside it is taken.
+    front: SharedFront,
     pid: u32,
     w: u32,
     h: u32,
@@ -97,6 +160,7 @@ pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
     }
     let bytes = (w * h * 4) as usize;
     let pages = bytes.div_ceil(PAGE_SIZE);
+    let front = Front::new(w, h)?;
     let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
     // Start milk-white rather than black.
     // SAFETY: fresh frames we own.
@@ -107,6 +171,7 @@ pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
     CLIENTS.lock().insert(
         id,
         Client {
+            front: Arc::new(Mutex::new(front)),
             pid,
             w,
             h,
@@ -149,6 +214,7 @@ pub fn resize(pid: u32, id: u32, w: u32, h: u32) -> Option<(Created, (usize, usi
     }
     let bytes = (w * h * 4) as usize;
     let pages = bytes.div_ceil(PAGE_SIZE);
+    let new_front = Front::new(w, h)?;
     let pa = pmm::alloc_contiguous_zeroed(pages, 1)?;
     let mut c = CLIENTS.lock();
     let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
@@ -177,7 +243,21 @@ pub fn resize(pid: u32, id: u32, w: u32, h: u32) -> Option<(Created, (usize, usi
     cl.w = w;
     cl.h = h;
     cl.dirty = Some(Rect::new(0, 0, w as i32, h as i32));
+    let front = cl.front.clone();
     drop(c);
+    // The compositor's copy follows: the old committed picture in the top left of the new
+    // size. (A commit that lands between the two steps sees the sizes differ and waits for the
+    // client's next one; the whole window is dirty anyway.)
+    {
+        let mut f = front.lock();
+        let (cw, ch) = (f.w.min(w) as usize, f.h.min(h) as usize);
+        // SAFETY: `new_front` is not shared yet.
+        let dst = unsafe { new_front.pixels_mut() };
+        for y in 0..ch {
+            dst[y * w as usize..][..cw].copy_from_slice(&f.pixels()[y * f.w as usize..][..cw]);
+        }
+        *f = new_front;
+    }
     if own {
         request(Request::ClientResized(id));
     }
@@ -206,19 +286,46 @@ pub fn body_size(id: u32, w: i32, h: i32) {
     }
 }
 
-/// MILK_WIN_COMMIT: `r` of the buffer changed (whole buffer if empty).
+/// MILK_WIN_COMMIT: `r` of the buffer changed (whole buffer if empty). This is the client's
+/// "frame done": the rect is copied into the compositor's front buffer, so a frame the client
+/// is still drawing is never shown.
 pub fn commit(pid: u32, id: u32, r: Rect) -> bool {
+    let (front, pa, w, h, r) = {
+        let c = CLIENTS.lock();
+        let Some(cl) = c.get(&id).filter(|cl| cl.pid == pid) else {
+            return false;
+        };
+        let full = Rect::new(0, 0, cl.w as i32, cl.h as i32);
+        let r = if r.is_empty() {
+            full
+        } else {
+            super::paint::intersect(&r, &full)
+        };
+        (cl.front.clone(), cl.pa, cl.w, cl.h, r)
+    };
+    if !r.is_empty() {
+        // The lock is a sleeping one, so it is taken with CLIENTS released. The compositor
+        // holds it while it reads the front buffer, so it never sees a half-copied rect.
+        let f = front.lock();
+        if f.w == w && f.h == h {
+            // SAFETY: the shared buffer is the client's, which is us (it is blocked in this
+            // syscall; a second thread of it drawing at the same moment is its own tearing);
+            // the front buffer is ours under the lock.
+            unsafe {
+                let src =
+                    core::slice::from_raw_parts(phys_to_virt(pa) as *const u32, (w * h) as usize);
+                let dst = f.pixels_mut();
+                for y in r.y..r.y + r.h {
+                    let at = y as usize * w as usize + r.x as usize;
+                    dst[at..at + r.w as usize].copy_from_slice(&src[at..at + r.w as usize]);
+                }
+            }
+        }
+    }
     let mut c = CLIENTS.lock();
-    let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) else {
-        return false;
-    };
-    let full = Rect::new(0, 0, cl.w as i32, cl.h as i32);
-    let r = if r.is_empty() {
-        full
-    } else {
-        super::paint::intersect(&r, &full)
-    };
-    cl.dirty = Some(cl.dirty.map_or(r, |d| d.union(&r)));
+    if let Some(cl) = c.get_mut(&id).filter(|cl| cl.pid == pid) {
+        cl.dirty = Some(cl.dirty.map_or(r, |d| d.union(&r)));
+    }
     drop(c);
     super::WAKE.wake_all();
     true
@@ -383,6 +490,7 @@ fn encode(kind: u32, x: i32, y: i32, key: u32, mods: u32, extra: i32) -> [u8; EV
 /// What the wm holds for a client window.
 pub struct ClientView {
     id: u32,
+    front: Option<SharedFront>,
     title: String,
     title_gen: u32,
     /// The pointer is pressed inside (so moves are sent as drags too).
@@ -392,8 +500,10 @@ pub struct ClientView {
 impl ClientView {
     pub fn new(id: u32) -> Box<ClientView> {
         let title = info(id).map_or(String::from("App"), |i| i.2);
+        let front = CLIENTS.lock().get(&id).map(|cl| cl.front.clone());
         Box::new(ClientView {
             id,
+            front,
             title,
             title_gen: 0,
             last: (-1, -1),
@@ -425,22 +535,21 @@ impl WindowContents for ClientView {
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
         // A resizable client follows its window (a resize drag, a tab group).
         body_size(self.id, w, h);
-        // Copy the geometry out and blit without holding the lock (IRQs stay on). If the
-        // process destroys the window meanwhile, the worst case is one frame of stale pixels.
-        let Some((pa, cw, ch)) = CLIENTS
-            .lock()
-            .get(&self.id)
-            .map(|cl| (cl.pa, cl.w as i32, cl.h as i32))
+        // The window is gone (its process destroyed it): nothing to show.
+        let Some(front) = self
+            .front
+            .as_ref()
+            .filter(|_| CLIENTS.lock().contains_key(&self.id))
         else {
             p.fill(0, 0, w, h, MILK);
             return;
         };
-        // SAFETY: the frames belong to the client table until the process is gone and the
-        // window closed; the process may be writing them concurrently (tearing at worst).
-        let px = unsafe {
-            core::slice::from_raw_parts(phys_to_virt(pa) as *const u32, (cw * ch) as usize)
-        };
-        p.blit_raw(0, 0, px, cw as usize, cw, ch);
+        // The front buffer holds the last committed frame; the lock keeps a commit from
+        // rewriting it while it is copied out.
+        let f = front.lock();
+        let (cw, ch) = (f.w as i32, f.h as i32);
+        p.blit_raw(0, 0, f.pixels(), cw as usize, cw, ch);
+        drop(f);
         if w > cw {
             p.fill(cw, 0, w - cw, h, MILK);
         }

@@ -411,22 +411,24 @@ pub fn group6(
         }
         let have = s.groups6.iter().position(|&m| m == (group, k));
         match (join, have) {
-            (true, Some(_)) => Err(EADDRINUSE),
+            (true, Some(_)) => return Err(EADDRINUSE),
             (true, None) => {
                 if s.groups6.len() >= 20 {
                     return Err(ENOBUFS);
                 }
                 s.groups6.push((group, k));
                 st.iface.links[k].v6.mld.join(group);
-                Ok(())
             }
             (false, Some(p)) => {
                 s.groups6.swap_remove(p);
                 st.iface.links[k].v6.mld.leave(group);
-                Ok(())
             }
-            (false, None) => Err(EADDRNOTAVAIL),
+            (false, None) => return Err(EADDRNOTAVAIL),
         }
+        // Report the change now rather than on the next stack tick, so the join is on the
+        // wire before anything the caller sends to the group right after this call.
+        super::mld::tick(st, k);
+        Ok(())
     })
 }
 

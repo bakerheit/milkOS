@@ -291,6 +291,34 @@ def spaces(t):
     return compose(t["milk"], [g], border=t["sand"])
 
 
+def _trash_can(g, t, lid=True):
+    """The can: a lid with its handle (when shut), a slightly tapered body with three ribs."""
+    if lid:
+        g.rr(20.2, 8.8, 7.6, 5.0, 1.8, None, outline=t["esp"], width=2.0)
+        g.rr(11.5, 12.6, 25, 3.6, 1.6, t["esp"])
+    g.poly([(13.6, 18.0), (34.4, 18.0), (32.6, 38.6), (15.4, 38.6)], t["esp"])
+    g.poly([(16.0, 20.4), (32.0, 20.4), (30.5, 36.2), (17.5, 36.2)], t["sand"])
+    for x in (20.6, 24.0, 27.4):
+        g.line([(x, 23.4), (x, 33.4)], 2.0, t["esp"])
+
+
+def trash(t):
+    """The Trash, empty: a sand tile, an espresso can with its lid on."""
+    g = Glyph()
+    _trash_can(g, t)
+    return compose(t["sand"], [g])
+
+
+def trash_full(t):
+    """The Trash with something in it: the lid off and crumpled paper over the rim (the accent: one straw sheet)."""
+    g = Glyph()
+    _trash_can(g, t, lid=False)
+    g.ell(19.0, 15.4, 5.0, 4.4, fill=t["milk"], outline=t["esp"], width=1.8)
+    g.ell(29.4, 14.6, 5.4, 4.6, fill=STRAW, outline=t["esp"], width=1.8)
+    g.ell(24.2, 11.6, 4.4, 3.9, fill=t["milk"], outline=t["esp"], width=1.8)
+    return compose(t["sand"], [g])
+
+
 def file_document(t):
     g = Glyph()
     g.rr(13, 8.5, 22, 31, 3.2, None, outline=t["esp"], width=2.4)
@@ -336,7 +364,8 @@ def file_package(t):
 
 
 ICONS = [("files", files), ("terminal", terminal), ("browser", browser), ("notes", notes), ("paint", paint), ("music", music), ("settings", settings),
-         ("text-editor", text_editor), ("calendar", calendar), ("clock", clock), ("preview", preview), ("activity", activity), ("store", store), ("spaces", spaces), ("today", today), ("disk-utility", disk_utility), ("reminders", reminders)]
+         ("text-editor", text_editor), ("calendar", calendar), ("clock", clock), ("preview", preview), ("activity", activity), ("store", store), ("spaces", spaces), ("today", today), ("disk-utility", disk_utility), ("reminders", reminders),
+         ("trash", trash), ("trash-full", trash_full)]
 FILE_ICONS = [("file-folder", files), ("file-document", file_document), ("file-image", file_image), ("file-audio", file_audio), ("file-archive", file_archive),
               ("file-package", file_package)]
 FILE_SIZES = [56, 36]

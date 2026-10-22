@@ -6,7 +6,7 @@
 //!   older than 30 s)
 //! * Settings sections
 //! * `= 2+2*3` the calculator: + - * / % ^, parentheses, decimals
-//! * `> ls /Commands` a shell command, run in a new Terminal tab
+//! * `> files list /Commands` a shell command, run in a new Terminal tab
 
 use alloc::format;
 use alloc::string::String;

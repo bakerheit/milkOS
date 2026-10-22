@@ -258,6 +258,8 @@ pub(super) enum DockAction {
     Spaces,
     /// An installed package (`packages::get(i)`).
     Pkg(usize),
+    /// The Trash, at the right end: opens it in Files; files dropped on it go in.
+    Trash,
 }
 
 struct DockItem {
@@ -352,7 +354,7 @@ pub(super) fn dock_action(i: usize) -> Option<DockAction> {
 }
 
 pub fn dock_len() -> usize {
-    DOCK.len() + super::packages::count()
+    DOCK.len() + super::packages::count() + 1
 }
 
 fn tiles() -> Vec<Tile> {
@@ -380,6 +382,16 @@ fn tiles() -> Vec<Tile> {
             action: DockAction::Pkg(i),
         });
     }
+    // The Trash, last: empty or full (super::trash keeps track).
+    let full = super::trash::full();
+    v.push(Tile {
+        name: String::from("Trash"),
+        art: Some(if full { "trash-full" } else { "trash" }),
+        icon: Some(if full { Icon::TrashFull } else { Icon::Trash }),
+        bg: SAND,
+        fg: ESPRESSO,
+        action: DockAction::Trash,
+    });
     v
 }
 
@@ -432,6 +444,10 @@ impl Desktop {
                 if let Some(p) = super::packages::get(k) {
                     self.launch_package(&p);
                 }
+            }
+            DockAction::Trash => {
+                super::apps::files::show_path(super::apps::files::TRASH);
+                self.open(App::Files);
             }
         }
     }
@@ -795,7 +811,8 @@ fn home_app_rect(k: usize, w: i32) -> Option<Rect> {
 /// Which dock tile the Apps card has at (x, y), in card coordinates.
 fn home_app_at(x: i32, y: i32) -> Option<usize> {
     let w = card_rect(5).w;
-    (0..tiles().len()).find(|&k| home_app_rect(k, w).is_some_and(|r| hit(&r, x, y)))
+    // Every tile but the Trash (the last one).
+    (0..tiles().len() - 1).find(|&k| home_app_rect(k, w).is_some_and(|r| hit(&r, x, y)))
 }
 
 /// A dock tile's icon, `s` across at (x, y): its glyph, or a package's colour and initial.
@@ -1208,6 +1225,7 @@ impl Desktop {
             DockAction::Pkg(k) => {
                 super::packages::get(k).is_some_and(|p| p.window && self.running_program(&p.exec))
             }
+            DockAction::Trash => false,
         }
     }
 
@@ -1239,6 +1257,7 @@ impl Desktop {
                 DockAction::Program(p) => self.running_program(p),
                 DockAction::Pkg(k) => super::packages::get(k)
                     .is_some_and(|p| p.window && self.running_program(&p.exec)),
+                DockAction::Trash => false,
             };
             if running {
                 p.rrect(
@@ -1552,8 +1571,11 @@ impl Desktop {
             }
             _ => {
                 label(p, "APPS");
-                // The same tiles as the dock, in the same order.
+                // The same tiles as the dock, in the same order (not the Trash).
                 for (k, t) in tiles().iter().enumerate() {
+                    if matches!(t.action, DockAction::Trash) {
+                        break;
+                    }
                     let Some(r) = home_app_rect(k, w) else {
                         break;
                     };

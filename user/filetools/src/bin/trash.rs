@@ -152,21 +152,28 @@ fn list(out: &mut Out, home: &str, table: bool) -> i32 {
         .max()
         .unwrap_or(7)
         .max(7);
-    let _ = writeln!(
-        out,
-        "{:<wn$}  {:<wf$}  {:<wd$}  {:>9}  {:>7}",
-        "NAME", "FROM", "DELETED", "DAYS LEFT", "SIZE"
+    // The size column only when it fits the terminal.
+    let with_size = wn + wf + wd + 9 + 7 + 8 <= sys::term_cols();
+    let mut head = format!(
+        "{:<wn$}  {:<wf$}  {:<wd$}  {:>9}",
+        "NAME", "FROM", "DELETED", "DAYS LEFT"
     );
+    if with_size {
+        let _ = write!(head, "  {:>7}", "SIZE");
+    }
+    out.line(&head);
     let mut total = 0;
     for (name, from, del, left, bytes, _) in &rows {
         total += bytes;
         let from = &tilde(from, home);
-        let _ = writeln!(
-            out,
-            "{name:<wn$}  {from:<wf$}  {del:<wd$}  {:>9}  {:>7}",
-            days_left_text(*left),
-            size(*bytes)
+        let mut l = format!(
+            "{name:<wn$}  {from:<wf$}  {del:<wd$}  {:>9}",
+            days_left_text(*left)
         );
+        if with_size {
+            let _ = write!(l, "  {:>7}", size(*bytes));
+        }
+        out.line(&l);
     }
     let how = match keep {
         filekit::trash::Keep::Forever => {

@@ -1174,6 +1174,48 @@ impl BuiltinShell {
     fn path(&self, arg: &str) -> String {
         fsx::resolve(&self.cwd, arg)
     }
+
+    /// `files list [-l] TARGET`.
+    fn files_list(&self, target: &str, long: bool, out: &mut Output) {
+        let p = self.path(target);
+        match fsx::list(&p) {
+            Ok(items) if long => {
+                for e in items {
+                    let kind = match e.kind {
+                        InodeType::Dir => "folder",
+                        InodeType::Symlink => "link",
+                        InodeType::CharDev | InodeType::BlockDev => "device",
+                        _ => "file",
+                    };
+                    out.out(&format!(
+                        "{kind:<6} {:>8}  {}",
+                        fsx::human_size(e.size),
+                        e.name
+                    ));
+                }
+            }
+            Ok(items) => {
+                let mut line = String::new();
+                for e in items {
+                    let name = if e.kind == InodeType::Dir {
+                        format!("{}/", e.name)
+                    } else {
+                        e.name
+                    };
+                    if line.len() + name.len() + 2 > 60 {
+                        out.good(&line);
+                        line.clear();
+                    }
+                    line.push_str(&name);
+                    line.push_str("  ");
+                }
+                if !line.is_empty() {
+                    out.good(&line);
+                }
+            }
+            Err(e) => out.bad(&format!("files: {target}: {e}")),
+        }
+    }
 }
 
 const COW: &str = r"        \   ^__^
@@ -1196,7 +1238,8 @@ impl Shell for BuiltinShell {
         let arg = rest.join(" ");
         match cmd {
             "help" => {
-                out.out("files:    ls [-l] cd pwd cat mkdir touch rm  echo text > file");
+                out.out("files:    files list [-l] | create NAME | delete [--now] PATH,  trash");
+                out.out("          cd pwd cat  echo text > file");
                 out.out("          edit <file> (opens it in Notes)");
                 out.out("system:   uname uptime date mem log whoami clear");
                 out.out("desktop:  open <files|notes|about|terminal>  notify <text>");
@@ -1274,51 +1317,62 @@ impl Shell for BuiltinShell {
             },
             "whoami" => out.out(user_name()),
             "hostname" => out.out("milk"),
-            "ls" => {
-                let long = rest.first() == Some(&"-l");
-                let target = rest
+            // A little of `files` (user/filetools has the whole thing, in msh).
+            "files" => {
+                let sub = rest.first().copied().unwrap_or("help");
+                let now = rest.contains(&"--now");
+                let long = rest.contains(&"-l") || rest.contains(&"--long");
+                let args: Vec<&str> = rest
                     .iter()
-                    .find(|a| !a.starts_with('-'))
+                    .skip(1)
+                    .filter(|a| !a.starts_with('-'))
                     .copied()
-                    .unwrap_or(".");
-                let p = self.path(target);
-                match fsx::list(&p) {
-                    Ok(items) if long => {
-                        for e in items {
-                            let kind = match e.kind {
-                                InodeType::Dir => 'd',
-                                InodeType::Symlink => 'l',
-                                InodeType::CharDev => 'c',
-                                InodeType::BlockDev => 'b',
-                                _ => '-',
-                            };
-                            out.out(&format!(
-                                "{kind} {:>8}  {}",
-                                fsx::human_size(e.size),
-                                e.name
-                            ));
-                        }
-                    }
-                    Ok(items) => {
-                        let mut line = String::new();
-                        for e in items {
-                            let name = if e.kind == InodeType::Dir {
-                                format!("{}/", e.name)
+                    .collect();
+                match sub {
+                    "list" => self.files_list(args.first().copied().unwrap_or("."), long, out),
+                    "create" => {
+                        for a in &args {
+                            let p = self.path(a);
+                            let r = if a.ends_with('/') {
+                                fs::mkdir_all(&p, 0o755)
+                            } else if fs::stat(&p).is_err() {
+                                fs::write_file(&p, b"")
                             } else {
-                                e.name
+                                Ok(())
                             };
-                            if line.len() + name.len() + 2 > 60 {
-                                out.good(&line);
-                                line.clear();
+                            if let Err(e) = r {
+                                out.bad(&format!("files: {a}: {e}"));
                             }
-                            line.push_str(&name);
-                            line.push_str("  ");
-                        }
-                        if !line.is_empty() {
-                            out.good(&line);
                         }
                     }
-                    Err(e) => out.bad(&format!("ls: {target}: {e}")),
+                    "delete" => {
+                        for a in &args {
+                            let p = self.path(a);
+                            if !fsx::is_dir(&p) && a.ends_with('/') {
+                                out.bad(&format!("files: {} is a file, not a folder", a.trim_end_matches('/')));
+                                continue;
+                            }
+                            let r = if now {
+                                if fsx::is_dir(&p) { fs::rmdir(&p) } else { fs::unlink(&p) }
+                                    .map_err(|e| format!("{a}: {e}"))
+                            } else {
+                                super::super::trash::move_to_trash(&p).map(|_| ())
+                            };
+                            if let Err(m) = r {
+                                out.bad(&format!("files: {m}"));
+                            }
+                        }
+                    }
+                    _ => out.out("files list [-l] [PATH] | create NAME (NAME/ a folder) | delete [--now] PATH"),
+                }
+            }
+            "trash" => {
+                let items = super::super::trash::items();
+                if items.is_empty() {
+                    out.out("The Trash is empty.");
+                }
+                for it in items {
+                    out.out(&format!("{}  (from {})", it.name, fsx::pretty(it.from())));
                 }
             }
             "cd" => {
@@ -1340,36 +1394,6 @@ impl Shell for BuiltinShell {
                             }
                         }
                         Err(e) => out.bad(&format!("cat: {a}: {e}")),
-                    }
-                }
-            }
-            "mkdir" => {
-                for a in &rest {
-                    if let Err(e) = fs::mkdir_all(&self.path(a), 0o755) {
-                        out.bad(&format!("mkdir: {a}: {e}"));
-                    }
-                }
-            }
-            "touch" => {
-                for a in &rest {
-                    let p = self.path(a);
-                    if fs::stat(&p).is_err()
-                        && let Err(e) = fs::write_file(&p, b"")
-                    {
-                        out.bad(&format!("touch: {a}: {e}"));
-                    }
-                }
-            }
-            "rm" => {
-                for a in &rest {
-                    let p = self.path(a);
-                    let r = if fsx::is_dir(&p) {
-                        fs::rmdir(&p)
-                    } else {
-                        fs::unlink(&p)
-                    };
-                    if let Err(e) = r {
-                        out.bad(&format!("rm: {a}: {e}"));
                     }
                 }
             }

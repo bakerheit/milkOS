@@ -234,7 +234,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .typ("pwd")
                 .enter()
                 .wait(200)
-                .typ("ls")
+                .typ("files list")
                 .enter()
                 .wait(200);
             b.typ("cat /System/Settings/motd").enter().wait(300);
@@ -382,7 +382,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.to(x, y).wait(30).down().wait(30).up();
         }
         "lsbin" => {
-            b.wait(300).typ("ls /Commands").enter().wait(600);
+            b.wait(300).typ("files list /Commands").enter().wait(600);
         }
         // Terminal tabs (the boot Terminal has the focus).
         "tabs" => {
@@ -390,7 +390,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             b.typ("echo second tab on $(tty)").enter().wait(300);
             b.typ("echo second tab").enter().wait(300);
             b.key(Key::Char('t'), Mods::META).wait(500);
-            b.typ("ls /Commands").enter().wait(600);
+            b.typ("files list /Commands").enter().wait(600);
         }
         "tabswitch" => {
             b.wait(300).key(Key::Char('t'), Mods::META).wait(500);
@@ -442,7 +442,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(800);
             b.click(200, 96).wait(300);
             b.click(700, 450)
-                .typ("rm Documents/todo.txt")
+                .typ("files delete Documents/todo.txt")
                 .enter()
                 .wait(400);
             b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
@@ -457,7 +457,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(800);
             b.click(200, 96).wait(300);
             b.click(700, 450)
-                .typ("rm Documents/todo.txt")
+                .typ("files delete Documents/todo.txt")
                 .enter()
                 .wait(400);
             b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
@@ -473,7 +473,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .wait(800);
             b.click(200, 96).wait(300);
             b.click(700, 450)
-                .typ("rm Documents/todo.txt")
+                .typ("files delete Documents/todo.txt")
                 .enter()
                 .wait(400);
             b.click(200, 300).wait(200).click(639, 117).wait(300); // the toolbar clock
@@ -584,7 +584,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         }
         "clear" => {
             b.wait(300)
-                .typ("ls /Commands")
+                .typ("files list /Commands")
                 .enter()
                 .wait(400)
                 .typ("clear")
@@ -606,7 +606,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         "skimcmd" => {
             b.key(Key::Char(' '), Mods::META)
                 .wait(150)
-                .typ("> ls /Commands")
+                .typ("> files list /Commands")
                 .wait(200)
                 .enter()
                 .wait(1200);
@@ -761,7 +761,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 let (x, y) = dock_icon_center(1);
                 b.click(x, y).wait(400);
                 b.typ("clear").enter().wait(200);
-                b.typ("ls ~/Documents").enter().wait(300);
+                b.typ("files list ~/Documents").enter().wait(300);
                 b.typ("audit --event powerbox").enter().wait(500);
                 b.typ("audit --event sandbox").enter().wait(800);
             }
@@ -1264,7 +1264,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
         // dock re-centres, the others sliding aside. slow-dock-slide catches it moving.
         "dock-slide" => {
             b.wait(300)
-                .typ("echo milk | sudo -S msh -c \"mkdir -p /Apps/hello && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /Commands/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
+                .typ("echo milk | sudo -S msh -c \"files create /Apps/hello/ && echo -e 'format 1\\nname hello\\nversion 1.0.0\\nexec /Commands/hello\\ndock Hello #9CBF9B' > /Apps/hello/manifest\"")
                 .enter()
                 .wait(1500);
             b.0.push(Step::Packages);
@@ -1391,12 +1391,61 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 b.0.push(Step::Log("fontcycle: every font drawn"));
             }
         }
+        // files and the Trash (docs/filesystem.md, "Files and the Trash"). files-term: the
+        // command in the Terminal; trash-files: Files' Trash with an item selected (Restore);
+        // trash-dock: the dock's Trash, full, under the pointer; settings-trash: Settings > Trash.
+        "files-term" => {
+            b.click(TERM_ZOOM.0, TERM_ZOOM.1).wait(400);
+            b.typ("clear").enter().wait(200);
+            for c in [
+                "cd ~/Documents",
+                "files create plans.txt drafts/2026/",
+                "files copy todo.txt drafts",
+                "files list -l",
+                "files delete plans.txt drafts/",
+                "files delete todo.txt/",
+                "trash list",
+            ] {
+                b.typ(c).enter().wait(400);
+            }
+        }
+        "trash-files" | "trash-dock" | "settings-trash" => {
+            b.wait(300).typ("clear").enter().wait(200);
+            for c in [
+                "cd ~",
+                "files create 'old notes.txt' sketches/cows/ Documents/draft.md",
+                "files copy Documents/todo.txt todo-copy.txt",
+                "files delete 'old notes.txt' sketches todo-copy.txt Documents/draft.md",
+            ] {
+                b.typ(c).enter().wait(400);
+            }
+            b.wait(1200); // the dock's Trash notices within a second
+            match name {
+                "trash-files" => {
+                    let (x, y) = dock_icon_center(0);
+                    b.click(x, y).wait(600);
+                    b.click(137, 183 + 7 * 26).wait(400); // the sidebar's Trash
+                    b.click(500, 250).wait(400); // the newest item
+                }
+                "trash-dock" => {
+                    let (x, y) = super::shell::dock_tile_center("Trash").unwrap_or((0, 0));
+                    b.glide(x - 120, y, x, y, 8).wait(800);
+                }
+                _ => {
+                    let (x, y) = dock_icon_center(8);
+                    b.click(x, y)
+                        .wait(500)
+                        .click(181 + 60, 113 + 44 + 6 * 28 + 12)
+                        .wait(400);
+                }
+            }
+        }
         // Settings > About: the system details and the font credits.
         "settings-about" => {
             let (x, y) = dock_icon_center(8);
             b.click(x, y)
                 .wait(500)
-                .click(181 + 60, 113 + 44 + 6 * 28 + 12)
+                .click(181 + 60, 113 + 44 + 7 * 28 + 12)
                 .wait(400);
         }
         _ => return None,

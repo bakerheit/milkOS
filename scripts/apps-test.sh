@@ -57,19 +57,19 @@ q move 398 92 click sleep 1 screendump "$T/cal-month2.png"
 differ "$T/cal-month.png" "$T/cal-week.png" && differ "$T/cal-week.png" "$T/cal-day.png" && differ "$T/cal-day.png" "$T/cal-year.png" && ok "Day, Week, Month and Year each draw something different" || bad "the view buttons changed nothing"
 # A new event through the window: the New event button, a title, Return.
 q move 152 662 click sleep 1 type 'From the window' sleep 0.3 screendump "$T/cal-sheet.png" key ret sleep 1.5
-ser "send:cal list 2" "wait:$P" "send:files list -l /Users/milk/Library/Calendar" "wait:$P" "send:cat /dev/wm" "wait:$P"
+ser "send:cal list 2" "wait:$P" "send:files list -l /Users/milk/Library/Calendar" "wait:$P" "send:text show /dev/wm" "wait:$P"
 out "cal list 2" | grep -q "Seeded event" && ok "the seeded event is in the calendar file" || bad "seeded event missing"
 out "cal list 2" | grep -q "From the window" && ok "an event made in the window reached the file" || bad "the window's event did not reach the file: $(out "cal list 2")"
-out "cat /dev/wm" | grep -q "Calendar" && ok "the Calendar window is on the desktop" || bad "no Calendar window in /dev/wm"
+out "text show /dev/wm" | grep -q "Calendar" && ok "the Calendar window is on the desktop" || bad "no Calendar window in /dev/wm"
 ser "send:open clock" "wait:$P"
 sleep 3
 q screendump "$T/clock.png"
-ser "send:cat /dev/wm" "wait:$P"
+ser "send:text show /dev/wm" "wait:$P"
 tr -d '\r' < "$LOG" | grep -a "window .* Clock" >/dev/null && ok "the Clock window is on the desktop" || bad "no Clock window"
 [ "$(stat -f %z "$T/clock.png")" -gt 10000 ] && ok "Clock drew (screenshot $(stat -f %z "$T/clock.png") bytes)" || bad "Clock screenshot is empty"
 ser "send:open activity" "wait:$P"
 sleep 3
-ser "send:cat /dev/wm" "wait:$P"
+ser "send:text show /dev/wm" "wait:$P"
 q screendump "$T/activity-processes.png"
 # The Security tab: the window's position is in /dev/wm (outer rect), the body starts 1px right
 # and 33px down; the tab is 347 right and 20 down of that.
@@ -81,7 +81,7 @@ differ "$T/clock.png" "$T/activity-processes.png" && differ "$T/activity-process
 ser "send:remind add Quick thing tomorrow at 5pm" "wait:$P" "send:open reminders" "wait:$P"
 sleep 3
 q screendump "$T/reminders.png"
-ser "send:cat /dev/wm" "wait:$P" "send:remind list" "wait:$P"
+ser "send:text show /dev/wm" "wait:$P" "send:remind list" "wait:$P"
 tr -d '\r' < "$LOG" | grep -a "window .* Reminders" >/dev/null && ok "the Reminders window is on the desktop" || bad "no Reminders window"
 out "remind list" | grep -q "Quick thing" && ok "remind's sentence form reads the day and time" || bad "remind add did not understand the sentence"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"

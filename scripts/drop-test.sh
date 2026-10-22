@@ -111,14 +111,14 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   "waitfile:$WORK/bv6" \
   'send:drop send bob.local /Volumes/Milk/share/to-bob.bin' "wait:$DONE_RE" "$P" \
   "waitfile:$WORK/bhid" 'send:drop list' "$P" 'send:ping -6 -c 1 -W 500 bob.local' "$P" \
-  'send:echo milk | sudo -S -u nobody /Commands/netctl visible off' "$P" "done:$WORK/alist" \
-  'send:su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$P" \
+  'send:print milk | sudo -S -u nobody /Commands/netctl visible off' "$P" "done:$WORK/alist" \
+  'send:su milk -c "text show /System/Settings/milk/drop/identity.secret"' "$P" \
   'send:su milk -c "drop name alice"' "$P" \
-  'send:echo milk | sudo -S -u nobody /Commands/drop name evil' "$P" \
+  'send:print milk | sudo -S -u nobody /Commands/drop name evil' "$P" \
   'send:drop peers' "$P" \
   'send:files list /Users/milk/Downloads' "$P" \
   'send:audit --event user.drop' "$P" \
-  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
+  'send:print now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
@@ -143,7 +143,7 @@ python3 -I scripts/serial_drive.py "$WORK/bob.sock" "$WORK/bob.log" \
   "waitfile:$WORK/alice.done" \
   'send:drop recv -k' 'wait:receiving as' 'raw:\x03' "$P" \
   'send:audit --event user.drop' "$P" \
-  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" \
+  'send:print now > /System/Kernel/fs/milkfs/sync' "$P" \
   "done:$WORK/bob.done" >"$WORK/bob.drive" 2>&1 &
 DB=$!
 PIDS+=("$DB")
@@ -207,7 +207,7 @@ check "$B" "bob as milk received alice-as-milk's file" "drop: received /Users/mi
 echo "  ok  alice as milk sent to bob (signed by alice's daemon)"
 check "$B" "the file milk received is milk's" "^file +[rwx-]{9} +milk +[a-z]+ +1048576 .*to-bob \\(1\\)\\.bin$"
 check "$B" "root's receive into milk's Downloads is milk's too" "^file +[rwx-]{9} +milk +[a-z]+ +1048576 .*to-bob\\.bin$"
-grep -A1 'su milk -c "cat /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
+grep -A1 'su milk -c "text show /System/Settings/milk/drop/identity.secret"' "$A" | grep -q "ed25519-seed" && fail "milk can read the machine's secret key"
 echo "  ok  milk can't read /System/Settings/milk/drop/identity.secret"
 check "$A" "milk (admin) renames through the daemon" "drop: this machine is now alice \\(was alice\\)"
 check "$A" "audit: the daemon's rename names who asked" "user\\.drop\\.rename +old=alice new=alice by uid=501 user=milk"
@@ -279,7 +279,7 @@ boot alice 02:6d:6b:64:0a:0a "$PA" "$PB"
 QA=$!
 PIDS+=("$QA")
 python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice2.log" \
-  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
+  "$P" 'send:pause 1' "$P" 'send:drop id' "$P" 'send:drop peers' "$P" 'send:uname -n' "$P" "done:$WORK/alice2.done" >"$WORK/alice2.drive" 2>&1 &
 DA=$!
 PIDS+=("$DA")
 for _ in $(seq 600); do [ -e "$WORK/alice2.done" ] && break; sleep 0.1; done
@@ -317,8 +317,8 @@ boot carol 02:6d:6b:64:0c:0c "$PC" "$PD"
 QC=$!
 PIDS+=("$QC")
 python3 -I scripts/serial_drive.py "$WORK/carol.sock" "$WORK/carol.log" \
-  "$P" 'send:sleep 1' "$P" 'send:drop id' "$P" 'send:audit --event user.drop' "$P" \
-  'send:echo now > /System/Kernel/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
+  "$P" 'send:pause 1' "$P" 'send:drop id' "$P" 'send:audit --event user.drop' "$P" \
+  'send:print now > /System/Kernel/fs/milkfs/sync' "$P" "done:$WORK/carol.done" >"$WORK/carol.drive" 2>&1 &
 DC=$!
 PIDS+=("$DC")
 for _ in $(seq 600); do [ -e "$WORK/carol.done" ] && break; sleep 0.1; done

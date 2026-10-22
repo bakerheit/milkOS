@@ -66,8 +66,8 @@ differ() { python3 scripts/shotwait.py --differ "$T/$1.png" "$T/$2.png"; }
 # wait_window PATTERN: poll /dev/wm until a window matching PATTERN is listed (up to ~30 s).
 wait_window() {
   for _ in $(seq 30); do
-    ser "send:cat /dev/wm" "wait:$P"
-    out "cat /dev/wm" | grep -aq "window .* $1" && return 0
+    ser "send:text show /dev/wm" "wait:$P"
+    out "text show /dev/wm" | grep -aq "window .* $1" && return 0
     sleep 1
   done
   return 1
@@ -75,8 +75,8 @@ wait_window() {
 # wait_gone PATTERN: the same, until no window matches.
 wait_gone() {
   for _ in $(seq 30); do
-    ser "send:cat /dev/wm" "wait:$P"
-    out "cat /dev/wm" | grep -aq "window .* $1" || return 0
+    ser "send:text show /dev/wm" "wait:$P"
+    out "text show /dev/wm" | grep -aq "window .* $1" || return 0
     sleep 1
   done
   return 1
@@ -84,14 +84,14 @@ wait_gone() {
 # file_has WORD / file_lacks WORD: poll the saved file (up to ~20 s) until it has / lacks WORD.
 file_poll() { # has|lacks WORD
   for _ in $(seq 20); do
-    ser "send:cat /Users/milk/sample.rs" "wait:$P"
-    if out "cat /Users/milk/sample.rs" | grep -q "$2"; then [ "$1" = has ] && return 0; else [ "$1" = lacks ] && return 0; fi
+    ser "send:text show /Users/milk/sample.rs" "wait:$P"
+    if out "text show /Users/milk/sample.rs" | grep -q "$2"; then [ "$1" = has ] && return 0; else [ "$1" = lacks ] && return 0; fi
     sleep 1
   done
   return 1
 }
 # The window's position (outer rect) from /dev/wm: "window ... WxH+X+Y".
-winpos() { out "cat /dev/wm" | grep -a "window .* $1" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/'; }
+winpos() { out "text show /dev/wm" | grep -a "window .* $1" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/'; }
 
 ser "wait:$P"
 q move 785 615 click sleep 1
@@ -103,7 +103,7 @@ shot rust
 # Click at the end of the file's last line and type; the editor starts with the caret at the top.
 q move $((X + 300)) $((Y + 100)) click sleep 0.5 type 'ZZ'; shot typed
 q key meta_l-s
-file_poll has ZZ && ok "typing then Cmd-S wrote the change to the file" || bad "the saved file has no ZZ: $(out 'cat /Users/milk/sample.rs' | head -3)"
+file_poll has ZZ && ok "typing then Cmd-S wrote the change to the file" || bad "the saved file has no ZZ: $(out 'text show /Users/milk/sample.rs' | head -3)"
 # Undo and save again: back to the original.
 q key meta_l-z; shot undone
 q key meta_l-s
@@ -123,6 +123,6 @@ ser "send:/Apps/texteditor/texteditor /Users/milk/bin.dat &" "wait:$P"
 wait_window "bin.dat" || bad "no window for bin.dat"
 shot binary prose
 differ rust prose && differ prose binary && ok "prose and binary files drew differently" || bad "screens did not change"
-ser "send:cat /dev/wm" "wait:$P"
+ser "send:text show /dev/wm" "wait:$P"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "texteditor-test: PASS (screenshots in $T)"; else echo "texteditor-test: FAIL (logs and screenshots in $T)"; exit 1; fi

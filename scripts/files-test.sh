@@ -43,7 +43,7 @@ boot() { # name steps...
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -drive "file=$FAT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 2>/dev/null &
   QPID=$!
-  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:echo FILES""-DONE" "wait:FILES-DONE" "done:$T/$name.done" &
+  python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" "$@" "send:print FILES""-DONE" "wait:FILES-DONE" "done:$T/$name.done" &
   DPID=$!
   for _ in $(seq 900); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
   sleep 1
@@ -59,9 +59,9 @@ s() { local a="$1" c; shift; for c in "$@"; do eval "$a+=(\"send:\$c\" \"wait:\$
 B1=(); s B1 \
   "go" \
   "files create notes.txt projects/a/b/" \
-  "echo hello > notes.txt" \
+  "print hello > notes.txt" \
   "files create notes.txt" \
-  "cat notes.txt" \
+  "text show notes.txt" \
   "files list" \
   "files list -l" \
   "MILK_TABLE=1 files list" \
@@ -70,14 +70,14 @@ B1=(); s B1 \
   "files copy projects backup" \
   "files list backup backup/a" \
   "files copy notes.txt backup/notes.txt" \
-  "echo replaced > other.txt" \
+  "print replaced > other.txt" \
   "files copy --replace other.txt backup/notes.txt" \
-  "cat backup/notes.txt" \
+  "text show backup/notes.txt" \
   "files move backup/notes.txt moved.txt" \
   "files rename moved.txt renamed.txt" \
   "files rename renamed.txt a/b" \
   "files link renamed.txt latest" \
-  "cat latest" \
+  "text show latest" \
   "files copy backup backup/inner" \
   "files delete notes.txt/" \
   "files create renamed.txt/" \
@@ -93,11 +93,11 @@ B1=(); s B1 \
   "trash list" \
   "MILK_TABLE=1 trash list" \
   "trash restore notes.txt" \
-  "cat notes.txt" \
+  "text show notes.txt" \
   "trash restore notes.txt" \
   "trash restore ~/projects" \
   "files list projects/a" \
-  "echo stray > ~/.Trash/stray.txt" \
+  "print stray > ~/.Trash/stray.txt" \
   "trash restore stray.txt" \
   "files delete ~/.Trash/stray.txt" \
   "files delete --now renamed.txt" \
@@ -129,32 +129,32 @@ s B1 \
   "trash empty --yes" \
   "trash list" \
   "files create ~/.config/milk/" \
-  "echo 'trash = 1' > ~/.config/milk/settings" \
+  "print 'trash = 1' > ~/.config/milk/settings" \
   "files create old.txt" \
   "files delete old.txt" \
   "/System/Services/trashd --once" \
   "trash list" \
   "/System/Services/trashd --once --later 2" \
   "trash list" \
-  "echo 'trash = never' > ~/.config/milk/settings" \
+  "print 'trash = never' > ~/.config/milk/settings" \
   "files create keep.txt" \
   "files delete keep.txt" \
   "/System/Services/trashd --once --later 400" \
   "trash list" \
-  "echo 'trash = 1' > ~/.config/milk/settings" \
+  "print 'trash = 1' > ~/.config/milk/settings" \
   "files create boot.txt" \
   "files delete boot.txt" \
-  "echo path = /Users/milk/boot.txt > ~/.Trash/.trashinfo/boot.txt" \
-  "echo deleted = 1000000000 >> ~/.Trash/.trashinfo/boot.txt" \
+  "print path = /Users/milk/boot.txt > ~/.Trash/.trashinfo/boot.txt" \
+  "print deleted = 1000000000 >> ~/.Trash/.trashinfo/boot.txt" \
   "trash list" \
   "files create gotest/back/ gotest/inner/ gotest/notes.txt" \
   "go gotest/inner" \
-  "where | cat" \
+  "where | text show" \
   "go .." \
   "where" \
   "go back" \
   "where > /tmp/where.txt" \
-  "cat /tmp/where.txt" \
+  "text show /tmp/where.txt" \
   "go /Apps" \
   "where" \
   "go /Users/milk/gotest" \
@@ -177,7 +177,7 @@ s B1 \
   "files info 5" \
   "ps | filter name == msh | select name" \
   "help" \
-  "echo now > /System/Kernel/fs/milkfs/sync"
+  "print now > /System/Kernel/fs/milkfs/sync"
 L1="$(boot b1 "${B1[@]}")"
 echo "$L1" > "$T/b1.txt"
 
@@ -192,7 +192,7 @@ check() { # description command text [nth]
 
 echo "== create, copy, move, rename, link, list, info"
 check "create makes a file and a folder with its parents; create on a file sets its time" "files list" "projects/"
-[ "$(out "cat notes.txt" | tr -d ' ')" = "hello" ] && ok "create on an existing file leaves it be" || bad "create on an existing file"
+[ "$(out "text show notes.txt" | tr -d ' ')" = "hello" ] && ok "create on an existing file leaves it be" || bad "create on an existing file"
 check "files list --long: kind, permissions, owner, size, date" "files list -l" "file    rw-r--r--  root  wheel        6"
 check "files list gives msh a table" "MILK_TABLE=1 files list" "name:str	kind:str	size:size"
 check "files info: kind and size" "files info notes.txt" "kind         file"
@@ -200,8 +200,8 @@ check "files info: where" "files info notes.txt" "where        /Users/milk/notes
 check "files info: owner" "files info notes.txt" "owner        root, group wheel"
 check "copy into a folder, a folder with everything in it" "files list backup backup/a" "notes.txt"
 check "copy refuses to overwrite" "files copy notes.txt backup/notes.txt" "backup/notes.txt already exists (add --replace"
-check "copy --replace overwrites" "cat backup/notes.txt" "replaced"
-check "move, rename, link" "cat latest" "replaced"
+check "copy --replace overwrites" "text show backup/notes.txt" "replaced"
+check "move, rename, link" "text show latest" "replaced"
 check "rename wants a name, not a path" "files rename renamed.txt a/b" "a/b is a path, not a name"
 check "a folder can't be copied into itself" "files copy backup backup/inner" "can't copy backup into itself"
 
@@ -220,7 +220,7 @@ check "trash list: name, where from, when, days left" "trash list" "notes 2.txt 
 has "trash list" "today" && has "trash list" "30" && ok "trash list: deleted today, 30 days left" || bad "trash list dates"
 check "trash list as a table" "MILK_TABLE=1 trash list" "name:str	from:str	deleted:str	days_left:int"
 check "restore puts it back" "trash restore notes.txt" "put notes.txt back: /Users/milk/notes.txt"
-[ "$(out "cat notes.txt" 2 | tr -d ' ')" = "hello" ] && ok "the restored file is the first one" || bad "restored content: $(out "cat notes.txt" 2)"
+[ "$(out "text show notes.txt" 2 | tr -d ' ')" = "hello" ] && ok "the restored file is the first one" || bad "restored content: $(out "text show notes.txt" 2)"
 check "restore refuses when something is there" "trash restore notes.txt" "/Users/milk/notes.txt already exists, so notes 2.txt can't go back there" 2
 check "restore by the path it had" "files list projects/a" "b/"
 check "an item with no record says so" "trash restore stray.txt" "stray.txt has no record of where it came from"
@@ -249,9 +249,9 @@ check "days left: never" "trash list" "never" 8
 check "an item from 2001 is due" "trash list" "boot.txt" 9
 
 echo "== go and where"
-check "go into a folder two deep; where in a pipe" "where | cat" "/Users/milk/gotest/inner"
+check "go into a folder two deep; where in a pipe" "where | text show" "/Users/milk/gotest/inner"
 check "go .." "where" "/Users/milk/gotest"
-check "go back, where > file" "cat /tmp/where.txt" "/Users/milk/gotest/inner"
+check "go back, where > file" "text show /tmp/where.txt" "/Users/milk/gotest/inner"
 check "go /Apps (absolute)" "where" "/Apps" 2
 check "go ./back reaches a folder called back" "where" "/Users/milk/gotest/back" 3
 [ "$(out "where" 4 | tr -d ' \r')" = "/Users/milk" ] && ok "go with no folder goes home" || bad "go home: $(out "where" 4)"
@@ -274,7 +274,7 @@ check "help: filter" "help" "structured pipes (docs/shell.md): filter COL OP V, 
 
 echo "== boot 2: trashd ran at boot"
 L2="$(boot b2 \
-  "send:sleep 2" "wait:$P" \
+  "send:pause 2" "wait:$P" \
   "send:trash list" "wait:$P" \
   "send:log -u trashd" "wait:$P" \
   "send:svc status trashd" "wait:$P")"

@@ -3,7 +3,7 @@
 #   1. pass the boot self-tests (`[sched-test] PASS`, `[proc-test] PASS`: the scheduler
 #      self-test is a good wakeup/IPI stress on its own),
 #   2. reach the shell prompt,
-#   3. echo back M short commands typed over the UART one second apart (`echo tickK`, a
+#   3. echo back M short commands typed over the UART one second apart (`print tickK`, a
 #      burst of bytes per line, the way a person or a script types),
 # without the kernel's slow UART fallback poll ever having to rescue bytes (that would
 # mean an RX interrupt was lost). Guards the PL011 RX path, the tty-uart feeder's
@@ -78,7 +78,7 @@ for b in $(seq 1 "$BOOTS"); do
     done
     sleep 1
     for k in $(seq 1 "$CMDS"); do
-      printf 'echo tick%s\n' "$k"
+      printf 'print tick%s\n' "$k"
       sleep 1
     done
     sleep 60 # keep stdin open until we're killed

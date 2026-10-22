@@ -85,7 +85,7 @@ python3 -I scripts/serial_drive.py "$WORK/alice.sock" "$WORK/alice.log" \
   "waitfile:$WORK/b1" \
   'send:drop list' "$P" \
   'send:ping -6 -c 2 -i 200 bob.local' 'wait:rtt min|packet loss|no answer' "$P" \
-  'send:echo milk drop over ipv6 only > /tmp/v6.txt' "$P" \
+  'send:print milk drop over ipv6 only > /tmp/v6.txt' "$P" \
   'send:drop send bob /tmp/v6.txt' "wait:$DONE_RE" "$P" \
   "done:$WORK/alice.done" >"$WORK/alice.drive" 2>&1 &
 PIDS+=($!)

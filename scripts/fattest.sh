@@ -55,7 +55,7 @@ F=/Volumes/MILKFAT; O="/Volumes/Mac/$SHARE_SUB"
 P='msh:[^\n]*\$ '
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files list -l $F" "wait:$P" \
-  "send:cat \"$F/A Long File Name With Spaces.txt\"" "wait:$P" \
+  "send:text show \"$F/A Long File Name With Spaces.txt\"" "wait:$P" \
   "send:files copy \"$F/A Long File Name With Spaces.txt\" $O/long.txt" "wait:$P" \
   "send:files copy $F/R*markdown $O/unicode.txt" "wait:$P" \
   "send:files copy \"$F/Projects/milkOS notes/ideas for later.md\" $O/deep.txt" "wait:$P" \
@@ -63,7 +63,7 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files copy $F/readme.txt $O/readme.txt" "wait:$P" \
   "send:files copy $F/CAPS.TXT $O/caps.txt" "wait:$P" \
   "send:files create \"$F/Made In milkOS/\"" "wait:$P" \
-  "send:echo hello from milkOS > \"$F/Made In milkOS/a pretty long file name from milkOS.txt\"" "wait:$P" \
+  "send:print hello from milkOS > \"$F/Made In milkOS/a pretty long file name from milkOS.txt\"" "wait:$P" \
   "send:files copy $O/payload.bin \"$F/Made In milkOS/Copied Binary Payload.bin\"" "wait:$P" \
   "send:files move $F/readme.txt \"$F/Renamed To A Long Name.txt\"" "wait:$P" \
   "send:files delete --now $F/CAPS.TXT" "wait:$P" \
@@ -71,7 +71,7 @@ python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
   "send:files copy \"$F/Made In milkOS/Copied Binary Payload.bin\" $O/readback.bin" "wait:$P" \
   "send:files copy \"$F/Renamed To A Long Name.txt\" $O/renamed.txt" "wait:$P" \
   "send:files list -l \"$F\" \"$F/Made In milkOS\" \"$F/Projects\"" "wait:$P" \
-  "send:echo FATTEST""-DONE" "wait:FATTEST-DONE" "done:$T/done" &
+  "send:print FATTEST""-DONE" "wait:FATTEST-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 900); do [ -e "$T/done" ] && break; sleep 0.2; done
 sleep 1

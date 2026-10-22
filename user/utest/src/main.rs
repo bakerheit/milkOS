@@ -560,7 +560,7 @@ fn sched_policy() -> String {
 
 /// Context-switch microbenchmarks (not pass/fail): pipe ping-pong between two processes
 /// and between two threads (a wake + block on each side per hop), and a sched_yield storm
-/// with 2 threads per CPU. Compare run-queue policies with `echo global > /proc/sched`.
+/// with 2 threads per CPU. Compare run-queue policies with `print global > /proc/sched`.
 fn t_csw(rounds: u32) -> bool {
     let cpus = sys::read_file("/proc/cpuinfo")
         .map(|c| String::from_utf8_lossy(&c).matches("processor").count())
@@ -1580,15 +1580,15 @@ fn t_svc() -> bool {
     write("ut-oneshot", "exec = /Commands/false\nrestart = never\n");
     write(
         "ut-needs-missing",
-        "exec = /Commands/sleep 60\nneeds = ut-no-such-unit\n",
+        "exec = /Commands/pause 60\nneeds = ut-no-such-unit\n",
     );
     write(
         "ut-needs-dead",
-        "exec = /Commands/sleep 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
+        "exec = /Commands/pause 60\nneeds = ut-oneshot\nafter = ut-oneshot\n",
     );
     write(
         "ut-sleeper",
-        "description = sleeps\nexec = /Commands/sleep 600\nuser = milk\nrestart = on-failure\n",
+        "description = sleeps\nexec = /Commands/pause 600\nuser = milk\nrestart = on-failure\n",
     );
     let reload = milkd("reload");
     let status = |u: &str| milkd(&alloc::format!("status {u}"));

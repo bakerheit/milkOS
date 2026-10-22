@@ -1,6 +1,6 @@
 //! Calendar events: repeat rules, the file format and "what happens on this day".
 //!
-//! One event per line, tab-separated, so a text editor (or `grep`) works on the file:
+//! One event per line, tab-separated, so a text editor (or `text find`) works on the file:
 //!
 //! ```text
 //! event  <id>  <date>  <start|->  <end|->  <repeat[:every]>  <until|->  <alert|->  <title>  <notes>

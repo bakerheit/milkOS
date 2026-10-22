@@ -412,12 +412,12 @@ mod tests {
     #[test]
     fn parses_and_unescapes() {
         let r = parse_record(
-            "65 1792589641138472000 16 /Commands/cat exec ppid=10%20argv=cat%20/proc/meminfo e4a6 1c73",
+            "65 1792589641138472000 16 /Commands/text exec ppid=10%20argv=text%20show%20/proc/meminfo e4a6 1c73",
         )
-        .unwrap_or_else(|| rec("exec", "/Commands/cat", "ppid=10%20argv=cat%20/proc/meminfo"));
+        .unwrap_or_else(|| rec("exec", "/Commands/text", "ppid=10%20argv=text%20show%20/proc/meminfo"));
         assert_eq!(r.event, "exec");
-        assert_eq!(r.detail, "ppid=10 argv=cat /proc/meminfo");
-        assert_eq!(kv(&r.detail, "argv"), Some("cat /proc/meminfo"));
+        assert_eq!(r.detail, "ppid=10 argv=text show /proc/meminfo");
+        assert_eq!(kv(&r.detail, "argv"), Some("text show /proc/meminfo"));
         assert_eq!(kv(&r.detail, "ppid"), Some("10"));
         assert_eq!(kv(&r.detail, "nope"), None);
         assert!(parse_record("garbage").is_none());
@@ -459,11 +459,11 @@ mod tests {
         assert_eq!(d.sentence, "moo2048 started, sandboxed");
         let d = describe(&rec(
             "exec",
-            "/Commands/cat",
-            "ppid=10%20argv=cat%20/proc/meminfo",
+            "/Commands/text",
+            "ppid=10%20argv=text%20show%20/proc/meminfo",
         ));
-        assert_eq!(d.sentence, "cat was started");
-        assert_eq!(d.detail, "cat /proc/meminfo");
+        assert_eq!(d.sentence, "text was started");
+        assert_eq!(d.detail, "text show /proc/meminfo");
         let d = describe(&rec(
             "user.pkg.install",
             "/Commands/milk",
@@ -509,7 +509,7 @@ mod tests {
             "/Apps/peek/peek",
             "op=open%20path=/System/Settings/passwd",
         );
-        let exec = rec("exec", "/Commands/cat", "argv=cat%20x");
+        let exec = rec("exec", "/Commands/text", "argv=text%20show%20x");
         assert!(
             matches(&deny, Filter::All)
                 && matches(&deny, Filter::Refused)

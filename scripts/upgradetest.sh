@@ -49,18 +49,18 @@ trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
 P='msh:[^\n]*\$ '
 D=/Volumes/Milk/docs
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-  "send:cat $D/small.txt" "wait:$P" \
+  "send:text show $D/small.txt" "wait:$P" \
   "send:files copy $D/data.bin $D/copy.bin" "wait:$P" \
-  "send:echo appended by milkOS >> $D/data.bin" "wait:$P" \
-  "send:echo new small > $D/small.txt" "wait:$P" \
-  "send:cat /Users/milk/Documents/old-note.txt" "wait:$P" \
+  "send:print appended by milkOS >> $D/data.bin" "wait:$P" \
+  "send:print new small > $D/small.txt" "wait:$P" \
+  "send:text show /Users/milk/Documents/old-note.txt" "wait:$P" \
   "send:files list /Volumes/Milk" "wait:$P" \
   "send:files list /Users/milk/Sites" "wait:$P" \
-  "send:cat /System/Settings/milk/drop/name" "wait:$P" \
+  "send:text show /System/Settings/milk/drop/name" "wait:$P" \
   "send:uname -n" "wait:$P" \
   "send:milk list" "wait:$P" \
-  "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
-  "send:echo UPGRADE""-DONE" "wait:UPGRADE-DONE" "done:$T/done" &
+  "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+  "send:print UPGRADE""-DONE" "wait:UPGRADE-DONE" "done:$T/done" &
 DPID=$!
 for _ in $(seq 600); do [ -e "$T/done" ] && break; sleep 0.2; done
 sleep 2   # let the flusher commit (1 s)
@@ -102,7 +102,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
 QPID=$!
-python3 scripts/serial_drive.py "$SOCK" "$LOG2" "wait:$P" "send:cat /Users/milk/Documents/old-note.txt" "wait:$P" "done:$T/done" &
+python3 scripts/serial_drive.py "$SOCK" "$LOG2" "wait:$P" "send:text show /Users/milk/Documents/old-note.txt" "wait:$P" "done:$T/done" &
 DPID=$!
 for _ in $(seq 600); do [ -e "$T/done" ] && break; sleep 0.2; done
 kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true

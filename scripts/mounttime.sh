@@ -31,9 +31,9 @@ boot() { # n: boot, write a file, sync, print the mount line
   QPID=$!
   local P='msh:[^\n]*\$ '
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "wait:$P" \
-    "send:echo boot $1 > /Volumes/Milk/data/boot$1.txt" "wait:$P" \
-    "send:echo now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
-    "send:echo MOUNT""-DONE" "wait:MOUNT-DONE" "done:$T/done$1" &
+    "send:print boot $1 > /Volumes/Milk/data/boot$1.txt" "wait:$P" \
+    "send:print now > /System/Kernel/fs/milkfs/sync" "wait:$P" \
+    "send:print MOUNT""-DONE" "wait:MOUNT-DONE" "done:$T/done$1" &
   local DPID=$!
   for _ in $(seq 900); do [ -e "$T/done$1" ] && break; sleep 0.2; done
   sleep 1.5

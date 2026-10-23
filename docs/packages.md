@@ -164,8 +164,8 @@ A desktop window (user/gui, MILK_WIN syscalls) over `/Commands/apps`. Use its do
   the log box. The Store waits for it (other buttons are off until it exits).
 * Keys: Up/Down (or the wheel) select, `i` install, `t` try, `o`/Enter run, `k` keep, `d` discard,
   `r` remove, `u` upgrade, `g` update, `a` upgrade all, `q` quit.
-* Theme: SPEC tokens. The wm doesn't publish its theme in `/dev/wm`'s status; the Store
-  looks for a `theme dark` line there first, then `theme = chocolate` (the wm's own prefs line) in
+* Theme: SPEC tokens. The wm publishes its theme in `/dev/wm`'s status (`theme dark` or `theme light`); the Store
+  looks for that line first, then `theme = chocolate` (the wm's own prefs line) in
   `/Users/milk/.config/milk/settings`, and then uses the wm's "Chocolate milk" values.
 * Dock entry: `rootfs/Apps/store/manifest` is a milk-format manifest with
   `exec store` (the program next to it, `/Apps/store/store`) and `dock Store #E58C97`, for

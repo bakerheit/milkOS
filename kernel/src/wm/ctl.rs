@@ -20,7 +20,7 @@
 //!                             fira, atkinson, ubuntu); saved like any other preference
 //! ```
 //!
-//! Reading it gives a status snapshot (`mode`, `space`, `font`, one `window` line per window).
+//! Reading it gives a status snapshot (`mode`, `space`, `font`, `theme`, one `window` line per window).
 //! The `/Commands/open`, `/Commands/notify`, `/Commands/today` and `/Commands/spaces` programs are thin wrappers.
 
 use alloc::string::String;

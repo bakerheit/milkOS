@@ -30,7 +30,10 @@
 //!   emits [`TextRun`]s the app draws with the same font, so measuring and drawing agree.
 //!
 //! # CHANGES
-//! (none yet: this is the first shape)
+//! - Added [`FormControl::content_drawn`] (true for `<button>`: the engine paints its
+//!   content, the app only the face). Documented that [`Item::Control`] and
+//!   [`FormControl::rect`] are the control's content box: its CSS background and borders are
+//!   already in the display list.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -98,7 +101,7 @@ pub enum Family {
 }
 
 /// One font as the page asks for it, at device size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Font {
     pub family: Family,
     /// The em size in device pixels (CSS size times zoom), at least 1.
@@ -246,7 +249,11 @@ pub enum MarkerKind {
 }
 
 /// A form control's box; the app draws it with its own widgets, using the state in
-/// [`Document::controls`] (index [`ControlId`]).
+/// [`Document::controls`] (index [`ControlId`]). The rect is the control's content box: its
+/// CSS background and borders (the UA gives fields an inset border and buttons an outset one)
+/// are already painted by the entries before it, so the app draws only what goes inside: the
+/// value or placeholder and caret of a text field, the label of an `<input type=submit>`, the
+/// check of a checkbox, the selected option and arrow of a `<select>`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ControlId(pub u32);
 
@@ -475,9 +482,12 @@ pub struct FormControl {
     pub cols: u32,
     /// The image of an [`ControlKind::ImageSubmit`].
     pub image: Option<ImageId>,
-    /// Its box after the last layout (document space, device px). Empty if not laid out
-    /// (hidden, display: none).
+    /// Its content box after the last layout (document space, device px; see
+    /// [`Item::Control`]). Empty if not laid out (hidden, display: none).
     pub rect: Rect,
+    /// The engine paints this control's content (a `<button>` holds arbitrary HTML): the app
+    /// should draw only a pressed/focus state, not a label.
+    pub content_drawn: bool,
     /// The font its text should be drawn in.
     pub font: Font,
     pub color: Color,
@@ -616,7 +626,9 @@ impl Document {
     }
 
     /// Stylesheets and images not supplied yet. Stylesheets come first (they can change which
-    /// images are needed); call again after supplying them.
+    /// images are needed); call again after supplying them. `<img>` images are listed from the
+    /// start; CSS background images once styles are known (after a [`Document::layout`]; the
+    /// next layout uses them). [`Document::load_resources`] does all of this in one go.
     pub fn pending_resources(&self) -> Vec<Resource> {
         self.page.pending_resources()
     }

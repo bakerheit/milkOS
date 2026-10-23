@@ -12,6 +12,21 @@
 extern crate alloc;
 
 pub mod api;
+pub mod atoms;
+pub mod charset;
+pub mod css;
+pub mod dom;
+pub mod fmath;
+mod forms;
+pub mod html;
+pub mod layout;
+mod measure;
 mod page;
+mod paint;
+pub mod style;
+pub mod url;
+
+#[cfg(test)]
+mod tests;
 
 pub use api::*;

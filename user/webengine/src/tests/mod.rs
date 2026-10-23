@@ -2,6 +2,7 @@
 
 mod api;
 mod bench;
+mod dom;
 mod fixtures;
 mod fuzz;
 mod golden;

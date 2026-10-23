@@ -154,7 +154,7 @@ js timer "microtask first" && ok "a promise reaction ran" || bad "no promise rea
 js timer "queued microtask" && ok "queueMicrotask ran" || bad "no queueMicrotask"
 js timer "timeout milk!" && ok "setTimeout passed its extra arguments" || bad "the timeout"
 js timer "five in-time" && ok "setInterval ran five times, 100 ms apart, then stopped" || bad "the interval: $(log_lines | grep -a 'JSTEST timer' | tail -1)"
-ORDER="$(log_lines | grep -a 'JSTEST timer' | tail -4 | sed 's/.*JSTEST timer //' | tr '\n' ',')"
+ORDER="$(log_lines | { grep -a 'JSTEST timer' || true; } | tail -4 | sed 's/.*JSTEST timer //' | tr '\n' ',')"
 [ "$ORDER" = "microtask first,queued microtask,timeout milk!,five in-time," ] && ok "in order: microtasks, the timeout, the interval" || bad "timer order: $ORDER"
 shot js-06-timer
 

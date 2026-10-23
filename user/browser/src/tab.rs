@@ -37,6 +37,8 @@ pub struct Page {
     pub laid_w: i32,
     /// The desktop font family it was laid out in (Settings can change it).
     pub laid_font: usize,
+    /// ... and for a dark or light desktop.
+    pub laid_dark: bool,
     /// The images it shows (addresses), for stepping animations.
     pub shown: alloc::collections::BTreeSet<String>,
     /// Stylesheets and images it is still waiting for.
@@ -59,6 +61,7 @@ impl Page {
             status: 200,
             laid_w: 0,
             laid_font: usize::MAX,
+            laid_dark: false,
             shown: alloc::collections::BTreeSet::new(),
             waiting: 0,
         }

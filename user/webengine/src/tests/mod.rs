@@ -9,3 +9,4 @@ mod html;
 mod layout;
 mod raster;
 mod render;
+mod scheme;

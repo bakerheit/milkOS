@@ -38,7 +38,12 @@ struct G {
 fn families() -> &'static [fontkit::Family<'static>] {
     use std::sync::OnceLock;
     static F: OnceLock<Vec<fontkit::Family<'static>>> = OnceLock::new();
-    F.get_or_init(|| BLOBS.iter().map(|b| fontkit::Family::parse(b).expect("a baked font")).collect())
+    F.get_or_init(|| {
+        BLOBS
+            .iter()
+            .map(|b| fontkit::Family::parse(b).expect("a baked font"))
+            .collect()
+    })
 }
 
 fn glyph(f: &Font, c: char) -> Option<G> {
@@ -46,7 +51,9 @@ fn glyph(f: &Font, c: char) -> Option<G> {
     let fam = &fams[family_index(f.family).min(fams.len() - 1)];
     let scale = if f.size <= 19 { 1 } else { 2 };
     let weight = fontkit::Weight::bold(f.weight >= 600);
-    let (g, mag) = fam.find(c as u32, scale, weight).or_else(|| fam.find(0xFFFD, scale, weight))?;
+    let (g, mag) = fam
+        .find(c as u32, scale, weight)
+        .or_else(|| fam.find(0xFFFD, scale, weight))?;
     let mut cov = alloc::vec![0u8; (g.w * g.h).max(0) as usize];
     g.spans(1, |x, y, len, a| {
         for k in 0..len {

@@ -62,7 +62,19 @@ pub struct Page {
     empty: DisplayList,
     boxes: usize,
     rules_count: usize,
+    /// The dark UA defaults (ua-dark.css), and whether the rules now use them.
+    ua_dark_sheet: Option<Rc<Sheet>>,
+    ua_dark: bool,
+    /// `<meta name=color-scheme>`: bit 1 light, 2 dark, 4 only.
+    meta_scheme: u8,
+    /// No author styles (`<style>`, a stylesheet link, `style=`) and no colour attributes
+    /// (bgcolor, text, link, ...): the page leaves its colours to the browser entirely.
+    plain: bool,
 }
+
+/// The canvas when the page doesn't paint one (SPEC "Type": milk, or Chocolate milk).
+pub const CANVAS_LIGHT: Color = 0xFFFF_FDF8;
+pub const CANVAS_DARK: Color = 0xFF2E_2520;
 
 fn decode_css(b: &[u8]) -> String {
     let b = b.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(b);
@@ -157,6 +169,10 @@ impl Page {
             empty: DisplayList::default(),
             boxes: 0,
             rules_count: 0,
+            ua_dark_sheet: None,
+            ua_dark: false,
+            meta_scheme: 0,
+            plain: true,
         };
         p.scan();
         p
@@ -182,6 +198,8 @@ impl Page {
             media: MediaList::default(),
             ua: true,
         });
+        let dark = self.parse_sheet(crate::style::UA_DARK_CSS, "about:ua");
+        self.ua_dark_sheet = Some(Rc::new(dark));
         let mut n = 0;
         while n != NONE {
             let Some(e) = self.dom.element(n) else {
@@ -193,8 +211,37 @@ impl Page {
                 continue;
             }
             let name = e.name;
+            // Does the page set any colours (or styles) of its own?
+            const COLOUR_ATTRS: [&str; 8] = [
+                "style",
+                "bgcolor",
+                "text",
+                "link",
+                "vlink",
+                "alink",
+                "color",
+                "background",
+            ];
+            if COLOUR_ATTRS.iter().any(|a| e.has_attr(a)) {
+                self.plain = false;
+            }
+            if e.is(tag::META)
+                && e.attr("name")
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("color-scheme"))
+                && let Some(c) = e.attr("content")
+            {
+                for w in c.split(crate::dom::is_html_space) {
+                    match w.to_ascii_lowercase().as_str() {
+                        "light" => self.meta_scheme |= 1,
+                        "dark" => self.meta_scheme |= 2,
+                        "only" => self.meta_scheme |= 4,
+                        _ => {}
+                    }
+                }
+            }
             match name {
                 tag::STYLE => {
+                    self.plain = false;
                     let media = media_attr(e.attr("media"));
                     let css = self.dom.text_content(n);
                     if self.slots.len() < self.limits.max_stylesheets {
@@ -220,6 +267,7 @@ impl Page {
                     {
                         let url = crate::url::resolve(&self.base, h);
                         let media = media_attr(e.attr("media"));
+                        self.plain = false;
                         self.slots.push(Slot::Linked {
                             url,
                             media,
@@ -512,8 +560,41 @@ impl Page {
         }
     }
 
-    /// Rebuild rules and restyle if the sheets or the media environment changed.
+    /// Rebuild rules and restyle if the sheets or the media environment changed, with the
+    /// dark UA defaults when they apply ([`Page::want_dark`]: the root's `color-scheme` is
+    /// only known after styling, so a page that turns out to want them is styled again).
     fn ensure_styled(&mut self, vp: &Viewport) {
+        for _ in 0..2 {
+            let want = self.want_dark(vp);
+            let force = want != self.ua_dark;
+            self.ua_dark = want;
+            self.style_pass(vp, force);
+            if self.want_dark(vp) == self.ua_dark {
+                break;
+            }
+        }
+    }
+
+    /// The dark UA defaults: only when the desktop is dark, and the page either says it can be
+    /// dark (`color-scheme` on the root, `<meta name=color-scheme>`) or leaves every colour to
+    /// the browser. A page that sets some colours but no scheme stays light (dark text on a
+    /// dark canvas would be worse than a light page in dark chrome).
+    fn want_dark(&self, vp: &Viewport) -> bool {
+        if !vp.dark {
+            return false;
+        }
+        let root = self.dom.document_element();
+        let css = self
+            .styles
+            .as_ref()
+            .and_then(|st| st.of.get(root as usize))
+            .and_then(|s| s.as_ref())
+            .map_or(0, |s| s.color_scheme);
+        let scheme = self.meta_scheme | css;
+        scheme & 2 != 0 || (scheme == 0 && self.plain)
+    }
+
+    fn style_pass(&mut self, vp: &Viewport, force: bool) {
         let zoom = vp.zoom.clamp(25, 500) as f32 / 100.0;
         let env = MediaEnv {
             width: vp.width.max(1) as f32 / zoom,
@@ -521,7 +602,8 @@ impl Page {
             dark: vp.dark,
         };
         let env_changed = self.rules_env != Some(env);
-        let need_rules = self.rules.is_none()
+        let need_rules = force
+            || self.rules.is_none()
             || self.sheets_changed
             || (env_changed && self.rules.as_ref().is_some_and(|r| r.media_rules));
         // vw/vh units depend on the viewport even without media rules.
@@ -531,7 +613,13 @@ impl Page {
             for s in &self.slots {
                 match s {
                     Slot::Ready { sheet, media, ua } if media.matches(&env) => {
-                        list.push((sheet.clone(), *ua))
+                        list.push((sheet.clone(), *ua));
+                        if *ua
+                            && self.ua_dark
+                            && let Some(d) = &self.ua_dark_sheet
+                        {
+                            list.push((d.clone(), true));
+                        }
                     }
                     Slot::Linked {
                         media,
@@ -629,7 +717,15 @@ impl Page {
         let size = |id: ImageId| images.get(id.0 as usize).and_then(|i| i.size);
         let by_node = &self.forms.by_node;
         let controls = |n: NodeId| by_node.get(&n).map(|c| c.0);
-        let canvas = canvas_color(&self.dom, styles);
+        let canvas = canvas_color(
+            &self.dom,
+            styles,
+            if self.ua_dark {
+                CANVAS_DARK
+            } else {
+                CANVAS_LIGHT
+            },
+        );
         let painted = paint::paint(&laid, &cx, &size, &controls, self.dom.len(), canvas);
         // Controls: where they are and how their text should look.
         for c in self.forms.controls.iter_mut() {
@@ -1054,8 +1150,8 @@ fn media_attr(m: Option<&str>) -> MediaList {
 }
 
 /// The canvas colour (CSS Backgrounds 3 §2.11.2): the root's background, or the body's if
-/// the root has none; white if neither.
-fn canvas_color(dom: &Dom, styles: &Styles) -> Color {
+/// the root has none; `default` (milk, or Chocolate milk for a dark page) if neither.
+fn canvas_color(dom: &Dom, styles: &Styles, default: Color) -> Color {
     let root = dom.document_element();
     let bg = |n: NodeId| {
         styles
@@ -1066,20 +1162,24 @@ fn canvas_color(dom: &Dom, styles: &Styles) -> Color {
             .unwrap_or(0)
     };
     if root != NONE && bg(root) >> 24 != 0 {
-        return blend_white(bg(root));
+        return blend_over(bg(root), default);
     }
     let body = dom.body();
     if body != NONE && bg(body) >> 24 != 0 {
-        return blend_white(bg(body));
+        return blend_over(bg(body), default);
     }
-    0xFFFF_FFFF
+    default
 }
 
-fn blend_white(c: Color) -> Color {
+/// `c` (maybe translucent) over the opaque `under`.
+fn blend_over(c: Color, under: Color) -> Color {
     let a = c >> 24;
     if a == 255 {
         return c;
     }
-    let mix = |v: u32| (v * a + 255 * (255 - a)) / 255;
-    0xFF00_0000 | (mix((c >> 16) & 255) << 16) | (mix((c >> 8) & 255) << 8) | mix(c & 255)
+    let mix = |s: u32| {
+        let (v, u) = ((c >> s) & 255, (under >> s) & 255);
+        ((v * a + u * (255 - a)) / 255) << s
+    };
+    0xFF00_0000 | mix(16) | mix(8) | mix(0)
 }

@@ -1,0 +1,15 @@
+/* The dark user-agent defaults (SPEC "Type", Chocolate milk), on top of ua.css, for a page
+   that opts into a dark colour scheme (`color-scheme: dark`, `<meta name=color-scheme>`)
+   while the desktop is dark, or that has no styles and no colour attributes at all. The canvas
+   (#2E2520) is the engine's (page.rs). */
+html { color: #F4EBE0; }
+:link { color: #A9B8E8; }
+input, select, button, textarea { color: #F4EBE0; }
+input, textarea, select { background-color: #382D27; border-color: #8C7764; }
+input[type=checkbox i], input[type=radio i] { background-color: #382D27; border-color: #8C7764; }
+input[type=submit i], input[type=reset i], input[type=button i], input[type=file i], button,
+select { background-color: #42352D; border-color: #8C7764; }
+dialog { background: #382D27; color: #F4EBE0; }
+mark { background-color: #EBB650; color: #3A2E27; }
+fieldset { border-color: #55463C; }
+table, td, th { border-color: #8C7764; }

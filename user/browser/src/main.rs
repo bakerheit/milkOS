@@ -232,10 +232,10 @@ pub struct App {
     /// A message for the status line, until (ms).
     pub flash: Option<(String, u64)>,
     pub shown_title: String,
+    /// When the desktop's theme was last read (ms).
+    pub theme_checked: u64,
     /// The system fonts for page text (the desktop's family, read each frame).
     pub sys: sysfont::SysText,
-    /// Links' colour: the light theme's token (pages are drawn on milk in both themes).
-    pub link: gui::Color,
     pub quit: bool,
     pub dirty: bool,
 }
@@ -1798,8 +1798,8 @@ fn main(args: &rt::Args) -> i32 {
         online,
         flash: None,
         shown_title: String::new(),
-        link: Theme::light().link,
         sys: sysfont::SysText::now(),
+        theme_checked: 0,
         quit: false,
         dirty: true,
     };
@@ -1851,6 +1851,16 @@ fn main(args: &rt::Args) -> i32 {
             break;
         }
         dirty |= app.tick();
+        // The desktop's theme, once a second: the chrome and dark-capable pages follow it.
+        let now = now_ms();
+        if now.saturating_sub(app.theme_checked) >= 1000 {
+            app.theme_checked = now;
+            let th = Theme::current();
+            if th.dark != app.th.dark {
+                app.th = th;
+                dirty = true;
+            }
+        }
         dirty |= app.animate();
         let (moved, due) = app.animate_images(now_ms());
         dirty |= moved;

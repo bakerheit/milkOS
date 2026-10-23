@@ -61,8 +61,13 @@ impl Doc {
     }
 
     /// Lay out `w` x `h` page pixels (cached by the engine for the same size).
-    pub fn layout(&mut self, w: i32, h: i32, fonts: Fonts) {
-        self.d.layout(&Viewport::new(w.max(1), h.max(1)), &fonts);
+    /// `dark`: the desktop is dark (the engine gives pages that allow it its dark defaults).
+    pub fn layout(&mut self, w: i32, h: i32, dark: bool, fonts: Fonts) {
+        let vp = Viewport {
+            dark,
+            ..Viewport::new(w.max(1), h.max(1))
+        };
+        self.d.layout(&vp, &fonts);
         self.laid = Some((w, h));
     }
 

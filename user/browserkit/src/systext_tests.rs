@@ -135,7 +135,7 @@ fn greek_and_cyrillic_draw_without_boxes() {
     );
     let list = d.layout(&Viewport::new(800, 600), &fonts).clone();
     let mut surf = Surface::new(800, 200, 0);
-    paint::paint_list(&mut surf, &list, 0, &mut P(&s), &[], None, 0x4F64A0);
+    paint::paint_list(&mut surf, &list, 0, &mut P(&s), &[], None);
     let ink = surf.px.iter().filter(|&&p| p != surf.px[0]).count();
     assert!(ink > 500, "text was drawn ({ink} pixels)");
     for e in &list.entries {

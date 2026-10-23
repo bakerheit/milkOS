@@ -613,14 +613,10 @@ fn entry(s: &mut Surface, list: &DisplayList, it: &Item, p: &mut dyn Painter) {
     }
 }
 
-/// The engine's built-in link colour (its UA stylesheet's `:link`).
-pub const UA_LINK: Color = 0xFF_00_00_EE;
-
 /// Paint the part of `list` from page y = `scroll` down into `s` (cleared to the page's
 /// background first), then the `position: fixed` boxes over it. `marks` are find-in-page
-/// highlights (page coordinates; the `current` one stronger). `link`: the colour for links
-/// the page didn't colour itself (the theme's link token, instead of the engine's default
-/// blue).
+/// highlights (page coordinates; the `current` one stronger). Links take the engine's
+/// colours (its UA defaults are milkOS's link tokens).
 pub fn paint_list(
     s: &mut Surface,
     list: &DisplayList,
@@ -628,7 +624,6 @@ pub fn paint_list(
     p: &mut dyn Painter,
     marks: &[Rect],
     current: Option<usize>,
-    link: Color,
 ) {
     let bg = if alpha(list.background) == 0 {
         0xFF_FF_FF
@@ -654,15 +649,7 @@ pub fn paint_list(
                 intersect(Rect::new(clip.x, clip.y + dy, clip.w, clip.h), base)
             };
             if s.clip.w > 0 && s.clip.h > 0 {
-                match e.item {
-                    Item::Text(mut run) if run.color == UA_LINK => {
-                        run.color = 0xFF00_0000 | link;
-                        s.run(&run, list.run_text(&run), Fonts { text: p.text() });
-                    }
-                    // A link's underline, drawn by the engine as a thin rectangle.
-                    Item::Rect { rect, color } if color == UA_LINK => s.fill(rect, link),
-                    ref it => entry(s, list, it, p),
-                }
+                entry(s, list, &e.item, p);
             }
         }
         if !fixed {
@@ -818,7 +805,6 @@ mod tests {
             &mut p,
             &[Rect::new(20, 20, 10, 10)],
             Some(0),
-            0x4F64A0,
         );
         assert_eq!(p.1, 1);
         assert!(s.px.contains(&0x123456), "the control was drawn");
@@ -835,18 +821,18 @@ mod tests {
         );
         let list1 = d1.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s2 = Surface::new(300, 200, 0);
-        paint_list(&mut s2, &list1, 0, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s2, &list1, 0, &mut p, &[], None);
         assert!(s2.px.contains(&0x00FF00), "a rounded border");
         assert_eq!(s.px[0], 0x102030, "the background");
-        // A link the page didn't colour gets the theme's colour, not the engine's blue.
+        // A link the page didn't colour has the link token, not the old browsers' blue.
         let mut d2 = page("<p><a href=/x>a link</a></p>");
         let list2 = d2.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s3 = Surface::new(300, 200, 0);
-        paint_list(&mut s3, &list2, 0, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s3, &list2, 0, &mut p, &[], None);
         assert!(s3.px.contains(&0x4F64A0));
         assert!(!s3.px.contains(&0x0000EE));
         // Scrolled past everything: just the background.
-        paint_list(&mut s, &list, 100_000, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s, &list, 100_000, &mut p, &[], None);
         assert!(s.px.iter().all(|&c| c == 0x102030));
     }
 
@@ -857,7 +843,7 @@ mod tests {
         );
         let list = d.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s = Surface::new(300, 200, 0);
-        paint_list(&mut s, &list, 1000, &mut P(None, 0), &[], None, 0x4F64A0);
+        paint_list(&mut s, &list, 1000, &mut P(None, 0), &[], None);
         assert_eq!(s.px[5 * 300 + 5], 0x0000FF);
     }
 
@@ -903,7 +889,6 @@ mod tests {
                 &mut P(None, 0),
                 &[],
                 None,
-                0x4F64A0,
             );
         }
     }

@@ -669,6 +669,7 @@ impl Styler<'_, '_> {
                 }
             }
             Decl::Visibility(v) => s.visibility = *v,
+            Decl::ColorScheme(v) => s.color_scheme = *v,
             Decl::OverflowX(v) => s.overflow_x = *v,
             Decl::OverflowY(v) => s.overflow_y = *v,
             Decl::ListStyleType(t, st) => {
@@ -760,6 +761,7 @@ fn is_inherited(p: Prop) -> bool {
             | TextTransform
             | WhiteSpace
             | Visibility
+            | ColorScheme
             | ListStyleType
             | ListStylePosition
             | BorderCollapse
@@ -825,6 +827,7 @@ fn copy_prop(s: &mut Style, from: &Style, p: Prop) {
         TextDecorationColor => s.deco_color = from.deco_color,
         VerticalAlign => s.vertical_align = from.vertical_align,
         Visibility => s.visibility = from.visibility,
+        ColorScheme => s.color_scheme = from.color_scheme,
         OverflowX => s.overflow_x = from.overflow_x,
         OverflowY => s.overflow_y = from.overflow_y,
         ListStyleType => {

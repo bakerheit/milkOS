@@ -84,9 +84,15 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   the system font. `browserkit::font` is the measurer the engine lays out with, so lines break
   where the glyphs are drawn.
 
-Links the page doesn't colour itself are drawn in the link colour (#4F64A0, underlined; the
-`link` token in appkit's Theme, SPEC "Type"). Pages are drawn on their own background in
-both themes, so they use the light theme's token.
+**Colours.** The engine's defaults are milkOS's (SPEC "Type"): a milk #FFFDF8 canvas,
+espresso #3A2E28 text, links #4F64A0 (underlined), never pure white or black; a page's own
+colours win. On a dark desktop a page gets the dark defaults (canvas #2E2520, text #F4EBE0,
+links #A9B8E8) only when it opts into a dark scheme (CSS `color-scheme: dark` / `light dark`
+on the root, or `<meta name=color-scheme>`) or sets no styles and no colour attributes at all;
+a page that sets some colours but no scheme stays light, since dark text on a dark canvas is
+worse than a light page in dark chrome. `prefers-color-scheme: dark` matches on a dark
+desktop either way. The built-in pages opt in. appkit's Theme has the link and pressed-link
+tokens for both themes.
 
 There are no app menus for client windows yet, so the toolbar's menu button (three lines)
 lists everything, with its key.
@@ -138,8 +144,8 @@ lists everything, with its key.
 * "Site" for cookies is the last two labels of the host (with a short list of two-label
   suffixes like `co.uk`), not the full public suffix list.
 * No hover: client windows get pointer moves only while a button is down, so links don't
-  show their address before a click (and there are no tooltips); the link's pressed colour
-  token is unused for now.
+  show their address before a click (and there are no tooltips); links have no pressed
+  colour yet.
 * Closing the window can't be refused, so a download still running is lost when the window
   closes; Cmd-W closes the window, not the tab.
 * A textarea's caret is always at the end of its text.

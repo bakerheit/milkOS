@@ -242,7 +242,11 @@ impl App {
     fn layout_current(&mut self) {
         let (lw, lh) = self.page_view(self.tab());
         let t = &self.tabs[self.cur];
-        if t.page.laid_w == lw && t.page.doc.laid.is_some() && t.page.laid_font == self.sys.ui {
+        if t.page.laid_w == lw
+            && t.page.doc.laid.is_some()
+            && t.page.laid_font == self.sys.ui
+            && t.page.laid_dark == self.th.dark
+        {
             // A link to a place on this page: no new layout, just the scroll.
             if t.anchor.is_some() {
                 let max = self.max_scroll(self.tab());
@@ -257,11 +261,12 @@ impl App {
         // few rounds until the page has what it can have now.
         let cur = self.cur;
         for _ in 0..4 {
-            let sys = self.sys;
+            let (sys, dark) = (self.sys, self.th.dark);
             let t = &mut self.tabs[cur];
-            t.page.doc.layout(lw, lh, Fonts { text: Some(&sys) });
+            t.page.doc.layout(lw, lh, dark, Fonts { text: Some(&sys) });
             t.page.laid_w = lw;
             t.page.laid_font = sys.ui;
+            t.page.laid_dark = dark;
             self.feed(cur);
             if self.tabs[cur].page.laid_w == lw {
                 break;
@@ -415,7 +420,6 @@ impl App {
             &mut p,
             &marks,
             current,
-            self.link,
         );
         // A scroll bar when the page is longer than the view.
         let total = t.page.doc.height().max(1);
@@ -576,7 +580,7 @@ impl App {
                 tx += 18;
             } else if t.page.kind == PageKind::Web && t.load.is_none() {
                 // Plain http: an open circle and the words.
-                self.win.text(tx, by + 6, "http", th.latte);
+                self.win.text(tx, by + 6, "http", th.cocoa);
                 self.hits.add(ARect::new(ax, by, 46, 28), ID_PADLOCK);
                 tx += 40;
             }

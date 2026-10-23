@@ -332,6 +332,8 @@ pub struct Style {
     pub text_transform: TextTransform,
     pub white_space: WhiteSpace,
     pub visibility: Visibility,
+    /// `color-scheme` (inherited): bit 1 light, 2 dark, 4 only; 0 = normal.
+    pub color_scheme: u8,
     pub list_style_type: ListStyleType,
     pub list_style_string: Option<Rc<str>>,
     pub list_inside: bool,
@@ -421,6 +423,7 @@ impl Style {
             text_transform: TextTransform::None,
             white_space: WhiteSpace::Normal,
             visibility: Visibility::Visible,
+            color_scheme: 0,
             list_style_type: ListStyleType::Disc,
             list_style_string: None,
             list_inside: false,
@@ -502,6 +505,7 @@ impl Style {
         s.text_transform = p.text_transform;
         s.white_space = p.white_space;
         s.visibility = p.visibility;
+        s.color_scheme = p.color_scheme;
         s.list_style_type = p.list_style_type;
         s.list_style_string = p.list_style_string.clone();
         s.list_inside = p.list_inside;

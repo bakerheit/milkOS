@@ -294,39 +294,41 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         1,
         proto,
         Some(event_ctor),
-        Some(alloc::boxed::Box::new(move |r: &mut Realm, _this: Value, a: &[Value]| {
-            if a.is_empty() {
-                return Err(type_error(r, "MessageEvent: 1 argument required"));
-            }
-            let ty = arg_str(r, a, 0)?;
-            let f = init_flags(r, arg(a, 1))?;
-            let p = match b2.st.borrow().outbox.message_proto.as_ref() {
-                Some(p) => r.pinned(p),
-                None => return Err(type_error(r, "MessageEvent is not available")),
-            };
-            let e = new_event_on(&b2, r, p, &ty, f);
-            if let Some(nt) = r.new_target() {
-                let np = r.get(nt, "prototype")?;
-                if np.is_object() {
-                    r.set_prototype(e, np);
+        Some(alloc::boxed::Box::new(
+            move |r: &mut Realm, _this: Value, a: &[Value]| {
+                if a.is_empty() {
+                    return Err(type_error(r, "MessageEvent: 1 argument required"));
                 }
-            }
-            let empty = r.string("");
-            let ports = r.new_array(&[]);
-            copy_init(
-                r,
-                e,
-                arg(a, 1),
-                &[
-                    ("data", Value::NULL),
-                    ("origin", empty),
-                    ("lastEventId", empty),
-                    ("source", Value::NULL),
-                    ("ports", ports),
-                ],
-            )?;
-            Ok(e)
-        })),
+                let ty = arg_str(r, a, 0)?;
+                let f = init_flags(r, arg(a, 1))?;
+                let p = match b2.st.borrow().outbox.message_proto.as_ref() {
+                    Some(p) => r.pinned(p),
+                    None => return Err(type_error(r, "MessageEvent is not available")),
+                };
+                let e = new_event_on(&b2, r, p, &ty, f);
+                if let Some(nt) = r.new_target() {
+                    let np = r.get(nt, "prototype")?;
+                    if np.is_object() {
+                        r.set_prototype(e, np);
+                    }
+                }
+                let empty = r.string("");
+                let ports = r.new_array(&[]);
+                copy_init(
+                    r,
+                    e,
+                    arg(a, 1),
+                    &[
+                        ("data", Value::NULL),
+                        ("origin", empty),
+                        ("lastEventId", empty),
+                        ("source", Value::NULL),
+                        ("ports", ports),
+                    ],
+                )?;
+                Ok(e)
+            },
+        )),
     );
     r.define(g, "MessageEvent", ctor, Attrs::METHOD)?;
     b.st.borrow_mut().outbox.message_proto = Some(pin);
@@ -340,13 +342,15 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         g,
         "name",
         move |r, _t, _a| Ok(r.string(&window_name(&b4))),
-        Some(alloc::boxed::Box::new(move |r: &mut Realm, _t: Value, a: &[Value]| {
-            let s = arg_str(r, a, 0)?;
-            // Names are short, like browsers' (2 MB there; plenty here).
-            let s = if s.len() > 64 << 10 { String::new() } else { s };
-            set_window_name(&b5, &s);
-            Ok(Value::UNDEFINED)
-        })),
+        Some(alloc::boxed::Box::new(
+            move |r: &mut Realm, _t: Value, a: &[Value]| {
+                let s = arg_str(r, a, 0)?;
+                // Names are short, like browsers' (2 MB there; plenty here).
+                let s = if s.len() > 64 << 10 { String::new() } else { s };
+                set_window_name(&b5, &s);
+                Ok(Value::UNDEFINED)
+            },
+        )),
     )?;
     Ok(())
 }

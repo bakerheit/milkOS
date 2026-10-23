@@ -128,7 +128,12 @@ fn golden_frame_display_lists() {
     // The page with its frames scrolled.
     let mut d = load(PAGE, &FILES);
     lay(&mut d, 800, &ApproxMeasurer);
-    let list = d.frame_slots().iter().find(|s| s.name == "list").unwrap().id;
+    let list = d
+        .frame_slots()
+        .iter()
+        .find(|s| s.name == "list")
+        .unwrap()
+        .id;
     d.set_frame_scroll(list, 0, 300);
     lay(&mut d, 800, &ApproxMeasurer);
     if let Some(e) = check("frames-page-scrolled", &dump_tree(&d)) {
@@ -157,7 +162,12 @@ fn frame_screenshots() {
     assert!(d.frame_ids().len() == 3);
     let mut d = load(PAGE, &FILES);
     d.layout(&Viewport::new(760, 760), &SysMeasurer);
-    let list = d.frame_slots().iter().find(|s| s.name == "list").unwrap().id;
+    let list = d
+        .frame_slots()
+        .iter()
+        .find(|s| s.name == "list")
+        .unwrap()
+        .id;
     d.set_frame_scroll(list, 0, 260);
     shot("frames-page-scrolled", d, 760, 760);
     let d = shot("frames-nested", load(NESTED, &FILES), 520, 480);
@@ -259,10 +269,7 @@ fn random_page(r: &mut Rng, frames: usize) -> String {
 fn tree_case(seed: u64, ops: usize) {
     let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let top_frames = 1 + r.below(4);
-    let mut d = Document::parse_str(
-        &random_page(&mut r, top_frames),
-        "http://fuzz.example/a/b",
-    );
+    let mut d = Document::parse_str(&random_page(&mut r, top_frames), "http://fuzz.example/a/b");
     let m = ApproxMeasurer;
     let mut attached = 0usize;
     for step in 0..ops {
@@ -270,7 +277,8 @@ fn tree_case(seed: u64, ops: usize) {
             0..=2 => {
                 // Fill a random wanting slot with a random page.
                 let slots = d.frame_slots();
-                let wanting: Vec<&FrameSlot> = slots.iter().filter(|s| s.blocked.is_none()).collect();
+                let wanting: Vec<&FrameSlot> =
+                    slots.iter().filter(|s| s.blocked.is_none()).collect();
                 if !wanting.is_empty() {
                     let s = wanting[r.below(wanting.len())];
                     let n = r.below(3);
@@ -297,7 +305,11 @@ fn tree_case(seed: u64, ops: usize) {
                 }
             }
             5 => {
-                let _ = d.hit_test(r.below(900) as i32 - 50, r.below(700) as i32 - 50, (r.below(50) as i32, r.below(500) as i32));
+                let _ = d.hit_test(
+                    r.below(900) as i32 - 50,
+                    r.below(700) as i32 - 50,
+                    (r.below(50) as i32, r.below(500) as i32),
+                );
             }
             6 => {
                 let _ = d.scroll_frames_at(
@@ -310,10 +322,10 @@ fn tree_case(seed: u64, ops: usize) {
             }
             7 => {
                 let ms = d.find("needle", false);
-                if let Some(mm) = ms.get(r.below(ms.len().max(1))) {
-                    if let Some(rc) = mm.frame_rects.first() {
-                        d.reveal(mm.frame, *rc);
-                    }
+                if let Some(mm) = ms.get(r.below(ms.len().max(1)))
+                    && let Some(rc) = mm.frame_rects.first()
+                {
+                    d.reveal(mm.frame, *rc);
                 }
                 let _ = d.text();
                 let _ = d.focus_order();
@@ -338,15 +350,24 @@ fn tree_case(seed: u64, ops: usize) {
             let slots = d.frame_slots();
             let dl = d.display_list();
             for e in dl.entries.iter().chain(dl.fixed.iter()) {
-                assert!((e.clip as usize) < dl.clips.len(), "seed {seed}: clip out of range");
+                assert!(
+                    (e.clip as usize) < dl.clips.len(),
+                    "seed {seed}: clip out of range"
+                );
                 if let Item::Text(t) = e.item {
-                    assert!((t.start as usize + t.len as usize) <= dl.text.len(), "seed {seed}: text out of range");
+                    assert!(
+                        (t.start as usize + t.len as usize) <= dl.text.len(),
+                        "seed {seed}: text out of range"
+                    );
                 }
             }
             assert!(slots.len() <= 32, "seed {seed}: {} slots", slots.len());
             assert!(slots.iter().all(|s| s.depth <= 6));
             for e in &dl.entries {
-                assert!(e.frame.is_top() || slots.iter().any(|s| s.id == e.frame), "seed {seed}: entry of an unknown frame");
+                assert!(
+                    e.frame.is_top() || slots.iter().any(|s| s.id == e.frame),
+                    "seed {seed}: entry of an unknown frame"
+                );
             }
         }
     }
@@ -374,18 +395,38 @@ fn frame_bomb_shapes_stay_bounded() {
     let slots = d.frame_slots();
     assert_eq!(slots.len(), 32);
     for s in &slots {
-        d.attach_frame(s.id, Document::parse_str("<p>x", "http://bomb.example/f"), None);
+        d.attach_frame(
+            s.id,
+            Document::parse_str("<p>x", "http://bomb.example/f"),
+            None,
+        );
     }
     d.layout(&Viewport::new(800, 600), &m);
-    assert!(d.display_list().entries.len() < 5200, "{}", d.display_list().entries.len());
+    assert!(
+        d.display_list().entries.len() < 5200,
+        "{}",
+        d.display_list().entries.len()
+    );
     let console = d.take_console();
-    assert!(console.iter().any(|l| l.text.contains("Too many frames")), "{console:?}");
+    assert!(
+        console.iter().any(|l| l.text.contains("Too many frames")),
+        "{console:?}"
+    );
     // A chain of frames that each contain the next, to the cap and beyond.
     let mut d = Document::parse_str("<iframe></iframe>", "http://bomb.example/");
     for _ in 0..40 {
         let slots = d.frame_slots();
-        let Some(s) = slots.iter().find(|s| s.wants_load()) else { break };
-        d.attach_frame(s.id, Document::parse_str("<iframe style='width:90%;height:90%'></iframe>", "http://bomb.example/n"), None);
+        let Some(s) = slots.iter().find(|s| s.wants_load()) else {
+            break;
+        };
+        d.attach_frame(
+            s.id,
+            Document::parse_str(
+                "<iframe style='width:90%;height:90%'></iframe>",
+                "http://bomb.example/n",
+            ),
+            None,
+        );
     }
     d.layout(&Viewport::new(800, 600), &m);
     let slots = d.frame_slots();
@@ -403,10 +444,18 @@ fn frame_bomb_shapes_stay_bounded() {
         for i in 0..2000 {
             big.push_str(&alloc::format!("<p>line {i}</p>"));
         }
-        d.attach_frame(s.id, Document::parse_str(&big, "http://bomb.example/big"), None);
+        d.attach_frame(
+            s.id,
+            Document::parse_str(&big, "http://bomb.example/big"),
+            None,
+        );
     }
     d.layout(&Viewport::new(800, 600), &m);
-    assert!(d.display_list().entries.len() < 60_000, "{}", d.display_list().entries.len());
+    assert!(
+        d.display_list().entries.len() < 60_000,
+        "{}",
+        d.display_list().entries.len()
+    );
 }
 
 // ---- scripts that make, move and remove frames ----------------------------------------------
@@ -479,16 +528,26 @@ fn scripts_that_churn_frames_keep_the_tree_sound() {
             for s in &slots {
                 assert!(s.depth >= 1 && s.depth <= 6);
                 if s.parent != FrameId::TOP {
-                    assert!(slots.iter().any(|p| p.id == s.parent), "seed {seed}: orphan slot");
+                    assert!(
+                        slots.iter().any(|p| p.id == s.parent),
+                        "seed {seed}: orphan slot"
+                    );
                 }
                 seen_ids.push(s.id.0);
             }
             // Ids are never given twice to different elements: closed ones are gone for good.
             for c in d.take_closed_frames() {
-                assert!(slots.iter().all(|s| s.id != c), "seed {seed}: closed frame {c:?} still has a slot");
+                assert!(
+                    slots.iter().all(|s| s.id != c),
+                    "seed {seed}: closed frame {c:?} still has a slot"
+                );
             }
             let dl = d.display_list();
-            assert!(dl.entries.iter().all(|e| (e.clip as usize) < dl.clips.len()));
+            assert!(
+                dl.entries
+                    .iter()
+                    .all(|e| (e.clip as usize) < dl.clips.len())
+            );
             let _ = d.hit_test(r.below(500) as i32, r.below(400) as i32, (0, 0));
             let _ = d.find("child", false);
         }

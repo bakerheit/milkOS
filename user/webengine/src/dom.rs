@@ -651,8 +651,16 @@ impl Dom {
         if t == tag::IFRAME
             && matches!(
                 name,
-                "src" | "srcdoc" | "name" | "sandbox" | "loading" | "allow" | "allowfullscreen"
-                    | "referrerpolicy" | "scrolling" | "csp"
+                "src"
+                    | "srcdoc"
+                    | "name"
+                    | "sandbox"
+                    | "loading"
+                    | "allow"
+                    | "allowfullscreen"
+                    | "referrerpolicy"
+                    | "scrolling"
+                    | "csp"
             )
         {
             self.changes.frames = true;

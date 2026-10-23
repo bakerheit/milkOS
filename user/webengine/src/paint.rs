@@ -455,17 +455,17 @@ impl P<'_> {
                 };
                 if self.marks.len() < MAX_MARKS {
                     self.marks.push((
-                    layer,
-                    list_len,
-                    FrameMark {
-                        node: b.node,
-                        rect: cr,
-                        clip,
-                        fixed: layer == Layer::Fixed,
-                        index: 0,
-                        visible,
-                        runs_before: 0,
-                    },
+                        layer,
+                        list_len,
+                        FrameMark {
+                            node: b.node,
+                            rect: cr,
+                            clip,
+                            fixed: layer == Layer::Fixed,
+                            index: 0,
+                            visible,
+                            runs_before: 0,
+                        },
                     ));
                 }
             }

@@ -376,7 +376,10 @@ impl Page {
         SlotAttrs {
             src,
             srcdoc: e.attr("srcdoc").map(|s| clip(s, MAX_SRCDOC)),
-            name: e.attr("name").map(|s| clip(s, MAX_NAME)).unwrap_or_default(),
+            name: e
+                .attr("name")
+                .map(|s| clip(s, MAX_NAME))
+                .unwrap_or_default(),
             sandbox: e.attr("sandbox").map(Sandbox::parse),
             lazy: e
                 .attr("loading")
@@ -501,9 +504,7 @@ pub(crate) fn next_gen() -> u64 {
 impl crate::Document {
     /// A number that changes whenever [`crate::Document::display_list`] does.
     pub(crate) fn list_gen(&self) -> u64 {
-        self.merged
-            .as_ref()
-            .map_or(self.page.dl_gen(), |m| m.gen_)
+        self.merged.as_ref().map_or(self.page.dl_gen(), |m| m.gen_)
     }
 }
 
@@ -615,7 +616,12 @@ impl Builder {
     ) {
         let cr = mk.rect;
         let child = doc.display_list();
-        let base = self.clips.get(mk.clip as usize).copied().unwrap_or(cr).intersect(&cr);
+        let base = self
+            .clips
+            .get(mk.clip as usize)
+            .copied()
+            .unwrap_or(cr)
+            .intersect(&cr);
         let base_idx = self.clip(base, mk.clip);
         let target_fixed = mk.fixed;
         // The canvas: a frame is never see-through.
@@ -756,7 +762,13 @@ fn merge(frames: &Frames, parent: FrameId, page: &Page) -> Option<DisplayList> {
 
 /// Lay out the frames below `page` (frame `parent`, already laid out in `vp`) and give each
 /// slot its box. Recurses into the frames' own frames.
-fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport, m: &dyn TextMeasurer) {
+fn layout_level(
+    frames: &mut Frames,
+    parent: FrameId,
+    page: &Page,
+    vp: &Viewport,
+    m: &dyn TextMeasurer,
+) {
     let marks: Vec<crate::paint::FrameMark> = page.frame_marks().to_vec();
     let mut seen: Vec<usize> = Vec::new();
     for mk in &marks {
@@ -813,10 +825,7 @@ fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport
         if let Some(s) = frames.slot_mut(id) {
             s.vp = Some(child_vp);
             s.content = (cw, ch);
-            let (mx, my) = (
-                (cw - child_vp.width).max(0),
-                (ch - child_vp.height).max(0),
-            );
+            let (mx, my) = ((cw - child_vp.width).max(0), (ch - child_vp.height).max(0));
             let want = if s.attrs.no_scroll { (0, 0) } else { s.scroll };
             let clamped = (want.0.clamp(0, mx), want.1.clamp(0, my));
             if clamped != s.scroll {
@@ -872,13 +881,17 @@ pub(crate) fn needs_layout(top: &crate::Document) -> bool {
     let Some(f) = top.frames.as_ref() else {
         return false;
     };
+    // A frame with no box is not laid out, so its changes wait until it has one.
     f.version != top.frames_seen
-        || f.slots
-            .iter()
-            .any(|s| s.doc.as_ref().is_some_and(|d| d.page.changed()))
+        || f.slots.iter().any(|s| {
+            !s.rect.is_empty() && s.doc.as_ref().is_some_and(|d| d.page.changed())
+        })
 }
 
 // ---- pointer, scrolling ---------------------------------------------------------------------
+
+/// A frame on the way down to a point: its id, the point in its viewport, its scroll.
+type PathStep = (FrameId, (i32, i32), (i32, i32));
 
 /// The frames under a point of `page`'s viewport, outermost first (not counting `parent`
 /// itself), each with the point and scroll in its own viewport.
@@ -889,7 +902,7 @@ fn path_at(
     x: i32,
     y: i32,
     scroll: (i32, i32),
-    out: &mut Vec<(FrameId, (i32, i32), (i32, i32))>,
+    out: &mut Vec<PathStep>,
 ) {
     if out.len() > 32 {
         return;
@@ -1110,7 +1123,11 @@ pub(crate) fn focus_order(top: &crate::Document) -> Vec<(FrameId, ControlId)> {
 /// A rectangle of a frame's document moved into its parent's (the slot's box, the frame's
 /// scroll), cut to what the slot shows.
 fn up(r: Rect, slot: Rect, scroll: (i32, i32)) -> Rect {
-    let moved = shift_rect(r, slot.x.saturating_sub(scroll.0), slot.y.saturating_sub(scroll.1));
+    let moved = shift_rect(
+        r,
+        slot.x.saturating_sub(scroll.0),
+        slot.y.saturating_sub(scroll.1),
+    );
     moved.intersect(&slot)
 }
 

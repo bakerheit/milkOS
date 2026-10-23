@@ -1046,7 +1046,7 @@ impl Sandbox {
     /// unknown tokens are ignored.
     pub fn parse(value: &str) -> Sandbox {
         let mut s = Sandbox::default();
-        for t in value.split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+        for t in value.split([' ', '\t', '\n', '\r', '\x0c']) {
             match t.to_ascii_lowercase().as_str() {
                 "allow-scripts" => s.scripts = true,
                 "allow-forms" => s.forms = true,
@@ -1848,9 +1848,8 @@ impl Document {
                 d.page.flush();
                 frames.sync_doc(d.page.frame, &mut d.page);
             }
-            match frames.slot_mut(id) {
-                Some(s) => s.doc = Some(d),
-                None => {}
+            if let Some(s) = frames.slot_mut(id) {
+                s.doc = Some(d);
             }
         }
     }

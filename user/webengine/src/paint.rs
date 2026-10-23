@@ -455,6 +455,8 @@ impl P<'_> {
                     last,
                 } = *f
                 {
+                    let io = self.inline_offset(ib);
+                    let (x, y) = (x + io.0, y + io.1);
                     let ibx = &boxes[ib as usize];
                     let ist = &ibx.style;
                     let fr = rect_au(x + off.0, y + off.1, w, h);
@@ -523,6 +525,8 @@ impl P<'_> {
                     node,
                 } = *f
                 {
+                    let io = self.inline_offset(styled);
+                    let (x, baseline) = (x + io.0, baseline + io.1);
                     let ts = &boxes[styled as usize].style;
                     let s = &ifc.text[start as usize..end as usize];
                     let run_rect = {

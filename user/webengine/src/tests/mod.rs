@@ -1,5 +1,6 @@
 //! Host tests (`scripts/webengine-test.sh`).
 
+mod api;
 mod bench;
 mod fixtures;
 mod fuzz;

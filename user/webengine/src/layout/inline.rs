@@ -628,7 +628,7 @@ pub fn layout_ifc(
     let bx = &mut boxes[b as usize];
     bx.first_baseline = lines.first().map(|l| l.baseline);
     bx.last_baseline = lines.last().map(|l| l.baseline);
-    bx.ifc = Some(Ifc { text, lines, frags });
+    bx.ifc = Some(alloc::boxed::Box::new(Ifc { text, lines, frags }));
     cy - y
 }
 

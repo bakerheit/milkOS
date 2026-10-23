@@ -141,9 +141,7 @@ pub struct LBox {
     pub margin: [Au; 4],
     pub border: [Au; 4],
     pub padding: [Au; 4],
-    /// Relative-position offset of this box (not including ancestors').
-    pub rel: (Au, Au),
-    pub ifc: Option<Ifc>,
+    pub ifc: Option<alloc::boxed::Box<Ifc>>,
     pub first_baseline: Option<Au>,
     pub last_baseline: Option<Au>,
     /// For absolutely positioned boxes: the static position (where it would have been).
@@ -173,7 +171,6 @@ impl LBox {
             margin: [0; 4],
             border: [0; 4],
             padding: [0; 4],
-            rel: (0, 0),
             ifc: None,
             first_baseline: None,
             last_baseline: None,

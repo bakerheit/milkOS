@@ -19,8 +19,8 @@ text 168,592 w508 SystemUi16 400 #ff222222 "ipsum dolor sit amet, consectetur ad
 text 168,611 w302 SystemUi16 400 #ff222222 "incididunt ut labore et dolore magna aliqua."
 border 228,647 344x58 [2, 2, 2, 2]
 text 260,672 w204 SystemUi16 400 #ff222222 "Centered half-width box with "
-text 464,672 w76 SystemUi16 400 #ffaa0000 "a relatively"
-text 342,691 w112 SystemUi16 400 #ffaa0000 "positioned span"
+text 484,676 w76 SystemUi16 400 #ffaa0000 "a relatively"
+text 362,695 w112 SystemUi16 400 #ffaa0000 "positioned span"
 text 454,691 w4 SystemUi16 400 #ff222222 "."
 rrect 56,217 221x119 r6 #ffffffff
 border 56,217 221x119 [1, 1, 1, 1]

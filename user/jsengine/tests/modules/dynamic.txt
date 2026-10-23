@@ -1,0 +1,236 @@
+//# case: import() gives the namespace
+//# file: main.js
+import * as stat from './m.js';
+const dyn = await import('./m.js');
+log(dyn === stat, dyn.v, Object.keys(dyn).join());
+const p = import('./m.js');
+log(p instanceof Promise, Object.prototype.toString.call(p));
+//# file: m.js
+export const v = 1;
+export default 2;
+//# expect
+true 1 default,v
+true [object Promise]
+
+//# case: import() runs the module once and later than static imports
+//# file: main.js
+log('main start');
+const a = import('./m.js');
+log('requested');
+await a;
+await import('./m.js');
+log('main end');
+//# file: m.js
+log('m runs');
+//# expect
+main start
+requested
+m runs
+main end
+
+//# case: import() relative specifiers resolve against the importing module
+//# file: main.js
+const m = await import('./sub/a.js');
+log(m.where, m.viaSub);
+//# file: sub/a.js
+export const where = 'sub/a';
+export const viaSub = (await import('./b.js')).where;
+//# file: sub/b.js
+export const where = 'sub/b';
+//# expect
+sub/a sub/b
+
+//# case: import() of a missing module rejects
+//# oracle: no
+//# file: main.js
+try { await import('./nope.js'); } catch (e) { log(e.name); }
+try { await import('./bad-syntax.js'); } catch (e) { log(e.name); }
+//# file: bad-syntax.js
+let let = 1;
+//# expect
+TypeError
+SyntaxError
+
+//# case: import() specifier is converted to a string and errors reject
+//# file: main.js
+const sym = Symbol('s');
+let r1 = import(sym);
+log(r1 instanceof Promise);
+try { await r1; } catch (e) { log(e.name); }
+const evil = { toString() { throw new RangeError('no'); } };
+try { await import(evil); } catch (e) { log(e.name); }
+const obj = { toString() { return './m.js'; } };
+log((await import(obj)).v);
+//# file: m.js
+export const v = 'via toString';
+//# expect
+true
+TypeError
+RangeError
+via toString
+
+//# case: import() with attributes
+//# file: main.js
+const j = await import('./d.json', { with: { type: 'json' } });
+log(j.default.k);
+try { await import('./d.json'); } catch (e) { log('no attribute', e.name); }
+try { await import('./d.json', 5); } catch (e) { log('bad options', e.name); }
+try { await import('./d.json', { with: 5 }); } catch (e) { log('bad with', e.name); }
+try { await import('./d.json', { with: { type: 5 } }); } catch (e) { log('bad value', e.name); }
+const noWith = await import('./m.js', {});
+log(noWith.v);
+const undef = await import('./m.js', undefined);
+log(undef.v);
+//# file: d.json
+{"k": "json value"}
+//# file: m.js
+export const v = 'js';
+//# expect
+json value
+no attribute TypeError
+bad options TypeError
+bad with TypeError
+bad value TypeError
+js
+js
+
+//# case: import() trailing comma and syntax
+//# file: main.js
+const m = await import('./m.js',);
+log(m.v);
+const m2 = await import('./m.js', {},);
+log(m2.v);
+//# file: m.js
+export const v = 'ok';
+//# expect
+ok
+ok
+
+//# case: import() in a cycle and of the module itself
+//# file: main.js
+import * as me from './main.js';
+export const marker = 'main marker';
+import('./main.js').then((self) => log(self.marker, self === me));
+log('main body done');
+//# expect
+main body done
+main marker true
+
+//# case: import() of a module that is waiting on a cycle partner
+//# file: main.js
+import './a.js';
+//# file: a.js
+import './b.js';
+log('a');
+//# file: b.js
+log('b start');
+import('./a.js').then(() => log('b got a'));
+log('b requested a');
+//# expect
+b start
+b requested a
+a
+b got a
+
+//# case: import() from a classic script
+//# file: script.js
+import('./m.js').then((ns) => log('loaded', ns.v));
+log('script end');
+//# file: m.js
+log('m runs');
+export const v = 'from script';
+//# expect
+script end
+m runs
+loaded from script
+
+//# case: import() from a classic script resolves against the script
+//# file: script.js
+import('./lib/m.js').then((ns) => log(ns.v), (e) => log('failed', e.message));
+//# file: lib/m.js
+export const v = 'lib';
+//# expect
+lib
+
+//# case: import() from inside eval and Function code
+//# file: script.js
+const f = new Function('return import("./m.js")');
+f().then((ns) => log('function', ns.v));
+(0, eval)('import("./m.js")').then((ns) => log('eval', ns.v));
+//# file: m.js
+export const v = 1;
+//# expect
+function 1
+eval 1
+
+//# case: import statement in a classic script is a syntax error
+//# file: script.js
+try { (0, eval)('import x from "./m.js"'); } catch (e) { log(e.name); }
+try { (0, eval)('export const a = 1'); } catch (e) { log(e.name); }
+try { (0, eval)('import.meta'); } catch (e) { log(e.name); }
+try { (0, eval)('new import("./m.js")'); } catch (e) { log(e.name); }
+try { (0, eval)('import()'); } catch (e) { log(e.name); }
+try { (0, eval)('import("a", {}, 1)'); } catch (e) { log(e.name); }
+try { (0, eval)('import'); } catch (e) { log(e.name); }
+log(typeof (0, eval)('import("./m.js")').then);
+//# file: m.js
+export const v = 1;
+//# expect
+SyntaxError
+SyntaxError
+SyntaxError
+SyntaxError
+SyntaxError
+SyntaxError
+SyntaxError
+function
+
+//# case: import.meta
+//# oracle: no
+//# file: main.js
+log(typeof import.meta, Object.getPrototypeOf(import.meta));
+log(import.meta === import.meta, Object.isExtensible(import.meta));
+import.meta.custom = 1;
+log(import.meta.custom);
+function f() { return import.meta; }
+log(f() === import.meta);
+log(import.meta.url);
+import { other } from './other.js';
+log(other === import.meta, other.url);
+//# file: other.js
+import * as m from './main.js';
+export const other = import.meta;
+//# expect
+object null
+true true
+1
+true
+test:///main.js
+false test:///other.js
+
+//# case: import.meta is per module and lazily made
+//# oracle: no
+//# file: main.js
+import { get } from './a.js';
+const mine = import.meta;
+log(get() !== mine, Object.keys(import.meta).join());
+//# file: a.js
+export const get = () => import.meta;
+//# expect
+true url
+
+//# case: syntax errors in modules
+//# file: main.js
+import './x.js';
+//# file: x.js
+import.meta = 1;
+//# expect
+load error: SyntaxError: Invalid left-hand side in assignment
+
+//# case: import call needs an argument
+//# file: main.js
+import './x.js';
+//# file: x.js
+const a = import();
+//# expect
+load error: SyntaxError: Unexpected token ')'

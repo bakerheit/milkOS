@@ -11,6 +11,8 @@ use crate::atoms::{Atom, Atoms, kw};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SK {
     Script,
+    /// A module's top level: a function-like scope whose declarations are all lexical.
+    Module,
     Function,
     Block,
     Catch,
@@ -31,6 +33,8 @@ pub(crate) enum BK {
     /// strict code).
     FuncName,
     Arguments,
+    /// `import { x } from "m"`: a live view of another module's binding.
+    Import,
 }
 
 impl BK {
@@ -126,7 +130,7 @@ impl<'a> Resolver<'a> {
 
     fn open(&mut self, id: ScopeId, kind: SK, parent: Option<ScopeId>) {
         let func = match kind {
-            SK::Function | SK::Script => id,
+            SK::Function | SK::Script | SK::Module => id,
             _ => parent.map_or(id, |p| self.scopes[p as usize].func),
         };
         let strict = parent.is_some_and(|p| self.scopes[p as usize].strict);
@@ -158,6 +162,29 @@ impl<'a> Resolver<'a> {
                 name,
                 kind,
                 captured: false,
+                loc: Loc::Unassigned,
+                annex_b: false,
+            });
+            return Ok(());
+        }
+        if s.kind == SK::Module {
+            // Everything at a module's top level is lexical, except that `var`s may repeat.
+            if let Some(i) = s.find(name) {
+                if s.bindings[i].kind == BK::Var && kind == BK::Var {
+                    return Ok(());
+                }
+                return self.err(
+                    alloc::format!(
+                        "Identifier '{}' has already been declared",
+                        self.atoms.get(name)
+                    ),
+                    pos,
+                );
+            }
+            s.bindings.push(Binding {
+                name,
+                kind,
+                captured: true,
                 loc: Loc::Unassigned,
                 annex_b: false,
             });
@@ -249,6 +276,32 @@ impl<'a> Resolver<'a> {
         self.hoist_vars(&s.body, s.scope)?;
         self.declare_lexical(&s.body, s.scope, true)?;
         self.stmts(&s.body)
+    }
+
+    pub fn module(&mut self, m: &ModuleAst) -> RResult {
+        self.open(m.scope, SK::Module, None);
+        self.scopes[m.scope as usize].strict = true;
+        self.cur = m.scope;
+        for imp in &m.info.imports {
+            let bk = if matches!(imp.name, ImportName::All) {
+                BK::Const
+            } else {
+                BK::Import
+            };
+            self.declare(m.scope, imp.local, bk, imp.pos)?;
+        }
+        self.hoist_vars(&m.body, m.scope)?;
+        self.declare_lexical(&m.body, m.scope, true)?;
+        self.stmts(&m.body)?;
+        for le in &m.info.local_exports {
+            if self.scopes[m.scope as usize].find(le.local).is_none() {
+                return self.err(
+                    alloc::format!("Export '{}' is not defined in module", self.atoms.get(le.local)),
+                    le.pos,
+                );
+            }
+        }
+        Ok(())
     }
 
     // ---- hoisting ----
@@ -916,6 +969,14 @@ impl<'a> Resolver<'a> {
                 }
                 Ok(())
             }
+            ExprKind::ImportCall(a, b) => {
+                self.expr(a)?;
+                if let Some(b) = b {
+                    self.expr(b)?;
+                }
+                Ok(())
+            }
+            ExprKind::ImportMeta => Ok(()),
         }
     }
 }

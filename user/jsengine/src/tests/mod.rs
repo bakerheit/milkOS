@@ -7,3 +7,4 @@ mod conformance;
 mod embed;
 mod fuzz;
 mod limits;
+mod modules;

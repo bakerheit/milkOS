@@ -12,7 +12,7 @@ use core::cell::{Cell, RefCell};
 
 use crate::ast::*;
 use crate::atoms::{Atom, Atoms, kw};
-use crate::bytecode::{Code, CodeKind, Const, Handler, Op, Source, env_ref};
+use crate::bytecode::{Code, CodeKind, Const, ENV_SLOT_BITS, Handler, Op, Source, env_ref};
 use crate::realm::Realm;
 use crate::resolve::{BK, Loc, SK, Scope};
 use crate::value::StrId;
@@ -87,6 +87,10 @@ pub(crate) struct Compiler<'a> {
     atom_strs: Vec<Option<StrId>>,
     /// The class constructor being compiled next has instance fields to initialize.
     ctor_fields: bool,
+    /// Compiling a module: every Code made belongs to it.
+    module: Option<crate::api::ModuleId>,
+    /// The hidden `*default*` binding's atom (named "default" when it names a function).
+    default_atom: Option<Atom>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +112,8 @@ fn is_anon_fn(e: &Expr) -> bool {
     match &e.k {
         ExprKind::Func(f) => f.name.is_none(),
         ExprKind::Class(c) => c.name.is_none(),
+        // Parentheses don't hide it: `var f = (function () {})` names the function f.
+        ExprKind::Seq(items) if items.len() == 1 => is_anon_fn(&items[0]),
         _ => false,
     }
 }
@@ -127,6 +133,8 @@ impl<'a> Compiler<'a> {
             fns: Vec::new(),
             atom_strs: Vec::new(),
             ctor_fields: false,
+            module: None,
+            default_atom: None,
         }
     }
 
@@ -211,7 +219,12 @@ impl<'a> Compiler<'a> {
         if let Some(s) = self.atom_strs[i] {
             return s;
         }
-        let s = self.realm.heap.intern_str(self.atoms.get(a));
+        let text = if Some(a) == self.default_atom {
+            "default"
+        } else {
+            self.atoms.get(a)
+        };
+        let s = self.realm.heap.intern_str(text);
         self.atom_strs[i] = Some(s);
         s
     }
@@ -428,7 +441,11 @@ impl<'a> Compiler<'a> {
                 if d > MAX_ENV_DEPTH {
                     return self.err("scopes nested too deeply", pos);
                 }
-                if k.is_lexical() {
+                if k == BK::Import {
+                    let n = self.const_atom(a);
+                    self.mark(pos);
+                    self.emit(Op::GetImport(env_ref(d, s), n));
+                } else if k.is_lexical() {
                     let n = self.const_atom(a);
                     self.emit(Op::GetEnvChk(env_ref(d, s), n));
                 } else {
@@ -489,6 +506,15 @@ impl<'a> Compiler<'a> {
                     return self.err("scopes nested too deeply", pos);
                 }
                 let r = env_ref(d, s);
+                if k == BK::Import {
+                    // Imports are read-only views: any store throws.
+                    let n = self.const_atom(a);
+                    self.mark(pos);
+                    self.emit(Op::GetImport(r, n));
+                    self.emit(Op::Pop);
+                    self.emit(Op::ThrowConst(n));
+                    return Ok(());
+                }
                 if mode == Store::Assign && matches!(k, BK::Const | BK::FuncName) {
                     if k == BK::FuncName && !strict {
                         if !keep {
@@ -587,6 +613,47 @@ impl<'a> Compiler<'a> {
         Ok(self.finish(st, None, 0, (0, self.source.text.len() as u32)))
     }
 
+    /// Compiles a module into two codes that run in the module's own environment (made by the
+    /// linker, with one slot per top-level binding, in binding order): the first creates the
+    /// closures of the function declarations (it runs at link time), the second is the body
+    /// (an async function when the module uses top-level await). Returns them and the
+    /// environment size.
+    pub fn compile_module(
+        &mut self,
+        m: &'a ModuleAst,
+        id: crate::api::ModuleId,
+    ) -> CResult<(Rc<Code>, Rc<Code>, u32)> {
+        self.module = Some(id);
+        self.default_atom = Some(m.info.default_atom);
+        let sid = m.scope;
+        let n = self.scopes[sid as usize].bindings.len();
+        if n as u32 >= (1 << ENV_SLOT_BITS) {
+            return self.err("too many top-level bindings", 0);
+        }
+        for i in 0..n {
+            self.scopes[sid as usize].bindings[i].loc = Loc::Env(i as u32);
+        }
+        self.scopes[sid as usize].env_size = n as u32;
+        let span = (0, self.source.text.len() as u32);
+        // Link-time code: the hoisted functions.
+        self.fns.push(new_fn(CodeKind::Normal, true));
+        self.f().scope_chain.push(sid);
+        self.hoist_functions(&m.body)?;
+        self.emit(Op::ReturnUndef);
+        let st = self.fns.pop().unwrap_or_else(|| new_fn(CodeKind::Normal, true));
+        let init = self.finish(st, None, 0, span);
+        // The body.
+        let mut st = new_fn(CodeKind::Normal, true);
+        st.is_async = m.info.has_tla;
+        self.fns.push(st);
+        self.f().scope_chain.push(sid);
+        self.stmts(&m.body)?;
+        self.emit(Op::ReturnUndef);
+        let st = self.fns.pop().unwrap_or_else(|| new_fn(CodeKind::Normal, true));
+        let body = self.finish(st, None, 0, span);
+        Ok((init, body, n as u32))
+    }
+
     /// Creates the closures of the function declarations directly in `body` (at scope entry).
     fn hoist_functions(&mut self, body: &'a [Stmt]) -> CResult<()> {
         for st in body {
@@ -641,6 +708,7 @@ impl<'a> Compiler<'a> {
             source: self.source.clone(),
             span,
             marked: Cell::new(0),
+            module: self.module,
         })
     }
 
@@ -835,6 +903,9 @@ impl<'a> Compiler<'a> {
         match &e.k {
             ExprKind::Func(f) if f.name.is_none() => self.func_expr(f, Some(s)),
             ExprKind::Class(c) if c.name.is_none() => self.class(c, Some(s)),
+            ExprKind::Seq(items) if items.len() == 1 && is_anon_fn(&items[0]) => {
+                self.named_expr_str(&items[0], s)
+            }
             _ => self.expr(e),
         }
     }
@@ -2173,6 +2244,21 @@ impl<'a> Compiler<'a> {
                         self.emit(Op::Pop);
                     }
                 }
+            }
+            ExprKind::ImportCall(spec, opts) => {
+                self.expr(spec)?;
+                match opts {
+                    Some(o) => self.expr(o)?,
+                    None => {
+                        self.emit(Op::Undef);
+                    }
+                }
+                self.mark(e.pos);
+                self.emit(Op::ImportCall);
+            }
+            ExprKind::ImportMeta => {
+                self.mark(e.pos);
+                self.emit(Op::ImportMeta);
             }
             ExprKind::Yield(arg, delegate) => {
                 match arg {

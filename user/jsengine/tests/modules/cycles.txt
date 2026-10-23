@@ -1,0 +1,194 @@
+//# case: cycle: hoisted functions work before the exporter runs
+//# file: main.js
+import { fromB } from './b.js';
+log('main', fromB());
+//# file: a.js
+import { bFn } from './b.js';
+log('a runs, b says', bFn());
+export function aFn() { return 'A'; }
+//# file: b.js
+import { aFn } from './a.js';
+log('b runs, a says', aFn());
+export function bFn() { return 'B'; }
+export function fromB() { return 'from b'; }
+//# file: boot.js
+//# expect
+a runs, b says B
+b runs, a says A
+main from b
+
+//# case: cycle: let binding is in its TDZ until the exporter runs
+//# file: main.js
+import './a.js';
+//# file: a.js
+import './b.js';
+export let late = 'a-late';
+export const alsoLate = 1;
+export class K {}
+log('a done');
+//# file: b.js
+import { late, alsoLate, K } from './a.js';
+for (const f of [() => late, () => alsoLate, () => K]) {
+  try { f(); log('no error'); } catch (e) { log(e.name); }
+}
+try { typeof late; } catch (e) { log('typeof', e.name); }
+log('b done');
+//# expect
+ReferenceError
+ReferenceError
+ReferenceError
+typeof ReferenceError
+b done
+a done
+
+//# case: cycle: bindings are live once initialized
+//# file: main.js
+import { getB, a } from './a.js';
+log(getB(), a);
+//# file: a.js
+import { b } from './b.js';
+export let a = 'a1';
+export const getB = () => b;
+a = 'a2';
+//# file: b.js
+import { a, getB } from './a.js';
+export let b = 'b1';
+setTimeoutLike(() => log('later', a, b));
+function setTimeoutLike(f) { Promise.resolve().then(f); }
+//# expect
+b1 a2
+later a2 b1
+
+//# case: cycle: three modules, evaluation order
+//# file: main.js
+import './x.js';
+log('main');
+//# file: x.js
+import './y.js';
+log('x');
+//# file: y.js
+import './z.js';
+log('y');
+//# file: z.js
+import './x.js';
+log('z');
+//# expect
+z
+y
+x
+main
+
+//# case: self import
+//# file: main.js
+import * as self from './main.js';
+import { v2 as other } from './main.js';
+export let v2 = 2;
+export const v = 'v';
+log(Object.keys(self).join(','), other, self.v);
+//# expect
+v,v2 2 v
+
+//# case: cycle: namespace of a module that has not run yet
+//# file: main.js
+import './a.js';
+//# file: a.js
+import * as b from './b.js';
+export let av = 1;
+log('a', Object.keys(b).join(','));
+//# file: b.js
+import * as a from './a.js';
+export let bv = 2;
+try { log('b', Object.keys(a).join(',')); } catch (e) { log('keys', e.name); }
+try { log(a.av); } catch (e) { log(e.name); }
+try { Object.keys(a).forEach((k) => a[k]); } catch (e) { log('key', e.name); }
+try { log(Object.getOwnPropertyDescriptor(a, 'av')); } catch (e) { log('desc', e.name); }
+try { log('av' in a); } catch (e) { log('in', e.name); }
+//# expect
+keys ReferenceError
+ReferenceError
+key ReferenceError
+desc ReferenceError
+true
+a bv
+
+//# case: export star through a cycle
+//# file: main.js
+import { x, y } from './a.js';
+log(x, y);
+//# file: a.js
+export * from './b.js';
+export const x = 'x';
+//# file: b.js
+export * from './a.js';
+export const y = 'y';
+//# expect
+x y
+
+//# case: ambiguous star exports are left out and error when imported
+//# file: main.js
+import * as ns from './s.js';
+log(Object.keys(ns).join(','), 'dup' in ns);
+//# file: s.js
+export * from './t.js';
+export * from './u.js';
+//# file: t.js
+export const dup = 't';
+export const only = 't';
+//# file: u.js
+export const dup = 'u';
+//# expect
+only false
+
+//# case: ambiguous star export error on a named import
+//# file: main.js
+import { dup } from './s.js';
+//# file: s.js
+export * from './t.js';
+export * from './u.js';
+//# file: t.js
+export const dup = 't';
+//# file: u.js
+export const dup = 'u';
+//# expect
+link error: SyntaxError: The requested module './s.js' contains conflicting star exports for name 'dup'
+
+//# case: the same binding reached by two star paths is not ambiguous
+//# file: main.js
+import { shared } from './s.js';
+log(shared);
+//# file: s.js
+export * from './t.js';
+export * from './u.js';
+//# file: t.js
+export * from './origin.js';
+//# file: u.js
+export * from './origin.js';
+//# file: origin.js
+export const shared = 'one binding';
+//# expect
+one binding
+
+//# case: re-exported binding is the same live binding
+//# file: main.js
+import { n, bump } from './mid.js';
+log(n); bump(); log(n);
+//# file: mid.js
+export { n, bump } from './src.js';
+//# file: src.js
+export let n = 0;
+export function bump() { n += 10; }
+//# expect
+0
+10
+
+//# case: import of an import binding
+//# file: main.js
+import { v } from './b.js';
+log(v);
+//# file: b.js
+import { v } from './a.js';
+export { v };
+//# file: a.js
+export let v = 'orig';
+//# expect
+orig

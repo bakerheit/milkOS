@@ -1,0 +1,158 @@
+//# case: namespace keys are sorted by code units
+//# oracle: no
+//# file: main.js
+import * as ns from './m.js';
+log(Object.keys(ns).join(','));
+log(Reflect.ownKeys(ns).map(String).join(','));
+log(JSON.stringify(Object.getOwnPropertyNames(ns)));
+//# file: m.js
+export const b = 1, a = 2, B = 3, _ = 4, $ = 5, z = 6, Z = 7;
+export { a as aa, b as "0", a as "10", a as "9" };
+export { a as "é", a as "\u{10000}", a as "￿" };
+//# expect
+$,0,10,9,B,Z,_,a,aa,b,z,é,𐀀,￿
+$,0,10,9,B,Z,_,a,aa,b,z,é,𐀀,￿,Symbol(Symbol.toStringTag)
+["$","0","10","9","B","Z","_","a","aa","b","z","é","𐀀","￿"]
+
+//# case: namespace is read-only and sealed
+//# file: main.js
+import * as ns from './m.js';
+function t(f) { try { const r = f(); return typeof r === 'object' || typeof r === 'function' ? 'ok' : String(r); } catch (e) { return e.name; } }
+log(t(() => { ns.x = 2; }), ns.x);
+log(t(() => { ns.nope = 2; }), 'nope' in ns);
+log(t(() => { delete ns.x; }));
+log(t(() => delete ns.nope), t(() => Reflect.deleteProperty(ns, 'x')));
+log(t(() => Object.defineProperty(ns, 'x', { value: 1 })));
+log(t(() => Object.defineProperty(ns, 'x', { value: 2 })));
+log(t(() => Object.defineProperty(ns, 'x', { value: 1, writable: false })));
+log(t(() => Object.defineProperty(ns, 'x', { value: 1, enumerable: false })));
+log(t(() => Object.defineProperty(ns, 'x', { get() {} })));
+log(t(() => Object.defineProperty(ns, 'nope', { value: 1 })));
+log(t(() => Reflect.defineProperty(ns, 'nope', { value: 1 })));
+log(t(() => Reflect.set(ns, 'x', 1)), t(() => Reflect.set(ns, 'nope', 1)));
+log(Object.isExtensible(ns), Object.isSealed(ns), Object.isFrozen(ns));
+log(t(() => Object.freeze(ns)));
+log(t(() => Object.seal(ns)));
+log(t(() => Object.preventExtensions(ns)));
+log(Object.getPrototypeOf(ns));
+log(t(() => Object.setPrototypeOf(ns, {})), t(() => Object.setPrototypeOf(ns, null)), Reflect.setPrototypeOf(ns, {}));
+log(JSON.stringify(Object.getOwnPropertyDescriptor(ns, 'x')));
+log(JSON.stringify(Object.getOwnPropertyDescriptor(ns, Symbol.toStringTag)));
+log(Object.prototype.toString.call(ns), String(ns[Symbol.toStringTag]));
+log(typeof ns, ns instanceof Object, Object.getOwnPropertyDescriptor(ns, 'nope'));
+//# file: m.js
+export let x = 1;
+//# expect
+TypeError 1
+TypeError false
+TypeError
+true false
+ok
+TypeError
+TypeError
+TypeError
+TypeError
+TypeError
+false
+false false
+false true false
+TypeError
+ok
+ok
+null
+TypeError ok false
+{"value":1,"writable":true,"enumerable":true,"configurable":false}
+{"value":"Module","writable":false,"enumerable":false,"configurable":false}
+[object Module] Module
+object false undefined
+
+//# case: namespace of an empty module can be frozen
+//# file: main.js
+import * as ns from './m.js';
+log(Object.isFrozen(ns), Object.isSealed(ns), Object.keys(ns).length);
+log(Object.freeze(ns) === ns);
+//# file: m.js
+//# expect
+true true 0
+true
+
+//# case: namespace is live and the same object every time
+//# file: main.js
+import * as a from './m.js';
+import * as b from './m.js';
+import { ns as c } from './re.js';
+import { bump } from './m.js';
+log(a === b, a === c);
+bump(); bump();
+log(a.count, c.count);
+const copy = { ...a };
+bump();
+log(copy.count, a.count);
+//# file: m.js
+export let count = 0;
+export function bump() { count++; }
+//# file: re.js
+export * as ns from './m.js';
+//# expect
+true true
+2 2
+2 3
+
+//# case: namespace behaves with for-in, spread, entries and in
+//# file: main.js
+import * as ns from './m.js';
+const seen = [];
+for (const k in ns) seen.push(k);
+log(seen.join(','));
+log(Object.entries(ns).map(([k, v]) => k + '=' + v).join(','));
+log(Object.values(ns).join(','));
+log('a' in ns, 'then' in ns, Symbol.toStringTag in ns, Object.hasOwn ? Object.hasOwn(ns, 'a') : true);
+log(ns.hasOwnProperty === undefined, Object.prototype.hasOwnProperty.call(ns, 'b'));
+log(JSON.stringify(ns));
+//# file: m.js
+export const a = 1, b = 'two';
+//# expect
+a,b
+a=1,b=two
+1,two
+true false true true
+true true
+{"a":1,"b":"two"}
+
+//# case: a namespace with a then export is thenable
+//# file: main.js
+const ns = await import('./m.js');
+log('resolved', typeof ns);
+//# file: m.js
+export function then(resolve) { log('then called'); resolve('thenable result'); }
+//# expect
+then called
+resolved string
+
+//# case: export names that look like array indices
+//# oracle: no
+//# file: main.js
+import * as ns from './m.js';
+log(ns[0], ns['1'], ns['01'], Object.keys(ns).join());
+log(Object.getOwnPropertyDescriptor(ns, '0').value);
+log(Reflect.has(ns, 1), Reflect.has(ns, 2));
+//# file: m.js
+const v = 'v';
+export { v as "0", v as "1", v as "01" };
+//# expect
+v v v 0,01,1
+v
+true false
+
+//# case: namespace object of a re-export of a namespace
+//# file: main.js
+import * as top from './top.js';
+log(top.inner.leaf, Object.keys(top.inner).join(), top.inner === top.again);
+//# file: top.js
+export * as inner from './mid.js';
+import * as again from './mid.js';
+export { again };
+//# file: mid.js
+export const leaf = 'L';
+//# expect
+L leaf true

@@ -297,6 +297,20 @@ impl Realm {
         }
     }
 
+    /// The value an imported binding currently has (Empty before its module initialized it).
+    fn import_get(&self, r: u32) -> Val {
+        match self.env_get(r) {
+            Val::Obj(o) => match &self.o(o).kind {
+                ObjKind::ImportRef { env, slot } => match &self.o(*env).kind {
+                    ObjKind::Env(d) => d.slots.get(*slot as usize).copied().unwrap_or(Val::Empty),
+                    _ => Val::Empty,
+                },
+                _ => Val::Empty,
+            },
+            _ => Val::Empty,
+        }
+    }
+
     fn env_set(&mut self, r: u32, v: Val) {
         let depth = r >> ENV_SLOT_BITS;
         let slot = (r & ((1 << ENV_SLOT_BITS) - 1)) as usize;
@@ -1039,6 +1053,33 @@ impl Realm {
                         let e = self.tdz_error(&code, n);
                         throw!(e);
                     }
+                    self.push(v);
+                }
+                Op::GetImport(r, n) => {
+                    let v = self.import_get(r);
+                    if v.is_empty() {
+                        let e = self.tdz_error(&code, n);
+                        throw!(e);
+                    }
+                    self.push(v);
+                }
+                Op::ImportMeta => {
+                    sync!();
+                    let m = code.module;
+                    let v = tri!(self.import_meta(m));
+                    self.push(v);
+                }
+                Op::ImportCall => {
+                    sync!();
+                    let opts = self.pop();
+                    let spec = self.pop();
+                    self.temps.push(spec);
+                    self.temps.push(opts);
+                    let referrer = code.module;
+                    let file = code.source.file.clone();
+                    let r = self.import_call(referrer, file, spec, opts);
+                    self.temps.truncate(self.temps.len() - 2);
+                    let v = tri!(r);
                     self.push(v);
                 }
                 Op::SetEnvChk(r, n) => {

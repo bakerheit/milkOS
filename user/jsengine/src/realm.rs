@@ -933,6 +933,7 @@ impl Realm {
         }
         let epoch = self.heap.epoch.wrapping_add(1).max(1);
         self.vm.trace(&mut t, epoch);
+        self.modules.trace(&mut t, epoch);
         let mut dead = core::mem::take(&mut self.dead_hosts);
         self.heap.collect(&mut t, &mut dead);
         self.dead_hosts = dead;

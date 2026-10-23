@@ -8,8 +8,18 @@ use alloc::vec::Vec;
 
 use imgdec::Image;
 
-use crate::engine::{Color, DisplayList, Font, Item, Rect};
+use webengine::{BorderStyle, Decoration, MarkerKind, TextRun};
+
+use crate::engine::{Color, ControlId, DisplayList, Entry, ImageId, Item, Rect};
 use crate::font;
+
+/// How glyphs are drawn: the scale (1, 2, 3 times the 8x16 cell), faux bold, a slant.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Glyphs {
+    pub scale: i32,
+    pub bold: bool,
+    pub italic: bool,
+}
 
 /// `src` over `dst` at `a` (0..=255).
 pub fn blend(dst: Color, src: Color, a: u32) -> Color {
@@ -21,12 +31,16 @@ pub fn blend(dst: Color, src: Color, a: u32) -> Color {
     ch(16) | ch(8) | ch(0)
 }
 
-fn intersect(a: Rect, b: Rect) -> Rect {
+/// The overlap of two rectangles; an empty one is (0, 0, 0, 0), so it can be used as a range.
+pub fn intersect(a: Rect, b: Rect) -> Rect {
     let x0 = a.x.max(b.x);
     let y0 = a.y.max(b.y);
-    let x1 = (a.x + a.w).min(b.x + b.w);
-    let y1 = (a.y + a.h).min(b.y + b.h);
-    Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+    let x1 = a.x.saturating_add(a.w).min(b.x.saturating_add(b.w));
+    let y1 = a.y.saturating_add(a.h).min(b.y.saturating_add(b.h));
+    if x1 <= x0 || y1 <= y0 {
+        return Rect::default();
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
 }
 
 pub struct Surface {
@@ -73,7 +87,15 @@ impl Surface {
 
     /// The visible part of `r` (after the offset), in surface pixels.
     fn vis(&self, r: Rect) -> Rect {
-        intersect(Rect::new(r.x + self.dx, r.y + self.dy, r.w, r.h), self.clip)
+        intersect(
+            Rect::new(
+                r.x.saturating_add(self.dx),
+                r.y.saturating_add(self.dy),
+                r.w,
+                r.h,
+            ),
+            self.clip,
+        )
     }
 
     pub fn fill(&mut self, r: Rect, c: Color) {
@@ -156,13 +178,29 @@ impl Surface {
         self.fill(Rect::new(r.x + r.w - t, r.y + t, t, r.h - 2 * t), c);
     }
 
-    /// Text with its top left at (x, y); returns the x where it ends.
-    pub fn text(&mut self, x: i32, y: i32, s: &str, f: Font, c: Color) -> i32 {
-        let sc = font::scale(f);
+    /// Text in the UI font (body size, or `big` for twice the size) with its top left at
+    /// (x, y); returns the x where it ends.
+    pub fn text(&mut self, x: i32, y: i32, s: &str, bold: bool, c: Color) -> i32 {
+        self.glyphs(
+            x,
+            y,
+            s,
+            Glyphs {
+                scale: 1,
+                bold,
+                italic: false,
+            },
+            c,
+        )
+    }
+
+    /// Unifont glyphs with the cell's top left at (x, y).
+    pub fn glyphs(&mut self, x: i32, y: i32, s: &str, f: Glyphs, c: Color) -> i32 {
+        let sc = f.scale.max(1);
         let step = font::CELL_W * sc;
         // Nothing of it can show: skip the glyph loop.
         if y + self.dy >= self.clip.bottom() || y + self.dy + font::CELL_H * sc <= self.clip.y {
-            return x + font::width(s, f);
+            return x + font::cells(s) * step;
         }
         let mut cx = x;
         for g in font::glyphs(s) {
@@ -175,16 +213,16 @@ impl Surface {
                     if *bits == 0 {
                         continue;
                     }
+                    // Italic: a slant of one pixel every four rows.
+                    let slant = if f.italic {
+                        ((15 - row as i32) / 4 - 1) * sc
+                    } else {
+                        0
+                    };
                     for col in 0..8 {
                         if bits & (0x80 >> col) == 0 {
                             continue;
                         }
-                        // Italic: a slant of one pixel every four rows.
-                        let slant = if f.italic {
-                            (15 - row as i32) / 4 - 1
-                        } else {
-                            0
-                        };
                         for sy in 0..sc {
                             for sx in 0..sc {
                                 let px = cx + col * sc + sx + slant;
@@ -239,15 +277,307 @@ impl Surface {
 
 /// What [`paint_list`] needs from the app besides the list.
 pub trait Painter {
-    /// A loaded image.
-    fn image(&self, url: &str) -> Option<&Image>;
-    /// Draw form control `id` (the app knows its state, focus and caret).
-    fn control(&mut self, s: &mut Surface, rect: Rect, id: usize);
+    /// A loaded image of this page.
+    fn image(&self, id: ImageId) -> Option<&Image>;
+    /// Draw form control `id` into its content box (the app knows its state, focus and
+    /// caret; the engine already painted the control's background and border).
+    fn control(&mut self, s: &mut Surface, rect: Rect, id: ControlId);
 }
 
-/// Paint the part of `list` from page y = `scroll` down into `s` (which is cleared to the
-/// page's background first). `marks` are find-in-page highlights (the `current` one
-/// stronger).
+fn alpha(c: Color) -> u32 {
+    c >> 24
+}
+
+impl Surface {
+    /// A fill in an engine colour (0xAARRGGBB).
+    fn fill_argb(&mut self, r: Rect, c: Color) {
+        match alpha(c) {
+            0 => {}
+            255 => self.fill(r, c & 0xFF_FFFF),
+            a => self.fill_alpha(r, c & 0xFF_FFFF, a),
+        }
+    }
+
+    /// A rounded rectangle in an engine colour.
+    fn rrect_argb(&mut self, r: Rect, radius: i32, c: Color) {
+        match alpha(c) {
+            0 => {}
+            255 => self.rrect(r, radius, c & 0xFF_FFFF),
+            // Translucent and rounded: the corners square (rare, and cheap this way).
+            a => self.fill_alpha(r, c & 0xFF_FFFF, a),
+        }
+    }
+
+    /// A rounded frame `w` wide (one colour, solid): straight sides, and quarter rings at
+    /// the corners.
+    fn rounded_border(&mut self, r: Rect, radius: i32, w: i32, c: Color) {
+        let rad = radius.min(r.w / 2).min(r.h / 2).max(0);
+        let w = w.max(1).min(rad.max(1));
+        if alpha(c) == 0 || rad == 0 {
+            return self.border(r, w, c & 0xFF_FFFF);
+        }
+        let c = c & 0xFF_FFFF;
+        self.fill(Rect::new(r.x + rad, r.y, r.w - 2 * rad, w), c);
+        self.fill(Rect::new(r.x + rad, r.y + r.h - w, r.w - 2 * rad, w), c);
+        self.fill(Rect::new(r.x, r.y + rad, w, r.h - 2 * rad), c);
+        self.fill(Rect::new(r.x + r.w - w, r.y + rad, w, r.h - 2 * rad), c);
+        let (o, i) = ((rad * 4) as i64, ((rad - w).max(0) * 4) as i64);
+        for (cx, cy, x0, y0) in [
+            (r.x + rad, r.y + rad, r.x, r.y),
+            (r.x + r.w - rad, r.y + rad, r.x + r.w - rad, r.y),
+            (r.x + rad, r.y + r.h - rad, r.x, r.y + r.h - rad),
+            (
+                r.x + r.w - rad,
+                r.y + r.h - rad,
+                r.x + r.w - rad,
+                r.y + r.h - rad,
+            ),
+        ] {
+            for y in y0..y0 + rad {
+                for x in x0..x0 + rad {
+                    // 4x4 samples: inside the outer circle and outside the inner one.
+                    let mut n = 0;
+                    for sy in 0..4 {
+                        for sx in 0..4 {
+                            let dx = ((x - cx) * 4 + sx) as i64 + if x < cx { 0 } else { 1 } - 2;
+                            let dy = ((y - cy) * 4 + sy) as i64 + if y < cy { 0 } else { 1 } - 2;
+                            let d = dx * dx + dy * dy;
+                            if d <= o * o && d >= i * i {
+                                n += 1;
+                            }
+                        }
+                    }
+                    if n > 0 {
+                        self.put(x, y, c, n * 255 / 16);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A circle's outline.
+    fn ring(&mut self, cx: i32, cy: i32, r: i32, c: Color) {
+        for y in -r - 1..=r + 1 {
+            for x in -r - 1..=r + 1 {
+                let d2 = x * x + y * y;
+                if d2 <= r * r && d2 >= (r - 1) * (r - 1) {
+                    self.put(cx + x, cy + y, c, 255);
+                }
+            }
+        }
+    }
+
+    /// One side of a border: solid, dashed, dotted or double.
+    fn side(&mut self, r: Rect, horizontal: bool, style: BorderStyle, c: Color) {
+        let c2 = c & 0xFF_FFFF;
+        let a = alpha(c);
+        if a == 0 || r.w <= 0 || r.h <= 0 {
+            return;
+        }
+        match style {
+            BorderStyle::None => {}
+            BorderStyle::Dashed | BorderStyle::Dotted => {
+                let t = if horizontal { r.h } else { r.w }.max(1);
+                let (on, off) = if style == BorderStyle::Dotted {
+                    (t, t)
+                } else {
+                    (3 * t, 2 * t)
+                };
+                let len = if horizontal { r.w } else { r.h };
+                let mut k = 0;
+                while k < len {
+                    let n = on.min(len - k);
+                    let seg = if horizontal {
+                        Rect::new(r.x + k, r.y, n, r.h)
+                    } else {
+                        Rect::new(r.x, r.y + k, r.w, n)
+                    };
+                    self.fill_argb(seg, c);
+                    k += on + off;
+                }
+            }
+            BorderStyle::Double if (if horizontal { r.h } else { r.w }) >= 3 => {
+                let t = if horizontal { r.h } else { r.w };
+                let third = (t / 3).max(1);
+                let (a1, a2) = if horizontal {
+                    (
+                        Rect::new(r.x, r.y, r.w, third),
+                        Rect::new(r.x, r.y + t - third, r.w, third),
+                    )
+                } else {
+                    (
+                        Rect::new(r.x, r.y, third, r.h),
+                        Rect::new(r.x + t - third, r.y, third, r.h),
+                    )
+                };
+                self.fill_argb(a1, c);
+                self.fill_argb(a2, c);
+            }
+            _ => {
+                if a == 255 {
+                    self.fill(r, c2)
+                } else {
+                    self.fill_alpha(r, c2, a)
+                }
+            }
+        }
+    }
+
+    /// A text run as the engine laid it out (pen at x, on the baseline).
+    pub fn run(&mut self, run: &TextRun, text: &str) {
+        let sc = font::scale(&run.font);
+        let f = Glyphs {
+            scale: sc,
+            bold: run.font.weight >= 600,
+            italic: run.font.italic,
+        };
+        let c = run.color & 0xFF_FFFF;
+        if alpha(run.color) == 0 {
+            return;
+        }
+        let top = run.baseline - font::ASCENT * sc;
+        self.glyphs(run.x, top, text, f, c);
+        let d = run.decoration;
+        if d.has(Decoration::UNDERLINE) {
+            self.fill(Rect::new(run.x, run.baseline + sc, run.width, sc), c);
+        }
+        if d.has(Decoration::LINE_THROUGH) {
+            self.fill(Rect::new(run.x, run.baseline - 5 * sc, run.width, sc), c);
+        }
+        if d.has(Decoration::OVERLINE) {
+            self.fill(Rect::new(run.x, top, run.width, sc), c);
+        }
+    }
+}
+
+/// Paint one display entry (already clipped by the caller).
+fn entry(s: &mut Surface, list: &DisplayList, it: &Item, p: &mut dyn Painter) {
+    match *it {
+        Item::Rect { rect, color } => s.fill_argb(rect, color),
+        Item::RoundRect {
+            rect,
+            color,
+            radius,
+        } => s.rrect_argb(rect, radius, color),
+        Item::Border {
+            rect,
+            widths,
+            colors,
+            styles,
+            radius,
+        } if radius > 0
+            && widths.iter().all(|w| *w == widths[0])
+            && colors.iter().all(|c| *c == colors[0])
+            && styles.iter().all(|st| *st == BorderStyle::Solid) =>
+        {
+            s.rounded_border(rect, radius, widths[0], colors[0]);
+        }
+        Item::Border {
+            rect,
+            widths,
+            colors,
+            styles,
+            ..
+        } => {
+            let [t, r, b, l] = widths;
+            s.side(
+                Rect::new(rect.x, rect.y, rect.w, t),
+                true,
+                styles[0],
+                colors[0],
+            );
+            s.side(
+                Rect::new(rect.x + rect.w - r, rect.y + t, r, rect.h - t - b),
+                false,
+                styles[1],
+                colors[1],
+            );
+            s.side(
+                Rect::new(rect.x, rect.y + rect.h - b, rect.w, b),
+                true,
+                styles[2],
+                colors[2],
+            );
+            s.side(
+                Rect::new(rect.x, rect.y + t, l, rect.h - t - b),
+                false,
+                styles[3],
+                colors[3],
+            );
+        }
+        Item::Text(run) => s.run(&run, list.run_text(&run)),
+        Item::Image { rect, image } => match p.image(image) {
+            Some(img) => s.image(rect, img),
+            None => {
+                // Not here (yet): a quiet frame.
+                s.fill(rect, 0xF3_EC_DF);
+                s.border(rect, 1, 0xE2_D5_BD);
+            }
+        },
+        Item::Tiled {
+            area,
+            tile,
+            image,
+            repeat_x,
+            repeat_y,
+        } => {
+            let Some(img) = p.image(image) else {
+                return;
+            };
+            if tile.w <= 0 || tile.h <= 0 {
+                return;
+            }
+            let old = s.clip;
+            s.clip = intersect(Rect::new(area.x + s.dx, area.y + s.dy, area.w, area.h), old);
+            // Only the tiles that can show (and never more than 4096 of them).
+            let vis = Rect::new(s.clip.x - s.dx, s.clip.y - s.dy, s.clip.w, s.clip.h);
+            let span = |o: i32, size: i32, v0: i32, v1: i32, rep: bool| -> (i32, i32) {
+                if !rep {
+                    return (0, 0);
+                }
+                let first = (v0 - o).div_euclid(size);
+                let last = (v1 - o).div_euclid(size);
+                (first, last)
+            };
+            let (x0, x1) = span(tile.x, tile.w, vis.x, vis.x + vis.w, repeat_x);
+            let (y0, y1) = span(tile.y, tile.h, vis.y, vis.y + vis.h, repeat_y);
+            let mut n = 0;
+            'tiles: for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    n += 1;
+                    if n > 4096 {
+                        break 'tiles;
+                    }
+                    s.image(
+                        Rect::new(tile.x + tx * tile.w, tile.y + ty * tile.h, tile.w, tile.h),
+                        img,
+                    );
+                }
+            }
+            s.clip = old;
+        }
+        Item::Marker { rect, kind, color } => {
+            let c = color & 0xFF_FFFF;
+            let r = (rect.w.min(rect.h) / 2).max(1);
+            let (cx, cy) = (rect.x + rect.w / 2, rect.y + rect.h / 2);
+            match kind {
+                MarkerKind::Disc => s.disc(cx, cy, r, c),
+                MarkerKind::Circle => s.ring(cx, cy, r, c),
+                MarkerKind::Square => s.fill(Rect::new(cx - r, cy - r, 2 * r, 2 * r), c),
+            }
+        }
+        Item::Control { rect, control } => p.control(s, rect, control),
+    }
+}
+
+/// The engine's built-in link colour (its UA stylesheet's `:link`).
+pub const UA_LINK: Color = 0xFF_00_00_EE;
+
+/// Paint the part of `list` from page y = `scroll` down into `s` (cleared to the page's
+/// background first), then the `position: fixed` boxes over it. `marks` are find-in-page
+/// highlights (page coordinates; the `current` one stronger). `link`: the colour for links
+/// the page didn't colour itself (the theme's link token, instead of the engine's default
+/// blue).
 pub fn paint_list(
     s: &mut Surface,
     list: &DisplayList,
@@ -255,84 +585,57 @@ pub fn paint_list(
     p: &mut dyn Painter,
     marks: &[Rect],
     current: Option<usize>,
+    link: Color,
 ) {
-    s.clear(list.background);
-    s.dx = 0;
-    s.dy = -scroll;
-    let top = scroll;
-    let bottom = scroll + s.h;
-    let visible = |r: &Rect| r.y < bottom && r.y + r.h > top;
-    for (k, m) in marks.iter().enumerate() {
-        if visible(m) {
-            let c = if Some(k) == current {
-                0xEB_B6_50
+    let bg = if alpha(list.background) == 0 {
+        0xFF_FF_FF
+    } else {
+        list.background & 0xFF_FFFF
+    };
+    s.clear(bg);
+    let base = Rect::new(0, 0, s.w, s.h);
+    for (entries, dy) in [(&list.entries, -scroll), (&list.fixed, 0)] {
+        s.dx = 0;
+        s.dy = dy;
+        let area = Rect::new(0, -dy, s.w, s.h);
+        let picked: alloc::vec::Vec<&Entry> = if dy == 0 {
+            entries.iter().collect()
+        } else {
+            list.visible(area)
+        };
+        for e in picked {
+            let clip = list.clips.get(e.clip as usize).copied().unwrap_or(base);
+            s.clip = if e.clip == 0 {
+                base
             } else {
-                0xF6_DF_A8
+                intersect(Rect::new(clip.x, clip.y + dy, clip.w, clip.h), base)
             };
-            s.fill(Rect::new(m.x - 1, m.y, m.w + 2, m.h), c);
-        }
-    }
-    for it in &list.items {
-        match it {
-            Item::Fill { rect, color } => {
-                if visible(rect) {
-                    s.fill(*rect, *color)
-                }
-            }
-            Item::Border { rect, width, color } => {
-                if visible(rect) {
-                    s.border(*rect, *width, *color)
-                }
-            }
-            Item::Text {
-                x,
-                y,
-                width,
-                text,
-                font,
-                color,
-                underline,
-            } => {
-                let h = font::line_height(*font);
-                if *y < bottom && y + h > top {
-                    s.text(*x, *y + 2, text, *font, *color);
-                    if *underline {
-                        let uy = y + 2 + font::CELL_H * font::scale(*font) - 1;
-                        s.fill(Rect::new(*x, uy, *width, 1), *color);
+            if s.clip.w > 0 && s.clip.h > 0 {
+                match e.item {
+                    Item::Text(mut run) if run.color == UA_LINK => {
+                        run.color = 0xFF00_0000 | link;
+                        s.run(&run, list.run_text(&run));
                     }
-                }
-            }
-            Item::Image { rect, url, alt } => {
-                if !visible(rect) {
-                    continue;
-                }
-                match p.image(url) {
-                    Some(img) => s.image(*rect, img),
-                    None => {
-                        // Not loaded (yet, or ever): a frame with the alt text.
-                        s.fill(*rect, 0xF3_EC_DF);
-                        s.border(*rect, 1, 0xE2_D5_BD);
-                        let old = s.clip;
-                        s.clip =
-                            intersect(Rect::new(rect.x + s.dx, rect.y + s.dy, rect.w, rect.h), old);
-                        s.text(
-                            rect.x + 6,
-                            rect.y + (rect.h - 16) / 2,
-                            alt,
-                            Font::BODY,
-                            0x6B_58_46,
-                        );
-                        s.clip = old;
-                    }
-                }
-            }
-            Item::Control { rect, id } => {
-                if visible(rect) {
-                    p.control(s, *rect, *id)
+                    // A link's underline, drawn by the engine as a thin rectangle.
+                    Item::Rect { rect, color } if color == UA_LINK => s.fill(rect, link),
+                    ref it => entry(s, list, it, p),
                 }
             }
         }
+        if dy != 0 {
+            s.clip = base;
+            for (k, m) in marks.iter().enumerate() {
+                let strong = Some(k) == current;
+                s.fill_alpha(
+                    Rect::new(m.x - 1, m.y, m.w + 2, m.h),
+                    0xEB_B6_50,
+                    if strong { 150 } else { 90 },
+                );
+            }
+        }
     }
+    s.clip = base;
+    s.dx = 0;
     s.dy = 0;
 }
 
@@ -407,13 +710,15 @@ pub fn scale_into(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::Unifont;
+    use webengine::Viewport;
 
     struct P(Option<Image>, usize);
     impl Painter for P {
-        fn image(&self, _: &str) -> Option<&Image> {
+        fn image(&self, _: ImageId) -> Option<&Image> {
             self.0.as_ref()
         }
-        fn control(&mut self, s: &mut Surface, r: Rect, _id: usize) {
+        fn control(&mut self, s: &mut Surface, r: Rect, _id: ControlId) {
             self.1 += 1;
             s.fill(r, 0x123456);
         }
@@ -427,12 +732,12 @@ mod tests {
         assert_eq!(s.px[10], 0);
         s.fill(Rect::new(35, 25, 100, 100), 0x00FF00);
         assert_eq!(*s.px.last().unwrap(), 0x00FF00);
-        let end = s.text(0, 10, "Hi", Font::BODY, 0xFFFFFF);
+        let end = s.text(0, 10, "Hi", false, 0xFFFFFF);
         assert_eq!(end, 16);
         assert!(s.px[(10 * 40)..(26 * 40)].contains(&0xFFFFFF));
         // Way off the surface: nothing happens, nothing panics.
-        s.text(-1000, -1000, "x", Font::BODY, 1);
-        s.text(i32::MAX / 4, 5, "x", Font::BODY, 1);
+        s.text(-1000, -1000, "x", true, 1);
+        s.text(i32::MAX / 4, 5, "x", false, 1);
         s.rrect(Rect::new(5, 5, 20, 10), 50, 0x0000FF);
         s.disc(20, 15, 4, 0x00FFFF);
         s.border(Rect::new(0, 0, 40, 30), 2, 0xABCDEF);
@@ -451,17 +756,16 @@ mod tests {
         assert!((b & 0xFF) == 0xFF && (b >> 16) < 0x90, "{b:x}");
     }
 
+    fn page(html: &str) -> webengine::Document {
+        webengine::Document::parse(html.as_bytes(), "http://x.test/", Some("text/html"))
+    }
+
     #[test]
     fn display_list_paint() {
-        let mut d = crate::engine::parse(
-            b"<p>hello</p><p><input name=a><img src=x.png alt=x></p>",
-            "text/html",
-            "http://x.test/",
+        let mut d = page(
+            "<body style='background:#102030'><p style='color:#ff0000'>hello <u>there</u></p><p><input name=a><img src=x.png alt=x width=20 height=20></p><div style='border:3px dashed #00ff00;height:20px'></div><ul><li>one</ul>",
         );
-        let none = |_: &str| None;
-        let list = d
-            .layout(300, &crate::font::Metrics { image_size: &none })
-            .clone();
+        let list = d.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s = Surface::new(300, 200, 0);
         let mut p = P(None, 0);
         paint_list(
@@ -471,13 +775,88 @@ mod tests {
             &mut p,
             &[Rect::new(20, 20, 10, 10)],
             Some(0),
+            0x4F64A0,
         );
         assert_eq!(p.1, 1);
-        assert!(s.px.contains(&0x123456));
-        assert!(s.px.contains(&0xEBB650));
+        assert!(s.px.contains(&0x123456), "the control was drawn");
+        assert!(s.px.contains(&0xFF0000), "red text");
+        assert!(s.px.contains(&0x00FF00), "the dashed border");
+        let mut d1 = page(
+            "<div style='border:2px solid #00ff00;border-radius:8px;height:30px;width:60px'></div>",
+        );
+        let list1 = d1.layout(&Viewport::new(300, 200), &Unifont).clone();
+        let mut s2 = Surface::new(300, 200, 0);
+        paint_list(&mut s2, &list1, 0, &mut p, &[], None, 0x4F64A0);
+        assert!(s2.px.contains(&0x00FF00), "a rounded border");
+        assert_eq!(s.px[0], 0x102030, "the background");
+        // A link the page didn't colour gets the theme's colour, not the engine's blue.
+        let mut d2 = page("<p><a href=/x>a link</a></p>");
+        let list2 = d2.layout(&Viewport::new(300, 200), &Unifont).clone();
+        let mut s3 = Surface::new(300, 200, 0);
+        paint_list(&mut s3, &list2, 0, &mut p, &[], None, 0x4F64A0);
+        assert!(s3.px.contains(&0x4F64A0));
+        assert!(!s3.px.contains(&0x0000EE));
         // Scrolled past everything: just the background.
-        paint_list(&mut s, &list, 10_000, &mut p, &[], None);
-        assert!(s.px.iter().all(|&c| c == list.background));
+        paint_list(&mut s, &list, 100_000, &mut p, &[], None, 0x4F64A0);
+        assert!(s.px.iter().all(|&c| c == 0x102030));
+    }
+
+    #[test]
+    fn fixed_boxes_stay_put() {
+        let mut d = page(
+            "<div style='position:fixed;top:0;left:0;width:50px;height:10px;background:#0000ff'></div><div style='height:3000px'></div>",
+        );
+        let list = d.layout(&Viewport::new(300, 200), &Unifont).clone();
+        let mut s = Surface::new(300, 200, 0);
+        paint_list(&mut s, &list, 1000, &mut P(None, 0), &[], None, 0x4F64A0);
+        assert_eq!(s.px[5 * 300 + 5], 0x0000FF);
+    }
+
+    #[test]
+    fn hostile_pages_paint() {
+        let mut seed = 99u32;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let parts = [
+            "<div style='border:9999px solid red'>",
+            "<p>",
+            "x ",
+            "<img src=a width=99999>",
+            "<table><td>",
+            "<pre>",
+            "\u{1F404}",
+            "</div>",
+            "<b>",
+            "<input>",
+            "<select><option>a",
+            "<ul><li>",
+            "<span style='font-size:999px'>",
+            "<div style='position:fixed;top:-99999px'>",
+        ];
+        for _ in 0..60 {
+            let mut h = alloc::string::String::new();
+            for _ in 0..(rnd() % 80) {
+                h.push_str(parts[rnd() as usize % parts.len()]);
+            }
+            let mut d = page(&h);
+            let list = d
+                .layout(&Viewport::new((rnd() % 900) as i32 + 1, 300), &Unifont)
+                .clone();
+            let mut s = Surface::new(200, 150, 0);
+            paint_list(
+                &mut s,
+                &list,
+                (rnd() % 2000) as i32,
+                &mut P(None, 0),
+                &[],
+                None,
+                0x4F64A0,
+            );
+        }
     }
 
     #[test]
@@ -493,7 +872,6 @@ mod tests {
         let mut same = alloc::vec![0u32; 4];
         scale_into(&src, &mut same, 2, 2, 0, 0, 2, 2);
         assert_eq!(same, src.px);
-        // Off the destination: clipped.
         let mut d = alloc::vec![7u32; 4];
         scale_into(&src, &mut d, 2, 2, 1, 1, 3, 3);
         assert_eq!(d[0], 7);

@@ -27,6 +27,8 @@ pub type JobId = u64;
 
 /// The most a page may be (as received and uncompressed).
 pub const MAX_PAGE: usize = 4 << 20;
+/// The most a stylesheet may be.
+pub const MAX_STYLE: usize = 2 << 20;
 /// The most an image file may be.
 pub const MAX_IMAGE: usize = 8 << 20;
 /// The most a download may be (it is held in memory until it is written).
@@ -40,6 +42,8 @@ pub enum Kind {
     /// A page for a tab (it may turn out to be a download).
     Page,
     Image,
+    /// A stylesheet for a page.
+    Style,
     /// Save whatever comes (Alt-click on a link).
     Download,
 }
@@ -147,6 +151,7 @@ impl Hooks for BrowserHooks {
         };
         match self.kind {
             Kind::Image => Some(MAX_IMAGE),
+            Kind::Style => None,
             Kind::Page
                 if !download::is_download(
                     h("content-type").unwrap_or(""),
@@ -176,15 +181,20 @@ impl Hooks for BrowserHooks {
 
 fn options(kind: Kind) -> Options {
     Options {
-        max_body: if kind == Kind::Image {
-            MAX_IMAGE
-        } else {
-            MAX_PAGE
+        max_body: match kind {
+            Kind::Image => MAX_IMAGE,
+            Kind::Style => MAX_STYLE,
+            _ => MAX_PAGE,
         },
-        timeout_ms: if kind == Kind::Page { 60_000 } else { 600_000 },
+        timeout_ms: if kind == Kind::Download {
+            600_000
+        } else {
+            60_000
+        },
         connect_timeout_ms: 10_000,
         accept: String::from(match kind {
             Kind::Image => "image/png, image/*;q=0.8, */*;q=0.5",
+            Kind::Style => "text/css, */*;q=0.1",
             _ => "text/html, application/xhtml+xml, text/plain;q=0.9, */*;q=0.8",
         }),
         // Downloads come as they are (the file is the file).
@@ -291,8 +301,8 @@ impl Fetcher {
             handle: None,
             spec: Some(Spec { req, ctx }),
         });
-        // Pages go first: they jump the queue of images.
-        if kind == Kind::Page {
+        // Pages and stylesheets go first: they jump the queue of images.
+        if matches!(kind, Kind::Page | Kind::Style) {
             self.waiting.push_front(id);
         } else {
             self.waiting.push_back(id);

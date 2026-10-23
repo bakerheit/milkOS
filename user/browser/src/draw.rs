@@ -9,13 +9,14 @@ use alloc::vec::Vec;
 
 use appkit::Rect as ARect;
 use appkit::widgets;
-use browserkit::engine::{Color, ControlKind, Document, Font, Rect};
-use browserkit::paint::{self, Painter, Surface};
+use browserkit::engine::{Color, ControlId, ControlKind, ImageId, Rect};
+use browserkit::paint::{self, Glyphs, Painter, Surface};
 use browserkit::{download, font};
 use gui::Window;
 use imgdec::Image;
 
 use crate::tab::PageKind;
+use crate::web::Doc;
 use crate::*;
 
 const RADIUS: i32 = 6;
@@ -56,185 +57,172 @@ fn hline(w: &mut Window, x: i32, y: i32, len: i32, c: Color) {
 
 /// The page's form controls, images and focus, for browserkit's painter.
 struct PagePainter<'a> {
-    doc: &'a Document,
+    doc: &'a Doc,
     images: &'a BTreeMap<String, ImgState>,
     focus: Option<usize>,
     caret: usize,
 }
 
-const F_BORDER: Color = 0xC4AE8F;
 const F_FOCUS: Color = 0xEBB650;
-const F_TEXT: Color = 0x3A2E28;
 const F_HINT: Color = 0x9C8A76;
-const F_FIELD: Color = 0xFFFFFF;
-const F_BUTTON: Color = 0xEFE6D4;
-const F_ACCENT: Color = 0xE58C97;
+const F_CHECK: Color = 0x3A2E28;
 
 impl Painter for PagePainter<'_> {
-    fn image(&self, url: &str) -> Option<&Image> {
-        match self.images.get(url) {
+    fn image(&self, id: ImageId) -> Option<&Image> {
+        match self.images.get(self.doc.image_url(id)) {
             Some(ImgState::Ready(i)) => Some(i),
             _ => None,
         }
     }
 
-    fn control(&mut self, s: &mut Surface, r: Rect, id: usize) {
-        let Some(c) = self.doc.controls().get(id) else {
+    /// Draw what goes inside a control's content box: the engine painted its background and
+    /// border already (the page's CSS, or the built-in look).
+    fn control(&mut self, s: &mut Surface, r: Rect, id: ControlId) {
+        let i = id.0 as usize;
+        let Some(c) = self.doc.control(i) else {
             return;
         };
-        let focused = self.focus == Some(id);
-        let border = if focused { F_FOCUS } else { F_BORDER };
-        let f = Font::BODY;
+        let focused = self.focus == Some(i);
+        let sc = font::scale(&c.font);
+        let g = Glyphs {
+            scale: sc,
+            bold: c.font.weight >= 600,
+            italic: c.font.italic,
+        };
+        let ink = if c.color >> 24 == 0 {
+            F_CHECK
+        } else {
+            c.color & 0xFF_FFFF
+        };
+        let ink = if c.disabled { F_HINT } else { ink };
+        let cell = font::CELL_W * sc;
+        let line = font::CELL_H * sc;
+        if focused {
+            // The focus ring, just outside the box.
+            let o = Rect::new(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
+            s.border(o, 2, F_FOCUS);
+        }
+        let old = s.clip;
+        s.clip = paint::intersect(Rect::new(r.x + s.dx, r.y + s.dy, r.w, r.h), old);
         match c.kind {
-            ControlKind::Text | ControlKind::Password | ControlKind::TextArea => {
-                s.rrect(r, 5, border);
-                let inner = Rect::new(
-                    r.x + 1 + i32::from(focused),
-                    r.y + 1 + i32::from(focused),
-                    r.w - 2 - 2 * i32::from(focused),
-                    r.h - 2 - 2 * i32::from(focused),
-                );
-                s.rrect(inner, 4, if c.disabled { F_BUTTON } else { F_FIELD });
-                let old = s.clip;
-                s.clip = clip(Rect::new(r.x + 4 + s.dx, r.y + s.dy, r.w - 8, r.h), old);
+            ControlKind::Text | ControlKind::Password => {
                 let shown: String = if c.kind == ControlKind::Password {
                     c.value.chars().map(|_| '*').collect()
                 } else {
                     c.value.clone()
                 };
-                if c.kind == ControlKind::TextArea {
-                    let cols = fit_chars(r.w - 16).max(1);
-                    let mut lines: Vec<String> = Vec::new();
-                    for l in shown.split('\n') {
-                        let ch: Vec<char> = l.chars().collect();
-                        if ch.is_empty() {
-                            lines.push(String::new());
-                        }
-                        for part in ch.chunks(cols) {
-                            lines.push(part.iter().collect());
-                        }
-                    }
-                    let rows = ((r.h - 10) / 20).max(1) as usize;
-                    let first = lines.len().saturating_sub(rows);
-                    for (k, l) in lines.iter().skip(first).enumerate() {
-                        s.text(r.x + 8, r.y + 5 + k as i32 * 20 + 2, l, f, F_TEXT);
-                    }
-                    if shown.is_empty() && !c.label.is_empty() {
-                        s.text(r.x + 8, r.y + 7, &c.label, f, F_HINT);
-                    }
-                    if focused {
-                        let last = lines.last().map_or(0, |l| l.chars().count()) as i32;
-                        let row = (lines.len().saturating_sub(first) as i32 - 1).max(0);
-                        s.fill(
-                            Rect::new(r.x + 8 + last * 8, r.y + 6 + row * 20, 2, 18),
-                            F_TEXT,
-                        );
-                    }
+                let cols = (r.w / cell).max(1) as usize;
+                let n = shown.chars().count();
+                let caret = self.caret.min(n);
+                // Scroll the text so the caret shows.
+                let first = if focused {
+                    caret.saturating_sub(cols.saturating_sub(1))
                 } else {
-                    let cols = fit_chars(r.w - 16).max(1);
-                    let n = shown.chars().count();
-                    let caret = self.caret.min(n);
-                    // Scroll the text so the caret shows.
-                    let first = if focused && caret > cols {
-                        caret - cols
-                    } else {
-                        0
-                    };
-                    let vis: String = shown.chars().skip(first).take(cols).collect();
-                    let ty = r.y + (r.h - 16) / 2;
-                    if shown.is_empty() && !c.label.is_empty() {
-                        s.text(r.x + 8, ty, &c.label, f, F_HINT);
-                    } else {
-                        s.text(r.x + 8, ty, &vis, f, F_TEXT);
+                    0
+                };
+                let vis: String = shown.chars().skip(first).take(cols + 1).collect();
+                let ty = r.y + (r.h - line) / 2;
+                if shown.is_empty() && !c.placeholder.is_empty() {
+                    s.glyphs(r.x, ty, &c.placeholder, g, F_HINT);
+                } else {
+                    s.glyphs(r.x, ty, &vis, g, ink);
+                }
+                if focused {
+                    let cx = r.x + (caret - first) as i32 * cell;
+                    s.fill(Rect::new(cx, ty, 2, line), ink);
+                }
+            }
+            ControlKind::TextArea => {
+                let cols = (r.w / cell).max(1) as usize;
+                let mut lines: Vec<String> = Vec::new();
+                for l in c.value.split('\n') {
+                    let ch: Vec<char> = l.chars().collect();
+                    if ch.is_empty() {
+                        lines.push(String::new());
                     }
-                    if focused {
-                        let cx = r.x + 8 + (caret - first) as i32 * 8;
-                        s.fill(Rect::new(cx, ty, 2, 16), F_TEXT);
+                    for part in ch.chunks(cols) {
+                        lines.push(part.iter().collect());
                     }
                 }
-                s.clip = old;
+                let step = line + 2;
+                let rows = (r.h / step).max(1) as usize;
+                let first = lines.len().saturating_sub(rows);
+                for (k, l) in lines.iter().skip(first).enumerate() {
+                    s.glyphs(r.x, r.y + k as i32 * step, l, g, ink);
+                }
+                if c.value.is_empty() && !c.placeholder.is_empty() {
+                    s.glyphs(r.x, r.y, &c.placeholder, g, F_HINT);
+                }
+                if focused {
+                    let last = lines.last().map_or(0, |l| l.chars().count()) as i32;
+                    let row = (lines.len().saturating_sub(first) as i32 - 1).max(0);
+                    s.fill(Rect::new(r.x + last * cell, r.y + row * step, 2, line), ink);
+                }
             }
             ControlKind::Checkbox => {
-                let b = Rect::new(r.x + 2, r.y + (r.h - 16) / 2, 16, 16);
-                s.rrect(b, 4, border);
-                s.rrect(
-                    Rect::new(b.x + 1, b.y + 1, 14, 14),
-                    3,
-                    if c.checked { F_ACCENT } else { F_FIELD },
-                );
                 if c.checked {
-                    // A tick: two strokes.
-                    for i in 0..4 {
-                        s.fill(Rect::new(b.x + 3 + i, b.y + 7 + i, 2, 2), F_TEXT);
+                    // A tick, sized to the box.
+                    let u = (r.w.min(r.h) / 8).max(1);
+                    let (x0, y0) = (r.x + r.w / 2 - 4 * u, r.y + r.h / 2 - u);
+                    for k in 0..3 {
+                        s.fill(Rect::new(x0 + k * u, y0 + k * u, 2 * u, 2 * u), ink);
                     }
-                    for i in 0..6 {
-                        s.fill(Rect::new(b.x + 7 + i, b.y + 9 - i, 2, 2), F_TEXT);
+                    for k in 0..5 {
+                        s.fill(
+                            Rect::new(x0 + (3 + k) * u, y0 + (1 - k) * u, 2 * u, 2 * u),
+                            ink,
+                        );
                     }
                 }
             }
             ControlKind::Radio => {
-                let (cx, cy) = (r.x + 10, r.y + r.h / 2);
-                s.disc(cx, cy, 8, border);
-                s.disc(cx, cy, 7, F_FIELD);
                 if c.checked {
-                    s.disc(cx, cy, 4, F_TEXT);
+                    let rr = (r.w.min(r.h) / 4).max(2);
+                    s.disc(r.x + r.w / 2, r.y + r.h / 2, rr, ink);
                 }
             }
             ControlKind::Select => {
-                s.rrect(r, 5, border);
-                s.rrect(Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2), 4, F_BUTTON);
-                let label = c.options.get(c.selected).map_or("", |o| o.0.as_str());
-                let label = ellipsize(label, fit_chars(r.w - 36));
-                s.text(r.x + 8, r.y + (r.h - 16) / 2, &label, f, F_TEXT);
-                // A small down arrow.
-                let (ax, ay) = (r.x + r.w - 18, r.y + r.h / 2 - 2);
-                for i in 0..4 {
-                    s.fill(Rect::new(ax + i, ay + i, 8 - 2 * i, 1), F_TEXT);
+                let label = c
+                    .options
+                    .iter()
+                    .find(|o| o.selected)
+                    .or(c.options.first())
+                    .map_or("", |o| o.label.as_str());
+                let label = ellipsize(label, ((r.w - 16) / cell).max(1) as usize);
+                s.glyphs(r.x, r.y + (r.h - line) / 2, &label, g, ink);
+                // A small down arrow at the right.
+                let (ax, ay) = (r.x + r.w - 10, r.y + r.h / 2 - 2);
+                for k in 0..4 {
+                    s.fill(Rect::new(ax + k, ay + k, 8 - 2 * k, 1), ink);
                 }
             }
-            ControlKind::Submit | ControlKind::Reset | ControlKind::Button => {
-                s.rrect(r, 6, border);
-                s.rrect(
-                    Rect::new(r.x + 1, r.y + 1, r.w - 2, r.h - 2),
-                    5,
-                    if c.kind == ControlKind::Submit {
-                        F_ACCENT
-                    } else {
-                        F_BUTTON
-                    },
-                );
-                let b = Font { bold: true, ..f };
-                let tw = font::width(&c.label, b);
-                let old = s.clip;
-                s.clip = clip(Rect::new(r.x + 2 + s.dx, r.y + s.dy, r.w - 4, r.h), old);
-                s.text(
-                    r.x + (r.w - tw) / 2,
-                    r.y + (r.h - 16) / 2,
-                    &c.label,
-                    b,
-                    if c.disabled { F_HINT } else { F_TEXT },
-                );
-                s.clip = old;
+            ControlKind::ImageSubmit => {
+                if let Some(img) = c.image.and_then(|id| self.image(id)) {
+                    s.image(r, img);
+                }
             }
-            ControlKind::Hidden => {}
+            ControlKind::Submit | ControlKind::Reset | ControlKind::Button | ControlKind::File => {
+                if !c.content_drawn {
+                    let label = if c.kind == ControlKind::File {
+                        "Choose a file"
+                    } else {
+                        c.label.as_str()
+                    };
+                    let tw = font::cells(label) * cell;
+                    s.glyphs(r.x + (r.w - tw) / 2, r.y + (r.h - line) / 2, label, g, ink);
+                }
+            }
         }
+        s.clip = old;
     }
-}
-
-fn clip(a: Rect, b: Rect) -> Rect {
-    let x0 = a.x.max(b.x);
-    let y0 = a.y.max(b.y);
-    let x1 = (a.x + a.w).min(b.x + b.w);
-    let y1 = (a.y + a.h).min(b.y + b.h);
-    Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
 impl App {
     /// Lay out the current tab's page if its width changed (zoom, resize, an image came).
     fn layout_current(&mut self) {
-        let (lw, _) = self.page_view(self.tab());
+        let (lw, lh) = self.page_view(self.tab());
         let t = &self.tabs[self.cur];
-        if t.page.laid_w == lw {
+        if t.page.laid_w == lw && t.page.doc.laid.is_some() {
             // A link to a place on this page: no new layout, just the scroll.
             if t.anchor.is_some() {
                 let max = self.max_scroll(self.tab());
@@ -245,31 +233,33 @@ impl App {
             }
             return;
         }
-        let images = &self.images;
-        let size = |u: &str| match images.get(u) {
-            Some(ImgState::Ready(i)) => Some((i.w as i32, i.h as i32)),
-            _ => None,
-        };
-        let m = font::Metrics { image_size: &size };
-        let t = &mut self.tabs[self.cur];
-        t.page.doc.layout(lw, &m);
-        t.page.laid_w = lw;
+        // Laying out finds CSS background images, and cached ones are supplied at once: a
+        // few rounds until the page has what it can have now.
+        let cur = self.cur;
+        for _ in 0..4 {
+            let t = &mut self.tabs[cur];
+            t.page.doc.layout(lw, lh);
+            t.page.laid_w = lw;
+            self.feed(cur);
+            if self.tabs[cur].page.laid_w == lw {
+                break;
+            }
+        }
+        self.tabs[cur].page.laid_w = lw;
         if let Some(f) = &self.finding {
             let q = f.text.clone();
             self.run_find(&q);
         }
         let max = self.max_scroll(self.tab());
         let t = self.tab_mut();
-        if let Some(a) = t.anchor.take() {
-            match t.page.doc.anchor(&a) {
-                Some(y) => {
-                    t.scroll = y.clamp(0, max);
-                    t.target = t.scroll;
-                }
-                None => {
-                    // Not there (yet): keep the place.
-                    t.scroll = t.scroll.min(max);
-                }
+        if let Some(a) = t.anchor.clone() {
+            if let Some(y) = t.page.doc.anchor(&a) {
+                t.scroll = y.clamp(0, max);
+                t.target = t.scroll;
+            }
+            // Stylesheets and images still coming move things: aim again after each layout.
+            if t.page.waiting == 0 {
+                t.anchor = None;
             }
         }
         t.scroll = t.scroll.min(max);
@@ -340,13 +330,13 @@ impl App {
             };
         }
         if let Some(id) = t.focus
-            && let Some(c) = t.page.doc.controls().get(id)
+            && let Some(c) = t.page.doc.control(id)
         {
             return String::from(match c.kind {
                 ControlKind::TextArea => {
                     "Typing in a text box (Esc to leave it, Tab to the next field)"
                 }
-                k if k.is_text() => {
+                k if crate::web::is_text(k) => {
                     "Typing in a field (Enter sends the form, Tab to the next field)"
                 }
                 ControlKind::Select => "Up and Down choose, Space opens the list",
@@ -358,16 +348,8 @@ impl App {
                 format!("The server said {} for this page", t.page.status)
             }
             PageKind::Web => {
-                let n = t.page.doc.images().len();
-                let waiting = t
-                    .page
-                    .doc
-                    .images()
-                    .iter()
-                    .filter(|u| matches!(self.images.get(*u), Some(ImgState::Loading(_))))
-                    .count();
-                if waiting > 0 {
-                    format!("Loading images: {} of {n}", n - waiting)
+                if t.page.waiting > 0 {
+                    format!("Loading {} stylesheet(s) and image(s)...", t.page.waiting)
                 } else {
                     String::from(if t.page.is_secure() {
                         "Secure connection"
@@ -391,21 +373,27 @@ impl App {
             focus: t.focus,
             caret: t.caret,
         };
-        let marks = if self.finding.is_some() {
-            &t.found[..]
-        } else {
-            &[][..]
-        };
+        let mut marks: Vec<Rect> = Vec::new();
+        let mut current = None;
+        if self.finding.is_some() {
+            for (k, m) in t.found.iter().enumerate() {
+                if k == t.found_at {
+                    current = Some(marks.len());
+                }
+                marks.extend_from_slice(m);
+            }
+        }
         paint::paint_list(
             &mut self.surface,
             t.page.doc.display_list(),
             t.scroll,
             &mut p,
-            marks,
-            Some(t.found_at),
+            &marks,
+            current,
+            self.link,
         );
         // A scroll bar when the page is longer than the view.
-        let total = t.page.doc.display_list().height.max(1);
+        let total = t.page.doc.height().max(1);
         if total > ph {
             let bar_h = ((ph as i64 * ph as i64 / total as i64) as i32)
                 .max(24)
@@ -779,8 +767,9 @@ impl App {
                 } else {
                     y
                 };
-                let opts: Vec<String> = c.options.iter().take(16).map(|o| o.0.clone()).collect();
-                let sel = c.selected;
+                let opts: Vec<String> =
+                    c.options.iter().take(16).map(|o| o.label.clone()).collect();
+                let sel = t.page.doc.selected(id);
                 self.hits.add(ARect::new(0, 0, w, h), ID_POPUP_BG);
                 self.win.rrect(x - 1, y - 1, pw + 2, ph + 2, 8, th.sand);
                 self.win.rrect(x, y, pw, ph, 7, th.milk);

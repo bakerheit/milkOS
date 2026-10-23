@@ -16,6 +16,7 @@ networking) and never forwards anything anywhere:
       /pixel.png   tracker.test's image: sets a cookie, logs the Cookie it got
       /track       tracker.test as a page (first party: its cookie may be set and sent)
       /file.zip    200 KB of application/zip, slowly (a download)
+      /styled      a page with a stylesheet (/site.css): colours, a flex row, a table
       /missing     404
 Every request is logged: "http METHOD PATH host=HOST cookie=COOKIE" (and "post BODY").
 Writes "dns=PORT http=PORT" to argv[1], then serves until killed.
@@ -102,7 +103,7 @@ HOME = page(
     "<p>A page from the <b>test server</b>, with <i>styles</i>, <code>code</code> and links: "
     "<a href=\"/long\">a long page</a>, <a href=\"/form\">forms</a>, <a href=\"/cookies\">cookies</a>, "
     "<a href=\"/file.zip\">a download</a>, <a href=\"/missing\">a missing page</a> and "
-    "<a href=\"/long#p150\">paragraph 150</a>.</p>"
+    "<a href=\"/long#p150\">paragraph 150</a>, and <a href=\"/styled\">a styled page</a>.</p>"
     "<p><img src=\"/cow.png\" alt=\"a cow\" width=\"160\" height=\"96\"> Café &mdash; &ldquo;quotes&rdquo; &copy; 2026</p>"
     "<ul><li>Whole milk</li><li>Skim<ul><li>Very skim</li></ul></li><li>Chocolate</li></ul>"
     "<ol><li>First</li><li>Second</li></ol>"
@@ -119,6 +120,24 @@ LONG = page(
     + "".join("<p id=\"p%d\">Paragraph %d of the long page: milk, cream, butter and cheese.</p>" % (k, k) for k in range(1, 301))
     + "<p id=\"end\">The end.</p></main>",
 )
+
+STYLED = page(
+    "Styled page",
+    "<link rel=\"stylesheet\" href=\"/site.css\"><header><h1>Milk &amp; Co.</h1><nav><a href=\"/\">Home</a> <a href=\"/long\">Long</a> <a href=\"/form\">Forms</a></nav></header>"
+    "<main><div class=\"cards\"><div class=\"card\"><h2>Whole</h2><p>Creamy and full.</p></div><div class=\"card\"><h2>Skim</h2><p>Light and clear.</p></div>"
+    "<div class=\"card hot\"><h2>Cocoa</h2><p>Warm, sweet, brown.</p></div></div>"
+    "<p class=\"note\">A <a href=\"/\">link</a> in a styled paragraph, with <strong>bold</strong> and <em>italic</em> text.</p></main>"
+    "<footer>Served with a stylesheet</footer>",
+)
+CSS = (
+    "body { margin: 0; background: #fffdf8; color: #3a2e28; font-family: sans-serif; }"
+    "header { background: #3a2e28; color: #fbf6ec; padding: 12px 20px; display: flex; justify-content: space-between; align-items: center; }"
+    "header h1 { margin: 0; font-size: 28px; } nav a { color: #ebb650; margin-left: 16px; }"
+    "main { padding: 16px 20px; } .cards { display: flex; gap: 16px; }"
+    ".card { flex: 1; background: #efe6d4; border: 2px solid #c4ae8f; border-radius: 8px; padding: 8px 12px; }"
+    ".card.hot { background: #e58c97; } .note { border-left: 4px solid #9cbf9b; padding-left: 12px; }"
+    "footer { margin: 0 20px; padding-top: 8px; border-top: 1px dashed #c4ae8f; color: #6b5846; }"
+).encode()
 
 FORM = page(
     "Forms",
@@ -168,6 +187,10 @@ class Web(http.server.BaseHTTPRequestHandler):
             return self.send(200, HOME)
         if path == "/cow.png":
             return self.send(200, COW, "image/png")
+        if path == "/styled":
+            return self.send(200, STYLED)
+        if path == "/site.css":
+            return self.send(200, CSS, "text/css")
         if path == "/long":
             return self.send(200, LONG)
         if path == "/form":

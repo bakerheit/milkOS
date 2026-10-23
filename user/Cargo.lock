@@ -54,6 +54,7 @@ dependencies = [
  "imgdec",
  "milkweb",
  "tls",
+ "webengine",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@
 # server's log and screenshots:
 #   * the window system's client protocol: Home / End / Page Up / Page Down reach the app, and
 #     clicks and the wheel carry the modifier keys (browser --log-input)
-#   * a page with an image, links, a long page: End / Home / Page Down / Space scroll, a
+#   * a page with an image and links, a page with a stylesheet, a long page: End / Home / Page Down / Space scroll, a
 #     #fragment, find in page, zoom, back
 #   * forms: a GET form driven by the keyboard (text, checkbox, radio arrows, select,
 #     textarea, submit) and a POST sign-in (Post/Redirect/Get) whose cookie comes back
@@ -101,6 +101,15 @@ set -- $(out "text show /dev/wm" | grep -a "window .* Milk Browser test" | tail 
 BX=$(( ${1:-85} + 1 )); BY=$(( ${2:-58} + 33 ))
 echo "  (window body at $BX,$BY)"
 shot 01-home
+
+go "$H/styled"
+loaded "http://$(esc_re "$H")/styled: 200 OK, [0-9]+ bytes, 'Styled page'" && ok "a styled page loaded" || bad "no styled page"
+wait_srv "^http GET /site\.css host=www\.milk\.test" && ok "its stylesheet was fetched" || bad "the stylesheet wasn't fetched"
+shot 01b-styled 01-home
+differ 01-home 01b-styled && ok "the styled page drew" || bad "the styled page looks like the last one"
+q key meta_l-bracket_left
+loaded "http://$(esc_re "$H")/: 200 OK, [0-9]+ bytes, 'Milk Browser test'" || true
+sleep 1
 
 echo "-- the client protocol (keys and modifiers)"
 q key home key end key pgup key pgdn

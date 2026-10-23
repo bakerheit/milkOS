@@ -6,11 +6,12 @@ use alloc::vec::Vec;
 
 use browserkit::address::Internal;
 use browserkit::certinfo::CertInfo;
-use browserkit::engine::{self, Document, Rect};
+use browserkit::engine::Rect;
 use browserkit::history::History;
 use milkweb::url::Url;
 
 use crate::net::JobId;
+use crate::web::Doc;
 
 /// The zoom steps (percent), Cmd-+ and Cmd-- walk them.
 pub const ZOOMS: [i32; 12] = [50, 67, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300];
@@ -27,34 +28,33 @@ pub struct Page {
     pub address: String,
     pub url: Option<Url>,
     pub title: String,
-    pub doc: Document,
-    /// The page as it came, for a form's Reset button (only kept when it has forms).
-    pub original: Option<Document>,
+    pub doc: Doc,
     /// https: the connection's details (the padlock).
     pub cert: Option<CertInfo>,
     pub kind: PageKind,
     pub status: u16,
     /// The width the page is laid out at (0: lay it out again before drawing).
     pub laid_w: i32,
+    /// Stylesheets and images it is still waiting for.
+    pub waiting: usize,
 }
 
 impl Page {
     pub fn new(address: &str, url: Option<Url>, html: &[u8], ct: &str, kind: PageKind) -> Page {
-        let base = url.as_ref().map_or_else(String::new, |u| u.to_text());
-        let mut doc = engine::parse(html, ct, &base);
-        // Pages are drawn on milk in both themes, so links take the light theme's token.
-        doc.set_link_color(appkit::Theme::light().link);
-        let original = (!doc.forms().is_empty()).then(|| doc.clone());
+        let base = url
+            .as_ref()
+            .map_or_else(|| String::from(address), |u| u.to_text());
+        let doc = Doc::parse(html, &base, ct);
         Page {
             address: String::from(address),
             url,
-            title: String::from(doc.title()),
+            title: doc.title(),
             doc,
-            original,
             cert: None,
             kind,
             status: 200,
             laid_w: 0,
+            waiting: 0,
         }
     }
 
@@ -93,8 +93,8 @@ pub struct Tab {
     pub caret: usize,
     /// Scroll to this `#name` once laid out.
     pub anchor: Option<String>,
-    /// Find in page: the matches (page coordinates) and the current one.
-    pub found: Vec<Rect>,
+    /// Find in page: the matches (each one's rectangles, page coordinates) and the current one.
+    pub found: Vec<Vec<Rect>>,
     pub found_at: usize,
 }
 

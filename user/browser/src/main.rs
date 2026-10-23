@@ -29,6 +29,7 @@ mod draw;
 mod net;
 mod store;
 mod tab;
+mod web;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -39,11 +40,10 @@ use appkit::{Field, Hits, Theme};
 use browserkit::address::{self, Internal, Target};
 use browserkit::bookmarks::Bookmarks;
 use browserkit::cookies::{Context, Jar, site_of};
-use browserkit::engine::{ControlKind, Hit};
-use browserkit::font::Metrics;
+use browserkit::engine::{ControlKind, ResourceKind};
 use browserkit::history::Visits;
 use browserkit::paint::Surface;
-use browserkit::{download, find, form, pages};
+use browserkit::{download, form, pages};
 use gui::{Event, Key, Mods, Window};
 use imgdec::Image;
 use milkweb::http::{Error, Request};
@@ -53,6 +53,7 @@ use rt::sys;
 use net::{Fetcher, JobId, Kind, Outcome};
 use store::Profile;
 use tab::{Load, Page, PageKind, Tab};
+use web::{Hit, is_button, is_text};
 
 rt::main!(main);
 
@@ -113,9 +114,11 @@ pub enum Popup {
     Select(usize),
 }
 
+/// A fetched image or stylesheet, kept for every page that uses it.
 pub enum ImgState {
     Loading(JobId),
     Ready(Image),
+    Sheet(Vec<u8>),
     Failed,
 }
 
@@ -146,6 +149,7 @@ pub struct App {
     pub visits: Visits,
     pub downloads: Vec<Download>,
     pub images: BTreeMap<String, ImgState>,
+    pub sheets: BTreeMap<String, ImgState>,
     pub image_pixels: usize,
     pub surface: Surface,
     /// The address bar while it has the keyboard.
@@ -159,6 +163,8 @@ pub struct App {
     /// A message for the status line, until (ms).
     pub flash: Option<(String, u64)>,
     pub shown_title: String,
+    /// Links' colour: the light theme's token (pages are drawn on milk in both themes).
+    pub link: gui::Color,
     pub quit: bool,
     pub dirty: bool,
 }
@@ -227,7 +233,7 @@ impl App {
 
     pub fn max_scroll(&self, t: &Tab) -> i32 {
         let (_, vh) = self.page_view(t);
-        (t.page.doc.display_list().height - vh).max(0)
+        (t.page.doc.height() - vh).max(0)
     }
 
     // ---- pages ----------------------------------------------------------------------------
@@ -574,17 +580,15 @@ impl App {
     // ---- find ---------------------------------------------------------------------------
 
     pub fn run_find(&mut self, q: &str) {
-        let images = &self.images;
-        let size = |u: &str| match images.get(u) {
-            Some(ImgState::Ready(i)) => Some((i.w as i32, i.h as i32)),
-            _ => None,
-        };
-        let m = Metrics { image_size: &size };
         let t = &mut self.tabs[self.cur];
-        t.found = find::find(t.page.doc.display_list(), q, &m, 1000);
+        t.found = t.page.doc.find(q);
         t.found_at = 0;
         // The first match at or below the top of the view.
-        if let Some(i) = t.found.iter().position(|r| r.y >= t.target) {
+        if let Some(i) = t
+            .found
+            .iter()
+            .position(|r| r.first().is_some_and(|r| r.y >= t.target))
+        {
             t.found_at = i;
         }
         self.show_match();
@@ -607,7 +611,7 @@ impl App {
         };
         let max = self.max_scroll(self.tab());
         let t = self.tab_mut();
-        if let Some(r) = t.found.get(t.found_at).copied()
+        if let Some(r) = t.found.get(t.found_at).and_then(|m| m.first()).copied()
             && (r.y < t.target || r.y + r.h > t.target + vh)
         {
             // Measured against where scrolling is heading, not where it is on the way.
@@ -617,31 +621,15 @@ impl App {
 
     // ---- forms --------------------------------------------------------------------------
 
-    /// Send the form that control `id` belongs to (a button, or Enter in a field).
+    /// Send the form that control `id` belongs to (a button, or Enter in a field: the
+    /// engine applies the implicit-submission rules).
     pub fn submit(&mut self, id: usize) {
         let t = self.tab();
         let doc = &t.page.doc;
-        let Some(c) = doc.controls().get(id) else {
+        let Some(c) = doc.control(id) else {
             return;
         };
-        // Enter in a field presses the form's first submit button (or sends it without one).
-        let submitter = if c.kind == ControlKind::Submit {
-            id
-        } else {
-            doc.controls()
-                .iter()
-                .position(|o| {
-                    o.kind == ControlKind::Submit
-                        && o.form == c.form
-                        && o.form.is_some()
-                        && !o.disabled
-                })
-                .unwrap_or(id)
-        };
-        let Some(sub) = doc.submission(submitter) else {
-            return;
-        };
-        let Some(base) = doc.base_url().or_else(|| t.page.url.clone()) else {
+        let Some(sub) = doc.submit(id) else {
             return;
         };
         let from = t.page.url.as_ref().map(|u| site_of(&u.host));
@@ -650,24 +638,29 @@ impl App {
             .controls()
             .iter()
             .any(|o| o.kind == ControlKind::Password && o.form == c.form && !o.value.is_empty());
-        match form::request(&sub, &base) {
+        let new_tab = sub.target.as_deref() == Some("_blank");
+        match form::request(&sub) {
             Ok(req) => {
                 if password && req.url.scheme == Scheme::Http {
                     self.say("Note: this password went over plain http, not encrypted");
                 }
                 let target = Target::Web(req.url.clone(), None);
-                self.go(self.cur, target, true, from, Some(req));
+                let ti = if new_tab && self.tabs.len() < MAX_TABS {
+                    let p = self.internal_page(Internal::NewTab);
+                    self.tabs.push(Tab::new(p));
+                    self.cur = self.tabs.len() - 1;
+                    self.cur
+                } else {
+                    self.cur
+                };
+                self.go(ti, target, true, from, Some(req));
             }
             Err(e) => self.say(&format!("The form can't be sent: {e}")),
         }
     }
 
     pub fn reset_form(&mut self, id: usize) {
-        let t = self.tab_mut();
-        let form = t.page.doc.controls().get(id).and_then(|c| c.form);
-        if let Some(orig) = t.page.original.clone() {
-            t.page.doc.reset(form, &orig);
-        }
+        self.tab_mut().page.doc.reset(id);
     }
 
     /// Give control `id` the keyboard (or take it away with None).
@@ -676,7 +669,7 @@ impl App {
         let t = self.tab_mut();
         t.focus = id;
         t.caret = id
-            .and_then(|i| t.page.doc.controls().get(i))
+            .and_then(|i| t.page.doc.control(i))
             .map_or(0, |c| c.value.chars().count());
         // Keep it in view.
         if let Some(r) = id.and_then(|i| t.page.doc.control_rect(i)) {
@@ -695,11 +688,11 @@ impl App {
         let Some(id) = t.focus else {
             return false;
         };
-        let Some(c) = t.page.doc.controls().get(id).cloned() else {
+        let Some(c) = t.page.doc.control(id).cloned() else {
             return false;
         };
         if m.meta || m.ctrl {
-            if c.kind.is_text() && matches!(k, Key::Char('v')) {
+            if is_text(c.kind) && matches!(k, Key::Char('v')) {
                 let clip = clipboard_get();
                 let clip = if c.kind == ControlKind::TextArea {
                     clip
@@ -712,7 +705,18 @@ impl App {
             return false;
         }
         match c.kind {
-            k2 if k2.is_text() => {
+            k2 if is_text(k2) && c.readonly => match k {
+                Key::Enter if k2 != ControlKind::TextArea => {
+                    self.submit(id);
+                    true
+                }
+                Key::Escape => {
+                    self.focus(None);
+                    true
+                }
+                _ => false,
+            },
+            k2 if is_text(k2) => {
                 let mut chars: Vec<char> = c.value.chars().collect();
                 let caret = self.tab().caret.min(chars.len());
                 let mut caret2 = caret;
@@ -798,11 +802,12 @@ impl App {
             ControlKind::Select => match k {
                 Key::Up | Key::Down => {
                     let n = c.options.len();
+                    let sel = self.tab().page.doc.selected(id);
                     if n > 0 {
                         let s = if k == Key::Up {
-                            c.selected.saturating_sub(1)
+                            sel.saturating_sub(1)
                         } else {
-                            (c.selected + 1).min(n - 1)
+                            (sel + 1).min(n - 1)
                         };
                         self.tab_mut().page.doc.select(id, s);
                     }
@@ -818,7 +823,7 @@ impl App {
                 }
                 _ => false,
             },
-            ControlKind::Submit | ControlKind::Reset | ControlKind::Button => match k {
+            k2 if is_button(k2) => match k {
                 Key::Char(' ') | Key::Enter => {
                     self.press(id);
                     true
@@ -835,15 +840,17 @@ impl App {
 
     fn insert_text(&mut self, id: usize, s: &str) {
         let t = self.tab_mut();
-        let Some(c) = t.page.doc.controls().get(id) else {
+        let Some(c) = t.page.doc.control(id) else {
             return;
         };
+        if c.readonly || c.disabled {
+            return;
+        }
         let mut chars: Vec<char> = c.value.chars().collect();
         let caret = t.caret.min(chars.len());
-        let room = if c.max_len > 0 {
-            c.max_len.saturating_sub(chars.len())
-        } else {
-            100_000usize.saturating_sub(chars.len())
+        let room = match c.max_length {
+            Some(n) => (n as usize).saturating_sub(chars.len()),
+            None => 100_000usize.saturating_sub(chars.len()),
         };
         let add: Vec<char> = s
             .chars()
@@ -859,11 +866,12 @@ impl App {
 
     /// A click (or Space) on a button control.
     fn press(&mut self, id: usize) {
-        let Some(kind) = self.tab().page.doc.controls().get(id).map(|c| c.kind) else {
+        let Some(kind) = self.tab().page.doc.control(id).map(|c| c.kind) else {
             return;
         };
         match kind {
-            ControlKind::Submit => self.submit(id),
+            ControlKind::Submit | ControlKind::ImageSubmit => self.submit(id),
+            ControlKind::File => self.say("Sending files with a form isn't supported yet"),
             ControlKind::Reset => self.reset_form(id),
             _ => {}
         }
@@ -874,6 +882,9 @@ impl App {
         let t = self.tab();
         let ids: Vec<usize> = (0..t.page.doc.controls().len())
             .filter(|&i| t.page.doc.control_rect(i).is_some() && !t.page.doc.controls()[i].disabled)
+            .filter(|&i| {
+                !t.page.doc.controls()[i].readonly || is_button(t.page.doc.controls()[i].kind)
+            })
             .collect();
         if ids.is_empty() {
             return;
@@ -1184,16 +1195,18 @@ impl App {
     fn page_click(&mut self, x: i32, y: i32, button: u8, m: Mods) {
         let t = self.tab();
         let (px, py) = (x * 100 / t.zoom, y * 100 / t.zoom + t.scroll);
-        match t.page.doc.hit_test(px, py) {
-            Some(Hit::Link(href)) => {
+        match t.page.doc.hit_test(px, py, t.scroll) {
+            Some(Hit::Link(link)) => {
                 if button == 2 {
                     return;
                 }
                 self.focus(None);
-                self.follow(&href, m.meta || m.ctrl || button == 3, m.alt);
+                let new_tab =
+                    m.meta || m.ctrl || button == 3 || link.target.as_deref() == Some("_blank");
+                self.follow(&link.url, new_tab, m.alt || link.download);
             }
             Some(Hit::Control(id)) => {
-                let Some(c) = self.tab().page.doc.controls().get(id).cloned() else {
+                let Some(c) = self.tab().page.doc.control(id).cloned() else {
                     return;
                 };
                 if c.disabled {
@@ -1205,16 +1218,15 @@ impl App {
                         self.tab_mut().page.doc.click_check(id)
                     }
                     ControlKind::Select => self.popup = Some(Popup::Select(id)),
-                    ControlKind::Submit | ControlKind::Reset | ControlKind::Button => {
-                        self.press(id)
-                    }
-                    k if k.is_text() => {
+                    k if is_button(k) => self.press(id),
+                    k if is_text(k) => {
                         // The caret goes where the click was (single-line fields).
                         if let Some(r) = self.tab().page.doc.control_rect(id)
                             && k != ControlKind::TextArea
                         {
                             let n = c.value.chars().count();
-                            let at = ((px - r.x - 8).max(0) / 8) as usize;
+                            let cell = 8 * browserkit::font::scale(&c.font);
+                            let at = ((px - r.x).max(0) / cell) as usize;
                             self.tab_mut().caret = at.min(n);
                         }
                     }
@@ -1343,12 +1355,17 @@ impl App {
             self.refresh_internal(Internal::Downloads);
             return;
         }
-        if kind == Kind::Image {
-            let url = self
-                .images
-                .iter()
-                .find(|(_, s)| matches!(s, ImgState::Loading(j) if *j == id))
-                .map(|(u, _)| u.clone());
+        if kind == Kind::Image || kind == Kind::Style {
+            let cache_hit = |m: &BTreeMap<String, ImgState>| {
+                m.iter()
+                    .find(|(_, s)| matches!(s, ImgState::Loading(j) if *j == id))
+                    .map(|(u, _)| u.clone())
+            };
+            let url = cache_hit(if kind == Kind::Image {
+                &self.images
+            } else {
+                &self.sheets
+            });
             if let Some(u) = url {
                 let st = match out {
                     Outcome::Image(Ok(img))
@@ -1357,17 +1374,19 @@ impl App {
                         self.image_pixels += img.w * img.h;
                         ImgState::Ready(img)
                     }
+                    Outcome::Page(r) if r.status < 400 && kind == Kind::Style => {
+                        ImgState::Sheet(r.body)
+                    }
                     _ => ImgState::Failed,
                 };
-                let ready = matches!(st, ImgState::Ready(_));
-                self.images.insert(u.clone(), st);
-                if ready {
-                    for t in &mut self.tabs {
-                        if t.page.doc.images().contains(&u) {
-                            t.page.laid_w = 0;
-                        }
-                    }
+                if kind == Kind::Image {
+                    self.images.insert(u, st);
+                } else {
+                    self.sheets.insert(u, st);
                 }
+            }
+            for ti in 0..self.tabs.len() {
+                self.feed(ti);
             }
             return;
         }
@@ -1430,7 +1449,7 @@ impl App {
                     t.target = s;
                 }
                 self.visits.add(&addr, &title, net::now_secs());
-                self.load_images(ti);
+                self.feed(ti);
                 self.save_cookies();
                 self.profile.write("history", &self.visits.to_file());
             }
@@ -1460,9 +1479,15 @@ impl App {
         }
     }
 
-    /// Fetch the images tab `ti`'s page shows (not over plain http on a secure page).
-    fn load_images(&mut self, ti: usize) {
-        let t = &self.tabs[ti];
+    /// Give tab `ti`'s page the stylesheets and images it waits for that have come (or
+    /// failed), and fetch the rest. Nothing over plain http on a secure page (mixed content).
+    pub fn feed(&mut self, ti: usize) {
+        let Some(t) = self.tabs.get(ti) else {
+            return;
+        };
+        if t.page.kind != PageKind::Web {
+            return;
+        }
         let secure = t
             .page
             .url
@@ -1474,24 +1499,76 @@ impl App {
             .as_ref()
             .map(|u| site_of(&u.host))
             .unwrap_or_default();
-        let list: Vec<String> = t.page.doc.images().iter().take(100).cloned().collect();
-        for src in list {
-            if self.images.contains_key(&src) {
-                continue;
+        // Supplying a stylesheet can ask for more (@import, background images): a few rounds.
+        for _ in 0..8 {
+            let pending = self.tabs[ti].page.doc.pending();
+            let mut waiting = 0;
+            let mut supplied = false;
+            for r in pending.into_iter().take(300) {
+                let style = r.kind == ResourceKind::Stylesheet;
+                let cache = if style { &self.sheets } else { &self.images };
+                match cache.get(&r.url) {
+                    Some(ImgState::Loading(_)) => waiting += 1,
+                    Some(ImgState::Ready(img)) => {
+                        if let ResourceKind::Image(id) = r.kind {
+                            let size = (img.w as u32, img.h as u32);
+                            self.tabs[ti].page.doc.supply_image(id, Some(size));
+                            supplied = true;
+                        }
+                    }
+                    Some(ImgState::Sheet(body)) => {
+                        let body = body.clone();
+                        self.tabs[ti]
+                            .page
+                            .doc
+                            .supply_stylesheet(&r.url, Some(&body));
+                        supplied = true;
+                    }
+                    Some(ImgState::Failed) => {
+                        match r.kind {
+                            ResourceKind::Image(id) => {
+                                self.tabs[ti].page.doc.supply_image(id, None)
+                            }
+                            ResourceKind::Stylesheet => {
+                                self.tabs[ti].page.doc.supply_stylesheet(&r.url, None)
+                            }
+                        }
+                        supplied = true;
+                    }
+                    None => {
+                        let url = Url::parse(&r.url)
+                            .ok()
+                            .filter(|u| !(secure && u.scheme == Scheme::Http));
+                        let cache = if style {
+                            &mut self.sheets
+                        } else {
+                            &mut self.images
+                        };
+                        match url {
+                            Some(u) => {
+                                let ctx = Context::Subresource {
+                                    page_site: site.clone(),
+                                };
+                                let kind = if style { Kind::Style } else { Kind::Image };
+                                let id = self.fetch.start(kind, Request::get(&u), ctx);
+                                cache.insert(r.url.clone(), ImgState::Loading(id));
+                                waiting += 1;
+                            }
+                            // Not an address we fetch, or mixed content: it failed.
+                            None => {
+                                cache.insert(r.url.clone(), ImgState::Failed);
+                                supplied = true;
+                            }
+                        }
+                    }
+                }
             }
-            let Ok(u) = Url::parse(&src) else {
-                continue;
-            };
-            if secure && u.scheme == Scheme::Http {
-                // Mixed content: blocked.
-                self.images.insert(src, ImgState::Failed);
-                continue;
+            self.tabs[ti].page.waiting = waiting;
+            if supplied {
+                self.tabs[ti].page.laid_w = 0;
+            } else {
+                break;
             }
-            let ctx = Context::Subresource {
-                page_site: site.clone(),
-            };
-            let id = self.fetch.start(Kind::Image, Request::get(&u), ctx);
-            self.images.insert(src, ImgState::Loading(id));
         }
     }
 }
@@ -1598,6 +1675,7 @@ fn main(args: &rt::Args) -> i32 {
         visits,
         downloads: Vec::new(),
         images: BTreeMap::new(),
+        sheets: BTreeMap::new(),
         image_pixels: 0,
         surface: Surface::new(W, H, 0xFFFFFF),
         editing: None,
@@ -1607,6 +1685,7 @@ fn main(args: &rt::Args) -> i32 {
         online,
         flash: None,
         shown_title: String::new(),
+        link: Theme::light().link,
         quit: false,
         dirty: true,
     };

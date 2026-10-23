@@ -12,7 +12,6 @@ pub mod cookies;
 pub mod date;
 pub mod download;
 pub mod engine;
-pub mod find;
 pub mod font;
 pub mod form;
 pub mod history;

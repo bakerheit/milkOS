@@ -403,14 +403,11 @@ impl Realm {
                 extra = self.vm.stack[base + nparams..sp].to_vec();
             }
             self.vm.stack.truncate(base + nparams);
-        } else {
-            for _ in argc..nparams {
-                self.vm.stack.push(Val::Undef);
-            }
         }
-        for _ in nparams..nlocals {
-            self.vm.stack.push(Val::Undef);
-        }
+        // Missing parameters and the other locals start undefined.
+        self.vm
+            .stack
+            .resize(base + nlocals.max(nparams), Val::Undef);
         let given_this = self.vm.stack[base - 2];
         let (this, nt) = match code.kind {
             CodeKind::Arrow => (cthis, cnt),
@@ -1132,20 +1129,28 @@ impl Realm {
                 Op::GetProp(c) => {
                     let o = self.pop();
                     let k = key_of!(c);
-                    let v = tri!(self.get_v(o, k));
+                    let v = match self.get_fast(o, k) {
+                        Some(v) => v,
+                        None => tri!(self.get_v(o, k)),
+                    };
                     self.push(v);
                 }
                 Op::GetPropKeep(c) => {
                     let o = self.peek(0);
                     let k = key_of!(c);
-                    let v = tri!(self.get_v(o, k));
+                    let v = match self.get_fast(o, k) {
+                        Some(v) => v,
+                        None => tri!(self.get_v(o, k)),
+                    };
                     self.push(v);
                 }
                 Op::SetProp(c) => {
                     let v = self.pop();
                     let o = self.pop();
                     let k = key_of!(c);
-                    tri!(self.set_v(o, k, v, code.strict));
+                    if !self.set_fast(o, k, v) {
+                        tri!(self.set_v(o, k, v, code.strict));
+                    }
                     self.push(v);
                 }
                 Op::GetElem => {
@@ -1993,6 +1998,142 @@ impl Realm {
                     }
                 }
                 Op::Nop => {}
+                Op::ThisProp(c) | Op::ThisPropKeep(c) => {
+                    let o = self.top().this.or_undef();
+                    let k = key_of!(c);
+                    pc += 1;
+                    let v = match self.get_fast(o, k) {
+                        Some(v) => v,
+                        None => {
+                            sync!();
+                            tri!(self.get_v(o, k))
+                        }
+                    };
+                    if matches!(op, Op::ThisPropKeep(_)) {
+                        self.push(o);
+                    }
+                    self.push(v);
+                }
+                Op::LocalProp(l, c) | Op::LocalPropKeep(l, c) => {
+                    let o = self
+                        .vm
+                        .stack
+                        .get(base + l as usize)
+                        .copied()
+                        .unwrap_or(Val::Undef);
+                    let k = key_of!(c);
+                    pc += 1;
+                    let v = match self.get_fast(o, k) {
+                        Some(v) => v,
+                        None => {
+                            sync!();
+                            tri!(self.get_v(o, k))
+                        }
+                    };
+                    if matches!(op, Op::LocalPropKeep(..)) {
+                        self.push(o);
+                    }
+                    self.push(v);
+                }
+                Op::Local2(a, b) => {
+                    let va = self
+                        .vm
+                        .stack
+                        .get(base + a as usize)
+                        .copied()
+                        .unwrap_or(Val::Undef);
+                    let vb = self
+                        .vm
+                        .stack
+                        .get(base + b as usize)
+                        .copied()
+                        .unwrap_or(Val::Undef);
+                    pc += 1;
+                    self.push(va);
+                    self.push(vb);
+                }
+                Op::PropProp(c, d) => {
+                    let o = self.pop();
+                    let k = key_of!(c);
+                    let v = match self.get_fast(o, k) {
+                        Some(v) => v,
+                        None => {
+                            sync!();
+                            tri!(self.get_v(o, k))
+                        }
+                    };
+                    pc += 1;
+                    let k2 = key_of!(d);
+                    let v2 = match self.get_fast(v, k2) {
+                        Some(v) => v,
+                        None => {
+                            sync!();
+                            tri!(self.get_v(v, k2))
+                        }
+                    };
+                    self.push(v2);
+                }
+                Op::SetPropPop(c) => {
+                    let v = self.pop();
+                    let o = self.pop();
+                    let k = key_of!(c);
+                    if !self.set_fast(o, k, v) {
+                        tri!(self.set_v(o, k, v, code.strict));
+                    }
+                    pc += 1;
+                }
+                Op::StrictEqJf | Op::StrictNeJf => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let r = self.strict_eq(a, b);
+                    let r = if matches!(op, Op::StrictEqJf) { r } else { !r };
+                    match code.ops.get(pc) {
+                        Some(Op::JumpIfFalse(t)) if !r => pc = *t as usize,
+                        _ => pc += 1,
+                    }
+                }
+                Op::LtJf | Op::GtJf | Op::LeJf | Op::GeJf => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let r = match (a, b) {
+                        (Val::Int(x), Val::Int(y)) => match op {
+                            Op::LtJf => x < y,
+                            Op::GtJf => x > y,
+                            Op::LeJf => x <= y,
+                            _ => x >= y,
+                        },
+                        _ => {
+                            let plain = match op {
+                                Op::LtJf => Op::Lt,
+                                Op::GtJf => Op::Gt,
+                                Op::LeJf => Op::Le,
+                                _ => Op::Ge,
+                            };
+                            sync!();
+                            tri!(self.compare_slow(plain, a, b))
+                        }
+                    };
+                    match code.ops.get(pc) {
+                        Some(Op::JumpIfFalse(t)) if !r => pc = *t as usize,
+                        _ => pc += 1,
+                    }
+                }
+                Op::StrictEqInt(n) => {
+                    let a = self.pop();
+                    let r = self.strict_eq(a, Val::Int(n));
+                    pc += 1;
+                    self.push(Val::Bool(r));
+                }
+                Op::StrictEqNull | Op::StrictNeNull => {
+                    let a = self.pop();
+                    let r = self.strict_eq(a, Val::Null);
+                    pc += 1;
+                    self.push(Val::Bool(if matches!(op, Op::StrictEqNull) {
+                        r
+                    } else {
+                        !r
+                    }));
+                }
             }
         }
     }

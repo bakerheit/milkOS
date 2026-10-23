@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::api::{HostFn, Key};
 use crate::heap::Tracer;
@@ -52,11 +53,27 @@ pub(crate) struct Prop {
 }
 
 /// Properties in insertion order, with a hash index once there are more than a few.
+///
+/// Lookups are sped up two ways (both exact, neither needs invalidating): a 64-bit Bloom
+/// mask of the keys ever inserted answers most misses (a method looked up on an instance,
+/// then on its prototype chain) without touching the entries, and a small table of
+/// "where was this key found last time" positions, shared by every map, answers most hits
+/// in objects built the same way (the same constructor) with one comparison.
 #[derive(Default)]
 pub(crate) struct PropMap {
     pub ents: Vec<(PropKey, Prop)>,
     index: Option<Box<[u32]>>,
     dead: u32,
+    /// Bit `hash >> 26` is set for every key ever inserted (deleting leaves bits set).
+    mask: u64,
+}
+
+const HINT_SLOTS: usize = 256;
+static HINTS: [AtomicU16; HINT_SLOTS] = [const { AtomicU16::new(0) }; HINT_SLOTS];
+
+#[inline(always)]
+fn bloom_bit(h: u32) -> u64 {
+    1u64 << (h >> 26)
 }
 
 const INDEX_AT: usize = 8;
@@ -67,6 +84,7 @@ impl PropMap {
             ents: Vec::new(),
             index: None,
             dead: 0,
+            mask: 0,
         }
     }
     pub fn with_capacity(n: usize) -> PropMap {
@@ -74,6 +92,7 @@ impl PropMap {
             ents: Vec::with_capacity(n),
             index: None,
             dead: 0,
+            mask: 0,
         }
     }
     #[inline]
@@ -82,24 +101,39 @@ impl PropMap {
     }
     #[inline]
     pub fn find(&self, k: PropKey) -> Option<usize> {
-        match &self.index {
+        let h = k.hash();
+        if self.mask & bloom_bit(h) == 0 {
+            return None;
+        }
+        let slot = (h >> 8) as usize & (HINT_SLOTS - 1);
+        let hint = HINTS[slot].load(Ordering::Relaxed) as usize;
+        if let Some(e) = self.ents.get(hint)
+            && e.0 == k
+        {
+            return Some(hint);
+        }
+        let found = match &self.index {
             None => self.ents.iter().position(|e| e.0 == k),
             Some(ix) => {
                 let mask = ix.len() - 1;
-                let mut i = k.hash() as usize & mask;
+                let mut i = h as usize & mask;
                 loop {
                     let e = ix[i];
                     if e == 0 {
-                        return None;
+                        break None;
                     }
                     let p = (e - 1) as usize;
                     if self.ents[p].0 == k {
-                        return Some(p);
+                        break Some(p);
                     }
                     i = (i + 1) & mask;
                 }
             }
+        };
+        if let Some(p) = found {
+            HINTS[slot].store(p as u16, Ordering::Relaxed);
         }
+        found
     }
     #[inline]
     pub fn get(&self, k: PropKey) -> Option<&Prop> {
@@ -107,6 +141,7 @@ impl PropMap {
     }
     pub fn insert(&mut self, k: PropKey, p: Prop) {
         let pos = self.ents.len();
+        self.mask |= bloom_bit(k.hash());
         self.ents.push((k, p));
         match &mut self.index {
             Some(ix) if (self.ents.len() * 2) <= ix.len() => {
@@ -700,6 +735,101 @@ impl Realm {
             return Ok(Some(Own::Data(v, WEC)));
         }
         Ok(self.get_own_plain(id, k))
+    }
+
+    // ---- inline fast paths for the interpreter's property ops ----
+
+    /// `o[k]` for the common case, without the general machinery: an own or inherited
+    /// *data* property reached through ordinary objects (arrays and string wrappers count
+    /// as ordinary for names other than `length`), `undefined` for a name nothing on the
+    /// chain has, a string's `length` and methods. Returns None whenever anything else could
+    /// be involved (an accessor, a host hook, a typed array, a lazy function, a proxy-ish
+    /// kind, a very long chain): the caller then does the full [[Get]].
+    #[inline(always)]
+    pub(crate) fn get_fast(&self, o: Val, k: PropKey) -> Option<Val> {
+        let mut cur = match o {
+            Val::Obj(id) => id,
+            Val::Str(s) => {
+                if k == self.key(N::length) {
+                    return Some(Val::Int(self.heap.str_len(s) as i32));
+                }
+                if let PropKey::Idx(_) = k {
+                    return None;
+                }
+                self.intr.string_proto
+            }
+            _ => return None,
+        };
+        let is_len = k == self.key(N::length);
+        let named = matches!(k, PropKey::Str(_)) && !is_len;
+        for _ in 0..8 {
+            let obj = self.o(cur);
+            if obj.flags & LAZY_FN != 0 {
+                return None;
+            }
+            match &obj.kind {
+                ObjKind::Array(a) if is_len => return Some(Val::num(a.len as f64)),
+                ObjKind::Array(_) | ObjKind::StrBox(_) if !named => return None,
+                ObjKind::Host { .. } | ObjKind::Typed(_) => return None,
+                _ => {}
+            }
+            if let Some(p) = obj.props.get(k) {
+                return if p.f & ACCESSOR == 0 { Some(p.v) } else { None };
+            }
+            match obj.proto {
+                Some(p) => cur = p,
+                None => return Some(Val::Undef),
+            }
+        }
+        None
+    }
+
+    /// `o[k] = v` for the common cases: overwriting an own writable data property of an
+    /// ordinary object, or adding a new property to an extensible ordinary object when
+    /// nothing on its prototype chain has that name. False means "not handled": do the full
+    /// [[Set]].
+    #[inline(always)]
+    pub(crate) fn set_fast(&mut self, o: Val, k: PropKey, v: Val) -> bool {
+        let Val::Obj(id) = o else { return false };
+        let obj = self.o(id);
+        if obj.flags & LAZY_FN != 0 || !matches!(obj.kind, ObjKind::Ordinary) {
+            return false;
+        }
+        if let Some(pos) = obj.props.find(k) {
+            let p = obj.props.ents[pos].1;
+            if p.f & (W | ACCESSOR) == W {
+                self.om(id).props.ents[pos].1.v = v;
+                return true;
+            }
+            return false;
+        }
+        if obj.flags & EXTENSIBLE == 0 || matches!(k, PropKey::Idx(_)) {
+            return false;
+        }
+        // Absent here: nothing on the chain may have the name (a setter, a read-only one).
+        let mut cur = obj.proto;
+        for _ in 0..8 {
+            let Some(c) = cur else {
+                self.heap.charge(32);
+                self.om(id).props.insert(k, Prop { v, f: WEC });
+                return true;
+            };
+            let po = self.o(c);
+            if po.flags & LAZY_FN != 0
+                || matches!(
+                    po.kind,
+                    ObjKind::Host { .. }
+                        | ObjKind::Typed(_)
+                        | ObjKind::Array(_)
+                        | ObjKind::StrBox(_)
+                )
+                || po.props.find(k).is_some()
+            {
+                return false;
+            }
+            cur = po.proto;
+        }
+        false
     }
 
     // ---- [[Get]] ----

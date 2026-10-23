@@ -15,7 +15,7 @@ SOCKET is a qemu `-qmp unix:SOCKET,server,nowait` socket. Commands run in order:
   scroll N           wheel N notches (positive = up)
   sleep SECS         wait
   delay SECS         change the pause after each input command from here on
-  screendump FILE    save the screen as PNG
+  screendump FILE    save the screen as PNG (as PPM if FILE ends in .ppm)
   hmp CMDLINE        run a human-monitor command, print its output
   raw JSON           send one QMP command object, print the reply
 
@@ -174,7 +174,8 @@ def main(argv):
         elif op == "delay":
             delay = float(argv.pop(0))
         elif op == "screendump":
-            q.cmd("screendump", filename=argv.pop(0), format="png")
+            f = argv.pop(0)
+            q.cmd("screendump", filename=f, format="ppm" if f.endswith(".ppm") else "png")
         elif op == "hmp":
             out = q.cmd("human-monitor-command", **{"command-line": argv.pop(0)})
             if out:

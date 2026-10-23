@@ -17,6 +17,8 @@ networking) and never forwards anything anywhere:
       /track       tracker.test as a page (first party: its cookie may be set and sent)
       /file.zip    200 KB of application/zip, slowly (a download)
       /styled      a page with a stylesheet (/site.css): colours, a flex row, a table
+      /unicode     Greek, Cyrillic, Latin Extended, dashes, quotes and symbols
+      /images      a JPEG, an animated GIF, WebP (lossy and animated), from user/imgdec's fixtures
       /missing     404
 Every request is logged: "http METHOD PATH host=HOST cookie=COOKIE" (and "post BODY").
 Writes "dns=PORT http=PORT" to argv[1], then serves until killed.
@@ -99,11 +101,12 @@ def page(title, body):
 
 HOME = page(
     "Milk Browser test",
+    "<p><a href=\"/form\" style=\"display: block; height: 60px; font-size: 40px\">Forms</a></p>"
     "<h1>The milkOS Browser</h1>"
     "<p>A page from the <b>test server</b>, with <i>styles</i>, <code>code</code> and links: "
     "<a href=\"/long\">a long page</a>, <a href=\"/form\">forms</a>, <a href=\"/cookies\">cookies</a>, "
     "<a href=\"/file.zip\">a download</a>, <a href=\"/missing\">a missing page</a> and "
-    "<a href=\"/long#p150\">paragraph 150</a>, and <a href=\"/styled\">a styled page</a>.</p>"
+    "<a href=\"/long#p150\">paragraph 150</a>, <a href=\"/styled\">a styled page</a>, <a href=\"/unicode\">Unicode</a> and <a href=\"/images\">pictures</a>.</p>"
     "<p><img src=\"/cow.png\" alt=\"a cow\" width=\"160\" height=\"96\"> Café &mdash; &ldquo;quotes&rdquo; &copy; 2026</p>"
     "<ul><li>Whole milk</li><li>Skim<ul><li>Very skim</li></ul></li><li>Chocolate</li></ul>"
     "<ol><li>First</li><li>Second</li></ol>"
@@ -138,6 +141,28 @@ CSS = (
     ".card.hot { background: #e58c97; } .note { border-left: 4px solid #9cbf9b; padding-left: 12px; }"
     "footer { margin: 0 20px; padding-top: 8px; border-top: 1px dashed #c4ae8f; color: #6b5846; }"
 ).encode()
+
+UNICODE = page(
+    "\u03a4\u03bf \u03b3\u03ac\u03bb\u03b1 \u2014 \u041c\u043e\u043b\u043e\u043a\u043e",
+    "<h1>\u0393\u03ac\u03bb\u03b1 \u2014 \u041c\u043e\u043b\u043e\u043a\u043e \u2014 Mleko</h1>"
+    "<p lang=\"el\">\u03a4\u03bf \u03b3\u03ac\u03bb\u03b1 \u03b5\u03af\u03bd\u03b1\u03b9 \u03bb\u03b5\u03c5\u03ba\u03cc \u03ba\u03b1\u03b9 \u03b6\u03b5\u03c3\u03c4\u03cc. \u0391\u0392\u0393\u0394\u0395 \u03b1\u03b2\u03b3\u03b4\u03b5 \u03c9\u03c8\u03c7</p>"
+    "<p lang=\"ru\">\u041c\u043e\u043b\u043e\u043a\u043e \u0431\u0435\u043b\u043e\u0435 \u0438 \u0442\u0451\u043f\u043b\u043e\u0435. \u0410\u0411\u0412\u0413\u0414 \u0436\u0437\u0438\u0439 \u044d\u044e\u044f</p>"
+    "<p>Latin Extended: \u0141\u00f3d\u017a, \u010cesk\u00fd, \u0153uvre, \u0219i \u021b, \u00df, \u0131</p>"
+    "<p>Dashes \u2013 and \u2014, \u201cdouble\u201d and \u2018single\u2019 quotes, \u2026 ellipsis, \u2022 bullet, \u2192 arrows \u2190, \u00a9 \u20ac 5 \u00bd \u2122 \u2605 \u2713</p>"
+    "<p><code>code stays monospace: \u03bb x \u2192 x</code> and <tt>tt</tt></p>"
+    "<pre>pre   keeps   its   spaces</pre>"
+    "<p style=\"font-family: serif\">A serif paragraph. <span style=\"font-family: cursive\">Cursive.</span> <b>Bold</b> <i>italic</i> <small>small</small></p>"
+    "<p style=\"font-size: 32px\">Big text \u2014 \u039c\u03b5\u03b3\u03ac\u03bb\u03bf</p>",
+)
+FIXTURES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "user", "imgdec", "tests", "fixtures")
+IMAGES = page(
+    "Pictures",
+    "<h1>Pictures</h1><p>A JPEG <img src=\"/fx/jpeg-big.jpg\" alt=\"jpeg\"> and an animated GIF "
+    "<img src=\"/fx/gif-anim-slow.gif\" alt=\"gif\"></p>"
+    "<p>WebP, lossy <img src=\"/fx/webp-lossy-big.webp\" alt=\"webp\"> and animated <img src=\"/fx/webp-anim.webp\" alt=\"webp anim\"></p>"
+    "<p>A progressive JPEG <img src=\"/fx/jpeg-progressive.jpg\" alt=\"progressive\"> and a broken one <img src=\"/broken.jpg\" alt=\"(broken)\"></p>",
+)
+TYPES = {".jpg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".png": "image/png"}
 
 FORM = page(
     "Forms",
@@ -187,6 +212,19 @@ class Web(http.server.BaseHTTPRequestHandler):
             return self.send(200, HOME)
         if path == "/cow.png":
             return self.send(200, COW, "image/png")
+        if path == "/unicode":
+            return self.send(200, UNICODE)
+        if path == "/images":
+            return self.send(200, IMAGES)
+        if path == "/broken.jpg":
+            return self.send(200, b"\xff\xd8\xff\xe0 not really a jpeg", "image/jpeg")
+        if path.startswith("/fx/"):
+            name = os.path.basename(path[4:])
+            ext = os.path.splitext(name)[1]
+            full = os.path.join(FIXTURES, name)
+            if ext in TYPES and os.path.isfile(full):
+                return self.send(200, open(full, "rb").read(), TYPES[ext])
+            return self.send(404, page("Not found", "<h1>404</h1>"))
         if path == "/styled":
             return self.send(200, STYLED)
         if path == "/site.css":

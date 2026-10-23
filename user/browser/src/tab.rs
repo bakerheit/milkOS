@@ -35,6 +35,10 @@ pub struct Page {
     pub status: u16,
     /// The width the page is laid out at (0: lay it out again before drawing).
     pub laid_w: i32,
+    /// The desktop font family it was laid out in (Settings can change it).
+    pub laid_font: usize,
+    /// The images it shows (addresses), for stepping animations.
+    pub shown: alloc::collections::BTreeSet<String>,
     /// Stylesheets and images it is still waiting for.
     pub waiting: usize,
 }
@@ -54,6 +58,8 @@ impl Page {
             kind,
             status: 200,
             laid_w: 0,
+            laid_font: usize::MAX,
+            shown: alloc::collections::BTreeSet::new(),
             waiting: 0,
         }
     }

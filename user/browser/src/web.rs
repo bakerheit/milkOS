@@ -9,7 +9,7 @@ use browserkit::engine::{
     ControlId, ControlKind, DisplayList, Document, FormControl, Link, Rect, Resource, Submission,
     Viewport,
 };
-use browserkit::font::Unifont;
+use browserkit::font::Fonts;
 use milkweb::url::Url;
 
 /// Does this control take typing?
@@ -61,8 +61,8 @@ impl Doc {
     }
 
     /// Lay out `w` x `h` page pixels (cached by the engine for the same size).
-    pub fn layout(&mut self, w: i32, h: i32) {
-        self.d.layout(&Viewport::new(w.max(1), h.max(1)), &Unifont);
+    pub fn layout(&mut self, w: i32, h: i32, fonts: Fonts) {
+        self.d.layout(&Viewport::new(w.max(1), h.max(1)), &fonts);
         self.laid = Some((w, h));
     }
 

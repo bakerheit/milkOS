@@ -25,7 +25,7 @@ pub fn esc(s: &str) -> String {
 
 fn page(title: &str, body: &str) -> String {
     format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title></head><body>{body}</body></html>",
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{}</title><style>body {{ font-family: system-ui; margin: 16px 20px; }}</style></head><body>{body}</body></html>",
         esc(title)
     )
 }

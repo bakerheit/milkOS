@@ -6,7 +6,8 @@
 # server's log and screenshots:
 #   * the window system's client protocol: Home / End / Page Up / Page Down reach the app, and
 #     clicks and the wheel carry the modifier keys (browser --log-input)
-#   * a page with an image and links, a page with a stylesheet, a long page: End / Home / Page Down / Space scroll, a
+#   * a page with an image and links, a page with a stylesheet, Greek and Cyrillic text, JPEG,
+#     GIF and WebP pictures (the animated ones play, and stop in a background tab), a long page: End / Home / Page Down / Space scroll, a
 #     #fragment, find in page, zoom, back
 #   * forms: a GET form driven by the keyboard (text, checkbox, radio arrows, select,
 #     textarea, submit) and a POST sign-in (Post/Redirect/Get) whose cookie comes back
@@ -96,9 +97,14 @@ q move 785 615 click sleep 1
 ser "send:/Apps/browser/browser --log-input http://$H/ &" "wait:$PR"
 if loaded "http://$(esc_re "$H")/: 200 OK, [0-9]+ bytes, 'Milk Browser test', 0 redirects" 30; then ok "the home page loaded (200, its title)"; else bad "no home page load in the log"; fi
 wait_srv "^http GET /cow\.png host=www\.milk\.test" && ok "the page's image was fetched" || bad "the image wasn't fetched"
-# Where the window's body is: the desktop places windows as it sees fit, so ask the Browser.
-# A right click on the page (it does nothing there) is logged in body coordinates
-# (--log-input); the screen point minus those is the body's origin.
+# The window is in /dev/wm's list as soon as the page is up (it used to be refreshed once a
+# second, so a window that had just opened was missing).
+ser "send:text show /dev/wm" "wait:$PR"
+out "text show /dev/wm" | grep -a "^window [0-9]* [0-9]*x[0-9]*+[0-9]*+[0-9]* space [0-9]* Milk Browser test$" >/dev/null &&
+  ok "/dev/wm lists the Browser's window at once" || bad "/dev/wm doesn't list the Browser's window: $(out "text show /dev/wm" | grep -a '^window')"
+# Where the window's body is (/dev/wm gives the frame, and the title bar's height is the
+# desktop's business): a right click on the page (it does nothing there) is logged in body
+# coordinates (--log-input); the screen point minus those is the body's origin.
 q move 512 400 click right
 set -- $(log_lines | sed -n 's/^\[browser\] input down \(-\{0,1\}[0-9]*\) \(-\{0,1\}[0-9]*\) button=2 .*/\1 \2/p' | tail -1)
 if [ -n "${1:-}" ]; then BX=$((512 - $1)); BY=$((400 - $2)); else BX=86; BY=91; bad "no right click logged, guessing the window's place"; fi
@@ -110,7 +116,23 @@ loaded "http://$(esc_re "$H")/styled: 200 OK, [0-9]+ bytes, 'Styled page'" && ok
 wait_srv "^http GET /site\.css host=www\.milk\.test" && ok "its stylesheet was fetched" || bad "the stylesheet wasn't fetched"
 shot 01b-styled 01-home
 differ 01-home 01b-styled && ok "the styled page drew" || bad "the styled page looks like the last one"
-q key meta_l-bracket_left
+go "$H/unicode"
+loaded "http://$(esc_re "$H")/unicode: 200 OK, [0-9]+ bytes, 'Το γάλα — Молоко'" && ok "a Greek and Cyrillic page (its title in the log)" || bad "no Unicode page"
+shot 01c-unicode 01b-styled
+go "$H/images"
+loaded "http://$(esc_re "$H")/images: 200 OK" || bad "no pictures page"
+for want in "jpeg-big\.jpg: 320x200$" "gif-anim-slow\.gif: 120x90, animated, 2 frames$" "webp-lossy-big\.webp: 333x211$" \
+    "webp-anim\.webp: 40x30, animated, 3 frames$" "jpeg-progressive\.jpg: 61x45$" "broken\.jpg: "; do
+  wait_log "^\[browser\] image http://$(esc_re "$H")/(fx/)?$want" 20 && ok "decoded: ${want%%:*}" || bad "image ${want%%:*}"
+done
+shot 01d-images 01c-unicode
+# The animated GIF moves (two raw screens a while apart differ), and stops in a background tab.
+q screendump "$T/anim-a.ppm" sleep 1.3 screendump "$T/anim-b.ppm"
+python3 scripts/shotwait.py --differ "$T/anim-a.png" "$T/anim-b.png" && ok "the animated pictures play" || bad "the animation didn't move"
+q key meta_l-t sleep 1 key esc sleep 0.5 screendump "$T/anim-c.ppm" sleep 1.3 screendump "$T/anim-d.ppm"
+python3 scripts/shotwait.py --same "$T/anim-c.png" "$T/anim-d.png" && ok "with the page in a background tab, nothing moves" || bad "something moves on the new tab"
+q key ctrl-w sleep 0.5
+q key meta_l-bracket_left sleep 0.5 key meta_l-bracket_left sleep 0.5 key meta_l-bracket_left
 loaded "http://$(esc_re "$H")/: 200 OK, [0-9]+ bytes, 'Milk Browser test'" || true
 sleep 1
 
@@ -119,12 +141,12 @@ q key home key end key pgup key pgdn
 for k in Home End PageUp PageDown; do
   wait_log "^\[browser\] input key $k mods=-$" 5 && ok "$k reaches the app" || bad "$k didn't reach the app"
 done
-q move $((BX + 600)) $((BY + 400)) hold meta_l click release meta_l
-wait_log "^\[browser\] input down 600 400 button=1 mods=meta$" 5 && ok "a click carries Cmd" || bad "no Cmd on the click"
+q move $((BX + 896)) $((BY + 400)) hold meta_l click release meta_l
+wait_log "^\[browser\] input down 896 400 button=1 mods=meta$" 5 && ok "a click carries Cmd" || bad "no Cmd on the click"
 q hold shift scroll -1 release shift
 wait_log "^\[browser\] input scroll 1 mods=shift$" 5 && ok "the wheel carries Shift" || bad "no Shift on the wheel"
-q move $((BX + 600)) $((BY + 420)) click
-wait_log "^\[browser\] input down 600 420 button=1 mods=-$" 5 && ok "a plain click carries no modifiers" || bad "a plain click had modifiers"
+q move $((BX + 896)) $((BY + 420)) click
+wait_log "^\[browser\] input down 896 420 button=1 mods=-$" 5 && ok "a plain click carries no modifiers" || bad "a plain click had modifiers"
 
 echo "-- a long page: scrolling, a fragment, find, zoom"
 go "$H/long"
@@ -185,9 +207,10 @@ loaded "http://$(esc_re "$H")/: 200 OK" || true
 sleep 1
 q key meta_l-d sleep 5.5
 shot 14-home
-# Cmd-click "forms" (page 606,86 = body 606,158): it opens in a new tab, this one stays.
+# Cmd-click the big "Forms" link at the top of the page (body 300,122): it opens in a new
+# tab, this one stays.
 before=$(log_lines | grep -c "^\[browser\] http://$(esc_re "$H")/form: 200" || true)
-q move $((BX + 606)) $((BY + 158)) hold meta_l click release meta_l
+q move $((BX + 300)) $((BY + 122)) hold meta_l click release meta_l
 sleep 2
 after=$(log_lines | grep -c "^\[browser\] http://$(esc_re "$H")/form: 200" || true)
 [ "$after" -gt "$before" ] && ok "Cmd-click loaded the link in a new tab" || bad "Cmd-click didn't load the link"

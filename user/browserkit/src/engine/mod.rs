@@ -8,7 +8,7 @@
 pub use webengine::{
     ControlId, ControlKind, DisplayList, Document, Entry, Family, FindMatch, Font, FontMetrics,
     FormControl, Hit, ImageId, Item, Link, Method, Rect, Resource, ResourceKind, Submission,
-    TextMeasurer, Viewport,
+    TextMeasurer, Viewport, Storage,
 };
 
 /// A pixel colour: `0xAARRGGBB` in the engine's lists, `0x00RRGGBB` on the screen.

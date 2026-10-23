@@ -588,6 +588,172 @@ pub struct Stats {
     pub layout_bytes: usize,
 }
 
+// ---- Scripts --------------------------------------------------------------------------------
+
+/// What a page's scripts reach outside the page, from the app. Every call that may run
+/// script takes one. Nothing here may block for long except the dialogs (which are modal:
+/// the app shows them and waits for the user) and [`ScriptHost::slow`].
+pub trait ScriptHost {
+    /// For layout a script forces (getBoundingClientRect, offsetHeight, ...).
+    fn measurer(&self) -> &dyn TextMeasurer;
+    /// The viewport the page is laid out in (innerWidth, media queries).
+    fn viewport(&self) -> Viewport;
+    /// The app's scroll offset, device pixels (scrollX / scrollY).
+    fn scroll(&self) -> (i32, i32);
+    /// A monotonic clock in milliseconds (timers, performance.now()).
+    fn now(&self) -> f64;
+    /// Milliseconds since 1970-01-01 UTC (Date.now()).
+    fn time(&self) -> f64;
+    /// The local time zone's offset from UTC in minutes (east positive).
+    fn tz_offset(&self) -> i32 {
+        0
+    }
+    /// navigator.userAgent.
+    fn user_agent(&self) -> String {
+        String::from("Mozilla/5.0 (milkOS) MilkBrowser/1.0")
+    }
+    /// `document.cookie`: the page's cookies as a Cookie header would carry them, without
+    /// HttpOnly ones.
+    fn cookies(&mut self) -> String {
+        String::new()
+    }
+    /// `document.cookie = ...`: one Set-Cookie line (the app refuses HttpOnly ones).
+    fn set_cookie(&mut self, _line: &str) {}
+    /// The page's origin's localStorage (`session` false) or this tab's sessionStorage. None:
+    /// storage is not available (the API then throws SecurityError, as for opaque origins).
+    fn storage(&mut self, _session: bool) -> Option<&mut dyn Storage> {
+        None
+    }
+    /// window.alert: show `msg` and wait for OK.
+    fn alert(&mut self, _msg: &str) {}
+    /// window.confirm: OK (true) or Cancel.
+    fn confirm(&mut self, _msg: &str) -> bool {
+        false
+    }
+    /// window.prompt: the text typed, or None for Cancel.
+    fn prompt(&mut self, _msg: &str, _default: &str) -> Option<String> {
+        None
+    }
+    /// A script has been running for `running_ms` without a break (asked about every 100 ms
+    /// or so once past [`ScriptLimits::slow_ms`]). Return false to stop it: the page's
+    /// scripts then end for good ("This page is slow — Stop it?").
+    fn slow(&mut self, _running_ms: f64) -> bool {
+        true
+    }
+}
+
+/// A Web Storage area (localStorage or sessionStorage), kept by the app.
+pub trait Storage {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    /// The `i`th key (a stable order: insertion order).
+    fn key(&self, i: usize) -> Option<String>;
+    fn get(&self, key: &str) -> Option<String>;
+    /// False if it would go over the quota (the script gets QuotaExceededError).
+    fn set(&mut self, key: &str, value: &str) -> bool;
+    fn remove(&mut self, key: &str);
+    fn clear(&mut self);
+}
+
+/// The bounds a page's scripts run in. A page over them gets an uncatchable error, its
+/// scripts stop, and the page stays as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScriptLimits {
+    /// Bytes of script heap.
+    pub memory: usize,
+    /// A script running longer than this without returning makes the app hear about it
+    /// ([`ScriptHost::slow`]).
+    pub slow_ms: u32,
+    /// Bytes of one script's source.
+    pub max_source: usize,
+}
+
+impl Default for ScriptLimits {
+    fn default() -> ScriptLimits {
+        ScriptLimits {
+            memory: 64 << 20,
+            slow_ms: 2_000,
+            max_source: 8 << 20,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConsoleLevel {
+    Log,
+    Info,
+    Warn,
+    Error,
+    Debug,
+}
+
+/// One line of a page's console (console.log and friends, uncaught errors, notes from the
+/// engine such as "modules aren't supported yet").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsoleLine {
+    pub level: ConsoleLevel,
+    pub text: String,
+}
+
+/// Something a script asked of the app (see [`Document::take_requests`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PageRequest {
+    /// location.href = / assign / replace, a link a script clicked: go there (absolute URL).
+    /// `replace`: no new history entry.
+    Navigate { url: String, replace: bool },
+    /// location.reload().
+    Reload,
+    /// history.back() / forward() / go(n).
+    History(i32),
+    /// history.pushState / replaceState: the address bar shows `url` (absolute, same
+    /// origin), with a new history entry unless `replace`; no load.
+    SetAddress { url: String, replace: bool },
+    /// window.scrollTo, scrollIntoView, element.focus() of something out of view: scroll
+    /// the view to this document position (device pixels).
+    ScrollTo { x: i32, y: i32 },
+    /// form.submit() / requestSubmit(): send this (as a submit button would).
+    Submit(Submission),
+    /// window.open(url): a new tab.
+    Open(String),
+    /// `document.title` changed.
+    Title,
+}
+
+/// Keys as scripts see them (KeyboardEvent.key / code).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyInput {
+    /// "a", "A", "Enter", "ArrowLeft", "Backspace", "Escape", "Tab", " " ...
+    pub key: String,
+    /// "KeyA", "Enter", "ArrowLeft", "Space" ... ("" if unknown).
+    pub code: String,
+    pub mods: Mods,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub meta: bool,
+}
+
+/// How a page's scripts are doing, for the app's debug line and the tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScriptStats {
+    /// Scripts run (inline and external).
+    pub scripts: u32,
+    /// Uncaught errors.
+    pub errors: u32,
+    /// Event listener calls, timer and frame callbacks run.
+    pub callbacks: u32,
+    /// Script heap in use, bytes.
+    pub heap_bytes: usize,
+    /// The scripts were stopped (by the user, or for going over a limit).
+    pub stopped: bool,
+}
+
 // ---- The document -------------------------------------------------------------------------
 
 /// A parsed page. Not tied to any I/O; all inputs come in through the methods.

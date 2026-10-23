@@ -93,7 +93,7 @@ impl App {
             Content::Nothing => self.draw_card(
                 Rect::new(cx, cy, cw, ch),
                 "Open a picture",
-                "Choose a PNG, PPM or BMP, or drop one on this window.",
+                "Choose a PNG, JPEG, GIF, WebP, PPM or BMP, or drop one on this window.",
                 &[("Open...", Kind::Primary, ID_OPEN, true)],
             ),
             Content::Failed(m) => {
@@ -279,8 +279,12 @@ impl App {
     fn draw_status(&mut self) {
         let th = self.th;
         let text = match &self.content {
-            Content::Picture { img, fmt } => {
+            Content::Picture { img, fmt, anim } => {
                 let (dw, _) = self.display_size(img);
+                let fmt = match anim {
+                    Some(p) => format!("{fmt}, {} frames", p.anim.frame_count()),
+                    None => String::from(*fmt),
+                };
                 let pct = dw * 100 / img.w.max(1);
                 let z = if self.zoom == Zoom::Fit {
                     format!("Fit ({pct}%)")
@@ -519,15 +523,23 @@ impl App {
 
     fn draw_info(&mut self) {
         let th = self.th;
-        let Content::Picture { img, fmt } = &self.content else {
+        let Content::Picture { img, fmt, anim } = &self.content else {
             return;
         };
-        let rows = [
+        let mut rows = alloc::vec![
             ("Size", format!("{} x {} pixels", img.w, img.h)),
             ("File", human(self.size)),
             ("Format", String::from(*fmt)),
             ("Modified", ago(self.mtime)),
         ];
+        if let Some(p) = anim {
+            let plays = match p.anim.plays() {
+                0 => String::from(", loops"),
+                1 => String::new(),
+                n => format!(", plays {n} times"),
+            };
+            rows.push(("Frames", format!("{}{plays}", p.anim.frame_count())));
+        }
         let (cx, cy, cw, _) = self.canvas();
         let r = Rect::new(
             cx + cw - 12 - 250,

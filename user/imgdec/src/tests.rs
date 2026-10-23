@@ -623,19 +623,19 @@ fn sniffing() {
     assert_eq!(sniff(b"%PDF-1.7\n"), Format::Pdf);
     assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Format::Jpeg);
     assert_eq!(sniff(b"GIF89a"), Format::Gif);
+    assert_eq!(sniff(b"RIFF\x10\0\0\0WEBPVP8 "), Format::WebP);
+    assert_eq!(sniff(b"RIFF\x10\0\0\0WAVEfmt "), Format::Unknown);
     assert_eq!(sniff(b"hello"), Format::Unknown);
     assert_eq!(sniff(b"P7\n"), Format::Unknown);
     assert_eq!(sniff(b""), Format::Unknown);
-    for f in [
-        &b"%PDF-1.4"[..],
-        &[0xFF, 0xD8, 0xFF, 0xE0],
-        b"GIF89a",
-        b"plain text",
-        b"",
-    ] {
+    for f in [&b"%PDF-1.4"[..], b"plain text", b""] {
         let e = decode(f).unwrap_err();
         assert!(matches!(e, ImgError::Unrecognised(_)));
         assert!(!e.message().is_empty());
+    }
+    // The start of a JPEG or GIF is now just a short file.
+    for f in [&[0xFF, 0xD8, 0xFF, 0xE0][..], b"GIF89a"] {
+        assert_eq!(decode(f).unwrap_err(), ImgError::Truncated);
     }
     assert!(decode(b"%PDF-1.4").unwrap_err().message().contains("PDF"));
 }

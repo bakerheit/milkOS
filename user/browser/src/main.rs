@@ -18,7 +18,7 @@
 //!
 //! `browser [--log-input] [ADDRESS]`: `--log-input` prints every key, click and wheel event
 //! with its modifier keys (`[browser] input ...`), which scripts/browser-test.sh uses to check
-//! the window system's client protocol.
+//! the window system's client protocol, and says more about script requests.
 
 #![no_std]
 #![no_main]
@@ -28,6 +28,7 @@ extern crate alloc;
 mod draw;
 mod js;
 mod net;
+mod request;
 mod store;
 mod sysfont;
 mod tab;
@@ -85,6 +86,8 @@ pub const ID_FIND_NEXT: u32 = 10;
 pub const ID_FIND_DONE: u32 = 11;
 pub const ID_FIND_FIELD: u32 = 12;
 pub const ID_POPUP_BG: u32 = 13;
+pub const ID_PANEL_CONSOLE: u32 = 14;
+pub const ID_PANEL_NET: u32 = 15;
 pub const ID_TAB: u32 = 100; // + index
 pub const ID_CLOSE_TAB: u32 = 200; // + index
 pub const ID_MENU_ITEM: u32 = 300; // + index
@@ -234,6 +237,14 @@ pub struct App {
     pub js_on: bool,
     /// The console panel is open.
     pub console_open: bool,
+    /// The panel shows the Network list instead of the console.
+    pub console_net: bool,
+    /// The network policy's settings and the CORS preflight cache (script requests).
+    pub net_cfg: browserkit::netpolicy::Config,
+    pub preflight: alloc::sync::Arc<rt::thread::Mutex<browserkit::netpolicy::PreflightCache>>,
+    /// Script requests running, by fetch job, and the answers on their way to pages.
+    pub net_jobs: BTreeMap<JobId, request::NetJob>,
+    pub net_inbox: request::Inbox,
     /// --log-input: say more on the serial line.
     pub log: bool,
     pub image_pixels: usize,
@@ -1303,6 +1314,8 @@ impl App {
             }
             Some(ID_FIND_FIELD) => {}
             Some(ID_POPUP_BG) => {}
+            Some(ID_PANEL_CONSOLE) => self.console_net = false,
+            Some(ID_PANEL_NET) => self.console_net = true,
             Some(i) if (ID_MENU_ITEM..ID_MENU_ITEM + 100).contains(&i) => {
                 self.popup = None;
                 self.menu_item((i - ID_MENU_ITEM) as usize);
@@ -1502,10 +1515,18 @@ impl App {
                 }
             }
         }
-        for (id, kind, out, cert) in self.fetch.finished() {
+        // Script requests: heads and progress first, then the ends (which may carry the
+        // head if it came in between), then the answers to the pages.
+        changed |= self.net_tick();
+        for (id, kind, out, cert, head, peer) in self.fetch.finished() {
             changed = true;
-            self.finish(id, kind, out, cert);
+            if kind == Kind::Request {
+                self.net_finished(id, out, head);
+                continue;
+            }
+            self.finish(id, kind, out, cert, peer);
         }
+        changed |= self.net_tick();
         for a in self.profile.take_inbox() {
             let target = address::interpret(&a);
             if self.tabs.len() < MAX_TABS {
@@ -1525,6 +1546,7 @@ impl App {
         kind: Kind,
         out: Outcome,
         cert: Option<browserkit::certinfo::CertInfo>,
+        peer: Option<Vec<u8>>,
     ) {
         if let Some(di) = self.downloads.iter().position(|d| d.job == id) {
             let d = &mut self.downloads[di];
@@ -1549,7 +1571,7 @@ impl App {
                     d.state = DlState::Failed(format!("{} {}", r.status, r.reason));
                     self.say(&format!("Download failed: {} {}", r.status, r.reason));
                 }
-                Outcome::Image(Ok(_)) => {}
+                Outcome::Image(Ok(_)) | Outcome::Net(_) => {}
             }
             self.refresh_internal(Internal::Downloads);
             return;
@@ -1663,6 +1685,10 @@ impl App {
                 if resp.url.scheme == Scheme::Https {
                     page.cert = cert;
                 }
+                // Where it came from decides what its scripts may reach (private network rule).
+                page.space = peer
+                    .as_deref()
+                    .and_then(browserkit::netpolicy::address_space_of_ip);
                 rt::println!(
                     "[browser] {}: {} {}, {} bytes, '{}', {} redirects",
                     resp.url,
@@ -1721,7 +1747,7 @@ impl App {
                 }
                 t.show(page, 0);
             }
-            Outcome::Saved(..) | Outcome::SaveFailed(_) | Outcome::Image(_) => {}
+            Outcome::Saved(..) | Outcome::SaveFailed(_) | Outcome::Image(_) | Outcome::Net(_) => {}
         }
     }
 
@@ -1923,7 +1949,16 @@ fn log_input(ev: &Event, m: Mods) {
 }
 
 fn main(args: &rt::Args) -> i32 {
-    let log = args.get(1) == Some("--log-input");
+    // Flags first, then the address.
+    let mut log = false;
+    let mut at = 1;
+    while let Some(a) = args.get(at) {
+        match a {
+            "--log-input" => log = true,
+            _ => break,
+        }
+        at += 1;
+    }
     let home = args.env("HOME").unwrap_or("/Users/milk");
     let profile = Profile::new(home);
     profile.ensure();
@@ -1976,6 +2011,16 @@ fn main(args: &rt::Args) -> i32 {
         local: BTreeMap::new(),
         js_on: js::javascript_setting(&profile_settings),
         console_open: false,
+        console_net: false,
+        net_cfg: browserkit::netpolicy::Config::default(),
+        preflight: alloc::sync::Arc::new(rt::thread::Mutex::new(
+            browserkit::netpolicy::PreflightCache::new(
+                browserkit::netpolicy::Limits::default().preflight_cache_entries,
+                browserkit::netpolicy::Limits::default().preflight_max_age,
+            ),
+        )),
+        net_jobs: BTreeMap::new(),
+        net_inbox: alloc::collections::VecDeque::new(),
         log,
         image_pixels: 0,
         surface: Surface::new(W, H, 0xFFFFFF),
@@ -1992,7 +2037,7 @@ fn main(args: &rt::Args) -> i32 {
     };
     // Addresses left in the inbox belong to an earlier run; the argument is this one's.
     let _ = app.profile.take_inbox();
-    let start = args.get(if log { 2 } else { 1 }).unwrap_or(HOME);
+    let start = args.get(at).unwrap_or(HOME);
     app.go_typed(start);
     app.draw();
     let mut last_draw = now_ms();
@@ -2000,7 +2045,14 @@ fn main(args: &rt::Args) -> i32 {
     loop {
         let busy = app.fetch.busy() || app.tab().scroll != app.tab().target;
         // Wait no longer than the next animation frame (pictures, or the page's scripts).
-        let mut wait = if busy { 16 } else { 400 };
+        let mut wait = if busy {
+            16
+        } else if app.net_active() {
+            // Script requests going: look at them often, without spinning.
+            30
+        } else {
+            400
+        };
         if let Some(due) = frame_due {
             wait = wait.min(due.saturating_sub(now_ms()).max(1));
         }

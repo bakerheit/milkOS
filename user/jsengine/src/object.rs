@@ -5,6 +5,7 @@
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::api::{HostFn, Key};
 use crate::heap::Tracer;
@@ -52,11 +53,27 @@ pub(crate) struct Prop {
 }
 
 /// Properties in insertion order, with a hash index once there are more than a few.
+///
+/// Lookups are sped up two ways (both exact, neither needs invalidating): a 64-bit Bloom
+/// mask of the keys ever inserted answers most misses (a method looked up on an instance,
+/// then on its prototype chain) without touching the entries, and a small table of
+/// "where was this key found last time" positions, shared by every map, answers most hits
+/// in objects built the same way (the same constructor) with one comparison.
 #[derive(Default)]
 pub(crate) struct PropMap {
     pub ents: Vec<(PropKey, Prop)>,
     index: Option<Box<[u32]>>,
     dead: u32,
+    /// Bit `hash >> 26` is set for every key ever inserted (deleting leaves bits set).
+    mask: u64,
+}
+
+const HINT_SLOTS: usize = 256;
+static HINTS: [AtomicU16; HINT_SLOTS] = [const { AtomicU16::new(0) }; HINT_SLOTS];
+
+#[inline(always)]
+fn bloom_bit(h: u32) -> u64 {
+    1u64 << (h >> 26)
 }
 
 const INDEX_AT: usize = 8;
@@ -67,6 +84,7 @@ impl PropMap {
             ents: Vec::new(),
             index: None,
             dead: 0,
+            mask: 0,
         }
     }
     pub fn with_capacity(n: usize) -> PropMap {
@@ -74,6 +92,7 @@ impl PropMap {
             ents: Vec::with_capacity(n),
             index: None,
             dead: 0,
+            mask: 0,
         }
     }
     #[inline]
@@ -82,24 +101,39 @@ impl PropMap {
     }
     #[inline]
     pub fn find(&self, k: PropKey) -> Option<usize> {
-        match &self.index {
+        let h = k.hash();
+        if self.mask & bloom_bit(h) == 0 {
+            return None;
+        }
+        let slot = (h >> 8) as usize & (HINT_SLOTS - 1);
+        let hint = HINTS[slot].load(Ordering::Relaxed) as usize;
+        if let Some(e) = self.ents.get(hint)
+            && e.0 == k
+        {
+            return Some(hint);
+        }
+        let found = match &self.index {
             None => self.ents.iter().position(|e| e.0 == k),
             Some(ix) => {
                 let mask = ix.len() - 1;
-                let mut i = k.hash() as usize & mask;
+                let mut i = h as usize & mask;
                 loop {
                     let e = ix[i];
                     if e == 0 {
-                        return None;
+                        break None;
                     }
                     let p = (e - 1) as usize;
                     if self.ents[p].0 == k {
-                        return Some(p);
+                        break Some(p);
                     }
                     i = (i + 1) & mask;
                 }
             }
+        };
+        if let Some(p) = found {
+            HINTS[slot].store(p as u16, Ordering::Relaxed);
         }
+        found
     }
     #[inline]
     pub fn get(&self, k: PropKey) -> Option<&Prop> {
@@ -107,6 +141,7 @@ impl PropMap {
     }
     pub fn insert(&mut self, k: PropKey, p: Prop) {
         let pos = self.ents.len();
+        self.mask |= bloom_bit(k.hash());
         self.ents.push((k, p));
         match &mut self.index {
             Some(ix) if (self.ents.len() * 2) <= ix.len() => {
@@ -298,6 +333,11 @@ pub(crate) enum ObjKind {
     RegExpStrIter(Box<crate::builtins::regexp::MatchAllData>),
     /// %AsyncFromSyncIteratorPrototype% objects: the sync iterator and its next method.
     AsyncFromSync(Val, Val),
+    ArrayBuffer(Box<crate::typed::BufData>),
+    /// A typed array (an integer-indexed exotic object over an ArrayBuffer).
+    Typed(Box<crate::typed::TypedData>),
+    DataView(Box<crate::typed::ViewData>),
+    TextDecoder(Box<crate::builtins::encoding::DecoderData>),
 }
 
 impl Obj {
@@ -335,6 +375,9 @@ impl Obj {
             ObjKind::RegExp(r) => r.bytes(),
             ObjKind::StrIter(_) | ObjKind::RegExpStrIter(_) | ObjKind::MapIter(_) => 32,
             ObjKind::Error(e) => 64 + e.frames.len() + e.file.len(),
+            ObjKind::ArrayBuffer(b) => 32 + b.bytes.capacity(),
+            ObjKind::Typed(_) | ObjKind::DataView(_) => 48,
+            ObjKind::TextDecoder(d) => 64 + d.pending.capacity(),
             _ => 0,
         }
     }
@@ -399,6 +442,8 @@ impl Obj {
                 t.val(*a);
                 t.val(*b);
             }
+            ObjKind::Typed(d) => t.obj(d.buf),
+            ObjKind::DataView(d) => t.obj(d.buf),
             // WeakMap values are traced as ephemerons by the collector.
             _ => {}
         }
@@ -657,6 +702,13 @@ impl Realm {
                     return Some(Own::Data(Val::num(self.heap.str_len(s) as f64), 0));
                 }
             }
+            ObjKind::Typed(_) => match k {
+                PropKey::Idx(i) => {
+                    return self.typed_get(id, i as usize).map(|v| Own::Data(v, WEC));
+                }
+                PropKey::Str(_) if self.canonical_numeric(k) => return None,
+                _ => {}
+            },
             _ => {}
         }
         let obj = self.o(id);
@@ -685,6 +737,101 @@ impl Realm {
         Ok(self.get_own_plain(id, k))
     }
 
+    // ---- inline fast paths for the interpreter's property ops ----
+
+    /// `o[k]` for the common case, without the general machinery: an own or inherited
+    /// *data* property reached through ordinary objects (arrays and string wrappers count
+    /// as ordinary for names other than `length`), `undefined` for a name nothing on the
+    /// chain has, a string's `length` and methods. Returns None whenever anything else could
+    /// be involved (an accessor, a host hook, a typed array, a lazy function, a proxy-ish
+    /// kind, a very long chain): the caller then does the full [[Get]].
+    #[inline(always)]
+    pub(crate) fn get_fast(&self, o: Val, k: PropKey) -> Option<Val> {
+        let mut cur = match o {
+            Val::Obj(id) => id,
+            Val::Str(s) => {
+                if k == self.key(N::length) {
+                    return Some(Val::Int(self.heap.str_len(s) as i32));
+                }
+                if let PropKey::Idx(_) = k {
+                    return None;
+                }
+                self.intr.string_proto
+            }
+            _ => return None,
+        };
+        let is_len = k == self.key(N::length);
+        let named = matches!(k, PropKey::Str(_)) && !is_len;
+        for _ in 0..8 {
+            let obj = self.o(cur);
+            if obj.flags & LAZY_FN != 0 {
+                return None;
+            }
+            match &obj.kind {
+                ObjKind::Array(a) if is_len => return Some(Val::num(a.len as f64)),
+                ObjKind::Array(_) | ObjKind::StrBox(_) if !named => return None,
+                ObjKind::Host { .. } | ObjKind::Typed(_) => return None,
+                _ => {}
+            }
+            if let Some(p) = obj.props.get(k) {
+                return if p.f & ACCESSOR == 0 { Some(p.v) } else { None };
+            }
+            match obj.proto {
+                Some(p) => cur = p,
+                None => return Some(Val::Undef),
+            }
+        }
+        None
+    }
+
+    /// `o[k] = v` for the common cases: overwriting an own writable data property of an
+    /// ordinary object, or adding a new property to an extensible ordinary object when
+    /// nothing on its prototype chain has that name. False means "not handled": do the full
+    /// [[Set]].
+    #[inline(always)]
+    pub(crate) fn set_fast(&mut self, o: Val, k: PropKey, v: Val) -> bool {
+        let Val::Obj(id) = o else { return false };
+        let obj = self.o(id);
+        if obj.flags & LAZY_FN != 0 || !matches!(obj.kind, ObjKind::Ordinary) {
+            return false;
+        }
+        if let Some(pos) = obj.props.find(k) {
+            let p = obj.props.ents[pos].1;
+            if p.f & (W | ACCESSOR) == W {
+                self.om(id).props.ents[pos].1.v = v;
+                return true;
+            }
+            return false;
+        }
+        if obj.flags & EXTENSIBLE == 0 || matches!(k, PropKey::Idx(_)) {
+            return false;
+        }
+        // Absent here: nothing on the chain may have the name (a setter, a read-only one).
+        let mut cur = obj.proto;
+        for _ in 0..8 {
+            let Some(c) = cur else {
+                self.heap.charge(32);
+                self.om(id).props.insert(k, Prop { v, f: WEC });
+                return true;
+            };
+            let po = self.o(c);
+            if po.flags & LAZY_FN != 0
+                || matches!(
+                    po.kind,
+                    ObjKind::Host { .. }
+                        | ObjKind::Typed(_)
+                        | ObjKind::Array(_)
+                        | ObjKind::StrBox(_)
+                )
+                || po.props.find(k).is_some()
+            {
+                return false;
+            }
+            cur = po.proto;
+        }
+        false
+    }
+
     // ---- [[Get]] ----
 
     pub(crate) fn get_p(&mut self, id: ObjId, k: PropKey, receiver: Val) -> Res<Val> {
@@ -696,7 +843,10 @@ impl Realm {
             if obj.flags & LAZY_FN == 0
                 && !matches!(
                     obj.kind,
-                    ObjKind::Array(_) | ObjKind::StrBox(_) | ObjKind::Host { .. }
+                    ObjKind::Array(_)
+                        | ObjKind::StrBox(_)
+                        | ObjKind::Host { .. }
+                        | ObjKind::Typed(_)
                 )
             {
                 if let Some(p) = obj.props.get(k) {
@@ -707,10 +857,37 @@ impl Realm {
                     return self.call_getter(a, receiver);
                 }
             } else {
+                let typed = match &obj.kind {
+                    ObjKind::Typed(t) => Some((t.kind, obj.props.len() == 0, obj.proto)),
+                    _ => None,
+                };
                 if let ObjKind::Host { class, data } = obj.kind
                     && let Some(v) = self.hook_get(cur, class, data, k)?
                 {
                     return Ok(v);
+                }
+                if let Some((kind, bare, proto)) = typed {
+                    match k {
+                        // An integer-indexed exotic object never looks past itself for a
+                        // numeric key.
+                        PropKey::Idx(i) => {
+                            return Ok(self.typed_get(cur, i as usize).unwrap_or(Val::Undef));
+                        }
+                        PropKey::Str(_) => {
+                            // `ta.length` without a getter call (a plain, unmodified view).
+                            if k == self.key(N::length)
+                                && bare
+                                && matches!(receiver, Val::Obj(r) if r == cur)
+                                && proto == Some(self.intr.ta_proto(kind))
+                            {
+                                return Ok(Val::num(self.typed_len(cur) as f64));
+                            }
+                            if self.canonical_numeric(k) {
+                                return Ok(Val::Undef);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 match self.get_own_plain(cur, k) {
                     Some(Own::Data(v, _)) => return Ok(v),
@@ -849,6 +1026,31 @@ impl Realm {
                     a.len = i + 1;
                 }
                 return Ok(ok);
+            }
+        }
+        if let ObjKind::Typed(_) = self.o(id).kind {
+            let numeric = match k {
+                PropKey::Idx(_) => true,
+                PropKey::Str(_) => self.canonical_numeric(k),
+                PropKey::Sym(_) => false,
+            };
+            if numeric {
+                let PropKey::Idx(i) = k else {
+                    return Ok(false);
+                };
+                if i as usize >= self.typed_len(id)
+                    || d.configurable == Some(false)
+                    || d.enumerable == Some(false)
+                    || d.is_accessor()
+                    || d.writable == Some(false)
+                {
+                    return Ok(false);
+                }
+                if let Some(v) = d.value {
+                    let n = self.to_num(v)?;
+                    self.typed_put(id, i as usize, n);
+                }
+                return Ok(true);
             }
         }
         if let ObjKind::StrBox(s) = self.o(id).kind {
@@ -1239,6 +1441,20 @@ impl Realm {
                         }
                     }
                 }
+                ObjKind::Typed(_) => {
+                    let i = match k {
+                        PropKey::Idx(i) => Some(i as usize),
+                        PropKey::Str(_) if self.canonical_numeric(k) => Some(usize::MAX),
+                        _ => None,
+                    };
+                    if let Some(i) = i {
+                        // TypedArraySetElement: convert first (it may run script), then
+                        // store if the index is still valid; never an error.
+                        let n = self.to_num(v)?;
+                        self.typed_put(id, i, n);
+                        return Ok(true);
+                    }
+                }
                 ObjKind::Array(a) if obj.flags & SPARSE == 0 => {
                     if let PropKey::Idx(i) = k {
                         if (i as usize) < a.dense.len() && !a.dense[i as usize].is_empty() {
@@ -1266,6 +1482,17 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         let own: Option<Own> = loop {
+            if let ObjKind::Typed(_) = self.o(cur).kind {
+                let numeric_missing = match k {
+                    PropKey::Idx(i) => i as usize >= self.typed_len(cur),
+                    PropKey::Str(_) => self.canonical_numeric(k),
+                    PropKey::Sym(_) => false,
+                };
+                // A typed array on the chain swallows assignments to indices it lacks.
+                if numeric_missing {
+                    return Ok(true);
+                }
+            }
             if let ObjKind::Host { class, data } = self.o(cur).kind
                 && self.class_has_hooks(class)
             {
@@ -1379,6 +1606,13 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         loop {
+            if let ObjKind::Typed(_) = self.o(cur).kind {
+                match k {
+                    PropKey::Idx(i) => return Ok((i as usize) < self.typed_len(cur)),
+                    PropKey::Str(_) if self.canonical_numeric(k) => return Ok(false),
+                    _ => {}
+                }
+            }
             if let ObjKind::Host { class, data } = self.o(cur).kind
                 && let Some(b) = self.hook_has(cur, class, data, k)?
             {
@@ -1411,6 +1645,13 @@ impl Realm {
             && let Some(b) = self.hook_delete(id, class, data, k)?
         {
             return Ok(b);
+        }
+        if let ObjKind::Typed(_) = self.o(id).kind {
+            match k {
+                PropKey::Idx(i) => return Ok(i as usize >= self.typed_len(id)),
+                PropKey::Str(_) if self.canonical_numeric(k) => return Ok(true),
+                _ => {}
+            }
         }
         let flags = self.o(id).flags;
         match &mut self.heap.om(id).kind {
@@ -1480,6 +1721,17 @@ impl Realm {
                 if !out.contains(&k) {
                     out.push(k);
                 }
+            }
+        }
+        if strings && let ObjKind::Typed(_) = self.o(id).kind {
+            let n = self.typed_len(id);
+            if !self.heap.could_fit(n.saturating_mul(24)) {
+                return Err(self.oom());
+            }
+            self.heap.work += (n >> 3) as u64;
+            out.reserve(n);
+            for i in 0..n as u32 {
+                out.push(PropKey::Idx(i));
             }
         }
         let obj = self.o(id);

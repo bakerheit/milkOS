@@ -119,3 +119,27 @@ test('date and math in loops (perf sanity)', function () {
   for (var k in o) sum += o[k];
   assertEq(sum, 12497500);
 });
+test('ES2023 array copies, groupBy, withResolvers, well-formed strings', function () {
+  var a = [3, 1, 2];
+  assertEq(a.toSorted(), [1, 2, 3]); assertEq(a, [3, 1, 2]);
+  assertEq(a.toSorted(function (x, y) { return y - x; }), [3, 2, 1]);
+  assertEq([3, undefined, 1].toSorted(), [1, 3, undefined]);
+  assertEq(a.toReversed(), [2, 1, 3]);
+  assertEq(a.toSpliced(1, 1, 'x', 'y'), [3, 'x', 'y', 2]);
+  assertEq(a.toSpliced(1), [3]);
+  assertEq(a.toSpliced(), [3, 1, 2]);
+  assertEq(a.with(1, 9), [3, 9, 2]); assertEq(a.with(-1, 9), [3, 1, 9]);
+  assertThrows(RangeError, function () { a.with(3, 0); });
+  assertEq([, 1].toReversed().length, 2);
+  var g = Object.groupBy([1, 2, 3, 4, 5], function (x) { return x % 2 ? 'odd' : 'even'; });
+  assertEq(Object.getPrototypeOf(g), null);
+  assertEq(g.odd, [1, 3, 5]); assertEq(g.even, [2, 4]);
+  var mg = Map.groupBy([1, 2, 3, 4], function (x) { return x > 2; });
+  assertEq(mg.get(false), [1, 2]); assertEq(mg.get(true), [3, 4]);
+  var r = Promise.withResolvers();
+  r.resolve(5);
+  var got; r.promise.then(function (v) { got = v; });
+  asyncTest('withResolvers', function () { return r.promise.then(function (v) { assertEq(v, 5); }); });
+  assertEq('a\ud800'.isWellFormed(), false); assertEq('ab'.isWellFormed(), true);
+  assertEq('a\ud800b'.toWellFormed(), 'a�b'); assertEq('x😀'.toWellFormed(), 'x😀');
+});

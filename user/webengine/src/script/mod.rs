@@ -19,6 +19,15 @@ pub mod timers;
 mod bridge;
 mod events_js;
 mod forms_js;
+mod net;
+mod netbytes;
+
+/// For the tests.
+#[cfg(test)]
+pub(crate) mod net_for_tests {
+    pub use super::net::parse_url;
+}
+
 mod nodes;
 mod window;
 
@@ -99,6 +108,26 @@ impl Runtime {
         core::mem::take(&mut self.b.st.borrow_mut().requests)
     }
 
+    pub fn take_net(&mut self) -> Vec<NetOut> {
+        core::mem::take(&mut self.b.st.borrow_mut().net.out)
+    }
+
+    pub fn net_pending(&self) -> usize {
+        self.b.st.borrow().net.pending()
+    }
+
+    /// An answer for request `id`: a task of its own.
+    pub fn net_event(
+        &mut self,
+        page: &mut Page,
+        host: &mut dyn ScriptHost,
+        id: u32,
+        ev: NetEvent,
+    ) -> bool {
+        self.entry(page, host, |b, r| net::deliver(b, r, id, ev))
+            .unwrap_or(false)
+    }
+
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
         let mut st = self.b.st.borrow_mut();
         st.console_bytes = 0;
@@ -131,6 +160,7 @@ impl Runtime {
         st.listeners.clear();
         st.handlers.clear();
         let cbs = core::mem::take(&mut st.cbs);
+        let net_pins = st.net.clear();
         let reason = st.stop_reason.clone();
         let already = st.stats.stopped;
         st.stats.stopped = true;
@@ -144,6 +174,9 @@ impl Runtime {
         if let Some(r) = self.realm.as_mut() {
             r.clear_jobs();
             r.set_interrupt(None);
+            for p in net_pins {
+                r.unpin(p);
+            }
             for (_, (f, a)) in cbs {
                 r.unpin(f);
                 if let Some(a) = a {
@@ -202,6 +235,12 @@ impl Runtime {
             drop(st);
             if top {
                 realm.release_temps();
+                // Byte buffers the network API made weigh nothing in the script heap: collect
+                // now and then so the dead ones are given back.
+                let want = b.bytes.get().is_some_and(|x| x.store.borrow_mut().want_gc());
+                if want {
+                    realm.gc();
+                }
             }
             out
         };
@@ -446,8 +485,16 @@ fn checkpoint(b: &Rc<Bridge>, r: &mut Realm) {
 }
 
 /// An exception reached the top: to the console (and an uncatchable one ends the scripts).
-pub(crate) fn report(b: &Bridge, r: &mut Realm, e: &Exception, what: &str) {
+pub(crate) fn report(b: &Rc<Bridge>, r: &mut Realm, e: &Exception, what: &str) {
     let rep = r.report(e);
+    // window.onerror and `error` listeners see it first; one that handles it keeps the
+    // console quiet.
+    if !rep.uncatchable && events_js::fire_error(b, r, &rep, e.value()) {
+        if let Ok(mut st) = b.st.try_borrow_mut() {
+            st.stats.errors += 1;
+        }
+        return;
+    }
     let text = if what.is_empty() {
         format!("Uncaught {rep}")
     } else {
@@ -469,7 +516,7 @@ pub(crate) fn report(b: &Bridge, r: &mut Realm, e: &Exception, what: &str) {
 
 /// Call `f`, reporting what it throws; None if it threw.
 pub(crate) fn call_report(
-    b: &Bridge,
+    b: &Rc<Bridge>,
     r: &mut Realm,
     f: Value,
     this: Value,

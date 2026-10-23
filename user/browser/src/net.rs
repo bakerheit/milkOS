@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use browserkit::certinfo::{self, CertInfo};
 use browserkit::cookies::{Context, Jar};
 use browserkit::download;
+use browserkit::netpolicy::{Config as NetConfig, Page as NetPage, PreflightCache};
 use imgdec::Image;
 use milkweb::http::{
     self, Error, Failure, Hooks, Method, Net, Options, Request, Response, Transport,
@@ -22,6 +23,7 @@ use rt::net::Want;
 use rt::sys;
 use rt::thread::{self, JoinHandle, Mutex};
 use rt::web::RtNet;
+use webengine::{NetHead, NetRequest};
 
 pub type JobId = u64;
 
@@ -37,6 +39,9 @@ pub const MAX_IMAGE: usize = 8 << 20;
 pub const MAX_DOWNLOAD: usize = 64 << 20;
 /// Jobs running at once (more wait their turn).
 pub const MAX_RUNNING: usize = 6;
+/// Script requests (fetch, XMLHttpRequest) running at once, besides those: a long poll or two
+/// must not keep a page from loading.
+pub const MAX_RUNNING_REQUESTS: usize = 8;
 const STACK: usize = 512 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -50,6 +55,8 @@ pub enum Kind {
     Script,
     /// Save whatever comes (Alt-click on a link).
     Download,
+    /// A request a page's script made (fetch, XMLHttpRequest): run by the network policy.
+    Request,
 }
 
 /// A decoded picture: a still one, or an animation (GIF, WebP) to step through.
@@ -66,6 +73,8 @@ pub enum Outcome {
     Failed(Failure),
     /// A download came, but couldn't be written (why).
     SaveFailed(String),
+    /// A script request's end.
+    Net(Box<Result<scriptnet::Done, scriptnet::Failed>>),
 }
 
 /// What a job and the window share.
@@ -80,6 +89,10 @@ pub struct Shared {
     /// The secure connection's details (https).
     pub cert: Option<CertInfo>,
     pub done: Option<Outcome>,
+    /// A script request: the response's head, once known (the window takes it).
+    pub head: Option<NetHead>,
+    /// A page: the address it was fetched from (4 or 16 bytes), for the private-network rule.
+    pub peer: Option<Vec<u8>>,
 }
 
 pub struct Job {
@@ -93,6 +106,16 @@ pub struct Job {
 struct Spec {
     req: Request,
     ctx: Context,
+    /// A script request, and what the policy needs to run it.
+    script: Option<ScriptSpec>,
+}
+
+/// A script request to run.
+pub struct ScriptSpec {
+    pub req: NetRequest,
+    pub page: NetPage,
+    pub cfg: NetConfig,
+    pub cache: Arc<Mutex<PreflightCache>>,
 }
 
 /// milkweb's `Net` over rt's sockets, with a TLS client made once per job and the
@@ -123,6 +146,50 @@ impl Net for BrowserNet {
         let (t, info) = milkweb::secure::secure_info(client, host, tcp)?;
         self.shared.lock().cert = Some(certinfo::describe(&info));
         Ok(t)
+    }
+}
+
+impl scriptnet::ScriptNet for BrowserNet {
+    /// The same lookups as `rt::web` (so names, `localhost`, `.local` and numeric addresses
+    /// behave as for pages), but the addresses come back to the policy, which refuses the
+    /// ones a public page may not reach before anything is connected.
+    fn resolve(&mut self, host: &str) -> Result<Vec<Vec<u8>>, Error> {
+        use rt::net::{Ip, SockAddr};
+        let want = self.inner.want;
+        let local = host == "localhost" || SockAddr::parse(host, 0).is_some() || rt::mdns::is_local(host);
+        let addrs: Vec<SockAddr> = if local {
+            rt::net::resolve_all(host, want).map_err(Error::NoDns)?
+        } else {
+            let ips = rt::net::kernel_resolve(host, want).map_err(|e| match e.0 {
+                1 => Error::Offline(String::from(host)),
+                2 | 61 => Error::NotFound(String::from(host)),
+                22 => Error::Url(milkweb::url::UrlError::BadHost(String::from(host))),
+                _ => Error::NoDns(rt::net::lookup_words(host, e)),
+            })?;
+            ips.into_iter().map(|ip| SockAddr::new(ip, 0)).collect()
+        };
+        Ok(addrs
+            .into_iter()
+            .map(|a| match a.ip.unmapped() {
+                Ip::V4(b) => b.to_vec(),
+                Ip::V6(b) => b.to_vec(),
+            })
+            .collect())
+    }
+
+    fn connect_ip(&mut self, ip: &[u8], port: u16, timeout_ms: u64) -> Result<Box<dyn Transport>, Error> {
+        use rt::net::Ip;
+        let text = match ip.len() {
+            4 => alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+            16 => {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(ip);
+                alloc::format!("{}", Ip::V6(b))
+            }
+            _ => return Err(Error::Connect(String::from("a bad address"))),
+        };
+        // A numeric address connects without another lookup.
+        self.inner.connect(&text, port, timeout_ms)
     }
 }
 
@@ -161,7 +228,7 @@ impl Hooks for BrowserHooks {
         };
         match self.kind {
             Kind::Image => Some(MAX_IMAGE),
-            Kind::Style | Kind::Script => None,
+            Kind::Style | Kind::Script | Kind::Request => None,
             Kind::Page
                 if !download::is_download(
                     h("content-type").unwrap_or(""),
@@ -249,6 +316,10 @@ fn run(
     shared: Arc<Mutex<Shared>>,
     downloads: String,
 ) {
+    if let Some(sc) = spec.script {
+        run_script(sc, jar, shared);
+        return;
+    }
     let mut net = BrowserNet {
         inner: RtNet::new(Want::Any),
         client: None,
@@ -261,6 +332,14 @@ fn run(
         shared: shared.clone(),
     };
     let r = http::fetch(&mut net, &spec.req, &options(kind), &mut hooks);
+    if kind == Kind::Page
+        && let Some(a) = net.inner.peer
+    {
+        shared.lock().peer = Some(match a.ip.unmapped() {
+            rt::net::Ip::V4(b) => b.to_vec(),
+            rt::net::Ip::V6(b) => b.to_vec(),
+        });
+    }
     let name = shared.lock().download.clone();
     let out = match (r, name) {
         (Ok(resp), Some(name)) if resp.status < 400 || kind == Kind::Download => {
@@ -287,6 +366,66 @@ fn run(
         (Err(f), _) => Outcome::Failed(f),
     };
     shared.lock().done = Some(out);
+}
+
+struct ScriptEvents {
+    shared: Arc<Mutex<Shared>>,
+}
+
+impl scriptnet::Events for ScriptEvents {
+    fn head(&mut self, head: &NetHead) {
+        self.shared.lock().head = Some(head.clone());
+    }
+    fn progress(&mut self, got: usize, total: Option<usize>) {
+        let mut s = self.shared.lock();
+        s.got = got;
+        s.total = total;
+    }
+    fn cancelled(&mut self) -> bool {
+        self.shared.lock().cancel
+    }
+}
+
+struct JarAccess(Arc<Mutex<Jar>>);
+
+impl scriptnet::Cookies for JarAccess {
+    fn header(&self, url: &Url, post: bool, now_secs: i64, ctx: &Context) -> Option<String> {
+        self.0.lock().header(url, post, now_secs, ctx)
+    }
+    fn store(&self, url: &Url, headers: &[(String, String)], now_secs: i64, ctx: &Context) {
+        self.0.lock().set_all(url, headers, now_secs, ctx);
+    }
+}
+
+struct CacheAccess(Arc<Mutex<PreflightCache>>);
+
+impl scriptnet::Preflights for CacheAccess {
+    fn with(&self, f: &mut dyn FnMut(&mut PreflightCache)) {
+        f(&mut self.0.lock());
+    }
+}
+
+/// A script's request, through the network policy, on this thread.
+fn run_script(sc: ScriptSpec, jar: Arc<Mutex<Jar>>, shared: Arc<Mutex<Shared>>) {
+    let mut net = BrowserNet {
+        inner: RtNet::new(Want::Any),
+        client: None,
+        shared: shared.clone(),
+    };
+    let jar = JarAccess(jar);
+    let cache = CacheAccess(sc.cache);
+    let env = scriptnet::Env {
+        cfg: &sc.cfg,
+        page: &sc.page,
+        jar: &jar,
+        cache: &cache,
+        now_secs: &now_secs,
+    };
+    let mut ev = ScriptEvents {
+        shared: shared.clone(),
+    };
+    let r = scriptnet::run(&mut net, &env, &sc.req, &mut ev);
+    shared.lock().done = Some(Outcome::Net(Box::new(r)));
 }
 
 /// The running and waiting jobs.
@@ -318,7 +457,11 @@ impl Fetcher {
             kind,
             shared: Arc::new(Mutex::new(Shared::default())),
             handle: None,
-            spec: Some(Spec { req, ctx }),
+            spec: Some(Spec {
+                req,
+                ctx,
+                script: None,
+            }),
         });
         // Pages, stylesheets and scripts go first: they jump the queue of images.
         if matches!(kind, Kind::Page | Kind::Style | Kind::Script) {
@@ -330,15 +473,53 @@ impl Fetcher {
         id
     }
 
-    fn running(&self) -> usize {
-        self.jobs.iter().filter(|j| j.handle.is_some()).count()
+    /// Start (or queue) a script's request.
+    pub fn start_script(&mut self, sc: ScriptSpec) -> JobId {
+        let id = self.next;
+        self.next += 1;
+        let url = Url::parse(&sc.req.url).unwrap_or_else(|_| sc.page.url.clone());
+        self.jobs.push(Job {
+            id,
+            kind: Kind::Request,
+            shared: Arc::new(Mutex::new(Shared::default())),
+            handle: None,
+            spec: Some(Spec {
+                req: Request::get(&url),
+                ctx: Context::TopLevel { from: None },
+                script: Some(sc),
+            }),
+        });
+        self.waiting.push_back(id);
+        self.pump();
+        id
+    }
+
+    fn running(&self, scripts: bool) -> usize {
+        self.jobs
+            .iter()
+            .filter(|j| j.handle.is_some() && (j.kind == Kind::Request) == scripts)
+            .count()
     }
 
     fn pump(&mut self) {
-        while self.running() < MAX_RUNNING {
-            let Some(id) = self.waiting.pop_front() else {
-                return;
+        let mut at = 0;
+        while at < self.waiting.len() {
+            let id = self.waiting[at];
+            let scripts = self
+                .jobs
+                .iter()
+                .find(|j| j.id == id)
+                .is_some_and(|j| j.kind == Kind::Request);
+            let room = if scripts {
+                self.running(true) < MAX_RUNNING_REQUESTS
+            } else {
+                self.running(false) < MAX_RUNNING
             };
+            if !room {
+                at += 1;
+                continue;
+            }
+            self.waiting.remove(at);
             let downloads = self.downloads.clone();
             let jar = self.jar.clone();
             let Some(j) = self.jobs.iter_mut().find(|j| j.id == id) else {
@@ -381,21 +562,21 @@ impl Fetcher {
     }
 
     /// Finished jobs: their ids and outcomes (threads joined). Call it every tick.
-    pub fn finished(&mut self) -> Vec<(JobId, Kind, Outcome, Option<CertInfo>)> {
+    pub fn finished(&mut self) -> Vec<(JobId, Kind, Outcome, Option<CertInfo>, Option<NetHead>, Option<Vec<u8>>)> {
         let mut out = Vec::new();
         let mut k = 0;
         while k < self.jobs.len() {
             let done = {
                 let mut s = self.jobs[k].shared.lock();
-                s.done.take().map(|o| (o, s.cert.take()))
+                s.done.take().map(|o| (o, s.cert.take(), s.head.take(), s.peer.take()))
             };
             match done {
-                Some((o, cert)) => {
+                Some((o, cert, head, peer)) => {
                     let j = self.jobs.remove(k);
                     if let Some(h) = j.handle {
                         h.join();
                     }
-                    out.push((j.id, j.kind, o, cert));
+                    out.push((j.id, j.kind, o, cert, head, peer));
                 }
                 None => k += 1,
             }
@@ -406,7 +587,14 @@ impl Fetcher {
         out
     }
 
+    /// Pages, pictures and downloads are being fetched (script requests are not counted:
+    /// [`Fetcher::requests`]).
     pub fn busy(&self) -> bool {
-        !self.jobs.is_empty()
+        self.jobs.iter().any(|j| j.kind != Kind::Request)
+    }
+
+    /// Script requests are outstanding.
+    pub fn requests(&self) -> bool {
+        self.jobs.iter().any(|j| j.kind == Kind::Request)
     }
 }

@@ -2,8 +2,11 @@
 //! installs one family; this file has the shared helpers and the order they are made in.
 
 pub(crate) mod array;
+pub(crate) mod clone;
 pub(crate) mod date;
+pub(crate) mod encoding;
 pub(crate) mod error;
+pub(crate) mod es2023;
 pub(crate) mod function;
 pub(crate) mod global;
 pub(crate) mod iter;
@@ -15,6 +18,7 @@ pub(crate) mod object;
 pub(crate) mod promise;
 pub(crate) mod regexp;
 pub(crate) mod string;
+pub(crate) mod typedarray;
 
 use alloc::vec::Vec;
 
@@ -244,5 +248,9 @@ pub(crate) fn init(r: &mut Realm) {
     map::init(r);
     regexp::init(r);
     date::init(r);
+    typedarray::init(r);
+    encoding::init(r);
+    clone::init(r);
+    es2023::init(r);
     global::init(r);
 }

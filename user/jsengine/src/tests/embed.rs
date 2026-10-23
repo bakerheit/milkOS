@@ -649,3 +649,190 @@ fn weak_handles_global_host_and_locations() {
         .unwrap();
     assert_eq!(where_.borrow().as_str(), "c.js:2:3");
 }
+
+/// Bytes in and out of the engine: the embedding API a `fetch` needs.
+#[test]
+fn host_bytes_in_and_out() {
+    let mut r = Realm::new(Options::default());
+    // Host bytes into script, copied and moved.
+    let body: Vec<u8> = (0..=255u8).collect();
+    let u8a = r.new_uint8_array(&body).unwrap();
+    assert!(r.is_typed_array(u8a));
+    assert!(!r.is_array_buffer(u8a));
+    let ab = r.new_array_buffer(b"hello").unwrap();
+    assert!(r.is_array_buffer(ab));
+    assert!(r.is_array_buffer_view(u8a));
+    let moved = r.new_array_buffer_from_vec(alloc::vec![1, 2, 3]).unwrap();
+    let g = r.global();
+    r.set(g, "u8", u8a).unwrap();
+    r.set(g, "ab", ab).unwrap();
+    r.set(g, "moved", moved).unwrap();
+    let v = r
+        .eval(
+            "var s = 0; for (var i = 0; i < u8.length; i++) s += u8[i];\
+             [s, ab.byteLength, new Uint8Array(ab)[1], new Uint8Array(moved).join('-')].join()",
+            "b.js",
+        )
+        .unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("32640,5,101,1-2-3"));
+    // Borrow, copy and mutate from the host.
+    assert_eq!(r.buffer_bytes(ab), Some(&b"hello"[..]));
+    assert_eq!(r.copy_bytes(u8a).map(|b| b.len()), Some(256));
+    r.buffer_bytes_mut(ab).unwrap()[0] = b'j';
+    let v = r
+        .eval("String.fromCharCode(...new Uint8Array(ab))", "b.js")
+        .unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("jello"));
+    // A view borrows only what it views.
+    let v = r
+        .eval("new Uint16Array(new ArrayBuffer(16), 4, 3)", "b.js")
+        .unwrap();
+    assert_eq!(r.buffer_bytes(v).map(|b| b.len()), Some(6));
+    let v = r
+        .eval("new DataView(new ArrayBuffer(10), 2, 5)", "b.js")
+        .unwrap();
+    assert_eq!(r.buffer_bytes(v).map(|b| b.len()), Some(5));
+    // How the console shows them.
+    let v = r.eval("new Uint8Array([1, 2, 3])", "b.js").unwrap();
+    assert_eq!(r.inspect(v), "Uint8Array(3) [1, 2, 3]");
+    let v = r.eval("new Float32Array(150)", "b.js").unwrap();
+    assert!(r.inspect(v).ends_with(", … 50 more]"));
+    let v = r.eval("new ArrayBuffer(8)", "b.js").unwrap();
+    assert_eq!(r.inspect(v), "ArrayBuffer { byteLength: 8 }");
+    // Not bytes.
+    let o = r.new_object();
+    assert!(r.buffer_bytes(o).is_none());
+    assert!(r.buffer_bytes(Value::int(3)).is_none());
+    // Taking the bytes detaches the buffer: script sees a zero-length buffer.
+    let bytes = r.take_buffer_bytes(ab).unwrap();
+    assert_eq!(bytes, b"jello");
+    assert!(r.buffer_bytes(ab).is_none());
+    let v = r.eval("ab.byteLength + ',' + ab.detached", "b.js").unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("0,true"));
+    assert!(r.take_buffer_bytes(ab).is_none());
+    // The cap.
+    r.set_max_buffer_bytes(1000);
+    assert!(r.new_array_buffer(&[0u8; 1001]).is_err());
+    assert!(r.new_uint8_array_from_vec(alloc::vec![0u8; 1000]).is_ok());
+    let v = r
+        .eval(
+            "try { new ArrayBuffer(1001); 'no' } catch (e) { e.name }",
+            "b.js",
+        )
+        .unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("RangeError"));
+    let v = r
+        .eval(
+            "try { new Uint8Array(1001); 'no' } catch (e) { e.name }",
+            "b.js",
+        )
+        .unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("RangeError"));
+    // Buffers count against the heap budget.
+    let mut r = Realm::new(Options {
+        limits: Limits {
+            max_heap_bytes: 4 << 20,
+            ..Limits::default()
+        },
+        ..Options::default()
+    });
+    r.set_max_buffer_bytes(64 << 20);
+    let v = r
+        .eval(
+            "var keep = []; try { for (var i = 0; i < 100; i++) keep.push(new ArrayBuffer(1 << 20)); 'no' } catch (e) { e.name }",
+            "b.js",
+        );
+    // Either a RangeError from one allocation or a termination: never a panic, never 100 MB.
+    match v {
+        Ok(v) => assert_eq!(r.get_string(v).as_deref(), Some("RangeError")),
+        Err(e) => assert!(e.is_uncatchable()),
+    }
+}
+
+/// `unhandledrejection` / `rejectionhandled` and `window.onerror` style hooks.
+#[test]
+fn rejection_and_error_hooks() {
+    let mut r = Realm::new(Options::default());
+    let log: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let l2 = log.clone();
+    r.set_rejection_hook(Some(Box::new(
+        move |r: &mut Realm, ev: PromiseRejection| {
+            match ev {
+                PromiseRejection::Unhandled { promise, reason } => {
+                    let s = r.inspect(reason);
+                    l2.borrow_mut()
+                        .push(alloc::format!("unhandled {s} {}", promise.is_object()));
+                    // Keep the promise to handle it later from script.
+                    let g = r.global();
+                    let _ = r.set(g, "lastRejected", promise);
+                }
+                PromiseRejection::Handled { promise } => {
+                    let g = r.global();
+                    let same = r.get(g, "lastRejected").map(|p| p.is_same_handle(&promise));
+                    l2.borrow_mut()
+                        .push(alloc::format!("handled {:?}", same.ok()));
+                }
+            }
+        },
+    )));
+    // Rejected, never handled: reported once, after the checkpoint.
+    r.eval("Promise.reject(new Error('a')); Promise.resolve(1).then(() => { Promise.reject('late'); })", "h.js")
+        .unwrap();
+    assert!(log.borrow().is_empty());
+    r.run_jobs().unwrap();
+    assert_eq!(log.borrow().len(), 2);
+    assert!(log.borrow()[0].starts_with("unhandled Error: a"));
+    assert!(log.borrow()[1].starts_with("unhandled late"));
+    // Handled within the same checkpoint: never reported.
+    log.borrow_mut().clear();
+    r.eval(
+        "var p = Promise.reject(7); Promise.resolve().then(() => p.catch(() => {}))",
+        "h.js",
+    )
+    .unwrap();
+    r.run_jobs().unwrap();
+    assert!(log.borrow().is_empty(), "{:?}", log.borrow());
+    // Handled in a later checkpoint: reported as unhandled, then as handled.
+    r.eval("var q = Promise.reject(8)", "h.js").unwrap();
+    r.run_jobs().unwrap();
+    assert_eq!(log.borrow().len(), 1);
+    r.eval("lastRejected = q; q.catch(() => {})", "h.js")
+        .unwrap();
+    r.run_jobs().unwrap();
+    assert_eq!(log.borrow().len(), 2);
+    assert_eq!(log.borrow()[1], "handled Some(true)");
+    // While a hook is installed the old polling API sees nothing.
+    assert!(r.take_unhandled_rejections().is_empty());
+    // A listener that rejects during the hook is reported in the same run_jobs.
+    log.borrow_mut().clear();
+    r.set_rejection_hook(None);
+    r.eval("Promise.reject(1)", "h.js").unwrap();
+    r.run_jobs().unwrap();
+    assert_eq!(r.take_unhandled_rejections().len(), 1);
+
+    // The error hook: a throwing job doesn't stop the others.
+    let errs: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let e2 = errs.clone();
+    r.set_error_hook(Some(Box::new(move |r: &mut Realm, e: &Exception| {
+        let rep = r.report(e);
+        e2.borrow_mut()
+            .push(alloc::format!("{}:{}:{}", rep.message, rep.file, rep.line));
+    })));
+    let f = r.eval("(function (n) { globalThis.ran = (globalThis.ran || 0) + 1; if (n % 2) throw new TypeError('odd ' + n); })", "j.js").unwrap();
+    for n in 0..4 {
+        r.enqueue_job(f, &[Value::int(n)]);
+    }
+    r.run_jobs().unwrap();
+    let ran = r.eval("ran", "j.js").unwrap();
+    assert_eq!(ran.as_number(), Some(4.0));
+    assert_eq!(errs.borrow().as_slice(), ["odd 1:j.js:1", "odd 3:j.js:1"]);
+    // Terminations still come back to the caller.
+    let mut limits = r.limits();
+    limits.max_steps = 100_000;
+    r.set_limits(limits);
+    let spin = r.eval("(function () { while (true) {} })", "j.js").unwrap();
+    r.enqueue_job(spin, &[]);
+    let e = r.run_jobs().unwrap_err();
+    assert!(e.is_uncatchable());
+    assert_eq!(errs.borrow().len(), 2);
+}

@@ -13,6 +13,8 @@ rt = { path = "../rt" }
 gui = { path = "../gui" }
 appkit = { path = "../appkit" }
 browserkit = { path = "../browserkit" }
+scriptnet = { path = "../scriptnet" }
+webengine = { path = "../webengine" }
 imgdec = { path = "../imgdec" }
 milkweb = { path = "../../milkweb" }
 tls = { path = "../../tls" }

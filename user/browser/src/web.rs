@@ -131,6 +131,16 @@ impl Doc {
         self.d.take_console()
     }
 
+    /// The network requests the page's scripts made or aborted.
+    pub fn take_net(&mut self) -> Vec<webengine::NetOut> {
+        self.d.take_net()
+    }
+
+    /// An answer for a script request.
+    pub fn net_event(&mut self, host: &mut dyn ScriptHost, id: u32, ev: webengine::NetEvent) -> bool {
+        self.d.net_event(host, id, ev)
+    }
+
     pub fn stop_scripts(&mut self) {
         self.d.stop_scripts();
     }

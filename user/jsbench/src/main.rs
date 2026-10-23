@@ -56,6 +56,11 @@ const WORKLOADS: &[(&str, &str, &str)] = &[
         include_str!("../../jsengine/bench/numeric.js"),
         include_str!("../../jsengine/bench/expected/numeric.txt"),
     ),
+    (
+        "typed",
+        include_str!("../../jsengine/bench/typed.js"),
+        include_str!("../../jsengine/bench/expected/typed.txt"),
+    ),
 ];
 
 fn main(args: &rt::Args) -> i32 {

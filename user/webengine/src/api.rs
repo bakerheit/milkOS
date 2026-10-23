@@ -43,6 +43,14 @@
 //!   XMLHttpRequest, canvas, workers, iframes' documents.
 //!
 //! # CHANGES
+//! - Network requests from scripts (`fetch`, `XMLHttpRequest`, `navigator.sendBeacon`): the
+//!   engine never does I/O. A script's request comes out of [`Document::take_net`] as a
+//!   [`NetOut::Start`] ([`NetRequest`]); the app runs it (the same-origin policy, CORS,
+//!   cookies and limits are the app's rules, not the engine's) and gives the outcome back
+//!   with [`Document::net_event`] ([`NetEvent`]: the head, progress, the body, or a
+//!   failure), each call being one task of the page's event loop. [`NetOut::Cancel`] says a
+//!   request was aborted or its page no longer wants it. [`Document::net_pending`] counts the
+//!   requests still outstanding (the tab's "loading" light). Added beside what was there.
 //! - Scripts: [`Document::parse_scripted`], [`ScriptHost`], [`Storage`], [`ScriptLimits`],
 //!   [`PageRequest`], [`ConsoleLine`], [`KeyInput`], [`Mods`], [`ScriptStats`] and the
 //!   Document calls in the "Scripts" section. [`Document::parse`] and friends still parse
@@ -775,6 +783,136 @@ pub struct ScriptStats {
     pub stopped: bool,
 }
 
+/// Fetch's request `mode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestMode {
+    SameOrigin,
+    Cors,
+    NoCors,
+    Navigate,
+}
+
+/// Fetch's request `credentials`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialsMode {
+    Omit,
+    SameOrigin,
+    Include,
+}
+
+/// Fetch's request `redirect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedirectMode {
+    Follow,
+    Error,
+    Manual,
+}
+
+/// Which API made a request (the app logs it, and an XHR's failures are events, not a
+/// rejected promise).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetKind {
+    Fetch,
+    Xhr,
+    /// `navigator.sendBeacon` (a POST nobody waits for) or a `keepalive` fetch.
+    Beacon,
+}
+
+/// A request a script made, for the app to run. Everything is as the script set it, except
+/// that the engine has already dropped headers a script may not set; the app applies the
+/// rules again (it does not trust this) and adds what only it may (`Cookie`, `Origin`,
+/// `Referer`, `Host`, the framing headers).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetRequest {
+    /// The handle for [`NetOut::Cancel`] and [`Document::net_event`].
+    pub id: u32,
+    pub kind: NetKind,
+    /// Absolute (resolved against the page), without a fragment.
+    pub url: String,
+    /// Upper case for the standard methods, as written otherwise.
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub mode: RequestMode,
+    pub credentials: CredentialsMode,
+    pub redirect: RedirectMode,
+    /// The `referrer` member: "" for none, "about:client" for the page, else an address.
+    pub referrer: String,
+    pub referrer_policy: String,
+    /// The `cache` member ("default", "no-store", ...).
+    pub cache: String,
+    /// The request's own time limit, ms (an XHR's `timeout`); 0: none. The engine also
+    /// ends the request itself when it passes, so the app may ignore it.
+    pub timeout_ms: u32,
+    /// Always preflight a cross-origin request (an XHR with listeners on its `upload`).
+    pub force_preflight: bool,
+}
+
+/// What a script's request leaves for the app, in order (see [`Document::take_net`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetOut {
+    Start(NetRequest),
+    /// The script aborted it (or its timeout passed): stop the work, send nothing more.
+    Cancel(u32),
+}
+
+/// The kind of response the page gets (Fetch's response `type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponseKind {
+    Basic,
+    Cors,
+    /// A `no-cors` cross-origin response: status 0, no headers, no body.
+    Opaque,
+    /// A `manual` redirect that was not followed: status 0, no headers, no body.
+    OpaqueRedirect,
+}
+
+/// A response's head, with the headers the page may see (the app has already removed
+/// Set-Cookie and, for a cross-origin response, everything CORS doesn't expose).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetHead {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: Vec<(String, String)>,
+    /// The address it came from after redirects ("" for an opaque response).
+    pub url: String,
+    pub redirected: bool,
+    pub kind: ResponseKind,
+}
+
+/// Why a request failed (for an XHR: `error` or `timeout`; for fetch: a TypeError).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetFailureKind {
+    /// No connection, a broken one, a certificate, a bad response.
+    Network,
+    /// The same-origin policy or CORS said no.
+    Blocked,
+    /// Over a size limit.
+    TooBig,
+    Timeout,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetFailure {
+    pub kind: NetFailureKind,
+    /// One plain-English line for the page's console ("Blocked by CORS: ...", "Mixed content:
+    /// ...", "GET http://... failed: ...").
+    pub message: String,
+}
+
+/// An outcome the app gives back for request `id` (see [`Document::net_event`]). A request
+/// gets at most one `Head`, any number of `Progress`, then one `Done` or one `Failed` (which
+/// may come without a `Head`, and ends it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetEvent {
+    Head(NetHead),
+    /// Body bytes received so far, and the total if the server said.
+    Progress { loaded: u64, total: Option<u64> },
+    /// The whole body (empty for an opaque response and for HEAD).
+    Done(Vec<u8>),
+    Failed(NetFailure),
+}
+
 // ---- The document -------------------------------------------------------------------------
 
 /// A parsed page. Not tied to any I/O; all inputs come in through the methods.
@@ -1152,6 +1290,26 @@ impl Document {
     /// Console lines since the last call.
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
         self.js.as_mut().map(|j| j.take_console()).unwrap_or_default()
+    }
+
+    /// Network requests the scripts made (or aborted) since the last call, in order.
+    pub fn take_net(&mut self) -> Vec<NetOut> {
+        self.js.as_mut().map(|j| j.take_net()).unwrap_or_default()
+    }
+
+    /// Requests made and not finished yet (no `Done` or `Failed` has come, no cancel).
+    pub fn net_pending(&self) -> usize {
+        self.js.as_ref().map_or(0, |j| j.net_pending())
+    }
+
+    /// The outcome of request `id` (see [`NetEvent`]): one task of the page's event loop,
+    /// the microtasks after it. An id the page no longer waits for (aborted, or the
+    /// scripts were stopped) is ignored. True if a script ran.
+    pub fn net_event(&mut self, host: &mut dyn ScriptHost, id: u32, ev: NetEvent) -> bool {
+        match self.js.as_mut() {
+            Some(j) => j.net_event(&mut self.page, host, id, ev),
+            None => false,
+        }
     }
 
     /// Stop the page's scripts for good (the user said so): nothing more runs, timers and

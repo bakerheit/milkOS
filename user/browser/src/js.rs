@@ -506,6 +506,7 @@ impl App {
         for r in reqs {
             self.page_request(ti, r);
         }
+        self.net_requests(ti);
     }
 
     fn page_request(&mut self, ti: usize, r: PageRequest) {

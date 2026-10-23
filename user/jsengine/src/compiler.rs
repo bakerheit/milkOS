@@ -621,8 +621,10 @@ impl<'a> Compiler<'a> {
                 _ => crate::object::PropKey::Idx(u32::MAX),
             })
             .collect();
+        let mut ops = st.ops;
+        crate::bytecode::fuse(&mut ops);
         Rc::new(Code {
-            ops: st.ops,
+            ops,
             consts: st.consts,
             keys,
             handlers: st.handlers,

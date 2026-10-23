@@ -67,6 +67,8 @@ pub struct Protos {
     pub custom_event: Pinned,
     pub input_event: Pinned,
     pub submit_event: Pinned,
+    pub error_event: Pinned,
+    pub rejection_event: Pinned,
     pub node_list: Pinned,
     pub html_collection: Pinned,
     pub token_list: Pinned,
@@ -170,6 +172,10 @@ pub struct State {
     pub write_after: (NodeId, NodeId),
     /// Sibling positions for selector matching, by DOM generation.
     pub positions: Option<(u64, alloc::rc::Rc<(Vec<u32>, Vec<u32>)>)>,
+    /// Network requests from scripts (script/net.rs).
+    pub net: super::net::NetState,
+    /// An `error` event is being dispatched (an error in its listener does not start another).
+    pub in_error_event: bool,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -182,6 +188,8 @@ pub struct Bridge {
     pub st: RefCell<State>,
     pub classes: OnceCell<Classes>,
     pub protos: OnceCell<Protos>,
+    /// The byte buffers of the network API (script/netbytes.rs).
+    pub bytes: OnceCell<super::netbytes::Bytes>,
 }
 
 impl Bridge {
@@ -222,9 +230,12 @@ impl Bridge {
                 template_content: BTreeMap::new(),
                 write_after: (NONE, NONE),
                 positions: None,
+                net: super::net::NetState::default(),
+                in_error_event: false,
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),
+            bytes: OnceCell::new(),
         }
     }
 

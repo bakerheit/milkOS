@@ -44,7 +44,9 @@ dependencies = [
  "imgdec",
  "milkweb",
  "rt",
+ "scriptnet",
  "tls",
+ "webengine",
 ]
 
 [[package]]
@@ -315,6 +317,15 @@ dependencies = [
  "milkcrypto",
  "milkweb",
  "tls",
+]
+
+[[package]]
+name = "scriptnet"
+version = "0.0.1"
+dependencies = [
+ "browserkit",
+ "milkweb",
+ "webengine",
 ]
 
 [[package]]

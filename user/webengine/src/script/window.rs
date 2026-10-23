@@ -730,7 +730,7 @@ const OWN_PROTO_TAGS: &[Atom] = &[
 
 // ---- window's natives -----------------------------------------------------------------------
 
-fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResult<Value> {
+pub(super) fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResult<Value> {
     let f = arg(a, 0);
     let f = if r.is_callable(f) {
         f
@@ -754,7 +754,7 @@ fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResu
     Ok(Value::int(id as i32))
 }
 
-fn timer_clear(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
+pub(super) fn timer_clear(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     let id = r.to_int32(arg(a, 0))?;
     if id <= 0 {
         return Ok(Value::UNDEFINED);
@@ -1105,59 +1105,6 @@ fn match_media(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     Ok(o)
 }
 
-fn b64_encode(r: &mut Realm, a: &[Value]) -> JsResult<Value> {
-    let units = {
-        let s = arg(a, 0);
-        let s = r.to_string(s)?;
-        s.encode_utf16().collect::<Vec<u16>>()
-    };
-    if units.iter().any(|&u| u > 255) {
-        return Err(dom_error(r, "InvalidCharacterError", "btoa: characters outside Latin-1"));
-    }
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes: Vec<u8> = units.iter().map(|&u| u as u8).collect();
-    let mut o = String::new();
-    for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        o.push(T[(n >> 18) as usize & 63] as char);
-        o.push(T[(n >> 12) as usize & 63] as char);
-        o.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        o.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    Ok(r.string(&o))
-}
-
-fn b64_decode(r: &mut Realm, a: &[Value]) -> JsResult<Value> {
-    let s = arg_str(r, a, 0)?;
-    let s: String = s.chars().filter(|c| !crate::dom::is_html_space(*c)).collect();
-    let s = s.trim_end_matches('=');
-    let val = |c: char| -> Option<u32> {
-        Some(match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '+' => 62,
-            '/' => 63,
-            _ => return None,
-        })
-    };
-    let mut units: Vec<u16> = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    for c in s.chars() {
-        let Some(v) = val(c) else {
-            return Err(dom_error(r, "InvalidCharacterError", "atob: not base64"));
-        };
-        acc = acc << 6 | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            units.push(((acc >> bits) & 255) as u16);
-        }
-    }
-    Ok(r.string_utf16(&units))
-}
-
 /// Stand-ins for observers pages feature-detect (they never call back).
 fn observer_stub(r: &mut Realm, g: Value, name: &str) -> JsResult<()> {
     let proto = r.new_object();
@@ -1181,6 +1128,26 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
     if let Err(e) = install_all(b, r) {
         super::report(b, r, &e, "setting up the page's scripts");
     }
+    // Uncaught errors in jobs and unhandled rejections go through window's events first.
+    let b2 = b.clone();
+    r.set_rejection_hook(Some(Box::new(move |r: &mut Realm, ev: jsengine::PromiseRejection| match ev {
+        jsengine::PromiseRejection::Unhandled { promise, reason } => {
+            if !events_js::fire_rejection(&b2, r, promise, Some(reason)) {
+                let rep = r.report_value(reason);
+                b2.console(ConsoleLevel::Error, format!("Uncaught (in promise) {rep}"));
+                if let Ok(mut st) = b2.st.try_borrow_mut() {
+                    st.stats.errors += 1;
+                }
+            }
+        }
+        jsengine::PromiseRejection::Handled { promise } => {
+            events_js::fire_rejection(&b2, r, promise, None);
+        }
+    })));
+    let b2 = b.clone();
+    r.set_error_hook(Some(Box::new(move |r: &mut Realm, e: &jsengine::Exception| {
+        super::report(&b2, r, e, "");
+    })));
     // Wall-clock time for Date, and the slow-script check.
     let b2 = b.clone();
     r.set_clock(Box::new(move || b2.host().map_or(0.0, |h| h.time())));
@@ -1252,6 +1219,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     let (_custom, p_custom) = mk(r, event);
     let (_input, p_input) = mk(r, ui);
     let (_submit, p_submit) = mk(r, event);
+    let (_errev, p_errev) = mk(r, event);
+    let (_rejev, p_rejev) = mk(r, event);
     let (node_list, p_node_list) = mk(r, objp);
     let (coll, p_coll) = mk(r, objp);
     let (tok, p_tok) = mk(r, objp);
@@ -1279,6 +1248,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         custom_event: p_custom,
         input_event: p_input,
         submit_event: p_submit,
+        error_event: p_errev,
+        rejection_event: p_rejev,
         node_list: p_node_list,
         html_collection: p_coll,
         token_list: p_tok,
@@ -1374,6 +1345,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     install_location(b, r, g)?;
     install_history(b, r, g)?;
     install_navigator(b, r, g)?;
+    super::net::install(b, r)?;
 
     // Sizes and scrolling.
     fn vp_css(b: &Bridge, which: u8) -> f64 {
@@ -1566,8 +1538,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         Ok(r.new_host_object(b.classes().computed, n as u64, p))
     })?;
     method(b, r, g, "matchMedia", 1, |b, r, _t, a| match_media(b, r, a))?;
-    r.define_method(g, "btoa", 1, |r, _t, a| b64_encode(r, a))?;
-    r.define_method(g, "atob", 1, |r, _t, a| b64_decode(r, a))?;
     method(b, r, g, "getSelection", 0, |_b, r, _t, _a| {
         let o = r.new_object();
         r.define(o, "rangeCount", Value::int(0), Attrs::ENUMERABLE)?;
@@ -1577,12 +1547,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         }
         r.define_method(o, "toString", 0, |r, _t, _a| Ok(r.string("")))?;
         Ok(o)
-    })?;
-    r.define_method(g, "structuredClone", 1, |r, _t, a| {
-        match r.json_stringify(arg(a, 0))? {
-            Some(s) => r.json_parse(&s),
-            None => Ok(Value::UNDEFINED),
-        }
     })?;
     // new Image(w, h), new Option(text, value, defaultSelected, selected).
     let b2 = b.clone();

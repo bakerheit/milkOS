@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>fetch, same origin</title>
+<script src="/common.js"></script></head>
+<body><h1>fetch, same origin</h1><p id="status">running</p>
+<script>
+const G = 'basic';
+const st = document.getElementById('status');
+async function run(name, f) {
+  try {
+    report(G, name, await f());
+  } catch (e) {
+    report(G, name, 'THREW ' + errName(e));
+  }
+}
+(async () => {
+  await run('text', async () => (await fetch('/api/hello')).text());
+  await run('json', async () => { const j = await (await fetch('/api/data.json')).json(); return j.items.length + ' ' + j.name + ' ' + j.nested.ok; });
+  await run('status', async () => { const r = await fetch('/api/status/404'); return r.status + ' ' + r.ok + ' ' + r.statusText + ' ' + (await r.text()); });
+  await run('response', async () => { const r = await fetch('/api/hello'); return [r.type, r.url.replace(location.origin, ''), r.redirected, r.headers.get('content-type'), r.headers.get('content-length')].join(' '); });
+  await run('post-json', async () => {
+    const r = await fetch('/api/echo', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Token': 't1' }, body: JSON.stringify({ a: 1 }) });
+    const j = await r.json();
+    return [j.method, j.content_type, j.x_token, j.body, j.origin === location.origin].join(' ');
+  });
+  await run('put', async () => { const j = await (await fetch('/api/echo', { method: 'PUT', body: 'put body' })).json(); return j.method + ' ' + j.content_type + ' ' + j.body; });
+  await run('delete', async () => { const j = await (await fetch('/api/echo', { method: 'DELETE' })).json(); return j.method + ' ' + j.length; });
+  await run('urlencoded', async () => { const j = await (await fetch('/api/echo', { method: 'POST', body: new URLSearchParams({ a: '1 2', b: 'x&y' }) })).json(); return j.content_type + ' ' + j.body; });
+  await run('formdata', async () => {
+    const fd = new FormData(); fd.append('field', 'value'); fd.append('file', new Blob(['file text'], { type: 'text/plain' }), 'note.txt');
+    const j = await (await fetch('/api/echo', { method: 'POST', body: fd })).json();
+    return j.content_type.split(';')[0] + ' ' + j.body.includes('name="field"') + ' ' + j.body.includes('filename="note.txt"') + ' ' + j.body.includes('file text');
+  });
+  await run('bytes', async () => { const ab = await (await fetch('/api/bytes')).arrayBuffer(); const u = new Uint8Array(ab); let sum = 0; for (const b of u) sum += b; return ab.byteLength + ' ' + sum + ' ' + u[255]; });
+  await run('binary-body', async () => { const j = await (await fetch('/api/echo', { method: 'POST', body: new Uint8Array([104, 105, 33]) })).json(); return j.body + ' ' + j.length; });
+  await run('redirect', async () => { const r = await fetch('/api/redirect?to=/api/hello&code=302'); return r.redirected + ' ' + r.url.replace(location.origin, '') + ' ' + (await r.text()); });
+  await run('redirect-manual', async () => { const r = await fetch('/api/redirect?to=/api/hello', { redirect: 'manual' }); return r.type + ' ' + r.status; });
+  await run('redirect-error', async () => { try { await fetch('/api/redirect?to=/api/hello', { redirect: 'error' }); return 'no error'; } catch (e) { return errName(e); } });
+  await run('network-error', async () => { try { await fetch('http://nosuch.test:' + location.port + '/'); return 'resolved'; } catch (e) { return errName(e); } });
+  await run('refused-scheme', async () => { try { await fetch('ftp://www.milk.test/x'); return 'resolved'; } catch (e) { return errName(e); } });
+  await run('abort', async () => {
+    const c = new AbortController(); const t0 = performance.now(); setTimeout(() => c.abort(), 100);
+    try { await fetch('/api/slow?ms=3000', { signal: c.signal }); return 'finished'; } catch (e) { return e.name + ' fast=' + (performance.now() - t0 < 1500); }
+  });
+  await run('timeout-signal', async () => { try { await fetch('/api/slow?ms=3000', { signal: AbortSignal.timeout(200) }); return 'finished'; } catch (e) { return e.name; } });
+  await run('too-big', async () => { try { const r = await fetch('/api/big?mb=12'); await r.arrayBuffer(); return 'resolved'; } catch (e) { return errName(e); } });
+  await run('set-cookie-hidden', async () => { const r = await fetch('/api/cookie'); return String(r.headers.get('set-cookie')) + ' ' + [...r.headers.keys()].includes('set-cookie'); });
+  await run('cookie-sent', async () => (await (await fetch('/api/whoami')).text()));
+  await run('cookie-omit', async () => (await (await fetch('/api/whoami', { credentials: 'omit' })).text()));
+  await run('document-cookie', async () => document.cookie);
+  await run('parallel', async () => {
+    const rs = await Promise.all(Array.from({ length: 10 }, (_, i) => fetch('/api/slow?ms=250').then((r) => r.text())));
+    return rs.length + ' ' + rs.every((x) => x === 'slow done');
+  });
+  await run('beacon', async () => { const ok = navigator.sendBeacon('/api/beacon', 'ping=1'); await sleep(300); return ok; });
+  await run('request-object', async () => {
+    const req = new Request('/api/echo', { method: 'POST', body: 'via request' });
+    const j = await (await fetch(req)).json(); return j.body + ' ' + req.bodyUsed;
+  });
+  window.addEventListener('unhandledrejection', (e) => { report(G, 'unhandledrejection', e.reason && e.reason.name); e.preventDefault(); });
+  fetch('http://nosuch.test:' + location.port + '/unhandled');
+  await sleep(1500);
+  st.textContent = 'done';
+  report(G, 'end', 'done');
+})();
+</script></body></html>

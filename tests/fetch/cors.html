@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>fetch, cross origin</title>
+<script src="/common.js"></script></head>
+<body><h1>fetch, cross origin</h1><p id="status">running</p>
+<script>
+const G = 'cors';
+const API = 'http://api.milk.test:' + location.port;   // another origin, the same site
+const OTHER = 'http://other.test:' + location.port;    // another site
+async function run(name, f) {
+  try { report(G, name, await f()); } catch (e) { report(G, name, 'THREW ' + errName(e)); }
+}
+const blocked = async (url, init) => { try { await fetch(url, init); return 'resolved'; } catch (e) { return 'rejected ' + e.name + ': ' + e.message; } };
+(async () => {
+  await run('origin', async () => location.origin);
+  await run('open', async () => { const r = await fetch(API + '/cors/open'); return [r.type, r.status, await r.text(), r.headers.get('x-visible'), String(r.headers.get('x-hidden')), r.headers.get('content-type')].join(' '); });
+  await run('origin-header', async () => { const j = await (await fetch(API + '/cors/origin')).json(); return j.origin; });
+  await run('closed', () => blocked(API + '/cors/closed'));
+  await run('closed-other-site', () => blocked(OTHER + '/cors/closed'));
+  await run('preflight-put', async () => {
+    const r = await fetch(API + '/cors/preflight', { method: 'PUT', headers: { 'X-Token': 'abc', 'Content-Type': 'application/json' }, body: '{"x":1}' });
+    const j = await r.json(); return [r.type, j.method, j.x_token, j.content_type, j.body, j.origin].join(' ');
+  });
+  await run('preflight-cached', async () => { const j = await (await fetch(API + '/cors/preflight', { method: 'PUT', headers: { 'X-Token': 'again', 'Content-Type': 'application/json' }, body: '{}' })).json(); return j.x_token; });
+  await run('preflight-delete', async () => (await (await fetch(API + '/cors/preflight', { method: 'DELETE' })).json()).method);
+  await run('preflight-denied', () => blocked(API + '/cors/nopreflight', { method: 'PUT', body: 'x' }));
+  await run('header-not-allowed', () => blocked(API + '/cors/preflight', { method: 'PUT', headers: { 'X-Other': '1' } }));
+  await run('no-cookie-without-credentials', async () => { const j = await (await fetch(API + '/cors/credentialed?set=1')).json(); return String(j.cookie); });
+  await run('credentials-include-sets-cookie', async () => { const j = await (await fetch(API + '/cors/credentialed?set=1', { credentials: 'include' })).json(); return String(j.cookie); });
+  await run('credentials-include-sends-cookie', async () => { const j = await (await fetch(API + '/cors/credentialed', { credentials: 'include' })).json(); return String(j.cookie); });
+  await run('credentials-default-omits', async () => { const j = await (await fetch(API + '/cors/credentialed')).json(); return String(j.cookie); });
+  await run('credentials-with-star', () => blocked(API + '/cors/star-credentialed', { credentials: 'include' }));
+  await run('credentials-open-star', () => blocked(API + '/cors/open', { credentials: 'include' }));
+  await run('third-party-cookie-not-set', async () => { await fetch(OTHER + '/cors/credentialed?set=1', { credentials: 'include' }).catch(() => {}); return 'tried'; });
+  await run('no-cors', async () => { const r = await fetch(OTHER + '/cors/closed', { mode: 'no-cors' }); return [r.type, r.status, JSON.stringify(await r.text()), [...r.headers].length].join(' '); });
+  await run('same-origin-mode', () => blocked(API + '/cors/open', { mode: 'same-origin' }));
+  await run('redirect-to-cors', async () => { const r = await fetch('/cors/redirect?to=' + encodeURIComponent(API + '/cors/open')); return [r.type, r.redirected, await r.text()].join(' '); });
+  await run('redirect-to-closed', () => blocked('/cors/redirect?to=' + encodeURIComponent(OTHER + '/cors/closed')));
+  await run('forbidden-headers', async () => { const j = await (await fetch('/api/headers', { headers: { Cookie: 'evil=1', Host: 'evil.test', 'Sec-Fetch-Mode': 'x', 'X-Fine': '1' } })).json(); return [String(j.cookie).includes('evil'), j.host.split(':')[0], j['x-fine'], String(j.origin), String(j.referer).replace(location.origin, ''), String(j['sec-fetch-mode'])].join(' '); });
+  document.getElementById('status').textContent = 'done';
+  report(G, 'end', 'done');
+})();
+</script></body></html>

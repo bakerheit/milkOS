@@ -283,6 +283,26 @@ fn call_handler(b: &Rc<Bridge>, r: &mut Realm, target: u32, ty: &str, this: Valu
     if !r.is_callable(f) {
         return;
     }
+    // window.onerror = function (message, source, lineno, colno, error): returning true says
+    // the error is handled.
+    if target == WINDOW && ty == "error" {
+        let msg = r.get(e, "message").unwrap_or(Value::UNDEFINED);
+        let file = r.get(e, "filename").unwrap_or(Value::UNDEFINED);
+        let line = r.get(e, "lineno").unwrap_or(Value::UNDEFINED);
+        let col = r.get(e, "colno").unwrap_or(Value::UNDEFINED);
+        let err = r.get(e, "error").unwrap_or(Value::UNDEFINED);
+        let is_event = r.host_data(e, b.classes().event).is_some();
+        if is_event
+            && let Some(ret) = call_report(b, r, f, this, &[msg, file, line, col, err])
+            && ret.as_bool() == Some(true)
+        {
+            let fl = flags(b, r, e);
+            if fl & CANCELABLE != 0 {
+                set_flags(r, e, fl | CANCELED);
+            }
+        }
+        return;
+    }
     if let Some(ret) = call_report(b, r, f, this, &[e])
         && ret.as_bool() == Some(false)
         && ty != "error"
@@ -1005,6 +1025,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         False,
         Zero,
         Empty,
+        Undefined,
     }
     const MOUSE: &[(&str, InitDefault)] = &[
         ("clientX", InitDefault::Zero),
@@ -1038,7 +1059,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         ("shiftKey", InitDefault::False),
         ("metaKey", InitDefault::False),
     ];
-    let ctors: [Ctor; 9] = [
+    let ctors: [Ctor; 11] = [
         Ctor { name: "Event", proto: |p| &p.event, parent: None, init: &[] },
         Ctor { name: "UIEvent", proto: |p| &p.ui_event, parent: Some("Event"), init: &[("detail", InitDefault::Zero), ("view", InitDefault::Null)] },
         Ctor { name: "MouseEvent", proto: |p| &p.mouse_event, parent: Some("UIEvent"), init: MOUSE },
@@ -1048,6 +1069,8 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         Ctor { name: "InputEvent", proto: |p| &p.input_event, parent: Some("UIEvent"), init: &[("data", InitDefault::Null), ("inputType", InitDefault::Empty), ("isComposing", InitDefault::False)] },
         Ctor { name: "CustomEvent", proto: |p| &p.custom_event, parent: Some("Event"), init: &[("detail", InitDefault::Null)] },
         Ctor { name: "SubmitEvent", proto: |p| &p.submit_event, parent: Some("Event"), init: &[("submitter", InitDefault::Null)] },
+        Ctor { name: "ErrorEvent", proto: |p| &p.error_event, parent: Some("Event"), init: &[("message", InitDefault::Empty), ("filename", InitDefault::Empty), ("lineno", InitDefault::Zero), ("colno", InitDefault::Zero), ("error", InitDefault::Null)] },
+        Ctor { name: "PromiseRejectionEvent", proto: |p| &p.rejection_event, parent: Some("Event"), init: &[("promise", InitDefault::Undefined), ("reason", InitDefault::Undefined)] },
     ];
     for c in ctors {
         let pv = r.pinned((c.proto)(p));
@@ -1087,7 +1110,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
                                 InitDefault::Null => Value::NULL,
                                 InitDefault::False => Value::FALSE,
                                 InitDefault::Zero => Value::int(0),
-                                InitDefault::Empty => Value::UNDEFINED,
+                                InitDefault::Empty | InitDefault::Undefined => Value::UNDEFINED,
                             },
                         )
                     })
@@ -1151,4 +1174,53 @@ pub fn create_event(b: &Rc<Bridge>, r: &mut Realm, name: &str) -> JsResult<Value
         }
     };
     Ok(new_event(b, r, proto, "", 0))
+}
+
+// ---- window.onerror and unhandledrejection ---------------------------------------------------
+
+/// An uncaught error reached the top: the `error` event at window (`window.onerror`, listeners).
+/// True if a listener handled it (the console stays quiet). An error inside a listener of this
+/// event is reported without another event.
+pub fn fire_error(b: &Rc<Bridge>, r: &mut Realm, rep: &jsengine::ErrorReport, value: Option<Value>) -> bool {
+    if b.st.borrow().stopped {
+        return false;
+    }
+    {
+        let mut st = b.st.borrow_mut();
+        if st.in_error_event {
+            return false;
+        }
+        st.in_error_event = true;
+    }
+    let msg = if rep.message.is_empty() {
+        rep.name.clone()
+    } else {
+        format!("{}: {}", rep.name, rep.message)
+    };
+    let msg = format!("Uncaught {msg}");
+    let e = new_event(b, r, &b.protos().error_event, "error", CANCELABLE);
+    let s = r.string(&msg);
+    let _ = r.define(e, "message", s, Attrs::ENUMERABLE);
+    let s = r.string(&rep.file);
+    let _ = r.define(e, "filename", s, Attrs::ENUMERABLE);
+    let _ = r.define(e, "lineno", Value::int(rep.line as i32), Attrs::ENUMERABLE);
+    let _ = r.define(e, "colno", Value::int(rep.column as i32), Attrs::ENUMERABLE);
+    let _ = r.define(e, "error", value.unwrap_or(Value::NULL), Attrs::ENUMERABLE);
+    let ok = dispatch(b, r, WINDOW, e);
+    b.st.borrow_mut().in_error_event = false;
+    !ok
+}
+
+/// A promise was rejected with nobody to hear it (or got a handler late): the
+/// `unhandledrejection` / `rejectionhandled` event at window. True if `unhandledrejection` was
+/// cancelled (preventDefault: the console stays quiet).
+pub fn fire_rejection(b: &Rc<Bridge>, r: &mut Realm, promise: Value, reason: Option<Value>) -> bool {
+    if b.st.borrow().stopped {
+        return false;
+    }
+    let (ty, flags) = if reason.is_some() { ("unhandledrejection", CANCELABLE) } else { ("rejectionhandled", 0) };
+    let e = new_event(b, r, &b.protos().rejection_event, ty, flags);
+    let _ = r.define(e, "promise", promise, Attrs::ENUMERABLE);
+    let _ = r.define(e, "reason", reason.unwrap_or(Value::UNDEFINED), Attrs::ENUMERABLE);
+    !dispatch(b, r, WINDOW, e)
 }

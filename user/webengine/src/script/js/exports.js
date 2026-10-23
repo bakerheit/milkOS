@@ -1,0 +1,22 @@
+
+return {
+  fetch,
+  Headers,
+  Request,
+  Response,
+  Blob,
+  File,
+  FileReader,
+  FormData,
+  URL,
+  URLSearchParams,
+  AbortController,
+  AbortSignal,
+  XMLHttpRequest,
+  XMLHttpRequestEventTarget,
+  XMLHttpRequestUpload,
+  ProgressEvent,
+  DOMException,
+  ReadableStream,
+  sendBeacon,
+};

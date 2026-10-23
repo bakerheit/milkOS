@@ -137,16 +137,17 @@ fn need(b: &Bridge, r: &mut Realm, v: Value) -> JsResult<Rc<Vec<u8>>> {
     }
 }
 
-/// Copy a page's `ArrayBuffer` / typed array / `DataView` in (None: not one).
+/// Copy a page's `ArrayBuffer` / typed array / `DataView` in (None: not one, or detached).
 pub fn from_buffer_source(r: &mut Realm, v: Value) -> JsResult<Option<Vec<u8>>> {
-    let _ = (r, v);
-    Ok(None)
+    if !v.is_object() || !(r.is_array_buffer(v) || r.is_array_buffer_view(v)) {
+        return Ok(None);
+    }
+    Ok(r.copy_bytes(v))
 }
 
 /// Copy `data` out as a new `ArrayBuffer`.
 pub fn to_array_buffer(r: &mut Realm, data: &[u8]) -> JsResult<Value> {
-    let _ = data;
-    Err(r.throw_error(ErrorKind::TypeError, "ArrayBuffer is not supported yet"))
+    r.new_array_buffer(data)
 }
 
 /// The natives on the `native` object.

@@ -8,7 +8,9 @@ use browserkit::address::Internal;
 use browserkit::certinfo::CertInfo;
 use browserkit::engine::Rect;
 use browserkit::history::History;
+use browserkit::netpolicy::{Limiter, Limits};
 use milkweb::url::Url;
+use webengine::NetRequest;
 
 use crate::net::JobId;
 use crate::web::Doc;
@@ -119,10 +121,37 @@ pub struct Tab {
     pub console: alloc::collections::VecDeque<(browserkit::engine::ConsoleLevel, String)>,
     /// When background timers last ran (ms): background tabs run theirs once a second.
     pub last_run: u64,
+    /// This tab for good (indexes move when tabs close), and which page it shows now (it
+    /// changes with every `show`): what a script request's answer is checked against.
+    pub uid: u64,
+    pub epoch: u64,
+    /// The page's script requests: how many may run, those waiting for their turn, those
+    /// running (by the page's request id, with the fetch job), and the log.
+    pub limiter: Limiter,
+    pub net_wait: alloc::collections::BTreeMap<u32, NetRequest>,
+    pub net_run: alloc::collections::BTreeMap<u32, crate::net::JobId>,
+    pub net_log: alloc::collections::VecDeque<NetLogEntry>,
 }
 
 /// Console lines a tab keeps.
 pub const CONSOLE_LINES: usize = 400;
+/// Requests a tab's log keeps.
+pub const NET_LOG_LINES: usize = 200;
+
+/// One request a page's script made, as the Network list shows it.
+#[derive(Clone, Debug)]
+pub struct NetLogEntry {
+    pub method: String,
+    pub url: String,
+    /// 0: none (it failed, or is still going).
+    pub status: u16,
+    /// How it ended: "ok", "failed", "blocked", "timeout", "cancelled", or "" while running.
+    pub state: &'static str,
+    pub ms: u64,
+    pub bytes: usize,
+}
+
+static NEXT_UID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 impl Tab {
     pub fn new(page: Page) -> Tab {
@@ -141,6 +170,12 @@ impl Tab {
             session: alloc::collections::BTreeMap::new(),
             console: alloc::collections::VecDeque::new(),
             last_run: 0,
+            uid: NEXT_UID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            epoch: 0,
+            limiter: Limiter::new(&Limits::default()),
+            net_wait: alloc::collections::BTreeMap::new(),
+            net_run: alloc::collections::BTreeMap::new(),
+            net_log: alloc::collections::VecDeque::new(),
         }
     }
 
@@ -169,6 +204,17 @@ impl Tab {
         self.found_at = 0;
         self.console.clear();
         self.last_run = 0;
+        // The old page's requests are over (the app cancels their jobs).
+        self.epoch += 1;
+        self.limiter.clear();
+        self.net_wait.clear();
+        self.net_run.clear();
+        self.net_log.clear();
+    }
+
+    /// The page's script requests are outstanding.
+    pub fn net_busy(&self) -> bool {
+        self.limiter.busy()
     }
 
     pub fn zoom_step(&mut self, d: i32) {

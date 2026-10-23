@@ -460,7 +460,8 @@ impl App {
         }
     }
 
-    /// The console panel over the bottom of the page: the tab's last console lines.
+    /// The console panel over the bottom of the page: the tab's last console lines, or (the
+    /// Network label) the requests its scripts made.
     fn draw_console(&mut self, w: i32) {
         let th = self.th;
         let (top, _, vh) = self.view();
@@ -468,21 +469,54 @@ impl App {
         let py = top + vh - ph;
         self.win.fill(0, py, w, ph, th.cream);
         hline(&mut self.win, 0, py, w, th.sand);
+        // Two labels: Console and Network (the one shown is bold).
+        let net = self.console_net;
+        let (lw1, lw2) = (wid("Console") + 14, wid("Network") + 14);
+        let r1 = ARect::new(4, py + 2, lw1, 22);
+        let r2 = ARect::new(4 + lw1, py + 2, lw2, 22);
+        if net {
+            self.win.text(11, py + 5, "Console", th.cocoa);
+            self.win.bold(11 + lw1, py + 5, "Network", th.espresso);
+        } else {
+            self.win.bold(11, py + 5, "Console", th.espresso);
+            self.win.text(11 + lw1, py + 5, "Network", th.cocoa);
+        }
+        self.hits.add(r1, ID_PANEL_CONSOLE);
+        self.hits.add(r2, ID_PANEL_NET);
         let t = &self.tabs[self.cur];
         let stats = t.page.doc.script_stats();
-        let head = if !t.page.doc.scripting() && !stats.stopped {
-            String::from("Console (this page runs no scripts)")
+        let head = if net {
+            let busy = t.limiter.running() + t.limiter.waiting();
+            format!(
+                "{} request(s), {} going",
+                t.net_log.len() + busy,
+                busy
+            )
+        } else if !t.page.doc.scripting() && !stats.stopped {
+            String::from("this page runs no scripts")
         } else {
             format!(
-                "Console: {} script(s), {} error(s), {} KB of script memory{}",
+                "{} script(s), {} error(s), {} KB of script memory{}",
                 stats.scripts,
                 stats.errors,
                 stats.heap_bytes / 1024,
                 if stats.stopped { ", stopped" } else { "" }
             )
         };
-        self.win.bold(10, py + 5, &ellipsize(&head, w - 20), th.espresso);
+        let hx = 11 + lw1 + lw2;
+        self.win.text(hx, py + 5, &ellipsize(&head, w - hx - 10), th.cocoa);
         let rows = ((ph - 30) / 18).max(1) as usize;
+        if net {
+            let lines = crate::request::net_lines(&t.net_log);
+            let n = lines.len();
+            for (i, text) in lines.iter().skip(n.saturating_sub(rows)).enumerate() {
+                let y = py + 26 + i as i32 * 18;
+                let bad = text.ends_with(" blocked") || text.contains(" blocked ") || text.contains(" failed");
+                let c = if bad { th.danger } else { th.cocoa };
+                self.win.text(10, y, &ellipsize(text, w - 20), c);
+            }
+            return;
+        }
         let n = t.console.len();
         let lines: Vec<(browserkit::engine::ConsoleLevel, String)> =
             t.console.iter().skip(n.saturating_sub(rows)).cloned().collect();
@@ -520,6 +554,10 @@ impl App {
             let mut tx = x + 10;
             if t.load.is_some() {
                 self.win.disc(tx + 3, TAB_H / 2 + 2, 3, gui::HONEY);
+                tx += 12;
+            } else if t.net_busy() {
+                // The page's scripts have requests going: a smaller dot.
+                self.win.disc(tx + 3, TAB_H / 2 + 2, 2, gui::HONEY);
                 tx += 12;
             } else if t.page.is_secure() {
                 widgets::padlock(&mut self.win, tx, TAB_H / 2 - 4, th.good);

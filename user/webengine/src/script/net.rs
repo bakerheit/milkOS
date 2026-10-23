@@ -410,6 +410,10 @@ fn start(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     } else {
         r.to_number(timeout)?.clamp(0.0, u32::MAX as f64) as u32
     };
+    let force_preflight = {
+        let v = r.get(desc, "forcePreflight")?;
+        r.to_boolean(v)
+    };
     {
         let st = b.st(r)?;
         if st.net.pending.len() >= MAX_PENDING {
@@ -436,6 +440,7 @@ fn start(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
         referrer_policy,
         cache,
         timeout_ms,
+        force_preflight,
     }));
     Ok(Value::int(id as i32))
 }

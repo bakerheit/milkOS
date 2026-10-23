@@ -844,6 +844,8 @@ pub struct NetRequest {
     /// The request's own time limit, ms (an XHR's `timeout`); 0: none. The engine also
     /// ends the request itself when it passes, so the app may ignore it.
     pub timeout_ms: u32,
+    /// Always preflight a cross-origin request (an XHR with listeners on its `upload`).
+    pub force_preflight: bool,
 }
 
 /// What a script's request leaves for the app, in order (see [`Document::take_net`]).

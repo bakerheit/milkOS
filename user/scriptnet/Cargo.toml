@@ -1,0 +1,19 @@
+[package]
+name = "scriptnet"
+version.workspace = true
+edition.workspace = true
+
+# The Browser's script requests (fetch, XMLHttpRequest, sendBeacon), run: one request from the
+# page (webengine's NetRequest) through the network policy (browserkit::netpolicy: the
+# same-origin policy, CORS and preflight, cookies, redirects, limits) and milkweb's HTTP client,
+# hop by hop. No I/O of its own (the caller gives a milkweb Net, a cookie jar and a clock), so
+# it builds and tests on the Mac:
+#   cd user && cargo test -p scriptnet --target aarch64-apple-darwin
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+milkweb = { path = "../../milkweb" }
+browserkit = { path = "../browserkit" }
+webengine = { path = "../webengine" }

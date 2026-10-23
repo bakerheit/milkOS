@@ -211,7 +211,13 @@ class XMLHttpRequest extends XMLHttpRequestEventTarget {
     emit(this, 'loadstart', 0, 0);
     if (s.hasBody && s.state === 1 && s.token === token) emit(s.upload, 'loadstart', 0, s.bodySize);
     if (s.token !== token) return;
+    // Listeners on `upload` make a cross-origin request preflighted (the standard's upload
+    // listener flag).
+    let uploadListeners = false;
+    const ul = s.upload[L];
+    if (ul) for (const list of ul.values()) if (list.length > 0) uploadListeners = true;
     const id = native.start({
+      forcePreflight: uploadListeners,
       kind: 'xhr', url: s.url, method: s.method, headers, body: bytes, mode: 'cors',
       credentials: s.withCredentials ? 'include' : 'same-origin', redirect: 'follow', referrer: 'about:client',
       referrerPolicy: '', cache: 'default', timeout: s.timeout,

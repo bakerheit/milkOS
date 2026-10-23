@@ -55,7 +55,8 @@
 - Exceptions: `exceptions::set_syscall_handler`, `set_user_fault_handler`, `restore_frame(*const TrapFrame) -> !`.
 - Display: `gfx::{DrawTarget, Surface, Rect, DirtyList}`, rounded rects, alpha, `font::draw_str_alpha` (Unifont cells).
   Desktop UI text goes through `sysfont::Font` (measure with `width`/`truncate`, draw with the painter's `text_*`);
-  never assume 8 px a character outside monospace grids.
+  never assume 8 px a character outside monospace grids. User-space apps get the same fonts through
+  `gui::text` / `appkit::text` (`Window::text` is the system font, `Window::mono` Unifont; docs/processes.md).
   `kprintln!` goes to UART + the screen console.
 
 ## UI

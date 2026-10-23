@@ -7,6 +7,10 @@ name = "filekit"
 version = "0.0.1"
 
 [[package]]
+name = "fontkit"
+version = "0.0.1"
+
+[[package]]
 name = "milkcrypto"
 version = "0.0.1"
 
@@ -22,6 +26,7 @@ name = "milkos-kernel"
 version = "0.0.0"
 dependencies = [
  "filekit",
+ "fontkit",
  "milkcrypto",
  "milkfs",
  "milkweb",

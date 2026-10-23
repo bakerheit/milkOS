@@ -89,6 +89,7 @@ pub fn init() {
     }
     kprintln!("fs: tmpfs mounted at /");
     initramfs::load();
+    crate::sysfont::install();
     layout::record_builtin_apps();
     devfs::init().expect("fs: mount /dev");
     procfs::init(root).expect("fs: mount /proc");

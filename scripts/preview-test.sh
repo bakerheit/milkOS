@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Preview end to end on a private image: boot with a desktop, open a PNG from a folder of
-# pictures (PNG, PPM, BMP, a damaged PNG and a PDF), step through them, zoom, and look at the PDF
-# and error cards (screenshots in the work directory; the checks compare screens and read
-# /dev/wm). About a minute.
+# pictures (PNG, PPM, BMP, a damaged PNG, a PDF, a progressive JPEG, an animated GIF and a WebP
+# with alpha), step through them, watch the GIF play, zoom, and look at the PDF and error cards
+# (screenshots in the work directory; the checks compare screens and read /dev/wm). About a
+# minute. The work directory is removed when everything passes (unless it was given).
 #   scripts/preview-test.sh [workdir]
 # Only the qemu started here is killed (by PID). Coordinates are for the 1024x768 desktop and the
 # window's position read from /dev/wm.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-T="${1:-$(mktemp -d /tmp/milk-pvtest.XXXXXX)}"
+T="${1:-}"
+OWN=0
+[ -n "$T" ] || { T="$(mktemp -d /tmp/milk-pvtest.XXXXXX)"; OWN=1; }
 mkdir -p "$T"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -46,6 +49,9 @@ $M put "$IMG" /Users/milk/Pictures/b-gradient.ppm "$T/b-gradient.ppm" >/dev/null
 $M put "$IMG" /Users/milk/Pictures/c-small.bmp "$T/c-small.bmp" >/dev/null
 $M put "$IMG" /Users/milk/Pictures/d-damaged.png "$T/d-damaged.png" >/dev/null
 $M put "$IMG" /Users/milk/Pictures/e-doc.pdf "$T/e-doc.pdf" >/dev/null
+$M put "$IMG" /Users/milk/Pictures/f-photo.jpg "$FIX/jpeg-big.jpg" >/dev/null
+$M put "$IMG" /Users/milk/Pictures/g-anim.gif "$FIX/gif-anim-slow.gif" >/dev/null
+$M put "$IMG" /Users/milk/Pictures/h-alpha.webp "$FIX/webp-lossy-alpha.webp" >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
@@ -92,8 +98,15 @@ q key right; shot 2-ppm 1-png
 q key right; shot 3-bmp 2-ppm
 q key right; shot 4-damaged 3-bmp
 q key right; shot 5-pdf 4-damaged
-q key right; shot 6-wrapped 5-pdf
+q key right; shot 5c-jpeg 5-pdf
+q key right; shot 5d-gif 5c-jpeg
+# The GIF plays by itself: its next frame comes after 1.5 s, with no input.
+shot 5e-gif-later 5d-gif
+q key right; shot 5f-webp 5e-gif-later
+q key right; shot 6-wrapped 5f-webp
 differ 1-png 2-ppm && differ 2-ppm 3-bmp && differ 3-bmp 4-damaged && differ 4-damaged 5-pdf && ok "each picture, the damaged file and the PDF drew a different screen" || bad "stepping through the folder did not change the screen"
+differ 5-pdf 5c-jpeg && differ 5c-jpeg 5d-gif && differ 5e-gif-later 5f-webp && ok "the JPEG, the GIF and the WebP each drew a different screen" || bad "the JPEG, GIF or WebP did not show"
+differ 5d-gif 5e-gif-later && ok "the animated GIF moved on to its next frame by itself" || bad "the GIF did not animate"
 same 1-png 6-wrapped && ok "the strip wraps from the last file back to the first" || bad "stepping past the last file did not return to the first"
 # On the gradient (400 x 300): big enough to zoom past the window and pan.
 q key right; shot 7-grad 6-wrapped
@@ -114,4 +127,6 @@ set -- $(out "text show /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -
 q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 391 )) click; shot 11-text 5b-pdf
 differ 5b-pdf 11-text && ok "Show text opened the text view" || bad "Show text did nothing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
-if [ "$FAIL" = 0 ]; then echo "preview-test: PASS (screenshots in $T)"; else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ]; then
+  if [ "$OWN" = 1 ]; then kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; rm -rf "$T"; echo "preview-test: PASS"; else echo "preview-test: PASS (screenshots in $T)"; fi
+else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi

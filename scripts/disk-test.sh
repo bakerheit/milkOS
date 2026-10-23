@@ -82,7 +82,7 @@ ser "send:disks snapshots" "wait:$P"
 out "disks snapshots" | grep -q "second-one" && bad "second-one is still there after Delete" || ok "Delete snapshot removed it (after the confirm sheet)"
 out "disks snapshots" | grep -q "first-one" && ok "the other snapshots are untouched" || bad "first-one vanished"
 click 313 129                      # the row first-one
-click 440 286                      # Roll back...
+click 400 286                      # Roll back... (where the system font puts it)
 q screendump "$T/rollback-sheet.png"
 click 722 407                      # the Danger button "Roll back"
 ser "send:disks snapshots" "wait:$P" "send:files list /Users/milk/Documents" "wait:$P"

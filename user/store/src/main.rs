@@ -491,8 +491,7 @@ impl App {
     // ---- drawing --------------------------------------------------------------------------
 
     fn heading(&mut self, x: i32, y: i32, s: &str, c: Color) {
-        self.win.text_x(x, y, s, c, 2);
-        self.win.text_x(x + 1, y, s, c, 2);
+        self.win.bold_x(x, y, s, c, 2);
     }
 
     /// SPEC Buttons: primary straw with ink, secondary oat with a sand edge, disabled latte.
@@ -745,7 +744,8 @@ impl App {
             if *kind == 1 {
                 self.details_hit = Some((lx, y - 2, lw, 20));
             }
-            self.win.text(lx + 12, y, l, c);
+            // The command log is monospace.
+            self.win.mono(lx + 12, y, l, c);
         }
         let sy = LOG_Y + lh + 10;
         match (&self.job, self.outcome) {

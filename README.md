@@ -114,8 +114,10 @@ The desktop's UI text is one of five typefaces, picked in Settings > Appearance 
 SIL Open Font License 1.1, and [Ubuntu Sans](https://github.com/canonical/Ubuntu-Sans-fonts) under the
 Ubuntu Font Licence 1.0 (licences and copyright lines in `assets/fonts/`, and in the image at
 `/System/Fonts/`). `scripts/gen_sysfont.py` renders them into the glyph bitmaps in
-`kernel/src/sysfont/`; it names the exact files it uses (from the Google Fonts repository) and their
-hashes. The .ttf files are not in this repository.
+`kernel/src/sysfont/` (Latin-1 in every family, and Latin Extended, Greek, Cyrillic, punctuation and
+symbols wherever a family has them, the others filling in), which apps read from `/System/Fonts/`; it
+names the exact files it uses (from the Google Fonts repository) and their hashes. The .ttf files are
+not in this repository. The few symbols no family has (★ ♥ ● ▶ ☐ ⌘ ...) are drawn by the script.
 
 The TLS root store (`assets/ca/mozilla-roots.der`) is the root certificates of Mozilla's CA program
 (NSS's certdata.txt, via curl's cacert.pem), under the Mozilla Public License 2.0: `assets/ca/NOTICE.txt`

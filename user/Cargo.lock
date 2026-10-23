@@ -134,6 +134,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontkit"
+version = "0.0.1"
+
+[[package]]
 name = "fsstress"
 version = "0.0.1"
 dependencies = [
@@ -144,6 +148,7 @@ dependencies = [
 name = "gui"
 version = "0.0.1"
 dependencies = [
+ "fontkit",
  "rt",
 ]
 

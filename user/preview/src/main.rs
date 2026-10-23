@@ -1,4 +1,5 @@
-//! Preview: pictures (PNG, PPM/PGM/PBM, BMP) and an honest look at PDFs (docs/ui-concepts/
+//! Preview: pictures (PNG, JPEG, GIF and WebP, animated ones playing, PPM/PGM/PBM, BMP) and an
+//! honest look at PDFs (docs/ui-concepts/
 //! SPEC-APPS.md, section 5). The decoding is the `imgdec` crate; this is the window.
 //!
 //! It reads untrusted files, so it sandboxes itself first: no network, no spawning, no clipboard,
@@ -22,6 +23,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use appkit::{Hits, Theme};
 use gui::{Event, Key, Mods, Window};
+use imgdec::anim::Animation;
 use imgdec::pdf::PdfInfo;
 use imgdec::{Format, Image};
 use rt::sys;
@@ -69,6 +71,8 @@ pub enum Content {
     Picture {
         img: Image,
         fmt: &'static str,
+        /// A GIF or WebP with more than one frame: it plays, `img` being the frame on show.
+        anim: Option<alloc::boxed::Box<Player>>,
     },
     Pdf {
         info: PdfInfo,
@@ -77,6 +81,13 @@ pub enum Content {
         scroll: usize,
     },
     Failed(String),
+}
+
+/// An animation being played.
+pub struct Player {
+    pub anim: Animation,
+    /// When the next frame is due (monotonic ms).
+    pub next_at: u64,
 }
 
 pub struct App {
@@ -99,8 +110,10 @@ pub struct App {
     pub info_open: bool,
     /// The scaled copy for Fit, 25% and 50%: (key, picture).
     pub cache: Option<((Zoom, u32, usize, usize), Image)>,
-    /// Bumped when the picture changes (rotation, a new file), part of the cache key.
+    /// Bumped when the picture changes (rotation, a new file, a new frame), part of the cache key.
     pub version: u32,
+    /// Quarter turns clockwise the user asked for (applied to each new animation frame too).
+    pub turns: u8,
     pub thumbs: BTreeMap<usize, Option<Image>>,
     pub strip_scroll: i32,
     /// The picture is bigger than the canvas across / down (set by drawing).
@@ -146,9 +159,12 @@ fn read_path(path: &str) -> Result<Vec<u8>, String> {
 
 fn is_picture_name(n: &str) -> bool {
     let l = n.to_ascii_lowercase();
-    ["png", "ppm", "pgm", "pbm", "pnm", "bmp", "pdf"]
-        .iter()
-        .any(|e| l.ends_with(&format!(".{e}")))
+    [
+        "png", "jpg", "jpeg", "jpe", "jfif", "gif", "webp", "ppm", "pgm", "pbm", "pnm", "bmp",
+        "pdf",
+    ]
+    .iter()
+    .any(|e| l.ends_with(&format!(".{e}")))
 }
 
 fn dir_of(path: &str) -> &str {
@@ -174,21 +190,45 @@ fn decode_content(bytes: &[u8]) -> Content {
             },
             Err(e) => Content::Failed(String::from(e.message())),
         },
-        f => match imgdec::decode(bytes) {
-            Ok(img) => Content::Picture {
-                img,
-                fmt: match f {
-                    Format::Png => "PNG",
-                    Format::Bmp => "BMP",
-                    _ => match bytes.get(1) {
-                        Some(b'1' | b'4') => "PBM",
-                        Some(b'2' | b'5') => "PGM",
-                        _ => "PPM",
-                    },
+        f => {
+            let fmt = match f {
+                Format::Pnm => match bytes.get(1) {
+                    Some(b'1' | b'4') => "PBM",
+                    Some(b'2' | b'5') => "PGM",
+                    _ => "PPM",
                 },
-            },
-            Err(e) => Content::Failed(String::from(e.message())),
-        },
+                f => f.name(),
+            };
+            // GIF and WebP may animate: play them.
+            if matches!(f, Format::Gif | Format::WebP)
+                && let Ok(mut anim) = Animation::new(bytes.to_vec())
+                && anim.is_animated()
+            {
+                return match anim.next_frame() {
+                    Some(Ok(fr)) => {
+                        let (img, delay) = (fr.image.clone(), fr.delay_ms);
+                        Content::Picture {
+                            img,
+                            fmt,
+                            anim: Some(alloc::boxed::Box::new(Player {
+                                anim,
+                                next_at: now_ms() + delay as u64,
+                            })),
+                        }
+                    }
+                    Some(Err(e)) => Content::Failed(String::from(e.message())),
+                    None => Content::Failed(String::from("The animation has no frames.")),
+                };
+            }
+            match imgdec::decode(bytes) {
+                Ok(img) => Content::Picture {
+                    img,
+                    fmt,
+                    anim: None,
+                },
+                Err(e) => Content::Failed(String::from(e.message())),
+            }
+        }
     }
 }
 
@@ -209,6 +249,7 @@ impl App {
     fn set_content(&mut self, c: Content) {
         self.content = c;
         self.version += 1;
+        self.turns = 0;
         self.cache = None;
         self.pan_reset = true;
         self.drag = None;
@@ -352,6 +393,7 @@ impl App {
     fn rotate(&mut self, cw: bool) {
         if let Content::Picture { img, .. } = &mut self.content {
             *img = img.rotated(cw);
+            self.turns = (self.turns + if cw { 1 } else { 3 }) % 4;
             self.version += 1;
             self.cache = None;
             self.pan_reset = true;
@@ -465,6 +507,49 @@ impl App {
         }
     }
 
+    /// Show the animation's next frame if it is due. True if the picture changed.
+    fn tick(&mut self, now: u64) -> bool {
+        let turns = self.turns;
+        let Content::Picture {
+            img, anim: Some(p), ..
+        } = &mut self.content
+        else {
+            return false;
+        };
+        if now < p.next_at {
+            return false;
+        }
+        if p.anim.finished() && p.anim.should_loop() {
+            p.anim.rewind();
+        }
+        match p.anim.next_frame() {
+            Some(Ok(fr)) => {
+                let mut frame = fr.image.clone();
+                p.next_at = now + fr.delay_ms.max(20) as u64;
+                for _ in 0..turns {
+                    frame = frame.rotated(true);
+                }
+                *img = frame;
+            }
+            // The end (it doesn't loop), or a damaged frame: keep showing the last good one.
+            _ => {
+                p.next_at = u64::MAX;
+                return false;
+            }
+        }
+        self.version += 1;
+        self.cache = None;
+        true
+    }
+
+    /// Milliseconds until the next animation frame (at most `max`).
+    fn wait_ms(&self, now: u64, max: u64) -> u64 {
+        match &self.content {
+            Content::Picture { anim: Some(p), .. } => p.next_at.saturating_sub(now).clamp(1, max),
+            _ => max,
+        }
+    }
+
     /// The wheel works the text view, or pans a picture that is bigger than the canvas, or
     /// scrolls the thumbnail strip.
     fn scroll(&mut self, d: i32) {
@@ -489,12 +574,15 @@ impl App {
 fn main(args: &rt::Args) -> i32 {
     // Before anything else: lock down what a bad picture could reach.
     let path = args.get(1);
+    // The system font: read now, and /System/Fonts stays readable for families a character
+    // needs later.
+    appkit::text::preload();
     let spec = match path {
         Some(p) => format!(
-            "fs={}:r fs=/dev/wm:r net=none spawn=0 clipboard=0",
+            "fs={}:r fs=/dev/wm:r fs=/System/Fonts:r net=none spawn=0 clipboard=0",
             dir_of(p)
         ),
-        None => String::from("fs=/dev/wm:r net=none spawn=0 clipboard=0"),
+        None => String::from("fs=/dev/wm:r fs=/System/Fonts:r net=none spawn=0 clipboard=0"),
     };
     if let Err(e) = sys::sandbox(&spec) {
         rt::println!("preview: can't sandbox myself: {}", e.name());
@@ -523,6 +611,7 @@ fn main(args: &rt::Args) -> i32 {
         info_open: false,
         cache: None,
         version: 0,
+        turns: 0,
         thumbs: BTreeMap::new(),
         strip_scroll: 0,
         overflow: (false, false),
@@ -536,8 +625,8 @@ fn main(args: &rt::Args) -> i32 {
     let mut shown_msg = false;
     app.draw();
     loop {
-        let ev = app.win.event(250);
-        let mut dirty = false;
+        let ev = app.win.event(app.wait_ms(now_ms(), 250));
+        let mut dirty = app.tick(now_ms());
         match ev {
             Some(Event::Close) => break,
             Some(Event::Resize { w, h }) => {

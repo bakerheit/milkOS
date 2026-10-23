@@ -1,17 +1,22 @@
 //! The desktop's system font: proportional, anti-aliased UI text from real typefaces.
 //!
 //! The glyphs are baked at build time by `scripts/gen_sysfont.py` (FreeType's hinted grey
-//! coverage, 4 bits a pixel, cropped to the ink) into `sysfont/<family>.bin`, indexed by the
-//! generated `sysfont_data.rs`. Five families (Figtree, IBM Plex Sans, Fira Sans and Atkinson
-//! Hyperlegible Next under the SIL OFL 1.1, Ubuntu Sans under the Ubuntu Font Licence 1.0; see
-//! `assets/fonts/`), each at the sizes the UI uses:
+//! coverage, 4 bits a pixel, cropped to the ink) into `sysfont/<family>.font`, indexed by the
+//! generated `sysfont_data.rs`; the blob format, the face choice, the fallback between families
+//! and the measuring live in the shared `fontkit` crate (`user/fontkit`), which user space uses
+//! too. Five families (Figtree, IBM Plex Sans, Fira Sans and Atkinson Hyperlegible Next under
+//! the SIL OFL 1.1, Ubuntu Sans under the Ubuntu Font Licence 1.0; see `assets/fonts/`) and a
+//! drawn symbol set, each at the sizes the UI uses:
 //!
-//! | scale | em     | line box | baseline | weights                 | characters          |
-//! |-------|--------|----------|----------|-------------------------|---------------------|
-//! | 1     | 13 px  | 16 px    | 13       | Regular, Medium, Bold   | Latin-1 + U+FFFD    |
-//! | 2     | 26 px  | 32 px    | 26       | Regular, Bold           | Latin-1 + U+FFFD    |
-//! | 4     | 52 px  | 64 px    | 52       | Bold                    | letters, digits, :  |
-//! | 8     | 104 px | 128 px   | 104      | Regular                 | digits, :           |
+//! | scale | em     | line box | baseline | weights                 | characters                |
+//! |-------|--------|----------|----------|-------------------------|---------------------------|
+//! | 1     | 13 px  | 16 px    | 13       | Regular, Medium, Bold   | Latin-1 and the font's    |
+//! | 2     | 26 px  | 32 px    | 26       | Regular, Bold           | Latin Ext., Greek, ...    |
+//! | 4     | 52 px  | 64 px    | 52       | Bold                    | letters, digits, :        |
+//! | 8     | 104 px | 128 px   | 104      | Regular                 | digits, :                 |
+//!
+//! A character the chosen family lacks comes from the others (`fontkit::FALLBACK`), then the
+//! drawn symbols, then a fold to similar characters, then a visible box.
 //!
 //! Text is laid out in line boxes `16 * scale` tall, the same cells the 8x16 Unifont text used,
 //! so a caller's `y` is still the top of the line. Anything not baked (another scale, a weight
@@ -19,9 +24,11 @@
 //!
 //! Which family the UI uses is a desktop preference (`font = figtree` in the settings file,
 //! Settings > Appearance); [`set_current`] switches it and the desktop redraws everything.
-//! Grids (the console, fbcon, Terminal, Notes' editor) stay on monospace Unifont (`font`).
-//! The boot splash runs before the settings are read, so it always uses the default family;
-//! the "milkOS" wordmark is always drawn in [`BRAND`].
+//! `/dev/wm` reports it (`font figtree`) so apps can follow. Grids (the console, fbcon,
+//! Terminal, Notes' editor) stay on monospace Unifont (`font`). The boot splash runs before the
+//! settings are read, so it always uses the default family; the "milkOS" wordmark is always
+//! drawn in [`BRAND`]. [`install`] puts the blobs in `/System/Fonts/<key>.font` (no copy: the
+//! files point at the kernel's own bytes) for user space.
 
 #![allow(dead_code)] // A text API: not every measure is used by every caller yet.
 
@@ -29,18 +36,11 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::gfx::{Color, DrawTarget};
-pub use crate::sysfont_data::FAMILIES;
+pub use crate::sysfont_data::{FAMILIES, SYMBOLS};
+pub use fontkit::Weight;
 
-/// One baked size and weight of a family (see the module table).
-pub struct Face {
-    pub size: u8,
-    pub line: u8,
-    pub ascent: u8,
-    pub weight: u16,
-    /// Its glyph records: `first .. first + count` in the family blob.
-    pub first: u16,
-    pub count: u16,
-}
+/// A glyph: its bitmap (as coverage spans) and metrics.
+pub type Glyph = fontkit::Glyph<'static>;
 
 pub struct Family {
     /// The settings-file value (`font = figtree`).
@@ -50,22 +50,17 @@ pub struct Family {
     pub copyright: &'static str,
     /// Its licence ("SIL Open Font License 1.1", "Ubuntu Font Licence 1.0").
     pub licence: &'static str,
-    /// Glyph records (12 bytes each) then coverage data, see `scripts/gen_sysfont.py`.
-    pub blob: &'static [u8],
-    pub faces: &'static [Face],
+    /// The baked glyphs.
+    pub font: fontkit::Family<'static>,
 }
 
-/// Face indices in every family (the generator's `FACES` order).
-const BODY_R: usize = 0;
-const BODY_M: usize = 1;
-const BODY_B: usize = 2;
-const HEAD_R: usize = 3;
-const HEAD_B: usize = 4;
-const BIG_B: usize = 5;
-const HUGE_R: usize = 6;
+// The kernel's families are fontkit's, in the same order.
+const _: () = {
+    assert!(FAMILIES.len() == fontkit::FAMILY_COUNT);
+};
 
 /// Figtree: the default, and the family of the "milkOS" wordmark.
-pub const DEFAULT: usize = 0;
+pub const DEFAULT: usize = fontkit::DEFAULT;
 pub const BRAND: usize = 0;
 
 static CURRENT: AtomicUsize = AtomicUsize::new(DEFAULT);
@@ -84,117 +79,16 @@ pub fn find(key: &str) -> Option<usize> {
     FAMILIES.iter().position(|f| f.key == key)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Weight {
-    Regular,
-    Medium,
-    Bold,
-}
+/// fontkit's view of the baked families.
+struct Baked;
 
-impl Weight {
-    pub fn bold(b: bool) -> Weight {
-        if b { Weight::Bold } else { Weight::Regular }
-    }
-}
-
-/// One glyph's bitmap and metrics, in the face's pixels (before magnification).
-#[derive(Clone, Copy)]
-pub struct Glyph {
-    pub w: i32,
-    pub h: i32,
-    /// Left edge relative to the pen.
-    pub left: i32,
-    /// Top edge in pixels above the baseline.
-    pub top: i32,
-    pub adv: i32,
-    data: &'static [u8],
-    rle: bool,
-}
-
-impl Glyph {
-    /// Call `f(x, y, len, coverage 0..=255)` for every run of non-zero coverage, row by row
-    /// (glyph-local coordinates, `mag` times magnified).
-    pub fn spans(&self, mag: i32, mut f: impl FnMut(i32, i32, i32, u8)) {
-        let (w, n) = (self.w, self.w * self.h);
-        let mut i = 0; // pixel index
-        let emit = |i: i32, len: i32, v: u8, f: &mut dyn FnMut(i32, i32, i32, u8)| {
-            if v == 0 {
-                return;
-            }
-            let a = v * 17;
-            let (mut i, mut len) = (i, len);
-            while len > 0 {
-                let (x, y) = (i % w, i / w);
-                let l = len.min(w - x);
-                for r in 0..mag {
-                    f(x * mag, y * mag + r, l * mag, a);
-                }
-                i += l;
-                len -= l;
-            }
-        };
-        if self.rle {
-            for &b in self.data {
-                if i >= n {
-                    break;
-                }
-                let len = (b & 15) as i32 + 1;
-                emit(i, len.min(n - i), b >> 4, &mut f);
-                i += len;
-            }
-        } else {
-            // Packed nibbles: merge equal neighbours into runs.
-            let mut run_start = 0;
-            let mut run_v = 0u8;
-            for &b in self.data.iter().take((n as usize).div_ceil(2)) {
-                for v in [b >> 4, b & 15] {
-                    if i >= n {
-                        break;
-                    }
-                    if v != run_v {
-                        emit(run_start, i - run_start, run_v, &mut f);
-                        run_start = i;
-                        run_v = v;
-                    }
-                    i += 1;
-                }
-            }
-            emit(run_start, i - run_start, run_v, &mut f);
+impl fontkit::Source<'static> for Baked {
+    fn family(&self, i: usize) -> Option<&'static fontkit::Family<'static>> {
+        match i {
+            fontkit::SYMBOLS => Some(&SYMBOLS),
+            _ => FAMILIES.get(i).map(|f| &f.font),
         }
     }
-}
-
-fn face_glyph(fam: &'static Family, face: usize, cp: u32) -> Option<Glyph> {
-    let fc = &fam.faces[face];
-    let rec = |i: usize| -> &[u8] { &fam.blob[12 * i..12 * i + 12] };
-    let (mut lo, mut hi) = (fc.first as usize, fc.first as usize + fc.count as usize);
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let r = rec(mid);
-        let c = u16::from_le_bytes([r[0], r[1]]) as u32;
-        if c == cp {
-            let off = u32::from_le_bytes([r[2], r[3], r[4], r[5]]);
-            let (w, h) = (r[6] as i32, r[7] as i32);
-            let rle = off & 1 << 31 != 0;
-            let start = (off & !(1 << 31)) as usize;
-            return Some(Glyph {
-                w,
-                h,
-                left: r[8] as i8 as i32,
-                top: r[9] as i8 as i32,
-                adv: r[10] as i32,
-                // The decoder stops after w * h pixels.
-                data: &fam.blob[start..],
-                rle,
-            });
-        }
-        if c < cp {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    None
 }
 
 /// A text style: family, scale (line boxes of `16 * scale` pixels) and weight. All UI text
@@ -225,8 +119,8 @@ impl Font {
         Font::ui(1, Weight::bold(bold))
     }
 
-    fn fam(&self) -> &'static Family {
-        &FAMILIES[self.family]
+    fn kit(&self) -> fontkit::Font {
+        fontkit::Font::new(self.family, self.scale, self.weight)
     }
 
     /// Height of a line box.
@@ -250,126 +144,44 @@ impl Font {
         y + (h - cap) / 2 - (self.baseline() - cap)
     }
 
-    /// The face that draws scale `s` best, and how much it must be magnified.
-    fn face_for(&self, s: i32) -> (usize, i32) {
-        let bold = self.weight != Weight::Regular;
-        match s {
-            1 => (
-                match self.weight {
-                    Weight::Regular => BODY_R,
-                    Weight::Medium => BODY_M,
-                    Weight::Bold => BODY_B,
-                },
-                1,
-            ),
-            2 | 3 => (if bold { HEAD_B } else { HEAD_R }, 1),
-            4..=7 if bold => (BIG_B, 1),
-            4..=7 => (HEAD_R, 2),
-            8.. if !bold => (HUGE_R, s / 8),
-            8.. => (BIG_B, s / 4),
-            _ => (BODY_R, 1),
-        }
-    }
-
-    /// The glyph for `c` and its magnification: from the best face, else the next smaller one
-    /// (a big face only has some characters), else U+FFFD.
-    pub fn glyph(&self, c: char) -> (Glyph, i32) {
-        let fam = self.fam();
-        let mut s = self.scale;
-        loop {
-            let (face, mag) = self.face_for(s);
-            let base = s / mag.max(1);
-            if let Some(g) = face_glyph(fam, face, c as u32) {
-                return (g, self.scale / base.max(1));
-            }
-            if s <= 3 {
-                if let Some(g) = face_glyph(fam, face, 0xFFFD) {
-                    return (g, self.scale / base.max(1));
-                }
-                // Unreachable with a complete bake; keep going with the body face.
-                let g = face_glyph(fam, BODY_R, 0xFFFD).or_else(|| face_glyph(fam, BODY_R, 32));
-                return (g.expect("sysfont: no replacement glyph"), self.scale);
-            }
-            s /= 2;
-        }
-    }
-
     pub fn advance(&self, c: char) -> i32 {
-        let (g, mag) = self.glyph(c);
-        g.adv * mag
+        self.kit().advance(&Baked, c)
     }
 
     /// Width of `s` in pixels.
     pub fn width(&self, s: &str) -> i32 {
-        s.chars().map(|c| self.advance(c)).sum()
+        self.kit().width(&Baked, s)
     }
 
     /// How many bytes of `s` fit in `max` pixels (a char boundary).
     pub fn fit(&self, s: &str, max: i32) -> usize {
-        let mut w = 0;
-        for (i, c) in s.char_indices() {
-            w += self.advance(c);
-            if w > max {
-                return i;
-            }
-        }
-        s.len()
+        self.kit().fit(&Baked, s, max)
     }
 
     /// `s` cut to `max` pixels with "..." when it doesn't fit.
     pub fn truncate(&self, s: &str, max: i32) -> String {
-        if self.width(s) <= max {
-            return String::from(s);
-        }
-        let dots = self.width("...");
-        let n = self.fit(s, (max - dots).max(0));
-        let mut out = String::from(s[..n].trim_end());
-        out.push_str("...");
-        out
+        self.kit().truncate(&Baked, s, max)
     }
 
     /// The longest end of `s` that fits in `max` pixels (a text field scrolled to its caret).
     pub fn tail<'s>(&self, s: &'s str, max: i32) -> &'s str {
-        let mut w = 0;
-        for (i, c) in s.char_indices().rev() {
-            w += self.advance(c);
-            if w > max {
-                return &s[i + c.len_utf8()..];
-            }
-        }
-        s
+        self.kit().tail(&Baked, s, max)
     }
 
     /// The char index in `s` nearest pixel offset `x` (caret placement).
     pub fn index_at(&self, s: &str, x: i32) -> usize {
-        let mut w = 0;
-        for (i, c) in s.chars().enumerate() {
-            let a = self.advance(c);
-            if x < w + a / 2 {
-                return i;
-            }
-            w += a;
-        }
-        s.chars().count()
+        self.kit().index_at(&Baked, s, x)
     }
 
     /// Width of the first `n` chars of `s` (where a caret after them goes).
     pub fn prefix_width(&self, s: &str, n: usize) -> i32 {
-        s.chars().take(n).map(|c| self.advance(c)).sum()
+        self.kit().prefix_width(&Baked, s, n)
     }
 
-    /// Call `f(pen x, glyph, magnification)` for each char of `s` starting at pen `x`;
+    /// Call `f(pen x, glyph, magnification)` for each glyph of `s` starting at pen `x`;
     /// returns the pen after the last one.
     pub fn layout(&self, x: i32, s: &str, mut f: impl FnMut(i32, &Glyph, i32)) -> i32 {
-        let mut pen = x;
-        for c in s.chars() {
-            let (g, mag) = self.glyph(c);
-            if g.w > 0 {
-                f(pen, &g, mag);
-            }
-            pen += g.adv * mag;
-        }
-        pen
+        self.kit().layout(&Baked, x, s, |pen, g, m| f(pen, g, m))
     }
 
     /// Draw `s` with the top of its line box at `y` straight onto `t` (the boot splash; the
@@ -394,42 +206,50 @@ pub fn width(s: &str, bold: bool) -> i32 {
     Font::body(bold).width(s)
 }
 
-/// Boot self-test: every family has every face, every baked glyph decodes inside its box,
-/// each Latin-1 character resolves at every scale and weight, and text measures sensibly.
+/// Put every blob in `/System/Fonts/<key>.font`, read-only, for user space (appkit's text).
+/// The files are the kernel's own bytes, not copies. After the initramfs is unpacked.
+pub fn install() {
+    let _ = crate::fs::mkdir("/System/Fonts", 0o755);
+    let mut n = 0;
+    let blobs = FAMILIES
+        .iter()
+        .map(|f| f.font.blob())
+        .chain([SYMBOLS.blob()]);
+    for (key, blob) in fontkit::KEYS.iter().zip(blobs) {
+        let path = alloc::format!("/System/Fonts/{key}.font");
+        match crate::fs::initramfs::put_file(&path, blob) {
+            Ok(()) => n += 1,
+            Err(e) => crate::kprintln!("fonts: {path}: {e}"),
+        }
+    }
+    crate::kprintln!("fonts: {n} font files in /System/Fonts");
+}
+
+/// Boot self-test: every blob validates, each Latin-1 character resolves at every scale and
+/// weight from its own family, other scripts resolve to something, and text measures sensibly.
 pub fn selftest() -> bool {
-    for (i, fam) in FAMILIES.iter().enumerate() {
-        if fam.faces.len() != 7 {
+    for fam in FAMILIES.iter().map(|f| &f.font).chain([&SYMBOLS]) {
+        if fam.validate().is_err() {
             return false;
         }
-        for fc in fam.faces {
-            for r in fc.first as usize..fc.first as usize + fc.count as usize {
-                let rec = &fam.blob[12 * r..12 * r + 12];
-                let cp = u16::from_le_bytes([rec[0], rec[1]]) as u32;
-                let face = fam
-                    .faces
-                    .iter()
-                    .position(|f| core::ptr::eq(f, fc))
-                    .unwrap_or(0);
-                let Some(g) = face_glyph(fam, face, cp) else {
-                    return false;
-                };
-                let mut ok = true;
-                let mut px = 0;
-                g.spans(1, |x, y, len, _| {
-                    ok &= x >= 0 && y >= 0 && len > 0 && x + len <= g.w && y < g.h;
-                    px += len;
-                });
-                if !ok || px > g.w * g.h || g.adv <= 0 && cp != 0xAD {
-                    return false;
-                }
-            }
+    }
+    for (i, fam) in FAMILIES.iter().enumerate() {
+        if fam.font.key() != fam.key || fam.font.faces().len() != 7 {
+            return false;
         }
         for scale in [1, 2, 4, 8] {
             for weight in [Weight::Regular, Weight::Medium, Weight::Bold] {
                 let f = Font::of(i, scale, weight);
                 for cp in (0x20u32..0x7F).chain(0xA0..0x100).chain([0xFFFD]) {
                     let c = char::from_u32(cp).unwrap_or('?');
-                    if f.advance(c) <= 0 && c != '\u{AD}' {
+                    if fam.font.find(cp, scale, weight).is_none()
+                        || (f.advance(c) <= 0 && c != '\u{AD}')
+                    {
+                        return false;
+                    }
+                }
+                for c in ['Ω', 'Ж', 'ő', '€', '→', '★', '中'] {
+                    if f.advance(c) <= 0 {
                         return false;
                     }
                 }

@@ -16,9 +16,11 @@
 //!                             app=<name> (default: the writing program), open=<what>
 //!                             (what a click opens; default the app)
 //! today | spaces | desktop | skim | lock
+//! font <key>                  the UI font, as Settings > Appearance sets it (figtree, plex,
+//!                             fira, atkinson, ubuntu); saved like any other preference
 //! ```
 //!
-//! Reading it gives a status snapshot (`mode`, `space`, one `window` line per window).
+//! Reading it gives a status snapshot (`mode`, `space`, `font`, one `window` line per window).
 //! The `/Commands/open`, `/Commands/notify`, `/Commands/today` and `/Commands/spaces` programs are thin wrappers.
 
 use alloc::string::String;
@@ -115,6 +117,15 @@ pub fn command(line: &str) -> bool {
             request(Request::Lock);
             true
         }
+        "font" => match crate::sysfont::find(rest.trim()) {
+            Some(f) => {
+                let mut p = super::prefs::get();
+                p.font = f;
+                request(Request::Prefs(p));
+                true
+            }
+            None => false,
+        },
         _ => false,
     }
 }

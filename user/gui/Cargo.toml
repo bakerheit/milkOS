@@ -9,3 +9,5 @@ bench = false
 
 [dependencies]
 rt = { path = "../rt" }
+# The system fonts (blob format, fallback, measuring), shared with the kernel.
+fontkit = { path = "../fontkit" }

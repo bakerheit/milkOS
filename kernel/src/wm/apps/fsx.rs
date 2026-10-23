@@ -131,7 +131,7 @@ pub fn art_kind_of(name: &str, dir: bool) -> &'static str {
     }
     let n = name.to_ascii_lowercase();
     let ext = |xs: &[&str]| xs.iter().any(|x| n.ends_with(x));
-    if ext(&[".png", ".jpg", ".jpeg", ".gif", ".bmp"]) {
+    if ext(&[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]) {
         "image"
     } else if ext(&[".wav", ".mp3", ".ogg", ".flac"]) {
         "audio"
@@ -155,7 +155,10 @@ pub fn icon_for(e: &Entry) -> Icon {
                 Icon::Note
             } else if n.ends_with(".sh") {
                 Icon::Term
-            } else if n.ends_with(".png") || n.ends_with(".jpg") {
+            } else if [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                .iter()
+                .any(|x| n.ends_with(x))
+            {
                 Icon::Photo
             } else if n.ends_with(".wav") {
                 Icon::Music

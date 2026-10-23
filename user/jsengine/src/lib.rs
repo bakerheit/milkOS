@@ -26,6 +26,7 @@ mod interp;
 mod lexer;
 mod libm;
 mod math;
+mod module;
 mod names;
 mod numconv;
 mod object;

@@ -74,11 +74,40 @@ pub(crate) struct Scope {
     pub strict: bool,
     /// Set by the compiler when it enters the scope.
     pub env_size: u32,
+    /// Name -> position, for scopes with many bindings (a module can have tens of
+    /// thousands; every identifier reference looks its scope chain up).
+    index: Option<alloc::collections::BTreeMap<Atom, u32>>,
 }
+
+const INDEX_AT: usize = 24;
 
 impl Scope {
     pub fn find(&self, a: Atom) -> Option<usize> {
-        self.bindings.iter().position(|b| b.name == a)
+        match &self.index {
+            Some(ix) => ix.get(&a).map(|i| *i as usize),
+            None => self.bindings.iter().position(|b| b.name == a),
+        }
+    }
+
+    /// Adds a binding (the names of existing ones stay where they are).
+    pub fn add(&mut self, b: Binding) {
+        let pos = self.bindings.len() as u32;
+        let name = b.name;
+        self.bindings.push(b);
+        match &mut self.index {
+            Some(ix) => {
+                ix.entry(name).or_insert(pos);
+            }
+            None => {
+                if self.bindings.len() > INDEX_AT {
+                    let mut ix = alloc::collections::BTreeMap::new();
+                    for (i, b) in self.bindings.iter().enumerate() {
+                        ix.entry(b.name).or_insert(i as u32);
+                    }
+                    self.index = Some(ix);
+                }
+            }
+        }
     }
 }
 
@@ -108,6 +137,7 @@ fn blank(kind: SK) -> Scope {
         uses_arguments: false,
         strict: false,
         env_size: 0,
+        index: None,
     }
 }
 
@@ -160,7 +190,7 @@ impl<'a> Resolver<'a> {
                 }
                 return Ok(());
             }
-            s.bindings.push(Binding {
+            s.add(Binding {
                 name,
                 kind,
                 captured: false,
@@ -184,7 +214,7 @@ impl<'a> Resolver<'a> {
                     pos,
                 );
             }
-            s.bindings.push(Binding {
+            s.add(Binding {
                 name,
                 kind,
                 captured: true,
@@ -227,7 +257,7 @@ impl<'a> Resolver<'a> {
             }
             return Ok(());
         }
-        s.bindings.push(Binding {
+        s.add(Binding {
             name,
             kind,
             captured: false,
@@ -259,7 +289,7 @@ impl<'a> Resolver<'a> {
                 let captured = sid != cur_func;
                 let scm = &mut self.scopes[sid as usize];
                 scm.uses_arguments = true;
-                scm.bindings.push(Binding {
+                scm.add(Binding {
                     name,
                     kind: BK::Arguments,
                     captured,

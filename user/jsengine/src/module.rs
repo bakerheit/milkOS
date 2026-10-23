@@ -83,6 +83,10 @@ pub(crate) struct ModuleRec {
     pub imports: Vec<ImportRes>,
     pub local_exports: Vec<(String, u32)>,
     pub indirect_exports: Vec<IndirectRec>,
+    /// Export name -> position in `local_exports` / `indirect_exports` (modules can have
+    /// thousands of exports).
+    pub local_index: BTreeMap<String, usize>,
+    pub indirect_index: BTreeMap<String, usize>,
     pub star_exports: Vec<(u32, u32)>,
     pub init: Option<Rc<Code>>,
     pub body: Option<Rc<Code>>,
@@ -117,6 +121,8 @@ impl ModuleRec {
             imports: Vec::new(),
             local_exports: Vec::new(),
             indirect_exports: Vec::new(),
+            local_index: BTreeMap::new(),
+            indirect_index: BTreeMap::new(),
             star_exports: Vec::new(),
             init: None,
             body: None,
@@ -429,6 +435,16 @@ impl Realm {
         rec.deps = alloc::vec![None; requests.len()];
         rec.requests = requests;
         rec.imports = imports;
+        rec.local_index = local_exports
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| (n.clone(), i))
+            .collect();
+        rec.indirect_index = indirect_exports
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.name.clone(), i))
+            .collect();
         rec.local_exports = local_exports;
         rec.indirect_exports = indirect_exports;
         rec.star_exports = star_exports;
@@ -489,6 +505,11 @@ impl Realm {
             .iter()
             .enumerate()
             .map(|(i, (n, _))| (n.clone(), i as u32))
+            .collect();
+        rec.local_index = exports
+            .iter()
+            .enumerate()
+            .map(|(i, (n, _))| (n.clone(), i))
             .collect();
         rec.synthetic = true;
         rec.status = St::Evaluated;
@@ -650,18 +671,17 @@ impl Realm {
             return Ok(Resolution::NotFound);
         }
         set.push((m, String::from(name)));
-        if let Some((_, slot)) = self.mrec(m).local_exports.iter().find(|(n, _)| n == name) {
+        if let Some(&i) = self.mrec(m).local_index.get(name) {
+            let slot = self.mrec(m).local_exports[i].1;
             return Ok(Resolution::Found {
                 module: m,
-                binding: Binding::Slot(*slot),
+                binding: Binding::Slot(slot),
             });
         }
-        let ind = self
-            .mrec(m)
-            .indirect_exports
-            .iter()
-            .find(|e| e.name == name)
-            .map(|e| (e.request, e.import.clone_name()));
+        let ind = self.mrec(m).indirect_index.get(name).map(|&i| {
+            let e = &self.mrec(m).indirect_exports[i];
+            (e.request, e.import.clone_name())
+        });
         if let Some((req, imp)) = ind {
             let Some(dep) = self.dep_idx(m, req as usize) else {
                 return Ok(Resolution::NotFound);

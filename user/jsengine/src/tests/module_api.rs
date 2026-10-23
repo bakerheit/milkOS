@@ -658,3 +658,43 @@ fn errors_from_modules_describe_themselves_body() {
     assert_eq!((rep.file.as_str(), rep.line), ("main.js", 1));
     let _ = describe;
 }
+
+/// A big bundle-shaped module: how long compiling, linking and running it takes.
+/// `cargo test --release -p jsengine --lib module_bundle_timing -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn module_bundle_timing() {
+    big(module_bundle_timing_body);
+}
+
+fn module_bundle_timing_body() {
+    let n = 20_000;
+    let mut src = String::new();
+    for i in 0..n {
+        src.push_str(&alloc::format!(
+            "function f{i}(x) {{ return x + {i} + (x > 3 ? f{}(x - 1) : 0); }}\nconst c{i} = [f{i}, 'v{i}'];\nexport {{ f{i} as e{i} }};\n",
+            (i + 1) % n
+        ));
+    }
+    src.push_str("export let total = 0; for (let i = 0; i < 1000; i++) total += f0(2);\n");
+    let t = std::time::Instant::now();
+    let mut r = realm();
+    let m = compile(&mut r, "bundle.js", &src);
+    let t_compile = t.elapsed();
+    let t = std::time::Instant::now();
+    r.link_module(m).unwrap();
+    let t_link = t.elapsed();
+    let t = std::time::Instant::now();
+    r.evaluate_module(m).unwrap();
+    let t_eval = t.elapsed();
+    let t = std::time::Instant::now();
+    let main = compile(&mut r, "main.js", "import * as ns from './bundle.js'; export const n = Object.keys(ns).length;");
+    r.set_module_dependency(main, 0, m).unwrap();
+    r.link_module(main).unwrap();
+    r.evaluate_module(main).unwrap();
+    let t_ns = t.elapsed();
+    std::println!(
+        "{} bytes: compile {t_compile:?}, link {t_link:?}, evaluate {t_eval:?}, namespace {t_ns:?}",
+        src.len()
+    );
+}

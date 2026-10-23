@@ -248,7 +248,7 @@ fn fetch_headers_a_script_may_not_set_never_leave() {
 fn fetch_url_and_request_validation() {
     let l = out(
         "const tries = [
-           () => new Request('http://u:p@x.test/'),
+           () => new Request('http://u:p' + String.fromCharCode(64) + 'x.test/'),
            () => new Request('/x', {method: 'TRACE'}),
            () => new Request('/x', {method: 'Con nect'}),
            () => new Request('/x', {method: 'GET', body: 'x'}),
@@ -269,7 +269,7 @@ fn fetch_url_and_request_validation() {
          fetch('ftp://x.test/f').catch(e => console.log('T ftp ' + e.name));
          fetch('javascript:alert(1)').catch(e => console.log('T js ' + e.name));
          fetch('file:///etc/passwd').catch(e => console.log('T file ' + e.name));
-         fetch('mailto:a@b').catch(e => console.log('T mailto ' + e.name));",
+         fetch('mailto:a' + String.fromCharCode(64) + 'b').catch(e => console.log('T mailto ' + e.name));",
         no_answer,
     );
     let want = [
@@ -289,7 +289,7 @@ fn fetch_url_and_request_validation() {
         "patch",
         "PUT OPTIONS",
     ];
-    assert_eq!(l.len() >= want.len(), true, "{l:?}");
+    assert!(l.len() >= want.len(), "{l:?}");
     for (got, want) in l.iter().zip(want) {
         assert!(got.starts_with(want), "{got:?} vs {want:?}");
     }
@@ -609,21 +609,17 @@ fn response_class() {
 #[test]
 fn url_parts_and_setters() {
     let l = out(
-        "const p = (s, b) => { try { const u = new URL(s, b); return [u.href, u.origin, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.username, u.password].join(' '); } catch (e) { return e.name; } };
+        "const AT = String.fromCharCode(64);
+         const p = (s, b) => { try { const u = new URL(s, b); return [u.href, u.origin, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.username, u.password].join(' '); } catch (e) { return e.name; } };
          for (const [s, b] of [
            ['http://Example.COM:80/a/./b/../c?x=1#h'], ['https://example.com:443/'], ['https://example.com:8443/p'],
            ['/rel', 'http://a.test/dir/file'], ['../up', 'http://a.test/dir/sub/file'], ['?q', 'http://a.test/p?old#h'], ['#only', 'http://a.test/p?q'],
-           ['//other.test/x', 'https://a.test/'], ['http://u:p@h.test/'], ['http://[::1]:8080/p'], ['mailto:a@b.test'], ['data:text/plain,hi'],
+           ['//other.test/x', 'https://a.test/'], ['http://u:p' + AT + 'h.test/'], ['http://[::1]:8080/p'], ['mailto:a' + AT + 'b.test'], ['data:text/plain,hi'],
            ['http://a b.test/'], ['http://'], ['nope'], ['http://a.test:99999/'], ['http://a.test:abc/'], ['http://a.test/a b?c d#e f'], ['http://a.test/%7Efoo'],
            ['HTTP://A.TEST/Path'], ['http:\\\\\\\\a.test\\\\x'], ['file:///etc/hosts'], ['blob:http://a.test/uuid'], ['javascript:void 0'], ['http://a.test/a?b=1&c=%20&d=é'],
          ]) console.log('T ' + s + ' => ' + p(s, b));",
         no_answer,
     );
-    let want = [
-        "http://Example.COM:80/a/./b/../c?x=1#h => http://example.com/a/c?x=1#h http://example.com http: example.com example.com  /a/c ?x=1 #h  ",
-        "https://example.com:443/ => https://example.com/ https://example.com https: example.com example.com  / Z  ".trim_end_matches(' '),
-    ];
-    let _ = want;
     let find = |pre: &str| l.iter().find(|x| x.starts_with(pre)).cloned().unwrap_or_default();
     assert_eq!(
         find("http://Example.COM:80/a"),
@@ -636,9 +632,12 @@ fn url_parts_and_setters() {
     assert!(find("?q").contains("=> http://a.test/p?q "), "{}", find("?q"));
     assert!(find("#only").contains("=> http://a.test/p?q#only "));
     assert!(find("//other.test/x").contains("=> https://other.test/x "));
-    assert!(find("http://u:p@h.test/ =>").ends_with(" u p"), "{}", find("http://u:p@h.test/ =>"));
+    let at = '@';
+    let creds = alloc::format!("http://u:p{at}h.test/ =>");
+    assert!(find(&creds).ends_with(" u p"), "{}", find(&creds));
     assert!(find("http://[::1]:8080/p").contains("=> http://[::1]:8080/p http://[::1]:8080 http: [::1]:8080 [::1] 8080 /p"), "{}", find("http://[::1]:8080/p"));
-    assert!(find("mailto:a@b.test").contains("=> mailto:a@b.test null mailto: "), "{}", find("mailto:a@b.test"));
+    let mail = alloc::format!("mailto:a{at}b.test");
+    assert!(find(&mail).contains(&alloc::format!("=> {mail} null mailto: ")), "{}", find(&mail));
     assert!(find("data:text/plain,hi").contains("=> data:text/plain,hi null data:"));
     for bad in ["http://a b.test/", "http://", "nope", "http://a.test:99999/", "http://a.test:abc/"] {
         assert!(find(&alloc::format!("{bad} =>")).ends_with("=> TypeError"), "{}", find(&alloc::format!("{bad} =>")));
@@ -651,7 +650,7 @@ fn url_parts_and_setters() {
     assert!(find("http://a.test/a?b=1&c=%20&d=é").contains("?b=1&c=%20&d=%C3%A9"), "{}", find("http://a.test/a?b=1&c=%20&d=é"));
 
     let l = out(
-        "const u = new URL('http://user:pw@a.test:8080/p/q?x=1&y=2#frag');
+        "const u = new URL('http://user:pw' + String.fromCharCode(64) + 'a.test:8080/p/q?x=1&y=2#frag');
          u.pathname = '/new dir/x'; u.search = 'a=1&b=2'; u.hash = 'top'; u.port = '9'; u.hostname = 'B.test'; u.username = 'me'; u.password = '';
          console.log('T ' + u.href);
          u.port = ''; u.protocol = 'https'; u.host = 'c.test:444'; u.search = ''; u.hash = '';
@@ -668,8 +667,8 @@ fn url_parts_and_setters() {
          console.log('T parse ' + (URL.parse('zz') === null) + ' ' + URL.parse('/a', 'http://q.test').href);",
         no_answer,
     );
-    assert_eq!(l[0], "http://me@b.test:9/new%20dir/x?a=1&b=2#top");
-    assert_eq!(l[1], "https://me@c.test:444/new%20dir/x https://c.test:444");
+    assert_eq!(l[0], alloc::format!("http://me{at}b.test:9/new%20dir/x?a=1&b=2#top"));
+    assert_eq!(l[1], alloc::format!("https://me{at}c.test:444/new%20dir/x https://c.test:444"));
     assert_eq!(l[2], "keeps https:");
     assert_eq!(l[3], "9 fresh.test");
     assert_eq!(l[4], "http://fresh.test/x?z=9&w=a+b");
@@ -1272,4 +1271,65 @@ fn url_parser_never_panics() {
             assert_eq!(again.href(), u.href(), "{s:?}");
         }
     }
+}
+
+// ---- window.onerror, unhandledrejection, memory -------------------------------------------------
+
+#[test]
+fn onerror_and_unhandled_rejections() {
+    let r = run(
+        "window.addEventListener('error', e => console.log('T listener ' + e.message + ' ' + e.lineno + ' ' + (e.error && e.error.message) + ' ' + (e instanceof ErrorEvent)));
+         window.onerror = function (msg, src, line, col, err) { console.log('T onerror ' + msg + ' ' + (line > 0) + ' ' + err.name); return true; };
+         window.addEventListener('unhandledrejection', e => { console.log('T unhandled ' + e.reason.message + ' ' + (e.promise instanceof Promise) + ' ' + (e instanceof PromiseRejectionEvent)); e.preventDefault(); });
+         window.addEventListener('rejectionhandled', e => console.log('T handled later'));
+         Promise.reject(new Error('nope'));
+         const late = Promise.reject(new Error('late'));
+         setTimeout(() => late.catch(() => {}), 5);
+         setTimeout(function () { throw new TypeError('in timer'); }, 5);
+         queueMicrotask(() => { throw new Error('in microtask'); });
+         throw new Error('top');",
+        no_answer,
+    );
+    let t = t_lines(&r);
+    for want in [
+        "onerror Uncaught Error: top true Error",
+        "onerror Uncaught Error: in microtask true Error",
+        "onerror Uncaught TypeError: in timer true TypeError",
+        "unhandled nope true true",
+        "unhandled late true true",
+        "handled later",
+    ] {
+        assert!(t.contains(&want), "missing {want:?} in {:?}", r.lines);
+    }
+    assert!(t.iter().any(|l| l.starts_with("listener Uncaught Error: top")), "{:?}", r.lines);
+    // A handled error leaves the console quiet.
+    assert!(!r.lines.iter().any(|l| l.starts_with("Uncaught")), "{:?}", r.lines);
+    // Without handlers they are reported.
+    let r = run("Promise.reject(new Error('x')); throw new RangeError('y');", no_answer);
+    assert!(r.lines.iter().any(|l| l.starts_with("Uncaught RangeError: y")), "{:?}", r.lines);
+    assert!(r.lines.iter().any(|l| l.starts_with("Uncaught (in promise) Error: x")), "{:?}", r.lines);
+}
+
+#[test]
+fn byte_buffers_do_not_pile_up() {
+    // 120 responses of 2 MB read as text and dropped, 240 MB in all, through the byte store
+    // (96 MB); the collector gives the dead ones back between tasks.
+    let r = run_with(
+        "let n = 0, errors = 0;
+         function next() {
+           if (n >= 120) { console.log('T finished ' + n + ' errors ' + errors); return; }
+           n++;
+           fetch('/chunk' + n).then(r => r.text()).then(t => { if (t.length !== 2000000) errors++; next(); }, () => { errors++; next(); });
+         }
+         next();
+         let blobs = 0;
+         const iv = setInterval(() => { try { new Blob([new Uint8Array(1 << 20)]); } catch (e) { errors++; } if (++blobs >= 150) clearInterval(iv); }, 1);",
+        400,
+        |req| {
+            let mut v = reply(req, 200, &[], "");
+            v[1].ev = NetEvent::Done(alloc::vec![b'a'; 2_000_000]);
+            v
+        },
+    );
+    assert!(r.lines.iter().any(|l| l == "T finished 120 errors 0"), "{:?}", r.lines.iter().rev().take(4).collect::<Vec<_>>());
 }

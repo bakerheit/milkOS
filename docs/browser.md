@@ -172,6 +172,39 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   timers and listeners go, the page stays as it is), Wait gives it ten more seconds. Pages
   that rebuild their content over and over stay in bounded memory: nodes no script refers to
   are given back when they leave the tree. Background tabs run their timers once a second.
+* **Network requests** (stage 2a): `fetch` with `Request`, `Response` and `Headers` (guards
+  and all), `XMLHttpRequest`, `navigator.sendBeacon`, `AbortController` / `AbortSignal`
+  (`abort(reason)`, `timeout(ms)`, `any([...])`), `URL` and `URLSearchParams`, `Blob`, `File`,
+  `FileReader`, `FormData` (also from a `<form>`), `ReadableStream` (a default reader over a
+  body), `DOMException` and `ProgressEvent`, and `window.onerror` / `error` and
+  `unhandledrejection` events (`ErrorEvent`, `PromiseRejectionEvent`). The classes are written
+  in script (`webengine/src/script/js/*.js`) and compiled the first time a page touches one
+  of the names (until then they are accessors on `window`, so pages that never use them pay
+  nothing); `script/net.rs` is the glue and `script/netbytes.rs` holds byte buffers outside the
+  script heap (a body or a Blob's content never goes through script as numbers; an
+  `ArrayBuffer` is made only when the page asks for one). The engine does no I/O: a request
+  comes out of `Document::take_net` as a `NetRequest`, and the app's answer goes back with
+  `Document::net_event` (head, progress, body, or a failure), one task of the page's event
+  loop each. Choices:
+  * `fetch` resolves when the head arrives (a body that is still coming makes `text()` wait,
+    and an abort rejects it); `response.body` is a `ReadableStream` that gives the whole body
+    as one `Uint8Array` chunk (no streaming of a request body: `new Request(url, {body:
+    stream})` is a TypeError; no `tee` across a locked stream, no `pipeTo`); a failed request
+    rejects with `TypeError: Failed to fetch` (the reason is in `error.cause` and, with the
+    policy's wording, on the console; the page can't tell CORS from a dead server, as on the
+    web).
+  * **Synchronous XHR is refused**: `open(method, url, false)` throws `InvalidAccessError` and
+    the console says why (a blocking request would freeze the tab, and pages run on one
+    thread). `responseType = "document"` is accepted and gives `null` (no HTML parser for
+    scripts yet); `responseText` fills in when the body is complete (`readyState` 3 and
+    `progress` events still come, with `lengthComputable` when the server sent a length).
+  * `data:` and `blob:` (from `URL.createObjectURL`) addresses are answered in the page. A
+    request body is at most 32 MB before the policy's own 4 MiB limit applies; at most 256
+    requests are outstanding per page.
+  * The rules (same-origin policy, CORS, preflight and its cache, credentials, cookies,
+    redirects hop by hop, mixed content, the private-network rule with the address a page was
+    fetched from, limits) are `browserkit::netpolicy`'s; the bindings only shape the API and
+    drop what a script may never set, and the app applies the rules again to everything.
 * **Restyling**: changes are batched until the next frame; only the changed subtrees are
   restyled (a change's parent's subtree, so sibling selectors see it), and the page is laid
   out again once. Hit testing, the focus and form state follow the new tree.
@@ -186,6 +219,18 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   chrome and, through `browserkit::paint`, the display list and the form controls (inside the
   boxes the engine painted); `tab.rs` and `store.rs` (the profile files, written to a
   temporary name and renamed).
+* `request.rs` and `user/scriptnet`: a page's script requests. `scriptnet::run` takes one
+  `NetRequest` through `netpolicy::Exchange` and milkweb hop by hop (redirects are followed by
+  hand so each hop is judged; a preflight is an OPTIONS before the request; the head is
+  announced as soon as it is known; every resolved address is checked before connecting, so a
+  public page can't reach the local network through a name that points there). `net.rs` runs
+  each one on a worker thread (`Kind::Request`, up to eight at once besides the six for pages,
+  so a long poll can't keep a page from loading), `request.rs` keeps the tab's limits and
+  queue (`netpolicy::Limiter`, cleared when the tab shows another page, and their jobs
+  cancelled), delivers the answers to the page as tasks, logs each request on the serial line
+  and in the console panel's Network list (click its label), and the tab shows a small dot
+  while requests are outstanding. A request belongs to the page that made it: navigating or
+  closing the tab cancels it and drops its answers.
 * `js.rs`: the pages' scripts: the `ScriptHost` (clock, cookies, storage, dialogs, the slow
   bar), running each tab's scripts and animation frames, what scripts ask for, the console.
 * `open URL` while the Browser runs: the desktop appends the address to
@@ -223,7 +268,25 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   defer, module, document.write, DOMContentLoaded, load), storage and cookies, a runaway
   `while (true)` stopped from the slow bar, and the JavaScript switch, from the console
   lines, the server's log and screenshots.
-* `scripts/webengine-test.sh` also covers the DOM changes (fragment parsing, serializing,
+* `scripts/fetch-test.sh` (default set, about a minute): a VM against
+  `scripts/fetch_test_servers.py` (a DNS zone with `www.milk.test`, `api.milk.test` (the same
+  site, another origin) and `other.test` (another site), and a web server that sets and checks
+  CORS headers; 127.0.0.1 only) and the pages in `tests/fetch`: same-origin `fetch` (bodies of
+  every kind, redirects, errors, abort and timeout, a response over the limit, cookies hidden
+  and sent, ten in parallel, `sendBeacon`, `unhandledrejection`), `XMLHttpRequest` (event
+  order, `responseType`s, progress, upload, timeout, abort, errors, synchronous XHR refused),
+  cross-origin `fetch` (Allow-Origin, exposed headers, preflight and its cache, a denied
+  preflight, credentials with cookies, no third-party cookies, `no-cors`, redirects), and a
+  page that loads JSON and builds itself with script (screenshots), with the Network list.
+  Mixed content (an https page asking for http) is covered by `scriptnet-unit` only: the VM
+  has no https test server.
+* `scripts/scriptnet-test.sh` (`scriptnet-unit`, smoke): `user/scriptnet` against a fake web
+  and the real policy: methods and bodies on the wire, CORS and preflight, credentials,
+  redirects hop by hop, cookies, the private-network and rebinding refusals, mixed content,
+  size and time limits, cancelling.
+* `scripts/webengine-test.sh` also covers the network bindings (`src/tests/nettest.rs`, over a
+  fake network: every class's behaviour, request shapes, answers out of order or for nobody,
+  limits, a fuzz of the parsers from script) and the DOM changes (fragment parsing, serializing,
   incremental restyling checked against a fresh parse and a full restyle, form state across
   tree changes) and the bindings (`src/tests/script.rs`: the DOM, events, forms, timers,
   storage, location, focus, bounded memory under churn; `src/tests/scripts.rs`: script
@@ -235,9 +298,11 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
 
 * Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
   there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
-* JavaScript is stage 1: no modules, fetch / XMLHttpRequest, canvas, workers or
-  MutationObserver callbacks (the observers exist and never call back); layout after a
-  change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
+* JavaScript has no modules, WebSockets, canvas, workers or `ReadableStream` request bodies;
+  `fetch` has no HTTP cache (`cache` modes only set headers) and no `integrity` check; hosts
+  with non-ASCII names aren't looked up (no IDNA); `URL` is a good WHATWG subset, not the whole
+  parser. MutationObserver callbacks never run (the observers exist and never call back);
+  layout after a change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
   don't apply.
 * No `<iframe>`, no HTTP cache or HTTP/2, no file upload in forms, no
   `<video>` / `<audio>`; arithmetic-coded or 12-bit JPEG, colour profiles.

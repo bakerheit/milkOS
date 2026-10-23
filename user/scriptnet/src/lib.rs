@@ -213,7 +213,7 @@ pub fn request_init(req: &NetRequest) -> Result<RequestInit, NetError> {
     let mut init = RequestInit::new(&req.url);
     init.method = method;
     init.headers = headers;
-    init.body = (!req.body.is_empty()).then(|| BodyInfo {
+    init.body = (!req.body.is_empty()).then_some(BodyInfo {
         len: req.body.len(),
         content_type: None,
     });

@@ -12,7 +12,6 @@ use browserkit::cookies::{Context, Jar};
 use browserkit::netpolicy::{Config, Page, PreflightCache};
 use milkweb::http::{Error, Net, Transport};
 use milkweb::url::Url;
-use webengine::*;
 
 use super::*;
 

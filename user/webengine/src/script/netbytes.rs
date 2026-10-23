@@ -47,14 +47,6 @@ impl Store {
         }
     }
 
-    /// Bytes alive, and how many buffers (for the tests and the stats).
-    pub fn live(&self) -> usize {
-        self.total
-    }
-
-    pub fn count(&self) -> usize {
-        self.items.len()
-    }
 }
 
 pub struct BytesClass {
@@ -229,7 +221,7 @@ pub fn define_natives(b: &Rc<Bridge>, r: &mut Realm, n: Value) -> JsResult<()> {
                 x.iter().map(|&c| crate::charset::windows1252(c)).collect()
             }
             "utf-16le" | "utf-16" => {
-                let units: Vec<u16> = x.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                let units: Vec<u16> = x.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
                 String::from_utf16_lossy(&units)
             }
             _ => decode_utf8(&x),

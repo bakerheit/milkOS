@@ -190,12 +190,9 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
         Ok(Value::UNDEFINED)
     })?;
     // parseUrl(href, base?) -> the parts of the address, or null.
-    let b2 = b.clone();
-    r.define_method(n, "parseUrl", 2, move |r, _t, a| {
+    r.define_method(n, "parseUrl", 2, |r, _t, a| {
         let href = arg_str(r, a, 0)?;
         let base = if arg(a, 1).is_undefined() { None } else { Some(arg_str(r, a, 1)?) };
-        let base = base.or_else(|| None);
-        let _ = &b2;
         match parse_url(&href, base.as_deref()) {
             Some(u) => url_object(r, &u),
             None => Ok(Value::NULL),

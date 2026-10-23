@@ -488,7 +488,18 @@ impl Desktop {
         theme::set_dark(pr.dark);
         crate::sysfont::set_current(pr.font);
         theme::set_dock_icon(pr.dock);
-        let Some(wp) = Wallpaper::new(pr.wallpaper_kind()) else {
+        // A photograph that no longer loads (file gone, damaged): the default wallpaper.
+        let wp = Wallpaper::new(pr.wallpaper_kind()).or_else(|| {
+            kprintln!(
+                "wm: wallpaper {} did not load, using the default",
+                pr.wallpaper_kind().key()
+            );
+            let mut def = pr;
+            def.wallpaper = None;
+            prefs::set(def);
+            Wallpaper::new(def.wallpaper_kind())
+        });
+        let Some(wp) = wp else {
             return Err(fb);
         };
         kprintln!(
@@ -967,19 +978,32 @@ impl Desktop {
     }
 
     /// Apply new preferences (theme, wallpaper, brightness, dock size) and save them.
-    fn apply_prefs(&mut self, p: prefs::Prefs) {
+    fn apply_prefs(&mut self, mut p: prefs::Prefs) {
         let old = prefs::get();
-        prefs::set(p);
-        prefs::save(&p);
         if p.dark != old.dark {
             theme::set_dark(p.dark);
         }
         if p.dark != old.dark || p.wallpaper_kind() != old.wallpaper_kind() {
-            match Wallpaper::new(p.wallpaper_kind()) {
-                Some(wp) => self.wp = wp,
-                None => self.post_toast("Out of memory", "for the new wallpaper"),
+            let mut made = Wallpaper::new(p.wallpaper_kind());
+            if made.is_none() && p.wallpaper_kind().is_photo() {
+                // The picture did not load: keep the wallpaper that was shown (or, if that is
+                // the one that fails, the theme's own) and do not remember the choice.
+                self.post_toast("Can't load that wallpaper", "keeping the previous one");
+                p.wallpaper = if old.wallpaper == p.wallpaper {
+                    None
+                } else {
+                    old.wallpaper
+                };
+                made = Wallpaper::new(p.wallpaper_kind());
+            } else if made.is_none() {
+                self.post_toast("Out of memory", "for the new wallpaper");
+            }
+            if let Some(wp) = made {
+                self.wp = wp;
             }
         }
+        prefs::set(p);
+        prefs::save(&p);
         if p.dock != old.dock {
             theme::set_dock_icon(p.dock);
         }

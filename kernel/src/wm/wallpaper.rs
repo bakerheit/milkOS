@@ -5,6 +5,10 @@
 //! when its panel is rendered ([`Wallpaper::glass`]), instead of keeping a second tinted
 //! full-screen copy; the panels redrawn every frame (dock, menu bar) use the copy as is.
 //! Integer maths only (the target is soft-float).
+//!
+//! The six photographs are not baked in (raw RGB, they would add about 14 MB to the kernel):
+//! they are JPEG files in /System/Wallpapers, decoded (imgdec) and scaled to the screen when one
+//! is chosen. Their glass is 75% milk (illustrated wallpapers: 55%) to keep text on it readable.
 
 use crate::gfx::{Color, DrawTarget, Rect, blend, rgb};
 use crate::pmm::Use;
@@ -20,13 +24,21 @@ pub struct Wallpaper {
     glass: Buffer,
     /// The milk blended over Wb (`theme::tc(MILK)` when this wallpaper was made).
     milk: Color,
+    /// Milk over the stronger glass (launcher, control centre) on top of `glass`.
+    strong_over: u8,
 }
 
-/// Milk over the 0.55 glass that makes it the 0.7 one: 1 - (1 - 0.7) / (1 - 0.55), rounded
-/// (within one level of blending 0.7 over Wb directly).
-const STRONG_OVER_GLASS: u8 = ((255 * (GLASS_STRONG_A as u32 - GLASS_A as u32)
-    + (255 - GLASS_A as u32) / 2)
-    / (255 - GLASS_A as u32)) as u8;
+/// Milk over glass of strength `glass` that makes it the stronger `strong`: 1 - (1 - strong) /
+/// (1 - glass), rounded (within one level of blending `strong` over Wb directly).
+const fn strong_over(glass: u8, strong: u8) -> u8 {
+    ((255 * (strong as u32 - glass as u32) + (255 - glass as u32) / 2) / (255 - glass as u32)) as u8
+}
+
+/// The illustrated wallpapers' glass: 0.55, and 0.7 for the launcher and control centre.
+const STRONG_OVER_GLASS: u8 = strong_over(GLASS_A, GLASS_STRONG_A);
+/// The photographs' glass: 0.75 (the contrast rule needs it), and 0.85 for the stronger panels.
+const PHOTO_GLASS_A: u8 = a(750);
+const PHOTO_STRONG_OVER_GLASS: u8 = strong_over(PHOTO_GLASS_A, a(850));
 
 /// How much milk a glass panel has over the blur.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,30 +54,92 @@ pub enum Kind {
     Dawn,
     Night,
     Oat,
+    BelfastSunset,
+    BellParkDawn,
+    AarfonteinSunrise,
+    MistyDawnField,
+    DuskPasture,
+    CowsAndTrees,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 3] = [Kind::Dawn, Kind::Night, Kind::Oat];
+    pub const ALL: [Kind; 9] = [
+        Kind::Dawn,
+        Kind::Night,
+        Kind::Oat,
+        Kind::BelfastSunset,
+        Kind::BellParkDawn,
+        Kind::AarfonteinSunrise,
+        Kind::MistyDawnField,
+        Kind::DuskPasture,
+        Kind::CowsAndTrees,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Kind::Dawn => "Dawn pasture",
             Kind::Night => "Night pasture",
             Kind::Oat => "Oat",
+            Kind::BelfastSunset => "Belfast Sunset",
+            Kind::BellParkDawn => "Bell Park Dawn",
+            Kind::AarfonteinSunrise => "Aarfontein Sunrise",
+            Kind::MistyDawnField => "Misty Dawn Field",
+            Kind::DuskPasture => "Dusk Pasture",
+            Kind::CowsAndTrees => "Cows and Trees",
         }
     }
 
+    /// The name in the settings file, and (for a photograph) the file in /System/Wallpapers.
     pub fn key(self) -> &'static str {
         match self {
             Kind::Dawn => "dawn",
             Kind::Night => "night",
             Kind::Oat => "oat",
+            Kind::BelfastSunset => "belfast-sunset",
+            Kind::BellParkDawn => "bell-park-dawn",
+            Kind::AarfonteinSunrise => "aarfontein-sunrise",
+            Kind::MistyDawnField => "misty-dawn-field",
+            Kind::DuskPasture => "dusk-pasture",
+            Kind::CowsAndTrees => "cows-and-trees",
         }
+    }
+
+    /// A photograph (loaded from a file when chosen), not an illustrated wallpaper.
+    pub fn is_photo(self) -> bool {
+        !matches!(self, Kind::Dawn | Kind::Night | Kind::Oat)
     }
 }
 
-/// Draw wallpaper `kind` full screen into `b` (also used for the Settings previews).
-pub fn paint(b: &mut Buffer, kind: Kind) {
+/// A photograph's file, decoded and scaled to cover `b` (the picture is centred, the rest cropped).
+/// False if the file is missing or does not decode: `b` is then untouched.
+fn paint_photo(b: &mut Buffer, kind: Kind) -> bool {
+    let path = alloc::format!("/System/Wallpapers/{}.jpg", kind.key());
+    let Ok(bytes) = crate::fs::read_file(&path) else {
+        crate::kprintln!("wm: wallpaper {}: cannot read {}", kind.key(), path);
+        return false;
+    };
+    let img = match imgdec::decode(&bytes) {
+        Ok(i) => i,
+        Err(e) => {
+            crate::kprintln!("wm: wallpaper {}: cannot decode ({:?})", kind.key(), e);
+            return false;
+        }
+    };
+    drop(bytes);
+    if img.w == 0 || img.h == 0 || img.px.len() < img.w * img.h {
+        return false;
+    }
+    let (w, h, stride) = (b.w() as usize, b.h() as usize, b.stride());
+    crate::art::scale_cover(&img.px, img.w, img.w, img.h, b.pixels_mut(), stride, w, h);
+    true
+}
+
+/// Draw wallpaper `kind` full screen into `b` (also used for the Settings previews). False
+/// only for a photograph that could not be loaded (`b` untouched).
+pub fn paint(b: &mut Buffer, kind: Kind) -> bool {
+    if kind.is_photo() {
+        return paint_photo(b, kind);
+    }
     // The artist's wallpaper (crate::art), scaled to cover this size; the drawn one if
     // there is none. Decoded straight into `b`, or (another size) into frames freed right
     // after: a full-screen temporary on the kernel heap would stay with the heap for good.
@@ -74,20 +148,21 @@ pub fn paint(b: &mut Buffer, kind: Kind) {
         let (sw, sh) = (a.w as usize, a.h as usize);
         if (sw, sh) == (w, h) {
             a.decode_rows(b.pixels_mut(), stride);
-            return;
+            return true;
         }
         if let Some(mut src) = Buffer::new(Use::Wallpaper, sw, sh, 0) {
             let ss = src.stride();
             a.decode_rows(src.pixels_mut(), ss);
             crate::art::scale_cover(src.pixels(), ss, sw, sh, b.pixels_mut(), stride, w, h);
-            return;
+            return true;
         }
     }
     match kind {
         Kind::Dawn => draw(b),
         Kind::Night => draw_night(b),
-        Kind::Oat => draw_oat(b),
+        _ => draw_oat(b),
     }
+    true
 }
 
 impl Wallpaper {
@@ -95,7 +170,20 @@ impl Wallpaper {
     pub fn new(kind: Kind) -> Option<Wallpaper> {
         let (w, h) = (screen_w() as usize, screen_h() as usize);
         let mut sharp = Buffer::new(Use::Wallpaper, w, h, 0)?;
-        paint(&mut sharp, kind);
+        let t0 = crate::timer::now_ns();
+        if !paint(&mut sharp, kind) {
+            return None;
+        }
+        if kind.is_photo() {
+            let heap = crate::heap::stats();
+            crate::kprintln!(
+                "wm: wallpaper {}: loaded in {} ms (kernel heap {} KiB used of {} KiB)",
+                kind.key(),
+                (crate::timer::now_ns() - t0) / 1_000_000,
+                heap.used / 1024,
+                heap.total / 1024
+            );
+        }
         let mut glass = Buffer::new(Use::Wallpaper, w, h, 0)?;
         copy(&sharp, &mut glass);
         for _ in 0..BLUR_PASSES {
@@ -103,15 +191,25 @@ impl Wallpaper {
             blur_cols(&mut glass, BLUR_RADIUS);
         }
         let milk = tc(MILK);
-        tint(&mut glass, milk, GLASS_A);
-        Some(Wallpaper { sharp, glass, milk })
+        let (glass_a, strong_over) = if kind.is_photo() {
+            (PHOTO_GLASS_A, PHOTO_STRONG_OVER_GLASS)
+        } else {
+            (GLASS_A, STRONG_OVER_GLASS)
+        };
+        tint(&mut glass, milk, glass_a);
+        Some(Wallpaper {
+            sharp,
+            glass,
+            milk,
+            strong_over,
+        })
     }
 
     /// Paint the glass under the screen rect `src` at (x, y) of `p`, at `strength`.
     pub fn glass(&self, p: &mut Painter, x: i32, y: i32, src: Rect, strength: Glass) {
         match strength {
             Glass::Normal => p.blit(x, y, &self.glass, src.x, src.y, src.w, src.h),
-            Glass::Strong => p.blit_tinted(x, y, &self.glass, src, self.milk, STRONG_OVER_GLASS),
+            Glass::Strong => p.blit_tinted(x, y, &self.glass, src, self.milk, self.strong_over),
         }
     }
 }

@@ -96,3 +96,11 @@
 /System/Fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt  assets/fonts/ATKINSON-HYPERLEGIBLE-NEXT-OFL.txt               644
 /System/Fonts/UBUNTU-SANS-UFL.txt                 assets/fonts/UBUNTU-SANS-UFL.txt                              644
 /System/Fonts/UNIFONT-LICENSE.txt                 assets/fonts/UNIFONT-LICENSE.txt                              644
+
+# The photo wallpapers (wm/wallpaper.rs decodes the chosen one): the art folder's files as they are.
+/System/Wallpapers/belfast-sunset.jpg  docs/ui-concepts/art/wallpapers-photos/belfast-sunset-1024x768.jpg  644
+/System/Wallpapers/bell-park-dawn.jpg  docs/ui-concepts/art/wallpapers-photos/bell-park-dawn-1024x768.jpg  644
+/System/Wallpapers/aarfontein-sunrise.jpg  docs/ui-concepts/art/wallpapers-photos/aarfontein-sunrise-1024x768.jpg  644
+/System/Wallpapers/misty-dawn-field.jpg  docs/ui-concepts/art/wallpapers-photos/misty-dawn-field-1024x768.jpg  644
+/System/Wallpapers/dusk-pasture.jpg  docs/ui-concepts/art/wallpapers-photos/dusk-pasture-1024x768.jpg  644
+/System/Wallpapers/cows-and-trees.jpg  docs/ui-concepts/art/wallpapers-photos/cows-and-trees-1024x768.jpg  644

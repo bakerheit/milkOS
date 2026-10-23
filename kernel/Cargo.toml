@@ -22,6 +22,9 @@ milkweb = { path = "../milkweb" }
 # The rules behind files and the Trash, shared with user space (pure, host-tested):
 # <repo>/user/filekit.
 filekit = { path = "../user/filekit" }
+# Image decoders (no_std, host-tested): <repo>/user/imgdec. The photo wallpapers are JPEG files
+# decoded when chosen (wm/wallpaper.rs).
+imgdec = { path = "../user/imgdec" }
 # The system fonts' blob format, fallback and measuring, shared with user space (appkit's
 # text; pure, host-tested): <repo>/user/fontkit.
 fontkit = { path = "../user/fontkit" }

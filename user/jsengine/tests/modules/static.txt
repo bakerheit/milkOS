@@ -233,3 +233,17 @@ log('ok');
 /* nor here */
 //# expect
 ok
+
+//# case: console rendering of a namespace
+//# oracle: no
+//# file: main.js
+import * as ns from './m.js';
+log(ns);
+log({ ns });
+//# file: m.js
+export const a = 1;
+export const b = 'two';
+export default [1, 2];
+//# expect
+[Module: null prototype] { a: 1, b: 'two', default: [1, 2] }
+{ns: [Module: null prototype] { a: 1, b: 'two', default: [1, 2] }}

@@ -7,4 +7,6 @@ mod conformance;
 mod embed;
 mod fuzz;
 mod limits;
+mod module_api;
+mod module_fuzz;
 mod modules;

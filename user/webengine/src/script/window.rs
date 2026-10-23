@@ -1105,59 +1105,6 @@ fn match_media(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     Ok(o)
 }
 
-fn b64_encode(r: &mut Realm, a: &[Value]) -> JsResult<Value> {
-    let units = {
-        let s = arg(a, 0);
-        let s = r.to_string(s)?;
-        s.encode_utf16().collect::<Vec<u16>>()
-    };
-    if units.iter().any(|&u| u > 255) {
-        return Err(dom_error(r, "InvalidCharacterError", "btoa: characters outside Latin-1"));
-    }
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let bytes: Vec<u8> = units.iter().map(|&u| u as u8).collect();
-    let mut o = String::new();
-    for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        o.push(T[(n >> 18) as usize & 63] as char);
-        o.push(T[(n >> 12) as usize & 63] as char);
-        o.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        o.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    Ok(r.string(&o))
-}
-
-fn b64_decode(r: &mut Realm, a: &[Value]) -> JsResult<Value> {
-    let s = arg_str(r, a, 0)?;
-    let s: String = s.chars().filter(|c| !crate::dom::is_html_space(*c)).collect();
-    let s = s.trim_end_matches('=');
-    let val = |c: char| -> Option<u32> {
-        Some(match c {
-            'A'..='Z' => c as u32 - 'A' as u32,
-            'a'..='z' => c as u32 - 'a' as u32 + 26,
-            '0'..='9' => c as u32 - '0' as u32 + 52,
-            '+' => 62,
-            '/' => 63,
-            _ => return None,
-        })
-    };
-    let mut units: Vec<u16> = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    for c in s.chars() {
-        let Some(v) = val(c) else {
-            return Err(dom_error(r, "InvalidCharacterError", "atob: not base64"));
-        };
-        acc = acc << 6 | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            units.push(((acc >> bits) & 255) as u16);
-        }
-    }
-    Ok(r.string_utf16(&units))
-}
-
 /// Stand-ins for observers pages feature-detect (they never call back).
 fn observer_stub(r: &mut Realm, g: Value, name: &str) -> JsResult<()> {
     let proto = r.new_object();
@@ -1591,8 +1538,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         Ok(r.new_host_object(b.classes().computed, n as u64, p))
     })?;
     method(b, r, g, "matchMedia", 1, |b, r, _t, a| match_media(b, r, a))?;
-    r.define_method(g, "btoa", 1, |r, _t, a| b64_encode(r, a))?;
-    r.define_method(g, "atob", 1, |r, _t, a| b64_decode(r, a))?;
     method(b, r, g, "getSelection", 0, |_b, r, _t, _a| {
         let o = r.new_object();
         r.define(o, "rangeCount", Value::int(0), Attrs::ENUMERABLE)?;
@@ -1602,12 +1547,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         }
         r.define_method(o, "toString", 0, |r, _t, _a| Ok(r.string("")))?;
         Ok(o)
-    })?;
-    r.define_method(g, "structuredClone", 1, |r, _t, a| {
-        match r.json_stringify(arg(a, 0))? {
-            Some(s) => r.json_parse(&s),
-            None => Ok(Value::UNDEFINED),
-        }
     })?;
     // new Image(w, h), new Option(text, value, defaultSelected, selected).
     let b2 = b.clone();

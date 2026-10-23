@@ -126,6 +126,8 @@ js_files!(
     "async2.js",
     "realworld.js",
     "typed.js",
+    "encoding.js",
+    "clone.js",
 );
 
 #[test]

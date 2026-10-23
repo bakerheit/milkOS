@@ -235,7 +235,12 @@ impl Realm {
             } else {
                 if !was_handled {
                     self.pending_rejections.retain(|x| *x != p);
-                    self.unhandled_retract(result);
+                    self.unhandled
+                        .retain(|(q, _)| !matches!(q, Val::Obj(o) if *o == p));
+                    if let Some(i) = self.reported.iter().position(|x| *x == p) {
+                        self.reported.swap_remove(i);
+                        self.late_handled.push(p);
+                    }
                 }
                 self.jobs.push_back(Job::Reaction {
                     reaction: rr,
@@ -244,8 +249,6 @@ impl Realm {
             }
         }
     }
-
-    fn unhandled_retract(&mut self, _reason: Val) {}
 
     /// Moves rejections still unhandled into the report list.
     pub(crate) fn track_rejections(&mut self) {
@@ -256,7 +259,7 @@ impl Realm {
                 && d.state == PState::Rejected
             {
                 let r = d.result;
-                self.unhandled.push(r);
+                self.unhandled.push((Val::Obj(p), r));
             }
         }
     }

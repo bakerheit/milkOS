@@ -2,6 +2,7 @@
 //! installs one family; this file has the shared helpers and the order they are made in.
 
 pub(crate) mod array;
+pub(crate) mod clone;
 pub(crate) mod date;
 pub(crate) mod encoding;
 pub(crate) mod error;
@@ -248,5 +249,6 @@ pub(crate) fn init(r: &mut Realm) {
     date::init(r);
     typedarray::init(r);
     encoding::init(r);
+    clone::init(r);
     global::init(r);
 }

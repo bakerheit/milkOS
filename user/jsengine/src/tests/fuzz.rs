@@ -653,6 +653,201 @@ fn program(rng: &mut Rng) -> String {
     g.out
 }
 
+/// Programs over ArrayBuffer, typed arrays, DataView, TextEncoder/Decoder, atob/btoa and
+/// structuredClone, with hostile arguments (huge or negative lengths, NaN, objects whose
+/// valueOf detaches a buffer, callbacks that throw).
+fn typed_program(rng: &mut Rng) -> String {
+    const KINDS: &[&str] = &[
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
+    ];
+    const NUMS: &[&str] = &[
+        "0",
+        "1",
+        "2",
+        "3",
+        "7",
+        "16",
+        "-1",
+        "-3",
+        "1.5",
+        "NaN",
+        "Infinity",
+        "-Infinity",
+        "1e10",
+        "2**32",
+        "2**31",
+        "'2'",
+        "'x'",
+        "null",
+        "undefined",
+        "true",
+        "-0",
+        "255",
+        "256",
+        "65536",
+        "1e300",
+        "{ valueOf() { return 2 } }",
+        "{ valueOf() { buf.transfer(); return 1 } }",
+        "{ valueOf() { throw new RangeError('v') } }",
+        "Symbol()",
+    ];
+    const CTOR_ARGS: &[&str] = &[
+        "",
+        "0",
+        "4",
+        "16",
+        "-1",
+        "1e10",
+        "NaN",
+        "'3'",
+        "[1, 2, 3]",
+        "[1.5, -2, 300, NaN]",
+        "{ length: 3, 0: 1 }",
+        "{ length: 1e10 }",
+        "buf",
+        "buf, 4",
+        "buf, 4, 2",
+        "buf, 3",
+        "buf, 0, 100",
+        "u8",
+        "f64",
+        "new Set([1, 2])",
+        "'abc'",
+        "{}",
+        "null",
+        "Symbol()",
+        "{ [Symbol.iterator]() { throw 1 } }",
+        "{ length: 2, get 0() { buf.transfer(); return 5 } }",
+    ];
+    const METHODS: &[&str] = &[
+        "at",
+        "copyWithin",
+        "entries",
+        "every",
+        "fill",
+        "filter",
+        "find",
+        "findIndex",
+        "findLast",
+        "findLastIndex",
+        "forEach",
+        "includes",
+        "indexOf",
+        "join",
+        "keys",
+        "lastIndexOf",
+        "map",
+        "reduce",
+        "reduceRight",
+        "reverse",
+        "set",
+        "slice",
+        "some",
+        "sort",
+        "subarray",
+        "toLocaleString",
+        "toString",
+        "values",
+        "toReversed",
+        "toSorted",
+        "with",
+    ];
+    const FNS: &[&str] = &[
+        "(x, i) => x + i",
+        "(a, b) => b - a",
+        "(a, b) => { buf.transfer(); return 0 }",
+        "() => { throw new TypeError('cb') }",
+        "x => x > 1",
+        "(a, b) => NaN",
+        "function () { return this }",
+    ];
+    let mut out = String::from(
+        "var buf = new ArrayBuffer(16), u8 = new Uint8Array(buf), f64 = new Float64Array(4), t, d, r;\n",
+    );
+    let n = 3 + rng.below(12);
+    for _ in 0..n {
+        let kind = rng.pick(KINDS);
+        let args = rng.pick(CTOR_ARGS);
+        out.push_str("try { ");
+        match rng.below(10) {
+            0..=4 => {
+                out.push_str(&alloc::format!("t = new {kind}({args}); "));
+                for _ in 0..1 + rng.below(3) {
+                    let m = rng.pick(METHODS);
+                    let a1 = if rng.chance(40) { rng.pick(FNS) } else { rng.pick(NUMS) };
+                    let a2 = rng.pick(NUMS);
+                    let a3 = rng.pick(NUMS);
+                    out.push_str(&alloc::format!(
+                        "try {{ r = t.{m}({a1}, {a2}, {a3}); String(r); if (r && r.next) {{ r.next(); [...r]; }} }} catch (e) {{ String(e) }} "
+                    ));
+                }
+                let i = rng.pick(NUMS);
+                let v = rng.pick(NUMS);
+                out.push_str(&alloc::format!("t[{i}] = {v}; r = t[{i}]; delete t[{i}]; ({i}) in t; Object.keys(t).length; "));
+            }
+            5 => {
+                let m = rng.pick(&[
+                    "getInt8", "getUint8", "getInt16", "getUint16", "getInt32", "getUint32",
+                    "getFloat32", "getFloat64", "setInt8", "setUint8", "setInt16", "setUint16",
+                    "setInt32", "setUint32", "setFloat32", "setFloat64",
+                ]);
+                let a = rng.pick(NUMS);
+                let b = rng.pick(NUMS);
+                let c = rng.pick(NUMS);
+                out.push_str(&alloc::format!(
+                    "d = new DataView(buf, {a}, {b}); d.{m}({b}, {a}, {c}); d.byteLength; d.byteOffset; "
+                ));
+            }
+            6 => {
+                let a = rng.pick(NUMS);
+                let b = rng.pick(NUMS);
+                out.push_str(&alloc::format!(
+                    "buf.slice({a}, {b}); new ArrayBuffer({a}); buf.transfer({b}); buf = new ArrayBuffer(16); u8 = new Uint8Array(buf); "
+                ));
+            }
+            7 => {
+                let a = rng.pick(&[
+                    "u8", "buf", "new Uint8Array(0)", "new Uint8Array([0xff, 0xfe, 0xfd])",
+                    "new Uint8Array([0xe2, 0x82])", "new Uint8Array([0xf0, 0x9f, 0x98, 0x80])",
+                    "new Uint16Array([0xd800])", "'str'", "null", "[1]", "f64",
+                ]);
+                let label = rng.pick(&["'utf-8'", "'utf-16le'", "'latin1'", "'bogus'", "undefined"]);
+                let opts = rng.pick(&["{}", "{ fatal: true }", "{ ignoreBOM: true }", "undefined"]);
+                out.push_str(&alloc::format!(
+                    "d = new TextDecoder({label}, {opts}); d.decode({a}, {{ stream: true }}); d.decode({a}); d.decode(); \
+                     new TextEncoder().encode(String(r)); new TextEncoder().encodeInto('a\\u{{d800}}\\u{{1f600}}', {a}); "
+                ));
+            }
+            8 => {
+                let a = rng.pick(&[
+                    "''", "'abc'", "'YWJj'", "'YWJj='", "'YW=Jj'", "'\\xff'", "'\\u0100'", "' Y W J j '",
+                    "'a'", "'!!!!'", "String(r)", "'A'.repeat(1000)", "undefined",
+                ]);
+                out.push_str(&alloc::format!("try {{ atob({a}) }} catch (e) {{}} try {{ btoa({a}) }} catch (e) {{}} "));
+            }
+            _ => {
+                let a = rng.pick(&[
+                    "u8", "buf", "f64.subarray(1)", "new DataView(buf, 2, 4)", "[u8, buf]",
+                    "{ a: u8, b: { c: buf } }", "new Map([[1, u8]])", "[new Date(0), /x/g, new Error('e')]",
+                    "function () {}", "Symbol()", "{ get x() { throw 1 } }", "new Set([buf])",
+                ]);
+                let o = rng.pick(&["undefined", "{ transfer: [buf] }", "{ transfer: [u8] }", "{ transfer: [] }", "{ transfer: [buf, buf] }", "null"]);
+                out.push_str(&alloc::format!("r = structuredClone({a}, {o}); String(r); "));
+            }
+        }
+        out.push_str("} catch (e) { String(e) }\n");
+    }
+    out
+}
+
 fn run_case(src: &str) {
     let mut r = Realm::new(Options::default());
     r.set_limits(Limits {
@@ -740,6 +935,58 @@ fn fuzz_mutated_tests() {
                 .collect();
             mutate(rng, &window)
         });
+    });
+}
+
+#[test]
+fn fuzz_typed_programs() {
+    on_big_stack(|| fuzz_with("typed", &typed_program));
+}
+
+/// The generator makes valid programs (so the fuzzing exercises the builtins, not the parser)
+/// that do run to the end often enough.
+#[test]
+fn typed_programs_are_valid() {
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0x1234);
+        let mut bad = 0;
+        let mut r = Realm::new(Options::default());
+        for _ in 0..300 {
+            let src = typed_program(&mut rng);
+            if let Err(e) = r.check_syntax(&src, "t.js") {
+                bad += 1;
+                if bad == 1 {
+                    std::println!("{e}\n{src}");
+                }
+            }
+        }
+        assert_eq!(bad, 0, "generated programs with syntax errors");
+    });
+}
+
+/// The typed-array programs under GC stress as well.
+#[test]
+fn fuzz_typed_gc_stress() {
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0x77aa);
+        for i in 0..iters() / 4 {
+            let src = typed_program(&mut rng);
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut r = Realm::new(Options::default());
+                r.heap.stress = 2;
+                r.set_limits(Limits {
+                    max_heap_bytes: 8 << 20,
+                    max_steps: 100_000,
+                    max_call_depth: 200,
+                    ..Limits::default()
+                });
+                let _ = r.eval(&src, "fuzz.js");
+                let _ = r.run_jobs();
+            }));
+            if out.is_err() {
+                panic!("typed gc stress case {i} panicked; source:\n{src}");
+            }
+        }
     });
 }
 

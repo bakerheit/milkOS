@@ -556,6 +556,36 @@ impl Realm {
                 out.push('}');
                 return Some(out);
             }
+            ObjKind::Typed(t) => {
+                let (name, total) = (t.kind.name(), t.len);
+                let len = self.typed_len(o);
+                let shown = len.min(100);
+                let _ = write!(out, "{name}({total}) [");
+                for i in 0..shown {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    if let Some(v) = self.typed_get(o, i) {
+                        let mut seen = Vec::new();
+                        self.inspect_into(&mut out, v, depth + 1, false, &mut seen);
+                    }
+                }
+                if len > shown {
+                    let _ = write!(out, ", … {} more", len - shown);
+                }
+                out.push(']');
+                return Some(out);
+            }
+            ObjKind::ArrayBuffer(b) => {
+                let n = b.bytes.len();
+                return Some(alloc::format!("ArrayBuffer {{ byteLength: {n} }}"));
+            }
+            ObjKind::DataView(d) => {
+                let (n, off) = (d.len, d.offset);
+                return Some(alloc::format!(
+                    "DataView {{ byteLength: {n}, byteOffset: {off} }}"
+                ));
+            }
             ObjKind::SymBox(s) => {
                 let s = *s;
                 let d = self.symbol_descriptive(Val::Sym(s));

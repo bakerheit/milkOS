@@ -93,5 +93,5 @@ echo "$st" | grep -q "^loaded .* verified" || bad "index not loaded: $st"
 [ "$(out "$L2" "search narwhal")" = "$G/d000/offline.txt" ] && ok "a file added while off is found (verify scan)" || bad "offline file: $(out "$L2" "search narwhal")"
 $M check "$IMG" > "$T/check.txt" 2>&1 && ok "host check clean" || { bad "host check"; tail -3 "$T/check.txt"; }
 echo
-[ $FAIL = 0 ] && echo "searchtest: PASS ($T)" || echo "searchtest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "searchtest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "searchtest: FAIL ($T)"; fi
 exit $FAIL

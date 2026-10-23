@@ -102,5 +102,5 @@ out "disks list /no/such/path" | grep -q "^disks list: /no/such/path doesn't exi
 out "text show /System/Kernel/fs/milkfs/info" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
 # The kernel's fs self-test isn't part of this boot any more: scripts/selftest-boot.sh runs it.
 echo
-[ $FAIL = 0 ] && echo "dftest: PASS ($T)" || echo "dftest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "dftest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "dftest: FAIL ($T)"; fi
 exit $FAIL

@@ -102,5 +102,5 @@ csz=$(stat -f %z "$COW_SRC")
 [ -n "$r3" ] && [ "$r3" -le "$r1" ] && ok "deleting it frees its pages: RootFiles $r3 kB" || bad "RootFiles after delete: $r3"
 echo "$L" | grep -a -A1 "files info /Commands/cowsay" | grep -aqi "no such\|not found\|doesn't exist" && ok "the deleted built-in file is gone" || bad "cowsay still there: $(echo "$L" | grep -a -A1 "files info /Commands/cowsay")"
 echo
-[ $FAIL = 0 ] && echo "reflinktest: PASS ($T)" || echo "reflinktest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "reflinktest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "reflinktest: FAIL ($T)"; fi
 exit $FAIL

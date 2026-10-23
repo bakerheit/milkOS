@@ -15,6 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 WORK="${1:-$(mktemp -d /tmp/milk-shot-test.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$WORK"
 ok=1
 for demo in shot shotregion; do
@@ -35,4 +36,6 @@ for demo in shot shotregion; do
   if [ "$diff" -le "$limit" ]; then echo "$demo: PASS ($diff px differ, limit $limit)"; else echo "$demo: FAIL ($diff px differ)"; ok=0; fi
 done
 echo "(files in $WORK)"
-[ "$ok" = 1 ] && echo "shot-test: PASS" || { echo "shot-test: FAIL"; exit 1; }
+[ "$ok" = 1 ] || { echo "shot-test: FAIL"; exit 1; }
+[ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ] && { rm -rf "$WORK" || true; }
+echo "shot-test: PASS"

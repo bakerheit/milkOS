@@ -280,4 +280,4 @@ echo "== the old names are gone"
 gone() { echo "$L1" | grep -A1 -F "\$ $1" | grep -Fq "msh: ${1%% *}: command not found" && ok "${1%% *} is gone" || bad "${1%% *} still runs: $(echo "$L1" | grep -A1 -F "\$ $1" | tail -1)"; }
 for c in ps top "kill 1" "svc list" log uname uptime free whoami id passwd su "sudo id" "auth -s"; do gone "$c"; done
 
-[ "$FAIL" = 0 ] && { echo "systools-test: PASS"; rm -rf "$T"; } || { echo "systools-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "systools-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "systools-test: FAIL (logs in $T)"; exit 1; }

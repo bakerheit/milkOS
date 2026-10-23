@@ -322,5 +322,5 @@ cat "$WORK/http.log"
 
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "pkg-test: PASS"

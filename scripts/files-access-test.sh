@@ -270,4 +270,4 @@ gone chmod; gone chown
 check "and not in /Commands" "files info /Commands/chmod /Commands/chown" "/Commands/chmod doesn't exist"
 check "chown too" "files info /Commands/chmod /Commands/chown" "/Commands/chown doesn't exist"
 
-[ "$FAIL" = 0 ] && { echo "files-access-test: PASS"; rm -rf "$T"; } || { echo "files-access-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "files-access-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "files-access-test: FAIL (logs in $T)"; exit 1; }

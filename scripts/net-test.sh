@@ -220,5 +220,5 @@ echo "---- host helper log ----"
 cat "$WORK/servers.log"
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "net-test: PASS"

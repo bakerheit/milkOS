@@ -122,5 +122,5 @@ print(f"recording: {res['seconds']} s, peak {res['peak_dbfs']} dBFS, everything 
 PY
 cleanup
 trap - EXIT
-[ -z "${1:-}" ] && rm -rf "$WORK"
+[ -z "${1:-}" ] && [ "${MILK_KEEP:-}" != 1 ] && rm -rf "$WORK" || true
 echo "audio-test: PASS"

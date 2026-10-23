@@ -75,5 +75,5 @@ echo "$L" | grep -a "^error: block .*data of /Volumes/Milk/docs/old.bin at offse
 echo "$L" | grep -a -A1 "text show /Volumes/Milk/docs/b.bin" | grep -aq "checksum mismatch in block" && ok "reading the damaged file fails its checksum (EIO)" || bad "read of damaged file"
 [ "$(echo "$L" | grep -a "milkfs.scrub.error" | grep -vc "audit --event")" -ge 2 ] && ok "both in the audit log" || bad "audit log"
 echo
-[ $FAIL = 0 ] && echo "scrubtest: PASS ($T)" || echo "scrubtest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "scrubtest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "scrubtest: FAIL ($T)"; fi
 exit $FAIL

@@ -117,4 +117,5 @@ for b in $(seq 1 "$BOOTS"); do
   wait "$qpid" 2>/dev/null
 done
 echo "serial-soak ($PROFILE${MILK_FEATURES:+ +$MILK_FEATURES}, smp $SMP, $BOOTS boots x $CMDS commands): $pass passed, $fail failed. Logs: $LOGS"
-[ "$fail" = 0 ]
+[ "$fail" = 0 ] || exit 1
+[ "${MILK_KEEP:-}" = 1 ] || { rm -rf "$LOGS" || true; echo "(passed: $LOGS removed)"; }

@@ -232,5 +232,5 @@ MILKFS_PASSPHRASE= $M check "$PL" > "$T/check6.txt" 2>&1 < /dev/null && grep -q 
 fi
 
 echo
-[ $FAIL = 0 ] && echo "enctest: PASS ($T)" || echo "enctest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "enctest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "enctest: FAIL ($T)"; fi
 exit $FAIL

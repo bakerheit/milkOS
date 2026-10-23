@@ -285,4 +285,4 @@ check "the other item is still there" "trash list" "keep.txt"
 check "trashd says so in the journal" "services logs trashd" "/Users/milk/.Trash: deleted 1 item for good (after 1 day)"
 check "trashd is a running milkd service" "services status trashd" "running"
 
-[ "$FAIL" = 0 ] && { echo "files-test: PASS"; rm -rf "$T"; } || { echo "files-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "files-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "files-test: FAIL (logs in $T)"; exit 1; }

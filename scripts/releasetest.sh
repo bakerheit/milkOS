@@ -101,5 +101,5 @@ if [ -s "$T/screen.png" ]; then
 else bad "no screendump"; fi
 rm -f "$B/disks/"*.img
 echo
-[ $FAIL = 0 ] && echo "releasetest: PASS ($T)" || echo "releasetest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "releasetest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "releasetest: FAIL ($T)"; fi
 exit $FAIL

@@ -49,3 +49,4 @@ tr -d '\r' < "$LOG" | grep -a "pagecache bench:" | sed 's/^pagecache bench: /  /
 tr -d '\r' < "$LOG" | grep -a "pages (" | sed 's/^/  stats: /'
 tr -d '\r' < "$LOG" | grep -a "^milkfs bench:" | sed 's/^milkfs bench: /  milkfs create: /'
 [ -e "$T/done" ] || { echo "cachebench: session did not finish"; exit 1; }
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true

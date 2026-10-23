@@ -114,5 +114,5 @@ for kind in data node; do
 done
 
 echo
-[ $FAIL = 0 ] && echo "fscktest: PASS ($T)" || echo "fscktest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "fscktest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "fscktest: FAIL ($T)"; fi
 exit $FAIL

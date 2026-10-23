@@ -3,14 +3,24 @@
 # seconds, log path, then the total wall time. Exits non-zero if anything failed; the last line
 # always says PASS or FAIL.
 #
-#   scripts/check-all.sh                default set: what gates a push (about 5 minutes at -j 4,
-#                                       20 at -j 1)
+#   scripts/check-all.sh                default set: what gates a push (about 2-3 minutes at -j 8)
 #   scripts/check-all.sh --smoke        one test per area, for every change (under 2 minutes)
 #   scripts/check-all.sh --full         everything, with the long soak/crash/stress runs
 #   scripts/check-all.sh --only REGEX   only tests (of the chosen set) whose name matches (egrep)
 #   scripts/check-all.sh --list         show the tests, their time limits and modes, run nothing
-#   -j N, --jobs N                      run up to N tests at once (default 4; -j 1 = one at a time)
-#   --keep                              keep every test's private work directory (default: only failures)
+#   -j N, --jobs N                      run up to N tests at once (default 8; -j 1 = one at a time)
+#   --keep                              keep every test's work files (default: only a failure's); the
+#                                       tests see MILK_KEEP=1, which keeps their own /tmp work folders too
+#   --if-needed                         exit 0 at once if this exact tree already passed this set
+#                                       (or a bigger one), otherwise run as usual
+#
+# Pass cache: when a whole set (smoke, default or full; never an --only run) passes on a clean
+# tree, the tree (`git write-tree`) is recorded in <git common dir>/check-all-pass/<tree>, one
+# line per pass: set, date, commit, wall time, logs. Every worktree shares it. --if-needed looks
+# there first: a full pass covers the default set and smoke, a default pass covers smoke. A dirty
+# tree (anything in `git status --porcelain`) is never recorded and never skipped, nor is a run
+# with a MILK_* or RELEASE variable set (they change what the tests do), nor one whose tree
+# changed while it ran.
 #
 # Sets: --smoke ("s" in the table) is part of the default set ("s" + "q"), which is part of
 # --full ("s" + "q" + "f"). Nothing leaves the default set to make the smoke tier.
@@ -23,6 +33,10 @@
 # Mac, so one test's VMs never see another's), and serial / monitor / QMP sockets and
 # screenshots live in each test's own mktemp directory. The Mac share is read-only except for
 # the tests that write, each into its own subdirectory named after its PID.
+# Disk: a passing test removes its own /tmp/milk-*.XXXXXX work folder (MILK_KEEP=1 keeps it), and
+# check-all then keeps only the *.log files in its run directory; a failure keeps everything.
+# Before anything starts, check-all warns if /tmp has under 20 GB free and refuses under 5 GB
+# (MILK_MIN_FREE_GB / MILK_WARN_FREE_GB change those).
 # Each test runs in its own process group (scripts/runlimit.py) with a time limit; on a timeout,
 # on Ctrl-C, or when it leaves something running, that group, and only that group, is stopped.
 #
@@ -50,7 +64,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
-TIER=q; ONLY=""; LIST=0; KEEP=0; JOBS=4
+TIER=q; ONLY=""; LIST=0; KEEP=0; JOBS=8; IF_NEEDED=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --full) TIER=f ;;
@@ -58,6 +72,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY="${2:?--only needs a pattern}"; shift ;;
     --list) LIST=1 ;;
     --keep) KEEP=1 ;;
+    --if-needed) IF_NEEDED=1 ;;
     -j|--jobs) JOBS="${2:?-j needs a number}"; shift ;;
     -j[0-9]*) JOBS="${1#-j}" ;;
     -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -69,23 +84,31 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "check-all: -j wants a number of at least 1 
 
 # name | set (s = smoke, q = default, f = full only) | time limit in seconds | mode (par/solo) | command
 # The default set also runs in --full, sometimes with bigger numbers (serial-soak).
+# Boot self-tests: every VM boots without the slow kernel self-tests (kernel/src/selftest.rs)
+# except selftest-boot, which runs them all once, and the ones that check a subsystem's own
+# self-test lines and ask for just those (net-test: net; the --full soaks: sched).
 TESTS=(
   "public-check|s|120|solo|scripts/public-check.sh"
-  "serial-soak|q|900|par|scripts/serial-soak.sh 2 6"
+  "selftest-boot|s|300|par|scripts/selftest-boot.sh"
+  "serial-soak|q|300|par|scripts/serial-soak.sh 2 3"
   "net-test|s|600|par|scripts/net-test.sh"
   "web-test|q|600|par|scripts/web-test.sh @WORK@"
   "pkg-test|s|600|par|scripts/pkg-test.sh"
   "svc-test|s|600|par|scripts/svc-test.sh"
   "driver-crash-test|q|600|par|scripts/driver-crash-test.sh @WORK@"
   "drop-test|q|600|par|scripts/drop-test.sh"
-  "fscktest|s|600|par|scripts/fscktest.sh"
+  "fscktest-1|s|600|par|scripts/fscktest.sh orphan dangling nlink"
+  "fscktest-2|s|600|par|scripts/fscktest.sh parent sb smap"
+  "fscktest-3|s|600|par|scripts/fscktest.sh bref data node"
   "reflinktest|q|600|par|scripts/reflinktest.sh"
   "upgradetest|q|600|par|scripts/upgradetest.sh"
   "scrubtest|q|900|par|scripts/scrubtest.sh"
   "sendtest|q|600|par|scripts/sendtest.sh"
   "fattest|q|600|par|scripts/fattest.sh"
   "dftest|q|600|par|scripts/dftest.sh"
-  "enctest|q|900|par|scripts/enctest.sh"
+  "enctest-keys|q|600|par|scripts/enctest.sh keys"
+  "enctest-lock|q|600|par|scripts/enctest.sh lock"
+  "enctest-convert|q|600|par|scripts/enctest.sh convert"
   "searchtest|q|900|par|scripts/searchtest.sh"
   "audio-test|q|600|par|scripts/audio-test.sh"
   "music-test|q|600|par|scripts/music-test.sh"
@@ -118,7 +141,8 @@ TESTS=(
   "wm-demo-tour|s|300|par|scripts/wm-demo.sh tour @WORK@/tour.png"
   "flicker-test|q|300|par|scripts/flicker-test.sh 150"
   "leak-test|q|600|par|scripts/leak-test.sh"
-  "serial-soak-full|f|3600|solo|scripts/serial-soak.sh 5 14"
+  "serial-soak-2x6|f|900|par|env MILK_SELFTEST=sched scripts/serial-soak.sh 2 6"
+  "serial-soak-full|f|3600|solo|env MILK_SELFTEST=sched scripts/serial-soak.sh 5 14"
   "crashtest|f|3600|solo|scripts/crashtest.sh"
   "converttest|f|2400|solo|scripts/converttest.sh"
   "stressloop|f|3600|solo|scripts/stressloop.sh"
@@ -149,6 +173,34 @@ if [ "$LIST" = 1 ]; then
   exit 0
 fi
 
+# The pass cache (see the top): the tree this run tests, if it can be recorded.
+case $TIER in s) SETNAME=smoke; SETRANK=1 ;; q) SETNAME=default; SETRANK=2 ;; *) SETNAME=full; SETRANK=3 ;; esac
+PASSDIR="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/check-all-pass"
+# pass_tree: sets ptree to the clean tree's id, or to nothing and why to the reason this run
+# can't be recorded or skipped.
+pass_tree() {
+  ptree=""; why=""
+  local v
+  [ -n "$ONLY" ] && { why="an --only run"; return; }
+  v="$(env | grep -E '^(MILK_[A-Za-z0-9_]*|RELEASE)=' | grep -Ev '^MILK_(KEEP|MIN_FREE_GB|WARN_FREE_GB)=' | cut -d= -f1 | tr '\n' ' ')"
+  [ -n "$v" ] && { why="set in the environment: $v"; return; }
+  [ -n "$(git status --porcelain 2>/dev/null)" ] && { why="the tree is dirty (git status --porcelain)"; return; }
+  ptree="$(git write-tree 2>/dev/null)" || { ptree=""; why="git write-tree failed"; }
+}
+pass_tree; TREE="$ptree"; TREE_WHY="$why"
+if [ "$IF_NEEDED" = 1 ]; then
+  if [ -n "$TREE" ] && [ -s "$PASSDIR/$TREE" ]; then
+    hit="$(awk -v r="$SETRANK" '{k = ($1 == "full") ? 3 : ($1 == "default") ? 2 : ($1 == "smoke") ? 1 : 0} k >= r {l = $0} END {print l}' "$PASSDIR/$TREE")"
+    if [ -n "$hit" ]; then
+      set -- $hit
+      echo "check-all: PASS, already passed on this exact tree $TREE ($1 set, $2, commit ${3:0:12}, $4; log $5)"
+      exit 0
+    fi
+  fi
+  if [ -n "$TREE" ]; then echo "check-all: --if-needed: tree $TREE hasn't passed the $SETNAME set yet; running it"
+  else echo "check-all: --if-needed: can't use the pass cache ($TREE_WHY); running"; fi
+fi
+
 # Last run's seconds per test ("name secs" lines), for running the long ones first.
 TIMES=target/check-all-times
 last_secs() { awk -v n="$1" '$1 == n {s = $2} END {print s + 0}' "$TIMES" 2>/dev/null || echo 0; }
@@ -166,6 +218,18 @@ while read -r _ i; do order+=("$i"); done < <(
     [ "$mode" = solo ] && continue
     printf '%s %s\n' "$(last_secs "$name")" "$i"
   done | sort -s -k1,1nr)
+
+# Free space: a full disk makes tests fail in confusing ways (and a run writes a few GB at once).
+free_gb="$(df -Pk /tmp 2>/dev/null | awk 'NR == 2 {print int($4 / 1048576)}')"
+MIN_GB="${MILK_MIN_FREE_GB:-5}"; WARN_GB="${MILK_WARN_FREE_GB:-20}"
+if [ -n "$free_gb" ]; then
+  if [ "$free_gb" -lt "$MIN_GB" ]; then
+    echo "check-all: FAIL, only ${free_gb} GB free in /tmp (need at least ${MIN_GB} GB); free some space first"
+    echo "check-all: (old test leftovers: ls -d /tmp/milk-*.?????? ; a failed test keeps its folder)"
+    exit 1
+  fi
+  [ "$free_gb" -lt "$WARN_GB" ] && echo "check-all: WARNING, only ${free_gb} GB free in /tmp (under ${WARN_GB} GB); a run can need several GB"
+fi
 
 ROOT="$(mktemp -d /tmp/milk-check-all.XXXXXX)"
 echo "check-all: $n tests, up to $JOBS at a time; logs and private images in $ROOT"
@@ -216,6 +280,8 @@ cargo build -q || { echo; echo "check-all: FAIL, the build failed"; exit 1; }
 # A free TCP port on 127.0.0.1 for net-test.
 free_port() { python3 -I -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"; }
 
+KEEP_ENV=(); [ "$KEEP" = 1 ] && KEEP_ENV=(MILK_KEEP=1)
+
 # Per test (index into selected): pid of its runlimit.py, result, seconds.
 pid=(); res=(); took=()
 for i in $(seq 0 $((n - 1))); do pid[$i]=""; res[$i]=""; took[$i]=""; done
@@ -229,7 +295,7 @@ start_test() { # index
   [ "$mode" = solo ] && echo "  ($name runs solo: nothing else running)"
   env MILK_FS="$W/fs.img" MILK_DISK="$W/disk.img" MILK_CRASH_IMG="$W/crash.img" \
       HTTP_PORT="$(free_port)" TMPDIR="$W" \
-      MILK_CHECK_ALL=1 MILK_OFFLINE=1 MILK_NET_GUARD_DIR="$GUARD" PATH="$GUARD:$PATH" \
+      ${KEEP_ENV[@]+"${KEEP_ENV[@]}"} MILK_CHECK_ALL=1 MILK_OFFLINE=1 MILK_NET_GUARD_DIR="$GUARD" PATH="$GUARD:$PATH" \
       python3 -I scripts/runlimit.py "$limit" "$W/output.log" --status "$W/.status" -- $cmd &
   pid[$i]=$!
   running+=("$i")
@@ -262,7 +328,9 @@ finish_test() { # index
   done_count=$((done_count + 1))
   printf '  %-18s %-12s %5ss   [%d/%d done, %ds wall]\n' "$name" "$r" "$secs" "$done_count" "$n" $((SECONDS - WALL0))
   if [ "$r" = PASS ] && [ "$KEEP" = 0 ]; then
-    rm -f "$W"/*.img # keep the log, drop the (big, sparse) images
+    # Keep the logs, drop the rest (the big sparse images, screenshots, recordings).
+    find "$W" -type f ! -name '*.log' -delete 2>/dev/null
+    find "$W" -mindepth 1 -type d -empty -delete 2>/dev/null
   fi
 }
 
@@ -341,7 +409,18 @@ if [ -s "$GUARD/tripped" ]; then
   sed 's/^/  /' "$GUARD/tripped"
   [ "$fails" = 0 ] && fails=1
 fi
-if [ "$fails" = 0 ]; then echo "check-all: PASS, $n tests in ${WALL}s ($ROOT)"; exit 0; fi
+if [ "$fails" = 0 ]; then
+  # Record the pass, if the tree is the one that was built and tested.
+  if [ -z "$TREE" ]; then
+    echo "check-all: pass not recorded ($TREE_WHY)"
+  elif pass_tree; [ "$ptree" != "$TREE" ]; then
+    echo "check-all: pass not recorded (the tree changed while the tests ran)"
+  elif mkdir -p "$PASSDIR" && printf '%s %s %s %ss %s\n' "$SETNAME" "$(date +%Y-%m-%dT%H:%M:%S)" \
+      "$(git rev-parse HEAD)" "$WALL" "$ROOT" >>"$PASSDIR/$TREE"; then
+    echo "check-all: pass recorded for tree $TREE ($SETNAME set) in $PASSDIR"
+  fi
+  echo "check-all: PASS, $n tests in ${WALL}s ($ROOT)"; exit 0
+fi
 echo "check-all: FAIL, $fails of $n failed in ${WALL}s ($ROOT)"
 exit 1
 }

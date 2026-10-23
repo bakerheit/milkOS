@@ -63,4 +63,4 @@ L2="$(boot b2 \
 echo "$L2" > "$T/b2.txt"
 echo "$L2" | grep -q "user/print\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/print.*$MARK")" || bad "marker not in the journal after reboot"
 echo "$L2" | grep -A1 "services logs --this-boot | text find --count" | grep -qx 0 && ok "services logs --this-boot shows only this boot" || bad "services logs --this-boot"
-[ "$FAIL" = 0 ] && echo "svc-test: PASS ($T)" || { echo "svc-test: FAIL ($T)"; exit 1; }
+if [ "$FAIL" = 0 ]; then echo "svc-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "svc-test: FAIL ($T)"; exit 1; fi

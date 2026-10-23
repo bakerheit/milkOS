@@ -18,6 +18,7 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 REPO="$PWD"
 WORK="${1:-$(mktemp -d /tmp/milk-driver-crash.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$WORK"
 QPID=""
 DPID=""
@@ -160,4 +161,6 @@ import json, sys
 r = json.load(sys.stdin)['runs']
 assert any(not x.get('silent') and abs(x['freq'] - 660) < 20 and x['dur'] >= 0.4 for x in r), r
 print('  ok  boot 2: the kernel driver played the 660 Hz tone')" || fail "boot 2: no tone"
-echo "driver-crash-test: PASS ($WORK)"
+cleanup
+trap - EXIT
+if [ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ]; then rm -rf "$WORK" || true; echo "driver-crash-test: PASS"; else echo "driver-crash-test: PASS ($WORK)"; fi

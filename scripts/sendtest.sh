@@ -177,5 +177,5 @@ $M check "$F" > "$T/fresh.txt" 2>&1 && grep -q " 0 snapshot" "$T/fresh.txt" && [
   && ok "the target is still empty and clean" || { bad "target after refused receives"; cat "$T/fresh.txt"; }
 
 echo
-[ $FAIL = 0 ] && echo "sendtest: PASS ($T)" || echo "sendtest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "sendtest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "sendtest: FAIL ($T)"; fi
 exit $FAIL

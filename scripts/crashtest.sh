@@ -138,4 +138,5 @@ done
 echo
 echo "crashtest: $PASS passed, $FAIL failed ($KILLS kill, $CUTS power-cut, $SBCUTS superblock rounds). Logs: $LOGS"
 python3 scripts/mkmilkfs.py check "$IMG"
-[ "$FAIL" = 0 ]
+[ "$FAIL" = 0 ] || exit 1
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$LOGS" || true

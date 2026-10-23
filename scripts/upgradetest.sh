@@ -112,5 +112,5 @@ echo "$L2" | grep -aq "^written before the move" && ok "second boot: the home is
 echo "$L2" | grep -aq "layout: moved" && bad "second boot moved something again" || ok "second boot: no move (idempotent)"
 echo "$L2" | grep -aq "built-in app(s) copied" && bad "second boot copied the built-in apps again" || ok "second boot: built-in apps unchanged, not rewritten"
 echo
-[ $FAIL = 0 ] && echo "upgradetest: PASS ($T)" || echo "upgradetest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "upgradetest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "upgradetest: FAIL ($T)"; fi
 exit $FAIL

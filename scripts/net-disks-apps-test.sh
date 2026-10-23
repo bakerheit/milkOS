@@ -347,4 +347,4 @@ check "--rebuild" "search --rebuild" "search: rebuilding the index in the backgr
 check "--wait-index" "search --wait-index" "search: the index is (ready|loaded)"
 check "a misspelled option" "search --fuzzy x" "search: there's no option --fuzzy \\(try search help\\)"
 
-[ "$FAIL" = 0 ] && { echo "net-disks-apps-test: PASS"; rm -rf "$T"; } || { echo "net-disks-apps-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "net-disks-apps-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "net-disks-apps-test: FAIL (logs in $T)"; exit 1; }

@@ -109,5 +109,5 @@ echo "  Mac sees:"; (cd "$MNT" && find . -path ./.fseventsd -prune -o -print | g
 hdiutil detach "$DEV" >/dev/null && ok "detached"
 
 echo
-if [ $FAIL = 0 ]; then echo "fattest: PASS ($T)"; else echo "fattest: FAIL ($T)"; fi
+if [ $FAIL = 0 ]; then echo "fattest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "fattest: FAIL ($T)"; fi
 exit $FAIL

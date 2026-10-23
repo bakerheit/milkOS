@@ -342,5 +342,5 @@ echo "  ok  on disk: the legacy seed is gone, the new one is tagged, the rotatio
 
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "drop-test: PASS"

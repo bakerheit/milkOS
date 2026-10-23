@@ -152,7 +152,7 @@ PROBE="$REPO/target/host-tests/aarch64-apple-darwin/debug/tlsprobe"
 "$PROBE" "$C/root.der" $(cases 127.0.0.1) | tee "$WORK/host.txt" || fail "host probe"
 HOST_N="$(grep -c ': ok: ' "$WORK/host.txt")"
 if [ -n "${TLS_INTEROP_HOST_ONLY:-}" ]; then
-  cleanup; trap - EXIT; rm -rf "$WORK"
+  cleanup; trap - EXIT; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
   echo "tls-interop: PASS (host only: $HOST_N cases)"
   exit 0
 fi
@@ -238,5 +238,5 @@ grep -aq "^\[browser\] https://web\.milk\.test:$PAGE/secure\.html: web\.milk\.te
 [ -n "${KEEP_SHOTS:-}" ] && cp "$WORK"/secure.png "$WORK"/wronghost.png "$KEEP_SHOTS"/
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "tls-interop: PASS (host $HOST_N cases, guest kernel $GUEST_N, guest user space $USER_N, network get https, Browser https + certificate error)"

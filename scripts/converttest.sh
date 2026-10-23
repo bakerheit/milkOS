@@ -150,4 +150,5 @@ done
 [ "$MIXED" -gt 0 ] && ok "$MIXED crash(es) hit in the middle of the rewriting (blocks in both forms)" || bad "no crash landed mid-way (timing?)"
 echo
 echo "converttest: $PASS passed, $FAIL failed ($T)"
-[ "$FAIL" = 0 ]
+[ "$FAIL" = 0 ] || exit 1
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true

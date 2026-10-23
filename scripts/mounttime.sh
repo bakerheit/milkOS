@@ -51,4 +51,4 @@ $M put "$IMG" /data/mac.txt "$T/mac.txt" >/dev/null
 boot 3
 boot 4
 $M check "$IMG" | tail -1 | sed 's/^/host /'
-echo "(logs: $T)"
+if [ "${MILK_KEEP:-}" = 1 ]; then echo "(logs: $T)"; else rm -rf "$T" || true; fi

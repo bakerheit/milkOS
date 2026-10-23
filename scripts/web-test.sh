@@ -132,4 +132,5 @@ echo "---- test server log ----"
 cat "$WORK/servers.log"
 cleanup
 trap - EXIT
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "web-test: PASS"

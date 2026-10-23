@@ -10,6 +10,7 @@ set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 T="${1:-$(mktemp -d /tmp/milk-pvtest.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$T"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -114,4 +115,5 @@ set -- $(out "text show /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -
 q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 411 )) click; shot 11-text 5b-pdf
 differ 5b-pdf 11-text && ok "Show text opened the text view" || bad "Show text did nothing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
-if [ "$FAIL" = 0 ]; then echo "preview-test: PASS (screenshots in $T)"; else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ] && [ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ]; then rm -rf "$T" || true; echo "preview-test: PASS"
+elif [ "$FAIL" = 0 ]; then echo "preview-test: PASS (screenshots in $T)"; else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi

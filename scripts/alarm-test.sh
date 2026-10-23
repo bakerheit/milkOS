@@ -88,4 +88,4 @@ out "$L" "cal list 3" | grep -q "lunch-test" && ok "the repeating event survived
 out "$L" "text show $LOGF" | grep -q "tea-test" && ok "the ring log survived a reboot" || bad "ring log lost after reboot"
 out "$L" "remind list" | grep -q "stretch" && ok "the repeating reminder survived a reboot" || bad "reminder lost after reboot"
 out "$L" "remind list" | grep -q "undated-thing" && bad "a completed reminder is still open" || ok "completed reminders stay closed"
-if [ "$FAIL" = 0 ]; then echo "alarm-test: PASS"; rm -rf "$T"; else echo "alarm-test: FAIL (logs in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ]; then echo "alarm-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "alarm-test: FAIL (logs in $T)"; exit 1; fi

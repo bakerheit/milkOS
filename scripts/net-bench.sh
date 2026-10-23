@@ -83,4 +83,4 @@ printf '%-16s %8s MiB/s\n' "guest -> host" "$UP" "host -> guest" "$DOWN" "guest 
 printf 'net-bench: %s MiB per run, %s kernel, smp %s\n' "$MIB" "$PROFILE" "${MILK_SMP:-4}"
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true

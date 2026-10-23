@@ -33,4 +33,4 @@ kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 tr -d '\r' < "$LOG" | grep -a "milkfs treetest:" | sed 's/^milkfs treetest: /  /'
 $M check "$IMG" | tail -1 | sed 's/^/host /'
-echo "(logs: $T)"
+if [ "${MILK_KEEP:-}" = 1 ]; then echo "(logs: $T)"; else rm -rf "$T" || true; fi

@@ -9,6 +9,7 @@ set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 T="${1:-$(mktemp -d /tmp/milk-edtest.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$T"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -125,4 +126,5 @@ shot binary prose
 differ rust prose && differ prose binary && ok "prose and binary files drew differently" || bad "screens did not change"
 ser "send:text show /dev/wm" "wait:$P"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
-if [ "$FAIL" = 0 ]; then echo "texteditor-test: PASS (screenshots in $T)"; else echo "texteditor-test: FAIL (logs and screenshots in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ] && [ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ]; then rm -rf "$T" || true; echo "texteditor-test: PASS"
+elif [ "$FAIL" = 0 ]; then echo "texteditor-test: PASS (screenshots in $T)"; else echo "texteditor-test: FAIL (logs and screenshots in $T)"; exit 1; fi

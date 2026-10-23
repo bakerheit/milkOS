@@ -129,4 +129,7 @@ check "$A" "network ping -6 bob.local (AAAA over ff02::fb)" "bytes from $B6: icm
 check "$A" "drop send bob over IPv6" "drop: sent v6\\.txt to bob"
 check "$B" "bob's receiver: only the IPv6 address" "drop: receiving as bob \\(fingerprint [0-9a-f ]{19}\\) on \\[$B6\\]:5360;"
 check "$B" "bob got the file" "drop: received /Users/milk/Downloads/v6\\.txt"
+cleanup
+trap - EXIT
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "net6-test: PASS"

@@ -57,5 +57,5 @@ for b in $(seq "$BOOTS"); do
   [ "$host" = clean ] && [ "$fat" = clean ] && [ "$kcheck" = clean ] || FAILS=$((FAILS + 1))
 done
 echo
-[ $FAILS = 0 ] && echo "stressloop: PASS, $BOOTS boots ($T)" || echo "stressloop: FAIL ($FAILS) ($T)"
+if [ $FAILS = 0 ]; then echo "stressloop: PASS, $BOOTS boots"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "stressloop: FAIL ($FAILS) ($T)"; fi
 exit $FAILS

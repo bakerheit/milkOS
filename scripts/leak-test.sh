@@ -82,4 +82,4 @@ for p in watch milkd alarmd activity; do
   if [ $((b - a)) -le "$lim" ]; then ok "$p stayed flat (${a}K -> ${b}K, limit +${lim}K)"; else bad "$p grew from ${a}K to ${b}K in $((SECONDS - t0)) s (limit +${lim}K)"; fi
 done
 grep -aqi "kernel panic" "$LOG" && bad "a kernel panic in the serial log" || true
-if [ "$FAIL" = 0 ]; then echo "leak-test: PASS"; rm -rf "$T"; else echo "leak-test: FAIL (log in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ]; then echo "leak-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "leak-test: FAIL (log in $T)"; exit 1; fi

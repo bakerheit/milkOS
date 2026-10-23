@@ -281,4 +281,4 @@ gone "unset LOCAL"
 check "msh help: variables" "help" "  variables        list, get NAME, remove NAME, run NAME=v CMD   (variables help)"
 check "msh help: text, print, pause" "help" "programs (/Commands): files trash text print pause"
 
-[ "$FAIL" = 0 ] && { echo "text-test: PASS"; rm -rf "$T"; } || { echo "text-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "text-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "text-test: FAIL (logs in $T)"; exit 1; }

@@ -9,6 +9,7 @@ set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
 T="${1:-$(mktemp -d /tmp/milk-appstest.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$T"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -85,4 +86,5 @@ ser "send:text show /dev/wm" "wait:$P" "send:remind list" "wait:$P"
 tr -d '\r' < "$LOG" | grep -a "window .* Reminders" >/dev/null && ok "the Reminders window is on the desktop" || bad "no Reminders window"
 out "remind list" | grep -q "Quick thing" && ok "remind's sentence form reads the day and time" || bad "remind add did not understand the sentence"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
-if [ "$FAIL" = 0 ]; then echo "apps-test: PASS (screenshots in $T)"; else echo "apps-test: FAIL (logs and screenshots in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ] && [ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ]; then rm -rf "$T" || true; echo "apps-test: PASS"
+elif [ "$FAIL" = 0 ]; then echo "apps-test: PASS (screenshots in $T)"; else echo "apps-test: FAIL (logs and screenshots in $T)"; exit 1; fi

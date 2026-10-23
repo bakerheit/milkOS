@@ -55,6 +55,10 @@ impl Val {
         matches!(self, Val::Undef)
     }
     #[inline]
+    pub fn is_null(self) -> bool {
+        matches!(self, Val::Null)
+    }
+    #[inline]
     pub fn is_nullish(self) -> bool {
         matches!(self, Val::Undef | Val::Null)
     }

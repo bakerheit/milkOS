@@ -402,6 +402,7 @@ impl Heap {
     /// rest. Returns how many objects were freed, with the finalizer data of host objects
     /// that died in `dead_hosts`.
     pub fn collect(&mut self, t: &mut Tracer, dead_hosts: &mut Vec<(u32, u64)>) {
+        // (the realm traced its roots with epoch + 1 already)
         self.epoch = self.epoch.wrapping_add(1).max(1);
         // Symbols' descriptions are always live (symbols are never freed).
         for s in &self.syms {

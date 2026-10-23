@@ -1221,6 +1221,13 @@ impl Realm {
         self.interrupt = f;
     }
 
+    /// How much native (Rust) stack one entry from the host may use before script gets a
+    /// RangeError / SyntaxError for nesting too deep (default 768 KB; give the thread at
+    /// least this plus 256 KB).
+    pub fn set_stack_limit(&mut self, bytes: usize) {
+        self.stack.limit = bytes.max(64 << 10);
+    }
+
     /// Steps run in the current (or last) entry from the host.
     pub fn steps(&self) -> u64 {
         self.steps

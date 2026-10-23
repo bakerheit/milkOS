@@ -357,7 +357,7 @@ impl Realm {
         match h {
             Val::Obj(o) => match &self.o(o).kind {
                 ObjKind::Native(n) => {
-                    matches!(n.f, crate::object::NativeImpl::Builtin(f) if f as usize == crate::builtins::function::has_instance as usize)
+                    matches!(n.f, crate::object::NativeImpl::Builtin(f) if f as *const () as usize == crate::builtins::function::has_instance as *const () as usize)
                 }
                 _ => false,
             },

@@ -476,3 +476,94 @@ impl Realm {
         }
     }
 }
+
+impl Realm {
+    /// Console renderings of the builtin kinds that aren't plain objects.
+    pub(crate) fn inspect_special(&mut self, o: ObjId, depth: u32, _top: bool) -> Option<String> {
+        let mut out = String::new();
+        match &self.o(o).kind {
+            ObjKind::Date(t) => {
+                let t = *t;
+                return Some(if t.is_nan() {
+                    String::from("Invalid Date")
+                } else {
+                    self.date_to_string(t)
+                });
+            }
+            ObjKind::RegExp(d) => {
+                let (s, f) = (d.source, d.flags);
+                let s = self.rust_string(s);
+                let f = self.rust_string(f);
+                return Some(alloc::format!("/{s}/{f}"));
+            }
+            ObjKind::Promise(p) => {
+                let (st, v) = (p.state, p.result);
+                out.push_str("Promise {");
+                match st {
+                    crate::builtins::promise::PState::Pending => out.push_str("<pending>"),
+                    crate::builtins::promise::PState::Fulfilled => {
+                        let mut seen = Vec::new();
+                        self.inspect_into(&mut out, v, depth + 1, false, &mut seen);
+                    }
+                    crate::builtins::promise::PState::Rejected => {
+                        out.push_str("<rejected> ");
+                        let mut seen = Vec::new();
+                        self.inspect_into(&mut out, v, depth + 1, false, &mut seen);
+                    }
+                }
+                out.push('}');
+                return Some(out);
+            }
+            ObjKind::Map(_) | ObjKind::Set(_) => {
+                let is_set = matches!(self.o(o).kind, ObjKind::Set(_));
+                let it = self.alloc(
+                    None,
+                    ObjKind::MapIter(alloc::boxed::Box::new(crate::builtins::map::MapIterData {
+                        coll: o,
+                        pos: 0,
+                        kind: 2,
+                        done: false,
+                    })),
+                );
+                let mut items = Vec::new();
+                while let Some((k, v, _)) = self.map_iter_next(it) {
+                    items.push((k, v));
+                    if items.len() > 100 {
+                        break;
+                    }
+                }
+                let _ = write!(
+                    out,
+                    "{}({}) {{",
+                    if is_set { "Set" } else { "Map" },
+                    items.len()
+                );
+                for (i, (k, v)) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    let mut seen = Vec::new();
+                    if depth > 1 {
+                        out.push('…');
+                        break;
+                    }
+                    self.inspect_into(&mut out, *k, depth + 1, false, &mut seen);
+                    if !is_set {
+                        out.push_str(" => ");
+                        self.inspect_into(&mut out, *v, depth + 1, false, &mut seen);
+                    }
+                }
+                out.push('}');
+                return Some(out);
+            }
+            ObjKind::SymBox(s) => {
+                let s = *s;
+                let d = self.symbol_descriptive(Val::Sym(s));
+                return Some(alloc::format!("[Symbol: {d}]"));
+            }
+            ObjKind::Coroutine(_) => return Some(String::from("Object [Generator] {}")),
+            _ => {}
+        }
+        None
+    }
+}

@@ -1,0 +1,78 @@
+test('map', function () {
+  var m = new Map();
+  var k = {};
+  m.set('a', 1).set(k, 2).set(NaN, 3).set(0, 4);
+  assertEq(m.size, 4);
+  assertEq(m.get('a'), 1);
+  assertEq(m.get(k), 2);
+  assertEq(m.get(NaN), 3);
+  assertEq(m.get(-0), 4);
+  assert(m.has(k) && !m.has({}));
+  assert(m.delete('a') && !m.delete('a'));
+  assertEq([...m.keys()].length, 3);
+  m.set(k, 'updated');
+  assertEq([...m.values()][0], 'updated', 'update keeps position');
+  var order = [];
+  m.forEach((v, key) => order.push(typeof key));
+  assertEq(order, ['object', 'number', 'number']);
+  m.clear();
+  assertEq(m.size, 0);
+  var big = new Map();
+  for (var i = 0; i < 1000; i++) big.set('k' + i, i);
+  for (var j = 0; j < 1000; j += 2) big.delete('k' + j);
+  assertEq(big.size, 500);
+  assertEq(big.get('k999'), 999);
+  assertEq([...big.keys()][0], 'k1');
+  var s1 = 'ab', s2 = 'a' + 'b';
+  var sm = new Map([[s1, 1]]);
+  assertEq(sm.get(s2), 1, 'strings compare by value');
+});
+test('map iteration with mutation', function () {
+  var m = new Map([[1, 1], [2, 2], [3, 3]]);
+  var seen = [];
+  for (var [k] of m) { seen.push(k); if (k === 1) { m.delete(2); m.set(4, 4); } }
+  assertEq(seen, [1, 3, 4]);
+  var churn = new Map();
+  var it = churn.keys();
+  for (var i = 0; i < 300; i++) churn.set(i, i);
+  for (var j = 0; j < 290; j++) churn.delete(j);
+  var rest = [];
+  for (var x of it) rest.push(x);
+  assertEq(rest, [290, 291, 292, 293, 294, 295, 296, 297, 298, 299]);
+});
+test('set', function () {
+  var s = new Set([1, 2, 2, 3]);
+  assertEq(s.size, 3);
+  s.add(1).add(4);
+  assertEq([...s], [1, 2, 3, 4]);
+  assert(s.has(4) && !s.has('4'));
+  s.delete(1);
+  assertEq([...s.values()], [2, 3, 4]);
+  assertEq([...s.entries()][0], [2, 2]);
+  assertEq(Set.prototype.keys, Set.prototype.values);
+  var uniq = [...new Set('mississippi')].join('');
+  assertEq(uniq, 'misp');
+  assertThrows(TypeError, function () { Set(); });
+});
+test('weak collections', function () {
+  var wm = new WeakMap();
+  var k1 = {}, k2 = function () {};
+  wm.set(k1, 'one').set(k2, 'two');
+  assertEq(wm.get(k1), 'one');
+  assert(wm.has(k2));
+  assert(wm.delete(k2) && !wm.has(k2));
+  assertThrows(TypeError, function () { wm.set('str', 1); });
+  assertEq(wm.get('nope'), undefined);
+  var ws = new WeakSet([k1]);
+  assert(ws.has(k1));
+  ws.add(k2);
+  assert(ws.has(k2));
+  assertThrows(TypeError, function () { ws.add(1); });
+  for (var i = 0; i < 2000; i++) wm.set({}, i);
+});
+test('toStringTag', function () {
+  assertEq(Object.prototype.toString.call(new Map()), '[object Map]');
+  assertEq(Object.prototype.toString.call(new Set()), '[object Set]');
+  assertEq(Object.prototype.toString.call(Promise.resolve()), '[object Promise]');
+  assertEq(Object.prototype.toString.call(JSON), '[object JSON]');
+});

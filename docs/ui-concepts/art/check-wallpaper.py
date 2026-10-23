@@ -6,6 +6,7 @@ in the wallpaper's own theme, over every region where a glass panel can sit.
 
     python3 docs/ui-concepts/art/check-wallpaper.py wallpaper-dawn.png
     python3 docs/ui-concepts/art/check-wallpaper.py wallpaper-night.png --dark
+    python3 docs/ui-concepts/art/check-wallpaper.py art/wallpapers-photos/dusk-pasture-1024x768.jpg --alpha 0.75
 
 Needs Pillow. Prints one line per region and exits 1 if any region fails.
 """
@@ -14,7 +15,7 @@ from PIL import Image, ImageFilter
 
 LIGHT = {"glass": (0xFF, 0xFD, 0xF8), "text": (0x3A, 0x2E, 0x28)}
 DARK = {"glass": (0x2E, 0x25, 0x20), "text": (0xF4, 0xEB, 0xE0)}
-ALPHA = 0.55          # glass fill alpha (SPEC)
+ALPHA = 0.55          # glass fill alpha (SPEC); --alpha N overrides it (photo wallpapers use 0.75)
 MIN_RATIO = 7.0
 BLUR_RADIUS = 24      # the pre-blurred wallpaper uses a box blur of radius 24
 REGIONS = {           # name: (x, y, w, h) on a 1024x768 screen (SPEC sizes)
@@ -44,11 +45,17 @@ def ratio(a, b):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    global ALPHA
+    argv = sys.argv[1:]
+    if "--alpha" in argv:
+        i = argv.index("--alpha")
+        ALPHA = float(argv[i + 1])
+        del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("--")]
     if not args:
         print(__doc__)
         return 2
-    theme = DARK if "--dark" in sys.argv else LIGHT
+    theme = DARK if "--dark" in argv else LIGHT
     img = Image.open(args[0]).convert("RGB")
     if img.size != (1024, 768):
         print(f"warning: expected 1024x768, got {img.size[0]}x{img.size[1]}")

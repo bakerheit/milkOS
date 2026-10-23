@@ -49,6 +49,13 @@ Set: **Dawn pasture** (default, light), **Night pasture** (dark, with moon, star
 - **Contrast rule:** glass is milk at 55% over the blurred wallpaper (dark theme: dark milk). Primary text on a glass panel over any part of the wallpaper must stay at least **7:1** in the theme the wallpaper belongs to. Check with `python3 docs/ui-concepts/art/check-wallpaper.py <wallpaper.png> [--dark]`; it must print PASS for every region.
 - Dark wallpapers must not be pure black: lowest value about #1E1915.
 
+### Photo wallpapers
+Six CC0 photographs sit in `art/wallpapers-photos/` (sources, authors and licence in the README there): Belfast Sunset, Bell Park Dawn, Aarfontein Sunrise, Misty Dawn Field, Dusk Pasture, Cows and Trees. Rules:
+- They are used **as shot**, no wash. The glass behind panels is **75% milk** (dark theme: 75% dark milk) instead of the illustrated wallpapers' 55%; at 75% every region of all six passes the 7:1 rule (`check-wallpaper.py --alpha 0.75`). The illustrated wallpapers keep 55%.
+- They are extra choices beside Dawn pasture, Night pasture and Oat, not replacements. Night pasture stays the dark theme's default; a photo can be chosen in either theme.
+- They are not baked into the kernel: raw RGB photos are about 2.3 MB each and do not run-length code. Load the chosen one at selection time (or ship them as files).
+- A new photo needs a CC0 or public-domain licence, a record in that README, and no EXIF/GPS in the file.
+
 ## 5. Boot splash
 Cream (#FBF6EC) or, for the night variant, dark cream (#382D27) at 1024x768. The milk drop (about 120 px tall, soft outline, a small highlight, a faint shadow ellipse), the wordmark "milkOS" below it with "OS" in blue, a 220x4 progress bar in straw on sand, and one small status word ("booting") in secondary text. Centre the group slightly above the middle. No animation beyond the bar. It must show within the first second and hand over to the desktop with a short fade (the existing 216 ms desktop-up is the budget).
 

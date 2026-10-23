@@ -36,3 +36,5 @@ Store straw with an ink bag and a milk sparkle; Spaces milk with four small wind
 ## Notes for whoever embeds them
 - The milk tiles have no edge in the PNG; the shell draws the 1px sand edge as the spec's icon code does. The shell's own drop shadow is not baked in either.
 - Not done: the optional fourth wallpaper.
+
+`wallpapers-photos/` holds six CC0 photographs as extra wallpaper choices (not baked into the kernel); see its README and ART.md, "Photo wallpapers".

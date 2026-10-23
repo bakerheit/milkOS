@@ -178,6 +178,8 @@ pub struct State {
     pub modrt: super::modrt::ModRt,
     /// An `error` event is being dispatched (an error in its listener does not start another).
     pub in_error_event: bool,
+    /// Messages posted with `postMessage`, for the host (script/frames.rs).
+    pub outbox: super::frames::Outbox,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -237,6 +239,7 @@ impl Bridge {
                 net: super::net::NetState::default(),
                 modrt,
                 in_error_event: false,
+                outbox: Default::default(),
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),

@@ -102,6 +102,10 @@ pub struct Changes {
     pub forms: bool,
     /// An image source may have changed.
     pub images: bool,
+    /// An `<iframe>` came, went or changed (its `src`, `srcdoc`, `name`, ...).
+    pub frames: bool,
+    /// `<iframe>` elements given back with [`Dom::free_subtree`] (their ids will be reused).
+    pub freed_frames: Vec<NodeId>,
     /// Anything at all (layout is needed).
     pub any: bool,
 }
@@ -480,12 +484,32 @@ impl Dom {
         self.changes.tree = true;
         self.changes.forms = true;
         self.changes.images = true;
+        if self.subtree_has_iframe(child) {
+            self.changes.frames = true;
+        }
         // The parent's parent: :empty, :nth-child and sibling combinators around the parent.
         let gp = self.nodes[parent as usize].parent;
         self.note_restyle(if gp == NONE || gp == 0 { parent } else { gp });
         if self.is_html(parent, tag::STYLE) || self.subtree_has_sheet(child) {
             self.changes.sheets = true;
         }
+    }
+
+    /// Is there an `<iframe>` in the subtree of `n` (bounded, so a hostile tree costs little)?
+    fn subtree_has_iframe(&self, n: NodeId) -> bool {
+        let mut c = n;
+        let mut k = 0;
+        while c != NONE {
+            if self.is_html(c, tag::IFRAME) {
+                return true;
+            }
+            k += 1;
+            if k > 100_000 {
+                return true;
+            }
+            c = self.next_in(c, n);
+        }
+        false
     }
 
     fn subtree_has_sheet(&self, n: NodeId) -> bool {
@@ -624,6 +648,15 @@ impl Dom {
         if matches!(t, tag::IMG | tag::INPUT) && matches!(name, "src" | "srcset" | "type") {
             self.changes.images = true;
         }
+        if t == tag::IFRAME
+            && matches!(
+                name,
+                "src" | "srcdoc" | "name" | "sandbox" | "loading" | "allow" | "allowfullscreen"
+                    | "referrerpolicy" | "scrolling" | "csp"
+            )
+        {
+            self.changes.frames = true;
+        }
         if matches!(t, tag::LINK | tag::STYLE) {
             self.changes.sheets = true;
         }
@@ -727,6 +760,10 @@ impl Dom {
             c = self.next_in(c, n);
         }
         for c in all {
+            if self.track && self.is_html(c, tag::IFRAME) {
+                self.changes.freed_frames.push(c);
+                self.changes.frames = true;
+            }
             let b = data_bytes(&self.nodes[c as usize].data);
             self.bytes = self.bytes.saturating_sub(b);
             let x = &mut self.nodes[c as usize];

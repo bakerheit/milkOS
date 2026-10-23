@@ -4,6 +4,7 @@ mod api;
 mod bench;
 mod dom;
 mod fixtures;
+mod frames;
 mod fuzz;
 mod golden;
 mod html;

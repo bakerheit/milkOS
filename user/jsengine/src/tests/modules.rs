@@ -293,7 +293,22 @@ impl Host {
 pub(crate) fn run_case(case: &Case, stress: u32) -> Result<(), String> {
     let mut host = Host::new(case.files.clone());
     let mut r = host.realm(stress);
-    host.run(&mut r, "main.js");
+    if case.files.iter().any(|(n, _)| n == "main.js") {
+        host.run(&mut r, "main.js");
+    } else if let Some((_, src)) = case.files.iter().find(|(n, _)| n == "script.js") {
+        // A classic script as the entry.
+        if let Err(e) = r.eval(src, "script.js") {
+            let rep = r.report(&e);
+            host.log
+                .borrow_mut()
+                .push(alloc::format!("script error: {}: {}", rep.name, rep.message));
+        }
+        host.pump(&mut r);
+        for v in r.take_unhandled_rejections() {
+            let d = describe(&mut r, v);
+            host.log.borrow_mut().push(alloc::format!("unhandled rejection: {d}"));
+        }
+    }
     let got = host.log.borrow().clone();
     if got == case.expect {
         Ok(())
@@ -311,7 +326,7 @@ macro_rules! mod_files {
     };
 }
 
-mod_files!("basics.txt");
+mod_files!("basics.txt", "static.txt", "cycles.txt", "namespace.txt", "tla.txt", "errors.txt", "dynamic.txt");
 
 fn run_all(stress: u32) {
     let mut failures: Vec<String> = Vec::new();

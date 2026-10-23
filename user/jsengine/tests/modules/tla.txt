@@ -1,0 +1,188 @@
+//# case: top-level await pauses only the module and its dependents
+//# file: main.js
+import './a.js';
+import './b.js';
+log('main');
+//# file: a.js
+log('a start');
+await null;
+log('a end');
+//# file: b.js
+log('b');
+//# expect
+a start
+b
+a end
+main
+
+//# case: a dependent waits for its async dependency
+//# file: main.js
+import './mid.js';
+import './sibling.js';
+log('main');
+//# file: mid.js
+import './slow.js';
+log('mid');
+//# file: slow.js
+log('slow start');
+await new Promise((r) => r());
+await 0;
+log('slow end');
+//# file: sibling.js
+log('sibling');
+//# expect
+slow start
+sibling
+slow end
+mid
+main
+
+//# case: async siblings finish in the order their promises settle
+//# file: main.js
+import './a.js';
+import './b.js';
+import './c.js';
+log('main');
+//# file: a.js
+log('a1');
+await 0; await 0; await 0;
+log('a2');
+//# file: b.js
+log('b1');
+await 0;
+log('b2');
+//# file: c.js
+log('c1');
+//# expect
+a1
+b1
+c1
+b2
+a2
+main
+
+//# case: modules waiting on async deps run in the order they were queued
+//# file: main.js
+import './p.js';
+import './q.js';
+log('main');
+//# file: p.js
+import './slowA.js';
+log('p');
+//# file: q.js
+import './fastB.js';
+log('q');
+//# file: slowA.js
+await 0; await 0; await 0; await 0;
+log('slowA');
+//# file: fastB.js
+await 0;
+log('fastB');
+//# expect
+fastB
+q
+slowA
+p
+main
+
+//# case: tla with a cycle
+//# file: main.js
+import './a.js';
+log('main');
+//# file: a.js
+import './b.js';
+log('a before await');
+await 0;
+log('a after await');
+export let av = 1;
+//# file: b.js
+import { av } from './a.js';
+log('b');
+export function bf() { return av; }
+//# expect
+b
+a before await
+a after await
+main
+
+//# case: await in expression positions and loops at the top level
+//# file: main.js
+const v = await Promise.resolve(40) + 2;
+log(v);
+for await (const x of [Promise.resolve('a'), 'b']) log(x);
+async function* g() { yield 1; yield 2; }
+for await (const x of g()) log('g' + x);
+const o = { async m() { return await 3; } };
+log(await o.m());
+export const result = await Promise.all([1, Promise.resolve(2)]);
+log(result.join());
+//# expect
+42
+a
+b
+g1
+g2
+3
+1,2
+
+//# case: this and arrow functions with tla
+//# file: main.js
+await 0;
+log(typeof this, (() => this)() === undefined);
+//# expect
+undefined true
+
+//# case: rejected tla fails the importer but not siblings
+//# file: main.js
+import './ok.js';
+const results = [];
+for (const name of ['./bad.js', './dep-of-bad.js', './ok.js']) {
+  try { await import(name); results.push(name + ' ok'); } catch (e) { results.push(name + ' ' + e.message); }
+}
+log(results.join(' | '));
+//# file: ok.js
+log('ok ran');
+//# file: bad.js
+await 0;
+throw new Error('async boom');
+//# file: dep-of-bad.js
+import './bad.js';
+log('never');
+//# expect
+ok ran
+./bad.js async boom | ./dep-of-bad.js async boom | ./ok.js ok
+
+//# case: the entry never finishes when its await never settles
+//# file: main.js
+import './a.js';
+log('main');
+//# file: a.js
+log('a');
+await new Promise(() => {});
+log('a end');
+//# expect
+a
+
+//# case: error in a sync module that depends on an async one
+//# file: main.js
+try { await import('./top.js'); } catch (e) { log('caught', e.message); }
+try { await import('./top.js'); } catch (e) { log('again', e.message); }
+//# file: top.js
+import './dep.js';
+log('top');
+//# file: dep.js
+log('dep');
+await 0;
+throw new Error('dep failed');
+//# expect
+dep
+caught dep failed
+again dep failed
+
+//# case: await keyword is reserved in modules
+//# file: main.js
+import './x.js';
+//# file: x.js
+function f() { var await = 1; }
+//# expect
+load error: SyntaxError: Unexpected token 'await'

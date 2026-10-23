@@ -112,6 +112,8 @@ fn is_anon_fn(e: &Expr) -> bool {
     match &e.k {
         ExprKind::Func(f) => f.name.is_none(),
         ExprKind::Class(c) => c.name.is_none(),
+        // Parentheses don't hide it: `var f = (function () {})` names the function f.
+        ExprKind::Seq(items) if items.len() == 1 => is_anon_fn(&items[0]),
         _ => false,
     }
 }
@@ -901,6 +903,9 @@ impl<'a> Compiler<'a> {
         match &e.k {
             ExprKind::Func(f) if f.name.is_none() => self.func_expr(f, Some(s)),
             ExprKind::Class(c) if c.name.is_none() => self.class(c, Some(s)),
+            ExprKind::Seq(items) if items.len() == 1 && is_anon_fn(&items[0]) => {
+                self.named_expr_str(&items[0], s)
+            }
             _ => self.expr(e),
         }
     }

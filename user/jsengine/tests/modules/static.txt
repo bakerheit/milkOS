@@ -1,0 +1,235 @@
+//# case: export forms
+//# file: main.js
+import * as m from './m.js';
+log(Object.keys(m).join(','));
+log(m.v, m.l, m.c, m.f(), m.g().next().value, typeof m.K, new m.K().x);
+log(m.default);
+log(m.renamed, m.inner);
+//# file: m.js
+export var v = 'var';
+export let l = 'let';
+export const c = 'const';
+export function f() { return 'fn'; }
+export function* g() { yield 'gen'; }
+export class K { x = 'class'; }
+const hidden = 'h';
+export { hidden as renamed };
+export default 'dflt';
+const inner = 'in';
+export { inner };
+//# expect
+K,c,default,f,g,inner,l,renamed,v
+var let const fn gen function class
+dflt
+h in
+
+//# case: export default forms get the name default
+//# file: main.js
+import fn, * as a from './fn.js';
+import cls, * as b from './cls.js';
+import afn from './afn.js';
+import gen from './gen.js';
+import arrow from './arrow.js';
+import ex from './ex.js';
+import named from './named.js';
+import namedcls from './namedcls.js';
+log(fn.name, cls.name, afn.name, gen.name, arrow.name, ex.name, named.name, namedcls.name);
+log(fn(), new cls().v, typeof afn, gen().next().value, arrow(), ex());
+//# file: fn.js
+export default function () { return 1; }
+//# file: cls.js
+export default class { constructor() { this.v = 2; } }
+//# file: afn.js
+export default async function () {}
+//# file: gen.js
+export default function* () { yield 3; }
+//# file: arrow.js
+export default () => 4;
+//# file: ex.js
+export default (function () { return 5; });
+//# file: named.js
+export default function realName() {}
+//# file: namedcls.js
+export default class Foo {}
+//# expect
+default default default default default default realName Foo
+1 2 function 3 4 5
+
+//# case: default export function is hoisted
+//# file: main.js
+import './b.js';
+//# file: b.js
+import f from './c.js';
+log(f());
+//# file: c.js
+import './b.js';
+export default function () { return 'hoisted'; }
+//# expect
+hoisted
+
+//# case: re-exports with renames and star
+//# file: main.js
+import { a, b as bb, d, e, ns, x, y as why } from './re.js';
+log(a, bb, d, e, ns.q, x, why);
+//# file: re.js
+export { a, b } from './src.js';
+export { a as e, b as d } from './src.js';
+export * as ns from './other.js';
+export * from './other.js';
+export { default as y } from './src.js';
+//# file: src.js
+export let a = 'A';
+export let b = 'B';
+export default 'D';
+//# file: other.js
+export let q = 'Q';
+export let x = 'X';
+export default 'not re-exported';
+//# expect
+A B B A Q X D
+
+//# case: export star skips default
+//# file: main.js
+import * as ns from './s.js';
+log(Object.keys(ns).join(','));
+//# file: s.js
+export * from './t.js';
+export let own = 1;
+//# file: t.js
+export default 1;
+export let other = 2;
+//# expect
+other,own
+
+//# case: local export shadows export star
+//# file: main.js
+import { v } from './s.js';
+log(v);
+//# file: s.js
+export * from './t.js';
+export const v = 'local';
+//# file: t.js
+export const v = 'star';
+//# expect
+local
+
+//# case: string named exports and imports
+//# file: main.js
+import { "a b" as ab, "default" as d, "\u{1F600}" as smile } from './m.js';
+import * as ns from './m.js';
+log(ab, d, smile);
+log(Object.keys(ns).join('|'));
+//# file: m.js
+const x = 'spaced';
+export { x as "a b", x as "default", x as "\u{1F600}" };
+export { x as "z" };
+//# expect
+spaced spaced spaced
+a b|default|z|😀
+
+//# case: string named re-export
+//# file: main.js
+import { "my name" as v } from './r.js';
+log(v);
+//# file: r.js
+export { "other name" as "my name" } from './s.js';
+//# file: s.js
+export let x = 'q';
+export { x as "other name" };
+//# expect
+q
+
+//# case: this is undefined and code is strict
+//# file: main.js
+log(typeof this, this === undefined);
+log((function () { return this; })() === undefined);
+try { undeclared = 1; log('no error'); } catch (e) { log(e.name); }
+try { delete Object.prototype; log('no error'); } catch (e) { log(e.name); }
+log(typeof arguments);
+//# expect
+undefined true
+true
+ReferenceError
+TypeError
+undefined
+
+//# case: module scope is not the global scope
+//# file: main.js
+var topVar = 1;
+let topLet = 2;
+function topFn() {}
+log(typeof globalThis.topVar, typeof globalThis.topLet, typeof globalThis.topFn);
+import './other.js';
+log(typeof sibling);
+//# file: other.js
+var sibling = 1;
+//# expect
+undefined undefined undefined
+undefined
+
+//# case: imports are hoisted and read-only
+//# file: main.js
+log(typeof early, early);
+import { early } from './m.js';
+try { (0, eval)('1'); } catch (e) {}
+function tryAssign() { try { early = 5; } catch (e) { return e.name; } }
+log(tryAssign());
+log(early);
+//# file: m.js
+export let early = 'set before main runs';
+//# expect
+string set before main runs
+TypeError
+set before main runs
+
+//# case: module runs once and in dependency order
+//# file: main.js
+import './a.js';
+import './b.js';
+import './a.js';
+log('main');
+//# file: a.js
+import './c.js';
+log('a');
+//# file: b.js
+import './c.js';
+log('b');
+//# file: c.js
+log('c');
+//# expect
+c
+a
+b
+main
+
+//# case: json module
+//# file: main.js
+import data from './d.json' with { type: 'json' };
+log(data.n, data.list.length);
+//# file: d.json
+{"n": 7, "list": [1,2,3]}
+//# expect
+7 3
+
+//# case: import attributes on re-exports and bare imports
+//# file: main.js
+import './setup.json' with { type: 'json' };
+export { default as cfg } from './setup.json' with { type: 'json' };
+import { cfg } from './main.js';
+log(cfg.a);
+//# file: setup.json
+{"a": "json"}
+//# expect
+json
+
+//# case: empty and comment-only modules
+//# file: main.js
+import './e1.js';
+import './e2.js';
+log('ok');
+//# file: e1.js
+//# file: e2.js
+// nothing here
+/* nor here */
+//# expect
+ok

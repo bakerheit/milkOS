@@ -264,6 +264,19 @@ pub fn check_head(
     })
 }
 
+/// The check for a module request whose kind (JavaScript or JSON) is not known to the one
+/// making it: a success status and either kind of type. (The engine checks the exact kind.)
+pub fn check_module_head(status: u16, status_text: &str, content_type: Option<&str>) -> Result<(), String> {
+    match check_head(ModType::Js, status, status_text, content_type) {
+        Ok(()) => Ok(()),
+        Err(e) if (200..300).contains(&status) => {
+            let essence = mime_essence(content_type.unwrap_or(""));
+            if is_json_mime(&essence) { Ok(()) } else { Err(e) }
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// The module type an import's attributes ask for, or why it can't be had.
 pub fn type_of_attributes(attrs: &[(String, String)]) -> Result<ModType, String> {
     let mut ty = ModType::Js;

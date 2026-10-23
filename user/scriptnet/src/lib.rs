@@ -261,6 +261,10 @@ struct Hooks<'a> {
     /// The hop is the one whose body the page gets (progress counts).
     final_hop: bool,
     stopped: bool,
+    /// A module script's request: the final response must be a success with a module's type.
+    module: bool,
+    /// Why the final response is no module (the request then ends there).
+    module_error: Option<String>,
 }
 
 impl http::Hooks for Hooks<'_> {
@@ -283,6 +287,21 @@ impl http::Hooks for Hooks<'_> {
                 match out.next {
                     Next::Done(meta) => {
                         self.final_hop = true;
+                        if self.module {
+                            // Strict checks for module scripts (HTML "fetch a single module
+                            // script"): a success status and a JavaScript (or JSON) type. The
+                            // page is told nothing; the body is not read.
+                            let ctype = headers
+                                .iter()
+                                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                                .map(|(_, v)| v.as_str());
+                            if let Err(why) =
+                                webengine::script::modules::check_module_head(meta.status, reason, ctype)
+                            {
+                                self.module_error = Some(why);
+                                return Some(0);
+                            }
+                        }
                         self.events.head(&head_of(&meta));
                         self.meta = Some(meta);
                     }
@@ -301,7 +320,7 @@ impl http::Hooks for Hooks<'_> {
     }
 
     fn stop(&mut self) -> bool {
-        if self.error.is_some() {
+        if self.error.is_some() || self.module_error.is_some() {
             return true;
         }
         if self.events.cancelled() {
@@ -472,14 +491,21 @@ pub fn run(
             error: None,
             final_hop: false,
             stopped: false,
+            module: req.kind == NetKind::Module,
+            module_error: None,
         };
         hops += 1;
         let refused = RefCell::new(None);
         let result = http::fetch(&mut Guarded { net: &mut *net, hop: &hop, refused: &refused }, &wreq, &opts, &mut hooks);
         let (meta, redirect, error, stopped) = (hooks.meta.take(), hooks.redirect, hooks.error.take(), hooks.stopped);
+        let module_error = hooks.module_error.take();
         drop(hooks);
         if let Some(e) = error {
             return Err(Failed::policy(&e));
+        }
+        if let Some(why) = module_error {
+            // (The page's console says "Failed to load module script <url>: " before this.)
+            return Err(Failed::net(NetFailureKind::Network, why));
         }
         let resp = match result {
             Ok(r) => r,

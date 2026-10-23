@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Milk - The Free Encyclopedia</title>
+<style>
+:root { --link: #3366cc; --border: #a2a9b1; --bg: #f8f9fa; }
+body { margin: 0; font-family: sans-serif; color: #202122; background: #fff; }
+header { background: var(--bg); border-bottom: 1px solid var(--border); padding: 8px 16px; display: flex; align-items: center; gap: 16px; }
+header .logo { font-weight: bold; font-size: 20px; font-family: Georgia, serif; }
+header input { flex: 1; max-width: 400px; }
+.page { display: flex; }
+nav.side { width: 160px; flex-shrink: 0; padding: 12px; font-size: 13px; }
+nav.side ul { list-style: none; padding: 0; margin: 0 0 12px; }
+nav.side li { margin: 4px 0; }
+main { flex: 1; min-width: 0; padding: 16px 24px; border-left: 1px solid var(--border); }
+a { color: var(--link); text-decoration: none; }
+h1 { font-family: 'Linux Libertine', Georgia, Times, serif; font-weight: normal; font-size: 28px; border-bottom: 1px solid var(--border); margin: 0 0 4px; }
+h2 { font-family: Georgia, serif; font-weight: normal; font-size: 22px; border-bottom: 1px solid var(--border); margin-top: 18px; }
+.tagline { font-size: 12px; color: #54595d; margin-bottom: 12px; }
+.infobox { float: right; clear: right; width: 230px; margin: 0 0 12px 16px; border: 1px solid var(--border); background: var(--bg); font-size: 12px; border-spacing: 3px; }
+.infobox caption { font-weight: bold; font-size: 14px; padding: 4px; }
+.infobox th { text-align: left; vertical-align: top; }
+.toc { display: table; border: 1px solid var(--border); background: var(--bg); padding: 6px 12px; font-size: 13px; }
+.toc ol { margin: 4px 0; padding-left: 20px; }
+p { line-height: 1.6; margin: 8px 0; }
+sup { font-size: 10px; }
+.refs { font-size: 12px; }
+footer { clear: both; border-top: 1px solid var(--border); padding: 12px 24px; font-size: 12px; color: #54595d; }
+@media (max-width: 600px) { nav.side { display: none; } main { border-left: none; } }
+</style>
+</head>
+<body>
+<header><span class="logo">Wikimilk</span><input type="search" name="q" placeholder="Search Wikimilk"><a href="/login">Log in</a></header>
+<div class="page">
+<nav class="side" aria-label="Site">
+<ul><li><a href="/">Main page</a><li><a href="/contents">Contents</a><li><a href="/random">Random article</a><li><a href="/about">About</a></ul>
+<ul><li><a href="/help">Help</a><li><a href="/donate">Donate</a></ul>
+</nav>
+<main id="content" role="main">
+<h1>Milk</h1>
+<div class="tagline">From Wikimilk, the free encyclopedia</div>
+<table class="infobox">
+<caption>Milk</caption>
+<tr><td colspan="2" style="text-align:center"><img src="glass.png" width="200" height="140" alt="A glass of milk"></td></tr>
+<tr><th>Type</th><td>Liquid food</td></tr>
+<tr><th>Source</th><td>Mammals</td></tr>
+<tr><th>Energy</th><td>270&nbsp;kJ per 100&nbsp;g</td></tr>
+<tr><th>Fat</th><td>3.25&nbsp;g</td></tr>
+</table>
+<p><b>Milk</b> is a white liquid food produced by the <a href="/wiki/Mammary_gland">mammary glands</a> of <a href="/wiki/Mammal">mammals</a>. It is the primary source of nutrition for young mammals before they are able to digest solid food.<sup><a href="#ref1">[1]</a></sup> Early-lactation milk, called <a href="/wiki/Colostrum">colostrum</a>, contains antibodies that strengthen the immune system.</p>
+<div class="toc"><b>Contents</b>
+<ol><li><a href="#history">History</a><li><a href="#types">Types</a><ol><li><a href="#cow">Cow</a><li><a href="#goat">Goat</a></ol><li><a href="#refs">References</a></ol>
+</div>
+<h2 id="history">History</h2>
+<p>Humans first learned to consume the milk of other mammals regularly following the domestication of animals during the <a href="/wiki/Neolithic_Revolution">Neolithic Revolution</a> or the development of agriculture. This development occurred independently in several global locations from as early as 9000&ndash;7000&nbsp;BC in <a href="/wiki/Mesopotamia">Mesopotamia</a> to 3500&ndash;3000&nbsp;BC in the Americas.</p>
+<h2 id="types">Types</h2>
+<p>Milk is consumed in many forms: <i>whole</i>, <i>skimmed</i>, <i>fermented</i> and <i>condensed</i>, among others. Lactose-free milk is made by adding the enzyme <code>lactase</code>.</p>
+<ul><li id="cow">Cow's milk, the most common</li><li id="goat">Goat's milk</li><li>Sheep's milk</li></ul>
+<h2 id="refs">References</h2>
+<ol class="refs"><li id="ref1">Pehrsson, P. R. et al. <cite>Milk composition</cite>. 2000.</li><li>Smith, A. <cite>A history of dairy</cite>. 1999.</li></ol>
+</main>
+</div>
+<footer>This page was last edited on 23 October 2026. Text is available under the <a href="/license">Creative Commons</a> licence.</footer>
+</body>
+</html>

@@ -44,7 +44,7 @@ pub mod udp;
 pub mod wire;
 
 use alloc::boxed::Box;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::sched::{self, WaitQueue};
 use crate::sync::{FnSlot, SpinLock};
@@ -131,6 +131,31 @@ static KICK: AtomicBool = AtomicBool::new(false);
 static PLANNED: AtomicU64 = AtomicU64::new(0);
 static THREAD_UP: AtomicBool = AtomicBool::new(false);
 
+/// Test knob (the self-test's stress mode, `jitter=MS` in opt/milkos/nettest): now and then
+/// stall for up to this many ms with IRQs masked, inside the stack lock or in the net
+/// thread, the way a vCPU the host descheduled stalls (0 = off). Timers then come due in
+/// bunches and `Stack::now` lags the clock.
+pub static JITTER_MS: AtomicU32 = AtomicU32::new(0);
+static JITTER_RNG: AtomicU32 = AtomicU32::new(0x6a69_7474);
+
+/// One roll of the [`JITTER_MS`] dice: 1 in 16 calls stalls.
+pub fn jitter() {
+    let max = JITTER_MS.load(Ordering::Relaxed);
+    if max == 0 {
+        return;
+    }
+    let mut x = JITTER_RNG.load(Ordering::Relaxed) ^ (timer::counter() as u32 & 0xff);
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    JITTER_RNG.store(x, Ordering::Relaxed);
+    if x % 16 != 0 {
+        return;
+    }
+    let _g = crate::sync::IrqGuard::new();
+    timer::delay_ms(((x >> 8) % max) as u64);
+}
+
 pub type WakeHook = fn(SocketId);
 
 /// Install the readiness hook (the process layer can use it to wake its own wait queues;
@@ -170,6 +195,7 @@ pub fn with<R>(f: impl FnOnce(&mut Stack) -> R) -> R {
         let mut g = NET.lock();
         let st = g.get_or_insert_with(new_stack);
         st.now = timer::now_ns();
+        jitter();
         let r = f(st);
         ipv6::flush_ns(st);
         st.poll_loopback();
@@ -237,6 +263,7 @@ fn net_thread() {
     let mut http: Option<services::Http> = None;
     loop {
         services::adopt(&mut http);
+        jitter();
         with(|st| {
             st.poll_rx();
             let now = st.now;
@@ -322,6 +349,32 @@ pub fn init() {
         socket::BUF_SIZE / 1024,
         socket::MAX_BUF >> 20
     );
+}
+
+/// The net thread's wake-up state, for the self-test watchdog's dump: (planned wake-up,
+/// IRQ pending, kick pending, does the net thread wait on its queue).
+pub fn thread_state() -> (u64, bool, bool, bool) {
+    (
+        PLANNED.load(Ordering::Acquire),
+        IRQ_PENDING.load(Ordering::Acquire),
+        KICK.load(Ordering::Acquire),
+        NET_WQ.has_waiters(),
+    )
+}
+
+/// [`with`] for a diagnostic dump: None if the stack lock stays taken (by another CPU) for
+/// `tries` attempts. No wake-ups, loopback delivery or kicks afterwards: it only looks.
+pub fn try_peek<R>(tries: u32, f: impl FnOnce(&mut Stack) -> R) -> Option<R> {
+    for _ in 0..tries {
+        if let Some(mut g) = NET.try_lock() {
+            return g.as_mut().map(|st| {
+                st.now = timer::now_ns();
+                f(st)
+            });
+        }
+        timer::delay_us(100);
+    }
+    None
 }
 
 /// Process anything received right now (thread context; the net thread does this too).

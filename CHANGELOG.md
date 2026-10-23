@@ -10,6 +10,13 @@
   certificate is for another site", "the certificate has expired", "the site doesn't speak
   TLS 1.3"). New in milkcrypto: AES-128 (bitsliced), GHASH/GCM, SHA-384, HKDF, RSA, P-256 and
   P-384. Tested against RFC 8448's trace and OpenSSL 3 (`scripts/tls-interop.sh`).
+- TCP under loss no longer stalls for minutes: after a retransmission timeout, an ACK that
+  echoes the timestamp of the original send is no longer taken as an RTT sample (Karn's rule
+  for timestamps). Those samples counted the RTO wait as round trip, so the RTO grew to many
+  seconds and each further loss waited a minute (the boot self-test's lossy rounds went
+  silent on a loaded host). The net self-test runs every check under a watchdog that fails
+  loudly with a state dump, and has a stress mode (`scripts/net-stress-test.sh`). A peer
+  that SACKs our FIN can no longer spin the sender.
 
 **Desktop**
 - Real system fonts: UI text is anti-aliased Figtree (default), IBM Plex Sans, Fira Sans,

@@ -13,7 +13,11 @@ fn wiki_page_1mb() {
     let html = wikigen::wiki_page(1 << 20, 42);
     assert!(html.len() > 1_000_000, "{}", html.len());
     let t0 = std::time::Instant::now();
-    let mut d = Document::parse(html.as_bytes(), "https://wiki.example/wiki/Milk", Some("text/html; charset=utf-8"));
+    let mut d = Document::parse(
+        html.as_bytes(),
+        "https://wiki.example/wiki/Milk",
+        Some("text/html; charset=utf-8"),
+    );
     let t1 = std::time::Instant::now();
     let (n_entries, height) = {
         let dl = d.layout(&Viewport::new(1024, 768), &SysMeasurer);

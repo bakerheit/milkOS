@@ -605,7 +605,17 @@ pub fn layout_sized(
     ch: Option<Au>,
     cb_h: Option<Au>,
 ) {
+    // Same inputs as last time: the subtree is as it was (perhaps moved), so just move it back
+    // to the origin. This keeps nested flex layouts linear instead of 2^depth.
+    let key = (cb_w, cw, ch, cb_h);
+    if boxes[b as usize].sized_key == Some(key) {
+        let bx = &boxes[b as usize];
+        let (dx, dy) = (bx.margin[3] - bx.x, bx.margin[0] - bx.y);
+        translate(boxes, b, dx, dy);
+        return;
+    }
     reset_subtree(boxes, b);
+    boxes[b as usize].sized_key = Some(key);
     boxes[b as usize].laid_out = true;
     let s = boxes[b as usize].style.clone();
     let (m, bo, p) = edges(cx, &s, cb_w);

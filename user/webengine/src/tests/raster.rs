@@ -88,7 +88,14 @@ fn glyph(f: &Font, c: char) -> Option<G> {
             }
         }
     }
-    Some(G { w, h, left: r[8] as i8 as i32, top: r[9] as i8 as i32, adv: r[10] as i32, cov })
+    Some(G {
+        w,
+        h,
+        left: r[8] as i8 as i32,
+        top: r[9] as i8 as i32,
+        adv: r[10] as i32,
+        cov,
+    })
 }
 
 /// Measures with the baked fonts' advances, scaled to the font size.
@@ -97,14 +104,21 @@ pub struct SysMeasurer;
 impl TextMeasurer for SysMeasurer {
     fn text_width(&self, f: &Font, text: &str) -> i32 {
         let (_, fs) = face_for(f);
-        let units: i64 = text.chars().map(|c| glyph(f, c).map(|g| g.adv).unwrap_or(0) as i64).sum();
+        let units: i64 = text
+            .chars()
+            .map(|c| glyph(f, c).map(|g| g.adv).unwrap_or(0) as i64)
+            .sum();
         ((units * f.size as i64 * 2 + fs as i64) / (2 * fs as i64)) as i32
     }
     fn metrics(&self, f: &Font) -> FontMetrics {
         let s = f.size as i32;
         let ascent = (s * 12 + 6) / 13;
         let descent = ((s * 3 + 6) / 13).max(1);
-        FontMetrics { ascent, descent, line_height: ((s * 16 + 6) / 13).max(ascent + descent) }
+        FontMetrics {
+            ascent,
+            descent,
+            line_height: ((s * 16 + 6) / 13).max(ascent + descent),
+        }
     }
 }
 
@@ -125,7 +139,11 @@ fn blend(dst: u32, c: u32, a: u32) -> u32 {
 
 impl Canvas {
     pub fn new(w: i32, h: i32, bg: u32) -> Canvas {
-        Canvas { w, h, px: alloc::vec![bg | 0xFF00_0000; (w * h) as usize] }
+        Canvas {
+            w,
+            h,
+            px: alloc::vec![bg | 0xFF00_0000; (w * h) as usize],
+        }
     }
 
     fn put(&mut self, x: i32, y: i32, c: u32, a: u32, clip: &Rect) {
@@ -137,7 +155,9 @@ impl Canvas {
     }
 
     fn fill(&mut self, r: Rect, c: u32, clip: &Rect) {
-        let r = r.intersect(clip).intersect(&Rect::new(0, 0, self.w, self.h));
+        let r = r
+            .intersect(clip)
+            .intersect(&Rect::new(0, 0, self.w, self.h));
         for y in r.y..r.bottom() {
             for x in r.x..r.right() {
                 self.put(x, y, c, 255, clip);
@@ -184,12 +204,27 @@ impl Canvas {
                 }
                 let mv = |r: Rect| Rect::new(r.x, r.y + dy, r.w, r.h);
                 match e.item {
-                    Item::Rect { rect, color } | Item::RoundRect { rect, color, .. } => self.fill(mv(rect), color, &clip),
-                    Item::Border { rect, widths, colors, .. } => {
+                    Item::Rect { rect, color } | Item::RoundRect { rect, color, .. } => {
+                        self.fill(mv(rect), color, &clip)
+                    }
+                    Item::Border {
+                        rect,
+                        widths,
+                        colors,
+                        ..
+                    } => {
                         let r = mv(rect);
                         self.fill(Rect::new(r.x, r.y, r.w, widths[0]), colors[0], &clip);
-                        self.fill(Rect::new(r.right() - widths[1], r.y, widths[1], r.h), colors[1], &clip);
-                        self.fill(Rect::new(r.x, r.bottom() - widths[2], r.w, widths[2]), colors[2], &clip);
+                        self.fill(
+                            Rect::new(r.right() - widths[1], r.y, widths[1], r.h),
+                            colors[1],
+                            &clip,
+                        );
+                        self.fill(
+                            Rect::new(r.x, r.bottom() - widths[2], r.w, widths[2]),
+                            colors[2],
+                            &clip,
+                        );
                         self.fill(Rect::new(r.x, r.y, widths[3], r.h), colors[3], &clip);
                     }
                     Item::Text(t) => {
@@ -215,15 +250,25 @@ impl Canvas {
                         let (text, col) = match c.kind {
                             ControlKind::Checkbox | ControlKind::Radio => {
                                 if c.checked {
-                                    self.fill(Rect::new(r.x + 3, r.y + 3, r.w - 6, r.h - 6), 0xFF2060C0, &clip);
+                                    self.fill(
+                                        Rect::new(r.x + 3, r.y + 3, r.w - 6, r.h - 6),
+                                        0xFF2060C0,
+                                        &clip,
+                                    );
                                 }
                                 continue;
                             }
-                            ControlKind::Submit | ControlKind::Reset | ControlKind::Button if !c.content_drawn => {
+                            ControlKind::Submit | ControlKind::Reset | ControlKind::Button
+                                if !c.content_drawn =>
+                            {
                                 (c.label.clone(), 0xFF000000)
                             }
                             ControlKind::Select => (
-                                c.options.iter().find(|o| o.selected).map(|o| o.label.clone()).unwrap_or_default(),
+                                c.options
+                                    .iter()
+                                    .find(|o| o.selected)
+                                    .map(|o| o.label.clone())
+                                    .unwrap_or_default(),
                                 0xFF000000,
                             ),
                             ControlKind::Text | ControlKind::TextArea => {
@@ -233,12 +278,17 @@ impl Canvas {
                                     (c.value.clone(), 0xFF000000)
                                 }
                             }
-                            ControlKind::Password => (c.value.chars().map(|_| '*').collect(), 0xFF000000),
+                            ControlKind::Password => {
+                                (c.value.chars().map(|_| '*').collect(), 0xFF000000)
+                            }
                             _ => continue,
                         };
                         let m = SysMeasurer.metrics(&font);
                         let start = dl.text.len();
-                        let mut dl2 = DisplayList { text: dl.text.clone(), ..DisplayList::default() };
+                        let mut dl2 = DisplayList {
+                            text: dl.text.clone(),
+                            ..DisplayList::default()
+                        };
                         dl2.text.push_str(&text);
                         let run = TextRun {
                             x: r.x + 1,

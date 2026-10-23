@@ -32,6 +32,7 @@ mod tests;
 // Test-only: the kernel's baked system fonts and PNG encoder, for the screenshots the
 // rendering tests write (tests/raster.rs).
 #[cfg(test)]
+#[allow(dead_code)]
 mod sysfont {
     pub struct Face {
         pub size: u8,
@@ -52,11 +53,11 @@ mod sysfont {
 }
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../../../kernel/src/sysfont_data.rs"]
-mod sysfont_data;
-#[cfg(test)]
-#[allow(dead_code)]
 #[path = "../../../kernel/src/wm/png.rs"]
 mod kernel_png;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../kernel/src/sysfont_data.rs"]
+mod sysfont_data;
 
 pub use api::*;

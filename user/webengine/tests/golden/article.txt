@@ -1,0 +1,103 @@
+rect 0,0 800x972 #ffffffff
+rect 0,0 800x41 #fff8f9fa
+border 0,0 800x41 [0, 0, 1, 0]
+text 16,26 w78 Serif20 700 #ff202122 "Wikimilk"
+rrect 110,9 408x22 r2 #ffffffff
+border 110,9 408x22 [2, 2, 2, 2]
+control 0 114,12 400x16
+text 534,25 w43 SansSerif16 400 #ff3366cc "Log in"
+text 12,69 w61 SansSerif13 400 #ff3366cc "Main page"
+text 12,89 w52 SansSerif13 400 #ff3366cc "Contents"
+text 12,109 w88 SansSerif13 400 #ff3366cc "Random article"
+text 12,129 w34 SansSerif13 400 #ff3366cc "About"
+text 12,157 w27 SansSerif13 400 #ff3366cc "Help"
+text 12,177 w42 SansSerif13 400 #ff3366cc "Donate"
+border 184,41 616x892 [0, 0, 0, 1]
+border 209,57 567x35 [0, 0, 1, 0]
+text 209,82 w50 Serif28 400 #ff202122 "Milk"
+text 209,107 w195 SansSerif12 400 #ff54595d "From Wikimilk, the free encyclopedia"
+rect 546,122 230x254 #fff8f9fa
+border 546,122 230x254 [1, 1, 1, 1]
+text 648,140 w27 SansSerif14 700 #ff202122 "Milk"
+image 561,152 200x140 #0
+text 551,311 w29 SansSerif12 700 #ff202122 "Type"
+text 636,311 w58 SansSerif12 400 #ff202122 "Liquid food"
+text 551,330 w41 SansSerif12 700 #ff202122 "Source"
+text 636,330 w52 SansSerif12 400 #ff202122 "Mammals"
+text 551,349 w41 SansSerif12 700 #ff202122 "Energy"
+text 636,349 w95 SansSerif12 400 #ff202122 "270\u{a0}kJ per 100\u{a0}g"
+text 551,368 w19 SansSerif12 700 #ff202122 "Fat"
+text 636,368 w37 SansSerif12 400 #ff202122 "3.25\u{a0}g"
+text 209,140 w30 SansSerif16 700 #ff202122 "Milk"
+text 239,140 w264 SansSerif16 400 #ff202122 " is a white liquid food produced by the"
+text 209,165 w122 SansSerif16 400 #ff3366cc "mammary glands"
+text 331,165 w21 SansSerif16 400 #ff202122 " of "
+text 352,165 w69 SansSerif16 400 #ff3366cc "mammals"
+text 421,165 w59 SansSerif16 400 #ff202122 ". It is the"
+text 209,191 w254 SansSerif16 400 #ff202122 "primary source of nutrition for young"
+text 209,217 w314 SansSerif16 400 #ff202122 "mammals before they are able to digest solid"
+text 209,242 w36 SansSerif16 400 #ff202122 "food."
+text 245,236 w11 SansSerif10 400 #ff3366cc "[1]"
+text 256,242 w193 SansSerif16 400 #ff202122 " Early-lactation milk, called "
+text 449,242 w69 SansSerif16 400 #ff3366cc "colostrum"
+text 518,242 w4 SansSerif16 400 #ff202122 ","
+text 209,268 w274 SansSerif16 400 #ff202122 "contains antibodies that strengthen the"
+text 209,293 w116 SansSerif16 400 #ff202122 "immune system."
+rect 209,309 112x126 #fff8f9fa
+border 209,309 112x126 [1, 1, 1, 1]
+text 222,328 w56 SansSerif13 700 #ff202122 "Contents"
+text 228,348 w14 SansSerif13 400 #ff202122 "1. "
+text 242,348 w40 SansSerif13 400 #ff3366cc "History"
+text 228,364 w14 SansSerif13 400 #ff202122 "2. "
+text 242,364 w35 SansSerif13 400 #ff3366cc "Types"
+text 248,384 w14 SansSerif13 400 #ff202122 "1. "
+text 262,384 w26 SansSerif13 400 #ff3366cc "Cow"
+text 248,400 w14 SansSerif13 400 #ff202122 "2. "
+text 262,400 w28 SansSerif13 400 #ff3366cc "Goat"
+text 228,420 w14 SansSerif13 400 #ff202122 "3. "
+text 242,420 w66 SansSerif13 400 #ff3366cc "References"
+border 209,453 567x27 [0, 0, 1, 0]
+text 209,473 w68 Serif22 400 #ff202122 "History"
+text 209,516 w552 SansSerif16 400 #ff202122 "Humans first learned to consume the milk of other mammals regularly following"
+text 209,542 w279 SansSerif16 400 #ff202122 "the domestication of animals during the "
+text 488,542 w141 SansSerif16 400 #ff3366cc "Neolithic Revolution"
+text 629,542 w140 SansSerif16 400 #ff202122 " or the development"
+text 209,567 w515 SansSerif16 400 #ff202122 "of agriculture. This development occurred independently in several global"
+text 209,593 w315 SansSerif16 400 #ff202122 "locations from as early as 9000–7000\u{a0}BC in "
+text 524,593 w96 SansSerif16 400 #ff3366cc "Mesopotamia"
+text 620,593 w148 SansSerif16 400 #ff202122 " to 3500–3000\u{a0}BC in"
+text 209,619 w97 SansSerif16 400 #ff202122 "the Americas."
+border 209,644 567x27 [0, 0, 1, 0]
+text 209,664 w60 Serif22 400 #ff202122 "Types"
+text 209,707 w233 SansSerif16 400 #ff202122 "Milk is consumed in many forms: "
+text 442,707 w42 SansSerif16 400i #ff202122 "whole"
+text 484,707 w8 SansSerif16 400 #ff202122 ", "
+text 492,707 w64 SansSerif16 400i #ff202122 "skimmed"
+text 556,707 w8 SansSerif16 400 #ff202122 ", "
+text 564,707 w72 SansSerif16 400i #ff202122 "fermented"
+text 636,707 w35 SansSerif16 400 #ff202122 " and "
+text 671,707 w78 SansSerif16 400i #ff202122 "condensed"
+text 749,707 w4 SansSerif16 400 #ff202122 ","
+text 209,733 w450 SansSerif16 400 #ff202122 "among others. Lactose-free milk is made by adding the enzyme "
+text 659,733 w67 Monospace16 400 #ff202122 "lactase"
+text 726,733 w4 SansSerif16 400 #ff202122 "."
+marker Disc 237,764 5x5
+text 249,771 w210 SansSerif16 400 #ff202122 "Cow's milk, the most common"
+marker Disc 237,783 5x5
+text 249,790 w78 SansSerif16 400 #ff202122 "Goat's milk"
+marker Disc 237,802 5x5
+text 249,809 w89 SansSerif16 400 #ff202122 "Sheep's milk"
+border 209,832 567x27 [0, 0, 1, 0]
+text 209,852 w112 Serif22 400 #ff202122 "References"
+text 236,888 w13 SansSerif12 400 #ff202122 "1. "
+text 249,888 w115 SansSerif12 400 #ff202122 "Pehrsson, P. R. et al. "
+text 364,888 w88 SansSerif12 400i #ff202122 "Milk composition"
+text 452,888 w36 SansSerif12 400 #ff202122 ". 2000."
+text 236,902 w13 SansSerif12 400 #ff202122 "2. "
+text 249,902 w51 SansSerif12 400 #ff202122 "Smith, A. "
+text 300,902 w88 SansSerif12 400i #ff202122 "A history of dairy"
+text 388,902 w36 SansSerif12 400 #ff202122 ". 1999."
+border 0,933 800x39 [1, 0, 0, 0]
+text 24,957 w391 SansSerif12 400 #ff54595d "This page was last edited on 23 October 2026. Text is available under the "
+text 415,957 w103 SansSerif12 400 #ff3366cc "Creative Commons"
+text 518,957 w44 SansSerif12 400 #ff54595d " licence."

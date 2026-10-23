@@ -434,10 +434,23 @@ impl P<'_> {
         if b.marker != NO_BOX {
             self.paint(b.marker, off, clip, op, layer, depth + 1);
         }
-        let clip = if s.overflow_x.clips() || s.overflow_y.clips() {
+        // Overflow: hidden/clip clip to the padding box. There are no scrolling boxes, so
+        // auto/scroll clip only vertically (a box with a height cut short), and let content
+        // that is too wide spill out, where the page itself can be scrolled to it.
+        let hard = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Clip);
+        let clip_x = hard(s.overflow_x);
+        let clip_y = s.overflow_y.clips();
+        let clip = if clip_x || clip_y {
             let (px_, py_, pw, ph) = b.padding_box();
-            let pr = rect_au(px_ + off.0, py_ + off.1, pw, ph);
-            // overflow-x: hidden alone still clips both axes here (no scrolling boxes).
+            let mut pr = rect_au(px_ + off.0, py_ + off.1, pw, ph);
+            if !clip_x {
+                pr.x = i32::MIN / 4;
+                pr.w = i32::MAX / 2;
+            }
+            if !clip_y {
+                pr.y = i32::MIN / 4;
+                pr.h = i32::MAX / 2;
+            }
             self.clip_with(clip, pr)
         } else {
             clip
@@ -455,6 +468,8 @@ impl P<'_> {
                     last,
                 } = *f
                 {
+                    let io = self.inline_offset(ib);
+                    let (x, y) = (x + io.0, y + io.1);
                     let ibx = &boxes[ib as usize];
                     let ist = &ibx.style;
                     let fr = rect_au(x + off.0, y + off.1, w, h);
@@ -523,6 +538,8 @@ impl P<'_> {
                     node,
                 } = *f
                 {
+                    let io = self.inline_offset(styled);
+                    let (x, baseline) = (x + io.0, baseline + io.1);
                     let ts = &boxes[styled as usize].style;
                     let s = &ifc.text[start as usize..end as usize];
                     let run_rect = {
@@ -575,16 +592,21 @@ impl P<'_> {
     fn child(&mut self, c: BoxId, off: (Au, Au), clip: u16, op: f32, layer: Layer, depth: u32) {
         let cb = &self.boxes[c as usize];
         let s = &cb.style;
-        let element_box = !matches!(cb.kind, Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_));
+        let element_box = !matches!(
+            cb.kind,
+            Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_)
+        );
         if element_box && s.position == Position::Fixed && layer != Layer::Fixed {
             self.order += 1;
-            self.deferred.push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
+            self.deferred
+                .push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
             return;
         }
         if element_box && s.is_positioned() && !matches!(cb.kind, Kind::Inline) {
             self.order += 1;
             let z = s.z_index.unwrap_or(0);
-            self.deferred.push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
+            self.deferred
+                .push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
             return;
         }
         self.paint(c, off, clip, op, layer, depth + 1);

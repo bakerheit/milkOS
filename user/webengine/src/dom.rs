@@ -2,6 +2,7 @@
 //! [`NodeId`]. Node 0 is the Document. Only what the parser, style system and layout need; no
 //! live mutation API beyond what the tree builder uses.
 
+use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -21,8 +22,8 @@ pub enum Ns {
 #[derive(Clone, Debug)]
 pub struct Attr {
     /// Lower-cased (HTML) or as adjusted (foreign content).
-    pub name: String,
-    pub value: String,
+    pub name: Box<str>,
+    pub value: Box<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,11 +41,11 @@ impl Element {
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attrs
             .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.value.as_str())
+            .find(|a| &*a.name == name)
+            .map(|a| &*a.value)
     }
     pub fn has_attr(&self, name: &str) -> bool {
-        self.attrs.iter().any(|a| a.name == name)
+        self.attrs.iter().any(|a| &*a.name == name)
     }
     pub fn is(&self, t: Atom) -> bool {
         self.ns == Ns::Html && self.name == t
@@ -134,9 +135,9 @@ impl Dom {
         let mut id = None;
         let mut classes = Vec::new();
         for a in &attrs {
-            if a.name == "id" && !a.value.is_empty() && id.is_none() {
+            if &*a.name == "id" && !a.value.is_empty() && id.is_none() {
                 id = Some(self.atoms.intern(&a.value));
-            } else if a.name == "class" && classes.is_empty() {
+            } else if &*a.name == "class" && classes.is_empty() {
                 for c in a.value.split(is_html_space) {
                     if !c.is_empty() {
                         classes.push(self.atoms.intern(c));
@@ -369,6 +370,21 @@ impl Dom {
             .unwrap_or(NONE)
     }
 
+    /// Give back the slack of the parser's growing buffers (text nodes, attribute lists).
+    pub fn shrink(&mut self) {
+        self.nodes.shrink_to_fit();
+        for n in self.nodes.iter_mut() {
+            match &mut n.data {
+                NodeData::Text(t) | NodeData::Comment(t) => t.shrink_to_fit(),
+                NodeData::Element(e) => {
+                    e.attrs.shrink_to_fit();
+                    e.classes.shrink_to_fit();
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn approx_bytes(&self) -> usize {
         let mut b = self.nodes.capacity() * core::mem::size_of::<Node>();
         for n in &self.nodes {
@@ -376,7 +392,7 @@ impl Dom {
                 NodeData::Element(e) => {
                     e.attrs
                         .iter()
-                        .map(|a| a.name.capacity() + a.value.capacity() + 48)
+                        .map(|a| a.name.len() + a.value.len() + 32)
                         .sum::<usize>()
                         + e.classes.capacity() * 4
                 }

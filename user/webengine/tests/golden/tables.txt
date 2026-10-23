@@ -1,0 +1,67 @@
+text 22,37 w173 SansSerif16 700 #ff000000 "Dairy production, 2025"
+rect 16,47 202x29 #ffdfe6ee
+border 16,47 202x29 [1, 1, 1, 1]
+text 87,67 w60 SansSerif16 700 #ff000000 "Country"
+rect 217,47 240x29 #ffdfe6ee
+border 217,47 240x29 [1, 1, 1, 1]
+text 279,67 w116 SansSerif16 700 #ff000000 "Cows (millions)"
+rect 456,47 148x29 #ffdfe6ee
+border 456,47 148x29 [1, 1, 1, 1]
+text 498,67 w65 SansSerif16 700 #ff000000 "Milk (Mt)"
+rect 603,47 181x29 #ffdfe6ee
+border 603,47 181x29 [1, 1, 1, 1]
+text 652,67 w83 SansSerif16 700 #ff000000 "Per cow (t)"
+border 16,75 202x29 [1, 1, 1, 1]
+text 25,95 w35 SansSerif16 400 #ff000000 "India"
+border 217,75 240x29 [1, 1, 1, 1]
+text 417,95 w31 SansSerif16 400 #ff000000 "61.0"
+border 456,75 148x29 [1, 1, 1, 1]
+text 564,95 w31 SansSerif16 400 #ff000000 "99.0"
+border 603,75 181x29 [1, 1, 1, 1]
+text 753,95 w22 SansSerif16 400 #ff000000 "1.6"
+rect 16,103 768x29 #fff2f4f7
+border 16,103 202x29 [1, 1, 1, 1]
+text 25,123 w95 SansSerif16 400 #ff000000 "United States"
+border 217,103 240x29 [1, 1, 1, 1]
+text 426,123 w22 SansSerif16 400 #ff000000 "9.4"
+border 456,103 148x29 [1, 1, 1, 1]
+text 555,123 w40 SansSerif16 400 #ff000000 "102.7"
+border 603,103 181x29 [1, 1, 1, 1]
+text 744,123 w31 SansSerif16 400 #ff000000 "10.9"
+border 16,131 202x29 [1, 1, 1, 1]
+text 25,151 w40 SansSerif16 400 #ff000000 "Brazil"
+border 217,131 240x29 [1, 1, 1, 1]
+text 417,151 w31 SansSerif16 400 #ff000000 "16.0"
+border 456,131 148x29 [1, 1, 1, 1]
+text 564,151 w31 SansSerif16 400 #ff000000 "35.0"
+border 603,131 181x29 [1, 1, 1, 1]
+text 753,151 w22 SansSerif16 400 #ff000000 "2.2"
+rect 16,159 768x29 #fff2f4f7
+border 16,159 441x29 [1, 1, 1, 1]
+text 25,179 w193 SansSerif16 400 #ff000000 "Rest of the world (estimate)"
+border 456,159 148x29 [1, 1, 1, 1]
+text 568,179 w27 SansSerif16 400 #ff000000 "420"
+border 603,159 181x29 [1, 1, 1, 1]
+text 766,179 w9 SansSerif16 400 #ff000000 "—"
+border 16,187 202x29 [1, 1, 1, 1]
+text 98,207 w38 SansSerif16 700 #ff000000 "Total"
+border 217,187 567x29 [1, 1, 1, 1]
+text 226,207 w93 SansSerif16 400 #ff000000 "about 650 Mt"
+border 16,240 224x77 [1, 1, 1, 1]
+border 17,241 81x50 [1, 1, 1, 1]
+text 22,271 w71 SansSerif16 700 #ff000000 "Rowspan"
+border 98,241 15x25 [1, 1, 1, 1]
+text 101,259 w9 SansSerif16 400 #ff000000 "a"
+border 113,241 126x25 [1, 1, 1, 1]
+text 116,259 w9 SansSerif16 400 #ff000000 "b"
+rect 98,266 15x25 #ffffeecc
+border 98,266 15x25 [1, 1, 1, 1]
+text 101,284 w8 SansSerif16 400 #ff000000 "c"
+border 113,266 126x25 [1, 1, 1, 1]
+text 169,284 w67 SansSerif16 400 #ff000000 "d (120px)"
+border 17,291 222x25 [1, 1, 1, 1]
+text 98,309 w61 SansSerif16 400 #ff000000 "wide cell"
+border 167,333 109x25 [1, 1, 1, 1]
+text 170,351 w103 SansSerif16 400 #ff000000 "table-cell span"
+text 16,351 w151 SansSerif16 400 #ff000000 "A table without rows: "
+text 276,351 w44 SansSerif16 400 #ff000000 " done."

@@ -139,30 +139,37 @@ fn layout_one(boxes: &mut Vec<LBox>, cx: &Cx, b: BoxId) {
     boxes[b as usize].laid_out = true;
 }
 
-/// The scrollable extent of the document: the furthest box edges, not counting boxes inside
-/// clipping (overflow: hidden) ancestors or fixed boxes.
+/// The scrollable extent of the document: the furthest box edges, not counting fixed boxes
+/// or what clipping ancestors cut off (per axis, as painting clips: hidden/clip in x,
+/// anything but visible in y).
 pub fn extent(boxes: &[LBox], root: BoxId) -> (Au, Au) {
     let mut w = 0;
     let mut h = 0;
-    let mut stack = alloc::vec![(root, false)];
-    while let Some((b, clipped)) = stack.pop() {
+    let mut stack = alloc::vec![(root, false, false)];
+    while let Some((b, cx_, cy_)) = stack.pop() {
         let bx = &boxes[b as usize];
         if bx.style.position == Position::Fixed {
             continue;
         }
-        if !clipped && bx.laid_out {
-            w = w.max(bx.x + bx.w + bx.margin[1].max(0));
-            h = h.max(bx.y + bx.h + bx.margin[2].max(0));
-            if let Some(ifc) = &bx.ifc
-                && let Some(l) = ifc.lines.last()
-            {
-                h = h.max(l.y + l.h);
+        if bx.laid_out {
+            if !cx_ {
+                w = w.max(bx.x + bx.w + bx.margin[1].max(0));
+            }
+            if !cy_ {
+                h = h.max(bx.y + bx.h + bx.margin[2].max(0));
+                if let Some(ifc) = &bx.ifc
+                    && let Some(l) = ifc.lines.last()
+                {
+                    h = h.max(l.y + l.h);
+                }
             }
         }
-        let clips =
-            clipped || (b != root && (bx.style.overflow_x.clips() || bx.style.overflow_y.clips()));
+        let own = b != root;
+        let clip_x =
+            cx_ || (own && matches!(bx.style.overflow_x, Overflow::Hidden | Overflow::Clip));
+        let clip_y = cy_ || (own && bx.style.overflow_y.clips());
         for &c in &bx.children {
-            stack.push((c, clips));
+            stack.push((c, clip_x, clip_y));
         }
     }
     (w, h)

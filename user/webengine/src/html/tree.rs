@@ -432,8 +432,8 @@ impl TreeBuilder {
             .attrs
             .iter()
             .map(|a| Attr {
-                name: a.name.clone(),
-                value: a.value.clone(),
+                name: a.name.as_str().into(),
+                value: a.value.as_str().into(),
             })
             .collect();
         self.dom.create_element(t.name, ns, attrs)
@@ -1559,10 +1559,10 @@ impl TreeBuilder {
     fn merge_attrs(&mut self, n: NodeId, st: &Tag) {
         if let Some(e) = self.dom.element_mut(n) {
             for a in &st.attrs {
-                if !e.attrs.iter().any(|x| x.name == a.name) {
+                if !e.attrs.iter().any(|x| *x.name == *a.name) {
                     e.attrs.push(Attr {
-                        name: a.name.clone(),
-                        value: a.value.clone(),
+                        name: a.name.as_str().into(),
+                        value: a.value.as_str().into(),
                     });
                 }
             }

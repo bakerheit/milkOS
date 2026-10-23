@@ -26,7 +26,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "audio-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -34,7 +34,7 @@ KERNEL="$ELF.bin"
 
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none -global virtio-mmio.force-legacy=false \
   -audiodev "wav,id=snd0,path=$WAV,out.frequency=48000" -device virtio-sound-device,audiodev=snd0 \
   2>"$WORK/qemu.err" &
@@ -122,5 +122,5 @@ print(f"recording: {res['seconds']} s, peak {res['peak_dbfs']} dBFS, everything 
 PY
 cleanup
 trap - EXIT
-[ -z "${1:-}" ] && rm -rf "$WORK"
+[ -z "${1:-}" ] && [ "${MILK_KEEP:-}" != 1 ] && rm -rf "$WORK" || true
 echo "audio-test: PASS"

@@ -20,11 +20,12 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d "${TMPDIR:-/tmp}/milk-text.XXXXXX")"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/fs.img"
@@ -35,7 +36,7 @@ boot() { # name steps...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
@@ -281,4 +282,4 @@ gone "unset LOCAL"
 check "msh help: variables" "help" "  variables        list, get NAME, remove NAME, run NAME=v CMD   (variables help)"
 check "msh help: text, print, pause" "help" "programs (/Commands): files trash text print pause"
 
-[ "$FAIL" = 0 ] && { echo "text-test: PASS"; rm -rf "$T"; } || { echo "text-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "text-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "text-test: FAIL (logs in $T)"; exit 1; }

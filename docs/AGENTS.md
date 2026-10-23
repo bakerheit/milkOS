@@ -66,11 +66,16 @@
 - Every window has its own offscreen surface. Nothing but the compositor writes to the framebuffer.
 
 ## Verifying
-- `scripts/check-all.sh` runs every test script, four at a time (private images and ports per test, time limits,
-  one pass/fail table with the wall time, non-zero exit on any fail; about 5 minutes, `-j 1` for one at a time).
-  `--smoke` is one test per area (under 2 minutes; run it on every change), `--full` adds the long
-  soak/crash/stress runs, `--only REGEX` picks some, `--list` shows them. The default set gates a push: run it
-  before asking the lead to merge. A new test that can't share the machine gets mode `solo` in the table.
+- `scripts/check-all.sh` runs every test script, eight at a time (private images and ports per test, time limits,
+  one pass/fail table with the wall time, non-zero exit on any fail; about 2 minutes, `-j 1` for one at a time).
+  `--smoke` is one test per area (run it on every change), `--full` adds the long soak/crash/stress runs,
+  `--only REGEX` picks some, `--list` shows them. The default set gates a push: run it before asking the lead
+  to merge. A pass on a clean tree is recorded, and `--if-needed` skips a set this exact tree already passed.
+  A new test that can't share the machine gets mode `solo` in the table.
+- VMs boot without the slow kernel self-tests (`opt/milkos/selftest`, kernel/src/selftest.rs);
+  `scripts/selftest-boot.sh` runs them all, and `MILK_SELFTEST=full scripts/run.sh` boots with them.
+- Disk: a test removes its own /tmp work folder when it passes and keeps it when it fails (`MILK_KEEP=1` or
+  check-all `--keep` keeps it anyway). check-all refuses to start with under 5 GB free in /tmp.
 - `scripts/public-check.sh` (also the first test in check-all) keeps the public repo clean: it fails on names from a
   local list (kept outside the repo, see the script header), e-mail addresses other than noreply ones, host home
   paths, key material and ticket ids, in the working tree and in commits not on origin/main. Run it before

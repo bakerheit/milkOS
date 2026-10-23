@@ -11,12 +11,13 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-scrubtest.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/s.img"
@@ -34,12 +35,12 @@ boot() { # name commands...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 ${ENC_QEMU[@]+"${ENC_QEMU[@]}"} 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  local args=("wait:$P" "send:pause 1" "wait:$P") # the first command only lets the boot finish
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print SCRUB""-DONE" "wait:SCRUB-DONE" "done:$T/$name.done" &
   local DPID=$!
@@ -75,5 +76,5 @@ echo "$L" | grep -a "^error: block .*data of /Volumes/Milk/docs/old.bin at offse
 echo "$L" | grep -a -A1 "text show /Volumes/Milk/docs/b.bin" | grep -aq "checksum mismatch in block" && ok "reading the damaged file fails its checksum (EIO)" || bad "read of damaged file"
 [ "$(echo "$L" | grep -a "milkfs.scrub.error" | grep -vc "audit --event")" -ge 2 ] && ok "both in the audit log" || bad "audit log"
 echo
-[ $FAIL = 0 ] && echo "scrubtest: PASS ($T)" || echo "scrubtest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "scrubtest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "scrubtest: FAIL ($T)"; fi
 exit $FAIL

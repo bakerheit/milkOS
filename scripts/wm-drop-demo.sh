@@ -16,7 +16,7 @@ OUT="${3:?usage}"
 mkdir -p "$OUT"
 WORK=$(mktemp -d /tmp/milk-drop-demo.XXXXXX)
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 read -r PA PB < <(python3 -I -c '
 import socket
 s = [socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for _ in range(2)]

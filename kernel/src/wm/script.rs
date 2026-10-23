@@ -788,7 +788,9 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 ..Mods::NONE
             };
             if name == "shot" {
-                b.wait(300).key(Key::Char('3'), cs).wait(2500);
+                // Let the desktop settle first (a first boot's Files window can still be
+                // filling in), so the screenshot and qemu's later screendump show the same.
+                b.wait(1500).key(Key::Char('3'), cs).wait(2500);
             } else {
                 b.wait(300).key(Key::Char('4'), cs).wait(300);
                 b.to(300, 90).wait(30).down().wait(30);

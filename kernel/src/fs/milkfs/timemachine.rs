@@ -44,6 +44,12 @@ fn thread() {
     loop {
         crate::sched::sleep_ms(1000);
         let Some(v) = super::volume() else { continue };
+        // No volume at boot (an encrypted home still locked, a disk formatted later): the
+        // interval starts when one shows up, instead of an "every 15m" snapshot right away.
+        if LAST_RUN.load(Ordering::Relaxed) == 0 {
+            LAST_RUN.store(now_s(), Ordering::Relaxed);
+            continue;
+        }
         let cfg = v.state.lock().auto_config();
         if cfg.enabled && now_s() >= LAST_RUN.load(Ordering::Relaxed) + cfg.interval_s {
             let _ = run_once(&format!("every {}", interval_text(cfg.interval_s)));

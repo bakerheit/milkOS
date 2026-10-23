@@ -31,6 +31,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$PWD"
 OPENSSL="${OPENSSL:-/opt/homebrew/opt/openssl@3/bin/openssl}"
 WORK="$(mktemp -d /tmp/milk-tls-interop.XXXXXX)"
@@ -152,14 +153,14 @@ PROBE="$REPO/target/host-tests/aarch64-apple-darwin/debug/tlsprobe"
 "$PROBE" "$C/root.der" $(cases 127.0.0.1) | tee "$WORK/host.txt" || fail "host probe"
 HOST_N="$(grep -c ': ok: ' "$WORK/host.txt")"
 if [ -n "${TLS_INTEROP_HOST_ONLY:-}" ]; then
-  cleanup; trap - EXIT; rm -rf "$WORK"
+  cleanup; trap - EXIT; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
   echo "tls-interop: PASS (host only: $HOST_N cases)"
   exit 0
 fi
 
 # ---- 4. and 5. the guest ----
 echo "---- guest: kernel (net::tls::selftest) and user space (/System/Developer/tlsprobe) ----"
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$WORK/milkos-kernel.bin"
@@ -169,7 +170,7 @@ printf '%s' "$GUEST_CASES" >"$WORK/tlstest.cfg"
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
   -accel hvf -cpu host -m 512M -kernel "$KERNEL" \
-  -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 -display none \
+  -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -fw_cfg "name=opt/milkos/tlstest,file=$WORK/tlstest.cfg" \
@@ -238,5 +239,5 @@ grep -aq "^\[browser\] https://web\.milk\.test:$PAGE/secure\.html: web\.milk\.te
 [ -n "${KEEP_SHOTS:-}" ] && cp "$WORK"/secure.png "$WORK"/wronghost.png "$KEEP_SHOTS"/
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "tls-interop: PASS (host $HOST_N cases, guest kernel $GUEST_N, guest user space $USER_N, network get https, Browser https + certificate error)"

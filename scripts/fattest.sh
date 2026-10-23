@@ -10,13 +10,14 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-fattest.XXXXXX)"
 IMG="$T/fat.img"
 FAIL=0
 bad() { echo "  FAIL: $*"; FAIL=1; }
 ok() { echo "  ok: $*"; }
 
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 
@@ -47,7 +48,7 @@ X="$SHARE_DIR/$SHARE_SUB"; mkdir -p "$X"
 head -c 200000 /dev/urandom > "$X/payload.bin"
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true; rm -rf "$X"' EXIT
@@ -109,5 +110,5 @@ echo "  Mac sees:"; (cd "$MNT" && find . -path ./.fseventsd -prune -o -print | g
 hdiutil detach "$DEV" >/dev/null && ok "detached"
 
 echo
-if [ $FAIL = 0 ]; then echo "fattest: PASS ($T)"; else echo "fattest: FAIL ($T)"; fi
+if [ $FAIL = 0 ]; then echo "fattest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "fattest: FAIL ($T)"; fi
 exit $FAIL

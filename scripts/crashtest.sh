@@ -26,7 +26,7 @@ SBCUTS="${3:-4}"
 IMG="${MILK_CRASH_IMG:-/tmp/milk-crash.img}"
 LOGS="$(mktemp -d /tmp/milk-crash.XXXXXX)"
 
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 source scripts/enc.sh
@@ -138,4 +138,5 @@ done
 echo
 echo "crashtest: $PASS passed, $FAIL failed ($KILLS kill, $CUTS power-cut, $SBCUTS superblock rounds). Logs: $LOGS"
 python3 scripts/mkmilkfs.py check "$IMG"
-[ "$FAIL" = 0 ]
+[ "$FAIL" = 0 ] || exit 1
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$LOGS" || true

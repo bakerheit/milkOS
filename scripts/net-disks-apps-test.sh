@@ -26,11 +26,12 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d "${TMPDIR:-/tmp}/milk-nda.XXXXXX")"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/fs.img"; SPARE="$T/spare.img"; BLANK="$T/blank.img"
@@ -177,7 +178,7 @@ s "search help" \
   "print now > /System/Kernel/fs/milkfs/sync"
 
 qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
@@ -347,4 +348,4 @@ check "--rebuild" "search --rebuild" "search: rebuilding the index in the backgr
 check "--wait-index" "search --wait-index" "search: the index is (ready|loaded)"
 check "a misspelled option" "search --fuzzy x" "search: there's no option --fuzzy \\(try search help\\)"
 
-[ "$FAIL" = 0 ] && { echo "net-disks-apps-test: PASS"; rm -rf "$T"; } || { echo "net-disks-apps-test: FAIL (logs in $T)"; exit 1; }
+[ "$FAIL" = 0 ] && { echo "net-disks-apps-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; } || { echo "net-disks-apps-test: FAIL (logs in $T)"; exit 1; }

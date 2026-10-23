@@ -13,6 +13,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$PWD"
 WORK="$(mktemp -d /tmp/milk-pkg-test.XXXXXX)"
 LOG="$WORK/serial.log"
@@ -28,7 +29,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "pkg-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -57,7 +58,7 @@ MILK_FS="$WORK/fs.img" MILK_DISK="$WORK/disk.img" milk_disk_args
 
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none -global virtio-mmio.force-legacy=false \
   "${DISK_ARGS[@]}" \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 2>"$WORK/qemu.err" &
@@ -289,7 +290,7 @@ echo "---- second boot of the same image ----"
 rm -f "$SERIAL" "$WORK/drive.done"
 LOG2="$WORK/serial2.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none -global virtio-mmio.force-legacy=false \
   "${DISK_ARGS[@]}" -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 2>>"$WORK/qemu.err" &
 QPID=$!
@@ -322,5 +323,5 @@ cat "$WORK/http.log"
 
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "pkg-test: PASS"

@@ -6,19 +6,21 @@
 # must not grow by more than LIMIT_KB (the
 # allocator returns freed memory, so a steady loop stays flat; plus an eighth of the process's
 # size, for the batching of what it gives back). Every other process's growth is
-# printed too, for information. About SECS + 40 seconds.
-#   scripts/leak-test.sh [SECS] [LIMIT_KB]      (defaults 60 and 128)
+# printed too, for information. About SECS + 20 seconds.
+#   scripts/leak-test.sh [SECS] [LIMIT_KB]      (defaults 30 and 128)
+# 30 s is enough: with the old bump allocator (user/rt before the heapkit heap) put back, a 30 s
+# run fails on three of the four (watch +1024K, activity +2048K, milkd +192K over the limits).
 # Only the qemu started here is killed (by PID). Work files: a fresh mktemp dir.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-SECS="${1:-60}"
+SECS="${1:-30}"
 LIMIT_KB="${2:-128}"
 T="$(mktemp -d /tmp/milk-leaktest.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 export MILK_FS="${MILK_FS:-$T/fs.img}" MILK_DISK="${MILK_DISK:-$T/disk.img}"
@@ -30,7 +32,7 @@ SOCK="$T/s.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
   -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
-  -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device virtio-gpu-device -display none \
+  -kernel "$ELF.bin" -serial "unix:$SOCK,server=on,wait=on" -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   "${DISK_ARGS[@]}" "${NET_ARGS[@]}" >/dev/null 2>&1 &
 QPID=$!
@@ -80,4 +82,4 @@ for p in watch milkd alarmd activity; do
   if [ $((b - a)) -le "$lim" ]; then ok "$p stayed flat (${a}K -> ${b}K, limit +${lim}K)"; else bad "$p grew from ${a}K to ${b}K in $((SECONDS - t0)) s (limit +${lim}K)"; fi
 done
 grep -aqi "kernel panic" "$LOG" && bad "a kernel panic in the serial log" || true
-if [ "$FAIL" = 0 ]; then echo "leak-test: PASS"; rm -rf "$T"; else echo "leak-test: FAIL (log in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ]; then echo "leak-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "leak-test: FAIL (log in $T)"; exit 1; fi

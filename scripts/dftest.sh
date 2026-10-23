@@ -10,11 +10,12 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-dftest.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 
@@ -28,7 +29,7 @@ SHARE_DIR="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)/share"
 
 SOCK="$T/serial.sock" LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true' EXIT
@@ -41,7 +42,7 @@ for c in \
   "disks list /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
   "text show /Commands/* > /Volumes/Milk/big.bin" "print now > /System/Kernel/fs/milkfs/sync" "text count --bytes /Volumes/Milk/big.bin" "disks list /Volumes/Milk" \
   "disks snapshot dfsnap" "disks list /Volumes/Milk/.snapshots/dfsnap" \
-  "disks list /no/such/path"; do
+  "disks list /no/such/path" "text show /System/Kernel/fs/milkfs/info"; do
   args+=("send:$c" "wait:$P")
 done
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print DF""-DONE" "wait:DF-DONE" "done:$T/done" &
@@ -51,8 +52,10 @@ kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 L="$(tr -d '\r' < "$LOG")"
 # The output of one command: the lines after "$ CMD" up to the next prompt.
-out() { echo "$L" | awk -v c="\$ $1" 'index($0, c) && substr($0, index($0, c)) == c {on=1; next} on && /^msh:/ {exit} on'; }
-col() { awk -v m="$1" -v n="$2" '$NF == m || ($(NF-1) == m && $NF == "(ro)") {print $n; exit}'; }
+# (The awk scripts read to the end instead of exiting early: an early exit kills the echo
+# feeding them with SIGPIPE, and pipefail makes that a failure; see scripts/grepq.sh.)
+out() { echo "$L" | awk -v c="\$ $1" '!d && index($0, c) && substr($0, index($0, c)) == c {on=1; next} on && /^msh:/ {on=0; d=1} on'; }
+col() { awk -v m="$1" -v n="$2" '!d && ($NF == m || ($(NF-1) == m && $NF == "(ro)")) {print $n; d=1}'; }
 
 DF="$(out "disks list")"
 echo "$DF" | sed 's/^/    /'
@@ -94,13 +97,13 @@ hu=$(echo "$P1" | col /Users/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
 [ "$(echo "$P1" | col /Users/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
   && ok "disks list /Users/milk = disks list /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
 u0=$(echo "$DF" | col /Volumes/Milk 3); u1=$(out "disks list /Volumes/Milk" | col /Volumes/Milk 3)
-big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
+big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk 'NR == 1 {print $1}') / 1024 ))
 [ -n "$u0" ] && [ -n "$u1" ] && [ "$big" -gt 1024 ] && [ $((u1 - u0)) -ge "$big" ] && [ $((u1 - u0)) -le $((big + big / 10 + 64)) ] \
   && ok "$big K written: used $u0 -> $u1 K" || bad "used: $u0 -> $u1 K after writing $big K"
 out "disks list /Volumes/Milk/.snapshots/dfsnap" | grep -q "^milkfs .* /Volumes/Milk/.snapshots/dfsnap (ro)$" && ok "a snapshot: milkfs, read-only" || bad "snapshot statfs"
 out "disks list /no/such/path" | grep -q "^disks list: /no/such/path doesn't exist" && ok "a missing path: an error" || bad "missing path"
-echo "$L" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
-echo "$L" | grep -q "fs selftest: PASS" && ok "self-test: $(echo "$L" | grep -o 'fs selftest: PASS ([0-9]* checks)')" || bad "self-test: $(echo "$L" | grep -a 'selftest: FAIL' | head -3)"
+out "text show /System/Kernel/fs/milkfs/info" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
+# The kernel's fs self-test isn't part of this boot any more: scripts/selftest-boot.sh runs it.
 echo
-[ $FAIL = 0 ] && echo "dftest: PASS ($T)" || echo "dftest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "dftest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "dftest: FAIL ($T)"; fi
 exit $FAIL

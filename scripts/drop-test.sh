@@ -26,6 +26,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$PWD"
 WORK="$(mktemp -d /tmp/milk-drop-test.XXXXXX)"
 PIDS=()
@@ -36,7 +37,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "drop-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -74,7 +75,7 @@ echo "eth1 link: alice 127.0.0.1:$PA <-> bob 127.0.0.1:$PB (qemu -netdev dgram)"
 # boot NAME MAC LOCAL_PORT REMOTE_PORT: eth0 = restricted slirp, eth1 = the dgram link.
 boot() {
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-2}" -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -drive "file=$WORK/$1-disk.img,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -drive "file=$WORK/$1-fs.img,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 \
@@ -217,7 +218,7 @@ check "$A" "userland crypto vectors (rt::crypto)" "drop: selftest ok"
 check "$A" "X25519 vectors in userland" "drop: x25519 +8/8 vectors"
 check "$A" "a fresh key is from the kernel CSPRNG" "^rng: +kernel CSPRNG"
 check "$A" "the kernel CSPRNG was seeded from virtio-rng" "\\[rng\\] ChaCha20 CSPRNG seeded from virtio-rng \\(64 bytes\\).*: ok$"
-check "$A" "the kernel ran every crypto vector" "\\[crypto\\] test vectors: .*x25519 8/8.*: ok"
+# The kernel's own crypto vectors are a boot self-test now: scripts/selftest-boot.sh checks them.
 check "$A" "alice rotated her key" "drop: the old key signed the new one"
 check "$B" "bob sees alice's rotation in drop list" "^alice +169\\.254\\.10\\.10 +[0-9a-f ]{19} +yes +rotated "
 check "$B" "bob accepts the rotated key (signed by the old one)" "drop: alice rotated its key \\(signed by its old key [0-9a-f ]{19}\\): now [0-9a-f ]{19}"
@@ -342,5 +343,5 @@ echo "  ok  on disk: the legacy seed is gone, the new one is tagged, the rotatio
 
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "drop-test: PASS"

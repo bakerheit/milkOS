@@ -1181,6 +1181,26 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
     if let Err(e) = install_all(b, r) {
         super::report(b, r, &e, "setting up the page's scripts");
     }
+    // Uncaught errors in jobs and unhandled rejections go through window's events first.
+    let b2 = b.clone();
+    r.set_rejection_hook(Some(Box::new(move |r: &mut Realm, ev: jsengine::PromiseRejection| match ev {
+        jsengine::PromiseRejection::Unhandled { promise, reason } => {
+            if !events_js::fire_rejection(&b2, r, promise, Some(reason)) {
+                let rep = r.report_value(reason);
+                b2.console(ConsoleLevel::Error, format!("Uncaught (in promise) {rep}"));
+                if let Ok(mut st) = b2.st.try_borrow_mut() {
+                    st.stats.errors += 1;
+                }
+            }
+        }
+        jsengine::PromiseRejection::Handled { promise } => {
+            events_js::fire_rejection(&b2, r, promise, None);
+        }
+    })));
+    let b2 = b.clone();
+    r.set_error_hook(Some(Box::new(move |r: &mut Realm, e: &jsengine::Exception| {
+        super::report(&b2, r, e, "");
+    })));
     // Wall-clock time for Date, and the slow-script check.
     let b2 = b.clone();
     r.set_clock(Box::new(move || b2.host().map_or(0.0, |h| h.time())));
@@ -1252,6 +1272,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     let (_custom, p_custom) = mk(r, event);
     let (_input, p_input) = mk(r, ui);
     let (_submit, p_submit) = mk(r, event);
+    let (_errev, p_errev) = mk(r, event);
+    let (_rejev, p_rejev) = mk(r, event);
     let (node_list, p_node_list) = mk(r, objp);
     let (coll, p_coll) = mk(r, objp);
     let (tok, p_tok) = mk(r, objp);
@@ -1279,6 +1301,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         custom_event: p_custom,
         input_event: p_input,
         submit_event: p_submit,
+        error_event: p_errev,
+        rejection_event: p_rejev,
         node_list: p_node_list,
         html_collection: p_coll,
         token_list: p_tok,

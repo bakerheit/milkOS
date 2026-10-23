@@ -481,8 +481,16 @@ fn checkpoint(b: &Rc<Bridge>, r: &mut Realm) {
 }
 
 /// An exception reached the top: to the console (and an uncatchable one ends the scripts).
-pub(crate) fn report(b: &Bridge, r: &mut Realm, e: &Exception, what: &str) {
+pub(crate) fn report(b: &Rc<Bridge>, r: &mut Realm, e: &Exception, what: &str) {
     let rep = r.report(e);
+    // window.onerror and `error` listeners see it first; one that handles it keeps the
+    // console quiet.
+    if !rep.uncatchable && events_js::fire_error(b, r, &rep, e.value()) {
+        if let Ok(mut st) = b.st.try_borrow_mut() {
+            st.stats.errors += 1;
+        }
+        return;
+    }
     let text = if what.is_empty() {
         format!("Uncaught {rep}")
     } else {
@@ -504,7 +512,7 @@ pub(crate) fn report(b: &Bridge, r: &mut Realm, e: &Exception, what: &str) {
 
 /// Call `f`, reporting what it throws; None if it threw.
 pub(crate) fn call_report(
-    b: &Bridge,
+    b: &Rc<Bridge>,
     r: &mut Realm,
     f: Value,
     this: Value,

@@ -31,6 +31,9 @@ pub(crate) struct SymData {
     pub desc: Option<StrId>,
     /// Symbol.for key, if registered.
     pub registered: bool,
+    /// A class's private name (`#x`): the key of a private field or method. Script never
+    /// sees it, and own-key listings skip it.
+    pub private: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +95,8 @@ pub(crate) struct Heap {
     /// Work done outside the VM loop (units copied, elements visited): the VM adds it to
     /// its step count, so a step budget bounds CPU time, not just loop iterations.
     pub work: u64,
+    /// Memory held outside the heap that counts against the budget (module code).
+    pub external: usize,
     stress_n: u32,
 }
 
@@ -117,6 +122,7 @@ impl Heap {
             stress: 0,
             stress_n: 0,
             work: 0,
+            external: 0,
         }
     }
 
@@ -401,8 +407,16 @@ impl Heap {
         self.syms.push(SymData {
             desc,
             registered: false,
+            private: false,
         });
         SymId(self.syms.len() as u32 - 1)
+    }
+
+    /// A fresh private name.
+    pub fn new_private_sym(&mut self, desc: StrId) -> SymId {
+        let s = self.new_sym(Some(desc));
+        self.syms[s.0 as usize].private = true;
+        s
     }
 
     // ---- collection ----
@@ -524,6 +538,7 @@ impl Heap {
         live += syms_bytes(self.syms.len());
         live += (self.objs.capacity() * core::mem::size_of::<ObjSlot>())
             + (self.strs.capacity() * core::mem::size_of::<StrSlot>());
+        live += self.external;
         self.live_bytes = live;
         self.since_gc = 0;
         self.gc_threshold = live.max(MIN_GC_THRESHOLD);

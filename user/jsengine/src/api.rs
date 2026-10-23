@@ -57,16 +57,40 @@
 //! - **Threads.** A realm is single-threaded (`!Send`). Parsing and compiling recurse with the
 //!   source's nesting (bounded); give the thread at least 1 MB of stack (the Browser's main
 //!   thread has 8 MB).
-//! - **Not supported (yet):** ES modules (`import`/`export`, `import()`; a script using
-//!   them gets a SyntaxError), `with`, direct `eval` seeing local variables (every `eval`
+//! - **Not supported (yet):** `with`, direct `eval` seeing local variables (every `eval`
 //!   is global), BigInt (so no BigInt64Array / BigUint64Array), Proxy, resizable
-//!   ArrayBuffers, Intl (the
-//!   `toLocale*String` methods format en-US style), private class members (`#x`),
-//!   String.prototype.normalize (returns the string as is), WeakRef /
-//!   FinalizationRegistry, SharedArrayBuffer and Atomics. Date has a fixed local offset (no
-//!   daylight-saving rules).
+//!   ArrayBuffers, Intl (the `toLocale*String` methods format en-US style),
+//!   String.prototype.normalize (returns the string as is), WeakRef / FinalizationRegistry,
+//!   SharedArrayBuffer and Atomics, symbols as WeakMap keys, the ES2024+ additions (iterator
+//!   helpers, Set methods, `Array.fromAsync`, RegExp `v` flag, duplicate named groups and
+//!   modifiers). Date has a fixed local offset (no daylight-saving rules). ES modules,
+//!   private class members (`#x`) and RegExp match indices (`d` flag) are supported.
 //!
 //! # CHANGES
+//! - Added ES modules (stage 2b). A module is compiled from source into a [`ModuleId`]
+//!   ([`Realm::compile_module`]; [`Realm::compile_synthetic_module`] for modules the host
+//!   builds, a JSON module say). The engine never does I/O: the host reads the requested
+//!   specifiers ([`Realm::module_requests`], each a [`ModuleRequest`] with its import
+//!   attributes), fetches and compiles them in whatever way and order it likes, and hands
+//!   each dependency back ([`Realm::set_module_dependency`]); then [`Realm::link_module`]
+//!   links the whole graph (missing or ambiguous exports are SyntaxErrors with the importing
+//!   file, line and column) and [`Realm::evaluate_module`] runs it and returns a Promise
+//!   (top-level await, cycles and async ordering follow the spec's algorithms).
+//!   [`Realm::module_namespace`] gives the module namespace object, [`Realm::module_status`]
+//!   and [`Realm::module_error`] the state. `import.meta` asks
+//!   [`Realm::set_import_meta_hook`] to fill in the object (once per module) and `import()`,
+//!   from modules and from classic scripts, asks [`Realm::set_dynamic_import_hook`] (a
+//!   [`DynamicImport`]); the host answers later with [`Realm::finish_dynamic_import`] and
+//!   the engine links, evaluates and settles the Promise. Modules count against the heap
+//!   budget and [`Realm::set_max_modules`]; [`Realm::drop_module`] and
+//!   [`Realm::drop_module_graph`] release them. `import`/`export` in a classic script are
+//!   still a SyntaxError (and `import()` is allowed there). A script's `import()` with no
+//!   hook set rejects with a TypeError. Linking, evaluation, `import()` and the module
+//!   namespace objects are real; the engine runs a module's code with the realm's step
+//!   budget and interrupt like any other script. Module code is strict, has no HTML-like
+//!   comments, and `await` is reserved in it. Also new: private class members (`#x`,
+//!   `#m()`, `static #s`, `#x in obj`), RegExp match indices (the `d` flag), and parameters
+//!   with defaults are in their TDZ until initialized (`function f(a = b, b) {}` throws).
 //! - Added [`Realm::set_rejection_hook`] ([`PromiseRejection`]: unhandled and late-handled
 //!   promise rejections, the browser's `unhandledrejection` / `rejectionhandled`) and
 //!   [`Realm::set_error_hook`] (exceptions thrown out of queued jobs, for `window.onerror`;
@@ -525,6 +549,99 @@ impl Default for ScriptOptions<'_> {
         }
     }
 }
+
+/// A module record (a compiled module, or a synthetic one the host made). Copy; valid until
+/// [`Realm::drop_module`] / [`Realm::drop_module_graph`] (a dropped or foreign id is refused
+/// with a TypeError, never confused with another module).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ModuleId(pub(crate) u32, pub(crate) u32);
+
+/// How to compile a module ([`Realm::compile_module`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleOptions<'a> {
+    /// The module's name in error reports and stacks, and the base the host resolves its
+    /// own specifiers against: normally its URL.
+    pub file: &'a str,
+    /// The line the source starts on (1 for a file; an inline `<script type="module">`'s
+    /// line in the page).
+    pub first_line: u32,
+    /// The column of the first line (1-based).
+    pub first_column: u32,
+}
+
+impl Default for ModuleOptions<'_> {
+    fn default() -> Self {
+        ModuleOptions {
+            file: "module",
+            first_line: 1,
+            first_column: 1,
+        }
+    }
+}
+
+/// One thing a module (or an `import()` call) asks the host for: a specifier and its import
+/// attributes (`with { type: "json" }` gives `("type", "json")`), where it was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRequest {
+    pub specifier: String,
+    /// The attributes, sorted by key.
+    pub attributes: Vec<(String, String)>,
+    /// Where the first request for this pair is (the file is the module's own).
+    pub line: u32,
+    pub column: u32,
+}
+
+impl ModuleRequest {
+    /// The value of attribute `key`, if present.
+    pub fn attribute(&self, key: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Where a module is in its life (the spec's cyclic module record status).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleStatus {
+    /// Compiled; dependencies may still be missing.
+    Unlinked,
+    /// [`Realm::link_module`] is running (only seen from a native called while it runs).
+    Linking,
+    Linked,
+    /// Running (or waiting on a dependency that is).
+    Evaluating,
+    /// Done synchronously but waiting for async dependencies, or suspended at a top-level
+    /// `await`.
+    EvaluatingAsync,
+    /// Finished, with a result or with an error ([`Realm::module_error`]).
+    Evaluated,
+}
+
+/// An `import()` call waiting for the host ([`Realm::set_dynamic_import_hook`]).
+#[derive(Clone, Debug)]
+pub struct DynamicImport {
+    /// Pass this to [`Realm::finish_dynamic_import`].
+    pub id: DynamicImportId,
+    /// The module whose code called `import()`, or None for a classic script.
+    pub referrer: Option<ModuleId>,
+    /// The file name of the calling script or module (what it was compiled with): the host
+    /// resolves a relative specifier against this (or the page, for an inline script).
+    pub referrer_file: String,
+    pub request: ModuleRequest,
+}
+
+/// Names one pending `import()` for [`Realm::finish_dynamic_import`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DynamicImportId(pub(crate) u32);
+
+/// Called the first time a module evaluates `import.meta`, with the new (null-prototype)
+/// meta object to fill in (`url`, `resolve`, ...).
+pub type ImportMetaHook = dyn FnMut(&mut Realm, ModuleId, Value) -> JsResult<()>;
+
+/// Called when script runs `import()`. The host starts loading and later calls
+/// [`Realm::finish_dynamic_import`]. An `Err` rejects the import's Promise with that error.
+pub type DynamicImportHook = dyn FnMut(&mut Realm, DynamicImport) -> JsResult<()>;
 
 impl Realm {
     // ---- creating ----
@@ -1530,5 +1647,169 @@ impl Realm {
 
     pub fn intrinsic(&self, i: Intrinsic) -> Value {
         Value(Val::Obj(self.intrinsic_obj(i)))
+    }
+    // ---- ES modules ----
+
+    /// Compiles `source` as a module: parses it (strict, with `import`/`export`, top-level
+    /// `await`, `import.meta`), analyses its scopes and compiles its code, but runs nothing
+    /// and fetches nothing. A SyntaxError (an early error, a duplicate or undefined export,
+    /// ...) is returned as an `Err` with file, line and column. Read what it wants with
+    /// [`Realm::module_requests`].
+    pub fn compile_module(&mut self, source: &str, opts: &ModuleOptions<'_>) -> JsResult<ModuleId> {
+        self.entry(|r| r.module_compile(source, opts))
+    }
+
+    /// A module the host builds from values: its exports are `exports` (name and value, in
+    /// any order; `"default"` for the default export). It has no dependencies and no code,
+    /// and is evaluated already (a JSON module is `[("default", parsed)]`). The values stay
+    /// alive as long as the module does.
+    pub fn compile_synthetic_module(
+        &mut self,
+        file: &str,
+        exports: &[(&str, Value)],
+    ) -> JsResult<ModuleId> {
+        let ex: Vec<(String, Val)> = exports
+            .iter()
+            .map(|(n, v)| (String::from(*n), self.check_val(v.0)))
+            .collect();
+        self.entry(|r| r.module_synthetic(file, ex))
+    }
+
+    /// The module requests of `m`, once each, in source order (`import` and `export ... from`
+    /// together). The index of a request in this list is what
+    /// [`Realm::set_module_dependency`] takes.
+    pub fn module_requests(&self, m: ModuleId) -> Vec<ModuleRequest> {
+        self.module_requests_of(m)
+    }
+
+    /// Says which module satisfies request number `index` of `m`. Every request has to be
+    /// answered (for `m` and, in turn, for every module reached) before [`Realm::link_module`].
+    /// Answering twice replaces the earlier answer while `m` is unlinked.
+    pub fn set_module_dependency(
+        &mut self,
+        m: ModuleId,
+        index: usize,
+        dep: ModuleId,
+    ) -> JsResult<()> {
+        self.entry(|r| r.module_set_dependency(m, index, dep))
+    }
+
+    /// The module answering request `index` of `m`, if the host has set one.
+    pub fn module_dependency(&self, m: ModuleId, index: usize) -> Option<ModuleId> {
+        self.module_dependency_of(m, index)
+    }
+
+    /// Links `m` and everything it reaches: resolves every import against the exports it
+    /// asks for and builds the module environments (functions are usable from here on,
+    /// `let` and `class` bindings are still uninitialized). A missing request answer, a
+    /// missing export or an ambiguous `export *` is a SyntaxError that names the importing
+    /// file, line and column; nothing stays half-linked after an error. Linking a linked
+    /// module does nothing.
+    pub fn link_module(&mut self, m: ModuleId) -> JsResult<()> {
+        self.entry(|r| r.module_link(m))
+    }
+
+    /// Evaluates `m` and its dependencies (each once, dependencies first, cycles and
+    /// top-level `await` by the spec's algorithm) and returns a Promise that fulfills with
+    /// undefined when everything has run, or rejects with the first error. Links first if
+    /// needed. Call [`Realm::run_jobs`] to let asynchronous modules run; a module without
+    /// `await` anywhere in its graph has finished when this returns. Evaluating a module
+    /// again gives the same outcome without running it again. The Promise counts as handled:
+    /// a failed module never causes an unhandled-rejection report, so the host reports it
+    /// itself (the browser's `window.onerror`) from [`Realm::module_error`] once the jobs
+    /// have run, or by calling `then` on the Promise.
+    pub fn evaluate_module(&mut self, m: ModuleId) -> JsResult<Value> {
+        let r = self.entry(|r| r.module_evaluate(m));
+        self.out(r)
+    }
+
+    /// The module namespace object of `m` (`import * as ns`): sorted keys, read-only, live.
+    /// The module has to be linked.
+    pub fn module_namespace(&mut self, m: ModuleId) -> JsResult<Value> {
+        let r = self.entry(|r| r.module_ns(m));
+        self.out(r)
+    }
+
+    pub fn module_status(&self, m: ModuleId) -> Option<ModuleStatus> {
+        self.module_status_of(m)
+    }
+
+    /// The error a finished module failed with (its evaluation threw, or one of its
+    /// dependencies' did).
+    pub fn module_error(&mut self, m: ModuleId) -> Option<Value> {
+        let v = self.module_error_of(m)?;
+        Some(self.out_val(v))
+    }
+
+    /// The file name `m` was compiled with.
+    pub fn module_file(&self, m: ModuleId) -> Option<String> {
+        self.module_file_of(m)
+    }
+
+    /// The names `m` exports, sorted (the keys of its namespace). The module has to be
+    /// linked.
+    pub fn module_export_names(&mut self, m: ModuleId) -> JsResult<Vec<String>> {
+        self.entry(|r| r.module_export_names_of(m))
+    }
+
+    /// Installs the hook that fills in `import.meta` (once per module; without one the
+    /// object is empty).
+    pub fn set_import_meta_hook(&mut self, hook: Option<Box<ImportMetaHook>>) {
+        self.import_meta_hook = hook;
+    }
+
+    /// Installs the hook that gets `import()` calls. Without one, `import()` returns a
+    /// Promise rejected with a TypeError.
+    pub fn set_dynamic_import_hook(&mut self, hook: Option<Box<DynamicImportHook>>) {
+        self.dynamic_import_hook = hook;
+    }
+
+    /// Completes an `import()` the hook was told about: `Ok(module)` is the module that
+    /// satisfies it (its whole graph set up as for [`Realm::link_module`]); the engine links
+    /// and evaluates it and, when that has finished, fulfills the script's Promise with the
+    /// namespace (or rejects it with the error). `Err(value)` rejects the Promise with
+    /// `value` (a failed fetch, say). Unknown or already-finished ids are ignored. The work
+    /// happens in a job: call [`Realm::run_jobs`] after (the answer is never acted on in
+    /// the middle of running script, even if the hook answers at once).
+    pub fn finish_dynamic_import(
+        &mut self,
+        id: DynamicImportId,
+        result: Result<ModuleId, Value>,
+    ) -> JsResult<()> {
+        let result = result.map_err(|v| self.check_val(v.0));
+        self.entry(|r| r.dynamic_import_finish(id, result))
+    }
+
+    /// How many `import()` calls are waiting for [`Realm::finish_dynamic_import`].
+    pub fn pending_dynamic_imports(&self) -> usize {
+        self.dynamic_import_count()
+    }
+
+    /// Forgets every pending `import()` (when the page goes away): their Promises stay
+    /// pending.
+    pub fn cancel_dynamic_imports(&mut self) {
+        self.dynamic_import_cancel();
+    }
+
+    /// The most modules a realm may hold (default 10 000); past it
+    /// [`Realm::compile_module`] throws a RangeError.
+    pub fn set_max_modules(&mut self, n: usize) {
+        self.modules.max = n;
+    }
+
+    pub fn module_count(&self) -> usize {
+        self.modules.count()
+    }
+
+    /// Releases `m` (its code, environment and namespace become garbage). Modules that
+    /// still depend on it stop being linkable; the host drops those too.
+    pub fn drop_module(&mut self, m: ModuleId) {
+        self.module_drop(m);
+    }
+
+    /// Releases `m` and every module reachable from it through the dependencies the host
+    /// set. Use it for a graph that is not shared with other roots.
+    pub fn drop_module_graph(&mut self, m: ModuleId) {
+        self.module_drop_graph(m);
     }
 }

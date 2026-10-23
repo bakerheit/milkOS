@@ -93,6 +93,15 @@ impl Realm {
                 "Cannot seal array buffer views with elements"
             }));
         }
+        if let ObjKind::Namespace(ns) = &self.o(o).kind {
+            // Its exports are writable and permanent: sealing is fine, freezing is not.
+            let has_exports = !ns.order.is_empty();
+            self.om(o).flags &= !EXTENSIBLE;
+            if frozen && has_exports {
+                return Err(self.type_error("Cannot freeze a module namespace object"));
+            }
+            return Ok(());
+        }
         if matches!(self.o(o).kind, ObjKind::Array(_)) {
             self.array_to_sparse(o);
             if frozen {
@@ -102,6 +111,12 @@ impl Realm {
         self.om(o).flags &= !EXTENSIBLE;
         let n = self.o(o).props.ents.len();
         for i in 0..n {
+            // Private fields are not properties: freezing leaves them writable.
+            if let PropKey::Sym(s) = self.o(o).props.ents[i].0
+                && self.heap.syms[s.0 as usize].private
+            {
+                continue;
+            }
             let p = &mut self.om(o).props.ents[i].1;
             p.f &= !C;
             if frozen && p.f & ACCESSOR == 0 {

@@ -297,6 +297,20 @@ impl Realm {
         }
     }
 
+    /// The value an imported binding currently has (Empty before its module initialized it).
+    fn import_get(&self, r: u32) -> Val {
+        match self.env_get(r) {
+            Val::Obj(o) => match &self.o(o).kind {
+                ObjKind::ImportRef { env, slot } => match &self.o(*env).kind {
+                    ObjKind::Env(d) => d.slots.get(*slot as usize).copied().unwrap_or(Val::Empty),
+                    _ => Val::Empty,
+                },
+                _ => Val::Empty,
+            },
+            _ => Val::Empty,
+        }
+    }
+
     fn env_set(&mut self, r: u32, v: Val) {
         let depth = r >> ENV_SLOT_BITS;
         let slot = (r & ((1 << ENV_SLOT_BITS) - 1)) as usize;
@@ -1039,6 +1053,75 @@ impl Realm {
                         let e = self.tdz_error(&code, n);
                         throw!(e);
                     }
+                    self.push(v);
+                }
+                Op::NewPrivName(c) => {
+                    let d = self.const_str_val(&code, c);
+                    let v = self.new_private_name(d);
+                    self.push(v);
+                }
+                Op::GetPriv => {
+                    let k = self.pop();
+                    let o = self.pop();
+                    let v = tri!(self.private_get(o, k));
+                    self.push(v);
+                }
+                Op::GetPrivKeep => {
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    let v = tri!(self.private_get(o, k));
+                    self.push(v);
+                }
+                Op::SetPriv => {
+                    let v = self.pop();
+                    let k = self.pop();
+                    let o = self.pop();
+                    tri!(self.private_set(o, k, v));
+                    self.push(v);
+                }
+                Op::PrivIn => {
+                    let o = self.pop();
+                    let k = self.pop();
+                    let b = tri!(self.private_in(k, o));
+                    self.push(Val::Bool(b));
+                }
+                Op::DefinePrivField => {
+                    let v = self.pop();
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    tri!(self.private_add_field(o, k, v));
+                }
+                Op::DefinePrivMethod(kind) => {
+                    let f = self.pop();
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    tri!(self.private_add_method(o, k, f, kind));
+                }
+                Op::GetImport(r, n) => {
+                    let v = self.import_get(r);
+                    if v.is_empty() {
+                        let e = self.tdz_error(&code, n);
+                        throw!(e);
+                    }
+                    self.push(v);
+                }
+                Op::ImportMeta => {
+                    sync!();
+                    let m = code.module;
+                    let v = tri!(self.import_meta(m));
+                    self.push(v);
+                }
+                Op::ImportCall => {
+                    sync!();
+                    let opts = self.pop();
+                    let spec = self.pop();
+                    self.temps.push(spec);
+                    self.temps.push(opts);
+                    let referrer = code.module;
+                    let file = code.source.file.clone();
+                    let r = self.import_call(referrer, file, spec, opts);
+                    self.temps.truncate(self.temps.len() - 2);
+                    let v = tri!(r);
                     self.push(v);
                 }
                 Op::SetEnvChk(r, n) => {

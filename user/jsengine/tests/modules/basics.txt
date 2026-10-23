@@ -1,0 +1,31 @@
+//# case: named, default and namespace imports
+//# file: main.js
+import def, { a, b as c } from './dep.js';
+import * as ns from './dep.js';
+log(def, a, c);
+log(Object.keys(ns).join(','));
+log(ns.a, ns[Symbol.toStringTag], typeof ns);
+//# file: dep.js
+export let a = 1;
+export const b = 2;
+export default 'dflt';
+//# expect
+dflt 1 2
+a,b,default
+1 Module object
+
+//# case: live bindings
+//# file: main.js
+import { n, inc } from './counter.js';
+log(n);
+inc();
+log(n);
+inc();
+log(n);
+//# file: counter.js
+export let n = 0;
+export function inc() { n++; }
+//# expect
+0
+1
+2

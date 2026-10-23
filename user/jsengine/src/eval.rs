@@ -16,7 +16,7 @@ use crate::resolve::Resolver;
 use crate::value::Val;
 
 impl Realm {
-    fn syntax_error_at(&mut self, src: &Source, pos: u32, msg: &str) -> Exception {
+    pub(crate) fn syntax_error_at(&mut self, src: &Source, pos: u32, msg: &str) -> Exception {
         let (line, col) = src.line_col(pos);
         let e = self.make_error(ErrorKind::SyntaxError, msg);
         if let ObjKind::Error(info) = &mut self.om(e).kind {
@@ -32,6 +32,12 @@ impl Realm {
         let sv = self.str_val(&stack);
         self.put_prop(e, sk, sv, crate::object::WC);
         Exception(Exc::Throw(Val::Obj(e)))
+    }
+
+    /// How many syntax tree nodes the heap budget leaves room for (about 48 bytes each).
+    pub(crate) fn parse_node_budget(&self) -> u64 {
+        let left = self.heap.max_bytes.saturating_sub(self.heap.live_bytes);
+        (left / 48) as u64
     }
 
     /// Parses and compiles a script.
@@ -55,6 +61,7 @@ impl Realm {
         };
         let mut p = Parser::new(&text);
         p.stack = Some(self.stack);
+        p.node_budget = self.parse_node_budget();
         let script = match p.parse_script() {
             Ok(s) => s,
             Err(e) => return Err(self.syntax_error_at(&src, e.pos, &e.msg)),

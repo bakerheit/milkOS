@@ -108,6 +108,8 @@ pub(crate) struct Lexer<'a> {
     /// True when only whitespace/comments were seen since the last line terminator (for
     /// `-->` comments).
     line_start: bool,
+    /// Module code: no HTML-like comments.
+    pub no_html_comments: bool,
 }
 
 fn is_id_start_ascii(c: u8) -> bool {
@@ -151,6 +153,7 @@ impl<'a> Lexer<'a> {
             src,
             pos: 0,
             line_start: true,
+            no_html_comments: false,
         };
         // Hashbang comment.
         if src.starts_with(b"#!") {
@@ -250,8 +253,13 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 // HTML-like comments (Annex B): `<!--` anywhere, `-->` at the start of a line.
-                b'<' if self.src[self.pos..].starts_with(b"<!--") => self.skip_line(),
-                b'-' if self.line_start && self.src[self.pos..].starts_with(b"-->") => {
+                b'<' if !self.no_html_comments && self.src[self.pos..].starts_with(b"<!--") => {
+                    self.skip_line()
+                }
+                b'-' if !self.no_html_comments
+                    && self.line_start
+                    && self.src[self.pos..].starts_with(b"-->") =>
+                {
                     self.skip_line()
                 }
                 0x80.. => match self.peek_char() {

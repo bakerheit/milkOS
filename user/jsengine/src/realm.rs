@@ -207,6 +207,9 @@ pub struct Realm {
     pub(crate) late_handled: Vec<ObjId>,
     pub(crate) rejection_hook: Option<Box<crate::api::RejectionHook>>,
     pub(crate) error_hook: Option<Box<crate::api::ErrorHook>>,
+    pub(crate) modules: crate::module::Modules,
+    pub(crate) import_meta_hook: Option<Box<crate::api::ImportMetaHook>>,
+    pub(crate) dynamic_import_hook: Option<Box<crate::api::DynamicImportHook>>,
     /// Symbol.for registry.
     pub(crate) sym_registry: Vec<(StrId, SymId)>,
     pub(crate) dead_hosts: Vec<(u32, u64)>,
@@ -278,6 +281,9 @@ impl Realm {
             late_handled: Vec::new(),
             rejection_hook: None,
             error_hook: None,
+            modules: crate::module::Modules::new(),
+            import_meta_hook: None,
+            dynamic_import_hook: None,
             sym_registry: Vec::new(),
             dead_hosts: Vec::new(),
             max_buffer: crate::typed::DEFAULT_MAX_BUFFER,
@@ -927,6 +933,7 @@ impl Realm {
         }
         let epoch = self.heap.epoch.wrapping_add(1).max(1);
         self.vm.trace(&mut t, epoch);
+        self.modules.trace(&mut t, epoch);
         let mut dead = core::mem::take(&mut self.dead_hosts);
         self.heap.collect(&mut t, &mut dead);
         self.dead_hosts = dead;

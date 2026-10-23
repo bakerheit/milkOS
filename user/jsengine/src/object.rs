@@ -293,6 +293,23 @@ impl WeakMapData {
     }
 }
 
+/// Where a module namespace entry reads its value from.
+pub(crate) enum NsTarget {
+    /// A slot of a module environment (live).
+    Slot(ObjId, u32),
+    /// A fixed value (a namespace re-exported as a binding).
+    Value(Val),
+}
+
+/// A module namespace object's exports: sorted names, each with its binding.
+pub(crate) struct NsData {
+    /// Export name -> `Val::Int(index)` into `order` / `targets`.
+    pub map: PropMap,
+    /// The export names in code unit order.
+    pub order: Vec<PropKey>,
+    pub targets: Vec<NsTarget>,
+}
+
 pub(crate) enum ObjKind {
     /// A freed slot.
     Dead,
@@ -316,6 +333,13 @@ pub(crate) enum ObjKind {
     Error(Box<crate::errors::ErrInfo>),
     Closure(Box<crate::interp::Closure>),
     Env(Box<crate::interp::EnvData>),
+    /// A module namespace exotic object.
+    Namespace(Box<NsData>),
+    /// An imported binding: slot `slot` of the exporting module's environment.
+    ImportRef {
+        env: ObjId,
+        slot: u32,
+    },
     /// A generator, async function or async generator: its suspended frame.
     Coroutine(Box<crate::interp::CoData>),
     ArrayIter(Box<crate::interp::ArrayIterData>),
@@ -366,6 +390,7 @@ impl Obj {
             ObjKind::WeakMap(m) => 32 + m.ents.capacity() * 24,
             ObjKind::Closure(c) => 64 + c.field_keys.len() * 16,
             ObjKind::Env(e) => 32 + e.slots.capacity() * 16,
+            ObjKind::Namespace(n) => 96 + n.order.len() * 72 + n.map.bytes(),
             ObjKind::Coroutine(c) => c.bytes(),
             ObjKind::ArrayIter(_) => 32,
             ObjKind::ForIn(f) => 48 + f.keys.capacity() * 16,
@@ -418,6 +443,20 @@ impl Obj {
                 t.opt_obj(e.parent);
                 for v in &e.slots {
                     t.val(*v);
+                }
+            }
+            ObjKind::ImportRef { env, .. } => t.obj(*env),
+            ObjKind::Namespace(n) => {
+                for k in &n.order {
+                    if let PropKey::Str(s) = k {
+                        t.str(*s);
+                    }
+                }
+                for g in &n.targets {
+                    match g {
+                        NsTarget::Slot(e, _) => t.obj(*e),
+                        NsTarget::Value(v) => t.val(*v),
+                    }
                 }
             }
             ObjKind::Coroutine(c) => c.trace(t, epoch),
@@ -702,6 +741,14 @@ impl Realm {
                     return Some(Own::Data(Val::num(self.heap.str_len(s) as f64), 0));
                 }
             }
+            ObjKind::Namespace(ns) => {
+                if !matches!(k, PropKey::Sym(_)) {
+                    let i = ns.map.get(k)?;
+                    let Val::Int(i) = i.v else { return None };
+                    let v = self.ns_value(&ns.targets[i as usize]);
+                    return Some(Own::Data(if v.is_empty() { Val::Undef } else { v }, W | E));
+                }
+            }
             ObjKind::Typed(_) => match k {
                 PropKey::Idx(i) => {
                     return self.typed_get(id, i as usize).map(|v| Own::Data(v, WEC));
@@ -729,6 +776,14 @@ impl Realm {
 
     /// [[GetOwnProperty]] including host hooks.
     pub(crate) fn get_own(&mut self, id: ObjId, k: PropKey) -> Res<Option<Own>> {
+        if let ObjKind::Namespace(_) = self.o(id).kind
+            && !matches!(k, PropKey::Sym(_))
+        {
+            return Ok(match self.ns_get(id, k)? {
+                Some(v) => Some(Own::Data(v, W | E)),
+                None => None,
+            });
+        }
         if let ObjKind::Host { class, data } = self.o(id).kind
             && let Some(v) = self.hook_get(id, class, data, k)?
         {
@@ -770,7 +825,7 @@ impl Realm {
             match &obj.kind {
                 ObjKind::Array(a) if is_len => return Some(Val::num(a.len as f64)),
                 ObjKind::Array(_) | ObjKind::StrBox(_) if !named => return None,
-                ObjKind::Host { .. } | ObjKind::Typed(_) => return None,
+                ObjKind::Host { .. } | ObjKind::Typed(_) | ObjKind::Namespace(_) => return None,
                 _ => {}
             }
             if let Some(p) = obj.props.get(k) {
@@ -822,6 +877,7 @@ impl Realm {
                         | ObjKind::Typed(_)
                         | ObjKind::Array(_)
                         | ObjKind::StrBox(_)
+                        | ObjKind::Namespace(_)
                 )
                 || po.props.find(k).is_some()
             {
@@ -847,6 +903,7 @@ impl Realm {
                         | ObjKind::StrBox(_)
                         | ObjKind::Host { .. }
                         | ObjKind::Typed(_)
+                        | ObjKind::Namespace(_)
                 )
             {
                 if let Some(p) = obj.props.get(k) {
@@ -865,6 +922,11 @@ impl Realm {
                     && let Some(v) = self.hook_get(cur, class, data, k)?
                 {
                     return Ok(v);
+                }
+                if matches!(self.o(cur).kind, ObjKind::Namespace(_))
+                    && !matches!(k, PropKey::Sym(_))
+                {
+                    return Ok(self.ns_get(cur, k)?.unwrap_or(Val::Undef));
                 }
                 if let Some((kind, bare, proto)) = typed {
                     match k {
@@ -1027,6 +1089,27 @@ impl Realm {
                 }
                 return Ok(ok);
             }
+        }
+        if let ObjKind::Namespace(_) = self.o(id).kind
+            && !matches!(k, PropKey::Sym(_))
+        {
+            let Some(cur) = self.get_own(id, k)? else {
+                return Ok(false);
+            };
+            let Own::Data(cv, _) = cur else {
+                return Ok(false);
+            };
+            if d.configurable == Some(true)
+                || d.enumerable == Some(false)
+                || d.is_accessor()
+                || d.writable == Some(false)
+            {
+                return Ok(false);
+            }
+            return Ok(match d.value {
+                Some(v) => self.same_val(v, cv),
+                None => true,
+            });
         }
         if let ObjKind::Typed(_) = self.o(id).kind {
             let numeric = match k {
@@ -1421,6 +1504,10 @@ impl Realm {
 
     /// OrdinarySet. Ok(false) means the assignment was rejected (strict code throws).
     pub(crate) fn set_p(&mut self, id: ObjId, k: PropKey, v: Val, receiver: Val) -> Res<bool> {
+        // A module namespace never accepts an assignment.
+        if let ObjKind::Namespace(_) = self.o(id).kind {
+            return Ok(false);
+        }
         // Fast paths when the receiver is the object itself.
         if let Val::Obj(r) = receiver
             && r == id
@@ -1482,6 +1569,9 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         let own: Option<Own> = loop {
+            if let ObjKind::Namespace(_) = self.o(cur).kind {
+                return Ok(false);
+            }
             if let ObjKind::Typed(_) = self.o(cur).kind {
                 let numeric_missing = match k {
                     PropKey::Idx(i) => i as usize >= self.typed_len(cur),
@@ -1606,7 +1696,13 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         loop {
-            if let ObjKind::Typed(_) = self.o(cur).kind {
+            if let ObjKind::Namespace(ns) = &self.o(cur).kind
+                && !matches!(k, PropKey::Sym(_))
+            {
+                if ns.map.find(k).is_some() {
+                    return Ok(true);
+                }
+            } else if let ObjKind::Typed(_) = self.o(cur).kind {
                 match k {
                     PropKey::Idx(i) => return Ok((i as usize) < self.typed_len(cur)),
                     PropKey::Str(_) if self.canonical_numeric(k) => return Ok(false),
@@ -1652,6 +1748,11 @@ impl Realm {
                 PropKey::Str(_) if self.canonical_numeric(k) => return Ok(true),
                 _ => {}
             }
+        }
+        if let ObjKind::Namespace(ns) = &self.o(id).kind
+            && !matches!(k, PropKey::Sym(_))
+        {
+            return Ok(ns.map.find(k).is_none());
         }
         let flags = self.o(id).flags;
         match &mut self.heap.om(id).kind {
@@ -1714,6 +1815,21 @@ impl Realm {
             self.materialize_fn(id);
         }
         let mut out: Vec<PropKey> = Vec::new();
+        if let ObjKind::Namespace(ns) = &self.o(id).kind {
+            if strings {
+                out.extend(ns.order.iter().copied());
+            }
+            if symbols {
+                for (k, p) in self.o(id).props.iter() {
+                    if let PropKey::Sym(_) = k
+                        && (!only_enum || p.f & E != 0)
+                    {
+                        out.push(*k);
+                    }
+                }
+            }
+            return Ok(out);
+        }
         if let ObjKind::Host { class, data } = self.o(id).kind
             && strings
         {
@@ -1787,8 +1903,9 @@ impl Realm {
         }
         if symbols {
             for (k, p) in obj.props.iter() {
-                if let PropKey::Sym(_) = k
+                if let PropKey::Sym(s) = k
                     && (!only_enum || p.f & E != 0)
+                    && !self.heap.syms[s.0 as usize].private
                 {
                     out.push(*k);
                 }

@@ -11,6 +11,10 @@ use crate::atoms::{Atom, Atoms, is_reserved, is_strict_reserved, kw};
 use crate::lexer::{LexError, Lexer, P, Tok, Token};
 
 pub(crate) const MAX_NEST: u32 = 1500;
+/// The longest `a.b.c(...)[...]` / `a + b + c` chain. The trees these make are as deep as
+/// the chain is long, and the compiler gives up near 2300 links on the default stack anyway:
+/// a longer one is refused here, before it can make a tree too deep to free.
+pub(crate) const MAX_CHAIN: u32 = 6000;
 
 pub(crate) struct ParseError {
     pub msg: String,
@@ -38,6 +42,8 @@ struct Ctx {
     allow_super_prop: bool,
     allow_new_target: bool,
     in_class_field: bool,
+    /// Module code: `await` is reserved everywhere.
+    module: bool,
 }
 
 pub(crate) struct Parser<'a> {
@@ -57,6 +63,14 @@ pub(crate) struct Parser<'a> {
     /// (a parenthesized list that may turn out to be arrow parameters).
     defer_cover_at: u32,
     pub stack: Option<crate::stack::StackGuard>,
+    /// How many more expressions and statements may be parsed (the tree has to fit the
+    /// heap budget; u64::MAX = no limit).
+    pub node_budget: u64,
+    /// Parsing a module (import/export declarations, import.meta, top-level await).
+    is_module: bool,
+    pub info: ModuleInfo,
+    /// The next function or class declaration may be anonymous (`export default function`).
+    anon_default_ok: bool,
 }
 
 /// Cover for a parenthesized list: `(a, b = 1, ...c)` before we know whether it's an arrow.
@@ -88,6 +102,10 @@ impl<'a> Parser<'a> {
             cover_init_pos: None,
             defer_cover_at: u32::MAX,
             stack: None,
+            node_budget: u64::MAX,
+            is_module: false,
+            info: ModuleInfo::default(),
+            anon_default_ok: false,
         }
     }
 
@@ -130,7 +148,7 @@ impl<'a> Parser<'a> {
                 )
             }
             Tok::Regex(..) => String::from("Unexpected regular expression"),
-            Tok::Private(_) => String::from("Private class members (#name) are not supported"),
+            Tok::Private(a) => alloc::format!("Unexpected identifier '#{}'", self.atoms.get(*a)),
             Tok::BigInt => String::from("BigInt literals are not supported"),
         };
         Err(ParseError {
@@ -203,6 +221,10 @@ impl<'a> Parser<'a> {
     }
 
     fn enter(&mut self) -> PResult<()> {
+        if self.node_budget == 0 {
+            return self.err("the code is too large to fit in memory");
+        }
+        self.node_budget -= 1;
         self.depth += 1;
         if self.depth > MAX_NEST || self.stack.is_some_and(|s| s.exceeded()) {
             return self.err("the code is nested too deeply");
@@ -230,7 +252,9 @@ impl<'a> Parser<'a> {
                 if a == kw::YIELD && (self.ctx.in_generator || self.ctx.strict) {
                     return None;
                 }
-                if a == kw::AWAIT && (self.ctx.in_async || self.ctx.in_class_field) {
+                if a == kw::AWAIT
+                    && (self.ctx.in_async || self.ctx.in_class_field || self.ctx.module)
+                {
                     return None;
                 }
                 Some(a)
@@ -272,6 +296,27 @@ impl<'a> Parser<'a> {
         })
     }
 
+    pub fn parse_module(&mut self) -> PResult<ModuleAst> {
+        self.is_module = true;
+        self.lx.no_html_comments = true;
+        self.ctx.strict = true;
+        self.ctx.module = true;
+        self.ctx.in_async = true;
+        self.info.default_atom = self.atoms.intern("*default*");
+        self.advance()?;
+        let scope = self.new_scope();
+        let (body, _) = self.parse_body_with_directives(false)?;
+        if !matches!(self.tok.tok, Tok::Eof) {
+            return self.unexpected();
+        }
+        self.finish_module_info()?;
+        Ok(ModuleAst {
+            body,
+            scope,
+            info: core::mem::take(&mut self.info),
+        })
+    }
+
     /// Statements up to `}` or the end, honouring a "use strict" directive prologue.
     fn parse_body_with_directives(&mut self, in_braces: bool) -> PResult<(Vec<Stmt>, bool)> {
         let mut body = Vec::new();
@@ -305,11 +350,475 @@ impl<'a> Parser<'a> {
                     directives = false;
                 }
             }
+            if self.is_module
+                && !in_braces
+                && matches!(self.tok.tok, Tok::Name(kw::IMPORT | kw::EXPORT, false))
+            {
+                self.parse_module_item(&mut body)?;
+                continue;
+            }
             body.push(self.parse_statement_list_item()?);
         }
         let strict = self.ctx.strict;
         self.ctx.strict = outer_strict;
         Ok((body, strict))
+    }
+
+    // ---- modules ----
+
+    /// A string-literal export or import name must be well-formed UTF-16.
+    fn module_string(&self, units: &[u16]) -> PResult<String> {
+        match String::from_utf16(units) {
+            Ok(s) => Ok(s),
+            Err(_) => self.err("Invalid module export name: contains unpaired surrogate"),
+        }
+    }
+
+    /// A module request (the same specifier and attributes share one entry).
+    fn add_request(&mut self, specifier: String, attrs: Vec<(String, String)>, pos: u32) -> u32 {
+        if let Some(i) = self
+            .info
+            .requests
+            .iter()
+            .position(|r| r.specifier == specifier && r.attrs == attrs)
+        {
+            return i as u32;
+        }
+        self.info.requests.push(ModRequest {
+            specifier,
+            attrs,
+            pos,
+        });
+        self.info.requests.len() as u32 - 1
+    }
+
+    /// `"spec" [with { key: "value", ... }]` after `from` (or after `import`/`export * `).
+    fn parse_module_specifier(&mut self) -> PResult<u32> {
+        let pos = self.tok.start;
+        let Tok::Str(units, _) = &self.tok.tok else {
+            return self.unexpected();
+        };
+        let units = units.clone();
+        let spec = String::from_utf16_lossy(&units);
+        self.advance()?;
+        let mut attrs: Vec<(String, String)> = Vec::new();
+        if self.is_name(kw::WITH) {
+            self.advance()?;
+            self.expect(P::LBrace)?;
+            while !self.is(P::RBrace) {
+                let key = match &self.tok.tok {
+                    Tok::Name(a, _) => self.atoms.get(*a).into(),
+                    Tok::Str(u, _) => String::from_utf16_lossy(u),
+                    _ => return self.unexpected(),
+                };
+                self.advance()?;
+                self.expect(P::Colon)?;
+                let Tok::Str(u, _) = &self.tok.tok else {
+                    return self.unexpected();
+                };
+                let u = u.clone();
+                let val = String::from_utf16_lossy(&u);
+                self.advance()?;
+                if attrs.iter().any(|(k, _)| *k == key) {
+                    return self.err(&alloc::format!(
+                        "Import attribute has duplicate key '{key}'"
+                    ));
+                }
+                attrs.push((key, val));
+                if !self.is(P::RBrace) {
+                    self.expect(P::Comma)?;
+                }
+            }
+            self.advance()?;
+            attrs.sort();
+        }
+        Ok(self.add_request(spec, attrs, pos))
+    }
+
+    /// `from "spec" ...`
+    fn parse_from_clause(&mut self) -> PResult<u32> {
+        if !self.is_name(kw::FROM) {
+            return self.unexpected();
+        }
+        self.advance()?;
+        self.parse_module_specifier()
+    }
+
+    /// An export or import name: an identifier name (reserved words too) or a string.
+    fn parse_module_name(&mut self) -> PResult<String> {
+        match &self.tok.tok {
+            Tok::Name(a, _) => {
+                let s = String::from(self.atoms.get(*a));
+                self.advance()?;
+                Ok(s)
+            }
+            Tok::Str(u, _) => {
+                let u = u.clone();
+                let s = self.module_string(&u)?;
+                self.advance()?;
+                Ok(s)
+            }
+            _ => self.unexpected(),
+        }
+    }
+
+    fn parse_module_item(&mut self, body: &mut Vec<Stmt>) -> PResult<()> {
+        let pos = self.tok.start;
+        if self.is_name(kw::IMPORT) {
+            let p = self.peek()?;
+            if matches!(p.tok, Tok::P(P::LParen) | Tok::P(P::Dot)) {
+                body.push(self.parse_statement()?);
+                return Ok(());
+            }
+            return self.parse_import_decl(pos);
+        }
+        self.parse_export_decl(body, pos)
+    }
+
+    fn parse_import_decl(&mut self, pos: u32) -> PResult<()> {
+        self.advance()?; // import
+        if matches!(self.tok.tok, Tok::Str(..)) {
+            self.parse_module_specifier()?;
+            return self.semicolon();
+        }
+        let mut entries: Vec<(ImportName, Atom, u32)> = Vec::new();
+        if let Some(_a) = self.ident_name()
+            && !self.is(P::LBrace)
+        {
+            let (local, lp) = self.binding_ident()?;
+            entries.push((ImportName::Name(String::from("default")), local, lp));
+            if self.is(P::Comma) {
+                self.advance()?;
+            } else {
+                let req = self.parse_from_clause()?;
+                self.semicolon()?;
+                self.push_imports(req, entries);
+                return Ok(());
+            }
+        }
+        if self.is(P::Star) {
+            self.advance()?;
+            if !self.is_name(kw::AS) {
+                return self.unexpected();
+            }
+            self.advance()?;
+            let (local, lp) = self.binding_ident()?;
+            entries.push((ImportName::All, local, lp));
+        } else if self.is(P::LBrace) {
+            self.advance()?;
+            while !self.is(P::RBrace) {
+                let tpos = self.tok.start;
+                let is_str = matches!(self.tok.tok, Tok::Str(..));
+                let ident = if let Tok::Name(a, _) = self.tok.tok {
+                    Some(a)
+                } else {
+                    None
+                };
+                let imported = self.parse_module_name()?;
+                if self.is_name(kw::AS) {
+                    self.advance()?;
+                    let (local, lp) = self.binding_ident()?;
+                    entries.push((ImportName::Name(imported), local, lp));
+                } else {
+                    // `import { x }`: the name is also the binding, so it must be a valid one.
+                    if is_str {
+                        return self.err_at("A string import name needs 'as'", tpos);
+                    }
+                    let a = ident.unwrap_or(0);
+                    let saved = self.tok.clone();
+                    // Check the identifier rules on the name we just consumed.
+                    if is_reserved(a)
+                        || (self.ctx.strict
+                            && (is_strict_reserved(a) || a == kw::EVAL || a == kw::ARGUMENTS))
+                        || a == kw::AWAIT
+                    {
+                        let n = String::from(self.atoms.get(a));
+                        return self
+                            .err_at(&alloc::format!("Unexpected reserved word '{n}'"), tpos);
+                    }
+                    let _ = saved;
+                    entries.push((ImportName::Name(imported), a, tpos));
+                }
+                if !self.is(P::RBrace) {
+                    self.expect(P::Comma)?;
+                }
+            }
+            self.advance()?;
+        } else {
+            return self.unexpected();
+        }
+        let req = self.parse_from_clause()?;
+        self.semicolon()?;
+        let _ = pos;
+        self.push_imports(req, entries);
+        Ok(())
+    }
+
+    fn push_imports(&mut self, request: u32, entries: Vec<(ImportName, Atom, u32)>) {
+        for (name, local, pos) in entries {
+            self.info.imports.push(ImportEntry {
+                request,
+                name,
+                local,
+                pos,
+            });
+        }
+    }
+
+    fn add_local_export(&mut self, name: String, local: Atom, pos: u32) {
+        self.info.local_exports.push(LocalExport {
+            export_name: name,
+            local,
+            pos,
+        });
+    }
+
+    fn parse_export_decl(&mut self, body: &mut Vec<Stmt>, pos: u32) -> PResult<()> {
+        self.advance()?; // export
+        match self.tok.tok {
+            Tok::P(P::Star) => {
+                self.advance()?;
+                if self.is_name(kw::AS) {
+                    self.advance()?;
+                    let name = self.parse_module_name()?;
+                    let request = self.parse_from_clause()?;
+                    self.semicolon()?;
+                    self.info.indirect_exports.push(IndirectExport {
+                        export_name: name,
+                        request,
+                        name: ImportName::All,
+                        pos,
+                    });
+                } else {
+                    let request = self.parse_from_clause()?;
+                    self.semicolon()?;
+                    self.info.star_exports.push((request, pos));
+                }
+                Ok(())
+            }
+            Tok::P(P::LBrace) => {
+                self.advance()?;
+                // (local or imported name, is a string, is a plain identifier name, exported name)
+                let mut specs: Vec<(String, Option<Atom>, String, u32)> = Vec::new();
+                while !self.is(P::RBrace) {
+                    let tpos = self.tok.start;
+                    let ident = if let Tok::Name(a, _) = self.tok.tok {
+                        Some(a)
+                    } else {
+                        None
+                    };
+                    let local = self.parse_module_name()?;
+                    let exported = if self.is_name(kw::AS) {
+                        self.advance()?;
+                        self.parse_module_name()?
+                    } else {
+                        local.clone()
+                    };
+                    specs.push((local, ident, exported, tpos));
+                    if !self.is(P::RBrace) {
+                        self.expect(P::Comma)?;
+                    }
+                }
+                self.advance()?;
+                if self.is_name(kw::FROM) {
+                    let request = self.parse_from_clause()?;
+                    for (local, _, exported, tpos) in specs {
+                        self.info.indirect_exports.push(IndirectExport {
+                            export_name: exported,
+                            request,
+                            name: ImportName::Name(local),
+                            pos: tpos,
+                        });
+                    }
+                } else {
+                    for (local, ident, exported, tpos) in specs {
+                        // Without `from`, the name must be an identifier reference.
+                        let Some(a) = ident else {
+                            return self.err_at("A string export name needs 'from'", tpos);
+                        };
+                        if is_reserved(a) || (self.ctx.strict && is_strict_reserved(a)) {
+                            return self.err_at(
+                                &alloc::format!("Unexpected reserved word '{local}'"),
+                                tpos,
+                            );
+                        }
+                        self.add_local_export(exported, a, tpos);
+                    }
+                }
+                self.semicolon()
+            }
+            Tok::Name(kw::DEFAULT, false) => {
+                self.advance()?;
+                let dpos = self.tok.start;
+                let is_decl = match self.tok.tok {
+                    Tok::Name(kw::FUNCTION, false) | Tok::Name(kw::CLASS, false) => true,
+                    Tok::Name(kw::ASYNC, false) => {
+                        let p = self.peek()?;
+                        matches!(p.tok, Tok::Name(kw::FUNCTION, false)) && !p.nl_before
+                    }
+                    _ => false,
+                };
+                let da = self.info.default_atom;
+                if is_decl {
+                    self.anon_default_ok = true;
+                    let st = self.parse_statement_list_item();
+                    self.anon_default_ok = false;
+                    let st = st?;
+                    let name = match &st.k {
+                        StmtKind::FuncDecl(f) => f.name,
+                        StmtKind::ClassDecl(c) => c.name,
+                        _ => None,
+                    };
+                    self.add_local_export(String::from("default"), name.unwrap_or(da), dpos);
+                    body.push(st);
+                } else {
+                    let e = self.parse_assign(false)?;
+                    self.semicolon()?;
+                    self.add_local_export(String::from("default"), da, dpos);
+                    body.push(Stmt {
+                        k: StmtKind::Var(
+                            VarKind::Const,
+                            alloc::vec![VarDecl {
+                                pat: Pat::Ident(da, dpos),
+                                init: Some(e),
+                            }],
+                        ),
+                        pos: dpos,
+                    });
+                }
+                Ok(())
+            }
+            Tok::Name(kw::VAR | kw::CONST | kw::FUNCTION | kw::CLASS, false) => {
+                self.export_declaration(body)
+            }
+            Tok::Name(kw::LET, false) => {
+                if self.let_is_decl()? {
+                    self.export_declaration(body)
+                } else {
+                    self.unexpected()
+                }
+            }
+            Tok::Name(kw::ASYNC, false) => {
+                let p = self.peek()?;
+                if matches!(p.tok, Tok::Name(kw::FUNCTION, false)) && !p.nl_before {
+                    self.export_declaration(body)
+                } else {
+                    self.unexpected()
+                }
+            }
+            _ => self.unexpected(),
+        }
+    }
+
+    fn export_declaration(&mut self, body: &mut Vec<Stmt>) -> PResult<()> {
+        let st = self.parse_statement_list_item()?;
+        let mut names: Vec<Atom> = Vec::new();
+        match &st.k {
+            StmtKind::Var(_, decls) => {
+                for d in decls {
+                    collect_pat_names(&d.pat, &mut names);
+                }
+            }
+            StmtKind::FuncDecl(f) => names.extend(f.name),
+            StmtKind::ClassDecl(c) => names.extend(c.name),
+            _ => return self.unexpected(),
+        }
+        for n in names {
+            let s = String::from(self.atoms.get(n));
+            self.add_local_export(s, n, st.pos);
+        }
+        body.push(st);
+        Ok(())
+    }
+
+    /// After the body: duplicate export names, and exports of imported bindings.
+    fn finish_module_info(&mut self) -> PResult<()> {
+        // `import { x } from "m"; export { x }` is a re-export of m's x (but a namespace import
+        // stays a local binding).
+        let info = &mut self.info;
+        let mut keep = Vec::new();
+        let locals = core::mem::take(&mut info.local_exports);
+        let by_local: alloc::collections::BTreeMap<Atom, usize> = info
+            .imports
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.local, i))
+            .collect();
+        for le in locals {
+            if let Some(&ii) = by_local.get(&le.local)
+                && let ie = &info.imports[ii]
+                && let ImportName::Name(n) = &ie.name
+            {
+                info.indirect_exports.push(IndirectExport {
+                    export_name: le.export_name,
+                    request: ie.request,
+                    name: ImportName::Name(n.clone()),
+                    pos: le.pos,
+                });
+            } else {
+                keep.push(le);
+            }
+        }
+        info.local_exports = keep;
+        let mut seen: alloc::collections::BTreeSet<&str> = alloc::collections::BTreeSet::new();
+        let mut dup: Option<(String, u32)> = None;
+        let all = info
+            .local_exports
+            .iter()
+            .map(|e| (e.export_name.as_str(), e.pos))
+            .chain(
+                info.indirect_exports
+                    .iter()
+                    .map(|e| (e.export_name.as_str(), e.pos)),
+            );
+        for (n, pos) in all {
+            if !seen.insert(n) {
+                dup = Some((String::from(n), pos));
+                break;
+            }
+        }
+        if let Some((n, pos)) = dup {
+            return self.err_at(&alloc::format!("Duplicate export of '{n}'"), pos);
+        }
+        Ok(())
+    }
+
+    /// `import(specifier, options)` and `import.meta` (the current token is `import`).
+    fn parse_import_expr(&mut self, in_new: bool) -> PResult<Expr> {
+        let pos = self.tok.start;
+        self.advance()?;
+        if self.is(P::Dot) {
+            self.advance()?;
+            if !self.is_name(kw::META) {
+                return self.unexpected();
+            }
+            if !self.is_module {
+                return self.err_at("Cannot use 'import.meta' outside a module", pos);
+            }
+            self.advance()?;
+            return Ok(Expr {
+                k: ExprKind::ImportMeta,
+                pos,
+            });
+        }
+        if in_new {
+            return self.err_at("Cannot use new with import", pos);
+        }
+        if !self.is(P::LParen) {
+            return self.unexpected();
+        }
+        self.advance()?;
+        let spec = self.parse_assign(false)?;
+        let mut opts = None;
+        if self.eat(P::Comma)? && !self.is(P::RParen) {
+            opts = Some(Box::new(self.parse_assign(false)?));
+            self.eat(P::Comma)?;
+        }
+        self.expect(P::RParen)?;
+        Ok(Expr {
+            k: ExprKind::ImportCall(Box::new(spec), opts),
+            pos,
+        })
     }
 
     // ---- statements ----
@@ -369,10 +878,16 @@ impl<'a> Parser<'a> {
                 if matches!(p.tok, Tok::P(P::LParen) | Tok::P(P::Dot)) {
                     return self.parse_statement();
                 }
-                self.err("Cannot use import statement outside a module (ES modules are not supported yet)")
+                if self.is_module {
+                    return self.err("Cannot use import statement here: imports are only allowed at the top level of a module");
+                }
+                self.err("Cannot use import statement outside a module")
             }
             Tok::Name(kw::EXPORT, false) => {
-                self.err("Unexpected token 'export' (ES modules are not supported yet)")
+                if self.is_module {
+                    return self.err("Unexpected token 'export': exports are only allowed at the top level of a module");
+                }
+                self.err("Unexpected token 'export'")
             }
             _ => self.parse_statement(),
         }
@@ -656,6 +1171,9 @@ impl<'a> Parser<'a> {
             if !self.ctx.in_async {
                 return self.unexpected();
             }
+            if self.ctx.module && !self.ctx.in_function {
+                self.info.has_tla = true;
+            }
             self.advance()?;
             is_await = true;
         }
@@ -895,6 +1413,7 @@ impl<'a> Parser<'a> {
 
     /// After `function` (current token) or `async` already consumed.
     fn parse_function(&mut self, is_decl: bool, is_async: bool, start: u32) -> PResult<Box<Func>> {
+        let anon_ok = core::mem::take(&mut self.anon_default_ok);
         self.advance()?; // `function`
         let is_generator = self.eat(P::Star)?;
         let mut name = None;
@@ -909,6 +1428,8 @@ impl<'a> Parser<'a> {
             let r = self.binding_ident();
             self.ctx = saved;
             name = Some(r?.0);
+        } else if is_decl && anon_ok {
+            name = Some(self.info.default_atom);
         } else if is_decl {
             return self.unexpected();
         }
@@ -963,7 +1484,14 @@ impl<'a> Parser<'a> {
                 self.ctx.allow_super_call = false;
             }
         }
-        let r = self.parse_function_parts(kind, is_async, is_generator, start);
+        let r = match self.enter() {
+            Ok(()) => {
+                let r = self.parse_function_parts(kind, is_async, is_generator, start);
+                self.leave();
+                r
+            }
+            Err(e) => Err(e),
+        };
         self.ctx = saved_ctx;
         self.labels = saved_labels;
         self.in_loop = saved_loop;
@@ -1187,29 +1715,88 @@ impl<'a> Parser<'a> {
                 self.expect(P::RBracket)?;
                 return Ok(PropName::Computed(Box::new(e)));
             }
-            Tok::Private(_) => return self.err("Private class members (#name) are not supported"),
             _ => return self.unexpected(),
         };
         self.advance()?;
         Ok(k)
     }
 
+    /// Records a private name a class declares; returns the hidden binding that keeps its
+    /// function (methods and accessors).
+    fn declare_private(
+        &mut self,
+        privs: &mut Vec<PrivDecl>,
+        name: Atom,
+        is_static: bool,
+        kind: PrivKind,
+        pos: u32,
+    ) -> PResult<Option<Atom>> {
+        let text = String::from(self.atoms.get(name));
+        if text == "#constructor" {
+            return self.err_at(
+                "Classes may not have a private field named '#constructor'",
+                pos,
+            );
+        }
+        if let Some(prev) = privs.iter().find(|p| p.name == name) {
+            let pair = matches!(
+                (prev.kind, kind),
+                (PrivKind::Getter, PrivKind::Setter) | (PrivKind::Setter, PrivKind::Getter)
+            ) && prev.is_static == is_static;
+            if !pair {
+                return self.err_at(
+                    &alloc::format!("Identifier '{text}' has already been declared"),
+                    pos,
+                );
+            }
+        }
+        let func = match kind {
+            PrivKind::Field => None,
+            PrivKind::Method => Some(self.atoms.intern(&alloc::format!("{text}/m"))),
+            PrivKind::Getter => Some(self.atoms.intern(&alloc::format!("{text}/g"))),
+            PrivKind::Setter => Some(self.atoms.intern(&alloc::format!("{text}/s"))),
+        };
+        privs.push(PrivDecl {
+            name,
+            is_static,
+            kind,
+            func,
+            pos,
+        });
+        Ok(func)
+    }
+
     // ---- classes ----
 
     fn parse_class(&mut self, is_decl: bool) -> PResult<Box<Class>> {
         let start = self.tok.start;
+        let anon_ok = core::mem::take(&mut self.anon_default_ok);
         self.advance()?; // class
         let saved_strict = self.ctx.strict;
         self.ctx.strict = true;
-        let r = self.parse_class_rest(is_decl, start);
+        let r = match self.enter() {
+            Ok(()) => {
+                let r = self.parse_class_rest(is_decl, start, anon_ok);
+                self.leave();
+                r
+            }
+            Err(e) => Err(e),
+        };
         self.ctx.strict = saved_strict;
         r
     }
 
-    fn parse_class_rest(&mut self, is_decl: bool, start: u32) -> PResult<Box<Class>> {
+    fn parse_class_rest(
+        &mut self,
+        is_decl: bool,
+        start: u32,
+        anon_ok: bool,
+    ) -> PResult<Box<Class>> {
         let mut name = None;
         if !self.is_name(kw::EXTENDS) && !self.is(P::LBrace) {
             name = Some(self.binding_ident()?.0);
+        } else if is_decl && anon_ok {
+            name = Some(self.info.default_atom);
         } else if is_decl {
             return self.unexpected();
         }
@@ -1227,6 +1814,8 @@ impl<'a> Parser<'a> {
         let mut field_keys: Vec<Expr> = Vec::new();
         let mut field_key_static: Vec<bool> = Vec::new();
         let mut field_key_at: Vec<u32> = Vec::new();
+        let mut privates: Vec<PrivDecl> = Vec::new();
+        let mut priv_installs: Vec<PrivInstall> = Vec::new();
         let derived = heritage.is_some();
         let mut fields_start = 0u32;
         let mut statics_start = 0u32;
@@ -1307,7 +1896,13 @@ impl<'a> Parser<'a> {
             }
             let key_is_ctor = matches!(self.tok.tok, Tok::Name(kw::CONSTRUCTOR, _))
                 || matches!(&self.tok.tok, Tok::Str(s, _) if crate::string::eq_str(s, "constructor"));
-            let key = self.parse_prop_name()?;
+            let key = if let Tok::Private(a) = self.tok.tok {
+                let name = self.private_atom(a);
+                self.advance()?;
+                PropName::Private(name)
+            } else {
+                self.parse_prop_name()?
+            };
             if self.is(P::LParen) {
                 if key_is_ctor && !is_static {
                     if is_async || is_gen || acc.is_some() {
@@ -1330,6 +1925,25 @@ impl<'a> Parser<'a> {
                     Some(MethodKind::Set) => FuncKind::Setter,
                     _ => FuncKind::Method,
                 };
+                if let PropName::Private(pn) = key {
+                    let pk = match acc {
+                        Some(MethodKind::Get) => PrivKind::Getter,
+                        Some(MethodKind::Set) => PrivKind::Setter,
+                        _ => PrivKind::Method,
+                    };
+                    let func = self.declare_private(&mut privates, pn, is_static, pk, mpos)?;
+                    if !is_static && let Some(func) = func {
+                        priv_installs.push(PrivInstall {
+                            name: pn,
+                            func,
+                            kind: match pk {
+                                PrivKind::Getter => 1,
+                                PrivKind::Setter => 2,
+                                _ => 0,
+                            },
+                        });
+                    }
+                }
                 let f = self.parse_function_rest(fk, is_async, is_gen, mpos)?;
                 let kind = match acc {
                     Some(MethodKind::Get) => MemberKind::Get(f),
@@ -1352,6 +1966,9 @@ impl<'a> Parser<'a> {
             // A field.
             if is_async || is_gen || acc.is_some() || key_is_ctor {
                 return self.unexpected();
+            }
+            if let PropName::Private(pn) = key {
+                self.declare_private(&mut privates, pn, is_static, PrivKind::Field, mpos)?;
             }
             let fkey = match key {
                 PropName::Computed(e) => {
@@ -1417,17 +2034,23 @@ impl<'a> Parser<'a> {
                 is_decl: false,
             })
         };
-        let fields = if inst_fields.is_empty() {
+        let fields = if inst_fields.is_empty() && priv_installs.is_empty() {
             None
         } else {
-            Some(mk(
-                self,
-                alloc::vec![Stmt {
+            let mut body = Vec::new();
+            if !priv_installs.is_empty() {
+                body.push(Stmt {
+                    k: StmtKind::PrivMethods(priv_installs),
+                    pos: start,
+                });
+            }
+            if !inst_fields.is_empty() {
+                body.push(Stmt {
                     k: StmtKind::Fields(inst_fields),
-                    pos: fields_start
-                }],
-                fields_start,
-            ))
+                    pos: fields_start,
+                });
+            }
+            Some(mk(self, body, fields_start.max(start)))
         };
         let statics = if static_body.is_empty() {
             None
@@ -1444,6 +2067,7 @@ impl<'a> Parser<'a> {
             field_keys,
             field_key_static,
             field_key_at,
+            privates,
             scope,
             start,
             end,
@@ -1599,6 +2223,7 @@ impl<'a> Parser<'a> {
                 }
                 ExprKind::Member(..)
                 | ExprKind::Index(..)
+                | ExprKind::PrivMember(..)
                 | ExprKind::SuperMember(_)
                 | ExprKind::SuperIndex(_) => Pat::Expr(Box::new(lhs)),
                 _ => return self.err_at("Invalid left-hand side in assignment", lhs.pos),
@@ -1760,9 +2385,14 @@ impl<'a> Parser<'a> {
     fn parse_binary(&mut self, min: u8, no_in: bool) -> PResult<Expr> {
         let pos = self.tok.start;
         let mut left = self.parse_unary()?;
+        let mut links = 0u32;
         while let Some((prec, op)) = self.binop(no_in) {
             if prec < min.max(1) {
                 break;
+            }
+            links += 1;
+            if links > MAX_CHAIN {
+                return self.err("the code is nested too deeply");
             }
             self.check_no_cover_init()?;
             if prec == 12 && matches!(left.k, ExprKind::Unary(..) | ExprKind::Await(_)) {
@@ -1770,6 +2400,11 @@ impl<'a> Parser<'a> {
             }
             self.advance()?;
             let right = self.parse_binary(if prec == 12 { 12 } else { prec + 1 }, no_in)?;
+            if matches!(right.k, ExprKind::PrivName(_))
+                || (matches!(left.k, ExprKind::PrivName(_)) && !matches!(op, Ok(BinOp::In)))
+            {
+                return self.err_at("Unexpected private name", pos);
+            }
             left = match op {
                 Ok(b) => Expr {
                     k: ExprKind::Bin(b, Box::new(left), Box::new(right)),
@@ -1820,6 +2455,19 @@ impl<'a> Parser<'a> {
             if op == UnOp::Delete && self.ctx.strict && matches!(arg.k, ExprKind::Ident(_)) {
                 return self.err_at("Delete of an unqualified identifier in strict mode.", pos);
             }
+            if op == UnOp::Delete {
+                let mut e = &arg;
+                loop {
+                    match &e.k {
+                        ExprKind::Seq(items) if items.len() == 1 => e = &items[0],
+                        ExprKind::OptChain(inner) => e = inner,
+                        _ => break,
+                    }
+                }
+                if matches!(e.k, ExprKind::PrivMember(..)) {
+                    return self.err_at("Private fields can not be deleted", pos);
+                }
+            }
             return Ok(Expr {
                 k: ExprKind::Unary(op, Box::new(arg)),
                 pos,
@@ -1840,6 +2488,9 @@ impl<'a> Parser<'a> {
             });
         }
         if self.is_name(kw::AWAIT) && (self.ctx.in_async) {
+            if self.ctx.module && !self.ctx.in_function {
+                self.info.has_tla = true;
+            }
             self.advance()?;
             let arg = self.parse_unary()?;
             return Ok(Expr {
@@ -1861,6 +2512,7 @@ impl<'a> Parser<'a> {
             }
             ExprKind::Member(..)
             | ExprKind::Index(..)
+            | ExprKind::PrivMember(..)
             | ExprKind::SuperMember(_)
             | ExprKind::SuperIndex(_) => Ok(()),
             _ => self.err_at(
@@ -1897,22 +2549,21 @@ impl<'a> Parser<'a> {
         } else if self.is_name(kw::SUPER) {
             self.parse_super()?
         } else if self.is_name(kw::IMPORT) {
-            return self.err(
-                "import() and import.meta are not supported (ES modules are not supported yet)",
-            );
+            self.parse_import_expr(false)?
         } else {
             self.parse_primary()?
         };
         let mut in_chain = false;
+        let mut links = 0u32;
         loop {
+            links += 1;
+            if links > MAX_CHAIN {
+                return self.err("the code is nested too deeply");
+            }
             match self.tok.tok {
                 Tok::P(P::Dot) => {
                     self.advance()?;
-                    let name = self.member_name()?;
-                    e = Expr {
-                        k: ExprKind::Member(Box::new(e), name, false),
-                        pos,
-                    };
+                    e = self.member_expr(e, pos, false)?;
                 }
                 Tok::P(P::QDot) => {
                     self.advance()?;
@@ -1934,11 +2585,7 @@ impl<'a> Parser<'a> {
                     } else if let Tok::Template(..) = self.tok.tok {
                         return self.err("Invalid tagged template on optional chain");
                     } else {
-                        let name = self.member_name()?;
-                        e = Expr {
-                            k: ExprKind::Member(Box::new(e), name, true),
-                            pos,
-                        };
+                        e = self.member_expr(e, pos, true)?;
                     }
                 }
                 Tok::P(P::LBracket) => {
@@ -1985,9 +2632,31 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(a)
             }
-            Tok::Private(_) => self.err("Private class members (#name) are not supported"),
             _ => self.unexpected(),
         }
+    }
+
+    /// `#name` as the atom of the name with its `#` (the lexer's atom has none).
+    fn private_atom(&mut self, a: Atom) -> Atom {
+        let s = alloc::format!("#{}", self.atoms.get(a));
+        self.atoms.intern(&s)
+    }
+
+    /// After `.` or `?.`: `obj.name` or `obj.#name`.
+    fn member_expr(&mut self, obj: Expr, pos: u32, optional: bool) -> PResult<Expr> {
+        if let Tok::Private(a) = self.tok.tok {
+            let name = self.private_atom(a);
+            self.advance()?;
+            return Ok(Expr {
+                k: ExprKind::PrivMember(Box::new(obj), name, optional),
+                pos,
+            });
+        }
+        let name = self.member_name()?;
+        Ok(Expr {
+            k: ExprKind::Member(Box::new(obj), name, optional),
+            pos,
+        })
     }
 
     fn parse_super(&mut self) -> PResult<Expr> {
@@ -2049,19 +2718,20 @@ impl<'a> Parser<'a> {
             } else if self.is_name(kw::SUPER) {
                 self.parse_super()?
             } else if self.is_name(kw::IMPORT) {
-                return self.err("import() is not supported");
+                self.parse_import_expr(true)?
             } else {
                 self.parse_primary()?
             };
+            let mut links = 0u32;
             loop {
+                links += 1;
+                if links > MAX_CHAIN {
+                    return self.err("the code is nested too deeply");
+                }
                 match self.tok.tok {
                     Tok::P(P::Dot) => {
                         self.advance()?;
-                        let name = self.member_name()?;
-                        callee = Expr {
-                            k: ExprKind::Member(Box::new(callee), name, false),
-                            pos,
-                        };
+                        callee = self.member_expr(callee, pos, false)?;
                     }
                     Tok::P(P::LBracket) => {
                         self.advance()?;
@@ -2256,7 +2926,16 @@ impl<'a> Parser<'a> {
                     },
                 }
             }
-            Tok::Private(_) => return self.err("Private class members (#name) are not supported"),
+            Tok::Private(a) => {
+                let a = *a;
+                let p = self.peek()?;
+                if !matches!(p.tok, Tok::Name(kw::IN, false)) {
+                    return self.unexpected();
+                }
+                let name = self.private_atom(a);
+                self.advance()?;
+                ExprKind::PrivName(name)
+            }
             _ => return self.unexpected(),
         };
         Ok(Expr { k, pos })
@@ -2604,6 +3283,7 @@ impl<'a> Parser<'a> {
             }
             ExprKind::Member(..)
             | ExprKind::Index(..)
+            | ExprKind::PrivMember(..)
             | ExprKind::SuperMember(_)
             | ExprKind::SuperIndex(_)
                 if !binding =>
@@ -2617,9 +3297,10 @@ impl<'a> Parser<'a> {
                     pos,
                 });
                 match inner.k {
-                    ExprKind::Ident(_) | ExprKind::Member(..) | ExprKind::Index(..) => {
-                        self.expr_to_pattern(inner, false)
-                    }
+                    ExprKind::Ident(_)
+                    | ExprKind::Member(..)
+                    | ExprKind::Index(..)
+                    | ExprKind::PrivMember(..) => self.expr_to_pattern(inner, false),
                     _ => self.err_at("Invalid destructuring assignment target", pos),
                 }
             }

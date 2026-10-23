@@ -202,6 +202,35 @@ impl Realm {
         };
         let gk = self.key(N::groups);
         self.put_prop(arr, gk, groups, crate::object::WEC);
+        if prog.flags.has_indices {
+            // The `d` flag: the [start, end] of every group, and of the named ones by name.
+            let mut pairs: Vec<Val> = Vec::with_capacity(items.len());
+            for g in 0..=prog.ncaps as usize {
+                let (a, b) = (caps[g * 2], caps[g * 2 + 1]);
+                if a == usize::MAX || b == usize::MAX || b < a || b > slen {
+                    pairs.push(Val::Undef);
+                } else {
+                    let p =
+                        self.new_array_from(alloc::vec![Val::num(a as f64), Val::num(b as f64)]);
+                    pairs.push(Val::Obj(p));
+                }
+            }
+            let ig = if prog.names.is_empty() {
+                Val::Undef
+            } else {
+                let go = self.alloc(None, ObjKind::Ordinary);
+                for (name, idx) in prog.names.iter() {
+                    let k = self.key_str(name);
+                    let v = pairs.get(*idx as usize).copied().unwrap_or(Val::Undef);
+                    self.put_prop(go, k, v, crate::object::WEC);
+                }
+                Val::Obj(go)
+            };
+            let ia = self.new_array_from(pairs);
+            self.put_prop(ia, gk, ig, crate::object::WEC);
+            let ik2 = self.key_str("indices");
+            self.put_prop(arr, ik2, Val::Obj(ia), crate::object::WEC);
+        }
         Ok(Val::Obj(arr))
     }
 

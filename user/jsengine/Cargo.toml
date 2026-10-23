@@ -6,7 +6,9 @@ edition.workspace = true
 # The Browser's JavaScript engine: a tokenizer (with ASI), a parser to an AST, a bytecode
 # compiler, a stack VM with a precise mark-sweep GC, and the ES2020 builtins (Object, Function,
 # Array, String, Number, Boolean, Symbol, Math, JSON, Date, RegExp, the Error types,
-# Map/Set/WeakMap/WeakSet, Promise, generators, async functions). no_std + alloc, no
+# Map/Set/WeakMap/WeakSet, Promise, generators, async functions), ES modules (linking and
+# evaluation by the spec's algorithms, top-level await, namespaces, import() and import.meta
+# through host hooks), private class members. no_std + alloc, no
 # dependencies and no I/O: the embedder (the DOM bindings in user/webengine and user/browser)
 # builds against src/api.rs only. Host tests:
 #   cd user && cargo test -p jsengine --target aarch64-apple-darwin

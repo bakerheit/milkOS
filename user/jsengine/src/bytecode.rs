@@ -58,6 +58,13 @@ pub(crate) enum Op {
     PutEnv(u32),
     GetEnvChk(u32, u32),
     SetEnvChk(u32, u32),
+    /// Reads an imported binding: the environment slot holds a reference to the exporting
+    /// module's slot (TDZ-checked; the second operand is the name).
+    GetImport(u32, u32),
+    /// `import.meta` of the running module.
+    ImportMeta,
+    /// spec options → promise: `import(spec, options)`.
+    ImportCall,
     /// A new environment of n slots (undefined) whose parent is the current one.
     PushEnv(u32),
     PopEnv,
@@ -200,6 +207,21 @@ pub(crate) enum Op {
     InitFields,
     /// The i-th computed field key of the running field initializer.
     FieldKey(u32),
+    /// A fresh private name (a private symbol) described by the string constant.
+    NewPrivName(u32),
+    /// obj name → v (`obj.#x`)
+    GetPriv,
+    /// obj name → obj v (for calls)
+    GetPrivKeep,
+    /// obj name v → v (`obj.#x = v`)
+    SetPriv,
+    /// name obj → bool (`#x in obj`)
+    PrivIn,
+    /// obj name v → obj (a private field is added)
+    DefinePrivField,
+    /// obj name f → obj (a private method or accessor half is added: 0 method, 1 getter,
+    /// 2 setter)
+    DefinePrivMethod(u32),
     /// obj v → obj (DefineField: CreateDataPropertyOrThrow)
     DefineField(u32),
     /// obj key v → obj
@@ -405,6 +427,8 @@ pub(crate) struct Code {
     pub source: Rc<Source>,
     pub span: (u32, u32),
     pub marked: Cell<u32>,
+    /// The module this code belongs to (None for scripts).
+    pub module: Option<crate::api::ModuleId>,
 }
 
 impl Code {

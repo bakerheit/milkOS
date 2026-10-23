@@ -11,6 +11,8 @@ use crate::atoms::{Atom, Atoms, kw};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SK {
     Script,
+    /// A module's top level: a function-like scope whose declarations are all lexical.
+    Module,
     Function,
     Block,
     Catch,
@@ -31,6 +33,8 @@ pub(crate) enum BK {
     /// strict code).
     FuncName,
     Arguments,
+    /// `import { x } from "m"`: a live view of another module's binding.
+    Import,
 }
 
 impl BK {
@@ -54,6 +58,8 @@ pub(crate) struct Binding {
     pub loc: Loc,
     /// A sloppy-mode block function also assigned to a var of the same name (Annex B).
     pub annex_b: bool,
+    /// A parameter of a function with defaults or patterns: in its TDZ until initialized.
+    pub tdz: bool,
 }
 
 pub(crate) struct Scope {
@@ -68,11 +74,40 @@ pub(crate) struct Scope {
     pub strict: bool,
     /// Set by the compiler when it enters the scope.
     pub env_size: u32,
+    /// Name -> position, for scopes with many bindings (a module can have tens of
+    /// thousands; every identifier reference looks its scope chain up).
+    index: Option<alloc::collections::BTreeMap<Atom, u32>>,
 }
+
+const INDEX_AT: usize = 24;
 
 impl Scope {
     pub fn find(&self, a: Atom) -> Option<usize> {
-        self.bindings.iter().position(|b| b.name == a)
+        match &self.index {
+            Some(ix) => ix.get(&a).map(|i| *i as usize),
+            None => self.bindings.iter().position(|b| b.name == a),
+        }
+    }
+
+    /// Adds a binding (the names of existing ones stay where they are).
+    pub fn add(&mut self, b: Binding) {
+        let pos = self.bindings.len() as u32;
+        let name = b.name;
+        self.bindings.push(b);
+        match &mut self.index {
+            Some(ix) => {
+                ix.entry(name).or_insert(pos);
+            }
+            None => {
+                if self.bindings.len() > INDEX_AT {
+                    let mut ix = alloc::collections::BTreeMap::new();
+                    for (i, b) in self.bindings.iter().enumerate() {
+                        ix.entry(b.name).or_insert(i as u32);
+                    }
+                    self.index = Some(ix);
+                }
+            }
+        }
     }
 }
 
@@ -102,6 +137,7 @@ fn blank(kind: SK) -> Scope {
         uses_arguments: false,
         strict: false,
         env_size: 0,
+        index: None,
     }
 }
 
@@ -126,7 +162,7 @@ impl<'a> Resolver<'a> {
 
     fn open(&mut self, id: ScopeId, kind: SK, parent: Option<ScopeId>) {
         let func = match kind {
-            SK::Function | SK::Script => id,
+            SK::Function | SK::Script | SK::Module => id,
             _ => parent.map_or(id, |p| self.scopes[p as usize].func),
         };
         let strict = parent.is_some_and(|p| self.scopes[p as usize].strict);
@@ -154,12 +190,37 @@ impl<'a> Resolver<'a> {
                 }
                 return Ok(());
             }
-            s.bindings.push(Binding {
+            s.add(Binding {
                 name,
                 kind,
                 captured: false,
                 loc: Loc::Unassigned,
                 annex_b: false,
+                tdz: false,
+            });
+            return Ok(());
+        }
+        if s.kind == SK::Module {
+            // Everything at a module's top level is lexical, except that `var`s may repeat.
+            if let Some(i) = s.find(name) {
+                if s.bindings[i].kind == BK::Var && kind == BK::Var {
+                    return Ok(());
+                }
+                return self.err(
+                    alloc::format!(
+                        "Identifier '{}' has already been declared",
+                        self.atoms.get(name)
+                    ),
+                    pos,
+                );
+            }
+            s.add(Binding {
+                name,
+                kind,
+                captured: true,
+                loc: Loc::Unassigned,
+                annex_b: false,
+                tdz: false,
             });
             return Ok(());
         }
@@ -196,12 +257,13 @@ impl<'a> Resolver<'a> {
             }
             return Ok(());
         }
-        s.bindings.push(Binding {
+        s.add(Binding {
             name,
             kind,
             captured: false,
             loc: Loc::Unassigned,
             annex_b: false,
+            tdz: false,
         });
         Ok(())
     }
@@ -227,17 +289,38 @@ impl<'a> Resolver<'a> {
                 let captured = sid != cur_func;
                 let scm = &mut self.scopes[sid as usize];
                 scm.uses_arguments = true;
-                scm.bindings.push(Binding {
+                scm.add(Binding {
                     name,
                     kind: BK::Arguments,
                     captured,
                     loc: Loc::Unassigned,
                     annex_b: false,
+                    tdz: false,
                 });
                 return;
             }
             s = sc.parent;
         }
+    }
+
+    /// A use of a private name: it has to be declared by an enclosing class.
+    fn private_ref(&mut self, name: Atom, pos: u32) -> RResult {
+        let mut s = Some(self.cur);
+        while let Some(sid) = s {
+            let sc = &self.scopes[sid as usize];
+            if sc.kind == SK::Class && sc.find(name).is_some() {
+                self.reference(name);
+                return Ok(());
+            }
+            s = sc.parent;
+        }
+        self.err(
+            alloc::format!(
+                "Private field '{}' must be declared in an enclosing class",
+                self.atoms.get(name)
+            ),
+            pos,
+        )
     }
 
     // ---- entry points ----
@@ -249,6 +332,35 @@ impl<'a> Resolver<'a> {
         self.hoist_vars(&s.body, s.scope)?;
         self.declare_lexical(&s.body, s.scope, true)?;
         self.stmts(&s.body)
+    }
+
+    pub fn module(&mut self, m: &ModuleAst) -> RResult {
+        self.open(m.scope, SK::Module, None);
+        self.scopes[m.scope as usize].strict = true;
+        self.cur = m.scope;
+        for imp in &m.info.imports {
+            let bk = if matches!(imp.name, ImportName::All) {
+                BK::Const
+            } else {
+                BK::Import
+            };
+            self.declare(m.scope, imp.local, bk, imp.pos)?;
+        }
+        self.hoist_vars(&m.body, m.scope)?;
+        self.declare_lexical(&m.body, m.scope, true)?;
+        self.stmts(&m.body)?;
+        for le in &m.info.local_exports {
+            if self.scopes[m.scope as usize].find(le.local).is_none() {
+                return self.err(
+                    alloc::format!(
+                        "Export '{}' is not defined in module",
+                        self.atoms.get(le.local)
+                    ),
+                    le.pos,
+                );
+            }
+        }
+        Ok(())
     }
 
     // ---- hoisting ----
@@ -450,6 +562,19 @@ impl<'a> Resolver<'a> {
                 self.declare(f.scope, n, BK::Param, f.start)?;
             }
         }
+        // With defaults, patterns or a rest parameter, a parameter can't be read before its
+        // own initialization runs.
+        let simple = f.rest.is_none()
+            && f.params
+                .iter()
+                .all(|p| p.default.is_none() && matches!(p.pat, Pat::Ident(..)));
+        if !simple {
+            for b in self.scopes[f.scope as usize].bindings.iter_mut() {
+                if b.kind == BK::Param {
+                    b.tdz = true;
+                }
+            }
+        }
         if let Body::Stmts(body) = &f.body {
             self.hoist_vars(body, f.scope)?;
             self.declare_lexical(body, f.scope, true)?;
@@ -477,6 +602,17 @@ impl<'a> Resolver<'a> {
         self.scopes[c.scope as usize].strict = true;
         if let Some(n) = c.name {
             self.declare(c.scope, n, BK::Const, c.start)?;
+        }
+        // Private names are bindings of the class scope (their names start with `#`, so they
+        // never meet an identifier): the name itself, and for methods and accessors the
+        // function that each instance gets.
+        for pd in &c.privates {
+            if self.scopes[c.scope as usize].find(pd.name).is_none() {
+                self.declare(c.scope, pd.name, BK::Const, pd.pos)?;
+            }
+            if let Some(f) = pd.func {
+                self.declare(c.scope, f, BK::Const, pd.pos)?;
+            }
         }
         self.cur = c.scope;
         if let Some(h) = &c.heritage {
@@ -729,10 +865,20 @@ impl<'a> Resolver<'a> {
                 Ok(())
             }
             StmtKind::Labeled(_, b) => self.stmt(b),
+            StmtKind::PrivMethods(list) => {
+                for i in list {
+                    self.reference(i.name);
+                    self.reference(i.func);
+                }
+                Ok(())
+            }
             StmtKind::Fields(defs) => {
                 for d in defs {
                     if let FieldKey::Name(PropName::Computed(e)) = &d.key {
                         self.expr(e)?;
+                    }
+                    if let FieldKey::Name(PropName::Private(a)) = &d.key {
+                        self.private_ref(*a, d.pos)?;
                     }
                     if let Some(v) = &d.value {
                         self.expr(v)?;
@@ -916,6 +1062,19 @@ impl<'a> Resolver<'a> {
                 }
                 Ok(())
             }
+            ExprKind::ImportCall(a, b) => {
+                self.expr(a)?;
+                if let Some(b) = b {
+                    self.expr(b)?;
+                }
+                Ok(())
+            }
+            ExprKind::ImportMeta => Ok(()),
+            ExprKind::PrivMember(o, name, _) => {
+                self.expr(o)?;
+                self.private_ref(*name, e.pos)
+            }
+            ExprKind::PrivName(name) => self.private_ref(*name, e.pos),
         }
     }
 }

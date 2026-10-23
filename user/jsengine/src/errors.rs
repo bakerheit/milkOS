@@ -592,6 +592,40 @@ impl Realm {
                 return Some(alloc::format!("[Symbol: {d}]"));
             }
             ObjKind::Coroutine(_) => return Some(String::from("Object [Generator] {}")),
+            ObjKind::Namespace(ns) => {
+                let entries: Vec<(PropKey, Val)> = ns
+                    .order
+                    .iter()
+                    .zip(ns.targets.iter())
+                    .map(|(k, t)| (*k, self.ns_value(t)))
+                    .collect();
+                out.push_str("[Module: null prototype] {");
+                if depth > 2 {
+                    out.push_str(" … }");
+                    return Some(out);
+                }
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    if i >= 50 {
+                        out.push_str(" …");
+                        break;
+                    }
+                    out.push(' ');
+                    let name = self.key_display(*k);
+                    out.push_str(&name);
+                    out.push_str(": ");
+                    if v.is_empty() {
+                        out.push_str("<uninitialized>");
+                    } else {
+                        let mut seen = Vec::new();
+                        self.inspect_into(&mut out, *v, depth + 1, false, &mut seen);
+                    }
+                }
+                out.push_str(if entries.is_empty() { "}" } else { " }" });
+                return Some(out);
+            }
             _ => {}
         }
         None

@@ -334,6 +334,7 @@ function finishRequest(s) {
 function xhrEvent(x, s, kind, data) {
   switch (kind) {
     case 'head': {
+      if (s.state !== 1) break;
       s.status = data.status;
       s.statusText = data.statusText;
       s.responseURL = data.url.replace(/#.*$/, '');

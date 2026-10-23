@@ -522,6 +522,7 @@ function fetch(input, init) {
       if (finished) return;
       switch (kind) {
         case 'head':
+          if (response) break;
           src = pendingSource();
           response = responseFromHead(data, src);
           resolve(response);
@@ -529,6 +530,7 @@ function fetch(input, init) {
         case 'done':
           finish();
           if (src) srcFinish(src, data);
+          else reject(networkError(null));
           break;
         case 'failed':
           finish();

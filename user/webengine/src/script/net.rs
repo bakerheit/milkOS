@@ -456,12 +456,12 @@ fn clip(s: &str) -> String {
 // ---- answers from the app --------------------------------------------------------------------
 
 /// One answer for request `id`: the script side's callback gets `(kind, data)`.
-pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) {
+pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) -> bool {
     let cb = match b.st.try_borrow() {
         Ok(st) => st.net.pending.get(&id).map(|p| r.pinned(p)),
         Err(_) => None,
     };
-    let Some(cb) = cb else { return };
+    let Some(cb) = cb else { return false };
     let last = matches!(ev, NetEvent::Done(_) | NetEvent::Failed(_));
     let (ty, data) = match &ev {
         NetEvent::Head(h) => ("head", head_object(r, h)),
@@ -489,7 +489,7 @@ pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) {
             ("failed", Ok(o))
         }
     };
-    let Ok(data) = data else { return };
+    let Ok(data) = data else { return false };
     let ty = r.string(ty);
     b.st.borrow_mut().stats.callbacks += 1;
     super::call_report(b, r, cb, Value::UNDEFINED, &[ty, data]);
@@ -499,6 +499,7 @@ pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) {
             r.unpin(p);
         }
     }
+    true
 }
 
 fn head_object(r: &mut Realm, h: &NetHead) -> JsResult<Value> {
@@ -592,7 +593,7 @@ fn host_ok(h: &str) -> bool {
         && !h.bytes().any(|c| {
             c <= 0x20
                 || c == 0x7f
-                || matches!(c, b'#' | b'/' | b'<' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'%' | b'"' | b'`' | b'{' | b'}')
+                || matches!(c, b':' | b'#' | b'/' | b'<' | b'>' | b'?' | b'@' | b'\\' | b'^' | b'|' | b'%' | b'"' | b'`' | b'{' | b'}')
         })
 }
 

@@ -21,6 +21,13 @@ mod events_js;
 mod forms_js;
 mod net;
 mod netbytes;
+
+/// For the tests.
+#[cfg(test)]
+pub(crate) mod net_for_tests {
+    pub use super::net::parse_url;
+}
+
 mod nodes;
 mod window;
 
@@ -117,11 +124,8 @@ impl Runtime {
         id: u32,
         ev: NetEvent,
     ) -> bool {
-        self.entry(page, host, |b, r| {
-            net::deliver(b, r, id, ev);
-            true
-        })
-        .unwrap_or(false)
+        self.entry(page, host, |b, r| net::deliver(b, r, id, ev))
+            .unwrap_or(false)
     }
 
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {

@@ -1,6 +1,7 @@
-//! The Browser's profile, `~/Library/Browser`: `bookmarks`, `cookies` (the persistent ones)
-//! and `history`, plus the `open` inbox the desktop drops addresses into for a Browser that
-//! is already running (`open URL`). Files are written whole to a temporary name and renamed,
+//! The Browser's profile, `~/Library/Browser`: `bookmarks`, `cookies` (the persistent ones),
+//! `history`, `settings` (`javascript=off`), `storage/<origin>` (pages' localStorage), plus
+//! the `open` inbox the desktop drops addresses into for a Browser that is already running
+//! (`open URL`). Files are written whole to a temporary name and renamed,
 //! so a crash leaves the old file, never half of one.
 
 use alloc::format;
@@ -46,9 +47,13 @@ impl Profile {
             .unwrap_or_default()
     }
 
-    /// Replace a profile file (write a temporary, then rename over it).
+    /// Replace a profile file (write a temporary, then rename over it). `name` may be in a
+    /// folder of the profile (`storage/...`): the temporary goes next to it.
     pub fn write(&self, name: &str, text: &str) -> bool {
-        let tmp = self.path(&format!(".{name}.tmp"));
+        let tmp = match name.rsplit_once('/') {
+            Some((dir, file)) => self.path(&format!("{dir}/.{file}.tmp")),
+            None => self.path(&format!(".{name}.tmp")),
+        };
         let Ok(fd) = sys::open_mode(
             &tmp,
             sys::O_WRONLY | sys::O_CREAT | sys::O_TRUNC | sys::O_CLOEXEC,

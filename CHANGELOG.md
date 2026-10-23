@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+**Browser**
+- The Browser is now a sandboxed user-space app (`/Apps/browser`) with tabs, back/forward,
+  bookmarks, find in page, zoom, forms (GET and POST), cookies (no third-party), downloads,
+  a padlock with certificate details, and plain-words error pages. It draws pages with a new
+  engine (`user/webengine`): the HTML5 parsing algorithm, CSS (selectors level 3, the cascade,
+  media queries, `var()`, `calc()`), and layout for blocks, text, floats, tables, flexbox and
+  a subset of grid. Page text uses the system fonts with Unicode, and JPEG, GIF and WebP
+  pictures (animated ones play in the front tab). Pages follow the Settings font and theme.
+- JavaScript: an ES2020 engine written from scratch (`user/jsengine`: bytecode VM, garbage
+  collector, Promises and async/await, classes, generators, RegExp, typed arrays, with budgets
+  for memory, steps and time). Pages get a live DOM API, events, timers, storage and a console
+  panel (Cmd-Alt-J). A runaway script gets a "This page is slow" bar; a toolbar switch turns
+  JavaScript off. Not yet: ES modules, BigInt, Proxy, Intl.
+- `fetch` and `XMLHttpRequest` with the web's rules: same-origin, CORS with preflight,
+  credentials modes, forbidden headers, mixed-content blocking, and no requests from a public
+  page to private addresses (`user/browserkit` netpolicy). Requests run off the page's thread,
+  and a Network list in the console panel shows them. Synchronous XHR is refused.
+
+**Tests**
+- A full `scripts/check-all.sh` runs 8 tests at a time and takes about 3 minutes (it was 7 to
+  8). Boot self-tests are opt-in, long tests are shorter or split, passing tests clean up
+  their work folders, and `--if-needed` skips a tree that already passed.
+
+**Desktop** (photos)
+- Six CC0 photo wallpapers (Settings > Wallpaper > Photos), decoded when chosen.
+
 **Network**
 - https:// pages: a TLS 1.3 client written from scratch (`tls/`, shared by the kernel and
   user space; docs/tls.md), so the Browser and `network get` open secure sites. ChaCha20-

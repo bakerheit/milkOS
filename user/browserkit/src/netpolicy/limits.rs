@@ -183,10 +183,7 @@ impl Limiter {
         let mut started = Vec::new();
         // The first waiting request that can run, repeatedly (a request blocked by its own
         // host doesn't hold back one for another host).
-        loop {
-            let Some(pos) = self.waiting.iter().position(|(_, h)| self.can_run(h)) else {
-                break;
-            };
+        while let Some(pos) = self.waiting.iter().position(|(_, h)| self.can_run(h)) {
             let (id, host) = self.waiting.remove(pos).unwrap_or((0, String::new()));
             self.running.push((id, host));
             started.push(id);

@@ -388,6 +388,34 @@ impl Headers {
             .collect()
     }
 
+    /// An immutable Headers for a response off the wire (`response.headers`): names must be
+    /// tokens and values free of NUL and line breaks, or the entry is dropped; non-ASCII
+    /// bytes in values are kept (a server may send them), and Set-Cookie is dropped. Entries
+    /// past the limits are dropped.
+    pub fn from_wire(entries: &[(String, String)]) -> Headers {
+        let mut list: Vec<(String, String)> = Vec::new();
+        let mut bytes = 0usize;
+        for (n, v) in entries {
+            let v = trim_header_value(v);
+            if !valid_header_name(n)
+                || is_forbidden_response_header(n)
+                || v.len() > MAX_VALUE
+                || v.bytes().any(|c| c == 0 || c == b'\r' || c == b'\n')
+            {
+                continue;
+            }
+            bytes += n.len() + v.len() + 4;
+            if list.len() >= MAX_HEADERS || bytes > MAX_HEADERS_BYTES {
+                break;
+            }
+            list.push((lower(n), String::from(v)));
+        }
+        Headers {
+            guard: Guard::Immutable,
+            list,
+        }
+    }
+
     pub fn guard(&self) -> Guard {
         self.guard
     }

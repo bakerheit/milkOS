@@ -377,3 +377,48 @@ fn hit_testing_follows_changes() {
     assert!(d.hit_test(5, 210, (0, 0)).link.is_some());
 }
 
+
+#[test]
+fn fragment_parser_fuzz() {
+    // Tag soup in every context that changes the parser's mode: no panic, bounded output,
+    // and the serialization parses again.
+    let parts = [
+        "<table>", "</table>", "<tr>", "<td>", "</td>", "<tbody>", "<select>", "<option>",
+        "</select>", "<p>", "</p>", "<b>", "</b>", "<i>", "<a href=x>", "</a>", "<script>",
+        "</script>", "<textarea>", "</textarea>", "<template>", "</template>", "<svg>",
+        "<math>", "<foreignObject>", "</svg>", "<!--", "-->", "<![CDATA[", "]]>", "&amp;",
+        "&#x0;", "text", " ", "<frameset>", "<body>", "<html>", "<head>", "<li>", "<ul>",
+        "<form>", "</form>", "<button>", "<noscript>", "<plaintext>", "<", ">", "\"", "'",
+    ];
+    let ctxs = [
+        tag::DIV, tag::TABLE, tag::TBODY, tag::TR, tag::TD, tag::SELECT, tag::TEXTAREA,
+        tag::SCRIPT, tag::TEMPLATE, tag::HTML, tag::BODY, tag::HEAD, tag::TITLE, tag::NOSCRIPT,
+        tag::COLGROUP, tag::CAPTION, tag::PLAINTEXT,
+    ];
+    let mut seed: u64 = 0xDEAD_BEEF_1234_5678;
+    let mut rnd = |n: usize| -> usize {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    for _ in 0..1500 {
+        let n = rnd(40);
+        let mut s = String::new();
+        for _ in 0..n {
+            s.push_str(parts[rnd(parts.len())]);
+        }
+        let ctx = ctxs[rnd(ctxs.len())];
+        let scripting = rnd(2) == 0;
+        let p = crate::html::parse_fragment(&s, ctx, &Limits::default(), scripting);
+        let root = p.dom.document_element();
+        let out = inner_html(&p.dom, root, scripting, 1 << 20);
+        assert!(out.len() < 64 * 1024, "{s}");
+        // Into a page and out again.
+        let mut d = Document::parse_str("<body><div id=t></div>", "http://t.example/");
+        let t = by_id(&d.page.dom, "t");
+        d.page.dom.import(&p.dom, root, t, NONE, 10_000);
+        lay(&mut d);
+        let _ = outer_html(&d.page.dom, 0, false, 1 << 20);
+    }
+}

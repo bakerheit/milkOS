@@ -59,6 +59,9 @@ atoms! {
     MS = "ms", MTEXT = "mtext", ANNOTATION_XML = "annotation-xml",
 }
 
+/// Names one document may intern.
+pub const MAX_ATOMS: usize = 1 << 20;
+
 /// Per-document interner: static atoms first, then whatever the page uses.
 pub struct Interner {
     names: Vec<String>,
@@ -83,10 +86,15 @@ impl Interner {
         }
     }
 
-    /// The atom for `s` (exact bytes; callers lower-case HTML names first).
+    /// The atom for `s` (exact bytes; callers lower-case HTML names first). Past
+    /// [`MAX_ATOMS`] new names (a script making up class names forever) all get the empty
+    /// atom, which no selector matches: memory stays bounded, such names just stop matching.
     pub fn intern(&mut self, s: &str) -> Atom {
         if let Some(a) = self.map.get(s) {
             return *a;
+        }
+        if self.names.len() >= MAX_ATOMS || s.len() > 4096 {
+            return tag::EMPTY;
         }
         let a = Atom(tag::COUNT + self.names.len() as u32);
         self.names.push(String::from(s));

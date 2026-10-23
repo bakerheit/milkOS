@@ -120,6 +120,20 @@ pub struct Dom {
     free: Vec<NodeId>,
     /// Bumped by every tracked change (tree, attributes, text): live collections cache by it.
     pub generation: u64,
+    /// Bytes of text and attribute values made, roughly (freed nodes give theirs back): the
+    /// bindings refuse to grow a page past [`MAX_DOM_BYTES`].
+    pub bytes: usize,
+}
+
+/// The most text and attribute bytes scripts may grow a page to.
+pub const MAX_DOM_BYTES: usize = 256 << 20;
+
+fn data_bytes(d: &NodeData) -> usize {
+    match d {
+        NodeData::Text(t) | NodeData::Comment(t) => t.len(),
+        NodeData::Element(e) => e.attrs.iter().map(|a| a.name.len() + a.value.len()).sum(),
+        _ => 0,
+    }
 }
 
 impl Default for Dom {
@@ -145,6 +159,7 @@ impl Dom {
             changes: Changes::default(),
             free: Vec::new(),
             generation: 0,
+            bytes: 0,
         }
     }
 
@@ -162,6 +177,7 @@ impl Dom {
     }
 
     fn push(&mut self, data: NodeData) -> NodeId {
+        self.bytes += data_bytes(&data);
         if let Some(id) = self.free.pop() {
             self.nodes[id as usize] = Node {
                 parent: NONE,
@@ -513,7 +529,7 @@ impl Dom {
     /// Set (or add) an attribute. `name` as given (callers lower-case HTML names). Keeps the
     /// element's interned id and classes in step.
     pub fn set_attr(&mut self, n: NodeId, name: &str, value: &str) {
-        let Some(e) = self.element_mut(n) else {
+        let Some(NodeData::Element(e)) = self.nodes.get_mut(n as usize).map(|x| &mut x.data) else {
             return;
         };
         match e.attrs.iter_mut().find(|a| &*a.name == name) {
@@ -521,12 +537,16 @@ impl Dom {
                 if &*a.value == value {
                     return;
                 }
+                self.bytes = (self.bytes + value.len()).saturating_sub(a.value.len());
                 a.value = value.into();
             }
-            None => e.attrs.push(Attr {
-                name: name.into(),
-                value: value.into(),
-            }),
+            None => {
+                self.bytes += name.len() + value.len();
+                e.attrs.push(Attr {
+                    name: name.into(),
+                    value: value.into(),
+                })
+            }
         }
         self.attr_changed(n, name);
     }
@@ -605,6 +625,7 @@ impl Dom {
                 if t == s {
                     return;
                 }
+                self.bytes = (self.bytes + s.len()).saturating_sub(t.len());
                 t.clear();
                 t.push_str(s);
             }
@@ -695,6 +716,8 @@ impl Dom {
             c = self.next_in(c, n);
         }
         for c in all {
+            let b = data_bytes(&self.nodes[c as usize].data);
+            self.bytes = self.bytes.saturating_sub(b);
             let x = &mut self.nodes[c as usize];
             *x = Node {
                 parent: NONE,

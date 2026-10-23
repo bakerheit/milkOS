@@ -10,6 +10,9 @@ use crate::api::*;
 use crate::atoms::tag;
 use crate::dom::{Dom, NONE, NodeId};
 
+/// The most text one control's value holds (bytes).
+pub const MAX_VALUE: usize = 4 << 20;
+
 /// A control that is submitted but never drawn (`<input type=hidden>`).
 #[derive(Clone, Debug)]
 pub struct Hidden {
@@ -417,6 +420,14 @@ impl Forms {
         };
         if !script && let Some(max) = c.max_length {
             v = v.chars().take(max as usize).collect();
+        }
+        // A bound for what any one control holds.
+        if v.len() > MAX_VALUE {
+            let mut e = MAX_VALUE;
+            while !v.is_char_boundary(e) {
+                e -= 1;
+            }
+            v.truncate(e);
         }
         c.value = v;
         self.dirty_value.insert(self.nodes[id.0 as usize]);

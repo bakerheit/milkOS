@@ -486,16 +486,23 @@ pub fn new_fragment(p: &mut Page) -> NodeId {
     p.dom.create_element(a, Ns::Html, Vec::new())
 }
 
-/// Room for one more node?
-fn check_room(p: &Page, r: &mut Realm) -> JsResult<()> {
+/// Room for one more node (and its text)?
+pub fn check_room(p: &Page, r: &mut Realm) -> JsResult<()> {
     if p.dom.live() >= p.limits().max_nodes {
         return Err(r.throw_error(jsengine::ErrorKind::RangeError, "too many DOM nodes"));
+    }
+    if p.dom.bytes >= crate::dom::MAX_DOM_BYTES {
+        return Err(r.throw_error(jsengine::ErrorKind::RangeError, "the page is too big"));
     }
     Ok(())
 }
 
 /// Replace `el`'s children with the parsed `html` (innerHTML); scripts in it don't run.
 pub fn set_inner_html(b: &Rc<Bridge>, r: &mut Realm, el: NodeId, html: &str) -> JsResult<()> {
+    if !html.is_empty() {
+        let p = b.page_or(r)?;
+        check_room(p, r)?;
+    }
     let tops = {
         let p = b.page_or(r)?;
         let ctx = context_atom(p, el);
@@ -550,6 +557,7 @@ fn insert_html(
     before: NodeId,
     html: &str,
 ) -> JsResult<()> {
+    check_room(b.page_or(r)?, r)?;
     let tops = {
         let p = b.page_or(r)?;
         let ca = context_atom(p, ctx);
@@ -1038,6 +1046,8 @@ pub fn set_attribute(b: &Rc<Bridge>, r: &mut Realm, n: NodeId, name: &str, value
     if value.len() > 4 << 20 {
         return Err(r.throw_error(jsengine::ErrorKind::RangeError, "attribute value too long"));
     }
+    check_room(p, r)?;
+    let p = b.page_or(r)?;
     p.dom.set_attr(n, &name, value);
     if let Some(ty) = handler_attr(&name) {
         let t = handler_target(p, n, ty);
@@ -1144,6 +1154,10 @@ fn is_block(t: Atom) -> bool {
 
 fn set_text_content(b: &Rc<Bridge>, r: &mut Realm, n: NodeId, s: &str) -> JsResult<()> {
     let p = b.page_or(r)?;
+    if !s.is_empty() {
+        check_room(p, r)?;
+    }
+    let p = b.page_or(r)?;
     match &p.dom.node(n).data {
         NodeData::Text(_) | NodeData::Comment(_) => {
             p.dom.set_data(n, s);
@@ -1199,6 +1213,7 @@ fn n_node_value(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResul
 fn n_set_node_value(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsResult<Value> {
     let n = this_node(b, r, t)?;
     let s = arg_str_or_empty(r, a, 0)?;
+    check_room(b.page_or(r)?, r)?;
     let p = b.page_or(r)?;
     if matches!(p.dom.node(n).data, NodeData::Text(_) | NodeData::Comment(_)) {
         p.dom.set_data(n, &s);
@@ -2015,6 +2030,7 @@ fn c_length(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Va
 fn c_append_data(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsResult<Value> {
     let n = this_node(b, r, t)?;
     let s = arg_str(r, a, 0)?;
+    check_room(b.page_or(r)?, r)?;
     let p = b.page_or(r)?;
     if let NodeData::Text(x) | NodeData::Comment(x) = &p.dom.node(n).data {
         let mut x = x.clone();

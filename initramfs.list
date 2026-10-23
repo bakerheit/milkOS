@@ -20,9 +20,10 @@
 /System/Services/trashd                           target/user/aarch64-unknown-none-softfloat/release/trashd     755
 
 # Apps: one folder each, the program next to its manifest (rootfs/Apps/<name>/manifest).
-# Paint and Peek have no dock line in theirs (the desktop has its own Paint tile; Peek is
-# the powerbox demo).
+# Paint, Browser and Peek have no dock line in theirs (the desktop has its own Paint and
+# Browser tiles; Peek is the powerbox demo).
 /Apps/activity/activity                           target/user/aarch64-unknown-none-softfloat/release/activity   755
+/Apps/browser/browser                             target/user/aarch64-unknown-none-softfloat/release/browser    755
 /Apps/calendar/calendar                           target/user/aarch64-unknown-none-softfloat/release/calendar   755
 /Apps/clock/clock                                 target/user/aarch64-unknown-none-softfloat/release/clock      755
 /Apps/diskutil/diskutil                           target/user/aarch64-unknown-none-softfloat/release/diskutil   755

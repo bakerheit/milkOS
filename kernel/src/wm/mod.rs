@@ -67,6 +67,7 @@ use crate::{cursor, display, input, kprintln, timer};
 
 use buffer::Buffer;
 pub use event::{Button, Event, Key};
+use event::Mods;
 use paint::{Painter, contains, hit};
 pub use power::panic_screen;
 use shell::{Layer, PanelKey, PanelSpec, Style};
@@ -467,6 +468,9 @@ pub struct Desktop {
     notif: bool,
     drawer: notif::Drawer,
     history: Vec<notif::Notice>,
+    /// The modifier keys held right now (from the input stream; demo scripts set them too),
+    /// sent with pointer and wheel events.
+    held: Mods,
 }
 
 impl Desktop {
@@ -491,6 +495,7 @@ impl Desktop {
             (timer::now_ns() - t) / 1_000_000
         );
         let mut d = Desktop {
+            held: Mods::NONE,
             fb,
             back,
             wp,
@@ -1556,6 +1561,10 @@ impl Desktop {
         let frames = self.stats.frames;
         // Input: virtio input, then the demo script.
         while let Some(ev) = input::poll() {
+            // Modifier presses are no events of ours, but pointer events carry what is held.
+            if let input::Event::KeyDown(k) | input::Event::KeyUp(k) = ev {
+                self.held = event::mods_of(k.mods);
+            }
             if let Some(ev) = event::from_input(ev) {
                 self.handle(ev);
             }
@@ -2145,8 +2154,9 @@ impl Desktop {
                 if self.notif && hit(&notif::rect(), x, y) {
                     self.scroll_notif(dy);
                 } else if let Some(id) = self.window_at(x, y)
+                    && let held = self.held
                     && let Some(w) = self.win_mut(id)
-                    && w.contents.scroll(dy)
+                    && w.contents.scroll_with(dy, held)
                 {
                     w.dirty = true;
                 }
@@ -2362,6 +2372,7 @@ impl Desktop {
     }
 
     fn send_pointer(&mut self, id: u32, x: i32, y: i32, kind: PointerKind) {
+        let held = self.held;
         let Some(w) = self.win_mut(id) else {
             return;
         };
@@ -2370,6 +2381,7 @@ impl Desktop {
             x: x - w.rect.x - b.x,
             y: y - w.rect.y - b.y,
             kind,
+            mods: held,
         };
         if w.contents.pointer(&e) {
             w.dirty = true;

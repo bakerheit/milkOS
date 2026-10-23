@@ -109,6 +109,16 @@ impl Event {
     }
 }
 
+/// The input layer's modifier bits as ours.
+pub fn mods_of(m: crate::input::Modifiers) -> Mods {
+    Mods {
+        shift: m.shift(),
+        ctrl: m.ctrl(),
+        alt: m.alt(),
+        meta: m.meta(),
+    }
+}
+
 /// Map an `input::Event` (virtio keyboard + tablet) to ours. Modifier key presses themselves and
 /// side buttons are dropped (modifier state rides on every key event).
 pub fn from_input(ev: crate::input::Event) -> Option<Event> {

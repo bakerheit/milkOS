@@ -64,6 +64,10 @@ pub const K_DOWN: u32 = 0x1_0006;
 pub const K_LEFT: u32 = 0x1_0007;
 pub const K_RIGHT: u32 = 0x1_0008;
 pub const K_DELETE: u32 = 0x1_0009;
+pub const K_HOME: u32 = 0x1_000A;
+pub const K_END: u32 = 0x1_000B;
+pub const K_PAGE_UP: u32 = 0x1_000C;
+pub const K_PAGE_DOWN: u32 = 0x1_000D;
 
 /// The compositor's copy of a client window's last committed picture (`w` x `h`, stride `w`).
 /// Frames are contiguous PMM memory, given back on drop.
@@ -511,7 +515,8 @@ impl ClientView {
     }
 }
 
-fn mods_bits(m: super::event::Mods) -> u32 {
+/// The `mods` word of key, button, move and scroll events: shift 1, ctrl 2, alt 4, meta 8.
+pub fn mods_bits(m: super::event::Mods) -> u32 {
     (m.shift as u32) | (m.ctrl as u32) << 1 | (m.alt as u32) << 2 | (m.meta as u32) << 3
 }
 
@@ -569,6 +574,10 @@ impl WindowContents for ClientView {
             Key::Left => K_LEFT,
             Key::Right => K_RIGHT,
             Key::Delete => K_DELETE,
+            Key::Home => K_HOME,
+            Key::End => K_END,
+            Key::PageUp => K_PAGE_UP,
+            Key::PageDown => K_PAGE_DOWN,
             Key::Char(c) => k.ch.unwrap_or(c) as u32,
             _ => return false,
         };
@@ -589,12 +598,16 @@ impl WindowContents for ClientView {
             return false;
         }
         self.last = (e.x, e.y);
-        push(self.id, encode(kind, e.x, e.y, 0, 0, extra));
+        push(self.id, encode(kind, e.x, e.y, 0, mods_bits(e.mods), extra));
         false
     }
 
     fn scroll(&mut self, dy: i32) -> bool {
-        push(self.id, encode(EV_SCROLL, 0, 0, 0, 0, dy));
+        self.scroll_with(dy, super::event::Mods::NONE)
+    }
+
+    fn scroll_with(&mut self, dy: i32, mods: super::event::Mods) -> bool {
+        push(self.id, encode(EV_SCROLL, 0, 0, 0, mods_bits(mods), dy));
         false
     }
 

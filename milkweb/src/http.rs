@@ -1,4 +1,4 @@
-//! An HTTP/1.1 client for GET, over a byte stream the caller opens.
+//! An HTTP/1.1 client for GET and POST, over a byte stream the caller opens.
 //!
 //! The caller provides a [`Net`]: `connect(host, port)` gives a [`Transport`] (TCP in the
 //! kernel and in `rt::web`, a fake one in the host tests), `now_ms()` a clock for the overall
@@ -14,6 +14,12 @@
 //! (301/302/303/307/308, at most [`Options::max_redirects`], a loop is an error), gzip and
 //! deflate bodies, a User-Agent, an overall deadline and limits on the header and body sizes.
 //! Anything malformed is an [`Error`], never a panic.
+//!
+//! [`fetch`] is the general form (the Browser's): a [`Request`] (GET or POST with a body,
+//! extra headers) and [`Hooks`] that are asked for each hop's Cookie header, see each
+//! response's headers (Set-Cookie on redirects too), may raise the body limit for one
+//! response (a download), hear the body's progress and can stop the fetch
+//! ([`Error::Cancelled`]). [`get`] is a plain GET with no hooks.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -129,6 +135,8 @@ pub enum Error {
     Io(String),
     /// A gzip / deflate body didn't decompress.
     Decode(&'static str),
+    /// [`Hooks::stop`] said stop (the user pressed Stop, or closed the tab).
+    Cancelled,
 }
 
 impl Error {
@@ -148,6 +156,7 @@ impl Error {
             Error::TooManyRedirects(_) | Error::RedirectLoop(_) => "Too many redirects",
             Error::Malformed(_) | Error::Decode(_) => "The server sent something odd",
             Error::Io(_) => "The connection broke",
+            Error::Cancelled => "Stopped",
         }
     }
 }
@@ -174,6 +183,7 @@ impl fmt::Display for Error {
             Error::Malformed(m) => write!(f, "not a valid HTTP response: {m}"),
             Error::Io(m) => write!(f, "{m}"),
             Error::Decode(m) => f.write_str(m),
+            Error::Cancelled => f.write_str("the page stopped loading"),
         }
     }
 }
@@ -235,6 +245,89 @@ impl Response {
     }
 }
 
+/// GET or POST (what a page or a form can ask for).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Method {
+    Get,
+    Post,
+}
+
+impl Method {
+    pub fn name(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Post => "POST",
+        }
+    }
+}
+
+/// What to fetch.
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub method: Method,
+    pub url: Url,
+    /// POST only (sent with Content-Length and `content_type`).
+    pub body: Vec<u8>,
+    pub content_type: String,
+    /// More headers, sent as given (Referer, ...). Names and values with a CR or LF in them
+    /// are dropped, so nothing can be smuggled into the request.
+    pub headers: Vec<(String, String)>,
+}
+
+impl Request {
+    pub fn get(url: &Url) -> Request {
+        Request {
+            method: Method::Get,
+            url: url.clone(),
+            body: Vec::new(),
+            content_type: String::new(),
+            headers: Vec::new(),
+        }
+    }
+
+    /// A form's POST (`application/x-www-form-urlencoded` body).
+    pub fn post_form(url: &Url, body: Vec<u8>) -> Request {
+        Request {
+            method: Method::Post,
+            url: url.clone(),
+            body,
+            content_type: String::from("application/x-www-form-urlencoded"),
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// What the caller of [`fetch`] hears about and decides on, hop by hop. Every method has a
+/// do-nothing default.
+pub trait Hooks {
+    /// The `Cookie` header's value for a request to `url` (None: send none). Asked for every
+    /// hop, so a redirect to another site gets that site's cookies, not these.
+    fn cookie(&mut self, url: &Url, method: Method) -> Option<String> {
+        let _ = (url, method);
+        None
+    }
+    /// A response's head arrived from `url` (each redirect too): read its Set-Cookie
+    /// headers here. `Some(n)`: this response's body may be up to `n` bytes (a download)
+    /// instead of [`Options::max_body`].
+    fn response(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> Option<usize> {
+        let _ = (url, status, headers);
+        None
+    }
+    /// `got` body bytes so far (as they come over the wire), of `total` if the server said.
+    fn progress(&mut self, got: usize, total: Option<usize>) {
+        let _ = (got, total);
+    }
+    /// Asked before every read: true ends the fetch with [`Error::Cancelled`].
+    fn stop(&mut self) -> bool {
+        false
+    }
+}
+
+/// No hooks (what [`get`] uses).
+pub struct NoHooks;
+
+impl Hooks for NoHooks {}
+
 // ---- reading ----------------------------------------------------------------------------------
 
 struct Reader<'a> {
@@ -243,6 +336,9 @@ struct Reader<'a> {
     pos: usize,
     eof: bool,
     deadline: u64,
+    hooks: &'a mut dyn Hooks,
+    /// The body's length if the server said (for [`Hooks::progress`]).
+    total: Option<usize>,
 }
 
 impl Reader<'_> {
@@ -257,6 +353,9 @@ impl Reader<'_> {
         }
         if net.now_ms() > self.deadline {
             return Err(Error::Timeout);
+        }
+        if self.hooks.stop() {
+            return Err(Error::Cancelled);
         }
         if self.pos > 0 && self.pos == self.buf.len() {
             self.buf.clear();
@@ -315,6 +414,7 @@ impl Reader<'_> {
             out.extend_from_slice(&self.avail()[..take]);
             self.pos += take;
             left -= take;
+            self.hooks.progress(out.len(), self.total);
         }
         Ok(())
     }
@@ -327,6 +427,7 @@ impl Reader<'_> {
             if out.len() > max {
                 return Err(Error::TooBig(max));
             }
+            self.hooks.progress(out.len(), None);
             if !self.fill(net)? {
                 return Ok(());
             }
@@ -501,6 +602,7 @@ fn read_body(
         if n > max {
             return Err(Error::TooBig(max));
         }
+        r.total = Some(n);
         let mut out = Vec::with_capacity(n.min(1 << 20));
         r.exact(net, n, &mut out)?;
         return Ok((out, if close { After::Close } else { After::Reuse }));
@@ -537,10 +639,21 @@ fn decode_body(
 
 // ---- a fetch ----------------------------------------------------------------------------------
 
-/// The request for `url`.
+/// The request for `url` (a GET).
 pub fn request_text(url: &Url, o: &Options) -> String {
+    request_head(&Request::get(url), None, o)
+}
+
+fn header_ok(s: &str) -> bool {
+    !s.bytes().any(|c| c == b'\r' || c == b'\n' || c == 0)
+}
+
+/// The head of `req` (with its `Cookie` header, if any), up to and including the empty line.
+pub fn request_head(req: &Request, cookie: Option<&str>, o: &Options) -> String {
+    let url = &req.url;
     let mut s = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: {}\r\n",
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: {}\r\n",
+        req.method.name(),
         url.path,
         url.host_port(),
         o.user_agent,
@@ -548,6 +661,37 @@ pub fn request_text(url: &Url, o: &Options) -> String {
     );
     if o.decompress {
         s.push_str("Accept-Encoding: gzip, deflate\r\n");
+    }
+    for (k, v) in &req.headers {
+        let k = k.trim();
+        let reserved = [
+            "host",
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "cookie",
+        ]
+        .iter()
+        .any(|r| k.eq_ignore_ascii_case(r));
+        if !k.is_empty() && !reserved && header_ok(k) && header_ok(v) && !k.contains(':') {
+            s.push_str(k);
+            s.push_str(": ");
+            s.push_str(v);
+            s.push_str("\r\n");
+        }
+    }
+    if let Some(c) = cookie.filter(|c| !c.is_empty() && header_ok(c)) {
+        s.push_str("Cookie: ");
+        s.push_str(c);
+        s.push_str("\r\n");
+    }
+    if req.method == Method::Post {
+        if header_ok(&req.content_type) && !req.content_type.is_empty() {
+            s.push_str("Content-Type: ");
+            s.push_str(&req.content_type);
+            s.push_str("\r\n");
+        }
+        s.push_str(&format!("Content-Length: {}\r\n", req.body.len()));
     }
     s.push_str(if o.keep_alive {
         "Connection: keep-alive\r\n\r\n"
@@ -601,17 +745,25 @@ fn open(net: &mut dyn Net, url: &Url, o: &Options) -> Result<Conn, Error> {
 fn exchange(
     net: &mut dyn Net,
     conn: &mut Conn,
-    url: &Url,
+    req: &Request,
     o: &Options,
     deadline: u64,
+    hooks: &mut dyn Hooks,
 ) -> Result<(Option<Answer>, After), Error> {
-    write_all(conn.t.as_mut(), request_text(url, o).as_bytes())?;
+    let cookie = hooks.cookie(&req.url, req.method);
+    let mut out = request_head(req, cookie.as_deref(), o).into_bytes();
+    if req.method == Method::Post {
+        out.extend_from_slice(&req.body);
+    }
+    write_all(conn.t.as_mut(), &out)?;
     let mut r = Reader {
         t: conn.t.as_mut(),
         buf: core::mem::take(&mut conn.buf),
         pos: 0,
         eof: false,
         deadline,
+        hooks,
+        total: None,
     };
     loop {
         let Some((status, reason, headers)) = read_head(&mut r, net, o.max_header)? else {
@@ -623,7 +775,11 @@ fn exchange(
             }
             continue; // 100 Continue, 103 Early Hints: the real answer follows
         }
-        let (body, after) = read_body(&mut r, net, status, &headers, o.max_body)?;
+        let max = r
+            .hooks
+            .response(&req.url, status, &headers)
+            .unwrap_or(o.max_body);
+        let (body, after) = read_body(&mut r, net, status, &headers, max)?;
         let after = if !o.keep_alive || has_token(&headers, "connection", "close") {
             After::Close
         } else {
@@ -640,10 +796,24 @@ fn is_redirect(status: u16) -> bool {
 
 /// GET `url`, following redirects. Thread context: it blocks in the transport.
 pub fn get(net: &mut dyn Net, url: &Url, o: &Options) -> Result<Response, Failure> {
+    fetch(net, &Request::get(url), o, &mut NoHooks)
+}
+
+/// `req`, following redirects (a POST answered by 301, 302 or 303 goes on as a GET without
+/// its body, as browsers do; 307 and 308 repeat it), with `hooks` asked along the way.
+pub fn fetch(
+    net: &mut dyn Net,
+    req: &Request,
+    o: &Options,
+    hooks: &mut dyn Hooks,
+) -> Result<Response, Failure> {
     let deadline = net.now_ms().saturating_add(o.timeout_ms);
-    let mut url = url.clone();
+    let mut req = req.clone();
+    let mut url = req.url.clone();
     let mut redirects: Vec<Url> = Vec::new();
-    let mut seen: Vec<String> = alloc::vec![url.to_text()];
+    // (method, address) pairs visited: a POST answered with a 303 to its own address is
+    // the usual Post/Redirect/Get, not a loop.
+    let mut seen: Vec<(Method, String)> = alloc::vec![(req.method, url.to_text())];
     let mut conn: Option<Conn> = None;
     let fail = |error: Error, url: &Url, redirects: &Vec<Url>| Failure {
         error,
@@ -661,7 +831,8 @@ pub fn get(net: &mut dyn Net, url: &Url, o: &Options) -> Result<Response, Failur
             }
         }
         let c = conn.as_mut().unwrap();
-        let (got, after) = match exchange(net, c, &url, o, deadline) {
+        req.url = url.clone();
+        let (got, after) = match exchange(net, c, &req, o, deadline, hooks) {
             Ok(x) => x,
             Err(e) => return Err(fail(e, &url, &redirects)),
         };
@@ -687,9 +858,14 @@ pub fn get(net: &mut dyn Net, url: &Url, o: &Options) -> Result<Response, Failur
                 Ok(n) => n,
                 Err(e) => return Err(fail(Error::Url(e), &url, &redirects)),
             };
-            let key = next.to_text();
+            if req.method == Method::Post && matches!(status, 301..=303) {
+                req.method = Method::Get;
+                req.body.clear();
+                req.content_type.clear();
+            }
+            let key = (req.method, next.to_text());
             if seen.contains(&key) {
-                return Err(fail(Error::RedirectLoop(key), &url, &redirects));
+                return Err(fail(Error::RedirectLoop(key.1), &url, &redirects));
             }
             if redirects.len() >= o.max_redirects {
                 return Err(fail(
@@ -704,7 +880,8 @@ pub fn get(net: &mut dyn Net, url: &Url, o: &Options) -> Result<Response, Failur
             continue;
         }
         let wire_bytes = body.len();
-        let (body, encoding) = match decode_body(body, &headers, o.max_body) {
+        let max = o.max_body.max(wire_bytes);
+        let (body, encoding) = match decode_body(body, &headers, max) {
             Ok(x) => x,
             Err(e) => return Err(fail(e, &url, &redirects)),
         };

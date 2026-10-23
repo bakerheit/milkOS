@@ -1,0 +1,18 @@
+[package]
+name = "browser"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "browser"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+gui = { path = "../gui" }
+appkit = { path = "../appkit" }
+browserkit = { path = "../browserkit" }
+imgdec = { path = "../imgdec" }
+milkweb = { path = "../../milkweb" }
+tls = { path = "../../tls" }

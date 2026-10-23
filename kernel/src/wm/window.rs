@@ -41,6 +41,8 @@ pub struct PointerInput {
     pub x: i32,
     pub y: i32,
     pub kind: PointerKind,
+    /// The modifier keys held at the time (Cmd-click, Shift-click).
+    pub mods: super::event::Mods,
 }
 
 /// What a window's client implements. All methods but `title` and `draw` have defaults.
@@ -67,6 +69,10 @@ pub trait WindowContents {
     /// Wheel; positive moves towards the end of the content.
     fn scroll(&mut self, _dy: i32) -> bool {
         false
+    }
+    /// The wheel with the modifier keys held (only client windows care; the rest scroll).
+    fn scroll_with(&mut self, dy: i32, _mods: super::event::Mods) -> bool {
+        self.scroll(dy)
     }
     /// The file this window is about (Notes' note, Files' selected file), for File >
     /// Browse Versions...

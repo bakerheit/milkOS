@@ -6,6 +6,7 @@ pub(crate) mod clone;
 pub(crate) mod date;
 pub(crate) mod encoding;
 pub(crate) mod error;
+pub(crate) mod es2023;
 pub(crate) mod function;
 pub(crate) mod global;
 pub(crate) mod iter;
@@ -250,5 +251,6 @@ pub(crate) fn init(r: &mut Realm) {
     typedarray::init(r);
     encoding::init(r);
     clone::init(r);
+    es2023::init(r);
     global::init(r);
 }

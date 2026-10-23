@@ -76,6 +76,8 @@ test('TextDecoder utf-16le and latin1', function () {
   assertEq(d.decode(new Uint8Array([0x3d, 0xd8, 0x00, 0xde])), '😀');
   assertEq(d.decode(new Uint8Array([0x3d, 0xd8])), '�', 'lone high surrogate');
   assertEq(d.decode(new Uint8Array([104, 0, 105])), 'h�', 'odd byte');
+  assertEq(d.decode(new Uint8Array([0x3d, 0xd8, 0x3d])), '\ufffd', 'a lone high surrogate and an odd byte are one error');
+  assertEq(d.decode(new Uint8Array([0x3d, 0xd8, 97, 0])), '\ufffda');
   assertEq(d.decode(new Uint8Array([0xff, 0xfe, 97, 0])), 'a', 'BOM dropped');
   var s = new TextDecoder('utf-16le');
   assertEq(s.decode(new Uint8Array([0x3d]), { stream: true }), '');

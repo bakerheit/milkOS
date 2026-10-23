@@ -877,6 +877,7 @@ impl Realm {
                             // `ta.length` without a getter call (a plain, unmodified view).
                             if k == self.key(N::length)
                                 && bare
+                                && matches!(receiver, Val::Obj(r) if r == cur)
                                 && proto == Some(self.intr.ta_proto(kind))
                             {
                                 return Ok(Val::num(self.typed_len(cur) as f64));

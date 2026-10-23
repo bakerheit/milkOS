@@ -14,6 +14,7 @@ pub(crate) const WORKLOADS: &[(&str, &str)] = &[
     ("arrays", include_str!("../../bench/arrays.js")),
     ("async", include_str!("../../bench/async.js")),
     ("numeric", include_str!("../../bench/numeric.js")),
+    ("typed", include_str!("../../bench/typed.js")),
 ];
 
 fn run(src: &str, name: &str) -> String {
@@ -113,4 +114,28 @@ fn bench_loop() {
         let mut r = Realm::new(Options::default());
         let _ = r.eval(&src, "bench.js");
     }
+}
+
+/// JSENGINE_BENCH_FILE: print the script's result (a string, as it is) between markers, so
+/// another engine's output for the same script can be compared with it.
+#[test]
+#[ignore]
+fn print_result() {
+    let path = std::env::var("JSENGINE_BENCH_FILE").unwrap();
+    let src = std::fs::read_to_string(&path).unwrap();
+    let h = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || {
+            let mut r = Realm::new(Options::default());
+            let out = match r.eval(&src, "print.js") {
+                Ok(v) => {
+                    let _ = r.run_jobs();
+                    r.inspect(v)
+                }
+                Err(e) => alloc::format!("error: {}", r.report(&e)),
+            };
+            std::println!("<<<RESULT\n{out}\nRESULT>>>");
+        })
+        .unwrap();
+    h.join().unwrap();
 }

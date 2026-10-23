@@ -19,7 +19,7 @@ pub(crate) struct StrIterData {
 
 impl Realm {
     /// RequireObjectCoercible(this) then ToString.
-    fn this_str(&mut self, this: Val, name: &str) -> Res<StrId> {
+    pub(crate) fn this_str(&mut self, this: Val, name: &str) -> Res<StrId> {
         match this {
             Val::Str(s) => Ok(s),
             Val::Undef | Val::Null | Val::Empty => Err(self.type_error(&alloc::format!(

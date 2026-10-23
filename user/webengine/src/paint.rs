@@ -95,7 +95,11 @@ enum Layer {
 
 impl P<'_> {
     fn push(&mut self, layer: Layer, item: Item, clip: u16) {
-        let e = Entry { item, clip };
+        let e = Entry {
+            item,
+            clip,
+            frame: FrameId::TOP,
+        };
         match layer {
             Layer::Neg => self.neg.push(e),
             Layer::Flow => self.flow.push(e),

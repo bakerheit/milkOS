@@ -18,6 +18,7 @@ pub mod css;
 pub mod dom;
 pub mod fmath;
 mod forms;
+mod frames;
 pub mod html;
 pub mod layout;
 mod measure;

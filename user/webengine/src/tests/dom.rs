@@ -72,11 +72,12 @@ fn noscript_follows_the_scripting_flag() {
     let html = "<body><noscript><p id=n>no js</p></noscript><p>x</p>";
     let off = Document::parse_str(html, "http://t.example/");
     assert!(by_id(&off.page.dom, "n") != NONE);
-    let on = Document {
-        page: crate::page::Page::parse_str_with(html, "http://t.example/", Limits::default(), true),
-        js: None,
-        notes: Vec::new(),
-    };
+    let on = Document::from_page(crate::page::Page::parse_str_with(
+        html,
+        "http://t.example/",
+        Limits::default(),
+        true,
+    ));
     // Raw text: no <p id=n> element, and it isn't shown.
     assert_eq!(by_id(&on.page.dom, "n"), NONE);
     let mut on = on;

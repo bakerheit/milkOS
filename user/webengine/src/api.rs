@@ -37,12 +37,33 @@
 //!   user's clicks, keys and focus through [`Document::click`] and friends. After any call
 //!   that runs script the DOM may have changed: [`Document::layout`] restyles only the
 //!   changed subtrees and lays out again, and [`ControlId`]s may have moved.
+//! - Frames: `<iframe>` elements are slots the host fills with documents it loaded (see the
+//!   "Frames" section at the end); the engine lays them out inside the parent, paints,
+//!   hit-tests, scrolls, focuses and searches across them.
 //! - Not supported (yet): `:hover`/`:focus` styles, CSS transforms, animations, web fonts,
 //!   named grid lines, inner scrolling boxes (overflow: auto spills sideways and clips
-//!   vertically), bidirectional text, vertical writing modes; for scripts: canvas, workers,
-//!   iframes' documents.
+//!   vertically), bidirectional text, vertical writing modes, `<frameset>`/`<frame>` (they are
+//!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - Frames. `<iframe>` support: see "Frames" at the end of this file for the model (slots, ids,
+//!   attach/detach, one display list with the frames' content inside it, hit testing, scrolling,
+//!   focus order, find). What an existing caller sees: [`Entry`] has a `frame` field (always
+//!   [`FrameId::TOP`] for a page without frames), [`Hit`] has `frame`, `point` and `scroll`,
+//!   [`FindMatch`] has `frame`, and [`Limits`] has `max_frames` and `max_frame_depth`: build
+//!   them with `..Default::default()` (all four are plain fields, set by the engine, so reading
+//!   code is unchanged). [`Document::frame_doc`] / [`Document::frame_doc_mut`] are the names for
+//!   a frame's document ([`Document::frame`] was taken by requestAnimationFrame). The engine
+//!   draws a frame's canvas colour over its slot. `frameborder=0` and `border=0` on an
+//!   `<iframe>` remove its border. The scripting hooks are [`Document::frame_info`],
+//!   [`Document::window_name`] / [`Document::set_window_name`], [`Document::frames_named`],
+//!   [`Document::child_frames`], [`Document::deliver_message`] and
+//!   [`Document::take_messages`]; the `window.parent` / `contentWindow` objects themselves
+//!   are the bindings' (script/). Stage: the model and the slot table (`frame_slots`,
+//!   `attach_frame`, `detach_frame`, `take_closed_frames`, the lookups, the caps, sandbox
+//!   parsing) are in; the calls that cross frames at layout time (`layout`, `hit_test`,
+//!   `find`, `scroll_frames_at`, `reveal`, `focus_order`) arrive in later commits of the
+//!   same branch with these signatures.
 //! - ES modules in pages. `<script type=module>` (inline and `src`), `<script type=importmap>`,
 //!   `<link rel=modulepreload>`, `nomodule` and `import()` work with no change to the calls
 //!   an app makes: a module and everything it imports is fetched through the script network
@@ -372,6 +393,11 @@ pub struct Entry {
     pub item: Item,
     /// Index into [`DisplayList::clips`]; 0 is "no clip" (clips\[0\] is the whole page).
     pub clip: u16,
+    /// Whose entry this is: [`FrameId::TOP`] for the page's own, else the frame whose
+    /// document drew it (see "Frames"). It matters for [`Item::Image`] and [`Item::Control`]
+    /// only: an [`ImageId`] or [`ControlId`] means something in that frame's document
+    /// ([`Document::frame_doc`], then [`Document::image_url`] / [`Document::controls`]).
+    pub frame: FrameId,
 }
 
 /// What to paint, back to front. Every entry carries its own clip, so any subset painted in
@@ -479,6 +505,14 @@ pub struct Hit {
     pub title: Option<String>,
     /// The pointer is over text (an I-beam cursor would fit).
     pub text: bool,
+    /// The frame the pointer is in: [`FrameId::TOP`], or the innermost `<iframe>` document
+    /// under it. `link`, `control` and `title` are that document's (a [`ControlId`] means
+    /// something in that frame only).
+    pub frame: FrameId,
+    /// The pointer in that frame's own viewport coordinates, and the frame's scroll offset:
+    /// pass both to the calls of `frame_doc_mut(hit.frame)` ([`Document::click`] and the like).
+    pub point: (i32, i32),
+    pub scroll: (i32, i32),
 }
 
 // ---- Find in page -------------------------------------------------------------------------
@@ -486,7 +520,12 @@ pub struct Hit {
 /// One occurrence of the search text. A match that wraps across lines has several rects.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindMatch {
+    /// Where it is, in the top page's document space as it is drawn now: for a match inside a
+    /// frame, in the frame's scroll position, so a match scrolled out of its frame's view
+    /// lies outside the frame's box (use [`Document::reveal`] to scroll it in).
     pub rects: Vec<Rect>,
+    /// The frame whose document holds the text ([`FrameId::TOP`] for the page itself).
+    pub frame: FrameId,
 }
 
 // ---- Forms --------------------------------------------------------------------------------
@@ -597,6 +636,12 @@ pub struct Limits {
     pub max_stylesheets: usize,
     /// Images referenced.
     pub max_images: usize,
+    /// `<iframe>` slots in a whole page (the frames of frames included). Frames over it are
+    /// not given a slot; the page stays as it is.
+    pub max_frames: usize,
+    /// How deep frames nest: the page is depth 0, its frames 1. A frame deeper than this
+    /// gets a slot that is [`FrameBlock::TooDeep`]. Only the top document's limits count.
+    pub max_frame_depth: usize,
 }
 
 impl Default for Limits {
@@ -608,6 +653,8 @@ impl Default for Limits {
             max_rules: 100_000,
             max_stylesheets: 64,
             max_images: 2_000,
+            max_frames: 32,
+            max_frame_depth: 5,
         }
     }
 }
@@ -931,6 +978,175 @@ pub enum NetEvent {
     Failed(NetFailure),
 }
 
+// ---- Frames ---------------------------------------------------------------------------------
+
+/// A frame (a browsing context) of a page: [`FrameId::TOP`] is the page itself, every other id
+/// names the slot of one `<iframe>` element somewhere in the page's tree of frames. Ids are
+/// handed out by the top document when it first sees the element (see
+/// [`Document::frame_slots`]), are unique in that page and are never used twice, even for a
+/// frame whose element is gone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FrameId(pub u32);
+
+impl FrameId {
+    /// The page itself (the top document).
+    pub const TOP: FrameId = FrameId(0);
+    pub fn is_top(self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// Why a slot can never hold a document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameBlock {
+    /// Nested deeper than [`Limits::max_frame_depth`]. The element is an empty box.
+    TooDeep,
+}
+
+/// What the `scrolling` attribute says (HTML's obsolete but still used `scrolling=no`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameScrolling {
+    Auto,
+    /// `scrolling=no`: the frame's document does not scroll (the engine pins its offset at 0).
+    No,
+}
+
+/// The `sandbox` attribute, read (HTML §4.8.5): each field is true when the token that allows
+/// it is present. The engine only parses; the host enforces. An empty attribute is all false.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sandbox {
+    pub scripts: bool,
+    pub forms: bool,
+    pub same_origin: bool,
+    pub top_navigation: bool,
+    pub top_navigation_by_user_activation: bool,
+    pub popups: bool,
+    pub popups_to_escape_sandbox: bool,
+    pub modals: bool,
+    pub downloads: bool,
+    pub pointer_lock: bool,
+    pub orientation_lock: bool,
+    pub presentation: bool,
+    pub storage_access_by_user_activation: bool,
+}
+
+impl Sandbox {
+    /// Read the attribute's value: space-separated, ASCII-case-insensitive `allow-*` tokens;
+    /// unknown tokens are ignored.
+    pub fn parse(value: &str) -> Sandbox {
+        let mut s = Sandbox::default();
+        for t in value.split(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+            match t.to_ascii_lowercase().as_str() {
+                "allow-scripts" => s.scripts = true,
+                "allow-forms" => s.forms = true,
+                "allow-same-origin" => s.same_origin = true,
+                "allow-top-navigation" => s.top_navigation = true,
+                "allow-top-navigation-by-user-activation" => {
+                    s.top_navigation_by_user_activation = true
+                }
+                "allow-popups" => s.popups = true,
+                "allow-popups-to-escape-sandbox" => s.popups_to_escape_sandbox = true,
+                "allow-modals" => s.modals = true,
+                "allow-downloads" => s.downloads = true,
+                "allow-pointer-lock" => s.pointer_lock = true,
+                "allow-orientation-lock" => s.orientation_lock = true,
+                "allow-presentation" => s.presentation = true,
+                "allow-storage-access-by-user-activation" => {
+                    s.storage_access_by_user_activation = true
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+}
+
+/// One `<iframe>` of the page, as the host sees it (see [`Document::frame_slots`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameSlot {
+    pub id: FrameId,
+    /// The frame whose document holds the element ([`FrameId::TOP`] for the page).
+    pub parent: FrameId,
+    /// 1 for the page's own frames, 2 for theirs, ...
+    pub depth: u32,
+    /// Bumped whenever `src` or `srcdoc` changes (a script set them, or the element was
+    /// replaced): a document loaded for an older generation is stale.
+    pub generation: u32,
+    /// The `src` attribute resolved against the parent's base URL; None if absent or blank.
+    pub src: Option<String>,
+    /// The `srcdoc` attribute (it wins over `src`).
+    pub srcdoc: Option<String>,
+    /// The `name` attribute: the name of the frame's browsing context (`window.name`,
+    /// `target=`).
+    pub name: String,
+    /// The `sandbox` attribute; None: not sandboxed.
+    pub sandbox: Option<Sandbox>,
+    /// `loading=lazy`: the host may wait until the frame is near the viewport (`rect`).
+    pub lazy: bool,
+    /// The `allow` attribute as written, and `allowfullscreen`.
+    pub allow: String,
+    pub allow_fullscreen: bool,
+    /// The `referrerpolicy` attribute, lower-cased ("" when absent).
+    pub referrer_policy: String,
+    pub scrolling: FrameScrolling,
+    /// The frame's content box (inside the border and padding) in its parent's document
+    /// space, device pixels, as of the last layout; empty if the element has no box
+    /// (`display: none`, not laid out yet). It is the size of the frame's viewport.
+    pub rect: Rect,
+    /// The element has a box: it can be seen (and its document is laid out).
+    pub rendered: bool,
+    /// None: the slot can hold a document.
+    pub blocked: Option<FrameBlock>,
+    /// The [`FrameSlot::generation`] the attached document was loaded for; None: no
+    /// document attached yet.
+    pub attached: Option<u32>,
+    /// The frame's document scroll offset, and the size of its scrollable area (the last
+    /// layout), device pixels.
+    pub scroll: (i32, i32),
+    pub content: (i32, i32),
+}
+
+impl FrameSlot {
+    /// The host should load something: the slot can hold a document and has none for its
+    /// current `src` / `srcdoc` (a `srcdoc`, `about:blank` for no `src`, or the `src`).
+    pub fn wants_load(&self) -> bool {
+        self.blocked.is_none() && self.attached != Some(self.generation)
+    }
+}
+
+/// Where a document sits in its page's frame tree (see [`Document::frame_info`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub id: FrameId,
+    /// None for the top document.
+    pub parent: Option<FrameId>,
+    /// 0 for the top document.
+    pub depth: u32,
+}
+
+/// A message `window.postMessage` queued, for the host to deliver (see
+/// [`Document::take_messages`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutMessage {
+    /// The frame whose window the script called `postMessage` on.
+    pub target: FrameId,
+    /// The `targetOrigin` argument as given (`"*"`, `"/"`, an origin).
+    pub target_origin: String,
+    /// The value, as JSON text (`JSON.stringify`); empty for `undefined`.
+    pub data: String,
+}
+
+/// A message to fire at a window (see [`Document::deliver_message`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Message {
+    /// The value as JSON text; empty for `undefined`.
+    pub data: String,
+    /// `event.origin`: the sender's serialized origin ("null" for an opaque one).
+    pub origin: String,
+    /// `event.source`: the sending frame.
+    pub source: FrameId,
+}
+
 // ---- The document -------------------------------------------------------------------------
 
 /// A parsed page. Not tied to any I/O; all inputs come in through the methods.
@@ -940,9 +1156,23 @@ pub struct Document {
     pub(crate) js: Option<alloc::boxed::Box<crate::script::Runtime>>,
     /// Requests made without scripts (a form that didn't validate).
     pub(crate) notes: Vec<PageRequest>,
+    /// The frames of the page (see "Frames"); only the top document has them.
+    pub(crate) frames: Option<alloc::boxed::Box<crate::frames::Frames>>,
+    /// This document is a frame's document, owned by the top document's table.
+    pub(crate) attached: bool,
 }
 
 impl Document {
+    pub(crate) fn from_page(page: crate::page::Page) -> Document {
+        Document {
+            page,
+            js: None,
+            notes: Vec::new(),
+            frames: None,
+            attached: false,
+        }
+    }
+
     /// Parse a page. `bytes` is the response body (already un-gzipped), `url` the final URL
     /// after redirects (the base for relative links), `content_type` the Content-Type header if
     /// there was one (its charset wins; otherwise a BOM, then `<meta charset>`, then UTF-8 if
@@ -957,20 +1187,12 @@ impl Document {
         content_type: Option<&str>,
         limits: Limits,
     ) -> Document {
-        Document {
-            page: crate::page::Page::parse(bytes, url, content_type, limits),
-            js: None,
-            notes: Vec::new(),
-        }
+        Document::from_page(crate::page::Page::parse(bytes, url, content_type, limits))
     }
 
     /// Parse a string of HTML (no charset step).
     pub fn parse_str(html: &str, url: &str) -> Document {
-        Document {
-            page: crate::page::Page::parse_str(html, url, Limits::default()),
-            js: None,
-            notes: Vec::new(),
-        }
+        Document::from_page(crate::page::Page::parse_str(html, url, Limits::default()))
     }
 
     /// The `<title>`, whitespace collapsed (empty if none).
@@ -1155,11 +1377,7 @@ impl Document {
             limits,
             scripts.is_some(),
         );
-        let mut d = Document {
-            page,
-            js: None,
-            notes: Vec::new(),
-        };
+        let mut d = Document::from_page(page);
         if let Some(l) = scripts {
             d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new(&d.page, l)));
         }
@@ -1345,5 +1563,315 @@ impl Document {
     /// The DOM changed since the last layout: lay out again before hit testing.
     pub fn needs_layout(&self) -> bool {
         self.page.changed()
+    }
+}
+
+/// # Frames
+///
+/// `<iframe>` support. A page is a tree of frames: the top document and, for each `<iframe>`
+/// element in it, a *slot* that holds a document of its own (which can have iframes in turn).
+/// The engine does no I/O, so the host fetches the documents and the engine does everything
+/// that crosses a frame boundary.
+///
+/// ```text
+///   top.frame_slots() ──▶ [FrameSlot { id, src, srcdoc, name, sandbox, rect, .. }]
+///        │  a slot that wants_load(): the host fetches (or builds from srcdoc) a Document
+///        ▼
+///   top.attach_frame(id, doc, Some(generation))      top.detach_frame(id)
+///        │
+///        ▼
+///   top.frame_doc_mut(id) ──▶ the frame's Document: supply_stylesheet, supply_image, run,
+///                          net_event, take_requests, take_console, ... exactly like the top
+///                          one (one ScriptHost per frame: its viewport is
+///                          [`Document::frame_viewport`], its cookies and storage are its
+///                          origin's)
+///   top.layout(&vp, m) ──▶ lays out the children into their slots (a viewport the size of
+///                          the slot's content box, the parent's zoom and scheme) and
+///                          paints them into the top display list
+/// ```
+///
+/// - **One tree, one set of ids.** [`FrameId::TOP`] is the page. Every other id is a slot of
+///   the top document's table, whatever the depth. Calls that cross frames are made on the
+///   top document and take or give [`FrameId`]s; calls on a frame's own document
+///   ([`Document::frame_doc_mut`]) look at that document alone (its `<iframe>`s are slots of the
+///   top document, so `frame_slots` on a frame's document is empty).
+/// - **The display list.** [`Document::layout`] on the top document returns one list with the
+///   frames' content inside it, in the order they are painted, each entry clipped to the
+///   slot's content box and moved by the slot's position and the frame's scroll offset.
+///   [`Entry::frame`] says whose entry it is, which matters for [`Item::Image`] and
+///   [`Item::Control`] (ids belong to a document). A frame paints its own canvas colour
+///   over its slot, so a frame is never see-through.
+/// - **Pointer.** [`Document::hit_test`] looks through frames: [`Hit::frame`] is the frame
+///   under the pointer and [`Hit::point`] / [`Hit::scroll`] the pointer and the scroll in
+///   that frame's own viewport, which are what `frame_doc_mut(hit.frame).click(..)` wants.
+///   [`Document::scroll_frames_at`] handles the wheel.
+/// - **Keyboard.** Each document keeps its own focus ([`Document::focused`]); the tree
+///   keeps which frame has the keyboard ([`Document::focused_frame`]) and
+///   [`Document::focus_order`] lists the controls of all frames in Tab order.
+/// - **Limits.** [`Limits::max_frames`] slots per page and [`Limits::max_frame_depth`]
+///   levels. A slot over the first is not made; one over the second is
+///   [`FrameBlock::TooDeep`]. The engine says so in the top document's console.
+impl Document {
+    /// Where this document sits in its page's frame tree.
+    pub fn frame_info(&self) -> FrameInfo {
+        let c = self.page.frame;
+        FrameInfo {
+            id: c.id,
+            parent: if c.id.is_top() { None } else { Some(c.parent) },
+            depth: c.depth,
+        }
+    }
+
+    /// Look at the `<iframe>` elements again (scripts may have added, changed or removed some)
+    /// and keep the table in step. Called by the calls below; cheap when nothing changed.
+    fn sync_frames(&mut self) {
+        if self.attached {
+            return;
+        }
+        let pending = self.page.frames_pending()
+            || self.frames.as_ref().is_some_and(|f| {
+                f.slots
+                    .iter()
+                    .any(|s| s.doc.as_ref().is_some_and(|d| d.page.frames_pending()))
+            });
+        if !pending {
+            return;
+        }
+        self.page.flush();
+        let lim = *self.page.limits();
+        let (maxf, maxd) = (lim.max_frames, lim.max_frame_depth);
+        if self.frames.is_none() && self.page.iframe_nodes().is_empty() {
+            self.page.frames_dirty = false;
+            return;
+        }
+        let frames = self
+            .frames
+            .get_or_insert_with(|| alloc::boxed::Box::new(crate::frames::Frames::new()));
+        frames.sync_doc(self.page.frame, &mut self.page, maxf, maxd);
+        for id in frames.walk() {
+            let Some(mut d) = frames.slot_mut(id).and_then(|s| s.doc.take()) else {
+                continue;
+            };
+            if d.page.frames_pending() {
+                d.page.flush();
+                frames.sync_doc(d.page.frame, &mut d.page, maxf, maxd);
+            }
+            match frames.slot_mut(id) {
+                Some(s) => s.doc = Some(d),
+                None => {}
+            }
+        }
+    }
+
+    /// Every `<iframe>` slot of the page, parents before their children, in tree order. Look
+    /// at it after anything that may have run script or changed the page: new slots show up
+    /// here (a slot that [`FrameSlot::wants_load`] needs its document).
+    pub fn frame_slots(&mut self) -> Vec<FrameSlot> {
+        self.sync_frames();
+        let Some(f) = self.frames.as_ref() else {
+            return Vec::new();
+        };
+        f.walk()
+            .into_iter()
+            .filter_map(|id| f.slot(id).map(|s| s.info()))
+            .collect()
+    }
+
+    /// Put a loaded document into slot `id`, replacing the one there (which is dropped, and
+    /// its frames' slots with it). `for_generation`: the [`FrameSlot::generation`] the load
+    /// was started for; if the slot has moved on since (a script set `src` again), the
+    /// document is refused and false returned. None: a navigation of the frame itself (a
+    /// link, `location`): always taken. False too for an unknown or blocked slot. The
+    /// frame's `window.name` is kept across a replacement (it starts as the element's `name`).
+    /// The document should be a fresh one (never attached; any frames it had are dropped).
+    pub fn attach_frame(&mut self, id: FrameId, doc: Document, for_generation: Option<u32>) -> bool {
+        if self.attached || id.is_top() {
+            return false;
+        }
+        self.sync_frames();
+        let Some(frames) = self.frames.as_mut() else {
+            return false;
+        };
+        crate::frames::attach(frames, id, doc, for_generation)
+    }
+
+    /// Take the document out of slot `id` (the slot stays, now empty, with the frames below it
+    /// gone). The host drops it and cancels what is loading for it.
+    pub fn detach_frame(&mut self, id: FrameId) -> Option<Document> {
+        let frames = self.frames.as_mut()?;
+        crate::frames::detach(frames, id)
+    }
+
+    /// Frames whose `<iframe>` element went away (or whose slot did, with its parent) since the
+    /// last call: the host cancels their loads and forgets them.
+    pub fn take_closed_frames(&mut self) -> Vec<FrameId> {
+        self.sync_frames();
+        self.frames
+            .as_mut()
+            .map(|f| f.take_closed())
+            .unwrap_or_default()
+    }
+
+    /// The document of frame `id` ([`FrameId::TOP`]: this one).
+    pub fn frame_doc(&self, id: FrameId) -> Option<&Document> {
+        if id.is_top() {
+            return Some(self);
+        }
+        self.frames.as_ref()?.slot(id)?.doc.as_deref()
+    }
+
+    /// The document of frame `id` to work on: supply its resources, run its scripts, give it
+    /// the pointer and keys ([`FrameId::TOP`]: this one).
+    pub fn frame_doc_mut(&mut self, id: FrameId) -> Option<&mut Document> {
+        if id.is_top() {
+            return Some(self);
+        }
+        self.frames.as_mut()?.slot_mut(id)?.doc.as_deref_mut()
+    }
+
+    /// The frames that have a document, in tree order (not the top document).
+    pub fn frame_ids(&self) -> Vec<FrameId> {
+        let Some(f) = self.frames.as_ref() else {
+            return Vec::new();
+        };
+        f.walk()
+            .into_iter()
+            .filter(|&id| f.slot(id).is_some_and(|s| s.doc.is_some()))
+            .collect()
+    }
+
+    /// The direct children of frame `of` that have a slot, in tree order (`window.frames` of
+    /// that window); those without a document are in it too.
+    pub fn child_frames(&self, of: FrameId) -> Vec<FrameId> {
+        self.frames
+            .as_ref()
+            .map(|f| f.children(of))
+            .unwrap_or_default()
+    }
+
+    /// The frames whose browsing context is called `name` (`window.name`, in tree order,
+    /// [`FrameId::TOP`] first if it is the page): the candidates of `target=name`. Whether a
+    /// link may navigate one is the host's call (sandboxing, same site).
+    pub fn frames_named(&self, name: &str) -> Vec<FrameId> {
+        let mut v = Vec::new();
+        if name.is_empty() {
+            return v;
+        }
+        if self.page.window_name == name {
+            v.push(FrameId::TOP);
+        }
+        if let Some(f) = self.frames.as_ref() {
+            for id in f.walk() {
+                if f.slot(id)
+                    .and_then(|s| s.doc.as_ref())
+                    .is_some_and(|d| d.page.window_name == name)
+                {
+                    v.push(id);
+                }
+            }
+        }
+        v
+    }
+
+    /// `window.name` of this document's browsing context.
+    pub fn window_name(&self) -> &str {
+        &self.page.window_name
+    }
+
+    /// Set `window.name` (the host clears it when a frame navigates to another site).
+    pub fn set_window_name(&mut self, name: &str) {
+        self.page.window_name = String::from(name);
+    }
+
+    /// The viewport frame `id`'s document is laid out in, as of the last layout (the slot's
+    /// content box at the parent's zoom). None for an unknown frame; the page's own
+    /// viewport for [`FrameId::TOP`] is whatever the host passed to [`Document::layout`].
+    /// A frame that has not been laid out yet reads 300 x 150, like a fresh iframe.
+    pub fn frame_viewport(&self, id: FrameId) -> Option<Viewport> {
+        crate::frames::viewport_of(self, id)
+    }
+
+    /// Tell the document a message arrived (`postMessage`): the `message` event is fired at
+    /// its window with `data` parsed from JSON, `origin` and `source`. The host has checked
+    /// `targetOrigin`. True if a script ran.
+    pub fn deliver_message(&mut self, host: &mut dyn ScriptHost, msg: &Message) -> bool {
+        crate::script::deliver_message(self, host, msg)
+    }
+
+    /// The messages scripts of this document posted since the last call, in order: the host
+    /// checks each one's `target_origin`, finds the target frame's document and calls
+    /// [`Document::deliver_message`] on it.
+    pub fn take_messages(&mut self) -> Vec<OutMessage> {
+        match self.js.as_mut() {
+            Some(j) => j.take_messages(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The frame that has the keyboard (the page, or a frame the user clicked in).
+    pub fn focused_frame(&self) -> FrameId {
+        self.frames
+            .as_ref()
+            .map(|f| f.focused)
+            .unwrap_or(FrameId::TOP)
+    }
+
+    /// Give a frame the keyboard (unknown ids are ignored). The engine keeps the state; the
+    /// host moves each document's own focus ([`Document::set_focus`]) to match, which fires
+    /// the blur and focus events.
+    pub fn set_focused_frame(&mut self, id: FrameId) {
+        if let Some(f) = self.frames.as_mut()
+            && (id.is_top() || f.slot(id).is_some_and(|s| s.doc.is_some()))
+        {
+            f.focused = id;
+        }
+    }
+
+    /// The scroll offset of frame `id`'s document ([`FrameId::TOP`] is the host's own).
+    pub fn frame_scroll(&self, id: FrameId) -> Option<(i32, i32)> {
+        self.frames.as_ref()?.slot(id).map(|s| s.scroll)
+    }
+
+    /// Scroll frame `id`'s document to (`x`, `y`), clamped to its scrollable area (and pinned
+    /// at 0 by `scrolling=no`); the offset it ended at. The next [`Document::layout`] moves
+    /// the frame's content.
+    pub fn set_frame_scroll(&mut self, id: FrameId, x: i32, y: i32) -> (i32, i32) {
+        crate::frames::set_scroll(self, id, x, y)
+    }
+
+    /// The wheel (or a drag) at viewport point (`x`, `y`) of the top document, with the page
+    /// scrolled by `scroll`: scroll the innermost frame under the pointer by (`dx`, `dy`)
+    /// as far as it can, hand what is left to its parent frame, and so on up; returns what
+    /// is left for the page itself (the host scrolls the page by it).
+    pub fn scroll_frames_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        scroll: (i32, i32),
+        dx: i32,
+        dy: i32,
+    ) -> (i32, i32) {
+        crate::frames::scroll_at(self, x, y, scroll, dx, dy)
+    }
+
+    /// Scroll so that `rect`, a rectangle in frame `id`'s document space, is in view: the frame
+    /// and the frames above it move as far as needed. Returns the rectangle in the top
+    /// document's space, for the host to scroll the page to. For find, `#fragment`, focus and
+    /// a script's `scrollIntoView`/`scrollTo`.
+    pub fn reveal(&mut self, id: FrameId, rect: Rect) -> Rect {
+        crate::frames::reveal(self, id, rect)
+    }
+
+    /// Scroll frame `id` to the element named by `fragment` (as [`Document::fragment_y`]
+    /// does for the page); true if it was found.
+    pub fn frame_fragment(&mut self, id: FrameId, fragment: &str) -> bool {
+        crate::frames::fragment(self, id, fragment)
+    }
+
+    /// The controls of the page and of all its frames in Tab order: the page's controls in
+    /// document order, a frame's controls at the place of its `<iframe>`. Only controls that
+    /// have a box and are not disabled.
+    pub fn focus_order(&self) -> Vec<(FrameId, ControlId)> {
+        crate::frames::focus_order(self)
     }
 }

@@ -82,6 +82,16 @@ pub struct Page {
     /// No author styles (`<style>`, a stylesheet link, `style=`) and no colour attributes
     /// (bgcolor, text, link, ...): the page leaves its colours to the browser entirely.
     plain: bool,
+    /// Where this document sits in its page's frame tree (the top document until attached).
+    pub(crate) frame: crate::frames::FrameCtx,
+    /// `window.name`: the name of this browsing context.
+    pub(crate) window_name: String,
+    /// The `<iframe>` elements may have changed since the frame table last looked.
+    pub(crate) frames_dirty: bool,
+    /// Which frame each `<iframe>` element of this document holds (kept by the frame table).
+    pub(crate) frame_nodes: BTreeMap<NodeId, FrameId>,
+    /// `<iframe>` elements scripts freed since the frame table last looked.
+    freed_iframes: Vec<NodeId>,
 }
 
 /// The canvas when the page doesn't paint one (SPEC "Type": milk, or Chocolate milk).
@@ -205,7 +215,13 @@ impl Page {
             focus: NONE,
             pending_restyle: Vec::new(),
             restyles: (0, 0),
+            frame: crate::frames::FrameCtx::TOP,
+            window_name: String::new(),
+            frames_dirty: false,
+            frame_nodes: BTreeMap::new(),
+            freed_iframes: Vec::new(),
         };
+        p.frames_dirty = p.dom.find_tag(tag::IFRAME) != NONE;
         p.scan();
         p.dom.track = true;
         p
@@ -796,7 +812,14 @@ impl Page {
     pub(crate) fn flush(&mut self) {
         self.sync_forms();
         self.sync_checked();
-        let ch = self.dom.take_changes();
+        let mut ch = self.dom.take_changes();
+        if ch.frames {
+            self.frames_dirty = true;
+        }
+        if !ch.freed_frames.is_empty() {
+            let freed = core::mem::take(&mut ch.freed_frames);
+            self.freed_iframes.extend(freed);
+        }
         if !(ch.any || ch.tree || ch.text || ch.sheets || ch.forms || ch.images) {
             return;
         }
@@ -922,6 +945,18 @@ impl Page {
 
     pub(crate) fn set_focus_node(&mut self, n: Option<NodeId>) {
         self.focus = n.unwrap_or(NONE);
+    }
+
+    pub(crate) fn freed_iframes_is_empty(&self) -> bool {
+        self.freed_iframes.is_empty()
+    }
+
+    pub(crate) fn take_freed_iframes(&mut self) -> Vec<NodeId> {
+        core::mem::take(&mut self.freed_iframes)
+    }
+
+    pub(crate) fn set_frame_nodes(&mut self, v: Vec<(NodeId, FrameId)>) {
+        self.frame_nodes = v.into_iter().collect();
     }
 
     pub(crate) fn forms(&self) -> &Forms {
@@ -1079,8 +1114,14 @@ impl Page {
     }
 
     pub fn hit_test(&self, x: i32, y: i32, scroll: (i32, i32)) -> Hit {
+        let base = Hit {
+            frame: self.frame.id,
+            point: (x, y),
+            scroll,
+            ..Hit::default()
+        };
         let Some(p) = &self.painted else {
-            return Hit::default();
+            return base;
         };
         let (dx, dy) = (x + scroll.0, y + scroll.1);
         let mut found = None;
@@ -1099,11 +1140,11 @@ impl Page {
             }
         }
         let Some(h) = found else {
-            return Hit::default();
+            return base;
         };
         let mut hit = Hit {
             text: h.text,
-            ..Hit::default()
+            ..base
         };
         let mut n = h.node;
         while n != NONE {
@@ -1235,6 +1276,7 @@ impl Page {
             {
                 out.push(FindMatch {
                     rects: self.match_rects(&runs, &hay[i..i + m]),
+                    frame: FrameId::TOP,
                 });
                 i += m;
                 if out.len() >= 10_000 {

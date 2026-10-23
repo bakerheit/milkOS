@@ -13,6 +13,7 @@
 //! scripts end for good: timers and listeners go, nothing runs again, the DOM stays.
 
 pub mod events;
+pub mod frames;
 pub mod importmap;
 pub mod loader;
 pub mod modules;
@@ -113,6 +114,11 @@ impl Runtime {
 
     pub fn take_requests(&mut self) -> Vec<PageRequest> {
         core::mem::take(&mut self.b.st.borrow_mut().requests)
+    }
+
+    /// Messages the window posted (`postMessage`), for the host to deliver.
+    pub fn take_messages(&mut self) -> Vec<OutMessage> {
+        core::mem::take(&mut self.b.st.borrow_mut().outbox.q)
     }
 
     pub fn take_net(&mut self) -> Vec<NetOut> {
@@ -628,6 +634,8 @@ fn run_timer(b: &Rc<Bridge>, r: &mut Realm, t: timers::Timer<u32>) {
 
 /// The app's click at viewport (x, y): find the element, then the events (and with scripts
 /// off, just the checkbox toggle).
+pub use frames::deliver_message;
+
 pub fn click(
     d: &mut Document,
     host: &mut dyn ScriptHost,

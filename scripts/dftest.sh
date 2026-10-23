@@ -10,6 +10,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-dftest.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
@@ -51,8 +52,10 @@ kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 L="$(tr -d '\r' < "$LOG")"
 # The output of one command: the lines after "$ CMD" up to the next prompt.
-out() { echo "$L" | awk -v c="\$ $1" 'index($0, c) && substr($0, index($0, c)) == c {on=1; next} on && /^msh:/ {exit} on'; }
-col() { awk -v m="$1" -v n="$2" '$NF == m || ($(NF-1) == m && $NF == "(ro)") {print $n; exit}'; }
+# (The awk scripts read to the end instead of exiting early: an early exit kills the echo
+# feeding them with SIGPIPE, and pipefail makes that a failure; see scripts/grepq.sh.)
+out() { echo "$L" | awk -v c="\$ $1" '!d && index($0, c) && substr($0, index($0, c)) == c {on=1; next} on && /^msh:/ {on=0; d=1} on'; }
+col() { awk -v m="$1" -v n="$2" '!d && ($NF == m || ($(NF-1) == m && $NF == "(ro)")) {print $n; d=1}'; }
 
 DF="$(out "disks list")"
 echo "$DF" | sed 's/^/    /'
@@ -94,7 +97,7 @@ hu=$(echo "$P1" | col /Users/milk 3); vu=$(echo "$P1" | col /Volumes/Milk 3)
 [ "$(echo "$P1" | col /Users/milk 2)" = "$(echo "$P1" | col /Volumes/Milk 2)" ] && [ -n "$hu" ] && [ -n "$vu" ] && [ $((hu > vu ? hu - vu : vu - hu)) -le 256 ] \
   && ok "disks list /Users/milk = disks list /Volumes/Milk (fstatfs: same size, used $vu / $hu K)" || bad "home vs volume"
 u0=$(echo "$DF" | col /Volumes/Milk 3); u1=$(out "disks list /Volumes/Milk" | col /Volumes/Milk 3)
-big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk '{print $1; exit}') / 1024 ))
+big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk 'NR == 1 {print $1}') / 1024 ))
 [ -n "$u0" ] && [ -n "$u1" ] && [ "$big" -gt 1024 ] && [ $((u1 - u0)) -ge "$big" ] && [ $((u1 - u0)) -le $((big + big / 10 + 64)) ] \
   && ok "$big K written: used $u0 -> $u1 K" || bad "used: $u0 -> $u1 K after writing $big K"
 out "disks list /Volumes/Milk/.snapshots/dfsnap" | grep -q "^milkfs .* /Volumes/Milk/.snapshots/dfsnap (ro)$" && ok "a snapshot: milkfs, read-only" || bad "snapshot statfs"

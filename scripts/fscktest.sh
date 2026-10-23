@@ -9,6 +9,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 ALL_KINDS="orphan dangling nlink parent sb smap bref data node"
 KINDS="${*:-$ALL_KINDS}"
 for k in $KINDS; do case " $ALL_KINDS " in *" $k "*) ;; *) echo "fscktest: no kind $k ($ALL_KINDS)" >&2; exit 2 ;; esac; done

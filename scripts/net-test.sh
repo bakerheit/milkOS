@@ -17,6 +17,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$PWD"
 HTTP_PORT="${HTTP_PORT:-8088}"
 # Short path: the serial unix socket lives here (macOS caps those at 104 bytes).

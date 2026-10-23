@@ -37,6 +37,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-enctest.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -109,7 +110,7 @@ boot b1 - \
 L="$(tr -d '\r' < "$T/b1.log")"
 echo "$L" | grep -aq "vda (Milk) is encrypted and locked" && ok "boot 1: the volume is locked at boot" || bad "not reported locked"
 echo "$L" | grep -a -A2 "text show /System/Kernel/fs/milkfs/unlock" | grep -aq "vda Milk locked" && ok "/System/Kernel/fs/milkfs/unlock lists it" || bad "unlock file"
-echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Milk" && bad "mounted while locked" || ok "not mounted while locked"
+echo "$L" | awk '!d && /\$ files list \/Volumes$/{on=1;next} on && /^msh:/{on=0;d=1} on' | grep -aq "Milk" && bad "mounted while locked" || ok "not mounted while locked"
 echo "$L" | grep -aq "wrong passphrase or recovery key" && ok "a wrong passphrase is refused" || bad "wrong passphrase accepted?"
 echo "$L" | grep -aq "disks: Milk unlocked" && ok "disks unlock mounts it" || bad "disks unlock"
 echo "$L" | grep -aq "$P1" && bad "the passphrase was echoed" || ok "the passphrase isn't echoed or logged"
@@ -140,7 +141,7 @@ EXTRA_DISKS="$VAULT $PLAIN" boot b3 "$P2" \
   "raw:disks unlock" "wait:Passphrase" "raw:$P2" "wait:unlocked" "wait:msh:" \
   "text show /Volumes/Vault/notes.txt" "print second > /Volumes/Vault/two.txt" "disks lock"
 L="$(tr -d '\r' < "$T/b3.log")"
-I="$(echo "$L" | awk '/\$ text show \/System\/Kernel\/fs\/milkfs\/info$/{on=1;next} on && /^msh:/{exit} on')"
+I="$(echo "$L" | awk '!d && /\$ text show \/System\/Kernel\/fs\/milkfs\/info$/{on=1;next} on && /^msh:/{on=0;d=1} on')"
 echo "$I" | grep -q "^encryption:  on$" && echo "$I" | grep -q "^locked:      no$" && echo "$I" | grep -q "^cipher:      xchacha20-siv" \
   && echo "$I" | grep -q "^kdf:         scrypt N=2^16 r=8 p=4$" && echo "$I" | grep -q "^key slots:   1 passphrase, 1 recovery$" \
   && ok "info: encryption on, unlocked, cipher, KDF, key slots" || bad "info encryption lines: $(echo "$I" | tail -6)"
@@ -151,7 +152,7 @@ echo "$L" | grep -aq "disks lock Vault: .*is in use: pid [0-9]* (msh): working d
 echo "$L" | grep -aq "disks lock Vault: .*is in use: pid [0-9]* (pause): 1 open file (EBUSY" && ok "busy (open file): names the process" || bad "open-file busy: $(echo "$L" | grep -a 'disks lock Vault' | sed -n 2p)"
 echo "$L" | grep -aq "^lock: EBUSY: .*(pause): 1 open file" && ok "/System/Kernel/fs/milkfs/error has the reason" || bad "error file"
 echo "$L" | grep -aq "milkfs: vd. (Vault) locked, /Volumes/Vault unmounted, key wiped$" && ok "Vault locked, key wiped" || bad "lock log"
-echo "$L" | awk '/\$ files list \/Volumes$/{on=1;next} on && /^msh:/{exit} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
+echo "$L" | awk '!d && /\$ files list \/Volumes$/{on=1;next} on && /^msh:/{on=0;d=1} on' | grep -aq "Vault" && bad "still mounted after lock" || ok "unmounted after lock"
 echo "$L" | grep -aq "text: /Volumes/Vault/notes.txt doesn.t exist" && ok "its files are gone until unlock" || bad "file readable while locked?"
 echo "$L" | grep -aq "^vd. Vault locked" && ok "listed as locked" || bad "not listed locked"
 [ "$(echo "$L" | grep -ac '^kept across the lock')" -ge 1 ] && echo "$L" | grep -aq "disks: Vault unlocked" && ok "unlock after lock: the file is back" || bad "unlock after lock"

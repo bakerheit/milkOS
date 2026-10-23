@@ -22,6 +22,7 @@
 # via a qemu monitor socket. Only the qemu processes started here are killed (by PID).
 set -uo pipefail
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 BOOTS="${1:-5}"
 CMDS="${2:-14}"
 export MILK_FS="${MILK_FS:-/tmp/serial-soak-fs.img}"

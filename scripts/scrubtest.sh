@@ -11,6 +11,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-scrubtest.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0

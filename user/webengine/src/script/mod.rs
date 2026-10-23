@@ -15,11 +15,13 @@
 pub mod events;
 pub mod importmap;
 pub mod loader;
+pub mod modules;
 pub mod timers;
 
 mod bridge;
 mod events_js;
 mod forms_js;
+mod modrt;
 mod net;
 mod netbytes;
 
@@ -125,8 +127,15 @@ impl Runtime {
         id: u32,
         ev: NetEvent,
     ) -> bool {
-        self.entry(page, host, |b, r| net::deliver(b, r, id, ev))
-            .unwrap_or(false)
+        let ran = self
+            .entry(page, host, |b, r| net::deliver(b, r, id, ev))
+            .unwrap_or(false);
+        // A module script's graph may have come in: its turn, if it has one, is now.
+        let wake = core::mem::take(&mut self.b.st.borrow_mut().modrt.wake);
+        if wake && !self.stopped() {
+            return self.run(page, host) || ran;
+        }
+        ran
     }
 
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
@@ -173,6 +182,7 @@ impl Runtime {
             );
         }
         if let Some(r) = self.realm.as_mut() {
+            modrt::teardown(&self.b, r);
             r.clear_jobs();
             r.set_interrupt(None);
             for p in net_pins {
@@ -258,18 +268,9 @@ impl Runtime {
         let pending_resources = !page.pending_resources().is_empty();
         self.entry(page, host, |b, r| {
             let mut did = false;
-            // Module scripts found so far: a note each (they don't run yet).
-            let mods = core::mem::take(&mut b.st.borrow_mut().loader.modules);
-            for m in mods {
-                let what = b
-                    .page()
-                    .and_then(|p| p.dom.element(m).and_then(|e| e.attr("src")).map(|s| p.resolve(s)))
-                    .unwrap_or_else(|| String::from("an inline module"));
-                b.console(
-                    ConsoleLevel::Warn,
-                    format!("A module script ({what}) was not run: modules aren't supported yet"),
-                );
-            }
+            // Module work the page queued (import maps, module graphs, preloads) starts
+            // first, so its fetches overlap with the classic scripts ahead of it.
+            modrt::pump(b, r);
             // Scripts, phase by phase.
             loop {
                 let next = b.st.borrow().loader.next();
@@ -465,15 +466,22 @@ fn checkpoint(b: &Rc<Bridge>, r: &mut Realm) {
     if b.st.borrow().depth > 1 {
         return;
     }
-    for _ in 0..1000 {
-        match r.run_jobs() {
-            Ok(()) => break,
-            Err(e) => {
-                report(b, r, &e, "");
-                if e.is_uncatchable() {
-                    break;
+    // Jobs, then the module graphs that came in (an `import()` answers with more jobs), until
+    // neither has anything.
+    for _ in 0..100 {
+        for _ in 0..1000 {
+            match r.run_jobs() {
+                Ok(()) => break,
+                Err(e) => {
+                    report(b, r, &e, "");
+                    if e.is_uncatchable() {
+                        break;
+                    }
                 }
             }
+        }
+        if b.st.borrow().stopped || !modrt::pump(b, r) {
+            break;
         }
     }
     for v in r.take_unhandled_rejections() {
@@ -538,13 +546,17 @@ pub(crate) fn call_report(
 /// Run (or fail) script `i` of the loader. `top`: from the event loop (not from inside a
 /// native, where the microtask checkpoint must wait).
 pub(crate) fn run_script(b: &Rc<Bridge>, r: &mut Realm, i: usize, top: bool) {
-    let (node, src, body) = {
+    let (node, src, body, module) = {
         let mut st = b.st.borrow_mut();
         let s = &mut st.loader.scripts[i];
         s.done = true;
         let body = core::mem::replace(&mut s.body, Body::Failed);
-        (s.node, s.src.clone(), body)
+        (s.node, s.src.clone(), body, s.module)
     };
+    if module {
+        modrt::run_script(b, r, i, top);
+        return;
+    }
     match body {
         Body::Ready(text) => {
             let file = src.clone().unwrap_or_else(|| {

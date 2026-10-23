@@ -295,6 +295,7 @@ pub fn register_handlers(b: &Bridge, r: &mut Realm, n: NodeId) {
 /// should run (inline ones now, external ones once fetched).
 pub fn inserted(b: &Rc<Bridge>, r: &mut Realm, tops: &[NodeId]) {
     let mut scripts = Vec::new();
+    let mut links = Vec::new();
     for &t in tops {
         register_handlers(b, r, t);
         if let Some(p) = b.page()
@@ -304,6 +305,8 @@ pub fn inserted(b: &Rc<Bridge>, r: &mut Realm, tops: &[NodeId]) {
             while c != NONE {
                 if p.dom.is_html(c, tag::SCRIPT) {
                     scripts.push(c);
+                } else if p.dom.is_html(c, tag::LINK) {
+                    links.push(c);
                 }
                 c = p.dom.next_in(c, t);
             }
@@ -311,6 +314,18 @@ pub fn inserted(b: &Rc<Bridge>, r: &mut Realm, tops: &[NodeId]) {
     }
     for s in scripts {
         prepare_inserted(b, r, s);
+    }
+    // <link rel=modulepreload> starts its fetch when it goes in.
+    if !links.is_empty() {
+        if let Some(p) = b.page() {
+            let base = String::from(p.base_url());
+            let resolve = move |h: &str| crate::url::resolve(&base, h);
+            let mut st = b.st.borrow_mut();
+            for l in links {
+                st.loader.prepare_preload(&p.dom, l, &resolve);
+            }
+        }
+        super::modrt::start_work(b, r);
     }
 }
 
@@ -325,6 +340,11 @@ pub fn prepare_inserted(b: &Rc<Bridge>, r: &mut Realm, s: NodeId) {
         .borrow_mut()
         .loader
         .prepare(&p.dom, s, false, ordered, &resolve);
+    // Import maps and module scripts the page inserted: compile and ask for fetches now
+    // (they run when their imports are in, at the end of the task).
+    if !b.st.borrow().loader.work.is_empty() {
+        super::modrt::start_work(b, r);
+    }
     if let Some(i) = idx {
         let inline = matches!(
             b.st.borrow().loader.scripts[i].body,
@@ -2531,6 +2551,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
                 reflect_url(b, r, o, "src", "src")?;
                 reflect_str(b, r, o, "type", "type")?;
                 reflect_bool(b, r, o, "defer", "defer")?;
+                reflect_bool(b, r, o, "noModule", "nomodule")?;
                 reflect_str(b, r, o, "charset", "charset")?;
                 reflect_str(b, r, o, "crossOrigin", "crossorigin")?;
                 getter(b, r, o, "async", script_async, Some(script_set_async))?;
@@ -2541,6 +2562,8 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
                 reflect_str(b, r, o, "rel", "rel")?;
                 reflect_str(b, r, o, "media", "media")?;
                 reflect_str(b, r, o, "type", "type")?;
+                reflect_str(b, r, o, "as", "as")?;
+                reflect_str(b, r, o, "crossOrigin", "crossorigin")?;
                 reflect_bool(b, r, o, "disabled", "disabled")?;
             }
             tag::TEMPLATE => {

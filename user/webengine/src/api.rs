@@ -816,6 +816,11 @@ pub enum NetKind {
     Xhr,
     /// `navigator.sendBeacon` (a POST nobody waits for) or a `keepalive` fetch.
     Beacon,
+    /// A module script or one of its imports (`<script type=module>`, `import`, `import()`,
+    /// `<link rel=modulepreload>`): a GET in mode cors. The response has to be a success
+    /// and a JavaScript (or, for a JSON module, JSON) MIME type; the page's console says
+    /// why when it is not.
+    Module,
 }
 
 /// A request a script made, for the app to run. Everything is as the script set it, except

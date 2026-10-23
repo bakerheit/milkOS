@@ -118,6 +118,14 @@ mtf() {
   if [ "$got" = "$3" ]; then ok "$1 $2 came from [${3:-the page}]"; else bad "$1 $2 came from [$got] wanted [$3]"; fi
 }
 srvn() { grep -acE -- "$1" "$T/server.log" || true; }
+# Where the window's body is on the screen: a right click (it does nothing on a page) is logged in
+# body coordinates. Sets BX and BY: screen = BX + body x, BY + body y (the page starts 72 down).
+calib() {
+  q move 512 400 click right
+  sleep 0.5
+  set -- $(log_lines | sed -n 's/^\[browser\] input down \(-\{0,1\}[0-9]*\) \(-\{0,1\}[0-9]*\) button=2 .*/\1 \2/p' | tail -1)
+  if [ -n "${1:-}" ]; then BX=$((512 - $1)); BY=$((400 - $2)); else BX=86; BY=91; bad "no right click logged, guessing the window's place"; fi
+}
 have_console() { wait_log "^\[browser\] console $1.*$2" "${3:-5}"; }
 finish_of() { wait_log "$CL $1 end " "${2:-40}"; }
 
@@ -224,6 +232,7 @@ if want sandbox; then
 echo "-- the sandbox attribute"
 go "$H/sandbox.html"
 finish_of sandbox 60 && ok "sandbox.html ran" || bad "sandbox.html did not finish: $(log_lines | grep -a 'IFRTEST sandbox\|console' | tail -4)"
+shot iframe-06-sandbox
 mt sandbox no-script-no-message "true"
 mtr sandbox s-scripts-origin "^null / event\.origin null$"
 mt sandbox s-scripts-cookie "threw SecurityError"
@@ -249,7 +258,6 @@ wait_log "$CL landed path " 20 && mt landed path "/landed.html" || bad "the sand
 # s-forms: its form went to the server from the sandbox with allow-forms, the others never sent one.
 [ "$(srvn '^http POST www\.milk\.test /echo\?from=sandbox ')" -ge 1 ] && ok "the sandbox with allow-forms sent its form" || bad "allow-forms: the form was not sent"
 [ "$(srvn '^http POST www\.milk\.test /echo\?from=sandbox ')" -le 1 ] && ok "and nobody else did" || bad "forms were sent by $(srvn '^http POST www\.milk\.test /echo\?from=sandbox ') frames"
-shot iframe-06-sandbox
 fi
 if want msg; then
 echo "-- postMessage"
@@ -350,21 +358,22 @@ echo "-- scrolling, typing and find in frames"
 go "$H/scroll.html"
 wait_log "$CL scroll message" 5 || true
 sleep 2
-# The frame at (20, 40) in the page; its body is at y = 72 + 40 in the window.
-q move 200 232 click
+calib
+# The tall frame is at (20, 40) in the page and 420 x 160: in the window body that is y = 72 + 40.
+q move $((BX + 200)) $((BY + 72 + 110)) click
 q scroll -3
 wait_log "IFRTEST scroll message scrolled:" 10 && ok "the wheel scrolled the frame it was over" || bad "the wheel did not scroll the frame"
 log_lines | grep -a "IFRTEST scroll parent-scrolled" >/dev/null && bad "the page scrolled too" || ok "and the page stayed where it was"
 shot iframe-13-scrolled-frame
 # Click the frame with the input, Tab to the field, type.
-q move 300 420 click
+q move $((BX + 300)) $((BY + 72 + 280)) click
 q key tab
 q type "hello"
 wait_log "IFRTEST input-child value=hello" 10 && ok "typing went to the field in the frame" || bad "the field in the frame got no input: $(log_lines | grep -a 'input-child' | tail -3)"
-mtf input-child value=hello "in" 2>/dev/null || true
+log_lines | grep -aE "^\[browser\] console log \[frame in\]: IFRTEST input-child value=hello$" >/dev/null && ok "and the line came from the frame called in" || bad "no frame label on the frame's console line"
 shot iframe-14-typed
 # The wheel in the page's own area scrolls the page.
-q move 600 520 click
+q move $((BX + 700)) $((BY + 72 + 450)) click
 q scroll -5
 wait_log "IFRTEST scroll parent-scrolled" 10 && ok "the wheel over the page scrolled the page" || bad "the wheel over the page did nothing"
 go "$H/find.html"
@@ -411,9 +420,7 @@ if want js; then
 echo "-- the JavaScript switch"
 go "$H/same.html"
 sleep 3
-q move 512 400 click right
-set -- $(log_lines | sed -n 's/^\[browser\] input down \(-\{0,1\}[0-9]*\) \(-\{0,1\}[0-9]*\) button=2 .*/\1 \2/p' | tail -1)
-if [ -n "${1:-}" ]; then BX=$((512 - $1)); BY=$((400 - $2)); else BX=86; BY=91; bad "no right click logged, guessing the window's place"; fi
+calib
 q move $((BX + 874)) $((BY + 52)) click sleep 0.5 move $((BX + 700)) $((BY + 422)) click
 wait_log "^\[browser\] javascript off" 5 && ok "the menu turned JavaScript off" || bad "no javascript off"
 BEFORE="$(log_lines | grep -ac 'IFRTEST same-child identity')"

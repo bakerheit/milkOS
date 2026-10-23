@@ -139,7 +139,8 @@ pub struct Ask<'a> {
 /// Decide what the frame's `src` / `srcdoc` mean and whether it may load.
 pub fn source(ask: &Ask<'_>) -> Result<Source, Refusal> {
     let src = ask.src.map(str::trim).unwrap_or("");
-    if ask.ancestors.len() >= MAX_DEPTH {
+    // The top page is an ancestor too: a frame at level L has L of them.
+    if ask.ancestors.len() > MAX_DEPTH {
         return Err(Refusal::TooDeep);
     }
     if ask.frames_now >= MAX_FRAMES {

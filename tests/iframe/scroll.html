@@ -18,6 +18,10 @@
   window.addEventListener('message', function (e) {
     console.log('IFRTEST scroll message ' + e.data);
   });
-  window.addEventListener('scroll', function () { console.log('IFRTEST scroll parent-scrolled ' + Math.round(window.scrollY)); });
+  var last = 0;
+  setInterval(function () {
+    var y = Math.round(window.scrollY);
+    if (y !== last) { last = y; console.log('IFRTEST scroll parent-scrolled ' + y); }
+  }, 200);
 </script>
 </body></html>

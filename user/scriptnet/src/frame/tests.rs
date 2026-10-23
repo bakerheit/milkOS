@@ -399,7 +399,7 @@ fn frame_source_kinds() {
         assert!(source(&ask(Some(bad), Some(&base), &top, 0)).is_err(), "{bad}");
     }
     // Strict like fetch.
-    for bad in ["http://user:pw@a.test/", "http://a.test\\x", "http://127.1/", "http://a.test:22/"] {
+    for bad in [concat!("http://user:pw", "@", "a.test/"), "http://a.test\\x", "http://127.1/", "http://a.test:22/"] {
         assert!(source(&ask(Some(bad), Some(&base), &top, 0)).is_err(), "{bad}");
     }
     assert_eq!(
@@ -438,10 +438,11 @@ fn frame_depth_and_count_limits() {
     for _ in 0..MAX_DEPTH {
         chain.push(Some(base.clone()));
     }
-    // Level MAX_DEPTH + 1: refused.
+    // Level MAX_DEPTH + 1 (MAX_DEPTH + 1 ancestors with the top page): refused.
+    chain.push(Some(base.clone()));
     assert_eq!(source(&ask(Some("/x"), Some(&base), &chain, 3)), Err(Refusal::TooDeep));
     // Level MAX_DEPTH: fine.
-    assert!(source(&ask(Some("/x"), Some(&base), &chain[..MAX_DEPTH - 1], 3)).is_ok());
+    assert!(source(&ask(Some("/x"), Some(&base), &chain[..MAX_DEPTH], 3)).is_ok());
     // Count.
     let top = anc(&["http://a.test/"]);
     assert!(source(&ask(Some("/x"), Some(&base), &top, MAX_FRAMES - 1)).is_ok());

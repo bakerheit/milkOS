@@ -290,7 +290,8 @@ on a page: the rest are left empty with a line on the console.
   (`document.domain` relaxing does not exist). Limits of the proxies: they are not instances of the other
   realm's classes (`instanceof Document` is false), `Array.isArray(proxy)` is false, only
   `Symbol.iterator` crosses, a frame being navigated away from is "dead" (`InvalidAccessError`), and
-  calls nest at most 8 deep. A runaway script in one frame does not stop the others: the "page is
+  calls nest at most 8 deep. A sandboxed frame without `allow-scripts` has no realm, so even with
+  `allow-same-origin` its parent cannot read it (`contentDocument` is `null`). A runaway script in one frame does not stop the others: the "page is
   slow" bar stops the frame that is running.
 * **postMessage.** `window.postMessage(message, targetOrigin)` and the options form, delivered as a
   task of the target's event loop (never synchronously), `event.data` / `origin` / `source` /
@@ -452,6 +453,26 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   404 and 500 and a bad dependency (error events and console errors, the other modules
   unharmed), JSON modules, a small app built from modules (screenshots), the depth and count
   limits, a module abandoned mid-download by going to another page, and the JavaScript switch.
+* `scripts/iframe-test.sh` (default set, about four minutes): a VM against
+  `scripts/iframe_test_servers.py` (the same zone as fetch-test; 127.0.0.1 only) and the pages in
+  `tests/iframe`. Same-origin frames both ways, other-origin and other-site frames (SecurityError),
+  frames three deep, `srcdoc` / `about:blank` / `data:`, `X-Frame-Options` and `frame-ancestors`
+  (17 frames, each judged), the `sandbox` attribute (scripts, same-origin, forms, popups, modals,
+  top navigation blocked and allowed, a CSP sandbox, a sandbox that nests), `postMessage` both ways
+  with origins and the structured clone, a form into a frame (GET and POST), `target=` links, error
+  pages inside frames (404, refused, unknown host, a file, text, a picture, a redirect, `javascript:`,
+  `file:`, a refused port), cookies (same site, third party), Back and Forward through frames, the
+  wheel, typing and find inside frames, a runaway frame stopped alone with the page's timer still
+  ticking, the depth cap (a sixth level is never fetched), the count cap, and the JavaScript switch,
+  from the console lines (a line from a frame carries `[frame name]`), the server's log (Referer,
+  Cookie, Sec-Fetch headers) and screenshots (`IFRAME_TEST_SHOTS=DIR` keeps them;
+  `IFRAME_TEST_ONLY="same msg"` runs sections).
+* Frame rules, host-tested (`scriptnet-unit`, `user/scriptnet/src/frame/tests.rs`): sandbox flags,
+  X-Frame-Options and `frame-ancestors` tables, loading (addresses, depth and count, mixed content,
+  cookie context, Referer, answer types), `target` choice and who may navigate whom, the joint session
+  history (with a fuzz), and the header parsers and addresses against hostile text. Scripting across
+  frames (`webengine-unit`, `src/tests/xframes.rs`): proxies, the same-origin policy, dead frames,
+  `postMessage` (origins, `targetOrigin`, every clone type, limits) and hostile scripts.
 * `scripts/scriptnet-test.sh` (`scriptnet-unit`, smoke): `user/scriptnet` against a fake web
   and the real policy: methods and bodies on the wire, CORS and preflight, credentials,
   redirects hop by hop, cookies, the private-network and rebinding refusals, mixed content,

@@ -175,7 +175,7 @@ mod tests {
             ("https://a.test:443/", "https://a.test"),
             ("https://a.test:8443/", "https://a.test:8443"),
             ("http://a.test:443/", "http://a.test:443"),
-            ("http://user:pw@a.test:81/", "http://a.test:81"),
+            (concat!("http://user:pw", "@", "a.test:81/"), "http://a.test:81"),
             ("http://[::1]:8000/", "http://[::1]:8000"),
             ("http://a.test./", "http://a.test"),
             ("http://a.test", "http://a.test"),

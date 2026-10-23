@@ -32,6 +32,17 @@
   deep and a page has at most 32; `window.name`, `postMessage` and same-origin reach between
   frames have hooks for the bindings (docs/frames.md).
 
+- `<iframe>` in the Browser: frames are fetched as navigations (the page as `Referer`, cookies
+  only along one site, every redirect hop checked, mixed content blocked, errors and refusals
+  shown inside the frame), `srcdoc`, `about:blank` and `data:` documents, `X-Frame-Options` and
+  CSP `frame-ancestors`, and the `sandbox` attribute (scripts, same-origin, forms, popups, top
+  navigation, modals, downloads). Scripts get `parent`, `top`, `frames`, `frameElement`,
+  `contentWindow` / `contentDocument` (same-origin frames share a DOM through proxies; other
+  origins get only `postMessage`, `location` and the rest of the safe set, `SecurityError`
+  otherwise) and `postMessage` with the structured clone. Links and forms take `target=`
+  (`_self`, `_parent`, `_top`, `_blank`, a frame's name); Back and Forward step a joint history
+  of the frames; clicks, the wheel, Tab, typing and find go to the right frame, and each frame
+  scrolls on its own. At most 5 levels and 32 frames; a runaway frame is stopped alone.
 - Settings > Browser picks the search engine for words typed in the address bar: DuckDuckGo
   (Lite, still the default), DuckDuckGo (HTML), Brave Search, Startpage, Bing or Google. The
   choice is saved with the other settings and the Browser uses it from the next search, without

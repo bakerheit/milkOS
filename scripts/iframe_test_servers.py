@@ -314,7 +314,7 @@ class Web(http.server.BaseHTTPRequestHandler):
         return self.send(
             200,
             "<!DOCTYPE html><title>Tall</title><body style='margin:6px;background:#fffbe8'>%s"
-            "<script>window.addEventListener('scroll',function(){try{parent.postMessage('scrolled:'+Math.round(window.scrollY),'*')}catch(e){}})</script>"
+            "<script>var last=0;setInterval(function(){var y=Math.round(window.scrollY);if(y!==last){last=y;try{parent.postMessage('scrolled:'+y,'*')}catch(e){}}},200)</script>"
             "</body>" % lines,
         )
 

@@ -126,6 +126,10 @@ js_files!(
     "collections.js",
     "misc.js",
     "gc.js",
+    "scope.js",
+    "edge.js",
+    "async2.js",
+    "realworld.js",
 );
 
 #[test]

@@ -705,8 +705,9 @@ impl<'a> Compiler<'a> {
                 && let Some(bi) = self.scopes[sid as usize].find(a)
             {
                 let b = self.scopes[sid as usize].bindings[bi];
-                if !b.captured && b.kind == BK::Param && !param_local.iter().any(|(x, _)| *x == bi)
-                {
+                if !b.captured && b.kind == BK::Param {
+                    // A repeated name binds the last parameter with it.
+                    param_local.retain(|(x, _)| *x != bi);
                     param_local.push((bi, i as u32));
                 }
             }
@@ -739,7 +740,11 @@ impl<'a> Compiler<'a> {
             let i = i as u32;
             match (&p.pat, &p.default) {
                 (Pat::Ident(a, pos), None) => {
-                    if !matches!(self.lookup(*a), Lookup::Local(l, _) if l == i) {
+                    let repeated_later = f.params[i as usize + 1..]
+                        .iter()
+                        .any(|q| matches!(q.pat, Pat::Ident(b, _) if b == *a));
+                    if !repeated_later && !matches!(self.lookup(*a), Lookup::Local(l, _) if l == i)
+                    {
                         self.emit(Op::GetLocal(i));
                         self.store_name(*a, Store::Init, false, *pos)?;
                     }

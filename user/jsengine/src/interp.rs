@@ -868,6 +868,9 @@ impl Realm {
         let mut code: Rc<Code> = self.top().code.clone();
         let mut pc: usize = self.top().pc as usize;
         let mut base: usize = self.top().base as usize;
+        // The running frame's index: its pc is kept current on every instruction, so errors
+        // made anywhere below (and stack traces) see the right position.
+        let mut fi: usize = self.vm.frames.len() - 1;
         macro_rules! sync {
             () => {
                 let n = self.vm.frames.len();
@@ -877,6 +880,7 @@ impl Realm {
         macro_rules! reload {
             () => {
                 let n = self.vm.frames.len();
+                fi = n - 1;
                 let f = &self.vm.frames[n - 1];
                 code = f.code.clone();
                 pc = f.pc as usize;
@@ -924,6 +928,9 @@ impl Realm {
                 }
             };
             pc += 1;
+            if let Some(f) = self.vm.frames.get_mut(fi) {
+                f.pc = pc as u32;
+            }
             match op {
                 Op::Undef => self.push(Val::Undef),
                 Op::Null => self.push(Val::Null),

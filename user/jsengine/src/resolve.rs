@@ -170,6 +170,8 @@ impl<'a> Resolver<'a> {
             let old = s.bindings[i].kind;
             let clash = match (old, kind) {
                 (BK::Var | BK::Param | BK::Arguments, BK::Var) => false,
+                // Duplicate parameters (sloppy, simple lists: the parser rejects the rest).
+                (BK::Param, BK::Param) => false,
                 (BK::FuncDecl, BK::Var) | (BK::Var, BK::FuncDecl) => false,
                 (BK::Param, BK::FuncDecl) => {
                     s.bindings[i].kind = BK::FuncDecl;

@@ -1,0 +1,595 @@
+//! The embedding API the way the DOM bindings use it: host classes with prototypes of
+//! accessors and methods, live collections through hooks, listeners kept in pins and called
+//! later, finalizers, event handler attributes, error positions, promises from the host.
+
+use crate::*;
+use alloc::boxed::Box;
+use alloc::rc::Rc;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
+
+/// A toy document: nodes with a tag, an id, children and a dataset.
+#[derive(Default)]
+struct Doc {
+    tags: Vec<String>,
+    ids: Vec<String>,
+    children: Vec<Vec<u64>>,
+    data: Vec<Vec<(String, String)>>,
+}
+
+impl Doc {
+    fn add(&mut self, tag: &str) -> u64 {
+        self.tags.push(String::from(tag));
+        self.ids.push(String::new());
+        self.children.push(Vec::new());
+        self.data.push(Vec::new());
+        self.tags.len() as u64 - 1
+    }
+}
+
+struct ElementClass;
+impl HostClass for ElementClass {
+    fn name(&self) -> &str {
+        "HTMLElement"
+    }
+}
+
+/// A live NodeList: data = the parent node; indexed hooks read the document.
+struct NodeListClass(Rc<RefCell<Doc>>, Rc<RefCell<Vec<Option<Pinned>>>>, ClassId);
+impl HostClass for NodeListClass {
+    fn name(&self) -> &str {
+        "NodeList"
+    }
+    fn hooks(&self) -> u8 {
+        hooks::INDEXED
+    }
+    fn get(
+        &self,
+        realm: &mut Realm,
+        _obj: Value,
+        data: u64,
+        key: Key<'_>,
+    ) -> JsResult<Option<Value>> {
+        let Key::Index(i) = key else { return Ok(None) };
+        let child = self.0.borrow().children[data as usize]
+            .get(i as usize)
+            .copied();
+        Ok(child.map(|c| wrap(realm, &self.1, self.2, c)))
+    }
+    fn keys(&self, _realm: &mut Realm, _obj: Value, data: u64) -> JsResult<Vec<OwnedKey>> {
+        let n = self.0.borrow().children[data as usize].len();
+        Ok((0..n as u32).map(OwnedKey::Index).collect())
+    }
+}
+
+/// element.dataset: named hooks over the node's data attributes.
+struct DatasetClass(Rc<RefCell<Doc>>);
+impl HostClass for DatasetClass {
+    fn hooks(&self) -> u8 {
+        hooks::NAMED
+    }
+    fn get(
+        &self,
+        realm: &mut Realm,
+        _obj: Value,
+        data: u64,
+        key: Key<'_>,
+    ) -> JsResult<Option<Value>> {
+        let Key::Str(k) = key else { return Ok(None) };
+        let v = self.0.borrow().data[data as usize]
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone());
+        Ok(v.map(|v| realm.string(&v)))
+    }
+    fn set(
+        &self,
+        realm: &mut Realm,
+        _obj: Value,
+        data: u64,
+        key: Key<'_>,
+        value: Value,
+    ) -> JsResult<bool> {
+        let Key::Str(k) = key else { return Ok(false) };
+        let v = realm.to_string(value)?;
+        let mut d = self.0.borrow_mut();
+        let list = &mut d.data[data as usize];
+        match list.iter_mut().find(|(n, _)| n == k) {
+            Some(e) => e.1 = v,
+            None => list.push((String::from(k), v)),
+        }
+        Ok(true)
+    }
+    fn delete(
+        &self,
+        _realm: &mut Realm,
+        _obj: Value,
+        data: u64,
+        key: Key<'_>,
+    ) -> JsResult<Option<bool>> {
+        let Key::Str(k) = key else { return Ok(None) };
+        self.0.borrow_mut().data[data as usize].retain(|(n, _)| n != k);
+        Ok(Some(true))
+    }
+    fn keys(&self, _realm: &mut Realm, _obj: Value, data: u64) -> JsResult<Vec<OwnedKey>> {
+        Ok(self.0.borrow().data[data as usize]
+            .iter()
+            .map(|(n, _)| OwnedKey::Str(n.clone()))
+            .collect())
+    }
+}
+
+/// One wrapper per node (identity matters: `a.firstChild === a.firstChild`).
+fn wrap(
+    realm: &mut Realm,
+    cache: &Rc<RefCell<Vec<Option<Pinned>>>>,
+    class: ClassId,
+    node: u64,
+) -> Value {
+    if let Some(Some(p)) = cache.borrow().get(node as usize) {
+        return realm.pinned(p);
+    }
+    let proto = realm
+        .get(realm.global(), "__ElementProto")
+        .unwrap_or(Value::NULL);
+    let w = realm.new_host_object(class, node, proto);
+    let pin = realm.pin(w);
+    let mut c = cache.borrow_mut();
+    if c.len() <= node as usize {
+        c.resize_with(node as usize + 1, || None);
+    }
+    c[node as usize] = Some(pin);
+    w
+}
+
+fn setup() -> (Realm, Rc<RefCell<Doc>>) {
+    let mut r = Realm::new(Options::default());
+    let doc = Rc::new(RefCell::new(Doc::default()));
+    let cache: Rc<RefCell<Vec<Option<Pinned>>>> = Rc::new(RefCell::new(Vec::new()));
+    let el = r.register_class(ElementClass);
+    let nl = r.register_class(NodeListClass(doc.clone(), cache.clone(), el));
+    let ds = r.register_class(DatasetClass(doc.clone()));
+    let g = r.global();
+    let proto = r.new_object();
+    r.define(g, "__ElementProto", proto, Attrs::METHOD).unwrap();
+    let ctor = r.new_class("HTMLElement", 0, proto, None, None);
+    r.define(g, "HTMLElement", ctor, Attrs::METHOD).unwrap();
+    let nl_proto = r.new_object();
+    let values = r.intrinsic(Intrinsic::ArrayValues);
+    let iter = r.well_known_symbol(WellKnown::Iterator);
+    r.define(nl_proto, iter, values, Attrs::METHOD).unwrap();
+    let for_each = r.intrinsic(Intrinsic::ArrayForEach);
+    r.define(nl_proto, "forEach", for_each, Attrs::METHOD)
+        .unwrap();
+    {
+        let doc = doc.clone();
+        r.define_getter(
+            nl_proto,
+            "length",
+            move |r, this, _| {
+                let Some((_, data)) = r.host_info(this) else {
+                    return Err(r.throw_type_error("Illegal invocation"));
+                };
+                Ok(Value::from(
+                    doc.borrow().children[data as usize].len() as u32
+                ))
+            },
+            None,
+        )
+        .unwrap();
+    }
+    // tagName, id (get/set), children, dataset, appendChild
+    {
+        let doc = doc.clone();
+        r.define_getter(
+            proto,
+            "tagName",
+            move |r, this, _| {
+                let Some(n) = r.host_data(this, el) else {
+                    return Err(r.throw_type_error("Illegal invocation"));
+                };
+                let t = doc.borrow().tags[n as usize].to_uppercase();
+                Ok(r.string(&t))
+            },
+            None,
+        )
+        .unwrap();
+    }
+    {
+        let doc_g = doc.clone();
+        let doc_s = doc.clone();
+        let setter: Box<NativeFn> = Box::new(move |r: &mut Realm, this: Value, args: &[Value]| {
+            let Some(n) = r.host_data(this, el) else {
+                return Err(r.throw_type_error("Illegal invocation"));
+            };
+            let v = r.to_string(args.first().copied().unwrap_or(Value::UNDEFINED))?;
+            doc_s.borrow_mut().ids[n as usize] = v;
+            Ok(Value::UNDEFINED)
+        });
+        r.define_getter(
+            proto,
+            "id",
+            move |r, this, _| {
+                let Some(n) = r.host_data(this, el) else {
+                    return Err(r.throw_type_error("Illegal invocation"));
+                };
+                let id = doc_g.borrow().ids[n as usize].clone();
+                Ok(r.string(&id))
+            },
+            Some(setter),
+        )
+        .unwrap();
+    }
+    r.define_getter(
+        proto,
+        "children",
+        move |r, this, _| {
+            let Some(n) = r.host_data(this, el) else {
+                return Err(r.throw_type_error("Illegal invocation"));
+            };
+            let p = r.get(r.global(), "__NodeListProto")?;
+            Ok(r.new_host_object(nl, n, p))
+        },
+        None,
+    )
+    .unwrap();
+    r.define(g, "__NodeListProto", nl_proto, Attrs::METHOD)
+        .unwrap();
+    r.define_getter(
+        proto,
+        "dataset",
+        move |r, this, _| {
+            let Some(n) = r.host_data(this, el) else {
+                return Err(r.throw_type_error("Illegal invocation"));
+            };
+            let op = r.intrinsic(Intrinsic::ObjectPrototype);
+            Ok(r.new_host_object(ds, n, op))
+        },
+        None,
+    )
+    .unwrap();
+    {
+        let doc = doc.clone();
+        r.define_method(proto, "appendChild", 1, move |r, this, args| {
+            let Some(p) = r.host_data(this, el) else {
+                return Err(r.throw_type_error("Illegal invocation"));
+            };
+            let child = args.first().copied().unwrap_or(Value::UNDEFINED);
+            let Some(c) = r.host_data(child, el) else {
+                return Err(r.throw_type_error(
+                    "Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.",
+                ));
+            };
+            doc.borrow_mut().children[p as usize].push(c);
+            Ok(child)
+        })
+        .unwrap();
+    }
+    {
+        let doc = doc.clone();
+        let cache = cache.clone();
+        let document = r.new_object();
+        r.define(g, "document", document, Attrs::METHOD).unwrap();
+        r.define_method(document, "createElement", 1, move |r, _this, args| {
+            let tag = r.to_string(args.first().copied().unwrap_or(Value::UNDEFINED))?;
+            let n = doc.borrow_mut().add(&tag);
+            Ok(wrap(r, &cache, el, n))
+        })
+        .unwrap();
+    }
+    (r, doc)
+}
+
+fn eval_str(r: &mut Realm, src: &str) -> String {
+    match r.eval(src, "page.js") {
+        Ok(v) => r.inspect(v),
+        Err(e) => {
+            let rep = r.report(&e);
+            alloc::format!("error: {rep}")
+        }
+    }
+}
+
+#[test]
+fn dom_like_bindings() {
+    let (mut r, doc) = setup();
+    let out = eval_str(
+        &mut r,
+        r#"
+        var ul = document.createElement('ul');
+        for (var i = 0; i < 3; i++) { var li = document.createElement('li'); li.id = 'item' + i; ul.appendChild(li); }
+        var ids = [];
+        for (var c of ul.children) ids.push(c.id);
+        ids.push(ul.children.length, ul.children[1].tagName, ul.children[1] === ul.children[1]);
+        ids.push(Array.from(ul.children).map(e => e.tagName).join());
+        ids.push([...ul.children].length, Object.keys(ul.children).join());
+        ul.children.forEach(function (e, i) { e.dataset.index = i; });
+        ids.push(ul.children[2].dataset.index, 'index' in ul.children[2].dataset, ul instanceof HTMLElement);
+        delete ul.children[2].dataset.index;
+        ids.push('index' in ul.children[2].dataset);
+        ul.expando = 'kept';
+        ids.join('|');
+        "#,
+    );
+    assert_eq!(
+        out,
+        "item0|item1|item2|3|LI|true|LI,LI,LI|3|0,1,2|2|true|true|false"
+    );
+    assert_eq!(doc.borrow().data[1].len(), 1);
+    // Errors from natives surface as catchable exceptions.
+    let out = eval_str(
+        &mut r,
+        r#"
+        var msgs = [];
+        try { ul.appendChild({}) } catch (e) { msgs.push(e instanceof TypeError, e.message) }
+        try { Object.getOwnPropertyDescriptor(__ElementProto, 'id').get.call({}) } catch (e) { msgs.push(e.message) }
+        try { new HTMLElement() } catch (e) { msgs.push(e.message) }
+        msgs.join('|')
+        "#,
+    );
+    assert_eq!(
+        out,
+        "true|Failed to execute 'appendChild' on 'Node': parameter 1 is not of type 'Node'.|Illegal invocation|Illegal constructor"
+    );
+    // Expandos survive collections (the wrapper is pinned in the cache).
+    r.release_temps();
+    r.gc();
+    assert_eq!(
+        eval_str(&mut r, "ul.expando + document.createElement('p').tagName"),
+        "keptP"
+    );
+}
+
+#[test]
+fn listeners_called_later() {
+    let mut r = Realm::new(Options::default());
+    let listeners: Rc<RefCell<Vec<Pinned>>> = Rc::new(RefCell::new(Vec::new()));
+    let l2 = listeners.clone();
+    let add = r.new_function("addEventListener", 2, move |r, _this, args| {
+        let f = args.get(1).copied().unwrap_or(Value::UNDEFINED);
+        if !r.is_callable(f) {
+            return Err(r.throw_type_error("listener is not a function"));
+        }
+        l2.borrow_mut().push(r.pin(f));
+        Ok(Value::UNDEFINED)
+    });
+    let g = r.global();
+    r.set(g, "addEventListener", add).unwrap();
+    r.eval("var clicks = 0; addEventListener('click', function (e) { clicks += e.detail; this.handled = true; });", "page.js").unwrap();
+    r.release_temps();
+    // Lots of garbage, collections, then dispatch.
+    r.eval(
+        "for (var i = 0; i < 50000; i++) ({ junk: [i] });",
+        "junk.js",
+    )
+    .unwrap();
+    r.release_temps();
+    r.gc();
+    for d in 1..=3 {
+        let ev = r.new_object();
+        r.set(ev, "detail", Value::int(d)).unwrap();
+        let fs: Vec<Value> = listeners.borrow().iter().map(|p| r.pinned(p)).collect();
+        for f in fs {
+            r.call(f, ev, &[ev]).unwrap();
+        }
+        assert_eq!(r.get(ev, "handled").unwrap().as_bool(), Some(true));
+        r.run_jobs().unwrap();
+        r.release_temps();
+    }
+    let v = r.eval("clicks", "x.js").unwrap();
+    assert_eq!(v.as_number(), Some(6.0));
+    for p in listeners.borrow_mut().drain(..) {
+        r.unpin(p);
+    }
+}
+
+struct Counted(Rc<Cell<u32>>);
+impl HostClass for Counted {
+    fn finalize(&self, _data: u64) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn finalizers_run_after_collection() {
+    let mut r = Realm::new(Options::default());
+    let n = Rc::new(Cell::new(0));
+    let class = r.register_class(Counted(n.clone()));
+    let make = r.new_function("make", 0, move |r, _, _| {
+        let p = r.intrinsic(Intrinsic::ObjectPrototype);
+        Ok(r.new_host_object(class, 7, p))
+    });
+    let g = r.global();
+    r.set(g, "make", make).unwrap();
+    r.eval(
+        "var keep = make(); for (var i = 0; i < 100; i++) make();",
+        "f.js",
+    )
+    .unwrap();
+    r.release_temps();
+    r.gc();
+    // A later entry runs the finalizers of what the collection freed.
+    r.eval("1", "x.js").unwrap();
+    assert_eq!(n.get(), 100);
+}
+
+#[test]
+fn handler_attributes_and_positions() {
+    let mut r = Realm::new(Options::default());
+    let f = r
+        .compile_function(
+            &["event"],
+            "return this.name + ':' + event.type",
+            "page.html",
+        )
+        .unwrap();
+    let this = r.new_object();
+    let name = r.string("button");
+    r.set(this, "name", name).unwrap();
+    let ev = r.new_object();
+    let ty = r.string("click");
+    r.set(ev, "type", ty).unwrap();
+    let out = r.call(f, this, &[ev]).unwrap();
+    assert_eq!(r.get_string(out).as_deref(), Some("button:click"));
+    // A syntax error in a handler is reported (and can't smuggle code past the wrapper).
+    assert!(
+        r.compile_function(&[], "}); globalThis.pwned = 1; (function(){", "page.html")
+            .is_err()
+    );
+    let pw = r.eval("typeof pwned", "x.js").unwrap();
+    assert_eq!(r.get_string(pw).as_deref(), Some("undefined"));
+    // Inline scripts report the page's own line numbers.
+    let e = r
+        .eval_with(
+            "var ok = 1;\nnull.boom;",
+            &ScriptOptions {
+                file: "index.html",
+                first_line: 40,
+                first_column: 9,
+            },
+        )
+        .unwrap_err();
+    let rep = r.report(&e);
+    assert_eq!(rep.name, "TypeError");
+    assert_eq!((rep.file.as_str(), rep.line), ("index.html", 41));
+    let e = r
+        .eval_with(
+            "  var = 1",
+            &ScriptOptions {
+                file: "index.html",
+                first_line: 12,
+                first_column: 5,
+            },
+        )
+        .unwrap_err();
+    let rep = r.report(&e);
+    assert_eq!(rep.name, "SyntaxError");
+    assert_eq!((rep.line, rep.column), (12, 11));
+    // A thrown non-error still has a position.
+    let e = r.eval("\n\nthrow 'plain'", "t.js").unwrap_err();
+    let rep = r.report(&e);
+    assert_eq!(
+        (rep.name.as_str(), rep.message.as_str(), rep.line),
+        ("Uncaught", "plain", 3)
+    );
+    let e = r
+        .eval(
+            "function outer() { inner() }\nfunction inner() { throw new Error('deep') }\nouter()",
+            "s.js",
+        )
+        .unwrap_err();
+    let rep = r.report(&e);
+    assert_eq!(rep.line, 2);
+    assert!(rep.stack.contains("at inner (s.js:2:"), "{}", rep.stack);
+    assert!(rep.stack.contains("at outer (s.js:1:"), "{}", rep.stack);
+    assert!(alloc::format!("{rep}").starts_with("Error: deep\n    at inner"));
+}
+
+#[test]
+fn promises_from_the_host() {
+    let mut r = Realm::new(Options::default());
+    let (p, resolve, _reject) = r.new_promise();
+    let g = r.global();
+    r.set(g, "hostPromise", p).unwrap();
+    let keep = r.pin(resolve);
+    r.eval("var got; hostPromise.then(v => { got = v * 2 });", "p.js")
+        .unwrap();
+    r.run_jobs().unwrap();
+    assert!(r.eval("got", "x.js").unwrap().is_undefined());
+    let res = r.pinned(&keep);
+    r.call(res, Value::UNDEFINED, &[Value::int(21)]).unwrap();
+    r.run_jobs().unwrap();
+    assert_eq!(r.eval("got", "x.js").unwrap().as_number(), Some(42.0));
+    r.unpin(keep);
+    // Unhandled rejections are reported once, handled ones not at all.
+    r.eval("Promise.reject(new Error('lost')); Promise.reject(1).catch(() => {}); (async () => { throw 'async lost' })()", "u.js")
+        .unwrap();
+    r.run_jobs().unwrap();
+    let un = r.take_unhandled_rejections();
+    assert_eq!(un.len(), 2);
+    let rep = r.report_value(un[0]);
+    assert_eq!(rep.message, "lost");
+    assert_eq!(r.inspect(un[1]), "async lost");
+    assert!(r.take_unhandled_rejections().is_empty());
+    // queueMicrotask-style jobs from the host.
+    let f = r
+        .eval("(function (a, b) { globalThis.sum = a + b })", "m.js")
+        .unwrap();
+    r.enqueue_job(f, &[Value::int(2), Value::int(3)]);
+    assert!(r.has_jobs());
+    r.run_jobs().unwrap();
+    assert_eq!(r.eval("sum", "x.js").unwrap().as_number(), Some(5.0));
+}
+
+struct Tab {
+    title: String,
+}
+
+#[test]
+fn host_state_and_conversions() {
+    let mut r = Realm::new(Options::default());
+    r.set_host(Box::new(Tab {
+        title: String::from("Home"),
+    }));
+    let get_title = r.new_function("title", 0, |r, _, _| {
+        let t = r.host::<Tab>().map(|t| t.title.clone()).unwrap_or_default();
+        Ok(r.string(&t))
+    });
+    let set_title = r.new_function("setTitle", 1, |r, _, args| {
+        let v = r.to_string(args.first().copied().unwrap_or(Value::UNDEFINED))?;
+        if let Some(t) = r.host::<Tab>() {
+            t.title = v;
+        }
+        Ok(Value::UNDEFINED)
+    });
+    let g = r.global();
+    r.set(g, "title", get_title).unwrap();
+    r.set(g, "setTitle", set_title).unwrap();
+    let v = r
+        .eval("setTitle(title() + ' page'); title()", "t.js")
+        .unwrap();
+    assert_eq!(r.get_string(v).as_deref(), Some("Home page"));
+    assert_eq!(r.host::<Tab>().map(|t| t.title.as_str()), Some("Home page"));
+    // Conversions run script (toString / valueOf) and propagate its exceptions.
+    let o = r
+        .eval(
+            "({ toString() { return 'T' }, valueOf() { return 3 } })",
+            "c.js",
+        )
+        .unwrap();
+    assert_eq!(r.to_string(o).unwrap(), "T");
+    assert_eq!(r.to_number(o).unwrap(), 3.0);
+    let bad = r
+        .eval("({ toString() { throw new Error('no') } })", "c.js")
+        .unwrap();
+    assert!(r.to_string(bad).is_err());
+    assert_eq!(r.type_of(o), "object");
+    let json = r.json_parse("{\"a\":[1,2]}").unwrap();
+    assert_eq!(
+        r.json_stringify(json).unwrap().as_deref(),
+        Some("{\"a\":[1,2]}")
+    );
+    assert_eq!(r.inspect(json), "{a: [1, 2]}");
+    let arr = r.new_array(&[]);
+    assert_eq!(r.array_push(arr, Value::int(1)).unwrap(), 1);
+    let fun = r.eval("(function named(a) {})", "f.js").unwrap();
+    assert_eq!(r.inspect(fun), "ƒ named()");
+    let m = r.eval("new Map([[1, 'a']])", "m.js").unwrap();
+    assert_eq!(r.inspect(m), "Map(1) {1 => 'a'}");
+    let e = r.eval("new TypeError('x')", "e.js").unwrap();
+    assert!(r.inspect(e).starts_with("TypeError: x"));
+    assert!(r.is_error(e));
+}
+
+#[test]
+fn wall_clock_interrupt() {
+    let mut r = Realm::new(Options::default());
+    let start = std::time::Instant::now();
+    r.set_interrupt(Some(Box::new(move || start.elapsed().as_millis() < 200)));
+    let e = r.eval("for (;;) {}", "spin.js").unwrap_err();
+    assert_eq!(e.termination(), Some(Termination::Interrupted));
+    assert!(start.elapsed().as_millis() < 2000);
+    let rep = r.report(&e);
+    assert!(rep.uncatchable);
+}

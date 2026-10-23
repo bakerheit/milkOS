@@ -1,0 +1,20 @@
+[package]
+name = "browserkit"
+version.workspace = true
+edition.workspace = true
+
+# The Browser's rules, without I/O or drawing to a window: cookies (RFC 6265), history,
+# bookmarks, the address bar, forms, downloads' names, certificate details, the built-in
+# pages, text measuring for the page renderer (user/webengine) and painting its display list
+# into pixels, and zoom. no_std + alloc, so it also
+# builds and tests on the Mac:
+#   cd user && cargo test -p browserkit --target aarch64-apple-darwin
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+milkweb = { path = "../../milkweb" }
+tls = { path = "../../tls" }
+imgdec = { path = "../imgdec" }
+webengine = { path = "../webengine" }

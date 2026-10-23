@@ -8,7 +8,6 @@
 //! - [`socket`]: the kernel socket API (what the syscall layer wraps).
 //! - [`dns`]: a stub resolver (thread context, blocking with a timeout), under the boot's
 //!   [`internet`] policy (on for interactive runs, off for tests).
-//! - [`web`]: the HTTP client's transport over kernel sockets (for the Browser).
 //! - [`procnet`]: `/proc/net/*`. [`services`]: the in-kernel HTTP demo server.
 //!
 //! Concurrency: all state is one [`Stack`] behind one `SpinLock` (`NET`), held only for
@@ -42,7 +41,6 @@ pub mod sockfile;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
-pub mod web;
 pub mod wire;
 
 use alloc::boxed::Box;

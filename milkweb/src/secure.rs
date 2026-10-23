@@ -70,7 +70,22 @@ impl Transport for Secure {
 
 /// Run the TLS handshake for `host` over `tcp` with `client` (its trust store, clock and
 /// random numbers): the stream to speak HTTP over.
-pub fn secure(client: &tls::Client, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error> {
+pub fn secure(
+    client: &tls::Client,
+    host: &str,
+    tcp: Box<dyn Transport>,
+) -> Result<Box<dyn Transport>, Error> {
+    secure_info(client, host, tcp).map(|(t, _)| t)
+}
+
+/// [`secure`], and what was negotiated (the cipher suite, the server's certificates), for a
+/// padlock's "connection details".
+pub fn secure_info(
+    client: &tls::Client,
+    host: &str,
+    tcp: Box<dyn Transport>,
+) -> Result<(Box<dyn Transport>, tls::ConnectionInfo), Error> {
     let s = client.connect(host, Tcp(tcp)).map_err(|e| error(host, e))?;
-    Ok(Box::new(Secure(s)))
+    let info = s.info().clone();
+    Ok((Box::new(Secure(s)), info))
 }

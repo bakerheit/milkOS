@@ -102,6 +102,10 @@ pub enum Key {
     Left,
     Right,
     Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
     Other(u32),
 }
 
@@ -161,18 +165,26 @@ fn word(b: &[u8], k: usize) -> u32 {
     u32::from_le_bytes([b[4 * k], b[4 * k + 1], b[4 * k + 2], b[4 * k + 3]])
 }
 
+fn mods_of(m: u32) -> Mods {
+    Mods {
+        shift: m & 1 != 0,
+        ctrl: m & 2 != 0,
+        alt: m & 4 != 0,
+        meta: m & 8 != 0,
+    }
+}
+
+/// The modifier keys an input event carries (key, button, move and scroll events).
+fn event_mods(b: &[u8; 32]) -> Option<Mods> {
+    matches!(word(b, 0), 1 | 3..=6).then(|| mods_of(word(b, 4)))
+}
+
 fn decode(b: &[u8; 32]) -> Option<Event> {
     let (x, y) = (word(b, 1) as i32, word(b, 2) as i32);
     let extra = word(b, 5) as i32;
     Some(match word(b, 0) {
         1 => {
-            let m = word(b, 4);
-            let mods = Mods {
-                shift: m & 1 != 0,
-                ctrl: m & 2 != 0,
-                alt: m & 4 != 0,
-                meta: m & 8 != 0,
-            };
+            let mods = mods_of(word(b, 4));
             let key = match word(b, 3) {
                 0x1_0001 => Key::Enter,
                 0x1_0002 => Key::Backspace,
@@ -183,6 +195,10 @@ fn decode(b: &[u8; 32]) -> Option<Event> {
                 0x1_0007 => Key::Left,
                 0x1_0008 => Key::Right,
                 0x1_0009 => Key::Delete,
+                0x1_000A => Key::Home,
+                0x1_000B => Key::End,
+                0x1_000C => Key::PageUp,
+                0x1_000D => Key::PageDown,
                 c => char::from_u32(c).map_or(Key::Other(c), Key::Char),
             };
             Event::Key(key, mods)
@@ -219,6 +235,8 @@ pub struct Window {
     px: *mut u32,
     pub w: i32,
     pub h: i32,
+    /// The modifiers of the last input event ([`Window::mods`]).
+    mods: core::cell::Cell<Mods>,
 }
 
 impl Window {
@@ -248,6 +266,7 @@ impl Window {
             px: addr as *mut u32,
             w,
             h,
+            mods: core::cell::Cell::new(Mods::default()),
         })
     }
 
@@ -345,7 +364,19 @@ impl Window {
                 ],
             )
         };
-        if r == 1 { decode(&b) } else { None }
+        if r != 1 {
+            return None;
+        }
+        if let Some(m) = event_mods(&b) {
+            self.mods.set(m);
+        }
+        decode(&b)
+    }
+
+    /// The modifier keys held during the last key, button, drag or scroll event returned by
+    /// [`Window::event`] (Cmd-click, Shift-scroll).
+    pub fn mods(&self) -> Mods {
+        self.mods.get()
     }
 
     pub fn set_title(&self, t: &str) {

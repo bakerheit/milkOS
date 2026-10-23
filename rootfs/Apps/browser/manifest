@@ -1,0 +1,7 @@
+format 1
+name browser
+version 1.0.0
+description Browser: web pages in tabs (http and https, forms, cookies, bookmarks, downloads)
+exec browser
+files
+payload-sha256 -

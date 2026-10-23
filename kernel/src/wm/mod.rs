@@ -66,6 +66,7 @@ use crate::sync::SpinLock;
 use crate::{cursor, display, input, kprintln, timer};
 
 use buffer::Buffer;
+use event::Mods;
 pub use event::{Button, Event, Key};
 use paint::{Painter, contains, hit};
 pub use power::panic_screen;
@@ -211,8 +212,6 @@ pub enum Request {
     Powerbox,
     /// A process asks for an administrator's authorisation (authpanel.rs).
     Auth,
-    /// Nothing to do: just run a frame (a background job has a result for an app).
-    Wake,
 }
 
 static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
@@ -220,6 +219,11 @@ static REQUESTS: SpinLock<Vec<Request>> = SpinLock::new(Vec::new());
 /// Queue a request; it is handled at the start of the next frame.
 /// `/Apps/<name>/<name>` of a built-in app (Paint, Peek: apps with no dock line of their
 /// own). An installed package's program only starts through its tile (sandboxed).
+/// The Browser (user/browser), and the page it opens from the dock's Actions: milkOS's own
+/// (the httpd service).
+pub const BROWSER: &str = "/Apps/browser/browser";
+pub const HOME_PAGE: &str = "http://127.0.0.1/";
+
 fn builtin_app_program(path: &str) -> bool {
     path.strip_prefix("/Apps/")
         .and_then(|r| r.split_once('/'))
@@ -467,6 +471,9 @@ pub struct Desktop {
     notif: bool,
     drawer: notif::Drawer,
     history: Vec<notif::Notice>,
+    /// The modifier keys held right now (from the input stream; demo scripts set them too),
+    /// sent with pointer and wheel events.
+    held: Mods,
 }
 
 impl Desktop {
@@ -491,6 +498,7 @@ impl Desktop {
             (timer::now_ns() - t) / 1_000_000
         );
         let mut d = Desktop {
+            held: Mods::NONE,
             fb,
             back,
             wp,
@@ -861,6 +869,33 @@ impl Desktop {
         }
     }
 
+    /// Open a web address in the Browser (/Apps/browser): a new one is started with it; a
+    /// running one finds it in its inbox (`~/Library/Browser/open`, one address a line, which
+    /// it reads within half a second) and comes to the front.
+    fn open_url(&mut self, url: &str) {
+        let url: String = url.chars().filter(|c| !c.is_control()).take(4000).collect();
+        match self.program_window("browser") {
+            Some(id) => {
+                let inbox = "/Users/milk/Library/Browser/open";
+                let mut text = crate::fs::read_to_string(inbox).unwrap_or_default();
+                if text.len() < 64 * 1024 {
+                    text.push_str(&url);
+                    text.push('\n');
+                    if let Err(e) = crate::fs::write_file(inbox, text.as_bytes()) {
+                        self.post_toast(
+                            "Browser",
+                            &alloc::format!("can't hand it the address: {e}"),
+                        );
+                    }
+                }
+                self.show_window(id);
+            }
+            None => {
+                self.launch_with(BROWSER, None, Some(&url));
+            }
+        }
+    }
+
     /// `open` from /dev/wm: an app by name, a folder (Files), a text file (Notes) or a program.
     fn open_any(&mut self, what: &str) {
         match what.to_ascii_lowercase().as_str() {
@@ -871,15 +906,14 @@ impl Desktop {
             "today" | "home" => return self.toggle_mode(Mode::Home),
             "spaces" => return self.toggle_mode(Mode::Spaces),
             "paint" => return self.launch("/Apps/paint/paint"),
-            "browser" | "web" => return self.open(App::Browser),
+            "browser" | "web" => return self.launch(BROWSER),
             "music" => return self.open(App::Music),
             "milkdrop" | "milk drop" => return self.open(App::Drop),
             _ if what.starts_with("http://")
                 || what.starts_with("https://")
                 || what.starts_with("localhost") =>
             {
-                apps::browser::open_url(what);
-                return self.open(App::Browser);
+                return self.open_url(what);
             }
             _ => {}
         }
@@ -1557,6 +1591,10 @@ impl Desktop {
         let frames = self.stats.frames;
         // Input: virtio input, then the demo script.
         while let Some(ev) = input::poll() {
+            // Modifier presses are no events of ours, but pointer events carry what is held.
+            if let input::Event::KeyDown(k) | input::Event::KeyUp(k) = ev {
+                self.held = event::mods_of(k.mods);
+            }
             if let Some(ev) = event::from_input(ev) {
                 self.handle(ev);
             }
@@ -1588,7 +1626,6 @@ impl Desktop {
                 Request::ClientCreate(id) => self.open(App::Client(id)),
                 Request::OpenAny(what) => self.open_any(&what),
                 Request::Prefs(p) => self.apply_prefs(p),
-                Request::Wake => {}
                 Request::Lock => self.lock_screen(),
                 Request::OpenPackage(name) => {
                     packages::refresh();
@@ -2152,8 +2189,9 @@ impl Desktop {
                 if self.notif && hit(&notif::rect(), x, y) {
                     self.scroll_notif(dy);
                 } else if let Some(id) = self.window_at(x, y)
+                    && let held = self.held
                     && let Some(w) = self.win_mut(id)
-                    && w.contents.scroll(dy)
+                    && w.contents.scroll_with(dy, held)
                 {
                     w.dirty = true;
                 }
@@ -2374,6 +2412,7 @@ impl Desktop {
     }
 
     fn send_pointer(&mut self, id: u32, x: i32, y: i32, kind: PointerKind) {
+        let held = self.held;
         let Some(w) = self.win_mut(id) else {
             return;
         };
@@ -2382,6 +2421,7 @@ impl Desktop {
             x: x - w.rect.x - b.x,
             y: y - w.rect.y - b.y,
             kind,
+            mods: held,
         };
         if w.contents.pointer(&e) {
             w.dirty = true;

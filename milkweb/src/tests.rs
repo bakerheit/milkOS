@@ -77,10 +77,18 @@ impl Transport for FakeConn {
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
         self.sent.extend_from_slice(buf);
-        if self.sent.ends_with(b"\r\n\r\n") {
-            let r = String::from_utf8_lossy(&self.sent).into_owned();
-            self.log.borrow_mut().requests.push(r);
-            self.sent.clear();
+        // A whole request: the head, and its body if it says it has one.
+        let text = String::from_utf8_lossy(&self.sent).into_owned();
+        if let Some(end) = text.find("\r\n\r\n") {
+            let len = text[..end]
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .and_then(|n| n.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if self.sent.len() >= end + 4 + len {
+                self.log.borrow_mut().requests.push(text);
+                self.sent.clear();
+            }
         }
         Ok(buf.len())
     }
@@ -1334,4 +1342,188 @@ fn html_odd_input() {
     );
     let p = html::plain("a\tb\r\n\u{2014}");
     assert_eq!(p.blocks[0].text(), "a    b\n-");
+}
+
+// ---- requests with a body, and the hooks (the Browser's fetch) --------------------------------
+
+#[derive(Default)]
+struct Rec {
+    cookies_asked: Vec<String>,
+    seen: Vec<(String, u16, Vec<String>)>,
+    progress: Vec<(usize, Option<usize>)>,
+    stop_after: Option<usize>,
+    reads: usize,
+    raise: Option<usize>,
+}
+
+impl http::Hooks for Rec {
+    fn cookie(&mut self, url: &Url, _m: http::Method) -> Option<String> {
+        self.cookies_asked.push(url.to_text());
+        (url.host == "a.test").then(|| String::from("sid=1"))
+    }
+    fn response(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> Option<usize> {
+        let sc = headers
+            .iter()
+            .filter(|(k, _)| k == "set-cookie")
+            .map(|(_, v)| v.clone())
+            .collect();
+        self.seen.push((url.to_text(), status, sc));
+        self.raise
+    }
+    fn progress(&mut self, got: usize, total: Option<usize>) {
+        self.progress.push((got, total));
+    }
+    fn stop(&mut self) -> bool {
+        self.reads += 1;
+        self.stop_after.is_some_and(|n| self.reads > n)
+    }
+}
+
+#[test]
+fn http_post_body_and_post_redirect_get() {
+    let mut net = FakeNet::new()
+        .serve(
+            "a.test",
+            answer(b"HTTP/1.1 303 See Other\r\nLocation: /form\r\nSet-Cookie: sid=2\r\nContent-Length: 0\r\n\r\n"),
+        )
+        .serve("a.test", answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+    let req = http::Request::post_form(&url("http://a.test/form"), b"name=milk&q=a%26b".to_vec());
+    let mut h = Rec::default();
+    let r = http::fetch(&mut net, &req, &Options::default(), &mut h).unwrap();
+    assert_eq!(r.body, b"ok");
+    let reqs = &net.log.borrow().requests;
+    assert!(
+        reqs[0].starts_with("POST /form HTTP/1.1\r\n"),
+        "{}",
+        reqs[0]
+    );
+    assert!(reqs[0].contains("\r\nContent-Type: application/x-www-form-urlencoded\r\n"));
+    assert!(reqs[0].contains("\r\nContent-Length: 17\r\n"));
+    assert!(reqs[0].contains("\r\nCookie: sid=1\r\n"));
+    assert!(reqs[0].ends_with("\r\n\r\nname=milk&q=a%26b"));
+    // 303 to its own address: a GET, no body, not a loop.
+    assert!(reqs[1].starts_with("GET /form HTTP/1.1\r\n"), "{}", reqs[1]);
+    assert!(!reqs[1].contains("Content-Length"));
+    assert_eq!(
+        h.seen[0],
+        (
+            "http://a.test/form".to_string(),
+            303,
+            vec!["sid=2".to_string()]
+        )
+    );
+    assert_eq!(h.seen[1].1, 200);
+}
+
+#[test]
+fn http_307_repeats_the_post_and_cookies_are_per_hop() {
+    let mut net = FakeNet::new()
+        .serve(
+            "a.test",
+            answer(b"HTTP/1.1 307 Again\r\nLocation: http://b.test/x\r\n\r\n"),
+        )
+        .serve(
+            "b.test",
+            answer(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+        );
+    let req = http::Request::post_form(&url("http://a.test/f"), b"a=1".to_vec());
+    let mut h = Rec::default();
+    http::fetch(&mut net, &req, &Options::default(), &mut h).unwrap();
+    let reqs = &net.log.borrow().requests;
+    assert!(
+        reqs[1].starts_with("POST /x HTTP/1.1\r\nHost: b.test\r\n"),
+        "{}",
+        reqs[1]
+    );
+    assert!(reqs[1].ends_with("\r\n\r\na=1"));
+    // a.test's cookie stays on a.test.
+    assert!(reqs[0].contains("Cookie: sid=1"));
+    assert!(!reqs[1].contains("Cookie"));
+    assert_eq!(h.cookies_asked, ["http://a.test/f", "http://b.test/x"]);
+}
+
+#[test]
+fn http_extra_headers_cannot_smuggle() {
+    let mut net = FakeNet::new().serve(
+        "a.test",
+        answer(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"),
+    );
+    let mut req = http::Request::get(&url("http://a.test/"));
+    req.headers
+        .push(("Referer".into(), "http://a.test/prev".into()));
+    req.headers
+        .push(("X-Evil".into(), "a\r\nHost: evil.test".into()));
+    req.headers.push(("Host".into(), "evil.test".into()));
+    req.headers.push(("Bad Name:".into(), "x".into()));
+    http::fetch(&mut net, &req, &Options::default(), &mut http::NoHooks).unwrap();
+    let r = &net.log.borrow().requests[0];
+    assert!(r.contains("\r\nReferer: http://a.test/prev\r\n"));
+    assert!(!r.contains("evil"), "{r}");
+    assert_eq!(r.matches("Host:").count(), 1);
+}
+
+#[test]
+fn http_progress_stop_and_bigger_limit() {
+    let body = vec![b'x'; 40_000];
+    let mut resp = b"HTTP/1.1 200 OK\r\nContent-Length: 40000\r\n\r\n".to_vec();
+    resp.extend_from_slice(&body);
+    let script = Script {
+        pieces: resp.chunks(5000).map(|c| c.to_vec()).collect(),
+        stall: false,
+    };
+    // Progress is reported with the total.
+    let mut net = FakeNet::new().serve("a.test", script.clone());
+    let mut h = Rec::default();
+    let r = http::fetch(
+        &mut net,
+        &http::Request::get(&url("http://a.test/f")),
+        &Options::default(),
+        &mut h,
+    )
+    .unwrap();
+    assert_eq!(r.body.len(), 40_000);
+    assert_eq!(h.progress.last(), Some(&(40_000, Some(40_000))));
+    assert!(h.progress.len() > 2);
+    // Stop.
+    let mut net = FakeNet::new().serve("a.test", script.clone());
+    let mut h = Rec {
+        stop_after: Some(3),
+        ..Rec::default()
+    };
+    let e = http::fetch(
+        &mut net,
+        &http::Request::get(&url("http://a.test/f")),
+        &Options::default(),
+        &mut h,
+    )
+    .unwrap_err();
+    assert_eq!(e.error, Error::Cancelled);
+    assert_eq!(e.error.title(), "Stopped");
+    // Over the limit, unless the hook raises it for this response (a download).
+    let small = Options {
+        max_body: 10_000,
+        ..Options::default()
+    };
+    let mut net = FakeNet::new().serve("a.test", script.clone());
+    let e = http::fetch(
+        &mut net,
+        &http::Request::get(&url("http://a.test/f")),
+        &small,
+        &mut Rec::default(),
+    )
+    .unwrap_err();
+    assert_eq!(e.error, Error::TooBig(10_000));
+    let mut net = FakeNet::new().serve("a.test", script);
+    let mut h = Rec {
+        raise: Some(100_000),
+        ..Rec::default()
+    };
+    let r = http::fetch(
+        &mut net,
+        &http::Request::get(&url("http://a.test/f")),
+        &small,
+        &mut h,
+    )
+    .unwrap();
+    assert_eq!(r.body.len(), 40_000);
 }

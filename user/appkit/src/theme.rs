@@ -29,6 +29,10 @@ pub struct Theme {
     pub on_danger: Color,
     /// "Fastest" green on milk.
     pub good: Color,
+    /// Link text (always underlined; SPEC "Type"), and while hovered or pressed. Not the
+    /// accent blue, which is for fills and meters only.
+    pub link: Color,
+    pub link_pressed: Color,
 }
 
 impl Theme {
@@ -42,6 +46,8 @@ impl Theme {
             latte: gui::LATTE,
             cocoa: gui::COCOA,
             espresso: gui::ESPRESSO,
+            link: rgb(0x4F, 0x64, 0xA0),
+            link_pressed: rgb(0x3F, 0x52, 0x8A),
             ..Theme::fixed()
         }
     }
@@ -58,6 +64,8 @@ impl Theme {
             espresso: rgb(0xF4, 0xEB, 0xE0),
             // Green on dark milk needs the plain accent to keep its contrast.
             good: gui::MATCHA,
+            link: rgb(0xA9, 0xB8, 0xE8),
+            link_pressed: rgb(0xC3, 0xCD, 0xF0),
             ..Theme::fixed()
         }
     }
@@ -81,6 +89,8 @@ impl Theme {
             danger: rgb(0xB5, 0x47, 0x3B),
             on_danger: rgb(0xFF, 0xFD, 0xF8),
             good: rgb(0x42, 0x70, 0x4B),
+            link: 0,
+            link_pressed: 0,
         }
     }
 

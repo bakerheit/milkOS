@@ -7,6 +7,8 @@ SOCKET is a qemu `-qmp unix:SOCKET,server,nowait` socket. Commands run in order:
 
   type TEXT          type TEXT on a US layout ("\\n" in TEXT is Enter; shift added as needed)
   key COMBO          press one key combo by qemu qcode name, e.g. ret, shift-a, ctrl-c, f1
+  hold KEY           press KEY (a qcode, e.g. meta_l, alt, shift) and keep it down
+  release KEY        let it go (hold meta_l click release meta_l = a Cmd-click)
   move X Y           put the absolute pointer (virtio-tablet) on screen pixel X, Y
   button BTN STATE   BTN = left|right|middle, STATE = down|up
   click [BTN]        press and release BTN (default left)
@@ -137,6 +139,11 @@ def main(argv):
                 time.sleep(delay)
         elif op == "key":
             q.keys([_ALIASES.get(k, k) for k in argv.pop(0).split("-")])
+            time.sleep(delay)
+        elif op in ("hold", "release"):
+            k = argv.pop(0)
+            k = _ALIASES.get(k, k)
+            q.events([{"type": "key", "data": {"down": op == "hold", "key": {"type": "qcode", "data": k}}}])
             time.sleep(delay)
         elif op == "move":
             x, y = int(argv.pop(0)), int(argv.pop(0))

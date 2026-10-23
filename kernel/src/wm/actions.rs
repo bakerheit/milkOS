@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use crate::sync::SpinLock;
 
-use super::apps::{browser, files, music, notes};
+use super::apps::{files, music, notes};
 use super::prefs;
 use super::window::App;
 use super::{Mode, Request, request};
@@ -105,8 +105,9 @@ pub fn register_builtin() {
         request(Request::Mode(Mode::Spaces))
     });
     register("Browser", "Open the milkOS home page", || {
-        browser::open_url(browser::HOME);
-        request(Request::Open(App::Browser));
+        request(Request::OpenAny(alloc::string::String::from(
+            super::HOME_PAGE,
+        )));
     });
     register("Music", "Play / pause music", || {
         if music::now().track.is_some() {

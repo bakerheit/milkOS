@@ -26,6 +26,7 @@ const CLONE_CHILD_CLEARTID: usize = 0x200000;
 struct Tcb {
     tid: AtomicI32,
     stack: *mut u8,
+    stack_size: usize,
     /// Boxed closure to run.
     func: *mut (dyn FnMut() + 'static),
 }
@@ -53,7 +54,14 @@ extern "C" fn thread_run(tcb: *mut Tcb) -> ! {
 
 /// Spawn a thread running `f`. Panics if out of memory.
 pub fn spawn<F: FnMut() + Send + 'static>(f: F) -> JoinHandle {
-    let stack = sys::mmap_anon(STACK_SIZE).expect("thread stack");
+    spawn_sized(STACK_SIZE, f)
+}
+
+/// [`spawn`] with a `stack_size`-byte stack (at least 64 KiB; deep work like a TLS
+/// handshake wants more than the default 128 KiB).
+pub fn spawn_sized<F: FnMut() + Send + 'static>(stack_size: usize, f: F) -> JoinHandle {
+    let stack_size = stack_size.max(64 * 1024).next_multiple_of(4096);
+    let stack = sys::mmap_anon(stack_size).expect("thread stack");
     // Put the Tcb at the base of the stack region (lowest address), the stack grows down
     // from the top.
     let tcb = stack as *mut Tcb;
@@ -62,9 +70,10 @@ pub fn spawn<F: FnMut() + Send + 'static>(f: F) -> JoinHandle {
     unsafe {
         (*tcb).tid = AtomicI32::new(-1);
         (*tcb).stack = stack;
+        (*tcb).stack_size = stack_size;
         (*tcb).func = alloc::boxed::Box::into_raw(boxed);
     }
-    let sp = (stack as usize + STACK_SIZE) & !15;
+    let sp = (stack as usize + stack_size) & !15;
     let flags = CLONE_VM
         | CLONE_FS
         | CLONE_FILES
@@ -106,7 +115,7 @@ impl JoinHandle {
         unsafe {
             drop(alloc::boxed::Box::from_raw((*tcb).func));
             let stack = (*tcb).stack;
-            let _ = sys::munmap(stack, STACK_SIZE);
+            let _ = sys::munmap(stack, (*tcb).stack_size);
         }
     }
 }

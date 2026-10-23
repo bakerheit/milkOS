@@ -1704,17 +1704,17 @@ impl Desktop {
         let base = dock_icon();
         let max_px = base * p.magnify_pct / 100;
         let (px, py) = self.pointer;
-        let over = p.magnify
+        let allowed = p.magnify
             && self.mode == Mode::Desktop
             && self.launcher.is_none()
             && self.lock_a == 0
-            && !matches!(self.drag, Some(Drag::Move { .. } | Drag::Resize { .. }))
-            && dock::in_zone(&self.dock_layout, max_px, px, py);
+            && !matches!(self.drag, Some(Drag::Move { .. } | Drag::Resize { .. }));
+        let over = allowed && dock::in_zone(&self.dock_layout, max_px, px, py);
         if over {
             self.dock_mag.x = px;
         }
-        self.dock_mag.target = if over { 1024 } else { 0 };
-        let easing = self.dock_mag.step(now);
+        self.dock_mag.set_over(over, allowed, now);
+        let easing = self.dock_mag.step(now) || self.dock_mag.waiting();
         let n = shell::dock_len();
         let mut l = dock::layout(
             n,

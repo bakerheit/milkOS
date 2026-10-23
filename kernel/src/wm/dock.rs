@@ -20,6 +20,9 @@ use super::theme::*;
 
 /// Ease time for entering / leaving (ns).
 pub const EASE_NS: u64 = 150_000_000;
+/// How long the pointer must stay out of the dock before it eases back down (ns), so grazing
+/// the bar's edge, or the strip of screen under it, does not make it flutter.
+pub const LEAVE_DELAY_NS: u64 = 250_000_000;
 /// Falloff radius in icon pitches (the influence reaches this far to each side).
 const RADIUS_PITCHES: i32 = 3;
 /// Fixed point one.
@@ -35,6 +38,8 @@ pub struct Mag {
     /// Moving towards ONE (pointer over the dock) or 0.
     pub target: i32,
     pub last_ns: u64,
+    /// When the pointer left the dock (0: it has not, or the delay is over).
+    left_ns: u64,
 }
 
 impl Mag {
@@ -44,7 +49,37 @@ impl Mag {
             t: 0,
             target: 0,
             last_ns: 0,
+            left_ns: 0,
         }
+    }
+
+    /// Say where the pointer is: `over` the dock, or out of it. Out of it, the dock stays
+    /// magnified for `LEAVE_DELAY_NS` first when `hold` (the pointer moved away; not when
+    /// something else, a menu or the lock screen, took over).
+    pub fn set_over(&mut self, over: bool, hold: bool, now: u64) {
+        if over {
+            self.left_ns = 0;
+            self.target = ONE;
+            return;
+        }
+        if self.target == ONE && hold {
+            if self.left_ns == 0 {
+                self.left_ns = now.max(1);
+            }
+            let slow = super::anim::SLOWMO
+                .load(core::sync::atomic::Ordering::Relaxed)
+                .max(1);
+            if now.saturating_sub(self.left_ns) < LEAVE_DELAY_NS * slow {
+                return;
+            }
+        }
+        self.left_ns = 0;
+        self.target = 0;
+    }
+
+    /// Out of the dock but still held magnified (the frame loop must keep running).
+    pub fn waiting(&self) -> bool {
+        self.left_ns != 0
     }
 
     /// Advance the ease to `now`. True if `t` changed (or is still moving).

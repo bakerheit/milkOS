@@ -426,8 +426,11 @@ pub(crate) fn attach(
             return false;
         }
     }
-    // The new document brings its own frames; the old one's go.
+    // The new document brings its own frames; the old one's go (and the table moves up).
     frames.remove_below(id);
+    let Some(i) = frames.index(id) else {
+        return false;
+    };
     let s = &mut frames.slots[i];
     let name = match s.doc.as_ref() {
         Some(old) => old.page.window_name.clone(),
@@ -443,6 +446,9 @@ pub(crate) fn attach(
         node: s.node,
     };
     doc.page.window_name = name;
+    // Its own frames, if any, are new to this table.
+    doc.page.frame_nodes.clear();
+    doc.page.frames_dirty = true;
     s.doc = Some(Box::new(doc));
     s.attached = Some(s.generation);
     s.scroll = (0, 0);
@@ -770,7 +776,9 @@ fn layout_level(
     m: &dyn TextMeasurer,
 ) {
     let marks: Vec<crate::paint::FrameMark> = page.frame_marks().to_vec();
-    let mut seen: Vec<usize> = Vec::new();
+    // Slots are looked up by id from here on: syncing a frame's own frames can remove slots
+    // and move the rest.
+    let mut seen: Vec<FrameId> = Vec::new();
     for mk in &marks {
         let Some(si) = frames
             .slots
@@ -779,10 +787,10 @@ fn layout_level(
         else {
             continue;
         };
-        if seen.contains(&si) {
+        if seen.contains(&frames.slots[si].id) {
             continue;
         }
-        seen.push(si);
+        seen.push(frames.slots[si].id);
         let s = &mut frames.slots[si];
         if s.rect != mk.rect || !s.rendered {
             s.rect = mk.rect;
@@ -822,6 +830,7 @@ fn layout_level(
             let l = doc.display_list();
             (l.width, l.height)
         };
+        let mut moved = false;
         if let Some(s) = frames.slot_mut(id) {
             s.vp = Some(child_vp);
             s.content = (cw, ch);
@@ -830,16 +839,17 @@ fn layout_level(
             let clamped = (want.0.clamp(0, mx), want.1.clamp(0, my));
             if clamped != s.scroll {
                 s.scroll = clamped;
-                frames.version += 1;
+                moved = true;
             }
-            if let Some(s) = frames.slot_mut(id) {
-                s.doc = Some(doc);
-            }
+            s.doc = Some(doc);
+        }
+        if moved {
+            frames.version += 1;
         }
     }
     // Elements with no box this time.
-    for (i, s) in frames.slots.iter_mut().enumerate() {
-        if s.parent == parent && !seen.contains(&i) {
+    for s in frames.slots.iter_mut() {
+        if s.parent == parent && !seen.contains(&s.id) {
             s.rect = Rect::default();
             s.rendered = false;
         }
@@ -883,9 +893,9 @@ pub(crate) fn needs_layout(top: &crate::Document) -> bool {
     };
     // A frame with no box is not laid out, so its changes wait until it has one.
     f.version != top.frames_seen
-        || f.slots.iter().any(|s| {
-            !s.rect.is_empty() && s.doc.as_ref().is_some_and(|d| d.page.changed())
-        })
+        || f.slots
+            .iter()
+            .any(|s| !s.rect.is_empty() && s.doc.as_ref().is_some_and(|d| d.page.changed()))
 }
 
 // ---- pointer, scrolling ---------------------------------------------------------------------

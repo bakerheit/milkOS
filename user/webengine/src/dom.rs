@@ -484,48 +484,44 @@ impl Dom {
         self.changes.tree = true;
         self.changes.forms = true;
         self.changes.images = true;
-        if self.subtree_has_iframe(child) {
+        let (has_sheet, has_frame) = self.subtree_has(child);
+        if has_frame {
             self.changes.frames = true;
         }
         // The parent's parent: :empty, :nth-child and sibling combinators around the parent.
         let gp = self.nodes[parent as usize].parent;
         self.note_restyle(if gp == NONE || gp == 0 { parent } else { gp });
-        if self.is_html(parent, tag::STYLE) || self.subtree_has_sheet(child) {
+        if self.is_html(parent, tag::STYLE) || has_sheet {
             self.changes.sheets = true;
         }
     }
 
-    /// Is there an `<iframe>` in the subtree of `n` (bounded, so a hostile tree costs little)?
-    fn subtree_has_iframe(&self, n: NodeId) -> bool {
+    /// Is there a stylesheet (`<style>`, `<link>`) or an `<iframe>` in the subtree of `n`
+    /// (bounded, so a hostile tree costs little: past the bound both are assumed)?
+    fn subtree_has(&self, n: NodeId) -> (bool, bool) {
+        let (mut sheet, mut frame) = (false, false);
         let mut c = n;
         let mut k = 0;
         while c != NONE {
-            if self.is_html(c, tag::IFRAME) {
-                return true;
+            if let Some(e) = self.element(c)
+                && e.ns == Ns::Html
+            {
+                if e.name == tag::STYLE || e.name == tag::LINK {
+                    sheet = true;
+                } else if e.name == tag::IFRAME {
+                    frame = true;
+                }
+                if sheet && frame {
+                    break;
+                }
             }
             k += 1;
             if k > 100_000 {
-                return true;
+                return (true, true);
             }
             c = self.next_in(c, n);
         }
-        false
-    }
-
-    fn subtree_has_sheet(&self, n: NodeId) -> bool {
-        let mut c = n;
-        let mut k = 0;
-        while c != NONE {
-            if self.is_html(c, tag::STYLE) || self.is_html(c, tag::LINK) {
-                return true;
-            }
-            k += 1;
-            if k > 100_000 {
-                return true;
-            }
-            c = self.next_in(c, n);
-        }
-        false
+        (sheet, frame)
     }
 
     /// `n`'s state (checked, selected) changed: restyle around it.

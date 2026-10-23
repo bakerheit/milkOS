@@ -1387,7 +1387,12 @@ fn layout_settles_with_frames_of_every_kind() {
             "{FLAT}<iframe style='display:none'></iframe><iframe width=0 height=0></iframe>\
              <iframe style='visibility:hidden' width=50 height=50></iframe><iframe width=50 height=50></iframe>"
         ),
-        &["<p>a", "<p>b<iframe></iframe>", "<p>c", "<p>d<iframe width=10 height=10></iframe>"],
+        &[
+            "<p>a",
+            "<p>b<iframe></iframe>",
+            "<p>c",
+            "<p>d<iframe width=10 height=10></iframe>",
+        ],
     );
     assert!(!d.needs_layout());
     lay(&mut d);
@@ -1407,9 +1412,8 @@ fn layout_settles_with_frames_of_every_kind() {
 
 #[test]
 fn the_iframe_element_hears_load_and_error() {
-    let mut d = scripted(
-        "<iframe id=a onload='window.log.push(\"attr\")'></iframe><iframe id=b></iframe>",
-    );
+    let mut d =
+        scripted("<iframe id=a onload='window.log.push(\"attr\")'></iframe><iframe id=b></iframe>");
     eval_str(
         &mut d,
         "window.log = []; document.getElementById('b').addEventListener('load', function (e) { log.push('b:' + e.type + ':' + (e.target.id) + ':' + e.bubbles); }); \
@@ -1420,16 +1424,25 @@ fn the_iframe_element_hears_load_and_error() {
     assert!(d.frame_load_event(ids[1], &mut h, false));
     assert!(d.frame_load_event(ids[1], &mut h, true));
     assert!(d.frame_load_event(ids[0], &mut h, false));
-    assert_eq!(eval_str(&mut d, "log.join()"), "b:load:b:false,b:error,attr");
+    assert_eq!(
+        eval_str(&mut d, "log.join()"),
+        "b:load:b:false,b:error,attr"
+    );
     assert!(!d.frame_load_event(FrameId(9), &mut h, false));
     // From inside a frame: the element is in the parent's document, so it is the parent's realm.
     let mut outer = scripted("<iframe id=f></iframe>");
-    eval_str(&mut outer, "window.n = 0; document.getElementById('f').onload = function () { n++; };");
+    eval_str(
+        &mut outer,
+        "window.n = 0; document.getElementById('f').onload = function () { n++; };",
+    );
     let id = outer.frame_slots()[0].id;
     assert!(outer.attach_frame(id, scripted("<iframe id=g></iframe>"), None));
     outer.frame_slots();
     let g = outer.frame_slots()[1].id;
-    eval_str(outer.frame_doc_mut(id).unwrap(), "window.m = 0; document.getElementById('g').onload = function () { m++; };");
+    eval_str(
+        outer.frame_doc_mut(id).unwrap(),
+        "window.m = 0; document.getElementById('g').onload = function () { m++; };",
+    );
     assert!(outer.frame_load_event(g, &mut h, false));
     assert!(outer.frame_load_event(id, &mut h, false));
     assert_eq!(eval_str(&mut outer, "n"), "1");
@@ -1460,4 +1473,41 @@ fn loaded_says_when_a_document_is_done() {
     assert!(plain.loaded());
     let plain = Document::parse_str("<img src=a.png>", "http://top.example/");
     assert!(!plain.loaded());
+}
+
+#[test]
+fn hostile_attribute_values_are_bounded() {
+    let big = "x".repeat(3 << 20);
+    let html = alloc::format!(
+        "<iframe name='{}' srcdoc='{}' sandbox='{}' allow='{}' src='   ' loading='LAZY ' referrerpolicy='  Origin '></iframe>\
+         <iframe src='http://[::1' width=-5 height=1e999 scrolling=NO></iframe>\
+         <iframe srcdoc='é{}é'></iframe>",
+        "n".repeat(1 << 20),
+        big,
+        "allow-scripts ".repeat(5000),
+        "camera; ".repeat(10_000),
+        "\u{1F600}".repeat(400_000),
+    );
+    let mut d = top(&html);
+    let s = d.frame_slots();
+    assert_eq!(s.len(), 3);
+    assert_eq!(s[0].name.len(), 64 << 10);
+    assert_eq!(s[0].srcdoc.as_ref().unwrap().len(), 1 << 20);
+    assert_eq!(s[0].allow.len(), 4096);
+    assert!(s[0].src.is_none() && s[0].lazy);
+    assert_eq!(s[0].referrer_policy, "origin");
+    assert!(s[0].sandbox.unwrap().scripts);
+    // A multi-byte character is never cut in half.
+    assert!(s[2].srcdoc.as_ref().unwrap().len() <= 1 << 20);
+    assert!(s[2].srcdoc.as_ref().unwrap().starts_with('é'));
+    assert_eq!(s[1].scrolling, FrameScrolling::No);
+    for sl in &s {
+        let doc = Document::parse_str(sl.srcdoc.as_deref().unwrap_or("<p>x"), "about:srcdoc");
+        d.attach_frame(sl.id, doc, Some(sl.generation));
+    }
+    lay(&mut d);
+    // The slot list is cheap to ask for repeatedly (copies are bounded).
+    for _ in 0..50 {
+        let _ = d.frame_slots();
+    }
 }

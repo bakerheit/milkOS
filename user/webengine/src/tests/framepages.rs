@@ -190,7 +190,34 @@ fn frame_screenshots() {
     let mut c = Canvas::new(760, 700, d.display_list().background);
     let dl = d.display_list().clone();
     c.paint(&dl, &d, 0);
-    save("frames-page-zoom-dark", &c);
+    save("frames-page-zoom", &c);
+    // A page that leaves its colours to the browser, in a dark desktop, with a frame that does
+    // the same: both dark, each with its own canvas.
+    let mut d = load(
+        "<h3>Dark desktop</h3><p>A plain page with a plain frame.</p><iframe width=300 height=110 srcdoc='<p>Plain frame text</p><input value=field>'></iframe><p>after</p>",
+        &[],
+    );
+    let vp = Viewport {
+        width: 420,
+        height: 260,
+        zoom: 100,
+        dark: true,
+    };
+    d.layout(&vp, &SysMeasurer);
+    let mut c = Canvas::new(420, 260, d.display_list().background);
+    let dl = d.display_list().clone();
+    c.paint(&dl, &d, 0);
+    save("frames-plain-dark", &c);
+    let canvas = dl
+        .entries
+        .iter()
+        .find_map(|e| match e.item {
+            Item::Rect { color, .. } if !e.frame.is_top() => Some(color),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(canvas, crate::page::CANVAS_DARK);
+    assert_eq!(dl.background, crate::page::CANVAS_DARK);
 }
 
 // ---- hostile shapes -------------------------------------------------------------------------

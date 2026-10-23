@@ -1404,3 +1404,60 @@ fn layout_settles_with_frames_of_every_kind() {
     lay(&mut d);
     assert!(!d.needs_layout());
 }
+
+#[test]
+fn the_iframe_element_hears_load_and_error() {
+    let mut d = scripted(
+        "<iframe id=a onload='window.log.push(\"attr\")'></iframe><iframe id=b></iframe>",
+    );
+    eval_str(
+        &mut d,
+        "window.log = []; document.getElementById('b').addEventListener('load', function (e) { log.push('b:' + e.type + ':' + (e.target.id) + ':' + e.bubbles); }); \
+         document.getElementById('b').addEventListener('error', function (e) { log.push('b:' + e.type); });",
+    );
+    let ids: Vec<FrameId> = d.frame_slots().iter().map(|s| s.id).collect();
+    let mut h = Host::new();
+    assert!(d.frame_load_event(ids[1], &mut h, false));
+    assert!(d.frame_load_event(ids[1], &mut h, true));
+    assert!(d.frame_load_event(ids[0], &mut h, false));
+    assert_eq!(eval_str(&mut d, "log.join()"), "b:load:b:false,b:error,attr");
+    assert!(!d.frame_load_event(FrameId(9), &mut h, false));
+    // From inside a frame: the element is in the parent's document, so it is the parent's realm.
+    let mut outer = scripted("<iframe id=f></iframe>");
+    eval_str(&mut outer, "window.n = 0; document.getElementById('f').onload = function () { n++; };");
+    let id = outer.frame_slots()[0].id;
+    assert!(outer.attach_frame(id, scripted("<iframe id=g></iframe>"), None));
+    outer.frame_slots();
+    let g = outer.frame_slots()[1].id;
+    eval_str(outer.frame_doc_mut(id).unwrap(), "window.m = 0; document.getElementById('g').onload = function () { m++; };");
+    assert!(outer.frame_load_event(g, &mut h, false));
+    assert!(outer.frame_load_event(id, &mut h, false));
+    assert_eq!(eval_str(&mut outer, "n"), "1");
+    assert_eq!(eval_str(outer.frame_doc_mut(id).unwrap(), "m"), "1");
+}
+
+#[test]
+fn loaded_says_when_a_document_is_done() {
+    let mut d = Document::parse_scripted(
+        b"<img src=a.png><script>var x = 1;</script>",
+        "http://top.example/",
+        None,
+        Limits::default(),
+        Some(ScriptLimits::default()),
+    );
+    let mut h = Host::new();
+    assert!(!d.loaded());
+    d.run(&mut h);
+    // The page's load waits for its image.
+    assert!(!d.loaded());
+    let id = d.pending_resources()[0].kind;
+    if let ResourceKind::Image(i) = id {
+        d.supply_image(i, Some((1, 1)));
+    }
+    d.run(&mut h);
+    assert!(d.loaded());
+    let plain = Document::parse_str("<p>x", "http://top.example/");
+    assert!(plain.loaded());
+    let plain = Document::parse_str("<img src=a.png>", "http://top.example/");
+    assert!(!plain.loaded());
+}

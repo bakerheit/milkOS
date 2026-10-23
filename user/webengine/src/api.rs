@@ -1980,6 +1980,40 @@ impl Document {
         self.page.window_name = String::from(name);
     }
 
+    /// The document has finished loading: with scripts, its `load` event has fired and none of
+    /// its requests are outstanding; without, every stylesheet and image it asked for has been
+    /// supplied. The host uses it to tell when a frame is done ([`Document::frame_load_event`]).
+    pub fn loaded(&self) -> bool {
+        match self.js.as_ref() {
+            Some(j) if !j.stopped() => j.loaded() && self.page.pending_resources().is_empty(),
+            _ => self.page.pending_resources().is_empty(),
+        }
+    }
+
+    /// Fire `load` (or `error`: the document could not be loaded) at the `<iframe>` element
+    /// of frame `id`, in the realm of the document that holds it: `iframe.onload`, an
+    /// `addEventListener('load')`. `host` is the host of that document (the frame named by
+    /// [`FrameSlot::parent`]). The page's own `load` does not wait for its frames. True if
+    /// the event was dispatched.
+    pub fn frame_load_event(&mut self, id: FrameId, host: &mut dyn ScriptHost, error: bool) -> bool {
+        let Some((parent, node)) = self
+            .frames
+            .as_ref()
+            .and_then(|f| f.slot(id))
+            .map(|s| (s.parent, s.node))
+        else {
+            return false;
+        };
+        let ty = if error { "error" } else { "load" };
+        self.with_frame(parent, |pd| {
+            pd.armed(|pd| match pd.js.as_mut() {
+                Some(j) if !j.stopped() => j.fire_node(&mut pd.page, host, node, ty),
+                _ => false,
+            })
+        })
+        .unwrap_or(false)
+    }
+
     /// The viewport frame `id`'s document is laid out in, as of the last layout (the slot's
     /// content box at the parent's zoom). None for an unknown frame; the page's own
     /// viewport for [`FrameId::TOP`] is whatever the host passed to [`Document::layout`].

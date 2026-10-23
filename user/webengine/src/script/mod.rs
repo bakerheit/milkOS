@@ -126,6 +126,22 @@ impl Runtime {
         core::mem::take(&mut self.b.st.borrow_mut().requests)
     }
 
+    /// Fire a plain, non-bubbling event of type `ty` at element `node` (an `<iframe>`'s
+    /// `load` and `error`).
+    pub fn fire_node(&mut self, page: &mut Page, host: &mut dyn ScriptHost, node: NodeId, ty: &str) -> bool {
+        if !page.dom.is_connected(node) {
+            return false;
+        }
+        self.entry(page, host, |b, r| events_js::fire_simple(b, r, node, ty, false, false))
+            .is_some()
+    }
+
+    /// The window's `load` event has fired and nothing it started is still outstanding.
+    pub fn loaded(&self) -> bool {
+        let st = self.b.st.borrow();
+        st.loaded && st.net.pending() == 0
+    }
+
     /// A `message` event for this window.
     pub fn deliver(&mut self, page: &mut Page, host: &mut dyn ScriptHost, msg: &Message) -> bool {
         self.entry(page, host, |b, r| frames::fire_message(b, r, msg))

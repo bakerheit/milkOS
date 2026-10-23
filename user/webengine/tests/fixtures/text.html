@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><title>Text</title>
+<style>
+body { font-family: Georgia, serif; margin: 20px; line-height: 1.4; }
+.center { text-align: center; }
+.right { text-align: right; }
+.justify { text-align: justify; width: 300px; border: 1px solid #ccc; }
+.nowrap { white-space: nowrap; overflow: hidden; width: 200px; border: 1px solid #ccc; }
+pre { background: #f6f6f6; border: 1px solid #ddd; padding: 8px; }
+blockquote { border-left: 4px solid #ccc; margin: 12px 0; padding-left: 12px; color: #555; }
+.big { font-size: 150%; } .small { font-size: smaller; }
+.up { text-transform: uppercase; letter-spacing: 1px; }
+.box { display: inline-block; width: 60px; height: 20px; background: #9bd; vertical-align: middle; }
+.break { width: 120px; border: 1px solid #ccc; overflow-wrap: anywhere; }
+</style></head>
+<body>
+<h1 class="center">Typography</h1>
+<p class="right">Right aligned paragraph.</p>
+<p class="justify">Justified text spreads the spaces between words so that both edges of every line except the last are flush with the box.</p>
+<div class="nowrap">This line does not wrap and is clipped at the box edge.</div>
+<pre>  preformatted   text
+	with a tab and
+    indentation</pre>
+<blockquote>A quotation, indented with a rule on its left.</blockquote>
+<p>Inline <span class="big">big</span> and <span class="small">small</span> text, H<sub>2</sub>O and E=mc<sup>2</sup>, an <span class="box"></span> inline-block, <span class="up">small caps-ish</span>, <s>struck</s>, <u>underlined</u>, <code>code()</code>.</p>
+<div class="break">averyveryverylongwordwithoutanybreakopportunities</div>
+<p>Line one<br>line two after a break<br><br>line four.</p>
+<hr>
+<ol start="3"><li>three</li><li>four</li></ol>
+<ol type="a"><li>alpha</li><li>beta</li></ol>
+<dl><dt>Term</dt><dd>Definition of the term.</dd></dl>
+</body></html>

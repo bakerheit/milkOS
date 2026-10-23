@@ -423,3 +423,15 @@ version = "0.0.1"
 dependencies = [
  "rt",
 ]
+
+[[package]]
+name = "webbench"
+version = "0.0.1"
+dependencies = [
+ "rt",
+ "webengine",
+]
+
+[[package]]
+name = "webengine"
+version = "0.0.1"

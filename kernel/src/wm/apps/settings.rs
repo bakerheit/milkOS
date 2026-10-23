@@ -1,7 +1,7 @@
 //! Settings: Appearance (Whole milk / Chocolate milk, the UI font), Wallpaper, Display (brightness), Dock
 //! (icon size), Time Machine (milkfs automatic snapshots, via /System/Kernel/fs/milkfs/auto), Trash (how
-//! long deleted things wait before trashd deletes them for good), Network (is the internet on,
-//! eth0, DNS) and About.
+//! long deleted things wait before trashd deletes them for good), Browser (the search engine for
+//! words typed in its address bar), Network (is the internet on, eth0, DNS) and About.
 //! Changes go to the desktop as `Request::Prefs` (applied at once, saved to
 //! ~/.config/milk/settings); Time Machine settings live on the milkfs volume itself.
 
@@ -27,7 +27,7 @@ use super::super::{Request, icons, request, shell};
 use super::fsx;
 use filekit::trash::Keep;
 
-pub const SECTIONS: [&str; 9] = [
+pub const SECTIONS: [&str; 10] = [
     "Appearance",
     "Wallpaper",
     "Display & Lock",
@@ -35,13 +35,15 @@ pub const SECTIONS: [&str; 9] = [
     "Sound",
     "Time Machine",
     "Trash",
+    "Browser",
     "Network",
     "About",
 ];
 const TM: usize = 5;
 const TRASH: usize = 6;
-const NETWORK: usize = 7;
-const ABOUT: usize = 8;
+const BROWSER: usize = 7;
+const NETWORK: usize = 8;
+const ABOUT: usize = 9;
 
 /// A section someone asked for (Skim's settings results); the Settings window picks it up.
 static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::new(None);
@@ -84,6 +86,8 @@ enum Hit {
     TrashKeep(Keep),
     TrashShow,
     TrashEmpty,
+    /// Settings > Browser: the search engine (index into `milkweb::search::ENGINES`).
+    Search(usize),
 }
 
 pub struct Settings {
@@ -636,6 +640,61 @@ impl Settings {
         }
     }
 
+    /// Settings > Browser: which search engine the Browser's address bar uses for words. Cards
+    /// like the Font ones: the chosen one has a honey outline and a bold name.
+    fn draw_browser(&mut self, p: &mut Painter, x: i32) {
+        Self::heading(
+            p,
+            x,
+            "Browser",
+            "What the address bar does with words that aren't an address.",
+        );
+        p.text_p(x, 96, "Search engine", ESPRESSO, true);
+        p.text_p(
+            x,
+            116,
+            "The Browser uses it from the next search on.",
+            COCOA,
+            false,
+        );
+        for (i, e) in milkweb::search::ENGINES.iter().enumerate() {
+            let (col, row) = (i as i32 % 2, i as i32 / 2);
+            let r = Rect::new(x + col * 212, 148 + row * 64, 196, 52);
+            let on = self.pending.search == i;
+            p.rrect_r(r, 12, if on { OAT } else { CREAM }, 255);
+            if on {
+                p.rrect_stroke(r.x, r.y, r.w, r.h, 12, 2, HONEY, 255);
+            } else {
+                p.rrect_stroke(r.x, r.y, r.w, r.h, 12, 1, SAND, 255);
+            }
+            let name = Font::body(on);
+            p.text_f(
+                r.x + 12,
+                r.y + 8,
+                &name.truncate(e.name, r.w - 24),
+                ESPRESSO,
+                name,
+            );
+            let note = Font::body(false);
+            p.text_f(
+                r.x + 12,
+                r.y + 28,
+                &note.truncate(e.note, r.w - 24),
+                COCOA,
+                note,
+            );
+            self.hits.push((r, Hit::Search(i)));
+        }
+        let body = Font::body(false);
+        let notes = [
+            "What you type is sent to the engine you pick, over https.",
+            "Some engines may show a check page instead of results.",
+        ];
+        for (i, n) in notes.iter().enumerate() {
+            p.text_p(x, 354 + i as i32 * 20, &body.truncate(n, 424), COCOA, false);
+        }
+    }
+
     fn draw_network(&mut self, p: &mut Painter, x: i32) {
         use crate::net::{self, dns, internet};
         Self::heading(p, x, "Network", "The internet, eth0 and name lookups.");
@@ -877,6 +936,7 @@ impl WindowContents for Settings {
             4 => self.draw_sound(p, x),
             TM => self.draw_tm(p, x),
             TRASH => self.draw_trash(p, x),
+            BROWSER => self.draw_browser(p, x),
             NETWORK => self.draw_network(p, x),
             _ => self.draw_about(p, x),
         }
@@ -985,6 +1045,10 @@ impl WindowContents for Settings {
             }
             Hit::Font(i) => {
                 pr.font = i;
+                self.send(pr);
+            }
+            Hit::Search(i) => {
+                pr.search = i;
                 self.send(pr);
             }
             Hit::Wallpaper(k) => {

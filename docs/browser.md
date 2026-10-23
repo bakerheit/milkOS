@@ -16,7 +16,7 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
 
 | | |
 | --- | --- |
-| files | `~/Library/Browser` and `~/Downloads` read-write; `/System/Fonts` (the system fonts, read ahead with `gui::text::preload`), `/proc/net/tls` (a test boot's test root), `/proc/net/internet` and the theme setting read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
+| files | `~/Library/Browser` and `~/Downloads` read-write; `/System/Fonts` (the system fonts, read ahead with `gui::text::preload`), `/proc/net/tls` (a test boot's test root), `/proc/net/internet` and the desktop settings file (`~/.config/milk/settings`: the search engine) read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
 | network | all (it is a browser) |
 | spawning | none |
 
@@ -30,8 +30,9 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   link with `target=_blank`) opens a link in a new tab.
 * **The address bar** (Cmd-L): an address (no scheme means http), `milk:newtab`,
   `milk:bookmarks`, `milk:history`, `milk:downloads`, `milk:cookies`, or bare words, which
-  become a DuckDuckGo search (offline, a page says searching needs the internet). Cmd-C /
-  Cmd-V copy and paste in it.
+  become a search with the engine picked in Settings > Browser (DuckDuckGo Lite unless you
+  pick another; see Search engines below). Offline, a page says searching needs the internet.
+  Cmd-C / Cmd-V copy and paste in it.
 * **History**: back / forward per tab (the buttons, Cmd-[ / Cmd-], Cmd-Left / Cmd-Right,
   Backspace), each page coming back where it was scrolled; reload (Cmd-R) and stop (Esc,
   Cmd-.). Visited pages are listed on `milk:history` (kept in `~/Library/Browser/history`).
@@ -265,6 +266,38 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   `scripts/browser-test.sh` uses to check the client protocol (Home / End / Page Up / Page
   Down reach client windows; clicks, drags and the wheel carry the modifiers).
 
+## Search engines
+
+Settings > Browser picks the engine for bare words typed in the address bar (and sent with
+`open WORDS`). The choice is `search = KEY` in `~/.config/milk/settings` (the desktop's file;
+Settings writes it with the other settings, so it survives a reboot). The Browser's sandbox
+already reads that one file, and it **reads it when it starts a search**, so a change applies
+to the very next search, with no restart, no polling and no event to deliver. A missing file,
+a missing line or an unknown key means the default; the last `search` line wins. The table is
+`milkweb/src/search.rs` (milkweb, not browserkit, because Settings, in the kernel, lists the
+same engines); `browserkit::address::interpret_with` uses it, and the new tab page names the
+engine in use.
+
+| Settings name | key | address (GET, https) | why that page |
+| --- | --- | --- | --- |
+| DuckDuckGo (Lite), the default | `duckduckgo-lite` | `https://lite.duckduckgo.com/lite/?q=` | its text-only page: no scripts, a few KB |
+| DuckDuckGo (HTML) | `duckduckgo-html` | `https://html.duckduckgo.com/html/?q=` | its no-script page with snippets and styling |
+| Brave Search | `brave` | `https://search.brave.com/search?q=` | no lite page exists; the results are in the HTML itself |
+| Startpage | `startpage` | `https://www.startpage.com/sp/search?query=` | the address its own search form uses; no lite page |
+| Bing | `bing` | `https://www.bing.com/search?q=` | results are in the HTML; the scripts only add extras |
+| Google | `google` | `https://www.google.com/search?q=` + `&udm=14` | `udm=14` is Google's "Web" results: links and snippets, without the AI box and widgets |
+
+`duckduckgo` alone is accepted as the Lite page. The words are cut at 2000 bytes (a whole
+character), any run of white space (a paste's line breaks too) becomes one space, and
+everything but letters, digits and `-_.~` is percent-encoded (a space is `+`, a real `+` is
+`%2B`, so `&`, `#`, quotes and non-ASCII text stay inside the query). Only typed words and
+`open` use the engine: back, reload and links go to the address they already have.
+
+Only DuckDuckGo's two pages are made to be read without scripts. Brave, Startpage, Bing and
+Google may answer a client they don't know with a check page ("verify you're human") or a page
+that needs scripts the Browser doesn't run yet. The Browser doesn't work around that and sends
+the same User-Agent as always: it is the engine's decision, and Settings says so.
+
 ## Tests
 
 * `scripts/browserkit-test.sh` (`browserkit-unit`, smoke): text in the real system fonts
@@ -286,6 +319,19 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   cookie comes back, third-party cookies refused, tabs, Cmd-click, `open URL`, bookmarks,
   downloads, error pages and the sandbox, from the serial log, the server's log and
   screenshots.
+* `scripts/milkweb-test.sh` (`milkweb-unit`, smoke) covers the search table (`search.rs`):
+  each engine's address for words, a table check (https, unique keys and names, a valid
+  address), spaces, `+`, `&`, `#`, quotes, `%`, `/`, Unicode and control characters in the
+  words, a 1 MB paste cut at 2000 bytes on a character boundary, and the settings line
+  (missing, unknown, junk, last one wins, a huge file); `browserkit-unit` checks the address
+  bar with an engine and the new tab page's hint.
+* `scripts/search-engine-test.sh` (default set, about two minutes): a VM against
+  `scripts/browser_test_servers.py` (127.0.0.1 only; the engines' names are NXDOMAIN there, so
+  the search ends in an error page and the test reads the address from the Browser's log). It
+  writes `search = KEY` for each engine while the Browser runs and checks the address of the
+  next search, then unknown and junk settings, that addresses and `milk:` pages never become
+  searches, encoded words, the Settings > Browser page (a click on Google writes the line and
+  keeps the other settings, the next search uses it) and that the choice survives a reboot.
 * `scripts/js-test.sh` (default set, about a minute and a half): a VM against
   `scripts/js_test_server.py` (127.0.0.1 only) serving the pages in `tests/js`: a tabs
   widget, a todo list built by script, form validation that blocks the submit, timers and

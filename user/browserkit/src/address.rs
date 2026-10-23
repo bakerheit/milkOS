@@ -5,6 +5,7 @@
 use alloc::format;
 use alloc::string::String;
 
+use milkweb::search::{self, Engine};
 use milkweb::url::{self, Url, UrlError};
 
 /// The Browser's own pages.
@@ -76,12 +77,9 @@ pub enum Target {
     Bad(String),
 }
 
-/// The search page for `words` (DuckDuckGo's lite, text-only one).
-pub fn search_url(words: &str) -> String {
-    format!(
-        "https://lite.duckduckgo.com/lite/?q={}",
-        url::query_encode(words)
-    )
+/// The search page for `words` on `engine` (see `milkweb::search` for the pages).
+pub fn search_url(engine: &Engine, words: &str) -> String {
+    engine.url(words)
 }
 
 /// Split `text` at its first `#`: the address and the fragment.
@@ -99,8 +97,13 @@ fn web(u: Result<Url, UrlError>, frag: Option<&str>) -> Target {
     }
 }
 
-/// What typed `text` means.
+/// What typed `text` means; bare words search with the default engine.
 pub fn interpret(text: &str) -> Target {
+    interpret_with(text, search::engine(search::DEFAULT))
+}
+
+/// What typed `text` means; bare words search with `engine`.
+pub fn interpret_with(text: &str, engine: &Engine) -> Target {
     let t = text.trim();
     if t.is_empty() {
         return Target::Bad(String::from("there's no address"));
@@ -109,7 +112,7 @@ pub fn interpret(text: &str) -> Target {
         return Target::Internal(i);
     }
     if url::looks_like_search(t) {
-        let s = search_url(t);
+        let s = search_url(engine, t);
         return match Url::parse(&s) {
             Ok(u) => Target::Search(u, String::from(t)),
             Err(e) => Target::Bad(format!("{e}")),
@@ -183,6 +186,79 @@ mod tests {
             interpret("milk:nope"),
             Target::Bad(_) | Target::Search(..)
         ));
+    }
+
+    #[test]
+    fn words_go_to_the_chosen_engine() {
+        let at = |key: &str, words: &str| match interpret_with(
+            words,
+            search::engine(search::find(key).unwrap()),
+        ) {
+            Target::Search(u, w) => (u.to_text(), w),
+            t => panic!("{t:?}"),
+        };
+        assert_eq!(
+            at("brave", "milk & cows"),
+            (
+                String::from("https://search.brave.com/search?q=milk+%26+cows"),
+                String::from("milk & cows")
+            )
+        );
+        assert_eq!(
+            at("google", "café 牛乳").0,
+            "https://www.google.com/search?q=caf%C3%A9+%E7%89%9B%E4%B9%B3&udm=14"
+        );
+        assert_eq!(
+            at("startpage", "one").0,
+            "https://www.startpage.com/sp/search?query=one"
+        );
+        // Without a choice, the default engine (DuckDuckGo Lite), as before engines were a setting.
+        assert_eq!(
+            match interpret("milk cows") {
+                Target::Search(u, _) => u.to_text(),
+                t => panic!("{t:?}"),
+            },
+            "https://lite.duckduckgo.com/lite/?q=milk+cows"
+        );
+        // The engine matters only for words: addresses and the Browser's pages are the same
+        // whatever is chosen.
+        let bing = search::engine(search::find("bing").unwrap());
+        assert!(
+            matches!(interpret_with("example.com/a", bing), Target::Web(u, None) if u.host == "example.com")
+        );
+        assert!(matches!(interpret_with("localhost", bing), Target::Web(..)));
+        assert!(matches!(
+            interpret_with("10.0.2.2:8000", bing),
+            Target::Web(..)
+        ));
+        assert_eq!(
+            interpret_with("milk:history", bing),
+            Target::Internal(Internal::History)
+        );
+        assert!(matches!(interpret_with("   ", bing), Target::Bad(_)));
+        // Hostile words stay inside the query.
+        for w in [
+            "x\r\nHost: evil.test",
+            "a#frag",
+            "?q=1&q=2",
+            "//evil.test/",
+            "http://evil.test/ x",
+        ] {
+            match interpret_with(w, bing) {
+                Target::Search(u, _) => {
+                    assert_eq!(u.host, "www.bing.com", "{w}");
+                    assert!(u.path.starts_with("/search?q="), "{w}");
+                    assert!(!u.path.contains(['\r', '\n', ' ', '#']), "{w}");
+                }
+                Target::Web(..) | Target::Bad(_) => {} // an address, or not one: not a search
+                t => panic!("{w}: {t:?}"),
+            }
+        }
+        // A 1 MB paste is cut to a sane address.
+        match interpret_with(&"milk ".repeat(200_000), bing) {
+            Target::Search(u, _) => assert!(u.to_text().len() < 2100),
+            t => panic!("{t:?}"),
+        }
     }
 
     #[test]

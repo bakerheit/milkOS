@@ -25,6 +25,12 @@
   module count and depth per page. The engine handles `import`/`export` in all forms with live
   bindings and cycles, plus private class members (`#x`), and default-parameter TDZ.
 
+- Settings > Browser picks the search engine for words typed in the address bar: DuckDuckGo
+  (Lite, still the default), DuckDuckGo (HTML), Brave Search, Startpage, Bing or Google. The
+  choice is saved with the other settings and the Browser uses it from the next search, without
+  a restart; a new tab names the engine in use. Words are encoded safely (`+`, `&`, `#`, quotes
+  and non-ASCII text) and cut at 2000 bytes.
+
 **Tests**
 - A full `scripts/check-all.sh` runs 8 tests at a time and takes about 3 minutes (it was 7 to
   8). Boot self-tests are opt-in, long tests are shorter or split, passing tests clean up

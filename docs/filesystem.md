@@ -246,7 +246,7 @@ theirs (chown to the home's owner). Deleting something that is already in a Tras
 for good.
 
 **How long things stay.** `trash = 30` (days, 1..3650) or `trash = never` in
-`~/.config/milk/settings`, the desktop settings file; Settings > Trash sets it (1, 7, 30 or
+`~/.config/milk/settings`, the desktop settings file (it also holds the theme, the font and the Browser's `search = KEY`, docs/browser.md); Settings > Trash sets it (1, 7, 30 or
 90 days, or Never; another number typed into the file shows as its own choice). The default
 is 30. **`trashd`** (`/System/Services/trashd`, a milkd service,
 `/System/Settings/milk/services/trashd.service`) goes through every Trash at boot and then

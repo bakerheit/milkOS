@@ -2,7 +2,8 @@
 //!
 //! Web pages are hostile input, so before anything else it sandboxes itself: the network
 //! yes, files only in its own `~/Library/Browser` and `~/Downloads` (anything else through the
-//! Powerbox), no spawning. Pages come through milkweb's HTTP client and the TLS 1.3 client
+//! Powerbox; the desktop's settings file is read-only, for the search engine), no spawning.
+//! Pages come through milkweb's HTTP client and the TLS 1.3 client
 //! (rt::web / rt::tls) on worker threads (net.rs); the rules (cookies, history, bookmarks,
 //! forms, find, the built-in pages, painting) are browserkit's, and the page renderer is
 //! behind browserkit::engine (user/webengine's interface).
@@ -337,7 +338,9 @@ impl App {
 
     fn internal_html(&self, i: Internal) -> String {
         match i {
-            Internal::NewTab => pages::new_tab(&self.bookmarks, self.online),
+            Internal::NewTab => {
+                pages::new_tab(&self.bookmarks, self.online, self.search_engine().name)
+            }
             Internal::Bookmarks => pages::bookmarks(&self.bookmarks),
             Internal::History => pages::history(&self.visits),
             Internal::Downloads => {
@@ -489,9 +492,33 @@ impl App {
         });
     }
 
+    /// The search engine Settings > Browser picked (`search = KEY` in the desktop's settings
+    /// file). Read each time it's needed, so a change made in Settings applies to the very
+    /// next search without the Browser having to watch the file; the default engine if the
+    /// file is missing, too big or doesn't say.
+    pub fn search_engine(&self) -> &'static milkweb::search::Engine {
+        let path = format!("{}/.config/milk/settings", self.profile.home);
+        let text = match sys::stat_path(&path, true) {
+            Ok(s) if s.size <= 64 << 10 => sys::read_file(&path).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let text = String::from_utf8_lossy(&text);
+        milkweb::search::engine(milkweb::search::from_settings(&text))
+    }
+
+    /// What was typed (or sent by `open`) means: like `address::interpret`, with the chosen
+    /// search engine for bare words.
+    pub fn interpret_typed(&self, text: &str) -> Target {
+        if milkweb::url::looks_like_search(text) {
+            address::interpret_with(text, self.search_engine())
+        } else {
+            address::interpret(text)
+        }
+    }
+
     /// Open what was typed in the address bar.
     pub fn go_typed(&mut self, text: &str) {
-        let t = address::interpret(text);
+        let t = self.interpret_typed(text);
         self.go(self.cur, t, true, None, None);
     }
 
@@ -1528,7 +1555,7 @@ impl App {
         }
         changed |= self.net_tick();
         for a in self.profile.take_inbox() {
-            let target = address::interpret(&a);
+            let target = self.interpret_typed(&a);
             if self.tabs.len() < MAX_TABS {
                 let p = self.internal_page(Internal::NewTab);
                 self.tabs.push(Tab::new(p));

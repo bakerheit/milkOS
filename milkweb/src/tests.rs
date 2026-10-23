@@ -691,8 +691,8 @@ fn urls_search() {
     assert!(!html_search("10.0.2.2:8000"));
     assert!(!html_search("http://x/"));
     assert_eq!(
-        crate::url::search_url("milk & cookies"),
-        "http://lite.duckduckgo.com/lite/?q=milk+%26+cookies"
+        crate::url::query_encode("milk & cookies"),
+        "milk+%26+cookies"
     );
 }
 

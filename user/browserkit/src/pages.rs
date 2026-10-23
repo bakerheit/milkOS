@@ -34,14 +34,17 @@ fn nav() -> &'static str {
     "<p><a href=\"milk:bookmarks\">Bookmarks</a> &middot; <a href=\"milk:history\">History</a> &middot; <a href=\"milk:downloads\">Downloads</a> &middot; <a href=\"milk:cookies\">Cookies</a></p>"
 }
 
-/// A new tab: what to do, and the bookmarks.
-pub fn new_tab(b: &Bookmarks, online: bool) -> String {
+/// A new tab: what to do (words search with `engine`, by name), and the bookmarks.
+pub fn new_tab(b: &Bookmarks, online: bool, engine: &str) -> String {
     let mut s = String::from("<h1>New Tab</h1>");
-    s.push_str(if online {
-        "<p>Type an address in the bar above, or words to search for (Cmd-L).</p>"
+    if online {
+        s.push_str(&format!(
+            "<p>Type an address in the bar above, or words to search for with {} (Cmd-L). To search somewhere else, pick another search engine in Settings &gt; Browser.</p>",
+            esc(engine)
+        ));
     } else {
-        "<p>Type an address in the bar above (Cmd-L). milkOS is offline, so only numeric addresses like http://10.0.2.2:8000/ and localhost open.</p>"
-    });
+        s.push_str("<p>Type an address in the bar above (Cmd-L). milkOS is offline, so only numeric addresses like http://10.0.2.2:8000/ and localhost open.</p>");
+    }
     if !b.0.is_empty() {
         s.push_str("<h2>Bookmarks</h2><ul>");
         for m in b.0.iter().rev().take(20) {
@@ -214,6 +217,10 @@ mod tests {
             "http://nope.test/",
         );
         assert!(e.contains("<title>Server not found</title>"));
-        assert!(new_tab(&Bookmarks::default(), false).contains("offline"));
+        assert!(new_tab(&Bookmarks::default(), false, "Bing").contains("offline"));
+        let on = new_tab(&Bookmarks::default(), true, "Brave Search");
+        assert!(on.contains("search for with Brave Search"), "{on}");
+        assert!(on.contains("Settings &gt; Browser"));
+        assert!(new_tab(&Bookmarks::default(), true, "<b>").contains("with &lt;b&gt;"));
     }
 }

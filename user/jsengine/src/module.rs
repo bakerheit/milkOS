@@ -31,6 +31,9 @@ use crate::realm::{Realm, Res};
 use crate::resolve::Resolver;
 use crate::value::{ObjId, Val};
 
+/// The most `import()` calls that may wait for the host at once; more reject.
+const MAX_PENDING_IMPORTS: usize = 4096;
+
 /// Where a module is in its life (the spec's cyclic module record status).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum St {
@@ -161,6 +164,8 @@ pub(crate) struct Modules {
     async_counter: u64,
     /// `import()` calls waiting for the host: the Promise handed to script.
     pending: Vec<Option<ObjId>>,
+    pending_free: Vec<u32>,
+    pending_live: usize,
     /// What lookups of a missing module see.
     dummy: ModuleRec,
 }
@@ -174,6 +179,8 @@ impl Modules {
             live: 0,
             async_counter: 0,
             pending: Vec::new(),
+            pending_free: Vec::new(),
+            pending_live: 0,
             dummy: ModuleRec::blank(ObjId { idx: 0, g: 0 }),
         }
     }
@@ -252,7 +259,11 @@ fn unpack(v: Val) -> Option<ModuleId> {
 }
 
 fn code_bytes(c: &Code) -> usize {
-    let mut n = 256 + c.ops.len() * 12 + c.lines.len() * 8 + c.handlers.len() * 20;
+    let mut n = 256
+        + c.ops.len() * core::mem::size_of::<crate::bytecode::Op>()
+        + c.lines.len() * 8
+        + c.handlers.len() * 20
+        + c.keys.len() * 16;
     for k in &c.consts {
         n += 24;
         if let crate::bytecode::Const::Code(sub) = k {
@@ -337,8 +348,10 @@ impl Realm {
             line_delta: opts.first_line as i32 - 1,
             first_col: opts.first_column.max(1),
         };
+        self.budget_check(source.len() / 2)?;
         let mut p = Parser::new(&text);
         p.stack = Some(self.stack);
+        p.node_budget = self.parse_node_budget();
         let ast = match p.parse_module() {
             Ok(a) => a,
             Err(e) => return Err(self.syntax_error_at(&src, e.pos, &e.msg)),
@@ -459,11 +472,27 @@ impl Realm {
         self.heap.external += ext;
         self.heap.charge(ext);
         self.modules.slots[id.0 as usize].rec = Some(rec);
-        if self.heap.over_hard_limit() {
+        if let Err(e) = self.budget_check(0) {
             self.module_drop(id);
-            return Err(self.oom());
+            return Err(e);
         }
         Ok(id)
+    }
+
+    /// Fails with an out-of-memory termination if `extra` more bytes can't fit the heap budget
+    /// even after a collection (when one is possible here).
+    fn budget_check(&mut self, extra: usize) -> Res<()> {
+        let max = self.heap.max_bytes;
+        if self.heap.used().saturating_add(extra) <= max {
+            return Ok(());
+        }
+        if self.native_frames.is_empty() && self.frames_empty() {
+            self.collect_garbage();
+        }
+        if self.heap.live_bytes.saturating_add(extra) > max {
+            return Err(self.oom());
+        }
+        Ok(())
     }
 
     fn module_release_slot(&mut self, id: ModuleId) {
@@ -1382,7 +1411,8 @@ impl Realm {
         spec: Val,
         opts: Val,
     ) -> Res<Val> {
-        let (promise, _res, _rej) = self.promise_with_resolvers();
+        // (no resolving functions: the engine settles it directly)
+        let promise = self.new_promise_obj(None);
         let mark = self.temps.len();
         self.temps.push(Val::Obj(promise));
         let r = self.import_call_inner(promise, referrer, file, spec, opts);
@@ -1434,12 +1464,15 @@ impl Realm {
         if self.dynamic_import_hook.is_none() {
             return Err(self.type_error("Dynamic import is not supported here"));
         }
+        if self.modules.pending_live >= MAX_PENDING_IMPORTS {
+            return Err(self.range_error("Too many dynamic imports are waiting to be loaded"));
+        }
         let id = {
-            let slot = self.modules.pending.iter().position(|p| p.is_none());
-            match slot {
+            self.modules.pending_live += 1;
+            match self.modules.pending_free.pop() {
                 Some(i) => {
-                    self.modules.pending[i] = Some(promise);
-                    i as u32
+                    self.modules.pending[i as usize] = Some(promise);
+                    i
                 }
                 None => {
                     self.modules.pending.push(Some(promise));
@@ -1468,9 +1501,7 @@ impl Realm {
         match r {
             Ok(()) => Ok(()),
             Err(e) => {
-                if let Some(slot) = self.modules.pending.get_mut(id as usize) {
-                    *slot = None;
-                }
+                self.pending_release(id);
                 Err(e)
             }
         }
@@ -1487,9 +1518,8 @@ impl Realm {
         let Some(promise) = slot.take() else {
             return Ok(());
         };
-        while matches!(self.modules.pending.last(), Some(None)) {
-            self.modules.pending.pop();
-        }
+        self.modules.pending_live -= 1;
+        self.modules.pending_free.push(id.0);
         let e = Val::Str(self.nstr(N::empty));
         let (arg, ok) = match result {
             Ok(m) => (pack(m), true),
@@ -1506,11 +1536,22 @@ impl Realm {
     }
 
     pub(crate) fn dynamic_import_count(&self) -> usize {
-        self.modules.pending.iter().flatten().count()
+        self.modules.pending_live
+    }
+
+    fn pending_release(&mut self, id: u32) {
+        if let Some(slot) = self.modules.pending.get_mut(id as usize)
+            && slot.take().is_some()
+        {
+            self.modules.pending_live -= 1;
+            self.modules.pending_free.push(id);
+        }
     }
 
     pub(crate) fn dynamic_import_cancel(&mut self) {
         self.modules.pending.clear();
+        self.modules.pending_free.clear();
+        self.modules.pending_live = 0;
     }
 }
 

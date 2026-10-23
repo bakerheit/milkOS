@@ -800,3 +800,81 @@ fn long_chains_do_not_overflow_body() {
         }
     }
 }
+
+#[test]
+fn big_literals_stop_at_the_heap_budget() {
+    big(big_literals_stop_at_the_heap_budget_body);
+}
+
+fn big_literals_stop_at_the_heap_budget_body() {
+    let mut r = realm();
+    let mut lim = r.limits();
+    lim.max_heap_bytes = 64 << 20;
+    r.set_limits(lim);
+    let src = alloc::format!("export const big = [{}];", "1,".repeat(200_000));
+    let mut peak = 0;
+    let mut stopped = false;
+    for i in 0..60 {
+        match r.compile_module(
+            &src,
+            &ModuleOptions {
+                file: "big.js",
+                ..ModuleOptions::default()
+            },
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                assert!(
+                    e.is_uncatchable() || r.report(&e).name == "SyntaxError",
+                    "{i}"
+                );
+                stopped = true;
+                break;
+            }
+        }
+        peak = peak.max(r.heap_stats().used_bytes);
+    }
+    assert!(stopped, "the budget should have stopped the flood");
+    assert!(
+        peak <= (64 << 20) + (8 << 20),
+        "the heap reached {} MB before the 64 MB budget stopped it",
+        peak >> 20
+    );
+    // A single source whose syntax tree alone would not fit is refused while parsing.
+    let mut r = realm();
+    let mut lim = r.limits();
+    lim.max_heap_bytes = 8 << 20;
+    r.set_limits(lim);
+    let src = alloc::format!("export const big = [{}];", "1,".repeat(2_000_000));
+    assert!(r.compile_module(&src, &ModuleOptions::default()).is_err());
+    let e = r
+        .eval(&alloc::format!("[{}]", "1,".repeat(2_000_000)), "x.js")
+        .unwrap_err();
+    let _ = r.report(&e);
+}
+
+#[test]
+fn many_pending_imports_stay_within_the_budget() {
+    big(many_pending_imports_stay_within_the_budget_body);
+}
+
+fn many_pending_imports_stay_within_the_budget_body() {
+    let mut r = realm();
+    r.set_dynamic_import_hook(Some(Box::new(|_r, _di| Ok(()))));
+    let src = "var n = 0; for (var i = 0; i < 20000; i++) { import('./m' + i + '.js').then(function (ns) { n++; }, function (e) { n++; }); } n";
+    let res = r.eval(src, "t.js");
+    assert!(
+        res.is_ok(),
+        "20000 pending imports should not exhaust a 64 MB heap"
+    );
+    // The ones past the limit were rejected at once, with a RangeError.
+    assert_eq!(r.pending_dynamic_imports(), 4096);
+    r.run_jobs().unwrap();
+    let n = r.eval("n", "t.js").unwrap();
+    assert_eq!(n.as_number(), Some((20_000 - 4096) as f64));
+    r.release_temps();
+    r.gc();
+    assert!(r.heap_stats().live_bytes < 48 << 20);
+    r.cancel_dynamic_imports();
+    assert_eq!(r.pending_dynamic_imports(), 0);
+}

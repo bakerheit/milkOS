@@ -63,6 +63,9 @@ pub(crate) struct Parser<'a> {
     /// (a parenthesized list that may turn out to be arrow parameters).
     defer_cover_at: u32,
     pub stack: Option<crate::stack::StackGuard>,
+    /// How many more expressions and statements may be parsed (the tree has to fit the
+    /// heap budget; u64::MAX = no limit).
+    pub node_budget: u64,
     /// Parsing a module (import/export declarations, import.meta, top-level await).
     is_module: bool,
     pub info: ModuleInfo,
@@ -99,6 +102,7 @@ impl<'a> Parser<'a> {
             cover_init_pos: None,
             defer_cover_at: u32::MAX,
             stack: None,
+            node_budget: u64::MAX,
             is_module: false,
             info: ModuleInfo::default(),
             anon_default_ok: false,
@@ -217,6 +221,10 @@ impl<'a> Parser<'a> {
     }
 
     fn enter(&mut self) -> PResult<()> {
+        if self.node_budget == 0 {
+            return self.err("the code is too large to fit in memory");
+        }
+        self.node_budget -= 1;
         self.depth += 1;
         if self.depth > MAX_NEST || self.stack.is_some_and(|s| s.exceeded()) {
             return self.err("the code is nested too deeply");

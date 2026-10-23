@@ -289,5 +289,21 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     b.st.borrow_mut().outbox.message_proto = Some(pin);
     let b3 = b.clone();
     r.define_method(g, "postMessage", 2, move |r, _t, a| post_message(&b3, r, a))?;
+    // window.name: the name of this browsing context, kept by the page (the frame table sets
+    // it from the element's `name`, the host from where the frame came).
+    let b4 = b.clone();
+    let b5 = b.clone();
+    r.define_getter(
+        g,
+        "name",
+        move |r, _t, _a| Ok(r.string(&window_name(&b4))),
+        Some(alloc::boxed::Box::new(move |r: &mut Realm, _t: Value, a: &[Value]| {
+            let s = arg_str(r, a, 0)?;
+            // Names are short, like browsers' (2 MB there; plenty here).
+            let s = if s.len() > 64 << 10 { String::new() } else { s };
+            set_window_name(&b5, &s);
+            Ok(Value::UNDEFINED)
+        })),
+    )?;
     Ok(())
 }

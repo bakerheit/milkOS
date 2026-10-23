@@ -1078,3 +1078,28 @@ fn scripts_of_one_frame_can_run_code_in_another() {
     hs.deny = true;
     assert_eq!(ev(&mut root, FrameId::TOP, "peer(1, '1')", &mut hs), "refused");
 }
+
+#[test]
+fn window_name_is_the_browsing_contexts() {
+    let mut d = scripted("<iframe name=kid></iframe>");
+    let id = d.frame_slots()[0].id;
+    assert_eq!(eval_str(&mut d, "name"), "");
+    eval_str(&mut d, "name = 'top-name'");
+    assert_eq!(d.window_name(), "top-name");
+    d.set_window_name("again");
+    assert_eq!(eval_str(&mut d, "window.name"), "again");
+    assert!(d.attach_frame(id, scripted("<p>x"), None));
+    let c = d.frame_doc_mut(id).unwrap();
+    assert_eq!(eval_str(c, "name"), "kid");
+    eval_str(c, "name = 'renamed'");
+    // Kept across a navigation of the frame; target= finds it by it.
+    assert!(d.attach_frame(id, scripted("<p>y"), None));
+    assert_eq!(eval_str(d.frame_doc_mut(id).unwrap(), "name"), "renamed");
+    assert_eq!(d.frames_named("renamed"), alloc::vec![id]);
+    assert_eq!(d.frames_named("again"), alloc::vec![FrameId::TOP]);
+    assert!(d.frames_named("nobody").is_empty());
+    // Changing the element's name attribute renames the context.
+    eval_str(&mut d, "document.querySelector('iframe').setAttribute('name', 'attr')");
+    d.frame_slots();
+    assert_eq!(d.frames_named("attr"), alloc::vec![id]);
+}

@@ -1364,8 +1364,36 @@ impl Document {
         crate::frames::text(self)
     }
 
+    /// The page's numbers, with its frames' added in (`approx_bytes` also counts the merged
+    /// display list).
     pub fn stats(&self) -> Stats {
-        self.page.stats()
+        let mut st = self.page.stats();
+        if let Some(f) = self.frames.as_ref() {
+            for s in &f.slots {
+                if let Some(d) = s.doc.as_ref() {
+                    let c = d.page.stats();
+                    st.nodes += c.nodes;
+                    st.elements += c.elements;
+                    st.rules += c.rules;
+                    st.boxes += c.boxes;
+                    st.display_items += c.display_items;
+                    st.approx_bytes += c.approx_bytes + d.merged_bytes();
+                    st.layout_bytes += c.layout_bytes;
+                }
+            }
+        }
+        st.approx_bytes += self.merged_bytes();
+        st
+    }
+
+    /// Bytes the merged display list (the page's list with its frames in it) takes.
+    pub(crate) fn merged_bytes(&self) -> usize {
+        self.merged.as_ref().map_or(0, |m| {
+            m.dl.entries.capacity() * core::mem::size_of::<Entry>()
+                + m.dl.fixed.capacity() * core::mem::size_of::<Entry>()
+                + m.dl.text.capacity()
+                + m.dl.clips.capacity() * core::mem::size_of::<Rect>()
+        })
     }
 }
 

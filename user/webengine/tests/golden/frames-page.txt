@@ -1,0 +1,59 @@
+f0 [-] text 16,38 w215 SansSerif24 700 #ff3a2e28 "Embedded content"
+f0 [-] text 16,76 w623 SansSerif16 400 #ff3a2e28 "The boxes below are separate documents, each with its own layout and its own scrolling."
+f0 [-] rrect 16,96 720x205 r6 #fffffaf0
+f0 [-] border 16,96 720x205 [1, 1, 1, 1]
+f0 [-] text 29,124 w110 SansSerif16 700 #ff3a2e28 "A small widget"
+f0 [-] border 29,136 696x152 [1, 1, 1, 1]
+f1 [30,137 694x150] rect 30,137 694x150 #fff4f1ec
+f1 [30,137 694x150] rect 30,149 694x134 #fff4f1ec
+f1 [30,137 694x150] rrect 42,149 670x108 r4 #ffffffff
+f1 [30,137 694x150] border 42,149 670x108 [1, 1, 1, 1]
+f1 [30,137 694x150] rrect 59,167 15x15 r2 #fffffdf8
+f1 [30,137 694x150] border 59,167 15x15 [1, 1, 1, 1]
+f1 [30,137 694x150] control 0 60,168 13x13
+f1 [30,137 694x150] text 77,185 w140 SansSerif16 400 #ff3a2e28 " I agree to the terms"
+f1 [30,137 694x150] rrect 102,194 96x22 r2 #fffffdf8
+f1 [30,137 694x150] border 102,194 96x22 [2, 2, 2, 2]
+f1 [30,137 694x150] control 1 106,197 88x16
+f1 [30,137 694x150] text 55,209 w47 SansSerif16 400 #ff3a2e28 "Name "
+f1 [30,137 694x150] rrect 55,220 59x26 r3 #ffefefef
+f1 [30,137 694x150] border 55,220 59x26 [1, 1, 1, 1]
+f1 [30,137 694x150] control 2 56,221 57x24
+f1 [30,137 694x150] text 68,236 w33 SansSerif13 400 #ff3a2e28 "Verify"
+f1 [30,137 694x150] text 42,280 w60 SansSerif12 400 #ff6b5f55 "Terms and "
+f1 [30,137 694x150] text 102,280 w38 SansSerif12 400 #ff4f64a0 "privacy"
+f1 [30,137 694x150] rect 102,281 38x1 #ff4f64a0
+f0 [-] border 16,313 324x224 [2, 2, 2, 2]
+f2 [18,315 320x220] rect 18,315 320x220 #fffffdf8
+f2 [18,315 320x220] rect 18,315 320x918 #fffffdf8
+f2 [18,315 320x220] rect 18,315 320x33 #ff4f64a0
+f2 [18,315 320x220] text 30,336 w74 SansSerif14 700 #ffffffff "Forty items"
+f2 [18,315 320x220] marker Disc 38,364 5x5
+f2 [18,315 320x220] text 50,371 w102 SansSerif16 400 #ff3a2e28 "Item number 1"
+f2 [18,315 320x220] marker Disc 38,386 5x5
+f2 [18,315 320x220] text 50,393 w102 SansSerif16 400 #ff3a2e28 "Item number 2"
+f2 [18,315 320x220] marker Disc 38,408 5x5
+f2 [18,315 320x220] text 50,415 w102 SansSerif16 400 #ff3a2e28 "Item number 3"
+f2 [18,315 320x220] marker Disc 38,430 5x5
+f2 [18,315 320x220] text 50,437 w102 SansSerif16 400 #ff3a2e28 "Item number 4"
+f2 [18,315 320x220] marker Disc 38,452 5x5
+f2 [18,315 320x220] text 50,459 w102 SansSerif16 400 #ff3a2e28 "Item number 5"
+f2 [18,315 320x220] marker Disc 38,474 5x5
+f2 [18,315 320x220] text 50,481 w102 SansSerif16 400 #ff3a2e28 "Item number 6"
+f2 [18,315 320x220] marker Disc 38,496 5x5
+f2 [18,315 320x220] text 50,503 w102 SansSerif16 400 #ff3a2e28 "Item number 7"
+f2 [18,315 320x220] marker Disc 38,518 5x5
+f2 [18,315 320x220] text 50,525 w102 SansSerif16 400 #ff3a2e28 "Item number 8"
+f2 [18,315 320x220] text 50,547 w102 SansSerif16 400 #ff3a2e28 "Item number 9"
+f0 [-] text 16,553 w183 SansSerif13 400 #ff6b5f55 "A long list in a 320 x 220 frame"
+f0 [-] border 352,313 204x124 [2, 2, 2, 2]
+f3 [354,315 200x120] rect 354,315 200x120 #ffe8f0e0
+f3 [354,315 200x120] rect 362,323 184x73 #ffe8f0e0
+f3 [354,315 200x120] text 362,338 w121 SansSerif16 700 #ff3a2e28 "Inline document"
+f3 [354,315 200x120] text 362,373 w174 SansSerif16 400 #ff3a2e28 "This one comes from the"
+f3 [354,315 200x120] text 362,392 w113 SansSerif16 400 #ff3a2e28 "srcdoc attribute."
+f0 [-] text 352,453 w38 SansSerif13 400 #ff6b5f55 "srcdoc"
+f0 [-] text 16,588 w248 SansSerif16 400 #ff3a2e28 "After the frames the page goes on, "
+f0 [-] text 264,588 w37 SansSerif16 400 #ff4f64a0 "a link"
+f0 [-] rect 264,589 37x1 #ff4f64a0
+f0 [-] text 301,588 w4 SansSerif16 400 #ff3a2e28 "."

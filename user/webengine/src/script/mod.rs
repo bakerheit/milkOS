@@ -13,6 +13,7 @@
 //! scripts end for good: timers and listeners go, nothing runs again, the DOM stays.
 
 pub mod events;
+pub mod importmap;
 pub mod loader;
 pub mod timers;
 

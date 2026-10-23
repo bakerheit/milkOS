@@ -1,5 +1,6 @@
-//! SHA-512 (FIPS 180-4), from scratch, for Ed25519 (rt::ed25519). [`selftest`] checks the
-//! FIPS / NIST vectors.
+//! SHA-512 and SHA-384 (FIPS 180-4), from scratch: SHA-512 for Ed25519 (rt::ed25519),
+//! SHA-384 for TLS (TLS_AES_256_GCM_SHA384 is not offered, but P-384 certificates are signed
+//! with it). [`selftest`] checks the FIPS / NIST vectors of both.
 
 const K: [u64; 80] = [
     0x428a2f98d728ae22,
@@ -93,6 +94,18 @@ const H0: [u64; 8] = [
     0x9b05688c2b3e6c1f,
     0x1f83d9abfb41bd6b,
     0x5be0cd19137e2179,
+];
+
+/// SHA-384's initial hash value (FIPS 180-4 5.3.4); everything else is SHA-512's.
+const H0_384: [u64; 8] = [
+    0xcbbb9d5dc1059ed8,
+    0x629a292a367cd507,
+    0x9159015a3070dd17,
+    0x152fecd8f70e5939,
+    0x67332667ffc00b31,
+    0x8eb44a8768581511,
+    0xdb0c2e0d64f98fa7,
+    0x47b5481dbefa4fa4,
 ];
 
 pub type Digest = [u8; 64];
@@ -210,6 +223,37 @@ pub fn sha512(data: &[u8]) -> Digest {
     Sha512::new().update(data).finish()
 }
 
+/// SHA-384: SHA-512 with its own initial value, cut to 48 bytes.
+#[derive(Clone, Default)]
+pub struct Sha384(Sha512);
+
+impl Sha384 {
+    pub const fn new() -> Sha384 {
+        Sha384(Sha512 {
+            h: H0_384,
+            buf: [0; 128],
+            nbuf: 0,
+            len: 0,
+        })
+    }
+
+    pub fn update(&mut self, data: &[u8]) -> &mut Self {
+        self.0.update(data);
+        self
+    }
+
+    pub fn finish(&mut self) -> [u8; 48] {
+        let full = self.0.finish();
+        let mut out = [0u8; 48];
+        out.copy_from_slice(&full[..48]);
+        out
+    }
+}
+
+pub fn sha384(data: &[u8]) -> [u8; 48] {
+    Sha384::new().update(data).finish()
+}
+
 /// FIPS 180-4 vectors: (passed, total).
 pub fn selftest() -> (usize, usize) {
     let hex = |d: &Digest| {
@@ -233,8 +277,23 @@ pub fn selftest() -> (usize, usize) {
             "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909",
         ),
     ];
+    let h384: [([u8; 48], &str); 3] = [
+        (
+            sha384(b""),
+            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b",
+        ),
+        (
+            sha384(b"abc"),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        ),
+        (
+            sha384(b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"),
+            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039",
+        ),
+    ];
     (
-        cases.iter().filter(|(d, w)| hex(d) == *w).count(),
-        cases.len(),
+        cases.iter().filter(|(d, w)| hex(d) == *w).count()
+            + h384.iter().filter(|(d, w)| crate::hex(d) == *w).count(),
+        cases.len() + h384.len(),
     )
 }

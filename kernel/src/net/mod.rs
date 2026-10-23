@@ -40,6 +40,7 @@ pub mod services;
 pub mod socket;
 pub mod sockfile;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 pub mod web;
 pub mod wire;

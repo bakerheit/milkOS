@@ -49,7 +49,8 @@ pub trait Net {
     fn has_tls(&self) -> bool {
         false
     }
-    /// Wrap a new connection to `host` for `https://` (TLS). Until milkOS has TLS this says so.
+    /// Wrap a new connection to `host` for `https://` (TLS; [`crate::secure::secure`] does
+    /// it). Without TLS this says so.
     fn secure(
         &mut self,
         host: &str,
@@ -101,8 +102,12 @@ impl Default for Options {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Error {
     Url(UrlError),
-    /// `https://` before milkOS has TLS.
+    /// `https://` where the host has no TLS (a [`Net`] whose `has_tls` is false).
     SecureUnsupported,
+    /// https://: the server's certificate was refused (host: why, in plain words).
+    Certificate(String),
+    /// https://: the secure connection couldn't be made, or broke (host: why).
+    Tls(String),
     /// The name wasn't looked up because the internet is off (offline mode).
     Offline(String),
     /// There is no such host (the name server said so).
@@ -132,6 +137,8 @@ impl Error {
         match self {
             Error::Url(_) => "That isn't an address",
             Error::SecureUnsupported => "Secure pages aren't supported yet",
+            Error::Certificate(_) => "This site's certificate can't be trusted",
+            Error::Tls(_) => "A secure connection couldn't be made",
             Error::Offline(_) => "No internet (offline mode)",
             Error::NotFound(_) => "Server not found",
             Error::NoDns(_) => "No internet",
@@ -152,6 +159,7 @@ impl fmt::Display for Error {
             Error::SecureUnsupported => f.write_str(
                 "https:// pages need TLS, which milkOS doesn't have yet (try the http:// address)",
             ),
+            Error::Certificate(m) | Error::Tls(m) => f.write_str(m),
             Error::Offline(h) => write!(
                 f,
                 "{h}: not looked up, the internet is off (offline mode; numeric addresses still work)"

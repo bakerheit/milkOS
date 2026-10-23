@@ -1,0 +1,16 @@
+The TLS root store (mozilla-roots.der, listed in mozilla-roots.txt)
+====================================================================
+
+mozilla-roots.der holds the root certificates of Mozilla's CA Certificate Program: the
+built-in roots of NSS (security/nss/lib/ckfw/builtins/certdata.txt in Mozilla's source tree)
+that Mozilla trusts to identify websites. They were extracted from certdata.txt by curl's
+mk-ca-bundle.pl (https://curl.se/docs/caextract.html) and converted from PEM to DER, without
+other changes, by scripts/gen_roots.py, which records the bundle's date and SHA-256.
+
+The certificate data is subject to the terms of the Mozilla Public License, v. 2.0. A copy
+of the MPL 2.0 is in MPL-2.0.txt next to this file; it can also be obtained at
+https://mozilla.org/MPL/2.0/.
+
+The Source Code Form of this data is certdata.txt in Mozilla's NSS. The rest of milkOS is
+under the MIT licence (LICENSE at the top of the repository); the MPL applies only to these
+files.

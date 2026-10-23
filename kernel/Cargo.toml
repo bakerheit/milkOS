@@ -12,6 +12,8 @@ bench = false
 [dependencies]
 # Shared crypto primitives (also used by userland through rt): <repo>/crypto.
 milkcrypto = { path = "../crypto" }
+# The TLS 1.3 client (no_std, host-tested): <repo>/tls. net/tls.rs is its kernel glue.
+tls = { path = "../tls" }
 # The milkfs file system (no_std, host-tested): <repo>/milkfs. fs/milkfs is its VFS glue.
 milkfs = { path = "../milkfs" }
 # URLs, the HTTP/1.1 client, DNS messages and the HTML subset (no_std, host-tested):

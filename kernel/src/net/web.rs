@@ -3,9 +3,8 @@
 //! [`Stream`] is a TCP connection as a `milkweb::http::Transport`. Thread context only (it
 //! sleeps on the socket). Used by the Browser; `rt::web` is the same for user space.
 //!
-//! The `https://` hook: `KernelNet::has_tls` is false, so the client refuses such addresses
-//! before connecting. With the `tls` crate, `has_tls` returns true and `secure` wraps the
-//! `Stream` in `tls::Client::connect(host, stream)`.
+//! `https://`: `secure` runs the TLS 1.3 handshake (milkweb::secure over the `tls` crate)
+//! with the system roots of [`super::tls::roots`], the CSPRNG and the RTC clock.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -117,6 +116,14 @@ impl Net for KernelNet {
 
     fn now_ms(&mut self) -> u64 {
         crate::timer::now_ns() / 1_000_000
+    }
+
+    fn has_tls(&self) -> bool {
+        true
+    }
+
+    fn secure(&mut self, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error> {
+        milkweb::secure::secure(&super::tls::client(), host, tcp)
     }
 }
 

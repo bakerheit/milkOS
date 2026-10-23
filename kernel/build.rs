@@ -89,10 +89,12 @@ fn build_user(repo: &Path) {
         return;
     }
     // A directory: cargo rescans everything under it for changes. user/rt also uses the
-    // shared crypto and milkweb crates.
+    // shared crypto, milkweb and tls crates (and tls compiles in assets/ca).
     println!("cargo:rerun-if-changed={}", user.display());
     println!("cargo:rerun-if-changed={}", repo.join("crypto").display());
     println!("cargo:rerun-if-changed={}", repo.join("milkweb").display());
+    println!("cargo:rerun-if-changed={}", repo.join("tls").display());
+    println!("cargo:rerun-if-changed={}", repo.join("assets/ca").display());
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(&user)

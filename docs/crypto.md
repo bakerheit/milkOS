@@ -8,6 +8,7 @@ linked into both worlds:
 |---|---|---|
 | kernel | `kernel/Cargo.toml` path dependency; `kernel/src/crypto/mod.rs` re-exports it as `crate::crypto::*` | `crypto::rng`: the CSPRNG behind `/dev/random`, `/dev/urandom`, getrandom(278) |
 | userland | `user/rt/Cargo.toml` path dependency; `rt::crypto` (plus the old paths `rt::sha256`, `rt::sha512`, `rt::ed25519`) | nothing: programs use the primitives directly |
+| tls | `tls/Cargo.toml` path dependency (the TLS 1.3 client, docs/tls.md) | random numbers and the clock come from its host |
 | milkfs | `milkfs/Cargo.toml` path dependency (the file system crate, kernel and host tests) | nothing: random bytes and scrypt's memory come from its host (`milkfs::platform`) |
 
 `crypto` is a member of the root (kernel) workspace, so `cargo clippy` / `cargo fmt` at the
@@ -27,10 +28,20 @@ root cover it. `kernel/build.rs` watches it too, so userland rebuilds when it ch
 | `xchacha20` | XChaCha20 stream (`xor`) and XChaCha20-Poly1305 (`seal` / `open`, 24-byte nonce, safe to pick at random), on `hchacha20` + ChaCha20 / `aead` | draft-irtf-cfrg-xchacha-03 A.3.1, plus a wrong tag |
 | `hmac` | HMAC-SHA256 (`HmacSha256`, `hmac_sha256`), PBKDF2-HMAC-SHA256 | RFC 4231 cases 1, 2, 6; RFC 7914 11 |
 | `scrypt` | scrypt (RFC 7914), the memory-hard password KDF; its big array comes from a `Scratch` the caller provides (`VecScratch` on the heap, or the kernel's page frames) | RFC 7914 12, both vectors |
+| `sha512` (also) | SHA-384 (`Sha384`, `sha384`): SHA-512 with its own IV, cut to 48 bytes | NIST (3) |
+| `hash` | the `Hash` trait over SHA-256/384/512, so HMAC and HKDF are written once | via hmac, hkdf |
+| `hmac` (also) | `Hmac<H>` over any `Hash` | RFC 4231 1, 2, 6 for SHA-384/512 |
+| `hkdf` | HKDF extract / expand (RFC 5869) over any `Hash` (the TLS 1.3 key schedule) | RFC 5869 A.1-A.3; SHA-384 cross-checked with Python |
+| `aes` | AES-128 (FIPS 197), bitsliced (BearSSL's aes_ct64 layout: 4 blocks in 8 u64 bit planes, the Boyar-Peralta S-box circuit, also in the key schedule): no table indexed by secret data | FIPS 197 B, C.1 |
+| `ghash`, `gcm` | GHASH as carry-less multiplies built from integer multiplies with masked holes (BearSSL's ghash_ctmul64), and AES-128-GCM (`Aes128Gcm`, `seal` / `open`, the tag checked before decrypting); ~200 MB/s on the Mac | GCM spec cases 1-4 + tamper; host: Go's AES-GCM table, a reference, every bit flip |
+| `bignum`, `rsa` | unsigned big integers (Montgomery, variable time: only public data) and RSA PKCS#1 v1.5 / PSS verification, 512..8192-bit moduli, e < 2^33 | OpenSSL-made signatures; host: 2048-4096-bit keys, SHA-256/384/512, hostile encodings, fuzz |
+| `nist` (private), `p256`, `p384` | NIST P-256 / P-384: constant-time Montgomery fields (u64 limbs, masks), complete a = -3 formulas (Renes-Costello-Batina), a fixed 4-bit window with masked table scans; ECDH (`public_key`, `shared`, the peer point checked) and ECDSA verification | NIST CDH, SigVer; host: NIST SigVer (Go's copy), OpenSSL vectors, group laws, hostile points and signatures |
+| `ecdsa` | strict DER ECDSA signatures (`parse_der`) | host: every prefix and mutation |
 | `field25519` (private) | GF(2^255-19), shared by Ed25519 and X25519; constant-time `cswap` | via the curves |
 | crate root | `hex`, `unhex`, `unhex_vec`, `ct_eq` (constant-time compare), `wipe` (volatile zeroing) | |
 
-`milkcrypto::selftest()` runs every module's vectors. The kernel prints them at boot
+`milkcrypto::selftest()` runs every module's vectors. The longer sets and the hostile-input
+cases are host tests: `scripts/crypto-test.sh` (check-all smoke set). The kernel prints them at boot
 (`[crypto] test vectors: chacha20 4/4 sha256 5/5 ...: ok`).
 
 **Why scrypt (not Argon2id)** for passwords: memory-hard, standardised with test vectors,

@@ -50,7 +50,8 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - FAT32 with long names, a page cache, and a shared folder with the Mac (`share/` here is `/Volumes/Mac` there).
 
 **Network and sound**
-- virtio-net with our own TCP/IP stack (Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP), sockets,
+- virtio-net with our own TCP/IP stack (Ethernet, ARP, IPv4, ICMP, UDP, DHCP, DNS, TCP, and TLS 1.3
+  for https:// with the Mozilla root store, docs/tls.md), sockets,
   `network` (status, connections, ping, get, connect, listen, names; `network help`), `httpd`.
   Traffic stays inside qemu's private network and the Mac's loopback.
 - virtio-sound with a mixer, `/dev/audio`, `play`, a boot chime and system sounds.
@@ -115,3 +116,7 @@ Ubuntu Font Licence 1.0 (licences and copyright lines in `assets/fonts/`, and in
 `/System/Fonts/`). `scripts/gen_sysfont.py` renders them into the glyph bitmaps in
 `kernel/src/sysfont/`; it names the exact files it uses (from the Google Fonts repository) and their
 hashes. The .ttf files are not in this repository.
+
+The TLS root store (`assets/ca/mozilla-roots.der`) is the root certificates of Mozilla's CA program
+(NSS's certdata.txt, via curl's cacert.pem), under the Mozilla Public License 2.0: `assets/ca/NOTICE.txt`
+and `assets/ca/MPL-2.0.txt`. `scripts/gen_roots.py` records the bundle's date and SHA-256.

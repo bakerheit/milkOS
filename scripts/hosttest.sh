@@ -2,7 +2,8 @@
 # Run the unit tests of one pure crate on the Mac and say how many ran:
 #   scripts/hosttest.sh CRATE NAME      e.g. scripts/hosttest.sh timekit timekit-unit
 # CRATE is a userland crate (user/CRATE, the user workspace) or one of the root workspace's
-# (<repo>/CRATE, e.g. milkfs).
+# (<repo>/CRATE, e.g. milkfs; its package name is read from CRATE/Cargo.toml, so crypto
+# runs milkcrypto).
 # Only the library's tests are run (`--lib`: the empty doc-test pass printed "0 passed" after the
 # real one and made a log look like nothing ran). It fails if any test fails, if the output has no
 # test result, or if zero tests ran, and ends with "NAME: N passed".
@@ -13,8 +14,14 @@ set -uo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 CRATE="${1:?usage: hosttest.sh CRATE NAME}"; NAME="${2:-$CRATE-unit}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-if [ -f "$REPO/$CRATE/Cargo.toml" ]; then cd "$REPO"; else cd "$REPO/user"; fi
-OUT="$(cargo test -p "$CRATE" --lib --target aarch64-apple-darwin --target-dir "$REPO/target/host-tests" 2>&1)"; RC=$?
+PKG="$CRATE"
+if [ -f "$REPO/$CRATE/Cargo.toml" ]; then
+  cd "$REPO"
+  PKG="$(sed -n 's/^name *= *"\(.*\)"/\1/p' "$CRATE/Cargo.toml" | head -1)"
+else
+  cd "$REPO/user"
+fi
+OUT="$(cargo test -p "$PKG" --lib --target aarch64-apple-darwin --target-dir "$REPO/target/host-tests" 2>&1)"; RC=$?
 echo "$OUT"
 [ "$RC" = 0 ] || { echo "$NAME: FAIL (cargo test exited $RC)"; exit 1; }
 PASSED="$(echo "$OUT" | sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' | awk '{s += $1} END {print s + 0}')"

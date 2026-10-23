@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "crypto", "milkfs", "milkweb"]
-# user/ is its own workspace (built by kernel/build.rs).
-exclude = ["user"]
+members = ["kernel", "crypto", "milkfs", "milkweb", "tls"]
+# user/ is its own workspace (built by kernel/build.rs); so is tls/probe (a host test tool).
+exclude = ["user", "tls/probe"]
 
 [profile.dev]
 panic = "abort"

@@ -25,8 +25,19 @@ dependencies = [
  "milkcrypto",
  "milkfs",
  "milkweb",
+ "tls",
 ]
 
 [[package]]
 name = "milkweb"
 version = "0.0.1"
+dependencies = [
+ "tls",
+]
+
+[[package]]
+name = "tls"
+version = "0.0.1"
+dependencies = [
+ "milkcrypto",
+]

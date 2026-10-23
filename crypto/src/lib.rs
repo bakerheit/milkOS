@@ -17,19 +17,39 @@
 //! | [`xchacha20`] | XChaCha20 stream and XChaCha20-Poly1305 (24-byte nonce) | xchacha draft A.3.1 + a wrong tag |
 //! | [`hmac`] | HMAC-SHA256 (RFC 2104), PBKDF2-HMAC-SHA256 (RFC 8018) | RFC 4231 1, 2, 6; RFC 7914 11 |
 //! | [`scrypt`] | scrypt (RFC 7914), the array from a caller-chosen [`scrypt::Scratch`] | RFC 7914 12 (both) |
+//! | [`hash`] | the [`hash::Hash`] trait over SHA-256/384/512 | via hmac, hkdf |
+//! | [`hkdf`] | HKDF extract / expand (RFC 5869) over any [`hash::Hash`] | RFC 5869 A.1-A.3, SHA-384 cross-checked |
+//! | [`aes`] | AES-128 block cipher (FIPS 197), bitsliced, constant time | FIPS 197 B, C.1 |
+//! | [`gcm`] | AES-128-GCM AEAD (SP 800-38D) on a constant-time GHASH | GCM spec test cases |
+//! | [`bignum`] | unsigned big integers for public-key verification (no panics on hostile input) | via rsa |
+//! | [`rsa`] | RSA PKCS#1 v1.5 and RSA-PSS signature verification (RFC 8017) | see the module |
+//! | [`p256`] | NIST P-256: ECDH (constant time) and ECDSA verification | see the module |
+//! | [`p384`] | NIST P-384: ECDSA verification | see the module |
+//! | [`ecdsa`] | ECDSA signatures in DER (strict parsing) | see the module |
 //!
 //! (The kernel's audit log keeps its own SHA-256, `kernel/src/audit/sha256.rs`, on
 //! purpose: `audit verify` checks the kernel's hashes with this independent copy.)
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 extern crate alloc;
 
 pub mod aead;
+pub mod aes;
+pub mod bignum;
 pub mod chacha20;
+pub mod ecdsa;
 pub mod ed25519;
 mod field25519;
+pub mod gcm;
+pub mod ghash;
+pub mod hash;
+pub mod hkdf;
 pub mod hmac;
+mod nist;
+pub mod p256;
+pub mod p384;
+pub mod rsa;
 pub mod poly1305;
 pub mod scrypt;
 pub mod sha256;
@@ -112,5 +132,40 @@ pub fn selftest() -> alloc::vec::Vec<(&'static str, usize, usize)> {
     v.push(("hmac-sha256+pbkdf2", p, t));
     let (p, t) = scrypt::selftest();
     v.push(("scrypt", p, t));
+    let (p, t) = hkdf::selftest();
+    v.push(("hkdf", p, t));
+    let (p, t) = aes::selftest();
+    v.push(("aes128", p, t));
+    let (p, t) = gcm::selftest();
+    v.push(("aes128gcm", p, t));
+    let (p, t) = rsa::selftest();
+    v.push(("rsa", p, t));
+    let (p, t) = p256::selftest();
+    v.push(("p256", p, t));
+    let (p, t) = p384::selftest();
+    v.push(("p384", p, t));
     v
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every module's boot self-test passes in full.
+    #[test]
+    fn selftests_pass() {
+        for (name, p, t) in super::selftest() {
+            assert!(t > 0, "{name}: no vectors");
+            assert_eq!(p, t, "{name}: {p}/{t}");
+        }
+    }
+
+    /// RSA public exponents beyond 33 bits are refused (they'd only make verifying slow).
+    #[test]
+    fn rsa_exponent_cap() {
+        let mut n = alloc::vec![0xffu8; 256];
+        n[255] = 0xf1;
+        assert!(super::rsa::PublicKey::new(&n, &[1, 0, 1]).is_some());
+        assert!(super::rsa::PublicKey::new(&n, &[1, 0xff, 0xff, 0xff, 0xff]).is_some());
+        assert!(super::rsa::PublicKey::new(&n, &[2, 0, 0, 0, 1]).is_none());
+        assert!(super::rsa::PublicKey::new(&n, &n[..255]).is_none());
+    }
 }

@@ -275,6 +275,16 @@ struct DockItem {
 /// The line under the Spaces overview.
 const SPACES_HINT: &str = "Click a window to focus   Drag it to another space   Esc to leave";
 
+/// Text straight on the dimmed wallpaper of the Spaces overview: light in both themes (the
+/// MILK token turns dark in Chocolate milk, ESPRESSO turns light).
+fn on_scrim_text() -> Color {
+    if crate::wm::theme::dark() {
+        ESPRESSO
+    } else {
+        MILK
+    }
+}
+
 const DOCK: [DockItem; 9] = [
     DockItem {
         name: "Files",
@@ -976,7 +986,7 @@ impl Desktop {
                             y: r.y + r.h + 10,
                             w: r.w + 40,
                             text: Self::window_label(w),
-                            color: MILK,
+                            color: on_scrim_text(),
                         });
                     }
                 }

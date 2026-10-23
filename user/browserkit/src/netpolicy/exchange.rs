@@ -36,8 +36,8 @@ use super::headers::{
 };
 use super::limits::Config;
 use super::origin::{
-    Origin, Target, address_space_of_host, is_loopback_host, is_potentially_trustworthy,
-    resolve_url,
+    AddressSpace, Origin, Target, address_space_of_host, address_space_of_ip, is_loopback_host,
+    is_potentially_trustworthy, resolve_url,
 };
 use super::referrer::{ReferrerInit, ReferrerPolicy, referrer_header};
 use crate::cookies;
@@ -80,6 +80,10 @@ text_enum! {
 pub struct Page {
     pub url: Url,
     pub origin: Origin,
+    /// Where the page itself came from, for the private-network rule. [`Page::new`] guesses
+    /// from the host text; the Browser sets the real one when it knows the address the page
+    /// was fetched from (a page on an intranet name that resolves to 10.x is `Private`).
+    pub address_space: AddressSpace,
     /// The page's referrer policy (`<meta name=referrer>` / header; the default if none).
     pub referrer_policy: ReferrerPolicy,
 }
@@ -88,6 +92,7 @@ impl Page {
     pub fn new(url: Url) -> Page {
         Page {
             origin: Origin::of(&url),
+            address_space: address_space_of_host(&url.host),
             url,
             referrer_policy: ReferrerPolicy::DEFAULT,
         }
@@ -146,6 +151,33 @@ impl RequestInit {
     }
 }
 
+impl RequestInit {
+    /// `navigator.sendBeacon(url, data)`: a keepalive POST with credentials. `content_type`
+    /// is the body's own (None for a string body without type, which the caller gives
+    /// `text/plain;charset=UTF-8`).
+    pub fn beacon(url: &str, len: usize, content_type: Option<&str>) -> RequestInit {
+        let mut i = RequestInit::new(url);
+        i.method = Method::post();
+        i.credentials = Credentials::Include;
+        i.keepalive = true;
+        i.body = Some(BodyInfo {
+            len,
+            content_type: content_type.map(String::from),
+        });
+        i
+    }
+}
+
+/// The checks `new Request(...)` makes when the request is built, before any fetch: only
+/// the errors that are the page's own doing ([`ErrorKind::Type`](super::error::ErrorKind));
+/// a request the network rules would stop later is still a valid `Request`.
+pub fn check_construct(cfg: &Config, page: &Page, init: &RequestInit) -> Result<(), NetError> {
+    match Exchange::start(cfg, page, init.clone()) {
+        Err(e) if e.kind() == super::error::ErrorKind::Type => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// What the page gets of a response (everything but the body bytes, which the bindings
 /// hold: they must drop them when `hide_body` is set).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -192,6 +224,26 @@ pub struct Hop {
     pub preflight: Option<PreflightRequest>,
     /// The whole exchange's time limit in ms (preflight and redirects included).
     pub timeout_ms: u64,
+    /// The most private address space this hop's host may resolve to: the page's own (or
+    /// anything, when `block_private_network` is off). A name that resolves to something
+    /// more private is a DNS-rebinding attempt: the transport's connect step calls
+    /// [`Hop::check_resolved`] with the address it got and refuses on `Err`.
+    pub max_address_space: AddressSpace,
+    /// The page's origin, for the error text.
+    pub page_origin: String,
+}
+
+impl Hop {
+    /// Is it all right to connect to `ip` (4 or 16 bytes, as looked up for this hop's host)?
+    pub fn check_resolved(&self, ip: &[u8]) -> Result<(), NetError> {
+        match address_space_of_ip(ip) {
+            Some(space) if self.max_address_space.may_reach(space) => Ok(()),
+            _ => Err(NetError::PrivateNetwork {
+                page: self.page_origin.clone(),
+                url: self.url.to_text(),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +263,7 @@ pub struct Outcome {
 
 /// What `start` found the address to be.
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Begin {
     Network(Exchange),
     /// A `data:` address: the response, and the decoded bytes. No network.
@@ -318,8 +371,7 @@ fn check_target(cfg: &Config, page: &Page, mode: Mode, url: &Url) -> Result<(), 
     }
     if cfg.block_private_network
         && !page
-            .origin
-            .address_space()
+            .address_space
             .may_reach(address_space_of_host(&url.host))
     {
         return Err(NetError::PrivateNetwork {
@@ -626,10 +678,8 @@ impl Exchange {
                     headers.push((String::from("cache-control"), String::from("no-cache")));
                 }
             }
-            CacheMode::NoCache => {
-                if !self.has_header("cache-control") {
-                    headers.push((String::from("cache-control"), String::from("max-age=0")));
-                }
+            CacheMode::NoCache if !self.has_header("cache-control") => {
+                headers.push((String::from("cache-control"), String::from("max-age=0")));
             }
             _ => {}
         }
@@ -694,6 +744,12 @@ impl Exchange {
             cookies: self.hop_cookies.clone(),
             preflight,
             timeout_ms: self.timeout_ms,
+            max_address_space: if self.cfg.block_private_network {
+                self.page.address_space
+            } else {
+                AddressSpace::Loopback
+            },
+            page_origin: self.page.origin.serialize(),
         })
     }
 
@@ -883,10 +939,11 @@ impl Exchange {
         }
         check_target(&self.cfg, &self.page, self.mode, &next)?;
 
-        // The Origin header becomes `null` once the chain has left the page's origin and moves on.
+        // The Origin header becomes `null` once the chain moves from another origin on to a
+        // third one (so that one never learns the page's origin).
         let here = Origin::of(&self.url);
         let there = Origin::of(&next);
-        if !self.page.origin.same_origin(&here) && !here.same_origin(&there) {
+        if !self.page.origin.same_origin(&here) && !self.page.origin.same_origin(&there) {
             self.tainted_origin = true;
         }
         // Credentials in a header don't follow a redirect to another origin.

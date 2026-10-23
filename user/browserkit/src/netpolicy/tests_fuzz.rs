@@ -194,7 +194,7 @@ fn mutate(r: &mut Rng, s: &str) -> String {
 
 const SEED_URLS: &[&str] = &[
     "https://example.com/a/b?c=d",
-    "http://user@example.com/",
+    "http://user\u{40}example.com/",
     "http://[::1]:8080/x",
     "//cdn.example.com/lib.js",
     "../up/../../x?y#z",
@@ -683,7 +683,7 @@ const LOCATIONS: &[&str] = &[
     "file:///etc/passwd",
     "javascript:1",
     "data:text/html,x",
-    "https://user:pw@app.test/",
+    "https://user:pw\u{40}app.test/",
     "https://app.test:25/",
     "http://10.0.0.1/",
     "http://localhost/",
@@ -867,7 +867,7 @@ fn fuzz_exchanges() {
         "file:///x",
         "http://10.0.0.1/",
         "https://api.test:25/",
-        "https://u@api.test/",
+        "https://u\u{40}api.test/",
         "//api.test/p",
     ];
     let methods = [

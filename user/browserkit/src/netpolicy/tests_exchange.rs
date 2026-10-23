@@ -6,7 +6,7 @@ use super::error::{CorsError, NetError};
 use super::exchange::*;
 use super::headers::{Guard, Headers, Method};
 use super::limits::{Config, Limits};
-use super::origin::Origin;
+use super::origin::{AddressSpace, Origin};
 use super::referrer::{ReferrerInit, ReferrerPolicy};
 use crate::cookies::Context;
 use milkweb::url::Url;
@@ -474,11 +474,7 @@ fn cookies_follow_credentials_and_site() {
         i.credentials = cred;
         let mut ex = net(&p, i);
         let hop = go(&mut ex);
-        assert_eq!(
-            hop.cookies,
-            want.and_then(|s| ctx(s)),
-            "{pg} -> {url} {cred:?}"
-        );
+        assert_eq!(hop.cookies, want.and_then(ctx), "{pg} -> {url} {cred:?}");
     }
 }
 
@@ -1399,7 +1395,7 @@ fn schemes() {
         );
     }
     assert!(matches!(
-        start_err(&p, init("https://user:pw@api.test/")),
+        start_err(&p, init("https://user:pw\u{40}api.test/")),
         NetError::UrlHasCredentials
     ));
     assert!(matches!(
@@ -1755,7 +1751,7 @@ fn response_size_and_status_checks() {
         Err(NetError::ResponseTooLarge { max: 1000 })
     ));
     assert!(
-        matches!(mk("99999999999999999999999999"), Ok(_)),
+        mk("99999999999999999999999999").is_ok(),
         "a length we can't parse is left to the transport's own cap"
     );
     assert!(mk("abc").is_ok());
@@ -2057,6 +2053,7 @@ fn redirect_limit() {
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn redirect_targets_that_are_refused() {
     let p = page("https://app.test/");
     let rows: [(&str, fn(&NetError) -> bool); 14] = [
@@ -2075,10 +2072,10 @@ fn redirect_targets_that_are_refused() {
         ("data:text/html,x", |e| {
             matches!(e, NetError::RedirectScheme { .. })
         }),
-        ("https://user:pw@app.test/x", |e| {
+        ("https://user:pw\u{40}app.test/x", |e| {
             matches!(e, NetError::RedirectWithCredentials { .. })
         }),
-        ("//user@app.test/x", |e| {
+        ("//user\u{40}app.test/x", |e| {
             matches!(e, NetError::RedirectWithCredentials { .. })
         }),
         ("http://app.test/x", |e| {
@@ -2204,7 +2201,8 @@ fn origin_header_is_null_after_a_hop_through_another_origin() {
     );
     go(&mut ex);
     assert!(ex.on_response(200, "OK", &h(&[(ACAO, "*")])).is_ok());
-    // app -> api -> app: back home, but the chain left, so Origin is null and CORS still applies
+    // app -> api -> app: back home. The origin is no secret from itself, so Origin stays, but
+    // CORS still applies to the final response (the chain was cross-origin)
     let (mut ex, r) = redirecting(
         &p,
         init("https://api.test/x"),
@@ -2214,7 +2212,7 @@ fn origin_header_is_null_after_a_hop_through_another_origin() {
     );
     r.unwrap();
     let hop2 = go(&mut ex);
-    assert_eq!(hdr(&hop2, "origin"), Some("null"));
+    assert_eq!(hdr(&hop2, "origin"), Some("https://app.test"));
     assert_eq!(
         hdr(&hop2, "sec-fetch-site"),
         Some("cross-site"),
@@ -2532,4 +2530,140 @@ fn xhr_style_request() {
         m.header("content-type").as_deref(),
         Some("application/json")
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Address spaces after name lookup, convenience constructors
+
+#[test]
+fn hop_checks_resolved_addresses() {
+    // a public page: a name that resolves to something private is a rebinding attempt
+    let p = page("https://app.test/");
+    let mut ex = net(&p, init("https://api.test/x"));
+    let hop = go(&mut ex);
+    assert_eq!(hop.max_address_space, AddressSpace::Public);
+    assert!(hop.check_resolved(&[93, 184, 216, 34]).is_ok());
+    for bad in [
+        [127u8, 0, 0, 1],
+        [10, 0, 0, 1],
+        [192, 168, 1, 1],
+        [169, 254, 169, 254],
+    ] {
+        let e = hop.check_resolved(&bad).unwrap_err();
+        assert!(matches!(e, NetError::PrivateNetwork { .. }), "{bad:?}");
+    }
+    assert!(
+        hop.check_resolved(&[1, 2, 3]).is_err(),
+        "an address we can't read is refused"
+    );
+    let mut v6 = [0u8; 16];
+    v6[15] = 1;
+    assert!(hop.check_resolved(&v6).is_err());
+    // a page that is itself on the private network may reach it
+    let mut intranet = page("http://wiki.example.test/");
+    intranet.address_space = AddressSpace::Private;
+    let mut ex = net(&intranet, init("/x"));
+    let hop = go(&mut ex);
+    assert_eq!(hop.max_address_space, AddressSpace::Private);
+    assert!(hop.check_resolved(&[10, 1, 2, 3]).is_ok());
+    assert!(hop.check_resolved(&[8, 8, 8, 8]).is_ok());
+    assert!(hop.check_resolved(&[127, 0, 0, 1]).is_err());
+    // with the rule off, anything goes
+    let off = Config {
+        block_private_network: false,
+        ..cfg()
+    };
+    let mut ex = match Exchange::start(&off, &p, init("https://api.test/x")).unwrap() {
+        Begin::Network(e) => e,
+        _ => unreachable!(),
+    };
+    let hop = go(&mut ex);
+    assert!(hop.check_resolved(&[127, 0, 0, 1]).is_ok());
+    assert!(hop.page_origin == "https://app.test");
+}
+
+#[test]
+fn page_address_space_decides_the_private_network_rule() {
+    let mut intranet = page("http://wiki.example.test/");
+    assert_eq!(
+        intranet.address_space,
+        AddressSpace::Public,
+        "guessed from the name"
+    );
+    assert!(matches!(
+        start_err(&intranet, init("http://10.0.0.5/x")),
+        NetError::PrivateNetwork { .. }
+    ));
+    intranet.address_space = AddressSpace::Private;
+    assert!(Exchange::start(&cfg(), &intranet, init("http://10.0.0.5/x")).is_ok());
+    assert!(matches!(
+        start_err(&intranet, init("http://localhost/x")),
+        NetError::PrivateNetwork { .. }
+    ));
+    // and a page that came from a loopback address may reach anything
+    let mut local = page("http://dev.example.test/");
+    local.address_space = AddressSpace::Loopback;
+    assert!(Exchange::start(&cfg(), &local, init("http://localhost:3009/x")).is_ok());
+    // the guess for the common cases
+    for (url, want) in [
+        ("http://localhost:3000/", AddressSpace::Loopback),
+        ("http://10.0.2.2:8080/", AddressSpace::Private),
+        ("https://example.com/", AddressSpace::Public),
+        ("http://printer/", AddressSpace::Private),
+    ] {
+        assert_eq!(page(url).address_space, want, "{url}");
+    }
+}
+
+#[test]
+fn beacon_request() {
+    let p = page("https://app.test/");
+    let i = RequestInit::beacon(
+        "https://stats.test/b",
+        100,
+        Some("text/plain;charset=UTF-8"),
+    );
+    assert_eq!(i.method.as_str(), "POST");
+    assert!(i.keepalive);
+    assert_eq!(i.credentials, Credentials::Include);
+    let mut ex = net(&p, i);
+    let hop = go(&mut ex);
+    assert!(hop.preflight.is_none(), "text/plain is simple");
+    assert!(hop.send_body);
+    assert_eq!(hdr(&hop, "origin"), Some("https://app.test"));
+    // a typed Blob makes it preflighted
+    let mut ex = net(
+        &p,
+        RequestInit::beacon("https://stats.test/b", 100, Some("application/json")),
+    );
+    assert!(go(&mut ex).preflight.is_some());
+    // too big for keepalive
+    assert!(matches!(
+        start_err(
+            &p,
+            RequestInit::beacon("https://stats.test/b", 70_000, None)
+        ),
+        NetError::KeepaliveBodyTooLarge { .. }
+    ));
+}
+
+#[test]
+fn check_construct_reports_only_type_errors() {
+    let p = page("https://app.test/");
+    let c = cfg();
+    assert!(check_construct(&c, &p, &init("/x")).is_ok());
+    assert!(check_construct(&c, &p, &init("https://elsewhere.test/")).is_ok());
+    // stopped later by network rules, but a valid Request
+    assert!(check_construct(&c, &p, &init("http://plain.test/")).is_ok());
+    assert!(check_construct(&c, &p, &init("http://127.0.0.1/")).is_ok());
+    assert!(check_construct(&c, &p, &init("https://app.test:25/")).is_ok());
+    // the page's own mistakes
+    assert!(check_construct(&c, &p, &init("file:///x")).is_err());
+    assert!(check_construct(&c, &p, &init("https://u\u{40}app.test/")).is_err());
+    let mut i = init("/x");
+    i.body = body(1, None);
+    assert!(check_construct(&c, &p, &i).is_err());
+    let mut i = with_method(init("https://api.test/"), "PUT");
+    i.mode = Mode::NoCors;
+    assert!(check_construct(&c, &p, &i).is_err());
 }

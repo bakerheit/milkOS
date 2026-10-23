@@ -701,7 +701,7 @@ fn headers_limits() {
     assert_eq!(h.len(), 2);
     // a failed set leaves the object as it was
     let before = h.clone();
-    assert!(h.set("a", &format!("{big}")).is_ok());
+    assert!(h.set("a", &big).is_ok());
     assert_eq!(h.len(), before.len());
 }
 
@@ -710,4 +710,43 @@ fn headers_names_are_stored_lower_case() {
     let mut h = Headers::new(Guard::None);
     h.append("X-MiXeD", "1").unwrap();
     assert_eq!(h.raw()[0].0, "x-mixed");
+}
+
+#[test]
+fn headers_from_the_wire() {
+    let wire = pairs(&[
+        ("Content-Type", " text/html "),
+        ("SET-COOKIE", "a=b"),
+        ("Set-Cookie2", "c"),
+        ("x-bytes", "caf\u{e9}"),
+        ("bad name", "x"),
+        ("x-nl", "a\nb"),
+        ("x-nul", "a\0b"),
+        ("x-a", "1"),
+        ("X-A", "2"),
+        ("", "empty name"),
+    ]);
+    let mut h = Headers::from_wire(&wire);
+    assert_eq!(h.guard(), Guard::Immutable);
+    assert_eq!(
+        h.entries(),
+        pairs(&[
+            ("content-type", "text/html"),
+            ("x-a", "1, 2"),
+            ("x-bytes", "caf\u{e9}")
+        ])
+    );
+    assert_eq!(h.append("x", "1"), Err(NetError::HeadersImmutable));
+    assert!(h.get_set_cookie().is_empty());
+    // limits
+    let many: Vec<(String, String)> = (0..200)
+        .map(|i| (format!("x-{i}"), "v".to_string()))
+        .collect();
+    assert_eq!(Headers::from_wire(&many).len(), MAX_HEADERS);
+    let fat: Vec<(String, String)> = (0..10)
+        .map(|i| (format!("x-{i}"), "v".repeat(MAX_VALUE)))
+        .collect();
+    assert!(Headers::from_wire(&fat).len() <= 2);
+    let huge = vec![("x".to_string(), "v".repeat(MAX_VALUE + 1))];
+    assert!(Headers::from_wire(&huge).is_empty());
 }

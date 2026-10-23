@@ -32,6 +32,7 @@ fn names(v: &[&str]) -> Vec<String> {
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn cors_check_table() {
     use CorsError::*;
     let page = o("https://app.test/");
@@ -278,6 +279,7 @@ fn grant_headers(origin: &str, extra: &[(&str, &str)]) -> Vec<(String, String)> 
 }
 
 #[test]
+#[allow(clippy::type_complexity)]
 fn preflight_check_table() {
     use CorsError::*;
     let page = o("https://app.test/");
@@ -589,7 +591,7 @@ fn preflight_check_table() {
     ];
     for (label, cred, method, uh, status, extra, want) in rows {
         // The expected error for status-only rows includes the origin check running second.
-        let origin_hdr = if cred { ok.to_string() } else { ok.to_string() };
+        let origin_hdr = ok.to_string();
         let hdrs = if label.starts_with("credentials need") {
             grant_headers(&origin_hdr, &[])
         } else {

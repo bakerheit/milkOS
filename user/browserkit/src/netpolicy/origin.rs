@@ -234,28 +234,36 @@ fn space_of_v4(a: [u8; 4]) -> AddressSpace {
     }
 }
 
+fn space_of_v6(v: [u16; 8]) -> AddressSpace {
+    if v == [0; 8] || v == [0, 0, 0, 0, 0, 0, 0, 1] {
+        return AddressSpace::Loopback;
+    }
+    let v4 = |hi: u16, lo: u16| [(hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8];
+    // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (the old compatible form)
+    if v[..5] == [0, 0, 0, 0, 0] && (v[5] == 0xffff || v[5] == 0) {
+        return space_of_v4(v4(v[6], v[7]));
+    }
+    // 64:ff9b::a.b.c.d (NAT64) and 2002:a.b.c.d:: (6to4) carry an IPv4 address too
+    if v[0] == 0x64 && v[1] == 0xff9b && v[2..6] == [0, 0, 0, 0] {
+        return space_of_v4(v4(v[6], v[7]));
+    }
+    if v[0] == 0x2002 {
+        return space_of_v4(v4(v[1], v[2]));
+    }
+    match v[0] {
+        x if x & 0xfe00 == 0xfc00 => AddressSpace::Private,
+        x if x & 0xffc0 == 0xfe80 => AddressSpace::Private,
+        x if x & 0xff00 == 0xff00 => AddressSpace::Private,
+        _ => AddressSpace::Public,
+    }
+}
+
 /// Classify a host (as in [`Url::host`]).
 pub fn address_space_of_host(host: &str) -> AddressSpace {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.contains(':') {
-        let Some(v) = parse_ipv6(&host) else {
-            // Not a valid literal: treat as the most private (never reachable from outside).
-            return AddressSpace::Loopback;
-        };
-        if v == [0, 0, 0, 0, 0, 0, 0, 0] || v == [0, 0, 0, 0, 0, 0, 0, 1] {
-            return AddressSpace::Loopback;
-        }
-        // ::ffff:a.b.c.d (mapped) and ::a.b.c.d (the old compatible form).
-        if v[..5] == [0, 0, 0, 0, 0] && (v[5] == 0xffff || v[5] == 0) {
-            let b = [(v[6] >> 8) as u8, v[6] as u8, (v[7] >> 8) as u8, v[7] as u8];
-            return space_of_v4(b);
-        }
-        return match v[0] {
-            x if x & 0xfe00 == 0xfc00 => AddressSpace::Private,
-            x if x & 0xffc0 == 0xfe80 => AddressSpace::Private,
-            x if x & 0xff00 == 0xff00 => AddressSpace::Private,
-            _ => AddressSpace::Public,
-        };
+        // Not a valid literal: treat as the most private (never reachable from outside).
+        return parse_ipv6(&host).map_or(AddressSpace::Loopback, space_of_v6);
     }
     if let Some(a) = parse_ipv4(&host) {
         return space_of_v4(a);
@@ -280,6 +288,22 @@ pub fn address_space_of_host(host: &str) -> AddressSpace {
         }
     }
     AddressSpace::Public
+}
+
+/// Classify a resolved address: 4 bytes (IPv4) or 16 bytes (IPv6), as a name lookup gives
+/// them. `None` for any other length.
+pub fn address_space_of_ip(ip: &[u8]) -> Option<AddressSpace> {
+    match ip.len() {
+        4 => Some(space_of_v4([ip[0], ip[1], ip[2], ip[3]])),
+        16 => {
+            let mut v = [0u16; 8];
+            for (i, w) in v.iter_mut().enumerate() {
+                *w = u16::from_be_bytes([ip[2 * i], ip[2 * i + 1]]);
+            }
+            Some(space_of_v6(v))
+        }
+        _ => None,
+    }
 }
 
 /// "Potentially trustworthy" (secure-contexts): https, or http to this machine.
@@ -466,6 +490,12 @@ pub fn resolve_url(base: &Url, input: &str, limits: &Limits) -> Result<Target, N
                         max: limits.max_url,
                     });
                 }
+                // blob:https://host/uuid names the origin that made it: no user name in it.
+                if let Some((_, after)) = rest.split_once("://")
+                    && authority_of(after).contains('@')
+                {
+                    return Err(NetError::UrlHasCredentials);
+                }
                 Ok(Target::Blob(text))
             }
             _ => Err(NetError::UnsupportedScheme(scheme)),
@@ -586,11 +616,11 @@ pub fn decode_data_url(rest: &str, max_body: usize) -> Result<DataUrl, NetError>
     };
     let mut meta = meta.trim_matches(|c: char| c == ' ');
     let mut base64 = false;
-    if let Some(i) = meta.rfind(';') {
-        if meta[i + 1..].trim().eq_ignore_ascii_case("base64") {
-            base64 = true;
-            meta = &meta[..i];
-        }
+    if let Some(i) = meta.rfind(';')
+        && meta[i + 1..].trim().eq_ignore_ascii_case("base64")
+    {
+        base64 = true;
+        meta = &meta[..i];
     }
     let bytes = percent_decode(data);
     let body = if base64 {

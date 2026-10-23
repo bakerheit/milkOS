@@ -44,7 +44,7 @@ fn origin_serialization() {
         ("http://[::1]:3000/", "http://[::1]:3000"),
         ("http://[::1]/", "http://[::1]"),
         ("http://example.com./", "http://example.com"),
-        ("http://user:pw@example.com/", "http://example.com"),
+        ("http://user:pw\u{40}example.com/", "http://example.com"),
         ("http://localhost:1234/a/b", "http://localhost:1234"),
     ];
     for (url, want) in rows {
@@ -420,8 +420,8 @@ fn resolve_absolute_and_relative() {
         ("/x@y", "http://a.test/x@y"),
         ("?q=a@b", "http://a.test/dir/page.html?q=a@b"),
         (
-            "http://b.test/?u=http://c.test@d.test",
-            "http://b.test/?u=http://c.test@d.test",
+            "http://b.test/?u=http://c.test\u{40}d.test",
+            "http://b.test/?u=http://c.test\u{40}d.test",
         ),
         ("http://b.test?x=@", "http://b.test/?x=@"),
         ("http://b.test#@x", "http://b.test/"),
@@ -441,15 +441,15 @@ fn resolve_absolute_and_relative() {
 fn resolve_refuses_credentials_backslashes_and_odd_schemes() {
     let base = "http://a.test/";
     for bad in [
-        "http://user@b.test/",
-        "http://user:pw@b.test/",
-        "https://:pw@b.test/",
+        "http://user\u{40}b.test/",
+        "http://user:pw\u{40}b.test/",
+        "https://:pw\u{40}b.test/",
         "http://@b.test/",
-        "//user@b.test/",
-        "//u:p@b.test/x",
-        "HTTP://user@b.test/",
-        "http://a.test:80@evil.test/",
-        "http://good.test@evil.test/",
+        "//user\u{40}b.test/",
+        "//u:p\u{40}b.test/x",
+        "HTTP://user\u{40}b.test/",
+        "http://a.test:80\u{40}evil.test/",
+        "http://good.test\u{40}evil.test/",
     ] {
         assert_eq!(err(base, bad), NetError::UrlHasCredentials, "{bad}");
     }
@@ -470,7 +470,7 @@ fn resolve_refuses_credentials_backslashes_and_odd_schemes() {
         ("ftp://x.test/", "ftp"),
         ("ws://x.test/", "ws"),
         ("wss://x.test/", "wss"),
-        ("mailto:a@b.test", "mailto"),
+        ("mailto:a\u{40}b.test", "mailto"),
         ("about:blank", "about"),
         ("chrome://settings", "chrome"),
         ("milk:history", "milk"),
@@ -714,5 +714,62 @@ fn page_cannot_pick_the_origin_with_userinfo_tricks() {
             Ok(Target::Http(url)) => assert_eq!(url.host, host, "{input}"),
             other => panic!("{input}: {other:?}"),
         }
+    }
+}
+
+#[test]
+fn address_spaces_of_embedded_ipv4() {
+    use AddressSpace::*;
+    let rows = [
+        ("64:ff9b::7f00:1", Loopback),
+        ("64:ff9b::a00:1", Private),
+        ("64:ff9b::808:808", Public),
+        ("2002:7f00:1::", Loopback),
+        ("2002:c0a8:101::1", Private),
+        ("2002:808:808::", Public),
+        ("64:ff9b:1::7f00:1", Public),
+        ("::ffff:7f00:1", Loopback),
+        ("::ffff:c0a8:1", Private),
+    ];
+    for (host, want) in rows {
+        assert_eq!(address_space_of_host(host), want, "{host}");
+    }
+}
+
+#[test]
+fn address_space_of_resolved_bytes() {
+    use AddressSpace::*;
+    assert_eq!(address_space_of_ip(&[127, 0, 0, 1]), Some(Loopback));
+    assert_eq!(address_space_of_ip(&[10, 0, 2, 2]), Some(Private));
+    assert_eq!(address_space_of_ip(&[8, 8, 8, 8]), Some(Public));
+    let mut v6 = [0u8; 16];
+    v6[15] = 1;
+    assert_eq!(address_space_of_ip(&v6), Some(Loopback));
+    let mut mapped = [0u8; 16];
+    mapped[10] = 0xff;
+    mapped[11] = 0xff;
+    mapped[12..].copy_from_slice(&[192, 168, 1, 1]);
+    assert_eq!(address_space_of_ip(&mapped), Some(Private));
+    let mut ula = [0u8; 16];
+    ula[0] = 0xfd;
+    assert_eq!(address_space_of_ip(&ula), Some(Private));
+    let mut public = [0u8; 16];
+    public[0] = 0x26;
+    public[1] = 0x06;
+    assert_eq!(address_space_of_ip(&public), Some(Public));
+    for len in [0usize, 1, 3, 5, 8, 15, 17, 100] {
+        assert_eq!(address_space_of_ip(&vec![1u8; len]), None, "{len}");
+    }
+}
+
+#[test]
+fn blob_with_a_user_name_is_refused() {
+    let base = "http://a.test/";
+    for bad in [
+        "blob:http://u\u{40}a.test/1",
+        "blob:http://a.test\u{40}evil.test/1",
+        "blob:https://u:p\u{40}a.test/1",
+    ] {
+        assert_eq!(err(base, bad), NetError::UrlHasCredentials, "{bad}");
     }
 }

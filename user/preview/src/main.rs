@@ -509,7 +509,7 @@ fn main(args: &rt::Args) -> i32 {
         win,
         th: Theme::current(),
         hits: Hits::default(),
-        name: String::from("Preview"),
+        name: String::new(),
         path: None,
         size: 0,
         mtime: 0,

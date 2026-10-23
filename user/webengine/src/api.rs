@@ -764,6 +764,8 @@ pub struct Document {
     pub(crate) page: crate::page::Page,
     /// Its scripts, if it was parsed with them on ([`Document::parse_scripted`]).
     pub(crate) js: Option<alloc::boxed::Box<crate::script::Runtime>>,
+    /// Requests made without scripts (a form that didn't validate).
+    pub(crate) notes: Vec<PageRequest>,
 }
 
 impl Document {
@@ -784,6 +786,7 @@ impl Document {
         Document {
             page: crate::page::Page::parse(bytes, url, content_type, limits),
             js: None,
+            notes: Vec::new(),
         }
     }
 
@@ -792,6 +795,7 @@ impl Document {
         Document {
             page: crate::page::Page::parse_str(html, url, Limits::default()),
             js: None,
+            notes: Vec::new(),
         }
     }
 
@@ -977,7 +981,11 @@ impl Document {
             limits,
             scripts.is_some(),
         );
-        let mut d = Document { page, js: None };
+        let mut d = Document {
+            page,
+            js: None,
+            notes: Vec::new(),
+        };
         if let Some(l) = scripts {
             d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new(&d.page, l)));
         }
@@ -1094,10 +1102,19 @@ impl Document {
         // Something to submit at all (a form, a method that sends)?
         self.page.submit(id, click)?;
         let form = self.page.form_node_of(id)?;
-        if let Some(j) = self.js.as_mut()
-            && !j.submit_event(&mut self.page, host, form, id)
-        {
-            return None;
+        match self.js.as_mut() {
+            Some(j) if !j.stopped() => {
+                if !j.submit_event(&mut self.page, host, form, id) {
+                    return None;
+                }
+            }
+            _ => {
+                if let Some((n, msg)) = crate::script::first_invalid(&mut self.page, form, id) {
+                    self.page.set_focus_node(Some(n));
+                    self.notes.push(PageRequest::Invalid(msg));
+                    return None;
+                }
+            }
         }
         // Listeners may have changed the values: the submission as it is now.
         self.page.sync_forms();
@@ -1107,7 +1124,11 @@ impl Document {
 
     /// What the scripts asked of the app since the last call, in order.
     pub fn take_requests(&mut self) -> Vec<PageRequest> {
-        self.js.as_mut().map(|j| j.take_requests()).unwrap_or_default()
+        let mut v = core::mem::take(&mut self.notes);
+        if let Some(j) = self.js.as_mut() {
+            v.extend(j.take_requests());
+        }
+        v
     }
 
     /// Console lines since the last call.

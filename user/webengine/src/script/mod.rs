@@ -356,7 +356,8 @@ impl Runtime {
         });
     }
 
-    /// The `submit` event at `form` (the submitter `id`): false if cancelled.
+    /// Validation, then the `submit` event at `form` (the submitter `id`): false if the
+    /// form is invalid or a listener cancelled it.
     pub fn submit_event(
         &mut self,
         page: &mut Page,
@@ -365,8 +366,22 @@ impl Runtime {
         id: ControlId,
     ) -> bool {
         let submitter = page.control_node(id).unwrap_or(NONE);
-        self.entry(page, host, |b, r| events_js::fire_submit(b, r, form, submitter))
-            .unwrap_or(true)
+        self.entry(page, host, |b, r| {
+            forms_js::validate_form(b, r, form, submitter)
+                && events_js::fire_submit(b, r, form, submitter)
+        })
+        .unwrap_or(true)
+    }
+
+    /// Test hook: run `f` as an entry (the realm and bridge at hand).
+    #[cfg(test)]
+    pub(crate) fn test_entry<R>(
+        &mut self,
+        page: &mut Page,
+        host: &mut dyn ScriptHost,
+        f: impl FnOnce(&Rc<Bridge>, &mut Realm) -> R,
+    ) -> Option<R> {
+        self.entry(page, host, f)
     }
 
     /// mousedown, mouseup, click at `target`; the checkbox dance around it. False if the
@@ -583,4 +598,25 @@ fn nodes_toggle(page: &mut Page, target: NodeId) -> bool {
         }
     }
     true
+}
+
+/// Without scripts: the first control of `form` that fails the basic constraints (required,
+/// type, length, range), and why. (`novalidate` and `formnovalidate` are honoured.)
+pub fn first_invalid(page: &mut Page, form: NodeId, submitter: ControlId) -> Option<(NodeId, String)> {
+    let skip = page.dom.element(form).is_some_and(|e| e.has_attr("novalidate"))
+        || page
+            .control_node(submitter)
+            .and_then(|n| page.dom.element(n))
+            .is_some_and(|e| e.has_attr("formnovalidate"));
+    if skip {
+        return None;
+    }
+    page.sync_forms();
+    let list = nodes::list_nodes(page, &bridge::ListKind::FormElements(form));
+    for n in list {
+        if let Some(m) = forms_js::basic_invalid(page, n) {
+            return Some((n, m));
+        }
+    }
+    None
 }

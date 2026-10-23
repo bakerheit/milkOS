@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 use jsengine::{Attrs, JsResult, Realm, Value};
 
-use super::bridge::{
+use super::bridge::{Rnd, 
     Bridge, Handler, ListKind, arg, arg_bool, arg_str, arg_str_or_empty, dom_error, type_error,
 };
 use super::events_js::{self, HANDLER_TYPES};
@@ -170,10 +170,6 @@ pub fn control_value(b: &Bridge, n: NodeId) -> Option<String> {
             .then_some(())
         })
         .map(|_| c.value.clone())
-}
-
-fn rv(r: &mut Realm, s: &str) -> Value {
-    r.string(s)
 }
 
 /// Lay the page out now if a script's changes need it (for sizes and positions).
@@ -774,7 +770,7 @@ pub fn live_list(b: &Rc<Bridge>, r: &mut Realm, kind: ListKind, collection: bool
             id,
             super::bridge::List {
                 kind,
-                gen: 0,
+                seen: 0,
                 cache: Vec::new(),
                 cached: false,
             },
@@ -814,13 +810,13 @@ pub fn list_now(b: &Bridge, id: u32) -> Vec<NodeId> {
     let Ok(mut st) = b.st.try_borrow_mut() else {
         return Vec::new();
     };
-    let gen = p.dom.generation;
+    let now_gen = p.dom.generation;
     let Some(l) = st.lists.get_mut(&id) else {
         return Vec::new();
     };
-    if !l.cached || l.gen != gen {
+    if !l.cached || l.seen != now_gen {
         l.cache = list_nodes(p, &l.kind);
-        l.gen = gen;
+        l.seen = now_gen;
         l.cached = true;
     }
     l.cache.clone()
@@ -881,25 +877,6 @@ fn named_item(b: &Rc<Bridge>, r: &mut Realm, id: u32, name: &str) -> Option<Valu
             .is_some_and(|e| e.attr("id") == Some(name) || e.attr("name") == Some(name))
     })?;
     Some(wrap(b, r, hit))
-}
-
-fn list_this(b: &Bridge, r: &mut Realm, this: Value) -> JsResult<Vec<NodeId>> {
-    if let Some(id) = r.host_data(this, b.classes().list) {
-        return Ok(list_now(b, id as u32));
-    }
-    // A static list is an array.
-    if r.is_array(this) {
-        let n = r.get(this, "length")?.as_number().unwrap_or(0.0) as u32;
-        let mut v = Vec::new();
-        for i in 0..n.min(1 << 20) {
-            let x = r.get(this, i)?;
-            if let Some(nd) = node_of(b, r, x) {
-                v.push(nd);
-            }
-        }
-        return Ok(v);
-    }
-    Err(type_error(r, "Illegal invocation"))
 }
 
 // ---- install -------------------------------------------------------------------------------
@@ -1864,19 +1841,19 @@ fn is_root_scroller(p: &Page, n: NodeId) -> bool {
 }
 fn e_offset_width(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
-    Ok(Value::number(doc_rect(b, n).2.round()))
+    Ok(Value::number(doc_rect(b, n).2.rnd()))
 }
 fn e_offset_height(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
-    Ok(Value::number(doc_rect(b, n).3.round()))
+    Ok(Value::number(doc_rect(b, n).3.rnd()))
 }
 fn e_offset_top(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
-    Ok(Value::number(doc_rect(b, n).1.round()))
+    Ok(Value::number(doc_rect(b, n).1.rnd()))
 }
 fn e_offset_left(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
-    Ok(Value::number(doc_rect(b, n).0.round()))
+    Ok(Value::number(doc_rect(b, n).0.rnd()))
 }
 fn e_offset_parent(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
@@ -1911,30 +1888,30 @@ fn doc_size_css(b: &Bridge) -> (f64, f64) {
 fn e_client_width(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
     if n == b.page_or(r)?.dom.document_element() {
-        return Ok(Value::number(viewport_css(b).0.round()));
+        return Ok(Value::number(viewport_css(b).0.rnd()));
     }
-    Ok(Value::number(doc_rect(b, n).2.round()))
+    Ok(Value::number(doc_rect(b, n).2.rnd()))
 }
 fn e_client_height(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
     if n == b.page_or(r)?.dom.document_element() {
-        return Ok(Value::number(viewport_css(b).1.round()));
+        return Ok(Value::number(viewport_css(b).1.rnd()));
     }
-    Ok(Value::number(doc_rect(b, n).3.round()))
+    Ok(Value::number(doc_rect(b, n).3.rnd()))
 }
 fn e_scroll_width(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
     if is_root_scroller(b.page_or(r)?, n) {
-        return Ok(Value::number(doc_size_css(b).0.round()));
+        return Ok(Value::number(doc_size_css(b).0.rnd()));
     }
-    Ok(Value::number(doc_rect(b, n).2.round()))
+    Ok(Value::number(doc_rect(b, n).2.rnd()))
 }
 fn e_scroll_height(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
     if is_root_scroller(b.page_or(r)?, n) {
-        return Ok(Value::number(doc_size_css(b).1.round()));
+        return Ok(Value::number(doc_size_css(b).1.rnd()));
     }
-    Ok(Value::number(doc_rect(b, n).3.round()))
+    Ok(Value::number(doc_rect(b, n).3.rnd()))
 }
 fn e_scroll_top(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
@@ -2168,7 +2145,7 @@ fn d_create_element_ns(b: &Rc<Bridge>, r: &mut Realm, _: Value, a: &[Value]) -> 
     if !valid_name(&name) {
         return Err(dom_error(r, "InvalidCharacterError", "not a valid element name"));
     }
-    let local = name.rsplit(':').next().unwrap_or(&name).to_string();
+    let local = String::from(name.rsplit(':').next().unwrap_or(&name));
     let p = b.page_or(r)?;
     check_room(p, r)?;
     let p = b.page_or(r)?;
@@ -2718,7 +2695,7 @@ fn img_size(b: &Rc<Bridge>, r: &mut Realm, t: Value, h: bool) -> JsResult<Value>
         return Ok(Value::int(v));
     }
     let (_, _, w, hh) = doc_rect(b, n);
-    Ok(Value::number(if h { hh } else { w }.round()))
+    Ok(Value::number(if h { hh } else { w }.rnd()))
 }
 fn img_width(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> JsResult<Value> {
     img_size(b, r, t, false)

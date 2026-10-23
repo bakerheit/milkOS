@@ -11,3 +11,4 @@ mod layout;
 mod raster;
 mod render;
 mod scheme;
+mod script;

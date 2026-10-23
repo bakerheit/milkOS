@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use jsengine::{Attrs, ErrorKind, HostClass, JsResult, Key, OwnedKey, Pinned, Realm, Value, hooks};
 
-use super::bridge::{Bridge, Classes, Protos, arg, arg_num, arg_str, dom_error, type_error};
+use super::bridge::{Rnd, Bridge, Classes, Protos, arg, arg_num, arg_str, dom_error, type_error};
 use super::events_js;
 use super::nodes::{self, getter, method, node_of, remove_attribute, set_attribute, wrap};
 use crate::api::{ConsoleLevel, PageRequest};
@@ -33,9 +33,6 @@ impl HostClass for EventClass {
         "Event"
     }
 }
-
-struct PlainClass;
-impl HostClass for PlainClass {}
 
 /// classList: indexed tokens of the class attribute.
 struct TokensClass {
@@ -480,7 +477,7 @@ fn rgb(c: u32) -> String {
         format!("rgb({r}, {g}, {b})")
     } else {
         let af = a as f32 / 255.0;
-        format!("rgba({r}, {g}, {b}, {})", (af * 100.0).round() / 100.0)
+        format!("rgba({r}, {g}, {b}, {})", (af as f64 * 100.0).rnd() / 100.0)
     }
 }
 
@@ -505,7 +502,7 @@ fn computed(b: &Bridge, n: NodeId, name: &str) -> String {
         .host()
         .map_or(1.0, |h| h.viewport().zoom.clamp(25, 500) as f64 / 100.0);
     let rect = p.node_rect(n).unwrap_or_default();
-    let px = |v: f64| format!("{}px", (v * 100.0).round() / 100.0);
+    let px = |v: f64| format!("{}px", (v * 100.0).rnd() / 100.0);
     match name {
         "display" => kebab_debug(s.display),
         "position" => kebab_debug(s.position),
@@ -807,7 +804,7 @@ fn console_text(r: &mut Realm, a: &[Value]) -> String {
                             'd' | 'i' => {
                                 let x = r.to_number(v).unwrap_or(f64::NAN);
                                 if x.is_finite() {
-                                    out.push_str(&format!("{}", x.trunc() as i64));
+                                    out.push_str(&format!("{}", x as i64));
                                 } else {
                                     out.push_str("NaN");
                                 }
@@ -963,7 +960,6 @@ fn install_location(b: &Rc<Bridge>, r: &mut Realm, g: Value) -> JsResult<()> {
         let s = location_href(&b2);
         Ok(r.string(&s))
     })?;
-    r.define(g, "location", loc, Attrs::ENUMERABLE)?;
     // window.location = "..." navigates.
     let b2 = b.clone();
     let lp = r.pin(loc);
@@ -1007,7 +1003,8 @@ fn install_history(b: &Rc<Bridge>, r: &mut Realm, g: Value) -> JsResult<()> {
     for (name, replace) in [("pushState", false), ("replaceState", true)] {
         let b2 = b.clone();
         r.define_method(h, name, 2, move |r, _t, a| {
-            let state = r.json_stringify(arg(a, 0))?;
+            let sv = arg(a, 0);
+            let state = if sv.is_nullish() { None } else { r.json_stringify(sv)? };
             let url = arg(a, 2);
             let cur = location_href(&b2);
             let target = if url.is_nullish() {
@@ -1224,7 +1221,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         dataset: r.register_class(DatasetClass { b: b.clone() }),
         storage: r.register_class(StorageClass { b: b.clone() }),
         computed: r.register_class(ComputedClass { b: b.clone() }),
-        plain: r.register_class(PlainClass),
     };
     let _ = b.classes.set(classes);
     let objp = r.intrinsic(jsengine::Intrinsic::ObjectPrototype);
@@ -1380,21 +1376,21 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     install_navigator(b, r, g)?;
 
     // Sizes and scrolling.
-    let vp_get = |which: u8| {
-        move |b: &Rc<Bridge>, _r: &mut Realm, _t: Value, _a: &[Value]| -> JsResult<Value> {
-            let (w, h) = match b.host() {
-                Some(h) => {
-                    let vp = h.viewport();
-                    let z = vp.zoom.clamp(25, 500) as f64 / 100.0;
-                    (vp.width as f64 / z, vp.height as f64 / z)
-                }
-                None => (0.0, 0.0),
-            };
-            Ok(Value::number(if which == 0 { w } else { h }.round()))
-        }
-    };
-    let w_get: fn(&Rc<Bridge>, &mut Realm, Value, &[Value]) -> JsResult<Value> = |b, r, t, a| vp_get(0)(b, r, t, a);
-    let h_get: fn(&Rc<Bridge>, &mut Realm, Value, &[Value]) -> JsResult<Value> = |b, r, t, a| vp_get(1)(b, r, t, a);
+    fn vp_css(b: &Bridge, which: u8) -> f64 {
+        let (w, h) = match b.host() {
+            Some(h) => {
+                let vp = h.viewport();
+                let z = vp.zoom.clamp(25, 500) as f64 / 100.0;
+                (vp.width as f64 / z, vp.height as f64 / z)
+            }
+            None => (0.0, 0.0),
+        };
+        if which == 0 { w } else { h }.rnd()
+    }
+    let w_get: fn(&Rc<Bridge>, &mut Realm, Value, &[Value]) -> JsResult<Value> =
+        |b, _r, _t, _a| Ok(Value::number(vp_css(b, 0)));
+    let h_get: fn(&Rc<Bridge>, &mut Realm, Value, &[Value]) -> JsResult<Value> =
+        |b, _r, _t, _a| Ok(Value::number(vp_css(b, 1)));
     getter(b, r, g, "innerWidth", w_get, None)?;
     getter(b, r, g, "innerHeight", h_get, None)?;
     getter(b, r, g, "outerWidth", w_get, None)?;

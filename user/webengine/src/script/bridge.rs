@@ -11,7 +11,6 @@
 //! fail becomes a script error, never a panic.
 
 use alloc::collections::BTreeMap;
-use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell, RefMut};
@@ -44,8 +43,6 @@ pub struct Classes {
     pub storage: ClassId,
     /// getComputedStyle results (data: the element).
     pub computed: ClassId,
-    /// Plain objects with no live keys (location, history, navigator, ...; data unused).
-    pub plain: ClassId,
 }
 
 /// The prototypes, pinned for the realm's life.
@@ -109,7 +106,7 @@ pub enum ListKind {
 pub struct List {
     pub kind: ListKind,
     /// The DOM generation the cache is from, and the cached nodes.
-    pub gen: u64,
+    pub seen: u64,
     pub cache: Vec<NodeId>,
     pub cached: bool,
 }
@@ -400,6 +397,19 @@ pub fn dom_error(r: &mut Realm, name: &str, msg: &str) -> Exception {
     r.throw(e)
 }
 
-pub fn str_val(r: &mut Realm, s: &str) -> Value {
-    r.string(s)
+/// Rounding for f64 without std.
+pub trait Rnd {
+    fn rnd(self) -> f64;
+}
+
+impl Rnd for f64 {
+    fn rnd(self) -> f64 {
+        if !self.is_finite() || self.abs() >= 4.0e15 {
+            return self;
+        }
+        let h = if self >= 0.0 { self + 0.5 } else { self - 0.5 };
+        let i = h as i64 as f64;
+        // -0.4 rounds to -0, as Math.round would not; fine for sizes.
+        i
+    }
 }

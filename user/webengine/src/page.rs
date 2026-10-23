@@ -899,10 +899,6 @@ impl Page {
         self.painted.as_ref()?.node_rects.get(n as usize).copied()
     }
 
-    pub(crate) fn last_viewport(&self) -> Option<Viewport> {
-        self.last_vp
-    }
-
     pub(crate) fn styles(&self) -> Option<&Styles> {
         self.styles.as_ref()
     }

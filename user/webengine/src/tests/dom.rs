@@ -75,6 +75,7 @@ fn noscript_follows_the_scripting_flag() {
     let on = Document {
         page: crate::page::Page::parse_str_with(html, "http://t.example/", Limits::default(), true),
         js: None,
+        notes: Vec::new(),
     };
     // Raw text: no <p id=n> element, and it isn't shown.
     assert_eq!(by_id(&on.page.dom, "n"), NONE);

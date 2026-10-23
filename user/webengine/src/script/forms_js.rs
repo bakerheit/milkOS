@@ -552,14 +552,6 @@ fn submit_with_events(b: &Rc<Bridge>, r: &mut Realm, form: NodeId, submitter: No
 
 // ---- validation ----------------------------------------------------------------------------
 
-/// Why a control is invalid (the browser's message), if it is.
-pub fn invalid_reason(b: &Bridge, r: Option<&mut Realm>, n: NodeId) -> Option<String> {
-    let p = b.page()?;
-    let msg = basic_invalid(p, n)?;
-    let _ = r;
-    Some(msg)
-}
-
 /// The checks that need no script: custom messages are added by the bindings.
 pub fn basic_invalid(p: &mut Page, n: NodeId) -> Option<String> {
     p.sync_forms();

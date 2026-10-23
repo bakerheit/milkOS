@@ -89,7 +89,7 @@ pub struct Page {
     /// The `<iframe>` elements may have changed since the frame table last looked.
     pub(crate) frames_dirty: bool,
     /// Which frame each `<iframe>` element of this document holds (kept by the frame table).
-    pub(crate) frame_nodes: BTreeMap<NodeId, FrameId>,
+    pub(crate) frame_nodes: Vec<(NodeId, FrameId)>,
     /// `<iframe>` elements scripts freed since the frame table last looked.
     freed_iframes: Vec<NodeId>,
     /// Counts the display lists made (for the frame table's merged lists).
@@ -220,7 +220,7 @@ impl Page {
             frame: crate::frames::FrameCtx::TOP,
             window_name: String::new(),
             frames_dirty: false,
-            frame_nodes: BTreeMap::new(),
+            frame_nodes: Vec::new(),
             freed_iframes: Vec::new(),
             dl_gen: 0,
         };
@@ -985,7 +985,7 @@ impl Page {
     }
 
     pub(crate) fn set_frame_nodes(&mut self, v: Vec<(NodeId, FrameId)>) {
-        self.frame_nodes = v.into_iter().collect();
+        self.frame_nodes = v;
     }
 
     pub(crate) fn forms(&self) -> &Forms {
@@ -1001,7 +1001,7 @@ impl Page {
         let Some(p) = &self.painted else {
             return NONE;
         };
-        let (dx, dy) = (x + scroll.0, y + scroll.1);
+        let (dx, dy) = (x.saturating_add(scroll.0), y.saturating_add(scroll.1));
         for h in p.hits.iter().rev() {
             if h.fixed && h.rect.contains(x, y) {
                 return h.node;
@@ -1153,7 +1153,7 @@ impl Page {
         let Some(p) = &self.painted else {
             return base;
         };
-        let (dx, dy) = (x + scroll.0, y + scroll.1);
+        let (dx, dy) = (x.saturating_add(scroll.0), y.saturating_add(scroll.1));
         let mut found = None;
         for h in p.hits.iter().rev() {
             if h.fixed && h.rect.contains(x, y) {

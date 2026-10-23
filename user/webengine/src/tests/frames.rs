@@ -1103,3 +1103,60 @@ fn window_name_is_the_browsing_contexts() {
     d.frame_slots();
     assert_eq!(d.frames_named("attr"), alloc::vec![id]);
 }
+
+#[test]
+fn extreme_numbers_do_not_overflow() {
+    let mut d = assemble(
+        &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"),
+        &["<p>x</p><p style='height:3000px'>y"],
+    );
+    let id = d.frame_slots()[0].id;
+    for v in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+        for w in [i32::MIN, 0, i32::MAX] {
+            let _ = d.hit_test(v, w, (v, w));
+            let _ = d.hit_test(5, 5, (v, w));
+            let _ = d.frame_at(v, w, (w, v));
+            let _ = d.scroll_frames_at(5, 5, (0, 0), v, w);
+            let _ = d.scroll_frames_at(v, w, (w, v), w, v);
+            d.set_frame_scroll(id, v, w);
+            let r = d.reveal(id, Rect::new(v, w, v, w));
+            let _ = r;
+            d.reveal(id, Rect::new(0, w, 0, 0));
+        }
+    }
+    lay(&mut d);
+    assert!(d.frame_scroll(id).is_some());
+}
+
+#[test]
+fn the_window_can_tell_where_it_sits() {
+    use crate::script::frames::*;
+    let mut root = scripted("<p>x</p><iframe id=a></iframe><div><iframe id=b></iframe></div>");
+    let ids: Vec<FrameId> = root.frame_slots().iter().map(|s| s.id).collect();
+    assert!(root.attach_frame(ids[0], scripted("<p>a</p><iframe id=c></iframe>"), None));
+    root.frame_slots();
+    let mut h = Host::new();
+    root.arm();
+    let top_node = root.page.dom.find_tag(crate::atoms::tag::IFRAME);
+    let js = root.js.as_mut().unwrap();
+    js.test_entry(&mut root.page, &mut h, |b, _r| {
+        assert_eq!(own_info(b).id, FrameId::TOP);
+        assert_eq!(own_info(b).parent, None);
+        assert_eq!(child_frames(b), alloc::vec![ids[0], ids[1]]);
+        assert_eq!(frame_of_element(b, top_node), Some(ids[0]));
+        assert_eq!(frame_of_element(b, 0), None);
+        assert!(frame_element(b).is_none());
+    });
+    root.disarm();
+    let a = root.frame_doc_mut(ids[0]).unwrap();
+    a.arm();
+    let js = a.js.as_mut().unwrap();
+    js.test_entry(&mut a.page, &mut h, |b, _r| {
+        let i = own_info(b);
+        assert_eq!((i.id, i.parent, i.depth), (ids[0], Some(FrameId::TOP), 1));
+        assert_eq!(child_frames(b).len(), 1);
+        let (pf, node) = frame_element(b).unwrap();
+        assert_eq!(pf, FrameId::TOP);
+        assert_eq!(node, top_node);
+    });
+}

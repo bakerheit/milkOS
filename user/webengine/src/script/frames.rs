@@ -96,6 +96,49 @@ pub fn own_frame(b: &Bridge) -> FrameId {
     b.page().map_or(FrameId::TOP, |p| p.frame.id)
 }
 
+/// Where this window sits: its frame, its parent's (None for the top document) and its depth.
+pub fn own_info(b: &Bridge) -> FrameInfo {
+    b.page().map_or(
+        FrameInfo {
+            id: FrameId::TOP,
+            parent: None,
+            depth: 0,
+        },
+        |p| {
+            let c = p.frame;
+            FrameInfo {
+                id: c.id,
+                parent: if c.id.is_top() { None } else { Some(c.parent) },
+                depth: c.depth,
+            }
+        },
+    )
+}
+
+/// The frames directly in this window's document, in tree order: `window.frames`. A frame
+/// whose document is not there yet is in the list.
+pub fn child_frames(b: &Bridge) -> Vec<FrameId> {
+    b.page()
+        .map(|p| p.frame_nodes.iter().map(|&(_, f)| f).collect())
+        .unwrap_or_default()
+}
+
+/// The frame an `<iframe>` element of this window's document holds (`iframe.contentWindow`).
+pub fn frame_of_element(b: &Bridge, node: crate::dom::NodeId) -> Option<FrameId> {
+    b.page()?
+        .frame_nodes
+        .iter()
+        .find(|&&(n, _)| n == node)
+        .map(|&(_, f)| f)
+}
+
+/// The `<iframe>` element that holds this window, as (the frame of the document it is in, its
+/// node there): `window.frameElement`. None for the top document.
+pub fn frame_element(b: &Bridge) -> Option<(FrameId, crate::dom::NodeId)> {
+    let c = b.page()?.frame;
+    (!c.id.is_top()).then_some((c.parent, c.node))
+}
+
 /// This window's `window.name`.
 pub fn window_name(b: &Bridge) -> String {
     b.page().map(|p| p.window_name.clone()).unwrap_or_default()

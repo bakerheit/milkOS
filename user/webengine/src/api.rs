@@ -48,22 +48,21 @@
 //! # CHANGES
 //! - Frames. `<iframe>` support: see "Frames" at the end of this file for the model (slots, ids,
 //!   attach/detach, one display list with the frames' content inside it, hit testing, scrolling,
-//!   focus order, find). What an existing caller sees: [`Entry`] has a `frame` field (always
-//!   [`FrameId::TOP`] for a page without frames), [`Hit`] has `frame`, `point` and `scroll`,
-//!   [`FindMatch`] has `frame`, and [`Limits`] has `max_frames` and `max_frame_depth`: build
-//!   them with `..Default::default()` (all four are plain fields, set by the engine, so reading
-//!   code is unchanged). [`Document::frame_doc`] / [`Document::frame_doc_mut`] are the names for
-//!   a frame's document ([`Document::frame`] was taken by requestAnimationFrame). The engine
-//!   draws a frame's canvas colour over its slot. `frameborder=0` and `border=0` on an
-//!   `<iframe>` remove its border. The scripting hooks are [`Document::frame_info`],
-//!   [`Document::window_name`] / [`Document::set_window_name`], [`Document::frames_named`],
-//!   [`Document::child_frames`], [`Document::deliver_message`] and
-//!   [`Document::take_messages`]; the `window.parent` / `contentWindow` objects themselves
-//!   are the bindings' (script/). Stage: the model and the slot table (`frame_slots`,
-//!   `attach_frame`, `detach_frame`, `take_closed_frames`, the lookups, the caps, sandbox
-//!   parsing) are in; the calls that cross frames at layout time (`layout`, `hit_test`,
-//!   `find`, `scroll_frames_at`, `reveal`, `focus_order`) arrive in later commits of the
-//!   same branch with these signatures.
+//!   focus order, find, `window.name`, `postMessage`, same-origin reach between frames). What an
+//!   existing caller sees: [`Entry`] has a `frame` field (always [`FrameId::TOP`] for a page
+//!   without frames), [`Hit`] has `frame`, `point` and `scroll`, [`FindMatch`] has `frame` and
+//!   `frame_rects`, and [`Limits`] has `max_frames` and `max_frame_depth` (build a `Limits`
+//!   with `..Default::default()`); all are plain fields set by the engine, so code that only
+//!   reads is unchanged. [`ScriptHost`] has a new provided method, `frame_host`.
+//!   [`Document::layout`], [`Document::display_list`], [`Document::hit_test`],
+//!   [`Document::find`], [`Document::text`], [`Document::needs_layout`], [`Document::stats`]
+//!   and [`Document::take_console`] now include the frames. [`Document::frame_doc`] /
+//!   [`Document::frame_doc_mut`] are the names for a frame's document ([`Document::frame`]
+//!   was taken by requestAnimationFrame). `window.postMessage` queues a message
+//!   ([`Document::take_messages`]) instead of doing nothing, `window.name` is the browsing
+//!   context's name, and there is a `MessageEvent`. An `<iframe>`'s `frameborder=0` (or `no`)
+//!   removes its UA border. Moving an `<iframe>` element in the tree keeps its document (a
+//!   browser would reload it); removing it closes the frame.
 //! - ES modules in pages. `<script type=module>` (inline and `src`), `<script type=importmap>`,
 //!   `<link rel=modulepreload>`, `nomodule` and `import()` work with no change to the calls
 //!   an app makes: a module and everything it imports is fetched through the script network
@@ -510,7 +509,8 @@ pub struct Hit {
     /// something in that frame only).
     pub frame: FrameId,
     /// The pointer in that frame's own viewport coordinates, and the frame's scroll offset:
-    /// pass both to the calls of `frame_doc_mut(hit.frame)` ([`Document::click`] and the like).
+    /// pass both to the calls on that frame's document ([`Document::click`] and the like,
+    /// through [`Document::with_frame`]).
     pub point: (i32, i32),
     pub scroll: (i32, i32),
 }
@@ -1648,46 +1648,92 @@ impl Document {
 /// `<iframe>` support. A page is a tree of frames: the top document and, for each `<iframe>`
 /// element in it, a *slot* that holds a document of its own (which can have iframes in turn).
 /// The engine does no I/O, so the host fetches the documents and the engine does everything
-/// that crosses a frame boundary.
+/// that crosses a frame boundary: lays the frames out inside their parents, paints them,
+/// finds what the pointer is over, scrolls, searches and orders the focus across them.
 ///
 /// ```text
 ///   top.frame_slots() ──▶ [FrameSlot { id, src, srcdoc, name, sandbox, rect, .. }]
 ///        │  a slot that wants_load(): the host fetches (or builds from srcdoc) a Document
 ///        ▼
 ///   top.attach_frame(id, doc, Some(generation))      top.detach_frame(id)
-///        │
+///        │                                           top.take_closed_frames()
 ///        ▼
-///   top.frame_doc_mut(id) ──▶ the frame's Document: supply_stylesheet, supply_image, run,
-///                          net_event, take_requests, take_console, ... exactly like the top
-///                          one (one ScriptHost per frame: its viewport is
+///   top.with_frame(id, |doc| ..) ──▶ the frame's Document, driven exactly like the top one:
+///                          supply_stylesheet, supply_image, run, net_event, click, key,
+///                          take_requests, take_console, take_net, ... Use `with_frame`
+///                          for the calls that run script, so same-origin scripts can reach
+///                          each other; `frame_doc` / `frame_doc_mut` do for the rest. One
+///                          ScriptHost per frame (its viewport is
 ///                          [`Document::frame_viewport`], its cookies and storage are its
-///                          origin's)
+///                          origin's), and `frame_host` says how one finds another's.
 ///   top.layout(&vp, m) ──▶ lays out the children into their slots (a viewport the size of
-///                          the slot's content box, the parent's zoom and scheme) and
-///                          paints them into the top display list
+///                          the slot's content box, the parent's zoom and scheme) and paints
+///                          them into the one display list the host draws
 /// ```
 ///
 /// - **One tree, one set of ids.** [`FrameId::TOP`] is the page. Every other id is a slot of
-///   the top document's table, whatever the depth. Calls that cross frames are made on the
-///   top document and take or give [`FrameId`]s; calls on a frame's own document
-///   ([`Document::frame_doc_mut`]) look at that document alone (its `<iframe>`s are slots of the
-///   top document, so `frame_slots` on a frame's document is empty).
+///   the top document's table, whatever the depth, and is never reused. Calls that cross
+///   frames are made on the top document and take or give [`FrameId`]s; the calls on a
+///   frame's own document look at that document alone (its `<iframe>`s are slots of the top
+///   document: `frame_slots` on a frame's document is empty). A document attached to a slot
+///   is owned by it; a document with frames of its own attached elsewhere loses them.
+/// - **Loading.** A slot [`wants_load`](FrameSlot::wants_load) until a document is attached
+///   for its current [`FrameSlot::generation`]. What to load is `srcdoc`, else `src`, else
+///   `about:blank` (the host builds an empty document); whether it may be loaded (framing
+///   headers, sandbox, mixed content, cookies) is the host's, and a refusal is an error page
+///   attached to the slot. A document for an older generation is refused by `attach_frame`.
+///   A frame that navigates (a link with a target, `location`) is `attach_frame(id, doc,
+///   None)`. `loading=lazy` is `FrameSlot::lazy` with the slot's `rect` for the host to
+///   judge. `<frame>` and `<frameset>` are not supported (they are not boxes); neither are
+///   `<object>` / `<embed>` documents.
 /// - **The display list.** [`Document::layout`] on the top document returns one list with the
-///   frames' content inside it, in the order they are painted, each entry clipped to the
-///   slot's content box and moved by the slot's position and the frame's scroll offset.
-///   [`Entry::frame`] says whose entry it is, which matters for [`Item::Image`] and
-///   [`Item::Control`] (ids belong to a document). A frame paints its own canvas colour
-///   over its slot, so a frame is never see-through.
+///   frames' content inside it, in the order they are painted (at the `<iframe>`'s place in
+///   the stacking order, so positioned boxes can cover a frame), each entry clipped to the
+///   slot's content box and moved by the slot's position and the frame's scroll offset; only
+///   what is in the frame's view is listed. [`Entry::frame`] says whose entry it is, which
+///   matters for [`Item::Image`] and [`Item::Control`] (an [`ImageId`] or [`ControlId`]
+///   belongs to a document: `frame_doc(e.frame)`). A frame paints its own canvas colour
+///   over its slot, so a frame is never see-through; `visibility: hidden` and `display:
+///   none` frames paint nothing. A frame's `position: fixed` boxes are fixed to the frame's
+///   view. [`FrameSlot::scroll`] and [`FrameSlot::content`] with the slot's `rect` are what a
+///   host needs to draw scrollbars.
+/// - **Scrolling.** The engine keeps each frame's offset ([`Document::set_frame_scroll`],
+///   clamped; pinned by `scrolling=no`); the wheel goes through
+///   [`Document::scroll_frames_at`] (the frame under the pointer first, then each parent, then
+///   what is left is the page's); [`Document::reveal`] and [`Document::frame_fragment`] scroll
+///   a frame, and the frames above it, to something inside it. After any of them, lay out
+///   again ([`Document::needs_layout`] says so).
 /// - **Pointer.** [`Document::hit_test`] looks through frames: [`Hit::frame`] is the frame
 ///   under the pointer and [`Hit::point`] / [`Hit::scroll`] the pointer and the scroll in
-///   that frame's own viewport, which are what `frame_doc_mut(hit.frame).click(..)` wants.
-///   [`Document::scroll_frames_at`] handles the wheel.
+///   that frame's own viewport, which are what `top.with_frame(hit.frame, |d| d.click(host,
+///   hit.point.0, hit.point.1, hit.scroll, mods))` wants. A box above a frame (positioned,
+///   later in the order) gets the pointer, not the frame. [`Document::frame_at`] is the same
+///   question for the cursor and the wheel.
 /// - **Keyboard.** Each document keeps its own focus ([`Document::focused`]); the tree
 ///   keeps which frame has the keyboard ([`Document::focused_frame`]) and
-///   [`Document::focus_order`] lists the controls of all frames in Tab order.
+///   [`Document::focus_order`] lists the controls of all frames in Tab order, the frame's at
+///   the place of its `<iframe>`. The host moves the document's focus to match
+///   ([`Document::set_focus`] fires `blur` and `focus`).
+/// - **Find, text.** [`Document::find`] and [`Document::text`] include the frames, in
+///   document order. A [`FindMatch`] says which frame it is in, where it is drawn (cut to the
+///   slot) and where it is in the frame ([`FindMatch::frame_rects`], for
+///   [`Document::reveal`]).
+/// - **Names and messages.** `window.name` is kept per frame ([`Document::window_name`]; it
+///   starts as the element's `name` and survives the frame's navigations);
+///   [`Document::frames_named`] lists the frames a `target=` can mean. `window.postMessage`
+///   queues an [`OutMessage`] ([`Document::take_messages`]) and the host delivers it with
+///   [`Document::deliver_message`] after the origin checks. Neither the engine nor its
+///   `window` knows origins: the host does.
+/// - **Scripts across frames.** [`Document::with_frame`] arms the page's other frames for the
+///   scripts of the document it runs, and the bindings reach one through
+///   `script::frames::with_peer` (a native's way into another realm, with that frame's
+///   host from [`ScriptHost::frame_host`]). A frame that is running (it called into another
+///   that now calls back) is busy and refused; so is a frame the host has no host for.
 /// - **Limits.** [`Limits::max_frames`] slots per page and [`Limits::max_frame_depth`]
 ///   levels. A slot over the first is not made; one over the second is
-///   [`FrameBlock::TooDeep`]. The engine says so in the top document's console.
+///   [`FrameBlock::TooDeep`] (no document may be attached to it). The engine says so in the
+///   top document's console ([`Document::take_console`]). The merged list holds only what is in
+///   each frame's view, so a frame with a huge viewport or document costs what it shows.
 impl Document {
     /// Make the other frames reachable from this document's scripts for the call that follows
     /// (see [`Document::with_frame`]).
@@ -1781,9 +1827,11 @@ impl Document {
         }
         self.page.flush();
         let lim = *self.page.limits();
-        let (maxf, maxd) = (lim.max_frames, lim.max_frame_depth);
+        // Whatever the host asked for, the table and the recursion stay small.
+        let (maxf, maxd) = (lim.max_frames.min(256), lim.max_frame_depth.min(16));
         if self.frames.is_none() && self.page.iframe_nodes().is_empty() {
             self.page.frames_dirty = false;
+            self.page.take_freed_iframes();
             return;
         }
         let frames = self

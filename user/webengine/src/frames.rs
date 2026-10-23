@@ -24,6 +24,8 @@ pub(crate) struct FrameCtx {
     pub id: FrameId,
     pub parent: FrameId,
     pub depth: u32,
+    /// The `<iframe>` element in the parent's document (NONE for the top document).
+    pub node: NodeId,
 }
 
 impl FrameCtx {
@@ -31,6 +33,7 @@ impl FrameCtx {
         id: FrameId::TOP,
         parent: FrameId::TOP,
         depth: 0,
+        node: NONE,
     };
 }
 
@@ -98,6 +101,21 @@ impl Slot {
             content: self.content,
         }
     }
+}
+
+/// The most of a `srcdoc` and of a `name` the slot keeps (the rest is cut, on a character).
+const MAX_SRCDOC: usize = 1 << 20;
+const MAX_NAME: usize = 64 << 10;
+
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return String::from(s);
+    }
+    let mut e = max;
+    while !s.is_char_boundary(e) {
+        e -= 1;
+    }
+    String::from(&s[..e])
 }
 
 /// Most iframe elements looked at in one document (the rest get no slot).
@@ -244,12 +262,24 @@ impl Frames {
         }
         let depth = ctx.depth + 1;
         for (order, &node) in nodes.iter().enumerate() {
-            let attrs = page.slot_attrs(node);
-            if let Some(i) = self
+            let existing = self
                 .slots
                 .iter()
-                .position(|s| s.parent == ctx.id && s.node == node)
-            {
+                .position(|s| s.parent == ctx.id && s.node == node);
+            if existing.is_none() && (self.slots.len() >= max_frames || self.next_id == u32::MAX) {
+                if !self.overflowed {
+                    self.overflowed = true;
+                    self.note(
+                        ConsoleLevel::Warn,
+                        alloc::format!(
+                            "Too many frames: only {max_frames} <iframe>s are used on a page."
+                        ),
+                    );
+                }
+                continue;
+            }
+            let attrs = page.slot_attrs(node);
+            if let Some(i) = existing {
                 let s = &mut self.slots[i];
                 s.order = order as u32;
                 if s.attrs != attrs {
@@ -262,18 +292,6 @@ impl Frames {
                         d.page.window_name = s.attrs.name.clone();
                     }
                     self.version += 1;
-                }
-                continue;
-            }
-            if self.slots.len() >= max_frames || self.next_id == u32::MAX {
-                if !self.overflowed {
-                    self.overflowed = true;
-                    self.note(
-                        ConsoleLevel::Warn,
-                        alloc::format!(
-                            "Too many frames: only {max_frames} <iframe>s are used on a page."
-                        ),
-                    );
                 }
                 continue;
             }
@@ -310,13 +328,9 @@ impl Frames {
             });
             self.version += 1;
         }
-        page.set_frame_nodes(
-            self.slots
-                .iter()
-                .filter(|s| s.parent == ctx.id)
-                .map(|s| (s.node, s.id))
-                .collect(),
-        );
+        let mut mine: Vec<&Slot> = self.slots.iter().filter(|s| s.parent == ctx.id).collect();
+        mine.sort_by_key(|s| s.order);
+        page.set_frame_nodes(mine.iter().map(|s| (s.node, s.id)).collect());
         page.frames_dirty = false;
     }
 }
@@ -361,13 +375,13 @@ impl Page {
             .map(|s| self.resolve(s));
         SlotAttrs {
             src,
-            srcdoc: e.attr("srcdoc").map(String::from),
-            name: e.attr("name").map(String::from).unwrap_or_default(),
+            srcdoc: e.attr("srcdoc").map(|s| clip(s, MAX_SRCDOC)),
+            name: e.attr("name").map(|s| clip(s, MAX_NAME)).unwrap_or_default(),
             sandbox: e.attr("sandbox").map(Sandbox::parse),
             lazy: e
                 .attr("loading")
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("lazy")),
-            allow: e.attr("allow").map(String::from).unwrap_or_default(),
+            allow: e.attr("allow").map(|s| clip(s, 4096)).unwrap_or_default(),
             allow_fullscreen: e.has_attr("allowfullscreen"),
             referrer_policy: e
                 .attr("referrerpolicy")
@@ -423,6 +437,7 @@ pub(crate) fn attach(
         id,
         parent: s.parent,
         depth: s.depth,
+        node: s.node,
     };
     doc.page.window_name = name;
     s.doc = Some(Box::new(doc));
@@ -897,7 +912,7 @@ fn path_at(
     if !s.rect.contains(px, py) {
         return;
     }
-    let local = (px - s.rect.x, py - s.rect.y);
+    let local = (px.saturating_sub(s.rect.x), py.saturating_sub(s.rect.y));
     out.push((s.id, local, s.scroll));
     path_at(frames, s.id, &d.page, local.0, local.1, s.scroll, out);
 }
@@ -947,7 +962,7 @@ fn scroll_by(frames: &mut Frames, id: FrameId, dx: i32, dy: i32) -> (i32, i32) {
         s.scroll = (nx, ny);
         frames.version += 1;
     }
-    (dx - ux, dy - uy)
+    (dx.saturating_sub(ux), dy.saturating_sub(uy))
 }
 
 pub(crate) fn set_scroll(top: &mut crate::Document, id: FrameId, x: i32, y: i32) -> (i32, i32) {

@@ -336,11 +336,6 @@ pub fn query_encode(s: &str) -> String {
     o
 }
 
-/// The search address for a bare word (DuckDuckGo's lite, text-only page).
-pub fn search_url(words: &str) -> String {
-    format!("http://lite.duckduckgo.com/lite/?q={}", query_encode(words))
-}
-
 impl From<UrlError> for String {
     fn from(e: UrlError) -> String {
         e.to_string()

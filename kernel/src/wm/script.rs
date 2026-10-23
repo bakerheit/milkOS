@@ -1462,7 +1462,7 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(8);
             b.click(x, y)
                 .wait(500)
-                .click(181 + 60, 113 + 44 + 8 * 28 + 12)
+                .click(181 + 60, 113 + 44 + 9 * 28 + 12)
                 .wait(400);
         }
         // Settings > Network: is the internet on, DNS, eth0.
@@ -1470,8 +1470,20 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(8);
             b.click(x, y)
                 .wait(500)
-                .click(181 + 60, 113 + 44 + 7 * 28 + 12)
+                .click(181 + 60, 113 + 44 + 8 * 28 + 12)
                 .wait(400);
+        }
+        // Settings > Browser: the search engine choice (Brave Search picked, to see the outline).
+        "settings-browser" | "settings-browser-dark" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y).wait(500);
+            if name == "settings-browser-dark" {
+                b.click(181 + 188 + 212 + 98, 113 + 92 + 68).wait(800);
+            }
+            b.click(181 + 60, 113 + 44 + 7 * 28 + 12)
+                .wait(400)
+                .click(181 + 188 + 98, 113 + 148 + 64 + 26)
+                .wait(500);
         }
         _ => return None,
     }

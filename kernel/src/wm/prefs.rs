@@ -1,5 +1,5 @@
 //! Desktop preferences: theme, wallpaper, font, brightness, dock size, how long the Trash
-//! keeps things. Kept in
+//! keeps things, the Browser's search engine. Kept in
 //! `~/.config/milk/settings` as plain `key = value` lines, so they survive reboots once home
 //! lives on milkfs. The Settings app edits them through `Request::Prefs`; the desktop applies
 //! and saves.
@@ -41,6 +41,10 @@ pub struct Prefs {
     /// How long things stay in the Trash (`trash = 30` / `trash = never`); `trashd` reads the
     /// same line from the same file.
     pub trash: filekit::trash::Keep,
+    /// The Browser's search engine for bare words: an index into `milkweb::search::ENGINES`,
+    /// saved by its key (`search = brave`). The Browser reads the file itself when it
+    /// searches (user/browser), so the desktop only keeps and shows the choice.
+    pub search: usize,
 }
 
 impl Prefs {
@@ -57,6 +61,7 @@ impl Prefs {
         magnify_pct: 175,
         font: crate::sysfont::DEFAULT,
         trash: filekit::trash::Keep::DEFAULT,
+        search: milkweb::search::DEFAULT,
     };
 
     /// The day counts Settings > Trash offers (plus Never).
@@ -73,7 +78,7 @@ impl Prefs {
 
     fn to_text(self) -> String {
         format!(
-            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\nmagnify = {}\nmagnify_size = {}\nfont = {}\ntrash = {}\n",
+            "# milkOS desktop settings (written by Settings)\ntheme = {}\nwallpaper = {}\nbrightness = {}\ndock = {}\nsound = {}\nlock = {}\nresolution = {}x{}\nwelcome = {}\nmagnify = {}\nmagnify_size = {}\nfont = {}\ntrash = {}\nsearch = {}\n",
             if self.dark { "chocolate" } else { "whole" },
             self.wallpaper.map_or("auto", |k| k.key()),
             self.brightness,
@@ -89,7 +94,8 @@ impl Prefs {
             if self.magnify { "on" } else { "off" },
             self.magnify_pct,
             crate::sysfont::FAMILIES[self.font.min(crate::sysfont::FAMILIES.len() - 1)].key,
-            self.trash.value()
+            self.trash.value(),
+            milkweb::search::engine(self.search).key
         )
     }
 
@@ -121,6 +127,7 @@ impl Prefs {
                     p.trash =
                         filekit::trash::Keep::parse(v).unwrap_or(filekit::trash::Keep::DEFAULT)
                 }
+                "search" => p.search = milkweb::search::find(v).unwrap_or(milkweb::search::DEFAULT),
                 "brightness" => p.brightness = v.parse().unwrap_or(100).clamp(20, 100),
                 "dock" => {
                     p.dock = match v.parse().unwrap_or(48) {

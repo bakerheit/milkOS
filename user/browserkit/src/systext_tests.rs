@@ -214,7 +214,11 @@ fn unstyled_pages_follow_the_settings_font() {
         Family::SansSerif
     );
     // The built-in pages (system-ui) follow it too.
-    let html = crate::pages::new_tab(&crate::bookmarks::Bookmarks::default(), false);
+    let html = crate::pages::new_tab(
+        &crate::bookmarks::Bookmarks::default(),
+        false,
+        "DuckDuckGo (Lite)",
+    );
     let (fam, _) = first_run(&html, 3);
     assert_eq!(family_index(fam, 3), 3, "{fam:?}");
 }

@@ -144,6 +144,7 @@ TESTS=(
   "preview-test|q|600|par|scripts/preview-test.sh"
   "fonts-test|q|600|par|scripts/fonts-test.sh"
   "browser-test|q|600|par|scripts/browser-test.sh"
+  "search-engine-test|q|600|par|scripts/search-engine-test.sh"
   "js-test|q|600|par|scripts/js-test.sh"
   "fetch-test|q|600|par|scripts/fetch-test.sh"
   "modules-test|q|600|par|scripts/modules-test.sh"

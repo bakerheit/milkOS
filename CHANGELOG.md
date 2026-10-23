@@ -14,11 +14,16 @@
   collector, Promises and async/await, classes, generators, RegExp, typed arrays, with budgets
   for memory, steps and time). Pages get a live DOM API, events, timers, storage and a console
   panel (Cmd-Alt-J). A runaway script gets a "This page is slow" bar; a toolbar switch turns
-  JavaScript off. Not yet: ES modules, BigInt, Proxy, Intl.
+  JavaScript off. Not yet: BigInt, Proxy, Intl.
 - `fetch` and `XMLHttpRequest` with the web's rules: same-origin, CORS with preflight,
   credentials modes, forbidden headers, mixed-content blocking, and no requests from a public
   page to private addresses (`user/browserkit` netpolicy). Requests run off the page's thread,
   and a Network list in the console panel shows them. Synchronous XHR is refused.
+- ES modules: `<script type=module>` (deferred, run once per URL, `nomodule` skipped),
+  `<link rel=modulepreload>`, import maps, dynamic `import()`, `import.meta.url`, JSON modules
+  and top-level `await`. Modules are fetched with CORS and a JavaScript MIME check, with caps on
+  module count and depth per page. The engine handles `import`/`export` in all forms with live
+  bindings and cycles, plus private class members (`#x`), and default-parameter TDZ.
 
 **Tests**
 - A full `scripts/check-all.sh` runs 8 tests at a time and takes about 3 minutes (it was 7 to

@@ -52,7 +52,7 @@ boot() {
   local name=$1 mac=$2 lp=$3 rp=$4 slirp=$5
   shift 5
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 2 -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -netdev "user,id=n0,ipv4=off$slirp" -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$lp,remote.type=inet,remote.host=127.0.0.1,remote.port=$rp" \

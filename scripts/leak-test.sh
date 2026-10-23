@@ -32,7 +32,7 @@ SOCK="$T/s.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
   -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
-  -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device virtio-gpu-device -display none \
+  -kernel "$ELF.bin" -serial "unix:$SOCK,server=on,wait=on" -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   "${DISK_ARGS[@]}" "${NET_ARGS[@]}" >/dev/null 2>&1 &
 QPID=$!

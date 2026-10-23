@@ -41,7 +41,7 @@ print(*[s.getsockname()[1] for s in ss])")
 boot() { # name mac lport rport netdev
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
     -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -netdev "$5" -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$3,remote.type=inet,remote.host=127.0.0.1,remote.port=$4" \

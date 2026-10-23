@@ -780,7 +780,26 @@ fn convert_thread() {
         }
         for (v, path) in vols {
             let t0 = crate::timer::now_ns();
-            let r = v.state.lock().convert_step(BATCH);
+            // The result goes into LAST_CONVERT before the volume's lock is let go: a reader of
+            // /System/Kernel/fs/milkfs/encrypt (`disks decrypt --wait`) that no longer sees the
+            // conversion must see how it ended, not an empty file.
+            let (r, enc) = {
+                let mut st = v.state.lock();
+                let r = st.convert_step(BATCH);
+                let enc = st.store.encrypted();
+                if let Ok(convert::Step::Done) = r {
+                    let done_text = format!(
+                        "{} ({}) at {path}: {} in place, done\n",
+                        v.device_name,
+                        v.label,
+                        if enc { "encrypted" } else { "decrypted" }
+                    );
+                    // Logged first, so the kernel's line comes before `disks --wait`'s.
+                    kprintln!("milkfs: {}", done_text.trim_end());
+                    *LAST_CONVERT.lock() = done_text;
+                }
+                (r, enc)
+            };
             match r {
                 Ok(convert::Step::More) => {
                     let rate = CONVERT_RATE_MB.load(Ordering::Relaxed) as u64;
@@ -795,15 +814,6 @@ fn convert_thread() {
                     }
                 }
                 Ok(convert::Step::Done) => {
-                    let enc = v.state.lock().store.encrypted();
-                    let text = format!(
-                        "{} ({}) at {path}: {} in place, done\n",
-                        v.device_name,
-                        v.label,
-                        if enc { "encrypted" } else { "decrypted" }
-                    );
-                    kprintln!("milkfs: {}", text.trim_end());
-                    *LAST_CONVERT.lock() = text;
                     crate::fs::pagecache::invalidate_dev(v.dev);
                     audit_op(
                         "milkfs.convert.done",

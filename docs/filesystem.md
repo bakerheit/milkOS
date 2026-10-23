@@ -1048,7 +1048,8 @@ Mount time, `scripts/mounttime.sh N` (N files made on the Mac, 100 per directory
 
 The `timemachine` kernel thread (started by `fs::start_threads()` after `proc::start_init`)
 snapshots the primary volume at boot and then every interval, as `auto-YYYY-MM-DDTHH:MM:SS`
-(RTC time), unless nothing changed since the newest snapshot (same committed root). Retention
+(RTC time; with no volume at boot, e.g. an encrypted home not unlocked yet, the interval starts
+when one shows up), unless nothing changed since the newest snapshot (same committed root). Retention
 applies to `auto-` snapshots only: the newest `keep`, plus the newest of each day for the last
 `daily` days; manual snapshots and clone origins are never deleted; if the 30-record table
 is full the oldest auto snapshot makes room. Defaults: on, 15 min, keep 8, daily 14. Settings

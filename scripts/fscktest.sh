@@ -28,7 +28,7 @@ trap '[ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true' EXIT
 boot() { # image mode log [sock]
   local fw=() ser=(-serial "file:$3")
   [ "$2" != normal ] && fw=(-fw_cfg "name=opt/milkos/test,string=$2")
-  [ -n "${4:-}" ] && ser=(-serial "unix:$4,server,nowait")
+  [ -n "${4:-}" ] && ser=(-serial "unix:$4,server=on,wait=on")
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
     -kernel "$ELF.bin" -display none -monitor none "${ser[@]}" \
     -global virtio-mmio.force-legacy=false \

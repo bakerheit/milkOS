@@ -21,7 +21,7 @@ SUB="cachebench-$$"; mkdir -p "$SHARE_DIR/$SUB"
 head -c 4194304 /dev/urandom > "$SHARE_DIR/$SUB/big.bin"
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false "${DISK_ARGS[@]}" "${SHARE_ARGS[@]}" 2>/dev/null &
 QPID=$!
 trap 'kill -9 "$QPID" 2>/dev/null || true; rm -rf "$SHARE_DIR/$SUB"' EXIT

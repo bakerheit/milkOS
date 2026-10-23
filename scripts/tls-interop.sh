@@ -169,7 +169,7 @@ printf '%s' "$GUEST_CASES" >"$WORK/tlstest.cfg"
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
   -accel hvf -cpu host -m 512M -kernel "$KERNEL" \
-  -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 -display none \
+  -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -fw_cfg "name=opt/milkos/tlstest,file=$WORK/tlstest.cfg" \

@@ -47,7 +47,7 @@ boot() {
   rm -f "$WORK/$name.sock" "$WORK/$name.done"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
     -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -audiodev "wav,id=snd0,path=$wav,out.frequency=48000" -device virtio-sound-device,audiodev=snd0 \
     ${extra[@]+"${extra[@]}"} 2>"$WORK/$name.qemu.err" &

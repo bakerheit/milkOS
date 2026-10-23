@@ -25,7 +25,7 @@ for b in $(seq "$BOOTS"); do
   scripts/mkfat.sh "$FAT" 40 STRESS >/dev/null
   SOCK="$T/s$b.sock"; LOG="$T/boot$b.log"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$FS,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -drive "file=$FAT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 2>/dev/null &

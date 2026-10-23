@@ -34,7 +34,7 @@ KERNEL="$ELF.bin"
 
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none -global virtio-mmio.force-legacy=false \
   -audiodev "wav,id=snd0,path=$WAV,out.frequency=48000" -device virtio-sound-device,audiodev=snd0 \
   2>"$WORK/qemu.err" &

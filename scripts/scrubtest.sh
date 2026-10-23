@@ -34,12 +34,12 @@ boot() { # name commands...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 ${ENC_QEMU[@]+"${ENC_QEMU[@]}"} 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  local args=("wait:$P" "send:pause 1" "wait:$P") # the first command only lets the boot finish
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print SCRUB""-DONE" "wait:SCRUB-DONE" "done:$T/$name.done" &
   local DPID=$!

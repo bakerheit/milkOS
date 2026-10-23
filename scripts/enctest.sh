@@ -63,13 +63,15 @@ boot() { # name [fw_cfg passphrase or -] commands...
     extra+=(-drive "file=$d,if=none,format=raw,id=hd$i" -device "virtio-blk-device,drive=hd$i"); i=$((i+1))
   done
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     ${extra[@]+"${extra[@]}"} 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  # A first command that only lets the boot finish (services starting print their banners
+  # over the first prompt, so a real command typed there wouldn't sit on its own line).
+  local args=("wait:$P" "send:pause 1" "wait:$P")
   for c in "$@"; do
     case "$c" in
       raw:*) args+=("send:${c#raw:}") ;;            # a line typed at a prompt (no shell prompt after)

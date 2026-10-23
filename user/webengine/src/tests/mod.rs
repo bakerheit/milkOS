@@ -8,6 +8,7 @@ mod fuzz;
 mod golden;
 mod html;
 mod layout;
+mod modules;
 mod nettest;
 mod raster;
 mod render;

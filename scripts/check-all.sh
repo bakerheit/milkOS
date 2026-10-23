@@ -146,6 +146,7 @@ TESTS=(
   "browser-test|q|600|par|scripts/browser-test.sh"
   "js-test|q|600|par|scripts/js-test.sh"
   "fetch-test|q|600|par|scripts/fetch-test.sh"
+  "modules-test|q|600|par|scripts/modules-test.sh"
   "webbench-test|q|600|par|scripts/webbench-test.sh"
   "jsbench-test|q|600|par|scripts/jsbench-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"

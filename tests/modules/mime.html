@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: what is refused</title>
+<script src="/classic.js"></script>
+</head><body>
+<h1>Modules: what is refused</h1>
+<script type="module" src="/mime/plain.js" onerror="report('mime', 'plain', 'error')" onload="report('mime', 'plain', 'LOADED')"></script>
+<script type="module" src="/mime/html.js" onerror="report('mime', 'html', 'error')" onload="report('mime', 'html', 'LOADED')"></script>
+<script type="module" src="/mime/none.js" onerror="report('mime', 'none', 'error')" onload="report('mime', 'none', 'LOADED')"></script>
+<script type="module" src="/mime/json.js" onerror="report('mime', 'json-as-js', 'error')" onload="report('mime', 'json-as-js', 'LOADED')"></script>
+<script type="module" src="/status/500.js" onerror="report('mime', 'status500', 'error')" onload="report('mime', 'status500', 'LOADED')"></script>
+<script type="module" src="/nothing/here.js" onerror="report('mime', 'missing', 'error')" onload="report('mime', 'missing', 'LOADED')"></script>
+<script type="module" src="/mime-graph/main.js" onerror="report('mime', 'bad-dependency', 'error')" onload="report('mime', 'bad-dependency', 'LOADED')"></script>
+<script type="module" src="/mime-graph/fine.js" onload="report('mime', 'good-sibling', 'loaded')"></script>
+<script type="module">
+  import good from '/data/config.json' with { type: 'json' };
+  report('mime', 'json-module', good.name + ' ' + good.list.join('+'));
+  const tries = [
+    ['plain', '/mime/plain.js', undefined],
+    ['html', '/mime/html.js', undefined],
+    ['missing', '/nothing/here.js', undefined],
+    ['status404', '/status/404.js', undefined],
+    ['json-without-attribute', '/data/config.json', undefined],
+    ['json-wrong-type', '/mime/data.json', { with: { type: 'json' } }],
+    ['css-type', '/data/config.json', { with: { type: 'css' } }],
+  ];
+  for (const [name, url, opts] of tries) {
+    try {
+      await (opts ? import(url, opts) : import(url));
+      report('mime', 'dynamic-' + name, 'LOADED');
+    } catch (e) {
+      report('mime', 'dynamic-' + name, e.name);
+    }
+  }
+  report('mime', 'end', 'done');
+</script>
+</body></html>

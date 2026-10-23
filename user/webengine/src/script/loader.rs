@@ -14,22 +14,30 @@
 //! later run on insertion (inline ones at once, external ones as soon as fetched; with
 //! `async = false` in insertion order).
 //!
-//! `type=module` is reported as unsupported (stage 2) and not run; `nomodule` scripts do run
-//! (this browser has no modules). Data blocks (`type=application/json`, `text/template`, ...)
-//! never run.
+//! `type=module` scripts (inline and external) take the same places in this order as classic
+//! ones do: deferred by default (in tree order with the `defer` scripts), `async` when asked,
+//! and when a page inserts one it runs as soon as its imports are in. What differs is the body:
+//! a module script is ready when its whole graph of imports has been fetched and compiled
+//! (script/modrt.rs), so it waits for that instead of a file. `nomodule` classic scripts never
+//! run (this browser has modules). `type=importmap` is read before any module loads, in tree
+//! order with the module scripts. `<link rel=modulepreload>` starts a fetch. Data blocks
+//! (`type=application/json`, `text/template`, ...) never run.
 
 use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::api::CredentialsMode;
 use crate::atoms::tag;
 use crate::dom::{Dom, NONE, NodeId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Classic,
-    /// `type=module`: not run (yet).
+    /// `type=module`.
     Module,
+    /// `type=importmap`.
+    ImportMap,
     /// Some other type: a data block, never run.
     Data,
 }
@@ -52,25 +60,46 @@ pub fn kind_of(dom: &Dom, n: NodeId) -> Kind {
     }
     // The JavaScript MIME type essences (MIME Sniffing §4.6), parameters ignored.
     let essence = ty.split(';').next().unwrap_or("").trim();
+    if is_javascript_mime(essence) {
+        return Kind::Classic;
+    }
     match essence {
-        "application/ecmascript"
-        | "application/javascript"
-        | "application/x-ecmascript"
-        | "application/x-javascript"
-        | "text/ecmascript"
-        | "text/javascript"
-        | "text/javascript1.0"
-        | "text/javascript1.1"
-        | "text/javascript1.2"
-        | "text/javascript1.3"
-        | "text/javascript1.4"
-        | "text/javascript1.5"
-        | "text/jscript"
-        | "text/livescript"
-        | "text/x-ecmascript"
-        | "text/x-javascript" => Kind::Classic,
         "module" => Kind::Module,
+        "importmap" => Kind::ImportMap,
         _ => Kind::Data,
+    }
+}
+
+/// Is this (lower case, parameters removed) a JavaScript MIME type essence (MIME Sniffing
+/// §4.6)? Also what a module's response must be.
+pub fn is_javascript_mime(essence: &str) -> bool {
+    matches!(
+        essence,
+        "application/ecmascript"
+            | "application/javascript"
+            | "application/x-ecmascript"
+            | "application/x-javascript"
+            | "text/ecmascript"
+            | "text/javascript"
+            | "text/javascript1.0"
+            | "text/javascript1.1"
+            | "text/javascript1.2"
+            | "text/javascript1.3"
+            | "text/javascript1.4"
+            | "text/javascript1.5"
+            | "text/jscript"
+            | "text/livescript"
+            | "text/x-ecmascript"
+            | "text/x-javascript"
+    )
+}
+
+/// A `crossorigin` attribute's credentials mode, for a module script (absent, empty or
+/// anything but `use-credentials`: same-origin credentials).
+pub fn credentials_of(crossorigin: Option<&str>) -> CredentialsMode {
+    match crossorigin {
+        Some(v) if v.trim().eq_ignore_ascii_case("use-credentials") => CredentialsMode::Include,
+        _ => CredentialsMode::SameOrigin,
     }
 }
 
@@ -104,6 +133,24 @@ pub struct Script {
     pub when: When,
     pub body: Body,
     pub done: bool,
+    /// A module script: its body is `Waiting` until its graph is in (script/modrt.rs fills it
+    /// in), not fetched through [`Loader::pending`].
+    pub module: bool,
+}
+
+/// Module work the page's scripts left, in tree order (so an import map is read before the
+/// module scripts after it, and not before the ones ahead of it).
+#[derive(Clone, Debug)]
+pub enum ModWork {
+    /// Start the graph of module script `.0` (of [`Loader::scripts`]): inline source in
+    /// `.1`, else the script's `src`.
+    Module(usize, Option<String>, CredentialsMode),
+    /// An inline import map.
+    ImportMap(NodeId, String),
+    /// An import map with a `src`, which browsers do not load: an `error` event.
+    BadImportMap(NodeId),
+    /// `<link rel=modulepreload href>`: the address and credentials.
+    Preload(String, CredentialsMode),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -123,8 +170,8 @@ pub struct Loader {
     /// Script elements that have been "prepared" (HTML's "already started"): never again.
     started: BTreeSet<NodeId>,
     pub phase: Phase,
-    /// Scripts that turned out to be modules (for the console's note), by node.
-    pub modules: Vec<NodeId>,
+    /// Module scripts, import maps and preloads to start, in order.
+    pub work: Vec<ModWork>,
 }
 
 /// More scripts than this on one page are ignored.
@@ -142,7 +189,7 @@ impl Loader {
             scripts: Vec::new(),
             started: BTreeSet::new(),
             phase: Phase::Loading,
-            modules: Vec::new(),
+            work: Vec::new(),
         }
     }
 
@@ -153,6 +200,8 @@ impl Loader {
         while n != NONE {
             if dom.is_html(n, tag::SCRIPT) {
                 l.prepare(dom, n, true, false, resolve);
+            } else if dom.is_html(n, tag::LINK) {
+                l.prepare_preload(dom, n, resolve);
             }
             // Not inside templates (their content is inert).
             n = if dom.is_html(n, tag::TEMPLATE) {
@@ -181,7 +230,33 @@ impl Loader {
     /// A node went back to the DOM (its id will be reused): forget it.
     pub fn forget(&mut self, n: NodeId) {
         self.started.remove(&n);
-        self.modules.retain(|&m| m != n);
+    }
+
+    /// `<link rel=modulepreload href=...>`: queue the fetch of the module and its imports.
+    /// True if it was one.
+    pub fn prepare_preload(&mut self, dom: &Dom, n: NodeId, resolve: &dyn Fn(&str) -> String) -> bool {
+        let Some(e) = dom.element(n) else { return false };
+        let is_preload = e
+            .attr("rel")
+            .is_some_and(|r| r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("modulepreload")));
+        if !is_preload || !dom.is_connected(n) || self.started.contains(&n) {
+            return false;
+        }
+        let Some(href) = e.attr("href").map(str::trim).filter(|h| !h.is_empty()) else {
+            return false;
+        };
+        // `as` other than script (or none) is not a module preload.
+        if let Some(a) = e.attr("as")
+            && !a.trim().eq_ignore_ascii_case("script")
+        {
+            return false;
+        }
+        self.started.insert(n);
+        if self.work.len() < MAX_SCRIPTS {
+            self.work
+                .push(ModWork::Preload(resolve(href), credentials_of(e.attr("crossorigin"))));
+        }
+        true
     }
 
     /// HTML's "prepare the script element" for a script at `n`: queue it (or not). For a
@@ -206,19 +281,37 @@ impl Loader {
             return None;
         }
         self.started.insert(n);
-        match kind_of(dom, n) {
-            Kind::Classic => {}
-            Kind::Module => {
-                self.modules.push(n);
+        let module = match kind_of(dom, n) {
+            Kind::Classic => {
+                // Browsers that have modules skip the scripts written for those without.
+                if e.has_attr("nomodule") {
+                    return None;
+                }
+                false
+            }
+            Kind::Module => true,
+            Kind::ImportMap => {
+                if self.work.len() >= MAX_SCRIPTS {
+                    return None;
+                }
+                // Only inline ones: an external import map is an error.
+                self.work.push(if src.is_some() {
+                    ModWork::BadImportMap(n)
+                } else {
+                    ModWork::ImportMap(n, text)
+                });
                 return None;
             }
             Kind::Data => return None,
-        }
+        };
         if self.scripts.len() >= MAX_SCRIPTS {
             return None;
         }
         let is_async = e.has_attr("async");
         let when = match (&src, parser) {
+            // Modules are deferred unless they say async, whether inline or not.
+            (_, true) if module && is_async => When::Async,
+            (_, true) if module => When::Defer,
             (Some(_), true) if is_async => When::Async,
             (Some(_), true) if e.has_attr("defer") => When::Defer,
             (_, true) => When::Blocking,
@@ -230,16 +323,24 @@ impl Loader {
         let (src, body) = match src {
             Some(s) if s.trim().is_empty() => (None, Body::Failed),
             Some(s) => (Some(resolve(s.trim())), Body::Waiting),
-            None => (None, Body::Ready(text)),
+            None if module => (None, Body::Waiting),
+            None => (None, Body::Ready(text.clone())),
         };
+        let idx = self.scripts.len();
+        if module && body == Body::Waiting {
+            let creds = credentials_of(e.attr("crossorigin"));
+            let inline = if src.is_none() { Some(text) } else { None };
+            self.work.push(ModWork::Module(idx, inline, creds));
+        }
         self.scripts.push(Script {
             node: n,
             src,
             when,
             body,
             done: false,
+            module,
         });
-        Some(self.scripts.len() - 1)
+        Some(idx)
     }
 
     /// External scripts whose bodies are wanted (absolute URLs, each once).
@@ -247,6 +348,7 @@ impl Loader {
         let mut v: Vec<String> = Vec::new();
         for s in &self.scripts {
             if s.body == Body::Waiting
+                && !s.module
                 && let Some(u) = &s.src
                 && !v.contains(u)
             {
@@ -259,7 +361,7 @@ impl Loader {
     /// The body of `url` came (None: it failed). Every script waiting for it gets it.
     pub fn supply(&mut self, url: &str, body: Option<&str>) {
         for s in self.scripts.iter_mut() {
-            if s.body == Body::Waiting && s.src.as_deref() == Some(url) {
+            if s.body == Body::Waiting && !s.module && s.src.as_deref() == Some(url) {
                 s.body = match body {
                     Some(b) => Body::Ready(String::from(b)),
                     None => Body::Failed,
@@ -347,12 +449,14 @@ mod tests {
             &crate::api::Limits::default(),
         );
         let mut l = Loader::collect(&p.dom, &res);
-        assert_eq!(l.scripts.len(), 6);
-        assert_eq!(l.modules.len(), 1);
+        assert_eq!(l.scripts.len(), 7);
+        assert_eq!(l.scripts.iter().filter(|s| s.module).count(), 1);
+        // The module is fetched through the module map, not as a classic script.
         assert_eq!(
             l.pending(),
             ["http://t.example/a.js", "http://t.example/d1.js", "http://t.example/as.js", "http://t.example/d2.js"]
         );
+        assert!(matches!(l.work.as_slice(), [ModWork::Module(5, None, CredentialsMode::SameOrigin)]));
         // a.js blocks everything after it (but not the async one).
         assert_eq!(l.next(), None);
         l.supply("http://t.example/as.js", Some("async"));
@@ -375,18 +479,134 @@ mod tests {
                 break;
             }
         }
-        // Stuck waiting for d1.js: d2 (after it) waits too.
+        // Stuck waiting for d1.js: the module and d2 (after it) wait too.
         assert_eq!(ran, ["(failed)", "inline1", "inline-defer-runs-now"]);
         assert_eq!(l.phase, Phase::Interactive);
         l.supply("http://t.example/d1.js", Some("d1"));
+        // d1 runs; then the module is next in line but its graph is not in: d2 waits for it.
+        let i = l.next().unwrap();
+        assert_eq!(l.scripts[i].body, Body::Ready(String::from("d1")));
+        l.scripts[i].done = true;
+        assert_eq!(l.next(), None);
+        l.scripts[5].body = Body::Ready(String::new());
         while let Some(i) = l.next() {
-            if let Body::Ready(s) = &l.scripts[i].body {
-                ran.push(s.clone());
-            }
+            ran.push(match (&l.scripts[i].body, l.scripts[i].module) {
+                (_, true) => String::from("(module)"),
+                (Body::Ready(s), _) => s.clone(),
+                _ => String::from("(failed)"),
+            });
             l.scripts[i].done = true;
         }
         assert_eq!(l.advance(), Some(Phase::ContentLoaded));
-        assert_eq!(&ran[3..], ["d1", "d2"]);
+        assert_eq!(&ran[3..], ["(module)", "d2"].map(String::from));
+        // (d1 was run in between, outside `ran`.)
+    }
+
+    #[test]
+    fn module_scripts_in_the_order_of_a_page() {
+        let p = crate::html::parse_document(
+            "<script defer src=d.js></script>\
+             <script type=module>inline module</script>\
+             <script type=module src=e.js></script>\
+             <script type=module async src=a.js></script>\
+             <script type=module async>async inline</script>\
+             <script type=module defer src=f.js></script>\
+             <script nomodule>old browsers</script>\
+             <script nomodule src=old.js></script>\
+             <script type=module src=''></script>\
+             <script type=module crossorigin=use-credentials src=c.js></script>\
+             <script type=module crossorigin src=c2.js></script>",
+            &crate::api::Limits::default(),
+        );
+        let l = Loader::collect(&p.dom, &res);
+        // d.js, the two inline modules, e.js, a.js, f.js, '', c.js, c2.js: no nomodule ones.
+        let w: Vec<(bool, When)> = l.scripts.iter().map(|s| (s.module, s.when)).collect();
+        assert_eq!(
+            w,
+            [
+                (false, When::Defer),
+                (true, When::Defer),
+                (true, When::Defer),
+                (true, When::Async),
+                (true, When::Async),
+                (true, When::Defer),
+                (true, When::Defer),
+                (true, When::Defer),
+                (true, When::Defer),
+            ]
+        );
+        // The empty src failed at once and starts no graph.
+        assert_eq!(l.scripts[6].body, Body::Failed);
+        assert_eq!(l.work.len(), 7);
+        match &l.work[0] {
+            ModWork::Module(1, Some(t), _) => assert_eq!(t, "inline module"),
+            w => panic!("{w:?}"),
+        }
+        assert!(matches!(&l.work[5], ModWork::Module(7, None, CredentialsMode::Include)));
+        assert!(matches!(&l.work[6], ModWork::Module(8, None, CredentialsMode::SameOrigin)));
+        assert_eq!(l.pending(), ["http://t.example/d.js"]);
+        // `supply` for a module's address doesn't touch it.
+        let mut l = l;
+        l.supply("http://t.example/e.js", Some("body"));
+        assert_eq!(l.scripts[2].body, Body::Waiting);
+    }
+
+    #[test]
+    fn import_maps_and_preloads_queue_in_tree_order() {
+        let p = crate::html::parse_document(
+            "<link rel=modulepreload href=pre.js>\
+             <script type=module src=first.js></script>\
+             <script type=importmap>{\"imports\": {}}</script>\
+             <link rel='stylesheet modulepreload' href=pre2.js crossorigin=use-credentials>\
+             <link rel=modulepreload href=''>\
+             <link rel=modulepreload as=style href=no.css>\
+             <link rel=preload href=x.js as=script>\
+             <script type=importmap src=ext.json></script>\
+             <script type=importmap></script>",
+            &crate::api::Limits::default(),
+        );
+        let l = Loader::collect(&p.dom, &res);
+        let kinds: Vec<&str> = l
+            .work
+            .iter()
+            .map(|w| match w {
+                ModWork::Preload(..) => "preload",
+                ModWork::Module(..) => "module",
+                ModWork::ImportMap(..) => "importmap",
+                ModWork::BadImportMap(..) => "bad importmap",
+            })
+            .collect();
+        assert_eq!(kinds, ["preload", "module", "importmap", "preload", "bad importmap"]);
+        assert!(matches!(&l.work[3], ModWork::Preload(u, CredentialsMode::Include) if u == "http://t.example/pre2.js"));
+    }
+
+    #[test]
+    fn script_kinds_and_mime() {
+        let p = crate::html::parse_document(
+            "<script type=module></script><script type=MODULE>x</script><script type=' module '>x</script>\
+             <script type=importmap>{}</script><script type=text/javascript>1</script><script type=speculationrules>{}</script>",
+            &crate::api::Limits::default(),
+        );
+        let kinds: Vec<Kind> = {
+            let mut v = Vec::new();
+            let mut n = 0;
+            while n != NONE {
+                if p.dom.is_html(n, tag::SCRIPT) {
+                    v.push(kind_of(&p.dom, n));
+                }
+                n = p.dom.next_in(n, 0);
+            }
+            v
+        };
+        assert_eq!(
+            kinds,
+            [Kind::Module, Kind::Module, Kind::Module, Kind::ImportMap, Kind::Classic, Kind::Data]
+        );
+        assert!(is_javascript_mime("text/javascript"));
+        assert!(is_javascript_mime("application/x-javascript"));
+        assert!(!is_javascript_mime("text/html"));
+        assert!(!is_javascript_mime("application/json"));
+        assert!(!is_javascript_mime("module"));
     }
 
     #[test]

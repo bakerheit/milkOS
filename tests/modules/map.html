@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: an import map</title>
+<script src="/classic.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "lodash-lite": "/vendor/lodash-lite.js",
+    "app/": "/lib/app/",
+    "cheese": "/lib/cheese-v1.js",
+    "blocked": null,
+    "cdn": "http://api.milk.test:@PORT@/cors/open.js"
+  },
+  "scopes": {
+    "/lib/legacy/": { "cheese": "/lib/cheese-v0.js" }
+  },
+  "integrity": { "/vendor/lodash-lite.js": "sha384-ignored" }
+}
+</script>
+<script type="importmap">{ "imports": { "lodash-lite": "/lib/wrong.js" } }</script>
+</head><body>
+<h1>Modules: an import map</h1>
+<script type="module">
+  import { chunk } from 'lodash-lite';
+  import { run } from 'app/run.js';
+  import cheese from 'cheese';
+  import legacy from '/lib/legacy/use.js';
+  import { where } from 'cdn';
+  report('map', 'bare', JSON.stringify(chunk([1, 2, 3, 4, 5], 2)));
+  report('map', 'prefix', run());
+  report('map', 'top-level', cheese);
+  report('map', 'scope', legacy);
+  report('map', 'cross-origin', where);
+  import('blocked').catch((e) => report('map', 'blocked', errName(e).slice(0, 60)));
+  import('nothing-here').catch((e) => report('map', 'unmapped', errName(e).slice(0, 60)));
+  report('map', 'first-wins', String(import.meta.resolve('lodash-lite').endsWith('/vendor/lodash-lite.js')));
+  // An import map after module loading began is ignored (the console says so).
+  const late = document.createElement('script');
+  late.type = 'importmap';
+  late.textContent = '{"imports": {"later": "/lib/cheese-v1.js"}}';
+  document.head.appendChild(late);
+  import('later').catch((e) => report('map', 'late-map', errName(e).slice(0, 60)));
+</script>
+</body></html>

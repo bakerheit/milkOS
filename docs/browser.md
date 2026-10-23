@@ -133,9 +133,34 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   insertion (external ones fetched like stylesheets, async unless `async = false`).
   `document.readyState` and `document.currentScript` follow. The page is parsed whole
   before any script runs, so `document.write` during loading puts its markup after the
-  running script. `type=module` is not run (a console note says so: stage 2); data blocks
+  running script. Data blocks
   (`application/json`, `text/template`) never run; `<noscript>` is raw text and hidden while
   scripts are on, and shown when they are off.
+* **Modules** (`user/webengine/src/script/modrt.rs`, `modules.rs`, `importmap.rs`): real ES
+  modules. `<script type=module>`, inline or with `src`, is deferred (in document order with
+  the `defer` scripts), `async` runs it as soon as its imports are in, and `nomodule` classic
+  scripts are skipped. A module and every module it imports are fetched with mode `cors` and
+  `same-origin` credentials (`crossorigin=use-credentials` for the ones that pass them on), so
+  the same rules as for `fetch` apply: another origin needs `Access-Control-Allow-Origin`,
+  redirects are judged hop by hop, mixed content is refused. The response has to be a success
+  with a JavaScript MIME type (a JSON one for `import data from "./x.json" with { type: "json" }`);
+  anything else is a console error and an `error` event on the `<script>`, and the other modules
+  carry on. Specifiers are resolved against the importing module's (final) address; a bare one
+  (`import "lodash"`) fails with the web's TypeError unless the page's **import map** maps it
+  (`imports`, `scopes`, trailing-slash prefixes, `null` to block; `integrity` is read and
+  ignored). Only the first `<script type=importmap>` counts, only an inline one, and none can
+  be added after the first module load has begun (the console says so). `import()` works from
+  classic scripts and modules through the same map and loader, `import.meta.url` and
+  `import.meta.resolve()` are there, and `document.currentScript` is null in a module. One
+  module map per page keyed by address and type: each module is fetched, compiled and run once,
+  cycles and top-level `await` follow the spec (a pending `await` doesn't hold up sibling
+  scripts, `DOMContentLoaded` or `load`). A page may have 2,000 modules, an import chain 256
+  deep, 24 module fetches in flight and 48 MB of module source in all, and the module graph
+  counts toward the page's heap budget; going to another page cancels fetches still running.
+  A syntax error or an unresolvable import reaches `window.onerror` and stops that graph only.
+  Not done: CSS module scripts, `import.meta` beyond `url` and `resolve`, multiple import maps
+  (merged, as the newest standard has them), `integrity` checks, workers and `data:`/`blob:`
+  module addresses.
 * **The DOM** (webengine's DOM, live): document lookups and `querySelector(All)` (the
   engine's own selector matcher), creating, inserting, moving, cloning and removing nodes,
   `textContent`, `innerHTML` / `outerHTML` / `insertAdjacentHTML` through the HTML fragment
@@ -265,7 +290,7 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   `scripts/js_test_server.py` (127.0.0.1 only) serving the pages in `tests/js`: a tabs
   widget, a todo list built by script, form validation that blocks the submit, timers and
   microtasks, a requestAnimationFrame animation, innerHTML, the script order (blocking,
-  defer, module, document.write, DOMContentLoaded, load), storage and cookies, a runaway
+  defer, a module in order with them, document.write, DOMContentLoaded, load), storage and cookies, a runaway
   `while (true)` stopped from the slow bar, and the JavaScript switch, from the console
   lines, the server's log and screenshots.
 * `scripts/fetch-test.sh` (default set, about a minute): a VM against
@@ -280,11 +305,27 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   page that loads JSON and builds itself with script (screenshots), with the Network list.
   Mixed content (an https page asking for http) is covered by `scriptnet-unit` only: the VM
   has no https test server.
+* `scripts/modules-test.sh` (default set, about three minutes): a VM against
+  `scripts/modules_test_servers.py` (the same kind of zone as fetch-test: `www.milk.test`,
+  `api.milk.test`, `other.test`; 127.0.0.1 only) and the pages in `tests/modules`: modules
+  importing each other, a cycle, each module run once, `nomodule`, deferred and async order,
+  top-level `await` with siblings, `import()` from a classic script, an import map (bare
+  specifiers, a prefix, a scope, a blocked name, a second map and a late one ignored) and a
+  page without one, a module blocked without CORS headers and allowed with them (also through
+  redirects), cookies for same-origin, `anonymous` and `use-credentials`, wrong MIME types,
+  404 and 500 and a bad dependency (error events and console errors, the other modules
+  unharmed), JSON modules, a small app built from modules (screenshots), the depth and count
+  limits, a module abandoned mid-download by going to another page, and the JavaScript switch.
 * `scripts/scriptnet-test.sh` (`scriptnet-unit`, smoke): `user/scriptnet` against a fake web
   and the real policy: methods and bodies on the wire, CORS and preflight, credentials,
   redirects hop by hop, cookies, the private-network and rebinding refusals, mixed content,
-  size and time limits, cancelling.
-* `scripts/webengine-test.sh` also covers the network bindings (`src/tests/nettest.rs`, over a
+  size and time limits, cancelling, and the strict checks for module requests (a success
+  status and a JavaScript type, in mode cors).
+* `scripts/webengine-test.sh` also covers modules: import map parsing and resolution (table
+  tests), the module map and fetch graph over a fake engine (dedup, cycles, limits, failures,
+  a fuzz of random events), the loader's ordering, and whole pages over a fake network
+  (`src/tests/modules.rs`: ordering, errors, `import()`, JSON, preloads, limits, hostile
+  maps), and the network bindings (`src/tests/nettest.rs`, over a
   fake network: every class's behaviour, request shapes, answers out of order or for nobody,
   limits, a fuzz of the parsers from script) and the DOM changes (fragment parsing, serializing,
   incremental restyling checked against a fresh parse and a full restyle, form state across
@@ -298,7 +339,7 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
 
 * Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
   there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
-* JavaScript has no modules, WebSockets, canvas, workers or `ReadableStream` request bodies;
+* JavaScript has no WebSockets, canvas, workers or `ReadableStream` request bodies;
   `fetch` has no HTTP cache (`cache` modes only set headers) and no `integrity` check; hosts
   with non-ASCII names aren't looked up (no IDNA); `URL` is a good WHATWG subset, not the whole
   parser. MutationObserver callbacks never run (the observers exist and never call back);

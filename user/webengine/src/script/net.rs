@@ -79,6 +79,8 @@ pub struct NetState {
     pending: BTreeMap<u32, Pinned>,
     /// What the app has not taken yet.
     pub out: Vec<NetOut>,
+    /// Module fetches outstanding (script/modrt.rs), by request id.
+    pub mod_fetches: BTreeMap<u32, super::modrt::Fetch>,
     /// The classes, once the script side has run.
     exports: Option<Pinned>,
     loading: bool,
@@ -86,13 +88,22 @@ pub struct NetState {
 
 impl NetState {
     pub fn pending(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.mod_fetches.len()
+    }
+
+    /// A fresh request id.
+    pub fn alloc_id(&mut self) -> u32 {
+        let id = self.next_id.wrapping_add(1).max(1);
+        self.next_id = id;
+        id
     }
 
     /// The scripts end: forget every request (the app is told to cancel them). The pins to
     /// give back to the realm.
     pub fn clear(&mut self) -> Vec<Pinned> {
-        let ids: Vec<u32> = self.pending.keys().copied().collect();
+        let mut ids: Vec<u32> = self.pending.keys().copied().collect();
+        ids.extend(self.mod_fetches.keys().copied());
+        self.mod_fetches.clear();
         for id in ids {
             self.out.push(NetOut::Cancel(id));
         }
@@ -420,8 +431,7 @@ fn start(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     }
     let pin = r.pin(cb);
     let mut st = b.st(r)?;
-    let id = st.net.next_id.wrapping_add(1).max(1);
-    st.net.next_id = id;
+    let id = st.net.alloc_id();
     st.net.pending.insert(id, pin);
     st.net.out.push(NetOut::Start(NetRequest {
         id,
@@ -454,6 +464,10 @@ fn clip(s: &str) -> String {
 
 /// One answer for request `id`: the script side's callback gets `(kind, data)`.
 pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) -> bool {
+    // A module fetch (script/modrt.rs).
+    if super::modrt::is_module_fetch(b, id) {
+        return super::modrt::deliver(b, r, id, ev);
+    }
     let cb = match b.st.try_borrow() {
         Ok(st) => st.net.pending.get(&id).map(|p| r.pinned(p)),
         Err(_) => None,

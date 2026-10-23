@@ -39,10 +39,23 @@
 //!   changed subtrees and lays out again, and [`ControlId`]s may have moved.
 //! - Not supported (yet): `:hover`/`:focus` styles, CSS transforms, animations, web fonts,
 //!   named grid lines, inner scrolling boxes (overflow: auto spills sideways and clips
-//!   vertically), bidirectional text, vertical writing modes; for scripts: modules, fetch /
-//!   XMLHttpRequest, canvas, workers, iframes' documents.
+//!   vertically), bidirectional text, vertical writing modes; for scripts: canvas, workers,
+//!   iframes' documents.
 //!
 //! # CHANGES
+//! - ES modules in pages. `<script type=module>` (inline and `src`), `<script type=importmap>`,
+//!   `<link rel=modulepreload>`, `nomodule` and `import()` work with no change to the calls
+//!   an app makes: a module and everything it imports is fetched through the script network
+//!   path, so the app sees them as [`NetOut::Start`] requests of the new kind
+//!   [`NetKind::Module`] (a GET in mode [`RequestMode::Cors`], with [`CredentialsMode::SameOrigin`]
+//!   or, for `crossorigin=use-credentials` and what such a module imports,
+//!   [`CredentialsMode::Include`]) and answers them with [`Document::net_event`] like any other.
+//!   An app that matches on [`NetKind`] must handle the new variant. The app should refuse a
+//!   module response that is not a success status with a JavaScript (or JSON) MIME type (the
+//!   engine checks too, and cancels the request with [`NetOut::Cancel`] if the head says no).
+//!   Module addresses never come out of [`Document::pending_scripts`]. A page may have 2,000
+//!   modules, an import chain 256 deep, 24 module requests in flight and 48 MB of module source;
+//!   [`Document::net_pending`] counts module fetches, and stopping the scripts cancels them.
 //! - Network requests from scripts (`fetch`, `XMLHttpRequest`, `navigator.sendBeacon`): the
 //!   engine never does I/O. A script's request comes out of [`Document::take_net`] as a
 //!   [`NetOut::Start`] ([`NetRequest`]); the app runs it (the same-origin policy, CORS,
@@ -816,6 +829,11 @@ pub enum NetKind {
     Xhr,
     /// `navigator.sendBeacon` (a POST nobody waits for) or a `keepalive` fetch.
     Beacon,
+    /// A module script or one of its imports (`<script type=module>`, `import`, `import()`,
+    /// `<link rel=modulepreload>`): a GET in mode cors. The response has to be a success
+    /// and a JavaScript (or, for a JSON module, JSON) MIME type; the page's console says
+    /// why when it is not.
+    Module,
 }
 
 /// A request a script made, for the app to run. Everything is as the script set it, except

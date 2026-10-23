@@ -694,3 +694,147 @@ fn set_cookie_follows_the_cors_check() {
     let _ = run_page(&rig, &mut w, &r);
     assert!(!jar_has("tracker"), "no third-party cookies");
 }
+
+// ---- module scripts: mode cors, credentials same-origin, the strict response checks ------------
+
+fn module_req(url: &str) -> NetRequest {
+    let mut r = req(url);
+    r.kind = NetKind::Module;
+    r
+}
+
+#[test]
+fn a_module_needs_a_success_and_a_script_type() {
+    let mut w = world(&["www.milk.test"], |s| match s.path.as_str() {
+        "/ok.js" => response("200 OK", &[("Content-Type", "text/javascript; charset=utf-8")], b"export default 1;"),
+        "/app.js" => response("200 OK", &[("Content-Type", "application/javascript")], b"export default 2;"),
+        "/data.json" => response("200 OK", &[("Content-Type", "application/json")], b"{\"a\":1}"),
+        "/html.js" => response("200 OK", &[("Content-Type", "text/html")], &alloc::vec![b'x'; 5000]),
+        "/plain.js" => response("200 OK", &[("Content-Type", "text/plain")], b"export {}"),
+        "/notype.js" => response("200 OK", &[], b"export {}"),
+        "/gone.js" => response("404 Not Found", &[("Content-Type", "text/javascript")], b"export {}"),
+        "/boom.js" => response("500 Internal Server Error", &[("Content-Type", "text/javascript")], b"export {}"),
+        _ => response("404 Not Found", &[], b""),
+    });
+    let rig = Rig::new("http://www.milk.test/page");
+    for (p, body) in [("/ok.js", &b"export default 1;"[..]), ("/app.js", b"export default 2;"), ("/data.json", b"{\"a\":1}")] {
+        let (out, ev) = run_page(&rig, &mut w, &module_req(&alloc::format!("http://www.milk.test{p}")));
+        let d = out.unwrap_or_else(|e| panic!("{p}: {}", e.failure.message));
+        assert_eq!(d.body, body, "{p}");
+        assert_eq!(ev.heads.len(), 1);
+    }
+    // A classic request for the same address isn't checked: fetch() may read anything.
+    let (out, _) = run_page(&rig, &mut w, &req("http://www.milk.test/html.js"));
+    assert!(out.is_ok());
+    for (p, want) in [
+        ("/html.js", "MIME type of \"text/html\""),
+        ("/plain.js", "MIME type of \"text/plain\""),
+        ("/notype.js", "no MIME type"),
+        ("/gone.js", "404 (Not Found)"),
+        ("/boom.js", "status of 500"),
+    ] {
+        let (out, ev) = run_page(&rig, &mut w, &module_req(&alloc::format!("http://www.milk.test{p}")));
+        let e = out.unwrap_err();
+        assert!(e.failure.message.contains(want), "{p}: {}", e.failure.message);
+        assert_eq!(e.failure.kind, NetFailureKind::Network);
+        assert!(!e.cancelled);
+        assert!(ev.heads.is_empty(), "{p}: the page is told nothing but the failure");
+        assert!(ev.progress.is_empty(), "{p}: the body isn't read ({:?})", ev.progress);
+    }
+}
+
+#[test]
+fn a_cross_origin_module_needs_cors() {
+    let mut w = world(&["www.milk.test", "cdn.other.test"], |s| match s.path.as_str() {
+        "/open.js" => response(
+            "200 OK",
+            &[("Content-Type", "text/javascript"), ("Access-Control-Allow-Origin", "*")],
+            b"export default 1;",
+        ),
+        "/exact.js" => response(
+            "200 OK",
+            &[("Content-Type", "text/javascript"), ("Access-Control-Allow-Origin", "http://www.milk.test")],
+            b"export default 1;",
+        ),
+        "/other.js" => response(
+            "200 OK",
+            &[("Content-Type", "text/javascript"), ("Access-Control-Allow-Origin", "http://evil.test")],
+            b"export default 1;",
+        ),
+        "/closed.js" => response("200 OK", &[("Content-Type", "text/javascript")], b"export default 1;"),
+        _ => response("404 Not Found", &[], b""),
+    });
+    let rig = Rig::new("http://www.milk.test/page");
+    for p in ["/open.js", "/exact.js"] {
+        let d = run_page(&rig, &mut w, &module_req(&alloc::format!("http://cdn.other.test{p}"))).0.unwrap();
+        assert_eq!(d.head.kind, ResponseKind::Cors, "{p}");
+        assert_eq!(d.body, b"export default 1;");
+    }
+    // The request says where it comes from.
+    let seen = w.seen.borrow();
+    assert_eq!(seen[0].header("origin"), Some("http://www.milk.test"));
+    drop(seen);
+    for p in ["/other.js", "/closed.js"] {
+        let (out, ev) = run_page(&rig, &mut w, &module_req(&alloc::format!("http://cdn.other.test{p}")));
+        let e = out.unwrap_err();
+        assert_eq!(e.failure.kind, NetFailureKind::Blocked, "{p}");
+        assert!(e.failure.message.contains("Access-Control"), "{}", e.failure.message);
+        assert!(ev.heads.is_empty());
+    }
+}
+
+#[test]
+fn module_credentials_follow_the_mode() {
+    let mut w = world(&["www.milk.test", "api.milk.test", "cdn.other.test"], |s| {
+        let cookie = s.header("cookie").unwrap_or("-").to_string();
+        let body = alloc::format!("// cookie {cookie}\nexport default 1;");
+        let mut h = alloc::vec![("Content-Type", "text/javascript")];
+        if s.host == "api.milk.test" {
+            h.push(("Access-Control-Allow-Origin", "http://www.milk.test"));
+            h.push(("Access-Control-Allow-Credentials", "true"));
+        } else if s.host == "cdn.other.test" {
+            h.push(("Access-Control-Allow-Origin", "*"));
+        }
+        response("200 OK", &h, body.as_bytes())
+    });
+    let rig = Rig::new("http://www.milk.test/page");
+    let ctx = Context::TopLevel { from: None };
+    rig.jar.0.borrow_mut().set(&Url::parse("http://www.milk.test/").unwrap(), "a=1; Path=/", 1_800_000_000, &ctx).unwrap();
+    rig.jar.0.borrow_mut().set(&Url::parse("http://api.milk.test/").unwrap(), "b=2; Path=/", 1_800_000_000, &ctx).unwrap();
+    // Same origin: credentials same-origin send the cookie.
+    let d = run_page(&rig, &mut w, &module_req("http://www.milk.test/m.js")).0.unwrap();
+    assert!(String::from_utf8_lossy(&d.body).contains("cookie a=1"), "{}", String::from_utf8_lossy(&d.body));
+    // Another origin of the same site: none, with same-origin credentials ...
+    let d = run_page(&rig, &mut w, &module_req("http://api.milk.test/m.js")).0.unwrap();
+    assert!(String::from_utf8_lossy(&d.body).contains("cookie -"));
+    // ... but with `crossorigin=use-credentials` (include), and the server agreeing.
+    let mut r = module_req("http://api.milk.test/m.js");
+    r.credentials = CredentialsMode::Include;
+    let d = run_page(&rig, &mut w, &r).0.unwrap();
+    assert!(String::from_utf8_lossy(&d.body).contains("cookie b=2"));
+    // Include against a server that doesn't allow credentials is refused.
+    let mut r = module_req("http://cdn.other.test/m.js");
+    r.credentials = CredentialsMode::Include;
+    assert!(run_page(&rig, &mut w, &r).0.is_err());
+}
+
+#[test]
+fn a_module_redirect_is_judged_and_the_final_type_is_checked() {
+    let mut w = world(&["www.milk.test", "cdn.other.test"], |s| match (s.host.as_str(), s.path.as_str()) {
+        ("www.milk.test", "/r.js") => response("302 Found", &[("Location", "/real.js")], b""),
+        ("www.milk.test", "/real.js") => response("200 OK", &[("Content-Type", "text/javascript")], b"export {}"),
+        ("www.milk.test", "/r-html.js") => response("302 Found", &[("Location", "/page.html")], b""),
+        ("www.milk.test", "/page.html") => response("200 OK", &[("Content-Type", "text/html")], b"<p>"),
+        ("www.milk.test", "/r-cdn.js") => response("302 Found", &[("Location", "http://cdn.other.test/closed.js")], b""),
+        ("cdn.other.test", "/closed.js") => response("200 OK", &[("Content-Type", "text/javascript")], b"export {}"),
+        _ => response("404 Not Found", &[], b""),
+    });
+    let rig = Rig::new("http://www.milk.test/page");
+    let d = run_page(&rig, &mut w, &module_req("http://www.milk.test/r.js")).0.unwrap();
+    assert!(d.head.redirected);
+    assert_eq!(d.head.url, "http://www.milk.test/real.js");
+    let e = run_page(&rig, &mut w, &module_req("http://www.milk.test/r-html.js")).0.unwrap_err();
+    assert!(e.failure.message.contains("text/html"), "{}", e.failure.message);
+    let e = run_page(&rig, &mut w, &module_req("http://www.milk.test/r-cdn.js")).0.unwrap_err();
+    assert_eq!(e.failure.kind, NetFailureKind::Blocked);
+}

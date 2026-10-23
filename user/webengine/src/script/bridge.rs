@@ -174,6 +174,8 @@ pub struct State {
     pub positions: Option<(u64, alloc::rc::Rc<(Vec<u32>, Vec<u32>)>)>,
     /// Network requests from scripts (script/net.rs).
     pub net: super::net::NetState,
+    /// Modules (script/modrt.rs).
+    pub modrt: super::modrt::ModRt,
     /// An `error` event is being dispatched (an error in its listener does not start another).
     pub in_error_event: bool,
 }
@@ -194,6 +196,8 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(limits: ScriptLimits, loader: Loader) -> Bridge {
+        let mut modrt = super::modrt::ModRt::default();
+        modrt.mods.limits.max_source = limits.max_source;
         Bridge {
             page: Cell::new(core::ptr::null_mut()),
             host: Cell::new(None),
@@ -231,6 +235,7 @@ impl Bridge {
                 write_after: (NONE, NONE),
                 positions: None,
                 net: super::net::NetState::default(),
+                modrt,
                 in_error_event: false,
             }),
             classes: OnceCell::new(),

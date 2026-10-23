@@ -123,6 +123,10 @@ pub struct Dom {
     /// Bytes of text and attribute values made, roughly (freed nodes give theirs back): the
     /// bindings refuse to grow a page past [`MAX_DOM_BYTES`].
     pub bytes: usize,
+    /// The checkboxes, radio buttons and options that are checked / selected now (what
+    /// `:checked` matches), once the page keeps it; None: the `checked` / `selected`
+    /// attributes say.
+    pub checked: Option<alloc::collections::BTreeSet<NodeId>>,
 }
 
 /// The most text and attribute bytes scripts may grow a page to.
@@ -160,6 +164,7 @@ impl Dom {
             free: Vec::new(),
             generation: 0,
             bytes: 0,
+            checked: None,
         }
     }
 
@@ -497,6 +502,12 @@ impl Dom {
             c = self.next_in(c, n);
         }
         false
+    }
+
+    /// `n`'s state (checked, selected) changed: restyle around it.
+    pub fn note_state(&mut self, n: NodeId) {
+        let p = self.nodes[n as usize].parent;
+        self.note_restyle(if p == NONE || p == 0 { n } else { p });
     }
 
     /// Is `n` in the document (an ancestor chain up to node 0)?

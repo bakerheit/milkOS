@@ -794,6 +794,8 @@ impl Page {
     /// images and form controls looked at again where that's needed, the changed subtrees
     /// marked for restyling, and the next layout made to happen.
     pub(crate) fn flush(&mut self) {
+        self.sync_forms();
+        self.sync_checked();
         let ch = self.dom.take_changes();
         if !(ch.any || ch.tree || ch.text || ch.sheets || ch.forms || ch.images) {
             return;
@@ -828,6 +830,61 @@ impl Page {
             }
         }
         self.layout_dirty = true;
+    }
+
+    /// Keep what `:checked` matches in step with the form state (the user's clicks, scripts),
+    /// restyling around the controls that changed.
+    pub(crate) fn sync_checked(&mut self) {
+        use alloc::collections::BTreeSet;
+        let mut now: BTreeSet<NodeId> = BTreeSet::new();
+        for (i, c) in self.forms.controls.iter().enumerate() {
+            match c.kind {
+                ControlKind::Checkbox | ControlKind::Radio if c.checked => {
+                    now.insert(self.forms.nodes[i]);
+                }
+                ControlKind::Select => {
+                    for (k, o) in c.options.iter().enumerate() {
+                        if o.selected
+                            && let Some(&n) = self.forms.option_nodes[i].get(k)
+                        {
+                            now.insert(n);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let old = match self.dom.checked.take() {
+            Some(s) => s,
+            None => {
+                // What the attributes said (what styling used so far).
+                let mut s = BTreeSet::new();
+                let mut n = 0;
+                while n != NONE {
+                    if let Some(e) = self.dom.element(n)
+                        && ((e.is(tag::INPUT) && e.has_attr("checked"))
+                            || (e.is(tag::OPTION) && e.has_attr("selected")))
+                    {
+                        s.insert(n);
+                    }
+                    n = self.dom.next_in(n, 0);
+                }
+                s
+            }
+        };
+        let changed: Vec<NodeId> = old.symmetric_difference(&now).copied().collect();
+        self.dom.checked = Some(now);
+        if changed.is_empty() {
+            return;
+        }
+        let track = self.dom.track;
+        self.dom.track = true;
+        for n in changed {
+            if (n as usize) < self.dom.len() && self.dom.is_connected(n) {
+                self.dom.note_state(n);
+            }
+        }
+        self.dom.track = track;
     }
 
     /// The form controls as the DOM is now (recollected if a script changed them).

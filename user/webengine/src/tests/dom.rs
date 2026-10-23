@@ -422,3 +422,43 @@ fn fragment_parser_fuzz() {
         let _ = outer_html(&d.page.dom, 0, false, 1 << 20);
     }
 }
+
+#[test]
+fn checked_styles_follow_the_form_state() {
+    // CSS-only tabs: radio buttons and :checked ~ siblings, clicked by the user (no script).
+    let mut d = Document::parse_str(
+        "<style>.p { display: none } #a:checked ~ .p1, #b:checked ~ .p2 { display: block }
+         option:checked { color: red }</style>
+         <body style='margin:0'><input type=radio name=t id=a checked><input type=radio name=t id=b>
+         <div class='p p1'>first panel</div><div class='p p2'>second panel</div>
+         <select><option>x<option id=o2>y</select>",
+        "http://t.example/",
+    );
+    lay(&mut d);
+    assert!(d.text().contains("first panel") && !d.text().contains("second panel"));
+    let b = d.controls()[1].rect;
+    struct NoHost;
+    impl ScriptHost for NoHost {
+        fn measurer(&self) -> &dyn TextMeasurer {
+            &ApproxMeasurer
+        }
+        fn viewport(&self) -> Viewport {
+            Viewport::new(800, 600)
+        }
+        fn scroll(&self) -> (i32, i32) {
+            (0, 0)
+        }
+        fn now(&self) -> f64 {
+            0.0
+        }
+        fn time(&self) -> f64 {
+            0.0
+        }
+    }
+    d.click(&mut NoHost, b.x + 1, b.y + 1, (0, 0), Mods::default());
+    lay(&mut d);
+    let t = d.text();
+    assert!(t.contains("second panel") && !t.contains("first panel"), "{t}");
+    assert!(d.page.restyles.0 >= 1, "an incremental restyle did it");
+    same_as_full_restyle(&mut d);
+}

@@ -2,11 +2,11 @@
 //! with a smooth falloff over about three icon widths, the dock widens, and it all eases in
 //! and out (150 ms) when the pointer enters or leaves. Integer maths only (soft-float).
 //!
-//! Layout is anchored on the pointer: the icon under it keeps the pointer at the same spot
-//! of itself, so the icon you aim at never slides away (and a demo clicking an icon's rest
-//! centre still lands on it); with the pointer at the middle the dock grows evenly to both
-//! sides, otherwise mostly away from the pointer. Icons stay bottom-aligned; the bar is the
-//! icons' extent plus its padding.
+//! The bar does not move with the pointer: magnified it is the resting bar grown evenly to both
+//! sides by as much as the icons can widen it at most (never past the screen), and the icons
+//! are centred in it, so with the pointer at either end the dock only swells, it does not
+//! slide. The icon under the pointer stays under it (it drifts by less than half its size, and
+//! a demo clicking an icon's rest centre still lands on it). Icons stay bottom-aligned.
 //!
 //! While magnified the dock panel draws only the glass bar and the icons are drawn in the
 //! compositor over everything (they rise above the bar), from the art's 96 px icons scaled
@@ -152,49 +152,52 @@ pub fn layout(n: usize, base: i32, px: i32, eased: i32, max_pct: i32) -> Layout 
             magnified: false,
         };
     }
-    // Sizes from each icon's rest centre's distance to the pointer (cosine-like falloff).
+    // Sizes from each icon's rest centre's distance to the pointer (cosine-like falloff), at
+    // full magnification `extra` px bigger under the pointer.
     let radius = RADIUS_PITCHES * pitch;
-    let extra = (max_pct - 100) * base / 100; // px at full magnification
-    let sizes: Vec<i32> = (0..n_i)
-        .map(|i| {
-            let c = rest(i) + base / 2;
-            let d = (c - px).abs();
-            let x = (d * ONE / radius.max(1)).min(ONE);
-            let f = ONE - smoothstep(x); // 1 at the pointer, 0 at the radius
-            base + (extra as i64 * f as i64 * eased as i64 / (ONE as i64 * ONE as i64)) as i32
-        })
-        .collect();
-    // Anchor: the pointer keeps its fractional place in the icon (pitch) it is over.
-    let q = ((px - rest(0)) * ONE / pitch).clamp(0, n_i * ONE - 1);
-    let k = (q / ONE) as usize;
-    let frac = q % ONE;
-    let mut xs = alloc::vec![0i32; n];
-    let mp = |i: usize| sizes[i] + DOCK_GAP;
-    xs[k] = px.clamp(rest(0), rest(n_i - 1) + pitch) - frac * mp(k) / ONE;
-    for i in (0..k).rev() {
-        xs[i] = xs[i + 1] - mp(i);
-    }
-    for i in k + 1..n {
-        xs[i] = xs[i - 1] + mp(i - 1);
-    }
-    // Kept on screen (4px from the edges) when it grows past them.
-    let (l0, r0) = (xs[0] - DOCK_PAD, xs[n - 1] + sizes[n - 1] + DOCK_PAD);
-    let shift = if r0 - l0 >= screen_w() - 8 {
-        (screen_w() - (r0 - l0)) / 2 - l0
-    } else if l0 < 4 {
-        4 - l0
-    } else if r0 > screen_w() - 4 {
-        screen_w() - 4 - r0
-    } else {
-        0
+    let grow = |px: i32, extra: i32| -> Vec<i32> {
+        (0..n_i)
+            .map(|i| {
+                let c = rest(i) + base / 2;
+                let x = ((c - px).abs() * ONE / radius.max(1)).min(ONE);
+                let f = ONE - smoothstep(x); // 1 at the pointer, 0 at the radius
+                (extra as i64 * f as i64 / ONE as i64) as i32
+            })
+            .collect()
     };
-    for x in xs.iter_mut() {
-        *x += shift;
+    let mut extra = (max_pct - 100) * base / 100;
+    // The widest the icons get over all pointer places (a quarter pitch apart): the bar is that
+    // wide whenever magnified, so it never slides or breathes as the pointer moves along it.
+    let widest = |extra: i32| -> i32 {
+        (0..4 * n_i)
+            .map(|q| grow(rest(0) + q * pitch / 4, extra).iter().sum::<i32>())
+            .max()
+            .unwrap_or(0)
+    };
+    let mut wmax = widest(extra);
+    // Never wider than the screen (4px from the edges): magnify less instead of clipping or
+    // moving the dock.
+    let room = screen_w() - 8 - rest_w;
+    if wmax > room {
+        extra = extra * room.max(0) / wmax.max(1);
+        wmax = widest(extra);
     }
-    let left = xs[0] - DOCK_PAD;
-    let right = xs[n - 1] + sizes[n - 1] + DOCK_PAD;
+    let sizes: Vec<i32> = grow(px, extra)
+        .into_iter()
+        .map(|g| base + (g as i64 * eased as i64 / ONE as i64) as i32)
+        .collect();
+    // The bar: its rest place, grown evenly to both sides by `eased`; the icons are centred in it.
+    let bar_w = rest_w + (wmax as i64 * eased as i64 / ONE as i64) as i32;
+    let bar_x = (screen_w() - bar_w) / 2;
+    let content: i32 = sizes.iter().sum::<i32>() + (n_i - 1).max(0) * DOCK_GAP;
+    let mut x = bar_x + DOCK_PAD + (bar_w - 2 * DOCK_PAD - content) / 2;
+    let mut xs = alloc::vec![0i32; n];
+    for i in 0..n {
+        xs[i] = x;
+        x += sizes[i] + DOCK_GAP;
+    }
     Layout {
-        bar: Rect::new(left, bar_y, right - left, bar_h),
+        bar: Rect::new(bar_x, bar_y, bar_w, bar_h),
         slots: xs
             .into_iter()
             .zip(sizes)

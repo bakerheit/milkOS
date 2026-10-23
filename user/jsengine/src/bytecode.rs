@@ -207,6 +207,21 @@ pub(crate) enum Op {
     InitFields,
     /// The i-th computed field key of the running field initializer.
     FieldKey(u32),
+    /// A fresh private name (a private symbol) described by the string constant.
+    NewPrivName(u32),
+    /// obj name → v (`obj.#x`)
+    GetPriv,
+    /// obj name → obj v (for calls)
+    GetPrivKeep,
+    /// obj name v → v (`obj.#x = v`)
+    SetPriv,
+    /// name obj → bool (`#x in obj`)
+    PrivIn,
+    /// obj name v → obj (a private field is added)
+    DefinePrivField,
+    /// obj name f → obj (a private method or accessor half is added: 0 method, 1 getter,
+    /// 2 setter)
+    DefinePrivMethod(u32),
     /// obj v → obj (DefineField: CreateDataPropertyOrThrow)
     DefineField(u32),
     /// obj key v → obj

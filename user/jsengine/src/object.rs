@@ -336,7 +336,10 @@ pub(crate) enum ObjKind {
     /// A module namespace exotic object.
     Namespace(Box<NsData>),
     /// An imported binding: slot `slot` of the exporting module's environment.
-    ImportRef { env: ObjId, slot: u32 },
+    ImportRef {
+        env: ObjId,
+        slot: u32,
+    },
     /// A generator, async function or async generator: its suspended frame.
     Coroutine(Box<crate::interp::CoData>),
     ArrayIter(Box<crate::interp::ArrayIterData>),
@@ -920,7 +923,9 @@ impl Realm {
                 {
                     return Ok(v);
                 }
-                if matches!(self.o(cur).kind, ObjKind::Namespace(_)) && !matches!(k, PropKey::Sym(_)) {
+                if matches!(self.o(cur).kind, ObjKind::Namespace(_))
+                    && !matches!(k, PropKey::Sym(_))
+                {
                     return Ok(self.ns_get(cur, k)?.unwrap_or(Val::Undef));
                 }
                 if let Some((kind, bare, proto)) = typed {
@@ -1898,8 +1903,9 @@ impl Realm {
         }
         if symbols {
             for (k, p) in obj.props.iter() {
-                if let PropKey::Sym(_) = k
+                if let PropKey::Sym(s) = k
                     && (!only_enum || p.f & E != 0)
+                    && !self.heap.syms[s.0 as usize].private
                 {
                     out.push(*k);
                 }

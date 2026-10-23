@@ -31,6 +31,9 @@ pub(crate) struct SymData {
     pub desc: Option<StrId>,
     /// Symbol.for key, if registered.
     pub registered: bool,
+    /// A class's private name (`#x`): the key of a private field or method. Script never
+    /// sees it, and own-key listings skip it.
+    pub private: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -404,8 +407,16 @@ impl Heap {
         self.syms.push(SymData {
             desc,
             registered: false,
+            private: false,
         });
         SymId(self.syms.len() as u32 - 1)
+    }
+
+    /// A fresh private name.
+    pub fn new_private_sym(&mut self, desc: StrId) -> SymId {
+        let s = self.new_sym(Some(desc));
+        self.syms[s.0 as usize].private = true;
+        s
     }
 
     // ---- collection ----

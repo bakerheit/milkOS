@@ -83,6 +83,8 @@ pub(crate) enum PropName {
     Str(Vec<u16>),
     Num(f64),
     Computed(Box<Expr>),
+    /// `#name` (class members only); the atom includes the `#`.
+    Private(Atom),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -148,6 +150,10 @@ pub(crate) enum ExprKind {
     SuperIndex(Box<Expr>),
     /// `...x` inside a parenthesized list (only before `=>`).
     Spread(Box<Expr>),
+    /// `obj.#name` / `obj?.#name`.
+    PrivMember(Box<Expr>, Atom, bool),
+    /// `#name` as the left operand of `in`.
+    PrivName(Atom),
     /// `import(specifier, options)`.
     ImportCall(Box<Expr>, Option<Box<Expr>>),
     /// `import.meta` (modules only).
@@ -272,6 +278,37 @@ pub(crate) enum StmtKind {
     Debugger,
     /// Class fields (inside the synthetic field-initializer functions): `this[key] = value`.
     Fields(Vec<FieldDef>),
+    /// The start of an instance field initializer: installs the class's private methods and
+    /// accessors on `this`.
+    PrivMethods(Vec<PrivInstall>),
+}
+
+/// One private method or accessor half to install on each instance.
+pub(crate) struct PrivInstall {
+    /// The binding holding the private name (`#m`).
+    pub name: Atom,
+    /// The binding holding the function (`#m/m`, `#m/g` or `#m/s`).
+    pub func: Atom,
+    /// 0 method, 1 getter, 2 setter.
+    pub kind: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PrivKind {
+    Field,
+    Method,
+    Getter,
+    Setter,
+}
+
+/// A private name a class declares.
+pub(crate) struct PrivDecl {
+    pub name: Atom,
+    pub is_static: bool,
+    pub kind: PrivKind,
+    /// For a method or accessor half: the hidden binding that keeps its function.
+    pub func: Option<Atom>,
+    pub pos: Pos,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -348,6 +385,8 @@ pub(crate) struct Class {
     /// Where field keys are evaluated relative to the members: field key i is evaluated
     /// just before member `field_key_at[i]` (or after all members if that equals the count).
     pub field_key_at: Vec<u32>,
+    /// The private names the class body declares (a getter and a setter share a name).
+    pub privates: Vec<PrivDecl>,
     /// The class scope (binds the class name inside the class).
     pub scope: ScopeId,
     pub start: Pos,

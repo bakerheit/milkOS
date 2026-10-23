@@ -148,7 +148,10 @@ fn fuzz_modules(kind: &str, make: &dyn Fn(&mut Rng) -> (String, Vec<(String, Str
     std::println!("{kind} outcomes (ran, syntax error, link error, eval error): {counts:?}");
     // Mutations should get past the parser often enough to test the linker and evaluator too.
     if kind == "module-mutate" {
-        assert!(counts[0] + counts[2] + counts[3] > counts[1] / 10, "{counts:?}");
+        assert!(
+            counts[0] + counts[2] + counts[3] > counts[1] / 10,
+            "{counts:?}"
+        );
     }
 }
 
@@ -168,8 +171,14 @@ fn module_decls(rng: &mut Rng) -> String {
             1 => out.push_str(&alloc::format!("import * as {n2} from '{sp}';\n")),
             2 => out.push_str(&alloc::format!("import {{ {n1} as {n2} }} from '{sp}';\n")),
             3 => out.push_str(&alloc::format!("import '{sp}';\n")),
-            4 => out.push_str(&alloc::format!("import {n2}, {{ {n3} as {} }} from '{sp}';\n", rng.pick(LOCALS))),
-            5 => out.push_str(&alloc::format!("import {n2}, * as {} from '{sp}';\n", rng.pick(LOCALS))),
+            4 => out.push_str(&alloc::format!(
+                "import {n2}, {{ {n3} as {} }} from '{sp}';\n",
+                rng.pick(LOCALS)
+            )),
+            5 => out.push_str(&alloc::format!(
+                "import {n2}, * as {} from '{sp}';\n",
+                rng.pick(LOCALS)
+            )),
             6 => out.push_str(&alloc::format!("export * from '{sp}';\n")),
             7 => out.push_str(&alloc::format!("export * as {n3} from '{sp}';\n")),
             8 => out.push_str(&alloc::format!("export {{ {n1} as {n3} }} from '{sp}';\n")),
@@ -178,8 +187,12 @@ fn module_decls(rng: &mut Rng) -> String {
             11 => out.push_str(&alloc::format!("export const {n2} = {};\n", rng.below(100))),
             12 => out.push_str(&alloc::format!("export let {n2} = [1, 2, {n2}];\n")),
             13 => out.push_str(&alloc::format!("export var {n2};\n")),
-            14 => out.push_str(&alloc::format!("export function {n2}() {{ return {n2}; }}\n")),
-            15 => out.push_str(&alloc::format!("export class {n2} {{ static s = {n2}; }}\n")),
+            14 => out.push_str(&alloc::format!(
+                "export function {n2}() {{ return {n2}; }}\n"
+            )),
+            15 => out.push_str(&alloc::format!(
+                "export class {n2} {{ static s = {n2}; }}\n"
+            )),
             16 => out.push_str("export default function () { return 1; }\n"),
             17 => out.push_str("export default class { }\n"),
             18 => out.push_str(&alloc::format!("export default {n2} + 1;\n")),
@@ -188,7 +201,9 @@ fn module_decls(rng: &mut Rng) -> String {
             21 => out.push_str(&alloc::format!("log(typeof {n2}, import.meta.url);\n")),
             22 => out.push_str(&alloc::format!("{n2} = 5;\n")),
             23 => out.push_str(&alloc::format!("throw {n2};\n")),
-            24 => out.push_str(&alloc::format!("import {{ {n1} as {n2} }} from '{sp}' with {{ type: 'json' }};\n")),
+            24 => out.push_str(&alloc::format!(
+                "import {{ {n1} as {n2} }} from '{sp}' with {{ type: 'json' }};\n"
+            )),
             _ => out.push_str(&alloc::format!("export {{ {n2} as default }}; var {n2};\n")),
         }
     }
@@ -281,13 +296,17 @@ fn graph(rng: &mut Rng) -> GraphSpec {
         if rng.chance(8) {
             // A bad import: a name nobody exports.
             let t = rng.below(n);
-            s.push_str(&alloc::format!("import {{ missing{i} }} from './m{t}.js';\n"));
+            s.push_str(&alloc::format!(
+                "import {{ missing{i} }} from './m{t}.js';\n"
+            ));
             if !targets.contains(&t) {
                 targets.push(t);
             }
         }
         deps[i] = targets;
-        s.push_str(&alloc::format!("export let v{i} = {i};\nexport function f{i}() {{ return v{i}; }}\n"));
+        s.push_str(&alloc::format!(
+            "export let v{i} = {i};\nexport function f{i}() {{ return v{i}; }}\n"
+        ));
         if rng.chance(40) {
             match rng.below(4) {
                 0 => s.push_str("await 0;\n"),
@@ -299,7 +318,9 @@ fn graph(rng: &mut Rng) -> GraphSpec {
                 _ => s.push_str("await Promise.resolve().then(() => 1);\n"),
             }
             if rng.chance(30) {
-                s.push_str(&alloc::format!("Promise.resolve().then(() => log('tick{i}'));\n"));
+                s.push_str(&alloc::format!(
+                    "Promise.resolve().then(() => log('tick{i}'));\n"
+                ));
             }
         }
         s.push_str(&alloc::format!("log('m{i}');\n"));
@@ -312,9 +333,22 @@ fn graph(rng: &mut Rng) -> GraphSpec {
     let files = sources
         .into_iter()
         .enumerate()
-        .map(|(i, s)| (if i == 0 { String::from("main.js") } else { alloc::format!("m{i}.js") }, s))
+        .map(|(i, s)| {
+            (
+                if i == 0 {
+                    String::from("main.js")
+                } else {
+                    alloc::format!("m{i}.js")
+                },
+                s,
+            )
+        })
         .collect();
-    GraphSpec { files, deps, throws }
+    GraphSpec {
+        files,
+        deps,
+        throws,
+    }
 }
 
 /// 0 = ran fine, 1 = a link/load error, 2 = an evaluation error.
@@ -354,7 +388,11 @@ fn check_graph(g: &GraphSpec) -> usize {
             text.push('\n');
         }
         text.push('\n');
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = f.write_all(text.as_bytes());
         }
     }
@@ -368,10 +406,15 @@ fn check_graph(g: &GraphSpec) -> usize {
         }
     }
     assert!(seen.iter().all(|c| *c <= 1), "a module ran twice: {log:?}");
-    let failed_load = log.iter().any(|l| l.starts_with("load error") || l.starts_with("link error"));
+    let failed_load = log
+        .iter()
+        .any(|l| l.starts_with("load error") || l.starts_with("link error"));
     let main_failed = log.iter().any(|l| l.starts_with("eval error"));
     if failed_load {
-        assert!(seen.iter().all(|c| *c == 0), "ran after a link error: {log:?}");
+        assert!(
+            seen.iter().all(|c| *c == 0),
+            "ran after a link error: {log:?}"
+        );
         return 1;
     }
     // Reachable modules.
@@ -387,13 +430,22 @@ fn check_graph(g: &GraphSpec) -> usize {
     if !main_failed {
         // No error: every reachable module ran exactly once.
         for (i, ok) in reach.iter().enumerate() {
-            assert_eq!(seen[i] == 1, *ok, "module {i} reachability vs runs: {log:?}\n{:?}", g.files);
+            assert_eq!(
+                seen[i] == 1,
+                *ok,
+                "module {i} reachability vs runs: {log:?}\n{:?}",
+                g.files
+            );
         }
         // And, without cycles, dependencies ran before dependents.
         let pos: Vec<Option<usize>> = (0..g.files.len())
             .map(|i| log.iter().position(|l| *l == alloc::format!("m{i}")))
             .collect();
-        let acyclic = g.deps.iter().enumerate().all(|(i, d)| d.iter().all(|t| *t > i));
+        let acyclic = g
+            .deps
+            .iter()
+            .enumerate()
+            .all(|(i, d)| d.iter().all(|t| *t > i));
         if acyclic {
             for (i, d) in g.deps.iter().enumerate() {
                 for t in d {
@@ -406,7 +458,10 @@ fn check_graph(g: &GraphSpec) -> usize {
     } else {
         // A failure: the throwing module is among those that ran or was cut off by a failed
         // dependency; nothing that depends on a failed module ran after it failed.
-        assert!(g.throws.iter().any(|t| *t), "an error with no thrower: {log:?}");
+        assert!(
+            g.throws.iter().any(|t| *t),
+            "an error with no thrower: {log:?}"
+        );
         return 2;
     }
     0
@@ -426,7 +481,10 @@ fn fuzz_module_graphs() {
             }
         }
         // The generator has to reach all three outcomes, or the checks above prove little.
-        assert!(counts.iter().all(|c| *c > 0), "outcomes (ok, link error, eval error): {counts:?}");
+        assert!(
+            counts.iter().all(|c| *c > 0),
+            "outcomes (ok, link error, eval error): {counts:?}"
+        );
         std::println!("graph outcomes (ok, link error, eval error): {counts:?}");
     });
 }

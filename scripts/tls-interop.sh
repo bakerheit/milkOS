@@ -12,10 +12,18 @@
 #      cases in fw_cfg opt/milkos/tlstest, the test CA in opt/milkos/tlstest-root; the
 #      kernel trusts that CA for this self-test only, never in its system store).
 #   5. In the same boot, the user-space tool /System/Developer/tlsprobe (rt::tls) runs
-#      cases too, with the test CA typed in over the serial console.
+#      cases too, with the test CA typed in over the serial console, and `network get` loads
+#      https:// pages (by name through the test DNS of scripts/web_test_servers.py, and by
+#      address) and refuses one for a name the certificate doesn't have.
+#   6. The Browser (scripts/wm-demo.sh browseurl) opens the https:// page, then shows the
+#      certificate error page for the wrong name.
+#   The test CA reaches the guest as fw_cfg opt/milkos/tlstest-root: the kernel trusts it on
+#   top of the Mozilla roots for that boot only (with a WARNING line), and the self-test cases
+#   use it alone; roots=mozilla cases check that the Mozilla roots don't trust it.
 #
 #   scripts/tls-interop.sh             OPENSSL=... to use another OpenSSL 3
 #   TLS_INTEROP_HOST_ONLY=1 scripts/tls-interop.sh    steps 1-3 only (no VM)
+#   KEEP_SHOTS=DIR scripts/tls-interop.sh             keep the Browser screenshots in DIR
 #
 # Network safety: every server binds 127.0.0.1; the guest only contacts 10.0.2.2 (qemu's
 # alias for the Mac's loopback). No real internet. Only processes started here are killed,
@@ -42,7 +50,7 @@ C="$WORK/ca"
 mkdir -p "$C"
 NB="$(date -u -v-1d +%Y%m%d%H%M%SZ)"
 NA="$(date -u -v+30d +%Y%m%d%H%M%SZ)"
-SAN="subjectAltName=DNS:interop.milk.test,IP:127.0.0.1,IP:10.0.2.2"
+SAN="subjectAltName=DNS:interop.milk.test,DNS:www.milk.test,IP:127.0.0.1,IP:10.0.2.2"
 "$OPENSSL" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$C/root.key" 2>/dev/null
 "$OPENSSL" genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$C/int.key" 2>/dev/null
 "$OPENSSL" genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$C/rsa.key" 2>/dev/null
@@ -73,6 +81,9 @@ sys.stdout.buffer.write(b''.join(b'%08d milkOS TLS interop .........\n' % i for 
 BIG_SHA="$(shasum -a 256 "$WORK/big.bin" | cut -d' ' -f1)"
 BIG_LEN="$(wc -c <"$WORK/big.bin" | tr -d ' ')"
 
+# A page for network get and the Browser.
+printf '<!DOCTYPE html><html><head><title>Secure milk</title></head><body><h1>Secure milk</h1><p>Served over TLS 1.3 by a test server on the Mac.</p></body></html>\n' >"$WORK/secure.html"
+
 # ---- 2. the servers ----
 free_ports() {
   python3 -I -c "
@@ -82,6 +93,13 @@ for s in ss: s.bind(('127.0.0.1', 0))
 print(*[s.getsockname()[1] for s in ss])" "$1"
 }
 read -r P_RSA_AES P_RSA_CHACHA P_EC_AES P_EC_CHACHA P_P256 P_P384 P_ALPN P_TLS12 P_BIG_AES P_BIG_CHACHA < <(free_ports 10)
+# The test DNS (names under milk.test; www.milk.test -> web.milk.test -> 10.0.2.2), as web-test uses.
+(cd "$WORK" && exec python3 -I "$REPO/scripts/web_test_servers.py" "$WORK/ports" >"$WORK/web-servers.log" 2>&1) &
+PIDS+=($!)
+for _ in $(seq 50); do [ -s "$WORK/ports" ] && break; sleep 0.1; done
+[ -s "$WORK/ports" ] || fail "the test DNS did not start"
+eval "$(tr ' ' '\n' <"$WORK/ports" | sed 's/^/W_/')"
+NETCFG="name=opt/milkos/net,string=internet=on dns=10.0.2.2:$W_dns"
 serve() { # port log args...
   local port="$1" log="$2"
   shift 2
@@ -122,7 +140,7 @@ cases() {
   echo "big-aes,$h:$P_BIG_AES,$n,suite=aes,get=/big.bin:$BIG_LEN:$BIG_SHA"
   echo "big-chacha,$h:$P_BIG_CHACHA,$n,suite=chacha,get=/big.bin:$BIG_LEN:$BIG_SHA"
   echo "wrong-host,$h:$P_EC_AES,other.milk.test,expect=the_certificate_is_for_another_site"
-  echo "untrusted-root,$h:$P_RSA_AES,$n,roots=system,expect=the_certificate_was_not_issued_by_a_trusted_authority"
+  echo "untrusted-root,$h:$P_RSA_AES,$n,roots=mozilla,expect=the_certificate_was_not_issued_by_a_trusted_authority"
   echo "tls12-only,$h:$P_TLS12,$n,expect=the_site_doesn't_speak_TLS_1.3"
 }
 
@@ -155,7 +173,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev user,id=n0 -device virtio-net-device,netdev=n0 \
   -fw_cfg "name=opt/milkos/tlstest,file=$WORK/tlstest.cfg" \
-  -fw_cfg "name=opt/milkos/tlstest-root,file=$C/root.der" &
+  -fw_cfg "name=opt/milkos/tlstest-root,file=$C/root.der" -fw_cfg "$NETCFG" &
 QPID=$!
 PIDS+=("$QPID")
 # The user-space tool reads the test CA and its cases from files, typed in here in short
@@ -169,6 +187,11 @@ while read -r c; do
   STEPS+=("send:print $c >> /tmp/tlsprobe.cases" "$P")
 done < <(cases 10.0.2.2 | grep -E '^(rsa-chacha|ecdsa-aes|hrr-p256|big-chacha|wrong-host|untrusted-root),')
 STEPS+=("send:/System/Developer/tlsprobe /tmp/tlsprobe.root /tmp/tlsprobe.cases" 'wait@180:\[tlsprobe\] [a-zA-Z]+: [0-9]+ of [0-9]+ cases' "$P")
+PAGE="$P_BIG_CHACHA"
+STEPS+=("send:network get https://www.milk.test:$PAGE/secure.html" 'wait:network get: [^\n]* ms' "$P"
+  "send:network get https://10.0.2.2:$PAGE/secure.html" 'wait:network get: [^\n]* ms' "$P"
+  "send:network get https://web.milk.test:$PAGE/secure.html" 'wait:network get: web' "$P"
+  'send:text show /proc/net/tls' 'wait:test_root=' "$P")
 python3 -I scripts/serial_drive.py "$SERIAL" "$LOG" "${STEPS[@]}" "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
 PIDS+=("$DPID")
@@ -185,9 +208,35 @@ GUEST_N="$(grep -ac '^\[tls\] .*: ok: ' "$LOG")"
 python3 -I scripts/console_clean.py "$LOG" | grep '^\[tlsprobe\]' | tee "$WORK/user.txt"
 grep -q '^\[tlsprobe\] ok: ' "$WORK/user.txt" || fail "the user-space cases did not all pass"
 USER_N="$(grep -c ': ok: ' "$WORK/user.txt")"
-# The test root must not have leaked into the system store.
-grep -aq '\[tls\] system roots: 121 Mozilla roots' "$LOG" || fail "system root store"
+grep -aq '\[tls\] 121 Mozilla roots parsed in [0-9]* ms; system store 122 roots' "$LOG" || fail "the root stores"
+grep -aq '\[tls\] WARNING: this boot trusts a TEST root' "$LOG" || fail "no warning about the test root"
+T="$WORK/console.txt"
+python3 -I scripts/console_clean.py "$LOG" >"$T"
+sed -n '/network get https:/,$p' "$T" | grep -v '^<' | head -20
+[ "$(grep -cE "^network get: 200 ok, [0-9]+ bytes from 10\.0\.2\.2:$PAGE in [0-9]+ ms$" "$T")" = 2 ] || fail "network get https:// (by name and by address)"
+[ "$(grep -c '^<!DOCTYPE html><html><head><title>Secure milk</title>' "$T")" -ge 2 ] || fail "network get https://: the page body"
+grep -q "^network get: web\.milk\.test: the certificate is for another site$" "$T" || fail "network get https:// with the wrong name"
+grep -q '^mozilla_roots=121$' "$T" && grep -q '^test_root=MII' "$T" || fail "/proc/net/tls"
+echo "network get https:// (test DNS name, IP, wrong name refused), /proc/net/tls: ok"
+kill "$QPID" 2>/dev/null || true
+
+# ---- 6. the Browser ----
+echo "---- Browser ----"
+browse() { # name url
+  WM_HOSTNET=1 DEMO_WAIT=120 SETTLE=1 scripts/wm-demo.sh browseurl "$WORK/$1.png" -fw_cfg "$NETCFG" \
+    -fw_cfg "name=opt/milkos/testurl,string=$2" -fw_cfg "name=opt/milkos/tlstest-root,file=$C/root.der" \
+    >"$WORK/$1.out" 2>&1 || { cat "$WORK/$1.out" >&2; fail "the Browser demo ($1)"; }
+  python3 -I scripts/png_check.py "$WORK/$1.png" >/dev/null || fail "the $1 screenshot isn't a PNG"
+  grep -a '^\[browser\]' "$WORK/$1.serial.log" | tr -d '\r'
+}
+browse secure "https://www.milk.test:$PAGE/secure.html"
+grep -aq "^\[browser\] https://www\.milk\.test:$PAGE/secure\.html: 200 ok, [0-9]* bytes, 'Secure milk', 0 redirects" "$WORK/secure.serial.log" ||
+  fail "the Browser didn't load the https page"
+browse wronghost "https://web.milk.test:$PAGE/secure.html"
+grep -aq "^\[browser\] https://web\.milk\.test:$PAGE/secure\.html: web\.milk\.test: the certificate is for another site" "$WORK/wronghost.serial.log" ||
+  fail "the Browser didn't refuse the wrong name"
+[ -n "${KEEP_SHOTS:-}" ] && cp "$WORK"/secure.png "$WORK"/wronghost.png "$KEEP_SHOTS"/
 cleanup
 trap - EXIT
 rm -rf "$WORK"
-echo "tls-interop: PASS (host $HOST_N cases, guest kernel $GUEST_N, guest user space $USER_N)"
+echo "tls-interop: PASS (host $HOST_N cases, guest kernel $GUEST_N, guest user space $USER_N, network get https, Browser https + certificate error)"

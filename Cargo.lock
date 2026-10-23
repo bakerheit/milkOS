@@ -31,6 +31,9 @@ dependencies = [
 [[package]]
 name = "milkweb"
 version = "0.0.1"
+dependencies = [
+ "tls",
+]
 
 [[package]]
 name = "tls"

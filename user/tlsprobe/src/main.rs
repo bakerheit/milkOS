@@ -3,7 +3,7 @@
 //!   /System/Developer/tlsprobe ROOT CASES
 //!
 //! ROOT is a file with the test CA, as DER or base64 (whitespace ignored); it is the only
-//! root trusted, except by `roots=system` cases (the compiled-in Mozilla roots). CASES is
+//! root trusted, except by `roots=mozilla` cases (the compiled-in Mozilla roots). CASES is
 //! a file of cases separated by whitespace, in the form of tls::interop (one per line is
 //! fine). Prints a line per case and a summary; exits 1 if any case failed.
 
@@ -23,34 +23,6 @@ use rt::{eprintln, println, sys};
 
 rt::main!(main);
 
-fn base64(text: &[u8]) -> Option<Vec<u8>> {
-    let val = |c: u8| -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32)
-    };
-    let chars: Vec<u8> = text.iter().copied().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
-    let mut out = Vec::with_capacity(chars.len() * 3 / 4);
-    for chunk in chars.chunks(4) {
-        let mut acc = 0u32;
-        for &c in chunk {
-            acc = (acc << 6) | val(c)?;
-        }
-        match chunk.len() {
-            4 => out.extend_from_slice(&acc.to_be_bytes()[1..]),
-            3 => out.extend_from_slice(&(acc << 6).to_be_bytes()[1..3]),
-            2 => out.push((acc >> 4) as u8),
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
 fn now_ms() -> u64 {
     sys::clock_ns(sys::CLOCK_MONOTONIC) / 1_000_000
 }
@@ -68,7 +40,7 @@ fn main(args: &rt::Args) -> i32 {
             return 2;
         }
     };
-    let der = if root.first() == Some(&0x30) { Some(root) } else { base64(&root) };
+    let der = if root.first() == Some(&0x30) { Some(root) } else { tls::base64(&String::from_utf8_lossy(&root)) };
     let mut test = RootStore::empty();
     match der.map(|d| test.add_der(&d)) {
         Some(Ok(())) => {}

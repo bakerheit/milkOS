@@ -9,8 +9,8 @@
 //! let page = rt::web::get(&mut n, &url, &rt::web::Options::default())?;
 //! ```
 //!
-//! `https://` gives [`Error::SecureUnsupported`] until there is TLS: then `RtNet::has_tls`
-//! says true and `secure` wraps the stream (`tls::Client::connect(host, stream)`).
+//! `https://` runs the TLS 1.3 handshake (milkweb::secure over rt::tls: the Mozilla roots,
+//! getrandom, the realtime clock).
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -126,6 +126,14 @@ impl Net for RtNet {
 
     fn now_ms(&mut self) -> u64 {
         sys::clock_ns(sys::CLOCK_MONOTONIC) / 1_000_000
+    }
+
+    fn has_tls(&self) -> bool {
+        true
+    }
+
+    fn secure(&mut self, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error> {
+        milkweb::secure::secure(&crate::tls::client(), host, tcp)
     }
 }
 

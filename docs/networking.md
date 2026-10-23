@@ -60,9 +60,9 @@ check-all checks at the start that the wrapper really refuses. Test scripts that
 internet or the LAN can open a connection to it (no port is forwarded unless `MILK_HTTP_PORT`
 asks, and that one is bound to the Mac's 127.0.0.1). Going out, it can reach whatever the Mac
 can: web sites, and also the Mac's LAN (a router's admin page, a printer) and the Mac itself
-at 10.0.2.2. Everything is plain http: anyone between the Mac and a site can read and change
-the pages (`https://` is refused until there is TLS, see below), so don't type anything
-private into a page. DNS answers aren't authenticated either (no DNSSEC; the ids are random
+at 10.0.2.2. Plain http pages can be read and changed by anyone between the Mac and a site;
+`https://` pages come over TLS 1.3 with the certificate checked against the Mozilla roots
+(docs/tls.md), so those can't, but don't type anything private into a page yet. DNS answers aren't authenticated either (no DNSSEC; the ids are random
 and an answer must echo the question). Every fetch is bounded (2 MiB per page in the
 Browser, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
 on the way (DNS, HTTP, gzip, HTML) is host-tested against malformed and hostile input. The
@@ -84,23 +84,27 @@ trait Transport { fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error>; //
                   fn write(&mut self, buf: &[u8]) -> Result<usize, Error>; }
 trait Net { fn connect(&mut self, host: &str, port: u16, timeout_ms: u64) -> Result<Box<dyn Transport>, Error>;
             fn now_ms(&mut self) -> u64;
-            fn has_tls(&self) -> bool { false }                      // the https hook
+            fn has_tls(&self) -> bool { false }                      // the https hook (true in both)
             fn secure(&mut self, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error>; }
 milkweb::http::get(&mut dyn Net, &Url, &Options) -> Result<Response, Failure>
 ```
 
 `net::web::KernelNet` (kernel sockets) and `rt::web::RtNet` (user sockets) implement `Net`.
-**TLS** slots in at `secure`: with `has_tls() == false` (today) an `https://` address fails at
-once with `Error::SecureUnsupported` ("Secure pages aren't supported yet"), before any lookup
-or connection; with the `tls` crate, `has_tls` returns true and `secure` returns
-`tls::Client::connect(host, tcp)` as a `Transport`. Nothing else changes.
+**TLS** is at `secure`: both say `has_tls() == true`, and `secure` is `milkweb::secure::secure`,
+the `tls` crate's handshake over the TCP `Transport` with the system roots (kernel:
+`net::tls::client()`; user space: `rt::tls::client()`). A refused certificate is
+`Error::Certificate` ("This site's certificate can't be trusted", with `tls`'s reason, e.g.
+"www.example.org: the certificate is for another site"), any other TLS failure `Error::Tls`
+("A secure connection couldn't be made"); a TCP close without close_notify ends the body
+(HTTP's own framing tells a cut body). A `Net` without TLS still gets
+`Error::SecureUnsupported` before any lookup. See docs/tls.md.
 
 **The Browser** (`wm/apps/browser.rs`) shows where redirects ended in its address bar and says
 what went wrong in words: "No internet (offline mode)", "Server not found", "No internet"
-(no DNS answer), "Can't connect to the server", "Secure pages aren't supported yet". A bare
+(no DNS answer), "Can't connect to the server", "This site's certificate can't be trusted",
+"A secure connection couldn't be made". A bare
 word (no dot, colon or slash, or several words) goes to DuckDuckGo's text-only page,
-`http://lite.duckduckgo.com/lite/?q=...` (not tried by any test: if the site insists on
-https, the search shows the secure-pages message until there is TLS). Its HTML subset
+`http://lite.duckduckgo.com/lite/?q=...` (not tried by any test). Its HTML subset
 (`milkweb::html`, host-tested): headings, paragraphs, `div`/`section`/... as blocks,
 `span`/`font`/... inline, lists, `blockquote`, `pre`, `hr`, tables as one line per row with
 " | " between cells, links, bold / italic, `<img alt>` as `[alt]`; `script`, `style`, `svg`,
@@ -507,7 +511,7 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 | `network connect [-4\|-6] [--udp] HOST PORT`, `network listen [-4\|-6] [--udp] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; listen uses `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by milkd as `httpd -q /Users/milk/Sites` on :80 (rootfs/Users/milk/Sites), listening on `[::]:80` (IPv6 and IPv4) |
 | `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
-| `network get [--headers] [--save FILE [--replace]] URL` | HTTP GET: the body to the screen or FILE (an existing FILE only with `--replace`), each redirect and a summary line on stderr (`network get: 200 OK, 607 bytes (gzip, 422 on the wire) from 10.0.2.2:8000 in 2 ms`) | `rt::web` (milkweb's HTTP/1.1 client: redirects, chunked, gzip/deflate, 4 MiB, 30 s). Host names with the internet on; `https://` refused (no TLS yet) |
+| `network get [--headers] [--save FILE [--replace]] URL` | HTTP GET: the body to the screen or FILE (an existing FILE only with `--replace`), each redirect and a summary line on stderr (`network get: 200 OK, 607 bytes (gzip, 422 on the wire) from 10.0.2.2:8000 in 2 ms`) | `rt::web` (milkweb's HTTP/1.1 client: redirects, chunked, gzip/deflate, 4 MiB, 30 s). Host names with the internet on; `https://` over TLS 1.3 (rt::tls) |
 | `network lookup [-4\|-6] NAME` | every address of a name (`NAME has IPv4 address A`), IPv4 first | `rt::net::resolve_all`: numeric / localhost / `.local` here, the rest through the kernel's resolver (`MILK_RESOLVE`, the boot's policy) |
 | `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
 | `network name [--local] [NAME]`, `network hide`, `network show` | the hostname, the `.local` (Milk Drop) name, Milk Drop visibility | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/System/Settings/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
@@ -818,7 +822,7 @@ of the CNAME (twice: the server sees one question, the second is cached), an AAA
 name (UDP truncated, then TCP: 40 addresses), NXDOMAIN, and `example.com` (answered
 NXDOMAIN by the test server, proving there's no fallback); `network get` through the chain
 (Host and User-Agent checked on the server, the body gunzipped), the loop, an `https://`
-address refused; `/proc/net/internet`. Then the Browser (`wm-demo.sh browseurl`) opens
+address with nothing listening (TLS itself is scripts/tls-interop.sh's); `/proc/net/internet`. Then the Browser (`wm-demo.sh browseurl`) opens
 `http://www.milk.test:PORT/start` by name: its log line must show the page, title and 3
 redirects, and the screenshot is kept (`web-browser.png`).
 
@@ -878,8 +882,7 @@ two UDP ports on 127.0.0.1.
 
 ## Next
 
-* TLS 1.3 (the `tls` crate) behind `Net::secure`, then https:// in the Browser and `network
-  get`; IPv6 DNS servers (slirp's fec0::3) for v6-only boots; DNS over a shared socket instead of
+* IPv6 DNS servers (slirp's fec0::3) for v6-only boots; DNS over a shared socket instead of
   one per question.
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;

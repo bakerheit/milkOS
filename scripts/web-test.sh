@@ -9,7 +9,7 @@
 #   1. msh over the serial console: network status (internet on, the test DNS), network lookup
 #      (a CNAME, the cache: asked once for two lookups, AAAA, a truncated UDP answer retried
 #      over TCP, NXDOMAIN, example.com answered by the test server), network get through a
-#      301/302/307 chain to a chunked + gzip page, a redirect loop, https:// refused,
+#      301/302/307 chain to a chunked + gzip page, a redirect loop, https:// to a closed port (TLS itself: scripts/tls-interop.sh),
 #      /proc/net/internet.
 #   2. The Browser (scripts/wm-demo.sh browseurl) opening http://www.milk.test:PORT/start:
 #      its log line ([browser] ...: 200, title, 3 redirects) and a screenshot.
@@ -72,7 +72,7 @@ python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
   'send:network lookup example.com' 'wait:network lookup: ' "$P" \
   "send:network get http://www.milk.test:$H/start" 'wait:network get: [^\n]* ms' "$P" \
   "send:network get http://www.milk.test:$H/loop" 'wait:network get: the redirects' "$P" \
-  'send:network get https://www.milk.test/' 'wait:network get: https' "$P" \
+  'send:network get https://www.milk.test/' 'wait:network get: connect' "$P" \
   'send:text show /proc/net/internet' 'wait:cache_misses=' "$P" \
   "done:$WORK/drive.done" >"$WORK/drive.log" 2>&1 &
 DPID=$!
@@ -111,11 +111,11 @@ want "^network get: 200 OK, [0-9]+ bytes \(gzip, [0-9]+ on the wire\) from 10\.0
 grep -q "^http /page host=web.milk.test:$H ua=milkOS/0.1 (network get)$" "$S" || fail "the page request's Host / User-Agent"
 grep -q '^http /page sent [0-9]* bytes gzip chunked$' "$S" || fail "the server didn't send the page gzipped and chunked"
 want "^network get: the redirects go round in a circle \(back to http://www\.milk\.test:$H/loop\)$" "redirect loop"
-want "^network get: https:// pages need TLS" "https:// refused"
+want "^network get: connect 10\.0\.2\.2:443: " "https:// (TLS: scripts/tls-interop.sh) to a port nobody listens on"
 want "^internet=on$" "/proc/net/internet"
 want "^dns=10\.0\.2\.2:$P_dns$" "/proc/net/internet dns"
 want "^dns_from=test$" "/proc/net/internet dns_from"
-echo "msh: network status (internet on, test DNS), lookup (CNAME, cache, AAAA, TCP after TC, NXDOMAIN), get (301/302/307, chunked + gzip, loop, https refused), /proc/net/internet: ok"
+echo "msh: network status (internet on, test DNS), lookup (CNAME, cache, AAAA, TCP after TC, NXDOMAIN), get (301/302/307, chunked + gzip, loop, https to a closed port), /proc/net/internet: ok"
 
 # ---- 2. the Browser, by host name ----
 URL="http://www.milk.test:$H/start"

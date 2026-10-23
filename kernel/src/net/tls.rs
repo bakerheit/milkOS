@@ -8,10 +8,13 @@
 //! let n = s.read(&mut buf)?;
 //! ```
 //!
-//! [`selftest`] is the guest half of `scripts/tls-interop.sh`: only when that script passes
-//! fw_cfg `opt/milkos/tlstest` (the cases, see `tls::interop`) does it run, and then with a
-//! root store holding nothing but the test CA from `opt/milkos/tlstest-root`. That root is
-//! never added to the system store, and normal boots don't look at it.
+//! Test boots: when a test script (scripts/tls-interop.sh) passes fw_cfg
+//! `opt/milkos/tlstest-root`, [`init`] says so loudly and that test CA is trusted on top of
+//! the Mozilla roots for this boot (by the Browser, and by user space through `/proc/net/tls`),
+//! so a page from a local test server loads. Normal boots have no such file and trust the
+//! Mozilla roots only. [`selftest`] runs the cases of fw_cfg `opt/milkos/tlstest` (see
+//! `tls::interop`) with the test CA alone, and `roots=mozilla` cases with the Mozilla roots
+//! alone.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -33,15 +36,72 @@ const TIMEOUT_NS: u64 = 15_000_000_000;
 
 static ROOTS: SpinLock<Option<Arc<RootStore>>> = SpinLock::new(None);
 
-/// The Mozilla root store, parsed once.
+/// A test CA this boot trusts on top of the Mozilla roots: only when a test script passed
+/// fw_cfg `opt/milkos/tlstest-root` (scripts/tls-interop.sh). Read once by [`init`].
+static TEST_ROOT: SpinLock<Option<Vec<u8>>> = SpinLock::new(None);
+
+/// Boot: look for a test root in fw_cfg (normal boots have none, and trust only Mozilla's).
+pub fn init() {
+    let Some(der) = fw_file("opt/milkos/tlstest-root", 16384) else {
+        return;
+    };
+    let mut probe = RootStore::empty();
+    match probe.add_der(&der) {
+        Ok(()) => {
+            kprintln!(
+                "[tls] WARNING: this boot trusts a TEST root from fw_cfg (opt/milkos/tlstest-root, {} bytes): a test run, not for real use",
+                der.len()
+            );
+            *TEST_ROOT.lock() = Some(der);
+        }
+        Err(e) => kprintln!("[tls] the fw_cfg test root doesn't parse ({e}): ignored"),
+    }
+}
+
+/// The test root of this boot, if a test passed one.
+pub fn test_root() -> Option<Vec<u8>> {
+    TEST_ROOT.lock().clone()
+}
+
+/// The system root store: the Mozilla roots (plus the test root of a test boot), parsed once.
 pub fn roots() -> Arc<RootStore> {
     if let Some(r) = ROOTS.lock().as_ref() {
         return r.clone();
     }
     // Parse outside the lock (a few ms), then publish; a racing parse is just dropped.
-    let parsed = Arc::new(RootStore::mozilla());
+    let mut store = RootStore::mozilla();
+    if let Some(t) = test_root() {
+        let _ = store.add_der(&t);
+    }
+    let parsed = Arc::new(store);
     let mut g = ROOTS.lock();
     g.get_or_insert(parsed).clone()
+}
+
+/// `/proc/net/tls`: the root store, and a test boot's extra root (base64 DER) for user space
+/// (rt::tls trusts it too, so `network get` and the Browser agree).
+pub fn proc_file(_st: &super::Stack, w: &mut dyn core::fmt::Write) -> core::fmt::Result {
+    writeln!(w, "mozilla_roots={}", tls::x509::split_der(tls::roots::MOZILLA_ROOTS_DER).count())?;
+    match TEST_ROOT.try_lock().and_then(|g| g.clone()) {
+        Some(der) => writeln!(w, "test_root={}", base64(&der)),
+        None => writeln!(w, "test_root=none"),
+    }
+}
+
+fn base64(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            if i <= c.len() {
+                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                s.push('=');
+            }
+        }
+    }
+    s
 }
 
 fn kernel_rng(out: &mut [u8]) {
@@ -159,8 +219,8 @@ pub fn selftest() {
     let Some(cfg) = fw_file("opt/milkos/tlstest", 4096) else {
         return;
     };
-    let Some(root) = fw_file("opt/milkos/tlstest-root", 16384) else {
-        kprintln!("[tls] FAIL: opt/milkos/tlstest without opt/milkos/tlstest-root");
+    let Some(root) = test_root() else {
+        kprintln!("[tls] FAIL: opt/milkos/tlstest without a usable opt/milkos/tlstest-root");
         return;
     };
     // The test CA only: not the Mozilla roots, and never added to them.
@@ -171,11 +231,12 @@ pub fn selftest() {
     }
     let store = Arc::new(store);
     let t0 = timer::now_ns();
-    let mozilla = roots();
+    let mozilla = Arc::new(RootStore::mozilla());
     kprintln!(
-        "[tls] system roots: {} Mozilla roots parsed in {} ms; test root for this run only",
+        "[tls] {} Mozilla roots parsed in {} ms; system store {} roots (with the test root)",
         mozilla.len(),
-        (timer::now_ns() - t0) / 1_000_000
+        (timer::now_ns() - t0) / 1_000_000,
+        roots().len()
     );
     let text = String::from_utf8_lossy(&cfg).into_owned();
     let (mut pass, mut fail) = (0, 0);

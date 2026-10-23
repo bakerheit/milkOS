@@ -7,7 +7,7 @@
 //!   `_` for spaces;
 //! * `suite=aes|chacha`: offer only that suite (and expect it);
 //! * `group=x25519|secp256r1|secp384r1`: expect that group;
-//! * `roots=system`: verify with the Mozilla roots instead of the test CA;
+//! * `roots=mozilla`: verify with the Mozilla roots alone instead of the test CA;
 //! * `get=PATH:SIZE:SHA256`: GET PATH from `s_server -WWW` and check the body; without it,
 //!   GET / from `s_server -www` and check its status page names TLS 1.3 and the suite;
 //! * `alpn=PROTO`: expect that ALPN answer.
@@ -65,7 +65,7 @@ pub fn parse_case(word: &str) -> Result<Case, String> {
                     _ => return Err(bad()),
                 })
             }
-            "roots" => c.system_roots = v == "system",
+            "roots" => c.system_roots = v == "mozilla",
             "alpn" => c.alpn = Some(v.to_string()),
             "get" => {
                 let mut g = v.split(':');

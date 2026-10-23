@@ -80,9 +80,55 @@ pub fn config(roots: Arc<RootStore>) -> Config {
     Config::new(roots, Arc::new(unix_seconds), Arc::new(getrandom))
 }
 
-/// A client with the compiled-in Mozilla roots (parsed now: build it once).
+/// The system root store: the compiled-in Mozilla roots, plus a test boot's test root
+/// (`/proc/net/tls` has it only when a test script passed one to the kernel through fw_cfg).
+/// Parsed on each call: build a client once.
+pub fn system_roots() -> RootStore {
+    let mut s = RootStore::mozilla();
+    if let Ok(t) = sys::read_file("/proc/net/tls") {
+        let t = String::from_utf8_lossy(&t);
+        if let Some(b) = t.lines().find_map(|l| l.strip_prefix("test_root="))
+            && let Some(der) = base64(b.trim())
+        {
+            let _ = s.add_der(&der);
+        }
+    }
+    s
+}
+
+/// Standard base64 (no whitespace) to bytes.
+pub fn base64(text: &str) -> Option<alloc::vec::Vec<u8>> {
+    let val = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let chars: alloc::vec::Vec<u8> =
+        text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=').collect();
+    let mut out = alloc::vec::Vec::with_capacity(chars.len() * 3 / 4);
+    for chunk in chars.chunks(4) {
+        let mut acc = 0u32;
+        for &c in chunk {
+            acc = (acc << 6) | val(c)?;
+        }
+        match chunk.len() {
+            4 => out.extend_from_slice(&acc.to_be_bytes()[1..]),
+            3 => out.extend_from_slice(&(acc << 6).to_be_bytes()[1..3]),
+            2 => out.push((acc >> 4) as u8),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// A client with the system roots.
 pub fn client() -> Client {
-    Client::new(config(Arc::new(RootStore::mozilla())))
+    Client::new(config(Arc::new(system_roots())))
 }
 
 /// Resolve `host`, connect to `port`, and run the handshake (the certificate must name

@@ -165,7 +165,7 @@ pub fn ping(p: &Parsed, host: &str, want: net::Want) -> i32 {
 /// `network get [--headers] [--save FILE [--replace]] URL`: the body to stdout (or FILE), a
 /// summary line ("network get: 200 OK, 1234 bytes from 10.0.2.2:80 in 5 ms") to stderr.
 /// HTTP/1.1 through rt::web: redirects followed (each one said on stderr), gzip / deflate
-/// undone; https:// is refused until there is TLS.
+/// undone; https:// over TLS 1.3 (rt::tls, the certificate checked).
 pub fn get(p: &Parsed, url: &str, want: net::Want) -> i32 {
     let u = match web::Url::parse(url) {
         Ok(u) => u,

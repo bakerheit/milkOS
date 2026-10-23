@@ -606,6 +606,7 @@ pub const FILES: &[(&str, Gen)] = &[
     ("igmp6", igmp6),
     ("hostname", hostname),
     ("internet", super::internet::proc_file),
+    ("tls", super::tls::proc_file),
 ];
 
 /// Render one of [`FILES`] into a String (thread context).

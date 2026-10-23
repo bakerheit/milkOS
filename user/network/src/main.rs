@@ -50,7 +50,7 @@ usage: network COMMAND ...    the network: links, connections, names and Milk Dr
 
 HOST is an address (10.0.2.2, fe80::1%eth1), localhost, NAME.local, or with the internet on
 any host name (offline, only .test names); --ipv4 (-4) and --ipv6 (-6) pick a family. URLs
-are http:// (redirects followed, gzip undone); https:// needs TLS, which isn't there yet. ^D on an empty line ends what connect and listen send. With no
+are http:// or https:// (TLS 1.3, the certificate checked; redirects followed, gzip undone). ^D on an empty line ends what connect and listen send. With no
 COMMAND, network shows the status.
 ";
 

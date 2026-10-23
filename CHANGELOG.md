@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+**Network**
+- https:// pages: a TLS 1.3 client written from scratch (`tls/`, shared by the kernel and
+  user space; docs/tls.md), so the Browser and `network get` open secure sites. ChaCha20-
+  Poly1305 and AES-128-GCM; X25519, P-256 and P-384; certificates always checked against the
+  compiled-in Mozilla root store (121 roots, 126 KiB), with errors in plain words ("the
+  certificate is for another site", "the certificate has expired", "the site doesn't speak
+  TLS 1.3"). New in milkcrypto: AES-128 (bitsliced), GHASH/GCM, SHA-384, HKDF, RSA, P-256 and
+  P-384. Tested against RFC 8448's trace and OpenSSL 3 (`scripts/tls-interop.sh`).
+
 **Desktop**
 - Real system fonts: UI text is anti-aliased Figtree (default), IBM Plex Sans, Fira Sans,
   Atkinson Hyperlegible Next or Ubuntu Sans, picked in Settings > Appearance > Font and

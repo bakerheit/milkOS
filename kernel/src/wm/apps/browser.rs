@@ -6,9 +6,9 @@
 //! Network policy (the boot's, `net::internet`): with the internet on it visits host names
 //! (looked up by `net::dns`), and a bare word in the address bar becomes a search on
 //! DuckDuckGo's lite page; offline (every test boot) it only visits IP literals and
-//! localhost, refused before a socket is made. `https://` says secure pages aren't supported
-//! yet (no TLS), before any lookup. Fetches run on their own kernel thread so the window
-//! system never blocks on the network.
+//! localhost, refused before a socket is made. `https://` pages come over TLS 1.3
+//! (`net::tls`: the certificate checked against the Mozilla roots, errors in plain words).
+//! Fetches run on their own kernel thread so the window system never blocks on the network.
 
 use alloc::format;
 use alloc::string::String;
@@ -70,6 +70,10 @@ fn hint(e: &Error) -> &'static str {
         Error::NotFound(_) => "Check the spelling of the address.",
         Error::Connect(_) => "The server may be down, or not taking connections on that port.",
         Error::SecureUnsupported => "If the site also has an http:// address, that one will open.",
+        Error::Certificate(_) => {
+            "milkOS checks every secure site's certificate against Mozilla's list of trusted authorities. Either the site is set up wrongly, or someone is pretending to be it: the page wasn't opened."
+        }
+        Error::Tls(_) => "milkOS speaks TLS 1.3 only; the site may need an older version.",
         Error::Timeout => "Try again (reload), or another site.",
         _ => "",
     }

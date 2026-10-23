@@ -3,7 +3,7 @@
 //!
 //!     tlsprobe ROOT.der CASE...
 //!
-//! ROOT.der is the throwaway test CA (the only root trusted, except for roots=system
+//! ROOT.der is the throwaway test CA (the only root trusted, except for roots=mozilla
 //! cases, which use the compiled-in Mozilla roots). Prints one line per case; exits 1 if
 //! any case failed.
 

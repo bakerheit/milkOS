@@ -29,7 +29,7 @@ use rt::sys;
 rt::main!(main);
 
 pub const W: i32 = 860;
-pub const H: i32 = 660;
+pub const H: i32 = 620;
 pub const BAR: i32 = 40;
 pub const STATUS_H: i32 = 24;
 pub const STRIP_W: i32 = 150;

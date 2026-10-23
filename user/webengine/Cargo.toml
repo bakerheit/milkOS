@@ -1,0 +1,14 @@
+[package]
+name = "webengine"
+version.workspace = true
+edition.workspace = true
+
+# The Browser's web engine: HTML5 parsing (the WHATWG tokenizer and tree builder), a DOM, CSS
+# (syntax, selectors level 3, the cascade, media queries), layout (block, inline, floats,
+# positioning, tables, flexbox) and paint into a display list, plus hit testing, find in page
+# and form controls. no_std + alloc, no dependencies and no I/O: the app fetches stylesheets and
+# images and measures text through the callbacks in src/api.rs. Host tests:
+#   cd user && cargo test -p webengine --target aarch64-apple-darwin
+[lib]
+bench = false
+doctest = false

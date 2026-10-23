@@ -345,6 +345,7 @@ pub(crate) fn values(r: &mut Realm, this: Val, _args: &[Val]) -> Res<Val> {
 
 /// The callback-taking methods share one loop. `kind` picks the behaviour.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 enum Each {
     ForEach,
     Map,
@@ -1119,15 +1120,14 @@ fn splice(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
         && a.dense.len() as f64 == len
         && !a.dense.iter().any(|v| v.is_empty())
         && r.o(o).proto == Some(r.intr.array_proto)
+        && let ObjKind::Array(a) = &mut r.om(o).kind
     {
-        if let ObjKind::Array(a) = &mut r.om(o).kind {
-            let s = start as usize;
-            let d = del as usize;
-            let removed: Vec<Val> = a.dense.splice(s..s + d, items.iter().copied()).collect();
-            a.len = a.dense.len() as u32;
-            r.heap.charge(items.len() * 16);
-            return Ok(Val::Obj(r.new_array_from(removed)));
-        }
+        let s = start as usize;
+        let d = del as usize;
+        let removed: Vec<Val> = a.dense.splice(s..s + d, items.iter().copied()).collect();
+        a.len = a.dense.len() as u32;
+        r.heap.charge(items.len() * 16);
+        return Ok(Val::Obj(r.new_array_from(removed)));
     }
     let out = r.species_create(o, del)?;
     let mark = r.temps.len();

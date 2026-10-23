@@ -876,11 +876,11 @@ impl Realm {
             }
             // A job counts as a step, so an endless chain of tiny jobs still gets polled.
             self.poll_steps += 1;
-            if self.poll_steps >= self.next_poll {
-                if let Err(e) = self.poll() {
-                    self.jobs.push_front(job);
-                    return Err(e);
-                }
+            if self.poll_steps >= self.next_poll
+                && let Err(e) = self.poll()
+            {
+                self.jobs.push_front(job);
+                return Err(e);
             }
             // The job's values are off the queue now: keep them rooted while it runs.
             let mark = self.temps.len();

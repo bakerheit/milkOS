@@ -42,7 +42,7 @@ impl Val {
     #[inline]
     pub fn num(x: f64) -> Val {
         // Keep integers in the Int fast path (but never -0).
-        if x >= -2147483648.0 && x <= 2147483647.0 {
+        if (-2147483648.0..=2147483647.0).contains(&x) {
             let i = x as i32;
             if i as f64 == x && !(i == 0 && x.is_sign_negative()) {
                 return Val::Int(i);

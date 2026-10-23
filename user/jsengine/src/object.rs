@@ -168,11 +168,6 @@ impl PropMap {
     pub fn iter(&self) -> impl Iterator<Item = &(PropKey, Prop)> {
         self.ents.iter().filter(|e| e.0 != TOMB)
     }
-    pub fn clear(&mut self) {
-        self.ents.clear();
-        self.index = None;
-        self.dead = 0;
-    }
     pub fn bytes(&self) -> usize {
         self.ents.capacity() * 32 + self.index.as_ref().map_or(0, |i| i.len() * 4)
     }
@@ -193,8 +188,6 @@ pub(crate) const SPARSE: u16 = 16;
 pub(crate) const CONSTRUCTOR: u16 = 32;
 /// A lazy function that also wants a fresh `prototype` object.
 pub(crate) const LAZY_PROTO: u16 = 64;
-/// An Error object (has [[ErrorData]]).
-pub(crate) const ERROR: u16 = 128;
 
 pub(crate) struct Obj {
     pub proto: Option<ObjId>,
@@ -262,9 +255,6 @@ impl WeakMapData {
         } else {
             false
         }
-    }
-    pub fn len(&self) -> usize {
-        self.ents.len()
     }
 }
 
@@ -523,10 +513,12 @@ impl Realm {
             // Interned strings that are indices are never made (key_units checks first),
             // but a script string may still be one.
             let u = self.heap.flat(s);
-            if u.len() <= 10 && !u.is_empty() && crate::string::is_ascii_digit(u[0]) {
-                if let Some(i) = crate::string::array_index(u) {
-                    return PropKey::Idx(i);
-                }
+            if u.len() <= 10
+                && !u.is_empty()
+                && crate::string::is_ascii_digit(u[0])
+                && let Some(i) = crate::string::array_index(u)
+            {
+                return PropKey::Idx(i);
             }
             return PropKey::Str(s);
         }
@@ -1204,7 +1196,7 @@ impl Realm {
                 _ => None,
             })
             .collect();
-        idx.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        idx.sort_unstable_by_key(|e| core::cmp::Reverse(e.0));
         let mut new_len = len;
         let mut ok = true;
         for (i, f) in idx {

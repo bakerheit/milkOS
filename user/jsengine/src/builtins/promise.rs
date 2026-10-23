@@ -49,8 +49,6 @@ pub(crate) enum Handler {
     Default,
     /// Resume an async function / async generator at its await.
     AsyncResume(ObjId),
-    /// Promise.all / allSettled / any element functions are ordinary natives (Js).
-    Noop,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -284,7 +282,6 @@ impl Realm {
                     Ok(arg)
                 }
             }
-            Handler::Noop => Ok(Val::Undef),
             Handler::Js(f) => self.call_v(f, Val::Undef, &[arg]),
             Handler::AsyncResume(co) => {
                 let mode = if reject { Resume::Throw } else { Resume::Next };
@@ -816,7 +813,7 @@ fn combinator_inner(r: &mut Realm, c: Val, iterable: Val, cap: Capability, mode:
 }
 
 fn bump_remaining(r: &mut Realm, state: ObjId, d: i32) -> i32 {
-    let n = match &mut r.om(state).kind {
+    match &mut r.om(state).kind {
         ObjKind::Array(a) => {
             let cur = match a.dense.get(1) {
                 Some(Val::Int(i)) => *i,
@@ -829,8 +826,7 @@ fn bump_remaining(r: &mut Realm, state: ObjId, d: i32) -> i32 {
             n
         }
         _ => 0,
-    };
-    n
+    }
 }
 
 fn state_slot(r: &Realm, state: ObjId, i: usize) -> Val {

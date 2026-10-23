@@ -379,7 +379,7 @@ fn parse_loose(s: &str, tz_min: i32) -> Option<f64> {
         }
     }
     let toks: Vec<&str> = lower
-        .split(|c: char| c == ' ' || c == ',' || c == '\t')
+        .split([' ', ',', '\t'])
         .filter(|t| !t.is_empty())
         .collect();
     for tok in toks {

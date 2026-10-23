@@ -245,8 +245,6 @@ pub(crate) enum Op {
     /// `this` in a derived constructor (ReferenceError before super()).
     ThisChk,
     NewTarget,
-    /// The current function object.
-    Callee,
     ArgumentsObj,
     /// An array of the arguments from index n on.
     RestArgs(u32),
@@ -379,12 +377,5 @@ impl Code {
             Err(0) => self.span.0,
             Err(i) => self.lines[i - 1].1,
         }
-    }
-
-    pub fn bytes(&self) -> usize {
-        core::mem::size_of::<Code>()
-            + self.ops.len() * core::mem::size_of::<Op>()
-            + self.consts.len() * 32
-            + self.lines.len() * 8
     }
 }

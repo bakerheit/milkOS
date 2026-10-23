@@ -35,7 +35,7 @@ pub(crate) fn js_round(x: f64) -> f64 {
     if x > 0.0 && x < 0.5 {
         return 0.0;
     }
-    if x < 0.0 && x >= -0.5 {
+    if (-0.5..0.0).contains(&x) {
         return -0.0;
     }
     let f = floor(x);
@@ -44,10 +44,6 @@ pub(crate) fn js_round(x: f64) -> f64 {
 
 pub(crate) fn abs(x: f64) -> f64 {
     f64::from_bits(x.to_bits() & !(1u64 << 63))
-}
-
-pub(crate) fn copysign(x: f64, y: f64) -> f64 {
-    f64::from_bits((x.to_bits() & !(1u64 << 63)) | (y.to_bits() & (1u64 << 63)))
 }
 
 /// fmod, exact (the musl algorithm): the result has the sign of x.

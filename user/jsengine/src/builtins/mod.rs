@@ -147,7 +147,7 @@ impl Realm {
     }
 
     pub(crate) fn idx_key(&mut self, i: f64) -> Res<PropKey> {
-        if i >= 0.0 && i < 4294967295.0 {
+        if (0.0..4294967295.0).contains(&i) {
             return Ok(PropKey::Idx(i as u32));
         }
         self.to_key(Val::num(i))

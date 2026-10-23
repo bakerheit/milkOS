@@ -230,13 +230,6 @@ impl Realm {
         self.o(o).flags & CLASS_CTOR != 0
     }
 
-    fn closure_code(&self, f: ObjId) -> Option<Rc<Code>> {
-        match &self.o(f).kind {
-            ObjKind::Closure(c) => Some(c.code.clone()),
-            _ => None,
-        }
-    }
-
     fn closure(&self, f: ObjId) -> Option<&Closure> {
         match &self.o(f).kind {
             ObjKind::Closure(c) => Some(c),
@@ -643,21 +636,18 @@ impl Realm {
         };
         self.vm.stack.truncate(frame.base as usize - 2);
         let mut result = v;
-        if frame.construct {
-            if !matches!(v, Val::Obj(_)) {
-                if frame.code.kind == CodeKind::DerivedCtor && !v.is_undef() {
-                    let e =
-                        self.type_error("Derived constructors may only return object or undefined");
-                    return self.abrupt_from(frame, Err(e));
-                }
-                if frame.this.is_empty() {
-                    let e = self.reference_error(
+        if frame.construct && !matches!(v, Val::Obj(_)) {
+            if frame.code.kind == CodeKind::DerivedCtor && !v.is_undef() {
+                let e = self.type_error("Derived constructors may only return object or undefined");
+                return self.abrupt_from(frame, Err(e));
+            }
+            if frame.this.is_empty() {
+                let e = self.reference_error(
                         "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
                     );
-                    return self.abrupt_from(frame, Err(e));
-                }
-                result = frame.this;
+                return self.abrupt_from(frame, Err(e));
             }
+            result = frame.this;
         }
         if let Some(co) = frame.co {
             match self.co_kind(co) {
@@ -1972,10 +1962,6 @@ impl Realm {
                     let t = self.top().new_target;
                     self.push(t);
                 }
-                Op::Callee => {
-                    let f = self.top().func.map_or(Val::Undef, Val::Obj);
-                    self.push(f);
-                }
                 Op::ArgumentsObj => {
                     let a = self.make_arguments(base);
                     self.push(Val::Obj(a));
@@ -2237,11 +2223,9 @@ impl Realm {
                     }
                     return self.get_p(id, PropKey::Idx(i as u32), o);
                 }
-                Val::Str(s) => {
-                    if (i as usize) < self.heap.str_len(s) {
-                        let c = self.heap.units(s)[i as usize];
-                        return Ok(Val::Str(self.char_str(c)));
-                    }
+                Val::Str(s) if (i as usize) < self.heap.str_len(s) => {
+                    let c = self.heap.units(s)[i as usize];
+                    return Ok(Val::Str(self.char_str(c)));
                 }
                 _ => {}
             }
@@ -2364,13 +2348,14 @@ impl Realm {
         }
         let g = self.global;
         let obj = self.o(g);
-        if obj.flags & LAZY_FN == 0 && !matches!(obj.kind, ObjKind::Host { .. }) {
-            if let Some(pos) = obj.props.find(k) {
-                let p = obj.props.ents[pos].1;
-                if p.f & (W | crate::object::ACCESSOR) == W {
-                    self.om(g).props.ents[pos].1.v = v;
-                    return Ok(());
-                }
+        if obj.flags & LAZY_FN == 0
+            && !matches!(obj.kind, ObjKind::Host { .. })
+            && let Some(pos) = obj.props.find(k)
+        {
+            let p = obj.props.ents[pos].1;
+            if p.f & (W | crate::object::ACCESSOR) == W {
+                self.om(g).props.ents[pos].1.v = v;
+                return Ok(());
             }
         }
         if strict && !self.has_property(g, k)? {
@@ -3112,10 +3097,9 @@ impl Realm {
             && self.o(o).flags & crate::object::SPARSE == 0
             && a.dense.len() as u32 == a.len
             && self.array_iteration_pristine(o)
+            && let ObjKind::Array(a) = &self.o(o).kind
         {
-            if let ObjKind::Array(a) = &self.o(o).kind {
-                return Ok(a.dense.iter().map(|v| v.or_undef()).collect());
-            }
+            return Ok(a.dense.iter().map(|v| v.or_undef()).collect());
         }
         let (iter, next) = self.get_iterator(it)?;
         let mark = self.temps.len();
@@ -3239,10 +3223,9 @@ impl Realm {
             && self.o(o).flags & crate::object::SPARSE == 0
             && a.dense.len() as u32 == a.len
             && !a.dense.iter().any(|x| x.is_empty())
+            && let ObjKind::Array(a) = &self.o(o).kind
         {
-            if let ObjKind::Array(a) = &self.o(o).kind {
-                return Ok(a.dense.clone());
-            }
+            return Ok(a.dense.clone());
         }
         let lk = self.key(N::length);
         let l = self.get_p(o, lk, v)?;

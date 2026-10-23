@@ -115,13 +115,6 @@ impl Realm {
         }
     }
 
-    pub(crate) fn to_numeric(&mut self, v: Val) -> Res<Val> {
-        match v {
-            Val::Int(_) | Val::Num(_) => Ok(v),
-            _ => Ok(Val::num(self.to_num(v)?)),
-        }
-    }
-
     pub(crate) fn str_to_number(&mut self, s: StrId) -> f64 {
         let u = self.heap.units(s);
         // Fast path: short decimal integers.
@@ -222,7 +215,7 @@ impl Realm {
     pub(crate) fn to_key(&mut self, v: Val) -> Res<PropKey> {
         match v {
             Val::Int(i) if i >= 0 => Ok(PropKey::Idx(i as u32)),
-            Val::Num(n) if n >= 0.0 && n < 4294967295.0 && (n as u32) as f64 == n => {
+            Val::Num(n) if (0.0..4294967295.0).contains(&n) && (n as u32) as f64 == n => {
                 Ok(PropKey::Idx(n as u32))
             }
             Val::Str(s) => Ok(self.key_from_str(s)),
@@ -357,7 +350,7 @@ impl Realm {
         match h {
             Val::Obj(o) => match &self.o(o).kind {
                 ObjKind::Native(n) => {
-                    matches!(n.f, crate::object::NativeImpl::Builtin(f) if f as *const () as usize == crate::builtins::function::has_instance as *const () as usize)
+                    matches!(n.f, crate::object::NativeImpl::Builtin(f) if core::ptr::eq(f as *const (), crate::builtins::function::has_instance as *const ()))
                 }
                 _ => false,
             },
@@ -420,7 +413,7 @@ impl Realm {
                     if n.is_empty() {
                         String::from("function")
                     } else {
-                        alloc::format!("{n}")
+                        n
                     }
                 } else if let ObjKind::Array(_) = self.o(o).kind {
                     String::from("array")
@@ -438,7 +431,7 @@ pub(crate) fn f64_to_int32(n: f64) -> i32 {
     if !n.is_finite() || n == 0.0 {
         return 0;
     }
-    if n >= -2147483648.0 && n <= 2147483647.0 {
+    if (-2147483648.0..=2147483647.0).contains(&n) {
         return n as i32;
     }
     let t = crate::math::trunc(n);

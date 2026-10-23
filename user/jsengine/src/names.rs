@@ -3,7 +3,7 @@
 
 macro_rules! names {
     ($($id:ident = $s:expr),* $(,)?) => {
-        #[allow(non_camel_case_types, dead_code)]
+        #[allow(non_camel_case_types, dead_code, clippy::enum_variant_names)]
         #[derive(Clone, Copy, PartialEq, Eq, Debug)]
         #[repr(u16)]
         pub(crate) enum N { $($id),* }

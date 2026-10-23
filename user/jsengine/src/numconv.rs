@@ -150,23 +150,21 @@ pub(crate) fn number_to_radix(x: f64, radix: u32) -> String {
                 let d = crate::math::floor(frac) as usize;
                 fd.push(d.min(35) as u8);
                 frac -= d as f64;
-                if frac > 0.5 || (frac == 0.5 && (d & 1) == 1) {
-                    if frac + delta > 1.0 {
-                        // Round up, propagating carries.
-                        loop {
-                            match fd.last_mut() {
-                                None => break,
-                                Some(l) => {
-                                    if (*l as u32) + 1 < radix {
-                                        *l += 1;
-                                        break;
-                                    }
-                                    fd.pop();
+                if (frac > 0.5 || (frac == 0.5 && (d & 1) == 1)) && frac + delta > 1.0 {
+                    // Round up, propagating carries.
+                    loop {
+                        match fd.last_mut() {
+                            None => break,
+                            Some(l) => {
+                                if (*l as u32) + 1 < radix {
+                                    *l += 1;
+                                    break;
                                 }
+                                fd.pop();
                             }
                         }
-                        break;
                     }
+                    break;
                 }
                 if frac < delta || fd.len() > 1100 {
                     break;
@@ -204,13 +202,13 @@ fn exact_decimal(x: f64) -> (Vec<u8>, Vec<u8>) {
     let bits = x.to_bits();
     let exp = ((bits >> 52) & 0x7ff) as i32;
     let mut mant = bits & ((1u64 << 52) - 1);
-    let e2;
-    if exp == 0 {
-        e2 = -1074;
+
+    let e2 = if exp == 0 {
+        -1074
     } else {
         mant |= 1 << 52;
-        e2 = exp - 1075;
-    }
+        exp - 1075
+    };
     // value = mant * 2^e2. Big decimal arithmetic in base 1e9 limbs.
     let mut int_part: Vec<u32>; // little-endian base 1e9
     let mut frac_digits: Vec<u8> = Vec::new();
@@ -303,8 +301,8 @@ fn shift_out(a: &mut [u32], sh: u32) -> u32 {
     let bit = sh % 32;
     let mut val: u64 = 0;
     // The integer part after *10 is < 10, so it fits in the next few bits.
-    for i in limb..a.len() {
-        let mut part = a[i] as u64;
+    for (i, slot) in a.iter_mut().enumerate().skip(limb) {
+        let mut part = *slot as u64;
         if i == limb {
             part >>= bit;
         }
@@ -319,12 +317,12 @@ fn shift_out(a: &mut [u32], sh: u32) -> u32 {
         // Clear the bits.
         if i == limb {
             if bit == 0 {
-                a[i] = 0;
+                *slot = 0;
             } else {
-                a[i] &= (1u32 << bit) - 1;
+                *slot &= (1u32 << bit) - 1;
             }
         } else {
-            a[i] = 0;
+            *slot = 0;
         }
     }
     val as u32
@@ -734,7 +732,7 @@ mod tests {
         assert_eq!(parse_int(&u("0x10"), 0), 16.0);
         assert_eq!(parse_int(&u("-077"), 8), -63.0);
         assert!(parse_int(&u("z"), 10).is_nan());
-        assert_eq!(parse_float(&u("3.14abc")), 3.14);
+        assert_eq!(parse_float(&u("2.5abc")), 2.5);
         assert_eq!(parse_float(&u("-.5")), -0.5);
     }
 }

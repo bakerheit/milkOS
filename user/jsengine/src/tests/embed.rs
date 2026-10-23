@@ -593,3 +593,59 @@ fn wall_clock_interrupt() {
     let rep = r.report(&e);
     assert!(rep.uncatchable);
 }
+
+struct WindowClass;
+impl HostClass for WindowClass {
+    fn name(&self) -> &str {
+        "Window"
+    }
+    fn hooks(&self) -> u8 {
+        hooks::NAMED
+    }
+    fn get(
+        &self,
+        realm: &mut Realm,
+        _obj: Value,
+        _data: u64,
+        key: Key<'_>,
+    ) -> JsResult<Option<Value>> {
+        // Elements by id: only names that look like ids we know.
+        match key {
+            Key::Str("byId") => Ok(Some(realm.string("element"))),
+            _ => Ok(None),
+        }
+    }
+}
+
+#[test]
+fn weak_handles_global_host_and_locations() {
+    let mut r = Realm::new(Options::default());
+    let o = r.new_object();
+    let w = r.weak(o);
+    assert!(r.upgrade(&w).is_some());
+    r.release_temps();
+    r.gc();
+    assert!(r.upgrade(&w).is_none());
+    let class = r.register_class(WindowClass);
+    r.make_global_host(class, 0);
+    let v = r.eval("var x = 1; [typeof byId, byId, x, typeof Math, globalThis === this, 'byId' in globalThis]", "w.js").unwrap();
+    assert_eq!(
+        r.inspect(v),
+        "['string', 'element', 1, 'object', true, true]"
+    );
+    let where_ = Rc::new(RefCell::new(String::new()));
+    let w2 = where_.clone();
+    let log = r.new_function("log", 1, move |r, _, _| {
+        if let Some((f, l, c)) = r.current_location() {
+            *w2.borrow_mut() = alloc::format!("{f}:{l}:{c}");
+        }
+        let st = r.stack_trace();
+        assert!(st.contains("at caller (c.js:2:"), "{st}");
+        Ok(Value::UNDEFINED)
+    });
+    let g = r.global();
+    r.set(g, "log", log).unwrap();
+    r.eval("function caller() {\n  log('hi')\n}\ncaller()", "c.js")
+        .unwrap();
+    assert_eq!(where_.borrow().as_str(), "c.js:2:3");
+}

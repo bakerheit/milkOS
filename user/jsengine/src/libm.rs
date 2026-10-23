@@ -2,10 +2,19 @@
 //! log2, log10, log1p, expm1, pow, sin, cos, tan, asin, acos, atan, atan2, the hyperbolic
 //! functions, cbrt and hypot. No std in the guest, so no system libm.
 
+// fdlibm's constants and idioms, kept as written: its approximations of pi/2, ln 2 etc. are
+// the split values the algorithms need, and (x - x) / (x - x) makes a NaN.
 #![allow(
     clippy::excessive_precision,
     clippy::unreadable_literal,
-    clippy::many_single_char_names
+    clippy::many_single_char_names,
+    clippy::approx_constant,
+    clippy::eq_op,
+    clippy::needless_range_loop,
+    clippy::int_plus_one,
+    clippy::let_and_return,
+    clippy::nonminimal_bool,
+    clippy::explicit_counter_loop
 )]
 
 use crate::math::{floor, sqrt};
@@ -79,7 +88,7 @@ pub(crate) fn exp(x: f64) -> f64 {
         if x > 709.782712893383973096e+00 {
             return f64::INFINITY;
         }
-        if x < -708.39641853226410622 && x < -745.13321910194110842 {
+        if x < -745.13321910194110842 {
             return 0.0;
         }
     }

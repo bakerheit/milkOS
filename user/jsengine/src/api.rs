@@ -57,12 +57,22 @@
 //! - **Threads.** A realm is single-threaded (`!Send`). Parsing and compiling recurse with the
 //!   source's nesting (bounded); give the thread at least 1 MB of stack (the Browser's main
 //!   thread has 8 MB).
-//! - **Not supported (yet):** ES modules (`import`/`export`; a script using them gets a
-//!   SyntaxError), `with`, direct `eval` seeing local variables (every `eval` is global),
-//!   BigInt, Proxy, typed arrays, Intl, private class members (`#x`), SharedArrayBuffer and
-//!   Atomics.
+//! - **Not supported (yet):** ES modules (`import`/`export`, `import()`; a script using
+//!   them gets a SyntaxError), `with`, direct `eval` seeing local variables (every `eval`
+//!   is global), BigInt, Proxy, typed arrays / ArrayBuffer / DataView, Intl (the
+//!   `toLocale*String` methods format en-US style), private class members (`#x`),
+//!   String.prototype.normalize (returns the string as is), WeakRef /
+//!   FinalizationRegistry, SharedArrayBuffer and Atomics. Date has a fixed local offset (no
+//!   daylight-saving rules).
 //!
 //! # CHANGES
+//! - The engine behind the API is real now (it was a stub that threw on `eval`).
+//! - Added [`Realm::set_stack_limit`] (the native stack an entry may use; default 768 KB).
+//! - Added [`WeakValue`], [`Realm::weak`] and [`Realm::upgrade`] (wrapper caches that let
+//!   wrappers be collected), [`Realm::make_global_host`] (a host-object `window`),
+//!   [`Realm::current_location`] and [`Realm::stack_trace`] (for a console).
+//! - Documented that [`Limits::max_steps`] also counts work builtins do (string copies,
+//!   array elements visited), so it bounds CPU time, not only loop iterations.
 //! - First version.
 
 use alloc::boxed::Box;
@@ -192,8 +202,9 @@ impl core::fmt::Display for ErrorReport {
 pub struct Limits {
     /// The heap budget in bytes (objects, strings, the VM stack). Default 64 MB.
     pub max_heap_bytes: usize,
-    /// VM steps allowed per entry from the host (one eval, call or job). Default 0 (none:
-    /// use the interrupt callback for wall-clock limits).
+    /// VM steps allowed per entry from the host (one eval, call or job): loop iterations,
+    /// calls, and builtins' work (copied string units, visited elements) in proportion.
+    /// Default 0 (none: use the interrupt callback for wall-clock limits).
     pub max_steps: u64,
     /// Nested calls (script and native) before a RangeError. Default 1000.
     pub max_call_depth: u32,
@@ -391,6 +402,12 @@ pub struct ClassId(pub(crate) u32);
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Pinned(pub(crate) u32);
 
+/// A handle that doesn't keep its value alive (for caches of wrappers): see
+/// [`Realm::weak`] and [`Realm::upgrade`]. Copy; never dangles (a collected value reads as
+/// None, even if its slot was reused).
+#[derive(Clone, Copy, Debug)]
+pub struct WeakValue(pub(crate) Val);
+
 /// A mark in the temporaries, for [`Realm::release_temps_to`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TempMark(pub(crate) usize);
@@ -479,6 +496,31 @@ impl Realm {
     /// The global object (`globalThis`; the Browser makes it the `window`).
     pub fn global(&self) -> Value {
         Value(Val::Obj(self.global))
+    }
+
+    /// Makes the global object a host object of `class` (for live named properties on
+    /// `window`, like elements by id). Its ordinary properties (the builtins, globals) stay.
+    pub fn make_global_host(&mut self, class: ClassId, data: u64) {
+        let g = self.global;
+        self.om(g).kind = crate::object::ObjKind::Host {
+            class: class.0,
+            data,
+        };
+    }
+
+    /// Inside a native: the innermost script position (file, line, column) — where
+    /// `console.log` was called from, say. None when no script is running.
+    pub fn current_location(&mut self) -> Option<(String, u32, u32)> {
+        self.stack_frames(1)
+            .into_iter()
+            .next()
+            .map(|(_, f, l, c)| (f, l, c))
+    }
+
+    /// Inside a native: the script stack as "    at f (file:line:col)" lines (for
+    /// `console.trace`).
+    pub fn stack_trace(&mut self) -> String {
+        self.current_site().stack
     }
 
     // ---- running script ----
@@ -629,11 +671,11 @@ impl Realm {
     /// ToString (may call `toString`/`valueOf`; a symbol throws).
     pub fn to_string(&mut self, v: Value) -> JsResult<String> {
         let v = self.check_val(v.0);
-        let r = self.entry(|r| {
+
+        self.entry(|r| {
             let s = r.to_str(v)?;
             Ok(crate::string::to_rust(r.heap.units(s)))
-        });
-        r
+        })
     }
 
     /// ToNumber.
@@ -1167,6 +1209,20 @@ impl Realm {
             && slot.take().is_some()
         {
             self.free_pins.push(p.0);
+        }
+    }
+
+    /// A weak handle to `v`: it doesn't keep `v` alive.
+    pub fn weak(&mut self, v: Value) -> WeakValue {
+        WeakValue(self.check_val(v.0))
+    }
+
+    /// The value of a weak handle, if it is still alive (then it is a temporary again).
+    pub fn upgrade(&mut self, w: &WeakValue) -> Option<Value> {
+        match w.0 {
+            Val::Obj(o) if !self.heap.obj_valid(o) => None,
+            Val::Str(s) if !self.heap.str_valid(s) => None,
+            v => Some(self.out_val(v)),
         }
     }
 

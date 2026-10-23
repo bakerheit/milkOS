@@ -274,8 +274,7 @@ impl Realm {
                 let len = self.length_of(val)?;
                 (0..len as u32).map(PropKey::Idx).collect()
             } else {
-                let ks = self.own_keys_p(o, true, false, true)?;
-                ks
+                self.own_keys_p(o, true, false, true)?
             };
             for k in keys {
                 let nv = self.internalize(o, k, reviver, depth + 1)?;

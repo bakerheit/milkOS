@@ -484,10 +484,9 @@ impl<'a> Parser<'a> {
                 in_class = true;
             } else if c == b'(' as u16 {
                 let next = self.s.get(i + 1).copied();
-                if next != Some(b'?' as u16) {
-                    n += 1;
-                } else if self.s.get(i + 2) == Some(&(b'<' as u16))
-                    && !matches!(self.s.get(i + 3), Some(&0x3d) | Some(&0x21))
+                if next != Some(b'?' as u16)
+                    || (self.s.get(i + 2) == Some(&(b'<' as u16))
+                        && !matches!(self.s.get(i + 3), Some(&0x3d) | Some(&0x21)))
                 {
                     n += 1;
                 }
@@ -806,7 +805,7 @@ fn prop_has(p: Prop, c: u32) -> bool {
         Prop::Number => ch.is_numeric(),
         Prop::Digit => {
             ch.is_ascii_digit()
-                || (ch.is_numeric() && ch.to_digit(10).is_some())
+                || (ch.is_numeric() && ch.is_ascii_digit())
                 || matches!(c, 0x0660..=0x0669 | 0x06F0..=0x06F9 | 0x0966..=0x096F | 0xFF10..=0xFF19)
         }
         Prop::Punct => {

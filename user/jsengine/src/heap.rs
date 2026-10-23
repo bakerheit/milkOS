@@ -248,10 +248,6 @@ impl Heap {
         }
     }
 
-    pub fn is_flat(&self, id: StrId) -> bool {
-        matches!(self.strs[id.idx as usize].s, JsStr::Flat(_))
-    }
-
     pub fn flatten(&mut self, id: StrId) {
         let len = match &self.strs[id.idx as usize].s {
             JsStr::Flat(_) => return,
@@ -396,11 +392,6 @@ impl Heap {
                 id
             }
         }
-    }
-
-    /// Looks up an interned string without creating one.
-    pub fn find_interned(&self, units: &[u16]) -> Option<StrId> {
-        self.intern_find(units, hash_units(units)).ok()
     }
 
     // ---- symbols ----

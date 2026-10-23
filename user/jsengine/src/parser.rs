@@ -1512,32 +1512,31 @@ impl<'a> Parser<'a> {
         // async arrow: `async x => ...` / `async (..) => ...`
         if self.is_name(kw::ASYNC) {
             let p = self.peek()?;
-            if !p.nl_before {
-                if let Tok::Name(a, _) = p.tok
-                    && a != kw::FUNCTION
-                {
-                    // async x => body
-                    let save_pos = self.lx.state();
-                    let save_tok = self.tok.clone();
-                    let save_prev = self.prev_end;
-                    self.advance()?;
-                    if let Some(param) = self.ident_name() {
-                        let ppos = self.tok.start;
-                        let p2 = self.peek()?;
-                        if matches!(p2.tok, Tok::P(P::Arrow)) && !p2.nl_before {
-                            self.advance()?;
-                            self.advance()?; // =>
-                            let params = alloc::vec![Param {
-                                pat: Pat::Ident(param, ppos),
-                                default: None
-                            }];
-                            return self.parse_arrow_body(params, None, true, pos);
-                        }
+            if !p.nl_before
+                && let Tok::Name(a, _) = p.tok
+                && a != kw::FUNCTION
+            {
+                // async x => body
+                let save_pos = self.lx.state();
+                let save_tok = self.tok.clone();
+                let save_prev = self.prev_end;
+                self.advance()?;
+                if let Some(param) = self.ident_name() {
+                    let ppos = self.tok.start;
+                    let p2 = self.peek()?;
+                    if matches!(p2.tok, Tok::P(P::Arrow)) && !p2.nl_before {
+                        self.advance()?;
+                        self.advance()?; // =>
+                        let params = alloc::vec![Param {
+                            pat: Pat::Ident(param, ppos),
+                            default: None
+                        }];
+                        return self.parse_arrow_body(params, None, true, pos);
                     }
-                    self.lx.set_state(save_pos);
-                    self.tok = save_tok;
-                    self.prev_end = save_prev;
                 }
+                self.lx.set_state(save_pos);
+                self.tok = save_tok;
+                self.prev_end = save_prev;
             }
         }
         let start_tok_is_paren = self.is(P::LParen);
@@ -1779,7 +1778,7 @@ impl<'a> Parser<'a> {
                 Err(l) => {
                     let mixes = |e: &Expr, nullish: bool| match &e.k {
                         ExprKind::Logic(LogicOp::Nullish, ..) => !nullish,
-                        ExprKind::Logic(_, ..) => nullish,
+                        ExprKind::Logic(..) => nullish,
                         _ => false,
                     };
                     let nullish = l == LogicOp::Nullish;

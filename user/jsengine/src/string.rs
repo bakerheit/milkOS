@@ -83,11 +83,6 @@ pub(crate) fn to_rust(u: &[u16]) -> String {
     out
 }
 
-/// Appends UTF-16 units of `s`.
-pub(crate) fn push_str(v: &mut Vec<u16>, s: &str) {
-    v.extend(s.encode_utf16());
-}
-
 pub(crate) fn eq_str(u: &[u16], s: &str) -> bool {
     let mut it = s.encode_utf16();
     for &c in u {

@@ -78,17 +78,12 @@ pub(crate) fn run_file(name: &str, src: &str, stress: u32) -> (bool, String, usi
             0,
         );
     }
-    for _ in 0..100 {
-        match r.run_jobs() {
-            Ok(()) => break,
-            Err(e) => {
-                return (
-                    false,
-                    alloc::format!("{name}: job threw {}", r.report(&e)),
-                    0,
-                );
-            }
-        }
+    if let Err(e) = r.run_jobs() {
+        return (
+            false,
+            alloc::format!("{name}: job threw {}", r.report(&e)),
+            0,
+        );
     }
     let out = match r.eval("__finish()", "finish.js") {
         Ok(v) => r.get_string(v).unwrap_or_default(),

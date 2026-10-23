@@ -702,7 +702,7 @@ fn seed() -> u64 {
 }
 
 fn fuzz_with(kind: &str, make: &dyn Fn(&mut Rng) -> String) {
-    let mut rng = Rng(seed() ^ kind.len() as u64 * 0x9E37_79B9);
+    let mut rng = Rng(seed() ^ (kind.len() as u64 * 0x9E37_79B9));
     for i in 0..iters() {
         let src = make(&mut rng);
         let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_case(&src)));
@@ -822,7 +822,7 @@ fn fuzz_repro() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let mut rng = Rng(seed() ^ "program".len() as u64 * 0x9E37_79B9);
+    let mut rng = Rng(seed() ^ ("program".len() as u64 * 0x9E37_79B9));
     let mut src = String::new();
     for _ in 0..=idx {
         src = program(&mut rng);

@@ -150,12 +150,6 @@ impl MapData {
     }
 }
 
-impl WeakMapData {
-    pub fn index_get(&self, k: ObjId) -> Option<Val> {
-        self.get(k)
-    }
-}
-
 impl Realm {
     /// The canonical form of a key.
     fn canon_key(&mut self, k: Val) -> Val {

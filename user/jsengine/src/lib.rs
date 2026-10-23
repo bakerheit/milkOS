@@ -9,8 +9,6 @@
 
 #![cfg_attr(not(test), no_std)]
 #![allow(clippy::wrong_self_convention)]
-// While the engine is being built behind the API stub.
-#![allow(dead_code)]
 
 extern crate alloc;
 

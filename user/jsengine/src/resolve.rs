@@ -74,9 +74,6 @@ impl Scope {
     pub fn find(&self, a: Atom) -> Option<usize> {
         self.bindings.iter().position(|b| b.name == a)
     }
-    pub fn has_env(&self) -> bool {
-        self.bindings.iter().any(|b| b.captured)
-    }
 }
 
 pub(crate) struct ResolveError {
@@ -290,9 +287,7 @@ impl<'a> Resolver<'a> {
                 {
                     let sc = &self.scopes[func as usize];
                     let clash = sc.find(n).is_some_and(|i| sc.bindings[i].kind.is_lexical());
-                    if !clash && sc.kind != SK::Script {
-                        self.declare(func, n, BK::Var, st.pos)?;
-                    } else if !clash {
+                    if !clash {
                         self.declare(func, n, BK::Var, st.pos)?;
                     }
                 }

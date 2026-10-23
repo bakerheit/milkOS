@@ -554,10 +554,7 @@ impl<'a> Lexer<'a> {
         let mut s = String::new();
         let mut escaped = false;
         let mut first = true;
-        loop {
-            let Some((c, n)) = self.peek_char_at(self.pos) else {
-                break;
-            };
+        while let Some((c, n)) = self.peek_char_at(self.pos) {
             if c == '\\' {
                 if self.byte(1) != b'u' {
                     return self.err("invalid escape in identifier", self.pos);
@@ -639,7 +636,7 @@ impl<'a> Lexer<'a> {
             let mut n = 0;
             loop {
                 let c = self.byte(0);
-                if c == b'_' && n > 0 && (self.byte(1) as char).to_digit(radix).is_some() {
+                if c == b'_' && n > 0 && (self.byte(1) as char).is_digit(radix) {
                     self.pos += 1;
                     continue;
                 }

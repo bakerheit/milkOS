@@ -24,3 +24,21 @@ fn smoke() {
     assert_eq!(run("function f(a, b) { return a + b } f(2, 3)"), "5");
     assert_eq!(run("[1,2,3].map(x => x * 2).join(',')"), "2,4,6");
 }
+
+#[test]
+#[ignore]
+fn sizes() {
+    std::println!(
+        "Val {} Obj {} ObjSlot {} ObjKind {} PropMap {} Prop {} PropKey {} Frame {} Op {} StrSlot {}",
+        core::mem::size_of::<crate::value::Val>(),
+        core::mem::size_of::<crate::object::Obj>(),
+        core::mem::size_of::<crate::heap::ObjSlot>(),
+        core::mem::size_of::<crate::object::ObjKind>(),
+        core::mem::size_of::<crate::object::PropMap>(),
+        core::mem::size_of::<crate::object::Prop>(),
+        core::mem::size_of::<crate::object::PropKey>(),
+        core::mem::size_of::<crate::interp::Frame>(),
+        core::mem::size_of::<crate::bytecode::Op>(),
+        core::mem::size_of::<crate::heap::StrSlot>(),
+    );
+}

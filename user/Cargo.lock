@@ -51,6 +51,7 @@ dependencies = [
 name = "browserkit"
 version = "0.0.1"
 dependencies = [
+ "fontkit",
  "imgdec",
  "milkweb",
  "tls",

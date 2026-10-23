@@ -1,33 +1,33 @@
 border 18,24 516x341 [0, 2, 2, 2]
 rect 18,24 12x2 #ff737373
 rect 86,24 448x2 #ff737373
-text 34,31 w48 SansSerif16 400 #ff000000 "Sign in"
-text 32,61 w78 SansSerif16 400 #ff000000 "User name"
-rrect 32,68 488x22 r2 #ffffffff
+text 34,31 w48 SansSerif16 400 #ff3a2e28 "Sign in"
+text 32,61 w78 SansSerif16 400 #ff3a2e28 "User name"
+rrect 32,68 488x22 r2 #fffffdf8
 border 32,68 488x22 [2, 2, 2, 2]
 control 0 36,71 480x16
-text 32,110 w70 SansSerif16 400 #ff000000 "Password"
-rrect 32,117 488x22 r2 #ffffffff
+text 32,110 w70 SansSerif16 400 #ff3a2e28 "Password"
+rrect 32,117 488x22 r2 #fffffdf8
 border 32,117 488x22 [2, 2, 2, 2]
 control 1 36,120 480x16
-rrect 36,142 15x15 r2 #ffffffff
+rrect 36,142 15x15 r2 #fffffdf8
 border 36,142 15x15 [1, 1, 1, 1]
 control 2 37,143 13x13
-rrect 179,142 15x15 r7 #ffffffff
+rrect 179,142 15x15 r7 #fffffdf8
 border 179,142 15x15 [1, 1, 1, 1]
 control 3 180,143 13x13
-rrect 228,142 15x15 r7 #ffffffff
+rrect 228,142 15x15 r7 #fffffdf8
 border 228,142 15x15 [1, 1, 1, 1]
 control 4 229,143 13x13
-text 54,160 w109 SansSerif16 400 #ff000000 " Remember me"
-text 197,160 w15 SansSerif16 400 #ff000000 " A"
-text 246,160 w15 SansSerif16 400 #ff000000 " B"
-text 32,185 w32 SansSerif16 400 #ff000000 "Plan"
+text 54,160 w109 SansSerif16 400 #ff3a2e28 " Remember me"
+text 197,160 w15 SansSerif16 400 #ff3a2e28 " A"
+text 246,160 w15 SansSerif16 400 #ff3a2e28 " B"
+text 32,185 w32 SansSerif16 400 #ff3a2e28 "Plan"
 rrect 32,192 488x20 r3 #ffefefef
 border 32,192 488x20 [1, 1, 1, 1]
 control 5 39,194 474x16
-text 32,232 w42 SansSerif16 400 #ff000000 "Notes"
-rrect 32,239 488x54 r2 #ffffffff
+text 32,232 w42 SansSerif16 400 #ff3a2e28 "Notes"
+rrect 32,239 488x54 r2 #fffffdf8
 border 32,239 488x54 [2, 2, 2, 2]
 control 6 36,242 480x48
 rrect 32,309 69x28 r4 #ff2b6cb0
@@ -40,12 +40,12 @@ control 8 112,314 17x16
 rrect 140,312 48x20 r3 #ffefefef
 border 140,312 48x20 [1, 1, 1, 1]
 control 9 147,314 34x16
-text 101,326 w4 SansSerif16 400 #ff000000 " "
-text 136,326 w4 SansSerif16 400 #ff000000 " "
-rrect 16,377 155x22 r2 #ffffffff
+text 101,326 w4 SansSerif16 400 #ff3a2e28 " "
+text 136,326 w4 SansSerif16 400 #ff3a2e28 " "
+rrect 16,377 155x22 r2 #fffffdf8
 border 16,377 155x22 [2, 2, 2, 2]
 control 10 20,380 147x16
 rrect 175,378 55x20 r3 #ffefefef
 border 175,378 55x20 [1, 1, 1, 1]
 control 11 182,380 41x16
-text 171,392 w4 SansSerif16 400 #ff000000 " "
+text 171,392 w4 SansSerif16 400 #ff3a2e28 " "

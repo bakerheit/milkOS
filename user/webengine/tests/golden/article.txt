@@ -2,7 +2,7 @@ rect 0,0 800x972 #ffffffff
 rect 0,0 800x41 #fff8f9fa
 border 0,0 800x41 [0, 0, 1, 0]
 text 16,26 w78 Serif20 700 #ff202122 "Wikimilk"
-rrect 110,9 408x22 r2 #ffffffff
+rrect 110,9 408x22 r2 #fffffdf8
 border 110,9 408x22 [2, 2, 2, 2]
 control 0 114,12 400x16
 text 534,25 w43 SansSerif16 400 #ff3366cc "Log in"

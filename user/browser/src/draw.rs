@@ -10,45 +10,38 @@ use alloc::vec::Vec;
 use appkit::Rect as ARect;
 use appkit::widgets;
 use browserkit::engine::{Color, ControlId, ControlKind, ImageId, Rect};
-use browserkit::paint::{self, Glyphs, Painter, Surface};
+use browserkit::paint::{self, Painter, Surface};
 use browserkit::{download, font};
-use gui::Window;
+use gui::{Window, text};
 use imgdec::Image;
 
+use crate::sysfont::SysText;
 use crate::tab::PageKind;
 use crate::web::Doc;
 use crate::*;
+use browserkit::font::Fonts;
 
 const RADIUS: i32 = 6;
 
-/// Characters of Unifont that fit in `px`.
-fn fit_chars(px: i32) -> usize {
-    (px / 8).max(0) as usize
+/// The chrome's text: the desktop's UI font (it follows Settings > Appearance > Font).
+fn ui() -> text::Font {
+    text::Font::body(false)
 }
 
-/// `s` cut to `n` characters with "..." at the end.
-fn ellipsize(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        return String::from(s);
-    }
-    if n <= 3 {
-        return s.chars().take(n).collect();
-    }
-    let mut o: String = s.chars().take(n - 3).collect();
-    o.push_str("...");
-    o
+/// Width of `s` in the UI font.
+fn wid(s: &str) -> i32 {
+    ui().width(s)
 }
 
-/// The end of `s` that fits in `n` characters ("..." in front).
-fn tail(s: &str, n: usize) -> String {
-    let c = s.chars().count();
-    if c <= n {
-        return String::from(s);
-    }
-    let skip = c - n + 3;
-    let mut o = String::from("...");
-    o.extend(s.chars().skip(skip));
-    o
+/// `s` cut to `max` pixels with "..." at the end.
+fn ellipsize(s: &str, max: i32) -> String {
+    ui().truncate(s, max.max(0))
+}
+
+/// UI text drawn only inside `clip` (x, y, w, h).
+fn clipped(win: &mut Window, clip: (i32, i32, i32, i32), x: i32, y: i32, s: &str, c: Color) -> i32 {
+    let stride = win.w as usize;
+    ui().draw(win.pixels(), stride, clip, x, y, s, c)
 }
 
 fn hline(w: &mut Window, x: i32, y: i32, len: i32, c: Color) {
@@ -61,18 +54,57 @@ struct PagePainter<'a> {
     images: &'a BTreeMap<String, ImgState>,
     focus: Option<usize>,
     caret: usize,
+    sys: SysText,
 }
 
 const F_FOCUS: Color = 0xEBB650;
 const F_HINT: Color = 0x9C8A76;
 const F_CHECK: Color = 0x3A2E28;
 
+/// The longest start of `s` that fits in `max` pixels (with "..." when cut).
+fn fit_text(fonts: Fonts, f: &browserkit::engine::Font, s: &str, max: i32) -> String {
+    if fonts.width(f, s) <= max {
+        return String::from(s);
+    }
+    let mut out = String::new();
+    for ch in s.chars() {
+        out.push(ch);
+        if fonts.width(f, &out) + fonts.width(f, "...") > max {
+            out.pop();
+            break;
+        }
+    }
+    out.push_str("...");
+    out
+}
+
+/// `s` broken into lines no wider than `max` (at characters: a textarea).
+fn wrap_chars(fonts: Fonts, f: &browserkit::engine::Font, s: &str, max: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for para in s.split('\n') {
+        let mut cur = String::new();
+        for ch in para.chars() {
+            cur.push(ch);
+            if fonts.width(f, &cur) > max && cur.chars().count() > 1 {
+                cur.pop();
+                lines.push(core::mem::take(&mut cur));
+                cur.push(ch);
+            }
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
 impl Painter for PagePainter<'_> {
     fn image(&self, id: ImageId) -> Option<&Image> {
-        match self.images.get(self.doc.image_url(id)) {
-            Some(ImgState::Ready(i)) => Some(i),
-            _ => None,
-        }
+        self.images
+            .get(self.doc.image_url(id))
+            .and_then(ImgState::picture)
+    }
+
+    fn text(&self) -> Option<&dyn browserkit::font::Text> {
+        Some(&self.sys)
     }
 
     /// Draw what goes inside a control's content box: the engine painted its background and
@@ -82,21 +114,18 @@ impl Painter for PagePainter<'_> {
         let Some(c) = self.doc.control(i) else {
             return;
         };
-        let focused = self.focus == Some(i);
-        let sc = font::scale(&c.font);
-        let g = Glyphs {
-            scale: sc,
-            bold: c.font.weight >= 600,
-            italic: c.font.italic,
+        let fonts = Fonts {
+            text: Some(&self.sys),
         };
+        let f = c.font;
+        let focused = self.focus == Some(i);
+        let line = font::CELL_H * font::scale(&f);
         let ink = if c.color >> 24 == 0 {
             F_CHECK
         } else {
             c.color & 0xFF_FFFF
         };
         let ink = if c.disabled { F_HINT } else { ink };
-        let cell = font::CELL_W * sc;
-        let line = font::CELL_H * sc;
         if focused {
             // The focus ring, just outside the box.
             let o = Rect::new(r.x - 3, r.y - 3, r.w + 6, r.h + 6);
@@ -107,56 +136,40 @@ impl Painter for PagePainter<'_> {
         match c.kind {
             ControlKind::Text | ControlKind::Password => {
                 let shown: String = if c.kind == ControlKind::Password {
-                    c.value.chars().map(|_| '*').collect()
+                    c.value.chars().map(|_| '\u{2022}').collect()
                 } else {
                     c.value.clone()
                 };
-                let cols = (r.w / cell).max(1) as usize;
-                let n = shown.chars().count();
-                let caret = self.caret.min(n);
-                // Scroll the text so the caret shows.
-                let first = if focused {
-                    caret.saturating_sub(cols.saturating_sub(1))
-                } else {
-                    0
-                };
-                let vis: String = shown.chars().skip(first).take(cols + 1).collect();
+                let caret = self.caret.min(shown.chars().count());
+                let before: String = shown.chars().take(caret).collect();
+                let cx = fonts.width(&f, &before);
+                // Scroll the text left so the caret shows.
+                let off = if focused { (cx - r.w + 3).max(0) } else { 0 };
                 let ty = r.y + (r.h - line) / 2;
                 if shown.is_empty() && !c.placeholder.is_empty() {
-                    s.glyphs(r.x, ty, &c.placeholder, g, F_HINT);
+                    s.text_at(fonts, &f, r.x, ty, &c.placeholder, F_HINT);
                 } else {
-                    s.glyphs(r.x, ty, &vis, g, ink);
+                    s.text_at(fonts, &f, r.x - off, ty, &shown, ink);
                 }
                 if focused {
-                    let cx = r.x + (caret - first) as i32 * cell;
-                    s.fill(Rect::new(cx, ty, 2, line), ink);
+                    s.fill(Rect::new(r.x + cx - off, ty, 2, line), ink);
                 }
             }
             ControlKind::TextArea => {
-                let cols = (r.w / cell).max(1) as usize;
-                let mut lines: Vec<String> = Vec::new();
-                for l in c.value.split('\n') {
-                    let ch: Vec<char> = l.chars().collect();
-                    if ch.is_empty() {
-                        lines.push(String::new());
-                    }
-                    for part in ch.chunks(cols) {
-                        lines.push(part.iter().collect());
-                    }
-                }
+                let lines = wrap_chars(fonts, &f, &c.value, r.w - 4);
                 let step = line + 2;
                 let rows = (r.h / step).max(1) as usize;
                 let first = lines.len().saturating_sub(rows);
                 for (k, l) in lines.iter().skip(first).enumerate() {
-                    s.glyphs(r.x, r.y + k as i32 * step, l, g, ink);
+                    s.text_at(fonts, &f, r.x, r.y + k as i32 * step, l, ink);
                 }
                 if c.value.is_empty() && !c.placeholder.is_empty() {
-                    s.glyphs(r.x, r.y, &c.placeholder, g, F_HINT);
+                    s.text_at(fonts, &f, r.x, r.y, &c.placeholder, F_HINT);
                 }
                 if focused {
-                    let last = lines.last().map_or(0, |l| l.chars().count()) as i32;
+                    let last = lines.last().map_or(0, |l| fonts.width(&f, l));
                     let row = (lines.len().saturating_sub(first) as i32 - 1).max(0);
-                    s.fill(Rect::new(r.x + last * cell, r.y + row * step, 2, line), ink);
+                    s.fill(Rect::new(r.x + last, r.y + row * step, 2, line), ink);
                 }
             }
             ControlKind::Checkbox => {
@@ -188,8 +201,8 @@ impl Painter for PagePainter<'_> {
                     .find(|o| o.selected)
                     .or(c.options.first())
                     .map_or("", |o| o.label.as_str());
-                let label = ellipsize(label, ((r.w - 16) / cell).max(1) as usize);
-                s.glyphs(r.x, r.y + (r.h - line) / 2, &label, g, ink);
+                let label = fit_text(fonts, &f, label, r.w - 16);
+                s.text_at(fonts, &f, r.x, r.y + (r.h - line) / 2, &label, ink);
                 // A small down arrow at the right.
                 let (ax, ay) = (r.x + r.w - 10, r.y + r.h / 2 - 2);
                 for k in 0..4 {
@@ -208,8 +221,15 @@ impl Painter for PagePainter<'_> {
                     } else {
                         c.label.as_str()
                     };
-                    let tw = font::cells(label) * cell;
-                    s.glyphs(r.x + (r.w - tw) / 2, r.y + (r.h - line) / 2, label, g, ink);
+                    let tw = fonts.width(&f, label);
+                    s.text_at(
+                        fonts,
+                        &f,
+                        r.x + (r.w - tw) / 2,
+                        r.y + (r.h - line) / 2,
+                        label,
+                        ink,
+                    );
                 }
             }
         }
@@ -222,7 +242,11 @@ impl App {
     fn layout_current(&mut self) {
         let (lw, lh) = self.page_view(self.tab());
         let t = &self.tabs[self.cur];
-        if t.page.laid_w == lw && t.page.doc.laid.is_some() {
+        if t.page.laid_w == lw
+            && t.page.doc.laid.is_some()
+            && t.page.laid_font == self.sys.ui
+            && t.page.laid_dark == self.th.dark
+        {
             // A link to a place on this page: no new layout, just the scroll.
             if t.anchor.is_some() {
                 let max = self.max_scroll(self.tab());
@@ -237,9 +261,12 @@ impl App {
         // few rounds until the page has what it can have now.
         let cur = self.cur;
         for _ in 0..4 {
+            let (sys, dark) = (self.sys, self.th.dark);
             let t = &mut self.tabs[cur];
-            t.page.doc.layout(lw, lh);
+            t.page.doc.layout(lw, lh, dark, Fonts { text: Some(&sys) });
             t.page.laid_w = lw;
+            t.page.laid_font = sys.ui;
+            t.page.laid_dark = dark;
             self.feed(cur);
             if self.tabs[cur].page.laid_w == lw {
                 break;
@@ -267,6 +294,8 @@ impl App {
     }
 
     pub fn draw(&mut self) {
+        // The desktop's font, once a frame (Settings may have changed it).
+        self.sys = SysText::now();
         self.layout_current();
         self.hits.clear();
         let th = self.th;
@@ -288,11 +317,11 @@ impl App {
             } else {
                 String::new()
             };
-            let room = fit_chars(w - 24 - right.len() as i32 * 8 - 16);
+            let room = w - 24 - wid(&right) - 16;
             self.win.text(10, sy + 3, &ellipsize(&text, room), th.cocoa);
             if !right.is_empty() {
                 self.win
-                    .text(w - 10 - right.len() as i32 * 8, sy + 3, &right, th.cocoa);
+                    .text(w - 10 - wid(&right), sy + 3, &right, th.cocoa);
             }
         }
         self.draw_popup(w, h);
@@ -372,6 +401,7 @@ impl App {
             images: &self.images,
             focus: t.focus,
             caret: t.caret,
+            sys: self.sys,
         };
         let mut marks: Vec<Rect> = Vec::new();
         let mut current = None;
@@ -390,7 +420,6 @@ impl App {
             &mut p,
             &marks,
             current,
-            self.link,
         );
         // A scroll bar when the page is longer than the view.
         let total = t.page.doc.height().max(1);
@@ -453,7 +482,7 @@ impl App {
                 widgets::padlock(&mut self.win, tx, TAB_H / 2 - 4, th.good);
                 tx += 14;
             }
-            let room = fit_chars(x + tw - 26 - tx);
+            let room = x + tw - 26 - tx;
             let title = ellipsize(t.title(), room);
             let c = if cur { th.espresso } else { th.cocoa };
             if cur {
@@ -551,26 +580,33 @@ impl App {
                 tx += 18;
             } else if t.page.kind == PageKind::Web && t.load.is_none() {
                 // Plain http: an open circle and the words.
-                self.win.text(tx, by + 6, "http", th.latte);
+                self.win.text(tx, by + 6, "http", th.cocoa);
                 self.hits.add(ARect::new(ax, by, 46, 28), ID_PADLOCK);
                 tx += 40;
             }
         }
         self.hits
             .add(ARect::new(tx, by, aw - (tx - ax) - 30, 28), ID_ADDRESS);
-        let room = fit_chars(ax + aw - 36 - tx);
+        let room = ax + aw - 36 - tx;
         match &self.editing {
             Some(f) => {
-                let n = f.text.chars().count();
-                let first = f.cur.saturating_sub(room);
-                let vis: String = f.text.chars().skip(first).take(room).collect();
-                if self.select_all && n > 0 {
-                    let wsel = (vis.chars().count() as i32 * 8).min(room as i32 * 8);
+                // Scroll the text so the caret shows.
+                let cx = ui().prefix_width(&f.text, f.cur);
+                let off = (cx - room + 2).max(0);
+                if self.select_all && !f.text.is_empty() {
+                    let wsel = wid(&f.text).min(room);
                     self.win.fill(tx - 1, by + 5, wsel + 2, 18, th.sand);
                 }
-                self.win.text(tx, by + 6, &vis, th.espresso);
-                let cx = tx + (f.cur - first) as i32 * 8;
-                self.win.fill(cx, by + 6, 2, 16, th.espresso);
+                let text = f.text.clone();
+                clipped(
+                    &mut self.win,
+                    (tx, by, room, 28),
+                    tx - off,
+                    by + 6,
+                    &text,
+                    th.espresso,
+                );
+                self.win.fill(tx + cx - off, by + 6, 2, 16, th.espresso);
             }
             None => {
                 let shown = match (&t.load, t.page.kind) {
@@ -592,7 +628,12 @@ impl App {
                         th.latte,
                     );
                 } else {
-                    self.win.text(tx, by + 6, &tail(&shown, room), th.espresso);
+                    let vis = if wid(&shown) > room {
+                        format!("...{}", ui().tail(&shown, room - wid("...")))
+                    } else {
+                        shown
+                    };
+                    self.win.text(tx, by + 6, &vis, th.espresso);
                 }
             }
         }
@@ -629,17 +670,19 @@ impl App {
         self.hits
             .add(ARect::new(fx, sy, fw, STATUS_H), ID_FIND_FIELD);
         if let Some(f) = &self.finding {
-            let room = fit_chars(fw - 16);
-            let first = f.cur.saturating_sub(room);
-            let vis: String = f.text.chars().skip(first).take(room).collect();
-            self.win.text(fx + 8, sy + 3, &vis, th.espresso);
-            self.win.fill(
-                fx + 8 + (f.cur - first) as i32 * 8,
-                sy + 4,
-                2,
-                15,
+            let room = fw - 16;
+            let cx = ui().prefix_width(&f.text, f.cur);
+            let off = (cx - room + 2).max(0);
+            let text = f.text.clone();
+            clipped(
+                &mut self.win,
+                (fx + 6, sy, room + 4, STATUS_H),
+                fx + 8 - off,
+                sy + 3,
+                &text,
                 th.espresso,
             );
+            self.win.fill(fx + 8 + cx - off, sy + 4, 2, 15, th.espresso);
         }
         let t = self.tab();
         let q = self
@@ -655,13 +698,13 @@ impl App {
         };
         let mut x = fx + fw + 12;
         self.win.text(x, sy + 3, &msg, th.cocoa);
-        x += msg.len() as i32 * 8 + 16;
+        x += wid(&msg) + 16;
         for (label, id) in [
             ("<", ID_FIND_PREV),
             (">", ID_FIND_NEXT),
             ("Done", ID_FIND_DONE),
         ] {
-            let bw = label.len() as i32 * 8 + 16;
+            let bw = wid(label) + 16;
             if x + bw > w {
                 break;
             }
@@ -688,8 +731,7 @@ impl App {
                     let y = py + 6 + i as i32 * 24;
                     self.win.text(px + 14, y + 4, label, th.espresso);
                     if !key.is_empty() {
-                        self.win
-                            .text(px + pw - 14 - key.len() as i32 * 8, y + 4, key, th.latte);
+                        self.win.text(px + pw - 14 - wid(key), y + 4, key, th.latte);
                     }
                     self.hits
                         .add(ARect::new(px, y, pw, 24), ID_MENU_ITEM + i as u32);
@@ -721,14 +763,7 @@ impl App {
                         ));
                     }
                 }
-                let pw = (lines
-                    .iter()
-                    .map(|l| l.0.chars().count())
-                    .max()
-                    .unwrap_or(20) as i32
-                    * 8
-                    + 32)
-                    .min(w - 24);
+                let pw = (lines.iter().map(|l| wid(&l.0)).max().unwrap_or(160) + 48).min(w - 24);
                 let ph = lines.len() as i32 * 22 + 16;
                 let (px, py) = (100, TOP - 4);
                 self.hits.add(ARect::new(0, 0, w, h), ID_POPUP_BG);
@@ -740,7 +775,7 @@ impl App {
                 for (i, (l, bold)) in lines.iter().enumerate() {
                     let y = py + 10 + i as i32 * 22;
                     let x = if i == 0 { px + 32 } else { px + 16 };
-                    let l = ellipsize(l, fit_chars(pw - (x - px) - 10));
+                    let l = ellipsize(l, pw - (x - px) - 10);
                     if *bold {
                         self.win.bold(x, y, &l, th.espresso);
                     } else {
@@ -778,12 +813,8 @@ impl App {
                     if i == sel {
                         self.win.rrect(x + 4, oy, pw - 8, 22, 6, th.oat);
                     }
-                    self.win.text(
-                        x + 12,
-                        oy + 3,
-                        &ellipsize(o, fit_chars(pw - 24)),
-                        th.espresso,
-                    );
+                    self.win
+                        .text(x + 12, oy + 3, &ellipsize(o, pw - 24), th.espresso);
                     self.hits
                         .add(ARect::new(x, oy, pw, 22), ID_OPTION + i as u32);
                 }

@@ -14,7 +14,7 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
 
 | | |
 | --- | --- |
-| files | `~/Library/Browser` and `~/Downloads` read-write; `/proc/net/tls` (a test boot's test root), `/proc/net/internet` and the theme setting read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
+| files | `~/Library/Browser` and `~/Downloads` read-write; `/System/Fonts` (the system fonts, read ahead with `gui::text::preload`), `/proc/net/tls` (a test boot's test root), `/proc/net/internet` and the theme setting read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
 | network | all (it is a browser) |
 | spawning | none |
 
@@ -69,12 +69,30 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   https page are not loaded. A refused certificate, a refused connection, an unknown host,
   a timeout and the rest get a page saying so in words, with a hint.
 * **Images and stylesheets**: fetched on their own (a few at a time, pages first), cached for
-  every tab, given to the engine as they come. PNG, BMP and PNM decode today (`user/imgdec`);
-  other formats show their alt text.
+  every tab, given to the engine as they come, decoded by `user/imgdec` on the fetching thread:
+  PNG, JPEG (baseline and progressive), GIF, WebP (lossy and lossless), BMP, PNM. Animated GIF
+  and WebP play (`imgdec::anim::Animation`, a frame at a time with its delay) while their tab is
+  in front; a background tab's pictures stand still. A picture that doesn't decode shows its
+  alt text.
+* **Text**: in the system fonts (`gui::text`, the desktop's five families, proportional and
+  anti-aliased, with Latin Extended, Greek, Cyrillic, punctuation and symbols): CSS
+  `sans-serif` and `system-ui` are the family Settings > Appearance chose (so pages follow a
+  Settings change, like the chrome), `serif` IBM Plex Sans (no serif face is baked), `cursive`
+  Atkinson Hyperlegible Next, `fantasy` Ubuntu Sans. Sizes snap to the fonts' 13, 26 and 52 px;
+  weight 600 and up is bold, 500 medium; italics are drawn oblique. Monospace (`<pre>`,
+  `<code>`, `<tt>`, CSS `monospace`) is Unifont 8x16, with characters Unifont lacks taken from
+  the system font. `browserkit::font` is the measurer the engine lays out with, so lines break
+  where the glyphs are drawn.
 
-Links the page doesn't colour itself are drawn in the link colour (#4F64A0, underlined; the
-`link` token in appkit's Theme, SPEC "Type"). Pages are drawn on their own background in
-both themes, so they use the light theme's token.
+**Colours.** The engine's defaults are milkOS's (SPEC "Type"): a milk #FFFDF8 canvas,
+espresso #3A2E28 text, links #4F64A0 (underlined), never pure white or black; a page's own
+colours win. On a dark desktop a page gets the dark defaults (canvas #2E2520, text #F4EBE0,
+links #A9B8E8) only when it opts into a dark scheme (CSS `color-scheme: dark` / `light dark`
+on the root, or `<meta name=color-scheme>`) or sets no styles and no colour attributes at all;
+a page that sets some colours but no scheme stays light, since dark text on a dark canvas is
+worse than a light page in dark chrome. `prefers-color-scheme: dark` matches on a dark
+desktop either way. The built-in pages opt in. appkit's Theme has the link and pressed-link
+tokens for both themes.
 
 There are no app menus for client windows yet, so the toolbar's menu button (three lines)
 lists everything, with its key.
@@ -98,14 +116,18 @@ lists everything, with its key.
 
 ## Tests
 
-* `scripts/browserkit-test.sh` (`browserkit-unit`, smoke): cookies (domains, paths, Secure,
+* `scripts/browserkit-test.sh` (`browserkit-unit`, smoke): text in the real system fonts
+  (fontkit over the baked blobs: Greek, Cyrillic and Latin Extended draw without boxes, find
+  highlights are as wide as the text they cover), cookies (domains, paths, Secure,
   SameSite, prefixes, expiry, third parties, limits, the file, hostile headers), history,
   bookmarks, the address bar, forms through the engine, downloads' names, certificate details,
   the built-in pages' escaping, painting (and pages of random tags that must paint without a
   panic) and zoom.
 * `scripts/browser-test.sh` (default set, about two minutes): a VM against
   `scripts/browser_test_servers.py` on the Mac's 127.0.0.1 only (a DNS server for a made-up zone
-  and the test pages). It checks the client protocol, a styled page and its stylesheet,
+  and the test pages). It checks the client protocol, that `/dev/wm` lists the window at once,
+  a styled page and its stylesheet, a Greek and Cyrillic page, JPEG, GIF and WebP pictures (the
+  animated ones play, and stand still in a background tab),
   scrolling, a fragment, find, zoom, back, a keyboard-driven GET form, a POST sign-in whose
   cookie comes back, third-party cookies refused, tabs, Cmd-click, `open URL`, bookmarks,
   downloads, error pages and the sandbox, from the serial log, the server's log and
@@ -115,16 +137,15 @@ lists everything, with its key.
 
 ## Known gaps
 
-* Text is Unifont (8x16 cells, Latin-1, typographic characters folded): bold is faux, sizes
-  are 1x / 2x / 3x the cell, so CSS font sizes snap. Proportional system fonts in user space
-  are the next step (the engine already takes any measurer).
+* Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
+  there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
 * No JavaScript, no `<iframe>`, no HTTP cache or HTTP/2, no file upload in forms, no
-  `<video>` / `<audio>`; JPEG, GIF and WebP wait for user/imgdec.
+  `<video>` / `<audio>`; arithmetic-coded or 12-bit JPEG, colour profiles.
 * "Site" for cookies is the last two labels of the host (with a short list of two-label
   suffixes like `co.uk`), not the full public suffix list.
 * No hover: client windows get pointer moves only while a button is down, so links don't
-  show their address before a click (and there are no tooltips); the link's pressed colour
-  token is unused for now.
+  show their address before a click (and there are no tooltips); links have no pressed
+  colour yet.
 * Closing the window can't be refused, so a download still running is lost when the window
   closes; Cmd-W closes the window, not the tab.
 * A textarea's caret is always at the end of its text.

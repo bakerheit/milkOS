@@ -8,10 +8,10 @@ use alloc::vec::Vec;
 
 use imgdec::Image;
 
-use webengine::{BorderStyle, Decoration, MarkerKind, TextRun};
+use webengine::{BorderStyle, MarkerKind, TextRun};
 
 use crate::engine::{Color, ControlId, DisplayList, Entry, ImageId, Item, Rect};
-use crate::font;
+use crate::font::{self, Fonts, Text};
 
 /// How glyphs are drawn: the scale (1, 2, 3 times the 8x16 cell), faux bold, a slant.
 #[derive(Clone, Copy, Debug, Default)]
@@ -282,6 +282,10 @@ pub trait Painter {
     /// Draw form control `id` into its content box (the app knows its state, focus and
     /// caret; the engine already painted the control's background and border).
     fn control(&mut self, s: &mut Surface, rect: Rect, id: ControlId);
+    /// The system fonts (None: everything in Unifont).
+    fn text(&self) -> Option<&dyn Text> {
+        None
+    }
 }
 
 fn alpha(c: Color) -> u32 {
@@ -423,29 +427,68 @@ impl Surface {
         }
     }
 
-    /// A text run as the engine laid it out (pen at x, on the baseline).
-    pub fn run(&mut self, run: &TextRun, text: &str) {
-        let sc = font::scale(&run.font);
-        let f = Glyphs {
-            scale: sc,
-            bold: run.font.weight >= 600,
-            italic: run.font.italic,
-        };
-        let c = run.color & 0xFF_FFFF;
+    /// A text run as the engine laid it out (pen at x, on the baseline). Its decoration
+    /// lines are separate rectangles in the list (the engine's), not drawn here.
+    pub fn run(&mut self, run: &TextRun, text: &str, fonts: Fonts) {
         if alpha(run.color) == 0 {
             return;
         }
-        let top = run.baseline - font::ASCENT * sc;
-        self.glyphs(run.x, top, text, f, c);
-        let d = run.decoration;
-        if d.has(Decoration::UNDERLINE) {
-            self.fill(Rect::new(run.x, run.baseline + sc, run.width, sc), c);
-        }
-        if d.has(Decoration::LINE_THROUGH) {
-            self.fill(Rect::new(run.x, run.baseline - 5 * sc, run.width, sc), c);
-        }
-        if d.has(Decoration::OVERLINE) {
-            self.fill(Rect::new(run.x, top, run.width, sc), c);
+        let c = run.color & 0xFF_FFFF;
+        self.text_at(
+            fonts,
+            &run.font,
+            run.x,
+            run.baseline - font::ASCENT * font::scale(&run.font),
+            text,
+            c,
+        );
+    }
+
+    /// Text in `f` with the top of its line box at (x, y): the system font through `fonts`,
+    /// or Unifont for monospace. Returns the end x.
+    pub fn text_at(
+        &mut self,
+        fonts: Fonts,
+        f: &webengine::Font,
+        x: i32,
+        y: i32,
+        text: &str,
+        c: Color,
+    ) -> i32 {
+        match fonts.backend(f) {
+            Some(t) => {
+                let (w, clip) = (self.w as usize, self.clip);
+                t.draw(&mut self.px, w, clip, x + self.dx, y + self.dy, f, text, c) - self.dx
+            }
+            None => {
+                // Unifont, with what it lacks in the system font (when there is one).
+                let g = Glyphs {
+                    scale: font::scale(f),
+                    bold: f.weight >= 600,
+                    italic: f.italic,
+                };
+                let mut cx = x;
+                for (seg, uni) in font::mono_segments(text, fonts.text.is_some()) {
+                    cx = match (uni, fonts.text) {
+                        (false, Some(t)) => {
+                            let (w, clip) = (self.w as usize, self.clip);
+                            let pf = font::proportional(f);
+                            t.draw(
+                                &mut self.px,
+                                w,
+                                clip,
+                                cx + self.dx,
+                                y + self.dy,
+                                &pf,
+                                seg,
+                                c,
+                            ) - self.dx
+                        }
+                        _ => self.glyphs(cx, y, seg, g, c),
+                    };
+                }
+                cx
+            }
         }
     }
 }
@@ -505,7 +548,7 @@ fn entry(s: &mut Surface, list: &DisplayList, it: &Item, p: &mut dyn Painter) {
                 colors[3],
             );
         }
-        Item::Text(run) => s.run(&run, list.run_text(&run)),
+        Item::Text(run) => s.run(&run, list.run_text(&run), Fonts { text: p.text() }),
         Item::Image { rect, image } => match p.image(image) {
             Some(img) => s.image(rect, img),
             None => {
@@ -570,14 +613,10 @@ fn entry(s: &mut Surface, list: &DisplayList, it: &Item, p: &mut dyn Painter) {
     }
 }
 
-/// The engine's built-in link colour (its UA stylesheet's `:link`).
-pub const UA_LINK: Color = 0xFF_00_00_EE;
-
 /// Paint the part of `list` from page y = `scroll` down into `s` (cleared to the page's
 /// background first), then the `position: fixed` boxes over it. `marks` are find-in-page
-/// highlights (page coordinates; the `current` one stronger). `link`: the colour for links
-/// the page didn't colour itself (the theme's link token, instead of the engine's default
-/// blue).
+/// highlights (page coordinates; the `current` one stronger). Links take the engine's
+/// colours (its UA defaults are milkOS's link tokens).
 pub fn paint_list(
     s: &mut Surface,
     list: &DisplayList,
@@ -585,7 +624,6 @@ pub fn paint_list(
     p: &mut dyn Painter,
     marks: &[Rect],
     current: Option<usize>,
-    link: Color,
 ) {
     let bg = if alpha(list.background) == 0 {
         0xFF_FF_FF
@@ -594,11 +632,11 @@ pub fn paint_list(
     };
     s.clear(bg);
     let base = Rect::new(0, 0, s.w, s.h);
-    for (entries, dy) in [(&list.entries, -scroll), (&list.fixed, 0)] {
+    for (entries, dy, fixed) in [(&list.entries, -scroll, false), (&list.fixed, 0, true)] {
         s.dx = 0;
         s.dy = dy;
         let area = Rect::new(0, -dy, s.w, s.h);
-        let picked: alloc::vec::Vec<&Entry> = if dy == 0 {
+        let picked: alloc::vec::Vec<&Entry> = if fixed {
             entries.iter().collect()
         } else {
             list.visible(area)
@@ -611,18 +649,10 @@ pub fn paint_list(
                 intersect(Rect::new(clip.x, clip.y + dy, clip.w, clip.h), base)
             };
             if s.clip.w > 0 && s.clip.h > 0 {
-                match e.item {
-                    Item::Text(mut run) if run.color == UA_LINK => {
-                        run.color = 0xFF00_0000 | link;
-                        s.run(&run, list.run_text(&run));
-                    }
-                    // A link's underline, drawn by the engine as a thin rectangle.
-                    Item::Rect { rect, color } if color == UA_LINK => s.fill(rect, link),
-                    ref it => entry(s, list, it, p),
-                }
+                entry(s, list, &e.item, p);
             }
         }
-        if dy != 0 {
+        if !fixed {
             s.clip = base;
             for (k, m) in marks.iter().enumerate() {
                 let strong = Some(k) == current;
@@ -775,10 +805,15 @@ mod tests {
             &mut p,
             &[Rect::new(20, 20, 10, 10)],
             Some(0),
-            0x4F64A0,
         );
         assert_eq!(p.1, 1);
         assert!(s.px.contains(&0x123456), "the control was drawn");
+        // The find highlight shows at the top of the page too (scroll 0).
+        let hl = blend(s.px[0], 0xEB_B6_50, 150);
+        assert!(
+            s.px[25 * 300 + 25] == hl || s.px.contains(&hl),
+            "the highlight"
+        );
         assert!(s.px.contains(&0xFF0000), "red text");
         assert!(s.px.contains(&0x00FF00), "the dashed border");
         let mut d1 = page(
@@ -786,18 +821,18 @@ mod tests {
         );
         let list1 = d1.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s2 = Surface::new(300, 200, 0);
-        paint_list(&mut s2, &list1, 0, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s2, &list1, 0, &mut p, &[], None);
         assert!(s2.px.contains(&0x00FF00), "a rounded border");
         assert_eq!(s.px[0], 0x102030, "the background");
-        // A link the page didn't colour gets the theme's colour, not the engine's blue.
+        // A link the page didn't colour has the link token, not the old browsers' blue.
         let mut d2 = page("<p><a href=/x>a link</a></p>");
         let list2 = d2.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s3 = Surface::new(300, 200, 0);
-        paint_list(&mut s3, &list2, 0, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s3, &list2, 0, &mut p, &[], None);
         assert!(s3.px.contains(&0x4F64A0));
         assert!(!s3.px.contains(&0x0000EE));
         // Scrolled past everything: just the background.
-        paint_list(&mut s, &list, 100_000, &mut p, &[], None, 0x4F64A0);
+        paint_list(&mut s, &list, 100_000, &mut p, &[], None);
         assert!(s.px.iter().all(|&c| c == 0x102030));
     }
 
@@ -808,7 +843,7 @@ mod tests {
         );
         let list = d.layout(&Viewport::new(300, 200), &Unifont).clone();
         let mut s = Surface::new(300, 200, 0);
-        paint_list(&mut s, &list, 1000, &mut P(None, 0), &[], None, 0x4F64A0);
+        paint_list(&mut s, &list, 1000, &mut P(None, 0), &[], None);
         assert_eq!(s.px[5 * 300 + 5], 0x0000FF);
     }
 
@@ -854,7 +889,6 @@ mod tests {
                 &mut P(None, 0),
                 &[],
                 None,
-                0x4F64A0,
             );
         }
     }

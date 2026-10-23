@@ -44,6 +44,9 @@
 //! - [`Font`] is `Ord` (usable as a cache key).
 //! - Added [`Stats::layout_bytes`]; [`Stats::approx_bytes`] now counts only what is kept.
 //! - Documented that text decorations are drawn by the engine (see [`TextRun::decoration`]).
+//! - The UA defaults are milkOS's: a #FFFDF8 canvas, #3A2E28 text, #4F64A0 links (no pure white
+//!   or black); [`Viewport::dark`] can give a page the dark defaults (see there).
+//!   `color-scheme` is a property now.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,7 +161,10 @@ pub struct Viewport {
     pub height: i32,
     /// Percent: 100 is 1:1. Clamped to 25..=500.
     pub zoom: u16,
-    /// `prefers-color-scheme: dark` matches when true. The engine does not recolour pages.
+    /// The desktop is dark: `prefers-color-scheme: dark` matches, and a page that opts into a
+    /// dark scheme (`color-scheme`, `<meta name=color-scheme>`) or sets no colours or styles at
+    /// all gets the dark UA defaults (canvas #2E2520, text #F4EBE0, links #A9B8E8). A page that
+    /// sets some colours but no scheme is never darkened.
     pub dark: bool,
 }
 

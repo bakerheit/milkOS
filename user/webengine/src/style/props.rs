@@ -125,6 +125,8 @@ pub enum Decl {
     TextDecorationColor(SColor),
     VerticalAlign(SVAlign),
     Visibility(Visibility),
+    /// `color-scheme`: bit 1 light, 2 dark, 4 only (0 = normal).
+    ColorScheme(u8),
     OverflowX(Overflow),
     OverflowY(Overflow),
     ListStyleType(ListStyleType, Option<Rc<str>>),
@@ -233,6 +235,7 @@ pub enum Prop {
     TextDecorationColor,
     VerticalAlign,
     Visibility,
+    ColorScheme,
     OverflowX,
     OverflowY,
     ListStyleType,
@@ -346,6 +349,7 @@ static PROPS_BY_ID: [Prop; PROP_COUNT] = {
         Prop::TextDecorationColor,
         Prop::VerticalAlign,
         Prop::Visibility,
+        Prop::ColorScheme,
         Prop::OverflowX,
         Prop::OverflowY,
         Prop::ListStyleType,
@@ -439,6 +443,7 @@ impl Decl {
             D::TextDecorationColor(_) => Prop::TextDecorationColor,
             D::VerticalAlign(_) => Prop::VerticalAlign,
             D::Visibility(_) => Prop::Visibility,
+            D::ColorScheme(_) => Prop::ColorScheme,
             D::OverflowX(_) => Prop::OverflowX,
             D::OverflowY(_) => Prop::OverflowY,
             D::ListStyleType(..) => Prop::ListStyleType,
@@ -1454,6 +1459,24 @@ fn deco_line(v: &[Tok]) -> Option<Decoration> {
     Some(Decoration(d))
 }
 
+/// `normal`, or `light` / `dark` / `only` in any order (unknown schemes are ignored, as the
+/// spec says: a page may name ones we don't have).
+fn color_scheme(v: &[Tok]) -> Option<u8> {
+    let mut bits = 0u8;
+    let mut any = false;
+    for x in components(v) {
+        any = true;
+        match ident(x)?.as_str() {
+            "normal" => return Some(0),
+            "light" => bits |= 1,
+            "dark" => bits |= 2,
+            "only" => bits |= 4,
+            _ => {}
+        }
+    }
+    any.then_some(bits)
+}
+
 fn white_space(k: &str) -> Option<WhiteSpace> {
     Some(match k {
         "normal" => WhiteSpace::Normal,
@@ -1791,6 +1814,7 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
                 Decl::VerticalAlign(SVAlign::L(values::length(c, false)?))
             }
         }
+        "color-scheme" => Decl::ColorScheme(color_scheme(v)?),
         "visibility" => Decl::Visibility(match kw()?.as_str() {
             "visible" => Visibility::Visible,
             "hidden" => Visibility::Hidden,
@@ -2145,7 +2169,6 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
         | "grid-template"
         | "caret-color"
         | "accent-color"
-        | "color-scheme"
         | "forced-color-adjust"
         | "print-color-adjust"
         | "-webkit-print-color-adjust"

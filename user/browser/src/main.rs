@@ -28,6 +28,7 @@ extern crate alloc;
 mod draw;
 mod net;
 mod store;
+mod sysfont;
 mod tab;
 mod web;
 
@@ -118,8 +119,76 @@ pub enum Popup {
 pub enum ImgState {
     Loading(JobId),
     Ready(Image),
+    /// An animation, its frame on show, and when the next one is due (ms).
+    Moving {
+        anim: alloc::boxed::Box<imgdec::anim::Animation>,
+        frame: Image,
+        next_at: u64,
+    },
     Sheet(Vec<u8>),
     Failed,
+}
+
+impl ImgState {
+    /// What a page shows of it now.
+    pub fn picture(&self) -> Option<&Image> {
+        match self {
+            ImgState::Ready(i) | ImgState::Moving { frame: i, .. } => Some(i),
+            _ => None,
+        }
+    }
+
+    fn pixels(&self) -> usize {
+        self.picture().map_or(0, |i| i.w * i.h)
+    }
+
+    /// A decoded picture, an animation at its first frame.
+    fn from_picture(p: net::Picture, now: u64) -> Option<ImgState> {
+        match p {
+            net::Picture::Still(img) => Some(ImgState::Ready(img)),
+            net::Picture::Moving(mut anim) => {
+                let (frame, delay) = match anim.next_frame()? {
+                    Ok(f) => (f.image.clone(), f.delay_ms),
+                    Err(_) => return None,
+                };
+                Some(ImgState::Moving {
+                    anim: alloc::boxed::Box::new(anim),
+                    frame,
+                    next_at: now + delay.max(20) as u64,
+                })
+            }
+        }
+    }
+
+    /// Step an animation whose frame is due. True if the picture changed.
+    fn step(&mut self, now: u64) -> bool {
+        let ImgState::Moving {
+            anim,
+            frame,
+            next_at,
+        } = self
+        else {
+            return false;
+        };
+        if now < *next_at {
+            return false;
+        }
+        if anim.finished() && anim.should_loop() {
+            anim.rewind();
+        }
+        match anim.next_frame() {
+            Some(Ok(fr)) if fr.image.w == frame.w && fr.image.h == frame.h => {
+                frame.px.copy_from_slice(&fr.image.px);
+                *next_at = now + fr.delay_ms.max(20) as u64;
+                true
+            }
+            // Done (or a damaged frame): it stays on the last good one.
+            _ => {
+                *next_at = u64::MAX;
+                false
+            }
+        }
+    }
 }
 
 pub enum DlState {
@@ -163,8 +232,10 @@ pub struct App {
     /// A message for the status line, until (ms).
     pub flash: Option<(String, u64)>,
     pub shown_title: String,
-    /// Links' colour: the light theme's token (pages are drawn on milk in both themes).
-    pub link: gui::Color,
+    /// When the desktop's theme was last read (ms).
+    pub theme_checked: u64,
+    /// The system fonts for page text (the desktop's family, read each frame).
+    pub sys: sysfont::SysText,
     pub quit: bool,
     pub dirty: bool,
 }
@@ -1224,10 +1295,13 @@ impl App {
                         if let Some(r) = self.tab().page.doc.control_rect(id)
                             && k != ControlKind::TextArea
                         {
-                            let n = c.value.chars().count();
-                            let cell = 8 * browserkit::font::scale(&c.font);
-                            let at = ((px - r.x).max(0) / cell) as usize;
-                            self.tab_mut().caret = at.min(n);
+                            let shown: String = if k == ControlKind::Password {
+                                c.value.chars().map(|_| '\u{2022}').collect()
+                            } else {
+                                c.value.clone()
+                            };
+                            let f = sysfont::font_for(&c.font, self.sys.ui);
+                            self.tab_mut().caret = f.index_at(&shown, (px - r.x).max(0));
                         }
                     }
                     _ => {}
@@ -1256,6 +1330,27 @@ impl App {
             13 => self.forget_everything(),
             _ => {}
         }
+    }
+
+    // ---- animations -----------------------------------------------------------------------
+
+    /// Step the animated pictures the current tab shows (background tabs' stand still).
+    /// Returns whether one changed, and when the next frame is due (ms).
+    fn animate_images(&mut self, now: u64) -> (bool, Option<u64>) {
+        let mut changed = false;
+        let mut next: Option<u64> = None;
+        let t = &self.tabs[self.cur];
+        for u in &t.page.shown {
+            if let Some(st) = self.images.get_mut(u) {
+                changed |= st.step(now);
+                if let ImgState::Moving { next_at, .. } = st
+                    && *next_at != u64::MAX
+                {
+                    next = Some(next.map_or(*next_at, |n: u64| n.min(*next_at)));
+                }
+            }
+        }
+        (changed, next)
     }
 
     // ---- jobs ---------------------------------------------------------------------------
@@ -1368,18 +1463,31 @@ impl App {
             });
             if let Some(u) = url {
                 let st = match out {
-                    Outcome::Image(Ok(img))
-                        if self.image_pixels + img.w * img.h <= MAX_IMAGE_PIXELS =>
-                    {
-                        self.image_pixels += img.w * img.h;
-                        ImgState::Ready(img)
+                    Outcome::Image(Err(e)) => {
+                        rt::println!("[browser] image {u}: {e}");
+                        ImgState::Failed
                     }
+                    Outcome::Image(Ok(pic)) => match ImgState::from_picture(pic, now_ms()) {
+                        Some(st) if self.image_pixels + st.pixels() <= MAX_IMAGE_PIXELS => {
+                            self.image_pixels += st.pixels();
+                            st
+                        }
+                        _ => ImgState::Failed,
+                    },
                     Outcome::Page(r) if r.status < 400 && kind == Kind::Style => {
                         ImgState::Sheet(r.body)
                     }
                     _ => ImgState::Failed,
                 };
                 if kind == Kind::Image {
+                    if let Some(i) = st.picture() {
+                        let moving = if let ImgState::Moving { anim, .. } = &st {
+                            alloc::format!(", animated, {} frames", anim.frame_count())
+                        } else {
+                            String::new()
+                        };
+                        rt::println!("[browser] image {u}: {}x{}{moving}", i.w, i.h);
+                    }
                     self.images.insert(u, st);
                 } else {
                     self.sheets.insert(u, st);
@@ -1509,10 +1617,12 @@ impl App {
                 let cache = if style { &self.sheets } else { &self.images };
                 match cache.get(&r.url) {
                     Some(ImgState::Loading(_)) => waiting += 1,
-                    Some(ImgState::Ready(img)) => {
+                    Some(st @ (ImgState::Ready(_) | ImgState::Moving { .. })) => {
+                        let img = st.picture().unwrap();
                         if let ResourceKind::Image(id) = r.kind {
                             let size = (img.w as u32, img.h as u32);
                             self.tabs[ti].page.doc.supply_image(id, Some(size));
+                            self.tabs[ti].page.shown.insert(r.url.clone());
                             supplied = true;
                         }
                     }
@@ -1638,9 +1748,12 @@ fn main(args: &rt::Args) -> i32 {
     let profile = Profile::new(home);
     profile.ensure();
     let online = internet_on();
+    // The system fonts now (the rest of /System/Fonts stays readable: other families are
+    // read when a page needs their characters, or when Settings picks another).
+    gui::text::preload();
     // Before any page is fetched: lock down what a hostile page could reach.
     let spec = format!(
-        "fs={}:rw fs={}:rw fs=/dev/wm:rw fs=/dev/clipboard:rw fs=/proc/net/tls:r fs=/proc/net/internet:r fs={home}/.config/milk/settings:r net=all spawn=0 clipboard=1",
+        "fs={}:rw fs={}:rw fs=/System/Fonts:r fs=/dev/wm:rw fs=/dev/clipboard:rw fs=/proc/net/tls:r fs=/proc/net/internet:r fs={home}/.config/milk/settings:r net=all spawn=0 clipboard=1",
         profile.lib, profile.downloads
     );
     if let Err(e) = sys::sandbox(&spec) {
@@ -1685,7 +1798,8 @@ fn main(args: &rt::Args) -> i32 {
         online,
         flash: None,
         shown_title: String::new(),
-        link: Theme::light().link,
+        sys: sysfont::SysText::now(),
+        theme_checked: 0,
         quit: false,
         dirty: true,
     };
@@ -1695,9 +1809,15 @@ fn main(args: &rt::Args) -> i32 {
     app.go_typed(start);
     app.draw();
     let mut last_draw = now_ms();
+    let mut frame_due: Option<u64> = None;
     loop {
         let busy = app.fetch.busy() || app.tab().scroll != app.tab().target;
-        let ev = app.win.event(if busy { 16 } else { 400 });
+        // Wait no longer than the next animation frame.
+        let mut wait = if busy { 16 } else { 400 };
+        if let Some(due) = frame_due {
+            wait = wait.min(due.saturating_sub(now_ms()).max(1));
+        }
+        let ev = app.win.event(wait);
         let m = app.win.mods();
         if log && let Some(e) = &ev {
             log_input(e, m);
@@ -1731,7 +1851,20 @@ fn main(args: &rt::Args) -> i32 {
             break;
         }
         dirty |= app.tick();
+        // The desktop's theme, once a second: the chrome and dark-capable pages follow it.
+        let now = now_ms();
+        if now.saturating_sub(app.theme_checked) >= 1000 {
+            app.theme_checked = now;
+            let th = Theme::current();
+            if th.dark != app.th.dark {
+                app.th = th;
+                dirty = true;
+            }
+        }
         dirty |= app.animate();
+        let (moved, due) = app.animate_images(now_ms());
+        dirty |= moved;
+        frame_due = due;
         let now = now_ms();
         if app.flash.as_ref().is_some_and(|f| f.1 <= now) {
             app.flash = None;

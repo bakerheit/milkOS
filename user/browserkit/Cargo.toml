@@ -18,3 +18,8 @@ milkweb = { path = "../../milkweb" }
 tls = { path = "../../tls" }
 imgdec = { path = "../imgdec" }
 webengine = { path = "../webengine" }
+
+[dev-dependencies]
+# The system fonts' measuring, for tests with real proportional text (the blobs from
+# kernel/src/sysfont).
+fontkit = { path = "../fontkit" }

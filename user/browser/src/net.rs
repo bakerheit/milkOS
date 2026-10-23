@@ -48,9 +48,15 @@ pub enum Kind {
     Download,
 }
 
+/// A decoded picture: a still one, or an animation (GIF, WebP) to step through.
+pub enum Picture {
+    Still(Image),
+    Moving(imgdec::anim::Animation),
+}
+
 pub enum Outcome {
     Page(Response),
-    Image(Result<Image, String>),
+    Image(Result<Picture, String>),
     /// A download was written: its path and size.
     Saved(String, usize),
     Failed(Failure),
@@ -261,7 +267,14 @@ fn run(
             if resp.status >= 400 {
                 Outcome::Image(Err(alloc::format!("{} {}", resp.status, resp.reason)))
             } else {
-                Outcome::Image(imgdec::decode(&resp.body).map_err(|e| String::from(e.message())))
+                let err = |e: imgdec::ImgError| String::from(e.message());
+                Outcome::Image(match imgdec::probe(&resp.body) {
+                    Ok(info) if info.animated => imgdec::anim::Animation::new(resp.body)
+                        .map(Picture::Moving)
+                        .map_err(err),
+                    Ok(_) => imgdec::decode(&resp.body).map(Picture::Still).map_err(err),
+                    Err(e) => Err(err(e)),
+                })
             }
         }
         (Ok(resp), _) => Outcome::Page(resp),

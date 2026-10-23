@@ -18,6 +18,9 @@ pub mod history;
 pub mod pages;
 pub mod paint;
 
+#[cfg(test)]
+mod systext_tests;
+
 use alloc::string::String;
 
 /// `s` on one line: tabs, newlines and other control characters become spaces.

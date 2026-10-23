@@ -33,14 +33,14 @@ details[open] > summary:first-of-type { list-style-type: disclosure-open; }
 details:not([open]) > :not(summary:first-of-type) { display: none; }
 
 input, select, button, textarea, meter, progress { display: inline-block; }
-input, select, button, textarea { font: 13.333px sans-serif; color: black; letter-spacing: normal;
+input, select, button, textarea { font: 13.333px sans-serif; color: #3A2E28; letter-spacing: normal;
   word-spacing: normal; line-height: normal; text-transform: none; text-indent: 0;
   text-align: start; }
 input[type=hidden i] { display: none; }
-input, textarea, select { border: 2px inset #767676; padding: 1px 2px; background-color: white;
+input, textarea, select { border: 2px inset #767676; padding: 1px 2px; background-color: #FFFDF8;
   border-radius: 2px; }
 input[type=checkbox i], input[type=radio i] { border: 1px solid #767676; padding: 0;
-  margin: 3px 3px 3px 4px; background-color: white; vertical-align: baseline; }
+  margin: 3px 3px 3px 4px; background-color: #FFFDF8; vertical-align: baseline; }
 input[type=radio i] { border-radius: 50%; }
 input[type=submit i], input[type=reset i], input[type=button i], input[type=file i], button,
 select { border: 1px solid #767676; padding: 1px 6px; background-color: #efefef;
@@ -52,7 +52,9 @@ textarea { white-space: pre-wrap; }
 img, video, canvas, iframe, embed, object, svg { display: inline-block; }
 iframe { border: 2px inset #808080; }
 
-html { color: black; }
+/* milkOS's defaults (SPEC "Type"): espresso text on milk, never pure black on white. The
+   canvas itself is the engine's (page.rs), and ua-dark.css replaces these for a dark page. */
+html { color: #3A2E28; }
 body { margin: 8px; }
 
 p, blockquote, figure, listing, plaintext, pre, xmp { margin-top: 1em; margin-bottom: 1em; }
@@ -61,7 +63,7 @@ address { font-style: italic; }
 listing, plaintext, pre, xmp { font-family: monospace; white-space: pre; }
 
 dialog { position: absolute; left: 0; right: 0; width: fit-content; height: fit-content;
-  margin: auto; border: solid; padding: 1em; background: white; color: black; }
+  margin: auto; border: solid; padding: 1em; background: #FFFDF8; color: #3A2E28; }
 
 h1 { margin-top: 0.67em; margin-bottom: 0.67em; font-size: 2.00em; font-weight: bold; }
 h2 { margin-top: 0.83em; margin-bottom: 0.83em; font-size: 1.50em; font-weight: bold; }
@@ -100,7 +102,7 @@ sup { vertical-align: super; font-size: smaller; line-height: normal; }
 nobr { white-space: nowrap; }
 center { text-align: center; }
 
-:link { color: #0000EE; }
+:link { color: #4F64A0; }
 :link { text-decoration: underline; cursor: pointer; }
 ins, u { text-decoration: underline; }
 del, s, strike { text-decoration: line-through; }

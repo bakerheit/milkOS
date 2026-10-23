@@ -1,0 +1,17 @@
+[package]
+name = "jsbench"
+version.workspace = true
+edition.workspace = true
+
+# The JavaScript engine in the guest: a Richards-style scheduler, a DeltaBlue-style
+# constraint solver, a ~1 MB JSON round trip, string/regexp templating, array work, async
+# pipelines and float math (softfloat here), each timed and checked against its known
+# result. A developer tool: /System/Developer/jsbench.
+[[bin]]
+name = "jsbench"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+jsengine = { path = "../jsengine" }

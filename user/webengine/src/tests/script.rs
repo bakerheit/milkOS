@@ -623,3 +623,108 @@ fn dom_nodes_stay_bounded_under_churn() {
     assert!(d.page.dom.len() < before + 100, "arena {}", d.page.dom.len());
 }
 
+
+/// Every bound function, getter and setter, called with hostile receivers and arguments:
+/// errors are fine, panics are not, and the page must still lay out.
+#[test]
+fn bindings_survive_hostile_calls() {
+    let mut d = doc(PAGE);
+    let mut h = Host::new();
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rnd = move |n: usize| -> usize {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n.max(1) as u64) as usize
+    };
+    with(&mut d, &mut h, |r, g, document| {
+        let object = r.get(g, "Object").unwrap_or(Value::UNDEFINED);
+        if !object.is_object() {
+            return; // the engine's stub has no builtins yet
+        }
+        let names_fn = r.get(object, "getOwnPropertyNames").unwrap_or(Value::UNDEFINED);
+        let desc_fn = r.get(object, "getOwnPropertyDescriptor").unwrap_or(Value::UNDEFINED);
+        if !r.is_callable(names_fn) || !r.is_callable(desc_fn) {
+            return; // the engine's stub has no such builtins yet
+        }
+        // Receivers: nodes of each kind, collections, helpers, odd values.
+        let mut thises: Vec<Value> = alloc::vec![document, g, Value::UNDEFINED, Value::NULL, Value::int(3)];
+        for id in ["outer", "inner", "list", "f", "name", "c", "s", "go", "link", "lab"] {
+            let e = by_id(r, document, id);
+            thises.push(e);
+        }
+        let outer = thises[5];
+        for k in ["childNodes", "children", "classList", "style", "dataset", "firstChild"] {
+            if let Ok(v) = r.get(outer, k) {
+                thises.push(v);
+            }
+        }
+        let plain = r.new_object();
+        thises.push(plain);
+        let txt = s(r, "x");
+        let tn = call(r, document, "createTextNode", &[txt]);
+        thises.push(tn);
+        let ctor = r.get(g, "Event").unwrap();
+        let ty = s(r, "click");
+        if let Ok(e) = r.construct(ctor, &[ty]) {
+            thises.push(e);
+        }
+        // Arguments.
+        let strs = ["", "div", "#outer", "<b>x</b><script>never()</script>", "a b", "click", "-1", "\u{0}", "beforeend", "999999999", "data-x", "style", "onclick", "javascript:void 0", "background-color"];
+        let mut argv: Vec<Value> = Vec::new();
+        for st in strs {
+            argv.push(r.string(st));
+        }
+        argv.extend([Value::UNDEFINED, Value::NULL, Value::TRUE, Value::int(-1), Value::int(0), Value::int(7), Value::number(f64::NAN), Value::number(1e300)]);
+        argv.extend(thises.iter().copied());
+        let f = r.new_function("cb", 1, |_r, _t, _a| Ok(Value::UNDEFINED));
+        argv.push(f);
+        // The prototypes to walk.
+        let mut protos: Vec<Value> = Vec::new();
+        for c in ["Node", "Element", "HTMLElement", "Document", "EventTarget", "Event", "CharacterData", "Text", "DocumentFragment", "HTMLInputElement", "HTMLSelectElement", "HTMLFormElement", "HTMLOptionElement", "HTMLAnchorElement", "HTMLTextAreaElement", "HTMLButtonElement", "HTMLScriptElement", "HTMLTemplateElement", "NodeList", "HTMLCollection", "DOMTokenList", "CSSStyleDeclaration", "Storage", "Window", "MouseEvent", "KeyboardEvent", "CustomEvent"] {
+            if let Ok(cv) = r.get(g, c)
+                && cv.is_object()
+                && let Ok(p) = r.get(cv, "prototype")
+            {
+                protos.push(p);
+            }
+        }
+        for k in ["location", "history", "navigator", "console", "performance", "localStorage"] {
+            if let Ok(v) = r.get(g, k) {
+                protos.push(v);
+            }
+        }
+        protos.push(g);
+        let mut calls = 0;
+        for &p in &protos {
+            let Ok(names) = r.call(names_fn, object, &[p]) else { continue };
+            let n = r.get(names, "length").ok().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+            for i in 0..n {
+                let Ok(name) = r.get(names, i) else { continue };
+                let Some(nm) = r.get_string(name) else { continue };
+                if matches!(nm.as_str(), "alert" | "confirm" | "prompt" | "constructor") {
+                    continue;
+                }
+                let Ok(desc) = r.call(desc_fn, object, &[p, name]) else { continue };
+                for part in ["value", "get", "set"] {
+                    let Ok(fv) = r.get(desc, part) else { continue };
+                    if !r.is_callable(fv) {
+                        continue;
+                    }
+                    for _ in 0..6 {
+                        let this = thises[rnd(thises.len())];
+                        let k = rnd(4);
+                        let args: Vec<Value> = (0..k).map(|_| argv[rnd(argv.len())]).collect();
+                        let _ = r.call(fv, this, &args);
+                        calls += 1;
+                    }
+                }
+            }
+        }
+        assert!(calls > 500, "{calls} calls");
+    });
+    // Still a page: it lays out and paints.
+    d.layout(&Viewport::new(800, 600), &ApproxMeasurer);
+    let _ = d.text();
+    let _ = d.hit_test(10, 10, (0, 0));
+}

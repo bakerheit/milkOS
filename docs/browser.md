@@ -6,7 +6,9 @@ address bar, forms, downloads' names, certificate details, the built-in pages, p
 zoom) are `user/browserkit`, host-tested (`scripts/browserkit-test.sh`); pages are parsed,
 styled and laid out by `user/webengine` (HTML5, CSS, layout; its interface is
 `user/webengine/src/api.rs`). Fetching is milkweb's HTTP client and the TLS 1.3 client
-(docs/networking.md, docs/tls.md) through `rt::web` / `rt::tls`. There is no JavaScript.
+(docs/networking.md, docs/tls.md) through `rt::web` / `rt::tls`. Pages' JavaScript runs in
+`user/jsengine` (its interface is `user/jsengine/src/api.rs`), bound to the page by
+`user/webengine/src/script` (see JavaScript, below).
 
 ## The sandbox
 
@@ -50,7 +52,7 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   (`application/x-www-form-urlencoded`), the encoding and the successful controls are the
   engine's. A password sent over plain http gets a note in the status line.
 * **Cookies** (`browserkit::cookies`, RFC 6265 basics): `Domain`, `Path`, `Secure` (only from
-  and to https), `HttpOnly` (kept; there are no scripts to hide them from), `Expires` /
+  and to https), `HttpOnly` (never shown to scripts, which can't set or replace one either), `Expires` /
   `Max-Age`, `SameSite` (Lax when a site says nothing: a page reached from another site's
   link or form gets Lax cookies for a GET only, Strict ones never; `None` needs `Secure`), the
   `__Secure-` and `__Host-` prefixes, a plain-http page can't replace a secure cookie.
@@ -98,6 +100,61 @@ tokens for both themes.
 There are no app menus for client windows yet, so the toolbar's menu button (three lines)
 lists everything, with its key.
 
+## JavaScript
+
+Web pages run their scripts (the toolbar's menu turns JavaScript off and on; the choice is
+kept in `~/Library/Browser/settings`, and the page reloads). Stage 1 is what ordinary
+interactive pages need: menus, tabs, toggles, form validation, content built by script.
+
+* **Scripts**: inline and external `<script>`s, in the HTML order: blocking ones in tree
+  order, then `defer` ones, then `DOMContentLoaded`, and `load` once the stylesheets and
+  images are in; `async` ones as soon as they are fetched; scripts a page inserts run on
+  insertion (external ones fetched like stylesheets, async unless `async = false`).
+  `document.readyState` and `document.currentScript` follow. The page is parsed whole
+  before any script runs, so `document.write` during loading puts its markup after the
+  running script. `type=module` is not run (a console note says so: stage 2); data blocks
+  (`application/json`, `text/template`) never run; `<noscript>` is raw text and hidden while
+  scripts are on, and shown when they are off.
+* **The DOM** (webengine's DOM, live): document lookups and `querySelector(All)` (the
+  engine's own selector matcher), creating, inserting, moving, cloning and removing nodes,
+  `textContent`, `innerHTML` / `outerHTML` / `insertAdjacentHTML` through the HTML fragment
+  parsing algorithm (scripts in it don't run), `innerText`, attributes, `id` / `className`
+  / `classList` / `dataset` / `style` (the inline style attribute), live collections
+  (`children`, `childNodes`, `getElementsBy*`, `forms`, `form.elements`, `select.options`),
+  the form controls' `value` / `checked` / `disabled` / `selectedIndex` (the same state the
+  Browser draws and submits), constraint validation (`required`, types, lengths, ranges,
+  `pattern`, `setCustomValidity`; a form that fails isn't sent, its first bad field gets the
+  focus and the status line the reason), `getBoundingClientRect`, `offset*` / `client*` /
+  `scroll*` sizes, `scrollIntoView`, `focus` / `blur`, `click()`, `getComputedStyle` (some
+  properties) and `matchMedia`.
+* **Events**: `addEventListener` with capture, bubbling, `once`, `passive`,
+  `preventDefault` and `stopPropagation`; `on*` attributes and properties; trusted
+  mousedown / mouseup / click (a cancelled click doesn't follow its link, press its button or
+  toggle its checkbox; labels click their control), keydown / keypress / keyup (a cancelled
+  key doesn't type or scroll), input and change, focus / blur / focusin / focusout (and
+  change when a changed field is left), submit (cancelling it stops the submission), reset,
+  invalid, `DOMContentLoaded`, `load` and `readystatechange`; `Event`, `CustomEvent` and
+  the UI event constructors for `dispatchEvent`.
+* **Timers and the window**: `setTimeout` / `setInterval` (the spec's nesting clamp),
+  `requestAnimationFrame` (run just before a frame is drawn, at the display's rate while a
+  page asks), `queueMicrotask` and promises (drained after each task); `console.*` (each line
+  on the serial port as `[browser] console LEVEL: ...`, and the last 400 per tab in the
+  console panel, Cmd-Alt-J or the menu); `location` (read, assign, replace, reload),
+  `history` (back, forward, go, pushState / replaceState for the address bar), `navigator`,
+  `screen`, `localStorage` per origin (kept in `~/Library/Browser/storage`, 5 MB each) and
+  `sessionStorage` per tab, `document.cookie` (without HttpOnly cookies), `alert` / `confirm`
+  / `prompt` as dialogs over the page, `window.open` as a new tab.
+* **Safety**: scripts run inside the Browser's sandbox (no files, no other tabs, no other
+  origins' storage). Each tab has its own realm with a 64 MB heap; a script that goes over
+  it is stopped. A script that runs for two seconds without a break brings up "This page is
+  slow ... Stop it?" over the page: Stop (or Esc) ends the page's scripts for good (its
+  timers and listeners go, the page stays as it is), Wait gives it ten more seconds. Pages
+  that rebuild their content over and over stay in bounded memory: nodes no script refers to
+  are given back when they leave the tree. Background tabs run their timers once a second.
+* **Restyling**: changes are batched until the next frame; only the changed subtrees are
+  restyled (a change's parent's subtree, so sibling selectors see it), and the page is laid
+  out again once. Hit testing, the focus and form state follow the new tree.
+
 ## Inside
 
 * `net.rs`: every page, image, stylesheet and download is a job on its own thread (512 KiB
@@ -108,6 +165,8 @@ lists everything, with its key.
   chrome and, through `browserkit::paint`, the display list and the form controls (inside the
   boxes the engine painted); `tab.rs` and `store.rs` (the profile files, written to a
   temporary name and renamed).
+* `js.rs`: the pages' scripts: the `ScriptHost` (clock, cookies, storage, dialogs, the slow
+  bar), running each tab's scripts and animation frames, what scripts ask for, the console.
 * `open URL` while the Browser runs: the desktop appends the address to
   `~/Library/Browser/open` and brings the window forward; the Browser reads and empties that
   file (it checks twice a second) and opens a tab for each address.
@@ -133,6 +192,18 @@ lists everything, with its key.
   cookie comes back, third-party cookies refused, tabs, Cmd-click, `open URL`, bookmarks,
   downloads, error pages and the sandbox, from the serial log, the server's log and
   screenshots.
+* `scripts/js-test.sh` (default set, about a minute and a half): a VM against
+  `scripts/js_test_server.py` (127.0.0.1 only) serving the pages in `tests/js`: a tabs
+  widget, a todo list built by script, form validation that blocks the submit, timers and
+  microtasks, a requestAnimationFrame animation, innerHTML, the script order (blocking,
+  defer, module, document.write, DOMContentLoaded, load), storage and cookies, a runaway
+  `while (true)` stopped from the slow bar, and the JavaScript switch, from the console
+  lines, the server's log and screenshots.
+* `scripts/webengine-test.sh` also covers the DOM changes (fragment parsing, serializing,
+  incremental restyling checked against a fresh parse and a full restyle, form state across
+  tree changes) and the bindings (`src/tests/script.rs`: the DOM, events, forms, timers,
+  storage, location, focus, bounded memory under churn; `src/tests/scripts.rs`: script
+  text against fixture pages).
 * `scripts/web-test.sh` and `scripts/tls-interop.sh` open pages by host name and over https
   (a good certificate and one for another site) through `open URL`.
 
@@ -140,7 +211,11 @@ lists everything, with its key.
 
 * Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
   there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
-* No JavaScript, no `<iframe>`, no HTTP cache or HTTP/2, no file upload in forms, no
+* JavaScript is stage 1: no modules, fetch / XMLHttpRequest, canvas, workers or
+  MutationObserver callbacks (the observers exist and never call back); layout after a
+  change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
+  don't apply.
+* No `<iframe>`, no HTTP cache or HTTP/2, no file upload in forms, no
   `<video>` / `<audio>`; arithmetic-coded or 12-bit JPEG, colour profiles.
 * "Site" for cookies is the last two labels of the host (with a short list of two-label
   suffixes like `co.uk`), not the full public suffix list.

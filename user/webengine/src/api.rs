@@ -32,11 +32,29 @@
 //! - Threads: parsing and layout recurse with the document's nesting (bounded by
 //!   [`Limits::max_depth`]); run them on the main thread (8 MB stack) or a thread with at
 //!   least 1 MB of stack, not a default 128 KB rt::thread.
-//! - Not supported (yet): scripts, `:hover`/`:focus` styles, CSS transforms, animations,
-//!   web fonts, named grid lines, inner scrolling boxes (overflow: auto spills sideways and
-//!   clips vertically), bidirectional text, vertical writing modes.
+//! - Scripts: a page parsed with [`Document::parse_scripted`] runs its JavaScript (see the
+//!   "Scripts" section at the end): the app drives it with [`Document::run`] and passes the
+//!   user's clicks, keys and focus through [`Document::click`] and friends. After any call
+//!   that runs script the DOM may have changed: [`Document::layout`] restyles only the
+//!   changed subtrees and lays out again, and [`ControlId`]s may have moved.
+//! - Not supported (yet): `:hover`/`:focus` styles, CSS transforms, animations, web fonts,
+//!   named grid lines, inner scrolling boxes (overflow: auto spills sideways and clips
+//!   vertically), bidirectional text, vertical writing modes; for scripts: modules, fetch /
+//!   XMLHttpRequest, canvas, workers, iframes' documents.
 //!
 //! # CHANGES
+//! - Scripts: [`Document::parse_scripted`], [`ScriptHost`], [`Storage`], [`ScriptLimits`],
+//!   [`PageRequest`], [`ConsoleLine`], [`KeyInput`], [`Mods`], [`ScriptStats`] and the
+//!   Document calls in the "Scripts" section. [`Document::parse`] and friends still parse
+//!   with scripts off.
+//! - [`ControlId`]s can change when a script adds or removes controls: keep the focus in the
+//!   engine ([`Document::focused`], [`Document::set_focus`]) and look ids up again after
+//!   any call that runs script. A form's entries are in tree order (not node order).
+//! - [`Document::submit_form`] checks the form's constraints (required, type, length,
+//!   range; pattern with scripts) and fires `submit` before giving the submission; a form
+//!   that fails says why with [`PageRequest::Invalid`]. [`Document::submit`] stays as it was.
+//! - [`Document::click`] toggles checkboxes and radio buttons itself (with scripts or
+//!   without): don't also call [`Document::set_checked`] for a click.
 //! - Added [`FormControl::content_drawn`] (true for `<button>`: the engine paints its
 //!   content, the app only the face). Documented that [`Item::Control`] and
 //!   [`FormControl::rect`] are the control's content box: its CSS background and borders are

@@ -42,6 +42,8 @@ use webengine::{
     RequestMode, ResponseKind,
 };
 
+pub mod frame;
+
 #[cfg(test)]
 mod tests;
 

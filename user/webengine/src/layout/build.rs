@@ -325,6 +325,19 @@ impl B<'_, '_> {
             self.gen_children(b, n, &style);
         }
         self.pseudo(b, n, &style, true);
+        if html && e.name == FIELDSET {
+            // The rendered legend (HTML §15.3.13): the first legend child, not floated or
+            // positioned, sits in the top border; it is laid out apart from the flow.
+            let kids = self.boxes[b as usize].children.clone();
+            if let Some(&l) = kids.iter().find(|&&c| !self.is_collapsible_ws(c)) {
+                let lb = &self.boxes[l as usize];
+                if dom.is_html(lb.node, LEGEND) && !lb.out_of_flow {
+                    self.boxes[l as usize].out_of_flow = true;
+                    self.boxes[l as usize].block_level = true;
+                    self.boxes[b as usize].legend = l;
+                }
+            }
+        }
         self.fixup(b);
     }
 

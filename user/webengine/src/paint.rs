@@ -224,6 +224,48 @@ impl P<'_> {
             colors[i] = c;
         }
         let _ = &mut styles;
+        if b.legend != NO_BOX {
+            // A fieldset: the top border runs through the legend's middle, with a gap for it.
+            let lg = &self.boxes[b.legend as usize];
+            let lh = px(lg.margin_box_h());
+            let shift = ((lh - widths[0]) / 2).max(0);
+            let r2 = Rect::new(r.x, r.y + shift, r.w, r.h - shift);
+            let mut w2 = widths;
+            w2[0] = 0;
+            self.push(
+                layer,
+                Item::Border {
+                    rect: r2,
+                    widths: w2,
+                    colors,
+                    styles,
+                    radius: 0,
+                },
+                clip,
+            );
+            let off_x = r.x - px(b.x);
+            let gx0 = px(lg.x - lg.margin[3]) + off_x - 2;
+            let gx1 = px(lg.x + lg.w + lg.margin[1]) + off_x + 2;
+            let top = Rect::new(r.x, r2.y, (gx0 - r.x).max(0), widths[0]);
+            let top2 = Rect::new(gx1, r2.y, (r.right() - gx1).max(0), widths[0]);
+            self.push(
+                layer,
+                Item::Rect {
+                    rect: top,
+                    color: colors[0],
+                },
+                clip,
+            );
+            self.push(
+                layer,
+                Item::Rect {
+                    rect: top2,
+                    color: colors[0],
+                },
+                clip,
+            );
+            return;
+        }
         self.push(
             layer,
             Item::Border {

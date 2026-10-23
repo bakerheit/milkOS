@@ -134,6 +134,8 @@ pub struct LBox {
     pub out_of_flow: bool,
     /// A list item's outside marker box.
     pub marker: BoxId,
+    /// A fieldset's rendered legend.
+    pub legend: BoxId,
     // ---- layout results ----
     /// Border box, document coordinates.
     pub x: Au,
@@ -166,6 +168,7 @@ impl LBox {
             block_level: false,
             out_of_flow: false,
             marker: NO_BOX,
+            legend: NO_BOX,
             x: 0,
             y: 0,
             w: 0,

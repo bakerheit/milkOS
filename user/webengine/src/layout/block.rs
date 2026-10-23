@@ -956,6 +956,21 @@ pub fn layout_block(
         bx.w = w + bp_w;
         bx.h = bp_h;
     }
+    let lg = boxes[b as usize].legend;
+    if lg != NO_BOX {
+        // The legend straddles the top border; the content starts below it.
+        let inner = (w + p[1] + p[3]).max(0);
+        layout_atomic(boxes, cx, lg, inner);
+        let lh = boxes[lg as usize].margin_box_h();
+        let ox = boxes[lg as usize].x - boxes[lg as usize].margin[3];
+        let oy = boxes[lg as usize].y - boxes[lg as usize].margin[0];
+        let nx = lx + ml + bo[3] + p[3];
+        let ny = y + ((bo[0] - lh) / 2).max(0);
+        translate(boxes, lg, nx - ox, ny - oy);
+        let extra = (lh - bo[0]).max(0);
+        boxes[b as usize].padding[0] += extra;
+        boxes[b as usize].h += extra;
+    }
     // Lists: the outside marker sits left of the first line.
     let (out, empty) = if is_replaced {
         let h = replaced_size(boxes, cx, b, cb_w, cb_h, bp_w, bp_h).1;

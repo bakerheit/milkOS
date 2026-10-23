@@ -25,9 +25,9 @@ Alpha tints used: straw at 0x44 (27%) for selection rows, straw at 0x55 (33%) fo
 - Bold: the face's real Bold (Medium is baked too).
 - Heading: 26px in a 32px line (scale 2), bold.
 - Display: 52px in a 64px line (scale 4), bold. Clock and big tile letters. The lock screen clock is 104px regular (scale 8).
-- Monospace grids (Terminal, Notes' editor, Versions' file preview, the console) stay Unifont 8x16.
+- Monospace grids (Terminal, Notes' editor, the Text Editor body, Versions' file preview, the console) stay Unifont 8x16. Every other app uses the system font: see `SPEC-FONT-ROLLOUT.md`.
 - The "milkOS" wordmark is always Figtree Bold.
-- No text smaller than 16px tall. Small caps labels are 8x16 uppercase in cocoa, not a smaller size.
+- No text smaller than 16px tall. Section labels are the system font, 13px, uppercase, in cocoa, not a smaller size (`SPEC-FONT-ROLLOUT.md`).
 
 ## Corner radii (px)
 - window: 12

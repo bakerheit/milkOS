@@ -30,7 +30,7 @@ Use only the SPEC tokens: milk #FFFDF8, cream #FBF6EC, oat #EFE6D4, sand #E2D5BD
 | Activity Monitor | espresso | line graph with one matcha line (family: system tools) |
 | Browser | blue | globe |
 | Notes | milk | pad with a honey band across the top |
-| Text Editor | milk | page with cocoa lines and a straw caret |
+| Text Editor | milk | portrait page with a folded corner, cocoa outline and lines, a straw caret on the last line |
 | Paint | milk | four colour dots (straw, honey, matcha, blue) |
 | Music | straw | note |
 | Calendar | milk | straw band at the top, date numeral in ink |
@@ -39,7 +39,8 @@ Use only the SPEC tokens: milk #FFFDF8, cream #FBF6EC, oat #EFE6D4, sand #E2D5BD
 | Settings | latte | gear |
 | Store | straw | open box or "S" bag |
 | Spaces / Overview | milk | four small windows |
-No two neighbouring dock tiles share a colour. Folder and file-type icons (document, image, audio, archive, package) use the same tile language at 56 px in Files, with milk tiles and one accent.
+| Today | milk | a honey sun rising over a cocoa horizon with five short rays (a scene, no text lines) |
+No two neighbouring dock tiles share a colour. **The three neutral tiles with a glyph made of lines must not look alike:** Notes is a wide pad with a honey band and ink lines; Text Editor is a portrait outlined page; Today has no lines at all. (Review 2026-10-23: Notes, Today and Text Editor all read as "three lines on white" in the dock.) Folder and file-type icons (document, image, audio, archive, package) use the same tile language at 56 px in Files, with milk tiles and one accent.
 
 ## 4. Wallpapers
 Set: **Dawn pasture** (default, light), **Night pasture** (dark, with moon, stars and a sleeping cow), **Oat** (plain), and an optional fourth (for example a dusk). All 1024x768, no text, no logos.

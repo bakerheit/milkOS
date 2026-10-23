@@ -53,3 +53,5 @@ Source: `scenes.mjs` holds the drawings and notes, `build.mjs` generates `index.
 `SPEC-APPS.md` specifies Activity Monitor, Text Editor, Calendar, Clock/Timer and Preview, built only on what the system can do today. `apps.html` has the 17 mockups. Source: `apps.mjs`.
 
 `SPEC-DISK-REMINDERS.md` specifies Disk Utility (a GUI over milkfs: snapshots and diff, clones, scrub, encryption, erasing and formatting a spare disk, encrypting in place, backups and restore with passphrases, a shared confirm sheet) and Reminders (lists, due dates, repeat, rung by the alarm daemon). `disk-reminders.html` has the 18 mockups. Source: `disk-reminders.mjs`.
+
+`SPEC-FONT-ROLLOUT.md` is the rule for one font in every app (the system font for all UI text, Unifont only for monospace content) and the per-app list of what changes. Written after the 2026-10-23 review of main.

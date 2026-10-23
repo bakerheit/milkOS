@@ -186,10 +186,18 @@ def settings(t):
 
 
 def text_editor(t):
+    """A portrait page with a folded corner, two lines and a straw caret on the third. Portrait and outlined, so it does not read as Notes (wide pad, honey band) or Today."""
     g = Glyph()
-    for y, w in (((15, 24), (21, 24), (27, 16), (33, 20)) if BOLD < 1.5 else ((16, 24), (26, 24), (36, 14))):
-        g.line([(12, y), (12 + w, y)], 2.4, t["cocoa"], False)
-    g.rr(33.4 if BOLD < 1.5 else 29.6, 29.4 if BOLD < 1.5 else 31, 2.6, 8.6, 1.3, STRAW)                            # the accent: a caret
+    x0, y0, w, h, f = 14.0, 8.5, 20.0, 31.0, 6.0
+    c = t["cocoa"]
+    g.line([(x0 + w, y0 + f), (x0 + w, y0 + h - 2), (x0 + w - 2, y0 + h), (x0 + 2, y0 + h), (x0, y0 + h - 2), (x0, y0 + 2), (x0 + 2, y0), (x0 + w - f, y0), (x0 + w, y0 + f)], 2.4, c, False)
+    if BOLD < 1.5:
+        g.line([(x0 + w - f, y0), (x0 + w - f, y0 + f), (x0 + w, y0 + f)], 2.4, c, False)                               # the folded corner (left out at 20 px and below)
+    rows = ((19.5, 12), (25.5, 12), (31.5, 5)) if BOLD < 1.5 else ((22, 12), (30, 5))
+    for y, ln in rows:
+        g.line([(x0 + 4, y), (x0 + 4 + ln, y)], 2.4, c, False)
+    last = rows[-1]
+    g.rr(x0 + 4 + last[1] + 2.2, last[0] - 4.2, 2.6, 8.4, 1.3, STRAW)                                         # the accent: a caret
     return compose(t["milk"], [g], border=t["sand"])
 
 
@@ -210,12 +218,16 @@ def calendar(t):
 
 
 def today(t):
-    """A honey half-sun rising on a cocoa horizon, three short agenda lines under it. No numeral and no page: it must not read as Calendar."""
+    """A honey sun rising over a cocoa horizon, five short rays. A scene, not lines: the three line icons (Notes, Text Editor, Today) must not look alike, and it must not read as Calendar."""
     g = Glyph()
-    g.d.pieslice([14 * U, 5.5 * U, 34 * U, 25.5 * U], 180, 360, fill=HONEY)
-    g.line([(8.5, 15.5), (39.5, 15.5)], 2.4, t["cocoa"], False)
-    for y, w in (((24, 22), (30, 22), (36, 13)) if BOLD < 1.5 else ((26, 22), (35, 22))):
-        g.line([(13, y), (13 + w, y)], 2.4, t["esp"], False)
+    cx, cy, r = 24.0, 29.0, 9.5
+    g.d.pieslice([(cx - r) * U, (cy - r) * U, (cx + r) * U, (cy + r) * U], 180, 360, fill=HONEY)
+    for ang in (200, 235, 270, 305, 340):
+        a = math.radians(ang)
+        g.line([(cx + math.cos(a) * 13.2, cy + math.sin(a) * 13.2), (cx + math.cos(a) * 17.2, cy + math.sin(a) * 17.2)], 2.4, t["cocoa"], True)
+    g.rr(8.5, 29.0, 31, 3.4, 1.7, t["cocoa"])
+    if BOLD < 1.5:
+        g.rr(15, 35.4, 18, 2.6, 1.3, t["cocoa"] + (140,))
     return compose(t["milk"], [g], border=t["sand"])
 
 

@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use browserkit::netpolicy::Admission;
 use milkweb::url::Url;
-use webengine::{NetEvent, NetFailure, NetFailureKind, NetOut, NetRequest};
+use webengine::{FrameId, NetEvent, NetFailure, NetFailureKind, NetOut, NetRequest};
 
 use crate::App;
 use crate::net::{JobId, Outcome, ScriptSpec};
@@ -27,6 +27,7 @@ use crate::web::Doc;
 pub struct NetJob {
     pub uid: u64,
     pub epoch: u64,
+    pub frame: u32,
     pub id: u32,
     pub method: String,
     pub url: String,
@@ -36,7 +37,7 @@ pub struct NetJob {
 }
 
 /// Answers on their way to pages: (tab uid, page generation, request id, the answer).
-pub type Inbox = VecDeque<(u64, u64, u32, NetEvent)>;
+pub type Inbox = VecDeque<(u64, u64, u32, u32, NetEvent)>;
 
 /// Answers handed to pages per tick (the rest wait for the next).
 const DELIVER_PER_TICK: usize = 64;
@@ -46,13 +47,13 @@ impl App {
         self.tabs.iter().position(|t| t.uid == uid && t.epoch == epoch)
     }
 
-    /// Take in what tab `ti`'s scripts asked of the network.
-    pub fn net_requests(&mut self, ti: usize) {
-        let outs = self.tabs[ti].page.doc.take_net();
+    /// Take in what the scripts of frame `f` of tab `ti` asked of the network.
+    pub fn net_requests(&mut self, ti: usize, f: FrameId) {
+        let outs = self.tabs[ti].page.doc.take_net(f);
         for o in outs {
             match o {
-                NetOut::Start(req) => self.net_start(ti, req),
-                NetOut::Cancel(id) => self.net_cancel(ti, id),
+                NetOut::Start(req) => self.net_start(ti, f, req),
+                NetOut::Cancel(id) => self.net_cancel(ti, f, id),
             }
         }
     }
@@ -62,12 +63,12 @@ impl App {
     }
 
     /// An answer for the page of tab `ti`, delivered at the next tick.
-    fn net_queue(&mut self, ti: usize, id: u32, ev: NetEvent) {
+    fn net_queue(&mut self, ti: usize, f: FrameId, id: u32, ev: NetEvent) {
         let t = &self.tabs[ti];
-        self.net_inbox.push_back((t.uid, t.epoch, id, ev));
+        self.net_inbox.push_back((t.uid, t.epoch, f.0, id, ev));
     }
 
-    fn net_fail_now(&mut self, ti: usize, req: &NetRequest, kind: NetFailureKind, message: String) {
+    fn net_fail_now(&mut self, ti: usize, f: FrameId, req: &NetRequest, kind: NetFailureKind, message: String) {
         self.net_say(&format!("request {} {}: {}", req.method, req.url, message));
         let t = &mut self.tabs[ti];
         if t.net_log.len() >= NET_LOG_LINES {
@@ -81,13 +82,24 @@ impl App {
             ms: 0,
             bytes: 0,
         });
-        self.net_queue(ti, req.id, NetEvent::Failed(NetFailure { kind, message }));
+        self.net_queue(ti, f, req.id, NetEvent::Failed(NetFailure { kind, message }));
     }
 
-    fn net_start(&mut self, ti: usize, req: NetRequest) {
-        if self.tabs[ti].page.url.is_none() {
+    /// The address a frame's scripts speak for (None: none).
+    fn net_page_url(&self, ti: usize, f: FrameId) -> Option<Url> {
+        let t = &self.tabs[ti];
+        if f.is_top() {
+            t.page.url.clone()
+        } else {
+            t.frames.meta.get(&f).and_then(|m| m.ancestor_url.clone())
+        }
+    }
+
+    fn net_start(&mut self, ti: usize, f: FrameId, req: NetRequest) {
+        if self.net_page_url(ti, f).is_none() {
             self.net_fail_now(
                 ti,
+                f,
                 &req,
                 NetFailureKind::Blocked,
                 format!("{} {}: this page can't make requests", req.method, req.url),
@@ -97,6 +109,7 @@ impl App {
         let Ok(u) = Url::parse(&req.url) else {
             self.net_fail_now(
                 ti,
+                f,
                 &req,
                 NetFailureKind::Network,
                 format!("{} {}: not an address milkOS can fetch", req.method, req.url),
@@ -104,22 +117,35 @@ impl App {
             return;
         };
         let host = format!("{}:{}", u.host.to_ascii_lowercase(), u.port);
-        match self.tabs[ti].limiter.submit(req.id as u64, &host) {
-            Err(e) => self.net_fail_now(ti, &req, NetFailureKind::Blocked, format!("{e}")),
-            Ok(Admission::Start) => self.net_launch(ti, req),
+        let key = ((f.0 as u64) << 32) | req.id as u64;
+        match self.tabs[ti].limiter.submit(key, &host) {
+            Err(e) => self.net_fail_now(ti, f, &req, NetFailureKind::Blocked, format!("{e}")),
+            Ok(Admission::Start) => self.net_launch(ti, f, req),
             Ok(Admission::Queued) => {
-                self.tabs[ti].net_wait.insert(req.id, req);
+                self.tabs[ti].net_wait.insert((f.0, req.id), req);
             }
         }
     }
 
     /// The limiter said go: hand the request to the fetcher.
-    fn net_launch(&mut self, ti: usize, req: NetRequest) {
+    fn net_launch(&mut self, ti: usize, f: FrameId, req: NetRequest) {
+        let Some(url) = self.net_page_url(ti, f) else { return };
         let t = &mut self.tabs[ti];
-        let Some(url) = t.page.url.clone() else { return };
         let mut page = browserkit::netpolicy::Page::new(url);
-        if let Some(space) = t.page.space {
-            page.address_space = space;
+        if f.is_top() {
+            if let Some(space) = t.page.space {
+                page.address_space = space;
+            }
+            page.referrer_policy = t.page.ref_policy;
+        } else if let Some(m) = t.frames.meta.get(&f) {
+            if let Some(space) = m.space {
+                page.address_space = space;
+            }
+            page.referrer_policy = m.ref_policy;
+            // A sandbox without allow-same-origin speaks for an origin of its own.
+            if m.sandbox.opaque_origin() {
+                page.origin = browserkit::netpolicy::Origin::Opaque(m.doc_id);
+            }
         }
         let spec = ScriptSpec {
             req: req.clone(),
@@ -129,12 +155,13 @@ impl App {
         };
         let job = self.fetch.start_script(spec);
         let t = &mut self.tabs[ti];
-        t.net_run.insert(req.id, job);
+        t.net_run.insert((f.0, req.id), job);
         self.net_jobs.insert(
             job,
             NetJob {
                 uid: t.uid,
                 epoch: t.epoch,
+                frame: f.0,
                 id: req.id,
                 method: req.method.clone(),
                 url: req.url.clone(),
@@ -147,24 +174,25 @@ impl App {
         }
     }
 
-    fn net_cancel(&mut self, ti: usize, id: u32) {
+    fn net_cancel(&mut self, ti: usize, f: FrameId, id: u32) {
         let t = &mut self.tabs[ti];
         let promoted = {
-            t.net_wait.remove(&id);
-            let had = t.net_run.remove(&id);
+            t.net_wait.remove(&(f.0, id));
+            let had = t.net_run.remove(&(f.0, id));
             if let Some(job) = had {
                 self.fetch.cancel(job);
                 self.net_jobs.remove(&job);
             }
-            self.tabs[ti].limiter.finish(id as u64)
+            self.tabs[ti].limiter.finish(((f.0 as u64) << 32) | id as u64)
         };
         self.net_promote(ti, promoted);
     }
 
     fn net_promote(&mut self, ti: usize, promoted: Vec<u64>) {
         for pid in promoted {
-            if let Some(r) = self.tabs[ti].net_wait.remove(&(pid as u32)) {
-                self.net_launch(ti, r);
+            let key = ((pid >> 32) as u32, pid as u32);
+            if let Some(r) = self.tabs[ti].net_wait.remove(&key) {
+                self.net_launch(ti, FrameId(key.0), r);
             }
         }
     }
@@ -199,19 +227,20 @@ impl App {
                 (s.head.take(), s.got, s.total)
             };
             let Some(nj) = self.net_jobs.get_mut(&job) else { continue };
-            let (uid, epoch, id) = (nj.uid, nj.epoch, nj.id);
+            let (uid, epoch, frame, id) = (nj.uid, nj.epoch, nj.frame, nj.id);
             let progress = (got, total);
             let send_progress = head.is_none() && progress != nj.sent && got > 0;
             if head.is_some() || send_progress {
                 nj.sent = progress;
             }
             if let Some(h) = head {
-                self.net_inbox.push_back((uid, epoch, id, NetEvent::Head(h)));
+                self.net_inbox.push_back((uid, epoch, frame, id, NetEvent::Head(h)));
             }
             if send_progress {
                 self.net_inbox.push_back((
                     uid,
                     epoch,
+                    frame,
                     id,
                     NetEvent::Progress {
                         loaded: got as u64,
@@ -227,12 +256,13 @@ impl App {
     fn net_deliver(&mut self) -> bool {
         let mut changed = false;
         for _ in 0..DELIVER_PER_TICK {
-            let Some((uid, epoch, id, ev)) = self.net_inbox.pop_front() else { break };
+            let Some((uid, epoch, frame, id, ev)) = self.net_inbox.pop_front() else { break };
             let Some(ti) = self.tab_of(uid, epoch) else { continue };
-            if !self.tabs[ti].page.doc.scripting() {
+            let f = FrameId(frame);
+            if !self.tabs[ti].page.doc.scripting_in(f) {
                 continue;
             }
-            self.with_doc(ti, |d: &mut Doc, h| d.net_event(h, id, ev));
+            self.with_doc_in(ti, f, |d: &mut Doc, h| d.net_event(f, h, id, ev));
             if ti == self.cur {
                 changed = true;
             }
@@ -251,7 +281,7 @@ impl App {
         let Some(ti) = self.tab_of(nj.uid, nj.epoch) else { return };
         let ms = crate::now_ms().saturating_sub(nj.started_ms);
         let t = &mut self.tabs[ti];
-        t.net_run.remove(&nj.id);
+        t.net_run.remove(&(nj.frame, nj.id));
         let mut entry = NetLogEntry {
             method: nj.method.clone(),
             url: nj.url.clone(),
@@ -306,12 +336,12 @@ impl App {
         }
         t.net_log.push_back(entry);
         for ev in events {
-            self.net_inbox.push_back((nj.uid, nj.epoch, nj.id, ev));
+            self.net_inbox.push_back((nj.uid, nj.epoch, nj.frame, nj.id, ev));
         }
         if !line.is_empty() {
             self.net_say(&line);
         }
-        let promoted = self.tabs[ti].limiter.finish(nj.id as u64);
+        let promoted = self.tabs[ti].limiter.finish(((nj.frame as u64) << 32) | nj.id as u64);
         self.net_promote(ti, promoted);
     }
 

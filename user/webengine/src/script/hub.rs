@@ -189,6 +189,8 @@ pub struct XFrame {
     pub class: Cell<Option<ClassId>>,
     /// The frame this realm's document is in, once it has joined a hub.
     pub my_frame: Cell<u32>,
+    /// The host is still loading frames of this document: `load` waits.
+    pub hold_load: Cell<bool>,
     /// The tagged-JSON cloners of postMessage, compiled at first use.
     pub cloner: RefCell<Option<(Pinned, Pinned)>>,
     pub message_proto: RefCell<Option<Pinned>>,
@@ -287,6 +289,7 @@ impl XFrame {
             freed: Rc::new(RefCell::new(Vec::new())),
             class: Cell::new(None),
             my_frame: Cell::new(0),
+            hold_load: Cell::new(false),
             cloner: RefCell::new(None),
             message_proto: RefCell::new(None),
             frames_obj: RefCell::new(None),
@@ -589,6 +592,50 @@ impl Document {
         if let Some(js) = self.js.as_ref() {
             *js.b.xf.sec.borrow_mut() = sec;
         }
+    }
+
+    /// Hold this document's `load` event back (the frames in it are still loading) or let it
+    /// go.
+    pub fn set_load_hold(&mut self, hold: bool) {
+        if let Some(js) = self.js.as_ref() {
+            js.b.xf.hold_load.set(hold);
+        }
+    }
+
+    /// The document has finished loading: its scripts have run and `load` was fired (or it has
+    /// none), and it waits for no stylesheet or image. (Its frames are not counted.)
+    pub fn is_loaded(&self) -> bool {
+        if !self.page.pending_resources().is_empty() {
+            return false;
+        }
+        match self.js.as_ref() {
+            Some(js) if !js.stopped() => js.b.st.try_borrow().map_or(false, |s| s.loaded),
+            _ => true,
+        }
+    }
+
+    /// Fire `load` at the `<iframe>` element that holds frame `id`, in its parent's document
+    /// (the frame's document is done). True if a listener ran or the event was fired.
+    pub fn fire_frame_load(&mut self, host: &mut dyn ScriptHost, id: FrameId) -> bool {
+        let Some(h) = self.frames.as_ref().map(|f| f.hub.clone()) else {
+            return false;
+        };
+        let Some((parent, node)) = h.element_of(id.0) else {
+            return false;
+        };
+        self.touch_hub();
+        let Some(dp) = h.doc(parent) else { return false };
+        // SAFETY: as in `hub::enter`: the hub's documents are the frame table's.
+        let d = unsafe { &mut *dp };
+        let Some(js) = d.js.as_mut() else { return false };
+        if js.stopped() {
+            return false;
+        }
+        js.entry(&mut d.page, host, |b, r| {
+            super::events_js::fire_simple(b, r, node, "load", false, false);
+            true
+        })
+        .unwrap_or(false)
     }
 
     /// The origin of frame `id`'s window as `event.origin` writes it (`"null"` for an opaque

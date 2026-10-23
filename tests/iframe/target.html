@@ -7,20 +7,23 @@
 <p>
 <a id="to-named" href="/target-page.html?by=name" target="named">named</a>
 <a id="to-self" href="/target-page.html?by=self" target="_self">_self</a>
-<a id="to-missing" href="/plain.txt" target="nobody-has-this-name">unknown name</a>
 </p>
 <iframe id="named" name="named" src="about:blank" width="420" height="80"></iframe>
 <iframe id="outer" name="outer" src="/target-outer.html" width="460" height="170"></iframe>
 <script>
-  var got = [];
-  window.addEventListener('message', function (e) { if (String(e.data).indexOf('target:') === 0) got.push(String(e.data).slice(7)); });
-  window.__click = function (id) { document.getElementById(id).click(); };
-  window.__report = function () {
-    report('target', 'messages', got.join(' | '));
-    report('target', 'named-path', document.getElementById('named').contentWindow.location.pathname + document.getElementById('named').contentWindow.location.search);
-    report('target', 'outer-path', document.getElementById('outer').contentWindow.location.pathname);
-    report('target', 'top-path', location.pathname);
-    report('target', 'end', 'done');
-  };
+  window.addEventListener('message', function (e) { if (String(e.data).indexOf('target:') === 0) console.log('IFRTEST target message ' + String(e.data).slice(7)); });
+  function outerClick(id) { frames.outer.document.getElementById(id).click(); }
+  window.addEventListener('load', function () {
+    setTimeout(function () { document.getElementById('to-named').click(); }, 800);
+    setTimeout(function () { outerClick('to-sibling'); }, 1600);
+    setTimeout(function () { outerClick('to-inner'); }, 2400);
+    setTimeout(function () {
+      report('target', 'named-path', frames.named.location.pathname + frames.named.location.search);
+      report('target', 'inner-path', frames.outer.frames.inner.location.pathname + frames.outer.frames.inner.location.search);
+      report('target', 'top-path', location.pathname);
+    }, 3300);
+    // Last: a link in a frame aimed at its parent replaces this page; one at the top too.
+    setTimeout(function () { outerClick('to-parent'); }, 4000);
+  });
 </script>
 </body></html>

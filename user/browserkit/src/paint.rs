@@ -286,6 +286,10 @@ pub trait Painter {
     fn text(&self) -> Option<&dyn Text> {
         None
     }
+    /// The entries that follow belong to this frame's document ([`Entry::frame`]): the
+    /// [`ImageId`]s and [`ControlId`]s they carry mean something in that document only. Called
+    /// when the frame changes; the page itself ([`FrameId::TOP`]) is the start.
+    fn set_frame(&mut self, _frame: webengine::FrameId) {}
 }
 
 fn alpha(c: Color) -> u32 {
@@ -632,6 +636,8 @@ pub fn paint_list(
     };
     s.clear(bg);
     let base = Rect::new(0, 0, s.w, s.h);
+    let mut frame = webengine::FrameId::TOP;
+    p.set_frame(frame);
     for (entries, dy, fixed) in [(&list.entries, -scroll, false), (&list.fixed, 0, true)] {
         s.dx = 0;
         s.dy = dy;
@@ -649,6 +655,10 @@ pub fn paint_list(
                 intersect(Rect::new(clip.x, clip.y + dy, clip.w, clip.h), base)
             };
             if s.clip.w > 0 && s.clip.h > 0 {
+                if e.frame != frame {
+                    frame = e.frame;
+                    p.set_frame(frame);
+                }
                 entry(s, list, &e.item, p);
             }
         }

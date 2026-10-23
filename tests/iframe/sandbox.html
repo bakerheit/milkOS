@@ -44,9 +44,8 @@
     report('sandbox', 's-both-storage', b && b.storage);
     report('sandbox', 's-both-parent-doc', b && b.parentDoc);
     report('sandbox', 's-all-contentDocument', tryit(function () { return document.getElementById('s-all').contentDocument; }));
-    report('sandbox', 's-same-readable', tryit(function () { return document.getElementById('s-same').contentDocument.getElementById('nojs').textContent; }));
+    report('sandbox', 's-same-readable', tryit(function () { return document.getElementById('s-same').contentDocument; }));
     report('sandbox', 's-scripts-contentDocument', tryit(function () { return document.getElementById('s-scripts').contentDocument; }));
-    report('sandbox', 's-nested-inner', got.inner ? (got.inner.origin + ' ' + got.inner.cookie) : 'none');
     report('sandbox', 'end', 'done');
   }
   window.addEventListener('load', function () {

@@ -55,6 +55,8 @@ struct PagePainter<'a> {
     focus: Option<usize>,
     caret: usize,
     sys: SysText,
+    /// The frame the entries being painted belong to.
+    frame: webengine::FrameId,
 }
 
 const F_FOCUS: Color = 0xEBB650;
@@ -99,8 +101,12 @@ fn wrap_chars(fonts: Fonts, f: &browserkit::engine::Font, s: &str, max: i32) -> 
 impl Painter for PagePainter<'_> {
     fn image(&self, id: ImageId) -> Option<&Image> {
         self.images
-            .get(self.doc.image_url(id))
+            .get(self.doc.image_url(self.frame, id))
             .and_then(ImgState::picture)
+    }
+
+    fn set_frame(&mut self, frame: webengine::FrameId) {
+        self.frame = frame;
     }
 
     fn text(&self) -> Option<&dyn browserkit::font::Text> {
@@ -110,7 +116,7 @@ impl Painter for PagePainter<'_> {
     /// Draw what goes inside a control's content box: the engine painted its background and
     /// border already (the page's CSS, or the built-in look).
     fn control(&mut self, s: &mut Surface, r: Rect, id: ControlId) {
-        let i = id.0 as usize;
+        let i = crate::web::join(self.frame, id.0 as usize);
         let Some(c) = self.doc.control(i) else {
             return;
         };
@@ -408,6 +414,7 @@ impl App {
             focus: t.focus,
             caret: t.caret,
             sys: self.sys,
+            frame: webengine::FrameId::TOP,
         };
         let mut marks: Vec<Rect> = Vec::new();
         let mut current = None;
@@ -873,7 +880,7 @@ impl App {
             }
             Some(Popup::Select(id)) => {
                 let t = self.tab();
-                let Some(c) = t.page.doc.controls().get(id) else {
+                let Some(c) = t.page.doc.control(id) else {
                     return;
                 };
                 let Some(r) = t.page.doc.control_rect(id) else {

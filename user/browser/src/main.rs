@@ -26,6 +26,7 @@
 extern crate alloc;
 
 mod draw;
+mod frames;
 mod js;
 mod net;
 mod request;
@@ -43,10 +44,11 @@ use appkit::{Field, Hits, Theme};
 use browserkit::address::{self, Internal, Target};
 use browserkit::bookmarks::Bookmarks;
 use browserkit::cookies::{Context, Jar, site_of};
+use browserkit::font::Fonts;
 use browserkit::engine::{ControlKind, ResourceKind};
 use browserkit::history::Visits;
 use browserkit::paint::Surface;
-use browserkit::{download, form, pages};
+use browserkit::{download, pages};
 use gui::{Event, Key, Mods, Window};
 use imgdec::Image;
 use milkweb::http::{Error, Request};
@@ -54,6 +56,7 @@ use milkweb::url::{Scheme, Url};
 use rt::sys;
 
 use net::{Fetcher, JobId, Kind, Outcome};
+use webengine::FrameId;
 use store::Profile;
 use tab::{Load, Page, PageKind, Tab};
 use web::{Hit, is_button, is_text};
@@ -245,6 +248,14 @@ pub struct App {
     /// Script requests running, by fetch job, and the answers on their way to pages.
     pub net_jobs: BTreeMap<JobId, request::NetJob>,
     pub net_inbox: request::Inbox,
+    /// Frames being fetched: job -> (tab uid, page generation, frame).
+    pub frame_jobs: BTreeMap<JobId, (u64, u64, FrameId)>,
+    /// The restrictions a frame fetch will run under once it lands.
+    pub pending_sandbox: BTreeMap<JobId, scriptnet::frame::sandbox::Sandbox>,
+    /// Documents get numbers (for the session history).
+    pub next_doc: u64,
+    /// Where the pointer last was in the window (clicks and drags): the wheel goes there.
+    pub pointer: (i32, i32),
     /// --log-input: say more on the serial line.
     pub log: bool,
     pub image_pixels: usize,
@@ -282,7 +293,7 @@ fn internet_on() -> bool {
 }
 
 /// What to say under an error's heading.
-fn hint(e: &Error) -> &'static str {
+pub(crate) fn hint(e: &Error) -> &'static str {
     match e {
         Error::Offline(_) => {
             "The internet is off: milkOS was started offline (MILK_OFFLINE=1, or by a test). Numeric addresses like http://10.0.2.2/ still work."
@@ -421,6 +432,7 @@ impl App {
                 } else {
                     t.history.replace(i.address());
                 }
+                t.history.set_top_doc(0);
                 if let Some(e) = t.history.current_mut() {
                     e.title = String::from(i.title());
                 }
@@ -461,7 +473,7 @@ impl App {
             if let Some(e) = t.history.current_mut() {
                 e.scroll = scroll;
             }
-            t.history.push(&a);
+            t.history.top_same_doc(&a, false);
             t.page.address = a;
             t.anchor = fragment;
             return;
@@ -486,40 +498,36 @@ impl App {
             fragment,
             scroll,
             started_ms: now_ms(),
+            restore: None,
         });
+    }
+
+    /// Back or forward to an entry whose page has to be fetched again: `plan` says where its
+    /// frames were, `old_doc` is the document the entry named, `scroll` where the page was.
+    pub fn go_restoring(
+        &mut self,
+        ti: usize,
+        target: Target,
+        plan: Vec<scriptnet::frame::history::Reload>,
+        old_doc: u64,
+        scroll: i32,
+    ) {
+        self.go(ti, target, false, None, None);
+        let t = &mut self.tabs[ti];
+        if let Some(l) = t.load.as_mut() {
+            l.restore = Some((old_doc, plan));
+            l.scroll = Some(scroll);
+        } else if t.anchor.is_none() {
+            // A built-in page shows at once: put the scroll back now.
+            t.scroll = scroll;
+            t.target = scroll;
+        }
     }
 
     /// Open what was typed in the address bar.
     pub fn go_typed(&mut self, text: &str) {
         let t = address::interpret(text);
         self.go(self.cur, t, true, None, None);
-    }
-
-    /// Follow a link on the current page: here, in a new tab, or save what it points at.
-    pub fn follow(&mut self, href: &str, new_tab: bool, save: bool) {
-        let t = self.tab();
-        let base = t.page.doc.base_url().or_else(|| t.page.url.clone());
-        let from = t.page.url.as_ref().map(|u| site_of(&u.host));
-        let target = address::resolve(base.as_ref(), href);
-        if save {
-            if let Target::Web(u, _) = target {
-                self.start_download(&u, from);
-            }
-            return;
-        }
-        if new_tab {
-            if self.tabs.len() >= MAX_TABS {
-                self.say("That's a lot of tabs: close one first");
-                return;
-            }
-            let p = self.internal_page(Internal::NewTab);
-            self.tabs.push(Tab::new(p));
-            let ti = self.tabs.len() - 1;
-            self.go(ti, target, true, from, None);
-            self.say("Opened in a new tab (Ctrl-Tab to go to it)");
-            return;
-        }
-        self.go(self.cur, target, true, from, None);
     }
 
     fn start_download(&mut self, u: &Url, from: Option<String>) {
@@ -539,20 +547,7 @@ impl App {
     }
 
     pub fn back_forward(&mut self, d: isize) {
-        let t = self.tab_mut();
-        let scroll = t.scroll;
-        let Some(e) = t.history.go(d, scroll) else {
-            return;
-        };
-        let (url, scroll) = (e.url.clone(), e.scroll);
-        let target = address::interpret(&url);
-        self.go(self.cur, target, false, None, None);
-        // Built-in pages show at once: put the scroll back now.
-        let t = self.tab_mut();
-        if t.load.is_none() && t.anchor.is_none() {
-            t.scroll = scroll;
-            t.target = scroll;
-        }
+        self.traverse(d);
     }
 
     pub fn reload(&mut self) {
@@ -686,8 +681,14 @@ impl App {
 
     pub fn run_find(&mut self, q: &str) {
         let t = &mut self.tabs[self.cur];
-        t.found = t.page.doc.find(q);
+        let found = t.page.doc.find(q);
+        t.found = found.iter().map(|m| m.0.clone()).collect();
+        t.found_in = found.into_iter().map(|m| (m.1, m.2)).collect();
         t.found_at = 0;
+        if self.log {
+            rt::println!("[browser] find \"{q}\": {} matches", self.tabs[self.cur].found.len());
+        }
+        let t = &mut self.tabs[self.cur];
         // The first match at or below the top of the view.
         if let Some(i) = t
             .found
@@ -715,6 +716,41 @@ impl App {
             self.page_view(t)
         };
         let max = self.max_scroll(self.tab());
+        // A match inside a frame: the frame (and the ones above it) scroll to it, and the page
+        // to the frame.
+        let (frame, frect) = {
+            let t = self.tab();
+            t.found_in
+                .get(t.found_at)
+                .map(|(f, r)| (*f, r.first().copied()))
+                .unwrap_or((FrameId::TOP, None))
+        };
+        if !frame.is_top()
+            && let Some(fr) = frect
+        {
+            let r = self.tab_mut().page.doc.reveal(frame, fr);
+            self.tab_mut().page.laid_w = 0;
+            // Where the match is now, in the page.
+            let cur = self.cur;
+            let sys = self.sys;
+            let dark = self.th.dark;
+            let (lw, lh) = self.page_view(&self.tabs[cur]);
+            self.tabs[cur].page.doc.layout(lw, lh, dark, Fonts { text: Some(&sys) });
+            self.tabs[cur].page.laid_w = lw;
+            let q = self.finding.as_ref().map(|f| f.text.clone()).unwrap_or_default();
+            let t = &mut self.tabs[cur];
+            let found = t.page.doc.find(&q);
+            t.found = found.iter().map(|m| m.0.clone()).collect();
+            t.found_in = found.into_iter().map(|m| (m.1, m.2)).collect();
+            if t.found_at >= t.found.len() {
+                t.found_at = t.found.len().saturating_sub(1);
+            }
+            let rr = t.found.get(t.found_at).and_then(|m| m.first()).copied().unwrap_or(r);
+            if rr.y < t.target || rr.y + rr.h > t.target + vh {
+                t.target = (rr.y - vh / 3).clamp(0, max);
+            }
+            return;
+        }
         let t = self.tab_mut();
         if let Some(r) = t.found.get(t.found_at).and_then(|m| m.first()).copied()
             && (r.y < t.target || r.y + r.h > t.target + vh)
@@ -734,41 +770,16 @@ impl App {
             return;
         }
         let ti = self.cur;
-        let Some(sub) = self.with_doc(ti, |d, h| d.submit_form(h, id)) else {
+        let (f, _) = web::split(id);
+        let Some(sub) = self.with_doc_in(ti, f, |d, h| d.submit_form(h, id)) else {
             return;
         };
-        self.send_submission(sub);
+        self.submit_from(f, sub);
     }
 
-    /// Go where a form submission says (from a button, or a script's form.submit()).
+    /// Go where a form submission of the top page says (a script's form.submit()).
     pub fn send_submission(&mut self, sub: browserkit::engine::Submission) {
-        let t = self.tab();
-        let doc = &t.page.doc;
-        let from = t.page.url.as_ref().map(|u| site_of(&u.host));
-        // A password typed on a plain-http page goes in the clear: say so.
-        let password = doc
-            .controls()
-            .iter()
-            .any(|o| o.kind == ControlKind::Password && !o.value.is_empty());
-        let new_tab = sub.target.as_deref() == Some("_blank");
-        match form::request(&sub) {
-            Ok(req) => {
-                if password && req.url.scheme == Scheme::Http {
-                    self.say("Note: this password went over plain http, not encrypted");
-                }
-                let target = Target::Web(req.url.clone(), None);
-                let ti = if new_tab && self.tabs.len() < MAX_TABS {
-                    let p = self.internal_page(Internal::NewTab);
-                    self.tabs.push(Tab::new(p));
-                    self.cur = self.tabs.len() - 1;
-                    self.cur
-                } else {
-                    self.cur
-                };
-                self.go(ti, target, true, from, Some(req));
-            }
-            Err(e) => self.say(&format!("The form can't be sent: {e}")),
-        }
+        self.submit_from(FrameId::TOP, sub);
     }
 
     pub fn reset_form(&mut self, id: usize) {
@@ -786,7 +797,15 @@ impl App {
         t.caret = id
             .and_then(|i| t.page.doc.control(i))
             .map_or(0, |c| c.value.chars().count());
-        // Keep it in view.
+        // Keep it in view (a frame's control: the frame scrolls to it first).
+        if let Some(i) = id
+            && !web::split(i).0.is_top()
+            && let Some(c) = t.page.doc.control(i).map(|c| c.rect)
+        {
+            let f = web::split(i).0;
+            t.page.doc.reveal(f, c);
+            t.page.laid_w = 0;
+        }
         if let Some(r) = id.and_then(|i| t.page.doc.control_rect(i)) {
             let zoom = t.zoom;
             let (_, h) = (0, (self.win.h - TOP - STATUS_H).max(1) * 100 / zoom);
@@ -882,9 +901,11 @@ impl App {
             ControlKind::Radio if matches!(k, Key::Up | Key::Down | Key::Left | Key::Right) => {
                 // Arrows move along the radio group (and choose).
                 let doc = &self.tab().page.doc;
-                let group: Vec<usize> = (0..doc.controls().len())
+                let fr = web::split(id).0;
+                let group: Vec<usize> = (0..doc.controls_in(fr).len())
+                    .map(|i| web::join(fr, i))
                     .filter(|&i| {
-                        let o = &doc.controls()[i];
+                        let o = doc.control(i).unwrap();
                         o.kind == ControlKind::Radio
                             && o.name == c.name
                             && o.form == c.form
@@ -999,7 +1020,10 @@ impl App {
         };
         let scroll = self.tab().scroll;
         let (x, y) = (r.x + r.w / 2, r.y + r.h / 2);
-        self.with_doc(ti, |d, h| d.click(h, x, y, scroll, js::engine_mods(Mods::default())));
+        let (f, point, fscroll) = self.tab().page.doc.pointer(x, y, scroll);
+        self.with_doc_in(ti, f, |d, h| {
+            d.click_in(f, h, point.0, point.1, fscroll, js::engine_mods(Mods::default()))
+        });
     }
 
     /// A click (or Space) on a button control.
@@ -1018,10 +1042,17 @@ impl App {
     /// Move the keyboard to the next (or previous) form control.
     fn tab_focus(&mut self, back: bool) {
         let t = self.tab();
-        let ids: Vec<usize> = (0..t.page.doc.controls().len())
-            .filter(|&i| t.page.doc.control_rect(i).is_some() && !t.page.doc.controls()[i].disabled)
+        let ids: Vec<usize> = t
+            .page
+            .doc
+            .focus_order()
+            .into_iter()
+            .filter(|&i| t.page.doc.control(i).is_some_and(|c| !c.disabled))
             .filter(|&i| {
-                !t.page.doc.controls()[i].readonly || is_button(t.page.doc.controls()[i].kind)
+                t.page
+                    .doc
+                    .control(i)
+                    .is_some_and(|c| !c.readonly || is_button(c.kind))
             })
             .collect();
         if ids.is_empty() {
@@ -1039,12 +1070,57 @@ impl App {
     // ---- scrolling ----------------------------------------------------------------------
 
     pub fn scroll_by(&mut self, d: i32) {
+        // The keys scroll the frame that has the keyboard.
+        let ff = self.tab().page.doc.focused_frame();
+        if !ff.is_top() {
+            let t = self.tab_mut();
+            let cur = t.page.doc.frame_scroll(ff).1;
+            t.page.doc.set_frame_scroll(ff, cur.saturating_add(d));
+            t.page.laid_w = 0;
+            return;
+        }
+        let max = self.max_scroll(self.tab());
+        let t = self.tab_mut();
+        t.target = (t.target + d).clamp(0, max);
+    }
+
+    /// The wheel: the frames under the pointer (where it last was) scroll first, the page gets
+    /// what they could not take.
+    pub fn wheel(&mut self, dy: i32) {
+        let (wx, wy) = self.pointer;
+        let (top, _, _) = self.view();
+        let t = self.tab();
+        if t.page.doc.laid.is_some() && wy >= top {
+            let (px, py) = (wx * 100 / t.zoom, (wy - top) * 100 / t.zoom + t.scroll);
+            let scroll = t.scroll;
+            let left = self.tab_mut().page.doc.wheel(px, py, scroll, dy);
+            if left != dy {
+                self.tab_mut().page.laid_w = 0;
+                self.dirty = true;
+            }
+            if left != 0 {
+                self.scroll_page_by(left);
+            }
+            return;
+        }
+        self.scroll_by(dy);
+    }
+
+    /// Scroll the page itself (whatever has the keyboard).
+    fn scroll_page_by(&mut self, d: i32) {
         let max = self.max_scroll(self.tab());
         let t = self.tab_mut();
         t.target = (t.target + d).clamp(0, max);
     }
 
     pub fn scroll_to(&mut self, y: i32) {
+        let ff = self.tab().page.doc.focused_frame();
+        if !ff.is_top() {
+            let t = self.tab_mut();
+            t.page.doc.set_frame_scroll(ff, y);
+            t.page.laid_w = 0;
+            return;
+        }
         let max = self.max_scroll(self.tab());
         let t = self.tab_mut();
         t.target = y.clamp(0, max);
@@ -1252,6 +1328,10 @@ impl App {
             Key::Escape => {
                 if self.tab().load.is_some() {
                     self.stop();
+                } else if self.tab().frames.busy() {
+                    let ti = self.cur;
+                    self.cancel_all_frames(ti);
+                    self.say("Stopped the frames");
                 }
             }
             Key::Down => self.scroll_by(40),
@@ -1268,6 +1348,7 @@ impl App {
 
     /// A click at (x, y) in the window.
     fn click(&mut self, x: i32, y: i32, button: u8, m: Mods) {
+        self.pointer = (x, y);
         let id = self.hits.at(x, y);
         let popup_was = match self.popup {
             Some(Popup::Select(c)) => Some(Popup::Select(c)),
@@ -1360,11 +1441,15 @@ impl App {
         let t = self.tab();
         let (px, py) = (x * 100 / t.zoom, y * 100 / t.zoom + t.scroll);
         let scroll = t.scroll;
+        // The frame under the pointer gets the click (and then the keyboard).
+        let (fr, point, fscroll) = t.page.doc.pointer(px, py, scroll);
         // The page's mousedown, mouseup and click (left button): a listener may cancel what
         // the click does (and checkboxes are toggled by the engine).
         if button == 1 {
             let page_before = self.tab().page.address.clone();
-            let ok = self.with_doc(ti, |d, h| d.click(h, px, py, scroll, js::engine_mods(m)));
+            let ok = self.with_doc_in(ti, fr, |d, h| {
+                d.click_in(fr, h, point.0, point.1, fscroll, js::engine_mods(m))
+            });
             if ti != self.cur
                 || self.tabs[ti].load.is_some()
                 || self.tabs[ti].page.address != page_before
@@ -1380,7 +1465,7 @@ impl App {
         }
         let t = self.tab();
         match t.page.doc.hit_test(px, py, t.scroll) {
-            Some(Hit::Link(link)) => {
+            Some(Hit::Link(link, lf)) => {
                 if button == 2 {
                     return;
                 }
@@ -1388,9 +1473,16 @@ impl App {
                     return; // the engine ran it (or scripts are off)
                 }
                 self.focus(None);
-                let new_tab =
-                    m.meta || m.ctrl || button == 3 || link.target.as_deref() == Some("_blank");
-                self.follow(&link.url, new_tab, m.alt || link.download);
+                self.tab_mut().page.doc.set_focused_frame(fr);
+                let new_tab = m.meta || m.ctrl || button == 3;
+                self.follow_in(
+                    lf,
+                    &link.url,
+                    link.target.as_deref(),
+                    new_tab,
+                    m.alt || link.download,
+                    true,
+                );
             }
             Some(Hit::Control(id)) => {
                 let Some(c) = self.tab().page.doc.control(id).cloned() else {
@@ -1422,7 +1514,10 @@ impl App {
                     _ => {}
                 }
             }
-            None => self.focus(None),
+            None => {
+                self.focus(None);
+                self.tab_mut().page.doc.set_focused_frame(fr);
+            }
         }
     }
 
@@ -1527,6 +1622,8 @@ impl App {
             self.finish(id, kind, out, cert, peer);
         }
         changed |= self.net_tick();
+        self.frames_sweep();
+        changed |= self.frames_tick();
         for a in self.profile.take_inbox() {
             let target = address::interpret(&a);
             if self.tabs.len() < MAX_TABS {
@@ -1571,9 +1668,13 @@ impl App {
                     d.state = DlState::Failed(format!("{} {}", r.status, r.reason));
                     self.say(&format!("Download failed: {} {}", r.status, r.reason));
                 }
-                Outcome::Image(Ok(_)) | Outcome::Net(_) => {}
+                Outcome::Image(Ok(_)) | Outcome::Net(_) | Outcome::Refused(_) => {}
             }
             self.refresh_internal(Internal::Downloads);
+            return;
+        }
+        if kind == Kind::Frame {
+            self.frame_finished(id, out, cert, peer);
             return;
         }
         if kind == Kind::Script {
@@ -1679,6 +1780,12 @@ impl App {
                     self.js_on,
                 );
                 page.status = resp.status;
+                page.ref_policy = resp
+                    .header("referrer-policy")
+                    .and_then(browserkit::netpolicy::ReferrerPolicy::parse_header)
+                    .unwrap_or(browserkit::netpolicy::ReferrerPolicy::DEFAULT);
+                let doc_id = self.next_doc_id();
+                page.doc_id = doc_id;
                 if resp.status >= 400 && page.title.is_empty() {
                     page.title = format!("{} {}", resp.status, resp.reason);
                 }
@@ -1705,20 +1812,29 @@ impl App {
                     if let Some(e) = t.history.current_mut() {
                         e.scroll = scroll;
                     }
-                    t.history.push(&addr);
+                    t.history.push_doc(&addr, doc_id);
+                } else if let Some((old, _)) = &load.restore {
+                    // Back or forward: the entry keeps its frames; its document is this one now.
+                    t.history.rebind(*old, doc_id);
+                    t.history.set_top_doc(doc_id);
                 } else {
-                    t.history.replace(&addr);
+                    t.history.replace_doc(&addr, doc_id);
                 }
                 if let Some(e) = t.history.current_mut() {
                     e.title = title.clone();
                 }
                 t.show(page, 0);
+                if let Some((_, plan)) = load.restore.clone() {
+                    t.frames.restore = plan;
+                }
                 t.anchor = load.fragment.clone();
                 if let Some(s) = load.scroll {
                     t.scroll = s;
                     t.target = s;
                 }
                 self.visits.add(&addr, &title, net::now_secs());
+                // Its frames start loading before its scripts run: they hold its `load` back.
+                self.sync_frames(ti);
                 self.feed(ti);
                 // Its scripts start now (inline ones run, external ones are fetched).
                 self.run_page(ti);
@@ -1747,12 +1863,17 @@ impl App {
                 }
                 t.show(page, 0);
             }
-            Outcome::Saved(..) | Outcome::SaveFailed(_) | Outcome::Image(_) | Outcome::Net(_) => {}
+            Outcome::Saved(..)
+            | Outcome::SaveFailed(_)
+            | Outcome::Image(_)
+            | Outcome::Net(_)
+            | Outcome::Refused(_) => {}
         }
     }
 
-    /// Give tab `ti`'s page the stylesheets and images it waits for that have come (or
-    /// failed), and fetch the rest. Nothing over plain http on a secure page (mixed content).
+    /// Give tab `ti`'s page (and its frames) the stylesheets and images they wait for that have
+    /// come (or failed), and fetch the rest. Nothing over plain http on a secure page (mixed
+    /// content).
     pub fn feed(&mut self, ti: usize) {
         let Some(t) = self.tabs.get(ti) else {
             return;
@@ -1760,20 +1881,44 @@ impl App {
         if t.page.kind != PageKind::Web {
             return;
         }
-        let secure = t
-            .page
-            .url
-            .as_ref()
-            .is_some_and(|u| u.scheme == Scheme::Https);
-        let site = t
-            .page
-            .url
-            .as_ref()
-            .map(|u| site_of(&u.host))
-            .unwrap_or_default();
+        for f in t.page.doc.all_ids() {
+            self.feed_frame(ti, f);
+        }
+    }
+
+    fn feed_frame(&mut self, ti: usize, f: FrameId) {
+        let Some(t) = self.tabs.get(ti) else {
+            return;
+        };
+        // The document's own address decides what is mixed content and whose cookies a
+        // subresource may carry.
+        let (secure, site) = if f.is_top() {
+            (
+                t.page
+                    .url
+                    .as_ref()
+                    .is_some_and(|u| u.scheme == Scheme::Https),
+                t.page
+                    .url
+                    .as_ref()
+                    .map(|u| site_of(&u.host))
+                    .unwrap_or_default(),
+            )
+        } else {
+            match t.frames.meta.get(&f) {
+                Some(m) => (
+                    m.ancestor_url
+                        .as_ref()
+                        .is_some_and(|u| u.scheme == Scheme::Https)
+                        || self.parent_chain(ti, f).iter().flatten().any(|u| u.scheme == Scheme::Https),
+                    m.sub_site.clone(),
+                ),
+                None => return,
+            }
+        };
         // Supplying a stylesheet can ask for more (@import, background images): a few rounds.
         for _ in 0..8 {
-            let pending = self.tabs[ti].page.doc.pending();
+            let pending = self.tabs[ti].page.doc.pending(f);
             let mut waiting = 0;
             let mut supplied = false;
             for r in pending.into_iter().take(300) {
@@ -1785,7 +1930,7 @@ impl App {
                         let img = st.picture().unwrap();
                         if let ResourceKind::Image(id) = r.kind {
                             let size = (img.w as u32, img.h as u32);
-                            self.tabs[ti].page.doc.supply_image(id, Some(size));
+                            self.tabs[ti].page.doc.supply_image(f, id, Some(size));
                             self.tabs[ti].page.shown.insert(r.url.clone());
                             supplied = true;
                         }
@@ -1795,16 +1940,16 @@ impl App {
                         self.tabs[ti]
                             .page
                             .doc
-                            .supply_stylesheet(&r.url, Some(&body));
+                            .supply_stylesheet(f, &r.url, Some(&body));
                         supplied = true;
                     }
                     Some(ImgState::Failed) => {
                         match r.kind {
                             ResourceKind::Image(id) => {
-                                self.tabs[ti].page.doc.supply_image(id, None)
+                                self.tabs[ti].page.doc.supply_image(f, id, None)
                             }
                             ResourceKind::Stylesheet => {
-                                self.tabs[ti].page.doc.supply_stylesheet(&r.url, None)
+                                self.tabs[ti].page.doc.supply_stylesheet(f, &r.url, None)
                             }
                         }
                         supplied = true;
@@ -1839,16 +1984,16 @@ impl App {
             }
             // External scripts.
             let mut scripted = false;
-            for u in self.tabs[ti].page.doc.pending_scripts().into_iter().take(100) {
+            for u in self.tabs[ti].page.doc.pending_scripts(f).into_iter().take(100) {
                 match self.scripts.get(&u) {
                     Some(ImgState::Loading(_)) => waiting += 1,
                     Some(ImgState::Sheet(body)) => {
                         let body = body.clone();
-                        self.tabs[ti].page.doc.supply_script(&u, Some(&body));
+                        self.tabs[ti].page.doc.supply_script(f, &u, Some(&body));
                         scripted = true;
                     }
                     Some(_) => {
-                        self.tabs[ti].page.doc.supply_script(&u, None);
+                        self.tabs[ti].page.doc.supply_script(f, &u, None);
                         scripted = true;
                     }
                     None => {
@@ -1865,21 +2010,25 @@ impl App {
                                 waiting += 1;
                             }
                             None => {
-                                self.tabs[ti].page.doc.supply_script(&u, None);
+                                self.tabs[ti].page.doc.supply_script(f, &u, None);
                                 scripted = true;
                             }
                         }
                     }
                 }
             }
-            self.tabs[ti].page.waiting = waiting;
+            if f.is_top() {
+                self.tabs[ti].page.waiting = waiting;
+            } else if let Some(m) = self.tabs[ti].frames.meta.get_mut(&f) {
+                m.waiting = waiting;
+            }
             if scripted {
-                self.run_page(ti);
+                self.run_frame(ti, f);
             }
             if supplied {
                 self.tabs[ti].page.laid_w = 0;
                 // The load event may be due now.
-                if self.tabs[ti].page.doc.scripting() {
+                if self.tabs[ti].page.doc.scripting_in(f) {
                     self.tabs[ti].last_run = 0;
                 }
             } else if !scripted {
@@ -2021,6 +2170,10 @@ fn main(args: &rt::Args) -> i32 {
         )),
         net_jobs: BTreeMap::new(),
         net_inbox: alloc::collections::VecDeque::new(),
+        frame_jobs: BTreeMap::new(),
+        pending_sandbox: BTreeMap::new(),
+        next_doc: 0,
+        pointer: (0, 0),
         log,
         image_pixels: 0,
         surface: Surface::new(W, H, 0xFFFFFF),
@@ -2074,9 +2227,13 @@ fn main(args: &rt::Args) -> i32 {
                 }
             }
             Some(Event::Down { x, y, button }) => app.click(x, y, button, m),
+            Some(Event::Drag { x, y }) => {
+                app.pointer = (x, y);
+                dirty = false;
+            }
             Some(Event::Scroll(d)) => {
                 if app.popup.is_none() {
-                    app.scroll_by(d * 60);
+                    app.wheel(d * 60);
                 }
             }
             Some(Event::Key(Key::Char('j'), mods)) if mods.meta && mods.alt => {

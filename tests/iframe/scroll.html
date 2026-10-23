@@ -1,25 +1,23 @@
 <!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Scrolling frames</title>
 <script src="/report.js"></script>
-<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+<style>
+  body { font-family: sans-serif; margin: 0; background: #fffdf8; color: #3a2e28; height: 1600px; }
+  h3 { position: absolute; left: 20px; top: 6px; margin: 0; }
+  iframe { position: absolute; border: 2px solid #b8a48c; background: #fff; }
+  #tall { left: 20px; top: 40px; width: 420px; height: 160px; }
+  #in { left: 20px; top: 230px; width: 420px; height: 110px; }
+  #pad { position: absolute; left: 20px; top: 380px; }
+</style>
 </head><body>
-<h2>A frame with more in it than it shows</h2>
-<iframe id="tall" name="tall" src="/tall" width="420" height="160"></iframe>
-<iframe id="in" name="in" src="/input-child.html" width="420" height="110"></iframe>
-<div style="height: 1400px; background: linear-gradient(#fffdf8, #efe6d4)">the parent goes on and on</div>
+<h3>A frame with more in it than it shows</h3>
+<iframe id="tall" name="tall" src="/tall"></iframe>
+<iframe id="in" name="in" src="/input-child.html"></iframe>
+<p id="pad">the parent goes on and on below here</p>
 <script>
-  var scrolls = [], inputs = [];
   window.addEventListener('message', function (e) {
-    var d = String(e.data);
-    if (d.indexOf('scrolled:') === 0) scrolls.push(d.slice(9));
-    if (d.indexOf('input:') === 0) inputs.push(d.slice(6));
+    console.log('IFRTEST scroll message ' + e.data);
   });
   window.addEventListener('scroll', function () { console.log('IFRTEST scroll parent-scrolled ' + Math.round(window.scrollY)); });
-  window.__report = function (label) {
-    report('scroll', label + '-frame-scrolls', scrolls.join(','));
-    report('scroll', label + '-inputs', inputs.join(' | '));
-    report('scroll', label + '-parent-y', Math.round(window.scrollY));
-    report('scroll', label + '-frame-y', document.getElementById('tall').contentWindow.scrollY);
-  };
 </script>
 </body></html>

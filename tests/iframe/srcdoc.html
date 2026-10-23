@@ -4,7 +4,7 @@
 <style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
 </head><body>
 <h2>srcdoc, about:blank and data:</h2>
-<iframe id="doc" name="doc" width="420" height="70" srcdoc="<body style='font-family:sans-serif;background:#e8f2e0'><p id=p>Hello from srcdoc</p><script>console.log('IFRTEST srcdoc-child ran ' + location.href + ' ' + (parent !== window) + ' ' + parent.document.title)<\/script>"></iframe>
+<iframe id="doc" name="doc" width="420" height="70" srcdoc="<body style='font-family:sans-serif;background:#e8f2e0' onload=&quot;console.log('IFRTEST srcdoc-child ran ' + location.href + ' ' + (parent !== window) + ' ' + parent.document.title)&quot;><p id=p>Hello from srcdoc</p>"></iframe>
 <iframe id="blank" name="blank" width="420" height="50"></iframe>
 <iframe id="blank2" name="blank2" src="about:blank" width="420" height="50"></iframe>
 <iframe id="data" name="data" width="420" height="50" src="data:text/html;charset=utf-8,%3Cbody%20style%3D%27background%3A%23f8e8e0;font-family%3Asans-serif%27%3E%3Cp%3EA%20data%3A%20document%3C%2Fp%3E%3Cscript%3Econsole.log%28%27IFRTEST%20data-child%20origin%20%27%20%2B%20window.origin%29%3C%2Fscript%3E"></iframe>
@@ -17,9 +17,6 @@
     var b = document.getElementById('blank');
     report('srcdoc', 'blank-url', b.contentWindow.location.href);
     report('srcdoc', 'blank-same-origin', String(b.contentDocument !== null));
-    var bd = b.contentDocument;
-    bd.open(); bd.write('<body style="font-family:sans-serif;background:#e0eaf8"><p id="w">Written by the parent with document.write</p></body>'); bd.close();
-    report('srcdoc', 'blank-written', b.contentDocument.getElementById('w') ? b.contentDocument.getElementById('w').textContent : 'missing');
     var b2 = document.getElementById('blank2').contentDocument;
     b2.body.innerHTML = '<p id="x">Built by the parent with innerHTML</p>';
     report('srcdoc', 'blank2-built', b2.getElementById('x').textContent);

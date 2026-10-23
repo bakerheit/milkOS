@@ -7,10 +7,10 @@ use alloc::vec::Vec;
 use browserkit::address::Internal;
 use browserkit::certinfo::CertInfo;
 use browserkit::engine::Rect;
-use browserkit::history::History;
 use browserkit::netpolicy::{Limiter, Limits};
 use milkweb::url::Url;
-use webengine::NetRequest;
+use scriptnet::frame::history::SessionHistory;
+use webengine::{FrameId, NetRequest};
 
 use crate::net::JobId;
 use crate::web::Doc;
@@ -48,6 +48,10 @@ pub struct Page {
     /// The kind of address the page came from (None: unknown; the policy guesses from the
     /// name), which limits what its scripts may reach on the local network.
     pub space: Option<browserkit::netpolicy::AddressSpace>,
+    /// The `Referrer-Policy` its response set: what its frames' requests send as `Referer`.
+    pub ref_policy: browserkit::netpolicy::ReferrerPolicy,
+    /// The document's number in the session history.
+    pub doc_id: u64,
 }
 
 impl Page {
@@ -78,6 +82,8 @@ impl Page {
             shown: alloc::collections::BTreeSet::new(),
             waiting: 0,
             space: None,
+            ref_policy: browserkit::netpolicy::ReferrerPolicy::DEFAULT,
+            doc_id: 0,
         }
     }
 
@@ -101,10 +107,13 @@ pub struct Load {
     /// Back and forward return to where the page was scrolled.
     pub scroll: Option<i32>,
     pub started_ms: u64,
+    /// Back or forward to an entry: the document it was (to rebind in the history) and where its
+    /// frames were.
+    pub restore: Option<(u64, alloc::vec::Vec<scriptnet::frame::history::Reload>)>,
 }
 
 pub struct Tab {
-    pub history: History,
+    pub history: SessionHistory,
     pub page: Page,
     pub load: Option<Load>,
     /// Page pixels from the top, and where smooth scrolling is heading.
@@ -118,6 +127,8 @@ pub struct Tab {
     pub anchor: Option<String>,
     /// Find in page: the matches (each one's rectangles, page coordinates) and the current one.
     pub found: Vec<Vec<Rect>>,
+    /// ... and for each, the frame it is in and the rectangles in that frame's own space.
+    pub found_in: Vec<(FrameId, Vec<Rect>)>,
     pub found_at: usize,
     /// sessionStorage, per origin, for as long as the tab lives.
     pub session: alloc::collections::BTreeMap<String, browserkit::storage::Area>,
@@ -132,8 +143,11 @@ pub struct Tab {
     /// The page's script requests: how many may run, those waiting for their turn, those
     /// running (by the page's request id, with the fetch job), and the log.
     pub limiter: Limiter,
-    pub net_wait: alloc::collections::BTreeMap<u32, NetRequest>,
-    pub net_run: alloc::collections::BTreeMap<u32, crate::net::JobId>,
+    /// Keyed by (frame, the request's id in that frame's document).
+    pub net_wait: alloc::collections::BTreeMap<(u32, u32), NetRequest>,
+    pub net_run: alloc::collections::BTreeMap<(u32, u32), crate::net::JobId>,
+    /// The page's frames: what each one loaded from, and the loads under way.
+    pub frames: crate::frames::FrameTable,
     pub net_log: alloc::collections::VecDeque<NetLogEntry>,
 }
 
@@ -160,7 +174,7 @@ static NEXT_UID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::
 impl Tab {
     pub fn new(page: Page) -> Tab {
         Tab {
-            history: History::new(),
+            history: SessionHistory::new(),
             page,
             load: None,
             scroll: 0,
@@ -170,6 +184,7 @@ impl Tab {
             caret: 0,
             anchor: None,
             found: Vec::new(),
+            found_in: Vec::new(),
             found_at: 0,
             session: alloc::collections::BTreeMap::new(),
             console: alloc::collections::VecDeque::new(),
@@ -179,6 +194,7 @@ impl Tab {
             limiter: Limiter::new(&Limits::default()),
             net_wait: alloc::collections::BTreeMap::new(),
             net_run: alloc::collections::BTreeMap::new(),
+            frames: crate::frames::FrameTable::default(),
             net_log: alloc::collections::VecDeque::new(),
         }
     }
@@ -205,7 +221,9 @@ impl Tab {
         self.focus = None;
         self.caret = 0;
         self.found.clear();
+        self.found_in.clear();
         self.found_at = 0;
+        self.frames = crate::frames::FrameTable::default();
         self.console.clear();
         self.last_run = 0;
         // The old page's requests are over (the app cancels their jobs).

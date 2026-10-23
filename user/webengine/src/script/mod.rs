@@ -296,7 +296,8 @@ impl Runtime {
     /// timers due.
     pub fn run(&mut self, page: &mut Page, host: &mut dyn ScriptHost) -> bool {
         let start = host.now();
-        let pending_resources = !page.pending_resources().is_empty();
+        // `load` waits for the stylesheets and images, and for the frames the host is loading.
+        let pending_resources = !page.pending_resources().is_empty() || self.b.xf.hold_load.get();
         self.entry(page, host, |b, r| {
             let mut did = false;
             // Module work the page queued (import maps, module graphs, preloads) starts

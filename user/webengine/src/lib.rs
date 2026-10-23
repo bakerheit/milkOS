@@ -40,3 +40,4 @@ mod tests;
 mod kernel_png;
 
 pub use api::*;
+pub use script::hub::FrameSec;

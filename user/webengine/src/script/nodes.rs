@@ -2134,11 +2134,26 @@ fn d_ready_state(b: &Rc<Bridge>, r: &mut Realm, _: Value, _: &[Value]) -> JsResu
     };
     Ok(r.string(s))
 }
+/// `document.cookie` of a document with an opaque origin (a sandbox without
+/// `allow-same-origin`, a `data:` document) is a SecurityError.
+fn opaque_cookie_check(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    if b.xf.sec.borrow().opaque {
+        return Err(dom_error(
+            r,
+            "SecurityError",
+            "The document is sandboxed and lacks the 'allow-same-origin' flag.",
+        ));
+    }
+    Ok(())
+}
+
 fn d_cookie(b: &Rc<Bridge>, r: &mut Realm, _: Value, _: &[Value]) -> JsResult<Value> {
+    opaque_cookie_check(b, r)?;
     let s = b.host().map(|h| h.cookies()).unwrap_or_default();
     Ok(r.string(&s))
 }
 fn d_set_cookie(b: &Rc<Bridge>, r: &mut Realm, _: Value, a: &[Value]) -> JsResult<Value> {
+    opaque_cookie_check(b, r)?;
     let s = arg_str(r, a, 0)?;
     if let Some(h) = b.host() {
         h.set_cookie(&s);
@@ -2574,6 +2589,13 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
             }
             tag::IFRAME => {
                 reflect_url(b, r, o, "src", "src")?;
+                reflect_str(b, r, o, "name", "name")?;
+                reflect_str(b, r, o, "srcdoc", "srcdoc")?;
+                reflect_str(b, r, o, "allow", "allow")?;
+                reflect_str(b, r, o, "loading", "loading")?;
+                reflect_str(b, r, o, "referrerPolicy", "referrerpolicy")?;
+                reflect_str(b, r, o, "width", "width")?;
+                reflect_str(b, r, o, "height", "height")?;
                 getter(b, r, o, "contentWindow", |b, r, t, _| super::xwin::content_window(b, r, t), None)?;
                 getter(b, r, o, "contentDocument", |b, r, t, _| super::xwin::content_document(b, r, t), None)?;
             }

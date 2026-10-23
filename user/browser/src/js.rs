@@ -21,6 +21,9 @@ use browserkit::cookies::Jar;
 use browserkit::engine::{
     ConsoleLevel, KeyInput, KeyMods, PageRequest, ScriptHost, Storage, TextMeasurer, Viewport,
 };
+use scriptnet::frame::nav::{self, Choice};
+use webengine::FrameId;
+use browserkit::address::Target;
 use browserkit::font::Fonts;
 use browserkit::storage::{self, Area};
 use gui::{Event, Key, Mods, Window};
@@ -29,7 +32,7 @@ use rt::sys;
 use rt::thread::Mutex;
 
 use crate::sysfont::SysText;
-use crate::tab::{CONSOLE_LINES, PageKind, Tab};
+use crate::tab::{PageKind, Tab};
 use crate::{App, STATUS_H, TOP, now_ms};
 
 /// The app's side of a page's scripts, made for one call.
@@ -51,6 +54,10 @@ pub struct JsHost<'a> {
     log: bool,
     /// The slow bar has been shown during this call.
     asked: bool,
+    /// `document.cookie` works (not for a third-party frame or an opaque origin).
+    cookies_ok: bool,
+    /// `alert`, `confirm` and `prompt` do nothing (a sandbox without `allow-modals`).
+    no_modals: bool,
 }
 
 impl ScriptHost for JsHost<'_> {
@@ -71,11 +78,14 @@ impl ScriptHost for JsHost<'_> {
     }
     fn cookies(&mut self) -> String {
         match &self.url {
-            Some(u) => self.jar.lock().for_script(u, crate::net::now_secs()),
-            None => String::new(),
+            Some(u) if self.cookies_ok => self.jar.lock().for_script(u, crate::net::now_secs()),
+            _ => String::new(),
         }
     }
     fn set_cookie(&mut self, line: &str) {
+        if !self.cookies_ok {
+            return;
+        }
         if let Some(u) = &self.url {
             let _ = self.jar.lock().set_from_script(u, line, crate::net::now_secs());
         }
@@ -89,18 +99,27 @@ impl ScriptHost for JsHost<'_> {
         a.map(|a| a as &mut dyn Storage)
     }
     fn alert(&mut self, msg: &str) {
+        if self.no_modals {
+            return;
+        }
         if self.log {
             rt::println!("[browser] alert: {}", browserkit::clean_line(msg));
         }
         self.dialog(msg, false, None);
     }
     fn confirm(&mut self, msg: &str) -> bool {
+        if self.no_modals {
+            return false;
+        }
         if self.log {
             rt::println!("[browser] confirm: {}", browserkit::clean_line(msg));
         }
         self.dialog(msg, true, None).is_some()
     }
     fn prompt(&mut self, msg: &str, default: &str) -> Option<String> {
+        if self.no_modals {
+            return None;
+        }
         if self.log {
             rt::println!("[browser] prompt: {}", browserkit::clean_line(msg));
         }
@@ -312,17 +331,59 @@ pub fn origin(u: &Url) -> String {
 }
 
 impl App {
-    /// Run `f` with tab `ti`'s document and a host for its scripts. Saves localStorage
-    /// afterwards if the page changed it, and takes in what the scripts asked for.
+    /// Run `f` with tab `ti`'s document and a host for the scripts of its top page.
     pub fn with_doc<R>(
         &mut self,
         ti: usize,
         f: impl FnOnce(&mut crate::web::Doc, &mut JsHost) -> R,
     ) -> R {
-        let (lw, lh) = self.page_view(&self.tabs[ti]);
+        self.with_doc_in(ti, FrameId::TOP, f)
+    }
+
+    /// Run `f` with tab `ti`'s document and a host for the scripts of frame `frame` (its
+    /// viewport, its origin's storage, the cookies it may have, the dialogs it may show). Saves
+    /// localStorage afterwards if a script changed it, and takes in what the scripts asked for.
+    pub fn with_doc_in<R>(
+        &mut self,
+        ti: usize,
+        frame: FrameId,
+        f: impl FnOnce(&mut crate::web::Doc, &mut JsHost) -> R,
+    ) -> R {
         let dark = self.th.dark;
         let sys: SysText = self.sys;
-        let origin = self.tabs[ti].page.url.as_ref().map(origin);
+        // What this frame is: its viewport, scroll, address and rights.
+        let (vp, scroll, url, origin, cookies_ok, no_modals) = {
+            let t = &self.tabs[ti];
+            if frame.is_top() {
+                let (lw, lh) = self.page_view(t);
+                (
+                    Viewport {
+                        dark,
+                        ..Viewport::new(lw.max(1), lh.max(1))
+                    },
+                    t.scroll,
+                    t.page.url.clone(),
+                    t.page.url.as_ref().map(origin),
+                    true,
+                    false,
+                )
+            } else {
+                let vp = t
+                    .page
+                    .doc
+                    .viewport_of(frame)
+                    .unwrap_or(Viewport::new(300, 150));
+                let m = t.frames.meta.get(&frame);
+                (
+                    Viewport { dark, ..vp },
+                    t.page.doc.frame_scroll(frame).1,
+                    m.and_then(|m| m.ancestor_url.clone()),
+                    m.and_then(|m| m.storage_key.clone()),
+                    m.is_some_and(|m| m.cookies_ok),
+                    m.is_some_and(|m| m.sandbox.no_modals()),
+                )
+            }
+        };
         // localStorage of this origin, read from the profile the first time.
         if let Some(o) = &origin
             && !self.local.contains_key(o)
@@ -355,12 +416,9 @@ impl App {
         };
         let mut host = JsHost {
             fonts: Fonts { text: Some(&sys) },
-            vp: Viewport {
-                dark,
-                ..Viewport::new(lw.max(1), lh.max(1))
-            },
-            scroll: t.scroll,
-            url: t.page.url.clone(),
+            vp,
+            scroll,
+            url,
             jar: &fetch.jar,
             local: origin.as_ref().and_then(|o| local.get_mut(o)),
             session,
@@ -371,12 +429,16 @@ impl App {
             wait_until: 0.0,
             log: *log,
             asked: false,
+            cookies_ok,
+            no_modals,
         };
         let out = f(&mut t.page.doc, &mut host);
         let (stopped, quit) = (host.stopped, host.quit);
         drop(host);
         if stopped {
-            self.tabs[ti].page.doc.stop_scripts();
+            // "Stop it" ends the scripts of the frame that was running; the rest of the page
+            // carries on. (The page's own: all of them were its.)
+            self.tabs[ti].page.doc.stop_scripts_in(frame);
             self.say("Stopped the page's scripts (it was too slow)");
         }
         if quit {
@@ -406,7 +468,7 @@ impl App {
         let mut changed = false;
         for ti in 0..self.tabs.len() {
             let t = &self.tabs[ti];
-            if t.page.kind != PageKind::Web || !t.page.doc.scripting() {
+            if t.page.kind != PageKind::Web || !t.page.doc.any_scripting() {
                 continue;
             }
             let due = t
@@ -423,7 +485,13 @@ impl App {
                 continue;
             }
             self.tabs[ti].last_run = now.max(1);
-            let did = self.with_doc(ti, |d, h| d.run(h));
+            let mut did = false;
+            for f in self.tabs[ti].page.doc.all_ids() {
+                if !self.tabs[ti].page.doc.scripting_in(f) {
+                    continue;
+                }
+                did |= self.with_doc_in(ti, f, |d, h| d.run(f, h));
+            }
             if did && ti == self.cur {
                 changed = true;
             }
@@ -431,19 +499,28 @@ impl App {
         changed
     }
 
-    /// Run tab `ti`'s scripts now (a script body or resource came in).
+    /// Run the scripts of tab `ti`'s page (the top document) now.
     pub fn run_page(&mut self, ti: usize) -> bool {
         if ti >= self.tabs.len() || !self.tabs[ti].page.doc.scripting() {
             return false;
         }
         self.tabs[ti].last_run = now_ms().max(1);
-        self.with_doc(ti, |d, h| d.run(h))
+        self.with_doc(ti, |d, h| d.run(FrameId::TOP, h))
+    }
+
+    /// Run the scripts of frame `f` of tab `ti` now.
+    pub fn run_frame(&mut self, ti: usize, f: FrameId) -> bool {
+        if ti >= self.tabs.len() || !self.tabs[ti].page.doc.scripting_in(f) {
+            return false;
+        }
+        self.tabs[ti].last_run = now_ms().max(1);
+        self.with_doc_in(ti, f, |d, h| d.run(f, h))
     }
 
     /// When the scripts of the current tab next want to run (ms, monotonic), or a frame.
     pub fn script_wake(&self) -> Option<u64> {
         let t = self.tab();
-        if !t.page.doc.scripting() {
+        if !t.page.doc.any_scripting() {
             return None;
         }
         if t.page.doc.wants_frame() {
@@ -455,8 +532,10 @@ impl App {
     /// requestAnimationFrame callbacks of the current tab, before it is drawn.
     pub fn animation_frame(&mut self) {
         let ti = self.cur;
-        if self.tabs[ti].page.doc.wants_frame() {
-            self.with_doc(ti, |d, h| d.frame(h));
+        for f in self.tabs[ti].page.doc.all_ids() {
+            if self.tabs[ti].page.doc.wants_frame_in(f) {
+                self.with_doc_in(ti, f, |d, h| d.frame_anim(f, h));
+            }
         }
     }
 
@@ -465,22 +544,21 @@ impl App {
         if ti >= self.tabs.len() {
             return;
         }
-        let lines = self.tabs[ti].page.doc.take_console();
-        for l in lines {
-            let level = match l.level {
-                ConsoleLevel::Log => "log",
-                ConsoleLevel::Info => "info",
-                ConsoleLevel::Warn => "warn",
-                ConsoleLevel::Error => "error",
-                ConsoleLevel::Debug => "debug",
-            };
-            let text = browserkit::clean_line(&l.text);
-            rt::println!("[browser] console {level}: {text}");
-            let t = &mut self.tabs[ti];
-            if t.console.len() >= CONSOLE_LINES {
-                t.console.pop_front();
+        let ids = self.tabs[ti].page.doc.all_ids();
+        for &f in &ids {
+            let lines = self.tabs[ti].page.doc.take_console(f);
+            if lines.is_empty() {
+                continue;
             }
-            t.console.push_back((l.level, text));
+            let label = self.tabs[ti]
+                .frames
+                .meta
+                .get(&f)
+                .map(|m| m.label.clone())
+                .unwrap_or_default();
+            for l in lines {
+                self.console_line(ti, &label, l.level, &l.text);
+            }
         }
         // The focus as the page has it now (controls may have come and gone).
         let t = &mut self.tabs[ti];
@@ -502,30 +580,58 @@ impl App {
             }
             self.dirty = true;
         }
-        let reqs = self.tabs[ti].page.doc.take_requests();
-        for r in reqs {
-            self.page_request(ti, r);
+        for &f in &ids {
+            let reqs = self.tabs[ti].page.doc.take_requests(f);
+            for r in reqs {
+                if ti >= self.tabs.len() {
+                    return;
+                }
+                self.page_request(ti, f, r);
+            }
+            if ti < self.tabs.len() {
+                self.net_requests(ti, f);
+            }
         }
-        self.net_requests(ti);
+        if ti < self.tabs.len() {
+            self.sync_frames(ti);
+        }
     }
 
-    fn page_request(&mut self, ti: usize, r: PageRequest) {
+    fn page_request(&mut self, ti: usize, frame: FrameId, r: PageRequest) {
         if self.log {
             rt::println!("[browser] script asks: {r:?}");
         }
         match r {
             PageRequest::Navigate { url, replace } => {
-                let target = browserkit::address::interpret(&url);
-                let from = self.tabs[ti]
-                    .page
-                    .url
-                    .as_ref()
-                    .map(|u| browserkit::cookies::site_of(&u.host));
-                self.go(ti, target, !replace, from, None);
+                if frame.is_top() {
+                    let target = browserkit::address::interpret(&url);
+                    let from = self.tabs[ti]
+                        .page
+                        .url
+                        .as_ref()
+                        .map(|u| browserkit::cookies::site_of(&u.host));
+                    self.go(ti, target, !replace, from, None);
+                } else {
+                    self.script_navigates(ti, frame, frame, &url, replace);
+                }
+            }
+            PageRequest::NavigateOther {
+                target,
+                url,
+                replace,
+            } => self.script_navigates(ti, frame, target, &url, replace),
+            PageRequest::NavigateTarget { url, target } => {
+                if ti == self.cur {
+                    self.follow_in(frame, &url, Some(&target), false, false, false);
+                }
             }
             PageRequest::Reload => {
                 if ti == self.cur {
-                    self.reload();
+                    if frame.is_top() {
+                        self.reload();
+                    } else {
+                        self.reload_frame(ti, frame);
+                    }
                 }
             }
             PageRequest::History(d) => {
@@ -534,35 +640,56 @@ impl App {
                 }
             }
             PageRequest::SetAddress { url, replace } => {
-                let t = &mut self.tabs[ti];
-                if replace {
-                    t.history.replace(&url);
-                } else {
-                    let scroll = t.scroll;
-                    if let Some(e) = t.history.current_mut() {
-                        e.scroll = scroll;
+                if frame.is_top() {
+                    let t = &mut self.tabs[ti];
+                    if replace {
+                        t.history.top_same_doc(&url, true);
+                    } else {
+                        let scroll = t.scroll;
+                        if let Some(e) = t.history.current_mut() {
+                            e.scroll = scroll;
+                        }
+                        t.history.top_same_doc(&url, false);
                     }
-                    t.history.push(&url);
+                    if let Ok(u) = Url::parse(&url) {
+                        t.page.url = Some(u);
+                    }
+                    t.page.address = url;
+                } else {
+                    let t = &mut self.tabs[ti];
+                    if let Some(m) = t.frames.meta.get(&frame) {
+                        let path = m.path.clone();
+                        t.history.frame_same_doc(&path, &url, replace);
+                    }
                 }
-                if let Ok(u) = Url::parse(&url) {
-                    t.page.url = Some(u);
-                }
-                t.page.address = url;
                 self.dirty = true;
             }
             PageRequest::ScrollTo { y, .. } => {
-                let max = self.max_scroll(&self.tabs[ti]);
-                let t = &mut self.tabs[ti];
-                t.target = y.clamp(0, max);
+                if frame.is_top() {
+                    let max = self.max_scroll(&self.tabs[ti]);
+                    let t = &mut self.tabs[ti];
+                    t.target = y.clamp(0, max);
+                } else {
+                    self.tabs[ti].page.doc.set_frame_scroll(frame, y);
+                    self.tabs[ti].page.laid_w = 0;
+                }
                 self.dirty = true;
             }
             PageRequest::Submit(sub) => {
                 if ti == self.cur {
-                    self.send_submission(sub);
+                    self.submit_from(frame, sub);
                 }
             }
             PageRequest::Open(url) => {
-                if self.tabs.len() < crate::MAX_TABS {
+                let sb = self.sandbox_of_frame(ti, frame);
+                if sb.no_popups() {
+                    self.frame_console(
+                        ti,
+                        frame,
+                        ConsoleLevel::Error,
+                        "Blocked opening a new tab from a sandboxed frame: the sandbox does not have 'allow-popups'.",
+                    );
+                } else if self.tabs.len() < crate::MAX_TABS {
                     let target = browserkit::address::interpret(&url);
                     let p = self.internal_page(browserkit::address::Internal::NewTab);
                     self.tabs.push(Tab::new(p));
@@ -572,11 +699,13 @@ impl App {
                 }
             }
             PageRequest::Title => {
-                let t = &mut self.tabs[ti];
-                t.page.title = t.page.doc.title();
-                let title = t.page.title.clone();
-                if let Some(e) = t.history.current_mut() {
-                    e.title = title;
+                if frame.is_top() {
+                    let t = &mut self.tabs[ti];
+                    t.page.title = t.page.doc.title();
+                    let title = t.page.title.clone();
+                    if let Some(e) = t.history.current_mut() {
+                        e.title = title;
+                    }
                 }
                 self.dirty = true;
             }
@@ -588,31 +717,92 @@ impl App {
         }
     }
 
+    /// A script of `source` navigates frame `target` (itself, or another window) to `url`.
+    fn script_navigates(&mut self, ti: usize, source: FrameId, target: FrameId, url: &str, replace: bool) {
+        let base = self.tabs[ti]
+            .page
+            .doc
+            .base_url_of(source)
+            .or_else(|| self.tabs[ti].page.url.clone());
+        let t = browserkit::address::resolve(base.as_ref(), url);
+        let sb = self.sandbox_of_frame(ti, source);
+        let choice = Choice::Frame(target.0);
+        let verdict = {
+            let tree = crate::frames::tree_of(&self.tabs[ti].page.doc);
+            nav::allowed(&tree, source.0, &choice, sb, false)
+        };
+        if let Err(d) = verdict {
+            self.refuse_navigation(ti, source, d);
+            return;
+        }
+        let Target::Web(u, fragment) = t else {
+            if let Target::Internal(_) | Target::Search(..) = t {
+                let from = None;
+                if target.is_top() {
+                    self.go(ti, t, !replace, from, None);
+                }
+            }
+            return;
+        };
+        if target.is_top() {
+            let from = self.referrer_site(ti, source);
+            self.go(ti, Target::Web(u, fragment), !replace, from, None);
+        } else {
+            self.navigate_frame(
+                ti,
+                target,
+                crate::frames::Nav {
+                    url: u,
+                    fragment,
+                    post: None,
+                    replace,
+                    source,
+                    how: None,
+                },
+            );
+        }
+    }
+
     /// A key for the page (focused element or body), before the app acts on it: false if a
     /// script cancelled it.
     pub fn page_key(&mut self, k: Key, m: Mods, up: bool) -> bool {
         let ti = self.cur;
-        if !self.tabs[ti].page.doc.scripting() {
+        let ff = self.tabs[ti].page.doc.focused_frame();
+        if !self.tabs[ti].page.doc.scripting_in(ff) {
             return true;
         }
         let Some(ki) = key_input(k, m) else {
             return true;
         };
-        self.with_doc(ti, |d, h| d.key(h, &ki, up))
+        self.with_doc_in(ti, ff, |d, h| d.key(ff, h, &ki, up))
     }
 
-    /// The user changed control `id` of the current page.
+    /// The user changed control `id` (a combined index) of the current page.
     pub fn control_input(&mut self, id: usize) {
         let ti = self.cur;
-        if self.tabs[ti].page.doc.scripting() {
-            self.with_doc(ti, |d, h| d.input(h, id));
+        let (f, _) = crate::web::split(id);
+        if self.tabs[ti].page.doc.scripting_in(f) {
+            self.with_doc_in(ti, f, |d, h| d.input(h, id));
         }
     }
 
-    /// The focus moved to `id` (or away): the page's focus events.
+    /// The focus moved to `id` (or away): the page's focus events, in the frame the control
+    /// is in (and in the frame it leaves).
     pub fn page_focus(&mut self, id: Option<usize>) {
         let ti = self.cur;
-        self.with_doc(ti, |d, h| d.set_focus(h, id));
+        let old = self.tabs[ti].page.doc.focused_frame();
+        match id {
+            Some(i) => {
+                let (f, _) = crate::web::split(i);
+                if f != old {
+                    self.with_doc_in(ti, old, |d, h| d.set_focus(h, None));
+                }
+                self.with_doc_in(ti, f, |d, h| d.set_focus(h, Some(i)));
+            }
+            None => {
+                self.with_doc_in(ti, old, |d, h| d.set_focus(h, None));
+            }
+        }
     }
 
     /// Turn JavaScript on or off (kept in ~/Library/Browser/settings); the page reloads.

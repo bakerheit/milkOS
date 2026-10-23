@@ -1342,7 +1342,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         g,
         "origin",
         move |r, _t, _| {
-            let s = split_url(&location_href(&b2)).origin;
+            let s = b2.origin().text;
             Ok(r.string(&s))
         },
         None,

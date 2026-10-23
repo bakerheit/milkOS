@@ -234,6 +234,96 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   restyled (a change's parent's subtree, so sibling selectors see it), and the page is laid
   out again once. Hit testing, the focus and form state follow the new tree.
 
+## Frames
+
+`<iframe>` works (`<frame>` / `<frameset>`, `<object>` and `<embed>` do not). The engine
+(`user/webengine`, its api.rs "Frames") keeps a tree of frames, each a document of its own laid out
+into the slot of its `<iframe>` (300 x 150 by default, `width` / `height` and CSS, `frameborder=0`,
+`scrolling=no`), painted into the page's display list, clipped and scrolled, and hit-tested, focused
+and searched through. The Browser (`user/browser/src/frames.rs`) loads them, and the rules are
+`scriptnet::frame` (pure, host-tested). Never more than 5 levels of frames inside frames or 32 frames
+on a page: the rest are left empty with a line on the console.
+
+* **Loading.** `src` is fetched as a navigation: the page as the `Referer` (cut by the `referrerpolicy`
+  attribute, the page's `Referrer-Policy` or strict-origin-when-cross-origin), `Sec-Fetch-Dest:
+  iframe`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Site`, redirects followed (each hop judged), the
+  answer shown by its type: HTML and text as pages, pictures in a page of their own, anything else (a
+  file, `Content-Disposition: attachment`) refused with a page saying so in the frame. `srcdoc` wins
+  over `src`; `about:blank` (or no `src`) is an empty document the parent can build with
+  `contentDocument`; a `data:` address is decoded in place (an opaque origin); `javascript:`,
+  `blob:`, `file:`, `ftp:` and the web's refused ports are refused. An error (404 and 500 pages are
+  shown as the server sent them), a refused connection, a certificate problem, a timeout, a blocked
+  frame: the **frame** shows the page saying so, never the tab, and its `load` event still fires. The
+  parent's `load` waits for its frames; each frame's `load` waits for the frames inside it.
+* **Who may frame what.** `X-Frame-Options` (`DENY`, `SAMEORIGIN` against every ancestor; conflicting
+  values mean `DENY`; `ALLOWALL`, unknown values and the obsolete `ALLOW-FROM` are ignored with a
+  console note) and the `frame-ancestors` directive of `Content-Security-Policy` (`'none'`, `'self'`,
+  `*`, schemes, hosts with `*.` wildcards, ports; every ancestor must be allowed; it overrides
+  `X-Frame-Options`), enforced when the answer comes (so the request is made, and logged by the
+  server). A CSP `sandbox` directive applies. Skipped: every other CSP directive (`frame-src`,
+  `child-src`, `default-src`, ... so a page cannot restrict what it embeds), report-only policies,
+  `Cross-Origin-*-Policy`, `<meta>` CSP.
+* **Mixed content.** A plain-http frame (or redirect hop) under an https page or any https
+  ancestor is blocked, except to this machine (`localhost`, 127/8, `::1`), like `fetch`.
+* **Cookies.** A frame gets cookies and keeps them only if its address is on the same *site* as
+  every ancestor above it (so `a.test` > `b.test` > `a.test` is a third party at the bottom): the
+  existing no-third-party rule, with redirects judged by the cookie jar. `document.cookie` in a
+  third-party frame reads nothing and sets nothing; an opaque origin never has any.
+* **Sandbox** (`sandbox` attribute and the CSP directive; a frame also inherits its parent's
+  restrictions). Enforced: scripts (none run), same-origin (without `allow-same-origin` the origin is
+  opaque: `window.origin` is `"null"`, no cookies, no storage, never the same origin as anything,
+  `postMessage` events say `null`), forms, popups (`window.open`, `target=_blank`), top navigation
+  (`allow-top-navigation`, or `-by-user-activation` after a click), modals (`alert`, `confirm`,
+  `prompt` return at once), downloads, and always: a sandboxed document may navigate only itself, its
+  frames and (with the tokens) the top page. Parsed and kept, with no visible effect: `allow-popups-to-escape-sandbox`
+  (a popup is a plain tab), `allow-pointer-lock`, `allow-orientation-lock`, `allow-presentation`,
+  `allow-storage-access-by-user-activation`, `allow-top-navigation-to-custom-protocols`. A sandbox with
+  both `allow-scripts` and `allow-same-origin` gets the console note browsers give.
+* **Scripts.** One realm per frame, its own origin. `window.parent`, `top`, `frames` (`frames[0]`,
+  `frames.name`, `length`), `frameElement`, `window.name`, `iframe.contentWindow` /
+  `contentDocument`. Same-origin frames reach each other through proxies (script/hub.rs,
+  remote.rs): `parent.document.getElementById("x").textContent = "y"`, calling a function of the
+  other frame, giving it a callback, listeners on its nodes. Another origin sees only `postMessage`,
+  `location` (set `href`, `replace`), `closed`, `frames`, `length`, `parent`, `top`, `opener`,
+  `focus`, `blur`, `close` and `w[0]`; everything else throws `SecurityError`
+  (`document.domain` relaxing does not exist). Limits of the proxies: they are not instances of the other
+  realm's classes (`instanceof Document` is false), `Array.isArray(proxy)` is false, only
+  `Symbol.iterator` crosses, a frame being navigated away from is "dead" (`InvalidAccessError`), and
+  calls nest at most 8 deep. A runaway script in one frame does not stop the others: the "page is
+  slow" bar stops the frame that is running.
+* **postMessage.** `window.postMessage(message, targetOrigin)` and the options form, delivered as a
+  task of the target's event loop (never synchronously), `event.data` / `origin` / `source` /
+  `lastEventId` / `ports` (always empty). `targetOrigin` `"*"`, `"/"` or an address; a message to a
+  frame whose origin is not it is dropped silently, as to a frame that is gone; a bad target origin is
+  a `SyntaxError`. The structured clone copies strings, numbers (`NaN`, infinities, `-0`), booleans,
+  `null`, `undefined`, plain objects and arrays, `Date`, `RegExp`, `Map`, `Set`, `Error`,
+  `ArrayBuffer` and the typed arrays, with cycles and shared references; a function, symbol, DOM node
+  or window is a `DataCloneError`. Not done: transfer lists, `MessageChannel`, `Blob`s.
+* **Links, forms, `location`.** `target=` takes `_self`, `_parent`, `_top`, `_blank` or a frame's
+  name (the frame itself, then the ones inside it, then each ancestor's); a name nobody has is a new
+  tab. A form submits into a frame, `a.click()` and `location = ...` inside a frame navigate it; a script
+  of one frame setting another's `location` is a request from the *asking* frame, so its sandbox
+  decides. Cmd-click and Alt-click behave as they do on the page.
+* **Session history.** Joint, as browsers keep it (`scriptnet::frame::history`): a navigation of a frame
+  adds an entry that is the whole frame tree as it was with that frame changed; the frame's first
+  load is part of the page's own entry; the same address or `location.replace` replaces. Back and
+  Forward step the entries: a frame whose document is the same keeps it (a fragment or `pushState`
+  address and the scroll are restored), one whose document differs is fetched again from the address
+  in the entry, and the frames it had come back to the addresses they had. Nothing is kept in a
+  back-forward cache. A POST is not repeated: going back to its result fetches it with GET.
+* **Input.** A click goes to the frame under the pointer (its `mousedown` / `click` run there, links
+  and controls are the frame's) and gives it the keyboard; Tab walks the controls of the page and
+  its frames in order; typing, Space and the arrows go to the frame with the keyboard. The wheel
+  scrolls the innermost frame under the pointer that can scroll, then its parents, then the page.
+  Client windows get no pointer movement without a button, so "under the pointer" means where it
+  last was when a button went down. Find in page searches every frame and scrolls the frame to the
+  match. The console panel and the serial line name the frame a message came from
+  (`console log [frame a/b]: ...`).
+* **Not done.** `<frame>` / `<frameset>`, `<object>` / `<embed>` documents, `window.open` with a
+  name for an existing window, `window.opener`, `document.domain`, Permissions-Policy (`allow` is
+  parsed), fullscreen, `loading=lazy` is a 600 px lookahead, `postMessage` ports, a frame's own
+  history entry for a form POST body.
+
 ## Inside
 
 * `net.rs`: every page, image, stylesheet and download is a job on its own thread (512 KiB
@@ -345,7 +435,7 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   parser. MutationObserver callbacks never run (the observers exist and never call back);
   layout after a change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
   don't apply.
-* No `<iframe>`, no HTTP cache or HTTP/2, no file upload in forms, no
+* No HTTP cache or HTTP/2, no file upload in forms, no
   `<video>` / `<audio>`; arithmetic-coded or 12-bit JPEG, colour profiles.
 * "Site" for cookies is the last two labels of the host (with a short list of two-label
   suffixes like `co.uk`), not the full public suffix list.

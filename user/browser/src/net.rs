@@ -57,6 +57,9 @@ pub enum Kind {
     Download,
     /// A request a page's script made (fetch, XMLHttpRequest): run by the network policy.
     Request,
+    /// A document for an `<iframe>`: fetched like a page, but never a download, and every hop is
+    /// checked against the frame rules (mixed content, refused ports).
+    Frame,
 }
 
 /// A decoded picture: a still one, or an animation (GIF, WebP) to step through.
@@ -75,6 +78,9 @@ pub enum Outcome {
     SaveFailed(String),
     /// A script request's end.
     Net(Box<Result<scriptnet::Done, scriptnet::Failed>>),
+    /// A frame's fetch was stopped by a rule on the way (a redirect to plain http under a secure
+    /// page, ...).
+    Refused(scriptnet::frame::load::Refusal),
 }
 
 /// What a job and the window share.
@@ -93,6 +99,8 @@ pub struct Shared {
     pub head: Option<NetHead>,
     /// A page: the address it was fetched from (4 or 16 bytes), for the private-network rule.
     pub peer: Option<Vec<u8>>,
+    /// A frame's fetch hit a rule on a redirect: why it was stopped.
+    pub refused: Option<scriptnet::frame::load::Refusal>,
 }
 
 pub struct Job {
@@ -108,6 +116,8 @@ struct Spec {
     ctx: Context,
     /// A script request, and what the policy needs to run it.
     script: Option<ScriptSpec>,
+    /// A frame: the addresses of its ancestors (top first), checked on every hop.
+    chain: Option<Vec<Option<Url>>>,
 }
 
 /// A script request to run.
@@ -202,6 +212,9 @@ struct BrowserHooks {
     jar: Arc<Mutex<Jar>>,
     ctx: Context,
     shared: Arc<Mutex<Shared>>,
+    chain: Option<Vec<Option<Url>>>,
+    /// The address being fetched (for resolving a redirect's Location).
+    base: Url,
 }
 
 fn is_redirect(status: u16, headers: &[(String, String)]) -> bool {
@@ -217,7 +230,16 @@ impl Hooks for BrowserHooks {
 
     fn response(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> Option<usize> {
         self.jar.lock().set_all(url, headers, now_secs(), &self.ctx);
+        self.base = url.clone();
         if is_redirect(status, headers) {
+            // A frame's redirect is judged before it is followed: mixed content, refused ports.
+            if let Some(chain) = &self.chain
+                && let Some((_, loc)) = headers.iter().find(|(k, _)| k == "location")
+                && let Ok(next) = url.join(loc)
+                && let Err(why) = scriptnet::frame::load::check_hop(chain, &next)
+            {
+                self.shared.lock().refused = Some(why);
+            }
             return None;
         }
         let h = |n: &str| {
@@ -228,7 +250,7 @@ impl Hooks for BrowserHooks {
         };
         match self.kind {
             Kind::Image => Some(MAX_IMAGE),
-            Kind::Style | Kind::Script | Kind::Request => None,
+            Kind::Style | Kind::Script | Kind::Request | Kind::Frame => None,
             Kind::Page
                 if !download::is_download(
                     h("content-type").unwrap_or(""),
@@ -252,7 +274,8 @@ impl Hooks for BrowserHooks {
     }
 
     fn stop(&mut self) -> bool {
-        self.shared.lock().cancel
+        let s = self.shared.lock();
+        s.cancel || s.refused.is_some()
     }
 }
 
@@ -330,9 +353,11 @@ fn run(
         jar,
         ctx: spec.ctx,
         shared: shared.clone(),
+        chain: spec.chain,
+        base: spec.req.url.clone(),
     };
     let r = http::fetch(&mut net, &spec.req, &options(kind), &mut hooks);
-    if kind == Kind::Page
+    if matches!(kind, Kind::Page | Kind::Frame)
         && let Some(a) = net.inner.peer
     {
         shared.lock().peer = Some(match a.ip.unmapped() {
@@ -341,7 +366,9 @@ fn run(
         });
     }
     let name = shared.lock().download.clone();
+    let refused = shared.lock().refused.take();
     let out = match (r, name) {
+        (_, _) if refused.is_some() => Outcome::Refused(refused.unwrap()),
         (Ok(resp), Some(name)) if resp.status < 400 || kind == Kind::Download => {
             match save(&downloads, &name, &resp.body) {
                 Ok(p) => Outcome::Saved(p, resp.body.len()),
@@ -461,15 +488,28 @@ impl Fetcher {
                 req,
                 ctx,
                 script: None,
+                chain: None,
             }),
         });
         // Pages, stylesheets and scripts go first: they jump the queue of images.
-        if matches!(kind, Kind::Page | Kind::Style | Kind::Script) {
+        if matches!(kind, Kind::Page | Kind::Style | Kind::Script | Kind::Frame) {
             self.waiting.push_front(id);
         } else {
             self.waiting.push_back(id);
         }
         self.pump();
+        id
+    }
+
+    /// Start (or queue) a frame's document. `chain`: the ancestors' addresses (top first), for
+    /// the checks on every redirect hop.
+    pub fn start_frame(&mut self, req: Request, ctx: Context, chain: Vec<Option<Url>>) -> JobId {
+        let id = self.start(Kind::Frame, req, ctx);
+        if let Some(j) = self.jobs.iter_mut().find(|j| j.id == id)
+            && let Some(s) = j.spec.as_mut()
+        {
+            s.chain = Some(chain);
+        }
         id
     }
 
@@ -487,6 +527,7 @@ impl Fetcher {
                 req: Request::get(&url),
                 ctx: Context::TopLevel { from: None },
                 script: Some(sc),
+                chain: None,
             }),
         });
         self.waiting.push_back(id);

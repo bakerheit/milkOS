@@ -254,7 +254,77 @@ pub(crate) enum Op {
     CheckCoercible,
     /// Throws if the top is not an object (iterator results).
     Nop,
+    // Fused pairs (see `fuse`): executed in place of the first op of the pair; the second op
+    // stays in the next slot (so a jump to it still works) and is skipped on the way past.
+    /// This; GetProp(c)
+    ThisProp(u32),
+    /// This; GetPropKeep(c)
+    ThisPropKeep(u32),
+    /// GetLocal(l); GetProp(c)
+    LocalProp(u32, u32),
+    /// GetLocal(l); GetPropKeep(c)
+    LocalPropKeep(u32, u32),
+    /// GetLocal(a); GetLocal(b)
+    Local2(u32, u32),
+    /// GetProp(c); GetProp(d)
+    PropProp(u32, u32),
+    /// SetProp(c); Pop
+    SetPropPop(u32),
+    /// StrictEq / StrictNe / Lt / Gt / Le / Ge; JumpIfFalse(t) (the target is read from the
+    /// next slot)
+    StrictEqJf,
+    StrictNeJf,
+    LtJf,
+    GtJf,
+    LeJf,
+    GeJf,
+    /// Int(i); StrictEq
+    StrictEqInt(i32),
+    /// Null; StrictEq / StrictNe
+    StrictEqNull,
+    StrictNeNull,
 }
+
+/// Replaces the first op of each hot pair by one op that does both, leaving the second op
+/// in place after it. A fused op ends up two slots on, so a jump into the middle of a pair
+/// (to the second op) still runs it alone, and handler ranges, line tables and jump targets
+/// (all instruction indices) need no changes. The fused op sets the program counter to the
+/// second op's slot before anything that can throw, so errors are placed exactly as they
+/// are for the unfused pair.
+pub(crate) fn fuse(ops: &mut [Op]) {
+    #[cfg(test)]
+    if NO_FUSE.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let orig: alloc::vec::Vec<Op> = ops.to_vec();
+    for i in 0..orig.len().saturating_sub(1) {
+        let f = match (orig[i], orig[i + 1]) {
+            (Op::This, Op::GetProp(c)) => Op::ThisProp(c),
+            (Op::This, Op::GetPropKeep(c)) => Op::ThisPropKeep(c),
+            (Op::GetLocal(l), Op::GetProp(c)) => Op::LocalProp(l, c),
+            (Op::GetLocal(l), Op::GetPropKeep(c)) => Op::LocalPropKeep(l, c),
+            (Op::GetLocal(a), Op::GetLocal(b)) => Op::Local2(a, b),
+            (Op::GetProp(c), Op::GetProp(d)) => Op::PropProp(c, d),
+            (Op::SetProp(c), Op::Pop) => Op::SetPropPop(c),
+            (Op::StrictEq, Op::JumpIfFalse(_)) => Op::StrictEqJf,
+            (Op::StrictNe, Op::JumpIfFalse(_)) => Op::StrictNeJf,
+            (Op::Lt, Op::JumpIfFalse(_)) => Op::LtJf,
+            (Op::Gt, Op::JumpIfFalse(_)) => Op::GtJf,
+            (Op::Le, Op::JumpIfFalse(_)) => Op::LeJf,
+            (Op::Ge, Op::JumpIfFalse(_)) => Op::GeJf,
+            (Op::Int(n), Op::StrictEq) => Op::StrictEqInt(n),
+            (Op::Null, Op::StrictEq) => Op::StrictEqNull,
+            (Op::Null, Op::StrictNe) => Op::StrictNeNull,
+            _ => continue,
+        };
+        ops[i] = f;
+    }
+}
+
+/// Tests: run without fusing, to compare results with and without.
+#[cfg(test)]
+pub(crate) static NO_FUSE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 pub(crate) enum Const {
     Num(f64),
@@ -377,5 +447,46 @@ impl Code {
             Err(0) => self.span.0,
             Err(i) => self.lines[i - 1].1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuse_replaces_the_first_op_of_a_pair_only() {
+        let mut ops = alloc::vec![
+            Op::This,
+            Op::GetProp(3),
+            Op::GetProp(4),
+            Op::StrictEq,
+            Op::JumpIfFalse(9),
+            Op::GetLocal(1),
+            Op::GetLocal(2),
+            Op::Pop,
+        ];
+        let before = ops.clone();
+        fuse(&mut ops);
+        assert_eq!(ops[0], Op::ThisProp(3));
+        assert_eq!(
+            ops[1],
+            Op::PropProp(3, 4),
+            "overlapping pairs fuse independently"
+        );
+        assert_eq!(
+            ops[2],
+            Op::GetProp(4),
+            "no pair starts here: GetProp, StrictEq"
+        );
+        assert_eq!(ops[3], Op::StrictEqJf);
+        assert_eq!(
+            ops[4], before[4],
+            "the second op stays for a jump into the middle"
+        );
+        assert_eq!(ops[5], Op::Local2(1, 2));
+        assert_eq!(ops[6], before[6]);
+        assert_eq!(ops[7], before[7]);
+        assert_eq!(ops.len(), before.len());
     }
 }

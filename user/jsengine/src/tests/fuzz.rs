@@ -782,7 +782,11 @@ fn typed_program(rng: &mut Rng) -> String {
                 out.push_str(&alloc::format!("t = new {kind}({args}); "));
                 for _ in 0..1 + rng.below(3) {
                     let m = rng.pick(METHODS);
-                    let a1 = if rng.chance(40) { rng.pick(FNS) } else { rng.pick(NUMS) };
+                    let a1 = if rng.chance(40) {
+                        rng.pick(FNS)
+                    } else {
+                        rng.pick(NUMS)
+                    };
                     let a2 = rng.pick(NUMS);
                     let a3 = rng.pick(NUMS);
                     out.push_str(&alloc::format!(
@@ -791,13 +795,28 @@ fn typed_program(rng: &mut Rng) -> String {
                 }
                 let i = rng.pick(NUMS);
                 let v = rng.pick(NUMS);
-                out.push_str(&alloc::format!("t[{i}] = {v}; r = t[{i}]; delete t[{i}]; ({i}) in t; Object.keys(t).length; "));
+                out.push_str(&alloc::format!(
+                    "t[{i}] = {v}; r = t[{i}]; delete t[{i}]; ({i}) in t; Object.keys(t).length; "
+                ));
             }
             5 => {
                 let m = rng.pick(&[
-                    "getInt8", "getUint8", "getInt16", "getUint16", "getInt32", "getUint32",
-                    "getFloat32", "getFloat64", "setInt8", "setUint8", "setInt16", "setUint16",
-                    "setInt32", "setUint32", "setFloat32", "setFloat64",
+                    "getInt8",
+                    "getUint8",
+                    "getInt16",
+                    "getUint16",
+                    "getInt32",
+                    "getUint32",
+                    "getFloat32",
+                    "getFloat64",
+                    "setInt8",
+                    "setUint8",
+                    "setInt16",
+                    "setUint16",
+                    "setInt32",
+                    "setUint32",
+                    "setFloat32",
+                    "setFloat64",
                 ]);
                 let a = rng.pick(NUMS);
                 let b = rng.pick(NUMS);
@@ -815,11 +834,20 @@ fn typed_program(rng: &mut Rng) -> String {
             }
             7 => {
                 let a = rng.pick(&[
-                    "u8", "buf", "new Uint8Array(0)", "new Uint8Array([0xff, 0xfe, 0xfd])",
-                    "new Uint8Array([0xe2, 0x82])", "new Uint8Array([0xf0, 0x9f, 0x98, 0x80])",
-                    "new Uint16Array([0xd800])", "'str'", "null", "[1]", "f64",
+                    "u8",
+                    "buf",
+                    "new Uint8Array(0)",
+                    "new Uint8Array([0xff, 0xfe, 0xfd])",
+                    "new Uint8Array([0xe2, 0x82])",
+                    "new Uint8Array([0xf0, 0x9f, 0x98, 0x80])",
+                    "new Uint16Array([0xd800])",
+                    "'str'",
+                    "null",
+                    "[1]",
+                    "f64",
                 ]);
-                let label = rng.pick(&["'utf-8'", "'utf-16le'", "'latin1'", "'bogus'", "undefined"]);
+                let label =
+                    rng.pick(&["'utf-8'", "'utf-16le'", "'latin1'", "'bogus'", "undefined"]);
                 let opts = rng.pick(&["{}", "{ fatal: true }", "{ ignoreBOM: true }", "undefined"]);
                 out.push_str(&alloc::format!(
                     "d = new TextDecoder({label}, {opts}); d.decode({a}, {{ stream: true }}); d.decode({a}); d.decode(); \
@@ -828,19 +856,50 @@ fn typed_program(rng: &mut Rng) -> String {
             }
             8 => {
                 let a = rng.pick(&[
-                    "''", "'abc'", "'YWJj'", "'YWJj='", "'YW=Jj'", "'\\xff'", "'\\u0100'", "' Y W J j '",
-                    "'a'", "'!!!!'", "String(r)", "'A'.repeat(1000)", "undefined",
+                    "''",
+                    "'abc'",
+                    "'YWJj'",
+                    "'YWJj='",
+                    "'YW=Jj'",
+                    "'\\xff'",
+                    "'\\u0100'",
+                    "' Y W J j '",
+                    "'a'",
+                    "'!!!!'",
+                    "String(r)",
+                    "'A'.repeat(1000)",
+                    "undefined",
                 ]);
-                out.push_str(&alloc::format!("try {{ atob({a}) }} catch (e) {{}} try {{ btoa({a}) }} catch (e) {{}} "));
+                out.push_str(&alloc::format!(
+                    "try {{ atob({a}) }} catch (e) {{}} try {{ btoa({a}) }} catch (e) {{}} "
+                ));
             }
             _ => {
                 let a = rng.pick(&[
-                    "u8", "buf", "f64.subarray(1)", "new DataView(buf, 2, 4)", "[u8, buf]",
-                    "{ a: u8, b: { c: buf } }", "new Map([[1, u8]])", "[new Date(0), /x/g, new Error('e')]",
-                    "function () {}", "Symbol()", "{ get x() { throw 1 } }", "new Set([buf])",
+                    "u8",
+                    "buf",
+                    "f64.subarray(1)",
+                    "new DataView(buf, 2, 4)",
+                    "[u8, buf]",
+                    "{ a: u8, b: { c: buf } }",
+                    "new Map([[1, u8]])",
+                    "[new Date(0), /x/g, new Error('e')]",
+                    "function () {}",
+                    "Symbol()",
+                    "{ get x() { throw 1 } }",
+                    "new Set([buf])",
                 ]);
-                let o = rng.pick(&["undefined", "{ transfer: [buf] }", "{ transfer: [u8] }", "{ transfer: [] }", "{ transfer: [buf, buf] }", "null"]);
-                out.push_str(&alloc::format!("r = structuredClone({a}, {o}); String(r); "));
+                let o = rng.pick(&[
+                    "undefined",
+                    "{ transfer: [buf] }",
+                    "{ transfer: [u8] }",
+                    "{ transfer: [] }",
+                    "{ transfer: [buf, buf] }",
+                    "null",
+                ]);
+                out.push_str(&alloc::format!(
+                    "r = structuredClone({a}, {o}); String(r); "
+                ));
             }
         }
         out.push_str("} catch (e) { String(e) }\n");
@@ -937,6 +996,119 @@ fn fuzz_mutated_tests() {
         });
     });
 }
+
+/// What a program does, as text: its value or error (with position and stack), the job queue
+/// result and what is left unhandled.
+fn observe(src: &str) -> String {
+    let mut r = Realm::new(Options::default());
+    r.set_limits(Limits {
+        max_heap_bytes: 8 << 20,
+        max_steps: 100_000,
+        max_call_depth: 200,
+        ..Limits::default()
+    });
+    r.set_stack_limit(2 << 20);
+    let mut out = String::new();
+    match r.eval(src, "fuzz.js") {
+        Ok(v) => out.push_str(&r.inspect(v)),
+        Err(e) => out.push_str(&alloc::format!("{}", r.report(&e))),
+    }
+    match r.run_jobs() {
+        Ok(()) => {}
+        Err(e) => out.push_str(&alloc::format!("|job {}", r.report(&e))),
+    }
+    for v in r.take_unhandled_rejections() {
+        out.push_str(&alloc::format!("|unhandled {}", r.inspect(v)));
+    }
+    out
+}
+
+/// Fused instruction pairs (bytecode::fuse) must change nothing observable: the same
+/// results, errors, error positions and stacks with and without them.
+#[test]
+fn fusion_is_invisible() {
+    use core::sync::atomic::Ordering;
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0xf05e);
+        let corpus: Vec<&str> = super::conformance::FILES.iter().map(|f| f.1).collect();
+        let mut cases: Vec<String> = Vec::new();
+        for _ in 0..iters() / 3 {
+            cases.push(program(&mut rng));
+        }
+        for _ in 0..iters() / 6 {
+            cases.push(typed_program(&mut rng));
+        }
+        for _ in 0..iters() / 6 {
+            let base = corpus[rng.below(corpus.len())];
+            let chars: Vec<char> = base.chars().collect();
+            let start = rng.below(chars.len());
+            let len = 200 + rng.below(1500);
+            let window: String = chars[start..(start + len).min(chars.len())]
+                .iter()
+                .collect();
+            cases.push(mutate(&mut rng, &window));
+        }
+        // Hand-written ones: every fused pair, in error and non-error situations.
+        for extra in FUSION_CASES {
+            cases.push(String::from(*extra));
+        }
+        let mut diffs = Vec::new();
+        for (i, src) in cases.iter().enumerate() {
+            crate::bytecode::NO_FUSE.store(true, Ordering::Relaxed);
+            let plain = observe(src);
+            crate::bytecode::NO_FUSE.store(false, Ordering::Relaxed);
+            let fused = observe(src);
+            if plain != fused {
+                diffs.push(alloc::format!(
+                    "case {i}:\n{src}\n--- unfused:\n{plain}\n--- fused:\n{fused}"
+                ));
+                if diffs.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        crate::bytecode::NO_FUSE.store(false, Ordering::Relaxed);
+        assert!(diffs.is_empty(), "{}", diffs.join("\n\n"));
+    });
+}
+
+const FUSION_CASES: &[&str] = &[
+    // this.x / local.x, plain and as a method receiver, on missing receivers
+    "class A { constructor() { this.x = 1 } get() { return this.x } m() { return this.nope.deeper } } var a = new A(); [a.get(), (() => { try { return a.m() } catch (e) { return e.message + '@' + e.stack } })()].join()",
+    "var o = { a: { b: { c: 7 } } }; function f(p) { return p.a.b.c + p.a.b.c } f(o)",
+    "var u; function g(p) { return p.a.b } try { g(u) } catch (e) { e.message + e.stack }",
+    "var u = { a: null }; function g(p) { return p.a.b } try { g(u) } catch (e) { e.message + e.stack }",
+    "function g(p, q) { return p.x + q.y } try { g({ x: 1 }, null) } catch (e) { e.message + e.stack }",
+    "function h(a, b) { return a + b } h(1, 2) + h('a', 'b')",
+    // compares feeding branches, with objects whose valueOf throws or counts
+    "var n = 0; var o = { valueOf() { n++; return 5 } }; function f(a, b) { if (a < b) return 'lt'; else if (a > b) return 'gt'; else return 'eq' } [f(o, 6), f(7, o), f(o, o), n].join()",
+    "var o = { valueOf() { throw new RangeError('v') } }; function f(a) { if (a <= 3) return 1; return 2 } try { f(o) } catch (e) { e.name + e.stack }",
+    "function f(a, b) { if (a === b) return 1; if (a !== b) return 2 } [f(1, 1), f('a', 'b'), f(NaN, NaN), f(null, null), f(undefined, null)].join()",
+    "function f(a) { if (a === 1) return 'one'; if (a === null) return 'null'; if (a !== null) return 'other' } [f(1), f(null), f(2), f('1')].join()",
+    "function f(a) { return a === 3 } [f(3), f('3'), f(3.5)].join()",
+    "function f(a) { return a === null || a !== null } f(0)",
+    // setting then discarding; frozen and accessor targets
+    "'use strict'; var o = Object.freeze({ a: 1 }); try { o.a = 2; } catch (e) { e.message + e.stack }",
+    "var log = []; var o = { set a(v) { log.push(v) } }; o.a = 5; o.a = 6; log.join()",
+    "var p = { set z(v) { this._z = v } }; var o = Object.create(p); o.z = 1; o.q = 2; [o._z, o.q, Object.keys(o).join()].join()",
+    "var o = {}; Object.defineProperty(o, 'r', { value: 1, writable: false }); o.r = 2; var d = Object.create(o); d.r = 3; [o.r, d.r, d.hasOwnProperty('r')].join()",
+    "var a = [1, 2, 3]; a.foo = 1; a.length = 1; a.bar = 2; [a.length, a.foo, a.bar].join()",
+    "var s = 'hello'; [s.length, s.charAt(1), s.nope, s.toUpperCase()].join()",
+    "var o = { get g() { return this.k }, k: 4 }; function f(x) { return x.g + x.g } f(o)",
+    // jump into the middle of a pair: loops and conditionals
+    "var s = 0; for (var i = 0; i < 10; i++) { var o = { v: i }; s += o.v; if (o.v === 5) continue; s += 1 } s",
+    "function f(n) { var s = 0; while (n > 0) { s += n; n--; if (n < 3) break } return s } f(10)",
+    "function f(a) { return a ? a.b.c : a.d } try { f({ b: { c: 1 } }) + f(0) } catch (e) { e.message + e.stack }",
+    "function f(a, b) { try { return a.x.y + b.z } catch (e) { return 'caught ' + e.message } finally { var t = a } } [f({ x: { y: 1 } }, { z: 2 }), f(null, 1), f({ x: {} }, 1)].join()",
+    "function* g(o) { var a = o.x; yield a; yield o.y.z; } var it = g({ x: 1, y: { z: 2 } }); [it.next().value, it.next().value, it.next().done].join()",
+    "async function f(o) { var a = await o.p; return a.q.r } f({ p: { q: { r: 5 } } }).then(v => { globalThis.out = v }); 1",
+    "var x = { a: 1 }; with_ = function (o) { return o.a === 1 ? o.a : o.b }; with_(x)",
+    "class B { constructor() { this.v = 1 } } class D extends B { constructor() { super(); this.w = this.v === 1 ? this.v : 0 } } new D().w",
+    "var o = { a: 1 }; function f() { return o.a === o.a } f()",
+    "function f(a, b) { return a.length === b.length } f([1, 2], 'ab')",
+    "var o; function f() { return o.a.b } try { f() } catch (e) { e.stack }",
+    "function f(a) { var t = a.x; var u = a.y; return t + u } try { f({ x: 1, get y() { throw new TypeError('in getter') } }) } catch (e) { e.stack }",
+];
 
 #[test]
 fn fuzz_typed_programs() {

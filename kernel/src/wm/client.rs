@@ -128,6 +128,9 @@ struct Client {
     pa: usize,
     pages: usize,
     title: String,
+    /// The title the window was created with: the app's name in the menu bar, whatever
+    /// the client later sets the title to (an editor shows its file name there).
+    app: String,
     title_gen: u32,
     /// Bounding box of committed changes not yet shown.
     dirty: Option<Rect>,
@@ -178,6 +181,7 @@ pub fn create(pid: u32, w: u32, h: u32, title: &str) -> Option<Created> {
             pa,
             pages,
             title: String::from(title),
+            app: String::from(title),
             title_gen: 0,
             dirty: None,
             events: VecDeque::new(),
@@ -492,6 +496,7 @@ pub struct ClientView {
     id: u32,
     front: Option<SharedFront>,
     title: String,
+    app: String,
     title_gen: u32,
     /// The pointer is pressed inside (so moves are sent as drags too).
     last: (i32, i32),
@@ -500,11 +505,19 @@ pub struct ClientView {
 impl ClientView {
     pub fn new(id: u32) -> Box<ClientView> {
         let title = info(id).map_or(String::from("App"), |i| i.2);
-        let front = CLIENTS.lock().get(&id).map(|cl| cl.front.clone());
+        let (front, app) = {
+            let c = CLIENTS.lock();
+            let cl = c.get(&id);
+            (
+                cl.map(|cl| cl.front.clone()),
+                cl.map_or_else(|| title.clone(), |cl| cl.app.clone()),
+            )
+        };
         Box::new(ClientView {
             id,
             front,
             title,
+            app,
             title_gen: 0,
             last: (-1, -1),
         })
@@ -518,6 +531,10 @@ fn mods_bits(m: super::event::Mods) -> u32 {
 impl WindowContents for ClientView {
     fn title(&self) -> &str {
         &self.title
+    }
+
+    fn app_name(&self) -> &str {
+        &self.app
     }
 
     fn menus(&self) -> &'static [&'static str] {

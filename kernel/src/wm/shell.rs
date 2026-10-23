@@ -1087,8 +1087,8 @@ impl Desktop {
                 None => "milkOS",
                 Some(w) => match w.app {
                     App::About => "milkOS",
-                    // A userland app: its window title names it.
-                    App::Client(_) => w.contents.title(),
+                    // A userland app: the title it opened its window with names it.
+                    App::Client(_) => w.contents.app_name(),
                     a => a.name(),
                 },
             },

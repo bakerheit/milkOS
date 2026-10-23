@@ -147,6 +147,50 @@ impl Net for BrowserNet {
     }
 }
 
+impl scriptnet::ScriptNet for BrowserNet {
+    /// The same lookups as `rt::web` (so names, `localhost`, `.local` and numeric addresses
+    /// behave as for pages), but the addresses come back to the policy, which refuses the
+    /// ones a public page may not reach before anything is connected.
+    fn resolve(&mut self, host: &str) -> Result<Vec<Vec<u8>>, Error> {
+        use rt::net::{Ip, SockAddr};
+        let want = self.inner.want;
+        let local = host == "localhost" || SockAddr::parse(host, 0).is_some() || rt::mdns::is_local(host);
+        let addrs: Vec<SockAddr> = if local {
+            rt::net::resolve_all(host, want).map_err(Error::NoDns)?
+        } else {
+            let ips = rt::net::kernel_resolve(host, want).map_err(|e| match e.0 {
+                1 => Error::Offline(String::from(host)),
+                2 | 61 => Error::NotFound(String::from(host)),
+                22 => Error::Url(milkweb::url::UrlError::BadHost(String::from(host))),
+                _ => Error::NoDns(rt::net::lookup_words(host, e)),
+            })?;
+            ips.into_iter().map(|ip| SockAddr::new(ip, 0)).collect()
+        };
+        Ok(addrs
+            .into_iter()
+            .map(|a| match a.ip.unmapped() {
+                Ip::V4(b) => b.to_vec(),
+                Ip::V6(b) => b.to_vec(),
+            })
+            .collect())
+    }
+
+    fn connect_ip(&mut self, ip: &[u8], port: u16, timeout_ms: u64) -> Result<Box<dyn Transport>, Error> {
+        use rt::net::Ip;
+        let text = match ip.len() {
+            4 => alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
+            16 => {
+                let mut b = [0u8; 16];
+                b.copy_from_slice(ip);
+                alloc::format!("{}", Ip::V6(b))
+            }
+            _ => return Err(Error::Connect(String::from("a bad address"))),
+        };
+        // A numeric address connects without another lookup.
+        self.inner.connect(&text, port, timeout_ms)
+    }
+}
+
 pub fn now_secs() -> i64 {
     (sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000) as i64
 }

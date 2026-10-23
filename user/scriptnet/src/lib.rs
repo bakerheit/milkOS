@@ -22,18 +22,20 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use browserkit::cookies::Context;
 use browserkit::netpolicy::{
-    Begin, Config, Credentials, CacheMode, ErrorKind, Exchange, Guard, Headers, Method, Mode,
+    Hop, Begin, Config, Credentials, CacheMode, ErrorKind, Exchange, Guard, Headers, Method, Mode,
     NetError, Next, Page, PreflightCache, Redirect, ReferrerInit, ReferrerPolicy, RequestInit,
     ResponseMeta, ResponseType,
 };
 use browserkit::netpolicy::exchange::BodyInfo;
-use milkweb::http::{self, Net};
+use milkweb::http::{self, Net, Transport};
 use milkweb::url::Url;
 use webengine::{
     CredentialsMode, NetFailure, NetFailureKind, NetHead, NetKind, NetRequest, RedirectMode,
@@ -42,6 +44,65 @@ use webengine::{
 
 #[cfg(test)]
 mod tests;
+
+/// The network, as script requests need it: a [`Net`] that can also say what a name resolves
+/// to and connect to an address, so the policy can look at the address before anything is
+/// sent (a public page may not be tricked into reaching the local network by a name that
+/// points inward).
+pub trait ScriptNet: Net {
+    /// The addresses `host` names (4 or 16 bytes each), in the order to try them.
+    fn resolve(&mut self, host: &str) -> Result<Vec<Vec<u8>>, http::Error>;
+    /// Connect to one of them (within `timeout_ms`).
+    fn connect_ip(
+        &mut self,
+        ip: &[u8],
+        port: u16,
+        timeout_ms: u64,
+    ) -> Result<Box<dyn Transport>, http::Error>;
+}
+
+/// [`ScriptNet`] seen as a [`Net`] for one hop: every address is checked by the hop before
+/// it is connected to.
+struct Guarded<'a> {
+    net: &'a mut dyn ScriptNet,
+    hop: &'a Hop,
+    refused: &'a RefCell<Option<NetError>>,
+}
+
+impl Net for Guarded<'_> {
+    fn connect(&mut self, host: &str, port: u16, timeout_ms: u64) -> Result<Box<dyn Transport>, http::Error> {
+        let addrs = self.net.resolve(host)?;
+        let mut last = http::Error::Connect(format!("{host}: no address"));
+        let mut refused = None;
+        for a in addrs {
+            match self.hop.check_resolved(&a) {
+                Err(e) => refused = Some(e),
+                Ok(()) => match self.net.connect_ip(&a, port, timeout_ms) {
+                    Ok(t) => return Ok(t),
+                    Err(e) => last = e,
+                },
+            }
+        }
+        if let Some(e) = refused {
+            // Only the refusal matters if nothing else connected.
+            last = http::Error::Connect(format!("{e}"));
+            *self.refused.borrow_mut() = Some(e);
+        }
+        Err(last)
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        self.net.now_ms()
+    }
+
+    fn has_tls(&self) -> bool {
+        self.net.has_tls()
+    }
+
+    fn secure(&mut self, host: &str, stream: Box<dyn Transport>) -> Result<Box<dyn Transport>, http::Error> {
+        self.net.secure(host, stream)
+    }
+}
 
 /// The cookie jar, as the requests use it (the Browser's is shared with page loads).
 pub trait Cookies {
@@ -325,7 +386,7 @@ fn network_failure(f: &http::Failure, method: &str, cancelled: bool, timeout_ms:
 
 /// Run `req` to its end. `events` hears the head and the progress on the way.
 pub fn run(
-    net: &mut dyn Net,
+    net: &mut dyn ScriptNet,
     env: &Env<'_>,
     req: &NetRequest,
     events: &mut dyn Events,
@@ -372,9 +433,13 @@ pub fn run(
             let opts = options(env.cfg, left, accept, agent);
             let mut nh = http::NoHooks;
             hops += 1;
-            let resp = match http::fetch(net, &wreq, &opts, &mut nh) {
+            let refused = RefCell::new(None);
+            let resp = match http::fetch(&mut Guarded { net: &mut *net, hop: &hop, refused: &refused }, &wreq, &opts, &mut nh) {
                 Ok(r) => r,
                 Err(f) => {
+                    if let Some(e) = refused.into_inner() {
+                        return Err(Failed::policy(&e));
+                    }
                     return Err(network_failure(&f, "OPTIONS", false, total_ms));
                 }
             };
@@ -409,7 +474,8 @@ pub fn run(
             stopped: false,
         };
         hops += 1;
-        let result = http::fetch(net, &wreq, &opts, &mut hooks);
+        let refused = RefCell::new(None);
+        let result = http::fetch(&mut Guarded { net: &mut *net, hop: &hop, refused: &refused }, &wreq, &opts, &mut hooks);
         let (meta, redirect, error, stopped) = (hooks.meta.take(), hooks.redirect, hooks.error.take(), hooks.stopped);
         drop(hooks);
         if let Some(e) = error {
@@ -417,7 +483,12 @@ pub fn run(
         }
         let resp = match result {
             Ok(r) => r,
-            Err(f) => return Err(network_failure(&f, hop.method.as_str(), stopped, total_ms)),
+            Err(f) => {
+                if let Some(e) = refused.into_inner() {
+                    return Err(Failed::policy(&e));
+                }
+                return Err(network_failure(&f, hop.method.as_str(), stopped, total_ms));
+            }
         };
         if redirect {
             continue;

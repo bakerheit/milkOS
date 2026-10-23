@@ -125,6 +125,7 @@ TESTS=(
   "imgdec-unit|s|300|par|scripts/imgdec-test.sh"
   "fontkit-unit|s|300|par|scripts/fontkit-test.sh"
   "browserkit-unit|s|300|par|scripts/browserkit-test.sh"
+  "scriptnet-unit|s|300|par|scripts/scriptnet-test.sh"
   "webengine-unit|s|300|par|scripts/webengine-test.sh"
   "jsengine-unit|s|300|par|scripts/jsengine-test.sh"
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"

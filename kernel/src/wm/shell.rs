@@ -1082,7 +1082,7 @@ impl Desktop {
     pub(super) fn app_title(&self) -> String {
         String::from(match self.mode {
             Mode::Home => "Today",
-            Mode::Spaces => "Overview",
+            Mode::Spaces => "Spaces",
             Mode::Desktop => match self.focused_window() {
                 None => "milkOS",
                 Some(w) => match w.app {

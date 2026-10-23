@@ -994,7 +994,8 @@ fn build(name: &str) -> Option<Vec<Step>> {
                     .enter()
                     .wait(300);
             }
-            let (x, y) = super::shell::dock_tile_center("Store").unwrap_or(dock_icon_center(9));
+            let (x, y) =
+                super::shell::dock_tile_center("Milk Store").unwrap_or(dock_icon_center(9));
             b.wait(300).click(x, y).wait(4000);
         }
         // The notification drawer (SPEC "Notification drawer"): the four mockup states.

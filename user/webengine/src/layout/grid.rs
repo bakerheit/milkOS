@@ -105,14 +105,28 @@ fn resolve(lines: (GridLine, GridLine), n: usize) -> (Option<usize>, usize) {
 }
 
 /// Place the items (§8.5, sparse, row by row).
-fn place(boxes: &[LBox], ids: &[BoxId], ncols_explicit: usize) -> (Vec<Item>, usize, usize) {
+fn place(
+    boxes: &[LBox],
+    ids: &[BoxId],
+    ncols_explicit: usize,
+    container: &GridStyle,
+) -> (Vec<Item>, usize, usize) {
+    let ncols_explicit = ncols_explicit.max(container.area_size.1 as usize);
     let mut ncols = ncols_explicit.max(1);
     // Columns implied by definite placements widen the grid first.
     let mut pre: Vec<(BoxId, Option<usize>, usize, Option<usize>, usize)> = Vec::new();
     for &b in ids {
         let g = gstyle(&boxes[b as usize].style);
-        let (c, cs) = resolve(g.col, ncols_explicit);
-        let (r, rs) = resolve(g.row, 0);
+        let (mut c, mut cs) = resolve(g.col, ncols_explicit);
+        let (mut r, mut rs) = resolve(g.row, 0);
+        if let Some(name) = &g.area_name
+            && let Some(a) = container.areas.iter().find(|a| a.0 == *name)
+        {
+            r = Some(a.1 as usize);
+            c = Some(a.2 as usize);
+            rs = (a.3 - a.1) as usize;
+            cs = (a.4 - a.2) as usize;
+        }
         let cs = cs.clamp(1, MAX_TRACKS);
         let rs = rs.clamp(1, 1000);
         if let Some(c) = c {
@@ -410,7 +424,7 @@ pub fn intrinsic(boxes: &[LBox], cx: &Cx, g: BoxId) -> (Au, Au) {
         .filter(|&c| !boxes[c as usize].out_of_flow)
         .collect();
     let cols = expand(cx, &gs.columns, None, gap);
-    let (items, ncols, _) = place(boxes, &ids, cols.len());
+    let (items, ncols, _) = place(boxes, &ids, cols.len(), &gs);
     let tracks = implicit(&cols, gs.auto_columns, ncols);
     let spans = col_spans(boxes, cx, &items);
     let mx = size_tracks(cx, &tracks, &spans, None, gap, false);
@@ -444,7 +458,8 @@ pub fn layout_grid(boxes: &mut Vec<LBox>, cx: &Cx, g: BoxId, spec_h: Option<Au>)
         .collect();
     ids.sort_by_key(|&c| boxes[c as usize].style.order);
     let cols = expand(cx, &gs.columns, Some(gw), col_gap);
-    let (items, ncols, nrows) = place(boxes, &ids, cols.len());
+    let (items, ncols, nrows) = place(boxes, &ids, cols.len(), &gs);
+    let nrows = nrows.max(gs.area_size.0 as usize);
     let col_tracks = implicit(&cols, gs.auto_columns, ncols);
     let spans = col_spans(boxes, cx, &items);
     let mut widths = size_tracks(cx, &col_tracks, &spans, Some(gw), col_gap, true);

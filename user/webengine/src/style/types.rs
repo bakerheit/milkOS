@@ -617,6 +617,12 @@ pub struct GridStyle {
     pub column_flow: bool,
     pub col: (GridLine, GridLine),
     pub row: (GridLine, GridLine),
+    /// grid-template-areas: (name, row start, col start, row end, col end), 0-based, end
+    /// exclusive; and the area grid's size (rows, columns).
+    pub areas: Rc<[(Rc<str>, u16, u16, u16, u16)]>,
+    pub area_size: (u16, u16),
+    /// grid-area: NAME on an item.
+    pub area_name: Option<Rc<str>>,
 }
 
 impl Default for GridStyle {
@@ -635,6 +641,9 @@ impl Default for GridStyle {
             column_flow: false,
             col: (GridLine::Auto, GridLine::Auto),
             row: (GridLine::Auto, GridLine::Auto),
+            areas: Rc::from(alloc::vec::Vec::new()),
+            area_size: (0, 0),
+            area_name: None,
         }
     }
 }

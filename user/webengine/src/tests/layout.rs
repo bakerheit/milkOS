@@ -630,3 +630,17 @@ fn grid_auto_columns_content_sized() {
     assert_eq!(r(&d, "a").w, ApproxMeasurer.text_width(&f, "aa"));
     assert_eq!(r(&d, "b").x, r(&d, "a").w);
 }
+
+#[test]
+fn grid_template_areas() {
+    let d = doc(
+        &page(
+            "<div style='display:grid;grid-template-areas:\"head head\" \"side main\" \"foot foot\";grid-template-columns:100px 1fr;width:400px'><main id=m style='grid-area:main'>m</main><header id=h style='grid-area:head'>h</header><nav id=n style='grid-area:side'>n</nav><footer id=f style='grid-area:foot'>f</footer></div>",
+        ),
+        800,
+    );
+    assert_eq!(r(&d, "h"), Rect::new(0, 0, 400, 19));
+    assert_eq!(r(&d, "n"), Rect::new(0, 19, 100, 19));
+    assert_eq!(r(&d, "m"), Rect::new(100, 19, 300, 19));
+    assert_eq!(r(&d, "f").y, 38);
+}

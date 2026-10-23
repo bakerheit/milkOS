@@ -163,6 +163,8 @@ pub enum Decl {
     GridAutoFlow(bool),
     /// 0 column-start, 1 column-end, 2 row-start, 3 row-end
     GridLine(u8, GridLine),
+    GridAreas(Rc<[(Rc<str>, u16, u16, u16, u16)]>, (u16, u16)),
+    GridAreaName(Option<Rc<str>>),
     /// A CSS-wide keyword for one longhand.
     Wide(Prop, Wide),
     /// `name: value` with `var()` in it, parsed after substitution.
@@ -270,6 +272,8 @@ pub enum Prop {
     GridLine1,
     GridLine2,
     GridLine3,
+    GridAreas,
+    GridAreaName,
     Count,
 }
 
@@ -381,6 +385,8 @@ static PROPS_BY_ID: [Prop; PROP_COUNT] = {
         Prop::GridLine1,
         Prop::GridLine2,
         Prop::GridLine3,
+        Prop::GridAreas,
+        Prop::GridAreaName,
     ];
     let mut i = 0;
     while i < all.len() {
@@ -469,6 +475,8 @@ impl Decl {
             D::GridAutoColumns(_) => Prop::GridAutoColumns,
             D::GridAutoFlow(_) => Prop::GridAutoFlow,
             D::GridLine(i, _) => side(Prop::GridLine0, *i),
+            D::GridAreas(..) => Prop::GridAreas,
+            D::GridAreaName(_) => Prop::GridAreaName,
             D::Wide(p, _) => *p,
             D::Pending(..) | D::Custom(..) => return None,
         })
@@ -525,7 +533,7 @@ fn longhands(name: &str) -> &'static [Prop] {
         "gap" | "grid-gap" => &[RowGap, ColumnGap],
         "grid-column" => &[GridLine0, GridLine1],
         "grid-row" => &[GridLine2, GridLine3],
-        "grid-area" => &[GridLine2, GridLine0, GridLine3, GridLine1],
+        "grid-area" => &[GridLine2, GridLine0, GridLine3, GridLine1, GridAreaName],
         "text-decoration" => &[TextDecorationLine, TextDecorationColor],
         "place-items" => &[AlignItems],
         "place-content" => &[AlignContent, JustifyContent],
@@ -2046,7 +2054,23 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
             out.push(Decl::GridLine(base + 1, b));
             return Some(());
         }
+        "grid-template-areas" => {
+            let (areas, size) = template_areas(v)?;
+            Decl::GridAreas(areas, size)
+        }
+        "grid-area" if matches!(components(v).as_slice(), [[Tok::Ident(n)]] if !n.eq_ignore_ascii_case("auto")) =>
+        {
+            let Some([Tok::Ident(n)]) = components(v).first().copied() else {
+                return None;
+            };
+            out.push(Decl::GridAreaName(Some(Rc::from(n.as_str()))));
+            for i in 0..4 {
+                out.push(Decl::GridLine(i, GridLine::Auto));
+            }
+            return Some(());
+        }
         "grid-area" => {
+            out.push(Decl::GridAreaName(None));
             let parts = split_slash(v);
             let get = |i: usize| {
                 parts
@@ -2118,7 +2142,6 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
         | "column-count"
         | "column-width"
         | "column-rule"
-        | "grid-template-areas"
         | "grid-template"
         | "caret-color"
         | "accent-color"
@@ -2436,4 +2459,48 @@ fn track_list(v: &[Tok]) -> Option<STrackList> {
         }
     }
     Some(out)
+}
+
+/// `grid-template-areas` (CSS Grid 1 §7.3): the named rectangles. None if a name isn't a
+/// rectangle or the rows differ in length.
+#[allow(clippy::type_complexity)]
+fn template_areas(v: &[Tok]) -> Option<(Rc<[(Rc<str>, u16, u16, u16, u16)]>, (u16, u16))> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for c in components(v) {
+        match c {
+            [Tok::Str(s)] => rows.push(s.split_whitespace().map(String::from).collect()),
+            [Tok::Ident(n)] if n.eq_ignore_ascii_case("none") => {
+                return Some((Rc::from(Vec::new()), (0, 0)));
+            }
+            _ => return None,
+        }
+    }
+    let ncols = rows.first().map(|r| r.len()).unwrap_or(0);
+    if rows.iter().any(|r| r.len() != ncols) || ncols > 1000 || rows.len() > 1000 {
+        return None;
+    }
+    let mut out: Vec<(Rc<str>, u16, u16, u16, u16)> = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        for (ci, name) in row.iter().enumerate() {
+            if name.chars().all(|c| c == '.') {
+                continue;
+            }
+            match out.iter_mut().find(|a| &*a.0 == name.as_str()) {
+                Some(a) => {
+                    a.3 = a.3.max(ri as u16 + 1);
+                    a.4 = a.4.max(ci as u16 + 1);
+                    a.1 = a.1.min(ri as u16);
+                    a.2 = a.2.min(ci as u16);
+                }
+                None => out.push((
+                    Rc::from(name.as_str()),
+                    ri as u16,
+                    ci as u16,
+                    ri as u16 + 1,
+                    ci as u16 + 1,
+                )),
+            }
+        }
+    }
+    Some((Rc::from(out), (rows.len() as u16, ncols as u16)))
 }

@@ -707,6 +707,12 @@ impl Styler<'_, '_> {
             Decl::GridAutoRows(t) => grid_mut(s).auto_rows = compute_track(t, c),
             Decl::GridAutoColumns(t) => grid_mut(s).auto_columns = compute_track(t, c),
             Decl::GridAutoFlow(col) => grid_mut(s).column_flow = *col,
+            Decl::GridAreas(a, size) => {
+                let g = grid_mut(s);
+                g.areas = a.clone();
+                g.area_size = *size;
+            }
+            Decl::GridAreaName(n) => grid_mut(s).area_name = n.clone(),
             Decl::GridLine(i, l) => {
                 let g = grid_mut(s);
                 match i {
@@ -853,7 +859,9 @@ fn copy_prop(s: &mut Style, from: &Style, p: Prop) {
         CounterReset => s.counter_reset = from.counter_reset.clone(),
         CounterIncrement => s.counter_increment = from.counter_increment.clone(),
         GridColumns | GridRows | GridAutoRows | GridAutoColumns | GridAutoFlow | GridLine0
-        | GridLine1 | GridLine2 | GridLine3 => s.grid = from.grid.clone(),
+        | GridLine1 | GridLine2 | GridLine3 | GridAreas | GridAreaName => {
+            s.grid = from.grid.clone()
+        }
         Count => {}
     }
 }

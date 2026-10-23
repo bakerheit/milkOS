@@ -685,7 +685,7 @@ impl App {
             let hint = if self.job.is_some() {
                 "Fetching the package list..."
             } else {
-                "Nothing to show yet. Press Update to fetch the package list."
+                "Nothing to show yet. Press Update."
             };
             self.win.text(CARD_X + 20, TOP + 32, hint, cocoa);
         }
@@ -699,11 +699,20 @@ impl App {
         let rows = ((lh - 16) / 18) as usize;
         // Wrap long lines (URLs, signatures) and show the newest that fit. The raw text behind
         // a plain-words error hangs off a Details line at the end, folded until asked for.
+        let bad = |l: &str| {
+            l.contains("refused")
+                || l.contains("failed")
+                || l.contains("BAD")
+                || l.starts_with("Can't reach")
+        };
+        // (text, kind): 0 plain, 1 the Details line, 2 raw text under it, 3 an error.
         let mut shown: Vec<(String, u8)> = self
             .log
             .iter()
-            .flat_map(|l| wrap(l, cols))
-            .map(|l| (l, 0))
+            .flat_map(|l| {
+                let kind = if bad(l) { 3 } else { 0 };
+                wrap(l, cols).into_iter().map(move |w| (w, kind))
+            })
             .collect();
         if !self.details.is_empty() {
             let mark = if self.details_open { "v" } else { ">" };
@@ -721,13 +730,9 @@ impl App {
         self.details_hit = None;
         for (i, (l, kind)) in shown[start..].iter().enumerate() {
             let y = LOG_Y + 8 + i as i32 * 18;
-            let c = if *kind != 0 || l.starts_with("$ ") {
+            let c = if *kind == 1 || *kind == 2 || l.starts_with("$ ") {
                 cocoa
-            } else if l.contains("refused")
-                || l.contains("failed")
-                || l.contains("BAD")
-                || l.starts_with("Can't reach")
-            {
+            } else if *kind == 3 {
                 // Straw text on oat is 2.2:1: the danger red in light, straw on dark oat.
                 if self.th.dark {
                     gui::STRAW

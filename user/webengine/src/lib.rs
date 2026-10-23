@@ -29,35 +29,11 @@ pub mod url;
 #[cfg(test)]
 mod tests;
 
-// Test-only: the kernel's baked system fonts and PNG encoder, for the screenshots the
-// rendering tests write (tests/raster.rs).
-#[cfg(test)]
-#[allow(dead_code)]
-mod sysfont {
-    pub struct Face {
-        pub size: u8,
-        pub line: u8,
-        pub ascent: u8,
-        pub weight: u16,
-        pub first: u16,
-        pub count: u16,
-    }
-    pub struct Family {
-        pub key: &'static str,
-        pub name: &'static str,
-        pub copyright: &'static str,
-        pub licence: &'static str,
-        pub blob: &'static [u8],
-        pub faces: &'static [Face],
-    }
-}
+// Test-only: the kernel's PNG encoder, for the screenshots the rendering tests write
+// (tests/raster.rs; its fonts come from user/fontkit).
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../../kernel/src/wm/png.rs"]
 mod kernel_png;
-#[cfg(test)]
-#[allow(dead_code)]
-#[path = "../../../kernel/src/sysfont_data.rs"]
-mod sysfont_data;
 
 pub use api::*;

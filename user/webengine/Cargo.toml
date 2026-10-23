@@ -12,3 +12,7 @@ edition.workspace = true
 [lib]
 bench = false
 doctest = false
+
+[dev-dependencies]
+# The system fonts, for the test rasterizer's screenshots (src/tests/raster.rs).
+fontkit = { path = "../fontkit" }

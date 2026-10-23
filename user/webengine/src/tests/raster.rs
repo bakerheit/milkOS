@@ -1,11 +1,17 @@
-//! A small rasterizer for the tests: paints a display list into pixels with the kernel's
-//! baked system fonts (scaled from their 13 px / 26 px faces) and writes PNG screenshots, and
+//! A small rasterizer for the tests: paints a display list into pixels with the system fonts
+//! (user/fontkit over the baked kernel/src/sysfont/*.font, scaled from their 13 / 26 px faces) and writes PNG screenshots, and
 //! the matching [`SysMeasurer`] so layout and drawing agree. Host tests only.
 
 use alloc::vec::Vec;
 
 use crate::api::*;
-use crate::sysfont_data::FAMILIES;
+static BLOBS: [&[u8]; 5] = [
+    include_bytes!("../../../../kernel/src/sysfont/figtree.font"),
+    include_bytes!("../../../../kernel/src/sysfont/plex.font"),
+    include_bytes!("../../../../kernel/src/sysfont/fira.font"),
+    include_bytes!("../../../../kernel/src/sysfont/atkinson.font"),
+    include_bytes!("../../../../kernel/src/sysfont/ubuntu.font"),
+];
 
 /// Which baked family stands in for a generic one.
 fn family_index(f: Family) -> usize {
@@ -23,77 +29,40 @@ struct G {
     left: i32,
     top: i32,
     adv: i32,
+    /// The pixel size of the face it came from (metrics are in its pixels).
+    fs: i32,
     cov: Vec<u8>,
 }
 
-/// (face index, face size) for a font.
-fn face_for(f: &Font) -> (usize, u8) {
-    let bold = f.weight >= 600;
-    if f.size <= 19 {
-        (if bold { 2 } else { 0 }, 13)
-    } else {
-        (if bold { 4 } else { 3 }, 26)
-    }
+/// The baked families (user/fontkit over kernel/src/sysfont/*.font), parsed once.
+fn families() -> &'static [fontkit::Family<'static>] {
+    use std::sync::OnceLock;
+    static F: OnceLock<Vec<fontkit::Family<'static>>> = OnceLock::new();
+    F.get_or_init(|| BLOBS.iter().map(|b| fontkit::Family::parse(b).expect("a baked font")).collect())
 }
 
 fn glyph(f: &Font, c: char) -> Option<G> {
-    let fam = &FAMILIES[family_index(f.family).min(FAMILIES.len() - 1)];
-    let (face, _) = face_for(f);
-    let fc = &fam.faces[face];
-    let rec = |i: usize| -> &[u8] { &fam.blob[12 * i..12 * i + 12] };
-    let find = |cp: u32| {
-        let (mut lo, mut hi) = (fc.first as usize, fc.first as usize + fc.count as usize);
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            let r = rec(mid);
-            let cc = u16::from_le_bytes([r[0], r[1]]) as u32;
-            if cc == cp {
-                return Some(mid);
-            }
-            if cc < cp {
-                lo = mid + 1;
-            } else {
-                hi = mid;
+    let fams = families();
+    let fam = &fams[family_index(f.family).min(fams.len() - 1)];
+    let scale = if f.size <= 19 { 1 } else { 2 };
+    let weight = fontkit::Weight::bold(f.weight >= 600);
+    let (g, mag) = fam.find(c as u32, scale, weight).or_else(|| fam.find(0xFFFD, scale, weight))?;
+    let mut cov = alloc::vec![0u8; (g.w * g.h).max(0) as usize];
+    g.spans(1, |x, y, len, a| {
+        for k in 0..len {
+            let i = (y * g.w + x + k) as usize;
+            if i < cov.len() {
+                cov[i] = a;
             }
         }
-        None
-    };
-    let i = find(c as u32).or_else(|| find(0xFFFD))?;
-    let r = rec(i);
-    let off = u32::from_le_bytes([r[2], r[3], r[4], r[5]]);
-    let (w, h) = (r[6] as i32, r[7] as i32);
-    let rle = off & 1 << 31 != 0;
-    let data = &fam.blob[(off & !(1 << 31)) as usize..];
-    let n = (w * h) as usize;
-    let mut cov = alloc::vec![0u8; n];
-    let mut k = 0usize;
-    if rle {
-        for &b in data {
-            if k >= n {
-                break;
-            }
-            let len = (b & 15) as usize + 1;
-            for _ in 0..len.min(n - k) {
-                cov[k] = (b >> 4) * 17;
-                k += 1;
-            }
-        }
-    } else {
-        for &b in data.iter().take(n.div_ceil(2)) {
-            for v in [b >> 4, b & 15] {
-                if k < n {
-                    cov[k] = v * 17;
-                    k += 1;
-                }
-            }
-        }
-    }
+    });
     Some(G {
-        w,
-        h,
-        left: r[8] as i8 as i32,
-        top: r[9] as i8 as i32,
-        adv: r[10] as i32,
+        w: g.w,
+        h: g.h,
+        left: g.left,
+        top: g.top,
+        adv: g.adv,
+        fs: 13 * scale / mag.max(1),
         cov,
     })
 }
@@ -103,12 +72,12 @@ pub struct SysMeasurer;
 
 impl TextMeasurer for SysMeasurer {
     fn text_width(&self, f: &Font, text: &str) -> i32 {
-        let (_, fs) = face_for(f);
-        let units: i64 = text
+        let w: f32 = text
             .chars()
-            .map(|c| glyph(f, c).map(|g| g.adv).unwrap_or(0) as i64)
+            .filter_map(|c| glyph(f, c))
+            .map(|g| g.adv as f32 * f.size as f32 / g.fs as f32)
             .sum();
-        ((units * f.size as i64 * 2 + fs as i64) / (2 * fs as i64)) as i32
+        (w + 0.5) as i32
     }
     fn metrics(&self, f: &Font) -> FontMetrics {
         let s = f.size as i32;
@@ -166,11 +135,10 @@ impl Canvas {
     }
 
     fn text(&mut self, dl: &DisplayList, t: &TextRun, clip: &Rect) {
-        let (_, fs) = face_for(&t.font);
-        let k = t.font.size as f32 / fs as f32;
         let mut pen = t.x as f32;
         for c in dl.run_text(t).chars() {
             let Some(g) = glyph(&t.font, c) else { continue };
+            let k = t.font.size as f32 / g.fs as f32;
             let gx = pen + g.left as f32 * k;
             let gy = t.baseline as f32 - g.top as f32 * k;
             let tw = (g.w as f32 * k).ceil() as i32;

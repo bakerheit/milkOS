@@ -151,6 +151,8 @@ fn main(args: &rt::Args) -> i32 {
                 }
             }
             Some(Event::Scroll(d)) => app.scroll = (app.scroll + d * 24).clamp(0, 4000),
+            // Settings changed the font or the theme: the next draw (below) uses them.
+            Some(Event::Appearance { dark, .. }) => app.th = Theme::for_dark(dark),
             _ => {}
         }
         if quit {

@@ -865,6 +865,8 @@ fn main(_args: &rt::Args) -> i32 {
             dirty = true;
             match ev {
                 Event::Close => return 0,
+                // Settings changed the font or the theme (redrawn below: dirty is set).
+                Event::Appearance { .. } => app.th = theme(),
                 Event::Down { x, y, button: 1 } => {
                     app.held = Some((x, y));
                     app.click(x, y);

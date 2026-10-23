@@ -134,6 +134,8 @@ fn main(_args: &rt::Args) -> i32 {
                 app.key(k, m);
             }
             Some(Event::Scroll(d)) => app.scroll = (app.scroll + d * 30).max(0),
+            // Settings changed the font or the theme: the next draw (below) uses them.
+            Some(Event::Appearance { dark, .. }) => app.th = Theme::for_dark(dark),
             _ => {}
         }
         let now = timeio::mono_ms();

@@ -120,6 +120,13 @@ pub fn current_family() -> usize {
     fam
 }
 
+/// The desktop says its family is now `fam` (an appearance event): use it at once, and go on
+/// checking `/dev/wm` as usual.
+pub fn note_family(fam: usize) {
+    CURRENT.store(fam.min(FAMILY_COUNT - 1), Ordering::Relaxed);
+    CHECKED.store(now_ms(), Ordering::Relaxed);
+}
+
 /// Use this family from now on (an app that knows better, or a test).
 pub fn set_current_family(fam: usize) {
     CURRENT.store(fam.min(FAMILY_COUNT - 1), Ordering::Relaxed);

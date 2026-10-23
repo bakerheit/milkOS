@@ -200,6 +200,11 @@ fn main(_args: &rt::Args) -> i32 {
                 }
             }
             Event::Up { .. } => app.last = None,
+            // Settings changed the font: the toolbar's labels are redrawn in it.
+            Event::Appearance { .. } => {
+                app.toolbar();
+                app.win.commit();
+            }
             Event::Resize { w, h } => {
                 // The kernel keeps the picture in the top-left; the new edges are milk.
                 if app.win.resize(w.max(MIN_W), h.max(MIN_H)).is_ok() {

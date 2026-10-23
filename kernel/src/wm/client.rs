@@ -53,6 +53,9 @@ pub const EV_CLOSE: u32 = 7;
 pub const EV_ACTION: u32 = 9;
 /// The window's body is now x by y (a resizable client: answer with MILK_WIN_RESIZE).
 pub const EV_RESIZE: u32 = 10;
+/// The desktop's look changed (Settings: the font or the theme): key = the font family's
+/// index, mods = 1 if the theme is dark. The client re-reads its look and redraws.
+pub const EV_APPEARANCE: u32 = 11;
 
 // Key codes for non-character keys (printable keys send their Unicode code point).
 pub const K_ENTER: u32 = 0x1_0001;
@@ -470,6 +473,18 @@ pub fn action(pid: u32, tag: u32, index: u32) -> bool {
     };
     push(id, encode(EV_ACTION, 0, 0, tag, index, 0));
     true
+}
+
+/// The font or the theme changed: every client window is told (an event, so an idle client
+/// repaints at once and nobody polls for it).
+pub fn appearance_changed(font: usize, dark: bool) {
+    let ids: Vec<u32> = CLIENTS.lock().keys().copied().collect();
+    for id in ids {
+        push(
+            id,
+            encode(EV_APPEARANCE, 0, 0, font as u32, u32::from(dark), 0),
+        );
+    }
 }
 
 fn push(id: u32, ev: [u8; EVENT_LEN]) {

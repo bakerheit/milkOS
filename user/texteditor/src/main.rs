@@ -920,6 +920,11 @@ fn main(args: &rt::Args) -> i32 {
                 app.scroll_by(d * 3);
                 dirty = true;
             }
+            // Settings changed the font or the theme: redraw in them.
+            Some(Event::Appearance { dark, .. }) => {
+                app.th = Theme::for_dark(dark);
+                dirty = true;
+            }
             Some(Event::Key(k, m)) => {
                 if !matches!(k, Key::Up | Key::Down) {
                     app.goal_col = None;

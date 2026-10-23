@@ -149,6 +149,8 @@ fn main(_args: &rt::Args) -> i32 {
                 Tab::Security => app.sec_scroll = (app.sec_scroll + d * 28).max(0),
                 _ => app.scroll = (app.scroll + d * 28).max(0),
             },
+            // Settings changed the font or the theme: the next draw (below) uses them.
+            Some(Event::Appearance { dark, .. }) => app.th = Theme::for_dark(dark),
             _ => {}
         }
         let now = mono_ns() / 1_000_000;

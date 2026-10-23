@@ -94,6 +94,11 @@ impl Theme {
         }
     }
 
+    /// The light or the dark theme (an appearance event says which).
+    pub fn for_dark(dark: bool) -> Theme {
+        if dark { Theme::dark() } else { Theme::light() }
+    }
+
     /// The theme the desktop is using (`/dev/wm` status, else the settings file).
     pub fn current() -> Theme {
         let status = read("/dev/wm");

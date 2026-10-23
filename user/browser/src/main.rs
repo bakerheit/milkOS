@@ -232,8 +232,6 @@ pub struct App {
     /// A message for the status line, until (ms).
     pub flash: Option<(String, u64)>,
     pub shown_title: String,
-    /// When the desktop's theme was last read (ms).
-    pub theme_checked: u64,
     /// The system fonts for page text (the desktop's family, read each frame).
     pub sys: sysfont::SysText,
     pub quit: bool,
@@ -1799,7 +1797,6 @@ fn main(args: &rt::Args) -> i32 {
         flash: None,
         shown_title: String::new(),
         sys: sysfont::SysText::now(),
-        theme_checked: 0,
         quit: false,
         dirty: true,
     };
@@ -1839,6 +1836,17 @@ fn main(args: &rt::Args) -> i32 {
             }
             Some(Event::Key(k, mods)) => app.key(k, mods),
             Some(Event::Action { .. }) => {} // the inbox is read every tick
+            // Settings changed the font or the theme: the chrome and the pages follow (the
+            // next draw re-lays pages out in the new font; nothing is fetched again).
+            Some(Event::Appearance { dark, .. }) => {
+                app.th = Theme::for_dark(dark);
+                if log {
+                    rt::println!(
+                        "[browser] appearance: font {} dark {dark}",
+                        gui::text::current_family()
+                    );
+                }
+            }
             Some(Event::Drop { fd, .. }) => {
                 let _ = sys::close(fd);
                 app.say(
@@ -1851,16 +1859,6 @@ fn main(args: &rt::Args) -> i32 {
             break;
         }
         dirty |= app.tick();
-        // The desktop's theme, once a second: the chrome and dark-capable pages follow it.
-        let now = now_ms();
-        if now.saturating_sub(app.theme_checked) >= 1000 {
-            app.theme_checked = now;
-            let th = Theme::current();
-            if th.dark != app.th.dark {
-                app.th = th;
-                dirty = true;
-            }
-        }
         dirty |= app.animate();
         let (moved, due) = app.animate_images(now_ms());
         dirty |= moved;

@@ -653,6 +653,10 @@ fn main(args: &rt::Args) -> i32 {
                 app.key(k, m);
                 dirty = true;
             }
+            Some(Event::Appearance { dark, .. }) => {
+                app.th = Theme::for_dark(dark);
+                dirty = true;
+            }
             Some(Event::Drop { fd, .. }) => {
                 app.open_fd(fd);
                 dirty = true;

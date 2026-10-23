@@ -989,6 +989,9 @@ impl Desktop {
             self.relayout_lock();
             kprintln!("wm: font {}", crate::sysfont::FAMILIES[p.font].name);
         }
+        if p.font != old.font || p.dark != old.dark {
+            client::appearance_changed(p.font, p.dark);
+        }
         if p.resolution != (theme::screen_w(), theme::screen_h())
             && !self.set_resolution(p.resolution.0, p.resolution.1)
         {

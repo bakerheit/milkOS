@@ -155,6 +155,8 @@ fn main(_args: &rt::Args) -> i32 {
             Event::Down { x, y, .. } if inside(x, y, SAVE) => app.save(),
             Event::Key(Key::Char('o'), _) => app.open(),
             Event::Key(Key::Char('s'), _) => app.save(),
+            // Settings changed the font: redraw in it.
+            Event::Appearance { .. } => app.draw(),
             Event::Drop { fd, .. } => {
                 app.show(fd, "dropped");
                 println!("peek: {}", app.status);

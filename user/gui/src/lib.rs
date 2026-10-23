@@ -152,6 +152,12 @@ pub enum Event {
         tag: u32,
         index: u32,
     },
+    /// Settings changed the desktop's font or theme: the system font follows by itself
+    /// ([`text::current_family`] is `font` now); re-read the theme (`dark`) and redraw.
+    Appearance {
+        font: usize,
+        dark: bool,
+    },
     /// A file was dropped on the window at (x, y): `fd` is it, opened read-only for us
     /// (the user's drop is the grant; read it, then close it).
     Drop {
@@ -220,6 +226,10 @@ fn decode(b: &[u8; 32]) -> Option<Event> {
         9 => Event::Action {
             tag: word(b, 3),
             index: word(b, 4),
+        },
+        11 => Event::Appearance {
+            font: word(b, 3) as usize,
+            dark: word(b, 4) & 1 != 0,
         },
         8 => Event::Drop {
             x,
@@ -370,7 +380,11 @@ impl Window {
         if let Some(m) = event_mods(&b) {
             self.mods.set(m);
         }
-        decode(&b)
+        let ev = decode(&b);
+        if let Some(Event::Appearance { font, .. }) = ev {
+            text::note_family(font);
+        }
+        ev
     }
 
     /// The modifier keys held during the last key, button, drag or scroll event returned by

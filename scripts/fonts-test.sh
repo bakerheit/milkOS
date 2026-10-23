@@ -2,7 +2,8 @@
 # The system font in user space, end to end on a private image: the kernel puts its font
 # files in /System/Fonts, /dev/wm says which family the desktop uses, an appkit app (Preview)
 # draws a Greek, Polish, Cyrillic and symbol file name in it, and switching the font (`font
-# KEY` to /dev/wm, what Settings does) changes the app on its next redraw and back again.
+# KEY` to /dev/wm, what Settings does) repaints it and the Browser in the new font at once,
+# with no input (an appearance event to every client), and back again.
 # Screenshots in the work directory, which is removed when everything passes (unless given).
 #   scripts/fonts-test.sh [workdir]
 # Only the qemu started here is killed (by PID).
@@ -74,18 +75,21 @@ wait_window() {
 ser "send:/Apps/preview/preview /Users/milk/Pictures/*.png &" "wait:$P"
 wait_window "Preview\|checker\|png" && ok "Preview is open" || bad "no Preview window"
 shot 1-figtree
-# The same window in Fira Sans after a redraw (any key redraws Preview), then back.
-# The desktop logs the switch on the console: let that line pass before reading.
-ser "send:print font fira > /dev/wm" "wait:wm: font Fira" "send:pause 1" "wait:$P"
+# The Browser too, on a built-in page (no network): an idle client with its own layout.
+ser "send:/Apps/browser/browser --log-input milk:newtab &" "wait:$P"
+wait_window "New Tab" && ok "the Browser is open" || bad "no Browser window"
+shot 1b-figtree 1-figtree
+# Switch the font (what Settings does) and touch nothing: every client is told (an
+# appearance event) and repaints in the new font by itself, within about a second.
+ser "send:print font fira > /dev/wm" "wait:wm: font Fira"
+python3 scripts/shotwait.py "$QMP" "$T/2-fira.png" --differ-from "$T/1b-figtree.png" --timeout 2 || true
+differ 1b-figtree 2-fira && ok "idle apps repainted in the new font with no input" || bad "the apps did not follow the font change by themselves"
 ser "send:text show /dev/wm" "wait:$P"
 out "text show /dev/wm" | grep -aq "^font fira" && ok "font fira took" || bad "/dev/wm did not switch to fira"
-sleep 1.2
-q key esc; shot 2-fira 1-figtree
-differ 1-figtree 2-fira && ok "the app redrew in the new font" || bad "the app did not follow the font change"
-ser "send:print font figtree > /dev/wm" "wait:wm: font Figtree" "send:pause 1" "wait:$P"
-sleep 1.2
-q key esc; shot 3-back 2-fira
-same 1-figtree 3-back && ok "switching back gives the same picture" || bad "switching back did not restore the look"
+tr -d '\r' < "$LOG" | grep -a "^\[browser\] appearance: font 2 dark false" >/dev/null && ok "the Browser heard about it (and laid its page out again)" || bad "no appearance event in the Browser"
+ser "send:print font figtree > /dev/wm" "wait:wm: font Figtree"
+python3 scripts/shotwait.py "$QMP" "$T/3-back.png" --differ-from "$T/2-fira.png" --timeout 2 || true
+same 1b-figtree 3-back && ok "switching back gives the same picture" || bad "switching back did not restore the look"
 grep -aq "fonts: 6 font files" "$LOG" && ok "boot log: fonts installed" || bad "no 'fonts:' line in the boot log"
 grep -aq "system fonts: 5 families ok" "$LOG" && ok "boot self-test: the fonts are ok" || bad "font self-test line missing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"

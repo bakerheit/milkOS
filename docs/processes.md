@@ -364,7 +364,9 @@ to the process; read it and close it), 9 notice action (a button on one of the p
 notices was pressed: `key` = the notice's `id=`, `mods` = which button, see "/dev/wm"
 below), 10 resize (only after RESIZABLE: the window's body on screen is now x by y; answer
 with `MILK_WIN_RESIZE` to that size and redraw; until then the old picture is shown in the
-top-left). 2 (key up) is reserved.
+top-left), 11 appearance (Settings changed the font or the theme: `key` = the font family's
+index, `mods` = 1 when dark; re-read the look and redraw; `user/gui` updates the system
+font's family itself and returns `Event::Appearance { font, dark }`). 2 (key up) is reserved.
 
 Resizing: a window that did not declare itself RESIZABLE is never made smaller than its
 buffer (and never joins a smaller tab group); a resizable one follows its window, a resize

@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 N="${1:-20000}"
 T="$(mktemp -d /tmp/milk-mounttime.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/big.img"

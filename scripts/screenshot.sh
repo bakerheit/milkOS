@@ -12,7 +12,7 @@ WAIT="${2:-4}"
 shift $(( $# > 2 ? 2 : $# )) || true
 SOCK="/tmp/milk-display.$$.sock"
 LOG="${OUT%.png}.serial.log"
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 # Flat arm64 Image so qemu passes the device tree (see run.sh).

@@ -182,7 +182,7 @@ pass_tree() {
   ptree=""; why=""
   local v
   [ -n "$ONLY" ] && { why="an --only run"; return; }
-  v="$(env | grep -E '^(MILK_[A-Za-z0-9_]*|RELEASE)=' | grep -Ev '^MILK_(KEEP|MIN_FREE_GB|WARN_FREE_GB)=' | cut -d= -f1 | tr '\n' ' ')"
+  v="$(env | grep -E '^(MILK_[A-Za-z0-9_]*|RELEASE)=' | grep -Ev '^MILK_(KEEP|MIN_FREE_GB|WARN_FREE_GB|PREBUILT)=' | cut -d= -f1 | tr '\n' ' ')"
   [ -n "$v" ] && { why="set in the environment: $v"; return; }
   [ -n "$(git status --porcelain 2>/dev/null)" ] && { why="the tree is dirty (git status --porcelain)"; return; }
   ptree="$(git write-tree 2>/dev/null)" || { ptree=""; why="git write-tree failed"; }
@@ -276,6 +276,12 @@ echo "check-all: internet guard on (qemu wrapper in $GUARD, MILK_CHECK_ALL=1)"
 # own `cargo build`s are no-ops (nothing in a test rebuilds the kernel under another test).
 echo "check-all: cargo build (debug)"
 cargo build -q || { echo; echo "check-all: FAIL, the build failed"; exit 1; }
+# ...and the tests then skip their own `cargo build` (MILK_PREBUILT=1): even with nothing to do,
+# cargo replaces target/.../milkos-kernel (unlink, then hard link again), and a test reading it
+# at that moment found no kernel. Not with RELEASE or MILK_FEATURES set: those tests build
+# something else than this.
+PREBUILT_ENV=()
+[ -z "${RELEASE:-}" ] && [ -z "${MILK_FEATURES:-}" ] && PREBUILT_ENV=(MILK_PREBUILT=1)
 
 # A free TCP port on 127.0.0.1 for net-test.
 free_port() { python3 -I -c "import socket; s = socket.socket(); s.bind(('127.0.0.1', 0)); print(s.getsockname()[1])"; }
@@ -295,7 +301,7 @@ start_test() { # index
   [ "$mode" = solo ] && echo "  ($name runs solo: nothing else running)"
   env MILK_FS="$W/fs.img" MILK_DISK="$W/disk.img" MILK_CRASH_IMG="$W/crash.img" \
       HTTP_PORT="$(free_port)" TMPDIR="$W" \
-      ${KEEP_ENV[@]+"${KEEP_ENV[@]}"} MILK_CHECK_ALL=1 MILK_OFFLINE=1 MILK_NET_GUARD_DIR="$GUARD" PATH="$GUARD:$PATH" \
+      ${KEEP_ENV[@]+"${KEEP_ENV[@]}"} ${PREBUILT_ENV[@]+"${PREBUILT_ENV[@]}"} MILK_CHECK_ALL=1 MILK_OFFLINE=1 MILK_NET_GUARD_DIR="$GUARD" PATH="$GUARD:$PATH" \
       python3 -I scripts/runlimit.py "$limit" "$W/output.log" --status "$W/.status" -- $cmd &
   pid[$i]=$!
   running+=("$i")

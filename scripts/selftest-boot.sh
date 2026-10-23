@@ -15,7 +15,7 @@ T="$(mktemp -d /tmp/milk-selftest.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 python3 scripts/mkmilkfs.py mkfs "$T/fs.img" --size 64M --label Milk >/dev/null

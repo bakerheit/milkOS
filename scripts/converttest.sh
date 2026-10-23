@@ -31,7 +31,7 @@ FAIL=0
 MIXED=0  # crashes that left blocks in both forms (mid-tree, not after the rewriting)
 ok() { echo "  ok: $*"; PASS=$((PASS + 1)); }
 bad() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
-cargo build -q || exit 1
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q || exit 1
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 

@@ -20,7 +20,7 @@ T="$(mktemp -d /tmp/milk-leaktest.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 export MILK_FS="${MILK_FS:-$T/fs.img}" MILK_DISK="${MILK_DISK:-$T/disk.img}"

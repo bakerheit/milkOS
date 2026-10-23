@@ -159,7 +159,7 @@ fi
 
 # ---- 4. and 5. the guest ----
 echo "---- guest: kernel (net::tls::selftest) and user space (/System/Developer/tlsprobe) ----"
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$WORK/milkos-kernel.bin"

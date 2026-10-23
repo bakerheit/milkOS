@@ -20,7 +20,7 @@ OUT="${2:-/tmp/milk-$DEMO.png}"
 shift $(( $# > 2 ? 2 : $# )) || true
 SOCK="/tmp/milk-demo.$$.sock"
 LOG="${OUT%.png}.serial.log"
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"

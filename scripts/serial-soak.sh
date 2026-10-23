@@ -32,7 +32,7 @@ PROFILE=debug
 [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-cargo build -q ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} || exit 1
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} || exit 1
 
 # has PATTERN: the log (CRs stripped) has a line matching the fixed string / regex.
 has() { tr -d '\r' < "$log" | grep -q "$@"; }

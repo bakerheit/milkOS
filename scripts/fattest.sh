@@ -16,7 +16,7 @@ FAIL=0
 bad() { echo "  FAIL: $*"; FAIL=1; }
 ok() { echo "  ok: $*"; }
 
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 

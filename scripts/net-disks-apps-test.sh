@@ -30,7 +30,7 @@ T="$(mktemp -d "${TMPDIR:-/tmp}/milk-nda.XXXXXX")"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/fs.img"; SPARE="$T/spare.img"; BLANK="$T/blank.img"

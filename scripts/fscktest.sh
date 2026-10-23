@@ -4,9 +4,15 @@
 # killed (by PID).
 #   repairable kinds:   orphan dangling nlink parent sb smap bref
 #   unrepairable kinds: data node (must be reported, never "repaired")
+#   scripts/fscktest.sh [KIND...]   only those kinds (default: all); each run makes its own base
+#   image, so check-all runs the kinds in three groups side by side (fscktest-1, -2, -3).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+ALL_KINDS="orphan dangling nlink parent sb smap bref data node"
+KINDS="${*:-$ALL_KINDS}"
+for k in $KINDS; do case " $ALL_KINDS " in *" $k "*) ;; *) echo "fscktest: no kind $k ($ALL_KINDS)" >&2; exit 2 ;; esac; done
+want() { case " $KINDS " in *" $1 "*) return 0 ;; esac; return 1; }
 T="$(mktemp -d /tmp/milk-fscktest.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
@@ -31,6 +37,8 @@ boot() { # image mode log [sock]
   QPID=$!
 }
 stop() { kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""; }
+# Copies of the base image are APFS clones where the Mac can (instant, no extra space).
+copy() { cp -c "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
 wait_for() { for _ in $(seq $(($3 * 10))); do grep -aq "$1" "$2" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 
 echo "== base image: a few seconds of the crash workload (files + snapshots)"
@@ -42,9 +50,10 @@ stop
 $M check "$BASE" --quiet >/dev/null && ok "base image is clean" || { bad "base image"; exit 1; }
 
 for kind in orphan dangling nlink parent sb smap bref; do
+  want "$kind" || continue
   echo "== $kind"
   # host repair
-  H="$T/$kind-host.img"; cp "$BASE" "$H"
+  H="$T/$kind-host.img"; copy "$BASE" "$H"
   $M corrupt "$H" "$kind" >/dev/null
   if [ "$kind" = sb ]; then
     # A torn slot is what an interrupted commit leaves: a note, not a failed check.
@@ -59,7 +68,7 @@ for kind in orphan dangling nlink parent sb smap bref; do
   stop
   grep -aq "CRASHCHECK PASS" "$T/$kind-host.boot" && ok "kernel mounts it and all files verify" || { bad "kernel after host repair"; grep -a "CRASHCHECK\|milkfs" "$T/$kind-host.boot" | head -5; }
   # kernel repair
-  K="$T/$kind-kernel.img"; cp "$BASE" "$K"
+  K="$T/$kind-kernel.img"; copy "$BASE" "$K"
   $M corrupt "$K" "$kind" >/dev/null
   SOCK="$T/$kind.sock"; LOG="$T/$kind-kernel.log"
   boot "$K" normal "$LOG" "$SOCK"
@@ -93,11 +102,12 @@ for kind in orphan dangling nlink parent sb smap bref; do
 done
 
 for kind in data node; do
+  want "$kind" || continue
   echo "== $kind (not repairable)"
-  H="$T/$kind.img"; cp "$BASE" "$H"
+  H="$T/$kind.img"; copy "$BASE" "$H"
   $M corrupt "$H" "$kind" >/dev/null
   $M check "$H" >/dev/null 2>&1 && bad "host check missed $kind" || ok "host check finds it"
-  cp "$H" "$T/$kind.before"
+  copy "$H" "$T/$kind.before"
   rc=0; $M check "$H" --repair >"$T/$kind.repair" 2>&1 || rc=$?
   { [ $rc = 2 ] && grep -q "cannot repair" "$T/$kind.repair"; } && ok "host repair refuses: $(grep -m1 'cannot repair' "$T/$kind.repair" | sed 's/^ *//')" || bad "host repair of $kind (rc $rc)"
   cmp -s "$H" "$T/$kind.before" && ok "image left as it was" || bad "repair changed a $kind-damaged image"

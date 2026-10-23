@@ -6,13 +6,15 @@
 # must not grow by more than LIMIT_KB (the
 # allocator returns freed memory, so a steady loop stays flat; plus an eighth of the process's
 # size, for the batching of what it gives back). Every other process's growth is
-# printed too, for information. About SECS + 40 seconds.
-#   scripts/leak-test.sh [SECS] [LIMIT_KB]      (defaults 60 and 128)
+# printed too, for information. About SECS + 20 seconds.
+#   scripts/leak-test.sh [SECS] [LIMIT_KB]      (defaults 30 and 128)
+# 30 s is enough: with the old bump allocator (user/rt before the heapkit heap) put back, a 30 s
+# run fails on three of the four (watch +1024K, activity +2048K, milkd +192K over the limits).
 # Only the qemu started here is killed (by PID). Work files: a fresh mktemp dir.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
-SECS="${1:-60}"
+SECS="${1:-30}"
 LIMIT_KB="${2:-128}"
 T="$(mktemp -d /tmp/milk-leaktest.XXXXXX)"
 FAIL=0

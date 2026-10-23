@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Alarms, timers and calendar alerts on a private image (fresh /tmp directory; only the qemu
 # started here is killed). One boot rings all three through alarmd (init starts it), a second
-# boot checks the data survived. About two and a half minutes.
+# boot checks the data survived. About 20 seconds.
 #   boot 1: alarm add in 5s / timer 6s / cal add in 5s --alert 0, plus a weekday alarm and a
-#           repeating event that must NOT ring. After ~80 s the log has one line per ring, the
-#           "once" alarm is switched off, the finished timer is gone.
+#           repeating event that must NOT ring. "in 5s" means the first whole minute at least
+#           5 s away, so instead of waiting for it (up to 65 s) the test moves the wall clock
+#           70 s ahead with the kernel's test-only time warp (fw_cfg opt/milkos/test-timewarp,
+#           /System/Kernel/kernel/timewarp; kernel/src/fs/clock.rs), after 7 real seconds for
+#           the timer, which counts on the monotonic clock. alarmd catches up on the jump like
+#           on a paused VM. Then the log has one line per ring, the "once" alarm is switched
+#           off, the finished timer is gone.
 #   boot 2: the weekday alarm and the repeating event are still there (milkfs home folder).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -22,13 +27,15 @@ $M mkfs "$IMG" --size 64M >/dev/null
 $M mkdir "$IMG" /Users/milk >/dev/null
 QPID=""
 trap '[ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true' EXIT
-boot() { # name commands...
+boot() { # name commands... (WARP=1: with the test time warp)
   local name="$1"; shift
+  local warp=()
+  [ "${WARP:-0}" = 1 ] && warp=(-fw_cfg name=opt/milkos/test-timewarp,string=on)
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
     -display none -monitor none -serial "unix:$SOCK,server,nowait" \
     -global virtio-mmio.force-legacy=false \
-    -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
+    -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 ${warp[@]+"${warp[@]}"} 2>/dev/null &
   QPID=$!
   local P='msh:[^\n]*\$ '
   # A first command that only lets the boot finish: a service starting late (seen with other
@@ -46,13 +53,13 @@ boot() { # name commands...
 # Output of the command typed as $2 in log $1, up to the next prompt.
 out() { tr -d '\r' < "$1" | awk -v c="$2" 'on && /^msh:/ {on=0; done=1} !done && $0 ~ /^msh:/ && substr($0, index($0, "$ ") + 2) == c {on=1; next} on'; }
 LOGF=/Users/milk/.cache/milk/alarmd.log
-boot b1 "processes list | text find alarmd" \
+WARP=1 boot b1 "processes list | text find alarmd" \
   "alarm add 03:15 weekdays pills" "alarm add in 5s ring-test" "timer 6s tea-test" \
   "cal add in 5s standup-test --alert 0" "cal add tomorrow 12:00 lunch-test --repeat weekly" \
   "remind add in 5s call-the-plumber" "remind add tomorrow stretch --repeat weekly" "remind add undated-thing" "remind add Pick up parcel friday at 5pm" \
   "alarm snooze 1 30" "remind snooze 3 15" "text find undated /Users/milk/Library/Reminders/Personal.rem" \
   "alarm list" "timer list" "cal list 3" "cal" "remind list" \
-  "pause 30" "pause 30" "pause 20" \
+  "pause 7" "print +70 > /System/Kernel/kernel/timewarp" "pause 4" \
   "text show $LOGF" "alarm list" "timer list" "cal list 3" "remind done 2" "remind done 3" "remind list" \
   "print now > /System/Kernel/fs/milkfs/sync" "pause 3"
 L="$T/b1.log"
@@ -73,8 +80,9 @@ after "alarm list" | grep "ring-test" | grep -q "off" && ok "the once alarm swit
 after "alarm list" | grep "pills" | grep -q "03:15  Weekdays" && ok "the weekday alarm is untouched" || bad "pills alarm changed"
 after "timer list" | grep -q "no timers" && ok "the finished timer was removed" || bad "timer still listed: $(after "timer list")"
 out "$L" "cal" | grep -q '\*' && ok "the month view marks today's event" || bad "month view has no * mark"
-boot b2 "alarm list" "cal list 3" "text show $LOGF" "remind list"
+boot b2 "alarm list" "cal list 3" "text show $LOGF" "remind list" "text show /System/Kernel/kernel/timewarp"
 L="$T/b2.log"
+out "$L" "text show /System/Kernel/kernel/timewarp" | grep -q "doesn.t exist" && ok "no time warp without the test fw_cfg flag" || bad "the time warp file exists in a normal boot"
 out "$L" "alarm list" | grep -q "pills" && ok "the alarm survived a reboot" || bad "alarm lost after reboot"
 out "$L" "cal list 3" | grep -q "lunch-test" && ok "the repeating event survived a reboot" || bad "event lost after reboot"
 out "$L" "text show $LOGF" | grep -q "tea-test" && ok "the ring log survived a reboot" || bad "ring log lost after reboot"

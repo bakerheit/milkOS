@@ -1174,8 +1174,9 @@ The host repair rewrites the live tree from the fixed item set into free blocks 
 new superblock (snapshots untouched; if there are any, the volume switches to exact sweeps
 since the dead lists no longer describe the new tree). `mkmilkfs.py corrupt IMAGE
 {orphan,dangling,nlink,parent,sb,smap,bref,data,node}` damages a test image on purpose, and
-`scripts/fscktest.sh` runs every kind through both repairs (base image = a few seconds of
-the crash workload; after a repair the kernel's crash-check verifies every file).
+`scripts/fscktest.sh [KIND...]` runs every kind (or the ones named) through both repairs
+(base image = a few seconds of the crash workload; after a repair the kernel's crash-check
+verifies every file); check-all runs the kinds in three groups side by side.
 
 ### Reflink copies and dedupe
 
@@ -1398,7 +1399,7 @@ deduped copies, snapshots, a promoted clone; SIGKILL and power-cut rounds at ran
 points of encrypting and of decrypting; after each crash the Mac's check is clean, every
 tree is exactly as before, the crash-check boot passes, and a resumed copy finishes:
 encrypted with no plaintext left on the disk, or plain and readable without a
-passphrase) and enctest boots 5-6 (the home volume encrypted while in use, what is
+passphrase) and enctest boots 5-6 (`scripts/enctest.sh convert`: the home volume encrypted while in use, what is
 refused meanwhile, locked at the next boot, decrypted back).
 
 **Locking again.** `disks lock [DEV|PATH|LABEL]` (no argument: every encrypted volume that
@@ -1597,8 +1598,9 @@ an encrypted volume; `--plaintext` checked to opt out);
 `verify-stream` on the Mac; receives in milkOS (onto a second disk) and on the Mac; the
 s1 / s2 trees identical on source, received volume and Mac-received images; damaged and
 truncated streams refused with the target byte-for-byte untouched; a missing base
-refused; qemu killed in the middle of a 20 MB receive: target untouched, and receiving
-again works. 21.7 MB full stream: sent in 53 ms, received in 434 ms (from the 9p share).
+refused. A crash in the middle of a receive (target complete or untouched, receiving again
+works) is the host test `a_crash_in_the_middle_of_a_receive` in milkfs/src/tests/send.rs,
+cut at eight points. 21.7 MB full stream: sent in 53 ms, received in 434 ms (from the 9p share).
 
 Limits: one receive at a time per volume; the target should be idle (a write to its live
 tree during a receive makes the receive fail with EBUSY at the end); changed runs are

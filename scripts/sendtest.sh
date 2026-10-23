@@ -13,8 +13,8 @@
 #           mkmilkfs.py check clean everywhere.
 #   boot 2: an empty volume: the incremental stream is refused (base missing), the damaged
 #           and truncated ones too, and the volume stays empty.
-#   boot 3: qemu is killed in the middle of receiving the full s2 (20 MB); the target is
-#           then either complete or untouched, and (boot 4) receiving again works.
+# A crash in the middle of a receive (the target is then complete or untouched, and receiving
+# again works) is a milkfs host test, at many cut points: milkfs/src/tests/send.rs.
 # Encrypted streams: s1 is also sent with --encrypt (verified, received on the Mac, a wrong
 # passphrase refused in the kernel). With MILK_ENCRYPT=1 every stream is encrypted (the
 # default from an encrypted volume; a --plaintext one is checked to be plain), so the
@@ -59,14 +59,8 @@ boot() { # name log commands...
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$log" "${args[@]}" "send:print SEND""-DONE" "wait:SEND-DONE" "done:$T/$name.done" &
   local DPID=$!
-  if [ -n "${KILL_ON:-}" ]; then
-    # Kill qemu KILL_AFTER seconds after the command matching KILL_ON was typed.
-    for _ in $(seq 1500); do grep -aq "$KILL_ON" "$log" 2>/dev/null && break; sleep 0.05; done
-    sleep "${KILL_AFTER:-0.3}"
-  else
-    for _ in $(seq 1500); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
-    sleep 1.5
-  fi
+  for _ in $(seq 1500); do [ -e "$T/$name.done" ] && break; sleep 0.2; done
+  sleep 1.5
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
   kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 }
@@ -78,8 +72,6 @@ $M mkfs "$SRC" --size 64M ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 $M mkfs "$BK" --size 64M --label Backup ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
 head -c 1500000 /dev/urandom > "$T/big.bin"
 $M put "$SRC" /data/big.bin "$T/big.bin" >/dev/null
-head -c 20000000 /dev/urandom > "$T/bulk.bin"
-$M put "$SRC" /bulk/bulk.bin "$T/bulk.bin" >/dev/null
 D=/Volumes/Milk/data; S=/Volumes/Mac/$SUB
 export MILKFS_STREAM_PASSPHRASE="fake-stream-passphrase"
 echo "$MILKFS_STREAM_PASSPHRASE" > "$SHAREDIR/$SUB/sp"; echo "wrong-fake-passphrase" > "$SHAREDIR/$SUB/wrong"
@@ -184,21 +176,6 @@ echo "$L" | grep -aq "disks receive: wrong passphrase for the stream (EACCES" &&
 $M check "$F" > "$T/fresh.txt" 2>&1 && grep -q " 0 snapshot" "$T/fresh.txt" && [ "$($M tree "$F" | wc -l | tr -d ' ')" = 0 ] \
   && ok "the target is still empty and clean" || { bad "target after refused receives"; cat "$T/fresh.txt"; }
 
-C="$T/crash.img"; $M mkfs "$C" --size 64M --label Crash ${ENC_MKFS[@]+"${ENC_MKFS[@]}"} >/dev/null
-DISKS="$T/src.img $C"
-KILL_ON="disks receive $S/s2-full" KILL_AFTER=0.4 boot b3 "$T/boot3.log" \
-  "disks receive $S/s2-full.stream --to /Volumes/Crash$SPF"
-$M check "$C" > "$T/crash1.txt" 2>&1 && ok "after a kill mid-receive the target checks clean" || { bad "target after a kill mid-receive"; cat "$T/crash1.txt"; }
-if [ "$($M tree "$C" | wc -l | tr -d ' ')" = 0 ]; then
-  ok "  and is untouched (the receive hadn't finished; $(grep -a -c 'clone' "$T/crash1.txt" | tr -d ' ') hidden clone record left)"
-elif $M tree "$C" --snapshot s2 2>/dev/null | diff -q - "$T/src-s2.tree" >/dev/null; then
-  ok "  and is complete (the receive finished before the kill)"
-else bad "  partly received"; fi
-boot b4 "$T/boot4.log" "disks receive $S/s2-full.stream --to /Volumes/Crash$SPF" "print now > /System/Kernel/fs/milkfs/sync"
-$M tree "$C" --snapshot s2 > "$T/crash-s2.tree" 2>/dev/null
-if diff -q "$T/crash-s2.tree" "$T/src-s2.tree" >/dev/null && $M check "$C" > "$T/crash2.txt" 2>&1 && ! grep -q "clone" "$T/crash2.txt"; then
-  ok "receiving again works (leftover clone discarded): s2 identical, check clean"
-else bad "receive after the kill"; tr -d '\r' < "$T/boot4.log" | grep -a "disks" | head -3; cat "$T/crash2.txt"; fi
 echo
 [ $FAIL = 0 ] && echo "sendtest: PASS ($T)" || echo "sendtest: FAIL ($T)"
 exit $FAIL

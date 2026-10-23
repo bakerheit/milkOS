@@ -111,7 +111,7 @@ differ 9-rotated 10-panned && ok "dragging panned the picture" || bad "the drag 
 q key meta_l-0 sleep 0.3 key right sleep 0.3 key right sleep 0.3 key right; shot 5b-pdf 10-panned
 ser "send:text show /dev/wm" "wait:$P"
 set -- $(out "text show /dev/wm" | grep -a "window .* Preview" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
-q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 411 )) click; shot 11-text 5b-pdf
+q move $(( ${1:-0} + 346 )) $(( ${2:-0} + 391 )) click; shot 11-text 5b-pdf
 differ 5b-pdf 11-text && ok "Show text opened the text view" || bad "Show text did nothing"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
 if [ "$FAIL" = 0 ]; then echo "preview-test: PASS (screenshots in $T)"; else echo "preview-test: FAIL (logs and screenshots in $T)"; exit 1; fi

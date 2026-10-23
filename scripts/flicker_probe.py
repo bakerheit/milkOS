@@ -65,7 +65,7 @@ def main():
     # image): the toolbar strip to the right of the search field, and the summary bar at the
     # bottom. Both are cream when the frame is complete, milk-white when the body was cleared
     # and not redrawn yet.
-    bands = {"toolbar": (700, 100, 855, 124), "summary": (140, 670, 930, 690)}
+    bands = {"toolbar": (700, 92, 855, 116), "summary": (140, 662, 930, 682)}
     def frac(px, name):
         x0, y0, x1, y1 = bands[name]
         return count(px, w, x0, y0, x1, y1, CREAM) / ((x1 - x0) * (y1 - y0))
@@ -94,10 +94,10 @@ def main():
     if os.environ.get("FLICKER_RESIZE"):
         # Resize the window by its bottom-right corner (Activity Monitor is resizable) and keep
         # the picture for a look: the committed frame must follow the new size.
-        move(q, 935, 691)
+        move(q, 935, 683)
         q.events([{"type": "btn", "data": {"button": "left", "down": True}}])
         for k in range(1, 11):
-            move(q, 935 + 4 * k, 691 - 8 * k)
+            move(q, 935 + 4 * k, 683 - 8 * k)
             time.sleep(0.05)
         q.events([{"type": "btn", "data": {"button": "left", "down": False}}])
         time.sleep(1.0)

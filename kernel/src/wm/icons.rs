@@ -13,6 +13,8 @@ pub enum Icon {
     Folder,
     Term,
     Globe,
+    /// A magnifying glass (the Skim search box).
+    Search,
     Note,
     Music,
     Photo,
@@ -104,6 +106,15 @@ pub fn draw(
             rect(p, 10, 23, 28, 2, 0, fg);
             rect(p, 13, 16, 22, 2, 0, fg);
             rect(p, 13, 30, 22, 2, 0, fg);
+        }
+        Icon::Search => {
+            // A magnifier: the lens, then the handle as a run of dots down to the corner.
+            ring(p, 9, 9, 24, 24, u(12), th(4), fg);
+            let dot = th(5);
+            for k in 0..8 {
+                let (a, b) = (30 + k, 30 + k);
+                p.circle(x + u(a), y + u(b), dot, fg, 255);
+            }
         }
         Icon::Music => {
             rect(p, 14, 28, 11, 9, u(5), fg);

@@ -537,7 +537,7 @@ pub const ENTRIES: [Entry; 13] = [
     },
     Entry {
         name: "Files",
-        sub: "Browse files (placeholder until vfs)",
+        sub: "Browse your files",
         icon: Icon::Folder,
         bg: HONEY,
         fg: INK,
@@ -1350,7 +1350,7 @@ impl Desktop {
         let Some(l) = &self.launcher else {
             return;
         };
-        icons::draw(p, 14, 8, 40, Icon::Globe, CREAM, 255, COCOA, false);
+        icons::draw(p, 14, 8, 40, Icon::Search, CREAM, 255, COCOA, false);
         let end = if l.query.is_empty() {
             p.text_x(66, 12, "Search", COCOA, 2, false);
             66

@@ -75,6 +75,16 @@ impl Runtime {
         self.b.st.borrow().stopped
     }
 
+    /// A call from the app is in progress in this realm (its state is not free to enter).
+    pub fn busy(&self) -> bool {
+        self.b.st.try_borrow().map_or(true, |s| s.depth > 0)
+    }
+
+    /// Arm (or disarm: None) the other frames for the calls that follow.
+    pub fn set_peers(&self, p: Option<frames::Peers>) {
+        self.b.set_peers(p);
+    }
+
     pub fn pending(&self) -> Vec<String> {
         let st = self.b.st.borrow();
         if st.stopped {
@@ -114,6 +124,12 @@ impl Runtime {
 
     pub fn take_requests(&mut self) -> Vec<PageRequest> {
         core::mem::take(&mut self.b.st.borrow_mut().requests)
+    }
+
+    /// A `message` event for this window.
+    pub fn deliver(&mut self, page: &mut Page, host: &mut dyn ScriptHost, msg: &Message) -> bool {
+        self.entry(page, host, |b, r| frames::fire_message(b, r, msg))
+            .is_some()
     }
 
     /// Messages the window posted (`postMessage`), for the host to deliver.

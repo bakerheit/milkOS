@@ -132,6 +132,11 @@ pub fn new_event(
     flags: u64,
 ) -> Value {
     let p = r.pinned(proto);
+    new_event_on(b, r, p, ty, flags)
+}
+
+/// [`new_event`] with the prototype object itself.
+pub fn new_event_on(b: &Rc<Bridge>, r: &mut Realm, p: Value, ty: &str, flags: u64) -> Value {
     let e = r.new_host_object(b.classes().event, flags, p);
     let t = r.string(ty);
     let _ = r.define(e, "type", t, ro());
@@ -865,7 +870,7 @@ pub fn dispatch_event(b: &Rc<Bridge>, r: &mut Realm, this: Value, args: &[Value]
 }
 
 /// `new Event(type, init)` and the subclasses: the flags from the init dictionary.
-fn init_flags(r: &mut Realm, init: Value) -> JsResult<u64> {
+pub(super) fn init_flags(r: &mut Realm, init: Value) -> JsResult<u64> {
     let mut f = 0;
     if init.is_object() {
         let bu = r.get(init, "bubbles")?;
@@ -885,7 +890,7 @@ fn init_flags(r: &mut Realm, init: Value) -> JsResult<u64> {
 }
 
 /// Copy these init members onto the event (with defaults).
-fn copy_init(r: &mut Realm, e: Value, init: Value, keys: &[(&str, Value)]) -> JsResult<()> {
+pub(super) fn copy_init(r: &mut Realm, e: Value, init: Value, keys: &[(&str, Value)]) -> JsResult<()> {
     for &(k, def) in keys {
         let v = if init.is_object() {
             let v = r.get(init, k)?;

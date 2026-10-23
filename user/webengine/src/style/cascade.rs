@@ -1182,6 +1182,17 @@ pub fn presentational_hints(dom: &Dom, el: NodeId, e: &Element, out: &mut Vec<De
                     out.push(Decl::BorderStyle(s, BorderStyle::Solid));
                 }
             }
+            // HTML §15.5.5: `frameborder=0` (or `no`) takes the UA's border off an iframe.
+            if e.name == IFRAME
+                && attr("frameborder").is_some_and(|v| {
+                    let v = v.trim();
+                    v == "0" || v.eq_ignore_ascii_case("no")
+                })
+            {
+                for s in 0..4 {
+                    out.push(Decl::BorderStyle(s, BorderStyle::None));
+                }
+            }
             for (a, sides) in [("hspace", [1u8, 3]), ("vspace", [0, 2])] {
                 if let Some(d) = attr(a).and_then(dimension) {
                     for s in sides {

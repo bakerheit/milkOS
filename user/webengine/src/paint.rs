@@ -23,7 +23,27 @@ pub struct HitRect {
     pub text: bool,
 }
 
+/// Where an `<iframe>`'s content goes: the frames' documents are spliced into the display list
+/// there (see `frames.rs`).
+#[derive(Clone, Copy, Debug)]
+pub struct FrameMark {
+    pub node: NodeId,
+    /// The content box: document space (viewport space for a fixed one), device pixels.
+    pub rect: Rect,
+    /// The clip the box is painted under.
+    pub clip: u16,
+    /// Painted in the fixed layer.
+    pub fixed: bool,
+    /// The content goes before `entries[index]` (before `fixed[index]` for a fixed one).
+    pub index: usize,
+    /// `visibility: visible` (a hidden frame keeps its slot but paints nothing).
+    pub visible: bool,
+    /// Text runs of the element's own document before it (for find and copy-all order).
+    pub runs_before: usize,
+}
+
 pub struct Painted {
+    pub marks: Vec<FrameMark>,
     pub dl: DisplayList,
     pub hits: Vec<HitRect>,
     /// Per DOM node: the union of its boxes (document space; fixed boxes in viewport space).
@@ -80,6 +100,8 @@ struct P<'a> {
     hits: Vec<HitRect>,
     node_rects: Vec<Rect>,
     control_rects: Vec<(ControlId, Rect)>,
+    /// `<iframe>` boxes: (layer, index in the layer's list, the mark).
+    marks: Vec<(Layer, usize, FrameMark)>,
     /// Positioned boxes waiting: (z, order, box, offset, clip, opacity, fixed).
     deferred: Vec<Deferred>,
     order: u32,
@@ -424,6 +446,29 @@ impl P<'_> {
         if let Kind::Replaced(rep) = &b.kind {
             let (cx_, cy_, cw, ch) = b.content();
             let cr = rect_au(cx_ + off.0, cy_ + off.1, cw, ch);
+            if b.node != NONE && self.cx.dom.is_html(b.node, crate::atoms::tag::IFRAME) {
+                let list_len = match layer {
+                    Layer::Neg => self.neg.len(),
+                    Layer::Flow => self.flow.len(),
+                    Layer::Pos => self.pos.len(),
+                    Layer::Fixed => self.fixed.len(),
+                };
+                if self.marks.len() < MAX_MARKS {
+                    self.marks.push((
+                    layer,
+                    list_len,
+                    FrameMark {
+                        node: b.node,
+                        rect: cr,
+                        clip,
+                        fixed: layer == Layer::Fixed,
+                        index: 0,
+                        visible,
+                        runs_before: 0,
+                    },
+                    ));
+                }
+            }
             if visible {
                 match rep {
                     Replaced::Image(Some(img), _) => {
@@ -768,6 +813,7 @@ pub fn paint(
         hits: Vec::new(),
         node_rects: alloc::vec![Rect::default(); nodes],
         control_rects: Vec::new(),
+        marks: Vec::new(),
         deferred: Vec::new(),
         order: 0,
     };
@@ -792,9 +838,50 @@ pub fn paint(
             }
         }
     }
+    let (nneg, nflow) = (p.neg.len(), p.flow.len());
+    let marks: Vec<FrameMark> = p
+        .marks
+        .iter()
+        .map(|&(layer, i, mut m)| {
+            m.index = match layer {
+                Layer::Neg => i,
+                Layer::Flow => nneg + i,
+                Layer::Pos => nneg + nflow + i,
+                Layer::Fixed => i,
+            };
+            m
+        })
+        .collect();
     let mut entries = p.neg;
     entries.extend(p.flow);
     entries.extend(p.pos);
+    let mut marks = marks;
+    if !marks.is_empty() {
+        // How many text runs of this document come before each frame (find and copy-all
+        // put a frame's text where its element is): entries first, then the fixed ones.
+        let prefix = |list: &[Entry]| -> Vec<usize> {
+            let mut v = Vec::with_capacity(list.len() + 1);
+            let mut n = 0;
+            v.push(0);
+            for e in list {
+                if matches!(e.item, Item::Text(_)) {
+                    n += 1;
+                }
+                v.push(n);
+            }
+            v
+        };
+        let pe = prefix(&entries);
+        let pf = prefix(&p.fixed);
+        let all = *pe.last().unwrap_or(&0);
+        for m in marks.iter_mut() {
+            m.runs_before = if m.fixed {
+                all + pf[m.index.min(pf.len() - 1)]
+            } else {
+                pe[m.index.min(pe.len() - 1)]
+            };
+        }
+    }
     let width = px(laid.width);
     let height = px(laid.height);
     let mut dl = DisplayList {
@@ -809,6 +896,7 @@ pub fn paint(
     };
     build_bands(&mut dl);
     Painted {
+        marks,
         dl,
         hits: p.hits,
         node_rects: p.node_rects,
@@ -816,8 +904,11 @@ pub fn paint(
     }
 }
 
+/// `<iframe>` boxes noted per page (a hostile page with more gets no slots for the rest).
+const MAX_MARKS: usize = 2048;
+
 /// The culling index of [`DisplayList::visible`].
-fn build_bands(dl: &mut DisplayList) {
+pub fn build_bands(dl: &mut DisplayList) {
     let nb = ((dl.height.max(1) + BAND - 1) / BAND).clamp(1, 1 << 16) as usize;
     let mut bands: Vec<Vec<u32>> = alloc::vec![Vec::new(); nb];
     for (i, e) in dl.entries.iter().enumerate() {

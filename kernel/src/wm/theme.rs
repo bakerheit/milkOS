@@ -129,11 +129,23 @@ pub const MENU_TEXT_Y: i32 = 6;
 
 // ---- dock -----------------------------------------------------------------------------------
 pub const DOCK_PAD: i32 = 8;
-/// Dock icon size: 48 by SPEC; Settings offers 40 / 48 / 56. The dock is that plus padding.
+/// The dock icon size chosen in Settings: 48 by SPEC; Settings offers 40 / 48 / 56. See
+/// `dock_icon` for the size actually drawn.
 static DOCK_ICON_PX: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(48);
 
+/// Room left free beside a resting dock (both sides together): the magnified icons and an app
+/// or two more still fit.
+const DOCK_SIDE_ROOM: i32 = 104;
+/// The dock never shrinks its icons below this, however many there are.
+const DOCK_MIN_ICON: i32 = 24;
+
+/// The icon size drawn: the one chosen in Settings, or smaller so that every dock tile (the
+/// desktop's, the installed apps' and the Trash) fits the screen with `DOCK_SIDE_ROOM` to spare.
 pub fn dock_icon() -> i32 {
-    DOCK_ICON_PX.load(core::sync::atomic::Ordering::Relaxed)
+    let want = DOCK_ICON_PX.load(core::sync::atomic::Ordering::Relaxed);
+    let n = (super::shell::dock_len() as i32).max(1);
+    let fit = (screen_w() - DOCK_SIDE_ROOM - 2 * DOCK_PAD - (n - 1) * DOCK_GAP) / n;
+    want.min(fit).max(DOCK_MIN_ICON)
 }
 
 pub fn set_dock_icon(px: i32) {
@@ -144,7 +156,7 @@ pub fn set_dock_icon(px: i32) {
 pub fn dock_h() -> i32 {
     dock_icon() + 2 * DOCK_PAD
 }
-pub const DOCK_GAP: i32 = 12;
+pub const DOCK_GAP: i32 = 6;
 pub const DOCK_BOTTOM: i32 = 12;
 pub const DOCK_DOT: i32 = 4;
 pub const DOCK_DOT_GAP: i32 = 4;

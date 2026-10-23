@@ -41,7 +41,7 @@ for c in \
   "disks list /Volumes/Milk /Users/milk /Volumes/DFFAT /Volumes/Mac /tmp" \
   "text show /Commands/* > /Volumes/Milk/big.bin" "print now > /System/Kernel/fs/milkfs/sync" "text count --bytes /Volumes/Milk/big.bin" "disks list /Volumes/Milk" \
   "disks snapshot dfsnap" "disks list /Volumes/Milk/.snapshots/dfsnap" \
-  "disks list /no/such/path"; do
+  "disks list /no/such/path" "text show /System/Kernel/fs/milkfs/info"; do
   args+=("send:$c" "wait:$P")
 done
 python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print DF""-DONE" "wait:DF-DONE" "done:$T/done" &
@@ -99,8 +99,8 @@ big=$(( $(out "text count --bytes /Volumes/Milk/big.bin" | awk '{print $1; exit}
   && ok "$big K written: used $u0 -> $u1 K" || bad "used: $u0 -> $u1 K after writing $big K"
 out "disks list /Volumes/Milk/.snapshots/dfsnap" | grep -q "^milkfs .* /Volumes/Milk/.snapshots/dfsnap (ro)$" && ok "a snapshot: milkfs, read-only" || bad "snapshot statfs"
 out "disks list /no/such/path" | grep -q "^disks list: /no/such/path doesn't exist" && ok "a missing path: an error" || bad "missing path"
-echo "$L" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
-echo "$L" | grep -q "fs selftest: PASS" && ok "self-test: $(echo "$L" | grep -o 'fs selftest: PASS ([0-9]* checks)')" || bad "self-test: $(echo "$L" | grep -a 'selftest: FAIL' | head -3)"
+out "text show /System/Kernel/fs/milkfs/info" | grep -q "^encryption:  off$" && ok "info (plain volume): encryption: off" || bad "info encryption line"
+# The kernel's fs self-test isn't part of this boot any more: scripts/selftest-boot.sh runs it.
 echo
 [ $FAIL = 0 ] && echo "dftest: PASS ($T)" || echo "dftest: FAIL ($T)"
 exit $FAIL

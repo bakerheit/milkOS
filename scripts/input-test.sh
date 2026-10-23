@@ -35,11 +35,11 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
 QPID=$!
 trap 'kill "$QPID" 2>/dev/null || true; rm -f "$SOCK"' EXIT
 
-for _ in $(seq 100); do
-  grep -q '\[selftest\] ok' "$LOG" 2>/dev/null && break
+for _ in $(seq 300); do
+  grep -q 'msh:' "$LOG" 2>/dev/null && break
   sleep 0.1
 done
-grep -q '\[selftest\] ok' "$LOG" || { echo "boot did not reach selftest ok" >&2; cat "$LOG" >&2; exit 1; }
+grep -q 'msh:' "$LOG" || { echo "boot did not reach the shell prompt" >&2; cat "$LOG" >&2; exit 1; }
 
 DEFAULT=(type 'Hello, milkOS! ~(1+2)=3' key ret type 'caps:' key caps_lock type 'abc'
   key caps_lock type ' ctrl-c:' key ctrl-c type ' bs:xy' key backspace key ret

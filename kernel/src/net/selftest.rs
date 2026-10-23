@@ -1,4 +1,6 @@
-//! Boot self-test of the network stack (thread context, after `net::init`).
+//! Boot self-test of the network stack (thread context, after `net::init`), with
+//! `opt/milkos/selftest=net` or `full` (kernel/src/selftest.rs; the default boot only waits for
+//! DHCP, [`wait_dhcp`]).
 //!
 //! Always (no host services needed): DHCP on eth0 (3 s timeout, boot goes on without it),
 //! ping the gateway (10.0.2.2, answered by qemu's slirp itself), UDP and TCP over loopback,
@@ -1067,6 +1069,33 @@ fn dump_proc() {
     }
 }
 
+/// Every boot (self-test or not, so the network is up when the shell is): wait up to 3 s for
+/// DHCP on eth0 and print the lease. Nothing to wait for without a NIC or in a v6-only boot.
+/// True if eth0 has an address.
+pub fn wait_dhcp() -> bool {
+    if super::v4_off() || !super::has_device() {
+        return false;
+    }
+    let t0 = timer::now_ns();
+    if !wait_for(3000, || super::config().configured()) {
+        kprintln!("[net] dhcp: no answer in 3 s, eth0 unconfigured (DHCP keeps trying)");
+        return false;
+    }
+    let c = super::config();
+    let (server, lease) = super::with(|st| (st.dhcp.server, st.dhcp.lease_s));
+    kprintln!(
+        "[net] dhcp: {} mask {} gw {} dns {} from {} lease {} s ({} ms)",
+        c.addr,
+        c.mask,
+        c.gateway.unwrap_or_default(),
+        c.dns.unwrap_or_default(),
+        server,
+        lease,
+        (timer::now_ns() - t0) / MS
+    );
+    true
+}
+
 /// Run the network self-test. Prints `[net] selftest ok` or `[net] selftest FAILED (n)`.
 pub fn run() {
     let cfg = read_config();
@@ -1084,22 +1113,8 @@ pub fn run() {
     if v6only && super::has_device() {
         check("v6-only", test_v4_off());
     } else if super::has_device() {
-        let t0 = timer::now_ns();
-        have_ip = wait_for(3000, || super::config().configured());
-        let c = super::config();
-        if have_ip {
-            let (server, lease) = super::with(|st| (st.dhcp.server, st.dhcp.lease_s));
-            kprintln!(
-                "[net] dhcp: {} mask {} gw {} dns {} from {} lease {} s ({} ms)",
-                c.addr,
-                c.mask,
-                c.gateway.unwrap_or_default(),
-                c.dns.unwrap_or_default(),
-                server,
-                lease,
-                (timer::now_ns() - t0) / MS
-            );
-        } else {
+        have_ip = wait_dhcp();
+        if !have_ip {
             check(
                 "dhcp",
                 Err("no answer in 3 s, eth0 unconfigured (DHCP keeps trying)".into()),

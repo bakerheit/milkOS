@@ -7,6 +7,69 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::exceptions::{BRK_SELFTEST, TrapFrame};
 use crate::{gic, kprintln, sync, timer};
 
+/// The boot self-tests that are slow (seconds in a debug kernel), each behind a bit of the boot
+/// option `opt/milkos/selftest`: `full` runs them all, or a comma list of `timer` (this file),
+/// `crypto` (the shared crate's vectors), `fs`, `sched` and `net`. The default boot runs none of
+/// them: scripts/selftest-boot.sh is the test that runs them all (`MILK_SELFTEST=full` in
+/// scripts/run.sh); a test that checks one subsystem's lines asks for just that one (net-test:
+/// `net`). memtest, the CSPRNG's own vectors and the process layer's self-test run every boot:
+/// they are fast and the rest of the system leans on what they check.
+pub const TIMER: u32 = 1 << 0;
+pub const CRYPTO: u32 = 1 << 1;
+pub const FS: u32 = 1 << 2;
+pub const SCHED: u32 = 1 << 3;
+pub const NET: u32 = 1 << 4;
+const ALL: u32 = TIMER | CRYPTO | FS | SCHED | NET;
+const NAMES: [(&str, u32); 5] = [
+    ("timer", TIMER),
+    ("crypto", CRYPTO),
+    ("fs", FS),
+    ("sched", SCHED),
+    ("net", NET),
+];
+
+static WANT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Read `opt/milkos/selftest` (early in kmain: fw_cfg works from the start).
+pub fn read_option() {
+    let mut text = [0u8; 64];
+    let n = crate::fwcfg::find_file("opt/milkos/selftest")
+        .filter(|f| (f.size as usize) <= text.len())
+        .filter(|f| crate::fwcfg::read_file(*f, &mut text[..f.size as usize]))
+        .map_or(0, |f| f.size as usize);
+    let s = core::str::from_utf8(&text[..n]).unwrap_or("").trim();
+    let mut want = 0;
+    for w in s.split(',').map(str::trim).filter(|w| !w.is_empty()) {
+        match NAMES.iter().find(|(name, _)| *name == w) {
+            Some((_, bit)) => want |= bit,
+            None if w == "full" => want = ALL,
+            None => kprintln!("[selftest] opt/milkos/selftest: unknown self-test {w:?} (ignored)"),
+        }
+    }
+    WANT.store(want, Ordering::Relaxed);
+    if want == ALL {
+        kprintln!("[selftest] full boot: every boot self-test runs (opt/milkos/selftest=full)");
+    } else if want == 0 {
+        kprintln!(
+            "[selftest] quick boot: the slow self-tests are off (opt/milkos/selftest=full runs them)"
+        );
+    } else {
+        let mut on = alloc::string::String::new();
+        for (name, bit) in NAMES {
+            if want & bit != 0 {
+                on.push_str(if on.is_empty() { "" } else { "," });
+                on.push_str(name);
+            }
+        }
+        kprintln!("[selftest] boot self-tests on: {on} (opt/milkos/selftest)");
+    }
+}
+
+/// Does this boot run the self-test(s) `bit`?
+pub fn wants(bit: u32) -> bool {
+    WANT.load(Ordering::Relaxed) & bit != 0
+}
+
 static DEADLINE_FIRED: AtomicBool = AtomicBool::new(false);
 static DEADLINE_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static DEADLINE_LATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);

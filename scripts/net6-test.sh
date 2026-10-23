@@ -57,7 +57,7 @@ boot() {
     -netdev "user,id=n0,ipv4=off$slirp" -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$lp,remote.type=inet,remote.host=127.0.0.1,remote.port=$rp" \
     -device "virtio-net-device,netdev=d0,mac=$mac" \
-    -fw_cfg "name=opt/milkos/net,string=v6only=1" "$@" 2>>"$WORK/$name.qemu.err" &
+    -fw_cfg "name=opt/milkos/net,string=v6only=1" -fw_cfg name=opt/milkos/selftest,string=net "$@" 2>>"$WORK/$name.qemu.err" &
   PIDS+=($!)
 }
 boot alice 02:6d:6b:64:0a:0a "$PA" "$PB" "" -fw_cfg "name=opt/milkos/nettest,string=echo6=[fec0::2]:$P_echo6"

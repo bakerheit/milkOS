@@ -62,7 +62,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
 QPID=$!
 P='wait:msh:/\$ '
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  'wait@240:\[net\] selftest' "$P" \
+  'wait@240:msh:/\$ ' \
   'send:network status' 'wait:internet +on' "$P" \
   'send:network lookup www.milk.test' 'wait:network lookup: ' "$P" \
   'send:network lookup www.milk.test' 'wait:network lookup: ' "$P" \

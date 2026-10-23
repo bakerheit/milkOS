@@ -69,7 +69,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
   -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:80,hostfwd=tcp:127.0.0.1:$KH_PORT-:8080,hostfwd=tcp:127.0.0.1:$NC_PORT-:7777" \
   -device virtio-net-device,netdev=n0 \
-  -fw_cfg "name=opt/milkos/nettest,string=$CFG" &
+  -fw_cfg "name=opt/milkos/nettest,string=$CFG" -fw_cfg name=opt/milkos/selftest,string=net &
 QPID=$!
 echo "qemu pid $QPID, serial log $LOG"
 # Console: log everything; once msh is up, run the network tools.

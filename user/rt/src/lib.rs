@@ -21,6 +21,7 @@ pub mod net;
 pub mod sys;
 pub mod table;
 pub mod thread;
+pub mod tls;
 pub mod unix;
 pub mod users;
 pub mod version;

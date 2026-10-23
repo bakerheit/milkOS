@@ -122,6 +122,7 @@ pub extern "C" fn kmain() -> ! {
     sysstat::init();
     net::init();
     net::selftest::run();
+    net::tls::selftest();
     audio::init();
     udrv::init_files();
     proc::init();

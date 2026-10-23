@@ -1,0 +1,16 @@
+[package]
+name = "tlsprobe"
+version = "0.0.1"
+edition = "2024"
+
+# A host (macOS) test client for scripts/tls-interop.sh: the tls crate over std TCP, run
+# against OpenSSL's s_server on 127.0.0.1. Not part of milkOS; its own workspace (built
+# with --target aarch64-apple-darwin into target/host-tests).
+[workspace]
+
+[dependencies]
+tls = { path = ".." }
+milkcrypto = { path = "../../crypto" }
+
+[profile.dev]
+opt-level = 1

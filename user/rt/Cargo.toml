@@ -10,5 +10,7 @@ bench = false
 [dependencies]
 # The shared crypto primitives (<repo>/crypto, also linked into the kernel).
 milkcrypto = { path = "../../crypto" }
+# The TLS 1.3 client (<repo>/tls, also linked into the kernel): rt::tls.
+tls = { path = "../../tls" }
 # The heap allocator (<repo>/user/heapkit), installed as the global allocator in heap.rs.
 heapkit = { path = "../heapkit" }

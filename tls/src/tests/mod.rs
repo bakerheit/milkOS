@@ -5,8 +5,8 @@
 //! hostile and mutated messages).
 
 mod chain;
-// mod rfc8448;
-// mod server;
+mod rfc8448;
+mod server;
 mod x509;
 
 use alloc::vec::Vec;

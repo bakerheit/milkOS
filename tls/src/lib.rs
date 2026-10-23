@@ -32,6 +32,7 @@ pub mod client;
 pub mod codec;
 pub mod der;
 pub mod error;
+pub mod interop;
 pub mod keys;
 pub mod name;
 pub mod record;

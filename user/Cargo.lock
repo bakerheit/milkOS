@@ -265,6 +265,7 @@ version = "0.0.1"
 dependencies = [
  "heapkit",
  "milkcrypto",
+ "tls",
 ]
 
 [[package]]
@@ -372,6 +373,20 @@ dependencies = [
  "rt",
  "timeio",
  "timekit",
+]
+
+[[package]]
+name = "tls"
+version = "0.0.1"
+dependencies = [
+ "milkcrypto",
+]
+
+[[package]]
+name = "tlsprobe"
+version = "0.0.1"
+dependencies = [
+ "rt",
 ]
 
 [[package]]

@@ -2,9 +2,9 @@
 
 Files: `kernel/src/virtio/net.rs` (driver), `kernel/src/net/` (stack, socket API, /proc/net,
 demo server, self-test, the internet policy, DNS), `kernel/src/proc/sock.rs` (socket syscalls),
-`milkweb/` (URLs, the HTTP/1.1 client, DNS messages, the Browser's HTML; shared by the kernel
+`milkweb/` (URLs, the HTTP/1.1 client, DNS messages, a small HTML subset; shared by the kernel
 and user space), `user/rt/src/net.rs` + `user/rt/src/web.rs` + `user/network` + `user/cmdkit`
-(the `network` command), `kernel/src/wm/apps/browser.rs` (the Browser),
+(the `network` command), `user/browser` (the Browser, docs/browser.md),
 `scripts/net-test.sh` / `scripts/web-test.sh` + helpers (end-to-end tests).
 
 Everything is written from scratch (no crates). IPv4 only: up to two Ethernet interfaces
@@ -38,7 +38,7 @@ choice, passed in fw_cfg `opt/milkos/net` and read by `net::internet` at net ini
 | who | `scripts/run.sh`, `milkOS.command` | `MILK_OFFLINE=1` / `--offline`, every test |
 | slirp | no `restrict=on`: NAT to the internet through the Mac | `restrict=on` (or a test's own local netdev) |
 | names (`net::dns`) | any name: A and AAAA from the DHCP DNS server (slirp's 10.0.2.3), CNAMEs followed, TCP for truncated answers, cached for their TTL | `.test` only, from a server set by the self-test; `EPERM` for the rest (the policy as it always was) |
-| Browser | host names; a bare word is a search (below) | IP literals and `localhost` only, refused before any socket |
+| Browser | host names; a bare word is a search (below) | IP literals and `localhost` only (the kernel's resolver refuses the rest) |
 | `network lookup` / `get` | real names | numeric, localhost, `NAME.local`, `.test` |
 | shown | Settings > Network "Internet: on", `network status` `internet on (DNS 10.0.2.3 from DHCP)`, `/proc/net/internet` | "off (offline mode)" |
 
@@ -63,14 +63,14 @@ can: web sites, and also the Mac's LAN (a router's admin page, a printer) and th
 at 10.0.2.2. Plain http pages can be read and changed by anyone between the Mac and a site;
 `https://` pages come over TLS 1.3 with the certificate checked against the Mozilla roots
 (docs/tls.md), so those can't, but don't type anything private into a page yet. DNS answers aren't authenticated either (no DNSSEC; the ids are random
-and an answer must echo the question). Every fetch is bounded (2 MiB per page in the
-Browser, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
+and an answer must echo the question). Every fetch is bounded (4 MiB per page in the
+Browser, 64 MiB for a download, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
 on the way (DNS, HTTP, gzip, HTML) is host-tested against malformed and hostile input. The
 sandbox's net capability gates names too: `MILK_RESOLVE` of a real name needs the full
 capability (`net=local` processes get localhost and numeric addresses only). Offline, none of
 this applies: slirp is restricted and the guest resolves nothing real.
 
-**The client** (`milkweb::http`, the Browser and `rt::web`): HTTP/1.1 GET with `Host`,
+**The client** (`milkweb::http`, the Browser and `rt::web`): HTTP/1.1 GET and POST with `Host`,
 `User-Agent: milkOS/0.1`, `Accept-Encoding: gzip, deflate` and `Connection: close` (or
 keep-alive, reused for a same-origin redirect, when `Options::keep_alive` asks); bodies framed
 by chunked encoding (trailers skipped), Content-Length (two different ones are an error) or
@@ -87,9 +87,18 @@ trait Net { fn connect(&mut self, host: &str, port: u16, timeout_ms: u64) -> Res
             fn has_tls(&self) -> bool { false }                      // the https hook (true in both)
             fn secure(&mut self, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error>; }
 milkweb::http::get(&mut dyn Net, &Url, &Options) -> Result<Response, Failure>
+milkweb::http::fetch(&mut dyn Net, &Request, &Options, &mut dyn Hooks) -> Result<Response, Failure>
 ```
 
-`net::web::KernelNet` (kernel sockets) and `rt::web::RtNet` (user sockets) implement `Net`.
+`fetch` is the Browser's: a `Request` (GET, or POST with a body and its Content-Type; extra
+headers, any with a CR or LF dropped, Host / Cookie / Content-Length reserved) and `Hooks`
+asked for every hop's `Cookie` header, shown every response's headers (Set-Cookie on
+redirects too, and they may raise the body limit for one response: a download), told the
+body's progress, and asked before every read whether to stop (`Error::Cancelled`). A POST
+answered 301/302/303 goes on as a GET without its body; 307/308 repeat it; the loop check
+counts (method, address), so Post/Redirect/Get to the same address isn't a loop.
+
+`rt::web::RtNet` (user sockets) implements `Net`.
 **TLS** is at `secure`: both say `has_tls() == true`, and `secure` is `milkweb::secure::secure`,
 the `tls` crate's handshake over the TCP `Transport` with the system roots (kernel:
 `net::tls::client()`; user space: `rt::tls::client()`). A refused certificate is
@@ -99,19 +108,15 @@ the `tls` crate's handshake over the TCP `Transport` with the system roots (kern
 (HTTP's own framing tells a cut body). A `Net` without TLS still gets
 `Error::SecureUnsupported` before any lookup. See docs/tls.md.
 
-**The Browser** (`wm/apps/browser.rs`) shows where redirects ended in its address bar and says
-what went wrong in words: "No internet (offline mode)", "Server not found", "No internet"
-(no DNS answer), "Can't connect to the server", "This site's certificate can't be trusted",
-"A secure connection couldn't be made". A bare
-word (no dot, colon or slash, or several words) goes to DuckDuckGo's text-only page,
-`http://lite.duckduckgo.com/lite/?q=...` (not tried by any test). Its HTML subset
-(`milkweb::html`, host-tested): headings, paragraphs, `div`/`section`/... as blocks,
-`span`/`font`/... inline, lists, `blockquote`, `pre`, `hr`, tables as one line per row with
-" | " between cells, links, bold / italic, `<img alt>` as `[alt]`; `script`, `style`, `svg`,
-`template` and the head dropped with their content; named and numeric entities; UTF-8,
-Latin-1 or Windows-1252 from the Content-Type, a `<meta charset>`, or the bytes; characters
-the UI font (Latin-1) lacks folded to ASCII. No CSS, no JavaScript, no images. Each load is
-logged (`[browser] URL: 200 OK, N bytes, 'title', K redirects`).
+**The Browser** (`user/browser`, docs/browser.md) shows where redirects ended in its address
+bar and says what went wrong in words: "No internet (offline mode)", "Server not found", "No
+internet" (no DNS answer), "Can't connect to the server", "This site's certificate can't be
+trusted", "A secure connection couldn't be made". A bare word (no dot, colon or slash, or
+several words) goes to DuckDuckGo's text-only page, `https://lite.duckduckgo.com/lite/?q=...`
+(tests only check that the search is asked for). Pages are rendered by `user/webengine` (HTML5
+parsing, CSS, layout). Each load is logged on the console (`[browser] URL: 200 OK, N bytes,
+'title', K redirects`). `milkweb::html` (the old Browser's HTML subset) stays for the
+`network` command's and tests' use.
 
 ## Structure
 
@@ -441,7 +446,7 @@ net::READY_WQ                      // WaitQueue woken on every change (what `wai
 Other entry points: `net::init()` (after `sched::init`), `net::selftest::run()`,
 `net::config() -> IpConfig { addr, mask, gateway, dns }`, `net::mac()`, `net::poll()`,
 `net::dns::{resolve, resolve_all, set_server, server, cache_stats}`, `net::internet::{online,
-dns_server, summary}`, `net::web::KernelNet` (milkweb's HTTP client over kernel sockets).
+dns_server, summary}`.
 
 `SocketId` is slot + generation (`raw()` / `from_raw()` to store it); a stale id gives
 `EBADF`. Semantics follow Linux unless noted: binding never conflicts with connections

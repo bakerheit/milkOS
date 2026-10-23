@@ -13,7 +13,8 @@
 #   * cookies: no third-party cookies (an image from another site gets none and sets none),
 #     persistent ones saved in ~/Library/Browser/cookies, session ones not
 #   * tabs (Cmd-T, Ctrl-Tab, Ctrl-W, Cmd-click), bookmarks (Cmd-D, the file), downloads to
-#     ~/Downloads (a second one gets a new name), error pages, the sandbox it runs in
+#     ~/Downloads (a second one gets a new name), `open URL` into the running Browser, error
+#     pages, the sandbox it runs in
 #   scripts/browser-test.sh [workdir]
 # Only the qemu and python processes started here are killed (by PID). The work directory is
 # removed when everything passes (unless it was given).
@@ -194,6 +195,13 @@ q key ctrl-tab; shot 16-tab2 15-two-tabs
 differ 15-two-tabs 16-tab2 && ok "Ctrl-Tab switched tabs" || bad "Ctrl-Tab didn't switch"
 q key ctrl-w sleep 5; shot 17-closed 16-tab2
 same 14-home 17-closed && ok "Ctrl-W closed the tab" || bad "Cmd-W didn't go back to one tab"
+# `open URL` with the Browser running: the desktop hands it the address (its inbox), a new tab.
+before=$(log_lines | grep -c "^\[browser\] http://$(esc_re "$H")/styled: 200" || true)
+ser "send:open http://$H/styled" "wait:$PR"
+sleep 2
+after=$(log_lines | grep -c "^\[browser\] http://$(esc_re "$H")/styled: 200" || true)
+[ "$after" -gt "$before" ] && ok "open URL reached the running Browser" || bad "open URL didn't reach the running Browser"
+q key ctrl-w sleep 0.5
 q key meta_l-t type "$H/missing" key ret
 loaded "http://$(esc_re "$H")/missing: 404 Not Found, [0-9]+ bytes, 'Not found'" && ok "a 404 page from a new tab (Cmd-T)" || bad "no 404 page"
 go "www.milk.test:1/"

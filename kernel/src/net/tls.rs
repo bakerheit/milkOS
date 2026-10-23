@@ -1,4 +1,4 @@
-//! TLS 1.3 for kernel code (the Browser's https:// hook): the shared `tls` crate
+//! TLS 1.3 for kernel code: the shared `tls` crate
 //! (`<repo>/tls`) over kernel TCP sockets, with the compiled-in Mozilla roots, the kernel
 //! CSPRNG and the RTC-backed wall clock. See docs/tls.md.
 //!
@@ -10,7 +10,8 @@
 //!
 //! Test boots: when a test script (scripts/tls-interop.sh) passes fw_cfg
 //! `opt/milkos/tlstest-root`, [`init`] says so loudly and that test CA is trusted on top of
-//! the Mozilla roots for this boot (by the Browser, and by user space through `/proc/net/tls`),
+//! the Mozilla roots for this boot (by user space too, through `/proc/net/tls`: the Browser
+//! and `network get`),
 //! so a page from a local test server loads. Normal boots have no such file and trust the
 //! Mozilla roots only. [`selftest`] runs the cases of fw_cfg `opt/milkos/tlstest` (see
 //! `tls::interop`) with the test CA alone, and `roots=mozilla` cases with the Mozilla roots
@@ -28,7 +29,7 @@ use super::wire::{Ipv4, SockAddr};
 use crate::sync::SpinLock;
 use crate::{fwcfg, kprintln, timer};
 
-#[allow(unused_imports)] // for the Browser
+#[allow(unused_imports)] // for kernel code that speaks TLS
 pub use tls::{Client, Config, RootStore, Stream, TlsError, Transport};
 
 /// How long a read or write may stall before the connection is given up.
@@ -81,7 +82,11 @@ pub fn roots() -> Arc<RootStore> {
 /// `/proc/net/tls`: the root store, and a test boot's extra root (base64 DER) for user space
 /// (rt::tls trusts it too, so `network get` and the Browser agree).
 pub fn proc_file(_st: &super::Stack, w: &mut dyn core::fmt::Write) -> core::fmt::Result {
-    writeln!(w, "mozilla_roots={}", tls::x509::split_der(tls::roots::MOZILLA_ROOTS_DER).count())?;
+    writeln!(
+        w,
+        "mozilla_roots={}",
+        tls::x509::split_der(tls::roots::MOZILLA_ROOTS_DER).count()
+    )?;
     match TEST_ROOT.try_lock().and_then(|g| g.clone()) {
         Some(der) => writeln!(w, "test_root={}", base64(&der)),
         None => writeln!(w, "test_root=none"),
@@ -92,7 +97,9 @@ fn base64(b: &[u8]) -> String {
     const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
     for c in b.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= c.len() {
                 s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -172,8 +179,13 @@ impl Transport for SocketTransport {
 
 /// A blocking TCP connect with a timeout (thread context).
 pub fn tcp_connect(addr: SockAddr, timeout_ns: u64) -> Result<SocketTransport, String> {
-    let fam = if addr.ip.is_v6() { Family::V6 } else { Family::V4 };
-    let s = socket::socket_family(fam, SockType::Stream).map_err(|e| format!("socket: {}", errno::name(e)))?;
+    let fam = if addr.ip.is_v6() {
+        Family::V6
+    } else {
+        Family::V4
+    };
+    let s = socket::socket_family(fam, SockType::Stream)
+        .map_err(|e| format!("socket: {}", errno::name(e)))?;
     let t = SocketTransport {
         socket: s,
         timeout_ns,
@@ -197,7 +209,11 @@ pub fn connect(host: &str, addr: SockAddr) -> Result<Stream<SocketTransport>, St
     connect_with(&client(), host, addr)
 }
 
-pub fn connect_with(client: &Client, host: &str, addr: SockAddr) -> Result<Stream<SocketTransport>, String> {
+pub fn connect_with(
+    client: &Client,
+    host: &str,
+    addr: SockAddr,
+) -> Result<Stream<SocketTransport>, String> {
     let t = tcp_connect(addr, TIMEOUT_NS)?;
     client.connect(host, t).map_err(|e| e.to_string())
 }
@@ -241,7 +257,9 @@ pub fn selftest() {
     let text = String::from_utf8_lossy(&cfg).into_owned();
     let (mut pass, mut fail) = (0, 0);
     let mut connect = |a: &str| -> Result<SocketTransport, String> {
-        let (ip, port) = a.split_once(':').ok_or_else(|| format!("bad address {a}"))?;
+        let (ip, port) = a
+            .split_once(':')
+            .ok_or_else(|| format!("bad address {a}"))?;
         let ip = Ipv4::parse(ip).ok_or_else(|| format!("bad address {a}"))?;
         let port = port.parse().map_err(|_| format!("bad address {a}"))?;
         tcp_connect(SockAddr::new(ip, port), TIMEOUT_NS)
@@ -258,7 +276,8 @@ pub fn selftest() {
                 &mut connect,
                 &now_ms,
             );
-            out.map(|m| (c.label.clone(), m)).map_err(|m| format!("{}: {m}", c.label))
+            out.map(|m| (c.label.clone(), m))
+                .map_err(|m| format!("{}: {m}", c.label))
         });
         match r {
             Ok((label, m)) => {

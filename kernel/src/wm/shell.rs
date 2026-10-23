@@ -290,7 +290,7 @@ const DOCK: [DockItem; 9] = [
         icon: Icon::Globe,
         bg: BLUE,
         fg: INK,
-        action: DockAction::App(App::Browser),
+        action: DockAction::Program(super::BROWSER),
     },
     DockItem {
         name: "Notes",
@@ -581,7 +581,7 @@ pub const ENTRIES: [Entry; 13] = [
         icon: Icon::Globe,
         bg: BLUE,
         fg: INK,
-        action: Action::App(App::Browser),
+        action: Action::Program(super::BROWSER),
     },
     Entry {
         name: "Music",

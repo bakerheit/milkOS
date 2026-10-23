@@ -174,7 +174,6 @@ pub enum App {
     Notes,
     About,
     Settings,
-    Browser,
     Music,
     Versions,
     /// The trusted Open / Save panel (powerbox.rs).
@@ -196,7 +195,6 @@ impl App {
             App::Notes => "Notes",
             App::About => "About milkOS",
             App::Settings => "Settings",
-            App::Browser => "Browser",
             App::Music => "Music",
             App::Versions => "Versions",
             App::Powerbox => "Open",

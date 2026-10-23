@@ -2,8 +2,8 @@
 
 milkOS has a TLS 1.3 client (RFC 8446), written from scratch in one shared crate, `tls`
 (`<repo>/tls`), `no_std` + `alloc`, on `milkcrypto` only. It is linked into the kernel
-(`net::tls`, used by the Browser through `net::web`) and into user space (`rt::tls`, used by
-`network get` through `rt::web`). `https://` pages are fetched with it (milkweb's
+(`net::tls`: its self-tests) and into user space (`rt::tls`, used by `network get` and the
+Browser through `rt::web` / milkweb's `secure`). `https://` pages are fetched with it (milkweb's
 `secure`, see docs/networking.md).
 
 ## The API
@@ -87,7 +87,7 @@ Distrust-after dates in certdata aren't applied (curl's bundle drops them).
 
 **Test roots.** A test script may pass a throwaway CA as fw_cfg `opt/milkos/tlstest-root`:
 the kernel then prints a WARNING and trusts it on top of the Mozilla roots for that boot
-(the Browser, and user space through `/proc/net/tls`'s `test_root=` line). Normal boots have
+(user space through `/proc/net/tls`'s `test_root=` line: the Browser and `network get`). Normal boots have
 no such file; `/proc/net/tls` says `test_root=none`.
 
 ## Tests

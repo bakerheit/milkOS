@@ -23,6 +23,7 @@ Alpha tints used: straw at 0x44 (27%) for selection rows, straw at 0x55 (33%) fo
 ## Type
 - The system font (`kernel/src/sysfont.rs`): Figtree by default, or IBM Plex Sans, Fira Sans, Atkinson Hyperlegible Next or Ubuntu Sans (Settings > Appearance > Font). 13px in a 16px line, espresso. Secondary text cocoa. Disabled latte.
 - Bold: the face's real Bold (Medium is baked too).
+- Links (Browser pages, "Learn more" text): always underlined. Light theme #4F64A0 (5.64:1 on milk, 5.32 on cream, 4.62 on oat); pressed or hovered #3F528A (7.42 on milk). Dark theme #A9B8E8 (7.64:1 on #2E2520, 6.81 on cream, 6.02 on oat); pressed or hovered #C3CDF0. The accent blue #7F93C9 is for fills and meters, never for link text (2.9:1 on milk).
 - Heading: 26px in a 32px line (scale 2), bold.
 - Display: 52px in a 64px line (scale 4), bold. Clock and big tile letters. The lock screen clock is 104px regular (scale 8).
 - Monospace grids (Terminal, Notes' editor, the Text Editor body, Versions' file preview, the console) stay Unifont 8x16. Every other app uses the system font: see `SPEC-FONT-ROLLOUT.md`.

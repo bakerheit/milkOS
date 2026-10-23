@@ -16,6 +16,7 @@ const MAX_LEN: f64 = 4294967295.0;
 impl Realm {
     /// The element at i if present (HasProperty + Get), fast for dense arrays.
     pub(crate) fn elem(&mut self, o: ObjId, i: f64) -> Res<Option<Val>> {
+        self.heap.work += 1;
         if let ObjKind::Array(a) = &self.o(o).kind
             && self.o(o).flags & SPARSE == 0
             && i < a.dense.len() as f64
@@ -98,6 +99,9 @@ impl Realm {
             return Ok(Val::Str(self.nstr(N::empty)));
         }
         let len = self.length_of(Val::Obj(o))?;
+        if len > 1.0 {
+            self.check_str_len(((len - 1.0) * sep.len() as f64).min(1e18) as usize)?;
+        }
         self.join_stack.push(o);
         let r: Res<Vec<u16>> = (|| {
             let mut out: Vec<u16> = Vec::new();
@@ -111,8 +115,8 @@ impl Realm {
                     let s = self.to_str(v)?;
                     out.extend_from_slice(self.heap.units(s));
                 }
-                if out.len() > crate::string::MAX_LEN {
-                    return Err(self.range_error("Invalid string length"));
+                if (i as u64) & 1023 == 0 {
+                    self.check_str_len(out.len())?;
                 }
                 i += 1.0;
                 if (i as u64) & 4095 == 0 {
@@ -1047,7 +1051,10 @@ fn sort(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
     let mut k = 0.0;
     while k < len {
         match r.elem(o, k)? {
-            Some(v) => vals.push(v),
+            Some(v) => {
+                r.temps.push(v);
+                vals.push(v);
+            }
             None => holes += 1.0,
         }
         k += 1.0;

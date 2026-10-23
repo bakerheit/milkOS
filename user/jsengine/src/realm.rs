@@ -139,6 +139,8 @@ pub struct Realm {
     /// VM steps in the current entry, and when to poll the interrupt next.
     pub(crate) steps: u64,
     pub(crate) next_poll: u64,
+    /// Steps since the realm was made (never reset): what the interrupt polling counts.
+    pub(crate) poll_steps: u64,
     /// Calls in progress (script and native).
     pub(crate) depth: u32,
     /// Entries from the host in progress (nested when a native calls the API).
@@ -206,6 +208,7 @@ impl Realm {
             ],
             steps: 0,
             next_poll: crate::api::INTERRUPT_STEPS,
+            poll_steps: 0,
             depth: 0,
             entries: 0,
             last_site: Site::default(),
@@ -227,7 +230,6 @@ impl Realm {
     pub(crate) fn entry<T>(&mut self, f: impl FnOnce(&mut Realm) -> Res<T>) -> Res<T> {
         if self.entries == 0 && self.native_frames.is_empty() && self.vm.frames.is_empty() {
             self.steps = 0;
-            self.next_poll = crate::api::INTERRUPT_STEPS;
             self.stack.base = crate::stack::sp();
         }
         self.entries += 1;
@@ -537,6 +539,18 @@ impl Realm {
         Ok(())
     }
 
+    /// A string (or string buffer) of `units` UTF-16 units: a RangeError past the engine's
+    /// longest string, an out-of-memory termination past the heap budget.
+    pub(crate) fn check_str_len(&mut self, units: usize) -> Res<()> {
+        if units > crate::string::MAX_LEN {
+            return Err(self.range_error("Invalid string length"));
+        }
+        if !self.heap.could_fit(units.saturating_mul(2)) {
+            return Err(self.oom());
+        }
+        Ok(())
+    }
+
     /// For recursive builtins (JSON, flat, ...): a RangeError when the native stack is low.
     pub(crate) fn check_stack(&mut self) -> Res<()> {
         if self.stack.exceeded() {
@@ -608,20 +622,17 @@ impl Realm {
             }
         };
         let base = self.temps.len();
+        // this and the arguments stay rooted for the whole call, whoever the caller is.
+        self.temps.push(this);
+        self.temps.extend_from_slice(args);
         self.native_frames.push(NativeFrame {
             callee: fo,
             new_target,
-            temps_base: base,
+            temps_base: self.temps.len(),
         });
         let r = match imp {
             Ok(b) => b(self, this, args),
             Err(h) => {
-                // Host natives see their this and args as temporaries.
-                self.temps.push(this);
-                self.temps.extend_from_slice(args);
-                self.native_frames
-                    .last_mut()
-                    .map(|f| f.temps_base = self.temps.len());
                 // SAFETY: Value is repr(transparent) over Val.
                 let av: &[Value] = unsafe {
                     core::slice::from_raw_parts(args.as_ptr() as *const Value, args.len())
@@ -745,8 +756,8 @@ impl Realm {
         if self.limits.max_steps != 0 && self.steps > self.limits.max_steps {
             return Err(Exception(Exc::Term(Termination::StepBudget)));
         }
-        if self.steps >= self.next_poll {
-            self.next_poll = self.steps + crate::api::INTERRUPT_STEPS;
+        if self.poll_steps >= self.next_poll {
+            self.next_poll = self.poll_steps + crate::api::INTERRUPT_STEPS;
             if let Some(f) = self.interrupt.as_mut()
                 && !f()
             {
@@ -862,7 +873,36 @@ impl Realm {
             // Each job gets its own step budget, like an entry from the host.
             if self.native_frames.is_empty() && self.vm.frames.is_empty() {
                 self.steps = 0;
-                self.next_poll = crate::api::INTERRUPT_STEPS;
+            }
+            // A job counts as a step, so an endless chain of tiny jobs still gets polled.
+            self.poll_steps += 1;
+            if self.poll_steps >= self.next_poll {
+                if let Err(e) = self.poll() {
+                    self.jobs.push_front(job);
+                    return Err(e);
+                }
+            }
+            // The job's values are off the queue now: keep them rooted while it runs.
+            let mark = self.temps.len();
+            match &job {
+                Job::Call { f, this, args } => {
+                    self.temps.push(*f);
+                    self.temps.push(*this);
+                    self.temps.extend_from_slice(args);
+                }
+                Job::Reaction { reaction, arg } => {
+                    self.temps.push(*reaction);
+                    self.temps.push(*arg);
+                }
+                Job::Thenable {
+                    promise,
+                    thenable,
+                    then,
+                } => {
+                    self.temps.push(*promise);
+                    self.temps.push(*thenable);
+                    self.temps.push(*then);
+                }
             }
             let r = match job {
                 Job::Call { f, this, args } => self.call_v(f, this, &args).map(|_| ()),
@@ -873,6 +913,7 @@ impl Realm {
                     then,
                 } => self.run_thenable_job(promise, thenable, then),
             };
+            self.temps.truncate(mark);
             if let Err(e) = r {
                 self.track_rejections();
                 return Err(e);

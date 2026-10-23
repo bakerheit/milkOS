@@ -83,6 +83,7 @@
 /System/Developer/tcpbench                        target/user/aarch64-unknown-none-softfloat/release/tcpbench   755
 /System/Developer/tlsprobe                        target/user/aarch64-unknown-none-softfloat/release/tlsprobe   755
 /System/Developer/webbench                        target/user/aarch64-unknown-none-softfloat/release/webbench   755
+/System/Developer/jsbench                         target/user/aarch64-unknown-none-softfloat/release/jsbench    755
 /System/Developer/fsstress                        target/user/aarch64-unknown-none-softfloat/release/fsstress   755
 
 # Linux program compatibility: a static Linux/aarch64 program with no milkOS knowledge,

@@ -723,9 +723,7 @@ fn replace_impl(r: &mut Realm, this: Val, args: &[Val], all: bool) -> Res<Val> {
             out.extend_from_slice(&sub);
         }
         last = p + pu.len();
-        if out.len() > crate::string::MAX_LEN {
-            return Err(r.range_error("Invalid string length"));
-        }
+        r.check_str_len(out.len())?;
     }
     out.extend_from_slice(&su[last..]);
     Ok(r.units_val(out))

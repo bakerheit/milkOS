@@ -87,6 +87,12 @@ pub(crate) struct Heap {
     pub gc_count: u64,
     /// Code-constant marking epoch (see `Code::marked`).
     pub epoch: u32,
+    /// Testing: ask for a collection after every this many allocations (0 = off).
+    pub stress: u32,
+    /// Work done outside the VM loop (units copied, elements visited): the VM adds it to
+    /// its step count, so a step budget bounds CPU time, not just loop iterations.
+    pub work: u64,
+    stress_n: u32,
 }
 
 const MIN_GC_THRESHOLD: usize = 2 << 20;
@@ -108,14 +114,25 @@ impl Heap {
             gc_wanted: false,
             gc_count: 0,
             epoch: 1,
+            stress: 0,
+            stress_n: 0,
+            work: 0,
         }
     }
 
     #[inline]
     pub fn charge(&mut self, bytes: usize) {
+        self.work += (bytes >> 4) as u64;
         self.since_gc = self.since_gc.saturating_add(bytes);
         if self.since_gc > self.gc_threshold {
             self.gc_wanted = true;
+        }
+        if self.stress != 0 {
+            self.stress_n += 1;
+            if self.stress_n >= self.stress {
+                self.stress_n = 0;
+                self.gc_wanted = true;
+            }
         }
     }
 
@@ -240,6 +257,7 @@ impl Heap {
             JsStr::Flat(_) => return,
             JsStr::Rope { len, .. } => *len as usize,
         };
+        self.work += (len >> 3) as u64;
         let mut out: Vec<u16> = Vec::with_capacity(len);
         // Iterative in-order walk: ropes built by `s += x` are as deep as they are long.
         let mut stack: Vec<StrId> = alloc::vec![id];

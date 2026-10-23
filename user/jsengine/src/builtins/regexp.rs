@@ -139,10 +139,11 @@ impl Realm {
             }
             return Ok(None);
         }
-        let units = self.heap.units(s).to_vec();
-        let (res, steps) = prog.exec(&units, last as usize, y, STEP_LIMIT);
+        self.heap.flatten(s);
+        let (res, steps) = prog.exec(self.heap.flat(s), last as usize, y, STEP_LIMIT);
         self.steps += steps / 64;
-        if self.steps >= self.next_poll
+        self.poll_steps += steps / 64;
+        if self.poll_steps >= self.next_poll
             || (self.limits.max_steps != 0 && self.steps > self.limits.max_steps)
         {
             self.poll()?;
@@ -171,14 +172,15 @@ impl Realm {
         let Some((prog, _, _)) = self.re_data(o) else {
             return Ok(Val::Null);
         };
-        let units = self.heap.units(s).to_vec();
+        self.heap.flatten(s);
+        let slen = self.heap.str_len(s);
         let mut items = Vec::with_capacity(prog.ncaps as usize + 1);
         for g in 0..=prog.ncaps as usize {
             let (a, b) = (caps[g * 2], caps[g * 2 + 1]);
-            if a == usize::MAX || b == usize::MAX || b < a {
+            if a == usize::MAX || b == usize::MAX || b < a || b > slen {
                 items.push(Val::Undef);
             } else {
-                let piece = units[a..b].to_vec();
+                let piece = self.heap.flat(s)[a..b].to_vec();
                 items.push(self.units_val(piece));
             }
         }
@@ -608,9 +610,7 @@ fn sym_replace(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
                 out.extend_from_slice(&replacement);
                 next_pos = (pos + matched.len()).min(su.len());
             }
-            if out.len() > crate::string::MAX_LEN {
-                return Err(r.range_error("Invalid string length"));
-            }
+            r.check_str_len(out.len())?;
         }
         Ok(())
     })();
@@ -675,6 +675,7 @@ fn sym_split(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
     while q < su.len() {
         let (res, steps) = prog.exec(&su, q, false, STEP_LIMIT);
         r.steps += steps / 64;
+        r.poll_steps += steps / 64;
         let caps = match res {
             MatchResult::Found(c) => c,
             MatchResult::NotFound => break,

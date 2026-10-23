@@ -317,6 +317,9 @@ impl Source {
 pub(crate) struct Code {
     pub ops: Vec<Op>,
     pub consts: Vec<Const>,
+    /// For each string constant, its property key (precomputed: property names are used
+    /// as keys far more often than as values).
+    pub keys: Vec<crate::object::PropKey>,
     pub handlers: Vec<Handler>,
     /// (instruction index, source position), ascending.
     pub lines: Vec<(u32, u32)>,

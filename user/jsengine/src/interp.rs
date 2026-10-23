@@ -902,8 +902,13 @@ impl Realm {
         }
         macro_rules! key_of {
             ($c:expr) => {{
-                let s = self.const_str_val(&code, $c);
-                self.key_from_str(s)
+                match code.keys.get($c as usize) {
+                    Some(k) => *k,
+                    None => {
+                        let s = self.const_str_val(&code, $c);
+                        self.key_from_str(s)
+                    }
+                }
             }};
         }
         loop {
@@ -2004,11 +2009,13 @@ impl Realm {
     /// Steps, interrupts, the collector. Called on calls and backward jumps.
     #[inline]
     fn safe_point(&mut self) -> Res<()> {
-        self.steps += 1;
+        let w = core::mem::take(&mut self.heap.work) >> 4;
+        self.steps += 1 + w;
+        self.poll_steps += 1 + w;
         if self.heap.gc_wanted {
             self.maybe_gc()?;
         }
-        if self.steps >= self.next_poll
+        if self.poll_steps >= self.next_poll
             || (self.limits.max_steps != 0 && self.steps > self.limits.max_steps)
         {
             self.poll()?;
@@ -2095,11 +2102,20 @@ impl Realm {
                         return Err(self.not_constructor_at(f));
                     }
                     let this = self.vm.stack[fpos - 1];
-                    let args: Vec<Val> = self.vm.stack[fpos + 1..].to_vec();
-                    let r = if is_new {
-                        self.construct_v(f, &args, new_target)
+                    // Small argument lists go through a buffer on the Rust stack.
+                    let mut buf = [Val::Undef; 6];
+                    let heap_args: Vec<Val>;
+                    let args: &[Val] = if argc <= buf.len() {
+                        buf[..argc].copy_from_slice(&self.vm.stack[fpos + 1..fpos + 1 + argc]);
+                        &buf[..argc]
                     } else {
-                        self.call_native(fo, this, &args, Val::Undef)
+                        heap_args = self.vm.stack[fpos + 1..].to_vec();
+                        &heap_args
+                    };
+                    let r = if is_new {
+                        self.construct_v(f, args, new_target)
+                    } else {
+                        self.call_native(fo, this, args, Val::Undef)
                     };
                     self.vm.stack.truncate(fpos - 1);
                     self.push(r?);
@@ -2142,9 +2158,7 @@ impl Realm {
             return Ok(a);
         }
         let total = la + lb;
-        if total > crate::string::MAX_LEN {
-            return Err(self.range_error("Invalid string length"));
-        }
+        self.check_str_len(total)?;
         if total <= 32 {
             let mut v = Vec::with_capacity(total);
             v.extend_from_slice(self.heap.units(a));
@@ -2165,9 +2179,7 @@ impl Realm {
                 total += self.heap.str_len(*s);
             }
         }
-        if total > crate::string::MAX_LEN {
-            return Err(self.range_error("Invalid string length"));
-        }
+        self.check_str_len(total)?;
         let mut v = Vec::with_capacity(total);
         for p in parts {
             if let Val::Str(s) = p {
@@ -3164,7 +3176,9 @@ impl Realm {
                         None => false,
                     };
                     if enumerable {
-                        keys.push(self.key_to_val(k));
+                        let kv = self.key_to_val(k);
+                        self.temps.push(kv);
+                        keys.push(kv);
                     }
                 }
                 cur = self.o(c).proto;
@@ -3231,7 +3245,10 @@ impl Realm {
         }
         let mut out = Vec::with_capacity(len as usize);
         for i in 0..len as u32 {
-            out.push(self.get_p(o, PropKey::Idx(i), v)?);
+            let x = self.get_p(o, PropKey::Idx(i), v)?;
+            // (rooted until the native call that asked returns)
+            self.temps.push(x);
+            out.push(x);
         }
         Ok(out)
     }

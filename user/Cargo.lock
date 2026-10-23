@@ -206,6 +206,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsbench"
+version = "0.0.1"
+dependencies = [
+ "jsengine",
+ "rt",
+]
+
+[[package]]
 name = "jsengine"
 version = "0.0.1"
 

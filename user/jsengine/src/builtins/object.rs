@@ -172,7 +172,9 @@ fn object_ctor(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 fn keys_of(r: &mut Realm, v: Val, mode: u8) -> Res<Val> {
     let o = r.to_object(v)?;
     let keys = r.own_keys_p(o, true, false, false)?;
-    let mut out = Vec::with_capacity(keys.len());
+    // The result array exists from the start so getters that run can't lose what's in it.
+    let arr = r.new_array_from(Vec::with_capacity(keys.len()));
+    r.temps.push(Val::Obj(arr));
     for k in keys {
         let Some(own) = r.get_own(o, k)? else {
             continue;
@@ -180,18 +182,22 @@ fn keys_of(r: &mut Realm, v: Val, mode: u8) -> Res<Val> {
         if own.flags() & E == 0 {
             continue;
         }
-        match mode {
-            0 => out.push(r.key_to_val(k)),
-            1 => out.push(r.get_p(o, k, Val::Obj(o))?),
+        let item = match mode {
+            0 => r.key_to_val(k),
+            1 => r.get_p(o, k, Val::Obj(o))?,
             _ => {
                 let kv = r.key_to_val(k);
+                r.temps.push(kv);
                 let vv = r.get_p(o, k, Val::Obj(o))?;
-                let pair = r.new_array_from(alloc::vec![kv, vv]);
-                out.push(Val::Obj(pair));
+                Val::Obj(r.new_array_from(alloc::vec![kv, vv]))
             }
+        };
+        let len = r.array_len(arr);
+        if !r.array_put_dense(arr, len, item) {
+            r.create_data(arr, PropKey::Idx(len), item)?;
         }
     }
-    Ok(Val::Obj(r.new_array_from(out)))
+    Ok(Val::Obj(arr))
 }
 
 fn keys(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {

@@ -271,6 +271,11 @@ impl Realm {
             ObjKind::Reaction(d) => (d.cap, d.reject, d.handler),
             _ => return Ok(()),
         };
+        if let Some(c) = cap {
+            self.temps.push(c.promise);
+            self.temps.push(c.resolve);
+            self.temps.push(c.reject);
+        }
         let result: Result<Val, Exception> = match handler {
             Handler::Default => {
                 if reject {
@@ -319,6 +324,8 @@ impl Realm {
     pub(crate) fn run_thenable_job(&mut self, promise: Val, thenable: Val, then: Val) -> Res<()> {
         let Val::Obj(p) = promise else { return Ok(()) };
         let (res, rej) = self.resolving_functions(p);
+        self.temps.push(res);
+        self.temps.push(rej);
         match self.call_v(then, thenable, &[res, rej]) {
             Ok(_) => Ok(()),
             Err(Exception(Exc::Throw(e))) => {
@@ -450,6 +457,8 @@ impl Realm {
             let Some((mode, value, promise)) = front else {
                 return Ok(());
             };
+            self.temps.push(Val::Obj(promise));
+            self.temps.push(value);
             if matches!(state, CoState::Running | CoState::Awaiting) {
                 return Ok(());
             }

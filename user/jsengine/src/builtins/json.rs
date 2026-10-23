@@ -433,9 +433,7 @@ impl Realm {
                 self.temps.pop();
                 st.stack.pop();
                 r?;
-                if out.len() > crate::string::MAX_LEN {
-                    return Err(self.range_error("Invalid string length"));
-                }
+                self.check_str_len(out.len())?;
                 if self.heap.over_hard_limit() {
                     return Err(self.oom());
                 }

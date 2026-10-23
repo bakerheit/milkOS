@@ -59,8 +59,9 @@ function __finish() {
 }
 "#;
 
-pub(crate) fn run_file(name: &str, src: &str) -> (bool, String, usize) {
+pub(crate) fn run_file(name: &str, src: &str, stress: u32) -> (bool, String, usize) {
     let mut r = Realm::new(Options::default());
+    r.heap.stress = stress;
     r.set_clock(alloc::boxed::Box::new(|| 1792591380000.0));
     // Debug builds use much more stack per level than release ones.
     r.set_stack_limit(6 << 20);
@@ -102,7 +103,7 @@ pub(crate) fn run_file(name: &str, src: &str) -> (bool, String, usize) {
 
 macro_rules! js_files {
     ($($name:literal),* $(,)?) => {
-        const FILES: &[(&str, &str)] = &[$(($name, include_str!(concat!("../../tests/js/", $name)))),*];
+        pub(crate) const FILES: &[(&str, &str)] = &[$(($name, include_str!(concat!("../../tests/js/", $name)))),*];
     };
 }
 
@@ -124,6 +125,7 @@ js_files!(
     "errors.js",
     "collections.js",
     "misc.js",
+    "gc.js",
 );
 
 #[test]
@@ -131,17 +133,28 @@ fn conformance() {
     // The Browser runs script on its 8 MB main thread; do the same here.
     let h = std::thread::Builder::new()
         .stack_size(8 << 20)
-        .spawn(conformance_inner)
+        .spawn(|| conformance_inner(0))
         .unwrap();
     h.join().unwrap();
 }
 
-fn conformance_inner() {
+/// The same files with a collection at (nearly) every safe point: a missing root shows up
+/// as a wrong value or a stale handle.
+#[test]
+fn conformance_gc_stress() {
+    let h = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(|| conformance_inner(1))
+        .unwrap();
+    h.join().unwrap();
+}
+
+fn conformance_inner(stress: u32) {
     let mut failures: Vec<String> = Vec::new();
     let mut total = 0;
     for (name, src) in FILES {
         // A big stack: deep recursion tests run on this thread.
-        let (ok, msg, n) = run_file(name, src);
+        let (ok, msg, n) = run_file(name, src, stress);
         total += n;
         if !ok {
             failures.push(msg);

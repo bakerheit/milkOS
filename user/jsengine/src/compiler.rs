@@ -613,9 +613,18 @@ impl<'a> Compiler<'a> {
         length: u32,
         span: (u32, u32),
     ) -> Rc<Code> {
+        let keys = st
+            .consts
+            .iter()
+            .map(|c| match c {
+                Const::Str(s) => self.realm.key_from_str(*s),
+                _ => crate::object::PropKey::Idx(u32::MAX),
+            })
+            .collect();
         Rc::new(Code {
             ops: st.ops,
             consts: st.consts,
+            keys,
             handlers: st.handlers,
             lines: st.lines,
             nparams: st.nparams,

@@ -63,6 +63,8 @@ impl Resp {
 pub struct Out {
     pub lines: Vec<String>,
     pub reqs: Vec<NetRequest>,
+    /// Classic external scripts supplied (they do not go through `NetOut`).
+    pub classic: Vec<String>,
     pub cancelled: Vec<u32>,
     pub doc: Document,
     pub host: Host,
@@ -106,6 +108,28 @@ fn answer(req: &NetRequest, r: Resp) -> Vec<(u32, NetEvent)> {
 pub fn run_more(o: &mut Out, ticks: u32, serve: &mut dyn FnMut(&NetRequest) -> Resp) {
     for _ in 0..ticks {
         let tick = o.tick;
+        // Classic external scripts come through the app's script path (no network events).
+        for u in o.doc.pending_scripts() {
+            let req = NetRequest {
+                id: 0,
+                kind: NetKind::Fetch,
+                url: u.clone(),
+                method: String::from("GET"),
+                headers: Vec::new(),
+                body: Vec::new(),
+                mode: RequestMode::NoCors,
+                credentials: CredentialsMode::SameOrigin,
+                redirect: RedirectMode::Follow,
+                referrer: String::new(),
+                referrer_policy: String::new(),
+                cache: String::new(),
+                timeout_ms: 0,
+                force_preflight: false,
+            };
+            let r = serve(&req);
+            o.classic.push(u.clone());
+            o.doc.supply_script(&u, if r.status == 200 { Some(&r.body) } else { None });
+        }
         o.doc.run(&mut o.host);
         loop {
             let mut got = false;
@@ -148,6 +172,7 @@ pub fn start(html: &str) -> Out {
     Out {
         lines: Vec::new(),
         reqs: Vec::new(),
+        classic: Vec::new(),
         cancelled: Vec::new(),
         doc: super::script::doc(html),
         host: Host::new(),
@@ -408,14 +433,16 @@ fn execution_order_defer_async_and_documents_events() {
         12,
         &mut serve,
     );
-    // The blocking script first; then the async module as soon as it is in; then the deferred
-    // ones in document order (the fast module waits for the slow one before it); then
-    // DOMContentLoaded and load.
+    // The blocking script first; the async module whenever it is in (here: the first moment
+    // its graph is); the deferred ones, classic and module, in document order (the fast module
+    // waits for the slow one before it); then DOMContentLoaded and load.
+    let t = o.t();
+    assert!(t.contains(&"async module"), "{:?}", o.lines);
+    let rest: Vec<&str> = t.iter().copied().filter(|l| *l != "async module").collect();
     assert_eq!(
-        o.t(),
+        rest,
         [
             "blocking loading",
-            "async module",
             "classic defer",
             "slow module",
             "fast module",
@@ -426,6 +453,9 @@ fn execution_order_defer_async_and_documents_events() {
         "{:?}",
         o.lines
     );
+    let at = |s: &str| t.iter().position(|l| *l == s).unwrap();
+    assert!(at("async module") > at("blocking loading"), "{t:?}");
+    assert!(at("async module") < at("DOMContentLoaded"), "{t:?}");
 }
 
 #[test]

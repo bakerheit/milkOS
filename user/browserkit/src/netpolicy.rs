@@ -30,3 +30,14 @@ pub use headers::{Guard, Headers, Method};
 pub use limits::{Admission, Config, Limiter, Limits};
 pub use origin::{AddressSpace, DataUrl, Origin, Target, resolve_url};
 pub use referrer::{ReferrerInit, ReferrerPolicy, referrer_header};
+
+#[cfg(test)]
+mod tests_cors;
+#[cfg(test)]
+mod tests_exchange;
+#[cfg(test)]
+mod tests_fuzz;
+#[cfg(test)]
+mod tests_headers;
+#[cfg(test)]
+mod tests_origin;

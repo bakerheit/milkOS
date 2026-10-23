@@ -26,12 +26,20 @@ use alloc::vec::Vec;
 
 use milkweb::url::Url;
 
-use super::cors::{PreflightCache, PreflightRequest, ResponseType};
+use super::cors::{
+    PreflightCache, PreflightRequest, ResponseType, build_preflight, corp_check, cors_check,
+    filter_basic, filter_cors, preflight_check,
+};
 use super::error::NetError;
-use super::headers::{Headers, Method};
+use super::headers::{
+    Guard, Headers, Method, combined_value, cors_unsafe_request_header_names, is_forbidden_method,
+};
 use super::limits::Config;
-use super::origin::{Origin, Target, resolve_url};
-use super::referrer::{ReferrerInit, ReferrerPolicy};
+use super::origin::{
+    Origin, Target, address_space_of_host, is_loopback_host, is_potentially_trustworthy,
+    resolve_url,
+};
+use super::referrer::{ReferrerInit, ReferrerPolicy, referrer_header};
 use crate::cookies;
 
 macro_rules! text_enum {
@@ -224,41 +232,287 @@ enum State {
     Done,
 }
 
+/// How far from the page every address so far in the redirect chain was (the
+/// `Sec-Fetch-Site` values).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum SiteClass {
+    SameOrigin,
+    SameSite,
+    CrossSite,
+}
+
+impl SiteClass {
+    fn name(self) -> &'static str {
+        match self {
+            SiteClass::SameOrigin => "same-origin",
+            SiteClass::SameSite => "same-site",
+            SiteClass::CrossSite => "cross-site",
+        }
+    }
+}
+
 /// One script request in flight (see the module docs).
 #[derive(Clone, Debug)]
 pub struct Exchange {
     cfg: Config,
     page: Page,
-    url: Url,
     method: Method,
-    state: State,
+    /// The page's headers as checked (lower-case names); the headers the browser adds are
+    /// put on in `next_hop`.
+    user_headers: Vec<(String, String)>,
+    has_body: bool,
+    send_body: bool,
+    mode: Mode,
+    credentials: Credentials,
+    redirect: Redirect,
+    cache: CacheMode,
+    /// The address the `Referer` is made from (None: no referrer).
+    referrer: Option<Url>,
+    policy: ReferrerPolicy,
+    force_preflight: bool,
     timeout_ms: u64,
+
+    url: Url,
+    redirects: usize,
+    /// Basic, Cors or Opaque; only ever goes up.
+    tainting: ResponseType,
+    /// Set when the chain went through another origin: the `Origin` header becomes `null`.
+    tainted_origin: bool,
+    /// Some address in the chain is not (schemeful) same-site with the page: no cookies
+    /// go or are kept for the rest of the exchange.
+    chain_cross_site: bool,
+    class: SiteClass,
+    state: State,
+    hop_cookies: Option<cookies::Context>,
+}
+
+fn class_of(page: &Origin, url: &Url) -> SiteClass {
+    let o = Origin::of(url);
+    if page.same_origin(&o) {
+        SiteClass::SameOrigin
+    } else if page.same_site(&o) {
+        SiteClass::SameSite
+    } else {
+        SiteClass::CrossSite
+    }
+}
+
+/// The rules about one address a request is about to go to (the first, and each redirect).
+fn check_target(cfg: &Config, page: &Page, mode: Mode, url: &Url) -> Result<(), NetError> {
+    // Mixed content: a secure page may not ask for plain http (this machine excepted, which
+    // the private-network rule below then covers).
+    if page.url.scheme == milkweb::url::Scheme::Https
+        && url.scheme == milkweb::url::Scheme::Http
+        && !is_loopback_host(&url.host)
+    {
+        return Err(NetError::MixedContent {
+            page: page.url.to_text(),
+            url: url.to_text(),
+        });
+    }
+    if mode == Mode::SameOrigin && !page.origin.same_origin(&Origin::of(url)) {
+        return Err(NetError::SameOriginOnly {
+            page: page.origin.serialize(),
+            url: url.to_text(),
+        });
+    }
+    if cfg.block_private_network
+        && !page
+            .origin
+            .address_space()
+            .may_reach(address_space_of_host(&url.host))
+    {
+        return Err(NetError::PrivateNetwork {
+            page: page.url.to_text(),
+            url: url.to_text(),
+        });
+    }
+    Ok(())
+}
+
+/// Printable ASCII only, and short: a status text a page can safely show.
+fn clean_reason(r: &str) -> String {
+    r.chars()
+        .filter(|c| (' '..='~').contains(c))
+        .take(128)
+        .collect()
 }
 
 impl Exchange {
     /// Check the request against every rule that needs no network, and set it up.
     pub fn start(cfg: &Config, page: &Page, init: RequestInit) -> Result<Begin, NetError> {
-        // STUB: only same-origin requests, no CORS yet (the full rules replace this).
-        let target = resolve_url(&page.url, &init.url, &cfg.limits)?;
-        let Target::Http(url) = target else {
-            return Err(NetError::OutOfOrder(
-                "stub: data and blob addresses are not supported yet",
-            ));
+        let lim = &cfg.limits;
+        if init.mode == Mode::Navigate {
+            return Err(NetError::NavigateMode);
+        }
+        if init.cache == CacheMode::OnlyIfCached && init.mode != Mode::SameOrigin {
+            return Err(NetError::CacheNeedsSameOrigin);
+        }
+        let method = init.method.clone();
+        if is_forbidden_method(method.as_str()) {
+            return Err(NetError::ForbiddenMethod(String::from(method.as_str())));
+        }
+        if init.mode == Mode::NoCors && !method.is_cors_safelisted() {
+            return Err(NetError::NoCorsMethod(String::from(method.as_str())));
+        }
+        if let Some(b) = &init.body {
+            if method.is_get_or_head() {
+                return Err(NetError::BodyNotAllowed(String::from(method.as_str())));
+            }
+            if b.len > lim.max_request_body {
+                return Err(NetError::RequestBodyTooLarge {
+                    len: b.len,
+                    max: lim.max_request_body,
+                });
+            }
+            if init.keepalive && b.len > lim.max_keepalive_body {
+                return Err(NetError::KeepaliveBodyTooLarge {
+                    len: b.len,
+                    max: lim.max_keepalive_body,
+                });
+            }
+        }
+
+        // The headers, checked again whatever guard they came with.
+        let guard = if init.mode == Mode::NoCors {
+            Guard::RequestNoCors
+        } else {
+            Guard::Request
         };
-        if Origin::of(&url) != page.origin {
-            return Err(NetError::SameOriginOnly {
-                page: page.origin.serialize(),
-                url: url.to_text(),
+        let mut h = Headers::new(guard);
+        for (n, v) in init.headers.raw() {
+            h.append(n, v)?;
+        }
+        if let Some(b) = &init.body
+            && let Some(ct) = &b.content_type
+            && !h.has("content-type").unwrap_or(false)
+        {
+            // An unusable default (or one no-cors drops) is simply left out.
+            let _ = h.append("content-type", ct);
+        }
+        if h.len() > lim.max_headers {
+            return Err(NetError::TooManyHeaders {
+                max: lim.max_headers,
             });
         }
-        Ok(Begin::Network(Exchange {
+        let total: usize = h.raw().iter().map(|(n, v)| n.len() + v.len() + 4).sum();
+        if total > lim.max_headers_bytes {
+            return Err(NetError::HeadersTooLarge {
+                max: lim.max_headers_bytes,
+            });
+        }
+        if h.raw().iter().any(|(_, v)| v.len() > lim.max_header_value) {
+            return Err(NetError::HeadersTooLarge {
+                max: lim.max_header_value,
+            });
+        }
+
+        // The address.
+        let target = resolve_url(&page.url, &init.url, lim)?;
+        let url = match target {
+            Target::Http(u) => u,
+            Target::Data(d) => {
+                if !method.is_get() {
+                    return Err(NetError::SchemeMethod {
+                        scheme: String::from("data"),
+                        method: String::from(method.as_str()),
+                    });
+                }
+                let text: String = init.url.trim().chars().take(lim.max_url).collect();
+                return Ok(Begin::Data(
+                    ResponseMeta {
+                        kind: ResponseType::Basic,
+                        status: 200,
+                        status_text: String::from("OK"),
+                        headers: alloc::vec![(String::from("content-type"), d.mime)],
+                        url: text,
+                        redirected: false,
+                        hide_body: false,
+                    },
+                    d.body,
+                ));
+            }
+            Target::Blob(text) => {
+                if !method.is_get() {
+                    return Err(NetError::SchemeMethod {
+                        scheme: String::from("blob"),
+                        method: String::from(method.as_str()),
+                    });
+                }
+                // blob:https://host/uuid: the part after "blob:" names the origin that made it.
+                let inner = text.get(5..).unwrap_or("");
+                let same = Url::parse(inner)
+                    .map(|u| page.origin.same_origin(&Origin::of(&u)) && inner.contains("://"))
+                    .unwrap_or(false);
+                if !same {
+                    return Err(NetError::SameOriginOnly {
+                        page: page.origin.serialize(),
+                        url: text,
+                    });
+                }
+                return Ok(Begin::Blob { url: text });
+            }
+        };
+        check_target(cfg, page, init.mode, &url)?;
+        if init.cache == CacheMode::OnlyIfCached {
+            return Err(NetError::NotCached { url: url.to_text() });
+        }
+
+        // The referrer.
+        let policy = init.referrer_policy.unwrap_or(page.referrer_policy);
+        let referrer = match &init.referrer {
+            ReferrerInit::NoReferrer => None,
+            ReferrerInit::Client => Some(page.url.clone()),
+            ReferrerInit::Url(s) => match resolve_url(&page.url, s, lim) {
+                Ok(Target::Http(u)) if page.origin.same_origin(&Origin::of(&u)) => Some(u),
+                _ => return Err(NetError::BadReferrer(s.chars().take(100).collect())),
+            },
+        };
+
+        let mut ex = Exchange {
             cfg: cfg.clone(),
             page: page.clone(),
-            url,
-            method: init.method,
-            state: State::Ready,
+            method,
+            user_headers: h.raw().to_vec(),
+            has_body: init.body.is_some(),
+            send_body: init.body.is_some(),
+            mode: init.mode,
+            credentials: init.credentials,
+            redirect: init.redirect,
+            cache: init.cache,
+            referrer,
+            policy,
+            force_preflight: init.force_preflight,
             timeout_ms: cfg.effective_timeout(init.timeout_ms),
-        }))
+            url: url.clone(),
+            redirects: 0,
+            tainting: ResponseType::Basic,
+            tainted_origin: false,
+            chain_cross_site: false,
+            class: SiteClass::SameOrigin,
+            state: State::Ready,
+            hop_cookies: None,
+        };
+        ex.enter(&url);
+        Ok(Begin::Network(ex))
+    }
+
+    /// Take `url` into the chain: raise the tainting and the site class.
+    fn enter(&mut self, url: &Url) {
+        if self.tainting == ResponseType::Basic && !self.page.origin.same_origin(&Origin::of(url)) {
+            self.tainting = if self.mode == Mode::NoCors {
+                ResponseType::Opaque
+            } else {
+                ResponseType::Cors
+            };
+        }
+        let c = class_of(&self.page.origin, url);
+        if c > self.class {
+            self.class = c;
+        }
+        if c == SiteClass::CrossSite {
+            self.chain_cross_site = true;
+        }
     }
 
     pub fn url(&self) -> &Url {
@@ -273,26 +527,182 @@ impl Exchange {
         self.timeout_ms
     }
 
+    pub fn redirect_count(&self) -> usize {
+        self.redirects
+    }
+
+    /// `Basic` (same origin), `Cors` or `Opaque` (no-cors, cross-origin) so far.
+    pub fn tainting(&self) -> ResponseType {
+        self.tainting
+    }
+
+    /// Does the request's credentials mode say "include"? (The CORS rules use the mode, not
+    /// whether cookies actually go.)
+    fn credentials_mode_include(&self) -> bool {
+        self.credentials == Credentials::Include
+    }
+
+    fn cookie_context(&self) -> Option<cookies::Context> {
+        let include = match self.credentials {
+            Credentials::Include => true,
+            Credentials::SameOrigin => self.tainting == ResponseType::Basic,
+            Credentials::Omit => false,
+        };
+        if !include || self.chain_cross_site {
+            return None;
+        }
+        Some(cookies::Context::Subresource {
+            page_site: self.page.origin.site()?,
+        })
+    }
+
+    fn origin_header(&self) -> Option<String> {
+        let ser = if self.tainted_origin {
+            String::from("null")
+        } else {
+            self.page.origin.serialize()
+        };
+        if self.tainting == ResponseType::Cors {
+            return Some(ser);
+        }
+        if self.method.is_get_or_head() {
+            return None;
+        }
+        match self.policy {
+            ReferrerPolicy::NoReferrer => None,
+            ReferrerPolicy::NoReferrerWhenDowngrade
+            | ReferrerPolicy::StrictOrigin
+            | ReferrerPolicy::StrictOriginWhenCrossOrigin => {
+                let https_page = self.page.origin.scheme() == Some(milkweb::url::Scheme::Https);
+                if https_page && self.url.scheme != milkweb::url::Scheme::Https {
+                    None
+                } else {
+                    Some(ser)
+                }
+            }
+            ReferrerPolicy::SameOrigin => self
+                .page
+                .origin
+                .same_origin(&Origin::of(&self.url))
+                .then_some(ser),
+            _ => Some(ser),
+        }
+    }
+
+    /// The origin the `Origin` header names right now: the page's, or `null` once the
+    /// redirect chain has left it. The CORS checks compare against this.
+    fn request_origin(&self) -> Origin {
+        if self.tainted_origin {
+            Origin::Opaque(0)
+        } else {
+            self.page.origin.clone()
+        }
+    }
+
+    fn unsafe_names(&self) -> Vec<String> {
+        cors_unsafe_request_header_names(&self.user_headers)
+    }
+
+    fn has_header(&self, name: &str) -> bool {
+        self.user_headers.iter().any(|(k, _)| k == name)
+    }
+
     /// The next request to send (the first one, or after a redirect).
     pub fn next_hop(&mut self, cache: &mut PreflightCache, now_ms: u64) -> Result<Hop, NetError> {
-        let _ = (cache, now_ms);
         if self.state != State::Ready {
             return Err(NetError::OutOfOrder("next_hop called out of order"));
         }
-        self.state = State::AwaitResponse;
+        let url = self.url.clone();
+        let mut headers = self.user_headers.clone();
+        if !self.has_header("accept") {
+            headers.push((String::from("accept"), String::from("*/*")));
+        }
+        match self.cache {
+            CacheMode::NoStore | CacheMode::Reload => {
+                if !self.has_header("pragma") {
+                    headers.push((String::from("pragma"), String::from("no-cache")));
+                }
+                if !self.has_header("cache-control") {
+                    headers.push((String::from("cache-control"), String::from("no-cache")));
+                }
+            }
+            CacheMode::NoCache => {
+                if !self.has_header("cache-control") {
+                    headers.push((String::from("cache-control"), String::from("max-age=0")));
+                }
+            }
+            _ => {}
+        }
+        let origin_hdr = self.origin_header();
+        if let Some(o) = &origin_hdr {
+            headers.push((String::from("origin"), o.clone()));
+        }
+        let referer = self
+            .referrer
+            .as_ref()
+            .and_then(|r| referrer_header(self.policy, r, &url));
+        if let Some(r) = &referer {
+            headers.push((String::from("referer"), r.clone()));
+        }
+        if is_potentially_trustworthy(&url) {
+            headers.push((String::from("sec-fetch-dest"), String::from("empty")));
+            headers.push((
+                String::from("sec-fetch-mode"),
+                String::from(self.mode.as_str()),
+            ));
+            headers.push((
+                String::from("sec-fetch-site"),
+                String::from(self.class.name()),
+            ));
+        }
+
+        let unsafe_names = self.unsafe_names();
+        let need_preflight = self.tainting == ResponseType::Cors
+            && (self.force_preflight
+                || !self.method.is_cors_safelisted()
+                || !unsafe_names.is_empty());
+        let preflight = if need_preflight
+            && !cache.covers(
+                &self.request_origin(),
+                &url,
+                self.credentials_mode_include(),
+                &self.method,
+                &unsafe_names,
+                now_ms,
+            ) {
+            Some(build_preflight(
+                &url,
+                &self.method,
+                &unsafe_names,
+                origin_hdr.as_deref(),
+                referer.as_deref(),
+            ))
+        } else {
+            None
+        };
+        self.state = if preflight.is_some() {
+            State::AwaitPreflight
+        } else {
+            State::AwaitResponse
+        };
+        self.hop_cookies = self.cookie_context();
         Ok(Hop {
             method: self.method.clone(),
-            url: self.url.clone(),
-            headers: Vec::new(),
-            send_body: true,
-            cookies: self
-                .page
-                .origin
-                .site()
-                .map(|s| cookies::Context::Subresource { page_site: s }),
-            preflight: None,
+            url,
+            headers,
+            send_body: self.send_body && self.has_body,
+            cookies: self.hop_cookies.clone(),
+            preflight,
             timeout_ms: self.timeout_ms,
         })
+    }
+
+    fn cors_error(&self, kind: super::error::CorsError) -> NetError {
+        NetError::Cors {
+            kind,
+            page_origin: self.page.origin.serialize(),
+            url: self.url.to_text(),
+        }
     }
 
     /// The preflight's answer arrived.
@@ -303,8 +713,25 @@ impl Exchange {
         status: u16,
         headers: &[(String, String)],
     ) -> Result<(), NetError> {
-        let _ = (cache, now_ms, status, headers);
-        Err(NetError::OutOfOrder("stub: no preflight yet"))
+        if self.state != State::AwaitPreflight {
+            return Err(NetError::OutOfOrder(
+                "on_preflight_response called out of order",
+            ));
+        }
+        self.state = State::Done;
+        let include = self.credentials_mode_include();
+        let grant = preflight_check(
+            &self.request_origin(),
+            include,
+            &self.method,
+            &self.unsafe_names(),
+            status,
+            headers,
+        )
+        .map_err(|k| self.cors_error(k))?;
+        cache.store(&self.request_origin(), &self.url, include, &grant, now_ms);
+        self.state = State::AwaitResponse;
+        Ok(())
     }
 
     /// The response's head arrived (`headers`: lower-case names as milkweb gives them).
@@ -318,18 +745,186 @@ impl Exchange {
             return Err(NetError::OutOfOrder("on_response called out of order"));
         }
         self.state = State::Done;
-        let _ = &self.cfg;
-        Ok(Outcome {
-            store_cookies: None,
-            next: Next::Done(ResponseMeta {
-                kind: ResponseType::Basic,
+        let lim = self.cfg.limits.clone();
+        if !(200..=599).contains(&status) {
+            return Err(NetError::BadResponse(alloc::format!("status {status}")));
+        }
+        if let Some(cl) = combined_value(headers, "content-length")
+            && let Ok(n) = cl.trim().parse::<usize>()
+            && n > lim.max_response_body
+        {
+            return Err(NetError::ResponseTooLarge {
+                max: lim.max_response_body,
+            });
+        }
+        if self.tainting == ResponseType::Cors {
+            cors_check(
+                &self.request_origin(),
+                self.credentials_mode_include(),
+                headers,
+            )
+            .map_err(|k| self.cors_error(k))?;
+        }
+        if self.tainting == ResponseType::Opaque {
+            corp_check(&self.page.origin, &self.url, headers)?;
+        }
+        let store_cookies = self.hop_cookies.take();
+
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            match self.redirect {
+                Redirect::Error => {
+                    return Err(NetError::RedirectRefused {
+                        url: self.url.to_text(),
+                    });
+                }
+                Redirect::Manual => {
+                    return Ok(Outcome {
+                        store_cookies,
+                        next: Next::Done(ResponseMeta {
+                            kind: ResponseType::OpaqueRedirect,
+                            status: 0,
+                            status_text: String::new(),
+                            headers: Vec::new(),
+                            url: self.url.to_text(),
+                            redirected: self.redirects > 0,
+                            hide_body: true,
+                        }),
+                    });
+                }
+                Redirect::Follow => {}
+            }
+            if let Some(loc) = combined_first(headers, "location") {
+                let to = self.follow(status, &loc, headers)?;
+                self.state = State::Ready;
+                return Ok(Outcome {
+                    store_cookies,
+                    next: Next::Redirect { to },
+                });
+            }
+        }
+
+        let meta = match self.tainting {
+            ResponseType::Opaque => ResponseMeta {
+                kind: ResponseType::Opaque,
+                status: 0,
+                status_text: String::new(),
+                headers: Vec::new(),
+                url: String::new(),
+                redirected: self.redirects > 0,
+                hide_body: true,
+            },
+            t => ResponseMeta {
+                kind: if t == ResponseType::Cors {
+                    ResponseType::Cors
+                } else {
+                    ResponseType::Basic
+                },
                 status,
-                status_text: String::from(reason),
-                headers: super::cors::filter_basic(headers),
+                status_text: clean_reason(reason),
+                headers: if t == ResponseType::Cors {
+                    filter_cors(headers, self.credentials_mode_include())
+                } else {
+                    filter_basic(headers)
+                },
                 url: self.url.to_text(),
-                redirected: false,
+                redirected: self.redirects > 0,
                 hide_body: false,
-            }),
+            },
+        };
+        Ok(Outcome {
+            store_cookies,
+            next: Next::Done(meta),
         })
     }
+
+    /// HTTP-redirect fetch: validate the Location and move the request to it.
+    fn follow(
+        &mut self,
+        status: u16,
+        loc: &str,
+        headers: &[(String, String)],
+    ) -> Result<Url, NetError> {
+        let from = self.url.to_text();
+        let next = match resolve_url(&self.url, loc, &self.cfg.limits) {
+            Ok(Target::Http(u)) => u,
+            Ok(Target::Data(_)) => {
+                return Err(NetError::RedirectScheme {
+                    url: from,
+                    scheme: String::from("data"),
+                });
+            }
+            Ok(Target::Blob(_)) => {
+                return Err(NetError::RedirectScheme {
+                    url: from,
+                    scheme: String::from("blob"),
+                });
+            }
+            Err(NetError::UnsupportedScheme(s)) => {
+                return Err(NetError::RedirectScheme {
+                    url: from,
+                    scheme: s,
+                });
+            }
+            Err(NetError::UrlHasCredentials) => {
+                return Err(NetError::RedirectWithCredentials { url: from });
+            }
+            Err(e @ NetError::BlockedPort { .. }) => return Err(e),
+            Err(e) => {
+                return Err(NetError::BadRedirect {
+                    url: from,
+                    why: alloc::format!("{e}"),
+                });
+            }
+        };
+        if self.redirects >= self.cfg.limits.max_redirects {
+            return Err(NetError::TooManyRedirects {
+                max: self.cfg.limits.max_redirects,
+            });
+        }
+        check_target(&self.cfg, &self.page, self.mode, &next)?;
+
+        // The Origin header becomes `null` once the chain has left the page's origin and moves on.
+        let here = Origin::of(&self.url);
+        let there = Origin::of(&next);
+        if !self.page.origin.same_origin(&here) && !here.same_origin(&there) {
+            self.tainted_origin = true;
+        }
+        // Credentials in a header don't follow a redirect to another origin.
+        if !here.same_origin(&there) {
+            self.user_headers.retain(|(k, _)| k != "authorization");
+        }
+        // 301/302 turn a POST into a GET; 303 turns everything but GET/HEAD into a GET.
+        let to_get = match status {
+            301 | 302 => self.method.as_str() == "POST",
+            303 => !self.method.is_get_or_head(),
+            _ => false,
+        };
+        if to_get {
+            self.method = Method::get();
+            self.send_body = false;
+            self.user_headers.retain(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "content-encoding" | "content-language" | "content-location" | "content-type"
+                )
+            });
+        }
+        // A Referrer-Policy on the redirect applies from here on.
+        if let Some(v) = combined_value(headers, "referrer-policy")
+            && let Some(p) = ReferrerPolicy::parse_header(&v)
+        {
+            self.policy = p;
+        }
+        self.redirects += 1;
+        self.enter(&next);
+        self.url = next.clone();
+        Ok(next)
+    }
+}
+
+fn combined_first(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.clone())
 }

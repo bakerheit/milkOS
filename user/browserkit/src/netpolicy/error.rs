@@ -157,6 +157,13 @@ pub enum NetError {
     NotCached {
         url: String,
     },
+    /// `data:` and `blob:` addresses can only be read with GET.
+    SchemeMethod {
+        scheme: String,
+        method: String,
+    },
+    /// The server's answer isn't a usable HTTP response (a status outside 200 to 599, ...).
+    BadResponse(String),
     /// Too many requests at once for the tab.
     TooManyRequests {
         max: usize,
@@ -355,6 +362,11 @@ impl fmt::Display for NetError {
                 f,
                 "{url} isn't in the cache and the request is set to cache: 'only-if-cached'"
             ),
+            SchemeMethod { scheme, method } => write!(
+                f,
+                "A {scheme}: address can only be fetched with GET, not {method}"
+            ),
+            BadResponse(why) => write!(f, "The server's response is not usable: {why}"),
             TooManyRequests { max } => {
                 write!(f, "Too many requests at once (this tab allows {max})")
             }

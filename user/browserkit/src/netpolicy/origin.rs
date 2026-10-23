@@ -368,6 +368,14 @@ pub fn host_ok(host: &str) -> bool {
     if host.contains(':') {
         return parse_ipv6(host).is_some();
     }
+    // Name syntax: labels of 1 to 63 letters, digits, `-` and `_`, not starting or ending
+    // with a hyphen.
+    for label in host.split('.') {
+        let b = label.as_bytes();
+        if b.is_empty() || b.len() > 63 || b[0] == b'-' || b[b.len() - 1] == b'-' {
+            return false;
+        }
+    }
     let last = host.rsplit('.').next().unwrap_or("");
     let numeric = !last.is_empty() && last.bytes().all(|c| c.is_ascii_digit());
     let hex = last.len() >= 2 && (last.starts_with("0x") || last.starts_with("0X"));
@@ -596,7 +604,9 @@ pub fn decode_data_url(rest: &str, max_body: usize) -> Result<DataUrl, NetError>
     }
     let fallback = || String::from("text/plain;charset=US-ASCII");
     let meta = meta.trim();
-    let mime = if meta.is_empty() || meta.starts_with(';') {
+    let mime = if meta.is_empty() {
+        fallback()
+    } else if meta.starts_with(';') {
         // ";charset=x" alone means text/plain with those parameters.
         if meta.bytes().all(|c| c >= 0x20 && c != 0x7f) && meta.len() <= 200 {
             format!("text/plain{meta}")

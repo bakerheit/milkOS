@@ -39,6 +39,7 @@ test('structuredClone builtin types', function () {
   assertEq(cr.source, 'a+b'); assertEq(cr.flags, 'gi'); assertEq(cr.lastIndex, 0);
   var cs = structuredClone(new Set([1, 'a', { z: 1 }]));
   assertEq(cs.size, 3); assertEq(cs.has('a'), true);
+  assertEq(Array.from(structuredClone(new Set([1, 'a']))), [1, 'a']);
   var cm = structuredClone(new Map([[1, { a: 1 }], ['k', [2]]]));
   assertEq(cm.get(1).a, 1); assertEq(cm.get('k')[0], 2);
   assertEq(typeof structuredClone(new Number(5)), 'object');

@@ -409,3 +409,34 @@ test('typed arrays in the rest of the language', function () {
     assertEq(z.join(), '-5,0,5');
   }
 });
+test('freeze and seal', function () {
+  var a = new Uint8Array(2);
+  assertThrows(TypeError, function () { Object.freeze(a); });
+  assertEq(Object.isExtensible(a), false, 'a failed freeze has already prevented extensions');
+  var b = new Uint8Array(2);
+  assertThrows(TypeError, function () { Object.seal(b); });
+  assertEq(Object.isExtensible(b), false);
+  var e = new Uint8Array(0);
+  Object.freeze(e);
+  assertEq(Object.isFrozen(e), true);
+  var c = new Uint8Array(2);
+  Object.preventExtensions(c);
+  assertEq(Object.isSealed(c), false, 'its elements are still configurable');
+  assertEq(Object.isFrozen(c), false);
+  assertThrows(TypeError, function () { 'use strict'; c.extra = 1; });
+});
+test('a typed array on the prototype chain', function () {
+  var t = new Uint8Array(4);
+  var o = Object.create(t);
+  assertThrows(TypeError, function () { return o.length; }, 'the length getter needs a typed array receiver');
+  assertEq(o[1], 0);
+  assertEq(o[9], undefined);
+  assertEq(1 in o, true);
+  assertEq(9 in o, false);
+  o[9] = 1;
+  assertEq(o.hasOwnProperty(9), false);
+  o[1] = 7;
+  assertEq(o.hasOwnProperty(1), true);
+  assertEq(t[1], 0, 'a store through the chain makes an own property of the receiver');
+  assertEq(Reflect.set(t, 1, 5, {}), true);
+});

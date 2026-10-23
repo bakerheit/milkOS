@@ -177,8 +177,9 @@ impl Realm {
                 for (k, val) in ents {
                     let k2 = self.clone_value(cx, k)?;
                     self.temps.push(k2);
+                    // (a Set keeps each value as both key and value)
                     let v2 = if is_set {
-                        Val::Undef
+                        k2
                     } else {
                         self.clone_value(cx, val)?
                     };

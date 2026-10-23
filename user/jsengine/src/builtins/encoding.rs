@@ -312,9 +312,14 @@ fn utf16le_decode(b: &[u8], fatal: bool, stream: bool, out: &mut Vec<u16>) -> Re
         return Err(());
     }
     let mut i = 0;
+    // A truncated final character is one error, whether it is half a code unit or half a pair.
+    let mut tail_error = false;
     while i < units.len() {
         let c = units[i];
         if (0xD800..0xDC00).contains(&c) {
+            if i + 1 == units.len() {
+                tail_error = true;
+            }
             match units.get(i + 1) {
                 Some(&d) if (0xDC00..0xE000).contains(&d) => {
                     out.push(c);
@@ -339,7 +344,7 @@ fn utf16le_decode(b: &[u8], fatal: bool, stream: bool, out: &mut Vec<u16>) -> Re
         }
         i += 1;
     }
-    if !stream && odd {
+    if !stream && odd && !tail_error {
         out.push(0xFFFD);
     }
     Ok(pending)

@@ -84,7 +84,9 @@ impl Realm {
             self.materialize_fn(o);
         }
         if matches!(self.o(o).kind, ObjKind::Typed(_)) && self.typed_len(o) > 0 {
-            // Its elements can't be made non-configurable (or non-writable).
+            // Its elements can't be made non-configurable (or non-writable), but the object
+            // has already been made non-extensible by then.
+            self.om(o).flags &= !EXTENSIBLE;
             return Err(self.type_error(if frozen {
                 "Cannot freeze array buffer views with elements"
             } else {

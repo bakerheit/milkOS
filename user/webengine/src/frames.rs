@@ -24,6 +24,8 @@ pub(crate) struct FrameCtx {
     pub id: FrameId,
     pub parent: FrameId,
     pub depth: u32,
+    /// The `<iframe>` element in the parent's document (NONE for the top document).
+    pub node: NodeId,
 }
 
 impl FrameCtx {
@@ -31,6 +33,7 @@ impl FrameCtx {
         id: FrameId::TOP,
         parent: FrameId::TOP,
         depth: 0,
+        node: NONE,
     };
 }
 
@@ -68,6 +71,8 @@ pub(crate) struct Slot {
     pub doc: Option<Box<crate::Document>>,
     /// The viewport the document was last laid out in.
     pub vp: Option<Viewport>,
+    /// A `#fragment` to scroll to once the document has its first layout.
+    pub pending_fragment: Option<String>,
 }
 
 impl Slot {
@@ -98,6 +103,21 @@ impl Slot {
             content: self.content,
         }
     }
+}
+
+/// The most of a `srcdoc` and of a `name` the slot keeps (the rest is cut, on a character).
+const MAX_SRCDOC: usize = 1 << 20;
+const MAX_NAME: usize = 64 << 10;
+
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return String::from(s);
+    }
+    let mut e = max;
+    while !s.is_char_boundary(e) {
+        e -= 1;
+    }
+    String::from(&s[..e])
 }
 
 /// Most iframe elements looked at in one document (the rest get no slot).
@@ -247,12 +267,24 @@ impl Frames {
         }
         let depth = ctx.depth + 1;
         for (order, &node) in nodes.iter().enumerate() {
-            let attrs = page.slot_attrs(node);
-            if let Some(i) = self
+            let existing = self
                 .slots
                 .iter()
-                .position(|s| s.parent == ctx.id && s.node == node)
-            {
+                .position(|s| s.parent == ctx.id && s.node == node);
+            if existing.is_none() && (self.slots.len() >= max_frames || self.next_id == u32::MAX) {
+                if !self.overflowed {
+                    self.overflowed = true;
+                    self.note(
+                        ConsoleLevel::Warn,
+                        alloc::format!(
+                            "Too many frames: only {max_frames} <iframe>s are used on a page."
+                        ),
+                    );
+                }
+                continue;
+            }
+            let attrs = page.slot_attrs(node);
+            if let Some(i) = existing {
                 let s = &mut self.slots[i];
                 s.order = order as u32;
                 if s.attrs != attrs {
@@ -265,18 +297,6 @@ impl Frames {
                         d.page.window_name = s.attrs.name.clone();
                     }
                     self.version += 1;
-                }
-                continue;
-            }
-            if self.slots.len() >= max_frames || self.next_id == u32::MAX {
-                if !self.overflowed {
-                    self.overflowed = true;
-                    self.note(
-                        ConsoleLevel::Warn,
-                        alloc::format!(
-                            "Too many frames: only {max_frames} <iframe>s are used on a page."
-                        ),
-                    );
                 }
                 continue;
             }
@@ -310,16 +330,13 @@ impl Frames {
                 content: (0, 0),
                 doc: None,
                 vp: None,
+                pending_fragment: None,
             });
             self.version += 1;
         }
-        page.set_frame_nodes(
-            self.slots
-                .iter()
-                .filter(|s| s.parent == ctx.id)
-                .map(|s| (s.node, s.id))
-                .collect(),
-        );
+        let mut mine: Vec<&Slot> = self.slots.iter().filter(|s| s.parent == ctx.id).collect();
+        mine.sort_by_key(|s| s.order);
+        page.set_frame_nodes(mine.iter().map(|s| (s.node, s.id)).collect());
         page.frames_dirty = false;
     }
 }
@@ -364,13 +381,16 @@ impl Page {
             .map(|s| self.resolve(s));
         SlotAttrs {
             src,
-            srcdoc: e.attr("srcdoc").map(String::from),
-            name: e.attr("name").map(String::from).unwrap_or_default(),
+            srcdoc: e.attr("srcdoc").map(|s| clip(s, MAX_SRCDOC)),
+            name: e
+                .attr("name")
+                .map(|s| clip(s, MAX_NAME))
+                .unwrap_or_default(),
             sandbox: e.attr("sandbox").map(Sandbox::parse),
             lazy: e
                 .attr("loading")
                 .is_some_and(|v| v.trim().eq_ignore_ascii_case("lazy")),
-            allow: e.attr("allow").map(String::from).unwrap_or_default(),
+            allow: e.attr("allow").map(|s| clip(s, 4096)).unwrap_or_default(),
             allow_fullscreen: e.has_attr("allowfullscreen"),
             referrer_policy: e
                 .attr("referrerpolicy")
@@ -412,9 +432,12 @@ pub(crate) fn attach(
             return false;
         }
     }
-    // The new document brings its own frames; the old one's go.
+    // The new document brings its own frames; the old one's go (and the table moves up).
     frames.remove_below(id);
     let hub = frames.hub.clone();
+    let Some(i) = frames.index(id) else {
+        return false;
+    };
     let s = &mut frames.slots[i];
     let name = match s.doc.as_ref() {
         Some(old) => old.page.window_name.clone(),
@@ -427,8 +450,12 @@ pub(crate) fn attach(
         id,
         parent: s.parent,
         depth: s.depth,
+        node: s.node,
     };
     doc.page.window_name = name;
+    // Its own frames, if any, are new to this table.
+    doc.page.frame_nodes.clear();
+    doc.page.frames_dirty = true;
     s.doc = Some(Box::new(doc));
     // The new document joins the page's hub (the old one left it when it was dropped).
     if let Some(d) = s.doc.as_deref_mut() {
@@ -441,6 +468,7 @@ pub(crate) fn attach(
     s.scroll = (0, 0);
     s.content = (0, 0);
     s.vp = None;
+    s.pending_fragment = None;
     if frames.focused == id {
         frames.focused = FrameId::TOP;
     }
@@ -500,9 +528,7 @@ pub(crate) fn next_gen() -> u64 {
 impl crate::Document {
     /// A number that changes whenever [`crate::Document::display_list`] does.
     pub(crate) fn list_gen(&self) -> u64 {
-        self.merged
-            .as_ref()
-            .map_or(self.page.dl_gen(), |m| m.gen_)
+        self.merged.as_ref().map_or(self.page.dl_gen(), |m| m.gen_)
     }
 }
 
@@ -614,7 +640,12 @@ impl Builder {
     ) {
         let cr = mk.rect;
         let child = doc.display_list();
-        let base = self.clips.get(mk.clip as usize).copied().unwrap_or(cr).intersect(&cr);
+        let base = self
+            .clips
+            .get(mk.clip as usize)
+            .copied()
+            .unwrap_or(cr)
+            .intersect(&cr);
         let base_idx = self.clip(base, mk.clip);
         let target_fixed = mk.fixed;
         // The canvas: a frame is never see-through.
@@ -755,9 +786,17 @@ fn merge(frames: &Frames, parent: FrameId, page: &Page) -> Option<DisplayList> {
 
 /// Lay out the frames below `page` (frame `parent`, already laid out in `vp`) and give each
 /// slot its box. Recurses into the frames' own frames.
-fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport, m: &dyn TextMeasurer) {
+fn layout_level(
+    frames: &mut Frames,
+    parent: FrameId,
+    page: &Page,
+    vp: &Viewport,
+    m: &dyn TextMeasurer,
+) {
     let marks: Vec<crate::paint::FrameMark> = page.frame_marks().to_vec();
-    let mut seen: Vec<usize> = Vec::new();
+    // Slots are looked up by id from here on: syncing a frame's own frames can remove slots
+    // and move the rest.
+    let mut seen: Vec<FrameId> = Vec::new();
     for mk in &marks {
         let Some(si) = frames
             .slots
@@ -766,10 +805,10 @@ fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport
         else {
             continue;
         };
-        if seen.contains(&si) {
+        if seen.contains(&frames.slots[si].id) {
             continue;
         }
-        seen.push(si);
+        seen.push(frames.slots[si].id);
         let s = &mut frames.slots[si];
         if s.rect != mk.rect || !s.rendered {
             s.rect = mk.rect;
@@ -793,6 +832,12 @@ fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport
             frames.sync_doc(doc.page.frame, &mut doc.page);
         }
         layout_level(frames, id, &doc.page, &child_vp, m);
+        if let Some(frag) = frames.slot_mut(id).and_then(|s| s.pending_fragment.take())
+            && let Some(y) = doc.page.fragment_y(&frag)
+            && let Some(s) = frames.slot_mut(id)
+        {
+            s.scroll.1 = y;
+        }
         // Its own frames merged in, if it has any.
         let sig = signature(frames, id, &doc.page);
         let stale = doc.merged.as_ref().is_none_or(|mg| mg.sig != sig);
@@ -809,27 +854,26 @@ fn layout_level(frames: &mut Frames, parent: FrameId, page: &Page, vp: &Viewport
             let l = doc.display_list();
             (l.width, l.height)
         };
+        let mut moved = false;
         if let Some(s) = frames.slot_mut(id) {
             s.vp = Some(child_vp);
             s.content = (cw, ch);
-            let (mx, my) = (
-                (cw - child_vp.width).max(0),
-                (ch - child_vp.height).max(0),
-            );
+            let (mx, my) = ((cw - child_vp.width).max(0), (ch - child_vp.height).max(0));
             let want = if s.attrs.no_scroll { (0, 0) } else { s.scroll };
             let clamped = (want.0.clamp(0, mx), want.1.clamp(0, my));
             if clamped != s.scroll {
                 s.scroll = clamped;
-                frames.version += 1;
+                moved = true;
             }
-            if let Some(s) = frames.slot_mut(id) {
-                s.doc = Some(doc);
-            }
+            s.doc = Some(doc);
+        }
+        if moved {
+            frames.version += 1;
         }
     }
     // Elements with no box this time.
-    for (i, s) in frames.slots.iter_mut().enumerate() {
-        if s.parent == parent && !seen.contains(&i) {
+    for s in frames.slots.iter_mut() {
+        if s.parent == parent && !seen.contains(&s.id) {
             s.rect = Rect::default();
             s.rendered = false;
         }
@@ -871,13 +915,17 @@ pub(crate) fn needs_layout(top: &crate::Document) -> bool {
     let Some(f) = top.frames.as_ref() else {
         return false;
     };
+    // A frame with no box is not laid out, so its changes wait until it has one.
     f.version != top.frames_seen
         || f.slots
             .iter()
-            .any(|s| s.doc.as_ref().is_some_and(|d| d.page.changed()))
+            .any(|s| !s.rect.is_empty() && s.doc.as_ref().is_some_and(|d| d.page.changed()))
 }
 
 // ---- pointer, scrolling ---------------------------------------------------------------------
+
+/// A frame on the way down to a point: its id, the point in its viewport, its scroll.
+type PathStep = (FrameId, (i32, i32), (i32, i32));
 
 /// The frames under a point of `page`'s viewport, outermost first (not counting `parent`
 /// itself), each with the point and scroll in its own viewport.
@@ -888,7 +936,7 @@ fn path_at(
     x: i32,
     y: i32,
     scroll: (i32, i32),
-    out: &mut Vec<(FrameId, (i32, i32), (i32, i32))>,
+    out: &mut Vec<PathStep>,
 ) {
     if out.len() > 32 {
         return;
@@ -911,7 +959,7 @@ fn path_at(
     if !s.rect.contains(px, py) {
         return;
     }
-    let local = (px - s.rect.x, py - s.rect.y);
+    let local = (px.saturating_sub(s.rect.x), py.saturating_sub(s.rect.y));
     out.push((s.id, local, s.scroll));
     path_at(frames, s.id, &d.page, local.0, local.1, s.scroll, out);
 }
@@ -949,11 +997,15 @@ fn scroll_by(frames: &mut Frames, id: FrameId, dx: i32, dy: i32) -> (i32, i32) {
     if s.attrs.no_scroll {
         return (dx, dy);
     }
-    let vp = s.vp.unwrap_or(Viewport::new(s.rect.w, s.rect.h));
-    let (mx, my) = (
-        (s.content.0 - vp.width).max(0),
-        (s.content.1 - vp.height).max(0),
-    );
+    // Before the first layout the size of the content is not known: the offset is kept as asked
+    // and clamped when the document is laid out (a restored scroll position, say).
+    let (mx, my) = match s.vp {
+        Some(vp) => (
+            (s.content.0 - vp.width).max(0),
+            (s.content.1 - vp.height).max(0),
+        ),
+        None => (i32::MAX, i32::MAX),
+    };
     let nx = s.scroll.0.saturating_add(dx).clamp(0, mx);
     let ny = s.scroll.1.saturating_add(dy).clamp(0, my);
     let (ux, uy) = (nx - s.scroll.0, ny - s.scroll.1);
@@ -961,7 +1013,7 @@ fn scroll_by(frames: &mut Frames, id: FrameId, dx: i32, dy: i32) -> (i32, i32) {
         s.scroll = (nx, ny);
         frames.version += 1;
     }
-    (dx - ux, dy - uy)
+    (dx.saturating_sub(ux), dy.saturating_sub(uy))
 }
 
 pub(crate) fn set_scroll(top: &mut crate::Document, id: FrameId, x: i32, y: i32) -> (i32, i32) {
@@ -1042,12 +1094,29 @@ fn set_slot_scroll(frames: &mut Frames, id: FrameId, x: i32, y: i32) {
 }
 
 pub(crate) fn fragment(top: &mut crate::Document, id: FrameId, frag: &str) -> bool {
-    let Some(y) = top.frame_doc(id).and_then(|d| d.page.fragment_y(frag)) else {
+    if id.is_top() {
+        return top
+            .frame_doc(id)
+            .and_then(|d| d.page.fragment_y(frag))
+            .is_some();
+    }
+    let Some(frames) = top.frames.as_mut() else {
         return false;
     };
-    if id.is_top() {
+    let Some(s) = frames.slot_mut(id) else {
+        return false;
+    };
+    if s.doc.is_none() {
+        return false;
+    }
+    if s.vp.is_none() {
+        // Not laid out yet: the element can't be found until it is. Do it then.
+        s.pending_fragment = Some(String::from(frag));
         return true;
     }
+    let Some(y) = s.doc.as_ref().and_then(|d| d.page.fragment_y(frag)) else {
+        return false;
+    };
     set_scroll(top, id, 0, y);
     true
 }
@@ -1109,7 +1178,11 @@ pub(crate) fn focus_order(top: &crate::Document) -> Vec<(FrameId, ControlId)> {
 /// A rectangle of a frame's document moved into its parent's (the slot's box, the frame's
 /// scroll), cut to what the slot shows.
 fn up(r: Rect, slot: Rect, scroll: (i32, i32)) -> Rect {
-    let moved = shift_rect(r, slot.x.saturating_sub(scroll.0), slot.y.saturating_sub(scroll.1));
+    let moved = shift_rect(
+        r,
+        slot.x.saturating_sub(scroll.0),
+        slot.y.saturating_sub(scroll.1),
+    );
     moved.intersect(&slot)
 }
 

@@ -200,29 +200,6 @@ fn assemble(top_html: &str, kids: &[&str]) -> Document {
     d
 }
 
-/// The display list as lines: the frame, the clip, the item.
-fn dump_frames(d: &Document) -> String {
-    let dl = d.display_list();
-    let mut s = String::new();
-    for (name, list) in [("", &dl.entries), ("fixed ", &dl.fixed)] {
-        for e in list.iter() {
-            let one = super::render::dump(&DisplayList {
-                entries: alloc::vec![*e],
-                text: dl.text.clone(),
-                ..DisplayList::default()
-            });
-            let c = dl.clips[e.clip as usize];
-            let clip = if c.w > 1 << 24 {
-                String::from("-")
-            } else {
-                alloc::format!("{},{} {}x{}", c.x, c.y, c.w, c.h)
-            };
-            s.push_str(&alloc::format!("{name}f{} [{clip}] {one}", e.frame.0));
-        }
-    }
-    s
-}
-
 fn texts_of(d: &Document) -> Vec<(u32, i32, i32, String)> {
     let dl = d.display_list();
     dl.entries
@@ -283,7 +260,9 @@ fn display_none_has_a_slot_but_no_box() {
 fn the_frame_viewport_is_the_slot_and_it_wraps_there() {
     let mut d = assemble(
         &alloc::format!("{FLAT}<iframe width=100 height=200 style='border:0'></iframe>"),
-        &["<body style='margin:0'><p style='margin:0'>aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj</p><div style='width:50vw;height:10px;background:red'>"],
+        &[
+            "<body style='margin:0'><p style='margin:0'>aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj</p><div style='width:50vw;height:10px;background:red'>",
+        ],
     );
     let id = d.frame_slots()[0].id;
     let vp = d.frame_viewport(id).unwrap();
@@ -299,7 +278,10 @@ fn the_frame_viewport_is_the_slot_and_it_wraps_there() {
         .entries
         .iter()
         .find_map(|e| match e.item {
-            Item::Rect { rect, color } if color == 0xFFFF_0000 => Some(rect),
+            Item::Rect {
+                rect,
+                color: 0xFFFF_0000,
+            } => Some(rect),
             _ => None,
         })
         .unwrap();
@@ -308,7 +290,9 @@ fn the_frame_viewport_is_the_slot_and_it_wraps_there() {
 
 #[test]
 fn zoom_and_dark_follow_the_parent() {
-    let mut d = top(&alloc::format!("{FLAT}<iframe width=100 height=50 style='border:0'></iframe>"));
+    let mut d = top(&alloc::format!(
+        "{FLAT}<iframe width=100 height=50 style='border:0'></iframe>"
+    ));
     let id = d.frame_slots()[0].id;
     assert!(d.attach_frame(id, child("<p>zz"), None));
     let vp = Viewport {
@@ -350,14 +334,19 @@ fn entries_are_clipped_to_the_slot_and_moved_into_place() {
         &alloc::format!(
             "{FLAT}<p style='margin:0'>top</p><iframe width=80 height=30 style='border:0'></iframe>"
         ),
-        &["<body style='margin:0'><p style='margin:0;font-size:20px'>one</p><p style='margin:0'>two</p><p style='margin:0'>three</p><p style='margin:0'>four</p>"],
+        &[
+            "<body style='margin:0'><p style='margin:0;font-size:20px'>one</p><p style='margin:0'>two</p><p style='margin:0'>three</p><p style='margin:0'>four</p>",
+        ],
     );
     let slot = Rect::new(0, 19, 80, 30);
     let dl = d.display_list();
     for e in dl.entries.iter().filter(|e| e.frame == FrameId(1)) {
         let c = dl.clips[e.clip as usize];
         assert!(
-            c.x >= slot.x && c.y >= slot.y && c.right() <= slot.right() && c.bottom() <= slot.bottom(),
+            c.x >= slot.x
+                && c.y >= slot.y
+                && c.right() <= slot.right()
+                && c.bottom() <= slot.bottom(),
             "{c:?}"
         );
     }
@@ -366,7 +355,12 @@ fn entries_are_clipped_to_the_slot_and_moved_into_place() {
     assert_eq!((one.0, one.1), (1, 0));
     assert!(one.2 > 19 && one.2 < 49, "{one:?}");
     // The page's own entries stay unclipped and are frame 0.
-    assert!(dl.entries.iter().filter(|e| e.frame == FrameId::TOP).all(|e| e.clip == 0));
+    assert!(
+        dl.entries
+            .iter()
+            .filter(|e| e.frame == FrameId::TOP)
+            .all(|e| e.clip == 0)
+    );
 }
 
 #[test]
@@ -406,7 +400,11 @@ fn nested_frames_clip_to_each_slot() {
         ],
     );
     let dl = d.display_list();
-    let deep: Vec<&Entry> = dl.entries.iter().filter(|e| e.frame == FrameId(2)).collect();
+    let deep: Vec<&Entry> = dl
+        .entries
+        .iter()
+        .filter(|e| e.frame == FrameId(2))
+        .collect();
     assert!(!deep.is_empty());
     for e in deep {
         let c = dl.clips[e.clip as usize];
@@ -421,7 +419,9 @@ fn nested_frames_clip_to_each_slot() {
 fn scrolling_moves_the_content_and_is_clamped() {
     let mut body = String::from("<body style='margin:0'>");
     for i in 0..30 {
-        body.push_str(&alloc::format!("<p style='margin:0;height:20px'>line{i}</p>"));
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px'>line{i}</p>"
+        ));
     }
     let mut d = assemble(
         &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"),
@@ -435,7 +435,11 @@ fn scrolling_moves_the_content_and_is_clamped() {
     assert!(d.needs_layout());
     lay(&mut d);
     let t = texts_of(&d);
-    assert_eq!(t.iter().find(|x| x.3 == "line0").map(|x| x.2), None, "scrolled out");
+    assert_eq!(
+        t.iter().find(|x| x.3 == "line0").map(|x| x.2),
+        None,
+        "scrolled out"
+    );
     let l3 = t.iter().find(|x| x.3 == "line3").unwrap().2;
     assert_eq!(l3, y0 + 3 * 20 - 50);
     // Clamped at the end, and never negative.
@@ -444,7 +448,9 @@ fn scrolling_moves_the_content_and_is_clamped() {
     assert_eq!(d.frame_scroll(id), Some((0, 0)));
     // scrolling=no pins it.
     let mut d = assemble(
-        &alloc::format!("{FLAT}<iframe scrolling=no width=100 height=100 style='border:0'></iframe>"),
+        &alloc::format!(
+            "{FLAT}<iframe scrolling=no width=100 height=100 style='border:0'></iframe>"
+        ),
         &[&body],
     );
     let id = d.frame_slots()[0].id;
@@ -457,7 +463,9 @@ fn scrolling_moves_the_content_and_is_clamped() {
 fn only_the_visible_part_of_a_scrolled_frame_is_listed() {
     let mut body = String::from("<body style='margin:0'>");
     for i in 0..3000 {
-        body.push_str(&alloc::format!("<p style='margin:0;height:20px'>row{i}</p>"));
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px'>row{i}</p>"
+        ));
     }
     let mut d = assemble(
         &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"),
@@ -475,12 +483,16 @@ fn only_the_visible_part_of_a_scrolled_frame_is_listed() {
 
 #[test]
 fn fixed_boxes_in_a_frame_stay_in_the_frame_view() {
-    let mut body = String::from("<body style='margin:0'><div style='position:fixed;top:0;left:0;background:#abcdef;width:30px;height:10px'></div>");
+    let mut body = String::from(
+        "<body style='margin:0'><div style='position:fixed;top:0;left:0;background:#abcdef;width:30px;height:10px'></div>",
+    );
     for i in 0..30 {
         body.push_str(&alloc::format!("<p style='margin:0;height:20px'>l{i}</p>"));
     }
     let mut d = assemble(
-        &alloc::format!("{FLAT}<p style='margin:0'>t</p><iframe width=100 height=100 style='border:0'></iframe>"),
+        &alloc::format!(
+            "{FLAT}<p style='margin:0'>t</p><iframe width=100 height=100 style='border:0'></iframe>"
+        ),
         &[&body],
     );
     let id = d.frame_slots()[0].id;
@@ -489,7 +501,10 @@ fn fixed_boxes_in_a_frame_stay_in_the_frame_view() {
             .entries
             .iter()
             .find_map(|e| match e.item {
-                Item::Rect { rect, color } if color == 0xFFAB_CDEF => Some(rect),
+                Item::Rect {
+                    rect,
+                    color: 0xFFAB_CDEF,
+                } => Some(rect),
                 _ => None,
             })
             .unwrap()
@@ -531,7 +546,9 @@ fn hit_testing_goes_into_the_frame() {
         &alloc::format!(
             "{FLAT}<p style='margin:0'><a href='/up'>up</a></p><iframe width=120 height=60 style='border:0'></iframe>"
         ),
-        &["<body style='margin:0'><p style='margin:0'><a href='go.html' target=x title=tip>link</a></p><form><input name=q size=5></form>"],
+        &[
+            "<body style='margin:0'><p style='margin:0'><a href='go.html' target=x title=tip>link</a></p><form><input name=q size=5></form>",
+        ],
     );
     let slot = d.frame_slots()[0].clone();
     // The page's own link.
@@ -565,10 +582,14 @@ fn hit_testing_goes_into_the_frame() {
 fn hits_in_a_scrolled_frame_and_in_the_border() {
     let mut body = String::from("<body style='margin:0'>");
     for i in 0..30 {
-        body.push_str(&alloc::format!("<p style='margin:0;height:20px'><a href='/l{i}'>l{i}</a></p>"));
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px'><a href='/l{i}'>l{i}</a></p>"
+        ));
     }
     let mut d = assemble(
-        &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:5px solid red'></iframe>"),
+        &alloc::format!(
+            "{FLAT}<iframe width=100 height=100 style='border:5px solid red'></iframe>"
+        ),
         &[&body],
     );
     let slot = d.frame_slots()[0].clone();
@@ -589,7 +610,9 @@ fn hits_in_a_scrolled_frame_and_in_the_border() {
 #[test]
 fn nested_hits_report_the_innermost_frame() {
     let mut d = assemble(
-        &alloc::format!("{FLAT}<div style='height:10px'></div><iframe width=100 height=60 style='border:0'></iframe>"),
+        &alloc::format!(
+            "{FLAT}<div style='height:10px'></div><iframe width=100 height=60 style='border:0'></iframe>"
+        ),
         &[
             "<body style='margin:0'><div style='height:20px'></div><iframe width=80 height=30 style='border:0'></iframe>",
             "<body style='margin:0'><a href='/in'>inner</a>",
@@ -629,7 +652,7 @@ fn the_wheel_chains_outwards() {
     assert_eq!(d.set_frame_scroll(o, 0, 9999), (0, 155));
     lay(&mut d);
     let y = d.frame_slots()[1].rect.y - 155;
-    assert!(y >= 0 && y < 100);
+    assert!((0..100).contains(&y));
     // 30 px of wheel over the inner frame: all of it used there.
     assert_eq!(d.scroll_frames_at(5, y + 5, (0, 0), 0, 30), (0, 0));
     assert_eq!(d.frame_scroll(i), Some((0, 30)));
@@ -651,7 +674,9 @@ fn reveal_scrolls_each_frame_and_returns_page_space() {
         inner.push_str(&alloc::format!("<p style='margin:0;height:20px'>i{i}</p>"));
     }
     let mut d = assemble(
-        &alloc::format!("{FLAT}<div style='height:100px'></div><iframe width=100 height=100 style='border:0'></iframe>"),
+        &alloc::format!(
+            "{FLAT}<div style='height:100px'></div><iframe width=100 height=100 style='border:0'></iframe>"
+        ),
         &[&inner],
     );
     let id = d.frame_slots()[0].id;
@@ -669,7 +694,9 @@ fn reveal_scrolls_each_frame_and_returns_page_space() {
     // A fragment.
     let mut d = assemble(
         &alloc::format!("{FLAT}<iframe width=100 height=50 style='border:0'></iframe>"),
-        &["<body style='margin:0'><div style='height:300px'></div><h2 id=here style='margin:0'>here</h2><div style='height:300px'></div>"],
+        &[
+            "<body style='margin:0'><div style='height:300px'></div><h2 id=here style='margin:0'>here</h2><div style='height:300px'></div>",
+        ],
     );
     let id = d.frame_slots()[0].id;
     assert!(d.frame_fragment(id, "here"));
@@ -697,13 +724,25 @@ fn focus_order_runs_through_frames() {
         .map(|&(f, c)| {
             (
                 f.0,
-                d.frame_doc(f).unwrap().controls()[c.0 as usize].name.clone(),
+                d.frame_doc(f).unwrap().controls()[c.0 as usize]
+                    .name
+                    .clone(),
             )
         })
         .collect();
-    let want: Vec<(u32, &str)> = alloc::vec![(0, "a"), (1, "f1"), (1, "f3"), (0, "b"), (2, "g1"), (0, "d")];
+    let want: Vec<(u32, &str)> = alloc::vec![
+        (0, "a"),
+        (1, "f1"),
+        (1, "f3"),
+        (0, "b"),
+        (2, "g1"),
+        (0, "d")
+    ];
     assert_eq!(
-        named.iter().map(|(f, n)| (*f, n.as_str())).collect::<Vec<_>>(),
+        named
+            .iter()
+            .map(|(f, n)| (*f, n.as_str()))
+            .collect::<Vec<_>>(),
         want
     );
 }
@@ -743,7 +782,13 @@ fn find_and_text_include_frames_in_order() {
     // The page text has the frames' text where they are.
     let t = d.text();
     let pos = |w: &str| t.find(w).unwrap();
-    assert!(pos("one") < pos("three") && pos("three") < pos("two") && pos("two") < pos("four") && pos("four") < pos("five"), "{t:?}");
+    assert!(
+        pos("one") < pos("three")
+            && pos("three") < pos("two")
+            && pos("two") < pos("four")
+            && pos("four") < pos("five"),
+        "{t:?}"
+    );
     let _ = &mut d;
 }
 
@@ -751,7 +796,10 @@ fn find_and_text_include_frames_in_order() {
 fn a_match_scrolled_out_of_its_frame_can_be_revealed() {
     let mut body = String::from("<body style='margin:0'>");
     for i in 0..40 {
-        body.push_str(&alloc::format!("<p style='margin:0;height:20px'>{}</p>", if i == 30 { "needle" } else { "hay" }));
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px'>{}</p>",
+            if i == 30 { "needle" } else { "hay" }
+        ));
     }
     let mut d = assemble(
         &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"),
@@ -760,7 +808,10 @@ fn a_match_scrolled_out_of_its_frame_can_be_revealed() {
     let m = d.find("needle", true);
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].frame, FrameId(1));
-    assert!(m[0].rects.is_empty(), "outside the slot, so not drawn there");
+    assert!(
+        m[0].rects.is_empty(),
+        "outside the slot, so not drawn there"
+    );
     assert_eq!(m[0].frame_rects.len(), 1);
     let r = m[0].frame_rects[0];
     assert!(r.y >= 600 && r.y < 620, "{r:?}");
@@ -801,21 +852,30 @@ fn removing_an_iframe_element_closes_its_frame() {
     let s = d.frame_slots();
     assert!(d.attach_frame(s[0].id, child("<p>a"), None));
     assert!(d.attach_frame(s[1].id, child("<p>b"), None));
-    run_script(&mut d, "var b = document.getElementById('b'); b.parentNode.removeChild(b);");
+    run_script(
+        &mut d,
+        "var b = document.getElementById('b'); b.parentNode.removeChild(b);",
+    );
     let s2 = d.frame_slots();
     assert_eq!(s2.len(), 1);
     assert_eq!(s2[0].id, s[0].id);
     assert_eq!(d.take_closed_frames(), alloc::vec![s[1].id]);
     assert_eq!(d.frame_ids(), alloc::vec![s[0].id]);
     // A new element is a new frame, with a new id.
-    run_script(&mut d, "document.getElementById('box').appendChild(document.createElement('iframe'));");
+    run_script(
+        &mut d,
+        "document.getElementById('box').appendChild(document.createElement('iframe'));",
+    );
     let s3 = d.frame_slots();
     assert_eq!(s3.len(), 2);
     assert!(s3[1].id.0 > s[1].id.0);
     assert!(s3[1].wants_load());
     // Changing src starts a new generation.
     let g = s3[1].generation;
-    run_script(&mut d, "document.querySelectorAll('iframe')[1].setAttribute('src', '/z.html');");
+    run_script(
+        &mut d,
+        "document.querySelectorAll('iframe')[1].setAttribute('src', '/z.html');",
+    );
     let s4 = d.frame_slots();
     assert_eq!(s4[1].generation, g + 1);
     assert_eq!(s4[1].src.as_deref(), Some("http://top.example/z.html"));
@@ -918,8 +978,16 @@ fn post_message_queues_and_deliver_message_fires() {
     assert_eq!(lines[1], "on:[object Object]");
     assert_eq!(lines[2].matches("plain").count(), 1);
     // Bad data is refused: things the structured clone cannot copy throw (cycles it can).
-    assert!(eval_str(&mut d, "try { postMessage({ f: function () {} }, '*'); 'no' } catch (e) { e.name }").contains("DataCloneError"));
-    assert!(eval_str(&mut d, "try { postMessage(); 'no' } catch (e) { e.name }").contains("TypeError"));
+    assert!(
+        eval_str(
+            &mut d,
+            "try { postMessage({ f: function () {} }, '*'); 'no' } catch (e) { e.name }"
+        )
+        .contains("DataCloneError")
+    );
+    assert!(
+        eval_str(&mut d, "try { postMessage(); 'no' } catch (e) { e.name }").contains("TypeError")
+    );
     assert_eq!(d.take_messages().len(), 0);
 }
 
@@ -931,17 +999,31 @@ fn messages_go_to_a_frames_own_document() {
     {
         let c = d.frame_doc_mut(id).unwrap();
         // A frame document without scripts takes no messages.
-        assert!(!c.deliver_message(&mut h, &Message { data: String::new(), origin: String::new(), source: FrameId::TOP }));
+        assert!(!c.deliver_message(
+            &mut h,
+            &Message {
+                data: String::new(),
+                origin: String::new(),
+                source: FrameId::TOP
+            }
+        ));
     }
     let mut c = scripted("<p>y");
-    eval_str(&mut c, "window.n = 0; onmessage = function (e) { n += e.data; };");
+    eval_str(
+        &mut c,
+        "window.n = 0; onmessage = function (e) { n += e.data; };",
+    );
     assert!(d.attach_frame(id, c, None));
     let c = d.frame_doc_mut(id).unwrap();
     assert_eq!(c.frame_info().id, id);
     for _ in 0..3 {
         assert!(c.deliver_message(
             &mut h,
-            &Message { data: String::from("2"), origin: String::from("http://top.example"), source: FrameId::TOP }
+            &Message {
+                data: String::from("2"),
+                origin: String::from("http://top.example"),
+                source: FrameId::TOP
+            }
         ));
     }
     assert_eq!(eval_str(c, "n"), "6");
@@ -1007,9 +1089,11 @@ fn install_peer(d: &mut Document, h: &mut dyn ScriptHost) {
                     doc.js
                         .as_mut()
                         .and_then(|j| {
-                            j.test_entry(&mut doc.page, host, |_b, r2| match r2.eval(&src, "peer") {
-                                Ok(v) => r2.to_string(v).unwrap_or_default(),
-                                Err(e) => alloc::format!("threw {}", r2.report(&e)),
+                            j.test_entry(&mut doc.page, host, |_b, r2| {
+                                match r2.eval(&src, "peer") {
+                                    Ok(v) => r2.to_string(v).unwrap_or_default(),
+                                    Err(e) => alloc::format!("threw {}", r2.report(&e)),
+                                }
                             })
                         })
                         .unwrap_or_else(|| String::from("stopped"))
@@ -1036,7 +1120,7 @@ fn scripts_of_one_frame_can_run_code_in_another() {
     for id in &ids {
         root.with_frame(*id, |d| install_peer(d, &mut hs)).unwrap();
     }
-    let mut ev = |root: &mut Document, from: FrameId, src: &str, hs: &mut Hosts| -> String {
+    let ev = |root: &mut Document, from: FrameId, src: &str, hs: &mut Hosts| -> String {
         root.with_frame(from, |d| {
             d.arm();
             let js = d.js.as_mut().unwrap();
@@ -1050,33 +1134,76 @@ fn scripts_of_one_frame_can_run_code_in_another() {
         .unwrap_or_else(|| String::from("no frame"))
     };
     // The top reaches a frame, a frame the top, a frame its sibling.
-    assert_eq!(ev(&mut root, FrameId::TOP, "peer(1, 'document.title')", &mut hs), "a title");
-    assert_eq!(ev(&mut root, ids[0], "peer(0, 'document.title')", &mut hs), "top title");
-    assert_eq!(ev(&mut root, ids[0], "peer(2, 'document.title')", &mut hs), "b title");
+    assert_eq!(
+        ev(
+            &mut root,
+            FrameId::TOP,
+            "peer(1, 'document.title')",
+            &mut hs
+        ),
+        "a title"
+    );
+    assert_eq!(
+        ev(&mut root, ids[0], "peer(0, 'document.title')", &mut hs),
+        "top title"
+    );
+    assert_eq!(
+        ev(&mut root, ids[0], "peer(2, 'document.title')", &mut hs),
+        "b title"
+    );
     // State survives between calls: it is the same realm.
-    assert_eq!(ev(&mut root, FrameId::TOP, "peer(2, 'window.v = 7; v * 2')", &mut hs), "14");
+    assert_eq!(
+        ev(
+            &mut root,
+            FrameId::TOP,
+            "peer(2, 'window.v = 7; v * 2')",
+            &mut hs
+        ),
+        "14"
+    );
     assert_eq!(ev(&mut root, ids[1], "String(window.v)", &mut hs), "7");
     // Errors in the other realm come back as text, not as a panic.
     assert!(ev(&mut root, FrameId::TOP, "peer(1, 'nope()')", &mut hs).starts_with("threw"));
     // Unknown frames and a host with no frame host are refused.
-    assert_eq!(ev(&mut root, FrameId::TOP, "peer(9, '1')", &mut hs), "refused");
+    assert_eq!(
+        ev(&mut root, FrameId::TOP, "peer(9, '1')", &mut hs),
+        "refused"
+    );
     // A frame that called into the top while the top is calling into it: the top is busy.
     assert_eq!(
-        ev(&mut root, FrameId::TOP, "peer(1, \"peer(0, '1')\")", &mut hs),
+        ev(
+            &mut root,
+            FrameId::TOP,
+            "peer(1, \"peer(0, '1')\")",
+            &mut hs
+        ),
         "refused"
     );
     // A frame reaching a frame reaching the top is fine; back to the first frame is not (it
     // is the one running).
     assert_eq!(
-        ev(&mut root, ids[0], "peer(2, \"peer(0, 'document.title')\")", &mut hs),
+        ev(
+            &mut root,
+            ids[0],
+            "peer(2, \"peer(0, 'document.title')\")",
+            &mut hs
+        ),
         "top title"
     );
     assert_eq!(
-        ev(&mut root, ids[0], "peer(2, \"peer(1, 'document.title')\")", &mut hs),
+        ev(
+            &mut root,
+            ids[0],
+            "peer(2, \"peer(1, 'document.title')\")",
+            &mut hs
+        ),
         "refused"
     );
     hs.deny = true;
-    assert_eq!(ev(&mut root, FrameId::TOP, "peer(1, '1')", &mut hs), "refused");
+    assert_eq!(
+        ev(&mut root, FrameId::TOP, "peer(1, '1')", &mut hs),
+        "refused"
+    );
 }
 
 #[test]
@@ -1099,7 +1226,360 @@ fn window_name_is_the_browsing_contexts() {
     assert_eq!(d.frames_named("again"), alloc::vec![FrameId::TOP]);
     assert!(d.frames_named("nobody").is_empty());
     // Changing the element's name attribute renames the context.
-    eval_str(&mut d, "document.querySelector('iframe').setAttribute('name', 'attr')");
+    eval_str(
+        &mut d,
+        "document.querySelector('iframe').setAttribute('name', 'attr')",
+    );
     d.frame_slots();
     assert_eq!(d.frames_named("attr"), alloc::vec![id]);
+}
+
+#[test]
+fn extreme_numbers_do_not_overflow() {
+    let mut d = assemble(
+        &alloc::format!("{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"),
+        &["<p>x</p><p style='height:3000px'>y"],
+    );
+    let id = d.frame_slots()[0].id;
+    for v in [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX] {
+        for w in [i32::MIN, 0, i32::MAX] {
+            let _ = d.hit_test(v, w, (v, w));
+            let _ = d.hit_test(5, 5, (v, w));
+            let _ = d.frame_at(v, w, (w, v));
+            let _ = d.scroll_frames_at(5, 5, (0, 0), v, w);
+            let _ = d.scroll_frames_at(v, w, (w, v), w, v);
+            d.set_frame_scroll(id, v, w);
+            let r = d.reveal(id, Rect::new(v, w, v, w));
+            let _ = r;
+            d.reveal(id, Rect::new(0, w, 0, 0));
+        }
+    }
+    lay(&mut d);
+    assert!(d.frame_scroll(id).is_some());
+}
+
+#[test]
+fn the_window_can_tell_where_it_sits() {
+    use crate::script::frames::*;
+    let mut root = scripted("<p>x</p><iframe id=a></iframe><div><iframe id=b></iframe></div>");
+    let ids: Vec<FrameId> = root.frame_slots().iter().map(|s| s.id).collect();
+    assert!(root.attach_frame(ids[0], scripted("<p>a</p><iframe id=c></iframe>"), None));
+    root.frame_slots();
+    let mut h = Host::new();
+    root.arm();
+    let top_node = root.page.dom.find_tag(crate::atoms::tag::IFRAME);
+    let js = root.js.as_mut().unwrap();
+    js.test_entry(&mut root.page, &mut h, |b, _r| {
+        assert_eq!(own_info(b).id, FrameId::TOP);
+        assert_eq!(own_info(b).parent, None);
+        assert_eq!(child_frames(b), alloc::vec![ids[0], ids[1]]);
+        assert_eq!(frame_of_element(b, top_node), Some(ids[0]));
+        assert_eq!(frame_of_element(b, 0), None);
+        assert!(frame_element(b).is_none());
+    });
+    root.disarm();
+    let a = root.frame_doc_mut(ids[0]).unwrap();
+    a.arm();
+    let js = a.js.as_mut().unwrap();
+    js.test_entry(&mut a.page, &mut h, |b, _r| {
+        let i = own_info(b);
+        assert_eq!((i.id, i.parent, i.depth), (ids[0], Some(FrameId::TOP), 1));
+        assert_eq!(child_frames(b).len(), 1);
+        let (pf, node) = frame_element(b).unwrap();
+        assert_eq!(pf, FrameId::TOP);
+        assert_eq!(node, top_node);
+    });
+}
+
+#[test]
+fn frames_in_flex_tables_floats_and_clipped_boxes() {
+    let mut d = assemble(
+        &alloc::format!(
+            "{FLAT}<div style='display:flex;gap:10px'><iframe width=60 height=40 style='border:0'></iframe><iframe width=60 height=40 style='border:0'></iframe></div>\\
+             <table><tr><td><iframe width=70 height=30 style='border:0'></iframe></td></tr></table>\\
+             <div style='float:right;width:90px'><iframe width=80 height=20 style='border:0'></iframe></div>\\
+             <div style='width:50px;height:30px;overflow:hidden'><iframe width=100 height=100 style='border:0'></iframe></div>"
+        ),
+        &[
+            "<body style='background:#111111'>",
+            "<body style='background:#222222'>",
+            "<body style='background:#333333'>",
+            "<body style='background:#444444'>",
+            "<body style='background:#555555'>",
+        ],
+    );
+    let s = d.frame_slots();
+    assert_eq!(s.len(), 5);
+    // Side by side in the flex row.
+    assert_eq!(s[1].rect.x - s[0].rect.right(), 10);
+    assert_eq!(s[0].rect.y, s[1].rect.y);
+    // Each one's canvas is where its slot is, and the clipped one shows only 50 x 30.
+    let dl = d.display_list();
+    for slot in &s {
+        let canvas = dl
+            .entries
+            .iter()
+            .find(|e| e.frame == slot.id && matches!(e.item, Item::Rect { .. }))
+            .unwrap();
+        let Item::Rect { rect, .. } = canvas.item else {
+            unreachable!()
+        };
+        assert_eq!(rect, slot.rect);
+        let clip = dl.clips[canvas.clip as usize];
+        if slot.id == s[4].id {
+            assert_eq!((clip.w, clip.h), (50, 30), "{clip:?}");
+        } else {
+            assert_eq!(clip, slot.rect);
+        }
+    }
+    // The pointer: the visible corner of the clipped frame is the frame's; the part of the
+    // frame outside the box still has the page's hit rectangle, as any overflow does.
+    let r = s[4].rect;
+    assert_eq!(d.hit_test(r.x + 5, r.y + 5, (0, 0)).frame, s[4].id);
+    d.frame_slots();
+}
+
+#[test]
+fn a_frame_in_a_fixed_box_stays_put_when_the_page_scrolls() {
+    let mut d = assemble(
+        &alloc::format!(
+            "{FLAT}<div style='position:fixed;left:10px;top:20px'><iframe width=100 height=50 style='border:0'></iframe></div><div style='height:3000px'></div>"
+        ),
+        &[
+            "<body style='margin:0;background:#123456'><p style='margin:0'>fixed frame</p><input name=q>",
+        ],
+    );
+    let dl = d.display_list();
+    assert!(
+        dl.entries.iter().all(|e| e.frame.is_top()),
+        "all of it is in the fixed layer"
+    );
+    let fx: Vec<&Entry> = dl.fixed.iter().filter(|e| e.frame == FrameId(1)).collect();
+    assert!(fx.len() >= 3);
+    for e in &fx {
+        let c = dl.clips[e.clip as usize];
+        assert!(
+            c.x >= 10 && c.y >= 20 && c.right() <= 110 && c.bottom() <= 70,
+            "{c:?}"
+        );
+    }
+    let s = d.frame_slots()[0].clone();
+    assert_eq!(s.rect, Rect::new(10, 20, 100, 50));
+    // Hit in viewport space whatever the page's scroll.
+    for sy in [0, 500] {
+        let h = d.hit_test(15, 25, (0, sy));
+        assert_eq!(h.frame, s.id, "scrolled {sy}");
+        assert_eq!(h.point, (5, 5));
+    }
+    assert_eq!(d.hit_test(15, 25 + 100, (0, 0)).frame, FrameId::TOP);
+    // The wheel over it goes to the frame first.
+    assert_eq!(
+        d.scroll_frames_at(15, 25, (0, 500), 0, 10),
+        (0, 10),
+        "nothing to scroll in the frame"
+    );
+}
+
+#[test]
+fn layout_settles_with_frames_of_every_kind() {
+    let mut d = assemble(
+        &alloc::format!(
+            "{FLAT}<iframe style='display:none'></iframe><iframe width=0 height=0></iframe>\
+             <iframe style='visibility:hidden' width=50 height=50></iframe><iframe width=50 height=50></iframe>"
+        ),
+        &[
+            "<p>a",
+            "<p>b<iframe></iframe>",
+            "<p>c",
+            "<p>d<iframe width=10 height=10></iframe>",
+        ],
+    );
+    assert!(!d.needs_layout());
+    lay(&mut d);
+    assert!(!d.needs_layout());
+    // A change in a hidden frame doesn't ask for layouts nobody can see, and one in a shown
+    // frame does, once.
+    let ids = d.frame_ids();
+    let doc = d.frame_doc_mut(ids[0]).unwrap();
+    doc.supply_stylesheet("x.css", None);
+    let shown = *ids.last().unwrap();
+    d.frame_doc_mut(shown).unwrap().set_window_name("x");
+    d.frame_doc_mut(shown).unwrap().page.mark_forms_changed();
+    assert!(d.needs_layout());
+    lay(&mut d);
+    assert!(!d.needs_layout());
+}
+
+#[test]
+fn the_iframe_element_hears_load_and_error() {
+    let mut d =
+        scripted("<iframe id=a onload='window.log.push(\"attr\")'></iframe><iframe id=b></iframe>");
+    eval_str(
+        &mut d,
+        "window.log = []; document.getElementById('b').addEventListener('load', function (e) { log.push('b:' + e.type + ':' + (e.target.id) + ':' + e.bubbles); }); \
+         document.getElementById('b').addEventListener('error', function (e) { log.push('b:' + e.type); });",
+    );
+    let ids: Vec<FrameId> = d.frame_slots().iter().map(|s| s.id).collect();
+    let mut h = Host::new();
+    assert!(d.frame_load_event(ids[1], &mut h, false));
+    assert!(d.frame_load_event(ids[1], &mut h, true));
+    assert!(d.frame_load_event(ids[0], &mut h, false));
+    assert_eq!(
+        eval_str(&mut d, "log.join()"),
+        "b:load:b:false,b:error,attr"
+    );
+    assert!(!d.frame_load_event(FrameId(9), &mut h, false));
+    // From inside a frame: the element is in the parent's document, so it is the parent's realm.
+    let mut outer = scripted("<iframe id=f></iframe>");
+    eval_str(
+        &mut outer,
+        "window.n = 0; document.getElementById('f').onload = function () { n++; };",
+    );
+    let id = outer.frame_slots()[0].id;
+    assert!(outer.attach_frame(id, scripted("<iframe id=g></iframe>"), None));
+    outer.frame_slots();
+    let g = outer.frame_slots()[1].id;
+    eval_str(
+        outer.frame_doc_mut(id).unwrap(),
+        "window.m = 0; document.getElementById('g').onload = function () { m++; };",
+    );
+    assert!(outer.frame_load_event(g, &mut h, false));
+    assert!(outer.frame_load_event(id, &mut h, false));
+    assert_eq!(eval_str(&mut outer, "n"), "1");
+    assert_eq!(eval_str(outer.frame_doc_mut(id).unwrap(), "m"), "1");
+}
+
+#[test]
+fn loaded_says_when_a_document_is_done() {
+    let mut d = Document::parse_scripted(
+        b"<img src=a.png><script>var x = 1;</script>",
+        "http://top.example/",
+        None,
+        Limits::default(),
+        Some(ScriptLimits::default()),
+    );
+    let mut h = Host::new();
+    assert!(!d.loaded());
+    d.run(&mut h);
+    // The page's load waits for its image.
+    assert!(!d.loaded());
+    let id = d.pending_resources()[0].kind;
+    if let ResourceKind::Image(i) = id {
+        d.supply_image(i, Some((1, 1)));
+    }
+    d.run(&mut h);
+    assert!(d.loaded());
+    let plain = Document::parse_str("<p>x", "http://top.example/");
+    assert!(plain.loaded());
+    let plain = Document::parse_str("<img src=a.png>", "http://top.example/");
+    assert!(!plain.loaded());
+}
+
+#[test]
+fn hostile_attribute_values_are_bounded() {
+    let big = "x".repeat(3 << 20);
+    let html = alloc::format!(
+        "<iframe name='{}' srcdoc='{}' sandbox='{}' allow='{}' src='   ' loading='LAZY ' referrerpolicy='  Origin '></iframe>\
+         <iframe src='http://[::1' width=-5 height=1e999 scrolling=NO></iframe>\
+         <iframe srcdoc='é{}é'></iframe>",
+        "n".repeat(1 << 20),
+        big,
+        "allow-scripts ".repeat(5000),
+        "camera; ".repeat(10_000),
+        "\u{1F600}".repeat(400_000),
+    );
+    let mut d = top(&html);
+    let s = d.frame_slots();
+    assert_eq!(s.len(), 3);
+    assert_eq!(s[0].name.len(), 64 << 10);
+    assert_eq!(s[0].srcdoc.as_ref().unwrap().len(), 1 << 20);
+    assert_eq!(s[0].allow.len(), 4096);
+    assert!(s[0].src.is_none() && s[0].lazy);
+    assert_eq!(s[0].referrer_policy, "origin");
+    assert!(s[0].sandbox.unwrap().scripts);
+    // A multi-byte character is never cut in half.
+    assert!(s[2].srcdoc.as_ref().unwrap().len() <= 1 << 20);
+    assert!(s[2].srcdoc.as_ref().unwrap().starts_with('é'));
+    assert_eq!(s[1].scrolling, FrameScrolling::No);
+    for sl in &s {
+        let doc = Document::parse_str(sl.srcdoc.as_deref().unwrap_or("<p>x"), "about:srcdoc");
+        d.attach_frame(sl.id, doc, Some(sl.generation));
+    }
+    lay(&mut d);
+    // The slot list is cheap to ask for repeatedly (copies are bounded).
+    for _ in 0..50 {
+        let _ = d.frame_slots();
+    }
+}
+
+#[test]
+fn scroll_and_fragment_asked_before_the_first_layout_are_kept() {
+    let mut body = String::from("<body style='margin:0'>");
+    for i in 0..40 {
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px' id=r{i}>row{i}</p>"
+        ));
+    }
+    let mut d = top(&alloc::format!(
+        "{FLAT}<iframe width=100 height=100 style='border:0'></iframe><iframe width=100 height=100 style='border:0'></iframe><iframe width=100 height=100 style='border:0'></iframe>"
+    ));
+    let ids: Vec<FrameId> = d.frame_slots().iter().map(|s| s.id).collect();
+    for id in &ids {
+        assert!(d.attach_frame(*id, child(&body), None));
+    }
+    // A restored position and a fragment, before anything is laid out.
+    assert_eq!(d.set_frame_scroll(ids[0], 0, 130), (0, 130));
+    assert!(d.frame_fragment(ids[1], "r12"));
+    assert!(d.frame_fragment(ids[2], "no-such-row"), "can't tell yet");
+    lay(&mut d);
+    assert_eq!(d.frame_scroll(ids[0]), Some((0, 130)));
+    assert_eq!(d.frame_scroll(ids[1]), Some((0, 240)));
+    assert_eq!(d.frame_scroll(ids[2]), Some((0, 0)));
+    // Past the end, it is clamped at the first layout.
+    let mut d = top(&alloc::format!(
+        "{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"
+    ));
+    let id = d.frame_slots()[0].id;
+    assert!(d.attach_frame(id, child(&body), None));
+    d.set_frame_scroll(id, 0, 99999);
+    lay(&mut d);
+    assert_eq!(d.frame_scroll(id), Some((0, 700)));
+    // And a fragment of a frame that is already laid out is applied at once.
+    assert!(d.frame_fragment(id, "r3"));
+    assert_eq!(d.frame_scroll(id), Some((0, 60)));
+}
+
+#[test]
+fn in_peer_is_an_entry_of_the_other_realm() {
+    let mut root = scripted("<title>top</title><iframe></iframe>");
+    let id = root.frame_slots()[0].id;
+    assert!(root.attach_frame(id, scripted("<title>kid</title><p id=p>hello"), None));
+    let mut hs = Hosts::chain(3);
+    root.arm();
+    let js = root.js.as_mut().unwrap();
+    let got = js.test_entry(&mut root.page, &mut hs, |b, _r| {
+        let kid = crate::script::frames::in_peer(b, id, |_b2, r2| {
+            let g = r2.global();
+            let d = r2.get(g, "document").unwrap();
+            let t = r2.get(d, "title").unwrap();
+            r2.to_string(t).unwrap()
+        });
+        // The frame can reach back to the top from there (its own peers are armed).
+        let back = crate::script::frames::in_peer(b, id, |b2, _r2| {
+            crate::script::frames::in_peer(b2, FrameId::TOP, |_b3, r3| {
+                let g = r3.global();
+                let d = r3.get(g, "document").unwrap();
+                let t = r3.get(d, "title").unwrap();
+                r3.to_string(t).unwrap()
+            })
+        });
+        let none = crate::script::frames::in_peer(b, FrameId(77), |_b2, _r2| 1);
+        (kid, back, none)
+    });
+    root.disarm();
+    let (kid, back, none) = got.unwrap();
+    assert_eq!(kid.as_deref(), Some("kid"));
+    // The top is the one running here, so it is busy for the frame.
+    assert_eq!(back, Some(None));
+    assert_eq!(none, None);
 }

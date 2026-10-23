@@ -405,6 +405,8 @@ impl App {
 
     fn draw_page(&mut self) {
         let (top, vw, vh) = self.view();
+        // Where the frames are and how far they are scrolled (the engine has just laid out).
+        let slots = self.tabs[self.cur].page.doc.slots();
         let t = &self.tabs[self.cur];
         let (pw, ph) = self.page_view(t);
         self.surface.resize(pw, ph);
@@ -434,6 +436,41 @@ impl App {
             &marks,
             current,
         );
+        // A scroll bar on each frame whose document is longer than its box. A frame's box is in
+        // its parent's document space, so the parents' places and scrolls are added up.
+        let mut origin: alloc::collections::BTreeMap<webengine::FrameId, (i32, i32)> =
+            alloc::collections::BTreeMap::new();
+        origin.insert(webengine::FrameId::TOP, (0, 0));
+        for s in &slots {
+            let Some(&(ox, oy)) = origin.get(&s.parent) else {
+                continue;
+            };
+            let (px, py) = if s.parent.is_top() {
+                (0, 0)
+            } else {
+                let ps = slots.iter().find(|x| x.id == s.parent).map_or((0, 0), |x| x.scroll);
+                (ps.0, ps.1)
+            };
+            let (x, y) = (ox + s.rect.x - px, oy + s.rect.y - py);
+            origin.insert(s.id, (x, y));
+            if s.attached.is_none()
+                || s.scrolling == webengine::FrameScrolling::No
+                || s.content.1 <= s.rect.h
+                || s.rect.h < 30
+            {
+                continue;
+            }
+            let bar_h = ((s.rect.h as i64 * s.rect.h as i64 / s.content.1 as i64) as i32)
+                .max(20)
+                .min(s.rect.h);
+            let by = (s.scroll.1 as i64 * (s.rect.h - bar_h) as i64
+                / (s.content.1 - s.rect.h).max(1) as i64) as i32;
+            self.surface.rrect(
+                Rect::new(x + s.rect.w - 7, y - t.scroll + by + 2, 5, bar_h - 4),
+                2,
+                0xC4AE8F,
+            );
+        }
         // A scroll bar when the page is longer than the view.
         let total = t.page.doc.height().max(1);
         if total > ph {

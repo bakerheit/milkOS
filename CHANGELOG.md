@@ -24,6 +24,13 @@
   and top-level `await`. Modules are fetched with CORS and a JavaScript MIME check, with caps on
   module count and depth per page. The engine handles `import`/`export` in all forms with live
   bindings and cycles, plus private class members (`#x`), and default-parameter TDZ.
+- Frames in the web engine: `<iframe>` elements are slots the Browser fills with documents. The
+  engine lays each frame out in a viewport the size of its box, paints it into the page's
+  display list (clipped to the box, with the frame's own scroll offset and its own `position:
+  fixed` boxes), and hit-tests, scrolls (the wheel passes on to the parent when a frame is at
+  its end), searches, copies text and orders the Tab key across frames. Frames nest up to 5
+  deep and a page has at most 32; `window.name`, `postMessage` and same-origin reach between
+  frames have hooks for the bindings (docs/frames.md).
 
 **Tests**
 - A full `scripts/check-all.sh` runs 8 tests at a time and takes about 3 minutes (it was 7 to

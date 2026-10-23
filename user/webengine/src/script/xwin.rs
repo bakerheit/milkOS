@@ -134,7 +134,7 @@ fn frame_element(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
 /// `iframe.contentWindow`.
 pub fn content_window(b: &Rc<Bridge>, r: &mut Realm, this: Value) -> JsResult<Value> {
     let n = this_node(b, r, this)?;
-    let Some(f) = b.page().and_then(|p| p.frame_nodes.get(&n).copied()) else {
+    let Some(f) = b.page().and_then(|p| p.frame_nodes.iter().find(|(k, _)| *k == n).map(|(_, f)| *f)) else {
         return Ok(Value::NULL);
     };
     if hub::peek(b, f.0).is_none() {
@@ -146,7 +146,7 @@ pub fn content_window(b: &Rc<Bridge>, r: &mut Realm, this: Value) -> JsResult<Va
 /// `iframe.contentDocument`: the document, if it is of the same origin, else null.
 pub fn content_document(b: &Rc<Bridge>, r: &mut Realm, this: Value) -> JsResult<Value> {
     let n = this_node(b, r, this)?;
-    let Some(f) = b.page().and_then(|p| p.frame_nodes.get(&n).copied()) else {
+    let Some(f) = b.page().and_then(|p| p.frame_nodes.iter().find(|(k, _)| *k == n).map(|(_, f)| *f)) else {
         return Ok(Value::NULL);
     };
     let Some(p) = hub::peek(b, f.0) else {

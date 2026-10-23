@@ -84,6 +84,21 @@ pub fn with_peer<R>(
     }
 }
 
+/// [`with_peer`] and then an entry of that frame's realm: `f` runs inside it, with the realm
+/// and its bridge at hand, with the frame's own other frames armed. This is the way for a
+/// native to ask another window something (`parent.document.title`, `contentWindow.f()`); what
+/// comes back has to be a plain Rust value, since a script value means nothing in another
+/// realm. None as for [`with_peer`], or if that frame has no scripts (or they are stopped).
+pub fn in_peer<R>(
+    b: &Bridge,
+    id: FrameId,
+    f: impl FnOnce(&Rc<Bridge>, &mut Realm) -> R,
+) -> Option<R> {
+    with_peer(b, id, |doc, host| {
+        doc.armed(|d| d.js.as_mut().and_then(|j| j.entry(&mut d.page, host, f)))
+    })?
+}
+
 /// What the window has queued, and the `MessageEvent` prototype.
 #[derive(Default)]
 pub struct Outbox {
@@ -94,6 +109,49 @@ pub struct Outbox {
 /// This window's own frame id (the top document's is [`FrameId::TOP`]).
 pub fn own_frame(b: &Bridge) -> FrameId {
     b.page().map_or(FrameId::TOP, |p| p.frame.id)
+}
+
+/// Where this window sits: its frame, its parent's (None for the top document) and its depth.
+pub fn own_info(b: &Bridge) -> FrameInfo {
+    b.page().map_or(
+        FrameInfo {
+            id: FrameId::TOP,
+            parent: None,
+            depth: 0,
+        },
+        |p| {
+            let c = p.frame;
+            FrameInfo {
+                id: c.id,
+                parent: if c.id.is_top() { None } else { Some(c.parent) },
+                depth: c.depth,
+            }
+        },
+    )
+}
+
+/// The frames directly in this window's document, in tree order: `window.frames`. A frame
+/// whose document is not there yet is in the list.
+pub fn child_frames(b: &Bridge) -> Vec<FrameId> {
+    b.page()
+        .map(|p| p.frame_nodes.iter().map(|&(_, f)| f).collect())
+        .unwrap_or_default()
+}
+
+/// The frame an `<iframe>` element of this window's document holds (`iframe.contentWindow`).
+pub fn frame_of_element(b: &Bridge, node: crate::dom::NodeId) -> Option<FrameId> {
+    b.page()?
+        .frame_nodes
+        .iter()
+        .find(|&&(n, _)| n == node)
+        .map(|&(_, f)| f)
+}
+
+/// The `<iframe>` element that holds this window, as (the frame of the document it is in, its
+/// node there): `window.frameElement`. None for the top document.
+pub fn frame_element(b: &Bridge) -> Option<(FrameId, crate::dom::NodeId)> {
+    let c = b.page()?.frame;
+    (!c.id.is_top()).then_some((c.parent, c.node))
 }
 
 /// This window's `window.name`.
@@ -237,39 +295,41 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         1,
         proto,
         Some(event_ctor),
-        Some(alloc::boxed::Box::new(move |r: &mut Realm, _this: Value, a: &[Value]| {
-            if a.is_empty() {
-                return Err(type_error(r, "MessageEvent: 1 argument required"));
-            }
-            let ty = arg_str(r, a, 0)?;
-            let f = init_flags(r, arg(a, 1))?;
-            let p = match b2.st.borrow().outbox.message_proto.as_ref() {
-                Some(p) => r.pinned(p),
-                None => return Err(type_error(r, "MessageEvent is not available")),
-            };
-            let e = new_event_on(&b2, r, p, &ty, f);
-            if let Some(nt) = r.new_target() {
-                let np = r.get(nt, "prototype")?;
-                if np.is_object() {
-                    r.set_prototype(e, np);
+        Some(alloc::boxed::Box::new(
+            move |r: &mut Realm, _this: Value, a: &[Value]| {
+                if a.is_empty() {
+                    return Err(type_error(r, "MessageEvent: 1 argument required"));
                 }
-            }
-            let empty = r.string("");
-            let ports = r.new_array(&[]);
-            copy_init(
-                r,
-                e,
-                arg(a, 1),
-                &[
-                    ("data", Value::NULL),
-                    ("origin", empty),
-                    ("lastEventId", empty),
-                    ("source", Value::NULL),
-                    ("ports", ports),
-                ],
-            )?;
-            Ok(e)
-        })),
+                let ty = arg_str(r, a, 0)?;
+                let f = init_flags(r, arg(a, 1))?;
+                let p = match b2.st.borrow().outbox.message_proto.as_ref() {
+                    Some(p) => r.pinned(p),
+                    None => return Err(type_error(r, "MessageEvent is not available")),
+                };
+                let e = new_event_on(&b2, r, p, &ty, f);
+                if let Some(nt) = r.new_target() {
+                    let np = r.get(nt, "prototype")?;
+                    if np.is_object() {
+                        r.set_prototype(e, np);
+                    }
+                }
+                let empty = r.string("");
+                let ports = r.new_array(&[]);
+                copy_init(
+                    r,
+                    e,
+                    arg(a, 1),
+                    &[
+                        ("data", Value::NULL),
+                        ("origin", empty),
+                        ("lastEventId", empty),
+                        ("source", Value::NULL),
+                        ("ports", ports),
+                    ],
+                )?;
+                Ok(e)
+            },
+        )),
     );
     r.define(g, "MessageEvent", ctor, Attrs::METHOD)?;
     b.st.borrow_mut().outbox.message_proto = Some(pin);
@@ -283,13 +343,15 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         g,
         "name",
         move |r, _t, _a| Ok(r.string(&window_name(&b4))),
-        Some(alloc::boxed::Box::new(move |r: &mut Realm, _t: Value, a: &[Value]| {
-            let s = arg_str(r, a, 0)?;
-            // Names are short, like browsers' (2 MB there; plenty here).
-            let s = if s.len() > 64 << 10 { String::new() } else { s };
-            set_window_name(&b5, &s);
-            Ok(Value::UNDEFINED)
-        })),
+        Some(alloc::boxed::Box::new(
+            move |r: &mut Realm, _t: Value, a: &[Value]| {
+                let s = arg_str(r, a, 0)?;
+                // Names are short, like browsers' (2 MB there; plenty here).
+                let s = if s.len() > 64 << 10 { String::new() } else { s };
+                set_window_name(&b5, &s);
+                Ok(Value::UNDEFINED)
+            },
+        )),
     )?;
     Ok(())
 }

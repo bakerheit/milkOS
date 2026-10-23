@@ -221,7 +221,8 @@ fn an_opaque_origin_is_the_same_as_nobody() {
     // Same address as the top page, but a sandbox without allow-same-origin: not the same origin.
     assert_eq!(eval_in(&mut top, FrameId::TOP, &mut h, "String(document.getElementById('f').contentDocument)"), "null");
     assert_eq!(eval_in(&mut top, FrameId::TOP, &mut h, "try { document.getElementById('f').contentWindow.depth } catch (e) { e.name }"), "SecurityError");
-    assert_eq!(eval_in(&mut top, id, &mut h, "window.origin"), "http://www.milk.test:8000");
+    assert_eq!(eval_in(&mut top, id, &mut h, "window.origin"), "null");
+    assert_eq!(eval_in(&mut top, id, &mut h, "try { document.cookie } catch (e) { e.name }"), "SecurityError");
     assert_eq!(top.frame_origin(id).as_deref(), Some("null"));
     assert_eq!(top.frame_origin(FrameId::TOP).as_deref(), Some("http://www.milk.test:8000"));
 }

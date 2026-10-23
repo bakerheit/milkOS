@@ -27,6 +27,9 @@ version = "0.0.1"
 [[package]]
 name = "milkweb"
 version = "0.0.1"
+dependencies = [
+ "tls",
+]
 
 [[package]]
 name = "moo2048"
@@ -43,6 +46,7 @@ dependencies = [
  "heapkit",
  "milkcrypto",
  "milkweb",
+ "tls",
 ]
 
 [[package]]
@@ -50,4 +54,11 @@ name = "snake"
 version = "1.0.0"
 dependencies = [
  "rt",
+]
+
+[[package]]
+name = "tls"
+version = "0.0.1"
+dependencies = [
+ "milkcrypto",
 ]

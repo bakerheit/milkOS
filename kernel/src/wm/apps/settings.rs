@@ -638,8 +638,8 @@ impl Settings {
         let body = Font::body(false);
         let notes: [&str; 3] = if online {
             [
-                "The Browser and network get visit http:// sites by name.",
-                "https:// pages need TLS, which milkOS doesn't have yet.",
+                "The Browser and network get visit sites by name.",
+                "https:// uses TLS 1.3, certificates checked (Mozilla roots).",
                 "Start with MILK_OFFLINE=1 for a boot with no internet.",
             ]
         } else {

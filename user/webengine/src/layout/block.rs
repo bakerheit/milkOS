@@ -570,6 +570,10 @@ pub fn layout_insides_h(
             flex::layout_flex(boxes, cx, b, spec_h, cb_h);
             return Margins::default();
         }
+        Kind::Grid => {
+            grid::layout_grid(boxes, cx, b, spec_h);
+            return Margins::default();
+        }
         _ => {}
     }
     let mut own = Floats::new();
@@ -885,7 +889,10 @@ pub fn layout_block(
     let bp_h = bo[0] + bo[2] + p[0] + p[2];
     let is_replaced = matches!(boxes[b as usize].kind, Kind::Replaced(_));
     let bfc_root = s.establishes_bfc()
-        || matches!(boxes[b as usize].kind, Kind::Table | Kind::Flex)
+        || matches!(
+            boxes[b as usize].kind,
+            Kind::Table | Kind::Flex | Kind::Grid
+        )
         || is_replaced
         || boxes[b as usize].parent == NO_BOX;
     // CSS 2.1 §9.5: a BFC root (or table / replaced box) doesn't overlap floats: it goes in the
@@ -957,7 +964,7 @@ pub fn layout_block(
     } else {
         let cbh_for_children = size_px(cx, &s, &s.height, cb_h, bp_h);
         match boxes[b as usize].kind {
-            Kind::Table | Kind::Flex => {
+            Kind::Table | Kind::Flex | Kind::Grid => {
                 layout_insides(boxes, cx, b, cb_h, true);
                 (Margins::of(mb), false)
             }

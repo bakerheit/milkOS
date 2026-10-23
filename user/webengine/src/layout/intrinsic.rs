@@ -20,6 +20,7 @@ fn compute(boxes: &[LBox], cx: &Cx, b: BoxId) -> (Au, Au) {
     match &bx.kind {
         Kind::Table => return table::intrinsic(boxes, cx, b),
         Kind::Flex => return flex::intrinsic(boxes, cx, b),
+        Kind::Grid => return grid::intrinsic(boxes, cx, b),
         Kind::Replaced(_) => {
             let w = replaced_width(boxes, cx, b);
             return (w, w);

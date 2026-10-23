@@ -19,6 +19,8 @@ pub enum Display {
     ListItem,
     Flex,
     InlineFlex,
+    Grid,
+    InlineGrid,
     Table,
     InlineTable,
     TableRowGroup,
@@ -35,7 +37,11 @@ impl Display {
     pub fn is_inline_level(self) -> bool {
         matches!(
             self,
-            Display::Inline | Display::InlineBlock | Display::InlineFlex | Display::InlineTable
+            Display::Inline
+                | Display::InlineBlock
+                | Display::InlineFlex
+                | Display::InlineTable
+                | Display::InlineGrid
         )
     }
     /// CSS Display §2.7 "blockification".
@@ -43,6 +49,7 @@ impl Display {
         match self {
             Display::Inline | Display::InlineBlock => Display::Block,
             Display::InlineFlex => Display::Flex,
+            Display::InlineGrid => Display::Grid,
             Display::InlineTable => Display::Table,
             Display::TableRowGroup
             | Display::TableHeaderGroup
@@ -394,6 +401,8 @@ pub struct Style {
     /// counter-reset / counter-increment (name, value), only the first of each.
     pub counter_reset: Option<(Rc<str>, i32)>,
     pub counter_increment: Option<(Rc<str>, i32)>,
+    /// Grid properties, when any is set (on containers or items).
+    pub grid: Option<Rc<GridStyle>>,
 }
 
 impl Style {
@@ -474,6 +483,7 @@ impl Style {
             aspect_ratio: None,
             counter_reset: None,
             counter_increment: None,
+            grid: None,
         }
     }
 
@@ -539,6 +549,92 @@ impl Style {
                     | Display::TableCaption
                     | Display::Flex
                     | Display::InlineFlex
+                    | Display::Grid
+                    | Display::InlineGrid
             )
+    }
+}
+
+// ---- CSS Grid ------------------------------------------------------------------------------
+
+/// A track sizing function's minimum (CSS Grid 1 §7.2.3).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TMin {
+    Fixed(LP),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+/// A track sizing function's maximum.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum TMax {
+    Fixed(LP),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+    /// fit-content(limit)
+    FitContent(LP),
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Track {
+    pub min: TMin,
+    pub max: TMax,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AutoRepeat {
+    Fill,
+    Fit,
+}
+
+/// `grid-template-columns` / `-rows`: explicit tracks, with an optional auto-repeat inserted
+/// at `at` (`repeat(auto-fill, ...)`).
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct TrackList {
+    pub tracks: alloc::vec::Vec<Track>,
+    pub auto_repeat: Option<(AutoRepeat, usize, alloc::vec::Vec<Track>)>,
+}
+
+/// One end of `grid-column` / `grid-row`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GridLine {
+    Auto,
+    /// A line number (1-based; negative counts from the end).
+    Line(i32),
+    Span(u32),
+}
+
+/// The grid-specific computed values (boxed in [`Style`]: most elements have none).
+#[derive(Clone, PartialEq, Debug)]
+pub struct GridStyle {
+    pub columns: TrackList,
+    pub rows: TrackList,
+    pub auto_rows: Track,
+    pub auto_columns: Track,
+    pub column_flow: bool,
+    pub col: (GridLine, GridLine),
+    pub row: (GridLine, GridLine),
+}
+
+impl Default for GridStyle {
+    fn default() -> Self {
+        GridStyle {
+            columns: TrackList::default(),
+            rows: TrackList::default(),
+            auto_rows: Track {
+                min: TMin::Auto,
+                max: TMax::Auto,
+            },
+            auto_columns: Track {
+                min: TMin::Auto,
+                max: TMax::Auto,
+            },
+            column_flow: false,
+            col: (GridLine::Auto, GridLine::Auto),
+            row: (GridLine::Auto, GridLine::Auto),
+        }
     }
 }

@@ -155,6 +155,14 @@ pub enum Decl {
     AspectRatio(Option<f32>),
     CounterReset(Option<(Rc<str>, i32)>),
     CounterIncrement(Option<(Rc<str>, i32)>),
+    GridColumns(Rc<STrackList>),
+    GridRows(Rc<STrackList>),
+    GridAutoRows(STrack),
+    GridAutoColumns(STrack),
+    /// grid-auto-flow: column
+    GridAutoFlow(bool),
+    /// 0 column-start, 1 column-end, 2 row-start, 3 row-end
+    GridLine(u8, GridLine),
     /// A CSS-wide keyword for one longhand.
     Wide(Prop, Wide),
     /// `name: value` with `var()` in it, parsed after substitution.
@@ -253,6 +261,15 @@ pub enum Prop {
     AspectRatio,
     CounterReset,
     CounterIncrement,
+    GridColumns,
+    GridRows,
+    GridAutoRows,
+    GridAutoColumns,
+    GridAutoFlow,
+    GridLine0,
+    GridLine1,
+    GridLine2,
+    GridLine3,
     Count,
 }
 
@@ -355,6 +372,15 @@ static PROPS_BY_ID: [Prop; PROP_COUNT] = {
         Prop::AspectRatio,
         Prop::CounterReset,
         Prop::CounterIncrement,
+        Prop::GridColumns,
+        Prop::GridRows,
+        Prop::GridAutoRows,
+        Prop::GridAutoColumns,
+        Prop::GridAutoFlow,
+        Prop::GridLine0,
+        Prop::GridLine1,
+        Prop::GridLine2,
+        Prop::GridLine3,
     ];
     let mut i = 0;
     while i < all.len() {
@@ -437,6 +463,12 @@ impl Decl {
             D::AspectRatio(_) => Prop::AspectRatio,
             D::CounterReset(_) => Prop::CounterReset,
             D::CounterIncrement(_) => Prop::CounterIncrement,
+            D::GridColumns(_) => Prop::GridColumns,
+            D::GridRows(_) => Prop::GridRows,
+            D::GridAutoRows(_) => Prop::GridAutoRows,
+            D::GridAutoColumns(_) => Prop::GridAutoColumns,
+            D::GridAutoFlow(_) => Prop::GridAutoFlow,
+            D::GridLine(i, _) => side(Prop::GridLine0, *i),
             D::Wide(p, _) => *p,
             D::Pending(..) | D::Custom(..) => return None,
         })
@@ -491,6 +523,9 @@ fn longhands(name: &str) -> &'static [Prop] {
         "flex-flow" => &[FlexDirection, FlexWrap],
         "overflow" => &[OverflowX, OverflowY],
         "gap" | "grid-gap" => &[RowGap, ColumnGap],
+        "grid-column" => &[GridLine0, GridLine1],
+        "grid-row" => &[GridLine2, GridLine3],
+        "grid-area" => &[GridLine2, GridLine0, GridLine3, GridLine1],
         "text-decoration" => &[TextDecorationLine, TextDecorationColor],
         "place-items" => &[AlignItems],
         "place-content" => &[AlignContent, JustifyContent],
@@ -1320,8 +1355,8 @@ fn display(v: &[Tok]) -> Option<Display> {
             Display::InlineFlex
         }
         // Grid is laid out as block flow (items stack); an honest fallback for now.
-        ["grid"] | ["block", "grid"] | ["-ms-grid"] => Display::FlowRoot,
-        ["inline-grid"] | ["inline", "grid"] => Display::InlineBlock,
+        ["grid"] | ["block", "grid"] | ["-ms-grid"] => Display::Grid,
+        ["inline-grid"] | ["inline", "grid"] | ["-ms-inline-grid"] => Display::InlineGrid,
         ["table"] | ["block", "table"] => Display::Table,
         ["inline-table"] | ["inline", "table"] => Display::InlineTable,
         ["table-row-group"] => Display::TableRowGroup,
@@ -1973,6 +2008,59 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
                 _ => return None,
             })
         }
+        "grid-template-columns" | "grid-template-rows" => {
+            let l = Rc::new(track_list(v)?);
+            if name.ends_with("columns") {
+                Decl::GridColumns(l)
+            } else {
+                Decl::GridRows(l)
+            }
+        }
+        "grid-auto-rows" | "grid-auto-columns" => {
+            let c = components(v);
+            let t = track(c.first()?)?;
+            if name.ends_with("rows") {
+                Decl::GridAutoRows(t)
+            } else {
+                Decl::GridAutoColumns(t)
+            }
+        }
+        "grid-auto-flow" => Decl::GridAutoFlow(
+            components(v)
+                .iter()
+                .any(|c| ident(c).as_deref() == Some("column")),
+        ),
+        "grid-column-start" => Decl::GridLine(0, grid_line(v)?),
+        "grid-column-end" => Decl::GridLine(1, grid_line(v)?),
+        "grid-row-start" => Decl::GridLine(2, grid_line(v)?),
+        "grid-row-end" => Decl::GridLine(3, grid_line(v)?),
+        "grid-column" | "grid-row" => {
+            let parts = split_slash(v);
+            let a = grid_line(parts.first()?)?;
+            let b = match parts.get(1) {
+                Some(p) => grid_line(p)?,
+                None => GridLine::Auto,
+            };
+            let base = if name == "grid-column" { 0 } else { 2 };
+            out.push(Decl::GridLine(base, a));
+            out.push(Decl::GridLine(base + 1, b));
+            return Some(());
+        }
+        "grid-area" => {
+            let parts = split_slash(v);
+            let get = |i: usize| {
+                parts
+                    .get(i)
+                    .map(|p| grid_line(p))
+                    .unwrap_or(Some(GridLine::Auto))
+            };
+            // row-start / column-start / row-end / column-end
+            out.push(Decl::GridLine(2, get(0)?));
+            out.push(Decl::GridLine(0, get(1)?));
+            out.push(Decl::GridLine(3, get(2)?));
+            out.push(Decl::GridLine(1, get(3)?));
+            return Some(());
+        }
         "counter-reset" => Decl::CounterReset(counter(v, 0)?),
         "counter-increment" => Decl::CounterIncrement(counter(v, 1)?),
         // Known and accepted without effect (so @supports says yes and nothing breaks).
@@ -2030,20 +2118,8 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
         | "column-count"
         | "column-width"
         | "column-rule"
-        | "grid-template-columns"
-        | "grid-template-rows"
         | "grid-template-areas"
         | "grid-template"
-        | "grid-area"
-        | "grid-column"
-        | "grid-row"
-        | "grid-auto-flow"
-        | "grid-auto-rows"
-        | "grid-auto-columns"
-        | "grid-column-start"
-        | "grid-column-end"
-        | "grid-row-start"
-        | "grid-row-end"
         | "caret-color"
         | "accent-color"
         | "color-scheme"
@@ -2183,4 +2259,181 @@ pub fn parse_block(toks: &[Tok], cx: &ParseCx, normal: &mut Vec<Decl>, important
             }
         }
     }
+}
+
+// ---- grid values ----------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SMin {
+    Fixed(Len),
+    Auto,
+    MinContent,
+    MaxContent,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SMax {
+    Fixed(Len),
+    Fr(f32),
+    Auto,
+    MinContent,
+    MaxContent,
+    FitContent(Len),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct STrack {
+    pub min: SMin,
+    pub max: SMax,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct STrackList {
+    pub tracks: Vec<STrack>,
+    pub auto_repeat: Option<(AutoRepeat, usize, Vec<STrack>)>,
+}
+
+/// Split at top-level `/` delimiters.
+fn split_slash(t: &[Tok]) -> Vec<&[Tok]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < t.len() {
+        if matches!(t[i], Tok::Delim('/')) {
+            out.push(trim(&t[start..i]));
+            start = i + 1;
+            i += 1;
+            continue;
+        }
+        i = values::component_end(t, i).max(i + 1);
+    }
+    out.push(trim(&t[start..]));
+    out
+}
+
+/// `<grid-line>` (CSS Grid 1 §8.3): auto, an integer, span N; named lines count as auto.
+fn grid_line(v: &[Tok]) -> Option<GridLine> {
+    let c = components(v);
+    let mut span = false;
+    let mut n: Option<i32> = None;
+    for x in &c {
+        match ident(x).as_deref() {
+            Some("span") => span = true,
+            Some("auto") => {}
+            Some(_) => {}
+            None => n = Some(values::integer(x)?),
+        }
+    }
+    Some(match (span, n) {
+        (true, n) => GridLine::Span(n.unwrap_or(1).clamp(1, 1000) as u32),
+        (false, Some(0)) | (false, None) => GridLine::Auto,
+        (false, Some(n)) => GridLine::Line(n.clamp(-1000, 1000)),
+    })
+}
+
+fn track_breadth_min(c: &[Tok]) -> Option<SMin> {
+    Some(match ident(c).as_deref() {
+        Some("auto") => SMin::Auto,
+        Some("min-content") => SMin::MinContent,
+        Some("max-content") => SMin::MaxContent,
+        _ => SMin::Fixed(nonneg_len(c)?),
+    })
+}
+
+fn track_breadth_max(c: &[Tok]) -> Option<SMax> {
+    if let [Tok::Dimension { value, unit }] = c
+        && unit == "fr"
+    {
+        return if *value >= 0.0 {
+            Some(SMax::Fr(*value))
+        } else {
+            None
+        };
+    }
+    Some(match ident(c).as_deref() {
+        Some("auto") => SMax::Auto,
+        Some("min-content") => SMax::MinContent,
+        Some("max-content") => SMax::MaxContent,
+        _ => SMax::Fixed(nonneg_len(c)?),
+    })
+}
+
+/// One `<track-size>`.
+fn track(c: &[Tok]) -> Option<STrack> {
+    if let [Tok::Function(f), ..] = c {
+        let args = split_commas(fn_args(c));
+        return match f.as_str() {
+            "minmax" if args.len() == 2 => Some(STrack {
+                min: track_breadth_min(args[0])?,
+                max: track_breadth_max(args[1])?,
+            }),
+            "fit-content" if args.len() == 1 => Some(STrack {
+                min: SMin::Auto,
+                max: SMax::FitContent(nonneg_len(args[0])?),
+            }),
+            _ => None,
+        };
+    }
+    let max = track_breadth_max(c)?;
+    let min = match &max {
+        SMax::Fr(_) => SMin::Auto,
+        SMax::Fixed(l) => SMin::Fixed(l.clone()),
+        SMax::Auto => SMin::Auto,
+        SMax::MinContent => SMin::MinContent,
+        SMax::MaxContent => SMin::MaxContent,
+        SMax::FitContent(_) => SMin::Auto,
+    };
+    Some(STrack { min, max })
+}
+
+/// `<track-list>` / `<auto-track-list>` (CSS Grid 1 §7.2), line names ignored.
+fn track_list(v: &[Tok]) -> Option<STrackList> {
+    let mut out = STrackList::default();
+    let c = components(v);
+    if c.len() == 1 && ident(c[0]).as_deref() == Some("none") {
+        return Some(out);
+    }
+    for x in c {
+        match x.first()? {
+            Tok::Open('[') => continue,
+            Tok::Function(f) if f == "repeat" => {
+                let args = split_commas(fn_args(x));
+                if args.len() < 2 {
+                    return None;
+                }
+                let tracks: Vec<STrack> = components(args[1])
+                    .into_iter()
+                    .filter(|t| !matches!(t.first(), Some(Tok::Open('['))))
+                    .map(track)
+                    .collect::<Option<Vec<_>>>()?;
+                if tracks.is_empty() {
+                    return None;
+                }
+                match ident(args[0]).as_deref() {
+                    Some("auto-fill") | Some("auto-fit") => {
+                        if out.auto_repeat.is_some() {
+                            return None;
+                        }
+                        let k = if ident(args[0]).as_deref() == Some("auto-fill") {
+                            AutoRepeat::Fill
+                        } else {
+                            AutoRepeat::Fit
+                        };
+                        out.auto_repeat = Some((k, out.tracks.len(), tracks));
+                    }
+                    _ => {
+                        let n = values::integer(args[0])?.clamp(1, 1000) as usize;
+                        for _ in 0..n {
+                            out.tracks.extend(tracks.iter().cloned());
+                            if out.tracks.len() > 1000 {
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => out.tracks.push(track(x)?),
+        }
+    }
+    Some(out)
 }

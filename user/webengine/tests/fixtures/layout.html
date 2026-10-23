@@ -21,6 +21,12 @@ body { margin: 0; font-family: system-ui, sans-serif; background: #f4f4f6; color
 .clear { clear: both; }
 .center { width: 50%; margin: 16px auto; border: 2px dashed #999; padding: 8px; text-align: center; }
 .rel { position: relative; left: 20px; top: 4px; color: #a00; }
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin-top: 16px; }
+.gallery div { background: #fff; border: 1px solid #ccc; padding: 8px; }
+.gallery .wide { grid-column: span 2; background: #fe9; }
+.page-grid { display: grid; grid-template-columns: 140px 1fr; grid-template-rows: auto 1fr auto; gap: 4px; min-height: 160px; margin-top: 16px; }
+.page-grid > * { background: #e8eef8; padding: 6px; }
+.page-grid header, .page-grid footer { grid-column: 1 / -1; background: #cdd; }
 </style></head>
 <body>
 <div class="top"><b>Brand</b><nav><a href="/a">Docs</a><a href="/b">Blog</a><a href="/c">About</a></nav></div>
@@ -36,5 +42,7 @@ body { margin: 0; font-family: system-ui, sans-serif; background: #f4f4f6; color
 <p><span class="float-l"></span>Text flows around the float on the left. It keeps going past the float's bottom edge and then uses the full width of the container again once the float is done. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
 <div class="clear"></div>
 <div class="center">Centered half-width box with <span class="rel">a relatively positioned span</span>.</div>
+<div class="gallery"><div>Grid one</div><div class="wide">Wide item spanning two columns</div><div>Three</div><div>Four</div><div>Five</div></div>
+<div class="page-grid"><header>Header across</header><nav>Side</nav><main>Main area grows</main><footer>Footer across</footer></div>
 </div>
 </body></html>

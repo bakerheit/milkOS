@@ -9,6 +9,7 @@
 pub mod block;
 pub mod build;
 pub mod flex;
+pub mod grid;
 pub mod inline;
 pub mod intrinsic;
 pub mod position;
@@ -73,6 +74,7 @@ pub enum Kind {
         span: u32,
     },
     Flex,
+    Grid,
 }
 
 /// A laid-out line box of an inline formatting context.

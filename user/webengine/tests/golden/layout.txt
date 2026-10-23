@@ -1,4 +1,4 @@
-rect 0,64 800x641 #fff4f4f6
+rect 0,64 800x915 #fff4f4f6
 rrect 56,64 688x137 r8 #ff334455
 text 330,117 w141 SystemUi32 700 #ffffffff "Build fast"
 text 198,157 w405 SystemUi16 400 #ffffffff "A flexible layout demo with flexbox, floats and positioning."
@@ -22,6 +22,29 @@ text 260,672 w204 SystemUi16 400 #ff222222 "Centered half-width box with "
 text 484,676 w76 SystemUi16 400 #ffaa0000 "a relatively"
 text 362,695 w112 SystemUi16 400 #ffaa0000 "positioned span"
 text 454,691 w4 SystemUi16 400 #ff222222 "."
+rect 56,721 166x37 #ffffffff
+border 56,721 166x37 [1, 1, 1, 1]
+text 65,745 w61 SystemUi16 400 #ff222222 "Grid one"
+rect 230,721 340x37 #ffffee99
+border 230,721 340x37 [1, 1, 1, 1]
+text 239,745 w232 SystemUi16 400 #ff222222 "Wide item spanning two columns"
+rect 578,721 166x37 #ffffffff
+border 578,721 166x37 [1, 1, 1, 1]
+text 587,745 w42 SystemUi16 400 #ff222222 "Three"
+rect 56,766 166x37 #ffffffff
+border 56,766 166x37 [1, 1, 1, 1]
+text 65,790 w33 SystemUi16 400 #ff222222 "Four"
+rect 230,766 166x37 #ffffffff
+border 230,766 166x37 [1, 1, 1, 1]
+text 239,790 w30 SystemUi16 400 #ff222222 "Five"
+rect 56,819 688x31 #ffccdddd
+text 62,840 w103 SystemUi16 400 #ff222222 "Header across"
+rect 56,854 140x31 #ffe8eef8
+text 62,875 w32 SystemUi16 400 #ff222222 "Side"
+rect 200,854 544x31 #ffe8eef8
+text 206,875 w118 SystemUi16 400 #ff222222 "Main area grows"
+rect 56,889 688x31 #ffccdddd
+text 62,910 w97 SystemUi16 400 #ff222222 "Footer across"
 rrect 56,217 221x119 r6 #ffffffff
 border 56,217 221x119 [1, 1, 1, 1]
 text 69,247 w38 SystemUi19 700 #ff222222 "One"

@@ -580,3 +580,53 @@ fn overflow_auto_spills_sideways() {
         .unwrap();
     assert!(dl.clips[red.clip as usize].w > 400);
 }
+
+#[test]
+fn grid_fr_fixed_and_gaps() {
+    let d = doc(
+        &page(
+            "<div style='display:grid;grid-template-columns:100px 1fr 2fr;gap:10px 20px;width:460px'><div id=a style='height:30px'></div><div id=b></div><div id=c></div><div id=d style='height:5px'></div></div>",
+        ),
+        800,
+    );
+    // 460 - 100 - 2*20 = 320 for 3fr: 1fr = 106.66.
+    assert_eq!(r(&d, "a"), Rect::new(0, 0, 100, 30));
+    assert_eq!(r(&d, "b").x, 120);
+    assert!((r(&d, "b").w - 107).abs() <= 1);
+    assert!((r(&d, "c").w - 213).abs() <= 1);
+    assert_eq!(r(&d, "b").h, 30); // stretched to the row
+    assert_eq!(r(&d, "d").y, 40); // second row after the 10px row gap
+}
+
+#[test]
+fn grid_auto_fill_and_spans() {
+    let d = doc(
+        &page(
+            "<div style='display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));width:500px'><div id=a>a</div><div id=b style='grid-column:span 2'>b</div><div id=c>c</div><div id=e style='grid-column:1 / -1'>e</div></div>",
+        ),
+        800,
+    );
+    // 3 columns of 166.66.
+    assert!((r(&d, "a").w - 167).abs() <= 1);
+    assert!((r(&d, "b").w - 333).abs() <= 1);
+    assert_eq!(r(&d, "c").y, r(&d, "e").y - 19);
+    assert_eq!(r(&d, "e").w, 500);
+}
+
+#[test]
+fn grid_auto_columns_content_sized() {
+    let d = doc(
+        &page(
+            "<div style='display:inline-grid;grid-template-columns:auto auto'><span id=a>aa</span><span id=b>bbbb</span></div>",
+        ),
+        800,
+    );
+    let f = Font {
+        family: Family::SansSerif,
+        size: 16,
+        weight: 400,
+        italic: false,
+    };
+    assert_eq!(r(&d, "a").w, ApproxMeasurer.text_width(&f, "aa"));
+    assert_eq!(r(&d, "b").x, r(&d, "a").w);
+}

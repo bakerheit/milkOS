@@ -530,8 +530,10 @@ impl Styler<'_, '_> {
         if s.is_out_of_flow_positioned() {
             s.float = Float::None;
         }
-        let parent_flex =
-            matches!(parent.display, Display::Flex | Display::InlineFlex) && el.is_some();
+        let parent_flex = matches!(
+            parent.display,
+            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+        ) && el.is_some();
         if is_root || s.float != Float::None || s.is_out_of_flow_positioned() || parent_flex {
             if s.display != Display::None && s.display != Display::Contents {
                 s.display = s.display.blockify();
@@ -700,6 +702,20 @@ impl Styler<'_, '_> {
             Decl::AspectRatio(v) => s.aspect_ratio = *v,
             Decl::CounterReset(v) => s.counter_reset = v.clone(),
             Decl::CounterIncrement(v) => s.counter_increment = v.clone(),
+            Decl::GridColumns(l) => grid_mut(s).columns = compute_tracks(l, c),
+            Decl::GridRows(l) => grid_mut(s).rows = compute_tracks(l, c),
+            Decl::GridAutoRows(t) => grid_mut(s).auto_rows = compute_track(t, c),
+            Decl::GridAutoColumns(t) => grid_mut(s).auto_columns = compute_track(t, c),
+            Decl::GridAutoFlow(col) => grid_mut(s).column_flow = *col,
+            Decl::GridLine(i, l) => {
+                let g = grid_mut(s);
+                match i {
+                    0 => g.col.0 = *l,
+                    1 => g.col.1 = *l,
+                    2 => g.row.0 = *l,
+                    _ => g.row.1 = *l,
+                }
+            }
             Decl::Wide(p, w) => {
                 let inherited = is_inherited(*p);
                 let from_parent = match w {
@@ -836,6 +852,8 @@ fn copy_prop(s: &mut Style, from: &Style, p: Prop) {
         AspectRatio => s.aspect_ratio = from.aspect_ratio,
         CounterReset => s.counter_reset = from.counter_reset.clone(),
         CounterIncrement => s.counter_increment = from.counter_increment.clone(),
+        GridColumns | GridRows | GridAutoRows | GridAutoColumns | GridAutoFlow | GridLine0
+        | GridLine1 | GridLine2 | GridLine3 => s.grid = from.grid.clone(),
         Count => {}
     }
 }
@@ -1207,4 +1225,37 @@ pub fn presentational_hints(dom: &Dom, el: NodeId, e: &Element, out: &mut Vec<De
         out.push(Decl::TextAlign(STextAlign::Right));
     }
     let _ = NodeData::Document;
+}
+
+fn grid_mut(s: &mut Style) -> &mut GridStyle {
+    Rc::make_mut(s.grid.get_or_insert_with(|| Rc::new(GridStyle::default())))
+}
+
+fn compute_track(t: &STrack, c: &LenCx) -> Track {
+    Track {
+        min: match &t.min {
+            SMin::Fixed(l) => TMin::Fixed(l.compute(c)),
+            SMin::Auto => TMin::Auto,
+            SMin::MinContent => TMin::MinContent,
+            SMin::MaxContent => TMin::MaxContent,
+        },
+        max: match &t.max {
+            SMax::Fixed(l) => TMax::Fixed(l.compute(c)),
+            SMax::Fr(f) => TMax::Fr(*f),
+            SMax::Auto => TMax::Auto,
+            SMax::MinContent => TMax::MinContent,
+            SMax::MaxContent => TMax::MaxContent,
+            SMax::FitContent(l) => TMax::FitContent(l.compute(c)),
+        },
+    }
+}
+
+fn compute_tracks(l: &STrackList, c: &LenCx) -> TrackList {
+    TrackList {
+        tracks: l.tracks.iter().map(|t| compute_track(t, c)).collect(),
+        auto_repeat: l
+            .auto_repeat
+            .as_ref()
+            .map(|(k, at, ts)| (*k, *at, ts.iter().map(|t| compute_track(t, c)).collect())),
+    }
 }

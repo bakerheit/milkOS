@@ -301,6 +301,7 @@ impl B<'_, '_> {
                 Kind::Column { span }
             }
             Display::Flex | Display::InlineFlex => Kind::Flex,
+            Display::Grid | Display::InlineGrid => Kind::Grid,
             _ => Kind::Block,
         };
         let is_column = matches!(kind, Kind::Column { .. });
@@ -452,7 +453,7 @@ impl B<'_, '_> {
                 self.wrap_table_parts(b);
                 self.fix_block_container(b);
             }
-            Kind::Flex => self.fix_flex(b),
+            Kind::Flex | Kind::Grid => self.fix_flex(b),
             Kind::Table => self.fix_table(b),
             Kind::RowGroup => self.fix_row_group(b),
             Kind::Row => self.fix_row(b),
@@ -779,6 +780,7 @@ pub fn build(inp: &Inputs) -> Vec<LBox> {
     }
     let kind = match style.display {
         Display::Flex | Display::InlineFlex => Kind::Flex,
+        Display::Grid | Display::InlineGrid => Kind::Grid,
         Display::Table | Display::InlineTable => Kind::Table,
         _ => Kind::Block,
     };

@@ -298,6 +298,11 @@ pub(crate) enum ObjKind {
     RegExpStrIter(Box<crate::builtins::regexp::MatchAllData>),
     /// %AsyncFromSyncIteratorPrototype% objects: the sync iterator and its next method.
     AsyncFromSync(Val, Val),
+    ArrayBuffer(Box<crate::typed::BufData>),
+    /// A typed array (an integer-indexed exotic object over an ArrayBuffer).
+    Typed(Box<crate::typed::TypedData>),
+    DataView(Box<crate::typed::ViewData>),
+    TextDecoder(Box<crate::builtins::encoding::DecoderData>),
 }
 
 impl Obj {
@@ -335,6 +340,9 @@ impl Obj {
             ObjKind::RegExp(r) => r.bytes(),
             ObjKind::StrIter(_) | ObjKind::RegExpStrIter(_) | ObjKind::MapIter(_) => 32,
             ObjKind::Error(e) => 64 + e.frames.len() + e.file.len(),
+            ObjKind::ArrayBuffer(b) => 32 + b.bytes.capacity(),
+            ObjKind::Typed(_) | ObjKind::DataView(_) => 48,
+            ObjKind::TextDecoder(d) => 64 + d.pending.capacity(),
             _ => 0,
         }
     }
@@ -399,6 +407,8 @@ impl Obj {
                 t.val(*a);
                 t.val(*b);
             }
+            ObjKind::Typed(d) => t.obj(d.buf),
+            ObjKind::DataView(d) => t.obj(d.buf),
             // WeakMap values are traced as ephemerons by the collector.
             _ => {}
         }
@@ -657,6 +667,13 @@ impl Realm {
                     return Some(Own::Data(Val::num(self.heap.str_len(s) as f64), 0));
                 }
             }
+            ObjKind::Typed(_) => match k {
+                PropKey::Idx(i) => {
+                    return self.typed_get(id, i as usize).map(|v| Own::Data(v, WEC));
+                }
+                PropKey::Str(_) if self.canonical_numeric(k) => return None,
+                _ => {}
+            },
             _ => {}
         }
         let obj = self.o(id);
@@ -696,7 +713,10 @@ impl Realm {
             if obj.flags & LAZY_FN == 0
                 && !matches!(
                     obj.kind,
-                    ObjKind::Array(_) | ObjKind::StrBox(_) | ObjKind::Host { .. }
+                    ObjKind::Array(_)
+                        | ObjKind::StrBox(_)
+                        | ObjKind::Host { .. }
+                        | ObjKind::Typed(_)
                 )
             {
                 if let Some(p) = obj.props.get(k) {
@@ -707,10 +727,36 @@ impl Realm {
                     return self.call_getter(a, receiver);
                 }
             } else {
+                let typed = match &obj.kind {
+                    ObjKind::Typed(t) => Some((t.kind, obj.props.len() == 0, obj.proto)),
+                    _ => None,
+                };
                 if let ObjKind::Host { class, data } = obj.kind
                     && let Some(v) = self.hook_get(cur, class, data, k)?
                 {
                     return Ok(v);
+                }
+                if let Some((kind, bare, proto)) = typed {
+                    match k {
+                        // An integer-indexed exotic object never looks past itself for a
+                        // numeric key.
+                        PropKey::Idx(i) => {
+                            return Ok(self.typed_get(cur, i as usize).unwrap_or(Val::Undef));
+                        }
+                        PropKey::Str(_) => {
+                            // `ta.length` without a getter call (a plain, unmodified view).
+                            if k == self.key(N::length)
+                                && bare
+                                && proto == Some(self.intr.ta_proto(kind))
+                            {
+                                return Ok(Val::num(self.typed_len(cur) as f64));
+                            }
+                            if self.canonical_numeric(k) {
+                                return Ok(Val::Undef);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 match self.get_own_plain(cur, k) {
                     Some(Own::Data(v, _)) => return Ok(v),
@@ -849,6 +895,31 @@ impl Realm {
                     a.len = i + 1;
                 }
                 return Ok(ok);
+            }
+        }
+        if let ObjKind::Typed(_) = self.o(id).kind {
+            let numeric = match k {
+                PropKey::Idx(_) => true,
+                PropKey::Str(_) => self.canonical_numeric(k),
+                PropKey::Sym(_) => false,
+            };
+            if numeric {
+                let PropKey::Idx(i) = k else {
+                    return Ok(false);
+                };
+                if i as usize >= self.typed_len(id)
+                    || d.configurable == Some(false)
+                    || d.enumerable == Some(false)
+                    || d.is_accessor()
+                    || d.writable == Some(false)
+                {
+                    return Ok(false);
+                }
+                if let Some(v) = d.value {
+                    let n = self.to_num(v)?;
+                    self.typed_put(id, i as usize, n);
+                }
+                return Ok(true);
             }
         }
         if let ObjKind::StrBox(s) = self.o(id).kind {
@@ -1239,6 +1310,20 @@ impl Realm {
                         }
                     }
                 }
+                ObjKind::Typed(_) => {
+                    let i = match k {
+                        PropKey::Idx(i) => Some(i as usize),
+                        PropKey::Str(_) if self.canonical_numeric(k) => Some(usize::MAX),
+                        _ => None,
+                    };
+                    if let Some(i) = i {
+                        // TypedArraySetElement: convert first (it may run script), then
+                        // store if the index is still valid; never an error.
+                        let n = self.to_num(v)?;
+                        self.typed_put(id, i, n);
+                        return Ok(true);
+                    }
+                }
                 ObjKind::Array(a) if obj.flags & SPARSE == 0 => {
                     if let PropKey::Idx(i) = k {
                         if (i as usize) < a.dense.len() && !a.dense[i as usize].is_empty() {
@@ -1266,6 +1351,17 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         let own: Option<Own> = loop {
+            if let ObjKind::Typed(_) = self.o(cur).kind {
+                let numeric_missing = match k {
+                    PropKey::Idx(i) => i as usize >= self.typed_len(cur),
+                    PropKey::Str(_) => self.canonical_numeric(k),
+                    PropKey::Sym(_) => false,
+                };
+                // A typed array on the chain swallows assignments to indices it lacks.
+                if numeric_missing {
+                    return Ok(true);
+                }
+            }
             if let ObjKind::Host { class, data } = self.o(cur).kind
                 && self.class_has_hooks(class)
             {
@@ -1379,6 +1475,13 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         loop {
+            if let ObjKind::Typed(_) = self.o(cur).kind {
+                match k {
+                    PropKey::Idx(i) => return Ok((i as usize) < self.typed_len(cur)),
+                    PropKey::Str(_) if self.canonical_numeric(k) => return Ok(false),
+                    _ => {}
+                }
+            }
             if let ObjKind::Host { class, data } = self.o(cur).kind
                 && let Some(b) = self.hook_has(cur, class, data, k)?
             {
@@ -1411,6 +1514,13 @@ impl Realm {
             && let Some(b) = self.hook_delete(id, class, data, k)?
         {
             return Ok(b);
+        }
+        if let ObjKind::Typed(_) = self.o(id).kind {
+            match k {
+                PropKey::Idx(i) => return Ok(i as usize >= self.typed_len(id)),
+                PropKey::Str(_) if self.canonical_numeric(k) => return Ok(true),
+                _ => {}
+            }
         }
         let flags = self.o(id).flags;
         match &mut self.heap.om(id).kind {
@@ -1480,6 +1590,17 @@ impl Realm {
                 if !out.contains(&k) {
                     out.push(k);
                 }
+            }
+        }
+        if strings && let ObjKind::Typed(_) = self.o(id).kind {
+            let n = self.typed_len(id);
+            if !self.heap.could_fit(n.saturating_mul(24)) {
+                return Err(self.oom());
+            }
+            self.heap.work += (n >> 3) as u64;
+            out.reserve(n);
+            for i in 0..n as u32 {
+                out.push(PropKey::Idx(i));
             }
         }
         let obj = self.o(id);

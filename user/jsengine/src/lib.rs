@@ -35,6 +35,7 @@ mod regexp;
 mod resolve;
 mod stack;
 mod string;
+mod typed;
 mod value;
 
 #[cfg(test)]

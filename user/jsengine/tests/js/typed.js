@@ -1,0 +1,35 @@
+test('arraybuffer basics', function () {
+  var b = new ArrayBuffer(8);
+  assertEq(b.byteLength, 8);
+  assert(b instanceof ArrayBuffer);
+  assertEq(Object.prototype.toString.call(b), '[object ArrayBuffer]');
+  assertThrows(TypeError, function () { ArrayBuffer(8); });
+  assertThrows(RangeError, function () { new ArrayBuffer(-1); });
+  assertEq(ArrayBuffer.isView(new Uint8Array(1)), true);
+  assertEq(ArrayBuffer.isView(b), false);
+  assertEq(b.slice(2, 6).byteLength, 4);
+  assertEq(b.slice(-3).byteLength, 3);
+});
+test('typed array basics', function () {
+  var a = new Uint8Array(4);
+  assertEq(a.length, 4);
+  assertEq(a.byteLength, 4);
+  a[0] = 257; a[1] = -1; a[2] = 3.9; a[3] = 'x';
+  assertEq(a[0], 1); assertEq(a[1], 255); assertEq(a[2], 3); assertEq(a[3], 0);
+  assertEq(a[4], undefined);
+  a[4] = 5;
+  assertEq(a[4], undefined);
+  assertEq(Object.keys(a), ['0', '1', '2', '3']);
+  assertEq(Uint8Array.BYTES_PER_ELEMENT, 1);
+  assertEq(Float64Array.BYTES_PER_ELEMENT, 8);
+  var c = new Uint8ClampedArray([300, -5, 1.5, 2.5, 0.5, NaN]);
+  assertEq(Array.from(c), [255, 0, 2, 2, 0, 0]);
+  var i8 = new Int8Array([127, 128, 255, -129]);
+  assertEq(Array.from(i8), [127, -128, -1, 127]);
+  var f = new Float32Array([0.1]);
+  assert(f[0] !== 0.1 && Math.abs(f[0] - 0.1) < 1e-7);
+  var u32 = new Uint32Array([-1, 4294967296 + 5]);
+  assertEq(Array.from(u32), [4294967295, 5]);
+  assertEq(Object.getPrototypeOf(Uint8Array), Object.getPrototypeOf(Int16Array));
+  assertEq(Object.prototype.toString.call(a), '[object Uint8Array]');
+});

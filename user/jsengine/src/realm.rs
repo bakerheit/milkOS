@@ -54,6 +54,57 @@ intrinsics! {
     object_ctor, function_ctor, array_ctor, promise_ctor, error_ctor, regexp_ctor,
         array_values, array_for_each, throw_type_error, eval_fn, promise_then,
     generator_function_ctor, async_function_ctor, array_iter_next, regexp_exec,
+    array_buffer_proto, array_buffer_ctor, data_view_proto, typed_array_proto, typed_array_ctor,
+    int8_proto, uint8_proto, uint8c_proto, int16_proto, uint16_proto, int32_proto, uint32_proto,
+    float32_proto, float64_proto,
+    int8_ctor, uint8_ctor, uint8c_ctor, int16_ctor, uint16_ctor, int32_ctor, uint32_ctor,
+    float32_ctor, float64_ctor,
+    text_encoder_proto, text_decoder_proto,
+}
+
+impl Intrinsics {
+    pub fn ta_proto(&self, k: crate::typed::TaKind) -> ObjId {
+        use crate::typed::TaKind as K;
+        match k {
+            K::Int8 => self.int8_proto,
+            K::Uint8 => self.uint8_proto,
+            K::Uint8C => self.uint8c_proto,
+            K::Int16 => self.int16_proto,
+            K::Uint16 => self.uint16_proto,
+            K::Int32 => self.int32_proto,
+            K::Uint32 => self.uint32_proto,
+            K::Float32 => self.float32_proto,
+            K::Float64 => self.float64_proto,
+        }
+    }
+    pub fn ta_ctor(&self, k: crate::typed::TaKind) -> ObjId {
+        use crate::typed::TaKind as K;
+        match k {
+            K::Int8 => self.int8_ctor,
+            K::Uint8 => self.uint8_ctor,
+            K::Uint8C => self.uint8c_ctor,
+            K::Int16 => self.int16_ctor,
+            K::Uint16 => self.uint16_ctor,
+            K::Int32 => self.int32_ctor,
+            K::Uint32 => self.uint32_ctor,
+            K::Float32 => self.float32_ctor,
+            K::Float64 => self.float64_ctor,
+        }
+    }
+    pub fn set_ta(&mut self, k: crate::typed::TaKind, proto: ObjId, ctor: ObjId) {
+        use crate::typed::TaKind as K;
+        match k {
+            K::Int8 => (self.int8_proto, self.int8_ctor) = (proto, ctor),
+            K::Uint8 => (self.uint8_proto, self.uint8_ctor) = (proto, ctor),
+            K::Uint8C => (self.uint8c_proto, self.uint8c_ctor) = (proto, ctor),
+            K::Int16 => (self.int16_proto, self.int16_ctor) = (proto, ctor),
+            K::Uint16 => (self.uint16_proto, self.uint16_ctor) = (proto, ctor),
+            K::Int32 => (self.int32_proto, self.int32_ctor) = (proto, ctor),
+            K::Uint32 => (self.uint32_proto, self.uint32_ctor) = (proto, ctor),
+            K::Float32 => (self.float32_proto, self.float32_ctor) = (proto, ctor),
+            K::Float64 => (self.float64_proto, self.float64_ctor) = (proto, ctor),
+        }
+    }
 }
 
 pub(crate) struct ClassEntry {
@@ -152,6 +203,8 @@ pub struct Realm {
     /// Symbol.for registry.
     pub(crate) sym_registry: Vec<(StrId, SymId)>,
     pub(crate) dead_hosts: Vec<(u32, u64)>,
+    /// The largest ArrayBuffer, in bytes (see `Realm::set_max_buffer_bytes`).
+    pub(crate) max_buffer: usize,
     pub(crate) vm: crate::interp::VmState,
     /// The native stack guard of the current outermost entry.
     pub(crate) stack: crate::stack::StackGuard,
@@ -216,6 +269,7 @@ impl Realm {
             unhandled: Vec::new(),
             sym_registry: Vec::new(),
             dead_hosts: Vec::new(),
+            max_buffer: crate::typed::DEFAULT_MAX_BUFFER,
             vm: crate::interp::VmState::new(),
             stack: crate::stack::StackGuard::new(crate::stack::DEFAULT_STACK_LIMIT),
         };
@@ -375,6 +429,11 @@ impl Realm {
             Intrinsic::Array => t.array_ctor,
             Intrinsic::Promise => t.promise_ctor,
             Intrinsic::Error => t.error_ctor,
+            Intrinsic::ArrayBuffer => t.array_buffer_ctor,
+            Intrinsic::ArrayBufferPrototype => t.array_buffer_proto,
+            Intrinsic::Uint8Array => t.uint8_ctor,
+            Intrinsic::Uint8ArrayPrototype => t.uint8_proto,
+            Intrinsic::TypedArrayPrototype => t.typed_array_proto,
         }
     }
 

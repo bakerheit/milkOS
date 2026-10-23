@@ -59,11 +59,12 @@
 //!   thread has 8 MB).
 //! - **Not supported (yet):** `with`, direct `eval` seeing local variables (every `eval`
 //!   is global), BigInt (so no BigInt64Array / BigUint64Array), Proxy, resizable
-//!   ArrayBuffers, Intl (the
-//!   `toLocale*String` methods format en-US style), private class members (`#x`),
-//!   String.prototype.normalize (returns the string as is), WeakRef /
-//!   FinalizationRegistry, SharedArrayBuffer and Atomics. Date has a fixed local offset (no
-//!   daylight-saving rules).
+//!   ArrayBuffers, Intl (the `toLocale*String` methods format en-US style),
+//!   String.prototype.normalize (returns the string as is), WeakRef / FinalizationRegistry,
+//!   SharedArrayBuffer and Atomics, symbols as WeakMap keys, the ES2024+ additions (iterator
+//!   helpers, Set methods, `Array.fromAsync`, RegExp `v` flag, duplicate named groups and
+//!   modifiers). Date has a fixed local offset (no daylight-saving rules). ES modules,
+//!   private class members (`#x`) and RegExp match indices (`d` flag) are supported.
 //!
 //! # CHANGES
 //! - Added ES modules (stage 2b). A module is compiled from source into a [`ModuleId`]
@@ -86,8 +87,10 @@
 //!   still a SyntaxError (and `import()` is allowed there). A script's `import()` with no
 //!   hook set rejects with a TypeError. Linking, evaluation, `import()` and the module
 //!   namespace objects are real; the engine runs a module's code with the realm's step
-//!   budget and interrupt like any other script. The module parser rejects HTML-like
-//!   comments, `with` and unparenthesized `await` as an identifier, as the spec says.
+//!   budget and interrupt like any other script. Module code is strict, has no HTML-like
+//!   comments, and `await` is reserved in it. Also new: private class members (`#x`,
+//!   `#m()`, `static #s`, `#x in obj`), RegExp match indices (the `d` flag), and parameters
+//!   with defaults are in their TDZ until initialized (`function f(a = b, b) {}` throws).
 //! - Added [`Realm::set_rejection_hook`] ([`PromiseRejection`]: unhandled and late-handled
 //!   promise rejections, the browser's `unhandledrejection` / `rejectionhandled`) and
 //!   [`Realm::set_error_hook`] (exceptions thrown out of queued jobs, for `window.onerror`;
@@ -1711,7 +1714,10 @@ impl Realm {
     /// undefined when everything has run, or rejects with the first error. Links first if
     /// needed. Call [`Realm::run_jobs`] to let asynchronous modules run; a module without
     /// `await` anywhere in its graph has finished when this returns. Evaluating a module
-    /// again gives the same outcome without running it again.
+    /// again gives the same outcome without running it again. The Promise counts as handled:
+    /// a failed module never causes an unhandled-rejection report, so the host reports it
+    /// itself (the browser's `window.onerror`) from [`Realm::module_error`] once the jobs
+    /// have run, or by calling `then` on the Promise.
     pub fn evaluate_module(&mut self, m: ModuleId) -> JsResult<Value> {
         let r = self.entry(|r| r.module_evaluate(m));
         self.out(r)

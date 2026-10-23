@@ -382,3 +382,109 @@ log(typeof inBlock);
 //# expect
 1
 undefined
+
+//# case: re-exporting a namespace import
+//# file: main.js
+import { ns } from './re.js';
+import * as direct from './m.js';
+log(ns === direct, ns.v, Object.keys(ns).join());
+//# file: re.js
+import * as ns from './m.js';
+export { ns };
+//# file: m.js
+export const v = 'val';
+//# expect
+true val v
+
+//# case: strict mode applies to modules
+//# file: main.js
+function t(src) { try { (0, eval)(src); return 'ok'; } catch (e) { return e.name; } }
+log(t('"use strict"; 010'));
+log(t('"use strict"; var yield'));
+function sloppyWrites() { try { Object.freeze({a:1}).a = 2; return 'no throw'; } catch (e) { return e.name; } }
+log(sloppyWrites());
+log((function () { return typeof this; })());
+log((() => { try { undefinedVariable = 1; } catch (e) { return e.name; } })());
+log((function f(a) { arguments[0] = 2; return a; })(1));
+//# expect
+SyntaxError
+SyntaxError
+TypeError
+undefined
+ReferenceError
+1
+
+//# case: duplicate parameters and octal escapes are errors in modules
+//# file: main.js
+import './x.js';
+//# file: x.js
+function f(a, a) {}
+//# expect
+load error: SyntaxError: Duplicate parameter name not allowed in this context
+
+//# case: octal literal in module code
+//# file: main.js
+import './x.js';
+//# file: x.js
+const n = 010;
+//# expect
+load error: SyntaxError: Octal literals are not allowed in strict mode.
+
+//# case: class declarations and expressions at module level
+//# file: main.js
+import K, { Plain, make } from './m.js';
+const k = new K();
+log(k.who(), new Plain().x, make().name, K.count);
+//# file: m.js
+export default class K {
+  static count = 3;
+  #secret = 'priv';
+  who() { return this.#secret; }
+}
+export class Plain { x = 'field'; }
+export const make = () => class Inner {};
+//# expect
+priv field Inner 3
+
+//# case: generators and iterators exported
+//# file: main.js
+import { gen, it } from './m.js';
+log([...gen()].join(), [...it].join());
+//# file: m.js
+export function* gen() { yield 1; yield 2; }
+export const it = { *[Symbol.iterator]() { yield 'a'; yield 'b'; } };
+//# expect
+1,2 a,b
+
+//# case: module-level destructuring and closures over imports
+//# file: main.js
+import { get, set } from './box.js';
+const [a, { b }] = [1, { b: 2 }];
+log(a, b, get());
+set('changed');
+log(get());
+//# file: box.js
+let v = 'initial';
+export const get = () => v;
+export const set = (x) => { v = x; };
+//# expect
+1 2 initial
+changed
+
+//# case: exported var and function share one binding with the declaration
+//# file: main.js
+import { v, w, f } from './m.js';
+log(v, w, f.name);
+//# file: m.js
+export var v = 1, w;
+w = v + 1;
+export function f() {}
+//# expect
+1 2 f
+
+//# case: modules run in strict mode but scripts do not
+//# file: script.js
+function sloppy() { return this === globalThis; }
+log(sloppy());
+//# expect
+true

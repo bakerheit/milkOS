@@ -11,6 +11,10 @@ use crate::atoms::{Atom, Atoms, is_reserved, is_strict_reserved, kw};
 use crate::lexer::{LexError, Lexer, P, Tok, Token};
 
 pub(crate) const MAX_NEST: u32 = 1500;
+/// The longest `a.b.c(...)[...]` / `a + b + c` chain. The trees these make are as deep as
+/// the chain is long, and the compiler gives up near 2300 links on the default stack anyway:
+/// a longer one is refused here, before it can make a tree too deep to free.
+pub(crate) const MAX_CHAIN: u32 = 6000;
 
 pub(crate) struct ParseError {
     pub msg: String,
@@ -1472,7 +1476,14 @@ impl<'a> Parser<'a> {
                 self.ctx.allow_super_call = false;
             }
         }
-        let r = self.parse_function_parts(kind, is_async, is_generator, start);
+        let r = match self.enter() {
+            Ok(()) => {
+                let r = self.parse_function_parts(kind, is_async, is_generator, start);
+                self.leave();
+                r
+            }
+            Err(e) => Err(e),
+        };
         self.ctx = saved_ctx;
         self.labels = saved_labels;
         self.in_loop = saved_loop;
@@ -1755,7 +1766,14 @@ impl<'a> Parser<'a> {
         self.advance()?; // class
         let saved_strict = self.ctx.strict;
         self.ctx.strict = true;
-        let r = self.parse_class_rest(is_decl, start, anon_ok);
+        let r = match self.enter() {
+            Ok(()) => {
+                let r = self.parse_class_rest(is_decl, start, anon_ok);
+                self.leave();
+                r
+            }
+            Err(e) => Err(e),
+        };
         self.ctx.strict = saved_strict;
         r
     }
@@ -2359,9 +2377,14 @@ impl<'a> Parser<'a> {
     fn parse_binary(&mut self, min: u8, no_in: bool) -> PResult<Expr> {
         let pos = self.tok.start;
         let mut left = self.parse_unary()?;
+        let mut links = 0u32;
         while let Some((prec, op)) = self.binop(no_in) {
             if prec < min.max(1) {
                 break;
+            }
+            links += 1;
+            if links > MAX_CHAIN {
+                return self.err("the code is nested too deeply");
             }
             self.check_no_cover_init()?;
             if prec == 12 && matches!(left.k, ExprKind::Unary(..) | ExprKind::Await(_)) {
@@ -2523,7 +2546,12 @@ impl<'a> Parser<'a> {
             self.parse_primary()?
         };
         let mut in_chain = false;
+        let mut links = 0u32;
         loop {
+            links += 1;
+            if links > MAX_CHAIN {
+                return self.err("the code is nested too deeply");
+            }
             match self.tok.tok {
                 Tok::P(P::Dot) => {
                     self.advance()?;
@@ -2686,7 +2714,12 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_primary()?
             };
+            let mut links = 0u32;
             loop {
+                links += 1;
+                if links > MAX_CHAIN {
+                    return self.err("the code is nested too deeply");
+                }
                 match self.tok.tok {
                     Tok::P(P::Dot) => {
                         self.advance()?;

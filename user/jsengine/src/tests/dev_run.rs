@@ -58,3 +58,27 @@ fn run_script() {
         .unwrap();
     h.join().unwrap();
 }
+
+#[test]
+#[ignore]
+fn chain_limits() {
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(|| {
+            for (name, unit) in [("member", ".b"), ("plus", "+1"), ("call", "()"), ("index", "[0]"), ("or", "||a")] {
+                let mut lo = 100usize;
+                let mut hi = 200_000usize;
+                while lo + 50 < hi {
+                    let mid = (lo + hi) / 2;
+                    let mut r = Realm::new(Options::default());
+                    let src = alloc::format!("a{}", unit.repeat(mid));
+                    let ok = !matches!(r.eval(&src, "x.js"), Err(e) if r.report(&e).message.contains("nested too deeply"));
+                    if ok { lo = mid } else { hi = mid }
+                }
+                std::println!("{name}: compiles up to about {lo} links");
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

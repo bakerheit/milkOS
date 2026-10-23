@@ -688,7 +688,11 @@ fn module_bundle_timing_body() {
     r.evaluate_module(m).unwrap();
     let t_eval = t.elapsed();
     let t = std::time::Instant::now();
-    let main = compile(&mut r, "main.js", "import * as ns from './bundle.js'; export const n = Object.keys(ns).length;");
+    let main = compile(
+        &mut r,
+        "main.js",
+        "import * as ns from './bundle.js'; export const n = Object.keys(ns).length;",
+    );
     r.set_module_dependency(main, 0, m).unwrap();
     r.link_module(main).unwrap();
     r.evaluate_module(main).unwrap();
@@ -697,4 +701,102 @@ fn module_bundle_timing_body() {
         "{} bytes: compile {t_compile:?}, link {t_link:?}, evaluate {t_eval:?}, namespace {t_ns:?}",
         src.len()
     );
+}
+
+#[test]
+fn hostile_nesting_and_sizes_are_refused() {
+    big(hostile_nesting_and_sizes_are_refused_body);
+}
+
+fn hostile_nesting_and_sizes_are_refused_body() {
+    let mut r = realm();
+    let deep = "(".repeat(200_000);
+    for src in [
+        alloc::format!("export default {deep}"),
+        alloc::format!("{}1{}", "import(".repeat(50_000), ")".repeat(50_000)),
+        alloc::format!("export default {}", "[".repeat(100_000)),
+        alloc::format!("export {{ {} }}", "a as b, ".repeat(10)),
+        "export * as ".repeat(10_000),
+        "import ".repeat(100_000),
+        alloc::format!("export default {}0", "-".repeat(300_000)),
+        alloc::format!("await {}0", "await ".repeat(100_000)),
+        alloc::format!(
+            "export default {}x{}",
+            "class extends ".repeat(10_000),
+            " {}".repeat(10_000)
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let src = src.1;
+        match r.compile_module(&src, &ModuleOptions::default()) {
+            Ok(m) => r.drop_module(m),
+            Err(e) => assert_eq!(r.report(&e).name, "SyntaxError"),
+        }
+        r.release_temps();
+    }
+    // Many exports and imports in one module are fine.
+    let mut src = String::new();
+    for i in 0..30_000 {
+        src.push_str(&alloc::format!("export const a{i} = {i};\n"));
+    }
+    let m = compile(&mut r, "many.js", &src);
+    let mut user = String::from("import * as ns from './many.js';\n");
+    for i in (0..30_000).step_by(1000) {
+        user.push_str(&alloc::format!("import {{ a{i} }} from './many.js';\n"));
+    }
+    user.push_str("export const n = Object.keys(ns).length;\n");
+    let u = compile(&mut r, "user.js", &user);
+    r.set_module_dependency(u, 0, m).unwrap();
+    r.link_module(u).unwrap();
+    r.evaluate_module(u).unwrap();
+    r.run_jobs().unwrap();
+    let ns = r.module_namespace(u).unwrap();
+    assert_eq!(r.get(ns, "n").unwrap().as_number(), Some(30_000.0));
+}
+
+#[test]
+fn long_chains_do_not_overflow() {
+    big(long_chains_do_not_overflow_body);
+}
+
+fn long_chains_do_not_overflow_body() {
+    let mut r = realm();
+    for src in [
+        alloc::format!("a{}", ".b".repeat(400_000)),
+        alloc::format!("a{}", "+1".repeat(400_000)),
+        alloc::format!("a{}", "()".repeat(400_000)),
+        alloc::format!("a{}", "[0]".repeat(300_000)),
+        alloc::format!("a{}", "?.b".repeat(300_000)),
+        alloc::format!("a{}", ",a".repeat(400_000)),
+        alloc::format!("a{}", "||a".repeat(400_000)),
+        alloc::format!("a{}", "?1:2".repeat(100_000)),
+        "if(1)".repeat(100_000) + "1",
+        "else if(1)".repeat(10) + "1",
+        "{".repeat(100_000) + &"}".repeat(100_000),
+        "function f(){".repeat(100_000) + &"}".repeat(100_000),
+        "class A{m(){".repeat(50_000) + &"}}".repeat(50_000),
+        "`${".repeat(50_000) + "1" + &"}`".repeat(50_000),
+        "x=>".repeat(100_000) + "1",
+        "-".repeat(100_000) + "1",
+        "await ".repeat(100_000) + "1",
+    ]
+    .iter()
+    .enumerate()
+    {
+        for module in [false, true] {
+            let src = src.1;
+            let res = if module {
+                r.compile_module(&src, &ModuleOptions::default())
+                    .map(|m| r.drop_module(m))
+            } else {
+                r.eval(&src, "x.js").map(|_| ())
+            };
+            if let Err(e) = res {
+                let _ = r.report(&e);
+            }
+            r.release_temps();
+        }
+    }
 }

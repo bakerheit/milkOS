@@ -48,6 +48,11 @@ pub struct PointerInput {
 pub trait WindowContents {
     /// Shown centred in the title bar.
     fn title(&self) -> &str;
+    /// The app's name in the menu bar (the title unless the app's windows are named by what
+    /// they hold, like a document).
+    fn app_name(&self) -> &str {
+        self.title()
+    }
     /// Dark chrome (the Terminal's espresso look).
     fn dark(&self) -> bool {
         false

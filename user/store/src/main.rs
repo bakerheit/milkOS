@@ -258,6 +258,11 @@ struct App {
     sel: usize,
     job: Option<Job>,
     log: Vec<String>,
+    /// The raw text behind a friendlier line in `log`, shown under "Details".
+    details: Vec<String>,
+    details_open: bool,
+    /// Where the Details line was drawn (x, y, w, h), for clicks.
+    details_hit: Option<(i32, i32, i32, i32)>,
     partial: String,
     outcome: Outcome,
     last_label: String,
@@ -286,6 +291,22 @@ const ACTS: [(Act, &str); 7] = [
     (Act::Remove, "Remove"),
     (Act::Upgrade, "Upgrade"),
 ];
+
+/// A network failure line from `apps` ("apps: http://host:port/: connect host:port: connection
+/// refused") as something to read: where it could not reach, and what to try.
+fn friendly(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("apps: ")?;
+    const WHY: [&str; 4] = ["refused", "timed out", "unreachable", "no route"];
+    if !rest.starts_with("http") || !WHY.iter().any(|w| line.contains(w)) {
+        return None;
+    }
+    let url = rest.split(": ").next()?;
+    let url = url.split_once("://").map_or(url, |(_, u)| u);
+    Some(alloc::format!(
+        "Can't reach the store at {}. Check your network, then press Update.",
+        url.trim_end_matches('/')
+    ))
+}
 
 /// Word-wrap `s` to `cols` characters; words longer than a line are split.
 fn wrap(s: &str, cols: usize) -> Vec<String> {
@@ -367,6 +388,8 @@ impl App {
             Ok(pid) => {
                 let _ = sys::close(w);
                 self.log.clear();
+                self.details.clear();
+                self.details_open = false;
                 self.partial.clear();
                 self.log.push(alloc::format!("$ {label}"));
                 self.outcome = Outcome::None;
@@ -402,6 +425,18 @@ impl App {
         }
     }
 
+    /// One line of what apps printed: a network failure is shown in plain words, the raw
+    /// text kept for the Details line.
+    fn add_line(&mut self, line: String) {
+        match friendly(&line) {
+            Some(f) => {
+                self.details.push(line);
+                self.log.push(f);
+            }
+            None => self.log.push(line),
+        }
+    }
+
     /// Read what apps printed; reap it when it is done. True if anything changed.
     fn pump(&mut self) -> bool {
         let Some(job) = self.job.as_ref() else {
@@ -417,7 +452,7 @@ impl App {
                     self.partial.push_str(&String::from_utf8_lossy(&buf[..n]));
                     while let Some(i) = self.partial.find('\n') {
                         let line: String = self.partial.drain(..=i).collect();
-                        self.log.push(String::from(line.trim_end()));
+                        self.add_line(String::from(line.trim_end()));
                     }
                     changed = true;
                 }
@@ -429,7 +464,7 @@ impl App {
         {
             if !self.partial.is_empty() {
                 let l = core::mem::take(&mut self.partial);
-                self.log.push(l);
+                self.add_line(l);
             }
             let _ = sys::close(fd);
             self.outcome = if st == 0 {
@@ -526,9 +561,11 @@ impl App {
             "{n} packages, {inst} installed, {ups} upgrades \u{b7} {}",
             self.repo
         );
-        let room = ((W - 16 - 104 - 8 - 72 - 12 - 184) / 8) as usize;
+        // 16 px of air after the title (its bold pass is one pixel wider).
+        let sub_x = 16 + gui::str_width("Milk Store", 2) + 1 + 16;
+        let room = ((W - 16 - 104 - 8 - 72 - 12 - sub_x) / 8) as usize;
         let sub: String = sub.chars().take(room).collect();
-        self.win.text(184, 22, &sub, cocoa);
+        self.win.text(sub_x, 22, &sub, cocoa);
         let idle = self.job.is_none();
         self.button(W - 16 - 104 - 8 - 72, 14, 72, "Update", false, idle);
         self.button(
@@ -644,6 +681,15 @@ impl App {
             }
         }
 
+        if pkgs.is_empty() {
+            let hint = if self.job.is_some() {
+                "Fetching the package list..."
+            } else {
+                "Nothing to show yet. Press Update."
+            };
+            self.win.text(CARD_X + 20, TOP + 32, hint, cocoa);
+        }
+
         // Log + progress.
         let lx = CARD_X + 20;
         let lw = CARD_W - 40;
@@ -651,13 +697,42 @@ impl App {
         self.win.rrect(lx, LOG_Y, lw, lh, 12, oat);
         let cols = ((lw - 24) / 8) as usize;
         let rows = ((lh - 16) / 18) as usize;
-        // Wrap long lines (URLs, signatures) and show the newest that fit.
-        let wrapped: Vec<String> = self.log.iter().flat_map(|l| wrap(l, cols)).collect();
-        let start = wrapped.len().saturating_sub(rows);
-        for (i, l) in wrapped[start..].iter().enumerate() {
-            let c = if l.starts_with("$ ") {
+        // Wrap long lines (URLs, signatures) and show the newest that fit. The raw text behind
+        // a plain-words error hangs off a Details line at the end, folded until asked for.
+        let bad = |l: &str| {
+            l.contains("refused")
+                || l.contains("failed")
+                || l.contains("BAD")
+                || l.starts_with("Can't reach")
+        };
+        // (text, kind): 0 plain, 1 the Details line, 2 raw text under it, 3 an error.
+        let mut shown: Vec<(String, u8)> = self
+            .log
+            .iter()
+            .flat_map(|l| {
+                let kind = if bad(l) { 3 } else { 0 };
+                wrap(l, cols).into_iter().map(move |w| (w, kind))
+            })
+            .collect();
+        if !self.details.is_empty() {
+            let mark = if self.details_open { "v" } else { ">" };
+            shown.push((alloc::format!("{mark} Details"), 1));
+            if self.details_open {
+                shown.extend(
+                    self.details
+                        .iter()
+                        .flat_map(|l| wrap(l, cols))
+                        .map(|l| (l, 2)),
+                );
+            }
+        }
+        let start = shown.len().saturating_sub(rows);
+        self.details_hit = None;
+        for (i, (l, kind)) in shown[start..].iter().enumerate() {
+            let y = LOG_Y + 8 + i as i32 * 18;
+            let c = if *kind == 1 || *kind == 2 || l.starts_with("$ ") {
                 cocoa
-            } else if l.contains("refused") || l.contains("failed") || l.contains("BAD") {
+            } else if *kind == 3 {
                 // Straw text on oat is 2.2:1: the danger red in light, straw on dark oat.
                 if self.th.dark {
                     gui::STRAW
@@ -667,7 +742,10 @@ impl App {
             } else {
                 espresso
             };
-            self.win.text(lx + 12, LOG_Y + 8 + i as i32 * 18, l, c);
+            if *kind == 1 {
+                self.details_hit = Some((lx, y - 2, lw, 20));
+            }
+            self.win.text(lx + 12, y, l, c);
         }
         let sy = LOG_Y + lh + 10;
         match (&self.job, self.outcome) {
@@ -705,6 +783,13 @@ impl App {
     }
 
     fn click(&mut self, x: i32, y: i32) {
+        if let Some((hx, hy, hw, hh)) = self.details_hit
+            && (hx..hx + hw).contains(&x)
+            && (hy..hy + hh).contains(&y)
+        {
+            self.details_open = !self.details_open;
+            return;
+        }
         // Top bar buttons.
         if (14..14 + BTN_H).contains(&y) {
             if (W - 16 - 104 - 8 - 72..W - 16 - 104 - 8).contains(&x) {
@@ -759,6 +844,9 @@ fn main(_args: &rt::Args) -> i32 {
         sel: 0,
         job: None,
         log: Vec::new(),
+        details: Vec::new(),
+        details_open: false,
+        details_hit: None,
         partial: String::new(),
         outcome: Outcome::None,
         last_label: String::new(),

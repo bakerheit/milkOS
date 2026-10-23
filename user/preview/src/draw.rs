@@ -259,7 +259,8 @@ impl App {
         }
         // The name, and "2 of 4".
         let room = name_limit - 76;
-        if room > 40 {
+        // Nothing open: the title bar already says Preview.
+        if room > 40 && !self.name.is_empty() {
             let mut label = String::from(&*self.name);
             let pos = if self.files.len() > 1 {
                 format!("  {} of {}", self.idx + 1, self.files.len())

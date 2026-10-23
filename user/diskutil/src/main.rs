@@ -273,7 +273,7 @@ impl App {
                     }),
                     diskkit::disks::Content::Other => v.push(Row {
                         name: e.name.clone(),
-                        kind: format!("other disk, {}", diskkit::fmt::kb(e.kb())),
+                        kind: format!("disk, {}", diskkit::fmt::kb(e.kb())),
                         icon: Icon::Disk,
                         locked: false,
                         path: None,

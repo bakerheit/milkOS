@@ -25,7 +25,7 @@ use timekit::date::split_secs;
 
 rt::main!(main);
 
-pub const W: i32 = 940;
+pub const W: i32 = 900;
 /// The spec says 676; the 1024x768 screen leaves room for a window this tall above the dock.
 pub const H: i32 = 620;
 pub const SIDE: i32 = 172;

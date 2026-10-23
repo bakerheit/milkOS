@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "fontkit"
+version = "0.0.1"
+
+[[package]]
 name = "fortune"
 version = "1.0.0"
 dependencies = [
@@ -13,6 +17,7 @@ dependencies = [
 name = "gui"
 version = "0.0.1"
 dependencies = [
+ "fontkit",
  "rt",
 ]
 

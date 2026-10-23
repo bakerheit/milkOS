@@ -1007,7 +1007,9 @@ impl Desktop {
                 }
                 for (id, r) in self.cells() {
                     v.push(spec(PanelKey::Cell(id), r, R_WINDOW, Style::Opaque, true));
-                    if let Some(w) = self.win(id) {
+                    // A caption only for a window that has its thumbnail (one opened since the
+                    // overview came up has none, and would be a caption over nothing).
+                    if let Some(w) = self.win(id).filter(|_| self.thumbs.contains_key(&id)) {
                         v.push(Layer::Label {
                             x: r.x - 20,
                             y: r.y + r.h + 10,
@@ -1784,7 +1786,7 @@ impl Desktop {
         }
     }
 
-    fn invalidate_spaces(&mut self) {
+    pub(super) fn invalidate_spaces(&mut self) {
         let keys: Vec<PanelKey> = self
             .cache
             .keys()

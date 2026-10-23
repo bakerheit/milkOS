@@ -1139,6 +1139,12 @@ impl Desktop {
             }
         }
         self.thumbs.remove(&id);
+        if self.mode == Mode::Spaces {
+            // The overview was laid out with this window: its cell, its caption (drawn outside
+            // any panel, so only a repaint clears it) and the strip's thumbnails.
+            self.invalidate_spaces();
+            self.damage_all();
+        }
         self.invalidate(PanelKey::Dock);
         if self.focus == Some(id) {
             self.focus = None;

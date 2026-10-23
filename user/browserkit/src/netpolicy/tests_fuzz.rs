@@ -810,6 +810,18 @@ fn check_hop(hop: &Hop, ex: &Exchange, cfg: &Config, page: &Page) {
     }
 }
 
+/// What a page may be told about a failure never depends on the rule that fired.
+fn check_error(e: &NetError) {
+    use super::error::ErrorKind;
+    let text = e.to_string();
+    assert!(!text.is_empty());
+    match e.kind() {
+        ErrorKind::Network => assert_eq!(e.script_message(), "Failed to fetch", "{e:?}"),
+        ErrorKind::Timeout => assert_eq!(e.script_message(), "The request timed out"),
+        ErrorKind::Type | ErrorKind::Abort => {}
+    }
+}
+
 fn check_meta(m: &ResponseMeta, raw: &[(String, String)]) {
     assert!(
         m.headers
@@ -967,13 +979,17 @@ fn fuzz_exchanges() {
             });
         }
         let mut ex = match Exchange::start(&cfg, &page, init) {
+            Err(e) => {
+                check_error(&e);
+                continue;
+            }
             Ok(Begin::Network(ex)) => ex,
             Ok(Begin::Data(m, body)) => {
                 check_meta(&m, &[]);
                 assert!(body.len() <= cfg.limits.max_response_body);
                 continue;
             }
-            Ok(Begin::Blob { .. }) | Err(_) => continue,
+            Ok(Begin::Blob { .. }) => continue,
         };
         ran += 1;
         let mut cache = PreflightCache::new(8, 600);
@@ -1029,7 +1045,10 @@ fn fuzz_exchanges() {
                         );
                     }
                 },
-                Err(_) => break,
+                Err(e) => {
+                    check_error(&e);
+                    break;
+                }
             }
         }
     }
@@ -1046,4 +1065,217 @@ fn exchange_and_cache_can_move_between_threads() {
     is_send::<Hop>();
     is_send::<Outcome>();
     is_send::<Headers>();
+}
+
+#[test]
+fn resolve_recovers_generated_components() {
+    // Build addresses from known parts; the parser must hand back exactly those parts.
+    let mut r = rng(10);
+    let labels = [
+        "a", "www", "example", "x-y", "api2", "a1b2", "z", "milk", "co", "test",
+    ];
+    let path_bits = [
+        "", "a", "a/b", "a/b/", "%41", "a%20b", "x.y", "q;r", "a,b", "~u", "a-b_c", "a=b", "@at",
+        ":colon", "a+b",
+    ];
+    let queries = [
+        "",
+        "?",
+        "?a=b",
+        "?a=b&c=d",
+        "?q=%20x",
+        "?x=http://y.test/",
+        "?@",
+        "?a=b#frag",
+    ];
+    for _ in 0..30_000 * scale() {
+        let https = r.chance(50);
+        let nlabels = 1 + r.below(4);
+        let host: Vec<&str> = (0..nlabels)
+            .map(|_| labels[r.below(labels.len())])
+            .collect();
+        let host = host.join(".");
+        let port: Option<u16> = if r.chance(50) {
+            Some([80u16, 443, 8080, 8443, 3000, 5000, 9000, 65535][r.below(8)])
+        } else {
+            None
+        };
+        let path = format!("/{}", path_bits[r.below(path_bits.len())]);
+        let query = queries[r.below(queries.len())];
+        let text = format!(
+            "{}://{}{}{}{}",
+            if https { "https" } else { "http" },
+            host,
+            port.map(|p| format!(":{p}")).unwrap_or_default(),
+            path,
+            query
+        );
+        match resolve_url(&base(), &text, &Limits::default()) {
+            Ok(Target::Http(u)) => {
+                assert_eq!(u.host, host, "{text}");
+                assert_eq!(u.scheme == milkweb::url::Scheme::Https, https, "{text}");
+                assert_eq!(
+                    u.port,
+                    port.unwrap_or(if https { 443 } else { 80 }),
+                    "{text}"
+                );
+                let want_path = format!("{path}{}", query.split('#').next().unwrap());
+                assert_eq!(u.path, want_path, "{text}");
+                assert!(Origin::of(&u).serialize().starts_with(if https {
+                    "https://"
+                } else {
+                    "http://"
+                }));
+            }
+            Err(NetError::BlockedPort { .. }) => {}
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn address_spaces_agree_with_std_for_ipv4() {
+    let mut r = rng(11);
+    for _ in 0..60_000 * scale() {
+        let o: [u8; 4] = match r.below(4) {
+            0 => [
+                127,
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+            ],
+            1 => [
+                10,
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+            ],
+            2 => [
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+            ],
+            _ => [
+                [172u8, 192, 169, 100][r.below(4)],
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+            ],
+        };
+        let std_ip = std::net::Ipv4Addr::from(o);
+        let text = std_ip.to_string();
+        let space = address_space_of_host(&text);
+        assert_eq!(address_space_of_ip(&o), Some(space), "{text}");
+        if std_ip.is_loopback() || std_ip.octets()[0] == 0 {
+            assert_eq!(space, AddressSpace::Loopback, "{text}");
+        } else if std_ip.is_private()
+            || std_ip.is_link_local()
+            || std_ip.is_multicast()
+            || std_ip.is_broadcast()
+        {
+            assert_eq!(space, AddressSpace::Private, "{text}");
+        }
+        // anything std calls global (and 100.64/10 isn't) is public to us too
+        if !std_ip.is_unspecified()
+            && !std_ip.is_loopback()
+            && !std_ip.is_private()
+            && !std_ip.is_link_local()
+            && !std_ip.is_multicast()
+            && !std_ip.is_broadcast()
+            && !(o[0] == 100 && (64..128).contains(&o[1]))
+            && o[0] != 0
+            && o[0] < 224
+        {
+            assert_eq!(space, AddressSpace::Public, "{text}");
+        }
+    }
+}
+
+#[test]
+fn address_spaces_agree_with_std_for_ipv6() {
+    let mut r = rng(12);
+    for _ in 0..40_000 * scale() {
+        let mut seg = [0u16; 8];
+        for s in seg.iter_mut() {
+            *s = [
+                0u16, 0, 1, 0xffff, 0xfe80, 0xfc00, 0xfd12, 0x2001, 0x7f00, 0x0a00,
+            ][r.below(10)];
+        }
+        let ip = std::net::Ipv6Addr::from(seg);
+        let text = ip.to_string();
+        let ours = address_space_of_host(&text);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&ip.octets());
+        assert_eq!(address_space_of_ip(&bytes), Some(ours), "{text}");
+        if ip.is_loopback() || ip.is_unspecified() {
+            assert_eq!(ours, AddressSpace::Loopback, "{text}");
+        }
+        if let Some(v4) = ip.to_ipv4_mapped() {
+            assert_eq!(ours, address_space_of_host(&v4.to_string()), "{text}");
+        }
+        // unique-local and link-local are never public
+        let first = ip.segments()[0];
+        if first & 0xfe00 == 0xfc00 || first & 0xffc0 == 0xfe80 {
+            assert_ne!(ours, AddressSpace::Public, "{text}");
+        }
+    }
+}
+
+#[test]
+fn option_names_round_trip() {
+    for m in [Mode::SameOrigin, Mode::Cors, Mode::NoCors, Mode::Navigate] {
+        assert_eq!(Mode::parse(m.as_str()), Some(m));
+    }
+    for c in [
+        Credentials::Omit,
+        Credentials::SameOrigin,
+        Credentials::Include,
+    ] {
+        assert_eq!(Credentials::parse(c.as_str()), Some(c));
+    }
+    for x in [Redirect::Follow, Redirect::Error, Redirect::Manual] {
+        assert_eq!(Redirect::parse(x.as_str()), Some(x));
+    }
+    for x in [
+        CacheMode::Default,
+        CacheMode::NoStore,
+        CacheMode::Reload,
+        CacheMode::NoCache,
+        CacheMode::ForceCache,
+        CacheMode::OnlyIfCached,
+    ] {
+        assert_eq!(CacheMode::parse(x.as_str()), Some(x));
+    }
+    for bad in ["", "CORS", "Cors", "cors ", "same_origin", "websocket"] {
+        assert_eq!(Mode::parse(bad), None, "{bad:?}");
+    }
+    assert_eq!(Credentials::parse("include "), None);
+    assert_eq!(Redirect::parse("Follow"), None);
+    assert_eq!(CacheMode::parse("no_store"), None);
+    assert_eq!(Mode::default(), Mode::Cors);
+    assert_eq!(Credentials::default(), Credentials::SameOrigin);
+    assert_eq!(Redirect::default(), Redirect::Follow);
+    assert_eq!(CacheMode::default(), CacheMode::Default);
+    for t in [
+        ResponseType::Basic,
+        ResponseType::Cors,
+        ResponseType::Opaque,
+        ResponseType::OpaqueRedirect,
+    ] {
+        assert!(!t.as_str().is_empty());
+    }
+    assert_eq!(ResponseType::OpaqueRedirect.as_str(), "opaqueredirect");
+}
+
+#[test]
+fn origin_accessors() {
+    let o = Origin::of(&Url::parse("https://www.example.co.uk:8443/x").unwrap());
+    assert_eq!(o.site().as_deref(), Some("example.co.uk"));
+    assert_eq!(o.host(), Some("www.example.co.uk"));
+    assert_eq!(o.scheme(), Some(milkweb::url::Scheme::Https));
+    assert!(!o.is_opaque());
+    assert!(Origin::Opaque(1).is_opaque());
+    assert_eq!(Origin::Opaque(1).host(), None);
+    assert_eq!(Origin::Opaque(1).scheme(), None);
 }

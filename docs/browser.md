@@ -60,6 +60,27 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   can't set any. Limits: 4 KB a cookie, 50 a site, 3000 in all. Persistent cookies are kept
   in `~/Library/Browser/cookies` (tab separated); session cookies end with the Browser.
   `milk:cookies` lists them by site; Cmd-Shift-Delete forgets cookies and history.
+* **Script networking rules** (`browserkit::netpolicy`, pure and host-tested): what a page's
+  `fetch` / XMLHttpRequest may do, the web's same-origin policy and CORS as the Fetch standard
+  writes them. `Exchange` takes one request hop by hop (what to send, then what to make of the
+  answer); the pieces are public too. Origins are scheme, host and port; only http, https,
+  `data:` (GET, decoded in place) and the page's own `blob:` addresses exist, and addresses with
+  a user name, a backslash, a number-like host (`127.1`) or one of the refused ports (mail, ssh,
+  ...) are errors. Modes `same-origin`, `cors` and `no-cors` (an opaque answer: status 0, no
+  headers, no body), credentials `omit` / `same-origin` / `include`, redirects `follow` /
+  `error` / `manual` (at most 20, `Authorization` dropped across origins, `Origin: null` once a
+  redirect goes from one foreign origin to another). Requests that are not simple (other
+  methods, custom headers, JSON bodies) are preflighted, and the answer is cached; a response's
+  headers reach the page only if CORS-safelisted or exposed, `Set-Cookie` never. Cookies go
+  only to the page's own site (no third-party cookies, also not after a redirect through
+  another site) and are kept only after the CORS check passed. An https page may not request
+  http; a page on a public host may not request a private-network or loopback address, and
+  `Hop::check_resolved` lets the transport refuse a name that resolves there. Limits: 4 MiB
+  request body, 8 MiB response, 64 headers, 20 redirects, 30 s, 16 requests per tab and 6 per
+  host (more wait in line). Failures print a plain-English line for the console; the page gets
+  only "Failed to fetch". The module docs list every place it is stricter than the standard.
+  Known gaps: no full public suffix list (the cookie code's last-two-labels rule), no IDNA, no
+  HTTP cache or CSP.
 * **Downloads**: an answer that isn't a page (a type other than HTML or text, or
   `Content-Disposition: attachment`) is saved to `~/Downloads` under its name (from
   `filename*` / `filename`, else the address, made safe; a taken name gets ` (2)`, ...),
@@ -182,7 +203,10 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   SameSite, prefixes, expiry, third parties, limits, the file, hostile headers), history,
   bookmarks, the address bar, forms through the engine, downloads' names, certificate details,
   the built-in pages' escaping, painting (and pages of random tags that must paint without a
-  panic) and zoom.
+  panic) and zoom, and the script networking rules (`netpolicy`: origins, address parsing,
+  headers and their guards, CORS and preflight, redirects, cookies, mixed content, limits; table
+  tests (well over a thousand rows) plus fuzzing of addresses, headers and whole exchanges against
+  a hostile server, `NETPOLICY_FUZZ=N` for longer runs).
 * `scripts/browser-test.sh` (default set, about two minutes): a VM against
   `scripts/browser_test_servers.py` on the Mac's 127.0.0.1 only (a DNS server for a made-up zone
   and the test pages). It checks the client protocol, that `/dev/wm` lists the window at once,

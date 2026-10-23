@@ -602,6 +602,64 @@ fn wrap(s: &str, cols: usize) -> Vec<String> {
     out
 }
 
+/// Like `wrap`, but a row ends after a space where it can, so words stay whole. A word longer
+/// than a row, or a row with no text before the break, is cut hard as before.
+fn wrap_words(s: &str, cols: usize) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut n = 0;
+    // Where the row could break (just after its last space) and whether it has text yet.
+    let mut brk: Option<usize> = None;
+    let mut text = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if is_marker(c) {
+            i += 1;
+            continue;
+        }
+        if n == cols {
+            // `c` does not fit.
+            if c == ' ' {
+                // The row ended with a word: the space between it and the next is dropped.
+                out.push(chars[start..i].iter().collect());
+                start = i + 1;
+                i += 1;
+                n = 0;
+                brk = None;
+                text = false;
+                continue;
+            }
+            let word = chars[brk.unwrap_or(i)..]
+                .iter()
+                .take_while(|&&c| c != ' ')
+                .filter(|&&c| !is_marker(c))
+                .count();
+            let cut = match brk {
+                Some(b) if word <= cols => b,
+                _ => i,
+            };
+            out.push(chars[start..cut].iter().collect());
+            start = cut;
+            n = visible_len(&chars[cut..i].iter().collect::<String>());
+            brk = None;
+            text = n > 0;
+        }
+        n += 1;
+        if c == ' ' {
+            if text {
+                brk = Some(i + 1);
+            }
+        } else {
+            text = true;
+        }
+        i += 1;
+    }
+    out.push(chars[start..].iter().collect());
+    out
+}
+
 impl Tab {
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, focused: bool) {
         let cols = ((w - 2 * PAD) / 8).max(4) as usize;
@@ -623,7 +681,7 @@ impl Tab {
             if vis.len() + prompt_rows.len() >= need {
                 break;
             }
-            for seg in wrap(l, cols).into_iter().rev() {
+            for seg in wrap_words(l, cols).into_iter().rev() {
                 vis.push((seg, *c));
             }
         }

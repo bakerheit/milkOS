@@ -3,6 +3,6 @@ name diskutil
 version 1.0.0
 description Disk Utility: usage, snapshots, clones, scrub, encryption and backups
 exec diskutil
-dock Disk #EBB650
+dock Disk Utility #EBB650
 files
 payload-sha256 -

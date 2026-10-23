@@ -1753,6 +1753,12 @@ impl Desktop {
             }
             self.dock_layout = l;
             self.dock_overlay = overlay;
+            // The icons moved under a pointer that did not: its tooltip may now be another one's.
+            let tip = self.dock_tip_at(px, py);
+            if tip != self.tip {
+                self.tip = tip;
+                self.invalidate(PanelKey::Dock);
+            }
             self.invalidate(PanelKey::Tip);
         }
         if self.dock_overlay {
@@ -2240,6 +2246,15 @@ impl Desktop {
     }
 
     /// Hover feedback: traffic-light symbols and the dock's name tips.
+    /// The dock tile whose name shows for a pointer at (x, y), by the current layout.
+    fn dock_tip_at(&self, x: i32, y: i32) -> Option<usize> {
+        if self.mode != Mode::Spaces {
+            self.dock_layout.hit(x, y)
+        } else {
+            None
+        }
+    }
+
     fn hover(&mut self, x: i32, y: i32) {
         self.hover_tabs(x, y);
         // The drawer: the dismiss x follows the pointer.
@@ -2349,11 +2364,7 @@ impl Desktop {
             }
             self.hover_lights = hl;
         }
-        let tip = if self.mode != Mode::Spaces {
-            self.dock_layout.hit(x, y)
-        } else {
-            None
-        };
+        let tip = self.dock_tip_at(x, y);
         if tip != self.tip {
             self.tip = tip;
             self.invalidate(PanelKey::Tip);

@@ -33,6 +33,8 @@ pub enum PanelKey {
     Cell(u32),
     /// The dock's hover name.
     Tip,
+    /// The one-line help under the Spaces overview.
+    SpacesHint,
     /// An open menu bar menu.
     Menu,
     /// The notification centre (notif.rs).
@@ -269,6 +271,9 @@ struct DockItem {
     fg: Color,
     action: DockAction,
 }
+
+/// The line under the Spaces overview.
+const SPACES_HINT: &str = "Click a window to focus   Drag it to another space   Esc to leave";
 
 const DOCK: [DockItem; 9] = [
     DockItem {
@@ -975,15 +980,10 @@ impl Desktop {
                         });
                     }
                 }
-                v.push(Layer::Label {
-                    x: 0,
-                    y: screen_h() - 46,
-                    w: screen_w(),
-                    text: String::from(
-                        "Click a window to focus   Drag it to another space   Esc to leave",
-                    ),
-                    color: MILK,
-                });
+                // On a glass pill: bare text vanishes on a light wallpaper.
+                let w = crate::sysfont::width(SPACES_HINT, false) + 32;
+                let r = Rect::new((screen_w() - w) / 2, screen_h() - 52, w, 28);
+                v.push(spec(PanelKey::SpacesHint, r, R_BUTTON, Style::Glass, true));
             }
         }
         if let Some(i) = self.tip
@@ -1128,6 +1128,7 @@ impl Desktop {
                     p.text_p_center(0, w, 6, &t.name, ESPRESSO, false);
                 }
             }
+            PanelKey::SpacesHint => p.text_p_center(0, w, 6, SPACES_HINT, ESPRESSO, false),
             PanelKey::LaunchInput => self.paint_launch_input(p, w),
             PanelKey::LaunchResults => self.paint_launch_results(p, w),
             PanelKey::Card(i) => self.paint_card(i, p, w, h),
@@ -1735,7 +1736,7 @@ impl Desktop {
             PanelKey::Cell(id) => {
                 self.drag = Some(Drag::Cell { id });
             }
-            PanelKey::Tip => {}
+            PanelKey::Tip | PanelKey::SpacesHint => {}
             PanelKey::Menu => {
                 if let Some(row) = self.menu_row_at(y) {
                     self.menu_activate(row);

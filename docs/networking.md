@@ -210,11 +210,14 @@ eth1, else the default gateway (eth0's).
     * **Window scaling**: we use shift 7, so windows up to 8 MiB. A SYN's window is never
       scaled.
     * **Timestamps**: a millisecond clock. Every ACK of new data gives an RTT sample from
-      the echo. PAWS drops old duplicates (a TSval below TS.Recent).
+      the echo, except an echo older than our latest retransmission timeout (Karn's rule
+      for timestamps: when the peer re-ACKs a resent duplicate it echoes the original
+      send, and the sample would count the RTO wait as round trip). PAWS drops old
+      duplicates (a TSval below TS.Recent).
     * **SACK**: up to 3 blocks with timestamps (4 without), the newest first.
   * **Retransmission timer** (RFC 6298): RTO from SRTT/RTTVAR, between 200 ms and 60 s.
-    Karn's rule applies when there are no timestamps. Backoff is exponential and reset by
-    new ACKs.
+    Karn's rule applies with and without timestamps (above). Backoff is exponential and
+    reset by new ACKs.
   * **Congestion control**: slow start and congestion avoidance (RFC 5681), initial window
     10 segments.
   * **Loss recovery.** It starts on 3 duplicate ACKs, or with SACK when more than two
@@ -767,6 +770,10 @@ It covers:
 * **lossy loopback**: 256 KiB with every 7th packet dropped and 64 KiB with every 3rd
   (data, ACKs, SYN and FIN alike). The bytes must arrive intact, with window scaling,
   SACK and timestamps negotiated and SACK recovery doing some of the resending;
+* **RTT after timeouts**: six times the receiver's ACK is lost (`iface::LO_DROP_FROM_PORT`)
+  and the sender resends after its RTO; srtt must stay near zero and the RTO at 200 ms
+  (taking the echoes of the original sends as samples gave an RTO of ~3.8 s here, and
+  under loss minute-long stalls in the lossy tests);
 * **TIME_WAIT**: the closing side parks the pair without a socket slot, and a new
   connection on the same 4-tuple reuses it;
 * **Path MTU** over loopback, which plays a smaller-MTU path (`iface::LO_MTU`) and answers
@@ -789,6 +796,19 @@ refused=IP:PORT`, passed by net-test.sh) also: 512 KiB TCP echo against the Mac 
 (10.0.2.2) and over IPv6 (`[fec0::2]`, which slirp maps to the Mac's `::1`), a `.test`
 lookup + NXDOMAIN against the Mac's test DNS server, a refused host port. It then prints
 /proc/net.
+
+Every check runs under a **watchdog** (a High priority thread, so it runs even if the net
+thread never sleeps): past 90 s it prints `[net] FAIL <check>: stalled ...` with a dump of
+the TCP connections (`tcp::debug_line`: sequence numbers, timers, RTO, srtt), the loopback
+queue, the net thread's wake-up state and the run queue, and the waiting test gives up. A
+stall fails loudly instead of leaving a silent console.
+
+Stress mode (in `opt/milkos/nettest`): `lossy_rounds=N` runs N more lossy transfers, each with
+its own drop sequence (`Iface::lo_reseed`) at 1 in 7, 5 or 3; `jitter=MS` stalls now and then
+for up to MS ms with IRQs masked, in the stack lock and in the net thread, as a vCPU the host
+deschedules does (`net::JITTER_MS`). **`scripts/net-stress-test.sh [GUESTS [ROUNDS [MS]]]`**
+(defaults 6 30 30, check-all `--full`) boots that many such guests at once and checks each
+passes.
 
 **`scripts/net-test.sh`**: starts `scripts/net_test_servers.py` (TCP echo on 127.0.0.1
 and on `::1` (v6-only), test DNS and HTTP on 127.0.0.1, from a mktemp dir), boots with

@@ -152,6 +152,7 @@ TESTS=(
   "crashtest|f|3600|solo|scripts/crashtest.sh"
   "converttest|f|2400|solo|scripts/converttest.sh"
   "stressloop|f|3600|solo|scripts/stressloop.sh"
+  "net-stress-test|f|900|par|scripts/net-stress-test.sh"
   "releasetest|f|1800|solo|scripts/releasetest.sh"
   "treetest|f|1800|solo|scripts/treetest.sh"
   "mounttime|f|900|solo|scripts/mounttime.sh"

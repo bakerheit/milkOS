@@ -184,6 +184,13 @@ pub struct Tcb {
     /// Without timestamps: (sequence number that acks the timed segment, send time).
     /// Karn: never a resent one.
     rtt_probe: Option<(u32, u64)>,
+    /// TSval of our latest retransmission timeout, until an echo at least that new comes
+    /// back. Karn's rule for timestamps: an echo older than it is of a segment sent before
+    /// the timeout (the peer re-ACKing data it already had echoes its old `ts_recent`), so
+    /// "now - echo" would count the RTO wait as round-trip time. Taking such samples
+    /// inflated srtt/rttvar under loss until the RTO, reset to its base on every ACK,
+    /// stayed at many seconds and every further loss stalled the connection for a minute.
+    rtx_ts: Option<u32>,
     /// Retransmission (or persist) deadline.
     pub timer: Option<u64>,
     persist: bool,
@@ -274,6 +281,7 @@ impl Tcb {
             srtt: 0,
             rttvar: 0,
             rtt_probe: None,
+            rtx_ts: None,
             timer: None,
             persist: false,
             force_probe: false,
@@ -312,6 +320,11 @@ impl Tcb {
         }
     }
 
+    /// (srtt, rttvar, RTO before backoff), for the self-test.
+    pub fn rtt_state(&self) -> (u64, u64, u64) {
+        (self.srtt, self.rttvar, self.rto_base)
+    }
+
     /// Children (in handshake or ready) queued on this listener.
     pub fn queued(&self) -> &[u16] {
         &self.accq[..self.accn as usize]
@@ -329,6 +342,19 @@ impl Tcb {
         self.ssthresh = u32::MAX;
         self.rto = RTO_INIT;
         self.rto_base = RTO_INIT;
+        self.rtx_ts = None;
+    }
+
+    /// An RTT sample from timestamp echo `e` on an ACK of new data, unless the echo
+    /// predates our latest retransmission timeout ([`Tcb::rtx_ts`]).
+    fn sample_ts(&mut self, e: u32, now: u64) {
+        if let Some(r) = self.rtx_ts {
+            if lt(e, r) {
+                return;
+            }
+            self.rtx_ts = None;
+        }
+        self.sample_rtt((tsval(now).wrapping_sub(e) as u64).max(1) * MS);
     }
 
     fn sample_rtt(&mut self, r: u64) {
@@ -884,8 +910,11 @@ pub fn output(st: &mut Stack, i: usize) {
     if !matches!(t.state, TcpState::TimeWait | TcpState::FinWait2) {
         loop {
             let data_end = t.snd_una.wrapping_add(tx.len() as u32);
-            // Resending after a timeout: skip what the peer has SACKed.
+            // Resending after a timeout: skip what the peer has SACKed. Only within the
+            // data: a peer that SACKs our FIN must not keep snd_nxt at data_end for ever
+            // (this loop runs under the stack lock, IRQs masked).
             if lt(t.snd_nxt, t.snd_max)
+                && lt(t.snd_nxt, data_end)
                 && let Some(end) = t.is_sacked(t.snd_nxt)
             {
                 t.snd_nxt = if lt(data_end, end) { data_end } else { end };
@@ -1611,7 +1640,7 @@ fn sync_input(st: &mut Stack, i: usize, seg: &Seg) {
             && e != 0
         {
             t.rtt_probe = None;
-            t.sample_rtt((tsval(now).wrapping_sub(e) as u64).max(1) * MS);
+            t.sample_ts(e, now);
         } else if let Some((pseq, at)) = t.rtt_probe
             && ge(seg.ack, pseq)
         {
@@ -2097,7 +2126,7 @@ pub fn tick(st: &mut Stack) {
 /// One line of a connection's sender and receiver state, for test failures.
 pub fn debug_line(t: &Tcb, txlen: usize, now: u64) -> alloc::string::String {
     alloc::format!(
-        "{} una={} nxt={} max={} txlen={} wnd={} cwnd={} ssth={} pipe={} rec={} nsacked={} high_rxt={} sml={} timer={:?} kick={:?} delack={:?} rto={} rcv_nxt={} nooo={} dupacks={}",
+        "{} una={} nxt={} max={} txlen={} wnd={} cwnd={} ssth={} pipe={} rec={} nsacked={} high_rxt={} sml={} timer_ms={:?} kick_ms={:?} delack_ms={:?} rto={} rto_base={} srtt={} rttvar={} retries={} timeouts={} rcv_nxt={} nooo={} dupacks={}",
         t.state.name(),
         t.snd_una.wrapping_sub(t.iss),
         t.snd_nxt.wrapping_sub(t.iss),
@@ -2111,10 +2140,15 @@ pub fn debug_line(t: &Tcb, txlen: usize, now: u64) -> alloc::string::String {
         t.nsacked,
         t.high_rxt.wrapping_sub(t.iss),
         t.snd_sml.wrapping_sub(t.iss),
-        t.timer.map(|d| d as i64 - now as i64),
-        t.kick.map(|d| d as i64 - now as i64),
-        t.delack.map(|d| d as i64 - now as i64),
+        t.timer.map(|d| (d as i64 - now as i64) / MS as i64),
+        t.kick.map(|d| (d as i64 - now as i64) / MS as i64),
+        t.delack.map(|d| (d as i64 - now as i64) / MS as i64),
         t.rto / MS,
+        t.rto_base / MS,
+        t.srtt / MS,
+        t.rttvar / MS,
+        t.retries,
+        t.timeouts,
         t.rcv_nxt.wrapping_sub(t.irs),
         t.nooo,
         t.dupacks
@@ -2165,6 +2199,7 @@ fn on_timer(st: &mut Stack, i: usize) {
     let t = &mut s.tcb;
     t.rto = (t.rto * 2).min(RTO_MAX);
     t.rtt_probe = None;
+    t.rtx_ts = Some(tsval(now));
     if handshake {
         st.stats.tcp_retrans_segs += 1;
         t.retransmits += 1;
@@ -2184,7 +2219,6 @@ fn on_timer(st: &mut Stack, i: usize) {
         }
         t.snd_nxt = t.snd_una;
     }
-    let _ = now;
     output(st, i);
 }
 

@@ -16,15 +16,127 @@
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::errno::{self, *};
 use super::socket::{self, Family, POLLIN, POLLOUT, SockType, SocketId};
 use super::wire::{Ipv4, Ipv6, SockAddr, checksum, put16};
 use super::{dns, services};
 use crate::fs::errno::{Errno, Result};
+use crate::sync::SpinLock;
 use crate::{fwcfg, kprintln, sched, timer};
 
 const MS: u64 = 1_000_000;
+
+// ---- watchdog -------------------------------------------------------------------------------
+//
+// Every check runs under a watchdog: a High priority thread (the net thread's priority, so
+// it gets the CPU even if the net thread never sleeps) that, when a check has run past its
+// budget, prints a FAIL line and a dump of the TCP connections, the net thread's wake-up
+// state and the run queue, then makes the waiting test give up. A stall leaves evidence
+// instead of a silent console.
+
+/// Normal runs take well under a second per check, the 1-in-3 loss test a few seconds; under
+/// 1-in-3 loss a connect may need its sixth SYN (31 s) and a transfer several backed-off RTOs.
+const ROUND_BUDGET_MS: u64 = 90_000;
+/// When the current check started (0: none running).
+static WD_START: AtomicU64 = AtomicU64::new(0);
+static WD_NAME: SpinLock<String> = SpinLock::new(String::new());
+/// The watchdog fired for the current check: tests stop waiting.
+static WD_FIRED: AtomicBool = AtomicBool::new(false);
+static WD_RUN: AtomicBool = AtomicBool::new(false);
+
+fn watch_start(name: &str) {
+    let mut n = WD_NAME.lock();
+    n.clear();
+    n.push_str(name);
+    drop(n);
+    WD_FIRED.store(false, Ordering::Release);
+    WD_START.store(timer::now_ns().max(1), Ordering::Release);
+}
+
+/// The check is over: did the watchdog fire during it?
+fn watch_stop() -> bool {
+    WD_START.store(0, Ordering::Release);
+    WD_FIRED.swap(false, Ordering::AcqRel)
+}
+
+/// Has the watchdog given up on the current check?
+fn stalled() -> bool {
+    WD_FIRED.load(Ordering::Acquire)
+}
+
+fn watchdog() {
+    while WD_RUN.load(Ordering::Acquire) {
+        sched::sleep_ms(250);
+        let start = WD_START.load(Ordering::Acquire);
+        if start == 0 || WD_FIRED.load(Ordering::Acquire) {
+            continue;
+        }
+        let ran = timer::now_ns().saturating_sub(start);
+        if ran < ROUND_BUDGET_MS * MS {
+            continue;
+        }
+        let name = WD_NAME.lock().clone();
+        kprintln!(
+            "[net] FAIL {name}: stalled, no result after {} ms (watchdog); state:",
+            ran / MS
+        );
+        dump_state();
+        WD_FIRED.store(true, Ordering::Release);
+    }
+}
+
+/// The TCP connections, the loopback queue, the net thread and the run queue.
+pub fn dump_state() {
+    let (planned, irq, kick, net_waits) = super::thread_state();
+    let now = timer::now_ns();
+    kprintln!(
+        "[net]   net thread: {} on its queue, next wake-up in {} ms, irq pending {irq}, kick pending {kick}; readiness waiters {}",
+        if net_waits { "waiting" } else { "not waiting" },
+        if planned == 0 {
+            0
+        } else {
+            (planned as i64 - now as i64) / MS as i64
+        },
+        super::READY_WQ.has_waiters()
+    );
+    let seen = super::try_peek(200, |st| {
+        kprintln!(
+            "[net]   loopback: {} queued, {} dropped; TIME_WAIT {}; tcp next timer in {} ms",
+            st.iface.lo_queued(),
+            st.iface.lo_stats.tx_dropped,
+            st.tw.entries.len(),
+            (st.next_deadline() as i64 - st.now as i64) / MS as i64
+        );
+        for (i, k) in st.socks.iter() {
+            if k.ty != SockType::Stream {
+                continue;
+            }
+            kprintln!(
+                "[net]   sock {i} {} -> {}{}: {}",
+                k.local,
+                k.remote,
+                if k.user_open { "" } else { " (closed by user)" },
+                super::tcp::debug_line(&k.tcb, k.tx.len(), st.now)
+            );
+        }
+    });
+    if seen.is_none() {
+        kprintln!("[net]   stack lock held by another CPU for 20 ms: not looking inside");
+    }
+    for t in sched::threads() {
+        kprintln!(
+            "[net]   thread {} {} {:?} {:?} cpu {} ({} ms run)",
+            t.tid,
+            t.name,
+            t.state,
+            t.prio,
+            t.cpu,
+            t.cpu_ns / MS
+        );
+    }
+}
 
 #[derive(Default)]
 struct Config {
@@ -37,6 +149,11 @@ struct Config {
     khttpd: Option<u16>,
     /// `lossy3=1`: also the 1-in-3 loss test (slow: tens of seconds of RTO backoff).
     heavy_loss: bool,
+    /// Stress mode, `lossy_rounds=N`: N more lossy-loopback rounds, each with its own loss
+    /// pattern (1 in 7, 5 or 3, a different drop sequence every round).
+    lossy_rounds: u32,
+    /// Stress mode, `jitter=MS`: random stalls of up to MS ms ([`super::JITTER_MS`]).
+    jitter_ms: u32,
 }
 
 fn parse_addr(s: &str) -> Option<SockAddr> {
@@ -73,6 +190,8 @@ fn read_config() -> Config {
             Some(("refused", v)) => c.refused = parse_addr(v),
             Some(("khttpd", v)) => c.khttpd = v.parse().ok(),
             Some(("lossy3", v)) => c.heavy_loss = v == "1",
+            Some(("lossy_rounds", v)) => c.lossy_rounds = v.parse().unwrap_or(0),
+            Some(("jitter", v)) => c.jitter_ms = v.parse().unwrap_or(0),
             _ => {}
         }
     }
@@ -85,7 +204,7 @@ fn wait_for(timeout_ms: u64, mut cond: impl FnMut() -> bool) -> bool {
         if cond() {
             return true;
         }
-        if timer::now_ns() >= end {
+        if timer::now_ns() >= end || stalled() {
             return false;
         }
         sched::sleep_ms(5);
@@ -143,13 +262,25 @@ fn pump(
     total: usize,
     timeout_ms: u64,
 ) -> core::result::Result<u64, String> {
+    pump_from(tx, rx, 0, total, timeout_ms)
+}
+
+/// [`pump`] when the first `sent` bytes of the pattern are already queued on `tx`.
+fn pump_from(
+    tx: SocketId,
+    rx: SocketId,
+    sent: usize,
+    total: usize,
+    timeout_ms: u64,
+) -> core::result::Result<u64, String> {
     let t0 = timer::now_ns();
-    let (mut sent, mut got) = (0usize, 0usize);
+    let (mut sent, mut got) = (sent, 0usize);
     let mut buf = [0u8; 2048];
     while got < total {
-        if timer::now_ns() - t0 > timeout_ms * MS {
+        if timer::now_ns() - t0 > timeout_ms * MS || stalled() {
             return Err(alloc::format!("timeout after {sent} sent / {got} received"));
         }
+        super::jitter();
         if sent < total {
             let n = (total - sent).min(buf.len());
             for (k, b) in buf[..n].iter_mut().enumerate() {
@@ -650,20 +781,61 @@ fn tcb_info(id: SocketId) -> (u8, bool, bool, u32, u32, u32, u32) {
 /// TCP over a lossy loopback (every `every`th packet dropped: data, ACKs, SYN and FIN
 /// alike): the bytes must arrive intact, with window scaling, SACK and timestamps on.
 fn test_lossy_tcp(every: u32, total: usize, port: u16) -> core::result::Result<(), String> {
+    lossy_tcp(every, total, port, None).map(|_| ())
+}
+
+/// [`test_lossy_tcp`]; with `seed` (stress mode) the drop sequence restarts from it, and
+/// only a broken transfer fails (a short one may get by without SACK recovery), quietly:
+/// returns (timeouts, longest RTO in ms) for the summary.
+fn lossy_tcp(
+    every: u32,
+    total: usize,
+    port: u16,
+    seed: Option<u32>,
+) -> core::result::Result<(u32, u32), String> {
     use super::iface::LO_DROP_EVERY;
-    let before = super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
+    let before = super::with(|st| {
+        if let Some(x) = seed {
+            st.iface.lo_reseed(x);
+        }
+        (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped)
+    });
+    let l = socket::socket(SockType::Stream).map_err(es)?;
     LO_DROP_EVERY.store(every, core::sync::atomic::Ordering::Relaxed);
     let r = (|| {
-        let l = socket::socket(SockType::Stream).map_err(es)?;
         socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, port)).map_err(es)?;
         socket::listen(l, 4).map_err(es)?;
-        let c = connect(SockAddr::new(Ipv4::LOCALHOST, port), 30_000)
+        // Every SYN can be lost: 32 s covers six of them (1 s RTO, doubling), and a second
+        // connection gets another six, so a 1-in-3 loss rate fails this once in ~500000.
+        let to = SockAddr::new(Ipv4::LOCALHOST, port);
+        let c = connect(to, 32_000)
+            .or_else(|x| {
+                if x == ETIMEDOUT {
+                    connect(to, 32_000)
+                } else {
+                    Err(x)
+                }
+            })
             .map_err(|x| alloc::format!("connect: {}", e(x)))?;
-        if socket::wait(l, POLLIN, 30_000 * MS) == 0 {
-            return Err(String::from("accept: nothing queued"));
-        }
-        let (a, _) = socket::accept(l).map_err(es)?;
-        let r = pump(c, a, total, 120_000);
+        // Some data first: if our handshake ACK is lost, the listener's child only gets
+        // established by a later segment from us, and data is resent for longer (10 tries)
+        // than the SYN-ACK is (5).
+        let first: Vec<u8> = (0..1024).map(pattern).collect();
+        let accepted = match socket::send(c, &first) {
+            Ok(n) if wait_for(60_000, || socket::poll(l) & POLLIN != 0) => {
+                socket::accept(l).map(|(a, _)| (a, n)).map_err(es)
+            }
+            Ok(_) => Err(String::from("accept: nothing queued")),
+            Err(x) => Err(alloc::format!("send: {}", e(x))),
+        };
+        let (a, sent) = match accepted {
+            Ok(v) => v,
+            Err(m) => {
+                let _ = socket::close(c);
+                return Err(m);
+            }
+        };
+        let r = pump_from(c, a, sent, total, 120_000);
         if r.is_err() {
             super::with(|st| {
                 for id in [c, a] {
@@ -677,23 +849,31 @@ fn test_lossy_tcp(every: u32, total: usize, port: u16) -> core::result::Result<(
             });
         }
         let info = tcb_info(c);
-        socket::shutdown(c, socket::Shutdown::Write).map_err(es)?;
-        socket::wait(a, POLLIN, 30_000 * MS);
+        let shut = socket::shutdown(c, socket::Shutdown::Write);
         let mut b = [0u8; 8];
-        let eof = socket::recv(a, &mut b);
+        let eof = if r.is_ok() && shut.is_ok() {
+            socket::wait(a, POLLIN, 30_000 * MS);
+            socket::recv(a, &mut b)
+        } else {
+            Ok(0)
+        };
         let _ = socket::close(a);
         let _ = socket::close(c);
-        let _ = socket::close(l);
         let ns = r?;
+        shut.map_err(|x| alloc::format!("shutdown: {}", e(x)))?;
         if eof != Ok(0) {
             return Err(alloc::format!("no EOF after FIN: {eof:?}"));
         }
         Ok((ns, info))
     })();
+    let _ = socket::close(l);
     LO_DROP_EVERY.store(0, core::sync::atomic::Ordering::Relaxed);
     let (ns, (ws, sack, ts, sack_rx, rexmit, timeouts, max_rto)) = r?;
     let (after, dropped) =
         super::with(|st| (st.stats.tcp_retrans_segs, st.iface.lo_stats.tx_dropped));
+    if seed.is_some() {
+        return Ok((timeouts, max_rto));
+    }
     kprintln!(
         "[net] tcp lossy loopback 1/{every}: {} KiB intact in {} ms ({} packets dropped, {} retransmissions, {} by SACK recovery, {timeouts} timeouts, longest RTO {max_rto} ms; wscale {ws} sack {} ts {})",
         total / 1024,
@@ -717,7 +897,119 @@ fn test_lossy_tcp(every: u32, total: usize, port: u16) -> core::result::Result<(
             "loss recovery never retransmitted from the scoreboard",
         ));
     }
+    Ok((timeouts, max_rto))
+}
+
+/// Stress mode: `rounds` lossy-loopback transfers, each with its own drop sequence and a
+/// loss rate of 1 in 7, 5 or 3.
+fn test_lossy_stress(rounds: u32) -> core::result::Result<(), String> {
+    let t0 = timer::now_ns();
+    let (mut timeouts, mut max_rto) = (0u32, 0u32);
+    for r in 0..rounds {
+        let every = [7, 5, 3][r as usize % 3];
+        let total = if every == 3 { 16 * 1024 } else { 64 * 1024 };
+        let seed = (r + 1).wrapping_mul(0x9e37_79b9) | 1;
+        // Each round gets the watchdog's whole budget.
+        watch_start(&alloc::format!(
+            "tcp lossy stress round {r} (1/{every}, seed {seed:#x})"
+        ));
+        let res = lossy_tcp(every, total, 5040, Some(seed));
+        if watch_stop() {
+            return Err(alloc::format!("round {r} stalled (watchdog)"));
+        }
+        let (t, m) =
+            res.map_err(|m| alloc::format!("round {r} (1/{every}, seed {seed:#x}): {m}"))?;
+        timeouts += t;
+        max_rto = max_rto.max(m);
+    }
+    kprintln!(
+        "[net] tcp lossy stress: {rounds} rounds intact in {} ms ({timeouts} timeouts, longest RTO {max_rto} ms)",
+        (timer::now_ns() - t0) / MS
+    );
     Ok(())
+}
+
+/// Karn's rule with timestamps: the receiver's ACK is lost, the sender times out and
+/// resends, and the receiver re-ACKs the duplicate echoing the timestamp of the original
+/// send. That echo must not become an RTT sample (it would count the RTO wait as round
+/// trip): on loopback srtt stays near zero and the RTO at its 200 ms floor. Taking those
+/// samples inflated the RTO to many seconds under loss and stalled the lossy tests.
+fn test_rtt_after_timeout() -> core::result::Result<(), String> {
+    use super::iface::LO_DROP_FROM_PORT;
+    const PORT: u16 = 5006;
+    const ROUNDS: u32 = 6;
+    let l = socket::socket(SockType::Stream).map_err(es)?;
+    let r = (|| {
+        socket::bind(l, SockAddr::new(Ipv4::LOCALHOST, PORT)).map_err(es)?;
+        socket::listen(l, 1).map_err(es)?;
+        let c = connect(SockAddr::new(Ipv4::LOCALHOST, PORT), 2000)
+            .map_err(|x| alloc::format!("connect: {}", e(x)))?;
+        let a = (|| {
+            if socket::wait(l, POLLIN, 2000 * MS) == 0 {
+                return Err(String::from("accept: nothing queued"));
+            }
+            socket::accept(l).map(|(a, _)| a).map_err(es)
+        })();
+        let a = match a {
+            Ok(a) => a,
+            Err(m) => {
+                let _ = socket::close(c);
+                return Err(m);
+            }
+        };
+        let res = (|| {
+            let state = || {
+                super::with(|st| {
+                    st.socks.get(c.slot()).map_or((0, 0, 0, 0, 0), |s| {
+                        let (srtt, var, base) = s.tcb.rtt_state();
+                        (srtt, var, base, s.tcb.timeouts, s.tx.len())
+                    })
+                })
+            };
+            let mut buf = [0u8; 512];
+            for k in 0..ROUNDS {
+                // The receiver's next ACK is lost on the wire.
+                LO_DROP_FROM_PORT.store((PORT as u32) << 16 | 1, Ordering::Relaxed);
+                let msg = [b'0' + k as u8; 100];
+                socket::send(c, &msg).map_err(|x| alloc::format!("send: {}", e(x)))?;
+                // The data itself got through at once; wait for the resend to be ACKed.
+                if !wait_for(5000, || state().4 == 0) {
+                    return Err(alloc::format!("round {k}: data never acknowledged"));
+                }
+                socket::wait(a, POLLIN, 1000 * MS);
+                let n = socket::recv(a, &mut buf).map_err(es)?;
+                if buf[..n] != msg[..] {
+                    return Err(alloc::format!("round {k}: got {n} bytes back"));
+                }
+            }
+            let (srtt, var, base, timeouts, _) = state();
+            kprintln!(
+                "[net] tcp rtt after timeouts: {timeouts} resends of a lost ACK, srtt {} us, rttvar {} us, rto {} ms",
+                srtt / 1000,
+                var / 1000,
+                base / MS
+            );
+            if timeouts < ROUNDS {
+                return Err(alloc::format!("{timeouts} timeouts, expected {ROUNDS}"));
+            }
+            // Loopback round trips take microseconds; even a host stall now and then stays
+            // far below the 200 ms of each RTO wait that a bad sample would add.
+            if srtt > 50 * MS || base > 200 * MS {
+                return Err(alloc::format!(
+                    "RTO waits taken as round-trip time: srtt {} ms, rto {} ms",
+                    srtt / MS,
+                    base / MS
+                ));
+            }
+            Ok(())
+        })();
+        let _ = socket::close(a);
+        let _ = socket::close(c);
+        res
+    })();
+    LO_DROP_FROM_PORT.store(0, Ordering::Relaxed);
+    let _ = socket::close(l);
+    r
 }
 
 /// TIME_WAIT: the side that closes first parks the pair in the TIME_WAIT table (no socket
@@ -1122,22 +1414,38 @@ pub fn wait_up() {
 pub fn run() {
     let cfg = read_config();
     let mut fails = 0u32;
-    let mut check = |name: &str, r: core::result::Result<(), String>| {
-        if let Err(m) = r {
-            kprintln!("[net] FAIL {name}: {m}");
-            fails += 1;
-        }
-    };
+    // Each check runs under the watchdog (it prints its own FAIL line on a stall).
+    macro_rules! check {
+        ($name:expr, $r:expr $(,)?) => {{
+            let name: &str = $name;
+            watch_start(name);
+            let r: core::result::Result<(), String> = $r;
+            let fired = watch_stop();
+            if let Err(m) = r {
+                kprintln!("[net] FAIL {name}: {m}");
+                fails += 1;
+            } else if fired {
+                fails += 1;
+            }
+        }};
+    }
+    super::JITTER_MS.store(cfg.jitter_ms, Ordering::Relaxed);
+    WD_RUN.store(true, Ordering::Release);
+    drop(sched::spawn_prio(
+        "net-watchdog",
+        sched::Priority::High,
+        watchdog,
+    ));
 
     // 1. DHCP (not in a v6-only boot: there IPv4 must stay off the wire).
     let mut have_ip = false;
     let v6only = super::v4_off();
     if v6only && super::has_device() {
-        check("v6-only", test_v4_off());
+        check!("v6-only", test_v4_off());
     } else if super::has_device() {
         have_ip = wait_dhcp();
         if !have_ip {
-            check(
+            check!(
                 "dhcp",
                 Err("no answer in 3 s, eth0 unconfigured (DHCP keeps trying)".into()),
             );
@@ -1170,7 +1478,7 @@ pub fn run() {
                 Err(x) => kprintln!("[net] ping {gw} seq={seq}: {}", e(x)),
             }
         }
-        check(
+        check!(
             "ping",
             if ok == 3 {
                 Ok(())
@@ -1182,24 +1490,28 @@ pub fn run() {
 
     // 2b. IPv6: link-local and SLAAC addresses, echo to ::1 and to slirp's host.
     if super::has_device() {
-        check("ipv6", test_ipv6());
-        check("ipv6 extension headers", test_ipv6_ext());
-        check("mld", test_mld());
+        check!("ipv6", test_ipv6());
+        check!("ipv6 extension headers", test_ipv6_ext());
+        check!("mld", test_mld());
     }
 
     // 3. Loopback.
-    check("udp loopback", test_loopback_udp());
-    check("tcp loopback", test_loopback_tcp());
-    check("dual-stack", test_dual_stack());
-    check("tcp lossy 1/7", test_lossy_tcp(7, 256 * 1024, 5002));
+    check!("udp loopback", test_loopback_udp());
+    check!("tcp loopback", test_loopback_tcp());
+    check!("dual-stack", test_dual_stack());
+    check!("tcp rtt after timeouts", test_rtt_after_timeout());
+    check!("tcp lossy 1/7", test_lossy_tcp(7, 256 * 1024, 5002));
     if cfg.heavy_loss {
-        check("tcp lossy 1/3", test_lossy_tcp(3, 32 * 1024, 5003));
+        check!("tcp lossy 1/3", test_lossy_tcp(3, 32 * 1024, 5003));
     }
-    check("tcp time-wait", test_time_wait());
-    check("ip fragments", test_fragments());
-    check("ipv6 fragments", test_fragments6());
-    check("path mtu", test_pmtu());
-    check(
+    if cfg.lossy_rounds > 0 {
+        check!("tcp lossy stress", test_lossy_stress(cfg.lossy_rounds));
+    }
+    check!("tcp time-wait", test_time_wait());
+    check!("ip fragments", test_fragments());
+    check!("ipv6 fragments", test_fragments6());
+    check!("path mtu", test_pmtu());
+    check!(
         "refused",
         match connect(SockAddr::new(Ipv4::LOCALHOST, 9), 1000) {
             Err(x) if x == ECONNREFUSED => {
@@ -1215,7 +1527,7 @@ pub fn run() {
     );
     // The kernel HTTP server only when asked (net-test.sh), else userland httpd owns :80.
     if let Some(port) = cfg.khttpd {
-        check(
+        check!(
             "kernel httpd",
             services::enable(port)
                 .map_err(|x| alloc::format!("enable :{port}: {}", e(x)))
@@ -1239,7 +1551,7 @@ pub fn run() {
     if super::has_device()
         && let Some(addr) = cfg.echo6
     {
-        check("tcp echo over IPv6", test_echo(addr));
+        check!("tcp echo over IPv6", test_echo(addr));
     }
 
     // 4. DNS policy (no packets for any of these). Online, example.com would be a real
@@ -1253,7 +1565,7 @@ pub fn run() {
     } else {
         dns::resolve("example.com", 100)
     };
-    check(
+    check!(
         "dns policy",
         match (
             dns::resolve("localhost", 100),
@@ -1275,7 +1587,7 @@ pub fn run() {
     // 5. Host-side tests, only with the test config.
     if have_ip {
         if let (Some(server), Some(name)) = (cfg.dns, cfg.name.as_deref()) {
-            check(
+            check!(
                 "dns",
                 dns::set_server(server)
                     .map_err(|x| alloc::format!("set_server: {}", e(x)))
@@ -1301,11 +1613,11 @@ pub fn run() {
             );
         }
         if let Some(addr) = cfg.echo {
-            check("tcp echo", test_echo(addr));
+            check!("tcp echo", test_echo(addr));
         }
 
         if let Some(addr) = cfg.refused {
-            check(
+            check!(
                 "host refused",
                 match connect(addr, 3000) {
                     Err(x) if x == ECONNREFUSED => {
@@ -1326,6 +1638,8 @@ pub fn run() {
     wait_for(300, || false);
     dump_proc();
     let _ = services::served();
+    WD_RUN.store(false, Ordering::Release);
+    super::JITTER_MS.store(0, Ordering::Relaxed);
     if fails == 0 {
         kprintln!("[net] selftest ok");
     } else {

@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::arp::{self, ArpCache};
 use super::errno::*;
-use super::wire::{Ipv4, Mac, checksum, put16};
+use super::wire::{Ipv4, Mac, be16, checksum, put16};
 use crate::fs::errno::Result;
 use crate::virtio::net::{DevStats, VirtioNet};
 
@@ -46,6 +46,9 @@ pub static LO_DROP_EVERY: AtomicU32 = AtomicU32::new(0);
 /// this (0 = off). A bigger packet is not delivered; it is kept in `lo_too_big` for the
 /// stack to answer like a router would (ICMP fragmentation needed / ICMPv6 packet too big).
 pub static LO_MTU: AtomicU32 = AtomicU32::new(0);
+/// Test knob (the self-test's RTT-after-timeout test): drop the next `count` IPv4 TCP
+/// segments sent from port `port`, packed as `port << 16 | count` (0 = off).
+pub static LO_DROP_FROM_PORT: AtomicU32 = AtomicU32::new(0);
 
 /// IPv4 configuration of a link (eth0: DHCP; eth1: link-local). `addr` unspecified = not
 /// configured.
@@ -672,6 +675,15 @@ impl Iface {
         // SAFETY: slot is free (not between head and head+count); MTU bytes each.
         let buf = unsafe { core::slice::from_raw_parts_mut(self.lo_buf.add(slot * MTU), MTU) };
         let n = build(buf);
+        let pick = LO_DROP_FROM_PORT.load(Ordering::Relaxed);
+        if pick & 0xffff != 0 && n >= IP_HDR + 4 && buf[0] >> 4 == 4 && buf[9] == PROTO_TCP {
+            let ihl = (buf[0] & 0x0f) as usize * 4;
+            if n >= ihl + 4 && be16(buf, ihl) as u32 == pick >> 16 {
+                LO_DROP_FROM_PORT.store(pick - 1, Ordering::Relaxed);
+                self.lo_stats.tx_dropped += 1;
+                return Ok(()); // "lost on the wire"
+            }
+        }
         let lo_mtu = LO_MTU.load(Ordering::Relaxed) as usize;
         if lo_mtu != 0 && n > lo_mtu {
             // "Too big for the next hop": keep enough of it to quote, deliver nothing.
@@ -707,6 +719,17 @@ impl Iface {
             ETH_HDR + build(&mut f[ETH_HDR..ETH_HDR + MTU])
         });
         if ok { Ok(()) } else { Err(ENOBUFS) }
+    }
+
+    /// Restart the lossy-loopback drop sequence ([`LO_DROP_EVERY`]) from `seed` (0: the
+    /// default seed), so the self-test's stress rounds each lose a different set of packets.
+    pub fn lo_reseed(&mut self, seed: u32) {
+        self.lo_seen = seed;
+    }
+
+    /// Packets waiting on the loopback ring.
+    pub fn lo_queued(&self) -> usize {
+        self.lo_count
     }
 
     /// Oldest loopback packet, if any. The slice stays valid until [`lo_pop`](Self::lo_pop)

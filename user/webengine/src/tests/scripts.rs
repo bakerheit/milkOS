@@ -266,29 +266,58 @@ fn hostile_scripts_stay_bounded() {
     if !engine_runs() {
         return;
     }
+    // Deep recursion is a RangeError; a timer flood is refused past the limit.
     let mut h = Host::new();
-    // Deep recursion, a heap bomb, a DOM bomb, a listener storm, timers flood: each one is
-    // refused or stopped, the page goes on (or stops), nothing panics.
-    let (d, lines) = page(
-        "<div id=x></div><script>
+    let (_d, lines) = page(
+        "<script>
            function f(n) { return f(n + 1) + 1; }
            try { f(0); } catch (e) { console.log('deep ' + (e instanceof RangeError)); }
-           try { for (var i = 0; i < 2000000; i++) document.body.appendChild(document.createElement('i')); }
-           catch (e) { console.log('dom ' + e.name); }
-           for (var j = 0; j < 20000; j++) setTimeout(function () {}, 1);
-           console.log('timers queued');
-         </script>
-         <script>
-           var a = []; while (true) a.push(new Array(100000).join('x'));
-         </script>
-         <script>console.log('after the bomb');</script>",
+           var ids = 0;
+           for (var j = 0; j < 20000; j++) if (setTimeout(function () {}, 1)) ids++;
+           console.log('timers ' + ids);
+         </script>",
         &mut h,
-        3,
+        1,
         10.0,
     );
     assert!(has(&lines, "deep true"), "{lines:?}");
-    assert!(has(&lines, "timers queued"), "{lines:?}");
+    assert!(has(&lines, "timers 10000"), "{lines:?}");
+    // A DOM bomb: refused (too many nodes) or stopped (the wrappers fill the heap).
+    let mut h = Host::new();
+    let (d, lines) = page(
+        "<script>
+           try { for (var i = 0; i < 2000000; i++) document.body.appendChild(document.createElement('i')); }
+           catch (e) { console.log('dom ' + e.name); }
+         </script>",
+        &mut h,
+        0,
+        0.0,
+    );
+    assert!(has(&lines, "dom RangeError") || has(&lines, "out of memory"), "{lines:?}");
     assert!(d.page.dom.live() <= Limits::default().max_nodes + 10);
-    // The heap bomb ends the page's scripts.
-    assert!(has(&lines, "out of memory") || has(&lines, "stopped"), "{lines:?}");
+    // A heap bomb ends the page's scripts; the next script doesn't run.
+    let mut h = Host::new();
+    let (d, lines) = page(
+        "<script>var a = []; while (true) a.push(new Array(100000).join('x'));</script>
+         <script>console.log('after the bomb');</script>",
+        &mut h,
+        1,
+        10.0,
+    );
+    assert!(has(&lines, "out of memory"), "{lines:?}");
+    assert!(!has(&lines, "after the bomb"), "{lines:?}");
+    assert!(!d.scripting());
+    // A text bomb in the DOM (outside the script heap): refused past the DOM's budget.
+    let mut h = Host::new();
+    let mut d = doc(
+        "<div id=x></div><script>
+           var s = 'x'; while (s.length < (1 << 22)) s += s;
+           try { for (var i = 0; i < 200; i++) { var p = document.createElement('p'); p.textContent = s; document.body.appendChild(p); } }
+           catch (e) { console.log('text ' + e.name + ' ' + i); }
+         </script>",
+    );
+    d.run(&mut h);
+    let lines: Vec<String> = d.take_console().into_iter().map(|l| l.text).collect();
+    assert!(has(&lines, "text RangeError"), "{lines:?}");
+    assert!(d.page.dom.bytes < crate::dom::MAX_DOM_BYTES + (8 << 20));
 }

@@ -462,7 +462,7 @@ pub fn layout_ifc(
                                 for p in placed.iter_mut() {
                                     p.x += dx;
                                 }
-                                cur += dx;
+                                cur = adv(cur, dx);
                             }
                             left = l2;
                             right = r2;
@@ -496,7 +496,7 @@ pub fn layout_ifc(
                 _ => wraps_root,
             };
             let is_space = matches!(items[j], It::Text { space: true, .. });
-            if !is_space && cur + iw > right && has_content(&items, &placed) {
+            if !is_space && cur.saturating_add(iw) > right && has_content(&items, &placed) {
                 if let Some((after, plen)) = last_break {
                     placed.truncate(plen);
                     j = after;
@@ -517,7 +517,7 @@ pub fn layout_ifc(
                 brk_after,
                 ..
             } = items[j]
-                && cur + iw > right
+                && cur.saturating_add(iw) > right
                 && !has_content(&items, &placed)
                 && boxes[styled as usize].style.break_anywhere
                 && end - start > 1
@@ -527,7 +527,7 @@ pub fn layout_ifc(
                 let mut acc = 0;
                 for (k, ch) in s.char_indices() {
                     let cw = cx.text_width(&font, &s[k..k + ch.len_utf8()]);
-                    if cur + acc + cw > right && fit > 0 {
+                    if cur.saturating_add(acc).saturating_add(cw) > right && fit > 0 {
                         break;
                     }
                     acc += cw;
@@ -568,7 +568,7 @@ pub fn layout_ifc(
                 x: cur,
                 w: iw,
             });
-            cur += iw;
+            cur = adv(cur, iw);
             let brk = match &items[j] {
                 It::Text { brk_after, .. } => *brk_after,
                 It::Atomic(_) => wraps_here,
@@ -597,7 +597,7 @@ pub fn layout_ifc(
                     x: cur,
                     w: e,
                 });
-                cur += e;
+                cur = adv(cur, e);
                 j += 1;
             }
         }
@@ -837,7 +837,7 @@ fn finish_line(
                                 ..
                             } if st2 == styled && shifts[kk] == shifts[k] && s2 == run_end => {
                                 run_end = e2;
-                                run_w += placed[kk].w;
+                                run_w = adv(run_w, placed[kk].w);
                                 kk += 1;
                             }
                             _ => break,
@@ -1084,4 +1084,10 @@ pub fn inline_widths(boxes: &[LBox], cx: &Cx, b: BoxId) -> (Au, Au) {
     mx = mx.max(line - trailing_space);
     mn = mn.max(word);
     (mn, mx.max(mn))
+}
+
+/// A pen position moved on by `d`, bounded (a line of hostile widths can't overflow the
+/// positions computed from it).
+fn adv(a: Au, d: Au) -> Au {
+    a.saturating_add(d).min(1 << 28)
 }

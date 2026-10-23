@@ -67,8 +67,10 @@ fn struct_sizes() {
 }
 
 /// Scripts on the same page: DOM building, queries, and a class change relaid out (the
-/// incremental restyle), timed (`--release -- --nocapture` for real numbers).
+/// incremental restyle), timed: `cargo test --release ... scripted -- --nocapture` (skipped
+/// in debug builds, where the VM is too slow for it to be worth the time).
 #[test]
+#[cfg_attr(debug_assertions, ignore)]
 fn scripted_dom_on_wiki_page() {
     let html = wikigen::wiki_page(1 << 20, 42);
     let mut h = super::script::Host::new();

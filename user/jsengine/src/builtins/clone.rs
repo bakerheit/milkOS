@@ -103,7 +103,8 @@ impl Realm {
             }
             ObjKind::Typed(t) => {
                 let (kind, buf, off, len) = (t.kind, t.buf, t.offset, t.len);
-                if self.buf_detached(buf) {
+                // (a buffer detached by this very transfer is fine: its views follow it)
+                if self.buf_detached(buf) && !cx.memo.contains_key(&(buf.idx, buf.g)) {
                     return Err(dom_exception(
                         self,
                         "DataCloneError",
@@ -119,7 +120,7 @@ impl Realm {
             }
             ObjKind::DataView(d) => {
                 let (buf, off, len) = (d.buf, d.offset, d.len);
-                if self.buf_detached(buf) {
+                if self.buf_detached(buf) && !cx.memo.contains_key(&(buf.idx, buf.g)) {
                     return Err(dom_exception(
                         self,
                         "DataCloneError",

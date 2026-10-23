@@ -75,6 +75,13 @@ test('structuredClone binary types', function () {
   var moved = structuredClone(t, { transfer: [t.buffer] });
   assertEq(Array.from(moved), [5, 6, 7]);
   assertEq(t.length, 0); assertEq(t.buffer.byteLength, 0);
+  var tb = new ArrayBuffer(8), tv = new Uint8Array(tb, 2, 4);
+  var pair = structuredClone([tv, tb], { transfer: [tb] });
+  assertEq(pair[0].byteOffset, 2); assertEq(pair[0].length, 4); assert(pair[0].buffer === pair[1]);
+  assertEq(tb.byteLength, 0);
+  var tb2 = new ArrayBuffer(8);
+  var pair2 = structuredClone([tb2, new Uint8Array(tb2, 4)], { transfer: [tb2] });
+  assert(pair2[1].buffer === pair2[0] && pair2[1].length === 4);
   var b2 = new ArrayBuffer(4);
   structuredClone(null, { transfer: [b2] });
   assertEq(b2.byteLength, 0);

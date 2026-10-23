@@ -692,6 +692,13 @@ fn host_bytes_in_and_out() {
         .eval("new DataView(new ArrayBuffer(10), 2, 5)", "b.js")
         .unwrap();
     assert_eq!(r.buffer_bytes(v).map(|b| b.len()), Some(5));
+    // How the console shows them.
+    let v = r.eval("new Uint8Array([1, 2, 3])", "b.js").unwrap();
+    assert_eq!(r.inspect(v), "Uint8Array(3) [1, 2, 3]");
+    let v = r.eval("new Float32Array(150)", "b.js").unwrap();
+    assert!(r.inspect(v).ends_with(", … 50 more]"));
+    let v = r.eval("new ArrayBuffer(8)", "b.js").unwrap();
+    assert_eq!(r.inspect(v), "ArrayBuffer { byteLength: 8 }");
     // Not bytes.
     let o = r.new_object();
     assert!(r.buffer_bytes(o).is_none());

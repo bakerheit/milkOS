@@ -365,3 +365,47 @@ test('big buffers and limits', function () {
   assertThrows(RangeError, function () { new Float64Array(Math.pow(2, 40)); });
   assertThrows(RangeError, function () { new Uint8Array({ length: Math.pow(2, 40) }); });
 });
+test('memory churn', function () {
+  for (var i = 0; i < 200; i++) {
+    var b = new ArrayBuffer(8 << 20);
+    new Uint8Array(b)[0] = 1;
+  }
+  assert(true);
+});
+test('reduce with many elements keeps nothing alive', function () {
+  var a = new Float64Array(100000);
+  a.fill(1);
+  assertEq(a.reduce(function (s, x) { return s + x; }, 0), 100000);
+});
+test('typed arrays in the rest of the language', function () {
+  var a = new Uint8Array([3, 1, 2]);
+  assertEq([].concat(a).length, 1, 'not spreadable by concat');
+  assertEq(Array.from(a).sort().join(), '1,2,3');
+  assertEq(Object.assign({}, new Uint8Array([4, 5]))[1], 5);
+  assertEq({ ...new Uint8Array([4, 5]) }[0], 4);
+  assertEq(JSON.stringify(Array.from(new Float32Array([0.5]))), '[0.5]');
+  assertEq(new Uint8Array([1, 2, 3]).map(String).join('|'), '1|2|3');
+  assertEq(Array.prototype.join.call(a, '+'), '3+1+2');
+  assertEq(typeof a, 'object');
+  assertEq(a instanceof Object, true);
+  var m = new Map([[a, 1]]);
+  assertEq(m.get(a), 1);
+  var w = new WeakMap(); w.set(a, 2); assertEq(w.get(a), 2);
+  var p = new Promise(function (res) { res(a); });
+  assertEq(Object.getPrototypeOf(a), Uint8Array.prototype);
+  assertEq(Reflect.ownKeys(a).join(), '0,1,2');
+  assertEq(Reflect.set(a, 5, 1), true);
+  assertEq(Reflect.has(a, 5), false);
+  assertEq(Reflect.get(a, 1), 1);
+  assertEq(Reflect.defineProperty(a, 7, { value: 1 }), false);
+  var s = '';
+  for (var k in a) s += k;
+  assertEq(s, '012');
+  assertEq(Object.entries(a).join(';'), '0,3;1,1;2,2');
+  assertEq(Object.values(a).join(), '3,1,2');
+  with_sort: {
+    var z = new Int8Array([5, -5, 0]);
+    z.sort();
+    assertEq(z.join(), '-5,0,5');
+  }
+});

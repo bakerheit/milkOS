@@ -879,7 +879,6 @@ fn reduce_impl(r: &mut Realm, this: Val, args: &[Val], right: bool) -> Res<Val> 
         while n < len {
             let k = if right { len - 1 - n } else { n };
             let v = r.typed_get(o, k).unwrap_or(Val::Undef);
-            r.temps.push(acc);
             acc = r.call_v(f, Val::Undef, &[acc, v, Val::num(k as f64), Val::Obj(o)])?;
             n += 1;
         }

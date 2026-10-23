@@ -139,7 +139,9 @@ fn encoder_encode_into(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
         read += units;
         i += units;
     }
-    r.typed_bytes_mut(dest)[..written].copy_from_slice(&out);
+    if let Some(d) = r.typed_bytes_mut(dest).get_mut(..written) {
+        d.copy_from_slice(&out);
+    }
     let o = r.new_plain();
     let rk = r.key_str("read");
     let wk = r.key_str("written");

@@ -107,22 +107,34 @@ pub extern "C" fn kmain() -> ! {
     timer::init();
     uart::init();
     udrv::init_policy();
+    // Which of the slow boot self-tests run (opt/milkos/selftest; by default none).
+    selftest::read_option();
     virtio::init();
     crypto::init();
     sync::irq_enable();
-    selftest::run();
+    if selftest::wants(selftest::TIMER) {
+        selftest::run();
+    }
     memtest::run();
     fs::init();
+    // Crash-test boots (opt/milkos/test) always; the fs self-test only if asked for.
     fs::selftest::run();
     sched::init();
     smp::init();
-    sched::selftest::run();
+    if selftest::wants(selftest::SCHED) {
+        sched::selftest::run();
+    }
     audit::init();
     journal::init();
     sysstat::init();
     net::init();
     net::tls::init();
-    net::selftest::run();
+    if selftest::wants(selftest::NET) {
+        net::selftest::run();
+    } else {
+        // The network is up when the shell is, self-test or not.
+        net::selftest::wait_up();
+    }
     net::tls::selftest();
     audio::init();
     udrv::init_files();

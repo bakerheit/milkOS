@@ -10,10 +10,11 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 BOOTS="${1:-8}"
 T="$(mktemp -d /tmp/milk-stress.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 QPID=""
@@ -25,7 +26,7 @@ for b in $(seq "$BOOTS"); do
   scripts/mkfat.sh "$FAT" 40 STRESS >/dev/null
   SOCK="$T/s$b.sock"; LOG="$T/boot$b.log"
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$FS,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
     -drive "file=$FAT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 2>/dev/null &
@@ -57,5 +58,5 @@ for b in $(seq "$BOOTS"); do
   [ "$host" = clean ] && [ "$fat" = clean ] && [ "$kcheck" = clean ] || FAILS=$((FAILS + 1))
 done
 echo
-[ $FAILS = 0 ] && echo "stressloop: PASS, $BOOTS boots ($T)" || echo "stressloop: FAIL ($FAILS) ($T)"
+if [ $FAILS = 0 ]; then echo "stressloop: PASS, $BOOTS boots"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "stressloop: FAIL ($FAILS) ($T)"; fi
 exit $FAILS

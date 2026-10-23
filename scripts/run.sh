@@ -46,6 +46,10 @@ fi
 # `echo "info registers -a" | nc -U /tmp/x.sock`).
 MON_ARGS=()
 [ -n "${MILK_MONITOR:-}" ] && MON_ARGS=(-monitor "unix:$MILK_MONITOR,server,nowait")
+# MILK_SELFTEST=full: run every boot self-test (timer, crypto vectors, fs, scheduler, network;
+# several seconds), or a comma list of them (e.g. sched,net). The default boot skips them
+# (kernel/src/selftest.rs; scripts/selftest-boot.sh is the test that runs them all).
+[ -n "${MILK_SELFTEST:-}" ] && MON_ARGS+=(-fw_cfg "name=opt/milkos/selftest,string=$MILK_SELFTEST")
 # MILK_DRIVERS="rng=kernel sound=user": which driver runs each device, the kernel's or the
 # user-space one (default: user for both, the kernel's as the fallback; docs/drivers.md).
 [ -n "${MILK_DRIVERS:-}" ] && MON_ARGS+=(-fw_cfg "name=opt/milkos/drivers,string=$MILK_DRIVERS")

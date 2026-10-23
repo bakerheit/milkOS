@@ -10,14 +10,14 @@ cd "$(dirname "$0")/.."
 N="${1:-50000}"
 T="$(mktemp -d /tmp/milk-treetest.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/tree.img"
 $M mkfs "$IMG" --size 256M >/dev/null
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
 QPID=$!
@@ -33,4 +33,4 @@ kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
 kill "$DPID" 2>/dev/null || true; wait "$DPID" 2>/dev/null || true
 tr -d '\r' < "$LOG" | grep -a "milkfs treetest:" | sed 's/^milkfs treetest: /  /'
 $M check "$IMG" | tail -1 | sed 's/^/host /'
-echo "(logs: $T)"
+if [ "${MILK_KEEP:-}" = 1 ]; then echo "(logs: $T)"; else rm -rf "$T" || true; fi

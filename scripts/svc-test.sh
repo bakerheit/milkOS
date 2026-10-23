@@ -12,11 +12,12 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-svc.XXXXXX)"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/fs.img"
@@ -28,7 +29,7 @@ boot() { # name steps...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   qemu-system-aarch64 -M virt -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-    -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+    -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
     -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
@@ -63,4 +64,4 @@ L2="$(boot b2 \
 echo "$L2" > "$T/b2.txt"
 echo "$L2" | grep -q "user/print\[[0-9]*\]: $MARK" && ok "the journal survived a reboot: $(echo "$L2" | grep -m1 "user/print.*$MARK")" || bad "marker not in the journal after reboot"
 echo "$L2" | grep -A1 "services logs --this-boot | text find --count" | grep -qx 0 && ok "services logs --this-boot shows only this boot" || bad "services logs --this-boot"
-[ "$FAIL" = 0 ] && echo "svc-test: PASS ($T)" || { echo "svc-test: FAIL ($T)"; exit 1; }
+if [ "$FAIL" = 0 ]; then echo "svc-test: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "svc-test: FAIL ($T)"; exit 1; fi

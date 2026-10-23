@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "net-bench: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -41,7 +41,7 @@ print(*[s.getsockname()[1] for s in ss])")
 boot() { # name mac lport rport netdev
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 \
     -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$1.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -netdev "$5" -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$3,remote.type=inet,remote.host=127.0.0.1,remote.port=$4" \
@@ -83,4 +83,4 @@ printf '%-16s %8s MiB/s\n' "guest -> host" "$UP" "host -> guest" "$DOWN" "guest 
 printf 'net-bench: %s MiB per run, %s kernel, smp %s\n' "$MIB" "$PROFILE" "${MILK_SMP:-4}"
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true

@@ -13,7 +13,7 @@ SAMPLES="${1:-150}"
 WORK="$(mktemp -d /tmp/milk-flicker.XXXXXX)"
 SOCK="$WORK/q.sock"
 LOG="$WORK/serial.log"
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"

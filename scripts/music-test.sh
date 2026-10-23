@@ -9,6 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 WORK="${1:-$(mktemp -d /tmp/milk-music-test.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$WORK"
 SRC=rootfs/System/Music/morning-pasture.wav
 ok=1
@@ -17,4 +18,6 @@ python3 -I scripts/music_check.py "$WORK/music.wav" "$SRC" --min-secs 2.5 || ok=
 MILK_SOUND_WAV="$WORK/musicpause.wav" scripts/wm-demo.sh musicpause "$WORK/musicpause.png" >/dev/null
 python3 -I scripts/music_check.py "$WORK/musicpause.wav" "$SRC" --min-secs 1.2 --max-secs 2.4 || ok=0
 echo "(screenshots and recordings in $WORK)"
-[ "$ok" = 1 ] && echo "music-test: PASS" || { echo "music-test: FAIL"; exit 1; }
+[ "$ok" = 1 ] || { echo "music-test: FAIL"; exit 1; }
+[ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ] && { rm -rf "$WORK" || true; }
+echo "music-test: PASS"

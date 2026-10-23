@@ -9,12 +9,13 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-upgrade.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 
@@ -41,7 +42,7 @@ $M check "$IMG" | grep -q "milkfs v0" && ok "v0 image with v0 extents" || bad "v
 
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
 QPID=$!
@@ -98,7 +99,7 @@ $M check "$IMG" > "$T/check2.txt" 2>&1 && ok "host check clean after the move" |
 echo "-- second boot: nothing left to move"
 LOG2="$T/serial2.log"; rm -f "$SOCK" "$T/done"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
 QPID=$!
@@ -112,5 +113,5 @@ echo "$L2" | grep -aq "^written before the move" && ok "second boot: the home is
 echo "$L2" | grep -aq "layout: moved" && bad "second boot moved something again" || ok "second boot: no move (idempotent)"
 echo "$L2" | grep -aq "built-in app(s) copied" && bad "second boot copied the built-in apps again" || ok "second boot: built-in apps unchanged, not rewritten"
 echo
-[ $FAIL = 0 ] && echo "upgradetest: PASS ($T)" || echo "upgradetest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "upgradetest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "upgradetest: FAIL ($T)"; fi
 exit $FAIL

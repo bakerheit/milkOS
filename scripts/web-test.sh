@@ -35,7 +35,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "web-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -53,7 +53,7 @@ echo "servers: dns 127.0.0.1:$P_dns (udp+tcp), http 127.0.0.1:$H (pid $SPID); gu
 # ---- 1. msh ----
 SERIAL="$WORK/serial.sock"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
@@ -62,7 +62,7 @@ qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -de
 QPID=$!
 P='wait:msh:/\$ '
 python3 -I "$REPO/scripts/serial_drive.py" "$SERIAL" "$LOG" \
-  'wait@240:\[net\] selftest' "$P" \
+  'wait@240:msh:/\$ ' \
   'send:network status' 'wait:internet +on' "$P" \
   'send:network lookup www.milk.test' 'wait:network lookup: ' "$P" \
   'send:network lookup www.milk.test' 'wait:network lookup: ' "$P" \
@@ -132,4 +132,5 @@ echo "---- test server log ----"
 cat "$WORK/servers.log"
 cleanup
 trap - EXIT
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "web-test: PASS"

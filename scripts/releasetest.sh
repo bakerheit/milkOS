@@ -12,6 +12,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$(pwd)"
 V="$(tr -d '[:space:]' < VERSION)"
 FAIL=0
@@ -36,10 +37,10 @@ headless() { # name commands...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   env -i HOME="$HOME" PATH="$CLEANPATH" /bin/bash -c "$GO" "$B/milkOS.command" \
-    --offline --headless --serial "unix:$SOCK,server,nowait" >"$T/$name.out" 2>&1 &
+    --offline --headless --serial "unix:$SOCK,server=on,wait=on" >"$T/$name.out" 2>&1 &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  local args=("wait:$P" "send:pause 1" "wait:$P") # the first command only lets the boot finish
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print REL""-DONE" "wait:REL-DONE" "done:$T/$name.done" &
   local DPID=$!
@@ -101,5 +102,5 @@ if [ -s "$T/screen.png" ]; then
 else bad "no screendump"; fi
 rm -f "$B/disks/"*.img
 echo
-[ $FAIL = 0 ] && echo "releasetest: PASS ($T)" || echo "releasetest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "releasetest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "releasetest: FAIL ($T)"; fi
 exit $FAIL

@@ -249,7 +249,9 @@ fn hostile_blobs_never_panic() {
         }
     }
     assert!(parsed > 1000);
-    assert!(t.elapsed().as_secs() < 60);
+    // A guard against runaway parsing, not a benchmark: a debug build on a loaded Mac can take
+    // over a minute here.
+    assert!(t.elapsed().as_secs() < 240);
 }
 
 #[test]

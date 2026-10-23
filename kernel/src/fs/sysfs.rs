@@ -251,8 +251,9 @@ pub fn init() -> Result<()> {
     milkfs::sysfs(&fsdir.add_dir("milkfs"));
     super::search::sysfs(&fsdir.add_dir("search"));
     super::pagecache::sysfs(&root.add_dir("fs").add_dir("pagecache"));
-    root.add_dir("kernel")
-        .add_file("version", || String::from(procfs::VERSION));
+    let kernel = root.add_dir("kernel");
+    kernel.add_file("version", || String::from(procfs::VERSION));
+    super::clock::sysfs(&kernel);
     super::mount(super::layout::KERNEL, Arc::clone(&fs) as _)?;
     Ok(())
 }

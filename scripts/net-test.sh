@@ -17,6 +17,7 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 REPO="$PWD"
 HTTP_PORT="${HTTP_PORT:-8088}"
 # Short path: the serial unix socket lives here (macOS caps those at 104 bytes).
@@ -34,7 +35,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "net-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -63,13 +64,13 @@ echo "helpers: echo 127.0.0.1:$P_echo and [::1]:$P_echo6, dns 127.0.0.1:$P_dns, 
 SERIAL="$WORK/serial.sock"
 
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -m 512M \
-  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=off" -serial chardev:s0 \
+  -kernel "$KERNEL" -chardev "socket,id=s0,path=$SERIAL,server=on,wait=on" -serial chardev:s0 \
   -display none \
   -global virtio-mmio.force-legacy=false \
   -device virtio-keyboard-device -device virtio-tablet-device \
   -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$HTTP_PORT-:80,hostfwd=tcp:127.0.0.1:$KH_PORT-:8080,hostfwd=tcp:127.0.0.1:$NC_PORT-:7777" \
   -device virtio-net-device,netdev=n0 \
-  -fw_cfg "name=opt/milkos/nettest,string=$CFG" &
+  -fw_cfg "name=opt/milkos/nettest,string=$CFG" -fw_cfg name=opt/milkos/selftest,string=net &
 QPID=$!
 echo "qemu pid $QPID, serial log $LOG"
 # Console: log everything; once msh is up, run the network tools.
@@ -220,5 +221,5 @@ echo "---- host helper log ----"
 cat "$WORK/servers.log"
 cleanup
 trap - EXIT
-rm -rf "$WORK"
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "net-test: PASS"

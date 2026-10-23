@@ -3478,6 +3478,10 @@ pub fn run() {
     if super::milkfs::crashtest::run() {
         return;
     }
+    // The rest is a slow boot self-test (opt/milkos/selftest=fs).
+    if !crate::selftest::wants(crate::selftest::FS) {
+        return;
+    }
     let mut t = T {
         checks: 0,
         failed: 0,

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Boot + serial console soak. N boots; each must
-#   1. pass the boot self-tests (`[sched-test] PASS`, `[proc-test] PASS`: the scheduler
-#      self-test is a good wakeup/IPI stress on its own),
+#   1. pass the boot self-tests (`[proc-test] PASS`, every boot; with MILK_SELFTEST=sched or
+#      full also `[sched-test] PASS`: the scheduler self-test is a good wakeup/IPI stress on
+#      its own, and check-all's --full soaks ask for it),
 #   2. reach the shell prompt,
 #   3. echo back M short commands typed over the UART one second apart (`print tickK`, a
 #      burst of bytes per line, the way a person or a script types),
@@ -10,6 +11,7 @@
 # wakeups and the scheduler's wakeups during boot.
 #
 #   scripts/serial-soak.sh [boots] [commands]   (default 5 14; 0 commands = boot tests only)
+#   MILK_SELFTEST=sched (or full, passed on by run.sh): run and check the scheduler self-test.
 #   MILK_SMP=1 for one CPU, RELEASE=1 for the release kernel (as run.sh).
 #   MILK_FEATURES=smp-join-delay: secondaries take 200 ms between coming online and
 #   joining the scheduler, so the self-tests run while CPUs join (the window of the
@@ -20,6 +22,7 @@
 # via a qemu monitor socket. Only the qemu processes started here are killed (by PID).
 set -uo pipefail
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 BOOTS="${1:-5}"
 CMDS="${2:-14}"
 export MILK_FS="${MILK_FS:-/tmp/serial-soak-fs.img}"
@@ -30,7 +33,7 @@ PROFILE=debug
 [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
-cargo build -q ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} || exit 1
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q ${RELEASE:+--release} ${MILK_FEATURES:+--features "$MILK_FEATURES"} || exit 1
 
 # has PATTERN: the log (CRs stripped) has a line matching the fixed string / regex.
 has() { tr -d '\r' < "$log" | grep -q "$@"; }
@@ -64,13 +67,16 @@ dump() {
   fi
 }
 
+case ",${MILK_SELFTEST:-}," in *,sched,*|*,full,*) SCHED_TEST=1 ;; *) SCHED_TEST=0 ;; esac
 pass=0
 fail=0
 for b in $(seq 1 "$BOOTS"); do
   log="$LOGS/boot$b.log"
   mon="$LOGS/mon$b.sock"
   : > "$log"
-  # Typist: wait for the shell prompt, then one command a second.
+  # Typist: wait for the shell prompt, then one command a second; then keep stdin open until
+  # this boot is over (the stop file), and no longer: `wait` on the pipeline waits for it too.
+  stop="$LOGS/stop$b"
   (
     for _ in $(seq 1 900); do
       grep -q 'msh:/' "$log" 2>/dev/null && break
@@ -81,11 +87,11 @@ for b in $(seq 1 "$BOOTS"); do
       printf 'print tick%s\n' "$k"
       sleep 1
     done
-    sleep 60 # keep stdin open until we're killed
+    for _ in $(seq 1 600); do [ -e "$stop" ] && break; sleep 0.1; done
   ) | MILK_OFFLINE=1 MILK_MONITOR="$mon" MILK_SMP="$SMP" scripts/run.sh headless > "$log" 2>&1 &
   qpid=$!
   stage=""
-  if ! wait_for 60 -F '[sched-test] PASS'; then
+  if [ "$SCHED_TEST" = 1 ] && ! wait_for 60 -F '[sched-test] PASS'; then
     stage="sched-test"
   elif ! wait_for 60 -F '[proc-test] PASS'; then
     stage="proc-test"
@@ -101,14 +107,16 @@ for b in $(seq 1 "$BOOTS"); do
   bad=$(grep -c 'PANIC\|EXCEPTION' "$log")
   if [ -z "$stage" ] && [ "$got" = "$CMDS" ] && [ "$rescued" = 0 ] && [ "$bad" = 0 ]; then
     pass=$((pass + 1))
-    echo "boot $b: ok (self-tests, $got/$CMDS commands)"
+    echo "boot $b: ok (self-tests$([ "$SCHED_TEST" = 1 ] && echo ' with sched-test'), $got/$CMDS commands)"
   else
     fail=$((fail + 1))
     echo "boot $b: FAIL (stuck at: ${stage:-none}; $got/$CMDS commands; fallback rescues $rescued; panics $bad; log $log)"
     dump
   fi
   kill "$qpid" 2>/dev/null
+  touch "$stop"
   wait "$qpid" 2>/dev/null
 done
 echo "serial-soak ($PROFILE${MILK_FEATURES:+ +$MILK_FEATURES}, smp $SMP, $BOOTS boots x $CMDS commands): $pass passed, $fail failed. Logs: $LOGS"
-[ "$fail" = 0 ]
+[ "$fail" = 0 ] || exit 1
+[ "${MILK_KEEP:-}" = 1 ] || { rm -rf "$LOGS" || true; echo "(passed: $LOGS removed)"; }

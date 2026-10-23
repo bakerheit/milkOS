@@ -28,7 +28,7 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "net6-test: FAIL: $*" >&2; echo "(logs in $WORK)" >&2; exit 1; }
 
-cargo build ${RELEASE:+--release} -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build ${RELEASE:+--release} -q
 PROFILE=debug; [ -n "${RELEASE:-}" ] && PROFILE=release
 ELF="target/aarch64-unknown-none-softfloat/$PROFILE/milkos-kernel"
 KERNEL="$ELF.bin"
@@ -52,12 +52,12 @@ boot() {
   local name=$1 mac=$2 lp=$3 rp=$4 slirp=$5
   shift 5
   qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 2 -m 512M \
-    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=off" -serial chardev:s0 \
+    -kernel "$KERNEL" -chardev "socket,id=s0,path=$WORK/$name.sock,server=on,wait=on" -serial chardev:s0 \
     -display none -global virtio-mmio.force-legacy=false \
     -netdev "user,id=n0,ipv4=off$slirp" -device virtio-net-device,netdev=n0 \
     -netdev "dgram,id=d0,local.type=inet,local.host=127.0.0.1,local.port=$lp,remote.type=inet,remote.host=127.0.0.1,remote.port=$rp" \
     -device "virtio-net-device,netdev=d0,mac=$mac" \
-    -fw_cfg "name=opt/milkos/net,string=v6only=1" "$@" 2>>"$WORK/$name.qemu.err" &
+    -fw_cfg "name=opt/milkos/net,string=v6only=1" -fw_cfg name=opt/milkos/selftest,string=net "$@" 2>>"$WORK/$name.qemu.err" &
   PIDS+=($!)
 }
 boot alice 02:6d:6b:64:0a:0a "$PA" "$PB" "" -fw_cfg "name=opt/milkos/nettest,string=echo6=[fec0::2]:$P_echo6"
@@ -129,4 +129,7 @@ check "$A" "network ping -6 bob.local (AAAA over ff02::fb)" "bytes from $B6: icm
 check "$A" "drop send bob over IPv6" "drop: sent v6\\.txt to bob"
 check "$B" "bob's receiver: only the IPv6 address" "drop: receiving as bob \\(fingerprint [0-9a-f ]{19}\\) on \\[$B6\\]:5360;"
 check "$B" "bob got the file" "drop: received /Users/milk/Downloads/v6\\.txt"
+cleanup
+trap - EXIT
+[ "${MILK_KEEP:-}" = 1 ] || rm -rf "$WORK" || true
 echo "net6-test: PASS"

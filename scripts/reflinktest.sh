@@ -10,12 +10,13 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="$(mktemp -d /tmp/milk-reflink.XXXXXX)"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/r.img"
@@ -24,7 +25,7 @@ $M mkfs "$IMG" --size 64M >/dev/null
 $M put "$IMG" /d/big.bin "$T/big.bin" >/dev/null
 SOCK="$T/serial.sock"; LOG="$T/serial.log"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp "${MILK_SMP:-4}" -m 512M -kernel "$ELF.bin" \
-  -display none -monitor none -serial "unix:$SOCK,server,nowait" \
+  -display none -monitor none -serial "unix:$SOCK,server=on,wait=on" \
   -global virtio-mmio.force-legacy=false \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 2>/dev/null &
 QPID=$!
@@ -102,5 +103,5 @@ csz=$(stat -f %z "$COW_SRC")
 [ -n "$r3" ] && [ "$r3" -le "$r1" ] && ok "deleting it frees its pages: RootFiles $r3 kB" || bad "RootFiles after delete: $r3"
 echo "$L" | grep -a -A1 "files info /Commands/cowsay" | grep -aqi "no such\|not found\|doesn't exist" && ok "the deleted built-in file is gone" || bad "cowsay still there: $(echo "$L" | grep -a -A1 "files info /Commands/cowsay")"
 echo
-[ $FAIL = 0 ] && echo "reflinktest: PASS ($T)" || echo "reflinktest: FAIL ($T)"
+if [ $FAIL = 0 ]; then echo "reflinktest: PASS"; [ "${MILK_KEEP:-}" = 1 ] || rm -rf "$T" || true; else echo "reflinktest: FAIL ($T)"; fi
 exit $FAIL

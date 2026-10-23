@@ -9,13 +9,15 @@
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
+source scripts/grepq.sh # grep -q that reads all its input (pipefail-safe)
 T="${1:-$(mktemp -d /tmp/milk-disktest.XXXXXX)}"
+OWN_WORK=1; [ -n "${1:-}" ] && OWN_WORK=0 # remove it on a pass only if this script made it
 mkdir -p "$T"
 M="python3 scripts/mkmilkfs.py"
 FAIL=0
 ok() { echo "  ok: $*"; }
 bad() { echo "  FAIL: $*"; FAIL=1; }
-cargo build -q
+[ "${MILK_PREBUILT:-}" = 1 ] || cargo build -q
 ELF="target/aarch64-unknown-none-softfloat/debug/milkos-kernel"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$ELF.bin"
 IMG="$T/a.img"
@@ -31,7 +33,7 @@ $M mkdir "$IMG" /Users/milk >/dev/null
 SOCK="$T/s.sock"; QMP="$T/q.sock"; LOG="$T/serial.log"
 : > "$LOG"
 qemu-system-aarch64 -M virt -object rng-random,id=rng0,filename=/dev/urandom -device virtio-rng-device,rng=rng0 -accel hvf -cpu host -smp 4 -m 512M -rtc base=localtime \
-  -kernel "$ELF.bin" -serial "unix:$SOCK,server,nowait" -device virtio-gpu-device -display none \
+  -kernel "$ELF.bin" -serial "unix:$SOCK,server=on,wait=on" -device virtio-gpu-device -display none \
   -global virtio-mmio.force-legacy=false -device virtio-keyboard-device -device virtio-tablet-device \
   -drive "file=$IMG,if=none,format=raw,id=hd0" -device virtio-blk-device,drive=hd0 \
   -drive "file=$VAULT,if=none,format=raw,id=hd1" -device virtio-blk-device,drive=hd1 \
@@ -118,4 +120,5 @@ q type "$PW" key ret sleep 4
 ser "send:text show /System/Kernel/fs/milkfs/lock" "wait:$P"
 out "text show /System/Kernel/fs/milkfs/lock" | grep -q "Vault unlocked" && ok "Unlock with the passphrase mounted the Vault again" || bad "Vault still locked: $(out "text show /System/Kernel/fs/milkfs/lock")"
 grep -aqi "panic" "$LOG" && bad "a kernel panic in the serial log" || ok "no panic"
-if [ "$FAIL" = 0 ]; then echo "disk-test: PASS (screenshots in $T)"; else echo "disk-test: FAIL (logs and screenshots in $T)"; exit 1; fi
+if [ "$FAIL" = 0 ] && [ "$OWN_WORK" = 1 ] && [ "${MILK_KEEP:-}" != 1 ]; then rm -rf "$T" || true; echo "disk-test: PASS"
+elif [ "$FAIL" = 0 ]; then echo "disk-test: PASS (screenshots in $T)"; else echo "disk-test: FAIL (logs and screenshots in $T)"; exit 1; fi

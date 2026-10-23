@@ -94,9 +94,14 @@ pub fn intrinsic(boxes: &[LBox], cx: &Cx, f: BoxId) -> (Au, Au) {
 
 /// The content height of an item laid out at content width `w`.
 fn height_at(boxes: &mut Vec<LBox>, cx: &Cx, b: BoxId, cb_w: Au, w: Au, cb_h: Option<Au>) -> Au {
+    if let Some(h) = cx.heights.borrow().get(&(b, w, cb_h)) {
+        return *h;
+    }
     block::layout_sized(boxes, cx, b, cb_w, w, None, cb_h);
     let bx = &boxes[b as usize];
-    bx.h - bx.border[0] - bx.border[2] - bx.padding[0] - bx.padding[2]
+    let h = bx.h - bx.border[0] - bx.border[2] - bx.padding[0] - bx.padding[2];
+    cx.heights.borrow_mut().insert((b, w, cb_h), h);
+    h
 }
 
 /// Lay out flex container `f` (x, y, w and edges set). `spec_h` is its definite content

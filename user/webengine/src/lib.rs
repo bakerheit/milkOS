@@ -52,11 +52,11 @@ mod sysfont {
 }
 #[cfg(test)]
 #[allow(dead_code)]
-#[path = "../../../kernel/src/sysfont_data.rs"]
-mod sysfont_data;
-#[cfg(test)]
-#[allow(dead_code)]
 #[path = "../../../kernel/src/wm/png.rs"]
 mod kernel_png;
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../../kernel/src/sysfont_data.rs"]
+mod sysfont_data;
 
 pub use api::*;

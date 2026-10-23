@@ -1,0 +1,49 @@
+border 18,16 516x351 [2, 2, 2, 2]
+text 34,38 w48 SansSerif16 400 #ff000000 "Sign in"
+text 32,63 w78 SansSerif16 400 #ff000000 "User name"
+rrect 32,70 488x22 r2 #ffffffff
+border 32,70 488x22 [2, 2, 2, 2]
+control 0 36,73 480x16
+text 32,112 w70 SansSerif16 400 #ff000000 "Password"
+rrect 32,119 488x22 r2 #ffffffff
+border 32,119 488x22 [2, 2, 2, 2]
+control 1 36,122 480x16
+rrect 36,144 15x15 r2 #ffffffff
+border 36,144 15x15 [1, 1, 1, 1]
+control 2 37,145 13x13
+rrect 179,144 15x15 r7 #ffffffff
+border 179,144 15x15 [1, 1, 1, 1]
+control 3 180,145 13x13
+rrect 228,144 15x15 r7 #ffffffff
+border 228,144 15x15 [1, 1, 1, 1]
+control 4 229,145 13x13
+text 54,162 w109 SansSerif16 400 #ff000000 " Remember me"
+text 197,162 w15 SansSerif16 400 #ff000000 " A"
+text 246,162 w15 SansSerif16 400 #ff000000 " B"
+text 32,187 w32 SansSerif16 400 #ff000000 "Plan"
+rrect 32,194 488x20 r3 #ffefefef
+border 32,194 488x20 [1, 1, 1, 1]
+control 5 39,196 474x16
+text 32,234 w42 SansSerif16 400 #ff000000 "Notes"
+rrect 32,241 488x54 r2 #ffffffff
+border 32,241 488x54 [2, 2, 2, 2]
+control 6 36,244 480x48
+rrect 32,311 69x28 r4 #ff2b6cb0
+control 7 32,311 69x28
+text 46,328 w30 SansSerif13 400 #ffffffff "Sign "
+text 76,328 w11 SansSerif13 700 #ffffffff "in"
+rrect 105,314 31x20 r3 #ffefefef
+border 105,314 31x20 [1, 1, 1, 1]
+control 8 112,316 17x16
+rrect 140,314 48x20 r3 #ffefefef
+border 140,314 48x20 [1, 1, 1, 1]
+control 9 147,316 34x16
+text 101,328 w4 SansSerif16 400 #ff000000 " "
+text 136,328 w4 SansSerif16 400 #ff000000 " "
+rrect 16,379 155x22 r2 #ffffffff
+border 16,379 155x22 [2, 2, 2, 2]
+control 10 20,382 147x16
+rrect 175,380 55x20 r3 #ffefefef
+border 175,380 55x20 [1, 1, 1, 1]
+control 11 182,382 41x16
+text 171,394 w4 SansSerif16 400 #ff000000 " "

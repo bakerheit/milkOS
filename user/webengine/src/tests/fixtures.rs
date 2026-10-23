@@ -12,7 +12,13 @@ pub const TEXT: &str = include_str!("../../tests/fixtures/text.html");
 
 #[test]
 fn fixture_screenshots() {
-    for (name, html) in [("article", ARTICLE), ("layout", LAYOUT), ("tables", TABLES), ("forms", FORMS), ("text", TEXT)] {
+    for (name, html) in [
+        ("article", ARTICLE),
+        ("layout", LAYOUT),
+        ("tables", TABLES),
+        ("forms", FORMS),
+        ("text", TEXT),
+    ] {
         for w in [1024, 480] {
             let (d, c) = screenshot(html, w, 1400);
             save(&alloc::format!("{name}-{w}"), &c);

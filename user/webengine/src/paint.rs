@@ -575,16 +575,21 @@ impl P<'_> {
     fn child(&mut self, c: BoxId, off: (Au, Au), clip: u16, op: f32, layer: Layer, depth: u32) {
         let cb = &self.boxes[c as usize];
         let s = &cb.style;
-        let element_box = !matches!(cb.kind, Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_));
+        let element_box = !matches!(
+            cb.kind,
+            Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_)
+        );
         if element_box && s.position == Position::Fixed && layer != Layer::Fixed {
             self.order += 1;
-            self.deferred.push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
+            self.deferred
+                .push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
             return;
         }
         if element_box && s.is_positioned() && !matches!(cb.kind, Kind::Inline) {
             self.order += 1;
             let z = s.z_index.unwrap_or(0);
-            self.deferred.push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
+            self.deferred
+                .push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
             return;
         }
         self.paint(c, off, clip, op, layer, depth + 1);

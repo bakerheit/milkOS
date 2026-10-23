@@ -1,0 +1,44 @@
+rect 0,64 800x641 #fff4f4f6
+rrect 56,64 688x137 r8 #ff334455
+text 330,117 w141 SystemUi32 700 #ffffffff "Build fast"
+text 198,157 w405 SystemUi16 400 #ffffffff "A flexible layout demo with flexbox, floats and positioning."
+rect 56,352 120x35 #ffeedddd
+text 64,375 w65 SystemUi16 400 #ff222222 "fixed 120"
+rect 176,352 448x35 #ffddddee
+text 184,375 w269 SystemUi16 400 #ff222222 "this one grows to fill the rest of the row"
+rect 624,352 120x35 #ffeedddd
+text 632,375 w65 SystemUi16 400 #ff222222 "fixed 120"
+rect 56,403 688x120 #ffddeedd
+text 64,426 w22 SystemUi16 400 #ff222222 "top"
+text 64,468 w47 SystemUi16 400 #ff222222 "middle"
+text 64,511 w49 SystemUi16 400 #ff222222 "bottom"
+rect 56,539 100x60 #ffccccee
+text 168,554 w564 SystemUi16 400 #ff222222 "Text flows around the float on the left. It keeps going past the float's bottom edge"
+text 168,573 w555 SystemUi16 400 #ff222222 "and then uses the full width of the container again once the float is done. Lorem"
+text 168,592 w508 SystemUi16 400 #ff222222 "ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor"
+text 168,611 w302 SystemUi16 400 #ff222222 "incididunt ut labore et dolore magna aliqua."
+border 228,647 344x58 [2, 2, 2, 2]
+text 260,672 w204 SystemUi16 400 #ff222222 "Centered half-width box with "
+text 464,672 w76 SystemUi16 400 #ffaa0000 "a relatively"
+text 342,691 w112 SystemUi16 400 #ffaa0000 "positioned span"
+text 454,691 w4 SystemUi16 400 #ff222222 "."
+rrect 56,217 221x119 r6 #ffffffff
+border 56,217 221x119 [1, 1, 1, 1]
+text 69,247 w38 SystemUi19 700 #ff222222 "One"
+text 69,284 w72 SystemUi16 400 #ff222222 "Short text."
+rrect 289,217 222x119 r6 #ffffffff
+border 289,217 222x119 [1, 1, 1, 1]
+text 302,247 w38 SystemUi19 700 #ff222222 "Two"
+text 302,284 w182 SystemUi16 400 #ff222222 "A bit more text in this card"
+text 302,303 w194 SystemUi16 400 #ff222222 "so it wraps over a few lines."
+rrect 523,217 221x119 r6 #ffffffff
+border 523,217 221x119 [1, 1, 1, 1]
+text 536,247 w53 SystemUi19 700 #ff222222 "Three"
+text 536,284 w76 SystemUi16 400 #ff222222 "Third card."
+rrect 486,210 32x17 r8 #ffcc3333
+text 492,222 w20 SystemUi11 400 #ffffffff "new"
+rect 0,0 800x48 #ff222222
+text 16,29 w46 SystemUi16 700 #ffffffff "Brand"
+text 642,29 w36 SystemUi16 400 #ffdddddd "Docs"
+text 694,29 w32 SystemUi16 400 #ffdddddd "Blog"
+text 742,29 w42 SystemUi16 400 #ffdddddd "About"

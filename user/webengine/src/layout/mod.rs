@@ -30,6 +30,9 @@ pub type Au = i32;
 pub const AU: Au = 64;
 pub type BoxId = u32;
 pub const NO_BOX: BoxId = u32::MAX;
+/// The largest single length (2^24 Au, about 262000 device px): anything a hostile page asks
+/// for beyond that is clamped, so sums of lengths stay far from overflowing.
+pub const MAX_LEN: Au = 1 << 24;
 
 #[derive(Clone, Debug)]
 pub enum Replaced {
@@ -146,6 +149,9 @@ pub struct LBox {
     /// For absolutely positioned boxes: the static position (where it would have been).
     pub static_pos: (Au, Au),
     pub laid_out: bool,
+    /// The inputs of the last [`block::layout_sized`] (cb width, content width, forced
+    /// height, cb height): the same inputs again reuse the result instead of redoing it.
+    pub sized_key: Option<(Au, Au, Option<Au>, Option<Au>)>,
 }
 
 impl LBox {
@@ -173,6 +179,7 @@ impl LBox {
             last_baseline: None,
             static_pos: (0, 0),
             laid_out: false,
+            sized_key: None,
         }
     }
 
@@ -220,6 +227,8 @@ pub struct Cx<'a> {
     metrics: RefCell<BTreeMap<Font, FontMetrics>>,
     spaces: RefCell<BTreeMap<Font, Au>>,
     pub intrinsic: RefCell<BTreeMap<BoxId, (Au, Au)>>,
+    /// Flex items' content heights at a width (box, width, cb height) → height.
+    pub heights: RefCell<BTreeMap<(BoxId, Au, Option<Au>), Au>>,
     /// Absolutely / fixed positioned boxes in tree order (laid out after the flow).
     pub abs: RefCell<Vec<BoxId>>,
     /// Work counter (bounded on hostile pages).
@@ -237,6 +246,7 @@ impl<'a> Cx<'a> {
             metrics: RefCell::new(BTreeMap::new()),
             spaces: RefCell::new(BTreeMap::new()),
             intrinsic: RefCell::new(BTreeMap::new()),
+            heights: RefCell::new(BTreeMap::new()),
             abs: RefCell::new(Vec::new()),
             work: core::cell::Cell::new(0),
         }
@@ -244,7 +254,7 @@ impl<'a> Cx<'a> {
 
     /// CSS px → Au.
     pub fn au(&self, px: f32) -> Au {
-        fmath::round_i32(px * self.zoom * AU as f32)
+        fmath::round_i32(px * self.zoom * AU as f32).clamp(-MAX_LEN, MAX_LEN)
     }
 
     /// A length-percentage against a reference in Au.
@@ -254,6 +264,7 @@ impl<'a> Cx<'a> {
             return px;
         }
         px.saturating_add(fmath::round_i32(l.pct * base as f32 / 100.0))
+            .clamp(-MAX_LEN, MAX_LEN)
     }
 
     pub fn font(&self, s: &Style) -> Font {
@@ -277,7 +288,7 @@ impl<'a> Cx<'a> {
 
     pub fn text_width(&self, f: &Font, s: &str) -> Au {
         self.work.set(self.work.get() + 1);
-        self.m.text_width(f, s).saturating_mul(AU)
+        self.m.text_width(f, s).saturating_mul(AU).clamp(0, MAX_LEN)
     }
 
     pub fn space_width(&self, f: &Font) -> Au {

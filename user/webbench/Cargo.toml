@@ -1,0 +1,16 @@
+[package]
+name = "webbench"
+version.workspace = true
+edition.workspace = true
+
+# The web engine in the guest: the ~1 MB Wikipedia-like page (src/wikigen.rs, shared with the
+# host benchmark in webengine's tests) and the fixture pages parsed, styled, laid out and
+# painted, with times and heap use printed. A developer tool: /System/Developer/webbench.
+[[bin]]
+name = "webbench"
+test = false
+bench = false
+
+[dependencies]
+rt = { path = "../rt" }
+webengine = { path = "../webengine" }

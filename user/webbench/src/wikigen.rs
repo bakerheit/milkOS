@@ -23,14 +23,86 @@ impl Rng {
 }
 
 const WORDS: &[&str] = &[
-    "milk", "dairy", "the", "of", "and", "in", "is", "a", "to", "was", "for", "as", "with", "by", "on", "that",
-    "from", "lactose", "protein", "calcium", "pasteurization", "butter", "cheese", "yogurt", "cattle", "goats",
-    "sheep", "production", "consumption", "history", "century", "region", "industry", "nutrition", "fat",
-    "content", "processing", "homogenized", "fermented", "culture", "species", "mammals", "market", "global",
-    "average", "annual", "estimated", "traditional", "modern", "agricultural", "European", "Asian", "farm",
-    "quality", "temperature", "bacteria", "enzyme", "whey", "casein", "cream", "skimmed", "powdered",
-    "condensed", "evaporated", "organic", "breed", "Holstein", "Jersey", "lactation", "yield", "litres",
-    "tonnes", "percent", "studies", "research", "health", "diet", "children", "adults", "population",
+    "milk",
+    "dairy",
+    "the",
+    "of",
+    "and",
+    "in",
+    "is",
+    "a",
+    "to",
+    "was",
+    "for",
+    "as",
+    "with",
+    "by",
+    "on",
+    "that",
+    "from",
+    "lactose",
+    "protein",
+    "calcium",
+    "pasteurization",
+    "butter",
+    "cheese",
+    "yogurt",
+    "cattle",
+    "goats",
+    "sheep",
+    "production",
+    "consumption",
+    "history",
+    "century",
+    "region",
+    "industry",
+    "nutrition",
+    "fat",
+    "content",
+    "processing",
+    "homogenized",
+    "fermented",
+    "culture",
+    "species",
+    "mammals",
+    "market",
+    "global",
+    "average",
+    "annual",
+    "estimated",
+    "traditional",
+    "modern",
+    "agricultural",
+    "European",
+    "Asian",
+    "farm",
+    "quality",
+    "temperature",
+    "bacteria",
+    "enzyme",
+    "whey",
+    "casein",
+    "cream",
+    "skimmed",
+    "powdered",
+    "condensed",
+    "evaporated",
+    "organic",
+    "breed",
+    "Holstein",
+    "Jersey",
+    "lactation",
+    "yield",
+    "litres",
+    "tonnes",
+    "percent",
+    "studies",
+    "research",
+    "health",
+    "diet",
+    "children",
+    "adults",
+    "population",
 ];
 
 fn words(r: &mut Rng, out: &mut String, n: usize) {
@@ -54,7 +126,14 @@ fn sentence(r: &mut Rng, out: &mut String, links: &mut usize) {
         match r.below(14) {
             0 | 1 => {
                 *links += 1;
-                let _ = write!(out, "<a href=\"/wiki/{}_{}\" title=\"{}\">{}</a>", w, *links % 997, w, w);
+                let _ = write!(
+                    out,
+                    "<a href=\"/wiki/{}_{}\" title=\"{}\">{}</a>",
+                    w,
+                    *links % 997,
+                    w,
+                    w
+                );
             }
             2 => {
                 let _ = write!(out, "<b>{w}</b>");
@@ -86,7 +165,10 @@ fn sentence(r: &mut Rng, out: &mut String, links: &mut usize) {
     out.push('.');
     if r.below(5) == 0 {
         let k = 1 + r.below(400);
-        let _ = write!(out, "<sup class=\"reference\" id=\"cite_ref-{k}\"><a href=\"#cite_note-{k}\">[{k}]</a></sup>");
+        let _ = write!(
+            out,
+            "<sup class=\"reference\" id=\"cite_ref-{k}\"><a href=\"#cite_note-{k}\">[{k}]</a></sup>"
+        );
     }
 }
 
@@ -131,12 +213,34 @@ fn stylesheet(out: &mut String, r: &mut Rng) {
     for i in 0..600 {
         let w = WORDS[r.below(WORDS.len())];
         let _ = match i % 6 {
-            0 => writeln!(out, ".mw-{w}-{i}{{margin:0 {}px;color:#{:06x}}}", i % 9, r.next() & 0xFFFFFF),
-            1 => writeln!(out, "#p-{w}-{i} .vector-menu-content li a{{padding:{}px 0;font-size:{}%}}", i % 5, 80 + i % 30),
-            2 => writeln!(out, "div.{w}{i}>ul>li:first-child{{list-style-type:disc;padding-left:{}em}}", i % 3),
+            0 => writeln!(
+                out,
+                ".mw-{w}-{i}{{margin:0 {}px;color:#{:06x}}}",
+                i % 9,
+                r.next() & 0xFFFFFF
+            ),
+            1 => writeln!(
+                out,
+                "#p-{w}-{i} .vector-menu-content li a{{padding:{}px 0;font-size:{}%}}",
+                i % 5,
+                80 + i % 30
+            ),
+            2 => writeln!(
+                out,
+                "div.{w}{i}>ul>li:first-child{{list-style-type:disc;padding-left:{}em}}",
+                i % 3
+            ),
             3 => writeln!(out, "[data-{w}=\"{i}\"]{{display:none}}"),
-            4 => writeln!(out, "@media (min-width:{}px){{.sk-{w}-{i}{{width:{}%}}}}", 400 + i, 10 + i % 80),
-            _ => writeln!(out, ".skin-{w} .mw-{i}:not(.hidden){{border-bottom:1px solid var(--border)}}"),
+            4 => writeln!(
+                out,
+                "@media (min-width:{}px){{.sk-{w}-{i}{{width:{}%}}}}",
+                400 + i,
+                10 + i % 80
+            ),
+            _ => writeln!(
+                out,
+                ".skin-{w} .mw-{i}:not(.hidden){{border-bottom:1px solid var(--border)}}"
+            ),
         };
     }
 }
@@ -150,12 +254,17 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
     stylesheet(&mut out, &mut r);
     out.push_str("</style>\n</head>\n<body class=\"skin-vector mediawiki ltr\">\n");
     out.push_str("<header class=\"mw-header\"><a class=\"mw-logo\" href=\"/\">Wikimilk</a><form class=\"mw-search\" action=\"/w/index.php\"><input type=\"search\" name=\"search\" placeholder=\"Search Wikimilk\"></form><a href=\"/login\">Log in</a></header>\n");
-    out.push_str("<div class=\"mw-page-container\">\n<nav class=\"vector-main-menu\" id=\"p-navigation\">\n");
+    out.push_str(
+        "<div class=\"mw-page-container\">\n<nav class=\"vector-main-menu\" id=\"p-navigation\">\n",
+    );
     for g in 0..6 {
         let _ = write!(out, "<h3>Menu {g}</h3><ul>");
         for k in 0..12 {
             let w = WORDS[r.below(WORDS.len())];
-            let _ = write!(out, "<li id=\"n-{g}-{k}\"><a href=\"/wiki/Special:{w}{k}\">{w} {k}</a></li>");
+            let _ = write!(
+                out,
+                "<li id=\"n-{g}-{k}\"><a href=\"/wiki/Special:{w}{k}\">{w} {k}</a></li>"
+            );
         }
         out.push_str("</ul>\n");
     }
@@ -163,7 +272,11 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
     // Infobox.
     out.push_str("<table class=\"infobox\"><caption>Milk</caption><tbody><tr><td colspan=\"2\" style=\"text-align:center\"><img src=\"/upload/Milk_glass.jpg\" width=\"220\" height=\"165\" alt=\"Milk\"></td></tr>");
     for k in 0..14 {
-        let _ = write!(out, "<tr><th scope=\"row\">{}</th><td>", WORDS[k % WORDS.len()]);
+        let _ = write!(
+            out,
+            "<tr><th scope=\"row\">{}</th><td>",
+            WORDS[k % WORDS.len()]
+        );
         words(&mut r, &mut out, 3);
         out.push_str("</td></tr>");
     }
@@ -175,17 +288,28 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
     }
     out.push_str("</p>\n<div id=\"toc\" class=\"toc\" role=\"navigation\"><div class=\"toctitle\"><h2 id=\"mw-toc-heading\">Contents</h2></div><ul>");
     for s in 0..20 {
-        let _ = write!(out, "<li class=\"toclevel-1\"><a href=\"#Section_{s}\"><span class=\"tocnumber\">{}</span> <span class=\"toctext\">Section {s}</span></a></li>", s + 1);
+        let _ = write!(
+            out,
+            "<li class=\"toclevel-1\"><a href=\"#Section_{s}\"><span class=\"tocnumber\">{}</span> <span class=\"toctext\">Section {s}</span></a></li>",
+            s + 1
+        );
     }
     out.push_str("</ul></div>\n");
     // Sections until the target size, leaving room for references and footer.
     let mut s = 0;
     while out.len() + 90_000 < target {
-        let _ = write!(out, "<h2><span class=\"mw-headline\" id=\"Section_{s}\">Section {s}: ");
+        let _ = write!(
+            out,
+            "<h2><span class=\"mw-headline\" id=\"Section_{s}\">Section {s}: "
+        );
         words(&mut r, &mut out, 2);
         out.push_str("</span></h2>\n");
         if s % 3 == 1 {
-            let _ = write!(out, "<div class=\"thumb tright\"><div class=\"thumbinner\" style=\"width:222px\"><img src=\"/upload/Figure_{s}.png\" width=\"220\" height=\"{}\" alt=\"\"><div class=\"thumbcaption\">", 120 + s % 80);
+            let _ = write!(
+                out,
+                "<div class=\"thumb tright\"><div class=\"thumbinner\" style=\"width:222px\"><img src=\"/upload/Figure_{s}.png\" width=\"220\" height=\"{}\" alt=\"\"><div class=\"thumbcaption\">",
+                120 + s % 80
+            );
             words(&mut r, &mut out, 9);
             out.push_str("</div></div></div>\n");
         }
@@ -209,7 +333,14 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
         if s % 5 == 3 {
             out.push_str("<h3>Data</h3><table class=\"wikitable sortable\"><thead><tr><th>Country</th><th>Cattle</th><th>Production</th><th>Change</th></tr></thead><tbody>");
             for k in 0..(10 + r.below(20)) {
-                let _ = write!(out, "<tr><td><a href=\"/wiki/Country_{k}\">Country {k}</a></td><td style=\"text-align:right\">{}.{}</td><td style=\"text-align:right\">{}</td><td>{}%</td></tr>", r.below(900), r.below(10), r.below(100_000), r.below(40));
+                let _ = write!(
+                    out,
+                    "<tr><td><a href=\"/wiki/Country_{k}\">Country {k}</a></td><td style=\"text-align:right\">{}.{}</td><td style=\"text-align:right\">{}</td><td>{}%</td></tr>",
+                    r.below(900),
+                    r.below(10),
+                    r.below(100_000),
+                    r.below(40)
+                );
             }
             out.push_str("</tbody></table>\n");
         }
@@ -219,9 +350,16 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
     out.push_str("<h2><span class=\"mw-headline\" id=\"References\">References</span></h2><div class=\"reflist\"><ol class=\"references\">");
     let mut k = 1;
     while out.len() + 12_000 < target || k < 40 {
-        let _ = write!(out, "<li id=\"cite_note-{k}\"><b><a href=\"#cite_ref-{k}\">^</a></b> <cite class=\"citation\">");
+        let _ = write!(
+            out,
+            "<li id=\"cite_note-{k}\"><b><a href=\"#cite_ref-{k}\">^</a></b> <cite class=\"citation\">"
+        );
         words(&mut r, &mut out, 6);
-        let _ = write!(out, " ({}). <a class=\"external\" href=\"https://example.org/ref/{k}\">", 1900 + r.below(125));
+        let _ = write!(
+            out,
+            " ({}). <a class=\"external\" href=\"https://example.org/ref/{k}\">",
+            1900 + r.below(125)
+        );
         words(&mut r, &mut out, 4);
         out.push_str("</a>.</cite></li>\n");
         k += 1;
@@ -232,7 +370,11 @@ pub fn wiki_page(target: usize, seed: u64) -> String {
     out.push_str("</ol></div>\n");
     out.push_str("<div class=\"navbox\"><div class=\"navbox-title\">Dairy products</div><div class=\"navbox-list hlist\"><ul>");
     for k in 0..40 {
-        let _ = write!(out, "<li><a href=\"/wiki/Product_{k}\">{}</a></li>", WORDS[k % WORDS.len()]);
+        let _ = write!(
+            out,
+            "<li><a href=\"/wiki/Product_{k}\">{}</a></li>",
+            WORDS[k % WORDS.len()]
+        );
     }
     out.push_str("</ul></div></div>\n</div>\n</main>\n</div>\n<footer class=\"mw-footer\"><ul><li>This page was last edited on 23 October 2026.</li><li><a href=\"/privacy\">Privacy policy</a></li><li><a href=\"/about\">About</a></li></ul></footer>\n</body>\n</html>\n");
     out

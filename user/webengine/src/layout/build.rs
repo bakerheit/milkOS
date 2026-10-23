@@ -56,8 +56,10 @@ impl B<'_, '_> {
             _ => !b.style.display.is_inline_level(),
         };
         // Text and markers share their element's style; only element boxes leave the flow.
-        b.out_of_flow = !matches!(b.kind, Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_))
-            && (b.style.float != Float::None || b.style.is_out_of_flow_positioned());
+        b.out_of_flow = !matches!(
+            b.kind,
+            Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_)
+        ) && (b.style.float != Float::None || b.style.is_out_of_flow_positioned());
         b.parent = parent;
         self.boxes.push(b);
         if parent != NO_BOX {
@@ -541,9 +543,17 @@ impl B<'_, '_> {
                 if !run.is_empty() {
                     // In inline content the anonymous table is an inline-table (§17.2.1 3).
                     let inline_ctx = kids.iter().any(|&k| {
-                        !self.is_table_part(k) && !self.boxes[k as usize].block_level && !self.is_collapsible_ws(k)
-                    }) && !kids.iter().any(|&k| !self.is_table_part(k) && self.boxes[k as usize].block_level);
-                    let disp = if inline_ctx { Display::InlineTable } else { Display::Table };
+                        !self.is_table_part(k)
+                            && !self.boxes[k as usize].block_level
+                            && !self.is_collapsible_ws(k)
+                    }) && !kids
+                        .iter()
+                        .any(|&k| !self.is_table_part(k) && self.boxes[k as usize].block_level);
+                    let disp = if inline_ctx {
+                        Display::InlineTable
+                    } else {
+                        Display::Table
+                    };
                     let t = self.wrap(b, &run, Kind::Table, disp);
                     self.boxes[t as usize].block_level = !inline_ctx;
                     self.fix_table(t);

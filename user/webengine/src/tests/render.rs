@@ -137,6 +137,9 @@ fn debug_abs() {
 
 #[test]
 fn debug_z() {
-    let (_, s) = render("<style>body{margin:0}</style><div style='position:relative;z-index:2;background:#000001;height:10px'></div><div style='position:relative;z-index:1;background:#000002;height:10px'></div>", 400);
+    let (_, s) = render(
+        "<style>body{margin:0}</style><div style='position:relative;z-index:2;background:#000001;height:10px'></div><div style='position:relative;z-index:1;background:#000002;height:10px'></div>",
+        400,
+    );
     std::println!("{s}");
 }

@@ -434,10 +434,23 @@ impl P<'_> {
         if b.marker != NO_BOX {
             self.paint(b.marker, off, clip, op, layer, depth + 1);
         }
-        let clip = if s.overflow_x.clips() || s.overflow_y.clips() {
+        // Overflow: hidden/clip clip to the padding box. There are no scrolling boxes, so
+        // auto/scroll clip only vertically (a box with a height cut short), and let content
+        // that is too wide spill out, where the page itself can be scrolled to it.
+        let hard = |o: Overflow| matches!(o, Overflow::Hidden | Overflow::Clip);
+        let clip_x = hard(s.overflow_x);
+        let clip_y = s.overflow_y.clips();
+        let clip = if clip_x || clip_y {
             let (px_, py_, pw, ph) = b.padding_box();
-            let pr = rect_au(px_ + off.0, py_ + off.1, pw, ph);
-            // overflow-x: hidden alone still clips both axes here (no scrolling boxes).
+            let mut pr = rect_au(px_ + off.0, py_ + off.1, pw, ph);
+            if !clip_x {
+                pr.x = i32::MIN / 4;
+                pr.w = i32::MAX / 2;
+            }
+            if !clip_y {
+                pr.y = i32::MIN / 4;
+                pr.h = i32::MAX / 2;
+            }
             self.clip_with(clip, pr)
         } else {
             clip

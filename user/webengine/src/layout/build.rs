@@ -41,6 +41,10 @@ struct B<'a, 'b> {
     boxes: Vec<LBox>,
     anon: BTreeMap<(usize, u8), Rc<Style>>,
     lists: Vec<ListCx>,
+    /// CSS counters: name → nested instances (innermost last).
+    counters: BTreeMap<Rc<str>, Vec<i32>>,
+    /// The counter instances created, in order (popped when their parent ends).
+    counter_scope: Vec<Rc<str>>,
 }
 
 fn display_code(d: Display) -> u8 {
@@ -107,10 +111,18 @@ impl B<'_, '_> {
                 step: if reversed { -1 } else { 1 },
             });
         }
+        // Counters reset by the children stay in scope for their later siblings (CSS 2.1
+        // §12.4.1), so they are dropped when the parent is done.
+        let mark = self.counter_scope.len();
         let mut c = dom.node(el).first_child;
         while c != NONE {
             self.gen_node(parent_box, c, el_style);
             c = dom.node(c).next;
+        }
+        for name in self.counter_scope.drain(mark..).collect::<Vec<_>>() {
+            if let Some(v) = self.counters.get_mut(&name) {
+                v.pop();
+            }
         }
         if is_list {
             self.lists.pop();
@@ -145,6 +157,21 @@ impl B<'_, '_> {
             return;
         }
         let e = dom.element(n).unwrap();
+        // CSS counters: reset (a new instance) then increment (CSS Lists 3 §4).
+        if let Some((name, v)) = &style.counter_reset {
+            self.counters.entry(name.clone()).or_default().push(*v);
+            self.counter_scope.push(name.clone());
+        }
+        if let Some((name, v)) = &style.counter_increment {
+            let stack = self.counters.entry(name.clone()).or_default();
+            if stack.is_empty() {
+                stack.push(0);
+                self.counter_scope.push(name.clone());
+            }
+            if let Some(top) = stack.last_mut() {
+                *top = top.saturating_add(*v);
+            }
+        }
         if style.display == Display::Contents {
             self.pseudo(parent_box, n, &style, false);
             self.gen_children(parent_box, n, &style);
@@ -319,7 +346,15 @@ impl B<'_, '_> {
                 ContentItem::Str(s) => text.push_str(s),
                 ContentItem::Attr(a) => text.push_str(e.and_then(|e| e.attr(a)).unwrap_or("")),
                 ContentItem::OpenQuote | ContentItem::CloseQuote => text.push('"'),
-                ContentItem::Counter(..) => {}
+                ContentItem::Counter(name, st) => {
+                    let v = self
+                        .counters
+                        .get(name)
+                        .and_then(|v| v.last())
+                        .copied()
+                        .unwrap_or(0);
+                    text.push_str(&format_counter(v, *st));
+                }
             }
         }
         if text.is_empty() && ps.display.is_inline_level() {
@@ -729,6 +764,8 @@ pub fn build(inp: &Inputs) -> Vec<LBox> {
         boxes: Vec::new(),
         anon: BTreeMap::new(),
         lists: Vec::new(),
+        counters: BTreeMap::new(),
+        counter_scope: Vec::new(),
     };
     let root = inp.dom.document_element();
     if root == NONE {

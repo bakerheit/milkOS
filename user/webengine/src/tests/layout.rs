@@ -539,3 +539,44 @@ fn generated_content() {
         .collect();
     assert_eq!(all, "[7]x\u{2192}");
 }
+
+#[test]
+fn css_counters() {
+    let d = doc(
+        &page(
+            "<style>body{counter-reset:h} h2{counter-increment:h} h2::before{content:counter(h) '. '} .r h3{counter-increment:s} .r{counter-reset:s} h3::before{content:counter(h) '.' counter(s, lower-roman) ' '}</style><h2>A</h2><div class=r><h3>x</h3><h3>y</h3></div><h2>B</h2>",
+        ),
+        800,
+    );
+    let all: String = texts(d.display_list())
+        .iter()
+        .map(|t| t.2.clone())
+        .collect::<alloc::vec::Vec<_>>()
+        .join("|");
+    assert_eq!(all.replace('|', ""), "1. A1.i x1.ii y2. B", "{all}");
+}
+
+#[test]
+fn overflow_auto_spills_sideways() {
+    let d = doc(
+        &page(
+            "<div style='overflow-x:auto;width:100px'><div id=w style='width:500px;height:10px;background:red'></div></div>",
+        ),
+        800,
+    );
+    let dl = d.display_list();
+    let red = dl
+        .entries
+        .iter()
+        .find(|e| {
+            matches!(
+                e.item,
+                Item::Rect {
+                    color: 0xFFFF0000,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    assert!(dl.clips[red.clip as usize].w > 400);
+}

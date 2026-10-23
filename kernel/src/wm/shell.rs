@@ -806,6 +806,33 @@ fn card_rect(i: u8) -> Rect {
 /// The Today Apps card's icons: the dock's tiles at 40px, five to a row.
 const HOME_ICON: i32 = 40;
 const HOME_COLS: i32 = 5;
+/// Top of the first row of icons and the distance to the second: a name that needs two lines
+/// ("Activity Monitor") still fits under the second row.
+const HOME_TOP: i32 = 38;
+const HOME_PITCH: i32 = 64;
+
+/// An app's name under its Apps-card icon: one line, or two split at a space when it is wider
+/// than `max` (each line cut with "..." as a last resort).
+fn home_label_lines(name: &str, max: i32) -> Vec<String> {
+    let f = Font::body(false);
+    if f.width(name) <= max {
+        return alloc::vec![String::from(name)];
+    }
+    // The split nearest the middle that leaves both halves fitting, else the first space.
+    let mut best: Option<usize> = None;
+    for (i, c) in name.char_indices() {
+        if c == ' ' && f.width(&name[..i]) <= max && f.width(&name[i + 1..]) <= max {
+            let off = |j: usize| (j as i32 - name.len() as i32 / 2).abs();
+            if best.is_none_or(|b| off(i) < off(b)) {
+                best = Some(i);
+            }
+        }
+    }
+    match best.or_else(|| name.find(' ')) {
+        Some(i) => alloc::vec![f.truncate(&name[..i], max), f.truncate(&name[i + 1..], max)],
+        None => alloc::vec![f.truncate(name, max)],
+    }
+}
 
 /// Where Apps-card tile `k` sits in a card `w` wide (None past the second row).
 fn home_app_rect(k: usize, w: i32) -> Option<Rect> {
@@ -817,7 +844,7 @@ fn home_app_rect(k: usize, w: i32) -> Option<Rect> {
     let step = (w - 32) / HOME_COLS;
     Some(Rect::new(
         16 + col * step + (step - HOME_ICON) / 2,
-        40 + row * 72,
+        HOME_TOP + row * HOME_PITCH,
         HOME_ICON,
         HOME_ICON,
     ))
@@ -1591,15 +1618,17 @@ impl Desktop {
                         break;
                     };
                     paint_tile(p, r.x, r.y, HOME_ICON, t);
-                    let name = Font::body(false).truncate(&t.name, r.w + 36);
-                    p.text_p_center(
-                        r.x - 20,
-                        r.w + 40,
-                        r.y + HOME_ICON + 4,
-                        &name,
-                        ESPRESSO,
-                        false,
-                    );
+                    let f = Font::body(false);
+                    for (n, line) in home_label_lines(&t.name, r.w + 36).iter().enumerate() {
+                        p.text_p_center(
+                            r.x - 20,
+                            r.w + 40,
+                            r.y + HOME_ICON + 4 + n as i32 * f.line_height(),
+                            line,
+                            ESPRESSO,
+                            false,
+                        );
+                    }
                 }
             }
         }

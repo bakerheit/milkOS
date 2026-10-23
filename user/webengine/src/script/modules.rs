@@ -157,6 +157,52 @@ struct Graph {
     root: Key,
     /// Set the engine's dependencies when ready (false: a preload).
     bind: bool,
+    /// Every module reached so far.
+    seen: BTreeSet<Key>,
+    /// Reached, and not compiled yet (still to be fetched).
+    waiting: BTreeSet<Key>,
+    /// The first module found unusable.
+    failed: Option<Key>,
+}
+
+impl Graph {
+    fn new(id: u32, root: Key, bind: bool) -> Graph {
+        let mut seen = BTreeSet::new();
+        seen.insert(root.clone());
+        Graph {
+            id,
+            root,
+            bind,
+            seen,
+            waiting: BTreeSet::new(),
+            failed: None,
+        }
+    }
+
+    /// Walk from `start` through what is compiled: what is still coming goes to `waiting`,
+    /// the first thing that is no use to `failed`. Each module is looked at once per graph.
+    fn examine<T: Types>(&mut self, map: &BTreeMap<Key, Entry<T>>, start: Key) {
+        let mut stack = alloc::vec![start];
+        while let Some(k) = stack.pop() {
+            if self.failed.is_some() {
+                return;
+            }
+            match map.get(&k).map(|e| &e.state) {
+                None => self.failed = Some(k),
+                Some(State::Queued | State::Fetching) => {
+                    self.waiting.insert(k);
+                }
+                Some(State::Broken(_)) => self.failed = Some(k),
+                Some(State::Parsed { deps, .. }) => {
+                    for d in deps.iter().rev() {
+                        if self.seen.insert(d.clone()) {
+                            stack.push(d.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct Limits {
@@ -193,6 +239,8 @@ pub struct Modules<T: Types> {
     graphs: Vec<Graph>,
     next_graph: u32,
     next_inline: u32,
+    /// Modules that have just become usable or broken: the graphs waiting for them look again.
+    changed: Vec<Key>,
     queue: VecDeque<Key>,
     inflight: usize,
     pub maps: Maps,
@@ -292,13 +340,6 @@ pub fn type_of_attributes(attrs: &[(String, String)]) -> Result<ModType, String>
     Ok(ty)
 }
 
-enum Poll {
-    Pending,
-    Ready,
-    Network(Key),
-    Broken(Key),
-}
-
 /// What [`Modules::on_head`] says to do with the response.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -314,6 +355,7 @@ impl<T: Types> Modules<T> {
             graphs: Vec::new(),
             next_graph: 1,
             next_inline: 1,
+            changed: Vec::new(),
             queue: VecDeque::new(),
             inflight: 0,
             maps: Maps {
@@ -419,7 +461,7 @@ impl<T: Types> Modules<T> {
         let (key, _) = self.ensure(url, ty, credentials, 0)?;
         let id = self.next_graph;
         self.next_graph += 1;
-        self.graphs.push(Graph { id, root: key, bind });
+        self.add_graph(Graph::new(id, key, bind));
         self.pump();
         self.poll(eng);
         Ok(id)
@@ -451,14 +493,16 @@ impl<T: Types> Modules<T> {
         self.compile_into(eng, &key, ModType::Js, source, first_line);
         let id = self.next_graph;
         self.next_graph += 1;
-        self.graphs.push(Graph {
-            id,
-            root: key,
-            bind: true,
-        });
+        self.add_graph(Graph::new(id, key, true));
         self.pump();
         self.poll(eng);
         id
+    }
+
+    fn add_graph(&mut self, mut g: Graph) {
+        let root = g.root.clone();
+        g.examine(&self.map, root);
+        self.graphs.push(g);
     }
 
     // ---- the map -------------------------------------------------------------------------------
@@ -583,6 +627,7 @@ impl<T: Types> Modules<T> {
         if let Some(e) = self.map.get_mut(key) {
             e.state = state;
         }
+        self.changed.push(key.clone());
     }
 
     // ---- events from the network ---------------------------------------------------------------
@@ -620,6 +665,7 @@ impl<T: Types> Modules<T> {
         }
         let url = e.file.clone();
         e.state = State::Broken(Broken::Network(why.clone()));
+        self.changed.push(key.clone());
         self.inflight = self.inflight.saturating_sub(1);
         self.note(true, format!("Failed to load module script {url}: {why}"));
         self.pump();
@@ -664,51 +710,35 @@ impl<T: Types> Modules<T> {
 
     // ---- graphs --------------------------------------------------------------------------------
 
-    fn check(&self, root: &Key) -> Poll {
-        let mut seen: BTreeSet<&Key> = BTreeSet::new();
-        let mut stack: Vec<&Key> = alloc::vec![root];
-        let mut pending = false;
-        while let Some(k) = stack.pop() {
-            if !seen.insert(k) {
-                continue;
-            }
-            let Some(e) = self.map.get(k) else { continue };
-            match &e.state {
-                State::Queued | State::Fetching => pending = true,
-                State::Broken(Broken::Network(_)) => return Poll::Network(k.clone()),
-                State::Broken(_) => return Poll::Broken(k.clone()),
-                State::Parsed { deps, .. } => {
-                    for d in deps.iter().rev() {
-                        stack.push(d);
-                    }
+    /// Settle the graphs that can be: those that reached something now broken fail at once,
+    /// those with nothing left to wait for are ready.
+    fn poll(&mut self, eng: &mut dyn Engine<T>) {
+        let changed = core::mem::take(&mut self.changed);
+        let mut graphs = core::mem::take(&mut self.graphs);
+        let mut keep = Vec::new();
+        for g in graphs.iter_mut() {
+            for k in &changed {
+                if g.waiting.remove(k) {
+                    g.examine(&self.map, k.clone());
                 }
             }
         }
-        if pending { Poll::Pending } else { Poll::Ready }
-    }
-
-    /// Settle the graphs that can be.
-    fn poll(&mut self, eng: &mut dyn Engine<T>) {
-        let graphs = core::mem::take(&mut self.graphs);
-        let mut keep = Vec::new();
         for g in graphs {
-            match self.check(&g.root) {
-                Poll::Pending => keep.push(g),
-                Poll::Network(k) => {
-                    let why = match self.map.get(&k).map(|e| &e.state) {
-                        Some(State::Broken(Broken::Network(w))) => w.clone(),
-                        _ => String::new(),
-                    };
-                    self.done.push((g.id, Outcome::Network(k, why)));
-                }
-                Poll::Broken(k) => self.done.push((g.id, Outcome::Broken(k))),
-                Poll::Ready => {
-                    let out = match self.bind(eng, &g.root, g.bind) {
-                        Ok(id) => Outcome::Ready(id),
-                        Err(e) => Outcome::Engine(e),
-                    };
-                    self.done.push((g.id, out));
-                }
+            if let Some(k) = &g.failed {
+                let out = match self.map.get(k).map(|e| &e.state) {
+                    Some(State::Broken(Broken::Network(w))) => Outcome::Network(k.clone(), w.clone()),
+                    Some(State::Broken(_)) => Outcome::Broken(k.clone()),
+                    _ => Outcome::Network(k.clone(), String::from("the module is gone")),
+                };
+                self.done.push((g.id, out));
+            } else if g.waiting.is_empty() {
+                let out = match self.bind(eng, &g.root, g.bind) {
+                    Ok(id) => Outcome::Ready(id),
+                    Err(e) => Outcome::Engine(e),
+                };
+                self.done.push((g.id, out));
+            } else {
+                keep.push(g);
             }
         }
         self.graphs = keep;
@@ -1393,5 +1423,33 @@ mod tests {
             assert_eq!(m.active(), 0, "seed {seed}: graphs left waiting with nothing out");
             assert_eq!(ended.len(), started.len(), "seed {seed}");
         }
+    }
+
+    /// A graph of as many modules as a page may have, answered one by one: the work per
+    /// answer stays small (settling the graphs does not walk the whole map each time).
+    #[test]
+    fn a_two_thousand_module_graph_settles_in_good_time() {
+        let mut e = Fake::default();
+        let mut m = Modules::<Fake>::default();
+        let mut body = String::new();
+        for i in 0..1990 {
+            body.push_str(&format!("import \"./leaf{i}.js\"\n"));
+        }
+        m.fetch_graph(&mut e, A, ModType::Js, CR, true).unwrap();
+        fetches(&mut m);
+        let t0 = std::time::Instant::now();
+        serve(&mut m, &mut e, A, &body);
+        let mut todo: Vec<String> = fetches(&mut m);
+        let mut n = 0;
+        while let Some(u) = todo.pop() {
+            serve(&mut m, &mut e, &u, "");
+            todo.extend(fetches(&mut m));
+            n += 1;
+        }
+        assert_eq!(n, 1990);
+        assert_eq!(m.take_done().len(), 1);
+        let ms = t0.elapsed().as_millis();
+        std::println!("a 1991-module graph settled in {ms} ms");
+        assert!(ms < 1500, "{ms} ms");
     }
 }

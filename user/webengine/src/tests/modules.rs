@@ -57,10 +57,6 @@ impl Resp {
         self.after = ticks;
         self
     }
-    pub fn header(mut self, k: &str, v: &str) -> Resp {
-        self.headers.push((String::from(k), String::from(v)));
-        self
-    }
     pub fn failed(kind: NetFailureKind, msg: &str) -> Resp {
         Resp { fail: Some((kind, String::from(msg))), ..Resp::with(0, None, "") }
     }
@@ -968,4 +964,54 @@ fn fuzz_random_module_pages() {
         assert!(o.doc.net_pending() <= 30, "seed {seed}");
         assert!(o.reqs.len() <= 2100, "seed {seed}: {} requests", o.reqs.len());
     }
+}
+
+#[test]
+fn import_from_eval_and_timer_strings_resolves_against_the_page() {
+    if !modules_work() {
+        return;
+    }
+    let o = run_page(
+        "<!DOCTYPE html><body><script>\
+           setTimeout(\"import('./t.js').then(function () { console.log('T timer string'); })\", 0);\
+           eval(\"import('./t.js').then(function () { console.log('T eval'); })\");\
+           new Function(\"return import('./t.js')\")().then(function () { console.log('T function'); });\
+         </script>",
+        6,
+        site(&[("/t.js", "export {};")]),
+    );
+    let t = o.t();
+    for want in ["timer string", "eval", "function"] {
+        assert!(t.contains(&want), "{want}: {:?}", o.lines);
+    }
+}
+
+#[test]
+fn a_module_script_ready_without_a_network_event_asks_for_a_run() {
+    if !modules_work() {
+        return;
+    }
+    // A timer later puts in another script for the same (cached) module: its graph is ready at
+    // the end of the task, with no answer to wait for, so the page must ask to be run again.
+    let mut o = start(
+        "<!DOCTYPE html><body><script type=module src=/m.js></script>\
+         <script>setTimeout(function () {\
+           var s = document.createElement('script'); s.type = 'module';\
+           s.textContent = \"import '/m.js'; console.log('T second');\";\
+           document.body.appendChild(s);\
+         }, 500);</script>",
+    );
+    run_more(&mut o, 3, &mut site(&[("/m.js", "console.log('T m');")]));
+    assert_eq!(o.t(), ["m"], "{:?}", o.lines);
+    o.host.now += 1000.0;
+    o.doc.run(&mut o.host);
+    o.lines.extend(o.doc.take_console().into_iter().map(|l| l.text));
+    assert!(!o.t().contains(&"second"), "not in the same run: {:?}", o.lines);
+    let wake = o.doc.next_wake();
+    assert_eq!(wake, Some(0.0), "the page asks to be run at once");
+    o.doc.run(&mut o.host);
+    o.lines.extend(o.doc.take_console().into_iter().map(|l| l.text));
+    assert!(o.t().contains(&"second"), "{:?}", o.lines);
+    assert_eq!(o.t().iter().filter(|l| **l == "m").count(), 1);
+    assert_eq!(o.doc.next_wake(), None);
 }

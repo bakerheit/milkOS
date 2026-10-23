@@ -247,7 +247,11 @@ fn dynamic_import(b: &Rc<Bridge>, r: &mut Realm, di: DynamicImport) -> jsengine:
                 m.base_of(k).map(String::from).unwrap_or(doc_base.clone()),
                 m.credentials_of(k),
             ),
-            None if di.referrer_file == page_url || di.referrer_file.is_empty() => {
+            // (An inline script's file is the page; code from setTimeout("...") or eval has
+            // a made-up name: those are the page's too.)
+            None if di.referrer_file == page_url
+                || !(di.referrer_file.starts_with("http://") || di.referrer_file.starts_with("https://")) =>
+            {
                 (doc_base.clone(), CredentialsMode::SameOrigin)
             }
             None => (di.referrer_file.clone(), CredentialsMode::SameOrigin),

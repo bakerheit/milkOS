@@ -99,6 +99,10 @@ impl Runtime {
         if st.stopped {
             return None;
         }
+        // A module script whose imports came in (or were cached) waits for its turn: now.
+        if st.modrt.wake {
+            return Some(0.0);
+        }
         st.timers.next_due()
     }
 
@@ -270,6 +274,7 @@ impl Runtime {
             let mut did = false;
             // Module work the page queued (import maps, module graphs, preloads) starts
             // first, so its fetches overlap with the classic scripts ahead of it.
+            b.st.borrow_mut().modrt.wake = false;
             modrt::pump(b, r);
             // Scripts, phase by phase.
             loop {

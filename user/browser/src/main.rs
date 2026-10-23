@@ -16,12 +16,9 @@
 //! middle button) opens a link in a new tab, Alt-click downloads it, Cmd-Shift-Delete forgets
 //! cookies and history.
 //!
-//! `browser [--log-input] [--allow-private-network] [ADDRESS]`: `--log-input` prints every key,
-//! click and wheel event with its modifier keys (`[browser] input ...`), which
-//! scripts/browser-test.sh uses to check the window system's client protocol, and says more
-//! about script requests. `--allow-private-network` lets the scripts of a page on a public
-//! name reach addresses on the local network (the policy refuses that otherwise: a web page
-//! must not reach into your network); the tests, whose servers are all on 10.0.2.2, use it.
+//! `browser [--log-input] [ADDRESS]`: `--log-input` prints every key, click and wheel event
+//! with its modifier keys (`[browser] input ...`), which scripts/browser-test.sh uses to check
+//! the window system's client protocol, and says more about script requests.
 
 #![no_std]
 #![no_main]
@@ -1521,13 +1518,13 @@ impl App {
         // Script requests: heads and progress first, then the ends (which may carry the
         // head if it came in between), then the answers to the pages.
         changed |= self.net_tick();
-        for (id, kind, out, cert, head) in self.fetch.finished() {
+        for (id, kind, out, cert, head, peer) in self.fetch.finished() {
             changed = true;
             if kind == Kind::Request {
                 self.net_finished(id, out, head);
                 continue;
             }
-            self.finish(id, kind, out, cert);
+            self.finish(id, kind, out, cert, peer);
         }
         changed |= self.net_tick();
         for a in self.profile.take_inbox() {
@@ -1549,6 +1546,7 @@ impl App {
         kind: Kind,
         out: Outcome,
         cert: Option<browserkit::certinfo::CertInfo>,
+        peer: Option<Vec<u8>>,
     ) {
         if let Some(di) = self.downloads.iter().position(|d| d.job == id) {
             let d = &mut self.downloads[di];
@@ -1687,6 +1685,10 @@ impl App {
                 if resp.url.scheme == Scheme::Https {
                     page.cert = cert;
                 }
+                // Where it came from decides what its scripts may reach (private network rule).
+                page.space = peer
+                    .as_deref()
+                    .and_then(browserkit::netpolicy::address_space_of_ip);
                 rt::println!(
                     "[browser] {}: {} {}, {} bytes, '{}', {} redirects",
                     resp.url,
@@ -1949,12 +1951,10 @@ fn log_input(ev: &Event, m: Mods) {
 fn main(args: &rt::Args) -> i32 {
     // Flags first, then the address.
     let mut log = false;
-    let mut private_ok = false;
     let mut at = 1;
     while let Some(a) = args.get(at) {
         match a {
             "--log-input" => log = true,
-            "--allow-private-network" => private_ok = true,
             _ => break,
         }
         at += 1;
@@ -2012,10 +2012,7 @@ fn main(args: &rt::Args) -> i32 {
         js_on: js::javascript_setting(&profile_settings),
         console_open: false,
         console_net: false,
-        net_cfg: browserkit::netpolicy::Config {
-            block_private_network: !private_ok,
-            ..browserkit::netpolicy::Config::default()
-        },
+        net_cfg: browserkit::netpolicy::Config::default(),
         preflight: alloc::sync::Arc::new(rt::thread::Mutex::new(
             browserkit::netpolicy::PreflightCache::new(
                 browserkit::netpolicy::Limits::default().preflight_cache_entries,

@@ -91,6 +91,8 @@ pub struct Shared {
     pub done: Option<Outcome>,
     /// A script request: the response's head, once known (the window takes it).
     pub head: Option<NetHead>,
+    /// A page: the address it was fetched from (4 or 16 bytes), for the private-network rule.
+    pub peer: Option<Vec<u8>>,
 }
 
 pub struct Job {
@@ -330,6 +332,14 @@ fn run(
         shared: shared.clone(),
     };
     let r = http::fetch(&mut net, &spec.req, &options(kind), &mut hooks);
+    if kind == Kind::Page
+        && let Some(a) = net.inner.peer
+    {
+        shared.lock().peer = Some(match a.ip.unmapped() {
+            rt::net::Ip::V4(b) => b.to_vec(),
+            rt::net::Ip::V6(b) => b.to_vec(),
+        });
+    }
     let name = shared.lock().download.clone();
     let out = match (r, name) {
         (Ok(resp), Some(name)) if resp.status < 400 || kind == Kind::Download => {
@@ -552,21 +562,21 @@ impl Fetcher {
     }
 
     /// Finished jobs: their ids and outcomes (threads joined). Call it every tick.
-    pub fn finished(&mut self) -> Vec<(JobId, Kind, Outcome, Option<CertInfo>, Option<NetHead>)> {
+    pub fn finished(&mut self) -> Vec<(JobId, Kind, Outcome, Option<CertInfo>, Option<NetHead>, Option<Vec<u8>>)> {
         let mut out = Vec::new();
         let mut k = 0;
         while k < self.jobs.len() {
             let done = {
                 let mut s = self.jobs[k].shared.lock();
-                s.done.take().map(|o| (o, s.cert.take(), s.head.take()))
+                s.done.take().map(|o| (o, s.cert.take(), s.head.take(), s.peer.take()))
             };
             match done {
-                Some((o, cert, head)) => {
+                Some((o, cert, head, peer)) => {
                     let j = self.jobs.remove(k);
                     if let Some(h) = j.handle {
                         h.join();
                     }
-                    out.push((j.id, j.kind, o, cert, head));
+                    out.push((j.id, j.kind, o, cert, head, peer));
                 }
                 None => k += 1,
             }

@@ -12,7 +12,7 @@ async function run(name, f) {
 const blocked = async (url, init) => { try { await fetch(url, init); return 'resolved'; } catch (e) { return 'rejected ' + e.name + ': ' + e.message; } };
 (async () => {
   await run('origin', async () => location.origin);
-  await run('open', async () => { const r = await fetch(API + '/cors/open'); return [r.type, r.status, await r.text(), r.headers.get('x-visible'), r.headers.get('x-hidden'), r.headers.get('content-type')].join(' '); });
+  await run('open', async () => { const r = await fetch(API + '/cors/open'); return [r.type, r.status, await r.text(), r.headers.get('x-visible'), String(r.headers.get('x-hidden')), r.headers.get('content-type')].join(' '); });
   await run('origin-header', async () => { const j = await (await fetch(API + '/cors/origin')).json(); return j.origin; });
   await run('closed', () => blocked(API + '/cors/closed'));
   await run('closed-other-site', () => blocked(OTHER + '/cors/closed'));
@@ -35,7 +35,7 @@ const blocked = async (url, init) => { try { await fetch(url, init); return 'res
   await run('same-origin-mode', () => blocked(API + '/cors/open', { mode: 'same-origin' }));
   await run('redirect-to-cors', async () => { const r = await fetch('/cors/redirect?to=' + encodeURIComponent(API + '/cors/open')); return [r.type, r.redirected, await r.text()].join(' '); });
   await run('redirect-to-closed', () => blocked('/cors/redirect?to=' + encodeURIComponent(OTHER + '/cors/closed')));
-  await run('forbidden-headers', async () => { const j = await (await fetch('/api/headers', { headers: { Cookie: 'evil=1', Host: 'evil.test', 'Sec-Fetch-Mode': 'x', 'X-Fine': '1' } })).json(); return [String(j.cookie).includes('evil'), j.host.split(':')[0], j['x-fine'], j.origin, String(j.referer).replace(location.origin, ''), j['sec-fetch-mode']].join(' '); });
+  await run('forbidden-headers', async () => { const j = await (await fetch('/api/headers', { headers: { Cookie: 'evil=1', Host: 'evil.test', 'Sec-Fetch-Mode': 'x', 'X-Fine': '1' } })).json(); return [String(j.cookie).includes('evil'), j.host.split(':')[0], j['x-fine'], String(j.origin), String(j.referer).replace(location.origin, ''), String(j['sec-fetch-mode'])].join(' '); });
   document.getElementById('status').textContent = 'done';
   report(G, 'end', 'done');
 })();

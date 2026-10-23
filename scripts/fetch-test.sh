@@ -100,7 +100,7 @@ srvn() { grep -acE -- "$1" "$T/server.log" || true; }
 
 ser "wait@120:$PR"
 q move 785 615 click sleep 1
-ser "send:/Apps/browser/browser --log-input --allow-private-network http://$H/basic.html &" "wait:$PR"
+ser "send:/Apps/browser/browser --log-input http://$H/basic.html &" "wait:$PR"
 
 echo "-- fetch, same origin"
 wait_log "^\[browser\] console log: FETCHTEST basic end" 90 && ok "basic.html ran to its end" || bad "basic.html did not finish: $(log_lines | grep -a 'FETCHTEST basic' | tail -2)"
@@ -196,7 +196,7 @@ ft cors no-cors "opaque 0 \"\" 0"
 ftr cors same-origin-mode "^rejected TypeError"
 ft cors redirect-to-cors "cors true open"
 ftr cors redirect-to-closed "^rejected TypeError"
-ft cors forbidden-headers "false www.milk.test 1 undefined /cors.html cors"
+ft cors forbidden-headers "false www.milk.test 1 undefined /cors.html undefined"
 
 echo "-- a page built from JSON"
 go "$H/render.html"
@@ -214,7 +214,7 @@ echo "-- the console panel's Network list"
 q move 512 300 click right
 set -- $(log_lines | sed -n 's/^\[browser\] input down \(-\{0,1\}[0-9]*\) \(-\{0,1\}[0-9]*\) button=2 .*/\1 \2/p' | tail -1)
 if [ -n "${1:-}" ]; then BX=$((512 - $1)); BY=$((300 - $2)); else BX=86; BY=91; bad "no right click logged, guessing the window's place"; fi
-q key meta_l-alt_l-j sleep 1
+q key meta_l-alt-j sleep 1
 shot fetch-04-console
 # The panel is the bottom third of the page area; its second label is the Network list.
 q move $((BX + 112)) $((BY + 420)) click sleep 1

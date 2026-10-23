@@ -15,7 +15,7 @@ networking) and never forwards anything anywhere:
       /api/big?mb=N         N MiB of x            /api/headers       the request headers, as JSON
       /api/redirect?to=URL&code=302    a redirect /api/cookie        sets sid=abc123
       /api/whoami           the Cookie header it saw   /api/beacon   POST, logged
-      /api/cheeses.json     the shop's list, after 400 ms (the render page)
+      /api/cheeses.json     the shop's list, after 2.5 s (the render page)
       /cors/open            Access-Control-Allow-Origin: *, exposes X-Visible (X-Hidden stays hidden)
       /cors/origin          allows the asking origin, says which it saw
       /cors/closed          no CORS headers at all
@@ -160,7 +160,7 @@ class Web(http.server.BaseHTTPRequestHandler):
         if path == "/api/data.json":
             return self.json({"items": [1, 2, 3], "name": "milk", "nested": {"ok": True}})
         if path == "/api/cheeses.json":
-            time.sleep(0.4)
+            time.sleep(2.5)
             return self.json(CHEESES)
         if path == "/api/bytes":
             return self.send(200, bytes(range(256)), "application/octet-stream")

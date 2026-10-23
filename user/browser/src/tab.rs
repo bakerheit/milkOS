@@ -45,6 +45,9 @@ pub struct Page {
     pub shown: alloc::collections::BTreeSet<String>,
     /// Stylesheets and images it is still waiting for.
     pub waiting: usize,
+    /// The kind of address the page came from (None: unknown; the policy guesses from the
+    /// name), which limits what its scripts may reach on the local network.
+    pub space: Option<browserkit::netpolicy::AddressSpace>,
 }
 
 impl Page {
@@ -74,6 +77,7 @@ impl Page {
             laid_dark: false,
             shown: alloc::collections::BTreeSet::new(),
             waiting: 0,
+            space: None,
         }
     }
 

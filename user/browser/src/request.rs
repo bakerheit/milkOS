@@ -117,9 +117,13 @@ impl App {
     fn net_launch(&mut self, ti: usize, req: NetRequest) {
         let t = &mut self.tabs[ti];
         let Some(url) = t.page.url.clone() else { return };
+        let mut page = browserkit::netpolicy::Page::new(url);
+        if let Some(space) = t.page.space {
+            page.address_space = space;
+        }
         let spec = ScriptSpec {
             req: req.clone(),
-            page: browserkit::netpolicy::Page::new(url),
+            page,
             cfg: self.net_cfg.clone(),
             cache: self.preflight.clone(),
         };

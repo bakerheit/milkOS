@@ -139,7 +139,7 @@ impl App {
                 win.rrect(r.x, r.y, r.w, r.h, 8, Theme::tint(th.oat, th.straw, 0x33));
             }
             win.disc(24, y + 13, 6, *c);
-            bold_x(win, 40, y + 5, name, th.espresso, 1);
+            win.text(40, y + 5, name, th.espresso);
             // The selected row's count is dropped: the list's own header carries it.
             if self.view != *v {
                 text_r(

@@ -96,10 +96,12 @@ q move 785 615 click sleep 1
 ser "send:/Apps/browser/browser --log-input http://$H/ &" "wait:$PR"
 if loaded "http://$(esc_re "$H")/: 200 OK, [0-9]+ bytes, 'Milk Browser test', 0 redirects" 30; then ok "the home page loaded (200, its title)"; else bad "no home page load in the log"; fi
 wait_srv "^http GET /cow\.png host=www\.milk\.test" && ok "the page's image was fetched" || bad "the image wasn't fetched"
-# The window's body origin, from /dev/wm (frame + 1, title bar 33).
-ser "send:text show /dev/wm" "wait:$PR"
-set -- $(out "text show /dev/wm" | grep -a "window .* Milk Browser test" | tail -1 | sed -E 's/.*x[0-9]+\+([0-9]+)\+([0-9]+) .*/\1 \2/')
-BX=$(( ${1:-85} + 1 )); BY=$(( ${2:-58} + 33 ))
+# Where the window's body is: the desktop places windows as it sees fit, so ask the Browser.
+# A right click on the page (it does nothing there) is logged in body coordinates
+# (--log-input); the screen point minus those is the body's origin.
+q move 512 400 click right
+set -- $(log_lines | sed -n 's/^\[browser\] input down \(-\{0,1\}[0-9]*\) \(-\{0,1\}[0-9]*\) button=2 .*/\1 \2/p' | tail -1)
+if [ -n "${1:-}" ]; then BX=$((512 - $1)); BY=$((400 - $2)); else BX=86; BY=91; bad "no right click logged, guessing the window's place"; fi
 echo "  (window body at $BX,$BY)"
 shot 01-home
 

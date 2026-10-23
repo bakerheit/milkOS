@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>A runaway frame</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>A frame whose script never ends</h2>
+<p id="ticks">ticks: 0</p>
+<iframe id="bad" name="bad" src="/runaway-child.html" width="420" height="80"></iframe>
+<iframe id="good" name="good" src="/same-child.html" width="420" height="120"></iframe>
+<script>
+  var ticks = 0;
+  report('runaway', 'start', 'parent running');
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('runaway', 'tick', ticks); }, 200);
+  window.addEventListener('load', function () { report('runaway', 'load', 'parent loaded'); });
+</script>
+</body></html>

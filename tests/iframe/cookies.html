@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cookies in frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Cookies and frames</h2>
+<iframe id="set" name="set" src="/cookie/set" width="420" height="60"></iframe>
+<script>
+  var got = {};
+  window.addEventListener('message', function (e) {
+    var d = String(e.data);
+    if (d.indexOf('cookie:') === 0) got[e.origin] = d.slice(7);
+  });
+  var order = [];
+  function load(id, url) {
+    var f = document.createElement('iframe');
+    f.id = id; f.name = id; f.width = 420; f.height = 40; f.src = url;
+    document.body.appendChild(f);
+  }
+  window.__start = function () {
+    load('same', '/cookie/who');
+    load('sibling', 'http://api.milk.test:@PORT@/cookie/who');
+    load('third', 'http://other.test:@PORT@/cookie/who');
+    load('thirdset', 'http://other.test:@PORT@/cookie/set');
+  };
+  window.__report = function () {
+    report('cookies', 'same-origin-frame', got['http://www.milk.test:@PORT@']);
+    report('cookies', 'same-site-frame', got['http://api.milk.test:@PORT@']);
+    report('cookies', 'third-party-frame', got['http://other.test:@PORT@']);
+    report('cookies', 'document-cookie', document.cookie);
+    report('cookies', 'end', 'done');
+  };
+  window.addEventListener('load', function () { setTimeout(window.__start, 400); setTimeout(window.__report, 3200); });
+</script>
+</body></html>

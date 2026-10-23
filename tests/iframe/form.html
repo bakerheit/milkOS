@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Forms into frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; } form { margin: 6px 0; }</style>
+</head><body>
+<h2>A form that submits into a frame</h2>
+<form id="get" action="/echo" method="get" target="result"><input id="q" name="q" value="cheese"><input type="hidden" name="via" value="get"><input id="gosubmit" type="submit" value="Search (GET)"></form>
+<form id="post" action="/echo?from=post" method="post" target="result"><input name="field" value="a b&c"><input type="hidden" name="via" value="post"><input id="postsubmit" type="submit" value="Send (POST)"></form>
+<iframe id="result" name="result" src="about:blank" width="520" height="90"></iframe>
+<p id="marker">the parent page, untouched</p>
+<script>
+  var echoes = [], loads = 0;
+  window.addEventListener('message', function (e) { if (String(e.data).indexOf('echo:') === 0) echoes.push(String(e.data).slice(5)); });
+  document.getElementById('result').addEventListener('load', function () { loads++; });
+  window.__submitGet = function () { document.getElementById('get').submit(); };
+  window.__submitPost = function () { document.getElementById('post').requestSubmit(); };
+  window.__report = function () {
+    report('form', 'echoes', echoes.length);
+    echoes.forEach(function (e, i) { report('form', 'echo-' + (i + 1), e); });
+    report('form', 'frame-loads', loads);
+    report('form', 'parent-untouched', document.getElementById('marker').textContent + ' ' + location.pathname + location.search);
+    report('form', 'end', 'done');
+  };
+  window.addEventListener('load', function () {
+    setTimeout(window.__submitGet, 500);
+    setTimeout(window.__submitPost, 1800);
+    setTimeout(window.__report, 3500);
+  });
+</script>
+</body></html>

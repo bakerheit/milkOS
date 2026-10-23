@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Frames deeper than the limit</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 10px; background: #fffdf8; color: #3a2e28; } iframe { border: 1px solid #b8a48c; background: #fff; display: block; margin: 4px 0; }</style>
+</head><body>
+<h3>level 0 (this page); every frame holds another</h3>
+<iframe id="d1" src="/deep?n=1" width="440" height="300"></iframe>
+<script>console.log('IFRTEST deep level-0 shown');</script>
+</body></html>

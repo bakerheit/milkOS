@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Find across frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Find in page</h2>
+<p>The word is quince, here once in the page.</p>
+<iframe id="a" name="a" srcdoc="<body style='font-family:sans-serif;background:#e8f2e0'><p>A frame with a quince in it, and another quince.</p></body>" width="420" height="60"></iframe>
+<iframe id="b" name="b" srcdoc="<body style='font-family:sans-serif;background:#e0eaf8'><p>No fruit here.</p><div style='height:300px'></div><p>Except this quince far down in the frame.</p></body>" width="420" height="80"></iframe>
+</body></html>

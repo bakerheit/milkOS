@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>postMessage</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>postMessage, both ways</h2>
+<iframe id="same" name="same" src="/msg-child.html" width="420" height="90"></iframe>
+<iframe id="api" name="api" src="http://api.milk.test:@PORT@/msg-child.html" width="420" height="90"></iframe>
+<iframe id="other" name="other" src="http://other.test:@PORT@/msg-child.html" width="420" height="90"></iframe>
+<p id="log"></p>
+<script>
+  var inbox = [];
+  window.addEventListener('message', function (e) {
+    inbox.push({ data: e.data, origin: e.origin, source: e.source, last: e.lastEventId, type: e.type, ports: e.ports && e.ports.length, isTrusted: e.isTrusted });
+  });
+  function find(pred) { for (var i = 0; i < inbox.length; i++) if (pred(inbox[i])) return inbox[i]; return null; }
+  var ids = ['same', 'api', 'other'];
+  function win(id) { return document.getElementById(id).contentWindow; }
+  var sent = 0;
+  function sendAll() {
+    ids.forEach(function (id) {
+      var w = win(id);
+      var o = id === 'same' ? location.origin : id === 'api' ? 'http://api.milk.test:@PORT@' : 'http://other.test:@PORT@';
+      w.postMessage({ kind: 'object', n: 42, s: 'str', arr: [1, 'two', [3]], nested: { a: { b: true } }, nul: null, undef: undefined, d: new Date(86400000), re: /a+b/gi, m: new Map([['k', 1]]), st: new Set([1, 2]), buf: new Uint8Array([1, 2, 3]).buffer, f: 1.5 }, o);
+      w.postMessage('plain string', o);
+      // Wrong target origins: nothing may be delivered.
+      w.postMessage('wrong-target', 'http://nobody.test:@PORT@');
+      w.postMessage('wrong-target-scheme', 'https://' + o.replace(/^https?:\/\//, ''));
+      w.postMessage('slash-target', '/');
+    });
+    var cyc = { name: 'cycle' }; cyc.self = cyc;
+    win('same').postMessage(cyc, '*');
+    report('msg', 'function-throws', tryit(function () { win('same').postMessage({ f: function () {} }, '*'); return 'sent'; }));
+    report('msg', 'symbol-throws', tryit(function () { win('same').postMessage(Symbol('x'), '*'); return 'sent'; }));
+    report('msg', 'dom-node-throws', tryit(function () { win('same').postMessage(document.body, '*'); return 'sent'; }));
+    report('msg', 'bad-target-throws', tryit(function () { win('same').postMessage('x', 'not a url'); return 'sent'; }));
+    report('msg', 'one-arg', tryit(function () { win('same').postMessage('one arg only'); return 'sent'; }));
+    report('msg', 'options-form', tryit(function () { win('same').postMessage('options form', { targetOrigin: '*' }); return 'sent'; }));
+    report('msg', 'async', String(find(function (m) { return m.data === 'plain string'; }) === null));
+  }
+  window.addEventListener('load', function () {
+    setTimeout(sendAll, 600);
+    setTimeout(function () {
+      ids.forEach(function (id) {
+        var replies = inbox.filter(function (m) { return m.source === win(id) && m.data && m.data.reply; });
+        var r = replies[0] && replies[0].data;
+        report('msg', id + '-reply-count', replies.length);
+        report('msg', id + '-reply', r ? r.summary : 'none');
+        report('msg', id + '-event-origin', replies[0] ? replies[0].origin : 'none');
+        report('msg', id + '-source-is-frame', String(!!replies[0] && replies[0].source === win(id)));
+        report('msg', id + '-event', replies[0] ? replies[0].type + ' ' + JSON.stringify(replies[0].last) + ' ' + replies[0].ports + ' ' + replies[0].isTrusted : 'none');
+      });
+      var same = find(function (m) { return m.data && m.data.reply === 'cycle'; });
+      report('msg', 'cycle-reply', same ? same.data.summary : 'none');
+      report('msg', 'wrong-target-delivered', String(inbox.filter(function (m) { return m.data && m.data.reply === 'wrong-target'; }).length));
+      report('msg', 'end', 'done');
+    }, 2600);
+  });
+</script>
+</body></html>

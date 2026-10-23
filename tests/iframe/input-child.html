@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Input in a frame</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 8px; background: #e8f2e0; color: #3a2e28; }</style></head>
+<body>
+<p>Type here: <input id="box" type="text" size="24" placeholder="focus me"></p>
+<p><label><input id="chk" type="checkbox"> a checkbox</label> <button id="btn">a button</button></p>
+<script>
+  var box = document.getElementById('box');
+  function say(t) { try { parent.postMessage('input:' + t, '*'); } catch (e) {} console.log('IFRTEST input-child ' + t); }
+  box.addEventListener('input', function () { say('value=' + box.value); });
+  box.addEventListener('focus', function () { say('focus'); });
+  document.getElementById('chk').addEventListener('change', function (e) { say('checked=' + e.target.checked); });
+  document.getElementById('btn').addEventListener('click', function () { say('button'); });
+  document.addEventListener('keydown', function (e) { if (e.key === 'F9') say('keydown-F9'); });
+</script></body></html>

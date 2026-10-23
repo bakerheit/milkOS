@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Target outer</title>
+<style>body { font-family: sans-serif; margin: 8px; background: #e8f2e0; color: #3a2e28; font-size: 13px; } iframe { border: 2px solid #8fa87c; background: #fff; display: block; margin: 4px 0; }</style></head>
+<body>
+<a id="to-parent" href="/target-page.html?by=parent" target="_parent">_parent</a>
+<a id="to-top" href="/landed.html" target="_top">_top</a>
+<a id="to-sibling" href="/target-page.html?by=sibling" target="named">sibling by name</a>
+<a id="to-inner" href="/target-page.html?by=inner" target="inner">inner by name</a>
+<iframe name="inner" src="about:blank" width="400" height="60"></iframe>
+<script>window.__click = function (id) { document.getElementById(id).click(); };</script>
+</body></html>

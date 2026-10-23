@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Nested frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Frames inside frames</h2>
+<iframe id="a" name="a" src="/nest-a.html" width="520" height="260"></iframe>
+<script>
+  window.addEventListener('load', function () {
+    var a = document.getElementById('a').contentWindow;
+    var b = a.frames[0], c = b.frames[0];
+    report('nested', 'depths', a.depth + ' ' + b.depth + ' ' + c.depth);
+    report('nested', 'chain', String(c.parent === b) + ' ' + String(b.parent === a) + ' ' + String(a.parent === window) + ' ' + String(c.top === window));
+    report('nested', 'reach-down', c.document.getElementById('leaf').textContent);
+    report('nested', 'title-chain', [a.document.title, b.document.title, c.document.title].join(' > '));
+    report('nested', 'end', 'done');
+  });
+</script>
+</body></html>

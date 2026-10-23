@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>The child</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 8px; background: #e8f2e0; color: #3a2e28; }</style>
+</head><body>
+<h3 id="who">I am the child frame</h3>
+<p id="msg">nothing yet</p>
+<button id="btn" onclick="document.getElementById('msg').textContent = 'clicked'">Click me</button>
+<script>
+  function setFromParent(t) { document.getElementById('msg').textContent = t; }
+  function readParentNote() { return parent.document.getElementById('note').textContent; }
+  report('same-child', 'identity', (parent !== window) + ' ' + (top === parent) + ' ' + frameElement.id + ' ' + window.name + ' ' + (window.self === window));
+  report('same-child', 'parent-title', parent.document.title);
+  parent.document.getElementById('note').textContent = 'the child changed this paragraph';
+</script>
+</body></html>

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Who may frame what</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 10px; background: #fffdf8; color: #3a2e28; font-size: 12px; } iframe { border: 2px solid #b8a48c; background: #fff; margin: 2px; vertical-align: top; }</style>
+</head><body>
+<div>X-Frame-Options (same origin):
+<iframe id="xfo-deny" src="/xfo/deny.html" width="150" height="46"></iframe>
+<iframe id="xfo-same" src="/xfo/same.html" width="150" height="46"></iframe>
+<iframe id="xfo-allowall" src="/xfo/allowall.html" width="150" height="46"></iframe>
+<iframe id="xfo-conflict" src="/xfo/conflict.html" width="150" height="46"></iframe>
+<iframe id="xfo-obsolete" src="/xfo/obsolete.html" width="150" height="46"></iframe>
+</div>
+<div>X-Frame-Options from another origin (api.milk.test):
+<iframe id="x-xfo-same" src="http://api.milk.test:@PORT@/xfo/same.html" width="150" height="46"></iframe>
+<iframe id="x-xfo-deny" src="http://api.milk.test:@PORT@/xfo/deny.html" width="150" height="46"></iframe>
+</div>
+<div>frame-ancestors:
+<iframe id="csp-none" src="/csp/none.html" width="150" height="46"></iframe>
+<iframe id="csp-self" src="/csp/self.html" width="150" height="46"></iframe>
+<iframe id="csp-www" src="/csp/www.html" width="150" height="46"></iframe>
+<iframe id="csp-other" src="/csp/other.html" width="150" height="46"></iframe>
+<iframe id="csp-wild" src="/csp/wild.html" width="150" height="46"></iframe>
+<iframe id="csp-both" src="/csp/both.html" width="150" height="46"></iframe>
+</div>
+<div>frame-ancestors from another origin:
+<iframe id="x-csp-self" src="http://api.milk.test:@PORT@/csp/self.html" width="150" height="46"></iframe>
+<iframe id="x-csp-www" src="http://api.milk.test:@PORT@/csp/www.html" width="150" height="46"></iframe>
+<iframe id="x-csp-other" src="http://api.milk.test:@PORT@/csp/other.html" width="150" height="46"></iframe>
+<iframe id="x-csp-wild" src="http://other.test:@PORT@/csp/wild.html" width="150" height="46"></iframe>
+</div>
+<script>
+  var shown = [];
+  window.addEventListener('message', function (e) {
+    if (String(e.data).indexOf('framed:') === 0) shown.push(String(e.data).slice(7));
+  });
+  var loads = 0;
+  document.querySelectorAll('iframe').forEach(function (f) { f.addEventListener('load', function () { loads++; }); });
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      report('xfo', 'shown', shown.sort().join(','));
+      report('xfo', 'load-events', loads + ' of ' + document.querySelectorAll('iframe').length);
+      report('xfo', 'end', 'done');
+    }, 1500);
+  });
+</script>
+</body></html>

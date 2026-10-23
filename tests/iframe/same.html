@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Same-origin frame</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>A same-origin frame</h2>
+<p id="note">the parent's own paragraph</p>
+<iframe id="f" name="f" src="/same-child.html" width="420" height="140"></iframe>
+<script>
+  window.addEventListener('load', function () {
+    var f = document.getElementById('f');
+    var d = f.contentDocument;
+    report('same', 'child-title', d && d.title);
+    report('same', 'parent-reads-child', d.getElementById('who').textContent);
+    f.contentWindow.setFromParent('hello from the parent');
+    report('same', 'child-got', d.getElementById('msg').textContent);
+    report('same', 'frames', window.frames.length + ' ' + (window.frames[0] === f.contentWindow) + ' ' + (window.frames.f === f.contentWindow) + ' ' + (window.length));
+    report('same', 'names', f.contentWindow.name + '|' + window.name + '|' + f.name);
+    report('same', 'top-is-self', String(window.parent === window) + ' ' + String(window.top === window) + ' ' + String(window.frameElement));
+    report('same', 'content-window-parent', String(f.contentWindow.parent === window));
+    report('same', 'child-location', f.contentWindow.location.pathname);
+    report('same', 'child-origin-same', String(f.contentWindow.location.origin === location.origin));
+    report('same', 'child-sees-parent-note', f.contentWindow.readParentNote());
+    report('same', 'child-click', (function () { d.getElementById('btn').click(); return d.getElementById('msg').textContent; })());
+    report('same', 'end', 'done');
+  });
+</script>
+</body></html>

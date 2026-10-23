@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Target page</title></head>
+<body style="font-family: sans-serif; background: #e0eaf8; color: #3a2e28; margin: 8px">
+<b>The link landed here</b>
+<script>try { parent.postMessage('target:' + (window.name || 'noname') + location.search, '*'); } catch (e) {}
+console.log('IFRTEST target-page landed ' + location.search + ' in ' + (window === top ? 'the top page' : 'frame ' + window.name));</script>
+</body></html>

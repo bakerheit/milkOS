@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Message child</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; font-size: 12px; margin: 6px; background: #e8f2e0; color: #3a2e28; }</style>
+</head><body>
+<p>I answer every message I get. <span id="count">0</span> so far.</p>
+<script>
+  var n = 0, seen = [];
+  function describe(d) {
+    if (d === null) return 'null';
+    if (typeof d === 'string') return 'string:' + d;
+    if (typeof d !== 'object') return typeof d + ':' + d;
+    if (d.name === 'cycle') return 'cycle:' + (d.self === d);
+    if (d.kind !== 'object') return JSON.stringify(d);
+    return [
+      'n=' + d.n, 'arr=' + JSON.stringify(d.arr), 'nested=' + JSON.stringify(d.nested),
+      'nul=' + d.nul, 'undef=' + ('undef' in d) + '/' + d.undef,
+      'd=' + (d.d instanceof Date) + ':' + d.d.getTime(), 're=' + (d.re instanceof RegExp) + ':' + d.re.source + '/' + d.re.flags,
+      'm=' + (d.m instanceof Map) + ':' + d.m.get('k'), 'st=' + (d.st instanceof Set) + ':' + d.st.size,
+      'buf=' + (d.buf instanceof ArrayBuffer) + ':' + d.buf.byteLength + ':' + new Uint8Array(d.buf)[2], 'f=' + d.f
+    ].join(' ');
+  }
+  window.addEventListener('message', function (e) {
+    n++;
+    document.getElementById('count').textContent = n;
+    var what = typeof e.data === 'string' ? e.data : (e.data && (e.data.name === 'cycle' ? 'cycle' : e.data.kind));
+    var summary = describe(e.data) + ' | origin=' + e.origin + ' source-is-parent=' + (e.source === parent) + ' self-origin=' + window.origin;
+    e.source.postMessage({ reply: what, summary: summary }, e.origin === 'null' ? '*' : e.origin);
+  });
+</script>
+</body></html>

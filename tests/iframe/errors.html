@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Frames that go wrong</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 10px; background: #fffdf8; color: #3a2e28; font-size: 12px; } iframe { border: 2px solid #b8a48c; background: #fff; margin: 2px; vertical-align: top; }</style>
+</head><body>
+<div>
+<iframe id="e404" name="e404" src="/status/404" width="200" height="70"></iframe>
+<iframe id="e500" name="e500" src="/status/500" width="200" height="70"></iframe>
+<iframe id="refused" name="refused" src="http://www.milk.test:1/" width="200" height="70"></iframe>
+<iframe id="nxdomain" name="nxdomain" src="http://does-not-exist.test:@PORT@/" width="200" height="70"></iframe>
+</div><div>
+<iframe id="download" name="download" src="/download/file.bin" width="200" height="70"></iframe>
+<iframe id="text" name="text" src="/plain.txt" width="200" height="70"></iframe>
+<iframe id="pic" name="pic" src="/pic.png" width="200" height="70"></iframe>
+<iframe id="redir" name="redir" src="/redirect?to=/same-child.html" width="200" height="70"></iframe>
+</div><div>
+<iframe id="js" name="js" src="javascript:alert(1)" width="200" height="40"></iframe>
+<iframe id="file" name="file" src="file:///etc/hosts" width="200" height="40"></iframe>
+<iframe id="port" name="port" src="http://www.milk.test:22/" width="200" height="40"></iframe>
+<iframe id="late" name="late" src="/slow?ms=3000" width="200" height="40"></iframe>
+</div>
+<script>
+  var loads = {};
+  document.querySelectorAll('iframe').forEach(function (f) { f.addEventListener('load', function () { loads[f.id] = true; }); });
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      report('errors', 'loaded', Object.keys(loads).sort().join(','));
+      report('errors', 'e404-text', tryit(function () { return document.getElementById('e404').contentDocument.title; }));
+      report('errors', 'text-body', tryit(function () { return document.getElementById('text').contentDocument.body.textContent.trim().split('\n')[0]; }));
+      report('errors', 'redir-path', tryit(function () { return document.getElementById('redir').contentWindow.location.pathname; }));
+      report('errors', 'top-path', location.pathname);
+      report('errors', 'end', 'done');
+    }, 4500);
+  });
+</script>
+</body></html>

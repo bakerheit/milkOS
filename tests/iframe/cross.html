@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cross-origin frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Frames of other origins</h2>
+<iframe id="api" name="api" src="http://api.milk.test:@PORT@/cross-child.html" width="420" height="110"></iframe>
+<iframe id="other" name="other" src="http://other.test:@PORT@/cross-child.html" width="420" height="110"></iframe>
+<script>
+  var msgs = [];
+  window.addEventListener('message', function (e) { msgs.push(e.data + '@' + e.origin); });
+  window.addEventListener('load', function () {
+    ['api', 'other'].forEach(function (id) {
+      var f = document.getElementById(id), w = f.contentWindow;
+      report('cross', id + '-contentDocument', String(f.contentDocument));
+      report('cross', id + '-window-document', tryit(function () { return w.document; }));
+      report('cross', id + '-location-href', tryit(function () { return w.location.href; }));
+      report('cross', id + '-location-pathname', tryit(function () { return w.location.pathname; }));
+      report('cross', id + '-body', tryit(function () { return w.document.body.innerHTML; }));
+      report('cross', id + '-set-prop', tryit(function () { w.secret = 1; return 'set'; }));
+      report('cross', id + '-name', tryit(function () { return w.name; }));
+      report('cross', id + '-safe', [typeof w.postMessage, String(w.closed), String(w.parent === window), String(w.top === window), String(w.frames === w.window), typeof w.focus].join(' '));
+      report('cross', id + '-length', tryit(function () { return w.length; }));
+      report('cross', id + '-self', String(w === w.window) + ' ' + String(w.self === w));
+    });
+    report('cross', 'end', 'done');
+  });
+  setTimeout(function () { report('cross', 'messages', msgs.sort().join(' | ')); }, 2500);
+</script>
+</body></html>

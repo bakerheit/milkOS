@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>History with frames</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Back and forward with frames</h2>
+<iframe id="left" name="left" src="/count/left" width="420" height="70"></iframe>
+<iframe id="right" name="right" src="/count/right" width="420" height="70"></iframe>
+<p><a id="l2" href="/count/left2" target="left">left 2</a> <a id="l3" href="/count/left3" target="left">left 3</a> <a id="r2" href="/count/right2" target="right">right 2</a></p>
+<script>
+  var shown = [];
+  window.addEventListener('message', function (e) { if (String(e.data).indexOf('framed:') === 0) shown.push(String(e.data).slice(7)); });
+  window.__click = function (id) { document.getElementById(id).click(); };
+  window.__report = function (label) { report('history', label, shown.join(',')); };
+  console.log('IFRTEST history parent-loaded ' + (window.history.length));
+</script>
+</body></html>

@@ -639,13 +639,30 @@ fn parse_selector(b: &Bridge, r: &mut Realm, s: &str) -> JsResult<Vec<crate::css
     }
 }
 
+/// Sibling positions for :nth-child() and friends, cached by the DOM's generation.
+fn positions(b: &Bridge, p: &Page) -> Rc<(Vec<u32>, Vec<u32>)> {
+    let gen_now = p.dom.generation;
+    if let Ok(st) = b.st.try_borrow()
+        && let Some((g, pos)) = &st.positions
+        && *g == gen_now
+        && pos.0.len() == p.dom.len()
+    {
+        return pos.clone();
+    }
+    let pos = Rc::new(crate::style::cascade::sibling_positions(&p.dom));
+    if let Ok(mut st) = b.st.try_borrow_mut() {
+        st.positions = Some((gen_now, pos.clone()));
+    }
+    pos
+}
+
 /// Elements under `root` (not `root` itself) matching `sel`, in tree order; at most `max`.
-fn select(p: &Page, root: NodeId, sel: &[crate::css::selector::Selector], max: usize) -> Vec<NodeId> {
-    let (index, count) = crate::style::cascade::sibling_positions(&p.dom);
+fn select(b: &Bridge, p: &Page, root: NodeId, sel: &[crate::css::selector::Selector], max: usize) -> Vec<NodeId> {
+    let pos = positions(b, p);
     let cx = crate::css::selector::MatchCx {
         dom: &p.dom,
-        index: &index,
-        count: &count,
+        index: &pos.0,
+        count: &pos.1,
     };
     let mut out = Vec::new();
     let mut c = p.dom.next_in(root, root);
@@ -661,12 +678,12 @@ fn select(p: &Page, root: NodeId, sel: &[crate::css::selector::Selector], max: u
     out
 }
 
-fn matches_sel(p: &Page, n: NodeId, sel: &[crate::css::selector::Selector]) -> bool {
-    let (index, count) = crate::style::cascade::sibling_positions(&p.dom);
+fn matches_sel(b: &Bridge, p: &Page, n: NodeId, sel: &[crate::css::selector::Selector]) -> bool {
+    let pos = positions(b, p);
     let cx = crate::css::selector::MatchCx {
         dom: &p.dom,
-        index: &index,
-        count: &count,
+        index: &pos.0,
+        count: &pos.1,
     };
     sel.iter().any(|s| cx.matches(s, n))
 }
@@ -1712,7 +1729,7 @@ fn e_query_selector(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsR
     let n = this_node(b, r, t)?;
     let s = arg_str(r, a, 0)?;
     let sel = parse_selector(b, r, &s)?;
-    let hit = select(b.page_or(r)?, n, &sel, 1);
+    let hit = select(b, b.page_or(r)?, n, &sel, 1);
     Ok(match hit.first() {
         Some(&h) => wrap(b, r, h),
         None => Value::NULL,
@@ -1722,14 +1739,14 @@ fn e_query_selector_all(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) ->
     let n = this_node(b, r, t)?;
     let s = arg_str(r, a, 0)?;
     let sel = parse_selector(b, r, &s)?;
-    let hits = select(b.page_or(r)?, n, &sel, 1 << 20);
+    let hits = select(b, b.page_or(r)?, n, &sel, 1 << 20);
     Ok(static_list(b, r, &hits))
 }
 fn e_matches(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
     let s = arg_str(r, a, 0)?;
     let sel = parse_selector(b, r, &s)?;
-    Ok(Value::bool(matches_sel(b.page_or(r)?, n, &sel)))
+    Ok(Value::bool(matches_sel(b, b.page_or(r)?, n, &sel)))
 }
 fn e_closest(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsResult<Value> {
     let n = this_elem(b, r, t)?;
@@ -1738,7 +1755,7 @@ fn e_closest(b: &Rc<Bridge>, r: &mut Realm, t: Value, a: &[Value]) -> JsResult<V
     let p = b.page_or(r)?;
     let mut c = n;
     while c != NONE {
-        if p.dom.element(c).is_some() && matches_sel(p, c, &sel) {
+        if p.dom.element(c).is_some() && matches_sel(b, p, c, &sel) {
             return Ok(wrap(b, r, c));
         }
         c = p.dom.parent(c);

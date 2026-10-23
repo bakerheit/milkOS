@@ -168,6 +168,8 @@ pub struct State {
     pub template_content: BTreeMap<NodeId, NodeId>,
     /// document.write: (the script writing, the last node it wrote).
     pub write_after: (NodeId, NodeId),
+    /// Sibling positions for selector matching, by DOM generation.
+    pub positions: Option<(u64, alloc::rc::Rc<(Vec<u32>, Vec<u32>)>)>,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -219,6 +221,7 @@ impl Bridge {
                 custom_validity: BTreeMap::new(),
                 template_content: BTreeMap::new(),
                 write_after: (NONE, NONE),
+                positions: None,
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),

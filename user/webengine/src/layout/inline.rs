@@ -86,12 +86,35 @@ impl Collect<'_, '_> {
             }
         }
         let end = self.text.len() as u32;
-        let s = &self.text[start as usize..end as usize];
-        let mut w = self.cx.text_width(&font, s);
-        if st.letter_spacing != 0.0 {
-            w += self.cx.au(st.letter_spacing) * s.chars().count() as i32;
-        }
         let node = boxes[b as usize].node;
+        if st.letter_spacing != 0.0 {
+            // Letter-spaced text goes out one character per item (and per run), so what is drawn
+            // matches what was measured.
+            let ls = self.cx.au(st.letter_spacing);
+            let mut i = start as usize;
+            while i < end as usize {
+                let c = self.text[i..].chars().next().unwrap();
+                let j = i + c.len_utf8();
+                let w = self.cx.text_width(&font, &self.text[i..j]) + ls;
+                let last = j == end as usize;
+                self.items.push(It::Text {
+                    start: i as u32,
+                    end: j as u32,
+                    w,
+                    styled: b,
+                    font,
+                    node,
+                    space: false,
+                    brk_after: brk_after && last,
+                });
+                i = j;
+            }
+            self.prev_space = false;
+            self.at_line_start = false;
+            return;
+        }
+        let s = &self.text[start as usize..end as usize];
+        let w = self.cx.text_width(&font, s);
         self.items.push(It::Text {
             start,
             end,
@@ -804,7 +827,7 @@ fn finish_line(
                 let mut kk = k + 1;
                 let mut run_end = end;
                 let mut run_w = placed[k].w;
-                if !justify {
+                if !justify && boxes[styled as usize].style.letter_spacing == 0.0 {
                     while kk < placed.len() {
                         match items[placed[kk].it] {
                             It::Text {

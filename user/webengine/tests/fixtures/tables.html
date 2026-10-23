@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><title>Tables</title>
+<style>
+body { font-family: sans-serif; margin: 16px; }
+table.data { border-collapse: collapse; width: 100%; margin-bottom: 24px; }
+.data caption { caption-side: top; font-weight: bold; padding: 6px; text-align: left; }
+.data th, .data td { border: 1px solid #999; padding: 4px 8px; }
+.data thead th { background: #dfe6ee; }
+.data tbody tr:nth-child(even) { background: #f2f4f7; }
+.data td.num { text-align: right; }
+.old td { padding: 2px; }
+</style></head>
+<body>
+<table class="data">
+<caption>Dairy production, 2025</caption>
+<thead><tr><th>Country</th><th>Cows (millions)</th><th>Milk (Mt)</th><th>Per cow (t)</th></tr></thead>
+<tbody>
+<tr><td>India</td><td class="num">61.0</td><td class="num">99.0</td><td class="num">1.6</td></tr>
+<tr><td>United States</td><td class="num">9.4</td><td class="num">102.7</td><td class="num">10.9</td></tr>
+<tr><td>Brazil</td><td class="num">16.0</td><td class="num">35.0</td><td class="num">2.2</td></tr>
+<tr><td colspan="2">Rest of the world (estimate)</td><td class="num">420</td><td class="num">&mdash;</td></tr>
+</tbody>
+<tfoot><tr><th>Total</th><td colspan="3">about 650 Mt</td></tr></tfoot>
+</table>
+<table border="1" cellpadding="4" cellspacing="0" class="old">
+<tr><th rowspan="2">Rowspan</th><td>a</td><td>b</td></tr>
+<tr><td bgcolor="#ffeecc">c</td><td align="right" width="120">d (120px)</td></tr>
+<tr><td colspan="3" align="center">wide cell</td></tr>
+</table>
+<p>A table without rows: <span style="display:table-cell;border:1px solid red;padding:2px">table-cell span</span> done.</p>
+</body></html>

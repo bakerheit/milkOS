@@ -941,6 +941,21 @@ impl Page {
         by_id.and_then(rect)
     }
 
+    /// Test helper: the border box (union of fragments) of the element with this id.
+    #[cfg(test)]
+    pub(crate) fn rect_of_id(&self, id: &str) -> Option<Rect> {
+        let p = self.painted.as_ref()?;
+        let a = self.dom.atoms.get(id)?;
+        let mut n = 0;
+        while n != NONE {
+            if self.dom.element(n).is_some_and(|e| e.id == Some(a)) {
+                return p.node_rects.get(n as usize).copied();
+            }
+            n = self.dom.next_in(n, 0);
+        }
+        None
+    }
+
     pub fn controls(&self) -> &[FormControl] {
         &self.forms.controls
     }

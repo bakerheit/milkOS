@@ -37,6 +37,16 @@ input, select, button, textarea { font: 13.333px sans-serif; color: black; lette
   word-spacing: normal; line-height: normal; text-transform: none; text-indent: 0;
   text-align: start; }
 input[type=hidden i] { display: none; }
+input, textarea, select { border: 2px inset #767676; padding: 1px 2px; background-color: white;
+  border-radius: 2px; }
+input[type=checkbox i], input[type=radio i] { border: 1px solid #767676; padding: 0;
+  margin: 3px 3px 3px 4px; background-color: white; vertical-align: baseline; }
+input[type=radio i] { border-radius: 50%; }
+input[type=submit i], input[type=reset i], input[type=button i], input[type=file i], button,
+select { border: 1px solid #767676; padding: 1px 6px; background-color: #efefef;
+  border-radius: 3px; }
+input[type=image i] { border: none; padding: 0; background-color: transparent; }
+input[type=range i], input[type=color i] { border: none; background-color: transparent; }
 button { text-align: center; }
 textarea { white-space: pre-wrap; }
 img, video, canvas, iframe, embed, object, svg { display: inline-block; }

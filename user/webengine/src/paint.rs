@@ -144,6 +144,24 @@ impl P<'_> {
         (dx, dy)
     }
 
+    /// The relative offsets of the inline boxes a fragment sits in (CSS 2.1 §9.4.3 applies
+    /// to inline boxes too).
+    fn inline_offset(&self, mut b: BoxId) -> (Au, Au) {
+        let mut o = (0, 0);
+        for _ in 0..64 {
+            if b == NO_BOX || !matches!(self.boxes[b as usize].kind, Kind::Inline | Kind::Text(_)) {
+                break;
+            }
+            if matches!(self.boxes[b as usize].kind, Kind::Inline) {
+                let r = self.rel_offset(&self.boxes[b as usize]);
+                o.0 += r.0;
+                o.1 += r.1;
+            }
+            b = self.boxes[b as usize].parent;
+        }
+        o
+    }
+
     fn clip_with(&mut self, clip: u16, r: Rect) -> u16 {
         let base = self.clips[clip as usize];
         let c = base.intersect(&r);
@@ -557,17 +575,16 @@ impl P<'_> {
     fn child(&mut self, c: BoxId, off: (Au, Au), clip: u16, op: f32, layer: Layer, depth: u32) {
         let cb = &self.boxes[c as usize];
         let s = &cb.style;
-        if s.position == Position::Fixed && layer != Layer::Fixed {
+        let element_box = !matches!(cb.kind, Kind::Text(_) | Kind::Break | Kind::Wbr | Kind::Marker(_));
+        if element_box && s.position == Position::Fixed && layer != Layer::Fixed {
             self.order += 1;
-            self.deferred
-                .push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
+            self.deferred.push((s.z_index.unwrap_or(0), self.order, c, (0, 0), 0, op, true));
             return;
         }
-        if s.is_positioned() && !matches!(cb.kind, Kind::Text(_)) {
+        if element_box && s.is_positioned() && !matches!(cb.kind, Kind::Inline) {
             self.order += 1;
             let z = s.z_index.unwrap_or(0);
-            self.deferred
-                .push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
+            self.deferred.push((z, self.order, c, off, clip, op, layer == Layer::Fixed));
             return;
         }
         self.paint(c, off, clip, op, layer, depth + 1);

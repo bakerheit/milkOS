@@ -393,6 +393,7 @@ pub fn layout_table(boxes: &mut Vec<LBox>, cx: &Cx, t: BoxId, spec_h: Option<Au>
         }
     }
     let mut cell_base: Vec<Option<Au>> = Vec::with_capacity(g.cells.len());
+    let mut cell_need: Vec<Au> = Vec::with_capacity(g.cells.len());
     for cell in &g.cells {
         let x0 = col_x[cell.col];
         let x1 = col_x[(cell.col + cell.colspan).min(n)] - hs;
@@ -403,16 +404,18 @@ pub fn layout_table(boxes: &mut Vec<LBox>, cx: &Cx, t: BoxId, spec_h: Option<Au>
                 .first_baseline
                 .map(|b| b - boxes[cell.b as usize].y),
         );
+        // A cell needs its content height, or its specified height if taller (§17.5.3).
+        let mut h = boxes[cell.b as usize].h;
+        let s = &boxes[cell.b as usize].style;
+        if let Size::L(l) = s.height
+            && !l.has_pct()
+        {
+            let (_, bo, p) = block::edges(cx, s, 0);
+            let bp = bo[0] + bo[2] + p[0] + p[2];
+            h = h.max(block::size_px(cx, s, &s.height, None, bp).unwrap_or(0) + bp);
+        }
+        cell_need.push(h);
         if cell.rowspan == 1 {
-            let mut h = boxes[cell.b as usize].h;
-            let s = &boxes[cell.b as usize].style;
-            if let Size::L(l) = s.height
-                && !l.has_pct()
-            {
-                let (_, bo, p) = block::edges(cx, s, 0);
-                let bp = bo[0] + bo[2] + p[0] + p[2];
-                h = h.max(block::size_px(cx, s, &s.height, None, bp).unwrap_or(0) + bp);
-            }
             row_h[cell.row] = row_h[cell.row].max(h);
         }
     }
@@ -432,11 +435,11 @@ pub fn layout_table(boxes: &mut Vec<LBox>, cx: &Cx, t: BoxId, spec_h: Option<Au>
         }
     }
     // Row-spanning cells grow their last row if needed.
-    for cell in &g.cells {
+    for (k, cell) in g.cells.iter().enumerate() {
         if cell.rowspan > 1 {
             let last = (cell.row + cell.rowspan - 1).min(nrows - 1);
             let have: Au = row_h[cell.row..=last].iter().sum::<Au>() + vs * (last - cell.row) as Au;
-            let need = boxes[cell.b as usize].h;
+            let need = cell_need[k];
             if need > have {
                 row_h[last] += need - have;
             }

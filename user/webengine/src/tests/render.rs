@@ -125,3 +125,18 @@ fn debug_dump() {
     );
     std::println!("{s}");
 }
+
+#[test]
+fn debug_abs() {
+    let (_, s) = render(
+        "<div style='position:relative;width:200px;border:1px solid'><span style='position:absolute;top:-8px;right:-8px;font-size:11px;padding:2px 6px;background:red'>new</span><h3>Two</h3></div>",
+        400,
+    );
+    std::println!("{s}");
+}
+
+#[test]
+fn debug_z() {
+    let (_, s) = render("<style>body{margin:0}</style><div style='position:relative;z-index:2;background:#000001;height:10px'></div><div style='position:relative;z-index:1;background:#000002;height:10px'></div>", 400);
+    std::println!("{s}");
+}

@@ -15,6 +15,9 @@
 //! Hostile input is bounded by [`Limits`]: node count, nesting depth (deeper elements are
 //! attached at the limit) and a cap on the active formatting elements list.
 
+// The `Tok::End(n) if matches!(n, ...)` guards mirror the spec's lists of tag names.
+#![allow(clippy::redundant_guards)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

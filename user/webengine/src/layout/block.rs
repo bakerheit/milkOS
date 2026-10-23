@@ -730,10 +730,9 @@ fn top_chain(boxes: &[LBox], cx: &Cx, b: BoxId, cb_w: Au, depth: u32) -> Margins
             .children
             .iter()
             .find(|&&c| !boxes[c as usize].out_of_flow)
+            && boxes[fc as usize].style.clear == Clear::None
         {
-            if boxes[fc as usize].style.clear == Clear::None {
-                m.join(top_chain(boxes, cx, fc, w, depth + 1));
-            }
+            m.join(top_chain(boxes, cx, fc, w, depth + 1));
         }
     }
     m
@@ -1029,11 +1028,7 @@ fn place_marker(boxes: &mut Vec<LBox>, cx: &Cx, li: BoxId, mk: BoxId) {
     let f = cx.font(&m.style);
     let fm = cx.metrics(&f);
     let asc = fm.ascent * AU;
-    let gap = if matches!(&m.kind, Kind::Marker(t) if t.is_empty()) {
-        0
-    } else {
-        0
-    };
+    let gap = 0;
     let baseline = boxes[li as usize].first_baseline.unwrap_or(cyy + asc);
     let w = boxes[mk as usize].w;
     let nx = cxx - w - gap;

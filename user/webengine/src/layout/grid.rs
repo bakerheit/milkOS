@@ -114,7 +114,9 @@ fn place(
     let ncols_explicit = ncols_explicit.max(container.area_size.1 as usize);
     let mut ncols = ncols_explicit.max(1);
     // Columns implied by definite placements widen the grid first.
-    let mut pre: Vec<(BoxId, Option<usize>, usize, Option<usize>, usize)> = Vec::new();
+    // (item, column, column span, row, row span)
+    type Pre = (BoxId, Option<usize>, usize, Option<usize>, usize);
+    let mut pre: Vec<Pre> = Vec::new();
     for &b in ids {
         let g = gstyle(&boxes[b as usize].style);
         let (mut c, mut cs) = resolve(g.col, ncols_explicit);
@@ -385,9 +387,7 @@ fn size_tracks(
         }
         None => {
             // Indefinite: flexible tracks at their max-content (as at max-content size).
-            for i in 0..n {
-                size[i] = limit[i];
-            }
+            size.copy_from_slice(&limit);
         }
     }
     size

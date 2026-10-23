@@ -959,7 +959,7 @@ fn valign_hint(v: &str, out: &mut Vec<Decl>) {
     out.push(Decl::VerticalAlign(SVAlign::K(a)));
 }
 
-fn nearest_table<'a>(dom: &'a Dom, mut n: NodeId) -> Option<&'a Element> {
+fn nearest_table(dom: &Dom, mut n: NodeId) -> Option<&Element> {
     for _ in 0..4 {
         n = dom.parent(n);
         if n == NONE {

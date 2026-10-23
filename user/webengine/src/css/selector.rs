@@ -501,10 +501,9 @@ impl<'a> P<'a> {
                 let s = s.to_ascii_lowercase();
                 if let Some(r) = s.strip_prefix("-n") {
                     (-1, Some(String::from(r)))
-                } else if let Some(r) = s.strip_prefix('n') {
-                    (1, Some(String::from(r)))
                 } else {
-                    return None;
+                    let r = s.strip_prefix('n')?;
+                    (1, Some(String::from(r)))
                 }
             }
             Tok::Delim('+') => {
@@ -546,7 +545,7 @@ impl<'a> P<'a> {
                 }
                 None
             }
-            Some(Tok::Number { value, int: true }) if matches!(self.t.get(self.i), Some(_)) => {
+            Some(Tok::Number { value, int: true }) if self.t.get(self.i).is_some() => {
                 // "+5" / "-5" tokenized as signed numbers.
                 self.i += 1;
                 Some((a, clampi(value)))

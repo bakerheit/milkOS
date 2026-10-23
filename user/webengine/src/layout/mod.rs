@@ -30,6 +30,8 @@ use crate::style::types::*;
 pub type Au = i32;
 pub const AU: Au = 64;
 pub type BoxId = u32;
+/// (box, width, containing-block height) for [`Cx::heights`].
+pub type HeightKey = (BoxId, Au, Option<Au>);
 pub const NO_BOX: BoxId = u32::MAX;
 /// The largest single length (2^24 Au, about 262000 device px): anything a hostile page asks
 /// for beyond that is clamped, so sums of lengths stay far from overflowing.
@@ -230,7 +232,7 @@ pub struct Cx<'a> {
     spaces: RefCell<BTreeMap<Font, Au>>,
     pub intrinsic: RefCell<BTreeMap<BoxId, (Au, Au)>>,
     /// Flex items' content heights at a width (box, width, cb height) → height.
-    pub heights: RefCell<BTreeMap<(BoxId, Au, Option<Au>), Au>>,
+    pub heights: RefCell<BTreeMap<HeightKey, Au>>,
     /// Absolutely / fixed positioned boxes in tree order (laid out after the flow).
     pub abs: RefCell<Vec<BoxId>>,
     /// Work counter (bounded on hostile pages).

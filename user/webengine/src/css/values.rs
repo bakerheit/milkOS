@@ -314,7 +314,7 @@ enum CalcV {
 fn calc_sum(t: &[Tok], depth: u32) -> Option<SLen> {
     match calc_sum_v(t, depth)? {
         CalcV::Len(l) => Some(l),
-        CalcV::Num(n) if n == 0.0 => Some(SLen::default()),
+        CalcV::Num(0.0) => Some(SLen::default()),
         CalcV::Num(_) => None,
     }
 }
@@ -375,7 +375,7 @@ fn calc_sum_v(t: &[Tok], depth: u32) -> Option<CalcV> {
             (Some(CalcV::Len(a)), CalcV::Len(b)) => CalcV::Len(a.add(&b, s)),
             // Number + length is invalid, except 0 (lenient).
             (Some(CalcV::Len(a)), CalcV::Num(0.0)) => CalcV::Len(a),
-            (Some(CalcV::Num(n)), CalcV::Len(b)) if n == 0.0 => CalcV::Len(b.scale(s)),
+            (Some(CalcV::Num(0.0)), CalcV::Len(b)) => CalcV::Len(b.scale(s)),
             _ => return None,
         });
     }
@@ -522,7 +522,9 @@ fn hex(v: &str) -> Option<u32> {
 }
 
 /// Colour function arguments: comma-separated (legacy) or space-separated with `/ alpha`.
-fn color_args(args: &[Tok]) -> Option<(Vec<&[Tok]>, Option<&[Tok]>)> {
+type ColorArgs<'a> = (Vec<&'a [Tok]>, Option<&'a [Tok]>);
+
+fn color_args(args: &[Tok]) -> Option<ColorArgs<'_>> {
     let commas = split_commas(args);
     if commas.len() >= 3 {
         let alpha = if commas.len() == 4 {

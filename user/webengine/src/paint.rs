@@ -63,6 +63,9 @@ fn fade(c: Color, opacity: f32) -> Color {
 /// What painting needs to know about images (intrinsic sizes, for background tiles).
 pub type ImageSize<'a> = &'a dyn Fn(ImageId) -> Option<(u32, u32)>;
 
+/// A positioned box waiting: (z, order, box, offset, clip, opacity, fixed).
+type Deferred = (i32, u32, BoxId, (Au, Au), u16, f32, bool);
+
 struct P<'a> {
     boxes: &'a [LBox],
     cx: &'a Cx<'a>,
@@ -78,7 +81,7 @@ struct P<'a> {
     node_rects: Vec<Rect>,
     control_rects: Vec<(ControlId, Rect)>,
     /// Positioned boxes waiting: (z, order, box, offset, clip, opacity, fixed).
-    deferred: Vec<(i32, u32, BoxId, (Au, Au), u16, f32, bool)>,
+    deferred: Vec<Deferred>,
     order: u32,
 }
 

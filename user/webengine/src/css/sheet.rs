@@ -436,11 +436,11 @@ pub fn parse_media_list(t: &[Tok]) -> MediaList {
         }
         if let [Tok::Ident(k)] = c[0] {
             let k = k.to_ascii_lowercase();
-            if k == "not" || k == "only" {
-                if matches!(c.get(1).and_then(|x| x.first()), Some(Tok::Ident(_))) {
-                    not = k == "not";
-                    i = 1;
-                }
+            if (k == "not" || k == "only")
+                && matches!(c.get(1).and_then(|x| x.first()), Some(Tok::Ident(_)))
+            {
+                not = k == "not";
+                i = 1;
             }
             if let Some([Tok::Ident(t)]) = c.get(i).copied() {
                 let t = t.to_ascii_lowercase();

@@ -54,9 +54,9 @@ pub fn prescan(b: &[u8]) -> Option<Encoding> {
     let mut i = 0;
     while i < b.len() {
         if b[i..].starts_with(b"<!--") {
-            match find(&b[i + 4..], b"-->") {
-                Some(j) => i += 4 + j + 3,
-                None => return None,
+            {
+                let j = find(&b[i + 4..], b"-->")?;
+                i += 4 + j + 3
             }
             continue;
         }
@@ -153,7 +153,7 @@ pub fn decode_with(b: &[u8], enc: Encoding) -> String {
             }
         }
         Encoding::Utf16Le | Encoding::Utf16Be => {
-            let units = b.chunks_exact(2).map(|p| {
+            let units = b.as_chunks::<2>().0.iter().map(|p| {
                 if enc == Encoding::Utf16Le {
                     u16::from_le_bytes([p[0], p[1]])
                 } else {

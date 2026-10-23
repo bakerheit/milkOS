@@ -233,8 +233,8 @@ pub fn layout_flex(
     {
         let mut start = 0;
         let mut used = 0;
-        for i in 0..items.len() {
-            let o = items[i].outer_hyp();
+        for (i, it) in items.iter().enumerate() {
+            let o = it.outer_hyp();
             let wrap = s.flex_wrap != FlexWrap::NoWrap;
             if wrap && i > start && avail_main.is_some_and(|a| used + main_gap + o > a) {
                 lines.push((start, i));

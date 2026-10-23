@@ -598,6 +598,9 @@ pub struct TrackList {
     pub auto_repeat: Option<(AutoRepeat, usize, alloc::vec::Vec<Track>)>,
 }
 
+/// A named grid area: (name, row start, column start, row end, column end).
+pub type Area = (Rc<str>, u16, u16, u16, u16);
+
 /// One end of `grid-column` / `grid-row`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GridLine {
@@ -619,7 +622,7 @@ pub struct GridStyle {
     pub row: (GridLine, GridLine),
     /// grid-template-areas: (name, row start, col start, row end, col end), 0-based, end
     /// exclusive; and the area grid's size (rows, columns).
-    pub areas: Rc<[(Rc<str>, u16, u16, u16, u16)]>,
+    pub areas: Rc<[Area]>,
     pub area_size: (u16, u16),
     /// grid-area: NAME on an item.
     pub area_name: Option<Rc<str>>,

@@ -359,8 +359,13 @@ impl DisplayList {
         let b0 = (area.y.max(0) / BAND) as usize;
         let b1 = ((area.bottom().max(0) - 1).max(0) / BAND) as usize;
         let mut idx: Vec<u32> = Vec::new();
-        for b in b0..=b1.min(self.bands.len() - 1) {
-            idx.extend_from_slice(&self.bands[b]);
+        for band in self
+            .bands
+            .iter()
+            .take(b1.min(self.bands.len() - 1) + 1)
+            .skip(b0)
+        {
+            idx.extend_from_slice(band);
         }
         idx.sort_unstable();
         idx.dedup();

@@ -163,7 +163,7 @@ pub enum Decl {
     GridAutoFlow(bool),
     /// 0 column-start, 1 column-end, 2 row-start, 3 row-end
     GridLine(u8, GridLine),
-    GridAreas(Rc<[(Rc<str>, u16, u16, u16, u16)]>, (u16, u16)),
+    GridAreas(Rc<[Area]>, (u16, u16)),
     GridAreaName(Option<Rc<str>>),
     /// A CSS-wide keyword for one longhand.
     Wide(Prop, Wide),
@@ -1685,10 +1685,10 @@ fn parse_value(name: &str, v: &[Tok], cx: &ParseCx, out: &mut Vec<Decl>) -> Opti
                 _ => return None,
             },
         ),
-        "font-variant" | "font-variant-caps" => Decl::FontVariant(match kw()?.as_str() {
-            "small-caps" | "all-small-caps" | "petite-caps" | "all-petite-caps" => true,
-            _ => false,
-        }),
+        "font-variant" | "font-variant-caps" => Decl::FontVariant(matches!(
+            kw()?.as_str(),
+            "small-caps" | "all-small-caps" | "petite-caps" | "all-petite-caps"
+        )),
         "font" => {
             font(v, out)?;
             return Some(());
@@ -2463,8 +2463,9 @@ fn track_list(v: &[Tok]) -> Option<STrackList> {
 
 /// `grid-template-areas` (CSS Grid 1 §7.3): the named rectangles. None if a name isn't a
 /// rectangle or the rows differ in length.
-#[allow(clippy::type_complexity)]
-fn template_areas(v: &[Tok]) -> Option<(Rc<[(Rc<str>, u16, u16, u16, u16)]>, (u16, u16))> {
+type Areas = (Rc<[Area]>, (u16, u16));
+
+fn template_areas(v: &[Tok]) -> Option<Areas> {
     let mut rows: Vec<Vec<String>> = Vec::new();
     for c in components(v) {
         match c {
@@ -2479,7 +2480,7 @@ fn template_areas(v: &[Tok]) -> Option<(Rc<[(Rc<str>, u16, u16, u16, u16)]>, (u1
     if rows.iter().any(|r| r.len() != ncols) || ncols > 1000 || rows.len() > 1000 {
         return None;
     }
-    let mut out: Vec<(Rc<str>, u16, u16, u16, u16)> = Vec::new();
+    let mut out: Vec<Area> = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
         for (ci, name) in row.iter().enumerate() {
             if name.chars().all(|c| c == '.') {

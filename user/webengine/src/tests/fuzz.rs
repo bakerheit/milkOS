@@ -326,7 +326,7 @@ fn pathological_shapes() {
         for _ in 0..3000 {
             s.push_str(open);
         }
-        s.push_str("x");
+        s.push('x');
         let t = std::time::Instant::now();
         run(s.as_bytes(), &[800]);
         std::println!("nesting {open}: {:?}", t.elapsed());

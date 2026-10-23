@@ -590,6 +590,8 @@ impl Page {
         }
     }
 
+    // The is_some + unwrap dodges a borrow-checker limit on returning a borrow early.
+    #[allow(clippy::unnecessary_unwrap)]
     pub fn layout(&mut self, vp: &Viewport, m: &dyn TextMeasurer) -> &DisplayList {
         let vp = Viewport {
             zoom: vp.zoom.clamp(25, 500),

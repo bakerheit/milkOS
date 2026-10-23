@@ -636,7 +636,7 @@ pub fn layout_ifc(
 /// fragments and move the atomics into place.
 #[allow(clippy::too_many_arguments)]
 fn finish_line(
-    boxes: &mut Vec<LBox>,
+    boxes: &mut [LBox],
     cx: &Cx,
     bs: &Style,
     root_vb: &VBox,

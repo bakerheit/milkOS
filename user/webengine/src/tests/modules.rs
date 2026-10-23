@@ -31,6 +31,8 @@ pub struct Resp {
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
     pub fail: Option<(NetFailureKind, String)>,
+    /// The address it was served from, if not the one asked for (a redirect).
+    pub url: Option<String>,
 }
 
 impl Resp {
@@ -39,13 +41,17 @@ impl Resp {
         if let Some(c) = ctype {
             headers.push((String::from("content-type"), String::from(c)));
         }
-        Resp { after: 0, status, headers, body: body.as_bytes().to_vec(), fail: None }
+        Resp { after: 0, status, headers, body: body.as_bytes().to_vec(), fail: None, url: None }
     }
     pub fn js(body: &str) -> Resp {
         Resp::with(200, Some("text/javascript"), body)
     }
     pub fn json(body: &str) -> Resp {
         Resp::with(200, Some("application/json"), body)
+    }
+    pub fn from_url(mut self, url: &str) -> Resp {
+        self.url = Some(String::from(url));
+        self
     }
     pub fn late(mut self, ticks: u32) -> Resp {
         self.after = ticks;
@@ -97,8 +103,8 @@ fn answer(req: &NetRequest, r: Resp) -> Vec<(u32, NetEvent)> {
             _ => "Status",
         }),
         headers: r.headers,
-        url: req.url.clone(),
-        redirected: false,
+        url: r.url.clone().unwrap_or_else(|| req.url.clone()),
+        redirected: r.url.is_some(),
         kind: ResponseKind::Basic,
     };
     alloc::vec![(r.after, NetEvent::Head(head)), (r.after, NetEvent::Done(r.body))]
@@ -698,5 +704,268 @@ fn hostile_import_maps_and_specifiers_stay_bounded() {
         let html = alloc::format!("<!DOCTYPE html><body><script type=importmap>{map}</script><script type=module>import 'a';</script>");
         let o = run_page(&html, 3, |_| Resp::js(""));
         assert!(o.reqs.is_empty(), "{map:?}");
+    }
+}
+
+#[test]
+fn feature_detection_pages_use() {
+    let o = run_page(
+        "<!DOCTYPE html><body><script>\
+           var s = document.createElement('script');\
+           console.log('T noModule ' + ('noModule' in s) + ' ' + s.noModule);\
+           s.noModule = true;\
+           console.log('T attr ' + s.hasAttribute('nomodule') + ' ' + s.noModule);\
+           console.log('T HTMLScriptElement ' + typeof HTMLScriptElement);\
+           console.log('T supports ' + (typeof HTMLScriptElement === 'function' && typeof HTMLScriptElement.supports));\
+           console.log('T link ' + (typeof document.createElement('link').relList));\
+         </script>",
+        2,
+        |_| Resp::js(""),
+    );
+    std::println!("{:?}", o.lines);
+    let t = o.t();
+    assert!(t.contains(&"noModule true false"), "{:?}", o.lines);
+    assert!(t.contains(&"attr true true"), "{:?}", o.lines);
+}
+
+#[test]
+fn relative_imports_follow_the_address_a_redirect_ended_at() {
+    if !modules_work() {
+        return;
+    }
+    let o = run_page(
+        "<!DOCTYPE html><body><script type=module src=/old/main.js></script>",
+        8,
+        |req| match req.url.as_str() {
+            "http://www.milk.test/old/main.js" => Resp::js("import './dep.js'; console.log('T main ' + import.meta.url);")
+                .from_url("http://www.milk.test/new/dir/main.js"),
+            "http://www.milk.test/new/dir/dep.js" => Resp::js("console.log('T dep from new');"),
+            _ => Resp::with(404, Some("text/plain"), ""),
+        },
+    );
+    assert_eq!(o.t(), ["dep from new", "main http://www.milk.test/new/dir/main.js"], "{:?}", o.lines);
+}
+
+#[test]
+fn a_module_that_imports_itself_and_other_odd_graphs() {
+    if !modules_work() {
+        return;
+    }
+    let o = run_page(
+        "<!DOCTYPE html><body><script type=module src=/self.js></script><script type=module src=/self.js#again></script>\
+         <script type=module src=/a.js></script>",
+        8,
+        site(&[
+            ("/self.js", "import * as me from './self.js'; export const x = 1; console.log('T self ' + me.x);"),
+            ("/a.js", "export * from './b.js'; export * as ns from './b.js'; import * as me from './a.js'; console.log('T a ' + Object.keys(me).join());"),
+            ("/b.js", "export const b1 = 1; export default 2;"),
+        ]),
+    );
+    assert_eq!(o.t(), ["self 1", "a b1,ns"], "{:?}", o.lines);
+}
+
+#[test]
+fn a_page_that_calls_import_in_a_loop_gets_rejections_not_memory() {
+    if !modules_work() {
+        return;
+    }
+    let o = run_page(
+        "<!DOCTYPE html><body><script>\
+           var ok = 0, rej = 0, p = [];\
+           for (var i = 0; i < 6000; i++) p.push(import('/m.js').then(function () { ok++; }, function (e) { rej++; }));\
+           Promise.all(p).then(function () { console.log('T done ' + (ok + rej) + ' rejected>0 ' + (rej > 0) + ' ok>0 ' + (ok > 0)); });\
+         </script>",
+        20,
+        site(&[("/m.js", "export default 1;")]),
+    );
+    assert!(o.t().contains(&"done 6000 rejected>0 true ok>0 true"), "{:?}", o.lines);
+    assert_eq!(o.asked(), ["http://www.milk.test/m.js"]);
+}
+
+#[test]
+fn a_module_over_the_source_limit_is_refused() {
+    if !modules_work() {
+        return;
+    }
+    let big: &'static str = alloc::boxed::Box::leak(alloc::format!("/*{}*/", "x".repeat((8 << 20) + 10)).into_boxed_str());
+    let o = run_page(
+        "<!DOCTYPE html><body><script type=module src=/big.js onerror=\"console.log('T error')\"></script>",
+        6,
+        |_| Resp::js(big),
+    );
+    assert!(o.t().contains(&"error"), "{:?}", o.lines);
+    assert!(o.has("too big"), "{:?}", o.lines);
+}
+
+#[test]
+fn async_false_keeps_inserted_module_scripts_in_order() {
+    if !modules_work() {
+        return;
+    }
+    let o = run_page(
+        "<!DOCTYPE html><body><script>\
+           ['/slow.js', '/fast.js'].forEach(function (src) {\
+             var s = document.createElement('script'); s.type = 'module'; s.src = src; s.async = false;\
+             document.body.appendChild(s);\
+           });\
+           var u = document.createElement('script'); u.type = 'module'; u.src = '/free.js'; document.body.appendChild(u);\
+         </script>",
+        10,
+        |req| {
+            if req.url.ends_with("/slow.js") {
+                Resp::js("console.log('T slow');").late(4)
+            } else if req.url.ends_with("/fast.js") {
+                Resp::js("console.log('T fast');")
+            } else {
+                Resp::js("console.log('T free');")
+            }
+        },
+    );
+    let t = o.t();
+    let at = |s: &str| t.iter().position(|l| *l == s).unwrap_or(usize::MAX);
+    assert!(at("slow") < at("fast"), "async=false keeps the order: {:?}", o.lines);
+    assert!(at("free") < at("slow"), "the free one goes when it is ready: {:?}", o.lines);
+}
+
+#[test]
+fn a_runaway_module_gets_the_slow_bar() {
+    if !modules_work() {
+        return;
+    }
+    let mut o = start("<!DOCTYPE html><body><script type=module>console.log('T start'); while (true) {}</script>");
+    o.host.tick = 3000.0;
+    o.host.stop_after = Some(2);
+    run_more(&mut o, 3, &mut |_| Resp::js(""));
+    assert!(o.t().contains(&"start"), "{:?}", o.lines);
+    assert!(o.host.slow_calls >= 1, "the app was asked about the slow script");
+    assert!(o.doc.script_stats().stopped, "{:?}", o.lines);
+}
+
+#[test]
+fn the_module_graph_counts_toward_the_heap_budget() {
+    if !modules_work() {
+        return;
+    }
+    // Forty modules, each a big array literal: together far more than the page's 64 MB.
+    let mut body = String::from("export default [");
+    for i in 0..200_000 {
+        body.push_str(&alloc::format!("{i},"));
+    }
+    body.push_str("0];");
+    let body: &'static str = alloc::boxed::Box::leak(body.into_boxed_str());
+    let mut main = String::new();
+    for i in 0..40 {
+        main.push_str(&alloc::format!("import a{i} from '/big/{i}.js';\n"));
+    }
+    main.push_str("console.log('T all loaded');");
+    let main: &'static str = alloc::boxed::Box::leak(main.into_boxed_str());
+    let mut o = run_page(
+        "<!DOCTYPE html><body><script type=module src=/main.js></script>",
+        60,
+        |req| if req.url.ends_with("/main.js") { Resp::js(main) } else { Resp::js(body) },
+    );
+    // The page is stopped for going over, nothing runs, and nothing is left fetching.
+    assert!(o.doc.script_stats().stopped, "{:?}", o.lines);
+    assert!(o.has("out of memory"), "{:?}", o.lines);
+    assert!(!o.t().contains(&"all loaded"));
+    assert_eq!(o.doc.net_pending(), 0);
+    assert!(o.doc.take_net().iter().all(|n| matches!(n, NetOut::Cancel(_))));
+}
+
+/// Random pages: module graphs of random shapes over a random web (late, failing, mistyped
+/// and redirected answers, junk import maps), stopped at random moments. Nothing may panic,
+/// and a stopped page leaves nothing fetching.
+#[test]
+fn fuzz_random_module_pages() {
+    if !modules_work() {
+        return;
+    }
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+        fn pick<'a>(&mut self, v: &[&'a str]) -> &'a str {
+            v[self.below(v.len())]
+        }
+    }
+    let specs = ["./a.js", "./b.js", "./c.js", "../a.js", "/d.js", "bare", "lib/x.js", "./gone.js", "http://other.test/e.js", "./a.js#f", "", "./d.json", "node:fs", "./%zz.js"];
+    let attrs = ["", "", "", " with { type: 'json' }", " with { type: 'css' }", " with { x: '1' }"];
+    let maps = [
+        "", "{}", "{\"imports\": {\"bare\": \"/a.js\", \"lib/\": \"/b/\"}}", "{\"imports\": 5}", "[", "{\"scopes\": {\"/\": {\"bare\": null}}}",
+        "{\"imports\": {\"bare\": \"http://other.test/e.js\"}}",
+    ];
+    for seed in 1..160u64 {
+        let mut r = Rng(seed.wrapping_mul(0x2545F4914F6CDD1D) | 1);
+        // The files of this web.
+        let mut files: Vec<(String, String)> = Vec::new();
+        for name in ["/a.js", "/b.js", "/c.js", "/d.js", "/b/x.js", "/e.js", "/d.json", "/gone.js"] {
+            let mut src = String::new();
+            for _ in 0..r.below(4) {
+                match r.below(9) {
+                    0..=3 => src.push_str(&alloc::format!("import {} '{}'{};\n", r.pick(&["", "x from", "* as ns from", "{ y } from"]), r.pick(&specs), r.pick(&attrs))),
+                    4 => src.push_str("export const y = 1; export default 2;\n"),
+                    5 => src.push_str("await new Promise(r => setTimeout(r, 30));\n"),
+                    6 => src.push_str(r.pick(&["throw new Error('x');\n", "export const = ;\n", "import.meta.url;\n", "this.x;\n"])),
+                    7 => src.push_str(&alloc::format!("import('{}').catch(() => {{}});\n", r.pick(&specs))),
+                    _ => src.push_str("console.log('T ran');\n"),
+                }
+            }
+            files.push((String::from(name), src));
+        }
+        let mut html = String::from("<!DOCTYPE html><body>");
+        for _ in 0..r.below(3) {
+            let m = r.pick(&maps);
+            if !m.is_empty() {
+                html.push_str(&alloc::format!("<script type=importmap>{m}</script>"));
+            }
+        }
+        for _ in 0..1 + r.below(4) {
+            match r.below(6) {
+                0 => html.push_str(&alloc::format!("<script type=module src='{}'></script>", r.pick(&["/a.js", "/b.js", "/gone.js", "/c.js", "/a.js#x"]))),
+                1 => html.push_str(&alloc::format!("<script type=module async src='{}'></script>", r.pick(&["/a.js", "/d.js"]))),
+                2 => html.push_str(&alloc::format!("<script type=module>import '{}'; console.log('T inline');</script>", r.pick(&specs))),
+                3 => html.push_str(&alloc::format!("<link rel=modulepreload href='{}'>", r.pick(&["/a.js", "/c.js"]))),
+                4 => html.push_str("<script nomodule>1</script><script defer src=/d.js></script>"),
+                _ => html.push_str("<script>import('/a.js').then(m => console.log('T dyn'), e => console.log('T dynerr ' + e.name));</script>"),
+            }
+        }
+        let mut o = start(&html);
+        let mut serve_state = Rng(seed ^ 0xABCD);
+        let stop_at = if r.below(3) == 0 { Some(r.below(12) as u32) } else { None };
+        let mut serve = |req: &NetRequest| -> Resp {
+            let path = req.url.strip_prefix("http://www.milk.test").unwrap_or("/other");
+            let found = files.iter().find(|(p, _)| *p == path);
+            match (found, serve_state.below(12)) {
+                (None, _) => Resp::with(404, Some("text/html"), "nope"),
+                (Some(_), 0) => Resp::failed(NetFailureKind::Network, "down"),
+                (Some(_), 1) => Resp::failed(NetFailureKind::Blocked, "Blocked by CORS: x"),
+                (Some((_, s)), 2) => Resp::with(200, Some("text/plain"), s),
+                (Some((_, s)), 3) => Resp::with(200, None, s),
+                (Some((_, s)), 4) => Resp::js(s).late(serve_state.below(5) as u32),
+                (Some((_, s)), 5) => Resp::js(s).from_url("http://www.milk.test/elsewhere/z.js"),
+                (Some((p, s)), _) if p.ends_with(".json") => Resp::json(if s.is_empty() { "{}" } else { "[1" }),
+                (Some((_, s)), _) => Resp::js(s),
+            }
+        };
+        for tick in 0..14 {
+            run_more(&mut o, 1, &mut serve);
+            if stop_at == Some(tick) {
+                o.doc.stop_scripts();
+                for out in o.doc.take_net() {
+                    assert!(matches!(out, NetOut::Cancel(_)), "seed {seed}");
+                }
+                assert_eq!(o.doc.net_pending(), 0, "seed {seed}: a stopped page is still fetching");
+            }
+        }
+        // After a while nothing more is going on or it has been asked for.
+        assert!(o.doc.net_pending() <= 30, "seed {seed}");
+        assert!(o.reqs.len() <= 2100, "seed {seed}: {} requests", o.reqs.len());
     }
 }

@@ -196,6 +196,8 @@ pub struct Bridge {
 
 impl Bridge {
     pub fn new(limits: ScriptLimits, loader: Loader) -> Bridge {
+        let mut modrt = super::modrt::ModRt::default();
+        modrt.mods.limits.max_source = limits.max_source;
         Bridge {
             page: Cell::new(core::ptr::null_mut()),
             host: Cell::new(None),
@@ -233,7 +235,7 @@ impl Bridge {
                 write_after: (NONE, NONE),
                 positions: None,
                 net: super::net::NetState::default(),
-                modrt: super::modrt::ModRt::default(),
+                modrt,
                 in_error_event: false,
             }),
             classes: OnceCell::new(),

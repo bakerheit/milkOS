@@ -291,6 +291,9 @@ impl Loader {
             }
             Kind::Module => true,
             Kind::ImportMap => {
+                if self.work.len() >= MAX_SCRIPTS {
+                    return None;
+                }
                 // Only inline ones: an external import map is an error.
                 self.work.push(if src.is_some() {
                     ModWork::BadImportMap(n)

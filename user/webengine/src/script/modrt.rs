@@ -35,6 +35,9 @@ use super::modules::{
 };
 use crate::api::*;
 
+/// `import()` calls (and script graphs) that may wait at once.
+const MAX_PENDING_IMPORTS: usize = 4_000;
+
 /// An error the page will see, kept until it is reported or thrown into a promise.
 pub enum ErrVal {
     Thrown(Pinned),
@@ -230,6 +233,10 @@ fn dynamic_import(b: &Rc<Bridge>, r: &mut Realm, di: DynamicImport) -> jsengine:
         Ok(t) => t,
         Err(m) => return Err(type_error(r, &m)),
     };
+    // A page that calls import() in a loop gets rejections, not memory.
+    if b.st(r)?.modrt.waiters.len() >= MAX_PENDING_IMPORTS {
+        return Err(type_error(r, "Too many import() calls are waiting for their modules"));
+    }
     // Relative to the module that asked; for a classic script, its file (an inline script's
     // file is the page itself: relative to the document's base address).
     let (base, creds) = {

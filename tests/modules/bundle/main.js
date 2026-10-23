@@ -14,7 +14,7 @@ const root = document.getElementById('app');
 const view = (state) => [Header(state), (() => {
   const page = document.createElement('div');
   page.className = 'page';
-  page.append(CheeseList(state, store.add), Cart(state));
+  page.append(Cart(state), CheeseList(state, store.add));
   return page;
 })()];
 
@@ -23,11 +23,11 @@ store.subscribe((state) => mount(root, view(state)));
 
 report('bundle', 'rendered', document.querySelectorAll('.card').length + ' cards, ' + (document.querySelector('.badge') || {}).textContent);
 
-// Later, "the user" adds two cheeses.
+// Later, "the user" adds cheeses.
 setTimeout(() => {
   const buttons = document.querySelectorAll('.card button');
   buttons[0].click();
   buttons[2].click();
   buttons[0].click();
   report('bundle', 'after-clicks', document.querySelector('.badge').textContent + ' | ' + document.querySelector('.total').textContent);
-}, 1500);
+}, 5000);

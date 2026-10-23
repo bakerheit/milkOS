@@ -1,0 +1,36 @@
+f0 [-] rect 12,12 776x334 #fffffdf8
+f0 [-] border 52,226 92x42 [1, 1, 1, 1]
+f2 [53,227 90x40] rect 53,227 90x40 #ffe8e0f0
+f2 [53,227 90x40] rect 57,231 82x14 #ffe8e0f0
+f2 [53,227 90x40] text 57,242 w28 SansSerif12 400 #ff3a2e28 "inline"
+f0 [-] border 253,226 92x42 [1, 1, 1, 1]
+f3 [254,227 90x40] rect 254,227 90x40 #ffe0f0e8
+f3 [254,227 90x40] rect 258,231 82x14 #ffe0f0e8
+f3 [254,227 90x40] text 258,242 w27 SansSerif12 400 #ff3a2e28 "twice"
+f0 [-] text 12,251 w40 SansSerif16 400 #ff3a2e28 "Text, "
+f0 [-] text 144,251 w109 SansSerif16 400 #ff3a2e28 " and more text, "
+f0 [-] text 345,251 w80 SansSerif16 400 #ff3a2e28 " in one line."
+f0 [-] text 12,341 w63 SansSerif16 400 #ff3a2e28 "The end."
+f0 [-] border 12,12 422x202 [1, 1, 1, 1]
+f0 [-] border 33,33 266x156 [3, 3, 3, 3]
+f1 [36,36 260x150] rect 36,36 260x150 #fff4f1ec
+f1 [36,36 260x150] rect 36,48 260x134 #fff4f1ec
+f1 [36,36 260x150] rrect 48,48 236x108 r4 #ffffffff
+f1 [36,36 260x150] border 48,48 236x108 [1, 1, 1, 1]
+f1 [36,36 260x150] rrect 65,66 15x15 r2 #fffffdf8
+f1 [36,36 260x150] border 65,66 15x15 [1, 1, 1, 1]
+f1 [36,36 260x150] control 0 66,67 13x13
+f1 [36,36 260x150] text 83,84 w140 SansSerif16 400 #ff3a2e28 " I agree to the terms"
+f1 [36,36 260x150] rrect 108,93 96x22 r2 #fffffdf8
+f1 [36,36 260x150] border 108,93 96x22 [2, 2, 2, 2]
+f1 [36,36 260x150] control 1 112,96 88x16
+f1 [36,36 260x150] text 61,108 w47 SansSerif16 400 #ff3a2e28 "Name "
+f1 [36,36 260x150] rrect 61,119 59x26 r3 #ffefefef
+f1 [36,36 260x150] border 61,119 59x26 [1, 1, 1, 1]
+f1 [36,36 260x150] control 2 62,120 57x24
+f1 [36,36 260x150] text 74,135 w33 SansSerif13 400 #ff3a2e28 "Verify"
+f1 [36,36 260x150] text 48,179 w60 SansSerif12 400 #ff6b5f55 "Terms and "
+f1 [36,36 260x150] text 108,179 w38 SansSerif12 400 #ff4f64a0 "privacy"
+f1 [36,36 260x150] rect 108,180 38x1 #ff4f64a0
+f0 [-] rrect 243,19 49x20 r10 #ffb43a3a
+f0 [-] text 251,33 w33 SansSerif12 400 #ffffffff "on top"

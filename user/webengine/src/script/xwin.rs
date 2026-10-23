@@ -8,9 +8,9 @@ use alloc::string::String;
 
 use jsengine::{HostClass, JsResult, Key, OwnedKey, Realm, Value, hooks};
 
-use super::bridge::{Bridge, arg, arg_str};
+use super::bridge::{Bridge, arg};
 use super::hub::{self};
-use super::nodes::{getter, method, this_node};
+use super::nodes::{getter, this_node};
 use super::remote::{self, Xv};
 use crate::dom::NodeId;
 
@@ -82,28 +82,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         let n = b.hub().map_or(0, |h| h.children(b.frame_id()).len());
         Ok(Value::int(n as i32))
     }, Some(replace_length))?;
-    getter(
-        b,
-        r,
-        g,
-        "name",
-        |b, r, _t, _a| {
-            let n = b.page().map(|p| p.window_name.clone()).unwrap_or_default();
-            Ok(r.string(&n))
-        },
-        Some(|b, r, _t, a| {
-            let s = arg_str(r, a, 0)?;
-            if let Some(p) = b.page() {
-                p.window_name = s;
-            }
-            Ok(Value::UNDEFINED)
-        }),
-    )?;
     getter(b, r, g, "frameElement", |b, r, _t, _a| frame_element(b, r), None)?;
-    method(b, r, g, "postMessage", 2, |b, r, _t, a| {
-        let me = b.frame_id();
-        super::postmsg::post_message(b, r, me, a)
-    })?;
     Ok(())
 }
 

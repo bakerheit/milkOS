@@ -1132,6 +1132,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
         super::report(b, r, &e, "setting up the page's scripts");
     }
     super::modrt::install(b, r);
+    super::frames::install(b, r);
     // Uncaught errors in jobs and unhandled rejections go through window's events first.
     let b2 = b.clone();
     r.set_rejection_hook(Some(Box::new(move |r: &mut Realm, ev: jsengine::PromiseRejection| match ev {

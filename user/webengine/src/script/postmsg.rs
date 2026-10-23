@@ -22,58 +22,49 @@
 use alloc::rc::Rc;
 use alloc::string::String;
 
-use jsengine::{Attrs, JsResult, Realm, Value};
+use jsengine::{JsResult, Realm, Value};
 
-use super::bridge::{Bridge, arg, dom_error};
-use super::events::WINDOW;
-use super::events_js;
-use super::remote;
-use super::xorigin::{self, Target};
-use crate::api::*;
-
-/// Messages one window may have queued (the Browser takes them every tick).
-const MAX_QUEUE: usize = 2000;
-/// The largest message, as text.
-const MAX_MESSAGE: usize = 16 << 20;
+use super::bridge::{Bridge, dom_error};
 
 const ENCODER: &str = r#"
 var ids = new Map(), n = 0, bytes = 0;
 function fail(m) { throw { __clone: m }; }
 var HEX = '0123456789abcdef';
 function hex(u8) { var s = []; for (var i = 0; i < u8.length; i++) s.push(HEX[u8[i] >> 4] + HEX[u8[i] & 15]); return s.join(''); }
+function tag(t, v) { var o = { $t: t }; if (v !== undefined) o.v = v; return o; }
 function enc(v, depth) {
   if (depth > 100) fail('the message is nested too deeply');
   var t = typeof v;
   if (v === null) return null;
-  if (t === 'undefined') return ['u'];
+  if (t === 'undefined') return tag('u');
   if (t === 'boolean') return v;
   if (t === 'string') { bytes += v.length; if (bytes > 16000000) fail('the message is too large'); return v; }
-  if (t === 'number') return (isFinite(v) && !(v === 0 && 1 / v < 0)) ? v : ['n', (v === 0) ? '-0' : String(v)];
+  if (t === 'number') return (isFinite(v) && !(v === 0 && 1 / v < 0)) ? v : tag('n', (v === 0) ? '-0' : String(v));
   if (t === 'function') fail(String(v).slice(0, 40) + ' could not be cloned.');
   if (t === 'symbol') fail('A Symbol could not be cloned.');
-  if (ids.has(v)) return ['ref', ids.get(v)];
-  var tag = Object.prototype.toString.call(v).slice(8, -1);
+  if (ids.has(v)) return tag('ref', ids.get(v));
+  var cls = Object.prototype.toString.call(v).slice(8, -1);
   var id = n++;
   ids.set(v, id);
   var o, i;
-  switch (tag) {
-    case 'Array': o = ['a']; for (i = 0; i < v.length; i++) o.push(enc(v[i], depth + 1)); return o;
-    case 'Date': return ['d', v.getTime()];
-    case 'RegExp': return ['r', v.source, v.flags];
-    case 'Map': o = ['m']; v.forEach(function (val, k) { o.push(enc(k, depth + 1), enc(val, depth + 1)); }); return o;
-    case 'Set': o = ['s']; v.forEach(function (k) { o.push(enc(k, depth + 1)); }); return o;
-    case 'ArrayBuffer': bytes += v.byteLength; return ['b', hex(new Uint8Array(v))];
-    case 'Error': return ['e', String(v.name), String(v.message)];
+  switch (cls) {
+    case 'Array': o = []; for (i = 0; i < v.length; i++) o.push(enc(v[i], depth + 1)); return o;
+    case 'Date': return tag('d', v.getTime());
+    case 'RegExp': return tag('r', [v.source, v.flags]);
+    case 'Map': o = []; v.forEach(function (val, k) { o.push(enc(k, depth + 1), enc(val, depth + 1)); }); return tag('m', o);
+    case 'Set': o = []; v.forEach(function (k) { o.push(enc(k, depth + 1)); }); return tag('s', o);
+    case 'ArrayBuffer': bytes += v.byteLength; return tag('b', hex(new Uint8Array(v)));
+    case 'Error': return tag('e', [String(v.name), String(v.message)]);
     case 'Object':
-      o = ['o'];
-      Object.keys(v).forEach(function (k) { o.push(k, enc(v[k], depth + 1)); });
+      o = {};
+      Object.keys(v).forEach(function (k) { o[k.charAt(0) === '$' ? '$' + k : k] = enc(v[k], depth + 1); });
       return o;
     default:
-      if (ArrayBuffer.isView(v) && tag !== 'DataView') {
+      if (ArrayBuffer.isView(v) && cls !== 'DataView') {
         bytes += v.byteLength;
-        return ['t', tag, hex(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))];
+        return tag('t', [cls, hex(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))]);
       }
-      fail('#<' + tag + '> could not be cloned.');
+      fail('#<' + cls + '> could not be cloned.');
   }
 }
 return JSON.stringify(enc(value, 0));
@@ -84,22 +75,27 @@ var seen = [];
 function unhex(s) { var u = new Uint8Array(s.length >> 1); for (var i = 0; i < u.length; i++) u[i] = parseInt(s.substr(i * 2, 2), 16); return u; }
 function dec(x) {
   if (x === null || typeof x !== 'object') return x;
-  var i, o;
-  switch (x[0]) {
-    case 'u': return undefined;
-    case 'n': return x[1] === '-0' ? -0 : x[1] === 'NaN' ? NaN : x[1] === 'Infinity' ? Infinity : -Infinity;
-    case 'ref': return seen[x[1]];
-    case 'a': o = []; seen.push(o); for (i = 1; i < x.length; i++) o.push(dec(x[i])); return o;
-    case 'o': o = {}; seen.push(o); for (i = 1; i < x.length; i += 2) o[x[i]] = dec(x[i + 1]); return o;
-    case 'd': o = new Date(x[1]); seen.push(o); return o;
-    case 'r': o = new RegExp(x[1], x[2]); seen.push(o); return o;
-    case 'm': o = new Map(); seen.push(o); for (i = 1; i < x.length; i += 2) { var k = dec(x[i]); o.set(k, dec(x[i + 1])); } return o;
-    case 's': o = new Set(); seen.push(o); for (i = 1; i < x.length; i++) o.add(dec(x[i])); return o;
-    case 'b': o = unhex(x[1]).buffer; seen.push(o); return o;
-    case 'e': o = new Error(x[2]); o.name = x[1]; seen.push(o); return o;
-    case 't': { var u = unhex(x[2]); var C = globalThis[x[1]]; o = (typeof C === 'function') ? new C(u.buffer) : u; seen.push(o); return o; }
+  var i, o, v;
+  if (Array.isArray(x)) { o = []; seen.push(o); for (i = 0; i < x.length; i++) o.push(dec(x[i])); return o; }
+  if (Object.prototype.hasOwnProperty.call(x, '$t')) {
+    v = x.v;
+    switch (x.$t) {
+      case 'u': return undefined;
+      case 'n': return v === '-0' ? -0 : v === 'NaN' ? NaN : v === 'Infinity' ? Infinity : -Infinity;
+      case 'ref': return seen[v];
+      case 'd': o = new Date(v); seen.push(o); return o;
+      case 'r': o = new RegExp(v[0], v[1]); seen.push(o); return o;
+      case 'm': o = new Map(); seen.push(o); for (i = 0; i < v.length; i += 2) { var k = dec(v[i]); o.set(k, dec(v[i + 1])); } return o;
+      case 's': o = new Set(); seen.push(o); for (i = 0; i < v.length; i++) o.add(dec(v[i])); return o;
+      case 'b': o = unhex(v).buffer; seen.push(o); return o;
+      case 'e': o = new Error(v[1]); o.name = v[0]; seen.push(o); return o;
+      case 't': { var u = unhex(v[1]); var C = globalThis[v[0]]; o = (typeof C === 'function') ? new C(u.buffer) : u; seen.push(o); return o; }
+    }
+    return undefined;
   }
-  return undefined;
+  o = {}; seen.push(o);
+  Object.keys(x).forEach(function (k) { o[k.slice(0, 2) === '$$' ? k.slice(1) : k] = dec(x[k]); });
+  return o;
 }
 return dec(JSON.parse(text));
 "#;
@@ -116,32 +112,14 @@ fn cloners(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<(Value, Value)> {
     Ok((e, d))
 }
 
-/// `window.postMessage` called on the window of frame `target`.
-pub fn post_message(b: &Rc<Bridge>, r: &mut Realm, target: u32, a: &[Value]) -> JsResult<Value> {
-    // postMessage(message, targetOrigin) or postMessage(message, { targetOrigin }).
-    let second = arg(a, 1);
-    let origin_text: String = if second.is_object() {
-        let t = r.get(second, "targetOrigin")?;
-        if t.is_undefined() {
-            String::from("/")
-        } else {
-            r.to_string(t)?
-        }
-    } else if second.is_undefined() {
-        String::from("/")
-    } else {
-        r.to_string(second)?
-    };
-    let Some(t) = xorigin::parse_target(&origin_text) else {
-        return Err(dom_error(
-            r,
-            "SyntaxError",
-            &alloc::format!("Failed to execute 'postMessage' on 'Window': Invalid target origin '{origin_text}' in a call to 'postMessage'."),
-        ));
-    };
+/// The tagged JSON of `v` (the structured clone); a `DataCloneError` for what cannot be copied.
+pub fn encode(b: &Rc<Bridge>, r: &mut Realm, v: Value) -> JsResult<String> {
+    if v.is_undefined() {
+        return Ok(String::new());
+    }
     let (enc, _) = cloners(b, r)?;
-    let text = match r.call(enc, Value::UNDEFINED, &[arg(a, 0)]) {
-        Ok(v) => r.get_string(v).unwrap_or_default(),
+    match r.call(enc, Value::UNDEFINED, &[v]) {
+        Ok(v) => Ok(r.get_string(v).unwrap_or_default()),
         Err(e) => {
             // A thrown {__clone: reason} is the cloner saying no.
             if let Some(v) = e.value()
@@ -152,79 +130,14 @@ pub fn post_message(b: &Rc<Bridge>, r: &mut Realm, target: u32, a: &[Value]) -> 
                 let why = r.get_string(m).unwrap_or_default();
                 return Err(dom_error(r, "DataCloneError", &why));
             }
-            return Err(e);
+            Err(e)
         }
-    };
-    if text.len() > MAX_MESSAGE {
-        return Err(dom_error(r, "DataCloneError", "the message is too large"));
     }
-    let target_origin = match t {
-        Target::Any => String::from("*"),
-        Target::SameAsSender => String::from("/"),
-        Target::Origin(o) => o,
-    };
-    if let Ok(mut st) = b.st.try_borrow_mut()
-        && st.outbox.q.len() < MAX_QUEUE
-    {
-        st.outbox.q.push(OutMessage {
-            target: FrameId(target),
-            target_origin,
-            data: text,
-        });
-    }
-    Ok(Value::UNDEFINED)
 }
 
-/// Make sure the realm has MessageEvent's prototype (kept pinned in the frame state).
-fn ensure_message_proto(b: &Rc<Bridge>, r: &mut Realm) {
-    if b.xf.message_proto.borrow().is_some() {
-        return;
-    }
-    let ev = r.pinned(&b.protos().event);
-    let proto = r.new_object_with_proto(ev);
-    let cls = r.new_class("MessageEvent", 2, proto, None, None);
-    let g = r.global();
-    let _ = r.define(g, "MessageEvent", cls, Attrs::METHOD);
-    *b.xf.message_proto.borrow_mut() = Some(r.pin(proto));
-}
-
-/// Fire the `message` event for `msg` at the window of `d`.
-pub fn deliver(d: &mut Document, host: &mut dyn ScriptHost, msg: &Message) -> bool {
-    let Some(js) = d.js.as_mut() else {
-        return false;
-    };
-    let page = &mut d.page;
-    js.entry(page, host, |b, r| {
-        let data = if msg.data.is_empty() {
-            Value::UNDEFINED
-        } else {
-            let Ok((_, dec)) = cloners(b, r) else {
-                return false;
-            };
-            let t = r.string(&msg.data);
-            match r.call(dec, Value::UNDEFINED, &[t]) {
-                Ok(v) => v,
-                Err(_) => return false,
-            }
-        };
-        ensure_message_proto(b, r);
-        let e = {
-            let p = b.xf.message_proto.borrow();
-            let Some(proto) = p.as_ref() else { return false };
-            events_js::new_event(b, r, proto, "message", events_js::TRUSTED)
-        };
-        let ro = Attrs::ENUMERABLE;
-        let _ = r.define(e, "data", data, ro);
-        let o = r.string(&msg.origin);
-        let _ = r.define(e, "origin", o, ro);
-        let lid = r.string("");
-        let _ = r.define(e, "lastEventId", lid, ro);
-        let src = remote::window_of(b, r, msg.source.0).unwrap_or(Value::NULL);
-        let _ = r.define(e, "source", src, ro);
-        let ports = r.new_array(&[]);
-        let _ = r.define(e, "ports", ports, ro);
-        events_js::dispatch(b, r, WINDOW, e);
-        true
-    })
-    .unwrap_or(false)
+/// The value a message's text stands for, in this realm.
+pub fn decode(b: &Rc<Bridge>, r: &mut Realm, text: &str) -> JsResult<Value> {
+    let (_, dec) = cloners(b, r)?;
+    let t = r.string(text);
+    r.call(dec, Value::UNDEFINED, &[t])
 }

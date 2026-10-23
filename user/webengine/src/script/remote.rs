@@ -45,8 +45,6 @@ pub struct XErr {
     pub message: String,
 }
 
-pub type XRes = Result<Xv, XErr>;
-
 fn xerr_of(r: &mut Realm, e: &Exception) -> XErr {
     if let Some(v) = e.value() {
         if v.is_object() {
@@ -662,7 +660,7 @@ fn window_get(b: &Rc<Bridge>, r: &mut Realm, key: RemoteKey, k: Key<'_>) -> JsRe
                 "postMessage" => {
                     let b2 = b.clone();
                     return Ok(Some(r.new_function("postMessage", 2, move |r, _t, a| {
-                        super::postmsg::post_message(&b2, r, frame, a)
+                        super::frames::queue(&b2, r, FrameId(frame), a)
                     })));
                 }
                 "window" | "self" | "frames" => return window_of(b, r, frame).map(Some),

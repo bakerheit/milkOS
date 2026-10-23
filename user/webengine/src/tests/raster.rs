@@ -220,7 +220,9 @@ impl Canvas {
                     Item::Marker { rect, color, .. } => self.fill(mv(rect), color, &clip),
                     Item::Control { rect, control } => {
                         let r = mv(rect);
-                        let c = &doc.controls()[control.0 as usize];
+                        // A control of a frame is in that frame's document.
+                        let owner = doc.frame_doc(e.frame).unwrap_or(doc);
+                        let c = &owner.controls()[control.0 as usize];
                         let font = c.font;
                         let (text, col) = match c.kind {
                             ControlKind::Checkbox | ControlKind::Radio => {

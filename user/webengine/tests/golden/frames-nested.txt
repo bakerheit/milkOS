@@ -1,0 +1,16 @@
+f0 [-] rect 12,16 776x248 #fffffdf8
+f0 [-] text 12,31 w121 SansSerif16 400 #ff3a2e28 "Level 0: the page"
+f0 [-] border 12,51 776x213 [2, 2, 2, 2]
+f0 [-] border 20,59 362x192 [1, 1, 1, 1]
+f1 [21,60 360x190] rect 21,60 360x190 #ffeef3e8
+f1 [21,60 360x190] rect 31,76 340x187 #ffeef3e8
+f1 [21,60 360x190] text 31,91 w113 SansSerif16 400 #ff3a2e28 "Level 1: a frame"
+f1 [21,60 360x190] border 31,111 302x112 [1, 1, 1, 1]
+f2 [32,112 300x110] rect 32,112 300x110 #fff6e9e0
+f2 [32,112 300x110] rect 40,128 284x130 #fff6e9e0
+f2 [32,112 300x110] text 40,143 w273 SansSerif16 400 #ff3a2e28 "Level 2: a frame in a frame in the page."
+f2 [32,112 300x110] text 40,162 w281 SansSerif16 400 #ff3a2e28 "This text is longer than the box is tall, so"
+f2 [32,112 300x110] text 40,181 w240 SansSerif16 400 #ff3a2e28 "it is cut off at the edge of its frame."
+f2 [32,112 300x110] text 40,216 w218 SansSerif16 400 #ff3a2e28 "More text, below the fold of this"
+f2 [32,112 300x110] text 40,235 w274 SansSerif16 400 #ff3a2e28 "innermost frame, to be reached only by"
+f1 [21,60 360x190] text 31,258 w227 SansSerif16 400 #ff3a2e28 "Level 1 goes on below its frame."

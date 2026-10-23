@@ -526,6 +526,9 @@ pub struct FindMatch {
     pub rects: Vec<Rect>,
     /// The frame whose document holds the text ([`FrameId::TOP`] for the page itself).
     pub frame: FrameId,
+    /// The same rectangles in that frame's own document space (what [`Document::reveal`]
+    /// takes).
+    pub frame_rects: Vec<Rect>,
 }
 
 // ---- Forms --------------------------------------------------------------------------------
@@ -725,6 +728,14 @@ pub trait ScriptHost {
     /// scripts then end for good ("This page is slow — Stop it?").
     fn slow(&mut self, _running_ms: f64) -> bool {
         true
+    }
+    /// The host for the scripts of frame `id` ([`FrameId::TOP`] included), for when one
+    /// frame's script reaches into another's (same-origin access: `contentWindow`, `parent`).
+    /// None: no access (the bindings throw a SecurityError). The host that runs a frame's
+    /// scripts is a different one per frame (its viewport, cookies and storage are the frame's
+    /// origin's), so this is how a call finds the other's.
+    fn frame_host(&mut self, _id: FrameId) -> Option<&mut dyn ScriptHost> {
+        None
     }
 }
 
@@ -1172,6 +1183,12 @@ pub struct Document {
     pub(crate) frames: Option<alloc::boxed::Box<crate::frames::Frames>>,
     /// This document is a frame's document, owned by the top document's table.
     pub(crate) attached: bool,
+    /// The display list with the frames' content in it (None: the page's own is it).
+    pub(crate) merged: Option<alloc::boxed::Box<crate::frames::Merged>>,
+    /// `Frames::version` at the last layout.
+    pub(crate) frames_seen: u64,
+    /// For a frame's document inside [`Document::with_frame`]: the rest of the tree.
+    pub(crate) peers: Option<crate::script::frames::Peers>,
 }
 
 impl Document {
@@ -1182,6 +1199,9 @@ impl Document {
             notes: Vec::new(),
             frames: None,
             attached: false,
+            merged: None,
+            frames_seen: 0,
+            peers: None,
         }
     }
 
@@ -1273,24 +1293,33 @@ impl Document {
     /// viewport (it returns the cached list); a new width, zoom, a supplied resource or a
     /// changed control restyle and relayout as needed.
     pub fn layout(&mut self, vp: &Viewport, m: &dyn TextMeasurer) -> &DisplayList {
-        self.page.layout(vp, m)
+        if self.attached {
+            return self.page.layout(vp, m);
+        }
+        self.sync_frames();
+        self.page.layout(vp, m);
+        crate::frames::layout_frames(self, vp, m);
+        self.display_list()
     }
 
     /// The last display list (empty before the first layout).
     pub fn display_list(&self) -> &DisplayList {
-        self.page.display_list()
+        match self.merged.as_ref() {
+            Some(m) => &m.dl,
+            None => self.page.display_list(),
+        }
     }
 
     /// What is at a point. `x`, `y` are viewport coordinates, `scroll` the app's scroll
     /// offset (so fixed boxes are hit where they are drawn).
     pub fn hit_test(&self, x: i32, y: i32, scroll: (i32, i32)) -> Hit {
-        self.page.hit_test(x, y, scroll)
+        crate::frames::hit_test(self, x, y, scroll)
     }
 
     /// Every occurrence of `query` in the laid-out text, in document order. Whitespace in the
     /// page is collapsed as displayed; `case_sensitive` false folds ASCII and Latin-1 case.
     pub fn find(&self, query: &str, case_sensitive: bool) -> Vec<FindMatch> {
-        self.page.find(query, case_sensitive)
+        crate::frames::find(self, query, case_sensitive)
     }
 
     /// The y offset of the element named by a URL fragment (`id`, or `<a name>`), for
@@ -1344,11 +1373,39 @@ impl Document {
     /// The text of the page as displayed (block boundaries become newlines), for copy-all and
     /// reader-like uses.
     pub fn text(&self) -> String {
-        self.page.text()
+        crate::frames::text(self)
     }
 
+    /// The page's numbers, with its frames' added in (`approx_bytes` also counts the merged
+    /// display list).
     pub fn stats(&self) -> Stats {
-        self.page.stats()
+        let mut st = self.page.stats();
+        if let Some(f) = self.frames.as_ref() {
+            for s in &f.slots {
+                if let Some(d) = s.doc.as_ref() {
+                    let c = d.page.stats();
+                    st.nodes += c.nodes;
+                    st.elements += c.elements;
+                    st.rules += c.rules;
+                    st.boxes += c.boxes;
+                    st.display_items += c.display_items;
+                    st.approx_bytes += c.approx_bytes + d.merged_bytes();
+                    st.layout_bytes += c.layout_bytes;
+                }
+            }
+        }
+        st.approx_bytes += self.merged_bytes();
+        st
+    }
+
+    /// Bytes the merged display list (the page's list with its frames in it) takes.
+    pub(crate) fn merged_bytes(&self) -> usize {
+        self.merged.as_ref().map_or(0, |m| {
+            m.dl.entries.capacity() * core::mem::size_of::<Entry>()
+                + m.dl.fixed.capacity() * core::mem::size_of::<Entry>()
+                + m.dl.text.capacity()
+                + m.dl.clips.capacity() * core::mem::size_of::<Rect>()
+        })
     }
 }
 
@@ -1418,10 +1475,10 @@ impl Document {
     /// [`ScriptHost::now`], the DOMContentLoaded and load events when their time comes, and
     /// the microtasks after each. True if anything ran (the page may have changed).
     pub fn run(&mut self, host: &mut dyn ScriptHost) -> bool {
-        match self.js.as_mut() {
-            Some(j) => j.run(&mut self.page, host),
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.run(&mut d.page, host),
             None => false,
-        }
+        })
     }
 
     /// When [`Document::run`] has timer work next ([`ScriptHost::now`]'s clock). None: only
@@ -1438,10 +1495,10 @@ impl Document {
 
     /// Run the animation frame callbacks (just before drawing).
     pub fn frame(&mut self, host: &mut dyn ScriptHost) -> bool {
-        match self.js.as_mut() {
-            Some(j) => j.frame(&mut self.page, host),
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.frame(&mut d.page, host),
             None => false,
-        }
+        })
     }
 
     /// A click at viewport point (`x`, `y`) with the view scrolled by `scroll`: mousedown,
@@ -1458,16 +1515,16 @@ impl Document {
         scroll: (i32, i32),
         mods: Mods,
     ) -> bool {
-        crate::script::click(self, host, x, y, scroll, mods)
+        self.armed(|d| crate::script::click(d, host, x, y, scroll, mods))
     }
 
     /// A key went down (`up` false) or up, for the focused element (or the body). False if
     /// a listener cancelled it: the app skips what the key would do (typing, scrolling).
     pub fn key(&mut self, host: &mut dyn ScriptHost, key: &KeyInput, up: bool) -> bool {
-        match self.js.as_mut() {
-            Some(j) => j.key(&mut self.page, host, key, up),
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.key(&mut d.page, host, key, up),
             None => true,
-        }
+        })
     }
 
     /// The form control with the keyboard, as the page sees it.
@@ -1479,19 +1536,21 @@ impl Document {
     /// to the elements, and `change` to a text field left with a new value.
     pub fn set_focus(&mut self, host: &mut dyn ScriptHost, id: Option<ControlId>) {
         let node = id.and_then(|i| self.page.control_node(i));
-        match self.js.as_mut() {
-            Some(j) => j.focus(&mut self.page, host, node),
-            None => self.page.set_focus_node(node),
-        }
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.focus(&mut d.page, host, node),
+            None => d.page.set_focus_node(node),
+        })
     }
 
     /// The user changed control `id`'s value (typed, pasted, picked an option): the
     /// `input` event (and for a select, `change`).
     pub fn input(&mut self, host: &mut dyn ScriptHost, id: ControlId) {
-        if let Some(n) = self.page.control_node(id)
-            && let Some(j) = self.js.as_mut()
-        {
-            j.user_input(&mut self.page, host, n);
+        if let Some(n) = self.page.control_node(id) {
+            self.armed(|d| {
+                if let Some(j) = d.js.as_mut() {
+                    j.user_input(&mut d.page, host, n);
+                }
+            });
         }
     }
 
@@ -1506,13 +1565,23 @@ impl Document {
         // Something to submit at all (a form, a method that sends)?
         self.page.submit(id, click)?;
         let form = self.page.form_node_of(id)?;
-        match self.js.as_mut() {
-            Some(j) if !j.stopped() => {
-                if !j.submit_event(&mut self.page, host, form, id) {
+        let scripted = self.js.as_ref().is_some_and(|j| !j.stopped());
+        let go = scripted && {
+            self.arm();
+            let go = match self.js.as_mut() {
+                Some(j) => j.submit_event(&mut self.page, host, form, id),
+                None => true,
+            };
+            self.disarm();
+            go
+        };
+        match scripted {
+            true => {
+                if !go {
                     return None;
                 }
             }
-            _ => {
+            false => {
                 if let Some((n, msg)) = crate::script::first_invalid(&mut self.page, form, id) {
                     self.page.set_focus_node(Some(n));
                     self.notes.push(PageRequest::Invalid(msg));
@@ -1537,7 +1606,15 @@ impl Document {
 
     /// Console lines since the last call.
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
-        self.js.as_mut().map(|j| j.take_console()).unwrap_or_default()
+        let mut v = self
+            .frames
+            .as_mut()
+            .map(|f| f.take_notes())
+            .unwrap_or_default();
+        if let Some(j) = self.js.as_mut() {
+            v.extend(j.take_console());
+        }
+        v
     }
 
     /// Network requests the scripts made (or aborted) since the last call, in order.
@@ -1554,10 +1631,10 @@ impl Document {
     /// the microtasks after it. An id the page no longer waits for (aborted, or the
     /// scripts were stopped) is ignored. True if a script ran.
     pub fn net_event(&mut self, host: &mut dyn ScriptHost, id: u32, ev: NetEvent) -> bool {
-        match self.js.as_mut() {
-            Some(j) => j.net_event(&mut self.page, host, id, ev),
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.net_event(&mut d.page, host, id, ev),
             None => false,
-        }
+        })
     }
 
     /// Stop the page's scripts for good (the user said so): nothing more runs, timers and
@@ -1574,7 +1651,7 @@ impl Document {
 
     /// The DOM changed since the last layout: lay out again before hit testing.
     pub fn needs_layout(&self) -> bool {
-        self.page.changed()
+        crate::frames::needs_layout(self)
     }
 }
 
@@ -1624,6 +1701,83 @@ impl Document {
 ///   levels. A slot over the first is not made; one over the second is
 ///   [`FrameBlock::TooDeep`]. The engine says so in the top document's console.
 impl Document {
+    /// Make the other frames reachable from this document's scripts for the call that follows
+    /// (see [`Document::with_frame`]).
+    pub(crate) fn arm(&mut self) {
+        self.touch_hub();
+        let p = if self.attached {
+            self.peers
+        } else {
+            let root = self as *mut Document;
+            self.frames
+                .as_deref_mut()
+                .map(|f| crate::script::frames::Peers {
+                    frames: f as *mut crate::frames::Frames,
+                    root,
+                })
+        };
+        if let Some(j) = self.js.as_ref() {
+            j.set_peers(p);
+        }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        if let Some(j) = self.js.as_ref() {
+            j.set_peers(None);
+        }
+    }
+
+    /// Tell the frames' hub where this (top) document is now: documents move, and a script of a
+    /// frame finds the top page through that address (script/hub.rs).
+    pub(crate) fn touch_hub(&self) {
+        if !self.attached
+            && let Some(f) = self.frames.as_ref()
+        {
+            f.hub.set_top(self as *const Document as *mut Document);
+        }
+    }
+
+    /// `f` with the other frames armed.
+    pub(crate) fn armed<R>(&mut self, f: impl FnOnce(&mut Document) -> R) -> R {
+        self.arm();
+        let r = f(self);
+        self.disarm();
+        r
+    }
+
+    /// Run `f` on frame `id`'s document with the rest of the page reachable from its scripts:
+    /// what a script needs to touch another frame's window (`parent.document`,
+    /// `iframe.contentWindow.x`, [`ScriptHost::frame_host`] says whose host). While `f` runs
+    /// the frame's document is out of the table (a script of another frame that wants it, because
+    /// this one called into it, is refused: it is busy). Use it for any call that runs script
+    /// ([`Document::run`], [`Document::net_event`], [`Document::click`], ...); it is
+    /// [`Document::frame_doc_mut`] for everything else. [`FrameId::TOP`] runs `f` on this
+    /// document. None for an unknown or empty frame.
+    pub fn with_frame<R>(&mut self, id: FrameId, f: impl FnOnce(&mut Document) -> R) -> Option<R> {
+        self.touch_hub();
+        if id.is_top() {
+            return Some(f(self));
+        }
+        let root = self as *mut Document;
+        let frames = self.frames.as_deref_mut()?;
+        let mut doc = frames.slot_mut(id)?.doc.take()?;
+        doc.peers = Some(crate::script::frames::Peers {
+            frames: frames as *mut crate::frames::Frames,
+            root,
+        });
+        let out = f(&mut doc);
+        doc.peers = None;
+        // The slot may be gone (a script removed its element) or taken over by another
+        // document: then this one is dropped.
+        if let Some(frames) = self.frames.as_deref_mut()
+            && let Some(s) = frames.slot_mut(id)
+            && s.doc.is_none()
+        {
+            s.doc = Some(doc);
+        }
+        Some(out)
+    }
+
     /// Where this document sits in its page's frame tree.
     pub fn frame_info(&self) -> FrameInfo {
         let c = self.page.frame;
@@ -1662,16 +1816,18 @@ impl Document {
             .get_or_insert_with(|| alloc::boxed::Box::new(crate::frames::Frames::new()));
         frames.hub.set_top(me);
         if let Some(js) = self.js.as_ref() {
-            js.link_hub(frames.hub.clone());
+            js.link_hub(frames.hub.clone(), 0, me);
         }
-        frames.sync_doc(self.page.frame, &mut self.page, maxf, maxd);
+        frames.max_frames = maxf;
+        frames.max_depth = maxd;
+        frames.sync_doc(self.page.frame, &mut self.page);
         for id in frames.walk() {
             let Some(mut d) = frames.slot_mut(id).and_then(|s| s.doc.take()) else {
                 continue;
             };
             if d.page.frames_pending() {
                 d.page.flush();
-                frames.sync_doc(d.page.frame, &mut d.page, maxf, maxd);
+                frames.sync_doc(d.page.frame, &mut d.page);
             }
             match frames.slot_mut(id) {
                 Some(s) => s.doc = Some(d),
@@ -1731,6 +1887,7 @@ impl Document {
 
     /// The document of frame `id` ([`FrameId::TOP`]: this one).
     pub fn frame_doc(&self, id: FrameId) -> Option<&Document> {
+        self.touch_hub();
         if id.is_top() {
             return Some(self);
         }
@@ -1740,10 +1897,17 @@ impl Document {
     /// The document of frame `id` to work on: supply its resources, run its scripts, give it
     /// the pointer and keys ([`FrameId::TOP`]: this one).
     pub fn frame_doc_mut(&mut self, id: FrameId) -> Option<&mut Document> {
+        self.touch_hub();
         if id.is_top() {
             return Some(self);
         }
         self.frames.as_mut()?.slot_mut(id)?.doc.as_deref_mut()
+    }
+
+    /// The frame under a point of the top document's viewport (`scroll`: the page's scroll),
+    /// [`FrameId::TOP`] if none: for the cursor, the wheel and where a click goes.
+    pub fn frame_at(&self, x: i32, y: i32, scroll: (i32, i32)) -> FrameId {
+        crate::frames::frame_at(self, x, y, scroll)
     }
 
     /// The frames that have a document, in tree order (not the top document).

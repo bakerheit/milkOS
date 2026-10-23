@@ -92,6 +92,8 @@ pub struct Page {
     pub(crate) frame_nodes: BTreeMap<NodeId, FrameId>,
     /// `<iframe>` elements scripts freed since the frame table last looked.
     freed_iframes: Vec<NodeId>,
+    /// Counts the display lists made (for the frame table's merged lists).
+    dl_gen: u64,
 }
 
 /// The canvas when the page doesn't paint one (SPEC "Type": milk, or Chocolate milk).
@@ -220,6 +222,7 @@ impl Page {
             frames_dirty: false,
             frame_nodes: BTreeMap::new(),
             freed_iframes: Vec::new(),
+            dl_gen: 0,
         };
         p.frames_dirty = p.dom.find_tag(tag::IFRAME) != NONE;
         p.scan();
@@ -951,6 +954,32 @@ impl Page {
         self.freed_iframes.is_empty()
     }
 
+    pub(crate) fn dl_gen(&self) -> u64 {
+        self.dl_gen
+    }
+
+    /// Where the `<iframe>` elements' contents go in the last display list.
+    pub(crate) fn frame_marks(&self) -> &[crate::paint::FrameMark] {
+        self.painted.as_ref().map_or(&[], |p| &p.marks)
+    }
+
+    /// The element at a viewport point and whether it is in the fixed layer.
+    pub(crate) fn hit_node(&self, x: i32, y: i32, scroll: (i32, i32)) -> Option<(NodeId, bool)> {
+        let p = self.painted.as_ref()?;
+        let (dx, dy) = (x.saturating_add(scroll.0), y.saturating_add(scroll.1));
+        for h in p.hits.iter().rev() {
+            if h.fixed && h.rect.contains(x, y) {
+                return Some((h.node, true));
+            }
+        }
+        for h in p.hits.iter().rev() {
+            if !h.fixed && h.rect.contains(dx, dy) {
+                return Some((h.node, false));
+            }
+        }
+        None
+    }
+
     pub(crate) fn take_freed_iframes(&mut self) -> Vec<NodeId> {
         core::mem::take(&mut self.freed_iframes)
     }
@@ -1105,6 +1134,7 @@ impl Page {
         }
         drop(cx);
         self.painted = Some(painted);
+        self.dl_gen = crate::frames::next_gen();
         self.layout_dirty = false;
         &self.painted.as_ref().unwrap().dl
     }
@@ -1225,6 +1255,14 @@ impl Page {
     }
 
     pub fn find(&self, query: &str, case_sensitive: bool) -> Vec<FindMatch> {
+        self.find_at(query, case_sensitive)
+            .into_iter()
+            .map(|(m, _)| m)
+            .collect()
+    }
+
+    /// Like [`Page::find`], with the index of the text run each match starts in.
+    pub(crate) fn find_at(&self, query: &str, case_sensitive: bool) -> Vec<(FindMatch, u32)> {
         let Some(p) = &self.painted else {
             return Vec::new();
         };
@@ -1274,10 +1312,15 @@ impl Page {
                 && (0..m)
                     .all(|k| hay[i + k].0 == q[k] || (q[k] == ' ' && hay[i + k].0.is_whitespace()))
             {
-                out.push(FindMatch {
-                    rects: self.match_rects(&runs, &hay[i..i + m]),
-                    frame: FrameId::TOP,
-                });
+                let rects = self.match_rects(&runs, &hay[i..i + m]);
+                out.push((
+                    FindMatch {
+                        frame_rects: rects.clone(),
+                        rects,
+                        frame: self.frame.id,
+                    },
+                    hay[i].1,
+                ));
                 i += m;
                 if out.len() >= 10_000 {
                     break;
@@ -1456,12 +1499,27 @@ impl Page {
     }
 
     pub fn text(&self) -> String {
+        self.text_with(&[])
+    }
+
+    /// The text, with each chunk (a frame's text) put before the run whose index is given.
+    pub(crate) fn text_with(&self, chunks: &[(usize, String)]) -> String {
         let Some(p) = &self.painted else {
             return String::new();
         };
         let mut s = String::new();
         let mut prev: Option<TextRun> = None;
-        for (r, _) in self.runs() {
+        let mut ck = 0;
+        for (ri, (r, _)) in self.runs().into_iter().enumerate() {
+            while ck < chunks.len() && chunks[ck].0 <= ri {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(&chunks[ck].1);
+                s.push('\n');
+                prev = None;
+                ck += 1;
+            }
             if let Some(pr) = prev {
                 if pr.baseline != r.baseline {
                     s.push('\n');
@@ -1471,6 +1529,13 @@ impl Page {
             }
             s.push_str(p.dl.run_text(&r));
             prev = Some(r);
+        }
+        for (_, t) in &chunks[ck..] {
+            if !s.is_empty() && !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s.push_str(t);
+            s.push('\n');
         }
         s
     }

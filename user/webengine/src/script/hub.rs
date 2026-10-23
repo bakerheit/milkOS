@@ -96,6 +96,10 @@ pub(crate) struct Adjust {
 /// Shared by the runtimes of one page.
 pub struct Hub {
     top: Cell<*mut Document>,
+    /// The documents of the frames (boxed in the frame table, so their addresses hold even
+    /// while the host takes one out of its slot to run it), by frame id: (the realm's uid, the
+    /// document). A runtime removes its entry when it is dropped.
+    docs: RefCell<BTreeMap<u32, (u64, *mut Document)>>,
     pending: RefCell<Vec<Adjust>>,
     /// Cross-frame calls in progress.
     nest: Cell<u32>,
@@ -108,6 +112,7 @@ impl Hub {
     pub fn new() -> Rc<Hub> {
         Rc::new(Hub {
             top: Cell::new(core::ptr::null_mut()),
+            docs: RefCell::new(BTreeMap::new()),
             pending: RefCell::new(Vec::new()),
             nest: Cell::new(0),
         })
@@ -120,13 +125,22 @@ impl Hub {
 
     /// The document of frame `id`, if it has one.
     pub(crate) fn doc(&self, id: u32) -> Option<*mut Document> {
-        let p = self.top.get();
-        if p.is_null() {
-            return None;
+        if id == 0 {
+            let p = self.top.get();
+            return (!p.is_null()).then_some(p);
         }
-        // SAFETY: see the module docs; used in a short scope.
-        let top = unsafe { &mut *p };
-        top.frame_doc_mut(FrameId(id)).map(|d| d as *mut Document)
+        self.docs.borrow().get(&id).map(|(_, p)| *p)
+    }
+
+    pub(crate) fn register(&self, id: u32, uid: u64, d: *mut Document) {
+        self.docs.borrow_mut().insert(id, (uid, d));
+    }
+
+    pub(crate) fn unregister(&self, id: u32, uid: u64) {
+        let mut m = self.docs.borrow_mut();
+        if m.get(&id).is_some_and(|(u, _)| *u == uid) {
+            m.remove(&id);
+        }
     }
 
     pub(crate) fn push(&self, a: Adjust) {
@@ -157,7 +171,6 @@ pub(crate) struct Peek {
     pub uid: u64,
     pub origin: super::xorigin::Origin,
     pub parent: Option<u32>,
-    pub busy: bool,
 }
 
 /// What one realm keeps for the frame bindings.
@@ -174,6 +187,8 @@ pub struct XFrame {
     /// operation).
     pub freed: Rc<RefCell<Vec<u64>>>,
     pub class: Cell<Option<ClassId>>,
+    /// The frame this realm's document is in, once it has joined a hub.
+    pub my_frame: Cell<u32>,
     /// The tagged-JSON cloners of postMessage, compiled at first use.
     pub cloner: RefCell<Option<(Pinned, Pinned)>>,
     pub message_proto: RefCell<Option<Pinned>>,
@@ -271,6 +286,7 @@ impl XFrame {
             proxies: RefCell::new(BTreeMap::new()),
             freed: Rc::new(RefCell::new(Vec::new())),
             class: Cell::new(None),
+            my_frame: Cell::new(0),
             cloner: RefCell::new(None),
             message_proto: RefCell::new(None),
             frames_obj: RefCell::new(None),
@@ -285,17 +301,34 @@ impl Default for XFrame {
 }
 
 impl Runtime {
-    /// Join the page's hub (called by the engine when the frame table is made and when a
-    /// document is attached).
-    pub(crate) fn link_hub(&self, hub: Rc<Hub>) {
+    /// Join the page's hub as frame `id` whose document is at `doc` (called by the engine when
+    /// the frame table is made and when a document is attached; the top document is frame 0).
+    pub(crate) fn link_hub(&self, hub: Rc<Hub>, id: u32, doc: *mut Document) {
+        self.b.xf.my_frame.set(id);
+        if id != 0 {
+            hub.register(id, self.b.xf.uid, doc);
+        }
         *self.b.xf.hub.borrow_mut() = Some(hub);
+    }
+
+    /// Leave the hub (the document is being taken out of the frame table).
+    pub(crate) fn unlink_hub(&self) {
+        if let Some(h) = self.b.xf.hub.borrow_mut().take() {
+            h.unregister(self.b.xf.my_frame.get(), self.b.xf.uid);
+        }
+    }
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        self.unlink_hub();
     }
 }
 
 impl Bridge {
     /// This frame's id in its page (0 for the top).
     pub fn frame_id(&self) -> u32 {
-        self.page().map_or(0, |p| p.frame.id.0)
+        self.xf.my_frame.get()
     }
 
     pub fn hub(&self) -> Option<Rc<Hub>> {
@@ -338,7 +371,6 @@ pub(crate) fn peek(from: &Bridge, frame: u32) -> Option<Peek> {
     let d = unsafe { &*dp };
     let js = d.js.as_ref()?;
     let origin = js.b.origin_with_page(&d.page);
-    let busy = js.b.st.try_borrow().map_or(true, |s| s.depth > 0);
     Some(Peek {
         uid: js.b.xf.uid,
         origin,
@@ -347,7 +379,6 @@ pub(crate) fn peek(from: &Bridge, frame: u32) -> Option<Peek> {
         } else {
             Some(d.page.frame.parent.0)
         },
-        busy,
     })
 }
 
@@ -461,12 +492,7 @@ pub(crate) fn enter<R>(
     }
     let _unnest = Unnest(&hub);
     let adj = hub.take_for(frame, uid);
-    let mut fh = FrameHost {
-        inner: host,
-        vp,
-        scroll,
-    };
-    js.entry(page, &mut fh, move |b, r| {
+    let run = move |b: &Rc<Bridge>, r: &mut Realm| {
         if !adj.is_empty() {
             let mut ex = b.xf.exports.borrow_mut();
             for a in adj {
@@ -474,8 +500,21 @@ pub(crate) fn enter<R>(
             }
         }
         f(b, r)
-    })
-    .ok_or(Gone::Dead)
+    };
+    // The host that runs that frame's scripts if the app has one (its cookies and storage are the
+    // frame's), else the caller's with that frame's viewport.
+    // SAFETY: `host` is the caller's host pointer; `frame_host` hands out a borrow of it or of
+    // something it owns, used only for this entry.
+    let host_ptr: *mut dyn ScriptHost = host;
+    if let Some(fh) = unsafe { &mut *host_ptr }.frame_host(FrameId(frame)) {
+        return js.entry(page, fh, run).ok_or(Gone::Dead);
+    }
+    let mut fh = FrameHost {
+        inner: unsafe { &mut *host_ptr },
+        vp,
+        scroll,
+    };
+    js.entry(page, &mut fh, run).ok_or(Gone::Dead)
 }
 
 impl Hub {

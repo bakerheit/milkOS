@@ -189,6 +189,9 @@ pub const MAX_CONSOLE_BYTES: usize = 1 << 20;
 pub struct Bridge {
     page: Cell<*mut Page>,
     host: Cell<Option<*mut (dyn ScriptHost + 'static)>>,
+    /// The other frames of the page, reachable while the call from the app lasts (armed by
+    /// the document; see script/frames.rs).
+    peers: Cell<Option<super::frames::Peers>>,
     pub st: RefCell<State>,
     pub classes: OnceCell<Classes>,
     pub protos: OnceCell<Protos>,
@@ -205,6 +208,7 @@ impl Bridge {
         Bridge {
             page: Cell::new(core::ptr::null_mut()),
             host: Cell::new(None),
+            peers: Cell::new(None),
             st: RefCell::new(State {
                 limits,
                 loader,
@@ -278,6 +282,15 @@ impl Bridge {
     pub fn host(&self) -> Option<&mut dyn ScriptHost> {
         // SAFETY: as for `page`.
         self.host.get().map(|h| unsafe { &mut *h as &mut dyn ScriptHost })
+    }
+
+    /// The other frames of the page, if the call from the app armed them.
+    pub fn peers(&self) -> Option<super::frames::Peers> {
+        self.peers.get()
+    }
+
+    pub fn set_peers(&self, p: Option<super::frames::Peers>) {
+        self.peers.set(p);
     }
 
     /// The state, or a script error if it is borrowed already (re-entrancy we didn't plan).

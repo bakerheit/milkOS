@@ -2052,11 +2052,14 @@ impl Desktop {
         for id in done {
             self.close(id);
         }
+        // /dev/wm's status, every frame: a window that just opened, moved or was retitled is
+        // listed at once (it was refreshed once a second, so a script that looked right after
+        // an app opened its window didn't see it yet).
+        ctl::set_status(self.status_report());
         // Once a second: CPU, clock, live panels.
         let sec = now / 1_000_000_000;
         if sec != self.last_second {
             self.last_second = sec;
-            ctl::set_status(self.status_report());
             // Installed packages (dock tiles), every few seconds.
             if sec % 3 == 1 && packages::refresh() {
                 self.invalidate(PanelKey::Dock);

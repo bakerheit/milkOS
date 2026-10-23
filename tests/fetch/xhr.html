@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>XMLHttpRequest</title>
+<script src="/common.js"></script></head>
+<body><h1>XMLHttpRequest</h1><p id="status">running</p>
+<script>
+const G = 'xhr';
+function xhr(method, url, opts) {
+  opts = opts || {};
+  return new Promise((resolve) => {
+    const x = new XMLHttpRequest();
+    const log = [];
+    for (const t of ['readystatechange', 'loadstart', 'progress', 'load', 'error', 'abort', 'timeout', 'loadend']) {
+      x.addEventListener(t, () => { const s = t === 'readystatechange' ? t + x.readyState : t; if (log[log.length - 1] !== s) log.push(s); });
+    }
+    const up = [];
+    if (opts.upload) for (const t of ['loadstart', 'progress', 'load', 'loadend']) x.upload.addEventListener(t, () => { if (up[up.length - 1] !== t) up.push(t); });
+    x.open(method, url);
+    if (opts.type) x.responseType = opts.type;
+    if (opts.timeout) x.timeout = opts.timeout;
+    if (opts.withCredentials) x.withCredentials = true;
+    for (const [k, v] of Object.entries(opts.headers || {})) x.setRequestHeader(k, v);
+    x.addEventListener('loadend', () => resolve({ x, log, up }));
+    x.send(opts.body);
+    if (opts.abortAfter) setTimeout(() => x.abort(), opts.abortAfter);
+  });
+}
+async function run(name, f) {
+  try { report(G, name, await f()); } catch (e) { report(G, name, 'THREW ' + errName(e)); }
+}
+(async () => {
+  await run('get', async () => { const r = await xhr('GET', '/api/hello'); return [r.x.status, r.x.statusText, r.x.responseText, r.x.getResponseHeader('Content-Type'), r.x.readyState].join(' | '); });
+  await run('events', async () => { const r = await xhr('GET', '/api/hello'); return r.log.join(','); });
+  await run('json', async () => { const r = await xhr('GET', '/api/data.json', { type: 'json' }); return r.x.response.items.join('+') + ' ' + typeof r.x.response; });
+  await run('arraybuffer', async () => { const r = await xhr('GET', '/api/bytes', { type: 'arraybuffer' }); return r.x.response.byteLength + ' ' + new Uint8Array(r.x.response)[200]; });
+  await run('blob', async () => { const r = await xhr('GET', '/api/bytes', { type: 'blob' }); return r.x.response.size + ' ' + r.x.response.type; });
+  await run('all-headers', async () => { const r = await xhr('GET', '/api/hello'); return r.x.getAllResponseHeaders().split('\r\n').filter((l) => l.startsWith('content-type') || l.startsWith('content-length')).join(' / '); });
+  await run('post', async () => { const r = await xhr('POST', '/api/echo', { body: 'xhr body', headers: { 'X-Token': 'x1', 'Content-Type': 'text/x-test' } }); const j = JSON.parse(r.x.responseText); return [j.method, j.x_token, j.content_type, j.body].join(' '); });
+  await run('status-404', async () => { const r = await xhr('GET', '/api/status/404'); return r.x.status + ' ' + r.log.join(','); });
+  await run('progress', async () => {
+    let n = 0, lengthOk = true, last = 0;
+    const x = new XMLHttpRequest(); x.open('GET', '/api/stream?kb=200&chunks=20&ms=40'); x.responseType = 'arraybuffer';
+    x.onprogress = (e) => { n++; lengthOk = lengthOk && e.lengthComputable && e.total === 204800; last = e.loaded; };
+    await new Promise((res) => { x.onloadend = res; x.send(); });
+    return 'events>=3=' + (n >= 3) + ' computable=' + lengthOk + ' last=' + last + ' size=' + x.response.byteLength;
+  });
+  await run('upload', async () => { const r = await xhr('POST', '/api/echo', { body: 'u'.repeat(100000), upload: true }); return r.up.join(',') + ' status=' + r.x.status; });
+  await run('timeout', async () => { const t0 = performance.now(); const r = await xhr('GET', '/api/slow?ms=3000', { timeout: 300 }); return r.log.filter((s) => s !== 'readystatechange1').join(',') + ' status=' + r.x.status + ' fast=' + (performance.now() - t0 < 1500); });
+  await run('abort', async () => { const r = await xhr('GET', '/api/slow?ms=3000', { abortAfter: 100 }); return r.log.filter((s) => s !== 'readystatechange1').join(',') + ' state=' + r.x.readyState + ' status=' + r.x.status; });
+  await run('error', async () => { const r = await xhr('GET', 'http://nosuch.test:' + location.port + '/'); return r.log.filter((s) => s !== 'readystatechange1').join(',') + ' status=' + r.x.status; });
+  await run('sync-refused', async () => { try { const x = new XMLHttpRequest(); x.open('GET', '/api/hello', false); return 'allowed'; } catch (e) { return e.name; } });
+  await run('unsafe-header', async () => { const x = new XMLHttpRequest(); x.open('GET', '/api/headers'); x.setRequestHeader('Cookie', 'evil=1'); x.setRequestHeader('X-Fine', 'ok'); await new Promise((res) => { x.onloadend = res; x.send(); }); const j = JSON.parse(x.responseText); return String(j['cookie']).includes('evil') + ' ' + j['x-fine']; });
+  await run('twice', async () => { const x = new XMLHttpRequest(); x.open('GET', '/api/hello'); x.send(); try { x.send(); return 'allowed'; } catch (e) { return e.name; } });
+  await run('cross-origin', async () => { const r = await xhr('GET', 'http://api.milk.test:' + location.port + '/cors/open'); return r.x.status + ' ' + r.x.responseText + ' ' + r.x.getResponseHeader('X-Visible') + ' ' + r.x.getResponseHeader('X-Hidden'); });
+  await run('cross-origin-blocked', async () => { const r = await xhr('GET', 'http://api.milk.test:' + location.port + '/cors/closed'); return r.log.filter((s) => s !== 'readystatechange1').join(',') + ' status=' + r.x.status + ' text=[' + r.x.responseText + ']'; });
+  await run('preflighted-put', async () => { const r = await xhr('PUT', 'http://api.milk.test:' + location.port + '/cors/preflight', { body: '{"v":1}', headers: { 'X-Token': 'cx', 'Content-Type': 'application/json' } }); const j = JSON.parse(r.x.responseText); return j.method + ' ' + j.x_token + ' ' + j.body; });
+  await run('upload-listener-preflights', async () => { const r = await xhr('POST', 'http://api.milk.test:' + location.port + '/cors/preflight', { body: 'x', upload: true }); return r.log.filter((s) => s !== 'readystatechange1').join(',') + ' status=' + r.x.status; });
+  document.getElementById('status').textContent = 'done';
+  report(G, 'end', 'done');
+})();
+</script></body></html>

@@ -16,9 +16,12 @@
 //! middle button) opens a link in a new tab, Alt-click downloads it, Cmd-Shift-Delete forgets
 //! cookies and history.
 //!
-//! `browser [--log-input] [ADDRESS]`: `--log-input` prints every key, click and wheel event
-//! with its modifier keys (`[browser] input ...`), which scripts/browser-test.sh uses to check
-//! the window system's client protocol.
+//! `browser [--log-input] [--allow-private-network] [ADDRESS]`: `--log-input` prints every key,
+//! click and wheel event with its modifier keys (`[browser] input ...`), which
+//! scripts/browser-test.sh uses to check the window system's client protocol, and says more
+//! about script requests. `--allow-private-network` lets the scripts of a page on a public
+//! name reach addresses on the local network (the policy refuses that otherwise: a web page
+//! must not reach into your network); the tests, whose servers are all on 10.0.2.2, use it.
 
 #![no_std]
 #![no_main]
@@ -1944,7 +1947,18 @@ fn log_input(ev: &Event, m: Mods) {
 }
 
 fn main(args: &rt::Args) -> i32 {
-    let log = args.get(1) == Some("--log-input");
+    // Flags first, then the address.
+    let mut log = false;
+    let mut private_ok = false;
+    let mut at = 1;
+    while let Some(a) = args.get(at) {
+        match a {
+            "--log-input" => log = true,
+            "--allow-private-network" => private_ok = true,
+            _ => break,
+        }
+        at += 1;
+    }
     let home = args.env("HOME").unwrap_or("/Users/milk");
     let profile = Profile::new(home);
     profile.ensure();
@@ -1998,7 +2012,10 @@ fn main(args: &rt::Args) -> i32 {
         js_on: js::javascript_setting(&profile_settings),
         console_open: false,
         console_net: false,
-        net_cfg: browserkit::netpolicy::Config::default(),
+        net_cfg: browserkit::netpolicy::Config {
+            block_private_network: !private_ok,
+            ..browserkit::netpolicy::Config::default()
+        },
         preflight: alloc::sync::Arc::new(rt::thread::Mutex::new(
             browserkit::netpolicy::PreflightCache::new(
                 browserkit::netpolicy::Limits::default().preflight_cache_entries,
@@ -2023,7 +2040,7 @@ fn main(args: &rt::Args) -> i32 {
     };
     // Addresses left in the inbox belong to an earlier run; the argument is this one's.
     let _ = app.profile.take_inbox();
-    let start = args.get(if log { 2 } else { 1 }).unwrap_or(HOME);
+    let start = args.get(at).unwrap_or(HOME);
     app.go_typed(start);
     app.draw();
     let mut last_draw = now_ms();

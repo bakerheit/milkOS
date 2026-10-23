@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Cheese shop</title>
+<style>
+body { font-family: sans-serif; margin: 24px; background: #fffdf8; color: #3a2e28; }
+h1 { color: #4f64a0; }
+.card { border: 2px solid #c4ae8f; border-radius: 8px; background: #efe6d4; padding: 8px 14px; margin: 8px 0; }
+.card b { font-size: 20px; }
+.price { float: right; font-weight: bold; }
+#status { color: #7a6a5a; font-style: italic; }
+#total { font-size: 22px; margin-top: 16px; }
+</style>
+<script src="/common.js"></script></head>
+<body>
+<h1>The cheese shop</h1>
+<p id="status">Loading the list from the server...</p>
+<div id="list"></div>
+<p id="total"></p>
+<script>
+const G = 'render';
+const status = document.getElementById('status');
+const list = document.getElementById('list');
+report(G, 'start', 'waiting');
+fetch('/api/cheeses.json').then((r) => {
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}).then((items) => {
+  let total = 0;
+  for (const c of items) {
+    const d = document.createElement('div');
+    d.className = 'card';
+    d.innerHTML = '<span class="price"></span><b></b><br><span class="origin"></span>';
+    d.querySelector('b').textContent = c.name;
+    d.querySelector('.price').textContent = '$' + c.price.toFixed(2);
+    d.querySelector('.origin').textContent = c.origin + ', aged ' + c.aged + ' months';
+    list.appendChild(d);
+    total += c.price;
+  }
+  status.textContent = 'Loaded ' + items.length + ' cheeses from the server.';
+  document.getElementById('total').textContent = 'Total: $' + total.toFixed(2);
+  document.title = 'Cheese shop (' + items.length + ')';
+  report(G, 'loaded', items.length + ' ' + total.toFixed(2));
+}).catch((e) => {
+  status.textContent = 'Failed: ' + e.message;
+  report(G, 'loaded', 'FAILED ' + errName(e));
+});
+</script></body></html>

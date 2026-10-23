@@ -55,12 +55,10 @@ impl Element {
 #[derive(Clone, Debug)]
 pub enum NodeData {
     Document,
-    Doctype {
-        name: String,
-        public_id: String,
-        system_id: String,
-    },
-    Element(Element),
+    /// (name, public id, system id), boxed (there is at most one).
+    Doctype(Box<[String; 3]>),
+    /// Boxed: half the nodes are text, which shouldn't pay for an element's fields.
+    Element(Box<Element>),
     Text(String),
     Comment(String),
 }
@@ -145,13 +143,13 @@ impl Dom {
                 }
             }
         }
-        self.push(NodeData::Element(Element {
+        self.push(NodeData::Element(Box::new(Element {
             name,
             ns,
             attrs,
             id,
             classes,
-        }))
+        })))
     }
 
     pub fn create_text(&mut self, s: String) -> NodeId {
@@ -163,11 +161,7 @@ impl Dom {
     }
 
     pub fn create_doctype(&mut self, name: String, public_id: String, system_id: String) -> NodeId {
-        self.push(NodeData::Doctype {
-            name,
-            public_id,
-            system_id,
-        })
+        self.push(NodeData::Doctype(Box::new([name, public_id, system_id])))
     }
 
     pub fn node(&self, n: NodeId) -> &Node {

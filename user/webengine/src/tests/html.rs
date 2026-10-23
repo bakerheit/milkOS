@@ -38,9 +38,7 @@ pub fn dump(dom: &Dom) -> String {
                 }
                 NodeData::Text(t) => out.push_str(&alloc::format!("\"{t}\"\n")),
                 NodeData::Comment(t) => out.push_str(&alloc::format!("<!-- {t} -->\n")),
-                NodeData::Doctype { name, .. } => {
-                    out.push_str(&alloc::format!("<!DOCTYPE {name}>\n"))
-                }
+                NodeData::Doctype(d) => out.push_str(&alloc::format!("<!DOCTYPE {}>\n", d[0])),
                 NodeData::Document => {}
             }
             walk(dom, c, depth + 1, out);

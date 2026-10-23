@@ -122,6 +122,11 @@ fn main(args: &rt::Args) -> i32 {
         st.nodes, st.rules, st.boxes, items, height
     );
     println!(
+        "webbench: engine estimate: {} KB kept, {} KB of boxes during layout",
+        st.approx_bytes / 1024,
+        st.layout_bytes / 1024
+    );
+    println!(
         "webbench: heap: {} KB for the DOM and styles' inputs after parse, {} KB in use now, arena peak {} KB (source {} KB)",
         parsed_kb.saturating_sub(base_kb),
         heap_used_kb().saturating_sub(base_kb),

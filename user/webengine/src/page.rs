@@ -608,6 +608,8 @@ impl Page {
         }
         self.ensure_styled(&vp);
         self.last_vp = Some(vp);
+        // The old display list goes before the new one is built (not both at the peak).
+        self.painted = None;
         let zoom = vp.zoom as f32 / 100.0;
         let styles = self.styles.as_ref().unwrap();
         let lookup = ImageLookup {
@@ -1038,10 +1040,8 @@ impl Page {
             rules: self.rules.as_ref().map(|r| r.len()).unwrap_or(0),
             boxes: self.boxes,
             display_items: dl_items,
-            approx_bytes: self.dom.approx_bytes()
-                + style_bytes
-                + dl_bytes
-                + self.boxes * core::mem::size_of::<crate::layout::LBox>(),
+            approx_bytes: self.dom.approx_bytes() + style_bytes + dl_bytes,
+            layout_bytes: self.boxes * core::mem::size_of::<crate::layout::LBox>(),
         }
     }
 }

@@ -28,12 +28,22 @@
 //!   too deep is cut short (see [`Limits`]), never crashes.
 //! - Text: the engine breaks lines and positions words using the app's [`TextMeasurer`], and
 //!   emits [`TextRun`]s the app draws with the same font, so measuring and drawing agree.
+//!   Underlines, overlines and line-throughs are already in the list as [`Item::Rect`]s.
+//! - Threads: parsing and layout recurse with the document's nesting (bounded by
+//!   [`Limits::max_depth`]); run them on the main thread (8 MB stack) or a thread with at
+//!   least 1 MB of stack, not a default 128 KB rt::thread.
+//! - Not supported (yet): scripts, `:hover`/`:focus` styles, CSS transforms, animations,
+//!   web fonts, named grid lines, inner scrolling boxes (overflow: auto spills sideways and
+//!   clips vertically), bidirectional text, vertical writing modes.
 //!
 //! # CHANGES
 //! - Added [`FormControl::content_drawn`] (true for `<button>`: the engine paints its
 //!   content, the app only the face). Documented that [`Item::Control`] and
 //!   [`FormControl::rect`] are the control's content box: its CSS background and borders are
 //!   already in the display list.
+//! - [`Font`] is `Ord` (usable as a cache key).
+//! - Added [`Stats::layout_bytes`]; [`Stats::approx_bytes`] now counts only what is kept.
+//! - Documented that text decorations are drawn by the engine (see [`TextRun::decoration`]).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -223,6 +233,8 @@ pub struct TextRun {
     pub width: i32,
     pub font: Font,
     pub color: Color,
+    /// The decoration lines in effect, for information: the engine has already put them in
+    /// the display list as [`Item::Rect`]s right after this run, so don't draw them again.
     pub decoration: Decoration,
     /// Where the text is in [`DisplayList::text`] (byte offsets; use [`DisplayList::run_text`]).
     pub start: u32,
@@ -561,8 +573,11 @@ pub struct Stats {
     pub rules: usize,
     pub boxes: usize,
     pub display_items: usize,
-    /// Bytes the document holds, roughly (DOM, styles, boxes, display list).
+    /// Bytes the document keeps between layouts, roughly (DOM, styles, display list and its
+    /// hit-test and find data).
     pub approx_bytes: usize,
+    /// Bytes the last layout's box tree took while it existed (freed after painting).
+    pub layout_bytes: usize,
 }
 
 // ---- The document -------------------------------------------------------------------------

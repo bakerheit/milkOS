@@ -239,7 +239,7 @@ check "get --save" "network get --save /tmp/page.html http://127.0.0.1/" "saved 
 check "get --save won't overwrite" "network get --save /tmp/page.html http://127.0.0.1/" "/tmp/page\\.html already exists \\(add --replace to overwrite it\\)" 2
 check "get --save --replace does" "network get --save /tmp/page.html --replace http://127.0.0.1/" "saved to /tmp/page\\.html"
 check "the saved page" "text show /tmp/page.html" "<"
-check "https is refused in words" "network get https://127.0.0.1/" "only http:// addresses work"
+check "https is refused in words" "network get https://127.0.0.1/" "https:// pages need TLS"
 echo "$L" | grep -q "network listen: listening on tcp \\[::\\]:7070 (IPv6 and IPv4)" && ok "listen" || bad "listen: no 'listening on' line"
 echo "$L" | grep -q "network listen: connection from 127\\.0\\.0\\.1:" && ok "connect reached listen" || bad "no connection from 127.0.0.1"
 [ "$(echo "$L" | grep -c "^hello over loopback")" -ge 1 ] && ok "listen printed what connect sent" || bad "listen didn't print the line"

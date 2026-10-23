@@ -2,7 +2,9 @@
 
 ## Setup
 - `export PATH="/opt/homebrew/opt/rustup/bin:$PATH"` (rustup is keg-only). Nightly + `aarch64-unknown-none-softfloat`, pinned in `rust-toolchain.toml`.
-- `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only,
+- `cargo build` from the repo root. `scripts/run.sh` = window, `scripts/run.sh headless` = serial only, both
+  with the internet on: for anything automated use `MILK_OFFLINE=1 scripts/run.sh headless` (tests stay offline;
+  check-all refuses an online boot, docs/networking.md "Internet"),
   `scripts/screenshot.sh out.png [secs] [extra qemu args]` = headless boot + PNG + serial log next to it.
   `MILK_MONITOR=/tmp/x.sock scripts/run.sh headless` adds a qemu monitor socket (`info registers -a` on a hang).
   `scripts/serial-soak.sh [boots] [cmds]` = serial console soak (trickled commands; all must echo back).

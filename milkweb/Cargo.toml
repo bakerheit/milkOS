@@ -1,0 +1,14 @@
+[package]
+name = "milkweb"
+version = "0.0.1"
+edition = "2024"
+
+# The web client pieces shared by the kernel (the Browser, net::dns) and user space (rt::web,
+# `network get` / `network lookup`): URLs, an HTTP/1.1 client over a small Transport trait
+# (TLS slots in there), DNS messages, a TTL cache and the resolver logic, gzip/deflate bodies
+# (the inflate is user/imgdec's), and the Browser's HTML subset with charset decoding.
+# no_std + alloc, no dependencies, no I/O of its own: host tests drive it with fake transports
+# (`scripts/milkweb-test.sh`). See docs/networking.md ("Internet").
+[lib]
+bench = false
+doctest = false

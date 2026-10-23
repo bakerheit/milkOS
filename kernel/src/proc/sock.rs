@@ -57,13 +57,16 @@ const ENOPROTOOPT: Errno = Errno(92);
 const MAX_IO: usize = 1 << 20;
 /// milkOS: allocate a pseudo-terminal (crate::pty); the master fd is returned.
 pub const MILK_OPENPTY: u64 = 0x1002;
+/// milkOS: look a host name up (net::dns, under the boot's internet policy).
+pub const MILK_RESOLVE: u64 = 0x1011;
 
 /// Is `nr` one of ours?
 pub fn handles(nr: u64) -> bool {
     use super::unixsys::{RECVMSG, SENDMSG, SOCKETPAIR};
     matches!(
         nr,
-        SOCKET | SOCKETPAIR | BIND..=SHUTDOWN | SENDMSG | RECVMSG | ACCEPT4 | PPOLL | MILK_OPENPTY
+        SOCKET | SOCKETPAIR | BIND
+            ..=SHUTDOWN | SENDMSG | RECVMSG | ACCEPT4 | PPOLL | MILK_OPENPTY | MILK_RESOLVE
     )
 }
 
@@ -108,6 +111,9 @@ pub fn dispatch(nr: u64, a: [u64; 6]) -> KResult<usize> {
     // the fs grants, abstract names by net, when connecting).
     if nr == MILK_OPENPTY {
         return sys_openpty(a[0] as usize, a[1] as u32);
+    }
+    if nr == MILK_RESOLVE {
+        return sys_resolve(a[0] as usize, a1, a2, a3, a4);
     }
     if nr == SOCKET && a[0] as u32 == super::unix::AF_UNIX {
         return super::unixsys::socket(a[1] as u32, a[2] as u32);
@@ -244,6 +250,57 @@ fn sys_openpty(slave_out: usize, flags: u32) -> KResult<usize> {
     }
     crate::audit!("pty.open", "pty=ttyp{n} fd={fd}");
     Ok(fd)
+}
+
+/// MILK_RESOLVE(name, name_len, want, out, out_max): the addresses of a host, IPv4 first,
+/// at most `out_max` records of 17 bytes at `out` (family 4 or 6, then the address in 16
+/// bytes, an IPv4 one in the first 4). `want`: 0 any, 1 IPv4, 2 IPv6. Returns how many.
+/// The policy is the kernel's (net::dns): offline, only localhost, numeric addresses and
+/// `.test` names (EPERM for the rest). A real lookup needs the full net capability.
+/// Errors: ENOENT no such host, ENODATA none of that family, ETIMEDOUT no answer, EPERM
+/// refused offline, EADDRNOTAVAIL no DNS server, EINVAL not a name, EIO a bad answer.
+fn sys_resolve(name: usize, len: usize, want: usize, out: usize, max: usize) -> KResult<usize> {
+    use super::caps::Net;
+    use crate::net::dns;
+    if len == 0 || len > 253 {
+        return Err(EINVAL);
+    }
+    let raw = copy_in(name, len)?;
+    let name = core::str::from_utf8(&raw).map_err(|_| EINVAL)?;
+    let want = match want {
+        0 => milkweb::dns::Want::Any,
+        1 => milkweb::dns::Want::V4,
+        2 => milkweb::dns::Want::V6,
+        _ => return Err(EINVAL),
+    };
+    let local = crate::net::internet::literal(name).is_some()
+        || name.trim_end_matches('.').eq_ignore_ascii_case("localhost");
+    match super::current_caps().net {
+        Net::All => {}
+        Net::Local if local => {}
+        Net::Local => return Err(super::caps::deny("resolve", "net=local-only")),
+        Net::None => return Err(super::caps::deny("resolve", "net capability dropped")),
+    }
+    let addrs = dns::resolve_all(name, want, 4000)?;
+    let mut buf = alloc::vec::Vec::with_capacity(addrs.len().min(max) * 17);
+    for a in addrs.iter().take(max) {
+        let mut rec = [0u8; 17];
+        match a {
+            IpAddr::V4(v) => {
+                rec[0] = 4;
+                rec[1..5].copy_from_slice(&v.0);
+            }
+            IpAddr::V6(v) => {
+                rec[0] = 6;
+                rec[1..17].copy_from_slice(&v.0);
+            }
+        }
+        buf.extend_from_slice(&rec);
+    }
+    if !buf.is_empty() {
+        copy_out(out, &buf)?;
+    }
+    Ok(buf.len() / 17)
 }
 
 fn install(of: OpenFile, cloexec: bool) -> KResult<usize> {

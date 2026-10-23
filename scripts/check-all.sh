@@ -37,6 +37,12 @@
 # rebuild it under the tests already running.
 # Tests that only measure (treetest, mounttime, cachebench, input-test) pass if they exit 0,
 # because they have no assertions of their own.
+# Internet guard: no test may boot with the internet on (docs/networking.md, "Internet"). Every
+# test runs with MILK_CHECK_ALL=1 (scripts/netdev.sh then refuses `milk_net_args online`) and a
+# qemu-system-aarch64 wrapper first in its PATH that refuses to start a VM whose fw_cfg
+# opt/milkos/net says internet=on, unless the DNS is a local test server (dns=10.0.2.2:PORT, the
+# Mac's 127.0.0.1: web-test). A test that trips either is FAIL(internet), and the run fails.
+# The wrapper is checked once at the start (it must refuse an internet=on boot).
 set -uo pipefail
 # The whole script is one { } block, so bash reads all of it before running any: editing this file
 # while a run is going doesn't make that run execute a mix of the old and new text.
@@ -67,6 +73,7 @@ TESTS=(
   "public-check|s|120|solo|scripts/public-check.sh"
   "serial-soak|q|900|par|scripts/serial-soak.sh 2 6"
   "net-test|s|600|par|scripts/net-test.sh"
+  "web-test|q|600|par|scripts/web-test.sh @WORK@"
   "pkg-test|s|600|par|scripts/pkg-test.sh"
   "svc-test|s|600|par|scripts/svc-test.sh"
   "driver-crash-test|q|600|par|scripts/driver-crash-test.sh @WORK@"
@@ -94,6 +101,7 @@ TESTS=(
   "cmdkit-unit|s|300|par|scripts/cmdkit-test.sh"
   "imgdec-unit|s|300|par|scripts/imgdec-test.sh"
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
+  "milkweb-unit|s|300|par|scripts/milkweb-test.sh"
   "files-test|q|600|par|scripts/files-test.sh"
   "files-access-test|q|600|par|scripts/files-access-test.sh"
   "systools-test|q|600|par|scripts/systools-test.sh"
@@ -162,6 +170,41 @@ echo "check-all: $n tests, up to $JOBS at a time; logs and private images in $RO
 others=$(pgrep -x qemu-system-aarch64 | wc -l | tr -d ' ')
 [ "$others" != 0 ] && echo "check-all: note, $others other qemu-system-aarch64 process(es) running (not touched; tests use private images, but timing is noisier)"
 
+# The internet guard: a qemu wrapper in $ROOT/.guard, first in every test's PATH (above).
+GUARD="$ROOT/.guard"
+mkdir -p "$GUARD"
+REAL_QEMU="$(command -v qemu-system-aarch64 || true)"
+[ -n "$REAL_QEMU" ] || { echo "check-all: FAIL, qemu-system-aarch64 isn't installed"; exit 1; }
+cat >"$GUARD/qemu-system-aarch64" <<GUARDEOF
+#!/bin/bash
+# check-all's internet guard (scripts/check-all.sh): no test boots with the internet on.
+for a in "\$@"; do
+  case "\$a" in
+    *name=opt/milkos/net,file=*) bad="\$a" ;;
+    *name=opt/milkos/net,*internet=on*)
+      case "\$a" in
+        *" dns=10.0.2.2:"[0-9]*|*"=dns=10.0.2.2:"[0-9]*) ;; # a local test DNS server (web-test)
+        *) bad="\$a" ;;
+      esac ;;
+  esac
+done
+if [ -n "\${bad:-}" ]; then
+  msg="check-all: INTERNET GUARD: a test tried to boot with the internet on (-fw_cfg \$bad); tests stay offline"
+  echo "\$msg" >&2
+  echo "\$msg" >>"$GUARD/tripped"
+  [ -n "\${TMPDIR:-}" ] && echo "\$msg" >>"\$TMPDIR/.internet-guard"
+  exit 97
+fi
+exec "$REAL_QEMU" "\$@"
+GUARDEOF
+chmod 755 "$GUARD/qemu-system-aarch64"
+if "$GUARD/qemu-system-aarch64" -fw_cfg "name=opt/milkos/net,string=internet=on" >/dev/null 2>&1 \
+  || [ ! -s "$GUARD/tripped" ]; then
+  echo "check-all: FAIL, the internet guard doesn't refuse an internet=on boot"; exit 1
+fi
+rm -f "$GUARD/tripped"
+echo "check-all: internet guard on (qemu wrapper in $GUARD, MILK_CHECK_ALL=1)"
+
 # One build up front so no test's time is a compile, a broken build stops here, and the tests'
 # own `cargo build`s are no-ops (nothing in a test rebuilds the kernel under another test).
 echo "check-all: cargo build (debug)"
@@ -183,6 +226,7 @@ start_test() { # index
   [ "$mode" = solo ] && echo "  ($name runs solo: nothing else running)"
   env MILK_FS="$W/fs.img" MILK_DISK="$W/disk.img" MILK_CRASH_IMG="$W/crash.img" \
       HTTP_PORT="$(free_port)" TMPDIR="$W" \
+      MILK_CHECK_ALL=1 MILK_OFFLINE=1 MILK_NET_GUARD_DIR="$GUARD" PATH="$GUARD:$PATH" \
       python3 -I scripts/runlimit.py "$limit" "$W/output.log" --status "$W/.status" -- $cmd &
   pid[$i]=$!
   running+=("$i")
@@ -205,6 +249,11 @@ finish_test() { # index
   esac
   # A kernel panic in the serial log is a fail even if the script forgot to look.
   if [ "$r" = PASS ] && grep -rqa "KERNEL PANIC\|kernel panic" "$W" 2>/dev/null; then r="FAIL(panic)"; fi
+  # The internet guard tripped (the wrapper or netdev.sh): a fail, whatever the script said.
+  if [ -s "$W/.internet-guard" ] || grep -qa "INTERNET GUARD" "$W/output.log" 2>/dev/null; then
+    r="FAIL(internet)"
+    grep -ah "INTERNET GUARD" "$W/.internet-guard" "$W/output.log" 2>/dev/null | head -2 | sed 's/^/    /'
+  fi
   [ "$r" != PASS ] && fails=$((fails + 1))
   res[$i]="$r"; took[$i]="$secs"
   done_count=$((done_count + 1))
@@ -284,6 +333,11 @@ done
 echo
 echo "check-all: wall time ${WALL}s for $n tests at -j $JOBS (${sum}s of test time); total ${SECONDS}s with the build"
 if [ "$INTERRUPTED" = 1 ]; then echo "check-all: FAIL, interrupted ($ROOT)"; exit 130; fi
+if [ -s "$GUARD/tripped" ]; then
+  echo "check-all: the INTERNET GUARD tripped (a test tried to boot with the internet on):"
+  sed 's/^/  /' "$GUARD/tripped"
+  [ "$fails" = 0 ] && fails=1
+fi
 if [ "$fails" = 0 ]; then echo "check-all: PASS, $n tests in ${WALL}s ($ROOT)"; exit 0; fi
 echo "check-all: FAIL, $fails of $n failed in ${WALL}s ($ROOT)"
 exit 1

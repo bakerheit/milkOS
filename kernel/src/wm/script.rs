@@ -27,6 +27,8 @@ pub enum Step {
     Idle(u64),
     /// Switch the display mode.
     Resolution(i32, i32),
+    /// Open something the way `open` does (an app's name, or an http:// address).
+    Open(&'static str),
 }
 
 pub struct Script {
@@ -566,6 +568,15 @@ fn build(name: &str) -> Option<Vec<Step>> {
             }
             b.typ(&host_test_url()).enter().wait(1500);
             b.click(230, 312).wait(1500);
+        }
+        "browseurl" => {
+            // Open the address in fw_cfg opt/milkos/testurl (scripts/web-test.sh: a host name
+            // its test DNS server answers) the way `open URL` does, so no click depends on
+            // the dock's layout or the display size, and wait for the page.
+            let url = fw_text("opt/milkos/testurl").unwrap_or_default();
+            b.wait(3000);
+            b.0.push(Step::Open(alloc::boxed::Box::leak(url.into_boxed_str())));
+            b.wait(5000);
         }
         "browserdeny" => {
             let (x, y) = dock_icon_center(2);
@@ -1448,6 +1459,14 @@ fn build(name: &str) -> Option<Vec<Step>> {
             let (x, y) = dock_icon_center(8);
             b.click(x, y)
                 .wait(500)
+                .click(181 + 60, 113 + 44 + 8 * 28 + 12)
+                .wait(400);
+        }
+        // Settings > Network: is the internet on, DNS, eth0.
+        "settings-network" => {
+            let (x, y) = dock_icon_center(8);
+            b.click(x, y)
+                .wait(500)
                 .click(181 + 60, 113 + 44 + 7 * 28 + 12)
                 .wait(400);
         }
@@ -1463,6 +1482,21 @@ fn build(name: &str) -> Option<Vec<Step>> {
 fn paint_offset() -> (i32, i32) {
     let r = super::client::place(1, 562, 414);
     (r.x - 192, r.y - 112)
+}
+
+/// A small fw_cfg text file (up to 200 bytes), trimmed.
+fn fw_text(name: &str) -> Option<String> {
+    let f = fwcfg::find_file(name)?;
+    let n = (f.size as usize).min(200);
+    let mut buf = alloc::vec![0u8; 200];
+    fwcfg::read_file(f, &mut buf[..n]).then(|| {
+        String::from(
+            core::str::from_utf8(&buf[..n])
+                .unwrap_or("")
+                .trim_matches(char::from(0))
+                .trim(),
+        )
+    })
 }
 
 fn host_test_url() -> String {
@@ -1571,6 +1605,7 @@ impl Script {
                 Step::Resolution(w, h) => {
                     d.set_resolution(*w, *h);
                 }
+                Step::Open(what) => d.open_any(what),
                 Step::Log(m) => kprintln!("[demo] {} {}", self.name, m),
                 Step::Panic => {
                     kprintln!("[demo] {} done", self.name);

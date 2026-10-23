@@ -5,18 +5,21 @@
 #                                 shows the console (msh shell + kernel messages)
 #   ./milkOS.command --sound      also play sound through the Mac's speakers
 #   ./milkOS.command --headless   no window, console only (for tests and SSH sessions)
+#   ./milkOS.command --offline    no internet (also MILK_OFFLINE=1)
 #   --serial SPEC / --monitor SPEC   pass qemu -serial / -monitor (for test scripts)
 #
 # Everything it uses is in this folder: kernel.bin, disks/milk.img (your files; it keeps
 # what you save), disks/scratch.img, share/ (visible in milkOS as /Volumes/Mac,
-# read-only). Needs QEMU (brew install qemu). Network: milkOS can't reach the Mac or the
-# internet (qemu "restrict" mode). To quit: close the window, or type Ctrl-A then X here.
+# read-only). Needs QEMU (brew install qemu). Network: the internet is on (qemu user-mode
+# networking; http:// sites only, no https yet); --offline turns it off. To quit: close the
+# window, or type Ctrl-A then X here.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE" || exit 1
 
 HEADLESS=0
 SOUND=0
+OFFLINE="${MILK_OFFLINE:-0}"
 SERIAL="mon:stdio"
 MONITOR=()
 say() { printf '%s\n' "$*" >&2; }
@@ -25,9 +28,10 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --headless) HEADLESS=1 ;;
     --sound) SOUND=1 ;;
+    --offline) OFFLINE=1 ;;
     --serial) SERIAL="${2:?--serial needs a value}"; shift ;;
     --monitor) MONITOR=(-monitor "${2:?--monitor needs a value}"); shift ;;
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) say "milkOS: unknown option $1 (try --help)"; exit 2 ;;
   esac
   shift
@@ -65,6 +69,11 @@ if [ "$HEADLESS" = 1 ]; then
 else
   DISPLAY_ARGS=(-device virtio-gpu-device -display cocoa)
 fi
+if [ "$OFFLINE" = 1 ]; then
+  NET_ARGS=(-netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0)
+else
+  NET_ARGS=(-netdev user,id=n0 -device virtio-net-device,netdev=n0 -fw_cfg "name=opt/milkos/net,string=internet=on")
+fi
 SOUND_ARGS=()
 [ "$SOUND" = 1 ] && SOUND_ARGS=(-audiodev coreaudio,id=snd0 -device virtio-sound-device,audiodev=snd0)
 
@@ -77,5 +86,5 @@ exec "$QEMU" -name "milkOS @VERSION@" -M virt "${ACCEL[@]}" -object rng-random,i
   -drive file=disks/milk.img,if=none,format=raw,id=hd1 -device virtio-blk-device,drive=hd1 \
   -fsdev local,id=fs0,path=share,security_model=mapped-xattr,readonly=on \
   -device virtio-9p-device,fsdev=fs0,mount_tag=mac -fw_cfg name=opt/milkos/share-rw,string=0 \
-  -netdev user,id=n0,restrict=on -device virtio-net-device,netdev=n0 \
+  "${NET_ARGS[@]}" \
   "${SOUND_ARGS[@]+"${SOUND_ARGS[@]}"}"

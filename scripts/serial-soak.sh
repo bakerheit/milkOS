@@ -82,7 +82,7 @@ for b in $(seq 1 "$BOOTS"); do
       sleep 1
     done
     sleep 60 # keep stdin open until we're killed
-  ) | MILK_MONITOR="$mon" MILK_SMP="$SMP" scripts/run.sh headless > "$log" 2>&1 &
+  ) | MILK_OFFLINE=1 MILK_MONITOR="$mon" MILK_SMP="$SMP" scripts/run.sh headless > "$log" 2>&1 &
   qpid=$!
   stage=""
   if ! wait_for 60 -F '[sched-test] PASS'; then

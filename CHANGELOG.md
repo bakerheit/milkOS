@@ -131,6 +131,30 @@
   are in `user/cmdkit` (host tests, smoke set); `scripts/net-disks-apps-test.sh` tests every
   subcommand in a VM.
 
+**Internet**
+- The internet is on for `scripts/run.sh` and the release `milkOS.command` (slirp without
+  `restrict=on`; `MILK_OFFLINE=1` or `--offline` for the old restricted network), and every
+  test stays offline: check-all puts a qemu wrapper first in each test's `PATH` that refuses
+  an `internet=on` boot, and fails the run if one is tried. The kernel is told in fw_cfg
+  `opt/milkos/net`; Settings > Network, `network status` and `/proc/net/internet` say
+  "Internet: on" or "off (offline mode)" (docs/networking.md, "Internet").
+- Real DNS when online: the DHCP server (slirp's 10.0.2.3), A and AAAA, CNAMEs, TCP for
+  truncated answers, a TTL cache. Offline keeps the `.test`-only policy. User space asks the
+  kernel (`MILK_RESOLVE`); `network lookup NAME` is new.
+- `milkweb`, a shared no_std crate (kernel and user space, host-tested): URLs, an HTTP/1.1
+  client over a small Transport trait (chunked, Content-Length, redirects with a loop guard
+  and a limit of 10, gzip/deflate with imgdec's inflate, `User-Agent: milkOS/0.1`, time and
+  size limits, an `https://` hook for TLS: until then "secure pages aren't supported yet"),
+  DNS messages and the resolver's logic, the Browser's HTML subset.
+- The Browser visits host names (offline: IP literals and localhost, as before), shows
+  where redirects ended, says what went wrong (no internet, not found, can't connect, secure
+  pages), searches DuckDuckGo's lite page for a bare word, and reads more of the web:
+  entities, script/style dropped, div/span/table/blockquote/hr, `<img alt>`, UTF-8 and
+  Latin-1. `network get` uses the same client (host names, redirects, gzip).
+- Tests: `scripts/milkweb-test.sh` (host) and `scripts/web-test.sh` (a VM against a DNS and
+  HTTP server on the Mac's 127.0.0.1; lookups, a redirect chain, a chunked gzip page, the
+  Browser by host name).
+
 **Memory**
 - A real heap for every program (`user/heapkit`, the global allocator in `rt::heap`). The old
   one was a bump allocator that only took back the most recent block, so long-running

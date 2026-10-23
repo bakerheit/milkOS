@@ -4,10 +4,11 @@
 //!   network [status] [LINK] [--keys]   links, addresses, counters, the names, Milk Drop
 //!   network connections [-t] [-u] [-l] [-4|-6]   sockets       network counters
 //!   network ping HOST                  network get URL [--save FILE]
+//!   network lookup NAME [-4|-6]        addresses of a host (the kernel's resolver)
 //!   network connect HOST PORT          network listen PORT
 //!   network name [--local] [NAME]      network hide | show     network help
 //!
-//! Reads /proc/net/* (kernel), uname (hostname) and /System/Settings/milk/drop (the .local
+//! Reads /proc/net/* (kernel; /proc/net/internet: is the internet on), uname (hostname) and /System/Settings/milk/drop (the .local
 //! name, visibility). `status`, `connections` and `counters` give msh a table when asked
 //! (MILK_TABLE=1, docs/shell.md). Exit 0 on success, 1 on a refused or failed change, 2 on
 //! bad usage. Parsing and words: user/cmdkit.
@@ -38,7 +39,8 @@ usage: network COMMAND ...    the network: links, connections, names and Milk Dr
   connections             open sockets: --tcp (-t) --udp (-u) --listening (-l) --ipv4 --ipv6
   counters                protocol counters (IP, ICMP, TCP, UDP, IPv6)
   ping HOST               echo requests: --count N (-c) --interval MS --size BYTES --timeout MS
-  get URL                 an http:// page to the screen, or --save FILE (--headers too)
+  get URL                 a web page to the screen, or --save FILE (--headers too)
+  lookup NAME             the addresses of a host name (DNS when the internet is on)
   connect HOST PORT       send what you type to HOST PORT and show what comes back (--udp)
   listen PORT             wait for one connection on PORT, then the same as connect (--udp)
   name [NAME]             show or set the hostname (root); --local: the .local (Milk Drop) name
@@ -46,8 +48,9 @@ usage: network COMMAND ...    the network: links, connections, names and Milk Dr
   show                    Milk Drop back on: visible on the VM link again (administrators)
   help                    this list
 
-HOST is an address (10.0.2.2, fe80::1%eth1), localhost, or NAME.local; --ipv4 (-4) and
---ipv6 (-6) pick a family. ^D on an empty line ends what connect and listen send. With no
+HOST is an address (10.0.2.2, fe80::1%eth1), localhost, NAME.local, or with the internet on
+any host name (offline, only .test names); --ipv4 (-4) and --ipv6 (-6) pick a family. URLs
+are http:// (redirects followed, gzip undone); https:// needs TLS, which isn't there yet. ^D on an empty line ends what connect and listen send. With no
 COMMAND, network shows the status.
 ";
 
@@ -112,6 +115,7 @@ fn main(args: &rt::Args) -> i32 {
             v.extend_from_slice(&FAMILY);
             v
         }
+        "lookup" => FAMILY.to_vec(),
         "connect" | "listen" => {
             let mut v = alloc::vec![flag("udp", Some('u'))];
             v.extend_from_slice(&FAMILY);
@@ -158,6 +162,8 @@ fn main(args: &rt::Args) -> i32 {
         ("ping", _) => usage("ping [--count N] [--interval MS] [--size BYTES] [--timeout MS] HOST"),
         ("get", [url]) => talk::get(&p, url, want),
         ("get", _) => usage("get URL [--save FILE] [--replace] [--headers]"),
+        ("lookup", [name]) => talk::lookup(name, want),
+        ("lookup", _) => usage("lookup NAME [--ipv4|--ipv6]"),
         ("connect", [host, port]) => talk::connect(host, port, p.has("udp"), want),
         ("connect", _) => usage("connect HOST PORT [--udp]"),
         ("listen", [port]) => talk::listen(port, p.has("udp"), want),
@@ -188,10 +194,12 @@ fn status(only: Option<&str>, keys: bool, table: bool) -> i32 {
     let dev = text("/proc/net/dev");
     let host = hostname();
     let local = ident::load().map(|id| id.name);
+    let inet = text("/proc/net/internet");
     let names = Names {
         hostname: &host,
         local: local.as_deref(),
         visible: ident::visible(),
+        internet: &inet,
     };
     if keys {
         print!("{}", kit::keys_text(&links, &names));

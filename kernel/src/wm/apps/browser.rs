@@ -1,20 +1,26 @@
-//! Browser: HTTP/1.0 GET over the kernel socket API (docs/networking.md) and a small HTML
-//! subset (h1-h3, p, a, ul/li, pre, b/strong, i/em, br, title) laid out in the milk style,
-//! with an address bar, back / forward / reload and clickable links.
+//! Browser: HTTP/1.1 GET through milkweb's client (redirects, chunked, gzip) over kernel
+//! sockets (`net::web`), and milkweb's HTML subset (headings, paragraphs, lists, quotes,
+//! tables as rows, pre, rules, links, bold / italic, `<img alt>`; entities; UTF-8 or Latin-1)
+//! laid out in the milk style, with an address bar, back / forward / reload and links.
 //!
-//! Network safety: it only ever connects to IP literals or `localhost` (127.0.0.1); any
-//! other host name is refused before a socket is made (the kernel resolver refuses them too).
-//! Fetches run on their own kernel thread so the window system never blocks on the network.
+//! Network policy (the boot's, `net::internet`): with the internet on it visits host names
+//! (looked up by `net::dns`), and a bare word in the address bar becomes a search on
+//! DuckDuckGo's lite page; offline (every test boot) it only visits IP literals and
+//! localhost, refused before a socket is made. `https://` says secure pages aren't supported
+//! yet (no TLS), before any lookup. Fetches run on their own kernel thread so the window
+//! system never blocks on the network.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use milkweb::html::{self, Block, BlockKind, Doc, Run};
+use milkweb::http::{self, Error, Failure, Options, Response};
+use milkweb::url::{self, Url};
+
 use crate::gfx::{Color, Rect};
-use crate::net::errno::{EALREADY, EINPROGRESS};
-use crate::net::socket::{self, POLLIN, POLLOUT, SockType};
-use crate::net::wire::{Ipv4, SockAddr};
+use crate::net::{internet, web::KernelNet};
 use crate::sched;
 use crate::sync::SpinLock;
 use crate::sysfont::{Font, Weight};
@@ -35,478 +41,37 @@ pub fn open_url(url: &str) {
 }
 const BAR_H: i32 = 44;
 const PAD: i32 = 24;
-const TIMEOUT_NS: u64 = 5_000_000_000;
-const MAX_BODY: usize = 512 * 1024;
+/// The most a page may be, as received and once uncompressed.
+const MAX_BODY: usize = 2 * 1024 * 1024;
 
-// ---- URLs ---------------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Url {
-    pub host: String,
-    pub ip: Ipv4,
-    pub port: u16,
-    pub path: String,
-}
-
-impl Url {
-    pub fn to_text(&self) -> String {
-        if self.port == 80 {
-            format!("http://{}{}", self.host, self.path)
-        } else {
-            format!("http://{}:{}{}", self.host, self.port, self.path)
-        }
+fn options() -> Options {
+    Options {
+        max_body: MAX_BODY,
+        timeout_ms: 30_000,
+        connect_timeout_ms: 8_000,
+        ..Options::default()
     }
 }
 
-fn parse_ip(s: &str) -> Option<Ipv4> {
-    let mut o = [0u8; 4];
-    let mut n = 0;
-    for part in s.split('.') {
-        if n == 4 || part.is_empty() || part.len() > 3 {
-            return None;
+/// GET `url`, following redirects. Thread context (sleeps on the socket).
+pub fn fetch(url: &Url) -> Result<Response, Failure> {
+    http::get(&mut KernelNet::new(), url, &options())
+}
+
+/// What to say under an error's heading.
+fn hint(e: &Error) -> &'static str {
+    match e {
+        Error::Offline(_) => {
+            "The internet is off: milkOS was started offline (MILK_OFFLINE=1, or by a test). Numeric addresses like http://10.0.2.2/ still work."
         }
-        o[n] = part.parse().ok()?;
-        n += 1;
-    }
-    (n == 4).then_some(Ipv4(o))
-}
-
-/// Parse `http://host[:port]/path` (the scheme is optional). Only IP literals and
-/// `localhost` are accepted: that is the browser's whole network policy.
-pub fn parse_url(s: &str) -> Result<Url, String> {
-    let s = s.trim();
-    let rest = if let Some(r) = s.strip_prefix("http://") {
-        r
-    } else if s.starts_with("https://") {
-        return Err(String::from("https isn't supported (no TLS in milkOS yet)"));
-    } else if s.contains("://") {
-        return Err(String::from("only http:// addresses work here"));
-    } else {
-        s
-    };
-    let (hostport, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (h, p.parse::<u16>().map_err(|_| format!("bad port '{p}'"))?),
-        None => (hostport, 80),
-    };
-    let ip = if host.eq_ignore_ascii_case("localhost") {
-        Ipv4([127, 0, 0, 1])
-    } else {
-        parse_ip(host).ok_or_else(|| {
-            format!("'{host}' is a name. This browser only visits IP addresses and localhost.")
-        })?
-    };
-    Ok(Url {
-        host: String::from(host),
-        ip,
-        port,
-        path: String::from(if path.is_empty() { "/" } else { path }),
-    })
-}
-
-/// Resolve a link against the page it is on.
-fn join(base: &Url, href: &str) -> Result<Url, String> {
-    let href = href.trim();
-    if href.starts_with("http://") || href.contains("://") {
-        return parse_url(href);
-    }
-    let mut u = base.clone();
-    let href = href.split('#').next().unwrap_or("");
-    if href.is_empty() {
-        return Ok(u);
-    }
-    if href.starts_with('/') {
-        u.path = String::from(href);
-    } else {
-        let dir = match base.path.rfind('/') {
-            Some(i) => &base.path[..=i],
-            None => "/",
-        };
-        u.path = format!("{dir}{href}");
-    }
-    Ok(u)
-}
-
-// ---- HTTP -----------------------------------------------------------------------------------
-
-pub struct Response {
-    pub status: u16,
-    pub content_type: String,
-    pub body: Vec<u8>,
-    pub url: Url,
-}
-
-/// Status, headers (lower-case names), body.
-type Raw = (u16, Vec<(String, String)>, Vec<u8>);
-
-fn get_once(url: &Url) -> Result<Raw, String> {
-    let s = socket::socket(SockType::Stream).map_err(|e| format!("socket: {e}"))?;
-    let close = |s| {
-        let _ = socket::close(s);
-    };
-    let addr = SockAddr::new(url.ip, url.port);
-    loop {
-        match socket::connect(s, addr) {
-            Ok(()) => break,
-            Err(e) if e == EINPROGRESS || e == EALREADY => {
-                if socket::wait(s, POLLOUT, TIMEOUT_NS) == 0 {
-                    close(s);
-                    return Err(format!("{}: timed out connecting", addr));
-                }
-            }
-            Err(e) => {
-                close(s);
-                return Err(format!(
-                    "can't connect to {addr}: {}",
-                    crate::net::errno::name(e)
-                ));
-            }
+        Error::NoDns(_) => {
+            "Is the network up? Settings > Network shows the internet and DNS status."
         }
-    }
-    let req = format!(
-        "GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: milkOS-Browser/1.0\r\nAccept: text/html, text/plain\r\nConnection: close\r\n\r\n",
-        url.path, url.host
-    );
-    let mut sent = 0;
-    let bytes = req.as_bytes();
-    while sent < bytes.len() {
-        match socket::send(s, &bytes[sent..]) {
-            Ok(n) => sent += n,
-            Err(e) if e == crate::net::errno::EAGAIN => {
-                socket::wait(s, POLLOUT, TIMEOUT_NS);
-            }
-            Err(e) => {
-                close(s);
-                return Err(format!("send: {}", crate::net::errno::name(e)));
-            }
-        }
-    }
-    let mut data = Vec::new();
-    let mut buf = alloc::vec![0u8; 4096];
-    loop {
-        match socket::recv(s, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                data.extend_from_slice(&buf[..n]);
-                if data.len() > MAX_BODY || complete(&data) {
-                    break;
-                }
-            }
-            Err(e) if e == crate::net::errno::EAGAIN => {
-                if socket::wait(s, POLLIN, TIMEOUT_NS) == 0 {
-                    break;
-                }
-            }
-            Err(e) => {
-                close(s);
-                return Err(format!("recv: {}", crate::net::errno::name(e)));
-            }
-        }
-    }
-    close(s);
-    let split = data
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| String::from("not an HTTP response"))?;
-    let head = String::from_utf8_lossy(&data[..split]).into_owned();
-    let body = data[split + 4..].to_vec();
-    let mut lines = head.lines();
-    let status_line = lines.next().unwrap_or("");
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| format!("bad status line '{status_line}'"))?;
-    let headers = lines
-        .filter_map(|l| l.split_once(':'))
-        .map(|(k, v)| (k.trim().to_ascii_lowercase(), String::from(v.trim())))
-        .collect();
-    Ok((status, headers, body))
-}
-
-/// Have we got the whole response? (Headers plus Content-Length bytes, when the server says
-/// how long it is; otherwise we read until the server closes.)
-fn complete(data: &[u8]) -> bool {
-    let Some(split) = data.windows(4).position(|w| w == b"\r\n\r\n") else {
-        return false;
-    };
-    let head = String::from_utf8_lossy(&data[..split]).to_ascii_lowercase();
-    head.lines()
-        .find_map(|l| l.strip_prefix("content-length:"))
-        .and_then(|v| v.trim().parse::<usize>().ok())
-        .is_some_and(|len| data.len() >= split + 4 + len)
-}
-
-/// GET `url`, following up to 3 redirects. Thread context (sleeps on the socket).
-pub fn fetch(url: &Url) -> Result<Response, String> {
-    let mut url = url.clone();
-    for _ in 0..4 {
-        let (status, headers, body) = get_once(&url)?;
-        let header = |k: &str| headers.iter().find(|(h, _)| h == k).map(|(_, v)| v.clone());
-        if (300..400).contains(&status)
-            && let Some(loc) = header("location")
-        {
-            url = join(&url, &loc)?;
-            continue;
-        }
-        return Ok(Response {
-            status,
-            content_type: header("content-type").unwrap_or_default(),
-            body,
-            url,
-        });
-    }
-    Err(String::from("too many redirects"))
-}
-
-// ---- HTML -----------------------------------------------------------------------------------
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum BlockKind {
-    H1,
-    H2,
-    H3,
-    P,
-    Li,
-    Pre,
-}
-
-#[derive(Clone, Debug)]
-struct Run {
-    text: String,
-    bold: bool,
-    italic: bool,
-    link: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-struct Block {
-    kind: BlockKind,
-    runs: Vec<Run>,
-}
-
-struct Doc {
-    title: String,
-    blocks: Vec<Block>,
-}
-
-fn entity(name: &str) -> Option<&'static str> {
-    Some(match name {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" | "#39" => "'",
-        "nbsp" => " ",
-        "middot" => "\u{b7}",
-        "copy" => "\u{a9}",
-        "mdash" | "ndash" => "-",
-        "hellip" => "...",
-        _ => return None,
-    })
-}
-
-fn decode(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 1..];
-        match after.find(';').filter(|&j| j <= 8) {
-            Some(j) => {
-                let name = &after[..j];
-                if let Some(r) = entity(name) {
-                    out.push_str(r);
-                } else if let Some(num) = name.strip_prefix('#') {
-                    let v = match num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
-                        Some(h) => u32::from_str_radix(h, 16).ok(),
-                        None => num.parse().ok(),
-                    };
-                    let c = v.and_then(char::from_u32).unwrap_or('?');
-                    out.push(match c as u32 {
-                        0x2013 | 0x2014 => '-',
-                        0x2018 | 0x2019 => '\'',
-                        0x201c | 0x201d => '"',
-                        _ => c,
-                    });
-                } else {
-                    out.push('&');
-                    out.push_str(name);
-                    out.push(';');
-                }
-                rest = &after[j + 1..];
-            }
-            None => {
-                out.push('&');
-                rest = after;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn attr(tag: &str, name: &str) -> Option<String> {
-    let lower = tag.to_ascii_lowercase();
-    let i = lower.find(&format!("{name}="))?;
-    let v = &tag[i + name.len() + 1..];
-    let v = v.trim_start();
-    let val = if let Some(r) = v.strip_prefix('"') {
-        r.split('"').next()?
-    } else if let Some(r) = v.strip_prefix('\'') {
-        r.split('\'').next()?
-    } else {
-        v.split(|c: char| c.is_whitespace() || c == '>').next()?
-    };
-    Some(decode(val))
-}
-
-/// Parse the subset. Unknown tags are ignored (their text is kept); script and style are
-/// dropped; whitespace collapses except inside pre.
-fn parse_html(src: &str) -> Doc {
-    let mut doc = Doc {
-        title: String::new(),
-        blocks: Vec::new(),
-    };
-    let mut cur = Block {
-        kind: BlockKind::P,
-        runs: Vec::new(),
-    };
-    let (mut bold, mut italic, mut pre, mut in_title, mut skip) = (0, 0, false, false, false);
-    let mut link: Option<String> = None;
-    let flush = |doc: &mut Doc, cur: &mut Block, next: BlockKind| {
-        let has_text = cur.runs.iter().any(|r| !r.text.trim().is_empty());
-        if has_text {
-            doc.blocks.push(core::mem::replace(
-                cur,
-                Block {
-                    kind: next,
-                    runs: Vec::new(),
-                },
-            ));
-        } else {
-            cur.runs.clear();
-            cur.kind = next;
-        }
-    };
-    let mut rest = src;
-    while !rest.is_empty() {
-        if let Some(stripped) = rest.strip_prefix("<!--") {
-            rest = stripped.find("-->").map_or("", |i| &stripped[i + 3..]);
-            continue;
-        }
-        if rest.starts_with('<') {
-            let end = rest.find('>').unwrap_or(rest.len() - 1);
-            let tag = &rest[1..end];
-            rest = &rest[end + 1..];
-            let closing = tag.starts_with('/');
-            let name: String = tag
-                .trim_start_matches('/')
-                .split(|c: char| c.is_whitespace() || c == '/')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            match (name.as_str(), closing) {
-                ("script" | "style", false) => skip = true,
-                ("script" | "style", true) => skip = false,
-                ("title", false) => in_title = true,
-                ("title", true) => in_title = false,
-                ("h1", false) => flush(&mut doc, &mut cur, BlockKind::H1),
-                ("h2", false) => flush(&mut doc, &mut cur, BlockKind::H2),
-                ("h3" | "h4" | "h5" | "h6", false) => flush(&mut doc, &mut cur, BlockKind::H3),
-                ("li", false) => flush(&mut doc, &mut cur, BlockKind::Li),
-                ("pre", false) => {
-                    flush(&mut doc, &mut cur, BlockKind::Pre);
-                    pre = true;
-                }
-                ("pre", true) => {
-                    pre = false;
-                    flush(&mut doc, &mut cur, BlockKind::P);
-                }
-                (
-                    "p" | "div" | "ul" | "ol" | "body" | "section" | "article" | "table" | "tr",
-                    _,
-                )
-                | ("h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li", true) => {
-                    flush(&mut doc, &mut cur, BlockKind::P)
-                }
-                ("br", _) => cur.runs.push(Run {
-                    text: String::from("\n"),
-                    bold: false,
-                    italic: false,
-                    link: None,
-                }),
-                ("b" | "strong", false) => bold += 1,
-                ("b" | "strong", true) => bold = (bold - 1).max(0),
-                ("i" | "em", false) => italic += 1,
-                ("i" | "em", true) => italic = (italic - 1).max(0),
-                ("a", false) => link = attr(tag, "href"),
-                ("a", true) => link = None,
-                _ => {}
-            }
-            continue;
-        }
-        let end = rest.find('<').unwrap_or(rest.len());
-        let raw = &rest[..end];
-        rest = &rest[end..];
-        if skip {
-            continue;
-        }
-        let text = decode(raw);
-        if in_title {
-            doc.title.push_str(text.trim());
-            continue;
-        }
-        let text = if pre {
-            text
-        } else {
-            let mut t = String::new();
-            let mut space = false;
-            for c in text.chars() {
-                if c.is_whitespace() {
-                    space = true;
-                } else {
-                    if space {
-                        t.push(' ');
-                        space = false;
-                    }
-                    t.push(c);
-                }
-            }
-            if space {
-                t.push(' ');
-            }
-            t
-        };
-        if text.is_empty() {
-            continue;
-        }
-        cur.runs.push(Run {
-            text,
-            bold: bold > 0,
-            italic: italic > 0,
-            link: link.clone(),
-        });
-    }
-    flush(&mut doc, &mut cur, BlockKind::P);
-    doc
-}
-
-fn plain_doc(text: &str) -> Doc {
-    Doc {
-        title: String::new(),
-        blocks: alloc::vec![Block {
-            kind: BlockKind::Pre,
-            runs: alloc::vec![Run {
-                text: String::from(text),
-                bold: false,
-                italic: false,
-                link: None,
-            }],
-        }],
+        Error::NotFound(_) => "Check the spelling of the address.",
+        Error::Connect(_) => "The server may be down, or not taking connections on that port.",
+        Error::SecureUnsupported => "If the site also has an http:// address, that one will open.",
+        Error::Timeout => "Try again (reload), or another site.",
+        _ => "",
     }
 }
 
@@ -520,7 +85,7 @@ fn message_doc(title: &str, lines: &[&str]) -> Doc {
             link: None,
         }],
     }];
-    for l in lines {
+    for l in lines.iter().filter(|l| !l.is_empty()) {
         blocks.push(Block {
             kind: BlockKind::P,
             runs: alloc::vec![Run {
@@ -541,7 +106,7 @@ fn message_doc(title: &str, lines: &[&str]) -> Doc {
 
 enum Load {
     Idle,
-    Loading(Arc<SpinLock<Option<Result<Response, String>>>>),
+    Loading(Arc<SpinLock<Option<Result<Response, Failure>>>>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -593,11 +158,32 @@ impl Browser {
     /// Go to `text`; `push`: a new history entry (not back / forward / reload).
     fn navigate(&mut self, text: &str, push: bool) {
         self.editing = false;
-        let url = match parse_url(text) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let online = internet::online();
+        let target = if url::looks_like_search(text) {
+            if !online {
+                self.address = String::from(text);
+                self.show(message_doc(
+                    "Searching needs the internet",
+                    &[
+                        "milkOS is offline (MILK_OFFLINE=1, or started by a test), so a word can't be searched for.",
+                        "Type an address instead, like http://10.0.2.2:8000/.",
+                    ],
+                ));
+                return;
+            }
+            url::search_url(text)
+        } else {
+            String::from(text)
+        };
+        let url = match Url::parse(&target) {
             Ok(u) => u,
             Err(e) => {
                 self.address = String::from(text);
-                self.show(message_doc("Can't go there", &[&e]));
+                self.show(message_doc("Can't go there", &[&format!("{e}")]));
                 return;
             }
         };
@@ -607,6 +193,14 @@ impl Browser {
                 .truncate(self.pos + usize::from(!self.history.is_empty()));
             self.history.push(self.address.clone());
             self.pos = self.history.len() - 1;
+        }
+        // Offline, a name is refused here, before any thread or socket.
+        if !online && !url.is_ip_literal() && url.host != "localhost" {
+            let e = Error::Offline(url.host.clone());
+            self.url = Some(url);
+            let msg = format!("{e}");
+            self.show(message_doc(e.title(), &[&msg, hint(&e)]));
+            return;
         }
         let slot = Arc::new(SpinLock::new(None));
         let out = slot.clone();
@@ -633,31 +227,48 @@ impl Browser {
         self.scroll = 0;
     }
 
-    fn finish(&mut self, r: Result<Response, String>) {
+    /// Show where a fetch ended up (after redirects) in the address bar and the history.
+    fn moved_to(&mut self, u: &Url) {
+        let shown = u.to_text();
+        if shown != self.address {
+            self.address = shown.clone();
+            if let Some(h) = self.history.get_mut(self.pos) {
+                *h = shown;
+            }
+        }
+        self.url = Some(u.clone());
+    }
+
+    fn finish(&mut self, r: Result<Response, Failure>) {
         self.load = Load::Idle;
         match r {
-            Err(e) => self.show(message_doc("Couldn't load the page", &[&e])),
+            Err(f) => {
+                self.moved_to(&f.url);
+                let msg = format!("{}", f.error);
+                crate::kprintln!("[browser] {}: {msg}", f.url);
+                self.show(message_doc(f.error.title(), &[&msg, hint(&f.error)]));
+            }
             Ok(resp) => {
-                // A redirect may have moved us.
-                let shown = resp.url.to_text();
-                if shown != self.address {
-                    self.address = shown.clone();
-                    if let Some(h) = self.history.get_mut(self.pos) {
-                        *h = shown;
-                    }
-                }
-                self.url = Some(resp.url.clone());
-                let text = String::from_utf8_lossy(&resp.body).into_owned();
-                let html = resp.content_type.contains("html")
-                    || (resp.content_type.is_empty() && text.trim_start().starts_with('<'));
-                let mut doc = if html {
-                    parse_html(&text)
+                self.moved_to(&resp.url);
+                let ct = resp.content_type();
+                let text = html::decode_bytes(&resp.body, ct);
+                let mut doc = if html::is_html(ct, &text) {
+                    html::parse(&text)
                 } else {
-                    plain_doc(&text)
+                    html::plain(&text)
                 };
                 if resp.status >= 400 && doc.title.is_empty() {
-                    doc.title = format!("{} error", resp.status);
+                    doc.title = format!("{} {}", resp.status, resp.reason);
                 }
+                crate::kprintln!(
+                    "[browser] {}: {} {}, {} bytes, '{}', {} redirects",
+                    resp.url,
+                    resp.status,
+                    resp.reason,
+                    resp.body.len(),
+                    doc.title,
+                    resp.redirects.len()
+                );
                 self.show(doc);
             }
         }
@@ -762,8 +373,18 @@ impl Browser {
                 BlockKind::P => (1, false, 12, ESPRESSO, 0),
                 BlockKind::Li => (1, false, 6, ESPRESSO, 18),
                 BlockKind::Pre => (1, false, 12, ESPRESSO, 12),
+                BlockKind::Quote => (1, false, 12, COCOA, 18),
+                BlockKind::Rule => (1, false, 12, SAND, 0),
             };
             let line_h = 16 * scale + 4;
+            if b.kind == BlockKind::Rule {
+                if let Some(p) = p.as_deref_mut() {
+                    p.fill(x0, y + 4, maxw, 1, SAND);
+                }
+                y += 9 + gap;
+                continue;
+            }
+            let y_start = y;
             if b.kind == BlockKind::Li
                 && let Some(p) = p.as_deref_mut()
             {
@@ -846,6 +467,11 @@ impl Browser {
                 }
                 x += ww;
             }
+            if b.kind == BlockKind::Quote
+                && let Some(p) = p.as_deref_mut()
+            {
+                p.fill(x0 + 4, y_start, 3, y - y_start + line_h, SAND);
+            }
             y += line_h + gap;
         }
         y + self.scroll
@@ -891,7 +517,10 @@ impl WindowContents for Browser {
                 if let Some((_, href)) = self.links.iter().find(|(r, _)| hit(r, e.x, e.y)) {
                     let href = href.clone();
                     let target = match &self.url {
-                        Some(base) => join(base, &href).map(|u| u.to_text()),
+                        Some(base) => base
+                            .join(&href)
+                            .map(|u| u.to_text())
+                            .map_err(|e| format!("{e}")),
                         None => Ok(href.clone()),
                     };
                     match target {

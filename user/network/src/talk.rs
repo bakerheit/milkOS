@@ -1,6 +1,6 @@
 //! The commands that talk to another machine: `ping` (ICMP echo through a Linux-style ping
-//! socket), `get` (HTTP/1.0 GET), `connect` and `listen` (stdin to a socket, the socket to
-//! stdout).
+//! socket), `get` (HTTP/1.1 GET through rt::web), `lookup` (the kernel's resolver),
+//! `connect` and `listen` (stdin to a socket, the socket to stdout).
 
 use alloc::format;
 use alloc::string::String;
@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use cmdkit::args::{Parsed, number};
 use cmdkit::net as kit;
 use rt::net::{self, POLLERR, POLLHUP, POLLIN, PollFd, SockAddr};
-use rt::{eprintln, println, sys};
+use rt::{eprintln, print, println, sys, web};
 
 // ---- ping -----------------------------------------------------------------------------------
 
@@ -160,15 +160,17 @@ pub fn ping(p: &Parsed, host: &str, want: net::Want) -> i32 {
     if got > 0 { 0 } else { 1 }
 }
 
-// ---- get ------------------------------------------------------------------------------------
+// ---- get, lookup ----------------------------------------------------------------------------
 
 /// `network get [--headers] [--save FILE [--replace]] URL`: the body to stdout (or FILE), a
 /// summary line ("network get: 200 OK, 1234 bytes from 10.0.2.2:80 in 5 ms") to stderr.
+/// HTTP/1.1 through rt::web: redirects followed (each one said on stderr), gzip / deflate
+/// undone; https:// is refused until there is TLS.
 pub fn get(p: &Parsed, url: &str, want: net::Want) -> i32 {
-    let (hostport, path) = match kit::split_url(url) {
-        Ok(v) => v,
+    let u = match web::Url::parse(url) {
+        Ok(u) => u,
         Err(e) => {
-            eprintln!("network get: {e}");
+            eprintln!("network get: {url}: {e}");
             return 2;
         }
     };
@@ -180,53 +182,35 @@ pub fn get(p: &Parsed, url: &str, want: net::Want) -> i32 {
         eprintln!("network get: {f} already exists (add --replace to overwrite it)");
         return 1;
     }
-    let addrs = match net::lookup_all(hostport, 80, want) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("network get: {e}");
-            return 2;
-        }
-    };
     let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
-    let (fd, addr) = match net::connect_any(&addrs, net::SOCK_STREAM) {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("network get: {e}");
-            return 1;
-        }
+    let mut n = web::RtNet::new(want);
+    let o = web::Options {
+        user_agent: alloc::format!("{} (network get)", web::USER_AGENT),
+        accept: String::from("*/*"),
+        ..web::Options::default()
     };
-    let req = format!(
-        "GET {path} HTTP/1.0\r\nHost: {hostport}\r\nUser-Agent: milkOS-network\r\nConnection: close\r\n\r\n"
-    );
-    if let Err(e) = net::send(fd, req.as_bytes()) {
-        eprintln!("network get: couldn't send the request: {e}");
-        return 1;
-    }
-    let mut resp = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        match net::recv(fd, &mut buf) {
-            Ok(0) => break,
-            Ok(n) => resp.extend_from_slice(&buf[..n]),
-            Err(e) => {
-                eprintln!("network get: the answer broke off: {e}");
-                return 1;
+    let r = match web::get(&mut n, &u, &o) {
+        Ok(r) => r,
+        Err(f) => {
+            for r in &f.redirects {
+                eprintln!("network get: redirected to {r}");
             }
+            eprintln!("network get: {}", f.error);
+            return match f.error {
+                web::Error::Url(_) => 2,
+                _ => 1,
+            };
         }
-    }
-    let _ = sys::close(fd);
-    let ms = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000;
-    let split = resp.windows(4).position(|w| w == b"\r\n\r\n");
-    let (head, body) = match split {
-        Some(k) => (&resp[..k], &resp[k + 4..]),
-        None => (&resp[..], &resp[resp.len()..]),
     };
-    let (code, reason) = kit::status_line(head);
+    let ms = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000;
+    for r in &r.redirects {
+        eprintln!("network get: redirected to {r}");
+    }
     if p.has("headers") {
-        let _ = sys::write_all(1, head);
-        println!();
+        let _ = sys::write_all(1, r.head_text().as_bytes());
         println!();
     }
+    let body = &r.body;
     match save {
         Some(f) => {
             let w = sys::open_mode(
@@ -251,12 +235,45 @@ pub fn get(p: &Parsed, url: &str, want: net::Want) -> i32 {
             }
         }
     }
+    let from = n
+        .peer
+        .map(|a| format!("{a}"))
+        .unwrap_or_else(|| r.url.host_port());
     eprintln!(
-        "network get: {code} {reason}, {} bytes from {addr} in {ms} ms{}",
+        "network get: {} {}, {} bytes{} from {from} in {ms} ms{}",
+        r.status,
+        r.reason,
         body.len(),
+        r.encoding
+            .map(|e| format!(" ({e}, {} on the wire)", r.wire_bytes))
+            .unwrap_or_default(),
         save.map(|f| format!(", saved to {f}")).unwrap_or_default()
     );
-    if code.starts_with('2') { 0 } else { 1 }
+    if (200..300).contains(&r.status) { 0 } else { 1 }
+}
+
+/// `network lookup NAME [-4|-6]`: every address, IPv4 first (the kernel's resolver: DNS
+/// with the internet on; offline only numeric addresses, localhost, NAME.local and .test).
+pub fn lookup(name: &str, want: net::Want) -> i32 {
+    let t0 = sys::clock_ns(sys::CLOCK_MONOTONIC);
+    match net::resolve_all(name, want) {
+        Ok(v) => {
+            let ms = (sys::clock_ns(sys::CLOCK_MONOTONIC) - t0) / 1_000_000;
+            let text: Vec<String> = v.iter().map(|a| format!("{}", a.ip)).collect();
+            let six: Vec<bool> = v.iter().map(|a| a.ip.is_v6()).collect();
+            print!("{}", kit::lookup_text(name, &text, &six));
+            eprintln!(
+                "network lookup: {} address{} in {ms} ms",
+                v.len(),
+                if v.len() == 1 { "" } else { "es" }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("network lookup: {e}");
+            1
+        }
+    }
 }
 
 // ---- connect, listen ------------------------------------------------------------------------

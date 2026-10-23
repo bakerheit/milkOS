@@ -237,6 +237,8 @@ pub(crate) struct BoundData {
 #[derive(Default)]
 pub(crate) struct WeakMapData {
     ents: Vec<(ObjId, Val)>,
+    /// A WeakSet (the values are unused).
+    pub is_set: bool,
 }
 
 impl WeakMapData {
@@ -287,6 +289,25 @@ pub(crate) enum ObjKind {
     WeakMap(Box<WeakMapData>),
     Arguments,
     Error(Box<crate::errors::ErrInfo>),
+    Closure(Box<crate::interp::Closure>),
+    Env(Box<crate::interp::EnvData>),
+    /// A generator, async function or async generator: its suspended frame.
+    Coroutine(Box<crate::interp::CoData>),
+    ArrayIter(Box<crate::interp::ArrayIterData>),
+    ForIn(Box<crate::interp::ForInData>),
+    Promise(Box<crate::builtins::promise::PromiseData>),
+    Reaction(Box<crate::builtins::promise::ReactionData>),
+    Map(Box<crate::builtins::map::MapData>),
+    Set(Box<crate::builtins::map::MapData>),
+    /// A Map/Set iterator.
+    MapIter(Box<crate::builtins::map::MapIterData>),
+    RegExp(Box<crate::regexp::RegExpData>),
+    /// A string iterator (by code points).
+    StrIter(Box<crate::builtins::string::StrIterData>),
+    /// A matchAll iterator.
+    RegExpStrIter(Box<crate::builtins::regexp::MatchAllData>),
+    /// %AsyncFromSyncIteratorPrototype% objects: the sync iterator and its next method.
+    AsyncFromSync(Val, Val),
 }
 
 impl Obj {
@@ -313,10 +334,21 @@ impl Obj {
             ObjKind::Native(n) => 64 + n.slots.len() * 16,
             ObjKind::Bound(b) => 48 + b.args.len() * 16,
             ObjKind::WeakMap(m) => 32 + m.ents.capacity() * 24,
+            ObjKind::Closure(c) => 64 + c.field_keys.len() * 16,
+            ObjKind::Env(e) => 32 + e.slots.capacity() * 16,
+            ObjKind::Coroutine(c) => c.bytes(),
+            ObjKind::ArrayIter(_) => 32,
+            ObjKind::ForIn(f) => 48 + f.keys.capacity() * 16,
+            ObjKind::Promise(p) => 64 + (p.fulfill.len() + p.reject.len()) * 16,
+            ObjKind::Reaction(_) => 64,
+            ObjKind::Map(m) | ObjKind::Set(m) => m.bytes(),
+            ObjKind::RegExp(r) => r.bytes(),
+            ObjKind::StrIter(_) | ObjKind::RegExpStrIter(_) | ObjKind::MapIter(_) => 32,
+            ObjKind::Error(e) => 64 + e.frames.len() + e.file.len(),
             _ => 0,
         }
     }
-    pub fn trace(&self, t: &mut Tracer, _epoch: u32) {
+    pub fn trace(&self, t: &mut Tracer, epoch: u32) {
         t.opt_obj(self.proto);
         for (k, p) in self.props.iter() {
             if let PropKey::Str(s) = k {
@@ -348,13 +380,45 @@ impl Obj {
                 t.val(*s);
             }
             ObjKind::StrBox(s) => t.str(*s),
+            ObjKind::Closure(c) => c.trace(t, epoch),
+            ObjKind::Env(e) => {
+                t.opt_obj(e.parent);
+                for v in &e.slots {
+                    t.val(*v);
+                }
+            }
+            ObjKind::Coroutine(c) => c.trace(t, epoch),
+            ObjKind::ArrayIter(a) => t.val(a.obj),
+            ObjKind::ForIn(f) => {
+                t.val(f.obj);
+                for k in &f.keys {
+                    t.val(*k);
+                }
+            }
+            ObjKind::Promise(p) => p.trace(t),
+            ObjKind::Reaction(r) => r.trace(t),
+            ObjKind::Map(m) | ObjKind::Set(m) => m.trace(t),
+            ObjKind::MapIter(m) => t.obj(m.coll),
+            ObjKind::RegExp(r) => r.trace(t),
+            ObjKind::StrIter(s) => t.str(s.s),
+            ObjKind::RegExpStrIter(m) => {
+                t.val(m.re);
+                t.str(m.s);
+            }
+            ObjKind::AsyncFromSync(a, b) => {
+                t.val(*a);
+                t.val(*b);
+            }
             // WeakMap values are traced as ephemerons by the collector.
             _ => {}
         }
     }
     #[inline]
     pub fn is_callable(&self) -> bool {
-        matches!(&self.kind, ObjKind::Native(_) | ObjKind::Bound(_))
+        matches!(
+            &self.kind,
+            ObjKind::Native(_) | ObjKind::Bound(_) | ObjKind::Closure(_)
+        )
     }
 }
 
@@ -496,8 +560,17 @@ impl Realm {
             return;
         }
         self.om(id).flags &= !(LAZY_FN | LAZY_PROTO);
+        let mut gen_proto = false;
         let (name, arity) = match &self.o(id).kind {
             ObjKind::Native(n) => (n.name, n.arity),
+            ObjKind::Closure(c) => {
+                gen_proto = c.code.is_generator;
+                let n = match c.code.name {
+                    Some(s) => Val::Str(s),
+                    None => Val::Str(self.nstr(N::empty)),
+                };
+                (n, c.code.length)
+            }
             _ => return,
         };
         let lk = self.key(N::length);
@@ -512,7 +585,24 @@ impl Realm {
             },
         );
         front.insert(nk, Prop { v: name, f: C });
-        if flags & LAZY_PROTO != 0 {
+        if flags & LAZY_PROTO != 0 && gen_proto {
+            // A generator function's prototype: inherits %GeneratorPrototype%, no constructor.
+            let is_async = matches!(&self.o(id).kind, ObjKind::Closure(c) if c.code.is_async);
+            let gp = if is_async {
+                self.intr.async_generator_proto
+            } else {
+                self.intr.generator_proto
+            };
+            let proto = self.alloc(Some(gp), ObjKind::Ordinary);
+            let pk = self.key(N::prototype);
+            front.insert(
+                pk,
+                Prop {
+                    v: Val::Obj(proto),
+                    f: W,
+                },
+            );
+        } else if flags & LAZY_PROTO != 0 {
             let op = self.intr.object_proto;
             let proto = self.alloc(Some(op), ObjKind::Ordinary);
             let ck = self.key(N::constructor);
@@ -1143,7 +1233,10 @@ impl Realm {
         {
             let obj = self.o(id);
             match &obj.kind {
-                ObjKind::Ordinary | ObjKind::Arguments | ObjKind::Native(_)
+                ObjKind::Ordinary
+                | ObjKind::Arguments
+                | ObjKind::Native(_)
+                | ObjKind::Closure(_)
                     if obj.flags & LAZY_FN == 0 =>
                 {
                     if let Some(pos) = obj.props.find(k) {

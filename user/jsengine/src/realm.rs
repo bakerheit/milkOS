@@ -52,8 +52,8 @@ intrinsics! {
     async_generator_function_proto, async_from_sync_iterator_proto, promise_proto,
     regexp_proto, date_proto, map_proto, set_proto, weakmap_proto, weakset_proto,
     object_ctor, function_ctor, array_ctor, promise_ctor, error_ctor, regexp_ctor,
-    array_values, array_for_each, throw_type_error, eval_fn, promise_then,
-    generator_function_ctor, async_function_ctor,
+        array_values, array_for_each, throw_type_error, eval_fn, promise_then,
+    generator_function_ctor, async_function_ctor, array_iter_next, regexp_exec,
 }
 
 pub(crate) struct ClassEntry {
@@ -117,6 +117,11 @@ pub struct Realm {
     pub(crate) intr: Intrinsics,
     pub(crate) sym: SymTable,
     pub(crate) global: ObjId,
+    /// Script-level let/const/class bindings (shared by every script): an object whose
+    /// properties are the bindings (Empty = not initialized yet, non-writable = const).
+    pub(crate) global_lex: ObjId,
+    /// Arrays being joined (Array.prototype.join cycles join as "").
+    pub(crate) join_stack: Vec<ObjId>,
     /// Single-unit strings 0..256, made once.
     pub(crate) char_cache: Vec<StrId>,
     pub(crate) temps: Vec<Val>,
@@ -146,6 +151,8 @@ pub struct Realm {
     pub(crate) sym_registry: Vec<(StrId, SymId)>,
     pub(crate) dead_hosts: Vec<(u32, u64)>,
     pub(crate) vm: crate::interp::VmState,
+    /// The native stack guard of the current outermost entry.
+    pub(crate) stack: crate::stack::StackGuard,
 }
 
 impl Realm {
@@ -179,6 +186,8 @@ impl Realm {
             intr: Intrinsics::placeholder(),
             sym,
             global: ObjId { idx: 0, g: 0 },
+            global_lex: ObjId { idx: 0, g: 0 },
+            join_stack: Vec::new(),
             char_cache,
             temps: Vec::new(),
             pins: Vec::new(),
@@ -205,6 +214,7 @@ impl Realm {
             sym_registry: Vec::new(),
             dead_hosts: Vec::new(),
             vm: crate::interp::VmState::new(),
+            stack: crate::stack::StackGuard::new(crate::stack::DEFAULT_STACK_LIMIT),
         };
         crate::builtins::init(&mut r);
         r
@@ -218,6 +228,7 @@ impl Realm {
         if self.entries == 0 && self.native_frames.is_empty() && self.vm.frames.is_empty() {
             self.steps = 0;
             self.next_poll = crate::api::INTERRUPT_STEPS;
+            self.stack.base = crate::stack::sp();
         }
         self.entries += 1;
         let r = f(self);
@@ -519,8 +530,16 @@ impl Realm {
 
     pub(crate) fn enter_call(&mut self) -> Res<()> {
         self.depth += 1;
-        if self.depth > self.limits.max_call_depth.max(16) {
+        if self.depth > self.limits.max_call_depth.max(16) || self.stack.exceeded() {
             self.depth -= 1;
+            return Err(self.range_error("Maximum call stack size exceeded"));
+        }
+        Ok(())
+    }
+
+    /// For recursive builtins (JSON, flat, ...): a RangeError when the native stack is low.
+    pub(crate) fn check_stack(&mut self) -> Res<()> {
+        if self.stack.exceeded() {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
         Ok(())
@@ -774,6 +793,10 @@ impl Realm {
         }
         self.intr.trace(&mut t);
         t.obj(self.global);
+        t.obj(self.global_lex);
+        for o in &self.join_stack {
+            t.obj(*o);
+        }
         for v in &self.temps {
             t.val(*v);
         }
@@ -817,7 +840,8 @@ impl Realm {
         for (s, _) in &self.sym_registry {
             t.str(*s);
         }
-        self.vm.trace(&mut t);
+        let epoch = self.heap.epoch.wrapping_add(1).max(1);
+        self.vm.trace(&mut t, epoch);
         let mut dead = core::mem::take(&mut self.dead_hosts);
         self.heap.collect(&mut t, &mut dead);
         self.dead_hosts = dead;

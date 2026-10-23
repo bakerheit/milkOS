@@ -9,6 +9,9 @@ use core::cell::Cell;
 
 use crate::value::StrId;
 
+/// The longest string the engine makes (in UTF-16 units), like V8's limit.
+pub(crate) const MAX_LEN: usize = (1 << 29) - 24;
+
 pub(crate) enum JsStr {
     Flat(FlatStr),
     Rope { l: StrId, r: StrId, len: u32 },

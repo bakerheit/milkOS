@@ -15,16 +15,27 @@
 extern crate alloc;
 
 pub mod api;
+mod ast;
+mod atoms;
 mod builtins;
+mod bytecode;
+mod compiler;
 mod conv;
 mod errors;
+mod eval;
 mod heap;
 mod interp;
+mod lexer;
+mod libm;
 mod math;
 mod names;
 mod numconv;
 mod object;
+mod parser;
 mod realm;
+mod regexp;
+mod resolve;
+mod stack;
 mod string;
 mod value;
 

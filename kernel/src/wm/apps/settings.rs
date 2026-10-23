@@ -23,7 +23,7 @@ use super::super::wallpaper::{self, Kind};
 use super::super::window::{
     PointerInput, PointerKind, WindowContents, hover_index, hover_move, paint_hover,
 };
-use super::super::{Request, icons, request};
+use super::super::{Request, icons, request, shell};
 use super::fsx;
 use filekit::trash::Keep;
 
@@ -49,6 +49,14 @@ static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::ne
 pub fn show_section(i: usize) {
     *PENDING.lock() = Some(i.min(SECTIONS.len() - 1));
 }
+/// The wallpaper tiles: a 4:3 preview, four to a row, the name (two lines at most) below.
+const WP_W: i32 = 100;
+const WP_H: i32 = 75;
+const WP_GAP: i32 = 17;
+const WP_COLS: i32 = 4;
+const WP_LABEL: i32 = 44;
+/// One wallpaper tile: the choice (None: Auto) and its name.
+type WpTile<'a> = (Option<Kind>, &'a str);
 const AUTO: &str = "/System/Kernel/fs/milkfs/auto";
 const TM_SNAPSHOTS: &str = "/System/Kernel/fs/milkfs/snapshots";
 
@@ -243,8 +251,11 @@ impl Settings {
             return;
         };
         for k in Kind::ALL {
-            wallpaper::paint(&mut full, k);
-            if let Some(mut t) = Buffer::new(pmm::Use::Wallpaper, 152, 114, 0) {
+            // A photograph that does not load has no preview (its tile stays plain).
+            if !wallpaper::paint(&mut full, k) {
+                continue;
+            }
+            if let Some(mut t) = Buffer::new(pmm::Use::Wallpaper, WP_W as usize, WP_H as usize, 0) {
                 paint::downscale(&full, &mut t);
                 self.thumbs.push((k, t));
             }
@@ -320,30 +331,66 @@ impl Settings {
         );
         self.build_thumbs();
         let cur = self.pending.wallpaper;
-        let mut items: Vec<(Option<Kind>, &str)> = alloc::vec![(None, "Auto")];
-        for k in Kind::ALL {
-            items.push((Some(k), k.name()));
-        }
-        for (i, (choice, name)) in items.into_iter().enumerate() {
-            let (col, row) = (i as i32 % 2, i as i32 / 2);
-            let r = Rect::new(x + col * 176, 88 + row * 150, 152, 114);
-            let shown = choice.unwrap_or(if self.pending.dark {
-                Kind::Night
-            } else {
-                Kind::Dawn
-            });
-            if let Some((_, t)) = self.thumbs.iter().find(|(k, _)| *k == shown) {
-                p.blit_rrect(r.x, r.y, t, 0, 0, r.w, r.h, 10, 255);
+        let mut items: Vec<WpTile> = alloc::vec![(None, "Auto")];
+        items.extend(
+            Kind::ALL
+                .iter()
+                .filter(|k| !k.is_photo())
+                .map(|&k| (Some(k), k.name())),
+        );
+        let photos = Kind::ALL.iter().filter(|k| k.is_photo());
+        let groups: [(&str, Vec<WpTile>); 2] = [
+            ("Illustrated", items),
+            ("Photos", photos.map(|&k| (Some(k), k.name())).collect()),
+        ];
+        let font = Font::body(false);
+        let mut y = 84;
+        for (title, tiles) in groups {
+            let rows = (tiles.len() as i32 + WP_COLS - 1) / WP_COLS;
+            p.text_p(x, y, title, COCOA, true);
+            y += 22;
+            for (i, (choice, name)) in tiles.into_iter().enumerate() {
+                let (col, row) = (i as i32 % WP_COLS, i as i32 / WP_COLS);
+                let r = Rect::new(
+                    x + col * (WP_W + WP_GAP),
+                    y + row * (WP_H + WP_LABEL),
+                    WP_W,
+                    WP_H,
+                );
+                let shown = choice.unwrap_or(if self.pending.dark {
+                    Kind::Night
+                } else {
+                    Kind::Dawn
+                });
+                if let Some((_, t)) = self.thumbs.iter().find(|(k, _)| *k == shown) {
+                    p.blit_rrect(r.x, r.y, t, 0, 0, r.w, r.h, 8, 255);
+                } else {
+                    p.rrect_r(r, 8, OAT, 255);
+                }
+                if choice.is_none() {
+                    p.rrect(r.x + 6, r.y + 6, 44, 20, 7, MILK, a(800));
+                    p.text_p(r.x + 13, r.y + 8, "auto", COCOA, true);
+                }
+                if choice == cur {
+                    p.rrect_stroke(r.x - 3, r.y - 3, r.w + 6, r.h + 6, 11, 3, HONEY, 255);
+                }
+                for (n, line) in shell::name_lines(name, WP_W + WP_GAP - 2)
+                    .iter()
+                    .enumerate()
+                {
+                    p.text_p_center(
+                        r.x - WP_GAP / 2,
+                        WP_W + WP_GAP,
+                        r.y + r.h + 4 + n as i32 * font.line_height(),
+                        line,
+                        ESPRESSO,
+                        choice == cur,
+                    );
+                }
+                self.hits
+                    .push((grow_h(r, WP_LABEL - WP_H + 8), Hit::Wallpaper(choice)));
             }
-            if choice.is_none() {
-                p.rrect(r.x + 8, r.y + 8, 48, 22, 8, MILK, a(800));
-                p.text_p(r.x + 16, r.y + 11, "auto", COCOA, true);
-            }
-            if choice == cur {
-                p.rrect_stroke(r.x - 4, r.y - 4, r.w + 8, r.h + 8, 14, 3, HONEY, 255);
-            }
-            p.text_p_center(r.x, r.w, r.y + r.h + 8, name, ESPRESSO, choice == cur);
-            self.hits.push((grow_h(r, 28), Hit::Wallpaper(choice)));
+            y += rows * (WP_H + WP_LABEL) + 10;
         }
     }
 

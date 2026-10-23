@@ -811,9 +811,9 @@ const HOME_COLS: i32 = 5;
 const HOME_TOP: i32 = 38;
 const HOME_PITCH: i32 = 64;
 
-/// An app's name under its Apps-card icon: one line, or two split at a space when it is wider
+/// A name under a tile (an app on the Apps card, a wallpaper in Settings): one line, or two split at a space when it is wider
 /// than `max` (each line cut with "..." as a last resort).
-fn home_label_lines(name: &str, max: i32) -> Vec<String> {
+pub(in crate::wm) fn name_lines(name: &str, max: i32) -> Vec<String> {
     let f = Font::body(false);
     if f.width(name) <= max {
         return alloc::vec![String::from(name)];
@@ -1621,7 +1621,7 @@ impl Desktop {
                     };
                     paint_tile(p, r.x, r.y, HOME_ICON, t);
                     let f = Font::body(false);
-                    for (n, line) in home_label_lines(&t.name, r.w + 36).iter().enumerate() {
+                    for (n, line) in name_lines(&t.name, r.w + 36).iter().enumerate() {
                         p.text_p_center(
                             r.x - 20,
                             r.w + 40,

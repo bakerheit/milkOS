@@ -9,10 +9,10 @@ use crate::*;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-struct Rng(u64);
+pub(super) struct Rng(pub u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(super) fn next(&mut self) -> u64 {
         // xorshift64*
         let mut x = self.0;
         x ^= x >> 12;
@@ -21,17 +21,17 @@ impl Rng {
         self.0 = x;
         x.wrapping_mul(0x2545F4914F6CDD1D)
     }
-    fn below(&mut self, n: usize) -> usize {
+    pub(super) fn below(&mut self, n: usize) -> usize {
         if n == 0 {
             0
         } else {
             (self.next() % n as u64) as usize
         }
     }
-    fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
+    pub(super) fn pick<'a>(&mut self, xs: &[&'a str]) -> &'a str {
         xs[self.below(xs.len())]
     }
-    fn chance(&mut self, pct: u64) -> bool {
+    pub(super) fn chance(&mut self, pct: u64) -> bool {
         self.next() % 100 < pct
     }
 }
@@ -166,7 +166,7 @@ const TOKENS: &[&str] = &[
     "-->",
 ];
 
-fn token_soup(rng: &mut Rng) -> String {
+pub(super) fn token_soup(rng: &mut Rng) -> String {
     let n = 1 + rng.below(120);
     let mut s = String::new();
     for _ in 0..n {
@@ -176,7 +176,7 @@ fn token_soup(rng: &mut Rng) -> String {
     s
 }
 
-fn mutate(rng: &mut Rng, src: &str) -> String {
+pub(super) fn mutate(rng: &mut Rng, src: &str) -> String {
     let mut b: Vec<char> = src.chars().collect();
     let rounds = 1 + rng.below(6);
     for _ in 0..rounds {
@@ -941,14 +941,14 @@ fn run_case(src: &str) {
     );
 }
 
-fn iters() -> usize {
+pub(super) fn iters() -> usize {
     std::env::var("JSENGINE_FUZZ_ITERS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1500)
 }
 
-fn seed() -> u64 {
+pub(super) fn seed() -> u64 {
     std::env::var("JSENGINE_FUZZ_SEED")
         .ok()
         .and_then(|s| s.parse().ok())

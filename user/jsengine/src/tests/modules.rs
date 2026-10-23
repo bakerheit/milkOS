@@ -176,10 +176,8 @@ impl Host {
         r
     }
 
-    fn fail(&mut self, r: &mut Realm, name: &str, e: &Exception) -> Value {
-        let v = e.value().unwrap_or(Value::UNDEFINED);
-        let _ = name;
-        v
+    fn fail(&mut self, _r: &mut Realm, _name: &str, e: &Exception) -> Value {
+        e.value().unwrap_or(Value::UNDEFINED)
     }
 
     /// Compiles `name` and everything it imports (cycles share the module map entry).

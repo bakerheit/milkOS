@@ -60,7 +60,6 @@ pub(crate) struct ReqRec {
     pub attrs: Vec<(String, String)>,
     pub line: u32,
     pub col: u32,
-    pub pos: u32,
 }
 
 pub(crate) struct ImportRes {
@@ -364,7 +363,6 @@ impl Realm {
                     attrs: r.attrs.clone(),
                     line,
                     col,
-                    pos: r.pos,
                 }
             })
             .collect();
@@ -725,6 +723,7 @@ impl Realm {
         if let Some(ns) = self.mrec(m).ns {
             return Ok(ns);
         }
+        self.check_stack()?;
         // The object exists (empty) before its entries are worked out: a namespace that
         // re-exports itself finds it.
         let ns = self.alloc(

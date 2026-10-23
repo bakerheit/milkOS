@@ -286,6 +286,7 @@ impl<'a> Parser<'a> {
 
     pub fn parse_module(&mut self) -> PResult<ModuleAst> {
         self.is_module = true;
+        self.lx.no_html_comments = true;
         self.ctx.strict = true;
         self.ctx.module = true;
         self.ctx.in_async = true;

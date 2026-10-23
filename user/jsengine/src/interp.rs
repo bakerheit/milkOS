@@ -1055,6 +1055,48 @@ impl Realm {
                     }
                     self.push(v);
                 }
+                Op::NewPrivName(c) => {
+                    let d = self.const_str_val(&code, c);
+                    let v = self.new_private_name(d);
+                    self.push(v);
+                }
+                Op::GetPriv => {
+                    let k = self.pop();
+                    let o = self.pop();
+                    let v = tri!(self.private_get(o, k));
+                    self.push(v);
+                }
+                Op::GetPrivKeep => {
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    let v = tri!(self.private_get(o, k));
+                    self.push(v);
+                }
+                Op::SetPriv => {
+                    let v = self.pop();
+                    let k = self.pop();
+                    let o = self.pop();
+                    tri!(self.private_set(o, k, v));
+                    self.push(v);
+                }
+                Op::PrivIn => {
+                    let o = self.pop();
+                    let k = self.pop();
+                    let b = tri!(self.private_in(k, o));
+                    self.push(Val::Bool(b));
+                }
+                Op::DefinePrivField => {
+                    let v = self.pop();
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    tri!(self.private_add_field(o, k, v));
+                }
+                Op::DefinePrivMethod(kind) => {
+                    let f = self.pop();
+                    let k = self.pop();
+                    let o = self.peek(0);
+                    tri!(self.private_add_method(o, k, f, kind));
+                }
                 Op::GetImport(r, n) => {
                     let v = self.import_get(r);
                     if v.is_empty() {

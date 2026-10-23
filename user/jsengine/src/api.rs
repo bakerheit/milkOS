@@ -84,8 +84,10 @@
 //!   budget and [`Realm::set_max_modules`]; [`Realm::drop_module`] and
 //!   [`Realm::drop_module_graph`] release them. `import`/`export` in a classic script are
 //!   still a SyntaxError (and `import()` is allowed there). A script's `import()` with no
-//!   hook set rejects with a TypeError. (Stub in the first commit: `compile_module` throws
-//!   a SyntaxError until the real implementation lands.)
+//!   hook set rejects with a TypeError. Linking, evaluation, `import()` and the module
+//!   namespace objects are real; the engine runs a module's code with the realm's step
+//!   budget and interrupt like any other script. The module parser rejects HTML-like
+//!   comments, `with` and unparenthesized `await` as an identifier, as the spec says.
 //! - Added [`Realm::set_rejection_hook`] ([`PromiseRejection`]: unhandled and late-handled
 //!   promise rejections, the browser's `unhandledrejection` / `rejectionhandled`) and
 //!   [`Realm::set_error_hook`] (exceptions thrown out of queued jobs, for `window.onerror`;
@@ -1764,7 +1766,9 @@ impl Realm {
     /// satisfies it (its whole graph set up as for [`Realm::link_module`]); the engine links
     /// and evaluates it and, when that has finished, fulfills the script's Promise with the
     /// namespace (or rejects it with the error). `Err(value)` rejects the Promise with
-    /// `value` (a failed fetch, say). Unknown or already-finished ids are ignored.
+    /// `value` (a failed fetch, say). Unknown or already-finished ids are ignored. The work
+    /// happens in a job: call [`Realm::run_jobs`] after (the answer is never acted on in
+    /// the middle of running script, even if the hook answers at once).
     pub fn finish_dynamic_import(
         &mut self,
         id: DynamicImportId,

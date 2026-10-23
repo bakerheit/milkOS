@@ -1898,8 +1898,9 @@ impl Realm {
         }
         if symbols {
             for (k, p) in obj.props.iter() {
-                if let PropKey::Sym(_) = k
+                if let PropKey::Sym(s) = k
                     && (!only_enum || p.f & E != 0)
+                    && !self.heap.syms[s.0 as usize].private
                 {
                     out.push(*k);
                 }

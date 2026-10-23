@@ -289,6 +289,7 @@ impl<'a> Compiler<'a> {
             PropName::Str(s) => Some(s.clone()),
             PropName::Num(n) => Some(crate::string::utf16(&crate::numconv::number_to_string(*n))),
             PropName::Computed(_) => None,
+            PropName::Private(a) => Some(self.atoms.get(*a).encode_utf16().collect()),
         }
     }
 
@@ -413,9 +414,15 @@ impl<'a> Compiler<'a> {
             }
             if let Some(i) = sc.find(name) {
                 let b = sc.bindings[i];
+                // A parameter that is still in its TDZ is checked like a `let`.
+                let kind = if b.tdz && b.kind == BK::Param {
+                    BK::Let
+                } else {
+                    b.kind
+                };
                 return match b.loc {
-                    Loc::Local(l) => Lookup::Local(l, b.kind),
-                    Loc::Env(e) => Lookup::Env(depth, e, b.kind),
+                    Loc::Local(l) => Lookup::Local(l, kind),
+                    Loc::Env(e) => Lookup::Env(depth, e, kind),
                     Loc::Unassigned => Lookup::Global,
                 };
             }
@@ -775,7 +782,7 @@ impl<'a> Compiler<'a> {
                 && let Some(bi) = self.scopes[sid as usize].find(a)
             {
                 let b = self.scopes[sid as usize].bindings[bi];
-                if !b.captured && b.kind == BK::Param {
+                if !b.captured && b.kind == BK::Param && !b.tdz {
                     // A repeated name binds the last parameter with it.
                     param_local.retain(|(x, _)| *x != bi);
                     param_local.push((bi, i as u32));
@@ -804,6 +811,18 @@ impl<'a> Compiler<'a> {
         if self.scopes[sid as usize].uses_arguments {
             self.emit(Op::ArgumentsObj);
             self.store_name(kw::ARGUMENTS, Store::Init, false, f.start)?;
+        }
+        // Parameters with defaults or patterns start out uninitialized.
+        for i in 0..n {
+            let b = self.scopes[sid as usize].bindings[i];
+            if b.tdz && b.kind == BK::Param {
+                self.emit(Op::Empty);
+                match b.loc {
+                    Loc::Local(l) => self.emit(Op::PutLocal(l)),
+                    Loc::Env(e) => self.emit(Op::PutEnv(env_ref(0, e))),
+                    Loc::Unassigned => self.emit(Op::Pop),
+                };
+            }
         }
         // Parameters: defaults and patterns, in order.
         for (i, p) in f.params.iter().enumerate() {
@@ -921,6 +940,17 @@ impl<'a> Compiler<'a> {
             None => name_hint,
         };
         let has_heritage = c.heritage.is_some();
+        // Fresh private names for this evaluation of the class.
+        let mut made: Vec<Atom> = Vec::new();
+        for pd in &c.privates {
+            if made.contains(&pd.name) {
+                continue;
+            }
+            made.push(pd.name);
+            let desc = self.const_atom(pd.name);
+            self.emit(Op::NewPrivName(desc));
+            self.store_name(pd.name, Store::Init, false, pos)?;
+        }
         if let Some(h) = &c.heritage {
             self.expr(h)?;
         }
@@ -971,6 +1001,37 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::Swap);
             }
             match &m.key {
+                PropName::Private(pn) => {
+                    let ns = self.atom_str(*pn);
+                    let code = self.compile_function(f, Some(ns))?;
+                    let fc = self.add_const(Const::Code(code));
+                    if m.is_static {
+                        // [proto F]: the function goes straight onto the class.
+                        self.load_name(*pn, pos)?;
+                        self.emit(Op::Closure(fc));
+                        self.emit(Op::DefinePrivMethod(kind));
+                    } else {
+                        // Each instance gets it when it is made: keep it for the field
+                        // initializer.
+                        let want = match kind {
+                            1 => PrivKind::Getter,
+                            2 => PrivKind::Setter,
+                            _ => PrivKind::Method,
+                        };
+                        let fb = c
+                            .privates
+                            .iter()
+                            .find(|p| p.name == *pn && p.kind == want && !p.is_static)
+                            .and_then(|p| p.func);
+                        self.emit(Op::Closure(fc));
+                        match fb {
+                            Some(fb) => self.store_name(fb, Store::Init, false, pos)?,
+                            None => {
+                                self.emit(Op::Pop);
+                            }
+                        }
+                    }
+                }
                 PropName::Computed(k) => {
                     self.expr(k)?;
                     self.emit(Op::ToPropKey);
@@ -1247,11 +1308,39 @@ impl<'a> Compiler<'a> {
             StmtKind::Debugger => {
                 self.emit(Op::Nop);
             }
+            StmtKind::PrivMethods(list) => {
+                for i in list {
+                    self.emit(Op::This);
+                    self.load_name(i.name, s.pos)?;
+                    self.load_name(i.func, s.pos)?;
+                    self.mark(s.pos);
+                    self.emit(Op::DefinePrivMethod(i.kind as u32));
+                    self.emit(Op::Pop);
+                }
+            }
             StmtKind::Fields(defs) => {
                 for d in defs {
                     self.mark(d.pos);
                     self.emit(Op::This);
                     match &d.key {
+                        FieldKey::Name(PropName::Private(pn)) => {
+                            self.load_name(*pn, d.pos)?;
+                            match &d.value {
+                                Some(v) => {
+                                    if is_anon_fn(v) {
+                                        let ns = self.atom_str(*pn);
+                                        self.named_expr_str(v, ns)?;
+                                    } else {
+                                        self.expr(v)?;
+                                    }
+                                }
+                                None => {
+                                    self.emit(Op::Undef);
+                                }
+                            }
+                            self.mark(d.pos);
+                            self.emit(Op::DefinePrivField);
+                        }
                         FieldKey::Computed(i) => {
                             self.emit(Op::FieldKey(*i));
                             match &d.value {
@@ -2043,6 +2132,15 @@ impl<'a> Compiler<'a> {
                 self.emit(Op::SetElem);
                 self.emit(Op::Pop);
             }
+            ExprKind::PrivMember(o, pn, _) => {
+                self.expr(o)?;
+                self.load_name(*pn, e.pos)?;
+                self.emit(Op::Rot3);
+                self.emit(Op::Rot3);
+                self.mark(e.pos);
+                self.emit(Op::SetPriv);
+                self.emit(Op::Pop);
+            }
             ExprKind::SuperMember(name) => {
                 let c = self.const_atom(*name);
                 self.emit(Op::SetSuper(c));
@@ -2185,6 +2283,22 @@ impl<'a> Compiler<'a> {
                 prefix,
                 target,
             } => self.update(*inc, *prefix, target, e.pos)?,
+            ExprKind::Bin(BinOp::In, a, b) if matches!(a.k, ExprKind::PrivName(_)) => {
+                let ExprKind::PrivName(pn) = a.k else {
+                    return self.err("Unexpected private name", e.pos);
+                };
+                self.load_name(pn, e.pos)?;
+                self.expr(b)?;
+                self.mark(e.pos);
+                self.emit(Op::PrivIn);
+            }
+            ExprKind::PrivName(_) => return self.err("Unexpected private name", e.pos),
+            ExprKind::PrivMember(o, pn, _) => {
+                self.expr(o)?;
+                self.load_name(*pn, e.pos)?;
+                self.mark(e.pos);
+                self.emit(Op::GetPriv);
+            }
             ExprKind::Bin(op, a, b) => {
                 self.expr(a)?;
                 self.expr(b)?;
@@ -2513,6 +2627,12 @@ impl<'a> Compiler<'a> {
                 self.mark(c.pos);
                 self.emit(Op::GetElemKeep);
             }
+            ExprKind::PrivMember(o, pn, false) => {
+                self.expr(o)?;
+                self.load_name(*pn, c.pos)?;
+                self.mark(c.pos);
+                self.emit(Op::GetPrivKeep);
+            }
             ExprKind::SuperMember(name) => {
                 if self.fr().this_chk {
                     self.emit(Op::ThisChk);
@@ -2535,7 +2655,10 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Seq(items)
                 if items.len() == 1
-                    && matches!(items[0].k, ExprKind::Member(..) | ExprKind::Index(..)) =>
+                    && matches!(
+                        items[0].k,
+                        ExprKind::Member(..) | ExprKind::Index(..) | ExprKind::PrivMember(..)
+                    ) =>
             {
                 return self.callee(&items[0]);
             }
@@ -2634,6 +2757,15 @@ impl<'a> Compiler<'a> {
                 self.mark(e.pos);
                 self.emit(Op::GetElem);
             }
+            ExprKind::PrivMember(o, pn, opt) => {
+                self.chain(o, false, exits)?;
+                if *opt {
+                    exits.push((self.emit(Op::JumpIfNullish(0)), 1));
+                }
+                self.load_name(*pn, e.pos)?;
+                self.mark(e.pos);
+                self.emit(Op::GetPriv);
+            }
             ExprKind::Call(callee, args, opt) => {
                 self.chain_callee(callee, exits)?;
                 if *opt {
@@ -2666,6 +2798,15 @@ impl<'a> Compiler<'a> {
                 self.expr(i)?;
                 self.mark(c.pos);
                 self.emit(Op::GetElemKeep);
+            }
+            ExprKind::PrivMember(o, pn, opt) => {
+                self.chain(o, false, exits)?;
+                if *opt {
+                    exits.push((self.emit(Op::JumpIfNullish(0)), 1));
+                }
+                self.load_name(*pn, c.pos)?;
+                self.mark(c.pos);
+                self.emit(Op::GetPrivKeep);
             }
             ExprKind::Call(..) => {
                 self.chain(c, false, exits)?;
@@ -2743,6 +2884,24 @@ impl<'a> Compiler<'a> {
                     self.emit(Op::Rot4);
                     self.emit(op);
                     self.emit(Op::SetElem);
+                    self.emit(Op::Pop);
+                }
+            }
+            ExprKind::PrivMember(o, pn, _) => {
+                self.expr(o)?;
+                self.load_name(*pn, target.pos)?;
+                self.emit(Op::Dup2);
+                self.mark(pos);
+                self.emit(Op::GetPriv);
+                self.emit(Op::ToNumeric);
+                if prefix {
+                    self.emit(op);
+                    self.emit(Op::SetPriv);
+                } else {
+                    self.emit(Op::Dup);
+                    self.emit(Op::Rot4);
+                    self.emit(op);
+                    self.emit(Op::SetPriv);
                     self.emit(Op::Pop);
                 }
             }
@@ -2878,6 +3037,42 @@ impl<'a> Compiler<'a> {
                         let end = self.emit(Op::Jump(0));
                         self.patch_here(short);
                         // [obj key old] → [old]
+                        self.emit(Op::Rot3);
+                        self.emit(Op::Pop);
+                        self.emit(Op::Pop);
+                        self.patch_here(end);
+                    }
+                }
+            }
+            ExprKind::PrivMember(o, pn, _) => {
+                self.expr(o)?;
+                self.load_name(*pn, t.pos)?;
+                match op {
+                    AssignOp::Assign => {
+                        self.expr(value)?;
+                        self.mark(pos);
+                        self.emit(Op::SetPriv);
+                    }
+                    AssignOp::Op(b) => {
+                        self.emit(Op::Dup2);
+                        self.mark(t.pos);
+                        self.emit(Op::GetPriv);
+                        self.expr(value)?;
+                        self.mark(pos);
+                        self.emit(bin_op(b));
+                        self.emit(Op::SetPriv);
+                    }
+                    AssignOp::Logic(l) => {
+                        self.emit(Op::Dup2);
+                        self.mark(t.pos);
+                        self.emit(Op::GetPriv);
+                        // [obj name old]
+                        let short = self.emit(logic_jump(l));
+                        self.expr(value)?;
+                        self.emit(Op::SetPriv);
+                        let end = self.emit(Op::Jump(0));
+                        self.patch_here(short);
+                        // [obj name old] → [old]
                         self.emit(Op::Rot3);
                         self.emit(Op::Pop);
                         self.emit(Op::Pop);

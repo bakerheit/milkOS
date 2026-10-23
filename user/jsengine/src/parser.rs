@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
                 )
             }
             Tok::Regex(..) => String::from("Unexpected regular expression"),
-            Tok::Private(_) => String::from("Private class members (#name) are not supported"),
+            Tok::Private(a) => alloc::format!("Unexpected identifier '#{}'", self.atoms.get(*a)),
             Tok::BigInt => String::from("BigInt literals are not supported"),
         };
         Err(ParseError {
@@ -1695,11 +1695,52 @@ impl<'a> Parser<'a> {
                 self.expect(P::RBracket)?;
                 return Ok(PropName::Computed(Box::new(e)));
             }
-            Tok::Private(_) => return self.err("Private class members (#name) are not supported"),
             _ => return self.unexpected(),
         };
         self.advance()?;
         Ok(k)
+    }
+
+    /// Records a private name a class declares; returns the hidden binding that keeps its
+    /// function (methods and accessors).
+    fn declare_private(
+        &mut self,
+        privs: &mut Vec<PrivDecl>,
+        name: Atom,
+        is_static: bool,
+        kind: PrivKind,
+        pos: u32,
+    ) -> PResult<Option<Atom>> {
+        let text = String::from(self.atoms.get(name));
+        if text == "#constructor" {
+            return self.err_at("Classes may not have a private field named '#constructor'", pos);
+        }
+        if let Some(prev) = privs.iter().find(|p| p.name == name) {
+            let pair = matches!(
+                (prev.kind, kind),
+                (PrivKind::Getter, PrivKind::Setter) | (PrivKind::Setter, PrivKind::Getter)
+            ) && prev.is_static == is_static;
+            if !pair {
+                return self.err_at(
+                    &alloc::format!("Identifier '{text}' has already been declared"),
+                    pos,
+                );
+            }
+        }
+        let func = match kind {
+            PrivKind::Field => None,
+            PrivKind::Method => Some(self.atoms.intern(&alloc::format!("{text}/m"))),
+            PrivKind::Getter => Some(self.atoms.intern(&alloc::format!("{text}/g"))),
+            PrivKind::Setter => Some(self.atoms.intern(&alloc::format!("{text}/s"))),
+        };
+        privs.push(PrivDecl {
+            name,
+            is_static,
+            kind,
+            func,
+            pos,
+        });
+        Ok(func)
     }
 
     // ---- classes ----
@@ -1743,6 +1784,8 @@ impl<'a> Parser<'a> {
         let mut field_keys: Vec<Expr> = Vec::new();
         let mut field_key_static: Vec<bool> = Vec::new();
         let mut field_key_at: Vec<u32> = Vec::new();
+        let mut privates: Vec<PrivDecl> = Vec::new();
+        let mut priv_installs: Vec<PrivInstall> = Vec::new();
         let derived = heritage.is_some();
         let mut fields_start = 0u32;
         let mut statics_start = 0u32;
@@ -1823,7 +1866,13 @@ impl<'a> Parser<'a> {
             }
             let key_is_ctor = matches!(self.tok.tok, Tok::Name(kw::CONSTRUCTOR, _))
                 || matches!(&self.tok.tok, Tok::Str(s, _) if crate::string::eq_str(s, "constructor"));
-            let key = self.parse_prop_name()?;
+            let key = if let Tok::Private(a) = self.tok.tok {
+                let name = self.private_atom(a);
+                self.advance()?;
+                PropName::Private(name)
+            } else {
+                self.parse_prop_name()?
+            };
             if self.is(P::LParen) {
                 if key_is_ctor && !is_static {
                     if is_async || is_gen || acc.is_some() {
@@ -1846,6 +1895,25 @@ impl<'a> Parser<'a> {
                     Some(MethodKind::Set) => FuncKind::Setter,
                     _ => FuncKind::Method,
                 };
+                if let PropName::Private(pn) = key {
+                    let pk = match acc {
+                        Some(MethodKind::Get) => PrivKind::Getter,
+                        Some(MethodKind::Set) => PrivKind::Setter,
+                        _ => PrivKind::Method,
+                    };
+                    let func = self.declare_private(&mut privates, pn, is_static, pk, mpos)?;
+                    if !is_static && let Some(func) = func {
+                        priv_installs.push(PrivInstall {
+                            name: pn,
+                            func,
+                            kind: match pk {
+                                PrivKind::Getter => 1,
+                                PrivKind::Setter => 2,
+                                _ => 0,
+                            },
+                        });
+                    }
+                }
                 let f = self.parse_function_rest(fk, is_async, is_gen, mpos)?;
                 let kind = match acc {
                     Some(MethodKind::Get) => MemberKind::Get(f),
@@ -1868,6 +1936,9 @@ impl<'a> Parser<'a> {
             // A field.
             if is_async || is_gen || acc.is_some() || key_is_ctor {
                 return self.unexpected();
+            }
+            if let PropName::Private(pn) = key {
+                self.declare_private(&mut privates, pn, is_static, PrivKind::Field, mpos)?;
             }
             let fkey = match key {
                 PropName::Computed(e) => {
@@ -1933,17 +2004,23 @@ impl<'a> Parser<'a> {
                 is_decl: false,
             })
         };
-        let fields = if inst_fields.is_empty() {
+        let fields = if inst_fields.is_empty() && priv_installs.is_empty() {
             None
         } else {
-            Some(mk(
-                self,
-                alloc::vec![Stmt {
+            let mut body = Vec::new();
+            if !priv_installs.is_empty() {
+                body.push(Stmt {
+                    k: StmtKind::PrivMethods(priv_installs),
+                    pos: start,
+                });
+            }
+            if !inst_fields.is_empty() {
+                body.push(Stmt {
                     k: StmtKind::Fields(inst_fields),
-                    pos: fields_start
-                }],
-                fields_start,
-            ))
+                    pos: fields_start,
+                });
+            }
+            Some(mk(self, body, fields_start.max(start)))
         };
         let statics = if static_body.is_empty() {
             None
@@ -1960,6 +2037,7 @@ impl<'a> Parser<'a> {
             field_keys,
             field_key_static,
             field_key_at,
+            privates,
             scope,
             start,
             end,
@@ -2115,6 +2193,7 @@ impl<'a> Parser<'a> {
                 }
                 ExprKind::Member(..)
                 | ExprKind::Index(..)
+                | ExprKind::PrivMember(..)
                 | ExprKind::SuperMember(_)
                 | ExprKind::SuperIndex(_) => Pat::Expr(Box::new(lhs)),
                 _ => return self.err_at("Invalid left-hand side in assignment", lhs.pos),
@@ -2286,6 +2365,11 @@ impl<'a> Parser<'a> {
             }
             self.advance()?;
             let right = self.parse_binary(if prec == 12 { 12 } else { prec + 1 }, no_in)?;
+            if matches!(right.k, ExprKind::PrivName(_))
+                || (matches!(left.k, ExprKind::PrivName(_)) && !matches!(op, Ok(BinOp::In)))
+            {
+                return self.err_at("Unexpected private name", pos);
+            }
             left = match op {
                 Ok(b) => Expr {
                     k: ExprKind::Bin(b, Box::new(left), Box::new(right)),
@@ -2336,6 +2420,19 @@ impl<'a> Parser<'a> {
             if op == UnOp::Delete && self.ctx.strict && matches!(arg.k, ExprKind::Ident(_)) {
                 return self.err_at("Delete of an unqualified identifier in strict mode.", pos);
             }
+            if op == UnOp::Delete {
+                let mut e = &arg;
+                loop {
+                    match &e.k {
+                        ExprKind::Seq(items) if items.len() == 1 => e = &items[0],
+                        ExprKind::OptChain(inner) => e = inner,
+                        _ => break,
+                    }
+                }
+                if matches!(e.k, ExprKind::PrivMember(..)) {
+                    return self.err_at("Private fields can not be deleted", pos);
+                }
+            }
             return Ok(Expr {
                 k: ExprKind::Unary(op, Box::new(arg)),
                 pos,
@@ -2380,6 +2477,7 @@ impl<'a> Parser<'a> {
             }
             ExprKind::Member(..)
             | ExprKind::Index(..)
+            | ExprKind::PrivMember(..)
             | ExprKind::SuperMember(_)
             | ExprKind::SuperIndex(_) => Ok(()),
             _ => self.err_at(
@@ -2425,11 +2523,7 @@ impl<'a> Parser<'a> {
             match self.tok.tok {
                 Tok::P(P::Dot) => {
                     self.advance()?;
-                    let name = self.member_name()?;
-                    e = Expr {
-                        k: ExprKind::Member(Box::new(e), name, false),
-                        pos,
-                    };
+                    e = self.member_expr(e, pos, false)?;
                 }
                 Tok::P(P::QDot) => {
                     self.advance()?;
@@ -2451,11 +2545,7 @@ impl<'a> Parser<'a> {
                     } else if let Tok::Template(..) = self.tok.tok {
                         return self.err("Invalid tagged template on optional chain");
                     } else {
-                        let name = self.member_name()?;
-                        e = Expr {
-                            k: ExprKind::Member(Box::new(e), name, true),
-                            pos,
-                        };
+                        e = self.member_expr(e, pos, true)?;
                     }
                 }
                 Tok::P(P::LBracket) => {
@@ -2502,9 +2592,31 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(a)
             }
-            Tok::Private(_) => self.err("Private class members (#name) are not supported"),
             _ => self.unexpected(),
         }
+    }
+
+    /// `#name` as the atom of the name with its `#` (the lexer's atom has none).
+    fn private_atom(&mut self, a: Atom) -> Atom {
+        let s = alloc::format!("#{}", self.atoms.get(a));
+        self.atoms.intern(&s)
+    }
+
+    /// After `.` or `?.`: `obj.name` or `obj.#name`.
+    fn member_expr(&mut self, obj: Expr, pos: u32, optional: bool) -> PResult<Expr> {
+        if let Tok::Private(a) = self.tok.tok {
+            let name = self.private_atom(a);
+            self.advance()?;
+            return Ok(Expr {
+                k: ExprKind::PrivMember(Box::new(obj), name, optional),
+                pos,
+            });
+        }
+        let name = self.member_name()?;
+        Ok(Expr {
+            k: ExprKind::Member(Box::new(obj), name, optional),
+            pos,
+        })
     }
 
     fn parse_super(&mut self) -> PResult<Expr> {
@@ -2574,11 +2686,7 @@ impl<'a> Parser<'a> {
                 match self.tok.tok {
                     Tok::P(P::Dot) => {
                         self.advance()?;
-                        let name = self.member_name()?;
-                        callee = Expr {
-                            k: ExprKind::Member(Box::new(callee), name, false),
-                            pos,
-                        };
+                        callee = self.member_expr(callee, pos, false)?;
                     }
                     Tok::P(P::LBracket) => {
                         self.advance()?;
@@ -2773,7 +2881,16 @@ impl<'a> Parser<'a> {
                     },
                 }
             }
-            Tok::Private(_) => return self.err("Private class members (#name) are not supported"),
+            Tok::Private(a) => {
+                let a = *a;
+                let p = self.peek()?;
+                if !matches!(p.tok, Tok::Name(kw::IN, false)) {
+                    return self.unexpected();
+                }
+                let name = self.private_atom(a);
+                self.advance()?;
+                ExprKind::PrivName(name)
+            }
             _ => return self.unexpected(),
         };
         Ok(Expr { k, pos })
@@ -3121,6 +3238,7 @@ impl<'a> Parser<'a> {
             }
             ExprKind::Member(..)
             | ExprKind::Index(..)
+            | ExprKind::PrivMember(..)
             | ExprKind::SuperMember(_)
             | ExprKind::SuperIndex(_)
                 if !binding =>
@@ -3134,9 +3252,10 @@ impl<'a> Parser<'a> {
                     pos,
                 });
                 match inner.k {
-                    ExprKind::Ident(_) | ExprKind::Member(..) | ExprKind::Index(..) => {
-                        self.expr_to_pattern(inner, false)
-                    }
+                    ExprKind::Ident(_)
+                    | ExprKind::Member(..)
+                    | ExprKind::Index(..)
+                    | ExprKind::PrivMember(..) => self.expr_to_pattern(inner, false),
                     _ => self.err_at("Invalid destructuring assignment target", pos),
                 }
             }

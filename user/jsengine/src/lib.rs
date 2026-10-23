@@ -31,6 +31,7 @@ mod names;
 mod numconv;
 mod object;
 mod parser;
+mod private;
 mod realm;
 mod regexp;
 mod resolve;

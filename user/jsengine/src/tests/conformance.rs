@@ -128,6 +128,7 @@ js_files!(
     "typed.js",
     "encoding.js",
     "clone.js",
+    "private.js",
 );
 
 #[test]

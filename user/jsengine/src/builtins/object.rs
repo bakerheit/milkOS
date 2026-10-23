@@ -111,6 +111,12 @@ impl Realm {
         self.om(o).flags &= !EXTENSIBLE;
         let n = self.o(o).props.ents.len();
         for i in 0..n {
+            // Private fields are not properties: freezing leaves them writable.
+            if let PropKey::Sym(s) = self.o(o).props.ents[i].0
+                && self.heap.syms[s.0 as usize].private
+            {
+                continue;
+            }
             let p = &mut self.om(o).props.ents[i].1;
             p.f &= !C;
             if frozen && p.f & ACCESSOR == 0 {

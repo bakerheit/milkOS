@@ -199,7 +199,14 @@ pub struct Realm {
     pub(crate) last_site: Site,
     /// Promises rejected with no handler (checked at the end of run_jobs).
     pub(crate) pending_rejections: Vec<ObjId>,
-    pub(crate) unhandled: Vec<Val>,
+    /// Rejected promises nobody handled by the end of a microtask checkpoint: (promise, reason).
+    pub(crate) unhandled: Vec<(Val, Val)>,
+    /// Promises reported to the rejection hook as unhandled (weak), and the ones among
+    /// them that got a handler since (to report as handled).
+    pub(crate) reported: Vec<ObjId>,
+    pub(crate) late_handled: Vec<ObjId>,
+    pub(crate) rejection_hook: Option<Box<crate::api::RejectionHook>>,
+    pub(crate) error_hook: Option<Box<crate::api::ErrorHook>>,
     /// Symbol.for registry.
     pub(crate) sym_registry: Vec<(StrId, SymId)>,
     pub(crate) dead_hosts: Vec<(u32, u64)>,
@@ -267,6 +274,10 @@ impl Realm {
             last_site: Site::default(),
             pending_rejections: Vec::new(),
             unhandled: Vec::new(),
+            reported: Vec::new(),
+            late_handled: Vec::new(),
+            rejection_hook: None,
+            error_hook: None,
             sym_registry: Vec::new(),
             dead_hosts: Vec::new(),
             max_buffer: crate::typed::DEFAULT_MAX_BUFFER,
@@ -904,8 +915,12 @@ impl Realm {
         for p in &self.pending_rejections {
             t.obj(*p);
         }
-        for v in &self.unhandled {
+        for (p, v) in &self.unhandled {
+            t.val(*p);
             t.val(*v);
+        }
+        for p in &self.late_handled {
+            t.obj(*p);
         }
         for (s, _) in &self.sym_registry {
             t.str(*s);
@@ -974,6 +989,20 @@ impl Realm {
             };
             self.temps.truncate(mark);
             if let Err(e) = r {
+                // An error hook takes thrown errors (and the jobs go on); terminations
+                // always end the run.
+                if let Exception(Exc::Throw(v)) = e
+                    && let Some(mut hook) = self.error_hook.take()
+                {
+                    let m = self.temps.len();
+                    self.temps.push(v);
+                    hook(self, &e);
+                    self.temps.truncate(m);
+                    if self.error_hook.is_none() {
+                        self.error_hook = Some(hook);
+                    }
+                    continue;
+                }
                 self.track_rejections();
                 return Err(e);
             }
@@ -988,6 +1017,57 @@ impl Realm {
     pub(crate) fn unhandled_rejections(&mut self) -> Vec<Val> {
         self.track_rejections();
         core::mem::take(&mut self.unhandled)
+            .into_iter()
+            .map(|(_, reason)| reason)
+            .collect()
+    }
+
+    /// Tells the rejection hook (if there is one) about promises rejected with no handler
+    /// and about ones that got a handler after being reported.
+    pub(crate) fn deliver_rejections(&mut self) {
+        if self.rejection_hook.is_none() {
+            return;
+        }
+        for _ in 0..1000 {
+            self.track_rejections();
+            let un = core::mem::take(&mut self.unhandled);
+            let late = core::mem::take(&mut self.late_handled);
+            if un.is_empty() && late.is_empty() {
+                return;
+            }
+            let Some(mut hook) = self.rejection_hook.take() else {
+                // (a nested call is delivering: put them back for it)
+                self.unhandled = un;
+                self.late_handled = late;
+                return;
+            };
+            // Prune the weak list now and then.
+            if self.reported.len() > 256 {
+                let heap = &self.heap;
+                self.reported.retain(|p| heap.obj_valid(*p));
+            }
+            let mark = self.temps.len();
+            for (p, reason) in un {
+                if let Val::Obj(po) = p {
+                    self.reported.push(po);
+                }
+                let ev = crate::api::PromiseRejection::Unhandled {
+                    promise: self.out_val(p),
+                    reason: self.out_val(reason),
+                };
+                hook(self, ev);
+            }
+            for p in late {
+                let ev = crate::api::PromiseRejection::Handled {
+                    promise: self.out_val(Val::Obj(p)),
+                };
+                hook(self, ev);
+            }
+            self.temps.truncate(mark);
+            if self.rejection_hook.is_none() {
+                self.rejection_hook = Some(hook);
+            }
+        }
     }
 }
 

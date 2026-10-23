@@ -83,6 +83,14 @@ impl Realm {
         if self.o(o).flags & crate::object::LAZY_FN != 0 {
             self.materialize_fn(o);
         }
+        if matches!(self.o(o).kind, ObjKind::Typed(_)) && self.typed_len(o) > 0 {
+            // Its elements can't be made non-configurable (or non-writable).
+            return Err(self.type_error(if frozen {
+                "Cannot freeze array buffer views with elements"
+            } else {
+                "Cannot seal array buffer views with elements"
+            }));
+        }
         if matches!(self.o(o).kind, ObjKind::Array(_)) {
             self.array_to_sparse(o);
             if frozen {

@@ -67,9 +67,14 @@
 //!   daylight-saving rules).
 //!
 //! # CHANGES
+//! - Added [`Realm::set_rejection_hook`] ([`PromiseRejection`]: unhandled and late-handled
+//!   promise rejections, the browser's `unhandledrejection` / `rejectionhandled`) and
+//!   [`Realm::set_error_hook`] (exceptions thrown out of queued jobs, for `window.onerror`;
+//!   the jobs go on). Both are optional; without them `run_jobs` and
+//!   [`Realm::take_unhandled_rejections`] work as before.
 //! - Added ArrayBuffer, the typed arrays (Int8, Uint8, Uint8Clamped, Int16, Uint16, Int32,
 //!   Uint32, Float32, Float64), DataView, TextEncoder / TextDecoder (utf-8, utf-16le,
-//!   latin1) and `atob` / `btoa` to the engine, and the bytes plumbing
+//!   latin1), `atob` / `btoa` and `structuredClone` to the engine, and the bytes plumbing
 //!   for the embedder: [`Realm::new_array_buffer`], [`Realm::new_array_buffer_from_vec`],
 //!   [`Realm::new_uint8_array`], [`Realm::new_uint8_array_from_vec`] (host bytes into script),
 //!   [`Realm::buffer_bytes`], [`Realm::buffer_bytes_mut`], [`Realm::copy_bytes`],
@@ -209,6 +214,23 @@ impl core::fmt::Display for ErrorReport {
         Ok(())
     }
 }
+
+/// What the rejection hook ([`Realm::set_rejection_hook`]) is told.
+#[derive(Clone, Copy, Debug)]
+pub enum PromiseRejection {
+    /// A promise was rejected and nothing handled it by the end of the microtask checkpoint
+    /// (the browser's `unhandledrejection`). `reason` is the rejection value.
+    Unhandled { promise: Value, reason: Value },
+    /// A promise already reported as unhandled got a handler after all (the browser's
+    /// `rejectionhandled`).
+    Handled { promise: Value },
+}
+
+/// Called with each [`PromiseRejection`].
+pub type RejectionHook = dyn FnMut(&mut Realm, PromiseRejection);
+
+/// Called with an uncaught exception ([`Realm::set_error_hook`]).
+pub type ErrorHook = dyn FnMut(&mut Realm, &Exception);
 
 /// Per-realm budgets. A zero means "no limit" for `max_steps`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -620,7 +642,14 @@ impl Realm {
     /// including the ones they queue. If a job throws, that exception is returned and the
     /// rest stay queued: report it and call `run_jobs` again.
     pub fn run_jobs(&mut self) -> JsResult<()> {
-        self.entry(|r| r.drain_jobs())
+        let r = self.entry(|r| r.drain_jobs());
+        if self.rejection_hook.is_some() {
+            self.entry(|r| {
+                r.deliver_rejections();
+                Ok(())
+            })?;
+        }
+        r
     }
 
     pub fn has_jobs(&self) -> bool {
@@ -644,6 +673,30 @@ impl Realm {
     pub fn take_unhandled_rejections(&mut self) -> Vec<Value> {
         let v = self.unhandled_rejections();
         v.into_iter().map(|x| self.out_val(x)).collect()
+    }
+
+    /// Installs a hook that is told about rejected promises nobody handled, the way a page
+    /// gets `unhandledrejection` and `rejectionhandled`. It is called at the end of
+    /// [`Realm::run_jobs`] (the microtask checkpoint), after the queue drained, once per
+    /// promise; a promise that gets a handler later is reported as `Handled` at the end of
+    /// a later `run_jobs`. The hook may call back into the realm (to dispatch an event
+    /// whose listener runs script); promises it rejects itself are reported in the same
+    /// checkpoint. While a hook is installed, [`Realm::take_unhandled_rejections`] finds
+    /// nothing (the hook got them). `None` removes it.
+    pub fn set_rejection_hook(&mut self, hook: Option<Box<RejectionHook>>) {
+        self.rejection_hook = hook;
+    }
+
+    /// Installs a hook for exceptions nobody can catch: one thrown out of a queued job (a
+    /// `queueMicrotask` callback, a promise reaction). The hook gets the exception (use
+    /// [`Realm::report`] for its message and position, [`Exception::value`] for the thrown
+    /// value, the way `window.onerror` wants them) and the jobs go on, so one failing
+    /// callback no longer stops [`Realm::run_jobs`]. Uncatchable terminations (budget,
+    /// interrupt, memory) are never given to the hook: `run_jobs` still returns them.
+    /// Errors thrown from `eval`, `call` and `construct` are returned to the embedder as
+    /// before. `None` removes the hook.
+    pub fn set_error_hook(&mut self, hook: Option<Box<ErrorHook>>) {
+        self.error_hook = hook;
     }
 
     /// A new pending promise and its resolve and reject functions.

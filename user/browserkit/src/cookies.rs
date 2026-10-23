@@ -172,6 +172,8 @@ pub enum Refused {
     NotSecure,
     Prefix,
     SameSiteNone,
+    /// A script (document.cookie) tried to set or replace an HttpOnly cookie.
+    HttpOnly,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,6 +231,23 @@ impl Jar {
 
     /// One `Set-Cookie` header from a response for `url`.
     pub fn set(&mut self, url: &Url, header: &str, now: i64, ctx: &Context) -> Result<(), Refused> {
+        self.set_as(url, header, now, ctx, false)
+    }
+
+    /// `document.cookie = line` on a page at `url`: like a Set-Cookie header, except that a
+    /// script can't set an HttpOnly cookie or replace one.
+    pub fn set_from_script(&mut self, url: &Url, line: &str, now: i64) -> Result<(), Refused> {
+        self.set_as(url, line, now, &Context::TopLevel { from: None }, true)
+    }
+
+    fn set_as(
+        &mut self,
+        url: &Url,
+        header: &str,
+        now: i64,
+        ctx: &Context,
+        script: bool,
+    ) -> Result<(), Refused> {
         if !Self::first_party(url, ctx) {
             return Err(Refused::ThirdParty);
         }
@@ -355,6 +374,9 @@ impl Jar {
             return Err(Refused::NotSecure);
         }
         let old = self.cookies.iter().position(same);
+        if script && (c.http_only || old.is_some_and(|i| self.cookies[i].http_only)) {
+            return Err(Refused::HttpOnly);
+        }
         if c.expires.is_some_and(|e| e <= now) {
             // Expired: a deletion.
             if let Some(i) = old {
@@ -414,6 +436,24 @@ impl Jar {
 
     /// The `Cookie` header for a request to `url` (None: no cookies go).
     pub fn header(&self, url: &Url, post: bool, now: i64, ctx: &Context) -> Option<String> {
+        self.header_as(url, post, now, ctx, false)
+    }
+
+    /// `document.cookie` for a page at `url`: what a request would carry, less the HttpOnly
+    /// cookies ("" for none).
+    pub fn for_script(&self, url: &Url, now: i64) -> String {
+        self.header_as(url, false, now, &Context::TopLevel { from: None }, true)
+            .unwrap_or_default()
+    }
+
+    fn header_as(
+        &self,
+        url: &Url,
+        post: bool,
+        now: i64,
+        ctx: &Context,
+        script: bool,
+    ) -> Option<String> {
         if !Self::first_party(url, ctx) {
             return None;
         }
@@ -437,6 +477,7 @@ impl Jar {
                         SameSite::Strict => false,
                     };
                 host_ok
+                    && !(script && c.http_only)
                     && path_match(path, &c.path)
                     && (https || !c.secure)
                     && c.expires.is_none_or(|e| e > now)
@@ -564,6 +605,27 @@ mod tests {
         assert_eq!(site_of("10.0.2.2"), "10.0.2.2");
         assert_eq!(site_of("::1"), "::1");
         assert_eq!(site_of("Milk.Test."), "milk.test");
+    }
+
+    #[test]
+    fn scripts_never_see_or_touch_http_only() {
+        let mut j = Jar::new();
+        let page = u("http://www.milk.test/app");
+        j.set(&page, "sid=secret; HttpOnly; Path=/", NOW, &TOP).unwrap();
+        j.set(&page, "theme=dark; Path=/", NOW, &TOP).unwrap();
+        assert_eq!(j.for_script(&page, NOW), "theme=dark");
+        assert_eq!(j.header(&page, false, NOW, &TOP).unwrap(), "sid=secret; theme=dark");
+        assert_eq!(
+            j.set_from_script(&page, "sid=stolen; Path=/", NOW),
+            Err(Refused::HttpOnly)
+        );
+        assert_eq!(
+            j.set_from_script(&page, "x=1; HttpOnly", NOW),
+            Err(Refused::HttpOnly)
+        );
+        j.set_from_script(&page, "lang=en; Path=/", NOW).unwrap();
+        assert_eq!(j.for_script(&page, NOW), "theme=dark; lang=en");
+        assert!(j.header(&page, false, NOW, &TOP).unwrap().contains("sid=secret"));
     }
 
     #[test]

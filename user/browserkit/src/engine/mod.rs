@@ -6,10 +6,13 @@
 //! engine, so a change of engine is a change here.
 
 pub use webengine::{
-    ControlId, ControlKind, DisplayList, Document, Entry, Family, FindMatch, Font, FontMetrics,
-    FormControl, Hit, ImageId, Item, Link, Method, Rect, Resource, ResourceKind, Submission,
-    TextMeasurer, Viewport,
+    ConsoleLevel, ConsoleLine, ControlId, ControlKind, DisplayList, Document, Entry, Family,
+    FindMatch, Font, FontMetrics, FormControl, Hit, ImageId, Item, KeyInput, Limits, Link,
+    Method, PageRequest, Rect, Resource, ResourceKind, ScriptHost, ScriptLimits, ScriptStats,
+    Storage, Submission, TextMeasurer, Viewport,
 };
+/// The modifier keys as the engine passes them to scripts.
+pub use webengine::Mods as KeyMods;
 
 /// A pixel colour: `0xAARRGGBB` in the engine's lists, `0x00RRGGBB` on the screen.
 pub type Color = u32;

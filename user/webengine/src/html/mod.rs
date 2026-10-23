@@ -5,4 +5,4 @@ pub mod entities;
 pub mod tokenizer;
 pub mod tree;
 
-pub use tree::{Parsed, parse_document};
+pub use tree::{Parsed, parse_document, parse_document_with, parse_fragment};

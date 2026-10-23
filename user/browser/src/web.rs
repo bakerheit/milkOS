@@ -1,12 +1,15 @@
 //! The page as the rest of the app uses it: user/webengine's Document (browserkit::engine)
 //! behind the few calls the Browser makes, with form controls by index (the engine's
-//! ControlId is the index into its controls).
+//! ControlId is the index into its controls). A page parsed with scripts on runs them
+//! through the calls that take a [`ScriptHost`] (js.rs makes one); after any of those the
+//! controls may have changed, so the focus is read back from the engine.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use browserkit::engine::{
-    ControlId, ControlKind, DisplayList, Document, FormControl, Link, Rect, Resource, Submission,
+    ConsoleLine, ControlId, ControlKind, DisplayList, Document, FormControl, KeyInput, KeyMods,
+    Limits, Link, PageRequest, Rect, Resource, ScriptHost, ScriptLimits, ScriptStats, Submission,
     Viewport,
 };
 use browserkit::font::Fonts;
@@ -43,13 +46,102 @@ pub struct Doc {
 }
 
 impl Doc {
-    /// Parse a page. `url` is its address (relative links resolve against it).
-    pub fn parse(bytes: &[u8], url: &str, content_type: &str) -> Doc {
+    /// Parse a page. `url` is its address (relative links resolve against it). `scripts`:
+    /// run its JavaScript.
+    pub fn parse(bytes: &[u8], url: &str, content_type: &str, scripts: bool) -> Doc {
         let ct = (!content_type.is_empty()).then_some(content_type);
         Doc {
-            d: Document::parse(bytes, url, ct),
+            d: Document::parse_scripted(
+                bytes,
+                url,
+                ct,
+                Limits::default(),
+                scripts.then(ScriptLimits::default),
+            ),
             laid: None,
         }
+    }
+
+    // ---- scripts ----
+
+    /// It runs scripts (and they haven't been stopped).
+    pub fn scripting(&self) -> bool {
+        self.d.scripting()
+    }
+
+    pub fn pending_scripts(&self) -> Vec<String> {
+        self.d.pending_scripts()
+    }
+
+    pub fn supply_script(&mut self, url: &str, body: Option<&[u8]>) {
+        self.d.supply_script(url, body);
+    }
+
+    /// Scripts, timers and load events that are due. True if anything ran.
+    pub fn run(&mut self, host: &mut dyn ScriptHost) -> bool {
+        self.d.run(host)
+    }
+
+    pub fn next_wake(&self) -> Option<f64> {
+        self.d.next_wake()
+    }
+
+    pub fn wants_frame(&self) -> bool {
+        self.d.wants_frame()
+    }
+
+    pub fn frame(&mut self, host: &mut dyn ScriptHost) -> bool {
+        self.d.frame(host)
+    }
+
+    /// A click at page point (x, y) with the view at `scroll`: false if a script cancelled
+    /// it (checkboxes and radio buttons are toggled by the engine).
+    pub fn click(&mut self, host: &mut dyn ScriptHost, x: i32, y: i32, scroll: i32, m: KeyMods) -> bool {
+        self.d.click(host, x, y - scroll, (0, scroll), m)
+    }
+
+    /// A key for the page: false if a script cancelled it.
+    pub fn key(&mut self, host: &mut dyn ScriptHost, k: &KeyInput, up: bool) -> bool {
+        self.d.key(host, k, up)
+    }
+
+    pub fn focused(&self) -> Option<usize> {
+        self.d.focused().map(|c| c.0 as usize)
+    }
+
+    pub fn set_focus(&mut self, host: &mut dyn ScriptHost, i: Option<usize>) {
+        self.d.set_focus(host, i.map(Self::id));
+    }
+
+    /// The user changed control `i` (input / change events).
+    pub fn input(&mut self, host: &mut dyn ScriptHost, i: usize) {
+        self.d.input(host, Self::id(i));
+    }
+
+    /// Pressing `i` with scripts: validation and the submit event first.
+    pub fn submit_form(&mut self, host: &mut dyn ScriptHost, i: usize) -> Option<Submission> {
+        self.d.submit_form(host, Self::id(i), None)
+    }
+
+    pub fn take_requests(&mut self) -> Vec<PageRequest> {
+        self.d.take_requests()
+    }
+
+    pub fn take_console(&mut self) -> Vec<ConsoleLine> {
+        self.d.take_console()
+    }
+
+    pub fn stop_scripts(&mut self) {
+        self.d.stop_scripts();
+    }
+
+    pub fn script_stats(&self) -> ScriptStats {
+        self.d.script_stats()
+    }
+
+    /// Scripts changed the page since it was laid out.
+    pub fn needs_layout(&self) -> bool {
+        self.d.needs_layout()
     }
 
     pub fn title(&self) -> String {

@@ -65,3 +65,66 @@ fn struct_sizes() {
         size_of::<crate::style::props::Decl>(),
     );
 }
+
+/// Scripts on the same page: DOM building, queries, and a class change relaid out (the
+/// incremental restyle), timed: `cargo test --release ... scripted -- --nocapture` (skipped
+/// in debug builds, where the VM is too slow for it to be worth the time).
+#[test]
+#[cfg_attr(debug_assertions, ignore)]
+fn scripted_dom_on_wiki_page() {
+    let html = wikigen::wiki_page(1 << 20, 42);
+    let mut h = super::script::Host::new();
+    let mut d = Document::parse_scripted(
+        html.as_bytes(),
+        "https://wiki.example/wiki/Milk",
+        Some("text/html; charset=utf-8"),
+        Limits::default(),
+        Some(ScriptLimits::default()),
+    );
+    d.layout(&Viewport::new(1024, 768), &SysMeasurer);
+    let probe = jsengine::Realm::new(jsengine::Options::default()).eval("1", "p").is_ok();
+    if !probe {
+        return;
+    }
+    let run = |d: &mut Document, h: &mut super::script::Host, src: &str| -> std::time::Duration {
+        let js = d.js.as_mut().unwrap();
+        let t = std::time::Instant::now();
+        js.test_entry(&mut d.page, h, |_b, r| {
+            if let Err(e) = r.eval(src, "bench") {
+                panic!("{}", r.report(&e));
+            }
+        });
+        t.elapsed()
+    };
+    let build = run(&mut d, &mut h, "var ul = document.createElement('ul'); for (var i = 0; i < 2000; i++) { var li = document.createElement('li'); li.textContent = 'item ' + i; li.className = 'x' + (i % 7); ul.appendChild(li); } document.body.appendChild(ul);");
+    let t = std::time::Instant::now();
+    d.layout(&Viewport::new(1024, 768), &SysMeasurer);
+    let lay1 = t.elapsed();
+    let query = run(&mut d, &mut h, "var n = 0; for (var k = 0; k < 20; k++) n += document.querySelectorAll('a').length; window.n = n;");
+    let restyle0 = d.page.restyles;
+    let mut toggles = std::time::Duration::ZERO;
+    for i in 0..20 {
+        toggles += run(&mut d, &mut h, &std::format!("document.querySelector('li').className = 'on{i}';"));
+        d.layout(&Viewport::new(1024, 768), &SysMeasurer);
+    }
+    let t = std::time::Instant::now();
+    for i in 0..20 {
+        run(&mut d, &mut h, &std::format!("document.querySelector('li').className = 'on{i}b';"));
+        d.layout(&Viewport::new(1024, 768), &SysMeasurer);
+    }
+    let per_change = t.elapsed() / 20;
+    let inner = run(&mut d, &mut h, "var t = document.createElement('div'); document.body.appendChild(t); for (var i = 0; i < 200; i++) t.innerHTML = '<p>tick <b>' + i + '</b></p><ul><li>a<li>b</ul>';");
+    std::println!(
+        "scripted wiki: build 2000 items {:?}, layout after {:?}, 20 x querySelectorAll('a') {:?}, class change + relayout {:?} each ({} incremental / {} full restyles), 200 innerHTML {:?}; heap {} KB",
+        build,
+        lay1,
+        query,
+        per_change,
+        d.page.restyles.0 - restyle0.0,
+        d.page.restyles.1 - restyle0.1,
+        inner,
+        d.script_stats().heap_bytes / 1024
+    );
+    let _ = toggles;
+    assert!(d.page.restyles.0 - restyle0.0 >= 30, "incremental restyles used");
+}

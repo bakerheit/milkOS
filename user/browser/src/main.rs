@@ -26,6 +26,7 @@
 extern crate alloc;
 
 mod draw;
+mod js;
 mod net;
 mod store;
 mod sysfont;
@@ -90,7 +91,7 @@ pub const ID_MENU_ITEM: u32 = 300; // + index
 pub const ID_OPTION: u32 = 400; // + index
 
 /// What the toolbar's menu offers (label, shortcut).
-pub const MENU: [(&str, &str); 14] = [
+pub const MENU: [(&str, &str); 16] = [
     ("New Tab", "Cmd-T"),
     ("Close Tab", "Ctrl-W"),
     ("Bookmark This Page", "Cmd-D"),
@@ -105,7 +106,11 @@ pub const MENU: [(&str, &str); 14] = [
     ("Skip to Content", ""),
     ("Save Link Target", "Alt-click"),
     ("Forget Cookies, History", "Cmd-Shift-Del"),
+    ("JavaScript", ""),
+    ("Console", "Cmd-Alt-J"),
 ];
+pub const MENU_JAVASCRIPT: usize = 14;
+pub const MENU_CONSOLE: usize = 15;
 
 pub enum Popup {
     Menu,
@@ -219,6 +224,18 @@ pub struct App {
     pub downloads: Vec<Download>,
     pub images: BTreeMap<String, ImgState>,
     pub sheets: BTreeMap<String, ImgState>,
+    /// External scripts, by address (ImgState::Sheet holds a body).
+    pub scripts: BTreeMap<String, ImgState>,
+    /// Bytes of script bodies kept (the cache is dropped past 16 MB).
+    pub script_bytes: usize,
+    /// localStorage, by origin (js.rs).
+    pub local: js::LocalStorage,
+    /// JavaScript is on (the menu's switch, kept in ~/Library/Browser/settings).
+    pub js_on: bool,
+    /// The console panel is open.
+    pub console_open: bool,
+    /// --log-input: say more on the serial line.
+    pub log: bool,
     pub image_pixels: usize,
     pub surface: Surface,
     /// The address bar while it has the keyboard.
@@ -344,6 +361,7 @@ impl App {
             html.as_bytes(),
             "text/html",
             PageKind::Internal(i),
+            false,
         )
     }
 
@@ -356,7 +374,14 @@ impl App {
         url: Option<Url>,
     ) -> Page {
         let html = pages::error(title, message, hint, address);
-        let mut p = Page::new(address, url, html.as_bytes(), "text/html", PageKind::Error);
+        let mut p = Page::new(
+            address,
+            url,
+            html.as_bytes(),
+            "text/html",
+            PageKind::Error,
+            false,
+        );
         p.title = String::from(title);
         p
     }
@@ -691,22 +716,29 @@ impl App {
     // ---- forms --------------------------------------------------------------------------
 
     /// Send the form that control `id` belongs to (a button, or Enter in a field: the
-    /// engine applies the implicit-submission rules).
+    /// engine applies the implicit-submission rules), after the constraints are checked and
+    /// the page's submit listeners had their say.
     pub fn submit(&mut self, id: usize) {
+        if self.tab().page.doc.control(id).is_none() {
+            return;
+        }
+        let ti = self.cur;
+        let Some(sub) = self.with_doc(ti, |d, h| d.submit_form(h, id)) else {
+            return;
+        };
+        self.send_submission(sub);
+    }
+
+    /// Go where a form submission says (from a button, or a script's form.submit()).
+    pub fn send_submission(&mut self, sub: browserkit::engine::Submission) {
         let t = self.tab();
         let doc = &t.page.doc;
-        let Some(c) = doc.control(id) else {
-            return;
-        };
-        let Some(sub) = doc.submit(id) else {
-            return;
-        };
         let from = t.page.url.as_ref().map(|u| site_of(&u.host));
         // A password typed on a plain-http page goes in the clear: say so.
         let password = doc
             .controls()
             .iter()
-            .any(|o| o.kind == ControlKind::Password && o.form == c.form && !o.value.is_empty());
+            .any(|o| o.kind == ControlKind::Password && !o.value.is_empty());
         let new_tab = sub.target.as_deref() == Some("_blank");
         match form::request(&sub) {
             Ok(req) => {
@@ -735,6 +767,9 @@ impl App {
     /// Give control `id` the keyboard (or take it away with None).
     pub fn focus(&mut self, id: Option<usize>) {
         self.editing = None;
+        if self.tab().focus != id || self.tab().page.doc.focused() != id {
+            self.page_focus(id);
+        }
         let t = self.tab_mut();
         t.focus = id;
         t.caret = id
@@ -825,8 +860,12 @@ impl App {
                 }
                 let v: String = chars.into_iter().collect();
                 let t = self.tab_mut();
+                let changed = t.page.doc.control(id).is_some_and(|c| c.value != v);
                 t.page.doc.set_value(id, &v);
                 t.caret = caret2;
+                if changed {
+                    self.control_input(id);
+                }
                 true
             }
             ControlKind::Radio if matches!(k, Key::Up | Key::Down | Key::Left | Key::Right) => {
@@ -848,14 +887,14 @@ impl App {
                     } else {
                         (p + 1) % n
                     }];
-                    self.tab_mut().page.doc.click_check(next);
                     self.focus(Some(next));
+                    self.click_control(next);
                 }
                 true
             }
             ControlKind::Checkbox | ControlKind::Radio => match k {
                 Key::Char(' ') => {
-                    self.tab_mut().page.doc.click_check(id);
+                    self.click_control(id);
                     true
                 }
                 Key::Enter => {
@@ -878,7 +917,10 @@ impl App {
                         } else {
                             (sel + 1).min(n - 1)
                         };
-                        self.tab_mut().page.doc.select(id, s);
+                        if s != sel {
+                            self.tab_mut().page.doc.select(id, s);
+                            self.control_input(id);
+                        }
                     }
                     true
                 }
@@ -931,6 +973,22 @@ impl App {
         let v: String = chars.into_iter().collect();
         t.page.doc.set_value(id, &v);
         t.caret = caret + n;
+        if n > 0 {
+            self.control_input(id);
+        }
+    }
+
+    /// A click on control `id` from the keyboard (Space on a checkbox, arrows in a radio
+    /// group): through the page, so its click listeners run and the engine toggles it.
+    fn click_control(&mut self, id: usize) {
+        let ti = self.cur;
+        let Some(r) = self.tab().page.doc.control_rect(id) else {
+            self.tab_mut().page.doc.click_check(id);
+            return;
+        };
+        let scroll = self.tab().scroll;
+        let (x, y) = (r.x + r.w / 2, r.y + r.h / 2);
+        self.with_doc(ti, |d, h| d.click(h, x, y, scroll, js::engine_mods(Mods::default())));
     }
 
     /// A click (or Space) on a button control.
@@ -1159,6 +1217,17 @@ impl App {
             self.popup = None;
             return;
         }
+        // The page's keydown first: a script may cancel what the key would do.
+        if !self.page_key(k, m, false) {
+            self.page_key(k, m, true);
+            return;
+        }
+        self.page_key_default(k, m);
+        self.page_key(k, m, true);
+    }
+
+    /// What a key does in the page when no script cancelled it.
+    fn page_key_default(&mut self, k: Key, m: Mods) {
         if k == Key::Tab {
             self.tab_focus(m.shift);
             return;
@@ -1189,6 +1258,10 @@ impl App {
     /// A click at (x, y) in the window.
     fn click(&mut self, x: i32, y: i32, button: u8, m: Mods) {
         let id = self.hits.at(x, y);
+        let popup_was = match self.popup {
+            Some(Popup::Select(c)) => Some(Popup::Select(c)),
+            _ => None,
+        };
         // An open popup: a click outside closes it.
         if self.popup.is_some()
             && !matches!(id, Some(i) if i == ID_MENU || (ID_MENU_ITEM..ID_MENU_ITEM + 100).contains(&i) || (ID_OPTION..ID_OPTION + 1000).contains(&i))
@@ -1235,10 +1308,14 @@ impl App {
                 self.menu_item((i - ID_MENU_ITEM) as usize);
             }
             Some(i) if (ID_OPTION..ID_OPTION + 1000).contains(&i) => {
-                if let Some(Popup::Select(c)) = self.popup {
-                    self.tab_mut().page.doc.select(c, (i - ID_OPTION) as usize);
-                }
                 self.popup = None;
+                if let Some(Popup::Select(c)) = popup_was {
+                    let o = (i - ID_OPTION) as usize;
+                    if self.tab().page.doc.selected(c) != o {
+                        self.tab_mut().page.doc.select(c, o);
+                        self.control_input(c);
+                    }
+                }
             }
             Some(i) if (ID_CLOSE_TAB..ID_CLOSE_TAB + 100).contains(&i) => {
                 self.close_tab((i - ID_CLOSE_TAB) as usize)
@@ -1262,12 +1339,40 @@ impl App {
     }
 
     fn page_click(&mut self, x: i32, y: i32, button: u8, m: Mods) {
+        let ti = self.cur;
+        // Hit testing needs the page as scripts left it.
+        if self.tab().page.doc.needs_layout() {
+            self.layout_current();
+        }
         let t = self.tab();
         let (px, py) = (x * 100 / t.zoom, y * 100 / t.zoom + t.scroll);
+        let scroll = t.scroll;
+        // The page's mousedown, mouseup and click (left button): a listener may cancel what
+        // the click does (and checkboxes are toggled by the engine).
+        if button == 1 {
+            let page_before = self.tab().page.address.clone();
+            let ok = self.with_doc(ti, |d, h| d.click(h, px, py, scroll, js::engine_mods(m)));
+            if ti != self.cur
+                || self.tabs[ti].load.is_some()
+                || self.tabs[ti].page.address != page_before
+            {
+                return; // the click navigated
+            }
+            if !ok {
+                return;
+            }
+            if self.tab().page.doc.needs_layout() {
+                self.layout_current();
+            }
+        }
+        let t = self.tab();
         match t.page.doc.hit_test(px, py, t.scroll) {
             Some(Hit::Link(link)) => {
                 if button == 2 {
                     return;
+                }
+                if link.url.trim_start().to_ascii_lowercase().starts_with("javascript:") {
+                    return; // the engine ran it (or scripts are off)
                 }
                 self.focus(None);
                 let new_tab =
@@ -1283,11 +1388,10 @@ impl App {
                 }
                 self.focus(Some(id));
                 match c.kind {
-                    ControlKind::Checkbox | ControlKind::Radio => {
-                        self.tab_mut().page.doc.click_check(id)
-                    }
+                    // Toggled by the engine's click above (a right or middle click doesn't).
+                    ControlKind::Checkbox | ControlKind::Radio => {}
                     ControlKind::Select => self.popup = Some(Popup::Select(id)),
-                    k if is_button(k) => self.press(id),
+                    k if is_button(k) && button == 1 => self.press(id),
                     k if is_text(k) => {
                         // The caret goes where the click was (single-line fields).
                         if let Some(r) = self.tab().page.doc.control_rect(id)
@@ -1326,6 +1430,8 @@ impl App {
             11 => self.skip_to_content(),
             12 => self.say("Alt-click a link to save what it points at in ~/Downloads"),
             13 => self.forget_everything(),
+            MENU_JAVASCRIPT => self.toggle_javascript(),
+            MENU_CONSOLE => self.console_open = !self.console_open,
             _ => {}
         }
     }
@@ -1448,6 +1554,37 @@ impl App {
             self.refresh_internal(Internal::Downloads);
             return;
         }
+        if kind == Kind::Script {
+            let url = self
+                .scripts
+                .iter()
+                .find(|(_, s)| matches!(s, ImgState::Loading(j) if *j == id))
+                .map(|(u, _)| u.clone());
+            if let Some(u) = url {
+                let st = match out {
+                    Outcome::Page(r) if r.status < 400 => {
+                        rt::println!("[browser] script {u}: {} bytes", r.body.len());
+                        self.script_bytes += r.body.len();
+                        ImgState::Sheet(r.body)
+                    }
+                    Outcome::Page(r) => {
+                        rt::println!("[browser] script {u}: {} {}", r.status, r.reason);
+                        ImgState::Failed
+                    }
+                    _ => ImgState::Failed,
+                };
+                self.scripts.insert(u, st);
+            }
+            for ti in 0..self.tabs.len() {
+                self.feed(ti);
+            }
+            // Keep the cache bounded (pages fetch again what they need).
+            if self.script_bytes > 16 << 20 {
+                self.scripts.retain(|_, s| matches!(s, ImgState::Loading(_)));
+                self.script_bytes = 0;
+            }
+            return;
+        }
         if kind == Kind::Image || kind == Kind::Style {
             let cache_hit = |m: &BTreeMap<String, ImgState>| {
                 m.iter()
@@ -1517,6 +1654,7 @@ impl App {
                     &resp.body,
                     &ct,
                     PageKind::Web,
+                    self.js_on,
                 );
                 page.status = resp.status;
                 if resp.status >= 400 && page.title.is_empty() {
@@ -1556,6 +1694,8 @@ impl App {
                 }
                 self.visits.add(&addr, &title, net::now_secs());
                 self.feed(ti);
+                // Its scripts start now (inline ones run, external ones are fetched).
+                self.run_page(ti);
                 self.save_cookies();
                 self.profile.write("history", &self.visits.to_file());
             }
@@ -1671,10 +1811,52 @@ impl App {
                     }
                 }
             }
+            // External scripts.
+            let mut scripted = false;
+            for u in self.tabs[ti].page.doc.pending_scripts().into_iter().take(100) {
+                match self.scripts.get(&u) {
+                    Some(ImgState::Loading(_)) => waiting += 1,
+                    Some(ImgState::Sheet(body)) => {
+                        let body = body.clone();
+                        self.tabs[ti].page.doc.supply_script(&u, Some(&body));
+                        scripted = true;
+                    }
+                    Some(_) => {
+                        self.tabs[ti].page.doc.supply_script(&u, None);
+                        scripted = true;
+                    }
+                    None => {
+                        let url = Url::parse(&u)
+                            .ok()
+                            .filter(|x| !(secure && x.scheme == Scheme::Http));
+                        match url {
+                            Some(x) => {
+                                let ctx = Context::Subresource {
+                                    page_site: site.clone(),
+                                };
+                                let id = self.fetch.start(Kind::Script, Request::get(&x), ctx);
+                                self.scripts.insert(u.clone(), ImgState::Loading(id));
+                                waiting += 1;
+                            }
+                            None => {
+                                self.tabs[ti].page.doc.supply_script(&u, None);
+                                scripted = true;
+                            }
+                        }
+                    }
+                }
+            }
             self.tabs[ti].page.waiting = waiting;
+            if scripted {
+                self.run_page(ti);
+            }
             if supplied {
                 self.tabs[ti].page.laid_w = 0;
-            } else {
+                // The load event may be due now.
+                if self.tabs[ti].page.doc.scripting() {
+                    self.tabs[ti].last_run = 0;
+                }
+            } else if !scripted {
                 break;
             }
         }
@@ -1767,12 +1949,14 @@ fn main(args: &rt::Args) -> i32 {
     let bookmarks = Bookmarks::from_file(&profile.read("bookmarks"));
     let visits = Visits::from_file(&profile.read("history"));
     let downloads = profile.downloads.clone();
+    let profile_settings = profile.read("settings");
     let first = Page::new(
         "",
         None,
         b"",
         "text/html",
         PageKind::Internal(Internal::NewTab),
+        false,
     );
     let mut app = App {
         win,
@@ -1787,6 +1971,12 @@ fn main(args: &rt::Args) -> i32 {
         downloads: Vec::new(),
         images: BTreeMap::new(),
         sheets: BTreeMap::new(),
+        scripts: BTreeMap::new(),
+        script_bytes: 0,
+        local: BTreeMap::new(),
+        js_on: js::javascript_setting(&profile_settings),
+        console_open: false,
+        log,
         image_pixels: 0,
         surface: Surface::new(W, H, 0xFFFFFF),
         editing: None,
@@ -1809,9 +1999,12 @@ fn main(args: &rt::Args) -> i32 {
     let mut frame_due: Option<u64> = None;
     loop {
         let busy = app.fetch.busy() || app.tab().scroll != app.tab().target;
-        // Wait no longer than the next animation frame.
+        // Wait no longer than the next animation frame (pictures, or the page's scripts).
         let mut wait = if busy { 16 } else { 400 };
         if let Some(due) = frame_due {
+            wait = wait.min(due.saturating_sub(now_ms()).max(1));
+        }
+        if let Some(due) = app.script_wake() {
             wait = wait.min(due.saturating_sub(now_ms()).max(1));
         }
         let ev = app.win.event(wait);
@@ -1833,6 +2026,9 @@ fn main(args: &rt::Args) -> i32 {
                 if app.popup.is_none() {
                     app.scroll_by(d * 60);
                 }
+            }
+            Some(Event::Key(Key::Char('j'), mods)) if mods.meta && mods.alt => {
+                app.console_open = !app.console_open;
             }
             Some(Event::Key(k, mods)) => app.key(k, mods),
             Some(Event::Action { .. }) => {} // the inbox is read every tick
@@ -1859,6 +2055,14 @@ fn main(args: &rt::Args) -> i32 {
             break;
         }
         dirty |= app.tick();
+        dirty |= app.run_scripts();
+        // The page's animation frames come with drawing.
+        dirty |= app.tab().page.doc.wants_frame();
+        dirty |= app.dirty;
+        app.dirty = false;
+        if app.quit {
+            break;
+        }
         dirty |= app.animate();
         let (moved, due) = app.animate_images(now_ms());
         dirty |= moved;

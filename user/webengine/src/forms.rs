@@ -2,7 +2,7 @@
 //! (§4.10.21.3 "form submission algorithm", §4.10.21.4 "constructing the entry list", encoded
 //! as application/x-www-form-urlencoded).
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -10,10 +10,15 @@ use crate::api::*;
 use crate::atoms::tag;
 use crate::dom::{Dom, NONE, NodeId};
 
+/// The most text one control's value holds (bytes).
+pub const MAX_VALUE: usize = 4 << 20;
+
 /// A control that is submitted but never drawn (`<input type=hidden>`).
 #[derive(Clone, Debug)]
 pub struct Hidden {
     pub node: NodeId,
+    /// Its place in tree order among the controls (node ids aren't, once scripts move nodes).
+    pub seq: u32,
     pub name: String,
     pub value: String,
     pub form: Option<u32>,
@@ -23,12 +28,22 @@ pub struct Forms {
     pub controls: Vec<FormControl>,
     /// The element of each control.
     pub nodes: Vec<NodeId>,
+    /// Each control's place in tree order (shared numbering with [`Hidden::seq`]).
+    pub seqs: Vec<u32>,
     pub by_node: BTreeMap<NodeId, (ControlId, ControlKind)>,
     pub hidden: Vec<Hidden>,
     /// `<form>` elements in tree order.
     pub forms: Vec<NodeId>,
     /// The initial state, for reset.
     initial: Vec<FormControl>,
+    /// A `<select>`'s option elements, per control (empty for the other kinds).
+    pub option_nodes: Vec<Vec<NodeId>>,
+    /// Controls whose value / checkedness / selectedness was changed by the user or a script
+    /// (HTML's "dirty" flags): recollecting after the DOM changes keeps their state instead of
+    /// taking it from the attributes again.
+    dirty_value: BTreeSet<NodeId>,
+    dirty_checked: BTreeSet<NodeId>,
+    dirty_select: BTreeSet<NodeId>,
 }
 
 fn collapse_ws(s: &str) -> String {
@@ -89,8 +104,13 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
         nodes: Vec::new(),
         by_node: BTreeMap::new(),
         hidden: Vec::new(),
+        seqs: Vec::new(),
         forms,
         initial: Vec::new(),
+        option_nodes: Vec::new(),
+        dirty_value: BTreeSet::new(),
+        dirty_checked: BTreeSet::new(),
+        dirty_select: BTreeSet::new(),
     };
     let mut n = 0;
     while n != NONE {
@@ -132,6 +152,7 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
             color: 0xFF00_0000,
             form: owner(dom, n, &f.forms),
         };
+        let mut opt_nodes = Vec::new();
         let ctl = if e.is(tag::INPUT) {
             let t = e.attr("type").unwrap_or("text").trim().to_ascii_lowercase();
             let value = String::from(e.attr("value").unwrap_or(""));
@@ -139,6 +160,7 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
                 "hidden" => {
                     f.hidden.push(Hidden {
                         node: n,
+                        seq: (f.nodes.len() + f.hidden.len()) as u32,
                         name: name.clone(),
                         value,
                         form: owner(dom, n, &f.forms),
@@ -218,6 +240,7 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
                     let in_disabled_group = dom
                         .element(dom.parent(o))
                         .is_some_and(|p| p.is(tag::OPTGROUP) && p.has_attr("disabled"));
+                    opt_nodes.push(o);
                     c.options.push(SelectOption {
                         label: oe
                             .attr("label")
@@ -286,8 +309,10 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
                 p = dom.parent(p);
             }
             f.by_node.insert(n, (id, c.kind));
+            f.seqs.push((f.nodes.len() + f.hidden.len()) as u32);
             f.nodes.push(n);
             f.controls.push(c);
+            f.option_nodes.push(opt_nodes);
         }
         // Don't look inside controls (options belong to their select).
         n = if e.is(tag::SELECT) || e.is(tag::TEXTAREA) {
@@ -300,6 +325,58 @@ pub fn collect(dom: &Dom, max: usize) -> Forms {
     f
 }
 
+/// Collect the controls again after the DOM changed, keeping what the user (or a script)
+/// changed: a dirty value, checkedness or selectedness stays; rects, fonts and colours stay
+/// until the next layout.
+pub fn recollect(dom: &Dom, old: &Forms, max: usize) -> Forms {
+    let mut f = collect(dom, max);
+    f.dirty_value = old.dirty_value.clone();
+    f.dirty_checked = old.dirty_checked.clone();
+    f.dirty_select = old.dirty_select.clone();
+    for i in 0..f.controls.len() {
+        let node = f.nodes[i];
+        let Some(&(oid, okind)) = old.by_node.get(&node) else {
+            continue;
+        };
+        let o = &old.controls[oid.0 as usize];
+        let c = &mut f.controls[i];
+        c.rect = o.rect;
+        c.font = o.font;
+        c.color = o.color;
+        if okind != c.kind {
+            continue;
+        }
+        if f.dirty_value.contains(&node) {
+            c.value = o.value.clone();
+        }
+        if f.dirty_checked.contains(&node) {
+            c.checked = o.checked;
+        }
+        if f.dirty_select.contains(&node) {
+            let sel: Vec<NodeId> = old.option_nodes[oid.0 as usize]
+                .iter()
+                .zip(o.options.iter())
+                .filter(|(_, op)| op.selected)
+                .map(|(n, _)| *n)
+                .collect();
+            for (k, op) in c.options.iter_mut().enumerate() {
+                op.selected = sel.contains(&f.option_nodes[i][k]);
+            }
+            if !c.multiple && !c.options.iter().any(|o| o.selected) && c.rows <= 1 {
+                if let Some(k) = c.options.iter().position(|o| !o.disabled) {
+                    c.options[k].selected = true;
+                }
+            }
+        }
+    }
+    // Forget nodes that are no longer controls.
+    let live: BTreeSet<NodeId> = f.nodes.iter().copied().collect();
+    f.dirty_value.retain(|n| live.contains(n));
+    f.dirty_checked.retain(|n| live.contains(n));
+    f.dirty_select.retain(|n| live.contains(n));
+    f
+}
+
 impl Forms {
     pub fn empty() -> Forms {
         Forms {
@@ -307,16 +384,27 @@ impl Forms {
             nodes: Vec::new(),
             by_node: BTreeMap::new(),
             hidden: Vec::new(),
+            seqs: Vec::new(),
             forms: Vec::new(),
             initial: Vec::new(),
+            option_nodes: Vec::new(),
+            dirty_value: BTreeSet::new(),
+            dirty_checked: BTreeSet::new(),
+            dirty_select: BTreeSet::new(),
         }
     }
 
     pub fn set_value(&mut self, id: ControlId, v: &str) {
+        self.set_value_as(id, v, false)
+    }
+
+    /// `script`: a script's `value =` (disabled and read-only controls take it too, and
+    /// `maxlength` isn't applied).
+    pub fn set_value_as(&mut self, id: ControlId, v: &str, script: bool) {
         let Some(c) = self.controls.get_mut(id.0 as usize) else {
             return;
         };
-        if c.disabled || c.readonly {
+        if !script && (c.disabled || c.readonly) {
             return;
         }
         if !matches!(
@@ -330,17 +418,30 @@ impl Forms {
         } else {
             v.replace(['\n', '\r'], "")
         };
-        if let Some(max) = c.max_length {
+        if !script && let Some(max) = c.max_length {
             v = v.chars().take(max as usize).collect();
         }
+        // A bound for what any one control holds.
+        if v.len() > MAX_VALUE {
+            let mut e = MAX_VALUE;
+            while !v.is_char_boundary(e) {
+                e -= 1;
+            }
+            v.truncate(e);
+        }
         c.value = v;
+        self.dirty_value.insert(self.nodes[id.0 as usize]);
     }
 
     pub fn set_checked(&mut self, id: ControlId, on: bool) {
+        self.set_checked_as(id, on, false)
+    }
+
+    pub fn set_checked_as(&mut self, id: ControlId, on: bool, script: bool) {
         let Some(c) = self.controls.get(id.0 as usize) else {
             return;
         };
-        if c.disabled {
+        if c.disabled && !script {
             return;
         }
         match c.kind {
@@ -349,29 +450,36 @@ impl Forms {
                 let (name, form) = (c.name.clone(), c.form);
                 if on && !name.is_empty() {
                     // The radio button group (HTML §4.10.5.1.15): same name, same form owner.
-                    for o in self.controls.iter_mut() {
+                    for (i, o) in self.controls.iter_mut().enumerate() {
                         if o.kind == ControlKind::Radio && o.name == name && o.form == form {
                             o.checked = false;
+                            self.dirty_checked.insert(self.nodes[i]);
                         }
                     }
                 }
                 self.controls[id.0 as usize].checked = on;
             }
-            _ => {}
+            _ => return,
         }
+        self.dirty_checked.insert(self.nodes[id.0 as usize]);
     }
 
     pub fn select_option(&mut self, id: ControlId, index: usize, on: bool) {
+        self.select_option_as(id, index, on, false)
+    }
+
+    pub fn select_option_as(&mut self, id: ControlId, index: usize, on: bool, script: bool) {
         let Some(c) = self.controls.get_mut(id.0 as usize) else {
             return;
         };
         if c.kind != ControlKind::Select
-            || c.disabled
+            || (c.disabled && !script)
             || index >= c.options.len()
-            || c.options[index].disabled
+            || (c.options[index].disabled && !script)
         {
             return;
         }
+        self.dirty_select.insert(self.nodes[id.0 as usize]);
         if c.multiple {
             c.options[index].selected = on;
         } else {
@@ -381,12 +489,33 @@ impl Forms {
         }
     }
 
+    /// No option of a select selected (a script set a value no option has).
+    pub fn deselect_all(&mut self, id: ControlId) {
+        if let Some(c) = self.controls.get_mut(id.0 as usize)
+            && c.kind == ControlKind::Select
+        {
+            for o in c.options.iter_mut() {
+                o.selected = false;
+            }
+            self.dirty_select.insert(self.nodes[id.0 as usize]);
+        }
+    }
+
     pub fn reset(&mut self, id: ControlId) {
         let Some(form) = self.controls.get(id.0 as usize).and_then(|c| c.form) else {
             return;
         };
+        self.reset_form(form);
+    }
+
+    /// Reset form number `form` (its controls back to their attributes).
+    pub fn reset_form(&mut self, form: u32) {
         for i in 0..self.controls.len() {
             if self.controls[i].form == Some(form) {
+                let node = self.nodes[i];
+                self.dirty_value.remove(&node);
+                self.dirty_checked.remove(&node);
+                self.dirty_select.remove(&node);
                 let rect = self.controls[i].rect;
                 let font = self.controls[i].font;
                 let color = self.controls[i].color;
@@ -409,13 +538,26 @@ impl Forms {
     ) -> Option<Submission> {
         let c = self.controls.get(id.0 as usize)?;
         let form_idx = c.form?;
-        let form_node = *self.forms.get(form_idx as usize)?;
-        let fe = dom.element(form_node)?;
         let submitter =
             matches!(c.kind, ControlKind::Submit | ControlKind::ImageSubmit).then_some(id);
         if c.kind == ControlKind::Reset || c.kind == ControlKind::Button {
             return None;
         }
+        self.submit_form(dom, doc_url, base, form_idx, submitter, click)
+    }
+
+    /// The submission of form number `form_idx` (`form.submit()` has no submitter).
+    pub fn submit_form(
+        &self,
+        dom: &Dom,
+        doc_url: &str,
+        base: &str,
+        form_idx: u32,
+        submitter: Option<ControlId>,
+        click: Option<(i32, i32)>,
+    ) -> Option<Submission> {
+        let form_node = *self.forms.get(form_idx as usize)?;
+        let fe = dom.element(form_node)?;
         let sub_el = submitter.and_then(|s| dom.element(self.nodes[s.0 as usize]));
         let pick = |a: &str, fa: &str| -> Option<String> {
             sub_el
@@ -442,19 +584,19 @@ impl Forms {
         let target = pick("formtarget", "target");
         // §4.10.21.4 the entry list, in tree order.
         let mut entries: Vec<(String, String)> = Vec::new();
-        let mut order: Vec<(NodeId, usize, bool)> = Vec::new();
+        let mut order: Vec<(u32, NodeId, usize, bool)> = Vec::new();
         for (i, ctl) in self.controls.iter().enumerate() {
             if ctl.form == Some(form_idx) {
-                order.push((self.nodes[i], i, false));
+                order.push((self.seqs[i], self.nodes[i], i, false));
             }
         }
         for (i, h) in self.hidden.iter().enumerate() {
             if h.form == Some(form_idx) {
-                order.push((h.node, i, true));
+                order.push((h.seq, h.node, i, true));
             }
         }
         order.sort_by_key(|o| o.0);
-        for (node, i, hidden) in order {
+        for (_, node, i, hidden) in order {
             if hidden {
                 let h = &self.hidden[i];
                 if h.name.is_empty() || dom.element(node).is_some_and(|e| e.has_attr("disabled")) {

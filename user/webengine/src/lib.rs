@@ -23,6 +23,8 @@ pub mod layout;
 mod measure;
 mod page;
 mod paint;
+pub mod script;
+pub mod serialize;
 pub mod style;
 pub mod url;
 

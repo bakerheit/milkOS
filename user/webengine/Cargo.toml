@@ -6,12 +6,17 @@ edition.workspace = true
 # The Browser's web engine: HTML5 parsing (the WHATWG tokenizer and tree builder), a DOM, CSS
 # (syntax, selectors level 3, the cascade, media queries), layout (block, inline, floats,
 # positioning, tables, flexbox) and paint into a display list, plus hit testing, find in page
-# and form controls. no_std + alloc, no dependencies and no I/O: the app fetches stylesheets and
+# and form controls, and the bindings that run page scripts in user/jsengine. no_std + alloc,
+# no I/O: the app fetches stylesheets and
 # images and measures text through the callbacks in src/api.rs. Host tests:
 #   cd user && cargo test -p webengine --target aarch64-apple-darwin
 [lib]
 bench = false
 doctest = false
+
+[dependencies]
+# The JavaScript engine pages' scripts run in (src/script/ binds the DOM into it).
+jsengine = { path = "../jsengine" }
 
 [dev-dependencies]
 # The system fonts, for the test rasterizer's screenshots (src/tests/raster.rs).

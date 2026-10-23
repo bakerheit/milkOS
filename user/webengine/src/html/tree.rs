@@ -3,13 +3,15 @@
 //! clause and the adoption agency algorithm), foster parenting, and the rules for foreign
 //! content (SVG and MathML are parsed so they nest correctly; they are not rendered).
 //!
-//! The scripting flag is off (no scripts run), so `<noscript>` content is parsed and shown.
+//! The scripting flag is a parameter: off (no scripts run), `<noscript>` content is parsed and
+//! shown; on, it is raw text (and display: none).
 //!
 //! Simplifications:
 //! - `<template>` contents are ordinary children of the template element (there is no
 //!   separate DocumentFragment) and the "in template" mode is approximated by "in body";
 //!   templates are display: none, so this never shows.
-//! - No fragment parsing (no innerHTML without scripts).
+//! - Fragment parsing ([`parse_fragment`], for `innerHTML`) follows §13.4 but has no form
+//!   element pointer from the context.
 //! - The SVG/MathML attribute-name adjustments are not applied (nothing reads them).
 //!
 //! Hostile input is bounded by [`Limits`]: node count, nesting depth (deeper elements are
@@ -107,8 +109,46 @@ pub struct Parsed {
 
 /// Parse a whole document (§13.2.6 driven by §13.2.5).
 pub fn parse_document(input: &str, limits: &Limits) -> Parsed {
+    parse_document_with(input, limits, false)
+}
+
+/// [`parse_document`] with the scripting flag (`<noscript>` is raw text when it is on).
+pub fn parse_document_with(input: &str, limits: &Limits, scripting: bool) -> Parsed {
     let mut tb = TreeBuilder::new(limits);
+    tb.scripting = scripting;
+    let tok = Tokenizer::new(input);
+    run(tb, tok, limits)
+}
+
+/// The HTML fragment parsing algorithm (§13.4): `input` parsed as if inside an HTML element
+/// named `context` (a static [`tag`] atom; pass [`tag::DIV`] for any other element, since only
+/// the known ones change how parsing goes). The result's document element is the stand-in
+/// `<html>` root; the fragment is its children (see [`Dom::import`]).
+pub fn parse_fragment(input: &str, context: Atom, limits: &Limits, scripting: bool) -> Parsed {
+    use tag::*;
+    let mut tb = TreeBuilder::new(limits);
+    tb.scripting = scripting;
     let mut tok = Tokenizer::new(input);
+    match context {
+        TITLE | TEXTAREA => tok.set_state(TextState::Rcdata),
+        STYLE | XMP | IFRAME | NOEMBED | NOFRAMES => tok.set_state(TextState::Rawtext),
+        SCRIPT => tok.set_state(TextState::ScriptData),
+        NOSCRIPT if scripting => tok.set_state(TextState::Rawtext),
+        PLAINTEXT => tok.set_state(TextState::Plaintext),
+        _ => {}
+    }
+    let root = tb.dom.create_element(HTML, Ns::Html, Vec::new());
+    tb.dom.append(0, root);
+    tb.open.push(root);
+    if context == TEMPLATE {
+        tb.afe.push(Afe::Marker);
+    }
+    tb.context = Some(context);
+    tb.reset_mode();
+    run(tb, tok, limits)
+}
+
+fn run(mut tb: TreeBuilder, mut tok: Tokenizer, limits: &Limits) -> Parsed {
     loop {
         tok.allow_cdata = tb.adjusted_current_is_foreign();
         let t = tok.next_token();
@@ -147,6 +187,10 @@ struct TreeBuilder {
     max_depth: usize,
     truncated: bool,
     stopped: bool,
+    /// The scripting flag (§13.2.4.5... "scripting flag").
+    scripting: bool,
+    /// Fragment parsing: the context element's tag.
+    context: Option<Atom>,
 }
 
 fn is_ws(c: char) -> bool {
@@ -183,6 +227,8 @@ impl TreeBuilder {
             max_depth: limits.max_depth.max(8),
             truncated: false,
             stopped: false,
+            scripting: false,
+            context: None,
         }
     }
 
@@ -749,7 +795,10 @@ impl TreeBuilder {
         for i in (0..self.open.len()).rev() {
             let n = self.open[i];
             let last = i == 0;
-            let t = self.dom.html_tag(n);
+            let t = match self.context {
+                Some(c) if last => c,
+                _ => self.dom.html_tag(n),
+            };
             let m = match t {
                 SELECT => {
                     let mut m = Mode::InSelect;
@@ -1144,6 +1193,7 @@ impl TreeBuilder {
                 }
                 TITLE => self.generic_text(&st, TextState::Rcdata, tz),
                 NOFRAMES | STYLE => self.generic_text(&st, TextState::Rawtext, tz),
+                NOSCRIPT if self.scripting => self.generic_text(&st, TextState::Rawtext, tz),
                 NOSCRIPT => {
                     self.insert_html(&st);
                     self.mode = Mode::InHeadNoscript;
@@ -1511,6 +1561,7 @@ impl TreeBuilder {
                 self.generic_text(&st, TextState::Rawtext, tz);
             }
             NOEMBED => self.generic_text(&st, TextState::Rawtext, tz),
+            NOSCRIPT if self.scripting => self.generic_text(&st, TextState::Rawtext, tz),
             SELECT => {
                 self.reconstruct_afe();
                 self.insert_html(&st);

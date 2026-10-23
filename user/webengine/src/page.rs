@@ -43,7 +43,7 @@ enum Slot {
 pub struct Page {
     url: String,
     base: String,
-    dom: Dom,
+    pub(crate) dom: Dom,
     truncated: bool,
     limits: Limits,
     slots: Vec<Slot>,
@@ -67,6 +67,18 @@ pub struct Page {
     ua_dark: bool,
     /// `<meta name=color-scheme>`: bit 1 light, 2 dark, 4 only.
     meta_scheme: u8,
+    /// The UA sheet, parsed once.
+    ua_sheet: Option<Rc<Sheet>>,
+    /// `<style>` sheets by element and text (not parsed again when a script changes others).
+    style_cache: Vec<(NodeId, String, Rc<Sheet>)>,
+    /// The scripting flag the page was parsed with (scripts on: `<noscript>` is raw text).
+    pub(crate) scripting: bool,
+    /// The element with the keyboard (NONE: the page itself).
+    pub(crate) focus: NodeId,
+    /// Subtrees to restyle at the next layout (scripts changed them).
+    pending_restyle: Vec<NodeId>,
+    /// Restyles done incrementally and in full since parsing (for tests and the debug line).
+    pub(crate) restyles: (u32, u32),
     /// No author styles (`<style>`, a stylesheet link, `style=`) and no colour attributes
     /// (bgcolor, text, link, ...): the page leaves its colours to the browser entirely.
     plain: bool,
@@ -114,6 +126,16 @@ fn is_text_plain(ct: Option<&str>) -> bool {
 
 impl Page {
     pub fn parse(bytes: &[u8], url: &str, ct: Option<&str>, limits: Limits) -> Page {
+        Page::parse_scripting(bytes, url, ct, limits, false)
+    }
+
+    pub fn parse_scripting(
+        bytes: &[u8],
+        url: &str,
+        ct: Option<&str>,
+        limits: Limits,
+        scripting: bool,
+    ) -> Page {
         let mut truncated = false;
         let bytes = if bytes.len() > limits.max_input {
             truncated = true;
@@ -127,16 +149,20 @@ impl Page {
                 "<!DOCTYPE html><html><head></head><body><pre>{}</pre></body></html>",
                 escape_html(&text)
             );
-            let mut p = Page::parse_str(&html, url, limits);
+            let mut p = Page::parse_str_with(&html, url, limits, false);
             p.truncated |= truncated;
             return p;
         }
-        let mut p = Page::parse_str(&text, url, limits);
+        let mut p = Page::parse_str_with(&text, url, limits, scripting);
         p.truncated |= truncated;
         p
     }
 
     pub fn parse_str(html: &str, url: &str, limits: Limits) -> Page {
+        Page::parse_str_with(html, url, limits, false)
+    }
+
+    pub fn parse_str_with(html: &str, url: &str, limits: Limits, scripting: bool) -> Page {
         let html = if html.len() > limits.max_input {
             let mut e = limits.max_input;
             while !html.is_char_boundary(e) {
@@ -146,7 +172,7 @@ impl Page {
         } else {
             html
         };
-        let parsed = crate::html::parse_document(html, &limits);
+        let parsed = crate::html::parse_document_with(html, &limits, scripting);
         let mut p = Page {
             url: String::from(url),
             base: String::from(url),
@@ -173,15 +199,23 @@ impl Page {
             ua_dark: false,
             meta_scheme: 0,
             plain: true,
+            ua_sheet: None,
+            style_cache: Vec::new(),
+            scripting,
+            focus: NONE,
+            pending_restyle: Vec::new(),
+            restyles: (0, 0),
         };
         p.scan();
+        p.dom.track = true;
         p
     }
 
-    /// Walk the DOM once: base URL, stylesheets, images, form controls.
+    /// Walk the DOM: base URL, stylesheets, images, form controls.
     fn scan(&mut self) {
         // <base href> (HTML §4.2.3: the first one with an href).
         let mut n = 0;
+        self.base = self.url.clone();
         while n != NONE {
             if let Some(e) = self.dom.element(n)
                 && e.is(tag::BASE)
@@ -192,14 +226,53 @@ impl Page {
             }
             n = self.dom.next_in(n, 0);
         }
-        let ua = self.parse_sheet(crate::style::UA_CSS, "about:ua");
-        self.slots.push(Slot::Ready {
-            sheet: Rc::new(ua),
-            media: MediaList::default(),
-            ua: true,
-        });
         let dark = self.parse_sheet(crate::style::UA_DARK_CSS, "about:ua");
         self.ua_dark_sheet = Some(Rc::new(dark));
+        // With scripts on, <noscript> holds raw text that isn't shown.
+        let ua = if self.scripting {
+            let css = alloc::format!("{}\nnoscript {{ display: none }}\n", crate::style::UA_CSS);
+            self.parse_sheet(&css, "about:ua")
+        } else {
+            self.parse_sheet(crate::style::UA_CSS, "about:ua")
+        };
+        self.ua_sheet = Some(Rc::new(ua));
+        self.scan_sheets();
+        self.scan_images();
+        self.forms = forms::collect(&self.dom, 100_000);
+        self.attach_form_images();
+    }
+
+    fn attach_form_images(&mut self) {
+        for (i, &node) in self.forms.nodes.iter().enumerate() {
+            self.forms.controls[i].image = self.img_nodes.get(&node).copied();
+        }
+    }
+
+    /// The stylesheets in tree order (`<style>`, `<link rel=stylesheet>`), plus whether the
+    /// page sets colours of its own and its `<meta name=color-scheme>`. Called again when a
+    /// script adds, removes or changes one: linked sheets already fetched (or failed) are
+    /// kept by URL, `<style>` sheets whose text is the same are not parsed again.
+    fn scan_sheets(&mut self) {
+        let mut linked: BTreeMap<String, LinkState> = BTreeMap::new();
+        let mut styles: Vec<(NodeId, String, Rc<Sheet>)> = core::mem::take(&mut self.style_cache);
+        for s in self.slots.drain(..) {
+            if let Slot::Linked { url, state, .. } = s
+                && !matches!(state, LinkState::Pending)
+            {
+                linked.insert(url, state);
+            }
+        }
+        self.rules_count = 0;
+        if let Some(ua) = &self.ua_sheet {
+            self.rules_count += sheet::count_rules(&ua.rules);
+            self.slots.push(Slot::Ready {
+                sheet: ua.clone(),
+                media: MediaList::default(),
+                ua: true,
+            });
+        }
+        self.plain = true;
+        self.meta_scheme = 0;
         let mut n = 0;
         while n != NONE {
             let Some(e) = self.dom.element(n) else {
@@ -245,11 +318,23 @@ impl Page {
                     let media = media_attr(e.attr("media"));
                     let css = self.dom.text_content(n);
                     if self.slots.len() < self.limits.max_stylesheets {
-                        let base = self.base.clone();
-                        let s = self.parse_sheet(&css, &base);
-                        self.queue_imports(&s);
+                        let sheet = match styles.iter().position(|(sn, t, _)| *sn == n && *t == css)
+                        {
+                            Some(i) => {
+                                let (_, _, sh) = styles.swap_remove(i);
+                                self.rules_count += sheet::count_rules(&sh.rules);
+                                sh
+                            }
+                            None => {
+                                let base = self.base.clone();
+                                let s = self.parse_sheet(&css, &base);
+                                self.queue_imports(&s);
+                                Rc::new(s)
+                            }
+                        };
+                        self.style_cache.push((n, css, sheet.clone()));
                         self.slots.push(Slot::Ready {
-                            sheet: Rc::new(s),
+                            sheet,
                             media,
                             ua: false,
                         });
@@ -268,42 +353,57 @@ impl Page {
                         let url = crate::url::resolve(&self.base, h);
                         let media = media_attr(e.attr("media"));
                         self.plain = false;
-                        self.slots.push(Slot::Linked {
-                            url,
-                            media,
-                            state: LinkState::Pending,
-                        });
-                    }
-                }
-                tag::IMG | tag::INPUT => {
-                    let is_img_input = name == tag::INPUT
-                        && e.attr("type")
-                            .is_some_and(|t| t.trim().eq_ignore_ascii_case("image"));
-                    if name == tag::IMG || is_img_input {
-                        let src = e.attr("src").map(String::from).or_else(|| {
-                            // No src: the first srcset candidate.
-                            e.attr("srcset")
-                                .and_then(|s| s.split(',').next())
-                                .and_then(|c| c.split_whitespace().next())
-                                .map(String::from)
-                        });
-                        if let Some(src) = src.filter(|s| !s.trim().is_empty()) {
-                            let url = crate::url::resolve(&self.base, &src);
-                            if let Some(id) = self.image_id(&url) {
-                                self.img_nodes.insert(n, id);
+                        let state = match linked.get(&url) {
+                            Some(LinkState::Loaded(sh)) => {
+                                self.rules_count += sheet::count_rules(&sh.rules);
+                                LinkState::Loaded(sh.clone())
                             }
-                        }
+                            Some(_) => LinkState::Failed,
+                            None => LinkState::Pending,
+                        };
+                        self.slots.push(Slot::Linked { url, media, state });
                     }
                 }
                 _ => {}
             }
             n = self.dom.next_in(n, 0);
         }
-        self.forms = forms::collect(&self.dom, 100_000);
-        for (i, &node) in self.forms.nodes.iter().enumerate() {
-            if let Some(&img) = self.img_nodes.get(&node) {
-                self.forms.controls[i].image = Some(img);
+        self.sheets_changed = true;
+        self.layout_dirty = true;
+    }
+
+    /// Which `<img>` / `<input type=image>` shows which image.
+    fn scan_images(&mut self) {
+        self.img_nodes.clear();
+        let mut n = 0;
+        while n != NONE {
+            let Some(e) = self.dom.element(n) else {
+                n = self.dom.next_in(n, 0);
+                continue;
+            };
+            if e.is(tag::TEMPLATE) || e.ns != crate::dom::Ns::Html {
+                n = self.dom.next_skipping_children(n, 0);
+                continue;
             }
+            let is_img_input = e.is(tag::INPUT)
+                && e.attr("type")
+                    .is_some_and(|t| t.trim().eq_ignore_ascii_case("image"));
+            if e.is(tag::IMG) || is_img_input {
+                let src = e.attr("src").map(String::from).or_else(|| {
+                    // No src: the first srcset candidate.
+                    e.attr("srcset")
+                        .and_then(|s| s.split(',').next())
+                        .and_then(|c| c.split_whitespace().next())
+                        .map(String::from)
+                });
+                if let Some(src) = src.filter(|s| !s.trim().is_empty()) {
+                    let url = crate::url::resolve(&self.base, &src);
+                    if let Some(id) = self.image_id(&url) {
+                        self.img_nodes.insert(n, id);
+                    }
+                }
+            }
+            n = self.dom.next_in(n, 0);
         }
     }
 
@@ -645,7 +745,8 @@ impl Page {
             self.sheets_changed = false;
         }
         self.rules_env = Some(env);
-        if need_style {
+        let incremental = !need_style && !self.pending_restyle.is_empty();
+        if need_style || incremental {
             let base = self.base.clone();
             let resolve = move |h: &str| crate::url::resolve(&base, h);
             let images = &mut self.images;
@@ -673,9 +774,233 @@ impl Page {
                 image: &mut image,
             };
             let rules = self.rules.as_ref().unwrap();
-            self.styles = Some(style_document(&self.dom, rules, &mut scx));
+            let roots = core::mem::take(&mut self.pending_restyle);
+            let done = incremental
+                && self.styles.as_mut().is_some_and(|st| {
+                    crate::style::cascade::restyle_subtrees(&self.dom, rules, &mut scx, st, &roots)
+                });
+            if done {
+                self.restyles.0 += 1;
+            } else {
+                self.styles = Some(style_document(&self.dom, rules, &mut scx));
+                self.restyles.1 += 1;
+            }
             self.layout_dirty = true;
         }
+        self.pending_restyle.clear();
+    }
+
+    /// Catch up with what scripts changed in the DOM since the last time: stylesheets,
+    /// images and form controls looked at again where that's needed, the changed subtrees
+    /// marked for restyling, and the next layout made to happen.
+    pub(crate) fn flush(&mut self) {
+        self.sync_forms();
+        self.sync_checked();
+        let ch = self.dom.take_changes();
+        if !(ch.any || ch.tree || ch.text || ch.sheets || ch.forms || ch.images) {
+            return;
+        }
+        if ch.sheets {
+            self.scan_sheets();
+        }
+        if ch.images {
+            self.scan_images();
+        }
+        if ch.forms {
+            self.forms = forms::recollect(&self.dom, &self.forms, 100_000);
+            self.attach_form_images();
+        } else if ch.images {
+            self.attach_form_images();
+        }
+        if self.focus != NONE && !self.dom.is_connected(self.focus) {
+            self.focus = NONE;
+        }
+        if ch.restyle_all {
+            self.styles = None;
+            self.pending_restyle.clear();
+        } else {
+            for r in ch.restyle {
+                if !self.pending_restyle.contains(&r) {
+                    self.pending_restyle.push(r);
+                }
+            }
+            if self.pending_restyle.len() > crate::dom::MAX_RESTYLE_ROOTS {
+                self.styles = None;
+                self.pending_restyle.clear();
+            }
+        }
+        self.layout_dirty = true;
+    }
+
+    /// Keep what `:checked` matches in step with the form state (the user's clicks, scripts),
+    /// restyling around the controls that changed.
+    pub(crate) fn sync_checked(&mut self) {
+        use alloc::collections::BTreeSet;
+        let mut now: BTreeSet<NodeId> = BTreeSet::new();
+        for (i, c) in self.forms.controls.iter().enumerate() {
+            match c.kind {
+                ControlKind::Checkbox | ControlKind::Radio if c.checked => {
+                    now.insert(self.forms.nodes[i]);
+                }
+                ControlKind::Select => {
+                    for (k, o) in c.options.iter().enumerate() {
+                        if o.selected
+                            && let Some(&n) = self.forms.option_nodes[i].get(k)
+                        {
+                            now.insert(n);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let old = match self.dom.checked.take() {
+            Some(s) => s,
+            None => {
+                // What the attributes said (what styling used so far).
+                let mut s = BTreeSet::new();
+                let mut n = 0;
+                while n != NONE {
+                    if let Some(e) = self.dom.element(n)
+                        && ((e.is(tag::INPUT) && e.has_attr("checked"))
+                            || (e.is(tag::OPTION) && e.has_attr("selected")))
+                    {
+                        s.insert(n);
+                    }
+                    n = self.dom.next_in(n, 0);
+                }
+                s
+            }
+        };
+        let changed: Vec<NodeId> = old.symmetric_difference(&now).copied().collect();
+        self.dom.checked = Some(now);
+        if changed.is_empty() {
+            return;
+        }
+        let track = self.dom.track;
+        self.dom.track = true;
+        for n in changed {
+            if (n as usize) < self.dom.len() && self.dom.is_connected(n) {
+                self.dom.note_state(n);
+            }
+        }
+        self.dom.track = track;
+    }
+
+    /// The form controls as the DOM is now (recollected if a script changed them).
+    pub(crate) fn sync_forms(&mut self) {
+        if self.dom.changes.forms {
+            self.dom.changes.forms = false;
+            self.forms = forms::recollect(&self.dom, &self.forms, 100_000);
+            self.attach_form_images();
+            self.layout_dirty = true;
+        }
+    }
+
+    /// The element of control `id`.
+    pub(crate) fn control_node(&self, id: ControlId) -> Option<NodeId> {
+        self.forms.nodes.get(id.0 as usize).copied()
+    }
+
+    /// The control an element is (after [`Page::sync_forms`]).
+    pub(crate) fn control_of_node(&self, n: NodeId) -> Option<ControlId> {
+        self.forms.by_node.get(&n).map(|c| c.0)
+    }
+
+    /// The `<form>` element control `id` belongs to.
+    pub(crate) fn form_node_of(&self, id: ControlId) -> Option<NodeId> {
+        let f = self.forms.controls.get(id.0 as usize)?.form?;
+        self.forms.forms.get(f as usize).copied()
+    }
+
+    pub(crate) fn focused_control(&self) -> Option<ControlId> {
+        if self.focus == NONE {
+            return None;
+        }
+        self.control_of_node(self.focus)
+    }
+
+    pub(crate) fn set_focus_node(&mut self, n: Option<NodeId>) {
+        self.focus = n.unwrap_or(NONE);
+    }
+
+    pub(crate) fn forms(&self) -> &Forms {
+        &self.forms
+    }
+
+    pub(crate) fn forms_mut(&mut self) -> &mut Forms {
+        &mut self.forms
+    }
+
+    /// The element under a viewport point (as [`Page::hit_test`] finds it), NONE if none.
+    pub(crate) fn node_at(&self, x: i32, y: i32, scroll: (i32, i32)) -> NodeId {
+        let Some(p) = &self.painted else {
+            return NONE;
+        };
+        let (dx, dy) = (x + scroll.0, y + scroll.1);
+        for h in p.hits.iter().rev() {
+            if h.fixed && h.rect.contains(x, y) {
+                return h.node;
+            }
+        }
+        for h in p.hits.iter().rev() {
+            if !h.fixed && h.rect.contains(dx, dy) {
+                return h.node;
+            }
+        }
+        NONE
+    }
+
+    /// A node's box after the last layout (document space; fixed ones in viewport space).
+    pub(crate) fn node_rect(&self, n: NodeId) -> Option<Rect> {
+        self.painted.as_ref()?.node_rects.get(n as usize).copied()
+    }
+
+    pub(crate) fn styles(&self) -> Option<&Styles> {
+        self.styles.as_ref()
+    }
+
+    pub(crate) fn page_url(&self) -> &str {
+        &self.url
+    }
+
+    /// The submission of the `<form>` element `form` (with `submitter`, if any).
+    pub(crate) fn submit_form_node(
+        &self,
+        form: NodeId,
+        submitter: Option<ControlId>,
+    ) -> Option<Submission> {
+        let idx = self.forms.forms.iter().position(|&f| f == form)? as u32;
+        self.forms
+            .submit_form(&self.dom, &self.url, &self.base, idx, submitter, None)
+    }
+
+    /// The page's address as script sees it (location.href).
+    pub(crate) fn address(&self) -> &str {
+        &self.url
+    }
+
+    /// history.pushState: the page now has this address (and base, without a `<base>`).
+    pub(crate) fn set_address(&mut self, url: &str) {
+        if self.base == self.url {
+            self.base = String::from(url);
+        }
+        self.url = String::from(url);
+    }
+
+    /// A script changed a control's state: draw again.
+    pub(crate) fn mark_forms_changed(&mut self) {
+        self.layout_dirty = true;
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// Does the DOM have changes the display list doesn't show yet?
+    pub(crate) fn changed(&self) -> bool {
+        let c = &self.dom.changes;
+        c.any || c.tree || c.text || c.sheets || c.forms || c.images || self.layout_dirty
     }
 
     // The is_some + unwrap dodges a borrow-checker limit on returning a borrow early.
@@ -687,6 +1012,7 @@ impl Page {
             height: vp.height.clamp(1, 1 << 16),
             dark: vp.dark,
         };
+        self.flush();
         if self.last_vp == Some(vp)
             && !self.layout_dirty
             && !self.sheets_changed
@@ -816,7 +1142,7 @@ impl Page {
 
     /// The control a `<label>` is for (HTML §4.10.4): `for=id`, else its first labelable
     /// descendant.
-    fn label_control(&self, label: NodeId) -> Option<ControlId> {
+    pub(crate) fn label_control(&self, label: NodeId) -> Option<ControlId> {
         let e = self.dom.element(label)?;
         if let Some(f) = e.attr("for") {
             let a = self.dom.atoms.get(f)?;
@@ -1039,6 +1365,12 @@ impl Page {
             return Some(r);
         }
         by_id.and_then(rect)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_full_restyle(&mut self) {
+        self.styles = None;
+        self.layout_dirty = true;
     }
 
     /// Test helper: the border box (union of fragments) of the element with this id.

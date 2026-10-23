@@ -217,9 +217,9 @@ struct Styler<'a, 'b> {
     distinct: usize,
 }
 
-/// Style every element of `dom`.
-pub fn style_document(dom: &Dom, rules: &RuleSet, cx: &mut StyleCx) -> Styles {
-    // Sibling positions for :nth-child() and friends.
+/// Sibling positions for :nth-child() and friends: (index among element siblings, 1-based;
+/// count of element siblings).
+pub(crate) fn sibling_positions(dom: &Dom) -> (Vec<u32>, Vec<u32>) {
     let n = dom.len();
     let mut index = alloc::vec![0u32; n];
     let mut count = alloc::vec![0u32; n];
@@ -241,7 +241,12 @@ pub fn style_document(dom: &Dom, rules: &RuleSet, cx: &mut StyleCx) -> Styles {
             c = dom.node(c).next;
         }
     }
-    let mut st = Styler {
+    (index, count)
+}
+
+fn styler<'a, 'b>(dom: &'a Dom, rules: &'a RuleSet, cx: &'a mut StyleCx<'b>) -> Styler<'a, 'b> {
+    let (index, count) = sibling_positions(dom);
+    Styler {
         dom,
         rules,
         cx,
@@ -253,7 +258,13 @@ pub fn style_document(dom: &Dom, rules: &RuleSet, cx: &mut StyleCx) -> Styles {
         slots: alloc::vec![None; PROP_COUNT],
         scratch: Vec::new(),
         distinct: 0,
-    };
+    }
+}
+
+/// Style every element of `dom`.
+pub fn style_document(dom: &Dom, rules: &RuleSet, cx: &mut StyleCx) -> Styles {
+    let n = dom.len();
+    let mut st = styler(dom, rules, cx);
     let mut out = Styles {
         of: alloc::vec![None; n],
         before: BTreeMap::new(),
@@ -265,37 +276,103 @@ pub fn style_document(dom: &Dom, rules: &RuleSet, cx: &mut StyleCx) -> Styles {
     if root == NONE {
         return out;
     }
-    // Iterative pre-order walk with the parent style at hand.
     let doc_style = st.init.clone();
-    let mut stack: Vec<(NodeId, Rc<Style>)> = alloc::vec![(root, doc_style)];
-    while let Some((el, parent)) = stack.pop() {
-        let Some(e) = dom.element(el) else { continue };
-        let is_root = el == root;
-        let s = st.style_element(el, e, &parent, is_root);
-        if is_root {
-            st.root_fs = s.font_size;
-            out.root_font_size = s.font_size;
-        }
-        if s.display == Display::None {
-            continue;
-        }
-        for (after, map) in [(false, &mut out.before), (true, &mut out.after)] {
-            if let Some(ps) = st.style_pseudo(el, &s, after) {
-                map.insert(el, ps);
-            }
-        }
-        // Children in reverse so they pop in order.
-        let kids: Vec<NodeId> = dom
-            .children(el)
-            .filter(|&c| dom.element(c).is_some())
-            .collect();
-        for &c in kids.iter().rev() {
-            stack.push((c, s.clone()));
-        }
-        out.of[el as usize] = Some(s);
-    }
+    st.walk(&mut out, root, doc_style);
     out.distinct = st.distinct;
     out
+}
+
+/// Restyle only the subtrees under `roots` (elements whose parents are styled), keeping the
+/// rest of `styles`. False if that can't be done and the caller should restyle everything
+/// (the root element is among them: rem units and the canvas depend on it).
+pub fn restyle_subtrees(
+    dom: &Dom,
+    rules: &RuleSet,
+    cx: &mut StyleCx,
+    styles: &mut Styles,
+    roots: &[NodeId],
+) -> bool {
+    let root = dom.document_element();
+    if root == NONE || roots.iter().any(|&r| r == root || r == 0) {
+        return false;
+    }
+    // Drop roots inside other roots.
+    let mut tops: Vec<NodeId> = Vec::new();
+    for &r in roots {
+        if (r as usize) >= dom.len() || dom.element(r).is_none() || !dom.is_connected(r) {
+            continue;
+        }
+        if roots
+            .iter()
+            .any(|&o| o != r && (o as usize) < dom.len() && dom.contains(o, dom.parent(r)) && o != NONE)
+        {
+            continue;
+        }
+        if !tops.contains(&r) {
+            tops.push(r);
+        }
+    }
+    if styles.of.len() < dom.len() {
+        styles.of.resize(dom.len(), None);
+    }
+    let mut st = styler(dom, rules, cx);
+    st.root_fs = styles.root_font_size;
+    st.distinct = styles.distinct;
+    for r in tops {
+        // Clear the old styles of the subtree.
+        let mut c = r;
+        while c != NONE {
+            styles.of[c as usize] = None;
+            styles.before.remove(&c);
+            styles.after.remove(&c);
+            c = dom.next_in(c, r);
+        }
+        let p = dom.parent(r);
+        let Some(Some(ps)) = styles.of.get(p as usize).cloned() else {
+            continue; // under display: none
+        };
+        st.walk(styles, r, ps);
+    }
+    styles.distinct = st.distinct;
+    true
+}
+
+impl Styler<'_, '_> {
+    /// Style `top` and its descendants (an iterative pre-order walk with the parent style at
+    /// hand) into `out`.
+    fn walk(&mut self, out: &mut Styles, top: NodeId, parent_style: Rc<Style>) {
+        let dom = self.dom;
+        let root = dom.document_element();
+        let mut stack: Vec<(NodeId, Rc<Style>)> = alloc::vec![(top, parent_style)];
+        while let Some((el, parent)) = stack.pop() {
+            let Some(e) = dom.element(el) else { continue };
+            let is_root = el == root;
+            let s = self.style_element(el, e, &parent, is_root);
+            if is_root {
+                self.root_fs = s.font_size;
+                out.root_font_size = s.font_size;
+            }
+            if s.display == Display::None {
+                continue;
+            }
+            for (after, map) in [(false, &mut out.before), (true, &mut out.after)] {
+                if let Some(ps) = self.style_pseudo(el, &s, after) {
+                    map.insert(el, ps);
+                }
+            }
+            // Children in reverse so they pop in order.
+            let kids: Vec<NodeId> = dom
+                .children(el)
+                .filter(|&c| dom.element(c).is_some())
+                .collect();
+            for &c in kids.iter().rev() {
+                stack.push((c, s.clone()));
+            }
+            if let Some(slot) = out.of.get_mut(el as usize) {
+                *slot = Some(s);
+            }
+        }
+    }
 }
 
 impl Styler<'_, '_> {

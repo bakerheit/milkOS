@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html><head><title>Todo list</title>
+<script src="common.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  li { font-size: 18px; margin: 4px 0; }
+  li.done { text-decoration: line-through; color: #888; }
+  #count { color: #4f64a0; }
+</style></head>
+<body>
+<h1>Things to do <span id="count"></span></h1>
+<form id="add"><input id="what" placeholder="Something to do" size="30"> <button id="go">Add</button></form>
+<ul id="list"></ul>
+<script>
+  var list = document.getElementById("list");
+  var items = ["Milk the cow", "Churn the butter", "Feed the cat"];
+  function render() {
+    list.textContent = "";
+    items.forEach(function (text, i) {
+      var li = document.createElement("li");
+      li.appendChild(document.createTextNode(text));
+      li.id = "item" + i;
+      li.addEventListener("click", function () {
+        li.classList.toggle("done");
+        report("todo", "toggled " + i + " " + li.className);
+      });
+      list.appendChild(li);
+    });
+    document.getElementById("count").textContent = "(" + list.children.length + ")";
+  }
+  document.getElementById("add").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var input = document.getElementById("what");
+    var v = input.value.trim();
+    if (v) {
+      items.push(v);
+      input.value = "";
+      render();
+    }
+    report("todo", "items " + list.children.length + " last " + list.lastChild.textContent);
+  });
+  render();
+  window.addEventListener("load", function () {
+    where("what");
+    where("item0");
+    report("todo", "ready " + list.children.length);
+  });
+</script>
+</body></html>

@@ -821,9 +821,13 @@ impl MatchCx<'_> {
             }),
             Simple::Link => e.ns == Ns::Html && matches!(e.name, A | AREA) && e.has_attr("href"),
             Simple::Never => false,
-            Simple::Checked => {
-                (e.is(INPUT) && e.has_attr("checked")) || (e.is(OPTION) && e.has_attr("selected"))
-            }
+            Simple::Checked => match &self.dom.checked {
+                Some(set) => (e.is(INPUT) || e.is(OPTION)) && set.contains(&el),
+                None => {
+                    (e.is(INPUT) && e.has_attr("checked"))
+                        || (e.is(OPTION) && e.has_attr("selected"))
+                }
+            },
             Simple::Disabled => is_form_el(e) && self.disabled(el, e),
             Simple::Enabled => is_form_el(e) && !self.disabled(el, e),
             Simple::Required => is_form_el(e) && e.has_attr("required"),

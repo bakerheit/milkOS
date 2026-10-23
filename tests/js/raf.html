@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><title>Animation</title>
+<script src="common.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  #track { position: relative; height: 60px; background: #f3ead8; }
+  #box { position: absolute; left: 0; top: 5px; width: 50px; height: 50px; background: #4f64a0; }
+</style></head><body>
+<h1>requestAnimationFrame</h1>
+<div id="track"><div id="box"></div></div>
+<p id="frames"></p>
+<script>
+  var frames = 0, first = 0;
+  function step(t) {
+    if (!first) first = t;
+    frames++;
+    var x = Math.min(400, frames * 8);
+    document.getElementById("box").style.left = x + "px";
+    document.getElementById("frames").textContent = frames + " frames";
+    if (frames < 50) {
+      requestAnimationFrame(step);
+    } else {
+      var left = document.getElementById("box").getBoundingClientRect().left;
+      report("raf", "done " + frames + " moved " + (left > 300 ? "yes" : "no " + left));
+    }
+  }
+  requestAnimationFrame(step);
+</script>
+</body></html>

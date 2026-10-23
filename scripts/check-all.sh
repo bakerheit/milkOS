@@ -143,6 +143,7 @@ TESTS=(
   "preview-test|q|600|par|scripts/preview-test.sh"
   "fonts-test|q|600|par|scripts/fonts-test.sh"
   "browser-test|q|600|par|scripts/browser-test.sh"
+  "js-test|q|600|par|scripts/js-test.sh"
   "webbench-test|q|600|par|scripts/webbench-test.sh"
   "jsbench-test|q|600|par|scripts/jsbench-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"

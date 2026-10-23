@@ -17,6 +17,7 @@ pub mod form;
 pub mod history;
 pub mod pages;
 pub mod paint;
+pub mod storage;
 
 #[cfg(test)]
 mod systext_tests;

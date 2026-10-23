@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><title>Timer</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; } #n { font-size: 64px; color: #4f64a0; }</style>
+</head><body>
+<h1>Counting</h1>
+<div id="n">0</div>
+<p id="note"></p>
+<script>
+  var n = 0, start = Date.now();
+  var iv = setInterval(function () {
+    n++;
+    document.getElementById("n").textContent = n;
+    if (n === 5) {
+      clearInterval(iv);
+      report("timer", "five " + (Date.now() - start >= 400 ? "in-time" : "too-fast"));
+    }
+  }, 100);
+  setTimeout(function (a, b) {
+    document.getElementById("note").textContent = "A timeout with arguments: " + a + b;
+    report("timer", "timeout " + a + b);
+  }, 50, "milk", "!");
+  Promise.resolve().then(function () { report("timer", "microtask first"); });
+  queueMicrotask(function () { report("timer", "queued microtask"); });
+</script>
+</body></html>

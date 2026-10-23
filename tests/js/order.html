@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><title>Script order</title>
+<script src="common.js"></script>
+<script>var seen = []; function mark(s) { seen.push(s); }</script>
+<script src="ext.js?a" defer></script>
+<script>mark("inline1 " + document.readyState);</script>
+<script src="ext.js?b"></script>
+<script type="module">mark("module");</script>
+<script type="text/template">mark("template");</script>
+</head><body>
+<script>
+  mark("inline2");
+  document.write("<p id=written>Written by document.write.</p>");
+  document.addEventListener("DOMContentLoaded", function () {
+    mark("DOMContentLoaded");
+  });
+  window.onload = function () {
+    mark("load " + document.readyState);
+    report("order", seen.join(", ") + " | written " + (document.getElementById("written") ? "yes" : "no"));
+  };
+</script>
+</body></html>

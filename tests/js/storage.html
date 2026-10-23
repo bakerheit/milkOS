@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><title>Storage</title>
+<script src="common.js"></script>
+</head><body>
+<h1>Storage</h1>
+<p id="out"></p>
+<script>
+  var n = parseInt(localStorage.getItem("visits") || "0", 10) + 1;
+  localStorage.setItem("visits", String(n));
+  sessionStorage.setItem("s", "x");
+  document.cookie = "jsc=" + n + "; Path=/";
+  document.getElementById("out").textContent = "Visits: " + n;
+  report("storage", "visits " + n + " cookie " + (document.cookie.indexOf("jsc=" + n) >= 0 ? "set" : "missing") +
+    " httponly " + (document.cookie.indexOf("secret") >= 0 ? "visible" : "hidden"));
+</script>
+</body></html>

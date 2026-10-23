@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html><head><title>innerHTML</title>
+<script src="common.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  table { border-collapse: collapse; } td, th { border: 1px solid #999; padding: 4px 10px; }
+  th { background: #e8dcc4; }
+</style></head><body>
+<h1>Built with innerHTML</h1>
+<div id="out"></div>
+<noscript><p id="ns">Scripts are off: this text is from a noscript element.</p></noscript>
+<script>
+  var rows = [["Milk", 3], ["Cream", 1], ["Cheese", 12]];
+  var html = "<table><tr><th>What</th><th>How many</th></tr>";
+  rows.forEach(function (r) { html += "<tr><td>" + r[0] + "</td><td>" + r[1] + "</td></tr>"; });
+  html += "</table><p class=sum>Total: <b>" + rows.reduce(function (a, r) { return a + r[1]; }, 0) + "</b></p>";
+  var out = document.getElementById("out");
+  out.innerHTML = html;
+  var cells = out.querySelectorAll("td");
+  report("innerhtml", "rows " + out.querySelectorAll("tr").length + " cells " + cells.length +
+    " total " + out.querySelector(".sum b").textContent + " ns " + (document.getElementById("ns") ? "shown" : "hidden"));
+  out.insertAdjacentHTML("beforeend", "<p id=after>Added after.</p>");
+  report("innerhtml", "outer " + document.getElementById("after").outerHTML);
+</script>
+</body></html>

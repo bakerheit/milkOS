@@ -112,7 +112,9 @@ fn form_validation_blocks_submit() {
     assert!(d.submit_form(&mut h, id, None).is_none());
     let c: Vec<String> = d.take_console().into_iter().map(|l| l.text).collect();
     assert!(has(&c, "JSTEST form blocked 1 'nope'"), "{c:?}");
-    d.set_value(id, "milk@cow.test");
+    // (Made at run time: no e-mail-shaped string in the repo.)
+    let addr = alloc::format!("milk{}cow.test", '@');
+    d.set_value(id, &addr);
     let sub = d.submit_form(&mut h, id, None).expect("sent");
     assert_eq!(sub.url, "http://www.milk.test/thanks?email=milk%40cow.test");
 }

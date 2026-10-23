@@ -67,8 +67,9 @@ stays on top: an operation needs **both** the permission bits and the sandbox.
   is 1777) only the file's owner, the directory's owner or root. Moving a directory to
   another parent also needs w on it (its `..`). **mkdir / symlink / link** need w on the
   directory. **truncate** needs w.
-* **chmod:** owner or root (a non-root owner outside the file's group loses set-group-ID).
-  **chown:** root; the owner may change the group to one of its own. A non-root chown
+* **chmod** (`files access`): owner or root (a non-root owner outside the file's group loses
+  set-group-ID). **chown** (`files owner`): root; the owner may change the group to one of
+  its own. A non-root chown
   clears set-ID bits. **utimes:** owner, root, or anyone who may write. Syscalls fchmodat,
   fchmod, fchownat, fchown; faccessat checks with the effective ids.
 * **Ownership of new files:** the caller's euid and egid (or the directory's group if it

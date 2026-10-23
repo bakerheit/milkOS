@@ -534,7 +534,7 @@ for a new crate) + one line in `initramfs.list`.
 * `init`: banner, runs `hello`, keeps `msh` running on the console, reaps orphans.
 * `msh`: the shell, see docs/shell.md (pipelines, redirection, && || ; &, variables,
   globs, job control with Ctrl-C, structured pipes).
-* `coreutils`: chmod chown df true false clear (and chroot, sandbox in /System/Developer),
+* `coreutils`: df true false clear (and chroot, sandbox in /System/Developer),
   one program each.
 * `systools`: `processes`, `services`, `system`, `users` and `admin` (they replaced ps, top,
   kill, svc, log, uname, uptime, free, whoami, id, passwd, su, sudo and auth); the rules are in
@@ -542,8 +542,8 @@ for a new crate) + one line in `initramfs.list`.
 * `texttools`: `text` (show, first, last, find, sort, unique, count: it replaced cat, head,
   tail, grep, sort, uniq and wc), `print` (echo) and `pause` (sleep); the rules are in
   `textkit` (docs/shell.md, "Text, print, pause and variables").
-* `filetools`: `files` (create, copy, move, rename, delete, info, list, link: it replaced ls,
-  cp, mv, rm, mkdir, touch and ln), `trash` and the `trashd` service (docs/filesystem.md,
+* `filetools`: `files` (create, copy, move, rename, delete, info, list, link, owner, access:
+  it replaced ls, cp, mv, rm, mkdir, touch, ln, chmod and chown), `trash` and the `trashd` service (docs/filesystem.md,
   "Files and the Trash"); the rules are in `filekit`, which the kernel's Files app shares.
 * `hello`, `fault` (deliberate crashes), `utest` (kernel feature tests from user space:
   `utest pipe | cow | proc | signal | all`), `fsstress`, `tcpbench`: test tools, in

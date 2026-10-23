@@ -218,6 +218,18 @@ impl Runtime {
         let pending_resources = !page.pending_resources().is_empty();
         self.entry(page, host, |b, r| {
             let mut did = false;
+            // Module scripts found so far: a note each (they don't run yet).
+            let mods = core::mem::take(&mut b.st.borrow_mut().loader.modules);
+            for m in mods {
+                let what = b
+                    .page()
+                    .and_then(|p| p.dom.element(m).and_then(|e| e.attr("src")).map(|s| p.resolve(s)))
+                    .unwrap_or_else(|| String::from("an inline module"));
+                b.console(
+                    ConsoleLevel::Warn,
+                    format!("A module script ({what}) was not run: modules aren't supported yet"),
+                );
+            }
             // Scripts, phase by phase.
             loop {
                 let next = b.st.borrow().loader.next();

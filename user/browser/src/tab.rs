@@ -46,11 +46,19 @@ pub struct Page {
 }
 
 impl Page {
-    pub fn new(address: &str, url: Option<Url>, html: &[u8], ct: &str, kind: PageKind) -> Page {
+    /// A page; `scripts`: run its JavaScript (web pages, when JavaScript is on).
+    pub fn new(
+        address: &str,
+        url: Option<Url>,
+        html: &[u8],
+        ct: &str,
+        kind: PageKind,
+        scripts: bool,
+    ) -> Page {
         let base = url
             .as_ref()
             .map_or_else(|| String::from(address), |u| u.to_text());
-        let doc = Doc::parse(html, &base, ct);
+        let doc = Doc::parse(html, &base, ct, scripts && kind == PageKind::Web);
         Page {
             address: String::from(address),
             url,
@@ -105,7 +113,16 @@ pub struct Tab {
     /// Find in page: the matches (each one's rectangles, page coordinates) and the current one.
     pub found: Vec<Vec<Rect>>,
     pub found_at: usize,
+    /// sessionStorage, per origin, for as long as the tab lives.
+    pub session: alloc::collections::BTreeMap<String, browserkit::storage::Area>,
+    /// The page's console (the last lines).
+    pub console: alloc::collections::VecDeque<(browserkit::engine::ConsoleLevel, String)>,
+    /// When background timers last ran (ms): background tabs run theirs once a second.
+    pub last_run: u64,
 }
+
+/// Console lines a tab keeps.
+pub const CONSOLE_LINES: usize = 400;
 
 impl Tab {
     pub fn new(page: Page) -> Tab {
@@ -121,6 +138,9 @@ impl Tab {
             anchor: None,
             found: Vec::new(),
             found_at: 0,
+            session: alloc::collections::BTreeMap::new(),
+            console: alloc::collections::VecDeque::new(),
+            last_run: 0,
         }
     }
 
@@ -147,6 +167,8 @@ impl Tab {
         self.caret = 0;
         self.found.clear();
         self.found_at = 0;
+        self.console.clear();
+        self.last_run = 0;
     }
 
     pub fn zoom_step(&mut self, d: i32) {

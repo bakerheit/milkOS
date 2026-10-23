@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><title>Runaway script</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; }</style>
+</head><body>
+<h1>A script that never ends</h1>
+<p id="p">Before the loop.</p>
+<script>
+  report("runaway", "starting");
+  setTimeout(function () {
+    document.getElementById("p").textContent = "In the loop...";
+    while (true) {}
+  }, 300);
+  setTimeout(function () { report("runaway", "never"); }, 5000);
+</script>
+</body></html>

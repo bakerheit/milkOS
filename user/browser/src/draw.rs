@@ -239,11 +239,12 @@ impl Painter for PagePainter<'_> {
 
 impl App {
     /// Lay out the current tab's page if its width changed (zoom, resize, an image came).
-    fn layout_current(&mut self) {
+    pub(crate) fn layout_current(&mut self) {
         let (lw, lh) = self.page_view(self.tab());
         let t = &self.tabs[self.cur];
         if t.page.laid_w == lw
             && t.page.doc.laid.is_some()
+            && !t.page.doc.needs_layout()
             && t.page.laid_font == self.sys.ui
             && t.page.laid_dark == self.th.dark
         {
@@ -296,6 +297,8 @@ impl App {
     pub fn draw(&mut self) {
         // The desktop's font, once a frame (Settings may have changed it).
         self.sys = SysText::now();
+        // The page's requestAnimationFrame callbacks, then its layout as they left it.
+        self.animation_frame();
         self.layout_current();
         self.hits.clear();
         let th = self.th;
@@ -323,6 +326,9 @@ impl App {
                 self.win
                     .text(w - 10 - wid(&right), sy + 3, &right, th.cocoa);
             }
+        }
+        if self.console_open {
+            self.draw_console(w);
         }
         self.draw_popup(w, h);
         let title = String::from(self.tab().title());
@@ -451,6 +457,43 @@ impl App {
             };
             let pw = (vw as i64 * frac.clamp(20, 1000) as i64 / 1000) as i32;
             self.win.fill(0, top, pw, 3, gui::HONEY);
+        }
+    }
+
+    /// The console panel over the bottom of the page: the tab's last console lines.
+    fn draw_console(&mut self, w: i32) {
+        let th = self.th;
+        let (top, _, vh) = self.view();
+        let ph = (vh / 3).clamp(80, 260);
+        let py = top + vh - ph;
+        self.win.fill(0, py, w, ph, th.cream);
+        hline(&mut self.win, 0, py, w, th.sand);
+        let t = &self.tabs[self.cur];
+        let stats = t.page.doc.script_stats();
+        let head = if !t.page.doc.scripting() && !stats.stopped {
+            String::from("Console (this page runs no scripts)")
+        } else {
+            format!(
+                "Console: {} script(s), {} error(s), {} KB of script memory{}",
+                stats.scripts,
+                stats.errors,
+                stats.heap_bytes / 1024,
+                if stats.stopped { ", stopped" } else { "" }
+            )
+        };
+        self.win.bold(10, py + 5, &ellipsize(&head, w - 20), th.espresso);
+        let rows = ((ph - 30) / 18).max(1) as usize;
+        let n = t.console.len();
+        let lines: Vec<(browserkit::engine::ConsoleLevel, String)> =
+            t.console.iter().skip(n.saturating_sub(rows)).cloned().collect();
+        for (i, (lvl, text)) in lines.iter().enumerate() {
+            let c = match lvl {
+                browserkit::engine::ConsoleLevel::Error => th.danger,
+                browserkit::engine::ConsoleLevel::Warn => th.honey,
+                _ => th.cocoa,
+            };
+            let y = py + 26 + i as i32 * 18;
+            self.win.text(10, y, &ellipsize(text, w - 20), c);
         }
     }
 
@@ -729,6 +772,13 @@ impl App {
                 self.win.rrect(px, py, pw, ph, 9, th.milk);
                 for (i, (label, key)) in MENU.iter().enumerate() {
                     let y = py + 6 + i as i32 * 24;
+                    let label = match i {
+                        MENU_JAVASCRIPT if self.js_on => "Turn JavaScript Off",
+                        MENU_JAVASCRIPT => "Turn JavaScript On",
+                        MENU_CONSOLE if self.console_open => "Hide Console",
+                        MENU_CONSOLE => "Show Console",
+                        _ => label,
+                    };
                     self.win.text(px + 14, y + 4, label, th.espresso);
                     if !key.is_empty() {
                         self.win.text(px + pw - 14 - wid(key), y + 4, key, th.latte);

@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html><head><title>Tabs widget</title>
+<script src="common.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  .tabs button { font-size: 18px; padding: 8px 18px; margin-right: 6px; background: #eee; border: 1px solid #aaa; }
+  .tabs button.on { background: #4f64a0; color: white; }
+  .panel { display: none; padding: 20px; border: 2px solid #4f64a0; margin-top: 10px; font-size: 20px; }
+  .panel.on { display: block; }
+</style></head>
+<body>
+<h1>Tabs</h1>
+<div class="tabs" id="tabs">
+  <button id="t1" class="on" data-panel="p1">Milk</button>
+  <button id="t2" data-panel="p2">Cheese</button>
+  <button id="t3" data-panel="p3">Butter</button>
+</div>
+<div id="p1" class="panel on">Milk comes from cows.</div>
+<div id="p2" class="panel">Cheese is made from milk, with rennet and time.</div>
+<div id="p3" class="panel">Butter is churned cream.</div>
+<script>
+  var tabs = document.querySelectorAll("#tabs button");
+  tabs.forEach(function (b) {
+    b.addEventListener("click", function (e) {
+      tabs.forEach(function (o) { o.classList.toggle("on", o === b); });
+      document.querySelectorAll(".panel").forEach(function (p) {
+        p.classList.toggle("on", p.id === b.dataset.panel);
+      });
+      report("tabs", "shown " + b.dataset.panel + " " + document.querySelector(".panel.on").textContent);
+    });
+  });
+  document.addEventListener("DOMContentLoaded", function () {
+    where("t2");
+    report("tabs", "ready");
+  });
+</script>
+</body></html>

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><title>Form validation</title>
+<script src="common.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  .err { color: #b00; font-weight: bold; }
+  input { font-size: 16px; }
+</style></head>
+<body>
+<h1>Sign up</h1>
+<form id="f" action="/thanks" method="get">
+  <p>Email: <input id="email" name="email" size="30"></p>
+  <p id="msg"></p>
+  <p><input type="submit" id="send" value="Sign up"></p>
+</form>
+<script>
+  var tries = 0;
+  document.getElementById("f").onsubmit = function (e) {
+    tries++;
+    var v = document.getElementById("email").value;
+    var ok = /^[^@\s]+@[^@\s]+\.[a-z]+$/i.test(v);
+    var msg = document.getElementById("msg");
+    if (!ok) {
+      e.preventDefault();
+      msg.className = "err";
+      msg.textContent = "That doesn't look like an email address.";
+      report("form", "blocked " + tries + " '" + v + "'");
+      return false;
+    }
+    msg.className = "";
+    msg.textContent = "";
+    report("form", "sending " + v);
+  };
+  where("email");
+  where("send");
+  report("form", "ready");
+</script>
+</body></html>

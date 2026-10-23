@@ -168,7 +168,7 @@ s B1 \
   "go gotest inner" \
   "OLDPWD= msh -c 'go back'" \
   "files create /tmp/locked/" \
-  "chmod 700 /tmp/locked" \
+  "files access /tmp/locked private" \
   "users switch milk --command 'go /tmp/locked'" \
   "cd /tmp" \
   "pwd" \
@@ -197,7 +197,7 @@ check "files list --long: kind, permissions, owner, size, date" "files list -l" 
 check "files list gives msh a table" "MILK_TABLE=1 files list" "name:str	kind:str	size:size"
 check "files info: kind and size" "files info notes.txt" "kind         file"
 check "files info: where" "files info notes.txt" "where        /Users/milk/notes.txt"
-check "files info: owner" "files info notes.txt" "owner        root, group wheel"
+check "files info: owner" "files info notes.txt" "owner        root (group: wheel)"
 check "copy into a folder, a folder with everything in it" "files list backup backup/a" "notes.txt"
 check "copy refuses to overwrite" "files copy notes.txt backup/notes.txt" "backup/notes.txt already exists (add --replace"
 check "copy --replace overwrites" "text show backup/notes.txt" "replaced"

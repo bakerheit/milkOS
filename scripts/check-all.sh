@@ -95,6 +95,7 @@ TESTS=(
   "imgdec-unit|s|300|par|scripts/imgdec-test.sh"
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
   "files-test|q|600|par|scripts/files-test.sh"
+  "files-access-test|q|600|par|scripts/files-access-test.sh"
   "systools-test|q|600|par|scripts/systools-test.sh"
   "net-disks-apps-test|q|600|par|scripts/net-disks-apps-test.sh"
   "text-test|q|600|par|scripts/text-test.sh"

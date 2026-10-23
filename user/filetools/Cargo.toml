@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 # Files and the Trash from the command line (docs/filesystem.md, "Files and the Trash"):
-#   files   create, copy, move, rename, delete, info, list, link (replaces mv cp touch rm
-#           mkdir ls ln)
+#   files   create, copy, move, rename, delete, info, list, link, owner, access (replaces mv
+#           cp touch rm mkdir ls ln chown chmod)
 #   trash   list, restore and empty the Trash
 #   trashd  the service that deletes things for good once they've been in the Trash longer
 #           than Settings > Trash says (at boot, then once a day)

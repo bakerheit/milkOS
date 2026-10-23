@@ -171,7 +171,7 @@ A `ver` column holds version numbers and compares them semver-ish (`rt::version`
 * `system memory`: `group:str (Activity Monitor's: Apps, Kernel heap, ...), size:size,
   percent:str`
 * `files list`: `name:str, kind:str (file folder link device pipe socket), size:size,
-  mode:str (rwxr-xr-x), owner:str, modified:str`
+  access:str (rwxr-xr-x), owner:str, modified:str`
 * `trash list`: `name:str, from:str (where it was), deleted:str, days_left:int (empty:
   never), size:size, trash:str (the Trash folder it is in)`
 * `variables list`: `name:str, value:str, exported:str (yes/no)`

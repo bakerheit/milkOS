@@ -15,6 +15,17 @@
   `copy`, `move` (across disks too), `rename`, `delete`, `info`, `list`, `link`, `help`, with
   errors in plain English. It replaces `ls`, `cp`, `mv`, `rm`, `mkdir`, `touch` and `ln`,
   which are gone. A slash at the end of a path means a folder: on a file it is an error.
+- `files owner` and `files access` replace `chown` and `chmod`, which are gone.
+  `files owner notes.txt` says "milk (group: staff)"; `files owner PATH USER`, `USER:GROUP` or
+  `:GROUP` changes it. `files access notes.txt` says who may use it in one sentence ("milk can
+  read and change it, staff can read it, everyone else can't", with set-ID and sticky when
+  they're on), and `files access PATH private | shared | group | read-only | open` sets it
+  (600/700, 644/755, 660/770, 444/555, 666/777 for files/folders; a runnable file stays
+  runnable), `runnable` / `not-runnable` turn running on and off, `--mode NNNN` sets an exact
+  octal mode. `--all` on a folder changes everything in it without following links. The
+  kernel's rules are the same: only an admin gives things away, an owner can change the group
+  to one they're in. `files info` shows the sentence beside the mode; the `files list` table's
+  `mode` column is now `access`.
 - `go` and `where` instead of `cd` and `pwd`, which are gone: `go Documents`, `go ..`,
   `go /Apps`, `go` (home), `go back` (the folder before; a folder called back is
   `go ./back`); `where` prints the folder you're in, in pipes too, and takes no

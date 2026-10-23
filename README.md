@@ -70,8 +70,8 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
   `processes list | filter memory > 1M | sort-by name`. `go Documents` changes folder (`go` alone: home,
   `go back`: the one before) and `where` says where you are; there is no `cd` or `pwd`.
 - `files`, one command for files and folders in plain English (`files create notes.txt`,
-  `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`
-  (list, restore, empty).
+  `files copy`, `files move`, `files delete` to the Trash, `files list`, `files owner`,
+  `files access notes.txt private`, `files help`), and `trash` (list, restore, empty).
 - `processes` (list, watch, stop, signal, info), `services` (list, status, start, stop, restart,
   logs: the journal), `system` (info, memory, uptime), `users` (me, list, password, switch) and
   `admin` (run a command as root, or with an administrator's ticket), each with `help`.

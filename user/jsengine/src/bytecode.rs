@@ -58,6 +58,13 @@ pub(crate) enum Op {
     PutEnv(u32),
     GetEnvChk(u32, u32),
     SetEnvChk(u32, u32),
+    /// Reads an imported binding: the environment slot holds a reference to the exporting
+    /// module's slot (TDZ-checked; the second operand is the name).
+    GetImport(u32, u32),
+    /// `import.meta` of the running module.
+    ImportMeta,
+    /// spec options → promise: `import(spec, options)`.
+    ImportCall,
     /// A new environment of n slots (undefined) whose parent is the current one.
     PushEnv(u32),
     PopEnv,
@@ -405,6 +412,8 @@ pub(crate) struct Code {
     pub source: Rc<Source>,
     pub span: (u32, u32),
     pub marked: Cell<u32>,
+    /// The module this code belongs to (None for scripts).
+    pub module: Option<crate::api::ModuleId>,
 }
 
 impl Code {

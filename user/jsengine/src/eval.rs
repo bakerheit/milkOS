@@ -16,7 +16,7 @@ use crate::resolve::Resolver;
 use crate::value::Val;
 
 impl Realm {
-    fn syntax_error_at(&mut self, src: &Source, pos: u32, msg: &str) -> Exception {
+    pub(crate) fn syntax_error_at(&mut self, src: &Source, pos: u32, msg: &str) -> Exception {
         let (line, col) = src.line_col(pos);
         let e = self.make_error(ErrorKind::SyntaxError, msg);
         if let ObjKind::Error(info) = &mut self.om(e).kind {

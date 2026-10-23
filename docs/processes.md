@@ -428,7 +428,7 @@ refreshes it every second and one that dies leaves nothing behind. `user/gui`:
 The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
 LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
 `Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,
-`space`, `focus`, `font` (the UI font's key; user apps draw in it), and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
+`space`, `focus`, `font` (the UI font's key; user apps draw in it), `theme` (`dark` or `light`; read it from here, a sandboxed app can't open the settings file), and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
 
 `user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
 paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and

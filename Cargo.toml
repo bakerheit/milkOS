@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["kernel", "crypto", "milkfs"]
+members = ["kernel", "crypto", "milkfs", "tls"]
 # user/ is its own workspace (built by kernel/build.rs).
 exclude = ["user"]
 

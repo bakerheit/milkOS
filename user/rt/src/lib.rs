@@ -24,6 +24,7 @@ pub mod thread;
 pub mod unix;
 pub mod users;
 pub mod version;
+pub mod web;
 
 /// The shared crypto primitives (<repo>/crypto: ChaCha20, SHA-256/512, Ed25519, ...).
 pub use milkcrypto as crypto;

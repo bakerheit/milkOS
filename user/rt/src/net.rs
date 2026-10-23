@@ -36,6 +36,8 @@ mod nr {
     pub const SENDTO: usize = 206;
     pub const RECVFROM: usize = 207;
     pub const SHUTDOWN: usize = 210;
+    /// milkOS: look a host name up in the kernel's resolver (kernel/src/proc/sock.rs).
+    pub const MILK_RESOLVE: usize = 0x1011;
 }
 
 fn sc(n: usize, a: [usize; 6]) -> Result<usize> {
@@ -595,8 +597,8 @@ impl Want {
 /// * `localhost`: ::1 and 127.0.0.1;
 /// * `NAME.local`: mDNS on the VM-to-VM link (eth1), [`crate::mdns`]: AAAA over
 ///   ff02::fb and A over 224.0.0.251;
-/// * anything else: refused. User space doesn't resolve internet names (the kernel's DNS
-///   policy, `net::dns`, is the only path to a real resolver and it refuses them too).
+/// * anything else: the kernel's resolver ([`kernel_resolve`], IPv4 first). With the
+///   internet on that is real DNS; offline (every test boot) it refuses all but `.test`.
 pub fn resolve_all(host: &str, want: Want) -> core::result::Result<Vec<SockAddr>, String> {
     let mut out = Vec::new();
     if host == "localhost" {
@@ -609,9 +611,10 @@ pub fn resolve_all(host: &str, want: Want) -> core::result::Result<Vec<SockAddr>
             out.push(SockAddr::new(ip, 0));
         }
     } else {
-        return Err(alloc::format!(
-            "{host}: not resolved: milkOS resolves only numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are refused"
-        ));
+        match kernel_resolve(host, want) {
+            Ok(v) => out.extend(v.into_iter().map(|ip| SockAddr::new(ip, 0))),
+            Err(e) => return Err(lookup_words(host, e)),
+        }
     }
     out.retain(|a| want.takes(&a.ip));
     if out.is_empty() {
@@ -619,6 +622,61 @@ pub fn resolve_all(host: &str, want: Want) -> core::result::Result<Vec<SockAddr>
         return Err(alloc::format!("{host}: no {fam} address"));
     }
     Ok(out)
+}
+
+/// The kernel's lookup of `host` (`MILK_RESOLVE`): its addresses, IPv4 first. Errors:
+/// ENOENT no such host, ENODATA none of that family (61), ETIMEDOUT no answer, EPERM
+/// refused (the internet is off), EADDRNOTAVAIL no DNS server, EINVAL not a name, EIO the
+/// server failed, ELOOP a CNAME loop, EACCES the sandbox's net capability.
+pub fn kernel_resolve(host: &str, want: Want) -> Result<Vec<Ip>> {
+    const MAX: usize = 64;
+    let mut buf = alloc::vec![0u8; 17 * MAX];
+    let w = match want {
+        Want::Any => 0,
+        Want::V4 => 1,
+        Want::V6 => 2,
+    };
+    let n = sc(
+        nr::MILK_RESOLVE,
+        [
+            host.as_ptr() as usize,
+            host.len(),
+            w,
+            buf.as_mut_ptr() as usize,
+            MAX,
+            0,
+        ],
+    )?;
+    let mut v = Vec::new();
+    for rec in buf.chunks(17).take(n) {
+        if rec[0] == 6 {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&rec[1..17]);
+            v.push(Ip::V6(a));
+        } else {
+            v.push(Ip::V4([rec[1], rec[2], rec[3], rec[4]]));
+        }
+    }
+    Ok(v)
+}
+
+/// A lookup failure in words (`HOST: ...`).
+pub fn lookup_words(host: &str, e: Errno) -> String {
+    match e.0 {
+        1 => alloc::format!(
+            "{host}: not looked up: the internet is off (offline mode), so milkOS resolves only numeric addresses, localhost, NAME.local and .test names"
+        ),
+        2 => alloc::format!("{host}: there's no such host"),
+        61 => alloc::format!("{host}: the host has no address of that kind"),
+        110 => alloc::format!("{host}: the name server didn't answer (no internet?)"),
+        99 => {
+            alloc::format!("{host}: there's no DNS server yet (is the network up? network status)")
+        }
+        22 => alloc::format!("{host}: isn't a host name"),
+        40 => alloc::format!("{host}: its aliases (CNAMEs) go round in a circle"),
+        13 => alloc::format!("{host}: not looked up: this program may not use the network"),
+        _ => alloc::format!("{host}: the lookup failed: {e}"),
+    }
 }
 
 /// The first address of `host` (see [`resolve_all`]).

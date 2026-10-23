@@ -1205,12 +1205,22 @@ pub fn run() {
         check("tcp echo over IPv6", test_echo(addr));
     }
 
-    // 4. DNS policy (no packets for any of these).
+    // 4. DNS policy (no packets for any of these). Online, example.com would be a real
+    // lookup, so only the offline rule is checked then (it must still refuse the name).
+    let refused = if super::internet::online() {
+        if dns::offline_allows("example.com") {
+            Ok(Ipv4::LOCALHOST)
+        } else {
+            Err(EPERM)
+        }
+    } else {
+        dns::resolve("example.com", 100)
+    };
     check(
         "dns policy",
         match (
             dns::resolve("localhost", 100),
-            dns::resolve("example.com", 100),
+            refused,
             dns::resolve("10.0.2.2", 100),
         ) {
             (Ok(a), Err(b), Ok(c))

@@ -1,6 +1,7 @@
 //! Settings: Appearance (Whole milk / Chocolate milk, the UI font), Wallpaper, Display (brightness), Dock
 //! (icon size), Time Machine (milkfs automatic snapshots, via /System/Kernel/fs/milkfs/auto), Trash (how
-//! long deleted things wait before trashd deletes them for good) and About.
+//! long deleted things wait before trashd deletes them for good), Network (is the internet on,
+//! eth0, DNS) and About.
 //! Changes go to the desktop as `Request::Prefs` (applied at once, saved to
 //! ~/.config/milk/settings); Time Machine settings live on the milkfs volume itself.
 
@@ -26,7 +27,7 @@ use super::super::{Request, icons, request};
 use super::fsx;
 use filekit::trash::Keep;
 
-pub const SECTIONS: [&str; 8] = [
+pub const SECTIONS: [&str; 9] = [
     "Appearance",
     "Wallpaper",
     "Display & Lock",
@@ -34,11 +35,13 @@ pub const SECTIONS: [&str; 8] = [
     "Sound",
     "Time Machine",
     "Trash",
+    "Network",
     "About",
 ];
 const TM: usize = 5;
 const TRASH: usize = 6;
-const ABOUT: usize = 7;
+const NETWORK: usize = 7;
+const ABOUT: usize = 8;
 
 /// A section someone asked for (Skim's settings results); the Settings window picks it up.
 static PENDING: crate::sync::SpinLock<Option<usize>> = crate::sync::SpinLock::new(None);
@@ -586,6 +589,71 @@ impl Settings {
         }
     }
 
+    fn draw_network(&mut self, p: &mut Painter, x: i32) {
+        use crate::net::{self, dns, internet};
+        Self::heading(p, x, "Network", "The internet, eth0 and name lookups.");
+        let online = internet::online();
+        let rows: [(&str, String); 5] = [
+            (
+                "Internet",
+                String::from(if online { "on" } else { "off (offline mode)" }),
+            ),
+            (
+                "DNS",
+                match internet::dns_server() {
+                    Some((a, internet::DnsFrom::Dhcp)) => format!("{} (from DHCP)", a.ip),
+                    Some((a, internet::DnsFrom::Test)) => format!("{a} (test override)"),
+                    None if online => String::from("none yet (waiting for DHCP)"),
+                    None => String::from("only .test names, for tests (offline)"),
+                },
+            ),
+            (
+                "eth0",
+                match net::link(0) {
+                    Some((_, mac, c)) if c.configured() => {
+                        let bits = c.mask.0.iter().map(|b| b.count_ones()).sum::<u32>();
+                        format!("{}/{bits}, mac {mac}", c.addr)
+                    }
+                    Some((_, mac, _)) => format!("no address yet, mac {mac}"),
+                    None => String::from("no network card"),
+                },
+            ),
+            (
+                "Gateway",
+                match net::link(0).and_then(|(_, _, c)| c.gateway) {
+                    Some(g) => format!("{g}"),
+                    None => String::from("-"),
+                },
+            ),
+            ("Name cache", {
+                let (n, hits, misses) = dns::cache_stats();
+                format!("{n} names ({hits} hits, {misses} misses)")
+            }),
+        ];
+        for (i, (k, v)) in rows.iter().enumerate() {
+            let y = 96 + i as i32 * 26;
+            p.text_p(x, y, k, COCOA, false);
+            p.text_p(x + 120, y, v, ESPRESSO, i == 0);
+        }
+        let body = Font::body(false);
+        let notes: [&str; 3] = if online {
+            [
+                "The Browser and network get visit http:// sites by name.",
+                "https:// pages need TLS, which milkOS doesn't have yet.",
+                "Start with MILK_OFFLINE=1 for a boot with no internet.",
+            ]
+        } else {
+            [
+                "Offline mode: the Browser visits only numeric addresses",
+                "and localhost, and names aren't looked up. Tests always run",
+                "like this; scripts/run.sh and milkOS.command turn it on.",
+            ]
+        };
+        for (i, n) in notes.iter().enumerate() {
+            p.text_p(x, 240 + i as i32 * 20, &body.truncate(n, 448), COCOA, false);
+        }
+    }
+
     fn draw_about(&mut self, p: &mut Painter, x: i32) {
         icons::drop_shape(p, x + 40, 60, 26, 56, BLUE);
         icons::drop_shape(p, x + 40, 60, 21, 46, MILK);
@@ -762,6 +830,7 @@ impl WindowContents for Settings {
             4 => self.draw_sound(p, x),
             TM => self.draw_tm(p, x),
             TRASH => self.draw_trash(p, x),
+            NETWORK => self.draw_network(p, x),
             _ => self.draw_about(p, x),
         }
         if let Some(i) = hover_index(&self.hits, self.hover) {
@@ -943,7 +1012,7 @@ impl WindowContents for Settings {
         }
         // Live sections (Time Machine countdown, About uptime) once a second.
         let s = now / 1_000_000_000;
-        if s != self.last_sec && matches!(self.section, TM | TRASH | ABOUT) {
+        if s != self.last_sec && matches!(self.section, TM | TRASH | NETWORK | ABOUT) {
             self.last_sec = s;
             if self.section == TM {
                 self.read_tm();

@@ -1,8 +1,11 @@
 # Networking
 
 Files: `kernel/src/virtio/net.rs` (driver), `kernel/src/net/` (stack, socket API, /proc/net,
-demo server, self-test), `kernel/src/proc/sock.rs` (socket syscalls), `user/rt/src/net.rs` +
-`user/network` + `user/cmdkit` (the `network` command), `scripts/net-test.sh` + helpers (end-to-end test).
+demo server, self-test, the internet policy, DNS), `kernel/src/proc/sock.rs` (socket syscalls),
+`milkweb/` (URLs, the HTTP/1.1 client, DNS messages, the Browser's HTML; shared by the kernel
+and user space), `user/rt/src/net.rs` + `user/rt/src/web.rs` + `user/network` + `user/cmdkit`
+(the `network` command), `kernel/src/wm/apps/browser.rs` (the Browser),
+`scripts/net-test.sh` / `scripts/web-test.sh` + helpers (end-to-end tests).
 
 Everything is written from scratch (no crates). IPv4 only: up to two Ethernet interfaces
 (`eth0`, the slirp NIC with DHCP; `eth1`, an optional VM-to-VM link with a link-local
@@ -12,14 +15,99 @@ address, see "eth1" below) plus loopback (`lo`).
 
 | | |
 |---|---|
-| `scripts/run.sh` / `screenshot.sh` | `-netdev user,id=n0,restrict=on` + `virtio-net-device` (`scripts/netdev.sh`). The guest gets 10.0.2.15 by DHCP and can ping 10.0.2.2; slirp lets it reach nothing else (no host, no internet; it also hands out no router/DNS in this mode). |
+| `scripts/run.sh`, the release `milkOS.command` | **the internet is on**: `-netdev user,id=n0` (no `restrict=on`) + `-fw_cfg name=opt/milkos/net,string=internet=on` (`scripts/netdev.sh`, `milk_net_args online`). slirp NATs to the Mac's network and answers DNS at 10.0.2.3 by asking the Mac's resolver. See "Internet" below. |
+| `MILK_OFFLINE=1 scripts/run.sh`, `milkOS.command --offline` | offline: `-netdev user,id=n0,restrict=on`, nothing in fw_cfg. The guest gets 10.0.2.15 by DHCP and can ping 10.0.2.2; slirp lets it reach nothing else (no host, no internet; it also hands out no router/DNS in this mode). |
+| `screenshot.sh`, `wm-demo.sh`, every test | offline as above (`milk_net_args` with no argument), or the test's own local-only netdev. |
 | `MILK_HTTP_PORT=8088 scripts/run.sh` | also forwards `127.0.0.1:8088` on the Mac to the guest's port 80: `curl http://127.0.0.1:8088/`. Opt-in so parallel qemus don't fight over the port. |
 | `scripts/net-test.sh` | the full end-to-end test (below). Unrestricted slirp, but every host-side helper binds to 127.0.0.1 and the guest is only told about 10.0.2.2 (= the Mac's loopback). |
 | in msh | `network status`, `network connections [--tcp] [--udp] [--listening]`, `network counters`, `network ping [--count N] [--interval MS] 10.0.2.2`, `network get http://127.0.0.1/`, `network connect HOST PORT` / `network listen PORT`, `text show /proc/net/tcp` (`network help` lists them all). Host servers at 10.0.2.2:PORT (the Mac's 127.0.0.1) are only reachable without `restrict=on`. |
 
 Network safety rule for tests: only qemu's own gateway/DHCP (10.0.2.2) and servers we start
 on the Mac at 127.0.0.1 (seen from the guest as 10.0.2.2:PORT). No internet hosts, no real
-DNS (see the resolver policy below).
+DNS (see the resolver policy below). `scripts/check-all.sh` enforces it (the internet guard,
+below).
+
+## Internet
+
+Interactive runs are online, tests are offline. Which one a boot is, is the launcher's
+choice, passed in fw_cfg `opt/milkos/net` and read by `net::internet` at net init (it logs
+`[net] internet: on, DNS from DHCP` or `[net] internet: off (offline mode)`):
+
+| | online (`internet=on`) | offline (nothing, or `internet=off`) |
+|---|---|---|
+| who | `scripts/run.sh`, `milkOS.command` | `MILK_OFFLINE=1` / `--offline`, every test |
+| slirp | no `restrict=on`: NAT to the internet through the Mac | `restrict=on` (or a test's own local netdev) |
+| names (`net::dns`) | any name: A and AAAA from the DHCP DNS server (slirp's 10.0.2.3), CNAMEs followed, TCP for truncated answers, cached for their TTL | `.test` only, from a server set by the self-test; `EPERM` for the rest (the policy as it always was) |
+| Browser | host names; a bare word is a search (below) | IP literals and `localhost` only, refused before any socket |
+| `network lookup` / `get` | real names | numeric, localhost, `NAME.local`, `.test` |
+| shown | Settings > Network "Internet: on", `network status` `internet on (DNS 10.0.2.3 from DHCP)`, `/proc/net/internet` | "off (offline mode)" |
+
+`dns=A.B.C.D:PORT` in the same fw_cfg file (with `internet=on`) is **test only**: that server
+is used instead of DHCP's (loopback or eth0's subnet only, never with a fallback to 10.0.2.3),
+so `scripts/web-test.sh` can run the online paths against its own DNS server on the Mac.
+
+**The guard.** `scripts/check-all.sh` runs every test with `MILK_CHECK_ALL=1 MILK_OFFLINE=1`
+and a `qemu-system-aarch64` wrapper first in `PATH` (also in releasetest's clean `PATH`). The
+wrapper refuses (exit 97) to start a VM whose fw_cfg `opt/milkos/net` says `internet=on` (or
+comes from a file), unless its DNS is a local test server (`dns=10.0.2.2:PORT`, the Mac's
+loopback); `netdev.sh` refuses `milk_net_args online` under `MILK_CHECK_ALL=1`. Either one
+makes that test `FAIL(internet)` and the run fail, with the offending argument printed;
+check-all checks at the start that the wrapper really refuses. Test scripts that call
+`run.sh` (serial-soak) set `MILK_OFFLINE=1` themselves, and releasetest runs
+`milkOS.command --offline`.
+
+**What is safe, what isn't (online).** The guest is behind slirp's NAT: nothing on the
+internet or the LAN can open a connection to it (no port is forwarded unless `MILK_HTTP_PORT`
+asks, and that one is bound to the Mac's 127.0.0.1). Going out, it can reach whatever the Mac
+can: web sites, and also the Mac's LAN (a router's admin page, a printer) and the Mac itself
+at 10.0.2.2. Everything is plain http: anyone between the Mac and a site can read and change
+the pages (`https://` is refused until there is TLS, see below), so don't type anything
+private into a page. DNS answers aren't authenticated either (no DNSSEC; the ids are random
+and an answer must echo the question). Every fetch is bounded (2 MiB per page in the
+Browser, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
+on the way (DNS, HTTP, gzip, HTML) is host-tested against malformed and hostile input. The
+sandbox's net capability gates names too: `MILK_RESOLVE` of a real name needs the full
+capability (`net=local` processes get localhost and numeric addresses only). Offline, none of
+this applies: slirp is restricted and the guest resolves nothing real.
+
+**The client** (`milkweb::http`, the Browser and `rt::web`): HTTP/1.1 GET with `Host`,
+`User-Agent: milkOS/0.1`, `Accept-Encoding: gzip, deflate` and `Connection: close` (or
+keep-alive, reused for a same-origin redirect, when `Options::keep_alive` asks); bodies framed
+by chunked encoding (trailers skipped), Content-Length (two different ones are an error) or
+the close; 1xx answers skipped; redirects 301/302/303/307/308 (at most 10; a loop, an address
+seen before, is an error); gzip (every member, CRC-32 and size checked) and deflate (zlib or
+raw), with user/imgdec's inflate; limits on the header (32 KiB) and body, an overall
+deadline and an idle timeout per read. It runs over two small traits:
+
+```rust
+trait Transport { fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error>; // 0 = end
+                  fn write(&mut self, buf: &[u8]) -> Result<usize, Error>; }
+trait Net { fn connect(&mut self, host: &str, port: u16, timeout_ms: u64) -> Result<Box<dyn Transport>, Error>;
+            fn now_ms(&mut self) -> u64;
+            fn has_tls(&self) -> bool { false }                      // the https hook
+            fn secure(&mut self, host: &str, tcp: Box<dyn Transport>) -> Result<Box<dyn Transport>, Error>; }
+milkweb::http::get(&mut dyn Net, &Url, &Options) -> Result<Response, Failure>
+```
+
+`net::web::KernelNet` (kernel sockets) and `rt::web::RtNet` (user sockets) implement `Net`.
+**TLS** slots in at `secure`: with `has_tls() == false` (today) an `https://` address fails at
+once with `Error::SecureUnsupported` ("Secure pages aren't supported yet"), before any lookup
+or connection; with the `tls` crate, `has_tls` returns true and `secure` returns
+`tls::Client::connect(host, tcp)` as a `Transport`. Nothing else changes.
+
+**The Browser** (`wm/apps/browser.rs`) shows where redirects ended in its address bar and says
+what went wrong in words: "No internet (offline mode)", "Server not found", "No internet"
+(no DNS answer), "Can't connect to the server", "Secure pages aren't supported yet". A bare
+word (no dot, colon or slash, or several words) goes to DuckDuckGo's text-only page,
+`http://lite.duckduckgo.com/lite/?q=...` (not tried by any test: if the site insists on
+https, the search shows the secure-pages message until there is TLS). Its HTML subset
+(`milkweb::html`, host-tested): headings, paragraphs, `div`/`section`/... as blocks,
+`span`/`font`/... inline, lists, `blockquote`, `pre`, `hr`, tables as one line per row with
+" | " between cells, links, bold / italic, `<img alt>` as `[alt]`; `script`, `style`, `svg`,
+`template` and the head dropped with their content; named and numeric entities; UTF-8,
+Latin-1 or Windows-1252 from the Content-Type, a `<meta charset>`, or the bytes; characters
+the UI font (Latin-1) lacks folded to ASCII. No CSS, no JavaScript, no images. Each load is
+logged (`[browser] URL: 200 OK, N bytes, 'title', K redirects`).
 
 ## Structure
 
@@ -87,12 +175,23 @@ eth1, else the default gateway (eth0's).
   `connect` filters the peer.
 * **DHCP**: DISCOVER/OFFER/REQUEST/ACK with retries (1, 2, 4, 8 s, then every 8 s), renews
   at T1, starts over at expiry or NAK. Boot does not wait for it beyond the self-test's 3 s.
-* **DNS** (`net::dns::resolve(name, timeout_ms)`): A records, 2 tries. **Policy**: never a
-  real lookup. `localhost`/`*.localhost` are 127.0.0.1 and dotted quads parse locally; any
-  other name must end in `.test` (else `EPERM`) and goes only to a server set with
-  `dns::set_server`, which must be loopback or on our subnet (else `EPERM`). The DHCP DNS
-  (slirp's 10.0.2.3, which forwards to the Mac's real resolver) is recorded but never used.
-  Relax this deliberately when the project wants real name resolution.
+* **DNS** (`net::dns::resolve_all(name, want, timeout_ms)`, and `resolve(name, timeout_ms)`
+  for one IPv4 address). `localhost`/`*.localhost` and numeric addresses are answered
+  locally. The rest depends on the boot ("Internet" above). **Offline** (every test): never a
+  real lookup. Any other name must end in `.test` (else `EPERM`) and goes only to a server set
+  with `dns::set_server`, which must be loopback or on our subnet (else `EPERM`); A records,
+  2 tries. The DHCP DNS (slirp's 10.0.2.3, which forwards to the Mac's real resolver) is
+  recorded but never used. **Online**: the DHCP DNS (or the test override), through
+  `milkweb::dns` (host-tested): A and AAAA (IPv4 first: slirp's IPv6 only works if the Mac
+  has it), random query ids, the answer must echo the question, CNAME chains followed inside
+  an answer and across questions (at most 8, loops refused), a truncated (TC) UDP answer
+  asked again over TCP, compression pointers only backwards. A 128-entry cache keeps answers
+  for their TTL (5 s to 1 day), NXDOMAIN and "no such record" for the SOA minimum (60 s
+  without one, at most 15 min). User space asks through `MILK_RESOLVE` (0x1011:
+  name, want, a buffer of 17-byte records; `rt::net::kernel_resolve`). Errors: `ENOENT` no
+  such host, `ENODATA` none of that family, `ETIMEDOUT` no answer, `EPERM` refused offline,
+  `EADDRNOTAVAIL` no DNS server yet, `EIO` a server failure or a bad answer, `ELOOP` a CNAME
+  loop.
 * **TCP** (`net/tcp.rs`):
   * **Basics.** The RFC 9293 state machine (all 11 states); active, passive and
     simultaneous open; FIN in every state.
@@ -337,7 +436,8 @@ net::READY_WQ                      // WaitQueue woken on every change (what `wai
 
 Other entry points: `net::init()` (after `sched::init`), `net::selftest::run()`,
 `net::config() -> IpConfig { addr, mask, gateway, dns }`, `net::mac()`, `net::poll()`,
-`net::dns::{resolve, set_server, server}`.
+`net::dns::{resolve, resolve_all, set_server, server, cache_stats}`, `net::internet::{online,
+dns_server, summary}`, `net::web::KernelNet` (milkweb's HTTP client over kernel sockets).
 
 `SocketId` is slot + generation (`raw()` / `from_raw()` to store it); a stale id gives
 `EBADF`. Semantics follow Linux unless noted: binding never conflicts with connections
@@ -387,8 +487,10 @@ and milkOS's `ifaddr` (`eth0 flags=UP,BROADCAST,RUNNING mtu=1500 ether=.. inet=.
 netmask=.. broadcast=.. inet6=ADDR/LEN,SCOPE[,tentative] (one per IPv6 address)
 router6=.. gateway=.. dns=.. dhcp=Bound`).
 
-Also milkOS's `hostname` (the running hostname), `pmtu` (learned path MTUs) and
-`igmp6` (the IPv6 groups each link is in, Linux columns, plus MLD counters).
+Also milkOS's `hostname` (the running hostname), `pmtu` (learned path MTUs),
+`igmp6` (the IPv6 groups each link is in, Linux columns, plus MLD counters) and `internet`
+(`internet=on|off`, `dns=ADDR:PORT|-`, `dns_from=dhcp|test|-`, the resolver cache's
+`cache=N`, `cache_hits=`, `cache_misses=`).
 
 IPv6: `tcp6` and `udp6` (AF_INET6 sockets, the 32-digit Linux address form; `tcp`/`udp`
 list only AF_INET ones, so a dual-stack listener is in `tcp6`), `if_inet6` (Linux
@@ -399,13 +501,14 @@ lines: Ip6, Icmp6, ND and DAD counters) and milkOS's `ndisc` (the neighbour cach
 
 | program | what | how |
 |---|---|---|
-| `network status [LINK] [--keys]` | each link: up or down, MAC, MTU, flags, IPv4 (address/prefix, netmask, broadcast, DHCP state, link-local), gateway and DNS, every IPv6 address with its scope (`link`, `global`, `host`, `(tentative)`), the IPv6 router, packet and byte counters; above them the hostname, the `.local` name and Milk Drop visibility. `--keys` is the stable `key=value` contract for the Settings > Network panel; a table for msh | `/proc/net/ifaddr` (milkOS, `key=value` per link) + `/proc/net/dev`, uname, the drop daemon's files |
+| `network status [LINK] [--keys]` | each link: up or down, MAC, MTU, flags, IPv4 (address/prefix, netmask, broadcast, DHCP state, link-local), gateway and DNS, every IPv6 address with its scope (`link`, `global`, `host`, `(tentative)`), the IPv6 router, packet and byte counters; above them the hostname, the `.local` name, Milk Drop visibility and the internet (`internet     on (DNS 10.0.2.3 from DHCP)` / `off (offline mode)`; `internet=on\|off` in `--keys`). `--keys` is the stable `key=value` contract for the Settings > Network panel; a table for msh | `/proc/net/ifaddr` (milkOS, `key=value` per link) + `/proc/net/dev`, uname, the drop daemon's files |
 | `network connections [--tcp] [--udp] [--listening] [--ipv4\|--ipv6]`, `network counters` | sockets (tcp, tcp6, udp, udp6; a table for msh), or protocol counters | `/proc/net/{tcp,tcp6,udp,udp6,snmp,snmp6}` |
 | `network ping [--ipv4\|--ipv6] [--count N] [--interval MS] [--size BYTES] [--timeout MS] HOST` | ICMP / ICMPv6 echo, Linux-style output | a **ping socket**: `socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP)` as on Linux (unprivileged), or `(AF_INET6, SOCK_DGRAM, IPPROTO_ICMPV6)` with `--ipv6` or an IPv6 address. `sendto` an echo request (the kernel sets the identifier = the socket's local "port", and the checksum), `recvfrom` gets the replies for that identifier (ICMP header + data, no IP header, so no TTL), `SO_RCVTIMEO` for the timeout. Default 4 pings (no ^C yet). Short forms: `-c`, `-i`, `-s`, `-W`, `-4`, `-6`. |
 | `network connect [-4\|-6] [--udp] HOST PORT`, `network listen [-4\|-6] [--udp] PORT` | stdin ↔ socket | `ppoll` on fd 0 and the socket; ^D half-closes (TCP). Connect tries every address of HOST; listen uses `[::]` (both families; `-4` IPv4 only, `-6` IPv6 only) |
 | `httpd [-p PORT] [-q] [DIR]` | static files over HTTP/1.0 (GET, HEAD), index.html or a listing for directories, `..` refused (403), 301 for a directory without `/` | started by milkd as `httpd -q /Users/milk/Sites` on :80 (rootfs/Users/milk/Sites), listening on `[::]:80` (IPv6 and IPv4) |
-| `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no tables or CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
-| `network get [--headers] [--save FILE [--replace]] URL` | HTTP GET: the body to the screen or FILE (an existing FILE only with `--replace`), a summary line on stderr | `http://` only (no TLS) |
+| `/status` (httpd) | a live dashboard: uptime, load, CPU per core, memory, network totals, the 15 newest audit events | generated per request from /proc, in the HTML subset the desktop Browser renders (no CSS: bars are text in `<pre>`); `open http://127.0.0.1/status` |
+| `network get [--headers] [--save FILE [--replace]] URL` | HTTP GET: the body to the screen or FILE (an existing FILE only with `--replace`), each redirect and a summary line on stderr (`network get: 200 OK, 607 bytes (gzip, 422 on the wire) from 10.0.2.2:8000 in 2 ms`) | `rt::web` (milkweb's HTTP/1.1 client: redirects, chunked, gzip/deflate, 4 MiB, 30 s). Host names with the internet on; `https://` refused (no TLS yet) |
+| `network lookup [-4\|-6] NAME` | every address of a name (`NAME has IPv4 address A`), IPv4 first | `rt::net::resolve_all`: numeric / localhost / `.local` here, the rest through the kernel's resolver (`MILK_RESOLVE`, the boot's policy) |
 | `drop id / name / list / send / recv / peers / forget / visible / daemon` | Milk Drop: file sharing with another milkOS on eth1 | see "Milk Drop" below |
 | `network name [--local] [NAME]`, `network hide`, `network show` | the hostname, the `.local` (Milk Drop) name, Milk Drop visibility | docs/network-panel.md; hostname via `sethostname(2)` (root, kept in `/System/Settings/milk/net/hostname`, applied by the kernel at boot), name and visibility through the drop daemon (administrators) |
 
@@ -435,11 +538,11 @@ port, scope }`, `Ip::{V4, V6}`, with RFC 5952 text.
   Milk Drop name (`drop name bob` -> `bob.local`), since every machine's hostname is `milk`.
   There is no probing for name conflicts: two machines with one name both answer, and
   the first answer wins.
-* **anything else is refused** (`network ping: example.com: not resolved: milkOS resolves only
-  numeric addresses, localhost and NAME.local (mDNS on eth1); internet names are
-  refused`). The kernel's DNS policy for its own callers (`.test` only, see DNS above) is
-  unchanged. Multicast never leaves through eth0, so `.local` lookups can't reach slirp or
-  the Mac.
+* **anything else goes to the kernel's resolver** (`MILK_RESOLVE`, see DNS above): with the
+  internet on, real DNS; offline, `.test` names only, and the rest refused (`network ping:
+  example.com: not looked up: the internet is off (offline mode), so milkOS resolves only
+  numeric addresses, localhost, NAME.local and .test names`). Multicast never leaves through
+  eth0, so `.local` lookups can't reach slirp or the Mac.
 
 ## Milk Drop (`user/drop`)
 
@@ -692,6 +795,33 @@ listing, 404, 403 for `..`, 301) and the kernel httpd (`/big` content verified, 
 `/big`, `/net`, 404). Kills only the qemu and
 python processes it started, by PID.
 
+**`scripts/milkweb-test.sh`** (host, no VM, no network): milkweb's unit tests. The HTTP client
+against scripted fake servers (Content-Length, chunked in pieces and broken, gzip and deflate
+bodies, a corrupt gzip, a 301/302/303/307/308 chain across hosts, a loop, 11 redirects, https
+refused before connecting and the TLS hook with a pass-through layer, body/header/gzip-bomb
+limits, a stalled server and the overall deadline, malformed status lines and headers,
+keep-alive reuse); DNS messages built by hand (compression pointers, a pointer loop, every
+truncation, random corruption, A/AAAA/CNAME, TTLs with the top bit set) and a fake name
+server for the lookup logic (the cache and TTL expiry, NODATA with an SOA, NXDOMAIN cached,
+CNAME chains across questions and loops, TC then TCP, a stray reply, SERVFAIL, timeouts);
+gzip members and header flags; URLs (parsing, joining links); the HTML subset (entities,
+charsets, blocks, tables, script/style dropped, junk input).
+
+**`scripts/web-test.sh`**: the online paths with no internet. `scripts/web_test_servers.py`
+(python3 -I, 127.0.0.1 only, never forwarding) serves DNS over UDP and TCP on one port for a
+made-up zone under `milk.test` (a CNAME, 40 A records that don't fit in UDP, an AAAA;
+everything else NXDOMAIN) and HTTP (a 301 -> 302 -> 307 chain across two host names to a
+chunked, gzipped page, and a redirect loop). The guest boots with an unrestricted netdev (as
+net-test's) and fw_cfg `internet=on dns=10.0.2.2:PORT`, so it uses that server and never
+slirp's. In msh: `network status` shows the internet on with the test DNS; `network lookup`
+of the CNAME (twice: the server sees one question, the second is cached), an AAAA, the big
+name (UDP truncated, then TCP: 40 addresses), NXDOMAIN, and `example.com` (answered
+NXDOMAIN by the test server, proving there's no fallback); `network get` through the chain
+(Host and User-Agent checked on the server, the body gunzipped), the loop, an `https://`
+address refused; `/proc/net/internet`. Then the Browser (`wm-demo.sh browseurl`) opens
+`http://www.milk.test:PORT/start` by name: its log line must show the page, title and 3
+redirects, and the screenshot is kept (`web-browser.png`).
+
 **`scripts/drop-test.sh`**: Milk Drop between two VMs, alice and bob. Each has its own
 private milkfs and scratch images in a mktemp dir, with a different random 1 MiB file put
 in by `mkmilkfs.py`. eth0 is a restricted slirp; eth1 is `-netdev dgram` between two free
@@ -747,6 +877,10 @@ file. The host helpers bind `::1`/127.0.0.1 only, bob's slirp is restricted, and
 two UDP ports on 127.0.0.1.
 
 ## Next
+
+* TLS 1.3 (the `tls` crate) behind `Net::secure`, then https:// in the Browser and `network
+  get`; IPv6 DNS servers (slirp's fec0::3) for v6-only boots; DNS over a shared socket instead of
+  one per question.
 
 * `epoll`; a real wake-up for console/tty readiness in ppoll instead of the 20 ms re-check;
   `MSG_PEEK`, `sendmsg`/`recvmsg`.

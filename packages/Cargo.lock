@@ -25,6 +25,10 @@ name = "milkcrypto"
 version = "0.0.1"
 
 [[package]]
+name = "milkweb"
+version = "0.0.1"
+
+[[package]]
 name = "moo2048"
 version = "1.0.0"
 dependencies = [
@@ -38,6 +42,7 @@ version = "0.0.1"
 dependencies = [
  "heapkit",
  "milkcrypto",
+ "milkweb",
 ]
 
 [[package]]

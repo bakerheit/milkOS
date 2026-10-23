@@ -10,6 +10,7 @@ is inspired by macOS (menu bar, dock, glass, Spaces, a launcher).
 ```
 scripts/run.sh                 # desktop window + serial console in this terminal
 scripts/run.sh headless        # serial console only
+MILK_OFFLINE=1 scripts/run.sh  # no internet (tests always run like this)
 MILK_SOUND=1 scripts/run.sh    # with sound through the Mac's speakers (off by default)
 MILK_SHARE_RW=1 scripts/run.sh # make the Mac shared folder writable (read-only by default)
 MILK_SMP=1 scripts/run.sh      # one CPU instead of four

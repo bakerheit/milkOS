@@ -1096,6 +1096,28 @@ pub fn wait_dhcp() -> bool {
     true
 }
 
+/// Every boot without the network self-test: DHCP ([`wait_dhcp`]), then up to 2 s for eth0's
+/// IPv6 link-local address and 2 s more for its SLAAC one, so the shell doesn't come up while
+/// IPv6 autoconfiguration is still printing its lines (the self-test waited for both too).
+pub fn wait_up() {
+    wait_dhcp();
+    if !super::has_device() {
+        return;
+    }
+    let v6 = |o: Option<super::ipv6::Origin>| {
+        super::with(|st| {
+            let v = &st.iface.eth0().v6;
+            match o {
+                None => v.link_local().is_some(),
+                Some(o) => v.addr(o).is_some(),
+            }
+        })
+    };
+    if wait_for(2000, || v6(None)) {
+        wait_for(2000, || v6(Some(super::ipv6::Origin::Slaac)));
+    }
+}
+
 /// Run the network self-test. Prints `[net] selftest ok` or `[net] selftest FAILED (n)`.
 pub fn run() {
     let cfg = read_config();

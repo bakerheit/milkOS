@@ -36,10 +36,10 @@ headless() { # name commands...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   env -i HOME="$HOME" PATH="$CLEANPATH" /bin/bash -c "$GO" "$B/milkOS.command" \
-    --offline --headless --serial "unix:$SOCK,server,nowait" >"$T/$name.out" 2>&1 &
+    --offline --headless --serial "unix:$SOCK,server=on,wait=on" >"$T/$name.out" 2>&1 &
   QPID=$!
   local P='msh:[^\n]*\$ '
-  local args=("wait:$P")
+  local args=("wait:$P" "send:pause 1" "wait:$P") # the first command only lets the boot finish
   for c in "$@"; do args+=("send:$c" "wait:$P"); done
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "${args[@]}" "send:print REL""-DONE" "wait:REL-DONE" "done:$T/$name.done" &
   local DPID=$!

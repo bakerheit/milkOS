@@ -133,7 +133,7 @@ pub extern "C" fn kmain() -> ! {
         net::selftest::run();
     } else {
         // The network is up when the shell is, self-test or not.
-        net::selftest::wait_dhcp();
+        net::selftest::wait_up();
     }
     net::tls::selftest();
     audio::init();

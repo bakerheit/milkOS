@@ -818,7 +818,7 @@ impl WindowContents for Settings {
             if i == self.section {
                 p.rrect_r(r, R_BUTTON, STRAW, SEL_SIDEBAR_A);
             }
-            p.text_p(18, y + 4, s, ESPRESSO, i == self.section);
+            p.text_p(18, y + 4, s, ESPRESSO, false);
             self.hits.push((r, Hit::Section(i)));
         }
         let x = SIDEBAR_W + 28;

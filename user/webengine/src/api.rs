@@ -719,6 +719,9 @@ pub enum PageRequest {
     Open(String),
     /// `document.title` changed.
     Title,
+    /// A form wasn't sent: this control is invalid (the engine has focused it); show the
+    /// message (constraint validation: required, type, pattern, ...).
+    Invalid(String),
 }
 
 /// Keys as scripts see them (KeyboardEvent.key / code).
@@ -759,6 +762,8 @@ pub struct ScriptStats {
 /// A parsed page. Not tied to any I/O; all inputs come in through the methods.
 pub struct Document {
     pub(crate) page: crate::page::Page,
+    /// Its scripts, if it was parsed with them on ([`Document::parse_scripted`]).
+    pub(crate) js: Option<alloc::boxed::Box<crate::script::Runtime>>,
 }
 
 impl Document {
@@ -778,6 +783,7 @@ impl Document {
     ) -> Document {
         Document {
             page: crate::page::Page::parse(bytes, url, content_type, limits),
+            js: None,
         }
     }
 
@@ -785,6 +791,7 @@ impl Document {
     pub fn parse_str(html: &str, url: &str) -> Document {
         Document {
             page: crate::page::Page::parse_str(html, url, Limits::default()),
+            js: None,
         }
     }
 
@@ -930,5 +937,198 @@ impl Document {
 
     pub fn stats(&self) -> Stats {
         self.page.stats()
+    }
+}
+
+/// # Scripts
+///
+/// A page parsed with [`Document::parse_scripted`] runs its JavaScript, in its own realm
+/// with the [`ScriptLimits`]. The app drives it:
+///
+/// ```text
+///   parse_scripted ─▶ pending_scripts() ──app fetches──▶ supply_script()
+///          │                                                   │
+///          ▼                                                   ▼
+///   run(host) whenever something came in, or at next_wake(): scripts in order, timers,
+///             DOMContentLoaded / load, microtasks
+///   frame(host) before drawing while wants_frame(): requestAnimationFrame callbacks
+///   click / key / set_focus / input / change / submit_form: the user's doings as events
+///   take_requests(), take_console(): what the scripts asked for and said
+/// ```
+///
+/// After any of these, lay out again before hit testing or drawing (the DOM may have
+/// changed; [`Document::layout`] restyles only what changed). Form controls may come and go:
+/// [`ControlId`]s are only good until the next call that runs script, so keep the focus in
+/// the engine ([`Document::focused`]) rather than an id of your own.
+impl Document {
+    /// Parse a page with its scripts on (`<noscript>` is then not shown). None for
+    /// `scripts` is [`Document::parse_with`]: scripts off.
+    pub fn parse_scripted(
+        bytes: &[u8],
+        url: &str,
+        content_type: Option<&str>,
+        limits: Limits,
+        scripts: Option<ScriptLimits>,
+    ) -> Document {
+        let page = crate::page::Page::parse_scripting(
+            bytes,
+            url,
+            content_type,
+            limits,
+            scripts.is_some(),
+        );
+        let mut d = Document { page, js: None };
+        if let Some(l) = scripts {
+            d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new(&d.page, l)));
+        }
+        d
+    }
+
+    /// The page runs scripts (and they haven't been stopped).
+    pub fn scripting(&self) -> bool {
+        self.js.as_ref().is_some_and(|j| !j.stopped())
+    }
+
+    /// External scripts to fetch (absolute URLs), in the order they are wanted.
+    pub fn pending_scripts(&self) -> Vec<String> {
+        self.js.as_ref().map(|j| j.pending()).unwrap_or_default()
+    }
+
+    /// An external script's body (None: the fetch failed; its `error` event fires). Call
+    /// [`Document::run`] after.
+    pub fn supply_script(&mut self, url: &str, body: Option<&[u8]>) {
+        if let Some(j) = self.js.as_mut() {
+            j.supply(url, body);
+        }
+    }
+
+    /// Do the script work that is due: scripts whose turn it is, timers due by
+    /// [`ScriptHost::now`], the DOMContentLoaded and load events when their time comes, and
+    /// the microtasks after each. True if anything ran (the page may have changed).
+    pub fn run(&mut self, host: &mut dyn ScriptHost) -> bool {
+        match self.js.as_mut() {
+            Some(j) => j.run(&mut self.page, host),
+            None => false,
+        }
+    }
+
+    /// When [`Document::run`] has timer work next ([`ScriptHost::now`]'s clock). None: only
+    /// when something comes in.
+    pub fn next_wake(&self) -> Option<f64> {
+        self.js.as_ref().and_then(|j| j.next_wake())
+    }
+
+    /// requestAnimationFrame callbacks are waiting: call [`Document::frame`] before the next
+    /// draw (at the display's rate while this stays true).
+    pub fn wants_frame(&self) -> bool {
+        self.js.as_ref().is_some_and(|j| j.wants_frame())
+    }
+
+    /// Run the animation frame callbacks (just before drawing).
+    pub fn frame(&mut self, host: &mut dyn ScriptHost) -> bool {
+        match self.js.as_mut() {
+            Some(j) => j.frame(&mut self.page, host),
+            None => false,
+        }
+    }
+
+    /// A click at viewport point (`x`, `y`) with the view scrolled by `scroll`: mousedown,
+    /// mouseup and click go to the element there. A checkbox or radio button under it is
+    /// toggled here (before the click event, and back if a listener cancels it; `input`
+    /// and `change` follow), so the app must not toggle it again. False if a listener
+    /// cancelled the click (preventDefault): the app then skips its own action (following
+    /// a link, pressing a button, opening a select).
+    pub fn click(
+        &mut self,
+        host: &mut dyn ScriptHost,
+        x: i32,
+        y: i32,
+        scroll: (i32, i32),
+        mods: Mods,
+    ) -> bool {
+        crate::script::click(self, host, x, y, scroll, mods)
+    }
+
+    /// A key went down (`up` false) or up, for the focused element (or the body). False if
+    /// a listener cancelled it: the app skips what the key would do (typing, scrolling).
+    pub fn key(&mut self, host: &mut dyn ScriptHost, key: &KeyInput, up: bool) -> bool {
+        match self.js.as_mut() {
+            Some(j) => j.key(&mut self.page, host, key, up),
+            None => true,
+        }
+    }
+
+    /// The form control with the keyboard, as the page sees it.
+    pub fn focused(&self) -> Option<ControlId> {
+        self.page.focused_control()
+    }
+
+    /// Give a control the keyboard (None: take it away): blur, focusout, focus, focusin go
+    /// to the elements, and `change` to a text field left with a new value.
+    pub fn set_focus(&mut self, host: &mut dyn ScriptHost, id: Option<ControlId>) {
+        let node = id.and_then(|i| self.page.control_node(i));
+        match self.js.as_mut() {
+            Some(j) => j.focus(&mut self.page, host, node),
+            None => self.page.set_focus_node(node),
+        }
+    }
+
+    /// The user changed control `id`'s value (typed, pasted, picked an option): the
+    /// `input` event (and for a select, `change`).
+    pub fn input(&mut self, host: &mut dyn ScriptHost, id: ControlId) {
+        if let Some(n) = self.page.control_node(id)
+            && let Some(j) = self.js.as_mut()
+        {
+            j.user_input(&mut self.page, host, n);
+        }
+    }
+
+    /// Submit the form control `id` belongs to, as [`Document::submit`] would, after its
+    /// `submit` event: None if a listener cancelled it (or there is nothing to submit).
+    pub fn submit_form(
+        &mut self,
+        host: &mut dyn ScriptHost,
+        id: ControlId,
+        click: Option<(i32, i32)>,
+    ) -> Option<Submission> {
+        // Something to submit at all (a form, a method that sends)?
+        self.page.submit(id, click)?;
+        let form = self.page.form_node_of(id)?;
+        if let Some(j) = self.js.as_mut()
+            && !j.submit_event(&mut self.page, host, form, id)
+        {
+            return None;
+        }
+        // Listeners may have changed the values: the submission as it is now.
+        self.page.sync_forms();
+        let id = self.page.control_of_node(self.page.control_node(id)?)?;
+        self.page.submit(id, click)
+    }
+
+    /// What the scripts asked of the app since the last call, in order.
+    pub fn take_requests(&mut self) -> Vec<PageRequest> {
+        self.js.as_mut().map(|j| j.take_requests()).unwrap_or_default()
+    }
+
+    /// Console lines since the last call.
+    pub fn take_console(&mut self) -> Vec<ConsoleLine> {
+        self.js.as_mut().map(|j| j.take_console()).unwrap_or_default()
+    }
+
+    /// Stop the page's scripts for good (the user said so): nothing more runs, timers and
+    /// listeners are dropped, the page stays as it is.
+    pub fn stop_scripts(&mut self) {
+        if let Some(j) = self.js.as_mut() {
+            j.stop("stopped");
+        }
+    }
+
+    pub fn script_stats(&self) -> ScriptStats {
+        self.js.as_ref().map(|j| j.stats()).unwrap_or_default()
+    }
+
+    /// The DOM changed since the last layout: lay out again before hit testing.
+    pub fn needs_layout(&self) -> bool {
+        self.page.changed()
     }
 }

@@ -118,6 +118,8 @@ pub struct Dom {
     pub changes: Changes,
     /// Ids of freed nodes, for reuse.
     free: Vec<NodeId>,
+    /// Bumped by every tracked change (tree, attributes, text): live collections cache by it.
+    pub generation: u64,
 }
 
 impl Default for Dom {
@@ -142,6 +144,7 @@ impl Dom {
             track: false,
             changes: Changes::default(),
             free: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -434,6 +437,7 @@ impl Dom {
     }
 
     fn note_restyle(&mut self, n: NodeId) {
+        self.generation += 1;
         let c = &mut self.changes;
         c.any = true;
         if c.restyle_all {
@@ -451,6 +455,7 @@ impl Dom {
 
     /// `child` is being linked into or out of `parent`.
     fn note_tree(&mut self, parent: NodeId, child: NodeId) {
+        self.generation += 1;
         self.changes.tree = true;
         self.changes.forms = true;
         self.changes.images = true;
@@ -538,6 +543,7 @@ impl Dom {
     }
 
     fn attr_changed(&mut self, n: NodeId, name: &str) {
+        self.generation += 1;
         if name == "id" || name == "class" {
             let (id, cls) = {
                 let e = self.element(n).unwrap();
@@ -604,6 +610,7 @@ impl Dom {
             }
             _ => return,
         }
+        self.generation += 1;
         if self.track && matches!(self.nodes[n as usize].data, NodeData::Text(_)) {
             self.changes.text = true;
             self.changes.any = true;

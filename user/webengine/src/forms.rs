@@ -478,6 +478,18 @@ impl Forms {
         }
     }
 
+    /// No option of a select selected (a script set a value no option has).
+    pub fn deselect_all(&mut self, id: ControlId) {
+        if let Some(c) = self.controls.get_mut(id.0 as usize)
+            && c.kind == ControlKind::Select
+        {
+            for o in c.options.iter_mut() {
+                o.selected = false;
+            }
+            self.dirty_select.insert(self.nodes[id.0 as usize]);
+        }
+    }
+
     pub fn reset(&mut self, id: ControlId) {
         let Some(form) = self.controls.get(id.0 as usize).and_then(|c| c.form) else {
             return;
@@ -515,13 +527,26 @@ impl Forms {
     ) -> Option<Submission> {
         let c = self.controls.get(id.0 as usize)?;
         let form_idx = c.form?;
-        let form_node = *self.forms.get(form_idx as usize)?;
-        let fe = dom.element(form_node)?;
         let submitter =
             matches!(c.kind, ControlKind::Submit | ControlKind::ImageSubmit).then_some(id);
         if c.kind == ControlKind::Reset || c.kind == ControlKind::Button {
             return None;
         }
+        self.submit_form(dom, doc_url, base, form_idx, submitter, click)
+    }
+
+    /// The submission of form number `form_idx` (`form.submit()` has no submitter).
+    pub fn submit_form(
+        &self,
+        dom: &Dom,
+        doc_url: &str,
+        base: &str,
+        form_idx: u32,
+        submitter: Option<ControlId>,
+        click: Option<(i32, i32)>,
+    ) -> Option<Submission> {
+        let form_node = *self.forms.get(form_idx as usize)?;
+        let fe = dom.element(form_node)?;
         let sub_el = submitter.and_then(|s| dom.element(self.nodes[s.0 as usize]));
         let pick = |a: &str, fa: &str| -> Option<String> {
             sub_el

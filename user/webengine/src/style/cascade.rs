@@ -219,7 +219,7 @@ struct Styler<'a, 'b> {
 
 /// Sibling positions for :nth-child() and friends: (index among element siblings, 1-based;
 /// count of element siblings).
-fn sibling_positions(dom: &Dom) -> (Vec<u32>, Vec<u32>) {
+pub(crate) fn sibling_positions(dom: &Dom) -> (Vec<u32>, Vec<u32>) {
     let n = dom.len();
     let mut index = alloc::vec![0u32; n];
     let mut count = alloc::vec![0u32; n];

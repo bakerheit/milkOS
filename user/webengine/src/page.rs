@@ -840,6 +840,110 @@ impl Page {
         }
     }
 
+    /// The element of control `id`.
+    pub(crate) fn control_node(&self, id: ControlId) -> Option<NodeId> {
+        self.forms.nodes.get(id.0 as usize).copied()
+    }
+
+    /// The control an element is (after [`Page::sync_forms`]).
+    pub(crate) fn control_of_node(&self, n: NodeId) -> Option<ControlId> {
+        self.forms.by_node.get(&n).map(|c| c.0)
+    }
+
+    /// The `<form>` element control `id` belongs to.
+    pub(crate) fn form_node_of(&self, id: ControlId) -> Option<NodeId> {
+        let f = self.forms.controls.get(id.0 as usize)?.form?;
+        self.forms.forms.get(f as usize).copied()
+    }
+
+    pub(crate) fn focused_control(&self) -> Option<ControlId> {
+        if self.focus == NONE {
+            return None;
+        }
+        self.control_of_node(self.focus)
+    }
+
+    pub(crate) fn set_focus_node(&mut self, n: Option<NodeId>) {
+        self.focus = n.unwrap_or(NONE);
+    }
+
+    pub(crate) fn forms(&self) -> &Forms {
+        &self.forms
+    }
+
+    pub(crate) fn forms_mut(&mut self) -> &mut Forms {
+        &mut self.forms
+    }
+
+    /// The element under a viewport point (as [`Page::hit_test`] finds it), NONE if none.
+    pub(crate) fn node_at(&self, x: i32, y: i32, scroll: (i32, i32)) -> NodeId {
+        let Some(p) = &self.painted else {
+            return NONE;
+        };
+        let (dx, dy) = (x + scroll.0, y + scroll.1);
+        for h in p.hits.iter().rev() {
+            if h.fixed && h.rect.contains(x, y) {
+                return h.node;
+            }
+        }
+        for h in p.hits.iter().rev() {
+            if !h.fixed && h.rect.contains(dx, dy) {
+                return h.node;
+            }
+        }
+        NONE
+    }
+
+    /// A node's box after the last layout (document space; fixed ones in viewport space).
+    pub(crate) fn node_rect(&self, n: NodeId) -> Option<Rect> {
+        self.painted.as_ref()?.node_rects.get(n as usize).copied()
+    }
+
+    pub(crate) fn last_viewport(&self) -> Option<Viewport> {
+        self.last_vp
+    }
+
+    pub(crate) fn styles(&self) -> Option<&Styles> {
+        self.styles.as_ref()
+    }
+
+    pub(crate) fn page_url(&self) -> &str {
+        &self.url
+    }
+
+    /// The submission of the `<form>` element `form` (with `submitter`, if any).
+    pub(crate) fn submit_form_node(
+        &self,
+        form: NodeId,
+        submitter: Option<ControlId>,
+    ) -> Option<Submission> {
+        let idx = self.forms.forms.iter().position(|&f| f == form)? as u32;
+        self.forms
+            .submit_form(&self.dom, &self.url, &self.base, idx, submitter, None)
+    }
+
+    /// The page's address as script sees it (location.href).
+    pub(crate) fn address(&self) -> &str {
+        &self.url
+    }
+
+    /// history.pushState: the page now has this address (and base, without a `<base>`).
+    pub(crate) fn set_address(&mut self, url: &str) {
+        if self.base == self.url {
+            self.base = String::from(url);
+        }
+        self.url = String::from(url);
+    }
+
+    /// A script changed a control's state: draw again.
+    pub(crate) fn mark_forms_changed(&mut self) {
+        self.layout_dirty = true;
+    }
+
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
     /// Does the DOM have changes the display list doesn't show yet?
     pub(crate) fn changed(&self) -> bool {
         let c = &self.dom.changes;
@@ -985,7 +1089,7 @@ impl Page {
 
     /// The control a `<label>` is for (HTML §4.10.4): `for=id`, else its first labelable
     /// descendant.
-    fn label_control(&self, label: NodeId) -> Option<ControlId> {
+    pub(crate) fn label_control(&self, label: NodeId) -> Option<ControlId> {
         let e = self.dom.element(label)?;
         if let Some(f) = e.attr("for") {
             let a = self.dom.atoms.get(f)?;

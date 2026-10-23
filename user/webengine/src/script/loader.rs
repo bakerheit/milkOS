@@ -173,6 +173,17 @@ impl Loader {
         self.started.contains(&n)
     }
 
+    /// Let a script element be prepared again (`document.write` output, which browsers run).
+    pub fn unmark_started(&mut self, n: NodeId) {
+        self.started.remove(&n);
+    }
+
+    /// A node went back to the DOM (its id will be reused): forget it.
+    pub fn forget(&mut self, n: NodeId) {
+        self.started.remove(&n);
+        self.modules.retain(|&m| m != n);
+    }
+
     /// HTML's "prepare the script element" for a script at `n`: queue it (or not). For a
     /// script a page inserted (`parser` false) the element must be connected; an inline one
     /// with no text and no src yet is left unstarted (it can run once it gets them). `ordered`:

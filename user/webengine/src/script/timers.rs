@@ -88,6 +88,16 @@ impl<H: Clone> Timers<H> {
         self.list.retain(|t| t.id != id);
     }
 
+    /// The callback handle of timer `id`.
+    pub fn handle_of(&self, id: u32) -> Option<H> {
+        self.list.iter().find(|t| t.id == id).map(|t| t.cb.clone())
+    }
+
+    /// The callback handle of animation frame request `id`.
+    pub fn frame_handle(&self, id: u32) -> Option<H> {
+        self.frames.iter().find(|f| f.0 == id).map(|f| f.1.clone())
+    }
+
     pub fn clear_all(&mut self) {
         self.list.clear();
         self.frames.clear();

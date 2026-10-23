@@ -640,17 +640,20 @@ fn button(b: Button) -> i32 {
 
 /// Air kept between a new window's bottom edge and the top of the dock.
 const DOCK_CLEARANCE: i32 = 8;
+/// Air kept between a new window's right edge and the screen's.
+const EDGE_CLEARANCE: i32 = 16;
 
 /// Where a new client window goes: centred in the area between the menu bar and the dock,
 /// nudged 24 px down-right per window already placed (n) so they don't stack exactly. The
-/// bottom edge stays DOCK_CLEARANCE above the dock (a window that would end lower slides up),
-/// and the window stays on-screen (one bigger than the area sits at its top left, below the bar).
+/// bottom edge stays DOCK_CLEARANCE above the dock and the right edge EDGE_CLEARANCE inside the
+/// screen (a window that would end beyond slides back), and the window stays on-screen (one bigger
+/// than the area sits at its top left, below the bar).
 pub fn place(n: i32, w: i32, h: i32) -> Rect {
     let area = super::Desktop::work_area();
     let step = (n % 4) * 24;
     let x = area.x + (area.w - w) / 2 + step;
     let y = area.y + (area.h - h) / 2 + step;
-    let x = x.min(screen_w() - w).max(0);
+    let x = x.min(screen_w() - w - EDGE_CLEARANCE).max(0);
     let y = y.min(area.y + area.h - DOCK_CLEARANCE - h).max(MENU_H);
     Rect::new(x, y, w, h)
 }

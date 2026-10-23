@@ -1548,3 +1548,38 @@ fn scroll_and_fragment_asked_before_the_first_layout_are_kept() {
     assert!(d.frame_fragment(id, "r3"));
     assert_eq!(d.frame_scroll(id), Some((0, 60)));
 }
+
+#[test]
+fn in_peer_is_an_entry_of_the_other_realm() {
+    let mut root = scripted("<title>top</title><iframe></iframe>");
+    let id = root.frame_slots()[0].id;
+    assert!(root.attach_frame(id, scripted("<title>kid</title><p id=p>hello"), None));
+    let mut hs = Hosts::chain(3);
+    root.arm();
+    let js = root.js.as_mut().unwrap();
+    let got = js.test_entry(&mut root.page, &mut hs, |b, _r| {
+        let kid = crate::script::frames::in_peer(b, id, |_b2, r2| {
+            let g = r2.global();
+            let d = r2.get(g, "document").unwrap();
+            let t = r2.get(d, "title").unwrap();
+            r2.to_string(t).unwrap()
+        });
+        // The frame can reach back to the top from there (its own peers are armed).
+        let back = crate::script::frames::in_peer(b, id, |b2, _r2| {
+            crate::script::frames::in_peer(b2, FrameId::TOP, |_b3, r3| {
+                let g = r3.global();
+                let d = r3.get(g, "document").unwrap();
+                let t = r3.get(d, "title").unwrap();
+                r3.to_string(t).unwrap()
+            })
+        });
+        let none = crate::script::frames::in_peer(b, FrameId(77), |_b2, _r2| 1);
+        (kid, back, none)
+    });
+    root.disarm();
+    let (kid, back, none) = got.unwrap();
+    assert_eq!(kid.as_deref(), Some("kid"));
+    // The top is the one running here, so it is busy for the frame.
+    assert_eq!(back, Some(None));
+    assert_eq!(none, None);
+}

@@ -1726,7 +1726,7 @@ impl Document {
 ///   `window` knows origins: the host does.
 /// - **Scripts across frames.** [`Document::with_frame`] arms the page's other frames for the
 ///   scripts of the document it runs, and the bindings reach one through
-///   `script::frames::with_peer` (a native's way into another realm, with that frame's
+///   `script::frames::in_peer` / `with_peer` (a native's way into another realm, with that frame's
 ///   host from [`ScriptHost::frame_host`]). A frame that is running (it called into another
 ///   that now calls back) is busy and refused; so is a frame the host has no host for.
 /// - **Limits.** [`Limits::max_frames`] slots per page and [`Limits::max_frame_depth`]

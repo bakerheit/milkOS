@@ -84,6 +84,21 @@ pub fn with_peer<R>(
     }
 }
 
+/// [`with_peer`] and then an entry of that frame's realm: `f` runs inside it, with the realm
+/// and its bridge at hand, with the frame's own other frames armed. This is the way for a
+/// native to ask another window something (`parent.document.title`, `contentWindow.f()`); what
+/// comes back has to be a plain Rust value, since a script value means nothing in another
+/// realm. None as for [`with_peer`], or if that frame has no scripts (or they are stopped).
+pub fn in_peer<R>(
+    b: &Bridge,
+    id: FrameId,
+    f: impl FnOnce(&Rc<Bridge>, &mut Realm) -> R,
+) -> Option<R> {
+    with_peer(b, id, |doc, host| {
+        doc.armed(|d| d.js.as_mut().and_then(|j| j.entry(&mut d.page, host, f)))
+    })?
+}
+
 /// What the window has queued, and the `MessageEvent` prototype.
 #[derive(Default)]
 pub struct Outbox {

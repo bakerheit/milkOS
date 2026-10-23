@@ -66,7 +66,7 @@ Each frame is its own realm with its own host. What the engine gives the binding
   the host checks the origin, finds the target frame and calls `deliver_message`, which fires a
   `MessageEvent` (`data`, `origin`, `source` through `script::frames::window_proxy`).
 - Where a window sits (`script::frames::own_info`, `child_frames`, `frame_of_element`,
-  `frame_element`) and `with_peer`: from a native of one realm, run a closure on another frame's
+  `frame_element`), `with_peer` and `in_peer` (the same, then an entry of that realm): from a native of one realm, run a closure on another frame's
   document with that frame's host (`ScriptHost::frame_host`). `Document::with_frame` arms it. A
   frame that is running (it called into another that now calls back) is busy and refused.
 

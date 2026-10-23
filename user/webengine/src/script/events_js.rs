@@ -685,9 +685,15 @@ fn activate(b: &Rc<Bridge>, r: &mut Realm, n: NodeId, kind: Option<ControlKind>)
                 return;
             }
             let url = p.resolve(href);
-            let blank = e.attr("target").is_some_and(|t| t == "_blank");
+            let target = e.attr("target").map(|t| t.trim()).unwrap_or("");
+            let blank = target == "_blank";
             b.request(if blank {
                 PageRequest::Open(url)
+            } else if !target.is_empty() && !target.eq_ignore_ascii_case("_self") {
+                PageRequest::NavigateTarget {
+                    url,
+                    target: String::from(target),
+                }
             } else {
                 PageRequest::Navigate {
                     url,

@@ -20,6 +20,11 @@ pub mod modules;
 pub mod timers;
 
 mod bridge;
+pub mod hub;
+mod postmsg;
+mod remote;
+pub mod xorigin;
+mod xwin;
 mod events_js;
 mod forms_js;
 mod modrt;

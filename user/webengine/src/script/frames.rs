@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 use crate::api::*;
 
 /// The `message` event for `msg`, fired at the window of `d`.
-pub fn deliver_message(_d: &mut Document, _host: &mut dyn ScriptHost, _msg: &Message) -> bool {
-    false
+pub fn deliver_message(d: &mut Document, host: &mut dyn ScriptHost, msg: &Message) -> bool {
+    super::postmsg::deliver(d, host, msg)
 }
 
 /// Messages `window.postMessage` queued, for the host.

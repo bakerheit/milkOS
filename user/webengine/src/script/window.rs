@@ -851,6 +851,9 @@ fn console_fn(b: &Rc<Bridge>, r: &mut Realm, obj: Value, name: &str, level: Cons
 }
 
 fn location_href(b: &Bridge) -> String {
+    if let Some(l) = b.xf.sec.borrow().location.as_ref() {
+        return l.clone();
+    }
     b.page().map(|p| String::from(p.address())).unwrap_or_default()
 }
 
@@ -1347,6 +1350,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     install_history(b, r, g)?;
     install_navigator(b, r, g)?;
     super::net::install(b, r)?;
+    super::xwin::install(b, r)?;
 
     // Sizes and scrolling.
     fn vp_css(b: &Bridge, which: u8) -> f64 {
@@ -1522,13 +1526,17 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     })?;
     method(b, r, g, "open", 1, |b, r, _t, a| {
         let u = if a.is_empty() { String::new() } else { arg_str(r, a, 0)? };
+        if b.xf.sec.borrow().no_popups {
+            b.console(ConsoleLevel::Error, String::from("Blocked opening a new tab from a sandboxed frame: the sandbox does not have 'allow-popups'."));
+            return Ok(Value::NULL);
+        }
         if let Some(p) = b.page() {
             let abs = p.resolve(&u);
             b.request(PageRequest::Open(abs));
         }
         Ok(Value::NULL)
     })?;
-    for m in ["close", "print", "focus", "blur", "stop", "postMessage", "moveTo", "resizeTo"] {
+    for m in ["close", "print", "focus", "blur", "stop", "moveTo", "resizeTo"] {
         r.define_method(g, m, 0, |_r, _t, _a| Ok(Value::UNDEFINED))?;
     }
     method(b, r, g, "getComputedStyle", 1, |b, r, _t, a| {

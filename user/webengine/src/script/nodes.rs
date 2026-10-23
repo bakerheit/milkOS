@@ -2574,8 +2574,8 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
             }
             tag::IFRAME => {
                 reflect_url(b, r, o, "src", "src")?;
-                getter(b, r, o, "contentWindow", |_, _, _, _| Ok(Value::NULL), None)?;
-                getter(b, r, o, "contentDocument", |_, _, _, _| Ok(Value::NULL), None)?;
+                getter(b, r, o, "contentWindow", |b, r, t, _| super::xwin::content_window(b, r, t), None)?;
+                getter(b, r, o, "contentDocument", |b, r, t, _| super::xwin::content_document(b, r, t), None)?;
             }
             tag::CANVAS => {
                 method(b, r, o, "getContext", 1, |_, _, _, _| Ok(Value::NULL))?;

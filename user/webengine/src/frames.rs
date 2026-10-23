@@ -114,6 +114,8 @@ pub(crate) struct Frames {
     /// Bumped by anything that changes what the frames add to the parent's display list
     /// beyond their own layout (an attach, a detach, a scroll).
     pub version: u64,
+    /// Shared by the runtimes of the page's frames (script/hub.rs).
+    pub hub: alloc::rc::Rc<crate::script::hub::Hub>,
 }
 
 impl Frames {
@@ -126,6 +128,7 @@ impl Frames {
             overflowed: false,
             notes: Vec::new(),
             version: 0,
+            hub: crate::script::hub::Hub::new(),
         }
     }
 
@@ -405,6 +408,9 @@ pub(crate) fn attach(
     }
     // The new document brings its own frames; the old one's go.
     frames.remove_below(id);
+    if let Some(js) = doc.js.as_ref() {
+        js.link_hub(frames.hub.clone());
+    }
     let s = &mut frames.slots[i];
     let name = match s.doc.as_ref() {
         Some(old) => old.page.window_name.clone(),

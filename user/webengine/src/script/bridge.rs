@@ -194,6 +194,8 @@ pub struct Bridge {
     pub protos: OnceCell<Protos>,
     /// The byte buffers of the network API (script/netbytes.rs).
     pub bytes: OnceCell<super::netbytes::Bytes>,
+    /// What the frame bindings keep (script/hub.rs).
+    pub xf: super::hub::XFrame,
 }
 
 impl Bridge {
@@ -244,6 +246,7 @@ impl Bridge {
             classes: OnceCell::new(),
             protos: OnceCell::new(),
             bytes: OnceCell::new(),
+            xf: super::hub::XFrame::new(),
         }
     }
 

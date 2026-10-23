@@ -808,6 +808,18 @@ pub enum PageRequest {
     /// A form wasn't sent: this control is invalid (the engine has focused it); show the
     /// message (constraint validation: required, type, pattern, ...).
     Invalid(String),
+    /// A script asked for another frame's window to go somewhere (`top.location = ...`,
+    /// `iframe.contentWindow.location.href = ...`, `frames[0].location.replace(...)`):
+    /// the request comes from the frame whose queue it is in, so the host can apply the
+    /// sandbox rules of the one that asked.
+    NavigateOther {
+        target: FrameId,
+        url: String,
+        replace: bool,
+    },
+    /// A script clicked a link that has a `target` other than `_self` (`a.click()`): the host
+    /// chooses the frame or tab like it does for a click by the user.
+    NavigateTarget { url: String, target: String },
 }
 
 /// Keys as scripts see them (KeyboardEvent.key / code).
@@ -1644,9 +1656,14 @@ impl Document {
             self.page.frames_dirty = false;
             return;
         }
+        let me = self as *mut Document;
         let frames = self
             .frames
             .get_or_insert_with(|| alloc::boxed::Box::new(crate::frames::Frames::new()));
+        frames.hub.set_top(me);
+        if let Some(js) = self.js.as_ref() {
+            js.link_hub(frames.hub.clone());
+        }
         frames.sync_doc(self.page.frame, &mut self.page, maxf, maxd);
         for id in frames.walk() {
             let Some(mut d) = frames.slot_mut(id).and_then(|s| s.doc.take()) else {

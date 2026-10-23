@@ -1,6 +1,7 @@
 //! What `network` reads, in words: /proc/net/ifaddr (milkOS: one line per link, `key=value`
 //! fields, `inet6=` once per IPv6 address), /proc/net/dev (counters), /proc/net/{tcp,udp,
-//! tcp6,udp6} (sockets), /proc/net/snmp{,6} (protocol counters), and `http://` addresses.
+//! tcp6,udp6} (sockets), /proc/net/snmp{,6} (protocol counters), /proc/net/internet, and
+//! `network lookup`'s answers.
 
 use alloc::format;
 use alloc::string::String;
@@ -109,6 +110,31 @@ pub struct Names<'a> {
     /// The .local (Milk Drop) name, without `.local`.
     pub local: Option<&'a str>,
     pub visible: bool,
+    /// /proc/net/internet, as read (empty if the kernel has none).
+    pub internet: &'a str,
+}
+
+/// What /proc/net/internet says: (on?, "on (DNS 10.0.2.3 from DHCP)" / "off (offline mode)").
+pub fn internet(proc: &str) -> (bool, String) {
+    let get = |k: &str| {
+        proc.lines()
+            .find_map(|l| l.strip_prefix(k).and_then(|r| r.strip_prefix('=')))
+            .map(str::trim)
+    };
+    match get("internet") {
+        Some("on") => {
+            let words = match (get("dns"), get("dns_from")) {
+                (Some(d), Some("dhcp")) if d != "-" => {
+                    format!("on (DNS {} from DHCP)", d.strip_suffix(":53").unwrap_or(d))
+                }
+                (Some(d), Some("test")) if d != "-" => format!("on (DNS {d}, test override)"),
+                _ => String::from("on (no DNS server yet)"),
+            };
+            (true, words)
+        }
+        Some(_) => (false, String::from("off (offline mode)")),
+        None => (false, String::from("off (this kernel doesn't say)")),
+    }
 }
 
 /// `network status`: the names, then one block per link (only `only` if given). Err: there
@@ -137,6 +163,7 @@ pub fn status_text(
                 "hidden (no announcements, no .local answers)"
             }
         );
+        let _ = writeln!(o, "internet     {}", internet(names.internet).1);
     }
     let mut shown = 0;
     for l in links {
@@ -268,6 +295,15 @@ pub fn keys_text(links: &[Link], names: &Names) -> String {
         o,
         "drop_visible={}",
         if names.visible { "on" } else { "off" }
+    );
+    let _ = writeln!(
+        o,
+        "internet={}",
+        if internet(names.internet).0 {
+            "on"
+        } else {
+            "off"
+        }
     );
     for i in links {
         let p = format!("iface.{}", i.name);
@@ -498,40 +534,17 @@ pub fn counters_text(snmp: &str, snmp6: &str) -> String {
 
 // ---- addresses -------------------------------------------------------------------------
 
-/// `[http://]HOST[:PORT][/PATH]` -> (`HOST[:PORT]`, `/PATH`).
-pub fn split_url(url: &str) -> Result<(&str, &str), String> {
-    if url.starts_with("https://") {
-        return Err(format!(
-            "{url}: only http:// addresses work (milkOS has no TLS yet)"
-        ));
+/// `network lookup`'s answer: one line per address, the family first.
+pub fn lookup_text(host: &str, addrs: &[String], v6: &[bool]) -> String {
+    let mut o = String::new();
+    for (a, six) in addrs.iter().zip(v6) {
+        let _ = writeln!(
+            o,
+            "{host} has {} address {a}",
+            if *six { "IPv6" } else { "IPv4" }
+        );
     }
-    if let Some((scheme, _)) = url.split_once("://")
-        && scheme != "http"
-    {
-        return Err(format!("{url}: only http:// addresses work"));
-    }
-    let rest = url.strip_prefix("http://").unwrap_or(url);
-    let (hostport, path) = match rest.find('/') {
-        Some(k) => (&rest[..k], &rest[k..]),
-        None => (rest, "/"),
-    };
-    if hostport.is_empty() {
-        return Err(format!("{url}: there's no host name in that address"));
-    }
-    Ok((hostport, path))
-}
-
-/// "HTTP/1.0 200 OK" -> ("200", "OK").
-pub fn status_line(head: &[u8]) -> (String, String) {
-    let first = head
-        .split(|&b| b == b'\n')
-        .next()
-        .and_then(|l| core::str::from_utf8(l).ok())
-        .unwrap_or("")
-        .trim_end();
-    let code = first.split(' ').nth(1).unwrap_or("?");
-    let reason: Vec<&str> = first.split(' ').skip(2).collect();
-    (String::from(code), reason.join(" "))
+    o
 }
 
 /// A port number, in words when it isn't one.
@@ -558,6 +571,7 @@ eth1 flags=UP,BROADCAST mtu=1500 ether=52:54:00:12:34:57 inet6=fe80::1/64,link,t
             hostname: "milk",
             local: Some("milk-1"),
             visible: true,
+            internet: "internet=on\ndns=10.0.2.3:53\ndns_from=dhcp\ncache=0\n",
         }
     }
 
@@ -568,7 +582,7 @@ eth1 flags=UP,BROADCAST mtu=1500 ether=52:54:00:12:34:57 inet6=fe80::1/64,link,t
         assert_eq!(ls[1].ipv4().as_deref(), Some("10.0.2.15/24"));
         assert!(ls[1].up() && !ls[2].up());
         let t = status_text(&ls, DEV, &names(), None).unwrap();
-        assert!(t.starts_with("hostname     milk\nlocal name   milk-1.local (the Milk Drop name)\nmilk drop    visible on the VM link\n"));
+        assert!(t.starts_with("hostname     milk\nlocal name   milk-1.local (the Milk Drop name)\nmilk drop    visible on the VM link\ninternet     on (DNS 10.0.2.3 from DHCP)\n"));
         assert!(t.contains("\neth0         up  52:54:00:12:34:56  mtu 1500\n"));
         assert!(t.contains(
             "  ipv4       10.0.2.15/24  netmask 255.255.255.0  broadcast 10.0.2.255  dhcp Bound\n"
@@ -592,17 +606,19 @@ eth1 flags=UP,BROADCAST mtu=1500 ether=52:54:00:12:34:57 inet6=fe80::1/64,link,t
             hostname: "milk",
             local: None,
             visible: false,
+            internet: "internet=off\ndns=-\ndns_from=-\n",
         };
         let t = status_text(&ls, DEV, &hidden, None).unwrap();
         assert!(t.contains("local name   - (no Milk Drop identity yet)\n"));
         assert!(t.contains("milk drop    hidden (no announcements, no .local answers)\n"));
+        assert!(t.contains("internet     off (offline mode)\n"));
     }
 
     #[test]
     fn keys() {
         let k = keys_text(&links(IFADDR), &names());
         assert!(k.contains(
-            "hostname=milk\nlocal_name=milk-1\nlocal_fqdn=milk-1.local\ndrop_visible=on\n"
+            "hostname=milk\nlocal_name=milk-1\nlocal_fqdn=milk-1.local\ndrop_visible=on\ninternet=on\n"
         ));
         assert!(k.contains("\niface.eth0.ipv4=10.0.2.15/24\n"));
         assert!(k.contains(
@@ -666,25 +682,38 @@ eth1 flags=UP,BROADCAST mtu=1500 ether=52:54:00:12:34:57 inet6=fe80::1/64,link,t
 
     #[test]
     fn urls() {
-        assert_eq!(
-            split_url("http://10.0.2.2:8080/a/b").unwrap(),
-            ("10.0.2.2:8080", "/a/b")
-        );
-        assert_eq!(split_url("[::1]").unwrap(), ("[::1]", "/"));
-        assert!(
-            split_url("https://x/")
-                .unwrap_err()
-                .contains("only http://")
-        );
-        assert!(split_url("ftp://x/").unwrap_err().contains("only http://"));
-        assert!(split_url("http:///x").unwrap_err().contains("no host"));
-        assert_eq!(
-            status_line(b"HTTP/1.0 404 Not Found\r\nServer: x"),
-            (String::from("404"), String::from("Not Found"))
-        );
         assert_eq!(port("80"), Ok(80));
         assert_eq!(port("0").unwrap_err(), "0 isn't a port number (1 to 65535)");
         assert!(port("http").is_err());
         assert_eq!(v6_parts("::1/128"), ("::1/128", "host", false));
+    }
+
+    #[test]
+    fn internet_words() {
+        assert_eq!(
+            internet("internet=on\ndns=10.0.2.3:53\ndns_from=dhcp\n"),
+            (true, String::from("on (DNS 10.0.2.3 from DHCP)"))
+        );
+        assert_eq!(
+            internet("internet=on\ndns=10.0.2.2:5353\ndns_from=test\n").1,
+            "on (DNS 10.0.2.2:5353, test override)"
+        );
+        assert_eq!(
+            internet("internet=on\ndns=-\ndns_from=-\n").1,
+            "on (no DNS server yet)"
+        );
+        assert_eq!(
+            internet("internet=off\n"),
+            (false, String::from("off (offline mode)"))
+        );
+        assert!(!internet("").0);
+        assert_eq!(
+            lookup_text(
+                "example.test",
+                &[String::from("10.0.2.2"), String::from("fec0::2")],
+                &[false, true]
+            ),
+            "example.test has IPv4 address 10.0.2.2\nexample.test has IPv6 address fec0::2\n"
+        );
     }
 }

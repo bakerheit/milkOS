@@ -10,6 +10,7 @@ is inspired by macOS (menu bar, dock, glass, Spaces, a launcher).
 ```
 scripts/run.sh                 # desktop window + serial console in this terminal
 scripts/run.sh headless        # serial console only
+MILK_OFFLINE=1 scripts/run.sh  # no internet (tests always run like this)
 MILK_SOUND=1 scripts/run.sh    # with sound through the Mac's speakers (off by default)
 MILK_SHARE_RW=1 scripts/run.sh # make the Mac shared folder writable (read-only by default)
 MILK_SMP=1 scripts/run.sh      # one CPU instead of four
@@ -70,8 +71,8 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
   `processes list | filter memory > 1M | sort-by name`. `go Documents` changes folder (`go` alone: home,
   `go back`: the one before) and `where` says where you are; there is no `cd` or `pwd`.
 - `files`, one command for files and folders in plain English (`files create notes.txt`,
-  `files copy`, `files move`, `files delete` to the Trash, `files list`, `files help`), and `trash`
-  (list, restore, empty).
+  `files copy`, `files move`, `files delete` to the Trash, `files list`, `files owner`,
+  `files access notes.txt private`, `files help`), and `trash` (list, restore, empty).
 - `processes` (list, watch, stop, signal, info), `services` (list, status, start, stop, restart,
   logs: the journal), `system` (info, memory, uptime), `users` (me, list, password, switch) and
   `admin` (run a command as root, or with an administrator's ticket), each with `help`.

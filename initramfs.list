@@ -37,8 +37,6 @@
 # programs; coreutils (user/coreutils/src/bin/*.rs) are one small program each.
 /Commands/msh                                     target/user/aarch64-unknown-none-softfloat/release/msh        755
 /Commands/disks                                   target/user/aarch64-unknown-none-softfloat/release/disks      755
-/Commands/chmod                                   target/user/aarch64-unknown-none-softfloat/release/chmod      755
-/Commands/chown                                   target/user/aarch64-unknown-none-softfloat/release/chown      755
 /Commands/processes                               target/user/aarch64-unknown-none-softfloat/release/processes  755
 /Commands/services                                target/user/aarch64-unknown-none-softfloat/release/services   755
 /Commands/system                                  target/user/aarch64-unknown-none-softfloat/release/system     755
@@ -47,7 +45,7 @@
 /Commands/users                                   target/user/aarch64-unknown-none-softfloat/release/users      4755
 /Commands/admin                                   target/user/aarch64-unknown-none-softfloat/release/admin      4755
 /Commands/clear                                   target/user/aarch64-unknown-none-softfloat/release/clear      755
-# Files and folders (files replaced mv cp touch rm mkdir ls ln), and the Trash.
+# Files and folders (files replaced mv cp touch rm mkdir ls ln chmod chown), and the Trash.
 /Commands/files                                   target/user/aarch64-unknown-none-softfloat/release/files      755
 /Commands/trash                                   target/user/aarch64-unknown-none-softfloat/release/trash      755
 # Text (text replaced cat head tail grep sort uniq wc), print (echo) and pause (sleep).

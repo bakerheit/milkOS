@@ -24,8 +24,13 @@ dependencies = [
  "filekit",
  "milkcrypto",
  "milkfs",
+ "milkweb",
  "tls",
 ]
+
+[[package]]
+name = "milkweb"
+version = "0.0.1"
 
 [[package]]
 name = "tls"

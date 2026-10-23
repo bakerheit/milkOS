@@ -16,6 +16,9 @@ milkcrypto = { path = "../crypto" }
 tls = { path = "../tls" }
 # The milkfs file system (no_std, host-tested): <repo>/milkfs. fs/milkfs is its VFS glue.
 milkfs = { path = "../milkfs" }
+# URLs, the HTTP/1.1 client, DNS messages and the HTML subset (no_std, host-tested):
+# <repo>/milkweb. The Browser and net::dns use it; so does user space (rt::web).
+milkweb = { path = "../milkweb" }
 # The rules behind files and the Trash, shared with user space (pure, host-tested):
 # <repo>/user/filekit.
 filekit = { path = "../user/filekit" }

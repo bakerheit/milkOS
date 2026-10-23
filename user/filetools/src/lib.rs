@@ -387,11 +387,10 @@ pub fn make_folders(p: &str) -> Result<(), String> {
         acc.push_str(part);
         match sys::mkdir(&acc, 0o755) {
             Ok(()) => {}
-            Err(e) if e.0 == 17 => {
-                if !is_folder(&acc) {
-                    return Err(format!("{acc} is a file, not a folder"));
-                }
-            }
+            // Already there. (The kernel checks write permission on the parent before it
+            // looks, so an existing folder in one you can't write, /tmp in /, is EACCES.)
+            Err(_) if is_folder(&acc) => {}
+            Err(e) if e.0 == 17 => return Err(format!("{acc} is a file, not a folder")),
             Err(e) => return Err(say(&acc, e.0)),
         }
     }

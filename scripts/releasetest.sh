@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Test the release bundle the way someone else would get it: build it (release.sh),
 # unzip dist/milkOS-<V>.zip into a fresh /tmp directory outside the repo, and run its
-# milkOS.command with a PATH that has no cargo/rustup:
+# milkOS.command --offline (tests never use the internet) with a PATH that has no cargo/rustup:
 #   1. --headless: boots to msh; the bundled milkfs disk is mounted and is /Users/milk
 #      (not new: made by release.sh); /Apps is there; version is right; the share
 #      is readable but not writable; a note saved to ~ is written out
@@ -24,7 +24,8 @@ B="$T/milkOS-$V"
 case "$B" in "$REPO"*) echo "bundle copy is inside the repo" >&2; exit 1 ;; esac
 [ -x "$B/milkOS.command" ] && ok "unzipped to $B, milkOS.command is executable" || bad "milkOS.command mode"
 grep -rIl -e "$REPO" -e rustup -e cargo "$B" >/dev/null 2>&1 && bad "bundle mentions the build machine" || ok "nothing in the bundle refers to the repo, cargo or rustup"
-CLEANPATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
+# check-all's internet guard (a qemu wrapper) stays first, if there is one.
+CLEANPATH="${MILK_NET_GUARD_DIR:+$MILK_NET_GUARD_DIR:}/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin"
 # Started from / with a clean environment; every step execs (env, bash -c, the
 # .command), so $! is qemu itself. (Not a shell function: backgrounding one forks.)
 GO='cd / && exec "$0" "$@"'
@@ -35,7 +36,7 @@ headless() { # name commands...
   local name="$1"; shift
   local SOCK="$T/$name.sock" LOG="$T/$name.log"
   env -i HOME="$HOME" PATH="$CLEANPATH" /bin/bash -c "$GO" "$B/milkOS.command" \
-    --headless --serial "unix:$SOCK,server,nowait" >"$T/$name.out" 2>&1 &
+    --offline --headless --serial "unix:$SOCK,server,nowait" >"$T/$name.out" 2>&1 &
   QPID=$!
   local P='msh:[^\n]*\$ '
   local args=("wait:$P")
@@ -67,7 +68,7 @@ python3 scripts/mkmilkfs.py check "$B/disks/milk.img" --quiet >/dev/null && ok "
 # Windowed, once: wait for the shell, let the desktop draw, grab the screen, kill by PID.
 MON="$T/mon.sock"
 env -i HOME="$HOME" PATH="$CLEANPATH" /bin/bash -c "$GO" "$B/milkOS.command" \
-  --serial "file:$T/w.log" --monitor "unix:$MON,server,nowait" >"$T/w.out" 2>&1 &
+  --offline --serial "file:$T/w.log" --monitor "unix:$MON,server,nowait" >"$T/w.out" 2>&1 &
 QEMU_PID=$!
 QPID=$QEMU_PID
 for _ in $(seq 600); do grep -aq "msh:" "$T/w.log" 2>/dev/null && break; sleep 0.1; done

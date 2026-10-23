@@ -6,7 +6,9 @@
 //! - [`iface`]: Ethernet framing, ARP resolution, IPv4 output + routing, loopback (`lo`).
 //! - [`arp`], [`icmp`], [`udp`], [`tcp`], [`dhcp`]: the protocols.
 //! - [`socket`]: the kernel socket API (what the syscall layer wraps).
-//! - [`dns`]: a stub resolver (thread context, blocking with a timeout).
+//! - [`dns`]: a stub resolver (thread context, blocking with a timeout), under the boot's
+//!   [`internet`] policy (on for interactive runs, off for tests).
+//! - [`web`]: the HTTP client's transport over kernel sockets (for the Browser).
 //! - [`procnet`]: `/proc/net/*`. [`services`]: the in-kernel HTTP demo server.
 //!
 //! Concurrency: all state is one [`Stack`] behind one `SpinLock` (`NET`), held only for
@@ -27,6 +29,7 @@ pub mod frag;
 pub mod hostname;
 pub mod icmp;
 pub mod iface;
+pub mod internet;
 pub mod ipv6;
 pub mod mld;
 pub mod pmtu;
@@ -39,6 +42,7 @@ pub mod sockfile;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
+pub mod web;
 pub mod wire;
 
 use alloc::boxed::Box;
@@ -263,6 +267,7 @@ fn net_thread() {
 /// and the net thread. Call after `sched::init`.
 pub fn init() {
     hostname::load();
+    internet::init();
     let v6only = boot_v6only();
     let have_dev = with(|st| {
         let now = st.now;

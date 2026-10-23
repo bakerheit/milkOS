@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one).
+# Build and run milkOS in qemu (4 CPUs; MILK_SMP=1 for one), with the internet on.
 #   scripts/run.sh            window (cocoa) + serial on this terminal
-#   scripts/run.sh headless   no window, serial only (used for tests)
+#   scripts/run.sh headless   no window, serial only
+#   MILK_OFFLINE=1 scripts/run.sh   no internet (the restricted network every test uses)
 # RELEASE=1: release kernel. MILK_FEATURES="a b": kernel cargo features (kernel/Cargo.toml).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -16,6 +17,8 @@ KERNEL="$ELF.bin"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$KERNEL"
 DISPLAY_ARGS=(-device virtio-gpu-device -display cocoa)
 [ "${1:-}" = headless ] && DISPLAY_ARGS=(-display none)
+# MILK_GPU=1 with headless: the desktop runs too, unseen (for screendumps through MILK_MONITOR).
+[ "${1:-}" = headless ] && [ "${MILK_GPU:-}" = 1 ] && DISPLAY_ARGS=(-device virtio-gpu-device -display none)
 # virtio-input keyboard + tablet (absolute pointer); modern virtio-mmio (qemu defaults to legacy).
 INPUT_ARGS=(-global virtio-mmio.force-legacy=false
   -device virtio-keyboard-device -device virtio-tablet-device)
@@ -25,11 +28,11 @@ milk_disk_args
 # Mac shared folder at /Volumes/Mac (read-only unless MILK_SHARE_RW=1), scripts/share.sh.
 source scripts/share.sh
 milk_share_args
-# eth0: restricted user-mode networking (see scripts/netdev.sh); MILK_HTTP_PORT=8088 to
-# reach the guest's web server at http://127.0.0.1:8088/. MILK_V6ONLY=1: a v6-only boot
-# (no IPv4 in slirp or on the guest's links).
+# eth0: user-mode networking with the internet on (MILK_OFFLINE=1: restricted, no internet;
+# see scripts/netdev.sh); MILK_HTTP_PORT=8088 to reach the guest's web server at
+# http://127.0.0.1:8088/. MILK_V6ONLY=1: a v6-only boot (no IPv4 in slirp or on the guest's links).
 source scripts/netdev.sh
-milk_net_args
+milk_net_args online
 # Sound (virtio-sound): off by default. MILK_SOUND=1 plays through the Mac's speakers
 # (coreaudio); MILK_SOUND_WAV=/tmp/x.wav records to a WAV file instead (silent).
 SOUND_ARGS=()

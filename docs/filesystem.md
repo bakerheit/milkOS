@@ -144,7 +144,7 @@ the move gets moved the boot after it is kept (promoted).
 ## Files and the Trash
 
 One command for files and folders, `files` (`user/filetools`; it replaced `ls`, `cp`, `mv`,
-`rm`, `mkdir`, `touch` and `ln`, which are gone), and a real Trash shared by `files`, the
+`rm`, `mkdir`, `touch`, `ln`, `chmod` and `chown`, which are gone), and a real Trash shared by `files`, the
 `trash` command, the `trashd` service, Files and the dock. The rules live in `user/filekit`
 (pure, host-tested with `scripts/filekit-test.sh`); the kernel's Files app uses the same
 crate (`kernel/src/wm/trash.rs`).
@@ -157,9 +157,14 @@ files move SRC... DST         rename or move, folders too; across disks: copy, t
 files rename OLD NEW          in place; NEW is a name, not a path
 files delete PATH...          to the Trash
 files delete --now PATH...    for good
-files info PATH...            kind, size (or items), where, which disk, dates, owner, permissions
+files info PATH...            kind, size (or items), where, which disk, dates, owner, access, mode
 files list [-l] [-a] [PATH]   folders first, "name/" for folders; --long, --all (dot files, /dev /proc /tmp)
 files link TARGET NAME        a symbolic link
+files owner PATH              "milk (group: staff)"
+files owner PATH... WHO       WHO = USER, USER:GROUP or :GROUP (chown); --all: everything inside
+files access PATH             "milk can read and change it, staff can read it, everyone else can't"
+files access PATH... HOW      HOW = private, shared, group, read-only, open, runnable, not-runnable
+files access PATH... --mode NNNN   an exact octal mode (chmod 4755); --all: everything inside
 trash [list]                  name, where it was, when deleted, days left
 trash restore NAME|PATH...    back where it was; refused if something is there now
 trash empty [--yes]           for good (asks first)
@@ -174,6 +179,37 @@ trash empty [--yes]           for good (asks first)
   means it must be a folder that is there. Nothing is overwritten unless `--replace` (a file
   over a file only). `move` renames with `RENAME_NOREPLACE`; on `EXDEV` it copies, and deletes
   the original only once the copy is whole (a failed copy is removed again).
+* **Owner and access.** The words set the whole mode, the second number for folders:
+
+  | word | file | folder |
+  |---|---|---|
+  | `private` | 600 | 700 |
+  | `shared` | 644 | 755 |
+  | `group` | 660 | 770 |
+  | `read-only` | 444 | 555 |
+  | `open` | 666 | 777 |
+
+  A runnable file (any execute bit set) stays runnable: it gets execute wherever the word
+  gives read, so a script set to `shared` is 755, `private` 700 and `read-only` 555. A word
+  never keeps set-user-ID or set-group-ID on a file (it says so; only `--mode` sets them); on
+  a folder it keeps set-group-ID and the sticky bit, which say how the folder works rather
+  than who may use it (`files access /tmp open` stays 1777). `runnable` turns execute on for
+  whoever can read (644 becomes 755), `not-runnable` turns it off for everyone; they are for
+  files (a folder is an error, and with `--all` folders are left alone). `--mode NNNN` is
+  exact, one to four octal digits. The kernel's rules are unchanged (docs/security.md,
+  "Permissions"): only an admin (root: `admin files owner ...`) gives something to another
+  user, its owner may change its group to one they are in, only its owner or an admin may
+  change its access, a non-admin owner outside the file's group can't set set-group-ID (files
+  says it was left off), and a non-admin group change clears set-ID bits. A link named on the
+  command line means what it points to, as chmod and chown did. **`--all`** on a folder
+  changes it and everything in it, depth first: folders get the folder mode and files the
+  file one; links are never followed or changed, and other disks mounted inside are skipped
+  (it says how many of each); a folder is changed before going in when its owner can still
+  open and list it afterwards, and after otherwise, so `--mode 600 --all` still reaches
+  everything; `/` and links are refused. The sentence (`files access`, `files info`) lists
+  owner, group and everyone else in the order Unix checks them, merging the ones that are
+  the same: files are read, changed and run; folders opened, listed and changed (adding,
+  removing and renaming things in them). Pure, host-tested: `filekit::access`.
 * **Errors** are sentences: "notes.txt doesn't exist", "projects is a folder, not a file",
   "backup/notes.txt already exists (add --replace to overwrite it)" (`filekit::words`).
 * **Tables.** `files list` and `trash list` give msh a table when it asks (docs/shell.md).

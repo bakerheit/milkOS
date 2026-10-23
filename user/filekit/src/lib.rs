@@ -5,6 +5,8 @@
 //!
 //! * [`path`]: paths, the trailing-slash rule, where a copy or move lands.
 //! * [`trash`]: the Trash's layout, its metadata files, free names, how long items stay.
+//! * [`access`]: who may use a file, in words, and the words that set it (`files access`,
+//!   `files owner`).
 //! * [`words`]: errors in plain English ("notes.txt doesn't exist").
 //! * [`date`]: Unix seconds as "Oct 20 2026, 23:01".
 
@@ -12,6 +14,7 @@
 
 extern crate alloc;
 
+pub mod access;
 pub mod date;
 pub mod path;
 pub mod trash;

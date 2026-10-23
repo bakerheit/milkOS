@@ -188,6 +188,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "milkweb"
+version = "0.0.1"
+
+[[package]]
 name = "msh"
 version = "0.0.1"
 dependencies = [
@@ -265,6 +269,7 @@ version = "0.0.1"
 dependencies = [
  "heapkit",
  "milkcrypto",
+ "milkweb",
  "tls",
 ]
 

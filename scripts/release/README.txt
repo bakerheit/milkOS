@@ -31,8 +31,10 @@ Your files and the Mac
   folder together; to start over, replace disks/milk.img with a fresh copy from the zip.
 - Anything you put in the "share" folder next to this file shows up inside milkOS as
   /Volumes/Mac (read-only: milkOS can look but not change it).
-- milkOS can't reach your Mac or the internet: its network is switched off from the
-  outside, so it's safe to poke around.
+- milkOS can reach the internet (plain http:// web sites; https:// ones need encryption
+  milkOS doesn't have yet), through QEMU on your Mac, but not your Mac's own services.
+  To start it with no internet at all, run it from Terminal as
+  ./milkOS.command --offline
 
 If something goes wrong
 -----------------------

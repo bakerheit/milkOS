@@ -1,10 +1,12 @@
-//! files: one command for files and folders (it replaced mv cp touch rm mkdir ls ln).
+//! files: one command for files and folders (it replaced mv cp touch rm mkdir ls ln chmod
+//! chown).
 //!
 //!   files create NAME            files create NAME/ (a folder, parents too)
 //!   files copy SRC... DST        files move SRC... DST       files rename OLD NEW
 //!   files delete [--now] PATH... (to the Trash, or for good)
 //!   files info PATH...           files list [--long] [--all] [PATH...]
 //!   files link TARGET NAME       files help
+//!   files owner PATH [WHO]       files access PATH [HOW | --mode NNNN] [--all]
 //!
 //! A slash at the end of a path means "a folder": on `create` it decides what is made;
 //! everywhere else what is on disk decides and a slash on a file is an error. Nothing is
@@ -20,9 +22,12 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use coreutils::{fmt_perm, fmt_time};
+use filekit::access::{self, How};
 use filekit::path::{self, Dest, Kind, check_name, check_slash, landing, split_slash};
 use filekit::trash::INFO_DIR;
-use filekit::words::{count, grouped, human, say, say_read, size};
+use filekit::words::{
+    count, grouped, human, no_group, no_user, say, say_access, say_owner, say_read, size,
+};
 use filetools::{CopyOpts, Reflink};
 use rt::io::Out;
 use rt::sys::{self, Stat};
@@ -39,14 +44,23 @@ usage: files COMMAND ...    files and folders (deleted things go to the Trash)
   rename OLD NEW          rename in place (NEW is a name, not a path)
   delete PATH...          move to the Trash (trash list shows it, trash restore undoes it)
   delete --now PATH...    delete for good, skipping the Trash
-  info PATH...            kind, size, dates, owner and permissions
+  info PATH...            kind, size, dates, owner and who may use it
   list [PATH...]          what's in a folder: --long (-l) details, --all (-a) hidden too
   link TARGET NAME        make NAME a link to TARGET
+  owner PATH [WHO]        who owns it; WHO (USER, USER:GROUP or :GROUP) changes that
+  access PATH [HOW]       who may use it, in words; HOW (a word below) changes that
   help                    this list
 
 When DST is a folder, copy and move put things inside it. Nothing is overwritten unless
 you add --replace. copy --reflink shares blocks (milkfs). A slash at the end of a path
 means a folder: files delete notes.txt/ on a file is an error, not a guess.
+
+Access words (file / folder): private 600/700, shared 644/755, group 660/770,
+read-only 444/555, open 666/777; a runnable file stays runnable (shared: 755).
+runnable / not-runnable turn running on or off for whoever can read it, and
+--mode NNNN sets an exact octal mode. owner and access with --all on a folder change
+everything in it too (links are never followed). Only an admin can give something to
+another user; its owner can change its group to one they're in, and its access.
 ";
 
 #[derive(Default)]
@@ -57,6 +71,8 @@ struct Opts {
     human: bool,
     replace: bool,
     reflink: Option<Reflink>,
+    /// `files access --mode NNNN`.
+    mode: Option<&'static str>,
 }
 
 struct Ctx {
@@ -91,7 +107,8 @@ fn parse(cmd: &str, args: &[&'static str]) -> Result<(Opts, Vec<&'static str>), 
     let mut rest = Vec::new();
     let mut done = false;
     let ok = |names: &[&str], a: &str| names.contains(&cmd) || a == "--help";
-    for &a in args {
+    let mut it = args.iter().copied();
+    while let Some(a) = it.next() {
         if done || a == "-" || !a.starts_with('-') {
             rest.push(a);
             continue;
@@ -100,7 +117,12 @@ fn parse(cmd: &str, args: &[&'static str]) -> Result<(Opts, Vec<&'static str>), 
             "--" => done = true,
             "--now" if ok(&["delete"], a) => o.now = true,
             "--long" if ok(&["list"], a) => o.long = true,
-            "--all" if ok(&["list"], a) => o.all = true,
+            "--all" if ok(&["list", "owner", "access"], a) => o.all = true,
+            "--mode" if ok(&["access"], a) => match it.next() {
+                Some(m) => o.mode = Some(m),
+                None => return Err(String::from("--mode without a mode (--mode 644)")),
+            },
+            _ if cmd == "access" && a.starts_with("--mode=") => o.mode = Some(&a[7..]),
             "--human" if ok(&["list"], a) => o.human = true,
             "--replace" if ok(&["copy", "move"], a) => o.replace = true,
             "--reflink" | "--reflink=always" if ok(&["copy"], a) => {
@@ -147,9 +169,20 @@ fn main(args: &rt::Args) -> i32 {
         Err(bad) => {
             let known = matches!(
                 cmd,
-                "create" | "copy" | "move" | "rename" | "delete" | "info" | "list" | "link"
+                "create"
+                    | "copy"
+                    | "move"
+                    | "rename"
+                    | "delete"
+                    | "info"
+                    | "list"
+                    | "link"
+                    | "owner"
+                    | "access"
             );
-            if known {
+            if bad.contains(' ') {
+                rt::eprintln!("files {cmd}: {bad}");
+            } else if known {
                 rt::eprintln!("files {cmd}: there's no option {bad} (try files help)");
             } else {
                 rt::eprintln!("files: there's no files {cmd} (try files help)");
@@ -166,6 +199,8 @@ fn main(args: &rt::Args) -> i32 {
         "info" => info(&mut c, &paths),
         "list" => list(&mut c, &o, &paths),
         "link" => link(&mut c, &paths),
+        "owner" => owner(&mut c, &o, &paths),
+        "access" => access(&mut c, &o, &paths),
         _ => {
             rt::eprintln!("files: there's no files {cmd} (try files help)");
             return 2;
@@ -467,45 +502,17 @@ fn look_through(c: &mut Ctx, p: &str, slash: bool) -> Option<Stat> {
     Some(st)
 }
 
-/// Who may do what, in words.
-fn perm_words(st: &Stat) -> String {
-    let dir = st.is_dir();
-    let can = |bits: u32| -> String {
-        let mut v: Vec<&str> = Vec::new();
-        if bits & 4 != 0 {
-            v.push(if dir { "see inside" } else { "read" });
-        }
-        if bits & 2 != 0 {
-            v.push(if dir { "add and remove" } else { "change" });
-        }
-        if bits & 1 != 0 {
-            v.push(if dir { "open" } else { "run" });
-        }
-        if v.is_empty() {
-            String::from("nothing")
-        } else {
-            v.join(", ")
-        }
-    };
-    let m = st.mode;
-    let mut s = format!(
-        "{}: {}; group {}: {}; everyone else: {}",
-        rt::users::user_name(st.uid),
-        can(m >> 6 & 7),
-        rt::users::group_name(st.gid),
-        can(m >> 3 & 7),
-        can(m & 7)
-    );
-    if m & 0o4000 != 0 {
-        s.push_str("; runs as its owner (set-user-ID)");
+/// Who may use it, in words (filekit::access::sentence); a link's own mode means nothing.
+fn access_words(st: &Stat) -> String {
+    if st.is_link() {
+        return String::from("what it links to decides (files access follows the link)");
     }
-    if m & 0o2000 != 0 {
-        s.push_str("; runs with its group (set-group-ID)");
-    }
-    if m & 0o1000 != 0 {
-        s.push_str("; only owners may delete things in it (sticky)");
-    }
-    s
+    access::sentence(
+        st.mode,
+        st.is_dir(),
+        &rt::users::user_name(st.uid),
+        &rt::users::group_name(st.gid),
+    )
 }
 
 fn info(c: &mut Ctx, paths: &[&str]) {
@@ -558,20 +565,15 @@ fn info(c: &mut Ctx, paths: &[&str]) {
         rows.push(("last read", filekit::date::when(st.atime)));
         rows.push((
             "owner",
-            format!(
-                "{}, group {}",
-                rt::users::user_name(st.uid),
-                rt::users::group_name(st.gid)
+            access::owner_words(
+                &rt::users::user_name(st.uid),
+                &rt::users::group_name(st.gid),
             ),
         ));
+        rows.push(("access", access_words(&st)));
         rows.push((
-            "permissions",
-            format!(
-                "{} ({:o}): {}",
-                fmt_perm(st.mode),
-                st.mode & 0o7777,
-                perm_words(&st)
-            ),
+            "mode",
+            format!("{} ({:o})", fmt_perm(st.mode), st.mode & 0o7777),
         ));
         if k > 0 {
             c.out.line("");
@@ -718,7 +720,7 @@ fn list(c: &mut Ctx, o: &Opts, paths: &[&str]) {
             ("name", Ty::Str),
             ("kind", Ty::Str),
             ("size", Ty::Size),
-            ("mode", Ty::Str),
+            ("access", Ty::Str),
             ("owner", Ty::Str),
             ("modified", Ty::Str),
         ])
@@ -796,5 +798,293 @@ fn link(c: &mut Ctx, paths: &[&str]) {
         rt::eprintln!(
             "files: note: {target} doesn't exist (yet), so {name} points at nothing for now"
         );
+    }
+}
+
+// ---- owner / access -------------------------------------------------------------------------
+
+/// What an `--all` walk did.
+#[derive(Default)]
+struct Walk {
+    done: usize,
+    links: usize,
+    disks: usize,
+}
+
+/// `one` on `p` (lstat `st`) and, if it's a folder, on everything in it, depth first. Links
+/// are skipped (never followed, never changed) and so are other disks mounted inside.
+/// `first`: change a folder before going into it; otherwise after, so a mode that would lock
+/// its owner out of it still reaches everything inside.
+fn tree(
+    c: &mut Ctx,
+    p: &str,
+    st: &Stat,
+    dev: u64,
+    w: &mut Walk,
+    first: &dyn Fn(&Stat) -> bool,
+    one: &mut dyn FnMut(&mut Ctx, &str, &Stat) -> bool,
+) {
+    if st.is_link() {
+        w.links += 1;
+        return;
+    }
+    if st.dev != dev {
+        w.disks += 1;
+        return;
+    }
+    if !st.is_dir() {
+        w.done += usize::from(one(c, p, st));
+        return;
+    }
+    let early = first(st);
+    if early {
+        w.done += usize::from(one(c, p, st));
+    }
+    match sys::read_dir(p) {
+        Ok(list) => {
+            for (n, _) in list {
+                if n == "." || n == ".." {
+                    continue;
+                }
+                let q = path::join(p, &n);
+                match sys::stat_path(&q, false) {
+                    Ok(s) => tree(c, &q, &s, dev, w, first, one),
+                    Err(e) => c.err(&say_read(&q, e.0)),
+                }
+            }
+        }
+        Err(e) => c.err(&say_read(p, e.0)),
+    }
+    if !early {
+        w.done += usize::from(one(c, p, st));
+    }
+}
+
+/// The thing `arg` names for owner and access: a link means what it points to (as chmod
+/// and chown did), except with --all, which never follows links. (shown path, stat, the
+/// link's target if it was one.)
+fn target(
+    c: &mut Ctx,
+    o: &Opts,
+    arg: &'static str,
+) -> Option<(&'static str, Stat, Option<String>)> {
+    let (p, slash) = split_slash(arg);
+    let st = look_through(c, p, slash)?;
+    if !st.is_link() {
+        if o.all && c.abs(p) == "/" {
+            c.err("won't change everything on the disk with --all: name a folder");
+            return None;
+        }
+        return Some((p, st, None));
+    }
+    let to = sys::readlink(p).unwrap_or_default();
+    if o.all {
+        c.err(&format!(
+            "{p} is a link, and --all never follows links: name what it links to ({to})"
+        ));
+        return None;
+    }
+    match sys::stat_path(p, true) {
+        Ok(t) => Some((p, t, Some(to))),
+        Err(_) => {
+            c.err(&format!("{p} is a link to {to}, which doesn't exist"));
+            None
+        }
+    }
+}
+
+/// "notes.txt" or, for a link, "latest -> notes.txt: ".
+fn shown_prefix(p: &str, to: &Option<String>) -> String {
+    match to {
+        Some(t) => format!("{p} -> {t}: "),
+        None => String::new(),
+    }
+}
+
+/// After an --all walk: how many, and what was left alone.
+fn walk_summary(c: &mut Ctx, p: &str, verb: &str, w: &Walk) {
+    let mut s = format!("{p}: {verb} {}", count(w.done, "item", "items"));
+    if w.links > 0 {
+        let _ = write!(s, ", left {} alone", count(w.links, "link", "links"));
+    }
+    if w.disks > 0 {
+        let _ = write!(
+            s,
+            ", skipped {} on another disk",
+            count(w.disks, "item", "items")
+        );
+    }
+    c.out.line(&s);
+}
+
+fn owner(c: &mut Ctx, o: &Opts, args: &[&'static str]) {
+    if args.is_empty() || (o.all && args.len() < 2) {
+        return c.usage("owner PATH   or   owner PATH... USER | USER:GROUP | :GROUP [--all]");
+    }
+    if args.len() == 1 {
+        let Some((p, st, to)) = target(c, o, args[0]) else {
+            return;
+        };
+        let words = access::owner_words(
+            &rt::users::user_name(st.uid),
+            &rt::users::group_name(st.gid),
+        );
+        let _ = writeln!(c.out, "{}{words}", shown_prefix(p, &to));
+        return;
+    }
+    let (paths, spec) = args.split_at(args.len() - 1);
+    let (u, g) = match access::parse_owner(spec[0]) {
+        Ok(v) => v,
+        Err(m) => return c.err(&m),
+    };
+    let uid = match u {
+        None => u32::MAX,
+        Some(n) => match n
+            .parse()
+            .ok()
+            .or_else(|| rt::users::by_name(n).map(|p| p.uid))
+        {
+            Some(x) => x,
+            None => return c.err(&no_user(n)),
+        },
+    };
+    let gid = match g {
+        None => u32::MAX,
+        Some(n) => match n.parse().ok().or_else(|| rt::users::group_id(n)) {
+            Some(x) => x,
+            None => return c.err(&no_group(n)),
+        },
+    };
+    let me = sys::geteuid();
+    let mut one = |c: &mut Ctx, p: &str, st: &Stat| -> bool {
+        match sys::chown(p, uid, gid) {
+            Ok(()) => true,
+            Err(e) if e.0 == 1 => {
+                let group = rt::users::group_name(if gid == u32::MAX { st.gid } else { gid });
+                c.err(&say_owner(
+                    p,
+                    uid != u32::MAX && uid != st.uid,
+                    st.uid == me,
+                    &rt::users::user_name(st.uid),
+                    &group,
+                ));
+                false
+            }
+            Err(e) => {
+                c.err(&say(p, e.0));
+                false
+            }
+        }
+    };
+    for &arg in paths {
+        let Some((p, st, _)) = target(c, o, arg) else {
+            continue;
+        };
+        if !o.all || !st.is_dir() {
+            one(c, p, &st);
+            continue;
+        }
+        let mut w = Walk::default();
+        tree(c, p, &st, st.dev, &mut w, &|_| true, &mut one);
+        walk_summary(c, p, "changed the owner of", &w);
+    }
+}
+
+/// Set access on one thing; false (and the message) if it didn't happen. `top`: named on
+/// the command line (so a folder given to runnable is an error, not skipped).
+fn set_access(c: &mut Ctx, how: How, p: &str, st: &Stat, top: bool) -> bool {
+    let folder = st.is_dir();
+    let cur = st.mode & 0o7777;
+    let Some(m) = access::new_mode(how, folder, cur) else {
+        if top {
+            c.err(&format!(
+                "{p} is a folder: folders are opened, not run (for the files in it: files access {p} --all runnable)"
+            ));
+        }
+        return false;
+    };
+    if top && how == How::Runnable(true) && cur & 0o444 == 0 {
+        c.err(&format!(
+            "nobody can read {p}, so it can't be made runnable (first: files access {p} private)"
+        ));
+        return false;
+    }
+    if let Err(e) = sys::chmod(p, m) {
+        c.err(&say_access(p, e.0, &rt::users::user_name(st.uid)));
+        return false;
+    }
+    // A word never keeps set-ID on a file; the kernel drops set-group-ID for an owner
+    // who isn't in the file's group. Say so rather than leave it a surprise.
+    let note = |c: &mut Ctx, m: String| {
+        c.out.flush();
+        rt::eprintln!("files: note: {m}");
+    };
+    if matches!(how, How::Word(_)) && !folder && cur & 0o6000 != 0 {
+        note(
+            c,
+            format!("{p} no longer runs as its owner or group (set-ID is only set with --mode)"),
+        );
+    }
+    if let Ok(now) = sys::stat_path(p, true) {
+        let got = now.mode & 0o7777;
+        if got != m && m & 0o2000 != 0 && got & 0o2000 == 0 {
+            let g = rt::users::group_name(st.gid);
+            note(
+                c,
+                format!(
+                    "set-group-ID was left off {p}: only members of its group ({g}) can set it"
+                ),
+            );
+        }
+    }
+    true
+}
+
+fn access(c: &mut Ctx, o: &Opts, args: &[&'static str]) {
+    let usage =
+        "access PATH   or   access PATH... HOW [--all]   or   access PATH... --mode NNNN [--all]";
+    let (paths, how): (&[&'static str], Option<How>) = match o.mode {
+        Some(m) => match access::parse_mode(m) {
+            Ok(m) => (args, Some(How::Mode(m))),
+            Err(e) => return c.err(&e),
+        },
+        None if args.len() >= 2 => {
+            let (paths, last) = args.split_at(args.len() - 1);
+            match access::parse_how(last[0]) {
+                Ok(h) => (paths, Some(h)),
+                Err(e) => return c.err(&e),
+            }
+        }
+        None => (args, None),
+    };
+    if paths.is_empty() || (how.is_none() && o.all) {
+        return c.usage(usage);
+    }
+    if o.mode.is_some() && paths.len() >= 2 && access::parse_how(paths[paths.len() - 1]).is_ok() {
+        return c.err("use a word or --mode, not both");
+    }
+    let Some(how) = how else {
+        let Some((p, st, to)) = target(c, o, paths[0]) else {
+            return;
+        };
+        let _ = writeln!(c.out, "{}{}", shown_prefix(p, &to), access_words(&st));
+        return;
+    };
+    for &arg in paths {
+        let Some((p, st, _)) = target(c, o, arg) else {
+            continue;
+        };
+        if !o.all || !st.is_dir() {
+            set_access(c, how, p, &st, true);
+            continue;
+        }
+        // Change a folder first if its owner can still open and list it afterwards.
+        let first =
+            |s: &Stat| access::new_mode(how, s.is_dir(), s.mode).is_none_or(|m| m & 0o500 == 0o500);
+        let mut w = Walk::default();
+        tree(c, p, &st, st.dev, &mut w, &first, &mut |c, q, s| {
+            set_access(c, how, q, s, false)
+        });
+        walk_summary(c, p, "set access on", &w);
     }
 }

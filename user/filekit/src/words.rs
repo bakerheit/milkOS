@@ -43,6 +43,37 @@ pub fn say_go(shown: &str, errno: i32, is_file: bool) -> String {
     }
 }
 
+/// Why `files access` couldn't change `shown` (owned by `owner`).
+pub fn say_access(shown: &str, errno: i32, owner: &str) -> String {
+    match errno {
+        1 => format!(
+            "you can't change who may use {shown}: only its owner ({owner}) or an admin can"
+        ),
+        e => say(shown, e),
+    }
+}
+
+/// Why `files owner` couldn't change `shown` (the kernel said EPERM). `new_user`: a
+/// different owner was asked for; `is_owner`: the caller owns it; `owner`, `group`: its
+/// owner now and the group asked for.
+pub fn say_owner(shown: &str, new_user: bool, is_owner: bool, owner: &str, group: &str) -> String {
+    if new_user {
+        format!("only an admin can change who owns {shown} (admin files owner {shown} ... does it)")
+    } else if !is_owner {
+        format!("you can't change the group of {shown}: only its owner ({owner}) or an admin can")
+    } else {
+        format!("you're not in the group {group}, so you can't give {shown} to it")
+    }
+}
+
+/// A user or group name that isn't there.
+pub fn no_user(name: &str) -> String {
+    format!("there's no user called {name} (users list shows them)")
+}
+pub fn no_group(name: &str) -> String {
+    format!("there's no group called {name}")
+}
+
 /// "1 item", "3 items".
 pub fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -108,6 +139,32 @@ mod tests {
             "notes.txt is a file, not a folder"
         );
         assert_eq!(say_go("/locked", 13, false), "you can't open /locked");
+    }
+
+    #[test]
+    fn refusals() {
+        assert_eq!(
+            say_access("notes.txt", 1, "milk"),
+            "you can't change who may use notes.txt: only its owner (milk) or an admin can"
+        );
+        assert_eq!(say_access("x", 2, "milk"), "x doesn't exist");
+        assert_eq!(
+            say_owner("notes.txt", true, true, "milk", "staff"),
+            "only an admin can change who owns notes.txt (admin files owner notes.txt ... does it)"
+        );
+        assert_eq!(
+            say_owner("notes.txt", false, false, "root", "staff"),
+            "you can't change the group of notes.txt: only its owner (root) or an admin can"
+        );
+        assert_eq!(
+            say_owner("notes.txt", false, true, "milk", "wheel"),
+            "you're not in the group wheel, so you can't give notes.txt to it"
+        );
+        assert_eq!(
+            no_user("bob"),
+            "there's no user called bob (users list shows them)"
+        );
+        assert_eq!(no_group("devs"), "there's no group called devs");
     }
 
     #[test]

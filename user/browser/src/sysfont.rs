@@ -6,14 +6,9 @@
 //! snap to 13, 26 and 52 px; weights of 600 and up are bold, 500 medium; italics are drawn
 //! oblique.
 
-use browserkit::engine::{Family, Font, Rect};
-use browserkit::font::{Text, snap};
+use browserkit::engine::{Font, Rect};
+use browserkit::font::{Text, family_index, snap};
 use gui::text::{self, Weight};
-
-/// Family indices in gui::text::NAMES order.
-const PLEX: usize = 1;
-const ATKINSON: usize = 3;
-const UBUNTU: usize = 4;
 
 /// `ui`: the desktop's family, read once per layout or frame (gui::text::current_family).
 #[derive(Clone, Copy)]
@@ -31,12 +26,7 @@ impl SysText {
 
 /// The system font for an engine font, with `ui` the desktop's family.
 pub fn font_for(f: &Font, ui: usize) -> text::Font {
-    let family = match f.family {
-        Family::Serif => PLEX,
-        Family::Cursive => ATKINSON,
-        Family::Fantasy => UBUNTU,
-        _ => ui,
-    };
+    let family = family_index(f.family, ui);
     let weight = match f.weight {
         600.. => Weight::Bold,
         500..=599 => Weight::Medium,

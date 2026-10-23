@@ -27,6 +27,20 @@ pub trait Text {
     ) -> i32;
 }
 
+/// The system font family (an index into fontkit's / gui::text's families) for a CSS generic
+/// family, with `ui` the desktop's (Settings > Appearance > Font): sans-serif and system-ui
+/// (the default for pages that name none) are the UI family, so unstyled pages follow
+/// Settings; serif is IBM Plex Sans (no serif face is baked), cursive Atkinson Hyperlegible
+/// Next, fantasy Ubuntu Sans. Monospace never gets here (it is Unifont).
+pub fn family_index(f: Family, ui: usize) -> usize {
+    match f {
+        Family::Serif => 1,
+        Family::Cursive => 3,
+        Family::Fantasy => 4,
+        _ => ui,
+    }
+}
+
 /// The scale (1, 2 or 4: 13, 26 or 52 px) nearest a font size in pixels.
 pub fn snap(px: i32) -> i32 {
     if px >= 39 {

@@ -412,7 +412,7 @@ impl Style {
     pub fn initial() -> Style {
         Style {
             color: 0xFF00_0000,
-            family: Family::Serif,
+            family: Family::SansSerif,
             font_size: 16.0,
             font_weight: 400,
             italic: false,

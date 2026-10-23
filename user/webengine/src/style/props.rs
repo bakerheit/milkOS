@@ -765,7 +765,7 @@ fn font_family(v: &[Tok]) -> Option<Family> {
             result = family_of(&name);
         }
     }
-    Some(result.unwrap_or(Family::Serif))
+    Some(result.unwrap_or(Family::SansSerif))
 }
 
 fn family_of(n: &str) -> Option<Family> {

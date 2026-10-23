@@ -47,6 +47,8 @@
 //! - The UA defaults are milkOS's: a #FFFDF8 canvas, #3A2E28 text, #4F64A0 links (no pure white
 //!   or black); [`Viewport::dark`] can give a page the dark defaults (see there).
 //!   `color-scheme` is a property now.
+//! - The default family (initial value, and where an unknown `font-family` list ends up) is
+//!   [`Family::SansSerif`], not serif.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -101,7 +103,7 @@ impl Rect {
 /// The generic family a font resolves to. The engine maps named families it knows
 /// (Helvetica, Arial, Georgia, Times, Courier, Menlo, ...) onto these; unknown names fall
 /// through the `font-family` list to the next one, and finally to the document default,
-/// [`Family::Serif`], as in every browser.
+/// [`Family::SansSerif`] (milkOS's: the desktop's UI font, where classic browsers use serif).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     Serif,

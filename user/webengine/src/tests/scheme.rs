@@ -1,6 +1,6 @@
-//! The UA's colours: milk and espresso by default, and the dark defaults only for a page that
-//! opts into a dark colour scheme or leaves every colour to the browser, while the desktop is
-//! dark.
+//! The UA's default family (sans-serif: the desktop's UI font) and colours: milk and
+//! espresso by default, and the dark defaults only for a page that opts into a dark colour
+//! scheme or leaves every colour to the browser, while the desktop is dark.
 
 use crate::api::*;
 
@@ -98,4 +98,25 @@ fn prefers_color_scheme_media_query() {
     let html = "<style>p{color:#111111} @media (prefers-color-scheme: dark){p{color:#eeeeee}}</style><p>x</p>";
     assert_eq!(text_colors(&render(html, false)), [0xFF11_1111]);
     assert_eq!(text_colors(&render(html, true)), [0xFFEE_EEEE]);
+}
+
+#[test]
+fn the_default_family_is_sans_serif() {
+    let fam = |html: &str| {
+        let l = render(html, false);
+        l.entries
+            .iter()
+            .find_map(|e| match e.item {
+                Item::Text(t) => Some(t.font.family),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(fam("<p>no font named</p>"), Family::SansSerif);
+    assert_eq!(
+        fam("<p style='font-family: Unknown Face'>x</p>"),
+        Family::SansSerif
+    );
+    assert_eq!(fam("<p style='font-family: serif'>x</p>"), Family::Serif);
+    assert_eq!(fam("<pre>x</pre>"), Family::Monospace);
 }

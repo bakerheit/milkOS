@@ -78,7 +78,8 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   anti-aliased, with Latin Extended, Greek, Cyrillic, punctuation and symbols): CSS
   `sans-serif` and `system-ui` are the family Settings > Appearance chose (so pages follow a
   Settings change, like the chrome), `serif` IBM Plex Sans (no serif face is baked), `cursive`
-  Atkinson Hyperlegible Next, `fantasy` Ubuntu Sans. Sizes snap to the fonts' 13, 26 and 52 px;
+  Atkinson Hyperlegible Next, `fantasy` Ubuntu Sans. A page that names no font (or only fonts
+  it doesn't have) gets sans-serif: the Settings font, not serif. Sizes snap to the fonts' 13, 26 and 52 px;
   weight 600 and up is bold, 500 medium; italics are drawn oblique. Monospace (`<pre>`,
   `<code>`, `<tt>`, CSS `monospace`) is Unifont 8x16, with characters Unifont lacks taken from
   the system font. `browserkit::font` is the measurer the engine lays out with, so lines break

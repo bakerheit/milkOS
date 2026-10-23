@@ -6,8 +6,9 @@ use std::boxed::Box;
 
 use fontkit::{Family as Fam, Source, Weight};
 
+use crate::engine::Family;
 use crate::engine::{Document, Font, Item, Rect, Viewport};
-use crate::font::{Fonts, Text, snap};
+use crate::font::{Fonts, Text, family_index, snap};
 use crate::paint::{self, Painter, Surface};
 
 static BLOBS: [&[u8]; 6] = [
@@ -27,22 +28,37 @@ impl Source<'static> for All {
     }
 }
 
-struct Sys(All);
+/// The system fonts with `.1` the desktop's family (mapped as the Browser's gui::text
+/// backend does, through font::family_index).
+struct Sys(All, usize);
 
 fn sys() -> Sys {
-    Sys(All(BLOBS
-        .iter()
-        .map(|b| &*Box::leak(Box::new(Fam::parse(b).unwrap())))
-        .collect()))
+    sys_ui(0)
 }
 
-fn kit(f: &Font) -> fontkit::Font {
-    fontkit::Font::new(0, snap(f.size as i32), Weight::bold(f.weight >= 600))
+fn sys_ui(ui: usize) -> Sys {
+    Sys(
+        All(BLOBS
+            .iter()
+            .map(|b| &*Box::leak(Box::new(Fam::parse(b).unwrap())))
+            .collect()),
+        ui,
+    )
+}
+
+impl Sys {
+    fn kit(&self, f: &Font) -> fontkit::Font {
+        fontkit::Font::new(
+            family_index(f.family, self.1),
+            snap(f.size as i32),
+            Weight::bold(f.weight >= 600),
+        )
+    }
 }
 
 impl Text for Sys {
     fn width(&self, f: &Font, s: &str) -> i32 {
-        kit(f).width(&self.0, s)
+        self.kit(f).width(&self.0, s)
     }
     fn draw(
         &self,
@@ -55,7 +71,7 @@ impl Text for Sys {
         s: &str,
         c: u32,
     ) -> i32 {
-        let k = kit(f);
+        let k = self.kit(f);
         let base = y + k.baseline();
         k.layout(&self.0, x, s, |pen, g, mag| {
             g.spans(mag, |sx, sy, len, _a| {
@@ -155,4 +171,50 @@ fn greek_and_cyrillic_draw_without_boxes() {
             }
         }
     }
+}
+
+/// The first text run of a page laid out with the desktop's family `ui`: its family and width.
+fn first_run(html: &str, ui: usize) -> (Family, i32) {
+    let s = sys_ui(ui);
+    let fonts = Fonts { text: Some(&s) };
+    let mut d = Document::parse(html.as_bytes(), "http://x.test/", Some("text/html"));
+    let list = d.layout(&Viewport::new(800, 600), &fonts).clone();
+    let run = list
+        .entries
+        .iter()
+        .find_map(|e| match e.item {
+            Item::Text(t) if !list.run_text(&t).trim().is_empty() => Some(t),
+            _ => None,
+        })
+        .expect("a text run");
+    (run.font.family, run.width)
+}
+
+#[test]
+fn unstyled_pages_follow_the_settings_font() {
+    let text = "<p>Unstyled text in whatever the desktop uses</p>";
+    // Figtree (0), then Fira Sans (2) as the Settings font: the default family is the UI one.
+    let (fam, w0) = first_run(text, 0);
+    let (_, w2) = first_run(text, 2);
+    assert_eq!(
+        fam,
+        Family::SansSerif,
+        "pages that name no font get sans-serif, not serif"
+    );
+    assert_eq!((family_index(fam, 0), family_index(fam, 2)), (0, 2));
+    assert_ne!(w0, w2, "the text was measured in the switched family");
+    // A page that asks for serif gets Plex whatever Settings says; monospace stays Unifont.
+    let serif = "<p style='font-family: Georgia, serif'>Serif text</p>";
+    let ((fam, ws0), (_, ws2)) = (first_run(serif, 0), first_run(serif, 2));
+    assert_eq!((fam, family_index(fam, 2), ws0), (Family::Serif, 1, ws2));
+    assert_eq!(first_run("<pre>code</pre>", 2).0, Family::Monospace);
+    // An unknown font name ends at the default, the UI family.
+    assert_eq!(
+        first_run("<p style='font-family: NoSuchFont'>x</p>", 2).0,
+        Family::SansSerif
+    );
+    // The built-in pages (system-ui) follow it too.
+    let html = crate::pages::new_tab(&crate::bookmarks::Bookmarks::default(), false);
+    let (fam, _) = first_run(&html, 3);
+    assert_eq!(family_index(fam, 3), 3, "{fam:?}");
 }

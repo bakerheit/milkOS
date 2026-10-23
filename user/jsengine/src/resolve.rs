@@ -233,7 +233,7 @@ impl<'a> Resolver<'a> {
             captured: false,
             loc: Loc::Unassigned,
             annex_b: false,
-                tdz: false,
+            tdz: false,
         });
         Ok(())
     }
@@ -265,7 +265,7 @@ impl<'a> Resolver<'a> {
                     captured,
                     loc: Loc::Unassigned,
                     annex_b: false,
-                tdz: false,
+                    tdz: false,
                 });
                 return;
             }
@@ -322,7 +322,10 @@ impl<'a> Resolver<'a> {
         for le in &m.info.local_exports {
             if self.scopes[m.scope as usize].find(le.local).is_none() {
                 return self.err(
-                    alloc::format!("Export '{}' is not defined in module", self.atoms.get(le.local)),
+                    alloc::format!(
+                        "Export '{}' is not defined in module",
+                        self.atoms.get(le.local)
+                    ),
                     le.pos,
                 );
             }

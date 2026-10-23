@@ -181,7 +181,10 @@ impl Modules {
         if let Some(i) = self.free.pop() {
             ModuleId(i, self.slots[i as usize].generation)
         } else {
-            self.slots.push(Slot { generation: 1, rec: None });
+            self.slots.push(Slot {
+                generation: 1,
+                rec: None,
+            });
             ModuleId(self.slots.len() as u32 - 1, 1)
         }
     }
@@ -933,10 +936,7 @@ impl Realm {
                         Resolution::Found { module, binding } => match binding {
                             Binding::Slot(s) => {
                                 let e = self.module_env_obj(module);
-                                Val::Obj(self.alloc(
-                                    None,
-                                    ObjKind::ImportRef { env: e, slot: s },
-                                ))
+                                Val::Obj(self.alloc(None, ObjKind::ImportRef { env: e, slot: s }))
                             }
                             Binding::Namespace => {
                                 let nsobj = self.get_module_namespace(module)?;
@@ -1163,7 +1163,11 @@ impl Realm {
             while let Some(x) = stack.pop() {
                 let a = self.mrec(x).async_eval;
                 let r = self.mrec_mut(x);
-                r.status = if a { St::EvaluatingAsync } else { St::Evaluated };
+                r.status = if a {
+                    St::EvaluatingAsync
+                } else {
+                    St::Evaluated
+                };
                 r.cycle_root = Some(m);
                 if x == m {
                     break;
@@ -1558,7 +1562,12 @@ fn continue_dynamic_import(r: &mut Realm, _this: Val, _args: &[Val]) -> Res<Val>
         dynamic_import_fulfilled,
         alloc::vec![Val::Obj(promise), pack(id)],
     );
-    let bad_fn = r.new_builtin_slots(e, 1, dynamic_import_rejected, alloc::vec![Val::Obj(promise)]);
+    let bad_fn = r.new_builtin_slots(
+        e,
+        1,
+        dynamic_import_rejected,
+        alloc::vec![Val::Obj(promise)],
+    );
     r.perform_then(
         ep,
         crate::builtins::promise::Handler::Js(Val::Obj(ok_fn)),

@@ -58,7 +58,9 @@ impl Realm {
         if p.f & ACCESSOR != 0 {
             let (g, _) = self.accessor_halves(p);
             if g.is_undef() {
-                return Err(self.type_error(&alloc::format!("'{name}' was defined without a getter")));
+                return Err(
+                    self.type_error(&alloc::format!("'{name}' was defined without a getter"))
+                );
             }
             return self.call_v(g, o, &[]);
         }
@@ -76,7 +78,9 @@ impl Realm {
         if p.f & ACCESSOR != 0 {
             let (_, st) = self.accessor_halves(p);
             if st.is_undef() {
-                return Err(self.type_error(&alloc::format!("'{name}' was defined without a setter")));
+                return Err(
+                    self.type_error(&alloc::format!("'{name}' was defined without a setter"))
+                );
             }
             self.call_v(st, o, &[v])?;
             return Ok(());

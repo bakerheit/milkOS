@@ -233,7 +233,11 @@ impl Host {
         for _ in 0..10_000 {
             if let Err(e) = r.run_jobs() {
                 let rep = r.report(&e);
-                self.log.borrow_mut().push(alloc::format!("job error: {}: {}", rep.name, rep.message));
+                self.log.borrow_mut().push(alloc::format!(
+                    "job error: {}: {}",
+                    rep.name,
+                    rep.message
+                ));
             }
             let batch: Vec<DynamicImport> = core::mem::take(&mut *self.pending.borrow_mut());
             if batch.is_empty() {
@@ -257,33 +261,43 @@ impl Host {
             Ok(m) => m,
             Err(v) => {
                 let d = describe(r, v);
-                self.log.borrow_mut().push(alloc::format!("load error: {d}"));
+                self.log
+                    .borrow_mut()
+                    .push(alloc::format!("load error: {d}"));
                 return;
             }
         };
         if let Err(e) = r.link_module(m) {
             let v = e.value().unwrap_or(Value::UNDEFINED);
             let d = describe(r, v);
-            self.log.borrow_mut().push(alloc::format!("link error: {d}"));
+            self.log
+                .borrow_mut()
+                .push(alloc::format!("link error: {d}"));
             return;
         }
         match r.evaluate_module(m) {
             Ok(_) => {}
             Err(e) => {
                 let rep = r.report(&e);
-                self.log.borrow_mut().push(alloc::format!("evaluate failed: {}", rep.name));
+                self.log
+                    .borrow_mut()
+                    .push(alloc::format!("evaluate failed: {}", rep.name));
                 return;
             }
         }
         self.pump(r);
         if let Some(v) = r.module_error(m) {
             let d = describe(r, v);
-            self.log.borrow_mut().push(alloc::format!("eval error: {d}"));
+            self.log
+                .borrow_mut()
+                .push(alloc::format!("eval error: {d}"));
         }
         // Unhandled rejections show up in the log too.
         for v in r.take_unhandled_rejections() {
             let d = describe(r, v);
-            self.log.borrow_mut().push(alloc::format!("unhandled rejection: {d}"));
+            self.log
+                .borrow_mut()
+                .push(alloc::format!("unhandled rejection: {d}"));
         }
     }
 }
@@ -297,14 +311,18 @@ pub(crate) fn run_case(case: &Case, stress: u32) -> Result<(), String> {
         // A classic script as the entry.
         if let Err(e) = r.eval(src, "script.js") {
             let rep = r.report(&e);
-            host.log
-                .borrow_mut()
-                .push(alloc::format!("script error: {}: {}", rep.name, rep.message));
+            host.log.borrow_mut().push(alloc::format!(
+                "script error: {}: {}",
+                rep.name,
+                rep.message
+            ));
         }
         host.pump(&mut r);
         for v in r.take_unhandled_rejections() {
             let d = describe(&mut r, v);
-            host.log.borrow_mut().push(alloc::format!("unhandled rejection: {d}"));
+            host.log
+                .borrow_mut()
+                .push(alloc::format!("unhandled rejection: {d}"));
         }
     }
     let got = host.log.borrow().clone();
@@ -313,7 +331,9 @@ pub(crate) fn run_case(case: &Case, stress: u32) -> Result<(), String> {
     } else {
         Err(alloc::format!(
             "case '{}':\n  expected: {:?}\n  got:      {:?}",
-            case.name, case.expect, got
+            case.name,
+            case.expect,
+            got
         ))
     }
 }
@@ -324,7 +344,15 @@ macro_rules! mod_files {
     };
 }
 
-mod_files!("basics.txt", "static.txt", "cycles.txt", "namespace.txt", "tla.txt", "errors.txt", "dynamic.txt");
+mod_files!(
+    "basics.txt",
+    "static.txt",
+    "cycles.txt",
+    "namespace.txt",
+    "tla.txt",
+    "errors.txt",
+    "dynamic.txt"
+);
 
 fn run_all(stress: u32) {
     let mut failures: Vec<String> = Vec::new();

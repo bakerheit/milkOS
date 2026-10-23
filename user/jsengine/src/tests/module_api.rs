@@ -72,9 +72,18 @@ fn syntax_errors_carry_file_line_and_column_body() {
     for (src, msg) in [
         ("export { nope };", "Export 'nope' is not defined in module"),
         ("let a; let a;", "Identifier 'a' has already been declared"),
-        ("export { a }; export { b as a }; let a, b;", "Duplicate export of 'a'"),
-        ("import { a } from 'm'; import { a } from 'n';", "Identifier 'a' has already been declared"),
-        ("if (1) { import 'm'; }", "imports are only allowed at the top level"),
+        (
+            "export { a }; export { b as a }; let a, b;",
+            "Duplicate export of 'a'",
+        ),
+        (
+            "import { a } from 'm'; import { a } from 'n';",
+            "Identifier 'a' has already been declared",
+        ),
+        (
+            "if (1) { import 'm'; }",
+            "imports are only allowed at the top level",
+        ),
         ("function f() { await 1; }", "Unexpected"),
         ("var await;", "Unexpected"),
         ("with (a) {}", "not supported"),
@@ -83,10 +92,16 @@ fn syntax_errors_carry_file_line_and_column_body() {
         ("export { a as 'x\\uD800' };let a;", "unpaired surrogate"),
         ("import x, * as y, { z } from 'm';", "Unexpected"),
         ("export default;", "Unexpected"),
-        ("export * as default from 'm'; export default 1;", "Duplicate export of 'default'"),
+        (
+            "export * as default from 'm'; export default 1;",
+            "Duplicate export of 'default'",
+        ),
         ("import { default } from 'm';", "reserved"),
         ("import { eval } from 'm';", "Unexpected"),
-        ("import m from 'm' with { type: 'json', type: 'json' };", "duplicate key"),
+        (
+            "import m from 'm' with { type: 'json', type: 'json' };",
+            "duplicate key",
+        ),
         ("new import('m')", "Cannot use new with import"),
         ("<!-- html comment", "Unexpected"),
     ] {
@@ -107,7 +122,11 @@ fn link_errors_point_at_the_import() {
 
 fn link_errors_point_at_the_import_body() {
     let mut r = realm();
-    let main = compile(&mut r, "main.js", "log;\nimport { a,\n  nope } from './dep.js';\n");
+    let main = compile(
+        &mut r,
+        "main.js",
+        "log;\nimport { a,\n  nope } from './dep.js';\n",
+    );
     let dep = compile(&mut r, "dep.js", "export let a;");
     let reqs = r.module_requests(main);
     assert_eq!(reqs.len(), 1);
@@ -119,7 +138,10 @@ fn link_errors_point_at_the_import_body() {
     assert_eq!(rep.name, "SyntaxError");
     assert_eq!(rep.file, "main.js");
     assert_eq!((rep.line, rep.column), (3, 3));
-    assert!(rep.message.contains("does not provide an export named 'nope'"));
+    assert!(
+        rep.message
+            .contains("does not provide an export named 'nope'")
+    );
     // Nothing stays linked.
     assert_eq!(r.module_status(main), Some(ModuleStatus::Unlinked));
     assert_eq!(r.module_status(dep), Some(ModuleStatus::Linked));
@@ -138,7 +160,11 @@ fn status_goes_through_its_stages_body() {
     r.link_module(m).unwrap();
     assert_eq!(r.module_status(m), Some(ModuleStatus::Linked));
     let ns = r.module_namespace(m).unwrap();
-    assert_eq!(r.get(ns, "v").unwrap_err().value().is_some(), true, "v is in its TDZ");
+    assert_eq!(
+        r.get(ns, "v").unwrap_err().value().is_some(),
+        true,
+        "v is in its TDZ"
+    );
     let p = r.evaluate_module(m).unwrap();
     assert_eq!(r.module_status(m), Some(ModuleStatus::EvaluatingAsync));
     r.run_jobs().unwrap();
@@ -235,7 +261,9 @@ fn the_module_count_is_limited_body() {
     for i in 0..3 {
         compile(&mut r, &alloc::format!("m{i}.js"), "export {};");
     }
-    let e = r.compile_module("export {};", &ModuleOptions::default()).unwrap_err();
+    let e = r
+        .compile_module("export {};", &ModuleOptions::default())
+        .unwrap_err();
     assert_eq!(r.report(&e).name, "RangeError");
     let e = r.compile_synthetic_module("s", &[]).unwrap_err();
     assert_eq!(r.report(&e).name, "RangeError");
@@ -244,7 +272,9 @@ fn the_module_count_is_limited_body() {
     lim.max_source_bytes = 100;
     r.set_limits(lim);
     let big = alloc::format!("export const a = '{}';", "x".repeat(200));
-    let e = r.compile_module(&big, &ModuleOptions::default()).unwrap_err();
+    let e = r
+        .compile_module(&big, &ModuleOptions::default())
+        .unwrap_err();
     assert_eq!(r.report(&e).name, "RangeError");
 }
 
@@ -265,7 +295,10 @@ fn modules_count_against_the_heap_body() {
     assert!(used > before + 50 * 400, "{before} -> {used}");
     r.gc();
     let after_gc = r.heap_stats().live_bytes;
-    assert!(after_gc > before, "module code is not free after a collection");
+    assert!(
+        after_gc > before,
+        "module code is not free after a collection"
+    );
     for m in ids {
         r.drop_module(m);
     }
@@ -279,10 +312,19 @@ fn modules_count_against_the_heap_body() {
     let src = alloc::format!("export const big = [{}];", "1,".repeat(2000));
     let mut stopped = false;
     for i in 0..1000 {
-        match r.compile_module(&src, &ModuleOptions { file: "x", ..ModuleOptions::default() }) {
+        match r.compile_module(
+            &src,
+            &ModuleOptions {
+                file: "x",
+                ..ModuleOptions::default()
+            },
+        ) {
             Ok(_) => {}
             Err(e) => {
-                assert!(e.is_uncatchable() || r.report(&e).name == "RangeError", "{i}");
+                assert!(
+                    e.is_uncatchable() || r.report(&e).name == "RangeError",
+                    "{i}"
+                );
                 stopped = true;
                 break;
             }
@@ -354,7 +396,11 @@ fn a_wide_export_star_graph_resolves_body() {
     let leaves = 60;
     let mut top = String::new();
     for i in 0..leaves {
-        ids.push(compile(&mut r, &alloc::format!("l{i}.js"), &alloc::format!("export const n{i} = {i};")));
+        ids.push(compile(
+            &mut r,
+            &alloc::format!("l{i}.js"),
+            &alloc::format!("export const n{i} = {i};"),
+        ));
         top.push_str("export * from './x.js';\n");
     }
     let t = compile(&mut r, "top.js", &top);
@@ -398,7 +444,10 @@ fn synthetic_modules_export_values_body() {
     let ns = r.module_namespace(m).unwrap();
     let out = r.get(ns, "out").unwrap();
     assert_eq!(r.get_string(out).as_deref(), Some("kept7default,extra"));
-    assert!(r.compile_synthetic_module("x", &[("a", Value::UNDEFINED), ("a", Value::UNDEFINED)]).is_err());
+    assert!(
+        r.compile_synthetic_module("x", &[("a", Value::UNDEFINED), ("a", Value::UNDEFINED)])
+            .is_err()
+    );
 }
 
 #[test]
@@ -416,7 +465,11 @@ fn import_meta_hook_runs_once_per_module_body() {
         let fv = r.string(&f);
         r.set(meta, "file", fv)
     })));
-    let m = compile(&mut r, "m.js", "export const a = import.meta.file, b = import.meta === import.meta, c = import.meta.file;");
+    let m = compile(
+        &mut r,
+        "m.js",
+        "export const a = import.meta.file, b = import.meta === import.meta, c = import.meta.file;",
+    );
     r.link_module(m).unwrap();
     r.evaluate_module(m).unwrap();
     assert_eq!(calls.get(), 1);
@@ -425,13 +478,19 @@ fn import_meta_hook_runs_once_per_module_body() {
     assert_eq!(r.get_string(a).as_deref(), Some("m.js"));
     // Without a hook the object is empty.
     let mut r = realm();
-    let m = compile(&mut r, "m.js", "export const k = Object.keys(import.meta).length;");
+    let m = compile(
+        &mut r,
+        "m.js",
+        "export const k = Object.keys(import.meta).length;",
+    );
     r.link_module(m).unwrap();
     r.evaluate_module(m).unwrap();
     let ns = r.module_namespace(m).unwrap();
     assert_eq!(r.get(ns, "k").unwrap().as_number(), Some(0.0));
     // A hook that throws makes import.meta throw.
-    r.set_import_meta_hook(Some(Box::new(|r, _m, _meta| Err(r.throw_type_error("no meta")))));
+    r.set_import_meta_hook(Some(Box::new(|r, _m, _meta| {
+        Err(r.throw_type_error("no meta"))
+    })));
     let m = compile(&mut r, "m2.js", "import.meta;");
     r.link_module(m).unwrap();
     r.evaluate_module(m).unwrap();
@@ -470,10 +529,18 @@ fn dynamic_import_hook_and_finish_body() {
         r2.borrow_mut().push(di);
         Ok(())
     })));
-    let m = compile(&mut r, "dir/m.js", "export const v = 1; globalThis.p1 = import('./a.js', { with: { type: 'json' } });");
+    let m = compile(
+        &mut r,
+        "dir/m.js",
+        "export const v = 1; globalThis.p1 = import('./a.js', { with: { type: 'json' } });",
+    );
     r.link_module(m).unwrap();
     r.evaluate_module(m).unwrap();
-    r.eval("globalThis.p2 = import('b'); globalThis.p3 = import('c')", "classic.js").unwrap();
+    r.eval(
+        "globalThis.p2 = import('b'); globalThis.p3 = import('c')",
+        "classic.js",
+    )
+    .unwrap();
     assert_eq!(r.pending_dynamic_imports(), 3);
     {
         let q = reqs.borrow();
@@ -517,7 +584,9 @@ fn a_hook_that_throws_rejects_the_import() {
 
 fn a_hook_that_throws_rejects_the_import_body() {
     let mut r = realm();
-    r.set_dynamic_import_hook(Some(Box::new(|r, _di| Err(r.throw_error(ErrorKind::RangeError, "blocked")))));
+    r.set_dynamic_import_hook(Some(Box::new(|r, _di| {
+        Err(r.throw_error(ErrorKind::RangeError, "blocked"))
+    })));
     let v = r.eval("import('./x.js')", "t.js").unwrap();
     let seen = Rc::new(RefCell::new(String::new()));
     let s2 = seen.clone();
@@ -544,16 +613,26 @@ fn module_graph_survives_collections_body() {
             "main.js",
             "import { a } from './a.js'; import * as b from './b.js';\nlet s = 0; for (let i = 0; i < 20000; i++) s += [i, {i}].length;\nconst c = await import('./c.js');\nlog(a(), b.b, c.default, s);",
         ),
-        ("a.js", "export function a() { return 'a' + [1,2,3].map(x => x * 2).join(''); }"),
+        (
+            "a.js",
+            "export function a() { return 'a' + [1,2,3].map(x => x * 2).join(''); }",
+        ),
         ("b.js", "export const b = ['b', 'b'].join('-'); await 0;"),
-        ("c.js", "export default {}.constructor.name + (await Promise.resolve(1));"),
+        (
+            "c.js",
+            "export default {}.constructor.name + (await Promise.resolve(1));",
+        ),
     ]);
     for stress in [0, 1, 7] {
         let mut host = Host::new(list.clone());
         let mut r = host.realm(stress);
         host.run(&mut r, "main.js");
         let log = host.log.borrow().clone();
-        assert_eq!(log, alloc::vec![String::from("a246 b-b Object1 40000")], "stress {stress}");
+        assert_eq!(
+            log,
+            alloc::vec![String::from("a246 b-b Object1 40000")],
+            "stress {stress}"
+        );
         r.gc();
     }
 }
@@ -569,7 +648,9 @@ fn errors_from_modules_describe_themselves_body() {
     host.run(&mut r, "main.js");
     assert_eq!(
         host.log.borrow().clone(),
-        alloc::vec![String::from("eval error: TypeError: Cannot read properties of null (reading 'x')")]
+        alloc::vec![String::from(
+            "eval error: TypeError: Cannot read properties of null (reading 'x')"
+        )]
     );
     let m = host.load(&mut r, "main.js", &[]).unwrap();
     let e = r.module_error(m).unwrap();

@@ -647,7 +647,10 @@ impl<'a> Compiler<'a> {
         self.f().scope_chain.push(sid);
         self.hoist_functions(&m.body)?;
         self.emit(Op::ReturnUndef);
-        let st = self.fns.pop().unwrap_or_else(|| new_fn(CodeKind::Normal, true));
+        let st = self
+            .fns
+            .pop()
+            .unwrap_or_else(|| new_fn(CodeKind::Normal, true));
         let init = self.finish(st, None, 0, span);
         // The body.
         let mut st = new_fn(CodeKind::Normal, true);
@@ -656,7 +659,10 @@ impl<'a> Compiler<'a> {
         self.f().scope_chain.push(sid);
         self.stmts(&m.body)?;
         self.emit(Op::ReturnUndef);
-        let st = self.fns.pop().unwrap_or_else(|| new_fn(CodeKind::Normal, true));
+        let st = self
+            .fns
+            .pop()
+            .unwrap_or_else(|| new_fn(CodeKind::Normal, true));
         let body = self.finish(st, None, 0, span);
         Ok((init, body, n as u32))
     }

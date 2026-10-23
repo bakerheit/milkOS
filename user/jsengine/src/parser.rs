@@ -387,7 +387,7 @@ impl<'a> Parser<'a> {
             return self.unexpected();
         };
         let units = units.clone();
-        let spec = self.module_string(&units)?;
+        let spec = String::from_utf16_lossy(&units);
         self.advance()?;
         let mut attrs: Vec<(String, String)> = Vec::new();
         if self.is_name(kw::WITH) {
@@ -396,10 +396,7 @@ impl<'a> Parser<'a> {
             while !self.is(P::RBrace) {
                 let key = match &self.tok.tok {
                     Tok::Name(a, _) => self.atoms.get(*a).into(),
-                    Tok::Str(u, _) => {
-                        let u = u.clone();
-                        self.module_string(&u)?
-                    }
+                    Tok::Str(u, _) => String::from_utf16_lossy(u),
                     _ => return self.unexpected(),
                 };
                 self.advance()?;
@@ -408,10 +405,12 @@ impl<'a> Parser<'a> {
                     return self.unexpected();
                 };
                 let u = u.clone();
-                let val = self.module_string(&u)?;
+                let val = String::from_utf16_lossy(&u);
                 self.advance()?;
                 if attrs.iter().any(|(k, _)| *k == key) {
-                    return self.err(&alloc::format!("Import attribute has duplicate key '{key}'"));
+                    return self.err(&alloc::format!(
+                        "Import attribute has duplicate key '{key}'"
+                    ));
                 }
                 attrs.push((key, val));
                 if !self.is(P::RBrace) {
@@ -517,11 +516,13 @@ impl<'a> Parser<'a> {
                     let saved = self.tok.clone();
                     // Check the identifier rules on the name we just consumed.
                     if is_reserved(a)
-                        || (self.ctx.strict && (is_strict_reserved(a) || a == kw::EVAL || a == kw::ARGUMENTS))
+                        || (self.ctx.strict
+                            && (is_strict_reserved(a) || a == kw::EVAL || a == kw::ARGUMENTS))
                         || a == kw::AWAIT
                     {
                         let n = String::from(self.atoms.get(a));
-                        return self.err_at(&alloc::format!("Unexpected reserved word '{n}'"), tpos);
+                        return self
+                            .err_at(&alloc::format!("Unexpected reserved word '{n}'"), tpos);
                     }
                     let _ = saved;
                     entries.push((ImportName::Name(imported), a, tpos));
@@ -1713,7 +1714,10 @@ impl<'a> Parser<'a> {
     ) -> PResult<Option<Atom>> {
         let text = String::from(self.atoms.get(name));
         if text == "#constructor" {
-            return self.err_at("Classes may not have a private field named '#constructor'", pos);
+            return self.err_at(
+                "Classes may not have a private field named '#constructor'",
+                pos,
+            );
         }
         if let Some(prev) = privs.iter().find(|p| p.name == name) {
             let pair = matches!(

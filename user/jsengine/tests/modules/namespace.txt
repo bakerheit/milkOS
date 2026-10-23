@@ -156,3 +156,44 @@ export { again };
 export const leaf = 'L';
 //# expect
 L leaf true
+
+//# case: namespace in assorted builtins
+//# file: main.js
+import * as ns from './m.js';
+function t(f) { try { const r = f(); return typeof r === 'object' && r !== null ? JSON.stringify(r) : String(r); } catch (e) { return e.name; } }
+log(t(() => structuredClone(ns)));
+log(t(() => ns + ''));
+log(t(() => `${ns}`));
+log(t(() => Object.getOwnPropertyDescriptors(ns)));
+log(t(() => Object.assign({}, ns)));
+log(t(() => ns.constructor), t(() => ns.__proto__), t(() => ns.toString));
+log(t(() => Reflect.deleteProperty(ns, Symbol.toStringTag)));
+log(t(() => { delete ns[Symbol.toStringTag]; }));
+log(t(() => Object.prototype.hasOwnProperty.call(ns, Symbol.toStringTag)));
+log(t(() => Object.getOwnPropertySymbols(ns).length));
+log(t(() => Array.from(ns)));
+log(t(() => Object.fromEntries(Object.entries(ns))));
+log(t(() => new Map([[ns, 1]]).get(ns)));
+log(t(() => { const w = new WeakMap(); w.set(ns, 2); return w.get(ns); }));
+log(t(() => Object.isFrozen(Object.freeze({ ns }).ns)));
+log(t(() => Symbol.toStringTag in ns), t(() => Object.keys(ns).includes('x')));
+//# file: m.js
+export const x = 1;
+export let y = 'two';
+//# expect
+DataCloneError
+TypeError
+TypeError
+{"x":{"value":1,"writable":true,"enumerable":true,"configurable":false},"y":{"value":"two","writable":true,"enumerable":true,"configurable":false}}
+{"x":1,"y":"two"}
+undefined undefined undefined
+false
+TypeError
+true
+1
+[]
+{"x":1,"y":"two"}
+1
+2
+false
+true true

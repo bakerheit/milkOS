@@ -1652,11 +1652,7 @@ impl Realm {
     /// and fetches nothing. A SyntaxError (an early error, a duplicate or undefined export,
     /// ...) is returned as an `Err` with file, line and column. Read what it wants with
     /// [`Realm::module_requests`].
-    pub fn compile_module(
-        &mut self,
-        source: &str,
-        opts: &ModuleOptions<'_>,
-    ) -> JsResult<ModuleId> {
+    pub fn compile_module(&mut self, source: &str, opts: &ModuleOptions<'_>) -> JsResult<ModuleId> {
         self.entry(|r| r.module_compile(source, opts))
     }
 

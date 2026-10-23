@@ -2221,6 +2221,9 @@ impl Realm {
                     {
                         return Ok(*v);
                     }
+                    if let ObjKind::Typed(_) = obj.kind {
+                        return Ok(self.typed_get(id, i as usize).unwrap_or(Val::Undef));
+                    }
                     return self.get_p(id, PropKey::Idx(i as u32), o);
                 }
                 Val::Str(s) if (i as usize) < self.heap.str_len(s) => {
@@ -2260,6 +2263,15 @@ impl Realm {
                 if let ObjKind::Array(a) = &mut self.om(id).kind {
                     a.dense[i as usize] = v;
                 }
+                return Ok(());
+            }
+            if let ObjKind::Typed(_) = obj.kind {
+                let n = match v {
+                    Val::Int(x) => x as f64,
+                    Val::Num(x) => x,
+                    _ => self.to_num(v)?,
+                };
+                self.typed_put(id, i as usize, n);
                 return Ok(());
             }
         }
@@ -2999,6 +3011,15 @@ impl Realm {
         let len = match obj {
             Val::Obj(o) => match &self.o(o).kind {
                 ObjKind::Array(a) => a.len as f64,
+                ObjKind::Typed(t) => {
+                    // Iterating a detached typed array is an error.
+                    if self.buf_detached(t.buf) {
+                        return Err(self.type_error(
+                            "Cannot perform %ArrayIteratorPrototype%.next on a detached ArrayBuffer",
+                        ));
+                    }
+                    t.len as f64
+                }
                 _ => {
                     let lk = self.key(N::length);
                     let l = self.get_p(o, lk, obj)?;

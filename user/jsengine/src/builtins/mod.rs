@@ -3,6 +3,7 @@
 
 pub(crate) mod array;
 pub(crate) mod date;
+pub(crate) mod encoding;
 pub(crate) mod error;
 pub(crate) mod function;
 pub(crate) mod global;
@@ -15,6 +16,7 @@ pub(crate) mod object;
 pub(crate) mod promise;
 pub(crate) mod regexp;
 pub(crate) mod string;
+pub(crate) mod typedarray;
 
 use alloc::vec::Vec;
 
@@ -244,5 +246,7 @@ pub(crate) fn init(r: &mut Realm) {
     map::init(r);
     regexp::init(r);
     date::init(r);
+    typedarray::init(r);
+    encoding::init(r);
     global::init(r);
 }

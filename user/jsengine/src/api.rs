@@ -59,13 +59,25 @@
 //!   thread has 8 MB).
 //! - **Not supported (yet):** ES modules (`import`/`export`, `import()`; a script using
 //!   them gets a SyntaxError), `with`, direct `eval` seeing local variables (every `eval`
-//!   is global), BigInt, Proxy, typed arrays / ArrayBuffer / DataView, Intl (the
+//!   is global), BigInt (so no BigInt64Array / BigUint64Array), Proxy, resizable
+//!   ArrayBuffers, Intl (the
 //!   `toLocale*String` methods format en-US style), private class members (`#x`),
 //!   String.prototype.normalize (returns the string as is), WeakRef /
 //!   FinalizationRegistry, SharedArrayBuffer and Atomics. Date has a fixed local offset (no
 //!   daylight-saving rules).
 //!
 //! # CHANGES
+//! - Added ArrayBuffer, the typed arrays (Int8, Uint8, Uint8Clamped, Int16, Uint16, Int32,
+//!   Uint32, Float32, Float64), DataView, TextEncoder / TextDecoder (utf-8, utf-16le,
+//!   latin1) and `atob` / `btoa` to the engine, and the bytes plumbing
+//!   for the embedder: [`Realm::new_array_buffer`], [`Realm::new_array_buffer_from_vec`],
+//!   [`Realm::new_uint8_array`], [`Realm::new_uint8_array_from_vec`] (host bytes into script),
+//!   [`Realm::buffer_bytes`], [`Realm::buffer_bytes_mut`], [`Realm::copy_bytes`],
+//!   [`Realm::take_buffer_bytes`] (script bytes out to the host, borrowed, copied or moved),
+//!   [`Realm::is_array_buffer`], [`Realm::is_typed_array`], [`Realm::is_array_buffer_view`]
+//!   and [`Realm::set_max_buffer_bytes`] (the cap on one ArrayBuffer; buffer bytes also count
+//!   against [`Limits::max_heap_bytes`]). New [`Intrinsic`] variants: `ArrayBuffer`,
+//!   `ArrayBufferPrototype`, `Uint8Array`, `Uint8ArrayPrototype`, `TypedArrayPrototype`.
 //! - The engine behind the API is real now (it was a stub that threw on `eval`).
 //! - Added [`Realm::set_stack_limit`] (the native stack an entry may use; default 768 KB).
 //! - Added [`WeakValue`], [`Realm::weak`] and [`Realm::upgrade`] (wrapper caches that let
@@ -84,6 +96,7 @@ use core::any::Any;
 pub use crate::realm::Realm;
 pub use crate::value::{Kind, Value};
 
+use crate::object::ObjKind;
 use crate::value::Val;
 
 /// The result of anything that can throw.
@@ -449,6 +462,12 @@ pub enum Intrinsic {
     Array,
     Promise,
     Error,
+    ArrayBuffer,
+    ArrayBufferPrototype,
+    Uint8Array,
+    Uint8ArrayPrototype,
+    /// `%TypedArray%.prototype`.
+    TypedArrayPrototype,
 }
 
 /// Heap figures.
@@ -1317,6 +1336,139 @@ impl Realm {
             let s = r.json_stringify_val(v, Val::Undef, Val::Undef)?;
             Ok(s.map(|s| crate::string::to_rust(r.heap.units(s))))
         })
+    }
+
+    // ---- bytes: ArrayBuffer and typed arrays ----
+
+    /// The largest ArrayBuffer script or the host may make, in bytes (default 32 MiB). A
+    /// bigger `new ArrayBuffer(n)` is a RangeError. All buffer bytes also count against the
+    /// heap budget ([`Limits::max_heap_bytes`]), so many buffers run out of memory like any
+    /// other data.
+    pub fn set_max_buffer_bytes(&mut self, bytes: usize) {
+        self.max_buffer = bytes;
+    }
+
+    pub fn max_buffer_bytes(&self) -> usize {
+        self.max_buffer
+    }
+
+    /// A new ArrayBuffer holding a copy of `bytes`. A RangeError (as an [`Exception`]) when it
+    /// is over [`Realm::max_buffer_bytes`] or can't fit the heap budget.
+    pub fn new_array_buffer(&mut self, bytes: &[u8]) -> JsResult<Value> {
+        let r = self.entry(|r| {
+            r.check_buffer_size(bytes.len())?;
+            Ok(Val::Obj(r.buffer_from_vec(bytes.to_vec())))
+        });
+        self.out(r)
+    }
+
+    /// Like [`Realm::new_array_buffer`] but takes the bytes without copying them.
+    pub fn new_array_buffer_from_vec(&mut self, bytes: Vec<u8>) -> JsResult<Value> {
+        let r = self.entry(|r| {
+            r.check_buffer_size(bytes.len())?;
+            Ok(Val::Obj(r.buffer_from_vec(bytes)))
+        });
+        self.out(r)
+    }
+
+    /// A new `Uint8Array` (on a new ArrayBuffer) holding a copy of `bytes`.
+    pub fn new_uint8_array(&mut self, bytes: &[u8]) -> JsResult<Value> {
+        self.new_uint8_array_from_vec(bytes.to_vec())
+    }
+
+    /// A new `Uint8Array` that takes `bytes` without copying them.
+    pub fn new_uint8_array_from_vec(&mut self, bytes: Vec<u8>) -> JsResult<Value> {
+        let r = self.entry(|r| {
+            r.check_buffer_size(bytes.len())?;
+            let n = bytes.len();
+            let buf = r.buffer_from_vec(bytes);
+            Ok(Val::Obj(r.typed_new(
+                crate::typed::TaKind::Uint8,
+                buf,
+                0,
+                n,
+                None,
+            )))
+        });
+        self.out(r)
+    }
+
+    /// Whether `v` is an ArrayBuffer.
+    pub fn is_array_buffer(&self, v: Value) -> bool {
+        matches!(self.check_val(v.0), Val::Obj(o) if matches!(self.o(o).kind, ObjKind::ArrayBuffer(_)))
+    }
+
+    /// Whether `v` is a typed array (any of the nine kinds).
+    pub fn is_typed_array(&self, v: Value) -> bool {
+        matches!(self.check_val(v.0), Val::Obj(o) if matches!(self.o(o).kind, ObjKind::Typed(_)))
+    }
+
+    /// Whether `v` is a typed array or a DataView.
+    pub fn is_array_buffer_view(&self, v: Value) -> bool {
+        matches!(self.check_val(v.0), Val::Obj(o) if matches!(self.o(o).kind, ObjKind::Typed(_) | ObjKind::DataView(_)))
+    }
+
+    /// Borrows the bytes of an ArrayBuffer (all of them) or of a typed array / DataView (the
+    /// bytes it views). None for anything else, and for a detached buffer. The slice is
+    /// valid until the next call that takes `&mut Realm`.
+    pub fn buffer_bytes(&self, v: Value) -> Option<&[u8]> {
+        let Val::Obj(o) = self.check_val(v.0) else {
+            return None;
+        };
+        match &self.o(o).kind {
+            ObjKind::ArrayBuffer(b) if !b.detached => Some(&b.bytes),
+            ObjKind::Typed(t) if !self.buf_detached(t.buf) => Some(self.typed_bytes(o)),
+            ObjKind::DataView(d) => {
+                let b = self.buf_data(d.buf)?;
+                if b.detached {
+                    return None;
+                }
+                b.bytes.get(d.offset..d.offset + d.len)
+            }
+            _ => None,
+        }
+    }
+
+    /// Like [`Realm::buffer_bytes`], writable (the script sees the changes).
+    pub fn buffer_bytes_mut(&mut self, v: Value) -> Option<&mut [u8]> {
+        let Val::Obj(o) = self.check_val(v.0) else {
+            return None;
+        };
+        let (buf, off, len) = match &self.o(o).kind {
+            ObjKind::ArrayBuffer(b) if !b.detached => (o, 0, b.bytes.len()),
+            ObjKind::Typed(t) => (t.buf, t.offset, t.len * t.kind.size()),
+            ObjKind::DataView(d) => (d.buf, d.offset, d.len),
+            _ => return None,
+        };
+        match &mut self.heap.om(buf).kind {
+            ObjKind::ArrayBuffer(b) if !b.detached => b.bytes.get_mut(off..off + len),
+            _ => None,
+        }
+    }
+
+    /// A copy of the bytes [`Realm::buffer_bytes`] would borrow.
+    pub fn copy_bytes(&self, v: Value) -> Option<Vec<u8>> {
+        self.buffer_bytes(v).map(|b| b.to_vec())
+    }
+
+    /// Moves the bytes out of an ArrayBuffer without copying (a typed array's or DataView's
+    /// buffer, whole): the buffer is detached afterwards (length 0, and every view of it
+    /// stops working), like `ArrayBuffer.prototype.transfer`. None if `v` is not a buffer
+    /// or view, or is already detached.
+    pub fn take_buffer_bytes(&mut self, v: Value) -> Option<Vec<u8>> {
+        let Val::Obj(o) = self.check_val(v.0) else {
+            return None;
+        };
+        let buf = match &self.o(o).kind {
+            ObjKind::ArrayBuffer(b) if !b.detached => o,
+            ObjKind::Typed(t) => t.buf,
+            ObjKind::DataView(d) => d.buf,
+            _ => return None,
+        };
+        if self.buf_detached(buf) {
+            return None;
+        }
+        Some(self.detach_buffer(buf))
     }
 
     pub fn well_known_symbol(&self, w: WellKnown) -> Value {

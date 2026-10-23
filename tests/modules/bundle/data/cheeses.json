@@ -1,0 +1,6 @@
+[
+  { "name": "Cheddar", "origin": "Somerset", "price": 7.5, "aged": 18 },
+  { "name": "Gouda", "origin": "Holland", "price": 6.25, "aged": 12 },
+  { "name": "Brie", "origin": "Meaux", "price": 9, "aged": 2 },
+  { "name": "Manchego", "origin": "La Mancha", "price": 11.4, "aged": 9 }
+]

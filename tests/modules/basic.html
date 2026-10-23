@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: the basics</title>
+<style>body { font-family: sans-serif; margin: 24px; background: #fffdf8; color: #3a2e28; } code { background: #efe6d4; padding: 1px 5px; }</style>
+<script src="/classic.js"></script>
+<script>
+  var seq = [];
+  function mark(s) { seq.push(s); }
+  mark('classic-head');
+  window.addEventListener('error', function (e) { report('basic', 'window-error', e.message); });
+  document.addEventListener('DOMContentLoaded', function () { mark('DOMContentLoaded'); });
+  window.addEventListener('load', function () {
+    mark('load');
+    // A second look a moment later, for the module that waits on a timer.
+    setTimeout(function () {
+      var pos = function (s) { return seq.indexOf(s); };
+      var ok = pos('classic-head') === 0 &&
+        pos('inline-module-1') > pos('classic-body') &&
+        pos('order.js') > pos('inline-module-1') &&
+        pos('DOMContentLoaded') > pos('order.js') &&
+        pos('tla-start') < pos('sibling') && pos('sibling') < pos('tla-end') && pos('tla-end') < pos('after-tla') &&
+        pos('async.js') >= 0 && pos('NOMODULE') < 0;
+      report('basic', 'order', ok ? 'ok' : 'BAD ' + seq.join(' '));
+      report('basic', 'end', 'done');
+    }, 800);
+  });
+</script>
+<script nomodule>window.nomoduleRan = true; mark('NOMODULE');</script>
+<script type="module">
+  import { name as aName, getB } from '/basic/a.js';
+  import * as ns from '/basic/b.js';
+  import { count as c1 } from '/count/basic.js';
+  import { count as c2 } from '/basic/count-again.js';
+  mark('inline-module-1');
+  report('basic', 'graph', aName + ' ' + getB() + ' ' + Object.keys(ns).join(','));
+  report('basic', 'cycle', ns.fromA());
+  report('basic', 'once', c1 + ' ' + c2);
+  report('basic', 'this-currentScript', (typeof this) + ' ' + (document.currentScript === null));
+  report('basic', 'strict', (function () { return this === undefined; })());
+  report('basic', 'meta', import.meta.url.replace(location.origin, ''));
+  report('basic', 'nomodule', String(window.nomoduleRan));
+  report('basic', 'dom-ready', document.readyState + ' ' + (document.getElementById('late') !== null));
+</script>
+<script type="module" src="/basic/order.js"></script>
+<script type="module" src="/basic/tla.js"></script>
+<script type="module" src="/basic/sibling.js"></script>
+<script type="module" src="/basic/after-tla.js"></script>
+<script type="module" async src="/basic/async.js"></script>
+</head><body>
+<h1>Modules: the basics</h1>
+<p id="late">Scripts of type <code>module</code> are deferred: they run after this paragraph is in the page.</p>
+<script>
+  mark('classic-body');
+  // import() from a classic script.
+  import('/basic/dyn.js').then(function (ns) { report('basic', 'dynamic', ns.hello() + ' ' + ns.default); });
+  import('/basic/nothere.js').catch(function (e) {
+    report('basic', 'dynamic-404', errName(e).replace(location.origin, ''));
+  });
+  import('/basic/dyn.js').then(function (ns) { report('basic', 'dynamic-same', ns.hello()); });
+</script>
+</body></html>

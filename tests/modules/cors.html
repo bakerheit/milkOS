@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: CORS</title>
+<script src="/classic.js"></script>
+</head><body>
+<h1>Modules: cross-origin</h1>
+<!-- Static module scripts from another origin: allowed with CORS headers, an error event without. -->
+<script type="module" src="http://api.milk.test:@PORT@/cors/open.js"
+  onload="report('cors', 'static-open', 'loaded')" onerror="report('cors', 'static-open', 'ERROR')"></script>
+<script type="module" src="http://api.milk.test:@PORT@/cors/closed.js"
+  onload="report('cors', 'static-closed', 'LOADED')" onerror="report('cors', 'static-closed', 'blocked')"></script>
+<script type="module">
+  import { where } from 'http://api.milk.test:@PORT@/cors/open.js';
+  report('cors', 'import-open', where);
+  const tries = [
+    ['import-closed', 'http://other.test:@PORT@/cors/closed.js'],
+    ['import-other-open', 'http://other.test:@PORT@/cors/open.js'],
+    ['origin', 'http://api.milk.test:@PORT@/cors/origin.js'],
+    ['redirect-to-closed', '/redirect.js?to=' + encodeURIComponent('http://other.test:@PORT@/cors/closed.js')],
+    ['redirect-to-open', '/redirect.js?to=' + encodeURIComponent('http://other.test:@PORT@/cors/open.js')],
+  ];
+  for (const [name, url] of tries) {
+    try {
+      const ns = await import(url);
+      report('cors', name, ns.where || ns.seen);
+    } catch (e) {
+      report('cors', name, 'rejected ' + e.name);
+    }
+  }
+  report('cors', 'end', 'done');
+</script>
+</body></html>

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: limits</title>
+<script src="/classic.js"></script>
+<script>
+  window.addEventListener('error', function (e) { report('limits', 'depth', String(e.message).slice(0, 90)); });
+</script>
+</head><body>
+<h1>Modules: limits</h1>
+<!-- Imports that never end. -->
+<script type="module" src="/gen/chain/0.js"></script>
+<script type="module">
+  // 200 modules at once is fine.
+  const ns = await import('/gen/wide.js?n=200');
+  report('limits', 'wide-200', ns.k);
+  // More than a page may have is refused, and not fetched.
+  try {
+    await import('/gen/wide.js?n=2300');
+    report('limits', 'wide-2300', 'LOADED');
+  } catch (e) {
+    report('limits', 'wide-2300', e.name + ': ' + String(e.message).slice(0, 60));
+  }
+  report('limits', 'end', 'done');
+</script>
+</body></html>

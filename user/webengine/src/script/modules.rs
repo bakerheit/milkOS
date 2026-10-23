@@ -416,7 +416,7 @@ impl<T: Types> Modules<T> {
         bind: bool,
     ) -> Result<u32, String> {
         self.maps.allowed = false;
-        let key = self.ensure(url, ty, credentials, 0)?;
+        let (key, _) = self.ensure(url, ty, credentials, 0)?;
         let id = self.next_graph;
         self.next_graph += 1;
         self.graphs.push(Graph { id, root: key, bind });
@@ -470,11 +470,11 @@ impl<T: Types> Modules<T> {
         ty: ModType,
         credentials: CredentialsMode,
         depth: u32,
-    ) -> Result<Key, String> {
+    ) -> Result<(Key, bool), String> {
         let url = strip_fragment(url);
         let key = Key::Url(String::from(url), ty);
         if self.map.contains_key(&key) {
-            return Ok(key);
+            return Ok((key, false));
         }
         if self.map.len() >= self.limits.max_modules {
             return Err(format!(
@@ -501,11 +501,11 @@ impl<T: Types> Modules<T> {
             self.note(true, format!("Failed to load module script {url}: {why}"));
             e.state = State::Broken(Broken::Network(why));
             self.map.insert(key.clone(), e);
-            return Ok(key);
+            return Ok((key, true));
         }
         self.map.insert(key.clone(), e);
         self.queue.push_back(key.clone());
-        Ok(key)
+        Ok((key, true))
     }
 
     /// Start queued fetches while there is room.
@@ -539,6 +539,7 @@ impl<T: Types> Modules<T> {
             Ok(id) => {
                 let reqs = eng.requests(id);
                 let mut deps: Vec<Key> = Vec::new();
+                let mut created: Vec<Key> = Vec::new();
                 let mut bad: Option<Broken<T>> = None;
                 for r in &reqs {
                     let dep = type_of_attributes(&r.attributes).and_then(|ty| {
@@ -547,7 +548,12 @@ impl<T: Types> Modules<T> {
                         self.ensure(&url, ty, creds, depth + 1)
                     });
                     match dep {
-                        Ok(k) => deps.push(k),
+                        Ok((k, new)) => {
+                            if new {
+                                created.push(k.clone());
+                            }
+                            deps.push(k);
+                        }
                         Err(message) => {
                             bad = Some(Broken::Resolve {
                                 message,
@@ -559,7 +565,17 @@ impl<T: Types> Modules<T> {
                     }
                 }
                 match bad {
-                    Some(b) => State::Broken(b),
+                    Some(b) => {
+                        // This module is no use, so the fetches it asked for and that have not
+                        // begun are not wanted either.
+                        for k in created {
+                            if matches!(self.map.get(&k).map(|e| &e.state), Some(State::Queued)) {
+                                self.map.remove(&k);
+                                self.queue.retain(|q| *q != k);
+                            }
+                        }
+                        State::Broken(b)
+                    }
                     None => State::Parsed { id, deps },
                 }
             }
@@ -1136,6 +1152,19 @@ mod tests {
         let Outcome::Broken(k) = &d[0].1 else { panic!("wanted broken") };
         assert!(matches!(m.broken(k), Some(Broken::Resolve { message, .. }) if message.contains("too many modules")));
         assert!(m.len() <= 3);
+        // What it had queued before it went over is dropped, not fetched.
+        assert_eq!(m.len(), 1, "only the broken root is left");
+        assert_eq!(m.fetching(), 0);
+        assert!(fetches(&mut m).is_empty());
+
+        // The same for a bad import after good ones.
+        let mut m = Modules::<Fake>::default();
+        m.fetch_graph(&mut e, A, ModType::Js, CR, true).unwrap();
+        fetches(&mut m);
+        serve(&mut m, &mut e, A, "import \"./ok1.js\"\nimport \"./ok2.js\"\nimport \"bare\"\n");
+        assert!(fetches(&mut m).is_empty(), "nothing is fetched for a module that is broken");
+        assert_eq!(m.len(), 1);
+        assert!(matches!(m.take_done()[0].1, Outcome::Broken(_)));
 
         // Depth: a chain that never ends.
         let mut m = Modules::<Fake>::new(Limits { max_depth: 5, ..Limits::default() });
@@ -1241,5 +1270,128 @@ mod tests {
         // And for a key nobody knows.
         m.on_failed(&mut e, &url("https://nowhere.test/x.js"), String::new());
         assert_eq!(m.on_head(&mut e, &Key::Inline(9), 500, "", None), Verdict::Continue);
+    }
+
+    /// Random events in random orders: nothing panics, the limits hold, and every graph that
+    /// was started ends once or is still waiting for a fetch that was asked for.
+    #[test]
+    fn random_events_keep_the_map_sound() {
+        struct Rng(u64);
+        impl Rng {
+            fn next(&mut self) -> u64 {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                self.0
+            }
+            fn below(&mut self, n: usize) -> usize {
+                (self.next() % n as u64) as usize
+            }
+        }
+        for seed in 1..60u64 {
+            let mut r = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+            let mut e = Fake::default();
+            let limits = Limits {
+                max_modules: 5 + r.below(40),
+                max_depth: 2 + r.below(10) as u32,
+                max_inflight: 1 + r.below(6),
+                max_source: 20 + r.below(200),
+                max_total: 100 + r.below(2000),
+            };
+            let (max_modules, max_inflight) = (limits.max_modules, limits.max_inflight);
+            let mut m = Modules::<Fake>::new(limits);
+            let mut started: Vec<u32> = Vec::new();
+            let mut ended: Vec<u32> = Vec::new();
+            let mut running: Vec<Key> = Vec::new();
+            let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+            for _ in 0..300 {
+                match r.below(8) {
+                    0 | 1 => {
+                        let u = format!("https://t.test/{}.js", names[r.below(names.len())]);
+                        let ty = if r.below(5) == 0 { ModType::Json } else { ModType::Js };
+                        if let Ok(g) = m.fetch_graph(&mut e, &u, ty, CR, r.below(2) == 0) {
+                            started.push(g);
+                        }
+                    }
+                    2 => {
+                        let g = m.inline_graph(&mut e, "import \"./a.js\"\nimport \"./b.js\"\n", "https://t.test/p.html", "https://t.test/", 1, CR);
+                        started.push(g);
+                    }
+                    3 => {
+                        if !running.is_empty() {
+                            let k = running.remove(r.below(running.len()));
+                            let body = match r.below(5) {
+                                0 => String::from("SYNTAX"),
+                                1 => String::new(),
+                                2 => format!("import \"./{}.js\"\nimport \"bare\"\n", names[r.below(names.len())]),
+                                _ => format!(
+                                    "import \"./{}.js\"\nimport \"../{}.js\" json\nimport \"./{}.js\"\n",
+                                    names[r.below(names.len())],
+                                    names[r.below(names.len())],
+                                    names[r.below(names.len())]
+                                ),
+                            };
+                            match r.below(4) {
+                                0 => {
+                                    if m.on_head(&mut e, &k, 200 + 204 * r.below(2) as u16, "", Some("text/html")) == Verdict::Continue {
+                                        m.on_body(&mut e, &k, body.as_bytes(), "");
+                                    }
+                                }
+                                _ => m.on_body(&mut e, &k, body.as_bytes(), ["", "https://cdn.t.test/x/y.js#f"][r.below(2)]),
+                            }
+                        }
+                    }
+                    4 => {
+                        if !running.is_empty() {
+                            let k = running.remove(r.below(running.len()));
+                            m.on_failed(&mut e, &k, String::from("down"));
+                        }
+                    }
+                    5 => {
+                        // Stray events for nobody, or twice.
+                        let k = url(&format!("https://t.test/{}.js", names[r.below(names.len())]));
+                        match r.below(3) {
+                            0 => m.on_failed(&mut e, &k, String::new()),
+                            1 => m.on_body(&mut e, &k, b"", ""),
+                            _ => {
+                                m.on_head(&mut e, &k, 404, "", None);
+                            }
+                        }
+                    }
+                    6 => {
+                        m.add_import_map("{\"imports\": {\"bare\": \"/c.js\"}}", "https://t.test/");
+                    }
+                    _ => {}
+                }
+                for a in m.take_actions() {
+                    let Action::Fetch { key, .. } = a;
+                    running.push(key);
+                }
+                for (g, _) in m.take_done() {
+                    assert!(started.contains(&g) && !ended.contains(&g), "graph {g} ended twice or was never started");
+                    ended.push(g);
+                }
+                m.take_notes();
+                // (A stray event may have ended a fetch that was out.)
+                running.retain(|k| matches!(m.map.get(k).map(|e| &e.state), Some(State::Fetching)));
+                assert!(m.len() <= max_modules + started.len(), "the map outgrew its limit: {}", m.len());
+                assert_eq!(m.inflight, running.len(), "{} out, counted {}", running.len(), m.inflight);
+                assert!(m.inflight <= max_inflight, "{} fetches out, limit {}", m.inflight, max_inflight);
+            }
+            // Everything still out fails: every graph is settled one way or the other.
+            while let Some(k) = running.pop() {
+                m.on_failed(&mut e, &k, String::from("end"));
+                for a in m.take_actions() {
+                    let Action::Fetch { key, .. } = a;
+                    running.push(key);
+                }
+            }
+            for (g, _) in m.take_done() {
+                assert!(started.contains(&g) && !ended.contains(&g));
+                ended.push(g);
+            }
+            assert_eq!(m.active(), 0, "seed {seed}: graphs left waiting with nothing out");
+            assert_eq!(ended.len(), started.len(), "seed {seed}");
+        }
     }
 }

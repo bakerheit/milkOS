@@ -13,7 +13,7 @@
 #   * raf.html       a requestAnimationFrame animation moving a box
 #   * innerhtml.html a table built with innerHTML, insertAdjacentHTML, outerHTML; noscript
 #                    hidden while scripts are on
-#   * order.html     blocking, defer, module (not run), data-block scripts, document.write,
+#   * order.html     blocking, defer, module (deferred, in order with them), data-block scripts, document.write,
 #                    DOMContentLoaded and load in order, document.currentScript
 #   * storage.html   localStorage across a reload (kept in ~/Library/Browser/storage),
 #                    document.cookie without the HttpOnly cookie
@@ -171,8 +171,7 @@ shot js-08-innerhtml
 
 echo "-- script order"
 go "$H/order.html"
-js order "inline1 loading, ext b loading, inline2, ext a interactive, DOMContentLoaded, load complete \| written yes" && ok "blocking, defer, DOMContentLoaded, load (module and template not run), document.write" || bad "order: $(log_lines | grep -a 'JSTEST order' | tail -1)"
-wait_log "^\[browser\] console warn: .*module" 5 && ok "the module script was reported as not supported" || bad "no note about the module script"
+js order "inline1 loading, ext b loading, inline2, ext a interactive, module, DOMContentLoaded, load complete \| written yes" && ok "blocking, defer, a module (deferred, after ext a), DOMContentLoaded, load (the template not run), document.write" || bad "order: $(log_lines | grep -a 'JSTEST order' | tail -1)"
 
 echo "-- storage and cookies"
 go "$H/storage.html"

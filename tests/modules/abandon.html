@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: a module that never ends</title>
+<script src="/classic.js"></script>
+</head><body>
+<h1>A module that trickles in for 30 seconds</h1>
+<p>Go to another page: the Browser must stop fetching it.</p>
+<script>report('abandon', 'start', 'waiting');</script>
+<script type="module" src="/stream/forever.js"></script>
+</body></html>

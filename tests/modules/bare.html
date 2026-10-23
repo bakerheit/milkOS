@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: no import map</title>
+<script src="/classic.js"></script>
+<script>
+  window.addEventListener('error', function (e) {
+    report('bare', 'onerror', e.message + ' @' + String(e.filename).replace(location.origin, ''));
+  });
+</script>
+</head><body>
+<h1>Modules: no import map</h1>
+<script type="module" src="/map/needs-bare.js" onerror="report('bare', 'error-event', 'fired')" onload="report('bare', 'load-event', 'fired')"></script>
+<script type="module">
+  report('bare', 'other-module', 'ran');
+  import('lodash-lite').catch((e) => report('bare', 'dynamic', errName(e).slice(0, 70)));
+  import('./nothing').catch((e) => report('bare', 'dotted', errName(e).replace(location.origin, '')));
+</script>
+</body></html>

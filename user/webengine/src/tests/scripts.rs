@@ -172,11 +172,10 @@ fn script_order() {
     assert!(
         has(
             &lines,
-            "JSTEST order inline1 loading, ext b loading, inline2, ext a interactive, DOMContentLoaded, load complete | written yes"
+            "JSTEST order inline1 loading, ext b loading, inline2, ext a interactive, module, DOMContentLoaded, load complete | written yes"
         ),
         "{lines:?}"
     );
-    assert!(has(&lines, "module"), "{lines:?}");
 }
 
 #[test]

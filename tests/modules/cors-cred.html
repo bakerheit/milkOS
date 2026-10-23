@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Modules: credentials</title>
+<script src="/classic.js"></script>
+</head><body>
+<h1>Modules: credentials</h1>
+<script>
+  // Cookies for www.milk.test and api.milk.test first; then the module scripts (put in by script).
+  var A = 'http://api.milk.test:@PORT@';
+  Promise.all([
+    fetch('/cookie/set'),
+    fetch(A + '/cors/setcookie', { credentials: 'include' }),
+  ]).then(function () {
+    report('cred', 'cookies', document.cookie);
+    function add(src, crossorigin) {
+      var s = document.createElement('script');
+      s.type = 'module';
+      s.src = src;
+      if (crossorigin) s.setAttribute('crossorigin', crossorigin);
+      document.body.appendChild(s);
+    }
+    add('/cred/cred-same.js');
+    add('/cred/cred-anon.js', 'anonymous');
+    add('/cred/cred-use.js', 'use-credentials');
+  });
+</script>
+</body></html>

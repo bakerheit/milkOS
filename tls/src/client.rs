@@ -153,23 +153,29 @@ impl KeyShare {
         let bad = || TlsError::illegal("an invalid key share");
         match self.group {
             NamedGroup::X25519 => {
-                let s: [u8; 32] = self.secret[..].try_into().map_err(|_| bad())?;
+                let mut s: [u8; 32] = self.secret[..].try_into().map_err(|_| bad())?;
                 let p: [u8; 32] = peer.try_into().map_err(|_| bad())?;
-                let mut z = x25519::shared(&s, &p).ok_or_else(bad)?;
+                let r = x25519::shared(&s, &p);
+                wipe(&mut s);
+                let mut z = r.ok_or_else(bad)?;
                 let v = z.to_vec();
                 wipe(&mut z);
                 Ok(v)
             }
             NamedGroup::Secp256r1 => {
-                let s: [u8; 32] = self.secret[..].try_into().map_err(|_| bad())?;
-                let mut z = p256::shared(&s, peer).ok_or_else(bad)?;
+                let mut s: [u8; 32] = self.secret[..].try_into().map_err(|_| bad())?;
+                let r = p256::shared(&s, peer);
+                wipe(&mut s);
+                let mut z = r.ok_or_else(bad)?;
                 let v = z.to_vec();
                 wipe(&mut z);
                 Ok(v)
             }
             NamedGroup::Secp384r1 => {
-                let s: [u8; 48] = self.secret[..].try_into().map_err(|_| bad())?;
-                let mut z = p384::shared(&s, peer).ok_or_else(bad)?;
+                let mut s: [u8; 48] = self.secret[..].try_into().map_err(|_| bad())?;
+                let r = p384::shared(&s, peer);
+                wipe(&mut s);
+                let mut z = r.ok_or_else(bad)?;
                 let v = z.to_vec();
                 wipe(&mut z);
                 Ok(v)

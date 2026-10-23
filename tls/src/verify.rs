@@ -32,6 +32,8 @@ const MAX_INTERMEDIATES: usize = 6;
 const MAX_PRESENTED: usize = 16;
 /// Most signature checks per chain.
 const MAX_SIGNATURE_CHECKS: usize = 48;
+/// Most name-against-subtree comparisons per chain (as BoringSSL: 2^20).
+const MAX_CONSTRAINT_CHECKS: usize = 1 << 20;
 
 /// RSA modulus sizes we accept anywhere (chain and handshake).
 #[derive(Clone, Copy, Debug)]
@@ -175,6 +177,7 @@ struct Search<'a, 'r> {
     now: i64,
     policy: &'r Policy,
     checks: usize,
+    constraint_budget: usize,
     /// The most specific error seen so far: (how far up the path it was, error).
     best: (usize, CertError),
 }
@@ -195,14 +198,32 @@ impl<'a, 'r> Search<'a, 'r> {
         verify_signature(alg, key, child.tbs, child.signature, self.policy)
     }
 
-    /// The certificates below the issuer being considered: the leaf and `path`.
-    fn below(&self, path: &[usize]) -> impl Iterator<Item = &Certificate<'a>> {
-        core::iter::once(self.leaf).chain(path.iter().map(|&i| &self.presented[i]))
-    }
-
-    fn constraints_ok(&self, nc: Option<&[u8]>, path: &[usize]) -> bool {
-        let Some(nc) = nc else { return true };
-        self.below(path).all(|c| name::within_constraints(nc, c))
+    /// Name constraints of a complete path (checked only once a path reaches an anchor, so
+    /// an untrusted chain costs nothing here): each issuer's over the certificates below it,
+    /// the anchor's over all of them.
+    fn path_constraints_ok(&mut self, anchor_nc: Option<&[u8]>, path: &[usize]) -> bool {
+        let presented = self.presented;
+        let leaf = self.leaf;
+        let below = |p: &[usize]| -> Vec<&'r Certificate<'a>> {
+            core::iter::once(leaf).chain(p.iter().map(|&i| &presented[i])).collect()
+        };
+        for (j, &i) in path.iter().enumerate() {
+            if let Some(nc) = presented[i].name_constraints {
+                for c in below(&path[..j]) {
+                    if !name::within_constraints(nc, c, &mut self.constraint_budget) {
+                        return false;
+                    }
+                }
+            }
+        }
+        if let Some(nc) = anchor_nc {
+            for c in below(path) {
+                if !name::within_constraints(nc, c, &mut self.constraint_budget) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Find an issuer for `child` (the top of `path`, or the leaf), recursively.
@@ -215,7 +236,7 @@ impl<'a, 'r> Search<'a, 'r> {
             let key = anchor.key();
             match self.signature(child, &key) {
                 Ok(()) => {
-                    if self.constraints_ok(anchor.name_constraints(), path) {
+                    if self.path_constraints_ok(anchor.name_constraints(), path) {
                         return Ok(());
                     }
                     self.note(depth, CertError::NameConstraints);
@@ -248,10 +269,6 @@ impl<'a, 'r> Search<'a, 'r> {
                     self.note(depth, e);
                     continue;
                 }
-            }
-            if !self.constraints_ok(cand.name_constraints, path) {
-                self.note(depth, CertError::NameConstraints);
-                continue;
             }
             path.push(i);
             match self.find(cand, path) {
@@ -291,6 +308,7 @@ pub fn verify_server_chain<'a>(
         now,
         policy,
         checks: 0,
+        constraint_budget: MAX_CONSTRAINT_CHECKS,
         best: (0, CertError::UnknownIssuer),
     };
     let mut path = Vec::new();

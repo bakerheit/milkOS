@@ -82,8 +82,9 @@ pub struct PublicKey {
 
 impl PublicKey {
     /// n and e big-endian, leading zero bytes allowed. None unless n is odd,
-    /// 512 <= bits(n) <= 8192, e is odd and 3 <= e < n. (Policy such as "2048 to 4096 bits
-    /// only" is the caller's.)
+    /// 512 <= bits(n) <= 8192, e is odd, 3 <= e < n and e < 2^33 (a huge public exponent
+    /// would only make verification slow; real keys use 3 or 65537). (Policy such as "2048
+    /// to 4096 bits only" is the caller's.)
     pub fn new(n: &[u8], e: &[u8]) -> Option<PublicKey> {
         let n = BigUint::from_be_bytes(n);
         let e = BigUint::from_be_bytes(e);
@@ -91,7 +92,7 @@ impl PublicKey {
         if !(512..=8192).contains(&bits) || !n.is_odd() {
             return None;
         }
-        if !e.is_odd() || e < BigUint::from_u64(3) || e >= n {
+        if !e.is_odd() || e < BigUint::from_u64(3) || e >= n || e.bits() > 33 {
             return None;
         }
         let mont = Mont::new(&n)?;

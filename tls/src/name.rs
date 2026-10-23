@@ -201,6 +201,7 @@ fn dns_within(name: &[u8], base: &[u8]) -> bool {
 /// inside the excluded subtree `base`? For exclusions we must be pessimistic: `*.example.com`
 /// is excluded by `bad.example.com` because it would match it.
 fn dns_may_hit(name: &[u8], base: &[u8]) -> bool {
+    let name = name.strip_suffix(b".").unwrap_or(name);
     if dns_within(name, base) {
         return true;
     }
@@ -251,7 +252,11 @@ fn subtrees(s: Option<&[u8]>) -> Vec<GeneralName<'_>> {
 /// Checked forms: dNSName, iPAddress, directoryName (the subject and SAN entries). Names of
 /// other forms are left alone, except that a constraint on a form we can't check, when the
 /// certificate has a name of that form, fails closed.
-pub fn within_constraints(nc: &[u8], cert: &x509::Certificate) -> bool {
+///
+/// `budget` counts name-against-subtree comparisons across a whole chain; when it runs out
+/// the answer is false (a hostile chain with thousands of names and subtrees can't make us
+/// spin).
+pub fn within_constraints(nc: &[u8], cert: &x509::Certificate, budget: &mut usize) -> bool {
     let mut d = crate::der::Der::new(nc);
     let permitted = d.optional(crate::der::ctx_cons(0)).flatten();
     let excluded = d.optional(crate::der::ctx_cons(1)).flatten();
@@ -265,6 +270,12 @@ pub fn within_constraints(nc: &[u8], cert: &x509::Certificate) -> bool {
         names.push(GeneralName::Directory(cert.subject));
     }
 
+    let cost = names.len().saturating_mul(perm.len() + excl.len());
+    if cost > *budget {
+        *budget = 0;
+        return false;
+    }
+    *budget -= cost;
     for n in &names {
         // Excluded: no match allowed.
         for e in &excl {
@@ -301,7 +312,8 @@ fn same_kind(a: &GeneralName, b: &GeneralName) -> bool {
     match (a, b) {
         (GeneralName::Dns(_), GeneralName::Dns(_))
         | (GeneralName::Directory(_), GeneralName::Directory(_)) => true,
-        (GeneralName::Ip(a), GeneralName::Ip(b)) => a.len() * 2 == b.len(),
+        // One form (RFC 5280): an IPv6 name under IPv4-only permitted subtrees is outside them.
+        (GeneralName::Ip(_), GeneralName::Ip(_)) => true,
         (GeneralName::Other(x, _), GeneralName::Other(y, _)) => x == y,
         _ => false,
     }

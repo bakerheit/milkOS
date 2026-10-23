@@ -113,7 +113,7 @@ fn mutated_der_never_panics() {
             let _ = c.subject_cn();
             let _ = c.issuer_display();
             if let Some(nc) = c.name_constraints {
-                let _ = crate::name::within_constraints(nc, &c);
+                let _ = crate::name::within_constraints(nc, &c, &mut 1_000_000);
             }
         }
     }

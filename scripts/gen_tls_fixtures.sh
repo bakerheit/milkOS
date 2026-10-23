@@ -102,6 +102,11 @@ cert leaf-nc-ok leaf-ec "/CN=www.allowed.example" int-nc \
 cert leaf-nc-bad leaf-ec "/CN=test.milk.example" int-nc "$LEAF_EC"
 cert leaf-nc-excluded leaf-ec "/CN=bad.allowed.example" int-nc \
   "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:www.allowed.example,DNS:*.allowed.example"
+# Wildcards with a trailing dot, and an IPv6 name under IPv4-only permitted subtrees.
+cert leaf-nc-dot leaf-ec "/CN=www.allowed.example" int-nc \
+  "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:*.allowed.example."
+cert leaf-nc-ipv6 leaf-ec "/CN=www.allowed.example" int-nc \
+  "basicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:www.allowed.example,IP:2001:db8::1"
 # int-ec again, cross-signed by the RSA root (same subject and key): backtracking.
 cert int-ec-cross int-ec "/O=milkOS tests/CN=milkOS Test Intermediate EC" root-rsa "$CAI"
 # Ed25519 all the way (the in-process test server's chain).

@@ -554,8 +554,8 @@ impl<'a> Certificate<'a> {
                 }
                 let value = ext.read(der::OCTET_STRING)?;
                 ext.end()?;
-                if seen.contains(&oid) {
-                    return None; // RFC 5280 4.2: at most one instance of each
+                if seen.len() >= 64 || seen.contains(&oid) {
+                    return None; // RFC 5280 4.2: at most one instance of each (and no absurd number of them)
                 }
                 seen.push(oid);
                 extension(&mut c, oid, critical, value)?;

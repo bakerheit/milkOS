@@ -157,4 +157,15 @@ mod tests {
             assert_eq!(p, t, "{name}: {p}/{t}");
         }
     }
+
+    /// RSA public exponents beyond 33 bits are refused (they'd only make verifying slow).
+    #[test]
+    fn rsa_exponent_cap() {
+        let mut n = alloc::vec![0xffu8; 256];
+        n[255] = 0xf1;
+        assert!(super::rsa::PublicKey::new(&n, &[1, 0, 1]).is_some());
+        assert!(super::rsa::PublicKey::new(&n, &[1, 0xff, 0xff, 0xff, 0xff]).is_some());
+        assert!(super::rsa::PublicKey::new(&n, &[2, 0, 0, 0, 1]).is_none());
+        assert!(super::rsa::PublicKey::new(&n, &n[..255]).is_none());
+    }
 }

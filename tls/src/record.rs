@@ -45,7 +45,13 @@ pub struct RecordLayer<T: Transport> {
     pub eof: bool,
     /// The handshake is over (EOF without close_notify is now truncation).
     pub established: bool,
+    /// Records in a row that carried nothing (change_cipher_spec, user_canceled, empty
+    /// application data): a server dribbling them can't keep us busy forever.
+    skipped: usize,
 }
+
+/// Most content-free records in a row.
+const MAX_SKIPPED: usize = 32;
 
 impl<T: Transport> RecordLayer<T> {
     pub fn new(transport: T) -> RecordLayer<T> {
@@ -59,6 +65,7 @@ impl<T: Transport> RecordLayer<T> {
             write_version: 0x0301,
             eof: false,
             established: false,
+            skipped: 0,
         }
     }
 
@@ -104,6 +111,10 @@ impl<T: Transport> RecordLayer<T> {
             let header: [u8; 5] = [self.rbuf[0], self.rbuf[1], self.rbuf[2], self.rbuf[3], self.rbuf[4]];
             let mut body: Vec<u8> = self.rbuf[5..5 + len].to_vec();
             self.rbuf.drain(..5 + len);
+            self.skipped += 1;
+            if self.skipped > MAX_SKIPPED {
+                return Err(TlsError::unexpected("too many records with nothing in them"));
+            }
 
             if ctype == CT_CHANGE_CIPHER_SPEC {
                 if !self.allow_ccs || body != [1] {
@@ -156,6 +167,7 @@ impl<T: Transport> RecordLayer<T> {
                         return Err(TlsError::proto(Alert::RECORD_OVERFLOW, "a handshake message was too long"));
                     }
                     self.hs.extend_from_slice(&data);
+                    self.skipped = 0;
                     return Ok(Incoming::Handshake);
                 }
                 CT_ALERT => {
@@ -169,9 +181,14 @@ impl<T: Transport> RecordLayer<T> {
                     if a == Alert::CLOSE_NOTIFY {
                         self.eof = true;
                     }
+                    self.skipped = 0;
                     return Ok(Incoming::Alert(a));
                 }
-                CT_APPLICATION_DATA => return Ok(Incoming::ApplicationData(data)),
+                CT_APPLICATION_DATA if data.is_empty() => continue,
+                CT_APPLICATION_DATA => {
+                    self.skipped = 0;
+                    return Ok(Incoming::ApplicationData(data));
+                }
                 CT_CHANGE_CIPHER_SPEC => return Err(TlsError::unexpected("a protected change_cipher_spec")),
                 _ => return Err(TlsError::unexpected("a record of unknown type")),
             }

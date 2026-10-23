@@ -177,6 +177,25 @@ fn name_constraints() {
         check(&["leaf-nc-excluded", "int-nc"], "www.allowed.example"),
         Err(CertError::NameConstraints)
     );
+    // The same with a trailing dot ("*.allowed.example.") must not slip past the exclusion.
+    assert_eq!(check(&["leaf-nc-dot", "int-nc"], "bad.allowed.example"), Err(CertError::NameConstraints));
+    // iPAddress is one form: an IPv6 name is outside IPv4-only permitted subtrees.
+    assert_eq!(check(&["leaf-nc-ipv6", "int-nc"], "www.allowed.example"), Err(CertError::NameConstraints));
+}
+
+#[test]
+fn constraint_work_is_bounded() {
+    use crate::x509::Certificate;
+    let d = fixture("leaf-nc-ok");
+    let c = Certificate::parse(&d).unwrap();
+    let nc_der = fixture("int-nc");
+    let nc = Certificate::parse(&nc_der).unwrap().name_constraints.unwrap();
+    let mut budget = 2;
+    assert!(!crate::name::within_constraints(nc, &c, &mut budget));
+    assert_eq!(budget, 0);
+    let mut budget = 1000;
+    assert!(crate::name::within_constraints(nc, &c, &mut budget));
+    assert!(budget < 1000);
 }
 
 #[test]

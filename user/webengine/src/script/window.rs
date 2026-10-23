@@ -730,7 +730,7 @@ const OWN_PROTO_TAGS: &[Atom] = &[
 
 // ---- window's natives -----------------------------------------------------------------------
 
-fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResult<Value> {
+pub(super) fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResult<Value> {
     let f = arg(a, 0);
     let f = if r.is_callable(f) {
         f
@@ -754,7 +754,7 @@ fn timer_add(b: &Rc<Bridge>, r: &mut Realm, a: &[Value], repeat: bool) -> JsResu
     Ok(Value::int(id as i32))
 }
 
-fn timer_clear(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
+pub(super) fn timer_clear(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
     let id = r.to_int32(arg(a, 0))?;
     if id <= 0 {
         return Ok(Value::UNDEFINED);
@@ -1374,6 +1374,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     install_location(b, r, g)?;
     install_history(b, r, g)?;
     install_navigator(b, r, g)?;
+    super::net::install(b, r)?;
 
     // Sizes and scrolling.
     fn vp_css(b: &Bridge, which: u8) -> f64 {

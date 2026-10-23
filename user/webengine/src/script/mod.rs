@@ -19,6 +19,8 @@ pub mod timers;
 mod bridge;
 mod events_js;
 mod forms_js;
+mod net;
+mod netbytes;
 mod nodes;
 mod window;
 
@@ -99,6 +101,29 @@ impl Runtime {
         core::mem::take(&mut self.b.st.borrow_mut().requests)
     }
 
+    pub fn take_net(&mut self) -> Vec<NetOut> {
+        core::mem::take(&mut self.b.st.borrow_mut().net.out)
+    }
+
+    pub fn net_pending(&self) -> usize {
+        self.b.st.borrow().net.pending()
+    }
+
+    /// An answer for request `id`: a task of its own.
+    pub fn net_event(
+        &mut self,
+        page: &mut Page,
+        host: &mut dyn ScriptHost,
+        id: u32,
+        ev: NetEvent,
+    ) -> bool {
+        self.entry(page, host, |b, r| {
+            net::deliver(b, r, id, ev);
+            true
+        })
+        .unwrap_or(false)
+    }
+
     pub fn take_console(&mut self) -> Vec<ConsoleLine> {
         let mut st = self.b.st.borrow_mut();
         st.console_bytes = 0;
@@ -131,6 +156,7 @@ impl Runtime {
         st.listeners.clear();
         st.handlers.clear();
         let cbs = core::mem::take(&mut st.cbs);
+        let net_pins = st.net.clear();
         let reason = st.stop_reason.clone();
         let already = st.stats.stopped;
         st.stats.stopped = true;
@@ -144,6 +170,9 @@ impl Runtime {
         if let Some(r) = self.realm.as_mut() {
             r.clear_jobs();
             r.set_interrupt(None);
+            for p in net_pins {
+                r.unpin(p);
+            }
             for (_, (f, a)) in cbs {
                 r.unpin(f);
                 if let Some(a) = a {
@@ -202,6 +231,12 @@ impl Runtime {
             drop(st);
             if top {
                 realm.release_temps();
+                // Byte buffers the network API made weigh nothing in the script heap: collect
+                // now and then so the dead ones are given back.
+                let want = b.bytes.get().is_some_and(|x| x.store.borrow_mut().want_gc());
+                if want {
+                    realm.gc();
+                }
             }
             out
         };

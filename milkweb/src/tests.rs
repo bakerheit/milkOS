@@ -1527,3 +1527,93 @@ fn http_progress_stop_and_bigger_limit() {
     .unwrap();
     assert_eq!(r.body.len(), 40_000);
 }
+
+// ---- other methods, no-follow redirects and the reason in the head (script requests) ---------
+
+#[test]
+fn http_put_with_body_and_head_without() {
+    let mut net = FakeNet::new()
+        .serve("a.test", answer(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+        .serve(
+            "a.test",
+            answer(b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\nContent-Type: text/plain\r\n\r\n"),
+        )
+        .serve("a.test", answer(b"HTTP/1.1 204 No Content\r\n\r\n"));
+    let mut put = http::Request::get(&url("http://a.test/item/1"));
+    put.verb = Some("PUT".into());
+    put.body = b"{\"a\":1}".to_vec();
+    put.content_type = "application/json".into();
+    let r = http::fetch(&mut net, &put, &Options::default(), &mut http::NoHooks).unwrap();
+    assert_eq!(r.body, b"ok");
+    let mut head = http::Request::get(&url("http://a.test/item/1"));
+    head.verb = Some("HEAD".into());
+    let r = http::fetch(&mut net, &head, &Options::default(), &mut http::NoHooks).unwrap();
+    assert_eq!(r.status, 200);
+    assert!(r.body.is_empty(), "a HEAD answer has no body, whatever Content-Length says");
+    // DELETE without a body: no Content-Length; PATCH without one: Content-Length 0.
+    let mut del = http::Request::get(&url("http://a.test/item/1"));
+    del.verb = Some("DELETE".into());
+    http::fetch(&mut net, &del, &Options::default(), &mut http::NoHooks).unwrap();
+    let reqs = &net.log.borrow().requests;
+    assert!(reqs[0].starts_with("PUT /item/1 HTTP/1.1\r\n"), "{}", reqs[0]);
+    assert!(reqs[0].contains("\r\nContent-Type: application/json\r\n"));
+    assert!(reqs[0].contains("\r\nContent-Length: 7\r\n"));
+    assert!(reqs[0].ends_with("\r\n\r\n{\"a\":1}"));
+    assert!(reqs[1].starts_with("HEAD /item/1 HTTP/1.1\r\n"));
+    assert!(reqs[2].starts_with("DELETE /item/1 HTTP/1.1\r\n"));
+    assert!(!reqs[2].contains("Content-Length"), "{}", reqs[2]);
+    let mut patch = http::Request::get(&url("http://a.test/p"));
+    patch.verb = Some("PATCH".into());
+    assert!(http::request_head(&patch, None, &Options::default()).contains("Content-Length: 0\r\n"));
+}
+
+#[test]
+fn http_redirects_can_be_left_to_the_caller() {
+    let mut net = FakeNet::new().serve(
+        "a.test",
+        answer(b"HTTP/1.1 302 Found\r\nLocation: http://b.test/x\r\nSet-Cookie: s=1\r\nContent-Length: 0\r\n\r\n"),
+    );
+    let o = Options {
+        follow_redirects: false,
+        ..Options::default()
+    };
+    let mut h = Rec::default();
+    let r = http::fetch(&mut net, &http::Request::get(&url("http://a.test/go")), &o, &mut h).unwrap();
+    assert_eq!(r.status, 302);
+    assert_eq!(r.header("location"), Some("http://b.test/x"));
+    assert!(r.redirects.is_empty());
+    assert_eq!(net.log.borrow().requests.len(), 1, "nothing was followed");
+    assert_eq!(h.seen.len(), 1);
+}
+
+#[test]
+fn http_response_head_hook_sees_the_reason_and_can_set_the_limit() {
+    struct R {
+        heads: Vec<(u16, String)>,
+    }
+    impl http::Hooks for R {
+        fn response_head(
+            &mut self,
+            _u: &Url,
+            status: u16,
+            reason: &str,
+            _h: &[(String, String)],
+        ) -> Option<usize> {
+            self.heads.push((status, reason.to_string()));
+            Some(3)
+        }
+    }
+    let mut net = FakeNet::new().serve(
+        "a.test",
+        answer(b"HTTP/1.1 418 I'm a teapot\r\nContent-Length: 10\r\n\r\n0123456789"),
+    );
+    let mut h = R { heads: Vec::new() };
+    let r = http::fetch(
+        &mut net,
+        &http::Request::get(&url("http://a.test/t")),
+        &Options::default(),
+        &mut h,
+    );
+    assert_eq!(h.heads, [(418, "I'm a teapot".to_string())]);
+    assert!(matches!(r, Err(f) if matches!(f.error, http::Error::TooBig(3))));
+}

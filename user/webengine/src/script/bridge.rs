@@ -170,6 +170,8 @@ pub struct State {
     pub write_after: (NodeId, NodeId),
     /// Sibling positions for selector matching, by DOM generation.
     pub positions: Option<(u64, alloc::rc::Rc<(Vec<u32>, Vec<u32>)>)>,
+    /// Network requests from scripts (script/net.rs).
+    pub net: super::net::NetState,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -182,6 +184,8 @@ pub struct Bridge {
     pub st: RefCell<State>,
     pub classes: OnceCell<Classes>,
     pub protos: OnceCell<Protos>,
+    /// The byte buffers of the network API (script/netbytes.rs).
+    pub bytes: OnceCell<super::netbytes::Bytes>,
 }
 
 impl Bridge {
@@ -222,9 +226,11 @@ impl Bridge {
                 template_content: BTreeMap::new(),
                 write_after: (NONE, NONE),
                 positions: None,
+                net: super::net::NetState::default(),
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),
+            bytes: OnceCell::new(),
         }
     }
 

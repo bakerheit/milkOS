@@ -87,6 +87,10 @@ pub struct Options {
     pub decompress: bool,
     /// Keep the connection open for a redirect to the same scheme, host and port.
     pub keep_alive: bool,
+    /// Follow redirects (the default). False: a 301/302/303/307/308 answer comes back as the
+    /// [`Response`] it is, for a caller that applies its own rules to each hop (the Browser's
+    /// script requests do).
+    pub follow_redirects: bool,
 }
 
 impl Default for Options {
@@ -101,6 +105,7 @@ impl Default for Options {
             accept: String::from("text/html, text/plain;q=0.9, */*;q=0.5"),
             decompress: true,
             keep_alive: false,
+            follow_redirects: true,
         }
     }
 }
@@ -272,9 +277,26 @@ pub struct Request {
     /// More headers, sent as given (Referer, ...). Names and values with a CR or LF in them
     /// are dropped, so nothing can be smuggled into the request.
     pub headers: Vec<(String, String)>,
+    /// A method other than GET and POST (PUT, DELETE, PATCH, OPTIONS, HEAD, any token), as
+    /// written; it replaces `method` on the request line. The body (and `content_type`) go
+    /// out with it, whatever the method. HEAD answers carry no body.
+    pub verb: Option<String>,
 }
 
 impl Request {
+    /// The method as it goes on the request line.
+    pub fn method_name(&self) -> &str {
+        self.verb.as_deref().unwrap_or_else(|| self.method.name())
+    }
+
+    /// Does the request line get a Content-Length (and the body)? POST, PUT and PATCH always;
+    /// others when there is a body.
+    fn sends_length(&self) -> bool {
+        self.method == Method::Post
+            || !self.body.is_empty()
+            || matches!(self.verb.as_deref(), Some("POST" | "PUT" | "PATCH"))
+    }
+
     pub fn get(url: &Url) -> Request {
         Request {
             method: Method::Get,
@@ -282,6 +304,7 @@ impl Request {
             body: Vec::new(),
             content_type: String::new(),
             headers: Vec::new(),
+            verb: None,
         }
     }
 
@@ -293,6 +316,7 @@ impl Request {
             body,
             content_type: String::from("application/x-www-form-urlencoded"),
             headers: Vec::new(),
+            verb: None,
         }
     }
 }
@@ -312,6 +336,18 @@ pub trait Hooks {
     fn response(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> Option<usize> {
         let _ = (url, status, headers);
         None
+    }
+    /// Like [`Hooks::response`], with the reason phrase too (asked first; the default asks
+    /// `response`).
+    fn response_head(
+        &mut self,
+        url: &Url,
+        status: u16,
+        reason: &str,
+        headers: &[(String, String)],
+    ) -> Option<usize> {
+        let _ = reason;
+        self.response(url, status, headers)
     }
     /// `got` body bytes so far (as they come over the wire), of `total` if the server said.
     fn progress(&mut self, got: usize, total: Option<usize>) {
@@ -653,7 +689,7 @@ pub fn request_head(req: &Request, cookie: Option<&str>, o: &Options) -> String 
     let url = &req.url;
     let mut s = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: {}\r\n",
-        req.method.name(),
+        req.method_name(),
         url.path,
         url.host_port(),
         o.user_agent,
@@ -685,7 +721,7 @@ pub fn request_head(req: &Request, cookie: Option<&str>, o: &Options) -> String 
         s.push_str(c);
         s.push_str("\r\n");
     }
-    if req.method == Method::Post {
+    if req.sends_length() {
         if header_ok(&req.content_type) && !req.content_type.is_empty() {
             s.push_str("Content-Type: ");
             s.push_str(&req.content_type);
@@ -752,7 +788,7 @@ fn exchange(
 ) -> Result<(Option<Answer>, After), Error> {
     let cookie = hooks.cookie(&req.url, req.method);
     let mut out = request_head(req, cookie.as_deref(), o).into_bytes();
-    if req.method == Method::Post {
+    if req.sends_length() {
         out.extend_from_slice(&req.body);
     }
     write_all(conn.t.as_mut(), &out)?;
@@ -777,9 +813,14 @@ fn exchange(
         }
         let max = r
             .hooks
-            .response(&req.url, status, &headers)
+            .response_head(&req.url, status, &reason, &headers)
             .unwrap_or(o.max_body);
-        let (body, after) = read_body(&mut r, net, status, &headers, max)?;
+        // HEAD: the headers describe a body that is not sent.
+        let (body, after) = if req.verb.as_deref() == Some("HEAD") {
+            (Vec::new(), After::Close)
+        } else {
+            read_body(&mut r, net, status, &headers, max)?
+        };
         let after = if !o.keep_alive || has_token(&headers, "connection", "close") {
             After::Close
         } else {
@@ -852,6 +893,7 @@ pub fn fetch(
             conn = None;
         }
         if is_redirect(status)
+            && o.follow_redirects
             && let Some(loc) = header(&headers, "location")
         {
             let next = match url.join(loc) {

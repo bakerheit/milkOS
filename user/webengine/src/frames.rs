@@ -71,6 +71,8 @@ pub(crate) struct Slot {
     pub doc: Option<Box<crate::Document>>,
     /// The viewport the document was last laid out in.
     pub vp: Option<Viewport>,
+    /// A `#fragment` to scroll to once the document has its first layout.
+    pub pending_fragment: Option<String>,
 }
 
 impl Slot {
@@ -325,6 +327,7 @@ impl Frames {
                 content: (0, 0),
                 doc: None,
                 vp: None,
+                pending_fragment: None,
             });
             self.version += 1;
         }
@@ -454,6 +457,7 @@ pub(crate) fn attach(
     s.scroll = (0, 0);
     s.content = (0, 0);
     s.vp = None;
+    s.pending_fragment = None;
     if frames.focused == id {
         frames.focused = FrameId::TOP;
     }
@@ -814,6 +818,12 @@ fn layout_level(
             frames.sync_doc(doc.page.frame, &mut doc.page);
         }
         layout_level(frames, id, &doc.page, &child_vp, m);
+        if let Some(frag) = frames.slot_mut(id).and_then(|s| s.pending_fragment.take())
+            && let Some(y) = doc.page.fragment_y(&frag)
+            && let Some(s) = frames.slot_mut(id)
+        {
+            s.scroll.1 = y;
+        }
         // Its own frames merged in, if it has any.
         let sig = signature(frames, id, &doc.page);
         let stale = doc.merged.as_ref().is_none_or(|mg| mg.sig != sig);
@@ -973,11 +983,15 @@ fn scroll_by(frames: &mut Frames, id: FrameId, dx: i32, dy: i32) -> (i32, i32) {
     if s.attrs.no_scroll {
         return (dx, dy);
     }
-    let vp = s.vp.unwrap_or(Viewport::new(s.rect.w, s.rect.h));
-    let (mx, my) = (
-        (s.content.0 - vp.width).max(0),
-        (s.content.1 - vp.height).max(0),
-    );
+    // Before the first layout the size of the content is not known: the offset is kept as asked
+    // and clamped when the document is laid out (a restored scroll position, say).
+    let (mx, my) = match s.vp {
+        Some(vp) => (
+            (s.content.0 - vp.width).max(0),
+            (s.content.1 - vp.height).max(0),
+        ),
+        None => (i32::MAX, i32::MAX),
+    };
     let nx = s.scroll.0.saturating_add(dx).clamp(0, mx);
     let ny = s.scroll.1.saturating_add(dy).clamp(0, my);
     let (ux, uy) = (nx - s.scroll.0, ny - s.scroll.1);
@@ -1066,12 +1080,29 @@ fn set_slot_scroll(frames: &mut Frames, id: FrameId, x: i32, y: i32) {
 }
 
 pub(crate) fn fragment(top: &mut crate::Document, id: FrameId, frag: &str) -> bool {
-    let Some(y) = top.frame_doc(id).and_then(|d| d.page.fragment_y(frag)) else {
+    if id.is_top() {
+        return top
+            .frame_doc(id)
+            .and_then(|d| d.page.fragment_y(frag))
+            .is_some();
+    }
+    let Some(frames) = top.frames.as_mut() else {
         return false;
     };
-    if id.is_top() {
+    let Some(s) = frames.slot_mut(id) else {
+        return false;
+    };
+    if s.doc.is_none() {
+        return false;
+    }
+    if s.vp.is_none() {
+        // Not laid out yet: the element can't be found until it is. Do it then.
+        s.pending_fragment = Some(String::from(frag));
         return true;
     }
+    let Some(y) = s.doc.as_ref().and_then(|d| d.page.fragment_y(frag)) else {
+        return false;
+    };
     set_scroll(top, id, 0, y);
     true
 }

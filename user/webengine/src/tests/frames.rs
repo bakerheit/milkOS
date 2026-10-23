@@ -1511,3 +1511,40 @@ fn hostile_attribute_values_are_bounded() {
         let _ = d.frame_slots();
     }
 }
+
+#[test]
+fn scroll_and_fragment_asked_before_the_first_layout_are_kept() {
+    let mut body = String::from("<body style='margin:0'>");
+    for i in 0..40 {
+        body.push_str(&alloc::format!(
+            "<p style='margin:0;height:20px' id=r{i}>row{i}</p>"
+        ));
+    }
+    let mut d = top(&alloc::format!(
+        "{FLAT}<iframe width=100 height=100 style='border:0'></iframe><iframe width=100 height=100 style='border:0'></iframe><iframe width=100 height=100 style='border:0'></iframe>"
+    ));
+    let ids: Vec<FrameId> = d.frame_slots().iter().map(|s| s.id).collect();
+    for id in &ids {
+        assert!(d.attach_frame(*id, child(&body), None));
+    }
+    // A restored position and a fragment, before anything is laid out.
+    assert_eq!(d.set_frame_scroll(ids[0], 0, 130), (0, 130));
+    assert!(d.frame_fragment(ids[1], "r12"));
+    assert!(d.frame_fragment(ids[2], "no-such-row"), "can't tell yet");
+    lay(&mut d);
+    assert_eq!(d.frame_scroll(ids[0]), Some((0, 130)));
+    assert_eq!(d.frame_scroll(ids[1]), Some((0, 240)));
+    assert_eq!(d.frame_scroll(ids[2]), Some((0, 0)));
+    // Past the end, it is clamped at the first layout.
+    let mut d = top(&alloc::format!(
+        "{FLAT}<iframe width=100 height=100 style='border:0'></iframe>"
+    ));
+    let id = d.frame_slots()[0].id;
+    assert!(d.attach_frame(id, child(&body), None));
+    d.set_frame_scroll(id, 0, 99999);
+    lay(&mut d);
+    assert_eq!(d.frame_scroll(id), Some((0, 700)));
+    // And a fragment of a frame that is already laid out is applied at once.
+    assert!(d.frame_fragment(id, "r3"));
+    assert_eq!(d.frame_scroll(id), Some((0, 60)));
+}

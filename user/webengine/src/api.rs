@@ -2094,7 +2094,9 @@ impl Document {
     }
 
     /// Scroll frame `id` to the element named by `fragment` (as [`Document::fragment_y`]
-    /// does for the page); true if it was found.
+    /// does for the page); true if it was found. Before the frame's first layout nothing can
+    /// be found: the fragment is kept and applied then (and true says only that there is a
+    /// document). The same goes for [`Document::set_frame_scroll`]'s offset.
     pub fn frame_fragment(&mut self, id: FrameId, fragment: &str) -> bool {
         crate::frames::fragment(self, id, fragment)
     }

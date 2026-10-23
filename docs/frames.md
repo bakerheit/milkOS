@@ -45,7 +45,9 @@ is the child.
 - **Scrolling**: per frame offsets kept by the engine, clamped to the content (`scrolling=no`
   pins them). The wheel scrolls the innermost frame under the pointer, passes what is left to its
   parent, and returns what the page should scroll by. `reveal` scrolls a frame and the frames
-  above it to show a rectangle (find, fragments, focus, `scrollIntoView`).
+  above it to show a rectangle (find, fragments, focus, `scrollIntoView`). An offset or a fragment
+  asked for before the frame's first layout (a restored position, `page.html#part`) is kept and
+  applied at that layout.
 - **Focus**: each document has its own; the table keeps which frame has the keyboard;
   `focus_order` is the Tab order across all frames, a frame's controls at its `<iframe>`.
 - **Find and text**: matches in frames come in document order with the frame they are in, the

@@ -574,12 +574,15 @@ impl App {
 fn main(args: &rt::Args) -> i32 {
     // Before anything else: lock down what a bad picture could reach.
     let path = args.get(1);
+    // The system font: read now, and /System/Fonts stays readable for families a character
+    // needs later.
+    appkit::text::preload();
     let spec = match path {
         Some(p) => format!(
-            "fs={}:r fs=/dev/wm:r net=none spawn=0 clipboard=0",
+            "fs={}:r fs=/dev/wm:r fs=/System/Fonts:r net=none spawn=0 clipboard=0",
             dir_of(p)
         ),
-        None => String::from("fs=/dev/wm:r net=none spawn=0 clipboard=0"),
+        None => String::from("fs=/dev/wm:r fs=/System/Fonts:r net=none spawn=0 clipboard=0"),
     };
     if let Err(e) = sys::sandbox(&spec) {
         rt::println!("preview: can't sandbox myself: {}", e.name());

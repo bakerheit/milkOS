@@ -60,7 +60,8 @@ impl App {
         let mut y = BAR + 14;
         for l in self.lines.iter().take(((H - BAR - 54) / 18) as usize) {
             let s: String = l.chars().take(((W - 32) / 8) as usize).collect();
-            w.text(16, y, &s, gui::ESPRESSO);
+            // The file's text is monospace content.
+            w.mono(16, y, &s, gui::ESPRESSO);
             y += 18;
         }
         w.fill(0, H - 34, W, 1, gui::SAND);
@@ -104,6 +105,8 @@ impl App {
 }
 
 fn main(_args: &rt::Args) -> i32 {
+    // The system font's files, read while we still may (the sandbox has no file system).
+    gui::text::preload();
     // Before anything else: no file system, no network, no spawning, no clipboard.
     if let Err(e) = sys::sandbox("fs-none net=none spawn=0 clipboard=0") {
         println!("peek: can't sandbox myself: {}", e.name());

@@ -2,7 +2,9 @@
 //!
 //! The apps draw their whole window each time (immediate mode) and record clickable regions in a
 //! [`Hits`] list as they go; a click is looked up there and handled by id. All colours come from
-//! [`Theme`], so the dark theme is automatic. Sizes follow docs/ui-concepts/SPEC.md.
+//! [`Theme`], so the dark theme is automatic. Sizes follow docs/ui-concepts/SPEC.md. Text is the
+//! system font ([`text`]) in the family Settings chooses; Unifont only where an app asks for
+//! monospace (docs/ui-concepts/SPEC-FONT-ROLLOUT.md).
 
 #![no_std]
 
@@ -15,6 +17,11 @@ pub mod widgets;
 
 pub use field::Field;
 pub use theme::Theme;
+
+/// The system font for appkit apps (re-exported from `gui::text`; see there for the API):
+/// `Window::text`/`bold`/`text_x`/`bold_x` and the widgets draw with it, `Window::mono*` and
+/// `widgets::mono_r`/`fit_mono` are the monospace opt-in.
+pub use gui::text;
 
 /// A rectangle in window coordinates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -170,17 +170,17 @@ impl App {
                 &widgets::fit(&p.name, if has_caps { 190 } else { 240 }),
                 th.espresso,
             );
-            text_r(win, cols[1].3, y + 6, &format!("{}", p.pid), th.espresso, 1);
+            // The live number columns are monospace so they don't jitter.
+            widgets::mono_r(win, cols[1].3, y + 6, &format!("{}", p.pid), th.espresso);
             win.text(cols[2].2, y + 6, state_word(p.state), th.espresso);
-            text_r(win, cols[3].3, y + 6, &fmt::pct10(p.cpu10), th.espresso, 1);
-            text_r(win, cols[4].3, y + 6, &fmt::mb(p.rss_kb), th.espresso, 1);
-            text_r(
+            widgets::mono_r(win, cols[3].3, y + 6, &fmt::pct10(p.cpu10), th.espresso);
+            widgets::mono_r(win, cols[4].3, y + 6, &fmt::mb(p.rss_kb), th.espresso);
+            widgets::mono_r(
                 win,
                 cols[5].3,
                 y + 6,
                 &format!("{}", p.threads),
                 th.espresso,
-                1,
             );
             if has_caps {
                 let (label, fill) = match sandbox_label(p) {

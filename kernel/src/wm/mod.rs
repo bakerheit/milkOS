@@ -983,11 +983,12 @@ impl Desktop {
             Mode::Spaces => "spaces",
         };
         let mut s = alloc::format!(
-            "mode {mode}\nlocked {}\nspace {} of {}\nfocus {}\n",
+            "mode {mode}\nlocked {}\nspace {} of {}\nfocus {}\nfont {}\n",
             if self.locked() { "yes" } else { "no" },
             self.space + 1,
             self.nspaces,
-            self.focused_window().map_or("none", |w| w.contents.title())
+            self.focused_window().map_or("none", |w| w.contents.title()),
+            crate::sysfont::FAMILIES[crate::sysfont::current()].key
         );
         for w in &self.windows {
             let r = w.rect;

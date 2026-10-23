@@ -22,6 +22,9 @@ milkweb = { path = "../milkweb" }
 # The rules behind files and the Trash, shared with user space (pure, host-tested):
 # <repo>/user/filekit.
 filekit = { path = "../user/filekit" }
+# The system fonts' blob format, fallback and measuring, shared with user space (appkit's
+# text; pure, host-tested): <repo>/user/fontkit.
+fontkit = { path = "../user/fontkit" }
 
 [features]
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.

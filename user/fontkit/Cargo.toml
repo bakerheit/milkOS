@@ -1,0 +1,14 @@
+[package]
+name = "fontkit"
+# Spelled out (not inherited from user/Cargo.toml): the kernel depends on it from outside
+# this workspace.
+version = "0.0.1"
+edition = "2024"
+
+# The system fonts' glyph blobs (kernel/src/sysfont/*.font, made by scripts/gen_sysfont.py)
+# and text measuring with fallback across the families, a fold-to-ASCII table and a box for
+# the rest. Pure, so the kernel (UI text) and user space (appkit::text, which reads
+# /System/Fonts/<key>.font) share it and the tests run on the host:
+# `scripts/fontkit-test.sh`.
+[lib]
+bench = false

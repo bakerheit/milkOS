@@ -7,7 +7,7 @@
 
 use crate::{Field, Hits, Rect, Theme};
 use alloc::string::String;
-use gui::{Color, Window, str_width};
+use gui::{Color, Window, bold_width, str_width};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -34,6 +34,18 @@ pub fn fit(s: &str, max_w: i32) -> String {
     if str_width(s, 1) <= max_w {
         return String::from(s);
     }
+    let f = gui::text::Font::ui(1, gui::text::Weight::Regular);
+    let mut o = String::from(&s[..f.fit(s, (max_w - str_width("~", 1)).max(0))]);
+    o.push('~');
+    o
+}
+
+/// Monospace text (Unifont cells) cut to `max_w` pixels, ending in "~" if shortened: for code
+/// and logs.
+pub fn fit_mono(s: &str, max_w: i32) -> String {
+    if gui::mono_width(s, 1) <= max_w {
+        return String::from(s);
+    }
     let keep = ((max_w / 8) - 1).max(0) as usize;
     let mut o: String = s.chars().take(keep).collect();
     o.push('~');
@@ -50,14 +62,28 @@ pub fn text_r(win: &mut Window, rx: i32, y: i32, s: &str, c: Color, scale: i32) 
     win.text_x(rx - str_width(s, scale), y, s, c, scale);
 }
 
-/// Bold text at a size (the second copy 1px right; at 2x and up, `scale` px).
+/// Bold text at a size: the system font's bold (headings are scale 2, big numbers 4).
 pub fn bold_x(win: &mut Window, x: i32, y: i32, s: &str, c: Color, scale: i32) {
-    win.text_x(x, y, s, c, scale);
-    win.text_x(x + scale.max(1), y, s, c, scale);
+    win.bold_x(x, y, s, c, scale);
 }
 
 pub fn bold_c(win: &mut Window, cx: i32, y: i32, s: &str, c: Color, scale: i32) {
-    bold_x(win, cx - str_width(s, scale) / 2, y, s, c, scale);
+    bold_x(win, cx - bold_width(s, scale) / 2, y, s, c, scale);
+}
+
+/// Bold text ending at `rx`.
+pub fn bold_r(win: &mut Window, rx: i32, y: i32, s: &str, c: Color, scale: i32) {
+    bold_x(win, rx - bold_width(s, scale), y, s, c, scale);
+}
+
+/// A section label (SPEC: 13 px, uppercase, cocoa): "LISTS", "VOLUMES".
+pub fn section(win: &mut Window, th: &Theme, x: i32, y: i32, s: &str) -> i32 {
+    win.text(x, y, &s.to_uppercase(), th.cocoa)
+}
+
+/// Monospace text ending at `rx` (number columns that must not jitter).
+pub fn mono_r(win: &mut Window, rx: i32, y: i32, s: &str, c: Color) {
+    win.mono(rx - gui::mono_width(s, 1), y, s, c);
 }
 
 /// A button in the SPEC's kinds. `pill` is the small 24px fully rounded one; otherwise the
@@ -95,7 +121,7 @@ pub fn button(
 
 /// The width a button needs for its label (min 88 for dialog buttons).
 pub fn button_w(label: &str, pill: bool) -> i32 {
-    let w = str_width(label, 1) + if pill { 28 } else { 24 };
+    let w = bold_width(label, 1) + if pill { 28 } else { 24 };
     if pill { w } else { w.max(88) }
 }
 
@@ -112,7 +138,7 @@ pub fn segmented(
     base: u32,
 ) -> i32 {
     let pad = 14;
-    let widths: alloc::vec::Vec<i32> = labels.iter().map(|l| str_width(l, 1) + 2 * pad).collect();
+    let widths: alloc::vec::Vec<i32> = labels.iter().map(|l| bold_width(l, 1) + 2 * pad).collect();
     let total: i32 = widths.iter().sum::<i32>() + 4;
     win.rrect(x, y, total, 28, 14, th.oat);
     let mut cx = x + 2;
@@ -215,14 +241,21 @@ pub fn field(
     if f.text.is_empty() && !placeholder.is_empty() {
         win.text(r.x + 8, ty, &fit(placeholder, max_w), th.cocoa);
     } else {
-        // Scroll so the caret stays visible.
-        let chars: alloc::vec::Vec<char> = f.text.chars().collect();
-        let fit_n = (max_w / 8).max(1) as usize;
-        let start = f.cur.saturating_sub(fit_n.saturating_sub(1));
-        let shown: String = chars.iter().skip(start).take(fit_n).collect();
-        win.text(r.x + 8, ty, &shown, th.espresso);
+        // Scroll so the caret stays visible: the longest end of the text before the caret
+        // that fits, then as much after it as fits.
+        let font = gui::text::Font::ui(1, gui::text::Weight::Regular);
+        let caret_at = f
+            .text
+            .char_indices()
+            .nth(f.cur)
+            .map_or(f.text.len(), |(i, _)| i);
+        let before = font.tail(&f.text[..caret_at], max_w - 2);
+        let start = caret_at - before.len();
+        let rest = &f.text[start..];
+        let shown = &rest[..font.fit(rest, max_w)];
+        win.text(r.x + 8, ty, shown, th.espresso);
         if focused && caret_on {
-            let cx = r.x + 8 + (f.cur - start) as i32 * 8;
+            let cx = r.x + 8 + font.width(before);
             win.fill(cx, ty, 2, 16, th.espresso);
         }
     }

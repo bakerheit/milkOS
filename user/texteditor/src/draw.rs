@@ -233,9 +233,10 @@ impl App {
                 }
                 let color = role_color(&th, role);
                 let x = x0 + (i - hs) as i32 * CELL_W;
-                self.win.text(x, y + 1, &run, color);
+                // The body is monospace (columns carry meaning): Unifont cells.
+                self.win.mono(x, y + 1, &run, color);
                 if matches!(role, Role::Heading | Role::Strong) {
-                    self.win.text(x + 1, y + 1, &run, color);
+                    self.win.mono(x + 1, y + 1, &run, color);
                 }
                 i = j;
             }
@@ -248,7 +249,7 @@ impl App {
                     th.cocoa
                 };
                 self.win
-                    .text(gutter - 10 - str_width(&num, 1), y + 1, &num, col);
+                    .mono(gutter - 10 - gui::mono_width(&num, 1), y + 1, &num, col);
             }
             // Caret.
             if r == cur_row

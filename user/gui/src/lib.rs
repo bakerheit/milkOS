@@ -3,6 +3,11 @@
 //! [`Window::pixels`] (or with the helpers here), call [`Window::commit`], and read input with
 //! [`Window::event`].
 //!
+//! Text: [`Window::text`], [`Window::bold`], [`Window::text_x`], [`Window::bold_x`] and
+//! [`str_width`] are the system font (the family Settings chooses, see [`text`]), with the same
+//! 16-pixel line as before; [`Window::mono`], [`Window::mono_x`] and [`mono_width`] are Unifont
+//! 8x16 cells, for monospace content only (code, logs, grids whose columns carry meaning).
+//!
 //! ```ignore
 //! let mut w = gui::Window::new("Hello", 320, 200)?;
 //! w.fill(0, 0, 320, 200, gui::MILK);
@@ -16,6 +21,8 @@
 extern crate alloc;
 
 use rt::sys;
+
+pub mod text;
 
 mod font {
     #![allow(dead_code)]
@@ -455,47 +462,48 @@ impl Window {
         self.disc(x1, y1, r, c);
     }
 
-    /// Text in Unifont 8x16 (the kernel's font), `scale`x. Returns the end x.
-    pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32) -> i32 {
-        let stride = self.w as usize;
+    /// Text in `f` with the top of its line box at `y`. Returns the end x.
+    pub fn text_f(&mut self, x: i32, y: i32, s: &str, c: Color, f: text::Font) -> i32 {
         let (w, h) = (self.w, self.h);
-        let px = self.pixels();
-        let mut cx = x;
-        for ch in s.chars() {
-            let cp = ch as u32;
-            let g = if (font::FIRST_CHAR..=font::LAST_CHAR).contains(&cp) {
-                &font::GLYPHS[(cp - font::FIRST_CHAR) as usize]
-            } else {
-                &font::REPLACEMENT
-            };
-            for (row, bits) in g.iter().enumerate() {
-                for col in 0..8 {
-                    if bits & (0x80 >> col) == 0 {
-                        continue;
-                    }
-                    for sy in 0..scale {
-                        for sx in 0..scale {
-                            let (xx, yy) = (cx + col * scale + sx, y + row as i32 * scale + sy);
-                            if xx >= 0 && yy >= 0 && xx < w && yy < h {
-                                px[yy as usize * stride + xx as usize] = c;
-                            }
-                        }
-                    }
-                }
-            }
-            cx += 8 * scale;
-        }
-        cx
+        let stride = w as usize;
+        f.draw(self.pixels(), stride, (0, 0, w, h), x, y, s, c)
+    }
+
+    /// UI text in the system font at `scale` (1: 13 px in a 16 px line, 2: 26, 4: 52).
+    /// Returns the end x.
+    pub fn text_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32) -> i32 {
+        self.text_f(x, y, s, c, text::Font::ui(scale, text::Weight::Regular))
+    }
+
+    /// Bold UI text (the face's real bold) at `scale`. Returns the end x.
+    pub fn bold_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32) -> i32 {
+        self.text_f(x, y, s, c, text::Font::ui(scale, text::Weight::Bold))
     }
 
     pub fn text(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
         self.text_x(x, y, s, c, 1)
     }
 
-    /// Faux bold, like the shell's titles.
     pub fn bold(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
-        self.text(x, y, s, c);
-        self.text(x + 1, y, s, c)
+        self.bold_x(x, y, s, c, 1)
+    }
+
+    /// Monospace Unifont 8x16 cells, `scale`x: for code, logs and columns that must line up,
+    /// never UI text. Returns the end x.
+    pub fn mono_x(&mut self, x: i32, y: i32, s: &str, c: Color, scale: i32) -> i32 {
+        let (w, h) = (self.w, self.h);
+        let stride = w as usize;
+        mono_into(self.pixels(), stride, (0, 0, w, h), x, y, s, c, scale)
+    }
+
+    pub fn mono(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
+        self.mono_x(x, y, s, c, 1)
+    }
+
+    /// Monospace faux bold (the cells drawn twice, 1 px apart).
+    pub fn mono_bold(&mut self, x: i32, y: i32, s: &str, c: Color) -> i32 {
+        self.mono(x, y, s, c);
+        self.mono(x + 1, y, s, c)
     }
 
     /// A button (SPEC "Buttons"): 24 high is a fully rounded pill, taller is a dialog button
@@ -534,7 +542,7 @@ impl Window {
         } else {
             self.rrect(x, y, w, h, r, fill);
         }
-        let tw = str_width(label, 1) + 1;
+        let tw = bold_width(label, 1);
         self.bold(x + (w - tw) / 2, y + (h - 16) / 2, label, text);
     }
 }
@@ -598,6 +606,59 @@ pub fn blend(dst: Color, src: Color, a: u8) -> Color {
     ch(16) | ch(8) | ch(0)
 }
 
+/// Width of UI text (the system font, regular) at `scale`.
 pub fn str_width(s: &str, scale: i32) -> i32 {
+    text::Font::ui(scale, text::Weight::Regular).width(s)
+}
+
+/// Width of bold UI text at `scale`.
+pub fn bold_width(s: &str, scale: i32) -> i32 {
+    text::Font::ui(scale, text::Weight::Bold).width(s)
+}
+
+/// Width of monospace Unifont text (8 px a char at 1x).
+pub fn mono_width(s: &str, scale: i32) -> i32 {
     s.chars().count() as i32 * 8 * scale
+}
+
+/// Unifont 8x16 cells into `px` (rows of `stride`), inside `clip` (x0, y0, x1, y1).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mono_into(
+    px: &mut [u32],
+    stride: usize,
+    clip: (i32, i32, i32, i32),
+    x: i32,
+    y: i32,
+    s: &str,
+    c: Color,
+    scale: i32,
+) -> i32 {
+    let (x0, y0, x1, y1) = clip;
+    let scale = scale.max(1);
+    let mut cx = x;
+    for ch in s.chars() {
+        let cp = ch as u32;
+        let g = if (font::FIRST_CHAR..=font::LAST_CHAR).contains(&cp) {
+            &font::GLYPHS[(cp - font::FIRST_CHAR) as usize]
+        } else {
+            &font::REPLACEMENT
+        };
+        for (row, bits) in g.iter().enumerate() {
+            for col in 0..8 {
+                if bits & (0x80 >> col) == 0 {
+                    continue;
+                }
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let (xx, yy) = (cx + col * scale + sx, y + row as i32 * scale + sy);
+                        if xx >= x0 && yy >= y0 && xx < x1 && yy < y1 {
+                            px[yy as usize * stride + xx as usize] = c;
+                        }
+                    }
+                }
+            }
+        }
+        cx += 8 * scale;
+    }
+    cx
 }

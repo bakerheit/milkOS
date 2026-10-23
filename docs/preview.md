@@ -41,7 +41,8 @@ size, format and when it was modified. **Save as...** (Cmd-S) writes a PNG throu
 ## Sandbox
 
 Preview reads untrusted files, so its first act is `sandbox("fs=<folder of the picture>:r
-fs=/dev/wm:r net=none spawn=0 clipboard=0")` (with no path, only `/dev/wm` for the theme): no
+fs=/dev/wm:r fs=/System/Fonts:r net=none spawn=0 clipboard=0")` (with no path, only `/dev/wm` for the
+theme and font choice and `/System/Fonts` for the system font's files): no
 network, no spawning, no clipboard, and files only from that folder, read-only, plus whatever the
 user hands over through the Open, Save panels or a drop. The thumbnails and the strip need that
 folder grant; there is no "open with" from Files yet.

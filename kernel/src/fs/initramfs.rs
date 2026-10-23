@@ -83,7 +83,7 @@ pub fn entries(archive: &[u8]) -> impl Iterator<Item = Result<Entry<'_>>> {
 
 /// Create or replace the file at `path` with `data`, which outlives the file (the archive):
 /// on tmpfs the file just points at it, elsewhere the bytes are written.
-fn put_file(path: &str, data: &'static [u8]) -> Result<()> {
+pub(crate) fn put_file(path: &str, data: &'static [u8]) -> Result<()> {
     let f = ops::open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
     if let Some(node) = downcast::<TmpNode>(f.inode()) {
         return node.set_rom(data);

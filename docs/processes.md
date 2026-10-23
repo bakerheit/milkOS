@@ -375,12 +375,26 @@ without destroying them are closed and freed by the wm within a second.
 
 `/Apps/paint/paint` is the example client (dock, Skim, or `open paint` in a shell).
 
+Text in a window: `user/gui`'s `Window::text`, `bold`, `text_x`, `bold_x` and `gui::str_width`
+draw and measure the **system font** (the desktop's own families, 13 px in a 16 px line at
+scale 1, 26 px at 2, 52 px at 4, the real bold), in the family `/dev/wm` names, re-checked at
+most once a second, so a Settings change shows on the app's next redraw. The glyphs are the
+kernel's: it serves them as `/System/Fonts/<key>.font` (read-only files pointing at its own
+bytes; the format and the fallback rules are the shared `user/fontkit` crate). `Window::mono`,
+`mono_x`, `mono_bold` and `gui::mono_width` are Unifont 8x16 cells, only for monospace
+content (code, logs, the Text Editor's body, live number columns; see
+`docs/ui-concepts/SPEC-FONT-ROLLOUT.md`). `gui::text::Font` draws into any pixel buffer with a
+clip (for offscreen surfaces). An app that sandboxes itself calls `gui::text::preload()` first
+or grants `fs=/System/Fonts:r`; if the files can't be read, text falls back to Unifont,
+measured and drawn alike.
+
 ### `/dev/wm` and the desktop tools
 
 `kernel/src/wm/ctl.rs`. Write one command per line (fields tab-separated, or split at the
 first space): `open <app|absolute path>` (apps: files terminal notes about paint today
 spaces milkdrop; a folder opens in Files, a text file in Notes, a `/Commands` program runs),
-`notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`. An
+`notify <title>[\t<subtitle>[\t<option>...]]`, `today`, `spaces`, `desktop`, `skim`, `font <key>`
+(the UI font, as Settings > Appearance sets it: figtree, plex, fira, atkinson, ubuntu). An
 unknown command (or an unknown `notify` option) fails the write with `EINVAL`.
 
 **Notifications with buttons.** `notify` takes options after the subtitle, one per field:
@@ -412,7 +426,7 @@ refreshes it every second and one that dies leaves nothing behind. `user/gui`:
 The `notify` program takes them as flags: `notify [--app NAME] [--id N] [--action
 LABEL[:COMMAND]]... <title> [subtitle...]`. Milk Drop's Received toast uses this with
 `Show` (`open ~/Downloads`) and `Open` (`open <the file>`). Reading gives a status snapshot (refreshed once a second): `mode`,
-`space`, `focus`, and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
+`space`, `focus`, `font` (the UI font's key; user apps draw in it), and one `window <id> <w>x<h>+<x>+<y> space <n> <title>` line per window.
 
 `user/desk` builds the wrappers (one crate, `src/bin/*.rs`): `open <app|path>...` (relative
 paths resolved against the cwd), `notify <title> [subtitle...]`, `today`, `spaces`, and

@@ -6,7 +6,7 @@
 # It refuses unless: X.Y.Z is SemVer and newer than VERSION; the tree is clean; you are on main
 # (or on a detached HEAD at origin/main, as in the stage worktree) and local main equals
 # origin/main; the tag doesn't exist; CHANGELOG.md has something under "## Unreleased".
-# It then changes VERSION, every Cargo version and the three Cargo.lock files (offline),
+# It then changes VERSION, every Cargo version and the Cargo.lock files (offline),
 # renames "## Unreleased" to "## X.Y.Z (DATE)" with a fresh empty "## Unreleased" above it,
 # runs scripts/version-check.sh, commits "Release vX.Y.Z" and makes the annotated tag vX.Y.Z.
 # It never pushes anything; it prints the next steps (docs/releasing.md). --dry-run prints

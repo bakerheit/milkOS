@@ -63,7 +63,8 @@ milk_semver_cmp() {
 
 # milk_cargo_files KIND [DIR]: the tracked Cargo.toml (KIND=manifest) or Cargo.lock (KIND=lock)
 # files that carry milkOS's own version, relative to DIR (default: here), one per line. The
-# example packages in packages/ are separate products with their own versions and are left out.
+# example packages in packages/ are separate products with their own versions: their manifests
+# are left out, but packages/Cargo.lock is in (it lists the milkOS crates they build on).
 milk_cargo_files() {
   local kind="$1" dir="${2:-.}" name
   case "$kind" in manifest) name=Cargo.toml ;; lock) name=Cargo.lock ;; *) return 1 ;; esac
@@ -71,7 +72,7 @@ milk_cargo_files() {
     git -C "$dir" ls-files -- "$name" "*/$name"
   else
     (cd "$dir" && find . -name "$name" -not -path './target/*' -not -path './.git/*' | sed 's|^\./||')
-  fi | grep -v '^packages/' | sort
+  fi | { if [ "$kind" = manifest ]; then grep -v '^packages/'; else cat; fi; } | sort
 }
 
 # milk_manifest_info FILE: what the manifest says about versions, one fact per line:

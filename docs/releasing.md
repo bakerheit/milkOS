@@ -22,7 +22,7 @@ needed only for the last step.
 What `cut-release.sh` does: checks the version is SemVer and newer than `VERSION`, the tree is
 clean, you are on `main` (or on a detached HEAD at `origin/main`, as in the `stage` worktree),
 local `main` equals `origin/main`, the tag doesn't exist, and `## Unreleased` isn't empty. Then it
-sets `VERSION`, every Cargo version and the three `Cargo.lock` files (offline), renames
+sets `VERSION`, every Cargo version and the `Cargo.lock` files (offline), renames
 `## Unreleased` to `## 0.2.0 (DATE)` with a fresh empty `## Unreleased` above it, runs
 `scripts/version-check.sh`, commits `Release v0.2.0` and makes the annotated tag. **It pushes
 nothing**; it prints the commands for steps 3 to 5. To back out before step 4:

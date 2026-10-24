@@ -211,10 +211,10 @@ has "$(git log -1 --format=%b)" "Co-Authored-By: Claude Sonnet 5.5 <noreply@anth
 for f in Cargo.toml user/Cargo.toml tls/probe/Cargo.toml user/filekit/Cargo.toml user/fontkit/Cargo.toml; do
   [ "$(grep -c '^version = "0.2.0"$' "$f")" = 1 ] && ok "$f is 0.2.0" || bad "$f not bumped"
 done
-for l in Cargo.lock user/Cargo.lock tls/probe/Cargo.lock; do
+for l in Cargo.lock user/Cargo.lock tls/probe/Cargo.lock packages/Cargo.lock; do
   has "$(git diff HEAD~1 -- "$l")" '+version = "0.2.0"' && ok "$l follows" || bad "$l not updated"
 done
-has "$(git diff HEAD~1 --stat)" "packages" && bad "touched packages/" || ok "the example packages are left alone"
+[ -z "$(git diff HEAD~1 --stat -- packages/fortune packages/snake packages/moo2048 packages/Cargo.toml)" ] && ok "the example packages keep their own versions" || bad "touched the example packages' manifests"
 [ "$(sed -n 1,6p CHANGELOG.md)" = "$(printf '# Changelog\n\n## Unreleased\n\n## 0.2.0 (2030-01-02)\n')" ] && ok "changelog: an empty Unreleased above '## 0.2.0 (2030-01-02)'" || bad "changelog head: $(sed -n 1,7p CHANGELOG.md)"
 NOTES="$(scripts/release-notes.sh v0.2.0)"; has "$NOTES" "The Browser is now a sandboxed" && ok "the notes for 0.2.0 are the old Unreleased text" || bad "notes after cut"
 [ "$(git rev-parse origin/main)" = "$(git -C "$T/a/origin.git" rev-parse main)" ] && [ "$(git rev-parse origin/main)" = "$H0" ] && [ -z "$(git -C "$T/a/origin.git" tag)" ] && ok "nothing was pushed (origin's main unchanged, no tag there)" || bad "something reached origin"

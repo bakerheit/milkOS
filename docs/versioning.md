@@ -27,7 +27,7 @@ moved and never reused.
 | where | what you see | how |
 |---|---|---|
 | `VERSION` | `0.2.0` | the source |
-| Cargo packages | `0.2.0` | `[workspace.package] version` in `Cargo.toml` and `user/Cargo.toml` (packages inherit it with `version.workspace = true`); `user/filekit`, `user/fontkit` and `tls/probe` spell it out; the three `Cargo.lock` files follow |
+| Cargo packages | `0.2.0` | `[workspace.package] version` in `Cargo.toml` and `user/Cargo.toml` (packages inherit it with `version.workspace = true`); `user/filekit`, `user/fontkit` and `tls/probe` spell it out; the `Cargo.lock` files follow (including the example packages' in `packages/`, which lists the milkOS crates it builds on) |
 | About, Settings, the boot message, `uname`, `/proc/version`, the Terminal banner, `system info`, `system version`, `/System/Version.txt`, the welcome text | `0.2.0` in a release; `0.2.0-dev (abc1234)` in any other build | `kernel/build.rs` sets `MILKOS_VERSION`; `@VERSION@` in `rootfs` text files is replaced with it |
 | the audit log's first record | `kernel=milkOS-0.2.0 build=abc1234` | the kernel's package version, and `MILKOS_BUILD` |
 | the release bundle | `milkOS-0.2.0.zip`, `SHA256SUMS` | `scripts/release.sh` names it from `VERSION` |

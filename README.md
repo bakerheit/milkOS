@@ -1,5 +1,7 @@
 # milkOS
 
+[![ci](https://github.com/bakerheit/milkOS/actions/workflows/ci.yml/badge.svg)](https://github.com/bakerheit/milkOS/actions/workflows/ci.yml)
+
 A hobby operating system for 64-bit ARM, written in Rust and run in qemu on a Mac. The kernel and
 userland are inspired by Linux (Linux syscall numbers, `/proc`, `/dev`, a POSIX-ish shell); the desktop
 is inspired by macOS (menu bar, dock, glass, Spaces, a launcher).
@@ -85,6 +87,13 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
   installs into a throwaway clone of the filesystem that you then keep or discard. Each one's
   `help` lists what it does.
 
+## Versions and releases
+The version is in `VERSION` (SemVer, `0.MINOR.PATCH` until 1.0). A build from a checkout calls itself
+`0.2.0-dev (abc1234)`; a release build, plain `0.2.0`; `system version` prints it. Releases are made
+with `scripts/cut-release.sh` and `scripts/publish-release.sh` on the Mac (GitHub Actions only
+repeats the portable checks, and is optional). See `docs/releasing.md` and `docs/versioning.md`,
+which also lists the formats that have their own version (the disk, packages, streams).
+
 ## Layout
 - `kernel/`: the kernel crate (`no_std`). Entry is `kernel/src/boot.S`, then `kmain` in `main.rs`.
 - `user/`: user programs and the `rt` runtime library, packed into the initramfs (`initramfs.list`).
@@ -94,9 +103,10 @@ tiles, and the Trash sits at the right end. Ctrl+Cmd+Q locks the screen, and Ctr
 - `scripts/`: run and test scripts. The main tests: `net-test.sh`, `pkg-test.sh`, `audio-test.sh`,
   `crashtest.sh`, `fattest.sh`, `wm-demo.sh <demo>`, `input-test.sh`, `screenshot.sh`.
   `check-all.sh` runs all of them, eight at a time (`-j N`), and prints one table (`--smoke` for a quick
-  one-per-area check, `--full` for the long ones).
+  one-per-area check, `--full` for the long ones). `ci-local.sh` runs the portable checks (build, clippy,
+  host tests) that the GitHub workflow runs; `cut-release.sh`, `publish-release.sh`, `release.sh` make a release.
 - `docs/`: design notes, one per area: `memory`, `processes`, `smp`, `filesystem`, `networking`, `audio`,
-  `packages`, `security`, `shell`, plus `AGENTS.md` (how to work on milkOS) and `ui-concepts/` (the UI spec
+  `packages`, `security`, `shell`, `versioning`, `releasing`, plus `AGENTS.md` (how to work on milkOS) and `ui-concepts/` (the UI spec
   and mockups). Screenshots are in `docs/screenshots/`.
 
 ## Licence

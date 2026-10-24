@@ -16,8 +16,12 @@ The names list is not in the repository, in any form (no names, no hashes): it i
 $MILK_PUBLIC_CHECK_NAMES, else from <git dir>/info/public-check-names. One entry per line, `#`
 starts a comment. An entry is matched case-insensitively as a whole word; an entry starting
 with `^` is matched only in its capitalised spelling and not where it could just be the first
-word of a sentence (for names that are also ordinary words). Without the file the names rule is
-skipped, with a note.
+word of a sentence (for names that are also ordinary words). Without the file (a fresh clone,
+GitHub Actions) the names rule is skipped, loudly: a NOTE at the top and "names rule SKIPPED"
+on the last line, never a silent pass; every other rule still runs and still fails.
+
+  --no-history   check the files only, not the commits that origin/main doesn't have (CI:
+                 scripts/ci-local.sh --ci; merge commits made by a hosting service are not ours)
 
 Third-party text (licences, vendored data) is exempted by path in EXEMPT below; the explicit
 TEST-ONLY key in scripts/milk-test-key.secret is allowed by the secret rule.
@@ -132,7 +136,11 @@ def tree_files():
 def main():
     hits = []
     if NAMES is None:
-        print("public-check: no names list (see the header of scripts/public_check.py), skipping the names rule")
+        print("public-check: NOTE: the names rule is SKIPPED: no names list at "
+              f"{names_file()} (it is kept outside the repository; see the header of scripts/public_check.py)")
+        if os.environ.get("GITHUB_ACTIONS"):
+            print("::notice title=public-check::the names rule was skipped (the names list is not in the repository); "
+                  "emails, paths, keys and ticket ids were checked")
     for path in tree_files():
         if path in SKIP_FILES or path.startswith(SKIP_DIRS):
             continue
@@ -145,6 +153,8 @@ def main():
         scan_text(path, data.decode("utf-8", "replace"), path, hits)
 
     # History: commits that origin/main doesn't have.
+    if "--no-history" in sys.argv[1:]:
+        return finish(hits, 0, "history not checked")
     base = subprocess.run(["git", "rev-parse", "--verify", "-q", "origin/main"], cwd=ROOT,
                           capture_output=True, text=True)
     rng = "origin/main..HEAD" if base.returncode == 0 else "HEAD"
@@ -168,13 +178,18 @@ def main():
                 hits.append(f"{label}: [names] {who} name {nm}")
         scan_text(label, msg, "", hits, in_history=True)
 
+    return finish(hits, ncommits, f"{ncommits} unpushed commits")
+
+
+def finish(hits, ncommits, what):
     for h in hits:
         print(h)
     nfiles = len(tree_files())
+    skipped = ", names rule SKIPPED (no names list)" if NAMES is None else ""
     if hits:
-        print(f"public-check: FAIL, {len(hits)} hit(s) ({nfiles} files, {ncommits} unpushed commits)")
+        print(f"public-check: FAIL, {len(hits)} hit(s) ({nfiles} files, {what}{skipped})")
         return 1
-    print(f"public-check: ok ({nfiles} files, {ncommits} unpushed commits)")
+    print(f"public-check: ok ({nfiles} files, {what}{skipped})")
     return 0
 
 

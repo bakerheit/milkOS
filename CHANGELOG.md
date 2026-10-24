@@ -257,6 +257,26 @@
   `scripts/heapkit-test.sh` (host, smoke set) and `scripts/leak-test.sh` (a desktop for a
   minute, default set) check it.
 
+**Releases**
+- A real version number: `VERSION` is the one source (SemVer, `0.MINOR.PATCH` until 1.0; the
+  next release is 0.2.0). The Cargo package versions follow it (they were 0.0.0 and 0.0.1, so the
+  audit log said `kernel=milkOS-0.0.0`; it now says the real version and the build), and
+  `scripts/version-check.sh` fails if anything that carries the version disagrees, or if a
+  format version in the code changes without `docs/versioning.md` (which lists every format and
+  interface with its own version) being updated.
+- A build from a checkout says `0.2.0-dev (abc1234)` (the commit, `+dirty` with changes,
+  `unknown` without git) in About, Settings, the boot message, `uname`, `/proc/version` and
+  `/System/Version.txt`; a release build says plain `0.2.0`. New `system version` prints it.
+- `scripts/cut-release.sh X.Y.Z` bumps everything, closes the changelog section, commits and
+  tags (it pushes nothing); `scripts/publish-release.sh vX.Y.Z` builds the bundle
+  (`scripts/release.sh`, which now also writes `SHA256SUMS`) and creates a draft GitHub
+  Release with the notes from `scripts/release-notes.sh`; `scripts/ci-local.sh` runs the
+  portable checks (build, clippy, host tests, version and public checks);
+  `scripts/install-hooks.sh` adds an optional pre-push hook. All of it works on the Mac with no
+  GitHub Actions; the two workflows in `.github/workflows/` are optional wrappers around the
+  scripts. `scripts/release-scripts-test.sh` (smoke set) tests the scripts in scratch clones.
+  See `docs/releasing.md` and `docs/versioning.md`.
+
 ## 0.1.0 (2026-10-21)
 
 The first release: everything below exists and is tested, on qemu `virt` (aarch64) with

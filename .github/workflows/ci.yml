@@ -1,0 +1,63 @@
+# Portable checks on every push to main and every pull request: a second opinion, not the
+# gate. The real gate is scripts/check-all.sh on a Mac (it boots VMs, which hosted runners
+# can't do without hardware acceleration), so none of that runs here.
+#
+# This file does almost nothing itself: it checks the repository out and calls
+# scripts/ci-local.sh, which you can run on your own Mac with the same result. Delete this file
+# (or turn Actions off in the repository settings) and nothing else changes.
+#
+# Runners: this repository is public, so GitHub's standard hosted runners are free for it; the
+# jobs below use only the standard labels (ubuntu-latest, macos-latest) and nothing here asks for
+# a larger, billed runner. Every job has a timeout so a stuck one can't run on.
+#   * checks (macOS): needs macOS because the host unit tests build for the Mac's own target
+#     (aarch64-apple-darwin) and the release scripts are written for the Mac's tools. It runs
+#     every step of scripts/ci-local.sh: fmt (advisory), clippy, host tests, the kernel build,
+#     version-check, release-scripts-test, public-check.
+#   * quick (Linux): version-check and the public scan only: plain bash/awk/python, so a
+#     second platform catches Mac-only habits in them. Cheap.
+# Actions are GitHub's own (actions/*), pinned by full commit SHA, the version in a comment.
+# No secrets, and nothing that runs a pull request's code with write access.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: portable checks (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup --version
+          rustup show active-toolchain || rustup toolchain install --profile minimal
+          rustup show
+      - name: Run the portable checks
+        run: scripts/ci-local.sh --ci
+
+  quick:
+    name: version and public checks (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Run version-check and public-check
+        run: scripts/ci-local.sh --ci --only version-check,public-check

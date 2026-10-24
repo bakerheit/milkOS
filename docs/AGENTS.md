@@ -80,4 +80,9 @@
   local list (kept outside the repo, see the script header), e-mail addresses other than noreply ones, host home
   paths, key material and ticket ids, in the working tree and in commits not on origin/main. Run it before
   committing. Without the local list it skips the names rule and says so.
+- The version is in `VERSION` and nowhere else by hand: never edit a version number (Cargo, docs, strings);
+  `scripts/cut-release.sh` does the bump (docs/releasing.md) and `scripts/version-check.sh` (in the smoke set) fails
+  if anything disagrees. Changing a format's version (milkfs, `.milkpkg`, streams, ...) means updating the table
+  and the `format-constants` block in docs/versioning.md, a migration and a changelog line. Agents don't cut,
+  tag or publish releases; the lead does. `scripts/ci-local.sh` runs the portable checks the GitHub workflow runs.
 - Prove it in qemu. For UI work, screenshot and actually look at the PNG. Paste boot logs in reports.

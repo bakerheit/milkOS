@@ -89,6 +89,8 @@ case "$JOBS" in ''|*[!0-9]*|0) echo "check-all: -j wants a number of at least 1 
 # self-test lines and ask for just those (net-test: net; the --full soaks: sched).
 TESTS=(
   "public-check|s|120|solo|scripts/public-check.sh"
+  "version-check|s|60|par|scripts/version-check.sh"
+  "release-scripts-test|s|300|par|scripts/release-scripts-test.sh"
   "selftest-boot|s|300|par|scripts/selftest-boot.sh"
   "serial-soak|q|300|par|scripts/serial-soak.sh 2 3"
   "net-test|s|600|par|scripts/net-test.sh"

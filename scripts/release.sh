@@ -9,6 +9,10 @@
 #     disks/scratch.img               scratch disk (the boot self-test's)
 #     share/README.txt                the Mac shared folder, empty, read-only in milkOS
 #   dist/milkOS-<VERSION>.zip         the same folder, zipped (ditto: modes kept)
+#   dist/SHA256SUMS                   the zip's SHA-256, in `shasum -c` form
+# The kernel is built with MILKOS_RELEASE=1, so it says plain "0.2.0", not "0.2.0-dev (abc1234)"
+# (docs/versioning.md). The name comes from <repo>/VERSION. Needs macOS (ditto, dd). Releases are
+# built from a clean checkout of the tag: scripts/publish-release.sh checks that.
 # Nothing in the bundle refers to the repo, cargo or rustup.
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
@@ -20,12 +24,13 @@ M="python3 scripts/mkmilkfs.py"
 MILK_SIZE="${MILK_SIZE:-512M}"
 
 echo "== building the release kernel ($V)"
-cargo build --release -q
+MILKOS_RELEASE=1 cargo build --release -q
 ELF="target/aarch64-unknown-none-softfloat/release/milkos-kernel"
 rm -rf "$OUT" "dist/$NAME.zip"
 mkdir -p "$OUT/disks" "$OUT/share"
 "$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy)" -O binary "$ELF" "$OUT/kernel.bin"
 grep -aq "milkOS $V (aarch64" "$OUT/kernel.bin" || { echo "release: kernel.bin isn't version $V" >&2; exit 1; }
+if grep -aq "milkOS $V-dev (" "$OUT/kernel.bin"; then echo "release: kernel.bin is a dev build (MILKOS_RELEASE=1 didn't reach build.rs)" >&2; exit 1; fi
 
 echo "== disks"
 $M mkfs "$OUT/disks/milk.img" --size "$MILK_SIZE" --label Milk >/dev/null
@@ -54,6 +59,7 @@ fi
 
 echo "== zip"
 (cd dist && ditto -c -k --keepParent "$NAME" "$NAME.zip")
+(cd dist && shasum -a 256 "$NAME.zip" > SHA256SUMS && shasum -a 256 -c SHA256SUMS >/dev/null) || { echo "release: SHA256SUMS failed" >&2; exit 1; }
 du -sh "$OUT" | sed 's/^/   /'
 ls -l "dist/$NAME.zip" | awk '{print "   " $5 " bytes  " $9}'
-echo "release: $OUT and dist/$NAME.zip"
+echo "release: $OUT, dist/$NAME.zip and dist/SHA256SUMS"

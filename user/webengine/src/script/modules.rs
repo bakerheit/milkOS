@@ -325,6 +325,12 @@ pub fn check_module_head(status: u16, status_text: &str, content_type: Option<&s
     }
 }
 
+/// The check for a classic worker's script (its own, or one `importScripts` pulls in): a
+/// success status and a JavaScript type.
+pub fn check_script_head(status: u16, status_text: &str, content_type: Option<&str>) -> Result<(), String> {
+    check_head(ModType::Js, status, status_text, content_type)
+}
+
 /// The module type an import's attributes ask for, or why it can't be had.
 pub fn type_of_attributes(attrs: &[(String, String)]) -> Result<ModType, String> {
     let mut ty = ModType::Js;

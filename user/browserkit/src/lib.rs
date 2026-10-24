@@ -19,6 +19,7 @@ pub mod netpolicy;
 pub mod pages;
 pub mod paint;
 pub mod storage;
+pub mod workers;
 
 #[cfg(test)]
 mod systext_tests;

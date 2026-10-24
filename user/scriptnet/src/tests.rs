@@ -744,6 +744,32 @@ fn a_module_needs_a_success_and_a_script_type() {
 }
 
 #[test]
+fn a_classic_worker_script_needs_a_success_and_a_script_type_but_not_a_module_one() {
+    let mut w = world(&["www.milk.test"], |s| match s.path.as_str() {
+        "/w.js" => response("200 OK", &[("Content-Type", "text/javascript")], b"postMessage(1)"),
+        "/data.json" => response("200 OK", &[("Content-Type", "application/json")], b"{}"),
+        "/html.js" => response("200 OK", &[("Content-Type", "text/html")], b"<p>x"),
+        "/gone.js" => response("404 Not Found", &[("Content-Type", "text/javascript")], b"x"),
+        _ => response("404 Not Found", &[], b""),
+    });
+    let rig = Rig::new("http://www.milk.test/page");
+    let script = |u: &str| {
+        let mut r = req(u);
+        r.kind = NetKind::Script;
+        r.mode = RequestMode::SameOrigin;
+        r
+    };
+    let d = run_page(&rig, &mut w, &script("http://www.milk.test/w.js")).0.unwrap();
+    assert_eq!(d.body, b"postMessage(1)");
+    for (p, want) in [("/html.js", "MIME type of \"text/html\""), ("/data.json", "MIME type of \"application/json\""), ("/gone.js", "404")] {
+        let (out, ev) = run_page(&rig, &mut w, &script(&alloc::format!("http://www.milk.test{p}")));
+        let e = out.unwrap_err();
+        assert!(e.failure.message.contains(want), "{p}: {}", e.failure.message);
+        assert!(ev.heads.is_empty(), "{p}");
+    }
+}
+
+#[test]
 fn a_cross_origin_module_needs_cors() {
     let mut w = world(&["www.milk.test", "cdn.other.test"], |s| match s.path.as_str() {
         "/open.js" => response(

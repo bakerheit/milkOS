@@ -127,6 +127,27 @@ fn memory_budget() {
     }
 }
 
+/// A native that calls script over and over (a proxy trap asked again and again by a loop
+/// over a prototype chain that never ends) is stopped by the step budget: each call from
+/// native code costs steps, even when the called function has no loop or call of its own.
+#[test]
+fn natives_calling_script_pay_steps() {
+    for src in [
+        "var r, p; var h = { getPrototypeOf: function () { return p }, ownKeys: function () { p instanceof Object; return Reflect.ownKeys.apply(null, arguments) } }; r = Proxy.revocable([1, 2, 3], h); p = r.proxy; for (var k in p) {}",
+        "var p = new Proxy({}, { getPrototypeOf: function () { return p } }); for (var i = 0; ; i++) p instanceof Object",
+        "var o = { get a() { return 1 } }; for (;;) { [1, 2, 3].map(function (x) { return x }); Object.keys(o); JSON.stringify({ toJSON: function () { return 1 } }) }",
+    ] {
+        let mut r = realm_with(Limits {
+            max_steps: 2_000_000,
+            ..Limits::default()
+        });
+        let t = std::time::Instant::now();
+        let e = r.eval(src, "loop.js").expect_err(src);
+        assert_eq!(e.termination(), Some(Termination::StepBudget), "{src}");
+        assert!(t.elapsed().as_secs() < 10, "{src}: took {:?}", t.elapsed());
+    }
+}
+
 /// Code a script keeps alive (functions made by eval and `new Function`, each with its own
 /// source text) counts against the heap budget like objects do.
 #[test]

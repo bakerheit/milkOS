@@ -974,3 +974,65 @@ fn style_sheets_dialogs_and_media_members() {
     assert_eq!(eval("try { document.createElement('div').play() } catch (e) { e.name }"), "TypeError");
     assert_eq!(eval("new FormDataEvent('formdata', {formData: new FormData()}).type + new ToggleEvent('toggle', {newState: 'open'}).newState + new DeviceOrientationEvent('x', {alpha: 1}).alpha"), "formdataopen1");
 }
+
+#[test]
+fn fuzz_ranges_walkers_and_parsers() {
+    // Random trees, ranges, selections, walkers and parsed markup: nothing panics or hangs, a
+    // clone leaves the tree as it was, and a range that was emptied reads as "".
+    let mut seed: u64 = 0xdead_beef_cafe_f00d;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    const TAGS: &[&str] = &["div", "p", "b", "i", "span", "ul", "li", "table", "tr", "td", "a", "br", "img", "select", "option", "template", "script", "style", "svg", "textarea"];
+    for round in 0..30 {
+        let mut html = String::new();
+        for _ in 0..(5 + next() % 40) {
+            let t = TAGS[(next() % TAGS.len() as u64) as usize];
+            match next() % 5 {
+                0 => html.push_str(&alloc::format!("<{t}>")),
+                1 => html.push_str(&alloc::format!("</{t}>")),
+                2 => html.push_str(&alloc::format!("text{} ", next() % 100)),
+                3 => html.push_str(&alloc::format!("<{t} id=i{} class=c{}>", next() % 5, next() % 3)),
+                _ => html.push_str("<!--c-->"),
+            }
+        }
+        let html = html.replace('\\', "").replace('\'', "").replace('\n', " ").replace("</", "<\\/");
+        let mut js = alloc::format!(
+            "var d = new DOMParser().parseFromString('{html}', 'text/html'); var root = document.getElementById('a'); root.innerHTML = '{html}'; var all = [root]; \
+             (function walk(n) {{ for (var c = n.firstChild; c; c = c.nextSibling) {{ all.push(c); walk(c); }} }})(root); \
+             var seedv = {}; function rnd(n) {{ seedv = (seedv * 16807) % 2147483647; return seedv % n; }} \
+             function pick() {{ return all[rnd(all.length)]; }} \
+             function off(n) {{ var l = n.nodeType === 3 || n.nodeType === 8 ? n.data.length : n.childNodes.length; return rnd(l + 1); }} \
+             var out = []; function t(f) {{ try {{ var v = f(); out.push(typeof v); }} catch (e) {{ out.push(e.name); }} }}\n",
+            next() % 2147483646 + 1
+        );
+        for _ in 0..(20 + next() % 30) {
+            let step = match next() % 16 {
+                0 => "t(function () { var r = document.createRange(); var a = pick(), b = pick(); r.setStart(a, off(a)); r.setEnd(b, off(b)); return r.toString().length; });",
+                1 => "t(function () { var r = document.createRange(); var a = pick(); r.selectNodeContents(a); var s = a.textContent; var c = r.cloneContents(); return c.textContent === s; });",
+                2 => "t(function () { var r = document.createRange(); var a = pick(), b = pick(); r.setStart(a, off(a)); r.setEnd(b, off(b)); r.deleteContents(); return r.collapsed; });",
+                3 => "t(function () { var r = document.createRange(); var a = pick(), b = pick(); r.setStart(a, off(a)); r.setEnd(b, off(b)); return r.extractContents().childNodes.length; });",
+                4 => "t(function () { var r = document.createRange(); var a = pick(); r.setStart(a, off(a)); r.collapse(true); var n = document.createElement('u'); r.insertNode(n); return n.parentNode !== null; });",
+                5 => "t(function () { var r = document.createRange(); var a = pick(); r.selectNodeContents(a); r.surroundContents(document.createElement('em')); return 1; });",
+                6 => "t(function () { var s = getSelection(); var a = pick(), b = pick(); s.setBaseAndExtent(a, off(a), b, off(b)); s.deleteFromDocument(); return s.toString(); });",
+                7 => "t(function () { var w = document.createTreeWalker(pick(), rnd(4096), null); var n = 0; while (w.nextNode() && n++ < 1000); while (w.previousNode() && n++ < 2000); return n; });",
+                8 => "t(function () { var it = document.createNodeIterator(pick(), 0xffffffff, function (x) { return rnd(3) + 1; }); var n = 0; while (it.nextNode() && n++ < 1000); while (it.previousNode() && n++ < 2000); return n; });",
+                9 => "t(function () { return new XMLSerializer().serializeToString(pick()).length; });",
+                10 => "t(function () { return d.documentElement.outerHTML.length + d.querySelectorAll('*').length; });",
+                11 => "t(function () { var a = pick(); return a.nodeType === 3 ? a.splitText(off(a)).data : 0; });",
+                12 => "t(function () { var a = pick(); if (a.nodeType === 3) { a.replaceData(off(a), rnd(5), 'zz'); a.deleteData(0, 1); } return 1; });",
+                13 => "t(function () { var a = pick(), b = pick(); var r1 = document.createRange(), r2 = document.createRange(); r1.selectNode(a.parentNode ? a : root); r2.selectNodeContents(b); return r1.compareBoundaryPoints(rnd(4), r2); });",
+                14 => "t(function () { var a = pick(); if (a !== root && a.parentNode) a.parentNode.removeChild(a); return 1; });",
+                _ => "t(function () { var a = pick(), b = pick(); if (a.nodeType === 1) a.appendChild(b === root ? document.createTextNode('x') : b); return 1; });",
+            };
+            js.push_str(step);
+            js.push('\n');
+        }
+        js.push_str("console.log('R done ' + out.length);");
+        let out = lines(&js, 3);
+        assert_eq!(out, alloc::format!("done {}", js.matches("\nt(function").count()), "round {round}: {js}");
+    }
+}

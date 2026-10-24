@@ -366,6 +366,12 @@ impl Realm {
         self.vm.stack.push(this);
         self.vm.stack.push(Val::Obj(f));
         self.vm.stack.extend_from_slice(args);
+        // (A native that calls script over and over - a proxy trap, a getter, a callback - pays
+        // steps for each call, so the budget and the interrupt still end such a loop.)
+        if let Err(e) = self.safe_point() {
+            self.vm.stack.truncate(mark);
+            return Err(e);
+        }
         if let Err(e) = self.push_frame(f, args.len(), new_target, true, construct) {
             self.vm.stack.truncate(mark);
             return Err(e);

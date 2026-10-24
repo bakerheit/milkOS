@@ -1203,6 +1203,69 @@ const FUSION_CASES: &[&str] = &[
     "function f(a) { var t = a.x; var u = a.y; return t + u } try { f({ x: 1, get y() { throw new TypeError('in getter') } }) } catch (e) { e.stack }",
 ];
 
+/// Programs that put proxies in front of every kind of target and every operation, with traps
+/// that return odd things, throw, revoke the proxy, change the target, or call back into the
+/// proxy.
+fn proxy_program(rng: &mut Rng) -> String {
+    const TARGETS: &[&str] = &[
+        "{}", "{a: 1, b: 2}", "[1, 2, 3]", "function f(x) { return x }", "class C { constructor(v) { this.v = v } }",
+        "new Map([[1, 2]])", "Object.freeze({z: 1})", "Object.preventExtensions({q: 1})", "Object.create(null)",
+        "(function () { var o = {}; Object.defineProperty(o, 'k', {value: 1}); return o })()", "new Date(0)", "p",
+        "new Proxy({}, {})", "function () { return this }",
+    ];
+    const RESULTS: &[&str] = &[
+        "undefined", "null", "true", "false", "1", "'a'", "{}", "[]", "['a', 'b']", "['a', 'a']", "[1]", "Symbol('s')",
+        "function () {}", "Object.prototype", "Array.prototype", "p", "r", "{value: 1, configurable: true}",
+        "{value: 1, configurable: false}", "{get: undefined, configurable: true}", "target", "NaN",
+    ];
+    const OPS: &[&str] = &[
+        "p.a", "p.a = 1", "p[0]", "p[0] = 5", "'a' in p", "delete p.a", "Object.keys(p)", "Object.getOwnPropertyNames(p)",
+        "Reflect.ownKeys(p)", "Object.entries(p)", "JSON.stringify(p)", "Object.getPrototypeOf(p)", "Object.setPrototypeOf(p, null)",
+        "p instanceof Object", "Object.isFrozen(p)", "Object.freeze(p)", "Object.seal(p)", "Object.preventExtensions(p)",
+        "Object.isExtensible(p)", "Object.defineProperty(p, 'n', {value: 1})", "Object.getOwnPropertyDescriptor(p, 'a')",
+        "Object.assign({}, p)", "({...p})", "for (var k in p) {}", "for (var v of p) {}", "p()", "new p()", "p.call(null, 1)",
+        "Array.isArray(p)", "Object.prototype.toString.call(p)", "[].concat(p)", "Array.prototype.slice.call(p)",
+        "Array.from(p)", "p.length", "p.push && p.push(1)", "String(p)", "p + ''", "structuredClone(p)", "Object.create(p).a",
+        "Reflect.get(p, 'a', {})", "Reflect.set(p, 'a', 1, {})", "p.hasOwnProperty('a')", "Object.fromEntries([['a', p]])",
+        "r.revoke()", "target.a = 9", "Object.defineProperty(target, 'a', {value: 3, configurable: false})",
+        "Object.freeze(target)", "p.__proto__", "p.__proto__ = {}", "Reflect.apply(p, null, [])", "Reflect.construct(p, [])",
+        "[...p]", "Math.max(...p)", "new Set(p)", "new Map(p)", "Promise.resolve(p)", "(async () => await p)()",
+    ];
+    const TRAPS: &[&str] = &[
+        "get", "set", "has", "deleteProperty", "ownKeys", "getOwnPropertyDescriptor", "defineProperty", "getPrototypeOf",
+        "setPrototypeOf", "isExtensible", "preventExtensions", "apply", "construct",
+    ];
+    let mut s = String::from("var log = []; var p, r, target; function t(f) { try { var v = f(); log.push(typeof v) } catch (e) { log.push(e && e.name) } }\n");
+    for _ in 0..(1 + rng.below(3)) {
+        let tgt = rng.pick(TARGETS);
+        s.push_str(&alloc::format!("target = {tgt}; var h = {{"));
+        for tr in TRAPS {
+            if rng.chance(45) {
+                let body = match rng.below(6) {
+                    0 => alloc::format!("return {}", rng.pick(RESULTS)),
+                    1 => String::from("throw new RangeError('trap')"),
+                    2 => String::from("r.revoke(); return Reflect.get.apply(null, arguments)"),
+                    3 => alloc::format!("{}; return Reflect.{tr}.apply(null, arguments)", rng.pick(OPS)),
+                    4 => alloc::format!("return Reflect.apply(Reflect.{tr}, null, arguments)"),
+                    _ => alloc::format!("return Reflect.{tr}.apply(null, arguments)"),
+                };
+                s.push_str(&alloc::format!("{tr}: function () {{ {body} }}, "));
+            }
+        }
+        s.push_str("}; r = Proxy.revocable(target, h); p = r.proxy;\n");
+        for _ in 0..(3 + rng.below(8)) {
+            let op = rng.pick(OPS);
+            let ret = if op.starts_with("for") { "" } else { "return " };
+            s.push_str(&alloc::format!("t(function () {{ {ret}{op} }});\n"));
+        }
+        if rng.chance(30) {
+            s.push_str("p = new Proxy(p, h); t(function () { return p.a }); t(function () { return Object.keys(p) });\n");
+        }
+    }
+    s.push_str("log.length");
+    s
+}
+
 #[test]
 fn fuzz_typed_programs() {
     on_big_stack(|| fuzz_with("typed", &typed_program));
@@ -1362,4 +1425,49 @@ fn fuzz_run_file() {
         Ok(_) => std::println!("ok {:?} steps {}", t.elapsed(), r.steps()),
         Err(e) => std::println!("err {} {:?} steps {}", r.report(&e), t.elapsed(), r.steps()),
     }
+}
+
+#[test]
+fn fuzz_proxy_programs() {
+    on_big_stack(|| fuzz_with("proxy", &proxy_program));
+}
+
+#[test]
+fn proxy_programs_are_valid() {
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0x5151);
+        let mut r = Realm::new(Options::default());
+        for _ in 0..300 {
+            let src = proxy_program(&mut rng);
+            if let Err(e) = r.check_syntax(&src, "t.js") {
+                panic!("{e}\n{src}");
+            }
+        }
+    });
+}
+
+/// The proxy programs under GC stress as well.
+#[test]
+fn fuzz_proxy_gc_stress() {
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0x9191);
+        for i in 0..iters() / 4 {
+            let src = proxy_program(&mut rng);
+            let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut r = Realm::new(Options::default());
+                r.heap.stress = 2;
+                r.set_limits(Limits {
+                    max_heap_bytes: 8 << 20,
+                    max_steps: 200_000,
+                    max_call_depth: 200,
+                    ..Limits::default()
+                });
+                let _ = r.eval(&src, "fuzz.js");
+                let _ = r.run_jobs();
+            }));
+            if out.is_err() {
+                panic!("proxy gc stress case {i} panicked; source:\n{src}");
+            }
+        }
+    });
 }

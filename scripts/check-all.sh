@@ -95,6 +95,7 @@ TESTS=(
   "serial-soak|q|300|par|scripts/serial-soak.sh 2 3"
   "pi-qemu-test|q|900|par|scripts/pi-qemu-test.sh"
   "highmem-test|q|600|par|scripts/highmem-test.sh"
+  "usb-test|q|600|par|scripts/usb-test.sh"
   "net-test|s|600|par|scripts/net-test.sh"
   "web-test|q|600|par|scripts/web-test.sh @WORK@"
   "pkg-test|s|600|par|scripts/pkg-test.sh"

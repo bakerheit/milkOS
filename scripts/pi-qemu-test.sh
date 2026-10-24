@@ -75,7 +75,7 @@ check() { # pattern what
 }
 
 # ---- boot 1 ----
-boot 1 "wait@300:$P" \
+boot 1 "wait@300:wm: desktop up" \
   "send:system" "wait:$P" \
   "send:disks" "wait:$P" \
   "send:print hello-from-the-pi > /Users/milk/Documents/pi.txt" "wait:$P" \

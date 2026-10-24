@@ -238,6 +238,33 @@ static STATE: SpinLock<State> = SpinLock::new(State {
 // Events dropped because the queue was full.
 static DROPPED: AtomicU64 = AtomicU64::new(0);
 
+// What the producers have fed in, for /proc/input (and the USB test): key presses and releases (auto-repeats
+// are counted separately), button changes, pointer moves, scroll events.
+static KEYS: AtomicU64 = AtomicU64::new(0);
+static REPEATS: AtomicU64 = AtomicU64::new(0);
+static BUTTONS: AtomicU64 = AtomicU64::new(0);
+static MOVES: AtomicU64 = AtomicU64::new(0);
+static SCROLLS: AtomicU64 = AtomicU64::new(0);
+
+/// `/proc/input`: how many events of each kind came in since boot, and the last pointer position.
+pub fn stats_text() -> alloc::string::String {
+    use core::fmt::Write;
+    let (x, y) = pointer();
+    let mut s = alloc::string::String::new();
+    let g = |c: &AtomicU64| c.load(Ordering::Relaxed);
+    let _ = writeln!(
+        s,
+        "keys {}\nrepeats {}\nbuttons {}\nmoves {}\nscrolls {}\ndropped {}\npointer {x} {y}",
+        g(&KEYS),
+        g(&REPEATS),
+        g(&BUTTONS),
+        g(&MOVES),
+        g(&SCROLLS),
+        dropped()
+    );
+    s
+}
+
 const MAX_SUBSCRIBERS: usize = 4;
 static SUBSCRIBERS: [FnSlot; MAX_SUBSCRIBERS] = [const { FnSlot::new() }; MAX_SUBSCRIBERS];
 
@@ -357,6 +384,11 @@ pub fn report_key(code: u16, value: i32) {
         return report_button(b, value != 0);
     }
 
+    if value == 2 {
+        REPEATS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        KEYS.fetch_add(1, Ordering::Relaxed);
+    }
     let key = KeyCode::from_evdev(code);
     let ev = {
         let mut s = STATE.lock();
@@ -401,6 +433,7 @@ pub fn report_key(code: u16, value: i32) {
 
 /// Feed a pointer button change.
 pub fn report_button(button: MouseButton, down: bool) {
+    BUTTONS.fetch_add(1, Ordering::Relaxed);
     let ev = {
         let mut s = STATE.lock();
         let bit = 1 << button as u8;
@@ -428,6 +461,7 @@ pub fn report_button(button: MouseButton, down: bool) {
 
 /// Feed an absolute pointer position in screen pixels (clamped to the screen).
 pub fn report_pointer(x: i32, y: i32) {
+    MOVES.fetch_add(1, Ordering::Relaxed);
     let ev = {
         let mut s = STATE.lock();
         let (x, y) = (x.clamp(0, s.width - 1), y.clamp(0, s.height - 1));
@@ -455,6 +489,7 @@ pub fn report_scroll(dx: i32, dy: i32) {
     if dx == 0 && dy == 0 {
         return;
     }
+    SCROLLS.fetch_add(1, Ordering::Relaxed);
     let ev = Event::Scroll { dx, dy };
     STATE.lock().push(ev);
     emit(Some(ev));

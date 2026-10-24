@@ -168,6 +168,19 @@ impl Dtb {
         found
     }
 
+    /// Like [`Dtb::find`], for the first node whose name starts with `prefix` (`pcie@` matches
+    /// `pcie@10000000`).
+    pub fn find_prefix(&self, prefix: &[u8], prop: &[u8]) -> Option<&'static [u8]> {
+        let mut found: Option<&'static [u8]> = None;
+        self.for_each_prop(|_parent, n, depth, p, data| {
+            if found.is_none() && depth >= 2 && n.starts_with(prefix) && p == prop {
+                // SAFETY: as in `find`.
+                found = Some(unsafe { core::slice::from_raw_parts(data.as_ptr(), data.len()) });
+            }
+        });
+        found
+    }
+
     /// The root node's `compatible` (NUL-separated strings), empty if absent.
     pub fn root_compatible(&self) -> &'static [u8] {
         let mut found: &'static [u8] = &[];

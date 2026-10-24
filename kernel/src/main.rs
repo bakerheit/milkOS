@@ -13,6 +13,7 @@ mod crashscreen;
 mod crypto;
 mod cursor;
 mod display;
+mod dma;
 mod dtb;
 mod exceptions;
 mod fbcon;
@@ -30,6 +31,7 @@ mod mem;
 mod memtest;
 mod mmu;
 mod net;
+mod pci;
 mod percpu;
 mod platform;
 mod pmm;
@@ -48,10 +50,12 @@ mod sync;
 mod sysfont;
 mod sysfont_data;
 mod sysstat;
+mod timeout;
 mod timer;
 mod tlb;
 mod uart;
 mod udrv;
+mod usb;
 mod virtio;
 mod wm;
 
@@ -151,6 +155,7 @@ pub extern "C" fn kmain() -> ! {
     proc::init();
     proc::start_init();
     fs::start_threads();
+    usb::start();
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the
     // screen and draws the mouse cursor from here on.

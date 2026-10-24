@@ -701,10 +701,18 @@ fn pi8_tree() -> Blob {
     f.cells(
         "reg",
         &[
-            0, 0, 0x3b40_0000, // 948 MiB
-            0, 0x4000_0000, 0xbc00_0000, // up to the peripherals
-            1, 0, 0x8000_0000, // 4 GiB .. 6 GiB
-            1, 0x8000_0000, 0x8000_0000, // 6 GiB .. 8 GiB
+            0,
+            0,
+            0x3b40_0000, // 948 MiB
+            0,
+            0x4000_0000,
+            0xbc00_0000, // up to the peripherals
+            1,
+            0,
+            0x8000_0000, // 4 GiB .. 6 GiB
+            1,
+            0x8000_0000,
+            0x8000_0000, // 6 GiB .. 8 GiB
         ],
     );
     f.end();
@@ -722,7 +730,10 @@ fn banks_pi4_gb8_uses_memory_above_4gib() {
     assert_eq!(n, 3, "the two high entries touch and merge");
     assert_eq!((banks[0].base, banks[0].size), (0, 0x3b40_0000));
     assert_eq!((banks[1].base, banks[1].size), (0x4000_0000, 0xbc00_0000));
-    assert_eq!((banks[2].base, banks[2].size), (0x1_0000_0000, 0x1_0000_0000));
+    assert_eq!(
+        (banks[2].base, banks[2].size),
+        (0x1_0000_0000, 0x1_0000_0000)
+    );
     let total: usize = banks[..n].iter().map(|b| b.size).sum();
     assert_eq!(total, 0x3b40_0000 + 0xbc00_0000 + 0x1_0000_0000);
 }
@@ -743,7 +754,10 @@ fn banks_the_holes_are_what_is_between() {
         }
         prev_end = prev_end.max(b.base + b.size);
     }
-    assert_eq!(holes, [(0x3b40_0000, 0x4000_0000), (0xfc00_0000, 0x1_0000_0000)]);
+    assert_eq!(
+        holes,
+        [(0x3b40_0000, 0x4000_0000), (0xfc00_0000, 0x1_0000_0000)]
+    );
 }
 
 #[test]
@@ -790,4 +804,641 @@ fn banks_hostile_input() {
     let (b, n) = crate::dtb::usable_banks(&[mr(0x100, 0x3000)], 0x1000, usize::MAX, 4096);
     assert_eq!(n, 1);
     assert_eq!((b[0].base, b[0].size), (0x1000, 0x2000));
+}
+
+// ---- USB ---------------------------------------------------------------------------------
+
+mod usb_tests {
+    use crate::usb::*;
+    use std::vec::Vec;
+
+    #[test]
+    fn setup_stage_for_get_descriptor() {
+        let t = setup_stage(req::get_descriptor(req::DESC_DEVICE, 0, 18), true);
+        // 80 06 00 01 00 00 12 00 on the wire.
+        assert_eq!(t.param, 0x0012_0000_0100_0680);
+        assert_eq!(t.status, 8);
+        // type 2 (setup), immediate data, transfer type 3 (IN data stage), cycle 1.
+        assert_eq!(t.control, 2 << 10 | 1 << 6 | 3 << 16 | 1);
+        assert_eq!(t.kind(), trb_type::SETUP_STAGE);
+        // No data stage: transfer type 0.
+        let t = setup_stage(req::set_configuration(1), false);
+        assert_eq!(t.control, 2 << 10 | 1 << 6);
+        assert_eq!(t.param, 0x0000_0000_0001_0900);
+        // OUT data: 2.
+        let s = Setup {
+            request_type: 0x21,
+            request: 9,
+            value: 0,
+            index: 0,
+            length: 1,
+        };
+        assert_eq!(setup_stage(s, false).control >> 16 & 3, 2);
+    }
+
+    #[test]
+    fn data_status_normal_and_link_trbs() {
+        let d = data_stage(0x1234_5000, 18, true, true);
+        assert_eq!((d.param, d.status), (0x1234_5000, 18));
+        assert_eq!(d.control, 3 << 10 | 1 << 16 | 1);
+        let s = status_stage(false, true);
+        assert_eq!(s.control, 4 << 10 | 1 << 5 | 1); // IOC, direction OUT
+        let s = status_stage(true, false);
+        assert_eq!(s.control, 4 << 10 | 1 << 5 | 1 << 16);
+        let n = normal(0x8000, 8, false);
+        assert_eq!(n.control, 1 << 10 | 1 << 5);
+        let l = link(0x1000, true, true);
+        assert_eq!(l.control, 6 << 10 | 1 << 1 | 1);
+        assert_eq!(l.param, 0x1000);
+        assert!(chained(n).control & 1 << 4 != 0);
+        // Words in memory order and back.
+        let w = d.words();
+        assert_eq!(w, [0x1234_5000, 0, 18, 3 << 10 | 1 << 16 | 1]);
+        assert_eq!(Trb::from_words(w), d);
+        assert!(!d.with_cycle(false).cycle());
+    }
+
+    #[test]
+    fn command_trbs() {
+        assert_eq!(enable_slot(true).control, 9 << 10 | 1);
+        let a = address_device(0x2000, 3, false, true);
+        assert_eq!(a.param, 0x2000);
+        assert_eq!(a.control, 11 << 10 | 3 << 24 | 1);
+        assert_eq!(
+            address_device(0x2000, 3, true, false).control,
+            11 << 10 | 3 << 24 | 1 << 9
+        );
+        assert_eq!(
+            configure_endpoint(0x3000, 2, true).control,
+            12 << 10 | 2 << 24 | 1
+        );
+        assert_eq!(disable_slot(5, false).control, 10 << 10 | 5 << 24);
+        assert_eq!(noop_command(true).kind(), trb_type::NO_OP_COMMAND);
+    }
+
+    #[test]
+    fn events_decode() {
+        // Command completion: slot 4 assigned, success.
+        let t = Trb {
+            param: 0x1010,
+            status: (code::SUCCESS as u32) << 24,
+            control: 33 << 10 | 4 << 24 | 1,
+        };
+        assert_eq!(
+            decode_event(&t),
+            Event::CommandCompletion {
+                trb: 0x1010,
+                code: 1,
+                slot: 4
+            }
+        );
+        // Transfer event: short packet, 3 bytes left, slot 2, endpoint DCI 3.
+        let t = Trb {
+            param: 0x5000,
+            status: (code::SHORT_PACKET as u32) << 24 | 3,
+            control: 32 << 10 | 3 << 16 | 2 << 24 | 1,
+        };
+        assert_eq!(
+            decode_event(&t),
+            Event::Transfer {
+                trb: 0x5000,
+                code: 13,
+                residual: 3,
+                slot: 2,
+                dci: 3
+            }
+        );
+        // Port status change: port 2.
+        let t = Trb {
+            param: 2 << 24,
+            status: 1 << 24,
+            control: 34 << 10 | 1,
+        };
+        assert_eq!(decode_event(&t), Event::PortStatusChange { port: 2 });
+        assert_eq!(
+            decode_event(&Trb {
+                control: 37 << 10,
+                ..Trb::default()
+            }),
+            Event::Other(37)
+        );
+    }
+
+    #[test]
+    fn port_register_writes_do_not_clear_by_accident() {
+        // Connected, enabled, powered, with a connect-change and a reset-change pending, full speed.
+        let v = portsc::CCS | portsc::PED | portsc::PP | portsc::CSC | portsc::PRC | 1 << 10;
+        assert_eq!(portsc::speed(v), speed::FULL);
+        // Clearing only the connect change: PED must not be written as 1 (that disables the port), the
+        // other change bit must not be either.
+        let w = portsc::write_clearing(v, portsc::CSC);
+        assert_eq!(w & portsc::PED, 0);
+        assert_eq!(w & portsc::PRC, 0);
+        assert_ne!(w & portsc::CSC, 0);
+        assert_ne!(w & portsc::PP, 0, "power stays on");
+        // A reset: PR set, no change bits, no PED.
+        let w = portsc::write_reset(v);
+        assert_eq!(w & portsc::CHANGE_BITS, 0);
+        assert_ne!(w & portsc::PR, 0);
+        assert_eq!(w & portsc::PED, 0);
+        // clear can only name change bits.
+        assert_eq!(
+            portsc::write_clearing(0, portsc::PR | portsc::CSC),
+            portsc::CSC
+        );
+        assert_eq!(portsc::link_state(0x5 << 5), 5);
+    }
+
+    #[test]
+    fn intervals_and_packet_sizes() {
+        // Low speed keyboard asking 10 ms: 80 units of 125 us, rounded down to 64 = 2^6 (8 ms).
+        assert_eq!(interrupt_interval(speed::LOW, 10), 6);
+        assert_eq!(interrupt_interval(speed::FULL, 1), 3);
+        assert_eq!(interrupt_interval(speed::FULL, 8), 6);
+        assert_eq!(interrupt_interval(speed::FULL, 255), 10); // capped at 2^10 * 125 us
+        assert_eq!(interrupt_interval(speed::FULL, 0), 3); // nonsense still gives a legal value
+        // High speed counts 2^(n-1) microframes.
+        assert_eq!(interrupt_interval(speed::HIGH, 4), 3);
+        assert_eq!(interrupt_interval(speed::SUPER, 1), 0);
+        assert_eq!(interrupt_interval(speed::HIGH, 0), 0);
+        assert_eq!(interrupt_interval(speed::HIGH, 200), 15);
+        assert_eq!(default_max_packet0(speed::LOW), 8);
+        assert_eq!(default_max_packet0(speed::FULL), 64);
+        assert_eq!(default_max_packet0(speed::SUPER), 512);
+        assert_eq!(default_max_packet0(0), 8);
+    }
+
+    #[test]
+    fn device_context_indexes() {
+        assert_eq!(dci(0x00), 1);
+        assert_eq!(dci(0x80), 1);
+        assert_eq!(dci(0x81), 3);
+        assert_eq!(dci(0x01), 2);
+        assert_eq!(dci(0x83), 7);
+        assert_eq!(dci(0x0f), 30);
+        assert_eq!(dci(0x8f), 31);
+    }
+
+    #[test]
+    fn contexts_are_laid_out_as_the_spec_says() {
+        for csz in [false, true] {
+            let n = ctx_dwords(csz);
+            assert_eq!(input_slot_offset(csz), n);
+            assert_eq!(input_ep_offset(csz, 1), 2 * n);
+            assert_eq!(input_ep_offset(csz, 3), 4 * n);
+            assert_eq!(input_ctx_dwords(csz), 33 * n);
+            assert_eq!(device_ctx_dwords(csz), 32 * n);
+        }
+        let mut ctx = std::vec![0u32; input_ctx_dwords(false)];
+        fill_input_control(&mut ctx, 0, 0b11);
+        assert_eq!((ctx[0], ctx[1]), (0, 3));
+        let so = input_slot_offset(false);
+        fill_slot(&mut ctx[so..], speed::LOW, 1, 2);
+        // speed 2 in 23:20, 1 context entry in 31:27, root port 2 in 23:16 of dword 1.
+        assert_eq!(ctx[so], 2 << 20 | 1 << 27);
+        assert_eq!(ctx[so + 1], 2 << 16);
+        let eo = input_ep_offset(false, 1);
+        fill_ep0(&mut ctx[eo..], 8, 0x1_2345_6000);
+        // CErr 3, type 4 (control), max packet 8; dequeue pointer | DCS.
+        assert_eq!(ctx[eo + 1], 3 << 1 | 4 << 3 | 8 << 16);
+        assert_eq!(ctx[eo + 2], 0x2345_6001);
+        assert_eq!(ctx[eo + 3], 1);
+        let eo = input_ep_offset(false, 3);
+        fill_interrupt_in(&mut ctx[eo..], 8, 6, 0x4000);
+        assert_eq!(ctx[eo], 6 << 16);
+        assert_eq!(ctx[eo + 1], 3 << 1 | 7 << 3 | 8 << 16);
+        assert_eq!(ctx[eo + 2], 0x4001);
+        assert_eq!(ctx[eo + 4], 8 | 8 << 16);
+    }
+
+    /// A configuration descriptor of a boot keyboard with a boot mouse interface (the shape of a
+    /// combined receiver), then a vendor interface, then a keyboard alternate setting.
+    fn composite_config() -> Vec<u8> {
+        let mut c = std::vec![
+            9, 2, 0, 0, 3, 1, 0, 0xa0, 50, // configuration: 3 interfaces, value 1
+            // interface 0: HID boot keyboard
+            9, 4, 0, 0, 1, 3, 1, 1, 0, 9, 0x21, 0x11, 0x01, 0, 1, 0x22, 63,
+            0, // HID descriptor
+            7, 5, 0x81, 3, 8, 0, 10, // endpoint IN 1, interrupt, 8 bytes, 10 ms
+            // interface 1: HID boot mouse
+            9, 4, 1, 0, 1, 3, 1, 2, 0, 9, 0x21, 0x11, 0x01, 0, 1, 0x22, 52, 0, 7, 5, 0x82, 3, 4, 0,
+            8, // interface 2: vendor specific with bulk endpoints
+            9, 4, 2, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x03, 2, 64, 0, 0, 7, 5, 0x84, 2, 64, 0, 0,
+        ];
+        let total = c.len() as u16;
+        c[2..4].copy_from_slice(&total.to_le_bytes());
+        c
+    }
+
+    #[test]
+    fn finds_the_hid_boot_interfaces() {
+        let cfg = composite_config();
+        assert_eq!(config_total_length(&cfg), Some(cfg.len() as u16));
+        let mut out = [HidBoot {
+            config: 0,
+            interface: 0,
+            kind: HidKind::Keyboard,
+            ep_addr: 0,
+            max_packet: 0,
+            interval: 0,
+        }; MAX_HID];
+        let n = find_hid_boot(&cfg, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(
+            out[0],
+            HidBoot {
+                config: 1,
+                interface: 0,
+                kind: HidKind::Keyboard,
+                ep_addr: 0x81,
+                max_packet: 8,
+                interval: 10
+            }
+        );
+        assert_eq!(
+            out[1],
+            HidBoot {
+                config: 1,
+                interface: 1,
+                kind: HidKind::Mouse,
+                ep_addr: 0x82,
+                max_packet: 4,
+                interval: 8
+            }
+        );
+    }
+
+    #[test]
+    fn descriptor_walk_survives_damage() {
+        let good = composite_config();
+        let mut out = [HidBoot {
+            config: 0,
+            interface: 0,
+            kind: HidKind::Keyboard,
+            ep_addr: 0,
+            max_packet: 0,
+            interval: 0,
+        }; MAX_HID];
+        // Every truncation and every single-byte corruption: no panic, never more than MAX_HID.
+        for cut in 0..=good.len() {
+            let n = find_hid_boot(&good[..cut], &mut out);
+            assert!(n <= MAX_HID);
+        }
+        for i in 0..good.len() {
+            for v in [0u8, 1, 0x7f, 0xff] {
+                let mut bad = good.clone();
+                bad[i] = v;
+                assert!(find_hid_boot(&bad, &mut out) <= MAX_HID);
+            }
+        }
+        // A zero-length descriptor must not loop forever.
+        let mut z = good.clone();
+        z[9] = 0;
+        let _ = find_hid_boot(&z, &mut out);
+        // A mouse-class interface with no endpoint yields nothing.
+        let mut c = std::vec![9, 2, 18, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 0, 3, 1, 2, 0];
+        let l = c.len() as u16;
+        c[2..4].copy_from_slice(&l.to_le_bytes());
+        assert_eq!(find_hid_boot(&c, &mut out), 0);
+    }
+
+    #[test]
+    fn device_descriptor() {
+        let d = [
+            18u8, 1, 0, 2, 0, 0, 0, 8, 0x6d, 0x04, 0x16, 0xc0, 0, 0x20, 1, 2, 0, 1,
+        ];
+        let p = parse_device(&d).unwrap();
+        assert_eq!(
+            (p.class, p.max_packet0, p.vendor, p.product, p.num_configs),
+            (0, 8, 0x046d, 0xc016, 1)
+        );
+        // Only the first 8 bytes: the packet size is there, the rest not.
+        let p = parse_device(&d[..8]).unwrap();
+        assert_eq!((p.max_packet0, p.vendor), (8, 0));
+        assert!(parse_device(&d[..7]).is_none());
+        assert!(
+            parse_device(&[18, 2, 0, 0, 0, 0, 0, 8]).is_none(),
+            "not a device descriptor"
+        );
+        assert_eq!(config_total_length(&[9, 2, 0x22, 0, 1]), Some(0x22));
+        assert_eq!(config_total_length(&[9, 1, 0x22, 0]), None);
+    }
+
+    fn collect_keys(kb: &mut Keyboard, report: [u8; 8], now: u64) -> Vec<(u16, i32)> {
+        let mut v = Vec::new();
+        kb.report(&report, now, |c| v.push((c.evdev, c.value)));
+        v
+    }
+
+    #[test]
+    fn keyboard_press_release_and_modifiers() {
+        let mut kb = Keyboard::new();
+        // Press a.
+        assert_eq!(
+            collect_keys(&mut kb, [0, 0, 0x04, 0, 0, 0, 0, 0], 0),
+            [(30, 1)]
+        );
+        // Left shift goes down while a is held, then z: shift first, then the new key.
+        assert_eq!(
+            collect_keys(&mut kb, [2, 0, 0x04, 0x1d, 0, 0, 0, 0], 10),
+            [(42, 1), (44, 1)]
+        );
+        // Release a and shift together with z still down: letters first, modifiers last.
+        assert_eq!(
+            collect_keys(&mut kb, [0, 0, 0x1d, 0, 0, 0, 0, 0], 20),
+            [(30, 0), (42, 0)]
+        );
+        assert_eq!(collect_keys(&mut kb, [0; 8], 30), [(44, 0)]);
+        // A right-hand modifier.
+        assert_eq!(
+            collect_keys(&mut kb, [0x20, 0, 0, 0, 0, 0, 0, 0], 40),
+            [(54, 1)]
+        );
+        assert_eq!(collect_keys(&mut kb, [0; 8], 50), [(54, 0)]);
+        // Same report twice: nothing.
+        assert_eq!(
+            collect_keys(&mut kb, [0, 0, 0x28, 0, 0, 0, 0, 0], 60),
+            [(28, 1)]
+        );
+        assert_eq!(collect_keys(&mut kb, [0, 0, 0x28, 0, 0, 0, 0, 0], 70), []);
+    }
+
+    #[test]
+    fn keyboard_rollover_and_short_reports() {
+        let mut kb = Keyboard::new();
+        collect_keys(&mut kb, [0, 0, 0x04, 0, 0, 0, 0, 0], 0);
+        // The phantom report (too many keys): ignored, a is still down.
+        assert_eq!(collect_keys(&mut kb, [0, 0, 1, 1, 1, 1, 1, 1], 5), []);
+        assert_eq!(collect_keys(&mut kb, [0; 8], 10), [(30, 0)]);
+        let mut v = Vec::new();
+        kb.report(&[0, 0, 0x04], 20, |c| v.push(c));
+        assert!(v.is_empty(), "a report shorter than 8 bytes is ignored");
+        // Unknown usages are skipped without disturbing the rest.
+        assert_eq!(
+            collect_keys(&mut kb, [0, 0, 0xe8, 0x04, 0, 0, 0, 0], 30),
+            [(30, 1)]
+        );
+    }
+
+    #[test]
+    fn keyboard_repeats_the_last_key_after_a_delay() {
+        let mut kb = Keyboard::new();
+        collect_keys(&mut kb, [0, 0, 0x04, 0, 0, 0, 0, 0], 1000);
+        let mut v = Vec::new();
+        kb.tick(1400, |c| v.push(c));
+        assert!(v.is_empty(), "not before the delay");
+        kb.tick(1500, |c| v.push(c));
+        assert_eq!(
+            v,
+            [KeyChange {
+                evdev: 30,
+                value: 2
+            }]
+        );
+        v.clear();
+        kb.tick(1510, |c| v.push(c));
+        assert!(v.is_empty());
+        kb.tick(1533, |c| v.push(c));
+        assert_eq!(v.len(), 1);
+        // A second key takes over the repeat; releasing it stops the repeat.
+        collect_keys(&mut kb, [0, 0, 0x04, 0x05, 0, 0, 0, 0], 1600);
+        v.clear();
+        kb.tick(2200, |c| v.push(c));
+        assert_eq!(
+            v,
+            [KeyChange {
+                evdev: 48,
+                value: 2
+            }]
+        );
+        collect_keys(&mut kb, [0, 0, 0x04, 0, 0, 0, 0, 0], 2300);
+        v.clear();
+        kb.tick(3000, |c| v.push(c));
+        assert!(
+            v.is_empty(),
+            "the repeating key was released; the older one does not take over"
+        );
+    }
+
+    #[test]
+    fn keyboard_release_all_on_unplug() {
+        let mut kb = Keyboard::new();
+        collect_keys(&mut kb, [0x01, 0, 0x04, 0x05, 0, 0, 0, 0], 0);
+        let mut v = Vec::new();
+        kb.release_all(|c| v.push((c.evdev, c.value)));
+        assert_eq!(v, [(30, 0), (48, 0), (29, 0)]);
+        let mut v = Vec::new();
+        kb.release_all(|c| v.push(c));
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn every_usage_maps_to_a_distinct_key() {
+        let mut seen = std::collections::BTreeSet::new();
+        for u in 0x04u8..=0x67 {
+            let e = usage_to_evdev(u);
+            if e != 0 {
+                // (0x31 and 0x32 both mean the backslash key.)
+                if u != 0x32 {
+                    assert!(seen.insert(e), "usage {u:#x} repeats evdev code {e}");
+                }
+            }
+        }
+        assert_eq!(usage_to_evdev(0x04), 30); // a
+        assert_eq!(usage_to_evdev(0x1d), 44); // z
+        assert_eq!(usage_to_evdev(0x1e), 2); // 1
+        assert_eq!(usage_to_evdev(0x27), 11); // 0
+        assert_eq!(usage_to_evdev(0x3a), 59); // F1
+        assert_eq!(usage_to_evdev(0x45), 88); // F12
+        assert_eq!(usage_to_evdev(0x52), 103); // up
+        assert_eq!(usage_to_evdev(0xff), 0);
+        assert_eq!(usage_to_evdev(0x01), 0);
+    }
+
+    #[test]
+    fn mouse_reports() {
+        let m = parse_mouse(&[0b101, 5, 0xfb, 0xff]).unwrap();
+        assert_eq!(
+            m,
+            MouseReport {
+                buttons: 5,
+                dx: 5,
+                dy: -5,
+                wheel: -1
+            }
+        );
+        let m = parse_mouse(&[0, 127, 0x80]).unwrap();
+        assert_eq!((m.dx, m.dy, m.wheel), (127, -128, 0));
+        assert!(parse_mouse(&[1, 2]).is_none());
+        assert_eq!(
+            parse_mouse(&[0xff, 0, 0]).unwrap().buttons,
+            7,
+            "only the three buttons"
+        );
+    }
+}
+
+mod pci_tests {
+    use crate::pci::*;
+
+    #[test]
+    fn ids_and_classes() {
+        assert!(present(0x1234_8086));
+        assert!(!present(0xffff_ffff));
+        assert!(!present(0xaaaa_ffff));
+        assert!(!present(0));
+        assert_eq!((vendor(0x0d10_1106), device(0x0d10_1106)), (0x1106, 0x0d10));
+        // The VL805: class 0c03, programming interface 30 (xHCI).
+        assert_eq!(class_codes(0x0c03_3001), (0x0c, 0x03, 0x30));
+        assert!(is_xhci(0x0c03_3001));
+        assert!(!is_xhci(0x0c03_2001)); // EHCI
+        assert!(!is_xhci(0x0604_0000)); // a bridge
+        assert_eq!(header_type(0x0001_0000), (1, false));
+        assert_eq!(header_type(0x0081_0000), (1, true));
+        assert_eq!(header_type(0x0080_0000), (0, true));
+    }
+
+    #[test]
+    fn bar_sizing() {
+        // 64 KiB 32-bit BAR: all ones written, 0xffff0000 read back.
+        assert_eq!(bar_kind(0xffff_0000), BarKind::Mem32 { prefetch: false });
+        assert_eq!(bar_size(0xffff_0000, 0), 0x1_0000);
+        // 16 KiB 64-bit non-prefetchable (qemu's xHCI): low dword ffffc004, high ffffffff.
+        assert_eq!(bar_kind(0xffff_c004), BarKind::Mem64 { prefetch: false });
+        assert_eq!(bar_size(0xffff_c004, 0xffff_ffff), 0x4000);
+        // A 64-bit BAR of 8 GiB: the high dword has the size bits.
+        assert_eq!(bar_size(0x0000_0004, 0xffff_fffe), 0x2_0000_0000);
+        assert_eq!(bar_kind(0xffff_fff1), BarKind::Io);
+        assert_eq!(bar_size(0xffff_fff1, 0), 0);
+        assert_eq!(bar_kind(0), BarKind::None);
+        assert_eq!(bar_size(0, 0), 0);
+        assert_eq!(bar_kind(0xffff_fff8), BarKind::Mem32 { prefetch: true });
+    }
+
+    #[test]
+    fn window_allocation_is_aligned_and_bounded() {
+        let mut w = Window::new(0x1000_0000, 0x10_0000);
+        assert_eq!(w.alloc(0x4000, 0x4000), Some(0x1000_0000));
+        assert_eq!(w.alloc(0x1000, 0x1000), Some(0x1000_4000));
+        // A big one aligns up, leaving a gap.
+        assert_eq!(w.alloc(0x8_0000, 0x8_0000), Some(0x1008_0000));
+        // The window is nearly gone.
+        assert_eq!(w.alloc(0x8_0000, 0x8_0000), None);
+        assert_eq!(w.alloc(0, 0x1000), None);
+        assert_eq!(w.alloc(0x1000, 3), None, "alignment must be a power of two");
+        assert!(w.alloc(u64::MAX, 1).is_none());
+        // A window at the top of the address space does not wrap.
+        let mut w = Window::new(u64::MAX - 0xfff, 0x1000);
+        assert!(w.alloc(0x2000, 0x1000).is_none());
+    }
+
+    #[test]
+    fn bridge_windows() {
+        // 0x10000000 .. 0x10300000: base field 0x1000, limit field 0x102 (the last MiB).
+        assert_eq!(
+            bridge_mem_window(0x1000_0000, 0x1030_0000),
+            Some(0x1020_1000)
+        );
+        assert_eq!(
+            bridge_mem_window(0x1000_0000, 0x1010_0000),
+            Some(0x1000_1000)
+        );
+        assert_eq!(bridge_mem_window(0x1000_0000, 0x1000_0000), None);
+        assert_eq!(
+            bridge_mem_window(0x1000_1000, 0x1020_0000),
+            None,
+            "not 1 MiB aligned"
+        );
+        assert_eq!(bridge_mem_window(0xff00_0000, 1 << 32), Some(0xfff0_ff00));
+        assert_eq!(bridge_mem_window(0xff00_0000, (1 << 32) + (1 << 20)), None);
+        // Closed: base 0xfff0 above limit 0x0000.
+        assert!(BRIDGE_WINDOW_CLOSED & 0xfff0 > BRIDGE_WINDOW_CLOSED >> 16);
+    }
+
+    #[test]
+    fn host_bridge_ranges_from_a_virt_tree() {
+        // qemu virt's pcie node: I/O at 0x3eff0000 (64 KiB), 32-bit memory 0x10000000 + 0x2eff0000,
+        // 64-bit memory at 0x80_0000_0000. 7 cells each: 3 pci, 2 cpu, 2 size.
+        let cells: [u32; 21] = [
+            0x0100_0000,
+            0,
+            0,
+            0,
+            0x3eff_0000,
+            0,
+            0x1_0000,
+            0x0200_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x2eff_0000,
+            0x0300_0000,
+            0x80,
+            0,
+            0x80,
+            0,
+            0x80,
+            0,
+        ];
+        let data: std::vec::Vec<u8> = cells.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let mut r = [Range {
+            space: 0,
+            prefetch: false,
+            pci_addr: 0,
+            cpu_addr: 0,
+            size: 0,
+        }; MAX_RANGES];
+        assert_eq!(parse_ranges(&data, 2, 2, &mut r), 3);
+        assert_eq!(
+            r[0],
+            Range {
+                space: 1,
+                prefetch: false,
+                pci_addr: 0,
+                cpu_addr: 0x3eff_0000,
+                size: 0x1_0000
+            }
+        );
+        assert_eq!(
+            r[1],
+            Range {
+                space: 2,
+                prefetch: false,
+                pci_addr: 0x1000_0000,
+                cpu_addr: 0x1000_0000,
+                size: 0x2eff_0000
+            }
+        );
+        assert_eq!(r[2].space, 3);
+        assert_eq!(r[2].cpu_addr, 0x80_0000_0000);
+        assert_eq!(memory_window(&r[..3]).unwrap().pci_addr, 0x1000_0000);
+        // Truncated data gives only whole entries; nonsense cell counts give nothing.
+        assert_eq!(parse_ranges(&data[..data.len() - 1], 2, 2, &mut r), 2);
+        assert_eq!(parse_ranges(&data, 3, 2, &mut r), 0);
+        assert_eq!(parse_ranges(&[], 2, 2, &mut r), 0);
+    }
+
+    #[test]
+    fn host_bridge_ranges_from_a_pi_tree() {
+        // The Pi 4's pcie@7d500000: one 32-bit memory range, PCI 0xf8000000 -> CPU 0x6_00000000, 64 MiB;
+        // 2 parent cells, 1 size cell... (the tree has #size-cells = 2 in /scb, 7 cells: 3 + 2 + 2).
+        let cells: [u32; 7] = [0x0200_0000, 0, 0xf800_0000, 6, 0, 0, 0x0400_0000];
+        let data: std::vec::Vec<u8> = cells.iter().flat_map(|c| c.to_be_bytes()).collect();
+        let mut r = [Range {
+            space: 0,
+            prefetch: false,
+            pci_addr: 0,
+            cpu_addr: 0,
+            size: 0,
+        }; MAX_RANGES];
+        assert_eq!(parse_ranges(&data, 2, 2, &mut r), 1);
+        assert_eq!(r[0].cpu_addr, 0x6_0000_0000);
+        assert_eq!(r[0].pci_addr, 0xf800_0000);
+        assert_eq!(r[0].size, 0x400_0000);
+        let w = memory_window(&r[..1]).unwrap();
+        assert_eq!(w.size, 64 << 20);
+        assert!(memory_window(&[]).is_none());
+    }
 }

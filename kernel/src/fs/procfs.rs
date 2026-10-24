@@ -182,6 +182,7 @@ pub fn init(root_fs: Arc<tmpfs::TmpFs>) -> Result<()> {
     r.add_file("version", || String::from(VERSION));
     r.add_file("interrupts", interrupts);
     r.add_file("mounts", mounts);
+    r.add_file("input", crate::input::stats_text);
     super::mount("/proc", fs.clone())?;
     *PROCFS.lock() = Some(fs);
     Ok(())

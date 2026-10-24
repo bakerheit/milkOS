@@ -129,7 +129,7 @@ LONG = page(
 SOURCE = (
     "<!DOCTYPE html>\n<html>\n<head><title>Source test</title></head>\n<body>\n<h1>A page with a script</h1>\n"
     "<p>Fish &amp; chips &lt;hot&gt;</p>\n<script>console.log('SRCTEST page script ran');</script>\n</body>\n</html>\n"
-)
+).encode("utf-8")
 
 STYLED = page(
     "Styled page",

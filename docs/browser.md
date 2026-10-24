@@ -28,7 +28,8 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   one (Cmd-W is the window system's and closes the window), Ctrl-Tab / Ctrl-Shift-Tab and
   Cmd-1..9 switch, a middle click on a tab closes it, Cmd-click (or the middle button, or a
   link with `target=_blank`) opens a link in a new tab.
-* **The address bar** (Cmd-L): an address (no scheme means http), `milk:newtab`,
+* **The address bar** (Cmd-L): an address (no scheme means http), `view-source:ADDRESS` (the
+  page's source, see "View source" below; Cmd-Alt-U does it for the page you are on), `milk:newtab`,
   `milk:bookmarks`, `milk:history`, `milk:downloads`, `milk:cookies`, or bare words, which
   become a search with the engine picked in Settings > Browser (DuckDuckGo Lite unless you
   pick another; see Search engines below). Offline, a page says searching needs the internet.
@@ -662,11 +663,12 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   (`WORKERS_TEST_SHOTS=DIR` keeps them; `WORKERS_TEST_ONLY="basic net"` runs sections).
   Host tests: `webengine-unit` runs real worker threads against a small stand-in app
   (`src/tests/workers.rs`: the platform inside, every script source, errors, transfer, ports,
-  terminate, close, runaway and memory-hungry workers, the cap, hostile messages both ways),
-  the port links (`ports.rs`), and `browserkit-unit` the hub (`browserkit/src/workers.rs`:
+  terminate, close, runaway and memory-hungry workers, the cap, hostile messages both ways, a
+  worker on a small stack asked for what nests too deep), the port links (`ports.rs`, with a
+  fuzz of two linked tables whose books must balance when everything is closed), and `browserkit-unit` the hub (`browserkit/src/workers.rs`:
   limits, routing, termination by navigation, tab and frame, zombies, the heap budget, a full
-  inbox, `data:` sources) and `view-source:` (addresses, numbering, escaping, wrapping, the
-  caps). `browser-test.sh` checks that Cmd-Alt-U fetches the page again and runs none of its
+  inbox, `data:` sources, a fuzz of random use against the caps) and `view-source:` (addresses,
+  numbering, escaping, wrapping, the caps, a fuzz of hostile text). `browser-test.sh` checks that Cmd-Alt-U fetches the page again and runs none of its
   script.
 * The script loader against the standard (`webengine-unit`, `src/tests/loading.rs`): blocking,
   `defer` and `async` order for any arrival order, a script that throws or does not compile, a

@@ -287,7 +287,7 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
             }
         }
         host.blocked = 0.0;
-        doc.run(&mut host);
+        let ran = doc.run(&mut host);
         while doc.worker_started() && !doc.worker_closing() && host.why.is_none() {
             let Some(m) = early.pop_front() else { break };
             host.blocked = 0.0;
@@ -343,7 +343,11 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
         if !host.stash.is_empty() || took > 0 {
             continue;
         }
-        let timeout = doc.next_wake().map(|w| (w - host.io.now()).max(0.0));
+        let mut timeout = doc.next_wake().map(|w| (w - host.io.now()).max(0.0));
+        // Work that says it is due and did nothing is not allowed to spin the thread.
+        if !ran && timeout == Some(0.0) {
+            timeout = Some(1.0);
+        }
         match host.io.recv(timeout.map(|t| t.min(60_000.0))) {
             Recv::Terminated => {
                 end = CloseWhy::Terminated;

@@ -803,6 +803,80 @@ mod tests {
     }
 
     #[test]
+    fn random_use_never_breaks_the_caps() {
+        let mut x = 0x0123_4567_89ab_cdefu64;
+        let mut rnd = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let mut h = hub();
+        let mut next = 1u32;
+        let mut live: Vec<u32> = Vec::new();
+        for step in 0..3000u64 {
+            let owner = Owner { tab: 1 + rnd(4), epoch: 1 + rnd(3), frame: rnd(3) as u32 };
+            match rnd(10) {
+                0..=2 => {
+                    let id = next;
+                    next += 1;
+                    if h.spawn(owner, spawn_of(id, "r")).is_ok() {
+                        live.push(id);
+                    }
+                }
+                3 | 4 => {
+                    if !live.is_empty() {
+                        let id = live[rnd(live.len() as u64) as usize];
+                        let _ = h.post(id, msg("m"));
+                    }
+                }
+                5 => {
+                    if !live.is_empty() {
+                        let id = live.swap_remove(rnd(live.len() as u64) as usize);
+                        h.terminate(id);
+                    }
+                }
+                6 => h.terminate_old(owner.tab, owner.epoch),
+                7 => h.terminate_frame(owner.tab, owner.epoch, owner.frame),
+                8 => {
+                    // A worker says something, or ends.
+                    if !live.is_empty() {
+                        let id = live[rnd(live.len() as u64) as usize];
+                        if let Some(t) = h.workers.get(&id).map(|e| e.handle)
+                            && let Some(f) = h.backend.threads.get_mut(&t)
+                        {
+                            f.said.push_back(match rnd(4) {
+                                0 => FromWorker::Heap((rnd(60) as usize) << 20),
+                                1 => FromWorker::Closed(CloseWhy::Closed),
+                                _ => FromWorker::Message(msg("up")),
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    h.backend.now += 1000;
+                    let _ = h.poll();
+                    live.retain(|id| h.owner_of(*id).is_some());
+                }
+            }
+            for tab in 1..=4 {
+                assert!(h.count_tab(tab) <= h.limits.per_tab, "step {step}");
+            }
+            assert!(h.threads() <= h.limits.threads, "step {step}: {}", h.threads());
+            // Every worker still running has a thread, and every thread is somebody's.
+            assert_eq!(h.backend.threads.len(), h.threads(), "step {step}");
+        }
+        for tab in 1..=4 {
+            h.terminate_tab(tab);
+        }
+        for _ in 0..3 {
+            h.poll();
+        }
+        assert_eq!(h.threads(), 0);
+        assert!(h.backend.threads.is_empty());
+    }
+
+    #[test]
     fn describing_a_worker_for_the_console() {
         assert_eq!(describe("", "http://a/b.js"), "http://a/b.js");
         assert_eq!(describe("calc", "http://a/b.js"), "\"calc\" (http://a/b.js)");

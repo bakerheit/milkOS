@@ -1124,6 +1124,94 @@ mod tests {
     }
 
     #[test]
+    fn two_linked_tables_under_random_use_keep_their_books() {
+        // A page's table and a worker's with a relay between them, random posts (with transfer
+        // lists, some invalid), closes and adoptions; nothing panics, and when everything is closed
+        // the books are empty on both sides.
+        let mut x = 0x1234_5678_9abc_def1u64;
+        let mut rnd = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        for _round in 0..40 {
+            let page = PortTable::new();
+            let work = PortTable::with_namespace(5);
+            let mut ids: Vec<u64> = Vec::new();
+            let relay = |from: &PortTable, link: u32, to: &PortTable, back: u32, ids: &mut Vec<u64>| {
+                for o in from.take_link_out(link, 64) {
+                    match o {
+                        LinkOut::Msg { port, data, ports, .. } => {
+                            for &c in &ports {
+                                to.import(c, back);
+                                ids.push(c);
+                            }
+                            to.deliver_link(port, data, &ports);
+                        }
+                        LinkOut::Close { port, .. } => to.close_from_link(port),
+                    }
+                }
+            };
+            for _ in 0..300 {
+                let (t, o, back) = if rnd(2) == 0 { (&page, o(0), 7u32) } else { (&work, o(1), 0u32) };
+                let _ = back;
+                match rnd(9) {
+                    0 => {
+                        if let Some((a, b)) = t.new_pair(o) {
+                            ids.push(a);
+                            ids.push(b);
+                        }
+                    }
+                    1 | 2 | 3 => {
+                        if !ids.is_empty() {
+                            let from = ids[rnd(ids.len() as u64) as usize];
+                            let mut tr = Vec::new();
+                            for _ in 0..rnd(3) {
+                                if !ids.is_empty() {
+                                    tr.push(ids[rnd(ids.len() as u64) as usize]);
+                                }
+                            }
+                            let _ = t.post(from, o, alloc::format!("m{}", rnd(100)), &tr);
+                        }
+                    }
+                    4 => {
+                        if !ids.is_empty() {
+                            let id = ids[rnd(ids.len() as u64) as usize];
+                            t.adopt(id, o);
+                            t.start(id, o);
+                        }
+                    }
+                    5 => {
+                        let _ = t.next_for(o, t.seq());
+                    }
+                    6 => {
+                        if !ids.is_empty() {
+                            t.close(ids[rnd(ids.len() as u64) as usize]);
+                        }
+                    }
+                    7 => relay(&page, 7, &work, 0, &mut ids),
+                    _ => relay(&work, 0, &page, 7, &mut ids),
+                }
+            }
+            for _ in 0..3 {
+                relay(&page, 7, &work, 0, &mut ids);
+                relay(&work, 0, &page, 7, &mut ids);
+            }
+            page.close_link(7);
+            work.close_link(0);
+            page.close_all(&ids);
+            work.close_all(&ids);
+            assert!(page.is_empty() && work.is_empty(), "ports left: {} {}", page.len(), work.len());
+            assert_eq!(page.queued(), 0);
+            assert_eq!(work.queued(), 0);
+            assert_eq!(page.inner.borrow().bytes, 0);
+            assert_eq!(work.inner.borrow().bytes, 0);
+            assert!(!page.has_links() && !work.has_links());
+        }
+    }
+
+    #[test]
     fn limits() {
         let t = PortTable::new();
         for _ in 0..MAX_PORTS / 2 {

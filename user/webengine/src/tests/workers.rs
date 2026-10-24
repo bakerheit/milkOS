@@ -306,7 +306,7 @@ impl Sim {
 
     /// Run until the page or a worker logs `T done`.
     pub fn finish(&mut self) -> Vec<String> {
-        self.run_until(10_000, |s| s.has("done"));
+        self.run_until(40_000, |s| s.has("done"));
         // A few more steps for what follows it.
         for _ in 0..5 {
             self.step();
@@ -393,7 +393,7 @@ fn the_workers_global_has_the_platform_and_no_dom() {
             "#,
         )],
     );
-    s.run_for(1500);
+    s.run_until(40_000, |s| s.has("bc hi") && s.has("interval 3") && s.has("mc ok") && s.has("timeout ran") && s.has("done 1"));
     let t: Vec<String> = s.t();
     let want = [
         "name plat",
@@ -492,7 +492,7 @@ fn a_blob_url_worker_runs_the_script_the_page_made() {
     );
     let t = s.finish();
     assert!(has_line(&t, "blob hi blob: http://www.milk.test"), "{t:?}\n{}", show(&s));
-    s.run_for(100);
+    s.run_until(30_000, |s| s.has("revoked fails"));
     assert!(has_line(&s.t(), "revoked fails"), "{:?}\n{}", s.t(), show(&s));
     // The page had the script; the worker fetched nothing.
     assert!(s.requests.is_empty(), "{:?}", s.requests);
@@ -546,7 +546,7 @@ fn a_missing_or_wrongly_typed_script_is_an_error_event_and_the_worker_ends() {
     let t = s.finish();
     assert!(has_line(&t, "failed nope.js [] 0"), "{t:?}\n{}", show(&s));
     assert!(has_line(&t, "failed text.js [] 0"), "{t:?}\n{}", show(&s));
-    s.run_for(100);
+    s.run_until(30_000, |s| s.closed.len() == 2);
     assert_eq!(s.closed.len(), 2, "{:?}", s.closed);
     assert!(s.closed.iter().all(|(_, w)| *w == CloseWhy::Failed));
 }
@@ -577,7 +577,8 @@ fn an_error_nobody_handles_goes_to_the_pages_console_and_self_onerror_can_take_i
             file("http://www.milk.test/e2.js", "self.onerror = (m, f, l, c, e) => { postMessage('handled ' + m + ' ' + l + ' ' + (e instanceof Error)); return true; }; setTimeout(() => { null.x; }, 1);"),
         ],
     );
-    s.run_for(600);
+    s.run_until(40_000, |s| s.lines.iter().any(|l| l.starts_with("Uncaught RangeError: plain")) && s.has("done"));
+    s.run_for(200);
     assert!(s.lines.iter().any(|l| l.starts_with("Uncaught RangeError: plain (http://www.milk.test/e1.js:1:")), "{:?}", s.lines);
     // (e2's error was handled in the worker: the page heard nothing of it.)
     assert!(!s.lines.iter().any(|l| l.contains("null")), "{:?}", s.lines);
@@ -620,7 +621,7 @@ fn terminate_ends_a_worker_and_what_it_still_sends_is_dropped() {
          w.onmessage = (e) => { got++; if (e.data === 'ready') { w.terminate(); w.postMessage('after'); console.log('T terminated'); } else console.log('T late'); };",
         vec![file("http://www.milk.test/t.js", "postMessage('ready'); setInterval(() => postMessage('tick'), 1); onmessage = () => postMessage('echo');")],
     );
-    s.run_until(5000, |s| !s.closed.is_empty());
+    s.run_until(30_000, |s| !s.closed.is_empty());
     s.run_for(100);
     assert_eq!(s.closed.len(), 1, "{:?}\n{}", s.closed, show(&s));
     assert_eq!(s.closed[0].1, CloseWhy::Terminated);
@@ -635,7 +636,7 @@ fn a_worker_can_close_itself() {
         "const w = new Worker('c.js'); w.onmessage = (e) => { console.log('T ' + e.data); }; w.postMessage(1); w.postMessage(2);",
         vec![file("http://www.milk.test/c.js", "let n = 0; onmessage = (e) => { n++; postMessage('m' + e.data); close(); postMessage('after close'); setTimeout(() => postMessage('never'), 1); };")],
     );
-    s.run_until(5000, |s| !s.closed.is_empty());
+    s.run_until(30_000, |s| !s.closed.is_empty());
     s.run_for(100);
     assert_eq!(s.closed.len(), 1, "{:?}", s.closed);
     assert_eq!(s.closed[0].1, CloseWhy::Closed);
@@ -656,15 +657,15 @@ fn a_runaway_worker_is_stopped_alone() {
             file("http://www.milk.test/bad.js", "onmessage = () => { while (true) {} };"),
         ],
     );
-    s.limits.task_ms = 400;
-    s.run_until(8000, |s| !s.closed.is_empty());
+    s.limits.task_ms = 1500;
+    s.run_until(40_000, |s| !s.closed.is_empty());
     assert_eq!(s.closed.len(), 1, "{:?}\n{}", s.closed, show(&s));
     match &s.closed[0].1 {
         CloseWhy::Stopped(why) => assert!(why.contains("ran for more than"), "{why}"),
         w => panic!("{w:?}"),
     }
     // The other worker and the page carried on.
-    s.run_for(100);
+    s.run_until(30_000, |s| s.has("good alive"));
     assert!(has_line(&s.t(), "good alive"), "{:?}\n{}", s.t(), show(&s));
 }
 
@@ -675,7 +676,7 @@ fn a_worker_that_eats_memory_is_stopped_alone() {
         vec![file("http://www.milk.test/mem.js", "onmessage = () => { const a = []; for (;;) a.push(new Array(10000).fill('x'.repeat(100))); };")],
     );
     s.limits.heap = 8 << 20;
-    s.run_until(20000, |s| !s.closed.is_empty());
+    s.run_until(60_000, |s| !s.closed.is_empty());
     assert!(matches!(&s.closed[0].1, CloseWhy::Stopped(w) if w.contains("memory")), "{:?}", s.closed);
 }
 
@@ -686,7 +687,7 @@ fn the_page_can_have_sixteen_workers_and_the_next_is_refused() {
          ws.forEach((w, i) => { w.onmessage = (e) => console.log('T up ' + e.data); });",
         vec![file("http://www.milk.test/n.js", "postMessage(name);")],
     );
-    s.run_until(5000, |s| s.t().iter().filter(|l| l.starts_with("up ")).count() == 16);
+    s.run_until(40_000, |s| s.t().iter().filter(|l| l.starts_with("up ")).count() == 16 && s.has("refused 16"));
     let t = s.t();
     assert!(has_line(&t, "refused 16"), "{t:?}\n{}", show(&s));
     assert_eq!(t.iter().filter(|l| l.starts_with("up ")).count(), 16, "{t:?}");

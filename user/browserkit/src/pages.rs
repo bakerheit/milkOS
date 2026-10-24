@@ -340,6 +340,33 @@ mod tests {
     }
 
     #[test]
+    fn view_source_of_hostile_text_is_always_one_aligned_table() {
+        let mut x = 0xdead_beef_1234_5678u64;
+        let mut rnd = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let pool = ["a", "<", ">", "&", "\"", "'", "\n", "\r\n", "\t", "\u{0}", "\u{7f}", "é", "日本", "\u{1F600}", " ", "</pre>", "<script>", "\u{FEFF}"];
+        for _ in 0..300 {
+            let mut t = String::new();
+            for _ in 0..rnd(400) {
+                t.push_str(pool[rnd(pool.len() as u64) as usize]);
+                if rnd(40) == 0 {
+                    t.push_str(&"x".repeat(rnd(500) as usize));
+                }
+            }
+            let h = view_source("http://a.test/<x>", "200 OK", t.len(), &t);
+            // Nothing of the text is markup: no tag from the pool survives.
+            assert!(!h.contains("<script>") && h.matches("<pre>").count() == 2, "{h}");
+            let gutter = h.split("<pre>").nth(1).unwrap().split("</pre>").next().unwrap();
+            let code = h.split("<pre>").nth(2).unwrap().split("</pre>").next().unwrap();
+            assert_eq!(gutter.matches('\n').count(), code.matches('\n').count(), "gutter and code must have the same number of lines: {h}");
+        }
+    }
+
+    #[test]
     fn escaping_and_pages() {
         assert_eq!(
             esc("<a href=\"x\">&</a>"),

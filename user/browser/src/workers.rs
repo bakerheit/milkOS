@@ -86,7 +86,7 @@ impl Mailbox {
 
     fn wake(&self) {
         self.seq.fetch_add(1, Ordering::AcqRel);
-        let _ = sys::futex_wake(self.seq.as_ptr() as usize, usize::MAX >> 1);
+        let _ = sys::futex_wake(self.seq.as_ptr() as usize, i32::MAX as usize);
     }
 }
 

@@ -1622,6 +1622,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     let _ = element;
 
     super::net::install_members(b, r)?;
+    super::net::install_locale_methods(b, r)?;
 
     // The parsed page's on* attributes.
     nodes::register_handlers(b, r, 0);

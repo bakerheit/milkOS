@@ -62,6 +62,10 @@ return {
   AnimationEffect,
   VisualViewport,
   ScreenOrientation,
+  Intl,
+  numberToLocale,
+  dateToLocale,
+  localeCompare,
   // members of objects the page already has (see net::MEMBERS)
   perf_mark: performanceMark,
   perf_measure: performanceMeasure,

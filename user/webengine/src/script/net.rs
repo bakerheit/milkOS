@@ -41,6 +41,7 @@ const PRELUDE: &str = concat!(
     include_str!("js/ports.js"),
     include_str!("js/events.js"),
     include_str!("js/misc.js"),
+    include_str!("js/intl.js"),
     include_str!("js/exports.js"),
 );
 
@@ -107,6 +108,7 @@ pub const GLOBALS: &[&str] = &[
     "DataTransfer",
     "BeforeUnloadEvent",
     "PageTransitionEvent",
+    "Intl",
 ];
 
 /// Properties the page's objects get from the script side, made when first read: (the
@@ -254,6 +256,50 @@ pub fn install_members(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
             Ok(Value::UNDEFINED)
         });
         r.define_accessor(obj, prop, getter, setter, Attrs::CONFIGURABLE)?;
+    }
+    Ok(())
+}
+
+/// `Number.prototype.toLocaleString`, the Date ones and `localeCompare`, with locales or
+/// options, go to Intl (script side); without arguments the engine's own en-US ones answer.
+pub fn install_locale_methods(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    let g = r.global();
+    let specs: [(&str, &str, &str, &[&str]); 5] = [
+        ("Number", "toLocaleString", "numberToLocale", &[]),
+        ("Date", "toLocaleString", "dateToLocale", &["all", "any"]),
+        ("Date", "toLocaleDateString", "dateToLocale", &["date", "date"]),
+        ("Date", "toLocaleTimeString", "dateToLocale", &["time", "time"]),
+        ("String", "localeCompare", "localeCompare", &[]),
+    ];
+    for (class, method, export, extra) in specs {
+        let ctor = r.get(g, class)?;
+        let proto = r.get(ctor, "prototype")?;
+        let orig = r.get(proto, method)?;
+        let porig = r.pin(orig);
+        let b2 = b.clone();
+        let is_compare = method == "localeCompare";
+        r.define_method(proto, method, if is_compare { 1 } else { 0 }, move |r, this, a| {
+            let first = if is_compare { 1 } else { 0 };
+            let plain = arg(a, first).is_undefined() && arg(a, first + 1).is_undefined();
+            let orig = r.pinned(&porig);
+            if plain {
+                return r.call(orig, this, a);
+            }
+            // (The receiver is checked by the engine's own method first.)
+            r.call(orig, this, &[arg(a, 0)])?;
+            let ex = exports(&b2, r)?;
+            let f = r.get(ex, export)?;
+            let mut argv: Vec<Value> = alloc::vec![this];
+            if is_compare {
+                argv.push(arg(a, 0));
+            }
+            argv.push(arg(a, first));
+            argv.push(arg(a, first + 1));
+            for e in extra {
+                argv.push(r.string(e));
+            }
+            r.call(f, Value::UNDEFINED, &argv)
+        })?;
     }
     Ok(())
 }

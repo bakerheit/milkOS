@@ -2352,6 +2352,27 @@ impl Realm {
                     f = Val::Obj(target);
                     continue;
                 }
+                ObjKind::Proxy(p) => {
+                    if (is_new && !p.constructor) || (!is_new && !p.callable) {
+                        return Err(if is_new {
+                            self.not_constructor_at(f)
+                        } else {
+                            self.not_callable_at(f)
+                        });
+                    }
+                    let this = self.vm.stack[fpos - 1];
+                    let args: Vec<Val> = self.vm.stack[fpos + 1..].to_vec();
+                    self.enter_call()?;
+                    let r = if is_new {
+                        self.construct_v(f, &args, new_target)
+                    } else {
+                        self.proxy_call(fo, this, &args)
+                    };
+                    self.depth -= 1;
+                    self.vm.stack.truncate(fpos - 1);
+                    self.push(r?);
+                    return Ok(false);
+                }
                 ObjKind::Native(_) => {
                     if is_new && !self.constructible(f) {
                         return Err(self.not_constructor_at(f));
@@ -3435,16 +3456,15 @@ impl Realm {
             _ => Val::Obj(self.to_object(v)?),
         };
         if let Val::Obj(o) = obj {
-            let mut seen: Vec<PropKey> = Vec::new();
+            let mut seen: alloc::collections::BTreeSet<PropKey> = alloc::collections::BTreeSet::new();
             let mut cur = Some(o);
             let mut depth = 0;
             while let Some(c) = cur {
                 let all = self.own_keys_p(c, true, false, false)?;
                 for k in all {
-                    if seen.contains(&k) {
+                    if !seen.insert(k) {
                         continue;
                     }
-                    seen.push(k);
                     let enumerable = match self.get_own(c, k)? {
                         Some(own) => own.flags() & E != 0,
                         None => false,
@@ -3455,7 +3475,7 @@ impl Realm {
                         keys.push(kv);
                     }
                 }
-                cur = self.o(c).proto;
+                cur = self.get_proto_p(c)?;
                 depth += 1;
                 if depth > 10_000 {
                     break;

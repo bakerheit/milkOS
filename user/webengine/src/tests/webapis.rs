@@ -375,3 +375,11 @@ fn scratch() {
     );
     std::println!("{r:?}");
 }
+
+#[test]
+fn proxies_work_in_pages_and_do_not_clone() {
+    assert_eq!(eval("var p = new Proxy({a: 1}, {get: function (t, k) { return k in t ? t[k] : 'none'; }}); p.a + ' ' + p.zz"), "1 none");
+    assert_eq!(eval("var p = new Proxy({a: 1}, {}); try { structuredClone(p); 'cloned' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(eval("var el = document.getElementById('a'); var p = new Proxy(el, {}); try { p.id } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("var s = new Proxy({}, {}); s.x = 1; JSON.stringify(s) + Object.keys(s)"), "{\"x\":1}x");
+}

@@ -214,7 +214,7 @@ fn errors_from_hostile_values() {
         "[].reduce(function(){})",
         "Symbol() + ''",
         "Object.defineProperty(1, 'x', {})",
-        "new Proxy({}, {})",
+        "new Proxy(1, {})",
         "x = y",
         "JSON.parse('{')",
         "'use strict'; undeclaredVar = 1",

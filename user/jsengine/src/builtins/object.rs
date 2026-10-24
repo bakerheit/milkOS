@@ -80,6 +80,33 @@ impl Realm {
 
     /// SetIntegrityLevel (sealed or frozen).
     pub(crate) fn set_integrity(&mut self, o: ObjId, frozen: bool) -> Res<()> {
+        if let ObjKind::Proxy(_) = self.o(o).kind {
+            if !self.prevent_extensions_p(o)? {
+                return Err(self.type_error("Cannot freeze or seal: the proxy refused"));
+            }
+            for k in self.own_keys_p(o, true, true, false)? {
+                let d = match self.get_own(o, k)? {
+                    Some(Own::Accessor(..)) => Desc {
+                        configurable: Some(false),
+                        ..Desc::default()
+                    },
+                    Some(Own::Data(..)) if frozen => Desc {
+                        configurable: Some(false),
+                        writable: Some(false),
+                        ..Desc::default()
+                    },
+                    Some(_) => Desc {
+                        configurable: Some(false),
+                        ..Desc::default()
+                    },
+                    None => continue,
+                };
+                if !self.define_own(o, k, d)? {
+                    return Err(self.type_error("Cannot define property: the proxy refused"));
+                }
+            }
+            return Ok(());
+        }
         if self.o(o).flags & crate::object::LAZY_FN != 0 {
             self.materialize_fn(o);
         }
@@ -127,7 +154,7 @@ impl Realm {
     }
 
     pub(crate) fn test_integrity(&mut self, o: ObjId, frozen: bool) -> Res<bool> {
-        if self.o(o).flags & EXTENSIBLE != 0 {
+        if self.is_extensible_p(o)? {
             return Ok(false);
         }
         let keys = self.own_keys_p(o, true, true, false)?;
@@ -152,8 +179,9 @@ impl Realm {
             Val::Null => return Ok("[object Null]".into()),
             _ => self.to_object(v)?,
         };
+        let is_arr = self.is_array_val(Val::Obj(o))?;
         let base = match &self.o(o).kind {
-            ObjKind::Array(_) => "Array",
+            _ if is_arr => "Array",
             ObjKind::Arguments => "Arguments",
             ObjKind::Error(_) => "Error",
             ObjKind::BoolBox(_) => "Boolean",
@@ -351,7 +379,7 @@ fn get_own_property_descriptors(r: &mut Realm, _this: Val, args: &[Val]) -> Res<
 
 fn get_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     let o = r.to_object(arg(args, 0))?;
-    Ok(r.o(o).proto.map_or(Val::Null, Val::Obj))
+    Ok(r.get_proto_p(o)?.map_or(Val::Null, Val::Obj))
 }
 
 fn set_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
@@ -365,7 +393,7 @@ fn set_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
         _ => return Err(r.type_error("Object prototype may only be an Object or null")),
     };
     if let Val::Obj(o) = v
-        && !r.set_proto(o, p)
+        && !r.set_proto_p(o, p)?
     {
         return Err(r.type_error("Cyclic __proto__ value or non-extensible object"));
     }
@@ -390,11 +418,10 @@ fn seal(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 
 fn prevent_extensions(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     let v = arg(args, 0);
-    if let Val::Obj(o) = v {
-        if matches!(r.o(o).kind, ObjKind::Array(_)) {
-            r.array_to_sparse(o);
-        }
-        r.om(o).flags &= !EXTENSIBLE;
+    if let Val::Obj(o) = v
+        && !r.prevent_extensions_p(o)?
+    {
+        return Err(r.type_error("Cannot prevent extensions"));
     }
     Ok(v)
 }
@@ -415,7 +442,7 @@ fn is_sealed(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 
 fn is_extensible(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     match arg(args, 0) {
-        Val::Obj(o) => Ok(Val::Bool(r.o(o).flags & EXTENSIBLE != 0)),
+        Val::Obj(o) => Ok(Val::Bool(r.is_extensible_p(o)?)),
         _ => Ok(Val::Bool(false)),
     }
 }
@@ -467,7 +494,7 @@ fn is_prototype_of(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
     };
     let o = r.to_object(this)?;
     let mut n = 0;
-    while let Some(p) = r.o(v).proto {
+    while let Some(p) = r.get_proto_p(v)? {
         if p == o {
             return Ok(Val::Bool(true));
         }
@@ -505,7 +532,7 @@ fn value_of(r: &mut Realm, this: Val, _args: &[Val]) -> Res<Val> {
 
 fn proto_get(r: &mut Realm, this: Val, _args: &[Val]) -> Res<Val> {
     let o = r.to_object(this)?;
-    Ok(r.o(o).proto.map_or(Val::Null, Val::Obj))
+    Ok(r.get_proto_p(o)?.map_or(Val::Null, Val::Obj))
 }
 
 fn proto_set(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
@@ -518,7 +545,7 @@ fn proto_set(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
         _ => return Ok(Val::Undef),
     };
     if let Val::Obj(o) = this
-        && !r.set_proto(o, p)
+        && !r.set_proto_p(o, p)?
     {
         return Err(r.type_error("Cyclic __proto__ value"));
     }

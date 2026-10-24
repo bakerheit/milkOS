@@ -130,6 +130,7 @@ js_files!(
     "clone.js",
     "private.js",
     "weakref.js",
+    "proxy.js",
     "lazy.js",
 );
 

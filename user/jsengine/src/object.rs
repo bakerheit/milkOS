@@ -15,7 +15,7 @@ use crate::value::{ObjId, StrId, SymId, Val};
 
 // ---- keys and properties ----
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub(crate) enum PropKey {
     /// An interned string that is not a canonical array index.
     Str(StrId),
@@ -329,6 +329,8 @@ pub(crate) enum ObjKind {
         data: u64,
     },
     WeakMap(Box<WeakMapData>),
+    /// A Proxy (src/proxy.rs).
+    Proxy(Box<crate::proxy::ProxyData>),
     Arguments,
     Error(Box<crate::errors::ErrInfo>),
     Closure(Box<crate::interp::Closure>),
@@ -438,6 +440,10 @@ impl Obj {
                 t.val(*s);
             }
             ObjKind::StrBox(s) => t.str(*s),
+            ObjKind::Proxy(p) => {
+                t.opt_obj(p.target);
+                t.opt_obj(p.handler);
+            }
             ObjKind::Closure(c) => c.trace(t, epoch),
             ObjKind::Env(e) => {
                 t.opt_obj(e.parent);
@@ -489,10 +495,11 @@ impl Obj {
     }
     #[inline]
     pub fn is_callable(&self) -> bool {
-        matches!(
-            &self.kind,
-            ObjKind::Native(_) | ObjKind::Bound(_) | ObjKind::Closure(_)
-        )
+        match &self.kind {
+            ObjKind::Native(_) | ObjKind::Bound(_) | ObjKind::Closure(_) => true,
+            ObjKind::Proxy(p) => p.callable,
+            _ => false,
+        }
     }
 }
 
@@ -776,6 +783,9 @@ impl Realm {
 
     /// [[GetOwnProperty]] including host hooks.
     pub(crate) fn get_own(&mut self, id: ObjId, k: PropKey) -> Res<Option<Own>> {
+        if let ObjKind::Proxy(_) = self.o(id).kind {
+            return self.proxy_get_own(id, k);
+        }
         if let ObjKind::Namespace(_) = self.o(id).kind
             && !matches!(k, PropKey::Sym(_))
         {
@@ -825,7 +835,10 @@ impl Realm {
             match &obj.kind {
                 ObjKind::Array(a) if is_len => return Some(Val::num(a.len as f64)),
                 ObjKind::Array(_) | ObjKind::StrBox(_) if !named => return None,
-                ObjKind::Host { .. } | ObjKind::Typed(_) | ObjKind::Namespace(_) => return None,
+                ObjKind::Host { .. }
+                | ObjKind::Typed(_)
+                | ObjKind::Namespace(_)
+                | ObjKind::Proxy(_) => return None,
                 _ => {}
             }
             if let Some(p) = obj.props.get(k) {
@@ -878,6 +891,7 @@ impl Realm {
                         | ObjKind::Array(_)
                         | ObjKind::StrBox(_)
                         | ObjKind::Namespace(_)
+                        | ObjKind::Proxy(_)
                 )
                 || po.props.find(k).is_some()
             {
@@ -904,6 +918,7 @@ impl Realm {
                         | ObjKind::Host { .. }
                         | ObjKind::Typed(_)
                         | ObjKind::Namespace(_)
+                        | ObjKind::Proxy(_)
                 )
             {
                 if let Some(p) = obj.props.get(k) {
@@ -914,6 +929,9 @@ impl Realm {
                     return self.call_getter(a, receiver);
                 }
             } else {
+                if let ObjKind::Proxy(_) = obj.kind {
+                    return self.proxy_get(cur, k, receiver);
+                }
                 let typed = match &obj.kind {
                     ObjKind::Typed(t) => Some((t.kind, obj.props.len() == 0, obj.proto)),
                     _ => None,
@@ -1039,6 +1057,9 @@ impl Realm {
 
     /// ValidateAndApplyPropertyDescriptor. Returns false where the spec says reject.
     pub(crate) fn define_own(&mut self, id: ObjId, k: PropKey, d: Desc) -> Res<bool> {
+        if let ObjKind::Proxy(_) = self.o(id).kind {
+            return self.proxy_define_own(id, k, d);
+        }
         if self.o(id).flags & LAZY_FN != 0 {
             self.materialize_fn(id);
         }
@@ -1504,6 +1525,9 @@ impl Realm {
 
     /// OrdinarySet. Ok(false) means the assignment was rejected (strict code throws).
     pub(crate) fn set_p(&mut self, id: ObjId, k: PropKey, v: Val, receiver: Val) -> Res<bool> {
+        if let ObjKind::Proxy(_) = self.o(id).kind {
+            return self.proxy_set(id, k, v, receiver);
+        }
         // A module namespace never accepts an assignment.
         if let ObjKind::Namespace(_) = self.o(id).kind {
             return Ok(false);
@@ -1569,6 +1593,9 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         let own: Option<Own> = loop {
+            if let ObjKind::Proxy(_) = self.o(cur).kind {
+                return self.proxy_set(cur, k, v, receiver);
+            }
             if let ObjKind::Namespace(_) = self.o(cur).kind {
                 return Ok(false);
             }
@@ -1696,6 +1723,9 @@ impl Realm {
         let mut cur = id;
         let mut depth = 0;
         loop {
+            if let ObjKind::Proxy(_) = self.o(cur).kind {
+                return self.proxy_has(cur, k);
+            }
             if let ObjKind::Namespace(ns) = &self.o(cur).kind
                 && !matches!(k, PropKey::Sym(_))
             {
@@ -1734,6 +1764,9 @@ impl Realm {
     }
 
     pub(crate) fn delete_p(&mut self, id: ObjId, k: PropKey) -> Res<bool> {
+        if let ObjKind::Proxy(_) = self.o(id).kind {
+            return self.proxy_delete(id, k);
+        }
         if self.o(id).flags & LAZY_FN != 0 {
             self.materialize_fn(id);
         }
@@ -1811,6 +1844,21 @@ impl Realm {
         symbols: bool,
         only_enum: bool,
     ) -> Res<Vec<PropKey>> {
+        if let ObjKind::Proxy(_) = self.o(id).kind {
+            let all = self.proxy_own_keys(id)?;
+            let mut out = Vec::new();
+            for k in all {
+                let is_sym = matches!(k, PropKey::Sym(_));
+                if (is_sym && !symbols) || (!is_sym && !strings) {
+                    continue;
+                }
+                if only_enum && !self.get_own(id, k)?.is_some_and(|o| o.flags() & E != 0) {
+                    continue;
+                }
+                out.push(k);
+            }
+            return Ok(out);
+        }
         if self.o(id).flags & LAZY_FN != 0 {
             self.materialize_fn(id);
         }
@@ -1850,6 +1898,9 @@ impl Realm {
                 out.push(PropKey::Idx(i));
             }
         }
+        // (Keys made by a host hook or a typed array may repeat among the properties; for
+        // ordinary objects the check would make this quadratic.)
+        let dedup = !out.is_empty();
         let obj = self.o(id);
         let mut idx: Vec<u32> = Vec::new();
         if strings {
@@ -1881,7 +1932,7 @@ impl Realm {
             }
             for i in idx {
                 let k = PropKey::Idx(i);
-                if !out.contains(&k) {
+                if !dedup || !out.contains(&k) {
                     out.push(k);
                 }
             }
@@ -1895,7 +1946,7 @@ impl Realm {
             for (k, p) in obj.props.iter() {
                 if let PropKey::Str(_) = k
                     && (!only_enum || p.f & E != 0)
-                    && !out.contains(k)
+                    && (!dedup || !out.contains(k))
                 {
                     out.push(*k);
                 }

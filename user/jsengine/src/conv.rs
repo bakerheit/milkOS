@@ -375,7 +375,7 @@ impl Realm {
         };
         let mut n = 0;
         loop {
-            match self.o(o).proto {
+            match self.get_proto_p(o)? {
                 None => return Ok(false),
                 Some(q) => {
                     if q == p {

@@ -606,11 +606,17 @@ impl Realm {
         }
     }
 
+    /// The function that is running as a native (the one a builtin's slots belong to).
+    pub(crate) fn callee_obj(&self) -> Option<ObjId> {
+        self.native_frames.last().map(|f| f.callee)
+    }
+
     pub(crate) fn constructible(&self, v: Val) -> bool {
         match v {
             Val::Obj(o) => {
                 let obj = self.o(o);
                 match &obj.kind {
+                    ObjKind::Proxy(p) => p.constructor,
                     ObjKind::Native(_) => obj.flags & CONSTRUCTOR != 0,
                     ObjKind::Bound(b) => self.constructible(Val::Obj(b.target)),
                     _ => self.vm_constructible(o),
@@ -671,6 +677,12 @@ impl Realm {
                 all.extend_from_slice(args);
                 self.enter_call()?;
                 let r = self.call_v(Val::Obj(target), bthis, &all);
+                self.depth -= 1;
+                r
+            }
+            ObjKind::Proxy(p) if p.callable => {
+                self.enter_call()?;
+                let r = self.proxy_call(fo, this, args);
                 self.depth -= 1;
                 r
             }
@@ -752,6 +764,12 @@ impl Realm {
             unreachable_err!(self)
         };
         match &self.o(fo).kind {
+            ObjKind::Proxy(_) => {
+                self.enter_call()?;
+                let r = self.proxy_construct(fo, args, new_target);
+                self.depth -= 1;
+                r
+            }
             ObjKind::Native(n) => {
                 if n.host_ctor {
                     // Host class: a fresh this from new.target.prototype.

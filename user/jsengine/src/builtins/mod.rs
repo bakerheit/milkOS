@@ -256,5 +256,6 @@ pub(crate) fn init(r: &mut Realm) {
     clone::init(r);
     es2023::init(r);
     weakref::init(r);
+    crate::proxy::init(r);
     global::init(r);
 }

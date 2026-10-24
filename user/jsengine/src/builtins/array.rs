@@ -159,9 +159,7 @@ fn array_ctor(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 }
 
 fn is_array(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
-    Ok(Val::Bool(
-        matches!(arg(args, 0), Val::Obj(o) if matches!(r.o(o).kind, ObjKind::Array(_))),
-    ))
+    Ok(Val::Bool(r.is_array_val(arg(args, 0))?))
 }
 
 fn from(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {
@@ -247,7 +245,7 @@ fn is_concat_spreadable(r: &mut Realm, v: Val) -> Res<bool> {
     if !s.is_undef() {
         return Ok(r.truthy(s));
     }
-    Ok(matches!(r.o(o).kind, ObjKind::Array(_)))
+    r.is_array_val(v)
 }
 
 fn concat(r: &mut Realm, this: Val, args: &[Val]) -> Res<Val> {

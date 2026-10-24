@@ -11,14 +11,14 @@ pub struct ObjId {
 }
 
 /// A handle to a string in a realm's heap.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct StrId {
     pub(crate) idx: u32,
     pub(crate) g: u32,
 }
 
 /// A symbol (symbols live as long as the realm).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct SymId(pub(crate) u32);
 
 /// The VM's value. `Int` is a fast path for numbers that are integers in i32 range (never

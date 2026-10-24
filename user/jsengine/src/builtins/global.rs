@@ -282,7 +282,7 @@ fn r_gopd(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 
 fn r_get_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     let o = need_obj(r, arg(args, 0), "getPrototypeOf")?;
-    Ok(r.o(o).proto.map_or(Val::Null, Val::Obj))
+    Ok(r.get_proto_p(o)?.map_or(Val::Null, Val::Obj))
 }
 
 fn r_set_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
@@ -292,7 +292,7 @@ fn r_set_prototype_of(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
         Val::Null => None,
         _ => return Err(r.type_error("Object prototype may only be an Object or null")),
     };
-    Ok(Val::Bool(r.set_proto(o, p)))
+    Ok(Val::Bool(r.set_proto_p(o, p)?))
 }
 
 fn r_has(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
@@ -303,16 +303,12 @@ fn r_has(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
 
 fn r_is_extensible(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     let o = need_obj(r, arg(args, 0), "isExtensible")?;
-    Ok(Val::Bool(r.o(o).flags & crate::object::EXTENSIBLE != 0))
+    Ok(Val::Bool(r.is_extensible_p(o)?))
 }
 
 fn r_prevent_extensions(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {
     let o = need_obj(r, arg(args, 0), "preventExtensions")?;
-    if matches!(r.o(o).kind, ObjKind::Array(_)) {
-        r.array_to_sparse(o);
-    }
-    r.om(o).flags &= !crate::object::EXTENSIBLE;
-    Ok(Val::Bool(true))
+    Ok(Val::Bool(r.prevent_extensions_p(o)?))
 }
 
 fn r_own_keys(r: &mut Realm, _this: Val, args: &[Val]) -> Res<Val> {

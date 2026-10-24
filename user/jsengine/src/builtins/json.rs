@@ -269,7 +269,7 @@ impl Realm {
         if let Val::Obj(o) = val {
             let mark = self.temps.len();
             self.temps.push(val);
-            let is_arr = matches!(self.o(o).kind, ObjKind::Array(_));
+            let is_arr = self.is_array_val(val)?;
             let keys: Vec<PropKey> = if is_arr {
                 let len = self.length_of(val)?;
                 (0..len as u32).map(PropKey::Idx).collect()
@@ -307,8 +307,8 @@ impl Realm {
         };
         if self.callable(replacer) {
             st.replacer_fn = replacer;
-        } else if let Val::Obj(ro) = replacer
-            && matches!(self.o(ro).kind, ObjKind::Array(_))
+        } else if let Val::Obj(_) = replacer
+            && self.is_array_val(replacer)?
         {
             let len = self.length_of(replacer)?;
             let mut list: Vec<PropKey> = Vec::new();
@@ -424,7 +424,7 @@ impl Realm {
                 }
                 st.stack.push(o);
                 self.temps.push(v);
-                let r = if matches!(self.o(o).kind, ObjKind::Array(_)) {
+                let r = if self.is_array_val(v)? {
                     self.ser_array(st, o, out)
                 } else {
                     self.ser_object(st, o, out)

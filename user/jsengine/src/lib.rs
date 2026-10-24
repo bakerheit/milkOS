@@ -33,6 +33,7 @@ mod numconv;
 mod object;
 mod parser;
 mod private;
+mod proxy;
 mod realm;
 mod regexp;
 mod resolve;

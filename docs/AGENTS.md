@@ -20,9 +20,13 @@
 ## Git
 - Each agent works only in its own worktree, `.claude/worktrees/<name>`, on branch `<name>`. Never touch `main`
   or other worktrees. The lead merges. Don't merge `main` into your branch unless the lead asks.
-- Commit often with clear messages. End every commit message with
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Never push (there is no remote), never force anything, never `--no-verify`, never bare `git stash`.
+- Commit often with clear messages, as `bakerheit <270044729+bakerheit@users.noreply.github.com>`
+  (`git -c user.name=bakerheit -c user.email=270044729+bakerheit@users.noreply.github.com commit ...`). End every
+  commit message with the `Co-Authored-By: Claude ... <noreply@anthropic.com>` line the lead gives you.
+- The repo is public (github.com/bakerheit/milkOS). No people or team names, ticket ids, personal paths or e-mail
+  addresses in files, commit messages or merge messages (`scripts/public-check.sh` enforces it).
+- Never push (only the lead pushes main, fast-forward only, after the full check-all passes), never force anything,
+  never `--no-verify`, never bare `git stash`. Releases and tags: docs/releasing.md.
 - Keep `cargo build` and `cargo clippy` warning-free, run `cargo fmt`.
 - `kernel/build.rs` fails every build if a `user/<crate>` program isn't listed in `initramfs.list`, so register a new
   crate in the same commit that adds it (or other people's test rebuilds break).

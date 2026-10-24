@@ -3,7 +3,10 @@
 //! functions capture. Captured bindings live in heap environments; the rest are frame
 //! locals. Script-level declarations are global (looked up by name at run time).
 
+use alloc::collections::BTreeMap;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::ops::{Index, IndexMut};
 
 use crate::ast::*;
 use crate::atoms::{Atom, Atoms, kw};
@@ -18,6 +21,9 @@ pub(crate) enum SK {
     Catch,
     Class,
     FuncName,
+    /// Stands for the environments around a function that is compiled later (see
+    /// [`ChainNode`]).
+    Chain,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -62,8 +68,94 @@ pub(crate) struct Binding {
     pub tdz: bool,
 }
 
+/// The captured bindings of one environment around a function that is compiled on its first
+/// call, with the node of the next environment out. Shared by all the functions made in that
+/// environment, so a module's thousands of bindings are not copied per function.
+pub(crate) struct ChainNode {
+    /// Every binding is in the environment: `loc` is `Env(slot)`.
+    pub bindings: Vec<Binding>,
+    index: Option<BTreeMap<Atom, u32>>,
+    pub parent: Option<Rc<ChainNode>>,
+}
+
+impl ChainNode {
+    pub fn new(bindings: Vec<Binding>, parent: Option<Rc<ChainNode>>) -> ChainNode {
+        let index = (bindings.len() > INDEX_AT).then(|| {
+            let mut ix = BTreeMap::new();
+            for (i, b) in bindings.iter().enumerate() {
+                ix.entry(b.name).or_insert(i as u32);
+            }
+            ix
+        });
+        ChainNode {
+            bindings,
+            index,
+            parent,
+        }
+    }
+
+    fn find(&self, a: Atom) -> Option<usize> {
+        match &self.index {
+            Some(ix) => ix.get(&a).map(|i| *i as usize),
+            None => self.bindings.iter().position(|b| b.name == a),
+        }
+    }
+}
+
+/// The scope table, indexed by scope id from `base` (a function that is analysed on its own
+/// only needs its own range of ids).
+pub(crate) struct Scopes {
+    base: u32,
+    v: Vec<Scope>,
+}
+
+impl Default for Scopes {
+    fn default() -> Scopes {
+        Scopes::empty()
+    }
+}
+
+impl Scopes {
+    pub fn new(base: u32, count: u32) -> Scopes {
+        let mut v = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            v.push(blank(SK::Block));
+        }
+        Scopes { base, v }
+    }
+
+    pub fn empty() -> Scopes {
+        Scopes {
+            base: 0,
+            v: Vec::new(),
+        }
+    }
+
+    /// One past the last id.
+    pub fn end(&self) -> u32 {
+        self.base + self.v.len() as u32
+    }
+}
+
+impl Index<u32> for Scopes {
+    type Output = Scope;
+    #[inline]
+    fn index(&self, i: u32) -> &Scope {
+        &self.v[(i - self.base) as usize]
+    }
+}
+
+impl IndexMut<u32> for Scopes {
+    #[inline]
+    fn index_mut(&mut self, i: u32) -> &mut Scope {
+        &mut self.v[(i - self.base) as usize]
+    }
+}
+
 pub(crate) struct Scope {
     pub kind: SK,
+    /// For a `Chain` scope: the environment it stands for.
+    pub chain: Option<Rc<ChainNode>>,
     pub parent: Option<ScopeId>,
     /// The function (or script) scope this scope belongs to.
     pub func: ScopeId,
@@ -82,7 +174,19 @@ pub(crate) struct Scope {
 const INDEX_AT: usize = 24;
 
 impl Scope {
+    /// The `i`th binding (an index `find` returned).
+    #[inline]
+    pub fn bind(&self, i: usize) -> &Binding {
+        match &self.chain {
+            Some(c) => &c.bindings[i],
+            None => &self.bindings[i],
+        }
+    }
+
     pub fn find(&self, a: Atom) -> Option<usize> {
+        if let Some(c) = &self.chain {
+            return c.find(a);
+        }
         match &self.index {
             Some(ix) => ix.get(&a).map(|i| *i as usize),
             None => self.bindings.iter().position(|b| b.name == a),
@@ -117,11 +221,23 @@ pub(crate) struct ResolveError {
 }
 
 pub(crate) struct Resolver<'a> {
-    pub scopes: Vec<Scope>,
+    pub scopes: Scopes,
     atoms: &'a Atoms,
     cur: ScopeId,
     depth: u32,
     pub stack: Option<crate::stack::StackGuard>,
+    /// Analysing one function on its own (for the parser, which then drops its body): names
+    /// that nothing inside resolves are collected instead of being taken for globals.
+    analyzing: bool,
+    free: Vec<Atom>,
+    free_priv: Vec<(Atom, u32)>,
+}
+
+/// What analysing a function found.
+pub(crate) struct Facts {
+    pub free: Vec<Atom>,
+    pub privs: Vec<(Atom, u32)>,
+    pub self_ref: bool,
 }
 
 type RResult = Result<(), ResolveError>;
@@ -129,6 +245,7 @@ type RResult = Result<(), ResolveError>;
 fn blank(kind: SK) -> Scope {
     Scope {
         kind,
+        chain: None,
         parent: None,
         func: 0,
         bindings: Vec::new(),
@@ -143,17 +260,91 @@ fn blank(kind: SK) -> Scope {
 
 impl<'a> Resolver<'a> {
     pub fn new(atoms: &'a Atoms, nscopes: u32) -> Resolver<'a> {
-        let mut scopes = Vec::with_capacity(nscopes as usize);
-        for _ in 0..nscopes {
-            scopes.push(blank(SK::Block));
-        }
         Resolver {
-            scopes,
+            scopes: Scopes::new(0, nscopes),
             atoms,
             cur: 0,
             depth: 0,
             stack: None,
+            analyzing: false,
+            free: Vec::new(),
+            free_priv: Vec::new(),
         }
+    }
+
+    /// A resolver for a function that is compiled later: scope 0 is the global scope, then
+    /// one scope per environment around it (outermost first), then the ids the parser hands
+    /// out from there. Returns it and the id of the innermost environment's scope.
+    pub fn for_lazy(
+        atoms: &'a Atoms,
+        nscopes: u32,
+        chain: &Option<Rc<ChainNode>>,
+    ) -> (Resolver<'a>, ScopeId) {
+        let mut nodes: Vec<Rc<ChainNode>> = Vec::new();
+        let mut n = chain.clone();
+        while let Some(c) = n {
+            n = c.parent.clone();
+            nodes.push(c);
+        }
+        let mut r = Resolver::new(atoms, nscopes);
+        r.scopes[0].kind = SK::Script;
+        let mut parent = 0;
+        for (i, node) in nodes.into_iter().rev().enumerate() {
+            let id = i as u32 + 1;
+            let sc = &mut r.scopes[id];
+            sc.kind = SK::Chain;
+            sc.parent = Some(parent);
+            sc.func = id;
+            sc.env_size = 1;
+            sc.chain = Some(node);
+            parent = id;
+        }
+        (r, parent)
+    }
+
+    /// Resolves a function that was parsed on its own (see `for_lazy`) whose enclosing scope
+    /// is `parent`.
+    pub fn lazy_function(&mut self, f: &Func, parent: ScopeId) -> RResult {
+        self.cur = parent;
+        self.func(f)
+    }
+
+    /// Checks a function on its own (the scopes of its ids `lo..hi`) and reports what it
+    /// uses from outside.
+    pub fn analyze(
+        atoms: &'a Atoms,
+        stack: Option<crate::stack::StackGuard>,
+        f: &Func,
+        lo: ScopeId,
+        hi: ScopeId,
+    ) -> Result<Facts, ResolveError> {
+        let mut r = Resolver {
+            scopes: Scopes::new(lo, hi - lo + 1),
+            atoms,
+            cur: hi,
+            depth: 0,
+            stack,
+            analyzing: true,
+            free: Vec::new(),
+            free_priv: Vec::new(),
+        };
+        // `hi` is a dummy scope around the function: nothing is declared in it.
+        r.scopes[hi].strict = f.strict;
+        r.func(f)?;
+        let self_ref = f.name_scope.is_some_and(|ns| {
+            r.scopes[ns].bindings.first().is_some_and(|b| b.captured)
+        });
+        let mut free = core::mem::take(&mut r.free);
+        free.sort_unstable();
+        free.dedup();
+        let mut privs = core::mem::take(&mut r.free_priv);
+        privs.sort_unstable();
+        privs.dedup_by_key(|p| p.0);
+        Ok(Facts {
+            free,
+            privs,
+            self_ref,
+        })
     }
 
     fn err(&self, msg: alloc::string::String, pos: u32) -> RResult {
@@ -163,10 +354,10 @@ impl<'a> Resolver<'a> {
     fn open(&mut self, id: ScopeId, kind: SK, parent: Option<ScopeId>) {
         let func = match kind {
             SK::Function | SK::Script | SK::Module => id,
-            _ => parent.map_or(id, |p| self.scopes[p as usize].func),
+            _ => parent.map_or(id, |p| self.scopes[p].func),
         };
-        let strict = parent.is_some_and(|p| self.scopes[p as usize].strict);
-        let s = &mut self.scopes[id as usize];
+        let strict = parent.is_some_and(|p| self.scopes[p].strict);
+        let s = &mut self.scopes[id];
         s.kind = kind;
         s.parent = parent;
         s.func = func;
@@ -174,7 +365,7 @@ impl<'a> Resolver<'a> {
     }
 
     fn declare(&mut self, scope: ScopeId, name: Atom, kind: BK, pos: u32) -> RResult {
-        let s = &mut self.scopes[scope as usize];
+        let s = &mut self.scopes[scope];
         if s.kind == SK::Script {
             // Script-level names are global: only track lexical ones for duplicate checks.
             if let Some(i) = s.find(name) {
@@ -270,24 +461,34 @@ impl<'a> Resolver<'a> {
 
     /// Resolves a reference from the current scope, marking captures.
     fn reference(&mut self, name: Atom) {
-        let cur_func = self.scopes[self.cur as usize].func;
+        self.reference_from(name, false);
+    }
+
+    /// A reference made from inside a function that is not being resolved here (its body
+    /// was dropped): whatever binds the name is captured.
+    fn reference_inner(&mut self, name: Atom) {
+        self.reference_from(name, true);
+    }
+
+    fn reference_from(&mut self, name: Atom, from_inner: bool) {
+        let cur_func = self.scopes[self.cur].func;
         let mut s = Some(self.cur);
         while let Some(sid) = s {
-            let sc = &self.scopes[sid as usize];
+            let sc = &self.scopes[sid];
             if sc.kind == SK::Script {
                 return;
             }
             if let Some(i) = sc.find(name) {
-                let captured = sc.func != cur_func;
-                if captured {
-                    self.scopes[sid as usize].bindings[i].captured = true;
+                let captured = from_inner || sc.func != cur_func;
+                if captured && sc.chain.is_none() {
+                    self.scopes[sid].bindings[i].captured = true;
                 }
                 return;
             }
             if name == kw::ARGUMENTS && sc.kind == SK::Function && !sc.is_arrow && !sc.is_field_init
             {
-                let captured = sid != cur_func;
-                let scm = &mut self.scopes[sid as usize];
+                let captured = from_inner || sid != cur_func;
+                let scm = &mut self.scopes[sid];
                 scm.uses_arguments = true;
                 scm.add(Binding {
                     name,
@@ -301,18 +502,30 @@ impl<'a> Resolver<'a> {
             }
             s = sc.parent;
         }
+        if self.analyzing {
+            self.free.push(name);
+        }
     }
 
     /// A use of a private name: it has to be declared by an enclosing class.
     fn private_ref(&mut self, name: Atom, pos: u32) -> RResult {
+        self.private_ref_from(name, pos, false)
+    }
+
+    fn private_ref_from(&mut self, name: Atom, pos: u32, from_inner: bool) -> RResult {
         let mut s = Some(self.cur);
         while let Some(sid) = s {
-            let sc = &self.scopes[sid as usize];
-            if sc.kind == SK::Class && sc.find(name).is_some() {
-                self.reference(name);
+            let sc = &self.scopes[sid];
+            // (A `Chain` scope is a class's environment too when the class declares it.)
+            if (sc.kind == SK::Class || sc.kind == SK::Chain) && sc.find(name).is_some() {
+                self.reference_from(name, from_inner);
                 return Ok(());
             }
             s = sc.parent;
+        }
+        if self.analyzing {
+            self.free_priv.push((name, pos));
+            return Ok(());
         }
         self.err(
             alloc::format!(
@@ -327,7 +540,7 @@ impl<'a> Resolver<'a> {
 
     pub fn script(&mut self, s: &Script) -> RResult {
         self.open(s.scope, SK::Script, None);
-        self.scopes[s.scope as usize].strict = s.strict;
+        self.scopes[s.scope].strict = s.strict;
         self.cur = s.scope;
         self.hoist_vars(&s.body, s.scope)?;
         self.declare_lexical(&s.body, s.scope, true)?;
@@ -336,7 +549,7 @@ impl<'a> Resolver<'a> {
 
     pub fn module(&mut self, m: &ModuleAst) -> RResult {
         self.open(m.scope, SK::Module, None);
-        self.scopes[m.scope as usize].strict = true;
+        self.scopes[m.scope].strict = true;
         self.cur = m.scope;
         for imp in &m.info.imports {
             let bk = if matches!(imp.name, ImportName::All) {
@@ -350,7 +563,7 @@ impl<'a> Resolver<'a> {
         self.declare_lexical(&m.body, m.scope, true)?;
         self.stmts(&m.body)?;
         for le in &m.info.local_exports {
-            if self.scopes[m.scope as usize].find(le.local).is_none() {
+            if self.scopes[m.scope].find(le.local).is_none() {
                 return self.err(
                     alloc::format!(
                         "Export '{}' is not defined in module",
@@ -391,13 +604,13 @@ impl<'a> Resolver<'a> {
             }
             StmtKind::FuncDecl(f) => {
                 // Annex B: a sloppy block function is also a var (unless that would clash).
-                let strict = self.scopes[func as usize].strict || f.strict;
+                let strict = self.scopes[func].strict || f.strict;
                 if !strict
                     && !f.is_async
                     && !f.is_generator
                     && let Some(n) = f.name
                 {
-                    let sc = &self.scopes[func as usize];
+                    let sc = &self.scopes[func];
                     let clash = sc.find(n).is_some_and(|i| sc.bindings[i].kind.is_lexical());
                     if !clash {
                         self.declare(func, n, BK::Var, st.pos)?;
@@ -506,9 +719,9 @@ impl<'a> Resolver<'a> {
                     if let Some(n) = f.name {
                         self.declare(scope, n, BK::FuncDecl, st.pos)?;
                         // Annex B marker (the var was hoisted by hoist_vars).
-                        let strict = self.scopes[scope as usize].strict || f.strict;
+                        let strict = self.scopes[scope].strict || f.strict;
                         if !strict && !f.is_async && !f.is_generator {
-                            let sc = &mut self.scopes[scope as usize];
+                            let sc = &mut self.scopes[scope];
                             if let Some(i) = sc.find(n) {
                                 sc.bindings[i].annex_b = true;
                             }
@@ -540,9 +753,30 @@ impl<'a> Resolver<'a> {
             }
             parent = ns;
         }
+        if let Body::Lazy(l) = &f.body {
+            // Not resolved here: its uses of outer names are replayed from where it stands.
+            if l.self_ref
+                && let Some(ns) = f.name_scope
+                && let Some(b) = self.scopes[ns].bindings.first_mut()
+            {
+                b.captured = true;
+            }
+            self.open(f.scope, SK::Function, Some(parent));
+            self.scopes[f.scope].is_arrow = f.kind == FuncKind::Arrow;
+            self.scopes[f.scope].strict = f.strict;
+            self.cur = parent;
+            for &a in &l.free {
+                self.reference_inner(a);
+            }
+            for &(a, pos) in &l.privs {
+                self.private_ref_from(a, pos, true)?;
+            }
+            self.cur = saved;
+            return Ok(());
+        }
         self.open(f.scope, SK::Function, Some(parent));
         {
-            let s = &mut self.scopes[f.scope as usize];
+            let s = &mut self.scopes[f.scope];
             s.is_arrow = f.kind == FuncKind::Arrow;
             s.is_field_init = f.kind == FuncKind::FieldInit;
             s.strict = f.strict;
@@ -569,7 +803,7 @@ impl<'a> Resolver<'a> {
                 .iter()
                 .all(|p| p.default.is_none() && matches!(p.pat, Pat::Ident(..)));
         if !simple {
-            for b in self.scopes[f.scope as usize].bindings.iter_mut() {
+            for b in self.scopes[f.scope].bindings.iter_mut() {
                 if b.kind == BK::Param {
                     b.tdz = true;
                 }
@@ -591,6 +825,7 @@ impl<'a> Resolver<'a> {
         match &f.body {
             Body::Stmts(body) => self.stmts(body)?,
             Body::Expr(e) => self.expr(e)?,
+            Body::Lazy(_) => {}
         }
         self.cur = saved;
         Ok(())
@@ -599,7 +834,7 @@ impl<'a> Resolver<'a> {
     fn class(&mut self, c: &Class) -> RResult {
         let saved = self.cur;
         self.open(c.scope, SK::Class, Some(self.cur));
-        self.scopes[c.scope as usize].strict = true;
+        self.scopes[c.scope].strict = true;
         if let Some(n) = c.name {
             self.declare(c.scope, n, BK::Const, c.start)?;
         }
@@ -607,7 +842,7 @@ impl<'a> Resolver<'a> {
         // never meet an identifier): the name itself, and for methods and accessors the
         // function that each instance gets.
         for pd in &c.privates {
-            if self.scopes[c.scope as usize].find(pd.name).is_none() {
+            if self.scopes[c.scope].find(pd.name).is_none() {
                 self.declare(c.scope, pd.name, BK::Const, pd.pos)?;
             }
             if let Some(f) = pd.func {
@@ -826,8 +1061,8 @@ impl<'a> Resolver<'a> {
                     self.open(h.scope, SK::Block, Some(self.cur));
                     self.cur = h.scope;
                     self.declare_lexical(&h.body, h.scope, false)?;
-                    for b in &self.scopes[h.scope as usize].bindings {
-                        if self.scopes[*catch_scope as usize].find(b.name).is_some()
+                    for b in &self.scopes[h.scope].bindings {
+                        if self.scopes[*catch_scope].find(b.name).is_some()
                             && b.kind.is_lexical()
                         {
                             return self.err(

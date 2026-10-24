@@ -66,6 +66,12 @@ const RUN_SLICE_MS: f64 = 50.0;
 
 impl Runtime {
     pub fn new(page: &Page, limits: ScriptLimits) -> Runtime {
+        // (Tests: JSENGINE_LAZY_ALL=1 runs every script with all its functions left for
+        // their first call.)
+        #[cfg(test)]
+        if std::env::var_os("JSENGINE_LAZY_ALL").is_some() {
+            jsengine::set_lazy_min_bytes(Some(0));
+        }
         let base = String::from(page.base_url());
         let resolve = move |h: &str| crate::url::resolve(&base, h);
         let loader = Loader::collect(&page.dom, &resolve);
@@ -263,6 +269,7 @@ impl Runtime {
                     max_steps: 0,
                     max_call_depth: 400,
                     max_source_bytes: self.limits.max_source,
+                    max_compile_bytes: self.limits.compile,
                 },
                 tz_offset_minutes: host.tz_offset(),
                 random_seed: host.time().to_bits() ^ 0x6d69_6c6b,

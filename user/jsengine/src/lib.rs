@@ -23,6 +23,7 @@ mod errors;
 mod eval;
 mod heap;
 mod interp;
+mod lazy;
 mod lexer;
 mod libm;
 mod math;
@@ -44,3 +45,5 @@ mod value;
 mod tests;
 
 pub use api::*;
+#[doc(hidden)]
+pub use lazy::set_lazy_min_bytes;

@@ -269,6 +269,15 @@ pub struct Limits {
     pub max_call_depth: u32,
     /// The longest source text `eval` and `Function` accept. Default 32 MB.
     pub max_source_bytes: usize,
+    /// The most memory (an estimate, in bytes) that the syntax tree of one parse may take
+    /// at once. Compiling has its own allowance, apart from the heap budget: the tree only
+    /// lives while a script or one function is parsed and compiled, and big functions are
+    /// parsed in pieces (each is dropped as soon as it is checked and parsed again when it is
+    /// first called), so the biggest thing that is parsed at once is one function body or the
+    /// statements outside any function. A script with a part bigger than this fails with a
+    /// SyntaxError ("the code is too large to fit in memory"). Default 96 MB (about 1.3 million
+    /// tokens: a function of about 1.3 MB of minified code, or as many statements).
+    pub max_compile_bytes: usize,
 }
 
 impl Default for Limits {
@@ -278,6 +287,7 @@ impl Default for Limits {
             max_steps: 0,
             max_call_depth: 1000,
             max_source_bytes: 32 << 20,
+            max_compile_bytes: 96 << 20,
         }
     }
 }

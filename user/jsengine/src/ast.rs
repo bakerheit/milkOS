@@ -335,6 +335,29 @@ pub(crate) struct Param {
 pub(crate) enum Body {
     Stmts(Vec<Stmt>),
     Expr(Box<Expr>),
+    /// A function that is compiled on its first call: the parser checked it (syntax and
+    /// scope errors), noted which outer names it uses, and dropped its tree. The source
+    /// range is `Func::start..end`.
+    Lazy(Box<LazyFunc>),
+}
+
+/// What the rest of the program needs to know about a function whose body was left uncompiled.
+pub(crate) struct LazyFunc {
+    /// The identifiers the function (and the functions inside it) use that nothing inside it
+    /// declares, sorted and without repeats. Names of enclosing bindings among them are
+    /// captured by it; the rest are globals.
+    pub free: Vec<Atom>,
+    /// The private names (`#x`) it uses, with a position for the error if no enclosing class
+    /// declares one.
+    pub privs: Vec<(Atom, Pos)>,
+    /// A named function expression that uses its own name.
+    pub self_ref: bool,
+    /// Where to resume parsing: the `(` of a function's parameters, or the start of an arrow.
+    pub resume: Pos,
+    /// `Function.length`.
+    pub length: u32,
+    /// The parser's context where the function began (strictness, class field, ...).
+    pub ctx: crate::parser::Ctx,
 }
 
 pub(crate) struct Func {

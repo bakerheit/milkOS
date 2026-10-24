@@ -351,13 +351,15 @@ impl Realm {
         self.budget_check(source.len() / 2)?;
         let mut p = Parser::new(&text);
         p.stack = Some(self.stack);
-        p.node_budget = self.parse_node_budget();
+        p.mem_limit = self.compile_limit();
+        p.lazy_min = crate::lazy::lazy_min_bytes();
         let ast = match p.parse_module() {
             Ok(a) => a,
             Err(e) => return Err(self.syntax_error_at(&src, e.pos, &e.msg)),
         };
-        let atoms = core::mem::replace(&mut p.atoms, crate::atoms::Atoms::new());
+        let atoms = core::mem::replace(&mut p.atoms, crate::atoms::Atoms::empty());
         let nscopes = p.scope_count();
+        drop(p);
         let mut res = Resolver::new(&atoms, nscopes);
         res.stack = Some(self.stack);
         if let Err(e) = res.module(&ast) {
@@ -365,7 +367,7 @@ impl Realm {
         }
         let scopes = core::mem::take(&mut res.scopes);
         // The static description of the module, from the finished scope table.
-        let sc = &scopes[ast.scope as usize];
+        let sc = &scopes[ast.scope];
         let slot_of = |a: u32| sc.find(a).map(|i| i as u32).unwrap_or(0);
         let tdz: Vec<u32> = sc
             .bindings
@@ -418,13 +420,23 @@ impl Realm {
             .collect();
         let id = self.modules.reserve();
         let src = Rc::new(src);
+        let shared = Rc::new(crate::lazy::LazyShared {
+            atoms: core::cell::RefCell::new(None),
+            default_atom: Some(ast.info.default_atom),
+        });
         let compiled = {
             let mut c = Compiler::new(self, &atoms, scopes, src.clone());
+            c.set_lazy_shared(shared.clone());
             match c.compile_module(&ast, id) {
                 Ok(r) => Ok(r),
                 Err(e) => Err((e.pos, e.msg)),
             }
         };
+        // Functions left for their first call keep the identifier table.
+        drop(ast);
+        if Rc::strong_count(&shared) > 1 {
+            *shared.atoms.borrow_mut() = Some(atoms);
+        }
         let (init, body, n) = match compiled {
             Ok(r) => r,
             Err((pos, msg)) => {

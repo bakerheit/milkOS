@@ -5,6 +5,7 @@
 //! jump targets (instruction indices), or an environment reference packed as
 //! `depth << 24 | slot` (depth = how many environments up the chain).
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -429,6 +430,9 @@ pub(crate) struct Code {
     pub marked: Cell<u32>,
     /// The module this code belongs to (None for scripts).
     pub module: Option<crate::api::ModuleId>,
+    /// A function whose body is compiled on its first call: this code is only its stub
+    /// (name, length, kind and flags), and `ops` is empty.
+    pub lazy: Option<Box<crate::lazy::LazyCode>>,
 }
 
 impl Code {
@@ -439,6 +443,11 @@ impl Code {
         self.marked.set(epoch);
         if let Some(n) = self.name {
             t.str(n);
+        }
+        if let Some(l) = &self.lazy
+            && let Some(c) = l.done.borrow().as_ref()
+        {
+            c.trace(t, epoch);
         }
         for c in &self.consts {
             match c {

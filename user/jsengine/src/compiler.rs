@@ -4,6 +4,7 @@
 //! are split around the inlined copies so an exception inside a copy goes to the right
 //! handler.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -14,7 +15,7 @@ use crate::ast::*;
 use crate::atoms::{Atom, Atoms, kw};
 use crate::bytecode::{Code, CodeKind, Const, ENV_SLOT_BITS, Handler, Op, Source, env_ref};
 use crate::realm::Realm;
-use crate::resolve::{BK, Loc, SK, Scope};
+use crate::resolve::{BK, ChainNode, Loc, SK, Scopes};
 use crate::value::StrId;
 
 pub(crate) struct CompileError {
@@ -81,10 +82,14 @@ struct FnState<'a> {
 pub(crate) struct Compiler<'a> {
     pub realm: &'a mut Realm,
     atoms: &'a Atoms,
-    scopes: Vec<Scope>,
+    scopes: Scopes,
     source: Rc<Source>,
     fns: Vec<FnState<'a>>,
-    atom_strs: Vec<Option<StrId>>,
+    atom_strs: BTreeMap<Atom, StrId>,
+    /// The chain of environments a scope stands in (see `chain_node`), once built.
+    chain_memo: BTreeMap<ScopeId, Option<Rc<ChainNode>>>,
+    /// The identifier table's lazy sharing (functions left for later keep it alive).
+    lazy_shared: Option<Rc<crate::lazy::LazyShared>>,
     /// The class constructor being compiled next has instance fields to initialize.
     ctor_fields: bool,
     /// Compiling a module: every Code made belongs to it.
@@ -122,7 +127,7 @@ impl<'a> Compiler<'a> {
     pub fn new(
         realm: &'a mut Realm,
         atoms: &'a Atoms,
-        scopes: Vec<Scope>,
+        scopes: Scopes,
         source: Rc<Source>,
     ) -> Compiler<'a> {
         Compiler {
@@ -131,7 +136,9 @@ impl<'a> Compiler<'a> {
             scopes,
             source,
             fns: Vec::new(),
-            atom_strs: Vec::new(),
+            atom_strs: BTreeMap::new(),
+            chain_memo: BTreeMap::new(),
+            lazy_shared: None,
             ctor_fields: false,
             module: None,
             default_atom: None,
@@ -212,12 +219,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn atom_str(&mut self, a: Atom) -> StrId {
-        let i = a as usize;
-        if i >= self.atom_strs.len() {
-            self.atom_strs.resize(i + 1, None);
-        }
-        if let Some(s) = self.atom_strs[i] {
-            return s;
+        if let Some(s) = self.atom_strs.get(&a) {
+            return *s;
         }
         let text = if Some(a) == self.default_atom {
             "default"
@@ -225,7 +228,7 @@ impl<'a> Compiler<'a> {
             self.atoms.get(a)
         };
         let s = self.realm.heap.intern_str(text);
-        self.atom_strs[i] = Some(s);
+        self.atom_strs.insert(a, s);
         s
     }
 
@@ -355,19 +358,19 @@ impl<'a> Compiler<'a> {
 
     /// Assigns locations to a scope's bindings and emits its entry (environment, TDZ marks).
     fn enter_scope(&mut self, sid: ScopeId, pos: u32) -> CResult<()> {
-        let n = self.scopes[sid as usize].bindings.len();
+        let n = self.scopes[sid].bindings.len();
         let mut env = 0u32;
         for i in 0..n {
-            let b = self.scopes[sid as usize].bindings[i];
+            let b = self.scopes[sid].bindings[i];
             let loc = if b.captured {
                 env += 1;
                 Loc::Env(env - 1)
             } else {
                 Loc::Local(self.alloc_local(pos)?)
             };
-            self.scopes[sid as usize].bindings[i].loc = loc;
+            self.scopes[sid].bindings[i].loc = loc;
         }
-        self.scopes[sid as usize].env_size = env;
+        self.scopes[sid].env_size = env;
         if env > 0 {
             self.emit(Op::PushEnv(env));
         }
@@ -377,9 +380,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn tdz_init(&mut self, sid: ScopeId) {
-        let n = self.scopes[sid as usize].bindings.len();
+        let n = self.scopes[sid].bindings.len();
         for i in 0..n {
-            let b = self.scopes[sid as usize].bindings[i];
+            let b = self.scopes[sid].bindings[i];
             if b.kind.is_lexical() {
                 self.emit(Op::Empty);
                 match b.loc {
@@ -398,7 +401,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn leave_scope(&mut self, sid: ScopeId) {
-        if self.scopes[sid as usize].env_size > 0 {
+        if self.scopes[sid].env_size > 0 {
             self.emit(Op::PopEnv);
         }
         self.f().scope_chain.pop();
@@ -408,12 +411,12 @@ impl<'a> Compiler<'a> {
         let mut sid = Some(self.cur_scope());
         let mut depth = 0u32;
         while let Some(s) = sid {
-            let sc = &self.scopes[s as usize];
+            let sc = &self.scopes[s];
             if sc.kind == SK::Script {
                 return Lookup::Global;
             }
             if let Some(i) = sc.find(name) {
-                let b = sc.bindings[i];
+                let b = *sc.bind(i);
                 // A parameter that is still in its TDZ is checked like a `let`.
                 let kind = if b.tdz && b.kind == BK::Param {
                     BK::Let
@@ -575,7 +578,7 @@ impl<'a> Compiler<'a> {
     fn script_lexical(&self, a: Atom) -> bool {
         let mut sid = Some(self.cur_scope());
         while let Some(s) = sid {
-            let sc = &self.scopes[s as usize];
+            let sc = &self.scopes[s];
             if sc.kind == SK::Script {
                 return sc.find(a).is_some_and(|i| sc.bindings[i].kind.is_lexical());
             }
@@ -593,9 +596,9 @@ impl<'a> Compiler<'a> {
         self.f().completion = Some(c);
         // Declarations: vars and functions on the global object, lexical names in the
         // global lexical environment.
-        let n = self.scopes[s.scope as usize].bindings.len();
+        let n = self.scopes[s.scope].bindings.len();
         for i in 0..n {
-            let b = self.scopes[s.scope as usize].bindings[i];
+            let b = self.scopes[s.scope].bindings[i];
             let name = self.const_atom(b.name);
             match b.kind {
                 BK::Let | BK::Class => {
@@ -633,14 +636,14 @@ impl<'a> Compiler<'a> {
         self.module = Some(id);
         self.default_atom = Some(m.info.default_atom);
         let sid = m.scope;
-        let n = self.scopes[sid as usize].bindings.len();
+        let n = self.scopes[sid].bindings.len();
         if n as u32 >= (1 << ENV_SLOT_BITS) {
             return self.err("too many top-level bindings", 0);
         }
         for i in 0..n {
-            self.scopes[sid as usize].bindings[i].loc = Loc::Env(i as u32);
+            self.scopes[sid].bindings[i].loc = Loc::Env(i as u32);
         }
-        self.scopes[sid as usize].env_size = n as u32;
+        self.scopes[sid].env_size = n as u32;
         let span = (0, self.source.text.len() as u32);
         // Link-time code: the hoisted functions.
         self.fns.push(new_fn(CodeKind::Normal, true));
@@ -722,6 +725,7 @@ impl<'a> Compiler<'a> {
             span,
             marked: Cell::new(0),
             module: self.module,
+            lazy: None,
         })
     }
 
@@ -730,6 +734,9 @@ impl<'a> Compiler<'a> {
     pub fn compile_function(&mut self, f: &'a Func, name_hint: Option<StrId>) -> CResult<Rc<Code>> {
         if self.fns.len() > 200 {
             return self.err("functions nested too deeply", f.start);
+        }
+        if let Body::Lazy(l) = &f.body {
+            return self.lazy_stub(f, l, name_hint);
         }
         let kind = match f.kind {
             FuncKind::Normal => CodeKind::Normal,
@@ -748,19 +755,19 @@ impl<'a> Compiler<'a> {
         let nparams = f.params.len() as u32;
         st.nparams = nparams;
         st.nlocals = nparams;
-        st.keeps_extra_args = f.rest.is_some() || self.scopes[f.scope as usize].uses_arguments;
+        st.keeps_extra_args = f.rest.is_some() || self.scopes[f.scope].uses_arguments;
         self.fns.push(st);
         // A named function expression's own name.
         if let Some(ns) = f.name_scope {
-            let has = self.scopes[ns as usize]
+            let has = self.scopes[ns]
                 .bindings
                 .first()
                 .is_some_and(|b| b.captured);
             if has {
-                self.scopes[ns as usize].bindings[0].loc = Loc::Env(0);
-                self.scopes[ns as usize].env_size = 1;
+                self.scopes[ns].bindings[0].loc = Loc::Env(0);
+                self.scopes[ns].env_size = 1;
             } else {
-                self.scopes[ns as usize].env_size = 0;
+                self.scopes[ns].env_size = 0;
             }
         }
         let r = self.function_body(f, init_fields);
@@ -778,16 +785,169 @@ impl<'a> Compiler<'a> {
         Ok(self.finish(st, name, length, (f.start, f.end)))
     }
 
+    /// Says which module the code belongs to, and the atom that stands for `default`.
+    pub fn set_module(&mut self, m: Option<crate::api::ModuleId>, default_atom: Option<Atom>) {
+        self.module = m;
+        self.default_atom = default_atom;
+    }
+
+    /// Lets functions left for their first call share the identifier table (see `lazy.rs`).
+    pub fn set_lazy_shared(&mut self, shared: Rc<crate::lazy::LazyShared>) {
+        self.lazy_shared = Some(shared);
+    }
+
+    /// Compiles a function that was parsed on its own, as the first thing in a scope table
+    /// whose scope `parent` is the innermost environment around it.
+    pub fn compile_lazy_function(
+        &mut self,
+        f: &'a Func,
+        name_hint: Option<StrId>,
+        parent: ScopeId,
+        this_chk: bool,
+        kind: CodeKind,
+    ) -> CResult<Rc<Code>> {
+        let mut outer = new_fn(kind, f.strict);
+        outer.this_chk = this_chk;
+        outer.scope_chain.push(parent);
+        self.fns.push(outer);
+        let r = self.compile_function(f, name_hint);
+        self.fns.pop();
+        r
+    }
+
+    /// The captured bindings of the environments that scope `start` stands in, as a list of
+    /// nodes (innermost first) that functions made there share.
+    fn chain_node(&mut self, start: Option<ScopeId>) -> Option<Rc<ChainNode>> {
+        let mut pending: Vec<ScopeId> = Vec::new();
+        let mut cur = start;
+        let mut base: Option<Rc<ChainNode>> = None;
+        while let Some(s) = cur {
+            if let Some(m) = self.chain_memo.get(&s) {
+                base = m.clone();
+                break;
+            }
+            let sc = &self.scopes[s];
+            match sc.kind {
+                SK::Script => break,
+                SK::Chain => {
+                    base = sc.chain.clone();
+                    break;
+                }
+                _ => {}
+            }
+            pending.push(s);
+            cur = sc.parent;
+        }
+        for &s in pending.iter().rev() {
+            let sc = &self.scopes[s];
+            let node = if sc.env_size > 0 {
+                let bs: Vec<crate::resolve::Binding> = sc
+                    .bindings
+                    .iter()
+                    .filter(|b| b.captured && matches!(b.loc, Loc::Env(_)))
+                    .copied()
+                    .collect();
+                Some(Rc::new(ChainNode::new(bs, base.clone())))
+            } else {
+                base.clone()
+            };
+            self.chain_memo.insert(s, node.clone());
+            base = node;
+        }
+        base
+    }
+
+    /// The code of a function whose body is left for its first call: only what a closure
+    /// needs to be made (name, length, kind), and what the later compile needs.
+    fn lazy_stub(
+        &mut self,
+        f: &'a Func,
+        l: &LazyFunc,
+        name_hint: Option<StrId>,
+    ) -> CResult<Rc<Code>> {
+        let Some(shared) = self.lazy_shared.clone() else {
+            return self.err("cannot compile this function", f.start);
+        };
+        let kind = match f.kind {
+            FuncKind::Normal => CodeKind::Normal,
+            FuncKind::Arrow => CodeKind::Arrow,
+            _ => CodeKind::Method,
+        };
+        let outer_this_chk = self.fns.last().is_some_and(|s| s.this_chk);
+        // Names are looked up from where the function stands (outside its own name's scope,
+        // which the later compile makes again).
+        let start = match f.name_scope {
+            Some(ns) => self.scopes[ns].parent,
+            None => self.scopes[f.scope].parent,
+        };
+        let chain = self.chain_node(start);
+        // The environment of a named function expression's own name, made by the code
+        // around it, exists if the function uses its name.
+        if let Some(ns) = f.name_scope {
+            let has = l.self_ref && !self.scopes[ns].bindings.is_empty();
+            if has {
+                self.scopes[ns].bindings[0].loc = Loc::Env(0);
+                self.scopes[ns].env_size = 1;
+            } else {
+                self.scopes[ns].env_size = 0;
+            }
+        }
+        let name = match f.name {
+            Some(a) => Some(self.atom_str(a)),
+            None => name_hint,
+        };
+        let head = crate::parser::LazyHead {
+            kind: f.kind,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            name: f.name,
+            has_name_scope: f.name_scope.is_some(),
+            is_decl: f.is_decl,
+            start: f.start,
+            end: f.end,
+            resume: l.resume,
+            ctx: l.ctx,
+        };
+        let lazy = crate::lazy::LazyCode {
+            head,
+            shared,
+            chain,
+            this_chk: kind == CodeKind::Arrow && outer_this_chk,
+            done: core::cell::RefCell::new(None),
+        };
+        Ok(Rc::new(Code {
+            ops: Vec::new(),
+            consts: Vec::new(),
+            keys: Vec::new(),
+            handlers: Vec::new(),
+            lines: Vec::new(),
+            nparams: 0,
+            nlocals: 0,
+            length: l.length,
+            name,
+            kind,
+            strict: f.strict,
+            is_async: f.is_async,
+            is_generator: f.is_generator,
+            keeps_extra_args: false,
+            source: self.source.clone(),
+            span: (f.start, f.end),
+            marked: Cell::new(0),
+            module: self.module,
+            lazy: Some(Box::new(lazy)),
+        }))
+    }
+
     fn function_body(&mut self, f: &'a Func, init_fields: bool) -> CResult<()> {
         let sid = f.scope;
         // Parameter slots: simple uncaptured identifier parameters live in their argument slot.
-        let n = self.scopes[sid as usize].bindings.len();
+        let n = self.scopes[sid].bindings.len();
         let mut param_local: Vec<(usize, u32)> = Vec::new();
         for (i, p) in f.params.iter().enumerate() {
             if let Pat::Ident(a, _) = p.pat
-                && let Some(bi) = self.scopes[sid as usize].find(a)
+                && let Some(bi) = self.scopes[sid].find(a)
             {
-                let b = self.scopes[sid as usize].bindings[bi];
+                let b = self.scopes[sid].bindings[bi];
                 if !b.captured && b.kind == BK::Param && !b.tdz {
                     // A repeated name binds the last parameter with it.
                     param_local.retain(|(x, _)| *x != bi);
@@ -797,7 +957,7 @@ impl<'a> Compiler<'a> {
         }
         let mut env = 0u32;
         for i in 0..n {
-            let b = self.scopes[sid as usize].bindings[i];
+            let b = self.scopes[sid].bindings[i];
             let loc = if b.captured {
                 env += 1;
                 Loc::Env(env - 1)
@@ -806,21 +966,21 @@ impl<'a> Compiler<'a> {
             } else {
                 Loc::Local(self.alloc_local(f.start)?)
             };
-            self.scopes[sid as usize].bindings[i].loc = loc;
+            self.scopes[sid].bindings[i].loc = loc;
         }
-        self.scopes[sid as usize].env_size = env;
+        self.scopes[sid].env_size = env;
         if env > 0 {
             self.emit(Op::PushEnv(env));
         }
         self.f().scope_chain.push(sid);
         // arguments
-        if self.scopes[sid as usize].uses_arguments {
+        if self.scopes[sid].uses_arguments {
             self.emit(Op::ArgumentsObj);
             self.store_name(kw::ARGUMENTS, Store::Init, false, f.start)?;
         }
         // Parameters with defaults or patterns start out uninitialized.
         for i in 0..n {
-            let b = self.scopes[sid as usize].bindings[i];
+            let b = self.scopes[sid].bindings[i];
             if b.tdz && b.kind == BK::Param {
                 self.emit(Op::Empty);
                 match b.loc {
@@ -860,7 +1020,7 @@ impl<'a> Compiler<'a> {
         }
         // TDZ marks for the body's lexical declarations; hoisted functions.
         for i in 0..n {
-            let b = self.scopes[sid as usize].bindings[i];
+            let b = self.scopes[sid].bindings[i];
             if b.kind.is_lexical() {
                 self.emit(Op::Empty);
                 match b.loc {
@@ -886,6 +1046,7 @@ impl<'a> Compiler<'a> {
                 self.expr(e)?;
                 self.emit(Op::Return);
             }
+            Body::Lazy(_) => return self.err("cannot compile this function", f.start),
         }
         self.f().scope_chain.pop();
         Ok(())
@@ -894,13 +1055,13 @@ impl<'a> Compiler<'a> {
     /// A function expression (or arrow) as a value.
     fn func_expr(&mut self, f: &'a Func, name_hint: Option<StrId>) -> CResult<()> {
         if let Some(ns) = f.name_scope {
-            self.scopes[ns as usize].parent = Some(self.cur_scope());
+            self.scopes[ns].parent = Some(self.cur_scope());
         }
         let code = self.compile_function(f, name_hint)?;
         let ci = self.add_const(Const::Code(code));
         let name_env = f
             .name_scope
-            .is_some_and(|ns| self.scopes[ns as usize].env_size > 0);
+            .is_some_and(|ns| self.scopes[ns].env_size > 0);
         if name_env {
             self.emit(Op::PushEnv(1));
             self.emit(Op::Closure(ci));
@@ -939,7 +1100,7 @@ impl<'a> Compiler<'a> {
 
     fn class(&mut self, c: &'a Class, name_hint: Option<StrId>) -> CResult<()> {
         let pos = c.start;
-        self.scopes[c.scope as usize].parent = Some(self.cur_scope());
+        self.scopes[c.scope].parent = Some(self.cur_scope());
         self.enter_scope(c.scope, pos)?;
         let name = match c.name {
             Some(a) => Some(self.atom_str(a)),
@@ -1067,7 +1228,7 @@ impl<'a> Compiler<'a> {
         self.emit(Op::Pop); // proto
         // [F]
         if let Some(fi) = &c.fields {
-            self.scopes[fi.scope as usize].parent = Some(self.cur_scope());
+            self.scopes[fi.scope].parent = Some(self.cur_scope());
             let code = self.compile_function(fi, None)?;
             let fc = self.add_const(Const::Code(code));
             match ik {
@@ -1082,7 +1243,7 @@ impl<'a> Compiler<'a> {
             self.store_name(a, Store::Init, false, pos)?;
         }
         if let Some(si) = &c.statics {
-            self.scopes[si.scope as usize].parent = Some(self.cur_scope());
+            self.scopes[si.scope].parent = Some(self.cur_scope());
             let code = self.compile_function(si, None)?;
             let fc = self.add_const(Const::Code(code));
             match sk {
@@ -1151,7 +1312,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn block(&mut self, b: &'a Block) -> CResult<()> {
-        self.scopes[b.scope as usize].parent = Some(self.cur_scope());
+        self.scopes[b.scope].parent = Some(self.cur_scope());
         self.enter_scope(b.scope, 0)?;
         self.hoist_block_functions(&b.body)?;
         self.stmts(&b.body)?;
@@ -1169,7 +1330,7 @@ impl<'a> Compiler<'a> {
             };
             if let StmtKind::FuncDecl(f) = &st.k {
                 let Some(name) = f.name else { continue };
-                self.scopes[f.scope as usize].parent = Some(self.cur_scope());
+                self.scopes[f.scope].parent = Some(self.cur_scope());
                 let code = self.compile_function(f, None)?;
                 let ci = self.add_const(Const::Code(code));
                 self.emit(Op::Closure(ci));
@@ -1222,15 +1383,15 @@ impl<'a> Compiler<'a> {
                 // in a sloppy if-body (no block) is created here.
                 let Some(name) = f.name else { return Ok(()) };
                 let sid = self.cur_scope();
-                let in_scope = self.scopes[sid as usize].find(name).is_some();
+                let in_scope = self.scopes[sid].find(name).is_some();
                 if !in_scope {
-                    self.scopes[f.scope as usize].parent = Some(sid);
+                    self.scopes[f.scope].parent = Some(sid);
                     let code = self.compile_function(f, None)?;
                     let ci = self.add_const(Const::Code(code));
                     self.emit(Op::Closure(ci));
                     self.store_name(name, Store::Assign, false, s.pos)?;
                 } else {
-                    let sc = &self.scopes[sid as usize];
+                    let sc = &self.scopes[sid];
                     let annex = sc.find(name).is_some_and(|i| sc.bindings[i].annex_b)
                         && sc.kind == SK::Block;
                     if annex {
@@ -1390,7 +1551,7 @@ impl<'a> Compiler<'a> {
 
     fn store_to_func_var(&mut self, name: Atom, pos: u32) -> CResult<()> {
         // Resolve from the function scope (skipping the block's own binding).
-        let fscope = self.scopes[self.cur_scope() as usize].func;
+        let fscope = self.scopes[self.cur_scope()].func;
         let saved = core::mem::take(&mut self.f().scope_chain);
         self.f().scope_chain = alloc::vec![fscope];
         // Count the environments between the current scope and the function scope.
@@ -1400,10 +1561,10 @@ impl<'a> Compiler<'a> {
             if x == fscope {
                 break;
             }
-            if self.scopes[x as usize].env_size > 0 {
+            if self.scopes[x].env_size > 0 {
                 extra += 1;
             }
-            s = self.scopes[x as usize].parent;
+            s = self.scopes[x].parent;
         }
         let r = match self.lookup(name) {
             Lookup::Local(l, _) => {
@@ -1544,9 +1705,9 @@ impl<'a> Compiler<'a> {
         labels: Vec<Atom>,
         pos: u32,
     ) -> CResult<()> {
-        self.scopes[scope as usize].parent = Some(self.cur_scope());
+        self.scopes[scope].parent = Some(self.cur_scope());
         self.enter_scope(scope, pos)?;
-        let per_iter = self.scopes[scope as usize].env_size > 0;
+        let per_iter = self.scopes[scope].env_size > 0;
         if let Some(init) = init {
             match init {
                 ForInit::Var(kind, decls) => {
@@ -1634,11 +1795,11 @@ impl<'a> Compiler<'a> {
         let it = self.alloc_local(pos)?;
         self.mark(pos);
         self.emit(Op::ForInStart(it));
-        self.scopes[scope as usize].parent = Some(self.cur_scope());
+        self.scopes[scope].parent = Some(self.cur_scope());
         let top = self.here();
         let jn = self.emit(Op::ForInNext(it, 0));
         self.enter_scope(scope, pos)?;
-        let has_env = self.scopes[scope as usize].env_size > 0;
+        let has_env = self.scopes[scope].env_size > 0;
         self.bind_for_head(left)?;
         self.f().ctx.push(Jc::Break {
             labels,
@@ -1687,7 +1848,7 @@ impl<'a> Compiler<'a> {
         self.emit(Op::SaveEnv(env_save));
         let region = self.open_region(true);
         self.f().ctx.push(Jc::IterClose { slot: it, region });
-        self.scopes[scope as usize].parent = Some(self.cur_scope());
+        self.scopes[scope].parent = Some(self.cur_scope());
         let top = self.here();
         let step = if is_await {
             self.emit(Op::AsyncIterStep(it, u32::MAX));
@@ -1697,7 +1858,7 @@ impl<'a> Compiler<'a> {
             self.emit(Op::IterStep(it, 0))
         };
         self.enter_scope(scope, pos)?;
-        let has_env = self.scopes[scope as usize].env_size > 0;
+        let has_env = self.scopes[scope].env_size > 0;
         self.bind_for_head(left)?;
         self.f().ctx.push(Jc::Break {
             labels,
@@ -1744,7 +1905,7 @@ impl<'a> Compiler<'a> {
         self.expr(disc)?;
         let d = self.alloc_local(pos)?;
         self.emit(Op::PutLocal(d));
-        self.scopes[scope as usize].parent = Some(self.cur_scope());
+        self.scopes[scope].parent = Some(self.cur_scope());
         self.enter_scope(scope, pos)?;
         for c in cases {
             self.hoist_block_functions(&c.body)?;
@@ -1845,7 +2006,7 @@ impl<'a> Compiler<'a> {
             let target = self.here();
             self.finish_region(cr, target);
             self.emit(Op::RestoreEnv(env_save));
-            self.scopes[catch_scope as usize].parent = Some(self.cur_scope());
+            self.scopes[catch_scope].parent = Some(self.cur_scope());
             self.enter_scope(catch_scope, pos)?;
             match param {
                 Some(p) => self.destructure(p, Store::Init)?,

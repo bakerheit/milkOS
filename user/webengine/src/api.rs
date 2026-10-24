@@ -765,6 +765,11 @@ pub struct ScriptLimits {
     pub slow_ms: u32,
     /// Bytes of one script's source.
     pub max_source: usize,
+    /// The most memory (an estimate, in bytes) one parse and compile of a script may use at
+    /// once for its syntax tree, apart from the heap above (the tree only exists while a
+    /// script or one function is being compiled; big functions are compiled on their first
+    /// call). See `jsengine::Limits::max_compile_bytes`.
+    pub compile: usize,
 }
 
 impl Default for ScriptLimits {
@@ -773,6 +778,7 @@ impl Default for ScriptLimits {
             memory: 64 << 20,
             slow_ms: 2_000,
             max_source: 8 << 20,
+            compile: 96 << 20,
         }
     }
 }

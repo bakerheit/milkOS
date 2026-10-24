@@ -103,6 +103,8 @@ impl Doc {
                 // A frame gets a quarter of what a page does; with 32 frames the tab as a whole
                 // is watched too ([`crate::frames`]).
                 memory: FRAME_HEAP,
+                // (Frames are compiled one at a time, but they are many.)
+                compile: 64 << 20,
                 ..ScriptLimits::default()
             }),
         )

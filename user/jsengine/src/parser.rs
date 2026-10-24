@@ -11,6 +11,13 @@ use crate::atoms::{Atom, Atoms, is_reserved, is_strict_reserved, kw};
 use crate::lexer::{LexError, Lexer, P, Tok, Token};
 
 pub(crate) const MAX_NEST: u32 = 1500;
+/// Estimated bytes per token parsed, for the tree and the code made from it (measured on
+/// minified code: 64 to 75 bytes a token whole, with the allocator's overhead).
+const TOKEN_COST: u64 = 72;
+/// And per statement (a `Stmt` is much bigger than an `Expr`).
+const STMT_COST: u64 = 160;
+/// What a function left for later takes: its `Func`, the name list and the stub code.
+const STUB_COST: u64 = 640;
 /// The longest `a.b.c(...)[...]` / `a + b + c` chain. The trees these make are as deep as
 /// the chain is long, and the compiler gives up near 2300 links on the default stack anyway:
 /// a longer one is refused here, before it can make a tree too deep to free.
@@ -33,17 +40,17 @@ impl From<LexError> for ParseError {
 type PResult<T> = Result<T, ParseError>;
 
 #[derive(Clone, Copy, Default)]
-struct Ctx {
-    strict: bool,
-    in_function: bool,
-    in_generator: bool,
-    in_async: bool,
-    allow_super_call: bool,
-    allow_super_prop: bool,
-    allow_new_target: bool,
-    in_class_field: bool,
+pub(crate) struct Ctx {
+    pub strict: bool,
+    pub in_function: bool,
+    pub in_generator: bool,
+    pub in_async: bool,
+    pub allow_super_call: bool,
+    pub allow_super_prop: bool,
+    pub allow_new_target: bool,
+    pub in_class_field: bool,
     /// Module code: `await` is reserved everywhere.
-    module: bool,
+    pub module: bool,
 }
 
 pub(crate) struct Parser<'a> {
@@ -63,14 +70,45 @@ pub(crate) struct Parser<'a> {
     /// (a parenthesized list that may turn out to be arrow parameters).
     defer_cover_at: u32,
     pub stack: Option<crate::stack::StackGuard>,
-    /// How many more expressions and statements may be parsed (the tree has to fit the
-    /// heap budget; u64::MAX = no limit).
-    pub node_budget: u64,
+    /// An estimate of the bytes the live syntax tree takes (counted per token and statement
+    /// as they are parsed, and given back when a function's tree is dropped), and the most it
+    /// may take: the tree has to fit the compile allowance.
+    pub mem: u64,
+    pub mem_limit: u64,
+    /// Functions of at least this many source bytes are checked and then dropped, to be
+    /// parsed again on their first call (u32::MAX: never).
+    pub lazy_min: u32,
+    /// How many functions are being parsed (nested), and the depth down to which functions
+    /// are kept (a function parsed again for its first call is kept itself).
+    fdepth: u32,
+    eager_depth: u32,
     /// Parsing a module (import/export declarations, import.meta, top-level await).
     is_module: bool,
     pub info: ModuleInfo,
     /// The next function or class declaration may be anonymous (`export default function`).
     anon_default_ok: bool,
+}
+
+/// A function's name and how it was declared, handed to `parse_function_rest`.
+#[derive(Clone, Copy, Default)]
+struct FnHead {
+    name: Option<Atom>,
+    name_scope: Option<ScopeId>,
+    is_decl: bool,
+}
+
+/// What `parse_lazy` needs to parse a dropped function again.
+pub(crate) struct LazyHead {
+    pub kind: FuncKind,
+    pub is_async: bool,
+    pub is_generator: bool,
+    pub name: Option<Atom>,
+    pub has_name_scope: bool,
+    pub is_decl: bool,
+    pub start: Pos,
+    pub end: Pos,
+    pub resume: Pos,
+    pub ctx: Ctx,
 }
 
 /// Cover for a parenthesized list: `(a, b = 1, ...c)` before we know whether it's an arrow.
@@ -83,9 +121,13 @@ struct ParenCover {
 
 impl<'a> Parser<'a> {
     pub fn new(src: &'a [u8]) -> Parser<'a> {
+        Parser::build(src, Atoms::new())
+    }
+
+    fn build(src: &'a [u8], atoms: Atoms) -> Parser<'a> {
         Parser {
             lx: Lexer::new(src),
-            atoms: Atoms::new(),
+            atoms,
             tok: Token {
                 tok: Tok::Eof,
                 start: 0,
@@ -102,11 +144,26 @@ impl<'a> Parser<'a> {
             cover_init_pos: None,
             defer_cover_at: u32::MAX,
             stack: None,
-            node_budget: u64::MAX,
+            mem: 0,
+            mem_limit: u64::MAX,
+            lazy_min: u32::MAX,
+            fdepth: 0,
+            eager_depth: 0,
             is_module: false,
             info: ModuleInfo::default(),
             anon_default_ok: false,
         }
+    }
+
+    /// A parser that goes on with the identifiers of an earlier parse of the same source.
+    pub fn with_atoms(src: &'a [u8], atoms: Atoms) -> Parser<'a> {
+        Parser::build(src, atoms)
+    }
+
+    /// The first scope id to hand out (a function parsed again numbers its scopes after the
+    /// ones of the environments around it).
+    pub fn set_first_scope(&mut self, n: u32) {
+        self.next_scope = n;
     }
 
     pub fn scope_count(&self) -> u32 {
@@ -160,8 +217,16 @@ impl<'a> Parser<'a> {
     fn advance(&mut self) -> PResult<()> {
         self.prev_end = self.tok.end;
         self.tok = self.lx.next(&mut self.atoms)?;
-        if let Tok::BigInt = self.tok.tok {
-            return self.unexpected();
+        let extra = match &self.tok.tok {
+            Tok::Str(s, _) => s.len() as u64 * 2 + 24,
+            Tok::Template(c, r, _) => (c.as_ref().map_or(0, |c| c.len()) + r.len()) as u64 * 2 + 48,
+            Tok::Regex(a, b) => (a.len() + b.len()) as u64 * 2 + 48,
+            Tok::BigInt => return self.unexpected(),
+            _ => 0,
+        };
+        self.mem += TOKEN_COST + extra;
+        if self.mem > self.mem_limit {
+            return self.err("the code is too large to fit in memory");
         }
         Ok(())
     }
@@ -221,10 +286,6 @@ impl<'a> Parser<'a> {
     }
 
     fn enter(&mut self) -> PResult<()> {
-        if self.node_budget == 0 {
-            return self.err("the code is too large to fit in memory");
-        }
-        self.node_budget -= 1;
         self.depth += 1;
         if self.depth > MAX_NEST || self.stack.is_some_and(|s| s.exceeded()) {
             return self.err("the code is nested too deeply");
@@ -906,6 +967,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_statement(&mut self) -> PResult<Stmt> {
+        self.mem += STMT_COST;
         self.enter()?;
         let r = self.parse_statement_inner();
         self.leave();
@@ -1438,17 +1500,12 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let mut f = self.parse_function_rest(FuncKind::Normal, is_async, is_generator, start)?;
-        f.name = name;
-        f.name_scope = name_scope;
-        f.is_decl = is_decl;
-        if f.strict
-            && let Some(n) = name
-            && (n == kw::EVAL || n == kw::ARGUMENTS)
-        {
-            return self.err_at("Unexpected eval or arguments in strict mode", start);
-        }
-        Ok(f)
+        let head = FnHead {
+            name,
+            name_scope,
+            is_decl,
+        };
+        self.parse_function_rest(FuncKind::Normal, is_async, is_generator, start, head)
     }
 
     /// Parameters and body (current token `(`).
@@ -1458,8 +1515,11 @@ impl<'a> Parser<'a> {
         is_async: bool,
         is_generator: bool,
         start: u32,
+        head: FnHead,
     ) -> PResult<Box<Func>> {
         let saved_ctx = self.ctx;
+        let resume = self.tok.start;
+        let mem_mark = self.mem;
         let saved_labels = core::mem::take(&mut self.labels);
         let saved_loop = self.in_loop;
         let saved_switch = self.in_switch;
@@ -1484,6 +1544,7 @@ impl<'a> Parser<'a> {
                 self.ctx.allow_super_call = false;
             }
         }
+        self.fdepth += 1;
         let r = match self.enter() {
             Ok(()) => {
                 let r = self.parse_function_parts(kind, is_async, is_generator, start);
@@ -1496,7 +1557,112 @@ impl<'a> Parser<'a> {
         self.labels = saved_labels;
         self.in_loop = saved_loop;
         self.in_switch = saved_switch;
+        let r = r.and_then(|mut f| {
+            f.name = head.name;
+            f.name_scope = head.name_scope;
+            f.is_decl = head.is_decl;
+            if f.strict
+                && let Some(n) = head.name
+                && (n == kw::EVAL || n == kw::ARGUMENTS)
+            {
+                return self.err_at("Unexpected eval or arguments in strict mode", start);
+            }
+            let lo = head.name_scope.unwrap_or(f.scope);
+            self.make_lazy(&mut f, lo, resume, saved_ctx, mem_mark)?;
+            Ok(f)
+        });
+        self.fdepth -= 1;
         r
+    }
+
+    /// Checks a finished function on its own and, if it is big enough, drops its tree: only
+    /// the names it uses from outside stay, and it is parsed again when first called.
+    fn make_lazy(
+        &mut self,
+        f: &mut Box<Func>,
+        lo: ScopeId,
+        resume: Pos,
+        ctx: Ctx,
+        mem_mark: u64,
+    ) -> PResult<()> {
+        if self.fdepth <= self.eager_depth
+            || f.end.saturating_sub(f.start) < self.lazy_min
+            || !matches!(
+                f.kind,
+                FuncKind::Normal
+                    | FuncKind::Arrow
+                    | FuncKind::Method
+                    | FuncKind::Getter
+                    | FuncKind::Setter
+            )
+            || !matches!(f.body, Body::Stmts(_) | Body::Expr(_))
+        {
+            return Ok(());
+        }
+        let hi = self.next_scope;
+        let facts = match crate::resolve::Resolver::analyze(&self.atoms, self.stack, f, lo, hi) {
+            Ok(x) => x,
+            Err(e) => {
+                return Err(ParseError {
+                    msg: e.msg,
+                    pos: e.pos,
+                });
+            }
+        };
+        let length = f.params.iter().take_while(|p| p.default.is_none()).count() as u32;
+        f.params = Vec::new();
+        f.rest = None;
+        f.body = Body::Lazy(Box::new(LazyFunc {
+            free: facts.free,
+            privs: facts.privs,
+            self_ref: facts.self_ref,
+            resume,
+            length,
+            ctx,
+        }));
+        // The scope ids it used are free again; its own (and its name's) are renumbered.
+        let mut next = lo;
+        if f.name_scope.is_some() {
+            f.name_scope = Some(next);
+            next += 1;
+        }
+        f.scope = next;
+        self.next_scope = next + 1;
+        self.mem = mem_mark + STUB_COST;
+        Ok(())
+    }
+
+    /// Parses a function again from its stub (see `Body::Lazy`): the parser must be set up
+    /// with the atoms of the original parse and the first free scope id.
+    pub fn parse_lazy(&mut self, h: &LazyHead) -> PResult<Box<Func>> {
+        self.ctx = h.ctx;
+        self.is_module = h.ctx.module;
+        self.lx.no_html_comments = h.ctx.module;
+        self.eager_depth = 1;
+        self.lx.pos = h.resume as usize;
+        self.advance()?;
+        let f = if h.kind == FuncKind::Arrow {
+            let e = self.parse_assign(false)?;
+            match e.k {
+                ExprKind::Func(f) => f,
+                _ => return self.err("Unexpected token"),
+            }
+        } else {
+            if !self.is(P::LParen) {
+                return self.unexpected();
+            }
+            let name_scope = h.has_name_scope.then(|| self.new_scope());
+            let head = FnHead {
+                name: h.name,
+                name_scope,
+                is_decl: h.is_decl,
+            };
+            self.parse_function_rest(h.kind, h.is_async, h.is_generator, h.start, head)?
+        };
+        if f.end != h.end || !matches!(f.body, Body::Stmts(_) | Body::Expr(_)) {
+            return self.err("Unexpected token");
+        }
+        Ok(f)
     }
 
     fn parse_function_parts(
@@ -1916,7 +2082,7 @@ impl<'a> Parser<'a> {
                     } else {
                         FuncKind::ClassCtor
                     };
-                    let f = self.parse_function_rest(kind, false, false, start)?;
+                    let f = self.parse_function_rest(kind, false, false, start, FnHead::default())?;
                     ctor = Some(f);
                     continue;
                 }
@@ -1944,7 +2110,7 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
-                let f = self.parse_function_rest(fk, is_async, is_gen, mpos)?;
+                let f = self.parse_function_rest(fk, is_async, is_gen, mpos, FnHead::default())?;
                 let kind = match acc {
                     Some(MethodKind::Get) => MemberKind::Get(f),
                     Some(MethodKind::Set) => MemberKind::Set(f),
@@ -2239,6 +2405,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_arrow_body(
+        &mut self,
+        params: Vec<Param>,
+        rest: Option<Pat>,
+        is_async: bool,
+        start: u32,
+    ) -> PResult<Expr> {
+        let ctx = self.ctx;
+        let mem_mark = self.mem;
+        let simple = rest.is_none()
+            && params
+                .iter()
+                .all(|p| p.default.is_none() && matches!(p.pat, Pat::Ident(..)));
+        self.fdepth += 1;
+        let r = self.parse_arrow_body_inner(params, rest, is_async, start);
+        let r = r.and_then(|mut e| {
+            // (Default values and patterns can hold functions whose scope ids come before the
+            // arrow's own, so only simple lists are dropped.)
+            if simple && let ExprKind::Func(f) = &mut e.k {
+                let lo = f.scope;
+                self.make_lazy(f, lo, start, ctx, mem_mark)?;
+            }
+            Ok(e)
+        });
+        self.fdepth -= 1;
+        r
+    }
+
+    fn parse_arrow_body_inner(
         &mut self,
         params: Vec<Param>,
         rest: Option<Pat>,
@@ -3031,7 +3225,7 @@ impl<'a> Parser<'a> {
                         Some(MethodKind::Set) => FuncKind::Setter,
                         _ => FuncKind::Method,
                     };
-                    let f = self.parse_function_rest(fk, is_async, is_gen, ppos)?;
+                    let f = self.parse_function_rest(fk, is_async, is_gen, ppos, FnHead::default())?;
                     props.push(PropDef::Method(key, acc.unwrap_or(MethodKind::Method), f));
                 } else if is_async || is_gen || acc.is_some() {
                     return self.unexpected();

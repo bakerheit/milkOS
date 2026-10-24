@@ -400,10 +400,17 @@ impl Realm {
         if self.vm.frames.len() as u32 >= self.limits.max_call_depth.max(16) {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
-        let (code, env, cthis, cnt) = match &self.o(f).kind {
+        let (mut code, env, cthis, cnt) = match &self.o(f).kind {
             ObjKind::Closure(c) => (c.code.clone(), c.env, c.this, c.new_target),
             _ => return Err(self.not_callable(Val::Obj(f))),
         };
+        if code.lazy.is_some() {
+            // First call of a function left uncompiled: compile it now.
+            code = self.force_lazy(&code)?;
+            if let ObjKind::Closure(c) = &mut self.om(f).kind {
+                c.code = code.clone();
+            }
+        }
         let nparams = code.nparams as usize;
         let nlocals = code.nlocals as usize;
         if self.vm.stack.len() + nlocals + 64 > MAX_STACK {

@@ -88,6 +88,15 @@ impl Atoms {
         a
     }
 
+    /// A table with nothing in it (not even the keywords): a placeholder for one that has
+    /// been lent out.
+    pub fn empty() -> Atoms {
+        Atoms {
+            strs: Vec::new(),
+            table: alloc::vec![u32::MAX; 1],
+        }
+    }
+
     pub fn intern(&mut self, s: &str) -> Atom {
         let mask = self.table.len() - 1;
         let mut i = hash(s) as usize & mask;

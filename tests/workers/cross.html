@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: other origins</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>A worker script from another origin</h2>
+<table id="t"></table>
+<script>
+  var urls = ['http://api.milk.test:@PORT@/ping-worker.js', 'http://other.test:@PORT@/ping-worker.js', 'ping-worker.js'];
+  var left = urls.length;
+  urls.forEach(function (u, i) {
+    var w = new Worker(u, { name: 'x' + i });
+    w.onmessage = function (e) { shown('cross', 'allowed-' + i, 'worker ' + e.data + ' started'); if (--left === 0) report('cross', 'end', 'ok'); };
+    w.onerror = function (e) { shown('cross', 'refused-' + i, 'error event'); if (--left === 0) report('cross', 'end', 'ok'); };
+  });
+</script>
+</body></html>

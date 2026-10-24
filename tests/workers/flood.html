@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: a lot of messages</title>
+<script src="/report.js"></script>
+</head><body>
+<h2>5000 messages each way</h2>
+<script>
+  var w = new Worker('/flood-worker.js', { name: 'flood' });
+  var next = 0, bad = 0, t0 = Date.now();
+  w.onmessage = function (e) {
+    if (e.data.i !== next) bad++;
+    next = e.data.i + 1;
+    if (next === 5000) report('flood', 'end', 'ordered=' + (bad === 0) + ' count=' + next);
+  };
+  for (var i = 0; i < 5000; i++) w.postMessage({ i: i, pad: 'xxxxxxxxxxxxxxxx' });
+</script>
+</body></html>

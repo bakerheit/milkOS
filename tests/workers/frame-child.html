@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>A frame with a worker</title>
+<script src="/report.js"></script>
+</head><body>
+<p>a frame</p>
+<script>
+  var w = new Worker('/tick-worker.js', { name: 'inframe' });
+  w.onmessage = function (e) { if (e.data === 8) parent.postMessage('ticking', '*'); };
+</script>
+</body></html>

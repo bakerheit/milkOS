@@ -605,6 +605,7 @@ impl App {
             }
             if ti < self.tabs.len() {
                 self.net_requests(ti, f);
+                self.worker_requests(ti, f);
             }
         }
         if ti < self.tabs.len() {

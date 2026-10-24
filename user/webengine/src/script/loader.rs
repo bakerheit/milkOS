@@ -2,7 +2,10 @@
 //!
 //! The page is parsed whole before any script runs (there is no pausing parser and so no
 //! `document.write` into the stream: the bindings insert written markup after the running
-//! script instead). Then, in order:
+//! script instead). A parser-blocking script is run with the rest of the tree set aside
+//! (`Dom::fence_after`), so it sees the page as far as a parser would have got; the external
+//! scripts `document.write` adds ([`When::Written`]) block the parser in order, ahead of the
+//! page's next script. Then, in order:
 //!
 //! 1. Parser-inserted scripts that block (inline ones, and external ones with neither
 //!    `defer` nor `async`), in tree order, each waiting for its body.
@@ -123,6 +126,9 @@ pub enum When {
     Async,
     /// Inserted by a script with `async = false`: in insertion order among those.
     Ordered,
+    /// An external script that `document.write` put in the page: the parser waits for it (the
+    /// scripts after the writer do not run before it), in the order written.
+    Written,
 }
 
 #[derive(Clone, Debug)]
@@ -172,6 +178,8 @@ pub struct Loader {
     pub phase: Phase,
     /// Module scripts, import maps and preloads to start, in order.
     pub work: Vec<ModWork>,
+    /// `document.write` is putting scripts in the page now (they are the parser's).
+    pub writing: bool,
 }
 
 /// More scripts than this on one page are ignored.
@@ -190,6 +198,7 @@ impl Loader {
             started: BTreeSet::new(),
             phase: Phase::Loading,
             work: Vec::new(),
+            writing: false,
         }
     }
 
@@ -315,6 +324,15 @@ impl Loader {
             (Some(_), true) if is_async => When::Async,
             (Some(_), true) if e.has_attr("defer") => When::Defer,
             (_, true) => When::Blocking,
+            // Written by document.write: the parser's, ahead of what follows the writer.
+            (Some(_), false) if self.writing && !module => When::Written,
+            // ... and an inline one written after such a script waits behind it (the parser
+            // is paused on it, with the rest of what was written still in its input).
+            (None, false)
+                if self.writing && !module && self.scripts.iter().any(|x| x.when == When::Written && !x.done) =>
+            {
+                When::Written
+            }
             // Inserted: external ones are async unless the page said `async = false`.
             (Some(_), false) if ordered && !is_async => When::Ordered,
             (Some(_), false) => When::Async,
@@ -394,6 +412,10 @@ impl Loader {
                 .iter()
                 .position(|s| !s.done && s.when == w)
         };
+        // Scripts document.write put in: the parser waits for them before the page's next one.
+        if let Some(i) = first(When::Written) {
+            return (self.scripts[i].body != Body::Waiting).then_some(i);
+        }
         match self.phase {
             Phase::Loading => {
                 let i = first(When::Blocking)?;
@@ -412,7 +434,7 @@ impl Loader {
     pub fn advance(&mut self) -> Option<Phase> {
         let open = |w: When| self.scripts.iter().any(|s| !s.done && s.when == w);
         match self.phase {
-            Phase::Loading if !open(When::Blocking) => {
+            Phase::Loading if !open(When::Blocking) && !open(When::Written) => {
                 self.phase = Phase::Interactive;
                 Some(self.phase)
             }

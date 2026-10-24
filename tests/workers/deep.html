@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: deep recursion</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; }</style>
+</head><body>
+<h2>A worker that recurses too deep</h2>
+<p id="s">...</p>
+<script>
+  var w = new Worker('/deep-worker.js', { name: 'deep' });
+  w.onmessage = function (e) { document.getElementById('s').textContent = 'the worker is still here: ' + e.data; report('deep', 'end', e.data); };
+  w.onerror = function (e) { report('deep', 'worker-error', e.message); };
+</script>
+</body></html>

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: the basics</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>Dedicated workers</h2>
+<p>Each row is an answer from a worker running on its own thread.</p>
+<table id="t"></table>
+<script>
+  var want = 5, got = 0;
+  function answer(name, value) {
+    shown('basic', name, value);
+    if (++got === want) report('basic', 'end', 'all five');
+  }
+  var w = new Worker('/basic-worker.js', { name: 'calc' });
+  w.onmessage = function (e) {
+    var d = e.data;
+    report('basic', 'scope', d.scope + ' ' + d.dom);
+    report('basic', 'location', d.loc + ' ' + d.origin + ' ' + d.secure + ' ' + d.name);
+    answer('classic', 'fib(25) = ' + d.fib);
+  };
+  w.postMessage({ n: 25 });
+
+  var m = new Worker('/module-worker.mjs', { type: 'module', name: 'mod' });
+  m.onmessage = function (e) { answer('module', e.data); };
+  m.postMessage('hello');
+
+  var i = new Worker('/import-worker.js', { name: 'imp' });
+  i.onmessage = function (e) { answer('importScripts', e.data); };
+
+  var blob = new Blob(['onmessage = function (e) { postMessage("blob worker says " + e.data + " from " + location.protocol); };'], { type: 'text/javascript' });
+  var bw = new Worker(URL.createObjectURL(blob), { name: 'blobby' });
+  bw.onmessage = function (e) { answer('blob', e.data); };
+  bw.postMessage('hi');
+
+  var dw = new Worker('data:text/javascript,postMessage("data worker, origin " + self.origin + " " + location.protocol)', { name: 'dat' });
+  dw.onmessage = function (e) { answer('data', e.data); };
+</script>
+</body></html>

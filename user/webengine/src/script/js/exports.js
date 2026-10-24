@@ -20,6 +20,8 @@ return {
   MessageChannel,
   MessagePort,
   deliverPort,
+  Worker,
+  deliverWorker,
   // observers.js
   MutationObserver,
   MutationRecord,

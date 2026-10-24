@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: a runaway</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>A worker that never returns</h2>
+<p>The page keeps running while the worker spins; the worker is stopped on its own.</p>
+<p id="ticks">ticks: 0</p>
+<p id="good">the other worker: ?</p>
+<script>
+  var ticks = 0;
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('runaway', 'tick', ticks); }, 200);
+  var bad = new Worker('/runaway-worker.js', { name: 'spinner' });
+  var good = new Worker('/quiet-worker.js', { name: 'quiet' });
+  good.onmessage = function (e) { document.getElementById('good').textContent = 'the other worker: ' + e.data; report('runaway', 'good', e.data); };
+  bad.postMessage('go');
+  setTimeout(function () { good.postMessage('before'); }, 1000);
+  setTimeout(function () { good.postMessage('after'); }, 14000);
+  report('runaway', 'start', 'page running');
+</script>
+</body></html>

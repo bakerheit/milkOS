@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: errors</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>Errors in workers</h2>
+<table id="t"></table>
+<script>
+  var left = 0;
+  function finish() { if (--left === 0) report('error', 'end', 'ok'); }
+  function path(u) { return String(u).replace(/^https?:\/\/[^\/]+/, ''); }
+  // 1. a worker throws: onerror with where.
+  left++;
+  var seen = 0;
+  var a = new Worker('/throws-worker.js', { name: 'thrower' });
+  a.onerror = function (e) {
+    e.preventDefault();
+    seen++;
+    shown('error', 'thrown-' + seen, e.message + ' @ ' + path(e.filename) + ':' + e.lineno);
+    if (seen === 2) finish();
+  };
+  a.onmessage = function (e) { report('error', 'message-before-error', e.data); };
+  a.postMessage('go');
+  // 2. a syntax error.
+  left++;
+  var b = new Worker('/syntax-worker.js', { name: 'syntax' });
+  b.onerror = function (e) { e.preventDefault(); shown('error', 'syntax', e.message.split(':')[0] + ' @ ' + path(e.filename) + ':' + e.lineno); finish(); };
+  // 3. a script that is not there.
+  left++;
+  var c = new Worker('/not-there.js', { name: 'missing' });
+  c.onerror = function (e) { e.preventDefault(); shown('error', 'missing', 'error event, message "' + e.message + '"'); finish(); };
+  // 4. a script of the wrong type.
+  left++;
+  var d = new Worker('/bad-type.js', { name: 'wrongtype' });
+  d.onerror = function (e) { e.preventDefault(); shown('error', 'wrong-type', 'error event'); finish(); };
+  // 5. self.onerror handles it inside the worker.
+  left++;
+  var f = new Worker('/handled-worker.js', { name: 'handled' });
+  f.onmessage = function (e) { shown('error', 'handled', e.data); finish(); };
+  f.onerror = function () { report('error', 'handled-leaked', 'the page heard of it'); };
+</script>
+</body></html>

@@ -265,6 +265,8 @@ struct Hooks<'a> {
     stopped: bool,
     /// A module script's request: the final response must be a success with a module's type.
     module: bool,
+    /// ... or a classic worker script's: a success with a JavaScript type.
+    script: bool,
     /// Why the final response is no module (the request then ends there).
     module_error: Option<String>,
 }
@@ -297,9 +299,12 @@ impl http::Hooks for Hooks<'_> {
                                 .iter()
                                 .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
                                 .map(|(_, v)| v.as_str());
-                            if let Err(why) =
+                            let verdict = if self.script {
+                                webengine::script::modules::check_script_head(meta.status, reason, ctype)
+                            } else {
                                 webengine::script::modules::check_module_head(meta.status, reason, ctype)
-                            {
+                            };
+                            if let Err(why) = verdict {
                                 self.module_error = Some(why);
                                 return Some(0);
                             }
@@ -493,7 +498,8 @@ pub fn run(
             error: None,
             final_hop: false,
             stopped: false,
-            module: req.kind == NetKind::Module,
+            module: matches!(req.kind, NetKind::Module | NetKind::Script),
+            script: req.kind == NetKind::Script,
             module_error: None,
         };
         hops += 1;

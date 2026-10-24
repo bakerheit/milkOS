@@ -284,10 +284,10 @@ fn hostile_scripts_stay_bounded() {
     // A DOM bomb: refused (too many nodes) or stopped (the wrappers fill the heap).
     let mut h = Host::new();
     let (d, lines) = page(
-        "<script>
+        "<body><script>
            try { for (var i = 0; i < 2000000; i++) document.body.appendChild(document.createElement('i')); }
            catch (e) { console.log('dom ' + e.name); }
-         </script>",
+         </script></body>",
         &mut h,
         0,
         0.0,

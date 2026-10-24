@@ -138,6 +138,14 @@ pub struct MutLog {
     pub deferred: Vec<NodeId>,
 }
 
+/// What [`Dom::fence_after`] hid: one list of siblings that follow a node on the way up.
+pub struct Fence {
+    node: NodeId,
+    parent: NodeId,
+    next: NodeId,
+    last: NodeId,
+}
+
 pub struct Dom {
     pub nodes: Vec<Node>,
     pub atoms: Interner,
@@ -559,6 +567,79 @@ impl Dom {
         self.children(html)
             .find(|&c| self.is_html(c, tag::BODY) || self.is_html(c, tag::FRAMESET))
             .unwrap_or(NONE)
+    }
+
+    // ---- the parser's place (scripts) --------------------------------------------------------
+
+    /// A parser-blocking script is running: the tree is as far as the parser has got, which is
+    /// `n` (the script element). Everything after it in tree order (its following siblings, and
+    /// those of each of its ancestors) is set aside until [`Dom::unfence`]. Nothing is copied:
+    /// the lists are cut where they are and joined again, with whatever the script added after
+    /// the cut kept between.
+    pub fn fence_after(&mut self, n: NodeId) -> Vec<Fence> {
+        let mut out = Vec::new();
+        let mut x = n;
+        while (x as usize) < self.nodes.len() {
+            let p = self.nodes[x as usize].parent;
+            if p == NONE {
+                break;
+            }
+            let nx = self.nodes[x as usize].next;
+            if nx != NONE {
+                out.push(Fence { node: x, parent: p, next: nx, last: self.nodes[p as usize].last_child });
+                self.nodes[nx as usize].prev = NONE;
+                self.nodes[x as usize].next = NONE;
+                self.nodes[p as usize].last_child = x;
+            }
+            x = p;
+        }
+        if !out.is_empty() {
+            self.generation += 1;
+        }
+        out
+    }
+
+    /// The script is done: what was set aside is back after what the script left there. The
+    /// page is told it may all have changed.
+    pub fn unfence(&mut self, fences: Vec<Fence>) {
+        if fences.is_empty() {
+            return;
+        }
+        for f in fences {
+            if (f.parent as usize) >= self.nodes.len() || (f.next as usize) >= self.nodes.len() {
+                continue;
+            }
+            // Where the cut list ends now: the end of the chain that starts at the node, or (if
+            // the script moved the node away) the end of the parent's children.
+            let tail = if self.nodes[f.node as usize].parent == f.parent {
+                let mut t = f.node;
+                let mut guard = 0u32;
+                while self.nodes[t as usize].next != NONE && guard < 50_000_000 {
+                    t = self.nodes[t as usize].next;
+                    guard += 1;
+                }
+                t
+            } else {
+                self.nodes[f.parent as usize].last_child
+            };
+            if tail == NONE {
+                self.nodes[f.parent as usize].first_child = f.next;
+                self.nodes[f.next as usize].prev = NONE;
+            } else {
+                self.nodes[tail as usize].next = f.next;
+                self.nodes[f.next as usize].prev = tail;
+            }
+            self.nodes[f.parent as usize].last_child = f.last;
+        }
+        self.generation += 1;
+        let c = &mut self.changes;
+        c.any = true;
+        c.tree = true;
+        c.forms = true;
+        c.images = true;
+        c.frames = true;
+        c.sheets = true;
+        c.restyle_all = true;
     }
 
     // ---- changes (scripts) -----------------------------------------------------------------

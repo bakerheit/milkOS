@@ -151,6 +151,7 @@ TESTS=(
   "fetch-test|q|600|par|scripts/fetch-test.sh"
   "modules-test|q|600|par|scripts/modules-test.sh"
   "iframe-test|q|600|par|scripts/iframe-test.sh"
+  "workers-test|q|600|par|scripts/workers-test.sh"
   "webbench-test|q|600|par|scripts/webbench-test.sh"
   "jsbench-test|q|600|par|scripts/jsbench-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"

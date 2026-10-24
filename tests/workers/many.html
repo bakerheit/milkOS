@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: too many</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>Seventeen workers</h2>
+<p id="s">...</p>
+<script>
+  var replies = 0, refused = [];
+  for (var i = 1; i <= 17; i++) {
+    (function (i) {
+      var w = new Worker('/ping-worker.js', { name: 'w' + i });
+      w.onmessage = function () { replies++; };
+      w.onerror = function () { refused.push(i); };
+    })(i);
+  }
+  setTimeout(function () {
+    document.getElementById('s').textContent = replies + ' workers answered; refused: ' + refused.join(',');
+    report('many', 'replies', replies);
+    report('many', 'refused', refused.join(','));
+    report('many', 'end', 'ok');
+  }, 4000);
+</script>
+</body></html>

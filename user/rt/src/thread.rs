@@ -60,8 +60,17 @@ pub fn spawn<F: FnMut() + Send + 'static>(f: F) -> JoinHandle {
 /// [`spawn`] with a `stack_size`-byte stack (at least 64 KiB; deep work like a TLS
 /// handshake wants more than the default 128 KiB).
 pub fn spawn_sized<F: FnMut() + Send + 'static>(stack_size: usize, f: F) -> JoinHandle {
+    match try_spawn_sized(stack_size, f) {
+        Ok(h) => h,
+        Err(e) => panic!("thread: {}", e.name()),
+    }
+}
+
+/// [`spawn_sized`] that says no (the stack or the thread could not be made) instead of
+/// panicking.
+pub fn try_spawn_sized<F: FnMut() + Send + 'static>(stack_size: usize, f: F) -> Result<JoinHandle, sys::Errno> {
     let stack_size = stack_size.max(64 * 1024).next_multiple_of(4096);
-    let stack = sys::mmap_anon(stack_size).expect("thread stack");
+    let stack = sys::mmap_anon(stack_size)?;
     // Put the Tcb at the base of the stack region (lowest address), the stack grows down
     // from the top.
     let tcb = stack as *mut Tcb;
@@ -93,13 +102,24 @@ pub fn spawn_sized<F: FnMut() + Send + 'static>(stack_size: usize, f: F) -> Join
         thread_entry as *const () as usize,
     );
     if tid < 0 {
-        panic!("clone: {}", sys::Errno(-tid as i32));
+        // SAFETY: the thread never started: reclaim its closure and stack.
+        unsafe {
+            drop(alloc::boxed::Box::from_raw((*tcb).func));
+            let _ = sys::munmap(stack, stack_size);
+        }
+        return Err(sys::Errno(-tid as i32));
     }
     unsafe { (*tcb).tid.store(tid as i32, Ordering::Release) };
-    JoinHandle { tcb }
+    Ok(JoinHandle { tcb })
 }
 
 impl JoinHandle {
+    /// The thread has ended (so [`JoinHandle::join`] returns at once).
+    pub fn is_finished(&self) -> bool {
+        // SAFETY: tcb is alive until join; the kernel clears `tid` when the thread exits.
+        unsafe { (*self.tcb).tid.load(Ordering::Acquire) == 0 }
+    }
+
     pub fn join(self) {
         let tcb = self.tcb;
         // SAFETY: tcb alive; the kernel clears `tid` to 0 and futex-wakes it on exit.

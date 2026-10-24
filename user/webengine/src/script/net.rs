@@ -39,6 +39,7 @@ const PRELUDE: &str = concat!(
     include_str!("js/fetch.js"),
     include_str!("js/xhr.js"),
     include_str!("js/ports.js"),
+    include_str!("js/workers.js"),
     include_str!("js/observers.js"),
     include_str!("js/dom.js"),
     include_str!("js/events.js"),
@@ -70,6 +71,7 @@ pub const GLOBALS: &[&str] = &[
     "ReadableStream",
     "MessageChannel",
     "MessagePort",
+    "Worker",
     "MutationObserver",
     "MutationRecord",
     "IntersectionObserver",
@@ -150,6 +152,61 @@ pub const GLOBALS: &[&str] = &[
     "BeforeUnloadEvent",
     "PageTransitionEvent",
     "Intl",
+];
+
+/// The names a worker's global gets from the script side (the rest of [`GLOBALS`] is about
+/// documents).
+pub const WORKER_GLOBALS: &[&str] = &[
+    "fetch",
+    "Headers",
+    "Request",
+    "Response",
+    "Blob",
+    "File",
+    "FileReader",
+    "FormData",
+    "URL",
+    "URLSearchParams",
+    "AbortController",
+    "AbortSignal",
+    "XMLHttpRequest",
+    "XMLHttpRequestEventTarget",
+    "XMLHttpRequestUpload",
+    "ProgressEvent",
+    "DOMException",
+    "ReadableStream",
+    "MessageChannel",
+    "MessagePort",
+    "BroadcastChannel",
+    "SubtleCrypto",
+    "CryptoKey",
+    "Scheduler",
+    "scheduler",
+    "LockManager",
+    "crypto",
+    "Crypto",
+    "PerformanceObserver",
+    "PerformanceEntry",
+    "PerformanceMark",
+    "PerformanceMeasure",
+    "reportError",
+    "CloseEvent",
+    "DOMRect",
+    "DOMRectReadOnly",
+    "DOMPoint",
+    "DOMPointReadOnly",
+    "DOMMatrix",
+    "DOMMatrixReadOnly",
+    "Intl",
+];
+
+/// The members of a worker's `performance` and `navigator` that come from the script side.
+const WORKER_MEMBERS: &[&str] = &[
+    "performance",
+    "navigator.locks",
+    "navigator.permissions",
+    "navigator.connection",
+    "navigator.storage",
 ];
 
 /// Properties the page's objects get from the script side, made when first read: (the
@@ -269,13 +326,13 @@ impl NetState {
 
 // ---- installing ------------------------------------------------------------------------------
 
-/// The lazy globals and `navigator.sendBeacon`.
-pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+/// The lazy globals and `navigator.sendBeacon`. `worker`: a worker's set of names.
+pub fn install(b: &Rc<Bridge>, r: &mut Realm, worker: bool) -> JsResult<()> {
     let g = r.global();
     let store = Rc::new(core::cell::RefCell::new(netbytes::Store::default()));
     let class = r.register_class(netbytes::BytesClass { store: store.clone() });
     let _ = b.bytes.set(netbytes::Bytes { class, store });
-    for &name in GLOBALS {
+    for &name in if worker { WORKER_GLOBALS } else { GLOBALS } {
         let b2 = b.clone();
         let getter = r.new_function(&format!("get {name}"), 0, move |r, _t, _a| {
             let ex = exports(&b2, r)?;
@@ -293,7 +350,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         r.define_accessor(g, name, getter, setter, Attrs::CONFIGURABLE)?;
     }
     // navigator.sendBeacon(url, data): the script side, loaded on first use.
-    let nav = r.get(g, "navigator")?;
+    let nav = if worker { Value::UNDEFINED } else { r.get(g, "navigator")? };
     if nav.is_object() {
         let b2 = b.clone();
         r.define_method(nav, "sendBeacon", 1, move |r, _t, a| {
@@ -305,10 +362,13 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     Ok(())
 }
 
-/// Make the [`MEMBERS`] (called once the objects exist).
-pub fn install_members(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+/// Make the [`MEMBERS`] (called once the objects exist). `worker`: only those a worker has.
+pub fn install_members(b: &Rc<Bridge>, r: &mut Realm, worker: bool) -> JsResult<()> {
     let g = r.global();
     for &(path, prop, key) in MEMBERS {
+        if worker && !(WORKER_MEMBERS.contains(&path) || WORKER_MEMBERS.contains(&format!("{path}.{prop}").as_str())) {
+            continue;
+        }
         let obj = match path {
             "window" => g,
             "Element.prototype" => r.pinned(&b.protos().element),
@@ -607,6 +667,7 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     // formEntries(form) -> [[name, value], ...]
     netbytes::define_natives(b, r, n)?;
     super::ports::define_natives(b, r, n)?;
+    super::worker::page::define_natives(b, r, n)?;
     super::observers::define_natives(b, r, n)?;
     super::observers::define_layout_natives(b, r, n)?;
     super::domextra::define_natives(b, r, n)?;

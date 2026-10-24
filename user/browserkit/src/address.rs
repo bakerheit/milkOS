@@ -73,8 +73,26 @@ pub enum Target {
     /// Bare words: the search engine's address for them (needs the internet).
     Search(Url, String),
     Internal(Internal),
+    /// `view-source:ADDRESS`: the page at ADDRESS as text, never run (a web address; its
+    /// `#fragment` is dropped).
+    Source(Url),
     /// Not something the Browser can open (why, in words).
     Bad(String),
+}
+
+/// The prefix of an address that shows a page's source.
+pub const VIEW_SOURCE: &str = "view-source:";
+
+/// The address a `view-source:` address is about (None if `text` is not one).
+fn view_source_of(text: &str) -> Option<&str> {
+    let t = text.trim();
+    let head = t.get(..VIEW_SOURCE.len())?;
+    head.eq_ignore_ascii_case(VIEW_SOURCE).then(|| &t[VIEW_SOURCE.len()..])
+}
+
+/// The address bar's text for the source of `url`.
+pub fn source_address(url: &Url) -> String {
+    format!("{VIEW_SOURCE}{}", url.to_text())
 }
 
 /// The search page for `words` on `engine` (see `milkweb::search` for the pages).
@@ -111,6 +129,19 @@ pub fn interpret_with(text: &str, engine: &Engine) -> Target {
     if let Some(i) = Internal::parse(t) {
         return Target::Internal(i);
     }
+    if let Some(rest) = view_source_of(t) {
+        let rest = rest.trim();
+        if view_source_of(rest).is_some() {
+            return Target::Bad(String::from("view-source: can't show the source of another view-source: address"));
+        }
+        let (a, _) = split_fragment(rest);
+        return match Url::parse(a) {
+            Ok(u) => Target::Source(u),
+            Err(_) => Target::Bad(String::from(
+                "view-source: shows the source of a web address (http:// or https://)",
+            )),
+        };
+    }
     if url::looks_like_search(t) {
         let s = search_url(engine, t);
         return match Url::parse(&s) {
@@ -136,6 +167,7 @@ pub fn resolve(base: Option<&Url>, href: &str) -> Target {
     let (a, frag) = split_fragment(h);
     let lower = a.to_ascii_lowercase();
     for bad in [
+        "view-source:",
         "javascript:",
         "data:",
         "file:",
@@ -182,6 +214,20 @@ mod tests {
         assert!(matches!(interpret("https://milk.test/"), Target::Web(u, None) if u.port == 443));
         assert!(matches!(interpret("ftp://x.test/"), Target::Bad(_)));
         assert!(matches!(interpret("   "), Target::Bad(_)));
+        // view-source:
+        match interpret("view-source:http://10.0.2.2:8000/a?x=1#top") {
+            Target::Source(u) => assert_eq!(u.to_text(), "http://10.0.2.2:8000/a?x=1"),
+            t => panic!("{t:?}"),
+        }
+        assert!(matches!(interpret(" VIEW-SOURCE:https://milk.test/ "), Target::Source(u) if u.port == 443));
+        assert!(matches!(interpret("view-source:milk.test/page"), Target::Source(u) if u.host == "milk.test"));
+        for bad in ["view-source:", "view-source:ftp://x.test/", "view-source:view-source:http://a.test/", "view-source:data:text/html,hi", "view-source:milk:history"] {
+            assert!(matches!(interpret(bad), Target::Bad(_)), "{bad}");
+        }
+        // A link can't lead to one.
+        assert!(matches!(resolve(None, "view-source:http://a.test/"), Target::Bad(_)));
+        let u = Url::parse("http://a.test/x").unwrap();
+        assert_eq!(source_address(&u), "view-source:http://a.test/x");
         assert!(matches!(
             interpret("milk:nope"),
             Target::Bad(_) | Target::Search(..)

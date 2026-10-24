@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: the network</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>A worker on the network</h2>
+<p>The worker fetches with its own origin. The page set the cookie <code>wk=1</code> first.</p>
+<table id="t"></table>
+<script>
+  fetch('/cookie/set').then(function () {
+    var w = new Worker('/net-worker.js', { name: 'netw' });
+    w.onmessage = function (e) { if (e.data && e.data.n) shown('netview', e.data.n, e.data.v); else report('net', 'end', e.data); };
+    w.onerror = function (e) { report('net', 'worker-error', e.message); };
+  });
+</script>
+</body></html>

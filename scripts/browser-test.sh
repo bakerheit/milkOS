@@ -257,6 +257,29 @@ ser "send:text show /proc/${BP:-0}/status" "wait:$PR"
 CAPS="$(out "text show /proc/${BP:-0}/status" | grep -a '^Caps:' || true)"
 echo "  $CAPS"
 echo "$CAPS" | grep "net=all" >/dev/null && echo "$CAPS" | grep "spawn=0" >/dev/null && echo "$CAPS" | grep "fs=/Users/milk/Library/Browser:rw" >/dev/null && ok "it runs sandboxed (network, its own files, no spawning)" || bad "the Browser's sandbox: ${CAPS:-no Caps line (pid ${BP:-?})}"
+echo "-- view-source"
+go "$H/source"
+wait_log "^\[browser\] console log: SRCTEST page script ran" 20 && ok "a page with a script ran it" || bad "the test page's script did not run"
+N1="$(log_lines | grep -c 'SRCTEST page script ran' || true)"
+S1="$(grep -c '^http GET /source ' "$T/servers.log" || true)"
+q key meta_l-alt-u
+loaded "view-source:http://$(esc_re "$H")/source: 200 OK, [0-9]+ bytes" 20 && ok "Cmd-Alt-U fetched the page's source" || bad "no view-source load: $(log_lines | grep -a 'view-source' | tail -2)"
+sleep 1.5
+shot 18-source
+N2="$(log_lines | grep -c 'SRCTEST page script ran' || true)"
+[ "$N1" = "$N2" ] && ok "the source view did not run the page's script" || bad "the page's script ran again in the source view ($N1 -> $N2)"
+S2="$(grep -c '^http GET /source ' "$T/servers.log" || true)"
+[ "$S2" -gt "$S1" ] && ok "the page was fetched again, as a request of its own" || bad "view-source did not fetch the page ($S1 -> $S2)"
+differ 14-home 18-source && ok "the source tab drew" || bad "the source tab looks like the home page"
+q key ctrl-w sleep 1
+go "view-source:http://$H/long"
+loaded "view-source:http://$(esc_re "$H")/long: 200 OK, [0-9]+ bytes" 20 && ok "a view-source: address in the address bar works too" || bad "typed view-source: address did not load"
+go "view-source:view-source:http://$H/long"
+sleep 1
+shot 19-source-refused
+go "$H/"
+loaded "http://$(esc_re "$H")/: 200 OK" || true
+
 clean_log | grep -i "panic" >/dev/null && bad "a panic in the serial log" || ok "no panic"
 clean_log | grep "browser.* quit unexpectedly" >/dev/null && bad "the Browser crashed" || true
 if [ "$FAIL" = 0 ]; then

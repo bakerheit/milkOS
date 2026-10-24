@@ -346,10 +346,12 @@ pub fn prepare_inserted(b: &Rc<Bridge>, r: &mut Realm, s: NodeId) {
         super::modrt::start_work(b, r);
     }
     if let Some(i) = idx {
-        let inline = matches!(
-            b.st.borrow().loader.scripts[i].body,
-            super::loader::Body::Ready(_)
-        );
+        // (An inline script written behind an external one waits for it.)
+        let inline = {
+            let st = b.st.borrow();
+            let sc = &st.loader.scripts[i];
+            matches!(sc.body, super::loader::Body::Ready(_)) && sc.when != super::loader::When::Written
+        };
         if inline {
             super::run_script(b, r, i, false);
         }
@@ -638,8 +640,12 @@ pub fn document_write(b: &Rc<Bridge>, r: &mut Realm, html: &str) -> JsResult<()>
         c = p.dom.node(c).next;
     }
     for s in scripts {
-        b.st(r)?.loader.unmark_started(s);
+        let mut st = b.st(r)?;
+        st.loader.unmark_started(s);
+        st.loader.writing = true;
+        drop(st);
         prepare_inserted(b, r, s);
+        b.st(r)?.loader.writing = false;
     }
     Ok(())
 }
@@ -2324,7 +2330,7 @@ fn d_template_content(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> J
     Ok(wrap(b, r, f))
 }
 
-fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Value> {
+pub(crate) fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Value> {
     let target = if t.is_undefined() {
         super::events::WINDOW
     } else {
@@ -2355,7 +2361,7 @@ fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Va
     Ok(events_js::get_handler(b, r, target, ty))
 }
 
-fn handler_set(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str, v: Value) -> JsResult<Value> {
+pub(crate) fn handler_set(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str, v: Value) -> JsResult<Value> {
     let target = if t.is_undefined() {
         super::events::WINDOW
     } else {

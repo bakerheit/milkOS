@@ -28,7 +28,8 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   one (Cmd-W is the window system's and closes the window), Ctrl-Tab / Ctrl-Shift-Tab and
   Cmd-1..9 switch, a middle click on a tab closes it, Cmd-click (or the middle button, or a
   link with `target=_blank`) opens a link in a new tab.
-* **The address bar** (Cmd-L): an address (no scheme means http), `milk:newtab`,
+* **The address bar** (Cmd-L): an address (no scheme means http), `view-source:ADDRESS` (the
+  page's source, see "View source" below; Cmd-Alt-U does it for the page you are on), `milk:newtab`,
   `milk:bookmarks`, `milk:history`, `milk:downloads`, `milk:cookies`, or bare words, which
   become a search with the engine picked in Settings > Browser (DuckDuckGo Lite unless you
   pick another; see Search engines below). Offline, a page says searching needs the internet.
@@ -133,8 +134,19 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   images are in; `async` ones as soon as they are fetched; scripts a page inserts run on
   insertion (external ones fetched like stylesheets, async unless `async = false`).
   `document.readyState` and `document.currentScript` follow. The page is parsed whole
-  before any script runs, so `document.write` during loading puts its markup after the
-  running script. Data blocks
+  before any script runs, but a parser-blocking script sees only the page as a parser would
+  have it when it got there: what follows the script (its following siblings, and those of
+  each ancestor) is set aside while it runs and the microtasks after it, and put back after
+  whatever the script added at that spot (`document.body` is `null` in a `<head>` script,
+  `getElementById` of a later element is `null`, `document.scripts[length - 1]` is the
+  running script); `defer` scripts and `DOMContentLoaded` see the whole page. `document.write`
+  during loading puts its markup after the running script; an inline script it writes runs
+  at once, an external one blocks the parser (it runs after the writer, in the order
+  written, before the page's next script, and an inline one written behind it waits for it).
+  A script that throws still lets the later ones run and keeps what it defined before the
+  throw (functions are hoisted); one that does not compile defines nothing. Not done: a
+  script waiting for stylesheets that are still loading, and errors from other origins'
+  scripts are not reduced to "Script error.". Data blocks
   (`application/json`, `text/template`) never run; `<noscript>` is raw text and hidden while
   scripts are on, and shown when they are off.
 * **Modules** (`user/webengine/src/script/modrt.rs`, `modules.rs`, `importmap.rs`): real ES
@@ -160,8 +172,8 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   counts toward the page's heap budget; going to another page cancels fetches still running.
   A syntax error or an unresolvable import reaches `window.onerror` and stops that graph only.
   Not done: CSS module scripts, `import.meta` beyond `url` and `resolve`, multiple import maps
-  (merged, as the newest standard has them), `integrity` checks, workers and `data:`/`blob:`
-  module addresses.
+  (merged, as the newest standard has them), `integrity` checks, and `data:`/`blob:` module
+  addresses in `import` (a module worker's own script may be one).
 * **The DOM** (webengine's DOM, live): document lookups and `querySelector(All)` (the
   engine's own selector matcher), creating, inserting, moving, cloning and removing nodes,
   `textContent`, `innerHTML` / `outerHTML` / `insertAdjacentHTML` through the HTML fragment
@@ -279,6 +291,83 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   20,000 queued messages and 32 MB of queued data per page; a port nobody holds is let go.
   `BroadcastChannel` delivers between the channels of one realm only (there is no other
   tab to reach).
+* **Web Workers** (`user/webengine/src/script/worker/`, `js/workers.js`, `user/browserkit/src/workers.rs`,
+  `user/browser/src/workers.rs`): `new Worker(url, { type: "classic" | "module", name })`, a
+  dedicated worker on a thread of its own with a realm of its own (the engine's realms are not
+  `Send`, so each is made on the worker's thread). The engine stays free of threads and I/O: a
+  page's `Worker` comes out of `Document::take_workers` as a `WorkerOut::Spawn`, and the app
+  answers with `WorkerEvent`s (`Document::worker_event`); the thread's whole body is
+  `webengine::run_worker(boot, &mut dyn WorkerIo)`, and the Browser's `WorkerIo` is a mailbox
+  on a futex. The rules (how many, who owns which, what a navigation does, what a full inbox
+  does) are `browserkit::workers::Hub`, host-tested against a fake backend; `user/browser`
+  gives it threads (`rt::thread::try_spawn_sized`, a 1 MiB stack, the realm keeps to 640 KB
+  of it).
+  * **Messages**: `postMessage` both ways is the structured clone of `window.postMessage`
+    (Date, Map, Set, RegExp, typed arrays, errors, cycles; a `DataCloneError` for a function)
+    with a transfer list that may hold `ArrayBuffer`s (given away: the sender's is detached,
+    and a typed array over it arrives as a view of the moved buffer) and `MessagePort`s
+    (a port given to a worker keeps working both ways: the end that stayed behind forwards
+    what its peer posts, the end that crossed posts back, ports travel inside messages on
+    ports, and closing one end closes the other; a port that came from the other thread can't
+    be sent on again). `onmessage`, `onerror`, `onmessageerror` and `addEventListener` on the
+    `Worker` and on `self`; an uncaught error in a worker reaches the `Worker`'s `error` event
+    (an `ErrorEvent` with `message`, `filename`, `lineno`, `colno`) unless `self.onerror` handled
+    it, and goes to the page's console if nobody cancels it. Messages sent before the worker's
+    script has run wait for it. One message is at most 4 MiB of text plus 64 MiB of buffers; a
+    worker's inbox holds 10,000 messages or 32 MiB (past that a message is dropped and the
+    console says so once), its outbox 50,000 items or 64 MiB.
+  * **Inside**: `self` / `globalThis` (`DedicatedWorkerGlobalScope` over `WorkerGlobalScope`),
+    `postMessage`, `close()`, `importScripts()` (classic workers: each script is fetched by the
+    app while the worker's thread waits, then run in order; a failure is a `NetworkError`),
+    ES module workers with static `import` and dynamic `import()` (`import.meta.url`, top-level
+    `await`; no import maps), `name`, `location` (read only), `navigator` (`userAgent`,
+    `language(s)`, `onLine`, `hardwareConcurrency`, `locks`...), `console` (lines go to the
+    tab's console tagged `[worker NAME]`, on the serial line as `console LEVEL [worker NAME]:`),
+    `setTimeout` / `setInterval` and friends, `queueMicrotask`, `performance`, `crypto`,
+    `TextEncoder` / `TextDecoder`, `URL`, `URLSearchParams`, `Blob`, `atob` / `btoa`,
+    `structuredClone`, `MessageChannel`, `BroadcastChannel` (within the worker), `fetch`,
+    `XMLHttpRequest` (asynchronous only), `AbortController`, `Intl`, `Proxy`, the geometry
+    classes. No `window`, no `document`, no DOM at all.
+  * **Where the script comes from**: the same origin as the page (http or https), a `blob:`
+    address the page made with `URL.createObjectURL` (the page already has the text, the worker
+    fetches nothing; a revoked one fails), or a `data:` address (decoded by the Browser; the
+    worker has an origin of its own, `self.origin` is `"null"`, and its requests are judged as
+    those of an opaque origin). Anything else (another origin, another scheme) is an `error`
+    event at the `Worker` and a console line, and the worker is never started. A script must be
+    a success with a JavaScript type (`NetKind::Script`, checked like a module). JavaScript off
+    means no `Worker`.
+  * **Network**: a worker's `fetch`, `XMLHttpRequest` and `importScripts` go through
+    `Document::take_net`-style `NetRequest`s like the page's, run by `scriptnet` and
+    `browserkit::netpolicy` with the worker's own origin and address as the page: the same
+    CORS, cookies (same-origin credentials by default), mixed content and private-network
+    rules, and the tab's request limits (16 in flight, 6 per host), which workers share with
+    the page. A CORS refusal is reported in the console tagged with the worker. `importScripts`
+    is stricter than a browser's for other origins: the script needs CORS headers, like a module.
+  * **Limits and safety**: 16 workers per page and per tab, 48 threads in all (a stopped worker's
+    thread counts until it has ended); 32 MB of heap each, and all the workers of a tab with
+    its page and frames share 160 MB (the greediest worker is stopped past it); a task that runs
+    8 seconds without returning stops that worker (`while (true) {}` ends in a console line
+    "The worker ... was stopped: a task ran for more than 8 s without returning", the page and
+    the other workers carry on); a worker out of memory is stopped alone too. `terminate()`,
+    going to another page, closing the tab, removing the frame that made the worker, and the
+    page's scripts being stopped all end it: its thread is flagged and woken, its requests are
+    cancelled, what it still says is dropped, and its thread is joined once it has ended (it
+    is never waited for). A worker has no access to files, other tabs, `localStorage` or
+    cookies (`document.cookie`).
+  * Not done: `SharedWorker`, service workers, workers inside workers, `OffscreenCanvas`,
+    `WebAssembly`, `SharedArrayBuffer`, the `credentials` option, other transferables than
+    buffers and ports, `BroadcastChannel` across threads, import maps in module workers, a
+    worker started from another worker's `blob:` address, and a limit on a worker that keeps
+    the CPU busy with many short tasks.
+* **View source**: `view-source:ADDRESS` in the address bar, or "View Page Source" in the
+  menu (Cmd-Alt-U), opens a tab with the page's source as it was fetched: one numbered line
+  each in the monospace font, as plain text (no highlighting; nothing in it is a tag, a link
+  or a script, and nothing runs). The page is fetched again as a navigation of its own, with
+  the same cookies, redirects, limits and checks as any other; only web addresses have a
+  source, and a `view-source:` address can't be linked to or nested. A line of more than 160
+  characters is wrapped (its continuation has no number); only the first 512 KB (and 20,000
+  lines) are shown, and the page says so at the top and the bottom. Back, forward and reload
+  work in the tab.
 * **Observers**: `MutationObserver` is real. The DOM keeps a log for the nodes that are
   watched (`childList`, `attributes` with `attributeFilter` and `attributeOldValue`,
   `characterData`, `subtree`; at most 8192 watched nodes, 20,000 records and 8 MB of old
@@ -314,8 +403,8 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   touch, animation, close, clipboard, drag, toggle, formdata and more), `navigator` and
   `screen` members, `getComputedStyle` (about eighty properties, custom properties, and
   `getPropertyValue`; read only), and `structuredClone` with real `DOMException`s.
-  What is **not** there: Shadow DOM (`attachShadow`), Web Workers, WebSocket, EventSource,
-  IndexedDB, Cache storage, service workers, WebAssembly, SharedArrayBuffer, a real BigInt,
+  What is **not** there: Shadow DOM (`attachShadow`), SharedWorker, service workers, WebSocket,
+  EventSource, IndexedDB, Cache storage, WebAssembly, SharedArrayBuffer, a real BigInt,
   `canvas.toDataURL`, media playback (`play()` rejects), `document.styleSheets` rules
   (an empty list), the Fullscreen, Share, Battery, WebRTC and speech APIs, and `Trusted Types`.
 * **Restyling**: changes are batched until the next frame; only the changed subtrees are
@@ -495,7 +584,8 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   animated ones play, and stand still in a background tab),
   scrolling, a fragment, find, zoom, back, a keyboard-driven GET form, a POST sign-in whose
   cookie comes back, third-party cookies refused, tabs, Cmd-click, `open URL`, bookmarks,
-  downloads, error pages and the sandbox, from the serial log, the server's log and
+  downloads, error pages, `view-source:` (Cmd-Alt-U fetches the page again, in a tab of its
+  own, and none of its script runs) and the sandbox, from the serial log, the server's log and
   screenshots.
 * `scripts/milkweb-test.sh` (`milkweb-unit`, smoke) covers the search table (`search.rs`):
   each engine's address for words, a table check (https, unique keys and names, a valid
@@ -557,6 +647,34 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   from the console lines (a line from a frame carries `[frame name]`), the server's log (Referer,
   Cookie, Sec-Fetch headers) and screenshots (`IFRAME_TEST_SHOTS=DIR` keeps them;
   `IFRAME_TEST_ONLY="same msg"` runs sections).
+* `scripts/workers-test.sh` (default set, about four minutes): a VM against
+  `scripts/workers_test_servers.py` (the same kind of zone as fetch-test; 127.0.0.1 only) and
+  the pages in `tests/workers`: a classic, a module (static and dynamic imports),
+  `importScripts`, a `blob:` and a `data:` worker; a worker's `fetch` / XHR with the page's
+  cookie, CORS open and closed (the refusal named in the console with the worker's name),
+  `importScripts` across origins and with a wrong type; a 2 MiB buffer given away and one
+  given back, ports both ways and made in the worker, the structured clone's odd types;
+  `terminate()` (the server hears nothing more); errors (thrown, a timer's, a syntax error, a
+  missing and a wrongly typed script, `self.onerror`); seventeen workers (the last refused);
+  worker scripts from other origins (refused, never requested); a page that leaves and a frame
+  that is removed (their workers end); 5000 messages each way in order; a worker that never
+  returns (the page keeps ticking, the worker is stopped alone, another worker still answers);
+  JavaScript off (no worker script is requested), with screenshots
+  (`WORKERS_TEST_SHOTS=DIR` keeps them; `WORKERS_TEST_ONLY="basic net"` runs sections).
+  Host tests: `webengine-unit` runs real worker threads against a small stand-in app
+  (`src/tests/workers.rs`: the platform inside, every script source, errors, transfer, ports,
+  terminate, close, runaway and memory-hungry workers, the cap, hostile messages both ways, a
+  worker on a small stack asked for what nests too deep), the port links (`ports.rs`, with a
+  fuzz of two linked tables whose books must balance when everything is closed), and `browserkit-unit` the hub (`browserkit/src/workers.rs`:
+  limits, routing, termination by navigation, tab and frame, zombies, the heap budget, a full
+  inbox, `data:` sources, a fuzz of random use against the caps) and `view-source:` (addresses,
+  numbering, escaping, wrapping, the caps, a fuzz of hostile text). `browser-test.sh` checks that Cmd-Alt-U fetches the page again and runs none of its
+  script.
+* The script loader against the standard (`webengine-unit`, `src/tests/loading.rs`): blocking,
+  `defer` and `async` order for any arrival order, a script that throws or does not compile, a
+  failed or wrongly typed one, `document.write`, inserted scripts (`async = false`),
+  `readyState` and the events, what an inline script sees of the page, the shape of an inline
+  script calling a function a later kind of script defines, and edits around the cut.
 * Big scripts and the platform, host-tested: `user/jsengine/src/tests/bigscripts.rs` (generated
   bundles of 1, 3 and 8 MB in several shapes run right under the real per-frame limits, the
   peak memory of loading them is measured with a counting allocator, the compile allowance
@@ -597,7 +715,7 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
 
 * Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
   there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
-* JavaScript has no WebSockets, workers, Shadow DOM, IndexedDB, real BigInt or `ReadableStream` request bodies
+* JavaScript has no WebSockets, SharedWorker or service workers, Shadow DOM, IndexedDB, real BigInt or `ReadableStream` request bodies
   (the list is in the JavaScript section);
   `fetch` has no HTTP cache (`cache` modes only set headers) and no `integrity` check; hosts
   with non-ASCII names aren't looked up (no IDNA); `URL` is a good WHATWG subset, not the whole

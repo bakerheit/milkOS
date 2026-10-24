@@ -331,8 +331,9 @@ impl App {
             max_source: caps.script.max(8 << 20),
             // What a page may read of a response whole (.text(), .json(), ...).
             buffer: caps.response,
-            // (The syntax tree of the biggest piece alive at once, apart from the heap.)
-            compile: (limit / 2).clamp(64 << 20, 512 << 20),
+            // (The syntax tree of the biggest piece alive at once, apart from the heap; never
+            // less than the engine's own default, however little the heap is.)
+            compile: (limit / 2).clamp(96 << 20, 512 << 20),
             ..ScriptLimits::default()
         }
     }

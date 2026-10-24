@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: transfer</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>Giving buffers and ports to a worker</h2>
+<table id="t"></table>
+<script>
+  var w = new Worker('/xfer-worker.js', { name: 'xfer' });
+  var steps = 0;
+  function step(name, value) { shown('xfer', name, value); if (++steps === 5) report('xfer', 'end', 'ok'); }
+  // 1. a 2 MiB buffer goes to the worker (and is gone here); the worker sends a bigger one back.
+  var buf = new ArrayBuffer(2 << 20);
+  var u8 = new Uint8Array(buf);
+  for (var i = 0; i < u8.length; i++) u8[i] = i & 255;
+  w.postMessage({ kind: 'buffer', buf: buf }, [buf]);
+  report('xfer', 'sender-detached', buf.byteLength + ' ' + u8.length);
+  w.onmessage = function (e) {
+    var d = e.data;
+    if (d.kind === 'back') {
+      var v = new Uint32Array(d.buf);
+      step('buffer-back', d.buf.byteLength + ' bytes, [7] = ' + v[7] + ', last = ' + v[v.length - 1]);
+      // 2. a port goes to the worker; both ends talk.
+      var mc = new MessageChannel();
+      var log = [];
+      mc.port1.onmessage = function (m) {
+        log.push(m.data);
+        if (m.data === 'ready') mc.port1.postMessage('hello');
+        if (m.data === 'echo:hello') { step('port-to-worker', log.join(' > ')); mc.port1.close(); }
+      };
+      w.postMessage({ kind: 'port', port: mc.port2 }, [mc.port2]);
+      // 3. the worker makes a port and sends it up.
+      w.postMessage({ kind: 'make' });
+    } else if (d.kind === 'made') {
+      var p = e.ports[0];
+      p.onmessage = function (m) { step('port-from-worker', m.data); };
+      p.postMessage('shout');
+      // 4. structured clone of the less ordinary kinds.
+      w.postMessage({ kind: 'clone' });
+    } else if (d.date) {
+      step('clone', [d.date.getTime(), d.map.get(1), d.set.size, d.re.flags + d.re.source, d.nested.arr[1][1], d.big.length, Object.is(d.neg0, -0), isNaN(d.nan), 'undef' in d].join(' '));
+      // 5. posting something that cannot be cloned
+      var err = 'none';
+      try { w.postMessage({ f: function () {} }); } catch (e) { err = e.name; }
+      step('not-cloneable', err);
+    }
+  };
+</script>
+</body></html>

@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: leaving the page</title>
+<script src="/report.js"></script>
+</head><body>
+<h2>This page has a worker; it leaves in a second</h2>
+<script>
+  var w = new Worker('/tick-worker.js', { name: 'leave' });
+  var n = 0;
+  w.onmessage = function (e) { n = e.data; if (n === 10) report('leave', 'ticking', n); };
+  setTimeout(function () { report('leave', 'leaving', n); location.href = '/landed.html'; }, 1500);
+</script>
+</body></html>

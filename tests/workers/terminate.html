@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Workers: terminate</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } td, th { padding: 3px 10px; text-align: left; border-bottom: 1px solid #d8c8b0; } code { background: #f4ebe0; padding: 0 3px; }</style>
+</head><body>
+<h2>terminate()</h2>
+<p id="s">starting</p>
+<script>
+  var w = new Worker('/tick-worker.js', { name: 'term' });
+  var ticks = 0, ended = false, late = 0;
+  w.onmessage = function (e) {
+    if (ended) { late++; return; }
+    ticks = e.data;
+    document.getElementById('s').textContent = 'the worker has ticked ' + ticks + ' times';
+    if (ticks === 6) {
+      w.terminate();
+      ended = true;
+      w.postMessage('after terminate');
+      report('terminate', 'terminated', 'after ' + ticks + ' ticks');
+      setTimeout(function () {
+        document.getElementById('s').textContent = 'terminated after ' + ticks + ' ticks; ' + late + ' came after';
+        report('terminate', 'late', late);
+        report('terminate', 'end', 'ok');
+      }, 1500);
+    }
+  };
+</script>
+</body></html>

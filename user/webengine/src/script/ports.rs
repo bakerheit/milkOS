@@ -584,11 +584,16 @@ impl Bridge {
         if let Some(h) = self.hub() {
             return h.ports.clone();
         }
-        // (A realm outside any hub has a table of its own.)
+        // (A realm outside any hub has a table of its own. A worker's ports are numbered apart
+        // from its page's, whose table it is linked to.)
+        let ns = self.st.try_borrow().ok().and_then(|st| st.worker.as_ref().map(|w| w.boot.spawn.id as u64));
         self.xf
             .ports
             .borrow_mut()
-            .get_or_insert_with(|| Rc::new(PortTable::new()))
+            .get_or_insert_with(|| Rc::new(match ns {
+                Some(ns) => PortTable::with_namespace(ns),
+                None => PortTable::new(),
+            }))
             .clone()
     }
 

@@ -711,6 +711,9 @@ pub struct Stats {
 
 // ---- Scripts --------------------------------------------------------------------------------
 
+/// `navigator.userAgent` unless the host says otherwise (workers get the same).
+pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (milkOS) MilkBrowser/1.0";
+
 /// What a page's scripts reach outside the page, from the app. Every call that may run
 /// script takes one. Nothing here may block for long except the dialogs (which are modal:
 /// the app shows them and waits for the user) and [`ScriptHost::slow`].
@@ -731,7 +734,7 @@ pub trait ScriptHost {
     }
     /// navigator.userAgent.
     fn user_agent(&self) -> String {
-        String::from("Mozilla/5.0 (milkOS) MilkBrowser/1.0")
+        String::from(DEFAULT_USER_AGENT)
     }
     /// `document.cookie`: the page's cookies as a Cookie header would carry them, without
     /// HttpOnly ones.

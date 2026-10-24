@@ -35,6 +35,7 @@ mod store;
 mod sysfont;
 mod tab;
 mod web;
+mod workers;
 
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -98,7 +99,7 @@ pub const ID_MENU_ITEM: u32 = 300; // + index
 pub const ID_OPTION: u32 = 400; // + index
 
 /// What the toolbar's menu offers (label, shortcut).
-pub const MENU: [(&str, &str); 16] = [
+pub const MENU: [(&str, &str); 17] = [
     ("New Tab", "Cmd-T"),
     ("Close Tab", "Ctrl-W"),
     ("Bookmark This Page", "Cmd-D"),
@@ -115,9 +116,11 @@ pub const MENU: [(&str, &str); 16] = [
     ("Forget Cookies, History", "Cmd-Shift-Del"),
     ("JavaScript", ""),
     ("Console", "Cmd-Alt-J"),
+    ("View Page Source", "Cmd-Alt-U"),
 ];
 pub const MENU_JAVASCRIPT: usize = 14;
 pub const MENU_CONSOLE: usize = 15;
+pub const MENU_SOURCE: usize = 16;
 
 pub enum Popup {
     Menu,
@@ -249,6 +252,10 @@ pub struct App {
     /// Script requests running, by fetch job, and the answers on their way to pages.
     pub net_jobs: BTreeMap<JobId, request::NetJob>,
     pub net_inbox: request::Inbox,
+    /// The pages' workers (workers.rs): the hub that keeps their rules, and what the App
+    /// remembers of each.
+    pub workers: workers::WorkerHub,
+    pub worker_meta: BTreeMap<u32, workers::WMeta>,
     /// Frames being fetched: job -> (tab uid, page generation, frame).
     pub frame_jobs: BTreeMap<JobId, (u64, u64, FrameId)>,
     /// The restrictions a frame fetch will run under once it lands.
@@ -462,6 +469,30 @@ impl App {
                 (u, None)
             }
             Target::Web(u, f) => (u, f),
+            Target::Source(u) => {
+                // The page as text, fetched like any navigation (its cookies, redirects and
+                // limits), shown without running anything.
+                let address = address::source_address(&u);
+                let id = self
+                    .fetch
+                    .start(Kind::Page, Request::get(&u), Context::TopLevel { from });
+                let scroll = if push {
+                    None
+                } else {
+                    self.tabs[ti].history.current().map(|e| e.scroll)
+                };
+                self.tabs[ti].load = Some(Load {
+                    job: id,
+                    address,
+                    push,
+                    fragment: None,
+                    scroll,
+                    started_ms: now_ms(),
+                    source: true,
+                    restore: None,
+                });
+                return;
+            }
         };
         // A link to a place on this same page: just scroll there.
         let t = &mut self.tabs[ti];
@@ -501,6 +532,7 @@ impl App {
             fragment,
             scroll,
             started_ms: now_ms(),
+            source: false,
             restore: None,
         });
     }
@@ -1567,6 +1599,7 @@ impl App {
             13 => self.forget_everything(),
             MENU_JAVASCRIPT => self.toggle_javascript(),
             MENU_CONSOLE => self.console_open = !self.console_open,
+            MENU_SOURCE => self.view_source(),
             _ => {}
         }
     }
@@ -1649,6 +1682,7 @@ impl App {
             self.finish(id, kind, out, cert, peer);
         }
         changed |= self.net_tick();
+        changed |= self.workers_tick();
         self.frames_sweep();
         changed |= self.frames_tick();
         for a in self.profile.take_inbox() {
@@ -1792,6 +1826,9 @@ impl App {
         };
         let load = self.tabs[ti].load.take().unwrap();
         match out {
+            Outcome::Page(resp) if load.source => {
+                self.finish_source(ti, load, resp, cert);
+            }
             Outcome::Page(resp) => {
                 let ct = String::from(resp.content_type());
                 let addr = match &load.fragment {
@@ -1896,6 +1933,79 @@ impl App {
             | Outcome::Net(_)
             | Outcome::Refused(_) => {}
         }
+    }
+
+    /// A `view-source:` answer: its text, numbered, shown in the tab and run by nothing.
+    fn finish_source(
+        &mut self,
+        ti: usize,
+        load: Load,
+        resp: milkweb::http::Response,
+        cert: Option<browserkit::certinfo::CertInfo>,
+    ) {
+        let ct = String::from(resp.content_type());
+        let (text, _) = webengine::charset::decode(&resp.body, Some(ct.as_str()).filter(|c| !c.is_empty()));
+        let status = format!("HTTP {} {}", resp.status, resp.reason);
+        let html = pages::view_source(&resp.url.to_text(), &status, resp.body.len(), &text);
+        let addr = address::source_address(&resp.url);
+        let mut page = Page::new(&addr, Some(resp.url.clone()), html.as_bytes(), "text/html", PageKind::Web, false);
+        page.status = resp.status;
+        page.doc_id = self.next_doc_id();
+        if resp.url.scheme == Scheme::Https {
+            page.cert = cert;
+        }
+        rt::println!(
+            "[browser] view-source:{}: {} {}, {} bytes",
+            resp.url,
+            resp.status,
+            resp.reason,
+            resp.body.len()
+        );
+        let title = page.title.clone();
+        let doc_id = page.doc_id;
+        let t = &mut self.tabs[ti];
+        if load.push {
+            let scroll = t.scroll;
+            if let Some(e) = t.history.current_mut() {
+                e.scroll = scroll;
+            }
+            t.history.push_doc(&addr, doc_id);
+        } else if let Some((old, _)) = &load.restore {
+            t.history.rebind(*old, doc_id);
+            t.history.set_top_doc(doc_id);
+        } else {
+            t.history.replace_doc(&addr, doc_id);
+        }
+        if let Some(e) = t.history.current_mut() {
+            e.title = title;
+        }
+        t.show(page, 0);
+        if let Some(s) = load.scroll {
+            t.scroll = s;
+            t.target = s;
+        }
+        self.save_cookies();
+    }
+
+    /// Show the source of the current page in a new tab (the menu, Cmd-Alt-U): the page is
+    /// fetched again as a navigation of its own (same cookies and rules), as text.
+    pub fn view_source(&mut self) {
+        let t = self.tab();
+        let Some(u) = t.page.url.clone().filter(|_| t.page.kind == PageKind::Web) else {
+            self.say("Only a web page has a source to view");
+            return;
+        };
+        if self.tabs.len() >= MAX_TABS {
+            self.say("That's a lot of tabs: close one first");
+            return;
+        }
+        let p = self.internal_page(Internal::NewTab);
+        let mut nt = Tab::new(p);
+        nt.history.push(Internal::NewTab.address());
+        self.tabs.push(nt);
+        let n = self.tabs.len() - 1;
+        self.cur = n;
+        self.go(n, Target::Source(u), true, None, None);
     }
 
     /// Give tab `ti`'s page (and its frames) the stylesheets and images they wait for that have
@@ -2197,6 +2307,8 @@ fn main(args: &rt::Args) -> i32 {
         )),
         net_jobs: BTreeMap::new(),
         net_inbox: alloc::collections::VecDeque::new(),
+        workers: workers::new_hub(webengine::DEFAULT_USER_AGENT, 0),
+        worker_meta: BTreeMap::new(),
         frame_jobs: BTreeMap::new(),
         pending_sandbox: BTreeMap::new(),
         next_doc: 0,
@@ -2227,6 +2339,9 @@ fn main(args: &rt::Args) -> i32 {
         // Wait no longer than the next animation frame (pictures, or the page's scripts).
         let mut wait = if busy {
             16
+        } else if app.workers_running() {
+            // Workers talking: look at their mailboxes often, without spinning.
+            8
         } else if app.net_active() {
             // Script requests going: look at them often, without spinning.
             30
@@ -2266,6 +2381,7 @@ fn main(args: &rt::Args) -> i32 {
             Some(Event::Key(Key::Char('j'), mods)) if mods.meta && mods.alt => {
                 app.console_open = !app.console_open;
             }
+            Some(Event::Key(Key::Char('u'), mods)) if mods.meta && mods.alt => app.view_source(),
             Some(Event::Key(k, mods)) => app.key(k, mods),
             Some(Event::Action { .. }) => {} // the inbox is read every tick
             // Settings changed the font or the theme: the chrome and the pages follow (the

@@ -19,6 +19,8 @@ networking) and never forwards anything anywhere:
       /styled      a page with a stylesheet (/site.css): colours, a flex row, a table
       /unicode     Greek, Cyrillic, Latin Extended, dashes, quotes and symbols
       /images      a JPEG, an animated GIF, WebP (lossy and animated), from user/imgdec's fixtures
+      /source      a page with a script (it logs SRCTEST page script ran), markup and entities
+                   in its text, for view-source:
       /missing     404
 Every request is logged: "http METHOD PATH host=HOST cookie=COOKIE" (and "post BODY").
 Writes "dns=PORT http=PORT" to argv[1], then serves until killed.
@@ -124,6 +126,11 @@ LONG = page(
     + "<p id=\"end\">The end.</p></main>",
 )
 
+SOURCE = (
+    "<!DOCTYPE html>\n<html>\n<head><title>Source test</title></head>\n<body>\n<h1>A page with a script</h1>\n"
+    "<p>Fish &amp; chips &lt;hot&gt;</p>\n<script>console.log('SRCTEST page script ran');</script>\n</body>\n</html>\n"
+)
+
 STYLED = page(
     "Styled page",
     "<link rel=\"stylesheet\" href=\"/site.css\"><header><h1>Milk &amp; Co.</h1><nav><a href=\"/\">Home</a> <a href=\"/long\">Long</a> <a href=\"/form\">Forms</a></nav></header>"
@@ -225,6 +232,8 @@ class Web(http.server.BaseHTTPRequestHandler):
             if ext in TYPES and os.path.isfile(full):
                 return self.send(200, open(full, "rb").read(), TYPES[ext])
             return self.send(404, page("Not found", "<h1>404</h1>"))
+        if path == "/source":
+            return self.send(200, SOURCE)
         if path == "/styled":
             return self.send(200, STYLED)
         if path == "/site.css":

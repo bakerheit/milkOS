@@ -43,7 +43,7 @@ pub type Inbox = VecDeque<(u64, u64, u32, u32, NetEvent)>;
 const DELIVER_PER_TICK: usize = 64;
 
 impl App {
-    fn tab_of(&self, uid: u64, epoch: u64) -> Option<usize> {
+    pub(crate) fn tab_of(&self, uid: u64, epoch: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.uid == uid && t.epoch == epoch)
     }
 
@@ -86,8 +86,11 @@ impl App {
     }
 
     /// The address a frame's scripts speak for (None: none).
-    fn net_page_url(&self, ti: usize, f: FrameId) -> Option<Url> {
+    pub(crate) fn net_page_url(&self, ti: usize, f: FrameId) -> Option<Url> {
         let t = &self.tabs[ti];
+        if crate::workers::is_worker_frame(f) {
+            return self.worker_meta.get(&crate::workers::worker_of(f)).and_then(|m| m.page_url.clone());
+        }
         if f.is_top() {
             t.page.url.clone()
         } else {
@@ -95,7 +98,7 @@ impl App {
         }
     }
 
-    fn net_start(&mut self, ti: usize, f: FrameId, req: NetRequest) {
+    pub(crate) fn net_start(&mut self, ti: usize, f: FrameId, req: NetRequest) {
         if self.net_page_url(ti, f).is_none() {
             self.net_fail_now(
                 ti,
@@ -132,7 +135,19 @@ impl App {
         let Some(url) = self.net_page_url(ti, f) else { return };
         let t = &mut self.tabs[ti];
         let mut page = browserkit::netpolicy::Page::new(url);
-        if f.is_top() {
+        if crate::workers::is_worker_frame(f) {
+            let wid = crate::workers::worker_of(f);
+            if let Some(m) = self.worker_meta.get(&wid) {
+                if let Some(space) = m.space {
+                    page.address_space = space;
+                }
+                page.referrer_policy = m.ref_policy;
+                // A script from a data: address speaks for an origin of its own.
+                if m.opaque {
+                    page.origin = browserkit::netpolicy::Origin::Opaque(0x8000_0000_0000_0000 | wid as u64);
+                }
+            }
+        } else if f.is_top() {
             if let Some(space) = t.page.space {
                 page.address_space = space;
             }
@@ -174,7 +189,7 @@ impl App {
         }
     }
 
-    fn net_cancel(&mut self, ti: usize, f: FrameId, id: u32) {
+    pub(crate) fn net_cancel(&mut self, ti: usize, f: FrameId, id: u32) {
         let t = &mut self.tabs[ti];
         let promoted = {
             t.net_wait.remove(&(f.0, id));
@@ -259,6 +274,11 @@ impl App {
             let Some((uid, epoch, frame, id, ev)) = self.net_inbox.pop_front() else { break };
             let Some(ti) = self.tab_of(uid, epoch) else { continue };
             let f = FrameId(frame);
+            if crate::workers::is_worker_frame(f) {
+                // A worker's answer goes to its thread.
+                self.workers.deliver_net(crate::workers::worker_of(f), id, ev);
+                continue;
+            }
             if !self.tabs[ti].page.doc.scripting_in(f) {
                 continue;
             }

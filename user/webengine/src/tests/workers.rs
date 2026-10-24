@@ -750,6 +750,21 @@ fn message_ports_given_to_a_worker_keep_working_both_ways() {
 }
 
 #[test]
+fn ports_of_the_page_and_of_the_worker_do_not_share_numbers() {
+    // The page's first channel goes over; the worker then makes one of its own and sends it back.
+    let mut s = Sim::new(
+        "const w = new Worker('n.js'); const mc = new MessageChannel();
+         mc.port1.onmessage = (e) => console.log('T from page port ' + e.data);
+         w.postMessage('first', [mc.port2]);
+         w.onmessage = (e) => { const p = e.ports[0]; p.onmessage = (m) => { console.log('T from worker port ' + m.data); console.log('T done'); }; p.postMessage('to the worker port'); };",
+        vec![file("http://www.milk.test/n.js", "onmessage = (e) => { e.ports[0].postMessage('hello from the first'); const mc = new MessageChannel(); mc.port1.onmessage = (m) => mc.port1.postMessage('echo ' + m.data); postMessage('second', [mc.port2]); };")],
+    );
+    let t = s.finish();
+    assert!(has_line(&t, "from page port hello from the first"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "from worker port echo to the worker port"), "{t:?}\n{}", show(&s));
+}
+
+#[test]
 fn a_port_made_in_a_worker_can_be_sent_to_the_page() {
     let mut s = Sim::new(
         "const w = new Worker('q.js'); w.onmessage = (e) => { const p = e.ports[0]; console.log('T ports ' + e.ports.length + ' ' + e.data); p.onmessage = (m) => { console.log('T page ' + m.data); if (m.data === 'pong 2') console.log('T done'); }; p.postMessage('ping 1'); p.postMessage('ping 2'); };",

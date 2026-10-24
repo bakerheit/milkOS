@@ -249,6 +249,29 @@ C="$(out "text show /Users/milk/Library/Browser/cookies")"
 echo "$C" | grep "	session	abc123$" >/dev/null && echo "$C" | grep "	track	1$" >/dev/null && ok "persistent cookies were saved" || bad "cookies file: $C"
 echo "$C" | grep -E "	(theme|sess|pixel|evil)	" >/dev/null && bad "a session, third-party or refused cookie was saved" || ok "no session or third-party cookie was saved"
 
+echo "-- view-source"
+go "$H/source"
+wait_log "^\[browser\] console log: SRCTEST page script ran" 20 && ok "a page with a script ran it" || bad "the test page's script did not run"
+N1="$(log_lines | grep -c 'SRCTEST page script ran' || true)"
+S1="$(grep -c '^http GET /source ' "$T/servers.log" || true)"
+q key meta_l-alt-u
+loaded "view-source:http://$(esc_re "$H")/source: 200 OK, [0-9]+ bytes" 20 && ok "Cmd-Alt-U fetched the page's source" || bad "no view-source load: $(log_lines | grep -a 'view-source' | tail -2)"
+sleep 1.5
+shot 18-source
+N2="$(log_lines | grep -c 'SRCTEST page script ran' || true)"
+[ "$N1" = "$N2" ] && ok "the source view did not run the page's script" || bad "the page's script ran again in the source view ($N1 -> $N2)"
+S2="$(grep -c '^http GET /source ' "$T/servers.log" || true)"
+[ "$S2" -gt "$S1" ] && ok "the page was fetched again, as a request of its own" || bad "view-source did not fetch the page ($S1 -> $S2)"
+differ 14-home 18-source && ok "the source tab drew" || bad "the source tab looks like the home page"
+q key ctrl-w sleep 1
+go "view-source:http://$H/long"
+loaded "view-source:http://$(esc_re "$H")/long: 200 OK, [0-9]+ bytes" 20 && ok "a view-source: address in the address bar works too" || bad "typed view-source: address did not load"
+go "view-source:view-source:http://$H/long"
+sleep 1
+shot 19-source-refused
+go "$H/"
+loaded "http://$(esc_re "$H")/: 200 OK" || true
+
 echo "-- the sandbox"
 ser "send:/Apps/browser/browser http://$H/ &" "wait:$PR"
 loaded "http://$(esc_re "$H")/: 200 OK" || true

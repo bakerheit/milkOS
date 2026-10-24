@@ -10,6 +10,7 @@ mod fuzz;
 mod golden;
 mod html;
 mod layout;
+mod loading;
 mod modules;
 mod nettest;
 mod raster;

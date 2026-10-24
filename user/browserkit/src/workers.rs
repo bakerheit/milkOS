@@ -407,6 +407,20 @@ impl<B: Backend> Hub<B> {
     }
 }
 
+/// A `data:` script is decoded here (the network path has no such addresses): its bytes become
+/// the worker's source, so the worker fetches nothing. Err: why it cannot be a worker (a
+/// broken address, a type other than JavaScript).
+pub fn prepare_source(sp: &mut WorkerSpawn) -> Result<(), String> {
+    let Some(rest) = sp.url.strip_prefix("data:") else { return Ok(()) };
+    let d = crate::netpolicy::origin::decode_data_url(rest, 8 << 20).map_err(|e| format!("{e}"))?;
+    let essence = d.mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    if !webengine::script::loader::is_javascript_mime(&essence) {
+        return Err(format!("the data address has the type {essence}, not JavaScript"));
+    }
+    sp.source = Some(d.body);
+    Ok(())
+}
+
 /// A worker as the console names it: `"name" (url)` or just the address.
 pub fn describe(name: &str, url: &str) -> String {
     let short: String = url.chars().take(120).collect();
@@ -734,6 +748,30 @@ mod tests {
         // The page and its frames count too: 20 MB more and the greediest worker goes.
         assert_eq!(h.enforce_tab_heap(1, 20 << 20), Some(2));
         assert_eq!(h.enforce_tab_heap(9, 1 << 30), None);
+    }
+
+    #[test]
+    fn a_data_script_is_decoded_for_the_worker() {
+        let mut sp = spawn_of(1, "d");
+        sp.url = String::from("data:text/javascript,postMessage(1%2B1)");
+        sp.origin = String::from("null");
+        assert_eq!(prepare_source(&mut sp), Ok(()));
+        assert_eq!(sp.source.as_deref(), Some(&b"postMessage(1+1)"[..]));
+        let mut sp = spawn_of(1, "d");
+        sp.url = String::from("data:application/javascript;base64,cG9zdE1lc3NhZ2UoMSk=#frag");
+        assert_eq!(prepare_source(&mut sp), Ok(()));
+        assert_eq!(sp.source.as_deref(), Some(&b"postMessage(1)"[..]));
+        // Not JavaScript, no comma, bad base64: refused.
+        for bad in ["data:,hello", "data:text/html,<p>", "data:text/javascript", "data:text/javascript;base64,!!!"] {
+            let mut sp = spawn_of(1, "d");
+            sp.url = String::from(bad);
+            assert!(prepare_source(&mut sp).is_err(), "{bad}");
+            assert!(sp.source.is_none());
+        }
+        // Other addresses are left alone.
+        let mut sp = spawn_of(1, "w");
+        assert_eq!(prepare_source(&mut sp), Ok(()));
+        assert!(sp.source.is_none());
     }
 
     #[test]

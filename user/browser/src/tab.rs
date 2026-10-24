@@ -107,6 +107,8 @@ pub struct Load {
     /// Back and forward return to where the page was scrolled.
     pub scroll: Option<i32>,
     pub started_ms: u64,
+    /// `view-source:`: the answer is shown as text, never run.
+    pub source: bool,
     /// Back or forward to an entry: the document it was (to rebind in the history) and where its
     /// frames were.
     pub restore: Option<(u64, alloc::vec::Vec<scriptnet::frame::history::Reload>)>,

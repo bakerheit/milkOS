@@ -429,6 +429,28 @@ impl Doc {
         }
     }
 
+    /// What frame `id`'s scripts asked of the app about their workers.
+    pub fn take_workers(&mut self, id: FrameId) -> Vec<webengine::WorkerOut> {
+        match self.d.frame_doc_mut(id) {
+            Some(d) => d.take_workers(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Something happened in worker `worker` of frame `id`.
+    pub fn worker_event(
+        &mut self,
+        id: FrameId,
+        host: &mut dyn ScriptHost,
+        worker: u32,
+        ev: webengine::WorkerEvent,
+    ) -> bool {
+        match self.d.frame_doc_mut(id) {
+            Some(d) => d.worker_event(host, worker, ev),
+            None => false,
+        }
+    }
+
     pub fn stop_scripts_in(&mut self, id: FrameId) {
         if let Some(d) = self.d.frame_doc_mut(id) {
             d.stop_scripts();

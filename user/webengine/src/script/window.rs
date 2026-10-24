@@ -1075,17 +1075,21 @@ fn install_navigator(b: &Rc<Bridge>, r: &mut Realm, g: Value) -> JsResult<()> {
     r.define(nav, "hardwareConcurrency", Value::int(1), Attrs::ENUMERABLE)?;
     r.define(nav, "maxTouchPoints", Value::int(0), Attrs::ENUMERABLE)?;
     r.define(nav, "webdriver", Value::FALSE, Attrs::ENUMERABLE)?;
+    r.define(nav, "doNotTrack", Value::NULL, Attrs::ENUMERABLE)?;
+    r.define(nav, "pdfViewerEnabled", Value::FALSE, Attrs::ENUMERABLE)?;
+    r.define_method(nav, "vibrate", 1, |_r, _t, _a| Ok(Value::FALSE))?;
+    r.define_method(nav, "getGamepads", 0, |r, _t, _a| Ok(r.new_array(&[])))?;
     r.define(g, "navigator", nav, Attrs::METHOD)?;
     Ok(())
 }
 
-fn match_media(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
-    let q = arg_str(r, a, 0)?;
+/// Does the media query `q` match the page's viewport and colour scheme?
+pub fn media_matches(b: &Bridge, q: &str) -> bool {
     let (w, h) = match b.host() {
         Some(h) => {
             let vp = h.viewport();
             let z = vp.zoom.clamp(25, 500) as f32 / 100.0;
-            (vp.width as f32 / z, vp.height as f32 / z, )
+            (vp.width as f32 / z, vp.height as f32 / z)
         }
         None => (1024.0, 768.0),
     };
@@ -1095,17 +1099,8 @@ fn match_media(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
         height: h,
         dark,
     };
-    let list = crate::css::sheet::parse_media_list(&crate::css::tokenizer::tokenize(&q, 4096));
-    let m = list.matches(&env);
-    let o = r.new_object();
-    r.define(o, "matches", Value::bool(m), Attrs::ENUMERABLE)?;
-    let qs = r.string(&q);
-    r.define(o, "media", qs, Attrs::ENUMERABLE)?;
-    r.define(o, "onchange", Value::NULL, Attrs::DEFAULT)?;
-    for name in ["addListener", "removeListener", "addEventListener", "removeEventListener"] {
-        r.define_method(o, name, 1, |_r, _t, _a| Ok(Value::UNDEFINED))?;
-    }
-    Ok(o)
+    let list = crate::css::sheet::parse_media_list(&crate::css::tokenizer::tokenize(q, 4096));
+    list.matches(&env)
 }
 
 /// Stand-ins for observers pages feature-detect (they never call back).
@@ -1414,9 +1409,25 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         Ok(Value::UNDEFINED)
     })?;
     let screen = r.new_object();
-    for (k, v) in [("width", 1920), ("height", 1080), ("availWidth", 1920), ("availHeight", 1080), ("colorDepth", 24), ("pixelDepth", 24)] {
+    for (k, v) in [
+        ("width", 1920),
+        ("height", 1080),
+        ("availWidth", 1920),
+        ("availHeight", 1080),
+        ("colorDepth", 24),
+        ("pixelDepth", 24),
+        ("availLeft", 0),
+        ("availTop", 0),
+        ("left", 0),
+        ("top", 0),
+    ] {
         r.define(screen, k, Value::int(v), Attrs::ENUMERABLE)?;
     }
+    r.define(screen, "isExtended", Value::FALSE, Attrs::ENUMERABLE)?;
+    for k in ["screenX", "screenY", "screenLeft", "screenTop"] {
+        r.define(g, k, Value::int(0), Attrs::DEFAULT)?;
+    }
+    r.define(g, "crossOriginIsolated", Value::FALSE, Attrs::DEFAULT)?;
     r.define(g, "screen", screen, Attrs::METHOD)?;
 
     // Timers, frames, microtasks.
@@ -1449,11 +1460,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         }
         Ok(Value::UNDEFINED)
     })?;
-    method(b, r, g, "requestIdleCallback", 1, |b, r, _t, a| {
-        let f = arg(a, 0);
-        timer_add(b, r, &[f, Value::int(1)], false)
-    })?;
-    method(b, r, g, "cancelIdleCallback", 1, |b, r, _t, a| timer_clear(b, r, a))?;
     r.define_method(g, "queueMicrotask", 1, |r, _t, a| {
         let f = arg(a, 0);
         if !r.is_callable(f) {
@@ -1489,18 +1495,17 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     // performance.
     let perf = r.new_object();
     let start = b.host().map_or(0.0, |h| h.now());
+    let origin = b.host().map_or(0.0, |h| h.time());
+    if let Ok(mut st) = b.st.try_borrow_mut() {
+        st.perf_origin = start;
+        st.time_origin = origin;
+    }
     let b2 = b.clone();
     r.define_method(perf, "now", 0, move |_r, _t, _a| {
         let now = b2.host().map_or(start, |h| h.now());
         Ok(Value::number(now - start))
     })?;
-    let origin = b.host().map_or(0.0, |h| h.time());
     r.define(perf, "timeOrigin", Value::number(origin), Attrs::ENUMERABLE)?;
-    for m in ["mark", "measure", "clearMarks", "clearMeasures"] {
-        r.define_method(perf, m, 0, |_r, _t, _a| Ok(Value::UNDEFINED))?;
-    }
-    r.define_method(perf, "getEntriesByType", 1, |r, _t, _a| Ok(r.new_array(&[])))?;
-    r.define_method(perf, "getEntriesByName", 1, |r, _t, _a| Ok(r.new_array(&[])))?;
     r.define(g, "performance", perf, Attrs::METHOD)?;
 
     // Dialogs.
@@ -1547,7 +1552,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         let p = r.pinned(&b.protos().style_decl);
         Ok(r.new_host_object(b.classes().computed, n as u64, p))
     })?;
-    method(b, r, g, "matchMedia", 1, |b, r, _t, a| match_media(b, r, a))?;
     method(b, r, g, "getSelection", 0, |_b, r, _t, _a| {
         let o = r.new_object();
         r.define(o, "rangeCount", Value::int(0), Attrs::ENUMERABLE)?;
@@ -1616,6 +1620,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     observer_stub(r, g, "ResizeObserver")?;
     observer_stub(r, g, "IntersectionObserver")?;
     let _ = element;
+
+    super::net::install_members(b, r)?;
 
     // The parsed page's on* attributes.
     nodes::register_handlers(b, r, 0);

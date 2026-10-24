@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use jsengine::{Attrs, JsResult, Pinned, Realm, Value};
 
-use super::bridge::{Bridge, arg, arg_num, arg_str, type_error};
+use super::bridge::{Bridge, Rnd, arg, arg_num, arg_str, type_error};
 use super::netbytes;
 use crate::api::*;
 
@@ -39,6 +39,8 @@ const PRELUDE: &str = concat!(
     include_str!("js/fetch.js"),
     include_str!("js/xhr.js"),
     include_str!("js/ports.js"),
+    include_str!("js/events.js"),
+    include_str!("js/misc.js"),
     include_str!("js/exports.js"),
 );
 
@@ -64,6 +66,74 @@ pub const GLOBALS: &[&str] = &[
     "ReadableStream",
     "MessageChannel",
     "MessagePort",
+    // misc.js
+    "crypto",
+    "Crypto",
+    "requestIdleCallback",
+    "cancelIdleCallback",
+    "IdleDeadline",
+    "matchMedia",
+    "MediaQueryList",
+    "MediaQueryListEvent",
+    "CSS",
+    "DOMRect",
+    "DOMRectReadOnly",
+    "DOMPoint",
+    "DOMPointReadOnly",
+    "DOMMatrix",
+    "DOMMatrixReadOnly",
+    "PerformanceObserver",
+    "PerformanceEntry",
+    "PerformanceMark",
+    "PerformanceMeasure",
+    "reportError",
+    "Animation",
+    "KeyframeEffect",
+    "DocumentTimeline",
+    "AnimationEffect",
+    "VisualViewport",
+    "ScreenOrientation",
+    "WheelEvent",
+    "CompositionEvent",
+    "StorageEvent",
+    "PopStateEvent",
+    "HashChangeEvent",
+    "TouchEvent",
+    "AnimationEvent",
+    "TransitionEvent",
+    "ClipboardEvent",
+    "DragEvent",
+    "CloseEvent",
+    "DataTransfer",
+    "BeforeUnloadEvent",
+    "PageTransitionEvent",
+];
+
+/// Properties the page's objects get from the script side, made when first read: (the
+/// object, the property, the script side's export).
+const MEMBERS: &[(&str, &str, &str)] = &[
+    ("performance", "mark", "perf_mark"),
+    ("performance", "measure", "perf_measure"),
+    ("performance", "clearMarks", "perf_clearMarks"),
+    ("performance", "clearMeasures", "perf_clearMeasures"),
+    ("performance", "getEntries", "perf_getEntries"),
+    ("performance", "getEntriesByType", "perf_getEntriesByType"),
+    ("performance", "getEntriesByName", "perf_getEntriesByName"),
+    ("performance", "timing", "perf_timing"),
+    ("performance", "navigation", "perf_navigation"),
+    ("navigator", "clipboard", "nav_clipboard"),
+    ("navigator", "permissions", "nav_permissions"),
+    ("navigator", "connection", "nav_connection"),
+    ("navigator", "geolocation", "nav_geolocation"),
+    ("navigator", "storage", "nav_storage"),
+    ("navigator", "plugins", "nav_plugins"),
+    ("navigator", "mimeTypes", "nav_mimeTypes"),
+    ("screen", "orientation", "screen_orientation"),
+    ("window", "visualViewport", "win_visualViewport"),
+    ("Element.prototype", "animate", "el_animate"),
+    ("Element.prototype", "getAnimations", "el_getAnimations"),
+    ("Document.prototype", "getAnimations", "doc_getAnimations"),
+    ("Document.prototype", "timeline", "doc_timeline"),
 ];
 
 /// Requests a page may have outstanding at once (the app has its own, lower limits).
@@ -152,6 +222,38 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
             let f = r.get(ex, "sendBeacon")?;
             r.call(f, Value::UNDEFINED, a)
         })?;
+    }
+    Ok(())
+}
+
+/// Make the [`MEMBERS`] (called once the objects exist).
+pub fn install_members(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    let g = r.global();
+    for &(path, prop, key) in MEMBERS {
+        let obj = match path {
+            "window" => g,
+            "Element.prototype" => r.pinned(&b.protos().element),
+            "Document.prototype" => r.pinned(&b.protos().document),
+            name => r.get(g, name)?,
+        };
+        if !obj.is_object() {
+            continue;
+        }
+        let b2 = b.clone();
+        let getter = r.new_function(&format!("get {prop}"), 0, move |r, this, _a| {
+            let ex = exports(&b2, r)?;
+            let v = r.get(ex, key)?;
+            // Now an ordinary property of the object itself.
+            let target = if this.is_object() { this } else { r.global() };
+            r.define(target, prop, v, Attrs::METHOD)?;
+            Ok(v)
+        });
+        let setter = r.new_function(&format!("set {prop}"), 1, move |r, this, a| {
+            let target = if this.is_object() { this } else { r.global() };
+            r.define(target, prop, arg(a, 0), Attrs::METHOD)?;
+            Ok(Value::UNDEFINED)
+        });
+        r.define_accessor(obj, prop, getter, setter, Attrs::CONFIGURABLE)?;
     }
     Ok(())
 }
@@ -256,6 +358,69 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     r.define_method(n, "time", 0, move |_r, _t, _a| {
         Ok(Value::number(b2.host().map_or(0.0, |h| h.time())))
     })?;
+    // random(uint8array) -> bool: fill it from the system's CSPRNG
+    let b2 = b.clone();
+    r.define_method(n, "random", 1, move |r, _t, a| {
+        let v = arg(a, 0);
+        let Some(len) = r.buffer_bytes(v).map(|x| x.len()) else {
+            return Ok(Value::FALSE);
+        };
+        let mut buf = alloc::vec![0u8; len.min(1 << 16)];
+        let ok = b2.host().is_some_and(|h| h.random(&mut buf));
+        if ok && let Some(dst) = r.buffer_bytes_mut(v) {
+            let n = buf.len().min(dst.len());
+            dst[..n].copy_from_slice(&buf[..n]);
+        }
+        Ok(Value::bool(ok))
+    })?;
+    // mediaMatches(query) -> bool
+    let b2 = b.clone();
+    r.define_method(n, "mediaMatches", 1, move |r, _t, a| {
+        let q = arg_str(r, a, 0)?;
+        Ok(Value::bool(super::window::media_matches(&b2, &q)))
+    })?;
+    // cssSupports(condition) / cssSupportsDecl(property, value) -> bool
+    r.define_method(n, "cssSupports", 1, |r, _t, a| {
+        let c = arg_str(r, a, 0)?;
+        Ok(Value::bool(crate::css::sheet::supports_text(&c)))
+    })?;
+    r.define_method(n, "cssSupportsDecl", 2, |r, _t, a| {
+        let (p, v) = (arg_str(r, a, 0)?, arg_str(r, a, 1)?);
+        Ok(Value::bool(crate::css::sheet::supports_declaration(&p, &v)))
+    })?;
+    // viewport() -> [width, height, zoom percent, dark]
+    let b2 = b.clone();
+    r.define_method(n, "viewport", 0, move |r, _t, _a| {
+        let (w, h, z, d) = match b2.host() {
+            Some(h) => {
+                let v = h.viewport();
+                let z = v.zoom.clamp(25, 500);
+                (v.width as f64 * 100.0 / z as f64, v.height as f64 * 100.0 / z as f64, z, v.dark)
+            }
+            None => (0.0, 0.0, 100, false),
+        };
+        let vals = [Value::number(w.rnd()), Value::number(h.rnd()), Value::int(z as i32), Value::bool(d)];
+        Ok(r.new_array(&vals))
+    })?;
+    // clipboardWrite(text) -> bool (only within a few seconds of a click or key press)
+    let b2 = b.clone();
+    r.define_method(n, "clipboardWrite", 1, move |r, _t, a| {
+        let t = arg_str(r, a, 0)?;
+        let now = b2.host().map_or(0.0, |h| h.now());
+        if now > b2.st(r)?.activation_until {
+            return Ok(Value::FALSE);
+        }
+        Ok(Value::bool(b2.host().is_some_and(|h| h.set_clipboard(&t))))
+    })?;
+    // rectProto() -> the prototype of the rects getBoundingClientRect makes
+    let b2 = b.clone();
+    r.define_method(n, "rectProto", 0, move |r, _t, _a| Ok(r.pinned(&b2.protos().dom_rect)))?;
+    // perfOrigin() -> the clock's reading at performance.timeOrigin, timeOrigin() -> that in ms
+    // since 1970
+    let b2 = b.clone();
+    r.define_method(n, "perfOrigin", 0, move |_r, _t, _a| Ok(Value::number(b2.st.borrow().perf_origin)))?;
+    let b2 = b.clone();
+    r.define_method(n, "timeOrigin", 0, move |_r, _t, _a| Ok(Value::number(b2.st.borrow().time_origin)))?;
     // formEntries(form) -> [[name, value], ...]
     netbytes::define_natives(b, r, n)?;
     super::ports::define_natives(b, r, n)?;

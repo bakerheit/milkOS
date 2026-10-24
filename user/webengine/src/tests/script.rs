@@ -27,6 +27,8 @@ pub struct Host {
     /// The clock moves this much each time it is read (for runaway-script tests).
     pub tick: f64,
     pub clock: core::cell::Cell<f64>,
+    pub rnd: u64,
+    pub clipboard: String,
 }
 
 impl Host {
@@ -43,6 +45,8 @@ impl Host {
             slow_calls: 0,
             tick: 0.0,
             clock: core::cell::Cell::new(0.0),
+            rnd: 0x2545_f491_4f6c_dd1d,
+            clipboard: String::new(),
         }
     }
 }
@@ -121,6 +125,18 @@ impl ScriptHost for Host {
     fn confirm(&mut self, msg: &str) -> bool {
         self.alerts.push(alloc::format!("confirm: {msg}"));
         self.confirm_answer
+    }
+    fn random(&mut self, out: &mut [u8]) -> bool {
+        // (Not random: a counter, so the tests can see what they get.)
+        for b in out.iter_mut() {
+            self.rnd = self.rnd.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *b = (self.rnd >> 33) as u8;
+        }
+        true
+    }
+    fn set_clipboard(&mut self, text: &str) -> bool {
+        self.clipboard = String::from(text);
+        true
     }
     fn slow(&mut self, _ms: f64) -> bool {
         self.slow_calls += 1;

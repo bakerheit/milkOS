@@ -98,6 +98,21 @@ impl ScriptHost for JsHost<'_> {
         };
         a.map(|a| a as &mut dyn Storage)
     }
+    fn random(&mut self, out: &mut [u8]) -> bool {
+        // The kernel's CSPRNG (getrandom(2)); asked again until all of `out` is filled.
+        let mut at = 0;
+        while at < out.len() {
+            match sys::getrandom(&mut out[at..]) {
+                Ok(n) if n > 0 => at += n,
+                _ => return false,
+            }
+        }
+        true
+    }
+    fn set_clipboard(&mut self, text: &str) -> bool {
+        crate::clipboard_set(text);
+        true
+    }
     fn alert(&mut self, msg: &str) {
         if self.no_modals {
             return;

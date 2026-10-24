@@ -729,6 +729,17 @@ pub trait ScriptHost {
     fn slow(&mut self, _running_ms: f64) -> bool {
         true
     }
+    /// Fill `out` with random bytes from the system's CSPRNG (`crypto.getRandomValues`,
+    /// `crypto.randomUUID`). False: not available (the API then throws).
+    fn random(&mut self, _out: &mut [u8]) -> bool {
+        false
+    }
+    /// `navigator.clipboard.writeText`: put `text` on the clipboard. The bindings only ask
+    /// within a few seconds of a click or key press in the page (user activation). False: no
+    /// clipboard.
+    fn set_clipboard(&mut self, _text: &str) -> bool {
+        false
+    }
     /// The host for the scripts of frame `id` ([`FrameId::TOP`] included), for when one
     /// frame's script reaches into another's (same-origin access: `contentWindow`, `parent`).
     /// None: no access (the bindings throw a SecurityError). The host that runs a frame's

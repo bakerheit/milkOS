@@ -520,6 +520,34 @@ fn supports_in_parens(c: &[Tok], cx: &ParseCx, atoms: &mut Interner) -> bool {
     }
 }
 
+/// `CSS.supports(condition)`: does the engine support this `@supports` condition (`(display:
+/// grid)`, `not (x: y)`, `selector(a > b)`, ...)? A bare declaration (`display: grid`) counts too.
+pub fn supports_text(cond: &str) -> bool {
+    let toks = crate::css::tokenizer::tokenize(cond, 4096);
+    let resolve = |_: &str| String::new();
+    let cx = ParseCx { resolve: &resolve };
+    let mut atoms = Interner::new();
+    if let Some(Tok::Ident(_)) = trim(&toks).first() {
+        let t = trim(&toks);
+        if t.iter().any(|x| matches!(x, Tok::Colon)) && !t.first().is_some_and(|x| x.is_ident("not")) {
+            let mut wrapped = alloc::vec![Tok::Open('(')];
+            wrapped.extend(t.iter().cloned());
+            wrapped.push(Tok::Close(')'));
+            return supports(&wrapped, &cx, &mut atoms);
+        }
+    }
+    supports(&toks, &cx, &mut atoms)
+}
+
+/// `CSS.supports(property, value)`.
+pub fn supports_declaration(name: &str, value: &str) -> bool {
+    let toks = crate::css::tokenizer::tokenize(value, 4096);
+    let resolve = |_: &str| String::new();
+    let cx = ParseCx { resolve: &resolve };
+    let mut tmp = Vec::new();
+    parse_declaration(&name.to_ascii_lowercase(), &toks, &cx, &mut tmp)
+}
+
 /// Limits for one parse.
 pub struct SheetLimits {
     pub max_tokens: usize,

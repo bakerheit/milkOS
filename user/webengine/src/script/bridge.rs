@@ -182,6 +182,11 @@ pub struct State {
     pub outbox: super::frames::Outbox,
     /// This realm's message ports (script/ports.rs).
     pub ports: super::ports::PortsLocal,
+    /// Until when (the host's clock) a click or key press lets a script use the clipboard.
+    pub activation_until: f64,
+    /// `performance.timeOrigin`: the host's clock then, and the time since 1970 in ms.
+    pub perf_origin: f64,
+    pub time_origin: f64,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -249,6 +254,9 @@ impl Bridge {
                 in_error_event: false,
                 outbox: Default::default(),
                 ports: Default::default(),
+                activation_until: 0.0,
+                perf_origin: 0.0,
+                time_origin: 0.0,
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),
@@ -294,6 +302,14 @@ impl Bridge {
 
     pub fn set_peers(&self, p: Option<super::frames::Peers>) {
         self.peers.set(p);
+    }
+
+    /// A click or key press just happened: the page may use the clipboard for a few seconds.
+    pub fn activate(&self) {
+        let now = self.host().map_or(0.0, |h| h.now());
+        if let Ok(mut st) = self.st.try_borrow_mut() {
+            st.activation_until = now + 5000.0;
+        }
     }
 
     /// The state, or a script error if it is borrowed already (re-entrancy we didn't plan).

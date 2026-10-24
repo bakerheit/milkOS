@@ -460,6 +460,12 @@ impl ScriptHost for FrameHost<'_> {
     fn slow(&mut self, running_ms: f64) -> bool {
         self.inner.slow(running_ms)
     }
+    fn random(&mut self, out: &mut [u8]) -> bool {
+        self.inner.random(out)
+    }
+    fn set_clipboard(&mut self, text: &str) -> bool {
+        self.inner.set_clipboard(text)
+    }
 }
 
 /// Run `f` inside frame `frame`'s realm (its document must still be `uid`). The page and host

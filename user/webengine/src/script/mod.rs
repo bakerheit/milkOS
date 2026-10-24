@@ -440,6 +440,9 @@ impl Runtime {
     ) -> bool {
         let target = key_target(page);
         self.entry(page, host, |b, r| {
+            if !up {
+                b.activate();
+            }
             let ty = if up { "keyup" } else { "keydown" };
             let mut ok = events_js::fire_key(b, r, target, ty, key);
             // keypress for keys that make a character (legacy, but pages still use it).
@@ -522,7 +525,10 @@ impl Runtime {
         pos: (i32, i32),
         mods: Mods,
     ) -> Option<bool> {
-        self.entry(page, host, |b, r| events_js::user_click(b, r, target, pos, mods))
+        self.entry(page, host, |b, r| {
+            b.activate();
+            events_js::user_click(b, r, target, pos, mods)
+        })
     }
 }
 

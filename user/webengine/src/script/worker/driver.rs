@@ -77,6 +77,9 @@ impl ScriptHost for WorkerHost<'_> {
     fn random(&mut self, out: &mut [u8]) -> bool {
         self.io.random(out)
     }
+    fn heap_allowance(&mut self, used: usize) -> Allowance {
+        self.io.heap_allowance(used)
+    }
     fn slow(&mut self, running_ms: f64) -> bool {
         if self.io.terminated() {
             self.why = Some(Why::Terminated);
@@ -309,7 +312,8 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
                 _ => {
                     let r = doc.script_stop_reason();
                     if r == "out of memory" {
-                        format!("it ran out of memory (the limit is {} MB)", boot.limits.heap >> 20)
+                        // (The limit it ran out at: the app moves it while the worker runs.)
+                        format!("it ran out of memory (the limit is {} MB)", stats.heap_limit.max(boot.limits.heap) >> 20)
                     } else {
                         r
                     }

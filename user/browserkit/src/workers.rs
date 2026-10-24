@@ -50,7 +50,8 @@ pub struct Limits {
     /// What a worker is allowed (heap, task time, stack).
     pub worker: WorkerLimits,
     /// All the workers of a tab together may hold this much script heap (bytes); past it the
-    /// greediest is stopped.
+    /// greediest is stopped. The Browser leaves this to the memory plan (which gives every
+    /// worker its own limit, from what the machine has free) and sets it very high.
     pub tab_heap: usize,
     /// How many messages and bytes a worker's inbox may hold (the backend enforces them
     /// where the messages wait; the hub only counts what it was refused).
@@ -91,6 +92,11 @@ pub trait Backend {
     fn recv(&mut self, h: &mut Self::Handle, max: usize) -> Vec<FromWorker>;
     /// Ask the worker to stop as soon as it can.
     fn terminate(&mut self, h: &mut Self::Handle);
+    /// The worker's heap limit is now this (the engine's bytes); it applies it the next time
+    /// its script runs. A backend without budgets that move ignores it.
+    fn set_heap_limit(&mut self, h: &mut Self::Handle, bytes: usize) {
+        let _ = (h, bytes);
+    }
     /// The thread has ended.
     fn finished(&mut self, h: &mut Self::Handle) -> bool;
     /// Join (and drop) a thread that has ended.
@@ -184,6 +190,19 @@ impl<B: Backend> Hub<B> {
     /// The ids of the workers of `tab`.
     pub fn ids_of_tab(&self, tab: u64) -> Vec<u32> {
         self.workers.iter().filter(|(_, e)| e.owner.tab == tab).map(|(i, _)| *i).collect()
+    }
+
+    /// Every running worker: (id, its tab, the heap it last said it holds).
+    pub fn heaps(&self) -> Vec<(u32, u64, usize)> {
+        self.workers.iter().map(|(&id, e)| (id, e.owner.tab, e.heap)).collect()
+    }
+
+    /// Give worker `id` a new heap limit (the memory plan moves them).
+    pub fn set_heap_limit(&mut self, id: u32, bytes: usize) {
+        if let Some(e) = self.workers.get_mut(&id) {
+            e.heap_limit = bytes;
+            self.backend.set_heap_limit(&mut e.handle, bytes);
+        }
     }
 
     /// Script heap the workers of `tab` hold, bytes (as they last said).

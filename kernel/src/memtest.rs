@@ -493,6 +493,7 @@ pub fn run() {
     test_pmm();
     test_heap();
     test_wx();
+    pmm::reset_counters();
     let s = pmm::stats();
     let h = heap::stats();
     kprintln!(

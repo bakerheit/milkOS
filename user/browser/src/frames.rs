@@ -542,8 +542,9 @@ impl App {
         };
         let opaque = sandbox.opaque_origin() || kind == FrameKind::Data;
         let scripts = self.js_on && !sandbox.no_scripts();
+        let scripts = scripts.then(|| self.script_limits(crate::mem::Kind::Frame, ti == self.cur));
         let base = if kind == FrameKind::Data { "data:".into() } else { base_text };
-        let doc = Doc::parse_frame(&bytes, &base, &ct, scripts);
+        let doc = Doc::parse_frame(&bytes, &base, &ct, scripts, self.engine_limits());
         let mut doc = doc;
         doc.set_frame_security(FrameSec {
             origin: (!opaque).then(|| pm_origin.clone()),
@@ -931,7 +932,8 @@ impl App {
         }
         let opaque = sandbox.opaque_origin();
         let scripts = self.js_on && !sandbox.no_scripts();
-        let mut doc = Doc::parse_frame(&bytes, &url.to_text(), &ct, scripts);
+        let scripts = scripts.then(|| self.script_limits(crate::mem::Kind::Frame, ti == self.cur));
+        let mut doc = Doc::parse_frame(&bytes, &url.to_text(), &ct, scripts, self.engine_limits());
         doc.set_frame_security(FrameSec {
             origin: None,
             opaque,
@@ -997,7 +999,7 @@ impl App {
     ) {
         let _ = sandbox;
         let html = pages::error(title, message, hint, address);
-        let mut doc = Doc::parse_frame(html.as_bytes(), "about:blank", "text/html", false);
+        let mut doc = Doc::parse_frame(html.as_bytes(), "about:blank", "text/html", None, self.engine_limits());
         doc.set_frame_security(FrameSec {
             origin: None,
             opaque: true,
@@ -1278,7 +1280,6 @@ impl App {
             if self.tabs[ti].frames.meta.is_empty() && self.tabs[ti].frames.loads.is_empty() {
                 continue;
             }
-            self.frame_budget(ti);
             changed |= self.frame_loads(ti);
             changed |= self.pump_messages(ti);
         }
@@ -1338,35 +1339,6 @@ impl App {
         }
         self.update_holds(ti);
         changed
-    }
-
-    /// The frames of a tab share a budget: when their scripts together hold too much memory the
-    /// greediest frame's scripts end (the page and the other frames carry on).
-    fn frame_budget(&mut self, ti: usize) {
-        let t = &self.tabs[ti];
-        let mut total = 0usize;
-        let mut worst: Option<(usize, FrameId)> = None;
-        for f in t.page.doc.frame_ids() {
-            let st = t.page.doc.script_stats_in(f);
-            if st.stopped {
-                continue;
-            }
-            total += st.heap_bytes;
-            if worst.is_none_or(|w| st.heap_bytes > w.0) {
-                worst = Some((st.heap_bytes, f));
-            }
-        }
-        if total > crate::web::FRAMES_HEAP
-            && let Some((_, f)) = worst
-        {
-            self.frame_console(
-                ti,
-                f,
-                ConsoleLevel::Error,
-                "The frames of this page use too much memory: the scripts of this frame were stopped.",
-            );
-            self.tabs[ti].page.doc.stop_scripts_in(f);
-        }
     }
 
     /// A document's own `load` waits for the frames in it.

@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory hog frame</title>
+<script src="/report.js"></script><script src="/hog.js"></script></head>
+<body style="font-family: sans-serif; margin: 8px; background: #eef4e8; color: #3a2e28">
+<p id="s">allocating</p>
+<script>
+  var a = args(location.search), mb = +a.mb || 50, kind = a.kind || 'objects';
+  report('frame', 'begin', mb + ' ' + kind);
+  setTimeout(function () {
+    hogRun(mb, kind, function (ms) { document.getElementById('s').textContent = 'holding ' + mb + ' MB'; report('frame', 'held', mb + 'MB in ' + ms + 'ms'); },
+      function (n) { document.getElementById('s').textContent = 'allocated ' + n + ' MB'; });
+  }, 300);
+</script>
+</body></html>

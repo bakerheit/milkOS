@@ -59,9 +59,12 @@ use loader::{Body, Loader, Phase};
 
 pub struct Runtime {
     b: Rc<Bridge>,
-    /// Made at the first entry (it needs the host's time zone).
+    /// Made at the first entry (it needs the host's time zone). Dropped when the scripts are
+    /// stopped for good: nothing can run in it any more, and its heap goes back to the system.
     realm: Option<Realm>,
     limits: ScriptLimits,
+    /// What the heap held and was allowed when the scripts were stopped (the engine's bytes).
+    final_heap: (usize, usize),
 }
 
 /// Script work done in one [`Runtime::run`] before it gives the app a turn (timers).
@@ -83,6 +86,7 @@ impl Runtime {
             b: Rc::new(Bridge::new(limits, loader)),
             realm: None,
             limits,
+            final_heap: (0, 0),
         }
     }
 
@@ -117,7 +121,7 @@ impl Runtime {
         if module {
             loader.work.push(loader::ModWork::Module(0, inline.filter(|_| boot.spawn.source.is_some()), CredentialsMode::SameOrigin));
         }
-        let rt = Runtime { b: Rc::new(Bridge::new(limits, loader)), realm: None, limits };
+        let rt = Runtime { b: Rc::new(Bridge::new(limits, loader)), realm: None, limits, final_heap: (0, 0) };
         {
             let mut sec = rt.b.xf.sec.borrow_mut();
             if boot.spawn.origin == "null" {
@@ -330,10 +334,28 @@ impl Runtime {
     pub fn stats(&self) -> ScriptStats {
         let mut s = self.b.st.borrow().stats;
         if let Some(r) = &self.realm {
-            s.heap_bytes = r.heap_stats().used_bytes;
+            let h = r.heap_stats();
+            s.heap_bytes = h.used_bytes;
+            s.heap_limit = h.limit_bytes;
         }
         s.stopped = self.b.st.borrow().stopped;
+        if s.stopped && self.realm.is_none() {
+            s.final_heap = self.final_heap.0;
+            s.heap_limit = self.final_heap.1;
+        }
         s
+    }
+
+    /// Collect garbage now (outside any script of this realm); the engine's bytes freed.
+    pub fn collect(&mut self) -> usize {
+        if self.b.st.try_borrow().map_or(true, |s| s.depth > 0) {
+            return 0;
+        }
+        let Some(r) = self.realm.as_mut() else { return 0 };
+        let before = r.heap_stats().used_bytes;
+        r.release_temps();
+        r.gc();
+        before.saturating_sub(r.heap_stats().used_bytes)
     }
 
     /// End the page's scripts for good.
@@ -381,6 +403,12 @@ impl Runtime {
             }
             r.release_temps();
         }
+        // The scripts are over: the realm (and with it the page's script heap) goes back to
+        // the system. The page itself stays as it is.
+        if let Some(r) = self.realm.take() {
+            let h = r.heap_stats();
+            self.final_heap = (h.used_bytes, h.limit_bytes);
+        }
     }
 
     /// One entry from the app: `f` runs with the page and host reachable, then the
@@ -413,6 +441,9 @@ impl Runtime {
             } else {
                 window::install(&self.b, &mut r);
             }
+            // The host moves the heap budget while the page runs.
+            let b2 = self.b.clone();
+            r.set_memory_hook(Some(alloc::boxed::Box::new(move |used| heap_allowance(&b2, used))));
             drop(_g);
             self.realm = Some(r);
         }
@@ -428,6 +459,20 @@ impl Runtime {
                     st.slow_asked = now;
                 }
                 st.depth += 1;
+            }
+            // (The budget as the machine has it now, before anything runs.)
+            if b.st.borrow().depth == 1 {
+                match heap_allowance(&b, realm.heap_stats().used_bytes) {
+                    jsengine::HeapAnswer::Limit(n) => realm.set_heap_limit(n),
+                    jsengine::HeapAnswer::Stop => {
+                        b.st.borrow_mut().depth -= 1;
+                        if self.b.st.borrow().stopped {
+                            self.teardown();
+                        }
+                        return None;
+                    }
+                    jsengine::HeapAnswer::Keep => {}
+                }
             }
             let out = f(&b, realm);
             checkpoint(&b, realm);
@@ -758,6 +803,24 @@ fn checkpoint(b: &Rc<Bridge>, r: &mut Realm) {
         b.console(ConsoleLevel::Error, format!("Uncaught (in promise) {rep}"));
         if let Ok(mut st) = b.st.try_borrow_mut() {
             st.stats.errors += 1;
+        }
+    }
+}
+
+/// Ask the host for the heap budget (and take the answer's reason if it says stop).
+fn heap_allowance(b: &Rc<Bridge>, used: usize) -> jsengine::HeapAnswer {
+    let Some(h) = b.host() else { return jsengine::HeapAnswer::Keep };
+    match h.heap_allowance(used) {
+        Allowance::Keep => jsengine::HeapAnswer::Keep,
+        Allowance::Limit(n) => jsengine::HeapAnswer::Limit(n),
+        Allowance::Stop(why) => {
+            if let Ok(mut st) = b.st.try_borrow_mut()
+                && !st.stopped
+            {
+                st.stopped = true;
+                st.stop_reason = why;
+            }
+            jsengine::HeapAnswer::Stop
         }
     }
 }

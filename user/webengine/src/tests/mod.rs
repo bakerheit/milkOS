@@ -11,6 +11,7 @@ mod golden;
 mod html;
 mod layout;
 mod loading;
+mod memory;
 mod modules;
 mod nettest;
 mod raster;

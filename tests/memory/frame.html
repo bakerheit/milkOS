@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: a frame that holds a lot</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>A frame that holds memory</h2>
+<p id="ticks">ticks: 0</p>
+<iframe id="hog" name="hog" width="420" height="80"></iframe>
+<script>
+  var a = args(location.search), ticks = 0;
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('frame', 'tick', ticks); }, 200);
+  document.getElementById('hog').src = '/hog-frame.html?mb=' + (a.mb || 50) + '&kind=' + (a.kind || 'objects');
+  report('frame', 'page', 'started');
+</script>
+</body></html>

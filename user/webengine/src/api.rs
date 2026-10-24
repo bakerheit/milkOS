@@ -46,6 +46,17 @@
 //!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - New [`Document::collect_garbage`] and [`Document::stop_scripts_because`] (the app's answers to
+//!   low memory: collect now, stop a page for a reason of its own).
+//! - Heap budgets that move (docs/browser.md "Memory"). New type [`Allowance`], new provided
+//!   [`ScriptHost::heap_allowance`] and [`WorkerIo::heap_allowance`] (the app says, before every
+//!   run and about every 65 thousand steps, how much heap the scripts may have; the default
+//!   keeps what [`ScriptLimits::memory`] said), and the new fields [`ScriptStats::heap_limit`] and
+//!   [`ScriptStats::final_heap`]. Scripts that are stopped now give their heap back at once (the realm
+//!   is dropped; the page stays as it is).
+//!   A script that goes over its budget is stopped alone, as before; what changed is that the
+//!   app can move the budget while the page runs. Build a `ScriptStats` with
+//!   `..Default::default()`.
 //! - Workers (docs/browser.md). `new Worker(url, {type, name})` for dedicated classic and module
 //!   workers, each on a thread of the app's making: [`Document::take_workers`] and
 //!   [`Document::worker_event`] are the page's half, [`run_worker`] with [`WorkerIo`] the
@@ -770,6 +781,15 @@ pub trait ScriptHost {
     fn slow(&mut self, _running_ms: f64) -> bool {
         true
     }
+    /// The heap budget (bytes, the engine's own count) these scripts may have, asked before every
+    /// run and about every 65 thousand steps while a script runs; `used` is the heap in use now.
+    /// [`Allowance::Limit`] sets it (up or down: the app works it out from what the machine has
+    /// free, see browserkit's memory plan), [`Allowance::Stop`] ends the scripts for good with
+    /// that reason on the console, [`Allowance::Keep`] changes nothing. A realm that holds more
+    /// than its budget runs out of memory and is stopped alone.
+    fn heap_allowance(&mut self, _used: usize) -> Allowance {
+        Allowance::Keep
+    }
     /// Fill `out` with random bytes from the system's CSPRNG (`crypto.getRandomValues`,
     /// `crypto.randomUUID`). False: not available (the API then throws).
     fn random(&mut self, _out: &mut [u8]) -> bool {
@@ -811,6 +831,16 @@ pub trait Storage {
     fn set(&mut self, key: &str, value: &str) -> bool;
     fn remove(&mut self, key: &str);
     fn clear(&mut self);
+}
+
+/// What [`ScriptHost::heap_allowance`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowance {
+    Keep,
+    /// The heap budget from now on, in the engine's bytes.
+    Limit(usize),
+    /// Stop the scripts; the text says why ("the page used too much memory").
+    Stop(String),
 }
 
 /// The bounds a page's scripts run in. A page over them gets an uncatchable error, its
@@ -929,6 +959,12 @@ pub struct ScriptStats {
     pub heap_bytes: usize,
     /// The scripts were stopped (by the user, or for going over a limit).
     pub stopped: bool,
+    /// The heap budget now (see [`ScriptHost::heap_allowance`]); 0 before the first script ran.
+    /// For scripts that were stopped: the budget they had.
+    pub heap_limit: usize,
+    /// For scripts that were stopped: the heap they held then (the engine's bytes). Their heap
+    /// is given back when they stop, so `heap_bytes` is 0 from then on.
+    pub final_heap: usize,
 }
 
 /// Fetch's request `mode`.
@@ -1424,6 +1460,10 @@ pub trait WorkerIo {
     fn send(&mut self, m: FromWorker) -> bool;
     /// The page asked for termination (polled from inside a running script).
     fn terminated(&self) -> bool;
+    /// The heap budget this worker may have now (see [`ScriptHost::heap_allowance`]).
+    fn heap_allowance(&mut self, _used: usize) -> Allowance {
+        Allowance::Keep
+    }
 }
 
 // ---- The document -------------------------------------------------------------------------
@@ -1899,6 +1939,20 @@ impl Document {
         if let Some(j) = self.js.as_mut() {
             j.stop("stopped");
         }
+    }
+
+    /// [`Document::stop_scripts`] with a reason the console shows ("The page's scripts were
+    /// stopped (REASON)").
+    pub fn stop_scripts_because(&mut self, why: &str) {
+        if let Some(j) = self.js.as_mut() {
+            j.stop(why);
+        }
+    }
+
+    /// Collect garbage in the page's script heap now (not while a script of this page runs).
+    /// Returns the bytes freed, by the engine's count. The app does this when memory is short.
+    pub fn collect_garbage(&mut self) -> usize {
+        self.js.as_mut().map_or(0, |j| j.collect())
     }
 
     pub fn script_stats(&self) -> ScriptStats {

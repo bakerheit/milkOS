@@ -188,6 +188,8 @@ pub struct Realm {
     pub(crate) native_frames: Vec<NativeFrame>,
     pub(crate) host: Option<Box<dyn Any>>,
     pub(crate) interrupt: Option<Box<dyn FnMut() -> bool>>,
+    /// Asked for the heap budget every so many steps (see `Realm::set_memory_hook`).
+    pub(crate) memory_hook: Option<Box<dyn FnMut(usize) -> crate::api::HeapAnswer>>,
     pub(crate) clock: Option<Box<dyn Fn() -> f64>>,
     pub(crate) tz_offset_min: i32,
     pub(crate) rng: [u64; 2],
@@ -279,6 +281,7 @@ impl Realm {
             native_frames: Vec::new(),
             host: None,
             interrupt: None,
+            memory_hook: None,
             clock: None,
             tz_offset_min: options.tz_offset_minutes,
             rng: [
@@ -873,6 +876,22 @@ impl Realm {
                 && !f()
             {
                 return Err(Exception(Exc::Term(Termination::Interrupted)));
+            }
+            // The heap budget may have changed since the entry began (the embedder watches
+            // the machine's memory): ask, and take the answer.
+            if let Some(mut f) = self.memory_hook.take() {
+                let used = self.heap.used();
+                let answer = f(used);
+                if self.memory_hook.is_none() {
+                    self.memory_hook = Some(f);
+                }
+                match answer {
+                    crate::api::HeapAnswer::Keep => {}
+                    crate::api::HeapAnswer::Limit(limit) => self.set_heap_limit(limit),
+                    crate::api::HeapAnswer::Stop => {
+                        return Err(Exception(Exc::Term(Termination::Interrupted)));
+                    }
+                }
             }
         }
         Ok(())

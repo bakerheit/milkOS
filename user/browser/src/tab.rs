@@ -55,19 +55,20 @@ pub struct Page {
 }
 
 impl Page {
-    /// A page; `scripts`: run its JavaScript (web pages, when JavaScript is on).
+    /// A page; `scripts`: run its JavaScript within these limits (web pages, when JavaScript is on).
     pub fn new(
         address: &str,
         url: Option<Url>,
         html: &[u8],
         ct: &str,
         kind: PageKind,
-        scripts: bool,
+        scripts: Option<webengine::ScriptLimits>,
+        limits: webengine::Limits,
     ) -> Page {
         let base = url
             .as_ref()
             .map_or_else(|| String::from(address), |u| u.to_text());
-        let doc = Doc::parse(html, &base, ct, scripts && kind == PageKind::Web);
+        let doc = Doc::parse(html, &base, ct, scripts.filter(|_| kind == PageKind::Web), limits);
         Page {
             address: String::from(address),
             url,
@@ -151,6 +152,24 @@ pub struct Tab {
     /// The page's frames: what each one loaded from, and the loads under way.
     pub frames: crate::frames::FrameTable,
     pub net_log: alloc::collections::VecDeque<NetLogEntry>,
+    /// Frames (by id) of the page whose scripts ran out of memory, said once.
+    pub mem_stops: alloc::collections::BTreeSet<u32>,
+    /// The user typed into a form of this page (discarding the tab would lose it).
+    pub touched: bool,
+    /// When the tab was last in front (ms), for choosing a tab to discard.
+    pub last_front: u64,
+    /// The tab was discarded to give memory back: what it showed, so it can be fetched again
+    /// when it is opened.
+    pub discarded: Option<Discarded>,
+}
+
+/// What a discarded tab keeps: not its page, only where it was.
+#[derive(Clone, Debug)]
+pub struct Discarded {
+    pub address: String,
+    pub scroll: i32,
+    pub title: String,
+    pub zoom: i32,
 }
 
 /// Console lines a tab keeps.
@@ -198,6 +217,10 @@ impl Tab {
             net_run: alloc::collections::BTreeMap::new(),
             frames: crate::frames::FrameTable::default(),
             net_log: alloc::collections::VecDeque::new(),
+            mem_stops: alloc::collections::BTreeSet::new(),
+            touched: false,
+            last_front: 0,
+            discarded: None,
         }
     }
 
@@ -234,6 +257,9 @@ impl Tab {
         self.net_wait.clear();
         self.net_run.clear();
         self.net_log.clear();
+        self.mem_stops.clear();
+        self.touched = false;
+        self.discarded = None;
     }
 
     /// The page's script requests are outstanding.

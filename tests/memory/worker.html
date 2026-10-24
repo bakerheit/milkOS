@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: a worker that holds a lot</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; }</style>
+</head><body>
+<h2>A worker that holds memory</h2>
+<p id="ticks">ticks: 0</p>
+<p id="state">worker: starting</p>
+<script>
+  var a = args(location.search), ticks = 0;
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('worker', 'tick', ticks); }, 200);
+  var w = new Worker('/hog-worker.js?mb=' + (a.mb || 50) + '&kind=' + (a.kind || 'objects'), { name: 'hog' });
+  w.onmessage = function (e) {
+    document.getElementById('state').textContent = 'worker: ' + e.data;
+    if (String(e.data).indexOf('progress') < 0) report('worker', 'message', e.data);
+    if (e.data === 'held') setTimeout(function () { w.postMessage('hello'); }, 500);
+  };
+  w.onerror = function (e) { report('worker', 'error', e.message || 'error'); };
+  report('worker', 'page', 'started');
+</script>
+</body></html>

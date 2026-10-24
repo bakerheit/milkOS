@@ -964,7 +964,8 @@ fn post_message_queues_and_deliver_message_fires() {
             &Message {
                 data: m.data.clone(),
                 origin: String::from("http://top.example"),
-                source: FrameId::TOP
+                source: FrameId::TOP,
+                ports: Vec::new(),
             }
         ));
     }
@@ -1004,7 +1005,8 @@ fn messages_go_to_a_frames_own_document() {
             &Message {
                 data: String::new(),
                 origin: String::new(),
-                source: FrameId::TOP
+                source: FrameId::TOP,
+                ports: Vec::new(),
             }
         ));
     }
@@ -1022,7 +1024,8 @@ fn messages_go_to_a_frames_own_document() {
             &Message {
                 data: String::from("2"),
                 origin: String::from("http://top.example"),
-                source: FrameId::TOP
+                source: FrameId::TOP,
+                ports: Vec::new(),
             }
         ));
     }

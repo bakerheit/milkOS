@@ -21,6 +21,7 @@ pub mod timers;
 
 mod bridge;
 pub mod hub;
+pub(crate) mod ports;
 mod postmsg;
 mod remote;
 pub mod xorigin;
@@ -96,6 +97,12 @@ impl Runtime {
         self.b.set_peers(p);
     }
 
+    /// Test hook: the bindings' state.
+    #[cfg(test)]
+    pub(crate) fn bridge(&self) -> &Rc<Bridge> {
+        &self.b
+    }
+
     pub fn pending(&self) -> Vec<String> {
         let st = self.b.st.borrow();
         if st.stopped {
@@ -125,7 +132,12 @@ impl Runtime {
         if st.modrt.wake {
             return Some(0.0);
         }
-        st.timers.next_due()
+        drop(st);
+        // Messages on a message port are tasks that are due now.
+        if ports::pending(&self.b) {
+            return Some(0.0);
+        }
+        self.b.st.borrow().timers.next_due()
     }
 
     pub fn wants_frame(&self) -> bool {
@@ -218,6 +230,7 @@ impl Runtime {
     }
 
     fn teardown(&mut self) {
+        ports::release(&self.b, self.realm.as_mut());
         let mut st = self.b.st.borrow_mut();
         st.timers.clear_all();
         st.listeners.clear();
@@ -385,6 +398,12 @@ impl Runtime {
                 if b.host().map_or(0.0, |h| h.now()) - start > RUN_SLICE_MS {
                     break;
                 }
+            }
+            // Then the messages on message ports that were posted before this pass (so a
+            // scheduler that posts a message from each message gets only one turn here, and
+            // the timers above run again before the next).
+            if !b.st.borrow().stopped && ports::pump(b, r, start, RUN_SLICE_MS) {
+                did = true;
             }
             did
         })

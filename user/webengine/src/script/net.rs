@@ -38,6 +38,7 @@ const PRELUDE: &str = concat!(
     include_str!("js/body.js"),
     include_str!("js/fetch.js"),
     include_str!("js/xhr.js"),
+    include_str!("js/ports.js"),
     include_str!("js/exports.js"),
 );
 
@@ -61,6 +62,8 @@ pub const GLOBALS: &[&str] = &[
     "ProgressEvent",
     "DOMException",
     "ReadableStream",
+    "MessageChannel",
+    "MessagePort",
 ];
 
 /// Requests a page may have outstanding at once (the app has its own, lower limits).
@@ -255,6 +258,7 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     })?;
     // formEntries(form) -> [[name, value], ...]
     netbytes::define_natives(b, r, n)?;
+    super::ports::define_natives(b, r, n)?;
     r.define_method(n, "formEntries", 1, {
         let b2 = b.clone();
         move |r, _t, a| form_entries(&b2, r, a)

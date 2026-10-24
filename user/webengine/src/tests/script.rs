@@ -728,3 +728,78 @@ fn bindings_survive_hostile_calls() {
     let _ = d.text();
     let _ = d.hit_test(10, 10, (0, 0));
 }
+
+/// Prints which of a list of web platform names a page can see (JSENGINE probe; ignored).
+#[test]
+#[ignore]
+fn api_probe() {
+    let mut h = Host::new();
+    let names = [
+        "window.MessageChannel", "window.MessagePort", "window.BroadcastChannel", "window.MutationObserver",
+        "window.IntersectionObserver", "window.ResizeObserver", "window.PerformanceObserver", "window.requestIdleCallback",
+        "window.cancelIdleCallback", "window.matchMedia", "window.DOMParser", "window.XMLSerializer", "window.Intl",
+        "window.crypto", "window.crypto && crypto.getRandomValues", "window.crypto && crypto.randomUUID", "window.crypto && crypto.subtle",
+        "window.structuredClone", "window.queueMicrotask", "window.WeakRef", "window.FinalizationRegistry", "window.Proxy", "window.Reflect",
+        "window.BigInt", "window.CustomEvent", "window.Event", "window.KeyboardEvent", "window.MouseEvent", "window.FocusEvent",
+        "window.InputEvent", "window.UIEvent", "window.PointerEvent", "window.WheelEvent", "window.TouchEvent", "window.ErrorEvent",
+        "window.PromiseRejectionEvent", "window.StorageEvent", "window.PopStateEvent", "window.HashChangeEvent", "window.CloseEvent",
+        "window.AnimationEvent", "window.TransitionEvent", "window.ClipboardEvent", "window.DragEvent", "window.CompositionEvent",
+        "window.EventTarget", "window.AbortController", "window.AbortSignal", "window.AbortSignal && AbortSignal.timeout",
+        "window.AbortSignal && AbortSignal.any", "window.AbortSignal && AbortSignal.abort", "window.TextEncoder", "window.TextDecoder",
+        "window.URL", "window.URL && URL.createObjectURL", "window.URLSearchParams", "window.Blob", "window.FileReader", "window.FormData",
+        "window.Headers", "window.fetch", "window.XMLHttpRequest", "window.WebSocket", "window.EventSource", "window.Worker",
+        "window.SharedWorker", "window.indexedDB", "window.caches", "window.localStorage", "window.sessionStorage", "window.history",
+        "window.performance", "performance.mark", "performance.measure", "performance.getEntriesByType", "performance.timeOrigin",
+        "performance.timing", "performance.navigation", "performance.memory", "window.navigator", "navigator.userAgent",
+        "navigator.userAgentData", "navigator.language", "navigator.languages", "navigator.clipboard", "navigator.permissions",
+        "navigator.mediaDevices", "navigator.connection", "navigator.geolocation", "navigator.serviceWorker", "navigator.sendBeacon",
+        "navigator.plugins", "navigator.mimeTypes", "navigator.deviceMemory", "navigator.hardwareConcurrency", "navigator.maxTouchPoints",
+        "navigator.doNotTrack", "navigator.vendor", "navigator.platform", "navigator.cookieEnabled", "navigator.onLine", "navigator.webdriver",
+        "navigator.storage", "navigator.locks", "navigator.vibrate", "navigator.share", "navigator.getBattery",
+        "window.screen", "screen.orientation", "screen.availWidth", "screen.colorDepth", "window.visualViewport", "window.devicePixelRatio",
+        "window.screenX", "window.screenY", "window.scrollX", "window.innerWidth", "window.outerWidth", "window.getComputedStyle",
+        "window.getSelection", "window.CSS", "window.CSS && CSS.supports", "window.CSS && CSS.escape", "window.CSSStyleSheet", "window.CSSStyleDeclaration",
+        "window.Element", "window.HTMLElement", "window.Node", "window.Document", "window.DocumentFragment", "window.Text", "window.Comment",
+        "window.Range", "window.Selection", "window.NodeList", "window.HTMLCollection", "window.DOMTokenList", "window.DOMRect",
+        "window.DOMRectReadOnly", "window.DOMPoint", "window.DOMMatrix", "window.TreeWalker", "window.NodeFilter", "document.createTreeWalker",
+        "document.createNodeIterator", "document.createRange", "document.implementation", "document.implementation && document.implementation.createHTMLDocument",
+        "document.createEvent", "document.elementFromPoint", "document.elementsFromPoint", "document.hasFocus", "document.visibilityState",
+        "document.hidden", "document.fonts", "document.timeline", "document.styleSheets", "document.adoptedStyleSheets", "document.documentElement",
+        "document.scrollingElement", "document.activeElement", "document.cookie", "document.referrer", "document.domain", "document.characterSet",
+        "document.contentType", "document.compatMode", "document.designMode", "document.execCommand", "document.getAnimations",
+        "document.querySelector", "document.body.animate", "document.body.getAnimations", "document.body.attachShadow", "document.body.closest",
+        "document.body.matches", "document.body.insertAdjacentElement", "document.body.scrollIntoView", "document.body.getBoundingClientRect",
+        "document.body.append", "document.body.replaceWith", "document.body.toggleAttribute", "document.body.getAttributeNames",
+        "document.body.classList", "document.body.dataset", "document.body.style", "document.body.focus", "document.body.click",
+        "document.body.requestFullscreen", "window.customElements", "window.HTMLTemplateElement", "window.Image", "window.Audio", "window.Option",
+        "window.HTMLCanvasElement", "document.createElement('canvas').getContext", "window.speechSynthesis", "window.Notification",
+        "window.alert", "window.open", "window.close", "window.focus", "window.print", "window.requestAnimationFrame", "window.scrollTo",
+        "window.btoa", "window.atob", "window.escape", "window.unescape", "window.encodeURIComponent", "window.setImmediate", "window.reportError",
+        "window.trustedTypes", "window.isSecureContext", "window.crossOriginIsolated", "window.origin", "window.onerror", "window.onunhandledrejection",
+        "window.onbeforeunload", "window.addEventListener", "Symbol.asyncIterator", "Array.prototype.at", "Object.hasOwn", "Object.fromEntries",
+        "Array.prototype.flat", "String.prototype.replaceAll", "String.prototype.at", "Promise.allSettled", "Promise.any", "Array.from",
+        "Atomics", "SharedArrayBuffer", "WebAssembly", "Float64Array", "BigInt64Array", "DataView", "Intl.DateTimeFormat", "Intl.NumberFormat",
+        "Intl.Collator", "Intl.PluralRules", "Intl.RelativeTimeFormat", "Intl.ListFormat", "Intl.Segmenter", "Intl.DisplayNames", "Intl.getCanonicalLocales",
+        "globalThis.gc", "Date.prototype.toLocaleDateString", "Number.prototype.toLocaleString", "String.prototype.localeCompare",
+        "String.prototype.normalize", "Array.prototype.toSorted", "structuredClone", "AggregateError", "Error.captureStackTrace",
+    ];
+    let mut js = String::from("var out = [];\n");
+    for n in names {
+        js.push_str(&alloc::format!("try {{ out.push(({n}) !== undefined && ({n}) !== null ? '+' : '-'); }} catch (e) {{ out.push('!'); }}\n"));
+    }
+    js.push_str("console.log('PROBE ' + out.join(''));");
+    let html = alloc::format!("<!DOCTYPE html><body><script>{js}</script></body>");
+    let mut d = doc(&html);
+    d.run(&mut h);
+    let lines: Vec<String> = d.take_console().into_iter().map(|l| l.text).collect();
+    let probe = lines.iter().find(|l| l.starts_with("PROBE ")).cloned().unwrap_or_default();
+    let marks: Vec<char> = probe.trim_start_matches("PROBE ").chars().collect();
+    let mut missing = Vec::new();
+    for (n, m) in names.iter().zip(marks.iter()) {
+        if *m != '+' {
+            missing.push(alloc::format!("{n}{}", if *m == '!' { " (throws)" } else { "" }));
+        }
+    }
+    std::println!("MISSING {}:\n  {}", missing.len(), missing.join("\n  "));
+    std::println!("{:?}", lines.iter().filter(|l| !l.starts_with("PROBE")).collect::<Vec<_>>());
+}

@@ -18,5 +18,8 @@ return {
   ProgressEvent,
   DOMException,
   ReadableStream,
+  MessageChannel,
+  MessagePort,
+  deliverPort,
   sendBeacon,
 };

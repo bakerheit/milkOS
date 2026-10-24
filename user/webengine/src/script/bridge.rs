@@ -180,6 +180,8 @@ pub struct State {
     pub in_error_event: bool,
     /// Messages posted with `postMessage`, for the host (script/frames.rs).
     pub outbox: super::frames::Outbox,
+    /// This realm's message ports (script/ports.rs).
+    pub ports: super::ports::PortsLocal,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -246,6 +248,7 @@ impl Bridge {
                 modrt,
                 in_error_event: false,
                 outbox: Default::default(),
+                ports: Default::default(),
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),

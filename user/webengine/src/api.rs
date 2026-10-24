@@ -1163,6 +1163,8 @@ pub struct OutMessage {
     pub target_origin: String,
     /// The value, as JSON text (`JSON.stringify`); empty for `undefined`.
     pub data: String,
+    /// The message ports it carries (in transit until the receiver adopts them).
+    pub ports: Vec<u64>,
 }
 
 /// A message to fire at a window (see [`Document::deliver_message`]).
@@ -1174,6 +1176,8 @@ pub struct Message {
     pub origin: String,
     /// `event.source`: the sending frame.
     pub source: FrameId,
+    /// The message ports it carries: `event.ports`.
+    pub ports: Vec<u64>,
 }
 
 // ---- The document -------------------------------------------------------------------------

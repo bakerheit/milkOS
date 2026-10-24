@@ -214,9 +214,38 @@ pub fn queue(b: &Rc<Bridge>, r: &mut Realm, target: FrameId, a: &[Value]) -> JsR
             ));
         }
     };
+    // The transfer list: the third argument, or `transfer` of the options. Message ports in
+    // it travel with the message; buffers are copied.
+    let list = if a.len() > 2 && arg(a, 2).is_object() {
+        arg(a, 2)
+    } else if opt.is_object() {
+        r.get(opt, "transfer")?
+    } else {
+        Value::UNDEFINED
+    };
+    let mut port_vals: alloc::vec::Vec<Value> = alloc::vec::Vec::new();
+    let mut port_ids: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    if list.is_object() {
+        let n = r.get(list, "length")?;
+        let n = r.to_number(n)?.clamp(0.0, 65_536.0) as u32;
+        for i in 0..n {
+            let v = r.get(list, i)?;
+            if let Some(id) = super::ports::port_id(b, r, v) {
+                port_vals.push(v);
+                port_ids.push(id);
+            } else if !(v.is_object() && (r.is_array_buffer(v) || r.is_array_buffer_view(v))) {
+                return Err(dom_error(
+                    r,
+                    "DataCloneError",
+                    "Failed to execute 'postMessage' on 'Window': Value in the transfer list is not transferable.",
+                ));
+            }
+        }
+    }
     // The structured clone (script/postmsg.rs): dates, maps, sets, buffers, cycles, and a
     // DataCloneError for what cannot be copied.
-    let data = super::postmsg::encode(b, r, arg(a, 0))?;
+    let port_list = r.new_array(&port_vals);
+    let data = super::postmsg::encode_with(b, r, arg(a, 0), Some(port_list))?;
     if data.len() > MAX_MESSAGE_BYTES {
         return Err(dom_error(
             r,
@@ -224,9 +253,21 @@ pub fn queue(b: &Rc<Bridge>, r: &mut Realm, target: FrameId, a: &[Value]) -> JsR
             "Failed to execute 'postMessage': the message is too large.",
         ));
     }
+    if !port_ids.is_empty()
+        && b.ports()
+            .transfer_out(b.port_owner(), &port_ids, None)
+            .is_err()
+    {
+        return Err(dom_error(
+            r,
+            "DataCloneError",
+            "Failed to execute 'postMessage' on 'Window': a port in the transfer list cannot be transferred (it is closed, already transferred or listed twice).",
+        ));
+    }
     let mut st = b.st(r)?;
     if st.outbox.q.len() >= MAX_QUEUED {
         drop(st);
+        b.ports().close_all(&port_ids);
         b.console(
             crate::api::ConsoleLevel::Warn,
             String::from("Too many messages are waiting: a postMessage was dropped."),
@@ -237,6 +278,7 @@ pub fn queue(b: &Rc<Bridge>, r: &mut Realm, target: FrameId, a: &[Value]) -> JsR
         target,
         target_origin,
         data,
+        ports: port_ids,
     });
     Ok(Value::UNDEFINED)
 }
@@ -251,10 +293,13 @@ pub fn fire_message(b: &Rc<Bridge>, r: &mut Realm, msg: &Message) {
         }
     };
     let e = new_event_on(b, r, proto, "message", events_js::TRUSTED);
+    // The ports that came with it are this realm's now.
+    let ports = super::ports::adopt_list(b, r, &msg.ports).unwrap_or_else(|_| r.new_array(&[]));
     let data = if msg.data.is_empty() {
         Value::UNDEFINED
     } else {
-        super::postmsg::decode(b, r, &msg.data).unwrap_or(Value::NULL)
+        let p = (!msg.ports.is_empty()).then_some(ports);
+        super::postmsg::decode(b, r, &msg.data, p).unwrap_or(Value::NULL)
     };
     let _ = r.define(e, "data", data, Attrs::ENUMERABLE);
     let o = r.string(&msg.origin);
@@ -263,7 +308,6 @@ pub fn fire_message(b: &Rc<Bridge>, r: &mut Realm, msg: &Message) {
     let _ = r.define(e, "lastEventId", l, Attrs::ENUMERABLE);
     let src = window_proxy(b, r, msg.source);
     let _ = r.define(e, "source", src, Attrs::ENUMERABLE);
-    let ports = r.new_array(&[]);
     let _ = r.define(e, "ports", ports, Attrs::ENUMERABLE);
     events_js::dispatch(b, r, WINDOW, e);
 }

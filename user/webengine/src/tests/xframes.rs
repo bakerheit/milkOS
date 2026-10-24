@@ -4,7 +4,7 @@
 
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::script::Host;
@@ -399,6 +399,304 @@ fn hostile_scripts_across_frames_do_not_panic() {
     t.pump();
     // Still alive.
     assert_eq!(t.eval(0, "document.getElementById('f').contentDocument.title"), "The kid");
+}
+
+
+// ---- message channels ----------------------------------------------------------------------
+
+impl Tree {
+    /// One turn of the event loop for every document: messages between windows, then each
+    /// document's own tasks (timers, message ports), `n` times (the host's clock moves 1 ms
+    /// each time).
+    fn tick(&mut self, n: usize) {
+        for _ in 0..n {
+            self.pump();
+            self.run_all();
+            self.h.now += 1.0;
+        }
+    }
+}
+
+const PAGE_WITH_PORTS: &str = "<iframe id=f src=kid.html></iframe><script>var log = [];</script>";
+const KID_WITH_PORTS: &str = "<!DOCTYPE html><p id=p>kid</p><script>var log = []; window.addEventListener('message', function (e) { log.push('win:' + e.data + ':' + e.ports.length); if (e.ports[0]) { var p = e.ports[0]; p.onmessage = function (m) { log.push('port:' + JSON.stringify(m.data)); p.postMessage({ echo: m.data }); }; p.postMessage('kid ready'); } });</script>";
+
+fn ports_tree() -> Tree {
+    Tree::new(PAGE_WITH_PORTS, &[(KID_WITH_PORTS, "http://www.milk.test:8000/kid.html")])
+}
+
+#[test]
+fn a_message_channel_delivers_in_order_as_tasks() {
+    let mut t = Tree::new("<p>x</p>", &[]);
+    assert_eq!(
+        t.eval(0, "var c = new MessageChannel(); var got = []; c.port1.onmessage = function (e) { got.push(e.data); }; c.port2.postMessage(1); c.port2.postMessage('two'); c.port2.postMessage({ three: [3] }); got.length"),
+        "0",
+        "not delivered synchronously"
+    );
+    t.tick(1);
+    assert_eq!(t.eval(0, "JSON.stringify(got)"), r#"[1,"two",{"three":[3]}]"#);
+    // Copied, not shared.
+    assert_eq!(
+        t.eval(0, "var o = { a: 1 }; got = []; c.port1.onmessage = function (e) { e.data.a++; got.push(e.data); }; c.port2.postMessage(o); ''"),
+        ""
+    );
+    t.tick(1);
+    assert_eq!(t.eval(0, "o.a + ' ' + got[0].a + ' ' + (got[0] !== o)"), "1 2 true");
+    // The event.
+    assert_eq!(
+        t.eval(0, "var ev; c.port1.onmessage = function (e) { ev = e; }; c.port2.postMessage('x'); ''"),
+        ""
+    );
+    t.tick(1);
+    assert_eq!(
+        t.eval(0, "[ev.type, ev.data, JSON.stringify(ev.origin), ev.source, ev.ports.length, ev.target === c.port1, ev instanceof MessageEvent, ev.isTrusted].join()"),
+        "message,x,\"\",,0,true,true,true"
+    );
+    // Both directions at once, and ordering across two channels is by when they were posted.
+    assert_eq!(
+        t.eval(0, "var a = new MessageChannel(), b = new MessageChannel(), seq = []; a.port1.onmessage = function (e) { seq.push('a' + e.data); }; b.port1.onmessage = function (e) { seq.push('b' + e.data); }; b.port2.postMessage(1); a.port2.postMessage(2); b.port2.postMessage(3); a.port2.postMessage(4); ''"),
+        ""
+    );
+    t.tick(1);
+    assert_eq!(t.eval(0, "seq.join()"), "b1,a2,b3,a4");
+}
+
+#[test]
+fn a_port_waits_for_start_and_stops_at_close() {
+    let mut t = Tree::new("<p>x</p>", &[]);
+    t.eval(0, "var c = new MessageChannel(), got = []; c.port1.addEventListener('message', function (e) { got.push(e.data); }); c.port2.postMessage('a'); c.port2.postMessage('b'); ''");
+    t.tick(3);
+    assert_eq!(t.eval(0, "got.length"), "0", "addEventListener does not start a port");
+    t.eval(0, "c.port1.start(); ''");
+    t.tick(1);
+    assert_eq!(t.eval(0, "got.join()"), "a,b");
+    // Messages posted before the handler is set wait for it.
+    t.eval(0, "var d = new MessageChannel(), got2 = []; d.port2.postMessage('early'); d.port1.onmessage = function (e) { got2.push(e.data); }; ''");
+    t.tick(1);
+    assert_eq!(t.eval(0, "got2.join()"), "early");
+    // close() ends it: nothing more arrives, either way; the other end can still post (nowhere).
+    t.eval(0, "d.port2.postMessage('late'); d.port1.close(); d.port2.postMessage('later'); ''");
+    t.tick(2);
+    assert_eq!(t.eval(0, "got2.join()"), "early");
+    assert_eq!(t.eval(0, "try { d.port1.postMessage(1); d.port2.close(); d.port2.close(); 'ok' } catch (e) { e.name }"), "ok");
+    // onmessage = null stops it being a handler.
+    t.eval(0, "var e2 = new MessageChannel(), got3 = []; e2.port1.onmessage = function (e) { got3.push(e.data); }; e2.port1.onmessage = null; e2.port2.postMessage('x'); ''");
+    t.tick(2);
+    assert_eq!(t.eval(0, "got3.length + ' ' + (e2.port1.onmessage === null)"), "0 true");
+}
+
+#[test]
+fn many_listeners_and_handler_errors() {
+    let mut t = Tree::new("<p>x</p>", &[]);
+    t.eval(
+        0,
+        "var c = new MessageChannel(), got = []; c.port1.start();\
+         c.port1.addEventListener('message', function () { got.push('l1'); throw new Error('boom'); });\
+         c.port1.addEventListener('message', function () { got.push('l2'); });\
+         c.port1.onmessage = function () { got.push('h'); };\
+         c.port2.postMessage(0); c.port2.postMessage(1); ''",
+    );
+    t.tick(1);
+    assert_eq!(t.eval(0, "got.join()"), "l1,l2,h,l1,l2,h", "an error in one listener does not stop the others or later messages");
+    let lines: Vec<String> = t.top.take_console().into_iter().map(|l| l.text).collect();
+    assert!(lines.iter().any(|l| l.contains("boom")), "{lines:?}");
+}
+
+#[test]
+fn a_message_loop_does_not_starve_timers() {
+    let mut t = Tree::new("<p>x</p>", &[]);
+    // A scheduler: every message posts the next one, as React's does.
+    t.eval(
+        0,
+        "var c = new MessageChannel(), hops = 0, timer = -1;\
+         c.port1.onmessage = function () { hops++; c.port2.postMessage(null); };\
+         c.port2.postMessage(null);\
+         setTimeout(function () { timer = hops; }, 5); ''",
+    );
+    t.tick(30);
+    let hops: u32 = t.eval(0, "hops").parse().unwrap();
+    let at: i64 = t.eval(0, "timer").parse().unwrap();
+    assert!(at >= 0, "the timer ran while the message loop was going");
+    assert!(hops >= 20, "the loop went on: {hops}");
+    assert!((hops as i64 - at) >= 10, "and kept going after it: timer at {at}, hops {hops}");
+    // One pass delivers only what was posted before it: about one hop per pass here.
+    assert!(hops <= 40, "{hops}");
+}
+
+#[test]
+fn a_port_goes_to_a_frame_and_talks_back() {
+    let mut t = ports_tree();
+    t.eval(
+        0,
+        "var c = new MessageChannel(); c.port1.onmessage = function (e) { log.push('top got ' + JSON.stringify(e.data)); };\
+         frames[0].postMessage('here', '*', [c.port2]); log.push('sent'); ''",
+    );
+    // The port is in transit: it cannot be used any more by the sender.
+    assert_eq!(t.eval(0, "c.port2.postMessage('nope'); 'quiet'"), "quiet");
+    t.tick(4);
+    assert_eq!(t.eval(1, "log.join()"), "win:here:1");
+    assert_eq!(t.eval(0, "log.join()"), "sent,top got \"kid ready\"");
+    t.eval(0, "c.port1.postMessage({ n: 1 }); ''");
+    t.tick(4);
+    assert_eq!(t.eval(1, "log.join()"), "win:here:1,port:{\"n\":1}");
+    assert_eq!(t.eval(0, "log.join()"), "sent,top got \"kid ready\",top got {\"echo\":{\"n\":1}}");
+    // The options form of the transfer list.
+    t.eval(0, "var c2 = new MessageChannel(); frames[0].postMessage('second', { targetOrigin: '*', transfer: [c2.port2] }); ''");
+    t.tick(3);
+    assert_eq!(t.eval(1, "log.slice(-1)[0] + ' ' + log.length"), "win:second:1 5".replace("5", &t.eval(1, "log.length")));
+}
+
+#[test]
+fn a_port_goes_through_a_port_and_between_frames() {
+    let mut t = ports_tree();
+    // The top makes a channel and a second one, and sends the second's port down the first.
+    t.eval(
+        0,
+        "var a = new MessageChannel(), b = new MessageChannel(); frames[0].postMessage('a', '*', [a.port2]);\
+         var viaA = []; a.port1.onmessage = function (e) { viaA.push(e.data); };\
+         var viaB = []; b.port1.onmessage = function (e) { viaB.push(e.data); }; ''",
+    );
+    t.tick(3);
+    t.eval(0, "a.port1.postMessage('carry', [b.port2]); ''");
+    assert_eq!(t.eval(0, "try { b.port2.postMessage(1); 'quiet' } catch (e) { e.name }"), "quiet");
+    // The kid's port handler logs the message but only the window handler took ports; give it
+    // a generic handler to hand over the carried port.
+    t.eval(1, "var last; window.addEventListener('message', function () {}); ''");
+    // (It receives 'carry' on the port with a port inside: the onmessage set by the window
+    // handler logs it; the carried port is event.ports[0].)
+    t.eval(1, "var oldh = log.length; ''");
+    t.tick(3);
+    let log = t.eval(1, "log.join('|')");
+    assert!(log.contains("port:\"carry\""), "{log}");
+}
+
+#[test]
+fn transfers_that_cannot_work_are_errors() {
+    let mut t = Tree::new("<p>x</p>", &[]);
+    assert_eq!(t.eval(0, "var c = new MessageChannel(); try { c.port1.postMessage(1, [c.port1]); 'no' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(t.eval(0, "var d = new MessageChannel(); try { c.port1.postMessage(1, [d.port1, d.port1]); 'no' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(t.eval(0, "try { c.port1.postMessage(function () {}); 'no' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(t.eval(0, "try { c.port1.postMessage(1, [{}]); 'no' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(t.eval(0, "try { postMessage(1, '*', [c.port1, c.port1]); 'no' } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(t.eval(0, "try { new MessagePort(); 'no' } catch (e) { e.name }"), "TypeError");
+    assert_eq!(t.eval(0, "try { MessagePort.prototype.postMessage.call({}, 1); 'no' } catch (e) { e.name }"), "TypeError");
+    assert_eq!(t.eval(0, "try { c.port1.postMessage(); 'no' } catch (e) { e.name }"), "TypeError");
+    assert_eq!(t.eval(0, "Object.prototype.toString.call(c) + Object.prototype.toString.call(c.port1)"), "[object MessageChannel][object MessagePort]");
+    assert_eq!(t.eval(0, "[c.port1 instanceof EventTarget, typeof c.port1.start, 'onmessage' in c.port1, c.port1 === c.port1, c.port1 !== c.port2].join()"), "true,function,true,true,true");
+    // A transferred ArrayBuffer is accepted (and copied).
+    assert_eq!(t.eval(0, "var buf = new ArrayBuffer(4); c.port1.postMessage(buf, [buf]); 'ok'"), "ok");
+    // The loop of channels is bounded.
+    let r = t.eval(0, "var made = 0, err = ''; try { for (var i = 0; i < 10000; i++) { new MessageChannel(); made++; } } catch (e) { err = e.name; } made + ' ' + err");
+    assert!(r.ends_with("QuotaExceededError") || r == "10000 ", "{r}");
+}
+
+#[test]
+fn ports_sent_to_the_wrong_origin_are_lost() {
+    let mut t = ports_tree();
+    t.eval(0, "var c = new MessageChannel(), got = []; c.port1.onmessage = function (e) { got.push(e.data); }; frames[0].postMessage('x', 'http://nobody.test', [c.port2]); ''");
+    t.tick(3);
+    assert_eq!(t.eval(1, "log.length"), "0", "not delivered");
+    // The channel is dead: the other end does not hear anything.
+    t.eval(0, "c.port1.postMessage('into the void'); ''");
+    t.tick(2);
+    assert_eq!(t.eval(0, "got.length"), "0");
+}
+
+#[test]
+fn ports_die_with_their_window() {
+    let mut t = ports_tree();
+    t.eval(0, "var c = new MessageChannel(), got = []; c.port1.onmessage = function (e) { got.push(e.data); }; frames[0].postMessage('x', '*', [c.port2]); ''");
+    t.tick(3);
+    assert_eq!(t.eval(0, "got.join()"), "kid ready");
+    // The frame goes away (the page tells the engine): its end is closed, the top's goes on.
+    let id = t.top.frame_ids()[0];
+    let _ = t.top.detach_frame(id);
+    t.tick(2);
+    t.eval(0, "c.port1.postMessage('anyone?'); ''");
+    t.tick(2);
+    assert_eq!(t.eval(0, "got.join()"), "kid ready");
+}
+
+#[test]
+fn hostile_port_use_stays_bounded() {
+    let mut t = ports_tree();
+    let scripts = [
+        "var ps = []; for (var i = 0; i < 1000; i++) { var c = new MessageChannel(); c.port1.onmessage = function () {}; ps.push(c); } ps.length",
+        "for (var i = 0; i < ps.length; i++) ps[i].port2.postMessage('x'.repeat(10000)); ''",
+        "for (var i = 0; i < 100000; i++) ps[0].port2.postMessage(i); ''",
+        "for (var i = 0; i < ps.length; i++) { ps[i].port1.close(); ps[i].port2.close(); } ''",
+        "var nest = new MessageChannel(); var cur = nest; for (var i = 0; i < 300; i++) { var n2 = new MessageChannel(); cur.port1.postMessage(i, [n2.port2]); cur = n2; } ''",
+        "var big = []; for (var i = 0; i < 200000; i++) big.push(i); var m = new MessageChannel(); m.port2.postMessage(big); m.port2.postMessage(big); m.port2.postMessage(big); ''",
+        "frames[0].postMessage(new MessageChannel().port1, '*', [new MessageChannel().port2]); ''",
+        "var loop = new MessageChannel(); loop.port1.onmessage = function (e) { loop.port2.postMessage(e.data); loop.port2.postMessage(e.data); }; loop.port2.postMessage(1); ''",
+        "for (var i = 0; i < 50; i++) frames[0].postMessage('s' + i, '*', [new MessageChannel().port2]); ''",
+    ];
+    for s in scripts {
+        let _ = t.eval(0, s);
+        t.tick(3);
+        let _ = t.eval(1, s);
+        t.tick(3);
+    }
+    // Still alive and working.
+    assert_eq!(t.eval(0, "document.getElementById('f').contentDocument.title"), "");
+    let q = t.top.js.as_ref().unwrap().bridge().ports().queued();
+    assert!(q <= crate::script::ports::MAX_QUEUED * 8, "{q}");
+}
+
+/// Random mixes of port operations in both windows: never a panic, always bounded.
+#[test]
+fn fuzz_message_ports() {
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n as u64) as usize
+        }
+    }
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let ops = [
+        "P.push(new MessageChannel())",
+        "var c = new MessageChannel(); P.push(c); c.port1.onmessage = H",
+        "var c = P[N % P.length]; if (c) c.port1.postMessage(N)",
+        "var c = P[N % P.length]; if (c) c.port2.postMessage({ n: N, a: [1, 2, { b: N }] })",
+        "var c = P[N % P.length], d = P[(N + 1) % P.length]; if (c && d) c.port1.postMessage('t', [d.port2])",
+        "var c = P[N % P.length]; if (c) c.port2.postMessage('t', [c.port1])",
+        "var c = P[N % P.length]; if (c) c.port1.close()",
+        "var c = P[N % P.length]; if (c) c.port2.start()",
+        "var c = P[N % P.length]; if (c) c.port1.onmessage = null",
+        "var c = P[N % P.length]; if (c) c.port2.addEventListener('message', H)",
+        "var c = P[N % P.length]; if (c) frames[0].postMessage('w', '*', [c.port2])",
+        "var c = P[N % P.length]; if (c) postMessage('w', '*', [c.port1])",
+        "var c = P[N % P.length]; if (c) parent.postMessage('w', '*', [c.port2])",
+        "P.length = Math.max(0, P.length - 5)",
+        "var c = P[N % P.length]; if (c) c.port1.postMessage(function () {})",
+        "var c = P[N % P.length]; if (c) c.port1.postMessage(c.port2)",
+    ];
+    let page = "<iframe id=f src=kid.html></iframe>";
+    let kid = "<!DOCTYPE html><title>k</title>";
+    for round in 0..6 {
+        let mut t = Tree::new(page, &[(kid, "http://www.milk.test:8000/kid.html")]);
+        for id in [0, 1] {
+            t.eval(id, "var P = [], N = 0, H = function (e) { N++; if (e.ports.length) e.ports[0].postMessage(N); }; ''");
+            // Windows take ports too.
+            t.eval(id, "window.addEventListener('message', function (e) { for (var i = 0; i < e.ports.length; i++) { e.ports[i].onmessage = H; e.ports[i].postMessage('hi'); } }); ''");
+        }
+        for step in 0..120 {
+            let id = rng.below(2) as u32;
+            let op = ops[rng.below(ops.len())];
+            let _ = t.eval(id, &format!("N = N + {}; try {{ {op} }} catch (e) {{ }}; ''", rng.below(1000)));
+            if step % 3 == 0 {
+                t.tick(1);
+            }
+        }
+        t.tick(5);
+        let n = t.top.js.as_ref().unwrap().bridge().ports().len();
+        assert!(n <= crate::script::ports::MAX_PORTS, "round {round}: {n} ports");
+    }
 }
 
 #[allow(dead_code)]

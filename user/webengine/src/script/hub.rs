@@ -95,6 +95,8 @@ pub(crate) struct Adjust {
 
 /// Shared by the runtimes of one page.
 pub struct Hub {
+    /// The page's message ports (`ports.rs`).
+    pub ports: Rc<super::ports::PortTable>,
     top: Cell<*mut Document>,
     /// The documents of the frames (boxed in the frame table, so their addresses hold even
     /// while the host takes one out of its slot to run it), by frame id: (the realm's uid, the
@@ -111,6 +113,7 @@ pub const MAX_NEST: u32 = 8;
 impl Hub {
     pub fn new() -> Rc<Hub> {
         Rc::new(Hub {
+            ports: Rc::new(super::ports::PortTable::new()),
             top: Cell::new(core::ptr::null_mut()),
             docs: RefCell::new(BTreeMap::new()),
             pending: RefCell::new(Vec::new()),
@@ -194,6 +197,8 @@ pub struct XFrame {
     /// The tagged-JSON cloners of postMessage, compiled at first use.
     pub cloner: RefCell<Option<(Pinned, Pinned)>>,
     pub message_proto: RefCell<Option<Pinned>>,
+    /// The message ports of a realm that is in no hub (`ports.rs`).
+    pub ports: RefCell<Option<Rc<super::ports::PortTable>>>,
     /// Child-frame windows that were handed out (so `a.frames[0] === a.frames[0]`) live in
     /// `proxies`.
     pub frames_obj: RefCell<Option<Pinned>>,
@@ -292,6 +297,7 @@ impl XFrame {
             hold_load: Cell::new(false),
             cloner: RefCell::new(None),
             message_proto: RefCell::new(None),
+            ports: RefCell::new(None),
             frames_obj: RefCell::new(None),
         }
     }
@@ -316,6 +322,7 @@ impl Runtime {
 
     /// Leave the hub (the document is being taken out of the frame table).
     pub(crate) fn unlink_hub(&self) {
+        super::ports::release(&self.b, None);
         if let Some(h) = self.b.xf.hub.borrow_mut().take() {
             h.unregister(self.b.xf.my_frame.get(), self.b.xf.uid);
         }
@@ -651,6 +658,17 @@ impl Document {
     /// [`Document::deliver_message`] on the document of the returned frame. `sender` is the
     /// frame whose script called `postMessage`.
     pub fn route_message(&self, sender: FrameId, m: &OutMessage) -> Option<(FrameId, Message)> {
+        let out = self.route_message_inner(sender, m);
+        if out.is_none() && !m.ports.is_empty() {
+            // Dropped: the ports it carried are lost with it.
+            if let Some(js) = self.js.as_ref() {
+                js.b.ports().close_all(&m.ports);
+            }
+        }
+        out
+    }
+
+    fn route_message_inner(&self, sender: FrameId, m: &OutMessage) -> Option<(FrameId, Message)> {
         let tgt = self.frame_doc(m.target)?;
         let sdoc = self.frame_doc(sender)?;
         let (tjs, sjs) = (tgt.js.as_ref()?, sdoc.js.as_ref()?);
@@ -670,6 +688,7 @@ impl Document {
                 data: m.data.clone(),
                 origin: sender_origin.text,
                 source: sender,
+                ports: m.ports.clone(),
             },
         ))
     }

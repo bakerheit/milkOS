@@ -855,3 +855,122 @@ fn custom_elements_registry_and_fonts() {
         "object,true,loaded,function,function,0"
     );
 }
+
+#[test]
+fn structured_clone_in_pages() {
+    assert_eq!(
+        eval("var o = {a: 1, d: new Date(5), m: new Map([[1, {x: 2}]]), s: new Set([1, 2]), r: /ab+/gi, u: new Uint8Array([1,2,3]), ab: new ArrayBuffer(4), e: new RangeError('boom'), n: null, un: undefined, nested: [1, [2, 3]]}; o.self = o; var c = structuredClone(o); [c !== o, c.self === c, c.d instanceof Date && c.d.getTime(), c.m.get(1).x, c.s.size, c.r.source + c.r.flags, c.u.join(), c.ab.byteLength, c.e instanceof RangeError, c.e.message, 'un' in c, c.nested[1][1]].join('|')"),
+        "true|true|5|2|2|ab+gi|1,2,3|4|true|boom|true|3"
+    );
+    assert_eq!(eval("try { structuredClone(function () {}) } catch (e) { e.name + ' ' + (e instanceof DOMException) + ' ' + e.code }"), "DataCloneError true 25");
+    assert_eq!(eval("try { atob('***') } catch (e) { e.name + ' ' + (e instanceof DOMException) }"), "InvalidCharacterError true");
+    assert_eq!(eval("var ab = new ArrayBuffer(8); var c = structuredClone(ab, {transfer: [ab]}); ab.byteLength + ' ' + c.byteLength"), "0 8");
+    // Objects the page side owns (a Blob, a URL, ...) are refused, not copied as empty shells.
+    assert_eq!(eval("try { structuredClone(new Blob(['abc'])) } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(eval("try { structuredClone({u: new URL('http://a.test/')}) } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(eval("try { structuredClone(document.body) } catch (e) { e.name }"), "DataCloneError");
+    assert_eq!(eval("structuredClone.length + structuredClone.name + atob.length"), "1structuredClone1");
+}
+
+#[test]
+fn broadcast_channel_notification_and_audio() {
+    let out = lines(
+        "var log = []; var a = new BroadcastChannel('c'), b = new BroadcastChannel('c'), d = new BroadcastChannel('other');
+         b.onmessage = function (e) { log.push('b ' + JSON.stringify(e.data) + ' ' + (e.target === b)); };
+         d.addEventListener('message', function () { log.push('d'); });
+         a.addEventListener('message', function () { log.push('a'); });
+         var obj = {x: [1, 2]}; a.postMessage(obj); obj.x.push(3);
+         a.close(); try { a.postMessage(1); } catch (e) { log.push(e.name); }
+         setTimeout(function () { console.log('R ' + log.join(';') + ' ' + a.name); }, 5);",
+        4,
+    );
+    assert_eq!(out, "InvalidStateError;b {\"x\":[1,2]} true c");
+    assert_eq!(eval("Notification.permission + typeof Notification.requestPermission().then + (new Notification('t')).title"), "deniedfunctiont");
+    assert_eq!(eval("var a = new Audio('x.mp3'); a.tagName + a.getAttribute('src') + a.paused + typeof a.play + a.canPlayType('audio/mpeg') + (a instanceof HTMLElement)"), "AUDIOx.mp3truefunctiontrue");
+    assert_eq!(eval("var a = new Audio(); var r = a.play(); r.catch(function () {}); typeof r.then"), "function");
+}
+
+
+/// Like `eval`, on an https page (a secure context).
+fn eval_secure(src: &str) -> String {
+    let lit = src.replace('\\', "\\\\").replace('\'', "\\'").replace('\n', "\\n");
+    let html = alloc::format!("<!DOCTYPE html><html><body><script>try {{ console.log('R ' + eval('{lit}')); }} catch (e) {{ console.log('R ERR ' + e.name + ': ' + e.message); }}</script></body></html>");
+    let mut h = Host::new();
+    let mut d = Document::parse_scripted(html.as_bytes(), "https://www.milk.test/page.html", Some("text/html"), Limits::default(), Some(ScriptLimits::default()));
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        d.run(&mut h);
+        d.layout(&Viewport::new(800, 600), &ApproxMeasurer);
+        for l in d.take_console() {
+            out.push(l.text);
+        }
+        h.now += 5.0;
+    }
+    out.into_iter().next().and_then(|l| l.strip_prefix("R ").map(String::from)).unwrap_or_default()
+}
+
+/// The result of an async expression (a promise): its value or error, once the loop ran.
+fn eval_async_secure(src: &str) -> String {
+    let body = alloc::format!("Promise.resolve().then(function () {{ {src} }}).then(function (v) {{ console.log('R ' + v); }}, function (e) {{ console.log('R ERR ' + e.name); }});");
+    let html = alloc::format!("<!DOCTYPE html><html><body><script>{body}</script></body></html>");
+    let mut h = Host::new();
+    let mut d = Document::parse_scripted(html.as_bytes(), "https://www.milk.test/page.html", Some("text/html"), Limits::default(), Some(ScriptLimits::default()));
+    let mut out = Vec::new();
+    for _ in 0..8 {
+        d.run(&mut h);
+        for l in d.take_console() {
+            out.push(l.text);
+        }
+        h.now += 5.0;
+    }
+    out.into_iter().next().and_then(|l| l.strip_prefix("R ").map(String::from)).unwrap_or_default()
+}
+
+#[test]
+fn secure_contexts_and_subtle_crypto() {
+    assert_eq!(eval("isSecureContext + ' ' + typeof crypto.subtle"), "false undefined");
+    assert_eq!(eval_secure("isSecureContext + ' ' + typeof crypto.subtle + ' ' + (crypto.subtle instanceof SubtleCrypto)"), "true object true");
+    let hex = "function hex(b) { return Array.from(new Uint8Array(b)).map(function (x) { return (x < 16 ? '0' : '') + x.toString(16); }).join(''); }";
+    let dig = |alg: &str, msg: &str| eval_async_secure(&alloc::format!("{hex} return crypto.subtle.digest('{alg}', new TextEncoder().encode('{msg}')).then(hex);"));
+    assert_eq!(dig("SHA-1", "abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    assert_eq!(dig("SHA-256", "abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert_eq!(dig("SHA-256", ""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert_eq!(dig("SHA-384", "abc"), "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7");
+    assert_eq!(dig("SHA-512", "abc"), "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+    // Messages around the padding boundaries.
+    assert_eq!(dig("SHA-256", "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"), "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    assert_eq!(dig("SHA-512", "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"), "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909");
+    assert_eq!(eval_async_secure("return crypto.subtle.digest('MD5', new Uint8Array(1));"), "ERR NotSupportedError");
+    assert_eq!(eval_async_secure("return crypto.subtle.digest('SHA-256', 'text');"), "ERR TypeError");
+    assert_eq!(
+        eval_async_secure(&alloc::format!("{hex} return crypto.subtle.importKey('raw', new TextEncoder().encode('key'), {{name: 'HMAC', hash: 'SHA-256'}}, false, ['sign', 'verify']).then(function (k) {{ return crypto.subtle.sign('HMAC', k, new TextEncoder().encode('The quick brown fox jumps over the lazy dog')).then(function (s) {{ return crypto.subtle.verify('HMAC', k, s, new TextEncoder().encode('The quick brown fox jumps over the lazy dog')).then(function (ok) {{ return hex(s) + ' ' + ok + ' ' + k.type + ' ' + k.algorithm.hash.name; }}); }}); }});")),
+        "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8 true secret SHA-256"
+    );
+    assert_eq!(eval_async_secure("return crypto.subtle.generateKey({name: 'AES-GCM', length: 256}, true, ['encrypt']);"), "ERR NotSupportedError");
+}
+
+#[test]
+fn scheduler_locks_credentials_and_small_members() {
+    assert_eq!(
+        lines("var log = []; scheduler.postTask(function () { log.push('task'); return 7; }, {delay: 10}).then(function (v) { log.push('v' + v); }); scheduler.yield().then(function () { log.push('yield'); }); log.push('sync'); setTimeout(function () { console.log('R ' + log.join()); }, 40);", 12),
+        "sync,yield,task,v7"
+    );
+    assert_eq!(
+        lines("var log = []; navigator.locks.request('a', function (l) { log.push('1 ' + l.name + ' ' + l.mode); return new Promise(function (r) { setTimeout(r, 5); }); }).then(function () { log.push('done1'); }); navigator.locks.request('a', function () { log.push('2'); }); setTimeout(function () { console.log('R ' + log.join()); }, 40);", 12),
+        "1 a exclusive,done1,2"
+    );
+    assert_eq!(eval("typeof navigator.credentials.get + typeof navigator.userActivation.isActive + navigator.userActivation.hasBeenActive"), "functionbooleanfalse");
+    assert_eq!(eval("document.designMode + ' ' + (document.elementsFromPoint(1, 1).length > 0) + ' ' + typeof document.lastModified + ' ' + document.styleSheets.length + ' ' + document.adoptedStyleSheets.length + ' ' + document.dir"), "off true string 0 0 ");
+}
+
+#[test]
+fn style_sheets_dialogs_and_media_members() {
+    assert_eq!(
+        eval("var s = new CSSStyleSheet(); s.replaceSync('a { color: red } b { color: blue }'); s.insertRule('i { top: 0 }', 0); [s.cssRules.length, s.cssRules[0].cssText, (s.deleteRule(0), s.cssRules.length)].join('|')"),
+        "3|i { top: 0 }|2"
+    );
+    assert_eq!(eval("var d = document.createElement('dialog'); document.body.appendChild(d); d.showModal(); var a = d.hasAttribute('open'); d.close('x'); a + ' ' + d.hasAttribute('open')"), "true false");
+    assert_eq!(eval("var v = document.createElement('video'); typeof v.play + typeof v.canPlayType + v.canPlayType('video/mp4') + (v.pause(), 'ok')"), "functionfunctionok");
+    assert_eq!(eval("try { document.createElement('div').play() } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("new FormDataEvent('formdata', {formData: new FormData()}).type + new ToggleEvent('toggle', {newState: 'open'}).newState + new DeviceOrientationEvent('x', {alpha: 1}).alpha"), "formdataopen1");
+}

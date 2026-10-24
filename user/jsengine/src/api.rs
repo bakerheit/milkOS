@@ -1483,6 +1483,15 @@ impl Realm {
         self.stack.limit = bytes.max(64 << 10);
     }
 
+    /// Mark a symbol as the key under which the host keeps its own state on script-visible
+    /// objects: `structuredClone` refuses an object that has an own property with it (a
+    /// `DataCloneError`, as for any other host object) instead of copying the empty shell.
+    pub fn set_clone_marker(&mut self, sym: Value) {
+        if let Val::Sym(s) = sym.0 {
+            self.clone_marker = Some(s);
+        }
+    }
+
     /// Steps run in the current (or last) entry from the host.
     pub fn steps(&self) -> u64 {
         self.steps

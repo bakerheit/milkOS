@@ -216,6 +216,8 @@ pub struct Realm {
     pub(crate) dynamic_import_hook: Option<Box<crate::api::DynamicImportHook>>,
     /// Symbol.for registry.
     pub(crate) sym_registry: Vec<(StrId, SymId)>,
+    /// Objects with an own property under this symbol are the host's (see `set_clone_marker`).
+    pub(crate) clone_marker: Option<SymId>,
     pub(crate) dead_hosts: Vec<(u32, u64)>,
     /// The largest ArrayBuffer, in bytes (see `Realm::set_max_buffer_bytes`).
     pub(crate) max_buffer: usize,
@@ -299,6 +301,7 @@ impl Realm {
             import_meta_hook: None,
             dynamic_import_hook: None,
             sym_registry: Vec::new(),
+            clone_marker: None,
             dead_hosts: Vec::new(),
             max_buffer: crate::typed::DEFAULT_MAX_BUFFER,
             vm: crate::interp::VmState::new(),

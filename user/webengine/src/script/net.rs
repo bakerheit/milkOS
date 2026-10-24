@@ -44,6 +44,7 @@ const PRELUDE: &str = concat!(
     include_str!("js/events.js"),
     include_str!("js/misc.js"),
     include_str!("js/intl.js"),
+    include_str!("js/platform.js"),
     include_str!("js/exports.js"),
 );
 
@@ -89,6 +90,24 @@ pub const GLOBALS: &[&str] = &[
     "customElements",
     "FontFace",
     "FontFaceSet",
+    "BroadcastChannel",
+    "Notification",
+    "Audio",
+    // platform.js
+    "SubtleCrypto",
+    "CryptoKey",
+    "Scheduler",
+    "scheduler",
+    "CSSStyleSheet",
+    "LockManager",
+    "CredentialsContainer",
+    "UserActivation",
+    "FormDataEvent",
+    "ToggleEvent",
+    "SecurityPolicyViolationEvent",
+    "DeviceOrientationEvent",
+    "DeviceMotionEvent",
+    "GamepadEvent",
     // misc.js
     "crypto",
     "Crypto",
@@ -165,6 +184,30 @@ const MEMBERS: &[(&str, &str, &str)] = &[
     ("Document.prototype", "getSelection", "doc_getSelection"),
     ("Document.prototype", "fonts", "doc_fonts"),
     ("window", "getSelection", "win_getSelection"),
+    ("navigator", "locks", "nav_locks"),
+    ("navigator", "credentials", "nav_credentials"),
+    ("navigator", "userActivation", "nav_userActivation"),
+    ("Document.prototype", "elementsFromPoint", "doc_elementsFromPoint"),
+    ("Document.prototype", "styleSheets", "doc_styleSheets"),
+    ("Document.prototype", "adoptedStyleSheets", "doc_adoptedStyleSheets"),
+    ("Document.prototype", "lastModified", "doc_lastModified"),
+    ("Document.prototype", "exitFullscreen", "doc_exitFullscreen"),
+    ("Document.prototype", "designMode", "doc_designMode"),
+    ("Document.prototype", "dir", "doc_dir"),
+    ("Document.prototype", "queryCommandSupported", "doc_queryCommandSupported"),
+    ("Element.prototype", "requestFullscreen", "el_requestFullscreen"),
+    ("Element.prototype", "checkVisibility", "el_checkVisibility"),
+    ("Element.prototype", "setPointerCapture", "el_noop"),
+    ("Element.prototype", "releasePointerCapture", "el_noop"),
+    ("Element.prototype", "scrollIntoViewIfNeeded", "el_noop"),
+    ("HTMLElement.prototype", "play", "el_media_play"),
+    ("HTMLElement.prototype", "pause", "el_media_pause"),
+    ("HTMLElement.prototype", "load", "el_media_load"),
+    ("HTMLElement.prototype", "canPlayType", "el_media_canPlayType"),
+    ("HTMLElement.prototype", "show", "el_dialog_show"),
+    ("HTMLElement.prototype", "showModal", "el_dialog_showModal"),
+    ("HTMLElement.prototype", "close", "el_dialog_close"),
+    ("HTMLElement.prototype", "decode", "el_img_decode"),
     ("Text.prototype", "splitText", "text_splitText"),
     ("CharacterData.prototype", "substringData", "cd_substringData"),
     ("CharacterData.prototype", "insertData", "cd_insertData"),
@@ -344,6 +387,44 @@ pub fn install_locale_methods(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     Ok(())
 }
 
+/// `structuredClone`, `atob` and `btoa` are the engine's, and it throws plain errors named like
+/// a DOMException; the page's DOMException class makes the real ones.
+pub fn install_dom_exceptions(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    let g = r.global();
+    for (name, len) in [("structuredClone", 1), ("atob", 1), ("btoa", 1)] {
+        let orig = r.get(g, name)?;
+        if !orig.is_object() {
+            continue;
+        }
+        let porig = r.pin(orig);
+        let b2 = b.clone();
+        r.define_method(g, name, len, move |r, this, a| {
+            let orig = r.pinned(&porig);
+            match r.call(orig, this, a) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    let Some(v) = e.value() else { return Err(e) };
+                    if !v.is_object() || !r.is_error(v) {
+                        return Err(e);
+                    }
+                    let nm = r.get(v, "name")?;
+                    let name = r.to_string(nm).unwrap_or_default();
+                    if name != "DataCloneError" && name != "InvalidCharacterError" {
+                        return Err(e);
+                    }
+                    let msg = r.get(v, "message")?;
+                    let ex = exports(&b2, r)?;
+                    let ctor = r.get(ex, "DOMException")?;
+                    let nmv = r.string(&name);
+                    let made = r.construct(ctor, &[msg, nmv])?;
+                    Err(r.throw(made))
+                }
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// The script side's exports object (running it the first time).
 pub fn exports(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     {
@@ -507,6 +588,22 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     r.define_method(n, "perfOrigin", 0, move |_r, _t, _a| Ok(Value::number(b2.st.borrow().perf_origin)))?;
     let b2 = b.clone();
     r.define_method(n, "timeOrigin", 0, move |_r, _t, _a| Ok(Value::number(b2.st.borrow().time_origin)))?;
+    // userActivation() -> [isActive, hasBeenActive]
+    let b2 = b.clone();
+    r.define_method(n, "userActivation", 0, move |r, _t, _a| {
+        let now = b2.host().map_or(0.0, |h| h.now());
+        let (until, ever) = {
+            let st = b2.st(r)?;
+            (st.activation_until, st.ever_active)
+        };
+        let active = until > 0.0 && now <= until;
+        Ok(r.new_array(&[Value::bool(active), Value::bool(ever || active)]))
+    })?;
+    // cloneMark(symbol): objects carrying the page-side state under it are not cloneable
+    r.define_method(n, "cloneMark", 1, |r, _t, a| {
+        r.set_clone_marker(arg(a, 0));
+        Ok(Value::UNDEFINED)
+    })?;
     // formEntries(form) -> [[name, value], ...]
     netbytes::define_natives(b, r, n)?;
     super::ports::define_natives(b, r, n)?;

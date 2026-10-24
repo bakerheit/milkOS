@@ -202,6 +202,11 @@ impl Realm {
                 n
             }
             ObjKind::Ordinary | ObjKind::Arguments => {
+                if let Some(m) = self.clone_marker
+                    && self.get_own_plain(o, crate::object::PropKey::Sym(m)).is_some()
+                {
+                    return Err(self.clone_fail(v));
+                }
                 let n = self.new_plain();
                 self.clone_root(cx, o, n);
                 self.clone_props(cx, o, n)?;

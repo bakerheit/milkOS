@@ -10,6 +10,7 @@
 
 const G = native.global;
 const S = Symbol('slots');
+native.cloneMark(S);
 const L = Symbol('listeners');
 const H = Symbol('handlers');
 const TAG = Symbol.toStringTag;

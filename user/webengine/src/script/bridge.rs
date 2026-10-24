@@ -184,6 +184,8 @@ pub struct State {
     pub ports: super::ports::PortsLocal,
     /// Until when (the host's clock) a click or key press lets a script use the clipboard.
     pub activation_until: f64,
+    /// A click or key press has happened in this realm.
+    pub ever_active: bool,
     /// `performance.timeOrigin`: the host's clock then, and the time since 1970 in ms.
     pub perf_origin: f64,
     pub time_origin: f64,
@@ -257,6 +259,7 @@ impl Bridge {
                 outbox: Default::default(),
                 ports: Default::default(),
                 activation_until: 0.0,
+                ever_active: false,
                 perf_origin: 0.0,
                 time_origin: 0.0,
                 watch: Default::default(),
@@ -312,6 +315,7 @@ impl Bridge {
         let now = self.host().map_or(0.0, |h| h.now());
         if let Ok(mut st) = self.st.try_borrow_mut() {
             st.activation_until = now + 5000.0;
+            st.ever_active = true;
         }
     }
 

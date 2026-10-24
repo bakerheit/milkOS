@@ -1105,3 +1105,90 @@ function makeFonts() {
   return f;
 }
 const documentFonts = makeFonts();
+
+// ---- BroadcastChannel (within the page's own scripts), Notification, Audio ------------------------------------
+
+const bcChannels = new Map(); // name -> channels of this realm
+let bcCount = 0;
+class BroadcastChannel extends NetEventTarget {
+  constructor(name) {
+    super();
+    need(arguments, 1, 'BroadcastChannel', 'BroadcastChannel');
+    if (bcCount >= 1000) throw domEx('QuotaExceededError', 'Too many broadcast channels are open.');
+    setSlots(this, { brand: 'BroadcastChannel', name: String(name), closed: false });
+    let set = bcChannels.get(this[S].name);
+    if (!set) bcChannels.set(this[S].name, (set = new Set()));
+    set.add(this);
+    bcCount++;
+  }
+  get name() { return slots(this, 'BroadcastChannel').name; }
+  postMessage(message) {
+    need(arguments, 1, 'postMessage', 'BroadcastChannel');
+    const s = slots(this, 'BroadcastChannel');
+    if (s.closed) throw domEx('InvalidStateError', "Failed to execute 'postMessage' on 'BroadcastChannel': Channel is closed");
+    const set = bcChannels.get(s.name);
+    if (!set) return;
+    const copies = [];
+    for (const ch of Array.from(set)) if (ch !== this) copies.push([ch, G.structuredClone(message)]);
+    for (const [ch, data] of copies) {
+      nextTick(() => {
+        if (ch[S].closed) return;
+        fire(ch, native.messageEvent('message', data, []));
+      });
+    }
+  }
+  close() {
+    const s = slots(this, 'BroadcastChannel');
+    if (s.closed) return;
+    s.closed = true;
+    const set = bcChannels.get(s.name);
+    if (set) {
+      set.delete(this);
+      if (!set.size) bcChannels.delete(s.name);
+    }
+    bcCount--;
+  }
+}
+tag(BroadcastChannel);
+handlerAttrs(BroadcastChannel, ['message', 'messageerror']);
+enumerable(BroadcastChannel, ['name', 'postMessage', 'close']);
+
+// Notifications are not shown: the permission is "denied", as it is for a page the user never
+// allowed, so pages that ask for it go on without.
+class Notification extends NetEventTarget {
+  constructor(title, options) {
+    super();
+    need(arguments, 1, 'Notification', 'Notification');
+    const o = isObj(options) ? options : {};
+    setSlots(this, { brand: 'Notification', title: String(title), body: o.body === undefined ? '' : String(o.body), tag: o.tag === undefined ? '' : String(o.tag) });
+    nextTick(() => fire(this, new G.Event('error')));
+  }
+  static get permission() { return 'denied'; }
+  static get maxActions() { return 2; }
+  static requestPermission(callback) {
+    if (typeof callback === 'function') nextTick(() => callback('denied'));
+    return Promise.resolve('denied');
+  }
+  get title() { return slots(this, 'Notification').title; }
+  get body() { return slots(this, 'Notification').body; }
+  get tag() { return slots(this, 'Notification').tag; }
+  close() {}
+}
+tag(Notification);
+handlerAttrs(Notification, ['click', 'close', 'error', 'show']);
+
+// `new Audio(src)`: an <audio> element that cannot play (there is no sound output).
+function Audio(src) {
+  if (new.target === undefined) throw new TypeError("Failed to construct 'Audio': Please use the 'new' operator, this DOM object constructor cannot be called as a function.");
+  const a = doc().createElement('audio');
+  if (src !== undefined) a.setAttribute('src', String(src));
+  const def = (k, v) => { if (!(k in a) || typeof a[k] !== 'function') ObjDefine(a, k, { value: v, writable: true, configurable: true }); };
+  def('play', function () { return Promise.reject(domEx('NotSupportedError', 'The media could not be played: there is no audio output.')); });
+  def('pause', function () {});
+  def('load', function () {});
+  def('canPlayType', function () { return ''; });
+  for (const [k, v] of Object.entries({ paused: true, ended: false, muted: false, volume: 1, currentTime: 0, duration: NaN, readyState: 0, networkState: 0, loop: false, autoplay: false, controls: false, playbackRate: 1 })) {
+    if (!(k in a)) ObjDefine(a, k, { value: v, writable: true, configurable: true, enumerable: true });
+  }
+  return a;
+}

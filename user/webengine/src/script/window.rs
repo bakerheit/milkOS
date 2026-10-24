@@ -754,6 +754,20 @@ pub fn cached_object(
     Ok(o)
 }
 
+/// Is the page a secure context: https, or a local address?
+pub fn is_secure(b: &Bridge) -> bool {
+    let Some(p) = b.page() else { return false };
+    let u = split_url(p.page_url());
+    match u.protocol.as_str() {
+        "https:" | "wss:" | "file:" => true,
+        "http:" | "ws:" => {
+            let h = u.hostname.to_ascii_lowercase();
+            h == "localhost" || h.ends_with(".localhost") || h == "127.0.0.1" || h == "[::1]"
+        }
+        _ => false,
+    }
+}
+
 /// The scroll offset in CSS pixels.
 pub fn scroll_css(b: &Bridge) -> (f64, f64) {
     match b.host() {
@@ -1518,7 +1532,8 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     r.define(g, "length", Value::int(0), Attrs::DEFAULT)?;
     let nm = r.string("");
     r.define(g, "name", nm, Attrs::DEFAULT)?;
-    r.define(g, "isSecureContext", Value::FALSE, Attrs::DEFAULT)?;
+    let b2 = b.clone();
+    r.define_getter(g, "isSecureContext", move |_r, _t, _| Ok(Value::bool(is_secure(&b2))), None)?;
     let b2 = b.clone();
     r.define_getter(
         g,
@@ -1797,6 +1812,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
 
     super::net::install_members(b, r)?;
     super::net::install_locale_methods(b, r)?;
+    super::net::install_dom_exceptions(b, r)?;
 
     // The parsed page's on* attributes.
     nodes::register_handlers(b, r, 0);

@@ -166,6 +166,13 @@ fn big_file() {
             super::alloc_count::current().saturating_sub(base) as f64 / 1048576.0,
             chk.map_err(|e| alloc::format!("{e}"))
         );
+        if std::env::var("BIG_RUN").is_ok() {
+            let mut r = realm(heap);
+            let t1 = std::time::Instant::now();
+            let out = r.eval(&src, "big.js").map(|_| ()).map_err(|e| alloc::format!("{}", r.report(&e)));
+            let st = r.heap_stats();
+            std::println!("run {:.1} ms, heap used {:.1} MB ({} objects, {} strings, code {:.1} MB) -> {:?}", t1.elapsed().as_secs_f64() * 1e3, st.used_bytes as f64 / 1048576.0, st.objects, st.strings, r.heap.code_acct.get() as f64 / 1048576.0, out);
+        }
     });
 }
 

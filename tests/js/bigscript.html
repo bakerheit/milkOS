@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><title>Big script</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; }</style>
+</head><body>
+<h1>A big script</h1>
+<p id="out">loading</p>
+<script>
+  // The size comes from the address (?mb=N): the server makes a bundle that big on the spot.
+  var mb = (location.search.match(/mb=([0-9.]+)/) || [0, "3"])[1];
+  var t0 = Date.now();
+  var s = document.createElement("script");
+  s.onload = function () {
+    var b = window.__big;
+    var ms = Date.now() - t0;
+    var ok = b && b.sum === b.want;
+    document.getElementById("out").textContent = "functions: " + (b && b.count) + ", sum " + (b && b.sum);
+    report("bigscript", (ok ? "ok " : "bad ") + (b && b.count) + " " + (b && b.sum) + "/" + (b && b.want) + " mb " + mb);
+    // (The time is for the log; the test looks only at the report above.)
+    report("bigtime", mb + " " + ms);
+  };
+  s.onerror = function () { report("bigscript", "error loading"); };
+  s.src = "/big.js?mb=" + mb;
+  document.head.appendChild(s);
+</script>
+</body></html>

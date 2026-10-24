@@ -14,7 +14,26 @@
   collector, Promises and async/await, classes, generators, RegExp, typed arrays, with budgets
   for memory, steps and time). Pages get a live DOM API, events, timers, storage and a console
   panel (Cmd-Alt-J). A runaway script gets a "This page is slow" bar; a toolbar switch turns
-  JavaScript off. Not yet: BigInt, Proxy, Intl.
+  JavaScript off. Not yet: real BigInt (literals parse and throw).
+- Big scripts: a script is parsed and compiled one top-level statement at a time, functions are
+  compiled on their first call, and the code a page keeps counts against its heap budget, so
+  bundles of several megabytes (a 3 MB bundle of functions peaks at about 10 to 30 MB instead of
+  over 200 MB; an 8 MB one that was refused now loads) load without running the Browser out of
+  memory, and a page that used to fail with "the code is too large to fit in memory" for a big
+  script now runs it. A single function or statement bigger than the compile allowance is still
+  refused, and so is code that does not fit the heap.
+- `MessageChannel` and `MessagePort` (structured copies, ports handed on to frames and
+  windows, ordered, without starving timers), `BroadcastChannel`, a real `MutationObserver`,
+  `IntersectionObserver` and `ResizeObserver`, `Proxy`, `Intl` (number, date, list, plural and
+  relative-time formatting, collation, segmenter; en-US data and a few locales), `DOMParser`,
+  `XMLSerializer`, `Range`, `Selection`, `TreeWalker`, `NodeIterator`, custom element
+  registry (definitions only), `crypto.getRandomValues` / `randomUUID` and, on https pages,
+  `crypto.subtle.digest` and HMAC, `requestIdleCallback`, `scheduler`, `navigator.locks`,
+  `performance.mark` / `measure` / observers, `matchMedia`, `CSS.supports`, geometry classes,
+  `Element.animate` (animations finish at once), `WeakRef` (strong), more events and
+  `navigator` / `screen` members, a fuller `getComputedStyle` (with `getPropertyValue`), and
+  `structuredClone` errors that are real `DOMException`s. See docs/browser.md for what is and
+  is not there.
 - `fetch` and `XMLHttpRequest` with the web's rules: same-origin, CORS with preflight,
   credentials modes, forbidden headers, mixed-content blocking, and no requests from a public
   page to private addresses (`user/browserkit` netpolicy). Requests run off the page's thread,

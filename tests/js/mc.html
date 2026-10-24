@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html><head><title>Message channel</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; } iframe { width: 420px; height: 80px; border: 1px solid #888; }</style>
+</head><body>
+<h1>MessageChannel between frames</h1>
+<iframe id="f" src="/mc-frame.html"></iframe>
+<p id="out">waiting</p>
+<script>
+  var f = document.getElementById("f");
+  var ticks = 0;
+  var tick = setInterval(function () { ticks++; }, 5);
+  f.onload = function () {
+    var ch = new MessageChannel();
+    var got = [];
+    var bulk = 0;
+    ch.port1.onmessage = function (e) {
+      var d = e.data;
+      if (d && d.bulk !== undefined) {
+        bulk++;
+        if (d.bulk !== bulk - 1) report("mc", "bulk out of order " + d.bulk + " at " + (bulk - 1));
+        if (bulk === 500) {
+          clearInterval(tick);
+          report("mc", "bulk 500 in order, timers ran " + (ticks > 0 ? "yes" : "no"));
+          document.getElementById("out").textContent = "done";
+        }
+        return;
+      }
+      got.push(d);
+      if (got.length === 3) {
+        report("mc", "echoes " + JSON.stringify(got));
+        // A second channel handed on through the first.
+        var c2 = new MessageChannel();
+        c2.port1.onmessage = function (e) { report("mc", "transferred port answered " + e.data); };
+        ch.port1.postMessage("take", [c2.port2]);
+        for (var i = 0; i < 500; i++) ch.port1.postMessage({ bulk: i, pad: "x" });
+      }
+    };
+    // 'ready' comes first from the frame, then the echoes.
+    f.contentWindow.postMessage("here is a port", "*", [ch.port2]);
+    ch.port1.postMessage({ n: 1, list: [1, 2], when: new Date(0), m: new Map([[1, "a"]]) });
+    ch.port1.postMessage("two");
+    ch.port1.postMessage([3]);
+    report("mc", "posted, port2 is " + typeof ch.port2 + " and detached for the sender");
+  };
+</script>
+</body></html>

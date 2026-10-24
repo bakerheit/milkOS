@@ -758,3 +758,36 @@ fn threads_passing_blocks_between_them() {
     cons.join().unwrap();
     h.check().unwrap();
 }
+
+// ---- the peak ----
+
+#[test]
+fn the_peak_follows_use_and_can_be_reset() {
+    use core::alloc::{GlobalAlloc, Layout};
+    let h = heap();
+    let l = Layout::from_size_align(256 << 10, 16).unwrap();
+    let base = h.stats().peak;
+    // SAFETY: matching alloc/dealloc pairs with the same layout.
+    let blocks: Vec<*mut u8> = (0..16).map(|_| unsafe { h.alloc(l) }).collect();
+    assert!(blocks.iter().all(|p| !p.is_null()));
+    let high = h.stats().peak;
+    assert!(high >= base + (4 << 20), "{high} after 16 blocks of 256 KiB (was {base})");
+    for p in blocks {
+        // SAFETY: allocated above with `l`.
+        unsafe { h.dealloc(p, l) };
+    }
+    // Giving everything back leaves the peak where it was; only a reset forgets it.
+    assert_eq!(h.stats().peak, high);
+    h.reset_peak();
+    assert!(h.stats().peak < high, "{} was not below {high} after a reset", h.stats().peak);
+    // A smaller burst after the reset shows up as the new, lower peak.
+    let l2 = Layout::from_size_align(64 << 10, 16).unwrap();
+    // SAFETY: as above.
+    let b2: Vec<*mut u8> = (0..4).map(|_| unsafe { h.alloc(l2) }).collect();
+    let mid = h.stats().peak;
+    assert!(mid < high, "{mid} not below {high}");
+    for p in b2 {
+        // SAFETY: allocated above with `l2`.
+        unsafe { h.dealloc(p, l2) };
+    }
+}

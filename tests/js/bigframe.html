@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html><head><title>Big script in a frame</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; } iframe { width: 520px; height: 120px; border: 1px solid #888; }</style>
+</head><body>
+<h1>A big script in a frame</h1>
+<iframe id="f" src="/bigscript.html?mb=0.5"></iframe>
+<script>
+  // The frame reports in its own console; the page asks it what it saw.
+  var f = document.getElementById("f");
+  f.onload = function () {
+    var tries = 0;
+    var iv = setInterval(function () {
+      tries++;
+      var b = f.contentWindow.__big;
+      if (b || tries > 100) {
+        clearInterval(iv);
+        report("bigframe", (b && b.sum === b.want ? "ok " : "bad ") + (b && b.count));
+      }
+    }, 100);
+  };
+</script>
+</body></html>

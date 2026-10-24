@@ -192,7 +192,7 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   `sessionStorage` per tab, `document.cookie` (without HttpOnly cookies), `alert` / `confirm`
   / `prompt` as dialogs over the page, `window.open` as a new tab.
 * **Safety**: scripts run inside the Browser's sandbox (no files, no other tabs, no other
-  origins' storage). Each tab has its own realm with a 64 MB heap; a script that goes over
+  origins' storage). Each tab has its own realm with a 64 MB heap (a frame's has 16 MB); a script that goes over
   it is stopped. A script that runs for two seconds without a break brings up "This page is
   slow ... Stop it?" over the page: Stop (or Esc) ends the page's scripts for good (its
   timers and listeners go, the page stays as it is), Wait gives it ten more seconds. Pages
@@ -231,6 +231,93 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
     redirects hop by hop, mixed content, the private-network rule with the address a page was
     fetched from, limits) are `browserkit::netpolicy`'s; the bindings only shape the API and
     drop what a script may never set, and the app applies the rules again to everything.
+* **Big scripts** (`user/jsengine`: `parser.rs`, `lazy.rs`, `compiler.rs`, `eval.rs`): a
+  bundle of many megabytes loads in a small peak of memory.
+  * A script is parsed, resolved and compiled **one top-level statement at a time**, and each
+    statement's syntax tree is dropped as soon as it has bytecode.
+  * A function of 64 bytes or more is parsed once, to find its early errors and the names it
+    uses, and then left as a **stub**: its body is parsed and compiled again on its first
+    call (so a script of thousands of functions that calls few of them never compiles the
+    rest). Errors in a function that is never called still come when the script loads.
+    A function too big to compile at its first call throws a `RangeError`.
+  * Array literals of 16 or more numbers or strings are stored as constants, not as
+    one node per item. A `BigInt` literal parses and throws a `TypeError` when it is
+    evaluated (there is no BigInt yet; scripts that only mention it in a `typeof` check
+    work).
+  * What a parse may use at once is an **allowance** apart from the heap: 96 MB (estimated)
+    for a page's scripts, 64 MB for a frame's (`ScriptLimits::compile`). It bounds the biggest
+    piece alive together, one function body or one top-level statement (about 1.3 million
+    tokens), not the whole script; a bigger piece is a SyntaxError ("the code is too large
+    to fit in memory"). The source text and the bytecode a page keeps (stubs included) count
+    against its heap budget (64 MB, a frame 16 MB), and a script of 8 MB at most is read, so a
+    script whose code could never fit is refused as soon as that is known.
+  * Measured in the guest (a generated minified bundle, page limits, one in fifty functions
+    called; peak memory while loading, before this work and after):
+
+    | bundle | before | after |
+    |---|---|---|
+    | 3 MB of plain functions | peak 212 MB, load 197 ms | peak 29 MB, load 109 ms |
+    | 3 MB of modules / IIFEs | peak 214 MB, load 159 ms | peak 9 MB, load 88 ms |
+    | 8 MB of modules / IIFEs | refused | peak 23 MB, load 213 ms |
+    | 8 MB of closures | refused | peak 40 MB, load 182 ms |
+    | 8 MB of tiny functions | the process ran out of memory | stopped by the heap budget, cleanly |
+    | one 3 MB function | refused | refused (it is one piece) |
+
+    Running the code costs about the same as before (a function pays its compile once, on the
+    first call). In a frame (16 MB heap) bundles of 1 to 8 MB of modules and 1 MB of plain
+    functions load where they were refused.
+* **MessageChannel and ports** (`script/ports.rs`, `js/ports.js`): `new MessageChannel()`,
+  `port1` / `port2`, `postMessage` with a transfer list, `onmessage` (which starts the port),
+  `addEventListener`, `start()`, `close()`. Messages are structured copies (the same
+  algorithm as `window.postMessage`: Date, Map, Set, RegExp, typed arrays, errors, cycles).
+  A port can be handed on in a transfer list, through `window.postMessage` to a frame or
+  another window and through another port; it then belongs to the receiver (the sender's
+  copy is detached). Delivery is one task per message, in order per port, and a burst is
+  cut into slices of at most 1000 messages, so timers and rendering keep running during a
+  long ping-pong. A message goes through the port's table even when its owner is another
+  frame of the same page; ports of a frame that goes away are closed. Limits: 4096 ports,
+  20,000 queued messages and 32 MB of queued data per page; a port nobody holds is let go.
+  `BroadcastChannel` delivers between the channels of one realm only (there is no other
+  tab to reach).
+* **Observers**: `MutationObserver` is real. The DOM keeps a log for the nodes that are
+  watched (`childList`, `attributes` with `attributeFilter` and `attributeOldValue`,
+  `characterData`, `subtree`; at most 8192 watched nodes, 20,000 records and 8 MB of old
+  values at a time, the rest dropped) and the records go to the callbacks at the microtask
+  checkpoint, after the script's promise jobs and before timers. Nodes a record names are
+  not given back until it is delivered. Not done: transient observers (a node moved out of
+  an observed subtree stops being reported at once). `IntersectionObserver` and
+  `ResizeObserver` report the first state of each target and every change after: the page
+  is looked at again after DOM changes, scrolling and resizing (a light poll every 100 ms
+  while they have targets, and a frame only when something may have moved); thresholds and
+  `rootMargin` work, clipping by an ancestor's `overflow` does not, and the content box of
+  a `ResizeObserver` entry is the border box minus padding and borders.
+* **More of the platform** (`webengine/src/script/js/*.js`, compiled the first time a page
+  touches a name): `Proxy` and `Reflect`, `Intl` (`NumberFormat`, `DateTimeFormat`,
+  `PluralRules`, `ListFormat`, `RelativeTimeFormat`, `Collator`, `Segmenter`,
+  `DisplayNames`, `getCanonicalLocales`; data for en-US and a few other locales, and
+  `toLocaleString` with a locale or options goes through it), `crypto` (`getRandomValues`,
+  `randomUUID`, and on https and localhost pages `crypto.subtle.digest` for SHA-1/256/384/512
+  and HMAC `importKey` / `sign` / `verify`; the other algorithms reject with
+  `NotSupportedError`), `DOMParser` (`text/html` is parsed with the page's HTML parser and
+  never runs scripts; the XML types are read with the same parser, so names are lower-cased
+  and there are no error documents), `XMLSerializer`, `document.implementation`, `TreeWalker`,
+  `NodeIterator`, `NodeFilter`, `Range` (boundaries do not follow later changes to the tree)
+  and `Selection` (kept in script, not tied to what the user selects with the pointer),
+  `requestIdleCallback`, `scheduler.postTask` / `yield`, `navigator.locks`,
+  `navigator.credentials` (empty), `navigator.clipboard.writeText` (right after a click or key),
+  `performance.mark` / `measure` / `PerformanceObserver`, `matchMedia`, `CSS.supports`,
+  `DOMRect` / `DOMPoint` / `DOMMatrix`, `Element.animate` (animations finish at once),
+  `CSSStyleSheet` objects (rules are kept, not applied), `document.fonts`, a
+  `customElements` registry (definitions are kept; elements are not upgraded), `Notification`
+  (permission "denied"), `new Audio()` (cannot play), `WeakRef` / `FinalizationRegistry` (hold
+  their targets, never call back), the `Event` family (wheel, composition, storage, popstate,
+  touch, animation, close, clipboard, drag, toggle, formdata and more), `navigator` and
+  `screen` members, `getComputedStyle` (about eighty properties, custom properties, and
+  `getPropertyValue`; read only), and `structuredClone` with real `DOMException`s.
+  What is **not** there: Shadow DOM (`attachShadow`), Web Workers, WebSocket, EventSource,
+  IndexedDB, Cache storage, service workers, WebAssembly, SharedArrayBuffer, a real BigInt,
+  `canvas.toDataURL`, media playback (`play()` rejects), `document.styleSheets` rules
+  (an empty list), the Fullscreen, Share, Battery, WebRTC and speech APIs, and `Trusted Types`.
 * **Restyling**: changes are batched until the next frame; only the changed subtrees are
   restyled (a change's parent's subtree, so sibling selectors see it), and the page is laid
   out again once. Hit testing, the focus and form state follow the new tree.
@@ -428,7 +515,10 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   widget, a todo list built by script, form validation that blocks the submit, timers and
   microtasks, a requestAnimationFrame animation, innerHTML, the script order (blocking,
   defer, a module in order with them, document.write, DOMContentLoaded, load), storage and cookies, a runaway
-  `while (true)` stopped from the slow bar, and the JavaScript switch, from the console
+  `while (true)` stopped from the slow bar, a generated 3 MB bundle (and a 0.5 MB one in an
+  iframe, under the frame limits), MessageChannel between a page and its frame (copies in order, a port
+  handed on through a port, 500 queued messages with a timer still running), a page using
+  the new observers and parsers, and the JavaScript switch, from the console
   lines, the server's log and screenshots.
 * `scripts/fetch-test.sh` (default set, about a minute): a VM against
   `scripts/fetch_test_servers.py` (a DNS zone with `www.milk.test`, `api.milk.test` (the same
@@ -467,6 +557,17 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   from the console lines (a line from a frame carries `[frame name]`), the server's log (Referer,
   Cookie, Sec-Fetch headers) and screenshots (`IFRAME_TEST_SHOTS=DIR` keeps them;
   `IFRAME_TEST_ONLY="same msg"` runs sections).
+* Big scripts and the platform, host-tested: `user/jsengine/src/tests/bigscripts.rs` (generated
+  bundles of 1, 3 and 8 MB in several shapes run right under the real per-frame limits, the
+  peak memory of loading them is measured with a counting allocator, the compile allowance
+  bounds the biggest piece, hostile and flat shapes stay linear, errors in uncalled functions
+  come at load), a differential fuzz that lazy compilation is invisible (`fuzz.rs`), the
+  whole suite also with every function lazy (`JSENGINE_LAZY_ALL=1`), `tests/js/proxy.js`,
+  `weakref.js` and `lazy.js`; `user/webengine/src/tests/webapis.rs` (each API above, a fuzz
+  of observers against random DOM changes) and the port tests in `xframes.rs` (order, start
+  and close, transfer between frames and through a port, bad transfers, window death, hostile
+  use, no starvation of timers, a fuzz). `scripts/jsbench-test.sh` also loads a generated
+  bundle in the guest and prints its time and peak.
 * Frame rules, host-tested (`scriptnet-unit`, `user/scriptnet/src/frame/tests.rs`): sandbox flags,
   X-Frame-Options and `frame-ancestors` tables, loading (addresses, depth and count, mixed content,
   cookie context, Referer, answer types), `target` choice and who may navigate whom, the joint session
@@ -496,11 +597,11 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
 
 * Font sizes snap to 13, 26 and 52 px (the baked faces), so `font-size: 16px` text is 13 px;
   there are no real italics or serif faces; CJK and other scripts no family has show as boxes.
-* JavaScript has no WebSockets, canvas, workers or `ReadableStream` request bodies;
+* JavaScript has no WebSockets, workers, Shadow DOM, IndexedDB, real BigInt or `ReadableStream` request bodies
+  (the list is in the JavaScript section);
   `fetch` has no HTTP cache (`cache` modes only set headers) and no `integrity` check; hosts
   with non-ASCII names aren't looked up (no IDNA); `URL` is a good WHATWG subset, not the whole
-  parser. MutationObserver callbacks never run (the observers exist and never call back);
-  layout after a change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
+  parser. Layout after a change is a whole-page layout (restyling is per subtree); `:hover` and `:focus` styles
   don't apply.
 * No HTTP cache or HTTP/2, no file upload in forms, no
   `<video>` / `<audio>`; arithmetic-coded or 12-bit JPEG, colour profiles.

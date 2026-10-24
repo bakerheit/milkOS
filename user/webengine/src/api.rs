@@ -46,6 +46,28 @@
 //!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - Big scripts and more of the web platform in the bindings (docs/browser.md). New fields:
+//!   [`ScriptLimits::compile`] (the allowance for the syntax tree of the biggest piece of one
+//!   script, see `jsengine::Limits::max_compile_bytes`; build with `..Default::default()`),
+//!   [`OutMessage::ports`] and [`Message::ports`] (the ids of the message ports a
+//!   `postMessage` carries; the Browser passes them on unchanged, they stay inside the
+//!   engine's tables, which the frames of one page share). New provided [`ScriptHost`]
+//!   methods: `random` (the system's CSPRNG for `crypto.getRandomValues`) and `set_clipboard`
+//!   (`navigator.clipboard.writeText`, asked within a few seconds of a click or key press);
+//!   both answer "not available" unless the host overrides them.
+//! - `MessageChannel`, `MessagePort` (structured copies, port transfer between frames and
+//!   windows, tasks in order, bounded) and `BroadcastChannel` (within one realm);
+//!   `MutationObserver` (real: records at the microtask checkpoint), `IntersectionObserver`
+//!   and `ResizeObserver` (the first state, then changes found when the page is laid out
+//!   again, scrolled or resized: [`Document::wants_frame`] is true while one is waiting and
+//!   [`Document::next_wake`] asks for a light poll every 100 ms while observers have
+//!   targets); `DOMParser`, `XMLSerializer`, `document.implementation`, `TreeWalker`,
+//!   `NodeIterator`, `Range`, `Selection`, a custom element registry (no upgrades), `Intl`,
+//!   `crypto` (digests and HMAC in `crypto.subtle` on secure pages), `scheduler`, `Proxy`,
+//!   `performance` marks, measures and observers, `matchMedia`, `CSS.supports`, geometry
+//!   classes, animations that finish at once, `navigator` / `screen` members and more events.
+//!   `getComputedStyle` answers about eighty properties and its `getPropertyValue` works.
+//!   `structuredClone` throws a real `DOMException` and refuses objects the bindings own.
 //! - Frames. `<iframe>` support: see "Frames" at the end of this file for the model (slots, ids,
 //!   attach/detach, one display list with the frames' content inside it, hit testing, scrolling,
 //!   focus order, find, `window.name`, `postMessage`, same-origin reach between frames). What an

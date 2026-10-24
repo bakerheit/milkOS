@@ -58,15 +58,38 @@
 //!   source's nesting (bounded); give the thread at least 1 MB of stack (the Browser's main
 //!   thread has 8 MB).
 //! - **Not supported (yet):** `with`, direct `eval` seeing local variables (every `eval`
-//!   is global), BigInt (so no BigInt64Array / BigUint64Array), Proxy, resizable
-//!   ArrayBuffers, Intl (the `toLocale*String` methods format en-US style),
-//!   String.prototype.normalize (returns the string as is), WeakRef / FinalizationRegistry,
-//!   SharedArrayBuffer and Atomics, symbols as WeakMap keys, the ES2024+ additions (iterator
+//!   is global), BigInt (literals parse and throw a TypeError when evaluated; there is no
+//!   BigInt global and no BigInt64Array / BigUint64Array), resizable
+//!   ArrayBuffers, Intl (the `toLocale*String` methods format en-US style; the Browser adds
+//!   a script-side Intl), String.prototype.normalize (returns the string as is), real
+//!   weak references (WeakRef and FinalizationRegistry exist but hold their targets strongly
+//!   and never call back), SharedArrayBuffer and Atomics, symbols as WeakMap keys, the ES2024+ additions (iterator
 //!   helpers, Set methods, `Array.fromAsync`, RegExp `v` flag, duplicate named groups and
 //!   modifiers). Date has a fixed local offset (no daylight-saving rules). ES modules,
 //!   private class members (`#x`) and RegExp match indices (`d` flag) are supported.
 //!
 //! # CHANGES
+//! - Big scripts. A script is parsed, resolved and compiled one top-level statement at a
+//!   time and each statement's tree is dropped as soon as it has bytecode; a function of 64
+//!   bytes or more is parsed once (for early errors and the names it uses) and left as a
+//!   stub that is compiled on its first call (`Code::lazy`; errors in a function body still
+//!   come when the script loads). Number and string array literals of 16 or more items are
+//!   constants. The parse/compile limit is now an allowance for the biggest piece alive at
+//!   once ([`Limits::max_compile_bytes`], default 96 MiB, a new field: build `Limits` with
+//!   `..Default::default()`), not a cumulative count of the script, and the source text and
+//!   the bytecode a realm keeps (stubs included) are charged to [`Limits::max_heap_bytes`],
+//!   so a script whose code does not fit the heap is refused early instead of exhausting
+//!   memory. The error for a part bigger than the allowance is still a SyntaxError "the code
+//!   is too large to fit in memory"; a function too big to compile when it is first called
+//!   throws a RangeError. `set_lazy_min_bytes` (and the env var `JSENGINE_LAZY_ALL=1`) make
+//!   every function lazy, for tests.
+//! - Added `Proxy` (all thirteen traps with the spec's invariant checks, `Proxy.revocable`,
+//!   proxies of arrays and functions, `IsArray` through proxies), `WeakRef` and
+//!   `FinalizationRegistry` (strong references; nothing is ever collected or called back),
+//!   BigInt literals (they parse; evaluating one throws a TypeError), and
+//!   [`Realm::set_clone_marker`] (a symbol under which the host keeps state on its objects;
+//!   `structuredClone` refuses such objects). `for-in` and several builtins were made
+//!   proxy-aware.
 //! - Added ES modules (stage 2b). A module is compiled from source into a [`ModuleId`]
 //!   ([`Realm::compile_module`]; [`Realm::compile_synthetic_module`] for modules the host
 //!   builds, a JSON module say). The engine never does I/O: the host reads the requested

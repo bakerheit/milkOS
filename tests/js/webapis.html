@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html><head><title>Web APIs</title>
+<script src="common.js"></script>
+<style>body { font-family: sans-serif; margin: 20px; } #box { width: 120px; height: 40px; background: #cde; }</style>
+</head><body>
+<h1>Web APIs</h1>
+<div id="box">box</div>
+<script>
+  var box = document.getElementById("box");
+  // MutationObserver: after the script, before timers
+  var order = [];
+  var mo = new MutationObserver(function (recs) {
+    order.push("mo" + recs.length);
+    report("webapis", "mutations " + recs.map(function (r) { return r.type; }).join(","));
+  });
+  mo.observe(box, { childList: true, attributes: true, attributeOldValue: true });
+  box.setAttribute("title", "t");
+  box.appendChild(document.createElement("b"));
+  Promise.resolve().then(function () { order.push("promise"); });
+  setTimeout(function () { order.push("timer"); report("webapis", "order " + order.join(">")); }, 0);
+  // IntersectionObserver / ResizeObserver: the first look
+  new IntersectionObserver(function (es) {
+    report("webapis", "intersection " + es.map(function (e) { return e.isIntersecting + ":" + e.intersectionRatio; }).join(","));
+  }).observe(box);
+  new ResizeObserver(function (es) {
+    var r = es[0].contentRect;
+    report("webapis", "resize " + Math.round(r.width) + "x" + Math.round(r.height));
+  }).observe(box);
+  // DOMParser, Range, TreeWalker
+  var d = new DOMParser().parseFromString("<ul><li>a<li>b</ul>", "text/html");
+  report("webapis", "parsed " + d.querySelectorAll("li").length + " " + d.body.firstChild.tagName);
+  var rg = document.createRange();
+  rg.selectNodeContents(box);
+  report("webapis", "range [" + rg.toString() + "]");
+  var w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT), n = 0;
+  while (w.nextNode()) n++;
+  report("webapis", "walked " + (n > 3 ? "yes" : "no"));
+  // structuredClone, scheduler, BroadcastChannel
+  var c = structuredClone({ a: [1, { b: new Date(5) }], s: new Set([1]) });
+  report("webapis", "clone " + c.a[1].b.getTime() + " " + c.s.size);
+  scheduler.postTask(function () { return 42; }).then(function (v) { report("webapis", "task " + v); });
+  var b1 = new BroadcastChannel("x"), b2 = new BroadcastChannel("x");
+  b2.onmessage = function (e) { report("webapis", "broadcast " + e.data); b1.close(); b2.close(); };
+  b1.postMessage("hi");
+  // the style API
+  report("webapis", "style " + getComputedStyle(box).getPropertyValue("width") + " " + getComputedStyle(box).display);
+</script>
+</body></html>

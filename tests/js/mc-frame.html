@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><title>Message channel frame</title></head><body>
+<p>A frame holding the other end.</p>
+<script>
+  onmessage = function (e) {
+    var p = e.ports[0];
+    var seq = 0;
+    p.onmessage = function (m) {
+      var d = m.data;
+      if (d === "take") {
+        // The port that came through the port: answer on it.
+        m.ports[0].postMessage("from the frame");
+        return;
+      }
+      if (d && d.bulk !== undefined) { p.postMessage(d); return; }
+      var shown = d && d.when instanceof Date && d.m instanceof Map ? { n: d.n, list: d.list.length, date: d.when.getTime(), map: d.m.get(1) } : d;
+      p.postMessage(shown);
+    };
+  };
+</script>
+</body></html>

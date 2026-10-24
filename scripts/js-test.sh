@@ -19,6 +19,14 @@
 #                    document.cookie without the HttpOnly cookie
 #   * runaway.html   while(true) {}: the "page is slow" bar comes up, Esc stops it, the
 #                    Browser goes on
+#   * bigscript.html a generated 3 MB bundle (thousands of functions, closures, object and array
+#                    literals) loads and runs; bigframe.html the same, 0.5 MB, in an iframe
+#   * mc.html        MessageChannel between a page and its frame: structured copies in order,
+#                    a port handed on through a port, 500 queued messages in order while a
+#                    timer keeps running
+#   * webapis.html   MutationObserver (after the script, before timers), IntersectionObserver
+#                    and ResizeObserver first reports, DOMParser, Range, TreeWalker,
+#                    structuredClone, scheduler, BroadcastChannel, getComputedStyle
 #   * the JavaScript switch (the toolbar's menu): off, the noscript text shows, on again
 #   scripts/js-test.sh [workdir]
 # Only the qemu and python processes started here are killed (by PID). The work directory is
@@ -192,6 +200,39 @@ sleep 1
 go "$H/tabs.html"
 js tabs "ready" 20 && ok "the Browser goes on (another page's scripts run)" || bad "the Browser didn't recover"
 log_lines | grep -a "JSTEST runaway never" >/dev/null && bad "a timer of the stopped page ran" || ok "the stopped page's timers are gone"
+
+echo "-- a big script"
+go "$H/bigscript.html?mb=3"
+js bigscript "ok [0-9]+ [0-9]+/[0-9]+ mb 3" 60 && ok "a generated 3 MB bundle loaded and every 50th function returned the right value" || bad "the big script: $(log_lines | grep -aE 'JSTEST bigscript|SyntaxError|too large' | tail -2)"
+log_lines | grep -a "JSTEST bigtime" | tail -1 | sed 's/.*JSTEST bigtime /  (3 MB, ms to load and run: /;s/$/)/'
+shot js-12-bigscript
+clean_log | grep -a "too large to fit in memory" >/dev/null && bad "the engine said the code was too large" || ok "no out-of-memory refusals"
+go "$H/bigframe.html"
+js bigframe "ok [0-9]+" 60 && ok "the same kind of bundle (0.5 MB) ran in an iframe, under the smaller frame limits" || bad "the big script in a frame: $(log_lines | grep -aE 'JSTEST bigframe|frame.*Error' | tail -2)"
+shot js-13-bigframe
+
+echo "-- MessageChannel between frames"
+go "$H/mc.html"
+js mc "posted, port2 is object" 30 && ok "the page posted to the frame (port2 handed over)" || bad "mc page: $(log_lines | grep -a 'JSTEST mc' | tail -1)"
+js mc 'echoes \[\{"n":1,"list":2,"date":0,"map":"a"\},"two",\[3\]\]' 30 && ok "three messages came back in order, copied (Date and Map survived)" || bad "mc echoes: $(log_lines | grep -a 'JSTEST mc' | tail -2)"
+js mc "transferred port answered from the frame" 30 && ok "a port handed on through a port works in the frame" || bad "mc transferred port"
+js mc "bulk 500 in order, timers ran yes" 40 && ok "500 queued messages arrived in order and timers kept running" || bad "mc bulk: $(log_lines | grep -a 'JSTEST mc' | tail -2)"
+shot js-14-mc
+
+echo "-- web APIs"
+go "$H/webapis.html"
+js webapis "mutations attributes,childList" 30 && ok "MutationObserver reported the attribute and child changes" || bad "mutation observer: $(log_lines | grep -a 'JSTEST webapis' | tail -2)"
+js webapis "order promise>mo2>timer" 10 && ok "records come after the promise job and before the timer" || bad "order: $(log_lines | grep -a 'JSTEST webapis order' | tail -1)"
+js webapis "intersection true:1" 20 && ok "IntersectionObserver reported the box as visible" || bad "intersection observer"
+js webapis "resize 120x40" 20 && ok "ResizeObserver reported the box's size" || bad "resize observer"
+js webapis "parsed 2 UL" && ok "DOMParser built a document" || bad "domparser"
+js webapis "range \[box\]" && ok "a Range over the box reads its text" || bad "range"
+js webapis "walked yes" && ok "TreeWalker walked the page" || bad "treewalker"
+js webapis "clone 5 1" && ok "structuredClone copied a Date and a Set" || bad "structuredClone"
+js webapis "task 42" && ok "scheduler.postTask ran" || bad "scheduler"
+js webapis "broadcast hi" && ok "BroadcastChannel delivered between two channels" || bad "broadcast"
+js webapis "style 120px block" && ok "getComputedStyle(...).getPropertyValue works" || bad "computed style"
+shot js-15-webapis
 
 echo "-- the JavaScript switch"
 go "$H/innerhtml.html"

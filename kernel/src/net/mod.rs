@@ -31,6 +31,7 @@ pub mod iface;
 pub mod internet;
 pub mod ipv6;
 pub mod mld;
+pub mod nic;
 pub mod pmtu;
 pub mod procnet;
 pub mod ring;
@@ -48,7 +49,6 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use crate::sched::{self, WaitQueue};
 use crate::sync::{FnSlot, SpinLock};
-use crate::virtio::net::VirtioNet;
 use crate::{kprintln, timer};
 use iface::{ETH_HDR, ETHERTYPE_ARP, ETHERTYPE_IPV4, IP_HDR, Iface};
 use socket::SocketId;
@@ -236,7 +236,8 @@ fn deliver_wakeups(w: Woken) {
 
 /// Called by the virtio-net driver at attach time (thread context, boot). `slot` orders
 /// the interfaces (see [`Iface::attach`]).
-pub fn attach_device(dev: VirtioNet, slot: usize) {
+pub fn attach_device(dev: nic::Nic, slot: usize) {
+    nic::set_present();
     let mac = Mac(dev.mac());
     with(|st| {
         if st.iface.attach(dev, slot, mac).is_none() {
@@ -247,7 +248,7 @@ pub fn attach_device(dev: VirtioNet, slot: usize) {
 
 /// Is there an Ethernet interface?
 pub fn has_device() -> bool {
-    crate::virtio::net::present()
+    nic::present()
 }
 
 /// virtio-net interrupt (already acknowledged by the driver): wake the net thread.

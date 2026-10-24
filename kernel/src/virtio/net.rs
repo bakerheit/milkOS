@@ -16,7 +16,7 @@
 //! wakes the net thread ([`crate::net::on_device_irq`]), which drains the rings.
 
 use core::ptr::write_bytes;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::mmio::{Error, MMIO_SPI_BASE, Transport};
 use super::queue::{MAX_QUEUE_SIZE, QueueMem, Virtqueue};
@@ -42,39 +42,7 @@ const CFG_MAC: usize = 0;
 const CFG_STATUS: usize = 6;
 const STATUS_LINK_UP: u8 = 1;
 
-/// Interface counters, the columns of `/proc/net/dev` we can fill.
-#[derive(Clone, Copy, Default, Debug)]
-pub struct DevStats {
-    pub rx_bytes: u64,
-    pub rx_packets: u64,
-    pub rx_errors: u64,
-    pub rx_dropped: u64,
-    pub tx_bytes: u64,
-    pub tx_packets: u64,
-    pub tx_errors: u64,
-    pub tx_dropped: u64,
-}
-
-/// A received frame, still sitting in its rx buffer. Hand it back with
-/// [`VirtioNet::rx_done`] once processed; the slice stays valid until then.
-pub struct RxBuf {
-    head: u16,
-    ptr: *const u8,
-    len: usize,
-}
-
-impl RxBuf {
-    /// The Ethernet frame (virtio header stripped).
-    ///
-    /// The returned slice is not tied to a borrow of the device, so the stack can keep
-    /// using (and transmitting through) the device while it parses the frame.
-    pub fn frame<'a>(&self) -> &'a [u8] {
-        // SAFETY: the buffer belongs to a descriptor the device has returned and that is not
-        // re-offered until `rx_done(self)`, which consumes `self`; the stack does not keep
-        // the slice past that call (it processes each frame to completion first).
-        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
+pub use crate::net::nic::{DevStats, RxBuf};
 
 pub struct VirtioNet {
     t: Transport,
@@ -98,14 +66,8 @@ pub struct VirtioNet {
 // network stack's lock.
 unsafe impl Send for VirtioNet {}
 
-/// Set once a virtio-net device is attached (cheap check for "is there a NIC").
-static PRESENT: AtomicBool = AtomicBool::new(false);
 /// Devices attached so far (the stack takes up to `net::iface::MAX_LINKS`).
 static COUNT: AtomicUsize = AtomicUsize::new(0);
-
-pub fn present() -> bool {
-    PRESENT.load(Ordering::Acquire)
-}
 
 impl VirtioNet {
     pub fn mac(&self) -> [u8; 6] {
@@ -142,11 +104,7 @@ impl VirtioNet {
             self.stats.rx_bytes += (len - HDR_LEN) as u64;
             // SAFETY: inside buffer i (len <= BUF_SIZE checked).
             let ptr = unsafe { self.rx_va(i).add(HDR_LEN) };
-            return Some(RxBuf {
-                head,
-                ptr,
-                len: len - HDR_LEN,
-            });
+            return Some(RxBuf::new(head, ptr, len - HDR_LEN));
         }
     }
 
@@ -331,7 +289,6 @@ pub fn attach(t: Transport) -> Result<(), Error> {
         ntx,
         if dev.link_up() { "up" } else { "down" }
     );
-    PRESENT.store(true, Ordering::Release);
-    crate::net::attach_device(dev, slot);
+    crate::net::attach_device(crate::net::nic::Nic::Virtio(dev), slot);
     Ok(())
 }

@@ -10,12 +10,12 @@ use super::Stack;
 use super::arp::ArpState;
 use super::iface::LINK_NAMES;
 use super::ipv6;
+use super::nic::DevStats;
 use super::socket::{Family, Sock, SockType};
 use super::tcp::TcpState;
 use super::wire::{IpAddr, Ipv4};
 use super::with;
 use crate::fs::procfs;
-use crate::virtio::net::DevStats;
 
 /// An address in /proc's hex: IPv4 as one native-endian u32, IPv6 as four of them (so
 /// `::1` is `00000000000000000000000001000000`, as Linux prints it on little-endian).
@@ -75,7 +75,7 @@ pub fn dev(st: &Stack, w: &mut dyn Write) -> fmt::Result {
     dev_line(w, "lo", &st.iface.lo_stats, 0)?;
     for (k, l) in st.iface.links.iter().enumerate() {
         if let Some(d) = l.dev.as_ref() {
-            dev_line(w, LINK_NAMES[k], &d.stats, l.extra_drops)?;
+            dev_line(w, LINK_NAMES[k], &d.stats(), l.extra_drops)?;
         }
     }
     Ok(())

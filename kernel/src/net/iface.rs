@@ -18,9 +18,9 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::arp::{self, ArpCache};
 use super::errno::*;
+use super::nic::{DevStats, Nic};
 use super::wire::{Ipv4, Mac, be16, checksum, put16};
 use crate::fs::errno::Result;
-use crate::virtio::net::{DevStats, VirtioNet};
 
 pub const ETH_HDR: usize = 14;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
@@ -102,7 +102,7 @@ pub struct LinkLocal {
 
 /// One Ethernet interface: a virtio-net device, its MAC, IPv4 config and ARP cache.
 pub struct Link {
-    pub dev: Option<VirtioNet>,
+    pub dev: Option<Nic>,
     /// virtio-mmio slot (interfaces are named by slot, highest first, which is the qemu
     /// command-line order: the first `-device virtio-net-device` is eth0).
     pub slot: usize,
@@ -263,7 +263,7 @@ impl Iface {
     /// Attach a device. Interfaces are kept ordered by virtio slot, highest first, so the
     /// names follow the qemu command line whatever order the slots were probed in. Returns
     /// the name it got, or None if every link is taken.
-    pub fn attach(&mut self, dev: VirtioNet, slot: usize, mac: Mac) -> Option<&'static str> {
+    pub fn attach(&mut self, dev: Nic, slot: usize, mac: Mac) -> Option<&'static str> {
         let n = self.links.iter().filter(|l| l.up()).count();
         if n == MAX_LINKS {
             return None;

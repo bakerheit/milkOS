@@ -54,6 +54,14 @@ pub enum Conduit {
     Smc,
 }
 
+/// Does a `compatible` property (NUL-separated strings) list `wanted` (as a whole string or a part of one)?
+pub fn compat_has(compat: &[u8], wanted: &str) -> bool {
+    !wanted.is_empty()
+        && compat
+            .split(|&b| b == 0)
+            .any(|s| s.windows(wanted.len()).any(|w| w == wanted.as_bytes()))
+}
+
 /// The RAM banks to use out of what the tree listed: sorted by address, rounded in to whole
 /// `page`s, nothing at or above `limit`, overlapping or touching banks merged, and only the bank
 /// that holds `kstart` and those above it (the allocator covers one span upwards from the

@@ -31,6 +31,11 @@ fn run() {
     };
     let mut ctrls: Vec<xhci::Controller> = Vec::new();
     for dev in &devices {
+        #[cfg(feature = "raspi")]
+        if rpikit::pci::vendor(dev.id) == 0x1106 {
+            // The VIA VL805: the firmware may have to load its code first.
+            crate::rpi::pcie::notify_vl805(dev.bdf.bus, dev.bdf.dev, dev.bdf.func);
+        }
         let Some(bar) = dev.bars.first().filter(|b| b.size != 0) else {
             continue;
         };

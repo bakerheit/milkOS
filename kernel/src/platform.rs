@@ -144,14 +144,6 @@ pub const fn periph(offset: usize) -> usize {
     }
 }
 
-/// Does the root `compatible` list (NUL-separated strings, as stored in the tree) name this
-/// board?
-pub fn compatible_matches(compat: &[u8], wanted: &str) -> bool {
-    compat
-        .split(|&b| b == 0)
-        .any(|s| s.windows(wanted.len()).any(|w| w == wanted.as_bytes()) && !wanted.is_empty())
-}
-
 /// The root `compatible` of `dtb`, if it has one (first match only; a few bytes).
 pub fn root_compatible<'a>(dtb: &Dtb, out: &'a mut [u8; 96]) -> &'a [u8] {
     let mut n = 0;
@@ -177,7 +169,7 @@ pub fn check_dtb() {
         Some(c) if !c.is_empty() => {
             let shown =
                 core::str::from_utf8(c.split(|&b| b == 0).next().unwrap_or(b"")).unwrap_or("?");
-            if compatible_matches(c, CURRENT.dtb_compatible) {
+            if crate::dtb::compat_has(c, CURRENT.dtb_compatible) {
                 kprintln!("platform: {} (device tree: {shown})", CURRENT.name);
             } else {
                 kprintln!(

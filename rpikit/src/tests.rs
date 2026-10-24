@@ -1442,3 +1442,149 @@ mod pci_tests {
         assert!(memory_window(&[]).is_none());
     }
 }
+
+/// Parse a device tree the firmware ships (not in the repository: the path is in `MILK_REAL_DTB`, e.g.
+/// bcm2711-rpi-4-b.dtb from a Pi's boot partition). Skipped when the variable is not set.
+#[test]
+fn a_real_pi4_tree_if_there_is_one() {
+    let Some(path) = std::env::var_os("MILK_REAL_DTB") else {
+        return;
+    };
+    let bytes = std::fs::read(path).expect("read MILK_REAL_DTB");
+    let blob = Blob::new(&bytes);
+    let d = blob.dtb().expect("a valid tree");
+    assert!(crate::dtb::compat_has(d.root_compatible(), "brcm,bcm2711"));
+    let mut cpus = [Cpu {
+        reg: 0,
+        method: EnableMethod::Unknown,
+        release_addr: 0,
+    }; MAX_CPUS];
+    let n = d.cpus(&mut cpus);
+    assert_eq!(n, 4);
+    for (i, c) in cpus[..4].iter().enumerate() {
+        assert_eq!(c.reg, i as u64);
+        assert_eq!(c.method, EnableMethod::SpinTable);
+        assert_eq!(c.release_addr, 0xd8 + 8 * i as u64);
+    }
+    assert_eq!(d.psci_conduit(), None);
+    let reg = d.find_prefix(b"pcie@", b"reg").expect("a pcie node");
+    assert_eq!(&reg[..8], &[0, 0, 0, 0, 0x7d, 0x50, 0x00, 0x00]);
+    let ranges = d.find_prefix(b"pcie@", b"ranges").expect("its ranges");
+    let mut r = [crate::pci::Range {
+        space: 0,
+        prefetch: false,
+        pci_addr: 0,
+        cpu_addr: 0,
+        size: 0,
+    }; crate::pci::MAX_RANGES];
+    let k = crate::pci::parse_ranges(ranges, 2, 2, &mut r);
+    assert!(k >= 1);
+    std::println!("real tree: {} cpus, pcie ranges {:x?}", n, &r[..k]);
+    let mut banks = [MemRange { base: 0, size: 0 }; MAX_BANKS];
+    let nb = d.memory(&mut banks);
+    std::println!("memory banks in the on-disk tree: {:x?}", &banks[..nb]);
+    std::println!(
+        "bootargs: {}",
+        core::str::from_utf8(d.bootargs()).unwrap_or("?")
+    );
+}
+
+mod genet_tests {
+    use crate::genet::*;
+
+    #[test]
+    fn descriptor_words() {
+        // 60 bytes: length 60 in 27:16, the default queue tag, CRC appended, one-descriptor frame.
+        assert_eq!(tx_status(60), 60 << 16 | 0x3f << 7 | 0x40 | 0x2000 | 0x4000);
+        assert_eq!(tx_status(1514) >> 16, 1514);
+        assert_eq!(tx_status(0x1fff) >> 16, 0xfff, "lengths are 12 bits");
+        assert_eq!(rx_status(2048), 2048 << 16);
+    }
+
+    #[test]
+    fn received_frames() {
+        let good = 64 << 16 | 0x2000 | 0x4000;
+        assert_eq!(rx_frame_len(good, 2048), Some(64));
+        // Not a whole frame (a middle fragment), or flagged bad.
+        assert_eq!(rx_frame_len(64 << 16 | 0x2000, 2048), None);
+        assert_eq!(rx_frame_len(64 << 16 | 0x4000, 2048), None);
+        for bit in [0x01, 0x02, 0x04, 0x08, 0x10] {
+            assert_eq!(rx_frame_len(good | bit, 2048), None, "error bit {bit:#x}");
+        }
+        // A runt, and one bigger than our buffers.
+        assert_eq!(rx_frame_len(13 << 16 | 0x6000, 2048), None);
+        assert_eq!(rx_frame_len(14 << 16 | 0x6000, 2048), Some(14));
+        assert_eq!(rx_frame_len(3000 << 16 | 0x6000, 2048), None);
+        assert_eq!(rx_frame_len(0, 2048), None);
+    }
+
+    #[test]
+    fn ring_indexes_wrap_like_the_hardware_16_bit_counters() {
+        assert_eq!(in_flight(5, 5), 0);
+        assert_eq!(in_flight(10, 3), 7);
+        assert_eq!(in_flight(2, 0xfffe), 4);
+        assert_eq!(in_flight(0, 0), 0);
+    }
+
+    #[test]
+    fn autonegotiation_picks_the_best_common_mode() {
+        let adv = 0x01e1; // 10/100 half and full
+        // Both ends have gigabit full: STAT1000 bit 11 is the partner's full duplex.
+        assert_eq!(
+            resolve(adv, 0x01e1, 0x0300, 0x0800),
+            Some(Negotiated {
+                mbps: 1000,
+                full: true
+            })
+        );
+        // The partner only has gigabit half.
+        assert_eq!(
+            resolve(adv, 0x01e1, 0x0300, 0x0400),
+            Some(Negotiated {
+                mbps: 1000,
+                full: false
+            })
+        );
+        // We do not advertise gigabit: 100 full.
+        assert_eq!(
+            resolve(adv, 0x01e1, 0, 0x0800),
+            Some(Negotiated {
+                mbps: 100,
+                full: true
+            })
+        );
+        // Partner: 100 half and 10 full only.
+        assert_eq!(
+            resolve(adv, 0x00a1, 0x0300, 0),
+            Some(Negotiated {
+                mbps: 100,
+                full: false
+            })
+        );
+        assert_eq!(
+            resolve(adv, 0x0061, 0x0300, 0),
+            Some(Negotiated {
+                mbps: 10,
+                full: true
+            })
+        );
+        assert_eq!(
+            resolve(adv, 0x0021, 0, 0),
+            Some(Negotiated {
+                mbps: 10,
+                full: false
+            })
+        );
+        // Nothing in common (or no partner abilities at all).
+        assert_eq!(resolve(adv, 0x0001, 0x0300, 0), None);
+        assert_eq!(resolve(0, 0x01e1, 0, 0x0c00), None);
+    }
+
+    #[test]
+    fn mac_address_registers() {
+        assert_eq!(
+            mac_registers([0xdc, 0xa6, 0x32, 0x12, 0x34, 0x56]),
+            (0xdca6_3212, 0x3456)
+        );
+    }
+}

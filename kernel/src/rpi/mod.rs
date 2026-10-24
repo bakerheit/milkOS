@@ -13,6 +13,7 @@
 //! driver give up, never the kernel hang.
 
 pub mod fb;
+pub mod genet;
 pub mod led;
 pub mod mailbox;
 pub mod pcie;
@@ -45,6 +46,7 @@ pub fn init() {
         Err(e) => crate::kprintln!("rpi: no ethernet address from the firmware ({e:?})"),
     }
     sdhci::init();
+    genet::init();
 }
 
 pub use crate::timeout::Timeout;

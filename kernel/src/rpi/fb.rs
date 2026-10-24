@@ -97,6 +97,9 @@ fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
         return None;
     }
     let va = map_buffer(fb.phys as usize, fb.size as usize)?;
+    // The first sign of life on a screen: a band across the top, drawn the moment the buffer
+    // exists, before anything else can fail.
+    sign_of_life(va, fb.width as usize, fb.height as usize);
     PTR.store(va, Ordering::Release);
     W.store(fb.width as usize, Ordering::Release);
     H.store(fb.height as usize, Ordering::Release);
@@ -118,6 +121,36 @@ fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
             fb.width as usize,
         )
     })
+}
+
+/// Height in pixels of the band [`sign_of_life`] draws.
+pub const BAND_H: usize = 6;
+
+/// A solid band across the top of the screen (bright green, `0x0000ff40` is not it: the pixel
+/// word is `0x00RRGGBB`), plus a white pixel row under it: "the kernel got a framebuffer".
+fn sign_of_life(va: usize, w: usize, h: usize) {
+    let band = BAND_H.min(h);
+    for y in 0..band {
+        let row = (va + y * w * 4) as *mut u32;
+        for x in 0..w {
+            // SAFETY: inside the buffer just mapped (w * h words).
+            unsafe {
+                row.add(x).write_volatile(if y + 1 == band {
+                    0x00ff_ffff
+                } else {
+                    0x0030_d060
+                })
+            };
+        }
+    }
+}
+
+/// Redraw the band (the boot console clears the screen when it starts).
+pub fn band() {
+    if let Some(p) = framebuffer() {
+        let (w, h) = size();
+        sign_of_life(p as usize, w, h);
+    }
 }
 
 /// Allocate the framebuffer at `w` x `h` (or what the firmware makes of it). `None` without a

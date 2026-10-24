@@ -1,4 +1,4 @@
-//! Text console on a framebuffer: 8x16 cells, cursor, wrapping, scrolling, and the basic ANSI
+//! Text console on a framebuffer: 8x16 cells (or 16x32, 24x48, ... with a scale), cursor, wrapping, scrolling, and the basic ANSI
 //! SGR colours (`ESC [ 30..37 m` etc.) plus `ESC [ H` and `ESC [ 2 J`.
 
 use crate::font::{self, GLYPH_H, GLYPH_W};
@@ -38,6 +38,8 @@ enum Parse {
 
 pub struct Console {
     surface: Surface<'static>,
+    /// Glyph magnification: a cell is `GLYPH_W * scale` by `GLYPH_H * scale` pixels.
+    scale: usize,
     cols: usize,
     rows: usize,
     cx: usize,
@@ -57,10 +59,18 @@ pub struct Console {
 
 impl Console {
     pub fn new(surface: Surface<'static>) -> Self {
-        let cols = (surface.width() - 2 * MARGIN) / GLYPH_W;
-        let rows = (surface.height() - 2 * MARGIN) / GLYPH_H;
+        Self::with_scale(surface, 1)
+    }
+
+    /// A console whose characters are `scale` times the size of the 8x16 font (1..=4), for
+    /// screens that are read from across a room.
+    pub fn with_scale(surface: Surface<'static>, scale: usize) -> Self {
+        let scale = scale.clamp(1, 4);
+        let cols = ((surface.width().saturating_sub(2 * MARGIN)) / (GLYPH_W * scale)).max(1);
+        let rows = ((surface.height().saturating_sub(2 * MARGIN)) / (GLYPH_H * scale)).max(1);
         let mut c = Console {
             surface,
+            scale,
             cols,
             rows,
             cx: 0,
@@ -102,21 +112,30 @@ impl Console {
         self.toggle_cursor();
     }
 
+    fn cw(&self) -> usize {
+        GLYPH_W * self.scale
+    }
+
+    fn ch(&self) -> usize {
+        GLYPH_H * self.scale
+    }
+
     fn cell_xy(&self, col: usize, row: usize) -> (i32, i32) {
         (
-            (MARGIN + col * GLYPH_W) as i32,
-            (MARGIN + row * GLYPH_H) as i32,
+            (MARGIN + col * self.cw()) as i32,
+            (MARGIN + row * self.ch()) as i32,
         )
     }
 
     /// Cursor is an inverted block; XORing twice restores the pixels.
     fn toggle_cursor(&mut self) {
         let (x, y) = self.cell_xy(self.cx.min(self.cols - 1), self.cy);
+        let (cw, ch) = (self.cw(), self.ch());
         let stride = self.surface.stride();
         let px = self.surface.pixels_mut();
-        for row in 0..GLYPH_H {
+        for row in 0..ch {
             let base = (y as usize + row) * stride + x as usize;
-            for p in &mut px[base..base + GLYPH_W] {
+            for p in &mut px[base..base + cw] {
                 *p ^= 0x00FF_FFFF;
             }
         }
@@ -138,9 +157,9 @@ impl Console {
             self.surface.scroll_up(
                 x,
                 y,
-                (self.cols * GLYPH_W) as i32,
-                (self.rows * GLYPH_H) as i32,
-                GLYPH_H as i32,
+                (self.cols * self.cw()) as i32,
+                (self.rows * self.ch()) as i32,
+                self.ch() as i32,
                 DEFAULT_BG,
             );
         }
@@ -192,7 +211,7 @@ impl Console {
         } else {
             (self.fg, self.bg)
         };
-        font::draw_glyph(&mut self.surface, x, y, c, fg, Some(bg), 1);
+        font::draw_glyph(&mut self.surface, x, y, c, fg, Some(bg), self.scale as i32);
         self.cx += 1;
     }
 
@@ -230,9 +249,9 @@ impl Console {
                     }
                     'K' => {
                         let (x, y) = self.cell_xy(self.cx.min(self.cols), self.cy);
-                        let end = MARGIN + self.cols * GLYPH_W;
+                        let end = MARGIN + self.cols * self.cw();
                         self.surface
-                            .fill_rect(x, y, end as i32 - x, GLYPH_H as i32, DEFAULT_BG);
+                            .fill_rect(x, y, end as i32 - x, self.ch() as i32, DEFAULT_BG);
                     }
                     _ => {}
                 }

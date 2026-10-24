@@ -3,6 +3,7 @@
 //! `raspi`, docs/raspberry-pi.md).
 //!
 //! * [`mailbox`]: the VideoCore property mailbox (framebuffer, clocks, power, board info).
+//! * [`led`]: the ACT LED as a sign of life (on while running, flashing after a crash).
 //! * [`fb`]: the display, a framebuffer the firmware allocates through the mailbox.
 //! * [`sdhci`]: the SD host controller (EMMC2 on a real board; qemu's raspi4b has the EMMC1
 //!   one), as a block device.
@@ -12,6 +13,7 @@
 //! driver give up, never the kernel hang.
 
 pub mod fb;
+pub mod led;
 pub mod mailbox;
 pub mod sdhci;
 

@@ -172,3 +172,24 @@ fn crash_test() {
     let v = unsafe { core::ptr::read_volatile(p) };
     kprintln!("[selftest] crash-test: survived?! read {v:#x}");
 }
+
+/// Boot option `opt/milkos/crashtest` (command line `milk.crashtest=early` or `=late` on the Pi): panic
+/// on purpose, to prove what a crash shows on the screen (scripts/pi-qemu-test.sh). `early` panics
+/// as soon as the display and the board drivers are up (the boot log is still on screen); `late`
+/// once the desktop has been up for a few seconds. Called from `kmain` at both points.
+pub fn crash_if_asked(stage: &str) {
+    let mut text = [0u8; 8];
+    let Some(f) = crate::fwcfg::find_file("opt/milkos/crashtest")
+        .filter(|f| (f.size as usize) <= text.len())
+        .filter(|f| crate::fwcfg::read_file(*f, &mut text[..f.size as usize]))
+    else {
+        return;
+    };
+    if &text[..f.size as usize] != stage.as_bytes() {
+        return;
+    }
+    if stage == "late" {
+        crate::sched::sleep_ms(8000);
+    }
+    panic!("crash-test: a deliberate panic, {stage} (opt/milkos/crashtest={stage})");
+}

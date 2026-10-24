@@ -9,6 +9,7 @@ use core::panic::PanicInfo;
 mod art;
 mod audio;
 mod audit;
+mod crashscreen;
 mod crypto;
 mod cursor;
 mod display;
@@ -99,6 +100,8 @@ pub extern "C" fn kmain() -> ! {
     exceptions::init();
     // The Pi's UART needs setting up before the first character (a no-op on virt).
     uart::early_init();
+    #[cfg(feature = "raspi")]
+    rpi::led::on();
     percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
@@ -113,6 +116,7 @@ pub extern "C" fn kmain() -> ! {
     #[cfg(feature = "raspi")]
     rpi::init();
     udrv::init_policy();
+    selftest::crash_if_asked("early");
     // Which of the slow boot self-tests run (opt/milkos/selftest; by default none).
     selftest::read_option();
     virtio::init();
@@ -152,6 +156,7 @@ pub extern "C" fn kmain() -> ! {
     // screen and draws the mouse cursor from here on.
     sched::spawn_prio("wm", sched::Priority::High, wm::run);
     // kmain is now just thread 0.
+    selftest::crash_if_asked("late");
     loop {
         sched::sleep_ms(1000);
     }

@@ -520,7 +520,9 @@ fn test_high_and_dma() {
         "selftest: {hi:#x} not in the linear map"
     );
     pmm::free_contiguous(hi, 3);
-    kprintln!("selftest: high memory ok (RAM to {top:#x}; 3 frames at {hi:#x} written, read back, freed)");
+    kprintln!(
+        "selftest: high memory ok (RAM to {top:#x}; 3 frames at {hi:#x} written, read back, freed)"
+    );
 }
 
 pub fn run() {

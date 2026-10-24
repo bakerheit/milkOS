@@ -45,7 +45,7 @@ pub fn init() {
     if let Some(fb) = crate::rpi::fb::init(WIDTH, HEIGHT) {
         BACKEND.store(RPIFB, Ordering::Release);
         let (w, h) = crate::rpi::fb::size();
-        return finish_init(fb, "rpi mailbox framebuffer", w, h);
+        return finish_init_boot_log(fb, "rpi mailbox framebuffer", w, h);
     }
     let (fb, name) = match gpu::find().and_then(|t| gpu::init(t, WIDTH, HEIGHT)) {
         Some(fb) => {
@@ -66,6 +66,50 @@ pub fn init() {
     finish_init(fb, name, WIDTH, HEIGHT)
 }
 
+/// How many times the 8x16 console font is magnified on the boot log and the crash screen: 1 on
+/// a 1024-wide screen, 2 from 1600 up, or what the `fbscale` boot option (command line
+/// `milk.fbscale=N`) says.
+pub fn console_scale() -> usize {
+    let (w, _) = size();
+    let mut buf = [0u8; 4];
+    let opt = crate::fwcfg::find_file("opt/milkos/fbscale")
+        .filter(|f| (f.size as usize) <= buf.len())
+        .filter(|f| crate::fwcfg::read_file(*f, &mut buf[..f.size as usize]))
+        .and_then(|f| {
+            core::str::from_utf8(&buf[..f.size as usize])
+                .ok()?
+                .trim()
+                .parse::<usize>()
+                .ok()
+        });
+    opt.unwrap_or(if w >= 1600 { 2 } else { 1 }).clamp(1, 4)
+}
+
+/// The Raspberry Pi's start: no serial cable, so the screen is the console. The kernel log so far
+/// is replayed onto it and `kprintln!` is mirrored there until the desktop takes the screen over
+/// ([`take_framebuffer`]); a crash shows its text where the boot log was ([`crate::crashscreen`]).
+/// No splash.
+#[cfg(feature = "raspi")]
+fn finish_init_boot_log(fb: Surface<'static>, name: &str, w: usize, h: usize) {
+    // SAFETY: a second view of the framebuffer; only the boot console draws until the desktop starts.
+    let view =
+        unsafe { Surface::from_raw(framebuffer().unwrap_or(core::ptr::null_mut()), w, h, w) };
+    *FRAMEBUFFER.lock() = Some(fb);
+    let mut console = fbcon::Console::with_scale(view, console_scale());
+    // What was printed before the screen existed.
+    crate::klog::read_since(0, |bytes| {
+        for chunk in bytes.utf8_chunks() {
+            console.write_str(chunk.valid());
+        }
+    });
+    sink::install_screen(console);
+    #[cfg(feature = "raspi")]
+    crate::rpi::fb::band();
+    kprintln!(
+        "display: {name} {w}x{h} XRGB8888, the boot log is on screen until the desktop starts"
+    );
+}
+
 /// The splash, the framebuffer parked for the desktop and the log line.
 fn finish_init(mut fb: Surface<'static>, name: &str, w: usize, h: usize) {
     splash::show(&mut fb, SPLASH_MS, None);
@@ -76,6 +120,10 @@ fn finish_init(mut fb: Surface<'static>, name: &str, w: usize, h: usize) {
 /// Hand the framebuffer to its one owner (the compositor). `None` if there is no display or it
 /// was already taken.
 pub fn take_framebuffer() -> Option<Surface<'static>> {
+    // The desktop draws the whole screen from here on: the boot console steps aside.
+    if sink::screen_installed() {
+        sink::remove_screen();
+    }
     FRAMEBUFFER.lock().take()
 }
 

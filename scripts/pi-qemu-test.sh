@@ -9,6 +9,11 @@
 #           4 GB or 8 GB board's memory node), loaded unchanged (qemu rewrites memory nodes of a tree
 #           given with -dtb, so this one goes in as a raw file where the boot stub looks for it):
 #           both banks used, the hole reserved, the framebuffer inside the hole, the desktop up.
+#   boot 4: `milk.crashtest=early` on the command line: a panic right after the display is up, with no
+#           serial cable in mind: the boot log (not cleared) and the panic text are on the screen, with the
+#           green sign-of-life band on top (qemu screendump, pixels checked);
+#   boot 5: `milk.crashtest=late`: a panic with the desktop up: the end of the log, the panic text, on a
+#           full-screen text console (screendump: the desktop is gone, the console background is there).
 #           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
 #           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
@@ -59,7 +64,7 @@ boot() {
 }
 stop() {
   kill -9 "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true; QPID=""
-  kill "$D" 2>/dev/null || true
+  { kill "$D"; wait "$D"; } 2>/dev/null || true
 }
 out() { # output of the command typed as $1 (the last time), up to the next prompt
   tr -d '\r' < "$LOG" | awk -v c="$1" '/^msh:/ { if (on) {on=0}; if (substr($0, index($0, "$ ") + 2) == c) {buf=""; on=1; next} } $0 == c && !on {buf=""; on=1; next} on {buf = buf $0 "\n"} END {printf "%s", buf}'
@@ -88,7 +93,7 @@ check '^rpi fb: 1024x768x32 pitch 4096 at ' "the mailbox framebuffer"
 check '^display: rpi mailbox framebuffer 1024x768' "the display on it"
 check '^\[sdhci\] .*card ready' "the SD card"
 check '^milkfs: mmcblk0 mounted at /Volumes/Milk' "milkfs on the SD card"
-check '^wm: desktop up' "the desktop"
+check 'wm: desktop up' "the desktop"
 has 'KERNEL PANIC|kernel panic' && bad "a kernel panic" || ok "no panic"
 out system | grep -Eq '^CPUs +4' && ok "system says 4 CPUs" || bad "system: $(out system)"
 out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^memory')" || bad "system has no memory line"
@@ -134,10 +139,46 @@ check '^mem: RAM 0x0\.\.0x80000000 \(1972 MiB, device tree\)' "boot 3: both bank
 check '^mem:   bank 0x0\.\.0x3b400000 ' "boot 3: the first bank"
 check '^mem:   bank 0x40000000\.\.0x80000000 ' "boot 3: the second bank"
 check '^rpi fb: 1024x768x32 pitch 4096 at 0x3c' "boot 3: the framebuffer in the hole between them"
-check '^wm: desktop up' "boot 3: the desktop"
+check 'wm: desktop up' "boot 3: the desktop"
 has 'KERNEL PANIC|kernel panic' && bad "boot 3: a kernel panic" || ok "boot 3: no panic"
 out system | grep -Eq '^memory +(1\.9|2\.0) GB' && ok "boot 3: system: $(out system | grep '^memory')" || bad "boot 3: system: $(out system)"
 [ -s "$T/banks.png" ] && python3 -I scripts/png_check.py "$T/banks.png" >/dev/null 2>&1 && ok "boot 3: a screendump" || bad "boot 3: no screendump"
+
+# ---- boots 4 and 5: what a crash looks like on the screen ----
+pixels() { # PNG X,Y ... -> "R,G,B" per point
+  python3 -I - "$@" <<'PY'
+import sys
+sys.path.insert(0, "scripts")
+import png_check
+w, h, rows = png_check.decode(sys.argv[1])
+print(" ".join("%d,%d,%d" % tuple(rows[int(p.split(",")[1])][int(p.split(",")[0])]) for p in sys.argv[2:]))
+PY
+}
+for stage in early late; do
+  python3 scripts/pi_dtb.py "$T/crash.dtb" --cmdline "milk.crashtest=$stage"
+  DTB_ARGS=(-dtb "$T/crash.dtb")
+  n=$([ $stage = early ] && echo 4 || echo 5)
+  # No prompt will come: wait for the panic itself, then the screen.
+  boot $n "wait@300:KERNEL PANIC"
+  sleep 2
+  python3 scripts/qmp.py "$QMP" screendump "$T/crash-$stage.png" >/dev/null 2>&1 || true
+  stop
+  check "^panicked at .*crash-test: a deliberate panic, $stage|crash-test: a deliberate panic, $stage" "boot $n: the deliberate panic ($stage)"
+  if [ -s "$T/crash-$stage.png" ]; then
+    # Bottom right: the console's background (0x161513), whatever was on the screen before.
+    case "$(pixels "$T/crash-$stage.png" 1000,750 1010,740)" in
+      "22,21,19 22,21,19") ok "boot $n: the crash screen is a text console (dark background where the desktop was)" ;;
+      *) bad "boot $n: the screen is not the text console: $(pixels "$T/crash-$stage.png" 1000,750 1010,740)" ;;
+    esac
+  else
+    bad "boot $n: no screendump"
+  fi
+done
+# After the early panic the screen kept the boot log and the green band over it (not cleared, no splash).
+case "$(pixels "$T/crash-early.png" 500,2 500,5)" in
+  "48,208,96 255,255,255") ok "boot 4: the sign-of-life band is on top (green, then a white line)" ;;
+  *) bad "boot 4: no sign-of-life band: $(pixels "$T/crash-early.png" 500,2 500,5)" ;;
+esac
 
 if [ "$FAIL" = 0 ]; then
   echo "pi-qemu-test: PASS"

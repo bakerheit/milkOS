@@ -186,6 +186,12 @@ extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
         ec_name((esr >> 26) & 0x3f)
     );
     kprintln!("*** halted ***");
+    if crate::platform::RASPI {
+        // No serial cable on the Pi: the dump on the screen, the LED flashing.
+        crate::crashscreen::show();
+        #[cfg(feature = "raspi")]
+        crate::rpi::led::blink_forever();
+    }
     halt();
 }
 

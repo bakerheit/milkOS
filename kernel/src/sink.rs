@@ -115,6 +115,24 @@ pub fn install_screen(console: Console) {
     SCREEN.busy.store(false, Ordering::Release);
 }
 
+/// Stop mirroring to the screen (the desktop is about to own the framebuffer). The console's
+/// state is dropped; the text is still in the kernel log.
+pub fn remove_screen() {
+    while !try_lock() {
+        core::hint::spin_loop();
+    }
+    // SAFETY: we hold the `busy` flag.
+    unsafe { *SCREEN.inner.get() = None };
+    SCREEN.busy.store(false, Ordering::Release);
+}
+
+/// Is `kprintln!` mirrored on the screen right now?
+pub fn screen_installed() -> bool {
+    // SAFETY: a racy peek at a word for a yes/no answer (used when a panic wants to know whether
+    // its text already reaches the screen); a torn read cannot happen on one aligned word.
+    unsafe { (*SCREEN.inner.get()).is_some() }
+}
+
 /// The writer behind `kprintln!`.
 pub struct Sink;
 

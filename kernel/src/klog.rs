@@ -55,3 +55,28 @@ pub fn read_since(from: u64, mut f: impl FnMut(&[u8])) -> u64 {
     }
     r.total
 }
+
+/// Call `f` with the last `max` bytes of the log, oldest first, in at most two slices (for a
+/// crash screen: it takes the lock only if it is free, so a crash while printing still shows what
+/// the screen got). Returns false if the lock was taken.
+pub fn tail(max: usize, mut f: impl FnMut(&[u8])) -> bool {
+    let Some(r) = RING.try_lock() else {
+        return false;
+    };
+    let n = (max.min(SIZE) as u64).min(r.total);
+    let start = r.total - n;
+    let (a, b) = (
+        (start as usize) & (SIZE - 1),
+        (r.total as usize) & (SIZE - 1),
+    );
+    if n == 0 {
+        return true;
+    }
+    if a < b {
+        f(&r.buf[a..b]);
+    } else {
+        f(&r.buf[a..]);
+        f(&r.buf[..b]);
+    }
+    true
+}

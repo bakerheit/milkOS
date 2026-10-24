@@ -749,7 +749,7 @@ pub fn sys(op: usize, a: usize, b: usize, c: usize, d: usize) -> KResult<usize> 
                     "slot={} irq={} base={:#x} id={}",
                     dev.slot,
                     dev.irq,
-                    0x0a00_0000 + dev.slot * mmio::MMIO_STRIDE,
+                    crate::platform::CURRENT.virtio.map_or(0, |v| v.base) + dev.slot * mmio::MMIO_STRIDE,
                     dev.id
                 ))
             })?;

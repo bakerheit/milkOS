@@ -18,11 +18,21 @@ use core::ptr::{read_volatile, write_volatile};
 use super::queue::Virtqueue;
 use crate::gic;
 
-pub const MMIO_BASE: usize = crate::mmu::phys_to_virt(0x0a00_0000);
-pub const MMIO_STRIDE: usize = 0x200;
-pub const MMIO_SLOTS: usize = 32;
+/// The board's transports (platform.rs); a board without virtio has no slots at all.
+const BOARD: crate::platform::VirtioMmio = match crate::platform::CURRENT.virtio {
+    Some(v) => v,
+    None => crate::platform::VirtioMmio {
+        base: 0,
+        stride: 0x200,
+        slots: 0,
+        spi_base: 0,
+    },
+};
+pub const MMIO_BASE: usize = crate::mmu::phys_to_virt(BOARD.base);
+pub const MMIO_STRIDE: usize = BOARD.stride;
+pub const MMIO_SLOTS: usize = BOARD.slots;
 /// "SPI n" of slot 0; slot `i` is SPI `MMIO_SPI_BASE + i`.
-pub const MMIO_SPI_BASE: u32 = 16;
+pub const MMIO_SPI_BASE: u32 = BOARD.spi_base;
 
 const MAGIC: u32 = 0x7472_6976; // "virt"
 

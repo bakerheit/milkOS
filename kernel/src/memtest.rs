@@ -62,10 +62,11 @@ fn test_mmu() {
     mmu::with_kernel_space(|s| {
         // Linear map (KERNEL_BASE + pa) of device space and RAM; nothing low, nothing
         // non-canonical.
+        let board = crate::platform::CURRENT;
         for pa in [
-            0x0900_0000usize,
-            0x0a00_0000,
-            0x3fff_f000,
+            board.uart_base,
+            board.gicd,
+            board.device.last().map_or(0, |r| r.1) - 0x1000,
             kstart,
             kstart + 0x1234,
         ] {

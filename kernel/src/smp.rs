@@ -47,10 +47,11 @@ static mut BOOT: [BootBlock; MAX_CPUS] = [const {
 /// Boot stacks handed to secondaries (they become those CPUs' idle threads' stacks).
 static mut STACKS: [Option<KStack>; MAX_CPUS] = [const { None }; MAX_CPUS];
 
-global_asm!(include_str!("smp.S"), MAIN = sym secondary_main);
+global_asm!(include_str!("el.S"), include_str!("smp.S"), MAIN = sym secondary_main);
 
 unsafe extern "C" {
     fn secondary_entry();
+    fn secondary_spin_entry();
 }
 
 const PSCI_CPU_ON: u64 = 0xc400_0003;
@@ -108,23 +109,84 @@ fn sysreg_state() -> (u64, u64, u64) {
     (mair, tcr, sctlr)
 }
 
-/// MPIDRs of the CPUs in the device tree, and whether PSCI uses smc.
+/// How the firmware starts a CPU.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// A PSCI CPU_ON call (hvc or smc).
+    Psci,
+    /// The spin table: write the entry point at this physical address and send an event.
+    Spin(u64),
+}
+
+/// The CPUs the firmware knows (MPIDR affinity, how to start each) and the PSCI conduit.
 fn discover() -> (heapless_list::List, bool) {
     let mut cpus = heapless_list::List::new();
-    let mut smc = false;
+    let mut smc = crate::platform::CURRENT.psci_default_smc;
     // SAFETY: the bootloader's DTB pointer (or 0).
     if let Some(d) = unsafe { crate::dtb::Dtb::from_addr(mem::boot_dtb_ptr()) } {
-        d.for_each_prop(|parent, node, _depth, prop, data| {
-            if parent == b"cpus" && node.starts_with(b"cpu@") && prop == b"reg" {
-                let v = data.iter().fold(0u64, |acc, &b| acc << 8 | b as u64);
-                cpus.push(v);
-            }
-            if node == b"psci" && prop == b"method" {
-                smc = data.starts_with(b"smc");
-            }
-        });
+        let mut found = [crate::dtb::Cpu {
+            reg: 0,
+            method: crate::dtb::EnableMethod::Unknown,
+            release_addr: 0,
+        }; crate::dtb::MAX_CPUS];
+        let n = d.cpus(&mut found);
+        let conduit = d.psci_conduit();
+        if let Some(c) = conduit {
+            smc = c == crate::dtb::Conduit::Smc;
+        }
+        for c in &found[..n] {
+            let start = match c.method {
+                crate::dtb::EnableMethod::SpinTable if c.release_addr != 0 => {
+                    Start::Spin(c.release_addr)
+                }
+                crate::dtb::EnableMethod::SpinTable => continue, // nowhere to write: skip
+                // `psci`, or no enable-method at all with a /psci node (qemu virt).
+                _ if conduit.is_some() || c.method == crate::dtb::EnableMethod::Psci => Start::Psci,
+                // No PSCI at all and no spin table: nothing we can do for this CPU.
+                _ => continue,
+            };
+            cpus.push(c.reg, start);
+        }
+    } else if crate::platform::RASPI {
+        // No device tree (qemu raspi4b without -dtb): the Pi firmware's spin table, the
+        // addresses every Pi 4 tree names.
+        for i in 0..4u64 {
+            cpus.push(i, Start::Spin(0xd8 + 8 * i));
+        }
     }
     (cpus, smc)
+}
+
+unsafe extern "C" {
+    /// Physical addresses of the secondaries' boot blocks, indexed by MPIDR Aff0 (smp.S
+    /// `spin_blocks`, read by `secondary_spin_entry` with the MMU off: a CPU released from the
+    /// firmware's spin table arrives with no argument, so it finds its own block by its number).
+    static mut spin_blocks: [u64; MAX_CPUS];
+}
+
+/// Release a CPU parked in the firmware's spin table: record its boot block, store the entry
+/// point where it is polling (`release`, a physical address in low RAM), make both visible to
+/// a core that reads with its caches off, and wake it. False if `release` is not usable.
+fn release_spin(mpidr: u64, release: u64, blk_pa: u64) -> bool {
+    let aff0 = (mpidr & 0xff) as usize;
+    if aff0 >= MAX_CPUS || release == 0 || release % 8 != 0 {
+        return false;
+    }
+    let va = mmu::phys_to_virt(release as usize);
+    if mmu::with_kernel_space(|s| s.translate(va)) != Some(release as usize) {
+        return false;
+    }
+    let entry = mmu::virt_to_phys(secondary_spin_entry as *const () as usize) as u64;
+    // SAFETY: the table is ours; the release word is the firmware's mailbox for this CPU.
+    unsafe {
+        let slot = (&raw mut spin_blocks).cast::<u64>().add(aff0);
+        slot.write_volatile(blk_pa);
+        clean_to_poc(slot as usize, 8);
+        (va as *mut u64).write_volatile(entry);
+        clean_to_poc(va, 8);
+        core::arch::asm!("sev", options(nostack, preserves_flags));
+    }
+    true
 }
 
 /// Start every other CPU in the device tree. After `sched::init`. Returns how many CPUs
@@ -135,9 +197,16 @@ pub fn init() -> usize {
     let boot_mpidr = percpu::get(0).mpidr.load(Ordering::Relaxed);
     let (mair, tcr, sctlr) = sysreg_state();
     let ttbr0 = mmu::boot_ttbr0();
-    let ver = psci(PSCI_VERSION, 0, 0, 0);
+    // Only ask PSCI if some CPU is started that way (a Pi's firmware has none: a call would
+    // trap to nowhere).
+    let uses_psci = cpus.as_slice().iter().any(|&(_, s)| s == Start::Psci);
+    let ver = if uses_psci {
+        psci(PSCI_VERSION, 0, 0, 0)
+    } else {
+        0
+    };
     let mut next = 1usize;
-    for &mpidr in cpus.as_slice() {
+    for &(mpidr, start) in cpus.as_slice() {
         if mpidr == boot_mpidr || next >= MAX_CPUS {
             continue;
         }
@@ -165,11 +234,22 @@ pub fn init() -> usize {
             b as *const BootBlock as usize
         };
         clean_to_poc(blk, core::mem::size_of::<BootBlock>());
-        let entry = mmu::virt_to_phys(secondary_entry as *const () as usize) as u64;
-        let r = psci(PSCI_CPU_ON, mpidr, entry, mmu::virt_to_phys(blk) as u64);
-        if r != 0 {
-            kprintln!("[smp] PSCI CPU_ON for mpidr {mpidr:#x} failed: {r}");
-            continue;
+        let blk_pa = mmu::virt_to_phys(blk) as u64;
+        match start {
+            Start::Psci => {
+                let entry = mmu::virt_to_phys(secondary_entry as *const () as usize) as u64;
+                let r = psci(PSCI_CPU_ON, mpidr, entry, blk_pa);
+                if r != 0 {
+                    kprintln!("[smp] PSCI CPU_ON for mpidr {mpidr:#x} failed: {r}");
+                    continue;
+                }
+            }
+            Start::Spin(release) => {
+                if !release_spin(mpidr, release, blk_pa) {
+                    kprintln!("[smp] spin-table release address {release:#x} for mpidr {mpidr:#x} is not in RAM");
+                    continue;
+                }
+            }
         }
         // Wait (up to 1 s) for it to report in.
         let t0 = timer::now_ns();
@@ -195,13 +275,20 @@ pub fn init() -> usize {
         }
     }
     let n = percpu::count();
-    kprintln!(
-        "[smp] {n} of {} CPUs online (PSCI {}.{} via {})",
-        cpus.as_slice().len().max(1),
-        (ver >> 16) & 0xffff,
-        ver & 0xffff,
-        if smc { "smc" } else { "hvc" }
-    );
+    if uses_psci {
+        kprintln!(
+            "[smp] {n} of {} CPUs online (PSCI {}.{} via {})",
+            cpus.as_slice().len().max(1),
+            (ver >> 16) & 0xffff,
+            ver & 0xffff,
+            if smc { "smc" } else { "hvc" }
+        );
+    } else {
+        kprintln!(
+            "[smp] {n} of {} CPUs online (spin table)",
+            cpus.as_slice().len().max(1)
+        );
+    }
     STARTED.store(n, Ordering::Release);
     if n > 1 {
         gic::spread_spis(true);
@@ -234,21 +321,25 @@ extern "C" fn secondary_main(cpu: usize) -> ! {
 
 /// Tiny fixed-capacity list (no heap needed for the DTB walk).
 mod heapless_list {
+    use super::Start;
     pub struct List {
-        v: [u64; 16],
+        v: [(u64, Start); 16],
         n: usize,
     }
     impl List {
         pub fn new() -> Self {
-            Self { v: [0; 16], n: 0 }
+            Self {
+                v: [(0, Start::Psci); 16],
+                n: 0,
+            }
         }
-        pub fn push(&mut self, x: u64) {
+        pub fn push(&mut self, x: u64, s: Start) {
             if self.n < 16 {
-                self.v[self.n] = x;
+                self.v[self.n] = (x, s);
                 self.n += 1;
             }
         }
-        pub fn as_slice(&self) -> &[u64] {
+        pub fn as_slice(&self) -> &[(u64, Start)] {
             &self.v[..self.n]
         }
     }

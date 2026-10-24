@@ -13,10 +13,11 @@ unsafe extern "C" {
     static __boot_dtb: u64;
 }
 
-/// qemu `virt` defaults, used only if the device tree can't be parsed.
+/// The board's default RAM (qemu virt: 512 MiB at 1 GiB), used only if the device tree can't be
+/// parsed.
 const FALLBACK_RAM: MemRange = MemRange {
-    base: 0x4000_0000,
-    size: 512 << 20,
+    base: crate::platform::CURRENT.ram_fallback.0,
+    size: crate::platform::CURRENT.ram_fallback.1,
 };
 
 /// Physical range of the kernel image (incl. .bss and the boot stack).
@@ -116,9 +117,12 @@ pub fn init() {
         (kend - kstart) >> 10,
         pmm::reserved_end()
     );
+    let dev = crate::platform::CURRENT.device;
     kprintln!(
-        "mem: MMU+caches on (4K granule, 48-bit VA, higher half at {:#x}: device 0..0x40000000, RAM cacheable; TTBR0 user only)",
-        mmu::KERNEL_BASE
+        "mem: MMU+caches on (4K granule, 48-bit VA, higher half at {:#x}: device {:#x}..{:#x}, RAM cacheable; TTBR0 user only)",
+        mmu::KERNEL_BASE,
+        dev.first().map_or(0, |r| r.0),
+        dev.last().map_or(0, |r| r.1)
     );
     kprintln!(
         "mem: pmm {} frames total, {} reserved, {} free ({} MiB)",

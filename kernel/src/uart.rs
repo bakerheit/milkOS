@@ -1,7 +1,10 @@
 //! PL011 UART receive path: RX interrupt feeding a lock-free ring buffer.
 //!
-//! (Transmit is still the polled console writer in main.rs.) UART0 is at 0x0900_0000 and
-//! raises SPI 1 = INTID 33 on qemu virt (DTB: `pl011@9000000`, `interrupts = <0 1 4>`).
+//! (Transmit is the polled [`putc`], behind the console writer in main.rs.) UART0 is at
+//! 0x0900_0000 and raises SPI 1 = INTID 33 on qemu virt (DTB: `pl011@9000000`, `interrupts = <0 1 4>`);
+//! on the Raspberry Pi 4 it is the PL011 at 0xfe20_1000, SPI 121 (platform.rs). The Pi's second
+//! UART, the mini UART (AUX), is what its GPIO 14/15 header carries once the firmware has
+//! `enable_uart=1`; [`putc`] mirrors the console there when the firmware turned it on.
 //!
 //! The ring has one producer at a time ([`drain`], under `DRAIN`: the IRQ handler, or the
 //! slow fallback poll) and one consumer ([`read_byte`], called only by the tty-uart
@@ -29,20 +32,26 @@ use crate::exceptions::TrapFrame;
 use crate::gic;
 use crate::sync::{FnSlot, SpinLock};
 
-const UART_BASE: usize = crate::mmu::phys_to_virt(0x0900_0000);
+const UART_BASE: usize = crate::mmu::phys_to_virt(crate::platform::CURRENT.uart_base);
 const UARTDR: usize = 0x00;
 const UARTFR: usize = 0x18;
 const UARTIFLS: usize = 0x34;
 const UARTIMSC: usize = 0x38;
 const UARTICR: usize = 0x44;
 
+const UARTIBRD: usize = 0x24;
+const UARTFBRD: usize = 0x28;
+const UARTLCR_H: usize = 0x2c;
+const UARTCR: usize = 0x30;
+
 const FR_RXFE: u32 = 1 << 4;
+const FR_TXFF: u32 = 1 << 5;
 const INT_RX: u32 = 1 << 4;
 const INT_RT: u32 = 1 << 6; // receive timeout: flushes a partly filled FIFO
 const INT_ERRORS: u32 = 0x7 << 7 | 1 << 10; // FE, PE, BE, OE
 
-/// SPI 1 on virt.
-pub const UART_IRQ: u32 = gic::spi(1);
+/// SPI 1 on virt, SPI 121 on the Pi.
+pub const UART_IRQ: u32 = crate::platform::CURRENT.uart_irq;
 
 const RING_SIZE: usize = 256; // power of two
 static RING: [AtomicU8; RING_SIZE] = [const { AtomicU8::new(0) }; RING_SIZE];
@@ -57,6 +66,71 @@ static RESCUES: AtomicU64 = AtomicU64::new(0);
 static DRAIN: SpinLock<()> = SpinLock::new(());
 /// Called (IRQ context) after new bytes land in the ring; the console tty wakes readers.
 static RX_HOOK: FnSlot = FnSlot::new();
+
+// ---- transmit -------------------------------------------------------------------------
+
+/// How long [`putc`] waits for room in a real UART's FIFO before dropping the byte: a UART
+/// nobody clocks must not hang the kernel (and its panic output).
+const TX_SPINS: u32 = 200_000;
+
+/// The Pi's mini UART (AUX block): enable register and the data/status/control registers.
+const AUX_BASE: usize = crate::mmu::phys_to_virt(crate::platform::periph(0x21_5000));
+const AUX_ENABLES: usize = 0x04;
+const MU_IO: usize = 0x40;
+const MU_LSR: usize = 0x54;
+const MU_CNTL: usize = 0x60;
+const MU_LSR_TX_EMPTY: u32 = 1 << 5;
+const MU_CNTL_TX_ENABLE: u32 = 1 << 1;
+
+/// The firmware left the mini UART running (set by [`early_init`]).
+static MINI_UART: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+fn aux_read(off: usize) -> u32 {
+    unsafe { read_volatile((AUX_BASE + off) as *const u32) }
+}
+fn aux_write(off: usize, v: u32) {
+    unsafe { write_volatile((AUX_BASE + off) as *mut u32, v) }
+}
+
+/// Get the console UART(s) ready for [`putc`]. A no-op on qemu virt (its PL011 just works).
+/// On the Pi the firmware leaves the PL011 off unless Bluetooth uses it, so program it
+/// (115200 8N1 from the 48 MHz UART clock the firmware sets by default; qemu ignores the
+/// divisors), and note whether the firmware enabled the mini UART (`enable_uart=1`), which then
+/// carries the same console. Call once, first thing in `kmain`.
+pub fn early_init() {
+    if !crate::platform::RASPI {
+        return;
+    }
+    reg_write(UARTCR, 0);
+    reg_write(UARTICR, 0x7ff);
+    reg_write(UARTIBRD, 26);
+    reg_write(UARTFBRD, 3);
+    reg_write(UARTLCR_H, 0x70); // 8 bits, FIFOs on, no parity, 1 stop
+    reg_write(UARTCR, 0x301); // UARTEN | TXE | RXE
+    let mini = aux_read(AUX_ENABLES) & 1 != 0 && aux_read(MU_CNTL) & MU_CNTL_TX_ENABLE != 0;
+    MINI_UART.store(mini, Ordering::Relaxed);
+}
+
+/// Send one byte to the console UART(s). Polled; on the Pi it waits (bounded) for FIFO room.
+pub fn putc(b: u8) {
+    if !crate::platform::RASPI {
+        // qemu virt's PL011 never fills up; the write has always been blind.
+        reg_write(0, b as u32);
+        return;
+    }
+    let mut spins = 0;
+    while reg_read(UARTFR) & FR_TXFF != 0 && spins < TX_SPINS {
+        spins += 1;
+    }
+    reg_write(0, b as u32);
+    if MINI_UART.load(Ordering::Relaxed) {
+        let mut spins = 0;
+        while aux_read(MU_LSR) & MU_LSR_TX_EMPTY == 0 && spins < TX_SPINS {
+            spins += 1;
+        }
+        aux_write(MU_IO, b as u32);
+    }
+}
 
 /// Install the receive hook (IRQ context, IRQs masked: must not block or allocate).
 pub fn set_rx_hook(h: fn()) {

@@ -1,5 +1,6 @@
 //! GICv2 driver for qemu's `virt` machine (distributor 0x0800_0000, CPU interface
-//! 0x0801_0000).
+//! 0x0801_0000) and the Raspberry Pi 4's GIC-400 (0xff84_1000 / 0xff84_2000; platform.rs has
+//! both; the register layout is the same).
 //!
 //! Confirmed with `-M virt -accel hvf -cpu host` on qemu 10.2: the default GIC is v2
 //! (DTB node `intc@8000000`, compatible `arm,cortex-a15-gic`), so `scripts/run.sh` needs no
@@ -21,8 +22,8 @@ use crate::kprintln;
 use crate::percpu::{self, MAX_CPUS};
 use crate::sync::{FnSlot, IrqGuard};
 
-const GICD_BASE: usize = crate::mmu::phys_to_virt(0x0800_0000);
-const GICC_BASE: usize = crate::mmu::phys_to_virt(0x0801_0000);
+const GICD_BASE: usize = crate::mmu::phys_to_virt(crate::platform::CURRENT.gicd);
+const GICC_BASE: usize = crate::mmu::phys_to_virt(crate::platform::CURRENT.gicc);
 
 // Distributor registers.
 const GICD_CTLR: usize = 0x000;

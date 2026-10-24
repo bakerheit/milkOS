@@ -4,10 +4,25 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The linker script, with the image's physical load address for the board being built:
+/// qemu virt loads a kernel at RAM + 0x80000 = 0x4008_0000, the Raspberry Pi firmware (and
+/// qemu raspi4b) at 0x80000 (feature `raspi`; kernel/src/platform.rs has the rest of the board).
+fn link_script(dir: &str) {
+    let raspi = std::env::var_os("CARGO_FEATURE_RASPI").is_some();
+    let phys = if raspi { "0x80000" } else { "0x40080000" };
+    let text = fs::read_to_string(format!("{dir}/linker.ld")).expect("read linker.ld");
+    let placeholder = "KERNEL_PHYS = 0x40080000;";
+    assert!(text.contains(placeholder), "linker.ld lost its KERNEL_PHYS line");
+    let text = text.replace(placeholder, &format!("KERNEL_PHYS = {phys};"));
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("linker.ld");
+    fs::write(&out, text).expect("write linker.ld");
+    println!("cargo:rustc-link-arg=-T{}", out.display());
+    println!("cargo:rerun-if-changed=linker.ld");
+}
+
 fn main() {
     let dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    println!("cargo:rustc-link-arg=-T{dir}/linker.ld");
-    println!("cargo:rerun-if-changed=linker.ld");
+    link_script(&dir);
     println!("cargo:rerun-if-changed=src/boot.S");
     let repo = Path::new(&dir).parent().unwrap();
     // The one version number (<repo>/VERSION), see docs/versioning.md:

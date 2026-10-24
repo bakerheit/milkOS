@@ -1,8 +1,9 @@
-// milkOS entry point. qemu -kernel jumps here at EL1 with the MMU off, at the physical
-// load address (0x40080000). The kernel is linked at KERNEL_BASE + that (the higher half,
-// TTBR1), so until the MMU is on and we have branched up there, everything here must be
-// PC-relative (adrp/adr, b/bl): no `ldr =symbol` (that's the high address) except the
-// jump itself. Included by mmu.rs via global_asm! with the constants it needs.
+// milkOS entry point. The bootloader jumps here with the MMU off, at the physical load
+// address: qemu virt at 0x40080000 (EL1), the Raspberry Pi firmware and qemu raspi4b at
+// 0x80000 (EL2; el.S drops to EL1). The kernel is linked at KERNEL_BASE + that (the higher
+// half, TTBR1), so until the MMU is on and we have branched up there, everything here must
+// be PC-relative (adrp/adr, b/bl): no `ldr =symbol` (that's the high address) except the
+// jump itself. Included by mmu.rs via global_asm! (behind el.S) with the constants it needs.
 .section .text.boot, "ax"
 .global _start
 _start:
@@ -21,14 +22,17 @@ _start:
     .long   0x644d5241                      // magic "ARM\x64"
     .long   0
 _real_start:
-    // qemu hands us the device tree pointer in x0. Keep it in x19 (nothing below
-    // touches x19) until we run high, then store it in __boot_dtb.
+    // The bootloader hands us the device tree pointer in x0. Keep it in x19 (nothing
+    // below touches x19) until we run high, then store it in __boot_dtb.
     mov     x19, x0
 
-    // Only core 0 runs; the others are started later via PSCI (smp.S).
+    // Only core 0 runs; the others are started later (PSCI or the spin table, smp.rs).
     mrs     x0, mpidr_el1
     and     x0, x0, #0xff
     cbnz    x0, 2f
+
+    // EL2 -> EL1 if the firmware started us at EL2 (el.S).
+    drop_to_el1 x0
 
     // Zero .bss (physical addresses: MMU off). The boot tables live in it.
     adrp    x0, __bss_start
@@ -42,18 +46,21 @@ _real_start:
 3:
     // Boot tables: one L0 + one L1, used for both TTBR0 (identity, so the next few
     // instructions keep running) and TTBR1 (KERNEL_BASE + pa: index bits 47:39 are the
-    // same). L1[0] = 1 GiB of MMIO, L1[1] = the first 1 GiB of RAM (the image, its
-    // stack, the DTB). mmu::init replaces TTBR1 with the full linear map.
+    // same). The four L1 entries (1 GiB each) are the board's (platform.rs boot_map): on
+    // virt MMIO then RAM (the image, its stack, the DTB), on the Pi RAM, nothing, nothing,
+    // MMIO. mmu::init replaces TTBR1 with the full linear map.
     adrp    x0, boot_l0
     adrp    x1, boot_l1
     orr     x2, x1, #3                      // table descriptor
     str     x2, [x0]
-    ldr     x2, ={BLOCK_DEV}
+    ldr     x2, ={L1_0}
     str     x2, [x1]
-    ldr     x2, ={BLOCK_RAM}
-    mov     x3, #0x40000000
-    orr     x2, x2, x3
+    ldr     x2, ={L1_1}
     str     x2, [x1, #8]
+    ldr     x2, ={L1_2}
+    str     x2, [x1, #16]
+    ldr     x2, ={L1_3}
+    str     x2, [x1, #24]
     dsb     sy
 
     ldr     x2, ={MAIR}
@@ -116,3 +123,5 @@ boot_l0:
     .space 4096
 boot_l1:
     .space 4096
+
+.purgem drop_to_el1

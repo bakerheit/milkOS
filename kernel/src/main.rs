@@ -5,7 +5,6 @@ extern crate alloc;
 
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
-use core::ptr::write_volatile;
 
 mod art;
 mod audio;
@@ -31,6 +30,7 @@ mod memtest;
 mod mmu;
 mod net;
 mod percpu;
+mod platform;
 mod pmm;
 mod poll;
 mod proc;
@@ -54,21 +54,20 @@ mod wm;
 
 // boot.S (the entry point) is included by mmu.rs, which owns the constants it uses.
 
-/// PL011 UART on qemu's virt machine.
 /// milkOS version, from `<repo>/VERSION` (kernel/build.rs).
 pub const VERSION: &str = env!("MILKOS_VERSION");
 
-const UART0: *mut u32 = mmu::phys_to_virt(0x0900_0000) as *mut u32;
-
+/// The console UART (uart.rs: the board's PL011, plus the Pi's mini UART when the firmware
+/// enabled it).
 struct Uart;
 
 impl Write for Uart {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for b in s.bytes() {
             if b == b'\n' {
-                unsafe { write_volatile(UART0, b'\r' as u32) };
+                uart::putc(b'\r');
             }
-            unsafe { write_volatile(UART0, b as u32) };
+            uart::putc(b);
         }
         Ok(())
     }
@@ -96,12 +95,15 @@ pub fn console_writer() -> impl Write {
 pub extern "C" fn kmain() -> ! {
     // Vectors first, so a fault anywhere after this gets a crash dump.
     exceptions::init();
+    // The Pi's UART needs setting up before the first character (a no-op on virt).
+    uart::early_init();
     percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
     display::init();
     kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
+    platform::check_dtb();
 
     gic::init();
     timer::init();

@@ -11,6 +11,7 @@
 //! * Every physical/virtual conversion goes through [`phys_to_virt`] and
 //!   [`virt_to_phys`].
 
+use crate::platform;
 use crate::pmm;
 use crate::sync::SpinLock;
 use core::arch::global_asm;
@@ -497,9 +498,6 @@ impl TableAlloc for BootTables {
     }
 }
 
-/// Everything below this is device space on qemu virt (UART, GIC, virtio-mmio,
-/// fw_cfg, PCIe low MMIO window, flash).
-const DEVICE_END: usize = 0x4000_0000;
 const BLOCK_2M: usize = 2 << 20;
 
 /// TTBR0 for kernel-only threads: an empty table (any low address faults).
@@ -533,13 +531,16 @@ fn image_sections() -> [(PhysAddr, PhysAddr, MapAttrs); 3] {
 }
 
 global_asm!(
+    include_str!("el.S"),
     include_str!("boot.S"),
     MAIR = const MAIR_VALUE,
     TCR = const TCR_BOOT,
     SCTLR_ON = const SCTLR_M | SCTLR_C | SCTLR_SA | SCTLR_I,
     SCTLR_OFF = const SCTLR_A | SCTLR_WXN,
-    BLOCK_DEV = const BOOT_BLOCK_DEV,
-    BLOCK_RAM = const BOOT_BLOCK_RAM,
+    L1_0 = const boot_block(0),
+    L1_1 = const boot_block(1),
+    L1_2 = const boot_block(2),
+    L1_3 = const boot_block(3),
 );
 
 // The TTBR1 swap must run while nothing uses TTBR1: it is called at its *physical*
@@ -566,15 +567,18 @@ global_asm!(
 pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
     let mut pool = BootTables { used: 0 };
     let mut space = AddressSpace::new(Half::Upper, &mut pool).expect("boot table pool empty");
-    space
-        .map(
-            phys_to_virt(0),
-            0,
-            DEVICE_END,
-            MapAttrs::KERNEL_DEVICE,
-            &mut pool,
-        )
-        .expect("map device region");
+    // MMIO, as the board has it (qemu virt: everything below 1 GiB; Pi: the top 64 MiB).
+    for &(start, end) in platform::CURRENT.device {
+        space
+            .map(
+                phys_to_virt(start),
+                start,
+                end - start,
+                MapAttrs::KERNEL_DEVICE,
+                &mut pool,
+            )
+            .expect("map device region");
+    }
     // RAM, W^X: everything read/write + execute-never, except the kernel image's text
     // (read + execute) and rodata (read only). The image is mapped in 4 KiB pages; the rest
     // in 2 MiB / 1 GiB blocks where alignment allows.
@@ -665,7 +669,7 @@ pub fn boot_ttbr0() -> u64 {
 }
 
 /// Map an MMIO range into the kernel address space as Device memory.
-/// The first 1 GiB of physical space is already mapped; this is for PCIe high windows etc.
+/// The board's own device ranges (platform.rs) are already mapped; this is for PCIe high windows etc.
 /// Returns the kernel virtual address.
 pub fn map_device(pa: PhysAddr, len: usize) -> Result<VirtAddr, MapError> {
     let start = pa & !(PAGE_SIZE - 1);
@@ -716,6 +720,16 @@ const TCR_BOOT: u64 = TCR_T0SZ
 /// and RAM (AttrIdx 1, inner shareable, executable at EL1).
 const BOOT_BLOCK_DEV: u64 = DESC_VALID | DESC_AF | DESC_PXN | DESC_UXN | (0b10 << 8);
 const BOOT_BLOCK_RAM: u64 = DESC_VALID | DESC_AF | DESC_UXN | (1 << 2) | (0b11 << 8);
+
+/// The boot identity map's L1 entry for GiB `i` (boot.S): the board's choice (platform.rs).
+const fn boot_block(i: usize) -> u64 {
+    let addr = (i as u64) << 30;
+    match platform::CURRENT.boot_map[i] {
+        platform::Block::None => 0,
+        platform::Block::Device => BOOT_BLOCK_DEV | addr,
+        platform::Block::Ram => BOOT_BLOCK_RAM | addr,
+    }
+}
 
 /// True if SCTLR_EL1 reports MMU, D-cache and I-cache all enabled.
 pub fn caches_on() -> bool {

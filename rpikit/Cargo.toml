@@ -1,0 +1,13 @@
+[package]
+name = "rpikit"
+version.workspace = true
+edition = "2024"
+
+# The pure parts of the Raspberry Pi (BCM2711) support, shared with the kernel
+# (kernel/src/platform.rs and its drivers): the flattened device tree reader and the kernel
+# command line, the VideoCore mailbox property messages, and the SD/SDHCI command encoding.
+# no_std, no I/O of its own: the host tests (`scripts/rpikit-test.sh`) feed it hand-written
+# device trees and scripted answers. See docs/raspberry-pi.md.
+[lib]
+bench = false
+doctest = false

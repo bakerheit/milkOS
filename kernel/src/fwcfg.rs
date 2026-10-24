@@ -5,10 +5,20 @@
 //! word at +20 kicks off the transfer).
 //!
 //! Only the bits needed to find a named file and write to it are here.
+//!
+//! The Raspberry Pi has no fw_cfg. The boot options the tests and the launcher pass as
+//! `opt/milkos/<name>` files come from the kernel command line there instead (the device tree's
+//! `/chosen/bootargs`: cmdline.txt on the SD card, `-append` under qemu): `milk.<name>=<value>`
+//! is the file `opt/milkos/<name>`; a value with spaces is quoted (`milk.net="internet=on dns=1.2.3.4:53"`).
+//! [`find_file`] and [`read_file`] serve those, so callers need not know. Writing and the
+//! `etc/ramfb` style device files do not exist there.
 
 use core::ptr::{read_volatile, write_volatile};
 
-const BASE: usize = crate::mmu::phys_to_virt(0x0902_0000);
+const BASE: usize = crate::mmu::phys_to_virt(match crate::platform::CURRENT.fwcfg {
+    Some(b) => b,
+    None => 0,
+});
 const DATA: *mut u8 = BASE as *mut u8;
 const SELECTOR: *mut u16 = (BASE + 8) as *mut u16;
 const DMA_HI: *mut u32 = (BASE + 16) as *mut u32;
@@ -65,8 +75,21 @@ fn read_u32_be() -> u32 {
     u32::from_be_bytes(b)
 }
 
-/// True if a fw_cfg device is present and supports DMA.
+/// The kernel command line of the Pi build (the device tree's `/chosen/bootargs`), as bytes.
+fn bootargs() -> &'static [u8] {
+    // SAFETY: the firmware's pointer, or 0; the blob is reserved (mem::init) and never freed.
+    match unsafe { crate::dtb::Dtb::from_addr(crate::mem::boot_dtb_ptr()) } {
+        Some(d) => d.bootargs(),
+        None => &[],
+    }
+}
+
+/// True if a fw_cfg device is present and supports DMA (the Pi: always, the command line stands
+/// in for it).
 pub fn available() -> bool {
+    if crate::platform::RASPI {
+        return true;
+    }
     select(SEL_SIGNATURE);
     let mut sig = [0u8; 4];
     read_bytes(&mut sig);
@@ -87,6 +110,16 @@ pub fn available() -> bool {
 
 /// Look up a file in the fw_cfg directory by name (e.g. `"etc/ramfb"`).
 pub fn find_file(name: &str) -> Option<File> {
+    if crate::platform::RASPI {
+        let (off, len) = rpikit::cmdline::find(bootargs(), rpikit::cmdline::option_name(name)?)?;
+        return Some(File {
+            select: u16::try_from(off).ok()?,
+            size: len as u32,
+        });
+    }
+    if crate::platform::CURRENT.fwcfg.is_none() {
+        return None;
+    }
     select(SEL_FILE_DIR);
     let count = read_u32_be();
     for _ in 0..count {
@@ -138,6 +171,9 @@ fn dma(control: u32, buf: *mut u8, len: usize) -> bool {
 
 /// Write `data` to the fw_cfg file `file` through the DMA interface.
 pub fn write_file(file: File, data: &mut [u8]) -> bool {
+    if crate::platform::RASPI {
+        return false;
+    }
     dma(
         DMA_SELECT | DMA_WRITE | ((file.select as u32) << 16),
         data.as_mut_ptr(),
@@ -148,6 +184,16 @@ pub fn write_file(file: File, data: &mut [u8]) -> bool {
 /// Read up to `buf.len()` bytes of `file` through the DMA interface.
 #[allow(dead_code)]
 pub fn read_file(file: File, buf: &mut [u8]) -> bool {
+    if crate::platform::RASPI {
+        let args = bootargs();
+        let (off, len) = (file.select as usize, file.size as usize);
+        if off.checked_add(len).is_none_or(|e| e > args.len()) {
+            return false;
+        }
+        let n = len.min(buf.len());
+        buf[..n].copy_from_slice(&args[off..off + n]);
+        return true;
+    }
     dma(
         DMA_SELECT | DMA_READ | ((file.select as u32) << 16),
         buf.as_mut_ptr(),

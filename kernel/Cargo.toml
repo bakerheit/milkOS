@@ -30,7 +30,15 @@ imgdec = { path = "../user/imgdec" }
 # text; pure, host-tested): <repo>/user/fontkit.
 fontkit = { path = "../user/fontkit" }
 
+# The Raspberry Pi pieces that are pure (device tree, command line, mailbox messages, SD
+# commands; no_std, host-tested): <repo>/rpikit.
+rpikit = { path = "../rpikit" }
+
 [features]
+# Build for the Raspberry Pi 4 (BCM2711; also qemu -M raspi4b) instead of qemu virt: the image is
+# linked for the Pi firmware's load address (0x80000) and the board table in platform.rs is the
+# Pi's. One source tree, two images (docs/raspberry-pi.md).
+raspi = []
 # Boot self-test ends with a deliberate bad-pointer read to prove the crash dump.
 crash-test = []
 # Scheduler self-test ends with a thread recursing forever, to prove the stack guard.

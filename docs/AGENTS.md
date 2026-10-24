@@ -14,8 +14,16 @@
   `scripts/memory-test.sh` = its memory (budgets that follow free memory, pressure, streaming; docs/browser.md "Memory").
   `scripts/milkfs-test.sh` = the file system's host tests (the `milkfs` crate on the Mac, seconds, no VM; docs/filesystem.md).
   `scripts/driver-crash-test.sh` = user-space drivers (rngd, soundd; docs/drivers.md) killed mid-use: restarted, audio keeps playing, no panic; `MILK_DRIVERS="rng=kernel sound=kernel"` for the in-kernel drivers only.
+  `scripts/pi-run.sh` = the Raspberry Pi 4 kernel on qemu `-M raspi4b` (docs/raspberry-pi.md); `scripts/pi-build.sh` builds its image (feature
+  `raspi`, target dir `target/pi`); `scripts/pi-qemu-test.sh` boots it five times (desktop, SD card, two RAM banks, both crash screens);
+  `scripts/usb-test.sh` = USB keyboard and mouse through qemu's xHCI; `scripts/highmem-test.sh` = RAM above 4 GiB on virt;
+  `scripts/rpikit-test.sh` = the Pi crate's host tests (device tree, mailbox, SD, PCI, USB, GENET).
   Daemons are milkd services (`/System/Settings/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.
 - qemu: `-M virt -accel hvf -cpu host -smp 4`, GICv2, 512M. Kernel boots as a flat arm64 Image (`.bin`), so x0 = DTB.
+- Two boards, one source tree: `kernel/src/platform.rs` has the table (qemu virt, Raspberry Pi 4 behind `--features raspi`);
+  board addresses go through `platform::CURRENT`, never literals. DMA memory comes from `dma::Buffer` / `pmm::alloc_dma_zeroed_as` (below
+  the board's DMA limit, synced around hand-overs); physical addresses are 64-bit and RAM can be several banks. Pi drivers live in
+  `kernel/src/rpi/`, pure parts in the `rpikit` crate (host tests).
 - macOS has no `timeout`. Run qemu in the background, sleep, read, then kill **that exact PID**. Never broad `pkill`.
 
 ## Git

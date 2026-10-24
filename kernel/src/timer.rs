@@ -235,7 +235,13 @@ pub fn init_cpu() {
 /// Set up the clock, hook the timer PPI and start the 100 Hz tick. The GIC must already be
 /// initialised; IRQs still have to be unmasked by the caller.
 pub fn init() {
-    let f = read_cntfrq();
+    let mut f = read_cntfrq();
+    // The Raspberry Pi's stock firmware sets CNTFRQ_EL0 (54 MHz); if some version does not, the counter
+    // still runs at the crystal's 54 MHz.
+    if f == 0 && crate::platform::RASPI {
+        f = 54_000_000;
+        kprintln!("[timer] CNTFRQ_EL0 is zero: assuming the Pi's 54 MHz");
+    }
     assert!(f != 0, "CNTFRQ_EL0 is zero");
     FREQ.store(f, Ordering::Relaxed);
     let now = counter();

@@ -228,10 +228,10 @@ fn dtb_cpus_spin_table() {
         release_addr: 0,
     }; MAX_CPUS];
     assert_eq!(d.cpus(&mut cpus), 4);
-    for i in 0..4 {
-        assert_eq!(cpus[i].reg, i as u64);
-        assert_eq!(cpus[i].method, EnableMethod::SpinTable);
-        assert_eq!(cpus[i].release_addr, 0xd8 + 8 * i as u64);
+    for (i, c) in cpus[..4].iter().enumerate() {
+        assert_eq!(c.reg, i as u64);
+        assert_eq!(c.method, EnableMethod::SpinTable);
+        assert_eq!(c.release_addr, 0xd8 + 8 * i as u64);
     }
     assert_eq!(d.psci_conduit(), None);
 }
@@ -1352,7 +1352,7 @@ mod pci_tests {
         assert_eq!(bridge_mem_window(0xff00_0000, 1 << 32), Some(0xfff0_ff00));
         assert_eq!(bridge_mem_window(0xff00_0000, (1 << 32) + (1 << 20)), None);
         // Closed: base 0xfff0 above limit 0x0000.
-        assert!(BRIDGE_WINDOW_CLOSED & 0xfff0 > BRIDGE_WINDOW_CLOSED >> 16);
+        const { assert!(BRIDGE_WINDOW_CLOSED & 0xfff0 > BRIDGE_WINDOW_CLOSED >> 16) };
     }
 
     #[test]

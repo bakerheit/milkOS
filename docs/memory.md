@@ -1,14 +1,17 @@
 # Memory management
 
-Files: `kernel/src/{dtb,mmu,pmm,heap,mem,memtest,spin}.rs`, header + DTB hand-off in `boot.S`.
+Files: `kernel/src/{dtb,mmu,pmm,heap,mem,memtest,spin,platform,dma}.rs` (the device tree reader is `rpikit::dtb`), header + DTB hand-off in `boot.S`.
+The board (qemu virt or the Raspberry Pi 4, docs/raspberry-pi.md) decides the load address, the device ranges and what the boot tables map.
 
 ## Boot sequence (`mem::init`, called first thing in `kmain`)
 1. `boot.S` (at the physical load address, MMU off, position independent) zeroes
-   .bss, fills two static boot tables (`boot_l0`/`boot_l1`: 1 GiB of MMIO + the first
-   1 GiB of RAM, used as both TTBR0 = identity and TTBR1 = `KERNEL_BASE + pa`), turns on
+   .bss, fills two static boot tables (`boot_l0`/`boot_l1`: four 1 GiB entries chosen by
+   the board, on virt 1 GiB of MMIO + the first 1 GiB of RAM, on the Pi RAM at 0 and MMIO at
+   0xc000_0000, used as both TTBR0 = identity and TTBR1 = `KERNEL_BASE + pa`), turns on
    MMU + D-cache + I-cache, branches to the higher half, sets sp and saves `x0` (device
-   tree pointer) in `__boot_dtb`.
-2. `dtb.rs` finds `/memory` in the blob. No DTB -> assume 512 MiB at 0x4000_0000.
+   tree pointer) in `__boot_dtb`. A core that starts at EL2 (the Pi) drops to EL1 first (`el.S`).
+2. `rpikit::dtb` finds `/memory` in the blob (all banks; `mem::ram_banks` picks the usable ones). No
+   DTB -> the board's default (virt: 512 MiB at 0x4000_0000).
 3. `mmu::init` builds the kernel's real tables (linear map of MMIO and *all* of RAM) in
    a static pool (no allocator yet), switches TTBR1 to them (through a 6-instruction
    trampoline called at its physical address) and points TTBR0 at an empty table.
@@ -31,7 +34,7 @@ the flat Image boots. The DTB sits at RAM + 128 MiB (1 MiB window).
 | VA range | TTBR | type | notes |
 |---|---|---|---|
 | `0x1000..0x1_0000_0000_0000` | 0 | user (EL0, nG, ASID) | `mmu::USER_BASE..USER_END`; page 0 unmapped |
-| `0xffff_0000_0000_0000..+0x4000_0000` | 1 | Device-nGnRE, RW, XN | UART, GIC, fw_cfg, virtio-mmio, PCIe low MMIO |
+| `0xffff_0000_0000_0000..+0x4000_0000` | 1 | Device-nGnRE, RW, XN | UART, GIC, fw_cfg, virtio-mmio, PCIe low MMIO (qemu virt; the Pi's device range is `0xfc00_0000..0x1_0000_0000`) |
 | `0xffff_0000_4000_0000..+RAM size` | 1 | Normal WB, inner shareable, RW+X | all RAM; the kernel image at `0xffff_0000_4008_0000` |
 | `0xffff_8000_0000_0000..+2 GiB` | 1 | Normal WB, RW, XN | `VMAP_BASE`: kernel stacks with guard pages |
 | everything else | | unmapped | |
@@ -156,6 +159,7 @@ for the empty table before running Rust.
   heap or stack and writing to text are SIGSEGV.
 
 ## Not done / hazards
-- Single bank of RAM (the one containing the kernel); other DTB banks are ignored.
+- RAM below the kernel's bank is ignored (the allocator spans from the kernel's bank upward; the gaps
+  between banks are reserved and not mapped).
 - The boot tables cover only the first 1 GiB of RAM; everything up to `mmu::init`
   (DTB parsing) must stay inside it. qemu puts the image and DTB there.

@@ -266,14 +266,13 @@ fn phy_start(phy: u8) {
         phy,
         MII_BCM54XX_AUXCTL,
         AUXCTL_SHDWSEL_MISC | AUXCTL_SHDWSEL_MISC << 12,
-    ) {
-        if let Some(v) = mdio_read(phy, MII_BCM54XX_AUXCTL) {
-            mdio_write(
-                phy,
-                MII_BCM54XX_AUXCTL,
-                AUXCTL_SHDWSEL_MISC | (v & !0x7007) | AUXCTL_MISC_WREN | AUXCTL_MISC_RGMII_SKEW_EN,
-            );
-        }
+    ) && let Some(v) = mdio_read(phy, MII_BCM54XX_AUXCTL)
+    {
+        mdio_write(
+            phy,
+            MII_BCM54XX_AUXCTL,
+            AUXCTL_SHDWSEL_MISC | (v & !0x7007) | AUXCTL_MISC_WREN | AUXCTL_MISC_RGMII_SKEW_EN,
+        );
     }
     mdio_write(phy, MII_ADVERTISE, ADVERTISE_ALL);
     mdio_write(phy, MII_CTRL1000, CTRL1000_ADV_FULL | CTRL1000_ADV_HALF);
@@ -521,10 +520,9 @@ fn mac_address(dtb: &rpikit::dtb::Dtb) -> [u8; 6] {
     if let Some(m) = dtb
         .find_prefix(b"ethernet@", b"local-mac-address")
         .filter(|m| m.len() == 6)
+        && m.iter().any(|&b| b != 0)
     {
-        if m.iter().any(|&b| b != 0) {
-            return [m[0], m[1], m[2], m[3], m[4], m[5]];
-        }
+        return [m[0], m[1], m[2], m[3], m[4], m[5]];
     }
     super::mailbox::board_mac().unwrap_or([0x02, 0x6d, 0x69, 0x6c, 0x6b, 0x01])
 }

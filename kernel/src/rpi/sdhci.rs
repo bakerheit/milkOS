@@ -175,8 +175,8 @@ impl Host {
         // SAFETY: the argument and block registers are written before the command starts it.
         unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
         self.w32(CMDMODE, sd::sdhci_cmd_word(c, false));
-        // Command complete (or an error).
-        let Some(status) = self.wait(INT, 1000, |v| v & (INT_CMD_DONE | INT_ERROR) != 0) else {
+        // Command complete (or an error): cards answer within microseconds, 100 ms is generous.
+        let Some(status) = self.wait(INT, 100, |v| v & (INT_CMD_DONE | INT_ERROR) != 0) else {
             let _ = self.reset(RESET_CMD | RESET_DAT);
             return Err(Fail::Timeout);
         };
@@ -189,7 +189,7 @@ impl Host {
         // R1b: the card holds DAT0 low until it is done; the controller reports it as transfer
         // complete (no data phase) or when the data is through.
         if c.data.is_none() && c.resp == Resp::R48Busy {
-            let Some(s) = self.wait(INT, 1000, |v| v & (INT_XFER_DONE | INT_ERROR) != 0) else {
+            let Some(s) = self.wait(INT, 500, |v| v & (INT_XFER_DONE | INT_ERROR) != 0) else {
                 let _ = self.reset(RESET_CMD | RESET_DAT);
                 return Err(Fail::Timeout);
             };
@@ -427,7 +427,9 @@ fn init_card(host: &Host, base_hz: u32) -> Option<Card> {
         return None;
     }
     crate::timer::delay_ms(2); // power and clock settle before the first command
-    if host.r32(STATE) & ST_CARD_PRESENT == 0 {
+    // The Pi 4's EMMC2 does not wire card detect (the card-present bit stays 0 with a card in): try
+    // regardless. Elsewhere (qemu's older controller) the bit is trustworthy and saves a timeout.
+    if host.r32(STATE) & ST_CARD_PRESENT == 0 && host.base != EMMC2 {
         return None;
     }
 

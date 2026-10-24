@@ -17,6 +17,7 @@ pub mod genet;
 pub mod led;
 pub mod mailbox;
 pub mod pcie;
+pub mod rng;
 pub mod sdhci;
 
 use core::arch::asm;
@@ -45,6 +46,7 @@ pub fn init() {
         ),
         Err(e) => crate::kprintln!("rpi: no ethernet address from the firmware ({e:?})"),
     }
+    rng::init();
     sdhci::init();
     genet::init();
 }

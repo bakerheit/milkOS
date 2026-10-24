@@ -145,7 +145,8 @@ impl Window {
 /// both multiples of 1 MiB with `end > base`: base in bits 15:4, limit (the last MiB's start) in 31:20.
 /// `None` if they do not fit 32 bits or are not aligned (the window stays closed).
 pub fn bridge_mem_window(base: u64, end: u64) -> Option<u32> {
-    if end <= base || base % (1 << 20) != 0 || end % (1 << 20) != 0 || end > 1 << 32 {
+    if end <= base || !base.is_multiple_of(1 << 20) || !end.is_multiple_of(1 << 20) || end > 1 << 32
+    {
         return None;
     }
     let limit = end - (1 << 20);

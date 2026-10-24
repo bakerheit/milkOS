@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+**Raspberry Pi 4** (docs/raspberry-pi.md)
+- milkOS boots on a Raspberry Pi 4: the same sources build a second kernel image (`--features raspi`,
+  `scripts/pi-build.sh`) linked for the firmware's load address, with the board in `kernel/src/platform.rs`
+  (UART, GIC-400, device ranges, boot tables). It starts at EL2 and drops to EL1, starts the other cores
+  through the firmware's spin table (or PSCI where the device tree says so), takes RAM from the device tree
+  (several banks, holes, memory above 4 GiB), and reads boot options from the kernel command line
+  (`milk.<name>=<value>`) where qemu virt has fw_cfg. It runs to the shell and the full desktop on qemu's
+  `-M raspi4b` (`scripts/pi-run.sh`, `scripts/pi-qemu-test.sh`).
+- Drivers written from scratch for the BCM2711: the VideoCore mailbox and the framebuffer it allocates
+  (format, pitch and address from the firmware's answer), the SD host controller (a block device, milkfs on
+  it), the hardware random generator, the ACT LED, the PCIe root complex, and the GENET Ethernet MAC with its
+  PHY (the last three, and EMMC2, untested until a real board: qemu does not model them).
+- A screen-only debugging story for a board with no serial cable: a sign-of-life band the moment the
+  framebuffer exists, the boot log mirrored on screen, a full-screen crash screen with the panic or exception dump
+  (boot log not cleared), the LED on while running and flashing after a crash.
+- USB keyboards and mice: PCI enumeration (`kernel/src/pci.rs`), an xHCI 1.1 driver, and the HID boot protocol
+  (`kernel/src/usb/`), tested on qemu virt's `qemu-xhci` with `usb-kbd` and `usb-mouse` (`scripts/usb-test.sh`);
+  `/proc/input` counts what the input layer received. Not yet: hubs, interrupts.
+- The network stack takes any NIC through `net::nic::Nic` (virtio-net or GENET); the boot RAM allocator and
+  page tables take 64-bit physical addresses and RAM banks; DMA buffers come from below the board's DMA limit
+  (`pmm::alloc_dma_zeroed_as`, `dma::Buffer`). New host-tested crate `rpikit` (device tree reader, command line,
+  mailbox messages, SD and SDHCI encoding, PCI math, xHCI TRBs and contexts, USB descriptors, HID reports,
+  GENET descriptors); new tests `pi-qemu-test`, `usb-test`, `highmem-test`, `rpikit-unit`.
+
 **Browser**
 - The Browser is now a sandboxed user-space app (`/Apps/browser`) with tabs, back/forward,
   bookmarks, find in page, zoom, forms (GET and POST), cookies (no third-party), downloads,

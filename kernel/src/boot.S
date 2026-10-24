@@ -34,6 +34,25 @@ _real_start:
     // EL2 -> EL1 if the firmware started us at EL2 (el.S).
     drop_to_el1 x0
 
+    // Whoever loaded the image may have left lines of it (or stale ones) in the data cache: clean and
+    // invalidate the whole image to the point of coherency before anything reads it with caches on.
+    // (The Raspberry Pi firmware copies the kernel in with its own agents; harmless on qemu.)
+    mrs     x2, ctr_el0
+    ubfx    x2, x2, #16, #4
+    mov     x3, #4
+    lsl     x2, x3, x2                      // data cache line size in bytes
+    adr     x0, _start
+    ldr     x1, =__image_size
+    add     x1, x0, x1
+    sub     x3, x2, #1
+    bic     x0, x0, x3
+1:  dc      civac, x0
+    add     x0, x0, x2
+    cmp     x0, x1
+    b.lo    1b
+    dsb     sy
+    isb
+
     // Zero .bss (physical addresses: MMU off). The boot tables live in it.
     adrp    x0, __bss_start
     add     x0, x0, :lo12:__bss_start

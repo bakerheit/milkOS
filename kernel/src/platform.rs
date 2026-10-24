@@ -115,7 +115,7 @@ pub const RASPI4: Platform = Platform {
     boot_map: [Block::Ram, Block::None, Block::None, Block::Device],
     // RAM above the peripherals (an 8 GB board has 4 GiB of it, from 0x1_0000_0000) is used.
     ram_limit: usize::MAX,
-    dma_limit: 0xfc00_0000,
+    dma_limit: 0xc000_0000,
     // 512 MiB is below every model's first RAM bank (a 1 GiB board loses the top of it to
     // the GPU).
     ram_fallback: (0, 512 << 20),

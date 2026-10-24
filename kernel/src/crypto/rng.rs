@@ -79,6 +79,13 @@ fn device_entropy(n: usize) -> ([u8; 64], usize) {
     let mut got = 0;
     while got < n {
         let k = vrng::read(&mut b[got..n], 100_000_000);
+        // The Pi has the SoC's generator instead of virtio-rng.
+        #[cfg(feature = "raspi")]
+        let k = if k == 0 {
+            crate::rpi::rng::read(&mut b[got..n], 100_000_000)
+        } else {
+            k
+        };
         if k == 0 {
             break;
         }
@@ -137,9 +144,13 @@ pub fn init() {
     if got == 0 {
         WEAK.store(true, Ordering::Release);
         kprintln!("[rng] ************************************************************");
-        kprintln!("[rng] WARNING: no virtio-rng device. The CSPRNG is seeded from timer");
-        kprintln!("[rng] jitter ONLY, which is weak in a VM: keys and nonces made on this");
-        kprintln!("[rng] boot may be guessable. Boot with -device virtio-rng-device.");
+        kprintln!(
+            "[rng] WARNING: no virtio-rng device or hardware generator. The CSPRNG is seeded from timer"
+        );
+        kprintln!("[rng] jitter ONLY, which is weak: keys and nonces made on this boot may be");
+        kprintln!(
+            "[rng] guessable. (qemu: boot with -device virtio-rng-device; qemu's raspi4b has none.)"
+        );
         kprintln!("[rng] ************************************************************");
     }
     SEEDED.store(true, Ordering::Release);

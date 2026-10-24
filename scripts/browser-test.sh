@@ -249,6 +249,14 @@ C="$(out "text show /Users/milk/Library/Browser/cookies")"
 echo "$C" | grep "	session	abc123$" >/dev/null && echo "$C" | grep "	track	1$" >/dev/null && ok "persistent cookies were saved" || bad "cookies file: $C"
 echo "$C" | grep -E "	(theme|sess|pixel|evil)	" >/dev/null && bad "a session, third-party or refused cookie was saved" || ok "no session or third-party cookie was saved"
 
+echo "-- the sandbox"
+ser "send:/Apps/browser/browser http://$H/ &" "wait:$PR"
+loaded "http://$(esc_re "$H")/: 200 OK" || true
+BP=$(out "/Apps/browser/browser http://$H/ &" | sed -n 's/^\[[0-9]*\] \([0-9]*\).*/\1/p' | tail -1)
+ser "send:text show /proc/${BP:-0}/status" "wait:$PR"
+CAPS="$(out "text show /proc/${BP:-0}/status" | grep -a '^Caps:' || true)"
+echo "  $CAPS"
+echo "$CAPS" | grep "net=all" >/dev/null && echo "$CAPS" | grep "spawn=0" >/dev/null && echo "$CAPS" | grep "fs=/Users/milk/Library/Browser:rw" >/dev/null && ok "it runs sandboxed (network, its own files, no spawning)" || bad "the Browser's sandbox: ${CAPS:-no Caps line (pid ${BP:-?})}"
 echo "-- view-source"
 go "$H/source"
 wait_log "^\[browser\] console log: SRCTEST page script ran" 20 && ok "a page with a script ran it" || bad "the test page's script did not run"
@@ -272,14 +280,6 @@ shot 19-source-refused
 go "$H/"
 loaded "http://$(esc_re "$H")/: 200 OK" || true
 
-echo "-- the sandbox"
-ser "send:/Apps/browser/browser http://$H/ &" "wait:$PR"
-loaded "http://$(esc_re "$H")/: 200 OK" || true
-BP=$(out "/Apps/browser/browser http://$H/ &" | sed -n 's/^\[[0-9]*\] \([0-9]*\).*/\1/p' | tail -1)
-ser "send:text show /proc/${BP:-0}/status" "wait:$PR"
-CAPS="$(out "text show /proc/${BP:-0}/status" | grep -a '^Caps:' || true)"
-echo "  $CAPS"
-echo "$CAPS" | grep "net=all" >/dev/null && echo "$CAPS" | grep "spawn=0" >/dev/null && echo "$CAPS" | grep "fs=/Users/milk/Library/Browser:rw" >/dev/null && ok "it runs sandboxed (network, its own files, no spawning)" || bad "the Browser's sandbox: ${CAPS:-no Caps line (pid ${BP:-?})}"
 clean_log | grep -i "panic" >/dev/null && bad "a panic in the serial log" || ok "no panic"
 clean_log | grep "browser.* quit unexpectedly" >/dev/null && bad "the Browser crashed" || true
 if [ "$FAIL" = 0 ]; then

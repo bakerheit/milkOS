@@ -431,7 +431,10 @@ impl Runtime {
             }
             let out = f(&b, realm);
             checkpoint(&b, realm);
-            lift_fence(&b);
+            // (A nested entry leaves the fence to the one that set it.)
+            if b.st.borrow().depth <= 1 {
+                lift_fence(&b);
+            }
             observers::note_entry_end(&b);
             let mut st = b.st.borrow_mut();
             st.depth -= 1;

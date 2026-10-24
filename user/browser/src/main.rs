@@ -433,6 +433,13 @@ impl App {
         if let Some(l) = self.tabs[ti].load.take() {
             self.fetch.cancel(l.job);
         }
+        // A script, stylesheet or picture that failed once is asked for again by the next page
+        // (a dropped connection must not keep a site's script away for the whole session).
+        if matches!(target, Target::Web(..) | Target::Source(_) | Target::Search(..)) {
+            self.scripts.retain(|_, s| !matches!(s, ImgState::Failed));
+            self.sheets.retain(|_, s| !matches!(s, ImgState::Failed));
+            self.images.retain(|_, s| !matches!(s, ImgState::Failed));
+        }
         let (url, fragment) = match target {
             Target::Internal(i) => {
                 let p = self.internal_page(i);

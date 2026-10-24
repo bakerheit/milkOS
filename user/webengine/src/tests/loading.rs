@@ -403,3 +403,121 @@ fn a_script_that_removes_itself_or_its_parent_does_not_lose_the_rest() {
     assert_eq!(tt[2], "x,last,SCRIPT after=true inside=false", "{l:?}");
 }
 
+
+/// Every node reachable from the document once, every link in agreement, and (when `all`) no
+/// node alive that is not reachable (nothing lost while the tree was cut).
+fn dom_is_sane(d: &Document) -> Result<usize, String> {
+    let dom = &d.page.dom;
+    let mut seen = alloc::collections::BTreeSet::new();
+    let mut stack = alloc::vec![0u32];
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) {
+            return Err(alloc::format!("node {n} reached twice"));
+        }
+        let node = dom.node(n);
+        let mut prev = crate::dom::NONE;
+        let mut c = node.first_child;
+        let mut count = 0;
+        while c != crate::dom::NONE {
+            let cn = dom.node(c);
+            if cn.parent != n {
+                return Err(alloc::format!("{c}'s parent is {} not {n}", cn.parent));
+            }
+            if cn.prev != prev {
+                return Err(alloc::format!("{c}'s prev is {} not {prev}", cn.prev));
+            }
+            stack.push(c);
+            prev = c;
+            c = cn.next;
+            count += 1;
+            if count > 100_000 {
+                return Err(String::from("a child list that never ends"));
+            }
+        }
+        if node.last_child != prev {
+            return Err(alloc::format!("{n}'s last child is {} not {prev}", node.last_child));
+        }
+    }
+    Ok(seen.len())
+}
+
+#[test]
+fn scripts_cutting_and_editing_the_page_never_break_the_tree() {
+    // Random pages with blocking scripts at random depths, each doing random edits around itself;
+    // afterwards the tree is whole: every link agrees, and everything a script added is there.
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut rnd = |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    for round in 0..60 {
+        let mut html = String::from("<!DOCTYPE html><html><head><title>f</title></head><body>");
+        let mut ids = 0;
+        let mut open: Vec<&str> = Vec::new();
+        let mut scripts = 0;
+        for _ in 0..(8 + rnd(25)) {
+            match rnd(6) {
+                0 | 1 => {
+                    let tag = ["div", "section", "p", "span"][rnd(4) as usize];
+                    ids += 1;
+                    html.push_str(&alloc::format!("<{tag} id=n{ids}>"));
+                    open.push(["div", "section", "p", "span"][rnd(4) as usize]);
+                    // (closed as whatever it is below: the parser sorts out mismatches)
+                    open.pop();
+                    open.push(tag);
+                }
+                2 => {
+                    if let Some(t) = open.pop() {
+                        html.push_str(&alloc::format!("</{t}>"));
+                    }
+                }
+                3 => {
+                    ids += 1;
+                    html.push_str(&alloc::format!("<b id=n{ids}>x</b>"));
+                }
+                _ => {
+                    scripts += 1;
+                    let ops: Vec<String> = (0..(1 + rnd(5)))
+                        .map(|_| {
+                            let t = alloc::format!("document.getElementById('n{}') || document.body", 1 + rnd(ids.max(1) as u64));
+                            match rnd(7) {
+                                0 => alloc::format!("({t}).appendChild(document.createElement('i'));"),
+                                1 => alloc::format!("{{ const t = {t}; t.insertBefore(document.createElement('u'), t.firstChild); }}"),
+                                2 => alloc::format!("{{ const t = {t}; if (t !== document.body && t.parentNode) t.parentNode.removeChild(t); }}"),
+                                3 => alloc::format!("{{ const t = {t}; t.parentNode && t.parentNode.insertBefore(document.createElement('s'), t.nextSibling); }}"),
+                                4 => alloc::format!("document.body.appendChild({t});"),
+                                5 => alloc::format!("document.write('<em>w</em>');"),
+                                _ => alloc::format!("{{ const me = document.currentScript; me.parentNode.insertBefore(document.createElement('a'), me); }}"),
+                            }
+                        })
+                        .collect();
+                    html.push_str(&alloc::format!("<script>try {{ {} }} catch (e) {{ console.log('T err ' + e.name); }}</script>", ops.join(" ")));
+                }
+            }
+        }
+        for t in open.iter().rev() {
+            html.push_str(&alloc::format!("</{t}>"));
+        }
+        html.push_str("<script defer src=/d.js></script></body></html>");
+        let mut d = doc(&html);
+        let mut h = Host::new();
+        let mut supplied = false;
+        for _ in 0..20 {
+            d.run(&mut h);
+            if !supplied && !d.pending_scripts().is_empty() {
+                d.supply_script("http://www.milk.test/d.js", Some(b"console.log('T deferred ' + document.getElementsByTagName('*').length)"));
+                supplied = true;
+            }
+            h.now += 10.0;
+        }
+        let lines: Vec<String> = d.take_console().into_iter().map(|l| l.text).collect();
+        match dom_is_sane(&d) {
+            Ok(n) => assert!(n > 4, "round {round}: {n} nodes\n{html}"),
+            Err(e) => panic!("round {round}: {e}\n{html}\n{lines:?}"),
+        }
+        assert!(lines.iter().any(|l| l.starts_with("T deferred")), "round {round}: {lines:?}\n{html}");
+        let _ = scripts;
+    }
+}

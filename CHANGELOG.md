@@ -62,6 +62,36 @@
   (`_self`, `_parent`, `_top`, `_blank`, a frame's name); Back and Forward step a joint history
   of the frames; clicks, the wheel, Tab, typing and find go to the right frame, and each frame
   scrolls on its own. At most 5 levels and 32 frames; a runaway frame is stopped alone.
+- Web Workers: `new Worker(url, { type, name })` for dedicated classic and module workers, each
+  on a thread of its own with its own realm, so heavy work no longer freezes the tab and
+  libraries that start workers (Comlink, inline `blob:` workers, bundlers' worker loaders)
+  run. `postMessage` both ways with the structured clone and a transfer list of `ArrayBuffer`s
+  (moved, the sender's is detached) and `MessagePort`s (they keep working across the two
+  threads), `terminate()`, `onmessage` / `onerror` / `onmessageerror`, `error` events with the
+  file, line and column, and inside the worker `importScripts`, module workers with static and
+  dynamic `import`, `close()`, `fetch` and `XMLHttpRequest` through the same network rules as
+  the page's (with the worker's own origin), timers, `console` (tagged `[worker NAME]` in the
+  panel and on the serial line), `crypto`, `URL`, `Blob`, `TextEncoder`, `Intl` and the rest of
+  the platform that is not about a document (no `window`, no `document`). A worker script comes
+  from the page's own origin, a `blob:` address the page made, or a `data:` address (an origin
+  of its own); anything else is an `error` event and a console line. Limits: 16 per page and
+  tab, 48 threads, 32 MB of heap each and 160 MB for a tab's workers together with its page,
+  8 seconds for one task (`while (true) {}` stops that worker alone, with a console line, and
+  the page keeps running), full inboxes drop messages, and navigating, closing the tab or
+  removing the frame ends a page's workers. JavaScript off means no workers. Not done:
+  `SharedWorker`, service workers, nested workers, `WebAssembly`. New `NetKind::Script`
+  (scriptnet checks it like a module), `ScriptHost::fetch_blocking`, `rt::thread::try_spawn_sized`
+  and `JoinHandle::is_finished`; `scripts/workers-test.sh` in the default set.
+- `view-source:ADDRESS` (and "View Page Source" in the menu, Cmd-Alt-U) opens the page's source
+  in a tab: the page is fetched again like any navigation, shown as plain numbered monospace
+  text (long lines wrapped, only the first 512 KB shown, and it says so), and nothing in it runs.
+- Script loading follows the HTML standard more closely: a parser-blocking script sees only the
+  page before it (`document.body` is `null` in a `<head>` script, a later element is not found,
+  `document.scripts` ends with the running script), and an external script that `document.write`
+  adds blocks the parser in order, before the page's next script, instead of running whenever
+  it arrives. `webengine/src/tests/loading.rs` checks the order of blocking, `defer`, `async`,
+  `document.write` and inserted scripts for any arrival order, scripts that throw or do not
+  compile, and the events.
 - Settings > Browser picks the search engine for words typed in the address bar: DuckDuckGo
   (Lite, still the default), DuckDuckGo (HTML), Brave Search, Startpage, Bing or Google. The
   choice is saved with the other settings and the Browser uses it from the next search, without

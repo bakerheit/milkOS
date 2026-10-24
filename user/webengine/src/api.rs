@@ -56,6 +56,10 @@
 //!   [`ScriptHost`] method `fetch_blocking` (a worker's `importScripts`), and
 //!   [`Document::script_stop_reason`]. `postMessage` to a window also writes a view of a
 //!   transferred buffer as a view (nothing changes for the ports a window message carries).
+//! - Script loading follows the standard more closely (behaviour, no new items): a parser-blocking
+//!   script sees only the part of the page before it while it runs (the rest is set aside and put
+//!   back after what the script added), and an external script `document.write` adds blocks the
+//!   parser in order, ahead of the page's next script.
 //! - Big scripts and more of the web platform in the bindings (docs/browser.md). New fields:
 //!   [`ScriptLimits::compile`] (the allowance for the syntax tree of the biggest piece of one
 //!   script, see `jsengine::Limits::max_compile_bytes`; build with `..Default::default()`),

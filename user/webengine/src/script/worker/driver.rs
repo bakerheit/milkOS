@@ -32,7 +32,7 @@ const MAX_STASH: usize = 8192;
 /// How long an `importScripts` waits for its script (ms).
 const FETCH_MS: f64 = 60_000.0;
 /// The heap is reported to the app at most this often (ms), when it changed by a lot.
-const HEAP_EVERY_MS: f64 = 250.0;
+const HEAP_EVERY_MS: f64 = 50.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Why {
@@ -334,7 +334,7 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
         // The heap, for the page's budget.
         let now = host.io.now();
         let heap = stats.heap_bytes;
-        if now - heap_at >= HEAP_EVERY_MS && heap.abs_diff(last_heap) >= (256 << 10) {
+        if now - heap_at >= HEAP_EVERY_MS && heap.abs_diff(last_heap) >= (512 << 10) {
             last_heap = heap;
             heap_at = now;
             host.io.send(FromWorker::Heap(heap));

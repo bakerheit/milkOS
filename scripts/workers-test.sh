@@ -24,6 +24,8 @@
 #   * leave.html      navigating away ends the page's workers; frame.html: so does removing the
 #                     frame that made one
 #   * flood.html      5000 messages each way, in order
+#   * deep.html       a worker (small stack) that recurses, nests and parses too deep: errors in
+#                     script, no crash
 #   * runaway.html    a worker that never returns is stopped alone: the page keeps ticking, the
 #                     other worker answers
 #   * the JavaScript switch (the toolbar's menu): off, no worker script is ever requested
@@ -247,6 +249,17 @@ echo "-- a lot of messages"
 go "$H/flood.html"
 finish_of flood 60 && ok "flood.html ran" || bad "flood.html did not finish: $(log_lines | grep -a 'WRKTEST flood\|console' | tail -3)"
 mt flood end "ordered=true count=5000"
+fi
+if want deep; then
+echo "-- a worker that nests too deep (its thread has a small stack)"
+go "$H/deep.html"
+finish_of deep 60 && ok "deep.html ran to its end (the worker did not crash)" || bad "deep.html did not finish: $(log_lines | grep -a 'WRKTEST deep\|console\|panic' | tail -5)"
+mtw deep alive deep
+mt deep alive yes
+for what in recursion json eval regexp clone stringify post closures; do
+  mtr deep $what '^(RangeError|SyntaxError|DataCloneError)$'
+done
+shot workers-11-deep
 fi
 if want runaway; then
 echo "-- a worker that never stops"

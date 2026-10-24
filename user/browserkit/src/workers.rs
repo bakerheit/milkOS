@@ -77,6 +77,9 @@ impl Default for Limits {
     }
 }
 
+/// The least heap a worker is started with, however many its tab has.
+pub const MIN_WORKER_HEAP: usize = 8 << 20;
+
 /// What the hub needs of a worker's thread.
 pub trait Backend {
     type Handle;
@@ -132,6 +135,8 @@ struct Entry<H> {
     name: String,
     url: String,
     handle: H,
+    /// The heap limit it was started with, and the heap it last said it had.
+    heap_limit: usize,
     heap: usize,
     /// A message was dropped because the inbox was full (said once).
     warned: bool,
@@ -196,11 +201,22 @@ impl<B: Backend> Hub<B> {
             return Err(Refusal::TooManyThreads(self.limits.threads));
         }
         let (id, name, url) = (spawn.id, spawn.name.clone(), spawn.url.clone());
-        let boot = WorkerBoot { spawn, limits: self.limits.worker, user_agent: self.user_agent.clone(), tz_offset: self.tz };
+        // What the tab's workers may hold in all is shared out as they start: the first ones
+        // get the full heap, later ones what is left (but never less than 8 MB), so sixteen
+        // workers cannot hold sixteen full heaps.
+        let promised: usize = self.workers.values().filter(|e| e.owner.tab == owner.tab).map(|e| e.heap_limit).sum();
+        let left = (self.limits.tab_heap / 2).saturating_sub(promised);
+        let heap_limit = self.limits.worker.heap.min(left.max(MIN_WORKER_HEAP)).max(1 << 20);
+        let boot = WorkerBoot {
+            spawn,
+            limits: WorkerLimits { heap: heap_limit, ..self.limits.worker },
+            user_agent: self.user_agent.clone(),
+            tz_offset: self.tz,
+        };
         let Some(handle) = self.backend.spawn(boot) else {
             return Err(Refusal::NoThread);
         };
-        self.workers.insert(id, Entry { owner, name, url, handle, heap: 0, warned: false, posted: 0 });
+        self.workers.insert(id, Entry { owner, name, url, handle, heap_limit, heap: 0, warned: false, posted: 0 });
         Ok(())
     }
 
@@ -542,6 +558,18 @@ mod tests {
         assert_eq!((b.spawn.id, b.user_agent.as_str(), b.tz_offset), (7, "UA", 60));
         assert_eq!(b.limits, WorkerLimits::default());
         assert_eq!(h.len(), 1);
+        // The tab's heap is shared out: the first workers get 32 MB, later ones less.
+        for i in 0..15 {
+            h.spawn(A, spawn_of(100 + i, "w")).unwrap();
+        }
+        let heaps: Vec<usize> = h.backend.boots.iter().map(|b| b.limits.heap >> 20).collect();
+        assert_eq!(&heaps[..3], [32, 32, 16]);
+        assert!(heaps.iter().all(|&m| m >= 8), "{heaps:?}");
+        assert!(heaps.iter().sum::<usize>() <= 80 + 8 * 16, "{heaps:?}");
+        // Another tab starts afresh.
+        let b2 = Owner { tab: 2, epoch: 1, frame: 0 };
+        h.spawn(b2, spawn_of(500, "w")).unwrap();
+        assert_eq!(h.backend.boots.last().unwrap().limits.heap, 32 << 20);
         assert_eq!(h.owner_of(7), Some(A));
     }
 

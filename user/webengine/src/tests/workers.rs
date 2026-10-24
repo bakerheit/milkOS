@@ -926,3 +926,18 @@ fn hostile_calls_from_script_do_not_panic() {
     assert!(has_line(&t, "threw true"), "{t:?}\n{}", show(&s));
     assert!(s.spawns.len() <= 16 + 1, "{}", s.spawns.len());
 }
+
+#[test]
+fn a_worker_on_a_small_stack_gets_errors_for_what_nests_too_deep_not_a_crash() {
+    let src = "// Things that eat native stack: a worker has a thread of its own with a smaller stack than the page's,\n// so the engine's limits must hold (an error in script, never a crash).\nfunction report(group, name, value) { console.log('T ' + group + ' ' + name + ' ' + value); }\nfunction rec(n) { return rec(n + 1) + 1; }\ntry { rec(0); report('deep', 'recursion', 'no error?'); } catch (e) { report('deep', 'recursion', e.name); }\nvar nested = '[' .repeat(4000) + ']'.repeat(4000);\ntry { JSON.parse(nested); report('deep', 'json', 'parsed'); } catch (e) { report('deep', 'json', e.name); }\ntry { eval(nested); report('deep', 'eval', 'ran'); } catch (e) { report('deep', 'eval', e.name); }\ntry { new RegExp('('.repeat(3000) + 'a' + ')'.repeat(3000)).test('a'); report('deep', 'regexp', 'ran'); } catch (e) { report('deep', 'regexp', e.name); }\nvar o = {}; var cur = o; for (var i = 0; i < 20000; i++) { cur.n = {}; cur = cur.n; }\ntry { structuredClone(o); report('deep', 'clone', 'cloned'); } catch (e) { report('deep', 'clone', e.name); }\ntry { JSON.stringify(o); report('deep', 'stringify', 'done'); } catch (e) { report('deep', 'stringify', e.name); }\ntry { postMessage(o); report('deep', 'post', 'sent'); } catch (e) { report('deep', 'post', e.name); }\nvar f = function () {}; for (var j = 0; j < 3000; j++) { f = (function (g) { return function () { return g() + 1; }; })(f); }\ntry { f(); report('deep', 'closures', 'ran'); } catch (e) { report('deep', 'closures', e.name); }\nreport('deep', 'alive', 'yes');\npostMessage('end');\n";
+    let mut s = Sim::new(
+        "const w = new Worker('deep.js', {name: 'deep'}); w.onmessage = (e) => console.log('T done');",
+        vec![file("http://www.milk.test/deep.js", src)],
+    );
+    s.limits.stack = 2 << 20;
+    let t = s.finish();
+    assert!(has_line(&t, "deep alive yes"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "deep recursion RangeError"), "{t:?}");
+    assert!(t.iter().any(|l| l == "deep post DataCloneError" || l == "deep post RangeError"), "{t:?}");
+    assert!(s.closed.is_empty(), "the worker is still running: {:?}", s.closed);
+}

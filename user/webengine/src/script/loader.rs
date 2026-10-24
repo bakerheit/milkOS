@@ -2,7 +2,10 @@
 //!
 //! The page is parsed whole before any script runs (there is no pausing parser and so no
 //! `document.write` into the stream: the bindings insert written markup after the running
-//! script instead). Then, in order:
+//! script instead). A parser-blocking script is run with the rest of the tree set aside
+//! (`Dom::fence_after`), so it sees the page as far as a parser would have got; the external
+//! scripts `document.write` adds ([`When::Written`]) block the parser in order, ahead of the
+//! page's next script. Then, in order:
 //!
 //! 1. Parser-inserted scripts that block (inline ones, and external ones with neither
 //!    `defer` nor `async`), in tree order, each waiting for its body.

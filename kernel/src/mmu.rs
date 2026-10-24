@@ -498,7 +498,6 @@ impl TableAlloc for BootTables {
     }
 }
 
-const BLOCK_2M: usize = 2 << 20;
 
 /// TTBR0 for kernel-only threads: an empty table (any low address faults).
 #[repr(C, align(4096))]
@@ -564,7 +563,7 @@ global_asm!(
 ///
 /// # Safety
 /// Call once, on the boot CPU, before the frame allocator (tables come from the boot pool).
-pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
+pub unsafe fn init(banks: &[crate::dtb::MemRange]) {
     let mut pool = BootTables { used: 0 };
     let mut space = AddressSpace::new(Half::Upper, &mut pool).expect("boot table pool empty");
     // MMIO, as the board has it (qemu virt: everything below 1 GiB; Pi: the top 64 MiB).
@@ -581,8 +580,8 @@ pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
     }
     // RAM, W^X: everything read/write + execute-never, except the kernel image's text
     // (read + execute) and rodata (read only). The image is mapped in 4 KiB pages; the rest
-    // in 2 MiB / 1 GiB blocks where alignment allows.
-    let ram_end = (ram_base + ram_size).next_multiple_of(BLOCK_2M);
+    // in 2 MiB / 1 GiB blocks where alignment allows. Only the banks that exist are mapped
+    // (a gap between two is not memory: touching it could fault the bus).
     let secs = image_sections();
     let (img_start, img_end) = (secs[0].0, secs[2].1);
     let mut map = |start: PhysAddr, end: PhysAddr, attrs: MapAttrs| {
@@ -592,11 +591,18 @@ pub unsafe fn init(ram_base: PhysAddr, ram_size: usize) {
                 .expect("map RAM");
         }
     };
-    map(ram_base, img_start, MapAttrs::KERNEL_DATA);
-    for (a, b, attrs) in secs {
-        map(a, b, attrs);
+    for bank in banks {
+        let (base, end) = (bank.base, bank.base + bank.size);
+        if (base..end).contains(&img_start) {
+            map(base, img_start, MapAttrs::KERNEL_DATA);
+            for (a, b, attrs) in secs {
+                map(a, b, attrs);
+            }
+            map(img_end, end, MapAttrs::KERNEL_DATA);
+        } else {
+            map(base, end, MapAttrs::KERNEL_DATA);
+        }
     }
-    map(img_end, ram_end, MapAttrs::KERNEL_DATA);
     let root = space.root() as u64;
     KERNEL_TTBR1.store(root, core::sync::atomic::Ordering::Relaxed);
     // SAFETY: called at its physical address through the boot identity map in TTBR0; it

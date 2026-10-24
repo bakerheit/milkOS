@@ -3,10 +3,11 @@
 //! [`take_framebuffer`]; if it never can, [`console_fallback`] puts the old text console
 //! mirroring `kprintln!` on screen instead.
 //!
-//! Two backends. virtio-gpu (`virtio::gpu`) when qemu has `-device virtio-gpu-device`: frames
+//! Three backends. virtio-gpu (`virtio::gpu`) when qemu has `-device virtio-gpu-device`: frames
 //! reach the screen only when presented, whole, so nothing tears. ramfb otherwise (old command
 //! lines): qemu scans the buffer out of RAM whenever it likes, [`wait`] and [`present`] are
-//! no-ops. Whoever writes framebuffer pixels follows one protocol, which suits both:
+//! no-ops. On the Raspberry Pi the firmware's framebuffer (`rpi::fb`, through the mailbox),
+//! which behaves like ramfb. Whoever writes framebuffer pixels follows one protocol, which suits both:
 //! [`wait`], draw, then [`present`] the rects drawn (or [`sync`] for the whole screen).
 
 use core::sync::atomic::{AtomicU8, Ordering};
@@ -26,6 +27,8 @@ const SPLASH_MS: u64 = 1000;
 const NONE: u8 = 0;
 const RAMFB: u8 = 1;
 const GPU: u8 = 2;
+/// The Pi's mailbox framebuffer.
+const RPIFB: u8 = 3;
 static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 
 fn backend() -> u8 {
@@ -37,6 +40,12 @@ static FRAMEBUFFER: SpinLock<Option<Surface<'static>>> = SpinLock::new(None);
 
 /// Initialise the display. Does nothing (and logs to the UART only) without a display device.
 pub fn init() {
+    #[cfg(feature = "raspi")]
+    if let Some(fb) = crate::rpi::fb::init(WIDTH, HEIGHT) {
+        BACKEND.store(RPIFB, Ordering::Release);
+        let (w, h) = crate::rpi::fb::size();
+        return finish_init(fb, "rpi mailbox framebuffer", w, h);
+    }
     let (fb, name) = match gpu::find().and_then(|t| gpu::init(t, WIDTH, HEIGHT)) {
         Some(fb) => {
             BACKEND.store(GPU, Ordering::Release);
@@ -53,10 +62,14 @@ pub fn init() {
             }
         },
     };
-    let mut fb = fb;
+    finish_init(fb, name, WIDTH, HEIGHT)
+}
+
+/// The splash, the framebuffer parked for the desktop and the log line.
+fn finish_init(mut fb: Surface<'static>, name: &str, w: usize, h: usize) {
     splash::show(&mut fb, SPLASH_MS, None);
     *FRAMEBUFFER.lock() = Some(fb);
-    kprintln!("display: {name} {WIDTH}x{HEIGHT} XRGB8888, splash up until the desktop starts");
+    kprintln!("display: {name} {w}x{h} XRGB8888, splash up until the desktop starts");
 }
 
 /// Hand the framebuffer to its one owner (the compositor). `None` if there is no display or it
@@ -81,6 +94,8 @@ pub fn console_fallback(mut fb: Surface<'static>) {
 pub fn size() -> (usize, usize) {
     match backend() {
         GPU => gpu::framebuffer().map_or((WIDTH, HEIGHT), |(_, w, h)| (w, h)),
+        #[cfg(feature = "raspi")]
+        RPIFB => crate::rpi::fb::size(),
         _ => ramfb::size(),
     }
 }
@@ -91,6 +106,8 @@ pub fn framebuffer() -> Option<*mut u32> {
     match backend() {
         GPU => gpu::framebuffer().map(|(p, _, _)| p),
         RAMFB => ramfb::framebuffer(),
+        #[cfg(feature = "raspi")]
+        RPIFB => crate::rpi::fb::framebuffer(),
         _ => None,
     }
 }
@@ -102,6 +119,8 @@ pub fn set_mode(w: usize, h: usize) -> Option<Surface<'static>> {
     match backend() {
         GPU => gpu::set_mode(w, h),
         RAMFB => ramfb::set_mode(w, h),
+        #[cfg(feature = "raspi")]
+        RPIFB => crate::rpi::fb::set_mode(w, h),
         _ => None,
     }
 }

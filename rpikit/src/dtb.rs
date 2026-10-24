@@ -54,6 +54,54 @@ pub enum Conduit {
     Smc,
 }
 
+/// The RAM banks to use out of what the tree listed: sorted by address, rounded in to whole
+/// `page`s, nothing at or above `limit`, overlapping or touching banks merged, and only the bank
+/// that holds `kstart` and those above it (the allocator covers one span upwards from the
+/// kernel). Returns the banks and how many; none if no bank holds `kstart`.
+pub fn usable_banks(
+    tree: &[MemRange],
+    kstart: usize,
+    limit: usize,
+    page: usize,
+) -> ([MemRange; MAX_BANKS], usize) {
+    let mut banks = [MemRange { base: 0, size: 0 }; MAX_BANKS];
+    let mut n = 0;
+    for b in tree {
+        let base = b.base.checked_next_multiple_of(page);
+        let end = b.base.checked_add(b.size).map(|e| e.min(limit) / page * page);
+        let (Some(base), Some(end)) = (base, end) else {
+            continue;
+        };
+        if end > base && n < MAX_BANKS {
+            banks[n] = MemRange {
+                base,
+                size: end - base,
+            };
+            n += 1;
+        }
+    }
+    banks[..n].sort_unstable_by_key(|b| b.base);
+    // Merge what overlaps or touches.
+    let mut m = 0;
+    for i in 0..n {
+        if m > 0 && banks[i].base <= banks[m - 1].base + banks[m - 1].size {
+            let end = (banks[i].base + banks[i].size).max(banks[m - 1].base + banks[m - 1].size);
+            banks[m - 1].size = end - banks[m - 1].base;
+        } else {
+            banks[m] = banks[i];
+            m += 1;
+        }
+    }
+    let Some(first) = banks[..m]
+        .iter()
+        .position(|b| (b.base..b.base + b.size).contains(&kstart))
+    else {
+        return (banks, 0);
+    };
+    banks.copy_within(first..m, 0);
+    (banks, m - first)
+}
+
 pub struct Dtb {
     base: usize,
     total_size: usize,

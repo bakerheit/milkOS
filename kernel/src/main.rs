@@ -36,6 +36,8 @@ mod poll;
 mod proc;
 mod pty;
 mod ramfb;
+#[cfg(feature = "raspi")]
+mod rpi;
 mod sched;
 mod selftest;
 mod sink;
@@ -108,6 +110,8 @@ pub extern "C" fn kmain() -> ! {
     gic::init();
     timer::init();
     uart::init();
+    #[cfg(feature = "raspi")]
+    rpi::init();
     udrv::init_policy();
     // Which of the slow boot self-tests run (opt/milkos/selftest; by default none).
     selftest::read_option();

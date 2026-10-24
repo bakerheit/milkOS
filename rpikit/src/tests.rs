@@ -616,3 +616,62 @@ fn sd_clock_dividers() {
     assert_eq!(sd::clock_control(1023), (0xff << 8) | (3 << 6) | 1);
     assert_eq!(sd::clock_control(0), 1);
 }
+
+// ---- RAM banks ---------------------------------------------------------------------------
+
+fn mr(base: usize, size: usize) -> MemRange {
+    MemRange { base, size }
+}
+
+#[test]
+fn banks_pi4_gb4() {
+    // 4 GB Pi: 948 MiB low, the rest from 1 GiB to the peripherals; the kernel at 0x80000.
+    let tree = [mr(0, 0x3b40_0000), mr(0x4000_0000, 0xbc00_0000)];
+    let (b, n) = crate::dtb::usable_banks(&tree, 0x8_0000, 0xfc00_0000, 4096);
+    assert_eq!(n, 2);
+    assert_eq!((b[0].base, b[0].size), (0, 0x3b40_0000));
+    assert_eq!((b[1].base, b[1].size), (0x4000_0000, 0xbc00_0000));
+}
+
+#[test]
+fn banks_clip_at_limit_and_ignore_high_memory() {
+    // 8 GB Pi: a bank above 4 GiB is not used; one crossing the limit is cut at it.
+    let tree = [
+        mr(0, 0x3b40_0000),
+        mr(0x4000_0000, 0xc000_0000),
+        mr(0x1_0000_0000, 0x1_0000_0000),
+    ];
+    let (b, n) = crate::dtb::usable_banks(&tree, 0x8_0000, 0xfc00_0000, 4096);
+    assert_eq!(n, 2);
+    assert_eq!(b[1].base + b[1].size, 0xfc00_0000);
+}
+
+#[test]
+fn banks_below_the_kernel_are_dropped_and_order_is_fixed() {
+    let tree = [mr(0x8000_0000, 0x1000_0000), mr(0x4000_0000, 0x1000_0000)];
+    let (b, n) = crate::dtb::usable_banks(&tree, 0x4008_0000, usize::MAX, 4096);
+    assert_eq!(n, 2);
+    assert_eq!(b[0].base, 0x4000_0000);
+    // Kernel in the upper bank: the lower one goes.
+    let (b, n) = crate::dtb::usable_banks(&tree, 0x8008_0000, usize::MAX, 4096);
+    assert_eq!(n, 1);
+    assert_eq!(b[0].base, 0x8000_0000);
+}
+
+#[test]
+fn banks_hostile_input() {
+    // Overlap and touching banks merge; nonsense (zero size, wrap-around, kernel in no bank)
+    // gives nothing usable and never panics.
+    let tree = [mr(0, 0x2000_0000), mr(0x1000_0000, 0x2000_0000), mr(0x3000_0000, 0x1000)];
+    let (b, n) = crate::dtb::usable_banks(&tree, 0x8_0000, usize::MAX, 4096);
+    assert_eq!(n, 1);
+    assert_eq!((b[0].base, b[0].size), (0, 0x3000_1000));
+    assert_eq!(crate::dtb::usable_banks(&[mr(0, 0)], 0x8_0000, usize::MAX, 4096).1, 0);
+    assert_eq!(crate::dtb::usable_banks(&[mr(usize::MAX - 10, 100)], 0x8_0000, usize::MAX, 4096).1, 0);
+    assert_eq!(crate::dtb::usable_banks(&[mr(0x4000_0000, 0x1000_0000)], 0x8_0000, usize::MAX, 4096).1, 0);
+    assert_eq!(crate::dtb::usable_banks(&[], 0x8_0000, usize::MAX, 4096).1, 0);
+    // Unaligned edges round inwards.
+    let (b, n) = crate::dtb::usable_banks(&[mr(0x100, 0x3000)], 0x1000, usize::MAX, 4096);
+    assert_eq!(n, 1);
+    assert_eq!((b[0].base, b[0].size), (0x1000, 0x2000));
+}

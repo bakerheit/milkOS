@@ -129,6 +129,8 @@ js_files!(
     "encoding.js",
     "clone.js",
     "private.js",
+    "weakref.js",
+    "lazy.js",
 );
 
 #[test]

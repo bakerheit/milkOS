@@ -1225,6 +1225,7 @@ impl<'a> Resolver<'a> {
                 Ok(())
             }
             ExprKind::Num(_)
+            | ExprKind::BigInt
             | ExprKind::Str(_)
             | ExprKind::Regex(..)
             | ExprKind::This

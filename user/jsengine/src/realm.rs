@@ -51,6 +51,7 @@ intrinsics! {
     generator_function_proto, async_function_proto, async_generator_proto,
     async_generator_function_proto, async_from_sync_iterator_proto, promise_proto,
     regexp_proto, date_proto, map_proto, set_proto, weakmap_proto, weakset_proto,
+    weakref_proto, finreg_proto,
     object_ctor, function_ctor, array_ctor, promise_ctor, error_ctor, regexp_ctor,
         array_values, array_for_each, throw_type_error, eval_fn, promise_then,
     generator_function_ctor, async_function_ctor, array_iter_next, regexp_exec,
@@ -151,6 +152,9 @@ pub(crate) struct SymTable {
     pub replace: SymId,
     pub search: SymId,
     pub split: SymId,
+    /// Private names (hidden from script) for WeakRef's target and FinalizationRegistry's tokens.
+    pub weakref_target: SymId,
+    pub finreg_tokens: SymId,
 }
 
 /// Where the last throw happened (for reports of thrown non-errors).
@@ -225,6 +229,14 @@ impl Realm {
         let mut heap = Heap::new(options.limits.max_heap_bytes);
         let names: Vec<StrId> = NAME_STRS.iter().map(|s| heap.intern_str(s)).collect();
         let char_cache: Vec<StrId> = (0u16..256).map(|c| heap.intern(&[c])).collect();
+        let weakref_target = {
+            let s = heap.intern_str("[[WeakRefTarget]]");
+            heap.new_private_sym(s)
+        };
+        let finreg_tokens = {
+            let s = heap.intern_str("[[FinalizationTokens]]");
+            heap.new_private_sym(s)
+        };
         let mut mk = |d: &str| {
             let s = heap.intern_str(d);
             heap.new_sym(Some(s))
@@ -243,6 +255,8 @@ impl Realm {
             replace: mk("Symbol.replace"),
             search: mk("Symbol.search"),
             split: mk("Symbol.split"),
+            weakref_target,
+            finreg_tokens,
         };
         let seed = options.random_seed;
         let mut r = Realm {

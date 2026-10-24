@@ -143,3 +143,12 @@ test('ES2023 array copies, groupBy, withResolvers, well-formed strings', functio
   assertEq('a\ud800'.isWellFormed(), false); assertEq('ab'.isWellFormed(), true);
   assertEq('a\ud800b'.toWellFormed(), 'a�b'); assertEq('x😀'.toWellFormed(), 'x😀');
 });
+test('BigInt literals are read but not run', function () {
+  var f = function () { return 10n; };
+  assertThrows(TypeError, f);
+  assertEq(typeof BigInt, 'undefined');
+  var guarded = function () { if (typeof BigInt === 'function') return 0xffn + 1n; return 'no bigint'; };
+  assertEq(guarded(), 'no bigint');
+  assertEq(0x1f + 1, 32);
+  assertEq(1e3, 1000);
+});

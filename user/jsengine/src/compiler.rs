@@ -2618,6 +2618,12 @@ impl<'a> Compiler<'a> {
                     }
                 }
             }
+            ExprKind::BigInt => {
+                self.mark(e.pos);
+                let c = self.const_str("BigInt is not supported");
+                self.emit(Op::Unsupported(c));
+                self.emit(Op::Undef);
+            }
             ExprKind::NumArray(v) => {
                 self.mark(e.pos);
                 let ci = self.add_const(Const::Nums(v.as_slice().into()));

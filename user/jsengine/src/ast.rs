@@ -113,6 +113,8 @@ pub(crate) struct TemplateParts {
 
 pub(crate) enum ExprKind {
     Num(f64),
+    /// A BigInt literal (`10n`): there are no BigInts, so evaluating it throws a TypeError.
+    BigInt,
     Str(Vec<u16>),
     Template(Box<TemplateParts>, Vec<Expr>),
     Tagged(Box<Expr>, Box<TemplateParts>, Vec<Expr>),

@@ -19,6 +19,7 @@ pub(crate) mod promise;
 pub(crate) mod regexp;
 pub(crate) mod string;
 pub(crate) mod typedarray;
+pub(crate) mod weakref;
 
 use alloc::vec::Vec;
 
@@ -206,7 +207,9 @@ pub(crate) fn init(r: &mut Realm) {
         map_proto,
         set_proto,
         weakmap_proto,
-        weakset_proto
+        weakset_proto,
+        weakref_proto,
+        finreg_proto
     );
     // Wrapper prototypes are themselves wrappers.
     let e = r.nstr(N::empty);
@@ -252,5 +255,6 @@ pub(crate) fn init(r: &mut Realm) {
     encoding::init(r);
     clone::init(r);
     es2023::init(r);
+    weakref::init(r);
     global::init(r);
 }

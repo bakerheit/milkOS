@@ -175,6 +175,8 @@ pub(crate) enum Op {
     NewArray(u32),
     /// arr v → arr
     ArrPush,
+    /// Throws a TypeError with the message of string constant n (a feature that is not there).
+    Unsupported(u32),
     /// arr → arr (a hole)
     ArrHole,
     /// → a new array of the numbers (or strings) of consts[i]

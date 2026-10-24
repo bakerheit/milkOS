@@ -233,7 +233,7 @@ impl<'a> Parser<'a> {
             Tok::Str(s, _) => s.len() as u64 * 2 + 24,
             Tok::Template(c, r, _) => (c.as_ref().map_or(0, |c| c.len()) + r.len()) as u64 * 2 + 48,
             Tok::Regex(a, b) => (a.len() + b.len()) as u64 * 2 + 48,
-            Tok::BigInt => return self.unexpected(),
+            Tok::BigInt => 0,
             _ => 0,
         };
         self.mem += TOKEN_COST + extra;
@@ -3096,6 +3096,12 @@ impl<'a> Parser<'a> {
                 }
                 self.advance()?;
                 ExprKind::Num(n)
+            }
+            Tok::BigInt => {
+                // Read, but there are no BigInts: evaluating one throws (a script that only
+                // has them on paths it guards with `typeof BigInt` loads and runs).
+                self.advance()?;
+                ExprKind::BigInt
             }
             Tok::Str(s, legacy) => {
                 if *legacy && self.ctx.strict {

@@ -1672,6 +1672,13 @@ impl Realm {
                         }
                     }
                 }
+                Op::Unsupported(c) => {
+                    let msg = match code.consts.get(c as usize) {
+                        Some(Const::Str(s)) => self.rust_string(*s),
+                        _ => alloc::string::String::from("not supported"),
+                    };
+                    tri!(Err(self.type_error(&msg)));
+                }
                 Op::ConstArray(ci) => {
                     let n = match code.consts.get(ci as usize) {
                         Some(Const::Nums(v)) => v.len(),

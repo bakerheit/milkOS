@@ -346,10 +346,12 @@ pub fn prepare_inserted(b: &Rc<Bridge>, r: &mut Realm, s: NodeId) {
         super::modrt::start_work(b, r);
     }
     if let Some(i) = idx {
-        let inline = matches!(
-            b.st.borrow().loader.scripts[i].body,
-            super::loader::Body::Ready(_)
-        );
+        // (An inline script written behind an external one waits for it.)
+        let inline = {
+            let st = b.st.borrow();
+            let sc = &st.loader.scripts[i];
+            matches!(sc.body, super::loader::Body::Ready(_)) && sc.when != super::loader::When::Written
+        };
         if inline {
             super::run_script(b, r, i, false);
         }
@@ -638,8 +640,12 @@ pub fn document_write(b: &Rc<Bridge>, r: &mut Realm, html: &str) -> JsResult<()>
         c = p.dom.node(c).next;
     }
     for s in scripts {
-        b.st(r)?.loader.unmark_started(s);
+        let mut st = b.st(r)?;
+        st.loader.unmark_started(s);
+        st.loader.writing = true;
+        drop(st);
         prepare_inserted(b, r, s);
+        b.st(r)?.loader.writing = false;
     }
     Ok(())
 }

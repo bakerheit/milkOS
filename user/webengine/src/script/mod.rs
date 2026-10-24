@@ -431,6 +431,7 @@ impl Runtime {
             }
             let out = f(&b, realm);
             checkpoint(&b, realm);
+            lift_fence(&b);
             observers::note_entry_end(&b);
             let mut st = b.st.borrow_mut();
             st.depth -= 1;
@@ -476,6 +477,7 @@ impl Runtime {
                 if let Some(i) = next {
                     run_script(b, r, i, true);
                     checkpoint(b, r);
+                    lift_fence(b);
                     did = true;
                     if b.st.borrow().stopped {
                         return did;
@@ -678,6 +680,35 @@ fn key_target(page: &Page) -> NodeId {
     if b != NONE { b } else { 0 }
 }
 
+/// Set aside what follows `node` in the page (see [`crate::dom::Dom::fence_after`]).
+fn set_fence(b: &Rc<Bridge>, node: NodeId) {
+    if node == NONE {
+        return;
+    }
+    let Some(p) = b.page() else { return };
+    if !p.dom.is_connected(node) {
+        return;
+    }
+    let f = p.dom.fence_after(node);
+    if let Ok(mut st) = b.st.try_borrow_mut() {
+        st.fence = f;
+    }
+}
+
+/// Bring back what [`set_fence`] set aside.
+fn lift_fence(b: &Rc<Bridge>) {
+    let f = match b.st.try_borrow_mut() {
+        Ok(mut st) => core::mem::take(&mut st.fence),
+        Err(_) => return,
+    };
+    if f.is_empty() {
+        return;
+    }
+    if let Some(p) = b.page() {
+        p.dom.unfence(f);
+    }
+}
+
 /// The worker called `close()`: nothing more of its queues runs.
 fn worker_closing(b: &Bridge) -> bool {
     b.st.try_borrow().map(|st| st.worker.as_ref().is_some_and(|w| w.closing)).unwrap_or(false)
@@ -802,12 +833,12 @@ pub(crate) fn call_report(
 /// Run (or fail) script `i` of the loader. `top`: from the event loop (not from inside a
 /// native, where the microtask checkpoint must wait).
 pub(crate) fn run_script(b: &Rc<Bridge>, r: &mut Realm, i: usize, top: bool) {
-    let (node, src, body, module) = {
+    let (node, src, body, module, when) = {
         let mut st = b.st.borrow_mut();
         let s = &mut st.loader.scripts[i];
         s.done = true;
         let body = core::mem::replace(&mut s.body, Body::Failed);
-        (s.node, s.src.clone(), body, s.module)
+        (s.node, s.src.clone(), body, s.module, s.when)
     };
     if module {
         modrt::run_script(b, r, i, top);
@@ -822,6 +853,11 @@ pub(crate) fn run_script(b: &Rc<Bridge>, r: &mut Realm, i: usize, top: bool) {
             });
             let prev = core::mem::replace(&mut b.st.borrow_mut().current_script, node);
             b.st.borrow_mut().stats.scripts += 1;
+            // The parser has got as far as this script: what follows it in the page is not
+            // there yet (until the script, and the microtasks after it, are done).
+            if top && when == loader::When::Blocking && b.worker_free() {
+                set_fence(b, node);
+            }
             if let Err(e) = r.eval(&text, &file) {
                 report(b, r, &e, "");
             }

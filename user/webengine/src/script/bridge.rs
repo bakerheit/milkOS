@@ -191,6 +191,8 @@ pub struct State {
     pub time_origin: f64,
     /// Whether IntersectionObserver / ResizeObserver want the layout looked at again.
     pub watch: super::observers::LayoutWatch,
+    /// The part of the tree set aside while a parser-blocking script runs ([`crate::dom::Dom::fence_after`]).
+    pub fence: Vec<crate::dom::Fence>,
     /// This realm is a dedicated worker's (script/worker).
     pub worker: Option<alloc::boxed::Box<super::worker::WorkerState>>,
     /// The workers this realm made.
@@ -267,6 +269,7 @@ impl Bridge {
                 perf_origin: 0.0,
                 time_origin: 0.0,
                 watch: Default::default(),
+                fence: Vec::new(),
                 worker: None,
                 workers: Default::default(),
             }),
@@ -314,6 +317,11 @@ impl Bridge {
 
     pub fn set_peers(&self, p: Option<super::frames::Peers>) {
         self.peers.set(p);
+    }
+
+    /// This realm is a page's (not a worker's).
+    pub fn worker_free(&self) -> bool {
+        self.st.try_borrow().map(|st| st.worker.is_none()).unwrap_or(true)
     }
 
     /// A click or key press just happened: the page may use the clipboard for a few seconds.

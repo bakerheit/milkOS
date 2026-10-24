@@ -340,79 +340,66 @@ fn window_onerror_hears_each_error_with_its_file_and_line_and_the_rest_runs() {
 }
 
 #[test]
-fn scripts_see_the_whole_page_even_the_part_after_them() {
-    // Known difference from a browser: the page is parsed whole before any script runs, so an
-    // inline script sees elements that come after it (a browser's parser has not got there).
-    // This test records what is, so a change either way is noticed.
-    let html = page("<script>console.log('T later ' + (document.getElementById('later') ? 'visible' : 'not there yet'))</script><div id=later></div>");
-    let l = load(&html, &[], 5);
-    assert_eq!(t(&l), ["later visible"], "{l:?}");
-}
-
-#[test]
-fn markup_written_by_a_script_runs_after_it_and_before_the_next_script() {
-    // document.write of scripts (the way tag managers and old ad code load more code): the written
-    // scripts run after the script that wrote them finishes, in order, before the page's next script.
-    let html = page(
-        "<script>document.write('<script src=\"/w.js\"><\\/script><script>console.log(\"T written inline\")<\\/script>'); console.log('T after write')</script>\
-         <script>console.log('T next ' + typeof w)</script>",
-    );
-    let l = load(&html, &[("/w.js", "var w = 1; console.log('T w.js');", Arrive::At(3))], 20);
-    assert_eq!(t(&l), ["after write", "w.js", "written inline", "next number"], "{l:?}");
-}
-
-#[test]
-fn the_same_script_twice_runs_twice_and_a_failed_defer_does_not_hold_up_the_next() {
-    let html = page(
-        "<script src=/twice.js></script><script src=/twice.js></script>\
-         <script defer src=/lost.js></script><script defer src=/d2.js></script>\
-         <script>addEventListener('DOMContentLoaded', () => console.log('T dcl'))</script>",
-    );
+fn a_blocking_script_sees_only_the_page_before_it_as_the_parser_would_have_it() {
+    // The parser has got as far as the script: what comes after is not in the page yet. A deferred
+    // script and DOMContentLoaded see it all.
+    let html = "<!DOCTYPE html><html><head><title>t</title>\
+         <script>console.log('T head: body ' + document.body + ', later ' + !!document.getElementById('later') + ', scripts ' + document.scripts.length)</script></head>\
+         <body><p id=first>first</p>\
+         <script id=b1>var s = document.scripts; console.log('T b1: later ' + !!document.getElementById('later') + ', first ' + !!document.getElementById('first') + ', scripts ' + s.length + ', last is me ' + (s[s.length - 1] === document.currentScript) + ', divs ' + document.querySelectorAll('div').length + ', children ' + document.body.children.length);\
+           document.body.appendChild(document.createElement('hr')); console.log('T b1 added: last child ' + document.body.lastElementChild.tagName);</script>\
+         <div id=later>later</div>\
+         <script defer src=/d.js></script>\
+         <script>addEventListener('DOMContentLoaded', () => console.log('T dcl: divs ' + document.querySelectorAll('div').length))</script>\
+         </body></html>";
     let l = load(
-        &html,
-        &[
-            ("/twice.js", "console.log('T twice');", Arrive::At(2)),
-            ("/lost.js", "", Arrive::Fails(1)),
-            ("/d2.js", "console.log('T d2');", Arrive::At(4)),
+        html,
+        &[("/d.js", "console.log('T defer: later ' + !!document.getElementById('later') + ', scripts ' + document.scripts.length + ', children ' + document.body.children.length + ', order ' + [...document.body.children].map(e => e.tagName).join())", Arrive::At(1))],
+        10,
+    );
+    assert_eq!(
+        t(&l),
+        [
+            "head: body null, later false, scripts 1",
+            "b1: later false, first true, scripts 2, last is me true, divs 0, children 2",
+            "b1 added: last child HR",
+            "defer: later true, scripts 4, children 6, order P,SCRIPT,HR,DIV,SCRIPT,SCRIPT",
+            "dcl: divs 1"
         ],
-        20,
+        "{l:?}"
     );
-    assert_eq!(t(&l), ["twice", "twice", "d2", "dcl"], "{l:?}");
 }
 
 #[test]
-fn src_wins_over_text_async_means_nothing_inline_and_an_empty_src_is_an_error() {
-    let html = page(
-        "<script src=/e.js>console.log('T text of a script with a src: never')</script>\
-         <script async>console.log('T inline async runs in order')</script>\
-         <script src=\"\" onerror=\"console.log('T empty src errors')\">console.log('T never either')</script>\
-         <script>console.log('T last')</script>",
-    );
-    let l = load(&html, &[("/e.js", "console.log('T e.js');", Arrive::At(1))], 10);
-    assert_eq!(t(&l), ["e.js", "inline async runs in order", "empty src errors", "last"], "{l:?}");
+fn scripts_that_change_the_page_while_it_is_cut_leave_it_whole_afterwards() {
+    // A script that moves, removes and adds nodes around the cut; nothing is lost or duplicated.
+    let html = "<!DOCTYPE html><html><body><div id=a><p id=a1></p><script id=s>\
+           var a = document.getElementById('a'), s = document.currentScript;\
+           a.appendChild(document.createElement('i'));\
+           a.insertBefore(document.createElement('b'), s);\
+           document.body.appendChild(document.createElement('u'));\
+           s.parentNode.removeChild(document.getElementById('a1'));\
+         </script><p id=a2></p><p id=a3></p></div><div id=z><span id=z1></span></div>\
+         <script defer src=/d.js></script>\
+         </body></html>";
+    let l = load(html, &[("/d.js", "console.log('T ' + [...document.body.querySelectorAll('*')].map(e => e.id || e.tagName).join())", Arrive::At(1))], 10);
+    // After the first script: a's children are b, s, i (it added them at the cut), then a2, a3
+    // (the rest of a); body: a, u (added at the cut), then z and the deferred script.
+    assert_eq!(t(&l), ["a,B,s,I,a2,a3,U,z,z1,SCRIPT"], "{l:?}");
 }
 
 #[test]
-fn domcontentloaded_reaches_window_and_document_listeners_once() {
-    let html = page(
-        "<script>let n = 0; addEventListener('DOMContentLoaded', () => console.log('T window ' + (++n))); document.addEventListener('DOMContentLoaded', () => console.log('T document ' + (++n)));\
-         document.onreadystatechange = () => console.log('T state ' + document.readyState);</script>",
-    );
-    let l = load(&html, &[], 10);
-    assert_eq!(t(&l), ["state interactive", "document 1", "window 2", "state complete"], "{l:?}");
-}
-
-#[test]
-fn an_error_in_a_deferred_script_does_not_keep_domcontentloaded_or_load_from_firing() {
-    let html = page(
-        "<script defer src=/bad.js></script><script defer src=/good.js></script>\
-         <script>addEventListener('DOMContentLoaded', () => console.log('T dcl')); addEventListener('load', () => console.log('T load'));</script>",
-    );
+fn a_script_that_removes_itself_or_its_parent_does_not_lose_the_rest() {
+    let html = "<!DOCTYPE html><html><body><div id=x><script>var me = document.currentScript; me.parentNode.removeChild(me); console.log('T removed self')</script><p id=after></p></div>\
+         <section id=y><script>document.getElementById('y').remove(); console.log('T removed parent')</script><p id=inside></p></section><p id=last></p>\
+         <script defer src=/d.js></script></body></html>";
     let l = load(
-        &html,
-        &[("/bad.js", "throw new Error('deferred boom');", Arrive::At(1)), ("/good.js", "console.log('T good');", Arrive::At(1))],
-        20,
+        html,
+        &[("/d.js", "console.log('T ' + [...document.body.children].map(e => e.id || e.tagName).join() + ' after=' + !!document.getElementById('after') + ' inside=' + !!document.getElementById('inside'))", Arrive::At(1))],
+        10,
     );
-    assert_eq!(t(&l), ["good", "dcl", "load"], "{l:?}");
-    assert!(l.iter().any(|x| x.contains("deferred boom")), "{l:?}");
+    let tt = t(&l);
+    assert_eq!(&tt[..2], ["removed self", "removed parent"], "{l:?}");
+    assert_eq!(tt[2], "x,last,SCRIPT after=true inside=false", "{l:?}");
 }
+

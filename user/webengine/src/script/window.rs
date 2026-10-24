@@ -503,31 +503,235 @@ fn computed(b: &Bridge, n: NodeId, name: &str) -> String {
         .map_or(1.0, |h| h.viewport().zoom.clamp(25, 500) as f64 / 100.0);
     let rect = p.node_rect(n).unwrap_or_default();
     let px = |v: f64| format!("{}px", (v * 100.0).rnd() / 100.0);
+    // Percentages resolve against the containing block's width.
+    let base = {
+        let parent = p.dom.parent(n);
+        if parent == crate::dom::NONE {
+            0.0
+        } else {
+            p.node_rect(parent).map_or(0.0, |r| r.w as f64 / zoom)
+        }
+    };
+    let lp = |v: crate::css::values::LP| px(v.px as f64 + v.pct as f64 * base / 100.0);
+    let lpa = |v: crate::style::types::LPA| match v {
+        crate::style::types::LPA::Auto => String::from("auto"),
+        crate::style::types::LPA::L(l) => lp(l),
+    };
+    let size = |v: crate::style::types::Size| match v {
+        crate::style::types::Size::Auto => String::from("auto"),
+        crate::style::types::Size::L(l) => lp(l),
+        crate::style::types::Size::MinContent => String::from("min-content"),
+        crate::style::types::Size::MaxContent => String::from("max-content"),
+        crate::style::types::Size::FitContent => String::from("fit-content"),
+        crate::style::types::Size::Content => String::from("content"),
+    };
+    let pad = |i: usize| (s.padding[i].px as f64 + s.padding[i].pct as f64 * base / 100.0).max(0.0);
+    let bw = |i: usize| s.border_width[i] as f64;
+    let content_box = s.box_sizing == crate::style::types::BoxSizing::ContentBox;
+    let border_style = |i: usize| match s.border_style[i] {
+        crate::api::BorderStyle::None => "none",
+        crate::api::BorderStyle::Solid | crate::api::BorderStyle::Shaded => "solid",
+        crate::api::BorderStyle::Dashed => "dashed",
+        crate::api::BorderStyle::Dotted => "dotted",
+        crate::api::BorderStyle::Double => "double",
+    };
+    let hidden = s.display == crate::style::types::Display::None;
+    let deco = |d: crate::api::Decoration| {
+        let mut v: Vec<&str> = Vec::new();
+        if d.has(crate::api::Decoration::UNDERLINE) {
+            v.push("underline");
+        }
+        if d.has(crate::api::Decoration::OVERLINE) {
+            v.push("overline");
+        }
+        if d.has(crate::api::Decoration::LINE_THROUGH) {
+            v.push("line-through");
+        }
+        if v.is_empty() { String::from("none") } else { v.join(" ") }
+    };
     match name {
+        n if n.starts_with("--") => custom_text(&s, n),
         "display" => kebab_debug(s.display),
         "position" => kebab_debug(s.position),
         "visibility" => kebab_debug(s.visibility),
         "overflow" | "overflow-y" => kebab_debug(s.overflow_y),
         "overflow-x" => kebab_debug(s.overflow_x),
+        "float" => kebab_debug(s.float),
+        "clear" => kebab_debug(s.clear),
+        "box-sizing" => kebab_debug(s.box_sizing),
         "color" => rgb(s.color),
         "background-color" => rgb(s.background_color),
+        "background-image" => String::from(if s.bg_image.is_some() { "url(\"\")" } else { "none" }),
         "opacity" => format!("{}", s.opacity),
         "font-size" => px(s.font_size as f64),
         "font-weight" => format!("{}", s.font_weight),
         "font-style" => String::from(if s.italic { "italic" } else { "normal" }),
+        "font-variant" | "font-variant-caps" => String::from(if s.small_caps { "small-caps" } else { "normal" }),
+        "font-family" => String::from(match s.family {
+            crate::api::Family::Serif => "serif",
+            crate::api::Family::SansSerif => "sans-serif",
+            crate::api::Family::Monospace => "monospace",
+            crate::api::Family::Cursive => "cursive",
+            crate::api::Family::Fantasy => "fantasy",
+            crate::api::Family::SystemUi => "system-ui",
+        }),
+        "line-height" => match s.line_height {
+            crate::style::types::LineHeight::Normal => String::from("normal"),
+            crate::style::types::LineHeight::Number(v) => px(v as f64 * s.font_size as f64),
+            crate::style::types::LineHeight::Px(v) => px(v as f64),
+        },
+        "text-align" => kebab_debug(s.text_align),
+        "text-transform" => kebab_debug(s.text_transform),
+        "text-indent" => lp(s.text_indent),
+        "text-decoration-line" => deco(s.deco_line),
+        "text-decoration" => deco(s.deco_line),
+        "white-space" => kebab_debug(s.white_space),
+        "letter-spacing" => if s.letter_spacing == 0.0 { String::from("normal") } else { px(s.letter_spacing as f64) },
+        "word-spacing" => if s.word_spacing == 0.0 { String::from("normal") } else { px(s.word_spacing as f64) },
+        "cursor" => kebab_debug(s.cursor),
+        "vertical-align" => match s.vertical_align {
+            crate::style::types::VAlign::L(l) => lp(l),
+            v => kebab_debug(v),
+        },
         "z-index" => s.z_index.map_or(String::from("auto"), |z| format!("{z}")),
-        "width" => px(rect.w as f64 / zoom),
-        "height" => px(rect.h as f64 / zoom),
-        "border-top-width" => px(s.border_width[0] as f64),
-        "border-right-width" => px(s.border_width[1] as f64),
-        "border-bottom-width" => px(s.border_width[2] as f64),
-        "border-left-width" => px(s.border_width[3] as f64),
+        "width" if hidden => String::from("auto"),
+        "height" if hidden => String::from("auto"),
+        "width" => {
+            let w = rect.w as f64 / zoom;
+            px(if content_box { (w - pad(1) - pad(3) - bw(1) - bw(3)).max(0.0) } else { w })
+        }
+        "height" => {
+            let h = rect.h as f64 / zoom;
+            px(if content_box { (h - pad(0) - pad(2) - bw(0) - bw(2)).max(0.0) } else { h })
+        }
+        "min-width" => size(s.min_width),
+        "min-height" => size(s.min_height),
+        "max-width" => s.max_width.map_or(String::from("none"), lp),
+        "max-height" => s.max_height.map_or(String::from("none"), lp),
+        "top" => lpa(s.inset[0]),
+        "right" => lpa(s.inset[1]),
+        "bottom" => lpa(s.inset[2]),
+        "left" => lpa(s.inset[3]),
+        "margin-top" => lpa(s.margin[0]).replace("auto", "0px"),
+        "margin-right" => lpa(s.margin[1]).replace("auto", "0px"),
+        "margin-bottom" => lpa(s.margin[2]).replace("auto", "0px"),
+        "margin-left" => lpa(s.margin[3]).replace("auto", "0px"),
+        "padding-top" => px(pad(0)),
+        "padding-right" => px(pad(1)),
+        "padding-bottom" => px(pad(2)),
+        "padding-left" => px(pad(3)),
+        "border-top-width" => px(bw(0)),
+        "border-right-width" => px(bw(1)),
+        "border-bottom-width" => px(bw(2)),
+        "border-left-width" => px(bw(3)),
+        "border-top-style" => String::from(border_style(0)),
+        "border-right-style" => String::from(border_style(1)),
+        "border-bottom-style" => String::from(border_style(2)),
+        "border-left-style" => String::from(border_style(3)),
+        "border-top-color" => rgb(s.border_color[0]),
+        "border-right-color" => rgb(s.border_color[1]),
+        "border-bottom-color" => rgb(s.border_color[2]),
+        "border-left-color" => rgb(s.border_color[3]),
+        "border-radius" | "border-top-left-radius" | "border-top-right-radius" | "border-bottom-left-radius"
+        | "border-bottom-right-radius" => lp(s.border_radius),
+        "flex-direction" => kebab_debug(s.flex_direction),
+        "flex-wrap" => String::from(match s.flex_wrap {
+            crate::style::types::FlexWrap::NoWrap => "nowrap",
+            crate::style::types::FlexWrap::Wrap => "wrap",
+            crate::style::types::FlexWrap::WrapReverse => "wrap-reverse",
+        }),
+        "flex-basis" => size(s.flex_basis),
+        "justify-content" => kebab_debug(s.justify_content),
+        "align-content" => kebab_debug(s.align_content),
+        "align-items" => kebab_debug(s.align_items),
+        "align-self" => kebab_debug(s.align_self),
+        "row-gap" => lp(s.row_gap),
+        "column-gap" => lp(s.column_gap),
         "flex-grow" => format!("{}", s.flex_grow),
         "flex-shrink" => format!("{}", s.flex_shrink),
         "order" => format!("{}", s.order),
+        "aspect-ratio" => s.aspect_ratio.map_or(String::from("auto"), |v| format!("{v}")),
+        "list-style-type" => kebab_debug(s.list_style_type),
+        "color-scheme" => String::from(match s.color_scheme & 3 {
+            1 => "light",
+            2 => "dark",
+            3 => "light dark",
+            _ => "normal",
+        }),
+        "transform" | "filter" | "box-shadow" | "text-shadow" | "animation-name" | "transition-property" | "clip-path"
+        | "backdrop-filter" | "mask-image" | "translate" | "rotate" | "scale" => String::from(if name == "transition-property" { "all" } else { "none" }),
+        "transition-duration" | "animation-duration" | "transition-delay" | "animation-delay" => String::from("0s"),
+        "pointer-events" | "user-select" | "will-change" | "touch-action" | "scroll-behavior" | "overflow-wrap" => String::from("auto"),
+        "content" => String::from("normal"),
+        "direction" => String::from("ltr"),
+        "writing-mode" => String::from("horizontal-tb"),
+        "unicode-bidi" => String::from("normal"),
+        "outline-style" => String::from("none"),
+        "outline-width" => String::from("0px"),
+        "background-repeat" => kebab_debug(s.bg_repeat),
         _ => String::new(),
     }
 }
+
+/// A custom property's value as text (tokens joined the way they were written, trimmed).
+fn custom_text(s: &crate::style::types::Style, name: &str) -> String {
+    use crate::css::tokenizer::Tok;
+    let Some(map) = &s.custom else { return String::new() };
+    let Some(toks) = map.get(name) else { return String::new() };
+    let mut out = String::new();
+    for t in toks.iter() {
+        match t {
+            Tok::Ident(v) => out.push_str(v),
+            Tok::Function(v) => {
+                out.push_str(v);
+                out.push('(');
+            }
+            Tok::AtKeyword(v) => {
+                out.push('@');
+                out.push_str(v);
+            }
+            Tok::Hash { value, .. } => {
+                out.push('#');
+                out.push_str(value);
+            }
+            Tok::Str(v) => {
+                out.push('"');
+                out.push_str(v);
+                out.push('"');
+            }
+            Tok::Url(v) => out.push_str(&format!("url({v})")),
+            Tok::Delim(c) => out.push(*c),
+            Tok::Number { value, .. } => out.push_str(&format!("{value}")),
+            Tok::Percentage(v) => out.push_str(&format!("{v}%")),
+            Tok::Dimension { value, unit } => out.push_str(&format!("{value}{unit}")),
+            Tok::Whitespace => out.push(' '),
+            Tok::Colon => out.push(':'),
+            Tok::Semicolon => out.push(';'),
+            Tok::Comma => out.push(','),
+            Tok::Open(c) | Tok::Close(c) => out.push(*c),
+            _ => {}
+        }
+        if out.len() > 65536 {
+            break;
+        }
+    }
+    String::from(out.trim())
+}
+
+/// The names `getComputedStyle(el)` lists (length, item(i)) and answers.
+const COMPUTED_NAMES: &[&str] = &[
+    "align-content", "align-items", "align-self", "aspect-ratio", "background-color", "background-image", "background-repeat",
+    "border-bottom-color", "border-bottom-style", "border-bottom-width", "border-left-color", "border-left-style",
+    "border-left-width", "border-radius", "border-right-color", "border-right-style", "border-right-width",
+    "border-top-color", "border-top-style", "border-top-width", "bottom", "box-sizing", "clear", "color", "color-scheme",
+    "column-gap", "content", "cursor", "direction", "display", "flex-basis", "flex-direction", "flex-grow", "flex-shrink",
+    "flex-wrap", "float", "font-family", "font-size", "font-style", "font-variant", "font-weight", "height",
+    "justify-content", "left", "letter-spacing", "line-height", "list-style-type", "margin-bottom", "margin-left",
+    "margin-right", "margin-top", "max-height", "max-width", "min-height", "min-width", "opacity", "order", "overflow-x",
+    "overflow-y", "padding-bottom", "padding-left", "padding-right", "padding-top", "pointer-events", "position", "right",
+    "row-gap", "text-align", "text-decoration-line", "text-indent", "text-transform", "top", "transform",
+    "transition-duration", "vertical-align", "visibility", "white-space", "width", "word-spacing", "z-index",
+];
 
 // ---- helpers the node bindings use --------------------------------------------------------
 
@@ -1103,23 +1307,6 @@ pub fn media_matches(b: &Bridge, q: &str) -> bool {
     list.matches(&env)
 }
 
-/// Stand-ins for observers pages feature-detect (they never call back).
-fn observer_stub(r: &mut Realm, g: Value, name: &str) -> JsResult<()> {
-    let proto = r.new_object();
-    for m in ["observe", "unobserve", "disconnect"] {
-        r.define_method(proto, m, 0, |_r, _t, _a| Ok(Value::UNDEFINED))?;
-    }
-    r.define_method(proto, "takeRecords", 0, |r, _t, _a| Ok(r.new_array(&[])))?;
-    let ctor = r.new_class(
-        name,
-        1,
-        proto,
-        None,
-        Some(Box::new(|_r: &mut Realm, t: Value, _a: &[Value]| Ok(t))),
-    );
-    r.define(g, name, ctor, Attrs::METHOD)
-}
-
 /// Make the realm a window: classes, prototypes, the DOM, events and the globals; then the
 /// page's `on*` attributes.
 pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
@@ -1552,16 +1739,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         let p = r.pinned(&b.protos().style_decl);
         Ok(r.new_host_object(b.classes().computed, n as u64, p))
     })?;
-    method(b, r, g, "getSelection", 0, |_b, r, _t, _a| {
-        let o = r.new_object();
-        r.define(o, "rangeCount", Value::int(0), Attrs::ENUMERABLE)?;
-        r.define(o, "isCollapsed", Value::TRUE, Attrs::ENUMERABLE)?;
-        for m in ["removeAllRanges", "addRange", "collapse", "selectAllChildren"] {
-            r.define_method(o, m, 0, |_r, _t, _a| Ok(Value::UNDEFINED))?;
-        }
-        r.define_method(o, "toString", 0, |r, _t, _a| Ok(r.string("")))?;
-        Ok(o)
-    })?;
     // new Image(w, h), new Option(text, value, defaultSelected, selected).
     let b2 = b.clone();
     let img_proto = b.protos().by_tag.iter().find(|(t, _)| *t == tag::IMG).map(|(_, p)| r.pinned(p)).unwrap_or(html_element);
@@ -1616,9 +1793,6 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         })),
     );
     r.define(g, "Option", option, Attrs::METHOD)?;
-    observer_stub(r, g, "MutationObserver")?;
-    observer_stub(r, g, "ResizeObserver")?;
-    observer_stub(r, g, "IntersectionObserver")?;
     let _ = element;
 
     super::net::install_members(b, r)?;
@@ -1756,12 +1930,30 @@ fn style_this(b: &Bridge, r: &mut Realm, t: Value) -> JsResult<NodeId> {
         .ok_or_else(|| type_error(r, "Illegal invocation"))
 }
 
+/// The element behind an inline style or a computed one (true), for the methods both have.
+fn style_any(b: &Bridge, r: &mut Realm, t: Value) -> JsResult<(NodeId, bool)> {
+    if let Some(n) = r.host_data(t, b.classes().computed) {
+        return Ok((n as NodeId, true));
+    }
+    style_this(b, r, t).map(|n| (n, false))
+}
+
+fn read_only_style(r: &mut Realm) -> jsengine::Exception {
+    dom_error(r, "NoModificationAllowedError", "These styles are computed, and therefore read-only.")
+}
+
 fn install_style(b: &Rc<Bridge>, r: &mut Realm, o: Value) -> JsResult<()> {
     getter(b, r, o, "cssText", |b, r, t, _a| {
-        let n = style_this(b, r, t)?;
+        let (n, comp) = style_any(b, r, t)?;
+        if comp {
+            return Ok(r.string(""));
+        }
         let s = serialize_decls(&style_decls(b, n));
         Ok(r.string(&s))
     }, Some(|b, r, t, a| {
+        if style_any(b, r, t)?.1 {
+            return Err(read_only_style(r));
+        }
         let n = style_this(b, r, t)?;
         let s = arg_str(r, a, 0)?;
         let d = parse_decls(&s);
@@ -1774,29 +1966,48 @@ fn install_style(b: &Rc<Bridge>, r: &mut Realm, o: Value) -> JsResult<()> {
         Ok(Value::UNDEFINED)
     }))?;
     getter(b, r, o, "length", |b, r, t, _a| {
-        let n = style_this(b, r, t)?;
+        let (n, comp) = style_any(b, r, t)?;
+        if comp {
+            return Ok(Value::int(COMPUTED_NAMES.len() as i32));
+        }
         Ok(Value::int(style_decls(b, n).len() as i32))
     }, None)?;
     method(b, r, o, "item", 1, |b, r, t, a| {
-        let n = style_this(b, r, t)?;
+        let (n, comp) = style_any(b, r, t)?;
         let i = r.to_int32(arg(a, 0))?;
+        if comp {
+            let s = if i >= 0 { COMPUTED_NAMES.get(i as usize).copied().unwrap_or("") } else { "" };
+            return Ok(r.string(s));
+        }
         let d = style_decls(b, n);
         let s = d.get(i.max(0) as usize).map(|x| x.0.clone()).unwrap_or_default();
         Ok(r.string(&s))
     })?;
     method(b, r, o, "getPropertyValue", 1, |b, r, t, a| {
-        let n = style_this(b, r, t)?;
+        let (n, comp) = style_any(b, r, t)?;
+        if comp {
+            let name = arg_str(r, a, 0)?;
+            let name = if name.starts_with("--") { name } else { name.to_ascii_lowercase() };
+            let v = computed(b, n, &name);
+            return Ok(r.string(&v));
+        }
         let name = arg_str(r, a, 0)?.to_ascii_lowercase();
         let v = style_decls(b, n).into_iter().rev().find(|x| x.0 == name).map(|x| x.1).unwrap_or_default();
         Ok(r.string(&v))
     })?;
     method(b, r, o, "getPropertyPriority", 1, |b, r, t, a| {
-        let n = style_this(b, r, t)?;
+        let (n, comp) = style_any(b, r, t)?;
+        if comp {
+            return Ok(r.string(""));
+        }
         let name = arg_str(r, a, 0)?.to_ascii_lowercase();
         let imp = style_decls(b, n).into_iter().rev().find(|x| x.0 == name).is_some_and(|x| x.2);
         Ok(r.string(if imp { "important" } else { "" }))
     })?;
     method(b, r, o, "setProperty", 2, |b, r, t, a| {
+        if style_any(b, r, t)?.1 {
+            return Err(read_only_style(r));
+        }
         let n = style_this(b, r, t)?;
         let name = arg_str(r, a, 0)?;
         let name = if name.starts_with("--") { name } else { name.to_ascii_lowercase() };
@@ -1806,6 +2017,9 @@ fn install_style(b: &Rc<Bridge>, r: &mut Realm, o: Value) -> JsResult<()> {
         Ok(Value::UNDEFINED)
     })?;
     method(b, r, o, "removeProperty", 1, |b, r, t, a| {
+        if style_any(b, r, t)?.1 {
+            return Err(read_only_style(r));
+        }
         let n = style_this(b, r, t)?;
         let name = arg_str(r, a, 0)?.to_ascii_lowercase();
         let old = style_decls(b, n).into_iter().rev().find(|x| x.0 == name).map(|x| x.1).unwrap_or_default();

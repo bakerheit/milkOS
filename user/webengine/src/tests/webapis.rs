@@ -383,3 +383,475 @@ fn proxies_work_in_pages_and_do_not_clone() {
     assert_eq!(eval("var el = document.getElementById('a'); var p = new Proxy(el, {}); try { p.id } catch (e) { e.name }"), "TypeError");
     assert_eq!(eval("var s = new Proxy({}, {}); s.x = 1; JSON.stringify(s) + Object.keys(s)"), "{\"x\":1}x");
 }
+
+// ---- MutationObserver, IntersectionObserver, ResizeObserver ------------------------------------
+
+fn lines(body: &str, steps: u32) -> String {
+    run(body, steps).join("|")
+}
+
+#[test]
+fn mutation_observer_reports_child_changes_after_the_script() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var mo = new MutationObserver(function (recs, o) {
+           log.push('cb ' + recs.length + ' ' + (o === mo) + ' ' + (this === mo));
+           recs.forEach(function (r) { log.push(r.type + ':' + r.addedNodes.length + '/' + r.removedNodes.length + ':' + (r.target === a)); });
+         });
+         mo.observe(a, { childList: true });
+         var s = document.createElement('span'); a.appendChild(s); a.removeChild(s);
+         log.push('sync');
+         Promise.resolve().then(function () { log.push('promise'); });
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "sync;promise;cb 2 true true;childList:1/0:true;childList:0/1:true");
+}
+
+#[test]
+fn mutation_observer_attributes_and_old_values() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var mo = new MutationObserver(function (recs) {
+           recs.forEach(function (r) { log.push(r.type + ':' + r.attributeName + ':' + r.oldValue); });
+         });
+         mo.observe(a, { attributes: true, attributeOldValue: true, attributeFilter: ['title', 'data-x'] });
+         a.setAttribute('title', 'one'); a.setAttribute('title', 'two'); a.setAttribute('class', 'ignored');
+         a.removeAttribute('title'); a.dataset.x = '5'; a.id = 'b';
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "attributes:title:null;attributes:title:one;attributes:title:two;attributes:data-x:null");
+}
+
+#[test]
+fn mutation_observer_subtree_and_character_data() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         a.innerHTML = '<p id=p>hi</p>';
+         var p = document.getElementById('p');
+         var mo = new MutationObserver(function (recs) {
+           recs.forEach(function (r) { log.push(r.type + ':' + r.target.nodeName + ':' + r.oldValue); });
+         });
+         mo.observe(a, { subtree: true, characterData: true, characterDataOldValue: true, childList: true, attributes: true });
+         p.firstChild.data = 'yo'; p.firstChild.appendData('!'); p.setAttribute('x', '1');
+         p.appendChild(document.createElement('b'));
+         var q = document.createElement('div'); a.appendChild(q); q.appendChild(document.createElement('i'));
+         mo.disconnect(); p.setAttribute('x', '2');
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    // After disconnect() the records not yet delivered are dropped.
+    assert_eq!(out, "");
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         a.innerHTML = '<p id=p>hi</p>';
+         var p = document.getElementById('p');
+         var mo = new MutationObserver(function (recs) {
+           recs.forEach(function (r) { log.push(r.type + ':' + r.target.nodeName + ':' + r.oldValue); });
+         });
+         mo.observe(a, { subtree: true, characterData: true, characterDataOldValue: true, childList: true, attributes: true });
+         p.firstChild.data = 'yo'; p.firstChild.appendData('!'); p.setAttribute('x', '1');
+         p.appendChild(document.createElement('b'));
+         var q = document.createElement('div'); a.appendChild(q); q.appendChild(document.createElement('i'));
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(
+        out,
+        "characterData:#text:hi;characterData:#text:yo;attributes:P:null;childList:P:null;childList:DIV:null;childList:DIV:null"
+    );
+}
+
+#[test]
+fn mutation_observer_api_details() {
+    assert_eq!(eval("typeof MutationObserver + typeof MutationRecord + MutationObserver.length + ' ' + Object.prototype.toString.call(new MutationObserver(function () {}))"), "functionfunction1 [object MutationObserver]");
+    assert_eq!(eval("try { new MutationObserver(); } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new MutationObserver(1); } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new MutationObserver(function () {}).observe(document.body, {}); } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new MutationObserver(function () {}).observe({}, {childList: true}); } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new MutationObserver(function () {}).observe(document.body, {attributes: false, attributeOldValue: true}); } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new MutationObserver(function () {}).observe(document.body, {childList: true, attributeFilter: ['a']}); 'ok' } catch (e) { e.name }"), "ok");
+    assert_eq!(eval("try { new MutationRecord() } catch (e) { e.name }"), "TypeError");
+    // takeRecords hands over what is waiting, and nothing is delivered after.
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var mo = new MutationObserver(function () { log.push('cb'); });
+         mo.observe(a, { childList: true });
+         a.appendChild(document.createElement('s'));
+         var t = mo.takeRecords();
+         log.push(t.length + ':' + t[0].type + ':' + mo.takeRecords().length);
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "1:childList:0");
+    // Two observers see the same change; a second observe() of a node replaces the options.
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var m1 = new MutationObserver(function (r) { log.push('m1 ' + r.length); });
+         var m2 = new MutationObserver(function (r) { log.push('m2 ' + r.length); });
+         m1.observe(a, { childList: true }); m1.observe(a, { attributes: true });
+         m2.observe(a, { childList: true, attributes: true });
+         a.appendChild(document.createElement('s')); a.setAttribute('k', 'v');
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "m1 1;m2 2");
+}
+
+#[test]
+fn mutation_observer_callbacks_that_mutate_stay_bounded() {
+    // A callback that changes what it watches runs again, but a page cannot spin the
+    // checkpoint forever: the rounds are limited and the page stays alive.
+    let out = lines(
+        "var a = document.getElementById('a'); var n = 0;
+         var mo = new MutationObserver(function () { n++; a.setAttribute('t', String(n)); });
+         mo.observe(a, { attributes: true });
+         a.setAttribute('t', '0');
+         setTimeout(function () { console.log('R ' + (n > 10) + ' ' + (n < 100000)); }, 50);",
+        20,
+    );
+    assert_eq!(out, "true true");
+    // A burst of changes: the records are limited, the callback still gets some.
+    let out = lines(
+        "var a = document.getElementById('a'); var got = 0;
+         var mo = new MutationObserver(function (r) { got += r.length; });
+         mo.observe(a, { childList: true });
+         for (var i = 0; i < 30000; i++) { a.appendChild(document.createElement('i')); }
+         setTimeout(function () { console.log('R ' + (got > 0) + ' ' + (got <= 30000) + ' ' + a.childNodes.length); }, 0);",
+        3,
+    );
+    assert_eq!(out, "true true 30001");
+}
+
+#[test]
+fn mutation_observer_sees_removed_subtrees_and_innerhtml() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         a.innerHTML = '<p>1</p><p>2</p>';
+         var mo = new MutationObserver(function (recs) {
+           recs.forEach(function (r) { log.push(r.type + ':' + r.addedNodes.length + '/' + r.removedNodes.length + (r.removedNodes[0] ? ':' + r.removedNodes[0].nodeName + ':' + r.removedNodes[0].textContent : '')); });
+         });
+         mo.observe(a, { childList: true });
+         a.innerHTML = '<b>x</b>';
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "childList:0/1:P:1;childList:0/1:P:2;childList:1/0");
+}
+
+#[test]
+fn mutation_observer_works_in_detached_trees() {
+    let out = lines(
+        "var d = document.createElement('div'); var log = [];
+         var mo = new MutationObserver(function (r) { log.push(r.length + r[0].type); });
+         mo.observe(d, { childList: true, subtree: true });
+         var c = document.createElement('p'); d.appendChild(c); c.appendChild(document.createElement('i'));
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 0);",
+        3,
+    );
+    assert_eq!(out, "2childList");
+}
+
+#[test]
+fn dom_defers_freeing_nodes_the_log_names() {
+    use crate::dom::{Dom, NONE};
+    let mut d = Dom::new();
+    let a = d.create_element(crate::atoms::tag::DIV, crate::dom::Ns::Html, Vec::new());
+    d.append(0, a);
+    d.mlog.watch.insert(a, (0, 1));
+    let c = d.create_element(crate::atoms::tag::SPAN, crate::dom::Ns::Html, Vec::new());
+    d.append(a, c);
+    d.detach(c);
+    assert_eq!(d.mlog.recs.len(), 2);
+    d.free_subtree(c);
+    // Not given back yet: a record names it.
+    assert_eq!(d.mlog.deferred, alloc::vec![c]);
+    assert_eq!(d.live(), 3);
+    assert_eq!(d.take_mutations().len(), 2);
+    assert_ne!(c, NONE);
+    for _ in 0..40_000 {
+        let n = d.create_element(crate::atoms::tag::SPAN, crate::dom::Ns::Html, Vec::new());
+        d.append(a, n);
+    }
+    assert!(d.mlog.recs.len() <= crate::dom::MAX_MUT_RECORDS);
+}
+
+#[test]
+fn intersection_observer_reports_the_first_state_and_changes() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var far = document.createElement('div'); far.style.cssText = 'margin-top:3000px;height:50px;width:50px'; far.id = 'far';
+         document.body.appendChild(far);
+         var io = new IntersectionObserver(function (es, o) {
+           es.forEach(function (e) { log.push(e.target.id + ':' + e.isIntersecting + ':' + e.intersectionRatio + ':' + (o === io)); });
+         });
+         io.observe(a); io.observe(far);
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 40);",
+        12,
+    );
+    assert_eq!(out, "a:true:1:true;far:false:0:true");
+}
+
+#[test]
+fn intersection_observer_options_and_errors() {
+    assert_eq!(eval("var io = new IntersectionObserver(function () {}, { rootMargin: '10px 20%', threshold: [0.5, 0, 1] }); io.rootMargin + ' ' + io.thresholds.join() + ' ' + io.root"), "10px 20% 10px 20% 0,0.5,1 null");
+    assert_eq!(eval("try { new IntersectionObserver(function () {}, { threshold: 2 }) } catch (e) { e.name }"), "RangeError");
+    assert_eq!(eval("try { new IntersectionObserver(function () {}, { rootMargin: 'bad' }) } catch (e) { e.name }"), "SyntaxError");
+    assert_eq!(eval("try { new IntersectionObserver() } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new IntersectionObserver(function () {}).observe({}) } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("var io = new IntersectionObserver(function () {}); io.observe(document.body); io.unobserve(document.body); io.disconnect(); io.takeRecords().length"), "0");
+}
+
+#[test]
+fn resize_observer_reports_sizes_and_changes() {
+    let out = lines(
+        "var a = document.getElementById('a'); var log = [];
+         var ro = new ResizeObserver(function (es, o) {
+           es.forEach(function (e) { log.push(e.contentRect.width + 'x' + e.contentRect.height + ':' + e.borderBoxSize[0].inlineSize + ':' + (o === ro)); });
+         });
+         ro.observe(a);
+         setTimeout(function () { a.style.width = '150px'; }, 30);
+         setTimeout(function () { console.log('R ' + log.join(';')); }, 120);",
+        40,
+    );
+    assert_eq!(out, "100x40:100:true;150x40:150:true");
+}
+
+#[test]
+fn layout_observers_stop_asking_for_frames_when_idle() {
+    let mut h = Host::new();
+    let html = "<!DOCTYPE html><html><body><div id=a style=\"width:100px;height:40px\">x</div><script>var n = 0; new ResizeObserver(function () { n++; }).observe(document.getElementById('a'));</script></body></html>";
+    let mut d = doc(html);
+    for _ in 0..5 {
+        d.run(&mut h);
+        if d.wants_frame() {
+            d.frame(&mut h);
+        }
+        d.layout(&Viewport::new(800, 600), &ApproxMeasurer);
+        h.now += 5.0;
+    }
+    // After the first look at the boxes nothing is pending until the page or the view changes.
+    assert!(!d.wants_frame());
+}
+
+#[test]
+fn computed_style_answers_the_common_properties() {
+    let o = lines(
+        "var a = document.getElementById('a'); a.style.cssText = 'width:100px;height:40px;padding:5px 10px;margin:3px;border:2px solid #f00;position:relative;top:7px;line-height:20px;text-align:center;--gap: 4px ;cursor:pointer';
+         var cs = getComputedStyle(a);
+         console.log('R ' + [cs.getPropertyValue('padding-left'), cs.paddingTop, cs.marginLeft, cs.borderTopWidth, cs.getPropertyValue('border-top-style'), cs.borderTopColor, cs.width, cs.height, cs.top, cs.lineHeight, cs.textAlign, cs.cursor, cs.getPropertyValue('--gap'), cs.boxSizing, cs.getPropertyValue('transform'), cs.length > 20, cs.item(0), cs.cssText === ''].join('|'));
+         a.style.boxSizing = 'border-box';
+         console.log('R ' + getComputedStyle(a).width);
+         try { cs.setProperty('color', 'red'); } catch (e) { console.log('R ' + e.name); }
+         try { cs.cssText = 'color:red'; } catch (e) { console.log('R ' + e.name); }
+         try { cs.removeProperty('color'); } catch (e) { console.log('R ' + e.name); }",
+        0,
+    );
+    assert_eq!(
+        o,
+        "10px|5px|3px|2px|solid|rgb(255, 0, 0)|100px|40px|7px|20px|center|pointer|4px|content-box|none|true|align-content|true|100px|NoModificationAllowedError|NoModificationAllowedError|NoModificationAllowedError"
+    );
+}
+
+#[test]
+fn fuzz_observers_with_random_dom_changes() {
+    // Random trees, observers with random options, random changes and disconnects: nothing
+    // panics, nothing hangs, and every record names a live node.
+    let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..40 {
+        let mut js = String::from(
+            "var root = document.getElementById('a'); var nodes = [root]; var obs = []; var bad = 0; var seen = 0;
+             function pick() { return nodes[Math.floor(Math.random() * nodes.length)]; }
+             function cb(recs) { recs.forEach(function (r) { seen++; if (!r.target || typeof r.target.nodeType !== 'number') bad++;
+               r.addedNodes.forEach(function (n) { if (typeof n.nodeType !== 'number') bad++; }); }); }
+             var seedv = 1; Math.random = function () { seedv = (seedv * 16807) % 2147483647; return seedv / 2147483647; };
+             var steps = [",
+        );
+        let n = 30 + (next() % 60) as usize;
+        for _ in 0..n {
+            let k = next() % 14;
+            let t = match k {
+                0 => "function () { var e = document.createElement('div'); pick().appendChild(e); nodes.push(e); }",
+                1 => "function () { var e = document.createElement('p'); var p = pick(); p.insertBefore(e, p.firstChild); nodes.push(e); }",
+                2 => "function () { var p = pick(); if (p !== root && p.parentNode) p.parentNode.removeChild(p); }",
+                3 => "function () { pick().setAttribute('k' + (seedv % 3), String(seedv)); }",
+                4 => "function () { pick().removeAttribute('k1'); }",
+                5 => "function () { pick().appendChild(document.createTextNode('t' + seedv)); }",
+                6 => "function () { var p = pick(); if (p.firstChild && p.firstChild.nodeType === 3) p.firstChild.data = 'd' + seedv; }",
+                7 => "function () { var p = pick(); if (p !== root) p.innerHTML = '<b>x</b><i>y</i>'; }",
+                8 => "function () { var o = new MutationObserver(cb); o.observe(pick(), { childList: seedv % 2 === 0, attributes: seedv % 3 === 0, characterData: true, subtree: seedv % 5 !== 0, attributeOldValue: seedv % 7 === 0 }); obs.push(o); }",
+                9 => "function () { if (obs.length) obs[seedv % obs.length].disconnect(); }",
+                10 => "function () { if (obs.length) obs[seedv % obs.length].takeRecords(); }",
+                11 => "function () { var p = pick(), q = pick(); try { p.appendChild(q); } catch (e) {} }",
+                12 => "function () { var p = pick(); if (p !== root) p.textContent = 'z'; }",
+                _ => "function () { var o = new MutationObserver(function () { pick().setAttribute('cbk', String(seedv)); }); o.observe(root, { attributes: true, subtree: true }); obs.push(o); }",
+            };
+            js.push_str(t);
+            js.push(',');
+        }
+        js.push_str(
+            "]; steps.forEach(function (f) { try { f(); } catch (e) { if (!(e instanceof TypeError)) throw e; } }); setTimeout(function () { console.log('R ' + bad + ' ' + (seen >= 0)); }, 10);",
+        );
+        let out = lines(&js, 4);
+        assert_eq!(out, "0 true", "round {round}: {js}");
+    }
+}
+
+// ---- DOMParser and friends ------------------------------------------------------------------
+
+#[test]
+fn dom_parser_makes_documents() {
+    assert_eq!(
+        eval("var d = new DOMParser().parseFromString('<!DOCTYPE html><html><head><title> A  b </title></head><body><p id=x class=c>hi <b>there</b></p><script>window.ran = 1<\\/script></body></html>', 'text/html'); [d.nodeType, d.title, d.body.tagName, d.getElementById('x').textContent, d.querySelector('b').textContent, d.querySelectorAll('p').length, d.documentElement.tagName, d.head.tagName, d.doctype.name, d.contentType, typeof window.ran, d instanceof Document, d.getElementsByTagName('p').length, Object.prototype.toString.call(d)].join('|')"),
+        "9|A b|BODY|hi there|there|1|HTML|HEAD|html|text/html|undefined|true|1|[object HTMLDocument]"
+    );
+    assert_eq!(
+        eval("var d = new DOMParser().parseFromString('<p>frag', 'text/html'); d.body.innerHTML + '|' + d.documentElement.outerHTML"),
+        "<p>frag</p>|<html><head></head><body><p>frag</p></body></html>"
+    );
+    assert_eq!(
+        eval("var d = new DOMParser().parseFromString('<?xml version=\"1.0\"?><feed><item id=\"1\"><title>T1</title></item><item id=\"2\"><title>T2</title></item></feed>', 'text/xml'); [d.documentElement.tagName.toLowerCase(), d.querySelectorAll('item').length, d.querySelector('item[id=\"2\"] title').textContent, d.getElementsByTagName('title').length, d.contentType].join('|')"),
+        "feed|2|T2|2|text/xml"
+    );
+    assert_eq!(eval("try { new DOMParser().parseFromString('x', 'text/plain') } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("try { new DOMParser().parseFromString('x') } catch (e) { e.name }"), "TypeError");
+    // Nodes of a parsed document can move into the page, and the page's scripts there do not run twice.
+    assert_eq!(
+        eval("var d = new DOMParser().parseFromString('<div id=moved>m</div>', 'text/html'); var n = document.importNode(d.getElementById('moved'), true); document.body.appendChild(n); document.getElementById('moved').textContent"),
+        "m"
+    );
+}
+
+#[test]
+fn implementation_and_serializer() {
+    assert_eq!(
+        eval("var d = document.implementation.createHTMLDocument('T'); d.body.appendChild(d.createElement('i')); [d.title, d.body.innerHTML, d.documentElement.nodeName].join('|')"),
+        "T|<i></i>|HTML"
+    );
+    assert_eq!(eval("document.implementation.hasFeature('x', '1') + ' ' + document.implementation.createDocumentType('svg', '', '').name"), "true svg");
+    let ser = |js: &str| eval(&alloc::format!("new XMLSerializer().serializeToString({js})"));
+    assert_eq!(ser("document.createElement('div')"), "<div xmlns=\"http://www.w3.org/1999/xhtml\"></div>");
+    assert_eq!(ser("document.createTextNode('a<b&c')"), "a&lt;b&amp;c");
+    assert_eq!(ser("document.createComment(' c ')"), "<!-- c -->");
+    assert_eq!(
+        ser("(function () { var e = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); e.setAttribute('width', '5'); e.appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'rect')); return e })()"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"5\"><rect/></svg>"
+    );
+    assert_eq!(
+        ser("(function () { var e = document.createElement('p'); e.innerHTML = 'a<br>b'; e.title = 'q\"'; return e })()"),
+        "<p xmlns=\"http://www.w3.org/1999/xhtml\" title=\"q&quot;\">a<br />b</p>"
+    );
+    assert_eq!(eval("try { new XMLSerializer().serializeToString({}) } catch (e) { e.name }"), "TypeError");
+}
+
+#[test]
+fn tree_walker_and_node_iterator() {
+    let setup = "var root = document.createElement('div'); root.innerHTML = '<p>a<b>b</b></p><!--c--><i>i<u>u</u></i>text'; ";
+    assert_eq!(
+        eval(&alloc::format!("{setup} var w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); var out = []; while (w.nextNode()) out.push(w.currentNode.nodeName); out.join()")),
+        "P,B,I,U"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); var out = []; while (w.nextNode()) out.push(w.currentNode.data); out.join()")),
+        "a,b,i,u,text"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var w = document.createTreeWalker(root, NodeFilter.SHOW_ALL, {{ acceptNode: function (n) {{ return n.nodeName === 'I' ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT; }} }}); var out = []; while (w.nextNode()) out.push(w.currentNode.nodeName); out.join()")),
+        "P,#text,B,#text,#comment,#text"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); [w.firstChild().nodeName, w.nextSibling().nodeName, w.lastChild().nodeName, w.parentNode().nodeName, w.previousSibling().nodeName, w.parentNode() === root, w.root === root].join()")),
+        "P,I,U,I,P,true,true"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT); w.currentNode = root.querySelector('u'); var out = []; while (w.previousNode()) out.push(w.currentNode.nodeName); out.join()")),
+        "I,B,P,DIV"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT); var out = []; var n; while ((n = it.nextNode())) out.push(n.nodeName); var back = []; while ((n = it.previousNode())) back.push(n.nodeName); out.join() + '|' + back.join()")),
+        "DIV,P,B,I,U|U,I,B,P,DIV"
+    );
+    assert_eq!(eval("try { document.createTreeWalker() } catch (e) { e.name }"), "TypeError");
+    assert_eq!(eval("NodeFilter.SHOW_ELEMENT + ' ' + NodeFilter.FILTER_SKIP + ' ' + NodeFilter.SHOW_ALL"), "1 3 4294967295");
+}
+
+#[test]
+fn ranges_and_selection() {
+    let setup = "var root = document.createElement('div'); root.innerHTML = '<p>Hello <b>big</b> world</p><i>tail</i>'; document.body.appendChild(root); var p = root.firstChild; ";
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.setStart(p.firstChild, 2); r.setEnd(p.lastChild, 3); [r.toString(), r.collapsed, r.commonAncestorContainer === p, r.startOffset, r.endOffset].join('|')")),
+        "llo big wo|false|true|2|3"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.selectNodeContents(p); var f = r.cloneContents(); var d = document.createElement('div'); d.appendChild(f); d.innerHTML + '|' + p.innerHTML")),
+        "Hello <b>big</b> world|Hello <b>big</b> world"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.setStart(p.firstChild, 3); r.setEnd(p.lastChild, 3); var f = r.extractContents(); var d = document.createElement('div'); d.appendChild(f); d.innerHTML + '|' + p.innerHTML + '|' + r.collapsed")),
+        "lo <b>big</b> wo|Helrld|true"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.selectNode(p.querySelector('b')); r.deleteContents(); p.innerHTML + '|' + r.collapsed")),
+        "Hello  world|true"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.setStart(p.firstChild, 6); r.collapse(true); var n = document.createElement('u'); n.textContent = 'X'; r.insertNode(n); p.innerHTML")),
+        "Hello <u>X</u><b>big</b> world"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var r = document.createRange(); r.selectNodeContents(p.querySelector('b')); var w = document.createElement('em'); r.surroundContents(w); p.innerHTML")),
+        "Hello <b><em>big</em></b> world"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var a = document.createRange(); a.selectNodeContents(p); var b = document.createRange(); b.selectNodeContents(root.lastChild); [a.compareBoundaryPoints(Range.START_TO_START, b), a.compareBoundaryPoints(Range.END_TO_START, b), b.compareBoundaryPoints(Range.START_TO_END, a), a.isPointInRange(p.firstChild, 2), a.comparePoint(root.lastChild.firstChild, 0), a.intersectsNode(p.querySelector('b'))].join()")),
+        "-1,-1,1,true,1,true"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var f = document.createRange().createContextualFragment('<i>1</i><b>2</b>'); f.childNodes.length + f.firstChild.nodeName")),
+        "2I"
+    );
+    assert_eq!(eval("var r = document.createRange(); try { r.setStart(document.body, 99) } catch (e) { e.name }"), "IndexSizeError");
+    assert_eq!(eval("var r = new Range(); r.startContainer === document && r.collapsed"), "true");
+    assert_eq!(
+        eval(&alloc::format!("{setup} var s = getSelection(); var r0 = s.rangeCount + s.type; s.selectAllChildren(p); var r = s.getRangeAt(0); [r0, s.rangeCount, s.type, s.toString(), s.anchorNode === p, s.focusOffset, s === document.getSelection()].join('|') + '|' + (s.removeAllRanges(), s.rangeCount)")),
+        "0None|1|Range|Hello big world|true|3|true|0"
+    );
+    assert_eq!(
+        eval(&alloc::format!("{setup} var s = getSelection(); s.setBaseAndExtent(p.firstChild, 5, p.lastChild, 2); [s.toString(), s.direction, s.containsNode(p.querySelector('b'))].join('|')")),
+        " big w|forward|true"
+    );
+}
+
+#[test]
+fn character_data_methods_and_split_text() {
+    assert_eq!(
+        eval("var p = document.createElement('p'); p.textContent = 'abcdef'; var t = p.firstChild; var u = t.splitText(2); [t.data, u.data, p.childNodes.length, t.substringData(1, 1), (t.insertData(1, 'X'), t.data), (t.deleteData(0, 1), t.data), (t.replaceData(0, 1, 'YY'), t.data)].join('|')"),
+        "ab|cdef|2|b|aXb|Xb|YYb"
+    );
+    assert_eq!(eval("var t = document.createTextNode('ab'); try { t.splitText(5) } catch (e) { e.name }"), "IndexSizeError");
+}
+
+#[test]
+fn custom_elements_registry_and_fonts() {
+    assert_eq!(
+        eval("class A extends HTMLElement {} customElements.define('x-a', A); [customElements.get('x-a') === A, customElements.get('x-b'), customElements.getName(A)].join()"),
+        "true,,x-a"
+    );
+    assert_eq!(eval("try { customElements.define('bad', function () {}) } catch (e) { e.name }"), "SyntaxError");
+    assert_eq!(eval("customElements.define('x-c', class {}); try { customElements.define('x-c', class {}) } catch (e) { e.name }"), "NotSupportedError");
+    assert_eq!(
+        lines("var log = []; customElements.whenDefined('x-w').then(function (c) { log.push('def ' + (c === C)); }); var C = class {}; customElements.define('x-w', C); setTimeout(function () { console.log('R ' + log.join()); }, 0);", 2),
+        "def true"
+    );
+    assert_eq!(
+        eval("[typeof document.fonts, document.fonts.check('12px serif'), document.fonts.status, typeof document.fonts.ready.then, typeof FontFace, document.fonts.size].join()"),
+        "object,true,loaded,function,function,0"
+    );
+}

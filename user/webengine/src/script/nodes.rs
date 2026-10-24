@@ -554,7 +554,7 @@ fn context_atom(p: &Page, el: NodeId) -> Atom {
     }
 }
 
-fn mark_scripts_started(b: &Bridge, tops: &[NodeId]) {
+pub(crate) fn mark_scripts_started(b: &Bridge, tops: &[NodeId]) {
     let Some(p) = b.page() else { return };
     let mut st = b.st.borrow_mut();
     for &t in tops {

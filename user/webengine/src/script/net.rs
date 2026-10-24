@@ -39,6 +39,8 @@ const PRELUDE: &str = concat!(
     include_str!("js/fetch.js"),
     include_str!("js/xhr.js"),
     include_str!("js/ports.js"),
+    include_str!("js/observers.js"),
+    include_str!("js/dom.js"),
     include_str!("js/events.js"),
     include_str!("js/misc.js"),
     include_str!("js/intl.js"),
@@ -67,6 +69,26 @@ pub const GLOBALS: &[&str] = &[
     "ReadableStream",
     "MessageChannel",
     "MessagePort",
+    "MutationObserver",
+    "MutationRecord",
+    "IntersectionObserver",
+    "IntersectionObserverEntry",
+    "ResizeObserver",
+    "ResizeObserverEntry",
+    // dom.js
+    "DOMParser",
+    "XMLSerializer",
+    "DOMImplementation",
+    "NodeFilter",
+    "TreeWalker",
+    "NodeIterator",
+    "AbstractRange",
+    "Range",
+    "Selection",
+    "CustomElementRegistry",
+    "customElements",
+    "FontFace",
+    "FontFaceSet",
     // misc.js
     "crypto",
     "Crypto",
@@ -136,6 +158,18 @@ const MEMBERS: &[(&str, &str, &str)] = &[
     ("Element.prototype", "getAnimations", "el_getAnimations"),
     ("Document.prototype", "getAnimations", "doc_getAnimations"),
     ("Document.prototype", "timeline", "doc_timeline"),
+    ("Document.prototype", "createRange", "doc_createRange"),
+    ("Document.prototype", "createTreeWalker", "doc_createTreeWalker"),
+    ("Document.prototype", "createNodeIterator", "doc_createNodeIterator"),
+    ("Document.prototype", "implementation", "doc_implementation"),
+    ("Document.prototype", "getSelection", "doc_getSelection"),
+    ("Document.prototype", "fonts", "doc_fonts"),
+    ("window", "getSelection", "win_getSelection"),
+    ("Text.prototype", "splitText", "text_splitText"),
+    ("CharacterData.prototype", "substringData", "cd_substringData"),
+    ("CharacterData.prototype", "insertData", "cd_insertData"),
+    ("CharacterData.prototype", "deleteData", "cd_deleteData"),
+    ("CharacterData.prototype", "replaceData", "cd_replaceData"),
 ];
 
 /// Requests a page may have outstanding at once (the app has its own, lower limits).
@@ -236,7 +270,13 @@ pub fn install_members(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
             "window" => g,
             "Element.prototype" => r.pinned(&b.protos().element),
             "Document.prototype" => r.pinned(&b.protos().document),
-            name => r.get(g, name)?,
+            name => match name.strip_suffix(".prototype") {
+                Some(class) => {
+                    let c = r.get(g, class)?;
+                    if c.is_object() { r.get(c, "prototype")? } else { c }
+                }
+                None => r.get(g, name)?,
+            },
         };
         if !obj.is_object() {
             continue;
@@ -470,6 +510,9 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     // formEntries(form) -> [[name, value], ...]
     netbytes::define_natives(b, r, n)?;
     super::ports::define_natives(b, r, n)?;
+    super::observers::define_natives(b, r, n)?;
+    super::observers::define_layout_natives(b, r, n)?;
+    super::domextra::define_natives(b, r, n)?;
     r.define_method(n, "formEntries", 1, {
         let b2 = b.clone();
         move |r, _t, a| form_entries(&b2, r, a)

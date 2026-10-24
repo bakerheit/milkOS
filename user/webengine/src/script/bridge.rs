@@ -187,6 +187,8 @@ pub struct State {
     /// `performance.timeOrigin`: the host's clock then, and the time since 1970 in ms.
     pub perf_origin: f64,
     pub time_origin: f64,
+    /// Whether IntersectionObserver / ResizeObserver want the layout looked at again.
+    pub watch: super::observers::LayoutWatch,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -257,6 +259,7 @@ impl Bridge {
                 activation_until: 0.0,
                 perf_origin: 0.0,
                 time_origin: 0.0,
+                watch: Default::default(),
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),

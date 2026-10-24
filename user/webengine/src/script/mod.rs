@@ -31,6 +31,8 @@ mod forms_js;
 mod modrt;
 mod net;
 mod netbytes;
+mod domextra;
+pub(crate) mod observers;
 
 /// For the tests.
 #[cfg(test)]
@@ -137,12 +139,17 @@ impl Runtime {
         if ports::pending(&self.b) {
             return Some(0.0);
         }
-        self.b.st.borrow().timers.next_due()
+        let due = self.b.st.borrow().timers.next_due();
+        match (due, observers::next_poll(&self.b)) {
+            (Some(a), Some(p)) => Some(a.min(p)),
+            (None, p) => p,
+            (a, None) => a,
+        }
     }
 
     pub fn wants_frame(&self) -> bool {
         let st = self.b.st.borrow();
-        !st.stopped && st.timers.wants_frame()
+        !st.stopped && (st.timers.wants_frame() || (st.watch.on && st.watch.dirty))
     }
 
     pub fn take_requests(&mut self) -> Vec<PageRequest> {
@@ -307,6 +314,7 @@ impl Runtime {
             }
             let out = f(&b, realm);
             checkpoint(&b, realm);
+            observers::note_entry_end(&b);
             let mut st = b.st.borrow_mut();
             st.depth -= 1;
             let top = st.depth == 0;
@@ -335,6 +343,7 @@ impl Runtime {
         // `load` waits for the stylesheets and images, and for the frames the host is loading.
         let pending_resources = !page.pending_resources().is_empty() || self.b.xf.hold_load.get();
         self.entry(page, host, |b, r| {
+            observers::poll(b);
             let mut did = false;
             // Module work the page queued (import maps, module graphs, preloads) starts
             // first, so its fetches overlap with the classic scripts ahead of it.
@@ -415,7 +424,7 @@ impl Runtime {
         self.entry(page, host, |b, r| {
             let cbs = b.st.borrow_mut().timers.take_frame();
             let now = b.host().map_or(0.0, |h| h.now());
-            let any = !cbs.is_empty();
+            let mut any = !cbs.is_empty();
             for (_, h) in cbs {
                 if let Some((f, _)) = b.cb(r, h) {
                     b.st.borrow_mut().stats.callbacks += 1;
@@ -425,6 +434,10 @@ impl Runtime {
                 if b.st.borrow().stopped {
                     break;
                 }
+            }
+            // The layout observers, after the frame callbacks' changes.
+            if !b.st.borrow().stopped && observers::check_layout(b, r) {
+                any = true;
             }
             any
         })
@@ -541,27 +554,37 @@ fn key_target(page: &Page) -> NodeId {
     if b != NONE { b } else { 0 }
 }
 
+/// Run the jobs queued, reporting what they throw.
+pub(crate) fn run_jobs_reporting(b: &Rc<Bridge>, r: &mut Realm) {
+    for _ in 0..1000 {
+        match r.run_jobs() {
+            Ok(()) => break,
+            Err(e) => {
+                report(b, r, &e, "");
+                if e.is_uncatchable() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 /// The microtask checkpoint: run jobs until none are left (reporting what they throw), then
 /// report promise rejections nobody handled.
 fn checkpoint(b: &Rc<Bridge>, r: &mut Realm) {
     if b.st.borrow().depth > 1 {
         return;
     }
-    // Jobs, then the module graphs that came in (an `import()` answers with more jobs), until
-    // neither has anything.
+    // Jobs, then the records for MutationObservers and the module graphs that came in (an
+    // `import()` answers with more jobs), until none has anything.
     for _ in 0..100 {
-        for _ in 0..1000 {
-            match r.run_jobs() {
-                Ok(()) => break,
-                Err(e) => {
-                    report(b, r, &e, "");
-                    if e.is_uncatchable() {
-                        break;
-                    }
-                }
-            }
+        run_jobs_reporting(b, r);
+        let observed = observers::deliver(b, r);
+        if b.st.borrow().stopped {
+            break;
         }
-        if b.st.borrow().stopped || !modrt::pump(b, r) {
+        let modules = modrt::pump(b, r);
+        if !modules && !observed {
             break;
         }
     }

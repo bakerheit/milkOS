@@ -113,6 +113,31 @@ pub struct Changes {
 /// Past this many separate restyle roots in one batch, everything is restyled.
 pub const MAX_RESTYLE_ROOTS: usize = 64;
 
+/// One thing that happened to a watched part of the tree (what a `MutationObserver` is told).
+#[derive(Clone, Debug)]
+pub enum MutRec {
+    /// `added` / `removed` is NONE when the other one happened. `prev` / `next` are the
+    /// siblings around the change.
+    Child { target: NodeId, added: NodeId, removed: NodeId, prev: NodeId, next: NodeId, anc: Vec<NodeId> },
+    Attr { target: NodeId, name: String, old: Option<String>, anc: Vec<NodeId> },
+    Data { target: NodeId, old: String, anc: Vec<NodeId> },
+}
+
+/// Most records held at once (past it, more are dropped), and most bytes of old values.
+pub const MAX_MUT_RECORDS: usize = 20_000;
+pub const MAX_MUT_BYTES: usize = 8 << 20;
+
+/// The log behind `MutationObserver`: which nodes are watched, and the records for them.
+#[derive(Default)]
+pub struct MutLog {
+    /// Watched nodes: (observers on the node itself, observers of its subtree).
+    pub watch: alloc::collections::BTreeMap<NodeId, (u32, u32)>,
+    pub recs: Vec<MutRec>,
+    bytes: usize,
+    /// Roots whose giving back waits until the records that name them are delivered.
+    pub deferred: Vec<NodeId>,
+}
+
 pub struct Dom {
     pub nodes: Vec<Node>,
     pub atoms: Interner,
@@ -131,6 +156,7 @@ pub struct Dom {
     /// `:checked` matches), once the page keeps it; None: the `checked` / `selected`
     /// attributes say.
     pub checked: Option<alloc::collections::BTreeSet<NodeId>>,
+    pub mlog: MutLog,
 }
 
 /// The most text and attribute bytes scripts may grow a page to.
@@ -169,6 +195,7 @@ impl Dom {
             generation: 0,
             bytes: 0,
             checked: None,
+            mlog: MutLog::default(),
         }
     }
 
@@ -279,6 +306,70 @@ impl Dom {
         self.nodes[n as usize].parent
     }
 
+    // ---- the mutation log ---------------------------------------------------------------
+
+    /// The watched nodes among `target` and its ancestors (empty: nobody is told).
+    fn mut_anc(&self, target: NodeId) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        if self.mlog.watch.is_empty() {
+            return out;
+        }
+        let mut c = target;
+        let mut k = 0;
+        while c != NONE && k < 4096 {
+            if let Some(&(d, deep)) = self.mlog.watch.get(&c)
+                && (d > 0 || deep > 0)
+            {
+                out.push(c);
+            }
+            c = self.nodes[c as usize].parent;
+            k += 1;
+        }
+        out
+    }
+
+    fn mut_push(&mut self, rec: MutRec, bytes: usize) {
+        if self.mlog.recs.len() >= MAX_MUT_RECORDS || self.mlog.bytes + bytes > MAX_MUT_BYTES {
+            return;
+        }
+        self.mlog.bytes += bytes;
+        self.mlog.recs.push(rec);
+    }
+
+    fn mut_child(&mut self, target: NodeId, added: NodeId, removed: NodeId, prev: NodeId, next: NodeId) {
+        let anc = self.mut_anc(target);
+        if !anc.is_empty() {
+            self.mut_push(MutRec::Child { target, added, removed, prev, next, anc }, 64);
+        }
+    }
+
+    fn mut_attr(&mut self, target: NodeId, name: &str, old: Option<String>) {
+        let anc = self.mut_anc(target);
+        if !anc.is_empty() {
+            let n = name.len() + old.as_ref().map_or(0, |o| o.len()) + 64;
+            self.mut_push(MutRec::Attr { target, name: String::from(name), old, anc }, n);
+        }
+    }
+
+    fn mut_data(&mut self, target: NodeId, old: String) {
+        let anc = self.mut_anc(target);
+        if !anc.is_empty() {
+            let n = old.len() + 64;
+            self.mut_push(MutRec::Data { target, old, anc }, n);
+        }
+    }
+
+    /// Hand over the records made since the last call.
+    pub fn take_mutations(&mut self) -> Vec<MutRec> {
+        self.mlog.bytes = 0;
+        core::mem::take(&mut self.mlog.recs)
+    }
+
+    /// Roots whose freeing was put off (see [`Dom::free_subtree`]).
+    pub fn take_deferred(&mut self) -> Vec<NodeId> {
+        core::mem::take(&mut self.mlog.deferred)
+    }
+
     pub fn detach(&mut self, n: NodeId) {
         let (p, prev, next) = {
             let x = &self.nodes[n as usize];
@@ -289,6 +380,9 @@ impl Dom {
         }
         if self.track {
             self.note_tree(p, n);
+        }
+        if !self.mlog.watch.is_empty() {
+            self.mut_child(p, NONE, n, prev, next);
         }
         if prev != NONE {
             self.nodes[prev as usize].next = next;
@@ -324,6 +418,9 @@ impl Dom {
             self.nodes[parent as usize].first_child = child;
         }
         self.nodes[parent as usize].last_child = child;
+        if !self.mlog.watch.is_empty() {
+            self.mut_child(parent, child, NONE, last, NONE);
+        }
     }
 
     /// Insert `child` into `parent` before `before` (NONE = append).
@@ -348,6 +445,9 @@ impl Dom {
         } else {
             self.nodes[parent as usize].first_child = child;
         }
+        if !self.mlog.watch.is_empty() {
+            self.mut_child(parent, child, NONE, prev, before);
+        }
     }
 
     /// Append text at a position: merged into the previous sibling if that is a text node
@@ -358,10 +458,17 @@ impl Dom {
         } else {
             self.nodes[before as usize].prev
         };
-        if prev != NONE
-            && let NodeData::Text(t) = &mut self.nodes[prev as usize].data
-        {
-            t.push_str(s);
+        if prev != NONE && matches!(self.nodes[prev as usize].data, NodeData::Text(_)) {
+            if !self.mlog.watch.is_empty() {
+                let old = match &self.nodes[prev as usize].data {
+                    NodeData::Text(t) => t.clone(),
+                    _ => String::new(),
+                };
+                self.mut_data(prev, old);
+            }
+            if let NodeData::Text(t) = &mut self.nodes[prev as usize].data {
+                t.push_str(s);
+            }
             return;
         }
         let t = self.create_text(String::from(s));
@@ -563,12 +670,14 @@ impl Dom {
         let Some(NodeData::Element(e)) = self.nodes.get_mut(n as usize).map(|x| &mut x.data) else {
             return;
         };
+        let mut old: Option<String> = None;
         match e.attrs.iter_mut().find(|a| &*a.name == name) {
             Some(a) => {
                 if &*a.value == value {
                     return;
                 }
                 self.bytes = (self.bytes + value.len()).saturating_sub(a.value.len());
+                old = Some(String::from(&*a.value));
                 a.value = value.into();
             }
             None => {
@@ -579,6 +688,9 @@ impl Dom {
                 })
             }
         }
+        if !self.mlog.watch.is_empty() {
+            self.mut_attr(n, name, old);
+        }
         self.attr_changed(n, name);
     }
 
@@ -587,8 +699,12 @@ impl Dom {
             return;
         };
         let before = e.attrs.len();
+        let old = e.attr(name).map(String::from);
         e.attrs.retain(|a| &*a.name != name);
         if e.attrs.len() != before {
+            if !self.mlog.watch.is_empty() {
+                self.mut_attr(n, name, old);
+            }
             self.attr_changed(n, name);
         }
     }
@@ -674,8 +790,11 @@ impl Dom {
                     return;
                 }
                 self.bytes = (self.bytes + s.len()).saturating_sub(t.len());
-                t.clear();
+                let old = core::mem::take(t);
                 t.push_str(s);
+                if !self.mlog.watch.is_empty() {
+                    self.mut_data(n, old);
+                }
             }
             _ => return,
         }
@@ -754,6 +873,13 @@ impl Dom {
     /// nothing refers to these ids any more (no script object, no saved focus).
     pub fn free_subtree(&mut self, n: NodeId) {
         if n == 0 || n as usize >= self.nodes.len() {
+            return;
+        }
+        // Records may name these nodes: they are given back once those are delivered.
+        if !self.mlog.recs.is_empty() && self.nodes[n as usize].parent == NONE {
+            if self.mlog.deferred.len() < 100_000 {
+                self.mlog.deferred.push(n);
+            }
             return;
         }
         self.detach(n);

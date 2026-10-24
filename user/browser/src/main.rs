@@ -32,6 +32,7 @@ mod js;
 mod mem;
 mod net;
 mod request;
+mod stream;
 mod store;
 mod sysfont;
 mod tab;
@@ -304,6 +305,9 @@ pub enum NoticeKind {
     /// "This page uses a lot of memory. Stop it?" about frame `frame` of the tab: Stop ends that
     /// document's scripts, Wait leaves it alone for a while.
     AskStop { frame: FrameId },
+    /// "This page is too big to show completely. Load more?": Load more fetches it again with
+    /// a window four times as big.
+    LoadMore,
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +539,7 @@ impl App {
                     started_ms: now_ms(),
                     source: true,
                     restore: None,
+                    ..Load::default()
                 });
                 return;
             }
@@ -562,9 +567,14 @@ impl App {
             None => url.to_text(),
         };
         let req = req.unwrap_or_else(|| Request::get(&url));
+        // The page streams in: the Browser takes it as it comes, shows the top while the rest
+        // is on its way, and takes in as much as the machine's memory allows (stream.rs).
+        let more = self.tabs[ti].more_next.take().unwrap_or(0);
+        let cap = self.page_cap(more);
+        self.fetch.caps = self.fetch_caps();
         let id = self
             .fetch
-            .start(Kind::Page, req, Context::TopLevel { from });
+            .start_page(req, Context::TopLevel { from }, cap);
         let scroll = if push {
             None
         } else {
@@ -579,6 +589,11 @@ impl App {
             started_ms: now_ms(),
             source: false,
             restore: None,
+            streaming: true,
+            cap,
+            more,
+            preview_next: stream::FIRST_PREVIEW,
+            ..Load::default()
         });
     }
 
@@ -1730,6 +1745,7 @@ impl App {
         }
         changed |= self.net_tick();
         changed |= self.workers_tick();
+        changed |= self.stream_tick();
         changed |= self.mem_front();
         changed |= self.mem_tick();
         self.frames_sweep();
@@ -1873,18 +1889,47 @@ impl App {
         else {
             return; // stopped, or the tab is gone
         };
-        let load = self.tabs[ti].load.take().unwrap();
+        let mut load = self.tabs[ti].load.take().unwrap();
+        // A page that streamed in: what came since the last look, and the whole body for the
+        // page to be made of.
+        let (rest, head2) = self.fetch.take_leftover(id);
+        if load.streaming {
+            load.buf.extend_from_slice(&rest);
+            if load.head.is_none() {
+                load.head = head2;
+            }
+        }
+        let out = match out {
+            Outcome::Page(mut resp) if resp.streamed && !load.source => {
+                resp.body = core::mem::take(&mut load.buf);
+                Outcome::Page(resp)
+            }
+            Outcome::Failed(f)
+                if load.streaming
+                    && f.error != Error::Cancelled
+                    && let Some(resp) = Self::partial_response(&mut load) =>
+            {
+                // The connection broke part way: what came is shown, and the page says so.
+                let msg = format!("The page stopped loading before its end: {}.", f.error);
+                self.console_line(ti, "", webengine::ConsoleLevel::Error, &msg);
+                load.partial_note = Some(msg);
+                Outcome::Page(resp)
+            }
+            o => o,
+        };
         match out {
             Outcome::Page(resp) if load.source => {
                 self.finish_source(ti, load, resp, cert);
             }
             Outcome::Page(resp) => {
+                let cut_at = resp.cut.then_some(resp.body.len());
                 let ct = String::from(resp.content_type());
                 let addr = match &load.fragment {
                     Some(f) => format!("{}#{f}", resp.url.to_text()),
                     None => resp.url.to_text(),
                 };
                 let scripts = self.js_on.then(|| self.script_limits(mem::Kind::Page, true));
+                let parse_started = now_ms();
                 let mut page = Page::new(
                     &addr,
                     Some(resp.url.clone()),
@@ -1892,8 +1937,8 @@ impl App {
                     &ct,
                     PageKind::Web,
                     scripts,
-                    self.engine_limits(),
-                );
+                    self.engine_limits_more(load.more),
+                    );
                 page.status = resp.status;
                 page.ref_policy = resp
                     .header("referrer-policy")
@@ -1920,11 +1965,20 @@ impl App {
                     page.title,
                     resp.redirects.len()
                 );
+                if self.log && resp.body.len() > 1 << 20 {
+                    rt::println!("[browser] parsed {} KB in {} ms", resp.body.len() >> 10, now_ms() - parse_started);
+                }
                 let title = page.title.clone();
+                let truncated = page.doc.truncated();
                 let t = &mut self.tabs[ti];
+                // (A page shown while it came was never the one the history left: the scroll
+                // of the page it replaced was kept when it first showed.)
+                let seen_scroll = load.previewed.then_some(t.scroll);
                 if load.push {
                     let scroll = t.scroll;
-                    if let Some(e) = t.history.current_mut() {
+                    if !load.previewed
+                        && let Some(e) = t.history.current_mut()
+                    {
                         e.scroll = scroll;
                     }
                     t.history.push_doc(&addr, doc_id);
@@ -1939,13 +1993,25 @@ impl App {
                     e.title = title.clone();
                 }
                 t.show(page, 0);
+                t.page_more = load.more;
                 if let Some((_, plan)) = load.restore.clone() {
                     t.frames.restore = plan;
                 }
                 t.anchor = load.fragment.clone();
-                if let Some(s) = load.scroll {
+                if let Some(s) = seen_scroll.or(load.scroll) {
                     t.scroll = s;
                     t.target = s;
+                }
+                if let Some(n) = cut_at {
+                    self.announce_cut(ti, n);
+                } else if truncated {
+                    self.announce_cut(ti, 0);
+                } else if let Some(note) = load.partial_note.take()
+                    && ti == self.cur
+                {
+                    let (uid, epoch) = (self.tabs[ti].uid, self.tabs[ti].epoch);
+                    self.notice = Some(Notice::info(uid, epoch, &note));
+                    self.dirty = true;
                 }
                 self.visits.add(&addr, &title, net::now_secs());
                 // Its frames start loading before its scripts run: they hold its `load` back.

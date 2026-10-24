@@ -61,6 +61,7 @@ pub struct MemMonitor {
     pub blind: bool,
     /// Say what happens on the serial line (`--log-input`).
     pub log: bool,
+    pub log_realms: bool,
     logged: (u64, usize),
     /// Counters for the log and the tests.
     pub reads: u64,
@@ -92,6 +93,7 @@ impl MemMonitor {
             planned_at: 0,
             blind: false,
             log,
+            log_realms: true,
             logged: (0, 0),
             reads: 0,
             plans: 0,
@@ -133,14 +135,23 @@ impl MemMonitor {
             if self.logged.0.abs_diff(avail_mb as u64) >= 16 || self.logged.1.abs_diff(used) >= 8 << 20 {
                 self.logged = (avail_mb as u64, used);
                 rt::println!(
-                    "[browser] memory: {} MB free of {} MB, room {} MB, {} realms hold {} MB (browser heap {} MB), level {:?}",
+                    "[browser] memory: {} MB free of {} MB, room {} MB, {} realms hold {} MB (browser heap {} MB), level {:?}{}",
                     avail_mb,
                     self.machine.total >> 20,
                     self.budget.room >> 20,
                     self.realms.len(),
                     used >> 20,
                     rt::heap::stats().used >> 20,
-                    self.budget.level
+                    self.budget.level,
+                    if self.log_realms {
+                        let mut t = String::new();
+                        for (k, r) in &self.realms {
+                            t.push_str(&alloc::format!(" [{:x}:{:?} {}/{} MB]", k, r.kind, r.used >> 20, r.limit >> 20));
+                        }
+                        t
+                    } else {
+                        String::new()
+                    }
                 );
             }
         }
@@ -213,7 +224,7 @@ impl MemMonitor {
     }
 
     /// The heap budget of realm `key` now, which holds `used`.
-    pub fn allowance(&mut self, now: u64, key: u64, kind: Kind, tab: u64, used: usize) -> Allowance {
+    pub fn allowance(&mut self, now: u64, key: u64, kind: Kind, tab: u64, fg: bool, used: usize) -> Allowance {
         if self.blind {
             return Allowance::Keep;
         }
@@ -228,7 +239,13 @@ impl MemMonitor {
         if !self.refresh(now) && now.saturating_sub(self.planned_at) >= PLAN_EVERY_MS {
             self.replan(now);
         }
-        let limit = self.budget.limit_of(key).unwrap_or_else(|| self.budget.for_new(kind, tab == self.front));
+        // (By the plan's room and weights, but with what the realm holds this very moment.)
+        let counted = self.budget.limit_of(key).is_some();
+        let limit = if counted {
+            self.budget.limit_with(kind, fg, used)
+        } else {
+            self.budget.limit_with(kind, fg, used).min(self.budget.for_new(kind, fg).max(used + used / 8))
+        };
         if let Some(k) = self.realms.get_mut(&key) {
             k.limit = limit;
         }
@@ -259,6 +276,8 @@ impl App {
             memory: limit,
             // A script's text is bounded by the memory it could be given, not by 8 MB.
             max_source: caps.script.max(8 << 20),
+            // What a page may read of a response whole (.text(), .json(), ...).
+            buffer: caps.response,
             // (The syntax tree of the biggest piece alive at once, apart from the heap.)
             compile: (limit / 2).clamp(64 << 20, 512 << 20),
             ..ScriptLimits::default()
@@ -268,8 +287,19 @@ impl App {
     /// The engine's limits for a page, from what the machine has free: how much text it takes in
     /// and how many nodes it builds.
     pub fn engine_limits(&self) -> webengine::Limits {
+        self.engine_limits_more(0)
+    }
+
+    /// The same after "Load more" was asked `more` times: four times the bytes and the nodes
+    /// each time, up to what the machine's room allows.
+    pub fn engine_limits_more(&self, more: u32) -> webengine::Limits {
         let caps = self.mem.caps();
-        webengine::Limits { max_input: caps.page, max_nodes: caps.nodes, ..webengine::Limits::default() }
+        let k = 1usize << (2 * more.min(10));
+        webengine::Limits {
+            max_input: caps.page.saturating_mul(k).min(caps.page_max).max(caps.page),
+            max_nodes: caps.nodes.saturating_mul(k).min(caps.nodes_max).max(caps.nodes),
+            ..webengine::Limits::default()
+        }
     }
 
     /// Whether tab `ti` is the one in front.
@@ -326,9 +356,9 @@ impl App {
     pub fn announce_memory_stop(&mut self, ti: usize, f: FrameId, used: usize, limit: usize) {
         let what = if f.is_top() { "This page" } else { "A frame of this page" };
         let msg = alloc::format!(
-            "{what} ran out of memory: it held {} and needed more than the {} the Browser could give it. Its scripts were stopped and their memory given back. The Browser, the desktop and your other tabs are not affected.",
-            human(to_real(used.min(limit))),
+            "{what} ran out of memory: it needed more than the {} the Browser could give it (it held {}). Its scripts were stopped and their memory given back. The Browser, the desktop and your other tabs are not affected.",
             human(to_real(limit)),
+            human(to_real(used)),
         );
         self.mem_console(ti, ConsoleLevel::Error, &msg);
         if ti == self.cur {
@@ -384,7 +414,7 @@ impl App {
         for _ in 0..4 {
             let Some(step) = self.mem.ladder.next(level, now) else { break };
             let did = self.mem_step(step, level);
-            if self.mem.log {
+            if self.mem.log && (did || step != Step::AskStop) {
                 rt::println!("[browser] memory is {:?}: {:?} {}", level, step, if did { "did something" } else { "had nothing to do" });
             }
             changed |= did;
@@ -566,7 +596,6 @@ impl App {
             .mem
             .list()
             .into_iter()
-            .filter(|r| r.kind != Kind::Worker)
             .filter(|r| self.mem_waits.get(&r.key).is_none_or(|until| *until <= now_ms()))
             .collect();
         let Some(key) = pick_heaviest(&list) else { return false };
@@ -574,7 +603,13 @@ impl App {
         let Some(ti) = self.tabs.iter().position(|t| t.uid == uid) else { return false };
         let used = self.mem.known(key).map_or(0, |k| k.used);
         let epoch = self.tabs[ti].epoch;
-        let what = if frame.is_top() { "This page" } else { "A frame on this page" };
+        let what = if frame.is_top() {
+            "This page"
+        } else if crate::workers::is_worker_frame(frame) {
+            "A worker of this page"
+        } else {
+            "A frame on this page"
+        };
         let text = alloc::format!("{what} uses a lot of memory ({}). Stop it?", human(to_real(used)));
         self.notice = Some(crate::Notice { tab: uid, epoch, text, kind: crate::NoticeKind::AskStop { frame } });
         if self.mem.log {
@@ -590,9 +625,20 @@ impl App {
         let Some(n) = self.notice.take() else { return };
         self.dirty = true;
         let Some(ti) = self.tabs.iter().position(|t| t.uid == n.tab && t.epoch == n.epoch) else { return };
+        if n.kind == crate::NoticeKind::LoadMore {
+            if stop {
+                self.load_more(ti);
+            }
+            return;
+        }
         if let crate::NoticeKind::AskStop { frame } = n.kind {
             let key = key_of(n.tab, frame);
-            if stop {
+            if stop && crate::workers::is_worker_frame(frame) {
+                self.worker_end(crate::workers::worker_of(frame));
+                self.mem.forget(key);
+                self.say("Stopped the worker");
+                self.mem_console(ti, ConsoleLevel::Warn, "You stopped a worker of this page because it used a lot of memory. The page, the Browser and your other tabs are not affected.");
+            } else if stop {
                 self.tabs[ti].page.doc.stop_scripts_because(frame, "you stopped it: it used a lot of memory");
                 self.mem.forget(key);
                 self.after_scripts(ti);

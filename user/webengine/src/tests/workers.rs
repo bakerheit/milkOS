@@ -254,7 +254,7 @@ impl Sim {
                         self.doc.worker_event(&mut self.host, id, WorkerEvent::Message(m));
                     }
                     FromWorker::Net(NetOut::Start(req)) => self.serve(id, req),
-                    FromWorker::Net(NetOut::Cancel(_)) => {}
+                    FromWorker::Net(NetOut::Cancel(_) | NetOut::Ack { .. }) => {}
                     FromWorker::Port { port, msg } => {
                         self.doc.worker_event(&mut self.host, id, WorkerEvent::Port { port, msg });
                     }

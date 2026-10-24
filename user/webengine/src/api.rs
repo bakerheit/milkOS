@@ -859,6 +859,10 @@ pub struct ScriptLimits {
     /// script or one function is being compiled; big functions are compiled on their first
     /// call). See `jsengine::Limits::max_compile_bytes`.
     pub compile: usize,
+    /// The most a response's body may be when the page reads it whole (`.text()`, `.json()`,
+    /// `.arrayBuffer()`, `.blob()`): more is an error for the page (read it with `response.body`
+    /// instead, which has no limit). The app sets it from the machine's free memory.
+    pub buffer: usize,
 }
 
 impl Default for ScriptLimits {
@@ -868,6 +872,7 @@ impl Default for ScriptLimits {
             slow_ms: 2_000,
             max_source: 8 << 20,
             compile: 96 << 20,
+            buffer: 8 << 20,
         }
     }
 }
@@ -1040,6 +1045,11 @@ pub struct NetRequest {
     pub timeout_ms: u32,
     /// Always preflight a cross-origin request (an XHR with listeners on its `upload`).
     pub force_preflight: bool,
+    /// The page reads the body in pieces if it can ([`NetEvent::Chunk`], then an empty
+    /// [`NetEvent::Done`]) and says how much it has used with [`NetOut::Ack`]; the app should
+    /// not send much more than a window (a megabyte) ahead of what was acknowledged. False: the
+    /// body comes whole in [`NetEvent::Done`], as it always did. Only `fetch` asks for pieces.
+    pub stream: bool,
 }
 
 /// What a script's request leaves for the app, in order (see [`Document::take_net`]).
@@ -1048,6 +1058,9 @@ pub enum NetOut {
     Start(NetRequest),
     /// The script aborted it (or its timeout passed): stop the work, send nothing more.
     Cancel(u32),
+    /// A streamed request's page has used the body up to this many bytes in all (see
+    /// [`NetRequest::stream`]): the app may send that much plus a window.
+    Ack { id: u32, consumed: u64 },
 }
 
 /// The kind of response the page gets (Fetch's response `type`).
@@ -1102,7 +1115,11 @@ pub enum NetEvent {
     Head(NetHead),
     /// Body bytes received so far, and the total if the server said.
     Progress { loaded: u64, total: Option<u64> },
-    /// The whole body (empty for an opaque response and for HEAD).
+    /// The next piece of the body of a request that asked for pieces ([`NetRequest::stream`]); the
+    /// pieces come in order between `Head` and `Done`.
+    Chunk(Vec<u8>),
+    /// The whole body (empty for an opaque response and for HEAD), or, after [`NetEvent::Chunk`]s,
+    /// nothing more: the end.
     Done(Vec<u8>),
     Failed(NetFailure),
 }
@@ -1983,6 +2000,7 @@ impl Document {
             slow_ms: 100,
             max_source: boot.limits.max_source,
             compile: 48 << 20,
+            buffer: (boot.limits.heap / 2).max(8 << 20),
         };
         let mut d = Document::from_page(page);
         d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new_worker(&d.page, limits, boot.clone())));

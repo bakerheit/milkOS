@@ -52,6 +52,8 @@ pub struct Page {
     pub ref_policy: browserkit::netpolicy::ReferrerPolicy,
     /// The document's number in the session history.
     pub doc_id: u64,
+    /// Shown while the rest of it still comes (stream.rs): no scripts, not in the history yet.
+    pub preview: bool,
 }
 
 impl Page {
@@ -85,6 +87,7 @@ impl Page {
             space: None,
             ref_policy: browserkit::netpolicy::ReferrerPolicy::DEFAULT,
             doc_id: 0,
+            preview: false,
         }
     }
 
@@ -98,6 +101,7 @@ impl Page {
 }
 
 /// A page on its way.
+#[derive(Default)]
 pub struct Load {
     pub job: JobId,
     /// What it is fetching (shown in the address bar meanwhile).
@@ -113,6 +117,19 @@ pub struct Load {
     /// Back or forward to an entry: the document it was (to rebind in the history) and where its
     /// frames were.
     pub restore: Option<(u64, alloc::vec::Vec<scriptnet::frame::history::Reload>)>,
+    /// The page's body streams in (see stream.rs): what has come, the head (once known), when
+    /// the page is shown next as it is (bytes, and ms of the last time), whether it was shown
+    /// already, the most the job takes in, and how many times "Load more" raised that.
+    pub streaming: bool,
+    pub buf: Vec<u8>,
+    pub head: Option<crate::net::PageHead>,
+    pub preview_next: usize,
+    pub preview_at: u64,
+    pub previewed: bool,
+    pub cap: usize,
+    pub more: u32,
+    /// The page's end never came (the connection broke): said on the bar once it is shown.
+    pub partial_note: Option<String>,
 }
 
 pub struct Tab {
@@ -158,6 +175,10 @@ pub struct Tab {
     pub touched: bool,
     /// When the tab was last in front (ms), for choosing a tab to discard.
     pub last_front: u64,
+    /// How many times "Load more" was asked of this page (each makes the window of the page
+    /// four times as big); the next load takes it (see stream.rs).
+    pub page_more: u32,
+    pub more_next: Option<u32>,
     /// The tab was discarded to give memory back: what it showed, so it can be fetched again
     /// when it is opened.
     pub discarded: Option<Discarded>,
@@ -220,6 +241,8 @@ impl Tab {
             mem_stops: alloc::collections::BTreeSet::new(),
             touched: false,
             last_front: 0,
+            page_more: 0,
+            more_next: None,
             discarded: None,
         }
     }

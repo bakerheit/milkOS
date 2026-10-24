@@ -484,6 +484,7 @@ impl App {
                 match out {
                     NetOut::Start(req) => self.net_start(ti, wframe(id), req),
                     NetOut::Cancel(r) => self.net_cancel(ti, wframe(id), r),
+                    NetOut::Ack { id: req, consumed } => self.net_ack(ti, wframe(id), req, consumed),
                 }
             }
             HubEvent::Console { owner, id, line, .. } => match self.tab_of(owner.tab, owner.epoch) {
@@ -499,6 +500,20 @@ impl App {
                         CloseWhy::Stopped(s) => format!("stopped: {s}"),
                     };
                     rt::println!("[browser] worker {id} ended: {w}");
+                }
+                // A worker that ran out of memory is said so on the bar too (the console has
+                // the whole story).
+                if let CloseWhy::Stopped(s) = &why
+                    && s.starts_with("it ran out of memory")
+                    && let Some(ti) = self.tab_of(owner.tab, owner.epoch)
+                    && ti == self.cur
+                {
+                    self.notice = Some(crate::Notice::info(
+                        owner.tab,
+                        owner.epoch,
+                        "A worker of this page ran out of memory and was stopped. The page and your other tabs are not affected.",
+                    ));
+                    self.dirty = true;
                 }
                 self.worker_forget(id, Some(owner));
             }
@@ -540,8 +555,10 @@ impl App {
         }
         // Each worker's heap limit follows the memory plan (the machine's free memory, the
         // tabs open, what everything holds).
-        for (id, tab, _) in self.workers.heaps() {
-            if let Some(l) = self.mem.budget.limit_of(crate::mem::worker_key(tab, id)) {
+        for (id, tab, used) in self.workers.heaps() {
+            let fg = self.tabs.get(self.cur).is_some_and(|t| t.uid == tab);
+            if self.mem.budget.limit_of(crate::mem::worker_key(tab, id)).is_some() {
+                let l = self.mem.budget.limit_with(browserkit::memory::Kind::Worker, fg, used);
                 self.workers.set_heap_limit(id, l);
             }
         }

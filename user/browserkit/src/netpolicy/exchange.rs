@@ -324,6 +324,8 @@ pub struct Exchange {
     policy: ReferrerPolicy,
     force_preflight: bool,
     timeout_ms: u64,
+    /// The page reads the body in pieces: the response limit (a whole body's) does not apply.
+    streaming: bool,
 
     url: Url,
     redirects: usize,
@@ -391,6 +393,12 @@ fn clean_reason(r: &str) -> String {
 }
 
 impl Exchange {
+    /// The page takes the body in pieces (a streamed fetch): the limit on a whole response
+    /// does not apply to it.
+    pub fn set_streaming(&mut self, on: bool) {
+        self.streaming = on;
+    }
+
     /// Check the request against every rule that needs no network, and set it up.
     pub fn start(cfg: &Config, page: &Page, init: RequestInit) -> Result<Begin, NetError> {
         let lim = &cfg.limits;
@@ -536,6 +544,7 @@ impl Exchange {
             policy,
             force_preflight: init.force_preflight,
             timeout_ms: cfg.effective_timeout(init.timeout_ms),
+            streaming: false,
             url: url.clone(),
             redirects: 0,
             tainting: ResponseType::Basic,
@@ -805,7 +814,8 @@ impl Exchange {
         if !(200..=599).contains(&status) {
             return Err(NetError::BadResponse(alloc::format!("status {status}")));
         }
-        if let Some(cl) = combined_value(headers, "content-length")
+        if !self.streaming
+            && let Some(cl) = combined_value(headers, "content-length")
             && let Ok(n) = cl.trim().parse::<usize>()
             && n > lim.max_response_body
         {

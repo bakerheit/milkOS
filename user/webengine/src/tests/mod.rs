@@ -19,6 +19,7 @@ mod render;
 mod scheme;
 mod script;
 mod scripts;
+mod streaming;
 mod webapis;
 mod workers;
 mod xframes;

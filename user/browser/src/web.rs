@@ -499,6 +499,11 @@ impl Doc {
             .any(|f| self.d.frame_doc(f).is_some_and(|d| d.needs_layout()))
     }
 
+    /// The page was cut at the engine's limits (bytes or nodes).
+    pub fn truncated(&self) -> bool {
+        self.d.truncated()
+    }
+
     pub fn title(&self) -> String {
         self.d.title()
     }

@@ -645,6 +645,7 @@ mod tests {
             cache: String::new(),
             timeout_ms: 0,
             force_preflight: false,
+            stream: false,
         };
         let t = h.backend.threads.get_mut(&1).unwrap();
         t.said.push_back(FromWorker::Message(msg("\"hi\"")));

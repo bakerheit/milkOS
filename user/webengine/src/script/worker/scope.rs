@@ -349,6 +349,7 @@ fn import_scripts(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value>
             cache: String::from("default"),
             timeout_ms: 0,
             force_preflight: false,
+            stream: false,
         };
         let answer = match b.host() {
             Some(h) => h.fetch_blocking(req),

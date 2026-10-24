@@ -43,18 +43,26 @@ pub struct Run {
     pub lines: Vec<String>,
     pub requests: Vec<NetRequest>,
     pub cancelled: Vec<u32>,
+    /// (request, bytes used) for every acknowledgement the page sent.
+    pub acks: Vec<(u32, u64)>,
     pub pending: usize,
     pub doc: Document,
 }
 
 /// Run `js` in a page, answering its requests with `serve`, for up to `ticks` ticks.
-pub fn run_with(js: &str, ticks: u32, mut serve: impl FnMut(&NetRequest) -> Vec<Reply>) -> Run {
+pub fn run_with(js: &str, ticks: u32, serve: impl FnMut(&NetRequest) -> Vec<Reply>) -> Run {
+    run_limits(js, ticks, ScriptLimits::default(), serve)
+}
+
+/// [`run_with`] with the page's own script limits.
+pub fn run_limits(js: &str, ticks: u32, limits: ScriptLimits, mut serve: impl FnMut(&NetRequest) -> Vec<Reply>) -> Run {
     let html = alloc::format!("<!DOCTYPE html><body><script>{js}</script></body>");
-    let mut d = doc(&html);
+    let mut d = super::script::doc_with(&html, limits);
     let mut h = Host::new();
     let mut lines: Vec<String> = Vec::new();
     let mut requests = Vec::new();
     let mut cancelled = Vec::new();
+    let mut acks: Vec<(u32, u64)> = Vec::new();
     // (due tick, id, event)
     let mut queue: Vec<(u32, u32, NetEvent)> = Vec::new();
     for tick in 0..ticks {
@@ -75,6 +83,7 @@ pub fn run_with(js: &str, ticks: u32, mut serve: impl FnMut(&NetRequest) -> Vec<
                         cancelled.push(id);
                         queue.retain(|q| q.1 != id);
                     }
+                    NetOut::Ack { id, consumed } => acks.push((id, consumed)),
                 }
             }
             // Deliver what is due, in order.
@@ -96,7 +105,7 @@ pub fn run_with(js: &str, ticks: u32, mut serve: impl FnMut(&NetRequest) -> Vec<
         h.now += 20.0;
     }
     let pending = d.net_pending();
-    Run { lines, requests, cancelled, pending, doc: d }
+    Run { lines, requests, cancelled, acks, pending, doc: d }
 }
 
 pub fn run(js: &str, serve: impl FnMut(&NetRequest) -> Vec<Reply>) -> Run {

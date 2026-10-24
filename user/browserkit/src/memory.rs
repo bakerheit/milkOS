@@ -149,6 +149,13 @@ impl Machine {
         self.available.saturating_sub(self.floor())
     }
 
+    /// Under this much room the Browser starts giving memory back: an eighth of RAM, at least
+    /// 16 MiB. (Pages are stopped at their limits long before the room is gone; this is the
+    /// point where tabs nobody looks at start to go, before the one in front runs dry.)
+    pub fn tight_room(&self) -> usize {
+        (self.total / 8).max(16 * MIB)
+    }
+
     /// How short memory is.
     pub fn level(&self) -> Level {
         if self.total == 0 {
@@ -158,7 +165,7 @@ impl Machine {
             Level::Critical
         } else if self.available < self.low {
             Level::Low
-        } else if self.room() < (self.total / 64).max(8 * MIB) {
+        } else if self.room() < self.tight_room() {
             Level::Tight
         } else {
             Level::Normal
@@ -170,7 +177,7 @@ impl Machine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
     Normal,
-    /// The room is nearly gone: scripts cannot grow any more.
+    /// The room is under an eighth of RAM: scripts have little left to grow into.
     Tight,
     /// Under the kernel's low mark.
     Low,
@@ -208,6 +215,17 @@ pub fn min_limit(kind: Kind) -> usize {
     }
 }
 
+/// What a realm of this kind has always been allowed before there were budgets (engine bytes):
+/// while the room holds it, a realm is never given less, so a page that works with a roomy
+/// machine does not break in a tab behind the one in front.
+pub fn old_default(kind: Kind) -> usize {
+    match kind {
+        Kind::Page => 64 * MIB,
+        Kind::Frame => 16 * MIB,
+        Kind::Worker => 32 * MIB,
+    }
+}
+
 /// The most one realm may ever have (engine bytes), however much is free: sized from RAM to
 /// protect the system, not to tune a page.
 pub fn ceiling(m: &Machine, kind: Kind) -> usize {
@@ -236,8 +254,9 @@ pub struct Budget {
     /// The room, real bytes and the engine's.
     pub room: usize,
     pub room_engine: usize,
-    /// Sum of the weights of the realms and of the rest of the system.
+    /// Sum of the weights of the realms and of the rest of the system, and how many realms.
     pub weights: usize,
+    pub count: usize,
     limits: BTreeMap<u64, usize>,
 }
 
@@ -266,13 +285,23 @@ impl Budget {
         self.limit(kind, foreground, 0, weight(kind, foreground))
     }
 
+    /// The limit of a realm of this kind that holds `used` right now, by this plan's room and
+    /// weights (the realm should be one the plan counted; its `used` may be newer than the
+    /// plan's). Never below what it holds and a little over.
+    pub fn limit_with(&self, kind: Kind, foreground: bool, used: usize) -> usize {
+        self.limit(kind, foreground, used, 0)
+    }
+
     fn limit(&self, kind: Kind, foreground: bool, used: usize, extra_weight: usize) -> usize {
         let w = weight(kind, foreground);
         let head = self.room_engine / (self.weights + extra_weight).max(1) * w;
         let raw = used.saturating_add(head);
         // (A realm is never squeezed under what it holds, and a little over.)
         let kept = used.saturating_add(used / 8).saturating_add(256 * KIB);
-        let limit = raw.max(kept).max(min_limit(kind));
+        // ... nor under what realms had before budgets, if each realm's share of the room
+        // can pay for it.
+        let guaranteed = old_default(kind).min(self.room_engine / (self.count + 1));
+        let limit = raw.max(kept).max(guaranteed).max(min_limit(kind));
         limit.min(ceiling(&self.machine, kind))
     }
 
@@ -294,6 +323,7 @@ pub fn plan(m: &Machine, realms: &[Realm]) -> Budget {
         room,
         room_engine: to_engine(room),
         weights,
+        count: realms.len(),
         limits: BTreeMap::new(),
     };
     for r in realms {
@@ -314,6 +344,8 @@ pub struct Caps {
     /// A page's own text: what is taken in, and parsed, before the rest is offered with "Load
     /// more".
     pub page: usize,
+    /// The most "Load more" can take a page's text to.
+    pub page_max: usize,
     /// One external script's text.
     pub script: usize,
     /// One stylesheet.
@@ -322,8 +354,9 @@ pub struct Caps {
     pub image: usize,
     /// A script's response read to the end (`.text()`, `.json()`, `.arrayBuffer()`, XHR).
     pub response: usize,
-    /// DOM nodes of one page.
+    /// DOM nodes of one page, and the most "Load more" can take that to.
     pub nodes: usize,
+    pub nodes_max: usize,
     /// Decoded pictures kept for all tabs, in pixels.
     pub image_pixels: usize,
     /// Script text kept for tabs to share, in bytes.
@@ -335,11 +368,13 @@ impl Caps {
         let part = |div: usize, lo: usize, hi: usize| (room / div).clamp(lo, hi);
         Caps {
             page: part(8, 16 * MIB, 256 * MIB),
+            page_max: part(2, 64 * MIB, 1024 * MIB),
             script: part(16, 4 * MIB, 128 * MIB),
             style: part(32, 2 * MIB, 64 * MIB),
             image: part(16, 8 * MIB, 128 * MIB),
             response: part(8, 8 * MIB, 512 * MIB),
-            nodes: part(2 * KIB, 200_000, 8_000_000),
+            nodes: part(2 * KIB, 300_000, 4_000_000),
+            nodes_max: part(KIB, 1_000_000, 16_000_000),
             image_pixels: part(8, 8 * MIB, 128 * MIB) / 4,
             script_cache: part(16, 16 * MIB, 256 * MIB),
         }
@@ -351,11 +386,13 @@ impl Default for Caps {
     fn default() -> Caps {
         Caps {
             page: 16 * MIB,
+            page_max: 64 * MIB,
             script: 4 * MIB,
             style: 2 * MIB,
             image: 8 * MIB,
             response: 8 * MIB,
             nodes: 1_000_000,
+            nodes_max: 1_000_000,
             image_pixels: 16 << 20,
             script_cache: 16 * MIB,
         }
@@ -452,8 +489,11 @@ impl Ladder {
     /// The step just returned freed nothing (no background tab was left, say): move on without
     /// waiting.
     pub fn skip(&mut self, step: Step) {
-        if step == Step::DiscardTab && self.stage == 2 {
-            self.stage = 3;
+        match step {
+            Step::DiscardTab if self.stage == 2 => self.stage = 3,
+            // (Asking has no step after it: there is nothing to move on to.)
+            Step::AskStop => return,
+            _ => {}
         }
         self.last_step = 0;
     }

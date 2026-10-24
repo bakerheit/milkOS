@@ -113,7 +113,7 @@ impl ScriptHost for WorkerHost<'_> {
                 Recv::Timeout => continue,
                 Recv::Msg(ToWorker::Net { id: i, ev }) if i == id => match ev {
                     NetEvent::Head(h) => head = Some(h),
-                    NetEvent::Progress { .. } => {}
+                    NetEvent::Progress { .. } | NetEvent::Chunk(_) => {}
                     NetEvent::Done(body) => {
                         let h = head.take().unwrap_or(NetHead {
                             status: 200,
@@ -169,6 +169,7 @@ fn script_request(id: u32, url: &str) -> NetRequest {
         cache: String::from("default"),
         timeout_ms: 0,
         force_preflight: false,
+        stream: false,
     }
 }
 
@@ -250,7 +251,7 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
                                 NetEvent::Head(h) => {
                                     heads.insert(id, h);
                                 }
-                                NetEvent::Progress { .. } => {}
+                                NetEvent::Progress { .. } | NetEvent::Chunk(_) => {}
                                 NetEvent::Done(body) => {
                                     let ok = heads.remove(&id).is_none_or(|h| (200..300).contains(&h.status));
                                     if ok {

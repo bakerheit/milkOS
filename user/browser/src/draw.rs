@@ -794,18 +794,27 @@ impl App {
             return; // about another tab or another page
         }
         let th = self.th;
-        let top = crate::TOP;
+        // Over the foot of the page (the top of a page is what one is reading), above the
+        // status line.
         let h = 40;
+        let top = self.win.h - STATUS_H - h;
         self.win.fill(0, top, w, h, th.straw);
-        self.win.fill(0, top + h - 1, w, 1, th.honey);
-        let ask = matches!(n.kind, crate::NoticeKind::AskStop { .. });
-        let (a_label, b_label) = if ask { ("Stop", "Wait") } else { ("OK", "") };
+        self.win.fill(0, top, w, 1, th.honey);
+        let ask = !matches!(n.kind, crate::NoticeKind::Info);
+        let (a_label, b_label) = match n.kind {
+            crate::NoticeKind::AskStop { .. } => ("Stop", "Wait"),
+            crate::NoticeKind::LoadMore => ("Load more", "Dismiss"),
+            crate::NoticeKind::Info => ("OK", ""),
+        };
         let aw = appkit::widgets::button_w(a_label, false);
         let bw = if ask { appkit::widgets::button_w(b_label, false) } else { 0 };
         let room = w - aw - bw - 40;
         self.win.text(14, top + 12, &ellipsize(&n.text, room), th.ink);
         let a = ARect::new(w - aw - bw - if ask { 24 } else { 12 }, top + 6, aw, 28);
-        let kind = if ask { appkit::widgets::Kind::Danger } else { appkit::widgets::Kind::Secondary };
+        let kind = match n.kind {
+            crate::NoticeKind::AskStop { .. } => appkit::widgets::Kind::Danger,
+            _ => appkit::widgets::Kind::Secondary,
+        };
         appkit::widgets::button(&mut self.win, &th, &mut self.hits, a, a_label, kind, ID_NOTICE_A, true, false);
         if ask {
             let b = ARect::new(w - bw - 12, top + 6, bw, 28);

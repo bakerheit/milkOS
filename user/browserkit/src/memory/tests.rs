@@ -64,10 +64,12 @@ fn floor_and_room_scale_with_ram() {
 fn levels() {
     let t = 512 * MIB;
     assert_eq!(Machine::new(t, 400 * MIB).level(), Level::Normal);
-    // Room under a sixty-fourth of RAM (at least 8 MiB): tight.
-    assert_eq!(Machine::new(t, 96 * MIB + 7 * MIB).level(), Level::Tight);
-    assert_eq!(Machine::new(t, 96 * MIB + 20 * MIB).level(), Level::Normal);
+    // Room under an eighth of RAM (at least 16 MiB): tight.
+    assert_eq!(Machine::new(t, 96 * MIB + 63 * MIB).level(), Level::Tight);
+    assert_eq!(Machine::new(t, 96 * MIB + 66 * MIB).level(), Level::Normal);
     assert_eq!(Machine::new(t, 80 * MIB).level(), Level::Tight);
+    assert_eq!(Machine::new(t, 96 * MIB + 30 * MIB).tight_room(), 64 * MIB);
+    assert_eq!(Machine::new(128 * MIB, 128 * MIB).tight_room(), 16 * MIB);
     assert_eq!(Machine::new(t, 63 * MIB).level(), Level::Low);
     assert_eq!(Machine::new(t, 31 * MIB).level(), Level::Critical);
     assert_eq!(Machine::new(t, 0).level(), Level::Critical);
@@ -162,8 +164,31 @@ fn growth_never_adds_up_to_more_than_the_room() {
             let slack = r.used / 8 + 256 * KIB;
             grow += l.saturating_sub(r.used).saturating_sub(slack);
         }
-        assert!(grow <= b.room_engine, "grow {grow} room {}", b.room_engine);
+        // (What realms are guaranteed can come on top of their shares, each at most its share of
+        // the room: at worst twice the room, which the reserve and the floor are there for.)
+        assert!(grow <= 2 * b.room_engine, "grow {grow} room {}", b.room_engine);
     }
+}
+
+#[test]
+fn a_realm_in_a_background_tab_still_gets_what_realms_always_had() {
+    // Ten tabs on a machine with room: the one behind the others still has the old 64 MB.
+    let m = mach(2048, 1900);
+    let mut realms = vec![page(1, true, 0)];
+    for k in 0..9u64 {
+        realms.push(page(10 + k, false, 0));
+    }
+    let b = plan(&m, &realms);
+    assert!(b.limit_of(10).unwrap() >= old_default(Kind::Page));
+    assert!(b.for_new(Kind::Page, false) >= old_default(Kind::Page));
+    // With little room the guarantee shrinks to a share of it.
+    let tight = plan(&mach(512, 120), &realms);
+    assert!(tight.limit_of(10).unwrap() < old_default(Kind::Page));
+    assert!(tight.limit_of(10).unwrap() >= min_limit(Kind::Page));
+    // Frames and workers have theirs too.
+    let b = plan(&m, &[page(1, true, 0), frame(2, false, 0), worker(3, false, 0)]);
+    assert!(b.limit_of(2).unwrap() >= old_default(Kind::Frame));
+    assert!(b.limit_of(3).unwrap() >= old_default(Kind::Worker));
 }
 
 #[test]
@@ -230,6 +255,9 @@ fn the_ladder_climbs_one_step_at_a_time() {
     // ... and when there are none the ladder moves on without waiting.
     l.skip(Step::DiscardTab);
     assert_eq!(l.next(Level::Tight, 3500), Some(Step::AskStop));
+    // (Nothing to ask about: no waiting is skipped.)
+    l.skip(Step::AskStop);
+    assert_eq!(l.next(Level::Tight, 3600), None);
     assert_eq!(l.next(Level::Tight, 4600), Some(Step::AskStop));
     // After ten seconds still short: caches again.
     assert_eq!(l.next(Level::Tight, 11_500), Some(Step::DropCaches));

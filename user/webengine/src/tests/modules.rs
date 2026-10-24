@@ -127,6 +127,7 @@ pub fn run_more(o: &mut Out, ticks: u32, serve: &mut dyn FnMut(&NetRequest) -> R
                 cache: String::new(),
                 timeout_ms: 0,
                 force_preflight: false,
+                stream: false,
             };
             let r = serve(&req);
             o.classic.push(u.clone());
@@ -148,6 +149,7 @@ pub fn run_more(o: &mut Out, ticks: u32, serve: &mut dyn FnMut(&NetRequest) -> R
                         o.cancelled.push(id);
                         o.queue.retain(|q| q.1 != id);
                     }
+                    NetOut::Ack { .. } => {}
                 }
             }
             let mut i = 0;

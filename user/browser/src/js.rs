@@ -61,6 +61,8 @@ pub struct JsHost<'a> {
     /// The machine's memory and the plan, and which realm these scripts are (key, kind, tab).
     mem: &'a mut crate::mem::MemMonitor,
     realm: (u64, browserkit::memory::Kind, u64),
+    /// This realm is in the tab in front.
+    fg: bool,
 }
 
 impl ScriptHost for JsHost<'_> {
@@ -145,7 +147,7 @@ impl ScriptHost for JsHost<'_> {
     }
     fn heap_allowance(&mut self, used: usize) -> webengine::Allowance {
         let (key, kind, tab) = self.realm;
-        self.mem.allowance(now_ms(), key, kind, tab, used)
+        self.mem.allowance(now_ms(), key, kind, tab, self.fg, used)
     }
     fn slow(&mut self, ran_ms: f64) -> bool {
         if self.stopped {
@@ -417,6 +419,7 @@ impl App {
             }
             self.local.insert(o.clone(), Area::from_file(&text));
         }
+        let front_uid = self.tabs.get(self.cur).map_or(0, |t| t.uid);
         let App {
             tabs,
             win,
@@ -425,6 +428,7 @@ impl App {
             th,
             log,
             mem,
+            cur,
             ..
         } = self;
         let t: &mut Tab = &mut tabs[ti];
@@ -438,7 +442,9 @@ impl App {
             None => None,
         };
         let realm_tab = t.uid;
+        mem.set_front(front_uid);
         let mut host = JsHost {
+            fg: ti == *cur,
             mem,
             realm: (
                 crate::mem::key_of(realm_tab, frame),

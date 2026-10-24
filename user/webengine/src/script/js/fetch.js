@@ -499,7 +499,7 @@ function fetch(input, init) {
       finished = true;
       native.cancel(id);
       const reason = signal[S].reason;
-      if (response) srcFail(src, reason);
+      if (response) liveFail(src, reason);
       else reject(reason);
     };
     const finish = () => {
@@ -518,23 +518,27 @@ function fetch(input, init) {
       referrer: s.referrer,
       referrerPolicy: s.referrerPolicy,
       cache: s.cache,
+      stream: true,
     }, (kind, data) => {
       if (finished) return;
       switch (kind) {
         case 'head':
           if (response) break;
-          src = pendingSource();
+          src = liveSource(id);
           response = responseFromHead(data, src);
           resolve(response);
           break;
+        case 'chunk':
+          if (src) liveChunk(src, data);
+          break;
         case 'done':
           finish();
-          if (src) srcFinish(src, data);
+          if (src) liveDone(src, data);
           else reject(networkError(null));
           break;
         case 'failed':
           finish();
-          if (response) srcFail(src, new TypeError('network error'));
+          if (response) liveFail(src, new TypeError('network error'));
           else reject(networkError(data));
           break;
         default:

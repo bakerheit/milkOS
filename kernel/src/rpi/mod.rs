@@ -13,6 +13,7 @@
 
 pub mod fb;
 pub mod mailbox;
+pub mod sdhci;
 
 use core::arch::asm;
 
@@ -24,15 +25,23 @@ pub fn init() {
     let mac = mailbox::board_mac();
     match (rev, fw) {
         (Ok(r), Ok(f)) => crate::kprintln!("rpi: board revision {r:#x}, firmware {f:#x}"),
-        (Err(e), _) | (_, Err(e)) => crate::kprintln!("rpi: the firmware did not say what board this is ({e:?})"),
+        (Err(e), _) | (_, Err(e)) => {
+            crate::kprintln!("rpi: the firmware did not say what board this is ({e:?})")
+        }
     }
     match mac {
         Ok(m) => crate::kprintln!(
             "rpi: ethernet address {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-            m[0], m[1], m[2], m[3], m[4], m[5]
+            m[0],
+            m[1],
+            m[2],
+            m[3],
+            m[4],
+            m[5]
         ),
         Err(e) => crate::kprintln!("rpi: no ethernet address from the firmware ({e:?})"),
     }
+    sdhci::init();
 }
 
 /// A deadline for a hardware poll, in the generic counter's ticks.

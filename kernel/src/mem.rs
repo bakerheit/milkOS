@@ -22,7 +22,10 @@ const FALLBACK_RAM: MemRange = MemRange {
 
 /// The RAM banks to use (rpikit's [`usable_banks`](crate::dtb::usable_banks)) and where they came
 /// from, for the log. Without a usable bank holding the kernel: the board's default.
-pub fn ram_banks(tree: &[MemRange], kstart: PhysAddr) -> ([MemRange; MAX_BANKS], usize, &'static str) {
+pub fn ram_banks(
+    tree: &[MemRange],
+    kstart: PhysAddr,
+) -> ([MemRange; MAX_BANKS], usize, &'static str) {
     let limit = crate::platform::CURRENT.ram_limit;
     let (banks, n) = crate::dtb::usable_banks(tree, kstart, limit, PAGE_SIZE);
     if n > 0 {
@@ -81,7 +84,11 @@ pub fn init() {
         .unwrap_or(MemRange { base: 0, size: 0 });
     // The allocator covers the first bank and everything above it as one range; the gaps
     // between banks (the Pi has one for the GPU's memory) are reserved below.
-    let span_end = banks[..nbanks].iter().map(|b| b.base + b.size).max().unwrap_or(0);
+    let span_end = banks[..nbanks]
+        .iter()
+        .map(|b| b.base + b.size)
+        .max()
+        .unwrap_or(0);
     let ram = MemRange {
         base: primary.base,
         size: span_end - primary.base,
@@ -130,7 +137,12 @@ pub fn init() {
     );
     if nbanks > 1 {
         for b in &banks[..nbanks] {
-            kprintln!("mem:   bank {:#x}..{:#x} ({} MiB)", b.base, b.base + b.size, b.size >> 20);
+            kprintln!(
+                "mem:   bank {:#x}..{:#x} ({} MiB)",
+                b.base,
+                b.base + b.size,
+                b.size >> 20
+            );
         }
     }
     match &dtb {

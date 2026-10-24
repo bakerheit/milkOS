@@ -117,9 +117,7 @@ pub fn find_file(name: &str) -> Option<File> {
             size: len as u32,
         });
     }
-    if crate::platform::CURRENT.fwcfg.is_none() {
-        return None;
-    }
+    crate::platform::CURRENT.fwcfg?;
     select(SEL_FILE_DIR);
     let count = read_u32_be();
     for _ in 0..count {

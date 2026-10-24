@@ -165,6 +165,7 @@ pub fn firmware_revision() -> Result<u32, Error> {
 
 /// Switch a power domain (rpikit::mailbox::power) on or off and wait for it. True if it is in
 /// the state asked for afterwards.
+#[allow(dead_code)] // for the USB and PCIe bring-up (docs/raspberry-pi.md)
 pub fn set_power(device: u32, on: bool) -> Result<bool, Error> {
     let w = query(msg::tag::SET_POWER_STATE, &[device, on as u32 | 2], 2)?;
     // Bit 0 of the answer: on; bit 1: the device does not exist.

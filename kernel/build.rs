@@ -12,7 +12,10 @@ fn link_script(dir: &str) {
     let phys = if raspi { "0x80000" } else { "0x40080000" };
     let text = fs::read_to_string(format!("{dir}/linker.ld")).expect("read linker.ld");
     let placeholder = "KERNEL_PHYS = 0x40080000;";
-    assert!(text.contains(placeholder), "linker.ld lost its KERNEL_PHYS line");
+    assert!(
+        text.contains(placeholder),
+        "linker.ld lost its KERNEL_PHYS line"
+    );
     let text = text.replace(placeholder, &format!("KERNEL_PHYS = {phys};"));
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("linker.ld");
     fs::write(&out, text).expect("write linker.ld");
@@ -98,7 +101,9 @@ fn is_semver(v: &str) -> bool {
         Some((c, p)) => (c, Some(p)),
         None => (v, None),
     };
-    let num = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p == "0" || !p.starts_with('0'));
+    let num = |p: &str| {
+        !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p == "0" || !p.starts_with('0'))
+    };
     let parts: Vec<&str> = core.split('.').collect();
     if parts.len() != 3 || !parts.iter().all(|p| num(p)) {
         return false;
@@ -174,7 +179,10 @@ fn git_build_id(repo: &Path) -> Option<String> {
             }
         }
     }
-    println!("cargo:rerun-if-changed={}", repo.join("kernel/src").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join("kernel/src").display()
+    );
     let dirty = git(repo, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     Some(if dirty { format!("{hash}+dirty") } else { hash })
 }
@@ -197,7 +205,10 @@ fn build_user(repo: &Path) {
     println!("cargo:rerun-if-changed={}", repo.join("crypto").display());
     println!("cargo:rerun-if-changed={}", repo.join("milkweb").display());
     println!("cargo:rerun-if-changed={}", repo.join("tls").display());
-    println!("cargo:rerun-if-changed={}", repo.join("assets/ca").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join("assets/ca").display()
+    );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(&user)

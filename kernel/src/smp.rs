@@ -246,7 +246,9 @@ pub fn init() -> usize {
             }
             Start::Spin(release) => {
                 if !release_spin(mpidr, release, blk_pa) {
-                    kprintln!("[smp] spin-table release address {release:#x} for mpidr {mpidr:#x} is not in RAM");
+                    kprintln!(
+                        "[smp] spin-table release address {release:#x} for mpidr {mpidr:#x} is not in RAM"
+                    );
                     continue;
                 }
             }

@@ -93,6 +93,7 @@ TESTS=(
   "release-scripts-test|s|300|par|scripts/release-scripts-test.sh"
   "selftest-boot|s|300|par|scripts/selftest-boot.sh"
   "serial-soak|q|300|par|scripts/serial-soak.sh 2 3"
+  "pi-qemu-test|q|900|par|scripts/pi-qemu-test.sh"
   "net-test|s|600|par|scripts/net-test.sh"
   "web-test|q|600|par|scripts/web-test.sh @WORK@"
   "pkg-test|s|600|par|scripts/pkg-test.sh"
@@ -132,6 +133,7 @@ TESTS=(
   "jsengine-unit|s|300|par|scripts/jsengine-test.sh"
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
   "milkweb-unit|s|300|par|scripts/milkweb-test.sh"
+  "rpikit-unit|s|300|par|scripts/rpikit-test.sh"
   "crypto-unit|s|300|par|scripts/crypto-test.sh"
   "tls-unit|s|300|par|scripts/tls-test.sh"
   "tls-interop|q|600|par|scripts/tls-interop.sh"
@@ -295,6 +297,9 @@ echo "check-all: internet guard on (qemu wrapper in $GUARD, MILK_CHECK_ALL=1)"
 # own `cargo build`s are no-ops (nothing in a test rebuilds the kernel under another test).
 echo "check-all: cargo build (debug)"
 cargo build -q || { echo; echo "check-all: FAIL, the build failed"; exit 1; }
+# The Raspberry Pi image (feature raspi, its own target directory) for pi-qemu-test.
+echo "check-all: cargo build (Raspberry Pi image)"
+cargo build -q --features raspi --target-dir target/pi || { echo; echo "check-all: FAIL, the Raspberry Pi build failed"; exit 1; }
 # ...and the tests then skip their own `cargo build` (MILK_PREBUILT=1): even with nothing to do,
 # cargo replaces target/.../milkos-kernel (unlink, then hard link again), and a test reading it
 # at that moment found no kernel. Not with RELEASE or MILK_FEATURES set: those tests build

@@ -38,6 +38,7 @@ fn name(id: u32) -> &'static str {
 pub fn init() {
     let mut found = 0;
     let mut legacy = 0;
+    #[allow(clippy::reversed_empty_ranges)] // no slots at all on a board without virtio
     for slot in 0..mmio::MMIO_SLOTS {
         let t = match Transport::probe(slot) {
             Ok(t) => t,

@@ -245,7 +245,8 @@ pub struct Csd {
 pub fn parse_csd(resp: [u32; 4]) -> Option<Csd> {
     let r = r136(resp);
     // Registers are shifted down by 8 bits (the CRC byte is not stored): CSD bit n is r bit n-8.
-    let field = |hi: u32, lo: u32| -> u64 { ((r >> (lo - 8)) & ((1u128 << (hi - lo + 1)) - 1)) as u64 };
+    let field =
+        |hi: u32, lo: u32| -> u64 { ((r >> (lo - 8)) & ((1u128 << (hi - lo + 1)) - 1)) as u64 };
     let version = field(127, 126) as u8;
     let blocks = match version {
         0 => {

@@ -122,6 +122,7 @@ pub struct Transport {
 impl Transport {
     /// Look at slot `slot`. Ok only for a present, modern (version 2) device.
     pub fn probe(slot: usize) -> Result<Transport, Error> {
+        #[allow(clippy::absurd_extreme_comparisons)] // no slots at all on a board without virtio
         if slot >= MMIO_SLOTS {
             return Err(Error::NoDevice);
         }

@@ -108,7 +108,11 @@ impl Blob {
         let mut words = std::vec![0u64; bytes.len().div_ceil(8) + 1];
         // SAFETY: the Vec<u64> is at least as long as `bytes` in bytes.
         unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr() as *mut u8, bytes.len())
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                words.as_mut_ptr() as *mut u8,
+                bytes.len(),
+            )
         };
         Blob {
             words,
@@ -128,8 +132,7 @@ impl Blob {
     }
 }
 
-const BOOTARGS: &str =
-    "console=serial0,115200 root=/dev/mmcblk0p2 milk.selftest=full milk.net=\"internet=on dns=10.0.2.2:53\" quiet";
+const BOOTARGS: &str = "console=serial0,115200 root=/dev/mmcblk0p2 milk.selftest=full milk.net=\"internet=on dns=10.0.2.2:53\" quiet";
 
 /// The shape of the stock Raspberry Pi 4 tree: 2-cell addresses, 1-cell sizes, a 4 GB memory
 /// node (two banks), four spin-table cpus, no psci node.
@@ -201,7 +204,10 @@ fn dtb_memory_banks() {
 fn dtb_compatible_and_bootargs() {
     let b = pi_tree(None, true);
     let d = b.dtb().unwrap();
-    assert_eq!(d.root_compatible(), b"raspberrypi,4-model-b\0brcm,bcm2711\0");
+    assert_eq!(
+        d.root_compatible(),
+        b"raspberrypi,4-model-b\0brcm,bcm2711\0"
+    );
     assert_eq!(d.bootargs(), BOOTARGS.as_bytes());
     // No chosen node: empty.
     let mut f = Fdt::new();
@@ -320,7 +326,10 @@ fn cmdline_edge_cases() {
     assert_eq!(cmdline::value(b"milk.x=1\0milk.y=2", "y"), Some(&b"2"[..]));
     assert_eq!(cmdline::value(b"milk.x=\"a b", "x"), Some(&b"\"a b"[..])); // unterminated
     assert_eq!(cmdline::find(b"milk.x=\"a b\"", "x"), Some((8, 3)));
-    assert_eq!(cmdline::option_name("opt/milkos/selftest"), Some("selftest"));
+    assert_eq!(
+        cmdline::option_name("opt/milkos/selftest"),
+        Some("selftest")
+    );
     assert_eq!(cmdline::option_name("opt/milkos/"), None);
     assert_eq!(cmdline::option_name("etc/ramfb"), None);
 }
@@ -366,7 +375,10 @@ fn mailbox_overflow_and_errors() {
     let t = b.tag(tag::GET_PITCH, &[], 1).unwrap();
     b.finish().unwrap();
     buf[1] = mailbox::RESPONSE_ERROR;
-    assert_eq!(Reply::new(&buf).values(t), Err(Error::Failed(mailbox::RESPONSE_ERROR)));
+    assert_eq!(
+        Reply::new(&buf).values(t),
+        Err(Error::Failed(mailbox::RESPONSE_ERROR))
+    );
     buf[1] = mailbox::RESPONSE_OK; // message ok but the tag was never processed
     assert_eq!(Reply::new(&buf).values(t), Err(Error::TagNotAnswered));
     // A tag handle that points past a shorter buffer.
@@ -441,7 +453,15 @@ fn mailbox_framebuffer_pitch_comes_from_the_answer() {
     // The firmware may pad rows: the pitch is not width * 4.
     let mut buf = [0u32; 64];
     let (_, tags) = mailbox::framebuffer_request(&mut buf, 1366, 768, 32).unwrap();
-    fake_fb_answer(&mut buf, 1366, 768, 0xc100_0000, 1408 * 768 * 4, 1408 * 4, 32);
+    fake_fb_answer(
+        &mut buf,
+        1366,
+        768,
+        0xc100_0000,
+        1408 * 768 * 4,
+        1408 * 4,
+        32,
+    );
     let fb = mailbox::framebuffer_reply(&buf, &tags).unwrap();
     assert_eq!(fb.pitch, 5632);
     assert_eq!(fb.width, 1366);
@@ -561,7 +581,12 @@ fn csd_regs(fields: &[(u32, u32, u64)]) -> [u32; 4] {
         csd |= (v as u128) << lo;
     }
     let r = csd >> 8;
-    [r as u32, (r >> 32) as u32, (r >> 64) as u32, (r >> 96) as u32]
+    [
+        r as u32,
+        (r >> 32) as u32,
+        (r >> 64) as u32,
+        (r >> 96) as u32,
+    ]
 }
 
 #[test]
@@ -591,19 +616,37 @@ fn sd_csd_v1_capacity() {
 fn sd_csd_rejects_junk() {
     assert_eq!(sd::parse_csd(csd_regs(&[(127, 126, 2)])), None); // unknown structure
     assert_eq!(sd::parse_csd([0; 4]), None); // v0 with C_SIZE 0, mult 0, len 0 -> 4 bytes: 0 blocks
-    assert_eq!(sd::parse_csd(csd_regs(&[(127, 126, 0), (83, 80, 15)])), None); // block length 32 KiB
+    assert_eq!(
+        sd::parse_csd(csd_regs(&[(127, 126, 0), (83, 80, 15)])),
+        None
+    ); // block length 32 KiB
 }
 
 #[test]
 fn sd_clock_dividers() {
     // EMMC2's base clock is 100 MHz on the Pi 4 (the firmware says so, mailbox clock 12).
-    assert_eq!(sd::clock_divider(100_000_000, 400_000), Some((125, 400_000)));
-    assert_eq!(sd::clock_divider(100_000_000, 25_000_000), Some((2, 25_000_000)));
-    assert_eq!(sd::clock_divider(100_000_000, 50_000_000), Some((1, 50_000_000)));
+    assert_eq!(
+        sd::clock_divider(100_000_000, 400_000),
+        Some((125, 400_000))
+    );
+    assert_eq!(
+        sd::clock_divider(100_000_000, 25_000_000),
+        Some((2, 25_000_000))
+    );
+    assert_eq!(
+        sd::clock_divider(100_000_000, 50_000_000),
+        Some((1, 50_000_000))
+    );
     // Never above the target: 30 MHz from 100 MHz needs n = 2 (25 MHz), not 1 (50 MHz).
-    assert_eq!(sd::clock_divider(100_000_000, 30_000_000), Some((2, 25_000_000)));
+    assert_eq!(
+        sd::clock_divider(100_000_000, 30_000_000),
+        Some((2, 25_000_000))
+    );
     // Base already below the target: undivided.
-    assert_eq!(sd::clock_divider(25_000_000, 50_000_000), Some((0, 25_000_000)));
+    assert_eq!(
+        sd::clock_divider(25_000_000, 50_000_000),
+        Some((0, 25_000_000))
+    );
     // Unknown base clock or zero target: no answer.
     assert_eq!(sd::clock_divider(0, 400_000), None);
     assert_eq!(sd::clock_divider(100_000_000, 0), None);
@@ -662,14 +705,30 @@ fn banks_below_the_kernel_are_dropped_and_order_is_fixed() {
 fn banks_hostile_input() {
     // Overlap and touching banks merge; nonsense (zero size, wrap-around, kernel in no bank)
     // gives nothing usable and never panics.
-    let tree = [mr(0, 0x2000_0000), mr(0x1000_0000, 0x2000_0000), mr(0x3000_0000, 0x1000)];
+    let tree = [
+        mr(0, 0x2000_0000),
+        mr(0x1000_0000, 0x2000_0000),
+        mr(0x3000_0000, 0x1000),
+    ];
     let (b, n) = crate::dtb::usable_banks(&tree, 0x8_0000, usize::MAX, 4096);
     assert_eq!(n, 1);
     assert_eq!((b[0].base, b[0].size), (0, 0x3000_1000));
-    assert_eq!(crate::dtb::usable_banks(&[mr(0, 0)], 0x8_0000, usize::MAX, 4096).1, 0);
-    assert_eq!(crate::dtb::usable_banks(&[mr(usize::MAX - 10, 100)], 0x8_0000, usize::MAX, 4096).1, 0);
-    assert_eq!(crate::dtb::usable_banks(&[mr(0x4000_0000, 0x1000_0000)], 0x8_0000, usize::MAX, 4096).1, 0);
-    assert_eq!(crate::dtb::usable_banks(&[], 0x8_0000, usize::MAX, 4096).1, 0);
+    assert_eq!(
+        crate::dtb::usable_banks(&[mr(0, 0)], 0x8_0000, usize::MAX, 4096).1,
+        0
+    );
+    assert_eq!(
+        crate::dtb::usable_banks(&[mr(usize::MAX - 10, 100)], 0x8_0000, usize::MAX, 4096).1,
+        0
+    );
+    assert_eq!(
+        crate::dtb::usable_banks(&[mr(0x4000_0000, 0x1000_0000)], 0x8_0000, usize::MAX, 4096).1,
+        0
+    );
+    assert_eq!(
+        crate::dtb::usable_banks(&[], 0x8_0000, usize::MAX, 4096).1,
+        0
+    );
     // Unaligned edges round inwards.
     let (b, n) = crate::dtb::usable_banks(&[mr(0x100, 0x3000)], 0x1000, usize::MAX, 4096);
     assert_eq!(n, 1);

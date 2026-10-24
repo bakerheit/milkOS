@@ -28,6 +28,7 @@ const NONE: u8 = 0;
 const RAMFB: u8 = 1;
 const GPU: u8 = 2;
 /// The Pi's mailbox framebuffer.
+#[cfg(feature = "raspi")]
 const RPIFB: u8 = 3;
 static BACKEND: AtomicU8 = AtomicU8::new(NONE);
 

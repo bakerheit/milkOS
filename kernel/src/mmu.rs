@@ -498,7 +498,6 @@ impl TableAlloc for BootTables {
     }
 }
 
-
 /// TTBR0 for kernel-only threads: an empty table (any low address faults).
 #[repr(C, align(4096))]
 struct EmptyTable([u64; ENTRIES]);

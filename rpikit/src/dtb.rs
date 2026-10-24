@@ -68,7 +68,10 @@ pub fn usable_banks(
     let mut n = 0;
     for b in tree {
         let base = b.base.checked_next_multiple_of(page);
-        let end = b.base.checked_add(b.size).map(|e| e.min(limit) / page * page);
+        let end = b
+            .base
+            .checked_add(b.size)
+            .map(|e| e.min(limit) / page * page);
         let (Some(base), Some(end)) = (base, end) else {
             continue;
         };
@@ -269,10 +272,7 @@ impl Dtb {
     /// Like [`Dtb::for_each_prop`], with a node id (the node's offset in the structure block,
     /// different for every node) in front of the depth, so a visitor can tell two nodes of the
     /// same name apart.
-    pub fn for_each_prop_id(
-        &self,
-        mut f: impl FnMut(&[u8], &[u8], usize, usize, &[u8], &[u8]),
-    ) {
+    pub fn for_each_prop_id(&self, mut f: impl FnMut(&[u8], &[u8], usize, usize, &[u8], &[u8])) {
         let start = self.base + self.struct_off;
         let end = start + self.struct_size;
         let strings = self.base + self.strings_off;

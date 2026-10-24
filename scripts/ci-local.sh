@@ -65,9 +65,11 @@ step_clippy() {
   local rc=0
   echo "-- clippy: kernel and shared crates (root workspace), -D warnings"
   cargo clippy --workspace --target-dir "$CT/root" -- -D warnings || rc=1
+  echo "-- clippy: the Raspberry Pi kernel (feature raspi), -D warnings"
+  cargo clippy -p milkos-kernel --features raspi --target-dir "$CT/pi" -- -D warnings || rc=1
   echo "-- clippy: host unit tests of the shared crates ($HOST)"
   local out
-  out="$(cargo clippy -p milkfs -p milkcrypto -p tls -p milkweb --tests --target "$HOST" --target-dir "$CT/host" 2>&1)"; local r=$?
+  out="$(cargo clippy -p milkfs -p milkcrypto -p tls -p milkweb -p rpikit --tests --target "$HOST" --target-dir "$CT/host" 2>&1)"; local r=$?
   if [ $r != 0 ]; then printf '%s\n' "$out" | tail -30; rc=1; else
     echo "   $(printf '%s\n' "$out" | grep -c '^warning' || true) warning line(s), listed only"; fi
   echo "-- clippy: user space (user/ workspace); warnings are listed, errors fail"

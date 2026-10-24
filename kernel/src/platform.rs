@@ -170,7 +170,8 @@ pub fn check_dtb() {
     let compat = dtb.as_ref().map(|d| root_compatible(d, &mut buf));
     match compat {
         Some(c) if !c.is_empty() => {
-            let shown = core::str::from_utf8(c.split(|&b| b == 0).next().unwrap_or(b"")).unwrap_or("?");
+            let shown =
+                core::str::from_utf8(c.split(|&b| b == 0).next().unwrap_or(b"")).unwrap_or("?");
             if compatible_matches(c, CURRENT.dtb_compatible) {
                 kprintln!("platform: {} (device tree: {shown})", CURRENT.name);
             } else {
@@ -180,6 +181,9 @@ pub fn check_dtb() {
                 );
             }
         }
-        _ => kprintln!("platform: {} (no device tree compatible string)", CURRENT.name),
+        _ => kprintln!(
+            "platform: {} (no device tree compatible string)",
+            CURRENT.name
+        ),
     }
 }

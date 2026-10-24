@@ -91,7 +91,9 @@ fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
         }
     }
     if fb.order != 0 {
-        kprintln!("rpi fb: the firmware uses RGB pixel order, which the desktop does not draw in, no display");
+        kprintln!(
+            "rpi fb: the firmware uses RGB pixel order, which the desktop does not draw in, no display"
+        );
         return None;
     }
     let va = map_buffer(fb.phys as usize, fb.size as usize)?;
@@ -108,7 +110,14 @@ fn configure(w: usize, h: usize) -> Option<Surface<'static>> {
         fb.size >> 10
     );
     // SAFETY: the firmware's buffer, mapped above, owned by the display from now on.
-    Some(unsafe { Surface::from_raw(va as *mut u32, fb.width as usize, fb.height as usize, fb.width as usize) })
+    Some(unsafe {
+        Surface::from_raw(
+            va as *mut u32,
+            fb.width as usize,
+            fb.height as usize,
+            fb.width as usize,
+        )
+    })
 }
 
 /// Allocate the framebuffer at `w` x `h` (or what the firmware makes of it). `None` without a

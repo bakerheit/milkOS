@@ -162,6 +162,9 @@ fn link_up() -> bool {
 
 /// Bring the root complex up and return the host bridge, or `None` (with the reason logged).
 pub fn host() -> Option<Host> {
+    if super::disabled("pcie") {
+        return None;
+    }
     // The firmware's device tree has the controller (`pcie@7d500000`); qemu's raspi4b does not model
     // it (an access would be a bus error), and the tests' tree does not name it.
     // SAFETY: the bootloader's pointer, or 0.

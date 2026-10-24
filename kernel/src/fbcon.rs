@@ -37,7 +37,14 @@ enum Parse {
 }
 
 pub struct Console {
+    /// What is drawn on: the screen itself, or (with a shadow) a buffer in RAM.
     surface: Surface<'static>,
+    /// The real screen, when `surface` is a RAM shadow of it: [`flush`](Console::flush) copies the rows
+    /// that changed. Reading video memory (scrolling does) is very slow on a board where it is not
+    /// cacheable, writing it is not, so the console reads and writes RAM and only writes the screen.
+    shown: Option<Surface<'static>>,
+    /// Pixel rows `[lo, hi)` changed since the last flush.
+    dirty: Option<(usize, usize)>,
     /// Glyph magnification: a cell is `GLYPH_W * scale` by `GLYPH_H * scale` pixels.
     scale: usize,
     cols: usize,
@@ -70,6 +77,8 @@ impl Console {
         let rows = ((surface.height().saturating_sub(2 * MARGIN)) / (GLYPH_H * scale)).max(1);
         let mut c = Console {
             surface,
+            shown: None,
+            dirty: None,
             scale,
             cols,
             rows,
@@ -91,13 +100,53 @@ impl Console {
         c
     }
 
+    /// A console drawn on `shadow` (same size as `shown`, in RAM) and copied to `shown` by [`flush`](Self::flush).
+    pub fn with_shadow(shown: Surface<'static>, shadow: Surface<'static>, scale: usize) -> Self {
+        let mut c = Self::with_scale(shadow, scale);
+        c.shown = Some(shown);
+        c.mark(0, c.surface.height());
+        c.flush();
+        c
+    }
+
     pub fn size(&self) -> (usize, usize) {
         (self.cols, self.rows)
+    }
+
+    fn mark(&mut self, y0: usize, y1: usize) {
+        self.dirty = Some(match self.dirty {
+            Some((lo, hi)) => (lo.min(y0), hi.max(y1)),
+            None => (y0, y1),
+        });
+    }
+
+    /// Copy the rows that changed to the screen (a no-op without a shadow).
+    pub fn flush(&mut self) {
+        let Some((lo, hi)) = self.dirty.take() else {
+            return;
+        };
+        let (w, h) = (self.surface.width(), self.surface.height());
+        let (lo, hi) = (lo.min(h), hi.min(h));
+        if let Some(shown) = self.shown.as_mut()
+            && hi > lo
+        {
+            shown.blit(
+                0,
+                lo as i32,
+                &self.surface,
+                0,
+                lo as i32,
+                w as i32,
+                (hi - lo) as i32,
+            );
+        }
     }
 
     /// Clear the screen and home the cursor.
     pub fn clear(&mut self) {
         self.cursor_drawn = false;
+        let h = self.surface.height();
+        self.mark(0, h);
         self.surface.clear(DEFAULT_BG);
         self.cx = 0;
         self.cy = 0;
@@ -110,6 +159,10 @@ impl Console {
             self.put_char(c);
         }
         self.toggle_cursor();
+        // A line is done: show it.
+        if s.contains('\n') {
+            self.flush();
+        }
     }
 
     fn cw(&self) -> usize {
@@ -131,6 +184,7 @@ impl Console {
     fn toggle_cursor(&mut self) {
         let (x, y) = self.cell_xy(self.cx.min(self.cols - 1), self.cy);
         let (cw, ch) = (self.cw(), self.ch());
+        self.mark(y as usize, y as usize + ch);
         let stride = self.surface.stride();
         let px = self.surface.pixels_mut();
         for row in 0..ch {
@@ -154,6 +208,7 @@ impl Console {
             self.cy += 1;
         } else {
             let (x, y) = self.cell_xy(0, 0);
+            self.mark(MARGIN, MARGIN + self.rows * self.ch());
             self.surface.scroll_up(
                 x,
                 y,
@@ -206,6 +261,7 @@ impl Console {
             self.newline();
         }
         let (x, y) = self.cell_xy(self.cx, self.cy);
+        self.mark(y as usize, y as usize + self.ch());
         let (fg, bg) = if self.reverse {
             (self.bg, self.fg)
         } else {
@@ -243,12 +299,15 @@ impl Console {
                         self.cx = (self.params[1].max(1) as usize - 1).min(self.cols - 1);
                     }
                     'J' if self.params[0] == 2 => {
+                        let h = self.surface.height();
+                        self.mark(0, h);
                         self.surface.clear(DEFAULT_BG);
                         self.cx = 0;
                         self.cy = 0;
                     }
                     'K' => {
                         let (x, y) = self.cell_xy(self.cx.min(self.cols), self.cy);
+                        self.mark(y as usize, y as usize + self.ch());
                         let end = MARGIN + self.cols * self.cw();
                         self.surface
                             .fill_rect(x, y, end as i32 - x, self.ch() as i32, DEFAULT_BG);

@@ -69,6 +69,7 @@ them, so every existing option works unchanged:
 | `milk.selftest=full` (or a comma list) | the slow boot self-tests (kernel/src/selftest.rs) |
 | `milk.drivers="rng=kernel sound=kernel"` | which driver runs each device (docs/drivers.md) |
 | `milk.net="internet=on"` | the launcher's network policy (docs/networking.md) |
+| `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens) |
 
@@ -177,7 +178,8 @@ There is no serial cable in this setup, so the kernel makes the screen the conso
 2. **The boot log** (`kprintln!`) is mirrored on the screen from that point on: first what was printed
    before the framebuffer existed (replayed from the kernel log), then everything, scrolling, in the 8x16
    console font (`milk.fbscale=2` doubles it; 1600+ wide screens do by default). No splash. The desktop
-   takes the screen when it starts.
+   takes the screen when it starts. The console draws in a RAM copy of the screen and writes the rows that
+   changed (video memory is slow to read when it is not cacheable, and scrolling reads), once per log line.
    ![boot log](screenshots/raspberry-pi-boot-log.png)
 3. **A crash shows its text.** A kernel panic or exception paints the end of the kernel log (which holds the
    panic message with its source line, or the exception dump: ESR, FAR, ELR, all registers) as a full-screen

@@ -22,6 +22,26 @@ pub mod sdhci;
 
 use core::arch::asm;
 
+/// Is `what` named in the boot option `milk.disable=a,b,c`? A way to start a board without a driver that hangs
+/// it (edit cmdline.txt, no rebuild): `pcie`, `usb`, `genet`, `sdhci`, `rng`.
+pub fn disabled(what: &str) -> bool {
+    let mut buf = [0u8; 64];
+    let Some(f) = crate::fwcfg::find_file("opt/milkos/disable")
+        .filter(|f| (f.size as usize) <= buf.len())
+        .filter(|f| crate::fwcfg::read_file(*f, &mut buf[..f.size as usize]))
+    else {
+        return false;
+    };
+    let hit = core::str::from_utf8(&buf[..f.size as usize])
+        .unwrap_or("")
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .any(|w| w == what);
+    if hit {
+        crate::kprintln!("rpi: {what} disabled by the command line (milk.disable)");
+    }
+    hit
+}
+
 /// Log what the firmware says about the board (firmware build, board revision, MAC address).
 /// Failures are logged, never fatal: the board works without the answers.
 pub fn init() {
@@ -46,9 +66,15 @@ pub fn init() {
         ),
         Err(e) => crate::kprintln!("rpi: no ethernet address from the firmware ({e:?})"),
     }
-    rng::init();
-    sdhci::init();
-    genet::init();
+    if !disabled("rng") {
+        rng::init();
+    }
+    if !disabled("sdhci") {
+        sdhci::init();
+    }
+    if !disabled("genet") {
+        genet::init();
+    }
 }
 
 pub use crate::timeout::Timeout;

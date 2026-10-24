@@ -158,6 +158,9 @@ pub struct Controller {
     slots: Vec<Slot>,
     /// Ports we have looked at since they connected (index = port - 1): don't enumerate twice.
     attached: [bool; 32],
+    /// When (ms) each port was first seen connected, 0 if it is not: a device gets 100 ms to settle
+    /// (USB's connect debounce) before the port is reset.
+    connected_since: [u64; 32],
     started: bool,
 }
 
@@ -267,7 +270,7 @@ impl Controller {
         wr32(ir + 8, 1); // ERSTSZ
         wr64(ir + 0x18, ev.pa()); // ERDP
         wr64(ir + 0x10, erst.pa()); // ERSTBA, last
-        wr32(ir, 3); // IMAN: clear a pending bit, leave interrupts off at the controller's interrupter
+        wr32(ir, 1); // IMAN: clear a pending bit; interrupts stay off (polled)
         wr32(op + USBCMD, CMD_RUN);
         if !wait(500, || rd32(op + USBSTS) & STS_HALTED == 0) {
             kprintln!("[usb] the controller does not start");
@@ -299,6 +302,7 @@ impl Controller {
             },
             slots: Vec::new(),
             attached: [false; 32],
+            connected_since: [0; 32],
             started: false,
         })
     }
@@ -324,7 +328,7 @@ impl Controller {
     }
 
     /// Wait for the command completion for the TRB at `trb_pa`; other events seen meanwhile are
-    /// handled by `other`.
+    /// handled as they come (`stash`).
     fn wait_command(&mut self, trb_pa: u64) -> Result<(u8, u8), Error> {
         let t = Timeout::ms(1000);
         loop {
@@ -700,7 +704,13 @@ impl Controller {
             if v & portsc::CHANGE_BITS != 0 {
                 wr32(a, portsc::write_clearing(v, v & portsc::CHANGE_BITS));
             }
-            if connected && !self.attached[idx] {
+            let now = crate::timer::now_ns() / 1_000_000 + 1;
+            if !connected {
+                self.connected_since[idx] = 0;
+            } else if self.connected_since[idx] == 0 {
+                self.connected_since[idx] = now;
+            }
+            if connected && !self.attached[idx] && now - self.connected_since[idx] >= 100 {
                 self.attached[idx] = true;
                 if let Err(e) = self.enumerate(port) {
                     kprintln!("[usb] port {port}: {e:?}");

@@ -22,6 +22,10 @@ use crate::pci;
 
 /// Find the host controllers and start the polling thread. Called once, after the scheduler is up.
 pub fn start() {
+    #[cfg(feature = "raspi")]
+    if crate::rpi::disabled("usb") {
+        return;
+    }
     crate::sched::spawn("usb", run);
 }
 

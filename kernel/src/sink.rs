@@ -126,6 +126,18 @@ pub fn remove_screen() {
     SCREEN.busy.store(false, Ordering::Release);
 }
 
+/// Show what the screen console has drawn so far (a no-op without a RAM shadow). Never waits.
+pub fn flush_screen() {
+    if !try_lock() {
+        return;
+    }
+    // SAFETY: we hold the `busy` flag.
+    if let Some(c) = unsafe { &mut *SCREEN.inner.get() } {
+        c.flush();
+    }
+    SCREEN.busy.store(false, Ordering::Release);
+}
+
 /// Is `kprintln!` mirrored on the screen right now?
 pub fn screen_installed() -> bool {
     // SAFETY: a racy peek at a word for a yes/no answer (used when a panic wants to know whether

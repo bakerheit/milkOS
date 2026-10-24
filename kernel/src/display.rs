@@ -85,6 +85,27 @@ pub fn console_scale() -> usize {
     opt.unwrap_or(if w >= 1600 { 2 } else { 1 }).clamp(1, 4)
 }
 
+/// Physical address of the console's RAM copy of the screen (0: none) and its size in pages.
+static SHADOW_PA: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static SHADOW_PAGES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The RAM copy of the screen the text consoles draw on (allocated on first use, never freed: the crash
+/// screen needs it when the desktop has long taken the framebuffer over). `None` without memory.
+pub fn console_shadow(w: usize, h: usize) -> Option<Surface<'static>> {
+    let pages = (w * h * 4).div_ceil(crate::mmu::PAGE_SIZE);
+    if SHADOW_PA.load(Ordering::Acquire) == 0 {
+        let pa = crate::pmm::alloc_contiguous_zeroed_as(crate::pmm::Use::Display, pages, 1)?;
+        SHADOW_PAGES.store(pages, Ordering::Release);
+        SHADOW_PA.store(pa, Ordering::Release);
+    }
+    if SHADOW_PAGES.load(Ordering::Acquire) < pages {
+        return None; // a bigger screen than the copy was made for
+    }
+    let va = crate::mmu::phys_to_virt(SHADOW_PA.load(Ordering::Acquire));
+    // SAFETY: pages we own for good; the one console that draws on it at a time is serialised by its caller.
+    Some(unsafe { Surface::from_raw(va as *mut u32, w, h, w) })
+}
+
 /// The Raspberry Pi's start: no serial cable, so the screen is the console. The kernel log so far
 /// is replayed onto it and `kprintln!` is mirrored there until the desktop takes the screen over
 /// ([`take_framebuffer`]); a crash shows its text where the boot log was ([`crate::crashscreen`]).
@@ -95,13 +116,19 @@ fn finish_init_boot_log(fb: Surface<'static>, name: &str, w: usize, h: usize) {
     let view =
         unsafe { Surface::from_raw(framebuffer().unwrap_or(core::ptr::null_mut()), w, h, w) };
     *FRAMEBUFFER.lock() = Some(fb);
-    let mut console = fbcon::Console::with_scale(view, console_scale());
+    // The console works in a RAM copy of the screen (video memory is slow to read, and scrolling reads it)
+    // and writes the changed rows out. The copy is kept for the crash screen.
+    let mut console = match console_shadow(w, h) {
+        Some(shadow) => fbcon::Console::with_shadow(view, shadow, console_scale()),
+        None => fbcon::Console::with_scale(view, console_scale()),
+    };
     // What was printed before the screen existed.
     crate::klog::read_since(0, |bytes| {
         for chunk in bytes.utf8_chunks() {
             console.write_str(chunk.valid());
         }
     });
+    console.flush();
     sink::install_screen(console);
     #[cfg(feature = "raspi")]
     crate::rpi::fb::band();

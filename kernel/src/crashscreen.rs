@@ -24,14 +24,19 @@ pub fn show() -> bool {
         return false;
     };
     if sink::screen_installed() {
-        // The boot console has the text already.
+        // The boot console has the text already: make sure the last lines are out.
+        sink::flush_screen();
         display::sync_panic();
         return true;
     }
     let (w, h) = display::size();
     // SAFETY: the live framebuffer; whatever else was drawing is stopped or about to be.
     let fb = unsafe { Surface::from_raw(ptr, w, h, w) };
-    let mut console = Console::with_scale(fb, display::console_scale());
+    // Drawn in RAM and written out in rows: scrolling reads, and reading video memory is slow.
+    let mut console = match display::console_shadow(w, h) {
+        Some(shadow) => Console::with_shadow(fb, shadow, display::console_scale()),
+        None => Console::with_scale(fb, display::console_scale()),
+    };
     // The end of the log, which holds the exception dump or the panic message with its
     // location, then a last line saying what this is.
     klog::tail(TAIL_BYTES, |bytes| {
@@ -42,6 +47,7 @@ pub fn show() -> bool {
     console.write_str(
         "\n\x1b[1;31mmilkOS stopped.\x1b[0m The green LED flashes. Photograph this screen.\n",
     );
+    console.flush();
     display::sync_panic();
     true
 }

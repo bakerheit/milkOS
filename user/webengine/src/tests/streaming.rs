@@ -18,12 +18,21 @@ fn run_with_until(js: &str, serve: impl FnMut(&NetRequest) -> Vec<Reply>) -> sup
 fn chunks(req: &NetRequest, n: usize, size: usize) -> Vec<Reply> {
     let mut h = head(200, "OK", &[("content-type", "application/octet-stream")]);
     h.url = req.url.clone();
-    let mut out = alloc::vec![Reply { after: 0, ev: NetEvent::Head(h) }];
+    let mut out = alloc::vec![Reply {
+        after: 0,
+        ev: NetEvent::Head(h)
+    }];
     for k in 0..n {
         let piece: Vec<u8> = (0..size).map(|i| ((k * size + i) & 255) as u8).collect();
-        out.push(Reply { after: 0, ev: NetEvent::Chunk(piece) });
+        out.push(Reply {
+            after: 0,
+            ev: NetEvent::Chunk(piece),
+        });
     }
-    out.push(Reply { after: 0, ev: NetEvent::Done(Vec::new()) });
+    out.push(Reply {
+        after: 0,
+        ev: NetEvent::Done(Vec::new()),
+    });
     out
 }
 
@@ -37,7 +46,12 @@ const READ_ALL: &str = "fetch('/big').then(async r => {
 fn the_body_is_a_stream_of_the_pieces_the_app_sent() {
     let r = run(READ_ALL, |req| chunks(req, 5, 1000));
     let t = t_lines(&r);
-    assert!(t.iter().any(|l| l.starts_with("read 5000 in 5 pieces sum ")), "{:?}", r.lines);
+    assert!(
+        t.iter()
+            .any(|l| l.starts_with("read 5000 in 5 pieces sum ")),
+        "{:?}",
+        r.lines
+    );
     assert!(r.requests[0].stream, "fetch asks for pieces");
     // Every piece the page read was acknowledged, in all and in order.
     let last = r.acks.last().copied();
@@ -106,7 +120,10 @@ fn text_and_json_keep_everything_and_acknowledge_at_once() {
 
 #[test]
 fn whole_body_reads_stop_at_the_memory_limit_but_pieces_do_not() {
-    let small = ScriptLimits { buffer: 3000, ..ScriptLimits::default() };
+    let small = ScriptLimits {
+        buffer: 3000,
+        ..ScriptLimits::default()
+    };
     // text() over the limit: an error the page can catch, and the request is cancelled.
     let r = run_limits(
         "fetch('/big').then(r => r.text()).then(() => console.log('T text ok'), e => console.log('T error ' + e.name + ': ' + e.message.slice(0, 40)));",
@@ -114,11 +131,27 @@ fn whole_body_reads_stop_at_the_memory_limit_but_pieces_do_not() {
         small,
         |req| chunks(req, 10, 1000),
     );
-    assert!(t_lines(&r).iter().any(|l| l.starts_with("error TypeError: The response body is bigger than this pa")), "{:?}", r.lines);
-    assert!(!r.cancelled.is_empty(), "the rest is not sent: {:?}", r.cancelled);
+    assert!(
+        t_lines(&r)
+            .iter()
+            .any(|l| l.starts_with("error TypeError: The response body is bigger than this pa")),
+        "{:?}",
+        r.lines
+    );
+    assert!(
+        !r.cancelled.is_empty(),
+        "the rest is not sent: {:?}",
+        r.cancelled
+    );
     // Reading by pieces: no limit.
     let r = run_limits(READ_ALL, 40, small, |req| chunks(req, 10, 1000));
-    assert!(t_lines(&r).iter().any(|l| l.starts_with("read 10000 in 10 pieces")), "{:?}", r.lines);
+    assert!(
+        t_lines(&r)
+            .iter()
+            .any(|l| l.starts_with("read 10000 in 10 pieces")),
+        "{:?}",
+        r.lines
+    );
     // Just under the limit: fine.
     let r = run_limits(
         "fetch('/big').then(r => r.text()).then(t => console.log('T text ' + t.length));",
@@ -141,7 +174,11 @@ fn a_response_can_be_cancelled_and_an_abort_ends_the_stream() {
         |req| chunks(req, 5, 1000),
     );
     assert!(t_lines(&r).contains(&"cancelled"), "{:?}", r.lines);
-    assert!(!r.cancelled.is_empty(), "the app is told to stop: {:?}", r.cancelled);
+    assert!(
+        !r.cancelled.is_empty(),
+        "the app is told to stop: {:?}",
+        r.cancelled
+    );
     let r = run(
         "const ac = new AbortController();
          fetch('/big', { signal: ac.signal }).then(async r => {
@@ -157,7 +194,11 @@ fn a_response_can_be_cancelled_and_an_abort_ends_the_stream() {
             v
         },
     );
-    assert!(t_lines(&r).iter().any(|l| l.starts_with("aborted")), "{:?}", r.lines);
+    assert!(
+        t_lines(&r).iter().any(|l| l.starts_with("aborted")),
+        "{:?}",
+        r.lines
+    );
 }
 
 #[test]
@@ -176,7 +217,12 @@ fn an_error_in_the_middle_reaches_the_reader() {
         },
     );
     let t = t_lines(&r);
-    assert!(t.iter().any(|l| l.starts_with("failed after 1600 TypeError")), "{:?}", r.lines);
+    assert!(
+        t.iter()
+            .any(|l| l.starts_with("failed after 1600 TypeError")),
+        "{:?}",
+        r.lines
+    );
     let _ = String::new();
 }
 
@@ -202,5 +248,8 @@ fn xhr_and_the_other_requests_do_not_stream() {
         |req| super::nettest::reply(req, 200, &[], "xhr body"),
     );
     assert!(t_lines(&r).contains(&"xhr xhr body"), "{:?}", r.lines);
-    assert!(r.requests.iter().all(|q| !q.stream), "only fetch asks for pieces");
+    assert!(
+        r.requests.iter().all(|q| !q.stream),
+        "only fetch asks for pieces"
+    );
 }

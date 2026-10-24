@@ -145,8 +145,9 @@ struct Spec {
     /// A page: its body streams to the window's thread (up to this many bytes) instead of
     /// coming whole.
     stream_cap: Option<usize>,
-    /// The most an image, a stylesheet and a script may be (from the memory plan).
-    caps: (usize, usize, usize),
+    /// The most an image, a stylesheet, a script and a page that comes whole (view-source, a
+    /// frame's document) may be (from the memory plan).
+    caps: (usize, usize, usize, usize),
     /// A script request, and what the policy needs to run it.
     script: Option<ScriptSpec>,
     /// A frame: the addresses of its ancestors (top first), checked on every hop.
@@ -254,7 +255,7 @@ struct BrowserHooks {
     file: Option<DlFile>,
     stream_cap: Option<usize>,
     reason: String,
-    caps: (usize, usize, usize),
+    caps: (usize, usize, usize, usize),
     jar: Arc<Mutex<Jar>>,
     ctx: Context,
     shared: Arc<Mutex<Shared>>,
@@ -400,13 +401,14 @@ impl Hooks for BrowserHooks {
     }
 }
 
-fn options(kind: Kind, caps: (usize, usize, usize)) -> Options {
+fn options(kind: Kind, caps: (usize, usize, usize, usize)) -> Options {
     Options {
         max_body: match kind {
             Kind::Image => caps.0,
             Kind::Style => caps.1,
             Kind::Script => caps.2,
-            _ => MAX_PAGE,
+            Kind::Frame => (caps.3 / 4).max(MAX_PAGE),
+            _ => caps.3,
         },
         timeout_ms: if kind == Kind::Download {
             600_000
@@ -642,7 +644,7 @@ pub struct Fetcher {
     pub downloads: String,
     /// What the memory plan allows an image, a stylesheet and a script to be (set by the app
     /// as memory changes; a job takes the numbers when it is started).
-    pub caps: (usize, usize, usize),
+    pub caps: (usize, usize, usize, usize),
     /// What a finished page job still had waiting to be taken (its last pieces) and whether it
     /// was cut at its cap, by job: the window asks for it once with [`Fetcher::take_leftover`].
     leftover: alloc::collections::BTreeMap<JobId, (Vec<u8>, Option<PageHead>)>,
@@ -656,7 +658,7 @@ impl Fetcher {
             next: 1,
             jar: Arc::new(Mutex::new(jar)),
             downloads,
-            caps: (MAX_IMAGE, MAX_STYLE, MAX_SCRIPT),
+            caps: (MAX_IMAGE, MAX_STYLE, MAX_SCRIPT, MAX_PAGE),
             leftover: alloc::collections::BTreeMap::new(),
         }
     }

@@ -20,6 +20,12 @@
 //! response's headers (Set-Cookie on redirects too), may raise the body limit for one
 //! response (a download), hear the body's progress and can stop the fetch
 //! ([`Error::Cancelled`]). [`get`] is a plain GET with no hooks.
+//!
+//! A body does not have to be held whole: when the hooks say so ([`Hooks::stream`]), the decoded body
+//! (de-chunked, and gunzipped or inflated as it arrives through [`crate::gzip::StreamDecoder`]) goes to
+//! [`Hooks::body`] piece by piece, with no size limit, an idle timeout ([`Options::stream_idle_ms`])
+//! instead of the overall one, and the hook free to block (the connection waits: backpressure) or to
+//! stop (the response says `cut`). The Browser streams pages, downloads and `fetch` bodies this way.
 
 use alloc::boxed::Box;
 use alloc::format;

@@ -8,13 +8,28 @@ const METER: &str = "MemTotal:           524288 kB\nMemFree:            452552 k
 const PRESS: &str = "level:          normal\nMemFree:            452552 kB\nLowMark:             65536 kB\nCriticalMark:        32768 kB\nMinFree:            400000 kB\nLowEvents:                 2\nCriticalEvents:            1\nAllocFailures:             3\n";
 
 fn page(key: u64, fg: bool, used: usize) -> Realm {
-    Realm { key, kind: Kind::Page, foreground: fg, used }
+    Realm {
+        key,
+        kind: Kind::Page,
+        foreground: fg,
+        used,
+    }
 }
 fn frame(key: u64, fg: bool, used: usize) -> Realm {
-    Realm { key, kind: Kind::Frame, foreground: fg, used }
+    Realm {
+        key,
+        kind: Kind::Frame,
+        foreground: fg,
+        used,
+    }
 }
 fn worker(key: u64, fg: bool, used: usize) -> Realm {
-    Realm { key, kind: Kind::Worker, foreground: fg, used }
+    Realm {
+        key,
+        kind: Kind::Worker,
+        foreground: fg,
+        used,
+    }
 }
 
 /// A machine of `total` MiB with `avail` MiB free.
@@ -32,16 +47,26 @@ fn parses_the_kernel_files() {
     assert_eq!((m.low_events, m.critical_events, m.failures), (2, 1, 3));
     // No pressure file: the usual marks. No MemAvailable: MemFree.
     let m = Machine::parse("MemTotal: 1048576 kB\nMemFree: 1000 kB\n", "").unwrap();
-    assert_eq!((m.total, m.available, m.low, m.critical), (1024 * MIB, 1000 * KIB, 128 * MIB, 64 * MIB));
+    assert_eq!(
+        (m.total, m.available, m.low, m.critical),
+        (1024 * MIB, 1000 * KIB, 128 * MIB, 64 * MIB)
+    );
     // Garbage.
     assert!(Machine::parse("", "").is_none());
     assert!(Machine::parse("MemTotal: lots kB\n", "").is_none());
     assert!(Machine::parse("MemTotal: 0 kB\nMemFree: 0 kB\n", "").is_none());
     assert!(Machine::parse("MemFree: 5 kB\n", "level: low\n").is_none());
     // Free memory above the total, marks above the total: all clamped.
-    let m = Machine::parse("MemTotal: 100 kB\nMemAvailable: 999 kB\n", "LowMark: 5000 kB\nCriticalMark: 9000 kB\n").unwrap();
+    let m = Machine::parse(
+        "MemTotal: 100 kB\nMemAvailable: 999 kB\n",
+        "LowMark: 5000 kB\nCriticalMark: 9000 kB\n",
+    )
+    .unwrap();
     assert!(m.available <= m.total && m.low <= m.total && m.critical <= m.low);
-    let m = Machine::parse(&format!("MemTotal: {} kB\nMemFree: {} kB\n", usize::MAX, usize::MAX), "");
+    let m = Machine::parse(
+        &format!("MemTotal: {} kB\nMemFree: {} kB\n", usize::MAX, usize::MAX),
+        "",
+    );
     assert!(m.is_none() || m.unwrap().available > 0);
 }
 
@@ -73,7 +98,9 @@ fn levels() {
     assert_eq!(Machine::new(t, 63 * MIB).level(), Level::Low);
     assert_eq!(Machine::new(t, 31 * MIB).level(), Level::Critical);
     assert_eq!(Machine::new(t, 0).level(), Level::Critical);
-    assert!(Level::Critical > Level::Low && Level::Low > Level::Tight && Level::Tight > Level::Normal);
+    assert!(
+        Level::Critical > Level::Low && Level::Low > Level::Tight && Level::Tight > Level::Normal
+    );
     assert_eq!(Machine::default().level(), Level::Normal);
 }
 
@@ -86,18 +113,32 @@ fn one_page_gets_most_of_the_room() {
     assert!(l > 100 * MIB, "limit {} MiB", l / MIB);
     assert!(to_real(l) < m.available - m.floor() + MIB);
     // It grows on a roomy machine and the same page gets less on a tight one.
-    let big = plan(&mach(2048, 1900), &[page(1, true, 0)]).limit_of(1).unwrap();
-    let small = plan(&mach(512, 160), &[page(1, true, 0)]).limit_of(1).unwrap();
+    let big = plan(&mach(2048, 1900), &[page(1, true, 0)])
+        .limit_of(1)
+        .unwrap();
+    let small = plan(&mach(512, 160), &[page(1, true, 0)])
+        .limit_of(1)
+        .unwrap();
     assert!(big > l && l > small, "{big} {l} {small}");
     assert!(big >= 500 * MIB, "a roomy machine: {} MiB", big / MIB);
     // No room: the minimum, and no more.
-    assert_eq!(plan(&mach(512, 90), &[page(1, true, 0)]).limit_of(1), Some(16 * MIB));
+    assert_eq!(
+        plan(&mach(512, 90), &[page(1, true, 0)]).limit_of(1),
+        Some(16 * MIB)
+    );
 }
 
 #[test]
 fn a_realm_keeps_what_it_holds() {
     let m = mach(512, 90); // no room
-    let b = plan(&m, &[page(1, true, 40 * MIB), frame(2, true, 2 * MIB), worker(3, false, 30 * MIB)]);
+    let b = plan(
+        &m,
+        &[
+            page(1, true, 40 * MIB),
+            frame(2, true, 2 * MIB),
+            worker(3, false, 30 * MIB),
+        ],
+    );
     // Holding 40 MiB with no room: that and an eighth, not a byte of growth beyond.
     assert_eq!(b.limit_of(1), Some(40 * MIB + 5 * MIB + 256 * KIB));
     // A small one gets the minimum.
@@ -118,11 +159,17 @@ fn more_tabs_mean_less_each() {
     let nine = plan(&m, &realms);
     let fg = nine.limit_of(1).unwrap();
     let bg = nine.limit_of(10).unwrap();
-    assert!(fg < one, "the page in front gets less with eight tabs behind it");
+    assert!(
+        fg < one,
+        "the page in front gets less with eight tabs behind it"
+    );
     assert!(bg < fg, "a background tab gets less than the one in front");
     assert!(bg >= min_limit(Kind::Page));
     // A page with its frames and a worker shares with them.
-    let shared = plan(&m, &[page(1, true, 0), frame(2, true, 0), worker(3, true, 0)]);
+    let shared = plan(
+        &m,
+        &[page(1, true, 0), frame(2, true, 0), worker(3, true, 0)],
+    );
     assert!(shared.limit_of(1).unwrap() < one);
     assert!(shared.limit_of(1) > shared.limit_of(2));
     assert_eq!(shared.limit_of(2), shared.limit_of(3));
@@ -158,7 +205,10 @@ fn growth_never_adds_up_to_more_than_the_room() {
         let mut grow = 0usize;
         for r in &realms {
             let l = b.limit_of(r.key).unwrap();
-            assert!(l >= r.used.min(ceiling(&m, r.kind)), "never under what it holds");
+            assert!(
+                l >= r.used.min(ceiling(&m, r.kind)),
+                "never under what it holds"
+            );
             assert!(l <= ceiling(&m, r.kind).max(min_limit(r.kind)));
             // Growth beyond the slack every realm is given.
             let slack = r.used / 8 + 256 * KIB;
@@ -166,7 +216,11 @@ fn growth_never_adds_up_to_more_than_the_room() {
         }
         // (What realms are guaranteed can come on top of their shares, each at most its share of
         // the room: at worst twice the room, which the reserve and the floor are there for.)
-        assert!(grow <= 2 * b.room_engine, "grow {grow} room {}", b.room_engine);
+        assert!(
+            grow <= 2 * b.room_engine,
+            "grow {grow} room {}",
+            b.room_engine
+        );
     }
 }
 
@@ -186,9 +240,35 @@ fn a_realm_in_a_background_tab_still_gets_what_realms_always_had() {
     assert!(tight.limit_of(10).unwrap() < old_default(Kind::Page));
     assert!(tight.limit_of(10).unwrap() >= min_limit(Kind::Page));
     // Frames and workers have theirs too.
-    let b = plan(&m, &[page(1, true, 0), frame(2, false, 0), worker(3, false, 0)]);
+    let b = plan(
+        &m,
+        &[page(1, true, 0), frame(2, false, 0), worker(3, false, 0)],
+    );
     assert!(b.limit_of(2).unwrap() >= old_default(Kind::Frame));
     assert!(b.limit_of(3).unwrap() >= old_default(Kind::Worker));
+}
+
+#[test]
+fn headroom_is_what_a_realm_may_grow_by() {
+    let m = mach(512, 440);
+    let b = plan(&m, &[page(1, true, 0), worker(2, true, 0)]);
+    // What the worker may grow by is what a worker of nothing would be given, and with what it
+    // holds added it is its limit (when nothing is clamped).
+    let head = b.headroom(Kind::Worker, true);
+    assert_eq!(head, b.limit_of(2).unwrap());
+    assert!(head >= old_default(Kind::Worker));
+    assert_eq!(
+        b.headroom(Kind::Worker, false) >= min_limit(Kind::Worker),
+        true
+    );
+    assert!(
+        b.headroom(Kind::Worker, true) > b.headroom(Kind::Worker, false)
+            || b.headroom(Kind::Worker, true) == old_default(Kind::Worker)
+    );
+    assert_eq!(b.ceiling_of(Kind::Worker), ceiling(&m, Kind::Worker));
+    // No room: the minimum, whatever the weights.
+    let tight = plan(&mach(512, 90), &[worker(2, true, 40 * MIB)]);
+    assert_eq!(tight.headroom(Kind::Worker, true), min_limit(Kind::Worker));
 }
 
 #[test]
@@ -198,13 +278,19 @@ fn ceilings_come_from_ram() {
         let b = plan(&m, &[page(1, true, 0), worker(2, true, 0)]);
         assert!(b.limit_of(1).unwrap() <= ceiling(&m, Kind::Page));
         assert!(b.limit_of(2).unwrap() <= ceiling(&m, Kind::Worker));
-        assert!(to_real(ceiling(&m, Kind::Page)) <= m.total, "a page can never be given more than the machine");
+        assert!(
+            to_real(ceiling(&m, Kind::Page)) <= m.total,
+            "a page can never be given more than the machine"
+        );
         assert!(ceiling(&m, Kind::Worker) <= ceiling(&m, Kind::Page));
     }
     // A page that holds more than the ceiling is given the ceiling: it will run out.
     let m = mach(512, 100);
     let c = ceiling(&m, Kind::Page);
-    assert_eq!(plan(&m, &[page(1, true, c + 50 * MIB)]).limit_of(1), Some(c));
+    assert_eq!(
+        plan(&m, &[page(1, true, c + 50 * MIB)]).limit_of(1),
+        Some(c)
+    );
 }
 
 #[test]
@@ -224,7 +310,13 @@ fn caps_follow_the_room() {
     let none = Caps::from_room(0);
     let some = Caps::from_room(300 * MIB);
     let lots = Caps::from_room(4096 * MIB);
-    for (a, b) in [(none.script, some.script), (some.script, lots.script), (none.response, some.response), (some.nodes, lots.nodes), (none.style, some.style)] {
+    for (a, b) in [
+        (none.script, some.script),
+        (some.script, lots.script),
+        (none.response, some.response),
+        (some.nodes, lots.nodes),
+        (none.style, some.style),
+    ] {
         assert!(a <= b);
     }
     // The old fixed caps are the smallest, so a roomy machine is never worse off.
@@ -292,12 +384,25 @@ fn a_blip_resets_nothing() {
 }
 
 fn tab(index: usize, fg: bool, bytes: usize) -> TabInfo {
-    TabInfo { index, foreground: fg, busy: false, touched: false, bytes, idle_ms: 5_000, discarded: false }
+    TabInfo {
+        index,
+        foreground: fg,
+        busy: false,
+        touched: false,
+        bytes,
+        idle_ms: 5_000,
+        discarded: false,
+    }
 }
 
 #[test]
 fn which_tab_to_discard() {
-    let tabs = [tab(0, true, 900 * MIB), tab(1, false, 20 * MIB), tab(2, false, 80 * MIB), tab(3, false, MIB / 4)];
+    let tabs = [
+        tab(0, true, 900 * MIB),
+        tab(1, false, 20 * MIB),
+        tab(2, false, 80 * MIB),
+        tab(3, false, MIB / 4),
+    ];
     // Never the one in front; the biggest one behind.
     assert_eq!(pick_discard(&tabs, false), Some(2));
     // Not ones already discarded, still loading, or just left.
@@ -315,18 +420,33 @@ fn which_tab_to_discard() {
     assert_eq!(pick_discard(&t, false), Some(1));
     assert_eq!(pick_discard(&t, true), Some(2));
     // Nothing worth discarding.
-    assert_eq!(pick_discard(&[tab(0, true, 1 << 30), tab(1, false, 100 * KIB)], false), None);
+    assert_eq!(
+        pick_discard(&[tab(0, true, 1 << 30), tab(1, false, 100 * KIB)], false),
+        None
+    );
     assert_eq!(pick_discard(&[], true), None);
 }
 
 #[test]
 fn which_page_to_ask_about() {
     assert_eq!(pick_heaviest(&[]), None);
-    assert_eq!(pick_heaviest(&[page(1, true, 5 * MIB)]), None, "a page that holds little is no one's problem");
-    let rs = [page(1, true, 20 * MIB), frame(2, false, 90 * MIB), worker(3, false, 60 * MIB)];
+    assert_eq!(
+        pick_heaviest(&[page(1, true, 5 * MIB)]),
+        None,
+        "a page that holds little is no one's problem"
+    );
+    let rs = [
+        page(1, true, 20 * MIB),
+        frame(2, false, 90 * MIB),
+        worker(3, false, 60 * MIB),
+    ];
     assert_eq!(pick_heaviest(&rs), Some(2));
     let rs = [page(1, true, 90 * MIB), frame(2, false, 90 * MIB)];
-    assert_eq!(pick_heaviest(&rs), Some(1), "the one in front first among equals");
+    assert_eq!(
+        pick_heaviest(&rs),
+        Some(1),
+        "the one in front first among equals"
+    );
 }
 
 #[test]
@@ -371,18 +491,29 @@ fn nothing_panics_on_nonsense() {
             })
             .collect();
         let b = plan(&m, &realms);
-        let _ = (b.level, b.caps(), b.for_new(Kind::Worker, false), m.level(), m.floor(), m.room());
+        let _ = (
+            b.level,
+            b.caps(),
+            b.for_new(Kind::Worker, false),
+            m.level(),
+            m.floor(),
+            m.room(),
+        );
         for r in &realms {
             assert!(b.limit_of(r.key).is_some());
         }
         let _ = pick_heaviest(&realms);
         let mut l = Ladder::new();
         for t in 0..20u64 {
-            let lv = [Level::Normal, Level::Tight, Level::Low, Level::Critical][(rnd() % 4) as usize];
+            let lv =
+                [Level::Normal, Level::Tight, Level::Low, Level::Critical][(rnd() % 4) as usize];
             if let Some(st) = l.next(lv, t * (rnd() % 2000)) {
                 l.skip(st);
             }
         }
     }
-    let _ = Machine::parse(&"MemTotal: 9999999999999999999999 kB".repeat(3), "LowMark: -1 kB");
+    let _ = Machine::parse(
+        &"MemTotal: 9999999999999999999999 kB".repeat(3),
+        "LowMark: -1 kB",
+    );
 }

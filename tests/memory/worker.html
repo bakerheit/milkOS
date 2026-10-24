@@ -9,7 +9,7 @@
 <script>
   var a = args(location.search), ticks = 0;
   setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('worker', 'tick', ticks); }, 200);
-  var w = new Worker('/hog-worker.js?mb=' + (a.mb || 50) + '&kind=' + (a.kind || 'objects'), { name: 'hog' });
+  var w = new Worker('/hog-worker.js?mb=' + (a.mb || 50) + '&kind=' + (a.kind || 'objects') + (a.sync ? '&sync=1' : ''), { name: 'hog' });
   w.onmessage = function (e) {
     document.getElementById('state').textContent = 'worker: ' + e.data;
     if (String(e.data).indexOf('progress') < 0) report('worker', 'message', e.data);

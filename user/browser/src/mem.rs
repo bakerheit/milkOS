@@ -15,7 +15,8 @@ use alloc::vec::Vec;
 
 pub use browserkit::memory::Kind;
 use browserkit::memory::{
-    self, Budget, Caps, Ladder, Level, Machine, Realm, Step, TabInfo, human, pick_discard, pick_heaviest, to_real,
+    self, Budget, Caps, Ladder, Level, Machine, Realm, Step, TabInfo, human, pick_discard,
+    pick_heaviest, to_real,
 };
 use rt::sys;
 use webengine::{Allowance, ConsoleLevel, FrameId, ScriptLimits};
@@ -125,14 +126,21 @@ impl MemMonitor {
         let list: Vec<Realm> = self
             .realms
             .iter()
-            .map(|(&key, k)| Realm { key, kind: k.kind, foreground: k.tab == self.front, used: k.used })
+            .map(|(&key, k)| Realm {
+                key,
+                kind: k.kind,
+                foreground: k.tab == self.front,
+                used: k.used,
+            })
             .collect();
         self.budget = memory::plan(&self.machine, &list);
         if self.log {
             let used: usize = self.realms.values().map(|k| k.used).sum();
             // (Said when the numbers moved by a lot, not every time they are looked at.)
             let avail_mb = self.machine.available >> 20;
-            if self.logged.0.abs_diff(avail_mb as u64) >= 16 || self.logged.1.abs_diff(used) >= 8 << 20 {
+            if self.logged.0.abs_diff(avail_mb as u64) >= 16
+                || self.logged.1.abs_diff(used) >= 8 << 20
+            {
                 self.logged = (avail_mb as u64, used);
                 rt::println!(
                     "[browser] memory: {} MB free of {} MB, room {} MB, {} realms hold {} MB (browser heap {} MB), level {:?}{}",
@@ -146,7 +154,13 @@ impl MemMonitor {
                     if self.log_realms {
                         let mut t = String::new();
                         for (k, r) in &self.realms {
-                            t.push_str(&alloc::format!(" [{:x}:{:?} {}/{} MB]", k, r.kind, r.used >> 20, r.limit >> 20));
+                            t.push_str(&alloc::format!(
+                                " [{:x}:{:?} {}/{} MB]",
+                                k,
+                                r.kind,
+                                r.used >> 20,
+                                r.limit >> 20
+                            ));
                         }
                         t
                     } else {
@@ -177,7 +191,15 @@ impl MemMonitor {
 
     /// Note a realm and what it holds.
     pub fn note(&mut self, key: u64, kind: Kind, tab: u64, used: usize, limit: usize) {
-        self.realms.insert(key, Known { kind, tab, used, limit });
+        self.realms.insert(
+            key,
+            Known {
+                kind,
+                tab,
+                used,
+                limit,
+            },
+        );
     }
 
     pub fn forget(&mut self, key: u64) {
@@ -206,7 +228,12 @@ impl MemMonitor {
     pub fn list(&self) -> Vec<Realm> {
         self.realms
             .iter()
-            .map(|(&key, k)| Realm { key, kind: k.kind, foreground: k.tab == self.front, used: k.used })
+            .map(|(&key, k)| Realm {
+                key,
+                kind: k.kind,
+                foreground: k.tab == self.front,
+                used: k.used,
+            })
             .collect()
     }
 
@@ -224,7 +251,15 @@ impl MemMonitor {
     }
 
     /// The heap budget of realm `key` now, which holds `used`.
-    pub fn allowance(&mut self, now: u64, key: u64, kind: Kind, tab: u64, fg: bool, used: usize) -> Allowance {
+    pub fn allowance(
+        &mut self,
+        now: u64,
+        key: u64,
+        kind: Kind,
+        tab: u64,
+        fg: bool,
+        used: usize,
+    ) -> Allowance {
         if self.blind {
             return Allowance::Keep;
         }
@@ -232,7 +267,15 @@ impl MemMonitor {
         match self.realms.get_mut(&key) {
             Some(k) => k.used = used,
             None => {
-                self.realms.insert(key, Known { kind, tab, used, limit: old });
+                self.realms.insert(
+                    key,
+                    Known {
+                        kind,
+                        tab,
+                        used,
+                        limit: old,
+                    },
+                );
                 self.planned_at = 0;
             }
         }
@@ -244,7 +287,9 @@ impl MemMonitor {
         let limit = if counted {
             self.budget.limit_with(kind, fg, used)
         } else {
-            self.budget.limit_with(kind, fg, used).min(self.budget.for_new(kind, fg).max(used + used / 8))
+            self.budget
+                .limit_with(kind, fg, used)
+                .min(self.budget.for_new(kind, fg).max(used + used / 8))
         };
         if let Some(k) = self.realms.get_mut(&key) {
             k.limit = limit;
@@ -254,11 +299,19 @@ impl MemMonitor {
 
     /// How short memory is.
     pub fn level(&self) -> Level {
-        if self.blind { Level::Normal } else { self.budget.level }
+        if self.blind {
+            Level::Normal
+        } else {
+            self.budget.level
+        }
     }
 
     pub fn caps(&self) -> Caps {
-        if self.blind { Caps::default() } else { self.budget.caps() }
+        if self.blind {
+            Caps::default()
+        } else {
+            self.budget.caps()
+        }
     }
 
     /// Browser-side numbers for the log: real bytes the scripts of all realms hold, about.
@@ -296,8 +349,16 @@ impl App {
         let caps = self.mem.caps();
         let k = 1usize << (2 * more.min(10));
         webengine::Limits {
-            max_input: caps.page.saturating_mul(k).min(caps.page_max).max(caps.page),
-            max_nodes: caps.nodes.saturating_mul(k).min(caps.nodes_max).max(caps.nodes),
+            max_input: caps
+                .page
+                .saturating_mul(k)
+                .min(caps.page_max)
+                .max(caps.page),
+            max_nodes: caps
+                .nodes
+                .saturating_mul(k)
+                .min(caps.nodes_max)
+                .max(caps.nodes),
             ..webengine::Limits::default()
         }
     }
@@ -327,17 +388,27 @@ impl App {
                     self.mem.forget(key);
                     continue;
                 }
-                self.mem.note(key, kind, t.uid, st.heap_bytes, st.heap_limit);
+                self.mem
+                    .note(key, kind, t.uid, st.heap_bytes, st.heap_limit);
                 seen.push(key);
             }
         }
         for (id, tab, used) in self.workers.heaps() {
             let key = worker_key(tab, id);
-            let limit = self.mem.known(key).map_or(0, |k| k.limit);
+            let limit = self
+                .mem
+                .budget
+                .limit_of(key)
+                .unwrap_or_else(|| self.mem.known(key).map_or(0, |k| k.limit));
             self.mem.note(key, Kind::Worker, tab, used, limit);
             seen.push(key);
         }
-        let gone: Vec<u64> = self.mem.realms().map(|(k, _)| k).filter(|k| !seen.contains(k)).collect();
+        let gone: Vec<u64> = self
+            .mem
+            .realms()
+            .map(|(k, _)| k)
+            .filter(|k| !seen.contains(k))
+            .collect();
         for k in gone {
             self.mem.forget(k);
         }
@@ -354,7 +425,11 @@ impl App {
     /// The scripts of frame `f` of tab `ti` were stopped for lack of memory: say so, plainly,
     /// once. `used`/`limit`: what it held and was allowed (the engine's bytes).
     pub fn announce_memory_stop(&mut self, ti: usize, f: FrameId, used: usize, limit: usize) {
-        let what = if f.is_top() { "This page" } else { "A frame of this page" };
+        let what = if f.is_top() {
+            "This page"
+        } else {
+            "A frame of this page"
+        };
         let msg = alloc::format!(
             "{what} ran out of memory: it needed more than the {} the Browser could give it (it held {}). Its scripts were stopped and their memory given back. The Browser, the desktop and your other tabs are not affected.",
             human(to_real(limit)),
@@ -363,7 +438,11 @@ impl App {
         self.mem_console(ti, ConsoleLevel::Error, &msg);
         if ti == self.cur {
             let (uid, epoch) = (self.tabs[ti].uid, self.tabs[ti].epoch);
-            self.notice = Some(crate::Notice::info(uid, epoch, &alloc::format!("{what} ran out of memory and its scripts were stopped.")));
+            self.notice = Some(crate::Notice::info(
+                uid,
+                epoch,
+                &alloc::format!("{what} ran out of memory and its scripts were stopped."),
+            ));
             self.dirty = true;
         }
     }
@@ -371,7 +450,9 @@ impl App {
     /// The tab in front changed: the one left is timestamped (it may be discarded after a while),
     /// and a discarded one that was opened is fetched again.
     pub fn mem_front(&mut self) -> bool {
-        let Some(front) = self.tabs.get(self.cur).map(|t| t.uid) else { return false };
+        let Some(front) = self.tabs.get(self.cur).map(|t| t.uid) else {
+            return false;
+        };
         let mut changed = false;
         if front != self.mem_front_uid {
             let now = now_ms();
@@ -412,10 +493,21 @@ impl App {
         let mut changed = false;
         // A step that frees nothing is followed at once by the next.
         for _ in 0..4 {
-            let Some(step) = self.mem.ladder.next(level, now) else { break };
+            let Some(step) = self.mem.ladder.next(level, now) else {
+                break;
+            };
             let did = self.mem_step(step, level);
             if self.mem.log && (did || step != Step::AskStop) {
-                rt::println!("[browser] memory is {:?}: {:?} {}", level, step, if did { "did something" } else { "had nothing to do" });
+                rt::println!(
+                    "[browser] memory is {:?}: {:?} {}",
+                    level,
+                    step,
+                    if did {
+                        "did something"
+                    } else {
+                        "had nothing to do"
+                    }
+                );
             }
             changed |= did;
             if did {
@@ -426,7 +518,11 @@ impl App {
         // Free memory gone from under the floor and nothing left to give back: the notice
         // bar goes when the page does.
         if let Some(n) = &self.notice
-            && (self.tabs.iter().all(|t| t.uid != n.tab) || self.tabs.iter().any(|t| t.uid == n.tab && n.epoch != t.epoch))
+            && (self.tabs.iter().all(|t| t.uid != n.tab)
+                || self
+                    .tabs
+                    .iter()
+                    .any(|t| t.uid == n.tab && n.epoch != t.epoch))
         {
             self.notice = None;
             changed = true;
@@ -461,7 +557,9 @@ impl App {
         let drop_images: Vec<alloc::string::String> = self
             .images
             .iter()
-            .filter(|(u, st)| !shown.contains(u.as_str()) && !matches!(st, crate::ImgState::Loading(_)))
+            .filter(|(u, st)| {
+                !shown.contains(u.as_str()) && !matches!(st, crate::ImgState::Loading(_))
+            })
             .map(|(u, _)| u.clone())
             .collect();
         for u in drop_images {
@@ -528,12 +626,18 @@ impl App {
                     busy: t.load.is_some() || t.net_busy() || t.frames.busy(),
                     touched: t.touched,
                     bytes: scripts + workers + t.page.doc.approx_bytes(),
-                    idle_ms: if t.last_front == 0 { u64::MAX } else { now.saturating_sub(t.last_front) },
+                    idle_ms: if t.last_front == 0 {
+                        u64::MAX
+                    } else {
+                        now.saturating_sub(t.last_front)
+                    },
                     discarded: t.discarded.is_some() || t.page.kind != PageKind::Web,
                 }
             })
             .collect();
-        let Some(i) = pick_discard(&infos, desperate) else { return false };
+        let Some(i) = pick_discard(&infos, desperate) else {
+            return false;
+        };
         self.discard_tab(i);
         true
     }
@@ -545,7 +649,10 @@ impl App {
         let blank = self.internal_page(browserkit::address::Internal::NewTab);
         let t = &mut self.tabs[i];
         let d = crate::tab::Discarded {
-            address: t.history.current().map_or_else(|| t.page.address.clone(), |e| e.url.clone()),
+            address: t
+                .history
+                .current()
+                .map_or_else(|| t.page.address.clone(), |e| e.url.clone()),
             scroll: t.scroll,
             title: t.page.title.clone(),
             zoom: t.zoom,
@@ -566,14 +673,20 @@ impl App {
         t.discarded = Some(d);
         self.mem.forget_tab(uid);
         if self.mem.log {
-            rt::println!("[browser] discarded tab {} ({} KB of page)", i + 1, before >> 10);
+            rt::println!(
+                "[browser] discarded tab {} ({} KB of page)",
+                i + 1,
+                before >> 10
+            );
         }
         self.dirty = true;
     }
 
     /// A discarded tab is opened: fetch its page again, where it was scrolled.
     pub fn restore_tab(&mut self, i: usize) {
-        let Some(d) = self.tabs.get_mut(i).and_then(|t| t.discarded.take()) else { return };
+        let Some(d) = self.tabs.get_mut(i).and_then(|t| t.discarded.take()) else {
+            return;
+        };
         let t = &mut self.tabs[i];
         t.zoom = d.zoom;
         if let Some(e) = t.history.current_mut() {
@@ -582,7 +695,11 @@ impl App {
         let target = browserkit::address::interpret(&d.address);
         self.go(i, target, false, None, None);
         if self.mem.log {
-            rt::println!("[browser] restoring discarded tab {} from {}", i + 1, d.address);
+            rt::println!(
+                "[browser] restoring discarded tab {} from {}",
+                i + 1,
+                d.address
+            );
         }
     }
 
@@ -596,11 +713,19 @@ impl App {
             .mem
             .list()
             .into_iter()
-            .filter(|r| self.mem_waits.get(&r.key).is_none_or(|until| *until <= now_ms()))
+            .filter(|r| {
+                self.mem_waits
+                    .get(&r.key)
+                    .is_none_or(|until| *until <= now_ms())
+            })
             .collect();
-        let Some(key) = pick_heaviest(&list) else { return false };
+        let Some(key) = pick_heaviest(&list) else {
+            return false;
+        };
         let (uid, frame) = ((key >> 32), FrameId(key as u32));
-        let Some(ti) = self.tabs.iter().position(|t| t.uid == uid) else { return false };
+        let Some(ti) = self.tabs.iter().position(|t| t.uid == uid) else {
+            return false;
+        };
         let used = self.mem.known(key).map_or(0, |k| k.used);
         let epoch = self.tabs[ti].epoch;
         let what = if frame.is_top() {
@@ -610,10 +735,23 @@ impl App {
         } else {
             "A frame on this page"
         };
-        let text = alloc::format!("{what} uses a lot of memory ({}). Stop it?", human(to_real(used)));
-        self.notice = Some(crate::Notice { tab: uid, epoch, text, kind: crate::NoticeKind::AskStop { frame } });
+        let text = alloc::format!(
+            "{what} uses a lot of memory ({}). Stop it?",
+            human(to_real(used))
+        );
+        self.notice = Some(crate::Notice {
+            tab: uid,
+            epoch,
+            text,
+            kind: crate::NoticeKind::AskStop { frame },
+        });
         if self.mem.log {
-            rt::println!("[browser] memory: asking to stop tab {} frame {:?} ({} KB)", ti + 1, frame, to_real(used) >> 10);
+            rt::println!(
+                "[browser] memory: asking to stop tab {} frame {:?} ({} KB)",
+                ti + 1,
+                frame,
+                to_real(used) >> 10
+            );
         }
         self.dirty = true;
         true
@@ -624,7 +762,13 @@ impl App {
     pub fn notice_answer(&mut self, stop: bool) {
         let Some(n) = self.notice.take() else { return };
         self.dirty = true;
-        let Some(ti) = self.tabs.iter().position(|t| t.uid == n.tab && t.epoch == n.epoch) else { return };
+        let Some(ti) = self
+            .tabs
+            .iter()
+            .position(|t| t.uid == n.tab && t.epoch == n.epoch)
+        else {
+            return;
+        };
         if n.kind == crate::NoticeKind::LoadMore {
             if stop {
                 self.load_more(ti);
@@ -639,7 +783,10 @@ impl App {
                 self.say("Stopped the worker");
                 self.mem_console(ti, ConsoleLevel::Warn, "You stopped a worker of this page because it used a lot of memory. The page, the Browser and your other tabs are not affected.");
             } else if stop {
-                self.tabs[ti].page.doc.stop_scripts_because(frame, "you stopped it: it used a lot of memory");
+                self.tabs[ti]
+                    .page
+                    .doc
+                    .stop_scripts_because(frame, "you stopped it: it used a lot of memory");
                 self.mem.forget(key);
                 self.after_scripts(ti);
                 self.say("Stopped the page's scripts");

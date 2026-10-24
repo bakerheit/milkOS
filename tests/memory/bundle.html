@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: a big bundle of plain functions</title>
+<script src="/report.js"></script></head>
+<body style="font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28">
+<h2>A bundle of plain functions</h2>
+<iframe id="f" width="420" height="60"></iframe>
+<script>
+  // ?mb=N: the page loads /bundle.js?mb=N in itself, and a frame loads it too.
+  var a = args(location.search), mb = +a.mb || 3;
+  report('bundle', 'begin', mb);
+  var s = document.createElement('script');
+  s.src = '/bundle.js?mb=' + mb;
+  s.onload = function () { report('bundle', 'page-loaded', mb); document.getElementById('f').src = '/bundle-frame.html?mb=' + mb; };
+  s.onerror = function () { report('bundle', 'page-error', mb); };
+  document.head.appendChild(s);
+</script>
+</body></html>

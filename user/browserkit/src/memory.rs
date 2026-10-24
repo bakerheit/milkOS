@@ -108,7 +108,8 @@ impl Machine {
             .saturating_mul(KIB)
             .min(total);
         let low = kb_of(pressure, "LowMark").map_or(total / 8, |k| k.saturating_mul(KIB));
-        let critical = kb_of(pressure, "CriticalMark").map_or(total / 16, |k| k.saturating_mul(KIB));
+        let critical =
+            kb_of(pressure, "CriticalMark").map_or(total / 16, |k| k.saturating_mul(KIB));
         Some(Machine {
             total,
             available,
@@ -174,8 +175,9 @@ impl Machine {
 }
 
 /// How short memory is, mildest first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
+    #[default]
     Normal,
     /// The room is under an eighth of RAM: scripts have little left to grow into.
     Tight,
@@ -260,12 +262,6 @@ pub struct Budget {
     limits: BTreeMap<u64, usize>,
 }
 
-impl Default for Level {
-    fn default() -> Level {
-        Level::Normal
-    }
-}
-
 impl Budget {
     /// The heap limit (engine bytes) of the realm `key` in the plan.
     pub fn limit_of(&self, key: u64) -> Option<usize> {
@@ -283,6 +279,18 @@ impl Budget {
     /// What a realm that does not exist yet would get now (engine bytes).
     pub fn for_new(&self, kind: Kind, foreground: bool) -> usize {
         self.limit(kind, foreground, 0, weight(kind, foreground))
+    }
+
+    /// How much a realm of this kind may grow beyond what it holds, by this plan (its share of
+    /// the room, at least what it is guaranteed): what a thread that cannot be asked while it
+    /// runs (a worker) is given to grow into between two looks at the plan.
+    pub fn headroom(&self, kind: Kind, foreground: bool) -> usize {
+        self.limit(kind, foreground, 0, 0)
+    }
+
+    /// The hard ceiling of a realm of this kind on this machine (engine bytes).
+    pub fn ceiling_of(&self, kind: Kind) -> usize {
+        ceiling(&self.machine, kind)
     }
 
     /// The limit of a realm of this kind that holds `used` right now, by this plan's room and
@@ -316,7 +324,11 @@ impl Budget {
 /// machine's numbers. Pure; call it again when anything changes.
 pub fn plan(m: &Machine, realms: &[Realm]) -> Budget {
     let room = m.room();
-    let weights = realms.iter().map(|r| weight(r.kind, r.foreground)).sum::<usize>() + SYSTEM_WEIGHT;
+    let weights = realms
+        .iter()
+        .map(|r| weight(r.kind, r.foreground))
+        .sum::<usize>()
+        + SYSTEM_WEIGHT;
     let mut b = Budget {
         machine: *m,
         level: m.level(),
@@ -373,8 +385,8 @@ impl Caps {
             style: part(32, 2 * MIB, 64 * MIB),
             image: part(16, 8 * MIB, 128 * MIB),
             response: part(8, 8 * MIB, 512 * MIB),
-            nodes: part(2 * KIB, 300_000, 4_000_000),
-            nodes_max: part(KIB, 1_000_000, 16_000_000),
+            nodes: part(2 * KIB, 200_000, 4_000_000),
+            nodes_max: part(512, 400_000, 16_000_000),
             image_pixels: part(8, 8 * MIB, 128 * MIB) / 4,
             script_cache: part(16, 16 * MIB, 256 * MIB),
         }
@@ -540,7 +552,7 @@ pub fn pick_heaviest(realms: &[Realm]) -> Option<u64> {
 pub fn human(bytes: usize) -> alloc::string::String {
     use alloc::format;
     if bytes >= 1 << 30 {
-        let t = bytes * 10 >> 30;
+        let t = (bytes * 10) >> 30;
         format!("{}.{} GB", t / 10, t % 10)
     } else if bytes >= MIB {
         format!("{} MB", bytes / MIB)

@@ -112,6 +112,28 @@ tab draws them as Apps, Kernel heap, Kernel image, Files in RAM, Screen (display
 panel caches), Windows, Other kernel (stacks, page tables, devices, boot, unaccounted), Page
 cache and Free.
 
+## Memory pressure
+`/proc/mempressure` (and a `MemAvailable` line in `/proc/meminfo`, the frames a program can still get,
+which today is `MemFree`: the page cache is capped at 8 MiB and not counted) tells a program that
+can give memory back how much trouble memory is in. It is cheap (a few counters under the PMM's lock)
+and read a few times a second at most; the Browser does (docs/browser.md "Memory").
+
+```
+level:          normal            normal | low | critical
+MemFree:            452472 kB
+LowMark:             65536 kB     1/8 of RAM: below it the level is low
+CriticalMark:        32768 kB     1/16 of RAM: below it, critical
+MinFree:            451496 kB     the fewest free frames there have been since boot
+LowEvents:                 0      times free memory fell below the low mark (it must come back 1/8
+CriticalEvents:            0      above it before the next is counted)
+AllocFailures:             0      frame allocations that found no memory (a run that did not fit
+                                  although there were frames, a fragmentation, is not counted)
+```
+The counters start at boot after the memory self-test (which asks for an impossible run on
+purpose). Nothing reclaims memory in the kernel on these numbers (there is no OOM killer and no
+swap): the signal is for programs that hold caches, and the Browser keeps the machine away from
+the low mark by itself, so `AllocFailures` stays 0 however a page behaves.
+
 ## Secondary CPUs
 `smp.S` gets the boot identity tables (`mmu::boot_ttbr0()`) for TTBR0 and the kernel's
 tables for TTBR1 in its `BootBlock`, turns the MMU on, branches high, then swaps TTBR0

@@ -80,6 +80,12 @@ pub struct Mailbox {
     /// The worker's heap limit now (the engine's bytes; 0: none given), moved by the window's
     /// thread as the memory plan changes and read by the worker's own.
     limit: AtomicUsize,
+    /// What it may grow by above what it holds while one task runs, and its ceiling (0: no
+    /// headroom given, the limit stands as it is).
+    headroom: AtomicUsize,
+    cap: AtomicUsize,
+    /// It may also double what it holds at one step (the machine has room to spare).
+    burst: AtomicBool,
 }
 
 impl Mailbox {
@@ -89,6 +95,9 @@ impl Mailbox {
             seq: AtomicU32::new(0),
             term: AtomicBool::new(false),
             limit: AtomicUsize::new(0),
+            headroom: AtomicUsize::new(0),
+            cap: AtomicUsize::new(usize::MAX),
+            burst: AtomicBool::new(false),
         }
     }
 
@@ -181,11 +190,19 @@ impl WorkerIo for ThreadIo {
     fn terminated(&self) -> bool {
         self.mb.term.load(Ordering::Acquire)
     }
-    fn heap_allowance(&mut self, _used: usize) -> webengine::Allowance {
-        match self.mb.limit.load(Ordering::Acquire) {
-            0 => webengine::Allowance::Keep,
-            n => webengine::Allowance::Limit(n),
+    fn heap_allowance(&mut self, used: usize) -> webengine::Allowance {
+        let limit = self.mb.limit.load(Ordering::Acquire);
+        if limit == 0 {
+            return webengine::Allowance::Keep;
         }
+        // The window's thread looks at this worker every 100 ms or so, from what the worker
+        // last reported; a task that allocates fast in between must not run into a limit made
+        // from old numbers: it may grow by its headroom from where it is now.
+        let room = self.mb.headroom.load(Ordering::Acquire);
+        let cap = self.mb.cap.load(Ordering::Acquire);
+        let burst = if self.mb.burst.load(Ordering::Acquire) { used } else { 0 };
+        let now = used.saturating_add(room.max(burst)).min(cap);
+        webengine::Allowance::Limit(limit.max(now))
     }
 }
 
@@ -196,7 +213,11 @@ pub struct Thread {
     join: JoinHandle,
 }
 
-pub struct ThreadBackend;
+/// The thread backend. `next_room` is the headroom and ceiling the next worker starts with:
+/// set before `spawn`, so a task that allocates at once has them from its first step.
+pub struct ThreadBackend {
+    pub next_room: (usize, usize, bool),
+}
 
 impl Backend for ThreadBackend {
     type Handle = Thread;
@@ -204,6 +225,9 @@ impl Backend for ThreadBackend {
     fn spawn(&mut self, boot: WorkerBoot) -> Option<Thread> {
         let mb = Arc::new(Mailbox::new());
         mb.limit.store(boot.limits.heap, Ordering::Release);
+        mb.headroom.store(self.next_room.0, Ordering::Release);
+        mb.cap.store(self.next_room.1, Ordering::Release);
+        mb.burst.store(self.next_room.2, Ordering::Release);
         let mb2 = mb.clone();
         let stack = boot.limits.stack.max(512 << 10);
         let mut boot = Some(boot);
@@ -259,6 +283,12 @@ impl Backend for ThreadBackend {
         h.mb.limit.store(bytes, Ordering::Release);
     }
 
+    fn set_heap_room(&mut self, h: &mut Thread, headroom: usize, cap: usize, burst: bool) {
+        h.mb.burst.store(burst, Ordering::Release);
+        h.mb.headroom.store(headroom, Ordering::Release);
+        h.mb.cap.store(cap, Ordering::Release);
+    }
+
     fn finished(&mut self, h: &mut Thread) -> bool {
         h.join.is_finished()
     }
@@ -276,7 +306,7 @@ pub type WorkerHub = Hub<ThreadBackend>;
 
 pub fn new_hub(user_agent: &str, tz_offset: i32) -> WorkerHub {
     Hub::new(
-        ThreadBackend,
+        ThreadBackend { next_room: (0, usize::MAX, false) },
         // (The memory plan, mem.rs, gives each worker its heap limit; the hub's fixed share of
         // a tab's heap is out of the way.)
         Limits { per_poll: 1024, tab_heap: usize::MAX / 4, ..Limits::default() },
@@ -371,12 +401,20 @@ impl App {
                     // What the machine has free decides how much heap it may have.
                     let fg = ti == self.cur;
                     self.workers.limits.worker.heap = self.mem.limit_for_new(browserkit::memory::Kind::Worker, fg);
+                    self.workers.backend.next_room = (
+                        self.mem.budget.headroom(browserkit::memory::Kind::Worker, fg),
+                        self.mem.budget.ceiling_of(browserkit::memory::Kind::Worker),
+                        self.mem.level() == browserkit::memory::Level::Normal,
+                    );
                     let spawned = match prepare_source(&mut sp) {
                         Ok(()) => self.workers.spawn(owner, sp).map_err(|e| format!("{e}")),
                         Err(why) => Err(why),
                     };
                     match spawned {
                         Ok(()) => {
+                            let head = self.mem.budget.headroom(browserkit::memory::Kind::Worker, fg);
+                            let cap = self.mem.budget.ceiling_of(browserkit::memory::Kind::Worker);
+                            self.workers.set_heap_room(id, head, cap, self.mem.level() == browserkit::memory::Level::Normal);
                             if self.log {
                                 rt::println!("[browser] worker {} started: {}", id, describe(&name, &url));
                             }
@@ -560,6 +598,9 @@ impl App {
             if self.mem.budget.limit_of(crate::mem::worker_key(tab, id)).is_some() {
                 let l = self.mem.budget.limit_with(browserkit::memory::Kind::Worker, fg, used);
                 self.workers.set_heap_limit(id, l);
+                let head = self.mem.budget.headroom(browserkit::memory::Kind::Worker, fg);
+                let cap = self.mem.budget.ceiling_of(browserkit::memory::Kind::Worker);
+                self.workers.set_heap_room(id, head, cap, self.mem.level() == browserkit::memory::Level::Normal);
             }
         }
         changed

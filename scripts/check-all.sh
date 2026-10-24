@@ -152,6 +152,7 @@ TESTS=(
   "modules-test|q|600|par|scripts/modules-test.sh"
   "iframe-test|q|600|par|scripts/iframe-test.sh"
   "workers-test|q|600|par|scripts/workers-test.sh"
+  "memory-test|q|900|par|scripts/memory-test.sh"
   "webbench-test|q|600|par|scripts/webbench-test.sh"
   "jsbench-test|q|600|par|scripts/jsbench-test.sh"
   "disk-test|q|600|par|scripts/disk-test.sh"

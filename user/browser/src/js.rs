@@ -842,6 +842,8 @@ impl App {
     /// The user changed control `id` (a combined index) of the current page.
     pub fn control_input(&mut self, id: usize) {
         let ti = self.cur;
+        // Something was typed or chosen in a form: discarding the tab would lose it.
+        self.tabs[ti].touched = true;
         let (f, _) = crate::web::split(id);
         if self.tabs[ti].page.doc.scripting_in(f) {
             self.with_doc_in(ti, f, |d, h| d.input(h, id));

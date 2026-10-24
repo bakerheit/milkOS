@@ -46,6 +46,16 @@
 //!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - `fetch` response bodies are streams (docs/browser.md "Memory"). New: [`NetRequest::stream`]
+//!   (the page reads the body in pieces if it can; only `fetch` asks), [`NetEvent::Chunk`] (a piece
+//!   of the body, between `Head` and `Done`; `Done` is then empty), [`NetOut::Ack`] (the page has used
+//!   the body up to this many bytes: the app may send a window, a megabyte, more) and
+//!   [`ScriptLimits::buffer`] (the most a response may be when the page reads it whole: `.text()`,
+//!   `.json()`, `.arrayBuffer()`, `.blob()`; beyond it the page gets a TypeError and the request is
+//!   cancelled). An app that matches on [`NetOut`] or [`NetEvent`] must handle the new variants (ignore
+//!   `Ack`; a `Chunk` only comes to an app that was asked for pieces), and a [`NetRequest`] or a
+//!   [`ScriptLimits`] built by field must say the new ones (use `..Default::default()` for the limits).
+//!   An app that never sends `Chunk` works as before: the body comes whole in `Done`.
 //! - New [`Document::collect_garbage`] and [`Document::stop_scripts_because`] (the app's answers to
 //!   low memory: collect now, stop a page for a reason of its own).
 //! - Heap budgets that move (docs/browser.md "Memory"). New type [`Allowance`], new provided

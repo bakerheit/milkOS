@@ -267,6 +267,7 @@ impl App {
         // Laying out finds CSS background images, and cached ones are supplied at once: a
         // few rounds until the page has what it can have now.
         let cur = self.cur;
+        let started = crate::now_ms();
         for _ in 0..4 {
             let (sys, dark) = (self.sys, self.th.dark);
             let t = &mut self.tabs[cur];
@@ -280,6 +281,12 @@ impl App {
             }
         }
         self.tabs[cur].page.laid_w = lw;
+        if self.log {
+            let ms = crate::now_ms() - started;
+            if ms >= 200 {
+                rt::println!("[browser] laid out {} nodes in {} ms", self.tabs[cur].page.doc.stats().nodes, ms);
+            }
+        }
         if let Some(f) = &self.finding {
             let q = f.text.clone();
             self.run_find(&q);

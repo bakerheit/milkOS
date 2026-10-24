@@ -464,6 +464,11 @@ impl Doc {
         }
     }
 
+    /// What the engine says of the page (nodes, boxes, items, the bytes it keeps).
+    pub fn stats(&self) -> webengine::Stats {
+        self.d.stats()
+    }
+
     /// What the page keeps between layouts, roughly (DOM, styles, display list), bytes.
     pub fn approx_bytes(&self) -> usize {
         self.d.stats().approx_bytes

@@ -97,6 +97,12 @@ pub trait Backend {
     fn set_heap_limit(&mut self, h: &mut Self::Handle, bytes: usize) {
         let _ = (h, bytes);
     }
+    /// What the worker may grow into while a task of its runs (the app cannot be asked until it
+    /// ends): `headroom` bytes above what it holds, never past `cap`; with `burst` also as much
+    /// again as it holds (a growing list copies itself into one twice the size at one step).
+    fn set_heap_room(&mut self, h: &mut Self::Handle, headroom: usize, cap: usize, burst: bool) {
+        let _ = (h, headroom, cap, burst);
+    }
     /// The thread has ended.
     fn finished(&mut self, h: &mut Self::Handle) -> bool;
     /// Join (and drop) a thread that has ended.
@@ -195,6 +201,13 @@ impl<B: Backend> Hub<B> {
     /// Every running worker: (id, its tab, the heap it last said it holds).
     pub fn heaps(&self) -> Vec<(u32, u64, usize)> {
         self.workers.iter().map(|(&id, e)| (id, e.owner.tab, e.heap)).collect()
+    }
+
+    /// How much worker `id` may grow into during one task, and the most it may ever have.
+    pub fn set_heap_room(&mut self, id: u32, headroom: usize, cap: usize, burst: bool) {
+        if let Some(e) = self.workers.get_mut(&id) {
+            self.backend.set_heap_room(&mut e.handle, headroom, cap, burst);
+        }
     }
 
     /// Give worker `id` a new heap limit (the memory plan moves them).

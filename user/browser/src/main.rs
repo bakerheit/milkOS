@@ -357,7 +357,7 @@ pub(crate) fn hint(e: &Error) -> &'static str {
         Error::Tls(_) => "milkOS speaks TLS 1.3 only; the site may need an older version.",
         Error::Timeout => "Try again (reload), or another site.",
         Error::TooBig(_) => {
-            "Pages can be up to 4 MB here; a file that big can be saved instead (Alt-click its link)."
+            "That is more than the Browser can hold in memory right now (what it can depends on how much the machine has free); a file that big can be saved instead (Alt-click its link)."
         }
         _ => "",
     }

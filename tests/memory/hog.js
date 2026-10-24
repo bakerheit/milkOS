@@ -1,6 +1,6 @@
 // Allocates and holds ordinary JavaScript data, a slice at a time (so timers and messages keep
 // being served), and says how far it got. Used by pages, frames and workers alike.
-//   hogRun(mb, kind, done)   kind: objects | strings | typed | mixed
+//   hogRun(mb, kind, done, progress, sync)   kind: objects | strings | typed | mixed; sync: all in one task
 // One "MB" is a count of items that weighs about a megabyte in the engine's own accounting
 // (measured: see docs/browser.md "Memory"); the figures are approximate by design.
 var HOLD = [];
@@ -10,10 +10,10 @@ function hogItem(kind, i) {
   if (kind === 'typed') { var a = new Uint8Array(1 << 19); a[i & 1023] = 1; return a; }
   return { id: i, name: 'item-' + i, tags: [i, i + 1, i + 2], nested: { a: i, b: 'v' + i } };
 }
-function hogRun(mb, kind, done, progress) {
+function hogRun(mb, kind, done, progress, sync) {
   var per = PER_MB[kind] || PER_MB.objects;
   var total = mb * per, made = 0, t0 = Date.now();
-  var slice = Math.max(1, per * 2);
+  var slice = sync ? total : Math.max(1, per * 2);
   function step() {
     var end = Math.min(total, made + slice);
     for (; made < end; made++) {

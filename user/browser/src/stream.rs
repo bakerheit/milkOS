@@ -37,31 +37,41 @@ const PREVIEW_MAX: usize = 4 << 20;
 /// it when there is none. The rest of a half-written tag would show as text.
 pub fn cut_at_tag(buf: &[u8]) -> usize {
     let from = buf.len().saturating_sub(8 << 10);
-    buf[from..].iter().rposition(|&b| b == b'>').map_or(buf.len(), |i| from + i + 1)
+    buf[from..]
+        .iter()
+        .rposition(|&b| b == b'>')
+        .map_or(buf.len(), |i| from + i + 1)
 }
 
 impl App {
     /// The most bytes a page's job takes in, after `more` times "Load more".
     pub fn page_cap(&self, more: u32) -> usize {
         let caps = self.mem.caps();
-        caps.page.saturating_mul(1usize << (2 * more.min(10))).min(caps.page_max).max(caps.page)
+        caps.page
+            .saturating_mul(1usize << (2 * more.min(10)))
+            .min(caps.page_max)
+            .max(caps.page)
     }
 
     /// What an image, a stylesheet and a script may be now (the memory plan's).
-    pub fn fetch_caps(&self) -> (usize, usize, usize) {
+    pub fn fetch_caps(&self) -> (usize, usize, usize, usize) {
         let c = self.mem.caps();
-        (c.image, c.style, c.script)
+        (c.image, c.style, c.script, c.page)
     }
 
     /// Take what the streaming pages have received; show a page that has come far enough.
     pub fn stream_tick(&mut self) -> bool {
         let mut changed = false;
         for ti in 0..self.tabs.len() {
-            let Some(l) = self.tabs[ti].load.as_ref() else { continue };
+            let Some(l) = self.tabs[ti].load.as_ref() else {
+                continue;
+            };
             if !l.streaming {
                 continue;
             }
-            let Some(sh) = self.fetch.shared(l.job) else { continue };
+            let Some(sh) = self.fetch.shared(l.job) else {
+                continue;
+            };
             let (chunks, head) = {
                 let mut s = sh.lock();
                 s.stream.waiting = 0;
@@ -84,7 +94,8 @@ impl App {
                 self.stream_preview(ti);
                 changed = true;
             }
-            changed |= got && ti == self.cur && self.tabs[ti].load.as_ref().is_some_and(|l| l.previewed);
+            changed |=
+                got && ti == self.cur && self.tabs[ti].load.as_ref().is_some_and(|l| l.previewed);
         }
         changed
     }
@@ -107,7 +118,15 @@ impl App {
             Some(f) => format!("{}#{f}", head.url.to_text()),
             None => head.url.to_text(),
         };
-        let mut page = Page::new(&addr, Some(head.url.clone()), &l.buf[..cut], &ct, PageKind::Web, None, limits);
+        let mut page = Page::new(
+            &addr,
+            Some(head.url.clone()),
+            &l.buf[..cut],
+            &ct,
+            PageKind::Web,
+            None,
+            limits,
+        );
         page.status = head.status;
         page.preview = true;
         let had = l.buf.len();
@@ -132,7 +151,12 @@ impl App {
         };
         t.show(page, scroll);
         if self.log {
-            rt::println!("[browser] streaming {}: showing the top after {} KB (cut at {} KB)", head.url, had >> 10, cut >> 10);
+            rt::println!(
+                "[browser] streaming {}: showing the top after {} KB (cut at {} KB)",
+                head.url,
+                had >> 10,
+                cut >> 10
+            );
         }
         self.feed(ti);
         self.dirty = true;
@@ -146,7 +170,9 @@ impl App {
                 human(got)
             )
         } else {
-            String::from("This page is too big to show completely: it has more elements than the Browser can keep for one page right now. Load more raises that to four times as many.")
+            String::from(
+                "This page is too big to show completely: it has more elements than the Browser can keep for one page right now. Load more raises that to four times as many.",
+            )
         };
         self.console_line(ti, "", ConsoleLevel::Warn, &msg);
         if ti == self.cur {
@@ -172,7 +198,10 @@ impl App {
     /// Reload tab `ti` (not just the current one).
     pub fn reload_tab(&mut self, ti: usize) {
         let t = &self.tabs[ti];
-        let a = t.history.current().map_or_else(|| t.page.address.clone(), |e| e.url.clone());
+        let a = t
+            .history
+            .current()
+            .map_or_else(|| t.page.address.clone(), |e| e.url.clone());
         if a.is_empty() {
             return;
         }

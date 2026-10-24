@@ -99,7 +99,7 @@ shared by the kernel (Files) and `files`.
 | `/System/Fonts`, `/System/Sounds`, `/System/Music` | tmpfs | font licences, system sounds, the seed tunes for ~/Music |
 | `/tmp` | tmpfs | mode `1777` (hidden in listings of `/`) |
 | `/dev` | devfs | `null zero random urandom console`, `vda`... (one per disk) (hidden) |
-| `/proc` | proc | `meminfo uptime version interrupts mounts` (hidden) |
+| `/proc` | proc | `meminfo mempressure uptime version interrupts mounts` (hidden) |
 
 There are no `/bin`, `/etc`, `/home`, `/srv`, `/run`, `/sys` or `/Applications` folders,
 and no links with those names: a clean break (the self-test checks they are gone).

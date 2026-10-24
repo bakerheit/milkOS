@@ -52,22 +52,25 @@ pub struct Page {
     pub ref_policy: browserkit::netpolicy::ReferrerPolicy,
     /// The document's number in the session history.
     pub doc_id: u64,
+    /// Shown while the rest of it still comes (stream.rs): no scripts, not in the history yet.
+    pub preview: bool,
 }
 
 impl Page {
-    /// A page; `scripts`: run its JavaScript (web pages, when JavaScript is on).
+    /// A page; `scripts`: run its JavaScript within these limits (web pages, when JavaScript is on).
     pub fn new(
         address: &str,
         url: Option<Url>,
         html: &[u8],
         ct: &str,
         kind: PageKind,
-        scripts: bool,
+        scripts: Option<webengine::ScriptLimits>,
+        limits: webengine::Limits,
     ) -> Page {
         let base = url
             .as_ref()
             .map_or_else(|| String::from(address), |u| u.to_text());
-        let doc = Doc::parse(html, &base, ct, scripts && kind == PageKind::Web);
+        let doc = Doc::parse(html, &base, ct, scripts.filter(|_| kind == PageKind::Web), limits);
         Page {
             address: String::from(address),
             url,
@@ -84,6 +87,7 @@ impl Page {
             space: None,
             ref_policy: browserkit::netpolicy::ReferrerPolicy::DEFAULT,
             doc_id: 0,
+            preview: false,
         }
     }
 
@@ -97,6 +101,7 @@ impl Page {
 }
 
 /// A page on its way.
+#[derive(Default)]
 pub struct Load {
     pub job: JobId,
     /// What it is fetching (shown in the address bar meanwhile).
@@ -112,6 +117,19 @@ pub struct Load {
     /// Back or forward to an entry: the document it was (to rebind in the history) and where its
     /// frames were.
     pub restore: Option<(u64, alloc::vec::Vec<scriptnet::frame::history::Reload>)>,
+    /// The page's body streams in (see stream.rs): what has come, the head (once known), when
+    /// the page is shown next as it is (bytes, and ms of the last time), whether it was shown
+    /// already, the most the job takes in, and how many times "Load more" raised that.
+    pub streaming: bool,
+    pub buf: Vec<u8>,
+    pub head: Option<crate::net::PageHead>,
+    pub preview_next: usize,
+    pub preview_at: u64,
+    pub previewed: bool,
+    pub cap: usize,
+    pub more: u32,
+    /// The page's end never came (the connection broke): said on the bar once it is shown.
+    pub partial_note: Option<String>,
 }
 
 pub struct Tab {
@@ -151,6 +169,28 @@ pub struct Tab {
     /// The page's frames: what each one loaded from, and the loads under way.
     pub frames: crate::frames::FrameTable,
     pub net_log: alloc::collections::VecDeque<NetLogEntry>,
+    /// Frames (by id) of the page whose scripts ran out of memory, said once.
+    pub mem_stops: alloc::collections::BTreeSet<u32>,
+    /// The user typed into a form of this page (discarding the tab would lose it).
+    pub touched: bool,
+    /// When the tab was last in front (ms), for choosing a tab to discard.
+    pub last_front: u64,
+    /// How many times "Load more" was asked of this page (each makes the window of the page
+    /// four times as big); the next load takes it (see stream.rs).
+    pub page_more: u32,
+    pub more_next: Option<u32>,
+    /// The tab was discarded to give memory back: what it showed, so it can be fetched again
+    /// when it is opened.
+    pub discarded: Option<Discarded>,
+}
+
+/// What a discarded tab keeps: not its page, only where it was.
+#[derive(Clone, Debug)]
+pub struct Discarded {
+    pub address: String,
+    pub scroll: i32,
+    pub title: String,
+    pub zoom: i32,
 }
 
 /// Console lines a tab keeps.
@@ -198,6 +238,12 @@ impl Tab {
             net_run: alloc::collections::BTreeMap::new(),
             frames: crate::frames::FrameTable::default(),
             net_log: alloc::collections::VecDeque::new(),
+            mem_stops: alloc::collections::BTreeSet::new(),
+            touched: false,
+            last_front: 0,
+            page_more: 0,
+            more_next: None,
+            discarded: None,
         }
     }
 
@@ -234,6 +280,9 @@ impl Tab {
         self.net_wait.clear();
         self.net_run.clear();
         self.net_log.clear();
+        self.mem_stops.clear();
+        self.touched = false;
+        self.discarded = None;
     }
 
     /// The page's script requests are outstanding.

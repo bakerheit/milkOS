@@ -329,7 +329,81 @@ function readySource(bytes) {
   return { state: 'ready', bytes, error: null, waiters: [] };
 }
 function pendingSource() {
-  return { state: 'pending', bytes: null, error: null, waiters: [] };
+  return { state: 'pending', bytes: null, error: null, waiters: [], live: null };
+}
+// A source whose bytes come in pieces from the app (a fetch response). `live` holds the pieces
+// the page has not used yet and how much it has used in all: the app is told (native.ack) as
+// pieces are used and does not send much more than a window ahead, so a body that is read slowly
+// does not pile up. A page that reads the body whole (text(), json(), ...) is a reader that
+// keeps everything (up to what the Browser can hold: native.bufferLimit()); one that reads
+// response.body piece by piece keeps only what it has not read.
+function liveSource(id) {
+  const s = pendingSource();
+  s.live = { id, queue: [], queued: 0, received: 0, consumed: 0, buffering: false, parts: [], ended: false, failed: null, wake: null };
+  return s;
+}
+function liveWake(l) {
+  const w = l.wake;
+  l.wake = null;
+  if (w) w();
+}
+function liveChunk(src, bytes) {
+  const l = src.live;
+  if (!l || src.state !== 'pending' || l.ended) return;
+  const n = native.bytesLength(bytes);
+  l.received += n;
+  if (l.buffering) {
+    l.parts.push(bytes);
+    l.consumed += n;
+    native.ack(l.id, l.consumed);
+    if (l.received > native.bufferLimit()) liveOverflow(src);
+  } else {
+    l.queue.push(bytes);
+    l.queued += n;
+    liveWake(l);
+  }
+}
+function liveOverflow(src) {
+  const l = src.live;
+  const e = new TypeError('The response body is bigger than this page may keep in memory (' + Math.floor(native.bufferLimit() / 1048576) + ' MB): read it piece by piece with response.body instead.');
+  l.parts = [];
+  l.ended = true;
+  l.failed = e;
+  native.cancel(l.id);
+  srcFail(src, e);
+  liveWake(l);
+}
+function liveDone(src, rest) {
+  const l = src.live;
+  if (!l || src.state !== 'pending') return;
+  // An app that did not send pieces sends the whole body here.
+  if (l.received === 0 && native.bytesLength(rest) > 0) liveChunk(src, rest);
+  if (src.state !== 'pending') return;
+  l.ended = true;
+  if (l.buffering) srcFinish(src, native.bytesConcat(l.parts));
+  liveWake(l);
+}
+function liveFail(src, err) {
+  const l = src.live;
+  if (l) {
+    l.failed = err;
+    l.ended = true;
+    liveWake(l);
+  }
+  srcFail(src, err);
+}
+// Everything is wanted at once: take what is queued and keep what comes.
+function liveBuffer(src) {
+  const l = src.live;
+  if (!l || l.buffering || src.state !== 'pending') return;
+  l.buffering = true;
+  for (const b of l.queue) l.parts.push(b);
+  l.consumed += l.queued;
+  l.queue = [];
+  l.queued = 0;
+  native.ack(l.id, l.consumed);
+  if (l.received > native.bufferLimit()) liveOverflow(src);
+  else if (l.ended) srcFinish(src, native.bytesConcat(l.parts));
 }
 function srcFinish(src, bytes) {
   if (src.state !== 'pending') return;
@@ -350,7 +424,9 @@ function srcFail(src, err) {
 function srcBytes(src) {
   if (src.state === 'ready') return Promise.resolve(src.bytes);
   if (src.state === 'error') return Promise.reject(src.error);
-  return new Promise((resolve, reject) => src.waiters.push({ resolve, reject }));
+  const p = new Promise((resolve, reject) => src.waiters.push({ resolve, reject }));
+  if (src.live) liveBuffer(src);
+  return p;
 }
 
 // What `new Request(url, {body})` and `new Response(body)` accept: the bytes and the
@@ -732,8 +808,50 @@ function readAllBytes(stream) {
   });
 }
 
+// A stream over a body that comes in pieces: each piece the page reads is acknowledged, which lets
+// the app send more.
+function streamOfLive(src, body) {
+  const l = src.live;
+  return new ReadableStream({
+    pull(c) {
+      return new Promise((resolve) => {
+        const step = () => {
+          if (l.failed) {
+            c.error(l.failed);
+            resolve();
+          } else if (l.queue.length > 0) {
+            const bytes = l.queue.shift();
+            const n = native.bytesLength(bytes);
+            l.queued -= n;
+            l.consumed += n;
+            native.ack(l.id, l.consumed);
+            body.used = true;
+            c.enqueue(new G.Uint8Array(native.bytesToArrayBuffer(bytes)));
+            resolve();
+          } else if (l.ended) {
+            body.used = true;
+            c.close();
+            resolve();
+          } else {
+            l.wake = step;
+          }
+        };
+        step();
+      });
+    },
+    cancel() {
+      body.used = true;
+      if (!l.ended) {
+        l.ended = true;
+        native.cancel(l.id);
+      }
+    },
+  });
+}
+
 // A stream that gives out a body in one chunk, once it is there.
 function streamOfSource(src, body) {
+  if (src.live && src.state === 'pending' && !src.live.buffering) return streamOfLive(src, body);
   let done = false;
   return new ReadableStream({
     pull(c) {

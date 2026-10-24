@@ -1,6 +1,12 @@
 //! DEFLATE (RFC 1951) and the zlib wrapper (RFC 1950), after the structure of zlib's `puff.c`:
 //! small, bit-at-a-time Huffman decoding, strict about everything that can't be valid. The
 //! output is capped by the caller, so a hostile stream can't make us allocate without limit.
+//!
+//! [`inflate`] and [`zlib_decompress`] take the whole stream. [`Inflater`] is the same decoder
+//! made resumable: the compressed bytes are given as they arrive ([`Inflater::feed`]), the
+//! decoded bytes are taken a piece at a time ([`Inflater::pump`]), and only the last 32 KiB of
+//! output is kept (for back references), so a stream of any length is decoded in constant
+//! memory. The web client uses it to hand a page to the Browser while it is still coming.
 
 use alloc::vec::Vec;
 
@@ -14,7 +20,7 @@ pub enum InflateError {
     TooBig,
 }
 
-struct Bits<'a> {
+pub(crate) struct Bits<'a> {
     data: &'a [u8],
     pos: usize,
     buf: u32,
@@ -317,4 +323,277 @@ pub fn crc32(parts: &[&[u8]]) -> u32 {
         }
     }
     !c
+}
+
+
+// ---- a resumable decoder ----------------------------------------------------------------------
+
+/// What [`Inflater::pump`] ran out of.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pump {
+    /// The output budget of this call was used up; call again for more.
+    More,
+    /// All the input given so far is decoded; [`Inflater::feed`] more.
+    NeedInput,
+    /// The final block ended: [`Inflater::rest`] is what followed it.
+    Done,
+}
+
+enum St {
+    /// Before a block header.
+    Block,
+    /// Inside a stored block: bytes left.
+    Stored(usize),
+    /// Inside a Huffman-coded block.
+    Codes(alloc::boxed::Box<(Huff, Huff)>),
+    Done,
+}
+
+/// DEFLATE, a piece at a time. Feed compressed bytes as they arrive, pump decoded ones out.
+///
+/// Where the input ends in the middle of a symbol or a block header, the decoder goes back to
+/// the start of that symbol and waits for more, so the pieces may be cut anywhere.
+pub struct Inflater {
+    inb: Vec<u8>,
+    pos: usize,
+    buf: u32,
+    cnt: u32,
+    st: St,
+    last: bool,
+    /// The newest output (at most about 64 KiB), for back references.
+    win: Vec<u8>,
+    /// The most output there may be, in all.
+    limit: usize,
+    out_total: usize,
+}
+
+const WINDOW: usize = 32 * 1024;
+
+impl Inflater {
+    /// A decoder whose output is at most `limit` bytes in all (more is [`InflateError::TooBig`]).
+    pub fn new(limit: usize) -> Inflater {
+        Inflater {
+            inb: Vec::new(),
+            pos: 0,
+            buf: 0,
+            cnt: 0,
+            st: St::Block,
+            last: false,
+            win: Vec::new(),
+            limit,
+            out_total: 0,
+        }
+    }
+
+    /// Compressed bytes that came.
+    pub fn feed(&mut self, data: &[u8]) {
+        if self.pos > 64 * 1024 && self.pos * 2 > self.inb.len() {
+            self.inb.drain(..self.pos);
+            self.pos = 0;
+        }
+        self.inb.extend_from_slice(data);
+    }
+
+    /// The bytes after the end of the stream (once [`Pump::Done`]).
+    pub fn rest(&self) -> &[u8] {
+        &self.inb[self.pos.min(self.inb.len())..]
+    }
+
+    /// Input bytes fed and not yet taken in.
+    pub fn pending(&self) -> usize {
+        self.inb.len() - self.pos
+    }
+
+    /// Bytes of output so far, in all.
+    pub fn total_out(&self) -> usize {
+        self.out_total
+    }
+
+    fn put(win: &mut Vec<u8>, out: &mut Vec<u8>, b: u8) {
+        win.push(b);
+        out.push(b);
+    }
+
+    fn trim(&mut self) {
+        if self.win.len() > 2 * WINDOW {
+            let cut = self.win.len() - WINDOW;
+            self.win.drain(..cut);
+        }
+    }
+
+    /// Decode what the input so far allows, appending to `out`, until at least `budget` bytes
+    /// were appended by this call (it may go a little over: a match copies whole) or the input
+    /// runs out. Errors are final.
+    pub fn pump(&mut self, out: &mut Vec<u8>, budget: usize) -> Result<Pump, InflateError> {
+        let start = out.len();
+        loop {
+            if out.len() - start >= budget {
+                return Ok(Pump::More);
+            }
+            match &mut self.st {
+                St::Done => return Ok(Pump::Done),
+                St::Block => {
+                    let mut b = Bits { data: &self.inb, pos: self.pos, buf: self.buf, cnt: self.cnt };
+                    let (p0, b0, c0) = (self.pos, self.buf, self.cnt);
+                    let r: Result<(bool, St), InflateError> = (|| {
+                        let last = b.need(1)? == 1;
+                        let st = match b.need(2)? {
+                            0 => {
+                                b.buf = 0;
+                                b.cnt = 0;
+                                let h = b.data.get(b.pos..b.pos + 4).ok_or(InflateError::Truncated)?;
+                                let len = u16::from_le_bytes([h[0], h[1]]) as usize;
+                                if u16::from_le_bytes([h[2], h[3]]) != !(len as u16) {
+                                    return Err(InflateError::Corrupt("stored block length check failed"));
+                                }
+                                b.pos += 4;
+                                St::Stored(len)
+                            }
+                            1 => St::Codes(alloc::boxed::Box::new(fixed_tables())),
+                            2 => St::Codes(alloc::boxed::Box::new(dynamic_tables(&mut b)?)),
+                            _ => return Err(InflateError::Corrupt("bad block type")),
+                        };
+                        Ok((last, st))
+                    })();
+                    match r {
+                        Ok((last, st)) => {
+                            self.pos = b.pos;
+                            self.buf = b.buf;
+                            self.cnt = b.cnt;
+                            self.last = last;
+                            self.st = st;
+                        }
+                        Err(InflateError::Truncated) => {
+                            self.pos = p0;
+                            self.buf = b0;
+                            self.cnt = c0;
+                            return Ok(Pump::NeedInput);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                St::Stored(left) => {
+                    let avail = self.inb.len() - self.pos;
+                    if *left == 0 {
+                        self.st = if self.last { St::Done } else { St::Block };
+                        continue;
+                    }
+                    if avail == 0 {
+                        return Ok(Pump::NeedInput);
+                    }
+                    let take = (*left).min(avail).min(budget.saturating_sub(out.len() - start).max(1));
+                    if self.out_total + take > self.limit {
+                        return Err(InflateError::TooBig);
+                    }
+                    let chunk = &self.inb[self.pos..self.pos + take];
+                    out.extend_from_slice(chunk);
+                    self.win.extend_from_slice(chunk);
+                    self.pos += take;
+                    self.out_total += take;
+                    *left -= take;
+                    self.trim();
+                }
+                St::Codes(tabs) => {
+                    let (lit, dist) = (&tabs.0, &tabs.1);
+                    let mut b = Bits { data: &self.inb, pos: self.pos, buf: self.buf, cnt: self.cnt };
+                    let mut ended = false;
+                    let mut starved = false;
+                    while out.len() - start < budget {
+                        let (p0, b0, c0) = (b.pos, b.buf, b.cnt);
+                        let step: Result<bool, InflateError> = (|| {
+                            let sym = lit.decode(&mut b)? as usize;
+                            if sym < 256 {
+                                if self.out_total >= self.limit {
+                                    return Err(InflateError::TooBig);
+                                }
+                                Inflater::put(&mut self.win, out, sym as u8);
+                                self.out_total += 1;
+                                Ok(false)
+                            } else if sym == 256 {
+                                Ok(true)
+                            } else {
+                                let s = sym - 257;
+                                if s >= 29 {
+                                    return Err(InflateError::Corrupt("bad length symbol"));
+                                }
+                                let len = LEN_BASE[s] as usize + b.need(LEN_EXTRA[s] as u32)? as usize;
+                                let ds = dist.decode(&mut b)? as usize;
+                                if ds >= 30 {
+                                    return Err(InflateError::Corrupt("bad distance symbol"));
+                                }
+                                let d = DIST_BASE[ds] as usize + b.need(DIST_EXTRA[ds] as u32)? as usize;
+                                if d > self.win.len() {
+                                    return Err(InflateError::Corrupt("distance too far back"));
+                                }
+                                if self.out_total + len > self.limit {
+                                    return Err(InflateError::TooBig);
+                                }
+                                for _ in 0..len {
+                                    let c = self.win[self.win.len() - d];
+                                    Inflater::put(&mut self.win, out, c);
+                                }
+                                self.out_total += len;
+                                Ok(false)
+                            }
+                        })();
+                        match step {
+                            Ok(false) => {}
+                            Ok(true) => {
+                                ended = true;
+                                break;
+                            }
+                            Err(InflateError::Truncated) => {
+                                b.pos = p0;
+                                b.buf = b0;
+                                b.cnt = c0;
+                                starved = true;
+                                break;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    self.pos = b.pos;
+                    self.buf = b.buf;
+                    self.cnt = b.cnt;
+                    self.trim();
+                    if ended {
+                        self.st = if self.last { St::Done } else { St::Block };
+                    } else if starved {
+                        return Ok(Pump::NeedInput);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// CRC-32 continued: `crc` is 0 at the start and what the last call returned after that.
+pub fn crc32_update(crc: u32, data: &[u8]) -> u32 {
+    let mut table = [0u32; 256];
+    for (n, e) in table.iter_mut().enumerate() {
+        let mut c = n as u32;
+        for _ in 0..8 {
+            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+        }
+        *e = c;
+    }
+    let mut c = !crc;
+    for &x in data {
+        c = table[((c ^ x as u32) & 0xFF) as usize] ^ (c >> 8);
+    }
+    !c
+}
+
+/// Adler-32 continued: `adler` is 1 at the start.
+pub fn adler32_update(adler: u32, data: &[u8]) -> u32 {
+    let (mut a, mut b) = (adler & 0xFFFF, adler >> 16);
+    for chunk in data.chunks(5552) {
+        for &x in chunk {
+            a += x as u32;
+            b += a;
+        }
+        a %= 65521;
+        b %= 65521;
+    }
+    (b << 16) | a
 }

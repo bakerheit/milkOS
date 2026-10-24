@@ -52,6 +52,27 @@
 //!   a frame's window and reads back is itself again (it came back as `undefined`). No new items; the file name
 //!   of the engine's own JavaScript in stacks is `browser-api` (it was `fetch-api`). An
 //!   uncaught error's report now carries the source line, which the Browser prints.
+//! - `fetch` response bodies are streams (docs/browser.md "Memory"). New: [`NetRequest::stream`]
+//!   (the page reads the body in pieces if it can; only `fetch` asks), [`NetEvent::Chunk`] (a piece
+//!   of the body, between `Head` and `Done`; `Done` is then empty), [`NetOut::Ack`] (the page has used
+//!   the body up to this many bytes: the app may send a window, a megabyte, more) and
+//!   [`ScriptLimits::buffer`] (the most a response may be when the page reads it whole: `.text()`,
+//!   `.json()`, `.arrayBuffer()`, `.blob()`; beyond it the page gets a TypeError and the request is
+//!   cancelled). An app that matches on [`NetOut`] or [`NetEvent`] must handle the new variants (ignore
+//!   `Ack`; a `Chunk` only comes to an app that was asked for pieces), and a [`NetRequest`] or a
+//!   [`ScriptLimits`] built by field must say the new ones (use `..Default::default()` for the limits).
+//!   An app that never sends `Chunk` works as before: the body comes whole in `Done`.
+//! - New [`Document::collect_garbage`] and [`Document::stop_scripts_because`] (the app's answers to
+//!   low memory: collect now, stop a page for a reason of its own).
+//! - Heap budgets that move (docs/browser.md "Memory"). New type [`Allowance`], new provided
+//!   [`ScriptHost::heap_allowance`] and [`WorkerIo::heap_allowance`] (the app says, before every
+//!   run and about every 65 thousand steps, how much heap the scripts may have; the default
+//!   keeps what [`ScriptLimits::memory`] said), and the new fields [`ScriptStats::heap_limit`] and
+//!   [`ScriptStats::final_heap`]. Scripts that are stopped now give their heap back at once (the realm
+//!   is dropped; the page stays as it is).
+//!   A script that goes over its budget is stopped alone, as before; what changed is that the
+//!   app can move the budget while the page runs. Build a `ScriptStats` with
+//!   `..Default::default()`.
 //! - Workers (docs/browser.md). `new Worker(url, {type, name})` for dedicated classic and module
 //!   workers, each on a thread of the app's making: [`Document::take_workers`] and
 //!   [`Document::worker_event`] are the page's half, [`run_worker`] with [`WorkerIo`] the
@@ -776,6 +797,15 @@ pub trait ScriptHost {
     fn slow(&mut self, _running_ms: f64) -> bool {
         true
     }
+    /// The heap budget (bytes, the engine's own count) these scripts may have, asked before every
+    /// run and about every 65 thousand steps while a script runs; `used` is the heap in use now.
+    /// [`Allowance::Limit`] sets it (up or down: the app works it out from what the machine has
+    /// free, see browserkit's memory plan), [`Allowance::Stop`] ends the scripts for good with
+    /// that reason on the console, [`Allowance::Keep`] changes nothing. A realm that holds more
+    /// than its budget runs out of memory and is stopped alone.
+    fn heap_allowance(&mut self, _used: usize) -> Allowance {
+        Allowance::Keep
+    }
     /// Fill `out` with random bytes from the system's CSPRNG (`crypto.getRandomValues`,
     /// `crypto.randomUUID`). False: not available (the API then throws).
     fn random(&mut self, _out: &mut [u8]) -> bool {
@@ -819,6 +849,16 @@ pub trait Storage {
     fn clear(&mut self);
 }
 
+/// What [`ScriptHost::heap_allowance`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowance {
+    Keep,
+    /// The heap budget from now on, in the engine's bytes.
+    Limit(usize),
+    /// Stop the scripts; the text says why ("the page used too much memory").
+    Stop(String),
+}
+
 /// The bounds a page's scripts run in. A page over them gets an uncatchable error, its
 /// scripts stop, and the page stays as it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -835,6 +875,10 @@ pub struct ScriptLimits {
     /// script or one function is being compiled; big functions are compiled on their first
     /// call). See `jsengine::Limits::max_compile_bytes`.
     pub compile: usize,
+    /// The most a response's body may be when the page reads it whole (`.text()`, `.json()`,
+    /// `.arrayBuffer()`, `.blob()`): more is an error for the page (read it with `response.body`
+    /// instead, which has no limit). The app sets it from the machine's free memory.
+    pub buffer: usize,
 }
 
 impl Default for ScriptLimits {
@@ -844,6 +888,7 @@ impl Default for ScriptLimits {
             slow_ms: 2_000,
             max_source: 8 << 20,
             compile: 96 << 20,
+            buffer: 8 << 20,
         }
     }
 }
@@ -935,6 +980,12 @@ pub struct ScriptStats {
     pub heap_bytes: usize,
     /// The scripts were stopped (by the user, or for going over a limit).
     pub stopped: bool,
+    /// The heap budget now (see [`ScriptHost::heap_allowance`]); 0 before the first script ran.
+    /// For scripts that were stopped: the budget they had.
+    pub heap_limit: usize,
+    /// For scripts that were stopped: the heap they held then (the engine's bytes). Their heap
+    /// is given back when they stop, so `heap_bytes` is 0 from then on.
+    pub final_heap: usize,
 }
 
 /// Fetch's request `mode`.
@@ -1010,6 +1061,11 @@ pub struct NetRequest {
     pub timeout_ms: u32,
     /// Always preflight a cross-origin request (an XHR with listeners on its `upload`).
     pub force_preflight: bool,
+    /// The page reads the body in pieces if it can ([`NetEvent::Chunk`], then an empty
+    /// [`NetEvent::Done`]) and says how much it has used with [`NetOut::Ack`]; the app should
+    /// not send much more than a window (a megabyte) ahead of what was acknowledged. False: the
+    /// body comes whole in [`NetEvent::Done`], as it always did. Only `fetch` asks for pieces.
+    pub stream: bool,
 }
 
 /// What a script's request leaves for the app, in order (see [`Document::take_net`]).
@@ -1018,6 +1074,9 @@ pub enum NetOut {
     Start(NetRequest),
     /// The script aborted it (or its timeout passed): stop the work, send nothing more.
     Cancel(u32),
+    /// A streamed request's page has used the body up to this many bytes in all (see
+    /// [`NetRequest::stream`]): the app may send that much plus a window.
+    Ack { id: u32, consumed: u64 },
 }
 
 /// The kind of response the page gets (Fetch's response `type`).
@@ -1072,7 +1131,11 @@ pub enum NetEvent {
     Head(NetHead),
     /// Body bytes received so far, and the total if the server said.
     Progress { loaded: u64, total: Option<u64> },
-    /// The whole body (empty for an opaque response and for HEAD).
+    /// The next piece of the body of a request that asked for pieces ([`NetRequest::stream`]); the
+    /// pieces come in order between `Head` and `Done`.
+    Chunk(Vec<u8>),
+    /// The whole body (empty for an opaque response and for HEAD), or, after [`NetEvent::Chunk`]s,
+    /// nothing more: the end.
     Done(Vec<u8>),
     Failed(NetFailure),
 }
@@ -1430,6 +1493,10 @@ pub trait WorkerIo {
     fn send(&mut self, m: FromWorker) -> bool;
     /// The page asked for termination (polled from inside a running script).
     fn terminated(&self) -> bool;
+    /// The heap budget this worker may have now (see [`ScriptHost::heap_allowance`]).
+    fn heap_allowance(&mut self, _used: usize) -> Allowance {
+        Allowance::Keep
+    }
 }
 
 // ---- The document -------------------------------------------------------------------------
@@ -1907,6 +1974,20 @@ impl Document {
         }
     }
 
+    /// [`Document::stop_scripts`] with a reason the console shows ("The page's scripts were
+    /// stopped (REASON)").
+    pub fn stop_scripts_because(&mut self, why: &str) {
+        if let Some(j) = self.js.as_mut() {
+            j.stop(why);
+        }
+    }
+
+    /// Collect garbage in the page's script heap now (not while a script of this page runs).
+    /// Returns the bytes freed, by the engine's count. The app does this when memory is short.
+    pub fn collect_garbage(&mut self) -> usize {
+        self.js.as_mut().map_or(0, |j| j.collect())
+    }
+
     pub fn script_stats(&self) -> ScriptStats {
         self.js.as_ref().map(|j| j.stats()).unwrap_or_default()
     }
@@ -1935,6 +2016,7 @@ impl Document {
             slow_ms: 100,
             max_source: boot.limits.max_source,
             compile: 48 << 20,
+            buffer: (boot.limits.heap / 2).max(8 << 20),
         };
         let mut d = Document::from_page(page);
         d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new_worker(&d.page, limits, boot.clone())));

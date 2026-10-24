@@ -20,6 +20,12 @@
 //! response's headers (Set-Cookie on redirects too), may raise the body limit for one
 //! response (a download), hear the body's progress and can stop the fetch
 //! ([`Error::Cancelled`]). [`get`] is a plain GET with no hooks.
+//!
+//! A body does not have to be held whole: when the hooks say so ([`Hooks::stream`]), the decoded body
+//! (de-chunked, and gunzipped or inflated as it arrives through [`crate::gzip::StreamDecoder`]) goes to
+//! [`Hooks::body`] piece by piece, with no size limit, an idle timeout ([`Options::stream_idle_ms`])
+//! instead of the overall one, and the hook free to block (the connection waits: backpressure) or to
+//! stop (the response says `cut`). The Browser streams pages, downloads and `fetch` bodies this way.
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -91,6 +97,9 @@ pub struct Options {
     /// [`Response`] it is, for a caller that applies its own rules to each hop (the Browser's
     /// script requests do).
     pub follow_redirects: bool,
+    /// A streamed body ([`Hooks::stream`]) is not held to `timeout_ms` as a whole: it may go on
+    /// as long as no more than this many ms pass without a piece arriving.
+    pub stream_idle_ms: u64,
 }
 
 impl Default for Options {
@@ -106,6 +115,7 @@ impl Default for Options {
             decompress: true,
             keep_alive: false,
             follow_redirects: true,
+            stream_idle_ms: 60_000,
         }
     }
 }
@@ -223,6 +233,11 @@ pub struct Response {
     pub wire_bytes: usize,
     /// "gzip" / "deflate" if the body was compressed.
     pub encoding: Option<&'static str>,
+    /// The body went to [`Hooks::body`] as it came and `body` is empty ([`Hooks::stream`]).
+    pub streamed: bool,
+    /// A streamed body was stopped before its end (the hook said so): `wire_bytes` is how much
+    /// of it was read.
+    pub cut: bool,
 }
 
 impl Response {
@@ -357,6 +372,22 @@ pub trait Hooks {
     fn stop(&mut self) -> bool {
         false
     }
+    /// Asked when the head of the final answer (not a redirect that is followed) is in, after
+    /// [`Hooks::response_head`]: true makes the body come to [`Hooks::body`] piece by piece,
+    /// decoded (de-chunked and decompressed), as it arrives, instead of in the [`Response`],
+    /// whose `body` is then empty. No size limit applies to a streamed body: the hook decides
+    /// when it has enough.
+    fn stream(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> bool {
+        let _ = (url, status, headers);
+        false
+    }
+    /// A piece of a streamed body. The hook may take as long as it likes (the connection waits:
+    /// this is the backpressure). False stops reading for good: the connection is closed and
+    /// the response says `cut`.
+    fn body(&mut self, data: &[u8]) -> bool {
+        let _ = data;
+        true
+    }
 }
 
 /// No hooks (what [`get`] uses).
@@ -473,8 +504,8 @@ impl Reader<'_> {
 
 /// Status, reason, headers (names in lower case).
 type Head = (u16, String, Vec<(String, String)>);
-/// A head and its (still encoded) body.
-type Answer = (Head, Vec<u8>);
+/// A head and its (still encoded) body, or how it was streamed instead.
+type Answer = (Head, Vec<u8>, Option<Streamed>);
 
 /// Status line + headers. Ok(None) for a connection closed before anything came (a dead
 /// kept-alive connection).
@@ -648,6 +679,173 @@ fn read_body(
     Ok((out, After::Close))
 }
 
+/// How a streamed body ended.
+struct Streamed {
+    after: After,
+    cut: bool,
+    wire: usize,
+    encoding: Option<&'static str>,
+}
+
+fn gz_error(e: crate::gzip::GzipError, max: usize) -> Error {
+    match e {
+        crate::gzip::GzipError::TooBig => Error::TooBig(max),
+        e => Error::Decode(e.message()),
+    }
+}
+
+/// The body of a response whose head was just read, handed piece by piece to the hooks.
+fn read_body_stream(
+    r: &mut Reader,
+    net: &mut dyn Net,
+    status: u16,
+    headers: &[(String, String)],
+    idle_ms: u64,
+) -> Result<Streamed, Error> {
+    // A streamed body has no overall deadline, only an idle one.
+    r.deadline = net.now_ms().saturating_add(idle_ms);
+    let close = has_token(headers, "connection", "close");
+    let reuse = if close { After::Close } else { After::Reuse };
+    if status == 204 || status == 304 || (100..200).contains(&status) {
+        return Ok(Streamed { after: reuse, cut: false, wire: 0, encoding: None });
+    }
+    let enc = header(headers, "content-encoding").unwrap_or("").trim().to_ascii_lowercase();
+    let encoding = match enc.as_str() {
+        "" | "identity" => None,
+        "gzip" | "x-gzip" => Some("gzip"),
+        "deflate" => Some("deflate"),
+        _ => return Err(Error::Decode("the page is compressed in a way milkOS can't undo")),
+    };
+    let mut dec = crate::gzip::StreamDecoder::new(&enc, usize::MAX / 4);
+    let mut wire = 0usize;
+    let mut cut = false;
+    // One raw piece in; false when the hook has had enough.
+    fn push(
+        dec: &mut crate::gzip::StreamDecoder,
+        r: &mut Reader,
+        piece: &[u8],
+    ) -> Result<bool, Error> {
+        let hooks = &mut *r.hooks;
+        dec.feed(piece, &mut |d| hooks.body(d)).map_err(|e| gz_error(e, usize::MAX))
+    }
+    let te = headers
+        .iter()
+        .filter(|(k, _)| k == "transfer-encoding")
+        .flat_map(|(_, v)| v.split(','))
+        .map(|t| t.trim().to_ascii_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>();
+    let chunked = match te.last() {
+        Some(last) if last == "chunked" => {
+            if te.len() > 1 {
+                return Err(Error::Malformed("an unknown transfer encoding"));
+            }
+            true
+        }
+        Some(_) => {
+            if te.iter().any(|t| t != "identity") {
+                return Err(Error::Malformed("an unknown transfer encoding"));
+            }
+            false
+        }
+        None => false,
+    };
+    if chunked {
+        loop {
+            let l = r.line(net, 1024)?;
+            let text = String::from_utf8_lossy(&l);
+            let hex = text.split(';').next().unwrap_or("").trim();
+            if hex.is_empty() || hex.len() > 15 || !hex.bytes().all(|c| c.is_ascii_hexdigit()) {
+                return Err(Error::Malformed("bad chunk size"));
+            }
+            let n = usize::from_str_radix(hex, 16).map_err(|_| Error::Malformed("bad chunk size"))?;
+            if n == 0 {
+                for _ in 0..100 {
+                    if r.line(net, 8192)?.is_empty() {
+                        dec.finish().map_err(|e| gz_error(e, usize::MAX))?;
+                        return Ok(Streamed { after: reuse, cut, wire, encoding });
+                    }
+                }
+                return Err(Error::Malformed("too many trailers"));
+            }
+            let mut left = n;
+            while left > 0 {
+                if r.avail().is_empty() && !r.fill(net)? {
+                    return Err(Error::Malformed("the body is shorter than the server said"));
+                }
+                let take = left.min(r.avail().len()).min(64 * 1024);
+                let piece = r.avail()[..take].to_vec();
+                r.pos += take;
+                left -= take;
+                wire += take;
+                r.hooks.progress(wire, None);
+                if !push(&mut dec, r, &piece)? {
+                    return Ok(Streamed { after: After::Close, cut: true, wire, encoding });
+                }
+                r.deadline = net.now_ms().saturating_add(idle_ms);
+            }
+            if !r.line(net, 2)?.is_empty() {
+                return Err(Error::Malformed("a chunk is longer than its size"));
+            }
+        }
+    }
+    let lens: Vec<&str> = headers
+        .iter()
+        .filter(|(k, _)| k == "content-length")
+        .flat_map(|(_, v)| v.split(','))
+        .map(str::trim)
+        .collect();
+    if let Some(first) = lens.first() {
+        if lens.iter().any(|l| l != first) {
+            return Err(Error::Malformed("two different Content-Lengths"));
+        }
+        if first.is_empty() || !first.bytes().all(|c| c.is_ascii_digit()) || first.len() > 15 {
+            return Err(Error::Malformed("a bad Content-Length"));
+        }
+        let n: usize = first.parse().map_err(|_| Error::Malformed("a bad Content-Length"))?;
+        r.total = Some(n);
+        let mut left = n;
+        while left > 0 {
+            if r.avail().is_empty() && !r.fill(net)? {
+                return Err(Error::Malformed("the body is shorter than the server said"));
+            }
+            let take = left.min(r.avail().len()).min(64 * 1024);
+            let piece = r.avail()[..take].to_vec();
+            r.pos += take;
+            left -= take;
+            wire += take;
+            r.hooks.progress(wire, r.total);
+            if !push(&mut dec, r, &piece)? {
+                return Ok(Streamed { after: After::Close, cut: true, wire, encoding });
+            }
+            r.deadline = net.now_ms().saturating_add(idle_ms);
+        }
+        dec.finish().map_err(|e| gz_error(e, usize::MAX))?;
+        return Ok(Streamed { after: reuse, cut, wire, encoding });
+    }
+    // To the end of the connection.
+    loop {
+        let take = r.avail().len().min(64 * 1024);
+        if take > 0 {
+            let piece = r.avail()[..take].to_vec();
+            r.pos += take;
+            wire += take;
+            r.hooks.progress(wire, None);
+            if !push(&mut dec, r, &piece)? {
+                return Ok(Streamed { after: After::Close, cut: true, wire, encoding });
+            }
+            r.deadline = net.now_ms().saturating_add(idle_ms);
+            continue;
+        }
+        if !r.fill(net)? {
+            break;
+        }
+    }
+    dec.finish().map_err(|e| gz_error(e, usize::MAX))?;
+    cut = false;
+    Ok(Streamed { after: After::Close, cut, wire, encoding })
+}
+
 fn decode_body(
     body: Vec<u8>,
     headers: &[(String, String)],
@@ -815,11 +1013,22 @@ fn exchange(
             .hooks
             .response_head(&req.url, status, &reason, &headers)
             .unwrap_or(o.max_body);
+        let followed = is_redirect(status) && o.follow_redirects && header(&headers, "location").is_some();
+        let head_only = req.verb.as_deref() == Some("HEAD");
+        let streaming = !followed && !head_only && r.hooks.stream(&req.url, status, &headers);
         // HEAD: the headers describe a body that is not sent.
-        let (body, after) = if req.verb.as_deref() == Some("HEAD") {
-            (Vec::new(), After::Close)
+        let (body, after, streamed) = if head_only {
+            (Vec::new(), After::Close, None)
+        } else if streaming {
+            let st = read_body_stream(&mut r, net, status, &headers, o.stream_idle_ms)?;
+            (Vec::new(), After::Reuse, Some(st))
         } else {
-            read_body(&mut r, net, status, &headers, max)?
+            let (b, a) = read_body(&mut r, net, status, &headers, max)?;
+            (b, a, None)
+        };
+        let after = match &streamed {
+            Some(st) if st.after == After::Close => After::Close,
+            _ => after,
         };
         let after = if !o.keep_alive || has_token(&headers, "connection", "close") {
             After::Close
@@ -827,7 +1036,7 @@ fn exchange(
             after
         };
         conn.buf = r.buf[r.pos..].to_vec();
-        return Ok((Some(((status, reason, headers), body)), after));
+        return Ok((Some(((status, reason, headers), body, streamed)), after));
     }
 }
 
@@ -877,7 +1086,7 @@ pub fn fetch(
             Ok(x) => x,
             Err(e) => return Err(fail(e, &url, &redirects)),
         };
-        let Some(((status, reason, headers), body)) = got else {
+        let Some(((status, reason, headers), body, streamed)) = got else {
             if reuse {
                 // The kept-alive connection had closed: once more on a new one.
                 conn = None;
@@ -921,6 +1130,20 @@ pub fn fetch(
             url = next;
             continue;
         }
+        if let Some(st) = streamed {
+            return Ok(Response {
+                status,
+                reason,
+                headers,
+                body: Vec::new(),
+                url,
+                redirects,
+                wire_bytes: st.wire,
+                encoding: st.encoding,
+                streamed: true,
+                cut: st.cut,
+            });
+        }
         let wire_bytes = body.len();
         let max = o.max_body.max(wire_bytes);
         let (body, encoding) = match decode_body(body, &headers, max) {
@@ -936,6 +1159,8 @@ pub fn fetch(
             redirects,
             wire_bytes,
             encoding,
+            streamed: false,
+            cut: false,
         });
     }
 }

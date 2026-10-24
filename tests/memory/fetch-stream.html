@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: fetch a body that is read piece by piece</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; }</style>
+</head><body>
+<h2>A body read piece by piece</h2>
+<p id="s">starting</p>
+<script>
+  // Reads 256 KB of /stream, stops reading for a while (the connection must wait: the server
+  // cannot get far ahead), then reads on to the end. ?mb=200&pause=6000
+  var a = args(location.search), mb = +a.mb || 200, pause = +a.pause || 6000;
+  report('stream', 'begin', mb);
+  fetch('/stream?mb=' + mb + '&chunk=64').then(async function (r) {
+    var rd = r.body.getReader(), total = 0, pieces = 0, sum = 0;
+    while (total < 256 * 1024) { var x = await rd.read(); if (x.done) break; total += x.value.length; pieces++; }
+    report('stream', 'paused', total);
+    await new Promise(function (res) { setTimeout(res, pause); });
+    report('stream', 'resumed', total);
+    for (;;) {
+      var y = await rd.read();
+      if (y.done) break;
+      total += y.value.length; pieces++;
+      for (var i = 0; i < y.value.length; i += 4099) sum = (sum + y.value[i]) | 0;
+    }
+    document.getElementById('s').textContent = 'read ' + total + ' bytes';
+    report('stream', 'end', total + ' bytes in ' + pieces + ' pieces');
+  }).catch(function (e) { report('stream', 'error', e.name + ': ' + e.message); });
+</script>
+</body></html>

@@ -42,7 +42,9 @@ async function run(name, f) {
     try { await fetch('/api/slow?ms=3000', { signal: c.signal }); return 'finished'; } catch (e) { return e.name + ' fast=' + (performance.now() - t0 < 1500); }
   });
   await run('timeout-signal', async () => { try { await fetch('/api/slow?ms=3000', { signal: AbortSignal.timeout(200) }); return 'finished'; } catch (e) { return e.name; } });
-  await run('too-big', async () => { try { const r = await fetch('/api/big?mb=12'); await r.arrayBuffer(); return 'resolved'; } catch (e) { return errName(e); } });
+  // What a script reads whole is bounded by the machine's memory (here about 40 MB), not by a fixed 8 MB.
+  await run('big-ok', async () => { const r = await fetch('/api/big?mb=12'); return (await r.arrayBuffer()).byteLength; });
+  await run('too-big', async () => { try { const r = await fetch('/api/big?mb=200'); await r.arrayBuffer(); return 'resolved'; } catch (e) { return e.name + ' says-so=' + /bigger than this page may keep in memory/.test(e.message); } });
   await run('set-cookie-hidden', async () => { const r = await fetch('/api/cookie'); return String(r.headers.get('set-cookie')) + ' ' + [...r.headers.keys()].includes('set-cookie'); });
   await run('cookie-sent', async () => (await (await fetch('/api/whoami')).text()));
   await run('cookie-omit', async () => (await (await fetch('/api/whoami', { credentials: 'omit' })).text()));

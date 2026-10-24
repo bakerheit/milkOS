@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: frames and workers made and dropped</title>
+<script src="/report.js"></script><script src="/hog.js"></script></head>
+<body style="font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28">
+<h2>Churn</h2>
+<p id="s">starting</p>
+<div id="box"></div>
+<script>
+  // ?rounds=N: every round makes 6 frames and 4 workers that each hold a few MB, and drops them
+  // again, while the page itself holds and drops some data too.
+  var a = args(location.search), rounds = +a.rounds || 6, round = 0;
+  report('churn', 'begin', rounds);
+  function again() {
+    if (round >= rounds) { document.getElementById('s').textContent = 'done'; report('churn', 'end', rounds); return; }
+    round++;
+    var box = document.getElementById('box'), ws = [], held = [];
+    for (var i = 0; i < 6; i++) {
+      var f = document.createElement('iframe');
+      f.width = 200; f.height = 40;
+      f.src = '/hog-frame.html?mb=4&kind=' + ['objects', 'strings', 'typed'][i % 3] + '&i=' + i + '&r=' + round;
+      box.appendChild(f);
+    }
+    for (var j = 0; j < 4; j++) {
+      var w = new Worker('/hog-worker.js?mb=4&kind=' + ['objects', 'strings'][j % 2] + '&r=' + round);
+      ws.push(w);
+    }
+    for (var k = 0; k < 20000; k++) held.push({ k: k, s: 'x' + k });
+    setTimeout(function () {
+      ws.forEach(function (w) { w.terminate(); });
+      box.textContent = '';
+      held = null;
+      report('churn', 'round', round);
+      setTimeout(again, 400);
+    }, 1500);
+  }
+  setTimeout(again, 300);
+</script>
+</body></html>

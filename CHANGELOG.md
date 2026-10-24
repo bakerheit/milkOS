@@ -15,6 +15,23 @@
   for memory, steps and time). Pages get a live DOM API, events, timers, storage and a console
   panel (Cmd-Alt-J). A runaway script gets a "This page is slow" bar; a toolbar switch turns
   JavaScript off. Not yet: real BigInt (literals parse and throw).
+- Memory (docs/browser.md "Memory"): the Browser no longer gives every page, frame and worker the
+  same few megabytes. Heap limits follow what the machine has free (`/proc/meminfo`, new
+  `MemAvailable` and `/proc/mempressure`): a floor always stays for the desktop and the other apps,
+  the room above it is shared out among the realms of all tabs (a page in front gets most of it), and
+  a page can hold hundreds of MB on a roomy machine where it was stopped at 64 MB (a frame at 16, a
+  worker at 32); as memory gets short the limits shrink, caches are dropped, garbage is collected,
+  background tabs are discarded (they come back from their address) and the heaviest page is
+  offered "This page uses a lot of memory. Stop it?"; a page that runs out is stopped alone, with
+  a console line and a bar, and gives its heap back at once. What used to be a refusal is streamed:
+  a page shows its top while the rest arrives and is cut at a memory-derived window with "This
+  page is too big to show completely. Load more?", `fetch` bodies are real streams with
+  backpressure (the page acknowledges what it read, the server waits), downloads are written to
+  disk as they come (no 64 MB limit), and the sizes of scripts, stylesheets, pictures and whole-body
+  reads follow the memory too. The engine's heap limit can now move while a script runs
+  (`jsengine::Realm::set_heap_limit`, `set_memory_hook`; `webengine::ScriptHost::heap_allowance`);
+  milkweb streams a body through a hook (`Hooks::stream` / `body`) and decodes chunked, gzip and
+  deflate bodies as they arrive.
 - Big scripts: a script is parsed and compiled one top-level statement at a time, functions are
   compiled on their first call, and the code a page keeps counts against its heap budget, so
   bundles of several megabytes (a 3 MB bundle of functions peaks at about 10 to 30 MB instead of
@@ -225,6 +242,10 @@
   share and lists their PIDs (`--all` for every one). `system memory` shows the new
   `/proc/meminfo` breakdown in Activity Monitor's groups. There is no `system restart` or
   `shutdown` yet: only the desktop's menu can.
+- `/proc/mempressure` (level normal / low / critical against marks at 1/8 and 1/16 of RAM, the
+  lowest free memory since boot, how often the marks were crossed, allocations that found no
+  memory) and a `MemAvailable` line in `/proc/meminfo`: a program that can give memory back (the
+  Browser) knows when to (docs/memory.md "Memory pressure").
 - `users` and `admin` are set-user-ID root like `su`, `sudo` and `passwd` were, with the same
   checks; their other subcommands give root up first. `admin` now gives the root command a
   clean environment from the target account (PATH, HOME, USER, LOGNAME, TERM, plus

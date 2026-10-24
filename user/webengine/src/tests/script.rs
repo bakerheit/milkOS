@@ -29,6 +29,9 @@ pub struct Host {
     pub clock: core::cell::Cell<f64>,
     pub rnd: u64,
     pub clipboard: String,
+    /// What heap_allowance answers (by the heap in use), and how often it was asked.
+    pub allowance: Option<alloc::boxed::Box<dyn FnMut(usize) -> Allowance>>,
+    pub allowance_calls: u32,
 }
 
 impl Host {
@@ -47,6 +50,8 @@ impl Host {
             clock: core::cell::Cell::new(0.0),
             rnd: 0x2545_f491_4f6c_dd1d,
             clipboard: String::new(),
+            allowance: None,
+            allowance_calls: 0,
         }
     }
 }
@@ -85,6 +90,13 @@ impl Storage for Mem {
 }
 
 impl ScriptHost for Host {
+    fn heap_allowance(&mut self, used: usize) -> Allowance {
+        self.allowance_calls += 1;
+        match self.allowance.as_mut() {
+            Some(f) => f(used),
+            None => Allowance::Keep,
+        }
+    }
     fn measurer(&self) -> &dyn TextMeasurer {
         &ApproxMeasurer
     }
@@ -148,12 +160,17 @@ impl ScriptHost for Host {
 }
 
 pub fn doc(html: &str) -> Document {
+    doc_with(html, ScriptLimits::default())
+}
+
+/// [`doc`] with the page's own script limits.
+pub fn doc_with(html: &str, limits: ScriptLimits) -> Document {
     let mut d = Document::parse_scripted(
         html.as_bytes(),
         "http://www.milk.test/page.html",
         Some("text/html"),
         Limits::default(),
-        Some(ScriptLimits::default()),
+        Some(limits),
     );
     d.layout(&Viewport::new(800, 600), &ApproxMeasurer);
     d

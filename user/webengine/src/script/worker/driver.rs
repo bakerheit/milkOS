@@ -77,6 +77,9 @@ impl ScriptHost for WorkerHost<'_> {
     fn random(&mut self, out: &mut [u8]) -> bool {
         self.io.random(out)
     }
+    fn heap_allowance(&mut self, used: usize) -> Allowance {
+        self.io.heap_allowance(used)
+    }
     fn slow(&mut self, running_ms: f64) -> bool {
         if self.io.terminated() {
             self.why = Some(Why::Terminated);
@@ -110,7 +113,7 @@ impl ScriptHost for WorkerHost<'_> {
                 Recv::Timeout => continue,
                 Recv::Msg(ToWorker::Net { id: i, ev }) if i == id => match ev {
                     NetEvent::Head(h) => head = Some(h),
-                    NetEvent::Progress { .. } => {}
+                    NetEvent::Progress { .. } | NetEvent::Chunk(_) => {}
                     NetEvent::Done(body) => {
                         let h = head.take().unwrap_or(NetHead {
                             status: 200,
@@ -166,6 +169,7 @@ fn script_request(id: u32, url: &str) -> NetRequest {
         cache: String::from("default"),
         timeout_ms: 0,
         force_preflight: false,
+        stream: false,
     }
 }
 
@@ -247,7 +251,7 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
                                 NetEvent::Head(h) => {
                                     heads.insert(id, h);
                                 }
-                                NetEvent::Progress { .. } => {}
+                                NetEvent::Progress { .. } | NetEvent::Chunk(_) => {}
                                 NetEvent::Done(body) => {
                                     let ok = heads.remove(&id).is_none_or(|h| (200..300).contains(&h.status));
                                     if ok {
@@ -309,7 +313,8 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
                 _ => {
                     let r = doc.script_stop_reason();
                     if r == "out of memory" {
-                        format!("it ran out of memory (the limit is {} MB)", boot.limits.heap >> 20)
+                        // (The limit it ran out at: the app moves it while the worker runs.)
+                        format!("it ran out of memory (the limit is {} MB)", stats.heap_limit.max(boot.limits.heap) >> 20)
                     } else {
                         r
                     }

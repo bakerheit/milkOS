@@ -1617,3 +1617,174 @@ fn http_response_head_hook_sees_the_reason_and_can_set_the_limit() {
     assert_eq!(h.heads, [(418, "I'm a teapot".to_string())]);
     assert!(matches!(r, Err(f) if matches!(f.error, http::Error::TooBig(3))));
 }
+
+// ---- streamed bodies ----------------------------------------------------------------------------
+
+/// Hooks that stream and keep what came, in pieces; `stop_after` bytes ends it early.
+#[derive(Default)]
+struct Streamer {
+    pieces: Vec<Vec<u8>>,
+    stop_after: Option<usize>,
+    asked: u32,
+    progress: Vec<usize>,
+}
+
+impl Streamer {
+    fn all(&self) -> Vec<u8> {
+        self.pieces.concat()
+    }
+}
+
+impl http::Hooks for Streamer {
+    fn stream(&mut self, _u: &Url, status: u16, _h: &[(String, String)]) -> bool {
+        self.asked += 1;
+        status < 300
+    }
+    fn body(&mut self, data: &[u8]) -> bool {
+        self.pieces.push(data.to_vec());
+        let got: usize = self.pieces.iter().map(Vec::len).sum();
+        self.stop_after.is_none_or(|n| got < n)
+    }
+    fn progress(&mut self, got: usize, _t: Option<usize>) {
+        self.progress.push(got);
+    }
+}
+
+fn fetch_streamed(resp: &[u8], hooks: &mut Streamer) -> Result<http::Response, http::Failure> {
+    let mut net = FakeNet::new().serve("h.test", answer(resp));
+    http::fetch(&mut net, &http::Request::get(&url("http://h.test/")), &Options::default(), hooks)
+}
+
+fn chunked_response(head: &str, parts: &[&[u8]]) -> Vec<u8> {
+    let mut resp = alloc::format!("HTTP/1.1 200 OK\r\n{head}Transfer-Encoding: chunked\r\n\r\n").into_bytes();
+    for p in parts {
+        resp.extend(alloc::format!("{:x}\r\n", p.len()).bytes());
+        resp.extend(*p);
+        resp.extend(b"\r\n");
+    }
+    resp.extend(b"0\r\n\r\n");
+    resp
+}
+
+#[test]
+fn a_streamed_body_comes_in_pieces_and_the_response_is_empty() {
+    // Chunked, plain.
+    let resp = chunked_response("", &[b"<p>one</p>", b"<p>two</p>", b"<p>three</p>"]);
+    let mut h = Streamer::default();
+    let r = fetch_streamed(&resp, &mut h).unwrap();
+    assert!(r.streamed && !r.cut && r.body.is_empty());
+    assert_eq!(h.all(), b"<p>one</p><p>two</p><p>three</p>");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.wire_bytes, 32);
+    assert!(h.pieces.len() >= 3, "pieces: {}", h.pieces.len());
+    // Content-Length.
+    let mut resp = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n".to_vec();
+    resp.extend(b"0123456789");
+    let mut h = Streamer::default();
+    let r = fetch_streamed(&resp, &mut h).unwrap();
+    assert_eq!(h.all(), b"0123456789");
+    assert!(r.streamed);
+    // To the end of the connection.
+    let mut h = Streamer::default();
+    fetch_streamed(b"HTTP/1.1 200 OK\r\n\r\nuntil the end", &mut h).unwrap();
+    assert_eq!(h.all(), b"until the end");
+}
+
+#[test]
+fn a_streamed_body_is_decoded_as_it_comes() {
+    // gzip over chunks cut in the middle of everything.
+    let body = gz(b"<p>Zipped and streamed, a few words more to make it longer</p>");
+    for cut in [1usize, 2, 5, 11, 40] {
+        let parts: Vec<&[u8]> = body.chunks(cut).collect();
+        let resp = chunked_response("Content-Encoding: gzip\r\n", &parts);
+        let mut h = Streamer::default();
+        let r = fetch_streamed(&resp, &mut h).unwrap();
+        assert_eq!(h.all(), b"<p>Zipped and streamed, a few words more to make it longer</p>", "cut {cut}");
+        assert_eq!(r.encoding, Some("gzip"));
+        assert!(r.streamed);
+    }
+    // A real gzip, and zlib and raw deflate.
+    let mut resp = alloc::format!("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n", HELLO_GZ.len()).into_bytes();
+    resp.extend(HELLO_GZ);
+    let mut h = Streamer::default();
+    fetch_streamed(&resp, &mut h).unwrap();
+    assert_eq!(h.all(), b"hello hello hello hello\n");
+    for enc in [zlib(b"deflated words"), stored_deflate(b"deflated words")] {
+        let mut resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: deflate\r\n\r\n".to_vec();
+        resp.extend(enc);
+        let mut h = Streamer::default();
+        let r = fetch_streamed(&resp, &mut h).unwrap();
+        assert_eq!(h.all(), b"deflated words");
+        assert_eq!(r.encoding, Some("deflate"));
+    }
+    // Two gzip members are one body.
+    let mut two = gz(b"first ");
+    two.extend(gz(b"second"));
+    let mut resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
+    resp.extend(two);
+    let mut h = Streamer::default();
+    fetch_streamed(&resp, &mut h).unwrap();
+    assert_eq!(h.all(), b"first second");
+}
+
+#[test]
+fn a_streamed_body_can_be_cut_and_a_bad_one_is_an_error() {
+    // The hook has had enough after a few bytes: the response says so, and the rest is never read.
+    let resp = chunked_response("", &[b"0123456789", b"abcdefghij", b"KLMNOPQRST"]);
+    let mut h = Streamer { stop_after: Some(12), ..Streamer::default() };
+    let r = fetch_streamed(&resp, &mut h).unwrap();
+    assert!(r.streamed && r.cut);
+    assert!(h.all().len() >= 12 && h.all().len() < 30);
+    // A corrupt gzip body, a cut-off one, one with a wrong checksum.
+    let good = gz(b"some text that is long enough");
+    let mut bad_crc = good.clone();
+    let n = bad_crc.len();
+    bad_crc[n - 6] ^= 0xff;
+    for body in [bad_crc, good[..good.len() - 4].to_vec(), b"not gzip at all, really".to_vec()] {
+        let mut resp = b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n".to_vec();
+        resp.extend(body);
+        let mut h = Streamer::default();
+        let e = fetch_streamed(&resp, &mut h).unwrap_err().error;
+        assert!(matches!(e, Error::Decode(_)), "{e:?}");
+    }
+    // An unknown coding, and a body shorter than it says.
+    let mut h = Streamer::default();
+    let e = fetch_streamed(b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\n\r\nxx", &mut h).unwrap_err().error;
+    assert!(matches!(e, Error::Decode(_)), "{e:?}");
+    let mut h = Streamer::default();
+    let e = fetch_streamed(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort", &mut h).unwrap_err().error;
+    assert!(matches!(e, Error::Malformed(_)), "{e:?}");
+}
+
+#[test]
+fn a_redirect_and_an_error_status_are_not_streamed_unless_the_hook_says() {
+    // The hook says no to anything over 299: the redirect is followed, and the answer after it
+    // streams.
+    let mut net = FakeNet::new().serve("h.test", answer(b"HTTP/1.1 301 Moved\r\nLocation: /b\r\nContent-Length: 0\r\n\r\n"));
+    net = net.serve("h.test", answer(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nnew"));
+    let mut h = Streamer::default();
+    let r = http::fetch(&mut net, &http::Request::get(&url("http://h.test/a")), &Options::default(), &mut h).unwrap();
+    assert_eq!(r.redirects.len(), 1);
+    assert_eq!(h.all(), b"new");
+    assert_eq!(h.asked, 1, "asked once, for the final answer");
+    // An error page the hook declines comes whole.
+    let mut h = Streamer::default();
+    let r = fetch_streamed(b"HTTP/1.1 404 Not Found\r\nContent-Length: 4\r\n\r\nnope", &mut h).unwrap();
+    assert!(!r.streamed);
+    assert_eq!(r.body, b"nope");
+}
+
+#[test]
+fn a_streamed_body_has_no_size_limit_of_its_own() {
+    // 3 MiB through a client whose whole-body limit is 1 MiB.
+    let big = vec![b'x'; 3 << 20];
+    let parts: Vec<&[u8]> = big.chunks(100_000).collect();
+    let resp = chunked_response("", &parts);
+    let mut net = FakeNet::new().serve("h.test", answer(&resp));
+    let mut h = Streamer::default();
+    let o = Options { max_body: 1 << 20, ..Options::default() };
+    let r = http::fetch(&mut net, &http::Request::get(&url("http://h.test/")), &o, &mut h).unwrap();
+    assert!(r.streamed && r.body.is_empty());
+    assert_eq!(h.all().len(), 3 << 20);
+    assert!(h.progress.last() == Some(&(3 << 20)));
+}

@@ -27,16 +27,16 @@ use webengine::{NetHead, NetRequest};
 
 pub type JobId = u64;
 
-/// The most a page may be (as received and uncompressed).
+/// What the fetch limits were before they followed memory (`milkweb` without a plan, view-source,
+/// frames, which are fetched whole): the Browser's `Caps` replace them for pages, scripts,
+/// stylesheets and pictures (`Fetcher::caps`).
 pub const MAX_PAGE: usize = 4 << 20;
-/// The most a stylesheet may be.
 pub const MAX_STYLE: usize = 2 << 20;
-/// The most a script may be.
 pub const MAX_SCRIPT: usize = 4 << 20;
-/// The most an image file may be.
 pub const MAX_IMAGE: usize = 8 << 20;
-/// The most a download may be (it is held in memory until it is written).
-pub const MAX_DOWNLOAD: usize = 64 << 20;
+/// A page that streams in is held back from the window's thread past this many bytes (the
+/// job waits: backpressure).
+const STREAM_WINDOW: usize = 2 << 20;
 /// Jobs running at once (more wait their turn).
 pub const MAX_RUNNING: usize = 6;
 /// Script requests (fetch, XMLHttpRequest) running at once, besides those: a long poll or two
@@ -83,9 +83,37 @@ pub enum Outcome {
     Refused(scriptnet::frame::load::Refusal),
 }
 
+/// The head of a page that streams in.
+#[derive(Clone, Debug)]
+pub struct PageHead {
+    pub status: u16,
+    pub reason: String,
+    pub headers: Vec<(String, String)>,
+    pub url: Url,
+}
+
+/// A page's body on its way from the job to the window's thread.
+#[derive(Default)]
+pub struct StreamBuf {
+    pub chunks: VecDeque<Vec<u8>>,
+    /// Bytes waiting in `chunks`.
+    pub waiting: usize,
+    /// Bytes handed over in all.
+    pub total: usize,
+    /// The job stopped reading at the cap: the page is longer than this.
+    pub cut: bool,
+}
+
 /// What a job and the window share.
 #[derive(Default)]
 pub struct Shared {
+    /// A page that streams in: its head (set once, when the final answer's head is in) and the
+    /// body so far.
+    pub page_head: Option<PageHead>,
+    pub stream: StreamBuf,
+    /// A script request that streams: how many bytes of its body the page has used (the job
+    /// sends no more than a window ahead of it).
+    pub acked: u64,
     pub got: usize,
     pub total: Option<usize>,
     /// The window asks the job to stop.
@@ -114,6 +142,12 @@ pub struct Job {
 struct Spec {
     req: Request,
     ctx: Context,
+    /// A page: its body streams to the window's thread (up to this many bytes) instead of
+    /// coming whole.
+    stream_cap: Option<usize>,
+    /// The most an image, a stylesheet, a script and a page that comes whole (view-source, a
+    /// frame's document) may be (from the memory plan).
+    caps: (usize, usize, usize, usize),
     /// A script request, and what the policy needs to run it.
     script: Option<ScriptSpec>,
     /// A frame: the addresses of its ancestors (top first), checked on every hop.
@@ -207,8 +241,21 @@ pub fn now_secs() -> i64 {
     (sys::clock_ns(sys::CLOCK_REALTIME) / 1_000_000_000) as i64
 }
 
+/// A download being written to disk as it comes.
+struct DlFile {
+    fd: i32,
+    path: String,
+    n: usize,
+    err: Option<String>,
+}
+
 struct BrowserHooks {
     kind: Kind,
+    downloads: String,
+    file: Option<DlFile>,
+    stream_cap: Option<usize>,
+    reason: String,
+    caps: (usize, usize, usize, usize),
     jar: Arc<Mutex<Jar>>,
     ctx: Context,
     shared: Arc<Mutex<Shared>>,
@@ -222,6 +269,80 @@ fn is_redirect(status: u16, headers: &[(String, String)]) -> bool {
 }
 
 impl Hooks for BrowserHooks {
+    fn response_head(
+        &mut self,
+        url: &Url,
+        status: u16,
+        reason: &str,
+        headers: &[(String, String)],
+    ) -> Option<usize> {
+        self.reason = String::from(reason);
+        self.response(url, status, headers)
+    }
+
+    fn stream(&mut self, url: &Url, status: u16, headers: &[(String, String)]) -> bool {
+        // A download goes to disk as it comes, whatever its size (the disk is the limit).
+        let name = self.shared.lock().download.clone();
+        if let Some(name) = name
+            && (status < 400 || self.kind == Kind::Download)
+        {
+            match open_download(&self.downloads, &name) {
+                Ok((fd, path)) => self.file = Some(DlFile { fd, path, n: 0, err: None }),
+                Err(e) => {
+                    // (No file: the body is read and thrown away, the outcome says why.)
+                    self.file = Some(DlFile { fd: -1, path: String::new(), n: 0, err: Some(e) });
+                }
+            }
+            return true;
+        }
+        if self.stream_cap.is_none() || self.kind != Kind::Page || name_is_some(&self.shared) {
+            return false;
+        }
+        self.shared.lock().page_head = Some(PageHead {
+            status,
+            reason: self.reason.clone(),
+            headers: headers.to_vec(),
+            url: url.clone(),
+        });
+        true
+    }
+
+    fn body(&mut self, data: &[u8]) -> bool {
+        if let Some(f) = self.file.as_mut() {
+            if f.err.is_some() {
+                return false;
+            }
+            if let Err(e) = sys::write_all(f.fd, data) {
+                f.err = Some(alloc::format!("couldn't write it: {}", e.name()));
+                return false;
+            }
+            f.n += data.len();
+            return !self.shared.lock().cancel;
+        }
+        let cap = self.stream_cap.unwrap_or(usize::MAX);
+        loop {
+            {
+                let mut s = self.shared.lock();
+                if s.cancel {
+                    return false;
+                }
+                // The window's thread takes what is waiting every few milliseconds; while a
+                // lot is, the connection waits (and so does the server).
+                if s.stream.waiting < STREAM_WINDOW {
+                    s.stream.waiting += data.len();
+                    s.stream.total += data.len();
+                    s.stream.chunks.push_back(data.to_vec());
+                    if s.stream.total >= cap {
+                        s.stream.cut = true;
+                        return false;
+                    }
+                    return true;
+                }
+            }
+            sys::sleep_ms(3);
+        }
+    }
+
     fn cookie(&mut self, url: &Url, method: Method) -> Option<String> {
         self.jar
             .lock()
@@ -249,7 +370,7 @@ impl Hooks for BrowserHooks {
                 .map(|(_, v)| v.as_str())
         };
         match self.kind {
-            Kind::Image => Some(MAX_IMAGE),
+            Kind::Image => Some(self.caps.0),
             Kind::Style | Kind::Script | Kind::Request | Kind::Frame => None,
             Kind::Page
                 if !download::is_download(
@@ -262,7 +383,8 @@ impl Hooks for BrowserHooks {
             Kind::Page | Kind::Download => {
                 self.shared.lock().download =
                     Some(download::file_name(url, h("content-disposition")));
-                Some(MAX_DOWNLOAD)
+                // (The body goes to disk as it comes: no limit of memory's.)
+                Some(usize::MAX / 4)
             }
         }
     }
@@ -279,13 +401,14 @@ impl Hooks for BrowserHooks {
     }
 }
 
-fn options(kind: Kind) -> Options {
+fn options(kind: Kind, caps: (usize, usize, usize, usize)) -> Options {
     Options {
         max_body: match kind {
-            Kind::Image => MAX_IMAGE,
-            Kind::Style => MAX_STYLE,
-            Kind::Script => MAX_SCRIPT,
-            _ => MAX_PAGE,
+            Kind::Image => caps.0,
+            Kind::Style => caps.1,
+            Kind::Script => caps.2,
+            Kind::Frame => (caps.3 / 4).max(MAX_PAGE),
+            _ => caps.3,
         },
         timeout_ms: if kind == Kind::Download {
             600_000
@@ -305,8 +428,20 @@ fn options(kind: Kind) -> Options {
     }
 }
 
-/// Write a download into `dir` under a free name: the path.
-fn save(dir: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
+/// Close a download's file and remove it.
+fn discard_download(f: DlFile) {
+    if f.fd >= 0 {
+        let _ = sys::close(f.fd);
+        let _ = sys::unlink(&f.path);
+    }
+}
+
+fn name_is_some(sh: &Arc<Mutex<Shared>>) -> bool {
+    sh.lock().download.is_some()
+}
+
+/// Make the file a download is written to, in `dir` under a free name: its descriptor and path.
+fn open_download(dir: &str, name: &str) -> Result<(i32, String), String> {
     let _ = sys::mkdir(dir, 0o755);
     for _ in 0..3 {
         let n = download::unique(name, |n| {
@@ -318,13 +453,7 @@ fn save(dir: &str, name: &str, bytes: &[u8]) -> Result<String, String> {
             sys::O_WRONLY | sys::O_CREAT | sys::O_EXCL | sys::O_CLOEXEC,
             0o644,
         ) {
-            Ok(fd) => {
-                let r = sys::write_all(fd, bytes);
-                let _ = sys::close(fd);
-                return r
-                    .map(|_| path)
-                    .map_err(|e| alloc::format!("couldn't write it: {}", e.name()));
-            }
+            Ok(fd) => return Ok((fd, path)),
             Err(e) if e.0 == 17 => continue, // EEXIST: someone took the name, try the next
             Err(e) => return Err(alloc::format!("couldn't save it in {dir}: {}", e.name())),
         }
@@ -350,13 +479,18 @@ fn run(
     };
     let mut hooks = BrowserHooks {
         kind,
+        downloads: downloads.clone(),
+        file: None,
+        stream_cap: spec.stream_cap,
+        reason: String::new(),
+        caps: spec.caps,
         jar,
         ctx: spec.ctx,
         shared: shared.clone(),
         chain: spec.chain,
         base: spec.req.url.clone(),
     };
-    let r = http::fetch(&mut net, &spec.req, &options(kind), &mut hooks);
+    let r = http::fetch(&mut net, &spec.req, &options(kind, spec.caps), &mut hooks);
     if matches!(kind, Kind::Page | Kind::Frame)
         && let Some(a) = net.inner.peer
     {
@@ -367,13 +501,32 @@ fn run(
     }
     let name = shared.lock().download.clone();
     let refused = shared.lock().refused.take();
+    // A download written to disk as it came: closed now, and removed again if it did not
+    // come whole (a stopped or broken download leaves no half file).
+    let file = hooks.file.take();
     let out = match (r, name) {
-        (_, _) if refused.is_some() => Outcome::Refused(refused.unwrap()),
-        (Ok(resp), Some(name)) if resp.status < 400 || kind == Kind::Download => {
-            match save(&downloads, &name, &resp.body) {
-                Ok(p) => Outcome::Saved(p, resp.body.len()),
-                Err(e) => Outcome::SaveFailed(e),
+        (_, _) if refused.is_some() => {
+            if let Some(f) = file {
+                discard_download(f);
             }
+            Outcome::Refused(refused.unwrap())
+        }
+        (Ok(_), _) if file.is_some() => {
+            let f = file.unwrap();
+            match f.err.clone() {
+                Some(e) => {
+                    discard_download(f);
+                    Outcome::SaveFailed(e)
+                }
+                None => {
+                    let _ = sys::close(f.fd);
+                    Outcome::Saved(f.path, f.n)
+                }
+            }
+        }
+        (Err(fail), _) if file.is_some() => {
+            discard_download(file.unwrap());
+            Outcome::Failed(fail)
         }
         (Ok(resp), _) if kind == Kind::Image => {
             if resp.status >= 400 {
@@ -395,8 +548,12 @@ fn run(
     shared.lock().done = Some(out);
 }
 
+/// How far ahead of what a page has used the job sends a streamed body.
+const SCRIPT_WINDOW: u64 = 1 << 20;
+
 struct ScriptEvents {
     shared: Arc<Mutex<Shared>>,
+    stream: bool,
 }
 
 impl scriptnet::Events for ScriptEvents {
@@ -410,6 +567,28 @@ impl scriptnet::Events for ScriptEvents {
     }
     fn cancelled(&mut self) -> bool {
         self.shared.lock().cancel
+    }
+    fn wants_stream(&mut self) -> bool {
+        self.stream
+    }
+    fn chunk(&mut self, data: &[u8]) -> bool {
+        loop {
+            {
+                let mut s = self.shared.lock();
+                if s.cancel {
+                    return false;
+                }
+                // The page uses what it has; while it is behind by a window, the connection
+                // waits and so does the server (a body of any length, read as slowly as the
+                // page likes, never piles up here).
+                if (s.stream.total as u64).saturating_sub(s.acked) < SCRIPT_WINDOW {
+                    s.stream.total += data.len();
+                    s.stream.chunks.push_back(data.to_vec());
+                    return true;
+                }
+            }
+            sys::sleep_ms(2);
+        }
     }
 }
 
@@ -450,6 +629,7 @@ fn run_script(sc: ScriptSpec, jar: Arc<Mutex<Jar>>, shared: Arc<Mutex<Shared>>) 
     };
     let mut ev = ScriptEvents {
         shared: shared.clone(),
+        stream: sc.req.stream,
     };
     let r = scriptnet::run(&mut net, &env, &sc.req, &mut ev);
     shared.lock().done = Some(Outcome::Net(Box::new(r)));
@@ -462,6 +642,12 @@ pub struct Fetcher {
     next: JobId,
     pub jar: Arc<Mutex<Jar>>,
     pub downloads: String,
+    /// What the memory plan allows an image, a stylesheet and a script to be (set by the app
+    /// as memory changes; a job takes the numbers when it is started).
+    pub caps: (usize, usize, usize, usize),
+    /// What a finished page job still had waiting to be taken (its last pieces) and whether it
+    /// was cut at its cap, by job: the window asks for it once with [`Fetcher::take_leftover`].
+    leftover: alloc::collections::BTreeMap<JobId, (Vec<u8>, Option<PageHead>)>,
 }
 
 impl Fetcher {
@@ -472,11 +658,23 @@ impl Fetcher {
             next: 1,
             jar: Arc::new(Mutex::new(jar)),
             downloads,
+            caps: (MAX_IMAGE, MAX_STYLE, MAX_SCRIPT, MAX_PAGE),
+            leftover: alloc::collections::BTreeMap::new(),
         }
+    }
+
+    /// The last pieces of a streamed page that finished since the window last looked, and its
+    /// head (if it came and the window has not taken it).
+    pub fn take_leftover(&mut self, id: JobId) -> (Vec<u8>, Option<PageHead>) {
+        self.leftover.remove(&id).unwrap_or_default()
     }
 
     /// Start (or queue) `req`.
     pub fn start(&mut self, kind: Kind, req: Request, ctx: Context) -> JobId {
+        self.start_with(kind, req, ctx, None)
+    }
+
+    fn start_with(&mut self, kind: Kind, req: Request, ctx: Context, stream_cap: Option<usize>) -> JobId {
         let id = self.next;
         self.next += 1;
         self.jobs.push(Job {
@@ -487,6 +685,8 @@ impl Fetcher {
             spec: Some(Spec {
                 req,
                 ctx,
+                stream_cap,
+                caps: self.caps,
                 script: None,
                 chain: None,
             }),
@@ -499,6 +699,12 @@ impl Fetcher {
         }
         self.pump();
         id
+    }
+
+    /// Start (or queue) a page for a tab whose body streams in: it comes to the window's thread
+    /// as it arrives (see [`Shared::stream`]), up to `cap` bytes.
+    pub fn start_page(&mut self, req: Request, ctx: Context, cap: usize) -> JobId {
+        self.start_with(Kind::Page, req, ctx, Some(cap))
     }
 
     /// Start (or queue) a frame's document. `chain`: the ancestors' addresses (top first), for
@@ -526,6 +732,8 @@ impl Fetcher {
             spec: Some(Spec {
                 req: Request::get(&url),
                 ctx: Context::TopLevel { from: None },
+                stream_cap: None,
+                caps: self.caps,
                 script: Some(sc),
                 chain: None,
             }),
@@ -613,6 +821,17 @@ impl Fetcher {
             };
             match done {
                 Some((o, cert, head, peer)) => {
+                    {
+                        let mut s = self.jobs[k].shared.lock();
+                        if s.stream.total > 0 || s.page_head.is_some() {
+                            let mut rest = Vec::new();
+                            for c in core::mem::take(&mut s.stream.chunks) {
+                                rest.extend(c);
+                            }
+                            s.stream.waiting = 0;
+                            self.leftover.insert(self.jobs[k].id, (rest, s.page_head.take()));
+                        }
+                    }
                     let j = self.jobs.remove(k);
                     if let Some(h) = j.handle {
                         h.join();

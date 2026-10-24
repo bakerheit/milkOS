@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: several frames that hold a lot</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28; } iframe { border: 2px solid #b8a48c; background: #fff; display: block; margin: 6px 0; }</style>
+</head><body>
+<h2>Frames that hold memory</h2>
+<p id="ticks">ticks: 0</p>
+<div id="f"></div>
+<script>
+  var a = args(location.search), ticks = 0, n = +a.n || 3;
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('frames', 'tick', ticks); }, 200);
+  for (var i = 0; i < n; i++) {
+    var f = document.createElement('iframe');
+    f.width = 420; f.height = 60; f.name = 'hog' + i;
+    f.src = '/hog-frame.html?mb=' + (a.mb || 100) + '&kind=' + (a.kind || 'objects') + '&i=' + i;
+    document.getElementById('f').appendChild(f);
+  }
+  report('frames', 'page', 'started ' + n);
+</script>
+</body></html>

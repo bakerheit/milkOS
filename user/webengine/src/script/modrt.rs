@@ -369,6 +369,7 @@ fn emit(b: &Rc<Bridge>, r: &mut Realm) {
                     cache: String::from("default"),
                     timeout_ms: 0,
                     force_preflight: false,
+                    stream: false,
                 }));
             }
         }
@@ -396,7 +397,7 @@ pub fn is_module_fetch(b: &Rc<Bridge>, id: u32) -> bool {
 /// One answer for the module fetch `id`. True if it was a task of the page's.
 pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) -> bool {
     match ev {
-        NetEvent::Progress { .. } => return true,
+        NetEvent::Progress { .. } | NetEvent::Chunk(_) => return true,
         NetEvent::Head(h) => {
             let key = {
                 let Ok(mut st) = b.st.try_borrow_mut() else { return true };

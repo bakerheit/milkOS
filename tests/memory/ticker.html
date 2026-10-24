@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: a page that only ticks</title>
+<script src="/report.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #e8f4e8; color: #3a2e28; }</style>
+</head><body>
+<h2>A quiet page</h2>
+<p id="ticks">ticks: 0</p>
+<script>
+  var ticks = 0, a = args(location.search);
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('ticker' + (a.id || ''), 'tick', ticks); }, 200);
+  report('ticker' + (a.id || ''), 'begin', 'ticking');
+</script>
+</body></html>

@@ -58,6 +58,11 @@ pub struct JsHost<'a> {
     cookies_ok: bool,
     /// `alert`, `confirm` and `prompt` do nothing (a sandbox without `allow-modals`).
     no_modals: bool,
+    /// The machine's memory and the plan, and which realm these scripts are (key, kind, tab).
+    mem: &'a mut crate::mem::MemMonitor,
+    realm: (u64, browserkit::memory::Kind, u64),
+    /// This realm is in the tab in front.
+    fg: bool,
 }
 
 impl ScriptHost for JsHost<'_> {
@@ -139,6 +144,10 @@ impl ScriptHost for JsHost<'_> {
             rt::println!("[browser] prompt: {}", browserkit::clean_line(msg));
         }
         self.dialog(msg, true, Some(default))
+    }
+    fn heap_allowance(&mut self, used: usize) -> webengine::Allowance {
+        let (key, kind, tab) = self.realm;
+        self.mem.allowance(now_ms(), key, kind, tab, self.fg, used)
     }
     fn slow(&mut self, ran_ms: f64) -> bool {
         if self.stopped {
@@ -410,6 +419,7 @@ impl App {
             }
             self.local.insert(o.clone(), Area::from_file(&text));
         }
+        let front_uid = self.tabs.get(self.cur).map_or(0, |t| t.uid);
         let App {
             tabs,
             win,
@@ -417,6 +427,8 @@ impl App {
             local,
             th,
             log,
+            mem,
+            cur,
             ..
         } = self;
         let t: &mut Tab = &mut tabs[ti];
@@ -429,7 +441,16 @@ impl App {
             }
             None => None,
         };
+        let realm_tab = t.uid;
+        mem.set_front(front_uid);
         let mut host = JsHost {
+            fg: ti == *cur,
+            mem,
+            realm: (
+                crate::mem::key_of(realm_tab, frame),
+                if frame.is_top() { browserkit::memory::Kind::Page } else { browserkit::memory::Kind::Frame },
+                realm_tab,
+            ),
             fonts: Fonts { text: Some(&sys) },
             vp,
             scroll,
@@ -450,6 +471,9 @@ impl App {
         let out = f(&mut t.page.doc, &mut host);
         let (stopped, quit) = (host.stopped, host.quit);
         drop(host);
+        // What the scripts hold now goes into the memory plan; scripts that ran out of memory
+        // are said so, once, in plain words.
+        self.note_realm(ti, frame);
         if stopped {
             // "Stop it" ends the scripts of the frame that was running; the rest of the page
             // carries on. (The page's own: all of them were its.)
@@ -474,6 +498,28 @@ impl App {
         }
         self.after_scripts(ti);
         out
+    }
+
+    /// Tell the memory plan what the scripts of frame `f` of tab `ti` hold, and announce their
+    /// end if they ran out of memory.
+    fn note_realm(&mut self, ti: usize, f: FrameId) {
+        if ti >= self.tabs.len() {
+            return;
+        }
+        let t = &self.tabs[ti];
+        let st = t.page.doc.script_stats_in(f);
+        let key = crate::mem::key_of(t.uid, f);
+        let uid = t.uid;
+        if st.stopped {
+            self.mem.forget(key);
+            if t.page.doc.script_stop_reason_in(f) == "out of memory" && !t.mem_stops.contains(&f.0) {
+                self.tabs[ti].mem_stops.insert(f.0);
+                self.announce_memory_stop(ti, f, st.final_heap, st.heap_limit);
+            }
+            return;
+        }
+        let kind = if f.is_top() { browserkit::memory::Kind::Page } else { browserkit::memory::Kind::Frame };
+        self.mem.note(key, kind, uid, st.heap_bytes, st.heap_limit);
     }
 
     /// Run the scripts of every tab that has work due (the current one now; others at most
@@ -796,6 +842,8 @@ impl App {
     /// The user changed control `id` (a combined index) of the current page.
     pub fn control_input(&mut self, id: usize) {
         let ti = self.cur;
+        // Something was typed or chosen in a form: discarding the tab would lose it.
+        self.tabs[ti].touched = true;
         let (f, _) = crate::web::split(id);
         if self.tabs[ti].page.doc.scripting_in(f) {
             self.with_doc_in(ti, f, |d, h| d.input(h, id));

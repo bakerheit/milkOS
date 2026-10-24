@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: fetch read whole</title>
+<script src="/report.js"></script></head>
+<body style="font-family: sans-serif; margin: 14px; background: #fffdf8; color: #3a2e28">
+<h2>A body read whole</h2>
+<script>
+  // ?mb=N: .text() of N MB. Over the page's limit it is an error the page can catch; ?xhr=1 does
+  // the same with XMLHttpRequest.
+  var a = args(location.search), mb = +a.mb || 20;
+  report('text', 'begin', mb);
+  if (a.xhr) {
+    var x = new XMLHttpRequest();
+    x.open('GET', '/stream?mb=' + mb);
+    x.responseType = 'arraybuffer';
+    x.onload = function () { report('text', 'xhr-loaded', x.response.byteLength); };
+    x.onerror = function () { report('text', 'xhr-error', 'network error'); };
+    x.send();
+  } else {
+    fetch('/stream?mb=' + mb).then(function (r) { return r.arrayBuffer(); }).then(
+      function (b) { report('text', 'loaded', b.byteLength); },
+      function (e) { report('text', 'error', e.name + ': ' + e.message.slice(0, 60)); });
+  }
+</script>
+</body></html>

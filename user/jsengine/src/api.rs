@@ -80,6 +80,11 @@
 //!   link). `x is not a function` words the callee as written, `a.b(...).c`, and a stack frame
 //!   names an unnamed function by where it was stored (`a.b = function () {}` is `a.b`; the
 //!   function's `name` property stays `""`).
+//! - Heap budgets that move. New [`Realm::set_heap_limit`] (change [`Limits::max_heap_bytes`] of a
+//!   running realm; [`Realm::set_limits`] uses it, and a realm over the new budget collects
+//!   at its next safe point and runs out of memory only if it still holds more) and
+//!   [`Realm::set_memory_hook`] (asked for the budget every [`INTERRUPT_STEPS`] steps with
+//!   the heap in use; it answers with a [`HeapAnswer`]). Nothing that worked changes.
 //! - Big scripts. A script is parsed, resolved and compiled one top-level statement at a
 //!   time and each statement's tree is dropped as soon as it has bytecode; a function of 64
 //!   bytes or more is parsed once (for early errors and the names it uses) and left as a
@@ -182,6 +187,16 @@ pub struct Exception(pub(crate) Exc);
 pub(crate) enum Exc {
     Throw(Val),
     Term(Termination),
+}
+
+/// What a memory hook says ([`Realm::set_memory_hook`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeapAnswer {
+    Keep,
+    /// The heap budget is this many bytes from now on.
+    Limit(usize),
+    /// Stop the script.
+    Stop,
 }
 
 /// Why a script was stopped (uncatchable).
@@ -586,6 +601,8 @@ pub struct HeapStats {
     pub objects: usize,
     pub strings: usize,
     pub collections: u64,
+    /// The heap budget now ([`Limits::max_heap_bytes`], as [`Realm::set_heap_limit`] left it).
+    pub limit_bytes: usize,
 }
 
 /// Where a script comes from, for [`Realm::eval_with`].
@@ -1506,6 +1523,7 @@ impl Realm {
             objects: self.heap.object_count(),
             strings: self.heap.string_count(),
             collections: self.heap.gc_count,
+            limit_bytes: self.heap.max_bytes,
         }
     }
 
@@ -1517,7 +1535,28 @@ impl Realm {
 
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
-        self.heap.max_bytes = limits.max_heap_bytes;
+        self.set_heap_limit(limits.max_heap_bytes);
+    }
+
+    /// Changes the heap budget ([`Limits::max_heap_bytes`]) of a running realm. A realm that
+    /// holds more than the new budget collects garbage at its next safe point and runs out of
+    /// memory if it still holds more; one that holds less can grow to it.
+    pub fn set_heap_limit(&mut self, bytes: usize) {
+        self.limits.max_heap_bytes = bytes;
+        self.heap.max_bytes = bytes;
+        if self.heap.used() > bytes {
+            self.heap.gc_wanted = true;
+        }
+    }
+
+    /// A callback asked for the heap budget every [`INTERRUPT_STEPS`] VM steps while script
+    /// runs, with the heap in use (an estimate, in bytes): [`HeapAnswer::Limit`] changes the
+    /// budget ([`Realm::set_heap_limit`]), [`HeapAnswer::Stop`] ends the script (uncatchable
+    /// [`Termination::Interrupted`]), [`HeapAnswer::Keep`] leaves things as they are. The
+    /// Browser uses it to give a page more room while the machine has it and to take it back
+    /// when the machine runs short.
+    pub fn set_memory_hook(&mut self, f: Option<Box<dyn FnMut(usize) -> HeapAnswer>>) {
+        self.memory_hook = f;
     }
 
     /// A callback polled every [`INTERRUPT_STEPS`] VM steps: return false to stop the script

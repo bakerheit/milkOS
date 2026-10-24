@@ -16,7 +16,7 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
 
 | | |
 | --- | --- |
-| files | `~/Library/Browser` and `~/Downloads` read-write; `/System/Fonts` (the system fonts, read ahead with `gui::text::preload`), `/proc/net/tls` (a test boot's test root), `/proc/net/internet` and the desktop settings file (`~/.config/milk/settings`: the search engine) read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
+| files | `~/Library/Browser` and `~/Downloads` read-write; `/System/Fonts` (the system fonts, read ahead with `gui::text::preload`), `/proc/net/tls` (a test boot's test root), `/proc/net/internet`, `/proc/meminfo` and `/proc/mempressure` (how much memory there is, "Memory" below) and the desktop settings file (`~/.config/milk/settings`: the search engine) read-only; `/dev/wm` and `/dev/clipboard`. Anything else only through the Powerbox |
 | network | all (it is a browser) |
 | spawning | none |
 
@@ -78,8 +78,11 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   another site) and are kept only after the CORS check passed. An https page may not request
   http; a page on a public host may not request a private-network or loopback address, and
   `Hop::check_resolved` lets the transport refuse a name that resolves there. Limits: 4 MiB
-  request body, 8 MiB response, 64 headers, 20 redirects, 30 s, 16 requests per tab and 6 per
-  host (more wait in line). Failures print a plain-English line for the console; the page gets
+  request body, a response read whole (an XHR's, or `.text()` and the like of a fetch) of at
+  most what the machine's memory allows ("Memory": 40 MB on a 512 MB VM, more on a bigger one),
+  64 headers, 20 redirects, 30 s to the answer, 16 requests per tab and 6 per host (more wait in
+  line). A fetch body read through `response.body` has no size limit and no time limit but a
+  minute without a byte. Failures print a plain-English line for the console; the page gets
   only "Failed to fetch". The module docs list every place it is stricter than the standard.
   Known gaps: no full public suffix list (the cookie code's last-two-labels rule), no IDNA, no
   HTTP cache or CSP.
@@ -87,7 +90,8 @@ Pages are hostile input, so the Browser sandboxes itself before it fetches anyth
   `Content-Disposition: attachment`) is saved to `~/Downloads` under its name (from
   `filename*` / `filename`, else the address, made safe; a taken name gets ` (2)`, ...),
   with a progress line in the status bar and `milk:downloads` listing them. Alt-click (or a
-  link with `download`) saves whatever a link points at. Up to 64 MB.
+  link with `download`) saves whatever a link points at, of any size: the file is written as it
+  arrives, nothing waits in memory, and one that is stopped or breaks leaves no half file.
 * **Security**: https pages show a padlock; clicking it shows who the certificate was issued
   to and by, its dates, its names and what TLS negotiated. Plain http pages say `http` there
   and the panel says the page isn't secure. Images and stylesheets over plain http on an
@@ -209,8 +213,9 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   `sessionStorage` per tab, `document.cookie` (without HttpOnly cookies), `alert` / `confirm`
   / `prompt` as dialogs over the page, `window.open` as a new tab.
 * **Safety**: scripts run inside the Browser's sandbox (no files, no other tabs, no other
-  origins' storage). Each tab has its own realm with a 64 MB heap (a frame's has 16 MB); a script that goes over
-  it is stopped. A script that runs for two seconds without a break brings up "This page is
+  origins' storage). Each page, frame and worker has its own realm, with a heap limit that follows what the
+  machine has free (see "Memory"); a script that goes over its limit is stopped alone, with a
+  message on the console and a bar. A script that runs for two seconds without a break brings up "This page is
   slow ... Stop it?" over the page: Stop (or Esc) ends the page's scripts for good (its
   timers and listeners go, the page stays as it is), Wait gives it ten more seconds. Pages
   that rebuild their content over and over stay in bounded memory: nodes no script refers to
@@ -266,8 +271,8 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
     piece alive together, one function body or one top-level statement (about 1.3 million
     tokens), not the whole script; a bigger piece is a SyntaxError ("the code is too large
     to fit in memory"). The source text and the bytecode a page keeps (stubs included) count
-    against its heap budget (64 MB, a frame 16 MB), and a script of 8 MB at most is read, so a
-    script whose code could never fit is refused as soon as that is known.
+    against its heap budget (see "Memory"), and a script is read up to what the machine's
+    memory allows, so a script whose code could never fit is refused as soon as that is known.
   * Measured in the guest (a generated minified bundle, page limits, one in fifty functions
     called; peak memory while loading, before this work and after):
 
@@ -349,8 +354,8 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
     the page. A CORS refusal is reported in the console tagged with the worker. `importScripts`
     is stricter than a browser's for other origins: the script needs CORS headers, like a module.
   * **Limits and safety**: 16 workers per page and per tab, 48 threads in all (a stopped worker's
-    thread counts until it has ended); 32 MB of heap each, and all the workers of a tab with
-    its page and frames share 160 MB (the greediest worker is stopped past it); a task that runs
+    thread counts until it has ended); a heap limit each from the memory plan ("Memory": 32 MB was
+    the fixed limit before; the limit now follows the machine's free memory and the other tabs); a task that runs
     8 seconds without returning stops that worker (`while (true) {}` ends in a console line
     "The worker ... was stopped: a task ran for more than 8 s without returning", the page and
     the other workers carry on); a worker out of memory is stopped alone too. `terminate()`,
@@ -417,6 +422,115 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
 * **Restyling**: changes are batched until the next frame; only the changed subtrees are
   restyled (a change's parent's subtree, so sibling selectors see it), and the page is laid
   out again once. Hit testing, the focus and form state follow the new tree.
+
+## Memory
+
+A real browser does not give every page the same few megabytes; it lets one grow while the machine
+has room and takes room back when it does not, streams what is too big to hold, and never lets one
+page take the machine down. The Browser works this way (`browserkit::memory` has the rules, host-tested;
+`user/browser/src/mem.rs` the reading of the machine and what is done about it).
+
+**What it reads.** `/proc/meminfo` (total memory and `MemAvailable`) and `/proc/mempressure`
+(the kernel's low and critical marks, 1/8 and 1/16 of RAM, and the counters; docs/memory.md "Memory
+pressure"), at most four times a second.
+
+**The plan.** Of what is available, the Browser always leaves the *floor* for the desktop and the other
+apps: the low mark plus a reserve of 1/16 of RAM (at least 32 MiB), 96 MB on a 512 MB machine, 192 MB
+on 1 GB, 384 MB on 2 GB. What is left is the *room*. The room is shared out by weight among the script
+realms of all tabs: a page in the tab in front 8, a frame or a worker in it 4, anything in a tab behind
+1, and the rest of the system 4 (it may grow too), and a realm's heap limit is what it holds now plus
+its share of the room: a single page on a 512 MB machine gets about 200 MB, on 1 GB about 500 MB, on 2
+GB over a gigabyte; the more tabs, frames and workers, the less each one's share; a machine that
+fills up shrinks every share. Three things bound it:
+
+* a realm is never squeezed under what it holds and an eighth more (the limit moves up and down, never
+  down onto live data: a page whose room is gone simply cannot grow), and never under what realms had
+  before budgets (64 MB a page, 16 a frame, 32 a worker) as long as its share of the room pays for it
+  (so a page loading in a tab behind the front one still has the old limit on a machine with room);
+* a hard ceiling per realm, sized from RAM, not a tuned number: 5/8 of RAM for a page, half for a
+  frame or a worker (what the engine counts, which is a little more than the system really gives: the
+  plan converts at 110%, measured in `jsengine` tests and the guest: the engine asks the allocator for
+  70 to 98% of its own count);
+* the first limit of a new realm is its share of the room as it stands.
+
+The plan is made again when anything changes (the machine's numbers, a tab opened, a realm's size). A
+running script is asked for its limit before every run and every 65,000 steps (`ScriptHost::heap_allowance`,
+`jsengine::Realm::set_memory_hook`), so a page that allocates in a loop watches its limit come in as the
+machine fills up and is stopped alone at it: the console says "This page ran out of memory: it needed
+more than the 319 MB the Browser could give it (it held ...). Its scripts were stopped and their memory
+given back. The Browser, the desktop and your other tabs are not affected.", a bar over the foot of the
+page says so too, and the stopped page's heap goes back to the system at once (the page itself stays as
+it is). A worker that runs out of memory gets the same console line (tagged with its name) and bar; a
+frame the same, for the frame alone. Workers run on threads of their own, so each has its limit in its
+mailbox, moved by the window's thread every 100 ms while any runs.
+
+**The pieces that were fixed numbers** now follow the room too (`Caps`): the most text of a page taken
+in before "Load more" (an eighth of the room, at least 16 MB, up to 256 MB), a script's text (a 16th,
+4 to 128 MB), a stylesheet, a picture's file, a response read whole, the DOM nodes of a page (a node
+every 2 KiB of room, at least 200,000 and at most 4 million; Load more raises it four times at
+a time up to a node every 512 bytes) and the decoded
+pictures and script text the Browser keeps for its tabs.
+
+**When memory runs short** (`Level`: *tight* when the room is under an eighth of RAM, *low* and
+*critical* when the kernel's marks are crossed) a ladder is climbed, cheapest first, one step a second
+(none waited for in the critical level), and started over after three calm seconds:
+
+1. drop caches: decoded pictures no tab shows, fetched stylesheet and script text the pages already took;
+2. collect garbage in every page and frame;
+3. discard the background tab that holds the most (idle for a second or more, not loading, no
+   typing in a form unless the machine is critical): the tab keeps its address, its scroll position and
+   its place in the history, the page goes, and opening the tab fetches it again where it was;
+4. ask about the heaviest page, frame or worker: "This page uses a lot of memory (41 MB). Stop it?"
+   with Stop and Wait, like the slow-script bar. Stop ends that document's scripts (or the worker) and
+   nothing else; Wait leaves it alone for a minute.
+
+Not done: compiled code is not dropped to be compiled again (a closure replaces its stub with the
+compiled function), and a realm's slot tables are never shrunk, so a page that built a lot and dropped
+it keeps its address space until it goes away.
+
+**Streaming.** Nothing that can be read in pieces is held whole:
+
+* *Pages*: the body comes to the window's thread as it arrives (`net.rs`, `stream.rs`; milkweb decodes
+  chunked and gzip / deflate bodies piece by piece, `imgdec::inflate::Inflater` is the resumable decoder,
+  and the connection waits while the window has a couple of megabytes it has not looked at: a slow
+  page is never ahead of the Browser). Once 64 KB are in, and then each time the page has grown four
+  times (and a quarter second has passed), up to 4 MB, the tab shows the page as far as it has come, parsed
+  afresh from the bytes so far and cut at the last complete tag, without scripts or frames: the top of
+  a page that takes long is on screen at once and where you scrolled stays. When the last byte is in
+  the whole page is parsed, its scripts run and it goes into the history. A page longer than its
+  window (memory-derived, 41 MB on a 512 MB machine) or with more nodes than the plan allows is cut:
+  the console says "This page is too big to show completely ...", and a bar over the foot of the page
+  asks "This page is too big to show completely. Load more?". Load more fetches the page again with
+  four times the window, up to what the machine's room allows. A page whose connection breaks half way
+  shows what came, with the reason on the console and the bar.
+* *fetch*: `response.body` is a `ReadableStream` fed piece by piece. The page tells the app how much it
+  has used (`NetOut::Ack`) and the app sends no more than a megabyte ahead of that: a body of any
+  length, read slowly, never piles up in the Browser, and the server's send waits too. `.text()`,
+  `.json()`, `.arrayBuffer()`, `.blob()` and `.formData()` keep the whole body, up to the memory-derived
+  limit (an error the page can catch beyond it, naming the limit; the request is stopped). A cloned
+  response keeps the whole body for both readers. A response with no pieces (a data: address, an
+  app that does not stream) works as it did. XMLHttpRequest keeps its body whole, up to the same
+  limit, with a plain console line when it is over.
+* *Downloads*: written to disk as they arrive.
+
+Not done: external scripts are fetched whole (up to the memory-derived cap) and parsed one top-level
+statement at a time by the engine, not while they download; the HTML parser is not resumable (the
+shown-so-far page is a parse of the prefix, the final one a parse of everything that came).
+
+`--log-input` makes the Browser say what it does about memory on the serial line:
+`[browser] memory: 427 MB free of 512 MB, room 331 MB, 1 realms hold 56 MB (browser heap 73 MB),
+level Normal [100000000:Page 56/220 MB]` (each realm's heap and limit), `memory is Tight: DropCaches
+did something`, `discarded tab 2`, `restoring discarded tab 2 from ...`, `memory: asking to stop ...`,
+`streaming ...: showing the top after 1217 KB`, `parsed 40960 KB in 89 ms`.
+
+Measured (`scripts/memory-test.sh`, 512 MB VM; before this work in brackets): a worker holds 200 MB of
+objects, strings or typed arrays [stopped at 32 MB], a frame 200 MB [16 MB], a page 150 MB [64 MB]; a
+3 MB bundle loads in a page and a frame; a 40 MB page shows its top after the first megabyte while the
+server is still sending, is cut with the bar and loads more; a 200 MB fetch body streams through the
+Browser in constant memory; a 100 MB download is saved [refused above 64 MB]; a page that eats
+everything is stopped at 70% of the room with the other tab still ticking and free memory back at
+what it was.
+
 
 ## Frames
 
@@ -535,7 +649,8 @@ on a page: the rest are left empty with a line on the console.
   while requests are outstanding. A request belongs to the page that made it: navigating or
   closing the tab cancels it and drops its answers.
 * `js.rs`: the pages' scripts: the `ScriptHost` (clock, cookies, storage, dialogs, the slow
-  bar), running each tab's scripts and animation frames, what scripts ask for, the console.
+  bar, the heap limit), running each tab's scripts and animation frames, what scripts ask for, the
+  console. `mem.rs`: the memory plan and the ladder; `stream.rs`: pages that stream in.
 * `open URL` while the Browser runs: the desktop appends the address to
   `~/Library/Browser/open` and brings the window forward; the Browser reads and empties that
   file (it checks twice a second) and opens a tab for each address.
@@ -610,6 +725,29 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   next search, then unknown and junk settings, that addresses and `milk:` pages never become
   searches, encoded words, the Settings > Browser page (a click on Google writes the line and
   keeps the other settings, the next search uses it) and that the choice survives a reboot.
+* `scripts/memory-test.sh` (default set, about six minutes): a VM against
+  `scripts/memory_test_servers.py` (a made-up zone and a web server that makes pages, bundles and
+  bodies of any size on the spot; 127.0.0.1 only) and the pages in `tests/memory`, on three boots (512 MB,
+  192 MB, 1 GB): the kernel's `/proc/mempressure`; a worker, a frame and a page holding 100 and 200 MB
+  of objects, strings and typed arrays, with the page still ticking; a 3 MB bundle in a page and a
+  frame; a 40 MB page (the top shown while the server is still sending, the bar, Load more); a 200 MB
+  fetch body read through a pause (the server cannot get ahead), `.text()` and XHR over the
+  limit; a 100 MB download and the Browser's memory flat; a page that eats everything stopped alone
+  (the other tab ticks, the desktop answers, free memory comes back, the kernel's low-water mark
+  stays above the low mark and no allocation fails); five tabs of 70 MB (caches dropped, garbage
+  collected, a tab discarded and fetched again when opened); frames, workers and tabs made and
+  dropped (memory back where it was); "Stop it?" on a machine with little to spare, clicked; 200 MB
+  holders on 1 GB (`MEMORY_TEST_ONLY="holds eater"` runs sections, `MEMORY_TEST_FULL=1` adds 400 MB on
+  2 GB, `MEMORY_TEST_SHOTS=DIR` keeps the screenshots). Host tests: the budget calculation
+  (`browserkit/src/memory/tests.rs`: fake memory, several tabs, floors, ceilings, the ladder and which
+  tab to discard, random inputs that must never panic), the engine's moving budget
+  (`jsengine/src/tests/limits.rs`, `webengine/src/tests/memory.rs`: more room while the page runs,
+  room taken back, a host that stops the scripts, hostile pages still stopped), the resumable inflater and
+  the streamed body (`imgdec` and `milkweb` tests, with random cuts and damage), a fetch body read in
+  pieces (`webengine/src/tests/streaming.rs`: acknowledgements, unread bodies, the limit, abort, errors,
+  clones) and `scriptnet` streaming. The hostile pages (a huge literal, a runaway allocation loop, 20,000
+  pending `import()` calls, a worker bomb) are in `jsengine-unit`, `webengine-unit`, `js-test`,
+  `iframe-test` and `workers-test`, which pass unchanged.
 * `scripts/js-test.sh` (default set, about a minute and a half): a VM against
   `scripts/js_test_server.py` (127.0.0.1 only) serving the pages in `tests/js`: a tabs
   widget, a todo list built by script, form validation that blocks the submit, timers and

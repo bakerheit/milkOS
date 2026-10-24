@@ -272,3 +272,66 @@ fn memory_budget_timing() {
         std::println!("{:?} gcs={} {src}", t.elapsed(), r.heap_stats().collections);
     }
 }
+
+#[test]
+fn heap_limit_moves_while_script_runs() {
+    // A script that holds more and more: the hook gives it room in steps, then takes it back.
+    let mut r = realm_with(Limits {
+        max_heap_bytes: 16 << 20,
+        ..Limits::default()
+    });
+    let calls = Rc::new(Cell::new(0u32));
+    let c = calls.clone();
+    r.set_memory_hook(Some(Box::new(move |used| {
+        c.set(c.get() + 1);
+        // Always 16 MiB above what is held, up to 200 MiB.
+        HeapAnswer::Limit((used + (16 << 20)).clamp(16 << 20, 200 << 20))
+    })));
+    let src = "var keep = []; for (var i = 0; i < 20000; i++) { keep.push({ a: i, b: 'x' + i }); for (var j = 0; j < 20; j++) {} } keep.length";
+    let v = r.eval(src, "grow.js").expect("the hook gave it room");
+    assert_eq!(v.as_number(), Some(20000.0));
+    assert!(calls.get() > 1, "the hook was asked more than once");
+    let lim = r.heap_stats().limit_bytes;
+    assert!(lim > 16 << 20 && lim <= 200 << 20, "limit {lim}");
+    // Now it takes the room back: what is held is more than the budget, and the next
+    // allocation loop runs out of memory (and only this realm).
+    r.set_memory_hook(Some(Box::new(|_| HeapAnswer::Limit(2 << 20))));
+    assert_eq!(
+        term(&mut r, "var more = []; for (var i = 0; i < 3000000; i++) more.push('y' + i); 1"),
+        Some(Termination::OutOfMemory)
+    );
+    assert_eq!(r.heap_stats().limit_bytes, 2 << 20);
+}
+
+#[test]
+fn set_heap_limit_moves_the_budget() {
+    let mut r = realm_with(Limits::default());
+    r.eval("var a = []; for (var i = 0; i < 30000; i++) a.push({ i: i });", "a.js").unwrap();
+    let held = r.heap_stats().used_bytes;
+    assert!(held > 1 << 20);
+    // More room: it can keep growing.
+    r.set_heap_limit(held * 4);
+    assert_eq!(r.heap_stats().limit_bytes, held * 4);
+    assert_eq!(r.limits().max_heap_bytes, held * 4);
+    r.eval("for (var i = 0; i < 30000; i++) a.push({ i: i });", "b.js").unwrap();
+    // Less room than it holds: a script that wants to grow is refused (it cannot even be
+    // compiled, or it runs out of memory at the first collection); the realm does not crash.
+    r.set_heap_limit(1 << 20);
+    assert!(r.eval("for (var i = 0; i < 1000000; i++) a.push({ i: i }); 1", "c.js").is_err());
+    // Room again, and it works.
+    r.set_heap_limit(1 << 30);
+    assert_eq!(r.eval("a.length", "d.js").unwrap().as_number(), Some(60000.0));
+}
+
+#[test]
+fn memory_hook_can_stop_the_script() {
+    let mut r = realm_with(Limits::default());
+    let n = Rc::new(Cell::new(0));
+    let n2 = n.clone();
+    r.set_memory_hook(Some(Box::new(move |_| {
+        n2.set(n2.get() + 1);
+        if n2.get() >= 3 { HeapAnswer::Stop } else { HeapAnswer::Keep }
+    })));
+    assert_eq!(term(&mut r, "var k = 0; for (;;) { k++; }"), Some(Termination::Interrupted));
+    assert_eq!(n.get(), 3);
+}

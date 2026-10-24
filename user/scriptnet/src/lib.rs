@@ -127,6 +127,17 @@ pub trait Events {
     fn progress(&mut self, got: usize, total: Option<usize>);
     /// Asked before every read: true ends the request quietly (the page cancelled it).
     fn cancelled(&mut self) -> bool;
+    /// The page reads the body in pieces ([`Events::chunk`]) instead of getting it whole. Asked
+    /// when the final response's head is in.
+    fn wants_stream(&mut self) -> bool {
+        false
+    }
+    /// A piece of a streamed body. The caller may block here (the connection waits: that is
+    /// the backpressure) and says false when the page has cancelled (the request ends).
+    fn chunk(&mut self, data: &[u8]) -> bool {
+        let _ = data;
+        true
+    }
 }
 
 /// Everything a request needs besides the request.
@@ -143,10 +154,13 @@ pub struct Env<'a> {
 #[derive(Debug)]
 pub struct Done {
     pub head: NetHead,
-    /// Empty for an opaque response and for HEAD.
+    /// Empty for an opaque response and for HEAD, and for a streamed body (it went to
+    /// [`Events::chunk`] as it came).
     pub body: Vec<u8>,
     /// Requests made on the wire (the preflight and the redirects count).
     pub hops: u32,
+    /// The body was streamed: how many bytes of it there were.
+    pub streamed: Option<usize>,
 }
 
 /// A request that did not: why, for the page (kind) and the console (message).
@@ -269,6 +283,10 @@ struct Hooks<'a> {
     script: bool,
     /// Why the final response is no module (the request then ends there).
     module_error: Option<String>,
+    /// Bytes handed to [`Events::chunk`].
+    streamed: usize,
+    /// The page reads the body in pieces (and may: a fetch).
+    stream: bool,
 }
 
 impl http::Hooks for Hooks<'_> {
@@ -318,6 +336,26 @@ impl http::Hooks for Hooks<'_> {
             Err(e) => self.error = Some(e),
         }
         Some(self.max_body)
+    }
+
+    fn stream(&mut self, _url: &Url, _status: u16, _headers: &[(String, String)]) -> bool {
+        self.final_hop
+            && !self.redirect
+            && !self.module
+            && self.error.is_none()
+            && self.module_error.is_none()
+            && self.stream
+            && self.meta.as_ref().is_some_and(|m| !m.hide_body)
+    }
+
+    fn body(&mut self, data: &[u8]) -> bool {
+        self.streamed += data.len();
+        if self.events.chunk(data) {
+            true
+        } else {
+            self.stopped = true;
+            false
+        }
     }
 
     fn progress(&mut self, got: usize, total: Option<usize>) {
@@ -425,7 +463,7 @@ pub fn run(
         Begin::Data(meta, body) => {
             let head = head_of(&meta);
             events.head(&head);
-            return Ok(Done { head, body, hops: 0 });
+            return Ok(Done { head, body, hops: 0, streamed: None });
         }
         Begin::Blob { url } => {
             return Err(Failed::net(
@@ -434,6 +472,9 @@ pub fn run(
             ));
         }
     };
+    // A fetch whose page reads in pieces is not held to the limit on a whole response.
+    let stream = matches!(req.kind, NetKind::Fetch) && events.wants_stream();
+    ex.set_streaming(stream);
     let started = net.now_ms();
     let total_ms = ex.timeout_ms();
     let deadline = started.saturating_add(total_ms);
@@ -501,12 +542,15 @@ pub fn run(
             module: matches!(req.kind, NetKind::Module | NetKind::Script),
             script: req.kind == NetKind::Script,
             module_error: None,
+            streamed: 0,
+            stream,
         };
         hops += 1;
         let refused = RefCell::new(None);
         let result = http::fetch(&mut Guarded { net: &mut *net, hop: &hop, refused: &refused }, &wreq, &opts, &mut hooks);
         let (meta, redirect, error, stopped) = (hooks.meta.take(), hooks.redirect, hooks.error.take(), hooks.stopped);
         let module_error = hooks.module_error.take();
+        let streamed_bytes = hooks.streamed;
         drop(hooks);
         if let Some(e) = error {
             return Err(Failed::policy(&e));
@@ -527,6 +571,16 @@ pub fn run(
         if redirect {
             continue;
         }
+        // The page cancelled while its body was coming.
+        if resp.streamed && resp.cut && stopped {
+            return Err(Failed {
+                failure: NetFailure {
+                    kind: NetFailureKind::Network,
+                    message: format!("{} {} failed: the request was cancelled", hop.method.as_str(), hop.url.to_text()),
+                },
+                cancelled: true,
+            });
+        }
         let Some(meta) = meta else {
             return Err(Failed::net(
                 NetFailureKind::Network,
@@ -534,11 +588,12 @@ pub fn run(
             ));
         };
         let head = head_of(&meta);
+        let streamed = resp.streamed.then_some(streamed_bytes);
         let body = if meta.hide_body || hop.method.as_str() == "HEAD" {
             Vec::new()
         } else {
             resp.body
         };
-        return Ok(Done { head, body, hops });
+        return Ok(Done { head, body, hops, streamed });
     }
 }

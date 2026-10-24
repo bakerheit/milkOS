@@ -206,6 +206,11 @@ pub struct Heard {
     pub progress: Vec<(usize, Option<usize>)>,
     pub cancel_after: Option<usize>,
     pub asked: usize,
+    /// The page reads the body in pieces; the pieces it got, and when to say it has had enough
+    /// (after this many).
+    pub stream: bool,
+    pub pieces: Vec<Vec<u8>>,
+    pub enough_after: Option<usize>,
 }
 
 impl Events for Heard {
@@ -218,6 +223,13 @@ impl Events for Heard {
     fn cancelled(&mut self) -> bool {
         self.asked += 1;
         self.cancel_after.is_some_and(|n| self.asked > n)
+    }
+    fn wants_stream(&mut self) -> bool {
+        self.stream
+    }
+    fn chunk(&mut self, data: &[u8]) -> bool {
+        self.pieces.push(data.to_vec());
+        self.enough_after.is_none_or(|n| self.pieces.len() < n)
     }
 }
 
@@ -237,6 +249,7 @@ pub fn req(url: &str) -> NetRequest {
         cache: "default".to_string(),
         timeout_ms: 0,
         force_preflight: false,
+        stream: false,
     }
 }
 
@@ -863,4 +876,73 @@ fn a_module_redirect_is_judged_and_the_final_type_is_checked() {
     assert!(e.failure.message.contains("text/html"), "{}", e.failure.message);
     let e = run_page(&rig, &mut w, &module_req("http://www.milk.test/r-cdn.js")).0.unwrap_err();
     assert_eq!(e.failure.kind, NetFailureKind::Blocked);
+}
+
+
+// ---- a body read in pieces -------------------------------------------------------------------------
+
+#[test]
+fn a_streamed_body_goes_to_the_page_in_pieces_and_never_whole() {
+    let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let b2 = big.clone();
+    let mut w = world(&["www.milk.test"], move |_| response("200 OK", &[("Content-Type", "application/octet-stream")], &b2));
+    let rig = Rig::new("http://www.milk.test/page");
+    // The whole-body limit is far below the size: a streamed body is not held to it.
+    let mut rig = rig;
+    rig.cfg.limits.max_response_body = 64 * 1024;
+    let mut ev = Heard { stream: true, ..Heard::default() };
+    let done = rig.run(&mut w, &req("http://www.milk.test/big"), &mut ev).unwrap();
+    assert_eq!(done.streamed, Some(300_000));
+    assert!(done.body.is_empty(), "the body went to the pieces");
+    assert_eq!(ev.pieces.concat(), big);
+    assert!(ev.pieces.len() > 3, "pieces: {}", ev.pieces.len());
+    assert_eq!(ev.heads.len(), 1);
+    assert_eq!(done.head.status, 200);
+    // The same request without streaming is held to the limit.
+    let mut ev = Heard::default();
+    let e = rig.run(&mut w, &req("http://www.milk.test/big"), &mut ev).unwrap_err();
+    assert!(e.failure.message.contains("larger than"), "{e:?}");
+}
+
+#[test]
+fn a_page_that_has_had_enough_ends_the_request_as_cancelled() {
+    let big = alloc::vec![b'y'; 200_000];
+    let b2 = big.clone();
+    let mut w = world(&["www.milk.test"], move |_| response("200 OK", &[], &b2));
+    let rig = Rig::new("http://www.milk.test/page");
+    let mut ev = Heard { stream: true, enough_after: Some(2), ..Heard::default() };
+    let e = rig.run(&mut w, &req("http://www.milk.test/big"), &mut ev).unwrap_err();
+    assert!(e.cancelled, "{e:?}");
+    assert_eq!(ev.pieces.len(), 2, "no piece after the page said enough");
+}
+
+#[test]
+fn bodies_the_page_may_not_see_and_head_requests_are_not_streamed() {
+    let mut w = world(&["www.milk.test", "other.test"], |_| response("200 OK", &[("Content-Type", "text/plain")], b"secret words"));
+    let rig = Rig::new("http://www.milk.test/page");
+    // no-cors, cross-origin: opaque, so no body at all.
+    let mut r = req("http://other.test/x");
+    r.mode = RequestMode::NoCors;
+    let mut ev = Heard { stream: true, ..Heard::default() };
+    let done = rig.run(&mut w, &r, &mut ev).unwrap();
+    assert_eq!(done.head.kind, ResponseKind::Opaque);
+    assert!(ev.pieces.is_empty() && done.streamed.is_none(), "{:?}", ev.pieces);
+    // HEAD.
+    let mut r = req("http://www.milk.test/x");
+    r.method = "HEAD".to_string();
+    let mut ev = Heard { stream: true, ..Heard::default() };
+    let done = rig.run(&mut w, &r, &mut ev).unwrap();
+    assert!(ev.pieces.is_empty() && done.body.is_empty());
+    // A redirect is followed and its body (empty) is not the page's.
+    let mut w = world(&["www.milk.test"], |s| {
+        if s.path == "/a" {
+            response("302 Found", &[("Location", "/b")], b"")
+        } else {
+            response("200 OK", &[], b"the real one")
+        }
+    });
+    let mut ev = Heard { stream: true, ..Heard::default() };
+    let done = rig.run(&mut w, &req("http://www.milk.test/a"), &mut ev).unwrap();
+    assert_eq!(ev.pieces.concat(), b"the real one");
+    assert_eq!(done.hops, 2);
 }

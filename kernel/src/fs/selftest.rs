@@ -827,6 +827,26 @@ fn procfs_sysfs(t: &mut T) {
         crate::heap::stats().total == pmm::stats().of(pmm::Use::Heap) * 4096,
         "the kernel heap's frames are tagged Heap",
     );
+    // /proc/mempressure: the level agrees with the PMM, the marks are 1/8 and 1/16 of RAM, and
+    // MemAvailable is MemFree.
+    let mp = read_str("/proc/mempressure");
+    let st = pmm::stats();
+    t.ok(
+        mp.starts_with("level:")
+            && mp.contains(st.pressure().name())
+            && mp.contains("LowMark:")
+            && mp.contains("CriticalMark:")
+            && mp.contains("AllocFailures:"),
+        "/proc/mempressure",
+    );
+    t.ok(
+        st.low_mark == st.total_frames / 8 && st.critical_mark == st.total_frames / 16,
+        "/proc/mempressure marks are 1/8 and 1/16 of RAM",
+    );
+    t.ok(
+        st.min_free <= st.free_frames && kb("MemAvailable") + 1024 >= kb("MemFree"),
+        "MemAvailable and the low-water mark",
+    );
     let up = read_str("/proc/uptime");
     let secs: f32 = up
         .split_whitespace()

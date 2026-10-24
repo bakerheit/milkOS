@@ -267,6 +267,7 @@ impl App {
         // Laying out finds CSS background images, and cached ones are supplied at once: a
         // few rounds until the page has what it can have now.
         let cur = self.cur;
+        let started = crate::now_ms();
         for _ in 0..4 {
             let (sys, dark) = (self.sys, self.th.dark);
             let t = &mut self.tabs[cur];
@@ -280,6 +281,12 @@ impl App {
             }
         }
         self.tabs[cur].page.laid_w = lw;
+        if self.log {
+            let ms = crate::now_ms() - started;
+            if ms >= 200 {
+                rt::println!("[browser] laid out {} nodes in {} ms", self.tabs[cur].page.doc.stats().nodes, ms);
+            }
+        }
         if let Some(f) = &self.finding {
             let q = f.text.clone();
             self.run_find(&q);
@@ -336,6 +343,7 @@ impl App {
         if self.console_open {
             self.draw_console(w);
         }
+        self.draw_notice(w);
         self.draw_popup(w, h);
         let title = String::from(self.tab().title());
         if title != self.shown_title {
@@ -782,6 +790,43 @@ impl App {
             self.win.fill(mx + 8, by + 8 + i * 5, 14, 2, th.espresso);
         }
         self.hits.add(ARect::new(mx, by, 30, 28), ID_MENU);
+    }
+
+    /// The bar over the top of the page: a message with OK, or a question with Stop and Wait
+    /// ("This page uses a lot of memory. Stop it?"), like the slow-script bar.
+    fn draw_notice(&mut self, w: i32) {
+        let Some(n) = self.notice.clone() else { return };
+        let t = self.tab();
+        if t.uid != n.tab || t.epoch != n.epoch {
+            return; // about another tab or another page
+        }
+        let th = self.th;
+        // Over the foot of the page (the top of a page is what one is reading), above the
+        // status line.
+        let h = 40;
+        let top = self.win.h - STATUS_H - h;
+        self.win.fill(0, top, w, h, th.straw);
+        self.win.fill(0, top, w, 1, th.honey);
+        let ask = !matches!(n.kind, crate::NoticeKind::Info);
+        let (a_label, b_label) = match n.kind {
+            crate::NoticeKind::AskStop { .. } => ("Stop", "Wait"),
+            crate::NoticeKind::LoadMore => ("Load more", "Dismiss"),
+            crate::NoticeKind::Info => ("OK", ""),
+        };
+        let aw = appkit::widgets::button_w(a_label, false);
+        let bw = if ask { appkit::widgets::button_w(b_label, false) } else { 0 };
+        let room = w - aw - bw - 40;
+        self.win.text(14, top + 12, &ellipsize(&n.text, room), th.ink);
+        let a = ARect::new(w - aw - bw - if ask { 24 } else { 12 }, top + 6, aw, 28);
+        let kind = match n.kind {
+            crate::NoticeKind::AskStop { .. } => appkit::widgets::Kind::Danger,
+            _ => appkit::widgets::Kind::Secondary,
+        };
+        appkit::widgets::button(&mut self.win, &th, &mut self.hits, a, a_label, kind, ID_NOTICE_A, true, false);
+        if ask {
+            let b = ARect::new(w - bw - 12, top + 6, bw, 28);
+            appkit::widgets::button(&mut self.win, &th, &mut self.hits, b, b_label, appkit::widgets::Kind::Secondary, ID_NOTICE_B, true, false);
+        }
     }
 
     fn draw_find(&mut self, sy: i32, w: i32) {

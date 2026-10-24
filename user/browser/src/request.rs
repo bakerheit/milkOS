@@ -54,7 +54,17 @@ impl App {
             match o {
                 NetOut::Start(req) => self.net_start(ti, f, req),
                 NetOut::Cancel(id) => self.net_cancel(ti, f, id),
+                NetOut::Ack { id, consumed } => self.net_ack(ti, f, id, consumed),
             }
+        }
+    }
+
+    /// The page has used a streamed body up to `consumed` bytes: the job may send more.
+    pub(crate) fn net_ack(&mut self, ti: usize, f: FrameId, id: u32, consumed: u64) {
+        let Some(job) = self.tabs[ti].net_run.get(&(f.0, id)).copied() else { return };
+        if let Some(sh) = self.fetch.shared(job) {
+            let mut s = sh.lock();
+            s.acked = s.acked.max(consumed);
         }
     }
 
@@ -162,10 +172,14 @@ impl App {
                 page.origin = browserkit::netpolicy::Origin::Opaque(m.doc_id);
             }
         }
+        // What a response may be when it comes whole (an XHR's, a fetch the page cannot take in
+        // pieces) follows the machine's memory; what streams has no limit here.
+        let mut cfg = self.net_cfg.clone();
+        cfg.limits.max_response_body = self.mem.caps().response;
         let spec = ScriptSpec {
             req: req.clone(),
             page,
-            cfg: self.net_cfg.clone(),
+            cfg,
             cache: self.preflight.clone(),
         };
         let job = self.fetch.start_script(spec);
@@ -237,9 +251,9 @@ impl App {
         let ids: Vec<JobId> = self.net_jobs.keys().copied().collect();
         for job in ids {
             let Some(sh) = self.fetch.shared(job) else { continue };
-            let (head, got, total) = {
+            let (head, got, total, chunks) = {
                 let mut s = sh.lock();
-                (s.head.take(), s.got, s.total)
+                (s.head.take(), s.got, s.total, core::mem::take(&mut s.stream.chunks))
             };
             let Some(nj) = self.net_jobs.get_mut(&job) else { continue };
             let (uid, epoch, frame, id) = (nj.uid, nj.epoch, nj.frame, nj.id);
@@ -250,6 +264,10 @@ impl App {
             }
             if let Some(h) = head {
                 self.net_inbox.push_back((uid, epoch, frame, id, NetEvent::Head(h)));
+            }
+            // The body's pieces, in order, between the head and the end.
+            for c in chunks {
+                self.net_inbox.push_back((uid, epoch, frame, id, NetEvent::Chunk(c)));
             }
             if send_progress {
                 self.net_inbox.push_back((
@@ -298,6 +316,8 @@ impl App {
         head: Option<webengine::NetHead>,
     ) {
         let Some(nj) = self.net_jobs.remove(&job) else { return };
+        // The last pieces of a streamed body that came since the last look.
+        let (rest, _) = self.fetch.take_leftover(job);
         let Some(ti) = self.tab_of(nj.uid, nj.epoch) else { return };
         let ms = crate::now_ms().saturating_sub(nj.started_ms);
         let t = &mut self.tabs[ti];
@@ -321,16 +341,21 @@ impl App {
                     }
                     entry.status = done.head.status;
                     entry.state = "ok";
-                    entry.bytes = done.body.len();
+                    let size = done.streamed.unwrap_or(done.body.len());
+                    entry.bytes = size;
                     line = format!(
-                        "request {} {}: {} {}, {} bytes, {} ms",
+                        "request {} {}: {} {}, {} bytes{}, {} ms",
                         nj.method,
                         done.head.url_or(&nj.url),
                         done.head.status,
                         done.head.status_text,
-                        done.body.len(),
+                        size,
+                        if done.streamed.is_some() { " (streamed)" } else { "" },
                         ms
                     );
+                    if !rest.is_empty() {
+                        events.push(NetEvent::Chunk(rest.clone()));
+                    }
                     events.push(NetEvent::Done(done.body));
                 }
                 Err(f) => {

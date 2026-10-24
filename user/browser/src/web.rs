@@ -43,11 +43,6 @@ pub fn is_button(k: ControlKind) -> bool {
     )
 }
 
-/// The script heap one frame may use (bytes).
-pub const FRAME_HEAP: usize = 16 << 20;
-/// All the frames of a tab together may use this much (bytes); past it the greediest is stopped.
-pub const FRAMES_HEAP: usize = 96 << 20;
-
 /// Bits of a combined control index that are the control's own.
 const CTL_BITS: u32 = 20;
 
@@ -75,39 +70,33 @@ pub struct Doc {
 
 impl Doc {
     /// Parse a page. `url` is its address (relative links resolve against it). `scripts`:
-    /// run its JavaScript.
-    pub fn parse(bytes: &[u8], url: &str, content_type: &str, scripts: bool) -> Doc {
+    /// run its JavaScript, within these limits (the Browser works them out from what the machine
+    /// has free: `mem.rs`).
+    pub fn parse(
+        bytes: &[u8],
+        url: &str,
+        content_type: &str,
+        scripts: Option<ScriptLimits>,
+        limits: Limits,
+    ) -> Doc {
         let ct = (!content_type.is_empty()).then_some(content_type);
         Doc {
-            d: Box::new(Document::parse_scripted(
-                bytes,
-                url,
-                ct,
-                Limits::default(),
-                scripts.then(ScriptLimits::default),
-            )),
+            d: Box::new(Document::parse_scripted(bytes, url, ct, limits, scripts)),
             laid: None,
         }
     }
 
     /// A document for a frame (not attached yet): like [`Doc::parse`], as a bare engine
     /// document.
-    pub fn parse_frame(bytes: &[u8], url: &str, content_type: &str, scripts: bool) -> Document {
+    pub fn parse_frame(
+        bytes: &[u8],
+        url: &str,
+        content_type: &str,
+        scripts: Option<ScriptLimits>,
+        limits: Limits,
+    ) -> Document {
         let ct = (!content_type.is_empty()).then_some(content_type);
-        Document::parse_scripted(
-            bytes,
-            url,
-            ct,
-            Limits::default(),
-            scripts.then(|| ScriptLimits {
-                // A frame gets a quarter of what a page does; with 32 frames the tab as a whole
-                // is watched too ([`crate::frames`]).
-                memory: FRAME_HEAP,
-                // (Frames are compiled one at a time, but they are many.)
-                compile: 64 << 20,
-                ..ScriptLimits::default()
-            }),
-        )
+        Document::parse_scripted(bytes, url, ct, limits, scripts)
     }
 
     // ---- frames ----
@@ -457,6 +446,34 @@ impl Doc {
         }
     }
 
+    /// Collect garbage in every document's scripts: the engine's bytes freed.
+    pub fn collect_garbage(&mut self) -> usize {
+        let mut freed = 0;
+        for id in self.all_ids() {
+            if let Some(d) = self.d.frame_doc_mut(id) {
+                freed += d.collect_garbage();
+            }
+        }
+        freed
+    }
+
+    /// Stop the scripts of frame `id` for a reason the console shows.
+    pub fn stop_scripts_because(&mut self, id: FrameId, why: &str) {
+        if let Some(d) = self.d.frame_doc_mut(id) {
+            d.stop_scripts_because(why);
+        }
+    }
+
+    /// What the engine says of the page (nodes, boxes, items, the bytes it keeps).
+    pub fn stats(&self) -> webengine::Stats {
+        self.d.stats()
+    }
+
+    /// What the page keeps between layouts, roughly (DOM, styles, display list), bytes.
+    pub fn approx_bytes(&self) -> usize {
+        self.d.stats().approx_bytes
+    }
+
     /// Stop every document's scripts.
     pub fn stop_scripts(&mut self) {
         for id in self.all_ids() {
@@ -466,6 +483,11 @@ impl Doc {
 
     pub fn script_stats(&self) -> ScriptStats {
         self.d.script_stats()
+    }
+
+    /// Why the scripts of frame `id` were stopped (empty if they were not).
+    pub fn script_stop_reason_in(&self, id: FrameId) -> String {
+        self.d.frame_doc(id).map(|d| d.script_stop_reason()).unwrap_or_default()
     }
 
     pub fn script_stats_in(&self, id: FrameId) -> ScriptStats {
@@ -480,6 +502,11 @@ impl Doc {
         self.all_ids()
             .into_iter()
             .any(|f| self.d.frame_doc(f).is_some_and(|d| d.needs_layout()))
+    }
+
+    /// The page was cut at the engine's limits (bytes or nodes).
+    pub fn truncated(&self) -> bool {
+        self.d.truncated()
     }
 
     pub fn title(&self) -> String {

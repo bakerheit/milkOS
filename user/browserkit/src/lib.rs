@@ -15,6 +15,7 @@ pub mod engine;
 pub mod font;
 pub mod form;
 pub mod history;
+pub mod memory;
 pub mod netpolicy;
 pub mod pages;
 pub mod paint;

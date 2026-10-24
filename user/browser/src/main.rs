@@ -29,8 +29,10 @@ extern crate alloc;
 mod draw;
 mod frames;
 mod js;
+mod mem;
 mod net;
 mod request;
+mod stream;
 mod store;
 mod sysfont;
 mod tab;
@@ -74,8 +76,6 @@ pub const BAR_H: i32 = 40;
 pub const TOP: i32 = TAB_H + BAR_H;
 pub const STATUS_H: i32 = 22;
 pub const MAX_TABS: usize = 24;
-/// Decoded images kept, in pixels (about 64 MB).
-const MAX_IMAGE_PIXELS: usize = 16 << 20;
 
 // Hit ids.
 pub const ID_BACK: u32 = 1;
@@ -93,6 +93,8 @@ pub const ID_FIND_FIELD: u32 = 12;
 pub const ID_POPUP_BG: u32 = 13;
 pub const ID_PANEL_CONSOLE: u32 = 14;
 pub const ID_PANEL_NET: u32 = 15;
+pub const ID_NOTICE_A: u32 = 16;
+pub const ID_NOTICE_B: u32 = 17;
 pub const ID_TAB: u32 = 100; // + index
 pub const ID_CLOSE_TAB: u32 = 200; // + index
 pub const ID_MENU_ITEM: u32 = 300; // + index
@@ -153,7 +155,7 @@ impl ImgState {
         }
     }
 
-    fn pixels(&self) -> usize {
+    pub fn pixels(&self) -> usize {
         self.picture().map_or(0, |i| i.w * i.h)
     }
 
@@ -283,6 +285,44 @@ pub struct App {
     pub sys: sysfont::SysText,
     pub quit: bool,
     pub dirty: bool,
+    /// The machine's memory and what each page, frame and worker may have of it (mem.rs).
+    pub mem: mem::MemMonitor,
+    /// When the tabs were last looked over for memory (ms), the tab that was in front then, and
+    /// the realms whose "Stop it?" was answered with Wait (key -> ask again after, ms).
+    pub mem_scan_at: u64,
+    pub mem_front_uid: u64,
+    pub mem_waits: BTreeMap<u64, u64>,
+    /// A bar over the top of the page: a memory warning, a question (Stop it?), a page that
+    /// was cut short (Load more?).
+    pub notice: Option<Notice>,
+}
+
+/// What a notice bar offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// Just a message: OK dismisses it.
+    Info,
+    /// "This page uses a lot of memory. Stop it?" about frame `frame` of the tab: Stop ends that
+    /// document's scripts, Wait leaves it alone for a while.
+    AskStop { frame: FrameId },
+    /// "This page is too big to show completely. Load more?": Load more fetches it again with
+    /// a window four times as big.
+    LoadMore,
+}
+
+#[derive(Clone, Debug)]
+pub struct Notice {
+    /// The tab (its uid) and the page (its epoch) it is about: it goes away with either.
+    pub tab: u64,
+    pub epoch: u64,
+    pub text: String,
+    pub kind: NoticeKind,
+}
+
+impl Notice {
+    pub fn info(tab: u64, epoch: u64, text: &str) -> Notice {
+        Notice { tab, epoch, text: String::from(text), kind: NoticeKind::Info }
+    }
 }
 
 pub fn now_ms() -> u64 {
@@ -317,7 +357,7 @@ pub(crate) fn hint(e: &Error) -> &'static str {
         Error::Tls(_) => "milkOS speaks TLS 1.3 only; the site may need an older version.",
         Error::Timeout => "Try again (reload), or another site.",
         Error::TooBig(_) => {
-            "Pages can be up to 4 MB here; a file that big can be saved instead (Alt-click its link)."
+            "That is more than the Browser can hold in memory right now (what it can depends on how much the machine has free); a file that big can be saved instead (Alt-click its link)."
         }
         _ => "",
     }
@@ -393,7 +433,8 @@ impl App {
             html.as_bytes(),
             "text/html",
             PageKind::Internal(i),
-            false,
+            None,
+            webengine::Limits::default(),
         )
     }
 
@@ -412,7 +453,8 @@ impl App {
             html.as_bytes(),
             "text/html",
             PageKind::Error,
-            false,
+            None,
+            webengine::Limits::default(),
         );
         p.title = String::from(title);
         p
@@ -497,6 +539,7 @@ impl App {
                     started_ms: now_ms(),
                     source: true,
                     restore: None,
+                    ..Load::default()
                 });
                 return;
             }
@@ -524,9 +567,14 @@ impl App {
             None => url.to_text(),
         };
         let req = req.unwrap_or_else(|| Request::get(&url));
+        // The page streams in: the Browser takes it as it comes, shows the top while the rest
+        // is on its way, and takes in as much as the machine's memory allows (stream.rs).
+        let more = self.tabs[ti].more_next.take().unwrap_or(0);
+        let cap = self.page_cap(more);
+        self.fetch.caps = self.fetch_caps();
         let id = self
             .fetch
-            .start(Kind::Page, req, Context::TopLevel { from });
+            .start_page(req, Context::TopLevel { from }, cap);
         let scroll = if push {
             None
         } else {
@@ -541,6 +589,11 @@ impl App {
             started_ms: now_ms(),
             source: false,
             restore: None,
+            streaming: true,
+            cap,
+            more,
+            preview_next: stream::FIRST_PREVIEW,
+            ..Load::default()
         });
     }
 
@@ -1461,6 +1514,8 @@ impl App {
             }
             Some(ID_FIND_FIELD) => {}
             Some(ID_POPUP_BG) => {}
+            Some(ID_NOTICE_A) => self.notice_answer(true),
+            Some(ID_NOTICE_B) => self.notice_answer(false),
             Some(ID_PANEL_CONSOLE) => self.console_net = false,
             Some(ID_PANEL_NET) => self.console_net = true,
             Some(i) if (ID_MENU_ITEM..ID_MENU_ITEM + 100).contains(&i) => {
@@ -1690,6 +1745,9 @@ impl App {
         }
         changed |= self.net_tick();
         changed |= self.workers_tick();
+        changed |= self.stream_tick();
+        changed |= self.mem_front();
+        changed |= self.mem_tick();
         self.frames_sweep();
         changed |= self.frames_tick();
         for a in self.profile.take_inbox() {
@@ -1770,7 +1828,7 @@ impl App {
                 self.feed(ti);
             }
             // Keep the cache bounded (pages fetch again what they need).
-            if self.script_bytes > 16 << 20 {
+            if self.script_bytes > self.mem.caps().script_cache {
                 self.scripts.retain(|_, s| matches!(s, ImgState::Loading(_)));
                 self.script_bytes = 0;
             }
@@ -1794,7 +1852,7 @@ impl App {
                         ImgState::Failed
                     }
                     Outcome::Image(Ok(pic)) => match ImgState::from_picture(pic, now_ms()) {
-                        Some(st) if self.image_pixels + st.pixels() <= MAX_IMAGE_PIXELS => {
+                        Some(st) if self.image_pixels + st.pixels() <= self.mem.caps().image_pixels => {
                             self.image_pixels += st.pixels();
                             st
                         }
@@ -1831,25 +1889,56 @@ impl App {
         else {
             return; // stopped, or the tab is gone
         };
-        let load = self.tabs[ti].load.take().unwrap();
+        let mut load = self.tabs[ti].load.take().unwrap();
+        // A page that streamed in: what came since the last look, and the whole body for the
+        // page to be made of.
+        let (rest, head2) = self.fetch.take_leftover(id);
+        if load.streaming {
+            load.buf.extend_from_slice(&rest);
+            if load.head.is_none() {
+                load.head = head2;
+            }
+        }
+        let out = match out {
+            Outcome::Page(mut resp) if resp.streamed && !load.source => {
+                resp.body = core::mem::take(&mut load.buf);
+                Outcome::Page(resp)
+            }
+            Outcome::Failed(f)
+                if load.streaming
+                    && f.error != Error::Cancelled
+                    && let Some(resp) = Self::partial_response(&mut load) =>
+            {
+                // The connection broke part way: what came is shown, and the page says so.
+                let msg = format!("The page stopped loading before its end: {}.", f.error);
+                self.console_line(ti, "", webengine::ConsoleLevel::Error, &msg);
+                load.partial_note = Some(msg);
+                Outcome::Page(resp)
+            }
+            o => o,
+        };
         match out {
             Outcome::Page(resp) if load.source => {
                 self.finish_source(ti, load, resp, cert);
             }
             Outcome::Page(resp) => {
+                let cut_at = resp.cut.then_some(resp.body.len());
                 let ct = String::from(resp.content_type());
                 let addr = match &load.fragment {
                     Some(f) => format!("{}#{f}", resp.url.to_text()),
                     None => resp.url.to_text(),
                 };
+                let scripts = self.js_on.then(|| self.script_limits(mem::Kind::Page, true));
+                let parse_started = now_ms();
                 let mut page = Page::new(
                     &addr,
                     Some(resp.url.clone()),
                     &resp.body,
                     &ct,
                     PageKind::Web,
-                    self.js_on,
-                );
+                    scripts,
+                    self.engine_limits_more(load.more),
+                    );
                 page.status = resp.status;
                 page.ref_policy = resp
                     .header("referrer-policy")
@@ -1876,11 +1965,20 @@ impl App {
                     page.title,
                     resp.redirects.len()
                 );
+                if self.log && resp.body.len() > 1 << 20 {
+                    rt::println!("[browser] parsed {} KB in {} ms", resp.body.len() >> 10, now_ms() - parse_started);
+                }
                 let title = page.title.clone();
+                let truncated = page.doc.truncated();
                 let t = &mut self.tabs[ti];
+                // (A page shown while it came was never the one the history left: the scroll
+                // of the page it replaced was kept when it first showed.)
+                let seen_scroll = load.previewed.then_some(t.scroll);
                 if load.push {
                     let scroll = t.scroll;
-                    if let Some(e) = t.history.current_mut() {
+                    if !load.previewed
+                        && let Some(e) = t.history.current_mut()
+                    {
                         e.scroll = scroll;
                     }
                     t.history.push_doc(&addr, doc_id);
@@ -1895,13 +1993,25 @@ impl App {
                     e.title = title.clone();
                 }
                 t.show(page, 0);
+                t.page_more = load.more;
                 if let Some((_, plan)) = load.restore.clone() {
                     t.frames.restore = plan;
                 }
                 t.anchor = load.fragment.clone();
-                if let Some(s) = load.scroll {
+                if let Some(s) = seen_scroll.or(load.scroll) {
                     t.scroll = s;
                     t.target = s;
+                }
+                if let Some(n) = cut_at {
+                    self.announce_cut(ti, n);
+                } else if truncated {
+                    self.announce_cut(ti, 0);
+                } else if let Some(note) = load.partial_note.take()
+                    && ti == self.cur
+                {
+                    let (uid, epoch) = (self.tabs[ti].uid, self.tabs[ti].epoch);
+                    self.notice = Some(Notice::info(uid, epoch, &note));
+                    self.dirty = true;
                 }
                 self.visits.add(&addr, &title, net::now_secs());
                 // Its frames start loading before its scripts run: they hold its `load` back.
@@ -1955,7 +2065,7 @@ impl App {
         let status = format!("HTTP {} {}", resp.status, resp.reason);
         let html = pages::view_source(&resp.url.to_text(), &status, resp.body.len(), &text);
         let addr = address::source_address(&resp.url);
-        let mut page = Page::new(&addr, Some(resp.url.clone()), html.as_bytes(), "text/html", PageKind::Web, false);
+        let mut page = Page::new(&addr, Some(resp.url.clone()), html.as_bytes(), "text/html", PageKind::Web, None, webengine::Limits::default());
         page.status = resp.status;
         page.doc_id = self.next_doc_id();
         if resp.url.scheme == Scheme::Https {
@@ -2261,7 +2371,7 @@ fn main(args: &rt::Args) -> i32 {
     gui::text::preload();
     // Before any page is fetched: lock down what a hostile page could reach.
     let spec = format!(
-        "fs={}:rw fs={}:rw fs=/System/Fonts:r fs=/dev/wm:rw fs=/dev/clipboard:rw fs=/proc/net/tls:r fs=/proc/net/internet:r fs={home}/.config/milk/settings:r net=all spawn=0 clipboard=1",
+        "fs={}:rw fs={}:rw fs=/System/Fonts:r fs=/dev/wm:rw fs=/dev/clipboard:rw fs=/proc/net/tls:r fs=/proc/net/internet:r fs=/proc/meminfo:r fs=/proc/mempressure:r fs={home}/.config/milk/settings:r net=all spawn=0 clipboard=1",
         profile.lib, profile.downloads
     );
     if let Err(e) = sys::sandbox(&spec) {
@@ -2284,7 +2394,8 @@ fn main(args: &rt::Args) -> i32 {
         b"",
         "text/html",
         PageKind::Internal(Internal::NewTab),
-        false,
+        None,
+        webengine::Limits::default(),
     );
     let mut app = App {
         win,
@@ -2333,6 +2444,11 @@ fn main(args: &rt::Args) -> i32 {
         sys: sysfont::SysText::now(),
         quit: false,
         dirty: true,
+        mem: mem::MemMonitor::new(log),
+        mem_scan_at: 0,
+        mem_front_uid: 0,
+        mem_waits: BTreeMap::new(),
+        notice: None,
     };
     // Addresses left in the inbox belong to an earlier run; the argument is this one's.
     let _ = app.profile.take_inbox();

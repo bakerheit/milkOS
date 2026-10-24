@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Memory: a page that eats everything</title>
+<script src="/report.js"></script><script src="/hog.js"></script>
+<style>body { font-family: sans-serif; margin: 14px; background: #fde8e8; color: #3a2e28; }</style>
+</head><body>
+<h2>A page that eats everything it can</h2>
+<p id="ticks">ticks: 0</p>
+<p id="state">eating</p>
+<script>
+  // Allocates without end, a megabyte at a time, until the Browser stops its scripts.
+  var ticks = 0, total = 0;
+  setInterval(function () { ticks++; document.getElementById('ticks').textContent = 'ticks: ' + ticks; if (ticks % 5 === 0) report('eat', 'tick', ticks); }, 200);
+  report('eat', 'begin', 'eating');
+  function more() {
+    for (var k = 0; k < 20; k++) HOLD.push(hogItem('objects', total * 700 + k));
+    total += 1;
+    for (var i = 0; i < 10; i++) { for (var j = 0; j < 700; j++) HOLD.push(hogItem('objects', total * 700 + j)); total += 1; }
+    if (total % 50 === 0) { report('eat', 'progress', total); document.getElementById('state').textContent = 'holding ' + total + ' MB'; }
+    setTimeout(more, 0);
+  }
+  setTimeout(more, 300);
+</script>
+</body></html>

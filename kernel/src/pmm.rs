@@ -86,7 +86,19 @@ pub struct Pmm {
     tags: *mut u8,
     /// Frames per [`Use`] (index = the tag).
     uses: [usize; Use::COUNT],
+    /// The lowest `free` has been (frames), allocations that found no memory, and how many
+    /// times `free` fell below the low and critical marks (`/proc/mempressure`).
+    min_free: usize,
+    failed: u64,
+    low_events: u64,
+    critical_events: u64,
+    in_low: bool,
+    in_critical: bool,
 }
+
+/// Memory is "low" under this part of RAM, "critical" under half of it (`/proc/mempressure`).
+pub const LOW_DIV: usize = 8;
+pub const CRITICAL_DIV: usize = 16;
 
 // SAFETY: the raw pointer refers to RAM owned exclusively by the Pmm.
 unsafe impl Send for Pmm {}
@@ -99,6 +111,48 @@ pub struct PmmStats {
     pub free_frames: usize,
     /// Allocated frames per [`Use`] (index = `Use as usize`; `Free` is always 0 here).
     pub uses: [usize; Use::COUNT],
+    /// Below this many free frames memory is low, below `critical_mark` critical.
+    pub low_mark: usize,
+    pub critical_mark: usize,
+    /// The fewest free frames there have been since boot.
+    pub min_free: usize,
+    /// Allocations that found no memory, since boot.
+    pub failed: u64,
+    /// Times free memory fell below the low / critical mark (from above it), since boot.
+    pub low_events: u64,
+    pub critical_events: u64,
+}
+
+/// How much trouble memory is in (`/proc/mempressure`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Pressure {
+    Normal,
+    Low,
+    Critical,
+}
+
+impl Pressure {
+    pub fn name(self) -> &'static str {
+        match self {
+            Pressure::Normal => "normal",
+            Pressure::Low => "low",
+            Pressure::Critical => "critical",
+        }
+    }
+}
+
+impl PmmStats {
+    /// The level free memory is at now.
+    pub fn pressure(&self) -> Pressure {
+        let free = self.free_frames;
+        if free < self.critical_mark {
+            Pressure::Critical
+        } else if free < self.low_mark {
+            Pressure::Low
+        } else {
+            Pressure::Normal
+        }
+    }
 }
 
 impl PmmStats {
@@ -169,19 +223,55 @@ impl Pmm {
         None
     }
 
+    /// The marks, in frames: low under 1/8 of RAM, critical under 1/16.
+    fn marks(&self) -> (usize, usize) {
+        (self.frames / LOW_DIV, self.frames / CRITICAL_DIV)
+    }
+
+    /// Free memory changed: keep the low-water mark and count the crossings of the marks (a
+    /// mark is crossed again only after free memory has come back a little above it).
+    fn note(&mut self) {
+        self.min_free = self.min_free.min(self.free);
+        let (low, critical) = self.marks();
+        if self.free < low {
+            if !self.in_low {
+                self.in_low = true;
+                self.low_events += 1;
+            }
+        } else if self.free >= low + low / 8 {
+            self.in_low = false;
+        }
+        if self.free < critical {
+            if !self.in_critical {
+                self.in_critical = true;
+                self.critical_events += 1;
+            }
+        } else if self.free >= critical + critical / 8 {
+            self.in_critical = false;
+        }
+    }
+
     fn alloc(&mut self, u: Use) -> Option<PhysAddr> {
-        let frame = self.find_free(self.hint.max(self.reserved))?;
+        let Some(frame) = self.find_free(self.hint.max(self.reserved)) else {
+            self.failed += 1;
+            return None;
+        };
         self.set_used(frame);
         self.free -= 1;
         self.hint = frame + 1;
         self.tag(frame, 1, u);
+        self.note();
         Some(self.frame_addr(frame))
     }
 
     /// Find `count` consecutive free frames whose first frame's address is a
     /// multiple of `align_frames` frames (a power of two).
     fn alloc_contiguous(&mut self, count: usize, align_frames: usize, u: Use) -> Option<PhysAddr> {
-        if count == 0 || count > self.free || !align_frames.is_power_of_two() {
+        if count == 0 || !align_frames.is_power_of_two() {
+            return None;
+        }
+        if count > self.free {
+            self.failed += 1;
             return None;
         }
         // Alignment is relative to physical address 0, not to `base`.
@@ -206,8 +296,11 @@ impl Pmm {
             self.free -= count;
             self.hint = start + count;
             self.tag(start, count, u);
+            self.note();
             return Some(self.frame_addr(start));
         }
+        // (No run long enough although there are frames: fragmentation, not exhaustion; the
+        // caller has a way out and this is not counted.)
         None
     }
 
@@ -232,6 +325,7 @@ impl Pmm {
         self.tag(first, count, Use::Free);
         self.free += count;
         self.hint = self.hint.min(first);
+        self.note();
     }
 }
 
@@ -277,12 +371,19 @@ pub unsafe fn init(base: PhysAddr, size: usize, reserved_end: PhysAddr) {
         bitmap,
         tags,
         uses: [0; Use::COUNT],
+        min_free: usize::MAX,
+        failed: 0,
+        low_events: 0,
+        critical_events: 0,
+        in_low: false,
+        in_critical: false,
     };
     for f in reserved..frames {
         pmm.set_free(f);
     }
     pmm.free = frames - reserved;
     pmm.uses[Use::Free as usize] = frames - reserved;
+    pmm.min_free = pmm.free;
     *PMM.lock() = Some(pmm);
 }
 
@@ -390,6 +491,21 @@ pub fn free_contiguous(pa: PhysAddr, count: usize) {
     with(|p| p.free_frames(pa, count));
 }
 
+/// Forget the low-water mark, the failures and the crossings counted so far: the boot
+/// self-test asks for an impossible run on purpose, and `/proc/mempressure` should say what
+/// happened once the system was up.
+pub fn reset_counters() {
+    with(|p| {
+        p.min_free = p.free;
+        p.failed = 0;
+        p.low_events = 0;
+        p.critical_events = 0;
+        p.in_low = false;
+        p.in_critical = false;
+        p.note();
+    });
+}
+
 pub fn stats() -> PmmStats {
     with(|p| PmmStats {
         base: p.base,
@@ -401,6 +517,12 @@ pub fn stats() -> PmmStats {
             u[Use::Free as usize] = 0;
             u
         },
+        low_mark: p.marks().0,
+        critical_mark: p.marks().1,
+        min_free: p.min_free,
+        failed: p.failed,
+        low_events: p.low_events,
+        critical_events: p.critical_events,
     })
 }
 

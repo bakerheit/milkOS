@@ -872,3 +872,219 @@ fn saved_pngs_decode_back_to_the_same_picture() {
         vec![0xFFFF_FFFF, 0xFF010203]
     );
 }
+
+// ---- the resumable decoder ------------------------------------------------------------------------
+
+/// Raw DEFLATE made with zlib (python): a dynamic-Huffman block, a stored block (random bytes) and a
+/// fixed-Huffman block, each ended by a sync flush, then a final block. 5510 bytes unpacked.
+const MIXED_HEX: &[&str] = &[
+    "7c966b52e3301084afe2ab39c1406a03a11ca7a8dc7ed1f448f3b5cdee1fc591e6d1f36ae9797b7bacdb747e5f96fb32",
+    "7dbf2fcfe934af9fd3c7e5fa673adfbea7d36ddbaecbf43aaf1ff1ff2985b775bedf251547a7c7b62d6ba985a558c288",
+    "4edb6748c741c8a6799983688088059ef4a91526e05a586433633aafcb9c1e7367c4925e43809ae1b7ab0f39ad022697",
+    "998b11d6d77cb94201987b021eeb8b2c541a5e2fcbf565986a0209ab7df6ed809846a490f0c2a57690e443603426946d",
+    "4302957baf4fcf96e1cba4346d5420f2d59443364cc86a22535ad30661583721f88c3140561306c6c01c276161f80e24",
+    "b1a50095b2ea20152e0d55f4215c7d9f80d4c7ac800247aeda21fb2f210b1e8a93c7351086a159dae75415a3a154a13a",
+    "842a84041b9148387ba27ab97fa6614e1b47381ad56693d3a45592608ec06425d5ea3954561005ebd3961038c0b056d2",
+    "0c55b755769d786ae00e7c415e8a52548e8e1c371acc92f11f5244d7a613d0564f7eb46ea4d20c900bfa585ad3ec1695",
+    "04b5fdf9e474611e98506d2312eb6694d2a8660822fb98354c2aeb0c2a72a3f9cf182cc4b4940fb6b6653465b07adecd",
+    "3407e9489df47f60cc081a9123a146cf217c2ca4945816dc1eff6849bf667862379262c2c080c832be4e9276c1f56b1a",
+    "d0fc26c1584090e68bf48b848ac8c67dc856f31f72086e01c2e6a153d23e5836b38a0827289d5f1cb8baf90ab226eaff",
+    "6c53d8597b3e25d87dde0e2564f701b0b24d2a4a4bc1419f011fbe31df20127b49f0458761fab56ae8c151e372c151c5",
+    "2c8fa932f3a6e973885b66272c333b2a1a7c6f64cac708eab2e7c43de7d42615c0763c3372460f8d09b397441b43b0d8",
+    "fe918c5b0151efdf7c7f010000ffff0090016ffe669f2bf20894ea27e689c66b6b262e4886b8438f39ba76fef8c90c51",
+    "01fbe6cf9a48d5b0c0a13da900a6adcb3d64069481be21c9c727b8db8c188f341a924c7f88dfa161bfdb0ecc682919d2",
+    "e64692f8194157f1d4af90988285cf7a9af7c93d5552266afe70e7aae6da47627c2e59af2ea37abc84670ad3c4d36bc0",
+    "8aad1fff8eb8406e2f8a7fc4cce4dd9f0b4110d9f2fa0025c8efe57f37724f4d37ea2b14004077139b4180df39322499",
+    "62c6857200059aeb8ea17cf3787e0ed29d1c0b63ffd7298374d9bd74fc11add7b9ca6503952269fd669f6376ee718797",
+    "37fd5f72f8d51c4ac91b6d0c48d41a1e5ec9e6a0392854a8615eef109fc1bfa9e2563701288f29b3d73f6ac2b69edd2c",
+    "19f264bee462a5baf20fd27ecf14c011ed201f836320adb98bab1686a28d9801210c7736f3eec580dcfc43fe5d049b4d",
+    "78a7a3ebb92865c8517ed02111f6a652da3524872b6a31d7ffe4587744d5eb783e96968f89be828565e07e5f7d784e90",
+    "60a721ca807d7633ed123402f376e5bf1496773d19616326be5be5850336b36f13bcae48000000ffff53484a2cca5300",
+    "1395f9e9a545250ac919a9a9c5a90ac945a989b9704e69518a42526949496a91424162668e42727eb94279466a254406",
+    "aa0a62547e49494e2a4c315406ac07ac3e2db12817c2825a076643554385600e01da01d608e5e766e664c3d860632076",
+    "8308b032b03cb2d16045e94589c5c550df4074018d05e1b4ccd41cb8a76082505f8349b07910552861822204f52ec417",
+    "50af230503440724a4201ac06e407619dcfd48dec6700024d02126404c435505b613e12ba837807c8825689102d70b73",
+    "254800e40e8c2086d805560b752ec40d10a78154805d866c3072508195c1420aaa066231d8bd8848418d0c88eb410e02",
+    "4b4214239b0b73225817c412847d0802ec364480438d47a41d987de07404743b4a0206b121d10ab61ee11aa418871805",
+    "b61a391c5093334c10a20fac0ea218c95bc8c91612a1d098410a6eb80b2189012365a12ac29230910213294651b23552",
+    "ac21656cd422019e5050e20239d5a07a1c492d6ac020bb1bb934802747a40402f1134af022251cb8d731933552f842fc",
+    "8b2826901c86942a91d232440372aca3e67d7864408421ca2109032c00f514246891c3139162a07180941490a31f39cd",
+    "2082016c03221d41ec822445e43206218c5a0820fb04c53290d9502f230a1d8427d1430791cf90c303a914434e7b88fc",
+    "8328af102c8c28468a7e446a84063eac5a40646c78a287f310a1839c90e0fa514a67e40c80520e214b200a0148c98194",
+    "bbe0c915b95043842e520c634f5fd0d083051c222522790229bf6296c3483912e159788d805230217c814882488518c2",
+    "8368010e525302528c4a0000",
+];
+
+fn unhex(parts: &[&str]) -> Vec<u8> {
+    let s: String = parts.concat();
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+}
+
+/// Decode `stream` in pieces cut by `cuts` (sizes, cycled), pumping with `budget`.
+fn inflate_in_pieces(stream: &[u8], cuts: &[usize], budget: usize) -> Result<Vec<u8>, InflateError> {
+    use crate::inflate::{Inflater, Pump};
+    let mut inf = Inflater::new(1 << 24);
+    let mut out = Vec::new();
+    let mut at = 0;
+    let mut k = 0;
+    loop {
+        let n = cuts[k % cuts.len()].max(1).min(stream.len() - at);
+        k += 1;
+        inf.feed(&stream[at..at + n]);
+        at += n;
+        loop {
+            match inf.pump(&mut out, budget)? {
+                Pump::More => continue,
+                Pump::NeedInput => break,
+                Pump::Done => return Ok(out),
+            }
+        }
+        if at >= stream.len() {
+            return Err(InflateError::Truncated);
+        }
+    }
+}
+
+#[test]
+fn the_resumable_inflater_matches_the_whole_one_for_any_cut() {
+    let stream = unhex(MIXED_HEX);
+    let (whole, used) = inflate(&stream, 1 << 20).unwrap();
+    assert_eq!(whole.len(), 5510);
+    assert_eq!(used, stream.len());
+    for cuts in [&[1usize][..], &[2], &[3], &[7, 1, 13], &[64], &[500, 3], &[1 << 20]] {
+        for budget in [1usize, 100, 4096, usize::MAX] {
+            assert_eq!(
+                inflate_in_pieces(&stream, cuts, budget).unwrap(),
+                whole,
+                "cuts {cuts:?} budget {budget}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_resumable_inflater_waits_for_the_rest_and_hands_back_what_follows() {
+    use crate::inflate::{Inflater, Pump};
+    let mut stream = unhex(MIXED_HEX);
+    let n = stream.len();
+    stream.extend_from_slice(b"TRAILER");
+    let mut inf = Inflater::new(1 << 20);
+    let mut out = Vec::new();
+    inf.feed(&stream[..n / 2]);
+    assert_eq!(inf.pump(&mut out, usize::MAX), Ok(Pump::NeedInput));
+    assert!(!out.is_empty() && out.len() < 5510, "some of it came already: {}", out.len());
+    inf.feed(&stream[n / 2..]);
+    assert_eq!(inf.pump(&mut out, usize::MAX), Ok(Pump::Done));
+    assert_eq!(out.len(), 5510);
+    assert_eq!(inf.rest(), b"TRAILER");
+    assert_eq!(inf.total_out(), 5510);
+    // Done stays done.
+    assert_eq!(inf.pump(&mut out, usize::MAX), Ok(Pump::Done));
+}
+
+#[test]
+fn the_resumable_inflater_keeps_a_window_for_far_back_references() {
+    use crate::inflate::{Inflater, Pump};
+    // A stored block of 20000 bytes, then a fixed-Huffman block that copies 258 bytes from
+    // 20000 back: far past what a small buffer would keep, and over a chunk boundary.
+    let data: Vec<u8> = (0..20000u32).map(|i| (i * 7 + i / 13) as u8).collect();
+    let mut s = vec![0u8]; // BFINAL=0, BTYPE=00, padded
+    s.extend_from_slice(&(20000u16).to_le_bytes());
+    s.extend_from_slice(&(!20000u16).to_le_bytes());
+    s.extend_from_slice(&data);
+    // The second block, bit by bit.
+    let mut bits: Vec<u8> = Vec::new();
+    for (v, n) in [(1u32, 1u32), (1, 2)] {
+        // BFINAL = 1, BTYPE = 01 (LSB first)
+        (0..n).for_each(|i| bits.push(((v >> i) & 1) as u8));
+    }
+    let code = |v: u32, n: u32, bits: &mut Vec<u8>| (0..n).rev().for_each(|i| bits.push(((v >> i) & 1) as u8)); // MSB first
+    // length 258 = symbol 285: 8-bit code 0xC0 + (285 - 280)
+    code(0xC0 + 5, 8, &mut bits);
+    // distance 20000: symbol 28 (base 16385, 13 extra bits = 3615), 5-bit code
+    code(28, 5, &mut bits);
+    (0..13).for_each(|i| bits.push(((3615u32 >> i) & 1) as u8));
+    // end of block: symbol 256, 7-bit code 0
+    code(0, 7, &mut bits);
+    for chunk in bits.chunks(8) {
+        let mut b = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() {
+            b |= bit << i;
+        }
+        s.push(b);
+    }
+    let whole = inflate(&s, 1 << 20).unwrap().0;
+    assert_eq!(whole.len(), 20258);
+    assert_eq!(&whole[20000..], &data[..258]);
+    for cut in [1usize, 5, 4096, 19999, 20005] {
+        let mut inf = Inflater::new(1 << 20);
+        let mut out = Vec::new();
+        for piece in s.chunks(cut) {
+            inf.feed(piece);
+            while inf.pump(&mut out, 1000).unwrap() == Pump::More {}
+        }
+        assert_eq!(out, whole, "cut {cut}");
+    }
+}
+
+#[test]
+fn the_resumable_inflater_is_bounded_and_survives_garbage() {
+    use crate::inflate::{Inflater, Pump};
+    let stream = unhex(MIXED_HEX);
+    // The output cap.
+    let mut inf = Inflater::new(1000);
+    inf.feed(&stream);
+    let mut out = Vec::new();
+    assert_eq!(inf.pump(&mut out, usize::MAX), Err(InflateError::TooBig));
+    assert!(out.len() <= 1000);
+    // Bad block type, stored length check, junk.
+    for junk in [&[0x07u8][..], &[0x01, 0x05, 0x00, 0x00, 0x00], &[0xff; 64], &[]] {
+        let mut inf = Inflater::new(1 << 20);
+        inf.feed(junk);
+        let mut out = Vec::new();
+        let r = inf.pump(&mut out, usize::MAX);
+        assert!(matches!(r, Err(_) | Ok(Pump::NeedInput)), "{r:?}");
+    }
+    // Random damage and random cuts: never a panic, and when it works it agrees with the
+    // whole-buffer decoder.
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rnd = |n: u64| {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s % n
+    };
+    for _ in 0..400 {
+        let mut st = stream.clone();
+        for _ in 0..1 + rnd(4) {
+            let i = rnd(st.len() as u64) as usize;
+            st[i] ^= 1 << rnd(8);
+        }
+        if rnd(3) == 0 {
+            st.truncate(rnd(st.len() as u64) as usize);
+        }
+        let cuts = [1 + rnd(40) as usize, 1 + rnd(300) as usize];
+        let got = inflate_in_pieces(&st, &cuts, 1 + rnd(5000) as usize);
+        if let Ok(g) = got
+            && let Ok((w, _)) = inflate(&st, 1 << 20)
+        {
+            assert_eq!(g, w);
+        }
+    }
+}
+
+#[test]
+fn checksums_continue() {
+    use crate::inflate::{adler32, adler32_update, crc32, crc32_update};
+    let data: Vec<u8> = (0..10000u32).map(|i| (i * 31 + 5) as u8).collect();
+    let mut c = 0;
+    let mut a = 1;
+    for p in data.chunks(777) {
+        c = crc32_update(c, p);
+        a = adler32_update(a, p);
+    }
+    assert_eq!(c, crc32(&[&data]));
+    assert_eq!(a, adler32(&data));
+    assert_eq!(crc32_update(0, b""), 0);
+    assert_eq!(adler32_update(1, b""), 1);
+}

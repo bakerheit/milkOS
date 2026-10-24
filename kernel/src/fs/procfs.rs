@@ -1,6 +1,6 @@
 //! procfs at `/proc`: read-only text files generated on every read.
 //!
-//! `meminfo`, `uptime`, `version`, `interrupts`, `mounts`. `meminfo`'s lines after `Shmem`
+//! `meminfo`, `mempressure`, `uptime`, `version`, `interrupts`, `mounts`. `meminfo`'s lines after `Shmem`
 //! say where the memory goes (docs/memory.md "Where the memory goes"); they add up to
 //! MemTotal - MemFree, with whatever no one owns up to as `Other`. Per-process directories
 //! (`/proc/<pid>`, `/proc/self`) belong to the process subsystem: it can add them with
@@ -41,6 +41,10 @@ fn meminfo(root_fs: &tmpfs::TmpFs) -> String {
     };
     line("MemTotal", kb(p.total_frames * mmu::PAGE_SIZE));
     line("MemFree", kb(p.free_frames * mmu::PAGE_SIZE));
+    // What a program can still get without anyone giving something back: all of the free
+    // frames. (The page cache is capped at 8 MiB and is not counted, nor is the kernel heap's
+    // free part: the heap never shrinks.)
+    line("MemAvailable", kb(p.free_frames * mmu::PAGE_SIZE));
     line("MemReserved", kb(p.reserved_frames * mmu::PAGE_SIZE));
     line("KernelHeap", kb(h.total));
     line("KernelHeapUsed", kb(h.used));
@@ -76,6 +80,29 @@ fn meminfo(root_fs: &tmpfs::TmpFs) -> String {
         line(k, kb(v));
     }
     line("Other", kb(used.saturating_sub(named)));
+    s
+}
+
+/// `/proc/mempressure`: how much trouble memory is in, for programs that can give some back
+/// (the Browser). Cheap to read; a program polls it a few times a second at most.
+fn mempressure() -> String {
+    let p = pmm::stats();
+    let kb = |frames: usize| frames * mmu::PAGE_SIZE / 1024;
+    let mut s = String::new();
+    let _ = writeln!(s, "{:<16}{}", "level:", p.pressure().name());
+    let mut line = |k: &str, v: usize| {
+        let _ = writeln!(s, "{:<16}{:>10} kB", format!("{k}:"), v);
+    };
+    line("MemFree", kb(p.free_frames));
+    line("LowMark", kb(p.low_mark));
+    line("CriticalMark", kb(p.critical_mark));
+    line("MinFree", kb(p.min_free));
+    let mut count = |k: &str, v: u64| {
+        let _ = writeln!(s, "{:<16}{:>10}", format!("{k}:"), v);
+    };
+    count("LowEvents", p.low_events);
+    count("CriticalEvents", p.critical_events);
+    count("AllocFailures", p.failed);
     s
 }
 
@@ -150,6 +177,7 @@ pub fn init(root_fs: Arc<tmpfs::TmpFs>) -> Result<()> {
     let fs = SynthFs::new("proc");
     let r = fs.root_dir();
     r.add_file("meminfo", move || meminfo(&root_fs));
+    r.add_file("mempressure", mempressure);
     r.add_file("uptime", uptime);
     r.add_file("version", || String::from(VERSION));
     r.add_file("interrupts", interrupts);

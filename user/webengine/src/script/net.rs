@@ -532,6 +532,21 @@ fn native_object(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
         }
         Ok(Value::UNDEFINED)
     })?;
+    // ack(id, consumed): the page has used the streamed body of request `id` up to this many
+    // bytes in all; the app may send a window more.
+    let b2 = b.clone();
+    r.define_method(n, "ack", 2, move |r, _t, a| {
+        let id = arg_num(r, a, 0)? as u32;
+        let consumed = arg_num(r, a, 1)?.max(0.0) as u64;
+        let live = b2.st(r)?.net.pending.contains_key(&id);
+        if live {
+            b2.st(r)?.net.out.push(NetOut::Ack { id, consumed });
+        }
+        Ok(Value::UNDEFINED)
+    })?;
+    // bufferLimit() -> the most a body may be when the page reads it whole.
+    let b2 = b.clone();
+    r.define_method(n, "bufferLimit", 0, move |_r, _t, _a| Ok(Value::number(b2.st.borrow().limits.buffer as f64)))?;
     // parseUrl(href, base?) -> the parts of the address, or null.
     r.define_method(n, "parseUrl", 2, |r, _t, a| {
         let href = arg_str(r, a, 0)?;
@@ -838,6 +853,11 @@ fn start(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
         let v = r.get(desc, "forcePreflight")?;
         r.to_boolean(v)
     };
+    // Only fetch reads its body in pieces.
+    let stream = kind == NetKind::Fetch && {
+        let v = r.get(desc, "stream")?;
+        r.to_boolean(v)
+    };
     {
         let st = b.st(r)?;
         if st.net.pending.len() >= MAX_PENDING {
@@ -864,6 +884,7 @@ fn start(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResult<Value> {
         cache,
         timeout_ms,
         force_preflight,
+        stream,
     }));
     Ok(Value::int(id as i32))
 }
@@ -898,6 +919,7 @@ pub fn deliver(b: &Rc<Bridge>, r: &mut Realm, id: u32, ev: NetEvent) -> bool {
             let _ = r.set(o, "total", Value::number(total.map_or(-1.0, |t| t as f64)));
             ("progress", Ok(o))
         }
+        NetEvent::Chunk(bytes) => ("chunk", netbytes::bytes_value(b, r, bytes)),
         NetEvent::Done(body) => ("done", netbytes::bytes_value(b, r, body)),
         NetEvent::Failed(f) => {
             let o = r.new_object();

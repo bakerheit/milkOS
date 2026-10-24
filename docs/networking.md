@@ -63,8 +63,9 @@ can: web sites, and also the Mac's LAN (a router's admin page, a printer) and th
 at 10.0.2.2. Plain http pages can be read and changed by anyone between the Mac and a site;
 `https://` pages come over TLS 1.3 with the certificate checked against the Mozilla roots
 (docs/tls.md), so those can't, but don't type anything private into a page yet. DNS answers aren't authenticated either (no DNSSEC; the ids are random
-and an answer must echo the question). Every fetch is bounded (4 MiB per page in the
-Browser, 64 MiB for a download, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
+and an answer must echo the question). Every fetch is bounded (a page in the
+Browser as much as its memory plan allows and streamed in, a download written to disk as it
+comes, 4 MiB for `network get`, 30 s, 10 redirects, gzip output capped), and every parser
 on the way (DNS, HTTP, gzip, HTML) is host-tested against malformed and hostile input. The
 sandbox's net capability gates names too: `MILK_RESOLVE` of a real name needs the full
 capability (`net=local` processes get localhost and numeric addresses only). Offline, none of

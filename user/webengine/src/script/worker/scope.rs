@@ -26,7 +26,9 @@ use crate::script::window::{self, Tables};
 use crate::script::{events_js, frames, modrt, net, nodes};
 
 /// Messages the worker may have posted and not handed up yet.
-pub const MAX_POSTS: usize = 4096;
+pub const MAX_POSTS: usize = 100_000;
+/// ... and the bytes of the messages among them.
+pub const MAX_POST_BYTES: usize = 64 << 20;
 
 /// The `on*` properties of the worker global.
 const HANDLERS: &[&str] = &[
@@ -197,12 +199,13 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
         let msg = xfer::encode_post(&b2, r, a, 0, "DedicatedWorkerGlobalScope")?;
         let mut st = b2.st(r)?;
         let Some(w) = st.worker.as_mut() else { return Ok(Value::UNDEFINED) };
-        if w.posts.len() >= MAX_POSTS {
+        if w.posts.len() >= MAX_POSTS || w.post_bytes + msg.data.len() > MAX_POST_BYTES {
             drop(st);
             xfer::drop_msg(&b2, &msg);
             b2.console(ConsoleLevel::Warn, String::from("Too many messages are waiting to be sent: a postMessage was dropped."));
             return Ok(Value::UNDEFINED);
         }
+        w.post_bytes += msg.data.len();
         w.posts.push(super::Post::Message(msg));
         Ok(Value::UNDEFINED)
     })?;
@@ -411,6 +414,7 @@ pub fn take_out(b: &Bridge) -> Vec<FromWorker> {
     if let Ok(mut st) = b.st.try_borrow_mut()
         && let Some(w) = st.worker.as_mut()
     {
+        w.post_bytes = 0;
         for p in core::mem::take(&mut w.posts) {
             v.push(match p {
                 super::Post::Message(m) => FromWorker::Message(m),

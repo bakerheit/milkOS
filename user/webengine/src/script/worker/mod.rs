@@ -66,11 +66,13 @@ pub struct WorkerState {
     pub closing: bool,
     /// The main script could not be loaded (the worker then ends).
     pub main_failed: bool,
+    /// Bytes of the messages in `posts`.
+    pub post_bytes: usize,
 }
 
 impl WorkerState {
     pub fn new(boot: WorkerBoot) -> WorkerState {
-        WorkerState { boot, posts: Vec::new(), closing: false, main_failed: false }
+        WorkerState { boot, posts: Vec::new(), closing: false, main_failed: false, post_bytes: 0 }
     }
 }
 

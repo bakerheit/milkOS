@@ -1027,6 +1027,98 @@ mod tests {
     }
 
     #[test]
+    fn a_port_given_to_another_thread_is_one_pair_across_two_tables() {
+        // The page's table and a worker's: link 7 on one side, 0 on the other.
+        let page = PortTable::new();
+        let work = PortTable::with_namespace(8);
+        let (a, b) = page.new_pair(o(0)).unwrap();
+        // The page gives `b` away.
+        page.transfer_out(o(0), &[b], None).unwrap();
+        page.export(&[b], 7);
+        assert!(page.has_links());
+        // `a` posts: the message waits at `b`'s end, and leaves with the next take.
+        assert_eq!(page.post(a, o(0), "to worker".into(), &[]), Ok(true));
+        let out = page.take_link_out(7, 10);
+        assert_eq!(out, [LinkOut::Msg { link: 7, port: b, data: "to worker".into(), ports: vec![] }]);
+        // The worker gets an end of its own for the same id, and the message.
+        assert!(work.import(b, 0));
+        assert!(!work.import(b, 0), "once");
+        assert!(work.adopt(b, o(1)));
+        assert!(work.deliver_link(b, "to worker".into(), &[]));
+        work.start(b, o(1));
+        assert_eq!(work.next_for(o(1), work.seq()).unwrap().1.data, "to worker");
+        // Its post goes back: out of the worker's table, into `a`'s queue in the page's.
+        assert_eq!(work.post(b, o(1), "to page".into(), &[]), Ok(true));
+        let back = work.take_link_out(0, 10);
+        assert_eq!(back, [LinkOut::Msg { link: 0, port: b, data: "to page".into(), ports: vec![] }]);
+        assert!(page.deliver_link(b, "to page".into(), &[]));
+        page.start(a, o(0));
+        assert_eq!(page.next_for(o(0), page.seq()).unwrap().1.data, "to page");
+        // A port that crossed is not sent on.
+        let (c, _d) = work.new_pair(o(1)).unwrap();
+        assert_eq!(work.post(c, o(1), "x".into(), &[b]), Err(PostError::BadTransfer));
+        // Closing the page's end closes the shadow and tells the far end.
+        page.close(a);
+        assert!(!page.is_open(b));
+        let closes = page.take_link_out(7, 10);
+        assert_eq!(closes, [LinkOut::Close { link: 7, port: b }]);
+        work.close_from_link(b);
+        assert!(!work.is_open(b));
+        assert!(work.take_link_out(0, 10).is_empty(), "no echo");
+    }
+
+    #[test]
+    fn ports_that_travel_with_a_message_over_a_link_cross_too() {
+        let page = PortTable::new();
+        let work = PortTable::with_namespace(3);
+        let (a, b) = page.new_pair(o(0)).unwrap();
+        let (c, d) = page.new_pair(o(0)).unwrap();
+        // `b` goes over; then a message on it carries `d`.
+        page.transfer_out(o(0), &[b], None).unwrap();
+        page.export(&[b], 1);
+        assert!(work.import(b, 0));
+        work.adopt(b, o(1));
+        // The page's `a` posts a message that carries `d`.
+        assert_eq!(page.post(a, o(0), "with port".into(), &[d]), Ok(true));
+        let out = page.take_link_out(1, 10);
+        let LinkOut::Msg { ports, data, .. } = &out[0] else { panic!("{out:?}") };
+        assert_eq!((data.as_str(), ports.as_slice()), ("with port", &[d][..]));
+        // d is exported now (its peer c stays on the page).
+        assert!(work.import(d, 0));
+        assert!(work.deliver_link(b, data.clone(), &[d]));
+        work.start(b, o(1));
+        let (_, m) = work.next_for(o(1), work.seq()).unwrap();
+        assert_eq!(m.ports, [d]);
+        assert!(work.adopt(d, o(1)));
+        // And what `c` posts reaches the worker's `d`.
+        assert_eq!(page.post(c, o(0), "via d".into(), &[]), Ok(true));
+        let out = page.take_link_out(1, 10);
+        assert_eq!(out, [LinkOut::Msg { link: 1, port: d, data: "via d".into(), ports: vec![] }]);
+    }
+
+    #[test]
+    fn closing_a_link_drops_everything_on_it() {
+        let page = PortTable::new();
+        let (a, b) = page.new_pair(o(0)).unwrap();
+        page.transfer_out(o(0), &[b], None).unwrap();
+        page.export(&[b], 5);
+        assert_eq!(page.post(a, o(0), "x".into(), &[]), Ok(true));
+        page.close_link(5);
+        assert!(!page.is_open(b));
+        assert!(page.take_link_out(5, 10).is_empty());
+        assert!(!page.has_links());
+        assert_eq!(page.queued(), 0);
+        // `a` lives, alone.
+        assert!(page.is_open(a));
+        assert_eq!(page.post(a, o(0), "y".into(), &[]), Ok(false));
+        // Messages for a port that is not there are refused, and what they carried closed.
+        let (c, d) = page.new_pair(o(0)).unwrap();
+        assert!(!page.deliver_link(999, "z".into(), &[c]));
+        assert!(!page.is_open(c));
+        let _ = d;
+    }
+
+    #[test]
     fn limits() {
         let t = PortTable::new();
         for _ in 0..MAX_PORTS / 2 {

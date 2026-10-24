@@ -727,3 +727,187 @@ fn fetch_and_xhr_in_a_worker_use_the_workers_own_origin() {
     assert_eq!(r.credentials, CredentialsMode::SameOrigin);
     assert!(s.requests.iter().any(|r| r.url == "http://api.test/x"), "{:?}", s.requests);
 }
+
+#[test]
+fn message_ports_given_to_a_worker_keep_working_both_ways() {
+    let mut s = Sim::new(
+        "const w = new Worker('p.js'); const mc = new MessageChannel();
+         mc.port1.onmessage = (e) => { console.log('T page got ' + JSON.stringify(e.data)); if (e.data.n < 3) mc.port1.postMessage({n: e.data.n + 1}); else console.log('T done'); };
+         w.postMessage({hello: 'x', port: mc.port2}, [mc.port2]);
+         mc.port1.postMessage({n: 0});
+         try { mc.port2.postMessage(1); console.log('T posted on a sent port'); } catch (e) { console.log('T sent ' + e.name); }
+         try { w.postMessage(1, [mc.port2]); } catch (e) { console.log('T twice ' + e.name); }",
+        vec![file("http://www.milk.test/p.js", "onmessage = (e) => {
+            const p = e.data.port; console.log('T worker ' + e.data.hello + ' ' + e.ports.length + ' ' + (e.ports[0] === p));
+            p.onmessage = (m) => p.postMessage({n: m.data.n + 1});
+        };")],
+    );
+    let t = s.finish();
+    assert!(has_line(&t, "worker x 1 true"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "page got {\"n\":1}"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "page got {\"n\":3}"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "twice DataCloneError"), "{t:?}");
+}
+
+#[test]
+fn a_port_made_in_a_worker_can_be_sent_to_the_page() {
+    let mut s = Sim::new(
+        "const w = new Worker('q.js'); w.onmessage = (e) => { const p = e.ports[0]; console.log('T ports ' + e.ports.length + ' ' + e.data); p.onmessage = (m) => { console.log('T page ' + m.data); if (m.data === 'pong 2') console.log('T done'); }; p.postMessage('ping 1'); p.postMessage('ping 2'); };",
+        vec![file("http://www.milk.test/q.js", "const mc = new MessageChannel();
+            mc.port1.onmessage = (e) => mc.port1.postMessage('pong ' + e.data.split(' ')[1]);
+            postMessage('here', [mc.port2]);")],
+    );
+    let t = s.finish();
+    assert!(has_line(&t, "ports 1 here"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "page pong 1"), "{t:?}\n{}", show(&s));
+    assert!(has_line(&t, "page pong 2"), "{t:?}\n{}", show(&s));
+}
+
+#[test]
+fn a_call_and_answer_pattern_over_ports_like_rpc_libraries_use() {
+    // One channel per call, the reply port sent with the request.
+    let mut s = Sim::new(
+        "const w = new Worker('rpc.js');
+         const call = (name, ...args) => new Promise((resolve) => { const { port1, port2 } = new MessageChannel(); port1.onmessage = (e) => { port1.close(); resolve(e.data); }; w.postMessage({name, args}, [port2]); });
+         (async () => {
+           const r1 = await call('add', 2, 3); const r2 = await call('add', r1, 10); const r3 = await call('shout', 'hi');
+           console.log('T results ' + [r1, r2, r3].join());
+           console.log('T done');
+         })();",
+        vec![file("http://www.milk.test/rpc.js", "const api = { add: (a, b) => a + b, shout: (s) => s.toUpperCase() + '!' };
+            onmessage = (e) => { const [port] = e.ports; port.postMessage(api[e.data.name](...e.data.args)); port.close(); };")],
+    );
+    let t = s.finish();
+    assert!(has_line(&t, "results 5,15,HI!"), "{t:?}\n{}", show(&s));
+}
+
+// ---- hostile input -------------------------------------------------------------------------------
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn pick<'a, T>(&mut self, v: &'a [T]) -> &'a T {
+        &v[(self.next() % v.len() as u64) as usize]
+    }
+}
+
+fn boot(url: &str, kind: WorkerType) -> WorkerBoot {
+    WorkerBoot {
+        spawn: WorkerSpawn {
+            id: 1,
+            url: String::from(url),
+            kind,
+            name: String::new(),
+            origin: String::from("http://www.milk.test"),
+            source: Some(b"onmessage = (e) => { try { postMessage(e.data, e.ports); } catch (x) {} };".to_vec()),
+            secure: false,
+        },
+        limits: WorkerLimits { stack: 4 << 20, ..WorkerLimits::default() },
+        user_agent: String::from("test"),
+        tz_offset: 0,
+    }
+}
+
+#[test]
+fn a_worker_global_survives_garbage_from_the_page() {
+    let mut rng = Rng(0x1234_5678_9abc_def1);
+    let datas = [
+        "", "null", "{", "[1,2", "{\"$t\":\"p\",\"v\":99}", "{\"$t\":\"ref\",\"v\":5}", "{\"$t\":\"w\",\"v\":[\"Uint8Array\",0,0,1]}",
+        "{\"$t\":\"t\",\"v\":[\"Nope\",\"zz\"]}", "{\"$t\":\"b\",\"v\":\"0\"}", "[{\"$t\":\"m\",\"v\":[1]}]", "\"str\"", "{\"$t\":\"r\",\"v\":[\"(\",\"g\"]}",
+        "{\"$t\":\"d\",\"v\":\"x\"}", "{\"a\":{\"b\":{\"c\":[1,2,{\"$t\":\"u\"}]}}}", "[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]",
+    ];
+    let b = boot("http://www.milk.test/g.js", WorkerType::Classic);
+    let mut d = Document::new_worker(&b);
+    let mut h = Host::new();
+    for _ in 0..50 {
+        d.run(&mut h);
+        h.now += 5.0;
+    }
+    for i in 0..400u32 {
+        let data = rng.pick(&datas).to_string();
+        let mut xfer = Vec::new();
+        for _ in 0..(rng.next() % 4) {
+            xfer.push(if rng.next() % 2 == 0 { Xfer::Port(rng.next() % 6) } else { Xfer::Buffer(vec![1u8; (rng.next() % 40) as usize]) });
+        }
+        match rng.next() % 4 {
+            0 => {
+                d.worker_message(&mut h, WireMsg { data, xfer });
+            }
+            1 => d.worker_port(rng.next() % 6, Some(WireMsg { data, xfer })),
+            2 => d.worker_port(rng.next() % 6, None),
+            _ => {
+                d.net_event(&mut h, i, NetEvent::Done(vec![1, 2, 3]));
+            }
+        }
+        d.run(&mut h);
+        let _ = d.take_worker_out();
+        let _ = d.take_console();
+        let _ = d.take_net();
+        h.now += 5.0;
+    }
+    assert!(!d.script_stats().stopped);
+}
+
+#[test]
+fn a_page_survives_garbage_from_its_workers() {
+    let mut rng = Rng(0xfeed_beef_0123_4567);
+    let mut d = doc("<script>var w = new Worker('w.js'); w.onmessage = (e) => { globalThis.n = (globalThis.n || 0) + 1; }; w.onerror = () => {}; w.onmessageerror = () => {};
+        var ch = new MessageChannel(); w.postMessage(1, [ch.port2]);</script>");
+    let mut h = Host::new();
+    d.run(&mut h);
+    let spawn = d.take_workers().into_iter().find_map(|o| if let WorkerOut::Spawn(s) = o { Some(s) } else { None }).unwrap();
+    let datas = ["", "null", "{", "{\"$t\":\"p\",\"v\":99}", "\"x\"", "[1,{\"$t\":\"ref\",\"v\":3}]", "{\"$t\":\"w\",\"v\":[\"X\",7,0,0]}"];
+    for _ in 0..400 {
+        let data = rng.pick(&datas).to_string();
+        let mut xfer = Vec::new();
+        for _ in 0..(rng.next() % 3) {
+            xfer.push(if rng.next() % 2 == 0 { Xfer::Port(rng.next() % 5) } else { Xfer::Buffer(vec![9u8; (rng.next() % 20) as usize]) });
+        }
+        let ev = match rng.next() % 5 {
+            0 => WorkerEvent::Message(WireMsg { data, xfer }),
+            1 => WorkerEvent::Error { message: "m".repeat((rng.next() % 50) as usize), filename: String::from("f"), line: rng.next() as u32, column: rng.next() as u32 },
+            2 => WorkerEvent::Port { port: rng.next() % 5, msg: Some(WireMsg { data, xfer }) },
+            3 => WorkerEvent::Port { port: rng.next() % 5, msg: None },
+            _ => continue,
+        };
+        d.worker_event(&mut h, spawn.id, ev);
+        d.run(&mut h);
+        let _ = d.take_workers();
+        h.now += 5.0;
+    }
+    // Events for workers that were never made, or already ended.
+    d.worker_event(&mut h, 999, WorkerEvent::Message(WireMsg::default()));
+    d.worker_event(&mut h, spawn.id, WorkerEvent::Closed);
+    d.worker_event(&mut h, spawn.id, WorkerEvent::Message(WireMsg::default()));
+    d.worker_event(&mut h, spawn.id, WorkerEvent::Closed);
+    assert!(!d.script_stats().stopped);
+}
+
+#[test]
+fn hostile_calls_from_script_do_not_panic() {
+    let mut s = Sim::new(
+        "const calls = [
+           () => new Worker(null), () => new Worker({toString() { throw 1; }}), () => new Worker('w.js', 5), () => new Worker('w.js', {name: {toString() { throw new Error('n'); }}}),
+           () => new Worker('w.js', {type: 'module', name: 'x'.repeat(100000)}), () => Worker.prototype.postMessage.call({}, 1), () => Worker.prototype.terminate.call(5),
+           () => { const w = new Worker('w.js'); w.postMessage(); }, () => { const w = new Worker('w.js'); w.postMessage(() => {}); },
+           () => { const w = new Worker('w.js'); w.postMessage(1, 5); }, () => { const w = new Worker('w.js'); w.postMessage(1, {transfer: 5}); },
+           () => { const w = new Worker('w.js'); w.postMessage(1, [{}]); }, () => { const w = new Worker('w.js'); w.postMessage(Symbol()); },
+           () => { const w = new Worker('w.js'); const a = {}; a.a = a; w.postMessage(a); }, () => { const w = new Worker('w.js'); w.postMessage('x'.repeat(5 << 20)); },
+           () => { const w = new Worker('w.js'); w.terminate(); w.terminate(); w.postMessage(1); },
+           () => { const mc = new MessageChannel(); mc.port1.close(); new Worker('w.js').postMessage(1, [mc.port2, mc.port1]); },
+           () => new Worker('w.js', {type: 'classic'}).dispatchEvent(new Event('x')),
+           () => { const w = new Worker('w.js'); w.onmessage = 5; w.onerror = null; w.addEventListener('error', {handleEvent() { throw 1; }}); },
+         ];
+         let n = 0; for (const c of calls) { try { c(); } catch (e) { n++; } } console.log('T threw ' + (n > 5)); console.log('T done');",
+        vec![file("http://www.milk.test/w.js", "onmessage = () => {}; postMessage(1);")],
+    );
+    s.max_live = 100;
+    let t = s.finish();
+    assert!(has_line(&t, "threw true"), "{t:?}\n{}", show(&s));
+    assert!(s.spawns.len() <= 16 + 1, "{}", s.spawns.len());
+}

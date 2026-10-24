@@ -136,6 +136,19 @@ impl ScriptHost for WorkerHost<'_> {
     }
 }
 
+/// A message or port traffic from the page, in the order it came.
+fn apply(doc: &mut Document, host: &mut WorkerHost<'_>, m: ToWorker) {
+    match m {
+        ToWorker::Message(w) => {
+            if !doc.worker_closing() {
+                doc.worker_message(host, w);
+            }
+        }
+        ToWorker::Port { port, msg } => doc.worker_port(port, msg),
+        ToWorker::Net { .. } => {}
+    }
+}
+
 /// The request for a classic worker's main script.
 fn script_request(id: u32, url: &str) -> NetRequest {
     NetRequest {
@@ -189,7 +202,7 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
     let mut next_id = DRIVER_IDS;
     // Messages that came before the script ran wait for it (the worker's port is not open
     // until its script has been evaluated).
-    let mut early: VecDeque<WireMsg> = VecDeque::new();
+    let mut early: VecDeque<ToWorker> = VecDeque::new();
     let mut last_heap = 0usize;
     let mut heap_at = f64::NEG_INFINITY;
     let end: CloseWhy;
@@ -220,16 +233,15 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
                     took += 1;
                     host.blocked = 0.0;
                     match m {
-                        ToWorker::Message(w) => {
-                            if !doc.worker_started() {
+                        m @ (ToWorker::Message(_) | ToWorker::Port { .. }) => {
+                            if !doc.worker_started() || !early.is_empty() {
                                 if early.len() < MAX_STASH {
-                                    early.push_back(w);
+                                    early.push_back(m);
                                 }
-                            } else if !doc.worker_closing() {
-                                doc.worker_message(&mut host, w);
+                            } else {
+                                apply(&mut doc, &mut host, m);
                             }
                         }
-                        ToWorker::Port { port, msg } => doc.worker_port(port, msg),
                         ToWorker::Net { id, ev } => match script_reqs.get(&id).cloned() {
                             Some(u) => match ev {
                                 NetEvent::Head(h) => {
@@ -277,9 +289,9 @@ pub fn run_worker(boot: WorkerBoot, io: &mut dyn WorkerIo) {
         host.blocked = 0.0;
         doc.run(&mut host);
         while doc.worker_started() && !doc.worker_closing() && host.why.is_none() {
-            let Some(w) = early.pop_front() else { break };
+            let Some(m) = early.pop_front() else { break };
             host.blocked = 0.0;
-            doc.worker_message(&mut host, w);
+            apply(&mut doc, &mut host, m);
         }
         flush(&mut doc, host.io);
         // Is it over?

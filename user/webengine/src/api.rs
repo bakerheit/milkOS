@@ -48,7 +48,8 @@
 //! # CHANGES
 //! - A function of another same-origin frame (`frame.contentWindow.Object`) has the other
 //!   function's properties (`getOwnPropertyNames`, `prototype`): its proxy is a function whose
-//!   prototype is a host object that forwards what it does not have. No new items; the file name
+//!   prototype is a host object that forwards what it does not have. A thing the page stored on
+//!   a frame's window and reads back is itself again (it came back as `undefined`). No new items; the file name
 //!   of the engine's own JavaScript in stacks is `browser-api` (it was `fetch-api`). An
 //!   uncaught error's report now carries the source line, which the Browser prints.
 //! - Workers (docs/browser.md). `new Worker(url, {type, name})` for dedicated classic and module

@@ -185,7 +185,14 @@ pub fn import(b: &Rc<Bridge>, r: &mut Realm, x: Xv) -> JsResult<Value> {
                     Target::Handle(h) => {
                         let v = b.xf.exports.borrow().get(h).map(|p| r.pinned(p));
                         if rf.counted {
-                            b.xf.exports.borrow_mut().adjust(r, h, -1);
+                            // The one who sent it back took a reference for the trip and left
+                            // the +1 for us in the hub's queue, not applied yet: the two cancel.
+                            // (Taking the -1 first would free the object, which the other frame's
+                            // proxy still holds a reference on, before the +1 was counted.)
+                            let met = b.hub().is_some_and(|hub| hub.cancel(me, b.xf.uid, h, 1));
+                            if !met {
+                                b.xf.exports.borrow_mut().adjust(r, h, -1);
+                            }
                         }
                         Ok(v.unwrap_or(Value::UNDEFINED))
                     }

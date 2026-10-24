@@ -148,7 +148,8 @@ fn same_origin_frames_reach_each_other() {
     assert_eq!(top(&mut t, "document.getElementById('f').contentWindow.callBack = function () { return 'kid saw ' + parent.seen.length; }; ''"), "");
     assert_eq!(top(&mut t, "frames[0].callBack()"), "kid saw 1");
     // But not for ever.
-    assert_eq!(top(&mut t, "function ping(n) { return frames[0].pong(n); } frames[0].pong = function (n) { return n > 100 ? 'deep' : parent.ping(n + 1); }; try { ping(0) } catch (e) { e.name }"), "InvalidStateError");
+    assert_eq!(t.eval(1, "function pong(n) { return n > 100 ? 'deep' : parent.ping(n + 1); } 1"), "1");
+    assert_eq!(top(&mut t, "function ping(n) { return frames[0].pong(n); } try { ping(0) } catch (e) { e.name }"), "InvalidStateError");
 }
 
 #[test]
@@ -732,4 +733,22 @@ fn the_functions_of_another_frame_keep_their_properties() {
     assert_eq!(top(&mut t, "w.Array.from('ab').join()"), "a,b");
     // (Being the other frame's own functions, they are not this realm's: `isArray` of a proxy.)
     assert_eq!(top(&mut t, "String(w.Array.isArray(w.Array.from('ab')))"), "true");
+}
+
+#[test]
+fn what_a_frame_is_given_comes_back_as_it_was() {
+    // An object or function of this page, stored on a frame's window and read back, is the same
+    // thing (the frame's proxy held the only reference while the read-back dropped it).
+    let mut t = Tree::new(
+        "<title>The top</title><iframe id=f src=kid.html></iframe>",
+        &[(KID, "http://www.milk.test:8000/kid.html")],
+    );
+    let top = |t: &mut Tree, s: &str| t.eval(0, s);
+    assert_eq!(top(&mut t, "var fw = frames[0]; var mine = { a: 1 }; fw.o = mine; typeof fw.o + ' ' + fw.o.a + ' ' + (fw.o === mine)"), "object 1 true");
+    assert_eq!(top(&mut t, "function fn(x) { return 'fn ' + x; } fw.f = fn; typeof fw.f + ' ' + fw.f(2) + ' ' + (fw.f === fn)"), "function fn 2 true");
+    // Again and again (the references stay balanced), and the frame itself still uses them.
+    assert_eq!(top(&mut t, "var ok = 0; for (var i = 0; i < 50; i++) { if (fw.o === mine && fw.f === fn) ok++; } ok"), "50");
+    assert_eq!(t.eval(1, "o.a + ' ' + f('k')"), "1 fn k");
+    assert_eq!(top(&mut t, "mine.a = 7; fw.o.a"), "7");
+    assert_eq!(t.eval(1, "o.a"), "7");
 }

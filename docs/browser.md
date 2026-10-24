@@ -689,8 +689,8 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   chain failed (`V(...).concat is not a function`, its own line and column) and a fuzz of
   hostile text through the callee reader and the snippet; `tests/js/errors.js` has the same
   for the conformance run. `xframes.rs` checks the properties of another frame's functions
-  (`Object.getOwnPropertyNames`, `Array.prototype`, `call`/`bind`) and `iframe-test.sh` does it
-  in the guest.
+  (`Object.getOwnPropertyNames`, `Array.prototype`, `call`/`bind`) and that what a frame is
+  given comes back as it was; `iframe-test.sh` checks the first in the guest.
 * The script loader against the standard (`webengine-unit`, `src/tests/loading.rs`): blocking,
   `defer` and `async` order for any arrival order, a script that throws or does not compile, a
   failed or wrongly typed one, `document.write`, inserted scripts (`async = false`),

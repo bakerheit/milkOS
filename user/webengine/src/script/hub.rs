@@ -153,6 +153,21 @@ impl Hub {
         }
     }
 
+    /// Takes one waiting adjustment of exactly this kind off the queue (true if there was one).
+    pub(crate) fn cancel(&self, frame: u32, uid: u64, handle: u32, delta: i32) -> bool {
+        let mut p = self.pending.borrow_mut();
+        match p
+            .iter()
+            .position(|a| a.frame == frame && a.uid == uid && a.handle == handle && a.delta == delta)
+        {
+            Some(i) => {
+                p.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub(crate) fn take_for(&self, frame: u32, uid: u64) -> Vec<Adjust> {
         let mut p = self.pending.borrow_mut();
         let mut mine = Vec::new();

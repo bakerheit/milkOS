@@ -102,6 +102,9 @@
   `undefined`, and a script that took its builtins from a fresh frame, reCAPTCHA's fingerprint
   among them, died with `V is not a function`). They are still not instances of this
   realm's classes, and `Object.getOwnPropertyNames(frameWindow)` lists only the enumerable names.
+  An object or function of the page that was stored on a frame's window (`frames[0].o = obj`)
+  and read back is now `obj` itself (it came back as `undefined`: the read-back gave up the
+  reference the frame's proxy held).
 - Script loading follows the HTML standard more closely: a parser-blocking script sees only the
   page before it (`document.body` is `null` in a `<head>` script, a later element is not found,
   `document.scripts` ends with the running script), and an external script that `document.write`

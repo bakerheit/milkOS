@@ -1,37 +1,47 @@
-//! A counting allocator for the host tests: current and peak live bytes, so the large-script
-//! tests can say how much memory parsing and compiling took. Only meaningful when one test runs
-//! (`--test-threads=1`); the counters are global.
+//! A counting allocator for the host tests: current and peak live bytes of the thread that
+//! asks, so the large-script tests can say how much memory parsing and compiling took (tests
+//! run in parallel, each on its own threads; a block freed by another thread than the one
+//! that made it just makes the counts a little off).
 
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use core::cell::Cell;
 
 pub(crate) struct Counting;
 
-static CUR: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CUR: Cell<isize> = const { Cell::new(0) };
+    static PEAK: Cell<isize> = const { Cell::new(0) };
+}
+
+fn add(n: isize) {
+    // (try_with: a thread that is ending has no counters any more)
+    let _ = CUR.try_with(|c| {
+        let v = c.get() + n;
+        c.set(v);
+        let _ = PEAK.try_with(|p| {
+            if v > p.get() {
+                p.set(v);
+            }
+        });
+    });
+}
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         let p = unsafe { std::alloc::System.alloc(l) };
         if !p.is_null() {
-            let c = CUR.fetch_add(l.size(), Relaxed) + l.size();
-            PEAK.fetch_max(c, Relaxed);
+            add(l.size() as isize);
         }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         unsafe { std::alloc::System.dealloc(p, l) };
-        CUR.fetch_sub(l.size(), Relaxed);
+        add(-(l.size() as isize));
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         let q = unsafe { std::alloc::System.realloc(p, l, n) };
         if !q.is_null() {
-            if n >= l.size() {
-                let c = CUR.fetch_add(n - l.size(), Relaxed) + (n - l.size());
-                PEAK.fetch_max(c, Relaxed);
-            } else {
-                CUR.fetch_sub(l.size() - n, Relaxed);
-            }
+            add(n as isize - l.size() as isize);
         }
         q
     }
@@ -40,15 +50,16 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
+/// Live bytes of this thread (made here, not yet freed).
 pub(crate) fn current() -> usize {
-    CUR.load(Relaxed)
+    CUR.with(|c| c.get().max(0) as usize)
 }
 
-/// Peak since the last `reset_peak`, in bytes.
+/// Peak of `current` since the last `reset_peak`.
 pub(crate) fn peak() -> usize {
-    PEAK.load(Relaxed)
+    PEAK.with(|p| p.get().max(0) as usize)
 }
 
 pub(crate) fn reset_peak() {
-    PEAK.store(CUR.load(Relaxed), Relaxed);
+    CUR.with(|c| PEAK.with(|p| p.set(c.get())));
 }

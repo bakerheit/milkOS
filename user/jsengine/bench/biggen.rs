@@ -267,7 +267,7 @@ fn chains(rng: &mut Rng, target: usize) -> Bundle {
     while s.len() < target {
         match rng.below(2) {
             0 => {
-                let m = 500 + rng.below(1500);
+                let m = 100 + rng.below(700);
                 s.push_str("t+=0");
                 for _ in 0..m {
                     let k = rng.below(10);
@@ -277,7 +277,7 @@ fn chains(rng: &mut Rng, target: usize) -> Bundle {
                 s.push(';');
             }
             _ => {
-                let m = 100 + rng.below(400);
+                let m = 20 + rng.below(60);
                 s.push_str("t+=o");
                 for j in 0..m {
                     s.push_str(if j % 2 == 0 { ".a()" } else { ".b()" });

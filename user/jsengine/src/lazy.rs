@@ -34,6 +34,10 @@ pub(crate) fn lazy_min_bytes() -> u32 {
     }
 }
 
+/// Tests: how many functions have been compiled on their first call.
+#[cfg(test)]
+pub(crate) static COMPILES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 static LAZY_OVERRIDE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
 
 /// For tests: functions of at least this many source bytes are left for their first call
@@ -79,6 +83,8 @@ impl Realm {
             // inside; refuse rather than guess.)
             return Err(self.range_error("Maximum call stack size exceeded"));
         };
+        #[cfg(test)]
+        COMPILES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         let r = self.compile_lazy(stub, lazy, &mut atoms);
         *lazy.shared.atoms.borrow_mut() = Some(atoms);
         match r {
@@ -130,6 +136,19 @@ impl Realm {
         c.set_lazy_shared(lazy.shared.clone());
         c.compile_lazy_function(&f, stub.name, parent, lazy.this_chk, stub.kind)
             .map_err(|e| (e.pos, e.msg))
+    }
+
+    /// Whether `pending` more bytes of code being built fit the heap budget (collecting
+    /// first if that can be done here).
+    pub(crate) fn code_fits(&mut self, pending: usize) -> bool {
+        let max = self.heap.max_bytes;
+        if self.heap.used().saturating_add(pending) <= max {
+            return true;
+        }
+        if self.native_frames.is_empty() && self.frames_empty() {
+            self.collect_garbage();
+        }
+        self.heap.live_bytes.saturating_add(pending) <= max
     }
 
     /// The most estimated bytes of syntax tree one parse may keep alive at once.

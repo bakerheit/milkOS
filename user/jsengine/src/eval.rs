@@ -2,17 +2,17 @@
 //! become SyntaxError objects that point at the source position.
 
 use alloc::rc::Rc;
-use alloc::string::String;
 
 use crate::api::{ErrorKind, ErrorReport, Exc, Exception, ScriptOptions};
 use crate::ast::{Body, ExprKind, StmtKind};
 use crate::bytecode::{Code, Source};
-use crate::compiler::Compiler;
+use crate::atoms::Atoms;
+use crate::compiler::{Compiler, Parts};
 use crate::errors::ErrInfo;
 use crate::object::ObjKind;
 use crate::parser::Parser;
 use crate::realm::{Realm, Res};
-use crate::resolve::Resolver;
+use crate::resolve::{Resolver, Scopes};
 use crate::value::Val;
 
 impl Realm {
@@ -34,7 +34,9 @@ impl Realm {
         Exception(Exc::Throw(Val::Obj(e)))
     }
 
-    /// Parses and compiles a script.
+    /// Parses and compiles a script. Its top-level statements are parsed, checked and
+    /// compiled one after the other, each tree dropped before the next is read, so only the
+    /// biggest statement (not the whole script) has to fit the compile allowance.
     pub(crate) fn compile_source(
         &mut self,
         source: &str,
@@ -46,42 +48,84 @@ impl Realm {
             return Err(self.range_error("The script is too large"));
         }
         let text: Rc<[u8]> = Rc::from(source.as_bytes());
-        let src = Source {
-            text: text.clone(),
-            file: String::from(file),
-            line_starts: crate::lexer::line_starts(&text),
+        let src = Rc::new(Source::new(
+            text.clone(),
+            file,
             line_delta,
             first_col,
-        };
+            self.heap.code_acct.clone(),
+        ));
         let mut p = Parser::new(&text);
         p.stack = Some(self.stack);
         p.mem_limit = self.compile_limit();
         p.lazy_min = crate::lazy::lazy_min_bytes();
-        let script = match p.parse_script() {
-            Ok(s) => s,
-            Err(e) => return Err(self.syntax_error_at(&src, e.pos, &e.msg)),
-        };
-        let atoms = core::mem::replace(&mut p.atoms, crate::atoms::Atoms::empty());
-        let nscopes = p.scope_count();
-        drop(p);
-        let mut res = Resolver::new(&atoms, nscopes);
-        res.stack = Some(self.stack);
-        if let Err(e) = res.script(&script) {
+        if let Err(e) = p.script_begin() {
             return Err(self.syntax_error_at(&src, e.pos, &e.msg));
         }
-        let scopes = core::mem::take(&mut res.scopes);
-        let src = Rc::new(src);
         let shared = Rc::new(crate::lazy::LazyShared {
             atoms: core::cell::RefCell::new(None),
             default_atom: None,
         });
+        let mut parts = Parts::new(Scopes::new(0, 1), shared.clone());
+        // The script scope, and the code's start.
+        {
+            let atoms = core::mem::replace(&mut p.atoms, Atoms::empty());
+            let mut c = Compiler::from_parts(self, &atoms, src.clone(), core::mem::take(&mut parts));
+            let r = c.begin_script();
+            parts = c.into_parts();
+            p.atoms = atoms;
+            if let Err(e) = r {
+                return Err(self.syntax_error_at(&src, e.pos, &e.msg));
+            }
+        }
+        parts.scopes[0].kind = crate::resolve::SK::Script;
+        let mut directives = true;
+        loop {
+            let mark = p.scope_mark();
+            p.mem = 0;
+            let st = match p.script_next(&mut directives) {
+                Ok(Some(st)) => st,
+                Ok(None) => break,
+                Err(e) => return Err(self.syntax_error_at(&src, e.pos, &e.msg)),
+            };
+            let hi = p.scope_mark();
+            let strict = p.is_strict();
+            let atoms = core::mem::replace(&mut p.atoms, Atoms::empty());
+            let mut res = Resolver::for_script_stmt(&atoms, core::mem::take(&mut parts.scopes));
+            res.stack = Some(self.stack);
+            let resolved = res.script_stmt(&st, strict, hi);
+            parts.scopes = core::mem::take(&mut res.scopes);
+            drop(res);
+            let out = match resolved {
+                Err(e) => Err((e.pos, e.msg)),
+                Ok(()) => {
+                    let mut c = Compiler::from_parts(
+                        self,
+                        &atoms,
+                        src.clone(),
+                        core::mem::take(&mut parts),
+                    );
+                    let r = c.script_stmt(&st, strict).map_err(|e| (e.pos, e.msg));
+                    parts = c.into_parts();
+                    r
+                }
+            };
+            p.atoms = atoms;
+            if let Err((pos, msg)) = out {
+                return Err(self.syntax_error_at(&src, pos, &msg));
+            }
+            // The statement's tree has done its job.
+            drop(st);
+            parts.forget_scopes(mark);
+            p.reset_scopes(mark);
+        }
+        let atoms = core::mem::replace(&mut p.atoms, Atoms::empty());
+        drop(p);
         let compiled = {
-            let mut c = Compiler::new(self, &atoms, scopes, src.clone());
-            c.set_lazy_shared(shared.clone());
-            c.compile_script(&script).map_err(|e| (e.pos, e.msg))
+            let mut c = Compiler::from_parts(self, &atoms, src.clone(), parts);
+            c.end_script().map_err(|e| (e.pos, e.msg))
         };
-        // The tree has done its job; functions left for later keep the identifier table.
-        drop(script);
+        // Functions left for later keep the identifier table.
         if Rc::strong_count(&shared) > 1 {
             *shared.atoms.borrow_mut() = Some(atoms);
         }
@@ -147,13 +191,13 @@ impl Realm {
                         }
                 }
                 Err(e) => {
-                    let s = Source {
-                        text: Rc::from(text),
-                        file: String::from(file),
-                        line_starts: crate::lexer::line_starts(text),
-                        line_delta: -2,
-                        first_col: 1,
-                    };
+                    let s = Source::new(
+                        Rc::from(text),
+                        file,
+                        -2,
+                        1,
+                        self.heap.code_acct.clone(),
+                    );
                     return Err(self.syntax_error_at(&s, e.pos, &e.msg));
                 }
             };

@@ -123,6 +123,11 @@ pub(crate) enum ExprKind {
     Null,
     Bool(bool),
     Array(Vec<ArrElem>),
+    /// An array literal of at least `parser::CONST_ARRAY_MIN` number literals (and nothing
+    /// else), or of string literals: kept as plain values, 8 (or 24) bytes an element
+    /// instead of a tree of 64.
+    NumArray(Vec<f64>),
+    StrArray(Vec<Vec<u16>>),
     Object(Vec<PropDef>),
     Func(Box<Func>),
     Class(Box<Class>),
@@ -418,8 +423,6 @@ pub(crate) struct Class {
 
 pub(crate) struct Script {
     pub body: Vec<Stmt>,
-    pub scope: ScopeId,
-    pub strict: bool,
 }
 
 /// One distinct (specifier, attributes) pair a module asks for.

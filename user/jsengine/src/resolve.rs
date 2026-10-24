@@ -131,9 +131,16 @@ impl Scopes {
         }
     }
 
-    /// One past the last id.
-    pub fn end(&self) -> u32 {
-        self.base + self.v.len() as u32
+    /// Makes ids below `end` valid (blank scopes for the new ones).
+    pub fn grow(&mut self, end: u32) {
+        while self.base + (self.v.len() as u32) < end {
+            self.v.push(blank(SK::Block));
+        }
+    }
+
+    /// Forgets the scopes from id `end` on.
+    pub fn truncate(&mut self, end: u32) {
+        self.v.truncate(end.saturating_sub(self.base) as usize);
     }
 }
 
@@ -538,13 +545,31 @@ impl<'a> Resolver<'a> {
 
     // ---- entry points ----
 
-    pub fn script(&mut self, s: &Script) -> RResult {
-        self.open(s.scope, SK::Script, None);
-        self.scopes[s.scope].strict = s.strict;
-        self.cur = s.scope;
-        self.hoist_vars(&s.body, s.scope)?;
-        self.declare_lexical(&s.body, s.scope, true)?;
-        self.stmts(&s.body)
+    /// A resolver for the statements of a script that is checked one at a time: the table so
+    /// far, with the script scope (id 0) open in it. (The table is handed to whoever works
+    /// on a statement next.)
+    pub fn for_script_stmt(atoms: &'a Atoms, scopes: Scopes) -> Resolver<'a> {
+        Resolver {
+            scopes,
+            atoms,
+            cur: 0,
+            depth: 0,
+            stack: None,
+            analyzing: false,
+            free: Vec::new(),
+            free_priv: Vec::new(),
+        }
+    }
+
+    /// Declares the names of one top-level statement and resolves what it uses. `hi` is one
+    /// past the highest scope id the statement's tree has.
+    pub fn script_stmt(&mut self, st: &Stmt, strict: bool, hi: ScopeId) -> RResult {
+        self.scopes.grow(hi);
+        self.scopes[0].strict = strict;
+        self.cur = 0;
+        self.hoist_stmt(st, 0, true)?;
+        self.declare_lexical(core::slice::from_ref(st), 0, true)?;
+        self.stmt(st)
     }
 
     pub fn module(&mut self, m: &ModuleAst) -> RResult {
@@ -1206,6 +1231,8 @@ impl<'a> Resolver<'a> {
             | ExprKind::NewTarget
             | ExprKind::Null
             | ExprKind::Bool(_)
+            | ExprKind::NumArray(_)
+            | ExprKind::StrArray(_)
             | ExprKind::SuperMember(_) => Ok(()),
             ExprKind::Template(_, exprs) => {
                 for x in exprs {

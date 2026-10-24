@@ -1072,6 +1072,99 @@ fn fusion_is_invisible() {
     });
 }
 
+/// Compiling functions on their first call (lazy.rs) must change nothing observable: the same
+/// results, errors, error positions and stacks whether every function is left for later or
+/// none is.
+#[test]
+fn lazy_is_invisible() {
+    on_big_stack(|| {
+        let mut rng = Rng(seed() ^ 0x1a2b);
+        let corpus: Vec<&str> = super::conformance::FILES.iter().map(|f| f.1).collect();
+        let mut cases: Vec<String> = Vec::new();
+        for _ in 0..iters() / 3 {
+            cases.push(program(&mut rng));
+        }
+        for _ in 0..iters() / 6 {
+            cases.push(typed_program(&mut rng));
+        }
+        for _ in 0..iters() / 6 {
+            let base = corpus[rng.below(corpus.len())];
+            let chars: Vec<char> = base.chars().collect();
+            let start = rng.below(chars.len());
+            let len = 200 + rng.below(1500);
+            let window: String = chars[start..(start + len).min(chars.len())]
+                .iter()
+                .collect();
+            cases.push(mutate(&mut rng, &window));
+        }
+        for _ in 0..iters() / 6 {
+            cases.push(token_soup(&mut rng));
+        }
+        for extra in LAZY_CASES {
+            cases.push(String::from(*extra));
+        }
+        let mut diffs = Vec::new();
+        for (i, src) in cases.iter().enumerate() {
+            crate::set_lazy_min_bytes(Some(u32::MAX - 1));
+            let eager = observe(src);
+            crate::set_lazy_min_bytes(Some(0));
+            let lazy = observe(src);
+            // (Where exactly a runaway recursion runs out of stack may differ: compiling a
+            // function on its first call needs some native stack too.)
+            if eager != lazy && !eager.contains("Maximum call stack") {
+                diffs.push(alloc::format!(
+                    "case {i}:\n{src}\n--- eager:\n{eager}\n--- lazy:\n{lazy}"
+                ));
+                if diffs.len() >= 3 {
+                    break;
+                }
+            }
+        }
+        crate::set_lazy_min_bytes(None);
+        assert!(diffs.is_empty(), "{}", diffs.join("\n\n"));
+        // (and the lazy path did run)
+        assert!(crate::lazy::COMPILES.load(core::sync::atomic::Ordering::Relaxed) > 1000);
+    });
+}
+
+const LAZY_CASES: &[&str] = &[
+    // early errors inside functions that are never called
+    "function f() { let a = 1; var a; } 1",
+    "function f() { return 1; } function g() { class A { m() { this.#x } } } 1",
+    "var o = { m() { 'use strict'; var x = 010; } }; 1",
+    "function f(a, a) { 'use strict'; } 1",
+    "(function () { break; })",
+    "function f() { function g() { let b; let b; } } 1",
+    // scoping
+    "var x = 'g'; function f() { var x = 'f'; return function () { return x }; } f()()",
+    "function f(n) { var r = []; for (let i = 0; i < n; i++) r.push(() => i); return r.map(g => g()).join() } f(4)",
+    "function f() { return typeof arguments + [].slice.call((() => arguments)()).length } f(1, 2, 3)",
+    "function f() { var a = arguments; return (() => a[0] + arguments[1])() } f(10, 20)",
+    "var f = function g() { return typeof g }; f()",
+    "var f = function g() { g = 1; return typeof g }; f()",
+    "class A { constructor() { this.v = 1 } get x() { return this.v } set x(n) { this.v = n } static s() { return 's' } #p = 5; q() { return this.#p } } var a = new A(); a.x = 7; [a.x, A.s(), a.q()].join()",
+    "class B { m() { return 'B' } } class C extends B { m() { return super.m() + 'C' } constructor() { super(); this.z = () => this.m() } } new C().z()",
+    "function* g(a) { var b = yield a; yield b * 2 } var it = g(1); it.next(); it.next(5).value",
+    "async function f() { await null; return 1 } f().then(v => globalThis.r = v); 0",
+    "function F() { if (!new.target) return 'call'; this.t = new.target === F } [F(), new F().t].join()",
+    "var o = { a: 1, get b() { return this.a + 1 }, m() { return () => this.a } }; o.m()() + o.b",
+    "function f() { 'use strict'; return this } f() === undefined",
+    "function f() { return this === globalThis } f()",
+    "function outer() { var c = 0; function inc() { return ++c } function get() { return c } return [inc, get] } var [i, g] = outer(); i(); i(); g()",
+    "eval('var ev = 1'); (function () { return typeof ev })()",
+    "function f() { return f.toString().length } f()",
+    "var f = (a, b = 2, ...c) => a + b + c.length; [f(1), f.length, f.name].join()",
+    "function f() { try { null.x } catch (e) { return e.stack } } f()",
+    "function f() {\n  g();\n}\nfunction g() {\n  throw new Error('boom')\n}\ntry { f() } catch (e) { e.stack }",
+    "function deep(n) { return n ? deep(n - 1) + 1 : 0 } try { deep(100000) } catch (e) { e.name }",
+    "var s = 0; [1, 2, 3].forEach(function (v) { s += v }); s",
+    "function f(a, b) { return a + b } f.call(null, 1, 2) + f.apply(null, [3, 4]) + f.bind(null, 5)(6)",
+    "var t = []; for (var i = 0; i < 3; i++) t.push(function () { return i }); t.map(f => f()).join()",
+    "label: { function f() { return 1 } break label } typeof f",
+    "if (true) { function h() { return 'h' } } h()",
+    "'use strict'; { function k() { return 'k' } } typeof k",
+];
+
 const FUSION_CASES: &[&str] = &[
     // this.x / local.x, plain and as a method receiver, on missing receivers
     "class A { constructor() { this.x = 1 } get() { return this.x } m() { return this.nope.deeper } } var a = new A(); [a.get(), (() => { try { return a.m() } catch (e) { return e.message + '@' + e.stack } })()].join()",

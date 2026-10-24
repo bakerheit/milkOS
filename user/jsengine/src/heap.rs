@@ -8,7 +8,9 @@
 //! object and environment, the VM stack and frames, temporaries, pins and the job queue.
 //! WeakMap/WeakSet entries are ephemerons (a value is kept only while its key is).
 
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::object::{Obj, ObjKind};
 use crate::string::{FlatStr, JsStr, hash_units};
@@ -97,6 +99,10 @@ pub(crate) struct Heap {
     pub work: u64,
     /// Memory held outside the heap that counts against the budget (module code).
     pub external: usize,
+    /// Memory held by compiled code and script sources, kept by the code itself (it adds
+    /// when it is made and takes away when it is dropped). It counts against the budget like
+    /// `external` does.
+    pub code_acct: Rc<Cell<usize>>,
     stress_n: u32,
 }
 
@@ -123,6 +129,7 @@ impl Heap {
             stress_n: 0,
             work: 0,
             external: 0,
+            code_acct: Rc::new(Cell::new(0)),
         }
     }
 
@@ -140,6 +147,13 @@ impl Heap {
                 self.gc_wanted = true;
             }
         }
+    }
+
+    /// Notes `bytes` of new code held (see `code_acct`; the code takes them away again when
+    /// it is dropped).
+    pub fn charge_code(&mut self, bytes: usize) {
+        self.code_acct.set(self.code_acct.get().saturating_add(bytes));
+        self.charge(bytes);
     }
 
     /// Bytes in use as far as we know (live at the last GC plus everything since).
@@ -539,6 +553,7 @@ impl Heap {
         live += (self.objs.capacity() * core::mem::size_of::<ObjSlot>())
             + (self.strs.capacity() * core::mem::size_of::<StrSlot>());
         live += self.external;
+        live += self.code_acct.get();
         self.live_bytes = live;
         self.since_gc = 0;
         self.gc_threshold = live.max(MIN_GC_THRESHOLD);

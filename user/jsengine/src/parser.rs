@@ -11,6 +11,8 @@ use crate::atoms::{Atom, Atoms, is_reserved, is_strict_reserved, kw};
 use crate::lexer::{LexError, Lexer, P, Tok, Token};
 
 pub(crate) const MAX_NEST: u32 = 1500;
+/// Array literals of at least this many number (or string) literals are kept as plain values.
+pub(crate) const CONST_ARRAY_MIN: usize = 16;
 /// Estimated bytes per token parsed, for the tree and the code made from it (measured on
 /// minified code: 64 to 75 bytes a token whole, with the allocator's overhead).
 const TOKEN_COST: u64 = 72;
@@ -22,6 +24,16 @@ const STUB_COST: u64 = 640;
 /// the chain is long, and the compiler gives up near 2300 links on the default stack anyway:
 /// a longer one is refused here, before it can make a tree too deep to free.
 pub(crate) const MAX_CHAIN: u32 = 6000;
+
+/// Whether a name repeats in a list (in time proportional to n log n, not n squared).
+fn has_duplicate(names: &[Atom]) -> bool {
+    if names.len() < 16 {
+        return names.iter().enumerate().any(|(i, n)| names[..i].contains(n));
+    }
+    let mut sorted: Vec<Atom> = names.to_vec();
+    sorted.sort_unstable();
+    sorted.windows(2).any(|w| w[0] == w[1])
+}
 
 pub(crate) struct ParseError {
     pub msg: String,
@@ -345,16 +357,69 @@ impl<'a> Parser<'a> {
 
     pub fn parse_script(&mut self) -> PResult<Script> {
         self.advance()?;
-        let scope = self.new_scope();
-        let (body, strict) = self.parse_body_with_directives(false)?;
+        self.new_scope();
+        let (body, _) = self.parse_body_with_directives(false)?;
         if !matches!(self.tok.tok, Tok::Eof) {
             return self.unexpected();
         }
-        Ok(Script {
-            body,
-            scope,
-            strict,
-        })
+        Ok(Script { body })
+    }
+
+    // ---- scripts, one top-level statement at a time ----
+    //
+    // A script's statements can be checked and compiled as they come, and their trees
+    // dropped, so a long script never has all its statements in memory at once (`eval.rs`).
+
+    /// Starts a script: reads the first token and makes the script's scope. Returns its id.
+    pub fn script_begin(&mut self) -> PResult<ScopeId> {
+        self.advance()?;
+        Ok(self.new_scope())
+    }
+
+    /// The next top-level statement (honouring the directive prologue), or None at the end.
+    /// `directives` is true until the first statement that is not a directive.
+    pub fn script_next(&mut self, directives: &mut bool) -> PResult<Option<Stmt>> {
+        if matches!(self.tok.tok, Tok::Eof) {
+            return Ok(None);
+        }
+        if *directives {
+            if let Tok::Str(_, legacy) = &self.tok.tok {
+                let legacy = *legacy;
+                let raw = &self.lx.src
+                    [self.tok.start as usize + 1..(self.tok.end as usize).saturating_sub(1)];
+                let is_use_strict = raw == b"use strict";
+                let p = self.peek()?;
+                let ends = matches!(p.tok, Tok::P(P::Semi) | Tok::P(P::RBrace) | Tok::Eof)
+                    || p.nl_before;
+                if ends {
+                    if is_use_strict {
+                        self.ctx.strict = true;
+                    }
+                    if legacy && self.ctx.strict {
+                        return self.err("Octal escape sequences are not allowed in strict mode");
+                    }
+                } else {
+                    *directives = false;
+                }
+            } else {
+                *directives = false;
+            }
+        }
+        Ok(Some(self.parse_statement_list_item()?))
+    }
+
+    /// Whether the script so far is strict code.
+    pub fn is_strict(&self) -> bool {
+        self.ctx.strict
+    }
+
+    /// The next scope id (to give back with `reset_scopes` once a statement is done).
+    pub fn scope_mark(&self) -> ScopeId {
+        self.next_scope
+    }
+
+    pub fn reset_scopes(&mut self, mark: ScopeId) {
+        self.next_scope = mark;
     }
 
     pub fn parse_module(&mut self) -> PResult<ModuleAst> {
@@ -1715,16 +1780,14 @@ impl<'a> Parser<'a> {
             if let Some(r) = &rest {
                 collect_pat_names(r, &mut names);
             }
-            for (i, n) in names.iter().enumerate() {
-                if names[..i].contains(n) {
-                    return self.err_at(
-                        "Duplicate parameter name not allowed in this context",
-                        start,
-                    );
-                }
-                if strict && (*n == kw::EVAL || *n == kw::ARGUMENTS) {
-                    return self.err_at("Unexpected eval or arguments in strict mode", start);
-                }
+            if has_duplicate(&names) {
+                return self.err_at(
+                    "Duplicate parameter name not allowed in this context",
+                    start,
+                );
+            }
+            if strict && names.iter().any(|n| *n == kw::EVAL || *n == kw::ARGUMENTS) {
+                return self.err_at("Unexpected eval or arguments in strict mode", start);
             }
         }
         Ok(Box::new(Func {
@@ -1892,6 +1955,7 @@ impl<'a> Parser<'a> {
     fn declare_private(
         &mut self,
         privs: &mut Vec<PrivDecl>,
+        index: &mut alloc::collections::BTreeMap<Atom, usize>,
         name: Atom,
         is_static: bool,
         kind: PrivKind,
@@ -1904,7 +1968,7 @@ impl<'a> Parser<'a> {
                 pos,
             );
         }
-        if let Some(prev) = privs.iter().find(|p| p.name == name) {
+        if let Some(prev) = index.get(&name).map(|&i| &privs[i]) {
             let pair = matches!(
                 (prev.kind, kind),
                 (PrivKind::Getter, PrivKind::Setter) | (PrivKind::Setter, PrivKind::Getter)
@@ -1922,6 +1986,7 @@ impl<'a> Parser<'a> {
             PrivKind::Getter => Some(self.atoms.intern(&alloc::format!("{text}/g"))),
             PrivKind::Setter => Some(self.atoms.intern(&alloc::format!("{text}/s"))),
         };
+        index.entry(name).or_insert(privs.len());
         privs.push(PrivDecl {
             name,
             is_static,
@@ -1981,6 +2046,7 @@ impl<'a> Parser<'a> {
         let mut field_key_static: Vec<bool> = Vec::new();
         let mut field_key_at: Vec<u32> = Vec::new();
         let mut privates: Vec<PrivDecl> = Vec::new();
+        let mut priv_index: alloc::collections::BTreeMap<Atom, usize> = alloc::collections::BTreeMap::new();
         let mut priv_installs: Vec<PrivInstall> = Vec::new();
         let derived = heritage.is_some();
         let mut fields_start = 0u32;
@@ -2097,7 +2163,7 @@ impl<'a> Parser<'a> {
                         Some(MethodKind::Set) => PrivKind::Setter,
                         _ => PrivKind::Method,
                     };
-                    let func = self.declare_private(&mut privates, pn, is_static, pk, mpos)?;
+                    let func = self.declare_private(&mut privates, &mut priv_index, pn, is_static, pk, mpos)?;
                     if !is_static && let Some(func) = func {
                         priv_installs.push(PrivInstall {
                             name: pn,
@@ -2134,7 +2200,7 @@ impl<'a> Parser<'a> {
                 return self.unexpected();
             }
             if let PropName::Private(pn) = key {
-                self.declare_private(&mut privates, pn, is_static, PrivKind::Field, mpos)?;
+                self.declare_private(&mut privates, &mut priv_index, pn, is_static, PrivKind::Field, mpos)?;
             }
             let fkey = match key {
                 PropName::Computed(e) => {
@@ -2487,19 +2553,17 @@ impl<'a> Parser<'a> {
         if let Some(r) = &rest {
             collect_pat_names(r, &mut names);
         }
-        for (i, n) in names.iter().enumerate() {
-            if names[..i].contains(n) {
-                return self.err_at(
-                    "Duplicate parameter name not allowed in this context",
-                    start,
-                );
-            }
-            if *n == kw::AWAIT && is_async {
-                return self.err_at(
-                    "'await' is not a valid parameter name in an async function",
-                    start,
-                );
-            }
+        if has_duplicate(&names) {
+            return self.err_at(
+                "Duplicate parameter name not allowed in this context",
+                start,
+            );
+        }
+        if is_async && names.contains(&kw::AWAIT) {
+            return self.err_at(
+                "'await' is not a valid parameter name in an async function",
+                start,
+            );
         }
         let f = Func {
             name: None,
@@ -3138,29 +3202,80 @@ impl<'a> Parser<'a> {
     fn parse_array_literal(&mut self) -> PResult<Expr> {
         let pos = self.tok.start;
         self.advance()?;
-        let mut items = Vec::new();
+        let mut items: Vec<ArrElem> = Vec::new();
+        // While every element so far is a number literal (or every one a string literal),
+        // they are kept as plain values in these; any other element turns them into trees.
+        let mut nums: Vec<f64> = Vec::new();
+        let mut strs: Vec<Vec<u16>> = Vec::new();
         loop {
             if self.eat(P::RBracket)? {
                 break;
             }
             if self.is(P::Comma) {
                 self.advance()?;
+                self.expand_const_items(&mut items, &mut nums, &mut strs, pos);
                 items.push(ArrElem::Hole);
                 continue;
             }
             if self.eat(P::Ellipsis)? {
+                self.expand_const_items(&mut items, &mut nums, &mut strs, pos);
                 items.push(ArrElem::Spread(self.parse_assign(false)?));
             } else {
-                items.push(ArrElem::Item(self.parse_assign(false)?));
+                let e = self.parse_assign(false)?;
+                match e.k {
+                    ExprKind::Num(n) if items.is_empty() && strs.is_empty() => nums.push(n),
+                    ExprKind::Str(s) if items.is_empty() && nums.is_empty() => strs.push(s),
+                    _ => {
+                        self.expand_const_items(&mut items, &mut nums, &mut strs, pos);
+                        items.push(ArrElem::Item(e));
+                    }
+                }
             }
             if !self.is(P::RBracket) {
                 self.expect(P::Comma)?;
             }
         }
+        if items.is_empty() {
+            if nums.len() >= CONST_ARRAY_MIN {
+                return Ok(Expr {
+                    k: ExprKind::NumArray(nums),
+                    pos,
+                });
+            }
+            if strs.len() >= CONST_ARRAY_MIN {
+                return Ok(Expr {
+                    k: ExprKind::StrArray(strs),
+                    pos,
+                });
+            }
+            self.expand_const_items(&mut items, &mut nums, &mut strs, pos);
+        }
         Ok(Expr {
             k: ExprKind::Array(items),
             pos,
         })
+    }
+
+    /// Turns the plain values collected by `parse_array_literal` into element trees.
+    fn expand_const_items(
+        &mut self,
+        items: &mut Vec<ArrElem>,
+        nums: &mut Vec<f64>,
+        strs: &mut Vec<Vec<u16>>,
+        pos: u32,
+    ) {
+        for n in nums.drain(..) {
+            items.push(ArrElem::Item(Expr {
+                k: ExprKind::Num(n),
+                pos,
+            }));
+        }
+        for s in strs.drain(..) {
+            items.push(ArrElem::Item(Expr {
+                k: ExprKind::Str(s),
+                pos,
+            }));
+        }
     }
 
     fn parse_object_literal(&mut self) -> PResult<Expr> {

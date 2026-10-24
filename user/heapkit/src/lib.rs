@@ -132,6 +132,9 @@ pub struct Stats {
     pub free: usize,
     /// Bytes in use by chunks (including the small-block runs).
     pub used: usize,
+    /// The largest the arena has been since the start (or the last `reset_peak`), in bytes:
+    /// the process's peak memory use, to within the arena's growth step.
+    pub peak: usize,
 }
 
 struct State<P> {
@@ -139,6 +142,8 @@ struct State<P> {
     base: usize,
     /// End of the arena; the fence header sits just below it.
     end: usize,
+    /// The highest the arena's end has been.
+    peak_end: usize,
     bins: [usize; NBINS],
     bitmap: [u64; NBINS / 64],
     /// Per class: the first run that has free blocks (a doubly linked list).
@@ -165,6 +170,7 @@ impl<P: Pages> Heap<P> {
                 sys,
                 base: 0,
                 end: 0,
+                peak_end: 0,
                 bins: [0; NBINS],
                 bitmap: [0; NBINS / 64],
                 runs: [0; NCLASS],
@@ -213,8 +219,14 @@ impl<P: Pages> Heap<P> {
                 end: s.end,
                 free: s.free_bytes,
                 used: s.end - s.base - s.free_bytes,
+                peak: s.peak_end.max(s.end) - s.base,
             }
         })
+    }
+
+    /// Forgets the peak so far: the next `stats().peak` counts from the arena as it is now.
+    pub fn reset_peak(&self) {
+        self.locked(|s| s.peak_end = s.end);
     }
 
     /// Run `f` on the system side, under the lock (tests read their page counts this way).
@@ -321,6 +333,7 @@ impl<P: Pages> State<P> {
         }
         self.base = base;
         self.end = end;
+        self.peak_end = end;
         // A permanent in-use sentinel at the start and the fence at the end, so coalescing
         // never looks past the arena.
         set_head(base, HDR, INUSE);
@@ -588,6 +601,7 @@ impl<P: Pages> State<P> {
         // The old fence becomes the header of the new space.
         set_head(f, add, INUSE);
         self.end = new_end;
+        self.peak_end = self.peak_end.max(new_end);
         set_head(self.fence(), HDR, INUSE);
         set_prev_size(self.fence(), add);
         self.release(f, false);

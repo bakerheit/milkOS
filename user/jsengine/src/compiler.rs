@@ -35,7 +35,7 @@ struct Region {
     finally: bool,
 }
 
-enum Jc<'a> {
+enum Jc {
     /// A break/continue target: loops, switches (`plain`: an unlabelled break stops here) and
     /// labelled statements.
     Break {
@@ -48,7 +48,7 @@ enum Jc<'a> {
     /// A try statement: its regions are suspended on the way out, and its finally block (if
     /// any) is run.
     Finally {
-        block: Option<&'a Block>,
+        block: Option<*const Block>,
         regions: Vec<usize>,
     },
     IterClose {
@@ -58,16 +58,17 @@ enum Jc<'a> {
     PopEnv,
 }
 
-struct FnState<'a> {
+struct FnState {
     ops: Vec<Op>,
     consts: Vec<Const>,
     str_consts: BTreeMap<Vec<u16>, u32>,
+    num_consts: BTreeMap<u64, u32>,
     handlers: Vec<Handler>,
     lines: Vec<(u32, u32)>,
     nlocals: u32,
     nparams: u32,
     scope_chain: Vec<ScopeId>,
-    ctx: Vec<Jc<'a>>,
+    ctx: Vec<Jc>,
     regions: Vec<Region>,
     kind: CodeKind,
     strict: bool,
@@ -84,7 +85,7 @@ pub(crate) struct Compiler<'a> {
     atoms: &'a Atoms,
     scopes: Scopes,
     source: Rc<Source>,
-    fns: Vec<FnState<'a>>,
+    fns: Vec<FnState>,
     atom_strs: BTreeMap<Atom, StrId>,
     /// The chain of environments a scope stands in (see `chain_node`), once built.
     chain_memo: BTreeMap<ScopeId, Option<Rc<ChainNode>>>,
@@ -96,6 +97,58 @@ pub(crate) struct Compiler<'a> {
     module: Option<crate::api::ModuleId>,
     /// The hidden `*default*` binding's atom (named "default" when it names a function).
     default_atom: Option<Atom>,
+    /// A script's hoisted function declarations are made at its start but compiled as they
+    /// come, into these (they are put in front of the statements' code when the script ends).
+    hoist_ops: Vec<Op>,
+    hoist_lines: Vec<(u32, u32)>,
+    /// Statements compiled (the code's size is checked against the heap budget now and then).
+    stmts_done: u32,
+}
+
+/// What a compiler keeps between the top-level statements of a script (so the tree of one
+/// statement is gone before the next is parsed).
+pub(crate) struct Parts {
+    fns: Vec<FnState>,
+    pub scopes: Scopes,
+    atom_strs: BTreeMap<Atom, StrId>,
+    chain_memo: BTreeMap<ScopeId, Option<Rc<ChainNode>>>,
+    lazy_shared: Option<Rc<crate::lazy::LazyShared>>,
+    hoist_ops: Vec<Op>,
+    hoist_lines: Vec<(u32, u32)>,
+}
+
+impl Default for Parts {
+    fn default() -> Parts {
+        Parts {
+            fns: Vec::new(),
+            scopes: Scopes::empty(),
+            atom_strs: BTreeMap::new(),
+            chain_memo: BTreeMap::new(),
+            lazy_shared: None,
+            hoist_ops: Vec::new(),
+            hoist_lines: Vec::new(),
+        }
+    }
+}
+
+impl Parts {
+    pub fn new(scopes: Scopes, lazy_shared: Rc<crate::lazy::LazyShared>) -> Parts {
+        Parts {
+            fns: Vec::new(),
+            scopes,
+            atom_strs: BTreeMap::new(),
+            chain_memo: BTreeMap::new(),
+            lazy_shared: Some(lazy_shared),
+            hoist_ops: Vec::new(),
+            hoist_lines: Vec::new(),
+        }
+    }
+
+    /// Forgets what was learned about scopes from id `mark` on (their ids are used again).
+    pub fn forget_scopes(&mut self, mark: ScopeId) {
+        let _ = self.chain_memo.split_off(&mark);
+        self.scopes.truncate(mark);
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -142,7 +195,56 @@ impl<'a> Compiler<'a> {
             ctor_fields: false,
             module: None,
             default_atom: None,
+            hoist_ops: Vec::new(),
+            hoist_lines: Vec::new(),
+            stmts_done: 0,
         }
+    }
+
+    /// A compiler that goes on with what `into_parts` of an earlier one kept.
+    pub fn from_parts(
+        realm: &'a mut Realm,
+        atoms: &'a Atoms,
+        source: Rc<Source>,
+        p: Parts,
+    ) -> Compiler<'a> {
+        let mut c = Compiler::new(realm, atoms, p.scopes, source);
+        c.fns = p.fns;
+        c.atom_strs = p.atom_strs;
+        c.chain_memo = p.chain_memo;
+        c.lazy_shared = p.lazy_shared;
+        c.hoist_ops = p.hoist_ops;
+        c.hoist_lines = p.hoist_lines;
+        c
+    }
+
+    pub fn into_parts(self) -> Parts {
+        Parts {
+            fns: self.fns,
+            scopes: self.scopes,
+            atom_strs: self.atom_strs,
+            chain_memo: self.chain_memo,
+            lazy_shared: self.lazy_shared,
+            hoist_ops: self.hoist_ops,
+            hoist_lines: self.hoist_lines,
+        }
+    }
+
+    /// Whether the code made so far (still being built, so not counted by the heap yet) fits
+    /// the heap budget with what is already there: a script whose code is bigger than the
+    /// heap could never run, so it is refused before it takes the memory.
+    fn code_fits(&mut self) -> bool {
+        let pending: usize = self
+            .fns
+            .iter()
+            .map(|f| {
+                f.ops.len() * core::mem::size_of::<Op>()
+                    + f.consts.len() * core::mem::size_of::<Const>()
+                    + f.lines.len() * 8
+            })
+            .sum::<usize>()
+            + self.hoist_ops.len() * core::mem::size_of::<Op>();
+        self.realm.code_fits(pending)
     }
 
     fn err<T>(&self, msg: &str, pos: u32) -> CResult<T> {
@@ -154,12 +256,12 @@ impl<'a> Compiler<'a> {
 
     // ---- function state helpers ----
 
-    fn f(&mut self) -> &mut FnState<'a> {
+    fn f(&mut self) -> &mut FnState {
         let n = self.fns.len() - 1;
         &mut self.fns[n]
     }
 
-    fn fr(&self) -> &FnState<'a> {
+    fn fr(&self) -> &FnState {
         &self.fns[self.fns.len() - 1]
     }
 
@@ -256,15 +358,13 @@ impl<'a> Compiler<'a> {
 
     fn const_num(&mut self, n: f64) -> u32 {
         let f = self.f();
-        for (i, c) in f.consts.iter().enumerate() {
-            if let Const::Num(m) = c
-                && m.to_bits() == n.to_bits()
-            {
-                return i as u32;
-            }
+        if let Some(&i) = f.num_consts.get(&n.to_bits()) {
+            return i;
         }
         f.consts.push(Const::Num(n));
-        f.consts.len() as u32 - 1
+        let i = f.consts.len() as u32 - 1;
+        f.num_consts.insert(n.to_bits(), i);
+        i
     }
 
     fn add_const(&mut self, c: Const) -> u32 {
@@ -589,16 +689,61 @@ impl<'a> Compiler<'a> {
 
     // ---- entry: scripts ----
 
-    pub fn compile_script(&mut self, s: &'a Script) -> CResult<Rc<Code>> {
-        self.fns.push(new_fn(CodeKind::Script, s.strict));
-        self.f().scope_chain.push(s.scope);
+    /// Starts compiling a script, whose scope is scope 0 (see `script_stmt`).
+    pub fn begin_script(&mut self) -> CResult<()> {
+        self.fns.push(new_fn(CodeKind::Script, false));
+        self.f().scope_chain.push(0);
         let c = self.alloc_local(0)?;
         self.f().completion = Some(c);
+        // Over to the declarations and hoisted functions, which `end_script` puts last.
+        self.emit(Op::Jump(0));
+        Ok(())
+    }
+
+    /// Compiles one top-level statement of the script (resolved already).
+    pub fn script_stmt(&mut self, st: &Stmt, strict: bool) -> CResult<()> {
+        self.f().strict = strict;
+        if !self.code_fits() {
+            return self.err("the code is too large to fit in memory", st.pos);
+        }
+        let inner = if let StmtKind::Labeled(_, inner) = &st.k {
+            inner
+        } else {
+            st
+        };
+        if let StmtKind::FuncDecl(f) = &inner.k
+            && let Some(name) = f.name
+        {
+            // Hoisted: its closure is made before anything else runs.
+            let ops = core::mem::take(&mut self.hoist_ops);
+            let lines = core::mem::take(&mut self.hoist_lines);
+            let main_ops = core::mem::replace(&mut self.f().ops, ops);
+            let main_lines = core::mem::replace(&mut self.f().lines, lines);
+            let r = (|| {
+                let code = self.compile_function(f, None)?;
+                let ci = self.add_const(Const::Code(code));
+                self.emit(Op::Closure(ci));
+                self.store_name(name, Store::Init, false, inner.pos)
+            })();
+            self.hoist_ops = core::mem::replace(&mut self.f().ops, main_ops);
+            self.hoist_lines = core::mem::replace(&mut self.f().lines, main_lines);
+            r?;
+        }
+        self.stmt(st)
+    }
+
+    /// Ends the script: the code that declares its names and makes its hoisted functions
+    /// goes last, and the first instruction jumps to it (and back).
+    pub fn end_script(&mut self) -> CResult<Rc<Code>> {
+        let c = self.f().completion.unwrap_or(0);
+        self.emit(Op::GetLocal(c));
+        self.emit(Op::Return);
+        let at = self.here();
         // Declarations: vars and functions on the global object, lexical names in the
         // global lexical environment.
-        let n = self.scopes[s.scope].bindings.len();
+        let n = self.scopes[0].bindings.len();
         for i in 0..n {
-            let b = self.scopes[s.scope].bindings[i];
+            let b = self.scopes[0].bindings[i];
             let name = self.const_atom(b.name);
             match b.kind {
                 BK::Let | BK::Class => {
@@ -612,10 +757,14 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        self.hoist_functions(&s.body)?;
-        self.stmts(&s.body)?;
-        self.emit(Op::GetLocal(c));
-        self.emit(Op::Return);
+        let base = self.here();
+        let hoist = core::mem::take(&mut self.hoist_ops);
+        let hlines = core::mem::take(&mut self.hoist_lines);
+        let f = self.f();
+        f.ops.extend(hoist);
+        f.lines.extend(hlines.into_iter().map(|(pc, pos)| (pc + base, pos)));
+        self.emit(Op::Jump(1));
+        self.f().ops[0] = Op::Jump(at);
         let st = self
             .fns
             .pop()
@@ -630,7 +779,7 @@ impl<'a> Compiler<'a> {
     /// environment size.
     pub fn compile_module(
         &mut self,
-        m: &'a ModuleAst,
+        m: &ModuleAst,
         id: crate::api::ModuleId,
     ) -> CResult<(Rc<Code>, Rc<Code>, u32)> {
         self.module = Some(id);
@@ -671,7 +820,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Creates the closures of the function declarations directly in `body` (at scope entry).
-    fn hoist_functions(&mut self, body: &'a [Stmt]) -> CResult<()> {
+    fn hoist_functions(&mut self, body: &[Stmt]) -> CResult<()> {
         for st in body {
             let st = if let StmtKind::Labeled(_, inner) = &st.k {
                 inner
@@ -691,7 +840,7 @@ impl<'a> Compiler<'a> {
 
     fn finish(
         &mut self,
-        st: FnState<'a>,
+        st: FnState,
         name: Option<StrId>,
         length: u32,
         span: (u32, u32),
@@ -706,12 +855,21 @@ impl<'a> Compiler<'a> {
             .collect();
         let mut ops = st.ops;
         crate::bytecode::fuse(&mut ops);
-        Rc::new(Code {
+        ops.shrink_to_fit();
+        let mut consts = st.consts;
+        consts.shrink_to_fit();
+        let mut keys: Vec<crate::object::PropKey> = keys;
+        keys.shrink_to_fit();
+        let mut handlers = st.handlers;
+        handlers.shrink_to_fit();
+        let mut lines = st.lines;
+        lines.shrink_to_fit();
+        let mut code = Code {
             ops,
-            consts: st.consts,
+            consts,
             keys,
-            handlers: st.handlers,
-            lines: st.lines,
+            handlers,
+            lines,
             nparams: st.nparams,
             nlocals: st.nlocals,
             length,
@@ -726,12 +884,16 @@ impl<'a> Compiler<'a> {
             marked: Cell::new(0),
             module: self.module,
             lazy: None,
-        })
+            charged: 0,
+        };
+        code.charged = code.own_bytes();
+        self.realm.heap.charge_code(code.charged);
+        Rc::new(code)
     }
 
     // ---- functions ----
 
-    pub fn compile_function(&mut self, f: &'a Func, name_hint: Option<StrId>) -> CResult<Rc<Code>> {
+    pub fn compile_function(&mut self, f: &Func, name_hint: Option<StrId>) -> CResult<Rc<Code>> {
         if self.fns.len() > 200 {
             return self.err("functions nested too deeply", f.start);
         }
@@ -800,7 +962,7 @@ impl<'a> Compiler<'a> {
     /// whose scope `parent` is the innermost environment around it.
     pub fn compile_lazy_function(
         &mut self,
-        f: &'a Func,
+        f: &Func,
         name_hint: Option<StrId>,
         parent: ScopeId,
         this_chk: bool,
@@ -861,7 +1023,7 @@ impl<'a> Compiler<'a> {
     /// needs to be made (name, length, kind), and what the later compile needs.
     fn lazy_stub(
         &mut self,
-        f: &'a Func,
+        f: &Func,
         l: &LazyFunc,
         name_hint: Option<StrId>,
     ) -> CResult<Rc<Code>> {
@@ -915,7 +1077,7 @@ impl<'a> Compiler<'a> {
             this_chk: kind == CodeKind::Arrow && outer_this_chk,
             done: core::cell::RefCell::new(None),
         };
-        Ok(Rc::new(Code {
+        let mut code = Code {
             ops: Vec::new(),
             consts: Vec::new(),
             keys: Vec::new(),
@@ -935,10 +1097,14 @@ impl<'a> Compiler<'a> {
             marked: Cell::new(0),
             module: self.module,
             lazy: Some(Box::new(lazy)),
-        }))
+            charged: 0,
+        };
+        code.charged = code.own_bytes();
+        self.realm.heap.charge_code(code.charged);
+        Ok(Rc::new(code))
     }
 
-    fn function_body(&mut self, f: &'a Func, init_fields: bool) -> CResult<()> {
+    fn function_body(&mut self, f: &Func, init_fields: bool) -> CResult<()> {
         let sid = f.scope;
         // Parameter slots: simple uncaptured identifier parameters live in their argument slot.
         let n = self.scopes[sid].bindings.len();
@@ -1053,7 +1219,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// A function expression (or arrow) as a value.
-    fn func_expr(&mut self, f: &'a Func, name_hint: Option<StrId>) -> CResult<()> {
+    fn func_expr(&mut self, f: &Func, name_hint: Option<StrId>) -> CResult<()> {
         if let Some(ns) = f.name_scope {
             self.scopes[ns].parent = Some(self.cur_scope());
         }
@@ -1075,7 +1241,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Compiles an expression, naming it if it's an anonymous function or class.
-    fn named_expr(&mut self, e: &'a Expr, name: Option<Atom>) -> CResult<()> {
+    fn named_expr(&mut self, e: &Expr, name: Option<Atom>) -> CResult<()> {
         if let Some(n) = name
             && is_anon_fn(e)
         {
@@ -1085,7 +1251,7 @@ impl<'a> Compiler<'a> {
         self.expr(e)
     }
 
-    fn named_expr_str(&mut self, e: &'a Expr, s: StrId) -> CResult<()> {
+    fn named_expr_str(&mut self, e: &Expr, s: StrId) -> CResult<()> {
         match &e.k {
             ExprKind::Func(f) if f.name.is_none() => self.func_expr(f, Some(s)),
             ExprKind::Class(c) if c.name.is_none() => self.class(c, Some(s)),
@@ -1098,7 +1264,7 @@ impl<'a> Compiler<'a> {
 
     // ---- classes ----
 
-    fn class(&mut self, c: &'a Class, name_hint: Option<StrId>) -> CResult<()> {
+    fn class(&mut self, c: &Class, name_hint: Option<StrId>) -> CResult<()> {
         let pos = c.start;
         self.scopes[c.scope].parent = Some(self.cur_scope());
         self.enter_scope(c.scope, pos)?;
@@ -1108,12 +1274,11 @@ impl<'a> Compiler<'a> {
         };
         let has_heritage = c.heritage.is_some();
         // Fresh private names for this evaluation of the class.
-        let mut made: Vec<Atom> = Vec::new();
+        let mut made: alloc::collections::BTreeSet<Atom> = alloc::collections::BTreeSet::new();
         for pd in &c.privates {
-            if made.contains(&pd.name) {
+            if !made.insert(pd.name) {
                 continue;
             }
-            made.push(pd.name);
             let desc = self.const_atom(pd.name);
             self.emit(Op::NewPrivName(desc));
             self.store_name(pd.name, Store::Init, false, pos)?;
@@ -1153,6 +1318,13 @@ impl<'a> Compiler<'a> {
         } else {
             (None, None)
         };
+        // The hidden binding of each instance private method or accessor half.
+        let mut inst_priv: BTreeMap<(Atom, u8), Atom> = BTreeMap::new();
+        for p in &c.privates {
+            if !p.is_static && let Some(f) = p.func {
+                inst_priv.entry((p.name, p.kind as u8)).or_insert(f);
+            }
+        }
         let mut next_key = 0usize;
         for (mi, m) in c.members.iter().enumerate() {
             while next_key < nkeys && c.field_key_at[next_key] as usize == mi {
@@ -1185,11 +1357,9 @@ impl<'a> Compiler<'a> {
                             2 => PrivKind::Setter,
                             _ => PrivKind::Method,
                         };
-                        let fb = c
-                            .privates
-                            .iter()
-                            .find(|p| p.name == *pn && p.kind == want && !p.is_static)
-                            .and_then(|p| p.func);
+                        let fb = inst_priv
+                            .get(&(*pn, want as u8))
+                            .copied();
                         self.emit(Op::Closure(fc));
                         match fb {
                             Some(fb) => self.store_name(fb, Store::Init, false, pos)?,
@@ -1259,7 +1429,7 @@ impl<'a> Compiler<'a> {
 
     fn field_key(
         &mut self,
-        c: &'a Class,
+        c: &Class,
         i: usize,
         ik: Option<u32>,
         sk: Option<u32>,
@@ -1304,14 +1474,14 @@ impl<'a> Compiler<'a> {
 
     // ---- statements ----
 
-    fn stmts(&mut self, body: &'a [Stmt]) -> CResult<()> {
+    fn stmts(&mut self, body: &[Stmt]) -> CResult<()> {
         for s in body {
             self.stmt(s)?;
         }
         Ok(())
     }
 
-    fn block(&mut self, b: &'a Block) -> CResult<()> {
+    fn block(&mut self, b: &Block) -> CResult<()> {
         self.scopes[b.scope].parent = Some(self.cur_scope());
         self.enter_scope(b.scope, 0)?;
         self.hoist_block_functions(&b.body)?;
@@ -1321,7 +1491,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Block-level function declarations: their closures exist from the block's start.
-    fn hoist_block_functions(&mut self, body: &'a [Stmt]) -> CResult<()> {
+    fn hoist_block_functions(&mut self, body: &[Stmt]) -> CResult<()> {
         for st in body {
             let st = if let StmtKind::Labeled(_, inner) = &st.k {
                 inner
@@ -1340,9 +1510,13 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn stmt(&mut self, s: &'a Stmt) -> CResult<()> {
+    fn stmt(&mut self, s: &Stmt) -> CResult<()> {
         if self.realm.stack.exceeded() {
             return self.err("the code is nested too deeply", s.pos);
+        }
+        self.stmts_done = self.stmts_done.wrapping_add(1);
+        if self.stmts_done & 63 == 0 && !self.code_fits() {
+            return self.err("the code is too large to fit in memory", s.pos);
         }
         self.mark(s.pos);
         match &s.k {
@@ -1587,11 +1761,11 @@ impl<'a> Compiler<'a> {
         r
     }
 
-    fn sub_stmt(&mut self, s: &'a Stmt) -> CResult<()> {
+    fn sub_stmt(&mut self, s: &Stmt) -> CResult<()> {
         self.stmt(s)
     }
 
-    fn labeled(&mut self, mut labels: Vec<Atom>, body: &'a Stmt) -> CResult<()> {
+    fn labeled(&mut self, mut labels: Vec<Atom>, body: &Stmt) -> CResult<()> {
         match &body.k {
             StmtKind::Labeled(l, b) => {
                 labels.push(*l);
@@ -1652,7 +1826,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn while_loop(&mut self, t: &'a Expr, b: &'a Stmt, labels: Vec<Atom>) -> CResult<()> {
+    fn while_loop(&mut self, t: &Expr, b: &Stmt, labels: Vec<Atom>) -> CResult<()> {
         let top = self.here();
         self.expr(t)?;
         let jf = self.emit(Op::JumpIfFalse(0));
@@ -1670,7 +1844,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn do_while(&mut self, b: &'a Stmt, t: &'a Expr, labels: Vec<Atom>) -> CResult<()> {
+    fn do_while(&mut self, b: &Stmt, t: &Expr, labels: Vec<Atom>) -> CResult<()> {
         let top = self.here();
         self.f().ctx.push(Jc::Break {
             labels,
@@ -1697,10 +1871,10 @@ impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     fn for_loop(
         &mut self,
-        init: &'a Option<ForInit>,
-        test: &'a Option<Expr>,
-        update: &'a Option<Expr>,
-        body: &'a Stmt,
+        init: &Option<ForInit>,
+        test: &Option<Expr>,
+        update: &Option<Expr>,
+        body: &Stmt,
         scope: ScopeId,
         labels: Vec<Atom>,
         pos: u32,
@@ -1774,7 +1948,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Binds the per-iteration value (on the stack) to a for-in/of head.
-    fn bind_for_head(&mut self, left: &'a ForHead) -> CResult<()> {
+    fn bind_for_head(&mut self, left: &ForHead) -> CResult<()> {
         match left {
             ForHead::Var(VarKind::Var, p) => self.destructure_mode(p, Store::Assign, true),
             ForHead::Var(_, p) => self.destructure(p, Store::Init),
@@ -1784,9 +1958,9 @@ impl<'a> Compiler<'a> {
 
     fn for_in(
         &mut self,
-        left: &'a ForHead,
-        right: &'a Expr,
-        body: &'a Stmt,
+        left: &ForHead,
+        right: &Expr,
+        body: &Stmt,
         scope: ScopeId,
         labels: Vec<Atom>,
         pos: u32,
@@ -1825,9 +1999,9 @@ impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     fn for_of(
         &mut self,
-        left: &'a ForHead,
-        right: &'a Expr,
-        body: &'a Stmt,
+        left: &ForHead,
+        right: &Expr,
+        body: &Stmt,
         scope: ScopeId,
         is_await: bool,
         labels: Vec<Atom>,
@@ -1896,8 +2070,8 @@ impl<'a> Compiler<'a> {
 
     fn switch(
         &mut self,
-        disc: &'a Expr,
-        cases: &'a [Case],
+        disc: &Expr,
+        cases: &[Case],
         scope: ScopeId,
         labels: Vec<Atom>,
         pos: u32,
@@ -1949,11 +2123,11 @@ impl<'a> Compiler<'a> {
     #[allow(clippy::too_many_arguments)]
     fn try_stmt(
         &mut self,
-        block: &'a Block,
-        param: &'a Option<Pat>,
-        handler: &'a Option<Block>,
+        block: &Block,
+        param: &Option<Pat>,
+        handler: &Option<Block>,
         catch_scope: ScopeId,
-        finalizer: &'a Option<Block>,
+        finalizer: &Option<Block>,
         pos: u32,
     ) -> CResult<()> {
         let env_save = self.alloc_local(pos)?;
@@ -1970,7 +2144,7 @@ impl<'a> Compiler<'a> {
                 regions.push(r);
             }
             self.f().ctx.push(Jc::Finally {
-                block: finalizer.as_ref(),
+                block: finalizer.as_ref().map(|b| b as *const Block),
                 regions,
             });
         }
@@ -2132,8 +2306,11 @@ impl<'a> Compiler<'a> {
                 }
                 if let Some(b) = block {
                     // Compile the finally body with the contexts outside it.
-                    let saved: Vec<Jc<'a>> = self.f().ctx.drain(i..).collect();
-                    let r = self.block(b);
+                    let saved: Vec<Jc> = self.f().ctx.drain(i..).collect();
+                    // SAFETY: the pointer was made from the finalizer of a `try` statement
+                    // that is still being compiled (an entry is popped before `try_stmt`
+                    // returns), so its tree is alive.
+                    let r = self.block(unsafe { &*b });
                     self.f().ctx.extend(saved);
                     r?;
                 }
@@ -2165,13 +2342,13 @@ impl<'a> Compiler<'a> {
 
     // ---- destructuring ----
 
-    fn destructure(&mut self, p: &'a Pat, mode: Store) -> CResult<()> {
+    fn destructure(&mut self, p: &Pat, mode: Store) -> CResult<()> {
         self.destructure_mode(p, mode, false)
     }
 
     /// Consumes the value on the stack into the pattern. `var_init` marks a `var`
     /// declaration's initializer (assignments to vars, no TDZ).
-    fn destructure_mode(&mut self, p: &'a Pat, mode: Store, var_init: bool) -> CResult<()> {
+    fn destructure_mode(&mut self, p: &Pat, mode: Store, var_init: bool) -> CResult<()> {
         match p {
             Pat::Ident(a, pos) => {
                 let m = if var_init { Store::Init } else { mode };
@@ -2270,7 +2447,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// [v] → [v or default]
-    fn default_value(&mut self, d: &'a Expr, target: &Pat) -> CResult<()> {
+    fn default_value(&mut self, d: &Expr, target: &Pat) -> CResult<()> {
         self.emit(Op::Dup);
         let j = self.emit(Op::JumpIfNotUndef(0));
         self.emit(Op::Pop);
@@ -2280,7 +2457,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// [v] → [] : stores into a member expression target.
-    fn store_to_target(&mut self, e: &'a Expr) -> CResult<()> {
+    fn store_to_target(&mut self, e: &Expr) -> CResult<()> {
         match &e.k {
             ExprKind::Member(o, name, _) => {
                 self.expr(o)?;
@@ -2327,7 +2504,7 @@ impl<'a> Compiler<'a> {
 
     // ---- expressions ----
 
-    fn expr(&mut self, e: &'a Expr) -> CResult<()> {
+    fn expr(&mut self, e: &Expr) -> CResult<()> {
         if self.realm.stack.exceeded() {
             return self.err("the code is nested too deeply", e.pos);
         }
@@ -2440,6 +2617,17 @@ impl<'a> Compiler<'a> {
                         }
                     }
                 }
+            }
+            ExprKind::NumArray(v) => {
+                self.mark(e.pos);
+                let ci = self.add_const(Const::Nums(v.as_slice().into()));
+                self.emit(Op::ConstArray(ci));
+            }
+            ExprKind::StrArray(v) => {
+                self.mark(e.pos);
+                let ids: Vec<StrId> = v.iter().map(|u| self.realm.heap.intern(u)).collect();
+                let ci = self.add_const(Const::Strs(ids));
+                self.emit(Op::ConstArray(ci));
             }
             ExprKind::Object(props) => self.object_literal(props)?,
             ExprKind::Func(f) => self.func_expr(f, None)?,
@@ -2606,7 +2794,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn object_literal(&mut self, props: &'a [PropDef]) -> CResult<()> {
+    fn object_literal(&mut self, props: &[PropDef]) -> CResult<()> {
         self.emit(Op::NewObject);
         for p in props {
             match p {
@@ -2677,7 +2865,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn unary(&mut self, op: UnOp, x: &'a Expr, pos: u32) -> CResult<()> {
+    fn unary(&mut self, op: UnOp, x: &Expr, pos: u32) -> CResult<()> {
         match op {
             UnOp::Typeof => {
                 if let ExprKind::Ident(a) = x.k
@@ -2711,7 +2899,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn delete(&mut self, x: &'a Expr, pos: u32) -> CResult<()> {
+    fn delete(&mut self, x: &Expr, pos: u32) -> CResult<()> {
         match &x.k {
             ExprKind::Member(o, name, _) => {
                 self.expr(o)?;
@@ -2780,7 +2968,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Pushes `this` and the function for a call.
-    fn callee(&mut self, c: &'a Expr) -> CResult<()> {
+    fn callee(&mut self, c: &Expr) -> CResult<()> {
         match &c.k {
             ExprKind::Member(o, name, false) => {
                 self.expr(o)?;
@@ -2862,7 +3050,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn spread_array(&mut self, args: &'a [Arg]) -> CResult<()> {
+    fn spread_array(&mut self, args: &[Arg]) -> CResult<()> {
         self.emit(Op::NewArray(args.len() as u32));
         for a in args {
             match a {
@@ -2880,7 +3068,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn call_args(&mut self, args: &'a [Arg], pos: u32, is_new: bool) -> CResult<()> {
+    fn call_args(&mut self, args: &[Arg], pos: u32, is_new: bool) -> CResult<()> {
         if args.iter().any(|a| matches!(a, Arg::Spread(_))) {
             self.spread_array(args)?;
             self.mark(pos);
@@ -2904,7 +3092,7 @@ impl<'a> Compiler<'a> {
 
     /// An optional chain link: leaves the value; records where nullish values exit, with how
     /// many stack slots to drop there.
-    fn chain(&mut self, e: &'a Expr, _keep: bool, exits: &mut Vec<(usize, u32)>) -> CResult<()> {
+    fn chain(&mut self, e: &Expr, _keep: bool, exits: &mut Vec<(usize, u32)>) -> CResult<()> {
         match &e.k {
             ExprKind::Member(o, name, opt) => {
                 self.chain(o, false, exits)?;
@@ -2946,7 +3134,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// [this f] for a call inside a chain.
-    fn chain_callee(&mut self, c: &'a Expr, exits: &mut Vec<(usize, u32)>) -> CResult<()> {
+    fn chain_callee(&mut self, c: &Expr, exits: &mut Vec<(usize, u32)>) -> CResult<()> {
         match &c.k {
             ExprKind::Member(o, name, opt) => {
                 self.chain(o, false, exits)?;
@@ -3004,7 +3192,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn update(&mut self, inc: bool, prefix: bool, target: &'a Expr, pos: u32) -> CResult<()> {
+    fn update(&mut self, inc: bool, prefix: bool, target: &Expr, pos: u32) -> CResult<()> {
         let op = if inc { Op::Inc } else { Op::Dec };
         match &target.k {
             ExprKind::Ident(a) => {
@@ -3098,7 +3286,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn assign(&mut self, op: AssignOp, target: &'a Pat, value: &'a Expr, pos: u32) -> CResult<()> {
+    fn assign(&mut self, op: AssignOp, target: &Pat, value: &Expr, pos: u32) -> CResult<()> {
         match target {
             Pat::Ident(a, ipos) => match op {
                 AssignOp::Assign => {
@@ -3134,8 +3322,8 @@ impl<'a> Compiler<'a> {
     fn assign_member(
         &mut self,
         op: AssignOp,
-        t: &'a Expr,
-        value: &'a Expr,
+        t: &Expr,
+        value: &Expr,
         pos: u32,
     ) -> CResult<()> {
         match &t.k {
@@ -3339,11 +3527,12 @@ fn pat_name(p: &Pat) -> Option<Atom> {
     }
 }
 
-fn new_fn<'a>(kind: CodeKind, strict: bool) -> FnState<'a> {
+fn new_fn(kind: CodeKind, strict: bool) -> FnState {
     FnState {
         ops: Vec::new(),
         consts: Vec::new(),
         str_consts: BTreeMap::new(),
+        num_consts: BTreeMap::new(),
         handlers: Vec::new(),
         lines: Vec::new(),
         nlocals: 0,

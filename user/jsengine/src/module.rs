@@ -258,21 +258,6 @@ fn unpack(v: Val) -> Option<ModuleId> {
     ))
 }
 
-fn code_bytes(c: &Code) -> usize {
-    let mut n = 256
-        + c.ops.len() * core::mem::size_of::<crate::bytecode::Op>()
-        + c.lines.len() * 8
-        + c.handlers.len() * 20
-        + c.keys.len() * 16;
-    for k in &c.consts {
-        n += 24;
-        if let crate::bytecode::Const::Code(sub) = k {
-            n += code_bytes(sub);
-        }
-    }
-    n
-}
-
 impl Realm {
     // ---- the table ----
 
@@ -341,13 +326,13 @@ impl Realm {
             return Err(self.range_error("Too many modules"));
         }
         let text: Rc<[u8]> = Rc::from(source.as_bytes());
-        let src = Source {
-            text: text.clone(),
-            file: String::from(opts.file),
-            line_starts: crate::lexer::line_starts(&text),
-            line_delta: opts.first_line as i32 - 1,
-            first_col: opts.first_column.max(1),
-        };
+        let src = Source::new(
+            text.clone(),
+            opts.file,
+            opts.first_line as i32 - 1,
+            opts.first_column.max(1),
+            self.heap.code_acct.clone(),
+        );
         self.budget_check(source.len() / 2)?;
         let mut p = Parser::new(&text);
         p.stack = Some(self.stack);
@@ -476,7 +461,8 @@ impl Realm {
         rec.has_tla = has_tla;
         rec.tdz = tdz;
         rec.status = St::Unlinked;
-        let ext = code_bytes(&init) + code_bytes(&body) + source.len() / 2 + 512;
+        // (The code and the source count by themselves, as they are held: see Heap::code_acct.)
+        let ext = 512;
         rec.ext_bytes = ext;
         rec.init = Some(init);
         rec.body = Some(body);

@@ -1672,6 +1672,30 @@ impl Realm {
                         }
                     }
                 }
+                Op::ConstArray(ci) => {
+                    let n = match code.consts.get(ci as usize) {
+                        Some(Const::Nums(v)) => v.len(),
+                        Some(Const::Strs(v)) => v.len(),
+                        _ => 0,
+                    };
+                    let mut dense: Vec<Val> = Vec::with_capacity(n);
+                    match code.consts.get(ci as usize) {
+                        Some(Const::Nums(v)) => dense.extend(v.iter().map(|x| Val::num(*x))),
+                        Some(Const::Strs(v)) => dense.extend(v.iter().map(|s| Val::Str(*s))),
+                        _ => {}
+                    }
+                    self.heap.charge(n * 16);
+                    tri!(self.check_mem());
+                    let p = self.intr.array_proto;
+                    let o = self.alloc(
+                        Some(p),
+                        ObjKind::Array(ArrayData {
+                            dense,
+                            len: n as u32,
+                        }),
+                    );
+                    self.push(Val::Obj(o));
+                }
                 Op::ArrHole => {
                     if let Val::Obj(a) = self.peek(0)
                         && let ObjKind::Array(d) = &mut self.om(a).kind

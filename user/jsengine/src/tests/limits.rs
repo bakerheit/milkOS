@@ -127,6 +127,41 @@ fn memory_budget() {
     }
 }
 
+/// Code a script keeps alive (functions made by eval and `new Function`, each with its own
+/// source text) counts against the heap budget like objects do.
+#[test]
+fn retained_code_counts_against_the_heap() {
+    for src in [
+        "var keep = []; for (var i = 0; ; i++) keep.push(eval('(function f' + i + '() { return ' + i + ' + \"' + 'x'.repeat(4000) + '\" })'))",
+        "var keep = []; for (var i = 0; ; i++) keep.push(new Function('return ' + i + ' + \"' + 'y'.repeat(4000) + '\"'))",
+        "var keep = []; for (var i = 0; ; i++) keep.push(eval('[' + ('(function () { return ' + i + ' }),').repeat(100) + ']'))",
+    ] {
+        let mut r = realm_with(Limits {
+            max_heap_bytes: 8 << 20,
+            max_steps: 50_000_000,
+            ..Limits::default()
+        });
+        let e = r.eval(src, "code.js").expect_err(src);
+        let rep = r.report(&e);
+        assert!(
+            e.termination() == Some(Termination::OutOfMemory) || rep.name == "RangeError",
+            "{src}: {rep}"
+        );
+        r.release_temps();
+        r.gc();
+        assert!(r.heap_stats().used_bytes < 64 << 20);
+    }
+    // And it is given back when the functions go.
+    let mut r = realm_with(Limits {
+        max_heap_bytes: 8 << 20,
+        ..Limits::default()
+    });
+    r.eval("for (var i = 0; i < 300; i++) eval('(function () { return \"' + 'z'.repeat(3000) + '\" })')", "a.js").unwrap();
+    r.release_temps();
+    r.gc();
+    assert!(r.heap_stats().used_bytes < 2 << 20, "{}", r.heap_stats().used_bytes);
+}
+
 #[test]
 fn recursion_is_a_catchable_range_error() {
     let mut r = Realm::new(Options::default());

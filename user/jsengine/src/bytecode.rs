@@ -177,6 +177,8 @@ pub(crate) enum Op {
     ArrPush,
     /// arr → arr (a hole)
     ArrHole,
+    /// → a new array of the numbers (or strings) of consts[i]
+    ConstArray(u32),
     /// arr iterable → arr
     ArrSpread,
     /// obj v → obj (CreateDataProperty)
@@ -352,6 +354,9 @@ pub(crate) static NO_FUSE: core::sync::atomic::AtomicBool =
 pub(crate) enum Const {
     Num(f64),
     Str(StrId),
+    /// The elements of an array literal made only of numbers / only of strings.
+    Nums(Box<[f64]>),
+    Strs(Vec<StrId>),
     Code(Rc<Code>),
     /// A template's cooked strings (None = undefined) and raw strings; the object is made
     /// once per site.
@@ -390,9 +395,34 @@ pub(crate) struct Source {
     pub line_delta: i32,
     /// The column of the first line (1-based).
     pub first_col: u32,
+    /// The realm's tally of the memory its code and sources hold (see `Heap::code_acct`),
+    /// and what this source added to it.
+    acct: Rc<Cell<usize>>,
+    charged: usize,
 }
 
 impl Source {
+    pub fn new(
+        text: Rc<[u8]>,
+        file: &str,
+        line_delta: i32,
+        first_col: u32,
+        acct: Rc<Cell<usize>>,
+    ) -> Source {
+        let line_starts = crate::lexer::line_starts(&text);
+        let charged = text.len() + line_starts.len() * 4 + file.len() + 96;
+        acct.set(acct.get().saturating_add(charged));
+        Source {
+            text,
+            file: String::from(file),
+            line_starts,
+            line_delta,
+            first_col,
+            acct,
+            charged,
+        }
+    }
+
     pub fn line_col(&self, pos: u32) -> (u32, u32) {
         let (l, c) = crate::lexer::line_col(&self.text, &self.line_starts, pos);
         let line = (l as i64 + self.line_delta as i64).max(1) as u32;
@@ -402,6 +432,12 @@ impl Source {
             c
         };
         (line, col)
+    }
+}
+
+impl Drop for Source {
+    fn drop(&mut self) {
+        self.acct.set(self.acct.get().saturating_sub(self.charged));
     }
 }
 
@@ -433,9 +469,36 @@ pub(crate) struct Code {
     /// A function whose body is compiled on its first call: this code is only its stub
     /// (name, length, kind and flags), and `ops` is empty.
     pub lazy: Option<Box<crate::lazy::LazyCode>>,
+    /// What this code adds to the realm's tally of the memory its code holds.
+    pub charged: usize,
+}
+
+impl Drop for Code {
+    fn drop(&mut self) {
+        let a = &self.source.acct;
+        a.set(a.get().saturating_sub(self.charged));
+    }
 }
 
 impl Code {
+    /// The bytes this code takes itself (not the code of the functions inside it), as nearly
+    /// as the allocator will see them.
+    pub fn own_bytes(&self) -> usize {
+        core::mem::size_of::<Code>()
+            + self.ops.capacity() * core::mem::size_of::<Op>()
+            + self.consts.capacity() * core::mem::size_of::<Const>()
+            + self.keys.capacity() * core::mem::size_of::<crate::object::PropKey>()
+            + self.consts.iter().map(|c| match c {
+                Const::Nums(v) => v.len() * 8,
+                Const::Strs(v) => v.len() * 8,
+                _ => 0,
+            }).sum::<usize>()
+            + self.lines.capacity() * 8
+            + self.handlers.capacity() * core::mem::size_of::<Handler>()
+            + if self.lazy.is_some() { 112 } else { 0 }
+            + 32
+    }
+
     pub fn trace(&self, t: &mut Tracer, epoch: u32) {
         if self.marked.get() == epoch {
             return;
@@ -452,6 +515,11 @@ impl Code {
         for c in &self.consts {
             match c {
                 Const::Str(s) => t.str(*s),
+                Const::Strs(v) => {
+                    for s in v {
+                        t.str(*s);
+                    }
+                }
                 Const::Code(c) => c.trace(t, epoch),
                 Const::Template(cooked, raw, obj) => {
                     for s in cooked.iter().flatten() {
@@ -468,7 +536,7 @@ impl Code {
                     t.str(*p);
                     t.str(*f);
                 }
-                Const::Num(_) => {}
+                Const::Num(_) | Const::Nums(_) => {}
             }
         }
     }

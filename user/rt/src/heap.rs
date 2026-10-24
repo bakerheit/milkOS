@@ -41,3 +41,8 @@ static HEAP: heapkit::Heap<Brk> = heapkit::Heap::new(Brk);
 pub fn stats() -> Stats {
     HEAP.stats()
 }
+
+/// Forgets the peak arena size so far (see [`Stats::peak`]).
+pub fn reset_peak() {
+    HEAP.reset_peak();
+}

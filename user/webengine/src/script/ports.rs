@@ -60,6 +60,22 @@ struct Port {
     owner: Option<Owner>,
     queue: VecDeque<Msg>,
     started: bool,
+    /// The port is one end of a pair that spans two threads (a page and its worker): messages
+    /// for the far end leave through [`PortTable::take_link_out`] instead of being queued here.
+    /// For the end that stayed behind (it has a `peer`) the messages its peer posts wait in its
+    /// queue until they are taken; for the end that crossed (no `peer`) it is the posts of
+    /// its own owner that leave.
+    link: Option<u32>,
+}
+
+/// Something a port table has for the other thread of a link.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LinkOut {
+    /// A message for the far end of `port` (the same id names both ends); the ports it
+    /// carries are exported with it.
+    Msg { link: u32, port: u64, data: String, ports: Vec<u64> },
+    /// `port` was closed: the far end closes too.
+    Close { link: u32, port: u64 },
 }
 
 #[derive(Default)]
@@ -71,6 +87,10 @@ struct Inner {
     queued: usize,
     /// Ports that have something to deliver now: owned, started, and a message waiting.
     ready: BTreeSet<u64>,
+    /// Ports that are an end of a link.
+    linked: usize,
+    /// What leaves for other threads, in order.
+    out: VecDeque<LinkOut>,
 }
 
 /// Why `post` refused.
@@ -88,6 +108,19 @@ pub struct PortTable {
 }
 
 impl Inner {
+    /// `id` (in transit) leaves over `link`: it stays here as the end that remembers its
+    /// peer, and the far thread gets an end of its own.
+    fn export(&mut self, id: u64, link: u32) {
+        if let Some(p) = self.ports.get_mut(&id)
+            && p.link.is_none()
+        {
+            p.link = Some(link);
+            p.owner = None;
+            self.linked += 1;
+        }
+        self.ready.remove(&id);
+    }
+
     fn refresh(&mut self, id: u64) {
         let ready = self
             .ports
@@ -103,21 +136,38 @@ impl Inner {
     /// Closes `id`: its queue is dropped (and the ports in transit in it are closed too), its
     /// peer is on its own.
     fn close(&mut self, id: u64) {
-        let mut todo = alloc::vec![id];
-        while let Some(id) = todo.pop() {
+        self.close_inner(id, true);
+    }
+
+    /// `close`, and for a port the far side of a link closed already: `echo` false says
+    /// nothing back.
+    fn close_inner(&mut self, id: u64, echo: bool) {
+        let mut todo = alloc::vec![(id, echo)];
+        while let Some((id, echo)) = todo.pop() {
             let Some(p) = self.ports.remove(&id) else {
                 continue;
             };
             self.ready.remove(&id);
+            if let Some(link) = p.link {
+                self.linked = self.linked.saturating_sub(1);
+                if echo && self.out.len() < MAX_QUEUED {
+                    self.out.push_back(LinkOut::Close { link, port: id });
+                }
+            }
             if let Some(peer) = p.peer
                 && let Some(q) = self.ports.get_mut(&peer)
             {
                 q.peer = None;
+                // The stay-behind end of a link has nothing left to talk to: it ends, and so
+                // does the far end.
+                if q.link.is_some() {
+                    todo.push((peer, true));
+                }
             }
             for m in p.queue {
                 self.bytes = self.bytes.saturating_sub(m.data.len());
                 self.queued = self.queued.saturating_sub(1);
-                todo.extend(m.ports);
+                todo.extend(m.ports.into_iter().map(|x| (x, true)));
             }
         }
     }
@@ -126,6 +176,14 @@ impl Inner {
 impl PortTable {
     pub fn new() -> PortTable {
         PortTable::default()
+    }
+
+    /// A table whose ports are numbered in space `ns` (a worker's: the ports of two tables
+    /// that are linked must not share an id).
+    pub fn with_namespace(ns: u64) -> PortTable {
+        let t = PortTable::default();
+        t.inner.borrow_mut().next = ns << 40;
+        t
     }
 
     /// Open ports.
@@ -159,6 +217,7 @@ impl PortTable {
                     owner: Some(owner),
                     queue: VecDeque::new(),
                     started: false,
+                    link: None,
                 },
             );
         }
@@ -189,9 +248,10 @@ impl PortTable {
     pub fn transfer_out(&self, owner: Owner, ids: &[u64], except: Option<u64>) -> Result<(), PostError> {
         let mut t = self.inner.borrow_mut();
         for (i, &id) in ids.iter().enumerate() {
+            // (A port that came over a link is not sent on: its far end is on the other thread.)
             let ok = Some(id) != except
                 && !ids[..i].contains(&id)
-                && t.ports.get(&id).is_some_and(|p| p.owner == Some(owner));
+                && t.ports.get(&id).is_some_and(|p| p.owner == Some(owner) && p.link.is_none());
             if !ok {
                 return Err(PostError::BadTransfer);
             }
@@ -216,15 +276,31 @@ impl PortTable {
         transfer: &[u64],
     ) -> Result<bool, PostError> {
         // The port must be the sender's to post anything.
-        let peer = {
+        let (peer, link) = {
             let t = self.inner.borrow();
             match t.ports.get(&from) {
-                Some(p) if p.owner == Some(owner) => p.peer,
+                Some(p) if p.owner == Some(owner) => (p.peer, p.link),
                 _ => return Ok(false),
             }
         };
         self.transfer_out(owner, transfer, Some(from))?;
         let mut t = self.inner.borrow_mut();
+        if let Some(link) = link {
+            // The far end is on the other thread of the link: the message leaves, with the
+            // ports it carries.
+            if t.out.len() >= MAX_QUEUED || t.bytes + data.len() > MAX_BYTES {
+                for &id in transfer {
+                    t.close(id);
+                }
+                return Ok(false);
+            }
+            for &id in transfer {
+                t.export(id, link);
+            }
+            t.bytes += data.len();
+            t.out.push_back(LinkOut::Msg { link, port: from, data, ports: transfer.to_vec() });
+            return Ok(true);
+        }
         let room = t.queued < MAX_QUEUED * 8 && t.bytes + data.len() <= MAX_BYTES;
         let target = peer.filter(|p| t.ports.get(p).is_some_and(|q| q.queue.len() < MAX_QUEUED));
         let Some(peer) = target.filter(|_| room) else {
@@ -270,6 +346,150 @@ impl PortTable {
         for &id in ids {
             t.close(id);
         }
+    }
+
+    // ---- links: ports whose other end is on another thread -------------------------------
+
+    /// Ports in transit (after a transfer list took them from their owner) leave over `link`.
+    pub fn export(&self, ids: &[u64], link: u32) {
+        let mut t = self.inner.borrow_mut();
+        for &id in ids {
+            t.export(id, link);
+        }
+    }
+
+    /// A port that arrived over `link` (its far end is there): a new end here, in transit
+    /// until a realm adopts it. False if the id is taken or the table is full.
+    pub fn import(&self, id: u64, link: u32) -> bool {
+        let mut t = self.inner.borrow_mut();
+        if t.ports.contains_key(&id) || t.ports.len() >= MAX_PORTS {
+            return false;
+        }
+        t.ports.insert(
+            id,
+            Port {
+                peer: None,
+                owner: None,
+                queue: VecDeque::new(),
+                started: false,
+                link: Some(link),
+            },
+        );
+        t.linked += 1;
+        true
+    }
+
+    /// A message from the far end of `id` over a link: it goes to the port's peer when it has
+    /// one (it is a message the far end posted), else to the port itself. The ports it
+    /// carries must be imported first. False if there is no such port or no room.
+    pub fn deliver_link(&self, id: u64, data: String, ports: &[u64]) -> bool {
+        let mut t = self.inner.borrow_mut();
+        let Some(p) = t.ports.get(&id) else {
+            for &c in ports {
+                t.close(c);
+            }
+            return false;
+        };
+        let dest = p.peer.unwrap_or(id);
+        let room = t.queued < MAX_QUEUED * 8 && t.bytes + data.len() <= MAX_BYTES;
+        let fits = t.ports.get(&dest).is_some_and(|q| q.queue.len() < MAX_QUEUED);
+        if !(room && fits) {
+            for &c in ports {
+                t.close(c);
+            }
+            return false;
+        }
+        t.seq += 1;
+        let seq = t.seq;
+        t.bytes += data.len();
+        t.queued += 1;
+        if let Some(q) = t.ports.get_mut(&dest) {
+            q.queue.push_back(Msg { seq, data, ports: ports.to_vec() });
+        }
+        t.refresh(dest);
+        true
+    }
+
+    /// Everything on `link` ends (the thread at the other end is gone): its ports close
+    /// without a word, and what was waiting to go is dropped.
+    pub fn close_link(&self, link: u32) {
+        let mut t = self.inner.borrow_mut();
+        let ids: Vec<u64> = t
+            .ports
+            .iter()
+            .filter(|(_, p)| p.link == Some(link))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            t.close_inner(id, false);
+        }
+        let mut keep = VecDeque::new();
+        while let Some(o) = t.out.pop_front() {
+            let (l, data) = match &o {
+                LinkOut::Msg { link: l, data, .. } => (*l, data.len()),
+                LinkOut::Close { link: l, .. } => (*l, 0),
+            };
+            if l == link {
+                t.bytes = t.bytes.saturating_sub(data);
+            } else {
+                keep.push_back(o);
+            }
+        }
+        t.out = keep;
+    }
+
+    /// The far end of `id` closed.
+    pub fn close_from_link(&self, id: u64) {
+        self.inner.borrow_mut().close_inner(id, false);
+    }
+
+    /// Some port here is an end of a link.
+    pub fn has_links(&self) -> bool {
+        self.inner.borrow().linked > 0 || !self.inner.borrow().out.is_empty()
+    }
+
+    /// What is waiting to go over `link`, at most `max` items: posts made on ports that
+    /// crossed, and what the peers of the ports that stayed posted to them.
+    pub fn take_link_out(&self, link: u32, max: usize) -> Vec<LinkOut> {
+        let mut t = self.inner.borrow_mut();
+        let mut out = Vec::new();
+        // The posts and closes first, in order.
+        let mut keep = VecDeque::new();
+        while let Some(o) = t.out.pop_front() {
+            let mine = match &o {
+                LinkOut::Msg { link: l, .. } | LinkOut::Close { link: l, .. } => *l == link,
+            };
+            if mine && out.len() < max {
+                if let LinkOut::Msg { data, .. } = &o {
+                    t.bytes = t.bytes.saturating_sub(data.len());
+                }
+                out.push(o);
+            } else {
+                keep.push_back(o);
+            }
+        }
+        t.out = keep;
+        // Then what waits in the stay-behind ends.
+        if t.linked > 0 {
+            let ids: Vec<u64> = t
+                .ports
+                .iter()
+                .filter(|(_, p)| p.link == Some(link) && p.peer.is_some() && !p.queue.is_empty())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in ids {
+                while out.len() < max {
+                    let Some(m) = t.ports.get_mut(&id).and_then(|p| p.queue.pop_front()) else { break };
+                    t.bytes = t.bytes.saturating_sub(m.data.len());
+                    t.queued = t.queued.saturating_sub(1);
+                    for &c in &m.ports {
+                        t.export(c, link);
+                    }
+                    out.push(LinkOut::Msg { link, port: id, data: m.data, ports: m.ports });
+                }
+            }
+        }
+        out
     }
 
     /// The realm goes away: its ports are closed (the ones in transit are not its).

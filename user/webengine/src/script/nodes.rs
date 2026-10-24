@@ -2324,7 +2324,7 @@ fn d_template_content(b: &Rc<Bridge>, r: &mut Realm, t: Value, _: &[Value]) -> J
     Ok(wrap(b, r, f))
 }
 
-fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Value> {
+pub(crate) fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Value> {
     let target = if t.is_undefined() {
         super::events::WINDOW
     } else {
@@ -2355,7 +2355,7 @@ fn handler_get(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str) -> JsResult<Va
     Ok(events_js::get_handler(b, r, target, ty))
 }
 
-fn handler_set(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str, v: Value) -> JsResult<Value> {
+pub(crate) fn handler_set(b: &Rc<Bridge>, r: &mut Realm, t: Value, ty: &str, v: Value) -> JsResult<Value> {
     let target = if t.is_undefined() {
         super::events::WINDOW
     } else {

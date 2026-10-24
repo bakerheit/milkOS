@@ -992,7 +992,7 @@ pub(super) fn timer_clear(b: &Rc<Bridge>, r: &mut Realm, a: &[Value]) -> JsResul
 
 /// console.log's formatting: %s %d %i %f %o %O %c substitutions in a first string, the
 /// rest inspected and joined with spaces.
-fn console_text(r: &mut Realm, a: &[Value]) -> String {
+pub(super) fn console_text(r: &mut Realm, a: &[Value]) -> String {
     let mut out = String::new();
     let mut rest = a;
     if let Some(first) = a.first()
@@ -1058,7 +1058,7 @@ fn console_text(r: &mut Realm, a: &[Value]) -> String {
     out
 }
 
-fn console_fn(b: &Rc<Bridge>, r: &mut Realm, obj: Value, name: &str, level: ConsoleLevel) -> JsResult<()> {
+pub(super) fn console_fn(b: &Rc<Bridge>, r: &mut Realm, obj: Value, name: &str, level: ConsoleLevel) -> JsResult<()> {
     let b2 = b.clone();
     r.define_method(obj, name, 0, move |r, _t, a| {
         let s = console_text(r, a);
@@ -1068,7 +1068,7 @@ fn console_fn(b: &Rc<Bridge>, r: &mut Realm, obj: Value, name: &str, level: Cons
     Ok(())
 }
 
-fn location_href(b: &Bridge) -> String {
+pub(super) fn location_href(b: &Bridge) -> String {
     if let Some(l) = b.xf.sec.borrow().location.as_ref() {
         return l.clone();
     }
@@ -1357,7 +1357,7 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
 }
 
 /// The interrupt callback: past the slow threshold, ask the app every 100 ms.
-fn interrupt(b: &Bridge) -> bool {
+pub(super) fn interrupt(b: &Bridge) -> bool {
     let Some(h) = b.host() else { return true };
     let now = h.now();
     let (start, asked, slow) = match b.st.try_borrow() {
@@ -1379,7 +1379,21 @@ fn interrupt(b: &Bridge) -> bool {
     go_on
 }
 
-fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+/// The values `install_all` goes on with after the classes and prototypes are made.
+pub(super) struct Tables {
+    pub et: Value,
+    pub node_list: Value,
+    pub coll: Value,
+    pub tok: Value,
+    pub style: Value,
+    pub storage: Value,
+    pub html_element: Value,
+    pub element: Value,
+}
+
+/// Register the host classes and make the prototypes (a window's, and a worker's too: the
+/// bindings expect them to exist).
+pub(super) fn make_tables(b: &Rc<Bridge>, r: &mut Realm) -> Tables {
     let classes = Classes {
         node: r.register_class(NodeClass),
         event: r.register_class(EventClass),
@@ -1461,6 +1475,11 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     };
     let _ = b.protos.set(protos);
     let _ = document;
+    Tables { et, node_list, coll, tok, style, storage, html_element, element }
+}
+
+fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    let Tables { et, node_list, coll, tok, style, storage, html_element, element } = make_tables(b, r);
 
     let g = r.global();
     // window's prototype chain: Window.prototype → EventTarget.prototype.
@@ -1547,7 +1566,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     install_location(b, r, g)?;
     install_history(b, r, g)?;
     install_navigator(b, r, g)?;
-    super::net::install(b, r)?;
+    super::net::install(b, r, false)?;
     super::xwin::install(b, r)?;
 
     // Sizes and scrolling.
@@ -1810,7 +1829,7 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     r.define(g, "Option", option, Attrs::METHOD)?;
     let _ = element;
 
-    super::net::install_members(b, r)?;
+    super::net::install_members(b, r, false)?;
     super::net::install_locale_methods(b, r)?;
     super::net::install_dom_exceptions(b, r)?;
 

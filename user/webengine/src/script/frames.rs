@@ -328,6 +328,15 @@ pub fn install(b: &Rc<Bridge>, r: &mut Realm) {
 }
 
 fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    install_message_event(b, r)?;
+    let g = r.global();
+    let b3 = b.clone();
+    r.define_method(g, "postMessage", 2, move |r, _t, a| post_message(&b3, r, a))?;
+    install_window_name(b, r)
+}
+
+/// `MessageEvent` (windows and workers both have it).
+pub(crate) fn install_message_event(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     let g = r.global();
     let ep = r.pinned(&b.protos().event);
     let proto = r.new_object_with_proto(ep);
@@ -377,8 +386,11 @@ fn install_all(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
     );
     r.define(g, "MessageEvent", ctor, Attrs::METHOD)?;
     b.st.borrow_mut().outbox.message_proto = Some(pin);
-    let b3 = b.clone();
-    r.define_method(g, "postMessage", 2, move |r, _t, a| post_message(&b3, r, a))?;
+    Ok(())
+}
+
+fn install_window_name(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<()> {
+    let g = r.global();
     // window.name: the name of this browsing context, kept by the page (the frame table sets
     // it from the element's `name`, the host from where the frame came).
     let b4 = b.clone();

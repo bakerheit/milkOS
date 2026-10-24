@@ -191,6 +191,10 @@ pub struct State {
     pub time_origin: f64,
     /// Whether IntersectionObserver / ResizeObserver want the layout looked at again.
     pub watch: super::observers::LayoutWatch,
+    /// This realm is a dedicated worker's (script/worker).
+    pub worker: Option<alloc::boxed::Box<super::worker::WorkerState>>,
+    /// The workers this realm made.
+    pub workers: super::worker::PageWorkers,
 }
 
 /// Lines and bytes of console kept between [`super::Runtime::take_console`] calls.
@@ -263,6 +267,8 @@ impl Bridge {
                 perf_origin: 0.0,
                 time_origin: 0.0,
                 watch: Default::default(),
+                worker: None,
+                workers: Default::default(),
             }),
             classes: OnceCell::new(),
             protos: OnceCell::new(),

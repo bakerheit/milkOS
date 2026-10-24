@@ -18,4 +18,5 @@ mod scheme;
 mod script;
 mod scripts;
 mod webapis;
+mod workers;
 mod xframes;

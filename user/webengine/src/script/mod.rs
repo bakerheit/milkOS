@@ -41,6 +41,7 @@ pub(crate) mod net_for_tests {
 }
 
 mod nodes;
+pub mod worker;
 mod window;
 
 use alloc::format;
@@ -85,8 +86,117 @@ impl Runtime {
         }
     }
 
+    /// The runtime of a dedicated worker (see [`worker`]): no document, a global of its own.
+    /// `page` is the empty page the bindings need for resolving addresses.
+    pub fn new_worker(page: &Page, limits: ScriptLimits, boot: crate::api::WorkerBoot) -> Runtime {
+        let _ = page;
+        let module = boot.spawn.kind == crate::api::WorkerType::Module;
+        let mut loader = Loader::new();
+        // A worker has no document phases: its script runs when it is ready.
+        loader.phase = Phase::Complete;
+        let body = match &boot.spawn.source {
+            Some(bytes) => {
+                let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+                let b = &b[..b.len().min(limits.max_source)];
+                Body::Ready(match core::str::from_utf8(b) {
+                    Ok(s) => String::from(s),
+                    Err(_) => b.iter().map(|&x| crate::charset::windows1252(x)).collect(),
+                })
+            }
+            None => Body::Waiting,
+        };
+        let inline = if module && let Body::Ready(t) = &body { Some(t.clone()) } else { None };
+        loader.scripts.push(loader::Script {
+            node: 0,
+            src: Some(boot.spawn.url.clone()),
+            when: loader::When::Async,
+            body: if module { Body::Waiting } else { body },
+            done: false,
+            module,
+        });
+        if module {
+            loader.work.push(loader::ModWork::Module(0, inline.filter(|_| boot.spawn.source.is_some()), CredentialsMode::SameOrigin));
+        }
+        let rt = Runtime { b: Rc::new(Bridge::new(limits, loader)), realm: None, limits };
+        {
+            let mut sec = rt.b.xf.sec.borrow_mut();
+            if boot.spawn.origin == "null" {
+                sec.opaque = true;
+            } else {
+                sec.origin = Some(boot.spawn.origin.clone());
+            }
+        }
+        {
+            let mut st = rt.b.st.borrow_mut();
+            st.content_loaded = true;
+            st.loaded = true;
+            st.worker = Some(alloc::boxed::Box::new(worker::WorkerState::new(boot)));
+        }
+        rt
+    }
+
     pub fn stopped(&self) -> bool {
         self.b.st.borrow().stopped
+    }
+
+    /// The native stack a worker's realm may use (what its thread has, less a margin).
+    fn worker_stack(&self) -> usize {
+        let have = self.b.st.borrow().worker.as_ref().map_or(0, |w| w.boot.limits.stack);
+        have.saturating_sub(384 << 10).max(128 << 10)
+    }
+
+    /// Why the scripts were stopped.
+    pub fn stop_reason(&self) -> String {
+        self.b.st.borrow().stop_reason.clone()
+    }
+
+    /// This is a worker's runtime.
+    pub fn is_worker(&self) -> bool {
+        self.b.st.borrow().worker.is_some()
+    }
+
+    /// The worker called `close()`.
+    pub fn worker_closing(&self) -> bool {
+        self.b.st.borrow().worker.as_ref().is_some_and(|w| w.closing)
+    }
+
+    /// The worker's main script has run (or failed to).
+    pub fn worker_started(&self) -> bool {
+        self.b.st.borrow().loader.scripts.first().is_some_and(|s| s.done)
+    }
+
+    /// The worker's script could not be loaded.
+    pub fn worker_main_failed(&self) -> bool {
+        self.b.st.borrow().worker.as_ref().is_some_and(|w| w.main_failed)
+    }
+
+    /// What the page's scripts ask of the app about their workers.
+    pub fn take_workers(&mut self) -> Vec<WorkerOut> {
+        worker::page::take_out(&self.b)
+    }
+
+    /// An event from worker `id` for the page: one task of its event loop.
+    pub fn worker_event(&mut self, page: &mut Page, host: &mut dyn ScriptHost, id: u32, ev: WorkerEvent) -> bool {
+        self.entry(page, host, |b, r| worker::page::event(b, r, id, ev)).unwrap_or(false)
+    }
+
+    /// A message from the page for this worker: a `message` event, one task.
+    pub fn worker_message(&mut self, page: &mut Page, host: &mut dyn ScriptHost, msg: &WireMsg) -> bool {
+        self.entry(page, host, |b, r| worker::scope::fire_message(b, r, msg)).is_some()
+    }
+
+    /// A message on a port the page gave this worker (or the port closing): it is queued for
+    /// the next [`Runtime::run`].
+    pub fn worker_port(&mut self, port: u64, msg: Option<WireMsg>) {
+        match msg {
+            Some(m) => worker::page::deliver_port(&self.b, 0, port, m),
+            None => self.b.ports().close_from_link(port),
+        }
+    }
+
+    /// What the worker has for the thread to send up: posts, errors, port traffic.
+    pub fn take_worker_out(&mut self) -> Vec<FromWorker> {
+        worker::scope::take_out(&self.b)
     }
 
     /// A call from the app is in progress in this realm (its state is not free to enter).
@@ -135,8 +245,9 @@ impl Runtime {
             return Some(0.0);
         }
         drop(st);
-        // Messages on a message port are tasks that are due now.
-        if ports::pending(&self.b) {
+        // Messages on a message port are tasks that are due now (and so are the events the
+        // engine has for the workers a page made).
+        if ports::pending(&self.b) || worker::page::has_local(&self.b) {
             return Some(0.0);
         }
         let due = self.b.st.borrow().timers.next_due();
@@ -237,6 +348,7 @@ impl Runtime {
     }
 
     fn teardown(&mut self) {
+        worker::page::terminate_all(&self.b, self.realm.as_mut());
         ports::release(&self.b, self.realm.as_mut());
         let mut st = self.b.st.borrow_mut();
         st.timers.clear_all();
@@ -295,7 +407,12 @@ impl Runtime {
                 random_seed: host.time().to_bits() ^ 0x6d69_6c6b,
             });
             let _g = self.b.enter(page, host);
-            window::install(&self.b, &mut r);
+            if self.b.st.borrow().worker.is_some() {
+                r.set_stack_limit(self.worker_stack());
+                worker::scope::install(&self.b, &mut r);
+            } else {
+                window::install(&self.b, &mut r);
+            }
             drop(_g);
             self.realm = Some(r);
         }
@@ -349,6 +466,10 @@ impl Runtime {
             // first, so its fetches overlap with the classic scripts ahead of it.
             b.st.borrow_mut().modrt.wake = false;
             modrt::pump(b, r);
+            // Events the engine has for the workers this page made.
+            if worker::page::has_local(b) && worker::page::pump_local(b, r) {
+                did = true;
+            }
             // Scripts, phase by phase.
             loop {
                 let next = b.st.borrow().loader.next();
@@ -396,6 +517,9 @@ impl Runtime {
             // Timers due now (not ones they set for "now" again: those wait for the next run).
             let now = b.host().map_or(start, |h| h.now());
             for _ in 0..MAX_TIMERS_PER_RUN {
+                if worker_closing(b) {
+                    break;
+                }
                 let t = b.st.borrow_mut().timers.take_due(now);
                 let Some(t) = t else { break };
                 did = true;
@@ -411,7 +535,7 @@ impl Runtime {
             // Then the messages on message ports that were posted before this pass (so a
             // scheduler that posts a message from each message gets only one turn here, and
             // the timers above run again before the next).
-            if !b.st.borrow().stopped && ports::pump(b, r, start, RUN_SLICE_MS) {
+            if !b.st.borrow().stopped && !worker_closing(b) && ports::pump(b, r, start, RUN_SLICE_MS) {
                 did = true;
             }
             did
@@ -554,6 +678,11 @@ fn key_target(page: &Page) -> NodeId {
     if b != NONE { b } else { 0 }
 }
 
+/// The worker called `close()`: nothing more of its queues runs.
+fn worker_closing(b: &Bridge) -> bool {
+    b.st.try_borrow().map(|st| st.worker.as_ref().is_some_and(|w| w.closing)).unwrap_or(false)
+}
+
 /// Run the jobs queued, reporting what they throw.
 pub(crate) fn run_jobs_reporting(b: &Rc<Bridge>, r: &mut Realm) {
     for _ in 0..1000 {
@@ -605,6 +734,29 @@ pub(crate) fn report(b: &Rc<Bridge>, r: &mut Realm, e: &Exception, what: &str) {
     if !rep.uncatchable && events_js::fire_error(b, r, &rep, e.value()) {
         if let Ok(mut st) = b.st.try_borrow_mut() {
             st.stats.errors += 1;
+        }
+        return;
+    }
+    // A worker's uncaught error goes up to the page's `Worker` object.
+    if !rep.uncatchable
+        && let Ok(mut st) = b.st.try_borrow_mut()
+        && st.worker.is_some()
+    {
+        let msg = if rep.message.is_empty() {
+            format!("Uncaught {}", rep.name)
+        } else {
+            format!("Uncaught {}: {}", rep.name, rep.message)
+        };
+        st.stats.errors += 1;
+        if let Some(w) = st.worker.as_mut()
+            && w.posts.len() < worker::scope::MAX_POSTS
+        {
+            w.posts.push(worker::Post::Error {
+                message: msg,
+                filename: rep.file.clone(),
+                line: rep.line,
+                column: rep.column,
+            });
         }
         return;
     }
@@ -684,6 +836,9 @@ pub(crate) fn run_script(b: &Rc<Bridge>, r: &mut Realm, i: usize, top: bool) {
         Body::Failed | Body::Waiting => {
             if let Some(u) = &src {
                 b.console(ConsoleLevel::Error, format!("Failed to load script {u}"));
+            }
+            if let Some(w) = b.st.borrow_mut().worker.as_mut() {
+                w.main_failed = true;
             }
             events_js::fire_simple(b, r, node, "error", false, false);
         }

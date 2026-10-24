@@ -63,7 +63,11 @@ function enc(v, depth) {
       Object.keys(v).forEach(function (k) { o[k.charAt(0) === '$' ? '$' + k : k] = enc(v[k], depth + 1); });
       return o;
     default:
-      if (ArrayBuffer.isView(v) && cls !== 'DataView') {
+      if (ArrayBuffer.isView(v)) {
+        // A view of a buffer that is being transferred is a view of it on the other side.
+        if (xfer !== null && xfer.has(v.buffer)) {
+          return tag('w', [cls, xfer.get(v.buffer), v.byteOffset, cls === 'DataView' ? v.byteLength : v.length]);
+        }
         bytes += v.byteLength;
         return tag('t', [cls, hex(new Uint8Array(v.buffer, v.byteOffset, v.byteLength))]);
       }
@@ -94,6 +98,7 @@ function dec(x) {
       case 'b': o = unhex(v).buffer; seen.push(o); return o;
       case 'e': o = new Error(v[1]); o.name = v[0]; seen.push(o); return o;
       case 't': { var u = unhex(v[1]); var C = globalThis[v[0]]; o = (typeof C === 'function') ? new C(u.buffer) : u; seen.push(o); return o; }
+      case 'w': { var C2 = globalThis[v[0]], B = ports ? ports[v[1]] : undefined; o = (typeof C2 === 'function' && B) ? new C2(B, v[2], v[3]) : undefined; seen.push(o); return o; }
     }
     return undefined;
   }

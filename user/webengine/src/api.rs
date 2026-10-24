@@ -46,6 +46,16 @@
 //!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - Workers (docs/browser.md). `new Worker(url, {type, name})` for dedicated classic and module
+//!   workers, each on a thread of the app's making: [`Document::take_workers`] and
+//!   [`Document::worker_event`] are the page's half, [`run_worker`] with [`WorkerIo`] the
+//!   thread's. New types: [`WorkerOut`], [`WorkerEvent`], [`WorkerSpawn`], [`WorkerBoot`],
+//!   [`WorkerLimits`], [`WireMsg`], [`Xfer`], [`ToWorker`], [`FromWorker`], [`CloseWhy`],
+//!   [`Recv`], [`WorkerType`]. A new [`NetKind`] variant, [`NetKind::Script`] (an app that
+//!   matches on the kind must handle it: treat it like [`NetKind::Module`]), a new provided
+//!   [`ScriptHost`] method `fetch_blocking` (a worker's `importScripts`), and
+//!   [`Document::script_stop_reason`]. `postMessage` to a window also writes a view of a
+//!   transferred buffer as a view (nothing changes for the ports a window message carries).
 //! - Big scripts and more of the web platform in the bindings (docs/browser.md). New fields:
 //!   [`ScriptLimits::compile`] (the allowance for the syntax tree of the biggest piece of one
 //!   script, see `jsengine::Limits::max_compile_bytes`; build with `..Default::default()`),
@@ -770,6 +780,13 @@ pub trait ScriptHost {
     fn frame_host(&mut self, _id: FrameId) -> Option<&mut dyn ScriptHost> {
         None
     }
+    /// A worker's `importScripts`: fetch `req` and wait for the answer (the worker is a thread
+    /// of its own, so it may block; nothing else of the page waits for it). None: this host
+    /// cannot (a page's host cannot: `importScripts` does not exist there). The answer is the
+    /// whole response, or a plain-English line for the console and the `NetworkError`.
+    fn fetch_blocking(&mut self, _req: NetRequest) -> Option<Result<(NetHead, Vec<u8>), String>> {
+        None
+    }
 }
 
 /// A Web Storage area (localStorage or sessionStorage), kept by the app.
@@ -943,6 +960,11 @@ pub enum NetKind {
     /// and a JavaScript (or, for a JSON module, JSON) MIME type; the page's console says
     /// why when it is not.
     Module,
+    /// A classic script a worker loads: its own main script, or what `importScripts` pulls
+    /// in. A GET that must end in a success status with a JavaScript MIME type, like
+    /// [`NetKind::Module`] (the app and `scriptnet` check both the same way); the mode is
+    /// `same-origin` for the main script and `cors` for `importScripts`.
+    Script,
 }
 
 /// A request a script made, for the app to run. Everything is as the script set it, except
@@ -1211,6 +1233,188 @@ pub struct Message {
     pub source: FrameId,
     /// The message ports it carries: `event.ports`.
     pub ports: Vec<u64>,
+}
+
+
+// ---- Workers --------------------------------------------------------------------------------
+
+/// The ways a worker's script runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerType {
+    Classic,
+    Module,
+}
+
+/// One entry of a transfer list, as it crosses between a page and a worker: a message port
+/// (by id, see [`WorkerOut::Port`]) or the bytes of an `ArrayBuffer` that was given away (the
+/// sender's buffer is detached).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Xfer {
+    Port(u64),
+    Buffer(Vec<u8>),
+}
+
+/// A message between a page and a worker (or a port on either side): the structured clone
+/// as the tagged JSON of `postmsg.rs` (empty for `undefined`), and the transfer list, in the
+/// order the sender wrote it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WireMsg {
+    pub data: String,
+    pub xfer: Vec<Xfer>,
+}
+
+/// What a page asks of the app to start a worker (see [`WorkerOut::Spawn`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerSpawn {
+    /// The worker's number in this page's realm; every later call names it.
+    pub id: u32,
+    /// The script's absolute address (no fragment).
+    pub url: String,
+    pub kind: WorkerType,
+    pub name: String,
+    /// The worker's origin as `self.origin` says it: `scheme://host:port`, or `"null"`
+    /// (a `data:` script: an origin of its own, shared with nobody).
+    pub origin: String,
+    /// The script's text, when the page already has it (a `blob:` address it made with
+    /// `URL.createObjectURL`): the worker then fetches nothing.
+    pub source: Option<Vec<u8>>,
+    /// The creating page is a secure context (https, or this machine).
+    pub secure: bool,
+}
+
+/// What a page's scripts ask of the app about their workers, in order
+/// ([`Document::take_workers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerOut {
+    /// `new Worker(url)`: the app decides whether and how (a thread, with limits), runs
+    /// [`run_worker`] on it, and tells the page how it went with [`WorkerEvent`]s. A worker
+    /// the app cannot start is answered with [`WorkerEvent::Error`] and [`WorkerEvent::Closed`].
+    Spawn(WorkerSpawn),
+    /// `worker.postMessage(...)`.
+    Post { worker: u32, msg: WireMsg },
+    /// A message the page's script posted on a port that was given to `worker` (or, with
+    /// `None`, the port was closed): it goes to the worker's end of that port.
+    Port { worker: u32, port: u64, msg: Option<WireMsg> },
+    /// `worker.terminate()` (or the page's script stopped).
+    Terminate(u32),
+}
+
+/// What happened in a worker, for the page's `Worker` object ([`Document::worker_event`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerEvent {
+    /// `self.postMessage(...)` in the worker: a `message` event at the `Worker` object.
+    Message(WireMsg),
+    /// The `error` event at the `Worker` object: an uncaught error in the worker, or its
+    /// script failed to load (`line` 0).
+    Error { message: String, filename: String, line: u32, column: u32 },
+    /// A message the worker posted on a port that was given to it (its far end is here), or
+    /// that port closing (`None`).
+    Port { port: u64, msg: Option<WireMsg> },
+    /// The worker has ended (it called `close()`, was terminated or was stopped); the
+    /// `Worker` object goes quiet. Nothing follows.
+    Closed,
+}
+
+/// What a worker's thread needs to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerBoot {
+    pub spawn: WorkerSpawn,
+    pub limits: WorkerLimits,
+    pub user_agent: String,
+    pub tz_offset: i32,
+}
+
+/// The bounds a worker runs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerLimits {
+    /// Bytes of script heap.
+    pub heap: usize,
+    /// A task (a script, a message, a timer) running longer than this without returning ends
+    /// the worker ("it ran too long"), in milliseconds.
+    pub task_ms: u32,
+    /// Bytes of one script's source.
+    pub max_source: usize,
+    /// The native stack the thread has (bytes); the realm keeps well inside it.
+    pub stack: usize,
+}
+
+impl Default for WorkerLimits {
+    fn default() -> WorkerLimits {
+        WorkerLimits { heap: 32 << 20, task_ms: 8_000, max_source: 8 << 20, stack: 1 << 20 }
+    }
+}
+
+/// What a worker sent up, in order ([`run_worker`] hands these to [`WorkerIo::send`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FromWorker {
+    /// `self.postMessage(...)`.
+    Message(WireMsg),
+    /// A request to run (ids are the worker's own; answer with [`ToWorker::Net`]); or a cancel.
+    Net(NetOut),
+    /// A post on a port that was given to the worker (or its close).
+    Port { port: u64, msg: Option<WireMsg> },
+    /// A console line.
+    Console(ConsoleLine),
+    /// An uncaught error nobody in the worker handled: it becomes an `error` event at the
+    /// page's `Worker` object. `line` 0: the script could not be loaded.
+    Error { message: String, filename: String, line: u32, column: u32 },
+    /// The worker's script heap, bytes (sent now and then, for the page's memory budget).
+    Heap(usize),
+    /// The worker is over, and why. The last thing it sends.
+    Closed(CloseWhy),
+}
+
+/// Why a worker ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseWhy {
+    /// `self.close()`, or nothing left to run is not a thing: workers stay until closed.
+    Closed,
+    /// The page terminated it.
+    Terminated,
+    /// The script could not be loaded or compiled.
+    Failed,
+    /// The engine stopped it: out of memory, or a task ran too long (the line is for the
+    /// console).
+    Stopped(String),
+}
+
+/// What the page side sends a worker's thread.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToWorker {
+    /// `worker.postMessage(...)`.
+    Message(WireMsg),
+    /// The outcome of request `id` (see [`FromWorker::Net`]).
+    Net { id: u32, ev: NetEvent },
+    /// A message on a port the page gave the worker (or the port closing).
+    Port { port: u64, msg: Option<WireMsg> },
+}
+
+/// What [`WorkerIo::recv`] found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Recv {
+    Msg(ToWorker),
+    /// The time given passed with nothing.
+    Timeout,
+    /// The page terminated the worker (or is gone): stop now.
+    Terminated,
+}
+
+/// What a worker's thread reaches the app through: the clock, randomness, and two queues.
+/// The app implements it over whatever it uses for threads; [`run_worker`] is the thread's
+/// whole body.
+pub trait WorkerIo {
+    /// A monotonic clock in milliseconds.
+    fn now(&self) -> f64;
+    /// Milliseconds since 1970-01-01 UTC.
+    fn time(&self) -> f64;
+    fn random(&mut self, out: &mut [u8]) -> bool;
+    /// The next message from the page, waiting up to `timeout_ms` (None: until one comes).
+    /// A pending termination wins over a message.
+    fn recv(&mut self, timeout_ms: Option<f64>) -> Recv;
+    /// Hand something up. False: the other side is gone or full and it was dropped.
+    fn send(&mut self, m: FromWorker) -> bool;
+    /// The page asked for termination (polled from inside a running script).
+    fn terminated(&self) -> bool;
 }
 
 // ---- The document -------------------------------------------------------------------------
@@ -1695,6 +1899,85 @@ impl Document {
     /// The DOM changed since the last layout: lay out again before hit testing.
     pub fn needs_layout(&self) -> bool {
         crate::frames::needs_layout(self)
+    }
+}
+
+/// # Workers
+///
+/// A page's `new Worker(url)` comes out of [`Document::take_workers`] as a
+/// [`WorkerOut::Spawn`]; the app starts a thread that runs [`run_worker`] with a
+/// [`WorkerBoot`] built from it, carries messages both ways ([`ToWorker`], [`FromWorker`]) and
+/// tells the page what happened ([`Document::worker_event`]). The worker's global is a
+/// [`Document`] too ([`Document::new_worker`]), which [`run_worker`] drives; apps only need
+/// the page's half. See `script/worker/mod.rs` for the picture.
+impl Document {
+    /// A document whose script runtime is a dedicated worker's global (no DOM). Meant for
+    /// [`run_worker`]; made on the worker's own thread (it is not `Send`).
+    pub fn new_worker(boot: &WorkerBoot) -> Document {
+        let page = crate::page::Page::parse_scripting(b"", &boot.spawn.url, None, Limits::default(), true);
+        let limits = ScriptLimits {
+            memory: boot.limits.heap,
+            slow_ms: 100,
+            max_source: boot.limits.max_source,
+            compile: 48 << 20,
+        };
+        let mut d = Document::from_page(page);
+        d.js = Some(alloc::boxed::Box::new(crate::script::Runtime::new_worker(&d.page, limits, boot.clone())));
+        d
+    }
+
+    /// What the scripts asked of the app about their workers since the last call, in order.
+    pub fn take_workers(&mut self) -> Vec<WorkerOut> {
+        self.js.as_mut().map(|j| j.take_workers()).unwrap_or_default()
+    }
+
+    /// Something happened in worker `worker`: one task of the page's event loop. True if a
+    /// script ran.
+    pub fn worker_event(&mut self, host: &mut dyn ScriptHost, worker: u32, ev: WorkerEvent) -> bool {
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.worker_event(&mut d.page, host, worker, ev),
+            None => false,
+        })
+    }
+
+    /// A worker's global: a message from the page (a `message` event, one task).
+    pub fn worker_message(&mut self, host: &mut dyn ScriptHost, msg: WireMsg) -> bool {
+        self.armed(|d| match d.js.as_mut() {
+            Some(j) => j.worker_message(&mut d.page, host, &msg),
+            None => false,
+        })
+    }
+
+    /// A worker's global: a message on a port the page gave it, or the port closing.
+    pub fn worker_port(&mut self, port: u64, msg: Option<WireMsg>) {
+        if let Some(j) = self.js.as_mut() {
+            j.worker_port(port, msg);
+        }
+    }
+
+    /// A worker's global: what it has for the page (posts, errors, port traffic).
+    pub fn take_worker_out(&mut self) -> Vec<FromWorker> {
+        self.js.as_mut().map(|j| j.take_worker_out()).unwrap_or_default()
+    }
+
+    /// A worker's global: it called `close()`.
+    pub fn worker_closing(&self) -> bool {
+        self.js.as_ref().is_some_and(|j| j.worker_closing())
+    }
+
+    /// A worker's global: its main script has run (messages are delivered from then on).
+    pub fn worker_started(&self) -> bool {
+        self.js.as_ref().is_some_and(|j| j.worker_started())
+    }
+
+    /// A worker's global: its main script could not be loaded.
+    pub fn worker_main_failed(&self) -> bool {
+        self.js.as_ref().is_some_and(|j| j.worker_main_failed())
+    }
+
+    /// Why the scripts were stopped ("" if they were not).
+    pub fn script_stop_reason(&self) -> String {
+        self.js.as_ref().map(|j| j.stop_reason()).unwrap_or_default()
     }
 }
 

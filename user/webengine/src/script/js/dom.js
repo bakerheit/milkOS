@@ -29,7 +29,7 @@ const domEx = (name, msg) => new DOMException(msg, name);
 const HTML_TYPES = ['text/html'];
 const XML_TYPES = ['text/xml', 'application/xml', 'application/xhtml+xml', 'image/svg+xml'];
 
-class ParsedDocument extends G.Document {
+class ParsedDocument extends (G.Document || Object) {
   constructor() {
     throw new TypeError('Illegal constructor');
   }

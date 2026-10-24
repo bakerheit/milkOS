@@ -685,6 +685,8 @@ fn key_target(page: &Page) -> NodeId {
 
 /// Set aside what follows `node` in the page (see [`crate::dom::Dom::fence_after`]).
 fn set_fence(b: &Rc<Bridge>, node: NodeId) {
+    // (One cut at a time: a cut that is still there is closed first.)
+    lift_fence(b);
     if node == NONE {
         return;
     }

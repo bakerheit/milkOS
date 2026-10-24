@@ -53,8 +53,10 @@
 //!   [`WorkerLimits`], [`WireMsg`], [`Xfer`], [`ToWorker`], [`FromWorker`], [`CloseWhy`],
 //!   [`Recv`], [`WorkerType`]. A new [`NetKind`] variant, [`NetKind::Script`] (an app that
 //!   matches on the kind must handle it: treat it like [`NetKind::Module`]), a new provided
-//!   [`ScriptHost`] method `fetch_blocking` (a worker's `importScripts`), and
-//!   [`Document::script_stop_reason`]. `postMessage` to a window also writes a view of a
+//!   [`ScriptHost`] method `fetch_blocking` (a worker's `importScripts`),
+//!   [`Document::script_stop_reason`], and the constant [`DEFAULT_USER_AGENT`] (what
+//!   [`ScriptHost::user_agent`] answers unless overridden; a worker gets the app's choice in
+//!   its [`WorkerBoot`]). `postMessage` to a window also writes a view of a
 //!   transferred buffer as a view (nothing changes for the ports a window message carries).
 //! - Script loading follows the standard more closely (behaviour, no new items): a parser-blocking
 //!   script sees only the part of the page before it while it runs (the rest is set aside and put

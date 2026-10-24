@@ -677,8 +677,8 @@ fn banks_pi4_gb4() {
 }
 
 #[test]
-fn banks_clip_at_limit_and_ignore_high_memory() {
-    // 8 GB Pi: a bank above 4 GiB is not used; one crossing the limit is cut at it.
+fn banks_clip_at_a_limit() {
+    // A board that cannot use RAM above 4 GiB: that bank goes, the one crossing the limit is cut.
     let tree = [
         mr(0, 0x3b40_0000),
         mr(0x4000_0000, 0xc000_0000),
@@ -687,6 +687,63 @@ fn banks_clip_at_limit_and_ignore_high_memory() {
     let (b, n) = crate::dtb::usable_banks(&tree, 0x8_0000, 0xfc00_0000, 4096);
     assert_eq!(n, 2);
     assert_eq!(b[1].base + b[1].size, 0xfc00_0000);
+}
+
+/// An 8 GB board's memory node: the size cell is 32 bits, so the 4 GiB above the peripherals come
+/// as two entries; they merge into one bank.
+fn pi8_tree() -> Blob {
+    let mut f = Fdt::new();
+    f.begin("");
+    f.cells("#address-cells", &[2]);
+    f.cells("#size-cells", &[1]);
+    f.begin("memory@0");
+    f.str_prop("device_type", "memory");
+    f.cells(
+        "reg",
+        &[
+            0, 0, 0x3b40_0000, // 948 MiB
+            0, 0x4000_0000, 0xbc00_0000, // up to the peripherals
+            1, 0, 0x8000_0000, // 4 GiB .. 6 GiB
+            1, 0x8000_0000, 0x8000_0000, // 6 GiB .. 8 GiB
+        ],
+    );
+    f.end();
+    f.end();
+    f.finish()
+}
+
+#[test]
+fn banks_pi4_gb8_uses_memory_above_4gib() {
+    let b = pi8_tree();
+    let d = b.dtb().unwrap();
+    let mut tree = [MemRange { base: 0, size: 0 }; MAX_BANKS];
+    assert_eq!(d.memory(&mut tree), 4);
+    let (banks, n) = crate::dtb::usable_banks(&tree[..4], 0x8_0000, usize::MAX, 4096);
+    assert_eq!(n, 3, "the two high entries touch and merge");
+    assert_eq!((banks[0].base, banks[0].size), (0, 0x3b40_0000));
+    assert_eq!((banks[1].base, banks[1].size), (0x4000_0000, 0xbc00_0000));
+    assert_eq!((banks[2].base, banks[2].size), (0x1_0000_0000, 0x1_0000_0000));
+    let total: usize = banks[..n].iter().map(|b| b.size).sum();
+    assert_eq!(total, 0x3b40_0000 + 0xbc00_0000 + 0x1_0000_0000);
+}
+
+#[test]
+fn banks_the_holes_are_what_is_between() {
+    // The allocator spans [0, 8 GiB); what the kernel reserves is each gap between banks.
+    let b = pi8_tree();
+    let d = b.dtb().unwrap();
+    let mut tree = [MemRange { base: 0, size: 0 }; MAX_BANKS];
+    let n = d.memory(&mut tree);
+    let (banks, n) = crate::dtb::usable_banks(&tree[..n], 0x8_0000, usize::MAX, 4096);
+    let mut holes = std::vec::Vec::new();
+    let mut prev_end = banks[0].base;
+    for b in &banks[..n] {
+        if b.base > prev_end {
+            holes.push((prev_end, b.base));
+        }
+        prev_end = prev_end.max(b.base + b.size);
+    }
+    assert_eq!(holes, [(0x3b40_0000, 0x4000_0000), (0xfc00_0000, 0x1_0000_0000)]);
 }
 
 #[test]

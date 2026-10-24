@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write a small Raspberry Pi 4 style device tree blob (python3 stdlib only).
 
-    scripts/pi_dtb.py OUT.dtb [--cmdline TEXT] [--psci hvc|smc] [--cpus N] [--ram-mb N]
+    scripts/pi_dtb.py OUT.dtb [--cmdline TEXT] [--psci hvc|smc] [--cpus N] [--ram-mb N] [--bank START:SIZE]
 
 qemu's `-M raspi4b` has no device tree of its own, and the real one is the firmware's (it
 belongs to the Pi's boot partition, not to this repository), so the tests build their own:
@@ -65,7 +65,7 @@ class Fdt:
         return header + b"\0" * 16 + bytes(self.struct) + bytes(self.strings)
 
 
-def build(cmdline, psci, cpus, ram_mb):
+def build(cmdline, psci, cpus, ram_mb, banks=(), ram_bytes=0):
     f = Fdt()
     f.begin("")
     f.string("compatible", "raspberrypi,4-model-b", "brcm,bcm2711")
@@ -77,8 +77,14 @@ def build(cmdline, psci, cpus, ram_mb):
     f.end()
     f.begin("memory@0")
     f.string("device_type", "memory")
-    f.cells("reg", 0, 0, ram_mb << 20)
+    f.cells("reg", 0, 0, ram_bytes or ram_mb << 20)
     f.end()
+    # More RAM banks (the 4 GB and 8 GB boards list several; qemu rewrites only memory@0).
+    for start, size in banks:
+        f.begin("memory@%x" % start)
+        f.string("device_type", "memory")
+        f.cells("reg", start >> 32, start & 0xFFFFFFFF, size)
+        f.end()
     f.begin("cpus")
     f.cells("#address-cells", 1)
     f.cells("#size-cells", 0)
@@ -110,9 +116,13 @@ def main():
     ap.add_argument("--psci", choices=["hvc", "smc"])
     ap.add_argument("--cpus", type=int, default=4)
     ap.add_argument("--ram-mb", type=int, default=1024)
+    ap.add_argument("--ram-bytes", type=lambda x: int(x, 0), help="size of memory@0 in bytes (instead of --ram-mb)")
+    ap.add_argument("--bank", action="append", default=[], metavar="START:SIZE",
+                    help="another RAM bank (hex or decimal), e.g. 0x40000000:0x40000000; repeatable")
     a = ap.parse_args()
     with open(a.out, "wb") as fh:
-        fh.write(build(a.cmdline, a.psci, a.cpus, a.ram_mb))
+        banks = [tuple(int(x, 0) for x in b.split(":")) for b in a.bank]
+        fh.write(build(a.cmdline, a.psci, a.cpus, a.ram_bytes // (1 << 20) if a.ram_bytes else a.ram_mb, banks, a.ram_bytes))
 
 
 if __name__ == "__main__":

@@ -267,6 +267,19 @@ impl Pmm {
     /// Find `count` consecutive free frames whose first frame's address is a
     /// multiple of `align_frames` frames (a power of two).
     fn alloc_contiguous(&mut self, count: usize, align_frames: usize, u: Use) -> Option<PhysAddr> {
+        self.alloc_contiguous_between(count, align_frames, u, 0, usize::MAX)
+    }
+
+    /// [`alloc_contiguous`](Self::alloc_contiguous) restricted to frames wholly inside the
+    /// physical range `[lo, hi)` (for devices that cannot address all of RAM).
+    fn alloc_contiguous_between(
+        &mut self,
+        count: usize,
+        align_frames: usize,
+        u: Use,
+        lo: PhysAddr,
+        hi: PhysAddr,
+    ) -> Option<PhysAddr> {
         if count == 0 || !align_frames.is_power_of_two() {
             return None;
         }
@@ -276,8 +289,9 @@ impl Pmm {
         }
         // Alignment is relative to physical address 0, not to `base`.
         let base_frame = self.base / PAGE_SIZE;
-        let mut start = self.reserved;
-        'outer: while start + count <= self.frames {
+        let mut start = self.reserved.max(lo.saturating_sub(self.base).div_ceil(PAGE_SIZE));
+        let end = self.frames.min(hi.saturating_sub(self.base) / PAGE_SIZE);
+        'outer: while start + count <= end {
             let misalign = (base_frame + start) % align_frames;
             if misalign != 0 {
                 start += align_frames - misalign;
@@ -449,6 +463,27 @@ pub fn alloc_contiguous(count: usize, align_frames: usize) -> Option<PhysAddr> {
 /// [`alloc_contiguous`] counted as `u`.
 pub fn alloc_contiguous_as(u: Use, count: usize, align_frames: usize) -> Option<PhysAddr> {
     with(|p| p.alloc_contiguous(count, align_frames, u))
+}
+
+/// Allocate `count` frames wholly inside `[lo, hi)` (physical), zeroed: for a device that can
+/// only address part of RAM (the Pi's mailbox sees the first GiB; its DMA engines everything
+/// below `platform::CURRENT.dma_limit`). `None` if there is no such run.
+pub fn alloc_contiguous_zeroed_between(
+    u: Use,
+    count: usize,
+    align_frames: usize,
+    lo: PhysAddr,
+    hi: PhysAddr,
+) -> Option<PhysAddr> {
+    let pa = with(|p| p.alloc_contiguous_between(count, align_frames, u, lo, hi))?;
+    // SAFETY: we own the frames and RAM is mapped.
+    unsafe { core::ptr::write_bytes(phys_to_virt(pa) as *mut u8, 0, count * PAGE_SIZE) };
+    Some(pa)
+}
+
+/// A zeroed run a DMA device can reach: below the board's DMA limit (everything on qemu virt).
+pub fn alloc_dma_zeroed_as(u: Use, count: usize, align_frames: usize) -> Option<PhysAddr> {
+    alloc_contiguous_zeroed_between(u, count, align_frames, 0, crate::platform::CURRENT.dma_limit)
 }
 
 /// Like [`alloc_contiguous`] but zeroed.

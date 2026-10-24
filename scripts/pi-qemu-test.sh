@@ -4,7 +4,13 @@
 #           firmware's spin table, the framebuffer from the mailbox and the desktop on it (a
 #           qemu screendump checked for real content), the SD card (emulated EMMC) found,
 #           a fresh milkfs on it mounted, commands typed over the serial line, a file written;
-#   boot 2: the same SD image again: the file is still there (the card's data survives a reboot).
+#   boot 2: the same SD image again: the file is still there (the card's data survives a reboot);
+#   boot 3: a device tree that lists two RAM banks with the GPU's hole between them (the shape of a
+#           4 GB or 8 GB board's memory node), loaded unchanged (qemu rewrites memory nodes of a tree
+#           given with -dtb, so this one goes in as a raw file where the boot stub looks for it):
+#           both banks used, the hole reserved, the framebuffer inside the hole, the desktop up.
+#           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
+#           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
 # TCG (no hvf for raspi), so a boot takes about 10-20 s.
 #
@@ -29,8 +35,11 @@ fi
 # What qemu does not supply: a device tree (qemu's raspi4b has none of its own).
 python3 scripts/pi_dtb.py "$T/pi.dtb" --cmdline ""
 python3 scripts/mkmilkfs.py mkfs "$T/sd.img" --size 64M --label Milk >/dev/null
+# boot 3's tree: no CPUs (it must fit under the boot stub's own code at 0x300), two banks.
+python3 scripts/pi_dtb.py "$T/banks.dtb" --cpus 0 --ram-bytes 0x3b400000 --bank 0x40000000:0x40000000
 P='msh:[^\n]*\$ '
 QPID=""
+DTB_ARGS=(-dtb "$T/pi.dtb")
 trap '[ -n "$QPID" ] && kill -9 "$QPID" 2>/dev/null || true' EXIT
 
 # boot N: start qemu on the card image, drive the serial console with the steps after it.
@@ -39,7 +48,7 @@ boot() {
   SOCK="$T/s$n.sock"; QMP="$T/q$n.sock"; LOG="$T/serial$n.log"
   : > "$LOG"
   # raspi4b: the SD card attaches with if=sd; no -m (the board's RAM), no hvf.
-  qemu-system-aarch64 -M raspi4b -kernel "$T/kernel8.img" -dtb "$T/pi.dtb" -display none -monitor none \
+  qemu-system-aarch64 -M raspi4b -kernel "$T/kernel8.img" "${DTB_ARGS[@]}" -display none -monitor none \
     -serial "unix:$SOCK,server=on,wait=on" -qmp "unix:$QMP,server,nowait" \
     -drive "file=$T/sd.img,if=sd,format=raw" >/dev/null 2>&1 &
   QPID=$!
@@ -114,6 +123,21 @@ stop
 # on a line of its own.)
 tr -d '\r' < "$LOG" | grep -q '^hello-from-the-pi$' && ok "boot 2: the file is still on the card" || bad "boot 2: the file is gone (see $LOG)"
 check '^milkfs: mmcblk0 mounted' "boot 2: the card mounts again"
+
+# ---- boot 3: two RAM banks and a hole ----
+DTB_ARGS=(-device "loader,file=$T/banks.dtb,addr=0x100,force-raw=on")
+boot 3 "wait@300:$P" "wait@120:wm: desktop up" "send:system" "wait:$P"
+sleep 1
+python3 scripts/qmp.py "$QMP" screendump "$T/banks.png" >/dev/null 2>&1 || true
+stop
+check '^mem: RAM 0x0\.\.0x80000000 \(1972 MiB, device tree\)' "boot 3: both banks (948 + 1024 MiB)"
+check '^mem:   bank 0x0\.\.0x3b400000 ' "boot 3: the first bank"
+check '^mem:   bank 0x40000000\.\.0x80000000 ' "boot 3: the second bank"
+check '^rpi fb: 1024x768x32 pitch 4096 at 0x3c' "boot 3: the framebuffer in the hole between them"
+check '^wm: desktop up' "boot 3: the desktop"
+has 'KERNEL PANIC|kernel panic' && bad "boot 3: a kernel panic" || ok "boot 3: no panic"
+out system | grep -Eq '^memory +(1\.9|2\.0) GB' && ok "boot 3: system: $(out system | grep '^memory')" || bad "boot 3: system: $(out system)"
+[ -s "$T/banks.png" ] && python3 -I scripts/png_check.py "$T/banks.png" >/dev/null 2>&1 && ok "boot 3: a screendump" || bad "boot 3: no screendump"
 
 if [ "$FAIL" = 0 ]; then
   echo "pi-qemu-test: PASS"

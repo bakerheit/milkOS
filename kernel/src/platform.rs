@@ -54,10 +54,12 @@ pub struct Platform {
     pub device: &'static [PhysRange],
     /// What the boot identity map has for each of the first four GiB (boot.S).
     pub boot_map: [Block; 4],
-    /// RAM at or above this physical address is not used (the Pi's peripherals start at
-    /// 0xfc00_0000; its tree also lists RAM up to 8 GB above the 4 GiB line, which would need
-    /// more than the 32-bit device addresses we map).
+    /// RAM at or above this physical address is not used.
     pub ram_limit: usize,
+    /// DMA-capable devices reach RAM only below this physical address (the Pi 4's PCIe, GENET and
+    /// EMMC2 sit behind a 0xfc00_0000 window; on a 4 GB or 8 GB board RAM above it is only for
+    /// the CPU).
+    pub dma_limit: usize,
     /// RAM to assume when there is no usable device tree (kept small: right on every model).
     pub ram_fallback: (usize, usize),
     /// virtio-mmio transports, if the board has them.
@@ -82,6 +84,7 @@ pub const VIRT: Platform = Platform {
     device: &[(0, 0x4000_0000)],
     boot_map: [Block::Device, Block::Ram, Block::None, Block::None],
     ram_limit: usize::MAX,
+    dma_limit: usize::MAX,
     ram_fallback: (0x4000_0000, 512 << 20),
     virtio: Some(VirtioMmio {
         base: 0x0a00_0000,
@@ -110,7 +113,9 @@ pub const RASPI4: Platform = Platform {
     // The kernel and the firmware's device tree sit in the first GiB; 0xc000_0000.. holds the
     // peripherals (the UART talks before the full tables exist).
     boot_map: [Block::Ram, Block::None, Block::None, Block::Device],
-    ram_limit: 0xfc00_0000,
+    // RAM above the peripherals (an 8 GB board has 4 GiB of it, from 0x1_0000_0000) is used.
+    ram_limit: usize::MAX,
+    dma_limit: 0xfc00_0000,
     // 512 MiB is below every model's first RAM bank (a 1 GiB board loses the top of it to
     // the GPU).
     ram_fallback: (0, 512 << 20),

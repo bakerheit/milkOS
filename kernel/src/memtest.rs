@@ -488,10 +488,46 @@ fn test_wx() {
     drop(core::hint::black_box(code));
 }
 
+/// Memory above 4 GiB (a 6 GiB qemu virt, an 8 GB Pi) and the DMA limit: frames asked for there
+/// come from there, are usable through the linear map, and a DMA allocation never lands above
+/// the board's limit. Says what it skipped.
+fn test_high_and_dma() {
+    const FOUR_GIB: usize = 4 << 30;
+    let limit = crate::platform::CURRENT.dma_limit;
+    let s = pmm::stats();
+    let top = s.base + s.total_frames * PAGE_SIZE;
+    // DMA-reachable frames: below the limit, whatever else the board has above.
+    let dma = pmm::alloc_dma_zeroed_as(pmm::Use::Other, 4, 4).expect("selftest: no DMA frames");
+    assert!(dma.is_multiple_of(4 * PAGE_SIZE) && dma + 4 * PAGE_SIZE <= limit);
+    fill_frame(dma, 0xd1a0);
+    check_frame(dma, 0xd1a0);
+    pmm::free_contiguous(dma, 4);
+    if top <= FOUR_GIB {
+        kprintln!("selftest: high memory skipped (RAM ends at {top:#x}, under 4 GiB)");
+        return;
+    }
+    let hi = pmm::alloc_contiguous_zeroed_between(pmm::Use::Other, 3, 1, FOUR_GIB, usize::MAX)
+        .expect("selftest: no frames above 4 GiB");
+    assert!(hi >= FOUR_GIB, "selftest: {hi:#x} is not above 4 GiB");
+    for i in 0..3 {
+        fill_frame(hi + i * PAGE_SIZE, 0x4_0000_0000 + i as u64);
+    }
+    for i in 0..3 {
+        check_frame(hi + i * PAGE_SIZE, 0x4_0000_0000 + i as u64);
+    }
+    assert!(
+        mmu::with_kernel_space(|s| s.translate(phys_to_virt(hi))) == Some(hi),
+        "selftest: {hi:#x} not in the linear map"
+    );
+    pmm::free_contiguous(hi, 3);
+    kprintln!("selftest: high memory ok (RAM to {top:#x}; 3 frames at {hi:#x} written, read back, freed)");
+}
+
 pub fn run() {
     kprintln!("selftest: memory...");
     test_mmu();
     test_pmm();
+    test_high_and_dma();
     test_heap();
     test_wx();
     pmm::reset_counters();

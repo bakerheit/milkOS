@@ -22,7 +22,7 @@ pub struct MemRange {
     pub size: usize,
 }
 
-pub const MAX_BANKS: usize = 4;
+pub const MAX_BANKS: usize = 8;
 /// CPUs [`Dtb::cpus`] reports.
 pub const MAX_CPUS: usize = 8;
 

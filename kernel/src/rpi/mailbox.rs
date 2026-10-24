@@ -103,8 +103,16 @@ pub fn transact<H, R>(
 ) -> Result<R, Error> {
     let mut page = PAGE.lock();
     if *page == 0 {
-        *page = crate::pmm::alloc_contiguous_zeroed_as(crate::pmm::Use::Devices, 1, 1)
-            .ok_or(Error::NoMemory)?;
+        // The VideoCore reads the message through a 1 GiB bus alias: it must sit in the first GiB
+        // (on a 4 or 8 GB board most of RAM is above that).
+        *page = crate::pmm::alloc_contiguous_zeroed_between(
+            crate::pmm::Use::Devices,
+            1,
+            1,
+            0,
+            0x4000_0000,
+        )
+        .ok_or(Error::NoMemory)?;
     }
     let pa = *page;
     let va = phys_to_virt(pa);

@@ -118,6 +118,7 @@ B=(); s B \
   "processes stop --all services" \
   "text show /tmp/follow.txt" \
   "system" \
+  "system version" \
   "system uptime" \
   "system memory" \
   "MILK_TABLE=1 system memory" \
@@ -224,6 +225,7 @@ checkre "the follow was stopped by name" "processes stop --all services" "^asked
 echo "== system"
 checkre "system with no verb: info, the name" "system" "^name +milk$"
 checkre "info: the version" "system" "^system +milkOS [0-9]+\\.[0-9]+\\.[0-9]+"
+checkre "version: one line, the number, and the commit in a build from a checkout" "system version" "^milkOS [0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?( \\(([0-9a-f]{7}(\\+dirty)?|unknown)\\))?$"
 checkre "info: CPUs" "system" "^CPUs +[0-9]+$"
 checkre "info: memory" "system" "^memory +[0-9]+ MB, [0-9.]+ MB free$"
 checkre "uptime" "system uptime" "^up .* \\(since [A-Z][a-z]{2} +[0-9]+ [0-9]{2}:[0-9]{2}\\), [0-9]+ processes, load [0-9.]+ [0-9.]+ [0-9.]+ \\(1, 5, 15 minutes\\)$"

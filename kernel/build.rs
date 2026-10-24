@@ -10,11 +10,21 @@ fn main() {
     println!("cargo:rerun-if-changed=linker.ld");
     println!("cargo:rerun-if-changed=src/boot.S");
     let repo = Path::new(&dir).parent().unwrap();
-    // The one version number (<repo>/VERSION): env!("MILKOS_VERSION") in the kernel, and
-    // @VERSION@ in rootfs text files (motd, System/Version.txt) is replaced with it.
-    let version = read_version(repo);
+    // The one version number (<repo>/VERSION), see docs/versioning.md:
+    //   MILKOS_VERSION      what people see: `0.2.0` for a release build (MILKOS_RELEASE=1, set by
+    //                       scripts/release.sh), `0.2.0-dev (abc1234)` for any other build, with
+    //                       `+dirty` after the hash when the tree has changes, or `unknown` for the
+    //                       hash when there is no git (a source tarball). uname, /proc/version, the
+    //                       boot message, About, Settings, @VERSION@ in rootfs text files.
+    //   MILKOS_VERSION_NUM  the plain number from VERSION.
+    //   MILKOS_BUILD        `release`, `abc1234`, `abc1234+dirty` or `unknown`.
+    let number = read_version(repo);
+    let (version, build) = version_strings(repo, &number);
     println!("cargo:rustc-env=MILKOS_VERSION={version}");
+    println!("cargo:rustc-env=MILKOS_VERSION_NUM={number}");
+    println!("cargo:rustc-env=MILKOS_BUILD={build}");
     println!("cargo:rerun-if-changed={}", repo.join("VERSION").display());
+    println!("cargo:rerun-if-env-changed=MILKOS_RELEASE");
     // User programs first: the initramfs packs them (initramfs.list).
     build_user(repo);
     build_initramfs(repo, &version);
@@ -66,14 +76,92 @@ fn build_art(repo: &Path) {
     }
 }
 
+/// `MAJOR.MINOR.PATCH` with an optional `-prerelease` (dot-separated identifiers of
+/// `[0-9A-Za-z-]`, numeric ones without leading zeros), which is what cargo also takes.
+fn is_semver(v: &str) -> bool {
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    let num = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) && (p == "0" || !p.starts_with('0'));
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 || !parts.iter().all(|p| num(p)) {
+        return false;
+    }
+    pre.is_none_or(|p| {
+        p.split('.').all(|id| {
+            !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && (!id.bytes().all(|b| b.is_ascii_digit()) || num(id))
+        })
+    })
+}
+
 fn read_version(repo: &Path) -> String {
     let v = fs::read_to_string(repo.join("VERSION")).expect("read <repo>/VERSION");
     let v = v.trim();
     assert!(
-        !v.is_empty() && v.split('.').all(|p| p.parse::<u32>().is_ok()),
-        "VERSION must be like 0.1.0, got {v:?}"
+        is_semver(v),
+        "VERSION must be like 0.2.0 or 0.3.0-rc.1, got {v:?}"
     );
     v.to_string()
+}
+
+/// (MILKOS_VERSION, MILKOS_BUILD) for `number`: see `main`.
+fn version_strings(repo: &Path, number: &str) -> (String, String) {
+    let release = std::env::var("MILKOS_RELEASE").is_ok_and(|v| v == "1");
+    if release {
+        return (number.to_string(), "release".to_string());
+    }
+    let build = git_build_id(repo).unwrap_or_else(|| "unknown".to_string());
+    let version = format!("{number}-dev ({build})");
+    // uname fields are 64 bytes; the longest user is "#1 milkOS <version> (aarch64, Rust)".
+    assert!(version.len() <= 40, "version string too long: {version}");
+    (version, build)
+}
+
+fn git(repo: &Path, args: &[&str]) -> Option<String> {
+    // GIT_OPTIONAL_LOCKS=0: `git status` must not rewrite the index (that would make cargo
+    // think the inputs changed).
+    let o = Command::new("git")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .ok()?;
+    o.status
+        .success()
+        .then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// `abc1234` or `abc1234+dirty` for the checkout at `repo`; None without git or when `repo`
+/// is not itself the top of a git checkout (a source tarball unpacked inside someone else's
+/// repository must not report that repository's commit).
+fn git_build_id(repo: &Path) -> Option<String> {
+    let top = git(repo, &["rev-parse", "--show-toplevel"])?;
+    if fs::canonicalize(&top).ok()? != fs::canonicalize(repo).ok()? {
+        return None;
+    }
+    let hash = git(repo, &["rev-parse", "--short=7", "HEAD"])?;
+    // Rebuild when the commit changes (the reflog of this checkout moves on every commit,
+    // checkout and reset), and when kernel sources change: whether the tree
+    // is dirty is decided when this script runs.
+    for p in ["logs/HEAD", "HEAD"] {
+        if let Some(path) = git(repo, &["rev-parse", "--git-path", p]) {
+            let path = if Path::new(&path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                repo.join(path)
+            };
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    println!("cargo:rerun-if-changed={}", repo.join("kernel/src").display());
+    let dirty = git(repo, &["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    Some(if dirty { format!("{hash}+dirty") } else { hash })
 }
 
 // ---- user programs ------------------------------------------------------------------

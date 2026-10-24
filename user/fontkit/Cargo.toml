@@ -2,7 +2,7 @@
 name = "fontkit"
 # Spelled out (not inherited from user/Cargo.toml): the kernel depends on it from outside
 # this workspace.
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 
 # The system fonts' glyph blobs (kernel/src/sysfont/*.font, made by scripts/gen_sysfont.py)

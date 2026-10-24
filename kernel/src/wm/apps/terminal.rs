@@ -1339,6 +1339,7 @@ impl Shell for BuiltinShell {
                         (s.free_frames * 4096) >> 20
                     ));
                 }
+                "version" => out.out(concat!("milkOS ", env!("MILKOS_VERSION"))),
                 "uptime" => out.out(&format!("up {}", fmt_uptime(timer::now_ns()))),
                 "memory" => {
                     let s = pmm::stats();
@@ -1356,7 +1357,7 @@ impl Shell for BuiltinShell {
                     ));
                 }
                 other => out.bad(&format!(
-                    "system: there's no system {other} here (info, uptime, memory)"
+                    "system: there's no system {other} here (info, version, uptime, memory)"
                 )),
             },
             "users" => match rest.first().copied().unwrap_or("me") {

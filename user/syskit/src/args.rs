@@ -235,11 +235,12 @@ pub fn services<'a>(a: &'a [&'a str]) -> Result<Services<'a>, Usage> {
 pub enum System {
     Help,
     Info,
+    Version,
     Memory,
     Uptime,
 }
 
-/// `system [info|memory|uptime|help]`; no verb is info.
+/// `system [info|version|memory|uptime|help]`; no verb is info.
 pub fn system(a: &[&str]) -> Result<System, Usage> {
     const N: &str = "system";
     let Some((&verb, rest)) = a.split_first() else {
@@ -250,6 +251,7 @@ pub fn system(a: &[&str]) -> Result<System, Usage> {
     }
     let v = match verb {
         "info" => System::Info,
+        "version" => System::Version,
         "memory" => System::Memory,
         "uptime" => System::Uptime,
         "restart" | "shutdown" | "shut-down" => {
@@ -598,6 +600,7 @@ mod tests {
     #[test]
     fn system_words() {
         assert_eq!(system(&[]), Ok(System::Info));
+        assert_eq!(system(&["version"]), Ok(System::Version));
         assert_eq!(system(&["memory"]), Ok(System::Memory));
         assert_eq!(system(&["uptime"]), Ok(System::Uptime));
         assert_eq!(system(&["help"]), Ok(System::Help));

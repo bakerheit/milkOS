@@ -1,6 +1,6 @@
 [package]
 name = "milkweb"
-version = "0.0.1"
+version.workspace = true
 edition = "2024"
 
 # The web client pieces shared by the kernel (the Browser, net::dns) and user space (rt::web,

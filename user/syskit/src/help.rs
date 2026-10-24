@@ -40,6 +40,7 @@ pub const SYSTEM: &str = "\
 usage: system COMMAND ...    this computer
 
   info                    name, version, kernel, uptime, CPUs and memory
+  version                 the milkOS version, and which build it is
   memory                  where the memory goes, in Activity Monitor's groups
   uptime                  how long since it started, and how busy it has been
   help                    this list
@@ -136,7 +137,7 @@ mod tests {
                 "list", "status", "start", "stop", "restart", "signal", "reload", "logs", "help"
             ]
         );
-        assert_eq!(verbs(SYSTEM), ["info", "memory", "uptime", "help"]);
+        assert_eq!(verbs(SYSTEM), ["info", "version", "memory", "uptime", "help"]);
         assert_eq!(verbs(USERS), ["me", "list", "password", "switch", "help"]);
         assert_eq!(
             verbs(ADMIN),

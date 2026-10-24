@@ -1,6 +1,6 @@
 [package]
 name = "tlsprobe"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 
 # A host (macOS) test client for scripts/tls-interop.sh: the tls crate over std TCP, run

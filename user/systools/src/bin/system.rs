@@ -1,6 +1,8 @@
 //! system: this computer (it replaced uname, uptime and free).
 //!
 //!   system info      name, version, kernel, uptime, CPUs, memory (also plain `system`)
+//!   system version   the milkOS version and build, one line: `milkOS 0.2.0` (a release) or
+//!                    `milkOS 0.2.0-dev (abc1234)` (a build from a checkout)
 //!   system memory    /proc/meminfo in Activity Monitor's groups (a table for msh when asked)
 //!   system uptime    how long since boot, the processes, the load averages
 //!
@@ -56,6 +58,13 @@ fn main(args: &rt::Args) -> i32 {
             ]) {
                 out.line(&l);
             }
+        }
+        System::Version => {
+            let Ok(u) = sys::uname() else {
+                rt::eprintln!("system version: the kernel didn't say what it is");
+                return 1;
+            };
+            out.line(&format!("{} {}", u[0], u[2]));
         }
         System::Uptime => {
             let up = time::parse_uptime(&systools::text("/proc/uptime"));

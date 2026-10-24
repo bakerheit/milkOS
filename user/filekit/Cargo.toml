@@ -2,7 +2,7 @@
 name = "filekit"
 # Spelled out (not inherited from user/Cargo.toml): the kernel depends on it from outside
 # this workspace.
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 
 # The rules behind `files`, `trash` and the Files app's Trash: paths and the trailing-slash

@@ -648,5 +648,6 @@ words, admin ticket). A NAME more than one process has is refused with their PID
 `--all`; `--group PGID` is kill's negative PID. **`system`** (it replaced `uname`,
 `uptime` and `free`): `info` (name, version, kernel, machine, uptime, CPUs, memory),
 `memory` (`/proc/meminfo` in Activity Monitor's groups, with what "Other kernel" is made
-of), `uptime`. There is no `system restart` or `shutdown`: only the desktop's milk menu can
+of), `uptime`, `version` (one line: `milkOS 0.2.0`, or `milkOS 0.2.0-dev (abc1234)` in a build from a
+checkout; docs/versioning.md). There is no `system restart` or `shutdown`: only the desktop's milk menu can
 do that (PSCI from the window manager, `kernel/src/wm/power.rs`), with no system call yet.

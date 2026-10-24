@@ -6,7 +6,7 @@ resolver = "2"
 members = ["rt", "init", "hello", "msh", "fault", "utest", "coreutils", "disks", "stty", "gui", "paint", "desk", "network", "httpd", "play", "audit", "apps", "versions", "fsstress", "search", "peek", "store", "drop", "timekit", "timeio", "timetools", "appkit", "clock", "calendar", "sysview", "activity", "diskkit", "reminders", "diskutil", "tcpbench", "milkd", "udrv", "rngd", "soundd", "filekit", "cmdkit", "heapkit", "filetools", "syskit", "systools", "textbuf", "fontkit", "imgdec", "texteditor", "preview", "textkit", "texttools", "tlsprobe", "webengine", "webbench", "browserkit", "scriptnet", "browser", "jsengine", "jsbench"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2024"
 
 [profile.dev]

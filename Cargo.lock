@@ -4,30 +4,30 @@ version = 4
 
 [[package]]
 name = "filekit"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "fontkit"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "imgdec"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "milkcrypto"
-version = "0.0.1"
+version = "0.1.0"
 
 [[package]]
 name = "milkfs"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "milkcrypto",
 ]
 
 [[package]]
 name = "milkos-kernel"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "filekit",
  "fontkit",
@@ -40,14 +40,14 @@ dependencies = [
 
 [[package]]
 name = "milkweb"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "tls",
 ]
 
 [[package]]
 name = "tls"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "milkcrypto",
 ]

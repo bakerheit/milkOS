@@ -547,7 +547,13 @@ pub fn init() {
         0,
         "[kernel]",
         "audit.boot",
-        concat!("kernel=milkOS-", env!("CARGO_PKG_VERSION")),
+        // The package version follows <repo>/VERSION (scripts/version-check.sh checks it).
+        concat!(
+            "kernel=milkOS-",
+            env!("CARGO_PKG_VERSION"),
+            " build=",
+            env!("MILKOS_BUILD")
+        ),
     );
     if let Some(root) = crate::fs::procfs::root() {
         root.add_file("audit", proc_text);

@@ -1,7 +1,8 @@
 [package]
 name = "milkos-kernel"
-# The milkOS version lives in <repo>/VERSION (kernel/build.rs: MILKOS_VERSION).
-version = "0.0.0"
+# The milkOS version lives in <repo>/VERSION (kernel/build.rs: MILKOS_VERSION); the package
+# version follows it (docs/versioning.md).
+version.workspace = true
 edition = "2024"
 
 [[bin]]

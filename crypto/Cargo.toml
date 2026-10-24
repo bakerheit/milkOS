@@ -1,6 +1,6 @@
 [package]
 name = "milkcrypto"
-version = "0.0.1"
+version.workspace = true
 edition = "2024"
 
 # Shared by the kernel (kernel/src/crypto) and userland (rt::crypto): no_std, alloc only,

@@ -4,6 +4,11 @@ members = ["kernel", "crypto", "milkfs", "milkweb", "tls"]
 # user/ is its own workspace (built by kernel/build.rs); so is tls/probe (a host test tool).
 exclude = ["user", "tls/probe"]
 
+# Every package here (and the user/ workspace, and tls/probe) has the version in <repo>/VERSION.
+# scripts/cut-release.sh changes them together; scripts/version-check.sh fails if one differs.
+[workspace.package]
+version = "0.1.0"
+
 [profile.dev]
 panic = "abort"
 opt-level = 1

@@ -36,7 +36,7 @@ mod notif;
 mod packages;
 mod paint;
 mod png;
-mod power;
+pub mod power;
 pub mod powerbox;
 pub mod prefs;
 mod rtc;

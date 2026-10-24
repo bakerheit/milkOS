@@ -13,11 +13,13 @@
 #           serial cable in mind: the boot log (not cleared) and the panic text are on the screen, with the
 #           green sign-of-life band on top (qemu screendump, pixels checked);
 #   boot 5: `milk.crashtest=late`: a panic with the desktop up: the end of the log, the panic text, on a
-#           full-screen text console (screendump: the desktop is gone, the console background is there).
+#           full-screen text console (screendump: the desktop is gone, the console background is there);
+#   boots 6, 7: `milk.crashtest=late-off` / `late-reset`: the desktop's Shut Down and Restart on a board with no PSCI
+#           (the SoC's power manager): qemu exits by itself / the machine boots again.
 #           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
 #           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
-# TCG (no hvf for raspi), so a boot takes about 10-20 s.
+# TCG (no hvf for raspi), so a boot takes about 10-30 s.
 #
 #   scripts/pi-qemu-test.sh [workdir]      (MILK_KEEP=1 keeps the work folder; MILK_PREBUILT=1 skips the build)
 set -euo pipefail
@@ -174,6 +176,20 @@ for stage in early late; do
     bad "boot $n: no screendump"
   fi
 done
+# ---- boots 6 and 7: power off and restart through the power manager ----
+python3 scripts/pi_dtb.py "$T/power.dtb" --cmdline "milk.crashtest=late-off"
+DTB_ARGS=(-dtb "$T/power.dtb")
+boot 6 "wait@300:wm: shutting down"
+gone=0
+for _ in $(seq 150); do kill -0 "$QPID" 2>/dev/null || { gone=1; break; }; sleep 0.2; done
+[ "$gone" = 1 ] && ok "boot 6: Shut Down powered the machine off (qemu exited by itself)" || bad "boot 6: the machine did not power off"
+stop
+python3 scripts/pi_dtb.py "$T/power.dtb" --cmdline "milk.crashtest=late-reset"
+boot 7 "wait@300:wm: restarting" "wait@300:milkOS [0-9][^ ]* .*booting"
+stop
+check 'wm: restarting \(power manager, full reset\)' "boot 7: Restart reset the machine"
+[ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" -ge 2 ] && ok "boot 7: the kernel booted a second time" || bad "boot 7: no second boot"
+
 # After the early panic the screen kept the boot log and the green band over it (not cleared, no splash).
 case "$(pixels "$T/crash-early.png" 500,2 500,5)" in
   "48,208,96 255,255,255") ok "boot 4: the sign-of-life band is on top (green, then a white line)" ;;

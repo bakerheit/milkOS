@@ -35,7 +35,7 @@ so those paths are skipped there) and logs what it reads; the first boot on a re
 ```
 scripts/pi-run.sh               # a window (cocoa) and the serial console on this terminal
 scripts/pi-run.sh headless      # serial only
-scripts/pi-qemu-test.sh         # the test: five boots, see below (about 2 minutes)
+scripts/pi-qemu-test.sh         # the test: seven boots, see its header (a few minutes)
 ```
 
 `-M raspi4b` runs on TCG (`-accel hvf` does not work for the Raspberry Pi machines), so boots take a
@@ -71,7 +71,7 @@ them, so every existing option works unchanged:
 | `milk.net="internet=on"` | the launcher's network policy (docs/networking.md) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
-| `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens) |
+| `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
 
@@ -273,7 +273,9 @@ Not done: the address filter, interrupt-driven transmit completion, checksum off
   or HDMI audio), no GPU acceleration (the VideoCore needs a mailbox/firmware protocol milkOS does not speak).
 * The desktop at 1024x768 on a Pi's CPU has not been measured; if it is slow the options are the release build (the default
   for `pi-bootdir.sh`) and a smaller compositor workload.
-* Power button, poweroff, reboot: the PSCI-less Pi needs the watchdog (`PM_RSTC`) or a mailbox call; not wired.
+* No power button support (the Pi 4 has none; a GPIO button is a few lines on top of `rpi/power.rs`). The desktop's Shut Down and
+  Restart use the SoC's power manager (`rpi/power.rs`: a watchdog full reset, with the firmware's halt marker set first for "off", so the board
+  stays down until power is cycled); both are tested on qemu (`pi-qemu-test` boots 6 and 7).
 * Thermal throttling is not watched (mailbox `GET_TEMPERATURE` exists).
 
 ## Stage 2: what to do with a board, in order

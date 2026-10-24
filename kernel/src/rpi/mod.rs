@@ -17,6 +17,7 @@ pub mod genet;
 pub mod led;
 pub mod mailbox;
 pub mod pcie;
+pub mod power;
 pub mod rng;
 pub mod sdhci;
 

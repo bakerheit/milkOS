@@ -15,7 +15,7 @@
   `scripts/milkfs-test.sh` = the file system's host tests (the `milkfs` crate on the Mac, seconds, no VM; docs/filesystem.md).
   `scripts/driver-crash-test.sh` = user-space drivers (rngd, soundd; docs/drivers.md) killed mid-use: restarted, audio keeps playing, no panic; `MILK_DRIVERS="rng=kernel sound=kernel"` for the in-kernel drivers only.
   `scripts/pi-run.sh` = the Raspberry Pi 4 kernel on qemu `-M raspi4b` (docs/raspberry-pi.md); `scripts/pi-build.sh` builds its image (feature
-  `raspi`, target dir `target/pi`); `scripts/pi-qemu-test.sh` boots it five times (desktop, SD card, two RAM banks, both crash screens);
+  `raspi`, target dir `target/pi`); `scripts/pi-qemu-test.sh` boots it seven times (desktop, SD card, two RAM banks, both crash screens, power off, restart);
   `scripts/usb-test.sh` = USB keyboard and mouse through qemu's xHCI; `scripts/highmem-test.sh` = RAM above 4 GiB on virt;
   `scripts/rpikit-test.sh` = the Pi crate's host tests (device tree, mailbox, SD, PCI, USB, GENET).
   Daemons are milkd services (`/System/Settings/milk/services/*.service`, docs/processes.md); don't add hard-coded starts to init.

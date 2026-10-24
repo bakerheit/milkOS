@@ -178,14 +178,25 @@ fn crash_test() {
 /// as soon as the display and the board drivers are up (the boot log is still on screen); `late`
 /// once the desktop has been up for a few seconds. Called from `kmain` at both points.
 pub fn crash_if_asked(stage: &str) {
-    let mut text = [0u8; 8];
+    let mut text = [0u8; 16];
     let Some(f) = crate::fwcfg::find_file("opt/milkos/crashtest")
         .filter(|f| (f.size as usize) <= text.len())
         .filter(|f| crate::fwcfg::read_file(*f, &mut text[..f.size as usize]))
     else {
         return;
     };
-    if &text[..f.size as usize] != stage.as_bytes() {
+    let want = &text[..f.size as usize];
+    // `late-off` / `late-reset`: the same wait, then the desktop's Shut Down / Restart, to test the power paths.
+    if stage == "late" && (want == b"late-off" || want == b"late-reset") {
+        crate::sched::sleep_ms(5000);
+        if want == b"late-off" {
+            crate::wm::power::shut_down();
+        } else {
+            crate::wm::power::restart();
+        }
+        return;
+    }
+    if want != stage.as_bytes() {
         return;
     }
     if stage == "late" {

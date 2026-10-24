@@ -1,5 +1,5 @@
-//! Restart / shut down (PSCI over HVC, which qemu's virt machine implements), and the kernel
-//! panic screen.
+//! Restart / shut down (PSCI over HVC, which qemu's virt machine implements; the Raspberry Pi has no PSCI and
+//! uses its power manager, `rpi/power.rs`), and the kernel panic screen.
 
 use core::fmt::Write;
 
@@ -9,9 +9,12 @@ use crate::gfx::{DrawTarget, Surface};
 
 use super::theme::*;
 
+#[cfg(not(feature = "raspi"))]
 const PSCI_SYSTEM_OFF: u64 = 0x8400_0008;
+#[cfg(not(feature = "raspi"))]
 const PSCI_SYSTEM_RESET: u64 = 0x8400_0009;
 
+#[cfg(not(feature = "raspi"))]
 fn psci(fid: u64) {
     // SAFETY: a PSCI call; for these two functions it does not return on success.
     unsafe { core::arch::asm!("hvc #0", inout("x0") fid => _, options(nomem, nostack)) };
@@ -21,14 +24,30 @@ pub fn shut_down() {
     // Commit the filesystems first: the last second of writes and the newest search-index
     // save would otherwise be lost with the power.
     let _ = crate::fs::sync_all();
-    crate::kprintln!("wm: shutting down (PSCI SYSTEM_OFF)");
-    psci(PSCI_SYSTEM_OFF);
+    #[cfg(feature = "raspi")]
+    {
+        crate::kprintln!("wm: shutting down (power manager, halt)");
+        crate::rpi::power::power_off();
+    }
+    #[cfg(not(feature = "raspi"))]
+    {
+        crate::kprintln!("wm: shutting down (PSCI SYSTEM_OFF)");
+        psci(PSCI_SYSTEM_OFF);
+    }
 }
 
 pub fn restart() {
     let _ = crate::fs::sync_all();
-    crate::kprintln!("wm: restarting (PSCI SYSTEM_RESET)");
-    psci(PSCI_SYSTEM_RESET);
+    #[cfg(feature = "raspi")]
+    {
+        crate::kprintln!("wm: restarting (power manager, full reset)");
+        crate::rpi::power::restart();
+    }
+    #[cfg(not(feature = "raspi"))]
+    {
+        crate::kprintln!("wm: restarting (PSCI SYSTEM_RESET)");
+        psci(PSCI_SYSTEM_RESET);
+    }
 }
 
 /// A fixed buffer to format into without allocating (the heap lock may be held mid-panic).

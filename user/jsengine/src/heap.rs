@@ -103,6 +103,8 @@ pub(crate) struct Heap {
     /// when it is made and takes away when it is dropped). It counts against the budget like
     /// `external` does.
     pub code_acct: Rc<Cell<usize>>,
+    /// What `code_acct` was at the last collection (the part of `live_bytes` that is code).
+    code_at_gc: usize,
     stress_n: u32,
 }
 
@@ -130,6 +132,7 @@ impl Heap {
             work: 0,
             external: 0,
             code_acct: Rc::new(Cell::new(0)),
+            code_at_gc: 0,
         }
     }
 
@@ -153,12 +156,19 @@ impl Heap {
     /// it is dropped).
     pub fn charge_code(&mut self, bytes: usize) {
         self.code_acct.set(self.code_acct.get().saturating_add(bytes));
-        self.charge(bytes);
+        self.work += (bytes >> 4) as u64;
+        if self.code_acct.get().saturating_sub(self.code_at_gc) > self.gc_threshold {
+            self.gc_wanted = true;
+        }
     }
 
     /// Bytes in use as far as we know (live at the last GC plus everything since).
     pub fn used(&self) -> usize {
-        self.live_bytes.saturating_add(self.since_gc)
+        // (Code made since the last collection counts at once; code dropped since then
+        // only when the next collection has seen it go.)
+        self.live_bytes
+            .saturating_add(self.since_gc)
+            .saturating_add(self.code_acct.get().saturating_sub(self.code_at_gc))
     }
 
     /// True when even garbage can't explain the usage any more: builtins that allocate in a
@@ -554,6 +564,7 @@ impl Heap {
             + (self.strs.capacity() * core::mem::size_of::<StrSlot>());
         live += self.external;
         live += self.code_acct.get();
+        self.code_at_gc = self.code_acct.get();
         self.live_bytes = live;
         self.since_gc = 0;
         self.gc_threshold = live.max(MIN_GC_THRESHOLD);

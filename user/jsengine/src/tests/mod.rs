@@ -7,6 +7,7 @@ mod bigscripts;
 mod bench;
 mod conformance;
 mod dev_run;
+mod diagnostics;
 mod embed;
 mod fuzz;
 mod limits;

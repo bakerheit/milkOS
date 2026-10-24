@@ -134,6 +134,7 @@ impl Realm {
         let mut c = Compiler::new(self, atoms, scopes, stub.source.clone());
         c.set_module(stub.module, lazy.shared.default_atom);
         c.set_lazy_shared(lazy.shared.clone());
+        c.infer_hint = stub.debug_name;
         c.compile_lazy_function(&f, stub.name, parent, lazy.this_chk, stub.kind)
             .map_err(|e| (e.pos, e.msg))
     }

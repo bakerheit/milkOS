@@ -22,6 +22,10 @@
     report('same', 'child-origin-same', String(f.contentWindow.location.origin === location.origin));
     report('same', 'child-sees-parent-note', f.contentWindow.readParentNote());
     report('same', 'child-click', (function () { d.getElementById('btn').click(); return d.getElementById('msg').textContent; })());
+    // The frame's own builtins keep their properties (a fingerprint takes getOwnPropertyNames
+    // from a frame's Object and calls it).
+    var w = f.contentWindow, names = w.Object.getOwnPropertyNames;
+    report('same', 'frame-builtins', typeof w.Object.keys + ' ' + typeof names + ' ' + typeof w.Array.prototype.slice + ' ' + names({ a: 1, b: 2 }).length + ' ' + w.Array.from('xy').join(''));
     report('same', 'end', 'done');
   });
 </script>

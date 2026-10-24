@@ -25,6 +25,7 @@ impl Realm {
                 line,
                 col,
                 frames: alloc::format!("    at {}:{}:{}", src.file, line, col),
+                snippet: crate::errors::source_snippet(src, pos),
             };
         }
         let stack = alloc::format!("SyntaxError: {msg}\n    at {}:{}:{}", src.file, line, col);

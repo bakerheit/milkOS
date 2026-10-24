@@ -280,6 +280,10 @@ pub struct RemoteRef {
     pub key: RemoteKey,
     /// This proxy holds a reference on the handle (given back when it is collected).
     pub counted: bool,
+    /// The other object is a function: the proxy is a function whose prototype is a host
+    /// object for the same reference, so its properties (`Object.keys`, `Array.prototype`)
+    /// are the other function's.
+    pub callable: bool,
 }
 
 impl XFrame {

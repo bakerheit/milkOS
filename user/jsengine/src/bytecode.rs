@@ -457,6 +457,9 @@ pub(crate) struct Code {
     /// fn.length
     pub length: u32,
     pub name: Option<StrId>,
+    /// What a stack trace calls an unnamed function: where it was stored (`a.b = function`
+    /// is "a.b"). Never the function's `name` property.
+    pub debug_name: Option<StrId>,
     pub kind: CodeKind,
     pub strict: bool,
     pub is_async: bool,
@@ -507,6 +510,9 @@ impl Code {
         }
         self.marked.set(epoch);
         if let Some(n) = self.name {
+            t.str(n);
+        }
+        if let Some(n) = self.debug_name {
             t.str(n);
         }
         if let Some(l) = &self.lazy

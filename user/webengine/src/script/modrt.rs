@@ -452,6 +452,7 @@ fn report_text(b: &Rc<Bridge>, r: &mut Realm, name: &str, message: &str, file: &
         column: col,
         stack: String::new(),
         uncatchable: false,
+        ..ErrorReport::default()
     };
     if !super::events_js::fire_error(b, r, &rep, Some(e)) {
         let at = if file.is_empty() { String::new() } else { format!("\n    at {file}:{line}:{col}") };

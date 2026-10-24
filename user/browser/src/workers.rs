@@ -296,8 +296,8 @@ impl App {
     /// line.
     pub fn worker_console(&mut self, ti: usize, id: u32, level: ConsoleLevel, text: &str) {
         let label = self.worker_meta.get(&id).map(|m| m.label.clone()).unwrap_or_default();
+        crate::frames::print_console(&format!("{} [worker {}]", level_tag(level), label), text);
         let text = browserkit::clean_line(text);
-        rt::println!("[browser] console {} [worker {}]: {}", level_tag(level), label, text);
         if ti >= self.tabs.len() {
             return;
         }

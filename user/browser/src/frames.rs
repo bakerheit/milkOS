@@ -194,6 +194,27 @@ pub struct Nav {
 
 const SEC_DEST: &str = "iframe";
 
+/// The most lines of one console entry that go to the serial log.
+const MAX_SERIAL_LINES: usize = 40;
+
+/// One console entry on the serial log: `[browser] console HEAD: first line`, and every
+/// further line (an error's stack, its source line and caret) on a line of its own with the
+/// same start, indented, so the log can be read and searched line by line.
+pub(crate) fn print_console(head: &str, text: &str) {
+    for (i, line) in text.split('\n').enumerate() {
+        if i >= MAX_SERIAL_LINES {
+            rt::println!("[browser] console {head}:   ...");
+            break;
+        }
+        let line = browserkit::clean_line(line);
+        if i == 0 {
+            rt::println!("[browser] console {head}: {line}");
+        } else {
+            rt::println!("[browser] console {head}:   {}", line.trim_end());
+        }
+    }
+}
+
 impl App {
     fn tab_of_epoch(&self, uid: u64, epoch: u64) -> Option<usize> {
         self.tabs.iter().position(|t| t.uid == uid && t.epoch == epoch)
@@ -275,12 +296,12 @@ impl App {
             ConsoleLevel::Error => "error",
             ConsoleLevel::Debug => "debug",
         };
-        let text = browserkit::clean_line(text);
         if label.is_empty() {
-            rt::println!("[browser] console {name}: {text}");
+            print_console(name, text);
         } else {
-            rt::println!("[browser] console {name} [frame {label}]: {text}");
+            print_console(&format!("{name} [frame {label}]"), text);
         }
+        let text = browserkit::clean_line(text);
         let t = &mut self.tabs[ti];
         if t.console.len() >= crate::tab::CONSOLE_LINES {
             t.console.pop_front();

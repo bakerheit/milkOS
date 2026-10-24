@@ -69,6 +69,17 @@
 //!   private class members (`#x`) and RegExp match indices (`d` flag) are supported.
 //!
 //! # CHANGES
+//! - Errors say where. [`ErrorReport`] has two new fields, `snippet` (the source line of the
+//!   top frame, at most 60 characters either side of the column, `...` where it is cut,
+//!   indentation removed) and `snippet_col` (the position in it): build one with
+//!   `..Default::default()`. Its `Display` ends with that line and a caret under the column
+//!   (`    672 | text` and `        |   ^`). Positions are per link of a chain: a property read
+//!   or a method call is at the property's name, an index at its `[`, a call of something that
+//!   is not a name at its `(` (they were all at the start of the chain; a stack frame, the
+//!   `line`/`column` of a report and the position `window.onerror` is told move to the failing
+//!   link). `x is not a function` words the callee as written, `a.b(...).c`, and a stack frame
+//!   names an unnamed function by where it was stored (`a.b = function () {}` is `a.b`; the
+//!   function's `name` property stays `""`).
 //! - Big scripts. A script is parsed, resolved and compiled one top-level statement at a
 //!   time and each statement's tree is dropped as soon as it has bytecode; a function of 64
 //!   bytes or more is parsed once (for early errors and the names it uses) and left as a
@@ -243,6 +254,12 @@ pub struct ErrorReport {
     pub column: u32,
     /// "    at f (file:line:col)" lines, innermost first, joined with '\n'.
     pub stack: String,
+    /// The line of source at `line`:`column`, cut to at most 60 characters on each side of
+    /// the position (`...` marks a cut) with its indentation removed, and `snippet_col`, the
+    /// character index of the position within it. Empty when the source is not at hand (a
+    /// native error with no script running, a termination).
+    pub snippet: String,
+    pub snippet_col: u32,
     pub uncatchable: bool,
 }
 
@@ -257,6 +274,16 @@ impl core::fmt::Display for ErrorReport {
             write!(f, "\n{}", self.stack)?;
         } else if !self.file.is_empty() {
             write!(f, "\n    at {}:{}:{}", self.file, self.line, self.column)?;
+        }
+        if !self.snippet.is_empty() {
+            // "    672 | the source line" and a caret under the position.
+            let w = alloc::format!("{}", self.line).len();
+            write!(f, "\n    {:>w$} | {}", self.line, self.snippet, w = w)?;
+            write!(f, "\n    {:>w$} | ", "", w = w)?;
+            for _ in 0..self.snippet_col {
+                f.write_str(" ")?;
+            }
+            f.write_str("^")?;
         }
         Ok(())
     }

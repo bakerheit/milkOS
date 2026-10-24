@@ -109,9 +109,11 @@ pub fn export(b: &Rc<Bridge>, r: &mut Realm, v: Value) -> Result<Xv, XErr> {
         Kind::Object => {
             let me = b.frame_id();
             let uid = b.xf.uid;
-            // A proxy of another realm's object goes back as what it stands for.
+            // A proxy of another realm's object goes back as what it stands for (a function
+            // proxy is a function whose prototype is the host object that stands for it).
+            let proxied = if r.is_callable(v) { r.get_prototype(v) } else { v };
             if let Some(cls) = b.xf.class.get()
-                && let Some(idx) = r.host_data(v, cls)
+                && let Some(idx) = r.host_data(proxied, cls)
             {
                 let rr = b.xf.remotes.borrow().get(idx as usize).copied().flatten();
                 if let Some(rr) = rr {
@@ -127,7 +129,7 @@ pub fn export(b: &Rc<Bridge>, r: &mut Realm, v: Value) -> Result<Xv, XErr> {
                     }
                     return Ok(Xv::Ref(XRef {
                         key: rr.key,
-                        callable: false,
+                        callable: rr.callable,
                         counted: matches!(rr.key.target, Target::Handle(_)),
                     }));
                 }
@@ -280,25 +282,34 @@ fn proxy_for(b: &Rc<Bridge>, r: &mut Realm, rf: XRef) -> JsResult<Value> {
     let rr = RemoteRef {
         key: rf.key,
         counted: rf.counted,
+        callable: rf.callable,
+    };
+    let cls = ensure_class(b, r);
+    let idx = {
+        let mut t = b.xf.remotes.borrow_mut();
+        match t.iter().position(|s| s.is_none()) {
+            Some(i) => {
+                t[i] = Some(rr);
+                i
+            }
+            None => {
+                t.push(Some(rr));
+                t.len() - 1
+            }
+        }
     };
     let v = if rf.callable {
+        // A function that calls the other one, in front of a host object that forwards the
+        // properties it has not got itself (`other.Object.keys`, `other.Array.prototype`):
+        // the host object stands for the other function, and is the function's prototype
+        // (on the way to this realm's Function.prototype for `call`, `apply` and `bind`).
         let b2 = b.clone();
-        r.new_function("", 0, move |r, this, args| call_remote(&b2, r, rr, this, args))
+        let f = r.new_function("", 0, move |r, this, args| call_remote(&b2, r, rr, this, args));
+        let fp = r.intrinsic(Intrinsic::FunctionPrototype);
+        let host = r.new_host_object(cls, idx as u64, fp);
+        r.set_prototype(f, host);
+        f
     } else {
-        let cls = ensure_class(b, r);
-        let idx = {
-            let mut t = b.xf.remotes.borrow_mut();
-            match t.iter().position(|s| s.is_none()) {
-                Some(i) => {
-                    t[i] = Some(rr);
-                    i
-                }
-                None => {
-                    t.push(Some(rr));
-                    t.len() - 1
-                }
-            }
-        };
         let proto = r.intrinsic(Intrinsic::ObjectPrototype);
         r.new_host_object(cls, idx as u64, proto)
     };
@@ -451,6 +462,30 @@ impl HostClass for RemoteClass {
                 let Some(k) = okey(r, key) else {
                     return Ok(None);
                 };
+                if rr.callable {
+                    // A function's own `call`, `apply`, `bind` and `toString` work on the proxy
+                    // (this realm's), and what the other function lacks is looked up in this
+                    // realm's Function.prototype.
+                    if let OKey::Str(s) = &k
+                        && matches!(s.as_str(), "call" | "apply" | "bind" | "toString" | "toLocaleString")
+                    {
+                        return Ok(None);
+                    }
+                    let v = with_remote(b, r, rr.key, move |bb, rb, obj| {
+                        let found = match &k {
+                            OKey::Str(s) => rb.has(obj, s.as_str()),
+                            OKey::Index(i) => rb.has(obj, *i),
+                            OKey::Iterator => Ok(false),
+                        }
+                        .map_err(|e| xerr_of(rb, &e))?;
+                        if !found {
+                            return Ok(Xv::Undef);
+                        }
+                        let v = get_k(rb, obj, &k)?;
+                        export(bb, rb, v)
+                    })?;
+                    return Ok(if v.is_undefined() { None } else { Some(v) });
+                }
                 with_remote(b, r, rr.key, move |bb, rb, obj| {
                     let v = get_k(rb, obj, &k)?;
                     export(bb, rb, v)

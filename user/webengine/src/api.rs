@@ -46,6 +46,11 @@
 //!   not boxes), `<object>`/`<embed>` documents; for scripts: canvas, workers.
 //!
 //! # CHANGES
+//! - A function of another same-origin frame (`frame.contentWindow.Object`) has the other
+//!   function's properties (`getOwnPropertyNames`, `prototype`): its proxy is a function whose
+//!   prototype is a host object that forwards what it does not have. No new items; the file name
+//!   of the engine's own JavaScript in stacks is `browser-api` (it was `fetch-api`). An
+//!   uncaught error's report now carries the source line, which the Browser prints.
 //! - Workers (docs/browser.md). `new Worker(url, {type, name})` for dedicated classic and module
 //!   workers, each on a thread of the app's making: [`Document::take_workers`] and
 //!   [`Document::worker_event`] are the page's half, [`run_worker`] with [`WorkerIo`] the

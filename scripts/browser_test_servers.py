@@ -21,6 +21,9 @@ networking) and never forwards anything anywhere:
       /images      a JPEG, an animated GIF, WebP (lossy and animated), from user/imgdec's fixtures
       /source      a page with a script (it logs SRCTEST page script ran), markup and entities
                    in its text, for view-source:
+      /blocked     a page the server refused with 429 Too Many Requests (it has a script that
+                   logs SRCTEST blocked script ran), for view-source:
+      /longline    a script of 700 KB on ONE line, ending in a marker, for view-source:
       /missing     404
 Every request is logged: "http METHOD PATH host=HOST cookie=COOKIE" (and "post BODY").
 Writes "dns=PORT http=PORT" to argv[1], then serves until killed.
@@ -131,6 +134,18 @@ SOURCE = (
     "<p>Fish &amp; chips &lt;hot&gt;</p>\n<script>console.log('SRCTEST page script ran');</script>\n</body>\n</html>\n"
 ).encode("utf-8")
 
+BLOCKED = (
+    "<!DOCTYPE html>\n<html>\n<head><title>Blocked</title></head>\n<body>\n<h1>Our systems have detected unusual traffic</h1>\n"
+    "<script>console.log('SRCTEST blocked script ran');</script>\n</body>\n</html>\n"
+).encode("utf-8")
+
+# A bundled script on one line (what a minifier makes): 700 KB of statements and a marker at the end.
+LONGLINE = (
+    "<!DOCTYPE html>\n<html>\n<head><title>One line</title></head>\n<body>\n<script>"
+    + "".join("var v%d=%d;" % (i, i) for i in range(60000))
+    + "console.log('SRCTEST longline script ran');//END-OF-THE-LONG-LINE</script>\n</body>\n</html>\n"
+).encode("utf-8")
+
 STYLED = page(
     "Styled page",
     "<link rel=\"stylesheet\" href=\"/site.css\"><header><h1>Milk &amp; Co.</h1><nav><a href=\"/\">Home</a> <a href=\"/long\">Long</a> <a href=\"/form\">Forms</a></nav></header>"
@@ -234,6 +249,10 @@ class Web(http.server.BaseHTTPRequestHandler):
             return self.send(404, page("Not found", "<h1>404</h1>"))
         if path == "/source":
             return self.send(200, SOURCE)
+        if path == "/blocked":
+            return self.send(429, BLOCKED)
+        if path == "/longline":
+            return self.send(200, LONGLINE)
         if path == "/styled":
             return self.send(200, STYLED)
         if path == "/site.css":

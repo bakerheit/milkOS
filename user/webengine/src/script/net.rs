@@ -509,7 +509,7 @@ pub fn exports(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
 
 fn load(b: &Rc<Bridge>, r: &mut Realm) -> JsResult<Value> {
     let native = native_object(b, r)?;
-    let f = r.compile_function(&["native"], PRELUDE, "fetch-api")?;
+    let f = r.compile_function(&["native"], PRELUDE, "browser-api")?;
     r.call(f, Value::UNDEFINED, &[native])
 }
 

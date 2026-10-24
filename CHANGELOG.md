@@ -84,7 +84,24 @@
   and `JoinHandle::is_finished`; `scripts/workers-test.sh` in the default set.
 - `view-source:ADDRESS` (and "View Page Source" in the menu, Cmd-Alt-U) opens the page's source
   in a tab: the page is fetched again like any navigation, shown as plain numbered monospace
-  text (long lines wrapped, only the first 512 KB shown, and it says so), and nothing in it runs.
+  text, and nothing in it runs. Lines wrap to the width of the window (a minified script of a
+  megabyte on one line reads whole, with no sideways scrolling), the numbers are not part of
+  the text, and a page the server refused (a 429, a 404) shows its body too. Only the first 4 MB
+  and 50,000 lines are shown, and it says so.
+- Errors say where they happened. An uncaught error or a rejected promise prints its stack
+  with the source line at the top frame, cut around the column on a long line, and a caret
+  under the column (`file:line:col`, then `672 | ...text...`), on the console panel and on the
+  serial line (one line each, the first starting `[browser] console error:`). Frames name the
+  functions a script never named by where they were stored (`a.b = function` is `a.b`,
+  `var f = function`, an object's `key: function`), and an error and each frame point at the
+  link of a chain that is meant (`a.b(c).d(e)`: the `d`), not at the start of the statement,
+  so `x is not a function` says `a.b(...).d is not a function` and where. The prelude's file is
+  `browser-api`, not `fetch-api`.
+- A function of another same-origin frame keeps its properties: `frame.contentWindow.Object
+  .getOwnPropertyNames`, `.Array.isArray`, `.Array.prototype` and the like are there (they were
+  `undefined`, and a script that took its builtins from a fresh frame, reCAPTCHA's fingerprint
+  among them, died with `V is not a function`). They are still not instances of this
+  realm's classes, and `Object.getOwnPropertyNames(frameWindow)` lists only the enumerable names.
 - Script loading follows the HTML standard more closely: a parser-blocking script sees only the
   page before it (`document.body` is `null` in a `<head>` script, a later element is not found,
   `document.scripts` ends with the running script), and an external script that `document.write`

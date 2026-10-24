@@ -274,6 +274,20 @@ differ 14-home 18-source && ok "the source tab drew" || bad "the source tab look
 q key ctrl-w sleep 1
 go "view-source:http://$H/long"
 loaded "view-source:http://$(esc_re "$H")/long: 200 OK, [0-9]+ bytes" 20 && ok "a view-source: address in the address bar works too" || bad "typed view-source: address did not load"
+go "view-source:http://$H/blocked"
+loaded "view-source:http://$(esc_re "$H")/blocked: 429 Too Many Requests, [0-9]+ bytes" 20 && ok "the source of a 429 page is shown (a refusal still has a body)" || bad "view-source of a 429 page did not load: $(log_lines | grep -a 'view-source' | tail -2)"
+sleep 1.5
+shot 19-source-429
+log_lines | grep -a "SRCTEST blocked script ran" >/dev/null && bad "the 429 page's script ran in the source view" || ok "the 429 page's script did not run in the source view"
+go "view-source:http://$H/longline"
+loaded "view-source:http://$(esc_re "$H")/longline: 200 OK, [0-9]+ bytes" 30 && ok "the source of a page with one very long line loaded" || bad "view-source of the long line did not load: $(log_lines | grep -a 'view-source' | tail -2)"
+sleep 3
+shot 19-source-longline
+differ 19-source-429 19-source-longline && ok "the long line drew (and not like the other page)" || bad "the long line's source looks like the 429 page's"
+q key end sleep 3
+shot 19-source-longline-end 19-source-longline
+differ 19-source-longline 19-source-longline-end && ok "the long line goes on past the first screen (End scrolled it)" || bad "End did not scroll the long line"
+log_lines | grep -a "SRCTEST longline script ran" >/dev/null && bad "the long script ran in the source view" || ok "the long script did not run in the source view"
 go "view-source:view-source:http://$H/long"
 sleep 1
 shot 19-source-refused

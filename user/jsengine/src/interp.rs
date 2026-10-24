@@ -819,47 +819,19 @@ impl Realm {
         }
     }
 
-    /// The callee's source text at the current call site ("foo.bar"), if it is a simple
-    /// name or member chain.
+    /// The callee's source text at the current call site, the way an engine words it in "x is
+    /// not a function": `foo`, `a.b.c`, `a.b(...).c`, `a[0]` (an argument list is `(...)`, and
+    /// an index that is not a plain name or number is `[...]`). Read back from the source text
+    /// at the call's position (see `call_pos` in the parser); None when the callee is not a
+    /// chain of names.
     fn callee_text(&self) -> Option<String> {
         let n = self.vm.frames.len();
         if n == 0 {
             return None;
         }
         let fr = &self.vm.frames[n - 1];
-        let mut pos = fr.code.pos_at(fr.pc.saturating_sub(1)) as usize;
-        let src = &fr.code.source.text;
-        if src.get(pos..pos + 3) == Some(b"new")
-            && src.get(pos + 3).is_some_and(|c| c.is_ascii_whitespace())
-        {
-            pos += 3;
-            while pos < src.len() && src[pos].is_ascii_whitespace() {
-                pos += 1;
-            }
-        }
-        let mut end = pos;
-        while end < src.len()
-            && (src[end].is_ascii_alphanumeric()
-                || src[end] == b'_'
-                || src[end] == b'$'
-                || src[end] == b'.'
-                || src[end] >= 0x80)
-        {
-            end += 1;
-        }
-        if end == pos || end - pos > 80 {
-            return None;
-        }
-        let s = core::str::from_utf8(&src[pos..end]).ok()?;
-        let s = s.trim_end_matches('.');
-        if s.is_empty()
-            || s.starts_with(|c: char| c.is_ascii_digit())
-            || s == "function"
-            || s == "class"
-        {
-            return None;
-        }
-        Some(String::from(s))
+        let pos = fr.code.pos_at(fr.pc.saturating_sub(1)) as usize;
+        callee_text_at(&fr.code.source.text, pos)
     }
 
     fn not_callable_at(&mut self, f: Val) -> Exception {
@@ -3585,7 +3557,7 @@ impl Realm {
             }
             let pos = f.code.pos_at(f.pc.saturating_sub(1));
             let (line, col) = f.code.source.line_col(pos);
-            let name = match f.code.name {
+            let name = match f.code.name.or(f.code.debug_name) {
                 Some(s) => crate::string::to_rust(self.heap.flat(s)),
                 None => String::new(),
             };
@@ -3609,3 +3581,220 @@ pub(crate) enum YieldStar {
 /// Not reachable: kept so the enum variant is used in match arms above.
 #[allow(dead_code)]
 fn _unused(_: Termination) {}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80
+}
+
+/// The index of the bracket that closes the group opened at `open` (a `(` or `[`), skipping
+/// strings and nested groups; None past `limit` bytes or at a mismatch.
+fn group_end(src: &[u8], open: usize, limit: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    let stop = (open + limit).min(src.len());
+    while i < stop {
+        match src[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            q @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < stop && src[i] != q {
+                    if src[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The index of the bracket that opens the group closed at `close`, going backwards (None
+/// past `limit` bytes or at a mismatch). Quotes are not understood going backwards, so a
+/// group that holds one is not found (the caller gives up then).
+fn group_start(src: &[u8], close: usize, limit: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let stop = close.saturating_sub(limit);
+    let mut i = close + 1;
+    while i > stop {
+        i -= 1;
+        match src[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'"' | b'\'' | b'`' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Where the chain of names, calls and indexes that ends just before `end` begins.
+fn chain_start(src: &[u8], end: usize) -> Option<usize> {
+    let floor = end.saturating_sub(600);
+    let mut e = end; // the chain so far is src[start..e]
+    for _ in 0..40 {
+        // The last element: a name, or a group (a call's arguments, an index) and what it
+        // applies to.
+        let mut k = e;
+        while k > floor && src[k - 1].is_ascii_whitespace() {
+            k -= 1;
+        }
+        if k == floor {
+            return None;
+        }
+        let start = match src[k - 1] {
+            b')' | b']' => {
+                // (A group follows something: a name or another group.)
+                e = group_start(src, k - 1, 400)?;
+                continue;
+            }
+            b if is_ident_byte(b) => {
+                let mut i = k;
+                while i > floor && is_ident_byte(src[i - 1]) {
+                    i -= 1;
+                }
+                i
+            }
+            _ => return None,
+        };
+        // Is this name the property of something before it?
+        let mut p = start;
+        while p > floor && src[p - 1].is_ascii_whitespace() {
+            p -= 1;
+        }
+        if p > floor && src[p - 1] == b'.' {
+            p -= 1;
+            if p > floor && src[p - 1] == b'?' {
+                p -= 1;
+            }
+            e = p;
+            continue;
+        }
+        return Some(start);
+    }
+    None
+}
+
+/// See [`Realm::callee_text`].
+pub(crate) fn callee_text_at(src: &[u8], pos: usize) -> Option<String> {
+    if pos >= src.len() {
+        return None;
+    }
+    // `new X`: the text after the keyword, forwards.
+    let mut p = pos;
+    if src.get(p..p + 3) == Some(b"new") && src.get(p + 3).is_some_and(|c| c.is_ascii_whitespace()) {
+        p += 3;
+        while p < src.len() && src[p].is_ascii_whitespace() {
+            p += 1;
+        }
+        let mut end = p;
+        while end < src.len() && (is_ident_byte(src[end]) || src[end] == b'.') {
+            end += 1;
+        }
+        if end == p || end - p > 80 {
+            return None;
+        }
+        let s = core::str::from_utf8(&src[p..end]).ok()?.trim_end_matches('.');
+        if s.is_empty() || s.starts_with(|c: char| c.is_ascii_digit()) || s == "function" || s == "class" {
+            return None;
+        }
+        return Some(String::from(s));
+    }
+    // Where the callee ends, and where the chain of names it is the end of begins.
+    let (end, from) = match src[p] {
+        b if is_ident_byte(b) => {
+            let mut e = p;
+            while e < src.len() && is_ident_byte(src[e]) {
+                e += 1;
+            }
+            // A property (`.name` after something), or the first name of a chain.
+            let mut q = p;
+            while q > 0 && src[q - 1].is_ascii_whitespace() {
+                q -= 1;
+            }
+            if q > 0 && src[q - 1] == b'.' {
+                let mut d = q - 1;
+                if d > 0 && src[d - 1] == b'?' {
+                    d -= 1;
+                }
+                (e, chain_start(src, d)?)
+            } else {
+                (e, p)
+            }
+        }
+        b'[' => (group_end(src, p, 400)? + 1, chain_start(src, p)?),
+        b'(' => (p, chain_start(src, p)?),
+        _ => return None,
+    };
+    // Render src[from..end].
+    let mut out = String::new();
+    let mut i = from;
+    while i < end {
+        if out.len() > 90 {
+            return None;
+        }
+        match src[i] {
+            b'(' => {
+                let close = group_end(src, i, 400)?;
+                out.push_str("(...)");
+                i = close + 1;
+            }
+            b'[' => {
+                let close = group_end(src, i, 400)?;
+                let inner = core::str::from_utf8(&src[i + 1..close]).ok()?.trim();
+                let simple = !inner.is_empty()
+                    && inner.len() <= 24
+                    && inner.bytes().all(|b| is_ident_byte(b) || b == b'.');
+                if simple {
+                    out.push('[');
+                    out.push_str(inner);
+                    out.push(']');
+                } else {
+                    out.push_str("[...]");
+                }
+                i = close + 1;
+            }
+            b if b.is_ascii_whitespace() => i += 1,
+            b'.' | b'?' => {
+                out.push(src[i] as char);
+                i += 1;
+            }
+            b if is_ident_byte(b) => {
+                let mut e = i;
+                while e < src.len() && is_ident_byte(src[e]) {
+                    e += 1;
+                }
+                if out.len() + (e - i) > 90 {
+                    return None;
+                }
+                out.push_str(core::str::from_utf8(&src[i..e]).ok()?);
+                i = e;
+            }
+            _ => return None,
+        }
+    }
+    let t = out.trim_end_matches('.');
+    if t.is_empty()
+        || t.starts_with(|c: char| c.is_ascii_digit())
+        || t == "function"
+        || t == "class"
+        || t.starts_with('(')
+        || t.starts_with('[')
+    {
+        return None;
+    }
+    Some(String::from(t))
+}

@@ -701,3 +701,35 @@ fn fuzz_message_ports() {
 
 #[allow(dead_code)]
 fn _unused(_: Vec<u8>) {}
+
+#[test]
+fn the_functions_of_another_frame_keep_their_properties() {
+    // `frame.contentWindow.Object.getOwnPropertyNames`, `.Array.isArray`, `.Array.prototype`:
+    // libraries take the builtins of a clean frame to use them, or to look at them (a fingerprint
+    // asks the frame's own `Object` for `getOwnPropertyNames` and calls it).
+    let mut t = Tree::new(
+        "<title>The top</title><iframe id=f src=kid.html></iframe>",
+        &[(KID, "http://www.milk.test:8000/kid.html")],
+    );
+    let top = |t: &mut Tree, s: &str| t.eval(0, s);
+    assert_eq!(top(&mut t, "var w = document.getElementById('f').contentWindow; typeof w.Object"), "function");
+    assert_eq!(top(&mut t, "typeof w.Object.getOwnPropertyNames + ' ' + typeof w.Object.keys + ' ' + typeof w.Array.isArray"), "function function function");
+    // Calling them works, from this realm or the other.
+    assert_eq!(top(&mut t, "w.Object.keys(w.hello.constructor === undefined ? {} : { a: 1, b: 2 }).join()"), "a,b");
+    assert_eq!(top(&mut t, "var V = w.Object.getOwnPropertyNames; typeof V(w.document).length + ' ' + (V(w).length > 10)"), "number true");
+    assert_eq!(top(&mut t, "var kidList = w.Object.getOwnPropertyNames({ x: 1, y: 2 }); kidList.length + ' ' + kidList[1]"), "2 y");
+    // What a function is: the same proxy each time; its `prototype`; `call` / `apply` / `bind`
+    // are this realm's; a name it doesn't have is undefined; the other frame's own statics.
+    assert_eq!(top(&mut t, "String(w.Object === w.Object)"), "true");
+    assert_eq!(top(&mut t, "typeof w.Array.prototype.slice + ' ' + typeof w.Object.prototype.hasOwnProperty"), "function function");
+    assert_eq!(top(&mut t, "w.Array.prototype.join.call([1, 2, 3], '-')"), "1-2-3");
+    assert_eq!(top(&mut t, "String(typeof w.Object.noSuchThing) + ' ' + typeof w.Object.call + ' ' + typeof w.Object.bind"), "undefined function function");
+    assert_eq!(top(&mut t, "var bound = w.Object.keys.bind(null); bound({ z: 1 }).join()"), "z");
+    // A function of the kid's own (a global function) has properties too, and goes back to it.
+    assert_eq!(t.eval(1, "hello.extra = 'on the function'; 1"), "1");
+    assert_eq!(top(&mut t, "String(w.hello.extra)"), "on the function");
+    assert_eq!(t.eval(1, "String(parent.document.getElementById('f').contentWindow.hello === hello)"), "true");
+    assert_eq!(top(&mut t, "w.Array.from('ab').join()"), "a,b");
+    // (Being the other frame's own functions, they are not this realm's: `isArray` of a proxy.)
+    assert_eq!(top(&mut t, "String(w.Array.isArray(w.Array.from('ab')))"), "true");
+}

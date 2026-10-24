@@ -2818,48 +2818,58 @@ impl<'a> Parser<'a> {
             if links > MAX_CHAIN {
                 return self.err("the code is nested too deeply");
             }
+            // Each link of a chain has a position of its own, where an engine would point
+            // at it (a property's name, a `[`, the callee of a call, or the `(` of a call of
+            // something that is not a name): minified code is long chains on one line, and
+            // an error should say which link failed.
             match self.tok.tok {
                 Tok::P(P::Dot) => {
                     self.advance()?;
-                    e = self.member_expr(e, pos, false)?;
+                    let lp = self.tok.start;
+                    e = self.member_expr(e, lp, false)?;
                 }
                 Tok::P(P::QDot) => {
                     self.advance()?;
                     in_chain = true;
                     if self.is(P::LParen) {
+                        let lp = call_pos(&e, self.tok.start);
                         let args = self.parse_args()?;
                         e = Expr {
                             k: ExprKind::Call(Box::new(e), args, true),
-                            pos,
+                            pos: lp,
                         };
                     } else if self.is(P::LBracket) {
+                        let lp = self.tok.start;
                         self.advance()?;
                         let idx = self.parse_expression(false)?;
                         self.expect(P::RBracket)?;
                         e = Expr {
                             k: ExprKind::Index(Box::new(e), Box::new(idx), true),
-                            pos,
+                            pos: lp,
                         };
                     } else if let Tok::Template(..) = self.tok.tok {
                         return self.err("Invalid tagged template on optional chain");
                     } else {
-                        e = self.member_expr(e, pos, true)?;
+                        let lp = self.tok.start;
+                        e = self.member_expr(e, lp, true)?;
                     }
                 }
                 Tok::P(P::LBracket) => {
+                    let lp = self.tok.start;
                     self.advance()?;
                     let idx = self.parse_expression(false)?;
                     self.expect(P::RBracket)?;
                     e = Expr {
                         k: ExprKind::Index(Box::new(e), Box::new(idx), false),
-                        pos,
+                        pos: lp,
                     };
                 }
                 Tok::P(P::LParen) => {
+                    let lp = call_pos(&e, self.tok.start);
                     let args = self.parse_args()?;
                     e = Expr {
                         k: ExprKind::Call(Box::new(e), args, false),
-                        pos,
+                        pos: lp,
                     };
                 }
                 Tok::Template(..) => {
@@ -3775,5 +3785,16 @@ pub(crate) fn collect_pat_names(p: &Pat, out: &mut Vec<Atom>) {
                 collect_pat_names(r, out);
             }
         }
+    }
+}
+
+/// Where a call is said to be: at the property or `[` of a method call, at the name of a
+/// plain call, and at the `(` when what is called is anything else (`f()()`, `(a || b)()`).
+fn call_pos(callee: &Expr, paren: u32) -> u32 {
+    match &callee.k {
+        ExprKind::Member(..) | ExprKind::PrivMember(..) | ExprKind::Index(..) | ExprKind::Ident(_) => {
+            callee.pos
+        }
+        _ => paren,
     }
 }

@@ -40,6 +40,31 @@ test('stack traces', function () {
   Error.captureStackTrace(obj);
   assertEq(typeof obj.stack, 'string');
 });
+test('not a function names the callee as written', function () {
+  function msg(f) { try { f(); } catch (e) { return e.message; } return 'none'; }
+  var V = function () { return {}; };
+  assertEq(msg(function () { V(1).concat(V(2)); }), 'V(...).concat is not a function');
+  var n = 5;
+  assertEq(msg(function () { n(1).concat(2); }), 'n is not a function');
+  assertEq(msg(function () { V()(); }), 'V(...) is not a function');
+  var o = { a: { b: {} }, list: [1] };
+  assertEq(msg(function () { o.a.b.c(); }), 'o.a.b.c is not a function');
+  assertEq(msg(function () { o.list[0](); }), 'o.list[0] is not a function');
+  assertEq(msg(function () { o.a
+    .b
+    .c(1,
+      2); }), 'o.a.b.c is not a function');
+  assertEq(msg(function () { o.a.b.c.d(); }), "Cannot read properties of undefined (reading 'd')");
+});
+test('stack frames name functions by where they are stored', function () {
+  var ns = { util: {} };
+  ns.util.go = function () { return new Error('x').stack; };
+  var viaVar = function () { return ns.util.go(); };
+  var s = viaVar();
+  assert(s.indexOf('at ns.util.go (') > 0, s);
+  assert(s.indexOf('at viaVar (') > 0, s);
+  assertEq(ns.util.go.name, '');
+});
 test('syntax errors', function () {
   assertThrows(SyntaxError, function () { eval('var 1x;'); });
   assertThrows(SyntaxError, function () { eval('let a; let a;'); });

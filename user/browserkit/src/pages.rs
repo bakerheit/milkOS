@@ -190,22 +190,22 @@ pub fn error(title: &str, message: &str, hint: &str, address: &str) -> String {
     page(title, &s)
 }
 
-/// Plain text shown as a page.
 /// The most of a page's source `view-source:` shows (bytes of text); the rest is said to be
 /// there.
-pub const SOURCE_CAP: usize = 512 << 10;
+pub const SOURCE_CAP: usize = 4 << 20;
 /// The most lines it shows.
-pub const SOURCE_LINES: usize = 20_000;
-/// A line longer than this many characters is shown as several (the continuation lines
-/// have no number).
-pub const SOURCE_WRAP: usize = 160;
+pub const SOURCE_LINES: usize = 50_000;
 
 /// The page of `view-source:`: `text` (the response body decoded), one numbered line each, in
 /// the monospace font, as plain text (nothing in it is a tag, a link or a script). `address` is
 /// what was fetched, `status` its status line, `bytes` the size of the response.
+///
+/// A line is wrapped to the width of the window by the page's own style (`pre-wrap`, and a
+/// word cut anywhere when it has no space: a minified script is one line of a megabyte), with
+/// its number hanging at the left of its first row, so every character can be read whatever
+/// the width. The numbers are the style's counter, not text: copying a line takes only the line.
 pub fn view_source(address: &str, status: &str, bytes: usize, text: &str) -> String {
-    // What is shown: at most SOURCE_CAP bytes and SOURCE_LINES lines, cut at a line end when
-    // there is one near, else at a character.
+    // What is shown: at most SOURCE_CAP bytes and SOURCE_LINES lines, cut at a character.
     let mut end = text.len().min(SOURCE_CAP);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -219,41 +219,21 @@ pub fn view_source(address: &str, status: &str, bytes: usize, text: &str) -> Str
     }
     let cut_lines = lines.len() > SOURCE_LINES;
     lines.truncate(SOURCE_LINES);
-    let width = format!("{}", lines.len().max(1)).len();
-    let mut gutter = String::with_capacity(lines.len() * (width + 1));
-    let mut code = String::with_capacity(shown.len() + lines.len() * 2);
-    for (i, line) in lines.iter().enumerate() {
+    let mut code = String::with_capacity(shown.len() + lines.len() * 24);
+    for line in &lines {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let mut first = true;
-        let mut chars = line.chars().peekable();
-        loop {
-            // The next piece of at most SOURCE_WRAP characters.
-            let mut n = 0;
-            let mut piece = String::new();
-            while n < SOURCE_WRAP && let Some(&c) = chars.peek() {
-                chars.next();
-                n += 1;
-                match c {
-                    '\t' => piece.push('\t'),
-                    c if c.is_control() => piece.push('\u{FFFD}'),
-                    '&' => piece.push_str("&amp;"),
-                    '<' => piece.push_str("&lt;"),
-                    '>' => piece.push_str("&gt;"),
-                    c => piece.push(c),
-                }
-            }
-            if first {
-                gutter.push_str(&format!("{:>width$}\n", i + 1));
-                first = false;
-            } else {
-                gutter.push_str(&format!("{:>width$}\n", ""));
-            }
-            code.push_str(&piece);
-            code.push('\n');
-            if chars.peek().is_none() {
-                break;
+        code.push_str("<div class=l>");
+        for c in line.chars() {
+            match c {
+                '\t' => code.push('\t'),
+                c if c.is_control() => code.push('\u{FFFD}'),
+                '&' => code.push_str("&amp;"),
+                '<' => code.push_str("&lt;"),
+                '>' => code.push_str("&gt;"),
+                c => code.push(c),
             }
         }
+        code.push_str("</div>");
     }
     let mut note = format!("{} &middot; {} &middot; {} bytes", esc(address), esc(status), bytes);
     let mut tail = String::new();
@@ -269,16 +249,22 @@ pub fn view_source(address: &str, status: &str, bytes: usize, text: &str) -> Str
     if text.is_empty() {
         note.push_str(" &middot; the response was empty");
     }
+    // The gutter is as wide as the biggest number (digits of the last line, at 0.6em each in
+    // the monospace font) and the code hangs from it.
+    let digits = format!("{}", lines.len().max(1)).len();
+    let gutter = digits as f32 * 0.62 + 0.6;
+    let pad = gutter + 0.8;
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>view-source:{}</title><style>\
          html {{ color-scheme: light dark; }} body {{ margin: 0; font-family: system-ui; }} \
          .note {{ margin: 8px 16px; font-size: 13px; }} \
-         table {{ border-collapse: collapse; margin: 0; }} td {{ vertical-align: top; padding: 0; }} \
-         pre {{ margin: 0; font-family: monospace; }} \
-         .n {{ color: #8a7a6a; padding: 0 10px 0 16px; border-right: 1px solid #c8b8a0; text-align: right; }} \
-         .c {{ padding: 0 16px 0 10px; }}</style></head><body>\
+         .src {{ font-family: monospace; margin: 0; counter-reset: ln; }} \
+         .l {{ counter-increment: ln; white-space: pre-wrap; overflow-wrap: anywhere; \
+         padding: 0 16px 0 {pad}em; text-indent: -{pad}em; }} \
+         .l::before {{ content: counter(ln); display: inline-block; width: {gutter}em; \
+         margin-right: 0.8em; text-indent: 0; text-align: right; color: #8a7a6a; }}</style></head><body>\
          <p class=note>{note}</p>\
-         <table><tr><td class=n><pre>{gutter}</pre></td><td class=c><pre>{code}</pre></td></tr></table>{tail}</body></html>",
+         <div class=src>{code}</div>{tail}</body></html>",
         esc(address)
     )
 }
@@ -296,19 +282,23 @@ mod tests {
     fn view_source_numbers_escapes_and_caps() {
         let h = view_source("http://a.test/x", "200 OK", 40, "<p a=\"1\">hi & bye</p>\r\nline 2\n\n\tlast");
         assert!(h.contains("<title>view-source:http://a.test/x</title>"));
-        // The gutter: 4 lines, numbers right-aligned in one column.
-        assert!(h.contains("<pre>1\n2\n3\n4\n</pre>"), "{h}");
-        // The text is escaped, CRLF is one line end, a tab stays.
-        assert!(h.contains("<pre>&lt;p a=\"1\"&gt;hi &amp; bye&lt;/p&gt;\nline 2\n\n\tlast\n</pre>"), "{h}");
+        // One block per line (the numbers are the style's counter): 4 lines, CRLF is one line
+        // end, a tab stays, the markup is text.
+        assert!(
+            h.contains(
+                "<div class=l>&lt;p a=\"1\"&gt;hi &amp; bye&lt;/p&gt;</div><div class=l>line 2</div><div class=l></div><div class=l>\tlast</div></div>"
+            ),
+            "{h}"
+        );
+        assert_eq!(h.matches("<div class=l>").count(), 4);
         assert!(!h.contains("<p a="), "nothing of the source is markup");
+        assert!(h.contains("counter(ln)") && h.contains("white-space: pre-wrap"));
         assert!(h.contains("200 OK") && h.contains("40 bytes"));
         assert!(!h.contains("showing only"));
-        // A text with a final newline has no empty line after it; many lines widen the gutter.
+        // A text with a final newline has no empty line after it.
         let many: String = (0..12).map(|i| format!("l{i}\n")).collect();
         let h = view_source("a", "200 OK", 0, &many);
-        assert!(h.contains("<pre> 1\n 2\n"), "{h}");
-        assert!(h.contains("11\n12\n</pre>"), "{h}");
-        assert!(!h.contains("13\n"));
+        assert_eq!(h.matches("<div class=l>").count(), 12);
         // Control characters are made visible, not passed on.
         let h = view_source("a", "200 OK", 0, "a\u{0}b\u{7}c");
         assert!(h.contains("a\u{FFFD}b\u{FFFD}c"));
@@ -317,30 +307,40 @@ mod tests {
     }
 
     #[test]
-    fn view_source_wraps_long_lines_and_says_when_it_cut() {
-        let long = "x".repeat(SOURCE_WRAP * 2 + 5);
+    fn view_source_shows_a_very_long_line_whole_and_says_when_it_cut() {
+        // A minified script: one line of 1 MB (more than the old limit of 512 KB) is all there,
+        // in one block, for the style to wrap.
+        let long = "x".repeat(1 << 20);
         let h = view_source("a", "200 OK", long.len(), &format!("short\n{long}\nend"));
-        // 5 display lines for 3 numbered ones; continuation lines have no number.
-        assert!(h.contains("<pre>1\n2\n \n \n3\n</pre>"), "{h}");
-        assert_eq!(h.matches(&"x".repeat(SOURCE_WRAP)).count(), 2);
+        assert_eq!(h.matches("<div class=l>").count(), 3);
+        assert!(h.contains(&format!("<div class=l>{long}</div>")));
+        assert!(!h.contains("showing only"));
+        // The gutter is wide enough for the last number.
+        assert!(h.contains("width: 1.22em"), "{}", &h[..900]);
         // Too many bytes: the cap says so, at the top and the bottom.
         let big = "0123456789\n".repeat(SOURCE_CAP / 11 + 1000);
         let h = view_source("a", "200 OK", big.len(), &big);
-        assert!(h.matches("showing only the first 512 KB").count() >= 1, "{}", &h[..400]);
+        assert!(h.matches("showing only the first 4096 KB").count() >= 1, "{}", &h[..400]);
         assert!(h.contains("That is all that is shown"));
         assert!(h.len() < SOURCE_CAP * 3 + 5000, "bounded: {}", h.len());
+        // One line past the cap is cut in the line, not dropped.
+        let one = "y".repeat(SOURCE_CAP + 10_000);
+        let h = view_source("a", "200 OK", one.len(), &one);
+        assert!(h.contains(&"y".repeat(SOURCE_CAP)) && !h.contains(&"y".repeat(SOURCE_CAP + 1)));
+        assert!(h.contains("showing only"));
         // Too many lines.
         let lines = "\n".repeat(SOURCE_LINES + 50);
         let h = view_source("a", "200 OK", lines.len(), &lines);
-        assert!(h.contains("showing only the first 20000 lines"));
+        assert!(h.contains("showing only the first 50000 lines"));
+        assert_eq!(h.matches("<div class=l>").count(), SOURCE_LINES);
         // A multi-byte character at the cap is not cut in two.
-        let tricky = "é".repeat(SOURCE_CAP);
+        let tricky = "\u{e9}".repeat(SOURCE_CAP);
         let h = view_source("a", "200 OK", tricky.len(), &tricky);
         assert!(h.contains("showing only"));
     }
 
     #[test]
-    fn view_source_of_hostile_text_is_always_one_aligned_table() {
+    fn view_source_of_hostile_text_is_always_one_block_a_line() {
         let mut x = 0xdead_beef_1234_5678u64;
         let mut rnd = |n: u64| {
             x ^= x << 13;
@@ -358,11 +358,13 @@ mod tests {
                 }
             }
             let h = view_source("http://a.test/<x>", "200 OK", t.len(), &t);
-            // Nothing of the text is markup: no tag from the pool survives.
-            assert!(!h.contains("<script>") && h.matches("<pre>").count() == 2, "{h}");
-            let gutter = h.split("<pre>").nth(1).unwrap().split("</pre>").next().unwrap();
-            let code = h.split("<pre>").nth(2).unwrap().split("</pre>").next().unwrap();
-            assert_eq!(gutter.matches('\n').count(), code.matches('\n').count(), "gutter and code must have the same number of lines: {h}");
+            // Nothing of the text is markup: no tag from the pool survives, and the blocks are
+            // the lines (a line break in the text never makes another block).
+            assert!(!h.contains("<script>") && !h.contains("</pre>"), "{h}");
+            let body = h.split("<div class=src>").nth(1).unwrap().split("</div></body>").next().unwrap();
+            let lines = t.strip_suffix('\n').unwrap_or(&t).split('\n').count();
+            assert_eq!(body.matches("<div class=l>").count(), lines.min(SOURCE_LINES), "{h}");
+            assert_eq!(body.matches("</div>").count(), lines.min(SOURCE_LINES) + 0, "{h}");
         }
     }
 

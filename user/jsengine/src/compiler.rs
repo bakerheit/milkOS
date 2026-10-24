@@ -93,6 +93,9 @@ pub(crate) struct Compiler<'a> {
     lazy_shared: Option<Rc<crate::lazy::LazyShared>>,
     /// The class constructor being compiled next has instance fields to initialize.
     ctor_fields: bool,
+    /// What the unnamed function compiled next is called in stack traces (see
+    /// `Code::debug_name`); taken by the first function compiled after it is set.
+    pub infer_hint: Option<StrId>,
     /// Compiling a module: every Code made belongs to it.
     module: Option<crate::api::ModuleId>,
     /// The hidden `*default*` binding's atom (named "default" when it names a function).
@@ -193,6 +196,7 @@ impl<'a> Compiler<'a> {
             chain_memo: BTreeMap::new(),
             lazy_shared: None,
             ctor_fields: false,
+            infer_hint: None,
             module: None,
             default_atom: None,
             hoist_ops: Vec::new(),
@@ -874,6 +878,7 @@ impl<'a> Compiler<'a> {
             nlocals: st.nlocals,
             length,
             name,
+            debug_name: None,
             kind: st.kind,
             strict: st.strict,
             is_async: st.is_async,
@@ -897,8 +902,9 @@ impl<'a> Compiler<'a> {
         if self.fns.len() > 200 {
             return self.err("functions nested too deeply", f.start);
         }
+        let infer = self.infer_hint.take();
         if let Body::Lazy(l) = &f.body {
-            return self.lazy_stub(f, l, name_hint);
+            return self.lazy_stub(f, l, name_hint, infer);
         }
         let kind = match f.kind {
             FuncKind::Normal => CodeKind::Normal,
@@ -944,7 +950,13 @@ impl<'a> Compiler<'a> {
             FuncKind::Getter | FuncKind::Setter | FuncKind::FieldInit => name,
             _ => name,
         };
-        Ok(self.finish(st, name, length, (f.start, f.end)))
+        let mut code = self.finish(st, name, length, (f.start, f.end));
+        if name.is_none()
+            && let Some(c) = Rc::get_mut(&mut code)
+        {
+            c.debug_name = infer;
+        }
+        Ok(code)
     }
 
     /// Says which module the code belongs to, and the atom that stands for `default`.
@@ -1026,6 +1038,7 @@ impl<'a> Compiler<'a> {
         f: &Func,
         l: &LazyFunc,
         name_hint: Option<StrId>,
+        infer: Option<StrId>,
     ) -> CResult<Rc<Code>> {
         let Some(shared) = self.lazy_shared.clone() else {
             return self.err("cannot compile this function", f.start);
@@ -1087,6 +1100,7 @@ impl<'a> Compiler<'a> {
             nlocals: 0,
             length: l.length,
             name,
+            debug_name: infer,
             kind,
             strict: f.strict,
             is_async: f.is_async,
@@ -3325,6 +3339,44 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// How a stack trace names a function stored at the member expression `t`: its path
+    /// (`a.b.c`, at most the last 4 names; `this.` and `.prototype` left out).
+    fn member_path(&mut self, t: &Expr) -> Option<StrId> {
+        let mut parts: Vec<Atom> = Vec::new();
+        let mut cur = t;
+        loop {
+            match &cur.k {
+                ExprKind::Member(o, name, _) => {
+                    if parts.len() >= 4 {
+                        break;
+                    }
+                    parts.insert(0, *name);
+                    cur = o;
+                }
+                ExprKind::Ident(a) => {
+                    parts.insert(0, *a);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let mut s = String::new();
+        for a in parts {
+            let n = self.atoms.get(a);
+            if n == "prototype" {
+                continue;
+            }
+            if !s.is_empty() {
+                s.push('.');
+            }
+            s.push_str(n);
+        }
+        if s.is_empty() || s.len() > 120 {
+            return None;
+        }
+        Some(self.realm.heap.intern_str(&s))
+    }
+
     fn assign_member(
         &mut self,
         op: AssignOp,
@@ -3338,7 +3390,11 @@ impl<'a> Compiler<'a> {
                 self.expr(o)?;
                 match op {
                     AssignOp::Assign => {
+                        if is_plain_fn(value) {
+                            self.infer_hint = self.member_path(t);
+                        }
                         self.expr(value)?;
+                        self.infer_hint = None;
                         self.mark(pos);
                         self.emit(Op::SetProp(c));
                     }
@@ -3523,6 +3579,15 @@ fn bin_op(op: BinOp) -> Op {
         BinOp::Ge => Op::Ge,
         BinOp::In => Op::In,
         BinOp::InstanceOf => Op::InstanceOf,
+    }
+}
+
+/// A function expression without a name (parentheses around it don't matter).
+fn is_plain_fn(e: &Expr) -> bool {
+    match &e.k {
+        ExprKind::Func(f) => f.name.is_none(),
+        ExprKind::Seq(items) if items.len() == 1 => is_plain_fn(&items[0]),
+        _ => false,
     }
 }
 

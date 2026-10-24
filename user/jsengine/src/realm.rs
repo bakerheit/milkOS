@@ -164,6 +164,7 @@ pub(crate) struct Site {
     pub line: u32,
     pub col: u32,
     pub stack: String,
+    pub snippet: crate::errors::Snippet,
 }
 
 pub struct Realm {

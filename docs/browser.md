@@ -198,7 +198,12 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   `requestAnimationFrame` (run just before a frame is drawn, at the display's rate while a
   page asks), `queueMicrotask` and promises (drained after each task); `console.*` (each line
   on the serial port as `[browser] console LEVEL: ...`, and the last 400 per tab in the
-  console panel, Cmd-Alt-J or the menu); `location` (read, assign, replace, reload),
+  console panel, Cmd-Alt-J or the menu; an uncaught error or a rejected promise is several
+  lines, `Uncaught TypeError: x.y is not a function`, one `    at name (file:line:col)` per frame
+  (names a script never gave are read from where the function was stored: `a.b = function`),
+  and the source line of the top frame, cut to 60 characters on each side of the column, with
+  a caret under it; on the serial port each line of such an entry starts `[browser] console
+  LEVEL:` too, at most 40 of them); `location` (read, assign, replace, reload),
   `history` (back, forward, go, pushState / replaceState for the address bar), `navigator`,
   `screen`, `localStorage` per origin (kept in `~/Library/Browser/storage`, 5 MB each) and
   `sessionStorage` per tab, `document.cookie` (without HttpOnly cookies), `alert` / `confirm`
@@ -363,11 +368,13 @@ interactive pages need: menus, tabs, toggles, form validation, content built by 
   menu (Cmd-Alt-U), opens a tab with the page's source as it was fetched: one numbered line
   each in the monospace font, as plain text (no highlighting; nothing in it is a tag, a link
   or a script, and nothing runs). The page is fetched again as a navigation of its own, with
-  the same cookies, redirects, limits and checks as any other; only web addresses have a
-  source, and a `view-source:` address can't be linked to or nested. A line of more than 160
-  characters is wrapped (its continuation has no number); only the first 512 KB (and 20,000
-  lines) are shown, and the page says so at the top and the bottom. Back, forward and reload
-  work in the tab.
+  the same cookies, redirects, limits and checks as any other (a page the server refused, a 429
+  or a 404, shows its body); only web addresses have a source, and a `view-source:` address
+  can't be linked to or nested. Each line is a block that wraps to the window (`pre-wrap`, a
+  word cut anywhere when it has no space, so a minified script on one line of a megabyte is all
+  there with no sideways scrolling), its number hangs at the left of its first row and is the
+  style's counter, not text; only the first 4 MB (and 50,000 lines) are shown, and the page
+  says so at the top and the bottom. Back, forward and reload work in the tab.
 * **Observers**: `MutationObserver` is real. The DOM keeps a log for the nodes that are
   watched (`childList`, `attributes` with `attributeFilter` and `attributeOldValue`,
   `characterData`, `subtree`; at most 8192 watched nodes, 20,000 records and 8 MB of old
@@ -465,7 +472,10 @@ on a page: the rest are left empty with a line on the console.
   `focus`, `blur`, `close` and `w[0]`; everything else throws `SecurityError`
   (`document.domain` relaxing does not exist). Limits of the proxies: they are not instances of the other
   realm's classes (`instanceof Document` is false), `Array.isArray(proxy)` is false, only
-  `Symbol.iterator` crosses, a frame being navigated away from is "dead" (`InvalidAccessError`), and
+  `Symbol.iterator` crosses, the functions of the other frame are functions here that call it
+  and have its properties (`frame.contentWindow.Object.getOwnPropertyNames`; `call`, `apply`,
+  `bind` and `toString` are this realm's), `Object.getOwnPropertyNames(frameWindow)` lists the
+  enumerable names only, a frame being navigated away from is "dead" (`InvalidAccessError`), and
   calls nest at most 8 deep. A sandboxed frame without `allow-scripts` has no realm, so even with
   `allow-same-origin` its parent cannot read it (`contentDocument` is `null`). A runaway script in one frame does not stop the others: the "page is
   slow" bar stops the frame that is running.
@@ -668,8 +678,19 @@ the same User-Agent as always: it is the engine's decision, and Settings says so
   fuzz of two linked tables whose books must balance when everything is closed), and `browserkit-unit` the hub (`browserkit/src/workers.rs`:
   limits, routing, termination by navigation, tab and frame, zombies, the heap budget, a full
   inbox, `data:` sources, a fuzz of random use against the caps) and `view-source:` (addresses,
-  numbering, escaping, wrapping, the caps, a fuzz of hostile text). `browser-test.sh` checks that Cmd-Alt-U fetches the page again and runs none of its
-  script.
+  numbering, escaping, a line of a megabyte whole, the caps, a fuzz of hostile text).
+  `browser-test.sh` checks that Cmd-Alt-U fetches the page again and runs none of its
+  script, and that the source of a 429 page and of a page of one 700 KB line are shown (and
+  scroll to the end) without running them.
+* Error reports (`jsengine-unit`, `src/tests/diagnostics.rs`): the source line and caret of an
+  uncaught error, a thrown value and a syntax error; a minified line of 300 KB cut around the
+  column; multi-byte text and control characters; the line of a rejected promise; the names of
+  functions by where they were stored (also when compiled on their first call); which link of a
+  chain failed (`V(...).concat is not a function`, its own line and column) and a fuzz of
+  hostile text through the callee reader and the snippet; `tests/js/errors.js` has the same
+  for the conformance run. `xframes.rs` checks the properties of another frame's functions
+  (`Object.getOwnPropertyNames`, `Array.prototype`, `call`/`bind`) and `iframe-test.sh` does it
+  in the guest.
 * The script loader against the standard (`webengine-unit`, `src/tests/loading.rs`): blocking,
   `defer` and `async` order for any arrival order, a script that throws or does not compile, a
   failed or wrongly typed one, `document.write`, inserted scripts (`async = false`),

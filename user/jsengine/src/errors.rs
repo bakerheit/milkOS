@@ -17,6 +17,86 @@ pub(crate) struct ErrInfo {
     pub col: u32,
     /// "    at ..." lines.
     pub frames: String,
+    /// The source text around the position (empty when there is none).
+    pub snippet: Snippet,
+}
+
+/// The characters shown before and after the position of an error in its source line.
+const SNIPPET_BEFORE: usize = 60;
+const SNIPPET_AFTER: usize = 60;
+
+/// One line of source around a position, cut to a bounded width, for error reports.
+#[derive(Clone, Default)]
+pub(crate) struct Snippet {
+    /// The text on one line (control characters are spaces). Empty when there is none.
+    pub text: String,
+    /// The character index of the position within `text`.
+    pub caret: u32,
+}
+
+/// The line of `src` that holds byte offset `pos`, trimmed to at most 60 characters before the
+/// position and 60 after it (a minified line of a megabyte shows just the part around it, with
+/// `...` where it was cut), leading indentation removed. Looks at a bounded number of bytes,
+/// whatever the line length.
+pub(crate) fn source_snippet(src: &crate::bytecode::Source, pos: u32) -> Snippet {
+    let t: &[u8] = &src.text;
+    let pos = (pos as usize).min(t.len());
+    let li = match src.line_starts.binary_search(&(pos as u32)) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    };
+    let ls = (src.line_starts.get(li).copied().unwrap_or(0) as usize).min(pos);
+    let is_nl = |b: u8| b == b'\n' || b == b'\r';
+    let mut from = ls.max(pos.saturating_sub(SNIPPET_BEFORE * 4 + 4));
+    while from < pos && (t[from] & 0xc0) == 0x80 {
+        from += 1;
+    }
+    let to = (pos + SNIPPET_AFTER * 4 + 4).min(t.len());
+    let mut end = to;
+    if let Some(i) = t[pos..to].iter().position(|&b| is_nl(b)) {
+        end = pos + i;
+    } else {
+        while end > pos && end < t.len() && (t[end] & 0xc0) == 0x80 {
+            end -= 1;
+        }
+    }
+    // (A line break inside the window ends the line; so does the end of the text.)
+    let line_continues = end == to && to < t.len() && !is_nl(t[to]);
+    let before: Vec<char> = String::from_utf8_lossy(&t[from..pos]).chars().collect();
+    let after: Vec<char> = String::from_utf8_lossy(&t[pos..end]).chars().collect();
+    let mut cut_l = from > ls;
+    let mut b: &[char] = &before;
+    if b.len() > SNIPPET_BEFORE {
+        b = &b[b.len() - SNIPPET_BEFORE..];
+        cut_l = true;
+    }
+    let mut cut_r = line_continues;
+    let mut a: &[char] = &after;
+    if a.len() > SNIPPET_AFTER {
+        a = &a[..SNIPPET_AFTER];
+        cut_r = true;
+    }
+    if !cut_l {
+        let n = b.iter().take_while(|c| **c == ' ' || **c == '\t').count();
+        b = &b[n..];
+    }
+    let mut text = String::new();
+    if cut_l {
+        text.push_str("...");
+    }
+    for c in b.iter().chain(a.iter()) {
+        text.push(if c.is_control() || *c == '\u{2028}' || *c == '\u{2029}' { ' ' } else { *c });
+    }
+    if cut_r {
+        text.push_str("...");
+    }
+    if text.trim().is_empty() {
+        return Snippet::default();
+    }
+    Snippet {
+        text,
+        caret: (b.len() + if cut_l { 3 } else { 0 }) as u32,
+    }
 }
 
 impl Realm {
@@ -41,6 +121,9 @@ impl Realm {
             site.file = f.1.clone();
             site.line = f.2;
             site.col = f.3;
+        }
+        if let Some(f) = self.vm.frames.last() {
+            site.snippet = source_snippet(&f.code.source, f.code.pos_at(f.pc.saturating_sub(1)));
         }
         let mut s = String::new();
         for (i, (name, file, line, col)) in frames.iter().enumerate() {
@@ -84,6 +167,7 @@ impl Realm {
                 line: site.line,
                 col: site.col,
                 frames: site.stack,
+                snippet: site.snippet,
             })),
         );
         let sk = self.key(N::stack);
@@ -157,6 +241,7 @@ impl Realm {
         {
             let (file, line, column, frames) =
                 (info.file.clone(), info.line, info.col, info.frames.clone());
+            let snippet = info.snippet.clone();
             let name = self
                 .peek_string(o, N::name)
                 .unwrap_or_else(|| String::from("Error"));
@@ -168,6 +253,8 @@ impl Realm {
                 line,
                 column,
                 stack: frames,
+                snippet: snippet.text,
+                snippet_col: snippet.caret,
                 uncatchable: false,
             };
         }
@@ -180,6 +267,8 @@ impl Realm {
             line: site.line,
             column: site.col,
             stack: site.stack,
+            snippet: site.snippet.text,
+            snippet_col: site.snippet.caret,
             uncatchable: false,
         }
     }

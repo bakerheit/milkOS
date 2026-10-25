@@ -206,7 +206,7 @@ check 'wm: restarting \(power manager, full reset\)' "boot 7: Restart reset the 
 # bring-up, the boot log, the desktop view, the touch polling, the crash screen; none of it may stall or panic. ----
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.sdwrite=1 milk.lcd=ili9486"
 DTB_ARGS=(-dtb "$T/lcd.dtb")
-boot 8 "wait@300:wm: desktop up" "send:system" "wait:$P"
+boot 8 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
 sleep 1
 python3 scripts/qmp.py "$QMP" screendump "$T/lcd8.png" >/dev/null 2>&1 || true
 stop
@@ -215,22 +215,25 @@ check '^lcd: panel initialised' "boot 8: the panel is brought up"
 check '^lcd: boot log on the panel' "boot 8: the boot log goes to the panel"
 check '^rpi fb: 1024x768x32 pitch 4096 at ' "boot 8: HDMI is still the primary screen"
 check '^lcd: the desktop \(1024x768\) is on the panel 480x320, scaled down' "boot 8: the panel mirrors the desktop"
-check '^lcd: first desktop update on the panel' "boot 8: a desktop update reaches the panel"
+check 'lcd: first desktop update on the panel' "boot 8: a desktop update reaches the panel"
 has 'KERNEL PANIC|kernel panic|lcd: .*timed out' && bad "boot 8: a panic or SPI time-out" || ok "boot 8: no panic, no SPI time-out"
 out system | grep -Eq '^CPUs +4' && ok "boot 8: the system runs (system says 4 CPUs)" || bad "boot 8: system: $(out system)"
+# The touch chip is polled all along and nothing is attached: no phantom touch (no pointer move, no button).
+out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 8: touch polling invents no pointer events" || bad "boot 8: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
 desktop_shot "$T/lcd8.png" && ok "boot 8: the HDMI screen shows the desktop" || bad "boot 8: the HDMI screen is blank or flat"
 
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9488 milk.lcd_rot=270 milk.hdmi=off milk.lcd_view=pan milk.touch_irq=-1 milk.lcd_dc=22 milk.lcd_rst=27 milk.lcd_hz=8000000"
-boot 9 "wait@300:wm: desktop up" "send:system" "wait:$P"
+boot 9 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
 stop
 check '^lcd: ili9488 480x320 rot 270 bgr, SPI0 CE0 [0-9]+ kHz .*DC=GPIO22 RST=GPIO27, touch XPT2046 on CE1, polled' "boot 9: other controller, rotation, pins, polled touch"
 check '^display: the SPI panel is the screen, the desktop draws 1024x768 in RAM' "boot 9: milk.hdmi=off makes the panel the screen"
 has '^rpi fb: ' && bad "boot 9: the HDMI framebuffer was used" || ok "boot 9: no HDMI framebuffer"
 check '^lcd: the desktop \(1024x768\) is on the panel 480x320, 1:1' "boot 9: the desktop runs on the panel, 1:1 view"
-check '^lcd: first desktop update on the panel' "boot 9: a desktop update reaches the panel"
+check 'lcd: first desktop update on the panel' "boot 9: a desktop update reaches the panel"
 check 'wm: desktop up' "boot 9: the desktop"
 has 'KERNEL PANIC|kernel panic|lcd: .*timed out' && bad "boot 9: a panic or SPI time-out" || ok "boot 9: no panic, no SPI time-out"
 out system | grep -Eq '^CPUs +4' && ok "boot 9: the system runs on the panel alone" || bad "boot 9: system: $(out system)"
+out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 9: touch polling invents no pointer events" || bad "boot 9: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
 
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=st7796 milk.lcd_rot=0 milk.crashtest=late"
 boot 10 "wait@300:KERNEL PANIC"

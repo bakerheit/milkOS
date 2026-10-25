@@ -129,10 +129,11 @@ pub fn connect_pins() {
 /// transmit FIFO of an idle controller has room. (Unimplemented or absent hardware reads as 0.)
 pub fn present() -> bool {
     let old = spi_read(CLK);
+    // (The divider's lowest bit is not kept: the values are even.)
     spi_write(CLK, 0x0064);
-    let a = spi_read(CLK) == 0x0064;
+    let a = spi_read(CLK) & 0xfffe == 0x0064;
     spi_write(CLK, 0x00c8);
-    let b = spi_read(CLK) == 0x00c8;
+    let b = spi_read(CLK) & 0xfffe == 0x00c8;
     spi_write(CLK, old);
     a && b && spi_read(CS) & CS_TXD != 0
 }

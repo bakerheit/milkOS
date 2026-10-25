@@ -88,7 +88,9 @@ a card or a disk.
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
    and **no `dtoverlay=vc4-kms-v3d`** (milkOS draws on the firmware's framebuffer, not on a KMS display).
    `cmdline.txt` can stay as it is (the kernel only looks at `milk.` words) or be replaced. The card is **read-only** to milkOS unless you add `milk.sdwrite=1` (so booting it cannot damage the other system; with the stock card there is no milkfs partition to write to anyway).
-3. Put the card in a Pi 4 with an HDMI screen. To go back: restore the old `config.txt`.
+3. Put the card in a Pi 4 with an HDMI screen (or, with `milk.lcd=ili9486` in `cmdline.txt`, the 3.5-inch SPI display on the
+   header: "3.5-inch SPI display"). To go back: restore the old `config.txt`. **Boot options live in `cmdline.txt`**: one line, `milk.<name>=<value>` words separated by
+   spaces; to change one, put the card in any computer, edit that line (`cmdline.milkos.txt` from step 1 is a starting point), eject, boot. No rebuild.
 
 The firmware (start4.elf) loads `milkos8.img` at 0x80000, hands over a device tree in `x0` and starts all four cores at EL2 (the
 others wait in the spin table). The card also holds the root file system's persistent part: milkOS finds

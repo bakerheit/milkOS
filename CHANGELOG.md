@@ -3,6 +3,10 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The PCIe bring-up no longer fails its first step depending on luck. A real boot (without `milk.pcie=probe`) printed `serror: absorbed an SError at checkpoint 'pcie-bridge-reset'` and then
+  `step 1 bridge-reset FAILED`, so USB was skipped; the same SError had been absorbed in the probe runs too, but there the per-access checkpoint took it *before* the step began, so the step looked clean and the
+  whole bring-up passed. Now an SError left pending by an earlier access on that CPU is drained before the bring-up (`pcie-drain`, logged once, not counted), the controller's status register is no longer read
+  while the bridge is held in reset (only the reset block's register is), and an SError taken at the first step's checkpoint is logged as expected and does not fail the step. The outcome no longer depends on the probe option.
 - USB hubs: a keyboard and mouse in the Pi 4's sockets now reach the keyboard and mouse drivers. The first real run found the VL805 and its
   xHCI and then logged `port 1: 2109:3431 class 0x9 (high speed): no keyboard or mouse interface, ignored`: **the four USB-A sockets are behind a USB 2 hub inside the VL805**,
   and the driver only knew devices directly on a root port. The xHCI driver now drives hubs (`usb/xhci/hub.rs`; pure parts in `rpikit::usbhub`): the hub descriptor, the slot context's hub

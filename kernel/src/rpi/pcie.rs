@@ -215,6 +215,22 @@ impl Run {
         self.seen = crate::serror::absorbed();
     }
 
+    /// End the first step: an SError taken here is logged once as expected and does not fail the step.
+    fn end_lenient(&mut self, step: usize) -> bool {
+        let s = &plan::STEPS[step];
+        super::serror_checkpoint(s.label);
+        if crate::serror::absorbed() != self.seen {
+            kprintln!(
+                "pcie: step {} {}: the SoC rejected an access while the bridge was in reset (an SError, taken and survived; expected, going on)",
+                step + 1,
+                s.name
+            );
+        } else if self.probe {
+            kprintln!("pcie: step {} {} ok", step + 1, s.name);
+        }
+        true
+    }
+
     /// End `step`: take a pending SError here, say how it went (every step in probe mode, failures always).
     fn end(&mut self, step: usize) -> bool {
         let s = &plan::STEPS[step];
@@ -293,7 +309,9 @@ fn root_complex(run: &mut Run) -> Option<Host> {
                 w.size.min((1u64 << 32) - w.pci_addr),
             )
         });
-    kprintln!("[pcie] root complex at {PCIE_PHYS:#x}: bringing it up (status before {:#x}, reset register {:#x})", rd(MISC_PCIE_STATUS), rd(RGR1_SW_INIT_1));
+    // (Only the reset block's register is read before the bridge is out of reset: the controller's own status register sits behind
+    // the bridge, and a read of it while the bridge is held in reset can be rejected by the SoC. The status is logged by the link wait.)
+    kprintln!("[pcie] root complex at {PCIE_PHYS:#x}: bringing it up (reset register {:#x})", rd(RGR1_SW_INIT_1));
     let bail = |r: &mut Run, step: usize| -> Option<Host> {
         let _ = r.end(step);
         park();
@@ -303,7 +321,9 @@ fn root_complex(run: &mut Run) -> Option<Host> {
     run.begin(0);
     wr(RGR1_SW_INIT_1, rd(RGR1_SW_INIT_1) | RGR1_INIT);
     delay_ms(1);
-    if !run.end(0) {
+    // An SError at this first checkpoint is expected on the real board (it was absorbed here in every run, with and without
+    // the probe) and the bring-up goes on after it every time: it is logged once, and the step does not fail.
+    if !run.end_lenient(0) {
         return bail(run, 0);
     }
     run.begin(1);
@@ -441,6 +461,12 @@ pub fn bring_up() -> Option<(Vec<pci::Device>, pci::Translate)> {
     }
     // An SError found at any checkpoint of this thread from here on is survived (details logged), never fatal.
     let _tolerate = crate::serror::tolerate();
+    // An SError left over from some earlier access on this CPU (the SD card driver's, say) may still be pending: take it here,
+    // say so once, and do not count it against the bring-up (the dump of what was written lately is in the crash screen only
+    // when it is fatal; here it is not).
+    if !crate::serror::checkpoint_catch("pcie-drain") {
+        kprintln!("[pcie] an SError from an earlier access on this CPU was still pending: drained before the bring-up, it is not the controller's");
+    }
     let mut run = Run { probe, seen: 0 };
     let Some(host) = root_complex(&mut run) else {
         PROBE.store(false, Ordering::Relaxed);

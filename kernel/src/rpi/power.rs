@@ -46,11 +46,13 @@ fn full_reset() -> ! {
 
 /// Reset the board. Does not return.
 pub fn restart() -> ! {
+    super::watchdog::disarm();
     full_reset()
 }
 
 /// Power off (halt until power cycled). Does not return.
 pub fn power_off() -> ! {
+    super::watchdog::disarm();
     wr(RSTS, (rd(RSTS) & RSTC_WRCFG_CLR) | PASSWORD | RSTS_HALT);
     full_reset()
 }

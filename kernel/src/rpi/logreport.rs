@@ -154,6 +154,7 @@ pub fn emit(n: u64, boot: u32) {
     // The mailbox can take a second to give up on a firmware that does not answer: save what is waiting first.
     logfile::tick();
     firmware();
+    put(&format!("watchdog: {}\n", super::watchdog::status()));
     put(&logfile::status());
     put(&format!("==== end of system report {n} ====\n"));
 }

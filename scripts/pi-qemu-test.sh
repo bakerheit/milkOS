@@ -33,6 +33,12 @@
 #           `milk.serror=off` makes the checkpoints no-ops, `milk.serror=paranoid` adds one after every register write; the ESR decode, FAR/ELR/SPSR, the checkpoint attribution and the register write
 #           breadcrumbs are checked in the log, the checkpoint cost is bounded, and boot 1 proves the checkpoints are silent when nothing is pending.
 #   boot 20: `milk.pcie=probe` where the tree has no PCIe controller (qemu's raspi4b has none): acknowledged, skipped cleanly, the desktop runs; `milk.crashtest=serror-absorb` runs the SError-survival rules against pretend SErrors.
+#   boots 21 to 24: the Ethernet link-up options and the watchdog (docs/raspberry-pi.md, "GENET link-up" and "Watchdog"): 21: `milk.genet=nolink,norx,notx,polled`
+#           with `milk.watchdog=on` where the tree has neither the Ethernet controller nor the power manager's watchdog block: both skipped cleanly,
+#           Shut Down powers the machine off; 22: `milk.watchdog=sim` (the same rules with no register: qemu's power manager resets at once when
+#           RSTC is written instead of counting down, so the real arming cannot run here): armed after the boot, the desktop comes up and runs
+#           for longer than the deadline, so it was kicked from CPU 0's timer tick; 23: disarmed by Shut Down; 24: `milk.crashtest=hang` stops
+#           CPU 0 with interrupts off, no kick comes, another CPU resets the board at the deadline and the kernel boots a second time.
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
 # TCG (no hvf for raspi), so a boot takes about 10-30 s.
 #
@@ -441,6 +447,46 @@ has '^pcie: step ' && bad "boot 20: a PCIe step ran without a controller" || ok 
 has 'KERNEL EXCEPTION|KERNEL PANIC|kernel panic' && bad "boot 20: an exception or a panic" || ok "boot 20: no exception, no panic"
 check 'wm: desktop up' "boot 20: the desktop is up"
 check '^serror: absorb self-test: ok ' "boot 20: an SError is survived at a pcie-* checkpoint (and under tolerate), refused elsewhere"
+
+# boots 21 to 24: the Ethernet link-up options and the watchdog. qemu's raspi4b has no GENET and the test tree has no watchdog node, so the options
+# must be accepted and the Ethernet skipped, the watchdog must say why it is not armed, and the board must still shut down by itself.
+python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.genet=nolink,norx,notx,polled milk.watchdog=on milk.crashtest=late-off"
+DTB_ARGS=(-dtb "$T/wd.dtb")
+boot 21 "wait@300:wm: shutting down"
+gone=0
+for _ in $(seq 100); do kill -0 "$QPID" 2>/dev/null || { gone=1; break; }; sleep 0.2; done
+stop
+check '^\[genet\] no Ethernet controller in the device tree' "boot 21: milk.genet=nolink,norx,notx,polled on a board without GENET: skipped cleanly"
+check '^\[genet\] milk.genet is set but there is nothing to probe: skipped' "boot 21: said so"
+check '^\[watchdog\] not armed: the device tree has no power manager watchdog' "boot 21: milk.watchdog=on where the tree has no watchdog block: not armed, with the reason"
+has '^\[watchdog\] armed' && bad "boot 21: the watchdog armed itself on a tree without the block (qemu would reset at once)" || ok "boot 21: no watchdog armed"
+has 'KERNEL EXCEPTION|KERNEL PANIC|kernel panic' && bad "boot 21: an exception or a panic" || ok "boot 21: no exception, no panic"
+[ "$gone" = 1 ] && ok "boot 21: Shut Down powered the machine off (qemu exited by itself)" || bad "boot 21: the machine did not power off"
+
+python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.watchdog=sim"
+boot 22 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:sleep 8" "wait@60:$P" "send:system" "wait:$P"
+stop
+check '^\[watchdog\] simulated \(milk.watchdog=sim\)' "boot 22: the simulated watchdog is chosen"
+check '^\[watchdog\] armed \(simulated\): the board resets after 4 s without a kick' "boot 22: armed once the boot is over"
+has '^\[watchdog\] simulated: no kick' && bad "boot 22: the simulated watchdog reset a kernel that was ticking" || ok "boot 22: the desktop came up and ran 8 s more, past the 4 s deadline: it was kicked in time"
+[ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" = 1 ] && ok "boot 22: one boot only" || bad "boot 22: the kernel booted again"
+
+python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.watchdog=sim milk.crashtest=late-off"
+boot 23 "wait@300:wm: shutting down"
+gone=0
+for _ in $(seq 100); do kill -0 "$QPID" 2>/dev/null || { gone=1; break; }; sleep 0.2; done
+stop
+check '^\[watchdog\] armed \(simulated\)' "boot 23: armed"
+has '^\[watchdog\] simulated: no kick' && bad "boot 23: the watchdog reset a clean shutdown" || ok "boot 23: no reset"
+[ "$gone" = 1 ] && ok "boot 23: Shut Down disarmed it and powered the machine off" || bad "boot 23: the machine did not power off"
+
+python3 scripts/pi_dtb.py "$T/wd.dtb" --cmdline "milk.watchdog=sim milk.crashtest=hang"
+boot 24 "wait@300:crash-test: CPU 0 now stops" "wait@300:\[watchdog\] simulated: no kick" "wait@300:milkOS [0-9][^ ]* .*booting"
+stop
+check '^\[watchdog\] armed \(simulated\)' "boot 24: armed"
+check '^crash-test: CPU 0 now stops with interrupts off' "boot 24: the kernel is hung on purpose"
+check '^\[watchdog\] simulated: no kick for 4 s: the board is reset now' "boot 24: no kick came; another CPU saw the missed deadline"
+[ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" -ge 2 ] && ok "boot 24: the frozen board was reset and the kernel booted a second time" || bad "boot 24: no second boot after the hang"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

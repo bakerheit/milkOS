@@ -8,6 +8,8 @@
 //! * [`sdhci`]: the SD host controller (EMMC2 on a real board; qemu's raspi4b has the EMMC1
 //!   one), as a block device.
 //! * [`genet`]: the Gigabit Ethernet MAC. Not modelled by qemu, so untested until hardware.
+//! * [`watchdog`]: the power manager's watchdog as a safety net for a frozen board (armed at the end of the boot,
+//!   kicked from the timer interrupt; `milk.watchdog=`).
 //! * [`spi`], [`lcd`]: SPI0 and the GPIO pins, and the 3.5-inch SPI display with its touch chip on
 //!   them (off unless `milk.lcd=` names a controller; rpikit::lcd and rpikit::touch are the pure parts).
 //!
@@ -28,6 +30,7 @@ pub mod power;
 pub mod rng;
 pub mod sdhci;
 pub mod spi;
+pub mod watchdog;
 
 use core::arch::asm;
 
@@ -89,6 +92,7 @@ pub fn init() {
         genet::init();
     }
     serror_checkpoint("rpi-genet");
+    watchdog::configure();
 }
 
 /// Take a pending SError here and now, so the crash dump names this place (kernel/src/serror.rs;

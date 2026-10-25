@@ -1593,19 +1593,11 @@ mod genet_tests {
         use crate::genet::regs::*;
 
         fn all() -> std::vec::Vec<(&'static str, &'static [Step])> {
-            std::vec![("init", INIT), ("irq-mask", IRQ_MASK), ("irq-unmask", IRQ_UNMASK), ("dma-on", DMA_ON)]
+            std::vec![("init", INIT), ("irq-mask", IRQ_MASK), ("dma-on", DMA_ON), ("link-up", LINK_UP), ("first-frames", FIRST_FRAMES)]
         }
 
         fn pos(name: &str) -> usize {
             INIT.iter().position(|s| s.name == name).unwrap_or_else(|| panic!("no step {name}"))
-        }
-
-        #[test]
-        fn mode_option() {
-            assert_eq!(Mode::parse(None), Ok(Mode::Normal));
-            assert_eq!(Mode::parse(Some(b"probe")), Ok(Mode::Probe));
-            assert_eq!(Mode::parse(Some(b"off")), Ok(Mode::Normal));
-            assert_eq!(Mode::parse(Some(b"proeb")), Err(Mode::Normal), "a typo runs normally but is reported");
         }
 
         #[test]
@@ -1616,7 +1608,7 @@ mod genet_tests {
                     assert!(seen.insert(s.name), "step name {} twice", s.name);
                     assert!(!s.name.is_empty() && s.name.len() <= 24, "{}", s.name);
                     match s.op {
-                        Op::DelayUs(_) => assert_eq!(s.reg, 0, "{t}/{}", s.name),
+                        Op::DelayUs(_) | Op::LinkResolve | Op::Event(_) => assert_eq!(s.reg, 0, "{t}/{}", s.name),
                         Op::ClearDescriptors | Op::PostRxDescriptors => {}
                         _ => {
                             assert!(s.reg < 0x1_0000 && s.reg % 4 == 0, "{t}/{}: {:#x}", s.name, s.reg);
@@ -1667,7 +1659,7 @@ mod genet_tests {
             assert_eq!(reg("tx-prod-index").reg, 0x500c);
             assert_eq!(DMA_ON[2].reg, 0x3044);
             assert_eq!(DMA_ON[3].reg, 0x5044);
-            assert_eq!(IRQ_UNMASK[0].op, Op::Write(7 << 13));
+            assert_eq!(LINK_UP.iter().find(|s| s.name == "link-irq-unmask").unwrap().op, Op::Write(7 << 13));
         }
 
         #[test]
@@ -1676,7 +1668,7 @@ mod genet_tests {
             assert_eq!(labels, ["genet-power-up", "genet-umac-reset", "genet-dma-off", "genet-umac-setup", "genet-rings"]);
             assert_eq!(INIT.last().unwrap().group_end, Some("genet-rings"), "the table ends on a checkpoint");
             assert_eq!(IRQ_MASK.last().unwrap().group_end, Some("genet-irq"));
-            assert_eq!(IRQ_UNMASK.last().unwrap().group_end, Some("genet-irq-on"));
+            assert_eq!(LINK_UP.last().unwrap().group_end, Some("genet-link-up"));
             assert_eq!(DMA_ON.last().unwrap().group_end, Some("genet-dma-on"));
             // Every label is in the documented checkpoint table.
             let doc = include_str!("../../docs/raspberry-pi.md");
@@ -1698,7 +1690,7 @@ mod genet_tests {
             assert_eq!(group_of(INIT, 0).start, 0);
             assert_eq!(INIT[group_of(INIT, 0).end - 1].name, "ext-power-up");
             assert_eq!(group_of(DMA_ON, 3), 0..4);
-            assert_eq!(group_of(IRQ_UNMASK, 0), 0..1);
+            assert_eq!(group_of(LINK_UP, 2), 0..LINK_UP.len());
             // Every step is in exactly the group that ends at the next checkpoint.
             for i in 0..INIT.len() {
                 let g = group_of(INIT, i);

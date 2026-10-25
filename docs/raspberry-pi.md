@@ -249,8 +249,7 @@ the ports on the board work without), interrupt-driven operation (MSI/INTx), rep
 buttons), LEDs, mass storage, isochronous.
 
 **Ethernet** (`rpi/genet.rs`, **untested**, descriptor words and autonegotiation resolution in `rpikit::genet`): UMAC reset and
-setup, RGMII with the PHY adding the receive delay (`rgmii-rxid`, so the PHY's RX skew bit is set and the MAC's ID delay is
-left on), one 64-entry receive ring and one transmit ring (the default ring 16) of 2 KiB buffers below the DMA limit, the descriptors
+setup, RGMII with the PHY adding the receive delay (`rgmii-rxid`: the PHY is left at its strapped defaults, as Linux leaves the BCM54213PE, and the MAC's transmit delay is on: `ID_MODE_DIS` clear), one 64-entry receive ring and one transmit ring (the default ring 16) of 2 KiB buffers below the DMA limit, the descriptors
 in the controller's own memory, MDIO to the BCM54213PE (PHY found at the tree's address, id logged), advertise everything,
 wait for autonegotiation, program speed/duplex into the MAC, interrupt on received frames (SPI 157) plus a 10 ms
 poll as a safety net. It plugs into the stack as a `net::nic::Nic` next to virtio-net. Promiscuous mode is on for now.
@@ -293,7 +292,7 @@ Not done: the address filter, interrupt-driven transmit completion, checksum off
    registers (all in `rpi/pcie.rs`, each written from the Broadcom core's documented sequence); if the VL805 enumerates but the xHCI
    does not start, the `NOTIFY_XHCI_RESET` call and the DMA window are next.
 4. **Ethernet.** `[genet]` lines: the version register, the PHY id (BCM54213PE answers `0x600d84a?`), link up with speed and duplex,
-   then `[net] dhcp`. If the PHY answers but no frames arrive: RGMII delays (`ID_MODE_DIS`, the PHY's skew bit), the descriptor ring
+   then `[net] dhcp`. If the PHY answers but no frames arrive: RGMII delays (`ID_MODE_DIS`; the PHY's skew straps), the descriptor ring
    registers, promiscuous mode.
 5. **Then** the interrupt-driven USB and the SD DMA, the address filter, performance work, and Wi-Fi.
 
@@ -301,3 +300,12 @@ What needs the owner: a **serial cable is not needed** for the order above (the 
 a way the screen cannot show (a crash before the framebuffer exists), a USB serial adapter on GPIO 14/15 with `enable_uart=1` (the
 config file above already has it) gives the same log at 115200 8N1 from the very first line, and a photo of the screen when the
 LED flashes is the next best thing.
+
+## How the untested drivers were checked
+
+qemu cannot run them, so their register layouts were checked against the public behaviour of the Linux drivers and headers (read as
+reference, nothing copied: `pcie-brcmstb.c`, `bcmgenet.{c,h}`, `unimac.h`, `bcmmii.c`, `broadcom.c`, `raspberrypi-firmware.h`) and against
+the device tree of a real board's boot partition (a read-only copy, not in the repository: `MILK_REAL_DTB=... scripts/pi-qemu-test.sh`
+boots it under qemu and the host tests parse it). That caught, among others: the RNG200's address (`0xfe104000`, not where memory put it),
+the PCIe outbound window (1 GiB at CPU `0x6_0000_0000`, PCI `0xc000_0000`, not 64 MiB), the DMA burst length (`0x10`), the PHY needing no skew
+setup, and the SDHCI `broken-cd` flag. What this cannot catch: timing, electrical, and anything the register documentation leaves out.

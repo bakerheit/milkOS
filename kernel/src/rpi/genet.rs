@@ -65,6 +65,9 @@ const INTRL2_MASK_CLEAR: usize = INTRL2_0 + 0x14;
 const IRQ_RXDMA_DONE: u32 = 7 << 13; // MBDONE | PDONE | BDONE
 // RBUF.
 const RBUF_CTRL: usize = RBUF;
+const RBUF_CHK_CTRL: usize = RBUF + 0x14;
+const RBUF_TBUF_SIZE_CTRL: usize = RBUF + 0xb4;
+const TBUF_CTRL: usize = 0x0600;
 // UMAC.
 const UMAC_CMD: usize = UMAC + 0x008;
 const UMAC_MAC0: usize = UMAC + 0x00c;
@@ -118,7 +121,7 @@ const D_CTRL: usize = 0x04;
 const D_SCB_BURST_SIZE: usize = 0x0c;
 const DMA_EN: u32 = 1 << 0;
 const DMA_RING_BUF_EN_SHIFT: u32 = 1;
-const DMA_MAX_BURST_LENGTH: u32 = 0x08;
+const DMA_MAX_BURST_LENGTH: u32 = 0x10;
 // Descriptor words.
 const BD_LENGTH_STATUS: usize = 0;
 const BD_ADDR_LO: usize = 4;
@@ -146,11 +149,6 @@ const BMSR_ANEGCOMPLETE: u16 = 1 << 5;
 const ADVERTISE_ALL: u16 = 0x01e0 | 0x0400 | 0x0800 | 1; // 10/100 full and half, pause, selector
 const CTRL1000_ADV_FULL: u16 = 0x0200;
 const CTRL1000_ADV_HALF: u16 = 0x0100;
-// Broadcom aux control (shadow registers), for the RGMII receive clock skew.
-const MII_BCM54XX_AUXCTL: u8 = 0x18;
-const AUXCTL_SHDWSEL_MISC: u16 = 0x07;
-const AUXCTL_MISC_WREN: u16 = 0x8000;
-const AUXCTL_MISC_RGMII_SKEW_EN: u16 = 0x0100;
 
 fn rd(off: usize) -> u32 {
     // SAFETY: the controller's registers, mapped as Device memory (platform.rs).
@@ -261,19 +259,9 @@ fn phy_start(phy: u8) {
     while mdio_read(phy, MII_BMCR).is_some_and(|v| v & BMCR_RESET != 0) && !t.expired() {
         delay_us(1000);
     }
-    // RGMII RX clock skew on (the PHY adds the receive delay): shadow register 7, bit 8.
-    if mdio_write(
-        phy,
-        MII_BCM54XX_AUXCTL,
-        AUXCTL_SHDWSEL_MISC | AUXCTL_SHDWSEL_MISC << 12,
-    ) && let Some(v) = mdio_read(phy, MII_BCM54XX_AUXCTL)
-    {
-        mdio_write(
-            phy,
-            MII_BCM54XX_AUXCTL,
-            AUXCTL_SHDWSEL_MISC | (v & !0x7007) | AUXCTL_MISC_WREN | AUXCTL_MISC_RGMII_SKEW_EN,
-        );
-    }
+    // No RGMII delay setup in the PHY: Linux's driver leaves the BCM54213PE at its strapped defaults too (it only
+    // adds clock skew for some other Broadcom models), and the tree says `rgmii-rxid`: the PHY's own receive delay,
+    // the MAC's transmit delay (ID_MODE_DIS clear, as below).
     mdio_write(phy, MII_ADVERTISE, ADVERTISE_ALL);
     mdio_write(phy, MII_CTRL1000, CTRL1000_ADV_FULL | CTRL1000_ADV_HALF);
     mdio_write(phy, MII_BMCR, BMCR_ANENABLE | BMCR_ANRESTART);
@@ -584,7 +572,12 @@ pub fn init() {
     wr(UMAC_MAX_FRAME_LEN, 1536);
     wr(UMAC_MIB_CTRL, 7);
     wr(UMAC_MIB_CTRL, 0);
+    // Plain frames: no 64-byte status block either way (Linux turns those on for checksum offload), no
+    // receive checksum, FCS stripped by the MAC (CMD_CRC_FWD off).
     wr(RBUF_CTRL, 0);
+    wr(TBUF_CTRL, 0);
+    wr(RBUF_CHK_CTRL, 0);
+    wr(RBUF_TBUF_SIZE_CTRL, 1);
     // Frames to anyone for now (a switch only sends us ours, plus broadcasts): the address filter is
     // a refinement for later.
     wr(

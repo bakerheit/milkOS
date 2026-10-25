@@ -187,7 +187,9 @@ extern "C" fn kstack_overflow(sp: u64, elr: u64, far: u64, esr: u64) -> ! {
     );
     kprintln!("*** halted ***");
     if crate::platform::RASPI {
-        // No serial cable on the Pi: the dump on the screen, the LED flashing.
+        // No serial cable on the Pi: the dump on the screen, the LED cycle.
+        #[cfg(feature = "raspi")]
+        crate::rpi::led::note_stack_overflow(elr, far);
         crate::crashscreen::show();
         #[cfg(feature = "raspi")]
         crate::rpi::led::blink_forever();
@@ -354,6 +356,12 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
             kprintln!(
                 "\n*** DOUBLE FAULT on cpu {cpu} while dumping a crash (vector {vector}) ***"
             );
+            // The dump never got as far as the LED: show the fault that stopped it.
+            #[cfg(feature = "raspi")]
+            if crate::platform::RASPI {
+                crate::rpi::led::note_exception(frame.esr, frame.elr, frame.far);
+                crate::rpi::led::blink_forever();
+            }
         } else {
             // Let the first dump finish (bounded: it may itself be stuck).
             let t0 = crate::timer::now_ns();
@@ -422,6 +430,21 @@ pub fn crash(frame: &TrapFrame, vector: usize, what: &str) -> ! {
     }
     kprintln!("  x30 = {:#018x}  (lr)", frame.x[30]);
     kprintln!("*** halted ***");
+    if crate::platform::RASPI {
+        // No serial cable on the Pi: the same dump on the screens, then the LED cycle (the code line
+        // is logged first so the crash screens end with it).
+        #[cfg(feature = "raspi")]
+        {
+            if vector % 4 == 0 || vector % 4 == 3 {
+                crate::rpi::led::note_exception(frame.esr, frame.elr, frame.far);
+            } else {
+                // An IRQ or FIQ vector that should not be taken: no ESR to speak of.
+                crate::rpi::led::note_exception(0x3d << 26, frame.elr, 0);
+            }
+            crate::crashscreen::show();
+            crate::rpi::led::blink_forever();
+        }
+    }
     halt();
 }
 

@@ -1732,3 +1732,215 @@ mod ledcode_tests {
         assert!(!ledcode::enabled(crate::cmdline::value(line, "ledcodes")));
     }
 }
+
+// ---- the ACT LED crash cycle --------------------------------------------------------------
+
+mod ledcrash_tests {
+    use crate::ledcode::Interval;
+    use crate::ledcrash::*;
+    use std::vec::Vec;
+
+    fn cycle(r: CrashRecord) -> Vec<Interval> {
+        CrashCycle::new(r).collect()
+    }
+
+    /// xorshift64: the same numbers every run.
+    fn rng(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// The worked example in docs/raspberry-pi.md and scripts/led-decode-test.py.
+    fn example() -> CrashRecord {
+        CrashRecord::new(4, 0o45, 0x9a3c4, 0x2000a0)
+    }
+
+    #[test]
+    fn a_cycle_starts_with_two_seconds_of_fast_flashing() {
+        let v = cycle(example());
+        for (i, iv) in v[..20].iter().enumerate() {
+            assert_eq!(iv.on, i % 2 == 0);
+            assert!(iv.ms == 100 || (i == 19 && iv.ms == GROUP_GAP_MS));
+        }
+        let fast: u32 = v[..19].iter().map(|i| i.ms).sum();
+        assert_eq!(fast, 1900);
+        // Nothing else in the cycle is a pulse as short as the alarm's.
+        assert!(v[20..].iter().filter(|i| i.on).all(|i| i.ms >= PULSE_MS));
+    }
+
+    #[test]
+    fn digits_are_pulses_and_zero_is_one_long_pulse() {
+        let r = CrashRecord::new(0, 0, 0, 0);
+        let v = cycle(r);
+        // 23 zeros: 23 long pulses after the alarm.
+        assert_eq!(v[20..].iter().filter(|i| i.on).count(), DIGITS);
+        assert!(v[20..].iter().filter(|i| i.on).all(|i| i.ms == ZERO_MS));
+        let r = CrashRecord::new(3, 0o12, 0, 0);
+        let v = cycle(r);
+        // stage 3: three short pulses with 250 ms between and 2.5 s after.
+        assert_eq!(
+            &v[20..26],
+            &[
+                Interval { on: true, ms: 150 },
+                Interval { on: false, ms: 250 },
+                Interval { on: true, ms: 150 },
+                Interval { on: false, ms: 250 },
+                Interval { on: true, ms: 150 },
+                Interval { on: false, ms: GROUP_GAP_MS },
+            ]
+        );
+        // ec 0o12: one pulse, 0.7 s, two pulses, group gap.
+        assert_eq!(v[26], Interval { on: true, ms: 150 });
+        assert_eq!(v[27], Interval { on: false, ms: DIGIT_GAP_MS });
+        assert_eq!(v[31], Interval { on: false, ms: GROUP_GAP_MS });
+    }
+
+    #[test]
+    fn digits_read_back_in_order() {
+        let r = example();
+        let d: Vec<u8> = (0..DIGITS).map(|i| r.digit(i)).collect();
+        assert_eq!(d[0], 4);
+        assert_eq!(&d[1..3], &[4, 5]);
+        assert_eq!(&d[3..15], &[0, 0, 0, 0, 0, 2, 3, 2, 1, 7, 0, 4][..]);
+        assert_eq!(&d[15..23], &[1, 0, 0, 0, 0, 2, 4, 0][..]);
+    }
+
+    #[test]
+    fn round_trip_many_values() {
+        let mut s = 0x1234_5678_9abc_def1u64;
+        let mut cases = std::vec![
+            CrashRecord::new(0, 0, 0, 0),
+            CrashRecord::new(8, 0o77, u64::MAX, u64::MAX),
+            CrashRecord::new(255, 255, u64::MAX, u64::MAX),
+            CrashRecord::new(7, 0o70, 0o7777_7777_7777, 0o7777_7777),
+            example(),
+        ];
+        for _ in 0..3000 {
+            let a = rng(&mut s);
+            let b = rng(&mut s);
+            cases.push(CrashRecord::new((a % 9) as u8, (a >> 8) as u8, b, a >> 20));
+        }
+        for r in cases {
+            let v = cycle(r);
+            assert_eq!(decode(v.iter().copied()), Some(r), "{r}");
+            // A cycle is bounded: under 90 s, and no u32 overflow.
+            let total: u64 = v.iter().map(|i| u64::from(i.ms)).sum();
+            assert_eq!(total, u64::from(CrashCycle::total_ms(r)));
+            assert!(total < 90_000, "{r}: {total} ms");
+            // Alternating levels, and every interval is a visible length.
+            for (i, iv) in v.iter().enumerate() {
+                assert_eq!(iv.on, i % 2 == 0);
+                assert!(iv.ms >= 100);
+            }
+        }
+    }
+
+    #[test]
+    fn the_worst_cycle_is_under_ninety_seconds() {
+        let worst = CrashRecord::new(8, 0o77, u64::MAX, u64::MAX);
+        assert!(CrashCycle::total_ms(worst) < 90_000);
+        // All sevens is the longest digit; stage 8 the longest stage.
+        let sevens = CrashRecord::new(8, 0o77, 0o7777_7777_7777, 0o7777_7777);
+        assert_eq!(CrashCycle::total_ms(worst), CrashCycle::total_ms(sevens));
+        assert_eq!(CrashCycle::total_ms(sevens), 86_750);
+    }
+
+    #[test]
+    fn decoding_works_from_the_middle_of_a_repeat() {
+        // A video that starts in the middle of one cycle and runs into the next.
+        let r = example();
+        let v = cycle(r);
+        let mut seen: Vec<Interval> = v[37..].to_vec();
+        seen.extend(cycle(r));
+        assert_eq!(decode(seen.iter().copied()), Some(r));
+        // A leading dark and trailing partial cycle are fine too.
+        let mut seen = std::vec![Interval { on: false, ms: 4000 }];
+        seen.extend(cycle(r));
+        seen.extend(&cycle(r)[..50]);
+        assert_eq!(decode(seen.iter().copied()), Some(r));
+    }
+
+    #[test]
+    fn a_phone_video_with_a_frame_of_jitter_still_decodes() {
+        // Timing measured from video is off by up to a frame (33 ms) at each edge.
+        let mut s = 7u64;
+        for _ in 0..500 {
+            let a = rng(&mut s);
+            let r = CrashRecord::new((a % 9) as u8, (a >> 8) as u8, rng(&mut s), rng(&mut s));
+            let v: Vec<Interval> = cycle(r)
+                .iter()
+                .enumerate()
+                .map(|(i, iv)| {
+                    // The edge before an interval moves by -33..=33 and the edge after it by the opposite.
+                    let j = (rng(&mut s) % 34) as i64;
+                    let sign = if i % 2 == 0 { 1 } else { -1 };
+                    Interval { on: iv.on, ms: (i64::from(iv.ms) + sign * j) as u32 }
+                })
+                .collect();
+            assert_eq!(decode(v.iter().copied()), Some(r));
+        }
+    }
+
+    #[test]
+    fn a_truncated_or_noisy_cycle_is_not_decoded() {
+        let v = cycle(example());
+        assert_eq!(decode(v[..v.len() - 2].iter().copied()), None);
+        assert_eq!(decode(v[..30].iter().copied()), None);
+        assert_eq!(decode(Vec::new()), None);
+        // Boot codes (no alarm) are not a crash cycle.
+        let boot: Vec<Interval> = crate::ledcode::sequence(&crate::ledcode::Stage::ALL.map(|s| (s, true))).collect();
+        assert_eq!(decode(boot.iter().copied()), None);
+        // A dropped pulse changes the digit but never panics; garbage never panics.
+        let mut s = 99u64;
+        for _ in 0..500 {
+            let g: Vec<Interval> = (0..200)
+                .map(|i| Interval { on: i % 2 == 0, ms: (rng(&mut s) % 4000) as u32 })
+                .collect();
+            let _ = decode(g.iter().copied());
+        }
+    }
+
+    #[test]
+    fn a_panic_names_its_file_and_line() {
+        let r = CrashRecord::panic(5, "kernel/src/rpi/lcd.rs", 412);
+        assert_eq!(r.ec, EC_PANIC);
+        assert!(r.is_panic());
+        assert_eq!(r.pc, 412);
+        assert_eq!(r.far, file_hash24("kernel/src/rpi/lcd.rs"));
+        assert_ne!(file_hash24("a.rs"), file_hash24("b.rs"));
+        assert_eq!(decode(cycle(r).iter().copied()), Some(r));
+    }
+
+    #[test]
+    fn fields_are_cut_to_their_size() {
+        let r = CrashRecord::exception(9, 0xffff_ffff_ffff_ffff, 0xffff_0000_0008_1234, 0xdead_beef_1234_5678);
+        assert_eq!(r.stage, 8);
+        assert_eq!(r.ec, 0o77);
+        assert_eq!(r.pc, 0x0_0008_1234);
+        assert_eq!(r.kernel_pc(), 0xffff_0000_0008_1234);
+        assert_eq!(r.far, 0x34_5678);
+        let esr = 0x25u64 << 26 | 1 << 25 | 0x45;
+        assert_eq!(CrashRecord::exception(1, esr, 0, 0).ec, 0o45);
+    }
+
+    #[test]
+    fn display_is_what_the_decoder_takes() {
+        assert_eq!(
+            std::format!("{}", example()),
+            "stage=4 ec=0o45 pc=0o000002321704 far=0o10000240"
+        );
+    }
+
+    #[test]
+    fn golden_cycle_checksum() {
+        // scripts/led-decode-test.py computes the same number from its own encoder.
+        let v = cycle(example());
+        let sum = v.iter().enumerate().fold(0u64, |a, (i, iv)| (a * 31 + (i as u64 + 1) * u64::from(iv.ms) + u64::from(iv.on)) % 1_000_000_007);
+        assert_eq!(v.len(), GOLDEN_LEN);
+        assert_eq!(sum, GOLDEN_SUM);
+    }
+    const GOLDEN_LEN: usize = 120;
+    const GOLDEN_SUM: u64 = 925_751_336;
+}

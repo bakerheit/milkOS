@@ -1023,3 +1023,159 @@ fn garbage_never_panics_the_model_or_the_driver() {
     }
     let _: String = String::new();
 }
+
+// ---- milk.lcd=probe ------------------------------------------------------------------------------
+
+mod probe {
+    use super::*;
+    use crate::lcdprobe::{self, BARS, ProbeCard, ROTATIONS, SETUPS, WHITE};
+
+    fn card(i: usize, rot: Rotation) -> (Config, ProbeCard) {
+        let cfg = SETUPS[i].config(rot);
+        (cfg, ProbeCard::new(i + 1, SETUPS.len(), &SETUPS[i], rot, cfg.width(), cfg.height()))
+    }
+
+    /// What the card looks like once the controller has taken the colours.
+    fn expected(cfg: &Config, c: &ProbeCard) -> Vec<u32> {
+        let (w, h) = (cfg.width(), cfg.height());
+        let mut v = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                v.push(quantize(cfg.controller, c.pixel(x, y)));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn every_setup_draws_its_card_through_its_own_init_stream() {
+        for (i, s) in SETUPS.iter().enumerate() {
+            for rot in ROTATIONS {
+                let (cfg, mut c) = card(i, rot);
+                let mut p = up(&cfg);
+                assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c), "{i} {rot:?}");
+                assert!(p.errors.is_empty(), "{:?}", p.errors);
+                assert_eq!(p.kind, s.controller);
+                assert_eq!(p.visible_for(&cfg), expected(&cfg, &c), "setup {i} {rot:?}");
+                // The 16-bit framing is the ILI9486's only.
+                let first_cmd = p.log.iter().find(|(d, _)| !*d).unwrap();
+                assert_eq!(first_cmd.1.len(), if s.controller.word16() { 2 } else { 1 });
+            }
+        }
+    }
+
+    #[test]
+    fn the_card_has_a_label_options_bars_and_a_border() {
+        for i in 0..SETUPS.len() {
+            let (cfg, c) = card(i, Rotation::Deg90);
+            let (w, h) = (cfg.width(), cfg.height());
+            assert_eq!((w, h), (480, 320));
+            // Border all round.
+            for x in [0, 3, w - 1, w - 4] {
+                assert_eq!(c.pixel(x, h / 2), WHITE);
+            }
+            for y in [0, 3, h - 1, h - 4] {
+                assert_eq!(c.pixel(w / 2, y), WHITE);
+            }
+            // Bars: the five colours, left to right, on a row in the middle of them.
+            let y = (c.bars_top() + h - 12) / 2;
+            let xs: Vec<u32> = (0..BARS.len()).map(|k| c.pixel(12 + (w - 24) * (2 * k + 1) / (2 * BARS.len()), y)).collect();
+            assert_eq!(xs, BARS);
+            // Text: lit pixels in the name's rows (big), in the options' rows, none above the bars outside text.
+            let lit = |y0: usize, y1: usize| (y0..y1).map(|y| (0..w).filter(|&x| c.pixel(x, y) == WHITE).count()).sum::<usize>();
+            assert!(lit(12, 12 + 42) > 600, "name too faint: {}", lit(12, 54));
+            assert!(lit(60, c.bars_top() - 4) > 300, "options too faint");
+            // The name is wide but fits.
+            let name_right = (0..w).rev().find(|&x| (12..54).any(|y| x < w - 5 && c.pixel(x, y) == WHITE)).unwrap();
+            assert!(name_right < w - 12, "name runs into the border");
+        }
+    }
+
+    #[test]
+    fn the_options_shown_are_the_ones_that_set_the_same_driver_up() {
+        for s in SETUPS {
+            for rot in ROTATIONS {
+                let (a, b) = lcdprobe::options(&s, rot);
+                let line = std::format!("{} {}", a.as_str(), b.as_str());
+                let value = |name| cmdline::value(line.as_bytes(), name);
+                assert_eq!(Controller::parse(value("lcd").unwrap()), Some(s.controller), "{line}");
+                assert_eq!(Rotation::parse(value("lcd_rot").unwrap()), Some(rot));
+                match value("lcd_hz") {
+                    None => assert!(!s.is_slow(), "{line}"),
+                    Some(v) => assert_eq!(cmdline::parse_num(v), Some(s.hz as i64)),
+                }
+                // Lines fit the screen at the small scale (12 px per character) with margins.
+                assert!(a.as_bytes().len() * 12 + 24 <= 480 && b.as_bytes().len() * 12 + 24 <= 480, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn setups_are_distinct_and_labels_are_readable() {
+        for (i, s) in SETUPS.iter().enumerate() {
+            for t in &SETUPS[i + 1..] {
+                assert_ne!(s, t);
+            }
+            let l = lcdprobe::label(s);
+            assert!(l.as_bytes().len() <= 12, "{}", l.as_str());
+            assert!(l.as_bytes().iter().all(|&c| c == b' ' || c.is_ascii_alphanumeric() && lcdprobe::glyph(c) != lcdprobe::glyph(0)));
+            let (a, b) = lcdprobe::options(s, Rotation::Deg90);
+            for c in a.as_bytes().iter().chain(b.as_bytes()) {
+                // Every character of the options has its own glyph (not the box).
+                let g = lcdprobe::glyph(*c);
+                assert!(*c == b' ' || g != lcdprobe::glyph(0x01), "no glyph for {}", *c as char);
+            }
+        }
+        let labels: Vec<String> = SETUPS.iter().map(|s| String::from(lcdprobe::label(s).as_str())).collect();
+        let mut sorted = labels.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), labels.len());
+    }
+
+    #[test]
+    fn rotating_on_a_set_up_needs_only_the_memory_access_byte() {
+        let (cfg, mut c) = card(1, Rotation::Deg90);
+        let mut p = up(&cfg);
+        assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
+        let resets = p.resets.len();
+        let (cfg2, mut c2) = card(1, Rotation::Deg270);
+        assert!(lcd::command(&cfg2, &mut p, lcd::MADCTL, &[cfg2.madctl()]));
+        assert!(lcd::draw_rect(&cfg2, &mut p, full(&cfg2), &mut c2));
+        assert_eq!(p.resets.len(), resets, "no new reset");
+        assert!(p.errors.is_empty());
+        assert_eq!(p.visible_for(&cfg2), expected(&cfg2, &c2));
+        assert_ne!(expected(&cfg, &c), expected(&cfg2, &c2));
+    }
+
+    #[test]
+    fn the_whole_probe_is_bounded() {
+        // Per set-up: init waits (simulated), each card held HOLD_MS, each card's bytes on the wire at the set-up's clock.
+        let mut total_ms = 0u64;
+        for (i, s) in SETUPS.iter().enumerate() {
+            let (cfg, mut c) = card(i, Rotation::Deg90);
+            let mut p = up(&cfg);
+            let init_ms = u64::from(p.waited_ms);
+            let before: usize = p.log.iter().map(|(_, b)| b.len()).sum();
+            assert!(lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
+            let bytes: usize = p.log.iter().map(|(_, b)| b.len()).sum::<usize>() - before;
+            let hz = if s.hz == 0 { 16_000_000u64 } else { u64::from(s.hz) };
+            let wire_ms = bytes as u64 * 8 * 1000 / hz;
+            total_ms += init_ms + ROTATIONS.len() as u64 * (u64::from(lcdprobe::HOLD_MS) + wire_ms);
+        }
+        total_ms *= u64::from(lcdprobe::ROUNDS);
+        assert!(total_ms < 90_000, "{total_ms} ms");
+        assert!(total_ms > 30_000, "{total_ms} ms");
+    }
+
+    #[test]
+    fn a_failing_bus_gives_up_without_a_panic() {
+        let (cfg, mut c) = card(0, Rotation::Deg90);
+        let mut p = SimPanel::new(cfg.controller);
+        p.fail_at = Some(3);
+        assert!(!lcd::init(&cfg, &mut p));
+        let mut p = up(&cfg);
+        p.fail_at = Some(p.log.len() + 4);
+        assert!(!lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut c));
+    }
+}

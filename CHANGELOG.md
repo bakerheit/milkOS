@@ -3,6 +3,19 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- A crash on a board with nothing attached is now readable from the ACT LED: instead of fast flashing forever, the LED repeats a cycle
+  (ten fast flashes, then counted octal digits, 0 = one long pulse): the boot stage reached, the exception class (or a marker for a Rust
+  panic, 77), the faulting PC (12 digits) and the faulting address (8 digits); for a panic the PC group is the source line and the
+  address group a hash of the file. The same values are logged in plain hex (`led: crash code ...`) before the crash screens are drawn.
+  Exceptions on the Pi now draw the crash screens and run the cycle too (before, only panics and stack overflows did). One cycle
+  takes under 90 s. `scripts/led-decode.py` turns the typed digits (or a phone video's measured pulses) into the values, and with the
+  kernel ELF into the function and source line; its tests are `led-decode-test`, the pattern's are in `rpikit::ledcrash` (host
+  tests: round trips with jitter), and `pi-qemu-test` boot 5 decodes the cycle from the GPIO pin while the kernel crashes.
+- `milk.lcd=probe`: for a 3.5-inch kit whose controller is unknown (the kits cannot be read back), the kernel shows six candidate set-ups
+  (ILI9486, ILI9488, ST7796, each at the normal and a slow SPI clock) one after another, each in two rotations, with a full-screen card
+  (the set-up's name in big letters, the options that select it, red/green/blue/white/black bars, a border) so the person who sees a
+  readable card knows what to put in cmdline.txt. About 80 s, then the boot goes on with no panel in use. Host-tested against the panel
+  model (`rpikit::lcdprobe`); `pi-qemu-test` boot 14 checks that it runs and ends.
 - The green ACT LED is now a boot progress readout for a board with no screen and no serial cable: a 1 s start
   marker once memory is up, then N pulses per milestone (memory, mailbox, framebuffer, interrupts, SD card,
   scheduler and CPUs, userspace), solid on when the desktop is up, fast flashing after a crash; a milestone

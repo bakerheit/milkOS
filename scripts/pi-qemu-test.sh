@@ -19,13 +19,13 @@
 #   The ACT LED codes (docs/raspberry-pi.md): qemu's raspi4b does model the GPIO block (GPFSEL4 and the level register
 #           GPLEV1 read back what the kernel wrote), so the pin is sampled while booting: boot 1 sees it high, then dark
 #           (the start marker and the codes), then high again (solid on); boot 3 (`milk.ledcodes=0`) never sees it dark
-#           once it is on; boot 5's crash sees it flash. All boots check the `led: stage N name` lines in order.
+#           once it is on; boot 5's crash is decoded from the pin (the whole crash cycle, scripts/led_sample.py + led-decode.py) and compared with the logged code. All boots check the `led: stage N name` lines in order.
 #           (raspi4b has exactly 2 GiB, so a layout above 4 GiB cannot run here: the allocator and
 #           page tables above 4 GiB are tested on qemu virt, scripts/highmem-test.sh.)
 #   boots 8 to 12: the 3.5-inch SPI display (`milk.lcd=...`), against qemu's SPI0 controller with nothing wired to it:
 #           8: panel mirroring an HDMI desktop; 9: the panel as the only screen (`milk.hdmi=off`, 1:1 pan view,
 #           other controller / rotation / pins / polled touch); 10: a crash with the panel on (no stall, HDMI crash
-#           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller.
+#           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14: `milk.lcd=probe` (every candidate set-up draws its card, then the boot goes on).
 #           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
 #           byte stream; the real board is the test of the wiring).
 # Offline, private images in a fresh /tmp folder, the qemu started here killed by PID.
@@ -76,6 +76,12 @@ boot() {
     -serial "unix:$SOCK,server=on,wait=on" -qmp "unix:$QMP,server,nowait" \
     -drive "file=$T/sd.img,if=sd,format=raw" >/dev/null 2>&1 &
   QPID=$!
+  LS=""
+  if [ "${LEDCYCLE:-}" = 1 ]; then
+    # Decode the crash cycle from the pin while the boot runs (stops at the first complete cycle, or after 200 s).
+    python3 -I scripts/led_sample.py "$QMP" 200 "$T/ledcycle$n" > "$T/ledrec$n" &
+    LS=$!
+  fi
   python3 scripts/serial_drive.py "$SOCK" "$LOG" "$@" "done:$T/done$n" &
   D=$!
   SP=""
@@ -204,15 +210,24 @@ for stage in early late; do
   DTB_ARGS=(-dtb "$T/crash.dtb")
   n=$([ $stage = early ] && echo 4 || echo 5)
   # No prompt will come: wait for the panic itself, then the screen.
-  boot $n "wait@300:KERNEL PANIC"
+  LEDCYCLE=$([ $stage = late ] && echo 1 || echo 0) boot $n "wait@300:KERNEL PANIC"
+  if [ $stage = late ]; then
+    # The crash cycle (docs/raspberry-pi.md): decoded from the pin by scripts/led_sample.py with the decoder of
+    # scripts/led-decode.py, and compared with the plain-hex values the kernel logs.
+    if wait "$LS" 2>/dev/null; then
+      REC=$(cat "$T/ledrec5")
+      CODE=$(tr -d '\r' < "$LOG" | sed -n -E 's/^led: crash code (stage=[0-9]+ ec=0o[0-7]+ pc=0o[0-7]+ far=0o[0-7]+) .*/\1/p' | head -1)
+      [ -n "$CODE" ] && [ "$REC" = "$CODE" ] && ok "boot 5: the LED crash cycle on the pin decodes to the logged code ($REC)" || bad "boot 5: LED cycle '$REC' != logged '$CODE'"
+      case "$REC" in "stage=8 ec=0o77 "*) ok "boot 5: stage 8 (desktop up), kind 0o77 (panic)";; *) bad "boot 5: wrong stage/kind: $REC";; esac
+      LINE=$(python3 -I scripts/led-decode.py $REC | grep -a 'panicked at' | tr -s ' ')
+      case "$LINE" in *"panicked at kernel/src/selftest.rs:"*) ok "boot 5: the code names the panic's file and line ($LINE)";; *) bad "boot 5: the code does not name selftest.rs: $LINE";; esac
+    else
+      bad "boot 5: no complete LED crash cycle seen on the pin"
+    fi
+  fi
+  # (qemu takes one QMP client at a time: the LED sampler above has let go by now.)
   sleep 2
   python3 scripts/qmp.py "$QMP" screendump "$T/crash-$stage.png" >/dev/null 2>&1 || true
-  if [ $stage = late ]; then
-    # The crash flashes the LED (about 5 Hz): sample the pin for two seconds, it must be seen both high and low.
-    PIN=""
-    for _ in $(seq 25); do PIN="$PIN$(pin_level "$QMP")"; sleep 0.05; done
-    case "$PIN" in *0*1*|*1*0*) ok "boot 5: the LED flashes after the crash ($PIN)";; *) bad "boot 5: the LED does not flash after the crash: $PIN";; esac
-  fi
   stop
   check "^panicked at .*crash-test: a deliberate panic, $stage|crash-test: a deliberate panic, $stage" "boot $n: the deliberate panic ($stage)"
   if [ -s "$T/crash-$stage.png" ]; then
@@ -304,6 +319,20 @@ stop
 check '^lcd: milk.lcd must be ili9486, ili9488 or st7796' "boot 12: an unknown controller is refused"
 has '^lcd: panel initialised' && bad "boot 12: a panel was brought up" || ok "boot 12: no panel"
 check 'wm: desktop up' "boot 12: the desktop comes up anyway"
+
+# ---- boot 14: milk.lcd=probe, for a display whose controller is unknown: every set-up shows its card, then the boot goes on ----
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_rounds=1 milk.lcd_probe_ms=150"
+boot 14 "wait@600:wm: desktop up"
+stop
+check '^lcd: probe: 6 set-ups x 2 rotations, 150 ms each, 1 round\(s\)' "boot 14: probe mode starts"
+N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe 1/1: set-up [1-6] of 6: ')
+[ "$N" = 12 ] && ok "boot 14: all 6 set-ups x 2 rotations drew their card ($N lines)" || bad "boot 14: $N probe cards, expected 12"
+check '^lcd: probe 1/1: set-up 1 of 6: ILI9486 -> milk.lcd=ili9486 milk.lcd_rot=90 \(' "boot 14: the first card names its set-up and options"
+check '^lcd: probe 1/1: set-up 6 of 6: ST7796 SLOW -> milk.lcd=st7796 milk.lcd_rot=270 milk.lcd_hz=4000000 ' "boot 14: the last card (slow clock, rotation 270)"
+check '^lcd: probe finished' "boot 14: probe ends"
+has '^lcd: panel initialised' && bad "boot 14: a panel was left running" || ok "boot 14: no panel after the probe"
+has 'KERNEL PANIC|kernel panic' && bad "boot 14: a kernel panic" || ok "boot 14: no panic"
+check 'wm: desktop up' "boot 14: the boot goes on after the probe"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

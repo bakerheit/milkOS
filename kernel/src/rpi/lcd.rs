@@ -4,8 +4,8 @@
 //! of both chips); this file wires them to SPI0 and the GPIO header, to the boot console and the
 //! crash screen, to the display layer and to the input layer.
 //!
-//! Off unless the command line says `milk.lcd=ili9486` (or `ili9488`, `st7796`): nothing on the
-//! header is touched otherwise. Options, all of them in cmdline.txt (docs/raspberry-pi.md):
+//! Off unless the command line says `milk.lcd=ili9486` (or `ili9488`, `st7796`, or `probe`: show each
+//! candidate set-up in turn, see [`probe`]): nothing on the header is touched otherwise. Options, all of them in cmdline.txt (docs/raspberry-pi.md):
 //!
 //! * `milk.lcd=` controller, `milk.lcd_rot=0|90|180|270` (default 90: landscape 480x320),
 //!   `milk.lcd_bgr=0|1` (default 1), `milk.lcd_inv=0|1`, `milk.lcd_madctl=0x..` (the raw memory
@@ -295,9 +295,12 @@ pub fn init() {
     if matches!(kind, b"" | b"off" | b"none" | b"0") {
         return;
     }
-    let Some(controller) = Controller::parse(kind) else {
+    let probing = kind.eq_ignore_ascii_case(b"probe");
+    let Some(controller) = Controller::parse(kind).or(probing.then_some(Controller::Ili9486)) else {
         STATE.store(FAILED, Ordering::Release);
-        kprintln!("lcd: milk.lcd must be ili9486, ili9488 or st7796 (or off), no display driver");
+        kprintln!(
+            "lcd: milk.lcd must be ili9486, ili9488 or st7796 (or probe, or off), no display driver"
+        );
         return;
     };
     // The divider comes from the highest rate the core clock reaches (it follows the load: a
@@ -313,6 +316,10 @@ pub fn init() {
     };
     spi::set_core_hz(core_hz);
     let s = parse_settings(controller, core_hz);
+    if probing {
+        probe(&s, core_hz);
+        return;
+    }
     let touch_desc = match (s.touch, s.irq) {
         (false, _) => alloc::string::String::from("off"),
         (true, Some(p)) => alloc::format!("XPT2046 on CE1, pen IRQ GPIO{p}"),
@@ -332,28 +339,10 @@ pub fn init() {
         s.rst,
         touch_desc
     );
-    spi::connect_pins();
-    spi::set_function(s.dc, spi::Func::Output);
-    spi::set_function(s.rst, spi::Func::Output);
-    spi::write(s.rst, true);
-    spi::write(s.dc, false);
-    if let Some(p) = s.irq {
-        spi::set_function(p, spi::Func::Input);
-        spi::set_pull(p, spi::Pull::Up);
-    }
-    if let Some(bl) = option("lcd_bl")
-        .and_then(cmdline::parse_num)
-        .and_then(spi::header_pin)
-    {
-        spi::set_function(bl, spi::Func::Output);
-        spi::write(bl, true);
-    }
-    if !spi::present() {
+    if !connect(&s) {
         STATE.store(FAILED, Ordering::Release);
-        kprintln!("lcd: SPI0 does not answer (no such controller here?): no display on the header");
         return;
     }
-    spi::reset();
     let mut bus = HwBus {
         dc: s.dc,
         rst: s.rst,
@@ -374,6 +363,110 @@ pub fn init() {
     kprintln!(
         "lcd: panel initialised (write only: whether it shows anything is for your eyes to say)"
     );
+}
+
+/// The pins and SPI0 for the display. False (and a log line) if the controller is not there.
+fn connect(s: &Settings) -> bool {
+    spi::connect_pins();
+    spi::set_function(s.dc, spi::Func::Output);
+    spi::set_function(s.rst, spi::Func::Output);
+    spi::write(s.rst, true);
+    spi::write(s.dc, false);
+    if let Some(p) = s.irq {
+        spi::set_function(p, spi::Func::Input);
+        spi::set_pull(p, spi::Pull::Up);
+    }
+    if let Some(bl) = option("lcd_bl")
+        .and_then(cmdline::parse_num)
+        .and_then(spi::header_pin)
+    {
+        spi::set_function(bl, spi::Func::Output);
+        spi::write(bl, true);
+    }
+    if !spi::present() {
+        kprintln!("lcd: SPI0 does not answer (no such controller here?): no display on the header");
+        return false;
+    }
+    spi::reset();
+    true
+}
+
+/// `milk.lcd=probe`, for a display whose controller is unknown (the kits cannot be read back): run through
+/// the candidate set-ups of `rpikit::lcdprobe`, each drawing a card (its name in big letters, the options
+/// that select it, colour bars, a border) for a few seconds, in two rotations; the whole list `ROUNDS`
+/// times (`milk.lcd_probe_rounds=`, default 2); then the boot goes on with no panel in use (the person
+/// puts the readable card's options in cmdline.txt). Pins, `milk.lcd_hz` and the backlight option are the
+/// ones of the normal driver; `milk.lcd_probe_ms=` is how long each card stays (default 2500).
+/// Bounded: every wait is, and a set-up whose transfers fail is skipped. About 80 s with the defaults.
+fn probe(base: &Settings, core_hz: u32) {
+    use rpikit::lcdprobe as lp;
+    let rounds = option("lcd_probe_rounds")
+        .and_then(cmdline::parse_num)
+        .map_or(lp::ROUNDS, |v| v.clamp(1, 10) as u32);
+    let hold = option("lcd_probe_ms")
+        .and_then(cmdline::parse_num)
+        .map_or(lp::HOLD_MS, |v| v.clamp(50, 20_000) as u32);
+    kprintln!(
+        "lcd: probe: {} set-ups x {} rotations, {} ms each, {} round(s) (DC=GPIO{} RST=GPIO{}): look for a readable card",
+        lp::SETUPS.len(),
+        lp::ROTATIONS.len(),
+        hold,
+        rounds,
+        base.dc,
+        base.rst
+    );
+    if !connect(base) {
+        return;
+    }
+    let default_hz = base.cdiv;
+    for round in 1..=rounds {
+        for (i, setup) in lp::SETUPS.iter().enumerate() {
+            let cdiv = if setup.hz == 0 {
+                default_hz
+            } else {
+                spi::divider_for(core_hz, setup.hz)
+            };
+            let mut bus = HwBus {
+                dc: base.dc,
+                rst: base.rst,
+                cdiv,
+            };
+            let mut cfg = setup.config(lp::ROTATIONS[0]);
+            spi::reset();
+            if !pk::init(&cfg, &mut bus) {
+                kprintln!("lcd: probe: set-up {} ({}): SPI transfers timed out, skipped", i + 1, lp::label(setup).as_str());
+                continue;
+            }
+            for (k, rot) in lp::ROTATIONS.iter().enumerate() {
+                cfg.rotation = *rot;
+                // The second rotation is only a new memory access control byte, no new init.
+                if k > 0 && !pk::command(&cfg, &mut bus, pk::MADCTL, &[cfg.madctl()]) {
+                    break;
+                }
+                let (a, b) = lp::options(setup, *rot);
+                kprintln!(
+                    "lcd: probe {round}/{rounds}: set-up {} of {}: {} -> {} {} ({} kHz)",
+                    i + 1,
+                    lp::SETUPS.len(),
+                    lp::label(setup).as_str(),
+                    a.as_str(),
+                    b.as_str(),
+                    core_hz / cdiv / 1000
+                );
+                let mut card = lp::ProbeCard::new(i + 1, lp::SETUPS.len(), setup, *rot, cfg.width(), cfg.height());
+                let full = Rect::new(0, 0, cfg.width(), cfg.height());
+                if !pk::draw_rect(&cfg, &mut bus, full, &mut card) {
+                    kprintln!("lcd: probe: SPI transfers timed out while drawing, skipped");
+                    break;
+                }
+                let t = Timeout::ms(u64::from(hold));
+                while !t.expired() {
+                    core::hint::spin_loop();
+                }
+            }
+        }
+    }
+    kprintln!("lcd: probe finished: no display driver is running; put the options of the card you could read in cmdline.txt");
 }
 
 /// The panel was brought up and is in use.

@@ -136,6 +136,7 @@ TESTS=(
   "milkfs-unit|s|300|par|scripts/milkfs-test.sh"
   "milkweb-unit|s|300|par|scripts/milkweb-test.sh"
   "rpikit-unit|s|300|par|scripts/rpikit-test.sh"
+  "led-decode-test|s|120|par|scripts/led-decode-test.sh"
   "crypto-unit|s|300|par|scripts/crypto-test.sh"
   "tls-unit|s|300|par|scripts/tls-test.sh"
   "tls-interop|q|600|par|scripts/tls-interop.sh"

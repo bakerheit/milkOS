@@ -225,7 +225,7 @@ not milkOS's.
 | 6 pulses | stage 6, **scheduler**: the scheduler runs and the other three CPUs are started |
 | 7 pulses | stage 7, **userspace**: the first user process (`init`) was started |
 | **solid on** | the desktop is up (or there is no framebuffer and so no desktop to wait for): **running fine** |
-| **fast steady flashing**, 5 times a second, forever | **crashed** (a panic or an exception), at any point |
+| **fast flashing** (10 flashes, 2 s), then dark, then groups of counted pulses, over and over | **crashed** (a panic or an exception), at any point; the groups say where: see "After a crash" below |
 
 A good boot is: marker, 1, 2, 3, 4, 5, 6, 7 pulses (about 9 s in all), then solid on. The kernel prints
 the same thing as `led: stage N name` lines in the boot log, so the log and the LED always agree.
@@ -239,9 +239,66 @@ until the next one: **if it goes dark after N pulses and stays dark, the kernel 
 (inside the next step). Solid on from the very start with *no* marker means `kmain` started and then hung
 before memory was up.
 
+### After a crash: the crash cycle
+
+A panic or an exception no longer just flashes: the LED repeats a **cycle of about 45 to 75 s (87 at most)** that says where the
+kernel stopped, with nothing else attached. It is written to be counted by eye (or filmed with a phone and measured later).
+The screens (HDMI and the SPI panel) are drawn first, as before; the cycle starts after them. In order:
+
+| part | looks like | carries |
+|---|---|---|
+| **alarm** | 10 fast flashes, 0.1 s on / 0.1 s off (2 s), then 2.5 s dark | "it crashed". Every cycle starts with it |
+| **group 1: stage** | 1 digit | the boot stage reached: 0 = before stage 1, 1 to 7 as in the table above, 8 = the desktop was up |
+| **group 2: kind** | 2 digits | the exception class (ESR_EL1 EC, 6 bits), or a marker: **77 = Rust panic**, 76 = kernel stack overflow, 75 = an interrupt vector that should never be taken (or nothing recorded). Classes you may see: 45 = data abort in the kernel, 44 = data abort in a user program, 41 = instruction abort in the kernel (jumped to a bad address), 40 = in a user program, 25 = SVC, 74 = BRK, 00 = unknown reason |
+| **group 3: PC** | 12 digits | the low 36 bits of the faulting address (ELR_EL1). For a panic: the **source line** of the panic |
+| **group 4: FAR** | 8 digits | the low 24 bits of the address that was touched (FAR_EL1), for aborts and alignment faults (zero otherwise). For a panic: a hash of the **source file name** |
+
+**Counting.** Every digit is **octal: 0 to 7**. A digit *d* from 1 to 7 is *d* short pulses (0.15 s on, 0.25 s dark between
+pulses). **A 0 is one long pulse** (0.6 s on). After a digit the LED is dark 0.7 s; after a group (1, 2, 12 and 8 digits)
+2.5 s, so groups are easy to tell apart. A whole cycle is 23 digits and takes at
+most 87 s (all sevens); typically 45 to 75 s. Then it starts again with the alarm, so a missed digit costs one more lap.
+The stage digit can be 8 (eight short pulses); no other digit is above 7.
+
+**Worked example.** A data abort in the kernel (class 45), at stage 4, program counter `0xffff00000009a3c4` touching the
+address `0x2000a0`: the LED shows the alarm, then
+
+| group | digits | pulses you count |
+|---|---|---|
+| stage | `4` | 4 short pulses |
+| kind | `4` `5` | 4 pulses, then 5 pulses |
+| PC | `0 0 0 0 0 2 3 2 1 7 0 4` | five long pulses, 2, 3, 2, 1, 7 pulses, a long pulse, 4 pulses |
+| FAR | `1 0 0 0 0 2 4 0` | 1 pulse, four long pulses, 2 pulses, 4 pulses, a long pulse |
+
+The same numbers are in the log (and so on the crash screens) as one line:
+`led: crash code stage=4 ec=0o45 pc=0o000002321704 far=0o10000240`, followed by `led: stage 4 ec 0x25 (data abort, same EL) pc 0xffff00000009a3c4 far 0x2000a0`.
+
+**What to do with the numbers.** Write the digits down group by group (the long pulses are 0s) and send them to whoever builds the
+kernel: `4 45 000002321704 10000240`. To read them yourself, on the Mac, in the repository:
+
+```
+python3 -I scripts/led-decode.py --elf target/pi/aarch64-unknown-none-softfloat/release/milkos-kernel 4 45 000002321704 10000240
+```
+
+It prints the stage name, the exception class in words, the full address (`0xffff000000000000` + the 12 digits: the kernel is
+linked at that base plus its load address, `linker.ld`), and with `--elf` the **function and source line** at that address
+(`llvm-symbolizer` or `addr2line`, whichever is installed, else `nm`). The ELF must come from the **same build** as the
+`kernel8.img` on the card (`RELEASE=1 scripts/pi-build.sh` leaves it in `target/pi/aarch64-unknown-none-softfloat/release/`).
+For a **panic** (kind 77) the PC group is the line and the FAR group names the file: the decoder looks the hash up in the
+source tree and prints `panicked at kernel/src/foo.rs:123`. A fault in a user program (kind 40 or 44) shows the user address in
+the PC group and no kernel symbol. The input may be typed as `stage=4 ec=0o45 pc=0o... far=0o...`, as the 23 digits with any
+separators, or `4-45-000002321704-10000240`.
+
+**From a phone video** (if counting live is too hard): film the LED for one whole cycle, step through the frames, and write
+down when it turns on and off (frame number x 1000 / frame rate, in ms), one number per line, alternating on, off, on, off...
+(`on 150` / `off 250` lines work too); then `python3 -I scripts/led-decode.py --pulses times.txt`. The rules tolerate a frame of
+error at 30 fps; it finds the first complete cycle, wherever the video starts.
+
+**If the LED does not flash at all** after a crash, the crash came before the kernel's exception vectors were set up, or the
+screen code itself hung (it runs first); the log line and the stage codes you saw before it are then all there is.
+
 **Telling it from the firmware.** Before it starts the kernel the Pi 4's bootloader uses the same LED:
 a *slow* repeating group of N flashes with a long pause between groups is a bootloader error, and none of our
-patterns look like that (ours start with the 1 s marker and are not repeated). Three well-known ones on the Pi 4:
+boot patterns look like that (ours start with the 1 s marker and are not repeated; the crash cycle starts with ten fast flashes). Three well-known ones on the Pi 4:
 **4 flashes** = `start*.elf` not found or not supported (wrong firmware files for the board), **7 flashes**
 = the kernel image was not found (`kernel8.img` / `kernel=` in `config.txt`), **8 flashes** = SDRAM not
 recognised. For all the others see the Raspberry Pi bootloader documentation (the "LED warning flash codes").
@@ -251,7 +308,7 @@ the firmware loaded milkOS and the kernel runs; groups of N flashes that repeat 
 firmware stopped before our kernel.
 
 **Turning it off.** `milk.ledcodes=0` in `cmdline.txt` skips the marker and the bursts (the LED then only turns on at
-`kmain` and goes on flashing after a crash). The codes busy-wait on the CPU's generic counter, so they need no
+`kmain`; the crash cycle is not affected). The codes busy-wait on the CPU's generic counter, so they need no
 allocator, timer interrupt or scheduler; the pattern language itself is `rpikit::ledcode` (host-tested).
 
 ## 3.5-inch SPI display
@@ -282,6 +339,8 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 | option | default | does |
 |---|---|---|
 | `milk.lcd=` | off | `ili9486` (the Waveshare-35A style kit: 16-bit words through shift registers), `ili9488` (18-bit pixels over plain SPI), `st7796` (RGB565 over plain SPI); `off` |
+| `milk.lcd=probe` | | for a kit whose controller nobody knows: shows each candidate set-up in turn, see "Finding the controller" below |
+| `milk.lcd_probe_rounds=` `milk.lcd_probe_ms=` | 2, 2500 | probe mode: how many times the list is shown, and how long each card stays (ms) |
 | `milk.lcd_rot=` | `90` | `0` portrait 320x480, `90` landscape 480x320 (the kit's usual use), `180`, `270` |
 | `milk.lcd_bgr=` | `1` | the glass's colour order (red and blue swapped on screen: try `0`) |
 | `milk.lcd_inv=` | per controller | display inversion (colours inverted: try the other value; `st7796` modules usually need `1`) |
@@ -292,6 +351,22 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 | `milk.touch_cal=a,b,c,d,e,f` | from `lcd_rot` | calibration: `x = ((a*rx + b*ry) >> 16) + c`, `y = ((d*rx + e*ry) >> 16) + f` from the chip's raw 0..4095 readings (16.16 fixed point, offsets in pixels); `ask` runs the four-cross helper |
 | `milk.lcd_view=` | `fit` | the desktop on the small screen: `fit` shows all of it scaled down (a 1024x768 desktop becomes 426x320, with bars), `pan` shows 480x320 of it 1:1 and moves the view when a finger is held within 24 px of the edge |
 | `milk.hdmi=off` | auto | do not use the firmware's HDMI framebuffer: the desktop draws in RAM and the panel is the screen |
+
+**Finding the controller (`milk.lcd=probe`).** These kits are write-only over SPI: nothing can be read back, so the kernel cannot
+tell which chip is on the glass. If you do not know (or `milk.lcd=ili9486` only makes the screen flicker blue or stay white), put
+`milk.lcd=probe` in `cmdline.txt` instead and boot. Before anything else the kernel runs through six candidate set-ups, one after another,
+and **draws a full-screen card on each**: the set-up's name in big letters (`ILI9486`, `ILI9488`, `ST7796`, and the same three with
+`SLOW`, which use a 4 MHz clock for wiring that cannot keep up with 16), under it the options that select it
+(`milk.lcd=ili9488` / `milk.lcd_rot=90`, shown in capitals: type them in lower case), `SETUP n OF 6`, then the **colour bars** red, green,
+blue, white, black, and a white border. Each set-up is shown for about 6 s in two landscape rotations (90, then 270), and the list is shown twice
+(about 80 s in all; `milk.lcd_probe_rounds=` and `milk.lcd_probe_ms=` change that). Watch the screen: **the set-up whose card you can read is the one
+to use.** Put its options in `cmdline.txt` in place of `milk.lcd=probe`. Then, from the bars: red, green, blue in the wrong order (blue first):
+add `milk.lcd_bgr=0`; white looks black and black looks white: add `milk.lcd_inv=1` (or `0` if it is set); the text upside down or mirrored: the other rotation
+(`milk.lcd_rot=270`, or `180`, `0`). If **no card is ever readable**, the pins or the wiring are the next suspects (`milk.lcd_dc=`, `milk.lcd_rst=`; the
+log, on the ACT LED stages, still says the boot went on). The probe uses the pins and `milk.lcd_hz` of the normal driver (the slow set-ups force 4 MHz); a set-up
+whose transfers time out is skipped. When the list is done the boot goes on **with no panel in use** (the kernel logs `lcd: probe finished`), because
+nothing says which set-up was the right one. Controllers it does not try: ILI9341/ILI9343 (their memory is 240x320, a different size from this driver's
+480x320), ILI9481 and others; the label on the glass's edge ("9343-c2" and the like) is the glass or batch, often not the controller.
 
 **What it shows**
 
@@ -354,7 +429,7 @@ the pixel data is plain bytes: `rpikit::lcd` does that framing, the model in the
 
 **On the real board, in this order**: (1) the ACT LED (on while the kernel runs); (2) the panel: the boot log should appear a
 second or two after power-on (a blank white or black panel with the backlight lit means it is not initialised: check the
-wiring, then `milk.lcd=` for the controller, then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
+wiring, then `milk.lcd=` for the controller (`milk.lcd=probe` shows every candidate), then `milk.lcd_hz=8000000`; garbled or mirrored: `milk.lcd_rot=`, `milk.lcd_madctl=`;
 red and blue swapped: `milk.lcd_bgr=0`; inverted colours: `milk.lcd_inv=`); (3) touch: after the desktop appears, a finger should move
 the pointer; if it lands in the wrong place or mirrored, add `milk.touch_cal=ask`, touch the crosses and copy the printed line.
 
@@ -392,7 +467,7 @@ mounts it from the emulated card, writes a file, takes a snapshot, reboots and f
 bounded waits, mixed into the CSPRNG's pool at seed time like virtio-rng. If the tree has no such node it is skipped, and
 the "jitter only" warning appears.
 
-**LED** (`rpi/led.rs`, patterns in `rpikit::ledcode`): GPIO 42 as an output, on at the start of `kmain`, then the progress codes (see "Reading the ACT LED"); fast flashing after a crash.
+**LED** (`rpi/led.rs`, patterns in `rpikit::ledcode`): GPIO 42 as an output, on at the start of `kmain`, then the progress codes (see "Reading the ACT LED"); the crash cycle after a crash (see "After a crash").
 
 **PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,usb}`). The four USB-A ports of a Pi 4 are root ports of a VIA VL805
 xHCI controller on the BCM2711's PCIe x1 link. Bring-up (`rpi/pcie.rs`, **untested**): reset the bridge, SerDes out of

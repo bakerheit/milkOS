@@ -8,7 +8,7 @@ an HDMI screen, and, honestly, which parts have only ever run on an emulator or 
 
 Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1), `kernel/src/rpi/*`
 (the Pi's drivers), `kernel/src/{pci,dma,timeout,crashscreen}.rs`, `kernel/src/usb/*`,
-`kernel/src/net/nic.rs`, the host-tested crate `rpikit/`, `scripts/pi-*.sh`, `scripts/{usb,highmem}-test.sh`.
+`kernel/src/net/nic.rs`, the host-tested crate `rpikit/`, `scripts/pi-*.sh`, `scripts/{usb,usb-hub,highmem}-test.sh`.
 
 ![milkOS on qemu raspi4b](screenshots/raspberry-pi-desktop.png)
 
@@ -24,7 +24,7 @@ Files: `kernel/src/platform.rs` (the board table), `kernel/src/el.S` (EL2 to EL1
 | SD card (SDHCI, polled PIO), as `/dev/mmcblk0`, milkfs on it | **runs** on qemu (its EMMC controller); **untested** on EMMC2 of a real board |
 | RAM from the device tree, several banks and holes | **runs** on qemu (two banks and a hole, the GPU's); 4 GB / 8 GB layouts are unit-tested and the allocator above 4 GiB is tested on qemu virt |
 | Hardware random generator (RNG200) | **untested** (qemu does not model it); falls back to the jitter-seeded CSPRNG |
-| PCIe root complex + xHCI USB (the VL805: the four USB ports) | the xHCI driver and the HID keyboard/mouse **run** on qemu virt (`usb-test`); the PCIe bring-up of the BCM2711 got as far as the VL805 on a real board and then raised an SError; reworked (steps, survivable rejections, `milk.pcie=probe`), still **unconfirmed** until the next real run |
+| PCIe root complex + xHCI USB (the VL805: the four USB-A sockets, which are behind a hub inside it) | the xHCI driver and the HID keyboard/mouse **run** on qemu virt (`usb-test`, hubs in `usb-hub-test`); the PCIe bring-up of the BCM2711 got as far as the VL805 on a real board and then raised an SError; reworked (steps, survivable rejections, `milk.pcie=probe`), still **unconfirmed** until the next real run |
 | Ethernet (GENET + BCM54213PE PHY) | **untested**: qemu has no GENET; written from the register layout, logs every step |
 | The 3.5-inch SPI display on the GPIO header and its touch chip (`milk.lcd=`) | the driver, the panel's byte streams and the touch maths are **host-tested against a model of both chips**; the whole driver **runs** on qemu raspi4b against its SPI0 controller with nothing wired to it; **untested on a real panel** (see "3.5-inch SPI display") |
 | Wi-Fi (CYW43455 over SDIO), Bluetooth, the official DSI touchscreen, audio, the GPU | not started |
@@ -809,8 +809,8 @@ the "jitter only" warning appears.
 
 **LED** (`rpi/led.rs`, patterns in `rpikit::ledcode`): GPIO 42 as an output, on at the start of `kmain`, then the progress codes (see "Reading the ACT LED"); the crash cycle after a crash (see "After a crash").
 
-**PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,pcie,usb}`). The four USB-A ports of a Pi 4 are root ports of a VIA VL805
-xHCI controller on the BCM2711's PCIe x1 link. Bring-up (`rpi/pcie.rs`), as a table of steps (`rpikit::pcie::STEPS`, host-tested) each of which ends
+**PCIe + USB** (`rpi/pcie.rs`, `pci.rs`, `usb/`, `rpikit::{pci,pcie,usb}`). The four USB-A sockets of a Pi 4 are behind a hub inside a VIA VL805
+xHCI controller on the BCM2711's PCIe x1 link (see "USB hubs" below). Bring-up (`rpi/pcie.rs`), as a table of steps (`rpikit::pcie::STEPS`, host-tested) each of which ends
 with an SError checkpoint named `pcie-<step>`:
 
 | # | step | what |
@@ -857,9 +857,56 @@ Evaluate Context / Configure Endpoint, control transfers, interrupt IN endpoints
 4 ms, with 32- or 64-byte contexts, every wait bounded and the DMA memory synced with explicit cache maintenance (the BCM2711's PCIe
 DMA is not cache-coherent). **HID boot protocol** (`usb/hid.rs`): keyboards (modifiers, six keys, rollover, software auto-repeat
 after 500 ms every 33 ms) and mice (3 buttons, motion, wheel) feed `input::report_*`. `scripts/usb-test.sh` types on a `usb-kbd` and moves a
-`usb-mouse` through qemu and reads `/proc/input`. Not done: hubs (a keyboard behind a hub; the VL805's ports are root ports, so
-the ports on the board work without), interrupt-driven operation (MSI/INTx), report-protocol HID (media keys, a mouse's extra
+`usb-mouse` through qemu and reads `/proc/input`. Not done: interrupt-driven operation (MSI/INTx), report-protocol HID (media keys, a mouse's extra
 buttons), LEDs, mass storage, isochronous.
+
+**USB hubs** (`usb/xhci/hub.rs`, `rpikit::usbhub`). **The Pi 4's four USB-A sockets are not root ports: they sit behind a USB 2 hub inside the VL805**
+(a VIA Labs hub, `2109:3431`, on root port 1). A keyboard or mouse plugged into a socket therefore has to be found through that hub; the first real run
+showed `port 1: 2109:3431 class 0x9 (high speed): no keyboard or mouse interface, ignored` and nothing reached the keyboard driver. The driver now handles hubs:
+a device of class 9 on a root port, or on a hub's port, gets its configuration set and its hub descriptor read (three tries); the slot
+context is updated (Hub, number of ports, think time, multi-TT, with alternate setting 1 for a high speed hub of protocol 2); every port gets
+SetPortFeature(PORT_POWER) and the hub is left alone for the descriptor's power-on-to-power-good time (at least 100 ms); then each port is read with
+GetPortStatus every 100 ms (every 20 ms while a port is being debounced or reset; the status-change interrupt endpoint is not used, polling is simpler
+and does not miss a change). What a port does is `rpikit::usbhub::PortMachine`'s decision, host-tested with a fake clock: a connection must hold for 100 ms,
+the port is reset (SetPortFeature(PORT_RESET), 500 ms to finish), the speed is read from the status (low, full or high), the device is given
+10 ms to recover and addressed. A device behind a hub gets its **route string** (the port number at each tier, the hub nearest the controller in the lowest
+nibble), the root port, and, for a low or full speed device behind a high speed hub, the hub's slot id and the port as its **transaction translator**
+(through a full speed hub that is itself behind a high speed one, the high speed hub above). A keyboard that does not answer its first descriptor request
+(a slow wake-up after the port reset) gets three tries 100 ms apart; a halted control endpoint (a stall, a transaction error) is reset and its ring restarted
+instead of wedging the device. A device that is unplugged is removed (keys released, slot disabled, memory freed); a hub that is unplugged takes everything
+behind it with it, the furthest devices first.
+
+Limits and what is bounded: hubs up to **3 tiers** deep (a fourth is logged and ignored), **15 ports** per hub (a route string nibble), **32 hub ports** in all,
+and no more devices than the controller's slots (16 are used). SuperSpeed hubs are not driven (a SuperSpeed port of the VL805 is a separate root port; the
+sockets' USB 2 side is what is used). A hub that does not answer a request is dropped at once with everything behind it, one that keeps failing after three
+requests in a row; a port is tried three times (reset and enumerate), then left alone until the cable has been out for 0.5 s; more than 8 new connections
+in 10 s on one port is a storm and the port is ignored for 5 s (three storms and it is given up on); an over-current port is left off and logged.
+Devices that are not keyboards or mice (a flash drive, a hub's non-boot parts) are logged once and left alone, not retried. A composite keyboard's second
+interface (media keys) is not driven; only the boot-protocol interface is, with SET_PROTOCOL(boot) and SET_IDLE.
+
+The log lines (all `[usb]`, with the port named by its path: `1` is root port 1, `1.3` port 3 of the hub on root port 1, `1.3.2` port 2 of the hub
+on that):
+
+| line | meaning |
+|---|---|
+| `hub 2109:3431 on port 1: 4 ports (high speed, power switching per port, power good after 100 ms, over-current per port, 8 bit times think time, one translator)` | a hub was found and configured; its ports are powered |
+| `port 1.3: something connected, resetting the port` | a device held its connection for 100 ms; the reset was started |
+| `port 1.3: low speed device 046d:c52b, slot 4: keyboard` | the device was addressed and its HID boot interfaces started (`keyboard + mouse` for a combined one) |
+| `port 1.3: hid keyboard attached (interface 0, endpoint 0x81, boot protocol)` | the keyboard interface is polled; keys now reach `/proc/input` |
+| `port 1.3: device removed` / `hub removed` | unplugged (a hub's devices are removed first) |
+| `port 1.3: disconnected` | something that was not driven (no slot) went away |
+| `port 1.3: ... class 0x8 (full speed): no keyboard or mouse interface, ignored` | a device we do not drive |
+| `hub ... port N reports no power: switching it on again` / `stays unpowered after three tries` | a hub that does not honour PORT_POWER on that port; nothing will be seen there |
+| `hub ... port N reports over-current, the hub cut its power` | the port stays off |
+| `port 1.3: the reset did not finish ...` / `would not enumerate in 3 tries` / `keeps connecting and disconnecting` | the port was given up on until the cable is out |
+| `hub ... does not answer (Timeout): dropped, with everything on it` | the hub stopped responding; USB goes on without it |
+
+**On the real board** the log should now show, after `[usb] xHCI 1.0: 5 ports ...`, the hub line (`hub 2109:3431 on port 1: 4 ports (high speed ...`), and for a keyboard in a
+socket `port 1.N: low speed device VVVV:PPPP, slot S: keyboard` and `port 1.N: hid keyboard attached`, and the same with `mouse` (N is the port of the hub the device is in). A wireless dongle that carries both a keyboard and a mouse shows `keyboard + mouse`. If the hub line is there but no device, the hub's
+power may be off (`reports no power`), the reset may fail (`the reset did not finish`), or the translator fields are not what this hub wants (the address step
+then fails with a completion code: `port 1.N: low speed device: Failed(N)`; the code names the cause: 4 = transaction error, 17 = parameter error, 19 = context state). Nothing of this is confirmed on the
+board yet: the host tests cover the layouts (route strings, translator fields, slot contexts, the port machine), and qemu covers a *full speed* hub (`usb-hub`) with nested hubs, hot
+plug and hub removal (`scripts/usb-hub-test.sh`), not a high speed hub with a translator.
 
 **Ethernet** (`rpi/genet.rs`, **untested**, descriptor words and autonegotiation resolution in `rpikit::genet`): UMAC reset and
 setup, RGMII with the PHY adding the receive delay (`rgmii-rxid`: the PHY is left at its strapped defaults, as Linux leaves the BCM54213PE, and the MAC's transmit delay is on: `ID_MODE_DIS` clear), one 64-entry receive ring and one transmit ring (the default ring 16) of 2 KiB buffers below the DMA limit, the descriptors
@@ -908,7 +955,7 @@ problem is the MDIO clock / PHY reset. (4) Link up but no frames: RGMII delays (
 | the mailbox, the framebuffer, the console font, the crash screens | HDMI scan-out, the LED, the real VideoCore's answers |
 | SDHCI against qemu's controller, milkfs on it | EMMC2's quirks, a real card's timing, high speed |
 | device tree parsing, banks and holes, 64-bit physical addresses (on virt) | a 4 GB / 8 GB board's actual tree |
-| xHCI, HID, PCI enumeration (on virt) | the BCM2711 PCIe bring-up, the VL805 itself, USB 3 |
+| xHCI, HID, hubs (a full speed `usb-hub`, nested, hot plugged), PCI enumeration (on virt) | the BCM2711 PCIe bring-up, the VL805 and its high speed hub's translator, USB 3 |
 | the net stack (on virt) | GENET, the PHY, the RGMII timing |
 | the SPI display's driver against qemu's SPI0 controller (nothing attached), its byte streams against a host model | whether a glass shows anything; the touch chip |
 
@@ -939,7 +986,7 @@ problem is the MDIO clock / PHY reset. (4) Link up but no frames: RGMII delays (
 2. **SD card.** Look for `[sdhci] 0xfe340000: card ready`. If EMMC2 does not answer, the log says at which command; the base clock
    is logged by the mailbox (`clock_rate`). A card without a milkfs partition: the desktop runs from RAM.
 3. **USB.** Look for the `[pcie]` lines (link up status word), `[pci]` (the VL805: vendor 1106, device 3483, class 0c0330), `[pcie] ... BAR0 reads 0x0100....`
-   (the first read of the controller), `[usb] xHCI`, then `port N: ...: keyboard` / `mouse`. If a `pcie: step N ... FAILED` or `serror: absorbed` line
+   (the first read of the controller), `[usb] xHCI`, then `hub 2109:3431 on port 1: 4 ports` (the sockets are behind the VL805's hub), then `port 1.N: ...: keyboard` / `mouse` ("PCIe and USB", USB hubs). If a `pcie: step N ... FAILED` or `serror: absorbed` line
    appears, the register writes under it name the access the SoC rejected. Not clear? Put `milk.pcie=probe` in `cmdline.txt`: the next log has a line per step
    and the result of every order of the firmware handshake. If the link is down the first suspects are the PERST# timing, the SerDes IDDQ bit and the window
    registers (all in `rpi/pcie.rs`); if the VL805 enumerates but the xHCI does not start, the `NOTIFY_XHCI_RESET` call and the DMA window are next.

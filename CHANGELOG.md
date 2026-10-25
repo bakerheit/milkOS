@@ -3,6 +3,17 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- USB hubs: a keyboard and mouse in the Pi 4's sockets now reach the keyboard and mouse drivers. The first real run found the VL805 and its
+  xHCI and then logged `port 1: 2109:3431 class 0x9 (high speed): no keyboard or mouse interface, ignored`: **the four USB-A sockets are behind a USB 2 hub inside the VL805**,
+  and the driver only knew devices directly on a root port. The xHCI driver now drives hubs (`usb/xhci/hub.rs`; pure parts in `rpikit::usbhub`): the hub descriptor, the slot context's hub
+  fields, ports powered (bPwrOn2PwrGood honoured) and polled with GetPortStatus, debounce, reset, speed from the port status, and devices addressed through the hub with their route
+  string and, for a low or full speed device behind a high speed hub, the hub's slot and port as translator. Hubs nest three tiers deep (15 ports each, 32 in all), hot plug and removal
+  free the slot, the endpoints and the held keys (a hub takes its devices with it), and a hub that never answers, reports garbage or storms with connects is bounded and skipped, with a log line
+  (`hub 2109:3431 on port 1: 4 ports ...`, `port 1.3: low speed device 046d:c52b, slot 4: keyboard`, `port 1.3: hid keyboard attached`, `port 1.3: device removed`; table in "PCIe and USB").
+  A stalled control endpoint is now reset instead of wedging the device, a short control transfer reports its real length, and a device that is slow to answer its first descriptor request gets three tries.
+  Host tests: the requests, descriptor, status, route strings, translator choice, slot contexts, the port state machine with a fake clock, fuzzing (`rpikit::usbhub`). New `usb-hub-test` boots qemu virt
+  with a `usb-hub` on the controller and a `usb-kbd` and `usb-mouse` behind it and checks both reach `/proc/input`, then plugs a nested hub with a keyboard, unplugs a keyboard with a key held,
+  a nested hub and the whole first hub over QMP, and plugs a hub again. Not confirmed on a real board yet (qemu's hub is full speed, so the translator fields are covered by the host tests only).
 - The Ethernet controller's bring-up no longer crashes the first real board with an SError ("GENET bring-up" in docs/raspberry-pi.md). The real log showed the
   SoC refusing one of the first accesses to the UMAC / DMA registers: they were touched before the SYS block's reset register was written, so the blocks were
   most likely still held in reset. The bring-up is now an ordered table (`rpikit::genet::init`, host-tested for its order, values and checkpoint labels): power,

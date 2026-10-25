@@ -23,6 +23,8 @@
 //! * [`lcdprobe`]: `milk.lcd=probe`, the card shown on each candidate set-up of a display whose controller is unknown.
 //! * [`touch`]: the XPT2046 touch chip beside it (commands, filter, calibration, pointer events).
 //! * [`usb`]: xHCI TRBs, events and contexts, USB descriptors, and the HID boot keyboard and mouse.
+//! * [`usbhub`]: USB hubs: the class requests, the hub descriptor, port status, route strings, transaction translators, a hub's
+//!   slot context, and the per-port state machine (debounce, reset, enumerate, remove, give up).
 #![no_std]
 
 #[cfg(test)]
@@ -47,6 +49,7 @@ pub mod sd;
 pub mod soc;
 pub mod touch;
 pub mod usb;
+pub mod usbhub;
 
 #[cfg(test)]
 mod fattests;
@@ -62,3 +65,5 @@ mod pcietests;
 mod testpng;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod usbhubtests;

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "appkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gui",
  "rt",
@@ -22,21 +22,21 @@ dependencies = [
 
 [[package]]
 name = "apps"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "audit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "browser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "browserkit",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "browserkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fontkit",
  "imgdec",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "calendar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "clock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -84,35 +84,35 @@ dependencies = [
 
 [[package]]
 name = "cmdkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "filekit",
 ]
 
 [[package]]
 name = "coreutils"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "desk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "diskkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "timekit",
 ]
 
 [[package]]
 name = "disks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cmdkit",
  "diskkit",
@@ -122,7 +122,7 @@ dependencies = [
 
 [[package]]
 name = "diskutil"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "diskkit",
@@ -134,25 +134,25 @@ dependencies = [
 
 [[package]]
 name = "drop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "fault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "filekit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "filetools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "coreutils",
  "filekit",
@@ -161,18 +161,18 @@ dependencies = [
 
 [[package]]
 name = "fontkit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "fsstress"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fontkit",
  "rt",
@@ -180,36 +180,36 @@ dependencies = [
 
 [[package]]
 name = "heapkit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "hello"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "httpd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "imgdec"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "init"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "jsbench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jsengine",
  "rt",
@@ -217,29 +217,29 @@ dependencies = [
 
 [[package]]
 name = "jsengine"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "milkcrypto"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "milkd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "milkweb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tls",
 ]
 
 [[package]]
 name = "msh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "filekit",
  "rt",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "network"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cmdkit",
  "drop",
@@ -258,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "paint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gui",
  "rt",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "peek"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gui",
  "rt",
@@ -274,14 +274,14 @@ dependencies = [
 
 [[package]]
 name = "play"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "preview"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "reminders"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "rngd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "udrv",
@@ -311,7 +311,7 @@ dependencies = [
 
 [[package]]
 name = "rt"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "heapkit",
  "milkcrypto",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "scriptnet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "browserkit",
  "milkweb",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "search"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cmdkit",
  "rt",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "soundd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "udrv",
@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gui",
  "rt",
@@ -354,14 +354,14 @@ dependencies = [
 
 [[package]]
 name = "stty"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "syskit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "filekit",
  "sysview",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "systools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "syskit",
@@ -378,22 +378,22 @@ dependencies = [
 
 [[package]]
 name = "sysview"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "tcpbench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "textbuf"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "texteditor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "appkit",
  "gui",
@@ -403,11 +403,11 @@ dependencies = [
 
 [[package]]
 name = "textkit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "texttools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "filekit",
  "rt",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "timeio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "timekit",
@@ -424,11 +424,11 @@ dependencies = [
 
 [[package]]
 name = "timekit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "timetools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "timeio",
@@ -437,28 +437,28 @@ dependencies = [
 
 [[package]]
 name = "tls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "milkcrypto",
 ]
 
 [[package]]
 name = "tlsprobe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "udrv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "utest"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "udrv",
@@ -466,14 +466,14 @@ dependencies = [
 
 [[package]]
 name = "versions"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
 ]
 
 [[package]]
 name = "webbench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rt",
  "webengine",
@@ -481,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "webengine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fontkit",
  "jsengine",

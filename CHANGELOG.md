@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 (2026-10-24)
+
 **Raspberry Pi 4** (docs/raspberry-pi.md)
 - milkOS boots on a Raspberry Pi 4: the same sources build a second kernel image (`--features raspi`,
   `scripts/pi-build.sh`) linked for the firmware's load address, with the board in `kernel/src/platform.rs`

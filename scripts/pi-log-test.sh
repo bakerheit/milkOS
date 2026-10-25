@@ -207,7 +207,7 @@ N=3
 for defect in loop short long range free nofile nombr tiny v1 foreign; do
   python3 -I scripts/pi_fat32.py "$T/bad-$defect.img" --defect "$defect" --layout "$T/bad-$defect.json" >/dev/null
   cp "$T/bad-$defect.img" "$T/bad-$defect.orig"
-  boot $N "$T/bad-$defect.img" "milk.ledcodes=0" "wait@300:led: stage 7 "
+  boot $N "$T/bad-$defect.img" "milk.ledcodes=0" "wait@300:led: (stage 7 |done, solid on)"
   sleep 3
   stop
   if cmp -s "$T/bad-$defect.img" "$T/bad-$defect.orig"; then ok "boot $N ($defect): the card is byte for byte unchanged"; else bad "boot $N ($defect): the card CHANGED"; fi

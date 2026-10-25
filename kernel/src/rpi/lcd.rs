@@ -34,7 +34,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use rpikit::cmdline;
-use rpikit::lcd::{self as pk, Bus, Config, Controller, Dirty, Pixels, Rect, Rotation, View, ViewSource};
+use rpikit::lcd::{
+    self as pk, Bus, Config, Controller, Dirty, Pixels, Rect, Rotation, View, ViewSource,
+};
 use rpikit::mailbox::clock;
 use rpikit::touch::{self, Cal, Event, Tracker};
 
@@ -103,8 +105,6 @@ fn settings() -> Option<Settings> {
 struct Inner {
     dirty: Dirty,
     view: View,
-    last_end_us: u64,
-    last_cost_us: u64,
 }
 
 static INNER: SpinLock<Option<Inner>> = SpinLock::new(None);
@@ -200,7 +200,9 @@ fn parse_settings(controller: Controller, core_hz: u32) -> Settings {
         .and_then(|v| {
             let c = Cal::parse(v);
             if c.is_none() {
-                kprintln!("lcd: milk.touch_cal needs six numbers a,b,c,d,e,f (or ask), using the default");
+                kprintln!(
+                    "lcd: milk.touch_cal needs six numbers a,b,c,d,e,f (or ask), using the default"
+                );
             }
             c
         })
@@ -303,7 +305,9 @@ pub fn init() {
     let core_hz = match mailbox::max_clock_rate(clock::CORE) {
         Ok(hz) if hz >= 100_000_000 => hz,
         other => {
-            kprintln!("lcd: the firmware did not give the core clock ({other:?}), assuming 500 MHz");
+            kprintln!(
+                "lcd: the firmware did not give the core clock ({other:?}), assuming 500 MHz"
+            );
             500_000_000
         }
     };
@@ -337,7 +341,10 @@ pub fn init() {
         spi::set_function(p, spi::Func::Input);
         spi::set_pull(p, spi::Pull::Up);
     }
-    if let Some(bl) = option("lcd_bl").and_then(cmdline::parse_num).and_then(spi::header_pin) {
+    if let Some(bl) = option("lcd_bl")
+        .and_then(cmdline::parse_num)
+        .and_then(spi::header_pin)
+    {
         spi::set_function(bl, spi::Func::Output);
         spi::write(bl, true);
     }
@@ -362,11 +369,11 @@ pub fn init() {
     *INNER.lock() = Some(Inner {
         dirty: Dirty::new(),
         view: View::scaled(s.cfg.width(), s.cfg.height(), s.cfg.width(), s.cfg.height()),
-        last_end_us: 0,
-        last_cost_us: 0,
     });
     STATE.store(READY, Ordering::Release);
-    kprintln!("lcd: panel initialised (write only: whether it shows anything is for your eyes to say)");
+    kprintln!(
+        "lcd: panel initialised (write only: whether it shows anything is for your eyes to say)"
+    );
 }
 
 /// The panel was brought up and is in use.
@@ -423,7 +430,12 @@ pub fn note_source(rects: &[crate::gfx::Rect]) {
     let Some(i) = g.as_mut() else { return };
     for r in rects {
         if r.w > 0 && r.h > 0 && r.x >= 0 && r.y >= 0 {
-            let m = i.view.map_rect(Rect::new(r.x as usize, r.y as usize, r.w as usize, r.h as usize));
+            let m = i.view.map_rect(Rect::new(
+                r.x as usize,
+                r.y as usize,
+                r.w as usize,
+                r.h as usize,
+            ));
             i.dirty.add(m.clip(s.cfg.width(), s.cfg.height()));
         }
     }
@@ -436,10 +448,13 @@ pub fn note_source_all() {
     }
 }
 
-/// Send what is dirty. `pump`: the print path, which may only use the bus if it is free, and
-/// leaves the panel alone if it was busy less than its own cost ago. Returns whether anything
-/// was sent.
-fn flush(pump: bool) -> bool {
+/// Rows of the panel per SPI window: a band is a few milliseconds on the wire, and the bus is
+/// released between bands, so the touch chip is never kept waiting long.
+const BAND_ROWS: usize = 16;
+
+/// Send what is dirty, in bands, for at most `budget_us` (what is left stays dirty). `pump`: the
+/// print path, which may only use the bus if it is free. Returns whether anything was sent.
+fn flush(pump: bool, budget_us: u64) -> bool {
     let Some(s) = settings() else { return false };
     if CRASHED.load(Ordering::Acquire) {
         return false;
@@ -453,44 +468,63 @@ fn flush(pump: bool) -> bool {
         if i.dirty.is_empty() {
             return false;
         }
-        // At most half of the time on the wire: the log is then never more than twice as slow.
-        if pump && now_us().saturating_sub(i.last_end_us) < i.last_cost_us {
-            return false;
-        }
         while let Some(r) = i.dirty.pop() {
             rects[n] = r;
             n += 1;
         }
         view = i.view;
     }
-    let Some(_bus) = lock_bus(if pump { 0 } else { 30 }) else {
-        for r in &rects[..n] {
-            mark(*r);
-        }
-        return false;
-    };
     let t0 = now_us();
-    let ok = send(&s, &rects[..n], view);
-    let t1 = now_us();
-    if let Some(i) = INNER.lock().as_mut() {
-        i.last_end_us = t1;
-        i.last_cost_us = t1 - t0;
+    let (mut bands, mut ok) = (0usize, true);
+    'rects: for ri in 0..n {
+        let r = rects[ri];
+        let mut y = r.y;
+        while y < r.y1() {
+            // Out of time, or the bus is taken: what is left goes back on the list.
+            let bus = if now_us().saturating_sub(t0) >= budget_us {
+                None
+            } else {
+                lock_bus(if pump { 0 } else { 30 })
+            };
+            let Some(bus) = bus else {
+                mark(Rect::new(r.x, y, r.w, r.y1() - y));
+                for rest in &rects[ri + 1..n] {
+                    mark(*rest);
+                }
+                break 'rects;
+            };
+            let band = Rect::new(r.x, y, r.w, BAND_ROWS.min(r.y1() - y));
+            ok = send(&s, &[band], view);
+            drop(bus);
+            if !ok {
+                break 'rects;
+            }
+            bands += 1;
+            y += band.h;
+        }
     }
+    if bands == 0 && ok {
+        return false;
+    }
+    let t1 = now_us();
     if ok {
         FAILS.store(0, Ordering::Relaxed);
         if MODE.load(Ordering::Relaxed) == DESKTOP && !FIRST_FRAME.swap(true, Ordering::Relaxed) {
-            drop(_bus);
             kprintln!(
-                "lcd: first desktop update on the panel: {n} rectangle(s), {} ms",
+                "lcd: first desktop update on the panel: {n} rectangle(s), {bands} band(s), {} ms",
                 (t1 - t0) / 1000
             );
         }
     } else if FAILS.fetch_add(1, Ordering::Relaxed) >= 2 {
         STATE.store(FAILED, Ordering::Release);
-        drop(_bus);
         kprintln!("lcd: three SPI transfers in a row timed out, the panel is off");
     }
     true
+}
+
+/// Is there something left to send?
+fn dirty_left() -> bool {
+    INNER.lock().as_ref().is_some_and(|i| !i.dirty.is_empty())
 }
 
 /// Draw `rects` of the panel from what the mode says: the shadow (text) or the desktop through
@@ -534,6 +568,9 @@ fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
     }
 }
 
+/// The most one `kprintln!` spends on the panel.
+const PUMP_BUDGET_US: u64 = 25_000;
+
 /// From `kprintln!`, outside the print lock: send what the log console changed, where that is
 /// safe and cheap enough.
 pub fn pump() {
@@ -546,7 +583,7 @@ pub fn pump() {
     if IRQS_LIVE.load(Ordering::Relaxed) && !crate::sync::irqs_enabled() {
         return;
     }
-    flush(true);
+    flush(true, PUMP_BUDGET_US);
 }
 
 // ---- the boot console and the crash screen -------------------------------------------------------
@@ -566,8 +603,11 @@ pub fn boot_console() {
     sink::install_lcd_console(console);
     mark_all();
     let t = now_us();
-    flush(false);
-    kprintln!("lcd: boot log on the panel (first full picture {} ms)", (now_us() - t) / 1000);
+    flush(false, u64::MAX);
+    kprintln!(
+        "lcd: boot log on the panel (first full picture {} ms)",
+        (now_us() - t) / 1000
+    );
 }
 
 /// Draw the crash screen on the panel: the end of the log, through `f`, on a plain scrolling
@@ -593,7 +633,12 @@ pub fn crash_paint(f: impl FnOnce(&mut Console)) -> bool {
     let (w, h) = (s.cfg.width(), s.cfg.height());
     // SAFETY: the static shadow just drawn on.
     let px = unsafe { core::slice::from_raw_parts(SHADOW.0.get() as *const u32, w * h) };
-    pk::draw_rect(&s.cfg, &mut bus, full_rect(&s), &mut Pixels { px, width: w });
+    pk::draw_rect(
+        &s.cfg,
+        &mut bus,
+        full_rect(&s),
+        &mut Pixels { px, width: w },
+    );
     BUS.store(false, Ordering::Release);
     true
 }
@@ -633,7 +678,11 @@ pub fn desktop_started() {
         "lcd: the desktop ({sw}x{sh}) is on the panel {}x{}, {}",
         w,
         h,
-        if s.pan { "1:1, touch the edge to move the view" } else { "scaled down" }
+        if s.pan {
+            "1:1, touch the edge to move the view"
+        } else {
+            "scaled down"
+        }
     );
 }
 
@@ -726,7 +775,8 @@ fn thread() {
     let mut tracker = Tracker::new();
     let mut tick = 0u32;
     loop {
-        crate::sched::sleep_ms(10);
+        // Touch every 10 ms; while there is something to send, the panel gets the time in between.
+        crate::sched::sleep_ms(if dirty_left() { 1 } else { 10 });
         tick = tick.wrapping_add(1);
         if !ready() || CRASHED.load(Ordering::Acquire) {
             continue;
@@ -737,8 +787,8 @@ fn thread() {
         if MODE.load(Ordering::Relaxed) == DESKTOP {
             ensure_view(&s);
         }
-        // The desktop is sent in the thread's time; at most half of it on the wire.
-        flush(false);
+        // The desktop is sent in the thread's time, a few milliseconds at a time.
+        flush(false, 8_000);
     }
 }
 
@@ -830,12 +880,20 @@ fn calibrate(s: &Settings) -> Option<Cal> {
             surf.fill_rect(x - 1, y - 14, 3, 29, hot);
         }
         mark_all();
-        flush(false);
+        flush(false, u64::MAX);
     };
     kprintln!("touch: calibration, touch the four crosses (milk.touch_cal=ask)");
     for (i, t) in targets.iter().enumerate() {
-        let title = ["Touch the cross: 1 of 4", "Touch the cross: 2 of 4", "Touch the cross: 3 of 4", "Touch the cross: 4 of 4"][i];
-        show(&[title, "(press firmly with a stylus or a fingernail)"], Some(*t));
+        let title = [
+            "Touch the cross: 1 of 4",
+            "Touch the cross: 2 of 4",
+            "Touch the cross: 3 of 4",
+            "Touch the cross: 4 of 4",
+        ][i];
+        show(
+            &[title, "(press firmly with a stylus or a fingernail)"],
+            Some(*t),
+        );
         let mut agree = 0;
         let mut last = (0i32, 0i32);
         let mut sum = (0i32, 0i32);
@@ -891,11 +949,27 @@ fn calibrate(s: &Settings) -> Option<Cal> {
             let line = alloc::format!("milk.touch_cal={t}");
             let mut surf = shadow_surface(&s.cfg);
             surf.clear(bg);
-            font::draw_str_alpha(&mut surf, 24, 80, "Calibrated. Put this in cmdline.txt:", fg, 255, 1);
+            font::draw_str_alpha(
+                &mut surf,
+                24,
+                80,
+                "Calibrated. Put this in cmdline.txt:",
+                fg,
+                255,
+                1,
+            );
             font::draw_str_alpha(&mut surf, 24, 110, &line, hot, 255, 1);
-            font::draw_str_alpha(&mut surf, 24, 150, "(replacing milk.touch_cal=ask)", fg, 255, 1);
+            font::draw_str_alpha(
+                &mut surf,
+                24,
+                150,
+                "(replacing milk.touch_cal=ask)",
+                fg,
+                255,
+                1,
+            );
             mark_all();
-            flush(false);
+            flush(false, u64::MAX);
             // Long enough to copy it down.
             crate::sched::sleep_ms(12_000);
         }

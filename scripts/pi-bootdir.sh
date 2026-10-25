@@ -8,7 +8,8 @@
 #   DEBUG=1 scripts/pi-bootdir.sh OUTDIR    the debug profile
 #
 # OUTDIR gets: milkos8.img (the kernel the firmware loads), config.milkos.txt and cmdline.milkos.txt
-# (what to put in config.txt / cmdline.txt, or use instead of them).
+# (what to put in config.txt / cmdline.txt, or use instead of them; cmdline.milkos.txt also turns on the
+# 3.5-inch SPI display, milk.lcd=ili9486: edit it on the card to change the options).
 set -euo pipefail
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 cd "$(dirname "$0")/.."
@@ -32,8 +33,12 @@ max_framebuffers=1
 # The serial console on GPIO 14/15 (the mini UART), 115200 8N1, for anyone who has a cable.
 enable_uart=1
 CFG
+# One line (the firmware reads cmdline.txt as one line). milk.lcd=ili9486 turns on the 3.5-inch SPI display
+# on the GPIO header (docs/raspberry-pi.md, "3.5-inch SPI display"): the boot log, crash screen, desktop and
+# touch. Without the option nothing on the header is touched; with it and no display there, the bytes just go
+# nowhere and the boot is not held up. If the panel is another controller: milk.lcd=ili9488 or milk.lcd=st7796.
 cat > "$OUT/cmdline.milkos.txt" <<'CMD'
-milk.fbscale=1
+milk.fbscale=1 milk.lcd=ili9486
 CMD
 echo "pi-bootdir: $(ls -1 "$OUT" | tr '\n' ' ')in $OUT"
 ls -la "$OUT"

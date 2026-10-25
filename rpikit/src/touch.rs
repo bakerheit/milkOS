@@ -116,7 +116,7 @@ pub fn filter(samples: &[Raw]) -> Option<Touch> {
     let mut zs = [0u16; SAMPLES];
     let mut n = 0;
     for s in samples.iter().take(SAMPLES) {
-        let edge = |v: u16| v < 8 || v > 4087;
+        let edge = |v: u16| !(8..=4087).contains(&v);
         if s.pressure() >= PRESSURE_MIN && !edge(s.x) && !edge(s.y) {
             xs[n] = s.x;
             ys[n] = s.y;

@@ -132,14 +132,12 @@ pub fn inflate(z: &[u8]) -> Option<Vec<u8>> {
                                 }
                             }
                             17 => {
-                                for _ in 0..3 + b.need(3)? {
-                                    lens.push(0);
-                                }
+                                let n = 3 + b.need(3)? as usize;
+                                lens.resize(lens.len() + n, 0);
                             }
                             _ => {
-                                for _ in 0..11 + b.need(7)? {
-                                    lens.push(0);
-                                }
+                                let n = 11 + b.need(7)? as usize;
+                                lens.resize(lens.len() + n, 0);
                             }
                         }
                     }

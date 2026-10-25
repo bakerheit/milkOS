@@ -247,9 +247,7 @@ fn the_four_rotations_are_true_rotations() {
         let mut p = up(&cfg);
         let (w, h) = (cfg.width(), cfg.height());
         let mut img = std::vec![0u32; w * h];
-        for x in 0..w / 2 {
-            img[x] = 0xff0000; // red bar along the top left half
-        }
+        img[..w / 2].fill(0xff0000); // red bar along the top left half
         img[(h - 1) * w + w - 1] = 0x00ff00; // green dot, bottom right
         lcd::draw_rect(&cfg, &mut p, full(&cfg), &mut Pixels { px: &img, width: w });
         let (vw, vh, seen) = p.visible(rot);
@@ -288,7 +286,7 @@ fn partial_updates_send_only_the_rectangle() {
     let q = rgb565_to_xrgb(rgb565(0x123456));
     for y in 0..320 {
         for x in 0..480 {
-            let inside = r.touches(&Rect::new(x, y, 1, 1)) && x >= 100 && x < 140 && y >= 50 && y < 80;
+            let inside = (100..140).contains(&x) && (50..80).contains(&y);
             let want = if inside { q } else { quantize(Controller::Ili9486, img[y * 480 + x]) };
             assert_eq!(seen[y * 480 + x], want, "({x},{y})");
         }

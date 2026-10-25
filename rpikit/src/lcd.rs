@@ -182,8 +182,8 @@ impl Dirty {
         // Full: merge into the rectangle it enlarges least.
         let mut best = 0;
         let mut waste = usize::MAX;
-        for i in 0..self.n {
-            let w = self.r[i].union(&r).area() - self.r[i].area();
+        for (i, a) in self.r[..self.n].iter().enumerate() {
+            let w = a.union(&r).area() - a.area();
             if w < waste {
                 waste = w;
                 best = i;
@@ -413,7 +413,7 @@ pub const fn rgb565_to_xrgb(v: u16) -> u32 {
 pub fn pack(c: Controller, px: &[u32], out: &mut [u8]) -> usize {
     match c.bytes_per_pixel() {
         3 => {
-            for (p, o) in px.iter().zip(out.chunks_exact_mut(3)) {
+            for (p, o) in px.iter().zip(out.chunks_mut(3)) {
                 o[0] = (*p >> 16) as u8 & 0xfc;
                 o[1] = (*p >> 8) as u8 & 0xfc;
                 o[2] = *p as u8 & 0xfc;
@@ -421,7 +421,7 @@ pub fn pack(c: Controller, px: &[u32], out: &mut [u8]) -> usize {
             px.len() * 3
         }
         _ => {
-            for (p, o) in px.iter().zip(out.chunks_exact_mut(2)) {
+            for (p, o) in px.iter().zip(out.chunks_mut(2)) {
                 o.copy_from_slice(&rgb565(*p).to_be_bytes());
             }
             px.len() * 2

@@ -65,12 +65,16 @@ pub fn show() -> bool {
 /// and the closing line. Nothing allocates, nothing waits for a lock.
 #[cfg(feature = "raspi")]
 fn show_on_lcd() -> bool {
-    crate::rpi::lcd::crash_paint(|console| {
+    let drawn = crate::rpi::lcd::crash_paint(|console| {
         klog::tail(TAIL_BYTES, |bytes| {
             for chunk in bytes.utf8_chunks() {
                 console.write_str(chunk.valid());
             }
         });
         console.write_str("\n\x1b[1;31mmilkOS stopped.\x1b[0m The LED flashes.\n");
-    })
+    });
+    if drawn {
+        crate::kprintln!("lcd: crash screen sent to the panel");
+    }
+    drawn
 }

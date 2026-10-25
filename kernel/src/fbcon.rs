@@ -125,12 +125,14 @@ impl Console {
     }
 
     /// Wrap around to the top instead of scrolling (see the field).
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
     pub fn set_wrap(&mut self, wrap: bool) {
         self.wrap = wrap;
     }
 
     /// The pixel rows `[lo, hi)` that changed since the last call, for a console that has no
     /// shadow to flush from (the caller sends them wherever the picture goes).
+    #[cfg_attr(not(feature = "raspi"), allow(dead_code))]
     pub fn take_dirty(&mut self) -> Option<(usize, usize)> {
         let (lo, hi) = self.dirty.take()?;
         let h = self.surface.height();
@@ -227,8 +229,13 @@ impl Console {
     fn clear_row(&mut self) {
         let (x, y) = self.cell_xy(0, self.cy);
         self.mark(y as usize, y as usize + self.ch());
-        self.surface
-            .fill_rect(x, y, (self.cols * self.cw()) as i32, self.ch() as i32, DEFAULT_BG);
+        self.surface.fill_rect(
+            x,
+            y,
+            (self.cols * self.cw()) as i32,
+            self.ch() as i32,
+            DEFAULT_BG,
+        );
     }
 
     fn newline(&mut self) {

@@ -192,7 +192,12 @@ fn on_irq(_irq: u32, frame: &mut TrapFrame) {
         if percpu::id() == 0 {
             TICKS.fetch_add(1, Ordering::Relaxed);
         }
-        percpu::this().ticks.fetch_add(1, Ordering::Relaxed);
+        let n = percpu::this().ticks.fetch_add(1, Ordering::Relaxed) + 1;
+        // Once a second on every CPU (idle ones included): a pending SError is taken here, in EL1, where the
+        // dump can name the last 'tick' as the checkpoint instead of the first eret to EL0 much later.
+        if n % TICK_HZ == 0 {
+            crate::serror::checkpoint("tick");
+        }
         let period = TICK_PERIOD.load(Ordering::Relaxed);
         let mut n = next.wrapping_add(period);
         if (now.wrapping_sub(n) as i64) >= 0 {

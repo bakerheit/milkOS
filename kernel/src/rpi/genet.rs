@@ -17,7 +17,7 @@
 //! stack every 10 ms as a safety net next to the interrupt.
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 use super::Timeout;
 use crate::dma::{self, Buffer};
@@ -152,11 +152,13 @@ const CTRL1000_ADV_HALF: u16 = 0x0100;
 
 fn rd(off: usize) -> u32 {
     // SAFETY: the controller's registers, mapped as Device memory (platform.rs).
+    crate::serror::note_read(BASE + off);
     unsafe { read_volatile((BASE + off) as *const u32) }
 }
 
 fn wr(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(BASE + off, v);
     unsafe { write_volatile((BASE + off) as *mut u32, v) }
 }
 
@@ -209,6 +211,17 @@ fn mdio_write(phy: u8, reg: u8, val: u16) -> bool {
 // ---- link state shared with the poll thread ------------------------------------------------------
 
 static LINK_UP: AtomicBool = AtomicBool::new(false);
+/// Frames given to / taken from the controller, for the 10-second report in the log (the
+/// network stack's own counters live behind its lock; these are readable from the poll thread).
+static TX_FRAMES: AtomicU64 = AtomicU64::new(0);
+static RX_FRAMES: AtomicU64 = AtomicU64::new(0);
+static RX_BAD: AtomicU64 = AtomicU64::new(0);
+/// Frames the stack wanted to send while the link was down (not given to the controller).
+static TX_LINK_DOWN: AtomicU64 = AtomicU64::new(0);
+/// Frames refused because the transmit ring was full.
+static TX_RING_FULL: AtomicU64 = AtomicU64::new(0);
+/// Receive interrupts taken.
+static RX_IRQS: AtomicU32 = AtomicU32::new(0);
 /// The PHY's MDIO address (0xff: none found).
 static PHY_ADDR: AtomicU8 = AtomicU8::new(0xff);
 
@@ -353,12 +366,14 @@ impl Genet {
             let Some(len) = gk::rx_frame_len(status, BUF_SIZE) else {
                 // A bad or fragmented frame (we only post whole-frame buffers): drop it.
                 self.stats.rx_errors += 1;
+                RX_BAD.fetch_add(1, Ordering::Relaxed);
                 self.recycle(slot);
                 continue;
             };
             self.rx_bufs.sync(slot * BUF_SIZE, len);
             self.stats.rx_packets += 1;
             self.stats.rx_bytes += len as u64;
+            RX_FRAMES.fetch_add(1, Ordering::Relaxed);
             let ptr = (self.rx_bufs.va() + slot * BUF_SIZE) as *const u8;
             return Some(RxBuf::new(slot as u16, ptr, len));
         }
@@ -390,9 +405,17 @@ impl Genet {
     }
 
     pub fn send_with(&mut self, fill: impl FnOnce(&mut [u8]) -> usize) -> bool {
+        // Nothing goes to the controller while the link is down: the MAC's transmitter is off then (mac_link_down),
+        // a queued frame would only sit in the ring until a cable shows up and be sent stale.
+        if !LINK_UP.load(Ordering::Acquire) {
+            self.stats.tx_dropped += 1;
+            TX_LINK_DOWN.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
         let cons = rd(ring_reg(TDMA, R_CONS_INDEX)) as u16;
         if gk::in_flight(self.tx_prod, cons) >= RING_SIZE {
             self.stats.tx_dropped += 1;
+            TX_RING_FULL.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         let slot = self.tx_prod as usize % RING_SIZE;
@@ -419,6 +442,7 @@ impl Genet {
         wr(ring_reg(TDMA, R_PROD_INDEX), self.tx_prod as u32);
         self.stats.tx_packets += 1;
         self.stats.tx_bytes += n as u64;
+        TX_FRAMES.fetch_add(1, Ordering::Relaxed);
         true
     }
 }
@@ -499,6 +523,7 @@ fn on_irq(_irq: u32, _frame: &mut crate::exceptions::TrapFrame) {
     let status = rd(INTRL2_STAT) & !rd(INTRL2_MASK_STATUS);
     wr(INTRL2_CLEAR, status);
     if status & IRQ_RXDMA_DONE != 0 {
+        RX_IRQS.fetch_add(1, Ordering::Relaxed);
         crate::net::on_device_irq();
     }
 }
@@ -544,12 +569,31 @@ pub fn init() {
         kprintln!("[genet] no memory for the rings");
         return;
     };
+    // The controller's DMA reaches memory by the ARM physical address (no 0xc0000000 alias: it sits on the system
+    // bus, not behind the legacy peripheral window) and not beyond the board's DMA limit.
+    let limit = crate::platform::CURRENT.dma_limit as u64;
+    let (rx_end, tx_end) = (
+        rx_bufs.pa() + rx_bufs.len() as u64,
+        tx_bufs.pa() + tx_bufs.len() as u64,
+    );
+    kprintln!(
+        "[genet] DMA buffers: rx {:#x}..{rx_end:#x}, tx {:#x}..{tx_end:#x} (bus = physical, limit {limit:#x})",
+        rx_bufs.pa(),
+        tx_bufs.pa()
+    );
+    if rx_end > limit || tx_end > limit {
+        kprintln!("[genet] the DMA buffers are beyond what the controller can address: not using it");
+        return;
+    }
+    super::serror_checkpoint("genet-buffers");
     // Power up the MAC's blocks, reset the UMAC and the buffers.
     wr(
         EXT_PWR_MGMT,
         rd(EXT_PWR_MGMT) & !(EXT_PWR_DOWN_BIAS | EXT_PWR_DOWN_DLL | EXT_PWR_DOWN_PHY),
     );
+    super::serror_checkpoint("genet-power-up");
     dma_disable();
+    super::serror_checkpoint("genet-dma-off");
     wr(SYS_RBUF_FLUSH_CTRL, rd(SYS_RBUF_FLUSH_CTRL) | 2);
     delay_us(10);
     wr(SYS_RBUF_FLUSH_CTRL, rd(SYS_RBUF_FLUSH_CTRL) & !2);
@@ -559,6 +603,7 @@ pub fn init() {
     wr(UMAC_CMD, CMD_SW_RESET | CMD_LCL_LOOP_EN);
     delay_us(2);
     wr(UMAC_CMD, 0);
+    super::serror_checkpoint("genet-umac-reset");
     // RGMII to an external PHY; the PHY adds the receive delay, the MAC the transmit delay.
     wr(SYS_PORT_CTRL, PORT_MODE_EXT_GPHY);
     wr(
@@ -584,8 +629,10 @@ pub fn init() {
         UMAC_CMD,
         CMD_PROMISC | CMD_PAD_EN | CMD_RX_PAUSE_IGNORE | CMD_TX_PAUSE_IGNORE,
     );
+    super::serror_checkpoint("genet-umac-setup");
     init_rings(&rx_bufs);
     dma::sync(rx_bufs.va(), rx_bufs.len());
+    super::serror_checkpoint("genet-rings");
     // The PHY.
     let hint = dtb
         .find_prefix(b"ethernet-phy@", b"reg")
@@ -605,6 +652,7 @@ pub fn init() {
             rd(UMAC_MDIO_CMD)
         ),
     }
+    super::serror_checkpoint("genet-phy");
     // Interrupt on received frames; DMA on.
     wr(INTRL2_MASK_SET, 0xffff_ffff);
     wr(INTRL2_CLEAR, 0xffff_ffff);
@@ -612,7 +660,9 @@ pub fn init() {
         let _ = crate::gic::enable(IRQ);
         wr(INTRL2_MASK_CLEAR, IRQ_RXDMA_DONE);
     }
+    super::serror_checkpoint("genet-irq");
     dma_enable();
+    super::serror_checkpoint("genet-dma-on");
     let dev = Genet {
         mac,
         rx_bufs,
@@ -639,14 +689,58 @@ pub fn start() {
     }
     crate::sched::spawn("genet", || {
         let mut n = 0u32;
+        let mut reports = 0u32;
+        let mut last = (0u64, 0u64, 0u64);
         loop {
             crate::sched::sleep_ms(10);
             n += 1;
             if n % 25 == 0 {
                 poll_link();
             }
+            // A pending SError shows up here at the latest 10 ms after the access (the checkpoint labels the poll thread).
+            if n % 10 == 0 {
+                super::serror_checkpoint("genet-poll");
+            }
             // Safety net next to the interrupt: look at the rings every 10 ms.
             crate::net::on_device_irq();
+            // Every 10 s: does the controller work at all? Link, frames, ring indexes. The first six
+            // reports always, then only when something moved.
+            if n % 1000 == 0 {
+                let now = (
+                    TX_FRAMES.load(Ordering::Relaxed),
+                    RX_FRAMES.load(Ordering::Relaxed),
+                    RX_BAD.load(Ordering::Relaxed) + TX_LINK_DOWN.load(Ordering::Relaxed),
+                );
+                if reports < 6 || now != last {
+                    report();
+                    last = now;
+                }
+                reports += 1;
+            }
         }
     });
+}
+
+/// The 10-second line: whether the PHY sees a cable, what the controller's rings and counters say.
+fn report() {
+    let phy = PHY_ADDR.load(Ordering::Relaxed);
+    let bmsr = if phy == 0xff { None } else { mdio_read(phy, MII_BMSR) };
+    kprintln!(
+        "[genet] link {} (PHY status {}), tx {} frames (dropped: {} link down, {} ring full), rx {} frames ({} bad, {} irqs); tx ring cons {} prod {}, rx ring prod {}; umac cmd {:#x}",
+        if LINK_UP.load(Ordering::Relaxed) { "up" } else { "down" },
+        match bmsr {
+            Some(v) => alloc::format!("{v:#06x}"),
+            None => alloc::string::String::from("unreadable"),
+        },
+        TX_FRAMES.load(Ordering::Relaxed),
+        TX_LINK_DOWN.load(Ordering::Relaxed),
+        TX_RING_FULL.load(Ordering::Relaxed),
+        RX_FRAMES.load(Ordering::Relaxed),
+        RX_BAD.load(Ordering::Relaxed),
+        RX_IRQS.load(Ordering::Relaxed),
+        rd(ring_reg(TDMA, R_CONS_INDEX)) as u16,
+        rd(ring_reg(TDMA, R_PROD_INDEX)) as u16,
+        rd(ring_reg(RDMA, R_CONS_INDEX)) as u16,
+        rd(UMAC_CMD)
+    );
 }

@@ -49,7 +49,34 @@ pub enum Nic {
     Genet(crate::rpi::genet::Genet),
 }
 
+/// How the log names a device: `virtio slot 3`, `genet`.
+pub struct NicLabel(&'static str, Option<usize>);
+
+impl NicLabel {
+    pub fn none() -> Self {
+        NicLabel("no device", None)
+    }
+}
+
+impl core::fmt::Display for NicLabel {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.1 {
+            Some(slot) => write!(f, "{} slot {slot}", self.0),
+            None => f.write_str(self.0),
+        }
+    }
+}
+
 impl Nic {
+    /// The driver, and for virtio the slot, as the boot log says it.
+    pub fn label(&self, slot: usize) -> NicLabel {
+        match self {
+            Nic::Virtio(_) => NicLabel("virtio", Some(slot)),
+            #[cfg(feature = "raspi")]
+            Nic::Genet(_) => NicLabel("genet", None),
+        }
+    }
+
     pub fn mac(&self) -> [u8; 6] {
         match self {
             Nic::Virtio(d) => d.mac(),

@@ -78,11 +78,13 @@ static FAILURES_LOGGED: AtomicU32 = AtomicU32::new(0);
 
 fn reg_read(off: usize) -> u32 {
     // SAFETY: mailbox registers, mapped as Device memory.
+    crate::serror::note_read(BASE + off);
     unsafe { read_volatile((BASE + off) as *const u32) }
 }
 
 fn reg_write(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(BASE + off, v);
     unsafe { write_volatile((BASE + off) as *mut u32, v) }
 }
 
@@ -273,6 +275,8 @@ fn transact_via<H, R>(
     let alias = msg::BUS_ALIASES[alias_idx as usize % msg::BUS_ALIASES.len()];
     let res = exchange(pa, alias, timeout_ms);
     flush_cache(va, PAGE_SIZE);
+    // The firmware wrote into our memory by DMA and the doorbell was a posted write: take a pending SError here.
+    super::serror_checkpoint("mbox-call");
     // SAFETY: as above; the firmware is done with the buffer (or gave up on it).
     let buf = unsafe { core::slice::from_raw_parts(va as *const u32, PAGE_SIZE / 4) };
     let out = match res {

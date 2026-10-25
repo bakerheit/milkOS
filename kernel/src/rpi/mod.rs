@@ -52,9 +52,11 @@ pub fn disabled(what: &str) -> bool {
 /// Log what the firmware says about the board (firmware build, board revision, MAC address).
 /// Failures are logged, never fatal: the board works without the answers.
 pub fn init() {
+    serror_checkpoint("rpi-init-entry");
     let rev = mailbox::board_revision();
     let fw = mailbox::firmware_revision();
     let mac = mailbox::board_mac();
+    serror_checkpoint("rpi-mailbox-info");
     match (rev, fw) {
         (Ok(r), Ok(f)) => crate::kprintln!("rpi: board revision {r:#x}, firmware {f:#x}"),
         (Err(e), _) | (_, Err(e)) => {
@@ -76,13 +78,21 @@ pub fn init() {
     if !disabled("rng") {
         rng::init();
     }
+    serror_checkpoint("rpi-rng");
     if !disabled("sdhci") {
         sdhci::init();
     }
+    serror_checkpoint("rpi-sdhci");
     if !disabled("genet") {
         genet::init();
     }
+    serror_checkpoint("rpi-genet");
 }
+
+/// Take a pending SError here and now, so the crash dump names this place (kernel/src/serror.rs;
+/// `milk.serror=off` makes it a no-op). The access that raised it happened between this label and the
+/// previous one that passed on the same CPU.
+pub use crate::serror::checkpoint as serror_checkpoint;
 
 pub use crate::timeout::Timeout;
 

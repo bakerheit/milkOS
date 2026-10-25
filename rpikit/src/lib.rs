@@ -4,6 +4,7 @@
 //! * [`dtb`]: the flattened device tree reader (RAM, CPUs and how to start them, the kernel
 //!   command line, the root `compatible`).
 //! * [`cmdline`]: `milk.<name>=<value>` options on the kernel command line.
+//! * [`esr`]: ESR_EL1 decoded for the exception dump (exception class, abort and SError syndromes).
 //! * [`genet`]: Ethernet descriptor words and autonegotiation results.
 //! * [`fat`]: finding one pre-created file on a FAT32 boot partition and its sectors (the boot log file).
 //! * [`logimg`]: the boot log file's layout (header, end marker, padding) and how a flush builds its sectors.
@@ -11,6 +12,7 @@
 //! * [`ledcrash`]: the ACT LED crash cycle (boot stage, exception class, PC, fault address as counted pulses).
 //! * [`mailbox`]: VideoCore property-interface messages (framebuffer, clocks, board info).
 //! * [`pci`]: config space fields, BAR sizing and placement, bridge windows, a host bridge's `ranges`.
+//! * [`soc`]: the BCM2711's blocks by address (the crash dump names the last device writes).
 //! * [`sd`]: SD card commands and responses, and the SDHCI register values that go with them.
 //! * [`lcd`]: the 3.5-inch SPI display on the GPIO header (ILI9486 / ILI9488 / ST7796 command streams,
 //!   pixel packing, dirty rectangles, scaling the desktop down to the panel).
@@ -24,6 +26,7 @@ extern crate std;
 
 pub mod cmdline;
 pub mod dtb;
+pub mod esr;
 pub mod fat;
 pub mod genet;
 pub mod ledcode;
@@ -34,6 +37,7 @@ pub mod logimg;
 pub mod mailbox;
 pub mod pci;
 pub mod sd;
+pub mod soc;
 pub mod touch;
 pub mod usb;
 

@@ -31,11 +31,13 @@ static PRESENT: AtomicBool = AtomicBool::new(false);
 
 fn rd(off: usize) -> u32 {
     // SAFETY: the generator's registers, mapped as Device memory (platform.rs).
+    crate::serror::note_read(BASE + off);
     unsafe { read_volatile((BASE + off) as *const u32) }
 }
 
 fn wr(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(BASE + off, v);
     unsafe { write_volatile((BASE + off) as *mut u32, v) }
 }
 

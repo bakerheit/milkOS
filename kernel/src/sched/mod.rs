@@ -764,6 +764,9 @@ extern "C" fn thread_start(entry: usize, arg: usize) -> ! {
 /// here, as `schedule` does after `switch_context` returns.
 extern "C" fn first_run() {
     after_switch();
+    // The next thing a user thread does is the eret to EL0, where a pending SError is taken whatever the mask:
+    // take it here instead, so the dump says it was already pending (and after which checkpoint).
+    crate::serror::checkpoint("el0-first-run");
 }
 
 /// Handle to a spawned thread. Dropping it detaches the thread.

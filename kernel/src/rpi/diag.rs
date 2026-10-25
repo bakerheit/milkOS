@@ -108,6 +108,9 @@ fn show(data: &[u8], out: &mut alloc::string::String) {
 
 /// Node names (prefixes) whose `compatible`, `status` and `reg` are logged: the devices the drivers use.
 const INTERESTING: &[&[u8]] = &[
+    b"soc",
+    b"scb",
+    b"axi",
     b"mailbox",
     b"firmware",
     b"mmc@",
@@ -162,14 +165,21 @@ pub fn dtb_report() {
             );
         let memory = node.starts_with(b"memory") && matches!(prop, b"reg" | b"device_type");
         let device = depth >= 2
-            && matches!(
+            && (matches!(
                 prop,
-                b"compatible" | b"status" | b"reg" | b"ranges" | b"clock-frequency"
-            )
+                b"compatible"
+                    | b"status"
+                    | b"reg"
+                    | b"ranges"
+                    | b"dma-ranges"
+                    | b"dma-coherent"
+                    | b"phy-mode"
+                    | b"clock-frequency"
+            ) || (prop == b"interrupts" && node.starts_with(b"ethernet@")))
             && INTERESTING
                 .iter()
                 .any(|p| node.starts_with(p) || parent.starts_with(p));
-        if !(chosen || root || memory || device) || lines >= 150 {
+        if !(chosen || root || memory || device) || lines >= 320 {
             return;
         }
         if matches!(prop, b"kaslr-seed" | b"rng-seed") {

@@ -43,6 +43,7 @@ mod ramfb;
 mod rpi;
 mod sched;
 mod selftest;
+mod serror;
 mod sink;
 mod smp;
 mod splash;
@@ -106,18 +107,26 @@ pub extern "C" fn kmain() -> ! {
     exceptions::init();
     // The Pi's UART needs setting up before the first character (a no-op on virt).
     uart::early_init();
+    // Before anything else of ours touched a device: an SError the firmware left pending is taken (and named) here.
+    serror::checkpoint("kmain-entry");
     #[cfg(feature = "raspi")]
     rpi::led::on();
     percpu::init_boot();
     // MMU + caches before anything takes a lock (atomics hang on Device memory).
     mem::init();
+    // `milk.serror=` (the command line is readable now), then the first checkpoint.
+    serror::init();
+    serror::checkpoint("mem-init");
     #[cfg(feature = "raspi")]
     rpi::led::start_codes();
+    serror::checkpoint("led-codes");
     // The 3.5-inch SPI panel on the GPIO header, if the command line has one: up before the
     // display layer so the boot log can reach it.
     #[cfg(feature = "raspi")]
     rpi::lcd::init();
+    serror::checkpoint("lcd-init");
     display::init();
+    serror::checkpoint("display-init");
     kprintln!("milkOS {VERSION} booting...");
     kprintln!("hello from the kernel");
     platform::check_dtb();
@@ -126,32 +135,47 @@ pub extern "C" fn kmain() -> ! {
         rpi::diag::boot_report();
         rpi::diag::dtb_report();
     }
+    serror::checkpoint("boot-reports");
 
     gic::init();
+    serror::checkpoint("gic-init");
     timer::init();
+    serror::checkpoint("timer-init");
     uart::init();
+    serror::checkpoint("uart-init");
+    serror::measure();
     #[cfg(feature = "raspi")]
     rpi::led::stage(rpikit::ledcode::Stage::Interrupts, true);
     #[cfg(feature = "raspi")]
     rpi::init();
+    serror::checkpoint("rpi-init-done");
     udrv::init_policy();
     selftest::crash_if_asked("early");
     // Which of the slow boot self-tests run (opt/milkos/selftest; by default none).
     selftest::read_option();
     virtio::init();
+    serror::checkpoint("virtio-init");
     crypto::init();
+    serror::checkpoint("crypto-init");
     sync::irq_enable();
+    serror::checkpoint("irq-enable");
     #[cfg(feature = "raspi")]
     rpi::lcd::irqs_live();
+    serror::checkpoint("lcd-irqs-live");
     if selftest::wants(selftest::TIMER) {
         selftest::run();
     }
     memtest::run();
+    serror::checkpoint("memtest");
     fs::init();
+    serror::checkpoint("fs-init");
     // Crash-test boots (opt/milkos/test) always; the fs self-test only if asked for.
     fs::selftest::run();
+    serror::checkpoint("sched-init-entry");
     sched::init();
+    serror::checkpoint("sched-init");
     smp::init();
+    serror::checkpoint("smp-init");
     #[cfg(feature = "raspi")]
     rpi::led::stage(rpikit::ledcode::Stage::Scheduler, true);
     if selftest::wants(selftest::SCHED) {
@@ -160,8 +184,11 @@ pub extern "C" fn kmain() -> ! {
     audit::init();
     journal::init();
     sysstat::init();
+    serror::checkpoint("audit-journal-sysstat");
     net::init();
+    serror::checkpoint("net-init");
     net::tls::init();
+    serror::checkpoint("net-tls-init");
     if selftest::wants(selftest::NET) {
         net::selftest::run();
     } else {
@@ -169,21 +196,31 @@ pub extern "C" fn kmain() -> ! {
         net::selftest::wait_up();
     }
     net::tls::selftest();
+    serror::checkpoint("net-up");
     audio::init();
+    serror::checkpoint("audio-init");
     udrv::init_files();
+    serror::checkpoint("udrv-init-files");
     proc::init();
+    serror::checkpoint("proc-init");
     proc::start_init();
+    serror::checkpoint("proc-start-init");
     #[cfg(feature = "raspi")]
     rpi::led::stage(rpikit::ledcode::Stage::Userspace, true);
     // Saves the boot log into the log file on the card, every second or so (rpi/logfile.rs).
     #[cfg(feature = "raspi")]
     rpi::logfile::start_thread();
+    serror::checkpoint("logfile-thread");
     fs::start_threads();
+    serror::checkpoint("fs-threads");
     #[cfg(feature = "raspi")]
     rpi::lcd::start();
+    serror::checkpoint("lcd-start");
     #[cfg(feature = "raspi")]
     rpi::genet::start();
+    serror::checkpoint("genet-start");
     usb::start();
+    serror::checkpoint("usb-start");
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the
     // screen and draws the mouse cursor from here on.

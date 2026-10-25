@@ -63,11 +63,13 @@ pub enum Pull {
 
 fn gpio_read_reg(off: usize) -> u32 {
     // SAFETY: GPIO registers, mapped as Device memory (platform.rs).
+    crate::serror::note_read(GPIO + off);
     unsafe { read_volatile((GPIO + off) as *const u32) }
 }
 
 fn gpio_write_reg(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(GPIO + off, v);
     unsafe { write_volatile((GPIO + off) as *mut u32, v) }
 }
 
@@ -98,11 +100,13 @@ pub fn read(pin: u8) -> bool {
 
 fn spi_read(off: usize) -> u32 {
     // SAFETY: SPI0 registers, Device memory.
+    crate::serror::note_read(SPI0 + off);
     unsafe { read_volatile((SPI0 + off) as *const u32) }
 }
 
 fn spi_write(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(SPI0 + off, v);
     unsafe { write_volatile((SPI0 + off) as *mut u32, v) }
 }
 

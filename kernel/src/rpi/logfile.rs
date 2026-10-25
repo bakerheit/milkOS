@@ -338,6 +338,7 @@ pub fn milestone() {
     let _ = with_state(|st| {
         probe(st, false);
         flush(st, false, 8);
+        super::serror_checkpoint("logfile-flush");
     });
 }
 
@@ -349,6 +350,7 @@ pub fn tick() {
     let _ = with_state(|st| {
         probe(st, false);
         flush(st, false, 4);
+        super::serror_checkpoint("logfile-flush");
     });
 }
 

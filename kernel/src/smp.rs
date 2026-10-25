@@ -302,10 +302,12 @@ pub fn init() -> usize {
 /// First Rust code on a secondary CPU (MMU and caches already on, stack set).
 extern "C" fn secondary_main(cpu: usize) -> ! {
     crate::exceptions::init();
+    crate::serror::checkpoint("smp-cpu-entry");
     percpu::record_midr();
     sched::enable_fp();
     gic::init_cpu();
     timer::init_cpu();
+    crate::serror::checkpoint("smp-cpu-up");
     // SAFETY: set by the boot CPU before CPU_ON; this CPU is its only user from now on.
     let stack = unsafe { (*(&raw mut STACKS).cast::<Option<KStack>>().add(cpu)).take() }
         .expect("secondary stack");

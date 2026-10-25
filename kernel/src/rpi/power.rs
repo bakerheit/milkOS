@@ -27,6 +27,7 @@ fn rd(off: usize) -> u32 {
 
 fn wr(off: usize, v: u32) {
     // SAFETY: as above.
+    let _c = crate::serror::write_guard(PM + off, v);
     unsafe { write_volatile((PM + off) as *mut u32, v) }
 }
 

@@ -106,11 +106,13 @@ struct Host {
 impl Host {
     fn r32(&self, off: usize) -> u32 {
         // SAFETY: SDHCI registers, mapped as Device memory (platform.rs).
+        crate::serror::note_read(phys_to_virt(self.base) + off);
         unsafe { read_volatile((phys_to_virt(self.base) + off) as *const u32) }
     }
 
     fn w32(&self, off: usize, v: u32) {
         // SAFETY: as above.
+        let _c = crate::serror::write_guard(phys_to_virt(self.base) + off, v);
         unsafe { write_volatile((phys_to_virt(self.base) + off) as *mut u32, v) }
         if self.slow.get() {
             let t = Timeout::us(10);
@@ -748,6 +750,7 @@ pub fn init() {
         } else {
             mailbox::clock_rate(rpikit::mailbox::clock::EMMC)
         };
+        super::serror_checkpoint("sdhci-clock");
         let from_fw = fw.as_ref().copied().unwrap_or(0);
         let from_caps = ((caps >> 8) & 0xff) * 1_000_000;
         let (base_hz, source) = if from_fw != 0 {
@@ -771,6 +774,7 @@ pub fn init() {
         let Some(card) = init_card(&host, base_hz) else {
             continue;
         };
+        super::serror_checkpoint("sdhci-card");
         let blocks = card.blocks;
         // The boot log writer's path (raw_io): from here on it can reach the card.
         RAW_BLOCKS.store(blocks, Ordering::Relaxed);

@@ -77,6 +77,8 @@ them, so every existing option works unchanged:
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal is off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
+| `milk.serror=trace` / `paranoid` / `off` | the SError checkpoints and the register write breadcrumbs ("Reading a crash"); `trace` is the default on the Pi image, `off` makes them no-ops, `paranoid` adds a checkpoint after every register write of the Pi drivers (slow; pins an SError to one register) |
+| `milk.crashtest=serror` / `dabt` | the exception dump instead of a panic, right after the display is up: a fake SError taken at a checkpoint (qemu cannot raise a real one), or a real data abort (a store to an unmapped address) |
 | `milk.crashtest=early` / `late` | panic on purpose right after the display is up / once the desktop has been up 8 s (tests the crash screens); `late-off` / `late-reset`: the desktop's Shut Down / Restart after 5 s (tests the power paths) |
 
 ## Putting it on a card
@@ -200,6 +202,102 @@ There is no serial cable in this setup, so the kernel makes the screen the conso
 5. `milk.crashtest=early|late` triggers a panic on purpose so you can see the screens once.
 6. **No HDMI cable at all?** The 3.5-inch SPI display on the GPIO header gets the same boot log and crash screen
    (section "3.5-inch SPI display": `milk.lcd=ili9486` in `cmdline.txt`).
+
+## Reading a crash
+
+Every exception (not panics: those print their message and source line) ends in a dump on the serial line, in the
+log file on the card, and on the crash screen (the end of the log; the last lines of the dump are the ones that
+matter most, so the dump ends with a summary). It looks like this (a data abort, then an SError taken at a checkpoint):
+
+```
+*** KERNEL EXCEPTION: synchronous exception ***
+  vector 4 (current EL, SP_ELx), cpu 0, thread 0 (?)
+  ESR_EL1 = 0x96000044  EC=0x25 (data abort, same EL) IL=1 ISS=0x0000044
+  data abort: translation fault, level 0 on write
+  DFSC=0x04 WnR=1 CM=0 S1PTW=0 EA=0 FnV=0
+  FAR_EL1 = 0xfffff000dead0010  (address accessed)
+  ELR_EL1 = 0xffff0000001d727c  (faulting pc)
+  SPSR_EL1 = 0x800003c5  EL1h NZCV=N--- DAIF=DAIF
+  SCTLR_EL1 = 0x30d8180d  ISR_EL1 = 0x80 (pending now: IRQ)  ID_AA64PFR0_EL1 = 0x2222 (RAS: none)  MPIDR = 0x80000000
+  last SError checkpoint that passed on cpu 0: 'crashtest-dabt' (37 passed)
+  ...
+
+*** KERNEL EXCEPTION: SError ***
+  vector 7 (current EL, SP_ELx), cpu 0, thread 0 (?)
+  ESR_EL1 = 0xbe000000  EC=0x2f (SError) IL=1 ISS=0x0000000
+  SError: asynchronous external abort; ELR_EL1 is where the CPU was, not the culprit
+  IDS=0 IESB=0 AET=0 (uncontainable) EA=0 DFSC=0x00 (uncategorized)
+  ...
+  SError at checkpoint 'crashtest-serror' on cpu 0
+  the access that caused it happened after checkpoint 'crashtest-before' passed and before 'crashtest-serror' (37 passed on this cpu)
+  last 8 register writes on cpu 0 (oldest first):
+    0xfd582000 genet+0x2000 <- 0x00000001
+    ...
+  summary: SError, cpu 0, thread ?, ESR 0xbe000000 (EC 0x2f SError), ELR 0x..., FAR 0x0
+  where: SError AT checkpoint 'crashtest-serror', after 'crashtest-before'
+  newest writes (newest first): 0xfd584018 genet+0x4018 <- 0x3; ...
+*** halted ***
+```
+
+**What each line is.** `ESR_EL1` is printed in full for every synchronous exception and SError, with the exception class
+name, IL and the 25-bit syndrome (decoded in `rpikit::esr`, host-tested against a table of known values and a fuzz run):
+for a data abort the fault (translation / permission / access flag / external abort, with its level), read or write,
+`S1PTW` (the fault was in the page-table walk), `CM` (cache maintenance), `EA` (the bus answered with an error), `FnV`
+(FAR not valid) and, when the syndrome is valid, the access size and register; for an instruction abort the same;
+for an SError `IDS` / `IESB` / `AET` / `EA` / `DFSC`. The Cortex-A72 of the Pi 4 has no RAS extension, so those fields
+are not architected there (the dump says so; an empty syndrome is normal): the syndrome does not name the cause,
+which is why the next two sections exist. `ISR_EL1` shows which interrupts are pending *at the time of the dump*
+(bit 8 = an SError is pending now). On a CPU with the RAS extension (`ID_AA64PFR0_EL1.RAS` non-zero) the dump also
+prints ERRIDR_EL1, DISR_EL1 and the first error records (ERXSTATUS / ERXADDR / ERXMISC0).
+
+**An SError is asynchronous.** It is raised after the fact (a posted write to a block that is not clocked, a DMA
+master that hit a bad address, a memory error) and the CPU takes it at the next moment SErrors are unmasked. The kernel
+runs with SErrors masked at EL1, so before the checkpoints existed that moment was the first `eret` to EL0 on that
+CPU ("vector 11, lower EL"), long after the culprit; `ELR_EL1` then says nothing about the cause.
+
+**Checkpoints** (`serror::checkpoint(label)`, `rpi::serror_checkpoint`; `kernel/src/serror.rs`): `dsb sy`, unmask SError,
+`isb`, mask again. A pending SError is taken *there*, in EL1, and the dump says `SError at checkpoint 'LABEL'` and
+which checkpoint passed before it on that CPU: **the access that caused it happened between those two labels, on that
+CPU.** Read the code between the two call sites and the device writes in the list below. A pending SError that is
+taken outside any checkpoint says so (`SError taken outside a checkpoint`) and names the last one that passed. Labels
+are `area-step`. Where they are:
+
+| label | where |
+|---|---|
+| `kmain-entry` | first thing in `kmain`: an SError the firmware left pending is taken here (the dump says `before any checkpoint passed`) |
+| `mem-init` `led-codes` `lcd-init` `display-init` `boot-reports` | after `mem::init`, the LED codes, the SPI panel, the display and the boot/device tree reports |
+| `gic-init` `timer-init` `uart-init` | after each of them |
+| `rpi-init-entry` `rpi-mailbox-info` `rpi-rng` `rpi-sdhci` `rpi-genet` `rpi-init-done` | `rpi::init`, between its steps |
+| `mbox-call` | at the end of every mailbox transaction (the firmware wrote into our memory by DMA) |
+| `sdhci-clock` `sdhci-card` | inside the SD driver's init |
+| `genet-buffers` `genet-power-up` `genet-dma-off` `genet-umac-reset` `genet-umac-setup` `genet-rings` `genet-phy` `genet-irq` `genet-dma-on` | the sub-steps of the Ethernet MAC's bring-up, in order |
+| `virtio-init` `crypto-init` `irq-enable` `lcd-irqs-live` `memtest` `fs-init` | the rest of the early boot |
+| `sched-init-entry` `sched-init` `smp-init` `audit-journal-sysstat` | around the scheduler, SMP |
+| `smp-cpu-entry` `smp-cpu-up` | on each secondary CPU as it comes up |
+| `net-init` `net-tls-init` `net-up` `net-thread` | the network stack (`net-thread`: every pass of the net thread, i.e. every packet and timer) |
+| `audio-init` `udrv-init-files` `proc-init` `proc-start-init` | before the first user process |
+| `el0-first-run` | the start of every user thread, right before its `eret` to EL0 |
+| `logfile-thread` `logfile-flush` | the boot log writer: after each flush to the card |
+| `fs-threads` `lcd-start` `genet-start` `usb-start` | starting the late threads |
+| `genet-poll` | the Ethernet poll thread, every 100 ms |
+| `mmio-write` | only with `milk.serror=paranoid`: right after every register write of the Pi drivers |
+| `tick` | the timer interrupt on **every CPU, once a second**, idle CPUs included: whatever goes wrong, it is named within a second |
+
+**Breadcrumbs.** The MMIO accessors of the Pi drivers (GENET, SD host, SPI and GPIO, PCIe, RNG, mailbox, power manager)
+record the register they wrote into a per-CPU ring of the last 8 writes; the dump prints it, oldest first, with the block
+name from `rpikit::soc` (`genet+0x4018`, `emmc2+0x34`, `gpio+0x20`) and the value written, and the CPU's last register read.
+The ACT LED's writes have a slot of their own (the LED code would flush everything else out of the ring). Even a crash
+with no checkpoint in the right place shows the last devices that CPU touched. The interrupt controller and the UART
+are not recorded (every interrupt and every character would).
+
+**What to do with an SError dump.** (1) Find `SError at checkpoint 'B'` and `after checkpoint 'A'` (or the `where:` line at the
+end). (2) Look at the writes in the list: the culprit is a device access on that CPU between A and B; the last few writes
+name the block. (3) If both labels are in `genet-*`, the Ethernet bring-up is the cause; `milk.disable=genet` starts the board
+without it. If it is `tick` after `logfile-flush`, the SD log writes. If the dump says `before any checkpoint passed`,
+the firmware left it. (4) If there are several CPUs in the list of last checkpoints, the one that crashed is the one in the
+vector line (`cpu N`). (5) If `trace` names a driver but not the register, boot once with `milk.serror=paranoid`: every register write of the Pi drivers is then followed by a checkpoint (`mmio-write`), the SError is taken right after the offending write and the dump says `paranoid mode: the bus error came back from the write to genet+0x...`. (6) `milk.serror=off` makes all of this a no-op (one load per call); the cost of a checkpoint is logged at
+every boot (`serror: a checkpoint costs N ns`). (7) Photograph the last lines of the crash screen, or read the log file
+(`scripts/pi-readlog.sh`); the LED crash code is unchanged.
 
 ## The boot log in a file
 

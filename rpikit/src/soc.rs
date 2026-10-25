@@ -12,7 +12,7 @@ pub const BLOCKS: &[(u64, u64, &str)] = &[
     (0xfe00_3000, 0x1000, "systimer"),
     (0xfe00_7000, 0x1000, "dma"),
     (0xfe00_b200, 0x200, "armctrl-intc"),
-    (0xfe00_b800, 0x40, "mailbox"),
+    (0xfe00_b880, 0x40, "mailbox"),
     (0xfe10_0000, 0x1000, "power-mgmt"),
     (0xfe10_1000, 0x1000, "clock-mgr"),
     (0xfe10_4000, 0x100, "rng200"),

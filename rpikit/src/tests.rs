@@ -2166,7 +2166,7 @@ fn soc_blocks_are_named_by_address_and_do_not_overlap() {
     assert_eq!(block(0xfe34_0034), Some(("emmc2", 0x34)));
     assert_eq!(block(0xfe10_4024), Some(("rng200", 0x24)));
     assert_eq!(block(0xfe20_0020), Some(("gpio", 0x20)));
-    assert_eq!(block(0xfe00_b880), Some(("mailbox", 0x80)));
+    assert_eq!(block(0xfe00_b890), Some(("mailbox", 0x10)));
     assert_eq!(block(0xff84_1104), Some(("gic-dist", 0x104)));
     assert_eq!(block(0x8000_0000), None);
     assert_eq!(block(0xfe34_0100), None);

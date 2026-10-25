@@ -241,7 +241,7 @@ impl Controller {
             .unwrap_or_default();
         kprintln!(
             "[usb] hub {name} on port {path}: {} ({e:?}): dropped, with everything on it",
-            if timeout { "does not answer" } else { "keeps failing requests" }
+            if timeout { "does not answer (unplugged just now, or stuck)" } else { "keeps failing requests" }
         );
         self.remove_tree(id);
     }

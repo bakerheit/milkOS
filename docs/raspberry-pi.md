@@ -899,7 +899,7 @@ on that):
 | `hub ... port N reports no power: switching it on again` / `stays unpowered after three tries` | a hub that does not honour PORT_POWER on that port; nothing will be seen there |
 | `hub ... port N reports over-current, the hub cut its power` | the port stays off |
 | `port 1.3: the reset did not finish ...` / `would not enumerate in 3 tries` / `keeps connecting and disconnecting` | the port was given up on until the cable is out |
-| `hub ... does not answer (Timeout): dropped, with everything on it` | the hub stopped responding; USB goes on without it |
+| `hub ... does not answer (unplugged just now, or stuck) (Timeout): dropped, with everything on it` | the hub stopped responding (or was just unplugged and its parent has not noticed yet); USB goes on without it |
 
 **On the real board** the log should now show, after `[usb] xHCI 1.0: 5 ports ...`, the hub line (`hub 2109:3431 on port 1: 4 ports (high speed ...`), and for a keyboard in a
 socket `port 1.N: low speed device VVVV:PPPP, slot S: keyboard` and `port 1.N: hid keyboard attached`, and the same with `mouse` (N is the port of the hub the device is in). A wireless dongle that carries both a keyboard and a mouse shows `keyboard + mouse`. If the hub line is there but no device, the hub's

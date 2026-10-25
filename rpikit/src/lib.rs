@@ -14,6 +14,7 @@
 //! * [`sd`]: SD card commands and responses, and the SDHCI register values that go with them.
 //! * [`lcd`]: the 3.5-inch SPI display on the GPIO header (ILI9486 / ILI9488 / ST7796 command streams,
 //!   pixel packing, dirty rectangles, scaling the desktop down to the panel).
+//! * [`lcdbudget`]: the time limits that keep the display from ever delaying the boot (the early bring-up's budget, the print path's, when `milk.lcd=probe` may start).
 //! * [`lcdprobe`]: `milk.lcd=probe`, the card shown on each candidate set-up of a display whose controller is unknown.
 //! * [`touch`]: the XPT2046 touch chip beside it (commands, filter, calibration, pointer events).
 //! * [`usb`]: xHCI TRBs, events and contexts, USB descriptors, and the HID boot keyboard and mouse.
@@ -29,6 +30,7 @@ pub mod genet;
 pub mod ledcode;
 pub mod ledcrash;
 pub mod lcd;
+pub mod lcdbudget;
 pub mod lcdprobe;
 pub mod logimg;
 pub mod mailbox;

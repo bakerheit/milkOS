@@ -400,6 +400,16 @@ controller**: nothing on the header is touched otherwise. Files: `kernel/src/rpi
 a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can be decided from bytes), `rpikit/src/lcdsim.rs`
 (the model of both chips the host tests run against).
 
+**The display never holds up the boot or the boot log.** The normal bring-up (`milk.lcd=ili9486` and the other controllers) is
+synchronous and early, so the log can reach the panel, but it has a hard time budget: the reset pulse, the init sequence and the first
+full picture together must be done **within 1.5 s** of the start (a normal bring-up takes 0.7 to 1.1 s, about half a second of it waits the
+controller needs; every single SPI transfer is also cut off at the time that is left). If not, the log says `lcd: gave up after N ms at step
+init #K (command, out of time)` (or `first picture #K`), the panel stays unused and the boot goes on. The budget is `milk.lcd_budget_ms=`
+(50..10000; for a kit on a very slow clock, and for the tests). After the first picture nothing in the print path waits for the panel: a
+`kprintln!` sends a few rows of the log to it at most (3 ms, and only one line in 20 ms does; the others are dropped and counted, what they
+changed is sent with the next send), and once the panel's own thread runs (after the scheduler) the print path sends nothing at all.
+`lcd: N panel update(s) from the log were dropped so far` says that updates were dropped. `milk.lcd=probe` is not run early at all (below).
+
 **Wiring assumed** (the usual kit; check the silkscreen, every pin is an option):
 
 | header | GPIO | what | option |
@@ -427,6 +437,7 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 | `milk.lcd_inv=` | per controller | display inversion (colours inverted: try the other value; `st7796` modules usually need `1`) |
 | `milk.lcd_madctl=` | from rot/bgr | the raw memory-access byte (`0x28`...), for a glass that comes out mirrored |
 | `milk.lcd_hz=` | `16000000` | SPI bit clock, up to `32000000` (divided down from the *highest* core clock the firmware reports, never faster than asked; if the firmware's mailbox does not answer, from 500 MHz, the Pi 4's default `core_freq`: a core clock that is really lower makes the bus slower, never faster; the boot log says which: `lcd: ... (core 500 MHz fallback, no firmware answer / 32, mode 0)`) |
+| `milk.lcd_budget_ms=` | `1500` | the time budget of the early bring-up (50..10000 ms), see "The display never holds up the boot" above |
 | `milk.lcd_dc=` `milk.lcd_rst=` `milk.lcd_bl=` `milk.touch_irq=` | 24, 25, none, 17 | pins, GPIO 2..27 |
 | `milk.touch=0` | on | leave the touch chip alone |
 | `milk.touch_cal=a,b,c,d,e,f` | from `lcd_rot` | calibration: `x = ((a*rx + b*ry) >> 16) + c`, `y = ((d*rx + e*ry) >> 16) + f` from the chip's raw 0..4095 readings (16.16 fixed point, offsets in pixels); `ask` runs the four-cross helper |
@@ -436,8 +447,15 @@ a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can b
 **Finding the controller (`milk.lcd=probe`).** These kits are write-only over SPI: nothing can be read back, so the kernel cannot
 tell which chip is on the glass, how it is wired, or on which pins. If you do not know (or `milk.lcd=ili9486` only makes the screen
 flicker blue or stay white), put `milk.lcd=probe` in `cmdline.txt` instead and boot. The kernel then goes through **21 set-ups, one after
-another** (about 95 s in all, then the boot goes on with no panel in use; the log says `lcd: probe finished`). Every set-up is reset and
-initialised afresh and shows, in this order:
+another** (about 95 s in all; then no panel is in use; the log says `lcd: probe finished`). **It runs last**: the boot does not wait for it.
+At the start of the boot the log only says `lcd: milk.lcd=probe: the probe starts after the boot is over ...` (nothing on the header is
+touched); the ACT LED goes through its stage codes and the screen and the SD log come up as without a display. The probe starts on a
+low-priority thread of its own when the boot is over (`led: done, solid on`, the desktop is up) and the boot log is saved to the card
+(`MILKLOG.TXT`; with no log file on the card, 8 s after the boot is over); the log says `lcd: probe: the boot is over and the log is
+saved ..., starting`, then the `lcd: probe n/21 ...` lines. **What you see on the ACT LED meanwhile** is what you would see without the probe:
+solid on once the boot is done, then the two-blink "log saved" signal; the probe never uses the LED. Do not power off because the panel
+is still busy: the log file on the card already has the whole boot. (A crash during the probe is handled as always, synchronously.)
+Every set-up is reset and initialised afresh and shows, in this order:
 
 1. **The number card** (1 s): the set-up's number, huge, white on black, with `OF 21` and the controller's name under it.
 2. **Four colour flashes** (0.4 s each): the whole screen solid red, then green, blue, white.

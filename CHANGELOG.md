@@ -3,6 +3,16 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- The 3.5-inch display can no longer hold up the boot or the SD boot log (a `milk.lcd=probe` boot showed "long pulse, one pulse, then nothing" for 100 s
+  and the log stayed blank: the probe ran synchronously before everything else). `milk.lcd=probe` now only notes itself at the start of the boot and runs
+  last, on its own low-priority thread, once the boot is over (LED solid on, desktop up) and the boot log is saved to the card (or 8 s after the boot is over if
+  there is no log file); the ACT LED keeps showing the boot status meanwhile, and the probe's waits sleep so the log writer and the desktop keep the CPU. The
+  normal `milk.lcd=ili9486` bring-up stays early and synchronous but is held to a budget of 1.5 s in all (reset, init sequence, first full picture, each SPI
+  transfer cut off at what is left; `milk.lcd_budget_ms=` changes it): past it the log says `lcd: gave up after N ms at step X` and the boot goes on without
+  the panel. The print path never waits for the panel: at most 3 ms per `kprintln!`, one send per 20 ms, the rest dropped and counted
+  (`lcd: N panel update(s) from the log were dropped so far`), and nothing at all once the panel's thread runs. Time-budget logic (`rpikit::lcdbudget`) is
+  host tested with a fake clock, including a stalled bus; the new `pi-lcd-late-test` boots with the probe and checks the boot reaches the desktop, the LED
+  stages and the saved log before the probe's first set-up, and boots with a budget that cannot be met.
 - The kernel saves its boot log into a file on the SD card, for a board with no serial cable and no working screen: put the blank `MILKLOG.TXT`
   (`scripts/pi-bootdir.sh` or `scripts/pi-logfile.sh` makes it) on the FAT boot partition, boot, wait for the ACT LED's "log saved" signal (two blinks and a
   pause), read it on the Mac with `scripts/pi-readlog.sh`. The kernel never creates a file or changes the FAT or a directory: it overwrites the data sectors of

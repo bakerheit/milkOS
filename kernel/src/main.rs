@@ -114,7 +114,8 @@ pub extern "C" fn kmain() -> ! {
     #[cfg(feature = "raspi")]
     rpi::led::start_codes();
     // The 3.5-inch SPI panel on the GPIO header, if the command line has one: up before the
-    // display layer so the boot log can reach it.
+    // display layer so the boot log can reach it, within a second or not at all (milk.lcd=probe
+    // is only noted here and runs at the very end of the boot).
     #[cfg(feature = "raspi")]
     rpi::lcd::init();
     display::init();
@@ -181,6 +182,9 @@ pub extern "C" fn kmain() -> ! {
     fs::start_threads();
     #[cfg(feature = "raspi")]
     rpi::lcd::start();
+    // `milk.lcd=probe`, last of all: after the desktop is up and the boot log is on the card.
+    #[cfg(feature = "raspi")]
+    rpi::lcd::start_probe();
     usb::start();
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the

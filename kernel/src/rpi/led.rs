@@ -120,6 +120,12 @@ pub fn finish() {
 /// The boot is done and the LED is solid on (set by [`finish`]).
 static FINISHED: AtomicBool = AtomicBool::new(false);
 
+/// Is the boot over (the desktop is up and the LED solid on, or there is no desktop to wait for)?
+/// Things that must not delay the boot (the display probe) start after this.
+pub fn finished() -> bool {
+    FINISHED.load(Ordering::Acquire)
+}
+
 /// May the log writer show its "log saved" signal? Only once the boot is over, with no crash, and not
 /// when the codes are off (`milk.ledcodes=0`).
 pub fn saved_signal_allowed() -> bool {

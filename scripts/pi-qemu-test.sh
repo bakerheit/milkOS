@@ -258,7 +258,7 @@ check 'wm: restarting \(power manager, full reset\)' "boot 7: Restart reset the 
 # ---- boots 8 to 12: the 3.5-inch SPI display (docs/raspberry-pi.md). qemu models the SPI0 controller (the bytes
 # go nowhere: no panel, no touch chip is attached), so these boots run the whole driver against nothing: the
 # bring-up, the boot log, the desktop view, the touch polling, the crash screen; none of it may stall or panic. ----
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.sdwrite=1 milk.lcd=ili9486"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.sdwrite=1 milk.lcd_budget_ms=10000 milk.lcd=ili9486"
 DTB_ARGS=(-dtb "$T/lcd.dtb")
 boot 8 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
 sleep 1
@@ -276,7 +276,7 @@ out system | grep -Eq '^CPUs +4' && ok "boot 8: the system runs (system says 4 C
 out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 8: touch polling invents no pointer events" || bad "boot 8: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
 desktop_shot "$T/lcd8.png" && ok "boot 8: the HDMI screen shows the desktop" || bad "boot 8: the HDMI screen is blank or flat"
 
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9488 milk.lcd_rot=270 milk.hdmi=off milk.lcd_view=pan milk.touch_irq=-1 milk.lcd_dc=22 milk.lcd_rst=27 milk.lcd_hz=8000000"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd_budget_ms=10000 milk.lcd=ili9488 milk.lcd_rot=270 milk.hdmi=off milk.lcd_view=pan milk.touch_irq=-1 milk.lcd_dc=22 milk.lcd_rst=27 milk.lcd_hz=8000000"
 boot 9 "wait@300:wm: desktop up" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
 stop
 check '^lcd: ili9488 480x320 rot 270 bgr, SPI0 CE0 [0-9]+ kHz .*DC=GPIO22 RST=GPIO27, touch XPT2046 on CE1, polled' "boot 9: other controller, rotation, pins, polled touch"
@@ -289,7 +289,7 @@ has 'KERNEL PANIC|kernel panic|lcd: .*timed out' && bad "boot 9: a panic or SPI 
 out system | grep -Eq '^CPUs +4' && ok "boot 9: the system runs on the panel alone" || bad "boot 9: system: $(out system)"
 out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 9: touch polling invents no pointer events" || bad "boot 9: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
 
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=st7796 milk.lcd_rot=0 milk.crashtest=late"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd_budget_ms=10000 milk.lcd=st7796 milk.lcd_rot=0 milk.crashtest=late"
 boot 10 "wait@300:KERNEL PANIC"
 sleep 2
 python3 scripts/qmp.py "$QMP" screendump "$T/lcd10.png" >/dev/null 2>&1 || true
@@ -305,7 +305,7 @@ else
   bad "boot 10: no screendump"
 fi
 
-python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=ili9486 milk.lcd_dc=99 milk.lcd_rot=45 milk.touch_cal=1,2,3 milk.lcd_hz=0 milk.lcd_madctl=999"
+python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd_budget_ms=10000 milk.lcd=ili9486 milk.lcd_dc=99 milk.lcd_rot=45 milk.touch_cal=1,2,3 milk.lcd_hz=0 milk.lcd_madctl=999"
 boot 11 "wait@300:wm: desktop up"
 stop
 check '^lcd: milk.lcd_dc=99 is not a header GPIO' "boot 11: a bad pin is refused, the default used"
@@ -322,9 +322,9 @@ has '^lcd: panel initialised' && bad "boot 12: a panel was brought up" || ok "bo
 check 'wm: desktop up' "boot 12: the desktop comes up anyway"
 
 # ---- boot 14: milk.lcd=probe, for a display whose controller is unknown: every set-up shows its number card, four colour
-# flashes and its text card, then the boot goes on. The holds are trimmed to 50 ms (the init waits of 21 set-ups remain). ----
+# flashes and its text card, then (the probe runs last, after the desktop is up: scripts/pi-lcd-late-test.sh) it finishes. The holds are trimmed to 50 ms (the init waits of 21 set-ups remain). ----
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_rounds=1 milk.lcd_probe_ms=50"
-boot 14 "wait@600:wm: desktop up"
+boot 14 "wait@600:wm: desktop up" "wait@600:lcd: probe finished"
 stop
 check '^lcd: probe: 21 set-ups from 1 of 21, 1 round\(s\), text card 50 ms, number card 50 ms, colour flashes 20 ms, pin sweeps on \(D/C GPIO24 reset GPIO25 .*SPI core clock [0-9]+ MHz, (from the firmware|fallback, no firmware answer)\)' "boot 14: probe mode starts, says the clock and where it came from"
 N=$(tr -d '\r' < "$LOG" | grep -Eac '^lcd: probe [0-9]+/21 [a-z0-9]+ [0-9]+ MHz mode [03] DC[0-9]+ RST[0-9]+: start ')
@@ -346,7 +346,7 @@ check 'wm: desktop up' "boot 14: the boot goes on after the probe"
 
 # ---- boot 15: the probe's own options: start at set-up 15, the pin sweeps off (no pin round, no backlight pins), three rounds' worth of nothing else ----
 python3 scripts/pi_dtb.py "$T/lcd.dtb" --cmdline "milk.lcd=probe milk.lcd_probe_ms=50 milk.lcd_probe_from=15 milk.lcd_probe_pins=0 milk.lcd_spi_mode=7"
-boot 15 "wait@300:wm: desktop up"
+boot 15 "wait@300:wm: desktop up" "wait@300:lcd: probe finished"
 stop
 check '^lcd: probe: 3 set-ups from 15 of 17, 1 round\(s\), .*pin sweeps off ' "boot 15: from=15 with the pin round left out leaves three set-ups"
 check '^lcd: milk.lcd_spi_mode must be 0, 1, 2 or 3, using 0' "boot 15: a bad SPI mode is refused"

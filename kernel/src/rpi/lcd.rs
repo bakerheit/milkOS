@@ -33,12 +33,13 @@
 //! bounded, and three failed transfers in a row switch the panel off.
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use rpikit::cmdline;
 use rpikit::lcd::{
     self as pk, Bus, Config, Controller, Dirty, Pixels, Rect, Rotation, View, ViewSource,
 };
+use rpikit::lcdbudget::{self as bud, Budget, BudgetBus, Clock, GaveUp, ProbeGate, Throttle, Why};
 use rpikit::mailbox::clock;
 use rpikit::touch::{self, Cal, Event, Tracker};
 
@@ -267,21 +268,64 @@ struct HwBus {
     rst: u8,
     cdiv: u32,
     mode: u8,
+    /// The longest the next transfer may take (a budget wrapper sets it), microseconds.
+    cap_us: u64,
+    /// Waits go to sleep on the scheduler instead of spinning (the probe thread: the other
+    /// threads, the log writer first, must get the CPU).
+    sleepy: bool,
+}
+
+impl HwBus {
+    fn new(dc: u8, rst: u8, cdiv: u32, mode: u8) -> HwBus {
+        HwBus {
+            dc,
+            rst,
+            cdiv,
+            mode,
+            cap_us: u64::MAX,
+            sleepy: false,
+        }
+    }
+
+    fn of(s: &Settings) -> HwBus {
+        HwBus::new(s.dc, s.rst, s.cdiv, s.mode)
+    }
+}
+
+/// Wait until `t` has expired: spinning, or (a kernel thread that has a scheduler to give the
+/// CPU back to) sleeping a millisecond at a time.
+fn wait_until(t: Timeout, sleepy: bool) {
+    while !t.expired() {
+        if sleepy {
+            crate::sched::sleep_ms(1);
+        } else {
+            core::hint::spin_loop();
+        }
+    }
 }
 
 impl Bus for HwBus {
     fn write(&mut self, data: bool, bytes: &[u8]) -> bool {
         spi::write(self.dc, data);
-        spi::transfer_mode(0, self.cdiv, self.mode, bytes, None)
+        spi::transfer_capped(0, self.cdiv, self.mode, bytes, None, self.cap_us)
     }
     fn reset_pin(&mut self, high: bool) {
         spi::write(self.rst, high);
     }
     fn delay_ms(&mut self, ms: u32) {
-        let t = Timeout::ms(ms as u64);
-        while !t.expired() {
-            core::hint::spin_loop();
-        }
+        wait_until(Timeout::ms(ms as u64), self.sleepy);
+    }
+    fn set_cap_us(&mut self, us: u64) {
+        self.cap_us = us;
+    }
+}
+
+/// The time source of the budgets.
+struct HwClock;
+
+impl Clock for HwClock {
+    fn now_us(&self) -> u64 {
+        now_us()
     }
 }
 
@@ -322,9 +366,45 @@ fn core_clock() -> (u32, &'static str) {
     }
 }
 
+/// How long the whole early bring-up may take (reset pulse, init sequence, first full-screen
+/// picture), microseconds. About half a second of a normal one is waits the controllers need
+/// (reset pulse, sleep out), the rest the wire: it takes 0.7 to 1.1 s; 1.5 s is the hard cap.
+/// Anything longer is cut off, logged, and the boot goes on with the panel unused. The display
+/// must never delay the boot or the boot log.
+const EARLY_BUDGET_US: u64 = 1_500_000;
+/// The budget in use: [`EARLY_BUDGET_US`], or `milk.lcd_budget_ms=` (50..10000; for a very slow
+/// kit, and for the tests that cut the bring-up off).
+static EARLY_LIMIT_US: AtomicU64 = AtomicU64::new(EARLY_BUDGET_US);
+/// When [`init`] started (a [`now_us`] reading; 0: not yet), the start of the early budget.
+static EARLY_T0: AtomicU64 = AtomicU64::new(0);
+
+/// `milk.lcd=probe` was asked for: the probe thread ([`start_probe`]) runs it, late.
+static PROBE_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Log where an early bring-up step gave up.
+fn log_gave_up(phase: &str, b: &Budget) {
+    let Some(g) = b.gave_up() else { return };
+    log_gave_up_at(phase, g);
+}
+
+fn log_gave_up_at(phase: &str, g: GaveUp) {
+    kprintln!(
+        "lcd: gave up after {} ms at step {phase} #{} ({}, {}); the boot goes on with the panel unused",
+        g.ms,
+        g.step,
+        g.op.name(),
+        match g.why {
+            Why::OutOfTime => "out of time",
+            Why::Transfer => "the SPI transfer failed",
+        }
+    );
+}
+
 /// Set up SPI0, the pins and the panel if the command line asks for one. Call once after
 /// `mem::init` (the firmware mailbox needs memory) and before the display layer starts. Logs
-/// what it does; failure leaves the panel off and the boot going.
+/// what it does; failure leaves the panel off and the boot going. The whole of it, and the first
+/// picture [`boot_console`] sends, are held to [`EARLY_BUDGET_US`]. `milk.lcd=probe` does nothing
+/// here at all: it is started late, by [`start_probe`].
 pub fn init() {
     let Some(kind) = option("lcd") else {
         return;
@@ -340,13 +420,26 @@ pub fn init() {
         );
         return;
     };
+    if probing {
+        // Not now: the probe takes minutes, and nothing may wait for it. It starts after the boot
+        // is over and the boot log is saved (start_probe), on a thread of its own. The pins, SPI0
+        // and the mailbox are not touched until then.
+        PROBE_PENDING.store(true, Ordering::Release);
+        kprintln!(
+            "lcd: milk.lcd=probe: the probe starts after the boot is over and the boot log is saved to the card, on its own thread"
+        );
+        return;
+    }
+    EARLY_T0.store(now_us(), Ordering::Release);
+    if let Some(ms) = option("lcd_budget_ms")
+        .and_then(cmdline::parse_num)
+        .filter(|ms| (50..=10_000).contains(ms))
+    {
+        EARLY_LIMIT_US.store(ms as u64 * 1000, Ordering::Release);
+    }
     let (core_hz, core_src) = core_clock();
     spi::set_core_hz(core_hz);
     let s = parse_settings(controller, core_hz);
-    if probing {
-        probe(&s, core_hz, core_src);
-        return;
-    }
     let touch_desc = match (s.touch, s.irq) {
         (false, _) => alloc::string::String::from("off"),
         (true, Some(p)) => alloc::format!("XPT2046 on CE1, pen IRQ GPIO{p}"),
@@ -372,15 +465,22 @@ pub fn init() {
         STATE.store(FAILED, Ordering::Release);
         return;
     }
-    let mut bus = HwBus {
-        dc: s.dc,
-        rst: s.rst,
-        cdiv: s.cdiv,
-        mode: s.mode,
-    };
-    if !pk::init(&s.cfg, &mut bus) {
+    let mut hw = HwBus::of(&s);
+    let mut budget = Budget::new(
+        EARLY_T0.load(Ordering::Acquire),
+        EARLY_LIMIT_US.load(Ordering::Acquire),
+    );
+    let ok = pk::init(
+        &s.cfg,
+        &mut BudgetBus {
+            inner: &mut hw,
+            budget: &mut budget,
+            clock: &HwClock,
+        },
+    );
+    if !ok {
         STATE.store(FAILED, Ordering::Release);
-        kprintln!("lcd: SPI transfers to the panel time out: no display on the header");
+        log_gave_up("init", &budget);
         return;
     }
     // SAFETY: nobody reads the cell before STATE says READY.
@@ -391,7 +491,8 @@ pub fn init() {
     });
     STATE.store(READY, Ordering::Release);
     kprintln!(
-        "lcd: panel initialised (write only: whether it shows anything is for your eyes to say)"
+        "lcd: panel initialised in {} ms (write only: whether it shows anything is for your eyes to say)",
+        budget.elapsed_ms(now_us())
     );
 }
 
@@ -422,12 +523,54 @@ fn connect(s: &Settings) -> bool {
     true
 }
 
-/// Busy-wait until `ms` milliseconds have passed since `t0` (a [`now_us`] reading).
+/// Wait until `ms` milliseconds have passed since `t0` (a [`now_us`] reading), sleeping: this runs
+/// on the probe thread, and the other threads must get the CPU meanwhile.
 fn wait_since(t0: u64, ms: u32) {
     while now_us().saturating_sub(t0) < u64::from(ms) * 1000 {
-        core::hint::spin_loop();
+        crate::sched::sleep_ms(1);
     }
 }
+
+/// Start the thread that runs `milk.lcd=probe`, if the command line asked for it (after
+/// `rpi::lcd::start`, with the scheduler up). The probe is the longest thing the kernel does for a
+/// display (about 100 s of waiting) and it is only a way to find the right options, so it comes
+/// last: it waits until the boot is over (`led: done, solid on`: the stage codes, the desktop) and the
+/// boot log is saved to the card (or, with no log file to wait for, a few seconds more), then runs
+/// at low priority, sleeping between SPI transfers. The ACT LED is not touched: it keeps showing the
+/// boot status ("solid on", then "log saved"). Progress goes to the log like everything else.
+pub fn start_probe() {
+    if !PROBE_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    crate::sched::spawn_prio("lcdprobe", crate::sched::Priority::Low, || {
+        let mut gate = ProbeGate::new(PROBE_GRACE_MS);
+        let t0 = now_us();
+        loop {
+            let now_ms = (now_us() - t0) / 1000;
+            if gate.ready(
+                now_ms,
+                super::led::finished(),
+                super::logfile::saved_quiet(),
+            ) {
+                break;
+            }
+            crate::sched::sleep_ms(250);
+        }
+        let Some(kind) = option("lcd") else { return };
+        let controller = Controller::parse(kind).unwrap_or(Controller::Ili9486);
+        let (core_hz, core_src) = core_clock();
+        spi::set_core_hz(core_hz);
+        let s = parse_settings(controller, core_hz);
+        kprintln!(
+            "lcd: probe: the boot is over and the log is saved ({} s after the thread started), starting",
+            (now_us() - t0) / 1_000_000
+        );
+        probe(&s, core_hz, core_src);
+    });
+}
+
+/// With no log file on the card to wait for, the probe starts this long after the boot is over.
+const PROBE_GRACE_MS: u64 = 8_000;
 
 /// Why a probe set-up was given up.
 #[derive(Clone, Copy)]
@@ -552,12 +695,8 @@ fn probe(base: &Settings, core_hz: u32, core_src: &'static str) {
                 core_hz / 1_000_000,
                 if bl_text.is_empty() { " none by the probe" } else { bl_text.as_str() }
             );
-            let mut bus = HwBus {
-                dc,
-                rst,
-                cdiv,
-                mode: setup.mode,
-            };
+            let mut bus = HwBus::new(dc, rst, cdiv, setup.mode);
+            bus.sleepy = true;
             let cfg = setup.config();
             let (w, h) = (cfg.width(), cfg.height());
             spi::reset();
@@ -700,9 +839,10 @@ pub fn note_source_all() {
 /// released between bands, so the touch chip is never kept waiting long.
 const BAND_ROWS: usize = 16;
 
-/// Send what is dirty, in bands, for at most `budget_us` (what is left stays dirty). `pump`: the
-/// print path, which may only use the bus if it is free. Returns whether anything was sent.
-fn flush(pump: bool, budget_us: u64) -> bool {
+/// Send what is dirty, in bands of `band_rows` rows, for at most `budget_us` (what is left stays
+/// dirty). `pump`: the print path, which may only use the bus if it is free and whose every
+/// transfer is also held to the time left of its budget. Returns whether anything was sent.
+fn flush(pump: bool, budget_us: u64, band_rows: usize) -> bool {
     let Some(s) = settings() else { return false };
     if CRASHED.load(Ordering::Acquire) {
         return false;
@@ -735,15 +875,30 @@ fn flush(pump: bool, budget_us: u64) -> bool {
                 lock_bus(if pump { 0 } else { 30 })
             };
             let Some(bus) = bus else {
+                if pump {
+                    THROTTLE.lock().note_dropped();
+                }
                 mark(Rect::new(r.x, y, r.w, r.y1() - y));
                 for rest in &rects[ri + 1..n] {
                     mark(*rest);
                 }
                 break 'rects;
             };
-            let band = Rect::new(r.x, y, r.w, BAND_ROWS.min(r.y1() - y));
-            ok = send(&s, &[band], view);
+            let band = Rect::new(r.x, y, r.w, band_rows.min(r.y1() - y));
+            let left = budget_us.saturating_sub(now_us().saturating_sub(t0));
+            ok = send(&s, &[band], view, if pump { left.max(1) } else { 0 });
             drop(bus);
+            if !ok && pump && now_us().saturating_sub(t0) >= budget_us {
+                // The print path ran out of its few milliseconds in the middle of a band: that is
+                // not the panel failing. The band is sent again later, with the rest.
+                THROTTLE.lock().note_dropped();
+                ok = true;
+                mark(Rect::new(r.x, y, r.w, r.y1() - y));
+                for rest in &rects[ri + 1..n] {
+                    mark(*rest);
+                }
+                break 'rects;
+            }
             if !ok {
                 break 'rects;
             }
@@ -776,14 +931,26 @@ fn dirty_left() -> bool {
 }
 
 /// Draw `rects` of the panel from what the mode says: the shadow (text) or the desktop through
-/// the view. No allocation.
-fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
-    let mut bus = HwBus {
-        dc: s.dc,
-        rst: s.rst,
-        cdiv: s.cdiv,
-        mode: s.mode,
-    };
+/// the view. No allocation. `limit_us` (0: none) is the most the whole send may take.
+fn send(s: &Settings, rects: &[Rect], view: View, limit_us: u64) -> bool {
+    let mut hw = HwBus::of(s);
+    if limit_us == 0 {
+        return send_on(s, rects, view, &mut hw);
+    }
+    let mut budget = Budget::new(now_us(), limit_us);
+    send_on(
+        s,
+        rects,
+        view,
+        &mut BudgetBus {
+            inner: &mut hw,
+            budget: &mut budget,
+            clock: &HwClock,
+        },
+    )
+}
+
+fn send_on<B: Bus>(s: &Settings, rects: &[Rect], view: View, bus: &mut B) -> bool {
     let (w, h) = (s.cfg.width(), s.cfg.height());
     if MODE.load(Ordering::Relaxed) == TEXT {
         // SAFETY: the static shadow, w * h words; the console may be drawing on it, which at worst
@@ -791,7 +958,7 @@ fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
         let px = unsafe { core::slice::from_raw_parts(SHADOW.0.get() as *const u32, w * h) };
         rects
             .iter()
-            .all(|r| pk::draw_rect(&s.cfg, &mut bus, *r, &mut Pixels { px, width: w }))
+            .all(|r| pk::draw_rect(&s.cfg, bus, *r, &mut Pixels { px, width: w }))
     } else {
         let Some(fb) = display::framebuffer() else {
             return true;
@@ -805,7 +972,7 @@ fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
         rects.iter().all(|r| {
             pk::draw_rect(
                 &s.cfg,
-                &mut bus,
+                bus,
                 *r,
                 &mut ViewSource {
                     view,
@@ -817,30 +984,74 @@ fn send(s: &Settings, rects: &[Rect], view: View) -> bool {
     }
 }
 
-/// The most one `kprintln!` spends on the panel.
-const PUMP_BUDGET_US: u64 = 25_000;
+/// Rate limit and drop counter of the print path's sends to the panel.
+static THROTTLE: SpinLock<Throttle> = SpinLock::new(Throttle::new());
+/// Dropped sends already reported in the log.
+static DROPS_REPORTED: AtomicU32 = AtomicU32::new(0);
+/// The panel's own thread is running: it sends the log's rows, the print path does not.
+static THREAD_UP: AtomicBool = AtomicBool::new(false);
+
+/// Rows the print path sends per band: what fits in half of its budget on the wire.
+fn pump_band_rows(s: &Settings) -> usize {
+    let ns_per_bit = u64::from(s.cdiv) * 1_000_000_000 / u64::from(spi::core_hz().max(1));
+    let row_bytes = (s.cfg.width() * s.cfg.controller.bytes_per_pixel()) as u64;
+    bud::pump_rows(row_bytes, ns_per_bit, bud::PUMP_BUDGET_US / 2).min(BAND_ROWS)
+}
 
 /// From `kprintln!`, outside the print lock: send what the log console changed, where that is
-/// safe and cheap enough.
+/// safe and cheap enough. A line costs the log at most [`bud::PUMP_BUDGET_US`] (3 ms) of this, and
+/// at most one line in [`bud::PUMP_GAP_US`] pays it: the others are dropped and counted (what they
+/// changed stays marked and goes out with the next send). Once the panel's own thread runs, the
+/// print path sends nothing at all. Nothing here ever waits for the bus.
 pub fn pump() {
     if STATE.load(Ordering::Relaxed) != READY
         || MODE.load(Ordering::Relaxed) != TEXT
         || CRASHED.load(Ordering::Relaxed)
+        || THREAD_UP.load(Ordering::Relaxed)
     {
         return;
     }
-    if IRQS_LIVE.load(Ordering::Relaxed) && !crate::sync::irqs_enabled() {
+    let drop_it = IRQS_LIVE.load(Ordering::Relaxed) && !crate::sync::irqs_enabled();
+    if drop_it || !THROTTLE.lock().allow(now_us()) {
+        if drop_it {
+            THROTTLE.lock().note_dropped();
+        }
         return;
     }
-    flush(true, PUMP_BUDGET_US);
+    let Some(s) = settings() else { return };
+    flush(true, bud::PUMP_BUDGET_US, pump_band_rows(&s));
+}
+
+/// Tell the log if print-path sends were dropped since the last time. Not from `pump` itself (a
+/// line printed there would pump again); from the panel's thread.
+fn report_drops() {
+    let n = THROTTLE.lock().dropped;
+    if n != DROPS_REPORTED.swap(n, Ordering::Relaxed) {
+        kprintln!(
+            "lcd: {n} panel update(s) from the log were dropped so far (the panel is behind: a line never waits for it, what it changed is sent later)"
+        );
+    }
 }
 
 // ---- the boot console and the crash screen -------------------------------------------------------
 
 /// The kernel log on the panel, as early as possible: replay what was logged so far on a text
-/// console of the panel's own size and keep `kprintln!` going there until the desktop starts.
+/// console of the panel's own size and keep `kprintln!` going there until the desktop starts. The
+/// first full picture is the last part of the early bring-up and shares its budget
+/// ([`EARLY_BUDGET_US`] from the start of [`init`]): if it does not fit, the panel is given up, the
+/// console removed and the boot goes on without it.
 pub fn boot_console() {
     let Some(s) = settings() else { return };
+    let budget = Budget::new(
+        EARLY_T0.load(Ordering::Acquire),
+        EARLY_LIMIT_US.load(Ordering::Acquire),
+    );
+    restore_console(&s, Some(budget));
+}
+
+/// Draw the log console and send the first picture of it. With a budget the picture is sent in
+/// bands held to it; false (the panel given up) if they do not fit.
+fn restore_console(s: &Settings, budget: Option<Budget>) -> bool {
     let mut console = Console::with_scale(shadow_surface(&s.cfg), 1);
     console.set_wrap(true);
     crate::klog::read_since(0, |bytes| {
@@ -850,13 +1061,59 @@ pub fn boot_console() {
     });
     let _ = console.take_dirty();
     sink::install_lcd_console(console);
-    mark_all();
     let t = now_us();
-    flush(false, u64::MAX);
+    let Some(mut budget) = budget else {
+        mark_all();
+        flush(false, u64::MAX, BAND_ROWS);
+        kprintln!(
+            "lcd: boot log on the panel (first full picture {} ms)",
+            (now_us() - t) / 1000
+        );
+        return true;
+    };
+    // Whole picture, in bands, each transfer held to what is left of the budget.
+    if let Some(i) = INNER.lock().as_mut() {
+        i.dirty.clear();
+    }
+    budget.next_phase();
+    let mut ok = true;
+    let mut y = 0;
+    let h = s.cfg.height();
+    while y < h && ok {
+        let band = Rect::new(0, y, s.cfg.width(), BAND_ROWS.min(h - y));
+        let mut hw = HwBus::of(s);
+        // SAFETY: the static shadow, w * h words; the console may be drawing on it, which at worst
+        // shows a half-drawn line.
+        let px = unsafe {
+            core::slice::from_raw_parts(SHADOW.0.get() as *const u32, s.cfg.width() * h)
+        };
+        ok = pk::draw_rect(
+            &s.cfg,
+            &mut BudgetBus {
+                inner: &mut hw,
+                budget: &mut budget,
+                clock: &HwClock,
+            },
+            band,
+            &mut Pixels {
+                px,
+                width: s.cfg.width(),
+            },
+        );
+        y += band.h;
+    }
+    if !ok {
+        STATE.store(FAILED, Ordering::Release);
+        sink::remove_lcd_console();
+        log_gave_up("first picture", &budget);
+        return false;
+    }
     kprintln!(
-        "lcd: boot log on the panel (first full picture {} ms)",
-        (now_us() - t) / 1000
+        "lcd: boot log on the panel (first full picture {} ms, {} ms since the bring-up began)",
+        (now_us() - t) / 1000,
+        budget.elapsed_ms(now_us())
     );
+    true
 }
 
 /// Draw the crash screen on the panel: the end of the log, through `f`, on a plain scrolling
@@ -874,12 +1131,7 @@ pub fn crash_paint(f: impl FnOnce(&mut Console)) -> bool {
     let mut console = Console::with_scale(shadow_surface(&s.cfg), 1);
     f(&mut console);
     let _ = console.take_dirty();
-    let mut bus = HwBus {
-        dc: s.dc,
-        rst: s.rst,
-        cdiv: s.cdiv,
-        mode: s.mode,
-    };
+    let mut bus = HwBus::of(&s);
     let (w, h) = (s.cfg.width(), s.cfg.height());
     // SAFETY: the static shadow just drawn on.
     let px = unsafe { core::slice::from_raw_parts(SHADOW.0.get() as *const u32, w * h) };
@@ -1024,10 +1276,16 @@ fn thread() {
     }
     let mut tracker = Tracker::new();
     let mut tick = 0u32;
+    // From here the print path leaves the panel to this thread.
+    THREAD_UP.store(true, Ordering::Release);
+    report_drops();
     loop {
         // Touch every 10 ms; while there is something to send, the panel gets the time in between.
         crate::sched::sleep_ms(if dirty_left() { 1 } else { 10 });
         tick = tick.wrapping_add(1);
+        if tick % 500 == 0 {
+            report_drops();
+        }
         if !ready() || CRASHED.load(Ordering::Acquire) {
             continue;
         }
@@ -1038,7 +1296,7 @@ fn thread() {
             ensure_view(&s);
         }
         // The desktop is sent in the thread's time, a few milliseconds at a time.
-        flush(false, 8_000);
+        flush(false, 8_000, BAND_ROWS);
     }
 }
 
@@ -1130,7 +1388,7 @@ fn calibrate(s: &Settings) -> Option<Cal> {
             surf.fill_rect(x - 1, y - 14, 3, 29, hot);
         }
         mark_all();
-        flush(false, u64::MAX);
+        flush(false, u64::MAX, BAND_ROWS);
     };
     kprintln!("touch: calibration, touch the four crosses (milk.touch_cal=ask)");
     for (i, t) in targets.iter().enumerate() {
@@ -1219,13 +1477,13 @@ fn calibrate(s: &Settings) -> Option<Cal> {
                 1,
             );
             mark_all();
-            flush(false, u64::MAX);
+            flush(false, u64::MAX, BAND_ROWS);
             // Long enough to copy it down.
             crate::sched::sleep_ms(12_000);
         }
         None => kprintln!("touch: the four touches do not give a calibration, keeping the default"),
     }
     // The boot log comes back (the klog has everything, including the lines above).
-    boot_console();
+    restore_console(s, None);
     cal
 }

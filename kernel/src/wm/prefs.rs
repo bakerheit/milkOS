@@ -101,6 +101,8 @@ impl Prefs {
 
     fn parse(text: &str) -> Prefs {
         let mut p = Prefs::DEFAULT;
+        // The display's own size unless the file names another mode this display offers.
+        p.resolution = super::screen::native();
         for line in text.lines() {
             let Some((k, v)) = line.split_once('=') else {
                 continue;
@@ -118,7 +120,7 @@ impl Prefs {
                 "resolution" => {
                     if let Some((w, h)) = v.split_once('x')
                         && let (Ok(w), Ok(h)) = (w.trim().parse(), h.trim().parse())
-                        && super::screen::MODES.contains(&(w, h))
+                        && super::screen::offered(w, h)
                     {
                         p.resolution = (w, h);
                     }
@@ -155,7 +157,13 @@ pub fn set(p: Prefs) {
 
 /// Read the settings file (defaults if there is none).
 pub fn load() -> Prefs {
-    let p = fs::read_to_string(PATH).map_or(Prefs::DEFAULT, |t| Prefs::parse(&t));
+    let p = fs::read_to_string(PATH).map_or_else(
+        |_| Prefs {
+            resolution: super::screen::native(),
+            ..Prefs::DEFAULT
+        },
+        |t| Prefs::parse(&t),
+    );
     set(p);
     p
 }

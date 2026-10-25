@@ -289,6 +289,47 @@ impl Cal {
     }
 }
 
+/// The raw range the XPT2046 reads over a whole resistive glass of the HDMI kits: the usual
+/// `xmin=200 xmax=3900 ymin=200 ymax=3900` of those panels' device-tree overlays.
+pub const GLASS_MIN: i32 = 200;
+pub const GLASS_MAX: i32 = 3900;
+
+impl Cal {
+    /// The starting map for a touch glass laid over a `w` x `h` screen with no SPI panel in the
+    /// way (the 4-inch 800x480 HDMI kit and its kind): `turn` 0 is the usual orientation, raw X
+    /// along the screen's width and raw Y down its height, raw 200..3900 spanning the screen;
+    /// 90/180/270 are the other ways a glass can be fitted (rotated a quarter turn, upside down,
+    /// three quarters). A good first guess, not a calibration: `milk.touch_cal=` overrides it,
+    /// `milk.touch_cal=ask` measures it.
+    pub fn default_for_screen(w: i32, h: i32, turn: Rotation) -> Cal {
+        let span = (GLASS_MAX - GLASS_MIN) as i64;
+        // One screen axis of `size` pixels from one raw axis: (factor 16.16, offset), inverted
+        // when the glass runs the other way.
+        let axis = |size: i32, inv: bool| -> (i32, i32) {
+            let n = (size as i64 - 1).max(1);
+            let k = n * 65536 / span;
+            let lo = GLASS_MIN as i64 * n / span;
+            if inv {
+                (-(k as i32), (n + lo) as i32)
+            } else {
+                (k as i32, -(lo as i32))
+            }
+        };
+        let (kx_w, cx_w) = axis(w, false);
+        let (kx_wi, cx_wi) = axis(w, true);
+        let (ky_h, cy_h) = axis(h, false);
+        let (ky_hi, cy_hi) = axis(h, true);
+        match turn {
+            Rotation::Deg0 => Cal { a: kx_w, b: 0, c: cx_w, d: 0, e: ky_h, f: cy_h },
+            // x follows raw Y, y runs against raw X.
+            Rotation::Deg90 => Cal { a: 0, b: kx_w, c: cx_w, d: ky_hi, e: 0, f: cy_hi },
+            Rotation::Deg180 => Cal { a: kx_wi, b: 0, c: cx_wi, d: 0, e: ky_hi, f: cy_hi },
+            // x runs against raw Y, y follows raw X.
+            Rotation::Deg270 => Cal { a: 0, b: kx_wi, c: cx_wi, d: ky_h, e: 0, f: cy_h },
+        }
+    }
+}
+
 /// Solve the 3x3 system `m * s = v` (Gaussian elimination, partial pivoting).
 fn solve3(mut m: [[f64; 3]; 3], mut v: [f64; 3]) -> Option<[f64; 3]> {
     for col in 0..3 {

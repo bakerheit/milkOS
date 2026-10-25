@@ -28,6 +28,8 @@
 #           screen as before); 11: bad option values are refused and the defaults used; 12: an unknown controller; 14, 15: `milk.lcd=probe` (every candidate set-up shows its number card, colour flashes and text card, then the boot goes on; 15: its own options).
 #           What qemu cannot show: whether any pixel reaches a glass (the host tests of rpikit's panel model prove the
 #           byte stream; the real board is the test of the wiring).
+#   boots 20 to 25: the framebuffer's size (milk.fbsize=800x480 / 1280x768 / auto / refused / 1920x1080: the log lines, a screendump of the right size, the
+#           boot console and crash screen at 800x480) and the touch chip with no SPI panel (milk.touch=xpt2046: pins logged, late start, no invented events).
 #   boots 16 to 19: the exception dump (docs/raspberry-pi.md, "Reading a crash"): `milk.crashtest=serror` runs a fake SError (qemu cannot raise a real
 #           one) through the real crash path at a checkpoint, `milk.crashtest=dabt` is a real data abort right after a checkpoint, and
 #           `milk.serror=off` makes the checkpoints no-ops, `milk.serror=paranoid` adds one after every register write; the ESR decode, FAR/ELR/SPSR, the checkpoint attribution and the register write
@@ -157,12 +159,12 @@ out system | grep -Eq '^memory +[0-9]+ MB' && ok "system: $(out system | grep '^
 out disks | grep -q 'milkfs.*/Volumes/Milk' && ok "disks lists the card's milkfs" || bad "disks: $(out disks)"
 out "text show /Users/milk/Documents/pi.txt" | grep -q 'hello-from-the-pi' && ok "a file written on the card reads back" || bad "no file: $(out 'text show /Users/milk/Documents/pi.txt')"
 # The screen: 1024x768, with a desktop's worth of colours in it (not black, not one flat colour).
-desktop_shot() { # PNG -> 0 if it shows a desktop
-  [ -s "$1" ] && python3 -I scripts/png_check.py "$1" >/dev/null 2>&1 && python3 -I - "$1" <<'PY'
+desktop_shot() { # PNG [W H] -> 0 if it shows a desktop (of 1024x768, or W x H)
+  [ -s "$1" ] && python3 -I scripts/png_check.py "$1" >/dev/null 2>&1 && python3 -I - "$1" "${2:-1024}" "${3:-768}" <<'PY'
 import struct, sys, zlib
 d = open(sys.argv[1], "rb").read()
 w, h = struct.unpack(">II", d[16:24])
-assert (w, h) == (1024, 768), (w, h)
+assert (w, h) == (int(sys.argv[2]), int(sys.argv[3])), (w, h)
 i, idat, bpp = 8, b"", 0
 while i < len(d):
     n, = struct.unpack(">I", d[i:i+4]); t = d[i+4:i+8]
@@ -426,6 +428,83 @@ check '^serror: paranoid: checkpoints and write breadcrumbs on, and a checkpoint
 check '^\*\*\* KERNEL EXCEPTION: SError \*\*\*' "boot 19: the dump comes out of paranoid mode (the early boot ran through a checkpoint per register write)"
 check '^\[sdhci\] .*card ready' "boot 19: the SD card was brought up with a checkpoint after every register write"
 check "^  SError at checkpoint 'crashtest-serror' on cpu 0" "boot 19: the fake SError"
+
+# ---- boots 20 to 25: the framebuffer's size (docs/raspberry-pi.md, "HDMI displays"). qemu's firmware says its display is 640x480
+# (no monitor behind it); pi_dtb.py pins milk.fbsize=1024x768 for the boots above, these name their own. ----
+dsize() { # PNG -> "WxH"
+  python3 -I -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); print("%dx%d" % struct.unpack(">II", d[16:24]))' "$1"
+}
+# boot 20: the 4-inch panel's own size, forced, with its touch chip and no SPI panel: the desktop at 800x480, the touch driver late and quiet.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.touch=xpt2046"
+DTB_ARGS=(-dtb "$T/fb.dtb")
+boot 20 "wait@300:wm: desktop up" "wait@300:touch: running" "send:system" "wait:$P" "send:text show /proc/input" "wait:$P"
+python3 scripts/qmp.py "$QMP" screendump "$T/fb800.png" >/dev/null 2>&1 || true
+stop
+check '^mbox: display size the firmware has: 640x480 \(get physical width/height, tag 0x40003\)' "boot 20: the firmware's display size is logged, and where it came from"
+check '^rpi fb: display size 640x480 \(firmware, physical size\), framebuffer 800x480: forced by milk.fbsize' "boot 20: milk.fbsize=800x480 is used, and the log says why"
+check '^rpi fb: 800x480x32 pitch 3200 at ' "boot 20: the framebuffer is 800x480"
+check '^display: rpi mailbox framebuffer 800x480 XRGB8888' "boot 20: the boot log console follows the size"
+check 'wm: desktop up' "boot 20: the desktop"
+check '^touch: XPT2046 on SPI0 CE1 \(GPIO 7\), MISO GPIO 9, MOSI GPIO 10, SCLK GPIO 11, .*pen IRQ GPIO 17; the display.s pins .* are not touched' "boot 20: milk.touch=xpt2046: the pins used are logged, the display's are not touched"
+check '^touch: running, map raw -> 800x480 pixels \(default\): milk.touch_cal=14152,0,-43,0,8484,-25 \(rot 0\)' "boot 20: the touch map is for the actual framebuffer size"
+has '^lcd: ' && bad "boot 20: the SPI panel driver said something with no milk.lcd" || ok "boot 20: no SPI panel driver output"
+[ "$(tr -d '\r' < "$LOG" | grep -an '^led: done, solid on' | head -1 | cut -d: -f1)" -lt "$(tr -d '\r' < "$LOG" | grep -an '^touch: XPT2046' | head -1 | cut -d: -f1)" ] && ok "boot 20: the touch thread started after the boot was over" || bad "boot 20: the touch thread did not wait for the end of the boot"
+has 'KERNEL PANIC|kernel panic|touch: .*(timed out|does not answer)' && bad "boot 20: a panic or a touch time-out" || ok "boot 20: no panic, no time-out"
+out system | grep -Eq '^CPUs +4' && ok "boot 20: the system runs" || bad "boot 20: system: $(out system)"
+out "text show /proc/input" | tr -d ' ' | grep -Eq '^buttons0$' && out "text show /proc/input" | tr -d ' ' | grep -Eq '^moves0$' && ok "boot 20: nothing is attached to the touch chip: no pointer events are invented" || bad "boot 20: /proc/input: $(out 'text show /proc/input' | tr '\n' ' ')"
+desktop_shot "$T/fb800.png" 800 480 && ok "boot 20: the screendump is an 800x480 desktop" || bad "boot 20: the screen is not an 800x480 desktop ($(dsize "$T/fb800.png"))"
+
+# boot 21: 1280x768, the 5:3 size for the panel behind a 1024x768 firmware mode, with the touch map for it, and a touch calibration given on the line.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=1280x768 milk.touch=xpt2046 milk.touch_rot=90 milk.touch_irq=-1"
+boot 21 "wait@300:wm: desktop up" "wait@300:touch: running"
+python3 scripts/qmp.py "$QMP" screendump "$T/fb1280.png" >/dev/null 2>&1 || true
+stop
+check '^rpi fb: 1280x768x32 pitch 5120 at ' "boot 21: the framebuffer is 1280x768"
+check '^touch: .*pen IRQ none \(polled\)' "boot 21: milk.touch_irq=-1 polls"
+check '^touch: running, map raw -> 1280x768 pixels \(default\): .* \(rot 90\)' "boot 21: the touch map follows the framebuffer, and milk.touch_rot=90"
+desktop_shot "$T/fb1280.png" 1280 768 && ok "boot 21: the screendump is a 1280x768 desktop" || bad "boot 21: the screen is not a 1280x768 desktop ($(dsize "$T/fb1280.png"))"
+
+# boot 22: a crash at 800x480: the boot log console and the crash screen fill the panel, the sign-of-life band is as wide as it.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=800x480 milk.crashtest=early"
+boot 22 "wait@300:KERNEL PANIC"
+sleep 2
+python3 scripts/qmp.py "$QMP" screendump "$T/fbcrash.png" >/dev/null 2>&1 || true
+stop
+if [ -s "$T/fbcrash.png" ] && [ "$(dsize "$T/fbcrash.png")" = 800x480 ]; then
+  case "$(pixels "$T/fbcrash.png" 400,2 400,5 795,2 795,5)" in
+    "48,208,96 255,255,255 48,208,96 255,255,255") ok "boot 22: an 800x480 screen, the sign-of-life band across all of it" ;;
+    *) bad "boot 22: no band across the 800x480 screen: $(pixels "$T/fbcrash.png" 400,2 400,5 795,2 795,5)" ;;
+  esac
+  case "$(pixels "$T/fbcrash.png" 795,478 790,470)" in
+    "22,21,19 22,21,19") ok "boot 22: the text console fills the bottom right corner of the 800x480 screen" ;;
+    *) bad "boot 22: the console does not fill the screen: $(pixels "$T/fbcrash.png" 795,478 790,470)" ;;
+  esac
+else
+  bad "boot 22: no 800x480 screendump ($(dsize "$T/fbcrash.png" 2>/dev/null))"
+fi
+
+# boot 23: milk.fbsize=auto: the firmware's own display size (qemu says 640x480), the smallest the desktop is made for.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=auto"
+boot 23 "wait@300:wm: desktop up"
+python3 scripts/qmp.py "$QMP" screendump "$T/fbauto.png" >/dev/null 2>&1 || true
+stop
+check "^rpi fb: display size 640x480 \\(firmware, physical size\\), framebuffer 640x480: the firmware's display mode" "boot 23: milk.fbsize=auto follows the firmware"
+desktop_shot "$T/fbauto.png" 640 480 && ok "boot 23: the screendump is a 640x480 desktop" || bad "boot 23: not a 640x480 desktop ($(dsize "$T/fbauto.png"))"
+
+# boot 24: a value that cannot be used is said so and the firmware's size is followed.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=99999x1"
+boot 24 "wait@300:wm: desktop up"
+stop
+check '^rpi fb: milk.fbsize is outside 640x400..4096x2160, using auto' "boot 24: a size out of range is refused"
+check '^rpi fb: 640x480x32 pitch 2560 at ' "boot 24: and the firmware's size is used"
+
+# boot 25: 1920x1080 (a television): the desktop at that size.
+python3 scripts/pi_dtb.py "$T/fb.dtb" --cmdline "milk.fbsize=1920x1080"
+boot 25 "wait@300:wm: desktop up"
+python3 scripts/qmp.py "$QMP" screendump "$T/fb1080.png" >/dev/null 2>&1 || true
+stop
+check '^rpi fb: 1920x1080x32 pitch 7680 at ' "boot 25: the framebuffer is 1920x1080"
+desktop_shot "$T/fb1080.png" 1920 1080 && ok "boot 25: the screendump is a 1920x1080 desktop" || bad "boot 25: not a 1920x1080 desktop ($(dsize "$T/fb1080.png"))"
 
 # ---- boot 13 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
 if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then

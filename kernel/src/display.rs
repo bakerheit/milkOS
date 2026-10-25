@@ -54,7 +54,17 @@ pub fn init() {
         let hdmi = if lcd::primary_wanted() {
             None
         } else {
-            fb::init(WIDTH, HEIGHT)
+            // The size the firmware's display mode has (800x480 for the 4-inch HDMI panel), or
+            // milk.fbsize=; 1024x768 when it says nothing usable. A size the firmware refuses
+            // falls back to 1024x768 too.
+            let (w, h) = fb::choose_size();
+            fb::init(w, h).or_else(|| {
+                if (w, h) == (WIDTH, HEIGHT) {
+                    return None;
+                }
+                kprintln!("rpi fb: {w}x{h} did not work, trying {WIDTH}x{HEIGHT}");
+                fb::init(WIDTH, HEIGHT)
+            })
         };
         if let Some(fb) = hdmi {
             BACKEND.store(RPIFB, Ordering::Release);
@@ -180,6 +190,8 @@ pub fn take_framebuffer() -> Option<Surface<'static>> {
     // The SPI panel, if there is one, shows the desktop too from here on.
     #[cfg(feature = "raspi")]
     if fb.is_some() {
+        // The touch calibration helper (milk.touch_cal=ask) has the screen until it is done.
+        crate::rpi::touch::desktop_starting();
         crate::rpi::lcd::desktop_started();
     }
     fb

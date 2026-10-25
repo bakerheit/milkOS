@@ -138,6 +138,15 @@ pub fn connect_pins() {
     }
 }
 
+/// Put only the pins a touch chip on chip select `cs` (0 or 1) needs on SPI0 (ALT0): MISO 9, MOSI 10, SCLK 11
+/// and that chip select (GPIO 7 for CE1, GPIO 8 for CE0). The other chip select (the display's, on a kit
+/// that has one) stays as the firmware left it.
+pub fn connect_pins_for_touch(cs: u8) {
+    for pin in [9, 10, 11, if cs == 0 { 8 } else { 7 }] {
+        set_function(pin, Func::Alt0);
+    }
+}
+
 /// Is there an SPI0 controller that answers? Its clock register keeps what is written, and the
 /// transmit FIFO of an idle controller has room. (Unimplemented or absent hardware reads as 0.)
 pub fn present() -> bool {

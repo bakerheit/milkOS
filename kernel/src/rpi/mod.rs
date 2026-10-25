@@ -8,6 +8,7 @@
 //! * [`sdhci`]: the SD host controller (EMMC2 on a real board; qemu's raspi4b has the EMMC1
 //!   one), as a block device.
 //! * [`genet`]: the Gigabit Ethernet MAC. Not modelled by qemu, so untested until hardware.
+//! * [`touch`]: the XPT2046 touch chip on SPI0 with no SPI panel (`milk.touch=xpt2046`): the touch glass of an HDMI display.
 //! * [`spi`], [`lcd`]: SPI0 and the GPIO pins, and the 3.5-inch SPI display with its touch chip on
 //!   them (off unless `milk.lcd=` names a controller; rpikit::lcd and rpikit::touch are the pure parts).
 //!
@@ -28,6 +29,7 @@ pub mod power;
 pub mod rng;
 pub mod sdhci;
 pub mod spi;
+pub mod touch;
 
 use core::arch::asm;
 

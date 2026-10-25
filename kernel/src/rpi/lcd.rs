@@ -50,6 +50,12 @@ use crate::input::{self, MouseButton};
 use crate::sync::SpinLock;
 use crate::{display, kprintln, sink};
 
+/// Does the command line name an SPI panel (`milk.lcd=<controller>` or `probe`)? Then the panel driver
+/// owns SPI0 and reads the touch chip itself ([`super::touch`] stays out of it).
+pub fn configured() -> bool {
+    !matches!(option("lcd"), None | Some(b"" | b"off" | b"none" | b"0"))
+}
+
 /// What [`STATE`] says.
 const OFF: u8 = 0;
 const READY: u8 = 1;
@@ -352,7 +358,7 @@ impl touch::TouchBus for TouchHw {
 const FALLBACK_CORE_HZ: u32 = 500_000_000;
 
 /// The core clock for the dividers, and a few words on where it came from (for the log).
-fn core_clock() -> (u32, &'static str) {
+pub(super) fn core_clock() -> (u32, &'static str) {
     // The divider comes from the highest rate the core clock reaches (it follows the load: a
     // divider for the idle rate would make the bus faster than asked when the clock rises).
     match mailbox::max_clock_rate(clock::CORE) {

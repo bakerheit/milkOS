@@ -40,6 +40,8 @@ enum Do {
     Spaces,
     DontShow,
     Close,
+    /// The next page of cards (a short window shows four at a time).
+    NextPage,
 }
 
 struct Card {
@@ -57,6 +59,8 @@ pub struct Welcome {
     /// Last thing a button did (shown in the footer).
     said: String,
     hover: Option<(i32, i32)>,
+    /// Which page of cards a short window (an 800x480 panel) shows.
+    page: usize,
 }
 
 fn has_milkfs() -> bool {
@@ -108,6 +112,7 @@ impl Welcome {
             closing: false,
             said: String::new(),
             hover: None,
+            page: 0,
         }
     }
 
@@ -294,6 +299,10 @@ impl Welcome {
                 self.closing = true;
                 String::new()
             }
+            Do::NextPage => {
+                self.page += 1; // wraps in draw
+                String::new()
+            }
         };
     }
 }
@@ -318,29 +327,54 @@ impl WindowContents for Welcome {
 
     fn draw(&mut self, p: &mut Painter, w: i32, h: i32, _focused: bool) {
         self.hits.clear();
+        // A short window (an 800x480 panel): a one-line header, tighter cards, four to a page.
+        let compact = h < 540;
+        let (top, card_h, pitch, btn_y) = if compact {
+            (50, 108, 15, 80)
+        } else {
+            (TOP, CARD_H, 17, CARD_H - 32)
+        };
         // Header: the drop, hello, and the promise.
-        icons::drop_shape(p, 44, 52, 18, 40, BLUE);
-        icons::drop_shape(p, 44, 52, 14, 32, MILK);
-        let x2 = p.text_x(78, 20, "Welcome to ", ESPRESSO, 2, true);
+        icons::drop_shape(p, 44, if compact { 34 } else { 52 }, 18, 40, BLUE);
+        icons::drop_shape(p, 44, if compact { 34 } else { 52 }, 14, 32, MILK);
+        let x2 = p.text_x(78, if compact { 10 } else { 20 }, "Welcome to ", ESPRESSO, 2, true);
         let mark = crate::sysfont::Font::of(crate::sysfont::BRAND, 2, crate::sysfont::Weight::Bold);
-        let x3 = p.text_f(x2, 20, "milk", ESPRESSO, mark);
-        p.text_f(x3, 20, "OS", BLUE, mark);
-        p.text_p(
-            78,
-            58,
-            "A small system made of milk. Six things it does differently;",
-            COCOA,
-            false,
-        );
-        p.text_p(78, 76, "every button below really does it.", COCOA, false);
-        // Cards, two columns.
-        let x0 = (w - 2 * CARD_W - GAP) / 2;
+        let x3 = p.text_f(x2, if compact { 10 } else { 20 }, "milk", ESPRESSO, mark);
+        p.text_f(x3, if compact { 10 } else { 20 }, "OS", BLUE, mark);
+        if compact {
+            p.text_p(x3 + 56, 24, "Every button below really does it.", COCOA, false);
+        } else {
+            p.text_p(
+                78,
+                58,
+                "A small system made of milk. Six things it does differently;",
+                COCOA,
+                false,
+            );
+            p.text_p(78, 76, "every button below really does it.", COCOA, false);
+        }
+        // Cards, two columns; as many rows as the window has room for, the rest on later pages.
+        // (Cards are 332 wide; a window narrower than 700 gets narrower ones and shorter lines.)
+        let card_w = ((w - 2 * 12 - GAP) / 2).min(CARD_W);
+        let x0 = (w - 2 * card_w - GAP) / 2;
+        let gap = if compact { 8 } else { GAP };
+        let rows = (((h - top - 54 + gap) / (card_h + gap)).clamp(1, 3)) as usize;
+        let per_page = rows * 2;
+        let pages = 6usize.div_ceil(per_page);
+        self.page %= pages;
         // The pills paint their own hover (SPEC Buttons).
         let mut pills: Vec<Rect> = Vec::new();
-        for (i, c) in self.cards().iter().enumerate() {
-            let cx = x0 + (i as i32 % 2) * (CARD_W + GAP);
-            let cy = TOP + (i as i32 / 2) * (CARD_H + GAP);
-            let r = Rect::new(cx, cy, CARD_W, CARD_H);
+        for (i, c) in self
+            .cards()
+            .iter()
+            .enumerate()
+            .skip(self.page * per_page)
+            .take(per_page)
+        {
+            let i = i - self.page * per_page;
+            let cx = x0 + (i as i32 % 2) * (card_w + GAP);
+            let cy = top + (i as i32 / 2) * (card_h + gap);
+            let r = Rect::new(cx, cy, card_w, card_h);
             p.rrect_r(r, 16, CREAM, 255);
             p.rrect_stroke(r.x, r.y, r.w, r.h, 16, 1, SAND, 255);
             icons::draw(
@@ -355,13 +389,15 @@ impl WindowContents for Welcome {
                 c.bg == MILK,
             );
             p.text_p(cx + 62, cy + 14, c.title, ESPRESSO, true);
+            let body = crate::sysfont::Font::body(false);
             for (k, l) in c.lines.iter().enumerate() {
-                p.text_p(cx + 62, cy + 34 + k as i32 * 17, l, COCOA, false);
+                let l = body.truncate(l, card_w - 62 - 10);
+                p.text_p(cx + 62, cy + 34 + k as i32 * pitch, &l, COCOA, false);
             }
             let mut bx = cx + 62;
             for (label, act) in &c.buttons {
                 let bw = button::pill_w(label);
-                let br = Rect::new(bx, cy + CARD_H - 32, bw, button::PILL_H);
+                let br = Rect::new(bx, cy + btn_y, bw, button::PILL_H);
                 let kind = if act.is_some() {
                     Kind::Primary
                 } else {
@@ -403,9 +439,21 @@ impl WindowContents for Welcome {
         let end = p.text_p(cb.x + 26, fy + 5, "Don't show again", ESPRESSO, false);
         self.hits
             .push((Rect::new(cb.x, cb.y - 4, end - cb.x + 6, 26), Do::DontShow));
+        // More cards than fit: "More" turns the page.
+        let mut right = w - x0 - 132;
+        if pages > 1 {
+            let label = format!("More ({}/{pages})", self.page + 1);
+            let bw = button::pill_w(&label);
+            let br = Rect::new(right - 12 - bw, fy + 1, bw, button::PILL_H);
+            let hov = self.hover.is_some_and(|(x, y)| hit(&br, x, y));
+            button::paint(p, br, &label, Kind::Secondary, State::hover(hov));
+            pills.push(br);
+            self.hits.push((br, Do::NextPage));
+            right = br.x - 12;
+        }
         if !self.said.is_empty() {
-            // Clear of "Get started" on the right.
-            let room = w - x0 - 132 - 16 - (end + 24);
+            // Clear of "Get started" (and "More") on the right.
+            let room = right - 16 - (end + 24);
             let s = crate::sysfont::Font::body(false).truncate(&self.said, room);
             p.text_p(end + 24, fy + 5, &s, COCOA, false);
         }

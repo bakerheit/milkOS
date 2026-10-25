@@ -169,6 +169,46 @@ pub fn band() {
     }
 }
 
+/// The framebuffer size for this boot: `milk.fbsize=WxH`, or (the default, `milk.fbsize=auto`) the display
+/// mode the firmware has set up from config.txt or the monitor's EDID, which it reports as the physical
+/// size; 1024x768 when the firmware reports nothing usable (rpikit::fbsize). Logs what it found and
+/// where the answer came from. Call before the first framebuffer request.
+pub fn choose_size() -> (usize, usize) {
+    use rpikit::fbsize as pick;
+    let req = pick::parse_option(crate::fwcfg::option("fbsize")).unwrap_or_else(|why| {
+        kprintln!("rpi fb: {why}");
+        pick::Request::Auto
+    });
+    let up = LIVE.load(Ordering::Acquire) || mailbox::probe();
+    let firmware = if up { mailbox::physical_size() } else { None };
+    // The display's own description, when it has one (a small panel usually has none).
+    if up && req == pick::Request::Auto {
+        match mailbox::edid_block0() {
+            Ok(b) => match pick::edid_preferred(&b) {
+                Some((w, h, khz)) => kprintln!(
+                    "mbox: EDID from the display: preferred mode {w}x{h}, pixel clock {khz} kHz"
+                ),
+                None => kprintln!("mbox: EDID block 0 from the display is damaged or has no timing"),
+            },
+            Err(_) => kprintln!(
+                "mbox: the display has no EDID (or the firmware cannot read it): the mode comes from config.txt"
+            ),
+        }
+    }
+    let ((w, h), src) = pick::choose(req, firmware);
+    match firmware {
+        Some((fw, fh)) => kprintln!(
+            "rpi fb: display size {fw}x{fh} (firmware, physical size), framebuffer {w}x{h}: {}",
+            src.describe()
+        ),
+        None => kprintln!(
+            "rpi fb: display size unknown (the firmware did not answer), framebuffer {w}x{h}: {}",
+            src.describe()
+        ),
+    }
+    (w as usize, h as usize)
+}
+
 /// Allocate the framebuffer at `w` x `h` (or what the firmware makes of it). `None` without a
 /// usable display.
 pub fn init(w: usize, h: usize) -> Option<Surface<'static>> {

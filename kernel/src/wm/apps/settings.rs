@@ -39,6 +39,10 @@ pub const SECTIONS: [&str; 10] = [
     "Network",
     "About",
 ];
+/// Room left under the last button of a page for the text that follows it, and the least a page is
+/// tall (pages that end in text, not buttons).
+const PAGE_TAIL: i32 = 64;
+const PAGE_MIN_H: [i32; 10] = [480, 0, 0, 0, 0, 0, 320, 0, 0, 0];
 const TM: usize = 5;
 const TRASH: usize = 6;
 const BROWSER: usize = 7;
@@ -103,6 +107,12 @@ pub struct Settings {
     /// The magnification size slider being dragged, and its track.
     dragging_mag: bool,
     mag_track: Rect,
+    /// The page is taller than the window (an 800x480 panel): how far it is scrolled, the height it
+    /// wants, and a touch that is dragging it (screen y and scroll at the start).
+    scroll: i32,
+    page_h: i32,
+    body_h: i32,
+    pan: Option<(i32, i32)>,
     tm_status: String,
     tm_count: usize,
     last_sec: u64,
@@ -123,6 +133,10 @@ impl Settings {
             track: Rect::new(0, 0, 0, 0),
             dragging_mag: false,
             mag_track: Rect::new(0, 0, 0, 0),
+            scroll: 0,
+            page_h: 0,
+            body_h: 0,
+            pan: None,
             tm_status: String::new(),
             tm_count: 0,
             last_sec: 0,
@@ -420,7 +434,7 @@ impl Settings {
         // Resolution: switched live, kept in settings.
         let ry = r.y + r.h + 24;
         p.text_p(x, ry, "Resolution", ESPRESSO, true);
-        for (i, &(rw, rh)) in super::super::screen::MODES.iter().enumerate() {
+        for (i, &(rw, rh)) in super::super::screen::modes().iter().enumerate() {
             let b = Rect::new(x + i as i32 * 112, ry + 24, 104, 30);
             let on = self.pending.resolution == (rw, rh);
             self.button(p, b, &format!("{rw} x {rh}"), on, Hit::Resolution(rw, rh));
@@ -769,7 +783,11 @@ impl Settings {
         p.text_p(
             x + 90,
             70,
-            concat!("Version ", env!("MILKOS_VERSION"), ", aarch64 on qemu virt"),
+            &format!(
+                "Version {}, aarch64 on {}",
+                env!("MILKOS_VERSION"),
+                crate::platform::CURRENT.name
+            ),
             COCOA,
             false,
         );
@@ -827,6 +845,17 @@ impl Settings {
         }
         let uni = "GNU Unifont draws Terminal and Notes. Licences: /System/Fonts.";
         p.text_p(x, y + 26, &body.truncate(uni, room), ESPRESSO, false);
+    }
+
+    /// Scroll the page to `to` (kept inside it, as of the last frame). True if it moved.
+    fn scroll_to(&mut self, to: i32) -> bool {
+        let max = (self.page_h - self.body_h).max(0);
+        let to = to.clamp(0, max);
+        if to == self.scroll {
+            return false;
+        }
+        self.scroll = to;
+        true
     }
 
     fn set_brightness_at(&mut self, x: i32) {
@@ -928,17 +957,57 @@ impl WindowContents for Settings {
             self.hits.push((r, Hit::Section(i)));
         }
         let x = SIDEBAR_W + 28;
-        match self.section {
-            0 => self.draw_appearance(p, x),
-            1 => self.draw_wallpaper(p, x),
-            2 => self.draw_display(p, x, w),
-            3 => self.draw_dock(p, x),
-            4 => self.draw_sound(p, x),
-            TM => self.draw_tm(p, x),
-            TRASH => self.draw_trash(p, x),
-            BROWSER => self.draw_browser(p, x),
-            NETWORK => self.draw_network(p, x),
-            _ => self.draw_about(p, x),
+        // The page draws at fixed positions from its own top; a window shorter than the page shows it
+        // scrolled (wheel, or a finger dragging on an empty spot). Hits are recorded in page
+        // coordinates and moved to the window's afterwards.
+        let n0 = self.hits.len();
+        let sc = self.scroll;
+        {
+            let mut q = p.sub(Rect::new(0, -sc, w, h + sc));
+            match self.section {
+                0 => self.draw_appearance(&mut q, x),
+                1 => self.draw_wallpaper(&mut q, x),
+                2 => self.draw_display(&mut q, x, w),
+                3 => self.draw_dock(&mut q, x),
+                4 => self.draw_sound(&mut q, x),
+                TM => self.draw_tm(&mut q, x),
+                TRASH => self.draw_trash(&mut q, x),
+                BROWSER => self.draw_browser(&mut q, x),
+                NETWORK => self.draw_network(&mut q, x),
+                _ => self.draw_about(&mut q, x),
+            }
+        }
+        let bottom = self.hits[n0..]
+            .iter()
+            .map(|(r, _)| r.y + r.h)
+            .max()
+            .unwrap_or(0);
+        self.page_h = (bottom + PAGE_TAIL).max(PAGE_MIN_H[self.section.min(PAGE_MIN_H.len() - 1)]);
+        self.body_h = h;
+        let max = (self.page_h - h).max(0);
+        if sc > max {
+            // The window grew (or the page got shorter): back in range at the next frame.
+            self.scroll = max;
+        }
+        for (r, _) in &mut self.hits[n0..] {
+            r.y -= sc;
+        }
+        // Parts of the page that scrolled under the window's edge are not buttons.
+        let body = Rect::new(SIDEBAR_W, 0, w - SIDEBAR_W, h);
+        let mut i = n0;
+        while i < self.hits.len() {
+            let r = self.hits[i].0;
+            if r.y + r.h <= body.y || r.y >= body.y + body.h {
+                self.hits.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if max > 0 {
+            // A thin thumb on the right edge shows there is more.
+            let th = (h * h / self.page_h.max(1)).clamp(24, h);
+            let ty = (h - th) * self.scroll.min(max) / max;
+            p.rrect(w - 7, ty + 2, 4, th - 4, 2, COCOA, 0x60);
         }
         if let Some(i) = hover_index(&self.hits, self.hover) {
             let (r, h) = self.hits[i];
@@ -968,7 +1037,30 @@ impl WindowContents for Settings {
         hover_move(&self.hits, &mut self.hover, x, y)
     }
 
+    fn scroll(&mut self, dy: i32) -> bool {
+        self.scroll_to(self.scroll + dy.signum() * 48)
+    }
+
     fn pointer(&mut self, e: &PointerInput) -> bool {
+        // A finger dragging the page: from an empty spot of the page, as the wheel would.
+        if let Some((y0, s0)) = self.pan {
+            match e.kind {
+                PointerKind::Drag => return self.scroll_to(s0 - (e.y - y0)),
+                PointerKind::Up(_) => {
+                    self.pan = None;
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if let PointerKind::Down(_) = e.kind
+            && e.x >= SIDEBAR_W
+            && self.page_h > 0
+            && !self.hits.iter().any(|(r, _)| hit(r, e.x, e.y))
+        {
+            self.pan = Some((e.y, self.scroll));
+            return false;
+        }
         if self.dragging_mag {
             match e.kind {
                 PointerKind::Drag => {
@@ -1008,6 +1100,7 @@ impl WindowContents for Settings {
         match h {
             Hit::Section(i) => {
                 self.section = i;
+                self.scroll = 0;
                 if i == TM {
                     self.read_tm();
                 }
@@ -1113,6 +1206,7 @@ impl WindowContents for Settings {
         let asked = PENDING.lock().take();
         if let Some(i) = asked {
             self.section = i;
+            self.scroll = 0;
             if i == TM {
                 self.read_tm();
             }

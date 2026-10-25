@@ -77,6 +77,8 @@ them, so every existing option works unchanged:
 | `milk.sdwrite=1` | allow writes to the SD card (`/dev/mmcblk0` is read-only otherwise: a card that also boots Raspberry Pi OS must not be written by accident; Disk Utility, `disks` and milkfs all see it read-only) |
 | `milk.disable=pcie,usb,genet,sdhci,rng` | start without a driver that misbehaves on a real board (edit `cmdline.txt`, no rebuild): `pcie` (and with it USB), `usb`, `genet`, `sdhci`, `rng` |
 | `milk.genet=probe` | run the Ethernet MAC's bring-up one register access at a time, with an SError checkpoint after each, and log `[genet] probe step N name ok` (or `FAILED`): names the exact access a board refuses (see "GENET bring-up") |
+| `milk.fbsize=WxH` / `auto` | the framebuffer (and so the desktop) size: `auto` (the default) follows the display mode the firmware has set up (the mailbox's physical size: 800x480 for a panel that takes that mode, 1920x1080 for a television), `WxH` forces a size (640x400 to 4096x2160); 1024x768 when the firmware reports nothing usable ("HDMI displays") |
+| `milk.touch=xpt2046` | the touch chip of an HDMI display, with no SPI panel (`milk.touch_cs=`, `milk.touch_irq=`, `milk.touch_cal=`, `milk.touch_rot=`: "HDMI displays") |
 | `milk.fbscale=N` | magnify the boot log and crash screen font N times (default 1; 2 from 1600 px wide) |
 | `milk.ledcodes=0` | no ACT LED progress codes (the LED just turns on at the start of `kmain`; the `led: stage` log lines stay; the "log saved" signal and the log error blink are off too). Default on; the codes add about 9 s to a boot |
 | `milk.lcd=ili9486` (or `ili9486p`, `ili9486p18`, `ili9488`, `st7796`, `ili9481`, `r61581`, `hx8357`, `ili9341`, `st7789`) | the 3.5-inch SPI display on the GPIO header (off without it; many more options: "3.5-inch SPI display"); `milk.lcd=probe` tries them all |
@@ -90,8 +92,10 @@ them, so every existing option works unchanged:
 The kernel is one file the firmware loads. These are **your** steps; nothing in the repository writes to
 a card or a disk.
 
-1. `scripts/pi-bootdir.sh /tmp/milkos-boot` builds the release kernel and puts `milkos8.img`,
+1. `scripts/pi-bootdir.sh /tmp/milkos-boot [--display hdmi800x480|auto]` builds the release kernel and puts `milkos8.img`,
    `config.milkos.txt`, `cmdline.milkos.txt` and the blank log file `MILKLOG.TXT` (8 MiB) in that folder (it refuses a folder on a mounted volume).
+   `--display auto` (the default) is for a monitor or television that tells the firmware what it can show; `--display hdmi800x480` is for the
+   4-inch 800x480 HDMI panel with a touch chip ("HDMI displays").
 2. On the card's boot partition (the FAT one with `start4.elf`, `fixup4.dat`, `config.txt`): **keep a copy
    of `config.txt`**, copy `milkos8.img` next to the firmware's files, and make `config.txt` say
    what `config.milkos.txt` says: `arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `max_framebuffers=1`
@@ -584,10 +588,108 @@ firmware stopped before our kernel.
 `kmain`; the crash cycle is not affected). The codes busy-wait on the CPU's generic counter, so they need no
 allocator, timer interrupt or scheduler; the pattern language itself is `rpikit::ledcode` (host-tested).
 
+## HDMI displays (including the 4-inch 800x480 panel with an SPI touch chip)
+
+milkOS draws on the firmware's framebuffer, so any display on a micro-HDMI port works, and its size follows what the firmware
+set up. This section is for the small HDMI panels sold as "4inch HDMI Display-C", "800x480 pixel", "XPT2046 touch controller"
+(and the ones like them): **an HDMI video input plus a touch chip on the GPIO header. It is not an SPI display.** The SPI panel
+driver and its probe ("3.5-inch SPI display") are for the other kind of kit, the ones with no HDMI connector; with this panel
+leave `milk.lcd=` out (the probe can never light it: all it shows is the panel's "no signal" screen).
+
+**What you need**
+- A **micro-HDMI to HDMI cable** (the Pi 4's two video ports are micro-HDMI; use the one next to the USB-C power port, HDMI0, for the
+  first try) into the full-size HDMI socket on the panel's edge.
+- **Power for the panel on its micro-USB port** (from a USB charger or a Pi USB port): the 26-pin socket on the GPIO header carries
+  5 V and the touch chip's signals but the picture and the backlight want the micro-USB supply on many boards. The audio jack is the
+  panel's own (it plays what comes over HDMI when the mode is `hdmi_drive=2`).
+- The 26-pin socket seated on pins 1 to 26 of the Pi's header (it carries 5 V, 3.3 V, ground and SPI0 MOSI / MISO / SCLK / CE1 and the touch
+  chip's pen-down line on GPIO 17, the wiring of the usual kits of this family; check the silkscreen: `milk.touch_cs=` and `milk.touch_irq=`
+  name other wiring).
+
+**The card**: `scripts/pi-bootdir.sh /tmp/milkos-boot --display hdmi800x480` writes
+- `config.milkos.txt`: the usual lines (`arm_64bit=1`, `kernel=milkos8.img`, `hdmi_force_hotplug=1`, `disable_overscan=1`, `max_framebuffers=1`, no KMS
+  overlay, the serial console) and then a block marked "this display" with the video mode: `hdmi_group=2`, `hdmi_mode=16`, `hdmi_drive=2` (the
+  standard 1024x768 at 60 Hz in HDMI mode). The panel's scaler board accepts that and shows it scaled to 800x480. The custom 800x480 timing the
+  vendor documents (`hdmi_group=2 hdmi_mode=87 hdmi_cvt=800 480 60 6 0 0 0 hdmi_drive=1`) is in the block as a commented alternative, with 720p
+  (`hdmi_group=1 hdmi_mode=4`), 800x600 (`hdmi_group=2 hdmi_mode=9`) and 640x480 (`hdmi_group=1 hdmi_mode=1`) after it, in that order of preference:
+  one real panel answered the custom timing with "Not Support" on its own screen, so it is not the default.
+- `cmdline.milkos.txt`: `milk.fbscale=1 milk.fbsize=1280x768 milk.touch=xpt2046`: no `milk.lcd=`, the touch chip on, and a 5:3 framebuffer
+  (see below).
+
+Copy them onto the boot partition as for any card ("Putting it on a card"); the block's comments say what each line does.
+
+**Why `milk.fbsize=1280x768`.** The firmware can only report the mode it was told to output (1024x768 here), not the shape of the glass behind the
+panel's scaler. A 1024x768 framebuffer (4:3) shown on a 5:3 panel is squashed. The desktop therefore draws 1280x768 (5:3, a size it is made for), the
+firmware scales that to the 1024x768 mode and the panel scales it to 800x480: the proportions come out right. With a mode the panel accepts natively
+(the custom 800x480 timing, or a panel that really reports 800x480) leave `milk.fbsize` out or say `milk.fbsize=800x480`: the desktop follows the
+firmware (`auto`), and at 800x480 it is laid out for the small screen (below). Other 5:3 sizes (`1024x614`, `1000x600`, ...) are accepted too.
+
+**How the size is chosen.** After the firmware has set the video mode the kernel asks the mailbox for the physical display size (and the
+display's EDID, if it has one, only to log it) and logs them:
+
+```
+mbox: display size the firmware has: 1024x768 (get physical width/height, tag 0x40003)
+mbox: the display has no EDID (or the firmware cannot read it): the mode comes from config.txt
+rpi fb: display size 1024x768 (firmware, physical size), framebuffer 1280x768: forced by milk.fbsize
+rpi fb: 1280x768x32 pitch 5120 at 0x3e... (3840 KiB)
+```
+
+With `milk.fbsize=auto` (the default) a size of at least 640x400 and at most 4096x2160 is used as it is; 0x0, the firmware's 720x576 no-display
+mode, an out-of-range size or no answer fall back to 1024x768 (the log says which). A forced size outside the range, or not `WxH`, is refused in the log
+and `auto` is used. The boot log console, the crash screen and the desktop all follow the size that results (`rpikit::fbsize`, host tested with a table).
+Under qemu the firmware says 640x480 (no monitor): the tests pin `milk.fbsize=1024x768` except where they test this.
+
+**The desktop on a small screen.** The desktop has no minimum size of its own; on a screen shorter than 640 pixels (the 800x480 panel) it changes
+where the 1024x768 layout does not fit, and nothing else changes:
+- a window the app wants taller or wider than the area between the menu bar and the dock is made smaller and moved inside it
+  (Terminal, Files, Notes, Music, Versions, About, Welcome, Settings; a program's own fixed-size window cannot shrink);
+- Settings scrolls (wheel, or a finger dragging on an empty spot of the page; a thin bar on the right shows there is more);
+- Welcome shows four cards at a time with a "More (1/2)" button, with a one-line header and tighter cards (and narrower cards with shorter lines in a window
+  under 700 wide);
+- About moves its stats up; Today (F4, the clock) shows the greeting and one row of three cards; the lock screen has a smaller clock and the avatar
+  below it; Skim sits near the top with five results; the display list in Settings offers the display's own size (and the standard modes that fit in it).
+Screenshots from qemu: `docs/screenshots/raspberry-pi-hdmi-800x480-*.png` (desktop, Settings, Welcome, lock screen).
+
+**Touch** (`milk.touch=xpt2046`, `kernel/src/rpi/touch.rs`; `milk.lcd=` and `milk.touch=` are independent: either, both or neither). SPI0 is set up for
+the touch chip alone: MISO / MOSI / SCLK (GPIO 9 / 10 / 11), the chip select (CE1, GPIO 7; `milk.touch_cs=0` for CE0, GPIO 8) and the pen-down line
+(GPIO 17, an input with a pull-up). It **never touches the display's pins** (the other chip select, D/C, reset). The thread starts after the boot
+is over and the boot log is saved (it can never delay the boot); the log says `touch: XPT2046 on SPI0 CE1 (GPIO 7), MISO GPIO 9, MOSI GPIO 10, SCLK
+GPIO 11, ..., pen IRQ GPIO 17; the display's pins ... are not touched`, then `touch: running, map raw -> WxH pixels (default): milk.touch_cal=...`,
+and the first three touches with their raw reading and the pixel they became. The pointer is the framebuffer's own pixels, whatever its size.
+
+| option | default | does |
+|---|---|---|
+| `milk.touch=xpt2046` | off | the standalone driver (with `milk.lcd=` set, the SPI panel driver reads the touch chip itself and this does nothing) |
+| `milk.touch_cs=` | `1` | the chip select the chip is wired to (0 or 1) |
+| `milk.touch_irq=` | `17` | the pen-down line (GPIO 2..27); `-1` polls only. A wrong pin only makes touches slower (the chip is asked every 100 ms when the line stays high) |
+| `milk.touch_rot=` | `0` | how the glass is fitted when there is no calibration: 0 = raw X along the screen's width and raw Y down it (raw 200..3900 spans the screen: the usual 800x480 kits); `90`, `180`, `270` are the other ways round |
+| `milk.touch_cal=a,b,c,d,e,f` | from `touch_rot` | a measured map (as for the SPI panel: `x = ((a*rx + b*ry) >> 16) + c`...), in the framebuffer's pixels; `ask` runs the four-cross helper on the screen before the desktop starts (it gives up after a minute without a touch, keeping the default), logs `touch: add this to cmdline.txt: milk.touch_cal=...` and shows it |
+| `milk.touch_hz=` | `1000000` | the bit clock (the chip allows 2 MHz at most) |
+
+If the pointer lands mirrored, swapped or off: first try `milk.touch_rot=90` / `180` / `270`, then `milk.touch_cal=ask`, touch the crosses and copy the printed line
+into `cmdline.txt` (replacing `ask`). The default is a guess for the usual orientation, not a calibration. Under qemu nothing is attached to SPI0: the
+driver reads silence and makes no pointer events (checked by `pi-qemu-test`).
+
+**What the first boot should show.** A black screen for a moment (the panel syncing), then the green sign-of-life band across the top within a second of the kernel starting, the boot log under it, and the desktop at about 12 s
+(the Welcome tour on a card with no saved settings). With the ACT LED codes on, the boot takes about 9 s longer. A finger on the glass should move the pointer
+once the log says `touch: running`.
+
+**If the picture is wrong** (change one thing at a time in `config.txt`, reboot):
+
+| you see | try |
+|---|---|
+| "Not Support" / "No signal" on the panel | the commented alternative modes in the block, in order: custom 800x480 CVT, 720p, 800x600, 640x480; a different micro-HDMI port; power on the panel's micro-USB; a shorter cable |
+| flicker, snow, dropouts, a picture that comes and goes | `hdmi_cvt=800 480 60 6 0 0 1` (reduced blanking, with mode 87), `config_hdmi_boost=7` (1..11, default 5), `hdmi_pixel_freq_limit=40000000`, a shorter or better cable |
+| off by a few pixels, an edge cut off, a black border | `disable_overscan=0` with `overscan_left/right/top/bottom`, or the explicit `hdmi_timings=` line of the block |
+| rotated or upside down | the panel is turned by hand, or `display_hdmi_rotate=2` (1 = 90, 3 = 270) in `config.txt`: a firmware option for its own framebuffer, not verified on a Pi 4 here; the touch then needs `milk.touch_rot=` or `milk.touch_cal=ask` to match. milkOS has no software rotation (`milk.fbrotate`): a rotated framebuffer would mean copying every frame, which the desktop does not do |
+| squashed or stretched | the framebuffer's shape is not the panel's: `milk.fbsize=1280x768` (5:3) for a 1024x768 mode; with an 800x480 mode `milk.fbsize=800x480` |
+| the picture is fine and the touch is wrong | the touch table above; the log's first three touches show the raw numbers |
+
 ## 3.5-inch SPI display
 
 A 480x320 colour TFT with a resistive touch chip that sits on the 40-pin header (the kits sold with an "LCD-show"
-install script for Raspberry Pi OS). On a board with **no HDMI cable and no serial cable** it is the only debug screen,
+install script for Raspberry Pi OS). **This driver and its probe are for those SPI kits, the ones with no HDMI connector; a display with an HDMI input
+(plus a touch chip on the header) is "HDMI displays" above.** On a board with **no HDMI cable and no serial cable** it is the only debug screen,
 so the boot log and the crash screen appear on it, and the desktop runs on it. It is **off unless `milk.lcd=` names its
 controller**: nothing on the header is touched otherwise. Files: `kernel/src/rpi/{spi,lcd}.rs` (SPI0, the pins, the panel as
 a display, the touch thread), `rpikit/src/{lcd,touch}.rs` (everything that can be decided from bytes), `rpikit/src/lcdsim.rs`

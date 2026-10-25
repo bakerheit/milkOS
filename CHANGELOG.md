@@ -3,6 +3,18 @@
 ## Unreleased
 
 **Raspberry Pi 4** (docs/raspberry-pi.md)
+- HDMI displays, including the 4-inch 800x480 panel with an SPI touch chip ("HDMI displays" in docs/raspberry-pi.md). That panel is an HDMI input plus a touch
+  chip on the header, not an SPI display (the SPI probe could only ever show its "no signal" screen). `scripts/pi-bootdir.sh OUTDIR --display hdmi800x480|auto` writes
+  a `config.milkos.txt` with a clearly marked "this display" block (the standard 1024x768 mode a real panel accepted; the custom 800x480 timing, 720p, 800x600 and
+  640x480 as commented alternatives, and commented fixes for flicker, offset and rotation) and a `cmdline.milkos.txt` that asks for a 5:3 `milk.fbsize=1280x768` and
+  turns on `milk.touch=xpt2046`; `auto` (the default) is what it always wrote. The framebuffer's size now follows the firmware's display mode (the mailbox's physical size,
+  the EDID logged when there is one; `milk.fbsize=WxH` forces a size, `auto` is the default, 1024x768 when the firmware reports nothing usable such as its 720x576
+  no-display mode; `rpikit::fbsize`, host tested with a table) and the boot log console, crash screen and desktop follow it. The desktop works on small screens: windows
+  fit between the menu bar and the dock, Settings scrolls (wheel or a finger), Welcome pages its cards, and About, Today, the lock screen and Skim have short-screen
+  layouts; 1024x768, 1280x768 and 1920x1080 work too. New touch driver `milk.touch=xpt2046` (`milk.touch_cs=`, `milk.touch_irq=`, `milk.touch_cal=` or `ask`, `milk.touch_rot=`):
+  the XPT2046 on SPI0 with no SPI panel, pointer events in the framebuffer's pixels, only its own pins touched (logged), on a thread that starts after the boot is
+  over; `milk.lcd=` and `milk.touch=` are independent. New `pi-bootdir-test`; `pi-qemu-test` boots 20 to 25 check the sizes, the screen dumps and the touch driver.
+  The About window and Settings > About name the real board instead of "qemu virt". Untested on the panel itself.
 - The Ethernet controller's bring-up no longer crashes the first real board with an SError ("GENET bring-up" in docs/raspberry-pi.md). The real log showed the
   SoC refusing one of the first accesses to the UMAC / DMA registers: they were touched before the SYS block's reset register was written, so the blocks were
   most likely still held in reset. The bring-up is now an ordered table (`rpikit::genet::init`, host-tested for its order, values and checkpoint labels): power,

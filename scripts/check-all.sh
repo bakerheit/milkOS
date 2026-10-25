@@ -140,6 +140,7 @@ TESTS=(
   "milkweb-unit|s|300|par|scripts/milkweb-test.sh"
   "rpikit-unit|s|300|par|scripts/rpikit-test.sh"
   "pi-readlog-unit|s|120|par|scripts/pi-readlog-test.sh"
+  "pi-bootdir-test|s|120|par|scripts/pi-bootdir-test.sh"
   "led-decode-test|s|120|par|scripts/led-decode-test.sh"
   "crypto-unit|s|300|par|scripts/crypto-test.sh"
   "tls-unit|s|300|par|scripts/tls-test.sh"

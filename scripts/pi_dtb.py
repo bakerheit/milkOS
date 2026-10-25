@@ -10,6 +10,11 @@ cells and one size cell, /chosen, /memory, four cortex-a72 cpus released through
 0xd8, 0xe0, 0xe8, 0xf0) with nothing else in it. qemu fills in /chosen/bootargs from `-append` and
 /memory from its RAM size when it loads the tree. With --psci the cpus use PSCI instead of the spin
 table (for host-side experiments).
+
+Unless the command line names `milk.fbsize=` the tree adds `milk.fbsize=1024x768`: qemu's raspi4b answers the
+mailbox's "physical display size" with its own 640x480 default (there is no monitor behind it), and the kernel
+follows the firmware's display size (docs/raspberry-pi.md, "HDMI displays"), so the tests pin the size they were
+written for. A test of the automatic choice passes `milk.fbsize=auto`.
 """
 import argparse
 import struct
@@ -120,6 +125,8 @@ def main():
     ap.add_argument("--bank", action="append", default=[], metavar="START:SIZE",
                     help="another RAM bank (hex or decimal), e.g. 0x40000000:0x40000000; repeatable")
     a = ap.parse_args()
+    if "milk.fbsize=" not in a.cmdline:
+        a.cmdline = (a.cmdline + " " if a.cmdline else "") + "milk.fbsize=1024x768"
     with open(a.out, "wb") as fh:
         banks = [tuple(int(x, 0) for x in b.split(":")) for b in a.bank]
         fh.write(build(a.cmdline, a.psci, a.cpus, a.ram_bytes // (1 << 20) if a.ram_bytes else a.ram_mb, banks, a.ram_bytes))

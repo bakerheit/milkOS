@@ -261,6 +261,14 @@ pub fn run() {
         crate::rpi::led::finish();
         return;
     };
+    // The desktop is as big as the display: 1024x768, or the size the Raspberry Pi's firmware reported
+    // (an 800x480 panel) or milk.fbsize= asked for.
+    let (fw, fh) = display::size();
+    if fw >= 320 && fh >= 200 {
+        screen::set_native(fw as i32, fh as i32);
+        theme::set_screen(fw as i32, fh as i32);
+        input::reset_screen(fw as i32, fh as i32);
+    }
     let t0 = timer::now_ns();
     let mut d = match Desktop::new(fb) {
         Ok(d) => d,
@@ -702,6 +710,13 @@ impl Desktop {
             return;
         }
         let (rect, contents): (Rect, Box<dyn WindowContents>) = apps::create(app);
+        // A small display (an 800x480 panel): the window the app wants, shrunk to what fits between
+        // the menu bar and the dock. (A client program's buffer cannot shrink.)
+        let rect = if matches!(app, App::Client(_)) {
+            rect
+        } else {
+            Self::fit_to_work_area(rect)
+        };
         // The "+" of a strip: it opens as a tab there, if it fits (a client app's buffer
         // cannot shrink yet; one that does not fit gets its own window).
         let fits = |w: &Window| {
@@ -925,6 +940,9 @@ impl Desktop {
             "paint" => return self.launch("/Apps/paint/paint"),
             "browser" | "web" => return self.launch(BROWSER),
             "music" => return self.open(App::Music),
+            "settings" | "preferences" => return self.open(App::Settings),
+            "welcome" => return self.open(App::Welcome),
+            "versions" => return self.open(App::Versions),
             "milkdrop" | "milk drop" => return self.open(App::Drop),
             _ if what.starts_with("http://")
                 || what.starts_with("https://")
@@ -1197,6 +1215,22 @@ impl Desktop {
             self.focus_top();
             self.invalidate(PanelKey::MenuBar);
         }
+    }
+
+    /// `r`, made smaller and moved if it does not lie inside the work area (with a margin that
+    /// keeps the window's shadow and the dock's reflection clear). A rectangle that fits is
+    /// returned unchanged.
+    fn fit_to_work_area(r: Rect) -> Rect {
+        let a = Self::work_area();
+        let fits = r.x >= 0 && r.y >= a.y && r.x + r.w <= a.w && r.y + r.h <= a.y + a.h;
+        if fits {
+            return r;
+        }
+        let w = r.w.min(a.w - 12).max(WIN_MIN_W.min(a.w));
+        let h = r.h.min(a.h - 8).max(WIN_MIN_H.min(a.h));
+        let x = r.x.clamp(6, (a.w - w - 6).max(6));
+        let y = r.y.clamp(a.y + 4, (a.y + a.h - h - 4).max(a.y + 4));
+        Rect::new(x, y, w, h)
     }
 
     /// The area between the menu bar and the dock.

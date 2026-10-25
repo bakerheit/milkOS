@@ -39,9 +39,14 @@ fn fade_ns() -> u64 {
     FADE_NS * super::anim::SLOWMO.load(core::sync::atomic::Ordering::Relaxed)
 }
 
-/// Clock geometry: 8x digits (the system font's 104 px face).
-const CLOCK_SCALE: i32 = 8;
-const CLOCK_Y: i32 = 176;
+/// Clock geometry: 8x digits (the system font's 104 px face); 5x and higher up on a short screen
+/// (an 800x480 panel), where the avatar and the hint under them would not fit.
+fn clock_scale() -> i32 {
+    if screen_h() < 640 { 5 } else { 8 }
+}
+fn clock_y() -> i32 {
+    if screen_h() < 640 { 56 } else { 176 }
+}
 
 fn paint(buf: &mut Buffer, wp: &Wallpaper) {
     let mut p = Painter::new(buf);
@@ -51,13 +56,13 @@ fn paint(buf: &mut Buffer, wp: &Wallpaper) {
     p.fill_a(0, 0, screen_w(), screen_h(), MILK, a(250));
     let t = rtc::now();
     let clock = format!("{:02}:{:02}", t.hour, t.minute);
-    let cw = Font::ui(CLOCK_SCALE, Weight::Regular).width(&clock);
+    let cw = Font::ui(clock_scale(), Weight::Regular).width(&clock);
     p.text_x(
         (screen_w() - cw) / 2,
-        CLOCK_Y,
+        clock_y(),
         &clock,
         ESPRESSO,
-        CLOCK_SCALE,
+        clock_scale(),
         false,
     );
     let date = format!(
@@ -69,7 +74,7 @@ fn paint(buf: &mut Buffer, wp: &Wallpaper) {
     let dw = Font::ui(2, Weight::Bold).width(&date);
     p.text_x(
         (screen_w() - dw) / 2,
-        CLOCK_Y + 16 * CLOCK_SCALE + 18,
+        clock_y() + 16 * clock_scale() + if screen_h() < 640 { 10 } else { 18 },
         &date,
         COCOA,
         2,
@@ -77,7 +82,11 @@ fn paint(buf: &mut Buffer, wp: &Wallpaper) {
     );
     // Who is here, and how to get back in.
     let cx = screen_w() / 2;
-    let ay = screen_h() - 230;
+    let ay = if screen_h() < 640 {
+        clock_y() + 16 * clock_scale() + 80
+    } else {
+        screen_h() - 230
+    };
     p.circle(cx - 36, ay, 72, CREAM, 255);
     p.ring(cx - 36, ay, 72, 2, SAND, 255);
     icons::drop_shape(&mut p, cx, ay + 42, 17, 37, BLUE);
@@ -219,7 +228,7 @@ impl Desktop {
         if fading || settle {
             self.damage_all();
         } else if new_minute {
-            self.damage(Rect::new(0, CLOCK_Y - 8, screen_w(), 16 * CLOCK_SCALE + 80));
+            self.damage(Rect::new(0, clock_y() - 8, screen_w(), 16 * clock_scale() + 80));
         }
         fading
     }

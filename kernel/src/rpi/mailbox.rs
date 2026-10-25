@@ -429,8 +429,45 @@ fn harmless_tags() {
         }
     }
     if let Some(v) = ask("physical display size", tag::GET_PHYSICAL_SIZE, &[], 2) {
-        kprintln!("mbox: display size the firmware has: {}x{}", v[0], v[1]);
+        kprintln!(
+            "mbox: display size the firmware has: {}x{} (get physical width/height, tag {:#x})",
+            v[0],
+            v[1],
+            tag::GET_PHYSICAL_SIZE
+        );
     }
+}
+
+/// The display's EDID base block (128 bytes), as the firmware read it over HDMI. An error when
+/// the display has none (the usual case for a small panel) or the firmware cannot say.
+pub fn edid_block0() -> Result<[u8; 128], Error> {
+    transact(
+        |buf| {
+            let mut b = msg::Builder::new(buf);
+            // Request: block number and a zero; answer: block number, status, then 128 bytes.
+            let t = b.tag(msg::tag::GET_EDID_BLOCK, &[0, 0], 34)?;
+            b.finish()?;
+            Some(t)
+        },
+        |buf, t| {
+            let v = msg::Reply::new(buf).values(t)?;
+            // Status word 0 is success; the data follows.
+            if v.len() < 34 || v[1] != 0 {
+                return Err(msg::Error::Malformed);
+            }
+            let mut out = [0u8; 128];
+            for (i, w) in v[2..34].iter().enumerate() {
+                out[4 * i..4 * i + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            Ok(out)
+        },
+    )
+}
+
+/// The firmware's idea of the display size, if it answers.
+pub fn physical_size() -> Option<(u32, u32)> {
+    let v = query(msg::tag::GET_PHYSICAL_SIZE, &[], 2).ok()?;
+    Some((v[0], v[1]))
 }
 
 /// A single-tag query: `tag` with `request` words, answer of up to `answer` words.

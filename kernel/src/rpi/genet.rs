@@ -623,6 +623,20 @@ pub fn init() {
         stats: DevStats::default(),
     };
     crate::net::attach_device(Nic::Genet(dev), 0);
+    // The poll thread needs the scheduler, which is not up yet (this runs from `rpi::init`): `start` spawns it.
+    ATTACHED.store(true, Ordering::Release);
+}
+
+/// Set once the controller is attached to the network stack; `start` then spawns its poll thread.
+static ATTACHED: AtomicBool = AtomicBool::new(false);
+
+/// The Ethernet poll thread: link state every 250 ms and the rings every 10 ms next to the interrupt.
+/// Called from `kmain` once the scheduler is running (it panicked "scheduler not initialised" when
+/// `init` spawned it, on the first real board).
+pub fn start() {
+    if !ATTACHED.swap(false, Ordering::AcqRel) {
+        return;
+    }
     crate::sched::spawn("genet", || {
         let mut n = 0u32;
         loop {

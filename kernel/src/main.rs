@@ -181,6 +181,8 @@ pub extern "C" fn kmain() -> ! {
     fs::start_threads();
     #[cfg(feature = "raspi")]
     rpi::lcd::start();
+    #[cfg(feature = "raspi")]
+    rpi::genet::start();
     usb::start();
 
     // The desktop: compositor, window manager and shell, in its own thread. It owns the

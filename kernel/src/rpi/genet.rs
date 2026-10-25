@@ -534,7 +534,7 @@ pub fn init() {
     let Some(dtb) = (unsafe { crate::dtb::Dtb::from_addr(crate::mem::boot_dtb_ptr()) }) else {
         return;
     };
-    if dtb.find_prefix(b"ethernet@", b"compatible").is_none() {
+    if dtb.find_prefix(b"ethernet@", b"compatible").is_none() || dtb.node_disabled(b"ethernet@") {
         kprintln!("[genet] no Ethernet controller in the device tree (qemu's raspi4b has none)");
         return;
     }

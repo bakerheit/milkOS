@@ -1,5 +1,5 @@
 //! The BCM2711's hardware random number generator (the iProc "RNG200" core: a NIST-style
-//! entropy source with a FIFO), at 0xfd20_8000. It seeds the kernel's CSPRNG the way virtio-rng does
+//! entropy source with a FIFO), at 0xfe10_4000 (`rng@7e104000` in the device tree). It seeds the kernel's CSPRNG the way virtio-rng does
 //! on qemu (`crypto/rng.rs` asks [`read`] when there is no virtio-rng). **Untested on hardware**
 //! (qemu's raspi4b does not model it): bring-up follows the restart sequence of Broadcom's driver;
 //! every wait is bounded and a source that does not answer is simply not used.
@@ -15,7 +15,7 @@ use super::Timeout;
 use crate::kprintln;
 use crate::mmu::phys_to_virt;
 
-const BASE: usize = phys_to_virt(0xfd20_8000);
+const BASE: usize = phys_to_virt(crate::platform::periph(0x10_4000));
 const CTRL: usize = 0x00;
 const SOFT_RESET: usize = 0x04;
 const RBG_SOFT_RESET: usize = 0x08;
@@ -50,7 +50,7 @@ fn restart() {
     wr(CTRL, (rd(CTRL) & !CTRL_RBGEN_MASK) | CTRL_RBGEN_ENABLE);
 }
 
-/// Start the generator if the device tree has it (`rng@7d208000`, `brcm,bcm2711-rng200`).
+/// Start the generator if the device tree has it (`rng@7e104000`, `brcm,bcm2711-rng200`).
 pub fn init() {
     // SAFETY: the bootloader's pointer, or 0.
     let Some(dtb) = (unsafe { crate::dtb::Dtb::from_addr(crate::mem::boot_dtb_ptr()) }) else {
@@ -59,7 +59,7 @@ pub fn init() {
     let has = dtb
         .find_prefix(b"rng@", b"compatible")
         .is_some_and(|c| crate::dtb::compat_has(c, "rng200"));
-    if !has {
+    if !has || dtb.node_disabled(b"rng@") {
         return;
     }
     restart();

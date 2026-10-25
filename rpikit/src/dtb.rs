@@ -189,6 +189,14 @@ impl Dtb {
         found
     }
 
+    /// Has the first node whose name starts with `prefix` been switched off (`status` other than
+    /// `okay`)? qemu does this to the nodes of hardware it does not model (a real firmware's tree
+    /// says `okay` or nothing).
+    pub fn node_disabled(&self, prefix: &[u8]) -> bool {
+        self.find_prefix(prefix, b"status")
+            .is_some_and(|s| !(s.starts_with(b"okay") || s.starts_with(b"ok\0")))
+    }
+
     /// The root node's `compatible` (NUL-separated strings), empty if absent.
     pub fn root_compatible(&self) -> &'static [u8] {
         let mut found: &'static [u8] = &[];

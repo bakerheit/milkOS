@@ -190,6 +190,18 @@ stop
 check 'wm: restarting \(power manager, full reset\)' "boot 7: Restart reset the machine"
 [ "$(tr -d '\r' < "$LOG" | grep -ac 'booting\.\.\.')" -ge 2 ] && ok "boot 7: the kernel booted a second time" || bad "boot 7: no second boot"
 
+# ---- boot 8 (only if MILK_REAL_DTB names a device tree from a real board's boot partition: it is not in the repository) ----
+if [ -n "${MILK_REAL_DTB:-}" ] && [ -r "$MILK_REAL_DTB" ]; then
+  DTB_ARGS=(-dtb "$MILK_REAL_DTB")
+  boot 8 "wait@300:wm: desktop up"
+  stop
+  check 'platform: Raspberry Pi 4 \(BCM2711\) \(device tree: raspberrypi,4-model-b\)' "boot 8: the real tree is accepted"
+  check '^\[smp\] 4 of 4 CPUs online \(spin table\)' "boot 8: four CPUs from the real tree's spin table"
+  check '\[genet\] no Ethernet controller' "boot 8: nodes qemu switched off are skipped (GENET)"
+  check '\[pcie\] the device tree has no \(enabled\) PCIe' "boot 8: nodes qemu switched off are skipped (PCIe)"
+  has 'KERNEL PANIC|kernel panic' && bad "boot 8: a kernel panic" || ok "boot 8: no panic"
+fi
+
 # After the early panic the screen kept the boot log and the green band over it (not cleared, no splash).
 case "$(pixels "$T/crash-early.png" 500,2 500,5)" in
   "48,208,96 255,255,255") ok "boot 4: the sign-of-life band is on top (green, then a white line)" ;;

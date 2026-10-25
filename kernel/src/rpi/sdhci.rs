@@ -576,7 +576,9 @@ pub fn init() {
                 && &b[..f.size as usize] == b"1"
         });
         if !writable {
-            kprintln!("[sdhci] the card is read-only (milk.sdwrite=1 on the command line allows writes)");
+            kprintln!(
+                "[sdhci] the card is read-only (milk.sdwrite=1 on the command line allows writes)"
+            );
         }
         let dev = SdCard {
             name: format!("mmcblk{}", 0),

@@ -1588,3 +1588,30 @@ mod genet_tests {
         );
     }
 }
+
+#[test]
+fn nodes_switched_off_are_noticed() {
+    let mut f = Fdt::new();
+    f.begin("");
+    f.begin("ethernet@7d580000");
+    f.str_prop("compatible", "brcm,bcm2711-genet-v5");
+    f.str_prop("status", "disabled");
+    f.end();
+    f.begin("rng@7e104000");
+    f.str_prop("compatible", "brcm,bcm2711-rng200");
+    f.str_prop("status", "okay");
+    f.end();
+    f.begin("pcie@7d500000");
+    f.str_prop("compatible", "brcm,bcm2711-pcie");
+    f.end();
+    f.end();
+    let b = f.finish();
+    let d = b.dtb().unwrap();
+    assert!(d.node_disabled(b"ethernet@"));
+    assert!(!d.node_disabled(b"rng@"));
+    assert!(
+        !d.node_disabled(b"pcie@"),
+        "no status property means enabled"
+    );
+    assert!(!d.node_disabled(b"nothing@"));
+}

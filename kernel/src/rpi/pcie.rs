@@ -169,9 +169,11 @@ pub fn host() -> Option<Host> {
     // it (an access would be a bus error), and the tests' tree does not name it.
     // SAFETY: the bootloader's pointer, or 0.
     let dtb = unsafe { crate::dtb::Dtb::from_addr(crate::mem::boot_dtb_ptr()) };
-    let Some(d) = dtb.filter(|d| d.find_prefix(b"pcie@", b"reg").is_some()) else {
+    let Some(d) =
+        dtb.filter(|d| d.find_prefix(b"pcie@", b"reg").is_some() && !d.node_disabled(b"pcie@"))
+    else {
         kprintln!(
-            "[pcie] the device tree has no PCIe controller: no USB (qemu's raspi4b has none)"
+            "[pcie] the device tree has no (enabled) PCIe controller: no USB (qemu's raspi4b has none)"
         );
         return None;
     };

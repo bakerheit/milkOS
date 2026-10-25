@@ -127,7 +127,8 @@ is not automated here (it needs the card's partitioning to be touched).
 | `0x4000_0000..0xfc00_0000` | more RAM (boards with more than 1 GB) |
 | `0x1_0000_0000..0x2_0000_0000` | the last 4 GB of an 8 GB board |
 | `0x3c10_0000` (qemu) | the framebuffer (qemu); on a board the firmware puts it in the GPU's memory |
-| `0xfd20_8000` | RNG200 |
+| `0xfe10_4000` | RNG200 (hardware random generator) |
+| `0xfe10_0000` | power manager (restart, power off) |
 | `0xfd50_0000` | PCIe root complex |
 | `0xfd58_0000` | GENET Ethernet |
 | `0xfe00_b880` | VideoCore mailbox |
@@ -224,7 +225,7 @@ detect bit is not trusted on EMMC2 (the Pi does not wire it). Not yet: DMA (SDMA
 limit), high speed mode (50 MHz), UHS, CMD23, voltage switching, SDIO. `scripts/pi-qemu-test.sh` formats an image with milkfs,
 mounts it from the emulated card, writes a file, takes a snapshot, reboots and finds the file.
 
-**RNG** (`rpi/rng.rs`): the iProc RNG200 at `0xfd208000` (control, soft resets, FIFO count/data), started and read through
+**RNG** (`rpi/rng.rs`): the iProc RNG200 at `0xfe104000` (control, soft resets, FIFO count/data), started and read through
 bounded waits, mixed into the CSPRNG's pool at seed time like virtio-rng. If the tree has no such node it is skipped, and
 the "jitter only" warning appears.
 

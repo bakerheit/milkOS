@@ -342,6 +342,16 @@ pub fn set_screen_size(width: i32, height: i32) {
     s.y = s.y.clamp(0, s.height - 1);
 }
 
+/// The display is not the size the pointer space was set up for (the Raspberry Pi's firmware
+/// reported another one): use `width` x `height` and put the pointer in the middle of it.
+pub fn reset_screen(width: i32, height: i32) {
+    let mut s = STATE.lock();
+    s.width = width.max(1);
+    s.height = height.max(1);
+    s.x = s.width / 2;
+    s.y = s.height / 2;
+}
+
 // --- producer API -----------------------------------------------------------------------
 
 fn emit(ev: Option<Event>) {

@@ -20,11 +20,48 @@ use super::wallpaper::Wallpaper;
 
 pub const MODES: [(i32, i32); 3] = [(1024, 768), (1280, 800), (1440, 900)];
 
+/// The display's own size: what the framebuffer was at boot (1024x768 unless the Raspberry Pi's
+/// firmware has a panel or monitor of another size, `milk.fbsize=`, rpi/fb.rs).
+static NATIVE: [core::sync::atomic::AtomicI32; 2] = [
+    core::sync::atomic::AtomicI32::new(1024),
+    core::sync::atomic::AtomicI32::new(768),
+];
+
+pub fn native() -> (i32, i32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (NATIVE[0].load(Relaxed), NATIVE[1].load(Relaxed))
+}
+
+pub fn set_native(w: i32, h: i32) {
+    use core::sync::atomic::Ordering::Relaxed;
+    NATIVE[0].store(w, Relaxed);
+    NATIVE[1].store(h, Relaxed);
+}
+
+/// The modes this display offers. On one of the standard sizes: the three [`MODES`], as always. On
+/// any other size (an 800x480 panel, a 1920x1080 television): its own size first, then the
+/// standard modes that fit inside it (none, for the panel: the firmware would have to scale a
+/// bigger picture down).
+pub fn modes() -> alloc::vec::Vec<(i32, i32)> {
+    let (nw, nh) = native();
+    if MODES.contains(&(nw, nh)) {
+        return MODES.to_vec();
+    }
+    let mut v = alloc::vec![(nw, nh)];
+    v.extend(MODES.iter().copied().filter(|&(w, h)| w <= nw && h <= nh));
+    v
+}
+
+/// Is `w` x `h` a mode of this display ([`modes`])?
+pub fn offered(w: i32, h: i32) -> bool {
+    modes().contains(&(w, h))
+}
+
 impl Desktop {
     /// Switch to `w` x `h`. False (nothing changed) if the mode isn't offered or there isn't
     /// the memory for it.
     pub(super) fn set_resolution(&mut self, w: i32, h: i32) -> bool {
-        if !MODES.contains(&(w, h)) {
+        if !offered(w, h) {
             return false;
         }
         if (w, h) == (screen_w(), screen_h()) {

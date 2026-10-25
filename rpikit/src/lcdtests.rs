@@ -750,6 +750,72 @@ fn calibration_defaults_put_the_corners_in_the_corners() {
 }
 
 #[test]
+fn hdmi_glass_default_puts_the_corners_in_the_corners() {
+    // The touch glass of an HDMI panel with no SPI display behind it: raw 200..3900 spans the
+    // screen. Each turn sends the raw corners to the matching screen corners.
+    let near = |p: (i32, i32), q: (i32, i32)| (p.0 - q.0).abs() <= 2 && (p.1 - q.1).abs() <= 2;
+    for (w, h) in [(800, 480), (1024, 768), (1920, 1080)] {
+        let (lo, hi) = (touch::GLASS_MIN, touch::GLASS_MAX);
+        for rot in ROTS {
+            let c = Cal::default_for_screen(w, h, rot);
+            let tl = c.apply(lo, lo);
+            let tr = c.apply(hi, lo);
+            let bl = c.apply(lo, hi);
+            let br = c.apply(hi, hi);
+            match rot {
+                Rotation::Deg0 => assert!(near(tl, (0, 0)) && near(tr, (w - 1, 0)) && near(bl, (0, h - 1)) && near(br, (w - 1, h - 1)), "{w}x{h} {rot:?} {tl:?} {tr:?} {bl:?} {br:?}"),
+                Rotation::Deg90 => assert!(near(tl, (0, h - 1)) && near(tr, (0, 0)) && near(bl, (w - 1, h - 1)) && near(br, (w - 1, 0)), "{w}x{h} {rot:?} {tl:?} {tr:?} {bl:?} {br:?}"),
+                Rotation::Deg180 => assert!(near(tl, (w - 1, h - 1)) && near(br, (0, 0)) && near(tr, (0, h - 1)), "{w}x{h} {rot:?} {tl:?} {tr:?} {br:?}"),
+                Rotation::Deg270 => assert!(near(tl, (w - 1, 0)) && near(tr, (w - 1, h - 1)) && near(bl, (0, 0)) && near(br, (0, h - 1)), "{w}x{h} {rot:?} {tl:?} {tr:?} {bl:?}"),
+            }
+            // The middle of the glass is the middle of the screen.
+            assert!(near(c.apply(2050, 2050), (w / 2, h / 2)) || near(c.apply(2050, 2050), (w / 2 - 1, h / 2 - 1)), "{w}x{h} {rot:?} {:?}", c.apply(2050, 2050));
+        }
+    }
+}
+
+#[test]
+fn touch_without_a_spi_panel_gives_pointer_events_in_screen_pixels() {
+    // The standalone touch driver (milk.touch=xpt2046, no milk.lcd): the chip model, the filter, the default
+    // map for the 800x480 screen and the tracker; no panel anywhere.
+    let cal = Cal::default_for_screen(800, 480, Rotation::Deg0);
+    let mut chip = SimTouch { pen: Some((2050, 2050, 1500)), ..Default::default() };
+    let mut tr = Tracker::new();
+    let mut events = Vec::new();
+    let mut poll = |chip: &mut SimTouch, tr: &mut Tracker, events: &mut Vec<Event>| {
+        let sample = touch::read(chip).map(|t| {
+            let (x, y) = cal.apply(t.x as i32, t.y as i32);
+            (x.clamp(0, 799), y.clamp(0, 479))
+        });
+        if let Some(e) = tr.update(sample) {
+            events.push(e);
+        }
+    };
+    poll(&mut chip, &mut tr, &mut events);
+    assert!(events.is_empty(), "one reading is not a touch yet");
+    poll(&mut chip, &mut tr, &mut events);
+    let Some(Event::Down(x, y)) = events.first().copied() else { panic!("{events:?}") };
+    assert!((x - 400).abs() <= 3 && (y - 240).abs() <= 3, "({x},{y})");
+    chip.pen = Some((3900, 3900, 1500));
+    poll(&mut chip, &mut tr, &mut events);
+    let Some(Event::Move(x, y)) = events.last().copied() else { panic!("{events:?}") };
+    assert!((x - 799).abs() <= 2 && (y - 479).abs() <= 2, "({x},{y})");
+    chip.pen = None;
+    for _ in 0..3 {
+        poll(&mut chip, &mut tr, &mut events);
+    }
+    assert_eq!(events.last(), Some(&Event::Up));
+    // A silent chip (nothing wired, as under qemu) makes no events at all.
+    let mut none = SimTouch::default();
+    let mut tr = Tracker::new();
+    let mut ev = Vec::new();
+    for _ in 0..50 {
+        poll(&mut none, &mut tr, &mut ev);
+    }
+    assert!(ev.is_empty());
+}
+
+#[test]
 fn calibration_text_round_trips() {
     let c = Cal { a: 7682, b: 0, c: -26, d: -1, e: 7000, f: 319 };
     let mut buf = [0u8; 96];

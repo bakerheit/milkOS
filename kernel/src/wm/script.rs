@@ -1485,6 +1485,24 @@ fn build(name: &str) -> Option<Vec<Step>> {
                 .click(181 + 188 + 98, 113 + 148 + 64 + 26)
                 .wait(500);
         }
+        // `open-<what>`: open one app or folder the way `open <what>` does (a screenshot of any window
+        // at any display size; the other demos click at 1024x768 positions).
+        n if n.starts_with("open-") && n.len() > 5 => {
+            // `open-settings+s` also turns the wheel over the window, eight notches.
+            let (name, scrolled) = match n[5..].strip_suffix("+s") {
+                Some(n) => (n, true),
+                None => (&n[5..], false),
+            };
+            let what = alloc::boxed::Box::leak(String::from(name).into_boxed_str());
+            b.0.push(Step::Open(what));
+            b.wait(1200);
+            if scrolled {
+                for _ in 0..8 {
+                    b.ev(Event::Scroll { dy: 1 }).wait(60);
+                }
+                b.wait(400);
+            }
+        }
         _ => return None,
     }
     b.0.push(Step::Log("done"));

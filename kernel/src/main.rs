@@ -217,6 +217,10 @@ pub extern "C" fn kmain() -> ! {
     #[cfg(feature = "raspi")]
     rpi::lcd::start();
     serror::checkpoint("lcd-start");
+    // The touch chip of an HDMI display (no SPI panel): its own thread, late (rpi/touch.rs).
+    #[cfg(feature = "raspi")]
+    rpi::touch::start();
+    serror::checkpoint("touch-start");
     #[cfg(feature = "raspi")]
     rpi::genet::start();
     serror::checkpoint("genet-start");

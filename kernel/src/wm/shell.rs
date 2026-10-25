@@ -767,39 +767,57 @@ pub(super) fn tile_colour(solid: bool) -> (Color, u8) {
 
 // ---- home cards ---------------------------------------------------------------------------
 
+/// A screen too short for Today's second row of cards (the Notes and Apps cards): an 800x480
+/// panel. Today then has the header and one row of three cards, a little tighter.
+fn today_compact() -> bool {
+    screen_h() < 640
+}
+
+/// Today's side margin: 48 on the 1024-wide design, less on a narrow screen.
+fn card_margin() -> i32 {
+    if screen_w() < 1024 { 24 } else { CARD_MARGIN }
+}
+
 /// Today's middle row: 3 cards (calendar, session, system), 4 from 1280 wide (+ recent
 /// notifications, card 6).
 pub fn today_cols() -> i32 {
-    if screen_w() >= 1280 { 4 } else { 3 }
+    if screen_w() >= 1280 && !today_compact() {
+        4
+    } else {
+        3
+    }
 }
 
 /// How many Today cards there are (indices 0..n).
 pub fn card_count() -> u8 {
-    if today_cols() == 4 { 7 } else { 6 }
+    if today_compact() {
+        4
+    } else if today_cols() == 4 {
+        7
+    } else {
+        6
+    }
 }
 
 fn card_rect(i: u8) -> Rect {
-    let y1 = 56 + 96 + CARD_GAP;
-    let y2 = y1 + 228 + CARD_GAP;
-    let inner = screen_w() - 2 * CARD_MARGIN;
+    let (head_h, row_h) = if today_compact() { (84, 212) } else { (96, 228) };
+    let y1 = 56 + head_h + CARD_GAP;
+    let y2 = y1 + row_h + CARD_GAP;
+    let margin = card_margin();
+    let inner = screen_w() - 2 * margin;
     let cols = today_cols();
-    // SPEC's 296 at 1024 wide; the 4-column row shares the width.
+    // SPEC's 296 at 1024 wide (less when the screen is narrower); the 4-column row shares the width.
     let cw = if cols == 3 {
-        296
+        296.min((inner - (cols - 1) * CARD_GAP) / cols)
     } else {
         (inner - (cols - 1) * CARD_GAP) / cols
     };
     let half = (inner - CARD_GAP) / 2;
     match i {
-        0 => Rect::new(CARD_MARGIN, 56, inner, 96),
-        1..=3 => Rect::new(CARD_MARGIN + (i as i32 - 1) * (cw + CARD_GAP), y1, cw, 228),
-        6 => Rect::new(CARD_MARGIN + 3 * (cw + CARD_GAP), y1, cw, 228),
-        _ => Rect::new(
-            CARD_MARGIN + (i as i32 - 4) * (half + CARD_GAP),
-            y2,
-            half,
-            188,
-        ),
+        0 => Rect::new(margin, 56, inner, head_h),
+        1..=3 => Rect::new(margin + (i as i32 - 1) * (cw + CARD_GAP), y1, cw, row_h),
+        6 => Rect::new(margin + 3 * (cw + CARD_GAP), y1, cw, row_h),
+        _ => Rect::new(margin + (i as i32 - 4) * (half + CARD_GAP), y2, half, 188),
     }
 }
 
@@ -1070,7 +1088,7 @@ impl Desktop {
             let x = launcher_x();
             v.push(spec(
                 PanelKey::LaunchInput,
-                Rect::new(x, LAUNCH_Y, LAUNCH_W, LAUNCH_INPUT_H),
+                Rect::new(x, launch_y(), LAUNCH_W, LAUNCH_INPUT_H),
                 R_LAUNCHER,
                 Style::GlassStrong,
                 true,
@@ -1079,7 +1097,7 @@ impl Desktop {
                 PanelKey::LaunchResults,
                 Rect::new(
                     x,
-                    LAUNCH_Y + LAUNCH_INPUT_H + LAUNCH_GAP,
+                    launch_y() + LAUNCH_INPUT_H + LAUNCH_GAP,
                     LAUNCH_W,
                     results_height(l),
                 ),

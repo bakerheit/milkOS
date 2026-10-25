@@ -5,6 +5,7 @@
 //!   command line, the root `compatible`).
 //! * [`cmdline`]: `milk.<name>=<value>` options on the kernel command line.
 //! * [`esr`]: ESR_EL1 decoded for the exception dump (exception class, abort and SError syndromes).
+//! * [`fbsize`]: which framebuffer size to ask the firmware for (follow its display mode, `milk.fbsize=`), and an EDID's preferred mode.
 //! * [`genet`]: Ethernet descriptor words and autonegotiation results.
 //! * [`fat`]: finding one pre-created file on a FAT32 boot partition and its sectors (the boot log file).
 //! * [`milklog`]: the SD card log file's layout (format 2: a header and a ring of sectors holding many boots), how a
@@ -32,6 +33,7 @@ pub mod cmdline;
 pub mod dtb;
 pub mod esr;
 pub mod fat;
+pub mod fbsize;
 pub mod genet;
 pub mod ledcode;
 pub mod ledcrash;

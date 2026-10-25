@@ -184,10 +184,16 @@ pub const LAUNCH_MAX_ROWS: usize = 6;
 /// Skim's result rows: SPEC's 6 at 768 high, more on taller screens.
 pub fn launch_rows() -> usize {
     match screen_h() {
-        0..800 => LAUNCH_MAX_ROWS,
+        // A short screen (an 800x480 panel): the box sits higher and the list is shorter.
+        0..640 => 5,
+        640..800 => LAUNCH_MAX_ROWS,
         800..900 => 8,
         _ => 9,
     }
+}
+/// Where Skim's box starts: 140 down, or 36 on a short screen.
+pub fn launch_y() -> i32 {
+    if screen_h() < 640 { 36 } else { LAUNCH_Y }
 }
 pub const LAUNCH_DIM_A: u8 = a(250);
 
